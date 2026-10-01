@@ -3374,8 +3374,8 @@ describe("gardener backlog + source-draft POSTs — 415 before any side effect",
 
 /**
  * Lint check 9 (report-page drift, `src/wiki/lint-drift.ts`) through the route,
- * over a temp GIT repo with backdated commits: `status-date-behind` reads the
- * index's git touch date, so a wiki with no history could not show it.
+ * over a temp GIT repo with backdated commits. The dropped `status-date-behind`
+ * must not come back: a body edit after `status_date` is not a finding.
  */
 describe("GET /api/wiki/linter-findings — check 9 drift over a git wiki", () => {
   let root: string;
@@ -3449,11 +3449,9 @@ describe("GET /api/wiki/linter-findings — check 9 drift over a git wiki", () =
     expect(drift).toEqual([
       "draft-lane-stale plans/lanes.mdx:7",
       "loose-sql plans/lanes.mdx",
-      "status-date-behind plans/drift.md:4",
     ]);
-    const behind = body.findings.find((f) => f.check === "status-date-behind")!;
-    expect(behind.message).toContain("status_date 2026-01-10 is older than the last content commit (2026-01-15)");
-    expect(body.counts["status-date-behind"]).toBe(1);
+    expect(body.counts["status-date-behind"]).toBeUndefined();
+    expect(body.counts["draft-lane-stale"]).toBe(1);
     expect(body.counts["case-table"]).toBe(0);
     expect(body.counts["long-page-no-fold"]).toBe(0);
   });

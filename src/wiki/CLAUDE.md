@@ -1597,30 +1597,30 @@ the stopped path).
 
 ### Lint check 9 — report-page drift (`lint-drift.ts`)
 
-Five report-only checks over REPORT pages (a `plan_status` key, or a page under
-`plans/` or `archive/`; reserved and culled pages excluded). None proposes a fix.
-Rules, constants and the measured tuning live in the module's docblock; the parts
-a caller can get wrong:
+Four report-only checks over LIVE report pages (`isLiveReportPage`: a
+`plan_status` of `proposed`/`ready`/`in-flight`/`blocked`, or no `plan_status`
+under `plans/`; reserved and culled pages excluded). Archived pages and settled
+statuses are out. None proposes a fix. Rules, constants and the measured tuning
+live in the module's docblock; the parts a caller can get wrong:
 
 - **Every structural test walks `parseBlocks`**, so a lane, fence, table,
   `<CaseBoard>` or `<Fold>` quoted in a code fence counts as nothing.
-- **Days are Europe/Oslo** (`todayOslo`): "today" for `draft-lane-stale`, and the
-  day of `gitTouchedMs` for `status-date-behind`.
-- **`status-date-behind` reads the index's `gitTouchedMs`** — no git call of its
-  own; sweeps and metadata-only commits are already set aside by `git-dates.ts`,
-  and a wiki with no git history gets no finding. It checks LIVE statuses only
-  (`proposed`/`ready`/`in-flight`/`blocked`). On a wiki carrying mimir's
-  `scripts/plan-status-stale.ts` (check 10) it skips that check's population —
-  top-level `plans/` pages in `in-flight`/`ready` — so the two never report one
-  page twice.
-- **`loose-sql` counts read queries** (`SELECT`/`WITH`) outside any `<Query>`, on
-  `plans/` or live-status pages only.
-- **`long-page-no-fold` is the one finding with `severity: "info"`.** `line` is
-  set on the lane and `status_date` findings.
+- **`draft-lane-stale` counts what `countedNextMovesLanes` counts** (lanes
+  directly inside an unsettled `<NextMoves>`), with ≥ 1 open item. Its `line`
+  is exact or absent: the line scan maps onto the parser's lanes only when
+  candidates and lanes match one-to-one, attributes included.
+- **`case-table` needs a status CELL**: a later cell whose leading clause is a
+  `CASE_STATUS_PHRASES` entry, alone or followed by a date or a
+  `CASE_STATUS_TAIL_WORDS` word. A first-cell wikilink is read by its target.
+- **`long-page-no-fold` counts lines like `wc -l`** and is the one finding with
+  `severity: "info"`. The weekly watcher leaves info findings out of its alert;
+  `/wiki/gardener` labels the group "(info)" from the findings' severity.
+- **`status-date-behind` was measured and dropped**: these wikis set
+  `status_date` when the status changes, so an edit after it is not drift.
 
 Acceptance: `lint-drift.test.ts` (each rule as accepted/rejected rows, the
-boundaries, the Oslo day, the check-10 split, and `lintWiki` over a temp git repo
-with backdated commits) and the drift case in `wiki-gardener-routes.test.ts`.
+boundaries, the Oslo day, the lane-line decoys, and `lintWiki` over a temp git
+repo) and the drift case in `wiki-gardener-routes.test.ts`.
 
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 

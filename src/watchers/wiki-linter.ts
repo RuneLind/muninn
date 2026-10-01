@@ -44,7 +44,6 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },
   "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },
   "draft-lane-stale": { one: "stale draft lane", many: "stale draft lanes" },
-  "status-date-behind": { one: "status_date behind the work", many: "status_dates behind the work" },
   "loose-sql": { one: "page with loose SQL", many: "pages with loose SQL" },
   "case-table": { one: "case table without a CaseBoard", many: "case tables without a CaseBoard" },
   "long-page-no-fold": { one: "long page with no Fold", many: "long pages with no Fold" },

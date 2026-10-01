@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Sixteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Fifteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -40,9 +40,9 @@
  *                      checks, and the only ones carrying a `fix` the gardener
  *                      turns into `wiki_proposals` rows. Rules, cuts and the
  *                      one-clustering split between 8.2 and 8.3: `lint-series.ts`.
- *  9. draft-lane-stale / status-date-behind / loose-sql / case-table /
- *                      long-page-no-fold — report-page DRIFT, on `plans/`,
- *                      `archive/` and `plan_status` pages only; report-only.
+ *  9. draft-lane-stale / loose-sql / case-table / long-page-no-fold —
+ *                      report-page DRIFT, on LIVE report pages only (a live
+ *                      `plan_status`, or none under `plans/`); report-only.
  *                      Rules and the scope: `lint-drift.ts`.
  *
  * The store's index builder silently drops unresolved link targets
@@ -588,7 +588,7 @@ export async function lintWiki(
   const now = deps?.now ?? (() => Date.now());
   const nowMs = now();
   const findings: LintFinding[] = [];
-  const drift = await driftContext(index.root, nowMs);
+  const drift = driftContext(nowMs);
 
   for (const page of index.pages) {
     if (page.type === "explainer") continue; // no frontmatter, no links
@@ -614,7 +614,7 @@ export async function lintWiki(
       findings.push(...checkStaleUpdated(page, content, nowMs));
       const sources = checkMissingSources(page, content);
       if (sources) findings.push(sources);
-      // Check 9 — report pages only (`plans/`, `archive/`, `plan_status`).
+      // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
     }
   }

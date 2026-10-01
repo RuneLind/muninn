@@ -1115,30 +1115,11 @@ export function toListing(
   // the rest spread on EVERY caller: one number, set only on a page that has
   // any, read by the rail's ✋ row flag and "waiting on you" chip. The client,
   // not this function, hides those two on a shared instance (nais).
-  //
-  // `gitContentTouchedMs`/`gitTouchUnverified` are stripped on EVERY caller and
-  // opted in by none: lint check 9 reads them off the index, server-side, and no
-  // list renders them.
-  const {
-    desc,
-    pubDate,
-    sessions,
-    prs,
-    prRefs,
-    sessionsBackfilled,
-    children,
-    issues,
-    cullReason,
-    supersededBy,
-    gitContentTouchedMs,
-    gitTouchUnverified,
-    ...rest
-  } = meta;
+  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, cullReason, supersededBy, ...rest } =
+    meta;
   void pubDate;
   void children;
   void prRefs;
-  void gitContentTouchedMs;
-  void gitTouchUnverified;
   const listedIssues = opts.includeProvenance ? issues : compactIssues(issues);
   return {
     ...rest,

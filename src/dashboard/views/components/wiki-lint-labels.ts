@@ -23,7 +23,6 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",
   "draft-lane-stale": `Draft lanes older than ${DRAFT_LANE_MAX_DAYS} days`,
-  "status-date-behind": "status_date older than the last content commit",
   "loose-sql": "SQL fences outside a <Query>",
   "case-table": "Case tables with statuses and no <CaseBoard>",
   "long-page-no-fold": "Long pages with no <Fold>",

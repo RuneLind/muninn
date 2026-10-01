@@ -21,10 +21,9 @@ import {
   pageLineCount,
   type DriftContext,
 } from "./lint-drift.ts";
-import { __setClassifyBudgetForTest, classifyContentChange, classifyPageChange } from "./git-dates.ts";
 
 const TODAY = "2026-10-01";
-const CTX: DriftContext = { today: TODAY, hasPlanStaleCheck: false };
+const CTX: DriftContext = { today: TODAY };
 
 /** A page as the index would hand it; only the fields the checks read. */
 function page(relPath: string, extra: Partial<WikiPageMeta> = {}): WikiPageMeta {
@@ -64,7 +63,7 @@ describe("isReportPage — the scope rule", () => {
   });
 });
 
-describe("isLiveReportPage — the drift scope, one rule for all five checks", () => {
+describe("isLiveReportPage — the drift scope, one rule for all four checks", () => {
   // [relPath, raw frontmatter, validated plan_status, in scope]
   const rows: [string, Record<string, unknown>, string | undefined, boolean][] = [
     ["plans/x.mdx", {}, undefined, true], // no plan_status, under plans/
@@ -184,6 +183,8 @@ describe("check 1 — draft-lane-stale", () => {
       ["a self-closing <Lane />", '<Lane kind="draft" since="2026-01-01" />', "exact"],
       ["two lanes on one line", '<Lane kind="you">a</Lane><Lane kind="draft" since="2026-01-01">b</Lane>', "exact"],
       ["a <Lane> in a list item", '- item one\n  <Lane kind="draft" since="2026-01-01">\n- item two', "absent"],
+      // an unclosed opener with the real lane's own attributes: only the count can tell
+      ["an unclosed twin of the real lane", '<Lane kind="draft" since="2026-09-01">', "absent"],
     ];
     for (const [what, decoy, want] of decoys) {
       test(`${what} → ${want}`, () => {
@@ -206,108 +207,6 @@ describe("check 1 — draft-lane-stale", () => {
     const f = only(run("plans/a.mdx", body), "draft-lane-stale");
     expect(f.map((x) => x.line)).toEqual([13]);
   });
-});
-
-describe("check 2 — status-date-behind", () => {
-  const body = ["---", "title: t", "plan_status: in-flight", "status_date: 2026-09-20", "---", "", "Body."].join("\n");
-  const at = (iso: string) => Date.parse(iso);
-  /** The two touch dates the index stamps: the rail's and the content one. */
-  const touch = (ms: number) => ({ gitTouchedMs: ms, gitContentTouchedMs: ms });
-
-  test("a content commit on a later day is reported, with the status_date line", () => {
-    const f = only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", ...touch(at("2026-09-22T10:00:00Z")) }), "status-date-behind");
-    expect(f).toHaveLength(1);
-    expect(f[0]!.line).toBe(4);
-    expect(f[0]!.message).toContain("status_date 2026-09-20 is older than the last content commit (2026-09-22)");
-  });
-
-  test("a commit on the same day, or earlier, is not", () => {
-    for (const iso of ["2026-09-20T21:00:00Z", "2026-09-19T08:00:00Z"]) {
-      expect(only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", ...touch(at(iso)) }), "status-date-behind")).toEqual([]);
-    }
-  });
-
-  test("the commit's day is the Europe/Oslo day, not the UTC day", () => {
-    // 22:30 UTC on the 20th is 00:30 on the 21st in Oslo (CEST, +2).
-    const f = only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", ...touch(at("2026-09-20T22:30:00Z")) }), "status-date-behind");
-    expect(f).toHaveLength(1);
-    expect(f[0]!.message).toContain("(2026-09-21)");
-  });
-
-  test("only a LIVE plan_status is checked", () => {
-    const touched = at("2026-09-25T10:00:00Z");
-    for (const s of ["proposed", "ready", "in-flight", "blocked"] as const) {
-      expect(only(run("plans/a.md", body, { plan_status: s, status_date: "2026-09-20", ...touch(touched) }), "status-date-behind")).toHaveLength(1);
-    }
-    for (const s of ["shipped", "superseded", "abandoned"] as const) {
-      expect(only(run("plans/a.md", body, { plan_status: s, status_date: "2026-09-20", ...touch(touched) }), "status-date-behind")).toEqual([]);
-    }
-    expect(only(run("plans/a.md", body, { status_date: "2026-09-20", ...touch(touched) }), "status-date-behind")).toEqual([]);
-  });
-
-  test("no git date (non-git wiki, or every commit a sweep) or no status_date ⇒ no finding", () => {
-    expect(only(run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20" }), "status-date-behind")).toEqual([]);
-    expect(only(run("plans/a.md", body, { plan_status: "in-flight", ...touch(at("2026-09-25T10:00:00Z")) }), "status-date-behind")).toEqual([]);
-  });
-
-  test("on a wiki carrying mimir's check 10, its population (top-level plans/, in-flight or ready) is left to it", () => {
-    const ctx = { ...CTX, hasPlanStaleCheck: true };
-    const touched = at("2026-09-25T10:00:00Z");
-    const f = (rel: string, s: "in-flight" | "ready" | "blocked" | "proposed") =>
-      only(run(rel, body, { plan_status: s, status_date: "2026-09-20", ...touch(touched) }, ctx), "status-date-behind");
-    expect(f("plans/a.md", "in-flight")).toEqual([]);
-    expect(f("plans/a.mdx", "ready")).toEqual([]);
-    expect(f("plans/a.md", "blocked")).toHaveLength(1);
-    expect(f("plans/a.md", "proposed")).toHaveLength(1);
-    expect(f("plans/sub/a.md", "in-flight")).toHaveLength(1);
-    expect(f("archive/a.md", "in-flight")).toHaveLength(1);
-  });
-  test("the CONTENT touch decides, not the rail's: a later tags-only commit moves only the rail date", () => {
-    const f = only(
-      run("plans/a.md", body, { plan_status: "in-flight", status_date: "2026-09-20", gitTouchedMs: at("2026-09-25T10:00:00Z"), gitContentTouchedMs: at("2026-09-20T10:00:00Z") }),
-      "status-date-behind",
-    );
-    expect(f).toEqual([]);
-  });
-
-  test("the page's creation commit is never a content touch", () => {
-    const created = at("2026-09-24T10:00:00Z");
-    const base = { plan_status: "in-flight" as const, status_date: "2026-09-20" };
-    expect(only(run("plans/a.md", body, { ...base, gitCreatedMs: created, ...touch(created) }), "status-date-behind")).toEqual([]);
-    expect(only(run("plans/a.md", body, { ...base, gitCreatedMs: created - 86_400_000, ...touch(created) }), "status-date-behind")).toHaveLength(1);
-  });
-
-  test("an unverified touch (metadata step-back ran out, or its budget) gives no finding", () => {
-    const base = { plan_status: "in-flight" as const, status_date: "2026-09-20", ...touch(at("2026-09-25T10:00:00Z")) };
-    expect(only(run("plans/a.md", body, { ...base, gitTouchUnverified: true }), "status-date-behind")).toEqual([]);
-    expect(only(run("plans/a.md", body, base), "status-date-behind")).toHaveLength(1);
-  });
-});
-
-describe("the content touch — which commits status-date-behind sets aside", () => {
-  const page = (fm: string, body = "Body.") => `---\ntitle: t\n${fm}---\n\n${body}\n`;
-  // [what, before, after, rail verdict, content verdict]
-  const rows: [string, string, string, string, string][] = [
-    ["a tags: rewrite", page("tags: [a]\n"), page("tags: [a, b]\n"), "edit", "metadata-only"],
-    ["a tags: line added", page(""), page("tags: [a]\n"), "edit", "metadata-only"],
-    ["a priority: rewrite", page("priority: p1\n"), page("priority: p2\n"), "metadata-only", "metadata-only"],
-    ["tags: and priority: together", page("tags: [a]\npriority: p1\n"), page("tags: [b]\npriority: p2\n"), "edit", "metadata-only"],
-    ["no change", page("tags: [a]\n"), page("tags: [a]\n"), "identical", "identical"],
-    ["tags: with a body edit", page("tags: [a]\n"), page("tags: [b]\n", "Body. More."), "edit", "edit"],
-    ["a title: rewrite", page("tags: [a]\n"), page("tags: [a]\n").replace("title: t", "title: u"), "edit", "edit"],
-    ["a block-list tag item", page("tags:\n  - a\n"), page("tags:\n  - b\n"), "edit", "edit"],
-    // mimir's auto-tagger adds a whole fence to a page that had none
-    ["a tags:-only fence added", "# T\n\nBody.\n", "---\ntags: [a]\n---\n# T\n\nBody.\n", "edit", "metadata-only"],
-    ["a fence with title: added", "# T\n\nBody.\n", "---\ntitle: T\ntags: [a]\n---\n# T\n\nBody.\n", "edit", "edit"],
-    ["a tags:-only fence added with a body edit", "# T\n\nBody.\n", "---\ntags: [a]\n---\n# T\n\nBody. More.\n", "edit", "edit"],
-    ["no fence either side, body edit", "# T\n\nBody.\n", "# T\n\nBody. More.\n", "edit", "edit"],
-  ];
-  for (const [what, before, after, rail, content] of rows) {
-    test(`${what}: rail ${rail}, content ${content}`, () => {
-      expect(classifyPageChange(before, after)).toBe(rail as never);
-      expect(classifyContentChange(before, after)).toBe(content as never);
-    });
-  }
 });
 
 describe("check 3 — loose-sql", () => {
@@ -474,17 +373,9 @@ describe("check 5 — long-page-no-fold (info)", () => {
 });
 
 describe("driftContext", () => {
-  test("today is the Europe/Oslo day of now", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-drift-ctx-"));
-    try {
-      expect((await driftContext(root, Date.parse("2026-09-30T22:30:00Z"))).today).toBe("2026-10-01");
-      expect((await driftContext(root, Date.parse("2026-09-30T21:30:00Z"))).today).toBe("2026-09-30");
-      expect((await driftContext(root, 0)).hasPlanStaleCheck).toBe(false);
-      await Bun.write(path.join(root, "scripts", "plan-status-stale.ts"), "// check 10\n");
-      expect((await driftContext(root, 0)).hasPlanStaleCheck).toBe(true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+  test("today is the Europe/Oslo day of now", () => {
+    expect(driftContext(Date.parse("2026-09-30T22:30:00Z")).today).toBe("2026-10-01");
+    expect(driftContext(Date.parse("2026-09-30T21:30:00Z")).today).toBe("2026-09-30");
   });
 });
 
@@ -528,148 +419,24 @@ describe("lintWiki — drift checks over a real git repo", () => {
     return findings.filter((f) => (DRIFT_LINT_CHECKS as readonly string[]).includes(f.check));
   }
 
-  test("a later body commit is behind; a later metadata-only commit is not", async () => {
-    await write("plans/body.md", plan("in-flight", "2026-09-10", "First."));
-    await write("plans/meta.md", plan("in-flight", "2026-09-10", "First."));
-    commit("2026-09-10T09:00:00Z");
-    await write("plans/body.md", plan("in-flight", "2026-09-10", "First. Then more work."));
-    await write("plans/meta.md", plan("in-flight", "2026-09-10", "First.", "series: s\npriority: p1\n"));
-    commit("2026-09-15T09:00:00Z");
-
-    const f = await drift();
-    expect(f.map((x) => `${x.check} ${x.relPath}:${x.line}`)).toEqual(["status-date-behind plans/body.md:4"]);
-    expect(f[0]!.message).toContain("(2026-09-15)");
-  });
-
-  test("a page committed once, after its status_date, is not behind: the creation commit is no content touch", async () => {
-    await write("plans/late.md", plan("in-flight", "2026-09-01", "Written earlier, committed late."));
-    commit("2026-09-05T09:00:00Z");
-    await write("plans/edited.md", plan("in-flight", "2026-09-01", "First."));
-    commit("2026-09-05T09:00:00Z");
-    await write("plans/edited.md", plan("in-flight", "2026-09-01", "First. Then more."));
-    commit("2026-09-07T09:00:00Z");
-    expect((await drift()).map((x) => x.relPath)).toEqual(["plans/edited.md"]);
-  });
-
-  test("a page merged onto the main line later, unchanged, is not behind; one changed in the merge is", async () => {
-    await write("README.md", "root\n");
-    commit("2026-09-01T08:00:00Z");
-    git(["branch", "-M", "main"]);
-    git(["checkout", "-q", "-b", "side"]);
-    await write("plans/same.md", plan("in-flight", "2026-09-01", "Written on a branch."));
-    await write("plans/changed.md", plan("in-flight", "2026-09-01", "Written on a branch."));
-    commit("2026-09-01T09:00:00Z");
-    git(["checkout", "-q", "main"]);
-    await write("other.md", "main moves on\n");
-    commit("2026-09-05T09:00:00Z");
-    git(["merge", "-q", "--no-ff", "--no-commit", "side"]);
-    await write("plans/changed.md", plan("in-flight", "2026-09-01", "Written on a branch. Edited in the merge."));
-    git(["add", "-A"]);
-    git(["commit", "-q", "-m", "merge side"], "2026-09-10T09:00:00Z");
-
-    expect((await drift()).map((x) => x.relPath)).toEqual(["plans/changed.md"]);
-    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/same.md")!;
-    expect(page.gitTouchedMs).toBe(Date.parse("2026-09-10T09:00:00Z")); // rail: the merge, as before
-    expect(page.gitContentTouchedMs).toBe(Date.parse("2026-09-01T09:00:00Z"));
-  });
-
-  test("a tags-only commit is not a content touch for this check, and the rail date still moves", async () => {
-    const tagged = (tags: string, body: string, date = "2026-09-03") => plan("in-flight", date, body, `tags: [${tags}]\n`);
-    await write("plans/a.md", tagged("a", "First."));
-    await write("plans/b.md", tagged("a", "First."));
-    commit("2026-09-01T09:00:00Z");
-    await write("plans/a.md", tagged("a", "First. More."));
-    await write("plans/b.md", tagged("a", "First. More."));
-    commit("2026-09-03T09:00:00Z");
-    await write("plans/a.md", tagged("a, b", "First. More."));
-    await write("plans/b.md", tagged("a, b", "First. More. And a body edit with it."));
-    commit("2026-09-10T09:00:00Z");
-
-    expect((await drift()).map((x) => x.relPath)).toEqual(["plans/b.md"]);
-    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
-    expect(page.gitTouchedMs).toBe(Date.parse("2026-09-10T09:00:00Z")); // rail: unchanged rule
-    expect(page.gitContentTouchedMs).toBe(Date.parse("2026-09-03T09:00:00Z"));
-  });
-
-  test("more metadata-only commits than the step-back walks: the touch is unverified, so no finding", async () => {
-    // status_date matches the last body edit; then N priority-only commits.
-    const build = async (n: number) => {
-      await write("plans/a.md", plan("in-flight", "2026-09-01", "First."));
-      commit("2026-09-01T09:00:00Z");
-      await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More."));
-      commit("2026-09-05T09:00:00Z");
-      for (let i = 1; i <= n; i++) {
-        await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More.", `priority: p${i}\n`));
-        commit(`2026-09-${String(5 + i).padStart(2, "0")}T09:00:00Z`);
-      }
-    };
-    await build(9); // > METADATA_TOUCH_MAX_STEPS (8)
-    expect(await drift()).toEqual([]);
-    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
-    expect(page.gitTouchUnverified).toBe(true);
-    expect(page.gitTouchedMs).toBe(Date.parse("2026-09-06T09:00:00Z")); // rail keeps the commit it reached
-  });
-
-  test("seven metadata-only commits resolve within the walk: verified, and not behind", async () => {
-    await write("plans/a.md", plan("in-flight", "2026-09-01", "First."));
-    commit("2026-09-01T09:00:00Z");
-    await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More."));
-    commit("2026-09-05T09:00:00Z");
-    for (let i = 1; i <= 7; i++) {
-      await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More.", `priority: p${i}\n`));
-      commit(`2026-09-${String(5 + i).padStart(2, "0")}T09:00:00Z`);
-    }
-    const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
-    expect(page.gitTouchUnverified).toBeUndefined();
-    expect(page.gitContentTouchedMs).toBe(Date.parse("2026-09-05T09:00:00Z"));
-    expect(await drift()).toEqual([]);
-  });
-
-  test("a classification that runs out of budget leaves the touch unverified: no finding", async () => {
-    await write("plans/a.md", plan("in-flight", "2026-09-05", "First."));
-    commit("2026-09-01T09:00:00Z");
-    await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More."));
-    commit("2026-09-05T09:00:00Z");
-    await write("plans/a.md", plan("in-flight", "2026-09-05", "First. More.", "priority: p1\n"));
-    commit("2026-09-08T09:00:00Z");
-    __setClassifyBudgetForTest(0);
-    try {
-      expect(await drift()).toEqual([]);
-      const page = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.md")!;
-      expect(page.gitTouchedMs).toBe(Date.parse("2026-09-08T09:00:00Z")); // unfiltered, as before
-      expect(page.gitTouchUnverified).toBe(true);
-    } finally {
-      __setClassifyBudgetForTest(null);
-    }
-  });
-
-  test("a status_date bumped in the same commit as the work is not behind", async () => {
-    await write("plans/a.md", plan("blocked", "2026-09-10", "First."));
-    commit("2026-09-10T09:00:00Z");
-    await write("plans/a.md", plan("blocked", "2026-09-15", "First. More."));
-    commit("2026-09-15T09:00:00Z");
-    expect(await drift()).toEqual([]);
-  });
-
-  test("a wiki carrying check 10 leaves an in-flight plans/ page to it", async () => {
+  test("status-date-behind is gone: a body commit after status_date is not a finding", async () => {
     await write("plans/a.md", plan("in-flight", "2026-09-10", "First."));
-    await write("plans/b.md", plan("blocked", "2026-09-10", "First."));
-    await write("scripts/plan-status-stale.ts", "// mimir check 10\n");
     commit("2026-09-10T09:00:00Z");
-    await write("plans/a.md", plan("in-flight", "2026-09-10", "More."));
-    await write("plans/b.md", plan("blocked", "2026-09-10", "More."));
-    commit("2026-09-12T09:00:00Z");
-    expect((await drift()).map((x) => x.relPath)).toEqual(["plans/b.md"]);
+    await write("plans/a.md", plan("in-flight", "2026-09-10", "First. Then more work."));
+    commit("2026-09-15T09:00:00Z");
+    expect(DRIFT_LINT_CHECKS as readonly string[]).not.toContain("status-date-behind");
+    expect(LINT_CHECKS as readonly string[]).not.toContain("status-date-behind");
+    expect(await drift()).toEqual([]);
   });
 
-  test("a wiki that is not a git repo degrades: no status-date finding, no throw, other checks still run", async () => {
+  test("a wiki that is not a git repo still lints: no throw, the checks run", async () => {
     await rm(path.join(root, ".git"), { recursive: true, force: true });
     await write("plans/a.md", plan("in-flight", "2026-09-10", sql("SELECT 1") + sql("SELECT 2")));
     const f = await drift();
     expect(f.map((x) => x.check)).toEqual(["loose-sql"]);
   });
 
-  test("the five drift keys are in LINT_CHECKS, so counts always carry them", async () => {
+  test("the four drift keys are in LINT_CHECKS, so counts always carry them", async () => {
     for (const c of DRIFT_LINT_CHECKS) expect(LINT_CHECKS).toContain(c);
     const index = await buildWikiIndex(root);
     const { counts } = await lintWiki(index, { now: () => NOW });

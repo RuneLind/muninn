@@ -1,10 +1,10 @@
 /**
  * Lint check 9 — report-page DRIFT: a report page whose shape has fallen behind
- * the work it records. Five checks, all report-only: none proposes a fix,
+ * the work it records. Four checks, all report-only: none proposes a fix,
  * because none is mechanical (a stale draft lane needs sending or dropping, an
  * SQL fence needs its result and question, a case table needs a YAML file).
  *
- * Scope is ONE predicate for all five, {@link isLiveReportPage}: a report page
+ * Scope is ONE predicate for all four, {@link isLiveReportPage}: a report page
  * ({@link isReportPage}) that is LIVE — a `plan_status` in
  * {@link LIVE_PLAN_STATUSES}, or no `plan_status` at all under `plans/`. An
  * archived page and a settled status are history, not drift (measured
@@ -13,7 +13,6 @@
  * | check                | fires when                                                              | severity |
  * |----------------------|-------------------------------------------------------------------------|----------|
  * | `draft-lane-stale`   | a counted `<Lane kind="draft">` with an open item, `since` > 2 days ago | warning  |
- * | `status-date-behind` | `status_date` is an earlier day than the page's last CONTENT commit     | warning  |
  * | `loose-sql`          | ≥ 2 read-query `sql` fences outside any `<Query>`, at any depth         | warning  |
  * | `case-table`         | ≥ 5 case rows (id first cell + a status cell), and no `<CaseBoard>`     | warning  |
  * | `long-page-no-fold`  | > 600 lines (`wc -l`) and no `<Fold>`                                   | info     |
@@ -21,15 +20,19 @@
  * Every structural test walks the parsed AST (`parseBlocks`, the renderer's own
  * parser), so a tag or fence quoted inside a code fence is not counted.
  *
- * **Days are Europe/Oslo calendar days** (`todayOslo`, the wiki's date
- * convention): "today" for the draft-lane age, and the day of the last content
- * commit for `status-date-behind`. Both wikis are written there, so a commit at
- * 00:30 on the 2nd is the 2nd, as the author's `status_date` would say.
+ * **"Today" is the Europe/Oslo calendar day** (`todayOslo`, the wiki's date
+ * convention), for the draft-lane age.
+ *
+ * A fifth check, `status-date-behind` (`status_date` older than the page's last
+ * content commit), was measured and DROPPED (2026-10-01): the wikis set
+ * `status_date` when the STATUS changes, not on every edit — three kode-wiki
+ * commits that day set it back after a rewrite ("ingen statusendring") — so on
+ * the kode-wiki 4 of its 8 hits were edits that changed no status (50%, over the
+ * 20% gate). mimir's check 10 (`scripts/plan-status-stale.ts`) stays the one
+ * staleness check.
  */
 
-import path from "node:path";
 import {
-  ATTR_RE,
   countedNextMovesLanes,
   parseBlocks,
   type Block,
@@ -43,11 +46,9 @@ import type { LintFinding } from "./lint.ts";
 import { DRAFT_LANE_MAX_DAYS } from "./lint-drift-limits.ts";
 
 export { DRAFT_LANE_MAX_DAYS };
-export { CONTENT_TOUCH_EXTRA_KEYS } from "./git-dates.ts";
 
 export const DRIFT_LINT_CHECKS = [
   "draft-lane-stale",
-  "status-date-behind",
   "loose-sql",
   "case-table",
   "long-page-no-fold",
@@ -63,9 +64,8 @@ export const LONG_PAGE_LINES = 600;
 
 /**
  * The LIVE statuses — the drift scope ({@link isLiveReportPage}). A settled
- * status (`shipped`, `superseded`, `abandoned`) stays true when the page is
- * edited later (a link, a follow-up note): measured 2026-10-01, 62 of mimir's 67
- * first-cut `status-date-behind` hits were `shipped` plans edited after shipping.
+ * status (`shipped`, `superseded`, `abandoned`) is history: its page is not
+ * expected to keep its shape current.
  */
 export const LIVE_PLAN_STATUSES: readonly string[] = ["proposed", "ready", "in-flight", "blocked"];
 
@@ -155,7 +155,7 @@ export function isReportPage(relPath: string, fm: Record<string, unknown>): bool
 }
 
 /**
- * The drift scope, one rule for all five checks: a report page that is LIVE —
+ * The drift scope, one rule for all four checks: a report page that is LIVE —
  * its validated `plan_status` is in {@link LIVE_PLAN_STATUSES}, or it carries no
  * `plan_status` key at all and sits under `plans/`. `fm` is the raw frontmatter
  * (a key present with an invalid value is not "no plan_status"); `planStatus`
@@ -222,15 +222,6 @@ export function isCaseRow(row: string[]): boolean {
 export interface DriftContext {
   /** Today, `YYYY-MM-DD`, Europe/Oslo. */
   today: string;
-  /** True when the wiki carries mimir's own check 10 (`scripts/plan-status-stale.ts`):
-   *  `status-date-behind` then leaves that check's population to it. */
-  hasPlanStaleCheck: boolean;
-}
-
-/** Check 10's population in mimir: a top-level `plans/` page whose status is
- *  `in-flight` or `ready` (`STALE_STATUSES` in `scripts/plan-status-stale.ts`). */
-function inPlanStaleScope(relPath: string, planStatus: unknown): boolean {
-  return /^plans\/[^/]+\.mdx?$/.test(relPath) && (planStatus === "in-flight" || planStatus === "ready");
 }
 
 /** A `<Lane …>` opener line as the parser takes one: the tag owns the line
@@ -242,34 +233,27 @@ const LANE_OPENER_RE = /^<Lane((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*>(.*)$/;
  * The 1-based source line of every `Lane` component the parser produced, in
  * source order, or null when that mapping is not one-to-one. Candidates are the
  * unfenced lines after the frontmatter that open a lane the way the parser
- * would; they map only when there are exactly as many as there are `Lane`
- * blocks and each candidate's attributes equal its block's. Anything else (a
- * decoy the parser read as text, a lane the scan cannot see) gives no lines.
+ * would ({@link LANE_OPENER_RE}, the reader's own fence rule), so every lane
+ * the parser built has its opener among them; a candidate the parser read as
+ * text instead (an opener never closed) makes the counts differ, and then no
+ * lane gets a line.
  */
-function laneLines(content: string, lanes: readonly Block[]): number[] | null {
+function laneLines(content: string, laneCount: number): number[] | null {
   const lines = content.split("\n");
-  const states = fenceLineStates(lines, "literal"); // the reader's own fence rule
-  const found: { line: number; attrs: Record<string, string> }[] = [];
+  const states = fenceLineStates(lines, "literal");
+  const found: number[] = [];
   for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
     if (states[i] !== "outside") continue;
     const m = LANE_OPENER_RE.exec(lines[i]!.trim());
     if (!m) continue;
     const rest = m[2]!;
     if (rest.trim() !== "" && !(rest.endsWith("</Lane>") && rest.indexOf("</Lane>") === rest.length - 7)) continue;
-    const attrs: Record<string, string> = {};
-    for (const a of m[1]!.matchAll(ATTR_RE)) attrs[a[1]!] = a[2]!;
-    found.push({ line: i + 1, attrs });
+    found.push(i + 1);
   }
-  if (found.length !== lanes.length) return null;
-  for (let k = 0; k < lanes.length; k++) {
-    const b = lanes[k]!;
-    if (b.type !== "component") return null;
-    for (const key of ["kind", "who", "since"]) if (b.attrs[key] !== found[k]!.attrs[key]) return null;
-  }
-  return found.map((f) => f.line);
+  return found.length === laneCount ? found : null;
 }
 
-/** The five drift checks over one page. Pure given its inputs. */
+/** The four drift checks over one page. Pure given its inputs. */
 export function checkDrift(page: WikiPageMeta, content: string, ctx: DriftContext): LintFinding[] {
   const fm = parseFrontmatter(content);
   if (!isLiveReportPage(page.relPath, fm, page.plan_status)) return [];
@@ -290,7 +274,7 @@ export function checkDrift(page: WikiPageMeta, content: string, ctx: DriftContex
   for (const lane of countedNextMovesLanes(blocks).lanes) {
     const age = lane.since === null ? 0 : daysBetween(lane.since, ctx.today);
     if (lane.kind !== "draft" || lane.items.length === 0 || age <= DRAFT_LANE_MAX_DAYS) continue;
-    lineOf ??= laneLines(content, allLanes);
+    lineOf ??= laneLines(content, allLanes.length);
     const at = allLanes.findIndex((b) => b.type === "component" && b.children === lane.children);
     out.push({
       check: "draft-lane-stale",
@@ -300,36 +284,7 @@ export function checkDrift(page: WikiPageMeta, content: string, ctx: DriftContex
     });
   }
 
-  // ── 2. status-date-behind ──────────────────────────────────────────────
-  // `gitContentTouchedMs` is the newest commit that changed CONTENT: sweeps
-  // (≥ 10 files), metadata-only commits and `tags:`-only commits are set aside
-  // by `git-dates.ts`. No finding when that date is absent (a non-git wiki),
-  // unverified (the step-back ran out, or degraded), or the page's own creation
-  // commit — a page written earlier and committed late has a `status_date` that
-  // predates its first commit by construction.
-  const touchedMs = page.gitContentTouchedMs;
-  if (
-    page.status_date &&
-    touchedMs !== undefined &&
-    !page.gitTouchUnverified &&
-    touchedMs !== page.gitCreatedMs &&
-    !(ctx.hasPlanStaleCheck && inPlanStaleScope(page.relPath, page.plan_status))
-  ) {
-    const touched = todayOslo(touchedMs);
-    if (touched > page.status_date) {
-      const lines = content.split("\n");
-      const end = frontmatterEndLine(lines);
-      const idx = lines.slice(0, end).findIndex((l) => l.startsWith("status_date:"));
-      out.push({
-        check: "status-date-behind",
-        relPath: page.relPath,
-        line: idx === -1 ? undefined : idx + 1,
-        message: `status_date ${page.status_date} is older than the last content commit (${touched}): update the status or the date`,
-      });
-    }
-  }
-
-  // ── 3–5: one walk ──────────────────────────────────────────────────────
+  // ── 2–4: one walk ──────────────────────────────────────────────────────
   let looseSql = 0;
   let caseRows = 0;
   const caseIds: string[] = [];
@@ -376,14 +331,7 @@ export function checkDrift(page: WikiPageMeta, content: string, ctx: DriftContex
   return out;
 }
 
-/** Build the per-run context: today, and whether the wiki carries its own
- *  plan-staleness check. */
-export async function driftContext(root: string, nowMs: number): Promise<DriftContext> {
-  let hasPlanStaleCheck = false;
-  try {
-    hasPlanStaleCheck = await Bun.file(path.join(root, "scripts", "plan-status-stale.ts")).exists();
-  } catch {
-    hasPlanStaleCheck = false;
-  }
-  return { today: todayOslo(nowMs), hasPlanStaleCheck };
+/** Build the per-run context: today, Europe/Oslo. */
+export function driftContext(nowMs: number): DriftContext {
+  return { today: todayOslo(nowMs) };
 }
