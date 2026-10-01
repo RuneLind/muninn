@@ -176,7 +176,7 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   CaseBoard: ["src"],
   // Run-to-run numbers from a CSV beside the page or a pipe-table body, with a
   // computed delta column. Wiki-only; see `src/format/delta-table.ts`.
-  DeltaTable: ["src", "better"],
+  DeltaTable: ["src", "better", "decimal"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

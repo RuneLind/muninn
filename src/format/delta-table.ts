@@ -8,9 +8,14 @@
  * `<Query>` table's client sort uses, so a cell that sorts as a number is the
  * cell that gets a delta.
  */
-import { isEmptyCell, parseCellValue, tableDecimalComma, type NumberContext } from "./cell-number.ts";
+import { commaKind, isEmptyCell, parseCellValue, tableDecimalComma, type NumberContext } from "./cell-number.ts";
 
 export type DeltaBetter = "lower" | "higher" | "";
+
+/** `decimal="comma"` reads every bare `d,ddd` cell as a decimal,
+ *  `decimal="dot"` as thousands; `""` lets the row, then the table, decide
+ *  ({@link deltaRowContexts}). */
+export type DeltaDecimal = "comma" | "dot" | "";
 
 export interface DeltaAttrs {
   src: string;
@@ -27,6 +32,9 @@ export interface DeltaAttrs {
   /** With a per-row list only: each valid label as written, in order, repeats
    *  included, for {@link betterLabelWarnings}. */
   labels?: string[];
+  decimal: DeltaDecimal;
+  /** A one-line warning for a `decimal` this cannot read; `""` when none. */
+  decimalWarning: string;
 }
 
 /** One wrapping `**…**`, `__…__`, `*…*` or `_…_` removed: a pipe-body cell is
@@ -49,6 +57,14 @@ const direction = (v: string): "lower" | "higher" | null => {
 };
 
 export function parseDeltaAttrs(attrs: Record<string, string>): DeltaAttrs {
+  const raw = (attrs.decimal ?? "").trim();
+  const d = raw.toLowerCase();
+  const decimal: DeltaDecimal = d === "comma" || d === "dot" ? d : "";
+  const decimalWarning = raw && !decimal ? `Unknown decimal value: ${raw} — use comma or dot` : "";
+  return { ...parseBetter(attrs), decimal, decimalWarning };
+}
+
+function parseBetter(attrs: Record<string, string>): Omit<DeltaAttrs, "decimal" | "decimalWarning"> {
   const src = (attrs.src ?? "").trim();
   const raw = (attrs.better ?? "").trim();
   if (!raw) return { src, better: "", rows: null, warning: "" };
@@ -132,7 +148,7 @@ function signed(x: number, d: number, comma: boolean): string {
  * change in percentage points (`+3 pp`); the percent is relative to `|prev|`
  * with one decimal (three significant digits when that rounds a change to
  * zero), and absent when `prev` is zero. Both cells are read in `ctx` (the
- * row's context). A decimal comma in either cell, or `ctx.decimalComma`,
+ * row's context, {@link deltaRowContexts}). A decimal comma in either cell, or `ctx.decimalComma`,
  * gives a decimal comma in both parts; `pctComma` (the table writes one
  * anywhere) gives one in the percent. The tone comes from the unrounded
  * difference.
@@ -199,12 +215,31 @@ export function deltaGrid(header: string[], rows: string[][], headerWidth = head
   };
 }
 
-/** The number context of one row: its run cells (every column but the
- *  label), read through `cellText` (a pipe body's emphasis stripped). Each
- *  row is a measure of its own, so a `0,5` in one row never makes another
- *  row's `1,309` a decimal. */
-export function rowContext(row: string[], cellText: (s: string) => string = (s) => s): NumberContext {
-  return tableDecimalComma(row.slice(1).map(cellText));
+/** The reading a set of cells gives a bare `d,ddd` cell: `comma` when some
+ *  cell is an unambiguous decimal and none is unambiguous grouping, `dot` for
+ *  the reverse, null for neither or both. */
+function commaReading(cells: string[]): "comma" | "dot" | null {
+  const kinds = new Set(cells.map(commaKind));
+  if (kinds.has("decimal") === kinds.has("grouping")) return null;
+  return kinds.has("decimal") ? "comma" : "dot";
+}
+
+/**
+ * The number context of each row. Only a bare `d,ddd` cell depends on it: an
+ * unambiguous decimal (`,d`, `,dd`, `,dddd+`, `0,ddd`) or grouping
+ * (`1,234,567`, `1,234.5`) cell reads as written. A bare one reads by
+ * `decimal`, else by the row's run cells ({@link commaReading}), else by every
+ * row's run cells, else as thousands. Cells are read through `cellText` (a
+ * pipe body's emphasis stripped); the label column gives no context.
+ */
+export function deltaRowContexts(
+  grid: DeltaGrid,
+  decimal: DeltaDecimal,
+  cellText: (s: string) => string = (s) => s,
+): NumberContext[] {
+  const runCells = (r: string[]) => r.slice(1).map(cellText);
+  const table = commaReading(grid.rows.flatMap(runCells));
+  return grid.rows.map((r) => ({ decimalComma: (decimal || commaReading(runCells(r)) || table || "dot") === "comma" }));
 }
 
 /** True when any run cell of the grid writes an unambiguous decimal comma:

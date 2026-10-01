@@ -335,6 +335,15 @@ describe("fix round 2: CaseBoard", () => {
     expect(html).toContain('<a class="cb-id" href="#case-a">A</a>');
   });
 
+  test("case anchors are made unique before Query anchors: two boards with case A beside Query Case-A-2", () => {
+    const html = formatWebHtml('<CaseBoard src="c.yaml" />\n\n<CaseBoard src="d.yaml" />\n\n<Query id="Case-A-2" question="x">\n\ny\n\n</Query>', {
+      files: files({ "c.yaml": { ok: true, text: "- {id: A, status: ok}\n" }, "d.yaml": { ok: true, text: "- {id: A, status: ok}\n" } }),
+    });
+    const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
+    expect(ids).toEqual(["case-a", "case-a-2", "case-a-2-2"]);
+    expect(html).toContain('<a class="query-id" href="#case-a-2-2">');
+  });
+
   test("a repeat's suffix never takes an authored id: A, A, A-2 → case-a, case-a-3, case-a-2", () => {
     expect(ok("- id: A\n- id: A\n- id: A-2\n").cases.map((c) => c.anchor)).toEqual(["case-a", "case-a-3", "case-a-2"]);
   });

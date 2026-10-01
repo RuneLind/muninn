@@ -44,10 +44,10 @@ import {
   betterLabelWarnings,
   computeDelta,
   deltaGrid,
+  deltaRowContexts,
   gridWritesComma,
   parseDeltaAttrs,
   rowBetter,
-  rowContext,
   stripEmphasis,
   type DeltaAttrs,
   type DeltaGrid,
@@ -287,8 +287,9 @@ const DELTA_MARK: Record<"good" | "bad", string> = {
  *  between the last two runs. `cell` renders one cell's text (escaped for a
  *  CSV, inline markdown for a pipe table); `value` is the text a number is
  *  read from (a pipe cell past its emphasis, so a bold Sum row keeps its
- *  delta). Each row's cells are read in that row's decimal context; the
- *  percents write a comma when any cell of the table does. A row wider than
+ *  delta). A bare `d,ddd` cell is read by {@link deltaRowContexts}; the
+ *  percents write a comma when any cell of the table writes an unambiguous
+ *  decimal comma, or with `decimal="comma"`. A row wider than
  *  the header gets a marker cell whether or not there is a delta column. */
 function deltaTableHtml(
   grid: DeltaGrid,
@@ -298,7 +299,8 @@ function deltaTableHtml(
 ): string {
   const { header, rows, overflow, runs } = grid;
   const markerColumn = runs !== null || overflow.some(Boolean);
-  const pctComma = gridWritesComma(grid, value);
+  const pctComma = gridWritesComma(grid, value) || attrs.decimal === "comma";
+  const ctxs = deltaRowContexts(grid, attrs.decimal, value);
   const dir = attrs.better ? `${attrs.better} is better` : attrs.rows?.size ? "✓ better, ✗ worse — per row" : "";
   const th =
     header.map((h, k) => `<th scope="col"${k > 0 ? ` class="dt-run"` : ""}>${cell(h)}</th>`).join("") +
@@ -318,7 +320,7 @@ function deltaTableHtml(
         value(r[runs[0]]!),
         value(r[runs[1]]!),
         rowBetter(attrs, r[0] ?? ""),
-        rowContext(r, value),
+        ctxs[i],
         pctComma,
       );
       const dHtml = d
@@ -350,7 +352,7 @@ function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): st
   const k = d.src ? -1 : rawChildren.findIndex((b) => b.type === "table");
   const rest = k === -1 ? rawChildren : [...rawChildren.slice(0, k), ...rawChildren.slice(k + 1)];
   const intro = rest.some((b) => !isBlankTextBlock(b)) ? `<div class="dt-body">${renderBlocks(rest, webRenderer)}</div>` : "";
-  const warn = d.warning ? blockNote("dt-warning", d.warning) : "";
+  const warn = [d.warning, d.decimalWarning].filter(Boolean).map((w) => blockNote("dt-warning", w)).join("");
   let table: string;
   if (d.src) {
     const csv = readCsvFile(d.src, "Table");

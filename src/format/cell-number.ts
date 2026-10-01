@@ -90,6 +90,22 @@ export function isUnambiguousDecimalComma(cell: string): boolean {
   return !!parseCellValue(cell)?.decimalComma;
 }
 
+/** What a cell's comma says about how its table writes numbers: `decimal` for
+ *  an unambiguous decimal comma ({@link isUnambiguousDecimalComma}),
+ *  `grouping` for comma thousands that cannot be a decimal (`1,234,567`,
+ *  `1,234.5`), `ambiguous` for a bare `1,500` (the context decides), `none`
+ *  for no comma or no number. */
+export type CommaKind = "decimal" | "grouping" | "ambiguous" | "none";
+
+export function commaKind(cell: string): CommaKind {
+  const plain = parseCellValue(cell);
+  if (!plain) return "none";
+  if (plain.decimalComma) return "decimal";
+  if (parseCellValue(cell, { decimalComma: true })?.decimalComma) return "ambiguous";
+  // A unit token holds no comma, so a comma here is in the number.
+  return cell.includes(",") ? "grouping" : "none";
+}
+
 /** The context for a set of cells (one table, or one column): a decimal comma
  *  when ANY cell writes an unambiguous one. */
 export function tableDecimalComma(cells: Iterable<string>): NumberContext {

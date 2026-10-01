@@ -72,10 +72,17 @@ describe("delta arithmetic", () => {
   });
 
   test("better takes lower or higher in any case; anything else is none, with a warning", () => {
-    expect(parseDeltaAttrs({ src: " r.csv ", better: "Lower" })).toEqual({ src: "r.csv", better: "lower", rows: null, warning: "" });
+    expect(parseDeltaAttrs({ src: " r.csv ", better: "Lower" })).toEqual({
+      src: "r.csv",
+      better: "lower",
+      rows: null,
+      warning: "",
+      decimal: "",
+      decimalWarning: "",
+    });
     expect(parseDeltaAttrs({ better: "less" })).toMatchObject({ src: "", better: "", rows: null });
     expect(parseDeltaAttrs({ better: "less" }).warning).toContain("Unknown better value: less");
-    expect(parseDeltaAttrs({})).toEqual({ src: "", better: "", rows: null, warning: "" });
+    expect(parseDeltaAttrs({})).toEqual({ src: "", better: "", rows: null, warning: "", decimal: "", decimalWarning: "" });
   });
 
   test("rows are padded or cut to the header's width", () => {
@@ -342,20 +349,9 @@ describe("fix round 2: the grid keeps every column that holds a value", () => {
   });
 });
 
-describe("fix round 2: each row is read in its own decimal context", () => {
-  test("a 1,309 count beside a decimal-comma row stays a count; percents still write commas", () => {
-    const html = pipe([
-      "| Teller | a | b |",
-      "|---|---:|---:|",
-      "| `antallUtenTreff` | 1,309 | 1,344 |",
-      "| Varighet | 81,38 sek | 82,00 sek |",
-    ]);
-    expect(deltaCells(html)).toEqual([
-      ["dt-delta", "+35 (+2,7%)"],
-      ["dt-delta", "+0,62 sek (+0,8%)"],
-    ]);
-  });
-
+describe("fix round 2: a row's decimal context", () => {
+  // The 1,309-beside-81,38 case moved to the class-check table below: without
+  // decimal= the table context now reads it as 1.309.
   test("the context is read through a cell's emphasis", () => {
     expect(deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| X | **0,5** | 1,500 |"]))).toEqual([["dt-delta", "+1,000 (+200,0%)"]]);
   });
@@ -405,5 +401,69 @@ describe("fix round 2: emphasis", () => {
 describe("fix round 2: text surfaces", () => {
   test("Slack: a file name holding a backtick falls back to the literal line", () => {
     expect(formatSlackMrkdwn('<DeltaTable src="a`b.csv" />')).toBe("Table: aˋb.csv");
+  });
+});
+
+describe("class check: a d,ddd cell's comma, by the enumerated rule", () => {
+  // [case, attrs, pipe rows, expected delta cells]. An unambiguous decimal
+  // (`,d`, `,dd`, `,dddd+`, `0,ddd`) or grouping (`1,234,567`, `1,234.5`) cell
+  // reads as written; a bare `d,ddd` reads by `decimal=`, else the row's
+  // cells, else the table's, else thousands.
+  const H = ["| T | a | b |", "|---|---:|---:|"];
+  const H4 = ["| T | a | b | c |", "|---|---:|---:|---:|"];
+  const UTEN_TREFF = [...H, "| `antallUtenTreff` | 1,309 | 1,344 |", "| Varighet | 81,38 sek | 82,00 sek |"];
+  const cases: [string, string, string[], string[][]][] = [
+    [
+      "an all-d,ddd row reads decimals from the table",
+      "",
+      [...H, "| Snitt | 1,250 sek | 1,375 sek |", "| Maks | 2,5 sek | 3,1 sek |"],
+      [["dt-delta", "+0,125 sek (+10,0%)"], ["dt-delta", "+0,6 sek (+24,0%)"]],
+    ],
+    [
+      "a count row in a decimal table reads decimals without decimal= (documented)",
+      "",
+      UTEN_TREFF,
+      [["dt-delta", "+0,035 (+2,7%)"], ["dt-delta", "+0,62 sek (+0,8%)"]],
+    ],
+    ['decimal="dot" reads the count row as thousands', ' decimal="dot"', UTEN_TREFF, [["dt-delta", "+35 (+2,7%)"], ["dt-delta", "+0,62 sek (+0,8%)"]]],
+    ["an English table with no decimals reads thousands", "", [...H, "| X | 1,500 | 1,750 |"], [["dt-delta", "+250 (+16.7%)"]]],
+    [
+      "a row's own cells decide before the table, which holds both kinds and so gives no context",
+      "",
+      [...H4, "| Tid | 0,5 | 1,250 | 1,500 |", "| Store | 1,234,567 | 1,250 | 1,500 |", "| Mix | 1,234,567 | 2,5 | 1,500 |"],
+      [["dt-delta", "+0,250 (+20,0%)"], ["dt-delta", "+250 (+20,0%)"], ["dt-delta", "+1497,5 (+59900,0%)"]],
+    ],
+    ['decimal="comma" reads 1,500 as 1.5', ' decimal="comma"', [...H, "| X | 1,500 | 1,750 |"], [["dt-delta", "+0,250 (+16,7%)"]]],
+    ['decimal="dot" never overrides an unambiguous decimal', ' decimal="dot"', [...H, "| Maks | 2,5 | 3,1 |"], [["dt-delta", "+0,6 (+24,0%)"]]],
+  ];
+  for (const [name, attrs, rows, expected] of cases) {
+    test(name, () => {
+      expect(deltaCells(pipe(rows, attrs))).toEqual(expected);
+    });
+  }
+
+  test("an unknown decimal value is a warning line", () => {
+    const html = pipe([...H, "| X | 1,500 | 1,750 |"], ' decimal="xyz"');
+    expect(html).toContain('<p class="dt-warning">Unknown decimal value: xyz — use comma or dot</p>');
+    expect(deltaCells(html)).toEqual([["dt-delta", "+250 (+16.7%)"]]);
+  });
+});
+
+describe("class check: pinned grid behaviours", () => {
+  test("a run column holding only NULL is skipped when the last two runs are chosen", () => {
+    const html = pipe(["| T | a | b | c |", "|---|---|---|---|", "| X | 1 | 2 | NULL |", "| Y | 4 | 5 | [null] |"]);
+    expect(html).toContain('<span class="dt-delta-runs">a → b</span>');
+    expect(deltaCells(html)).toEqual([["dt-delta", "+1 (+100.0%)"], ["dt-delta", "+1 (+25.0%)"]]);
+  });
+
+  test("the percent separator is read through emphasis: a bold 0,5 in another row gives comma percents", () => {
+    // The 1,234,567 row leaves the table with no comma context, so only the
+    // percent separator can make Y's percent a comma.
+    const rows = ["| T | a | b |", "|---|---|---|", "| X | **0,5** | |", "| Z | 1,234,567 | |", "| Y | 1 | 2 |"];
+    expect(deltaCells(pipe(rows))).toEqual([
+      ["dt-delta dt-none", ""],
+      ["dt-delta dt-none", ""],
+      ["dt-delta", "+1 (+100,0%)"],
+    ]);
   });
 });
