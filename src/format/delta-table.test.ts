@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { parseBlocks, type Block } from "./markdown-ast.ts";
-import { computeDelta, deltaGrid, parseDeltaAttrs } from "./delta-table.ts";
+import { computeDelta, deltaGrid, parseDeltaAttrs, stripEmphasis } from "./delta-table.ts";
 import { parseCellNumberParts, parseCellValue } from "./cell-number.ts";
 import { QUERY_CSV_MAX_ROWS, type PageFileResult } from "./query-block.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -303,5 +303,107 @@ describe("fix round 1: counts and files", () => {
     const html = formatWebHtml('<DeltaTable src="cases.yaml" />', { files: files({ "cases.yaml": { ok: true, text: "- id: A\n" } }) });
     expect(html).toContain("File type not allowed: cases.yaml");
     expect(html).not.toContain("<table");
+  });
+});
+
+describe("fix round 2: the grid keeps every column that holds a value", () => {
+  test("a blank header cell over a value keeps its column, and the delta", () => {
+    const html = pipe(["| Teller | 18.09 |  |", "|---|---|---|", "| A | 1 | 2 |"]);
+    expect(html).toContain('<td class="dt-run">2</td>');
+    expect(html).not.toContain("Two runs are needed");
+    expect(deltaCells(html)).toEqual([["dt-delta", "+1 (+100.0%)"]]);
+  });
+
+  test("the over-long-row marker renders when the table has no delta column", () => {
+    const html = fromCsv("T,a\nX,1,9\nY,2\n");
+    expect(html).toContain("Two runs are needed");
+    expect(deltaCells(html)).toEqual([
+      ["dt-delta dt-overflow", "more cells than the header"],
+      ["dt-delta dt-none", ""],
+    ]);
+  });
+
+  test("a column blank in the header and every row is dropped", () => {
+    const html = fromCsv("T,a,b,\nX,1,2,\n");
+    expect(html.match(/<th scope="col" class="dt-run">/g)).toHaveLength(2);
+  });
+
+  test("a run column with a header and no value in any row renders, and the delta skips it", () => {
+    const future = pipe(["| T | a | b | 29.10 |", "|---|---|---|---|", "| X | 1 | 2 | |", "| Y | 4 | 5 | |"]);
+    expect(future).toContain('<th scope="col" class="dt-run">29.10</th>');
+    expect(future).toContain('<span class="dt-delta-runs">a → b</span>');
+    expect(deltaCells(future)).toEqual([
+      ["dt-delta", "+1 (+100.0%)"],
+      ["dt-delta", "+1 (+25.0%)"],
+    ]);
+    const middle = pipe(["| T | a | mid | b |", "|---|---|---|---|", "| X | 1 | | 3 |"]);
+    expect(middle).toContain('<span class="dt-delta-runs">a → b</span>');
+    expect(deltaCells(middle)).toEqual([["dt-delta", "+2 (+200.0%)"]]);
+  });
+});
+
+describe("fix round 2: each row is read in its own decimal context", () => {
+  test("a 1,309 count beside a decimal-comma row stays a count; percents still write commas", () => {
+    const html = pipe([
+      "| Teller | a | b |",
+      "|---|---:|---:|",
+      "| `antallUtenTreff` | 1,309 | 1,344 |",
+      "| Varighet | 81,38 sek | 82,00 sek |",
+    ]);
+    expect(deltaCells(html)).toEqual([
+      ["dt-delta", "+35 (+2,7%)"],
+      ["dt-delta", "+0,62 sek (+0,8%)"],
+    ]);
+  });
+
+  test("the context is read through a cell's emphasis", () => {
+    expect(deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| X | **0,5** | 1,500 |"]))).toEqual([["dt-delta", "+1,000 (+200,0%)"]]);
+  });
+
+  test("the label column gives no context", () => {
+    expect(deltaCells(fromCsv('T,a,b\n"0,5","1,500","1,750"\n'))).toEqual([["dt-delta", "+250 (+16.7%)"]]);
+  });
+
+  test("a glued % is read in the row's context", () => {
+    expect(deltaCells(pipe(["| T | x | a | b |", "|---|---|---|---|", "| X | 0,5 | 1,250% | 1,500% |"]))).toEqual([
+      ["dt-delta", "+0,250 pp (+20,0%)"],
+    ]);
+  });
+});
+
+describe("fix round 2: per-row better labels", () => {
+  const RUNS = "Teller,a,b\nKandidater,132,16\nMetadatafeil,9,10\n";
+
+  test("a label that matches no row is a warning naming it", () => {
+    expect(fromCsv(RUNS, ' better="Kandidatr=lower"')).toContain('<p class="dt-warning">better names no row: Kandidatr</p>');
+    expect(fromCsv(RUNS, ' better="Kandidater=lower"')).not.toContain("dt-warning");
+  });
+
+  test("a label given twice is a warning", () => {
+    expect(fromCsv(RUNS, ' better="Kandidater=lower; kandidater=higher"')).toContain(
+      '<p class="dt-warning">better names a row more than once: kandidater</p>',
+    );
+  });
+
+  test("a label may hold =: the direction is after the last one", () => {
+    expect(deltaCells(fromCsv("T,a,b\na=b,1,2\n", ' better="a=b=lower"'))).toEqual([["dt-delta dt-bad", "✗ +1 (+100.0%)"]]);
+  });
+
+  test("labels match in NFC: a decomposed label matches a composed row", () => {
+    const cells = deltaCells(fromCsv("T,a,b\nÅrsak,1,2\n", ' better="Årsak=lower"'));
+    expect(cells).toEqual([["dt-delta dt-bad", "✗ +1 (+100.0%)"]]);
+  });
+});
+
+describe("fix round 2: emphasis", () => {
+  test("_5_ is read like *5*", () => {
+    expect(stripEmphasis("_5_")).toBe("5");
+    expect(deltaCells(pipe(["| T | a | b |", "|---|---|---|", "| x | _3_ | 4 |"]))).toEqual([["dt-delta", "+1 (+33.3%)"]]);
+  });
+});
+
+describe("fix round 2: text surfaces", () => {
+  test("Slack: a file name holding a backtick falls back to the literal line", () => {
+    expect(formatSlackMrkdwn('<DeltaTable src="a`b.csv" />')).toBe("Table: aˋb.csv");
   });
 });

@@ -13,6 +13,9 @@
 export interface Csv {
   header: string[];
   rows: string[][];
+  /** The header's cells as written; set only when a row is wider and the
+   *  header was padded. */
+  headerWidth?: number;
   /** Set when a quote opened and never closed: the rest of the file is in one cell. */
   warning?: "unterminated-quote";
 }
@@ -71,10 +74,12 @@ export function parseCsv(text: string): Csv {
   const multiColumn = (body[0]?.cells.length ?? 0) >= 2;
   const kept = body.filter((r, k) => k === 0 || !multiColumn || !blank(r)).map((r) => r.cells);
   const width = kept.reduce((w, r) => Math.max(w, r.length), 0);
+  const headerWidth = kept[0]?.length ?? 0;
   for (const r of kept) while (r.length < width) r.push("");
   return {
     header: kept[0] ?? [],
     rows: kept.slice(1),
+    ...(headerWidth < width ? { headerWidth } : {}),
     ...(unterminated ? { warning: "unterminated-quote" as const } : {}),
   };
 }

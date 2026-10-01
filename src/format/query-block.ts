@@ -32,8 +32,6 @@ export const PAGE_FILE_KIND_EXTENSIONS: Readonly<Record<PageFileKind, readonly s
   yaml: [".yaml", ".yml"],
 };
 const ALL_KINDS = Object.keys(PAGE_FILE_KIND_EXTENSIONS) as PageFileKind[];
-/** Every extension some component reads. */
-export const PAGE_FILE_EXTENSIONS: readonly string[] = Object.values(PAGE_FILE_KIND_EXTENSIONS).flat();
 
 /** The kind a path's extension names, or null for none of them. */
 export function pageFileKind(p: string): PageFileKind | null {

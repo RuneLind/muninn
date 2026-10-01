@@ -205,6 +205,7 @@ describe("Query table sorting — the column rule (enumerated)", () => {
     ["number + unit, grouped and decimal comma", ["1 500 NOK", "900 NOK", "-2,5 NOK"],
       ["-2,5 NOK", "900 NOK", "1 500 NOK"]],
     ["plain numbers with one shared unit", ["10 %", "9", "-1 %"], ["-1 %", "9", "10 %"]],
+    ["glued percent sorts by value", ["0.5%", "0.25%", "-3%"], ["-3%", "0.25%", "0.5%"]],
     ["mixed units fall to collation", ["0.25 x", "0.5 kr"], ["0.5 kr", "0.25 x"]],
     ["words with æøå", ["Ås", "Zebra", "Øst", "Ærlig", "Alfa"], ["Alfa", "Zebra", "Ærlig", "Øst", "Ås"]],
     ["empty and NULL cells", ["MEL-10", "", "MEL-9", "NULL", "[NULL]"], ["MEL-9", "MEL-10", "", "NULL", "[NULL]"]],

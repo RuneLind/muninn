@@ -87,7 +87,8 @@ const CASES = [
   "",
 ].join("\n");
 
-const RUNS = "Teller,07.09,08.09,18.09\nKandidater,140,132,16\nMetadatafeil,9,9,10\nUten treff,322,322,322\n";
+// The last row is wider than the header: its delta cell is the muted overflow marker.
+const RUNS = "Teller,07.09,08.09,18.09\nKandidater,140,132,16\nMetadatafeil,9,9,10\nUten treff,322,322,322\nBred rad,1,2,3,4\n";
 
 let server: ChildProcess | undefined;
 let base = "";
@@ -197,6 +198,7 @@ test.describe("Wiki reader: CaseBoard, DeltaTable, Query explorer", () => {
     await expect(row("Metadatafeil").getByRole("img", { name: "worse" })).toBeVisible();
     await expect(row("Uten treff")).toHaveText("0 (0.0%)");
     await expect(row("Uten treff")).toHaveClass(/dt-flat/);
+    await expect(row("Bred rad")).toHaveText("more cells than the header");
     expectClean(seen);
   });
 
@@ -353,6 +355,7 @@ test.describe("Wiki reader: CaseBoard, DeltaTable, Query explorer", () => {
         deltaRuns: page.locator(".dt-delta-runs").first(),
         deltaDir: page.locator(".dt-delta-dir").first(),
         pct: page.locator("section.delta-table").first().locator("td.dt-delta:not(.dt-good):not(.dt-bad) .dt-pct").first(),
+        overflow: page.locator("td.dt-overflow").first(),
         count: page.locator(".qx-count"),
       };
       for (const [name, loc] of Object.entries(muted)) {

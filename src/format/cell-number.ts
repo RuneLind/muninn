@@ -84,13 +84,10 @@ export function parseCellValue(cell: string, ctx: NumberContext = {}): CellValue
 
 /** True when the cell reads as a number whose comma can only be a decimal
  *  comma: `,d`, `,dd`, `,dddd…`, `0,ddd`, `1 500,5` — every comma decimal but
- *  the `1,500` shape, which is ambiguous on its own. */
+ *  the `1,500` shape, which with no context reads as comma thousands and so
+ *  never reports a decimal comma here. */
 export function isUnambiguousDecimalComma(cell: string): boolean {
-  const v = parseCellValue(cell);
-  if (!v || !v.decimalComma) return false;
-  const t = cell.trim().replace(/^\u2212/, "-");
-  const num = v.unit ? /^(.*?\d)\s*[\p{L}%\p{Sc}]+$/u.exec(t)?.[1] ?? t : t;
-  return !AMBIGUOUS_COMMA_RE.test(num);
+  return !!parseCellValue(cell)?.decimalComma;
 }
 
 /** The context for a set of cells (one table, or one column): a decimal comma

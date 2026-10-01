@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { parseBlocks, type Block } from "./markdown-ast.ts";
-import { CASEBOARD_MAX_CASES, caseCountText, groupCases, parseCaseBoard } from "./case-board.ts";
+import { CASEBOARD_MAX_CASES, caseCountParts, groupCases, parseCaseBoard } from "./case-board.ts";
 import { pageFileRefs, type PageFileResult } from "./query-block.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -76,7 +76,8 @@ describe("CaseBoard grammar", () => {
   test("an empty file is an empty board", () => {
     const b = ok("");
     expect(b.cases).toEqual([]);
-    expect(caseCountText(b.counts)).toBe("0 cases");
+    expect(caseCountParts(b.counts)).toEqual([]);
+    expect(board("")).toContain('<span class="cb-count">0 cases</span>');
   });
 
   test("past 500 cases the board shows 500 and the counts cover every case", () => {
@@ -88,8 +89,8 @@ describe("CaseBoard grammar", () => {
   });
 
   test("the count strip lists non-zero statuses in vocabulary order, unknown last", () => {
-    expect(caseCountText(ok(CASES).counts)).toBe("2 hold · 1 wait · 1 none · 1 ok");
-    expect(caseCountText(ok("- {id: A, status: x}\n- {id: B, status: wrong}").counts)).toBe("1 wrong · 1 unknown");
+    expect(caseCountParts(ok(CASES).counts)).toEqual([[2, "hold"], [1, "wait"], [1, "none"], [1, "ok"]]);
+    expect(caseCountParts(ok("- {id: A, status: x}\n- {id: B, status: wrong}").counts)).toEqual([[1, "wrong"], [1, "unknown"]]);
   });
 
   test("rows group by status in vocabulary order, file order within a group", () => {
@@ -319,5 +320,37 @@ describe("fix round 1: CaseBoard", () => {
     expect(formatSlackMrkdwn('<CaseBoard src="a_b*.yaml" />')).toBe("Cases: `a_b*.yaml`");
     expect(formatSlackMrkdwn('<DeltaTable src="r_1*.csv" />')).toBe("Table: `r_1*.csv`");
     expect(formatSlackMrkdwn('<Query id="Q-1" csv="q_1*.csv" />')).toContain("Resultat: `q_1*.csv`");
+  });
+});
+
+describe("fix round 2: CaseBoard", () => {
+  test("a Query card and a case never share an id: the card takes the next free suffix", () => {
+    const html = formatWebHtml('<Query id="Case-A" question="x">\n\ny\n\n</Query>\n\n<CaseBoard src="c.yaml" />', {
+      files: files({ "c.yaml": { ok: true, text: "- {id: A, status: ok}\n- {id: A-2, status: ok}\n" } }),
+    });
+    const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(["case-a-3", "case-a", "case-a-2"]);
+    expect(html).toContain('<a class="query-id" href="#case-a-3">');
+    expect(html).toContain('<a class="cb-id" href="#case-a">A</a>');
+  });
+
+  test("a repeat's suffix never takes an authored id: A, A, A-2 → case-a, case-a-3, case-a-2", () => {
+    expect(ok("- id: A\n- id: A\n- id: A-2\n").cases.map((c) => c.anchor)).toEqual(["case-a", "case-a-3", "case-a-2"]);
+  });
+
+  test("a ... document end followed by more is several documents", () => {
+    const several = { ok: false as const, reason: "Multiple YAML documents (---); use one list" };
+    expect(parseCaseBoard("- id: a\n...\n- id: b\n")).toEqual(several);
+    expect(parseCaseBoard("...\n- id: a\n")).toEqual(several);
+    expect(parseCaseBoard("- id: a\n...\n# end\n\n")).toMatchObject({ ok: true, total: 1 });
+  });
+
+  test("an id that is a list or a mapping is skipped as having no id, not as empty", () => {
+    expect(ok("- id: [1]\n- id: {a: 1}\n- id:\n")).toMatchObject({ skipped: 2, emptyIds: 1, total: 0 });
+  });
+
+  test("YAML's .nan and -.inf are written back as YAML writes them", () => {
+    expect(ok("- id: .nan\n- id: -.inf\n- id: .inf\n").cases.map((c) => c.id)).toEqual([".nan", "-.inf", ".inf"]);
   });
 });
