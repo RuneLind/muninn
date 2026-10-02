@@ -206,10 +206,20 @@ age factor at 1 — an unknown age is not evidence of an old page — and its `w
 says `created ?`. Bookkeeping pages are excluded
 (`isMetaPage`), and so is anything below `ACTIVITY_MIN_SCORE` — which is what lets
 the section be EMPTY on a wiki where nothing has happened, instead of filling six
-rows with `+` glyphs reading "created on" a day two years back. The weights live in
+rows "created on" a day two years back. The weights live in
 `DEFAULT_ACTIVITY_WEIGHTS` and a wiki overrides them in its `.wiki-reader.json`
-`activity` block (above); each row carries a `+`/`~` glyph, the age of the signal
-that placed it, and its full derivation in the row's `title=`.
+`activity` block (above); each row carries the age of the signal that placed it
+and its full derivation in the row's `title=`. A row whose own CREATION won shows
+a bordered `NEW` tag before that age, both in `--tok-str`; a changed row carries
+no mark. **Activity ranks FAMILIES**: `rankActivity` rolls an attachment child
+the rail folds into its parent's row before the `rows` cut, scored as the better
+of the two, with the child's kind, age and `why` (`via`, worded
+`explainer "X" changed 3d ago…`). The child stays folded under the parent's chip,
+closed by default, and a closed chip hiding a child that clears the floor and
+whose newest signal is younger than the parent's newest carries an amber corner
+dot (`newerChildren` → `childNewer`). A rolled-up row whose parent also cleared
+the floor on its own carries `ownRanked`, so a pinned series member stays
+self-ranked in Activity.
 
 **Every rail row shows a COMPACT age**, not a calendar date — `now` / `Nh` / `Nd`
 up to `RAIL_AGE_MAX_DAYS` (99), then the day (`formatRailAge`, the one spelling
@@ -431,14 +441,15 @@ carries the diagram it embeds, a superseded plan sits beside its successor — a
 the rail listed every one of them as a peer row, or (for a same-stem `.html`)
 did not list it at all. The store now PAIRS them and the rail FOLDS them.
 
-**Four rules, all scoped to ONE FOLDER, first match wins**, recorded on the child
-as `pairedBy` so the rail can say why on hover:
+**Four rules, first match wins** — rules 1, 2 and 4 scoped to ONE FOLDER, rule 3
+to the embedding page's folder AND ITS DESCENDANTS — recorded on the child as
+`pairedBy` so the rail can say why on hover:
 
 | rule | shape | `pairedBy` |
 |---|---|---|
 | 1 | `x.html` beside `x.md`/`x.mdx` | `stem` |
 | 2 | `x-prototype.html` / `x-prototype-N.html` beside a page at `x` | `suffix` |
-| 3 | the markdown page carries `<Embed src="./child.html">` | `link` |
+| 3 | the markdown page carries `<Embed src="./child.html">` or `<Embed src="./sub/dir/child.html">` — the RESOLVED target in the page's folder or below it; above or beside it (`../x.html`) pairs nothing. An html embedded by two or more pages, in any folders, pairs with none; a page that folds under its successor (a rule-4 child) adopts none of its embeds | `link` |
 | 4 | the child's frontmatter names `superseded_by: [[successor]]` | `superseded` |
 
 A META-stemmed `.html` beside its own meta markdown page (`index.html` +
@@ -501,7 +512,24 @@ ONLY: `index.outgoing`, the backlinks, the Atlas graph and the lint checks are
 untouched, because an embedded diagram is part of the page while a cited one is a
 peer. An html embedded by two or more pages belongs to neither.
 
-**Rule 4 is same-folder too, and the folder is RESOLVED, not discarded.**
+**Rule 3 reaches DOWN, never up.** A page's explainers often live in a folder
+named after it (`reviews/<date>-melosys-api-3520/arkitektur.html`, embedded from
+`reviews/<date>-melosys-api-3520.mdx`), so the target may sit in any descendant
+of the page's folder — judged on the RESOLVED path, so `./a/../x.html` is the
+page's own folder. Such a child can live in another folder than its parent, and
+everything that reads folders handles it as a facet-hidden parent: under a
+folder facet that leaves the parent out it is an ordinary row, families never
+count a non-rule-4 child, and months skip every child (both walked in
+`wiki-recents.test.ts`). It also inherits its parent's cull, like any attachment.
+
+**Rule 4 outranks rule 3.** A page that folds under its successor adopts none of
+its embeds: they stay ordinary rows. Otherwise the embed made the old page a
+parent and the one-level rule dropped its superseded pair — which main already
+did for a SAME-folder embed, so that case changed too. Rules 1 and 2 keep the
+old order: a page with a same-stem or `-prototype` attachment loses its rule-4
+pair, as documented below.
+
+**Rule 4 is same-folder, and the folder is RESOLVED, not discarded.**
 `superseded_by: [[archive/old-plan]]` names a page in `archive/`; re-scoping that
 bare stem to the child's own folder pairs it under whatever same-stem page lives
 there. A target naming another folder — or nothing — pairs nothing.
@@ -525,11 +553,12 @@ walk order.
 `buildRail` emits a child under its parent (open) or not at all (closed), and the
 one-row invariant is unchanged — sections MOVE a row, never copy it:
 
-- **Activity ranks PAGES, not groups.** A child it ranks is emitted in Activity
-  as itself (with its `pairedBy` and its parent's title in the hover) and leaves
-  the parent's chip count; a parent it ranks takes its open group with it, so a
-  group is never split across two sections. A pinned child is lifted the same
-  way — the ★ is the reader's own choice. **Both lifts are computed BEFORE the
+- **Activity ranks FAMILIES.** `rankActivity` rolls a ranked child up into its
+  parent's row (see Activity above), so a child reaches Activity only under its
+  parent's chip, and a parent Activity takes carries its group with it — a group
+  is never split across two sections. (`buildRail` still lifts a raw child row a
+  caller hands it, as itself with its parent's title in the hover, out of the
+  chip count.) A pinned child is lifted — the ★ is the reader's own choice. **Both lifts are computed BEFORE the
   first row is emitted**: the chip stands for the rows the group is hiding, so it
   has to be counted against every child's FINAL placement, and a child ranked
   BELOW its own parent was still unclaimed when the parent's chip was counted. A
@@ -558,14 +587,20 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
 
 ### The row's layout rules (`wiki-page.ts`, constants in `wiki-rail-width.ts`)
 
-A rail row is six things — type dot · title · group chip · status pill · ⚑ ·
+A rail row is six things — type icon · title · group chip · status pill · ⚑ ·
 ★+date — and only the title is elastic. At the 260px rail (`RAIL_WIDTH_MIN`, i.e.
 any window under 1100px) the title gets what the 226px content box leaves after
 the row's other parts and one 8px gap per part after the first. Measured on
 mimir 2026-09-18 (the reviewer re-derived every term): dot 7; status pill
 44–76.3 (`superseded` is the widest); ⚑ 6.3; ★+date 25.7 as an age or 74 as a
 full date; an Activity row adds a 10px glyph and its gap; a chip row adds the
-compact chip (29.4–74.5) and its gap. So a chipless pill + ⚑ + age row keeps
+compact chip (29.4–74.5) and its gap. **Re-measured 2026-10-02 for the type
+icon**: the lead column is 14px on every row (the dot was 7), the `+`/`~` glyph
+is gone, and a NEW row's end slot is 71px (★ 10.6 + `NEW` tag 32.9 + age 21.5 +
+the slot's gaps and the tag's margin); so plain rows
+lose 7px of title, changed Activity rows gain 11, NEW rows lose 34. The one
+measured casualty: a chip + full-date row at 260 (icon 14 + mid floor 126 +
+date 73.7 + two gaps = 229.7 > 226) now wraps there. So a chipless pill + ⚑ + age row keeps
 72–99px of title (the floor exactly on the `superseded` + age row: 226 − 32 −
 7 − 76.3 − 6.3 − 32.5 = 71.9), an Activity row 80, and a full-date row ~50 —
 under the floor, which is the shape that wraps at 260 (17 of 18 wrapped
@@ -680,7 +715,7 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   rail included; the Atlas reads the pool when its tab opens) and `#wikiCount`
   (`shown / pool`) is over the pool; the series census is NOT —
   `groupSeries(filtered, allPages)`, so a hidden member reads as `N of M shown`
-  and a retired head still names the fold. The `▸` and `continue at:` are the
+  and a retired head still names the fold. The latest dot and `continue at:` are the
   exception to the census rule: they skip a retired plan
   (`seriesContinuePlan`), since the rail hides the page they would name;
   `newestSeriesPlan`/`seriesHead` and lint stay census-inclusive. N counts the
@@ -950,7 +985,7 @@ newer one wins, silently**, because the head is picked newest-first; the lint
 reports the duplicate. The **newest plan** is the member carrying a NON-TERMINAL
 `plan_status` (`SERIES_TERMINAL_STATUSES` = `superseded`, `abandoned` — a
 retired plan's `status_date` is usually NEWER than its successor's, since
-retiring a page is the last edit it gets, so without this the `▸` and *continue
+retiring a page is the last edit it gets, so without this the latest dot and *continue
 at* named a dead page), newest by `seriesDateMs`. A blog or an archive page is a
 member of the work but never "the latest", because *continue at* has to name a
 page a reader can continue IN. The test is `plan_status`, not the `plans/`
@@ -1035,13 +1070,12 @@ pair differently. The rendered date cell always names the day the order used.
    case read `1 of 2 shown` with nothing hidden and lost the roll-up's
    `1 superseded`. A FAMILY's census is deliberately the other way round: there
    the lift really does take the page out of the slate for that render.
-6. **`latest` is not a seventh row element.** The newest plan's row carries a
-   `▸` glyph INSIDE `.wiki-list-title` with the words on hover; the row's six
-   elements are each budgeted in `wiki-rail-width.ts` and a seventh takes the
-   title under its floor. Re-measured at 260 and 300 px against #559's baseline:
-   no new wrapped row. The glyph is `--accent-light`, the token the series group
-   row already carries: `--status-warning` measured 3.19:1 in the light theme,
-   under AA for an 11px mark that is the whole claim.
+6. **`latest` is not a row element.** The newest plan's row carries
+   `.latest`, drawn as a filled `--accent` dot ON the series rail (the member's
+   free `::before`) or, outside a series body, at the row's left edge
+   (`::after`) — absolute, so no width budget moves — with the words on hover.
+   It replaced a `▸` inside the title, which read as an expand caret beside the
+   fold chip's `▸`.
 7. **The series is one block** (#581). A 2px accent rail runs from the series
    row through every `.wiki-series-cont` row after it — members and their
    attachment children, ghosts, `+N more` — and caps on the last one
@@ -1072,7 +1106,7 @@ costs no request, and through `seriesMembersOf` and `seriesDateSignal`, so it
 can never report a different set or a different day from the fold: the timeline
 is the fold's own order REVERSED, and each step prints the day it was ordered
 by, mtime rung included. *continue at* never names the open page (a reader
-usually arrives there from the `▸` row), is omitted when there is no other plan,
+usually arrives there from the latest row), is omitted when there is no other plan,
 and clips its label at `SERIES_CONTINUE_MAX` (64 code points) with the whole
 title on `title=` — a mimir plan title runs past 100 characters and took the
 strip's whole second line. Beside it sits **`edit series`**, the affordance PR A
@@ -1174,7 +1208,7 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     `opacity: 1` painted the rail's on every row, and the always-in-flow button
     took `.wiki-list-end` to 90 px and wrapped a plan row's title under
     `RAIL_TITLE_MIN` at the 300 px rail on CI's fonts. On a fine pointer it is
-    absolutely positioned over the date it replaces on hover (the `▸` rule — the
+    absolutely positioned over the date it replaces on hover (the no-row-element rule — the
     row's six items are budgeted one by one in `wiki-rail-width.ts`); on a coarse
     one it is visible and in flow, since a hover-revealed control is one a finger
     cannot reach.
@@ -1191,10 +1225,10 @@ roll-up word, the `continue at:` clip), `store.test.ts` (the parse),
 the member rows, the census, the lifts, the forced-open rule and its pinned
 exception) and `e2e/wiki-rail-series.spec.ts` (the chain end to end: the fold,
 one row for two spellings of the key, the dissolution against an untouched
-control family, the `▸` inside the title, the ghost, `N of M shown` — asserted
+control family, the latest dot on the rail, the ghost, `N of M shown` — asserted
 VISIBLE at 300 and 260px, since `toHaveText` passes on a clipped element — the
 reader header agreeing with the fold, and the contrast of the label, the chip,
-the census, the timeline date and the `▸` in both themes). The EDITOR's own acceptance is
+the census, the timeline date and the latest dot in both themes). The EDITOR's own acceptance is
 `wiki-series-routes.test.ts` (every status code, the case-fold normalization,
 the html and reserved-basename refusals, the one-label 409, the noop's honest
 echo, the two write-time races via the `readFile` seam, the held lock, and both
@@ -1360,7 +1394,7 @@ fold's order is worked-first in EVERY sort mode** whenever the memo is warm, so
 one wiki open on a warm instance and on a cold one can sequence the same fold two
 ways under "Recently updated"; the alternative is a fold whose order depends on a
 sort the fold does not display. What may legitimately disagree, also by design:
-the fold's FIRST ROW need not be its head, its `▸` or the lint's proposed head.
+the fold's FIRST ROW need not be its head, its latest dot or the lint's proposed head.
 The `⋯` series menu's option list stays on the IDENTITY chain — it is a write
 surface.
 
@@ -2276,7 +2310,7 @@ adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
   which becomes a wrapping flex pair (`has-issues`: the clamped
   `.wiki-list-title-text` and `.wiki-issue-pills`) — never inside the clamp,
   where a wrapped pill run was clipped on 80 of 96 keyed rows. Still one row
-  element (the `▸` rule). The column sits BESIDE the text while the text keeps
+  element (the no-row-element rule). The column sits BESIDE the text while the text keeps
   `RAIL_TITLE_MIN`, and wraps UNDER it (flush right) otherwise, so a pill row
   takes no reserve in the row's floors or chip breakpoints and breaks lines
   exactly where the same row without pills does: a reserve on the chip floors

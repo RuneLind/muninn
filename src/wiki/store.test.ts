@@ -2158,6 +2158,94 @@ describe("attachments — fix round 1", () => {
 
     expect(index.pages.find((p) => p.relPath === "blogs/far.html")!.parent).toBeUndefined();
   });
+
+  // Rule 3 widened: a review page keeps its explainers in a folder named after
+  // it (melosys-kode-wiki `reviews/<date>-melosys-api-3520/arkitektur.html`).
+  test("rule 3: an embed of a SUBFOLDER html pairs it", async () => {
+    await Bun.write(
+      path.join(root, "reviews/pr-3520.mdx"),
+      '---\ntitle: PR review\n---\n\n<Embed src="./pr-3520/arkitektur.html" />\n',
+    );
+    await Bun.write(path.join(root, "reviews/pr-3520/arkitektur.html"), html("Arkitektur"));
+    const index = await buildWikiIndex(root);
+
+    const child = index.pages.find((p) => p.relPath === "reviews/pr-3520/arkitektur.html")!;
+    expect(child.parent).toBe("reviews/pr-3520.mdx");
+    expect(child.pairedBy).toBe("link");
+    expect(index.pages.find((p) => p.relPath === "reviews/pr-3520.mdx")!.children).toEqual([
+      "reviews/pr-3520/arkitektur.html",
+    ]);
+  });
+
+  test("rule 3: an embed two folders down pairs too", async () => {
+    await Bun.write(
+      path.join(root, "reviews/pr.mdx"),
+      '---\ntitle: PR\n---\n\n<Embed src="./pr/probe/deep.html" />\n',
+    );
+    await Bun.write(path.join(root, "reviews/pr/probe/deep.html"), html("Deep"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "reviews/pr/probe/deep.html")!.parent).toBe("reviews/pr.mdx");
+  });
+
+  test("rule 3: a `../` embed of the PARENT folder's html pairs nothing", async () => {
+    await Bun.write(
+      path.join(root, "reviews/sub/page.mdx"),
+      '---\ntitle: Sub page\n---\n\n<Embed src="../up.html" />\n',
+    );
+    await Bun.write(path.join(root, "reviews/up.html"), html("Up"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "reviews/up.html")!.parent).toBeUndefined();
+  });
+
+  // Fix round 1: an embed must not make a superseded page a parent, which the
+  // one-level rule then answered by dropping its rule-4 pair.
+  for (const [what, src, target] of [
+    ["a subfolder", "./old/diag.html", "plans/old/diag.html"],
+    ["a same-folder", "./old-diag.html", "plans/old-diag.html"],
+  ] as const) {
+    test(`rule 4 outranks rule 3: a superseded page keeps its pair, ${what} embed stays unpaired`, async () => {
+      await Bun.write(path.join(root, "plans/new.md"), "---\ntitle: New\n---\n\nNew.");
+      await Bun.write(
+        path.join(root, "plans/old.md"),
+        `---\ntitle: Old\nsuperseded_by: [[new]]\n---\n\n<Embed src="${src}" />\n`,
+      );
+      await Bun.write(path.join(root, target), html("Old diagram"));
+      const index = await buildWikiIndex(root);
+
+      const old = index.pages.find((p) => p.relPath === "plans/old.md")!;
+      expect(old.parent).toBe("plans/new.md");
+      expect(old.pairedBy).toBe("superseded");
+      expect(old.children).toBeUndefined();
+      expect(index.pages.find((p) => p.relPath === target)!.parent).toBeUndefined();
+    });
+  }
+
+  test("rule 3: a SIBLING folder sharing the page folder's name as a prefix is not below it", async () => {
+    await Bun.write(path.join(root, "plans/a.mdx"), '---\ntitle: A\n---\n\n<Embed src="../plans-x/d.html" />\n');
+    await Bun.write(path.join(root, "plans-x/d.html"), html("D"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "plans-x/d.html")!.parent).toBeUndefined();
+  });
+
+  test("rule 3: a page at the wiki ROOT adopts an embed in any folder below it", async () => {
+    await Bun.write(path.join(root, "overview.mdx"), '---\ntitle: Overview\n---\n\n<Embed src="./maps/x.html" />\n');
+    await Bun.write(path.join(root, "maps/x.html"), html("X"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "maps/x.html")!.parent).toBe("overview.mdx");
+  });
+
+  test("rule 3: a subfolder html embedded by pages in two folders still belongs to neither", async () => {
+    await Bun.write(path.join(root, "reviews/a.mdx"), '---\ntitle: A\n---\n\n<Embed src="./pr/shared.html" />\n');
+    await Bun.write(path.join(root, "reviews/pr/b.mdx"), '---\ntitle: B\n---\n\n<Embed src="./shared.html" />\n');
+    await Bun.write(path.join(root, "reviews/pr/shared.html"), html("Shared"));
+    const index = await buildWikiIndex(root);
+
+    expect(index.pages.find((p) => p.relPath === "reviews/pr/shared.html")!.parent).toBeUndefined();
+  });
 });
 
 /**

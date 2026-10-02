@@ -2977,20 +2977,31 @@ export function resolveSupersededBy(
   return hit.relPath;
 }
 
+/** Is `dir` the folder `base` or a descendant of it? `.` is the wiki root. */
+function inFolderOrBelow(dir: string, base: string): boolean {
+  return base === "." || dir === base || dir.startsWith(base + "/");
+}
+
 /**
  * FOLD the wiki's attachments: set `parent`/`pairedBy` on each child and
  * `children` on each parent, in place, over the pages that survived the
- * same-stem drop. Four rules, all scoped to ONE FOLDER, first match wins:
+ * same-stem drop. Four rules, first match wins — 1, 2 and 4 scoped to ONE
+ * FOLDER, 3 to the embedding page's folder and its DESCENDANTS:
  *
  *  1. **Same stem** — `x.html` beside `x.md`/`x.mdx`. The markdown page keeps the
  *     name: this child registers no stem key, so `[[x]]` and `?name=x` answer
  *     exactly as they did when the html was dropped.
  *  2. **Prototype suffix** — `x-prototype.html` / `x-prototype-2.html` beside a
  *     page at `x`. Only that suffix.
- *  3. **Embedded** — the markdown page carries `<Embed src="./child.html">`. An
- *     EMBEDDED html is part of the page; a LINKED one is a peer, so a markdown
- *     link pairs nothing. One more guard makes it safe: an html embedded by TWO
- *     OR MORE pages stays a sibling — it belongs to no one page. A META-stemmed
+ *  3. **Embedded** — the markdown page carries `<Embed src="./child.html">` or
+ *     `<Embed src="./sub/dir/child.html">`: the RESOLVED target sits in the
+ *     page's own folder or below it (a review page keeping its explainers in a
+ *     folder named after it). A target above or beside that folder pairs
+ *     nothing, and a page that folds under its successor (a rule-4 child)
+ *     adopts none of its embeds. An EMBEDDED html is part of the page; a
+ *     LINKED one is a peer, so a markdown link pairs nothing. One more guard
+ *     makes it safe: an html embedded by TWO OR MORE pages stays a sibling —
+ *     it belongs to no one page. A META-stemmed
  *     html beside its own meta markdown page (`index.html` + `index.md`) is
  *     dropped one layer above this pass and never reaches it, so rule 3 cannot
  *     pair it whoever embeds it — unchanged from before attachments existed, and
@@ -3048,6 +3059,9 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
     child.pairedBy = by;
   };
 
+  /** `.html` pages rules 1–2 left unpaired: rule 3's candidates, judged after
+   *  rule 4's survivors are known (rule 4 outranks rule 3, below). */
+  const embedCandidates: WikiPageMeta[] = [];
   for (const p of pages) {
     if (extRank(p.relPath) !== 2) continue; // rules 1–3 pair `.html` only
     const dir = path.posix.dirname(p.relPath);
@@ -3062,12 +3076,7 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
       adopt(p, protoParent, "suffix");
       continue;
     }
-    const embedding = embedders.get(normalizeRelPath(p.relPath)) ?? [];
-    if (embedding.length !== 1) continue;
-    const parent = embedding[0]!;
-    if (path.posix.dirname(parent.relPath) !== dir) continue;
-    if (isMetaStem(parent.name)) continue; // meta pages are absent from the lookup above; this is rule 3's own door
-    adopt(p, parent, "link");
+    embedCandidates.push(p);
   }
 
   // Rule 4, in two steps so the outcome cannot depend on the walk order: collect
@@ -3091,13 +3100,30 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
     superseded.push({ child: p, parent });
     supersededChildren.add(p);
   }
+  // Rules 1–2 children only, at this point: a rule-1/2 attachment still cancels
+  // its page's rule-4 pair (the one-level rule), an EMBED no longer does.
   const hasChildren = new Set<string>();
   for (const p of pages) if (p.parent) hasChildren.add(p.parent);
-  for (const { child, parent } of superseded) {
-    if (hasChildren.has(child.relPath)) continue; // child is itself a parent
-    if (supersededChildren.has(parent)) continue; // successor is itself superseded
-    adopt(child, parent, "superseded");
+  const rule4 = superseded.filter(
+    ({ child, parent }) =>
+      !hasChildren.has(child.relPath) && // child is itself a parent
+      !supersededChildren.has(parent), // successor is itself superseded
+  );
+  const rule4Kids = new Set(rule4.map(({ child }) => child));
+
+  // Rule 3 YIELDS to rule 4: a page folding under its successor adopts none of
+  // its embeds, which stay ordinary rows — otherwise the embed made the old page
+  // a parent and the one-level rule then dropped its superseded pair.
+  for (const p of embedCandidates) {
+    const embedding = embedders.get(normalizeRelPath(p.relPath)) ?? [];
+    if (embedding.length !== 1) continue;
+    const parent = embedding[0]!;
+    if (!inFolderOrBelow(path.posix.dirname(p.relPath), path.posix.dirname(parent.relPath))) continue;
+    if (isMetaStem(parent.name)) continue; // meta pages are absent from the lookup above; this is rule 3's own door
+    if (rule4Kids.has(parent)) continue;
+    adopt(p, parent, "link");
   }
+  for (const { child, parent } of rule4) adopt(child, parent, "superseded");
 
   for (const p of pages) {
     if (!p.parent) continue;

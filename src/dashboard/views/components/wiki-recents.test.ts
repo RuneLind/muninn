@@ -39,8 +39,8 @@ import {
   type RailSection,
 } from "./wiki-recents.ts";
 import { GROUP_FAMILIES_TOGGLE_KEY, groupRollup, groupSeries, railGroups } from "./wiki-groups.ts";
-import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
-import type { ActivityRow } from "./wiki-activity-rank.ts";
+import { filterPages, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
+import { DEFAULT_ACTIVITY_WEIGHTS, rankActivity, type ActivityRow } from "./wiki-activity-rank.ts";
 
 function page(over: Partial<WikiListing> & { relPath: string }): WikiListing {
   return {
@@ -2859,5 +2859,202 @@ describe("buildRail — series, fix round 1", () => {
     });
     expect(groupsOf(forced.entries)[0]!.forcedOpen).toBe(true);
     expect(groupsOf(forced.entries)[0]!.folded).toBe(false);
+  });
+});
+
+/**
+ * Activity rolls an attachment child up into its parent (`rankActivity`), so
+ * the rail draws ONE row per family: the parent, with the child folded under its
+ * chip — closed by default — and a dot on the chip when what is folded is newer
+ * than the page. Driven through the REAL ranking, since that is the seam.
+ */
+describe("buildRail — Activity rolls children up into their parent", () => {
+  const NOW = Date.UTC(2026, 8, 12, 12, 0, 0);
+  const DAY = 86_400_000;
+  const dated = (relPath: string, createdDaysAgo: number, over: Partial<WikiListing> = {}) =>
+    page({ relPath, title: relPath, gitCreatedMs: NOW - createdDaysAgo * DAY, gitTouchedMs: NOW - createdDaysAgo * DAY, ...over });
+  const parent = dated("plans/pr.mdx", 60, { title: "PR review", type: "archive" });
+  const embed = dated("plans/pr-belop.html", 3, { title: "Beløp", type: "explainer", parent: "plans/pr.mdx", pairedBy: "link" });
+  const other = dated("plans/other.mdx", 5, { title: "Other" });
+  const all = [parent, embed, other];
+  const rowsOf = (m: ReturnType<typeof buildRail>) =>
+    m.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const rail = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({
+      filtered: all,
+      facetOnly: all,
+      filters: INERT,
+      pins: [],
+      activity: rankActivity(all, { ...DEFAULT_ACTIVITY_WEIGHTS, rows: 6 }, NOW),
+      ...over,
+    });
+
+  test("the explainer folds under its parent's CLOSED chip instead of ranking as its own row", () => {
+    const rs = rowsOf(rail());
+    const act = rs.filter((r) => r.section === "activity").map((r) => r.page.relPath);
+    expect(act).toEqual(["plans/pr.mdx", "plans/other.mdx"]);
+    expect(rs.some((r) => r.page.relPath === "plans/pr-belop.html")).toBe(false);
+    const p = rs.find((r) => r.page.relPath === "plans/pr.mdx")!;
+    expect(p.children?.map((c) => c.relPath)).toEqual(["plans/pr-belop.html"]);
+    expect(p.folded).toBe(true);
+    // The row's date and hover are the child's: it is what earned the slot.
+    expect(p.activity?.via?.relPath).toBe("plans/pr-belop.html");
+    expect(p.activity?.ageMs).toBe(3 * DAY);
+    expect(p.activity?.why).toContain('explainer "Beløp"');
+  });
+
+  test("the chip is flagged NEWER while closed, and not once the reader opened it", () => {
+    expect(rowsOf(rail()).find((r) => r.page.relPath === "plans/pr.mdx")!.childNewer).toBe(true);
+    const opened = rowsOf(rail({ openFolds: [normalizeFoldKey("plans/pr.mdx")] }));
+    const p = opened.find((r) => r.page.relPath === "plans/pr.mdx")!;
+    expect(p.folded).toBe(false);
+    expect(p.childNewer).toBeUndefined();
+    // Open, the child is drawn UNDER its parent, not lifted.
+    const c = opened.find((r) => r.page.relPath === "plans/pr-belop.html")!;
+    expect(c.section).toBe("activity");
+    expect(c.lifted).toBeUndefined();
+  });
+
+  test("a PINNED child still lifts into Pinned, and the chip no longer counts or flags it", () => {
+    // An OLDER sibling keeps the chip on screen, so the flag is judged on what
+    // the chip really holds rather than vanishing with the chip.
+    const older = dated("plans/pr-old.html", 80, { parent: "plans/pr.mdx", pairedBy: "link", type: "explainer" });
+    const pages = [...all, older];
+    const rs = rowsOf(
+      rail({
+        filtered: pages,
+        facetOnly: pages,
+        pins: ["plans/pr-belop.html"],
+        activity: rankActivity(pages, DEFAULT_ACTIVITY_WEIGHTS, NOW),
+      }),
+    );
+    expect(rs.filter((r) => r.page.relPath === "plans/pr-belop.html").map((r) => r.section)).toEqual(["pinned"]);
+    const p = rs.find((r) => r.page.relPath === "plans/pr.mdx")!;
+    expect(p.section).toBe("activity");
+    expect(p.children?.map((c) => c.relPath)).toEqual(["plans/pr-old.html"]);
+    expect(p.folded).toBe(true);
+    expect(p.childNewer).toBeUndefined();
+  });
+
+  test("a series member whose OWN score cleared the floor stays in Activity when pinned, even if its child outscored it", () => {
+    const a = dated("plans/a.mdx", 4, { series: "alpha" });
+    const b = dated("plans/b.mdx", 70, { series: "alpha" });
+    const kid = dated("plans/a-diagram.html", 1, { parent: "plans/a.mdx", pairedBy: "link", type: "explainer" });
+    const pages = [a, b, kid];
+    const activity = rankActivity(pages, DEFAULT_ACTIVITY_WEIGHTS, NOW);
+    expect(activity[0]!.via?.relPath).toBe("plans/a-diagram.html");
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: ["plans/a.mdx"],
+      seriesGroups: groupSeries(pages),
+      activity,
+    });
+    expect(rowsOf(m).filter((r) => r.page.relPath === "plans/a.mdx").map((r) => r.section)).toEqual(["activity"]);
+  });
+
+  test("a closed series PEEK row carries the newer-child flag on its chip", () => {
+    const a = dated("plans/a.mdx", 60, { series: "alpha" });
+    const b = dated("plans/b.mdx", 70, { series: "alpha" });
+    const kid = dated("plans/a-diagram.html", 2, { parent: "plans/a.mdx", pairedBy: "link", type: "explainer" });
+    const pages = [a, b, kid];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: [],
+      seriesGroups: groupSeries(pages),
+      activity: rankActivity(pages, DEFAULT_ACTIVITY_WEIGHTS, NOW),
+    });
+    const peek = rowsOf(m).find((r) => r.page.relPath === "plans/a.mdx")!;
+    expect(peek.section).toBe("activity");
+    expect(peek.folded).toBe(true);
+    expect(peek.childNewer).toBe(true);
+  });
+
+  test("a series member ranked only THROUGH its child is not self-ranked: its pin keeps it under Pinned", () => {
+    const a = dated("plans/a.mdx", 60, { series: "alpha" });
+    const b = dated("plans/b.mdx", 70, { series: "alpha" });
+    const kid = dated("plans/a-diagram.html", 2, { parent: "plans/a.mdx", pairedBy: "link", type: "explainer" });
+    const pages = [a, b, kid];
+    const m = buildRail({
+      filtered: pages,
+      facetOnly: pages,
+      filters: INERT,
+      pins: ["plans/a.mdx"],
+      seriesGroups: groupSeries(pages),
+      activity: rankActivity(pages, DEFAULT_ACTIVITY_WEIGHTS, NOW),
+    });
+    expect(rowsOf(m).filter((r) => r.page.relPath === "plans/a.mdx").map((r) => r.section)).toEqual(["pinned"]);
+  });
+});
+
+/**
+ * Rule 3 now pairs an embed in a DESCENDANT folder, so a child can sit in a
+ * different folder from its parent. Every grouping that reads folders, walked:
+ * the child must render exactly once, or not at all only where a facet hides it.
+ */
+describe("buildRail — a child in a subfolder of its parent", () => {
+  const NOW = Date.UTC(2026, 8, 12, 12, 0, 0);
+  const DAY = 86_400_000;
+  const at = (relPath: string, days: number, over: Partial<WikiListing> = {}) =>
+    page({ relPath, title: relPath, gitCreatedMs: NOW - days * DAY, gitTouchedMs: NOW - days * DAY, ...over });
+  const count = (m: ReturnType<typeof buildRail>, rel: string) =>
+    m.entries.filter((e) => e.kind === "row" && e.page.relPath === rel).length;
+  const build = (pages: WikiListing[], over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({ filtered: pages, facetOnly: pages, filters: INERT, pins: [], ...over });
+
+  // A ROOT parent, so the child is in another top-level folder (`pr`) — the one
+  // shape where the folder facet splits the pair.
+  const rootParent = at("pr.mdx", 3);
+  const rootChild = at("pr/arkitektur.html", 2, { type: "explainer", parent: "pr.mdx", pairedBy: "link" });
+  // An ARCHIVE parent, so month grouping is in play.
+  const arcParent = at("archive/2026-09-30-review.mdx", 3);
+  const arcChild = at("archive/2026-09-30-review/diff.html", 2, {
+    type: "explainer",
+    parent: "archive/2026-09-30-review.mdx",
+    pairedBy: "link",
+  });
+  const all = [rootParent, rootChild, arcParent, arcChild, at("archive/2026-08-01-old.mdx", 40)];
+
+  test("no facet: each child folds under its parent once, across families and Activity", () => {
+    const groups = railGroups(all, { folder: "", sort: "updated", projects: {} });
+    const m = build(all, { groups, activity: rankActivity(all, DEFAULT_ACTIVITY_WEIGHTS, NOW) });
+    expect(count(m, "pr/arkitektur.html")).toBe(0);
+    expect(count(m, "archive/2026-09-30-review/diff.html")).toBe(0);
+    expect(count(m, "pr.mdx")).toBe(1);
+    const opened = build(all, {
+      groups,
+      openFolds: [normalizeFoldKey("pr.mdx"), normalizeFoldKey("archive/2026-09-30-review.mdx")],
+    });
+    expect(count(opened, "pr/arkitektur.html")).toBe(1);
+    expect(count(opened, "archive/2026-09-30-review/diff.html")).toBe(1);
+  });
+
+  test("folder facet on the parent's folder hides the child with it; on the child's folder it is a plain row", () => {
+    const root = filterPages(all, { ...INERT, folder: "/" });
+    expect(root.map((p) => p.relPath)).toEqual(["pr.mdx"]);
+    const mRoot = build(root);
+    expect(count(mRoot, "pr.mdx")).toBe(1);
+    expect(mRoot.entries.find((e) => e.kind === "row" && e.page.relPath === "pr.mdx")!).not.toHaveProperty("children");
+
+    const sub = filterPages(all, { ...INERT, folder: "pr" });
+    const mSub = build(sub);
+    expect(count(mSub, "pr/arkitektur.html")).toBe(1);
+    expect(mSub.shown).toBe(1);
+  });
+
+  test("month grouping (folder=archive): the subfolder child is in no month and folds under its parent once", () => {
+    const arc = filterPages(all, { ...INERT, folder: "archive" });
+    const groups = railGroups(arc, { folder: "archive", sort: "updated", projects: {}, now: NOW });
+    for (const g of groups) expect(g.members.some((p) => p.relPath.endsWith("diff.html"))).toBe(false);
+    const open = build(arc, {
+      groups,
+      expandAll: true,
+    });
+    expect(count(open, "archive/2026-09-30-review/diff.html")).toBe(1);
+    expect(count(open, "archive/2026-09-30-review.mdx")).toBe(1);
+    expect(open.shown).toBe(arc.length);
   });
 });

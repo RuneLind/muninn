@@ -523,16 +523,29 @@ test.describe("Wiki rail: series", () => {
     await expect(groupRow(page, "family:plans/other-slate")).toHaveCount(1);
   });
 
-  test("the `▸` on the newest plan is INSIDE the title — no seventh element", async ({ page }) => {
+  test("the newest plan is a dot ON the series rail — a pseudo-element, no seventh element", async ({ page }) => {
     await openRail(page);
     await seriesFold(page).click();
     const latest = row(page, PLAN);
-    await expect(latest.locator(".wiki-list-title .wiki-latest-glyph")).toHaveText("▸");
+    await expect(latest).toHaveClass(/\blatest\b/);
     await expect(latest).toHaveAttribute("title", /newest plan in this series/);
-    // No other row carries it.
-    await expect(page.locator(".wiki-latest-glyph")).toHaveCount(1);
+    // No other row carries it, and no `▸` is left in any title to read as a caret.
+    await expect(page.locator(".wiki-list-item.latest")).toHaveCount(1);
+    await expect(page.locator(".wiki-list-title")).not.toContainText(["▸"]);
+    // The dot sits ON the rail: its centre on the rail's centre line.
+    const geo = await latest.evaluate((el) => {
+      const dot = getComputedStyle(el, "::before");
+      const rail = getComputedStyle(el, "::after");
+      return {
+        content: dot.content,
+        dotCentre: parseFloat(dot.left) + parseFloat(dot.width) / 2,
+        railCentre: parseFloat(rail.left) + parseFloat(rail.width) / 2,
+      };
+    });
+    expect(geo.content).toBe('""');
+    expect(geo.dotCentre).toBe(geo.railCentre);
     // The row's own child count is unchanged against a sibling that is not the
-    // latest — same section, same chrome, one glyph of difference.
+    // latest — same section, same chrome, nothing added to the row.
     const childCounts = await page.evaluate(
       (arg: { latest: string; plain: string }) => {
         const count = (rel: string) =>
@@ -584,7 +597,7 @@ test.describe("Wiki rail: series", () => {
     await openRail(page);
     await page.fill("#wikiSearch", "provenance");
     await expect(page.locator(".wiki-list-group")).toHaveCount(0);
-    await expect(page.locator(".wiki-latest-glyph")).toHaveCount(0);
+    await expect(page.locator(".wiki-list-item.latest")).toHaveCount(0);
     const rel = await relPaths(page);
     expect(rel).toContain(PLAN);
     expect(rel).toContain(BLOG);
@@ -849,16 +862,39 @@ test.describe("Wiki rail: series", () => {
       ).toBeGreaterThanOrEqual(4.5);
     });
 
-    // Its own case, so a failing date cell cannot mask it: the `▸` is the whole
-    // claim "this is the plan to continue in" compressed into one mark, and it
-    // is the only thing on that row saying so.
-    test(`the \`▸\` on the newest plan is legible in the ${scheme} theme`, async ({ page }) => {
+    // Its own case, so a failing date cell cannot mask it: the latest dot is
+    // the whole claim "this is the plan to continue in" compressed into one
+    // mark. A graphic, so WCAG 1.4.11's 3:1 against the ground it sits on.
+    test(`the latest dot on the newest plan is visible in the ${scheme} theme`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await openRail(page);
       await seriesFold(page).click();
-      const glyph = page.locator(".wiki-latest-glyph");
-      await expect(glyph).toHaveCount(1);
-      expect(await contrastOf(glyph)).toBeGreaterThanOrEqual(4.5);
+      const latest = page.locator(".wiki-list-item.latest");
+      await expect(latest).toHaveCount(1);
+      const ratio = await latest.evaluate((el) => {
+        const rgb = (c: string) => c.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+        const lum = (c: string) => {
+          const [r, g, b] = rgb(c).map((v) => {
+            const s = v / 255;
+            return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+          }) as [number, number, number];
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        let node: HTMLElement | null = el.parentElement;
+        let ground = "rgb(0, 0, 0)";
+        while (node) {
+          const c = getComputedStyle(node).backgroundColor;
+          if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
+            ground = c;
+            break;
+          }
+          node = node.parentElement;
+        }
+        const a = lum(getComputedStyle(el, "::before").backgroundColor);
+        const b = lum(ground);
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      });
+      expect(ratio).toBeGreaterThanOrEqual(3);
     });
   }
 });

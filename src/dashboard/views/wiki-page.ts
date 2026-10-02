@@ -370,7 +370,7 @@ export async function renderWikiPage(opts?: {
 
     .wiki-list { flex: 1; overflow-y: auto; padding: 6px; }
     /* ONE flex line until the row's floors no longer fit it, and then TWO.
-       The row is six things — type dot · title · group chip · status pill · ⚑ ·
+       The row is six things — type icon · title · group chip · status pill · ⚑ ·
        ★+date — and at the 260px rail (RAIL_WIDTH_MIN, i.e. any window under
        1100px) the five that are not the title measure 143.4px plus 40px of gaps,
        leaving 42.6px for the title AND the chip together. No distribution of
@@ -437,7 +437,16 @@ export async function renderWikiPage(opts?: {
     }
     /* Flex-start row: the title's siblings are nudged down onto its first line
        (a 16.25px line box) so the row reads as one line when the title is one. */
-    .wiki-list-item .wiki-type-dot { align-self: flex-start; margin-top: 5px; }
+    /* The type ICON: one fixed 14px lead column on every row (wiki-type-icon.ts),
+       centred on the title's first 16.25px line. Coloured with the type dot's
+       own tokens, so plan/archive stay dim and explainer amber. */
+    .wiki-type-icon { width: 14px; height: 14px; flex-shrink: 0; margin-top: 1px; color: var(--text-dim); }
+    .wiki-type-icon.ti-concept { color: var(--accent); }
+    .wiki-type-icon.ti-entity { color: var(--status-cyan); }
+    .wiki-type-icon.ti-source { color: var(--status-info); }
+    .wiki-type-icon.ti-analysis { color: var(--status-magenta); }
+    .wiki-type-icon.ti-explainer { color: var(--status-warning); }
+    .wiki-type-icon.ti-note { color: var(--text-dim); }
     .wiki-list-item .wiki-list-meta { margin-top: 2px; }
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
@@ -554,6 +563,15 @@ export async function renderWikiPage(opts?: {
     /* Forced open because the open page is inside: not a toggle, and it says so
        rather than reading as a control that does nothing. */
     .wiki-fold-chip[disabled] { cursor: default; opacity: .85; }
+    /* A closed group hiding a child newer than its page: an amber dot on the
+       chip's corner. Absolute, so the chip's measured widths do not move; the
+       chip's title/aria-label say what it means. */
+    .wiki-fold-chip.newer { position: relative; }
+    .wiki-fold-chip.newer::after {
+      content: ""; position: absolute; top: -3px; right: -3px; width: 7px; height: 7px;
+      border-radius: 50%; background: var(--status-warning); box-shadow: 0 0 0 1.5px var(--bg-panel);
+    }
+    @media (forced-colors: active) { .wiki-fold-chip.newer::after { background: Highlight; box-shadow: none; } }
     /* A child row: indented under its parent, with a rail on the left so the
        group reads as one block rather than as rows that happen to be adjacent.
        The indent is on the ROW, so the row stays a full-width click target.
@@ -626,12 +644,28 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item.member.wiki-series-cont:not(.child)::before,
     .wiki-list-ghost.wiki-series-cont::before { display: none; }
     .wiki-list-item.wiki-series-cont:hover::after { background: var(--accent-light); }
+    /* LATEST: the newest plan of a series is a filled node ON the series rail
+       (the member's ::before is free — the grey member rule is hidden on a
+       series row). Outside a series body (pinned, lifted) there is no rail, so
+       the same dot sits at the row's left edge on ::after. Absolute either way:
+       no row width, so no budget in wiki-rail-width.ts moves. */
+    .wiki-list-item.latest { position: relative; }
+    .wiki-list-item.latest.wiki-series-cont:not(.child)::before,
+    .wiki-list-item.latest:not(.wiki-series-cont)::after {
+      content: ""; display: block; position: absolute; top: 11px; width: 8px; height: 8px;
+      border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-panel);
+      pointer-events: none;
+    }
+    .wiki-list-item.latest.wiki-series-cont:not(.child)::before { left: -3px; bottom: auto; }
+    .wiki-list-item.latest:not(.wiki-series-cont)::after { left: 1px; }
     /* Forced colours repaint a background as Canvas, which would erase the
        rail; the border it replaced stayed visible. The hover selector is listed
        so its higher specificity cannot win back the Canvas. */
     @media (forced-colors: active) {
       .wiki-list-group.series::after, .wiki-series-cont::after,
       .wiki-list-item.wiki-series-cont:hover::after { background: CanvasText; }
+      .wiki-list-item.latest.wiki-series-cont:not(.child)::before,
+      .wiki-list-item.latest:not(.wiki-series-cont)::after { background: Highlight; box-shadow: none; }
     }
     /* A series NAME wraps to two lines, like a page title, rather than
        ellipsizing on one: the roll-up moved to its own line under it, so the
@@ -645,7 +679,7 @@ export async function renderWikiPage(opts?: {
        wraps BETWEEN counts and never clips one. --text-muted over the pane (the
        group row paints no hover fill); the two live statuses take the colours
        their row pills use, both measured ≥ 6.3:1 in the light theme (see
-       .wiki-act-glyph). Blocked stays muted: the warning amber is 3.19:1 light. */
+       .wiki-new-tag). Blocked stays muted: the warning amber is 3.19:1 light. */
     .wiki-group-rollup {
       display: block; color: var(--text-muted); font-size: 10.5px; font-weight: 400;
       line-height: 1.45; margin-top: 1px; white-space: normal;
@@ -662,21 +696,13 @@ export async function renderWikiPage(opts?: {
       display: block; color: var(--text-muted); font-size: 10.5px; font-weight: 400;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    /* The \`▸\` on the newest plan of a series: a text mark inside the title, not
-       a row element. See \`wiki-rail-width.ts\` — the row's six items are each
-       budgeted and a seventh takes the title under its floor.
-       --accent-light, not --status-warning: measured against the rail's ground
-       (.wiki-pane paints --bg-panel) the warning amber is 3.19:1 light, under AA
-       for an 11px mark; --accent-light is 6.46:1 light and 8.05:1 dark (the same
-       swap .wiki-act-glyph's green made, and the token the series group row
-       already carries — the glyph and its fold now read as one colour). */
-    .wiki-latest-glyph { color: var(--accent-light); margin-right: 4px; font-size: 11px; }
-    /* ✋ = a NextMoves step waiting on the reader: an inline mark, the ▸ rule. */
+    /* ✋ = a NextMoves step waiting on the reader: an inline mark inside the
+       title, never a row element (the row's six items are each budgeted). */
     .wiki-moves-flag { margin-right: 4px; font-size: 11px; }
     /* Issue pills: a COLUMN of their own inside .wiki-list-title, never inside
        the clamp — inline, a pill run wrapped to a third line and was clipped on
        80 of 96 keyed rows of a real wiki. The title element stays ONE row item
-       (the ▸ rule — a seventh flex item would cost the title its floor).
+       (a seventh flex item would cost the title its floor).
        Solid = stamped, dashed = inferred. A pill is part of the row, which is
        one click target, so it keeps the row's pointer. */
     .wiki-list-title.has-issues {
@@ -747,23 +773,20 @@ export async function renderWikiPage(opts?: {
       color: var(--text-dim); background: var(--bg-surface);
       border-radius: 6px; margin: 2px 0 3px; padding: 6px 10px;
     }
-    /* Activity's per-row glyph: "+" created, "~" changed. A fixed-width
-       monospace slot so the titles below it still line up, and theme tokens
-       rather than a raw hex.
+    /* A NEW Activity row: a bordered NEW tag before the age, and the age in the
+       same green. "Changed" rows carry no mark.
        The green is --tok-str, NOT --status-success: measured against the rail's
        ground (.wiki-pane paints --bg-panel), the plain status green is 3.30:1
-       in the light theme, under AA for 11px bold text. --tok-str is the same
+       in the light theme, under AA for small bold text. --tok-str is the same
        ramp darkened for exactly that reason (shared-styles.ts says so where it
        is declared) and measures 6.34:1 light; in the DARK theme the two tokens
-       are the same value, so nothing moves there. --accent-light needed no such
-       swap: 6.46:1 light, 8.05:1 dark. */
-    .wiki-act-glyph {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px; font-weight: 700; line-height: 1.45;
-      width: 10px; text-align: center; flex-shrink: 0; margin-top: 2px;
+       are the same value. */
+    .wiki-new-tag {
+      font-size: 9.5px; font-weight: 700; letter-spacing: .06em; line-height: 1.35;
+      color: var(--tok-str); border: 1px solid color-mix(in srgb, var(--tok-str) 55%, transparent);
+      border-radius: 3px; padding: 0 3px; margin: 1px 2px 0 0; flex-shrink: 0;
     }
-    .wiki-act-glyph.new { color: var(--tok-str); }
-    .wiki-act-glyph.changed { color: var(--accent-light); }
+    .wiki-list-meta.new { color: var(--tok-str); font-weight: 600; }
     /* ★ and the date share one flex slot, so the ★ costs the row its own width
        and NOT the row's 8px gap as well: as a sibling of the title the pair
        measured 21px off .wiki-list-title on every row — 42px of title left at
@@ -824,7 +847,7 @@ export async function renderWikiPage(opts?: {
          unconditional opacity below is gone.
          (2) In flow it cost the row width forever: the end slot measured 90px
          and a chipless pill + ⚑ row wrapped its title under \`RAIL_TITLE_MIN\` at
-         300px on CI's fonts. So on the rail it is ABSOLUTE — the \`▸\` rule from
+         300px on CI's fonts. So on the rail it is ABSOLUTE — the no-row-element rule from
          PR A, a seventh row item the budget has no room for — pinned to the end
          slot's top-right corner, which is the corner the date occupies. The
          date is not drawn under it: the whole \`.wiki-list-meta\` goes
