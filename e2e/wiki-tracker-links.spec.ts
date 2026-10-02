@@ -315,13 +315,13 @@ async function clippedPillRows(page: Page): Promise<string[]> {
 }
 
 /**
- * Whether a row's dot, title cell and ★+date share one line box — the row's
+ * Whether a row's type icon, title cell and ★+date share one line box — the row's
  * line STRUCTURE, which a pill must not change.
  */
 async function oneLine(page: Page, rel: string): Promise<boolean> {
   return row(page, rel).evaluate((el) => {
     const box = (sel: string) => el.querySelector(sel)!.getBoundingClientRect();
-    const dot = box(".wiki-type-dot");
+    const dot = box(".wiki-type-icon");
     const title = box(".wiki-list-title");
     const end = box(".wiki-list-end");
     return dot.top < title.top + 16 && Math.abs(end.top - title.top) < 6;
@@ -524,7 +524,10 @@ test.describe("Wiki reader: tracker links", () => {
       const where = `${width}px`;
       await expect(pills(page, TWIN_MD).first(), where).toBeVisible();
       await expect(row(page, MIRROR_MD).locator(".wiki-issue-pill"), where).toHaveCount(0);
-      if (width === 260) expect(await oneLine(page, MIRROR_MD), where).toBe(true);
+      // The case needs a width where the pill-less row is ONE line. Not 260
+      // since the 14px type icon (7px wider than the dot it replaced): measured,
+      // icon 14 + mid floor 126 + full date 73.7 + two gaps = 229.7 > 226.
+      if (width === 280) expect(await oneLine(page, MIRROR_MD), where).toBe(true);
       expect(await oneLine(page, TWIN_MD), where).toBe(await oneLine(page, MIRROR_MD));
       expect(await chipForm(page, TWIN_MD), where).toBe(await chipForm(page, MIRROR_MD));
       expect(await clippedPillRows(page), where).toEqual([]);

@@ -66,6 +66,9 @@ const SUP10 = "plans/sup10.mdx";
 const BIG = "plans/big.mdx";
 const THREE = "plans/three.mdx";
 const BARE = "plans/bare.mdx";
+/** A NEW in-flight plan with a ⚑: Activity's widest end slot (the NEW tag beside
+ *  its age) on the row shape that already runs closest to the title floor. */
+const NEW_FLIGHT = "plans/new-flight.mdx";
 const BIG_ATTACHED = 120;
 const BIG_SUPERSEDED = 100;
 const md = (title: string, extra: string[] = []) =>
@@ -94,9 +97,23 @@ const EDGE_PAGES: Array<[string, string]> = [
     html(`Three mock ${i + 1}`),
   ]),
   [BARE, md("Bare plan with a pill and a flag", PILL_AND_FLAG)],
+  // No `created:` line and re-written after the settle (below): NEW in Activity.
+  [
+    NEW_FLIGHT,
+    [
+      "---",
+      "title: New in-flight plan with a flag",
+      "plan_status: in-flight",
+      "followups: open",
+      "---",
+      "",
+      "# New",
+      "",
+    ].join("\n"),
+  ],
 ];
-/** Rows on screen with every group closed: the two title pages + four parents. */
-const CLOSED_ROWS = 2 + 4;
+/** Rows on screen with every group closed: the two title pages + four parents + the new plan. */
+const CLOSED_ROWS = 2 + 4 + 1;
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -114,6 +131,11 @@ test.beforeAll(async () => {
     await writeFile(path.join(root, rel), body, "utf8");
   }
   await settleWikiMtimes(root);
+  // Re-created AFTER the settle: on macOS `utimes` moves the birthtime back with
+  // the mtime, and the oldest creation signal wins.
+  const fresh = EDGE_PAGES.find(([rel]) => rel === NEW_FLIGHT)![1];
+  await rm(path.join(root, NEW_FLIGHT));
+  await writeFile(path.join(root, NEW_FLIGHT), fresh, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -476,7 +498,7 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
         title: title.getBoundingClientRect().width,
         wrapped: end.getBoundingClientRect().top > title.getBoundingClientRect().top + 8,
         endGap: el.getBoundingClientRect().right - 10 - end.getBoundingClientRect().right,
-        kids: Array.from(el.children).map((c) => [c.className.slice(0, 24), Math.round(c.getBoundingClientRect().width), Math.round(c.getBoundingClientRect().top)]),
+        kids: Array.from(el.children).map((c) => [(c.getAttribute("class") ?? "").slice(0, 24), Math.round(c.getBoundingClientRect().width), Math.round(c.getBoundingClientRect().top)]),
         item: el.clientWidth,
       };
     });
@@ -523,8 +545,8 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
       const cs = getComputedStyle(el);
       const gap = parseFloat(cs.gap) || 8;
       const content = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-      // dot · [mid] · pill · ⚑ · ★+date, and the four gaps between five items.
-      return { parts: w(".wiki-type-dot") + w(".wiki-status") + w(".wiki-followup-flag") + w(".wiki-list-end") + 4 * gap, content };
+      // icon · [mid] · pill · ⚑ · ★+date, and the four gaps between five items.
+      return { parts: w(".wiki-type-icon") + w(".wiki-status") + w(".wiki-followup-flag") + w(".wiki-list-end") + 4 * gap, content };
     });
     // Rail px per content px is 1:1; the offset is whatever the pane, list and
     // row paddings take, read from this machine rather than assumed.
@@ -543,6 +565,24 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
   // chip rows above it is the mid floor plus the compact chip that does (a
   // mutation setting both min-widths to 10px leaves them green), so the floor
   // assertion lives here and nowhere else in this block.
+  // The NEW tag widens the end slot: measured, not derived. At 260 (content 226)
+  // this row measured icon 14 + in-flight pill 57 + ⚑ 6 + end slot 71 (★ 10.6,
+  // tag 32.9, age 21.5) + four 8px gaps = 180, leaving 46px < RAIL_TITLE_MIN.
+  // No tag form fits (it would need ≤ 11px), so the row takes the documented
+  // degrade: it wraps, the title keeps its floor and the date stays flush right.
+  // At the 300px default it is one line.
+  test("a NEW in-flight plan with a ⚑ keeps its title floor at 260 (wrapping) and one line at 300", async ({ page }) => {
+    await openAt(page, 260);
+    await expect(rowOf(page, NEW_FLIGHT).locator(".wiki-new-tag")).toHaveText("NEW");
+    const g = await geometry(page, NEW_FLIGHT);
+    expect(g.title, JSON.stringify(g.kids)).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+    expect(g.endGap, JSON.stringify(g.kids)).toBeLessThanOrEqual(1);
+    await openAt(page, 300);
+    const h = await geometry(page, NEW_FLIGHT);
+    expect(h.wrapped, JSON.stringify(h.kids)).toBe(false);
+    expect(h.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+  });
+
   test("a chipless pill + ⚑ row at the narrow rail keeps the title floor, and its second line is flush right", async ({ page }) => {
     await openAt(page, 260);
     const g = await geometry(page, BARE);

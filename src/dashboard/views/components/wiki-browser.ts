@@ -151,6 +151,7 @@ import {
   type ActivityWeights,
   type WorkedGate,
 } from "./wiki-activity-rank.ts";
+import { railTypeIconHtml } from "./wiki-type-icon.ts";
 import {
   purgeRecentsKeys,
   readFolds,
@@ -946,7 +947,7 @@ function movesPersonal(): boolean {
 }
 
 /** The ✋ mark on a rail row whose page has a step waiting on the reader. An
- *  inline span INSIDE `.wiki-list-title` (the `▸` rule): the row's six flex
+ *  inline span INSIDE `.wiki-list-title`: the row's six flex
  *  items are each budgeted, and a seventh would cost the title its floor.
  *  `aria-hidden`: the row's title attribute is what a screen reader gets. */
 function movesFlagHtml(p: WikiListing): string {
@@ -1636,6 +1637,9 @@ function renderList(): void {
       return;
     }
     const p = entry.page;
+    // The page whose dates the cell reads: the attachment child that earned a
+    // rolled-up Activity row (`via`), else the row's own page.
+    const datePage = entry.activity?.via ?? p;
     // WHICH SIGNAL this row's date comes from: the one that PUT an Activity row
     // there, the one the list SORTED on for every other row. `null` is the
     // backlinks mode, whose rows count links rather than days. In every recency
@@ -1659,7 +1663,7 @@ function renderList(): void {
           : "updated";
     // ONE signal derivation per row — the stamp AND the label in a single call,
     // because this runs for every row on every keystroke (1261 of them on jarvis).
-    const dateSignal = signal === null ? null : pageDateSignal(p, signal, now);
+    const dateSignal = signal === null ? null : pageDateSignal(datePage, signal, now);
     // The STAMP the age counts from. For an Activity row it is the one the
     // ranking already derived (`now - ageMs`, off the same anchored instant), so
     // the row's date and its `why` sentence cannot disagree about the age; for a
@@ -1683,13 +1687,17 @@ function renderList(): void {
     const source: WorkedSource | null =
       signal === "worked" && dateSignal
         ? dateSignal.kind === "worked"
-          ? workedSourceOf(p, now, dateSignal)
+          ? workedSourceOf(datePage, now, dateSignal)
           : { kind: "fallback" }
-        : entry.activity?.kind === "changed" && workedGate?.open && !isUsableWorkedMs(p.workedMs, now)
+        : entry.activity?.kind === "changed" && workedGate?.open && !isUsableWorkedMs(datePage.workedMs, now)
           ? { kind: "fallback" }
           : null;
     const chip = workedChip(source, fullDate, dateSignal?.kind === "added" ? "added" : "updated");
-    const metaClass = chip.cls;
+    // A NEW page (its own creation won, not a child's) says so in the date cell:
+    // a bordered NEW tag and the age in the same green. "Changed" is Activity's
+    // default and carries no mark — its `why` hover holds the derivation.
+    const isNew = entry.activity?.kind === "new" && !entry.activity.via;
+    const metaClass = chip.cls + (isNew ? " new" : "");
     const dateTitle = chip.title;
     // Every rail row shows a COMPACT age (`formatRailAge`, whose docblock has the
     // why), the backlinks sort its link count instead.
@@ -1714,9 +1722,8 @@ function renderList(): void {
         ? `In ${entry.member.label}`
         : `In the ${entry.member.label} ${entry.member.kind === "series" ? "series" : "family"}`
       : "";
-    // The `▸` glyph on the newest plan of a series says WHAT it is here, because
-    // the glyph itself cannot: the words live in the reader header, and a row
-    // that grew a seventh element for them would wrap at the default rail.
+    // The latest dot (a pseudo-element on the series rail) says WHAT it is here,
+    // because a dot cannot: the words live in the reader header.
     const latestWhy = entry.latest ? "newest plan in this series that is not retired" : "";
     const pills = railIssuePillsHtml(p.issues, (id) => trackerLabels[id] ?? "");
     // A retired row (the toggle is on, or a search found it) says so on hover;
@@ -1735,17 +1742,16 @@ function renderList(): void {
       // family's own depth it would read as a sibling of the page it belongs to.
       // A SERIES member (and its attachment child) also carries
       // `wiki-series-cont`, which runs the series' accent rail through the row.
-      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}${entry.latest ? " latest" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
       `>` +
-      (entry.activity
-        ? `<span class="wiki-act-glyph ${esc(entry.activity.kind)}">${entry.activity.kind === "new" ? "+" : "~"}</span>`
-        : "") +
-      `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
+      // The type ICON, a fixed 14px lead column on EVERY row — Activity rows grow
+      // no extra column, so their titles line up with their neighbours'.
+      railTypeIconHtml(p.type) +
       // Title and chip share ONE box, `.wiki-list-mid`, and that box is what is
-      // left of the row after the dot, the pill, the ⚑ and the ★+date have taken
+      // left of the row after the icon, the pill, the ⚑ and the ★+date have taken
       // their intrinsic widths. It is a wrapper for two reasons, both measured:
       // it gives the pair a single floor the row can wrap against, and its own
       // width IS "the space left on this row", which is the only thing a CSS
@@ -1756,27 +1762,20 @@ function renderList(): void {
       // row it carries the derivation UNDER the name as well — this element is
       // two thirds of the row, and its own `title` is what the pointer lands on
       // there, so the row's attribute alone is unreachable over most of the row.
-      // The `▸` marking the newest plan of a series lives INSIDE this element,
-      // not beside it: the row is six flex items and `wiki-rail-width.ts` budgets
-      // every one of them, so a seventh would cost the title its floor and wrap
-      // the row. An inline span inside the line clamp costs the title's own text
-      // 9.3px — measured on mimir: a 5.3px glyph at 11px type plus its 4px
-      // margin — and costs the row's layout nothing. (The 11px this comment used
-      // to name is the font SIZE, not a width.)
+      // Marks inside it (✋) are inline spans, never row elements: the row is
+      // six flex items and `wiki-rail-width.ts` budgets every one of them.
       (pills
         ? // A row with issue pills: the title element becomes a flex pair — the
           // clamped text, and the pills in their own column beside it — so the
           // clamp can never hide them. Still ONE element of the row, for the
-          // `▸`'s reason. Rows without pills keep the plain markup.
+          // ✋'s reason. Rows without pills keep the plain markup.
           `<div class="wiki-list-title has-issues" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
           `<span class="wiki-list-title-text">` +
-          (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
           movesFlagHtml(p) +
           `${esc(displayTitleOf(p))}</span>` +
           pills +
           `</div>`
         : `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
-          (entry.latest ? `<span class="wiki-latest-glyph" aria-hidden="true">▸</span>` : "") +
           movesFlagHtml(p) +
           `${esc(displayTitleOf(p))}</div>`) +
       // The group CHIP: what is folded under this row, and the control that
@@ -1799,9 +1798,11 @@ function renderList(): void {
             // the compact form is the words moved to the hover, not dropped, and
             // `aria-label` is what makes that true for a screen reader as well
             // (a `display:none` span is out of the accessible name).
-            const hover = `${full} — ${why}`;
+            // The dot is drawn by CSS (`.newer::after`, absolute — no chip
+            // width), so its meaning lives here, on both attributes.
+            const hover = `${full} — ${why}` + (entry.childNewer ? " (something inside changed after this page)" : "");
             return (
-              `<button type="button" class="wiki-fold-chip${sizeClasses}${entry.folded ? " folded" : ""}"` +
+              `<button type="button" class="wiki-fold-chip${sizeClasses}${entry.folded ? " folded" : ""}${entry.childNewer ? " newer" : ""}"` +
               ` data-fold-key="${esc(normalizeFoldKey(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
               // Forced open because the reader is ON a page in this group: the same
               // inert control the section header renders, for the same reason.
@@ -1832,7 +1833,7 @@ function renderList(): void {
       // Unlike the ★ it is OUT OF FLOW while hidden (`wiki-page.ts`): the row's
       // six items are each budgeted by `wiki-rail-width.ts`, and a seventh took
       // the end slot to 90px and wrapped a plan row's title under its floor on
-      // CI's fonts — the `▸` rule, which costs the row's layout nothing.
+      // CI's fonts — out of flow, it costs the row's layout nothing.
       // Absent entirely on a read-only instance or root, and on a page no
       // series may claim (`canEditSeriesPage`: an `.html` attachment, an
       // `index.md`), where the only thing a click could produce is a refusal.
@@ -1843,6 +1844,7 @@ function renderList(): void {
       // The full date on the META element, never on the row — same reason the
       // derivation is repeated onto `.wiki-list-title` above. It carries the
       // signal's label verbatim, time and all, since a hover has room for it.
+      (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
       `<div class="wiki-list-meta${metaClass}"${dateTitle ? ` title="${esc(dateTitle)}"` : ""}>${esc(meta)}</div>` +
       `</div>` +
       `</div>`;
@@ -3138,7 +3140,7 @@ function projectHubChipHtml(m: WikiListing): string {
  *    carrying a `series_label:` rename the strip. The open page has to be one
  *    of the members, not merely carry the key — see the guard below.
  *  - **`continue at:` never names the open page.** The newest plan IS usually
- *    the page the reader has open (they got here from the `▸` row), and a link
+ *    the page the reader has open (they got here from the latest row), and a link
  *    back to it would be the one useless answer. It names the next-newest plan
  *    instead, and is omitted entirely when there is none. Its label is clipped
  *    to `SERIES_CONTINUE_MAX`, with the whole title one hover away — a wiki

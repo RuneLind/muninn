@@ -588,8 +588,8 @@ export type RailEntry =
       pinned: boolean;
       /** Set on Activity rows only: which signal put the page there, how old
        *  that signal is, and the sentence explaining the placement. The painter
-       *  draws the glyph, the date cell and the row's `title=` from it. */
-      activity?: Pick<ActivityRow, "kind" | "why" | "ageMs" | "worked">;
+       *  draws the NEW tag, the date cell and the row's `title=` from it. */
+      activity?: RailActivity;
       /**
        * Set on a PARENT row: the children this row stands for — the ones not
        * emitted anywhere else in this render, which is exactly what the chip
@@ -600,6 +600,10 @@ export type RailEntry =
       /** Set on a parent row: true when its group is CLOSED, so `children` are
        *  not emitted. The chip says how many are hidden either way. */
       folded?: boolean;
+      /** Set on a CLOSED parent row whose chip hides a child with a newer
+       *  Activity signal than the parent's own (`ActivityRow.newerChildren`).
+       *  The painter draws a dot on the chip and names it in the hover. */
+      childNewer?: true;
       /** Set on a parent row whose group is open because the OPEN PAGE is inside
        *  it. Its chip is not a toggle — flipping the stored key changes nothing
        *  on screen — so the painter renders it inert rather than dead. */
@@ -621,8 +625,9 @@ export type RailEntry =
       member?: { label: string; kind: RailGroupKind };
       /**
        * Set on the NEWEST PLAN of a series, wherever that page renders. The
-       * painter draws a `▸` glyph INSIDE the title (never a seventh row
-       * element — see `wiki-rail-width.ts`) and says why on hover.
+       * painter draws a dot on the series rail (or the row's left edge outside
+       * a series body) — a pseudo-element, never a row element — and says why
+       * on hover.
        *
        * Carried on the ROW rather than derived by the painter because the
        * decision is the group's (`RailGroup.latestRel`, computed over every
@@ -711,6 +716,19 @@ export type RailEntry =
       /** The members the closed series holds that no peek row shows. */
       hidden: number;
     };
+
+/** What an Activity row carries onto the rail. */
+export type RailActivity = Pick<ActivityRow, "kind" | "why" | "ageMs" | "worked" | "via">;
+
+function railActivityOf(row: ActivityRow): RailActivity {
+  return {
+    kind: row.kind,
+    why: row.why,
+    ageMs: row.ageMs,
+    ...(row.worked ? { worked: true as const } : {}),
+    ...(row.via ? { via: row.via } : {}),
+  };
+}
 
 export interface RailInput {
   /** The pages the current facets AND query select, already sorted — today's
@@ -918,10 +936,11 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  * safe.** A page the store paired (`parent`/`children`) renders under its parent
  * — or, in a closed group, not at all — and never twice:
  *
- *  - **Activity ranks PAGES, not groups.** A child Activity lifts is emitted
- *    there as itself, carrying its `child` info, and leaves its parent's chip
- *    count. A parent Activity lifts takes its open group with it, so a group is
- *    never split across two sections.
+ *  - **Activity ranks FAMILIES.** `rankActivity` rolls a ranked child up into
+ *    its parent's row (`via`), so a parent Activity lifts takes its group with
+ *    it — closed unless the reader opened that key — and a group is never split
+ *    across two sections. A raw child row handed in anyway (a caller that did
+ *    not roll up) is still emitted as itself, lifted, and leaves the chip.
  *  - **A closed group emits no child rows**, so `shown` — and with it
  *    `#wikiCount` — goes DOWN, and the chip says by how much. A count that
  *    disagreed with the rows on screen is the failure this whole module is
@@ -1054,7 +1073,7 @@ export function buildRail(input: RailInput): RailModel {
   const inSeries = (p: WikiListing): boolean =>
     groupOf.get(normalizeRel(p.relPath))?.kind === "series";
   /** The newest plan of each series, keyed on relPath — the rows that earn the
-   *  `▸`, wherever they render (a pinned one keeps it under `Pinned`). */
+   *  latest dot, wherever they render (a pinned one keeps it under `Pinned`). */
   const latestRels = new Set<string>();
   for (const g of seriesList) if (g.latestRel) latestRels.add(normalizeRel(g.latestRel));
 
@@ -1122,7 +1141,9 @@ export function buildRail(input: RailInput): RailModel {
     page: WikiListing,
     section: RailSection,
     extra: {
-      activity?: Pick<ActivityRow, "kind" | "why" | "ageMs" | "worked">;
+      activity?: RailActivity;
+      /** The ranking's `newerChildren` — read only to set `childNewer`. */
+      newerChildren?: readonly string[];
       /** True only on the recursive call below, i.e. the row really is drawn
        *  inside its parent's group. A row emitted anywhere else is `lifted`. */
       underParent?: boolean;
@@ -1138,6 +1159,10 @@ export function buildRail(input: RailInput): RailModel {
       (c) => !claimed.has(normalizeRel(c.relPath)) && !lifted.has(normalizeRel(c.relPath)),
     );
     const folded = mine.length > 0 ? !isOpen(key) : undefined;
+    const childNewer =
+      folded === true &&
+      !!extra.newerChildren?.length &&
+      mine.some((c) => extra.newerChildren!.includes(normalizeRel(c.relPath)));
     claim(page);
     entries.push({
       kind: "row",
@@ -1149,6 +1174,7 @@ export function buildRail(input: RailInput): RailModel {
       // pretend to toggle: this group is open because the reader is ON a page
       // inside it, and a click can only write a stored key with no visible effect.
       ...(mine.length ? { children: mine, folded, ...(forced.has(key) ? { forcedOpen: true } : {}) } : {}),
+      ...(childNewer ? { childNewer: true as const } : {}),
       ...(parent
         ? {
             child: { parent, pairedBy: page.pairedBy ?? "" },
@@ -1257,7 +1283,9 @@ export function buildRail(input: RailInput): RailModel {
         // The holder's date cell is the best signal that ranked it — its own, or
         // its child's when only the child ranked. First seen is best: rank order.
         if (!activityOf.has(holderKey)) activityOf.set(holderKey, row);
-        if (held.holder === row.page) selfRanked.add(holderKey);
+        // A row the roll-up earned through a child (`via`) is self-ranked only
+        // when the page's own score cleared the floor too (`ownRanked`).
+        if (held.holder === row.page && (!row.via || row.ownRanked)) selfRanked.add(holderKey);
         continue;
       }
       activityRows.push(row);
@@ -1422,7 +1450,7 @@ export function buildRail(input: RailInput): RailModel {
       const act = activityOf.get(normalizeRel(m.relPath));
       emitRow(m, section, {
         inGroup: g,
-        ...(act ? { activity: { kind: act.kind, why: act.why, ageMs: act.ageMs, ...(act.worked ? { worked: true } : {}) } } : {}),
+        ...(act ? { activity: railActivityOf(act), newerChildren: act.newerChildren } : {}),
       });
     };
     if (expanded) {
@@ -1456,9 +1484,7 @@ export function buildRail(input: RailInput): RailModel {
         // belt-and-braces re-test of the one-row invariant rather than the
         // mechanism — the mechanism is the lift.
         if (claimed.has(normalizeRel(row.page.relPath))) continue;
-        emitRow(row.page, "activity", {
-          activity: { kind: row.kind, why: row.why, ageMs: row.ageMs, ...(row.worked ? { worked: true } : {}) },
-        });
+        emitRow(row.page, "activity", { activity: railActivityOf(row), newerChildren: row.newerChildren });
       }
     }
     if (pinned.length) {

@@ -429,18 +429,18 @@ test.describe("Wiki: retired pages", () => {
   });
   // ── Fix round 1 ─────────────────────────────────────────────────────────
 
-  test("fix 1: the ▸ and `continue at:` skip a retired plan; the strip marks it", async ({ page }) => {
+  test("fix 1: the latest dot and `continue at:` skip a retired plan; the strip marks it", async ({ page }) => {
     await openRail(page, WIKI_ALPHA);
     await openAllFolds(page);
-    await expect(row(page, A2).locator(".wiki-latest-glyph")).toHaveCount(1);
-    // A3 is newer and retired: the ▸ is the newest plan that is NOT retired,
+    await expect(row(page, A2)).toHaveClass(/\blatest\b/);
+    // A3 is newer and retired: the dot is the newest plan that is NOT retired,
     // and its hover says so.
     await expect(row(page, A2)).toHaveAttribute("title", /newest plan in this series that is not retired/);
     await toggle(page).check();
     await openAllFolds(page);
     await expect(row(page, A3)).toBeVisible();
-    await expect(row(page, A3).locator(".wiki-latest-glyph")).toHaveCount(0);
-    await expect(row(page, A2).locator(".wiki-latest-glyph")).toHaveCount(1);
+    await expect(row(page, A3)).not.toHaveClass(/\blatest\b/);
+    await expect(row(page, A2)).toHaveClass(/\blatest\b/);
 
     await page.goto(`${BASE}/wiki?wiki=${WIKI_ALPHA}&relPath=${encodeURIComponent(A1)}`);
     await expect(page.locator(".wiki-series-go")).toHaveText("Alpha two");

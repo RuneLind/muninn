@@ -1159,3 +1159,138 @@ describe("rankActivity — a worked stamp the ranking may not use", () => {
     }
   });
 });
+
+/**
+ * The roll-up: an attachment child the rail folds never ranks as itself — its
+ * PARENT's row stands for the family, so Activity shows one row per family and
+ * the child folds under the parent's chip.
+ */
+describe("rankActivity — attachment children roll up into their parent", () => {
+  const child = (relPath: string, parent: string, over: Parameters<typeof page>[0]) =>
+    ({ ...page({ ...over, relPath }), parent, pairedBy: "link", type: "explainer" }) as WikiListing;
+  const oldParent = page({ relPath: "plans/pr.mdx", title: "PR review", createdDaysAgo: 60 });
+  const newKid = child("plans/pr-diagram.html", "plans/pr.mdx", { relPath: "", title: "Diagram", createdDaysAgo: 3 });
+
+  test("a ranked child is represented by its parent's row, naming the child", () => {
+    const rows = rankActivity([oldParent, newKid], wide, NOW);
+    expect(rows.map((r) => r.page.relPath)).toEqual(["plans/pr.mdx"]);
+    const r = rows[0]!;
+    expect(r.via?.relPath).toBe("plans/pr-diagram.html");
+    // The child's signal: its kind, its age and its derivation, prefixed by what it is.
+    expect(r.kind).toBe("new");
+    expect(r.ageMs).toBe(3 * DAY);
+    expect(r.why.startsWith('explainer "Diagram" created 3d ago')).toBe(true);
+  });
+
+  test("the roll-up happens BEFORE the rows cut: two children of one page cost one slot", () => {
+    const kid2 = child("plans/pr-proto.html", "plans/pr.mdx", { relPath: "", title: "Proto", createdDaysAgo: 3.5 });
+    const other = page({ relPath: "other.md", title: "Other", createdDaysAgo: 4 });
+    const rows = rankActivity([oldParent, newKid, kid2, other], { ...wide, rows: 2 }, NOW);
+    expect(rows.map((r) => r.page.relPath)).toEqual(["plans/pr.mdx", "other.md"]);
+  });
+
+  test("the parent's own signal wins when it is the stronger one — no `via`", () => {
+    const freshParent = page({ relPath: "plans/pr.mdx", title: "PR review", createdDaysAgo: 1 });
+    const olderKid = child("plans/pr-diagram.html", "plans/pr.mdx", { relPath: "", title: "Diagram", createdDaysAgo: 5 });
+    const [r] = rankActivity([freshParent, olderKid], wide, NOW);
+    expect(r!.page.relPath).toBe("plans/pr.mdx");
+    expect(r!.via).toBeUndefined();
+    expect(r!.ageMs).toBe(1 * DAY);
+    expect(r!.newerChildren).toBeUndefined();
+  });
+
+  test("`newerChildren` names the children whose own signal is newer than the parent's", () => {
+    const parent = page({ relPath: "plans/pr.mdx", title: "PR review", createdDaysAgo: 2 });
+    const newer = child("plans/a.html", "plans/pr.mdx", { relPath: "", title: "A", createdDaysAgo: 1 });
+    const older = child("plans/b.html", "plans/pr.mdx", { relPath: "", title: "B", createdDaysAgo: 4 });
+    const [r] = rankActivity([parent, newer, older], wide, NOW);
+    expect(r!.newerChildren).toEqual(["plans/a.html"]);
+  });
+
+  test("a child whose parent is not in the listing (a facet) or is retired keeps its own row", () => {
+    expect(relOrder([newKid])).toEqual(["plans/pr-diagram.html"]);
+    const culledParent = { ...oldParent, culled: true } as WikiListing;
+    expect(relOrder([culledParent, newKid])).toEqual(["plans/pr-diagram.html"]);
+  });
+
+  test("a parent that is itself a child pairs nothing — the rail's one-level rule", () => {
+    const grand = { ...oldParent, parent: "plans/top.mdx", pairedBy: "superseded" } as WikiListing;
+    const top = page({ relPath: "plans/top.mdx", title: "Top", createdDaysAgo: 90 });
+    expect(relOrder([top, grand, newKid]).sort()).toEqual(["plans/pr-diagram.html"]);
+  });
+});
+
+/**
+ * Fix round 1 for the roll-up: which signal "newer" compares, the tie rule, the
+ * floor on the children, and the two facts the rolled-up row must carry over.
+ */
+describe("rankActivity — roll-up, fix round 1", () => {
+  const kid = (relPath: string, over: Omit<Parameters<typeof page>[0], "relPath">) =>
+    ({ ...page({ ...over, relPath }), parent: "plans/p.mdx", pairedBy: "link", type: "explainer" }) as WikiListing;
+
+  test("`newer` compares against the parent's NEWEST signal, not the one that won", () => {
+    // Parent created 2d (wins: 0.76) and edited 0.2d ago; the child is 1d old.
+    const parent = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 2, updatedDaysAgo: 0.2 });
+    const [r] = rankActivity([parent, kid("plans/c.html", { title: "C", createdDaysAgo: 1 })], wide, NOW);
+    expect(r!.kind).toBe("new"); // the creation won, which is what the old test compared against
+    expect(r!.newerChildren).toBeUndefined();
+  });
+
+  test("a TIE goes to the parent's own row, and an equally old child is not newer", () => {
+    const parent = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 3 });
+    const [r] = rankActivity([parent, kid("plans/c.html", { title: "C", createdDaysAgo: 3 })], wide, NOW);
+    expect(r!.via).toBeUndefined();
+    expect(r!.newerChildren).toBeUndefined();
+  });
+
+  test("only children that clear the floor count: a below-floor child is never `newer`", () => {
+    const parent = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 90 });
+    const ranked = kid("plans/a.html", { title: "A", createdDaysAgo: 2 });
+    const dormant = kid("plans/b.html", { title: "B", createdDaysAgo: 40 });
+    const [r] = rankActivity([parent, ranked, dormant], wide, NOW);
+    expect(r!.via?.relPath).toBe("plans/a.html");
+    expect(r!.newerChildren).toEqual(["plans/a.html"]);
+  });
+
+  test("a child's WORKED change carries `worked` onto the rolled-up row", () => {
+    const parent = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 90 });
+    const child = kid("plans/c.html", { title: "C", createdDaysAgo: 40, updatedDaysAgo: 30, workedDaysAgo: 1 });
+    const gate: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1 };
+    const [r] = rankActivity([parent, child], wide, NOW, gate);
+    expect(r!.via?.relPath).toBe("plans/c.html");
+    expect(r!.kind).toBe("changed");
+    expect(r!.worked).toBe(true);
+  });
+
+  test("`ownRanked` says the parent cleared the floor on its own", () => {
+    const fresh = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 4 });
+    const old = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 90 });
+    const child = kid("plans/c.html", { title: "C", createdDaysAgo: 1 });
+    const [above] = rankActivity([fresh, child], wide, NOW);
+    expect(above!.via?.relPath).toBe("plans/c.html");
+    expect(above!.ownRanked).toBe(true);
+    const [below] = rankActivity([old, child], wide, NOW);
+    expect(below!.ownRanked).toBeUndefined();
+  });
+});
+
+/** Fix round 2: the parent's NEWEST signal, through both branches of its gate. */
+describe("rankActivity — the parent's newest signal", () => {
+  const kid = (relPath: string, createdDaysAgo: number) =>
+    ({ ...page({ relPath, title: relPath, createdDaysAgo }), parent: "plans/p.mdx", pairedBy: "link", type: "explainer" }) as WikiListing;
+
+  test("an update that is only the git floor (not an edit) is not the newest signal — the creation is", () => {
+    // Created 10d (birthtime), git floor 2d with no touch: the update is kind "added".
+    const parent = page({ relPath: "plans/p.mdx", title: "P", birthtimeDaysAgo: 10, createdDaysAgo: 2, updatedDaysAgo: null });
+    const [r] = rankActivity([parent, kid("plans/c.html", 5)], wide, NOW);
+    expect(r!.newerChildren).toEqual(["plans/c.html"]);
+  });
+
+  test("a DEMOTED parent's newest signal is its worked date, not the set-aside git update", () => {
+    // Git touched 3d, a session last wrote it 10d ago: the open gate demotes it to 10d.
+    const parent = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 40, updatedDaysAgo: 3, workedDaysAgo: 10 });
+    const gate: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1, asOfMs: NOW };
+    const [r] = rankActivity([parent, kid("plans/c.html", 6)], wide, NOW, gate);
+    expect(r!.newerChildren).toEqual(["plans/c.html"]);
+  });
+});

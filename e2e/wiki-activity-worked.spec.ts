@@ -196,13 +196,14 @@ async function makeRoot(name: string): Promise<void> {
 const activityRows = (page: Page) => page.locator('.wiki-list-item[data-section="activity"]');
 
 /** What a reader sees of each Activity row, in order: which page, the hover
- *  derivation, the glyph's kind and the date cell. */
+ *  derivation, its kind (the NEW tag, or none) and the date cell. */
 const activitySnapshot = (page: Page) =>
   activityRows(page).evaluateAll((els) =>
     els.map((e) => ({
       rel: e.getAttribute("data-relpath") ?? "",
       why: e.getAttribute("title") ?? "",
-      kind: (e.querySelector(".wiki-act-glyph")?.className ?? "").replace("wiki-act-glyph ", ""),
+      // A NEW row carries the NEW tag; a changed row carries no mark.
+      kind: e.querySelector(".wiki-new-tag") ? "new" : "changed",
       meta: e.querySelector(".wiki-list-meta")?.textContent ?? "",
     })),
   );

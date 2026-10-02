@@ -28,7 +28,7 @@ export const RAIL_WIDTH_KEY_STEP = 16;
 /**
  * The page title's FLOOR inside a rail row, in px — the one number the row's
  * other rules are sized against, and the reason they exist. A row is a flex
- * line of six things (type dot · title · group chip · status pill · ⚑ · ★+date)
+ * line of six things (type icon · title · group chip · status pill · ⚑ · ★+date)
  * and only the title is elastic, so before this floor existed the title was
  * whatever the others left: measured at the 260px rail on a row carrying all
  * six, 10.0px — a named page with no name on it, and a hover target Playwright

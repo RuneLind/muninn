@@ -40,6 +40,7 @@
  * wiki can override them in its `.wiki-reader.json` `activity` block.
  */
 
+import { normalizeRel as relKey } from "./wiki-nav.ts";
 import {
   displayTitleOf,
   isImplausibleFutureDate,
@@ -168,6 +169,50 @@ export interface ActivityRow {
    *  so the row's date cell names the worked day rather than the update stamp.
    *  Absent — not `false` — so a closed gate's rows are the pre-gate objects. */
   worked?: true;
+  /** Set on a PARENT row whose placement an attachment child earned (the
+   *  roll-up in {@link rankActivity}): `kind`, `ageMs`, `worked` and `why` are
+   *  that child's, and the date cell derives from it. */
+  via?: WikiListing;
+  /** Set beside `via` when the parent's OWN score also cleared
+   *  {@link ACTIVITY_MIN_SCORE}: the page ranked itself, a child just ranked
+   *  higher. `buildRail` treats such a series member as self-ranked. */
+  ownRanked?: true;
+  /** Normalized relPaths of the attachment children whose own score clears
+   *  {@link ACTIVITY_MIN_SCORE} and whose NEWEST signal (creation, or a change
+   *  under the row's worked substitution) is younger than the parent's newest —
+   *  the fold chip's "something newer inside" dot. Absent when none. */
+  newerChildren?: string[];
+}
+
+/** Each scored row's newest signal (ms): the creation, or the change stamp when
+ *  the update is a real edit — the same worked substitution the score uses. */
+const newestOf = new WeakMap<ActivityRow, number>();
+
+/**
+ * child key → its parent page, for the pairs the rail FOLDS: the parent present
+ * in `pages`, not itself a child there (`buildRail`'s one-level rule), and live
+ * — a culled parent ranks nowhere, so its child keeps a row of its own.
+ */
+function foldParents(pages: readonly WikiListing[]): Map<string, WikiListing> {
+  const byRel = new Map<string, WikiListing>();
+  for (const p of pages) byRel.set(relKey(p.relPath), p);
+  const parentPage = (p: WikiListing): WikiListing | undefined => {
+    if (!p.parent) return undefined;
+    const parent = byRel.get(relKey(p.parent));
+    return parent && parent !== p ? parent : undefined;
+  };
+  const out = new Map<string, WikiListing>();
+  for (const p of pages) {
+    const parent = parentPage(p);
+    if (!parent || parentPage(parent) || parent.culled || isMetaPage(parent)) continue;
+    out.set(relKey(p.relPath), parent);
+  }
+  return out;
+}
+
+/** What a rolled-up row calls the child that earned it, in its `why`. */
+function childNoun(child: WikiListing): string {
+  return child.pairedBy === "superseded" ? "superseded page" : child.type || "attachment";
 }
 
 const PERCENT_KEYS = ["agePenalty", "hubPenalty", "planBoost", "changedWeight", "workedGate"] as const;
@@ -497,6 +542,12 @@ export function workedGateFor(
  *
  * `gate` is the payload's {@link workedGateFor} verdict. Absent or closed ⇒ the
  * ranking is the pre-gate one exactly.
+ *
+ * **One row per family.** An attachment child the rail folds (`foldParents`)
+ * never ranks as itself: its PARENT's row stands for it, scored as the better of
+ * the parent's own row and its children's, and carrying the winner's kind, age
+ * and `why` (`via` names the child). Rolled up BEFORE the cut, so the section
+ * still holds `weights.rows` families.
  */
 export function rankActivity(
   pages: readonly WikiListing[],
@@ -505,11 +556,51 @@ export function rankActivity(
   gate?: WorkedGate | null,
 ): ActivityRow[] {
   const substitute = gate?.open === true ? gate : null;
-  const rows: ActivityRow[] = [];
+  const parents = foldParents(pages);
+  /** Every live page's own row, floor or not — a parent's own signal is what
+   *  its children's are compared against even when it ranks on theirs alone. */
+  const own = new Map<string, ActivityRow>();
+  const kids = new Map<string, ActivityRow[]>();
   for (const page of pages) {
     if (isMetaPage(page) || page.culled) continue;
     const row = scorePage(page, weights, now, substitute);
-    if (row.score >= ACTIVITY_MIN_SCORE) rows.push(row);
+    const key = relKey(page.relPath);
+    const parent = parents.get(key);
+    if (!parent) {
+      own.set(key, row);
+      continue;
+    }
+    const pk = relKey(parent.relPath);
+    const list = kids.get(pk);
+    if (list) list.push(row);
+    else kids.set(pk, [row]);
+  }
+  const rows: ActivityRow[] = [];
+  for (const [key, self] of own) {
+    const children = (kids.get(key) ?? []).filter((r) => r.score >= ACTIVITY_MIN_SCORE);
+    // Ties go to the parent's own row: "the page changed" is the plainer claim.
+    let best = self;
+    for (const c of children) if (c.score > best.score) best = c;
+    if (best.score < ACTIVITY_MIN_SCORE) continue;
+    const selfNewest = newestOf.get(self) ?? 0;
+    const newer = children
+      .filter((c) => (newestOf.get(c) ?? 0) > selfNewest)
+      .map((c) => relKey(c.page.relPath));
+    const row: ActivityRow =
+      best === self
+        ? self
+        : {
+            page: self.page,
+            kind: best.kind,
+            score: best.score,
+            why: `${childNoun(best.page)} "${displayTitleOf(best.page)}" ${best.why}`,
+            ageMs: best.ageMs,
+            ...(best.worked ? { worked: true as const } : {}),
+            via: best.page,
+            ...(self.score >= ACTIVITY_MIN_SCORE ? { ownRanked: true as const } : {}),
+          };
+    if (newer.length) row.newerChildren = newer;
+    rows.push(row);
   }
   rows.sort((a, b) => b.score - a.score || displayTitleOf(a.page).localeCompare(displayTitleOf(b.page)));
   return rows.slice(0, weights.rows);
@@ -662,5 +753,6 @@ function scorePage(
   }
   const row: ActivityRow = { page, kind, score, why, ageMs: kind === "new" ? now - createdMs : now - changeMs };
   if (worked && kind === "changed") row.worked = true;
+  newestOf.set(row, Math.max(createdMs, isEdit ? changeMs : 0));
   return row;
 }

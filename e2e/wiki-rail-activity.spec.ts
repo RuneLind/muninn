@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { contrastOf, paintedContrast } from "./contrast.ts";
 
 const PORT = e2ePort("wiki-rail-activity");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -64,9 +65,16 @@ const PLAN = "plans/young-plan.md";
 const BRAND_NEW = "notes/brand-new.md";
 const FRESH = [0, 1, 2, 3].map((i) => `notes/fresh-${i}.md`);
 const LINKERS = [1, 2, 3, 4, 5, 6].map((i) => `concepts/link-${i}.md`);
+/** An old review page and the explainer it EMBEDS (pairing rule 3). Only the
+ *  explainer is recent, so Activity ranks the family through it — and must draw
+ *  the PARENT, with the explainer folded under its closed chip. */
+const REVIEW = "notes/review.mdx";
+const REVIEW_EMBED = "notes/review-belop.html";
 
 /** Every page of the git wiki, so a count assertion says what it means. */
-const ALL_PAGES = 1 + 1 + 1 + 1 + FRESH.length + LINKERS.length;
+const ALL_PAGES = 1 + 1 + 1 + 1 + FRESH.length + LINKERS.length + 2;
+/** The rows on screen with every fold at its default: the embed is folded. */
+const CLOSED_ROWS = ALL_PAGES - 1;
 /** The default `rows`, which this wiki does not override. */
 const DEFAULT_ROWS = 6;
 
@@ -140,6 +148,14 @@ test.beforeAll(async () => {
     await write(rel, md(`Linker ${rel}`, "See [[hub]] for the rest."));
   }
   commit(now - 60 * DAY, "the hub and its linkers");
+
+  // T-40d — a review page; T-1.5d — the explainer it embeds. 1.5 days puts the
+  // explainer's creation (0.81) between the plan (0.84) and the fresh pages
+  // (0.76), so the family takes the third Activity slot and one fresh page drops.
+  await write(REVIEW, md("PR review", '<Embed src="./review-belop.html" title="Beløp" />'));
+  commit(now - 40 * DAY, "the review");
+  await write(REVIEW_EMBED, "<!doctype html><html><head><title>Beløp til fakturering</title></head><body>diagram</body></html>\n");
+  commit(now - 1.5 * DAY, "the review's explainer");
 
   // T-3d — a plan is created.
   await write(PLAN, md("Young plan", "First draft.", ["plan_status: in-flight"]));
@@ -282,25 +298,27 @@ test.describe("Wiki rail: Activity", () => {
 
     const activity = await relPathsIn(page, "activity");
     expect(activity).toHaveLength(DEFAULT_ROWS);
-    expect(activity.slice(0, 2)).toEqual([BRAND_NEW, PLAN]);
+    expect(activity.slice(0, 3)).toEqual([BRAND_NEW, PLAN, REVIEW]);
 
     // The old hub was touched TODAY and is still not news: 60 days old, six
     // pages linking to it. That is the whole point of the ranking.
     expect(activity).not.toContain(HUB);
     // It is in the listing below, exactly once, like every other page.
     await expect(page.locator(`.wiki-list-item[data-relpath="${HUB}"]`)).toHaveCount(1);
-    await expect(page.locator(".wiki-list-item")).toHaveCount(ALL_PAGES);
-    await expect(page.locator("#wikiCount")).toHaveText(`${ALL_PAGES} / ${ALL_PAGES}`);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
+    await expect(page.locator("#wikiCount")).toHaveText(`${CLOSED_ROWS} / ${ALL_PAGES}`);
   });
 
-  test("the glyph says which signal placed the row, and the title says why", async ({ page }) => {
+  test("a NEW row carries a NEW tag in its date cell, a changed row no mark, and the title says why", async ({ page }) => {
     await openRail(page);
     const newRow = page.locator(`.wiki-list-item[data-relpath="${BRAND_NEW}"]`);
-    await expect(newRow.locator(".wiki-act-glyph.new")).toHaveText("+");
+    await expect(newRow.locator(".wiki-list-end .wiki-new-tag")).toHaveText("NEW");
+    await expect(newRow.locator(".wiki-list-meta")).toHaveClass(/\bnew\b/);
     await expect(newRow).toHaveAttribute("title", /^created /);
 
     const changedRow = page.locator(`.wiki-list-item[data-relpath="${PLAN}"]`);
-    await expect(changedRow.locator(".wiki-act-glyph.changed")).toHaveText("~");
+    await expect(changedRow.locator(".wiki-new-tag")).toHaveCount(0);
+    await expect(changedRow.locator(".wiki-list-meta")).not.toHaveClass(/\bnew\b/);
     await expect(changedRow).toHaveAttribute("title", /^changed .* created .* hub ×/);
 
     // The TITLE element is two thirds of the row and carries a `title=` of its
@@ -311,38 +329,101 @@ test.describe("Wiki rail: Activity", () => {
       /^Young plan\nchanged .* hub ×/s,
     );
 
-    // A listing row carries no glyph — the mark means "this is in Activity".
-    await expect(
-      page.locator(`.wiki-list-item[data-relpath="${HUB}"] .wiki-act-glyph`),
-    ).toHaveCount(0);
+    // A listing row carries no tag — the mark means "new, in Activity".
+    await expect(page.locator(`.wiki-list-item[data-relpath="${HUB}"] .wiki-new-tag`)).toHaveCount(0);
+    // The old +/~ glyph column is gone from every row.
+    await expect(page.locator(".wiki-act-glyph")).toHaveCount(0);
 
     // The date cell is the age of the winning signal, relative.
     await expect(newRow.locator(".wiki-list-meta")).toHaveText("now");
     await expect(changedRow.locator(".wiki-list-meta")).toHaveText("1d");
-
-    // The glyphs resolve to the TOKENS they are declared with, compared against
-    // the same tokens read off a probe in this document — a literal colour here
-    // would pass against any theme and pin nothing. `--tok-str` rather than
-    // `--status-success` is a contrast decision (see the CSS comment); a revert
-    // to the plain status green has to fail something. The last line holds
-    // because Playwright's default colorScheme is LIGHT, which is the theme the
-    // swap was made for; in dark the two tokens are the same value.
-    const token = (name: string) =>
-      page.evaluate((n) => {
-        const probe = document.createElement("span");
-        probe.style.color = `var(${n})`;
-        document.body.appendChild(probe);
-        const c = getComputedStyle(probe).color;
-        probe.remove();
-        return c;
-      }, name);
-    await expect(newRow.locator(".wiki-act-glyph.new")).toHaveCSS("color", await token("--tok-str"));
-    await expect(changedRow.locator(".wiki-act-glyph.changed")).toHaveCSS(
-      "color",
-      await token("--accent-light"),
-    );
-    expect(await token("--tok-str")).not.toBe(await token("--status-success"));
   });
+
+  test("an Activity-ranked explainer folds under its parent's CLOSED chip, not as its own row", async ({ page }) => {
+    await openRail(page);
+    const parent = page.locator(`.wiki-list-item[data-relpath="${REVIEW}"]`);
+    await expect(parent).toHaveAttribute("data-section", "activity");
+    // Not a row at all while the chip is closed — never a loose Activity row.
+    await expect(page.locator(`.wiki-list-item[data-relpath="${REVIEW_EMBED}"]`)).toHaveCount(0);
+    const chip = parent.locator(".wiki-fold-chip");
+    await expect(chip).toHaveAttribute("aria-expanded", "false");
+    await expect(chip).toHaveText(/1 attached/);
+    // Something inside is newer than the page: the chip says so.
+    await expect(chip).toHaveClass(/\bnewer\b/);
+    await expect(chip).toHaveAttribute("aria-label", /changed after this page/);
+    // The row's age and hover are the explainer's: it is what earned the slot.
+    await expect(parent.locator(".wiki-list-meta")).toHaveText("2d");
+    await expect(parent).toHaveAttribute("title", /^explainer "Beløp til fakturering" created /);
+    // The parent is not new, so it carries no NEW tag.
+    await expect(parent.locator(".wiki-new-tag")).toHaveCount(0);
+
+    await chip.click();
+    const child = page.locator(`.wiki-list-item[data-relpath="${REVIEW_EMBED}"]`);
+    await expect(child).toHaveCount(1);
+    await expect(child).toHaveAttribute("data-section", "activity");
+    await expect(child).toHaveClass(/\bchild\b/);
+    await expect(parent.locator(".wiki-fold-chip")).not.toHaveClass(/\bnewer\b/);
+  });
+
+  test("every rail row leads with the same 14px type icon, so titles line up", async ({ page }) => {
+    await openRail(page);
+    // Top-level rows only (a `.child` is indented on purpose): Activity rows and
+    // listing rows must start their titles at the same x — the fake indent the
+    // old +/~ column put on Activity rows alone.
+    const lefts = await page.locator(".wiki-list-item:not(.child):not(.member)").evaluateAll((els) =>
+      els.map((el) => {
+        const icon = el.querySelector(".wiki-type-icon") as SVGElement | null;
+        const title = el.querySelector(".wiki-list-title") as HTMLElement;
+        return {
+          section: el.getAttribute("data-section"),
+          icon: icon ? Math.round(icon.getBoundingClientRect().width) : 0,
+          title: Math.round(title.getBoundingClientRect().left),
+        };
+      }),
+    );
+    expect(new Set(lefts.map((l) => l.section))).toEqual(new Set(["activity", "all"]));
+    expect(lefts.every((l) => l.icon === 14)).toBe(true);
+    expect(new Set(lefts.map((l) => l.title)).size).toBe(1);
+    // The icon names its type for a hover and a screen reader.
+    await expect(page.locator(`.wiki-list-item[data-relpath="${PLAN}"] .wiki-type-icon title`)).toHaveText("plan");
+    await expect(page.locator(".wiki-list-item .wiki-type-dot")).toHaveCount(0);
+  });
+
+  // The NEW tag and the green age, measured against what paints behind them in
+  // BOTH themes, and resolved to `--tok-str` on a body probe — `--status-success`
+  // is 3.30:1 in the light theme (see the CSS comment), so a revert must fail.
+  for (const scheme of ["light", "dark"] as const) {
+    test(`the NEW tag and its age are --tok-str and legible in the ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openRail(page);
+      const token = (name: string) =>
+        page.evaluate((n) => {
+          const probe = document.createElement("span");
+          probe.style.color = `var(${n})`;
+          document.body.appendChild(probe);
+          const c = getComputedStyle(probe).color;
+          probe.remove();
+          return c;
+        }, name);
+      const newRow = page.locator(`.wiki-list-item[data-relpath="${BRAND_NEW}"]`);
+      const tag = newRow.locator(".wiki-new-tag");
+      const age = newRow.locator(".wiki-list-meta");
+      await expect(tag).toHaveCSS("color", await token("--tok-str"));
+      await expect(age).toHaveCSS("color", await token("--tok-str"));
+      expect(await contrastOf(tag)).toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(age)).toBeGreaterThanOrEqual(4.5);
+      // …and in the state a reader points at it: the row hovered.
+      await newRow.locator(".wiki-list-title").hover();
+      expect(await contrastOf(tag)).toBeGreaterThanOrEqual(4.5);
+      // …and on the ACTIVE row, whose 14% accent tint is translucent: composited.
+      await newRow.locator(".wiki-list-title").click();
+      await expect(newRow).toHaveClass(/\bactive\b/);
+      await page.mouse.move(0, 0);
+      expect(await paintedContrast(tag)).toBeGreaterThanOrEqual(4.5);
+      expect(await paintedContrast(age)).toBeGreaterThanOrEqual(4.5);
+      if (scheme === "light") expect(await token("--tok-str")).not.toBe(await token("--status-success"));
+    });
+  }
 
   test("a query hides Activity, exactly as it hides Pinned", async ({ page }) => {
     await openRail(page);
