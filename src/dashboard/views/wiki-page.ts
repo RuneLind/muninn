@@ -699,7 +699,7 @@ export async function renderWikiPage(opts?: {
     /* ✋ = a NextMoves step waiting on the reader: an inline mark inside the
        title, never a row element (the row's six items are each budgeted). */
     .wiki-moves-flag { margin-right: 4px; font-size: 11px; }
-    /* Issue pills: a COLUMN of their own inside .wiki-list-title, never inside
+    /* Issue mark (one ticket glyph + count per row): a COLUMN of its own inside .wiki-list-title, never inside
        the clamp — inline, a pill run wrapped to a third line and was clipped on
        80 of 96 keyed rows of a real wiki. The title element stays ONE row item
        (a seventh flex item would cost the title its floor).
@@ -711,8 +711,7 @@ export async function renderWikiPage(opts?: {
     }
     /* The text's own floor is what decides where the column goes: beside the
        text while the text keeps RAIL_TITLE_MIN, under it (flush right)
-       otherwise — so a pill row keeps the line structure of the same row
-       without pills. */
+       otherwise. */
     .wiki-list-title-text {
       flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -723,7 +722,7 @@ export async function renderWikiPage(opts?: {
       flex: 0 1 auto; max-width: ${RAIL_ISSUE_PILLS_COL}px; margin: 1px 0 0 auto;
     }
     .wiki-issue-pill {
-      display: inline-block; padding: 0 4px;
+      display: inline-flex; align-items: center; gap: 2px; padding: 0 3px;
       border: 1px solid var(--text-muted); border-radius: 3px;
       font-family: ui-monospace, Menlo, monospace; font-size: 9.5px; line-height: 13px;
       color: var(--text-muted);
@@ -733,7 +732,7 @@ export async function renderWikiPage(opts?: {
        --text-muted measures 4.42:1 and 4.24:1 in the light theme. */
     .wiki-list-item:hover .wiki-issue-pill,
     .wiki-list-item.active .wiki-issue-pill { color: var(--text-secondary); }
-    .wiki-issue-pill.more { border-color: transparent; padding: 0 2px; }
+    .wiki-issue-glyph { flex-shrink: 0; }
     .wiki-chip-row-label {
       align-self: center; font-size: 11px; color: var(--text-muted); margin-right: 2px;
     }

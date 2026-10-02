@@ -78,11 +78,10 @@ export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 62;
 export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + 76;
 
 /**
- * The issue-pill column's `max-width`: one `DEMO-1234`-sized pill, or two short
- * ones, per line. The column sits beside the title text while the text keeps
- * `RAIL_TITLE_MIN`, and wraps UNDER it otherwise, so a pill row takes no reserve
- * in the floors or breakpoints above: it breaks lines exactly where the same
- * row without pills does. The column shrinks to its widest pill before that.
+ * The issue-mark column's `max-width` — a safety cap sized for the key pills
+ * the glyph mark replaced (~20px with a count, so it never binds). The column
+ * sits beside the title text while the text keeps `RAIL_TITLE_MIN`, and wraps
+ * UNDER it otherwise, so it takes no reserve in the floors or breakpoints above.
  */
 export const RAIL_ISSUE_PILLS_COL = 92;
 

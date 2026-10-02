@@ -376,16 +376,19 @@ test.describe("Wiki reader: tracker links", () => {
 
     // Stamped is solid; everything else dashed.
     await expect(pills(page, STAMPED)).toHaveClass("wiki-issue-pill");
-    await expect(pills(page, SCALAR)).toHaveCount(2);
-    for (const p of await pills(page, SCALAR).all()) await expect(p).not.toHaveClass(/inferred/);
+    // One mark per row, whatever the key count; the count is painted beside the glyph.
+    await expect(pills(page, SCALAR)).toHaveCount(1);
+    await expect(pills(page, SCALAR)).not.toHaveClass(/inferred/);
+    await expect(pills(page, SCALAR)).toHaveText("2");
     const dashed = await pills(page, INFERRED).first().evaluate((el) => getComputedStyle(el).borderTopStyle);
     expect(dashed).toBe("dashed");
     expect(await pills(page, STAMPED).evaluate((el) => getComputedStyle(el).borderTopStyle)).toBe("solid");
 
-    // The anchor carries five non-mention keys: two pills and a +3, strongest first.
-    await expect(pills(page, ANCHOR)).toHaveCount(2);
-    await expect(pills(page, ANCHOR).first()).toHaveAttribute("data-issue-rel", "created");
-    await expect(row(page, ANCHOR).locator(".wiki-issue-pill.more")).toHaveText("+3");
+    // The anchor carries five non-mention keys: one mark counting 5, strongest first.
+    await expect(pills(page, ANCHOR)).toHaveCount(1);
+    await expect(pills(page, ANCHOR)).toHaveAttribute("data-issue-rel", "created");
+    await expect(pills(page, ANCHOR)).toHaveText("5");
+    expect((await pills(page, ANCHOR).getAttribute("data-issue-keys"))!.split(" ")).toHaveLength(5);
 
     // The pills live INSIDE the title element: the row grows no child.
     const counts = await page.evaluate(
@@ -459,7 +462,7 @@ test.describe("Wiki reader: tracker links", () => {
     await page.locator("#wikiFilters summary").click();
     await page.locator("#jiraChips [data-jira-more]").click();
     for (const bad of ["ORA-01407", "SAK-4711", "DEMO-122", "DEMO-190", "DEMO-199"]) {
-      await expect(page.locator(`[data-issue-key="${bad}"]`)).toHaveCount(0);
+      await expect(page.locator(`[data-issue-key="${bad}"], [data-issue-keys~="${bad}"]`)).toHaveCount(0);
       await expect(page.locator(`#jiraChips [data-jira="${bad}"]`)).toHaveCount(0);
     }
   });
@@ -502,12 +505,7 @@ test.describe("Wiki reader: tracker links", () => {
         const longText = row(page, LONG).locator(".wiki-list-title-text");
         expect(await longText.evaluate((el) => el.scrollHeight > el.clientHeight), where).toBe(true);
         expect(await clippedPillRows(page), where).toEqual([]);
-        if (width === 260) {
-          // The long key really wraps after its dash there — the case is only about a key that does.
-          const lines = await pills(page, LONG_KEY).evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
-          expect(lines, where).toBe(2);
-        }
-        // The pill is text a reader has to read.
+        // The mark's glyph and count paint in the pill's text colour.
         expect(await contrastOf(pills(page, STAMPED)), where).toBeGreaterThanOrEqual(4.5);
         // No sideways scroll bought by the pill column.
         const o = await page.locator("#wikiList").evaluate((el) => el.scrollWidth - el.clientWidth);
@@ -534,16 +532,23 @@ test.describe("Wiki reader: tracker links", () => {
     }
   });
 
-  test("pills: a title that fits two lines without its pill shows no ellipsis at the 260px rail", async ({ page }) => {
-    await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, 260] as const);
+  // The mark is a glyph, not a key: it sits BESIDE the title on its first line
+  // and costs the title at most its own width, at the narrowest rail too. (The
+  // old key pill wrapped under the title there; the mark trades that extra line
+  // for ~20px of title width.)
+  test("pills: the mark sits beside the title's first line and takes at most 24px, at 260 and 300 px", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 1400 });
-    await openReader(page, `wiki=${WIKI}`);
-    const text = row(page, TWO_LINE).locator(".wiki-list-title-text");
-    const fit = await text.evaluate((el) => ({
-      lines: Math.round(el.scrollHeight / parseFloat(getComputedStyle(el).lineHeight)),
-      clamped: el.scrollHeight > el.clientHeight + 1,
-    }));
-    expect(fit).toEqual({ lines: 2, clamped: false });
+    for (const width of [260, 300]) {
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
+      await openReader(page, `wiki=${WIKI}`);
+      const geo = await row(page, TWO_LINE).evaluate((el) => {
+        const t = el.querySelector(".wiki-list-title-text")!.getBoundingClientRect();
+        const m = el.querySelector(".wiki-issue-pills")!.getBoundingClientRect();
+        return { beside: m.left >= t.right - 0.5 && m.top < t.top + 4, width: m.width };
+      });
+      expect(geo.beside, `${width}px`).toBe(true);
+      expect(geo.width, `${width}px`).toBeLessThanOrEqual(24);
+    }
   });
 
   for (const scheme of ["light", "dark"] as const) {
@@ -581,12 +586,11 @@ test.describe("Wiki reader: tracker links", () => {
     await expect(page.locator("#jiraChips [data-jira-more]")).toHaveCount(0);
   });
 
-  test("pills: named with the tracker, +N carries its keys in the accessible name, a click opens the row", async ({ page }) => {
+  test("pills: named with the tracker, every key in the accessible name, a click opens the row", async ({ page }) => {
     await openReader(page, `wiki=${WIKI}`);
-    await expect(pills(page, INFERRED).first()).toHaveAttribute("title", "Jira DEMO-130 — inferred (title)");
+    await expect(pills(page, INFERRED).first()).toHaveAttribute("title", "Jira DEMO-130 — inferred (title)\nJira DEMO-131 — inferred (title)");
     await expect(pills(page, STAMPED)).toHaveAttribute("title", "Jira DEMO-180 — stamped");
-    const plus = row(page, ANCHOR).locator(".wiki-issue-pill.more");
-    await expect(plus).toHaveAttribute("aria-label", /^3 more: Jira DEMO-/);
+    await expect(pills(page, ANCHOR)).toHaveAttribute("aria-label", /^Jira DEMO-\d+ — inferred \(created here[^;]*(; Jira DEMO-\d+ — [^;]+){4}$/);
     await pills(page, STAMPED).click();
     await expect(page.locator(".wiki-bc-cur")).toContainText("Stemplet");
   });
