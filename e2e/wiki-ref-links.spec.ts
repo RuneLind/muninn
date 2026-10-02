@@ -49,7 +49,7 @@ const PAGE = [
   "",
   "Fag sa nei (D4), se Q-2. Ikke en lenke: `D4`, «vedtak fattet i Melosys», og D9.",
   "",
-  "Se også [Runde 3](#runde-3--2026-08-18-kveld). Tvetydig: «Om spørringen» og D1. Ikke i artikkelen: [lista](#wikiList).",
+  "Se også [Runde 3](#runde-3--2026-08-18-kveld). Tvetydig: «Om spørringen» og D1. Ikke i artikkelen: [lista](#wikiList). Se «Med fold».",
   "",
   "| Spørsmål | Beslutning |",
   "|---|---|",
@@ -102,6 +102,20 @@ const PAGE = [
   "- **D1** — En annen logg med samme id.",
   "",
   "</DecisionLog>",
+  "",
+  "### Om spørringen",
+  "",
+  "Overskriften tar ikke tittelen to folds deler.",
+  "",
+  "## Med fold",
+  "",
+  '<Fold title="Innfelt">',
+  "",
+  "Skjult fold-innhold.",
+  "",
+  "</Fold>",
+  "",
+  "Prosa etter folden.",
   "",
   "## Notater",
   "",
@@ -200,6 +214,7 @@ test.describe("Wiki reader: in-page references", () => {
       "D4→d4",
       "Q-2→q-2",
       "Runde 3→runde-3--2026-08-18-kveld",
+      "«Med fold»→med-fold",
       "D4→d4",
       "S1→s1",
       "Q-2→q-2",
@@ -289,6 +304,11 @@ test.describe("Wiki reader: in-page references", () => {
     await expect(fold).toHaveAttribute("open", "");
     await expect(fold).toBeInViewport();
     await expect(fold).toHaveClass(/wiki-hash-flash/);
+    // A descendant's animationend bubbles up; only the fold's own ends the flash.
+    await fold.locator(".fold-body").evaluate((el) =>
+      el.dispatchEvent(new AnimationEvent("animationend", { bubbles: true, animationName: "x" })),
+    );
+    await expect(fold).toHaveClass(/wiki-hash-flash/);
     expectClean(seen);
   });
 
@@ -371,6 +391,27 @@ test.describe("Wiki reader: in-page references", () => {
     await expect(page.locator(".wiki-ref-peek")).toHaveCount(0);
     await expect(last).toBeFocused();
     expectClean(seen);
+  });
+
+  test("a heading's peek shows its prose, not a fold that opens its section", async ({ page }) => {
+    const seen = await openPage(page);
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "«Med fold»" }).hover();
+    const body = page.locator(".wiki-ref-peek .wiki-ref-peek-body");
+    await expect(body).toContainText("Prosa etter folden.");
+    await expect(body).not.toContainText("Skjult fold-innhold.");
+    await expect(body.locator("details")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("chat keeps a DecisionLog chip as a span with its pill", async ({ page }) => {
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(() => typeof (globalThis as any).sanitizeHtml === "function");
+    const html = await page.evaluate(() => {
+      const g = globalThis as any;
+      return g.sanitizeHtml(g.formatWebHtml("<DecisionLog>\n\n- **D4** — Ingen fakturering.\n\n</DecisionLog>"), true);
+    });
+    expect(html).toContain('<span class="dl-id">D4</span>');
+    expect(html).not.toContain("<a");
   });
 
   test("chat renders an in-page link as plain text, not a dead anchor", async ({ page }) => {

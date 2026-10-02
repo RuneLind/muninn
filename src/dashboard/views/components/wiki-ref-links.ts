@@ -455,10 +455,7 @@ function install(): void {
   // first-tap peek to the click handler.
   document.addEventListener("focusin", (e) => {
     const a = refLink(e);
-    if (a && a === refocused) {
-      refocused = null;
-      return;
-    }
+    if (a && a === refocused) return;
     if (a && peekFor !== a && a.matches(":focus-visible")) showPeek(a);
   });
   document.addEventListener("focusout", (e) => {
@@ -483,14 +480,21 @@ function install(): void {
     "keydown",
     (e) => {
       if (e.key !== "Escape" || !peek) return;
+      // A card the pane swap left behind owns no Escape.
+      if (!peek.isConnected) {
+        hidePeek();
+        return;
+      }
+      // No preventDefault: a focused field keeps its own Escape behaviour.
       e.stopImmediatePropagation();
-      e.preventDefault();
       const back = peekFor;
       const inside = peek.contains(document.activeElement);
       hidePeek();
       if (inside && back) {
+        // focus() fires focusin synchronously; cleared after either way.
         refocused = back;
         back.focus();
+        refocused = null;
       }
     },
     true,
