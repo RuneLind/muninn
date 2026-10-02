@@ -2315,10 +2315,12 @@ adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
   `.wiki-list-title`, which becomes a wrapping flex pair (`has-issues`) — never
   inside the clamp, where a wrapped run was clipped. Still one row element (the
   no-row-element rule). The column sits BESIDE the text while the text keeps
-  `RAIL_TITLE_MIN` and wraps UNDER it otherwise, capped at
-  `RAIL_ISSUE_PILLS_COL` (32px). Trade against the key pills it replaced
-  (#633): those took ~90px beside the title at the 300px rail, the mark ~13px;
-  but where a pill used to wrap under the title (260px) the mark now sits
+  `RAIL_TITLE_MIN` and wraps UNDER it otherwise; `RAIL_ISSUE_PILLS_COL` (28px)
+  is the mark's width budget, pinned by the e2e, not a CSS cap. Trade against
+  the key pills it replaced (#633), measured on the e2e fixture at 300px: a
+  one-key pill took 55.8px beside the title (two keys, 92px, wrapped under it);
+  the mark is 11px (18.7px with a count) and costs the title 15px with its gap.
+  But where a pill used to wrap under the title (260px) the mark now sits
   beside it, so a title right at the two-line edge can ellipsize there. A
   plan row with a status pill and ⚑ at 300px still wraps the mark under its
   title. On a hovered or active row the ink is `--text-secondary`

@@ -290,7 +290,12 @@ async function clippedPillRows(page: Page): Promise<string[]> {
         for (const pill of pills) {
           if (pill.scrollWidth > pill.clientWidth + 1) bad.push(`${row.getAttribute("data-relpath")} ${pill.getAttribute("data-issue-keys")} squeezed`);
         }
-        if (c.width > maxCol + 0.5) bad.push(`${row.getAttribute("data-relpath")} column ${c.width}px`);
+        // The mark's OWN box against the budget: the column is a plain block, so
+        // a mark wider than the budget overflows it rather than being clamped.
+        for (const pill of pills) {
+          const w = pill.getBoundingClientRect().width;
+          if (w > maxCol + 0.5) bad.push(`${row.getAttribute("data-relpath")} ${pill.getAttribute("data-issue-keys")} mark ${w}px`);
+        }
         for (const pill of pills) {
           const r = pill.getBoundingClientRect();
           if (r.left < c.left - 0.5 || r.right > c.right + 0.5) bad.push(`${row.getAttribute("data-relpath")} ${pill.getAttribute("data-issue-keys")} outside its column`);
@@ -538,20 +543,19 @@ test.describe("Wiki reader: tracker links", () => {
     }
   });
 
-  // The mark is a glyph, not a key: it sits BESIDE the title on its first line
-  // and costs the title at most its own width, at the narrowest rail too. (The
-  // old key pill wrapped under the title there; the mark trades that extra line
-  // for ~13px of title width.) A long key does not widen it, and a count stays
-  // inside the column cap.
+  // The mark is a glyph, not a key: it sits BESIDE the title on its first line,
+  // at the narrowest rail too. (The old key pill wrapped under the title there;
+  // the mark trades that extra line for 15px of title width — 11px plus the
+  // gap.) A long key does not widen it, and a count stays inside the budget.
   for (const width of [260, 300]) {
-    test(`issue mark: beside the title's first line, at most 13px for one key, count inside the cap, ${width}px`, async ({ page }) => {
+    test(`issue mark: beside the title's first line, at most 13px for one key, count inside the budget, ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width: 1280, height: 1400 });
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
       await openReader(page, `wiki=${WIKI}`);
       const markOf = (rel: string) =>
         row(page, rel).evaluate((el) => {
           const t = el.querySelector(".wiki-list-title-text")!.getBoundingClientRect();
-          const m = el.querySelector(".wiki-issue-pills")!.getBoundingClientRect();
+          const m = el.querySelector(".wiki-issue-pill")!.getBoundingClientRect();
           return { beside: m.left >= t.right - 0.5 && m.top < t.top + 4, width: m.width };
         });
       const one = await markOf(TWO_LINE);

@@ -48,8 +48,9 @@ function keyLine(ref: ListingIssueRef, label: string): string {
   return also.length ? `${name} — stamped (also ${also.join(", ")})` : `${name} — stamped`;
 }
 
-/** A ticket with a perforation, in the type icon's stroke style. CSS fills the
- *  outline (`.tk`) for a stamped key and leaves it open for an inferred one. */
+/** A ticket in the type icon's stroke style. CSS fills it (`.tk`) for a
+ *  stamped key, which hides the perforation, and leaves it open for an
+ *  inferred one. */
 const TICKET_GLYPH =
   `<svg class="wiki-issue-glyph" viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor"` +
   ` stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +

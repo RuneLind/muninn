@@ -78,12 +78,13 @@ export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 62;
 export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + 76;
 
 /**
- * The issue-mark column's `max-width`: the glyph plus a two-digit count, with
- * slack. The column sits beside the title text while the text keeps
- * `RAIL_TITLE_MIN`, and wraps UNDER it otherwise, so it takes no reserve in the
- * floors or breakpoints above.
+ * The widest an issue mark may be: the 11px glyph, its gap and a two-digit
+ * count (measured 18.7px with one digit). A budget the e2e pins on every mark's
+ * own box, not a CSS cap. The column sits beside the title text while the text
+ * keeps `RAIL_TITLE_MIN` and wraps UNDER it otherwise, so it takes no reserve
+ * in the floors or breakpoints above.
  */
-export const RAIL_ISSUE_PILLS_COL = 32;
+export const RAIL_ISSUE_PILLS_COL = 28;
 
 /**
  * The three container breakpoints, in px of REMAINING row space (`.wiki-list-mid`),

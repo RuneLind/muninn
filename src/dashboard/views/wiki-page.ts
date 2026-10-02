@@ -11,7 +11,6 @@ import {
   RAIL_CHIP_SWITCH_LONG,
   RAIL_CHIP_SWITCH_WIDE,
   RAIL_GROUP_CHIP_SWITCH,
-  RAIL_ISSUE_PILLS_COL,
   RAIL_MID_MIN_CHIP,
   RAIL_MID_MIN_CHIP_NARROW,
   RAIL_MID_MIN_CHIP_WIDE,
@@ -716,7 +715,7 @@ export async function renderWikiPage(opts?: {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; overflow-wrap: anywhere;
     }
-    .wiki-issue-pills { flex: 0 0 auto; max-width: ${RAIL_ISSUE_PILLS_COL}px; margin: 1px 0 0 auto; }
+    .wiki-issue-pills { flex: 0 0 auto; margin: 1px 0 0 auto; }
     .wiki-issue-pill {
       display: inline-flex; align-items: center; gap: 2px; height: 13px;
       font-family: ui-monospace, Menlo, monospace; font-size: 9.5px; line-height: 13px;
