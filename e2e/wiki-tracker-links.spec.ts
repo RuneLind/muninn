@@ -110,12 +110,11 @@ const TWIN_HTML = "notes/tvilling.html";
 /** The control for the twin: the same fold chip and title length, no key. */
 const MIRROR_MD = "notes/speil.md";
 const MIRROR_HTML = "notes/speil.html";
-/** A title that fits two lines at the 260px rail WITHOUT its pill, and that the
- *  inline pill run of the first cut pushed onto a clamped third line. */
-/** A key wider than its row's title cell at the 260px rail (a long project
- *  name beside a fold chip): the pill wraps after the dash, inside the cell. */
+/** A long project key beside a fold chip: the mark must be no wider than a
+ *  short key's. */
 const LONG_KEY = "notes/langnokkel.md";
 const LONG_KEY_HTML = "notes/langnokkel.html";
+/** A title near the two-line edge at the 260px rail: the mark sits beside it. */
 const TWO_LINE = "notes/to-linjer.md";
 const TWO_LINE_TITLE = "DEMO-162 notater fra kjøringen i går";
 
@@ -254,7 +253,7 @@ async function shownCount(page: Page): Promise<number> {
 }
 
 /**
- * For every row carrying pills, the pills whose box is NOT wholly inside the row
+ * For every row carrying an issue mark, a mark whose box is NOT wholly inside the row
  * and inside every clipping ancestor — `toBeVisible()` passes on an element a
  * line clamp has hidden, so the geometry is the only honest test.
  */
@@ -279,24 +278,29 @@ async function clippedPillRows(page: Page): Promise<string[]> {
           const t = text.getBoundingClientRect();
           if (r.left < t.right - 0.5 && r.top < t.bottom - 0.5) ok = false;
         }
-        if (!ok) bad.push(`${row.getAttribute("data-relpath")} ${pill.textContent}`);
+        if (!ok) bad.push(`${row.getAttribute("data-relpath")} ${pill.getAttribute("data-issue-keys")}`);
       }
       // The column: at most its max-width, inside the title cell, and never
-      // narrower than a pill in it; a pill never narrower than its text.
+      // narrower than its mark; a mark never narrower than its content.
       const col = row.querySelector(".wiki-issue-pills");
       if (col) {
         const c = col.getBoundingClientRect();
         const cell = row.querySelector(".wiki-list-title")!.getBoundingClientRect();
         if (c.left < cell.left - 0.5 || c.right > cell.right + 0.5) bad.push(`${row.getAttribute("data-relpath")} column outside the title cell`);
         for (const pill of pills) {
-          if (pill.scrollWidth > pill.clientWidth + 1) bad.push(`${row.getAttribute("data-relpath")} ${pill.textContent} squeezed`);
+          if (pill.scrollWidth > pill.clientWidth + 1) bad.push(`${row.getAttribute("data-relpath")} ${pill.getAttribute("data-issue-keys")} squeezed`);
         }
-        if (c.width > maxCol + 0.5) bad.push(`${row.getAttribute("data-relpath")} column ${c.width}px`);
+        // The mark's OWN box against the budget: the column is a plain block, so
+        // a mark wider than the budget overflows it rather than being clamped.
+        for (const pill of pills) {
+          const w = pill.getBoundingClientRect().width;
+          if (w > maxCol + 0.5) bad.push(`${row.getAttribute("data-relpath")} ${pill.getAttribute("data-issue-keys")} mark ${w}px`);
+        }
         for (const pill of pills) {
           const r = pill.getBoundingClientRect();
-          if (r.left < c.left - 0.5 || r.right > c.right + 0.5) bad.push(`${row.getAttribute("data-relpath")} ${pill.textContent} outside its column`);
+          if (r.left < c.left - 0.5 || r.right > c.right + 0.5) bad.push(`${row.getAttribute("data-relpath")} ${pill.getAttribute("data-issue-keys")} outside its column`);
         }
-        // Beside the pills, the text keeps its floor.
+        // Beside the mark, the text keeps its floor.
         const text = row.querySelector(".wiki-list-title-text");
         if (text) {
           const t = text.getBoundingClientRect();
@@ -316,7 +320,7 @@ async function clippedPillRows(page: Page): Promise<string[]> {
 
 /**
  * Whether a row's type icon, title cell and ★+date share one line box — the row's
- * line STRUCTURE, which a pill must not change.
+ * line STRUCTURE, which a mark must not change.
  */
 async function oneLine(page: Page, rel: string): Promise<boolean> {
   return row(page, rel).evaluate((el) => {
@@ -363,7 +367,7 @@ test.describe("Wiki reader: tracker links", () => {
     expect(linked.meta.issues).toEqual([{ tracker: "jira", key: "DEMO-190", relations: ["link", "mention"] }]);
   });
 
-  test("1: pills on every keyed row, dashed when inferred, none on a key-less row, child count unchanged", async ({ page }) => {
+  test("1: a mark on every keyed row, outline when inferred, none on a key-less row, child count unchanged", async ({ page }) => {
     await openReader(page, `wiki=${WIKI}`);
     // Folded rows (the series and the twin) are checked by the facet case,
     // which opens them.
@@ -374,18 +378,28 @@ test.describe("Wiki reader: tracker links", () => {
     }
     for (const rel of [ORA, PLAIN, LINKED]) await expect(row(page, rel).locator(".wiki-issue-pill")).toHaveCount(0);
 
-    // Stamped is solid; everything else dashed.
     await expect(pills(page, STAMPED)).toHaveClass("wiki-issue-pill");
-    await expect(pills(page, SCALAR)).toHaveCount(2);
-    for (const p of await pills(page, SCALAR).all()) await expect(p).not.toHaveClass(/inferred/);
-    const dashed = await pills(page, INFERRED).first().evaluate((el) => getComputedStyle(el).borderTopStyle);
-    expect(dashed).toBe("dashed");
-    expect(await pills(page, STAMPED).evaluate((el) => getComputedStyle(el).borderTopStyle)).toBe("solid");
+    // One mark per row, whatever the key count; the count is painted beside the glyph.
+    await expect(pills(page, SCALAR)).toHaveCount(1);
+    await expect(pills(page, SCALAR)).not.toHaveClass(/inferred/);
+    await expect(pills(page, SCALAR)).toHaveText("2");
+    // Stamped paints a FILLED ticket, inferred an outline one; no box around
+    // either (a dashed box around an outline glyph blurred into a smudge at 1x).
+    const paint = (rel: string) =>
+      pills(page, rel).evaluate((el) => ({
+        fill: getComputedStyle(el.querySelector(".wiki-issue-glyph path")!).fill,
+        border: getComputedStyle(el).borderTopStyle,
+      }));
+    expect((await paint(STAMPED)).fill).not.toBe("none");
+    expect((await paint(INFERRED)).fill).toBe("none");
+    expect((await paint(STAMPED)).border).toBe("none");
+    expect((await paint(INFERRED)).border).toBe("none");
 
-    // The anchor carries five non-mention keys: two pills and a +3, strongest first.
-    await expect(pills(page, ANCHOR)).toHaveCount(2);
-    await expect(pills(page, ANCHOR).first()).toHaveAttribute("data-issue-rel", "created");
-    await expect(row(page, ANCHOR).locator(".wiki-issue-pill.more")).toHaveText("+3");
+    // The anchor carries five non-mention keys: one mark counting 5, strongest first.
+    await expect(pills(page, ANCHOR)).toHaveCount(1);
+    await expect(pills(page, ANCHOR)).toHaveAttribute("data-issue-rel", "created");
+    await expect(pills(page, ANCHOR)).toHaveText("5");
+    expect((await pills(page, ANCHOR).getAttribute("data-issue-keys"))!.split(" ")).toHaveLength(5);
 
     // The pills live INSIDE the title element: the row grows no child.
     const counts = await page.evaluate(
@@ -459,7 +473,7 @@ test.describe("Wiki reader: tracker links", () => {
     await page.locator("#wikiFilters summary").click();
     await page.locator("#jiraChips [data-jira-more]").click();
     for (const bad of ["ORA-01407", "SAK-4711", "DEMO-122", "DEMO-190", "DEMO-199"]) {
-      await expect(page.locator(`[data-issue-key="${bad}"]`)).toHaveCount(0);
+      await expect(page.locator(`[data-issue-key="${bad}"], [data-issue-keys~="${bad}"]`)).toHaveCount(0);
       await expect(page.locator(`#jiraChips [data-jira="${bad}"]`)).toHaveCount(0);
     }
   });
@@ -486,7 +500,7 @@ test.describe("Wiki reader: tracker links", () => {
     await expect(page.locator('[data-prov-jira="DEMO-180"]')).toBeVisible();
   });
 
-  test("pills: never clipped by the title clamp, at 260, 286 and 420 px, in both themes", async ({ page }) => {
+  test("issue mark: never clipped by the title clamp, at 260, 286 and 420 px, in both themes", async ({ page }) => {
     for (const scheme of ["light", "dark"] as const) {
       for (const width of [260, 286, 420]) {
         await page.emulateMedia({ colorScheme: scheme });
@@ -502,12 +516,7 @@ test.describe("Wiki reader: tracker links", () => {
         const longText = row(page, LONG).locator(".wiki-list-title-text");
         expect(await longText.evaluate((el) => el.scrollHeight > el.clientHeight), where).toBe(true);
         expect(await clippedPillRows(page), where).toEqual([]);
-        if (width === 260) {
-          // The long key really wraps after its dash there — the case is only about a key that does.
-          const lines = await pills(page, LONG_KEY).evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
-          expect(lines, where).toBe(2);
-        }
-        // The pill is text a reader has to read.
+        // The mark's glyph and count paint in the pill's text colour.
         expect(await contrastOf(pills(page, STAMPED)), where).toBeGreaterThanOrEqual(4.5);
         // No sideways scroll bought by the pill column.
         const o = await page.locator("#wikiList").evaluate((el) => el.scrollWidth - el.clientWidth);
@@ -516,7 +525,7 @@ test.describe("Wiki reader: tracker links", () => {
     }
   });
 
-  test("pills: a row with a fold chip keeps the line structure and chip form of the same row without pills, 260–560px", async ({ page }) => {
+  test("issue mark: a row with a fold chip keeps the line structure and chip form of the same row without a mark, 260–560px", async ({ page }) => {
     await page.setViewportSize({ width: 1400, height: 1400 });
     for (let width = 260; width <= 560; width += 20) {
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
@@ -534,20 +543,33 @@ test.describe("Wiki reader: tracker links", () => {
     }
   });
 
-  test("pills: a title that fits two lines without its pill shows no ellipsis at the 260px rail", async ({ page }) => {
-    await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, 260] as const);
-    await page.setViewportSize({ width: 1280, height: 1400 });
-    await openReader(page, `wiki=${WIKI}`);
-    const text = row(page, TWO_LINE).locator(".wiki-list-title-text");
-    const fit = await text.evaluate((el) => ({
-      lines: Math.round(el.scrollHeight / parseFloat(getComputedStyle(el).lineHeight)),
-      clamped: el.scrollHeight > el.clientHeight + 1,
-    }));
-    expect(fit).toEqual({ lines: 2, clamped: false });
-  });
+  // The mark is a glyph, not a key: it sits BESIDE the title on its first line,
+  // at the narrowest rail too. (The old key pill wrapped under the title there;
+  // the mark trades that extra line for 15px of title width — 11px plus the
+  // gap.) A long key does not widen it, and a count stays inside the budget.
+  for (const width of [260, 300]) {
+    test(`issue mark: beside the title's first line, at most 13px for one key, count inside the budget, ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 1400 });
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
+      await openReader(page, `wiki=${WIKI}`);
+      const markOf = (rel: string) =>
+        row(page, rel).evaluate((el) => {
+          const t = el.querySelector(".wiki-list-title-text")!.getBoundingClientRect();
+          const m = el.querySelector(".wiki-issue-pill")!.getBoundingClientRect();
+          return { beside: m.left >= t.right - 0.5 && m.top < t.top + 4, width: m.width };
+        });
+      const one = await markOf(TWO_LINE);
+      expect(one.beside).toBe(true);
+      expect(one.width).toBeLessThanOrEqual(13);
+      expect((await markOf(LONG_KEY)).width).toBeCloseTo(one.width, 0);
+      const five = await markOf(ANCHOR);
+      expect(five.width).toBeGreaterThan(one.width);
+      expect(five.width).toBeLessThanOrEqual(RAIL_ISSUE_PILLS_COL);
+    });
+  }
 
   for (const scheme of ["light", "dark"] as const) {
-    test(`pills: 4.5:1 at rest, on the hovered row and on the active row, ${scheme} theme`, async ({ page }) => {
+    test(`issue mark: 4.5:1 at rest, on the hovered row and on the active row, ${scheme} theme`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await openReader(page, `wiki=${WIKI}`);
       const pill = pills(page, STAMPED);
@@ -564,7 +586,7 @@ test.describe("Wiki reader: tracker links", () => {
     });
   }
 
-  test("pills: a listing refresh that drops the tracker drops its label and its cap", async ({ page }) => {
+  test("issue mark: a listing refresh that drops the tracker drops its label and its cap", async ({ page }) => {
     await page.clock.install();
     await openReader(page, `wiki=${WIKI}`);
     await page.locator("#wikiFilters summary").click();
@@ -581,12 +603,11 @@ test.describe("Wiki reader: tracker links", () => {
     await expect(page.locator("#jiraChips [data-jira-more]")).toHaveCount(0);
   });
 
-  test("pills: named with the tracker, +N carries its keys in the accessible name, a click opens the row", async ({ page }) => {
+  test("issue mark: named with the tracker, every key in the accessible name, a click opens the row", async ({ page }) => {
     await openReader(page, `wiki=${WIKI}`);
-    await expect(pills(page, INFERRED).first()).toHaveAttribute("title", "Jira DEMO-130 — inferred (title)");
+    await expect(pills(page, INFERRED).first()).toHaveAttribute("title", "Jira DEMO-130 — inferred (title)\nJira DEMO-131 — inferred (title)");
     await expect(pills(page, STAMPED)).toHaveAttribute("title", "Jira DEMO-180 — stamped");
-    const plus = row(page, ANCHOR).locator(".wiki-issue-pill.more");
-    await expect(plus).toHaveAttribute("aria-label", /^3 more: Jira DEMO-/);
+    await expect(pills(page, ANCHOR)).toHaveAttribute("aria-label", /^Jira DEMO-\d+ — inferred \(created here[^;]*(; Jira DEMO-\d+ — [^;]+){4}$/);
     await pills(page, STAMPED).click();
     await expect(page.locator(".wiki-bc-cur")).toContainText("Stemplet");
   });

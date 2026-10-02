@@ -2306,38 +2306,35 @@ adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
   a disabled control saying why, so a chip's count is the rows on screen and
   `#wikiCount`. A tag filter makes no such promise and still counts pages a
   closed fold hides.
-- **Rail pills** sit in a column of their own inside `.wiki-list-title`,
-  which becomes a wrapping flex pair (`has-issues`: the clamped
-  `.wiki-list-title-text` and `.wiki-issue-pills`) — never inside the clamp,
-  where a wrapped pill run was clipped on 80 of 96 keyed rows. Still one row
-  element (the no-row-element rule). The column sits BESIDE the text while the text keeps
-  `RAIL_TITLE_MIN`, and wraps UNDER it (flush right) otherwise, so a pill row
-  takes no reserve in the row's floors or chip breakpoints and breaks lines
-  exactly where the same row without pills does: a reserve on the chip floors
-  (fix round 1's 96px) wrapped whole rows at 260–290px. The column is at most
-  `RAIL_ISSUE_PILLS_COL` (92px) and shrinks to its widest pill; a key may wrap
-  after its project's `-` (`<wbr>`), so a pill only overhangs its cell for a
-  project name of 11+ characters at the title's floor (the one residual).
-  Up to two pills, strongest first, then `+N` whose hidden keys are in its
-  accessible name; dashed unless `stamped`. A pill is part of the row, which
-  is one click target, so it keeps the row's `pointer`. On a hovered or active
-  row the pill ink is `--text-secondary` (`--text-muted` measured 4.42:1 and
-  under 4.5 there in the light theme). Measured on melosys-kode-wiki at every
-  rail width 260–560px (10px steps), both themes: 0 rows that wrap where main's
-  do not, 0 clipped pills, 0 pill overlaps; mimir's rail is byte-for-byte the
-  same geometry as main. The cost is the title text: clamped rows 206 / 152 /
-  135 / 103 / 42 / 2 at 260 / 286 / 300 / 340 / 420 / 560px against main's 203
-  / 145 / 115 / 66 / 17 / 0, and 53 / 19 / 19 / 21 / 28 of the 78 pill rows are
-  taller than on main at 260 / 300 / 340 / 420 / 560px.
+- **Rail issue mark** (`wiki-issue-pills.ts`; the file and class names
+  predate it): ONE ticket glyph per row, plus a count when the page carries
+  more than one key. The keys are not painted — every key and its relations
+  are in the `title` (one per line) and the accessible name. Filled when the
+  strongest ref is `stamped`, outline otherwise (a dashed box around an outline
+  glyph blurred into a smudge at 1x). It sits in a column of its own inside
+  `.wiki-list-title`, which becomes a wrapping flex pair (`has-issues`) — never
+  inside the clamp, where a wrapped run was clipped. Still one row element (the
+  no-row-element rule). The column sits BESIDE the text while the text keeps
+  `RAIL_TITLE_MIN` and wraps UNDER it otherwise; `RAIL_ISSUE_PILLS_COL` (28px)
+  is the mark's width budget, pinned by the e2e, not a CSS cap. Trade against
+  the key pills it replaced (#633), measured on the e2e fixture at 300px: a
+  one-key pill took 55.8px beside the title (two keys, 92px, wrapped under it);
+  the mark is 11px (18.7px with a count) and costs the title 15px with its gap.
+  But where a pill used to wrap under the title (260px) the mark now sits
+  beside it, so a title right at the two-line edge can ellipsize there. A
+  plan row with a status pill and ⚑ at 300px still wraps the mark under its
+  title. On a hovered or active row the ink is `--text-secondary`
+  (`--text-muted` measured 4.42:1 there in the light theme).
 
 Acceptance: `trackers/jira.test.ts` (each rule, the anchor line's 2/70/138
 shape, Jira markup, the project bound, the not-a-key shapes and masks),
 `trackers/index.test.ts` (the block's validation), `trackers/store-issues.test.ts`
 (the index build through the route's own `toListing`, the demotion, the
 count-equals-rows property, the no-tracker pin) and
-`e2e/wiki-tracker-links.spec.ts` (pill geometry at three rail widths in both
+`e2e/wiki-tracker-links.spec.ts` (mark geometry at three rail widths in both
 themes, a fold-chip row's line structure and chip form against the same row
-without pills at 260–560px, a long key wrapping inside its cell, contrast at
+without a mark at 260–560px, the mark beside the title and no wider for a
+long key, filled vs outline, contrast at
 rest / hovered / active, a listing that drops the tracker, and chip = rows =
 `#wikiCount` through a closed series and an `.html` twin).
 

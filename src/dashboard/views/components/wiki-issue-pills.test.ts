@@ -12,11 +12,19 @@ describe("railIssuePillsHtml", () => {
     expect(railIssuePillsHtml([])).toBe("");
   });
 
-  test("a stamped key is solid, an inferred one dashed, and the hover names the tracker and the relations", () => {
-    const html = railIssuePillsHtml([ref("DEMO-101", "stamped"), ref("DEMO-102", "created", "link")], JIRA);
-    expect(html).toContain('class="wiki-issue-pill" data-issue-key="DEMO-101"');
-    expect(html).toContain('class="wiki-issue-pill inferred" data-issue-key="DEMO-102"');
+  test("one mark per row: solid when the strongest key is stamped, no count for one key", () => {
+    const html = railIssuePillsHtml([ref("DEMO-101", "stamped")], JIRA);
+    expect(html.match(/class="wiki-issue-pill[ "]/g)).toHaveLength(1);
+    expect(html).toContain('class="wiki-issue-pill" role="img" data-issue-key="DEMO-101" data-issue-rel="stamped"');
     expect(html).toContain('title="Jira DEMO-101 — stamped"');
+    expect(html).not.toContain("wiki-issue-count");
+    // The key is on the hover, not painted.
+    expect(html.replace(/<[^>]*>/g, "")).toBe("");
+  });
+
+  test("dashed when the strongest key is inferred", () => {
+    const html = railIssuePillsHtml([ref("DEMO-102", "created", "link")], JIRA);
+    expect(html).toContain('class="wiki-issue-pill inferred"');
     expect(html).toContain('title="Jira DEMO-102 — inferred (created here, link)"');
   });
 
@@ -25,22 +33,22 @@ describe("railIssuePillsHtml", () => {
     expect(html).toContain('title="Jira DEMO-101 — stamped (also title, file name)"');
   });
 
-  test("two pills, then +N carrying the rest on its hover AND in its accessible name", () => {
+  test("several keys: one mark with the count, every key on its hover AND in its accessible name", () => {
     const html = railIssuePillsHtml(
-      [ref("DEMO-1", "title"), ref("DEMO-2", "tag"), ref("DEMO-3", "tag"), ref("DEMO-4", "stem")],
+      [ref("DEMO-1", "stamped"), ref("DEMO-2", "tag"), ref("DEMO-3", "stem")],
       JIRA,
     );
-    expect(html.match(/data-issue-key=/g)).toHaveLength(2);
-    expect(html).toContain(">+2</span>");
-    expect(html).toContain("Jira DEMO-3 — inferred (tag)\nJira DEMO-4 — inferred (file name)");
-    expect(html).toContain('aria-label="2 more: Jira DEMO-3 — inferred (tag); Jira DEMO-4 — inferred (file name)"');
-  });
-
-  test("a key may wrap after its project's dash and nowhere else", () => {
-    expect(railIssuePillsHtml([ref("DEMOPROSJEKT-123456", "tag")])).toContain(">DEMOPROSJEKT-<wbr>123456</span>");
+    expect(html.match(/class="wiki-issue-pill[ "]/g)).toHaveLength(1);
+    expect(html).toContain('data-issue-key="DEMO-1"');
+    expect(html).toContain('data-issue-keys="DEMO-1 DEMO-2 DEMO-3"');
+    expect(html).toContain('<span class="wiki-issue-count">3</span>');
+    expect(html).toContain('title="Jira DEMO-1 — stamped\nJira DEMO-2 — inferred (tag)\nJira DEMO-3 — inferred (file name)"');
+    expect(html).toContain('aria-label="Jira DEMO-1 — stamped; Jira DEMO-2 — inferred (tag); Jira DEMO-3 — inferred (file name)"');
   });
 
   test("keys are escaped", () => {
-    expect(railIssuePillsHtml([ref('A-1"<b>', "stamped")])).not.toContain("<b>");
+    const html = railIssuePillsHtml([ref('A-1"<b>', "stamped")]);
+    expect(html).not.toContain("<b>");
+    expect(html).toContain('data-issue-keys="A-1&quot;&lt;b&gt;"');
   });
 });
