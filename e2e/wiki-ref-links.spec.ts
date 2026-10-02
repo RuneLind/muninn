@@ -390,6 +390,11 @@ test.describe("Wiki reader: in-page references", () => {
     await page.keyboard.press("Escape");
     await expect(page.locator(".wiki-ref-peek")).toHaveCount(0);
     await expect(last).toBeFocused();
+    // The suppression covers that one focus return only: tabbing back peeks again.
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(last).toBeFocused();
+    await expect(page.locator(".wiki-ref-peek")).toBeVisible();
     expectClean(seen);
   });
 

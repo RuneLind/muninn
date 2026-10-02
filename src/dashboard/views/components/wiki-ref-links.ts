@@ -485,7 +485,8 @@ function install(): void {
         hidePeek();
         return;
       }
-      // No preventDefault: a focused field keeps its own Escape behaviour.
+      // Stopped here, so no other listener sees this Escape (a focused field's
+      // own included); the browser's default action still runs.
       e.stopImmediatePropagation();
       const back = peekFor;
       const inside = peek.contains(document.activeElement);
