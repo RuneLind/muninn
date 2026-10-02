@@ -168,6 +168,7 @@ import { enhanceEmbeds } from "./wiki-embed.ts";
 import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
 import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
+import { enhanceRefLinks } from "./wiki-ref-links.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
@@ -3967,6 +3968,10 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // Fact-check layer: chip → evidence card, the summary strip, and the
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);
+      // Bare ids (D4, Q-8) and quoted section titles → links with a peek card.
+      // After the fact-check layer, which anchors marks on the text as served;
+      // before the hash reveal, which needs the fold and heading ids it adds.
+      enhanceRefLinks(articleRoot);
       applyDisplay();
       // A `#id` in the URL (a shared `#q-8`): open the folds around it, scroll to
       // it. Not on an in-place reload (`reloadCheckedPage`): the URL keeps the

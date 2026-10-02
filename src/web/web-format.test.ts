@@ -219,6 +219,18 @@ describe("formatWebHtml", () => {
     expect(result).toContain("click");
   });
 
+  test("renders an in-page fragment link, same tab", () => {
+    expect(formatWebHtml("se [D4](#d4) og [Runde 3](#runde-3--2026-08-18-kveld)")).toBe(
+      'se <a href="#d4">D4</a> og <a href="#runde-3--2026-08-18-kveld">Runde 3</a>',
+    );
+  });
+
+  test("a fragment carrying a quote stays inside the href; one with a space is no link", () => {
+    expect(formatWebHtml('[x](#a"onclick="b)')).toBe('<a href="#a&quot;onclick=&quot;b">x</a>');
+    expect(formatWebHtml("[x](#a b)")).toBe("x");
+    expect(formatWebHtml("[x](#)")).toBe("x");
+  });
+
   test("escapes double quotes in regular text", () => {
     const result = formatWebHtml('He said "hello"');
     expect(result).toBe("He said &quot;hello&quot;");
