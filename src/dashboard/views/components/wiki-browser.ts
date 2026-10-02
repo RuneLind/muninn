@@ -3971,7 +3971,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // Bare ids (D4, Q-8) and quoted section titles → links with a peek card.
       // After the fact-check layer, which anchors marks on the text as served;
       // before the hash reveal, which needs the fold and heading ids it adds.
-      enhanceRefLinks(articleRoot);
+      enhanceRefLinks(articleRoot, data.meta.relPath);
       applyDisplay();
       // A `#id` in the URL (a shared `#q-8`): open the folds around it, scroll to
       // it. Not on an in-place reload (`reloadCheckedPage`): the URL keeps the

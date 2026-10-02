@@ -93,6 +93,13 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
         el.removeAttribute(attr.name);
       }
       if (tag === "a") {
+        // An anchor whose href did not survive (an in-page `#d4`, a DecisionLog
+        // chip) is text here: a link-styled anchor that goes nowhere is worse.
+        if (!el.hasAttribute("href")) {
+          walk(el);
+          el.replaceWith(...Array.from(el.childNodes));
+          continue;
+        }
         el.setAttribute("target", "_blank");
         el.setAttribute("rel", "noopener");
       }

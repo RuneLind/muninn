@@ -49,7 +49,7 @@ const PAGE = [
   "",
   "Fag sa nei (D4), se Q-2. Ikke en lenke: `D4`, «vedtak fattet i Melosys», og D9.",
   "",
-  "Se også [Runde 3](#runde-3--2026-08-18-kveld). Tvetydig: «Om spørringen».",
+  "Se også [Runde 3](#runde-3--2026-08-18-kveld). Tvetydig: «Om spørringen» og D1. Ikke i artikkelen: [lista](#wikiList).",
   "",
   "| Spørsmål | Beslutning |",
   "|---|---|",
@@ -96,6 +96,20 @@ const PAGE = [
   "Gjør dette når PR-en er deployet til q2.",
   "",
   "</Fold>",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D1** — En annen logg med samme id.",
+  "",
+  "</DecisionLog>",
+  "",
+  "## Notater",
+  "",
+  "Første.",
+  "",
+  "## Notater",
+  "",
+  "Andre.",
   "",
   "## Runde 3 — 2026-08-18 kveld",
   "",
@@ -199,6 +213,11 @@ test.describe("Wiki reader: in-page references", () => {
     // A title two folds share links nowhere; a Query's CSV result is data.
     await expect(page.locator(".query-result td", { hasText: "D4" })).toHaveCount(1);
     await expect(page.locator(".query-result a")).toHaveCount(0);
+    // A fragment link to page chrome stays a plain link.
+    await expect(page.locator('.wiki-article a[href="#wikiList"]')).not.toHaveClass(/wiki-ref/);
+    // Repeated heading slugs are numbered as GitHub does.
+    await expect(page.locator(".wiki-article :is(h2,h3)#notater")).toHaveText("Notater");
+    await expect(page.locator(".wiki-article :is(h2,h3)#notater-1")).toHaveText("Notater");
     // Folds and headings got ids; the heading inside its fold did not take the fold's.
     await expect(page.locator("details.fold#q2-oppskrift")).toHaveCount(1);
     await expect(page.locator("h2#runde-3--2026-08-18-kveld, h3#runde-3--2026-08-18-kveld")).toHaveCount(1);
@@ -289,6 +308,79 @@ test.describe("Wiki reader: in-page references", () => {
     await page.keyboard.press("Enter");
     await expect(page.locator("section.query#q-2")).toBeInViewport();
     expectClean(seen);
+  });
+
+  test("Back from a jump on a legacy ?page= URL restores the scroll without a refetch", async ({ page }) => {
+    const seen = watch(page);
+    let pageFetches = 0;
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/wiki/page") pageFetches++;
+    });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=refs`);
+    await expect(page.locator(".wiki-article a.wiki-ref").first()).toBeAttached();
+    await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 150));
+    const fetchesBefore = pageFetches;
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "«Q2-oppskrift»" }).click();
+    await expect(page.locator("details.fold#q2-oppskrift")).toBeInViewport();
+    await page.goBack();
+    await expect.poll(() => scrollTop(page)).toBe(150);
+    expect(pageFetches).toBe(fetchesBefore);
+    expectClean(seen);
+  });
+
+  test("the peek is a tooltip the link points at, not a dialog", async ({ page }) => {
+    const seen = await openPage(page);
+    const ref = page.locator(".wiki-article a.wiki-ref", { hasText: "D4" }).first();
+    await ref.hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toHaveAttribute("role", "tooltip");
+    await expect(ref).toHaveAttribute("aria-describedby", (await peek.getAttribute("id"))!);
+    await page.mouse.move(0, 0);
+    await expect(peek).toHaveCount(0);
+    await expect(ref).not.toHaveAttribute("aria-describedby", /.+/);
+    expectClean(seen);
+  });
+
+  test("Escape on a peek closes it and leaves focus mode alone", async ({ page }) => {
+    const seen = await openPage(page);
+    await page.locator(".wiki-article").click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("f");
+    await expect(page.locator(".wiki-layout")).toHaveClass(/\bfocus-mode\b/);
+    const ref = page.locator(".wiki-article a.wiki-ref", { hasText: "Q-2" }).first();
+    await ref.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(page.locator(".wiki-ref-peek")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-ref-peek")).toHaveCount(0);
+    await expect(page.locator(".wiki-layout")).toHaveClass(/\bfocus-mode\b/);
+    expectClean(seen);
+  });
+
+  test("Escape from inside the peek returns focus to the link without reopening it", async ({ page }) => {
+    const seen = await openPage(page);
+    // Tab from the article's last link enters the card; focus it directly here.
+    const last = page.locator(".wiki-article a.wiki-ref", { hasText: "Q-2" }).first();
+    await last.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(page.locator(".wiki-ref-peek")).toBeVisible();
+    await page.locator(".wiki-ref-peek-go").focus();
+    await expect(page.locator(".wiki-ref-peek-go")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-ref-peek")).toHaveCount(0);
+    await expect(last).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("chat renders an in-page link as plain text, not a dead anchor", async ({ page }) => {
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(() => typeof (globalThis as any).sanitizeHtml === "function");
+    const html = await page.evaluate(() => {
+      const g = globalThis as any;
+      return g.sanitizeHtml(g.formatWebHtml("se [D4](#d4) og [nav](https://nav.no)"), true);
+    });
+    expect(html).toBe('se D4 og <a href="https://nav.no" target="_blank" rel="noopener">nav</a>');
   });
 
   for (const scheme of ["light", "dark"] as const) {

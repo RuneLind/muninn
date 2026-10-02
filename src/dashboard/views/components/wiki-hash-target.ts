@@ -37,6 +37,12 @@ export function revealHashTarget(root: Element, hash: string = location.hash): b
   el.classList.remove(HASH_FLASH_CLASS);
   void (el as HTMLElement).offsetWidth; // restart the animation on a repeat
   el.classList.add(HASH_FLASH_CLASS);
-  el.addEventListener("animationend", () => el.classList.remove(HASH_FLASH_CLASS), { once: true });
+  // Its own animation only: animationend bubbles up from any descendant.
+  const end = (e: Event) => {
+    if (e.target !== el) return;
+    el.classList.remove(HASH_FLASH_CLASS);
+    el.removeEventListener("animationend", end);
+  };
+  el.addEventListener("animationend", end);
   return true;
 }

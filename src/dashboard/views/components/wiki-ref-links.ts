@@ -10,15 +10,17 @@
  * - **Targets.** DecisionLog items, Query cards and CaseBoard rows keep their
  *   server anchors and are keyed by their chip text. Every `<Fold>` and heading
  *   gets an id here, GitHub's heading slug, so the `](#slug)` links pages
- *   already carry resolve. A fold wins over a heading of the same title; a
- *   title two folds (or two headings) share names no one section and links
- *   nowhere (fagavklaring has fourteen «Om spørringen» folds).
+ *   already carry resolve (repeats numbered `-1`, `-2` in document order, as
+ *   GitHub does). A fold wins over a heading of the same title. A key two
+ *   targets share links nowhere: a title two folds share (fagavklaring has
+ *   fourteen «Om spørringen» folds), an id two DecisionLogs both define.
  * - **Not linked:** text inside code, links, headings, a fold's summary, form
  *   controls, diagrams and a Query's CSV result table (data, not prose); a
  *   reference inside its own target; a quote that names no section on the
  *   page (`«vedtak fattet i Melosys»`).
- * - **Explicit links.** A server-rendered `<a href="#id">` whose target exists
- *   joins in and gets the same peek and jump.
+ * - **Explicit links.** A server-rendered `<a href="#id">` whose target is one
+ *   of those kinds, inside the article, joins in and gets the same peek and
+ *   jump; any other fragment link keeps the browser's own behaviour.
  * - **Back.** Each jump pushes a history entry. Back (the pill or the browser)
  *   restores the scroll position the jump left. The pill and the peek live in
  *   the article, so the next page render takes them away.
@@ -93,44 +95,56 @@ function foldTitle(fold: Element): string {
   return t.trim();
 }
 
+/** GitHub's rule for a repeated slug: the first keeps it, then `-1`, `-2`. */
 function ensureId(el: Element, title: string): string {
   if (el.id) return el.id;
   const base = headingSlug(title) || "section";
   let id = base;
-  for (let k = 2; document.getElementById(id); k++) id = `${base}-${k}`;
+  for (let k = 1; document.getElementById(id); k++) id = `${base}-${k}`;
   el.id = id;
   return id;
 }
 
 const ID_TARGETS = ".dl-item[id] > .dl-id, section.query[id] .query-id, .cb-row[id] > .cb-id";
+const SECTIONS = "details.fold, h1, h2, h3, h4, h5, h6";
+/** What a peek can show: the targets `peekParts` knows. */
+const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${SECTIONS}`;
+
+/** A key seen twice maps to null: it names no one target. */
+function claim(map: Map<string, Element | null>, key: string, el: Element): void {
+  map.set(key, map.has(key) ? null : el);
+}
+
+function unique(map: Map<string, Element | null>): Map<string, Element> {
+  const out = new Map<string, Element>();
+  for (const [k, el] of map) if (el) out.set(k, el);
+  return out;
+}
 
 /** What the page defines, keyed the way its prose names it. Gives every fold
- *  and heading an id on the way. The first definition of a key wins. */
+ *  and heading an id on the way, in document order. A key defined twice is
+ *  left out. */
 export function refTargets(root: Element): { ids: Map<string, Element>; titles: Map<string, Element> } {
-  const ids = new Map<string, Element>();
+  const idDefs = new Map<string, Element | null>();
   root.querySelectorAll(ID_TARGETS).forEach((chip) => {
     const key = (chip.textContent ?? "").trim();
     const target = chip.closest("[id]");
-    if (key && target && !ids.has(key)) ids.set(key, target);
+    if (key && target) claim(idDefs, key, target);
   });
-  const titles = new Map<string, Element>();
-  // Folds first, then headings: a heading only takes a title no fold holds.
-  const claim = (els: Element[], titleOf: (el: Element) => string) => {
-    const seen = new Map<string, Element | null>();
-    for (const el of els) {
-      const title = titleOf(el);
-      if (!title) continue;
-      ensureId(el, title);
-      seen.set(title, seen.has(title) ? null : el);
-    }
-    for (const [title, el] of seen) if (el && !titles.has(title)) titles.set(title, el);
-  };
-  claim(Array.from(root.querySelectorAll("details.fold")), foldTitle);
-  claim(
-    Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6")).filter((h) => !h.classList.contains("fold-heading-dup")),
-    (h) => (h.textContent ?? "").trim(),
-  );
-  return { ids, titles };
+  const folds = new Map<string, Element | null>();
+  const headings = new Map<string, Element | null>();
+  root.querySelectorAll(SECTIONS).forEach((el) => {
+    if (el.classList.contains("fold-heading-dup")) return;
+    const isFold = el.matches("details.fold");
+    const title = isFold ? foldTitle(el) : (el.textContent ?? "").trim();
+    if (!title) return;
+    ensureId(el, title);
+    claim(isFold ? folds : headings, title, el);
+  });
+  const titles = unique(folds);
+  // A heading takes only a title no fold holds, ambiguously or not.
+  for (const [title, el] of headings) if (el && !folds.has(title)) titles.set(title, el);
+  return { ids: unique(idDefs), titles };
 }
 
 const SKIP =
@@ -139,12 +153,13 @@ const SKIP =
 /** Wrap every reference under `root` in an `a.wiki-ref`. Returns how many. */
 export function linkRefs(root: Element): number {
   const { ids, titles } = refTargets(root);
-  // A server-rendered fragment link whose target exists joins in.
+  // A server-rendered fragment link to a known kind of target joins in.
   root.querySelectorAll<HTMLAnchorElement>('a[href^="#"]:not(.dl-id):not(.query-id):not(.cb-id)').forEach((a) => {
     const id = decodeHash(a.getAttribute("href")!);
-    if (id && document.getElementById(id)) {
+    const target = id ? document.getElementById(id) : null;
+    if (target && root.contains(target) && target.matches(TARGET_KINDS)) {
       a.classList.add(REF_CLASS);
-      a.dataset.ref = id;
+      a.dataset.ref = target.id;
     }
   });
   if (!ids.size && !titles.size) return 0;
@@ -190,15 +205,23 @@ function decodeHash(href: string): string | null {
   }
 }
 
-/** A copy safe to show twice on the page: no ids. */
+/** A copy safe to show twice on the page: no ids, no flash, no frames
+ *  reloading, no live checkboxes. */
 function cloneBare<T extends Node>(n: T): T {
   const c = n.cloneNode(true) as T;
   if (c instanceof Element) {
-    c.removeAttribute("id");
-    c.querySelectorAll("[id]").forEach((x) => x.removeAttribute("id"));
+    for (const x of [c, ...Array.from(c.querySelectorAll("[id], .wiki-hash-flash, iframe, input"))]) {
+      x.removeAttribute("id");
+      x.classList.remove(HASH_FLASH_CLASS);
+      if (x.tagName === "IFRAME") x.remove();
+      if (x instanceof HTMLInputElement) x.disabled = true;
+    }
   }
   return c;
 }
+
+/** Blocks a peek does not copy: big, live or a section of their own. */
+const PEEK_SKIP = "details, iframe, section.query, .caseboard";
 
 const PEEK_CHARS = 400;
 const isHeading = (n: Node) => n.nodeType === 1 && /^H[1-6]$/.test((n as Element).tagName);
@@ -211,6 +234,10 @@ function leadingContent(start: ChildNode | null): Node[] {
   let chars = 0;
   for (let n = start; n && chars < PEEK_CHARS; n = n.nextSibling) {
     if (isHeading(n)) {
+      if (chars > 0) break;
+      continue;
+    }
+    if (n.nodeType === 1 && (n as Element).matches(PEEK_SKIP)) {
       if (chars > 0) break;
       continue;
     }
@@ -271,6 +298,10 @@ let peekFor: HTMLAnchorElement | null = null;
 let showTimer: ReturnType<typeof setTimeout> | undefined;
 let hideTimer: ReturnType<typeof setTimeout> | undefined;
 let backPill: HTMLButtonElement | null = null;
+/** The page's relPath, for a jump from a legacy `?page=` URL. */
+let pageRelPath = "";
+/** A link Escape just returned focus to: its focusin must not reopen the card. */
+let refocused: HTMLAnchorElement | null = null;
 /** One entry per jump: the URL and scroll position it left. */
 let stack: { url: string; top: number }[] = [];
 let installed = false;
@@ -283,6 +314,7 @@ function hidePeek(): void {
   // Cleared before the removal: removing a card that holds focus fires its
   // focusout, which calls back in here, and a second remove() throws.
   const card = peek;
+  peekFor?.removeAttribute("aria-describedby");
   peek = null;
   peekFor = null;
   card?.remove();
@@ -295,8 +327,11 @@ function showPeek(a: HTMLAnchorElement): void {
   const { label, where, body, isTitle } = peekParts(target);
   const card = document.createElement("div");
   card.className = PEEK_CLASS;
-  card.setAttribute("role", "dialog");
-  card.setAttribute("aria-label", `Preview: ${label}`);
+  // A tooltip, not a dialog: the reader's modal checks treat any
+  // [role="dialog"] as open and would block shortcuts while a card shows.
+  card.id = PEEK_CLASS;
+  card.setAttribute("role", "tooltip");
+  a.setAttribute("aria-describedby", PEEK_CLASS);
   const head = document.createElement("div");
   head.className = `${PEEK_CLASS}-head`;
   const lab = document.createElement("span");
@@ -359,6 +394,14 @@ function setBackPill(): void {
 function jump(id: string): void {
   if (!root) return;
   hidePeek();
+  // A legacy `?page=` URL: give the entry its relPath first, or Back would
+  // miss the reader's same-page check and refetch the page.
+  const u = new URL(location.href);
+  if (pageRelPath && u.searchParams.get("relPath") !== pageRelPath) {
+    u.searchParams.delete("page");
+    u.searchParams.set("relPath", pageRelPath);
+    history.replaceState(history.state, "", u);
+  }
   stack.push({ url: location.href, top: root.scrollTop });
   const hash = `#${encodeURIComponent(id)}`;
   // pushState fires no hashchange, so the reader's own listener stays out of it.
@@ -370,6 +413,11 @@ function jump(id: string): void {
 /** Back onto the URL a jump left: restore its scroll. popstate, not
  *  hashchange: a jump to the hash already in the URL changes no hash. */
 function onPopState(): void {
+  // The pane holds something else now (an Ask answer, the start view).
+  if (!article?.isConnected) {
+    stack = [];
+    return;
+  }
   const top = stack[stack.length - 1];
   if (!top || location.href !== top.url) return;
   stack.pop();
@@ -407,6 +455,10 @@ function install(): void {
   // first-tap peek to the click handler.
   document.addEventListener("focusin", (e) => {
     const a = refLink(e);
+    if (a && a === refocused) {
+      refocused = null;
+      return;
+    }
     if (a && peekFor !== a && a.matches(":focus-visible")) showPeek(a);
   });
   document.addEventListener("focusout", (e) => {
@@ -425,13 +477,24 @@ function install(): void {
     }
     jump(a.dataset.ref ?? "");
   });
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !peek) return;
-    const back = peekFor;
-    const inside = peek.contains(document.activeElement);
-    hidePeek();
-    if (inside) back?.focus();
-  });
+  // Capture on window: this Escape closes the card and nothing else (focus
+  // mode's own Escape listener would otherwise leave focus mode too).
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape" || !peek) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      const back = peekFor;
+      const inside = peek.contains(document.activeElement);
+      hidePeek();
+      if (inside && back) {
+        refocused = back;
+        back.focus();
+      }
+    },
+    true,
+  );
   // The peek is placed against the viewport: a scroll outside it or a resize
   // retires it.
   document.addEventListener(
@@ -447,8 +510,9 @@ function install(): void {
 
 /** Link the references in a freshly rendered article and reset the jump
  *  history. Called once per page render, before the URL's hash is revealed. */
-export function enhanceRefLinks(articleRoot: Element): void {
+export function enhanceRefLinks(articleRoot: Element, relPath = ""): void {
   install();
+  pageRelPath = relPath;
   hidePeek();
   stack = [];
   backPill = null;
