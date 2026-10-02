@@ -30,6 +30,7 @@ import {
   MOVES_AGE_CLASS,
   MOVES_PILL_CLASS,
 } from "./components/wiki-report-blocks.ts";
+import { refLinksCss } from "./components/wiki-ref-links.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -1922,6 +1923,8 @@ export async function renderWikiPage(opts?: {
       font-size: 11px; border: 1px solid var(--status-warning); color: var(--text-soft);
     }
     .${LINE_REFS_TOGGLE_CLASS}:not(.on) { text-decoration: line-through; }
+    /* In-page references, their peek card and the back pill (wiki-ref-links.ts). */
+    ${refLinksCss()}
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}

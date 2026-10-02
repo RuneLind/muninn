@@ -93,6 +93,20 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
         el.removeAttribute(attr.name);
       }
       if (tag === "a") {
+        // An anchor whose href did not survive (an in-page `#d4`, a DecisionLog
+        // chip) goes nowhere here. A chip keeps its allowlisted class on a
+        // span, so it keeps its pill; anything else becomes plain text.
+        if (!el.hasAttribute("href")) {
+          walk(el);
+          const cls = el.getAttribute("class");
+          if (cls) {
+            const span = document.createElement("span");
+            span.setAttribute("class", cls);
+            span.append(...Array.from(el.childNodes));
+            el.replaceWith(span);
+          } else el.replaceWith(...Array.from(el.childNodes));
+          continue;
+        }
         el.setAttribute("target", "_blank");
         el.setAttribute("rel", "noopener");
       }

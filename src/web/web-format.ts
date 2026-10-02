@@ -1123,11 +1123,14 @@ function renderInline(text: string): string {
   // interpreted as tags. Must happen before generated tags are emitted below.
   result = escapeHtml(result);
 
-  // Markdown links → <a>. Only http/https to prevent javascript: injection.
+  // Markdown links → <a>. Only http/https to prevent javascript: injection,
+  // plus an in-page `#fragment` (no quote or space can reach the attribute:
+  // the text is escaped above and the class below excludes whitespace).
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
     if (/^https?:\/\//.test(url)) {
       return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
     }
+    if (/^#[^\s#]+$/.test(url)) return `<a href="${url}">${label}</a>`;
     return label;
   });
 

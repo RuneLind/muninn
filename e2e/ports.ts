@@ -205,6 +205,9 @@ export const E2E_PORTS = {
   "wiki-caseboard": 3097,
   // <Tldr>, <Timeline>, <DecisionLog> and <RunChecklist> over a temp wiki.
   "wiki-genre-blocks": 3098,
+  // In-page references (bare ids, quoted titles, fragment links), the peek
+  // card and Back, over a temp wiki.
+  "wiki-ref-links": 3099,
   // The gardener strip's error note: one muninn over a throwaway bot with a
   // seeded wiki-gardener watcher; the verb POSTs reach it unmodified or with
   // their content type stripped.
