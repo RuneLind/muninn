@@ -32,8 +32,8 @@ export function relationWord(rel: IssueRelation): string {
 }
 
 /**
- * A stamped key is the page's own claim and renders solid; every other
- * relation is inferred and renders dashed. The strongest relation decides.
+ * A stamped key is the page's own claim and renders filled; every other
+ * relation is inferred and renders as an outline. The strongest relation decides.
  */
 export function issueRefInferred(ref: ListingIssueRef): boolean {
   return ref.relations[0] !== "stamped";
@@ -41,23 +41,24 @@ export function issueRefInferred(ref: ListingIssueRef): boolean {
 
 /** `Jira DEMO-104 — inferred (title)`, `… — stamped`, or `… — stamped (also
  *  title)`: every relation the key has, not only the strongest. */
-function pillTitle(ref: ListingIssueRef, label: string): string {
+function keyLine(ref: ListingIssueRef, label: string): string {
   const name = label ? `${label} ${ref.key}` : ref.key;
   if (issueRefInferred(ref)) return `${name} — inferred (${ref.relations.map(relationWord).join(", ")})`;
   const also = ref.relations.slice(1).map(relationWord);
   return also.length ? `${name} — stamped (also ${also.join(", ")})` : `${name} — stamped`;
 }
 
-/** A ticket with a perforation, in the type icon's stroke style. */
+/** A ticket with a perforation, in the type icon's stroke style. CSS fills the
+ *  outline (`.tk`) for a stamped key and leaves it open for an inferred one. */
 const TICKET_GLYPH =
   `<svg class="wiki-issue-glyph" viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor"` +
-  ` stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">` +
-  `<path d="M1.5 4h11v1.8a1.3 1.3 0 0 0 0 2.4V10h-11V8.2a1.3 1.3 0 0 0 0-2.4z"/>` +
+  ` stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+  `<path class="tk" d="M1.5 4h11v1.8a1.3 1.3 0 0 0 0 2.4V10h-11V8.2a1.3 1.3 0 0 0 0-2.4z"/>` +
   `<path d="M9 4.3v5.4" stroke-dasharray="1.2 1.2"/></svg>`;
 
 /**
  * The mark for one row, `""` when the page carries no issue. The refs arrive
- * strongest first, so the first one decides solid (stamped) or dashed
+ * strongest first, so the first one decides filled (stamped) or outline
  * (inferred) and names `data-issue-key`/`data-issue-rel`; `data-issue-keys`
  * lists them all. `labelOf` names a tracker id the way the UI calls it (`Jira`).
  */
@@ -67,7 +68,7 @@ export function railIssuePillsHtml(
 ): string {
   if (!issues || issues.length === 0) return "";
   const first = issues[0]!;
-  const titles = issues.map((r) => pillTitle(r, labelOf(r.tracker)));
+  const titles = issues.map((r) => keyLine(r, labelOf(r.tracker)));
   const count = issues.length > 1 ? `<span class="wiki-issue-count">${issues.length}</span>` : "";
   return (
     `<span class="wiki-issue-pills"><span class="wiki-issue-pill${issueRefInferred(first) ? " inferred" : ""}" role="img"` +

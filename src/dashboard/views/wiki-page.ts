@@ -699,12 +699,11 @@ export async function renderWikiPage(opts?: {
     /* ✋ = a NextMoves step waiting on the reader: an inline mark inside the
        title, never a row element (the row's six items are each budgeted). */
     .wiki-moves-flag { margin-right: 4px; font-size: 11px; }
-    /* Issue mark (one ticket glyph + count per row): a COLUMN of its own inside .wiki-list-title, never inside
-       the clamp — inline, a pill run wrapped to a third line and was clipped on
-       80 of 96 keyed rows of a real wiki. The title element stays ONE row item
-       (a seventh flex item would cost the title its floor).
-       Solid = stamped, dashed = inferred. A pill is part of the row, which is
-       one click target, so it keeps the row's pointer. */
+    /* Issue mark: one ticket glyph (+ a count) per row, in a COLUMN of its
+       own inside .wiki-list-title, never inside the clamp, where it would be
+       clipped on a third line. The title element stays ONE row item (a seventh
+       flex item would cost the title its floor). Filled = stamped, outline =
+       inferred. The mark is part of the row, one click target. */
     .wiki-list-title.has-issues {
       display: flex; flex-wrap: wrap; align-items: flex-start; gap: 2px 4px;
       -webkit-line-clamp: unset; overflow: visible;
@@ -717,22 +716,18 @@ export async function renderWikiPage(opts?: {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; overflow-wrap: anywhere;
     }
-    .wiki-issue-pills {
-      display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px;
-      flex: 0 1 auto; max-width: ${RAIL_ISSUE_PILLS_COL}px; margin: 1px 0 0 auto;
-    }
+    .wiki-issue-pills { flex: 0 0 auto; max-width: ${RAIL_ISSUE_PILLS_COL}px; margin: 1px 0 0 auto; }
     .wiki-issue-pill {
-      display: inline-flex; align-items: center; gap: 2px; padding: 0 3px;
-      border: 1px solid var(--text-muted); border-radius: 3px;
+      display: inline-flex; align-items: center; gap: 2px; height: 13px;
       font-family: ui-monospace, Menlo, monospace; font-size: 9.5px; line-height: 13px;
       color: var(--text-muted);
     }
-    .wiki-issue-pill.inferred { border-style: dashed; }
-    /* The hovered and the active row paint a fill under the pill, where
+    .wiki-issue-pill:not(.inferred) .wiki-issue-glyph .tk { fill: currentColor; }
+    .wiki-issue-glyph { flex-shrink: 0; }
+    /* The hovered and the active row paint a fill under the mark, where
        --text-muted measures 4.42:1 and 4.24:1 in the light theme. */
     .wiki-list-item:hover .wiki-issue-pill,
     .wiki-list-item.active .wiki-issue-pill { color: var(--text-secondary); }
-    .wiki-issue-glyph { flex-shrink: 0; }
     .wiki-chip-row-label {
       align-self: center; font-size: 11px; color: var(--text-muted); margin-right: 2px;
     }

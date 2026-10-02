@@ -47,6 +47,8 @@ describe("railIssuePillsHtml", () => {
   });
 
   test("keys are escaped", () => {
-    expect(railIssuePillsHtml([ref('A-1"<b>', "stamped")])).not.toContain("<b>");
+    const html = railIssuePillsHtml([ref('A-1"<b>', "stamped")]);
+    expect(html).not.toContain("<b>");
+    expect(html).toContain('data-issue-keys="A-1&quot;&lt;b&gt;"');
   });
 });

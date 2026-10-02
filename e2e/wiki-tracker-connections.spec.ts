@@ -438,7 +438,7 @@ test.describe("Wiki reader: Connections + Link", () => {
     await openPage(page, WIKI, ORA);
     await expect(section(page)).toHaveCount(0);
     for (const bad of ["ORA-01407", "SAK-4711"]) {
-      await expect(page.locator(`[data-issue-key="${bad}"], [data-issue-row="${bad}"], #jiraChips [data-jira="${bad}"]`)).toHaveCount(0);
+      await expect(page.locator(`[data-issue-key="${bad}"], [data-issue-keys~="${bad}"], [data-issue-row="${bad}"], #jiraChips [data-jira="${bad}"]`)).toHaveCount(0);
     }
   });
 
