@@ -437,7 +437,7 @@ export function tracesPromptModalScript(): string {
       var a = buildSpan.attributes;
       var stats = [
         { value: a.messagesCount, label: 'Messages', section: 'history', tab: 'user' },
-        { value: a.memoriesCount, label: 'Memories', section: 'personal-memories' },
+        { value: a.memoriesCount, label: 'Memories', section: 'personal-memories', alt: 'shared-memories' },
         { value: a.goalsCount, label: 'Goals', section: 'goals' },
         { value: a.scheduledTasksCount, label: 'Tasks', section: 'tasks' },
         { value: a.alertsCount, label: 'Alerts', section: 'alerts' },
@@ -445,28 +445,33 @@ export function tracesPromptModalScript(): string {
       el.innerHTML = stats.map(function(s) {
         var clickable = s.value > 0;
         var cls = 'prompt-stat-pill' + (clickable ? ' clickable' : '');
-        var attrs = clickable ? ' data-section="' + s.section + '"' : '';
+        var attrs = clickable ? ' data-section="' + s.section + '"' + (s.alt ? ' data-alt="' + s.alt + '"' : '') : '';
         return '<div class="' + cls + '"' + attrs + '><span class="stat-val">' + s.value + '</span> ' + s.label + '</div>';
       }).join('');
       // Attach click handlers via event delegation
       el.querySelectorAll('.prompt-stat-pill.clickable').forEach(function(pill) {
         pill.addEventListener('click', function() {
-          jumpToSection(pill.dataset.section, sectionTab(pill.dataset.section));
+          var at = locateSection([pill.dataset.section].concat(pill.dataset.alt ? [pill.dataset.alt] : []));
+          jumpToSection(at.key, at.tab);
         });
       });
     }
 
     /**
-     * The tab a section renders on. Per-turn context moved from the system
-     * prompt into the user turn's <context> block; older snapshots still carry
-     * it in the system prompt, so ask the prompt on screen rather than assume.
+     * The first of keys the prompt on screen holds, and its tab. Per-turn
+     * context is in the user turn's <context> block on new snapshots and in the
+     * system prompt on older ones, so ask the prompt rather than assume.
      */
-    function sectionTab(sectionKey) {
-      if (sectionKey === 'history') return 'user';
+    function locateSection(keys) {
       var data = activePromptKey ? promptCache[activePromptKey] : null;
-      if (!data) return 'system';
-      var inUser = parseUserSections(data.userPrompt || '').some(function(s) { return s.key === sectionKey; });
-      return inUser ? 'user' : 'system';
+      var user = data ? parseUserSections(data.userPrompt || '') : [];
+      var system = data ? parseSystemSections(data.systemPrompt || '') : [];
+      var has = function(list, key) { return list.some(function(s) { return s.key === key; }); };
+      for (var i = 0; i < keys.length; i++) {
+        if (has(user, keys[i])) return { key: keys[i], tab: 'user' };
+        if (has(system, keys[i])) return { key: keys[i], tab: 'system' };
+      }
+      return { key: keys[0], tab: keys[0] === 'history' ? 'user' : 'system' };
     }
 
     function jumpToSection(sectionKey, tab) {
@@ -553,18 +558,40 @@ export function tracesPromptModalScript(): string {
         rest = rest.slice(histEnd + '</conversation_history>'.length);
       }
       // The per-turn <context> block sits between the history and the user's own words.
-      var ctxStart = rest.indexOf('<context>');
-      var ctxEnd = rest.indexOf('</context>');
-      if (ctxStart >= 0 && ctxEnd > ctxStart && rest.slice(0, ctxStart).trim() === '') {
-        var ctx = parseMarkedSections(rest.slice(ctxStart + '<context>'.length, ctxEnd), CONTEXT_MARKERS);
+      var ctx = parseContextBlock(rest);
+      if (ctx) {
         sections = sections.concat(ctx.sections);
-        rest = rest.slice(ctxEnd + '</context>'.length);
+        rest = ctx.rest;
       }
       var currentMsg = rest.trim();
       if (currentMsg) {
         sections.push({ key: 'current', label: 'Current Message', color: 'current', content: currentMsg, collapsed: false });
       }
       return sections;
+    }
+
+    /**
+     * The builder's exact shape only: the block opens the text, its body starts
+     * with a known marker, and it closes on its own line before a blank line or
+     * the end. Anything else (a user's own <context> text) stays Current Message.
+     */
+    function parseContextBlock(text) {
+      var open = '<context>\\n';
+      var close = '\\n</context>';
+      var start = text.indexOf(open);
+      if (start < 0 || text.slice(0, start).trim() !== '') return null;
+      var bodyStart = start + open.length;
+      var end = text.indexOf(close, bodyStart);
+      while (end >= 0) {
+        var after = text.slice(end + close.length, end + close.length + 2);
+        if (after === '' || after === '\\n\\n') break;
+        end = text.indexOf(close, end + 1);
+      }
+      if (end < 0) return null;
+      var body = text.slice(bodyStart, end);
+      var marked = parseMarkedSections(body, CONTEXT_MARKERS);
+      if (marked.sections.length === 0 || body.slice(0, marked.firstPos).trim() !== '') return null;
+      return { sections: marked.sections, rest: text.slice(end + close.length) };
     }
 
     function parseConversationMessages(text) {

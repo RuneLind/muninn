@@ -112,7 +112,9 @@ export interface FencedOneShotOptions {
   config: Config;
   botConfig: BotConfig;
   timeoutMs?: number;
-  /** Thinking budget; defaults to {@link FENCED_THINKING_MAX_TOKENS}. `null`
+  /** Thinking budget; defaults to {@link FENCED_THINKING_MAX_TOKENS}, sent with
+   *  `effort: "low"`. An explicit number is forwarded without effort, so on an
+   *  adaptive-thinking model the call runs at the bot's own effort. `null`
    *  inherits the bot's own. Ignored on connectors where the field is not a
    *  thinking budget (openai-compat, where it is `max_tokens`). */
   thinkingMaxTokens?: number | null;

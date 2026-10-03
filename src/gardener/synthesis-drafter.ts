@@ -54,18 +54,15 @@ import {
   type WikiProposalRelatedPage,
 } from "../db/wiki-proposals.ts";
 import type { executeOneShot } from "../ai/one-shot.ts";
-import { runFencedOneShot } from "../core/fenced-one-shot.ts";
+import { FENCED_THINKING_MAX_TOKENS, runFencedOneShot } from "../core/fenced-one-shot.ts";
 import type { Tracer } from "../tracing/tracer.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "synthesis-drafter");
 
-/** Thinking budget for a synthesis draft — same 8k knee the capture summarizers +
- *  source drafter use (mechanical synthesis, not chat: a bot's chat-tuned budget
- *  is spent as silent first-token dead-air). Equals `FENCED_THINKING_MAX_TOKENS`
- *  (a test pins that equality), and the draft takes the seam's default rather
- *  than passing it, because only the default budget gets `effort: "low"`. */
-export const SYNTHESIS_THINKING_MAX_TOKENS = 8000;
+/** Thinking budget for a synthesis draft: the fenced seam's default, which the
+ *  draft takes by omitting the budget so it also runs at `effort: "low"`. */
+export const SYNTHESIS_THINKING_MAX_TOKENS = FENCED_THINKING_MAX_TOKENS;
 
 /** Per-member excerpt char cap — enough for title + lead + headings + outcome. */
 export const MEMBER_EXCERPT_MAX = 1200;

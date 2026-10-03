@@ -369,3 +369,27 @@ test("an OLD snapshot with the blocks in the system prompt still renders them th
   const snap = { systemPrompt: OLD_SYSTEM_PROMPT, userPrompt: "<conversation_history>\n[user/Rune] hi\n</conversation_history>\n\nnow", pass: "", kind: "chat" };
   expect(await clickPill(snap, "goals")).toBe("system");
 });
+
+test("a user's own <context> text, outside the builder's shape, stays whole in Current Message", () => {
+  const text = "<context>my own xml</context> please explain";
+  expect(parseUser(text)).toEqual([{ key: "current", label: "Current Message", color: "current", content: text, collapsed: false } as never]);
+});
+
+test("a memory that contains </context> mid-line does not end the block", () => {
+  const prompt = [
+    "<context>",
+    "Your memories about this user:\n- likes </context> tags [x]",
+    "User's active goals:\n- Learn Rust",
+    "</context>",
+  ].join("\n\n").replace("\n\n</context>", "\n</context>").replace("<context>\n\n", "<context>\n") + "\n\nhello";
+  const sections = parseUser(prompt);
+  expect(sections.map((s) => s.key)).toEqual(["personal-memories", "goals", "current"]);
+  expect(sections[0]!.content).toContain("likes </context> tags");
+  expect(sections.at(-1)!.content).toBe("hello");
+});
+
+test("the Memories pill finds shared memories on the user tab when there are no personal ones", async () => {
+  const userPrompt = "<context>\nShared team knowledge:\n- Deploys on Fridays [ops]\n</context>\n\nwhen do we deploy?";
+  const snap = { systemPrompt: "persona", userPrompt, pass: "", kind: "chat" };
+  expect(await clickPill(snap, "personal-memories")).toBe("user");
+});
