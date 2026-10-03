@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   seriesCommitterWarning,
+  seriesSelfCommitBlocker,
   seriesUncommittedReason,
   type SeriesCommitterWiki,
 } from "./series-committer.ts";
@@ -80,11 +81,13 @@ describe("seriesCommitterWarning", () => {
 
   test("a plain or status-only entry is not coverage — neither mode commits", () => {
     for (const mode of ["plain", "status-only"] as const) {
-      expect(
-        seriesCommitterWarning(wiki({ root: "/repos/big/wiki" }), [
-          repo({ path: "/repos/big", mode, containedWikiRoots: ["/repos/big/wiki"] }),
-        ]),
-      ).not.toBeNull();
+      const line = seriesCommitterWarning(wiki({ root: "/repos/big/wiki" }), [
+        repo({ path: "/repos/big", mode, containedWikiRoots: ["/repos/big/wiki"] }),
+      ]);
+      expect(line).not.toBeNull();
+      // The wiki IS inside SYNC_REPOS here, so the line must not say otherwise.
+      expect(line).not.toContain("outside SYNC_REPOS");
+      expect(line).toContain("wiki-mode");
     }
   });
 
@@ -93,19 +96,53 @@ describe("seriesCommitterWarning", () => {
   });
 });
 
+describe("seriesSelfCommitBlocker", () => {
+  async function git(cwd: string, args: string[]): Promise<void> {
+    const proc = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")} failed`);
+  }
+
+  async function withTemp(fn: (dir: string) => Promise<void>): Promise<void> {
+    const dir = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-blocker-")));
+    try {
+      await fn(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("null for a remote-less repo the wiki owns", () =>
+    withTemp(async (dir) => {
+      await git(dir, ["init", "-q"]);
+      expect(await seriesSelfCommitBlocker(dir)).toBeNull();
+    }));
+
+  test("names each blocker, so the warn says the true cause", () =>
+    withTemp(async (dir) => {
+      expect(await seriesSelfCommitBlocker(dir)).toBe("not a git repo");
+      await git(dir, ["init", "-q"]);
+      const nested = path.join(dir, "docs", "wiki");
+      await mkdir(nested, { recursive: true });
+      expect(await seriesSelfCommitBlocker(nested)).toBe(`the wiki sits inside the larger repo ${dir}`);
+      await git(dir, ["remote", "add", "origin", path.join(dir, "nowhere.git")]);
+      expect(await seriesSelfCommitBlocker(dir)).toBe("the repo has a remote");
+    }));
+});
+
 describe("seriesUncommittedReason", () => {
   test("silent when the route's own commit landed or had nothing to commit", () => {
-    expect(seriesUncommittedReason(true, { committed: true })).toBeNull();
+    expect(seriesUncommittedReason(null, { committed: true })).toBeNull();
     // The edit put the page back to its HEAD bytes: the tree is clean.
-    expect(seriesUncommittedReason(true, { committed: false, reason: "nothing-to-commit" })).toBeNull();
+    expect(seriesUncommittedReason(null, { committed: false, reason: "nothing-to-commit" })).toBeNull();
   });
 
   test("names why the edit stayed uncommitted", () => {
-    expect(seriesUncommittedReason(true, { committed: false, reason: "not-default-branch" })).toBe(
+    expect(seriesUncommittedReason(null, { committed: false, reason: "not-default-branch" })).toBe(
       "not-default-branch",
     );
     // The commit seam threw, so `writeWikiPage` reported no result at all.
-    expect(seriesUncommittedReason(true, undefined)).toBe("commit failed");
-    expect(seriesUncommittedReason(false, undefined)).toContain("remote");
+    expect(seriesUncommittedReason(null, undefined)).toBe("commit failed");
+    // The route never tried: the blocker IS the reason.
+    expect(seriesUncommittedReason("not a git repo", undefined)).toBe("not a git repo");
   });
 });

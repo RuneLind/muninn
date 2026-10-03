@@ -64,7 +64,7 @@
  * standalone `WIKI_EXTRA` wiki outside a `wiki`-mode `SYNC_REPOS` entry, so
  * there THIS route commits the one page itself (`[series] edit: <relPath>`, no
  * push) — when the wiki is its own repo and that repo has no remote
- * (`seriesCanSelfCommit`). Otherwise, or when the commit does not land, it logs
+ * (`seriesSelfCommitBlocker`). Otherwise, or when the commit does not land, it logs
  * {@link seriesCommitterWarning}'s line.
  * Measured: the melosys-kode-wiki edit of 2026-10-02 sat uncommitted until
  * another session found it, because the warn line was all this route did.
@@ -110,8 +110,8 @@ import { canEditSeriesPage, SERIES_VALUE_MAX } from "../views/components/wiki-se
 import { decideStampRequest } from "./wiki-stamp.ts";
 import { readonlyRefusal } from "./route-utils.ts";
 import {
-  seriesCanSelfCommit,
   seriesCommitterWarning,
+  seriesSelfCommitBlocker,
   seriesUncommittedReason,
 } from "../../wiki/series-committer.ts";
 import { getSyncRepos } from "../../sync/config.ts";
@@ -302,7 +302,8 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
         getSyncRepos().repos,
       );
-      const selfCommit = noCommitter !== null && (await seriesCanSelfCommit(root));
+      const blocker = noCommitter !== null ? await seriesSelfCommitBlocker(root) : null;
+      const selfCommit = noCommitter !== null && blocker === null;
       const commitTail: PageWriteCommitOptions = selfCommit
         ? {
             commit: (paths, message) => commitWikiChange(root, paths, message, { push: false }),
@@ -462,7 +463,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       const changed = written !== null;
       const uncommitted =
         changed && noCommitter && result.outcome === "written"
-          ? seriesUncommittedReason(selfCommit, result.commit)
+          ? seriesUncommittedReason(blocker, result.commit)
           : null;
       if (uncommitted) {
         log.warn("wiki series: {warning} ({reason})", {
