@@ -206,12 +206,14 @@ describe("the spawn", () => {
       seen.push([...argv]);
       return { stdout: `{"outcome":"unchanged","path":"${argv[argv.indexOf("--file") + 1]}"}`, stderr: "", exitCode: 0 };
     };
-    for (const bun of ["bun", "/opt/homebrew/bin/bun", "/bin/bash"]) {
+    for (const bun of ["bun", "/opt/homebrew/bin/bun", "/opt/bun/bun-profile", "/opt/bun/bun.exe", "/bin/bash"]) {
       await stamp(appWith({ runProc, stampConfig: () => config({ bun }) }));
     }
     expect(seen.map((argv) => argv.slice(0, 3))).toEqual([
       ["bun", "--no-env-file", bin],
       ["/opt/homebrew/bin/bun", "--no-env-file", bin],
+      ["/opt/bun/bun-profile", "--no-env-file", bin],
+      ["/opt/bun/bun.exe", "--no-env-file", bin],
       ["/bin/bash", bin, "--session"],
     ]);
   });
