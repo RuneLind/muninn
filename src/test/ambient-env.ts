@@ -156,6 +156,12 @@ const CLAUDE_USAGE_FLAGS = ["CLAUDE_USAGE_URL", "CLAUDE_USAGE_PUBLIC_URL"];
  *  what a spawn actually runs. */
 const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"];
 
+/** The ⇪ Felles publish seam (`src/wiki/felles-publish.ts`): a developer's
+ *  value would put `fellesPublish` on every matching `/api/wiki/pages` payload
+ *  and point the route at a real script that uploads. `FELLES_WIKI_BUCKET`
+ *  rides along: it lands in the payload and the copied command line. */
+const FELLES_PUBLISH_FLAGS = ["FELLES_WIKI_PUBLISH_BIN", "FELLES_WIKI_PUBLISH_WIKIS", "FELLES_WIKI_BUCKET"];
+
 /** The wiki bucket mirror (`src/wiki/bucket-mirror.ts`). A developer's value
  *  would start a poller that writes and DELETES files inside a spawned server's
  *  tmpdir, and change what every `loadConfig()` suite parses. The specs that use
@@ -190,6 +196,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...VIMEO_FLAGS,
   ...CLAUDE_USAGE_FLAGS,
   ...WIKI_STAMP_FLAGS,
+  ...FELLES_PUBLISH_FLAGS,
   ...WIKI_BUCKET_MIRROR_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops

@@ -73,6 +73,7 @@ import { closeChatOptionsIfNavigatingAway, initChatOptions } from "./wiki-chat-o
 // module — two states, two document listener sets, one split dialog.
 import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
 import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
+import { fellesBtnHtml, FELLES_BTN_ID, openFellesPublishDialog } from "./wiki-felles-publish.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
 import { relatedSectionHtml, type RelatedListing } from "./wiki-related-view.ts";
@@ -439,6 +440,11 @@ let jiraKeys: Record<string, number> = {};
  *  configures one; `{}` on every other wiki, which is what keeps their Jira row
  *  uncapped and unlabelled. */
 let trackerLabels: Record<string, string> = {};
+/** The publish script's path when this wiki offers ⇪ Felles, else null. From
+ *  the listing payload; absent means "no control", never "the last wiki's". */
+let fellesPublishBin: string | null = null;
+/** muninn's `FELLES_WIKI_BUCKET`, for the copied command line. */
+let fellesPublishBucket: string | undefined;
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
@@ -2637,7 +2643,9 @@ function renderBreadcrumb(m: WikiListing): void {
     // thread. Same row deliberately — see `discussArticleBtnHtml`.
     discussArticleBtnHtml() +
     // Third article-level action, same row: turn the page into a pasteable post.
-    shareArticleBtnHtml();
+    shareArticleBtnHtml() +
+    // ⇪ Felles — publish to the melosys-felles bucket, on an allowlisted wiki only.
+    (fellesPublishBin ? fellesBtnHtml(m.relPath) : "");
   el.style.display = "flex";
 }
 function hideBreadcrumb(): void {
@@ -7164,6 +7172,18 @@ document.addEventListener("click", (e) => {
   // bundle: this file IS a bundle, and doing both would put two copies of the
   // module (two states, two listener sets) on the same page.
   else if (t.closest("#" + SHARE_BTN_ID)) openArticleShare();
+  else if (t.closest("#" + FELLES_BTN_ID)) {
+    const relPath = t.closest("#" + FELLES_BTN_ID)?.getAttribute("data-felles-relpath") || "";
+    if (relPath && fellesPublishBin && WIKI_ROOT) {
+      openFellesPublishDialog({
+        wiki: WIKI || "",
+        relPath,
+        bin: fellesPublishBin,
+        root: WIKI_ROOT,
+        bucket: fellesPublishBucket,
+      });
+    }
+  }
   // ⧉ Copy path — delegated like its neighbours because the breadcrumb's
   // innerHTML is rewritten on every navigation, which would drop a direct
   // listener on the second page the reader opens.
@@ -7589,6 +7609,10 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
       if (t && typeof t.id === "string" && typeof t.label === "string") trackerLabels[t.id] = t.label;
     }
   }
+  fellesPublishBin =
+    data.fellesPublish && typeof data.fellesPublish.bin === "string" ? data.fellesPublish.bin : null;
+  fellesPublishBucket =
+    typeof data.fellesPublish?.bucket === "string" ? data.fellesPublish.bucket : undefined;
   // The issue board is a tracker surface: its head link shows only while the
   // listing names a tracker.
   const boardLink = document.getElementById("wikiBoardLink");

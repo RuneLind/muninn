@@ -66,6 +66,8 @@ export interface WikiPagesResponse {
    *  `asOfMs` is when the ledger answered; optional because an older server
    *  sends none, and then Activity demotes nothing. */
   workedCoverage?: { matched: number; total: number; returned: number; asOfMs?: number };
+  /** The publish script's path on a wiki that offers ⇪ Felles; absent elsewhere. */
+  fellesPublish?: { bin: string; bucket?: string };
   error?: string;
 }
 
