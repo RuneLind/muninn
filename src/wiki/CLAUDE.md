@@ -149,7 +149,7 @@ A breadcrumb button on a wiki named in `FELLES_WIKI_PUBLISH_WIKIS` that runs the
 
 - **muninn uploads nothing.** The script's scanner is the only guard against personal data on a page the whole team reads; a second uploader here would be a second, weaker guard.
 - **The spawn is `<bun> --no-env-file <bin> [--dry-run] [--tillat-ident] <root> ./<relPath>`**, with the relPath the index's own spelling (an unlisted page is a 404). The `./` keeps a dash-led page from being read as a flag; a `--` separator is unreliable, since Bun swallows one placed directly after the script path. The root is absolute.
-- **The child environment is an allowlist**: `PATH` (gcloud), `HOME` and `CLOUDSDK_*` (its login), `TMPDIR`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, and `FELLES_WIKI_BUCKET`. **`--no-env-file` is half of it**: without the flag Bun reloads muninn's `.env` from the working directory and every secret the list leaves out comes back (measured). The Stamp route spawns `WIKI_STAMP_BIN` the same way without the flag — same class, on main, not fixed here.
+- **The child environment is an allowlist**: `PATH` (gcloud), `HOME` and `CLOUDSDK_*` (its login), `TMPDIR`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, and `FELLES_WIKI_BUCKET`. **`--no-env-file` is half of it**: without the flag Bun reloads muninn's `.env` from the working directory and every secret the list leaves out comes back (measured). The Stamp route passes the same flag when `WIKI_STAMP_BUN` names a Bun binary (`stampInterpreterArgv`; see the Stamp section).
 - **Gates**: the stamp route's same-origin check (`decideStampRequest`, 415/403), both variables set with an absolute script path, the `default` profile, the wiki name in the allowlist (403), and not a `WIKI_READONLY_ROOTS` root (403 — publishing is egress). The listing payload carries `fellesPublish: {bin, bucket?}` only where the button renders; the route re-checks everything.
 - **One run at a time, held twice — except after a timeout.** The route is single-flight per process (409 while a run is in flight). On a 504 the slot frees as soon as Bun is killed, while a gcloud it started may still be uploading, so a click right after a timeout can overlap it (the 504 copy says to dry-run first). And the dialog holds itself open: ✕ is disabled, `cancel` is prevented, and a `close` while running re-opens it — Chrome makes a REPEATED Escape non-cancelable (close-watcher anti-abuse), so `cancel` alone let a third Escape drop the result. A 504 says an upload may still have finished, since only Bun is killed and a gcloud it started can complete. Exit 1 reads "refused by the scanner, or the script failed": a crash also exits 1.
 - **⧉ Copy command** prefixes muninn's `FELLES_WIKI_BUCKET` when set, so the line targets the same bucket as the button. It says `bun` where the route runs `process.execPath`.
@@ -2978,8 +2978,8 @@ frontmatter line: the route spawns claude-usage's CLI exactly as the hook does,
 plus `--report`:
 
 ```
-<WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> --session <ref> --file <abs> --report
-<WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> <stampFlag> <KEY> --file <abs> --report
+<WIKI_STAMP_BUN|bun> [--no-env-file] <WIKI_STAMP_BIN> --session <ref> --file <abs> --report
+<WIKI_STAMP_BUN|bun> [--no-env-file] <WIKI_STAMP_BIN> <stampFlag> <KEY> --file <abs> --report
 ```
 
 The second line is the **`{ tracker, key }` body form** — Connections' Link.
@@ -3013,7 +3013,13 @@ inherited names are what the CLI needs to RUN — `PATH` so the interpreter is
 findable (a bare `{ WIKI_STAMP_ROOTS }` drops it and lands every Stamp in the 502
 bucket with an empty stderr), `HOME` for its skip record, `TMPDIR` for
 `writeAtomic`'s sibling temp file. A test asserts `PATH` and `WIKI_STAMP_ROOTS`
-present and `DATABASE_URL` absent.
+present and `DATABASE_URL` absent. **`--no-env-file` is the other half**: Bun
+loads `.env` from its working directory (muninn's repo root), which put
+`DATABASE_URL` and the bot tokens back into an allowlisted child until
+`stampInterpreterArgv` added the flag. It follows the interpreter only when
+`WIKI_STAMP_BUN` names a Bun binary by basename (`bun`, `bun-<variant>`,
+optional `.exe`); node and deno load no `.env` unasked and would reject the
+flag. A real-Bun test with a `.env` in the child's cwd pins it.
 
 Checks, in order, each BEFORE any spawn:
 

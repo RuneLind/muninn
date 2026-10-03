@@ -18,11 +18,12 @@
  *
  * So the spawn is the HOOK'S OWN command line plus `--report`:
  *
- *     <WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> --session <ref> --file <abs> --report
- *     <WIKI_STAMP_BUN|bun> <WIKI_STAMP_BIN> <adapter.stampFlag> <key> --file <abs> --report
+ *     <WIKI_STAMP_BUN|bun> [--no-env-file] <WIKI_STAMP_BIN> --session <ref> --file <abs> --report
+ *     <WIKI_STAMP_BUN|bun> [--no-env-file] <WIKI_STAMP_BIN> <adapter.stampFlag> <key> --file <abs> --report
  *
- * with `WIKI_STAMP_ROOTS` handed down in the child environment. The second
- * form takes every check below unchanged; its step 1 is the adapter's
+ * with `WIKI_STAMP_ROOTS` handed down in the child environment and
+ * `--no-env-file` present whenever the interpreter is Bun
+ * ({@link stampInterpreterArgv}). The second form takes every check below unchanged; its step 1 is the adapter's
  * `parseKey` instead of `SESSION_REF_RE`, a wiki whose `.wiki-reader.json`
  * names no such tracker is refused 409 `no-tracker`, and a key in none of its
  * `projects` 409 `out-of-project`. `--report` is
@@ -182,6 +183,10 @@ export const STAMP_CHILD_ENV_NAMES: readonly string[] = ["PATH", "HOME", "TMPDIR
  * user's own directory, and `TMPDIR` because `writeAtomic` needs somewhere to
  * put the sibling temp file on hosts that set it. `WIKI_STAMP_ROOTS` is added
  * verbatim — the operator's own value, since the CLI does its own parse.
+ *
+ * **The allowlist is half the fence.** Bun reloads `.env` from its working
+ * directory, which puts `DATABASE_URL` and the bot tokens back; the other half
+ * is `--no-env-file`, added by {@link stampInterpreterArgv}.
  */
 export function stampChildEnv(
   rootsRaw: string,
@@ -194,6 +199,23 @@ export function stampChildEnv(
   }
   env[WIKI_STAMP_ROOTS_ENV] = rootsRaw;
   return env;
+}
+
+/**
+ * The interpreter half of the spawn: `<bun> --no-env-file` when `WIKI_STAMP_BUN`
+ * names a Bun binary, the bare interpreter otherwise.
+ *
+ * Bun loads `.env` from its working directory — muninn's own repo root — so
+ * without the flag every secret {@link stampChildEnv} leaves out comes back
+ * (measured: the real-Bun test in `wiki-stamp.test.ts` reads `leaked`). Bun is
+ * recognised by basename (`bun`, `bun-<variant>`, either with `.exe`); any other
+ * interpreter gets no flag, because node and deno load no `.env` on their own
+ * and would reject one they do not know.
+ */
+export function stampInterpreterArgv(interpreter: string): string[] {
+  return /^bun(-[\w.]+)?(\.exe)?$/i.test(path.basename(interpreter))
+    ? [interpreter, "--no-env-file"]
+    : [interpreter];
 }
 
 /** What {@link decideStampRequest} answers. `null` means "let it through". */
@@ -617,7 +639,7 @@ export function registerWikiStampRoute(
     let proc;
     try {
       proc = await (deps.runProc ?? runProc)(
-        [config.bun, config.bin, ...argv, "--file", realPath, "--report"],
+        [...stampInterpreterArgv(config.bun), config.bin, ...argv, "--file", realPath, "--report"],
         deps.timeoutMs ?? WIKI_STAMP_TIMEOUT_MS,
         "wiki-stamp",
         // An ALLOWLIST, never `{...process.env}` — see `stampChildEnv`.
