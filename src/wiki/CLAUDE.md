@@ -65,7 +65,7 @@ The rule, exactly, because every clause is load-bearing:
 
 Two emitted shapes are landed-as-is: (a) an indented prose CONTINUATION containing a `word:` under a value-less key (`description:` + `  Note: x` ⇒ `description.Note`) — 0 occurrences measured across the six roots; and (b) the derived-title registration described in the `titleFrom` section above.
 
-The nine non-test callers all read named keys and none enumerate the map — `lint.ts` (×2), `gardener/{apply,draft,source-drafter,synthesis-drafter,runner}.ts`, `plans/source.ts`, `scripts/backfill-wiki-pubdates.ts` (×2 — `url`/`date` at `:146`, `type`/`url` at `:272`; it splices body lines and never reserializes the fence) and `store.ts` itself — so the nested keys are inert everywhere they are not asked for by name. `src/plans/frontmatter.ts` is shape-coupled rather than a caller: it re-implements the column-0 key shape for the `/plans` priority write, and the nested level does not change that shape. The adjacent CRLF bug (`(.*)$` matching no `\r`, so a CRLF page parses to `{}`) is **not** fixed here and stays documented at the call site in `buildWikiIndex`.
+Every non-test caller reads named keys and none enumerates the map (among them `lint.ts`, `lint-drift.ts`, `gardener/{apply,draft,source-drafter,synthesis-drafter,runner}.ts`, `plans/source.ts`, `dashboard/routes/wiki-series-routes.ts`, `scripts/backfill-wiki-pubdates.ts` — which splices body lines and never reserializes the fence — and `store.ts` itself), so the nested keys are inert everywhere they are not asked for by name. `src/plans/frontmatter.ts` is shape-coupled rather than a caller: it re-implements the column-0 key shape for the `/plans` priority write, and the nested level does not change that shape. The adjacent CRLF bug (`(.*)$` matching no `\r`, so a CRLF page parses to `{}`) is **not** fixed here and stays documented at the call site in `buildWikiIndex`.
 
 ## Ask tab, Similar articles (`wikiCollections`)
 
@@ -136,10 +136,10 @@ Five things about it are deliberate and easy to undo by accident:
 - **The path rides on the button** (`data-copy-path`), not re-derived at click time from module state a navigation may already have moved — so the tooltip and the clipboard cannot name different pages.
 - **It is in NEITHER read-only selector list.** Copying a path spends no model call, writes nothing and reaches no network, so it stays live on a `WIKI_READONLY_ROOTS` wiki — which is the kind whose paths get pasted into briefs most. Adding `COPY_PATH_BTN_ID` to `WIKI_READONLY_EGRESS_SELECTOR` dims a control that has nothing to refuse.
 - **The breadcrumb's leaf is the page's TITLE, not its filename**, which is exactly why a copy button is needed rather than selecting the trail: on mimir the two share nothing.
-- ⚠️ **It is ICON-ONLY, the row WRAPS, and the rule is ENFORCED by the spec, not recorded in a comment.** `.wiki-bc-trail` is the row's only shrinkable item, so every action added to that row comes out of the trail's width: a LABELLED button (~104px) rendered it at 27px at 1280 and 0px at 800 with the document scrolling 48px sideways; the glyph costs ~38px (a 30px button plus the row's 8px gap) and `flex: 1 1 160px` + `flex-wrap` catches the rest. **Two earlier rounds wrote measurements into this comment and the CSS's, and a third wrote a full sweep; each was refuted by the next review** — the sweep claiming "260 wraps at every width" about a build where it wraps at 8 of 14. So the invariant is what is stated (the trail stays legible; the row never overflows its pane; it wraps ONLY where a single line would leave the trail cramped — the counterfactual below, not a bare "does one line fit", which the shipped basis deliberately does not satisfy at 960/980 where wrapping buys the trail 214/234px instead of 129/149px) and `e2e/wiki-copy-path.spec.ts` **sweeps 760–1920px in both selection states** to enforce it — both states because ✨ Explain and ✓ Fact check are hidden until text is selected, so every hand sweep measured a row two items shorter than a reader mid-selection sees. With a selection live the row may legitimately wrap where it otherwise does not, so the no-wrap check is scoped to the no-selection case. The no-wrap half is a **counterfactual, not a width list** — the spec forces `nowrap`, reads what the trail would have got, and only then asks whether wrapping bought anything, which is what makes it portable: where a flex row breaks depends on platform font metrics, and CI proved it by failing on Linux at two widths that stay on one line on macOS. Measured against that rule, each mutation shown to apply: basis 0 fails 7 cases, 100 fails 1, 180 fails 3, 200 fails 4, 260 fails 5, removing `flex-wrap` fails 7 — while 120/140/160 all pass, so it brackets the basis from both sides without dictating one value. The detector itself is pinned in both directions (hardwiring it to `false`, and the top-edge form it replaced, each fail one case). Re-tune by changing the basis and running the spec.
+- ⚠️ **It is ICON-ONLY, the row WRAPS, and the rule is ENFORCED by the spec, not recorded in a comment.** `.wiki-bc-trail` is the row's only shrinkable item, so every action added to that row comes out of the trail's width: a LABELLED button (~104px) rendered it at 27px at 1280 and 0px at 800 with the document scrolling 48px sideways; the glyph costs ~38px (a 30px button plus the row's 8px gap) and `flex: 1 1 160px` + `flex-wrap` catches the rest. Do not record width measurements in a comment: the invariant is what is stated (the trail stays legible; the row never overflows its pane; it wraps ONLY where a single line would leave the trail cramped — the counterfactual below, not a bare "does one line fit", which the shipped basis deliberately does not satisfy at 960/980 where wrapping buys the trail 214/234px instead of 129/149px) and `e2e/wiki-copy-path.spec.ts` **sweeps 760–1920px in both selection states** to enforce it — both states because ✨ Explain and ✓ Fact check are hidden until text is selected, so every hand sweep measured a row two items shorter than a reader mid-selection sees. With a selection live the row may legitimately wrap where it otherwise does not, so the no-wrap check is scoped to the no-selection case. The no-wrap half is a **counterfactual, not a width list** — the spec forces `nowrap`, reads what the trail would have got, and only then asks whether wrapping bought anything, which is what makes it portable: where a flex row breaks depends on platform font metrics, and CI proved it by failing on Linux at two widths that stay on one line on macOS. The spec brackets the basis from both sides (120–160 pass; 100, 180 and removing `flex-wrap` fail) without dictating one value. Re-tune by changing the basis and running the spec.
 - **A blank path is a REFUSAL, not a copy.** `writeText("")` resolves, so copying nothing would report success while emptying the reader's clipboard — `wikiPagePath` answers `""` for a blank relPath and the click reports "Copy failed". The accessible name carries that verdict too: an `aria-label` overrides a button's text, so a static one silences the only feedback a clipboard write has, hardest on the `execCommand` path that is PRIMARY on the plain-HTTP tailnet deployment.
 
-**It is also a new disclosure**, small but real: `GET /wiki` now ships the host's absolute directory layout for the selected wiki (`window.__WIKI_ROOT__`) to whoever can load the page — `origin/main` shipped no absolute path there, and `/api/wiki/*` still ships none. Bounded by `/wiki` being admin-zone under `src/auth/zones.ts` on a default-profile instance, whatever `MUNINN_AUTH` says — role `user` (including `local` mode's credential-less loopback identity) gets 403 there. Only under `MUNINN_PROFILE=nais` is `/wiki` a user-zone path (`WIKI_READ_SLICE_PATHS`, GET/HEAD only, admitted by `servesWikiReadSliceOnly`), and there the page withholds the root (`__WIKI_ROOT__ = ""`, so Copy path copies the relPath alone) and the read routes serve read-only roots only (`src/dashboard/routes/wiki-read-scope.ts`); `/plans` already ships its wiki root the same way. On the documented `MUNINN_AUTH=off` shape there is no middleware at all, so on a tailnet-served instance it discloses the username and home layout — including for `WIKI_READONLY_ROOTS` entries such as `~/.claude/projects`. Wiki content cannot read it: explainer pages render in an iframe with no `allow-same-origin`.
+**It is also a disclosure**, small but real: `GET /wiki` ships the host's absolute directory layout for the selected wiki (`window.__WIKI_ROOT__`) to whoever can load the page; `/api/wiki/*` ships none. In an authenticating `MUNINN_AUTH` mode it is bounded by `/wiki` being admin-zone under `src/auth/zones.ts` on a default-profile instance — role `user` (including `local` mode's credential-less loopback identity) gets 403 there. Only under `MUNINN_PROFILE=nais` is `/wiki` a user-zone path (`WIKI_READ_SLICE_PATHS`, GET/HEAD only, admitted by `servesWikiReadSliceOnly`), and there the page withholds the root (`__WIKI_ROOT__ = ""`, so Copy path copies the relPath alone) and the read routes serve read-only roots only (`src/dashboard/routes/wiki-read-scope.ts`); `/plans` already ships its wiki root the same way. With `MUNINN_AUTH=off` no zone middleware is mounted (only the `off` origin guard, which does not gate a GET), so on a tailnet-served instance it discloses the username and home layout — including for `WIKI_READONLY_ROOTS` entries such as `~/.claude/projects`. Wiki content cannot read it: explainer pages render in an iframe with no `allow-same-origin`.
 
 Acceptance: `e2e/wiki-copy-path.spec.ts` (two temp wikis in ONE process, the second registered read-only).
 
@@ -259,19 +259,11 @@ shape, since it is where the full date belongs.
 both new and pinned renders once, at the top, under Activity. Claim ORDER is the
 only thing deciding that — see `buildRail`.
 
-⚠️ **`Recently opened` is GONE** (2026-09-13). It was a folded third section
-holding the last six pages the reader opened, and it carried a rule set of its
-own — the page being READ was skipped there (its `.active` row must not be inside
-a closed `<details>`), the fold's open state was carried across re-renders, a
-`clear` affordance was gated on every facet being inert, and every navigation
-bumped a token so a response that lost a race could not write itself to the head
-of a persistent list. All of it is deleted, along with the `recent` section, the
-`fold`/`clear` header fields, `resolve`'s `skip` predicate, `buildRail`'s `active`
-input, `railFacetsInert`, `pushRecent` and `navToken`. The rail is Activity, then
-Pinned, then the listing: Activity answers "what happened here" from the wiki's
-own dates, and a ★ answers "keep this" deliberately — an automatic list between
-them said neither, folded away where nobody read it. A ★ is how a reader keeps a
-page now. The dead `muninn.wiki.recents.v1:*` keys are dropped by a boot-time
+**The rail is Activity, then Pinned, then the listing — with no automatic
+recently-opened list.** Activity answers "what happened here" from the wiki's own
+dates and a ★ answers "keep this" deliberately; a folded `Recently opened`
+section between them (removed 2026-09-13) said neither. A ★ is how a reader keeps
+a page. The dead `muninn.wiki.recents.v1:*` keys are dropped by a boot-time
 `purgeRecentsKeys()` (below).
 Acceptance: `e2e/wiki-rail-activity.spec.ts`, whose fixture wiki is a real git
 repo with backdated commits — the dates are git's, so a fixture written a
@@ -1516,9 +1508,9 @@ stderr, since "nothing warned and the axis is just empty" is the failure the
 
 The rail can only fold what somebody NAMED, and nothing told a reader which
 pages a `series:` was missing from. Check 8 (`src/wiki/lint-series.ts`, run by
-`lintWiki` like the seven hygiene checks) reads the index the rail reads and
-reports three things — and its findings, alone among the ten checks, carry a
-machine-readable `fix` the gardener turns into review-gate rows.
+`lintWiki` beside the other checks in `LINT_CHECKS`) reads the index the rail
+reads and reports three things — and its findings, alone among the lint checks,
+carry a machine-readable `fix` the gardener turns into review-gate rows.
 
 | check | what it reports |
 |---|---|
@@ -1864,9 +1856,9 @@ themes. `--text-dim` is 3.24:1 dark / 3.74:1 light and `--text-muted` measures
 carrying the PR numbers the pairing rests on. A hovered row is not a transient
 state: it is where the pointer is whenever a row is being read.
 
-**There is no `⋯ add to series` control.** The series editor is a later PR, and a
-visible control that cannot act is the dead control #557's F2 decision rejected.
-`series` and `series_label` are untouched by this feature.
+**Each row carries the series editor's `⋯` opener** (`seriesMenuBtnHtml`, only
+where `canEditSeriesPage` allows — see Series → The editor). Which rows appear
+does not depend on `series` or `series_label`.
 
 Acceptance: `store.test.ts` (the three shapes, the fence mask, the frontmatter
 merge, the bare-`#N` and unknown-repo refusals, the prose owner gate and its five
@@ -1892,10 +1884,10 @@ means re-measuring on the live wiki and moving the pin in the same edit.
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).
 
-- **`page` is the page NAME, resolved with `index.resolve(page)`** — the Explain / fact-check / Similar contract, NOT a relPath (which carries directories and an extension, and which the reader's client never holds for the open page) and NOT `/api/wiki/page`'s name-or-relPath contract.
+- **The page reference is `relPath` first, the page NAME as the rename fallback** — the shared `resolvePageRef` contract of Explain, fact-check and Similar, so an ambiguous stem 404s (see Registry). Resolving the stem alone could write a post from a different same-stem page than the one on screen.
 - **POST, and the ordering is a requirement.** This is the FIRST POST+SSE route in the family (the other `streamFactcheckScaffold` callers are GETs). Every body check — missing `page`/`preset`, an unknown `lang`, both text caps, an **unknown preset id** — returns a plain JSON 400 BEFORE `streamShareSSE` is called; after `streamSSE` commits a 200 the only way to report a bad request is an `app_error` nothing can tell from a model failure. It is POST rather than GET because the reader can EDIT the prompt before generating.
 - **Over-cap is a 400, never a truncation** (`SHARE_PROMPT_OVERRIDE_MAX` 8k, `SHARE_EXTRA_MAX` 2k). A silently shortened prompt changes what the model was asked without telling anyone, and the reader reads the result as an answer to the instruction they wrote.
-- **An unknown preset id is refused, not defaulted.** `findSharePreset` returns undefined for a present-but-unknown id (an ABSENT id still means "the default"), so the route 400s instead of generating with the neutral prompt and reporting it as the picked preset's output. The id is resolved against the RESOLVED BOT, whose `prompts/share*.md` files override the shipped set — which is why that check runs after bot resolution and why a bot-less wiki takes the `app_error` path instead.
+- **An unknown preset id is refused, not defaulted.** `findSharePreset` returns undefined for a present-but-unknown id (an ABSENT id still means "the default"), so the route 400s instead of generating with the neutral prompt and reporting it as the picked preset's output. The check runs after the WIKI resolves (an unknown wiki reports the wiki, not the preset) and independently of the bot: a resolved bot's `prompts/share*.md` files override or extend the shipped set, and with no bot the shipped set (`resolveSharePresets(undefined)`) is the list.
 - **The prompt is instruction → language rider → extra → fenced source, in that order.** The rider goes AFTER the reader's edit on purpose: an edit rewrites the SHAPE of the post, not the language toggle, and rider-first let "…in English" inside an edited prompt silently beat a toggle left on Norsk. Every interpolated field is fence-neutralized (`neutralizeShareFence`, the `neutralizePromptFence` treatment).
 - **The web tools are fenced off** — `SHARE_EXCLUDED_TOOLS` (WebSearch/WebFetch) unioned onto `FENCED_EXCLUDED_TOOLS`. The product is a summary of a source the sender chose; a model that fetches the web mid-summary puts claims that are not in that page into a post going out under the sender's name. It also removes the latency tail from a call whose whole input is already in the prompt. Preflight therefore needs **no** web-tools connector and **no** collections (`resolveSharePreflight` is just unknown wiki → unloadable index → unknown page); a page that reduces to no prose is refused before the slot is taken.
 - **Streaming needed a passthrough.** `FencedOneShotOptions` gained an additive `onProgress` (the underlying `tracedOneShot` always had one, it simply was not forwarded) — the two pre-existing fenced callers omit it and are unaffected.
@@ -3082,11 +3074,11 @@ computed against the root that is actually served rather than `undefined`.
 #### Route-local CSRF (`decideStampRequest`)
 
 The route is **admin-zone by default-deny** (no `zones.ts` entry) and covered by
-the global side-effect check in `auth/origin.ts` — **in an authenticating mode**.
-With `MUNINN_AUTH=off` it is covered by nothing: `src/index.ts` mounts the auth,
-origin and zone middlewares only when `isAuthenticatingMode(auth.mode)`, and
-`off` is the one instance shape that can actually write. Measured against a live
-`off` server: a page on another origin appended a ref with
+the global side-effect check in `auth/origin.ts` in an authenticating mode. With
+`MUNINN_AUTH=off`, the one instance shape that can actually write, no zone
+middleware is mounted and only the origin guard's looser `off` shape runs
+(`src/index.ts`). Measured against a live `off` server before that guard existed:
+a page on another origin appended a ref with
 `fetch(url, {mode: "no-cors", headers: {"content-type": "text/plain"}})`, which
 needs no preflight. So the route carries its own pure check, independent of the
 mode, with three rules:
@@ -3106,8 +3098,7 @@ explicitly REFUSES to do for the global middleware (a DNS-rebound name the
 attacker owns satisfies it). That argument holds here too: rule 3 is not the
 defence, rules 1 and 2 are. It is kept because it refuses the plain cross-origin
 POST one step earlier with a readable reason, and under `off` there is no
-`MUNINN_ALLOWED_ORIGINS` to check against at all. **The other muninn write routes
-share this exposure under `off`** — a class follow-up, out of this route's scope.
+`MUNINN_ALLOWED_ORIGINS` to check against at all.
 
 **Behind `tailscale serve`, rule 3 passes as written — MEASURED** (2026-09-17,
 the author's laptop): the proxy passes `Host:` through UNCHANGED as the tailnet
@@ -3347,7 +3338,7 @@ There are **two** read-only switches, and they answer different questions. Neith
 
 ### The instance switch (`MUNINN_WIKI_READONLY`)
 
-`MUNINN_WIKI_READONLY=1` marks an instance as NOT the wiki write owner. Muninn runs on two machines against the same wiki working trees, and `SCHEDULER_ENABLED=false` closes only the scheduler — `createDashboardRoutes` registers every route unconditionally, so the whole HTTP write surface stays live on the non-owner.
+`MUNINN_WIKI_READONLY=1` marks an instance as NOT the wiki write owner. Muninn runs on two machines against the same wiki working trees, and `SCHEDULER_ENABLED=false` closes only the scheduler — on the default profile `createDashboardRoutes` registers every route group (only `MUNINN_PROFILE=nais` drops some), so the whole HTTP write surface stays live on the non-owner.
 
 **It forbids page CONTENT writes, not git.** Enforced at exactly three seams, each taking an injectable `isReadonly` that defaults to `isWikiReadonly()` (so a call site added later is guarded by default, and a test drives one seam without touching the process env):
 
@@ -3392,13 +3383,14 @@ So each of them carries a **per-wiki prologue** (`egressRefusal` in `wiki-routes
 | `GET /api/wiki/ask` / `GET /api/wiki/explain` | retrieval + cited synthesis (collection-gated today; a `WIKI_EXTRA` 3rd segment lights them up) |
 | `POST /api/wiki/remember` | a Haiku distill + an embedding (it writes a Postgres row, not a file — hence egress list, not write list) |
 | `POST /api/wiki/atlas/draft-synthesis` | the drafting one-shot + a proposal the seam guard then refuses forever |
-| `POST /api/wiki/reindex` | every page BODY shipped to huginn's embedder — the one non-model way this wiki's content leaves the machine (collection-gated today, which is one `WIKI_EXTRA` third segment away from being untrue) |
+| `POST /api/wiki/reindex` | every page BODY shipped to huginn's embedder (collection-gated today, which is one `WIKI_EXTRA` third segment away from being untrue) |
+| `GET /api/wiki/similar` | the page's title, tags and first body paragraph shipped to huginn's embedder on every page open — no model call, the highest-volume egress the reader has |
 
 **The prologue's entry-less fallback is scoped to the requests it actually serves.** `resolveWikiRequest` answers `entry: undefined` for two unrelated shapes — the `WIKI_DIR` env override (no `?wiki=`/`?bot=` given), which the routes really do serve from `resolveWikiRoot(undefined)` and which therefore must be guarded, and an UNKNOWN name, which they serve not at all. `readonlyCandidateRoot(entry, unknownWiki)` separates them (`null` ⇒ no root ⇒ no refusal): keying on `entry === undefined` alone made a typo inherit the env root's policy, so with `WIKI_DIR` naming a read-only root `?wiki=typo` answered 403 "this wiki is read-only" about a wiki nobody asked for, and `/wiki?wiki=typo` rendered the banner + disabled Ask box to match. An unknown name keeps the preflight error each route already has. The same helper feeds the `/wiki` render flag, so page and routes cannot disagree.
 
 `/api/wiki/digest` is the one refusal that does not use the shared `error` key: the What's-new card reads `data.error` as "generation FAILED — keep the old digest, offer a retry", and a policy refusal is not a failure, so it answers 403 with `{digest: null, readonly: true, reason}` and the card simply hides.
 
-The **14 `readonlyRefusal` route guards are deliberately untouched** — inverting their ordering at every site to make them per-wiki is a much larger change than the surface warrants. What covers the gardener/backlog family instead, and both halves were corrected after review:
+The **`readonlyRefusal` route guards (`route-utils.ts`) are deliberately untouched** — inverting their ordering at every site to make them per-wiki is a much larger change than the surface warrants. What covers the gardener/backlog family instead, and both halves were corrected after review:
 
 - **`resolveBacklogBot` refuses a read-only root explicitly**, with the family's ONE shape — 403 + `readonly: true`, rendered by the shared `backlogRefusal(c, …)` rather than spelled at each of its ten call sites (a 400 reads as "your request was malformed", which is the one thing the caller cannot fix). Its `source !== "bot"` check covers a standalone read-only wiki; it does NOT cover a BOT whose own `wikiDir` is listed, and every drafting POST in that file (backlog-run, source-draft-{run,backlog,doc}, backlog-doc-delete) funnels through that one prologue.
 - **`proposals/:id/approve` refuses BEFORE the draft→approved CAS.** The root-keyed `applyWikiProposal` guard is reached only AFTER it, so — measured — approve returned 403 with the row left in `approved`, where the gate offers no verb at all (reject 409s "not reviewable"): stuck forever on a refusal that changed nothing. The cheap half of the apply-target lookup (wiki name → registry root, else bot → `wikiDir`) is hoisted above the CAS for it; the failing half stays below, since it flips the row to `error`. The read and the CAS are `BacklogRouteDeps` seams precisely so a test can drive the gap between them.
@@ -3597,4 +3589,4 @@ Comma-separated `name=path[=coll1+coll2][=botpin]` pairs registering **standalon
 
 ## `WIKI_READONLY_ROOTS` — the full entry from the root `CLAUDE.md` env table
 
-Comma-separated wiki **ROOTS** (same `~`/relative/absolute dialect as `WIKI_EXTRA`, resolved through the same `resolveConfiguredPath`) that this instance may only READ — however many other wikis it owns. Keyed on the resolved root, not the registry name, because every enforcement point already holds the root: the three content seams refuse before opening anything, and a **per-wiki prologue** on every `?wiki=`-steerable EGRESS route (`/api/wiki/{digest,ask,explain,factcheck,factcheck/claim,share,remember,ask/chat,factcheck/integrate,atlas/draft-synthesis}`) 403s before any model call, DB thread seed or `/agents` run registration. Registration buys three surfaces, not two — file writes, local reads, and routes that spend a model call on page content, two of which reach the **live web** via the fact-check prompt's WebFetch/search instructions; `DASHBOARD_HOST=127.0.0.1` bounds only the second. An entry matching no registered wiki fails **closed for itself** (it names a root nothing writes) and is warned about loudly. Unknown roots are writable, so the mechanism is inert until used. **Matching is root-EXACT, not prefix** (normalized + realpath-aware, so a symlinked or differently-cased spelling of the same directory matches, but a wiki registered at a SUBDIRECTORY of a listed root is NOT covered — list each root you mean). Two read paths deliberately stay outside it: `POST /api/wiki/reindex` is guarded but collection-gated (a root with no `wikiCollections` never reaches huginn anyway), and `src/wiki/ingest-backlog.ts`'s `collectWikiRefs` sweep walks **every** `.md` under the root without honouring `.wiki-reader.json`'s `include` — harmless today because it is reached only through bot-wiki gardener routes, which a read-only root now refuses. Surfaced on `/models` (Machine card) and injected into the reader as `__WIKI_READONLY_WIKI__`, which dims + blocks the write AND egress affordances. Set on this laptop for `~/.claude/projects` — Claude Code's own auto-memory, loaded into a session's context at start, so an HTTP write there edits the developer's instructions. Details: `src/wiki/CLAUDE.md`.
+Comma-separated wiki **ROOTS** (same `~`/relative/absolute dialect as `WIKI_EXTRA`, resolved through the same `resolveConfiguredPath`) that this instance may only READ — however many other wikis it owns. Keyed on the resolved root, not the registry name, because every enforcement point already holds the root: the three content seams refuse before opening anything, and a **per-wiki prologue** on every `?wiki=`-steerable EGRESS route (`/api/wiki/{digest,ask,explain,factcheck,factcheck/claim,share,remember,ask/chat,factcheck/integrate,atlas/draft-synthesis,reindex,similar}`) 403s before any model call, DB thread seed or `/agents` run registration. Registration buys three surfaces, not two — file writes, local reads, and routes that spend a model call on page content, two of which reach the **live web** via the fact-check prompt's WebFetch/search instructions; `DASHBOARD_HOST=127.0.0.1` bounds only the second. An entry matching no registered wiki fails **closed for itself** (it names a root nothing writes) and is warned about loudly. Unknown roots are writable, so the mechanism is inert until used. **Matching is root-EXACT, not prefix** (normalized + realpath-aware, so a symlinked or differently-cased spelling of the same directory matches, but a wiki registered at a SUBDIRECTORY of a listed root is NOT covered — list each root you mean). One read path deliberately stays outside it: `src/wiki/ingest-backlog.ts`'s `collectWikiRefs` sweep walks **every** `.md` under the root without honouring `.wiki-reader.json`'s `include` — harmless today because it is reached only through bot-wiki gardener routes, which a read-only root now refuses. Surfaced on `/models` (Machine card) and injected into the reader as `__WIKI_READONLY_WIKI__`, which dims + blocks the write AND egress affordances. Set on this laptop for `~/.claude/projects` — Claude Code's own auto-memory, loaded into a session's context at start, so an HTTP write there edits the developer's instructions. Details: `src/wiki/CLAUDE.md`.

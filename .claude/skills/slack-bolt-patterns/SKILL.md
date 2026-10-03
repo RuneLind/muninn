@@ -72,7 +72,7 @@ app.event("app_mention", async ({ event, client }) => {
 
 ## Event Handling
 
-### Duplicate Event Problem (CRITICAL)
+### Duplicate events
 
 When a user @mentions the bot, Slack fires **both** if subscribed to both:
 - `app_mention` — the @mention event

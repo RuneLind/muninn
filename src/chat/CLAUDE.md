@@ -23,8 +23,8 @@
 ### Chat State (state.ts)
 
 - `ChatState` class: conversations keyed by UUID, Map-based pub/sub to WebSocket subscribers.
-- `ChatEvent` union type: `message`, `status`, `text_delta`, `stream_clear`, `intent`, `tool_status`, `response_meta`, `conversation_created`.
-- Ephemeral events (`text_delta`, `intent`, `tool_status`) are broadcast-only — no state mutation.
+- `ChatEvent` union type: `message`, `status`, `conversation_created`, `text_delta`, `stream_clear`, `intent`, `tool_status`, `tool_end`, `usage_progress`, `response_meta`, `mcp_status`, `dev_run`, `dev_run_event`.
+- Ephemeral events (`text_delta`, `intent`, `tool_status`, `tool_end`, `usage_progress`) are broadcast-only — no state mutation.
 - `hydrateFromDb()` loads persisted conversations on startup with deterministic IDs from (userId, botName, platform).
 - `MAX_CONVERSATIONS` (50) caps how many conversations keep their MESSAGE HISTORY in memory — **shells are never evicted**. The cap used to delete the LRU shell, which was a permanent 404 for its owner and a silent write loss (`addMessage` returns early on a missing shell, and nothing can reconstruct a `crypto.randomUUID()` id). `trimHydratedMessages` now empties the LRU `messages` arrays instead; a trimmed conversation still resolves, still accepts writes, and reads its history from the DB.
 

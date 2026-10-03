@@ -1,6 +1,6 @@
 # Hivemind Module — Architecture & Rules
 
-Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan.md`.
+Phases 1, 2, 3, and 4 of the integration plan, archived in mimir at `archive/claude-hivemind/hivemind-integration-plan.md`.
 
 ## File Overview
 
@@ -23,10 +23,8 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
 
 ## Phase 1 scope
 
-- Single namespace per bot — takes the **first** entry of `hivemind.namespaces`. Multi-namespace lands in Phase 4.
 - Tools: `ask_peer` (blocking with timeout), `send_to_peer` (fire-and-forget), `list_peers`.
-- Pending-ask resolution by FIFO queue per `from_id`. The first inbound message from peer X resolves the oldest pending `ask_peer(X, ...)`.
-- No autonomous responses, no loop guards — those land in Phase 3 alongside autorespond.
+- Pending-ask resolution per `from_id`: token-first, then FIFO (see Common pitfalls #3).
 
 ## Phase 4 scope
 
@@ -48,10 +46,10 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
 - **Migration 037.** Backfills existing `peer:<name>` thread rows to
   `peer:private/<name>` (Phase 1+2+3 traffic was all on `private`).
 
-## Phase 2 scope (this revision)
+## Phase 2 scope
 
 - **Inbound peer threading.** Unsolicited messages (or async replies that arrive
-  after `ask_peer` has timed out) are routed to a `peer:<cwd-basename>` thread
+  after `ask_peer` has timed out) are routed to a `peer:<namespace>/<cwd-basename>` thread
   under the bot's default user (`bot_default_user` table). Persisted in
   `messages` with `role='peer'` and `from_peer_id` set to the broker's
   per-session UUID.
@@ -68,8 +66,6 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
   the most recent peer that spoke in that thread (looked up via
   `getMostRecentPeerIdForThread`). The leading `>` and an optional next token
   are stripped before send.
-- **No autorespond yet.** Peer messages surface in the UI but the bot does not
-  auto-reply. Phase 3 adds `autoRespondPeers` + loop guards.
 
 ## Phase 3 scope
 
@@ -300,10 +296,10 @@ The slow turn runs as `pendingAdvanceRun` (test-only seam, await it after
 
 1. **Broker script path.** The auto-start assumes `~/source/private/claude-hivemind/src/broker.ts`. Set `HIVEMIND_BROKER_SCRIPT` if your install lives elsewhere.
 2. **Port collisions.** MCP server uses 9180. Serena tool-proxy uses 9120, instances 9121+. Don't drop hivemind below that range.
-3. **FIFO ask matching.** Two concurrent `ask_peer` calls to the same peer match replies in send order — there's no correlation ID in the broker protocol. Don't rely on content matching.
+3. **Ask matching is token-first, then FIFO.** A reply that echoes an `ask_peer` call's minted `correlation_id` resolves that exact ask (`client.ts` `dispatchInboundMessage`); a reply with no token resolves the oldest pending ask to that peer, so un-echoed concurrent asks match in send order. Don't rely on content matching.
 4. **Tests use a stub broker.** `client.test.ts` spins up a mini WebSocket server on a random port and uses `brokerPort` injection. Don't accidentally run tests against the real broker. `router.test.ts` uses the real test DB — run `bun run db:setup:test` after schema changes.
 5. **Bot needs a default user for inbound routing.** The router drops inbound peer messages when `bot_default_user.user_id` is unset for that bot — there's no thread to attach the message to. Set one via the chat page or `PUT /chat/bot-preferences/<bot>/default-user`.
-6. **Peer thread name is cwd-derived, not id-derived.** Phase 2 uses `peer:<cwd-basename>` rather than `peer:<from_id>` because broker peer IDs rotate per session. Don't switch to `from_id` without designing for thread fragmentation across reconnects.
+6. **Peer thread name is cwd-derived, not id-derived.** Threads are `peer:<namespace>/<cwd-basename>` rather than `peer:<from_id>` because broker peer IDs rotate per session. Don't switch to `from_id` without designing for thread fragmentation across reconnects.
 7. **Autorespond is fire-and-forget.** `HivemindRouter.route` returns once the inbound message is persisted; the bot turn runs in the background. Tests can await `router.pendingAutorespond` to settle the in-flight promise. Don't await it from production callers — it's a test-only seam.
 8. **`processMessage` injection in tests.** `AutorespondDeps.processMessage` is an optional override so router tests can stub the AI pipeline. Production wires `defaultProcessMessage`. If you change `ProcessMessageParams`, check both call sites.
 9. **Cap hit auto-pauses.** Once `maxAutoTurnsPerHour` trips, `auto_respond_paused` stays true until the user manually unpauses via the chat-header pill. The cap reset is implicit (older assistant turns roll out of the hour), so a paused thread won't auto-resume.

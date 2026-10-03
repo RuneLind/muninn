@@ -53,7 +53,7 @@ docker exec muninn-postgres psql -U muninn -d muninn_test -c "YOUR SQL HERE"
 
 ## Schema overview
 
-13 tables total. All timestamps are `TIMESTAMPTZ`. UUIDs auto-generated. Most tables have `bot_name` for multi-bot isolation.
+33 tables; the complete schema is `db/init.sql`, and this overview covers the ones most often queried. All timestamps are `TIMESTAMPTZ`. UUIDs auto-generated. Most tables have `bot_name` for multi-bot isolation.
 
 ### Core data tables
 
@@ -66,7 +66,7 @@ docker exec muninn-postgres psql -U muninn -d muninn_test -c "YOUR SQL HERE"
 - Unique thread names per user+bot (`idx_threads_name`)
 
 **messages** — Full conversation history
-- `id` UUID PK, `user_id`, `bot_name`, `username`, `role` (user|assistant), `content`, `cost_usd`, `duration_ms`, `model`, `input_tokens`, `output_tokens`, `source`, `platform`, `thread_id` FK→threads, `created_at`
+- `id` UUID PK, `user_id`, `bot_name`, `username`, `role` (user|assistant|peer), `content`, `cost_usd`, `duration_ms`, `model`, `input_tokens`, `output_tokens`, `source`, `platform`, `thread_id` FK→threads, `created_at`
 
 **memories** — Semantic memory with vector embeddings
 - `id` UUID PK, `user_id`, `bot_name`, `content`, `summary`, `tags` TEXT[], `search_vector` TSVECTOR, `embedding` vector(384), `source_message_id` FK→messages, `scope` (personal|shared), `created_at`
@@ -80,7 +80,7 @@ docker exec muninn-postgres psql -U muninn -d muninn_test -c "YOUR SQL HERE"
 - `id` UUID PK, `user_id`, `bot_name`, `title`, `task_type` (reminder|briefing|custom), `prompt`, `schedule_hour`, `schedule_minute`, `schedule_days` INT[], `schedule_interval_ms`, `timezone`, `platform`, `enabled`, `last_run_at`, `next_run_at`, `created_at`, `updated_at`
 
 **watchers** — Background monitors (email, calendar, etc.)
-- `id` UUID PK, `user_id`, `bot_name`, `name`, `type` (email|calendar|github|news|goal), `config` JSONB, `interval_ms`, `enabled`, `last_run_at`, `last_notified_ids` JSONB, `created_at`, `updated_at`
+- `id` UUID PK, `user_id`, `bot_name`, `name`, `type` (email|calendar|github|news|goal|x|anthropic|wiki-gardener|wiki-linter|wiki-committer|consolidation-gardener), `config` JSONB, `interval_ms`, `enabled`, `last_run_at`, `last_success_at`, `last_notified_ids` JSONB, `force_next_run`, `created_at`, `updated_at`
 
 **user_settings** — Quiet hours, timezone
 - `user_id` TEXT PK, `quiet_start` INT, `quiet_end` INT, `timezone`, `created_at`, `updated_at`

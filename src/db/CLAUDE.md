@@ -98,8 +98,9 @@ extensions, order-independent). It skips cleanly when Postgres is unreachable.
 - Excluded from the diff: `schema_migrations` (bookkeeping; only rows differ) and
   `benchmark_*` (created by migrations 030-034 but intentionally absent from
   `init.sql` — experimental tooling fresh deploys don't carry).
-- The replay calls `runMigrations(url, { perMigrationTransaction: false })` because
-  migration 016 uses `CREATE INDEX CONCURRENTLY`, which can't run in a transaction.
+- `runMigrations` runs any migration whose file contains `CONCURRENTLY` outside a
+  transaction (migration 016 uses `CREATE INDEX CONCURRENTLY`, which can't run in
+  one), so the replay calls it plainly: `runMigrations(url, { quiet: true })`.
 - **When the guard fails**, add the missing object to whichever side lacks it (a new
   migration for an upgraded-only column, an `init.sql` line for a fresh-only index).
 
