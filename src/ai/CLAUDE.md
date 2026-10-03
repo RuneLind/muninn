@@ -69,8 +69,8 @@ Parses Claude CLI NDJSON output line-by-line for real-time progress:
 
 Assembles prompts from multiple sources in parallel:
 
-1. **System prompt**: persona (CLAUDE.md) + user identity + tool restrictions + memories + goals + scheduled tasks + recent alerts
-2. **User prompt**: conversation history (in `<conversation_history>` tags) + current message
+1. **System prompt**: persona (CLAUDE.md) + user identity + tool restrictions + standing rules — stable across turns, so it caches
+2. **User prompt**: conversation history (in `<conversation_history>` tags) + this turn's memories, goals, scheduled tasks and recent alerts (in `<context>` tags) + current message
 
 Parallel fetches: recent messages, embedding generation, active goals, scheduled tasks, recent alerts, then hybrid memory search.
 

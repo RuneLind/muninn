@@ -14,6 +14,7 @@ import {
   SUMMARY_STRUCTURE_BULLETS,
 } from "./summarizer-shared.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
+import { captureThinkingFor, findCapturePreset, SHIPPED_CAPTURE_PRESETS } from "./presets.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
@@ -379,6 +380,35 @@ describe("runCaptureOneShot", () => {
     const h = harness({ thinkingMaxTokens: 0 });
     await runCaptureOneShot(h.opts);
     expect(h.seen[0]!.thinkingMaxTokens).toBe(0);
+  });
+
+  test("the default (capped) budget also sends effort low, recorded on the span", async () => {
+    const h = harness();
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!.effort).toBe("low");
+    expect(h.calls.find((c) => c.op === "start" && c.label === "claude")!.attrs).toMatchObject({
+      thinkingMaxTokens: CAPTURE_THINKING_MAX_TOKENS,
+      effort: "low",
+    });
+  });
+
+  test("an inherit kind (null, e.g. `deep`) gets no effort override, so the bot's own effort applies", async () => {
+    const h = harness({ thinkingMaxTokens: captureThinkingFor(findCapturePreset(SHIPPED_CAPTURE_PRESETS, "deep")!) });
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!).not.toHaveProperty("effort");
+    expect(h.calls.find((c) => c.op === "start" && c.label === "claude")!.attrs).not.toHaveProperty("effort");
+  });
+
+  test("a capped kind (`standard`) gets effort low", async () => {
+    const h = harness({ thinkingMaxTokens: captureThinkingFor(findCapturePreset(SHIPPED_CAPTURE_PRESETS, "standard")!) });
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!.effort).toBe("low");
+  });
+
+  test("an explicit budget is forwarded without effort", async () => {
+    const h = harness({ thinkingMaxTokens: 0 });
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!).not.toHaveProperty("effort");
   });
 
   test("binds bot + connector + traceId onto the run BEFORE the model call", async () => {

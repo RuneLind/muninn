@@ -193,10 +193,13 @@ export interface GardenerSeamContext {
    * `wiki_gardener_draft` row). Optional — absent ⇒ every tracer call is a no-op.
    */
   tracer?: Tracer;
+  /** Test seam for the draft call — production callers omit it. */
+  oneShot?: typeof executeOneShot;
 }
 
 export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeams {
   const { botConfig, config, apiUrl, wikiDir, profileUserId, tracer } = ctx;
+  const oneShot = ctx.oneShot ?? executeOneShot;
   const name = botConfig.name;
   const collections = (botConfig.wikiCollections ?? []).filter((c) => c && c.trim());
   const seams: SharedGardenerSeams = {
@@ -249,7 +252,7 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
       // `effort` carries the cap on adaptive-thinking models, which ignore the budget.
       const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS, effort: "low" as const };
       const startedAt = performance.now();
-      const exec = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
+      const exec = await oneShot(prompt, config, draftBotConfig, { timeoutMs });
       const durationMs = performance.now() - startedAt;
       // executeOneShot / one-shot.ts never calls trackUsage (many callers —
       // summarizers/research — where blanket usage rows would be scope creep), so

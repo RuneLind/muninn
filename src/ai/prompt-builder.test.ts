@@ -125,11 +125,18 @@ describe("buildPrompt", () => {
     expect(result.systemPrompt).not.toContain("Morning briefing");
   });
 
-  test("per-turn context sits after the history and before the current message", async () => {
+  test("per-turn context sits in one <context> block after the history and before the current message", async () => {
     const result = await bp({ currentMessage: "new question" });
-    const ctx = result.userPrompt.indexOf("Prefers TypeScript over JavaScript");
-    expect(ctx).toBeGreaterThan(result.userPrompt.indexOf("</conversation_history>"));
-    expect(ctx).toBeLessThan(result.userPrompt.lastIndexOf("new question"));
+    const u = result.userPrompt;
+    const open = u.indexOf("<context>\n");
+    const close = u.indexOf("\n</context>");
+    expect(open).toBeGreaterThan(u.indexOf("</conversation_history>"));
+    for (const item of ["Prefers TypeScript over JavaScript", "Learn Rust", "Morning briefing"]) {
+      expect(u.indexOf(item)).toBeGreaterThan(open);
+      expect(u.indexOf(item)).toBeLessThan(close);
+    }
+    // The user's own words are everything after the closing tag, and nothing else is.
+    expect(u.slice(close + "\n</context>".length).trim()).toBe("new question");
   });
 
   test("includes conversation history in user prompt", async () => {

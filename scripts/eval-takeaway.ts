@@ -33,7 +33,7 @@ import { executeOneShot } from "../src/ai/one-shot.ts";
 import { callHaikuWithFallback } from "../src/ai/haiku-direct.ts";
 import { parseSummaryResponse } from "../src/utils/summary-parser.ts";
 import { buildVimeoSystemPrompt } from "../src/vimeo/summarizer.ts";
-import { captureBotConfigFor, captureThinkingFor, findCapturePreset, resolveCapturePresets, type CapturePreset } from "../src/summaries/presets.ts";
+import { CAPTURE_EFFORT, captureBotConfigFor, captureThinkingFor, findCapturePreset, resolveCapturePresets, type CapturePreset } from "../src/summaries/presets.ts";
 import { SUMMARY_STRUCTURE_BULLETS } from "../src/summaries/summary-structure.ts";
 import { CAPTURE_THINKING_MAX_TOKENS } from "../src/summaries/summarizer-shared.ts";
 import { groundTakeaway, splitClosingTakeaway } from "../src/summaries/takeaway-check.ts";
@@ -145,8 +145,8 @@ for (let n = 1; n <= runs; n++) {
     systemPrompt,
     timeoutMs: 900_000,
     // `null` from captureThinkingFor means the bot's own budget (deep); the
-    // seam's default is the capture cap.
-    ...(thinking === null ? {} : { thinkingMaxTokens: CAPTURE_THINKING_MAX_TOKENS }),
+    // seam's default is the capture cap, plus the low effort production sends with it.
+    ...(thinking === null ? {} : { thinkingMaxTokens: CAPTURE_THINKING_MAX_TOKENS, effort: CAPTURE_EFFORT }),
   });
   const { summary } = parseSummaryResponse(result.result);
   const split = splitClosingTakeaway(summary);

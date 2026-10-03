@@ -291,3 +291,81 @@ test("the pass label is a token that clears 4.5:1 on the modal's panel", () => {
   expect(block).toContain("var(--text-muted)");
   expect(block).not.toContain("var(--text-faint)");
 });
+
+// Per-turn context moved from the system prompt to a <context> block in the user
+// turn (PR #637). The modal must find it there, and still render older snapshots.
+const CONTEXT_BLOCK = [
+  "<context>",
+  "Your memories about this user:\n- Prefers TypeScript [lang]",
+  "User's active goals:\n- Learn Rust",
+  "User's scheduled tasks:\n- Morning briefing (briefing, 08:00)",
+  "Recent proactive messages sent to user (last 24h):\n- [09:00] watcher: inbox digest",
+  "</context>",
+].join("\n\n");
+const NEW_USER_PROMPT =
+  "<conversation_history>\n[user/Rune] earlier\n[assistant] reply\n</conversation_history>\n\n" +
+  CONTEXT_BLOCK + "\n\nwhat is next?";
+const OLD_SYSTEM_PROMPT =
+  "persona text\n\nYour memories about this user:\n- Prefers TypeScript [lang]\n\nUser's active goals:\n- Learn Rust";
+
+type Section = { key: string; content?: string };
+const parseUser = (t: string) => (ctx as unknown as { parseUserSections: (t: string) => Section[] }).parseUserSections(t);
+
+test("the user turn's <context> block parses into its own sections, between history and the current message", () => {
+  const sections = parseUser(NEW_USER_PROMPT);
+  expect(sections.map((s) => s.key)).toEqual(["history", "personal-memories", "goals", "tasks", "alerts", "current"]);
+  expect(sections.find((s) => s.key === "goals")!.content).toBe("User's active goals:\n- Learn Rust");
+});
+
+test("Current Message is only the text after </context>", () => {
+  const current = parseUser(NEW_USER_PROMPT).find((s) => s.key === "current")!;
+  expect(current.content).toBe("what is next?");
+});
+
+test("a <context> block with no history before it still parses", () => {
+  const keys = parseUser(CONTEXT_BLOCK + "\n\nhi").map((s) => s.key);
+  expect(keys).toEqual(["personal-memories", "goals", "tasks", "alerts", "current"]);
+});
+
+test("the user tab renders the context sections as sections, not inside Current Message", async () => {
+  nextResponse.body = { systemPrompt: "persona", userPrompt: NEW_USER_PROMPT, pass: "", kind: "chat" };
+  await ctx.openPromptModal();
+  const html = body();
+  expect(html).toContain('data-section="goals"');
+  const current = html.slice(html.indexOf('class="current-message"'));
+  expect(current).toContain("what is next?");
+  expect(current).not.toContain("Learn Rust");
+});
+
+/** Opens a snapshot with a prompt_build span, then clicks the stat pill for `section`. */
+async function clickPill(snapshot: Record<string, unknown>, section: string): Promise<"system" | "user" | "none"> {
+  ctx.waterfallSpans = [{ name: "prompt_build", attributes: { messagesCount: 2, memoriesCount: 1, goalsCount: 1, scheduledTasksCount: 1, alertsCount: 1 } }];
+  const doc = ctx.document as { getElementById: (id: string) => ReturnType<typeof makeEl> };
+  const handlers: Record<string, () => void> = {};
+  const stats = doc.getElementById("promptStats");
+  // The stub has no DOM: hand back one fake pill per clickable pill tag, with every data-* attribute.
+  stats.querySelectorAll = (() =>
+    [...stats.innerHTML.matchAll(/<div class="prompt-stat-pill clickable"([^>]*)>/g)].map((m) => {
+      const dataset = Object.fromEntries([...m[1]!.matchAll(/data-(\w+)="([^"]*)"/g)].map((a) => [a[1], a[2]]));
+      return { dataset, addEventListener: (_e: string, fn: () => void) => { handlers[dataset.section!] = fn; } };
+    })) as never;
+  nextResponse.body = snapshot;
+  await ctx.openPromptModal();
+  ctx.setTimeout = () => 0; // the scroll-into-view step is not under test
+  handlers[section]!();
+  const sys = doc.getElementById("tabSystem").classList.contains("active");
+  const user = doc.getElementById("tabUser").classList.contains("active");
+  return sys && !user ? "system" : user && !sys ? "user" : "none";
+}
+
+test("stat pills jump to the user tab when the section is in the user turn's <context>", async () => {
+  const snap = { systemPrompt: "persona", userPrompt: NEW_USER_PROMPT, pass: "", kind: "chat" };
+  for (const key of ["personal-memories", "goals", "tasks", "alerts"]) expect(await clickPill(snap, key)).toBe("user");
+});
+
+test("an OLD snapshot with the blocks in the system prompt still renders them there, and its pills go there", async () => {
+  const sys = (ctx as unknown as { parseSystemSections: (t: string) => Section[] }).parseSystemSections(OLD_SYSTEM_PROMPT);
+  expect(sys.map((s) => s.key)).toEqual(["persona", "personal-memories", "goals"]);
+  const snap = { systemPrompt: OLD_SYSTEM_PROMPT, userPrompt: "<conversation_history>\n[user/Rune] hi\n</conversation_history>\n\nnow", pass: "", kind: "chat" };
+  expect(await clickPill(snap, "goals")).toBe("system");
+});

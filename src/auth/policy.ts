@@ -107,7 +107,7 @@ export function pinnedLocalUserId(): string | null {
  * read into this user's prompt.
  *
  * `shared` means "visible to every user of this bot" and its rows go verbatim
- * into the system prompt under `Shared team knowledge:` — with the scope
+ * into the user turn's `<context>` block under `Shared team knowledge:` — with the scope
  * assigned per turn by a fire-and-forget Haiku classifier, i.e. by a model, not
  * by the person. On a single-identity instance that is the feature. On an
  * instance that authenticates, it is one colleague's content entering another

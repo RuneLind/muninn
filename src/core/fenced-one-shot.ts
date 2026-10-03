@@ -172,6 +172,8 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       : opts.thinkingMaxTokens === undefined
         ? FENCED_THINKING_MAX_TOKENS
         : opts.thinkingMaxTokens;
+    // Effort only with the default cap, so an explicit caller budget is not pinned to low.
+    const effort = thinking !== null && opts.thinkingMaxTokens === undefined ? FENCED_EFFORT : undefined;
 
     // A fresh object, never a mutation — `botConfig` is the shared discovered
     // config, and every other field (name / connector / model) is carried over so
@@ -187,12 +189,13 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-      ...(thinking !== null ? { effort: FENCED_EFFORT } : {}),
+      ...(effort ? { effort } : {}),
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
       startAttrs: {
         source: opts.source,
         ...(opts.startAttrs ?? {}),
         ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+        ...(effort ? { effort } : {}),
       },
     });
 

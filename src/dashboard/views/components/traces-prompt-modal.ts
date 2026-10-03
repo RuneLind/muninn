@@ -437,23 +437,36 @@ export function tracesPromptModalScript(): string {
       var a = buildSpan.attributes;
       var stats = [
         { value: a.messagesCount, label: 'Messages', section: 'history', tab: 'user' },
-        { value: a.memoriesCount, label: 'Memories', section: 'personal-memories', tab: 'system' },
-        { value: a.goalsCount, label: 'Goals', section: 'goals', tab: 'system' },
-        { value: a.scheduledTasksCount, label: 'Tasks', section: 'tasks', tab: 'system' },
-        { value: a.alertsCount, label: 'Alerts', section: 'alerts', tab: 'system' },
+        { value: a.memoriesCount, label: 'Memories', section: 'personal-memories' },
+        { value: a.goalsCount, label: 'Goals', section: 'goals' },
+        { value: a.scheduledTasksCount, label: 'Tasks', section: 'tasks' },
+        { value: a.alertsCount, label: 'Alerts', section: 'alerts' },
       ].filter(function(s) { return s.value != null; });
       el.innerHTML = stats.map(function(s) {
         var clickable = s.value > 0;
         var cls = 'prompt-stat-pill' + (clickable ? ' clickable' : '');
-        var attrs = clickable ? ' data-section="' + s.section + '" data-tab="' + s.tab + '"' : '';
+        var attrs = clickable ? ' data-section="' + s.section + '"' : '';
         return '<div class="' + cls + '"' + attrs + '><span class="stat-val">' + s.value + '</span> ' + s.label + '</div>';
       }).join('');
       // Attach click handlers via event delegation
       el.querySelectorAll('.prompt-stat-pill.clickable').forEach(function(pill) {
         pill.addEventListener('click', function() {
-          jumpToSection(pill.dataset.section, pill.dataset.tab);
+          jumpToSection(pill.dataset.section, sectionTab(pill.dataset.section));
         });
       });
+    }
+
+    /**
+     * The tab a section renders on. Per-turn context moved from the system
+     * prompt into the user turn's <context> block; older snapshots still carry
+     * it in the system prompt, so ask the prompt on screen rather than assume.
+     */
+    function sectionTab(sectionKey) {
+      if (sectionKey === 'history') return 'user';
+      var data = activePromptKey ? promptCache[activePromptKey] : null;
+      if (!data) return 'system';
+      var inUser = parseUserSections(data.userPrompt || '').some(function(s) { return s.key === sectionKey; });
+      return inUser ? 'user' : 'system';
     }
 
     function jumpToSection(sectionKey, tab) {
@@ -478,19 +491,37 @@ export function tracesPromptModalScript(): string {
       }, 50);
     }
 
+    // Per-turn blocks: in the user turn's <context> since the prompt-cache split,
+    // in the system prompt on older snapshots. Both alert headings are matched.
+    var CONTEXT_MARKERS = [
+      { key: 'personal-memories', label: 'Personal Memories', marker: 'Your memories about this user:', color: 'memories' },
+      { key: 'shared-memories', label: 'Shared Memories', marker: 'Shared team knowledge:', color: 'memories' },
+      { key: 'goals', label: 'Goals', marker: "User's active goals:", color: 'goals' },
+      { key: 'tasks', label: 'Scheduled Tasks', marker: "User's scheduled tasks:", color: 'tasks' },
+      { key: 'alerts', label: 'Alerts', marker: 'Recent proactive messages sent to user (last 24h):', color: 'alerts' },
+      { key: 'alerts', label: 'Alerts', marker: 'Recent watcher alerts sent to user (last 24h):', color: 'alerts' },
+    ];
+
     function parseSystemSections(text) {
       var markers = [
         { key: 'identity', label: 'User Identity', marker: 'You are currently talking to:', color: 'identity' },
         { key: 'restrictions', label: 'Tool Restrictions', marker: '## Verkt\\u00f8yrestriksjoner', color: 'restrictions' },
-        { key: 'personal-memories', label: 'Personal Memories', marker: 'Your memories about this user:', color: 'memories' },
-        { key: 'shared-memories', label: 'Shared Memories', marker: 'Shared team knowledge:', color: 'memories' },
-        { key: 'goals', label: 'Goals', marker: "User's active goals:", color: 'goals' },
-        { key: 'tasks', label: 'Scheduled Tasks', marker: "User's scheduled tasks:", color: 'tasks' },
-        { key: 'alerts', label: 'Alerts', marker: 'Recent watcher alerts sent to user (last 24h):', color: 'alerts' },
+      ].concat(CONTEXT_MARKERS, [
         { key: 'knowledge', label: 'Knowledge', marker: 'Relevant company knowledge (from Notion):', color: 'knowledge' },
         { key: 'slack-post', label: 'Slack Posting', marker: '## Slack Channel Posting', color: 'slack' },
         { key: 'channel-context', label: 'Channel Context', marker: '## Channel Context', color: 'slack' },
-      ];
+      ]);
+      var marked = parseMarkedSections(text, markers);
+      var sections = [];
+      var personaText = text.slice(0, marked.firstPos).trim();
+      if (personaText) {
+        sections.push({ key: 'persona', label: 'Persona', color: 'persona', content: personaText, collapsed: true });
+      }
+      return sections.concat(marked.sections);
+    }
+
+    /** Splits text at each marker found; returns the sections and where the first one starts. */
+    function parseMarkedSections(text, markers) {
       var found = [];
       for (var i = 0; i < markers.length; i++) {
         var idx = text.indexOf(markers[i].marker);
@@ -501,33 +532,37 @@ export function tracesPromptModalScript(): string {
       found.sort(function(a, b) { return a.pos - b.pos; });
       var sections = [];
       var firstPos = found.length > 0 ? found[0].pos : text.length;
-      var personaText = text.slice(0, firstPos).trim();
-      if (personaText) {
-        sections.push({ key: 'persona', label: 'Persona', color: 'persona', content: personaText, collapsed: true });
-      }
       for (var i = 0; i < found.length; i++) {
         var start = found[i].pos;
         var end = i + 1 < found.length ? found[i + 1].pos : text.length;
         var content = text.slice(start, end).trim();
         sections.push({ key: found[i].key, label: found[i].label, color: found[i].color, content: content, collapsed: false });
       }
-      return sections;
+      return { sections: sections, firstPos: firstPos };
     }
 
     function parseUserSections(text) {
       var sections = [];
-      var histStart = text.indexOf('<conversation_history>');
-      var histEnd = text.indexOf('</conversation_history>');
+      var rest = text;
+      var histStart = rest.indexOf('<conversation_history>');
+      var histEnd = rest.indexOf('</conversation_history>');
       if (histStart >= 0 && histEnd >= 0) {
-        var histContent = text.slice(histStart + '<conversation_history>'.length, histEnd).trim();
-        var currentMsg = text.slice(histEnd + '</conversation_history>'.length).trim();
+        var histContent = rest.slice(histStart + '<conversation_history>'.length, histEnd).trim();
         var messages = parseConversationMessages(histContent);
         sections.push({ key: 'history', label: 'Conversation History', color: 'history', messages: messages, collapsed: messages.length > 10 });
-        if (currentMsg) {
-          sections.push({ key: 'current', label: 'Current Message', color: 'current', content: currentMsg, collapsed: false });
-        }
-      } else {
-        sections.push({ key: 'current', label: 'Current Message', color: 'current', content: text.trim(), collapsed: false });
+        rest = rest.slice(histEnd + '</conversation_history>'.length);
+      }
+      // The per-turn <context> block sits between the history and the user's own words.
+      var ctxStart = rest.indexOf('<context>');
+      var ctxEnd = rest.indexOf('</context>');
+      if (ctxStart >= 0 && ctxEnd > ctxStart && rest.slice(0, ctxStart).trim() === '') {
+        var ctx = parseMarkedSections(rest.slice(ctxStart + '<context>'.length, ctxEnd), CONTEXT_MARKERS);
+        sections = sections.concat(ctx.sections);
+        rest = rest.slice(ctxEnd + '</context>'.length);
+      }
+      var currentMsg = rest.trim();
+      if (currentMsg) {
+        sections.push({ key: 'current', label: 'Current Message', color: 'current', content: currentMsg, collapsed: false });
       }
       return sections;
     }
@@ -560,22 +595,24 @@ export function tracesPromptModalScript(): string {
         container.innerHTML = '<pre>' + esc(text) + '</pre>';
         return;
       }
-      container.innerHTML = sections.map(function(s) {
-        var items = countItems(s.content);
-        var badge = items > 0 ? '<span class="prompt-section-badge">' + items + ' items</span>' : '';
-        var meta = fmtCharCount(s.content.length);
-        var bodyClass = s.collapsed ? 'prompt-section-body hidden' : 'prompt-section-body';
-        var chevClass = s.collapsed ? 'prompt-section-chevron collapsed' : 'prompt-section-chevron';
-        return '<div class="prompt-section section-' + s.color + '" data-section="' + s.key + '">' +
-          '<div class="prompt-section-header" onclick="toggleSection(this)">' +
-            '<span class="' + chevClass + '">\\u25BC</span>' +
-            '<span class="prompt-section-title">' + esc(s.label) + '</span>' +
-            badge +
-            '<span class="prompt-section-meta">' + meta + '</span>' +
-          '</div>' +
-          '<div class="' + bodyClass + '">' + esc(s.content) + '</div>' +
-        '</div>';
-      }).join('');
+      container.innerHTML = sections.map(renderTextSection).join('');
+    }
+
+    function renderTextSection(s) {
+      var items = countItems(s.content);
+      var badge = items > 0 ? '<span class="prompt-section-badge">' + items + ' items</span>' : '';
+      var meta = fmtCharCount(s.content.length);
+      var bodyClass = s.collapsed ? 'prompt-section-body hidden' : 'prompt-section-body';
+      var chevClass = s.collapsed ? 'prompt-section-chevron collapsed' : 'prompt-section-chevron';
+      return '<div class="prompt-section section-' + s.color + '" data-section="' + s.key + '">' +
+        '<div class="prompt-section-header" onclick="toggleSection(this)">' +
+          '<span class="' + chevClass + '">\\u25BC</span>' +
+          '<span class="prompt-section-title">' + esc(s.label) + '</span>' +
+          badge +
+          '<span class="prompt-section-meta">' + meta + '</span>' +
+        '</div>' +
+        '<div class="' + bodyClass + '">' + esc(s.content) + '</div>' +
+      '</div>';
     }
 
     function renderUserPrompt(text, container) {
@@ -606,6 +643,8 @@ export function tracesPromptModalScript(): string {
               }).join('') +
             '</div>' +
           '</div>';
+        } else if (s.key !== 'current') {
+          return renderTextSection(s);
         } else {
           return '<div class="current-message-wrapper">' +
             '<div class="current-message-label">Current Message</div>' +

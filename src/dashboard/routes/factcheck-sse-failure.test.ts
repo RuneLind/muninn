@@ -56,12 +56,15 @@ mock.module("../../db/traces.ts", () => ({
   },
 }));
 
+// Phase 1: one claim by default, so the run takes the single-claim path (no
+// compose). The compose case below swaps in two.
+let extractedClaims: { title: string; quote: string }[] = [{ title: "The sky is blue", quote: "the sky is blue" }];
+
 const realHaiku = await import("../../ai/haiku-direct.ts");
 mock.module("../../ai/haiku-direct.ts", () => ({
   ...realHaiku,
-  // Phase 1: one claim, so the run takes the single-claim path (no compose).
   callHaikuWithFallback: async () => ({
-    result: JSON.stringify({ claims: [{ title: "The sky is blue", quote: "the sky is blue" }] }),
+    result: JSON.stringify({ claims: extractedClaims }),
     inputTokens: 10,
     outputTokens: 5,
     numTurns: 1,
@@ -71,7 +74,7 @@ mock.module("../../ai/haiku-direct.ts", () => ({
 }));
 
 const { streamFactcheckSSE } = await import("./factcheck-sse.ts");
-const { FACTCHECK_CLAIM_TIMEOUT_MS } = await import("./factcheck-sse.ts");
+const { FACTCHECK_CLAIM_TIMEOUT_MS, COMPOSE_BUDGET_MS } = await import("./factcheck-sse.ts");
 
 type SseEvent = { event: string; data: Record<string, unknown> };
 
@@ -256,5 +259,47 @@ describe("failed claim — rebuilt tool child spans", () => {
 
   test("the non-timeout failure path attaches its tool spans too", () => {
     expect(claimChildren(errorRun).map((s) => s.name).sort()).toEqual(["WebFetch", "WebSearch"]);
+  });
+});
+
+describe("multi-claim compose — thinking controls", () => {
+  test("the compose call runs at low effort (thinkingMaxTokens: 0 is ignored on adaptive-thinking models)", async () => {
+    extractedClaims = [
+      { title: "The sky is blue", quote: "The sky is blue" },
+      { title: "Water is wet", quote: "Water is wet" },
+    ];
+    const composeOpts: Record<string, unknown>[] = [];
+    const claimOpts: Record<string, unknown>[] = [];
+    const oneShot = async (_p: string, _c: unknown, _b: unknown, o: Record<string, unknown> = {}) => {
+      if (o.timeoutMs === COMPOSE_BUDGET_MS) {
+        composeOpts.push(o);
+        return { result: "Overall: fine.", inputTokens: 1, outputTokens: 1, numTurns: 1, durationMs: 1 };
+      }
+      claimOpts.push(o);
+      throw new Error("claim verify not under test");
+    };
+    try {
+      const app = new Hono();
+      app.get("/fc", (c) =>
+        streamFactcheckSSE(c, {
+          config,
+          botConfig,
+          body: "The sky is blue. Water is wet.",
+          meta: { title: "Sky", tags: [], type: "concept" },
+          wikiName: "testwiki",
+          mode: "article",
+          baseHash: "deadbeef",
+          oneShot: oneShot as never,
+        }),
+      );
+      await (await app.request("/fc")).text();
+    } finally {
+      extractedClaims = [{ title: "The sky is blue", quote: "the sky is blue" }];
+    }
+    expect(claimOpts).toHaveLength(2);
+    expect(composeOpts).toHaveLength(1);
+    expect(composeOpts[0]!.effort).toBe("low");
+    // The per-claim verifies keep the bot's own effort.
+    for (const o of claimOpts) expect(o).not.toHaveProperty("effort");
   });
 });

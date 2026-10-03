@@ -158,8 +158,10 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
     userParts.push(formatConversationHistory(history));
   }
 
+  // Tagged so the user's own words follow a clear boundary; the /traces prompt
+  // modal splits the user turn on these tags too.
   if (contextParts.length > 0) {
-    userParts.push(contextParts.join("\n\n"));
+    userParts.push(`<context>\n${contextParts.join("\n\n")}\n</context>`);
   }
 
   userParts.push(currentMessage);

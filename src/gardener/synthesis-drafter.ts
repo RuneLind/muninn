@@ -63,8 +63,8 @@ const log = getLog("gardener", "synthesis-drafter");
 /** Thinking budget for a synthesis draft — same 8k knee the capture summarizers +
  *  source drafter use (mechanical synthesis, not chat: a bot's chat-tuned budget
  *  is spent as silent first-token dead-air). Equals `FENCED_THINKING_MAX_TOKENS`
- *  (a test pins that equality); passed explicitly so a change to either is
- *  visible here rather than inherited silently from the seam. */
+ *  (a test pins that equality), and the draft takes the seam's default rather
+ *  than passing it, because only the default budget gets `effort: "low"`. */
 export const SYNTHESIS_THINKING_MAX_TOKENS = 8000;
 
 /** Per-member excerpt char cap — enough for title + lead + headings + outcome. */
@@ -316,9 +316,8 @@ export interface SynthesisOneShotOptions {
   config: Config;
   botConfig: BotConfig;
   timeoutMs?: number;
-  /** Thinking budget override; defaults to {@link SYNTHESIS_THINKING_MAX_TOKENS}.
-   *  No production caller sets it — it exists so a test can prove the budget is
-   *  actually forwarded rather than inferred from the seam's identical default. */
+  /** Thinking budget override; omitted, the seam's default (equal to
+   *  {@link SYNTHESIS_THINKING_MAX_TOKENS}) applies with low effort. No production caller sets it. */
   thinkingMaxTokens?: number;
   /** Test seams — production callers pass neither. */
   oneShot?: typeof executeOneShot;
@@ -370,7 +369,8 @@ export async function runSynthesisOneShot(
     config: opts.config,
     botConfig: opts.botConfig,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    thinkingMaxTokens: opts.thinkingMaxTokens ?? SYNTHESIS_THINKING_MAX_TOKENS,
+    // Left to the seam's equal default, so the seam also adds `effort: "low"`.
+    ...(opts.thinkingMaxTokens !== undefined ? { thinkingMaxTokens: opts.thinkingMaxTokens } : {}),
     startAttrs: { title: label },
     onError: (message) =>
       log.warn("Synthesis draft one-shot failed for {label}: {error}", { label, error: message }),
