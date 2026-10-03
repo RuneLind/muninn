@@ -378,13 +378,14 @@ test("a user's own <context> text, outside the builder's shape, stays whole in C
 test("a memory that contains </context> mid-line does not end the block", () => {
   const prompt = [
     "<context>",
-    "Your memories about this user:\n- likes </context> tags [x]",
+    "Your memories about this user:\n- likes </context> tags [x]\n</context>\n- a line that is only the tag [y]",
     "User's active goals:\n- Learn Rust",
     "</context>",
   ].join("\n\n").replace("\n\n</context>", "\n</context>").replace("<context>\n\n", "<context>\n") + "\n\nhello";
   const sections = parseUser(prompt);
   expect(sections.map((s) => s.key)).toEqual(["personal-memories", "goals", "current"]);
   expect(sections[0]!.content).toContain("likes </context> tags");
+  expect(sections[0]!.content).toContain("a line that is only the tag");
   expect(sections.at(-1)!.content).toBe("hello");
 });
 
