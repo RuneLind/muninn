@@ -1122,7 +1122,7 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
   - **The route is the FIFTH call site of `writeWikiPage`**, and the third of
     the three that write metadata in NO-LOG mode (the two `/plans` flips are the
     others; the fact-check append and the integrate apply both log and commit):
-    no `log.md` line, no reindex, no commit. It DOES refresh the wiki index
+    no `log.md` line, no reindex. It DOES refresh the wiki index
     inside the write, because the rail reads that index behind a 5-minute TTL,
     and it reads the index with `refresh: true` BEFORE deciding too — the key's
     spelling and the one-label check are decisions made off that index, and the
@@ -1130,11 +1130,18 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     `setFrontmatterScalar` (`src/plans/frontmatter.ts`), so there is still
     exactly one line-upsert implementation; the label is written with its
     `after: "series"` anchor so the pair stays together through a head move.
-  - **Who commits it.** mimir: the repo-sync loop. A BOT wiki: the daily
-    `wiki-committer` sweeper, up to ~24 h later, under a `[sweep]` subject that
-    bypasses that bot's own `wikiAutoCommit` policy. A standalone `WIKI_EXTRA`
-    wiki outside `SYNC_REPOS`: **nobody** — the edit sits in the working tree,
-    and the write logs one `warn` saying so (`src/wiki/series-committer.ts`).
+  - **Who commits it.** mimir: the repo-sync loop, where a `wiki`-mode
+    `SYNC_REPOS` entry lists it. A BOT wiki: the daily `wiki-committer` sweeper,
+    up to ~24 h later, under a `[sweep]` subject that bypasses that bot's own
+    `wikiAutoCommit` policy. A standalone `WIKI_EXTRA` wiki outside every
+    `wiki`-mode entry (`plain` and `status-only` never commit): **the route
+    itself** — `[series] edit: <relPath>`, that one page only, no push — but
+    only when the wiki root is its repo's toplevel and the repo has no remote,
+    so mimir on a machine without `SYNC_REPOS` and a code repo's `docs/wiki` are
+    left alone. Any other case, or a commit that does not land, logs one `warn`
+    (`src/wiki/series-committer.ts`). Before, it only warned, and the
+    melosys-kode-wiki edit of 2026-10-02 sat uncommitted until another session
+    found it.
   - **ONE page per call**, `{wiki?, relPath, baseHash, series: string|null,
     seriesLabel?: string|null}`. The status ladder, in full: **415** a
     `content-type` that is not `application/json` and **403** a cross-site POST
