@@ -1,6 +1,6 @@
 # Hivemind Module — Architecture & Rules
 
-Phases 1, 2, 3, and 4 of the integration plan, archived in mimir at `archive/claude-hivemind/hivemind-integration-plan.md`.
+Phases 1, 2, 3, and 4 of the integration plan, archived in mimir at `archive/muninn/hivemind-integration-plan.md`.
 
 ## File Overview
 

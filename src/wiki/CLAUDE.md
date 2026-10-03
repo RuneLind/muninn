@@ -1856,8 +1856,8 @@ themes. `--text-dim` is 3.24:1 dark / 3.74:1 light and `--text-muted` measures
 carrying the PR numbers the pairing rests on. A hovered row is not a transient
 state: it is where the pointer is whenever a row is being read.
 
-**Each row carries the series editor's `⋯` opener** (`seriesMenuBtnHtml`, only
-where `canEditSeriesPage` allows — see Series → The editor). Which rows appear
+**Each row carries the series editor's `⋯` opener** (`seriesMenuBtnHtml`, on a
+writable wiki and only where `canEditSeriesPage` allows — see Series → The editor). Which rows appear
 does not depend on `series` or `series_label`.
 
 Acceptance: `store.test.ts` (the three shapes, the fence mask, the frontmatter
