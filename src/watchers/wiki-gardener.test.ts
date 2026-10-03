@@ -47,6 +47,24 @@ describe("buildGardenerSeams — searchRelated threading (silent no-op regressio
   });
 });
 
+describe("buildGardenerSeams.callDraft — thinking controls", () => {
+  test("drafts at low effort with the 8k budget, not the bot's chat settings", async () => {
+    const seen: BotConfig[] = [];
+    const chatBot = { ...ctx(["wiki"]).botConfig, thinkingMaxTokens: 40_000, effort: "high" } as BotConfig;
+    const seams = buildGardenerSeams({
+      ...ctx(["wiki"]),
+      botConfig: chatBot,
+      oneShot: (async (_p: string, _c: Config, b: BotConfig) => {
+        seen.push(b);
+        return { result: "draft", model: "m", inputTokens: 0, outputTokens: 0, numTurns: 1 };
+      }) as never,
+    });
+    expect(await seams.callDraft("prompt", 1_000)).toBe("draft");
+    expect(seen[0]!.effort).toBe("low");
+    expect(seen[0]!.thinkingMaxTokens).toBe(8_000);
+  });
+});
+
 describe("buildGardenerSeams.fetchDoc — the weekly harvest's body", () => {
   test("a fenced summary is harvested with its fence and without the transcript appendix", async () => {
     const server = Bun.serve({

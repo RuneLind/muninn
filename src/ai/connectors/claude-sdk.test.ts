@@ -464,6 +464,20 @@ describe("claude-sdk executePrompt", () => {
     expect("thinking" in opts).toBe(false);
   });
 
+  test("passes the bot's effort through as the SDK effort option", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, { ...baseBot(), effort: "low" });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect(opts.effort).toBe("low");
+  });
+
+  test("omits the effort option when effort is unset", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, baseBot());
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect("effort" in opts).toBe(false);
+  });
+
   test("maps extraDirs to additionalDirectories", async () => {
     fakeEvents = successOnly;
     await executePrompt("hi", baseConfig, { ...baseBot(), extraDirs: ["/tmp/frames", "/tmp/more"] });

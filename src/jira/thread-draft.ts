@@ -357,8 +357,8 @@ export function buildThreadTurnInstruction(input: {
   const parts = [
     "DENNE MELDINGEN ER EN BESTILLING PÅ EN JIRA-SAK. Skriv saken ut fra samtalen over — " +
       "problemet vi har diskutert, avklaringene som er gjort, og kildene du allerede har hentet " +
-      "med `research_knowledge` i denne tråden. Ikke søk på nytt med mindre samtalen mangler noe " +
-      "konkret du trenger.",
+      "med `research_knowledge` i denne tråden. Søk igjen når saken trenger noe konkret som samtalen " +
+      "ikke dekker, i stedet for å fylle hullet fra egen kunnskap.",
     neutralizeJiraFence(input.instruction.trim()),
     depthRider(input.depth),
     languageRider(),

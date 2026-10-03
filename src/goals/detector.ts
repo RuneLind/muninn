@@ -59,6 +59,7 @@ async function doGoalExtraction(input: DetectionInput, traceContext?: TraceConte
     input.userMessage,
     input.assistantResponse,
     activeGoalsList,
+    todayForDetector(Date.now()),
   );
 
   runHaikuExtraction<DetectionResult>({
@@ -154,10 +155,25 @@ async function handleCompletion(
   }
 }
 
+const DETECTOR_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Oslo",
+  weekday: "long",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/** "Saturday, 2026-10-03" in Europe/Oslo — the anchor a relative deadline ("by Friday") resolves against. */
+export function todayForDetector(nowMs: number): string {
+  const parts = Object.fromEntries(DETECTOR_DATE_FMT.formatToParts(new Date(nowMs)).map((p) => [p.type, p.value]));
+  return `${parts.weekday}, ${parts.year}-${parts.month}-${parts.day}`;
+}
+
 export function buildPrompt(
   userMessage: string,
   assistantResponse: string,
   activeGoals: string,
+  today?: string,
 ): string {
   return `You are a goal detection system. Analyze this conversation and decide:
 1. Did the user express a NEW goal, commitment, or deadline?
@@ -171,11 +187,11 @@ ${activeGoals ? `\nCurrently active goals:\n${activeGoals}\n` : "\nNo active goa
 Respond with ONLY valid JSON (no markdown fences):
 {"action": "none"}
 or
-{"action": "new", "title": "Short goal title", "description": "Brief context", "deadline": "2025-03-15T00:00:00Z", "tags": ["work"]}
+{"action": "new", "title": "Short goal title", "description": "Brief context", "deadline": "<ISO 8601 date-time>", "tags": ["work"]}
 or
 {"action": "completed", "completed_goal_id": "<exact id copied from the active goals list above>", "completed_goal_title": "matching goal title"}
 
-If there's a deadline, use ISO 8601. If no clear deadline, omit it.
+If there's a deadline, use ISO 8601${today ? `, resolving relative dates ("by Friday", "next week") against today's date, ${today} (Europe/Oslo)` : ""}. If no clear deadline, omit it.
 
 User said: """
 ${userMessage}

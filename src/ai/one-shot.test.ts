@@ -79,6 +79,14 @@ test("timeoutMs is folded into a botConfig clone, never mutating the caller's co
   expect(bot.timeoutMs).toBeUndefined(); // original untouched
 });
 
+test("effort is folded into a botConfig clone and overrides the bot's own", async () => {
+  const bot = stubBot({ effort: "high" });
+  await executeOneShot("p", config, bot, { effort: "low" });
+
+  expect(connectorArgs?.botConfig.effort).toBe("low");
+  expect(bot.effort).toBe("high"); // original untouched
+});
+
 test("extraDirs append --add-dir spawnArgs for the CLI connector (preserving existing args)", async () => {
   const bot = stubBot({ connector: "claude-cli", spawnArgs: ["--strict-mcp-config"] });
   await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"] });

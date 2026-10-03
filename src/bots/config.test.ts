@@ -553,6 +553,17 @@ describe("bot discovery", () => {
       expect(found!.timeoutMs).toBeUndefined();
     });
 
+    test("keeps a valid effort level and drops an unknown one", () => {
+      setupTestBot("_test_effort_ok", { config: { effort: "low" } });
+      setupTestBot("_test_effort_bad", { config: { effort: "turbo" } });
+
+      const bots = discoverAllBots();
+      expect(bots.find((b) => b.name === "_test_effort_ok")!.effort).toBe("low");
+      const bad = bots.find((b) => b.name === "_test_effort_bad");
+      expect(bad).toBeDefined(); // the bot stays online
+      expect(bad!.effort).toBeUndefined();
+    });
+
     test("resolves wikiDir relative to the bot folder", () => {
       const dir = setupTestBot("_test_wikidir", {
         config: { wikiDir: "../../../huginn/huginn-jarvis/data/wiki" },

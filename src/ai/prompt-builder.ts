@@ -99,7 +99,11 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
     { botName, ms: Math.round(totalMs) },
   );
 
-  // System prompt: persona + user identity + tool restrictions + context (memories, goals)
+  // System prompt: the parts that stay the same from turn to turn for this user
+  // and bot (persona, identity, tool restrictions, standing rules), so it can be
+  // served from the prompt cache. Per-turn context — memories retrieved for THIS
+  // message, goals, tasks, recent alerts — goes in the user turn, after the
+  // history, so a change there does not invalidate the cached prefix.
   const systemParts: string[] = [persona];
 
   if (userIdentity) {
@@ -116,21 +120,11 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
     systemParts.push(restrictionPrompt);
   }
 
-  if (relevantMemories.length > 0) {
-    systemParts.push(formatMemories(relevantMemories));
-  }
-
-  if (activeGoals.length > 0) {
-    systemParts.push(formatGoals(activeGoals));
-  }
-
-  if (scheduledTasks.length > 0) {
-    systemParts.push(formatScheduledTasks(scheduledTasks));
-  }
-
-  if (recentAlerts.length > 0) {
-    systemParts.push(formatAlerts(recentAlerts));
-  }
+  const contextParts: string[] = [];
+  if (relevantMemories.length > 0) contextParts.push(formatMemories(relevantMemories));
+  if (activeGoals.length > 0) contextParts.push(formatGoals(activeGoals));
+  if (scheduledTasks.length > 0) contextParts.push(formatScheduledTasks(scheduledTasks));
+  if (recentAlerts.length > 0) contextParts.push(formatAlerts(recentAlerts));
 
   // Placed last so it sits closest to the user turn, where instruction-following
   // is best.
@@ -144,7 +138,7 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
   // closest to the user turn, where instruction-following is best. It is also
   // where a per-turn instruction has to be to beat the standing persona — a Jira
   // draft turn asks for an output shape the persona knows nothing about, and
-  // burying it above the memories/goals blocks is what makes such a rider read as
+  // burying it above the standing rules is what makes such a rider read as
   // background rather than as the instruction for this turn.
   if (turnInstruction?.trim()) {
     systemParts.push(turnInstruction.trim());
@@ -162,6 +156,12 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
 
   if (history.length > 0) {
     userParts.push(formatConversationHistory(history));
+  }
+
+  // Tagged so the user's own words follow a clear boundary; the /traces prompt
+  // modal splits the user turn on these tags too.
+  if (contextParts.length > 0) {
+    userParts.push(`<context>\n${contextParts.join("\n\n")}\n</context>`);
   }
 
   userParts.push(currentMessage);

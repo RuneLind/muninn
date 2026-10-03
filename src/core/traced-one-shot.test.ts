@@ -86,6 +86,18 @@ describe("tracedOneShot", () => {
     });
   });
 
+  test("forwards an effort override to the connector, and omits the key when unset", async () => {
+    const seen: Record<string, unknown>[] = [];
+    const oneShot = (async (_p: string, _c: unknown, _b: unknown, o: Record<string, unknown> = {}) => {
+      seen.push(o);
+      return makeResult();
+    }) as never;
+    await tracedOneShot(recordingTracer().tracer, "claude", "prompt", config, botConfig, { oneShot, effort: "low" });
+    await tracedOneShot(recordingTracer().tracer, "claude", "prompt", config, botConfig, { oneShot });
+    expect(seen[0]!.effort).toBe("low");
+    expect(seen[1]!).not.toHaveProperty("effort");
+  });
+
   test("defaults connector to claude-cli when botConfig omits it", async () => {
     const { tracer, starts } = recordingTracer();
     await tracedOneShot(tracer, "claude", "prompt", config, { model: "sonnet" } as BotConfig, {

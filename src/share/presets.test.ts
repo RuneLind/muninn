@@ -13,6 +13,7 @@ import {
   DEFAULT_VARIANT_ID as LEAF_VARIANT_ID,
   DEFAULT_VARIANT_LABEL as LEAF_VARIANT_LABEL,
 } from "../bots/prompt-defaults.ts";
+import { SLACK_PASTE_MAX } from "./wire.ts";
 
 const variant = (id: string, label: string, content: string) => ({ id, label, content });
 
@@ -159,11 +160,9 @@ describe("shipped preset prompt contract", () => {
     for (const p of all) expect(p.content).toContain("Do not copy the source document's section headings");
   });
 
-  test("the Slack preset carries an explicit length budget well under Slack's snippet threshold", () => {
+  test("the Slack preset states Slack's snippet threshold as the reason to stay short", () => {
     const slack = all.find((p) => p.id === "slack-dev-security")!;
-    const budget = slack.content.match(/under (\d+) characters/);
-    expect(budget).not.toBeNull();
-    expect(Number(budget![1])).toBeLessThan(4000);
+    expect(slack.content).toContain(`about ${SLACK_PASTE_MAX} characters`);
     expect(slack.content).toContain("snippet");
   });
 

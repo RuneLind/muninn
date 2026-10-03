@@ -460,16 +460,17 @@ describe("runSynthesisOneShot — tool fence + observability identity", () => {
     }
   });
 
-  // The seam DEFAULTS to the same 8000, so "the connector saw 8000" alone proves
-  // nothing about this vertical's explicit pass — pin the equality, then prove the
-  // forwarding with a value the seam default cannot produce.
-  test("forwards its own thinking budget, which equals the seam's default", async () => {
+  // The draft takes the seam's default budget (pinned equal to its own) so the
+  // seam also sends `effort: "low"`; an injected budget is forwarded without it.
+  test("runs at the seam's default budget with low effort; an override is forwarded without effort", async () => {
     expect(SYNTHESIS_THINKING_MAX_TOKENS).toBe(FENCED_THINKING_MAX_TOKENS);
 
     const { seenOpts } = await run(bot());
     expect(seenOpts!.thinkingMaxTokens).toBe(SYNTHESIS_THINKING_MAX_TOKENS);
+    expect(seenOpts!.effort).toBe("low");
 
     const injected = await run(bot(), "The Alpha-Gamma Story", { thinkingMaxTokens: 1234 });
     expect(injected.seenOpts!.thinkingMaxTokens).toBe(1234);
+    expect(injected.seenOpts!.effort).toBeUndefined();
   });
 });

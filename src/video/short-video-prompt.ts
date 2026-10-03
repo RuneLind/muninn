@@ -145,7 +145,7 @@ const VISUAL_ONLY_INSTRUCTION: EnvelopeInstruction = {
  * zero-frame form is a PREFIX of the frames-present one, so the two cannot drift.
  */
 const NO_COMMENTARY_CLAUSE =
-  "CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response.";
+  "Write no commentary: your only text output is the final CATEGORY/SUMMARY response, because any text before it streams into the reader's capture card ahead of the summary.";
 
 function noCommentaryInstruction(withFrames: boolean): EnvelopeInstruction {
   return {

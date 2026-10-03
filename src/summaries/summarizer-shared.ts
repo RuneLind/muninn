@@ -15,7 +15,7 @@ import {
   windowedTranscriptRider,
   type SummaryEnvelopeSlots,
 } from "./prompt-pieces.ts";
-import { CAPTURE_THINKING_MAX_TOKENS } from "./presets.ts";
+import { CAPTURE_EFFORT, CAPTURE_THINKING_MAX_TOKENS } from "./presets.ts";
 
 /**
  * Two values this seam OWNED and two leaves now hold, re-exported so no importer
@@ -197,6 +197,9 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     : opts.thinkingMaxTokens === undefined
       ? CAPTURE_THINKING_MAX_TOKENS
       : opts.thinkingMaxTokens;
+  // The budget is ignored on adaptive-thinking models; effort carries the cap
+  // there. Only the default cap gets it: an explicit budget or `null` (inherit) does not.
+  const effort = thinking !== null && opts.thinkingMaxTokens === undefined ? CAPTURE_EFFORT : undefined;
 
   try {
     // The `claude` span (start/end + tool child spans) is owned by the shared
@@ -208,12 +211,14 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+      ...(effort ? { effort } : {}),
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
       startAttrs: {
         source,
         title,
         url,
         ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+        ...(effort ? { effort } : {}),
         ...(opts.extraTraceAttrs ?? {}),
       },
     });

@@ -125,3 +125,41 @@ describe("runFencedOneShot — onProgress passthrough", () => {
     }
   });
 });
+
+describe("runFencedOneShot — effort", () => {
+  /** A tracer that keeps the `claude` span's start attributes. */
+  function attrTracer() {
+    const starts: Record<string, unknown>[] = [];
+    const t = fakeTracer();
+    t.start = ((label: string, attrs?: Record<string, unknown>) => {
+      if (label === "claude") starts.push(attrs ?? {});
+      return "span-x";
+    }) as Tracer["start"];
+    return { tracer: t, starts };
+  }
+
+  test("the default cap sends effort low, and the span records it beside the budget", async () => {
+    const { oneShot, seen } = recordingOneShot();
+    const { tracer, starts } = attrTracer();
+    await runFencedOneShot({ ...base, tracer, oneShot: oneShot as never });
+    expect(seen[0]!.effort).toBe("low");
+    expect(starts[0]).toMatchObject({ thinkingMaxTokens: 8000, effort: "low" });
+  });
+
+  test("an explicit budget is forwarded without pinning effort to low", async () => {
+    const { oneShot, seen } = recordingOneShot();
+    const { tracer, starts } = attrTracer();
+    await runFencedOneShot({ ...base, thinkingMaxTokens: 32_000, tracer, oneShot: oneShot as never });
+    expect(seen[0]!.thinkingMaxTokens).toBe(32_000);
+    expect(seen[0]!).not.toHaveProperty("effort");
+    expect(starts[0]).not.toHaveProperty("effort");
+  });
+
+  test("openai-compat gets neither — there the budget field is max_tokens", async () => {
+    const { oneShot, seen } = recordingOneShot();
+    const local = { ...botConfig, connector: "openai-compat", baseUrl: "http://localhost:11434/v1" } as BotConfig;
+    await runFencedOneShot({ ...base, botConfig: local, tracer: fakeTracer(), oneShot: oneShot as never });
+    expect(seen[0]!).not.toHaveProperty("effort");
+    expect(seen[0]!).not.toHaveProperty("thinkingMaxTokens");
+  });
+});

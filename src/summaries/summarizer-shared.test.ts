@@ -14,6 +14,7 @@ import {
   SUMMARY_STRUCTURE_BULLETS,
 } from "./summarizer-shared.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
+import { captureThinkingFor, findCapturePreset, SHIPPED_CAPTURE_PRESETS } from "./presets.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
@@ -36,7 +37,7 @@ Instructions:
    Choose from: ${cats.join(", ")}
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
-   - Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*
+   - Open the summary with ONE short *italic* ingress line: what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*
    - Then a \`## Key takeaways\` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.
    - Then \`##\`-level section headers for each major topic; use \`###\` only for sub-sections. Keep the heading hierarchy consistent.
    - When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet ("the prompt I use is…", "run this…", text shown on screen) — reproduce it VERBATIM inside a fenced code block, under a short line saying what it is. Never paraphrase or shorten it: for these, fidelity beats brevity and the "keep it concise" rule below does not apply. ALWAYS close the fence, and never label one \`mermaid\` — that is drawn, not shown. Quote it whole; only when it will not fit, quote the essential part, mark it \`(excerpted)\`, and still close the fence — never truncate silently. When what is dictated is itself markup the "plain markdown only" rule below forbids, describe it in prose rather than quoting it. If the source names such an artifact without ever giving its text, say so — never invent one.
@@ -379,6 +380,35 @@ describe("runCaptureOneShot", () => {
     const h = harness({ thinkingMaxTokens: 0 });
     await runCaptureOneShot(h.opts);
     expect(h.seen[0]!.thinkingMaxTokens).toBe(0);
+  });
+
+  test("the default (capped) budget also sends effort low, recorded on the span", async () => {
+    const h = harness();
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!.effort).toBe("low");
+    expect(h.calls.find((c) => c.op === "start" && c.label === "claude")!.attrs).toMatchObject({
+      thinkingMaxTokens: CAPTURE_THINKING_MAX_TOKENS,
+      effort: "low",
+    });
+  });
+
+  test("an inherit kind (null, e.g. `deep`) gets no effort override, so the bot's own effort applies", async () => {
+    const h = harness({ thinkingMaxTokens: captureThinkingFor(findCapturePreset(SHIPPED_CAPTURE_PRESETS, "deep")!) });
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!).not.toHaveProperty("effort");
+    expect(h.calls.find((c) => c.op === "start" && c.label === "claude")!.attrs).not.toHaveProperty("effort");
+  });
+
+  test("a capped kind (`standard`) gets effort low", async () => {
+    const h = harness({ thinkingMaxTokens: captureThinkingFor(findCapturePreset(SHIPPED_CAPTURE_PRESETS, "standard")!) });
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!.effort).toBe("low");
+  });
+
+  test("an explicit budget is forwarded without effort", async () => {
+    const h = harness({ thinkingMaxTokens: 0 });
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!).not.toHaveProperty("effort");
   });
 
   test("binds bot + connector + traceId onto the run BEFORE the model call", async () => {

@@ -39,6 +39,11 @@ import {
  */
 export const FENCED_THINKING_MAX_TOKENS = 8000;
 
+/** The same cap for adaptive-thinking models (Opus/Sonnet 4.6+, the 5.5 models
+ *  included), where Claude Code drops a thinking budget and effort is the only
+ *  thinking control. */
+export const FENCED_EFFORT = "low" as const;
+
 /**
  * Tools a fenced one-shot must not have. The product is delivered as the call's
  * RETURN TEXT, so any tool that can produce the artifact some other way is a way
@@ -107,7 +112,9 @@ export interface FencedOneShotOptions {
   config: Config;
   botConfig: BotConfig;
   timeoutMs?: number;
-  /** Thinking budget; defaults to {@link FENCED_THINKING_MAX_TOKENS}. `null`
+  /** Thinking budget; defaults to {@link FENCED_THINKING_MAX_TOKENS}, sent with
+   *  `effort: "low"`. An explicit number is forwarded without effort, so on an
+   *  adaptive-thinking model the call runs at the bot's own effort. `null`
    *  inherits the bot's own. Ignored on connectors where the field is not a
    *  thinking budget (openai-compat, where it is `max_tokens`). */
   thinkingMaxTokens?: number | null;
@@ -167,6 +174,8 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       : opts.thinkingMaxTokens === undefined
         ? FENCED_THINKING_MAX_TOKENS
         : opts.thinkingMaxTokens;
+    // Effort only with the default cap, so an explicit caller budget is not pinned to low.
+    const effort = thinking !== null && opts.thinkingMaxTokens === undefined ? FENCED_EFFORT : undefined;
 
     // A fresh object, never a mutation — `botConfig` is the shared discovered
     // config, and every other field (name / connector / model) is carried over so
@@ -182,11 +191,13 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+      ...(effort ? { effort } : {}),
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
       startAttrs: {
         source: opts.source,
         ...(opts.startAttrs ?? {}),
         ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+        ...(effort ? { effort } : {}),
       },
     });
 
