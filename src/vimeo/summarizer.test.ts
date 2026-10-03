@@ -484,7 +484,7 @@ test("a MANUAL caption track does NOT append the rider", async () => {
 
   expect(lastSystemPrompt).toBeDefined();
   expect(lastSystemPrompt).not.toContain(AUTO_CAPTION_RIDER.trim());
-  expect(lastSystemPrompt).not.toContain("MACHINE-GENERATED");
+  expect(lastSystemPrompt).not.toContain("machine-generated");
   expect(ingestPayload!.caption_kind).toBe("manual");
 });
 

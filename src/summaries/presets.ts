@@ -53,6 +53,14 @@ import { SUMMARY_STRUCTURE_BULLETS } from "./summary-structure.ts";
  */
 export const CAPTURE_THINKING_MAX_TOKENS = 8000;
 
+/**
+ * The same first-token cap for adaptive-thinking models (Opus/Sonnet 4.6+, the
+ * 5.5 models included), where Claude Code drops a thinking budget and effort is
+ * the only thinking control. `low` is the documented starting point for content
+ * generation; the 8k measurement above predates the 5.5 models — re-measure TTFT.
+ */
+export const CAPTURE_EFFORT = "low" as const;
+
 /** How a kind's model call differs from the default capture call. */
 export interface CaptureRunOptions {
   /**

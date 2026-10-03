@@ -33,7 +33,7 @@
  */
 
 import type { Config } from "../config.ts";
-import type { BotConfig } from "../bots/config.ts";
+import type { BotConfig, EffortLevel } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
@@ -48,8 +48,10 @@ export interface TracedOneShotOptions {
   systemPrompt?: string;
   /** Response timeout override in ms. */
   timeoutMs?: number;
-  /** Thinking-budget override (`0` disables). Omit to inherit the bot's budget. */
+  /** Thinking-budget override (budget-era models only). Omit to inherit the bot's budget. */
   thinkingMaxTokens?: number;
+  /** Effort override (adaptive-thinking models). Omit to inherit the bot's effort. */
+  effort?: EffortLevel;
   /** Streaming progress callback (text deltas, tool events). */
   onProgress?: StreamProgressCallback;
   /** Extra read dirs (claude-cli `--add-dir` / claude-sdk `additionalDirectories`). */
@@ -103,6 +105,7 @@ export async function tracedOneShot(
       ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.thinkingMaxTokens !== undefined ? { thinkingMaxTokens: opts.thinkingMaxTokens } : {}),
+      ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
     });

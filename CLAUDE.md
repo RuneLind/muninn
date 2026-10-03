@@ -90,9 +90,9 @@ All fields are optional — falls back to global `.env` values:
 
 ```json
 {
-  "connector": "copilot-sdk",
-  "model": "claude-sonnet-5.5",
-  "thinkingMaxTokens": 16000,
+  "connector": "claude-sdk",
+  "model": "claude-sonnet-5-5",
+  "effort": "medium",
   "timeoutMs": 180000
 }
 ```
@@ -102,7 +102,8 @@ All fields are optional — falls back to global `.env` values:
 | `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"` |
 | `haikuBackend` | string | derived from `connector` | Per-bot Haiku backend for the `research_knowledge` decomposer and memory/goal/schedule extractors. One of `"cli"`, `"anthropic"`, `"copilot"`, `"vertex"`. Default is `copilot` for `copilot-sdk` bots, `cli` otherwise — **there is no derived default for `vertex`**, deliberately: the connector that would imply it (`openai-compat`) is equally the local-Ollama shape, and telling them apart needs the bot's `baseUrl`, which the router is not given. A deployment that must keep these calls on an approved endpoint sets this field (or `HAIKU_BACKEND`). See "Switching Haiku backend" below. |
 | `model` | string | `CLAUDE_MODEL` env | Model name (e.g. "claude-sonnet-5-5", "qwen3.5:35b"; Copilot takes the dotted "claude-sonnet-5.5") |
-| `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking). For openai-compat: used as max_tokens. |
+| `thinkingMaxTokens` | number | CLI default | Thinking budget, honored only on models that take one (Haiku 4.5 and older). Claude Code ignores it on adaptive-thinking models — Opus/Sonnet 4.6 and later, including the 5.5 models — and `0` does not turn thinking off on a model that rejects disabled thinking; use `effort` there. Copilot ignores it. For openai-compat: used as max_tokens. |
+| `effort` | string | Claude Code's default for the model | `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"` — the thinking control on adaptive-thinking models. `claude-cli` passes `--effort`, `claude-sdk` the SDK's `effort`; Copilot and openai-compat ignore it. One-shot jobs that cap thinking for first-token latency (captures, fenced drafts, fact-check compose) override it to `low`. |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 | `baseUrl` | string | — | Base URL for OpenAI-compatible API (e.g. `"http://localhost:11434/v1"`). A **Vertex AI** host — `https://<region>-aiplatform.googleapis.com/v1/projects/<p>/locations/<region>/endpoints/openapi`, or the multi-region `aiplatform.<mr>.rep.googleapis.com` — switches the credential to Application Default Credentials instead of `OPENAI_API_KEY`; see the connector table below. |
 | `showWaterfall` | boolean | `true` | Show request progress waterfall overlay in web chat |
@@ -114,7 +115,7 @@ All fields are optional — falls back to global `.env` values:
 | `prompts` | — | — | **Not a config.json field.** Research-flow prompts live in `bots/<name>/prompts/<key>.md` — one file per key: `jiraAnalysis` (Jira research seed; supports named variants via `jiraAnalysis.<id>.md`, first line `<!-- label: … -->` for the dropdown; the Chrome Jira extension reads variants from `GET /api/research/variants?bot=<name>`), `investigateCode`, `deepAnalysis`, `specGeneration` and `specDomain` (buttons render only when their file exists; specDomain opens a fagperson review gate persisting to `/chat/specs`, flipping `dev_run` `spec_draft → spec_approved`), `share` (share-summary preset; **also** supports named variants via `share.<id>.md`, same `<!-- label: … -->` first line), `jiraTemplate.<id>.md` (Jira-composer task templates — **variant-only**: there is no bare `jiraTemplate.md`, and one warns like any unknown file, so a per-bot template is always a named id such as `jiraTemplate.bug.md`), and `captureSummary.<id>.md` (capture summary KINDS for the Vimeo picker — variant-only the same way; an id matching a shipped kind (`standard`/`deep`/`talk-notes`) replaces its structure bullets and keeps its run options, a new id appends a kind that runs like `standard`; merge in `src/summaries/presets.ts`). Unknown filenames warn at discovery; an EMPTY prompt file (or a variant carrying only its label line) warns and is treated as absent, so the shipped default still applies; a leftover `"prompts"` block in config.json triggers a migration-hint warning. **Share is the one key whose defaults SHIP IN-REPO** (`src/share/presets.ts`) — a bare `share.md` replaces the shipped default preset, a `share.<id>.md` overrides a shipped preset of the same id or appends a new one, and that merge lives in the share service, not the loader. |
 | `wikiAutoCommit` | object | push on | Auto-commit for the bot's programmatic wiki writes — `{ push?: boolean, catalogKinds?: string[] }`. Commits exactly the touched files on the wiki repo's **default branch only**, then pushes to upstream (`push` defaults on; failures non-fatal; never runs clean/checkout/restore/reset). `catalogKinds` = which page kinds get an index.md catalog line (default `["concept"]`; entities never). Details: `src/wiki/CLAUDE.md`. |
 
-Discovery validates each field at load time: unknown enum values (`connector`, `haikuBackend`) and scalar fields with the wrong JSON type (e.g. `"timeoutMs": "180000"` as a string, `showWaterfall` as a string) are **warned about and dropped**, so the bot falls back to the field's default rather than carrying a mistyped value downstream. Falsy-but-valid values (`thinkingMaxTokens: 0`, `showWaterfall: false`) are kept. Validation never aborts discovery — a bad field degrades to its default, it doesn't take the bot offline.
+Discovery validates each field at load time: unknown enum values (`connector`, `haikuBackend`, `effort`) and scalar fields with the wrong JSON type (e.g. `"timeoutMs": "180000"` as a string, `showWaterfall` as a string) are **warned about and dropped**, so the bot falls back to the field's default rather than carrying a mistyped value downstream. Falsy-but-valid values (`thinkingMaxTokens: 0`, `showWaterfall: false`) are kept. Validation never aborts discovery — a bad field degrades to its default, it doesn't take the bot offline.
 
 ### Database
 

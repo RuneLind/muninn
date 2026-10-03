@@ -45,8 +45,8 @@ export const SHARE_EXTRA_MAX = 2_000;
  * collapses in the channel and is read by nobody — so a post over this is a
  * delivery failure, not a long message. The dialog warns on it (client-side, at
  * render time, over the SERVER-rendered mrkdwn — the exact bytes that get pasted).
- * The `slack-dev-security` preset asks the model for <1200 chars; this is the
- * backstop for the presets that don't, and for a model that ignored the budget.
+ * The `slack-dev-security` preset names this threshold to the model; this is
+ * the backstop for the presets that don't, and for a post that ran long anyway.
  */
 export const SLACK_PASTE_MAX = 4_000;
 

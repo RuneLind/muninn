@@ -246,7 +246,8 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
     callDraft: async (prompt, timeoutMs) => {
       // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
       // thinking budget (jarvis: 40k), which makes one-shots slow and variable.
-      const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS };
+      // `effort` carries the cap on adaptive-thinking models, which ignore the budget.
+      const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS, effort: "low" as const };
       const startedAt = performance.now();
       const exec = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
       const durationMs = performance.now() - startedAt;

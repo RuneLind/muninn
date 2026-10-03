@@ -39,6 +39,10 @@ export const CONNECTOR_VALUES = ["claude-cli", "copilot-sdk", "openai-compat", "
 /** Valid `haikuBackend` values — shared by discovery validation + the /models editor. */
 export const HAIKU_BACKEND_VALUES = ["cli", "anthropic", "copilot", "vertex"] as const;
 
+/** Effort levels the Claude connectors pass through (`--effort` / the Agent SDK's `effort`). */
+export const EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = (typeof EFFORT_VALUES)[number];
+
 /** The per-bot config.json fields editable from the /models dashboard page. */
 export const EDITABLE_BOT_FIELDS = ["connector", "model", "thinkingMaxTokens", "haikuBackend"] as const;
 export type EditableBotField = (typeof EDITABLE_BOT_FIELDS)[number];
@@ -106,8 +110,17 @@ export interface BotConfig {
   haikuBackend?: HaikuBackend;
   /** Claude model override (e.g. "opus", "sonnet") — falls back to global CLAUDE_MODEL */
   model?: string;
-  /** Max thinking tokens for extended thinking — set 0 to disable, undefined = CLI default */
+  /** Thinking budget for models that take one (Haiku 4.5 and older). Claude Code
+   *  ignores it on adaptive-thinking models — Opus/Sonnet 4.6 and later, including
+   *  the 5.5 models — and `0` does not turn thinking off on a model that rejects
+   *  disabled thinking; set `effort` there. On openai-compat it is the request's
+   *  `max_tokens`. */
   thinkingMaxTokens?: number;
+  /** Effort level for the Claude connectors (`claude-cli` → `--effort`,
+   *  `claude-sdk` → `effort`). The thinking control on adaptive-thinking models.
+   *  Unset ⇒ Claude Code's default for the model. Ignored by copilot-sdk and
+   *  openai-compat. */
+  effort?: EffortLevel;
   /** Claude timeout override in ms — falls back to global CLAUDE_TIMEOUT_MS */
   timeoutMs?: number;
   /** Base URL for OpenAI-compatible API (e.g. "http://localhost:1234/v1") */
@@ -877,7 +890,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "componentAnswers", "contextWindow", "hivemind", "mcpStatus", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener", "wikiAutoCommit"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "effort", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "componentAnswers", "contextWindow", "hivemind", "mcpStatus", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener", "wikiAutoCommit"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -887,6 +900,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         }
         validateEnumField(botSettings, "connector", CONNECTOR_VALUES, name);
         validateEnumField(botSettings, "haikuBackend", HAIKU_BACKEND_VALUES, name);
+        validateEnumField(botSettings, "effort", EFFORT_VALUES, name);
         validateScalarField(botSettings, "model", "string", name);
         validateScalarField(botSettings, "baseUrl", "string", name);
         validateScalarField(botSettings, "wikiDir", "string", name);
@@ -952,6 +966,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       haikuBackend: botSettings.haikuBackend as HaikuBackend | undefined,
       model: botSettings.model as string | undefined,
       thinkingMaxTokens: botSettings.thinkingMaxTokens as number | undefined,
+      effort: botSettings.effort as EffortLevel | undefined,
       timeoutMs: botSettings.timeoutMs as number | undefined,
       baseUrl: botSettings.baseUrl as string | undefined,
       wikiDir:
@@ -979,6 +994,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (botSettings.haikuBackend) configParts.push(`haikuBackend: ${botSettings.haikuBackend}`);
     if (botSettings.model) configParts.push(`model: ${botSettings.model}`);
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
+    if (botSettings.effort) configParts.push(`effort: ${botSettings.effort}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
     if (botSettings.baseUrl) configParts.push(`baseUrl: ${botSettings.baseUrl}`);
     const channelListening = botSettings.channelListening as ChannelListeningConfig | undefined;

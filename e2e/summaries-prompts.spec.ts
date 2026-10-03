@@ -262,7 +262,7 @@ test.describe("Summaries: the capture-prompt matrix", () => {
       "context",
     ]);
     await expect(tiktok).toContainText("Summarize the following TikTok video");
-    await expect(tiktok).toContainText("produce NO commentary");
+    await expect(tiktok).toContainText("Write no commentary");
     await expect(tiktok).not.toContainText("no kind picker");
     await expect(tiktok.locator("[data-override]")).toHaveText("not present");
     await page.screenshot({ path: testInfo.outputPath("tiktok.png"), fullPage: true });

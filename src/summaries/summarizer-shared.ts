@@ -15,7 +15,7 @@ import {
   windowedTranscriptRider,
   type SummaryEnvelopeSlots,
 } from "./prompt-pieces.ts";
-import { CAPTURE_THINKING_MAX_TOKENS } from "./presets.ts";
+import { CAPTURE_EFFORT, CAPTURE_THINKING_MAX_TOKENS } from "./presets.ts";
 
 /**
  * Two values this seam OWNED and two leaves now hold, re-exported so no importer
@@ -208,6 +208,8 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+      // The budget is ignored on adaptive-thinking models; effort carries the cap there.
+      ...(thinking !== null && opts.thinkingMaxTokens === undefined ? { effort: CAPTURE_EFFORT } : {}),
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
       startAttrs: {
         source,

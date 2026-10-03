@@ -39,6 +39,11 @@ import {
  */
 export const FENCED_THINKING_MAX_TOKENS = 8000;
 
+/** The same cap for adaptive-thinking models (Opus/Sonnet 4.6+, the 5.5 models
+ *  included), where Claude Code drops a thinking budget and effort is the only
+ *  thinking control. */
+export const FENCED_EFFORT = "low" as const;
+
 /**
  * Tools a fenced one-shot must not have. The product is delivered as the call's
  * RETURN TEXT, so any tool that can produce the artifact some other way is a way
@@ -182,6 +187,7 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+      ...(thinking !== null ? { effort: FENCED_EFFORT } : {}),
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
       startAttrs: {
         source: opts.source,

@@ -132,7 +132,7 @@ All fields are optional — falls back to global `.env` values:
 {
   "connector": "claude-cli",
   "model": "claude-sonnet-5-5",
-  "thinkingMaxTokens": 16000,
+  "effort": "medium",
   "timeoutMs": 180000,
   "baseUrl": "http://localhost:11434/v1",
   "contextWindow": 200000,
@@ -144,7 +144,8 @@ All fields are optional — falls back to global `.env` values:
 |---|---|---|---|
 | `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"` |
 | `model` | string | `CLAUDE_MODEL` env | Model name (e.g. `"claude-sonnet-5-5"`, `"qwen3:32b"`) |
-| `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable). For openai-compat: used as `max_tokens` |
+| `thinkingMaxTokens` | number | CLI default | Thinking budget for models that take one (Haiku 4.5 and older); ignored on Opus/Sonnet 4.6 and later, where `effort` is the control. For openai-compat: used as `max_tokens` |
+| `effort` | string | model default | `low` / `medium` / `high` / `xhigh` / `max` — thinking control for the Claude connectors |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 | `baseUrl` | string | — | Base URL for OpenAI-compatible API (required for `openai-compat`) |
 | `contextWindow` | number | — | Context window size in tokens. Shown as usage bar in web chat |
@@ -243,8 +244,8 @@ Spawns Claude Code in headless mode with `--output-format stream-json --verbose`
 
 ```json
 {
-  "model": "claude-opus-4-6",
-  "thinkingMaxTokens": 40000,
+  "model": "claude-opus-5-5",
+  "effort": "medium",
   "timeoutMs": 300000
 }
 ```
@@ -259,7 +260,6 @@ Uses GitHub Copilot SDK with a shared singleton client. MCP tools from `.mcp.jso
 {
   "connector": "copilot-sdk",
   "model": "claude-sonnet-5.5",
-  "thinkingMaxTokens": 16000,
   "timeoutMs": 180000
 }
 ```
@@ -272,7 +272,7 @@ Uses Anthropic's `@anthropic-ai/claude-agent-sdk` `query()` iterable as a direct
 {
   "connector": "claude-sdk",
   "model": "claude-sonnet-5-5",
-  "thinkingMaxTokens": 16000,
+  "effort": "medium",
   "timeoutMs": 180000
 }
 ```

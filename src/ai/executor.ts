@@ -37,6 +37,12 @@ export async function executeClaudePrompt(
     "--model", model,
   ];
 
+  // Effort is the thinking control on adaptive-thinking models (Opus/Sonnet 4.6+,
+  // the 5.5 models included); Claude Code ignores MAX_THINKING_TOKENS there.
+  if (botConfig.effort) {
+    args.push("--effort", botConfig.effort);
+  }
+
   // The CLI also discovers .mcp.json from its cwd; passing it explicitly is
   // what the MCP preflight below pairs with.
   const mcpConfigPath = join(botConfig.dir, ".mcp.json");

@@ -12,7 +12,7 @@
  */
 
 import type { Config } from "../config.ts";
-import type { BotConfig, ConnectorType } from "../bots/config.ts";
+import type { BotConfig, ConnectorType, EffortLevel } from "../bots/config.ts";
 import type { ClaudeExecResult } from "./executor.ts";
 import type { StreamProgressCallback } from "./stream-parser.ts";
 import { resolveConnector } from "./connector.ts";
@@ -51,8 +51,9 @@ export interface OneShotOptions {
   /** Response timeout override in ms. Falls back to the bot/global default. */
   timeoutMs?: number;
   /**
-   * Thinking-budget override for this call (`0` disables thinking entirely).
-   * Falls back to the bot's `thinkingMaxTokens`.
+   * Thinking-budget override for this call. Falls back to the bot's
+   * `thinkingMaxTokens`. Claude Code applies a budget only on models that take
+   * one (Haiku 4.5 and older); on adaptive-thinking models pass `effort` too.
    *
    * A one-shot job inherits the bot's CHAT thinking budget, which is tuned for
    * open-ended conversation — jarvis carries 40k. On a batch transform (the
@@ -63,6 +64,12 @@ export interface OneShotOptions {
    * deep reasoning simply omit this and keep the bot's budget.
    */
   thinkingMaxTokens?: number;
+  /**
+   * Effort override for this call; falls back to the bot's `effort`. The
+   * thinking control on adaptive-thinking models (Opus/Sonnet 4.6+, the 5.5
+   * models included), where `thinkingMaxTokens` is ignored.
+   */
+  effort?: EffortLevel;
   /** Streaming progress callback (text deltas, tool events). */
   onProgress?: StreamProgressCallback;
   /**
@@ -103,7 +110,7 @@ export async function executeOneShot(
   botConfig: BotConfig,
   opts: OneShotOptions = {},
 ): Promise<ClaudeExecResult> {
-  const { systemPrompt, timeoutMs, thinkingMaxTokens, onProgress, extraDirs } = opts;
+  const { systemPrompt, timeoutMs, thinkingMaxTokens, effort, onProgress, extraDirs } = opts;
 
   checkPromptResolved(prompt);
 
@@ -115,6 +122,10 @@ export async function executeOneShot(
 
   if (thinkingMaxTokens !== undefined) {
     effective = { ...effective, thinkingMaxTokens };
+  }
+
+  if (effort !== undefined) {
+    effective = { ...effective, effort };
   }
 
   if (extraDirs && extraDirs.length > 0) {

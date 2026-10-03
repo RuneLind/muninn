@@ -64,7 +64,7 @@ Instructions:
 4. Then add a blank line, then SUMMARY: on its own line
 5. Then write a structured summary with:
    - One bullet, and nothing else.
-6. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.
+6. Write no commentary: your only text output is the final CATEGORY/SUMMARY response, because any text before it streams into the reader's capture card ahead of the summary. Do not narrate the frames as you read them.
 
 Video title: A placeholder capture
 Video URL: https://www.tiktok.com/@placeholder/video/1234567890123456789
@@ -117,17 +117,17 @@ Author: placeholder-author`);
       author: "A",
     });
     expect(prompt).toContain(
-      "\n6. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.",
+      "\n6. Write no commentary: your only text output is the final CATEGORY/SUMMARY response, because any text before it streams into the reader's capture card ahead of the summary. Do not narrate the frames as you read them.",
     );
     // Position, not just presence: the rule governs the whole answer, so it is
     // stated after the structure bullets rather than among the frame rules.
     const lastBullet = SUMMARY_STRUCTURE_BULLETS[SUMMARY_STRUCTURE_BULLETS.length - 1]!;
-    expect(prompt.indexOf("6. CRITICAL: produce NO commentary")).toBeGreaterThan(
+    expect(prompt.indexOf("6. Write no commentary")).toBeGreaterThan(
       prompt.indexOf(lastBullet),
     );
     // …and after the CATEGORY step, which is what a `before`-slotted rule would
     // have come before.
-    expect(prompt.indexOf("6. CRITICAL")).toBeGreaterThan(prompt.indexOf("3. Start your response"));
+    expect(prompt.indexOf("6. Write no commentary")).toBeGreaterThan(prompt.indexOf("3. Start your response"));
   });
 
   /**
@@ -159,7 +159,7 @@ Instructions:
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
    - One bullet, and nothing else.
-4. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response.
+4. Write no commentary: your only text output is the final CATEGORY/SUMMARY response, because any text before it streams into the reader's capture card ahead of the summary.
 
 Video title: A placeholder capture
 Video URL: https://www.tiktok.com/@placeholder/video/1234567890123456789
@@ -199,7 +199,7 @@ Author: placeholder-author`);
     const withFrames = buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, base);
     const without = buildShortVideoSystemPrompt(TIKTOK_PROMPT_SPEC, { ...base, frames: false });
     const shared =
-      "CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response.";
+      "Write no commentary: your only text output is the final CATEGORY/SUMMARY response, because any text before it streams into the reader's capture card ahead of the summary.";
     expect(withFrames).toContain(`${shared} Do not narrate the frames as you read them.`);
     expect(without).toContain(`${shared}\n`);
   });

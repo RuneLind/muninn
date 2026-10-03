@@ -84,7 +84,7 @@ Structure:
 - 3-6 bullets with the concrete technical points.
 - A short numbered closing section with what to do or watch next.
 
-LENGTH BUDGET: the whole post must stay under 1200 characters. Slack turns a longer paste into a file snippet instead of a message, which nobody reads. Cut points rather than compressing every sentence into unreadable density.
+LENGTH: short enough to read at a glance in a busy channel. Slack turns a paste longer than about 4000 characters into a file snippet instead of a message, which nobody reads. Cut points rather than compressing every sentence into unreadable density.
 
 ${SHARED_PRESET_RULES}`;
 

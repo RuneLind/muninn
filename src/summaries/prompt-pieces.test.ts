@@ -547,7 +547,7 @@ describe("the pieces each vertical contributes", () => {
         "no-commentary",
         "context",
       ]);
-      expect(pieces.find((p) => p.id === "no-commentary")!.text).toContain("produce NO commentary");
+      expect(pieces.find((p) => p.id === "no-commentary")!.text).toContain("Write no commentary");
     }
   });
 

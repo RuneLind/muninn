@@ -92,9 +92,9 @@ describe("buildBriefingPrompt", () => {
 
   test("includes tool instructions in system prompt", async () => {
     const { systemPrompt } = await buildBriefingPrompt(baseTask, persona, "jarvis");
-    expect(systemPrompt).toContain("Du HAR tilgang til verktøy");
-    expect(systemPrompt).toContain("get-current-time");
-    expect(systemPrompt).toContain("WebSearch");
+    expect(systemPrompt).toContain("med verktøyene du har");
+    expect(systemPrompt).toContain("kalenderhendelser");
+    expect(systemPrompt).toContain("nyheter når task-promptet ber om det");
   });
 
   test("includes date and timezone context", async () => {
@@ -194,7 +194,7 @@ describe("buildBriefingPrompt", () => {
     const { systemPrompt, meta } = await buildBriefingPrompt(baseTask, persona, "jarvis");
     // Should still include persona and tool instructions
     expect(systemPrompt).toContain("You are Jarvis");
-    expect(systemPrompt).toContain("Du HAR tilgang til verktøy");
+    expect(systemPrompt).toContain("med verktøyene du har");
     expect(meta.memoriesCount).toBe(0);
     expect(meta.goalsCount).toBe(0);
   });

@@ -65,12 +65,7 @@ export async function buildBriefingPrompt(
   const systemParts: string[] = [
     persona,
     `Du genererer en planlagt ${timeOfDay}-briefing. I dag er ${dateStr}. Tidssone: ${task.timezone}.`,
-    [
-      "Du HAR tilgang til verktøy — bruk dem aktivt.",
-      "Sjekk kalenderen med get-current-time → list-events.",
-      "Søk nyheter med WebSearch hvis task-promptet ber om det.",
-      "Ikke si at du ikke har tilgang til sanntidsinformasjon — du har det via verktøy.",
-    ].join("\n"),
+    "Hent det som kan ha endret seg siden treningsdataene dine med verktøyene du har, i stedet for å skrive fra hukommelsen: dagens kalenderhendelser, og nyheter når task-promptet ber om det.",
     "Formater svaret med standard markdown (**bold**, *italic*, lister). Hold det konsist men informativt.",
   ];
 

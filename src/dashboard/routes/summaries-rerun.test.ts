@@ -1156,7 +1156,7 @@ describe("the short-video verticals", () => {
     expect(system).toContain("from its speech transcript");
     // The rule about the whole ANSWER stays on both forms; only its
     // frame-specific second sentence goes.
-    expect(system).toContain("produce NO commentary");
+    expect(system).toContain("Write no commentary");
     // And the CAPTURE's own form still mentions them, so this is a branch and
     // not a builder that lost the clause.
     const capture = buildShortVideoSystemPrompt(TIKTOK_SPEC, {

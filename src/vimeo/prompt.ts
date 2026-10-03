@@ -48,7 +48,7 @@ export const SUMMARIZE_INTRO = INTRO_LEAD + WINDOWED_RIDER;
  * said. The instruction is to describe rather than to assert, not to omit.
  */
 export const AUTO_CAPTION_RIDER =
-  "\n\nIMPORTANT: this transcript is MACHINE-GENERATED and garbles proper nouns " +
+  "\n\nThis transcript is machine-generated and garbles proper nouns " +
   "(measured: \"JavaBeen\" for JavaBin). Do not assert the spelling of any name, " +
   "product, library or acronym the captions cannot corroborate — describe it " +
   "(\"a JVM testing library\") or mark it uncertain rather than guessing a spelling.";

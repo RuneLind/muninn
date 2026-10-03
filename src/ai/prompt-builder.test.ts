@@ -106,19 +106,30 @@ describe("buildPrompt", () => {
     expect(result.systemPrompt).toContain("You are Jarvis, a helpful assistant.");
   });
 
-  test("includes memories in system prompt", async () => {
+  // Per-turn context lives in the user turn so the system prompt stays cacheable.
+  test("includes memories in the user prompt, not the system prompt", async () => {
     const result = await bp();
-    expect(result.systemPrompt).toContain("Prefers TypeScript over JavaScript");
+    expect(result.userPrompt).toContain("Prefers TypeScript over JavaScript");
+    expect(result.systemPrompt).not.toContain("Prefers TypeScript over JavaScript");
   });
 
-  test("includes goals in system prompt", async () => {
+  test("includes goals in the user prompt, not the system prompt", async () => {
     const result = await bp();
-    expect(result.systemPrompt).toContain("Learn Rust");
+    expect(result.userPrompt).toContain("Learn Rust");
+    expect(result.systemPrompt).not.toContain("Learn Rust");
   });
 
-  test("includes scheduled tasks in system prompt", async () => {
+  test("includes scheduled tasks in the user prompt, not the system prompt", async () => {
     const result = await bp();
-    expect(result.systemPrompt).toContain("Morning briefing");
+    expect(result.userPrompt).toContain("Morning briefing");
+    expect(result.systemPrompt).not.toContain("Morning briefing");
+  });
+
+  test("per-turn context sits after the history and before the current message", async () => {
+    const result = await bp({ currentMessage: "new question" });
+    const ctx = result.userPrompt.indexOf("Prefers TypeScript over JavaScript");
+    expect(ctx).toBeGreaterThan(result.userPrompt.indexOf("</conversation_history>"));
+    expect(ctx).toBeLessThan(result.userPrompt.lastIndexOf("new question"));
   });
 
   test("includes conversation history in user prompt", async () => {
@@ -142,17 +153,14 @@ describe("buildPrompt", () => {
     expect(result.systemPrompt).toContain("SVARFORMAT: bare saketeksten.");
   });
 
-  test("turnInstruction is LAST — closest to the user turn, after persona and every context block", async () => {
+  test("turnInstruction is LAST in the system prompt — closest to the user turn, after the persona", async () => {
     const result = await bp({
       persona: "You are Jarvis.",
       turnInstruction: "SVARFORMAT: bare saketeksten.",
     });
     const at = result.systemPrompt.indexOf("SVARFORMAT: bare saketeksten.");
     expect(at).toBeGreaterThan(result.systemPrompt.indexOf("You are Jarvis."));
-    // A rider buried above the memories/goals blocks reads as background rather
-    // than as the instruction for this turn.
-    expect(at).toBeGreaterThan(result.systemPrompt.indexOf("Prefers TypeScript over JavaScript"));
-    expect(at).toBeGreaterThan(result.systemPrompt.indexOf("Learn Rust"));
+    expect(result.systemPrompt.trimEnd().endsWith("SVARFORMAT: bare saketeksten.")).toBe(true);
   });
 
   test("the persona SURVIVES a turn instruction — this is an append, not a swap", async () => {

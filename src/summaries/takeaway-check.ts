@@ -208,7 +208,7 @@ Emphasis and compression are fine; a claim is not.
 Answer with ONE JSON object and nothing else:
 {"verdict": "grounded" | "ungrounded", "issues": ["<one SHORT line per unsupported clause, in English, quoting the clause>"], "rewrite": <string or null>}
 
-If ungrounded, "rewrite" is a replacement takeaway: at most two sentences and about 50 words, in the SAME LANGUAGE as the original takeaway, built ONLY from the body (its Key takeaways bullets first), restating the source's own conclusion in its own emphasis — not made more memorable, and not a list of everything the body says. No markdown, no "Takeaway:" prefix. If grounded, "issues" is [] and "rewrite" is null.
+If ungrounded, "rewrite" is a replacement takeaway: at most two sentences, in the SAME LANGUAGE as the original takeaway, built ONLY from the body (its Key takeaways bullets first), restating the source's own conclusion in its own emphasis — not made more memorable, and not a list of everything the body says. No markdown, no "Takeaway:" prefix. If grounded, "issues" is [] and "rewrite" is null.
 
 <body>
 ${body}

@@ -9,7 +9,7 @@
  *   2. **Verification** — a bounded-parallel fan-out (`FACTCHECK_CLAIM_CONCURRENCY`)
  *      of tool-enabled `executeOneShot` calls, one per claim, each verifying its
  *      claim against the LIVE web (WebFetch) and emitting one verdict block.
- *   3. **Compose** (multi-claim only) — a small call (`thinkingMaxTokens: 0`) that
+ *   3. **Compose** (multi-claim only) — a small low-effort call that
  *      writes the overall-assessment lede; the server assembles `lede + blocks`.
  *      Tools remain available (they are NOT disabled) — a tool excursion here just
  *      burns the 30s compose budget and degrades to the neutral header (the catch
@@ -1204,13 +1204,15 @@ async function runFactcheck(
         // The shared seam owns the `compose` span (connector + requestedModel at
         // start, model/tokens at end, `{ error }` on throw). It's named `compose`
         // (never "claude"), so it too falls through to the walk aggregate alongside
-        // the claim spans. Only thinking is disabled (`thinkingMaxTokens: 0`); tools
+        // the claim spans. Only thinking is turned down — `effort: "low"` on
+        // adaptive-thinking models, where `thinkingMaxTokens: 0` is ignored; tools
         // stay available — the compose prompt steers away from tool use, but a stray
         // tool excursion just burns the COMPOSE_BUDGET_MS window and degrades to the
         // neutral header below (we deliberately don't hard-disable tools here).
         const compose = await tracedOneShot(tracer, "compose", composePrompts.userPrompt, config, botConfig, {
           systemPrompt: composePrompts.systemPrompt,
           thinkingMaxTokens: 0,
+          effort: "low",
           timeoutMs: COMPOSE_BUDGET_MS,
           onProgress: composeProgress,
           ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),

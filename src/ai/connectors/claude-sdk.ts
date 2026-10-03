@@ -32,11 +32,13 @@ interface PendingTool {
 }
 
 /**
- * Map a bot's `thinkingMaxTokens` to the SDK's `thinking` option. The CLI honors
- * this via the `MAX_THINKING_TOKENS` env; the SDK exposes it as a structured
- * option instead. Without this, flipping a bot from claude-cli to claude-sdk
- * would silently drop its thinking budget (e.g. jarvis's 40k chat budget, the
- * gardener's 8k draft cap). `undefined` ⇒ leave the SDK default; `0` ⇒ disabled.
+ * Map a bot's `thinkingMaxTokens` to the SDK's `thinking` option — the same
+ * budget the claude-cli connector passes as `MAX_THINKING_TOKENS`. The SDK hands
+ * it to Claude Code, which applies a budget only on models that take one (Haiku
+ * 4.5 and older): on an adaptive-thinking model (Opus/Sonnet 4.6+, the 5.5
+ * models included) the budget is dropped, and `{type:"disabled"}` is dropped on
+ * a model that rejects it. The thinking control there is `effort`, passed below.
+ * `undefined` ⇒ leave the SDK default; `0` ⇒ disabled where the model allows it.
  */
 export function resolveThinking(maxTokens: number | undefined): ThinkingConfig | undefined {
   if (maxTokens === undefined) return undefined;
@@ -146,6 +148,7 @@ export async function executePrompt(
       : { systemPrompt: { type: "preset", preset: "claude_code" } }),
     settingSources: [],
     ...(thinking ? { thinking } : {}),
+    ...(botConfig.effort ? { effort: botConfig.effort } : {}),
     ...(hasMcp ? { mcpServers } : {}),
     ...(botConfig.extraDirs?.length ? { additionalDirectories: botConfig.extraDirs } : {}),
     // Under bypassPermissions the SDK's `allowedTools` option only suppresses

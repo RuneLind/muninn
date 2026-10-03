@@ -646,7 +646,7 @@ test.describe("Summaries: capture a Vimeo URL", () => {
     const system = (request.messages ?? []).find((m) => m.role === "system")?.content ?? "";
     expect(system).toContain("## Timeline");
     expect(system).toContain("LANGUAGE: write the summary in Norwegian (bokmål)");
-    expect(system.indexOf("MACHINE-GENERATED")).toBeLessThan(system.indexOf("LANGUAGE:"));
+    expect(system.indexOf("machine-generated")).toBeLessThan(system.indexOf("LANGUAGE:"));
     // talk-notes is a bot-model, capped kind: the throwaway bot's own model ran.
     expect(request.model).toBe("e2e-fake");
 

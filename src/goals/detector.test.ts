@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildPrompt, fuzzyMatchGoalTitle, selectCompletedGoal } from "./detector.ts";
+import { buildPrompt, fuzzyMatchGoalTitle, selectCompletedGoal, todayForDetector } from "./detector.ts";
 
 // ── fuzzyMatchGoalTitle ──────────────────────────────────────────────
 
@@ -158,6 +158,17 @@ describe("buildPrompt", () => {
   test("mentions ISO 8601 for deadlines", () => {
     const prompt = buildPrompt("Hello", "Sure!", "");
     expect(prompt).toContain("ISO 8601");
+  });
+
+  test("anchors relative deadlines on the supplied date, and carries no fixed example date", () => {
+    const prompt = buildPrompt("Finish it by Friday", "Sure!", "", "Saturday, 2026-10-03");
+    expect(prompt).toContain("Saturday, 2026-10-03");
+    expect(prompt).not.toMatch(/"deadline": "\d{4}-/);
+  });
+
+  test("todayForDetector renders weekday + Oslo date", () => {
+    // 2026-10-03T22:30Z is already Sunday 2026-10-04 in Oslo (UTC+2).
+    expect(todayForDetector(Date.UTC(2026, 9, 3, 22, 30))).toBe("Sunday, 2026-10-04");
   });
 
   test("wraps user message in triple quotes", () => {

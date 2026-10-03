@@ -91,7 +91,7 @@
  * were the point of the restructure and are preserved.
  */
 export const SUMMARY_STRUCTURE_BULLETS = [
-  "- Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*",
+  "- Open the summary with ONE short *italic* ingress line: what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*",
   "- Then a `## Key takeaways` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.",
   "- Then `##`-level section headers for each major topic; use `###` only for sub-sections. Keep the heading hierarchy consistent.",
   "- When the source DICTATES something meant to be reused — a prompt, a command, a config, a query, a formula, a code snippet (\"the prompt I use is…\", \"run this…\", text shown on screen) — reproduce it VERBATIM inside a fenced code block, under a short line saying what it is. Never paraphrase or shorten it: for these, fidelity beats brevity and the \"keep it concise\" rule below does not apply. ALWAYS close the fence, and never label one `mermaid` — that is drawn, not shown. Quote it whole; only when it will not fit, quote the essential part, mark it `(excerpted)`, and still close the fence — never truncate silently. When what is dictated is itself markup the \"plain markdown only\" rule below forbids, describe it in prose rather than quoting it. If the source names such an artifact without ever giving its text, say so — never invent one.",

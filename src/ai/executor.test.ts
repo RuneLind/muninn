@@ -187,6 +187,33 @@ describe("executeClaudePrompt", () => {
     spawnSpy.mockRestore();
   });
 
+  test("passes the bot's effort as --effort, and omits the flag when unset", async () => {
+    const spawnSpy = spyOn(Bun, "spawn");
+    const mockStdout = JSON.stringify({ result: "hello", duration_ms: 1000, duration_api_ms: 800 });
+    const fakeProc = () =>
+      ({
+        pid: 123,
+        stdout: new Response(mockStdout).body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+        kill: mock(),
+      }) as any;
+    spawnSpy.mockReturnValueOnce(fakeProc()).mockReturnValueOnce(fakeProc());
+
+    const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
+    await executeClaudePrompt("test", config, { name: "testbot", dir: "/tmp/testbot", effort: "medium" } as any);
+    await executeClaudePrompt("test", config, { name: "testbot", dir: "/tmp/testbot" } as any);
+
+    const [withEffort] = spawnSpy.mock.calls[0]! as unknown as [string[]];
+    const i = withEffort.indexOf("--effort");
+    expect(i).toBeGreaterThan(-1);
+    expect(withEffort[i + 1]).toBe("medium");
+    const [without] = spawnSpy.mock.calls[1]! as unknown as [string[]];
+    expect(without).not.toContain("--effort");
+
+    spawnSpy.mockRestore();
+  });
+
   test("returns wallClockMs and startupMs", async () => {
     const spawnSpy = spyOn(Bun, "spawn");
 
