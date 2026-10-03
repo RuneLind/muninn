@@ -1,10 +1,10 @@
 /**
- * Who commits a series edit — and the wikis where the answer is NOBODY.
+ * Who commits a series edit — and the wikis where nothing else does.
  *
- * `POST /api/wiki/series` writes in `writeWikiPage`'s no-log mode and passes no
- * committer, the `/plans` board's discipline: mimir is in `SYNC_REPOS`, and the
- * repo-sync loop is its committer. That reasoning does not carry to every wiki
- * the route serves, and the two gaps are different:
+ * `POST /api/wiki/series` writes in `writeWikiPage`'s no-log mode. On mimir it
+ * passes no committer: mimir is in `SYNC_REPOS`, and the repo-sync loop is its
+ * committer. That reasoning does not carry to every wiki the route serves, and
+ * the two gaps are different:
  *
  *   - **A BOT wiki** is swept by the daily `wiki-committer` watcher
  *     (`src/watchers/`), so its edit is committed — but up to ~24 h later, under
@@ -12,16 +12,17 @@
  *     Late and differently-labelled, not lost.
  *   - **A standalone `WIKI_EXTRA` wiki that no `SYNC_REPOS` entry covers** has
  *     neither: the sweeper is bot-keyed and the loop never looks at that repo.
- *     The edit sits in the working tree until a human notices it. That is the
- *     one case worth a log line at write time, because nothing else on the
- *     machine will ever mention it.
+ *     A non-null answer here makes the route commit the page itself; the line
+ *     is logged only when that commit does not land (not a repo, a feature
+ *     branch checked out), because then nothing else will ever mention it.
  *
- * The match is LEXICAL (the same normalisation `parseSyncRepos` falls back to),
- * so an exotic symlink could produce a warning for a wiki that really is
- * covered. A spurious log line is the right direction for a check whose whole
- * output is a log line.
+ * Both sides are compared with symlinks resolved, the normalisation
+ * `parseSyncRepos` stores `SyncRepo.path` in: a non-null answer is now a commit,
+ * and a lexical miss (macOS `/tmp` → `/private/tmp`) would commit a repo the
+ * sync loop already owns.
  */
 
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import type { SyncRepo } from "../sync/config.ts";
 
@@ -33,7 +34,12 @@ export interface SeriesCommitterWiki {
 }
 
 function norm(p: string): string {
-  return path.resolve(p).replace(/\/+$/, "");
+  const resolved = path.resolve(p);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved.replace(/\/+$/, "");
+  }
 }
 
 /** Is `root` inside (or equal to) `dir`? */
@@ -44,7 +50,8 @@ function contains(dir: string, root: string): boolean {
 }
 
 /**
- * The line to log for this write, or `null` when the wiki has a committer.
+ * The line to log when this write stays uncommitted, or `null` when the wiki
+ * has a committer of its own — so non-null also means "the route commits".
  *
  * `entry === null` is the bare `WIKI_DIR` override — the bot-owned default wiki
  * under another name, so it takes the bot-wiki branch (no warning).

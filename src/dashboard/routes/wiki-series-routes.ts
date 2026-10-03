@@ -50,21 +50,21 @@
  *     noop over somebody else's hand edit. The editor's own head move clears the
  *     old head first and is unaffected.
  *
- * **No log.md entry, no reindex, no commit** — `writeWikiPage`'s no-log mode,
- * the `/plans` board's priority-flip discipline. A series edit is metadata: it
+ * **No log.md entry, no reindex** — `writeWikiPage`'s no-log mode, the
+ * `/plans` board's priority-flip discipline. A series edit is metadata: it
  * moves no prose, so re-embedding the page buys nothing, and a rail-menu click
  * is a triage-rate action whose curated log line would bury the log it sits in.
  * `groupApplyPolicy` is the policy for a gardener GROUP APPLY, which writes page
  * CONTENT at a review gate.
  *
- * **Who commits it, then — and the wiki where nobody does.** On mimir the
- * repo-sync loop is the committer (it is in `SYNC_REPOS`). On a BOT wiki the
- * daily `wiki-committer` sweeper is, up to ~24 h later, under a `[sweep]`
- * subject and bypassing that bot's own `wikiAutoCommit` policy — late, not lost.
- * On a standalone `WIKI_EXTRA` wiki that no `SYNC_REPOS` entry covers there is
- * NO committer at all, so the write logs one `warn` naming that
- * ({@link seriesCommitterWarning}); the reader's edit sits in the working tree
- * until a human commits it.
+ * **Who commits it, then.** On mimir the repo-sync loop is the committer (it is
+ * in `SYNC_REPOS`). On a BOT wiki the daily `wiki-committer` sweeper is, up to
+ * ~24 h later, under a `[sweep]` subject — late, not lost. Neither covers a
+ * standalone `WIKI_EXTRA` wiki outside `SYNC_REPOS`, so there THIS route commits
+ * the one page itself (`[series] edit: <relPath>`, no push) and logs
+ * {@link seriesCommitterWarning}'s line only when that commit did not land.
+ * Measured: the melosys-kode-wiki edit of 2026-10-02 sat uncommitted until
+ * another session found it, because the warn line was all this route did.
  *
  * It DOES refresh the wiki index (`defaultPageWriteIo`), unlike the plans board:
  * the rail renders from `GET /api/wiki/pages`, which reads that index behind a
@@ -98,6 +98,7 @@ import {
   PAGE_GONE_REASON,
   defaultPageWriteIo,
   writeWikiPage,
+  type PageWriteCommitOptions,
 } from "../../wiki/page-write.ts";
 import { setFrontmatterScalar } from "../../plans/frontmatter.ts";
 import { sha256 } from "../../gardener/util.ts";
@@ -107,6 +108,7 @@ import { decideStampRequest } from "./wiki-stamp.ts";
 import { readonlyRefusal } from "./route-utils.ts";
 import { seriesCommitterWarning } from "../../wiki/series-committer.ts";
 import { getSyncRepos } from "../../sync/config.ts";
+import { commitWikiChange } from "../../wiki/commit.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("wiki", "series");
@@ -288,6 +290,17 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       let clearedLabel: { series: string; label: string } | null = null;
       /** Rule 4's loser — the member that already names this series. */
       let twoHeaded: WikiPageMeta | null = null;
+      // Non-null only where nothing else commits this wiki — see the header.
+      const noCommitter = seriesCommitterWarning(
+        entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
+        getSyncRepos().repos,
+      );
+      const commitTail: PageWriteCommitOptions = noCommitter
+        ? {
+            commit: (paths, message) => commitWikiChange(root, paths, message, { push: false }),
+            commitMessage: `[series] edit: ${meta.relPath}`,
+          }
+        : {};
       const result = await writeWikiPage({
         wikiDir: root,
         relPath: meta.relPath,
@@ -298,6 +311,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         // where the call is read.
         collections: [],
         logKind: null,
+        ...commitTail,
         now: () => Date.now(),
         transform: (raw) => {
           written = null;
@@ -438,12 +452,12 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       // hash is of this call's own output rather than of a re-read another
       // writer may have moved.
       const changed = written !== null;
-      if (changed) {
-        const warning = seriesCommitterWarning(
-          entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
-          getSyncRepos().repos,
-        );
-        if (warning) log.warn("wiki series: {warning}", { warning, path: meta.relPath });
+      if (changed && noCommitter && result.outcome === "written" && !result.commit?.committed) {
+        log.warn("wiki series: {warning} ({reason})", {
+          warning: noCommitter,
+          reason: result.commit?.reason ?? "commit failed",
+          path: meta.relPath,
+        });
       }
       // The cast is the `written`/`refusedReason` idiom above: TypeScript cannot
       // see that the closure ran, so it narrows every one of these to `null`.

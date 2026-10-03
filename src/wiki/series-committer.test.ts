@@ -7,6 +7,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { seriesCommitterWarning, type SeriesCommitterWiki } from "./series-committer.ts";
 import type { SyncRepo } from "../sync/config.ts";
 
@@ -59,5 +62,20 @@ describe("seriesCommitterWarning", () => {
     // …and neither does the bare `WIKI_DIR` override, which is a bot wiki under
     // another name.
     expect(seriesCommitterWarning(null, [])).toBeNull();
+  });
+
+  test("a root reached through a symlink is still covered", async () => {
+    // `SyncRepo.path` is stored realpath'd; the registry keeps the configured
+    // spelling. A lexical miss would now COMMIT a repo the sync loop owns.
+    const base = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-link-")));
+    try {
+      const real = path.join(base, "mimir");
+      const link = path.join(base, "linked");
+      await mkdir(real);
+      await symlink(real, link);
+      expect(seriesCommitterWarning(wiki({ root: link }), [repo({ path: real })])).toBeNull();
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });

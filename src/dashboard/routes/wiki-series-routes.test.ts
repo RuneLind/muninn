@@ -8,7 +8,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -24,6 +24,7 @@ import {
 import { sha256 } from "../../gardener/util.ts";
 import { registerWikiSeriesRoutes, type WikiSeriesRouteDeps } from "./wiki-series-routes.ts";
 import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
+import { __resetSyncReposForTest } from "../../sync/config.ts";
 
 const PLAN = "plans/alpha.mdx";
 const SHIPPED = "plans/beta.mdx";
@@ -793,5 +794,92 @@ describe("the head move, as the two calls it is", () => {
     );
     // And the old head kept its own order, minus the line that left.
     expect(await fence(PLAN)).toEqual(planBefore.filter((l) => !l.startsWith("series_label:")));
+  });
+});
+
+describe("who commits the write", () => {
+  async function git(cwd: string, args: string[]): Promise<string> {
+    const proc = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+    const out = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")} failed`);
+    return out.trim();
+  }
+
+  /**
+   * A git wiki with one initial commit, a tracked page left modified and an
+   * untracked file — the two kinds of foreign dirt a commit must not sweep in.
+   * Realpath'd, because `SyncRepo.path` is and macOS `tmpdir()` is a symlink.
+   */
+  async function gitWiki(): Promise<string> {
+    const dir = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-git-")));
+    for (const [rel, body] of PAGES) {
+      await mkdir(path.join(dir, path.dirname(rel)), { recursive: true });
+      await writeFile(path.join(dir, rel), body, "utf8");
+    }
+    await git(dir, ["init", "-q", "-b", "main"]);
+    await git(dir, ["config", "user.email", "a@b.c"]);
+    await git(dir, ["config", "user.name", "Fixture"]);
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-q", "-m", "init"]);
+    await writeFile(path.join(dir, BLOG), md("Gamma blog, hand-edited"), "utf8");
+    await writeFile(path.join(dir, "scratch.md"), md("Scratch"), "utf8");
+    return dir;
+  }
+
+  async function editLone(
+    dir: string,
+    source: "bot" | "extra",
+    syncRepos?: string,
+  ): Promise<{ subjects: string[]; headFiles: string; status: string[] }> {
+    __setWikiRegistryForTest([{ name: "g", root: dir, source }]);
+    const prevSync = process.env.SYNC_REPOS;
+    if (syncRepos) process.env.SYNC_REPOS = syncRepos;
+    else delete process.env.SYNC_REPOS;
+    __resetSyncReposForTest();
+    __resetWikiCacheForTest();
+    try {
+      const baseHash = sha256(await readFile(path.join(dir, LONE), "utf8"));
+      const res = await post({ wiki: "g", relPath: LONE, baseHash, series: "prov" });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { written: boolean }).written).toBe(true);
+      return {
+        subjects: (await git(dir, ["log", "--format=%s"])).split("\n"),
+        headFiles: await git(dir, ["show", "--name-only", "--format=", "HEAD"]),
+        status: (await git(dir, ["status", "--porcelain"]))
+          .split("\n")
+          .map((l) => l.trim())
+          .sort(),
+      };
+    } finally {
+      if (prevSync === undefined) delete process.env.SYNC_REPOS;
+      else process.env.SYNC_REPOS = prevSync;
+      __resetSyncReposForTest();
+      __setWikiRegistryForTest([{ name: "w", root, source: "extra" }]);
+      __resetWikiCacheForTest();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a standalone wiki outside SYNC_REPOS gets one commit holding only the page", async () => {
+    const dir = await gitWiki();
+    const { subjects, headFiles, status } = await editLone(dir, "extra");
+    expect(subjects).toEqual([`[series] edit: ${LONE}`, "init"]);
+    expect(headFiles).toBe(LONE);
+    // The foreign dirt is still dirt: neither file rode along.
+    expect(status).toEqual(["?? scratch.md", `M ${BLOG}`]);
+  });
+
+  test("a wiki SYNC_REPOS covers is left to the sync loop", async () => {
+    const dir = await gitWiki();
+    const { subjects, status } = await editLone(dir, "extra", `g=${dir}:wiki`);
+    expect(subjects).toEqual(["init"]);
+    expect(status).toContain(`M ${LONE}`);
+  });
+
+  test("a bot wiki is left to the wiki-committer sweeper", async () => {
+    const dir = await gitWiki();
+    const { subjects, status } = await editLone(dir, "bot");
+    expect(subjects).toEqual(["init"]);
+    expect(status).toContain(`M ${LONE}`);
   });
 });
