@@ -253,7 +253,7 @@ rank X (replacing <docId>)`); the `Collection: …` info line carries `N article
 
 ### Prompt size is critical
 
-Sonnet times out at 60s with large prompts. The collection path must send **compact one-liners** (`compactTweetText`), not full markdown documents. Full docs caused 180s timeouts even with increased limits. The compact format matches what the direct fetcher produces: `@handle: text (likes, views)\n  URL: url`.
+The collection path must send **compact one-liners** (`compactTweetText`), not full markdown documents: full docs made the Sonnet digest call time out even at 180s. The compact format matches what the direct fetcher produces: `@handle: text (likes, views)\n  URL: url`.
 
 ### Collection path gotchas
 
@@ -276,13 +276,13 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 | `collection` | `"x-feed"` | Collection name. Required for the active collection path. |
 | `model` | Haiku | Model for summarization (e.g. "claude-sonnet-5-5") |
 | `timeoutMs` | 300000 | Model call timeout (ms). Set 600000+ for Sonnet with large backlogs. Read by BOTH legs off the same default: the digest call, and the capture leg's completion budget (`min(timeoutMs + 30s, tick 600s) − 60s`). |
-| `maxDocs` | 80 | Max documents to fetch from collection per run. The cap is **score-ordered** (see "Score-ordered document cap"), so at full listing-score coverage it no longer shapes digest content — only fetch cost and the capture batch. Below full coverage it still selects which docs are fetched at all. **Calibrated 2026-07-25 and deliberately kept at 80** for the X-Article work: the live 2-day window held 476 docs at **100%** listing-score coverage, 80th-place `combined_score` = **0.5794**, and every article-class doc in the capture band sat at ranks 1/15/26/38/57/67 (0.7493 → 0.5903) — all inside 80. Raising to 200 (cut ≈ 0.500) would admit 10 more articles, all from the low-engagement tail the gate's 0.6 floor rejects anyway, at ~200 doc fetches per 2h run. Revisit only if a `Collection: …` log line shows `newCount` regularly above 80 (the first post-quiet-hours run is the one binding case). |
+| `maxDocs` | 80 | Max documents to fetch from collection per run. The cap is **score-ordered** (see "Score-ordered document cap"), so at full listing-score coverage it no longer shapes digest content — only fetch cost and the capture batch. Below full coverage it still selects which docs are fetched at all. **Calibrated 2026-07-25 and deliberately kept at 80** for the X-Article work: the live 2-day window held 476 docs at **100%** listing-score coverage, 80th-place `combined_score` = **0.5777**, and the 6 of the window's 25 article docs that sit inside the cap are at ranks 1/15/26/38/57/67 (0.7493 → 0.5903). Raising to 200 (cut ≈ 0.500) would admit 10 more articles, all from the low-engagement tail the gate's 0.6 floor rejects anyway, at ~200 doc fetches per 2h run. Revisit only if a `Collection: …` log line shows `newCount` regularly above 80 (the first post-quiet-hours run is the one binding case). |
 | `topN` | 30 | Max tweets sent to LLM after engagement ranking |
 | `prompt` | `DEFAULT_X_PROMPT` | Custom prompt (overrides default two-tier format) |
 | `apiUrl` | `KNOWLEDGE_API_URL` env | Knowledge API URL |
 | `windowDays` | 2 | Rolling day window (Europe/Oslo). 1 = today only, 7 = last week. |
 | `dedupByTweetId` | `true` | Filter out tweets already in `lastNotifiedIds`. Set `false` on daily/weekly digests that re-rank the full window. |
-| `minScore` | — | Pre-LLM gate on `rankScore` (metadata `combined_score` preferred; text-regex `combined_score`/`engagement_score` fallback). If set and top tweet is below, the watcher silently tracks the fetched IDs and skips the LLM call entirely — no message sent. **NB — needs re-tuning:** the seeded X Highlights floor of `0.85` is structurally unreachable (live max `combined_score` ≈ 0.8028), so Highlights silences every run. Re-tune below the post-rescore ceiling once distribution is measured — expect **0.6–0.75**. |
+| `minScore` | — | Pre-LLM gate on `rankScore` (metadata `combined_score` preferred; text-regex `combined_score`/`engagement_score` fallback). If set and top tweet is below, the watcher silently tracks the fetched IDs and skips the LLM call entirely — no message sent. **NB — the seed needs re-tuning:** the `0.85` floor `scripts/setup-x-watchers.ts` seeds is structurally unreachable (live max `combined_score` ≈ 0.8028), so a freshly seeded Highlights row silences every run; the live row runs `0.6`. Re-tune the seed below the post-rescore ceiling — expect **0.6–0.75**. |
 | `quietMode` | `false` | Allows the LLM to reply with literal `SKIP` (any case, optional surrounding markdown/punctuation) to suppress the alert. The fetched IDs are still tracked so the same tweets aren't re-evaluated next run. |
 | `captureCandidates` | `false` | Persist high-value **long-form** tweets into the `summary_candidates` inbox (Candidates → Summaries). Collection path only. Runs on the FULL fetched batch, BEFORE and independent of the `minScore`/`quietMode` silencing — a run that alerts nothing can still capture. See "Candidate capture" below. |
 | `candidateMinScore` | 0.6 | Inbox capture floor for **top-5%-author** long-form (`x-post`) tweets — long-form tweets scored ≥ this by the capture gate are queued. Independent of the alert `minScore`. |
@@ -461,12 +461,13 @@ bot's chat connector. `watcherConnectorInfo(watcher, botConfig, botFallbackModel
   bot's chat connector (`claude-sdk`) / `HAIKU_BACKEND` resolution (`anthropic`)
   is irrelevant. Stamping the chat connector here (the pre-fix `setConnectorInfo`
   call) was an active lie.
-- `wiki-gardener` → labelled from the **bot's own connector/model** — its draft
-  (`executeOneShot`, the dominant work) runs there; the Haiku cluster is the
-  minor part. `botFallbackModel` (resolved once per batch from
-  `loadConfig().claudeModel`) mirrors the fallback every other `setConnectorInfo`
-  caller passes.
-- `news` / `wiki-linter` → `null` (no model runs, so no chip is stamped).
+- `wiki-gardener` / `consolidation-gardener` → labelled from the **bot's own
+  connector/model** — their draft (`executeOneShot`, the dominant work) runs
+  there; the gardener's Haiku cluster is the minor part. `botFallbackModel`
+  (resolved once per batch from `loadConfig().claudeModel`) mirrors the fallback
+  every other `setConnectorInfo` caller passes.
+- `news` / `wiki-linter` / `wiki-committer` → `null` (no model runs, so no chip
+  is stamped).
 
 ### Scheduler context
 
@@ -482,7 +483,7 @@ Due watchers now run **concurrently**: `runWatchers` fans the due list out throu
 
 ### Concurrent-duplicate guard (`claimChecker`/`releaseChecker`)
 
-The scheduler tick races `runWatchers` against `TICK_TIMEOUT_MS` (10 min) and releases `tickRunning` when the race settles — but an orphaned checker (a 20-min gardener, a wedged MCP subprocess) keeps running past that. Because `force_next_run`/`last_run_at` only change at run **END**, the next tick re-selects the same watcher and would dispatch a **concurrent duplicate** (the seeded 20-min weekly gardener already exceeds the 10-min tick, so this is a live bug). A module-level in-flight set keyed on the watcher id — claimed BEFORE `runChecker` and released in the RAW checker promise's own `.finally` (NOT the timeout-raced one, which would free the slot while an orphan still runs) — skips the duplicate dispatch until the real work settles. **Escape hatch:** a slot older than `2 × computeWatcherTimeoutMs(watcher)` is force-reclaimed with a loud `log.error` (a never-settling checker would otherwise park that watcher until restart); the reclaim mints a fresh token, so the stale checker's late `.finally` (old token) is a no-op and can't free the new dispatch's slot.
+The scheduler tick races `runWatchers` against `TICK_TIMEOUT_MS` (10 min) and releases `tickRunning` when the race settles — but an orphaned checker (a 45-min gardener, a wedged MCP subprocess) keeps running past that. Because `force_next_run`/`last_run_at` only change at run **END**, the next tick re-selects the same watcher and would dispatch a **concurrent duplicate** (the seeded 45-min weekly gardener already exceeds the 10-min tick, so this is a live bug). A module-level in-flight set keyed on the watcher id — claimed BEFORE `runChecker` and released in the RAW checker promise's own `.finally` (NOT the timeout-raced one, which would free the slot while an orphan still runs) — skips the duplicate dispatch until the real work settles. **Escape hatch:** a slot older than `2 × computeWatcherTimeoutMs(watcher)` is force-reclaimed with a loud `log.error` (a never-settling checker would otherwise park that watcher until restart); the reclaim mints a fresh token, so the stale checker's late `.finally` (old token) is a no-op and can't free the new dispatch's slot.
 
 Caveats of the parallel model:
 - The **phase dial** (`agentStatus.set("running_watcher")` / `set("sending_telegram")`) is a coarse global indicator and races under parallelism — that's expected. The real per-watcher progress lives in the per-`requestId` waterfall. The dial is reset to `idle` **once** after the whole batch settles (not per-watcher), so an early finisher doesn't flip it to idle while siblings still run.
@@ -524,7 +525,7 @@ Who writes it, and when, is load-bearing — three review rounds landed here:
   undefined, and "no MCP server key contains gmail" — where there is no evidence
   the run broke and equally none that it worked. An unparseable answer is also
   not coverage. Coverage rides out on `checkEmail`'s **return value**
-  (`EmailCheckResult.coveredFrom`), never an out-param: as an optional out-param
+  (`WatcherCheckResult.coveredFrom`), never an out-param: as an optional out-param
   it could be dropped at either call hop with `tsc` clean and the suite green,
   leaving the whole feature inert.
 - **The write happens AFTER delivery.** `finishWatcherRun` claims "everything in
@@ -953,7 +954,7 @@ Like the X watcher, the single Anthropic row is split into three rows that share
 | **Anthropic Daily Digest** | 24h + `hour:12` | `digest:true` | — | `true` (prompt invites `SKIP`) | Sonnet | 3 | `DEFAULT_ANTHROPIC_DAILY_PROMPT` |
 | **Anthropic Weekly Digest** | 7d + `hour:18` | `digest:true` | — | `false` | Sonnet | 16 | `DEFAULT_ANTHROPIC_WEEKLY_PROMPT` |
 
-- **Per-row snapshot windows.** `watcher_snapshots` is keyed by `(watcher_id, key)`, so each row keeps an **independent** Tier-2 baseline. A row's snapshot, advanced at the row's own cadence, *is* its window: Highlights→last-2h delta, Daily→today's additions, Weekly→the week's. (Cost: each row fetches `llms.txt` and holds its own ~1753-URL baseline when it runs — trivial; it's the mechanism, not waste. Rows rarely run in the same tick.)
+- **Per-row snapshot windows.** `watcher_snapshots` is keyed by `(watcher_id, key)`, so each row keeps an **independent** Tier-2 baseline. A row's snapshot, advanced at the row's own cadence, *is* its window: Highlights→last-2h delta, Daily→today's additions, Weekly→the week's. (Cost: each row fetches `llms.txt` and holds its own `llms.txt` baseline (549 URLs since the 2026-07-21 restructure) when it runs — trivial; it's the mechanism, not waste. Rows rarely run in the same tick.)
 - **Digest mode** (`config.digest`) rolls a window's candidates into ONE message via a single LLM call instead of per-item alerts. It **caps the Tier-1 portion at 240** (`DIGEST_MAX_TIER1` = 12 feeds × `MAX_PER_FEED` 20 — a safety rail) but **never truncates Tier-2 additions**: Tier-2 dedup is the snapshot, which `persistTier2` advances to the full set unconditionally, so an un-surfaced Tier-2 addition would be lost forever, whereas a dropped Tier-1 item re-surfaces next run via `lastNotifiedIds`. `trackingIds` = the digested set only. On an LLM error the digest returns `[]` without advancing snapshots (the window retries the next *scheduled* run — hence the widened `lookbackDays` as a retry cushion). `quietMode` lets an all-churn day reply `SKIP`.
 - **Daytime window for Highlights** is the runner's quiet-hours, NOT `config.hour` — `isScheduledTimeDue` only supports a single once-per-day hour (incompatible with "every 2h"), so Highlights omits `hour` and night-suppression rides `isQuietHours` (same as X Highlights). Absent a configured quiet-hours window the row fires 24/7 every 2h (the `minScore 0.8` gate keeps that rare).
 - **Gate-score calibration logging.** The gate path logs one `gate-score n=… score=… min=… surfaced=… …` line per candidate (greppable prefix `gate-score`; `score=omitted` = the model dropped it as churn). Mine the log history after a week of real output to set the final `minScore`.
@@ -1856,4 +1857,4 @@ unset). The manual drain mirrors this via its own `wiki-gardener-backlog` tracer
 
 ## Testing
 
-Watcher tests: `runner.test.ts` — tests dedup logic, contentHash, extractProperNouns. Checkers with mockable seams are unit-tested next to their source (`anthropic.test.ts` covers parsing, gate, digest, and the shelf-capture policy against mocked fetch/Haiku/DB; `x.test.ts` similarly). The email checker spawns Haiku with Gmail MCP and is only testable via manual trigger from the dashboard.
+Watcher tests: `runner.test.ts` — tests dedup logic, contentHash, extractProperNouns. Checkers with mockable seams are unit-tested next to their source (`anthropic.test.ts` covers parsing, gate, digest, and the shelf-capture policy against mocked fetch/Haiku/DB; `x.test.ts` similarly). `email.test.ts` covers the email checker's liveness predicate, bounded retry and `coveredFrom` through injected seams; only the live Gmail MCP round-trip needs a manual trigger from the dashboard.
