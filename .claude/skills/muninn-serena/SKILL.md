@@ -13,8 +13,10 @@ Serena provides code search and analysis tools (find_symbol, search_for_pattern,
 2. Click **Start** on the instances you need (or **Start All**)
 3. Each instance spawns Serena with `--transport streamable-http` on a dedicated port
 4. The bot's `.mcp.json` has `type: "http"` entries pointing directly to these ports
-5. The copilot-sdk connects to Serena over HTTP — no proxy, no per-session spawning
+5. The copilot-sdk connects to Serena over HTTP — no per-session spawning
 6. Click **Stop** when done to free resources
+
+While any instance runs, muninn also runs a tool proxy on port 9120 (`src/serena/tool-proxy.ts`, started and stopped by the manager). It exposes two tools — `search_tools` and `call_tool` — in front of every running instance instead of every instance's full tool list. A bot can point its `.mcp.json` at the proxy or at an instance directly.
 
 ## Configuration
 

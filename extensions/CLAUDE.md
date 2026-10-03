@@ -32,7 +32,7 @@ const DEFAULTS = {
 const settings = await chrome.storage.sync.get(DEFAULTS);
 ```
 
-Never use `javrvisUrl` (legacy name). The settings key and the HTML element ID must match.
+The settings key and the HTML element ID must match.
 
 ### Options page
 
@@ -42,9 +42,11 @@ Every extension has an options page with at least a "Muninn URL" field. Use the 
 
 Extensions are vanilla JS — no TypeScript, no bundler. Load directly from the folder in Chrome dev mode. Keep them simple.
 
+One exception: `youtube/capture-rules.js` is generated from `src/youtube/` by `bun run build:extension`. Edit the source, rerun the command, and commit the regenerated file; never edit `capture-rules.js` by hand (a test compares it byte for byte with the emitter's output).
+
 ### API calls
 
-Extensions call Muninn dashboard endpoints (defined in `src/dashboard/routes.ts`). The `host_permissions` in `manifest.json` must include the Muninn URL pattern (default `http://localhost:3010/*`).
+Extensions call Muninn dashboard endpoints (defined in `src/dashboard/routes/*.ts`, one file per surface, e.g. `youtube-routes.ts`, `research-routes.ts`). The `host_permissions` in `manifest.json` must include the Muninn URL pattern (default `http://localhost:3010/*`).
 
 ### Error handling
 

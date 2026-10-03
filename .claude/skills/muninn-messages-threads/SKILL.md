@@ -1,5 +1,5 @@
 ---
-description: "Conventions for message storage, platform formatting, thread management, and outbound message persistence in Muninn. Use when: (1) Saving messages to the database from any code path (watchers, scheduler, handlers), (2) Formatting messages for display on Telegram, Slack, or web, (3) Working with thread ordering or the listThreads query, (4) Adding new outbound message sources (watchers, scheduled tasks, alerts), (5) Modifying the web chat (resolveConversation, message loading, rendering), (6) Writing Haiku prompts that generate user-facing text, (7) Debugging why messages look wrong on a specific platform, (8) Debugging why thread ordering puts the wrong thread on top, (9) Working with the Jira Chrome extension research thread flow (user resolution, thread collision). Triggers: 'formatting', 'thread ordering', 'saveMessage', 'formatTelegramHtml', 'formatWebHtml', 'watcher message', 'scheduler message', 'web chat', 'platform format', 'markdown storage', 'thread activity', 'research chat', 'jira plugin', 'chrome extension', 'findThreadByName', 'forceNew'."
+description: "Conventions for how Muninn stores, formats and threads messages. Use whenever code saves a message from any path (handlers, watchers, scheduler), formats output for Telegram, Slack or web, writes a Haiku prompt that produces user-facing text, touches thread ordering or the web chat's message loading, or changes the Jira extension's research-thread flow — and when debugging a message that renders wrong on one platform or lands in the wrong thread."
 ---
 
 # Muninn Messages & Threads
@@ -75,9 +75,7 @@ The `listThreads()` function in `src/db/threads.ts` sorts threads by most recent
 
 ### The NULL thread_id trap
 
-Messages from watchers and scheduled tasks historically had no `thread_id` set. The old query used `COALESCE(thread_id, main_thread_id)` to attribute these to "main", which inflated the main thread's `last_activity` and made it permanently sort to the top — even when other threads had more recent real conversation activity.
-
-The fix: the query now uses `AND thread_id IS NOT NULL`, excluding orphan messages from activity calculations entirely. These messages are still visible when viewing the main thread (the `getSimMessages` and `getRecentMessages` functions handle the `OR thread_id IS NULL` clause separately for display).
+`listThreads()` computes activity with `AND thread_id IS NOT NULL`, so messages without a thread never count toward a thread's `last_activity`. Attributing them to "main" would make main sort to the top permanently. These messages are still visible when viewing the main thread (the `getSimMessages` and `getRecentMessages` functions handle the `OR thread_id IS NULL` clause separately for display).
 
 ### Rule: always set threadId when saving messages
 
@@ -98,12 +96,13 @@ await saveMessage({
 });
 ```
 
-If `threadId` is omitted, the message gets `NULL` in the DB. It won't appear in non-main thread contexts (breaking conversation continuity) and won't affect thread ordering.
+If `threadId` is omitted, the message gets `NULL` in the DB: it shows only in the main thread and does not affect thread ordering. Proactive rows (`watcher:`/`task:`/`goal:` sources) never enter the prompt's conversation history either way — `getRecentMessages(…, { excludeProactive: true })` drops them, and they reach the model only through the bounded alerts block.
 
 ### Where to check
 
 - `src/watchers/runner.ts` — email/news alert persistence
-- `src/scheduler/runner.ts` — scheduled tasks, goal reminders, goal check-ins
+- `src/scheduler/task-executor.ts` — scheduled tasks
+- `src/scheduler/goal-runner.ts` — goal reminders, goal check-ins
 - `src/core/message-processor.ts` — main chat messages (already correct)
 
 ## 3. Web Chat
@@ -131,19 +130,15 @@ When loading persisted messages from the DB:
 1. **Server** (`src/chat/routes.ts`): `formatWebHtml(m.content)` is applied to assistant messages when `isWeb === true`
 2. **Client** (`src/chat/views/page.ts`): `sanitizeHtml(msg.text, isWeb)` strips disallowed tags
 
-The `sanitizeHtml` function uses two tag whitelists:
-- `_tgTags`: `b, strong, i, em, u, s, del, code, pre, a, br, span`
-- `_webTags`: all of `_tgTags` plus `h2, h3, h4, h5, h6, ul, ol, li, blockquote, hr, table, thead, tbody, tr, th, td, p`
-
-If `isWeb` is false (wrong conversation type), headings, lists, and tables are stripped — the page looks broken.
+`sanitizeHtml` allows a wider tag set when `isWeb` is true (headings, lists, blockquotes, tables). If `isWeb` is false (wrong conversation type), headings, lists, and tables are stripped — the page looks broken.
 
 ### Streaming messages
 
-For real-time streaming, the client-side `formatWebHtml()` (a JS port in `page.ts`) is used directly on accumulated deltas. A note at the top of `src/web/web-format.ts` reminds to keep both copies in sync.
+For real-time streaming, the client-side `formatWebHtml()` in `src/chat/views/components/web-format-client.ts` is used directly on accumulated deltas. Keep it in sync with `src/web/web-format.ts` (rules in `src/web/CLAUDE.md`).
 
 ## 4. Research Thread Creation (Jira Chrome Extension)
 
-The `/api/research/chat` endpoint (`src/dashboard/routes.ts`) creates threads for Jira tasks sent from the Chrome extension. It has specific safeguards to prevent two past bugs: wrong user selection and silent thread reuse.
+The `/api/research/chat` endpoint (`src/dashboard/routes/research-routes.ts`) creates threads for Jira tasks sent from the Chrome extension. It has specific safeguards to prevent two past bugs: wrong user selection and silent thread reuse.
 
 ### User resolution
 
@@ -170,7 +165,7 @@ This prevents the old bug where `createThread`'s `ON CONFLICT` upsert silently r
 
 | File | Purpose |
 |---|---|
-| `src/dashboard/routes.ts` | `/api/research/chat` handler — user resolution, thread collision, pending message |
+| `src/dashboard/routes/research-routes.ts` | `/api/research/chat` handler — user resolution, thread collision, pending message |
 | `src/db/threads.ts` | `findThreadByName()`, `createThread()` |
 | `src/chat/pending-messages.ts` | In-memory store bridging POST → chat page (5-min TTL) |
 | `src/chat/views/page.ts` | `handleDeepLink()` — consumes pending message and auto-sends |

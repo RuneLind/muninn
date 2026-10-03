@@ -1,5 +1,5 @@
 ---
-description: "How the web chat waterfall, tool status, and request progress system works in Muninn. Use when: (1) Debugging why the waterfall shows or doesn't show for a bot, (2) Modifying how tool calls are displayed inline or in the waterfall, (3) Working with the showWaterfall config flag or window._suppressWaterfall, (4) Adding new tool status mappings in tool-status.ts, (5) Debugging why tool use disappears on page refresh, (6) Understanding SSE vs WebSocket event flow in the chat page, (7) Working with request progress tracking (agentStatus), (8) Modifying how traces link to messages for persistent tool history, (9) Understanding the intermediate element lifecycle (intent bubbles, tool status lines, streaming bubbles). Triggers: 'waterfall', 'showWaterfall', 'tool status', 'request progress', 'agentStatus', 'SSE events', 'tool_status event', 'intent bubble', 'removeIntermediates', 'msg-intermediate', 'msg-tool-status', 'trace_id', 'loadToolCallsFromTrace', '_suppressWaterfall', 'request_progress', 'tool calls disappear', 'waterfall panel'."
+description: "How Muninn's web chat shows request progress: the waterfall panel, inline tool-status lines and intent bubbles, the SSE and WebSocket channels that feed them, and the trace link that keeps tool history across a page refresh. Use whenever you change or debug any of these — the showWaterfall flag, tool-status text, agentStatus progress, or tool calls that vanish or show for the wrong bot."
 ---
 
 # Muninn Waterfall & Tool Status System
@@ -13,8 +13,8 @@ The chat page uses two separate event channels for different purposes. Confusing
 ```
 Server                          Browser (chat page)
   │
-  ├── SSE (/api/events) ──────► Waterfall panel (request_progress)
-  │     Global, all clients      Agent status bar (agent_status)
+  ├── SSE (/chat/events) ─────► Waterfall panel (request_progress)
+  │     Scoped to ?viewer=       Agent status bar (agent_status)
   │     Sends initial state       ← Used for progress visualization
   │     on connect
   │
@@ -35,12 +35,12 @@ Server                          Browser (chat page)
 The full pipeline from AI connector to browser:
 
 ```
-AI Connector (claude-cli, copilot-sdk, openai-compat)
+AI Connector (claude-cli, copilot-sdk, openai-compat, claude-sdk)
     │
     │  StreamProgressEvent: tool_start, tool_end, text_delta, intent
     │
     ▼
-message-processor.ts: progressCallback
+core/progress-callbacks.ts: buildProgressCallback()
     │
     ├──► onTextDelta(text)  ─── WS ──► streaming bubble in chat
     ├──► onIntent(text)     ─── WS ──► intent bubble in chat
@@ -65,11 +65,13 @@ message-processor.ts: progressCallback
 |---|---|
 | `src/ai/stream-parser.ts` | Parses connector output into `StreamProgressEvent` (tool_start, tool_end, text_delta, intent) |
 | `src/ai/tool-status.ts` | `getToolStatus()` — maps tool names to human-friendly text (e.g., "Code analysis: find symbol MaksimalAvgift") |
-| `src/core/message-processor.ts` | Routes stream events to both WS callbacks (chat display) and agentStatus (waterfall) |
+| `src/core/progress-callbacks.ts` | `buildProgressCallback()` — routes stream events to both WS callbacks (chat display) and agentStatus (waterfall); called from `message-processor.ts` |
 | `src/observability/agent-status.ts` | `agentStatus` singleton — tracks `RequestProgress` with tool timing, notifies SSE subscribers |
-| `src/dashboard/routes/sse-routes.ts` | `/api/events` endpoint — sends initial state + live `request_progress` updates |
+| `src/chat/routes.ts` | `GET /chat/events` — the chat page's SSE stream: `agent_status` + `request_progress` only, scoped by `?viewer=` |
+| `src/dashboard/routes/sse-routes.ts` | `/api/events` — the dashboard's operator stream (denied to role `user`; the chat page does not use it) |
 | `src/chat/state.ts` | `publishIntent()`, `publishToolStatus()`, `publishTextDelta()` — WS event emitters |
-| `src/chat/views/page.ts` | Browser-side: waterfall rendering, WS event handlers, inline tool display |
+| `src/chat/views/page.ts` | Browser-side: WS/SSE event handlers, `resolveConversation`, `selectBot` |
+| `src/chat/views/components/streaming-ui.ts` | Browser-side inline tool display: `getOrCreateToolContainer`, `appendToolStatus`, `collapseToolActivity`, `loadToolCallsFromTrace` |
 
 ## 3. Waterfall Panel
 
@@ -86,7 +88,7 @@ interface RequestProgress {
   username?: string;
   phase: AgentPhase;
   connectorLabel?: string;      // e.g., "Copilot SDK"
-  model?: string;               // e.g., "claude-opus-4-6"
+  model?: string;               // e.g., "claude-sonnet-5-5"
   startedAt: number;            // epoch ms
   tools: ToolProgress[];        // tool timing bars
   completed?: boolean;

@@ -20,9 +20,9 @@ description: >
 Every user message triggers a main Claude response plus three **fire-and-forget** async Haiku pipelines that extract knowledge in the background. A unified scheduler runs independently on a 60s tick.
 
 ```
-User message → bot/handler.ts
+User message → core/message-processor.ts
   ├── buildPrompt() → main Claude call (Sonnet) → response to Telegram
-  └── [fire-and-forget, parallel]
+  └── core/metadata-extractor.ts [fire-and-forget, parallel]
       ├── extractMemoryAsync()   → memories table
       ├── extractGoalAsync()     → goals table
       └── extractScheduleAsync() → scheduled_tasks table
@@ -45,9 +45,9 @@ Scheduler (60s tick, independent)
 - Fires `trackUsage()` → INSERT into `haiku_usage` table (fire-and-forget)
 - Returns `{ result, inputTokens, outputTokens, model }`
 
-**`callHaikuMessageWithFallback(prompt, fallback, opts)`** (`src/ai/haiku-direct.ts`) — the high-level wrapper the scheduler uses. Routes through the Haiku router (`cli` / `anthropic` / `copilot`, picked per bot) and returns `{ text, usage }` with `text` = the `fallback` string on error. The old `callHaiku(prompt, fallback, source)` is gone; nothing in the scheduler spawns the CLI directly any more — it reaches `spawnHaiku` only as the router's fallback.
+**`callHaikuMessageWithFallback(prompt, fallback, opts)`** (`src/ai/haiku-direct.ts`) — the high-level wrapper the scheduler uses. Routes through the Haiku router (`cli` / `anthropic` / `copilot` / `vertex`, picked per bot) and returns `{ text, usage }` with `text` = the `fallback` string on error. The old `callHaiku(prompt, fallback, source)` is gone; nothing in the scheduler spawns the CLI directly any more — it reaches `spawnHaiku` only as the router's fallback.
 
-**No timeout** on Haiku calls (unlike main executor which uses `Promise.race`).
+`spawnHaiku` times out after `HAIKU_TIMEOUT_MS` (60 s) unless the caller passes `timeoutMs`.
 
 ### Source Labels
 
@@ -69,7 +69,7 @@ Scheduler (60s tick, independent)
 
 **Flow:**
 1. Build prompt with user message + assistant response
-2. `spawnHaiku(prompt, "memory", "jarvis-memory")`
+2. `runHaikuExtraction({ source: "memory", entrypoint: "jarvis-memory", prompt, haikuBackend, onResult })` (`src/ai/haiku-extraction.ts`, routed through the Haiku router)
 3. Haiku returns `{worth_remembering: bool, summary?, tags?}`
 4. If worth remembering: `generateEmbedding(summary)` → `saveMemory()` with embedding vector
 
@@ -83,7 +83,7 @@ Scheduler (60s tick, independent)
 **Flow:**
 1. Fetch active goals for context (`getActiveGoals()`)
 2. Build prompt including active goals list
-3. `spawnHaiku(prompt, "goals", "jarvis-goals")`
+3. `runHaikuExtraction({ source: "goals", entrypoint: "jarvis-goals", … })`
 4. Haiku returns `{action: "none"|"new"|"completed", title?, description?, deadline?, tags?, completedGoalTitle?}`
 5. New: `saveGoal()` | Completed: fuzzy title match → `updateGoalStatus(id, "completed")`
 
@@ -95,7 +95,7 @@ Scheduler (60s tick, independent)
 
 **Flow:**
 1. Build prompt asking for recurring tasks (NOT one-time reminders)
-2. `spawnHaiku(prompt, "schedule", "jarvis-schedule-detector")`
+2. `runHaikuExtraction({ source: "schedule", entrypoint: "jarvis-schedule-detector", … })`
 3. Haiku returns `{has_schedule, title, task_type, hour, minute, days, interval_ms, prompt, timezone}`
 4. If detected: `saveScheduledTask()` (computes `next_run_at` timezone-aware)
 
@@ -115,7 +115,6 @@ Assembles full context for the main Claude call.
 
 **System prompt assembly** (joined with `\n\n`):
 - Base persona (Jarvis identity, tone)
-- Telegram HTML formatting rules
 - Goal awareness instructions + scheduled task awareness
 - Top 5 relevant memories: `"- {summary} [{tags}]"`
 - Active goals: `"- {title} (deadline: {date}) [{tags}]"`
@@ -162,9 +161,9 @@ Runs on configurable interval (default 60s). Guard `tickRunning` prevents overla
 
 **Three sequential jobs per tick:**
 
-1. **Scheduled tasks:** `getTasksDueNow()` → update `next_run_at` FIRST (prevent re-fire) → `callHaikuMessageWithFallback()` → Telegram
-2. **Goal deadline reminders:** Deadline within 24h, not reminded in 12h → `callHaikuMessageWithFallback()` → Telegram
-3. **Goal check-ins:** Not checked in 3+ days → `callHaikuMessageWithFallback()` → Telegram (max 1 per tick)
+1. **Scheduled tasks** (`task-executor.ts`): `getTasksDueNow()` → update `next_run_at` FIRST (prevent re-fire) → `callHaikuMessageWithFallback()` → Telegram
+2. **Goal deadline reminders** (`goal-runner.ts`): Deadline within 24h, not reminded in 12h → `callHaikuMessageWithFallback()` → Telegram
+3. **Goal check-ins** (`goal-runner.ts`): Not checked in 3+ days → `callHaikuMessageWithFallback()` → Telegram (max 1 per tick)
 
 ## Key Files
 
@@ -183,7 +182,9 @@ Runs on configurable interval (default 60s). Guard `tickRunning` prevents overla
 | `src/db/goals.ts` | Goal CRUD |
 | `src/db/scheduled-tasks.ts` | Scheduled task CRUD + next_run_at computation |
 | `src/db/stats.ts` | Dashboard stats (combines both token sources) |
-| `src/bot/handler.ts` | Orchestrates message flow, triggers all pipelines |
+| `src/core/message-processor.ts` | Orchestrates message flow (Telegram, Slack, web) |
+| `src/core/metadata-extractor.ts` | Fires the three extraction pipelines |
+| `src/ai/haiku-extraction.ts` | `runHaikuExtraction()` — shared extractor wrapper (router, tracing, JSON parse) |
 
 ## Adding a New Extraction Pipeline
 
@@ -191,10 +192,10 @@ Follow the existing pattern:
 
 1. Create `src/<domain>/detector.ts` with `extract<Domain>Async(input, config)` function
 2. Build a prompt instructing Haiku what to detect, with clear JSON output schema
-3. Call `spawnHaiku(prompt, "<source-label>", "jarvis-<domain>")`
+3. Call `runHaikuExtraction({ source: "<source-label>", entrypoint: "jarvis-<domain>", prompt, haikuBackend, onResult })`
 4. Parse response and save to DB via `src/db/<domain>.ts`
-5. Wire into `src/bot/handler.ts` as fire-and-forget alongside existing extractors
+5. Wire into `src/core/metadata-extractor.ts` as fire-and-forget alongside existing extractors
 6. Add source label to dashboard stats if token visibility needed
 7. If context needed in main prompt: add to `buildPrompt()` parallel queries and system prompt assembly
 
-For detailed implementation patterns, read the existing extractors — they all follow the same structure: async wrapper with `.catch()`, prompt construction, `spawnHaiku()` call, JSON parse, conditional DB save.
+For detailed implementation patterns, read the existing extractors — they all follow the same structure: prompt construction, one `runHaikuExtraction()` call, conditional DB save in `onResult`.
