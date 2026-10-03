@@ -810,26 +810,30 @@ describe("who commits the write", () => {
    * untracked file — the two kinds of foreign dirt a commit must not sweep in.
    * Realpath'd, because `SyncRepo.path` is and macOS `tmpdir()` is a symlink.
    */
-  async function gitWiki(): Promise<string> {
-    const dir = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-git-")));
+  async function gitWiki(opts: { sub?: string; remote?: boolean } = {}): Promise<string> {
+    const top = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-git-")));
+    const dir = opts.sub ? path.join(top, opts.sub) : top;
     for (const [rel, body] of PAGES) {
       await mkdir(path.join(dir, path.dirname(rel)), { recursive: true });
       await writeFile(path.join(dir, rel), body, "utf8");
     }
-    await git(dir, ["init", "-q", "-b", "main"]);
-    await git(dir, ["config", "user.email", "a@b.c"]);
-    await git(dir, ["config", "user.name", "Fixture"]);
-    await git(dir, ["add", "-A"]);
-    await git(dir, ["commit", "-q", "-m", "init"]);
+    await git(top, ["init", "-q", "-b", "main"]);
+    if (opts.remote) await git(top, ["remote", "add", "origin", path.join(top, "nowhere.git")]);
+    await git(top, ["config", "user.email", "a@b.c"]);
+    await git(top, ["config", "user.name", "Fixture"]);
+    await git(top, ["add", "-A"]);
+    await git(top, ["commit", "-q", "-m", "init"]);
     await writeFile(path.join(dir, BLOG), md("Gamma blog, hand-edited"), "utf8");
     await writeFile(path.join(dir, "scratch.md"), md("Scratch"), "utf8");
     return dir;
   }
 
+  /** `top` is the git toplevel, when the wiki sits below it. */
   async function editLone(
     dir: string,
     source: "bot" | "extra",
     syncRepos?: string,
+    top: string = dir,
   ): Promise<{ subjects: string[]; headFiles: string; status: string[] }> {
     __setWikiRegistryForTest([{ name: "g", root: dir, source }]);
     const prevSync = process.env.SYNC_REPOS;
@@ -843,9 +847,9 @@ describe("who commits the write", () => {
       expect(res.status).toBe(200);
       expect(((await res.json()) as { written: boolean }).written).toBe(true);
       return {
-        subjects: (await git(dir, ["log", "--format=%s"])).split("\n"),
-        headFiles: await git(dir, ["show", "--name-only", "--format=", "HEAD"]),
-        status: (await git(dir, ["status", "--porcelain"]))
+        subjects: (await git(top, ["log", "--format=%s"])).split("\n"),
+        headFiles: await git(top, ["show", "--name-only", "--format=", "HEAD"]),
+        status: (await git(top, ["status", "--porcelain"]))
           .split("\n")
           .map((l) => l.trim())
           .sort(),
@@ -856,7 +860,7 @@ describe("who commits the write", () => {
       __resetSyncReposForTest();
       __setWikiRegistryForTest([{ name: "w", root, source: "extra" }]);
       __resetWikiCacheForTest();
-      await rm(dir, { recursive: true, force: true });
+      await rm(top, { recursive: true, force: true });
     }
   }
 
@@ -881,5 +885,25 @@ describe("who commits the write", () => {
     const { subjects, status } = await editLone(dir, "bot");
     expect(subjects).toEqual(["init"]);
     expect(status).toContain(`M ${LONE}`);
+  });
+
+  test("a standalone wiki whose repo has a remote is not committed", async () => {
+    // A remote means another machine (or a sync loop elsewhere) owns this
+    // history: a local, unpushed commit would fork it. mimir on a laptop with
+    // no SYNC_REPOS is this shape.
+    const dir = await gitWiki({ remote: true });
+    const { subjects, status } = await editLone(dir, "extra");
+    expect(subjects).toEqual(["init"]);
+    expect(status).toContain(`M ${LONE}`);
+  });
+
+  test("a wiki nested in a larger repo is not committed", async () => {
+    // A `docs/wiki` inside a code repo: a reader click must not write history
+    // into a repo that never opted into auto-commit.
+    const dir = await gitWiki({ sub: "docs/wiki" });
+    const top = path.dirname(path.dirname(dir));
+    const { subjects, status } = await editLone(dir, "extra", undefined, top);
+    expect(subjects).toEqual(["init"]);
+    expect(status).toContain(`M docs/wiki/${LONE}`);
   });
 });

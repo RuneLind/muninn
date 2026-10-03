@@ -57,12 +57,15 @@
  * `groupApplyPolicy` is the policy for a gardener GROUP APPLY, which writes page
  * CONTENT at a review gate.
  *
- * **Who commits it, then.** On mimir the repo-sync loop is the committer (it is
- * in `SYNC_REPOS`). On a BOT wiki the daily `wiki-committer` sweeper is, up to
+ * **Who commits it, then.** On mimir the repo-sync loop is the committer where
+ * `SYNC_REPOS` lists it; on a machine where it does not, mimir's remote keeps
+ * the route from committing it (below). On a BOT wiki the daily `wiki-committer` sweeper is, up to
  * ~24 h later, under a `[sweep]` subject — late, not lost. Neither covers a
- * standalone `WIKI_EXTRA` wiki outside `SYNC_REPOS`, so there THIS route commits
- * the one page itself (`[series] edit: <relPath>`, no push) and logs
- * {@link seriesCommitterWarning}'s line only when that commit did not land.
+ * standalone `WIKI_EXTRA` wiki outside a `wiki`-mode `SYNC_REPOS` entry, so
+ * there THIS route commits the one page itself (`[series] edit: <relPath>`, no
+ * push) — when the wiki is its own repo and that repo has no remote
+ * (`seriesCanSelfCommit`). Otherwise, or when the commit does not land, it logs
+ * {@link seriesCommitterWarning}'s line.
  * Measured: the melosys-kode-wiki edit of 2026-10-02 sat uncommitted until
  * another session found it, because the warn line was all this route did.
  *
@@ -106,7 +109,11 @@ import { normalizeSeriesKey, seriesCensusKey, seriesKeyOf } from "../views/compo
 import { canEditSeriesPage, SERIES_VALUE_MAX } from "../views/components/wiki-series-menu.ts";
 import { decideStampRequest } from "./wiki-stamp.ts";
 import { readonlyRefusal } from "./route-utils.ts";
-import { seriesCommitterWarning } from "../../wiki/series-committer.ts";
+import {
+  seriesCanSelfCommit,
+  seriesCommitterWarning,
+  seriesUncommittedReason,
+} from "../../wiki/series-committer.ts";
 import { getSyncRepos } from "../../sync/config.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { getLog } from "../../logging.ts";
@@ -295,7 +302,8 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
         getSyncRepos().repos,
       );
-      const commitTail: PageWriteCommitOptions = noCommitter
+      const selfCommit = noCommitter !== null && (await seriesCanSelfCommit(root));
+      const commitTail: PageWriteCommitOptions = selfCommit
         ? {
             commit: (paths, message) => commitWikiChange(root, paths, message, { push: false }),
             commitMessage: `[series] edit: ${meta.relPath}`,
@@ -452,10 +460,14 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       // hash is of this call's own output rather than of a re-read another
       // writer may have moved.
       const changed = written !== null;
-      if (changed && noCommitter && result.outcome === "written" && !result.commit?.committed) {
+      const uncommitted =
+        changed && noCommitter && result.outcome === "written"
+          ? seriesUncommittedReason(selfCommit, result.commit)
+          : null;
+      if (uncommitted) {
         log.warn("wiki series: {warning} ({reason})", {
           warning: noCommitter,
-          reason: result.commit?.reason ?? "commit failed",
+          reason: uncommitted,
           path: meta.relPath,
         });
       }

@@ -1130,12 +1130,16 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     `setFrontmatterScalar` (`src/plans/frontmatter.ts`), so there is still
     exactly one line-upsert implementation; the label is written with its
     `after: "series"` anchor so the pair stays together through a head move.
-  - **Who commits it.** mimir: the repo-sync loop. A BOT wiki: the daily
-    `wiki-committer` sweeper, up to ~24 h later, under a `[sweep]` subject that
-    bypasses that bot's own `wikiAutoCommit` policy. A standalone `WIKI_EXTRA`
-    wiki outside `SYNC_REPOS`: **the route itself** — `[series] edit: <relPath>`,
-    that one page only, no push; it logs one `warn` only when that commit does
-    not land (`src/wiki/series-committer.ts`). Before, it only warned, and the
+  - **Who commits it.** mimir: the repo-sync loop, where a `wiki`-mode
+    `SYNC_REPOS` entry lists it. A BOT wiki: the daily `wiki-committer` sweeper,
+    up to ~24 h later, under a `[sweep]` subject that bypasses that bot's own
+    `wikiAutoCommit` policy. A standalone `WIKI_EXTRA` wiki outside every
+    `wiki`-mode entry (`plain` and `status-only` never commit): **the route
+    itself** — `[series] edit: <relPath>`, that one page only, no push — but
+    only when the wiki root is its repo's toplevel and the repo has no remote,
+    so mimir on a machine without `SYNC_REPOS` and a code repo's `docs/wiki` are
+    left alone. Any other case, or a commit that does not land, logs one `warn`
+    (`src/wiki/series-committer.ts`). Before, it only warned, and the
     melosys-kode-wiki edit of 2026-10-02 sat uncommitted until another session
     found it.
   - **ONE page per call**, `{wiki?, relPath, baseHash, series: string|null,
