@@ -175,6 +175,47 @@ describe("the spawn", () => {
     }
   });
 
+  test("a real Bun child does not load the .env in its working directory", async () => {
+    // The allowlist above means nothing if Bun refills the environment from the
+    // `.env` in its cwd, which is muninn's own repo root in production.
+    const cwd = await mkdtemp(path.join(tmpdir(), "muninn-stamp-cwd-"));
+    const probe = path.join(cwd, "probe.ts");
+    await writeFile(path.join(cwd, ".env"), "STAMP_LEAK_PROBE=leaked\n", "utf8");
+    await writeFile(
+      probe,
+      `await Bun.write(${JSON.stringify(argvFile)}, "LEAK=" + (process.env.STAMP_LEAK_PROBE ?? "none"));\n` +
+        `const file = process.argv[process.argv.indexOf("--file") + 1];\n` +
+        `console.log(JSON.stringify({ outcome: "unchanged", reason: "already-stamped", path: file }));\n`,
+      "utf8",
+    );
+    const prev = process.cwd();
+    process.chdir(cwd);
+    try {
+      const res = await stamp(appWith({ stampConfig: () => config({ bin: probe, bun: process.execPath }) }));
+      expect(res.status).toBe(200);
+      expect(await readFile(argvFile, "utf8")).toBe("LEAK=none");
+    } finally {
+      process.chdir(prev);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("--no-env-file follows a Bun interpreter only — another one gets the bare script", async () => {
+    const seen: string[][] = [];
+    const runProc: StampRouteDeps["runProc"] = async (argv) => {
+      seen.push([...argv]);
+      return { stdout: `{"outcome":"unchanged","path":"${argv[argv.indexOf("--file") + 1]}"}`, stderr: "", exitCode: 0 };
+    };
+    for (const bun of ["bun", "/opt/homebrew/bin/bun", "/bin/bash"]) {
+      await stamp(appWith({ runProc, stampConfig: () => config({ bun }) }));
+    }
+    expect(seen.map((argv) => argv.slice(0, 3))).toEqual([
+      ["bun", "--no-env-file", bin],
+      ["/opt/homebrew/bin/bun", "--no-env-file", bin],
+      ["/bin/bash", bin, "--session"],
+    ]);
+  });
+
   test("a spawn that THROWS is 502, not the timeout's 409", async () => {
     // `Bun.spawn` throws synchronously for an argv it cannot build. The two used
     // to share a catch, so a NUL in `ref` — which fails in ~10 ms — was reported
