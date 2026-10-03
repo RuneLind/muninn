@@ -37,6 +37,8 @@ import {
   registerWikiProvenanceRoutes,
 } from "./wiki-provenance.ts";
 import { registerWikiStampRoute } from "./wiki-stamp.ts";
+import { registerWikiFellesPublishRoute } from "./wiki-felles-publish.ts";
+import { fellesPublishPayloadField } from "../../wiki/felles-publish.ts";
 import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
@@ -1484,6 +1486,9 @@ export function registerWikiReadRoutes(
       // memo look like a verdict. Derived, like `projects`, over the same page
       // array the listing ships, so the option and the rows cannot disagree.
       ...(index.workedCoverage ? { workedCoverage: index.workedCoverage } : {}),
+      // The ⇪ Felles control's gate, present only on a wiki that offers it. The
+      // route re-checks; this only decides whether the button renders.
+      ...fellesPublishPayloadField(entry?.name, entry?.root),
     });
   });
 
@@ -1701,6 +1706,9 @@ export function registerWikiToolRoutes(
   // registered wiki root on this machine's filesystem, so `MUNINN_PROFILE=nais`
   // must drop it with everything else bound to a working tree.
   registerWikiStampRoute(app, provenanceCtx);
+  // Publish to the melosys-felles bucket — off unless FELLES_WIKI_PUBLISH_BIN
+  // and FELLES_WIKI_PUBLISH_WIKIS are set, and dropped on nais with the group.
+  registerWikiFellesPublishRoute(app);
   // The series editor's one write, in the same group for the same reason.
   registerWikiSeriesRoutes(app);
   // The issue board's page, in the same group: it reads one wiki's index.

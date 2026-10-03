@@ -6,6 +6,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
+import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
 import {
   RAIL_CHIP_SWITCH_SHORT,
   RAIL_CHIP_SWITCH_LONG,
@@ -2571,6 +2572,7 @@ export async function renderWikiPage(opts?: {
     }
     ${agentPresenceStyles()}
     ${shareDialogStyles()}
+    ${fellesPublishStyles()}
     ${wikiReadonlyStyles()}
     ${wikiReadSliceStyles()}
   </style>
