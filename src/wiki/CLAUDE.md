@@ -2041,17 +2041,23 @@ rows gets no partial rows, and a weaker one gets at most `PARTIAL_BAND_MAX`
 (10), ordered by words hit, then by the rarity of the long words the page hit
 (Σ ln(1 + pool / pages hitting the word), over this query's filtered pool),
 then score. Measured on mimir: `wiki` has 151 full rows, while `wiki retire`
-has 4, so before the cap it listed 150 partial rows hitting only `wiki`; now it
-lists 4 + 10, pages hitting `retire` first. Partial rows past the cap are in
-none of `rows`, `groups`, `total`, `partials`, chips or the footer. A series group never
+has 4, so before the cap it listed 150 partial rows, 147 of them hitting only
+`wiki`; now it lists 4 + 10, the 3 pages hitting `retire` first. Partial rows
+past the cap are in none of `rows`, `groups`, `total`, `partials` or the
+footer. A chip can still count them: its count is what its series-filtered
+query returns, where the threshold and the cap apply to that series alone
+(measured on mimir: under `wiki retire` the `wiki-provenance` chip counts 7
+while 2 of its rows are listed). A series group never
 spans two words-hit tiers, or a partial row would show inside a full group. A
 partial row carries a `partial m/n` pill whose title names the words it hit
 (the hit may sit in a field the row does not show) and marks only its own
-words. The footer for rows past the cap says "N more — narrow the query": the
-largest partial result (4 + 10) fits under `FIND_ROWS_MAX`, so only full rows
-are ever hidden, and another word can drop them. A
-digit word matches a whole number outside any ISO date, in the scorer and the
-highlighter alike, so `9` does not hit `2026-09-…`. Series groups, keys and
+words. The footer for rows past `FIND_ROWS_MAX` says "N more — narrow the
+query": the largest partial result (4 + 10) fits under that row cap, which is
+the palette's only limit, so only full rows are ever hidden, and another word
+can drop them. A digit word matches a whole number outside any ISO date, in
+the scorer and the highlighter alike, so `9` does not hit `2026-09-…`; it
+scores in the title (4), the description and the `status_note` (1) only, never
+in tags, series or the relPath. Series groups, keys and
 labels are the rail's (`seriesKeyOf`, `seriesCensusKey`, `seriesHead`). Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
 pool drops bookkeeping pages, attachment children and (unless `is:retired`)
 culled pages; a superseded page stays and names its successor. Rows group by

@@ -80,7 +80,7 @@ export const FIND_SHORT_WORD = 3;
 export const PARTIAL_BAND_MAX_FULL = 5;
 /** The most partial rows a query returns, rarest matched words first. */
 export const PARTIAL_BAND_MAX = 10;
-/** How much `near` multiplies the text score at its ceiling. */
+/** The text score's multiplier is 1 + this × `near`, so 1.8 at `near` = 1. */
 export const FIND_NEAR_BOOST = 0.8;
 /** The recency term's weight and decay (days). */
 export const FIND_RECENCY_WEIGHT = 0.6;

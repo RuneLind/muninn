@@ -48,7 +48,8 @@ export function findPaletteHtml(): string {
   );
 }
 
-/** The chip row: one button per series among ALL matches, count beside it. */
+/** The chip row: one button per series among the returned rows (row cap
+ *  included, dropped partial rows not), at most `FIND_CHIPS_MAX`, count beside it. */
 export function findChipsHtml(result: FindResult): string {
   return result.chips
     .slice(0, FIND_CHIPS_MAX)
@@ -100,11 +101,11 @@ export function findListHtml(
   return html;
 }
 
-/** The footer for rows past the cap. Only full rows are ever hidden: a
- *  partial band exists only beside fewer than `PARTIAL_BAND_MAX_FULL` full
- *  rows and holds at most `PARTIAL_BAND_MAX`, which fits under
- *  `FIND_ROWS_MAX` (pinned by a test). So a hidden row hit every word, and
- *  another word can drop it. */
+/** The footer for rows past the row cap. At `FIND_ROWS_MAX`, the palette's
+ *  only limit, only full rows are ever hidden: a partial band exists only
+ *  beside fewer than `PARTIAL_BAND_MAX_FULL` full rows and holds at most
+ *  `PARTIAL_BAND_MAX`, which fits under it (pinned by a test). So a hidden row
+ *  hit every word, and another word can drop it. */
 export function findMoreText(result: FindResult): string {
   const hidden = result.total - result.rows.length;
   return hidden > 0 ? `${hidden} more — narrow the query` : "";

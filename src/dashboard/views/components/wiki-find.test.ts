@@ -10,6 +10,7 @@ import {
   FIND_ROWS_MAX,
   foldText,
   highlightFind,
+  PARTIAL_BAND_MAX,
   PARTIAL_BAND_MAX_FULL,
   parseFindQuery,
   rankFind,
@@ -726,7 +727,7 @@ describe("the footer for rows past the cap", () => {
   test("only full rows are ever hidden, so the footer always says narrow the query", async () => {
     const { findMoreText } = await import("./wiki-find-view.ts");
     // The largest partial result fits under the row cap.
-    expect(PARTIAL_BAND_MAX_FULL - 1 + 10).toBeLessThanOrEqual(FIND_ROWS_MAX);
+    expect(PARTIAL_BAND_MAX_FULL - 1 + PARTIAL_BAND_MAX).toBeLessThanOrEqual(FIND_ROWS_MAX);
     const fulls = Array.from({ length: 45 }, (_, i) => pg(`f${i}.md`, { title: `Ledger notes ${i}` }));
     expect(findMoreText(rankFind(fulls, "ledger notes", { now: NOW }))).toBe("5 more — narrow the query");
     expect(findMoreText(rankFind(fulls.slice(0, 3), "ledger notes", { now: NOW }))).toBe("");
@@ -807,6 +808,40 @@ describe("fix round 2: the partial band is a bounded rescue", () => {
     expect(order(pages, "felles ab")).toEqual(["both.md"]);
     // Three characters is long again: `bucket` alone is enough under `felles bucket xyz`.
     expect(order(pages, "felles bucket xyz")).toEqual(["felles.md"]);
+  });
+});
+
+describe("the rarity pool: every filtered page, before word matching", () => {
+  test("a page that misses a required word still counts toward a word's rarity", () => {
+    // `felles` is common in the pool but rare among the listed pages (only
+    // `ab felles.md` also hits the required `ab`). Pool rarity puts the `wiki`
+    // pages first; counting listed pages only would put `felles` first.
+    const pages = [
+      pg("ab-felles.md", { title: "ab felles", mtimeMs: NOW }),
+      ...Array.from({ length: 3 }, (_, i) => pg(`ab-wiki${i}.md`, { title: `ab wiki ${i}` })),
+      ...Array.from({ length: 10 }, (_, i) => pg(`felles${i}.md`, { title: `Felles ${i}` })),
+    ];
+    const r = rankFind(pages, "ab felles wiki", { now: NOW });
+    expect(r.rows.every((x) => x.partial)).toBe(true);
+    expect(r.rows.map((x) => x.page.relPath)).toEqual(["ab-wiki0.md", "ab-wiki1.md", "ab-wiki2.md", "ab-felles.md"]);
+  });
+
+  test("a page a filter drops does not count toward a word's rarity", () => {
+    // Inside `type:plan`, `wiki` is the rarer word; across every type it is the
+    // commoner one. The filtered pool decides.
+    const pages = [
+      pg("plan-wiki.md", { title: "Plan wiki" }),
+      ...Array.from({ length: 3 }, (_, i) => pg(`plan-felles${i}.md`, { title: `Plan felles ${i}`, mtimeMs: NOW })),
+      ...Array.from({ length: 10 }, (_, i) => pg(`blog-wiki${i}.md`, { title: `Blog wiki ${i}`, type: "blog" })),
+    ];
+    const r = rankFind(pages, "type:plan felles wiki", { now: NOW });
+    expect(r.rows.every((x) => x.partial)).toBe(true);
+    expect(r.rows.map((x) => x.page.relPath)).toEqual([
+      "plan-wiki.md",
+      "plan-felles0.md",
+      "plan-felles1.md",
+      "plan-felles2.md",
+    ]);
   });
 });
 
