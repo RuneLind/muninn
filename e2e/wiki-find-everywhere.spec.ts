@@ -537,6 +537,20 @@ test("a filter typed inside the debounce cancels the fetch, and no request carri
   expect(sent).toEqual(["felles kode"]);
 });
 
+test("the request carries the free words, not the box's raw text", async ({ page }) => {
+  const sent: string[] = [];
+  page.on("request", (req) => {
+    const u = new URL(req.url());
+    if (u.pathname === "/api/wiki/find-everywhere") sent.push(u.searchParams.get("q") ?? "");
+  });
+  await openReader(page);
+  // Quotes and an unfinished key narrow nothing, so the section fetches — the
+  // free words only.
+  await find(page, 'felles "kode" type:');
+  await expect(target(page)).toHaveCount(1);
+  expect(sent).toEqual(["felles kode"]);
+});
+
 test("aria-activedescendant follows the selection on a section-only repaint", async ({ page }) => {
   ledger.slowFor = { zzqq: 3_000 };
   await holdListing(page);
