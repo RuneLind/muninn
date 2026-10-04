@@ -6,7 +6,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { highlightFind, type FindResult } from "./wiki-find.ts";
+import { highlightFind, type FindResult, type FindRow } from "./wiki-find.ts";
 
 export const FIND_ID = "wikiFind";
 export const FIND_SCRIM_ID = "wikiFindScrim";
@@ -91,7 +91,7 @@ export function findListHtml(
   for (const g of result.groups) {
     if (g.seriesKey) html += `<div class="wiki-find-group" role="presentation">${esc(g.seriesLabel)}</div>`;
     for (const r of g.rows) {
-      html += findRowHtml(r.page, i, i === active, result.terms, hrefFor(r.page.relPath), titleOf);
+      html += findRowHtml(r, result.terms.length, i, i === active, hrefFor(r.page.relPath), titleOf);
       i++;
     }
   }
@@ -102,13 +102,15 @@ export function findListHtml(
 }
 
 function findRowHtml(
-  p: WikiListing,
+  r: FindRow,
+  words: number,
   i: number,
   active: boolean,
-  terms: readonly string[],
   href: string,
   titleOf: (relPath: string) => string | undefined,
 ): string {
+  const p: WikiListing = r.page;
+  const terms = r.terms;
   const notes: string[] = [];
   if (p.pairedBy === "superseded" && p.parent) {
     notes.push(`superseded by ${esc(titleOf(p.parent) ?? p.parent)}`);
@@ -118,7 +120,11 @@ function findRowHtml(
     `<a class="wiki-find-row${active ? " active" : ""}" id="${findRowId(i)}" role="option" ` +
     `aria-selected="${active}" data-find-row="${i}" data-relpath="${esc(p.relPath)}" href="${esc(href)}">` +
     `<span class="wiki-find-title">${highlightFind(displayTitleOf(p), terms)}</span>` +
-    `<span class="wiki-find-meta"><span class="wiki-find-type">${esc(p.type)}</span>` +
+    `<span class="wiki-find-meta">` +
+    (r.partial
+      ? `<span class="wiki-find-partial" title="Matches ${r.matched} of ${words} words">partial ${r.matched}/${words}</span>`
+      : "") +
+    `<span class="wiki-find-type">${esc(p.type)}</span>` +
     `<span class="wiki-find-path">${highlightFind(p.relPath, terms)}</span>` +
     (notes.length ? `<span class="wiki-find-note">${notes.join(" · ")}</span>` : "") +
     `</span></a>`
@@ -171,6 +177,10 @@ export function findPaletteStyles(): string {
     .wiki-find-meta { display: flex; gap: 8px; font-size: 11px; color: var(--text-muted); min-width: 0; }
     .wiki-find-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .wiki-find-type { flex-shrink: 0; }
+    .wiki-find-partial {
+      flex-shrink: 0; padding: 0 6px; border-radius: 999px; font-size: 10.5px;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-muted);
+    }
     .wiki-find-note { flex-shrink: 0; color: var(--text-soft); }
     .wiki-find mark { background: none; color: var(--accent-light); font-weight: 600; }
     .wiki-find-empty, .wiki-find-more { padding: 10px 14px; font-size: 12.5px; color: var(--text-muted); }

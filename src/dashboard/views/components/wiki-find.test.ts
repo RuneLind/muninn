@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   applySeriesChip,
+  findNeed,
   FIND_ROWS_MAX,
   foldText,
   highlightFind,
@@ -69,9 +70,24 @@ describe("parseFindQuery", () => {
 });
 
 describe("matching", () => {
-  test("words are ANDed: a word hitting no field drops the page", () => {
+  test("a page hitting every word ranks above one hitting some, and is not marked partial", () => {
     const pages = [pg("a.md", { title: "Alpha beta" }), pg("b.md", { title: "Alpha gamma" })];
-    expect(order(pages, "alpha beta")).toEqual(["a.md"]);
+    const r = rankFind(pages, "alpha beta", { now: NOW });
+    expect(r.rows.map((x) => [x.page.relPath, x.partial, x.matched])).toEqual([
+      ["a.md", false, 2],
+      ["b.md", true, 1],
+    ]);
+    expect(r.rows[1]!.terms).toEqual(["alpha"]);
+    expect(r.partials).toBe(1);
+  });
+
+  test("status_note is a free-word field at the description's weight", () => {
+    const noted = pg("n.md", { title: "Shared wiki", status_note: "Felles bucket deployed" });
+    const described = pg("d.md", { title: "Shared wiki", description: "felles" });
+    const r = rankFind([noted, described, pg("x.md", { title: "Shared wiki" })], "felles", { now: NOW });
+    expect(r.rows.map((x) => x.page.relPath).sort()).toEqual(["d.md", "n.md"]);
+    expect(r.rows[0]!.score).toBe(r.rows[1]!.score);
+    expect(order([pg("r.md", { title: "R", status_note: "round 12 done" })], "12")).toEqual(["r.md"]);
   });
 
   test("a digit word matches a WHOLE number in the title, ISO dates removed", () => {
@@ -482,5 +498,121 @@ describe("seriesLabelFor — one spelling of a row's series label", () => {
     const labels = seriesLabels(pages);
     expect(seriesLabelFor(pages[1]!, labels)).toBe("Recall work");
     expect(seriesLabelFor(pages[2]!, labels)).toBe("");
+  });
+});
+
+describe("soft AND for free words", () => {
+  test("the need rule: 1 for one or two words, ⌈n/2⌉ from three", () => {
+    expect([0, 1, 2, 3, 4, 5].map(findNeed)).toEqual([0, 1, 1, 2, 2, 3]);
+  });
+
+  // Titles hit words w1..w4 by name; the query decides how many count.
+  const pages = [
+    pg("all.md", { title: "w1 w2 w3 w4" }),
+    pg("three.md", { title: "w1 w2 w3" }),
+    pg("two.md", { title: "w1 w2" }),
+    pg("one.md", { title: "w1" }),
+    pg("none.md", { title: "zz" }),
+  ];
+  const listed = (q: string) => order(pages, q).sort();
+
+  test("n=1: plain AND", () => {
+    expect(listed("w3")).toEqual(["all.md", "three.md"]);
+  });
+
+  test("n=2: one word is enough", () => {
+    expect(listed("w2 w4")).toEqual(["all.md", "three.md", "two.md"]);
+  });
+
+  test("n=3: two words are needed", () => {
+    expect(listed("w1 w2 w4")).toEqual(["all.md", "three.md", "two.md"]);
+  });
+
+  test("n=4: two words are needed", () => {
+    expect(listed("w1 w2 w3 w4")).toEqual(["all.md", "three.md", "two.md"]);
+    expect(listed("w2 w3 xx yy")).toEqual(["all.md", "three.md"]);
+  });
+
+  test("the full band sits above every partial row, even one with a far higher score", () => {
+    const strong = pg("strong.md", {
+      title: "Ledger ledger",
+      tags: ["ledger"],
+      description: "ledger",
+      series: "ledger",
+      workedMs: NOW,
+    });
+    const weak = pg("weak.md", { title: "Plain", description: "ledger review", mtimeMs: NOW - 900 * DAY });
+    const r = rankFind([strong, weak], "ledger review", { now: NOW, near: { "strong.md": 1 } });
+    expect(r.rows.map((x) => x.page.relPath)).toEqual(["weak.md", "strong.md"]);
+    expect(r.rows[1]!.score).toBeGreaterThan(r.rows[0]!.score);
+  });
+
+  test("inside the partial band: words hit first, then score", () => {
+    const p = [
+      pg("hi-score-one.md", { title: "aa", tags: ["aa"], description: "aa" }),
+      pg("two-words.md", { title: "aa bb" }),
+      pg("low-one.md", { title: "aa" }),
+    ];
+    expect(order(p, "aa bb cc")).toEqual(["two-words.md"]);
+    expect(order(p, "aa bb")).toEqual(["two-words.md", "hi-score-one.md", "low-one.md"]);
+    expect(order(p, "aa bb cc dd")).toEqual(["two-words.md"]);
+  });
+
+  test("a partial series row never groups above a full row ranked after its series head", () => {
+    const p = [
+      pg("s/head.md", { title: "aa bb", series: "s", tags: ["aa"] }),
+      pg("loose.md", { title: "aa bb" }),
+      pg("s/part.md", { title: "aa", series: "s" }),
+    ];
+    const r = rankFind(p, "aa bb", { now: NOW });
+    expect(r.rows.map((x) => x.page.relPath)).toEqual(["s/head.md", "loose.md", "s/part.md"]);
+    expect(r.groups.map((g) => g.seriesKey)).toEqual(["s", "", "s"]);
+  });
+
+  test("filters stay hard: a page outside in:/type:/#tag/age: never appears, partial or not", () => {
+    const p = [
+      pg("in.md", { title: "aa", series: "keep", type: "plan", tags: ["ops"], workedMs: NOW - DAY }),
+      pg("out-series.md", { title: "aa bb", series: "other", type: "plan", tags: ["ops"], workedMs: NOW - DAY }),
+      pg("out-type.md", { title: "aa bb", series: "keep", type: "blog", tags: ["ops"], workedMs: NOW - DAY }),
+      pg("out-tag.md", { title: "aa bb", series: "keep", type: "plan", workedMs: NOW - DAY }),
+      pg("out-age.md", { title: "aa bb", series: "keep", type: "plan", tags: ["ops"], workedMs: NOW - 99 * DAY }),
+    ];
+    expect(order(p, "aa bb in:keep type:pl #ops age:<30")).toEqual(["in.md"]);
+    expect(order(p, "aa bb in:keep type:pl #ops")).toEqual(["out-age.md", "in.md"]);
+  });
+
+  test("chips count partial rows too, and applying one yields that count", () => {
+    const p = [
+      pg("a/1.md", { title: "aa bb", series: "a" }),
+      pg("a/2.md", { title: "aa", series: "a" }),
+      pg("b/1.md", { title: "bb", series: "b" }),
+      pg("c.md", { title: "cc", series: "a" }),
+    ];
+    const r = rankFind(p, "aa bb", { now: NOW });
+    expect(r.total).toBe(3);
+    expect(r.partials).toBe(2);
+    expect(r.chips.map((c) => [c.seriesKey, c.count])).toEqual([
+      ["a", 2],
+      ["b", 1],
+    ]);
+    for (const c of r.chips) {
+      const applied = rankFind(p, applySeriesChip("aa bb", c.token), { now: NOW });
+      expect(applied.total).toBe(c.count);
+    }
+  });
+});
+
+describe("the palette row for a partial match", () => {
+  test("carries `partial m/n` and marks only the words it hit; a full row has no marker", async () => {
+    const { findListHtml } = await import("./wiki-find-view.ts");
+    const pages = [pg("full.md", { title: "Alpha beta" }), pg("x/mybeta.md", { title: "Alpha gamma" })];
+    const html = findListHtml(rankFind(pages, "alpha beta", { now: NOW }), "alpha beta", 0, (r) => r, () => undefined);
+    const [full, part] = html.split('<a class="wiki-find-row').slice(1);
+    expect(full).not.toContain("wiki-find-partial");
+    expect(full).toContain("<mark>Alpha</mark> <mark>beta</mark>");
+    expect(part).toContain('<span class="wiki-find-partial" title="Matches 1 of 2 words">partial 1/2</span>');
+    expect(part).toContain("<mark>Alpha</mark> gamma");
+    // `beta` sits inside the path but scored nothing (not a segment start), so it is not marked.
+    expect(part).toContain('<span class="wiki-find-path">x/mybeta.md</span>');
   });
 });

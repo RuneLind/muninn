@@ -57,6 +57,8 @@ function md(title: string, fm: string[], body: string): string {
  *  - a series `two-words` labelled "Two words" (head `alpha`, member `beta`),
  *    plus a loose page that also says "member": the chip and the quoted `in:`.
  *  - `gamma-report` — a no-series page that out-scores a series group.
+ *  - `shared-wiki` says "felles" only in its `status_note`; `wiki-glossary`
+ *    shares just the word "wiki" — the full row and the partial row.
  */
 const PAGES: Array<[string, string]> = [
   [OPEN, md("Open plan", [], "Links [[hop1]] and [[bridge]].")],
@@ -70,6 +72,8 @@ const PAGES: Array<[string, string]> = [
   ["plans/gamma-one.mdx", md("Gamma one", ["series: greek"], "x")],
   ["plans/gamma-two.mdx", md("Gamma two", ["series: greek"], "x")],
   ["plans/gamma-report.mdx", md("Gamma gamma report", ["tags: [gamma]", "description: All about gamma."], "x")],
+  ["plans/shared-wiki.mdx", md("Shared wiki rollout", ["plan_status: active", "status_note: felles bucket live"], "x")],
+  ["plans/wiki-glossary.mdx", md("Wiki glossary", [], "x")],
 ];
 
 let server: ChildProcess | undefined;
@@ -211,6 +215,18 @@ test("a two-word query ranks the expected page first; `#<digits>` finds a number
   await input(page).fill("#500");
   await expect(rows(page)).toHaveCount(1);
   await expect(rows(page).first().locator(".wiki-find-title")).toHaveText("Four fix rounds on widget #500");
+});
+
+test("a word only the status_note carries finds the page; a page hitting fewer words follows, marked partial", async ({ page }) => {
+  await openReader(page);
+  await find(page, "felles wiki");
+  await expect(rows(page)).toHaveCount(2);
+  const [full, partial] = [rows(page).first(), rows(page).nth(1)];
+  await expect(full).toHaveAttribute("data-relpath", "plans/shared-wiki.mdx");
+  await expect(full.locator(".wiki-find-partial")).toHaveCount(0);
+  await expect(partial).toHaveAttribute("data-relpath", "plans/wiki-glossary.mdx");
+  await expect(partial.locator(".wiki-find-partial")).toHaveText("partial 1/2");
+  await expect(partial.locator(".wiki-find-title mark")).toHaveText(["Wiki"]);
 });
 
 test('`in:"two words"` narrows to the series by its label', async ({ page }) => {

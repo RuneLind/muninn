@@ -9,8 +9,8 @@
  * `near` on `/api/wiki/page` — closeness to the open page over the neighbour
  * rule (`src/wiki/strength.ts`), keyed by the listing's own `relPath` spelling.
  *
- * Grammar (`parseFindQuery`): free words are ANDed, stray `"` dropped (no
- * phrase search). `in:<text>` / `in:"<text with spaces>"` keeps pages whose
+ * Grammar (`parseFindQuery`): free words are soft-ANDed (below), stray `"`
+ * dropped (no phrase search). `in:<text>` / `in:"<text with spaces>"` keeps pages whose
  * series key or label contains the text; `series:<key>` (what a chip applies)
  * keeps the series whose key IS that key, in the rail's fold; `type:<prefix>`;
  * `age:<N` / `age:>N` days on the worked-on axis; `#tag` a tag prefix, but
@@ -21,13 +21,20 @@
  * their values (`type:plan type:blog`); two `#tag`s AND; two `age:` bounds AND,
  * so a second bound of the same direction keeps the tighter. Across keys
  * everything ANDs. A chip REPLACES the `series:` tokens and keeps the rest, so
- * it yields exactly the count it shows (pinned by a property test).
+ * it yields exactly the count it shows (pinned by a property test); its count
+ * includes partial rows, as does `total`.
  *
  * Score, per page: each word SUMS the weights of the fields it hits (title 3,
- * series 2, tags/aliases 1.5, description 1, relPath 1); a word that hits no
- * field drops the page. Total = text × (1 + 0.8 × near) + 0.6 × e^(−age/30).
- * A pure-digit word matches a WHOLE number outside any ISO date in the title
- * (weight 4, so `9` does not hit `2026-09-…`) or the description (1).
+ * series 2, tags/aliases 1.5, description 1, status_note 1, relPath 1).
+ * Total = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). A pure-digit word
+ * matches a WHOLE number outside any ISO date in the title (weight 4, so `9`
+ * does not hit `2026-09-…`), the description or the status_note (1).
+ *
+ * Soft AND — filters stay hard, free words do not. A page hitting every word
+ * is in the FULL band, ranked as above. A page hitting fewer, but at least
+ * `findNeed(n)` of the n words (1 for n ≤ 2, ⌈n/2⌉ from 3), is in the PARTIAL
+ * band, strictly below every full row, ordered by words hit, then score. So a
+ * one-word query behaves as plain AND. A partial row marks only its own words.
  */
 
 import { escHtml } from "./escape.ts";
@@ -49,6 +56,7 @@ export const FIND_WEIGHTS = {
   series: 2,
   tag: 1.5,
   description: 1,
+  statusNote: 1,
   relPath: 1,
 } as const;
 /** How much `near` multiplies the text score at its ceiling. */
@@ -235,9 +243,20 @@ export function inFindPool(p: WikiListing, retired: boolean): boolean {
   return true;
 }
 
+/** How many of `n` free words a page must hit to be listed at all. */
+export function findNeed(n: number): number {
+  return n <= 2 ? Math.min(n, 1) : Math.ceil(n / 2);
+}
+
 export interface FindRow {
   page: WikiListing;
   score: number;
+  /** How many of the query's free words the page hits. */
+  matched: number;
+  /** The folded words the page hits — what its row marks. */
+  terms: string[];
+  /** Hits fewer than all the free words (the partial band). */
+  partial: boolean;
   /** The page's closeness to the open page, 0 when none. */
   near: number;
   /** The rail's fold of the series key, `""` when the page has none. */
@@ -268,9 +287,11 @@ export interface FindResult {
   rows: FindRow[];
   groups: FindGroup[];
   chips: FindChip[];
-  /** All matches, before the row cap. */
+  /** All matches, full and partial, before the row cap. */
   total: number;
-  /** The folded terms the highlighter marks. */
+  /** How many of `total` are partial rows. */
+  partials: number;
+  /** The query's folded free words. A row marks its own `terms`. */
   terms: string[];
 }
 
@@ -282,37 +303,48 @@ export interface RankOptions {
   limit?: number;
 }
 
-/** The text score of one page for the query's words; 0 when a word misses. */
+interface TextHit {
+  score: number;
+  /** The words that hit at least one field. */
+  hit: string[];
+}
+
+/** The text score of one page: the summed weights of the words that hit. */
 function textScore(
   p: WikiListing,
   words: readonly string[],
   labels: Map<string, string>,
-): number {
-  if (!words.length) return 1;
+): TextHit {
+  if (!words.length) return { score: 1, hit: [] };
   const titles = [...new Set([foldText(p.title), foldText(displayTitleOf(p))])];
   const raw = seriesKeyOf(p);
   const key = foldText(raw);
   const label = foldText(seriesLabelFor(p, labels));
   const tags = [...p.tags, ...p.aliases].map(foldText);
   const desc = foldText(p.description ?? "");
+  const note = foldText(p.status_note ?? "");
   const rel = foldText(p.relPath);
   let total = 0;
+  const hit: string[] = [];
   for (const w of words) {
     let s = 0;
     if (/^\d+$/.test(w)) {
       if (titles.some((t) => hasWholeNumber(t, w))) s += FIND_WEIGHTS.titleNumber;
       if (desc && hasWholeNumber(desc, w)) s += FIND_WEIGHTS.description;
+      if (note && hasWholeNumber(note, w)) s += FIND_WEIGHTS.statusNote;
     } else {
       if (titles.some((t) => t.includes(w))) s += FIND_WEIGHTS.title;
       if (key && (key.includes(w) || label.includes(w))) s += FIND_WEIGHTS.series;
       if (tags.some((t) => t.includes(w))) s += FIND_WEIGHTS.tag;
       if (desc.includes(w)) s += FIND_WEIGHTS.description;
+      if (note.includes(w)) s += FIND_WEIGHTS.statusNote;
       if (relPathMatchesQuery(rel, w)) s += FIND_WEIGHTS.relPath;
     }
-    if (s === 0) return 0;
+    if (s === 0) continue;
     total += s;
+    hit.push(w);
   }
-  return total;
+  return { score: total, hit };
 }
 
 function passesFilters(
@@ -346,10 +378,11 @@ function passesFilters(
  */
 export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankOptions): FindResult {
   const q = parseFindQuery(raw);
-  const empty: FindResult = { rows: [], groups: [], chips: [], total: 0, terms: q.words };
+  const empty: FindResult = { rows: [], groups: [], chips: [], total: 0, partials: 0, terms: q.words };
   if (isEmptyQuery(q)) return empty;
   const labels = seriesLabels(pages);
   const near = opts.near ?? {};
+  const need = findNeed(q.words.length);
   const scored: FindRow[] = [];
   for (const p of pages) {
     if (!inFindPool(p, q.retired)) continue;
@@ -357,20 +390,26 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
     const ageDays = ms > 0 ? Math.max(0, (opts.now - ms) / DAY_MS) : null;
     if (!passesFilters(p, q, labels, ageDays)) continue;
     const text = textScore(p, q.words, labels);
-    if (text === 0) continue;
+    if (text.hit.length < need) continue;
     const n = near[p.relPath] ?? 0;
     const recency = ageDays === null ? 0 : FIND_RECENCY_WEIGHT * Math.exp(-ageDays / FIND_RECENCY_DAYS);
     const raw = seriesKeyOf(p);
     const key = raw ? seriesCensusKey(raw) : "";
     scored.push({
       page: p,
-      score: text * (1 + FIND_NEAR_BOOST * n) + recency,
+      score: text.score * (1 + FIND_NEAR_BOOST * n) + recency,
+      matched: text.hit.length,
+      terms: text.hit,
+      partial: text.hit.length < q.words.length,
       near: n,
       seriesKey: key,
       seriesLabel: key ? seriesLabelFor(p, labels) || raw : "",
     });
   }
-  scored.sort((a, b) => b.score - a.score || a.page.relPath.localeCompare(b.page.relPath));
+  // Words hit first: the full band (every word) sits above every partial row.
+  scored.sort(
+    (a, b) => b.matched - a.matched || b.score - a.score || a.page.relPath.localeCompare(b.page.relPath),
+  );
 
   // Chips count every match, before the row cap, keyed on exactly what the
   // chip's `series:` token matches — so applying a chip yields its count.
@@ -393,7 +432,9 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
 
   const top = scored.slice(0, opts.limit ?? FIND_ROWS_MAX);
   // Group by series, groups in order of their best row. A no-series row is a
-  // group of one placed by its own score, so the best match always leads.
+  // group of one placed by its own score, so the best match always leads. A
+  // group never spans two words-hit tiers, or a partial row would sit inside a
+  // series group above a full row ranked after that group's head.
   const groups: FindGroup[] = [];
   const byKey = new Map<string, FindGroup>();
   for (const r of top) {
@@ -401,11 +442,12 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
       groups.push({ seriesKey: "", seriesLabel: "", rows: [r] });
       continue;
     }
-    const g = byKey.get(r.seriesKey);
+    const tierKey = `${r.matched}\u0000${r.seriesKey}`;
+    const g = byKey.get(tierKey);
     if (g) g.rows.push(r);
     else {
       const made = { seriesKey: r.seriesKey, seriesLabel: r.seriesLabel, rows: [r] };
-      byKey.set(r.seriesKey, made);
+      byKey.set(tierKey, made);
       groups.push(made);
     }
   }
@@ -414,6 +456,7 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
     groups,
     chips: [...chipMap.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
     total: scored.length,
+    partials: scored.filter((r) => r.partial).length,
     terms: q.words,
   };
 }

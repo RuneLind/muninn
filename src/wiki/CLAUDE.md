@@ -2010,19 +2010,28 @@ with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
 **The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
 the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
 it; the rail's search box is unchanged. It ranks `allPages` in the browser —
-there is no find route. Grammar: free words ANDed, a `"` on a free word dropped
+there is no find route. Grammar: free words soft-ANDed (below), a `"` on a free word dropped
 (no phrase search) — but a quoted value after an unknown key stays one word
 (`foo:"a b"` is the word `foo:a b`); `in:<text>`/`in:"<text>"` a substring of the series key or label;
 `series:<key>` the series whose key IS that key, in the rail's fold (`"`
 stripped on both sides) — what a series chip applies. A chip REPLACES the
 query's `series:` tokens and keeps every other token, `in:` included, so its
 count is what applying it yields for any listing and query (a seeded property
-test in `wiki-find.test.ts` pins it);
+test in `wiki-find.test.ts` pins it) — partial rows included, since a page's
+band depends on its own fields alone;
 `type:<prefix>`; `age:<N`/`age:>N` days on the worked-on axis, two bounds of
 one direction keeping the tighter; `#tag` a tag prefix but `#<digits>` a
 number word; `is:retired` admits culled pages; a known key with no value yet
 (`in:`, `type:`, `#`, `age:<`) is ignored, and `<`/`>` alone counts as no value only after `age:` (a series
-keyed `<` is a real value); any other `key:` is a free word. A
+keyed `<` is a real value); any other `key:` is a free word. A free word
+scores the fields it hits: title 3, series key/label 2, tags/aliases 1.5,
+description 1, `status_note` 1, relPath segment start 1. **Soft AND:** filters
+stay hard; free words do not. A page hitting all n words is in the full band,
+ranked as before; one hitting fewer but at least `findNeed(n)` (1 for n ≤ 2,
+⌈n/2⌉ from 3) is in the partial band, strictly below every full row, ordered by
+words hit, then score — so a one-word query is plain AND. A series group never
+spans two words-hit tiers, or a partial row would show inside a full group. A
+partial row carries a `partial m/n` pill and marks only its own words. A
 digit word matches a whole number outside any ISO date, in the scorer and the
 highlighter alike, so `9` does not hit `2026-09-…`. Series groups, keys and
 labels are the rail's (`seriesKeyOf`, `seriesCensusKey`, `seriesHead`). Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
