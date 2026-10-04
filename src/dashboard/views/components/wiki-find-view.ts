@@ -95,10 +95,20 @@ export function findListHtml(
       i++;
     }
   }
-  if (result.total > result.rows.length) {
-    html += `<div class="wiki-find-more">${result.total - result.rows.length} more — narrow the query</div>`;
-  }
+  const more = findMoreText(result);
+  if (more) html += `<div class="wiki-find-more">${esc(more)}</div>`;
   return html;
+}
+
+/** The footer for rows past the cap: how many are partial, and the narrow
+ *  hint only when a hidden row is a full match (more words drop partials). */
+export function findMoreText(result: FindResult): string {
+  const hidden = result.total - result.rows.length;
+  if (hidden <= 0) return "";
+  const hiddenPartial = result.partials - result.rows.filter((r) => r.partial).length;
+  if (hiddenPartial <= 0) return `${hidden} more — narrow the query`;
+  const partial = `${hiddenPartial} ${hiddenPartial === 1 ? "is a partial match" : "are partial matches"}`;
+  return hiddenPartial < hidden ? `${hidden} more — ${partial}; narrow the query` : `${hidden} more — ${partial}`;
 }
 
 function findRowHtml(
@@ -122,7 +132,7 @@ function findRowHtml(
     `<span class="wiki-find-title">${highlightFind(displayTitleOf(p), terms)}</span>` +
     `<span class="wiki-find-meta">` +
     (r.partial
-      ? `<span class="wiki-find-partial" title="Matches ${r.matched} of ${words} words">partial ${r.matched}/${words}</span>`
+      ? `<span class="wiki-find-partial" title="Matches ${esc(r.terms.join(", "))} — ${r.matched} of ${words} words">partial ${r.matched}/${words}</span>`
       : "") +
     `<span class="wiki-find-type">${esc(p.type)}</span>` +
     `<span class="wiki-find-path">${highlightFind(p.relPath, terms)}</span>` +

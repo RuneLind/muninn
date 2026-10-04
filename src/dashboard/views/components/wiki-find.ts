@@ -9,20 +9,23 @@
  * `near` on `/api/wiki/page` — closeness to the open page over the neighbour
  * rule (`src/wiki/strength.ts`), keyed by the listing's own `relPath` spelling.
  *
- * Grammar (`parseFindQuery`): free words are soft-ANDed (below), stray `"`
- * dropped (no phrase search). `in:<text>` / `in:"<text with spaces>"` keeps pages whose
- * series key or label contains the text; `series:<key>` (what a chip applies)
- * keeps the series whose key IS that key, in the rail's fold; `type:<prefix>`;
+ * Grammar (`parseFindQuery`): free words are soft-ANDed (below) and
+ * deduplicated after folding, stray `"` dropped (no phrase search).
+ * `in:<text>` / `in:"<text with spaces>"` keeps pages whose series key or
+ * label contains the text; `series:<key>` (what a chip applies) keeps the
+ * series whose key IS that key, in the rail's fold; `type:<prefix>`;
  * `age:<N` / `age:>N` days on the worked-on axis; `#tag` a tag prefix, but
- * `#<digits>` a number word; `is:retired` admits culled pages. A known key with
- * no value yet (`in:`, `type:`, `#`, `age:<`) is ignored; any other `key:` token
+ * `#<digits>` a REQUIRED number word (a bare `12` stays a free word);
+ * `is:retired` admits culled pages. A known key with no value yet (`in:`,
+ * `type:`, `#`, `age:<`) is ignored; any other `key:` token
  * is a free word (quotes and all: `foo:"a b"` is the one word `foo:a b`). `<`
  * or `>` alone is unfinished only after `age:`. `in:`, `series:` and `type:` OR
  * their values (`type:plan type:blog`); two `#tag`s AND; two `age:` bounds AND,
  * so a second bound of the same direction keeps the tighter. Across keys
  * everything ANDs. A chip REPLACES the `series:` tokens and keeps the rest, so
- * it yields exactly the count it shows (pinned by a property test); its count
- * includes partial rows, as does `total`.
+ * it yields exactly the count it shows (pinned by a property test): full rows
+ * in that series, plus its partial rows when the series alone has fewer than
+ * `PARTIAL_BAND_MAX_FULL` full rows.
  *
  * Score, per page: each word SUMS the weights of the fields it hits (title 3,
  * series 2, tags/aliases 1.5, description 1, status_note 1, relPath 1).
@@ -30,11 +33,15 @@
  * matches a WHOLE number outside any ISO date in the title (weight 4, so `9`
  * does not hit `2026-09-…`), the description or the status_note (1).
  *
- * Soft AND — filters stay hard, free words do not. A page hitting every word
- * is in the FULL band, ranked as above. A page hitting fewer, but at least
- * `findNeed(n)` of the n words (1 for n ≤ 2, ⌈n/2⌉ from 3), is in the PARTIAL
- * band, strictly below every full row, ordered by words hit, then score. So a
- * one-word query behaves as plain AND. A partial row marks only its own words.
+ * Soft AND — filters stay hard, long free words do not. Every page listed
+ * hits every REQUIRED word: a `#<digits>` word, and any free word shorter than
+ * `FIND_SHORT_WORD` characters (folded), which matches too much to be the one
+ * missing. A page hitting every word is in the FULL band, ranked as above. A
+ * page hitting fewer, but at least `findNeed(n)` of the n LONG words (1 for
+ * n ≤ 2, ⌈n/2⌉ from 3), is in the PARTIAL band, strictly below every full row,
+ * ordered by words hit, then score. The partial band is shown only while the
+ * full band has fewer than `PARTIAL_BAND_MAX_FULL` rows. So a one-word query
+ * behaves as plain AND. A partial row marks only its own words.
  */
 
 import { escHtml } from "./escape.ts";
@@ -59,6 +66,12 @@ export const FIND_WEIGHTS = {
   statusNote: 1,
   relPath: 1,
 } as const;
+/** A free word shorter than this (folded) is required: `i`, `w`, `12` hit
+ *  most pages, so as the missing word they flooded the partial band. */
+export const FIND_SHORT_WORD = 3;
+/** The partial band is shown only while the full band has fewer rows than
+ *  this: more words must keep narrowing a query that already works. */
+export const PARTIAL_BAND_MAX_FULL = 5;
 /** How much `near` multiplies the text score at its ceiling. */
 export const FIND_NEAR_BOOST = 0.8;
 /** The recency term's weight and decay (days). */
@@ -68,8 +81,10 @@ export const FIND_RECENCY_DAYS = 30;
 const DAY_MS = 86_400_000;
 
 export interface FindQuery {
-  /** Free words, folded. */
+  /** Free words, folded, deduplicated, none of them in `numbers`. */
   words: string[];
+  /** `#<digits>` words, `#` dropped, deduplicated — required in both bands. */
+  numbers: string[];
   /** `in:` values, folded. */
   inSeries: string[];
   /** `series:` keys, in {@link seriesMatchKey}'s form. */
@@ -124,7 +139,7 @@ export function seriesMatchKey(key: string): string {
 const KNOWN_KEYS = new Set(["in", "series", "type", "is", "age"]);
 
 export function parseFindQuery(raw: string): FindQuery {
-  const q: FindQuery = { words: [], inSeries: [], series: [], types: [], tags: [], retired: false };
+  const q: FindQuery = { words: [], numbers: [], inSeries: [], series: [], types: [], tags: [], retired: false };
   for (const tok of tokenize(raw)) {
     const colon = tok.indexOf(":");
     const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
@@ -163,13 +178,15 @@ export function parseFindQuery(raw: string): FindQuery {
     if (tok === "#") continue;
     if (tok.startsWith("#")) {
       const rest = tok.slice(1);
-      if (/^\d+$/.test(rest)) q.words.push(rest);
+      if (/^\d+$/.test(rest)) q.numbers.push(rest);
       else q.tags.push(foldText(rest));
       continue;
     }
     const word = foldText(tok.replace(/"/g, ""));
     if (word) q.words.push(word);
   }
+  q.numbers = [...new Set(q.numbers)];
+  q.words = [...new Set(q.words)].filter((w) => !q.numbers.includes(w));
   return q;
 }
 
@@ -177,6 +194,7 @@ export function parseFindQuery(raw: string): FindQuery {
 function isEmptyQuery(q: FindQuery): boolean {
   return (
     !q.words.length &&
+    !q.numbers.length &&
     !q.inSeries.length &&
     !q.series.length &&
     !q.types.length &&
@@ -243,7 +261,7 @@ export function inFindPool(p: WikiListing, retired: boolean): boolean {
   return true;
 }
 
-/** How many of `n` free words a page must hit to be listed at all. */
+/** How many of `n` LONG free words a page must hit to be listed at all. */
 export function findNeed(n: number): number {
   return n <= 2 ? Math.min(n, 1) : Math.ceil(n / 2);
 }
@@ -251,11 +269,11 @@ export function findNeed(n: number): number {
 export interface FindRow {
   page: WikiListing;
   score: number;
-  /** How many of the query's free words the page hits. */
+  /** How many of the query's words (`FindResult.terms`) the page hits. */
   matched: number;
   /** The folded words the page hits — what its row marks. */
   terms: string[];
-  /** Hits fewer than all the free words (the partial band). */
+  /** Hits fewer than all the words (the partial band). */
   partial: boolean;
   /** The page's closeness to the open page, 0 when none. */
   near: number;
@@ -275,8 +293,11 @@ export interface FindChip {
   /** {@link seriesMatchKey} of the series — what `token` matches. */
   seriesKey: string;
   label: string;
-  /** Matches in this series across ALL results, not only the shown rows. */
+  /** What applying the chip yields: its full rows, plus its partial rows
+   *  when those are fewer than `PARTIAL_BAND_MAX_FULL`. Not only shown rows. */
   count: number;
+  /** Full-band rows in this series — chips sort on it first. */
+  full: number;
   /** The query token the chip applies. */
   token: string;
 }
@@ -287,11 +308,13 @@ export interface FindResult {
   rows: FindRow[];
   groups: FindGroup[];
   chips: FindChip[];
-  /** All matches, full and partial, before the row cap. */
+  /** All listed matches before the row cap — partial ones only when the
+   *  partial band is shown. */
   total: number;
-  /** How many of `total` are partial rows. */
+  /** How many of `total` are partial rows; the footer says how many of the
+   *  hidden rows are. */
   partials: number;
-  /** The query's folded free words. A row marks its own `terms`. */
+  /** The query's folded words, free and `#<digits>`. A row marks its own `terms`. */
   terms: string[];
 }
 
@@ -378,56 +401,69 @@ function passesFilters(
  */
 export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankOptions): FindResult {
   const q = parseFindQuery(raw);
-  const empty: FindResult = { rows: [], groups: [], chips: [], total: 0, partials: 0, terms: q.words };
+  const terms = [...q.words, ...q.numbers];
+  const empty: FindResult = { rows: [], groups: [], chips: [], total: 0, partials: 0, terms };
   if (isEmptyQuery(q)) return empty;
   const labels = seriesLabels(pages);
   const near = opts.near ?? {};
-  const need = findNeed(q.words.length);
-  const scored: FindRow[] = [];
+  const required = new Set([...q.numbers, ...q.words.filter((w) => w.length < FIND_SHORT_WORD)]);
+  const need = findNeed(terms.length - required.size);
+  const candidates: FindRow[] = [];
   for (const p of pages) {
     if (!inFindPool(p, q.retired)) continue;
     const ms = pageWorkedMs(p, opts.now);
     const ageDays = ms > 0 ? Math.max(0, (opts.now - ms) / DAY_MS) : null;
     if (!passesFilters(p, q, labels, ageDays)) continue;
-    const text = textScore(p, q.words, labels);
-    if (text.hit.length < need) continue;
+    const text = textScore(p, terms, labels);
+    const hitRequired = text.hit.filter((w) => required.has(w)).length;
+    if (hitRequired < required.size || text.hit.length - hitRequired < need) continue;
     const n = near[p.relPath] ?? 0;
     const recency = ageDays === null ? 0 : FIND_RECENCY_WEIGHT * Math.exp(-ageDays / FIND_RECENCY_DAYS);
     const raw = seriesKeyOf(p);
     const key = raw ? seriesCensusKey(raw) : "";
-    scored.push({
+    candidates.push({
       page: p,
       score: text.score * (1 + FIND_NEAR_BOOST * n) + recency,
       matched: text.hit.length,
       terms: text.hit,
-      partial: text.hit.length < q.words.length,
+      partial: text.hit.length < terms.length,
       near: n,
       seriesKey: key,
       seriesLabel: key ? seriesLabelFor(p, labels) || raw : "",
     });
   }
   // Words hit first: the full band (every word) sits above every partial row.
-  scored.sort(
+  candidates.sort(
     (a, b) => b.matched - a.matched || b.score - a.score || a.page.relPath.localeCompare(b.page.relPath),
   );
+  const showPartials = candidates.filter((r) => !r.partial).length < PARTIAL_BAND_MAX_FULL;
+  const scored = showPartials ? candidates : candidates.filter((r) => !r.partial);
 
-  // Chips count every match, before the row cap, keyed on exactly what the
-  // chip's `series:` token matches — so applying a chip yields its count.
+  // Chips count every candidate before the row cap, keyed on exactly what the
+  // chip's `series:` token matches. Applying a chip decides the partial band
+  // on that series' own full rows, so the count does too — and equals what
+  // applying it yields. A chip exists for each series among the listed rows.
+  const tally = new Map<string, { label: string; full: number; partial: number }>();
+  for (const r of candidates) {
+    const match = r.seriesKey ? seriesMatchKey(r.seriesKey) : "";
+    if (!match) continue;
+    const t = tally.get(match) ?? { label: r.seriesLabel, full: 0, partial: 0 };
+    if (r.partial) t.partial++;
+    else t.full++;
+    tally.set(match, t);
+  }
   const chipMap = new Map<string, FindChip>();
   for (const r of scored) {
-    if (!r.seriesKey) continue;
-    const match = seriesMatchKey(r.seriesKey);
-    if (!match) continue;
-    const c = chipMap.get(match);
-    if (c) c.count++;
-    else {
-      chipMap.set(match, {
-        seriesKey: match,
-        label: r.seriesLabel,
-        count: 1,
-        token: /\s/.test(match) ? `series:"${match}"` : `series:${match}`,
-      });
-    }
+    const match = r.seriesKey ? seriesMatchKey(r.seriesKey) : "";
+    if (!match || chipMap.has(match)) continue;
+    const t = tally.get(match)!;
+    chipMap.set(match, {
+      seriesKey: match,
+      label: t.label,
+      count: t.full + (t.full < PARTIAL_BAND_MAX_FULL ? t.partial : 0),
+      full: t.full,
+      token: /\s/.test(match) ? `series:"${match}"` : `series:${match}`,
+    });
   }
 
   const top = scored.slice(0, opts.limit ?? FIND_ROWS_MAX);
@@ -454,10 +490,12 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
   return {
     rows: groups.flatMap((g) => g.rows),
     groups,
-    chips: [...chipMap.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
+    chips: [...chipMap.values()].sort(
+      (a, b) => b.full - a.full || b.count - a.count || a.label.localeCompare(b.label),
+    ),
     total: scored.length,
     partials: scored.filter((r) => r.partial).length,
-    terms: q.words,
+    terms,
   };
 }
 
