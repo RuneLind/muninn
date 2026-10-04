@@ -76,7 +76,19 @@ import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
 import { fellesBtnHtml, FELLES_BTN_ID, openFellesPublishDialog } from "./wiki-felles-publish.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
-import { relatedSectionHtml, type RelatedListing } from "./wiki-related-view.ts";
+import {
+  parseRelatedOrder,
+  RELATED_HOP_ATTR,
+  RELATED_HOP_BODY_ATTR,
+  RELATED_ORDER_ATTR,
+  relatedHopHtml,
+  relatedSectionHtml,
+  type RelatedHopResponse,
+  type RelatedListing,
+  type RelatedOrder,
+  type RelatedViewOptions,
+} from "./wiki-related-view.ts";
+import { seriesLabels } from "./wiki-find.ts";
 // The start-view cards (What's new · Index coverage · reindex poller): IMPORTED
 // for the same reason as the share dialog above — one bundle, one module state.
 import {
@@ -136,6 +148,7 @@ import {
   orderSeriesGroups,
   railGroups,
   clipSeriesTitle,
+  seriesCensusKey,
   seriesContinuePlan,
   seriesKeyOf,
   seriesMembersOf,
@@ -157,9 +170,11 @@ import {
   purgeRecentsKeys,
   readFolds,
   readPins,
+  readRelatedOrder,
   readSort,
   toggleFolded,
   togglePinned,
+  writeRelatedOrder,
   writeSort,
 } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
@@ -453,7 +468,7 @@ interface WikiPageDetail {
   html: string;
   outgoing: WikiListing[];
   backlinks: WikiListing[];
-  /** The pages one hop from this one, newest first. ABSENT on an older server;
+  /** The pages one hop from this one, strongest first. ABSENT on an older server;
    *  `[]` on a page with no neighbours — both render no block at all. */
   related?: RelatedListing[];
   /** TRUE when the page carries any provenance key and the block is worth
@@ -2977,6 +2992,99 @@ function miniGraphHtml(data: WikiPageDetail, rows: readonly IssueRow[] | null | 
 }
 
 // ── Right pane: connections ───────────────────────────────────────────
+/** The Related work order this reader picked on this wiki (D3). */
+let relatedOrder: RelatedOrder = readRelatedOrder(WIKI);
+/** Second-hop answers for the page open now, keyed by the hop row's normalized
+ *  relPath. Reset whenever a different page's connections render, so a ▸ never
+ *  shows a cut made against the page the reader left. */
+const relatedHops = new Map<string, RelatedHopResponse>();
+let relatedHopsFor: string | null = null;
+
+/** The block's options: the worked axis and instant the rail reads, the order,
+ *  and the rail's series labels. */
+function relatedViewOpts(): RelatedViewOptions {
+  const labels = seriesLabels(allPages);
+  return {
+    workedAxis: workedAxisOn,
+    now: recencyNow(),
+    order: relatedOrder,
+    hops: true,
+    seriesLabelOf: (p) => {
+      const key = seriesKeyOf(p);
+      return key ? (labels.get(seriesCensusKey(key)) ?? "") : "";
+    },
+  };
+}
+
+function relatedBlockHtml(data: WikiPageDetail): string {
+  const open = data.meta?.relPath ? normalizeRel(data.meta.relPath) : null;
+  if (open !== relatedHopsFor) {
+    relatedHops.clear();
+    relatedHopsFor = open;
+  }
+  return relatedSectionHtml(data.related ?? [], seriesEditable(), relatedViewOpts());
+}
+
+/** The reader picked an order: remember it for this wiki and repaint the block
+ *  alone, keeping focus on the button pressed. */
+function setRelatedOrder(order: RelatedOrder): void {
+  relatedOrder = order;
+  writeRelatedOrder(WIKI, order);
+  const section = document.querySelector("#connBody .wiki-related");
+  if (!section || !connData) return;
+  section.outerHTML = relatedSectionHtml(connData.related ?? [], seriesEditable(), relatedViewOpts());
+  document.querySelector<HTMLButtonElement>(`#connBody [${RELATED_ORDER_ATTR}="${order}"]`)?.focus();
+}
+
+/**
+ * ▸ on a Related work row: open (or close) THAT page's own related work under
+ * the row — `GET /api/wiki/related`, minus the page open now and its
+ * attachments. One fetch per row per page open; a failure is not cached.
+ */
+function toggleRelatedHop(btn: HTMLButtonElement): void {
+  const rel = btn.getAttribute(RELATED_HOP_ATTR) || "";
+  const row = btn.closest(".wiki-conn-related");
+  const body = row?.nextElementSibling as HTMLElement | null;
+  if (!rel || !body || body.getAttribute(RELATED_HOP_BODY_ATTR) !== rel) return;
+  if (btn.getAttribute("aria-expanded") === "true") {
+    btn.setAttribute("aria-expanded", "false");
+    btn.textContent = "▸";
+    body.hidden = true;
+    return;
+  }
+  btn.setAttribute("aria-expanded", "true");
+  btn.textContent = "▾";
+  body.hidden = false;
+  const viaRow = connData?.related?.find((p) => p.relPath === rel);
+  const via = viaRow ? displayTitleOf(viaRow) : rel;
+  const key = normalizeRel(rel);
+  const cached = relatedHops.get(key);
+  if (cached) {
+    body.innerHTML = relatedHopHtml(via, cached, relatedViewOpts());
+    return;
+  }
+  const open = currentRelPath;
+  if (!open) return;
+  body.innerHTML = relatedHopHtml(via, null);
+  const url =
+    "/api/wiki/related?relPath=" + encodeURIComponent(rel) + "&exclude=" + encodeURIComponent(open) + "&limit=6";
+  fetch(withWiki(url))
+    .then((r) => r.json() as Promise<RelatedHopResponse>)
+    .then((data) => {
+      if (currentRelPath !== open) return;
+      const answer: RelatedHopResponse = Array.isArray(data.related)
+        ? data
+        : { related: [], total: 0, error: data.error || "unavailable" };
+      if (!answer.error) relatedHops.set(key, answer);
+      if (body.isConnected && !body.hidden) body.innerHTML = relatedHopHtml(via, answer, relatedViewOpts());
+    })
+    .catch(() => {
+      if (currentRelPath === open && body.isConnected && !body.hidden) {
+        body.innerHTML = relatedHopHtml(via, { related: [], total: 0, error: "unavailable" });
+      }
+    });
+}
+
 function renderConnections(data: WikiPageDetail): void {
   // Feeds the Discuss dialog's "How it connects" starter question. Stamped here
   // because this is the one place the page's resolved neighbours arrive.
@@ -3015,7 +3123,7 @@ function renderConnections(data: WikiPageDetail): void {
     // `Related work` leads: it is the one section that ANSWERS a question
     // ("what else is this piece of work?") rather than listing a mechanism.
     // The two below are the raw link lists it is derived from.
-    relatedSectionHtml(data.related ?? [], seriesEditable()) +
+    relatedBlockHtml(data) +
     section("Linked from", data.backlinks) +
     section("Links to", data.outgoing) +
     // Placeholder the lazy "Similar" fetch fills in after the page renders.
@@ -4397,6 +4505,21 @@ document.body.addEventListener("click", (e) => {
     target.closest &&
     target.closest(`[${SERIES_MENU_ATTR}], [${SERIES_EDIT_ATTR}], #${SERIES_MENU_ID}`)
   ) {
+    return;
+  }
+  // Related work's order toggle and ▸ second hop. The ▸ sits INSIDE a
+  // `[data-relpath]` row, so it is claimed here, before the nav-link branch
+  // below would open the row's page.
+  const relOrderBtn = target.closest ? target.closest(`[${RELATED_ORDER_ATTR}]`) : null;
+  if (relOrderBtn) {
+    e.preventDefault();
+    setRelatedOrder(parseRelatedOrder(relOrderBtn.getAttribute(RELATED_ORDER_ATTR)));
+    return;
+  }
+  const relHopBtn = target.closest ? target.closest<HTMLButtonElement>(`[${RELATED_HOP_ATTR}]`) : null;
+  if (relHopBtn) {
+    e.preventDefault();
+    toggleRelatedHop(relHopBtn);
     return;
   }
   // The article header's project hub chip. Delegated here rather than bound at

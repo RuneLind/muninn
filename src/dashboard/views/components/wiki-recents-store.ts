@@ -22,12 +22,14 @@ import {
   foldsKey,
   parseRelPathList,
   pinsKey,
+  relatedOrderKey,
   serializeRelPathList,
   sortKey,
   togglePin,
   toggleFold,
 } from "./wiki-recents.ts";
 import { parseWikiSortMode, type WikiSortMode } from "./wiki-filter.ts";
+import { parseRelatedOrder, type RelatedOrder } from "./wiki-related-view.ts";
 
 /** The slice of `Storage` the purge below needs, so a unit test can hand it a
  *  fake instead of a browser. */
@@ -100,6 +102,24 @@ export function readSort(wiki: string): WikiSortMode | null {
 export function writeSort(wiki: string, mode: WikiSortMode): void {
   try {
     localStorage.setItem(sortKey(wiki), mode);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** The Related work order this reader picked on this wiki; `strongest` when
+ *  never picked, unreadable or unknown. */
+export function readRelatedOrder(wiki: string): RelatedOrder {
+  try {
+    return parseRelatedOrder(localStorage.getItem(relatedOrderKey(wiki)));
+  } catch {
+    return "strongest";
+  }
+}
+
+export function writeRelatedOrder(wiki: string, order: RelatedOrder): void {
+  try {
+    localStorage.setItem(relatedOrderKey(wiki), order);
   } catch {
     /* best-effort */
   }

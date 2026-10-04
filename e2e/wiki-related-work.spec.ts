@@ -26,7 +26,7 @@
 
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
@@ -45,7 +45,18 @@ import { contrastOf } from "./contrast.ts";
  * 25 → 10 and 25 → 30 both pass. The value pin further down is what reports a
  * move.
  */
-import { RELATED_DIGEST_PRS, RELATED_HUB_BACKLINKS } from "../src/wiki/related-constants.ts";
+import {
+  RELATED_DIGEST_PRS,
+  RELATED_HUB_BACKLINKS,
+  STRENGTH_LINK_BOTH_WAYS,
+  STRENGTH_LINK_ONE_WAY,
+  STRENGTH_MAX,
+  STRENGTH_PR_CAP,
+  STRENGTH_PR_WEIGHT,
+  STRENGTH_SESSION_CAP,
+  STRENGTH_SESSION_DIGEST,
+  STRENGTH_SESSION_WEIGHT,
+} from "../src/wiki/related-constants.ts";
 
 const PORT = e2ePort("wiki-related-work");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -79,9 +90,15 @@ function md(title: string, fm: string[], body: string): string {
  *  - `digest` — names 16 PR refs including both of `a`'s, and links nothing.
  *  - `unrelated` — shares exactly ONE ref and links nothing: one under the
  *    threshold, so a rule that paired on a single ref would put it in.
+ *  - `a-prototype.html` — the open page's own attachment. `c` links to it and
+ *    to `b`, so `c`'s second hop holds `a`, the attachment and `b`.
+ *  - `dg-*` — a cluster of its own for the digest case: `dg-digest` cites
+ *    `dg-open` and names 16 refs including both of its two; `dg-peer` cites it
+ *    and names just those two.
  *
- * Every page carries a `status_date`, which is what the block orders by on a
- * temp wiki with no git history.
+ * Every page carries a `status_date`, which breaks a strength tie on a temp
+ * wiki with no git history. The three rows' MTIMES are set (`AGES_DAYS`), so
+ * the age each row shows — and the `Newest` order — is a fixed fact.
  */
 const PAGES: Array<[string, string]> = [
   [
@@ -98,9 +115,10 @@ const PAGES: Array<[string, string]> = [
     md(
       "Sharing blog",
       [`prs: [${REF_AUTHORED}]`, "status_date: 2026-09-16"],
-      "Reads [[a]] and https://github.com/RuneLind/muninn/pull/550.",
+      "Reads [[a]], [[b]], [the prototype](../plans/a-prototype.html) and https://github.com/RuneLind/muninn/pull/550.",
     ),
   ],
+  ["plans/a-prototype.html", "<!doctype html><html><head><title>A prototype</title></head><body>x</body></html>"],
   ["plans/downstream.mdx", md("Downstream plan", ["status_date: 2026-09-14"], "The successor.")],
   [
     "plans/hub.mdx",
@@ -132,13 +150,37 @@ const PAGES: Array<[string, string]> = [
     md("Session open", [`sessions: [claude-code:${SESSION_ID}]`, "status_date: 2026-09-12"], "Body."),
   ],
   ["plans/sess-twin.mdx", md("Session twin", [`sessions: [${SESSION_ID}]`, "status_date: 2026-09-11"], "Body.")],
+  // The digest cluster: `dg-open` declares two refs; `dg-digest` cites it and
+  // names RELATED_DIGEST_PRS + 1 refs including both; `dg-peer` cites it and
+  // names only the two.
+  ["plans/dg-open.mdx", md("Digest open", ["prs: [RuneLind/muninn#700, RuneLind/muninn#701]", "status_date: 2026-09-10"], "Body.")],
+  [
+    "plans/dg-digest.mdx",
+    md(
+      "Digest citer",
+      ["status_date: 2026-09-09"],
+      `Reads [[dg-open]]. Names muninn#700, muninn#701, ${Array.from(
+        { length: RELATED_DIGEST_PRS - 1 },
+        (_, i) => `huginn#${i + 101}`,
+      ).join(", ")}.`,
+    ),
+  ],
+  ["plans/dg-peer.mdx", md("Digest peer", ["status_date: 2026-09-08"], "Reads [[dg-open]]. Names muninn#700 and muninn#701.")],
 ];
 
-/** The rows the block must hold, newest first, with their why lines. */
-const EXPECTED: Array<[string, string]> = [
-  ["Citing plan", "cites this page"],
-  ["Sharing blog", `cites this page · shares ${REF_AUTHORED}, ${REF_BODY}`],
-  ["Downstream plan", "cited by this page"],
+/** How many days old each row's file is: the age the row shows. */
+const AGES_DAYS: Record<string, number> = {
+  "plans/downstream.mdx": 2,
+  "plans/b.mdx": 5,
+  "blogs/c.mdx": 9,
+};
+
+/** The rows the block must hold, strongest first (a 1.0 tie falls to
+ *  `status_date`, newest first), with their why lines and scores. */
+const EXPECTED: Array<[string, string, string]> = [
+  ["Sharing blog", `cites this page · shares ${REF_AUTHORED}, ${REF_BODY}`, "2.2"],
+  ["Citing plan", "cites this page", "1.0"],
+  ["Downstream plan", "cited by this page", "1.0"],
 ];
 
 let server: ChildProcess | undefined;
@@ -149,6 +191,10 @@ test.beforeAll(async () => {
   for (const [rel, body] of PAGES) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
     await writeFile(path.join(root, rel), body, "utf8");
+  }
+  for (const [rel, days] of Object.entries(AGES_DAYS)) {
+    const at = new Date(Date.now() - days * 86_400_000);
+    await utimes(path.join(root, rel), at, at);
   }
   // One past the threshold: the cut fires ABOVE it, not at it.
   await mkdir(path.join(root, "fill"), { recursive: true });
@@ -222,7 +268,21 @@ test("the thresholds are the measured values — moving one means re-measuring",
   expect(RELATED_DIGEST_PRS).toBe(15);
 });
 
-test("the block leads the Connections panel, newest first, with one why line per row", async ({
+/** The neighbour weights the bar draws and the order sorts on. Moving one moves
+ *  every score and STRENGTH_MAX, i.e. every bar's width — pinned here for the
+ *  same reason as the thresholds above. */
+test("the strength weights are the planned values — moving one rescales every bar", () => {
+  expect(STRENGTH_LINK_ONE_WAY).toBe(1.0);
+  expect(STRENGTH_LINK_BOTH_WAYS).toBe(1.6);
+  expect(STRENGTH_PR_WEIGHT).toBe(0.6);
+  expect(STRENGTH_PR_CAP).toBe(1.8);
+  expect(STRENGTH_SESSION_WEIGHT).toBe(1.2);
+  expect(STRENGTH_SESSION_CAP).toBe(2.4);
+  expect(STRENGTH_SESSION_DIGEST).toBe(12);
+  expect(STRENGTH_MAX).toBeCloseTo(5.8, 10);
+});
+
+test("the block leads the Connections panel, strongest first, with one why line and score per row", async ({
   page,
 }) => {
   await openReader(page);
@@ -230,23 +290,125 @@ test("the block leads the Connections panel, newest first, with one why line per
   // FIRST section in the panel — before `Linked from` and `Links to`, which are
   // the raw lists it is derived from.
   const titles = page.locator("#connBody .wiki-conn-title");
-  await expect(titles.first()).toHaveText(`Related work (${EXPECTED.length})`);
+  await expect(titles.first().locator(".wiki-rel-count")).toHaveText(`Related work (${EXPECTED.length})`);
   await expect(titles.nth(1)).toContainText("Linked from");
 
   await expect(relatedRows(page)).toHaveCount(EXPECTED.length);
-  for (const [i, [title, why]] of EXPECTED.entries()) {
+  for (const [i, [title, why, score]] of EXPECTED.entries()) {
     const row = relatedRows(page).nth(i);
     await expect(row.locator("> .wiki-conn-text > span")).toHaveText(title);
     await expect(row.locator(".wiki-conn-why")).toHaveText(why);
+    await expect(row.locator(".wiki-rel-score")).toHaveText(score);
   }
+  // The bars: a link segment on every row, a PR segment only where two refs
+  // are shared, and widths on the one fixed scale — the one-way link is the
+  // same width on all three rows.
+  await expect(relatedRows(page).nth(0).locator(".seg-pr")).toHaveCount(1);
+  await expect(relatedRows(page).nth(1).locator(".seg-pr")).toHaveCount(0);
+  const linkWidths = await relatedRows(page)
+    .locator(".seg-link")
+    .evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().width * 10) / 10));
+  expect(new Set(linkWidths).size).toBe(1);
+  const bar = await relatedRows(page).nth(0).locator(".wiki-rel-bar").evaluate((e) => e.getBoundingClientRect().width);
+  expect(linkWidths[0]! / bar).toBeCloseTo(STRENGTH_LINK_ONE_WAY / STRENGTH_MAX, 1);
+  // Each row's age is the NEIGHBOUR's date, off its mtime on this git-less wiki.
+  await expect(relatedRows(page).locator(".wiki-rel-age")).toHaveText(["9d", "5d", "2d"]);
+});
+
+test("Strongest | Newest: the toggle re-sorts by the age shown, and the choice survives a reload", async ({
+  page,
+}) => {
+  await openReader(page);
+  const order = page.locator("#connBody .wiki-rel-order");
+  await expect(order.locator('[data-rel-order="strongest"]')).toHaveAttribute("aria-pressed", "true");
+  await order.locator('[data-rel-order="newest"]').click();
+  await expect(order.locator('[data-rel-order="newest"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(relatedRows(page).locator("> .wiki-conn-text > span")).toHaveText([
+    "Downstream plan",
+    "Citing plan",
+    "Sharing blog",
+  ]);
+  // The ages read in order — the column the sort is on.
+  await expect(relatedRows(page).locator(".wiki-rel-age")).toHaveText(["2d", "5d", "9d"]);
+
+  await page.reload();
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("A page");
+  await expect(page.locator('#connBody [data-rel-order="newest"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(relatedRows(page).first().locator("> .wiki-conn-text > span")).toHaveText("Downstream plan");
+
+  await page.locator('#connBody [data-rel-order="strongest"]').click();
+  await expect(relatedRows(page).first().locator("> .wiki-conn-text > span")).toHaveText("Sharing blog");
+});
+
+test("▸ opens a row's own related work — never the open page or its attachments", async ({ page }) => {
+  // The control: without `exclude`, `c`'s block really holds `a` and `a`'s
+  // attachment, so their absence below is the cut and not the fixture.
+  const all = await (await fetch(`${BASE}/api/wiki/related?wiki=${WIKI}&relPath=blogs/c.mdx`)).json();
+  expect(all.related.map((r: { relPath: string }) => r.relPath).sort()).toEqual([
+    "plans/a-prototype.html",
+    OPEN,
+    "plans/b.mdx",
+  ]);
+
+  await openReader(page);
+  const hops: string[] = [];
+  page.on("request", (req) => {
+    if (req.url().includes("/api/wiki/related")) hops.push(req.url());
+  });
+  const row = relatedRows(page).first();
+  await expect(row.locator("> .wiki-conn-text > span")).toHaveText("Sharing blog");
+  await row.locator("[data-rel-hop]").click();
+  // The ▸ is a control, not a row click: the open page did not change.
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("A page");
+  await expect(row.locator("[data-rel-hop]")).toHaveAttribute("aria-expanded", "true");
+  const hopRows = page.locator(".wiki-rel-hop-row");
+  await expect(hopRows.locator("> .wiki-conn-text > span")).toHaveText(["Citing plan"]);
+  const hopBody = page.locator('.wiki-rel-hop-body[data-rel-hop-for="blogs/c.mdx"]');
+  await expect(hopBody).toContainText("Related to Sharing blog");
+  await expect(hopBody).not.toContainText("A page");
+  await expect(hopBody).not.toContainText("A prototype");
+  expect(hops).toHaveLength(1);
+  expect(new URL(hops[0]!).searchParams.get("exclude")).toBe(OPEN);
+
+  // Closed and reopened, it is answered from the cache for this page open.
+  await row.locator("[data-rel-hop]").click();
+  await row.locator("[data-rel-hop]").click();
+  await expect(hopRows).toHaveCount(1);
+  expect(hops).toHaveLength(1);
+
+  // A hop row opens its page through the panel's own handler.
+  await hopRows.first().click();
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Citing plan");
+});
+
+test("a DIGEST that links to the page shows its link and no PR segment", async ({ page }) => {
+  const body = await (await fetch(`${BASE}/api/wiki/page?wiki=${WIKI}&relPath=plans/dg-open.mdx`)).json();
+  const by = Object.fromEntries(
+    body.related.map((r: { relPath: string; signals: unknown; why: string }) => [r.relPath, r]),
+  );
+  // Both cite the open page and both name its two refs; only the digest has
+  // more than RELATED_DIGEST_PRS, so only the peer's PRs count.
+  expect(by["plans/dg-digest.mdx"].why).toBe("cites this page");
+  expect(by["plans/dg-digest.mdx"].signals).toEqual({ link: "in", prs: [], sessions: [] });
+  expect(by["plans/dg-peer.mdx"].signals.prs).toHaveLength(2);
+
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/dg-open.mdx")}`);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Digest open");
+  const digest = relatedRows(page).filter({ hasText: "Digest citer" });
+  const peer = relatedRows(page).filter({ hasText: "Digest peer" });
+  await expect(digest.locator(".seg-link")).toHaveCount(1);
+  await expect(digest.locator(".seg-pr")).toHaveCount(0);
+  await expect(digest.locator(".wiki-rel-score")).toHaveText("1.0");
+  await expect(peer.locator(".seg-pr")).toHaveCount(1);
+  await expect(peer.locator(".wiki-rel-score")).toHaveText("2.2");
 });
 
 test("a row opens its page — the panel's own delegated handler, no second click path", async ({
   page,
 }) => {
   await openReader(page);
-  await relatedRows(page).first().click();
-  await expect(page.locator(".wiki-article-head h1")).toHaveText("Citing plan");
+  await relatedRows(page).first().locator("> .wiki-conn-text > span").click();
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Sharing blog");
 });
 
 test("the HUB and the DIGEST are cut, though both are in the wiki and one cites the page", async ({
@@ -308,8 +470,8 @@ test("the why line is fully VISIBLE — the PR numbers are what the `shares` rea
   page,
 }) => {
   await openReader(page);
-  const why = relatedRows(page).nth(1).locator(".wiki-conn-why");
-  await expect(why).toHaveText(EXPECTED[1]![1]);
+  const why = relatedRows(page).nth(0).locator(".wiki-conn-why");
+  await expect(why).toHaveText(EXPECTED[0]![1]);
 
   // ⚠️ `toHaveText` passes on a CLIPPED element, which is how this shipped:
   // `white-space: nowrap` + `text-overflow: ellipsis` painted 248px of a 353px
@@ -349,7 +511,7 @@ for (const scheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: scheme });
     await openReader(page);
     // The `em` carries the reasons; the container carries only the separators.
-    const row = relatedRows(page).nth(1);
+    const row = relatedRows(page).nth(0);
     const reason = row.locator(".wiki-conn-why em").first();
     await expect(reason).toBeVisible();
     expect(await contrastOf(reason)).toBeGreaterThanOrEqual(4.5);
@@ -362,5 +524,60 @@ for (const scheme of ["light", "dark"] as const) {
     const hovered = await paintedBg(reason);
     expect(hovered).not.toBe(rest);
     expect(await contrastOf(reason)).toBeGreaterThanOrEqual(4.5);
+  });
+}
+
+/** Contrast of an element's own BACKGROUND (a bar segment is a graphic, not
+ *  text) against the nearest ancestor that paints one — WCAG 1.4.11 asks 3:1. */
+function fillContrast(locator: import("@playwright/test").Locator): Promise<number> {
+  return locator.evaluate((el) => {
+    const lum = (c: string): number => {
+      const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
+      const ch = (v: number) => {
+        const s = v / 255;
+        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+    };
+    let node: HTMLElement | null = el.parentElement;
+    let bg = "rgb(255, 255, 255)";
+    while (node) {
+      const c = getComputedStyle(node).backgroundColor;
+      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
+        bg = c;
+        break;
+      }
+      node = node.parentElement;
+    }
+    const a = lum(getComputedStyle(el).backgroundColor);
+    const b = lum(bg);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  });
+}
+
+for (const scheme of ["light", "dark"] as const) {
+  test(`the bar segments clear 3:1 and the score and age 4.5:1 in the ${scheme} theme, at rest and hovered`, async ({
+    page,
+  }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    const measure = async (row: import("@playwright/test").Locator, segs: string[]) => {
+      for (const seg of segs) {
+        expect(await fillContrast(row.locator(seg)), `${scheme} ${seg}`).toBeGreaterThanOrEqual(3);
+      }
+      expect(await contrastOf(row.locator(".wiki-rel-score")), `${scheme} score`).toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(row.locator(".wiki-rel-age")), `${scheme} age`).toBeGreaterThanOrEqual(4.5);
+    };
+    await openReader(page);
+    const row = relatedRows(page).nth(0);
+    await measure(row, [".seg-link", ".seg-pr"]);
+    await row.hover();
+    await measure(row, [".seg-link", ".seg-pr"]);
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/sess-open.mdx")}`);
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Session open");
+    const sess = relatedRows(page).nth(0);
+    await measure(sess, [".seg-sess"]);
+    await sess.hover();
+    await measure(sess, [".seg-sess"]);
   });
 }

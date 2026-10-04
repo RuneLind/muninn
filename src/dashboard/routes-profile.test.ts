@@ -206,7 +206,8 @@ describe("renderNav under the nais profile", () => {
 describe("the wiki read slice under nais", () => {
   test("the read routes are registered", () => {
     const read = wikiRouteTable("read", "nais");
-    expect(read.length).toBeGreaterThanOrEqual(6);
+    expect(read.length).toBeGreaterThanOrEqual(7);
+    expect(read.some((r) => r.path === "/api/wiki/related")).toBe(true);
     const paths = registeredPaths(build("nais"));
     for (const { path } of read) {
       expect(`${path} → ${paths.has(path)}`).toBe(`${path} → true`);
@@ -218,11 +219,11 @@ describe("the wiki read slice under nais", () => {
     // answer is the route's own and does not depend on this machine's wikis.
     const app = build("nais");
     const answers: Record<string, number> = {};
-    for (const path of ["/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/html", "/api/wiki/pages?wiki=__no_such_wiki__"]) {
+    for (const path of ["/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/related", "/api/wiki/html", "/api/wiki/pages?wiki=__no_such_wiki__"]) {
       answers[path] = (await app.request(path)).status;
     }
     expect(answers).toEqual({
-      "/api/wiki/page": 400, "/api/wiki/page/provenance": 400, "/api/wiki/html": 400,
+      "/api/wiki/page": 400, "/api/wiki/page/provenance": 400, "/api/wiki/related": 400, "/api/wiki/html": 400,
       "/api/wiki/pages?wiki=__no_such_wiki__": 200,
     });
   });

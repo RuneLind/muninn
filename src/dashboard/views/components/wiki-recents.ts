@@ -51,6 +51,8 @@ export const PINS_KEY_PREFIX = "muninn.wiki.pins.v1:";
 export const FOLDS_KEY_PREFIX = "muninn.wiki.folds.v1:";
 /** The sort this reader PICKED, per wiki. Absent ⇒ the default (`resolveSortMode`). */
 export const SORT_KEY_PREFIX = "muninn.wiki.sort.v1:";
+/** The Related work order this reader PICKED, per wiki. Absent ⇒ strongest. */
+export const RELATED_ORDER_KEY_PREFIX = "muninn.wiki.related-order.v1:";
 
 /** Pins are the reader's own choice, so the cap is only a bound on the stored
  *  string — but it is enforced on READ as well as on write, so a hand-edited or
@@ -82,6 +84,10 @@ export function foldsKey(wiki: string): string {
 
 export function sortKey(wiki: string): string {
   return SORT_KEY_PREFIX + wiki;
+}
+
+export function relatedOrderKey(wiki: string): string {
+  return RELATED_ORDER_KEY_PREFIX + wiki;
 }
 
 /**

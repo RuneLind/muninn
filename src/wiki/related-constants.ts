@@ -89,10 +89,32 @@ export const STRENGTH_SESSION_CAP = 2.4;
 
 /**
  * The highest score a neighbour can reach: both-ways link plus both caps.
- * DERIVED, so moving a weight moves the ceiling with it — PR 2's strength bar
+ * DERIVED, so moving a weight moves the ceiling with it — Related work's strength bar
  * divides by this.
  */
 export const STRENGTH_MAX = STRENGTH_LINK_BOTH_WAYS + STRENGTH_PR_CAP + STRENGTH_SESSION_CAP;
+
+/** The three bar segments' widths in score units: what each signal adds. */
+export interface StrengthParts {
+  link: number;
+  prs: number;
+  sessions: number;
+}
+
+/**
+ * What each signal adds to a neighbour's score — the ONE spelling of the
+ * weights. `strengthOf` (`strength.ts`) sums it, and the Related work bar
+ * (`wiki-related-view.ts`) draws it, so a bar's segments always add up to the
+ * score printed beside it. Here rather than in `strength.ts` because the
+ * browser bundle loads this module and cannot load that one.
+ */
+export function strengthParts(link: "out" | "in" | "both" | null, prCount: number, sessionCount: number): StrengthParts {
+  return {
+    link: link === "both" ? STRENGTH_LINK_BOTH_WAYS : link ? STRENGTH_LINK_ONE_WAY : 0,
+    prs: prCount >= RELATED_SHARED_PRS_MIN ? Math.min(prCount * STRENGTH_PR_WEIGHT, STRENGTH_PR_CAP) : 0,
+    sessions: Math.min(sessionCount * STRENGTH_SESSION_WEIGHT, STRENGTH_SESSION_CAP),
+  };
+}
 
 /**
  * How much a SECOND hop keeps of its parent's closeness. A first-hop page

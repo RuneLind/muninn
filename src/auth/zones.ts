@@ -156,7 +156,8 @@ export const USER_ZONE_PATHS: readonly string[] = [
 
 /**
  * The wiki READ slice — the `wiki-read` route group: the reader page, the
- * listing, one page, its provenance block, explainer HTML and graph mode.
+ * listing, one page, its provenance block, another page's Related work (the
+ * reader's second hop), explainer HTML and graph mode.
  *
  * In the user zone ONLY when the caller says the read slice is the served wiki
  * surface (`ZoneDecisionInput.wikiReadSlice`, from `servesWikiReadSliceOnly` —
@@ -170,6 +171,7 @@ export const WIKI_READ_SLICE_PATHS: readonly string[] = [
   "/api/wiki/pages",
   "/api/wiki/page",
   "/api/wiki/page/provenance",
+  "/api/wiki/related",
   "/api/wiki/html",
   "/api/wiki/graph",
 ];

@@ -18,7 +18,9 @@
  * **Never transitive**, and that is a measurement rather than a preference: the
  * largest connected component of mimir's raw link graph is 189 of 379 narrative
  * pages (`scripts/lint-series-dryrun.ts`, 2026-09-20), so "reachable" groups
- * half the wiki and says nothing. One hop is the whole rule.
+ * half the wiki and says nothing. One hop is the whole rule. The reader's ▸
+ * SECOND hop (`GET /api/wiki/related`) does not bend it: it is an explicit
+ * request for ANOTHER page's one hop, minus the page already open.
  *
  * **Why ≥2 shared PR refs and not one.** A single shared PR number pairs every
  * page that mentions a busy week; two is what made the dry run's pairs read as
@@ -40,7 +42,7 @@
 
 import { bySeriesDateDesc } from "../dashboard/views/components/wiki-groups.ts";
 import type { WikiIndex } from "./store.ts";
-import { isBookkeeping, neighbours } from "./strength.ts";
+import { isBookkeeping, linkOf, neighbours } from "./strength.ts";
 import {
   REASON_SESSION_PREFIX,
   RELATED_DIGEST_PRS,
@@ -64,13 +66,29 @@ export {
 // dependency runs one way: `related.ts` → `strength.ts`.
 export { isBookkeeping };
 
-/** One related page: which page, and the one line saying why it is there. */
+/** Which signals tie a row to the open page, in the shape the reader's bar
+ *  draws. `link` is `in` when the row cites the open page, `out` when the open
+ *  page cites the row. `prs` and `sessions` are every shared ref, in the open
+ *  page's spelling; `prs` is `[]` when the PR signal does not count (under two
+ *  shared, or a digest at either end). */
+export interface RelatedSignals {
+  link: "out" | "in" | "both" | null;
+  prs: string[];
+  sessions: string[];
+}
+
+/** One related page: which page, how strongly, and the one line saying why. */
 export interface RelatedRef {
   /** The candidate's relPath, exactly as `WikiPageMeta.relPath` spells it. */
   relPath: string;
   /** The reasons, joined with ` · ` — e.g.
    *  `cites this page · shares RuneLind/claude-usage#207, RuneLind/muninn#550`. */
   why: string;
+  /** `neighbours()`' score, rounded to one decimal — the value the reader
+   *  prints, and the value the order compares, so two rows printing the same
+   *  number are a tie. */
+  strength: number;
+  signals: RelatedSignals;
 }
 
 /** The two link reasons. A why line pushes its reasons in one fixed order —
@@ -80,13 +98,14 @@ const REASON_CITES = "cites this page";
 const REASON_CITED_BY = "cited by this page";
 
 /**
- * The related pages for `relPath`, newest first.
+ * The related pages for `relPath`, strongest first.
  *
- * "Newest" is {@link bySeriesDateDesc} — `status_date`, else the durable git
+ * "Strongest" is `neighbours()`' score — one rule for membership and weight
+ * (`strength.ts`). Ties, which are common (every one-way link alone scores
+ * 1.0), fall to {@link bySeriesDateDesc}: `status_date`, else the durable git
  * touch date, else the file's mtime, at DAY granularity with the rung as the
- * tie-break. The same signal the rail's Series fold orders its members by, and
- * the same function: two surfaces that both claim to show the newest page of a
- * piece of work must not disagree about which one that is.
+ * tie-break — the series fold's own order. The reader's `Newest` toggle
+ * re-sorts client-side on the worked-on axis its age column shows.
  *
  * Returns `[]` for an unknown relPath and for a page with no neighbours — the
  * route passes that through and the reader renders no block at all.
@@ -113,8 +132,16 @@ export function computeRelated(index: WikiIndex, relPath: string): RelatedRef[] 
       if (n.signals.sessions.length) {
         why.push(`${REASON_SESSION_PREFIX}${n.signals.sessions.slice(0, RELATED_SHARED_PRS_SHOWN).join(", ")}`);
       }
-      return { meta: n.meta, why: why.join(" · ") };
+      return {
+        meta: n.meta,
+        ref: {
+          relPath: n.meta.relPath,
+          why: why.join(" · "),
+          strength: Math.round(n.score * 10) / 10,
+          signals: { link: linkOf(n.signals), prs: [...n.signals.prs], sessions: [...n.signals.sessions] },
+        },
+      };
     })
-    .sort((a, b) => bySeriesDateDesc(a.meta, b.meta))
-    .map(({ meta, why }) => ({ relPath: meta.relPath, why }));
+    .sort((a, b) => b.ref.strength - a.ref.strength || bySeriesDateDesc(a.meta, b.meta))
+    .map(({ ref }) => ref);
 }
