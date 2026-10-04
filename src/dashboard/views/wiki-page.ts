@@ -2565,6 +2565,59 @@ export async function renderWikiPage(opts?: {
       display: inline-block; max-width: 16ch; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
     }
+    /* Related work's header: the count, then the Strongest | Newest toggle. */
+    .wiki-rel-head { display: flex; align-items: center; gap: 8px; }
+    .wiki-rel-order {
+      margin-left: auto; display: inline-flex; border: 1px solid var(--border-secondary);
+      border-radius: 6px; overflow: hidden;
+    }
+    .wiki-rel-order button {
+      background: none; border: 0; padding: 1px 7px; cursor: pointer;
+      font-family: inherit; font-size: 10.5px; font-weight: 500; color: var(--text-soft);
+    }
+    .wiki-rel-order button[aria-pressed="true"] { background: var(--bg-surface); color: var(--text-primary); font-weight: 600; }
+    /* The ▸ second-hop opener, always visible: a control revealed on hover is a
+       control a finger cannot reach. --text-soft, not --text-muted: muted
+       measured 4.42:1 over the hovered row in the light theme
+       (e2e/wiki-related-work.spec.ts). */
+    .wiki-rel-hop {
+      background: none; border: 0; padding: 0; width: 12px; flex-shrink: 0; cursor: pointer;
+      font-family: inherit; font-size: 11px; line-height: 1.55; color: var(--text-soft);
+    }
+    .wiki-rel-hop:hover, .wiki-rel-hop[aria-expanded="true"] { color: var(--text-primary); }
+    /* The meta line: strength bar, score, the neighbour's age, its series.
+       Every span here re-states size and colour, because \`.wiki-conn-item span\`
+       (the title's rule) reaches them too. */
+    .wiki-rel-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 2px; min-width: 0; }
+    /* Segments on the fixed STRENGTH_MAX scale, so bars compare across pages.
+       Semantic status tokens, each measured at ≥3:1 against the row at rest and
+       hovered, in both themes (e2e/wiki-related-work.spec.ts). The track is an
+       outline, not a fill, so a segment is measured against the row itself. */
+    .wiki-rel-meta .wiki-rel-bar {
+      display: inline-flex; width: 58px; height: 6px; border-radius: 3px; overflow: hidden;
+      box-shadow: inset 0 0 0 1px var(--border-secondary); flex-shrink: 0;
+    }
+    .wiki-rel-seg { display: block; height: 100%; }
+    .wiki-rel-seg.seg-link { background: var(--status-info); }
+    .wiki-rel-seg.seg-pr { background: var(--status-magenta); }
+    .wiki-rel-seg.seg-sess { background: var(--status-cyan); }
+    .wiki-rel-meta .wiki-rel-score {
+      font-size: 10.5px; color: var(--text-soft); font-variant-numeric: tabular-nums; overflow: visible;
+    }
+    .wiki-rel-meta .wiki-rel-age { font-size: 10.5px; color: var(--text-soft); overflow: visible; }
+    .wiki-rel-meta .wiki-rel-age.worked { color: var(--worked-ink); font-weight: 600; }
+    .wiki-rel-meta .wiki-rel-age.fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
+    .wiki-rel-meta .wiki-rel-age.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
+    .wiki-rel-meta .wiki-rel-series {
+      font-size: 10px; color: var(--text-soft); border: 1px solid var(--border-secondary);
+      border-radius: 8px; padding: 0 6px; max-width: 16ch;
+    }
+    /* The second hop, under the row it opened from. */
+    .wiki-rel-hop-body { margin: 0 0 6px 20px; padding-left: 4px; border-left: 2px solid var(--border-secondary); }
+    .wiki-rel-hop-body[hidden] { display: none; }
+    .wiki-rel-hop-head, .wiki-rel-hop-note { font-size: 10.5px; color: var(--text-soft); padding: 2px 8px; }
+    .wiki-conn-item.wiki-rel-hop-row { align-items: flex-start; }
+    .wiki-rel-hop-row .wiki-type-dot { margin-top: 5px; flex-shrink: 0; }
 
     .wiki-empty-state { padding: 40px; text-align: center; color: var(--text-muted); font-size: 13px; }
     .wiki-empty-state code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }

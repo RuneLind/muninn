@@ -953,7 +953,7 @@ is the one surface the user zone is written around.
    `/api/search/` reads were already owner-guarded, so this is enumeration
    rather than new protection. **Plus, under `MUNINN_PROFILE=nais` only, the
    wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki` and
-   `/api/wiki/{pages,page,page/provenance,html,graph}`, GET/HEAD only). The
+   `/api/wiki/{pages,page,page/provenance,related,html,graph}`, GET/HEAD only). The
    zone middleware is told at mount (`createZoneMiddleware(auth, { wikiReadSlice
    })`, from `servesWikiReadSliceOnly`); on a default-profile instance those
    paths stay admin, because there they are the operator's reader over every

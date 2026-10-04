@@ -218,6 +218,14 @@ export function seriesLabels(pages: readonly WikiListing[]): Map<string, string>
   return out;
 }
 
+/** A page's series label out of `seriesLabels`' map, `""` for a page in no
+ *  series (or one the map does not know). The one spelling the palette and
+ *  Related work's pill both read. */
+export function seriesLabelFor(p: WikiListing, labels: ReadonlyMap<string, string>): string {
+  const raw = seriesKeyOf(p);
+  return raw ? (labels.get(seriesCensusKey(raw)) ?? "") : "";
+}
+
 /** Is this page in the find pool before any query filter? */
 export function inFindPool(p: WikiListing, retired: boolean): boolean {
   if (isMetaPage(p)) return false;
@@ -284,7 +292,7 @@ function textScore(
   const titles = [...new Set([foldText(p.title), foldText(displayTitleOf(p))])];
   const raw = seriesKeyOf(p);
   const key = foldText(raw);
-  const label = raw ? foldText(labels.get(seriesCensusKey(raw)) ?? "") : "";
+  const label = foldText(seriesLabelFor(p, labels));
   const tags = [...p.tags, ...p.aliases].map(foldText);
   const desc = foldText(p.description ?? "");
   const rel = foldText(p.relPath);
@@ -317,7 +325,7 @@ function passesFilters(
   if (q.inSeries.length) {
     if (!raw) return false;
     const key = foldText(raw);
-    const label = foldText(labels.get(seriesCensusKey(raw)) ?? "");
+    const label = foldText(seriesLabelFor(p, labels));
     if (!q.inSeries.some((v) => key.includes(v) || label.includes(v))) return false;
   }
   if (q.series.length && !q.series.includes(seriesMatchKey(raw))) return false;
@@ -359,7 +367,7 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
       score: text * (1 + FIND_NEAR_BOOST * n) + recency,
       near: n,
       seriesKey: key,
-      seriesLabel: key ? labels.get(key) ?? raw : "",
+      seriesLabel: key ? seriesLabelFor(p, labels) || raw : "",
     });
   }
   scored.sort((a, b) => b.score - a.score || a.page.relPath.localeCompare(b.page.relPath));

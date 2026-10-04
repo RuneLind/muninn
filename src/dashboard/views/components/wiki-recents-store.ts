@@ -20,8 +20,11 @@ import {
   PINS_MAX,
   RECENTS_KEY_PREFIX,
   foldsKey,
+  parseRelatedOrder,
   parseRelPathList,
   pinsKey,
+  relatedOrderKey,
+  type RelatedOrder,
   serializeRelPathList,
   sortKey,
   togglePin,
@@ -100,6 +103,24 @@ export function readSort(wiki: string): WikiSortMode | null {
 export function writeSort(wiki: string, mode: WikiSortMode): void {
   try {
     localStorage.setItem(sortKey(wiki), mode);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** The Related work order this reader picked on this wiki; `strongest` when
+ *  never picked, unreadable or unknown. */
+export function readRelatedOrder(wiki: string): RelatedOrder {
+  try {
+    return parseRelatedOrder(localStorage.getItem(relatedOrderKey(wiki)));
+  } catch {
+    return "strongest";
+  }
+}
+
+export function writeRelatedOrder(wiki: string, order: RelatedOrder): void {
+  try {
+    localStorage.setItem(relatedOrderKey(wiki), order);
   } catch {
     /* best-effort */
   }

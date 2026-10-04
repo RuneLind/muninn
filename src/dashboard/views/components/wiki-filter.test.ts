@@ -1770,3 +1770,13 @@ test("filtersRevealing: a page that already passes keeps every filter", () => {
   const f: WikiFilters = { ...NO_FILTER, domain: "ai", q: "retrieval" };
   expect(filtersRevealing(PAGES[0]!, f)).toEqual(f);
 });
+
+test("workedAxisSource: the rail's and Related work's ONE derivation of a date chip's source", async () => {
+  const { workedAxisSource, workedSignal } = await import("./wiki-filter.ts");
+  const now = Date.parse("2026-10-04T12:00:00Z");
+  const worked = { workedMs: now - 3 * 86_400_000, mtimeMs: now - 3 * 86_400_000 } as Parameters<typeof workedSignal>[0];
+  const unworked = { mtimeMs: now - 5 * 86_400_000 } as Parameters<typeof workedSignal>[0];
+  expect(workedAxisSource(worked, now, workedSignal(worked, now))?.kind).toBe("worked");
+  expect(workedAxisSource(unworked, now, workedSignal(unworked, now))).toEqual({ kind: "fallback" });
+  expect(workedAxisSource(unworked, now, null)).toBeNull();
+});

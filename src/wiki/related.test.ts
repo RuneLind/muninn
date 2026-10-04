@@ -206,15 +206,41 @@ describe("computeRelated", () => {
     expect(whyByPath(index, OPEN)["plans/hub.md"]).toBeUndefined();
   });
 
-  test("rows come back NEWEST first", async () => {
+  test("rows come back STRONGEST first, each with its strength and signals", async () => {
     await writeFillers(0);
-    expect(computeRelated(await buildWikiIndex(root), OPEN).map((r) => r.relPath)).toEqual([
-      "plans/both.md", // 2026-09-12
-      "plans/hub.md", // 2026-09-11
-      "plans/citer.md", // 2026-09-10
-      "plans/cited.md", // 2026-09-08
-      "plans/sharer.md", // 2026-09-05
+    const rows = computeRelated(await buildWikiIndex(root), OPEN);
+    expect(rows.map((r) => [r.relPath, r.strength])).toEqual([
+      ["plans/both.md", 2.8], // both ways (1.6) + two shared refs (1.2)
+      ["plans/sharer.md", 1.2], // two shared refs, no link
+      ["plans/hub.md", 1], // one-way links tie at 1.0 …
+      ["plans/citer.md", 1],
+      ["plans/cited.md", 1],
     ]);
+    const by = Object.fromEntries(rows.map((r) => [r.relPath, r.signals]));
+    expect(by["plans/both.md"]).toEqual({
+      link: "both",
+      prs: ["RuneLind/muninn#549", "RuneLind/muninn#550"],
+      sessions: [],
+    });
+    expect(by["plans/sharer.md"]!.link).toBeNull();
+    // `in` = the row cites the open page, `out` = the open page cites the row.
+    expect(by["plans/citer.md"]!.link).toBe("in");
+    expect(by["plans/cited.md"]!.link).toBe("out");
+  });
+
+  test("a strength TIE falls to the series order, newest first", async () => {
+    await writeFillers(0);
+    // hub 09-11, citer 09-10, cited 09-08 — all 1.0. Re-dating `cited` past the
+    // other two moves it to the head of the tie and nowhere else.
+    const file = path.join(root, "plans/cited.md");
+    const before = await Bun.file(file).text();
+    try {
+      await writeFile(file, before.replace("2026-09-08", "2026-09-15"), "utf8");
+      const rows = computeRelated(await buildWikiIndex(root), OPEN).map((r) => r.relPath);
+      expect(rows).toEqual(["plans/both.md", "plans/sharer.md", "plans/cited.md", "plans/hub.md", "plans/citer.md"]);
+    } finally {
+      await writeFile(file, before, "utf8");
+    }
   });
 
   test("an unknown relPath answers [] rather than throwing", async () => {

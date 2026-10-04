@@ -3,7 +3,7 @@ import { resolveServingProfile, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
-import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
 import { issueRowsFor } from "../../wiki/trackers/rows.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
@@ -30,7 +30,8 @@ import {
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
-import { computeRelated } from "../../wiki/related.ts";
+import { computeRelated, type RelatedRef } from "../../wiki/related.ts";
+import { RELATED_HOP_LIMIT_DEFAULT, RELATED_HOP_LIMIT_MAX } from "../../wiki/related-constants.ts";
 import { nearScores } from "../../wiki/strength.ts";
 import { ctxStampable, pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import {
@@ -1066,7 +1067,8 @@ export function toListing(
   //   2. `/api/wiki/page` meta  — the single page the reader has open.
   //   3. `/api/wiki/page`'s `listings()` — the outgoing/backlink ARRAYS on that
   //      same response, which are link-heavy pages' bulk. Strip.
-  //   4. `/api/wiki/page`'s `related` rows — caller 3's shape plus `why`. Strip.
+  //   4. `/api/wiki/page`'s and `/api/wiki/related`'s `related` rows
+  //      (`relatedRows`) — caller 3's shape plus `why`/`strength`/`signals`. Strip.
   // So a field stripped for payload size (e.g. `status_note`) also goes out of
   // reach of the reader, and a field opted IN for caller 2 must not be opted in
   // for callers 3 or 4, which would re-bloat exactly the pages this strip protects.
@@ -1087,8 +1089,9 @@ export function toListing(
   // `prRefs` is stripped on EVERY caller and opted in by NONE — not even
   // `includeProvenance`. It is the INPUT to `computeRelated` (`src/wiki/related.ts`),
   // which runs server-side on caller 2 and answers with `related[]`; each of
-  // those rows carries the refs it matched on inside its own `why` string, so
-  // shipping the raw list would be a dozen refs per page that nothing renders.
+  // those rows carries the refs it SHARES with the open page in
+  // `signals.prs`, so shipping each page's raw list would be a dozen refs per
+  // page that nothing renders.
   //
   // `children` is stripped on EVERY caller and opted in by none: the rail
   // rebuilds every group from the `parent` links of the pages the facets left on
@@ -1254,6 +1257,60 @@ async function getCollectionUpdateStatus(
  *  caps a looping caller at ~3 % of the event loop. In-process `refresh: true`
  *  callers (programmatic writers) are not throttled. */
 export const WIKI_HTTP_REFRESH_MIN_INTERVAL_MS = 15_000;
+
+/** `computeRelated`'s decisions as listing rows — `toListing` (caller 4 of its
+ *  strip list) plus `why`, `strength` and `signals`. Shared by `/api/wiki/page`
+ *  and `/api/wiki/related`, so the two answer one row shape. */
+function relatedRows(index: WikiIndex, refs: RelatedRef[]) {
+  return refs.flatMap((r) => {
+    const m = index.resolveRelPath(r.relPath);
+    return m ? [{ ...toListing(index, m), why: r.why, strength: r.strength, signals: r.signals }] : [];
+  });
+}
+
+/** `/api/wiki/related`'s `limit`: digits only, clamped to 1–`RELATED_HOP_LIMIT_MAX`;
+ *  anything else (absent, empty, signed, fractional, `1e3`, `0x10`, `5abc`) is
+ *  the default. A prefix parse read `1e3` as 1 and `5abc` as 5. */
+export function parseRelatedHopLimit(raw: string | undefined): number {
+  if (raw === undefined || !/^\d+$/.test(raw)) return RELATED_HOP_LIMIT_DEFAULT;
+  return Math.min(RELATED_HOP_LIMIT_MAX, Math.max(1, Number(raw)));
+}
+
+/** The page extensions an extensionless `exclude` is tried with, in the store's
+ *  same-stem precedence order. */
+const EXCLUDE_EXTENSIONS = [".md", ".mdx", ".html"] as const;
+
+/**
+ * `/api/wiki/related`'s `exclude`: a relPath as the listing spells it
+ * (case-insensitive), the same relPath without its extension, or a folder-less
+ * STEM that exactly one non-attachment page has. Never a title or an alias —
+ * `index.resolve` matches both, and cut a page by its title. `undefined` when
+ * none of those finds a page.
+ */
+export function resolveExcludeRef(index: WikiIndex, raw: string): WikiPageMeta | undefined {
+  const ref = raw.trim();
+  if (!ref) return undefined;
+  const exact = index.resolveRelPath(ref);
+  if (exact) return exact;
+  if (!/\.(md|mdx|html)$/i.test(ref)) {
+    for (const ext of EXCLUDE_EXTENSIONS) {
+      const hit = index.resolveRelPath(ref + ext);
+      if (hit) return hit;
+    }
+  }
+  // A page name carries no folder, so a ref with one matches no stem below.
+  const key = stemKey(ref);
+  let only: WikiPageMeta | undefined;
+  for (const p of index.pages) {
+    // An attachment (an `.html` paired to its page) is part of that page, not
+    // a page of its own; a superseded page is a page.
+    if (p.parent && p.pairedBy !== "superseded") continue;
+    if (stemKey(p.name) !== key) continue;
+    if (only) return undefined;
+    only = p;
+  }
+  return only;
+}
 
 /** The whole wiki surface — the read slice plus everything else — which is
  *  what the `default` profile registers (as the `wiki-read` and `wiki` groups).
@@ -1499,7 +1556,8 @@ export function registerWikiReadRoutes(
   // folder can't shadow the intended page), else by `name` (first-stem-match, the
   // legacy wikilink/list-click path).
   /**
-   * The ONE resolution `/api/wiki/page` and `/api/wiki/page/provenance` share:
+   * The ONE resolution `/api/wiki/page`, `/api/wiki/page/provenance` and
+   * `/api/wiki/related` share:
    * `wiki`/`bot` → registry entry, `relPath` (collision-proof) else `name`
    * (first-stem-match) → page. The 400/404/503 ladder is the contract both
    * answer, so it lives once.
@@ -1575,24 +1633,23 @@ export function registerWikiReadRoutes(
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
       // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs ∪ shares a session,
-      // minus hubs, never transitive` (`neighbours()` in `strength.ts`), newest
-      // first, one `why` line per row. Computed here rather than in the browser
+      // minus hubs, never transitive` (`neighbours()` in `strength.ts`),
+      // strongest first (ties newest first), one `why` line, `strength` and
+      // `signals` per row. Computed here rather than in the browser
       // because its inputs are `prRefs` and `sessions`, which the listing does
       // not carry (and must not: see `toListing`) — and because the rule reads
       // the whole index, which the client holds only as the filtered page list.
       //
-      // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why` — it
-      // cannot use `listings()` itself, which answers a bare listing and would
-      // drop the one field this block exists for. The array is bounded by the
-      // link graph and by the three cuts, not by a cap: measured over the
+      // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why`,
+      // `strength` and `signals` — it cannot use `listings()` itself, which
+      // answers a bare listing and would drop the fields this block exists
+      // for. The array is bounded by the link graph and by the three cuts, not
+      // by a cap: measured over the
       // 547-page mimir clone 2026-09-20, the largest block is 33 rows
       // (`overview.md`), and the pages that answered hundreds — `index.md` at
       // 340, `plans/index.md` 246, `log.md` 189 — are bookkeeping or hubs, which
       // now get no block at all.
-      related: computeRelated(index, meta.relPath).flatMap((r) => {
-        const m = index.resolveRelPath(r.relPath);
-        return m ? [{ ...toListing(index, m), why: r.why }] : [];
-      }),
+      related: relatedRows(index, computeRelated(index, meta.relPath)),
       // NEAR — the find palette's closeness boost: relPath → (0, 1), one and
       // two hops over the same neighbour rule, capped at `NEAR_MAX` entries.
       // Keyed by `meta.relPath` exactly as `/api/wiki/pages` spells it, never
@@ -1601,6 +1658,35 @@ export function registerWikiReadRoutes(
       // with a capital. `{}` for a bookkeeping or hub page.
       near: nearScores(index, meta.relPath),
     });
+  });
+
+  // RELATED WORK'S SECOND HOP — the reader's ▸ on a Related work row asks for
+  // THAT page's one hop (`computeRelated`), minus the page the reader has open
+  // (`exclude`) and that page's own attachments, which the open page's block
+  // already leaves out. It is another page's block, not a transitive walk:
+  // `related.ts`'s one-hop rule holds. Same resolution and 400/404/503 ladder
+  // as `/api/wiki/page`. `exclude` resolves more narrowly than a page
+  // reference (`resolveExcludeRef`: relPath with or without extension, or a
+  // stem exactly one non-attachment page has — never a title, an alias or an
+  // attachment's stem); one that names no page is compared as given. `limit` is digits
+  // only, clamped to 1–20, default 6 (`parseRelatedHopLimit`), and `total` is
+  // the row count before it, so the reader can say how many it left out.
+  app.get("/api/wiki/related", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { index, meta } = resolved;
+    const limit = parseRelatedHopLimit(c.req.query("limit"));
+    const excludeQ = c.req.query("exclude");
+    const excludeKey = excludeQ
+      ? normalizeRelPath(resolveExcludeRef(index, excludeQ)?.relPath ?? excludeQ)
+      : null;
+    const kept = computeRelated(index, meta.relPath).filter((r) => {
+      if (excludeKey === null) return true;
+      if (normalizeRelPath(r.relPath) === excludeKey) return false;
+      const parent = index.resolveRelPath(r.relPath)?.parent;
+      return parent === undefined || normalizeRelPath(parent) !== excludeKey;
+    });
+    return c.json({ related: relatedRows(index, kept.slice(0, limit)), total: kept.length });
   });
 
   // The provenance block for ONE page — who wrote it, which issue it serves,

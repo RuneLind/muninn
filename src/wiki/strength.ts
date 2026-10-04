@@ -36,13 +36,8 @@ import {
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
   RELATED_SHARED_PRS_MIN,
-  STRENGTH_LINK_BOTH_WAYS,
-  STRENGTH_LINK_ONE_WAY,
-  STRENGTH_PR_CAP,
-  STRENGTH_PR_WEIGHT,
-  STRENGTH_SESSION_CAP,
   STRENGTH_SESSION_DIGEST,
-  STRENGTH_SESSION_WEIGHT,
+  strengthParts,
 } from "./related-constants.ts";
 import { bareId, stampedSessionRefs } from "./session-refs.ts";
 
@@ -240,18 +235,17 @@ export function neighbours(index: WikiIndex, relPath: string): Neighbour[] {
 /** The score a set of signals adds up to. Exported for the unit tests' signal
  *  sweep; a reader takes `Neighbour.score`. */
 export function strengthOf(signals: NeighbourSignals): number {
-  const link =
-    signals.cites && signals.citedBy
-      ? STRENGTH_LINK_BOTH_WAYS
-      : signals.cites || signals.citedBy
-        ? STRENGTH_LINK_ONE_WAY
-        : 0;
-  const prs =
-    signals.prs.length >= RELATED_SHARED_PRS_MIN
-      ? Math.min(signals.prs.length * STRENGTH_PR_WEIGHT, STRENGTH_PR_CAP)
-      : 0;
-  const sessions = Math.min(signals.sessions.length * STRENGTH_SESSION_WEIGHT, STRENGTH_SESSION_CAP);
-  return link + prs + sessions;
+  const p = strengthParts(linkOf(signals), signals.prs.length, signals.sessions.length);
+  return p.link + p.prs + p.sessions;
+}
+
+/** The link signal as one value: `in` — the neighbour cites the open page,
+ *  `out` — the open page cites the neighbour, `both`, or `null`. */
+export function linkOf(signals: Pick<NeighbourSignals, "cites" | "citedBy">): "out" | "in" | "both" | null {
+  if (signals.cites && signals.citedBy) return "both";
+  if (signals.cites) return "in";
+  if (signals.citedBy) return "out";
+  return null;
 }
 
 /** A first-hop closeness: `s/(s+1)`, in `[0.5, 1)` for every neighbour. */

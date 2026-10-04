@@ -381,8 +381,8 @@ export type SeriesPlanFields = PageDateOrder & Pick<WikiListing, "plan_status">;
  *  touch falls on is the process's own timezone question — see
  *  {@link seriesDateSignal}.
  *
- *  Exported for `src/wiki/related.ts`, which orders the `Related work` rows the
- *  same way. */
+ *  Exported for `src/wiki/related.ts`, which breaks a `Related work`
+ *  strength tie the same way. */
 export function bySeriesDateDesc(a: PageDateOrder, b: PageDateOrder): number {
   const sa = seriesDateSignal(a);
   const sb = seriesDateSignal(b);

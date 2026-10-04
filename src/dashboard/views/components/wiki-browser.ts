@@ -76,7 +76,18 @@ import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
 import { fellesBtnHtml, FELLES_BTN_ID, openFellesPublishDialog } from "./wiki-felles-publish.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
-import { relatedSectionHtml, type RelatedListing } from "./wiki-related-view.ts";
+import {
+  RELATED_HOP_ATTR,
+  RELATED_HOP_BODY_ATTR,
+  RELATED_ORDER_ATTR,
+  relatedHopHtml,
+  relatedSectionHtml,
+  type RelatedHopResponse,
+  type RelatedListing,
+  type RelatedViewOptions,
+} from "./wiki-related-view.ts";
+import { seriesLabelFor, seriesLabels } from "./wiki-find.ts";
+import { RELATED_HOP_LIMIT_DEFAULT } from "../../../wiki/related-constants.ts";
 // The start-view cards (What's new · Index coverage · reindex poller): IMPORTED
 // for the same reason as the share dialog above — one bundle, one module state.
 import {
@@ -124,8 +135,10 @@ import {
   normalizeFoldKey,
   isPinnedRelPath,
   pairedByWhy,
+  parseRelatedOrder,
   railSectionsVisible,
   type RailEntry,
+  type RelatedOrder,
 } from "./wiki-recents.ts";
 import {
   GROUP_FAMILIES_TOGGLE_KEY,
@@ -157,9 +170,11 @@ import {
   purgeRecentsKeys,
   readFolds,
   readPins,
+  readRelatedOrder,
   readSort,
   toggleFolded,
   togglePinned,
+  writeRelatedOrder,
   writeSort,
 } from "./wiki-recents-store.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
@@ -267,7 +282,7 @@ import {
   isRecencySort,
   recencyKindFor,
   resolveSortMode,
-  workedSourceOf,
+  workedAxisSource,
   workedChip,
   isUsableWorkedMs,
   type WorkedSource,
@@ -453,7 +468,7 @@ interface WikiPageDetail {
   html: string;
   outgoing: WikiListing[];
   backlinks: WikiListing[];
-  /** The pages one hop from this one, newest first. ABSENT on an older server;
+  /** The pages one hop from this one, strongest first. ABSENT on an older server;
    *  `[]` on a page with no neighbours — both render no block at all. */
   related?: RelatedListing[];
   /** TRUE when the page carries any provenance key and the block is worth
@@ -861,7 +876,10 @@ function applyWorkedSortOption(coverage: WikiPagesResponse["workedCoverage"]): v
   const workedShown = coverage && typeof coverage.matched === "number" ? coverage.matched > 0 : null;
   if (workedShown !== null) {
     option.hidden = !workedShown;
+    const was = workedAxisOn;
     workedAxisOn = workedShown;
+    // Related work's ages mark their source on this axis too.
+    if (was !== workedAxisOn) repaintRelatedBlock();
   }
   // "Worked on" is the default where it is offered; a sort the reader picked
   // (this tab, or stored for this wiki) wins. `resolveSortMode` owns the rules.
@@ -1708,9 +1726,7 @@ function renderList(): void {
     // worked day.
     const source: WorkedSource | null =
       signal === "worked" && dateSignal
-        ? dateSignal.kind === "worked"
-          ? workedSourceOf(datePage, now, dateSignal)
-          : { kind: "fallback" }
+        ? workedAxisSource(datePage, now, dateSignal)
         : entry.activity?.kind === "changed" && workedGate?.open && !isUsableWorkedMs(datePage.workedMs, now)
           ? { kind: "fallback" }
           : null;
@@ -2977,6 +2993,153 @@ function miniGraphHtml(data: WikiPageDetail, rows: readonly IssueRow[] | null | 
 }
 
 // ── Right pane: connections ───────────────────────────────────────────
+/** The Related work order this reader picked on this wiki. */
+let relatedOrder: RelatedOrder = readRelatedOrder(WIKI);
+
+/*
+ * Second-hop state for ONE page open, keyed by the hop row's normalized
+ * relPath. `resetRelatedHops` runs on every `renderConnections` — a page open,
+ * A → start → A, an in-place reload — so a ▸ never shows a cut made against an
+ * earlier open, and an answer arriving for an earlier open is dropped by
+ * generation. An answer is cached for the open; a failure is shown while the
+ * hop stays open and refetched on the next open.
+ */
+const relatedHops = new Map<string, RelatedHopResponse>();
+const relatedHopErrors = new Map<string, RelatedHopResponse>();
+const relatedHopsOpen = new Set<string>();
+/** One request per hop at a time: a re-click while it is in flight waits on it. */
+const relatedHopsInFlight = new Set<string>();
+let relatedHopsGen = 0;
+
+function resetRelatedHops(): void {
+  relatedHops.clear();
+  relatedHopErrors.clear();
+  relatedHopsOpen.clear();
+  relatedHopsInFlight.clear();
+  relatedHopsGen++;
+}
+
+/** A hop's render state: `undefined` closed, `null` loading, else its answer. */
+function relatedHopState(rel: string): RelatedHopResponse | null | undefined {
+  const key = normalizeRel(rel);
+  if (!relatedHopsOpen.has(key)) return undefined;
+  const answer = relatedHops.get(key) ?? relatedHopErrors.get(key);
+  return answer ? { ...answer, related: freshenRelated(answer.related) } : null;
+}
+
+/**
+ * Related rows with their LISTING fields taken from the listing the rail holds
+ * now; only `why`, `strength` and `signals` stay the row's. The block's rows
+ * come from the page response, which a series write or a later listing does
+ * not re-send. The fresh entry REPLACES the row's listing fields rather than
+ * merging over them: `toListing` omits an absent optional key, so a merge kept
+ * a `series` (or `seriesLabel`, `culled`, …) the page had since lost.
+ */
+function freshenRelated(rows: RelatedListing[]): RelatedListing[] {
+  const byRel = new Map(allPages.map((p) => [normalizeRel(p.relPath), p]));
+  return rows.map((p) => {
+    const fresh = byRel.get(normalizeRel(p.relPath));
+    return fresh ? { ...fresh, why: p.why, strength: p.strength, signals: p.signals } : p;
+  });
+}
+
+/** The block's options: the worked axis and instant the rail reads, the order,
+ *  the rail's series labels and the open hops. */
+function relatedViewOpts(): RelatedViewOptions {
+  const labels = seriesLabels(allPages);
+  return {
+    workedAxis: workedAxisOn,
+    now: recencyNow(),
+    order: relatedOrder,
+    hops: true,
+    seriesLabelOf: (p) => seriesLabelFor(p, labels),
+    hopState: relatedHopState,
+  };
+}
+
+function relatedBlockHtml(data: WikiPageDetail): string {
+  return relatedSectionHtml(freshenRelated(data.related ?? []), seriesEditable(), relatedViewOpts());
+}
+
+/** Repaint the block alone from `connData` and the listing held now — after an
+ *  order pick, a series write, or a flip of the worked-on axis. Open hops stay
+ *  open (`hopState`). */
+function repaintRelatedBlock(): void {
+  const section = document.querySelector("#connBody .wiki-related");
+  if (!section || !connData) return;
+  section.outerHTML = relatedBlockHtml(connData);
+}
+
+/** The reader picked an order: remember it for this wiki and repaint the block
+ *  alone, keeping focus on the button pressed. */
+function setRelatedOrder(order: RelatedOrder): void {
+  relatedOrder = order;
+  writeRelatedOrder(WIKI, order);
+  repaintRelatedBlock();
+  document.querySelector<HTMLButtonElement>(`#connBody [${RELATED_ORDER_ATTR}="${order}"]`)?.focus();
+}
+
+/** Paint one hop's ▸ and body from its state, leaving the rest of the block —
+ *  and the focus on the ▸ — in place. */
+function paintRelatedHop(rel: string): void {
+  const sel = CSS.escape(rel);
+  const btn = document.querySelector<HTMLButtonElement>(`#connBody .wiki-related [${RELATED_HOP_ATTR}="${sel}"]`);
+  const body = document.querySelector<HTMLElement>(`#connBody .wiki-related [${RELATED_HOP_BODY_ATTR}="${sel}"]`);
+  if (!btn || !body) return;
+  const state = relatedHopState(rel);
+  const open = state !== undefined;
+  btn.setAttribute("aria-expanded", String(open));
+  btn.textContent = open ? "▾" : "▸";
+  body.hidden = !open;
+  const viaRow = connData?.related?.find((p) => p.relPath === rel);
+  body.innerHTML = open ? relatedHopHtml(viaRow ? displayTitleOf(viaRow) : rel, state, relatedViewOpts()) : "";
+}
+
+/**
+ * ▸ on a Related work row: open (or close) THAT page's own related work under
+ * the row — `GET /api/wiki/related`, minus the page open now and its
+ * attachments. One request per row per page open, in flight or answered.
+ */
+function toggleRelatedHop(btn: HTMLButtonElement): void {
+  const rel = btn.getAttribute(RELATED_HOP_ATTR) || "";
+  if (!rel) return;
+  const key = normalizeRel(rel);
+  if (relatedHopsOpen.has(key)) {
+    relatedHopsOpen.delete(key);
+    relatedHopErrors.delete(key);
+  } else {
+    relatedHopsOpen.add(key);
+    if (!relatedHops.has(key) && !relatedHopsInFlight.has(key)) fetchRelatedHop(rel, key);
+  }
+  paintRelatedHop(rel);
+}
+
+function fetchRelatedHop(rel: string, key: string): void {
+  const open = currentRelPath;
+  if (!open) return;
+  const gen = relatedHopsGen;
+  relatedHopsInFlight.add(key);
+  const url =
+    "/api/wiki/related?relPath=" +
+    encodeURIComponent(rel) +
+    "&exclude=" +
+    encodeURIComponent(open) +
+    "&limit=" +
+    RELATED_HOP_LIMIT_DEFAULT;
+  const unavailable = (error?: string): RelatedHopResponse => ({ related: [], total: 0, error: error || "unavailable" });
+  fetch(withWiki(url))
+    .then((r) => r.json() as Promise<RelatedHopResponse>)
+    .then((data) => (Array.isArray(data.related) ? data : unavailable(data.error)))
+    .catch(() => unavailable())
+    .then((answer) => {
+      if (gen !== relatedHopsGen) return;
+      relatedHopsInFlight.delete(key);
+      if (!answer.error) relatedHops.set(key, answer);
+      else if (relatedHopsOpen.has(key)) relatedHopErrors.set(key, answer);
+      paintRelatedHop(rel);
+    });
+}
+
 function renderConnections(data: WikiPageDetail): void {
   // Feeds the Discuss dialog's "How it connects" starter question. Stamped here
   // because this is the one place the page's resolved neighbours arrive.
@@ -3009,13 +3172,14 @@ function renderConnections(data: WikiPageDetail): void {
   issueStates.clear();
   issueFocusKey = null;
   connData = data;
+  resetRelatedHops();
   document.getElementById("connBody")!.innerHTML =
     issueSectionFor(data.meta?.relPath ?? currentRelPath) +
     miniGraphHtml(data, issueRows) +
     // `Related work` leads: it is the one section that ANSWERS a question
     // ("what else is this piece of work?") rather than listing a mechanism.
     // The two below are the raw link lists it is derived from.
-    relatedSectionHtml(data.related ?? [], seriesEditable()) +
+    relatedBlockHtml(data) +
     section("Linked from", data.backlinks) +
     section("Links to", data.outgoing) +
     // Placeholder the lazy "Similar" fetch fills in after the page renders.
@@ -3584,6 +3748,9 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
 async function refreshAfterSeriesWrite(): Promise<ReceiveOutcome | "error"> {
   const outcome = await requestPagesAwaited({ refresh: true, force: true });
   repaintSeriesHead();
+  // Related work's rows carry series too, and the ⋯ on them is one of the
+  // editor's openers.
+  repaintRelatedBlock();
   return outcome;
 }
 
@@ -4397,6 +4564,21 @@ document.body.addEventListener("click", (e) => {
     target.closest &&
     target.closest(`[${SERIES_MENU_ATTR}], [${SERIES_EDIT_ATTR}], #${SERIES_MENU_ID}`)
   ) {
+    return;
+  }
+  // Related work's order toggle and ▸ second hop. The ▸ sits INSIDE a
+  // `[data-relpath]` row, so it is claimed here, before the nav-link branch
+  // below would open the row's page.
+  const relOrderBtn = target.closest ? target.closest(`[${RELATED_ORDER_ATTR}]`) : null;
+  if (relOrderBtn) {
+    e.preventDefault();
+    setRelatedOrder(parseRelatedOrder(relOrderBtn.getAttribute(RELATED_ORDER_ATTR)));
+    return;
+  }
+  const relHopBtn = target.closest ? target.closest<HTMLButtonElement>(`[${RELATED_HOP_ATTR}]`) : null;
+  if (relHopBtn) {
+    e.preventDefault();
+    toggleRelatedHop(relHopBtn);
     return;
   }
   // The article header's project hub chip. Delegated here rather than bound at

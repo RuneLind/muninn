@@ -1758,19 +1758,24 @@ Every clause of that is a shape the corpus contains:
   documenting this very feature, and without the mask every page explaining
   provenance pairs with PR 543.
 
-**The listing does not grow.** `toListing` strips `prRefs` on ALL THREE callers
-and opts it in for NONE — not even `includeProvenance`. It is the input to
-`computeRelated`, which runs server-side and hands each row the refs it matched
-on inside that row's own `why`; the raw list is a dozen refs per page that no
-LIST renders. Measured on a 547-page mimir clone, `GET /api/wiki/pages`:
+**The listing does not grow.** `toListing` strips `prRefs` on every caller and
+opts it in for NONE — not even `includeProvenance`. It is the input to
+`computeRelated`, which runs server-side and hands each row the refs it SHARES
+with the open page (`signals.prs`, and the first two in its `why`); the raw
+list is a dozen refs per page that no LIST renders. Measured on a 547-page
+mimir clone, `GET /api/wiki/pages`:
 **385,013 bytes before and after**, every row byte-identical.
 
 ### The rule (`computeRelated`, pure)
 
 `computeRelated(index, relPath)` takes the built `WikiIndex` and answers the
-DECISION — which pages, and why — never a listing row. `/api/wiki/page` maps each
-decision onto `toListing`, so a related row is the shape the panel's other rows
-are plus `why`, and this module stays testable without a Hono app.
+DECISION — which pages, why and how strongly — never a listing row. Each row is
+`{relPath, why, strength, signals}`: `strength` is `neighbours()`' score rounded
+to one decimal, and `signals` is `{link: "out"|"in"|"both"|null, prs, sessions}`
+in the open page's terms (`in` = the row cites the open page). `/api/wiki/page`
+and `/api/wiki/related` map each decision onto `toListing` through one helper
+(`relatedRows`), so a related row is the shape the panel's other rows are plus
+those three fields, and this module stays testable without a Hono app.
 
 Three cuts, each one a way the block fills with pages nobody meant — and **all
 three are SYMMETRIC**: each says "this page is not a piece of work", which is as
@@ -1820,12 +1825,12 @@ a row here is the same file twice on one screen (measured: opening
 `-prototype.html`). Scoped to THIS page's children: an `.html` explainer
 belonging to some other page is an ordinary candidate.
 
-**Order is newest first, through `bySeriesDateDesc`** — `status_date`, else the
-durable git touch date, else mtime, at DAY granularity with the rung as the
-tie-break. The same function the rail's Series fold orders its members by, so two
-surfaces that both claim to show the newest page of one piece of work cannot
-disagree. `seriesDateSignal` takes a structural `PageDateFields` for that reason:
-the server's `WikiPageMeta` satisfies it as well as the client's `WikiListing`.
+**Order is strongest first**, comparing the ROUNDED strength (so two rows that
+print the same score are a tie), and a tie falls to `bySeriesDateDesc` —
+`status_date`, else the durable git touch date, else mtime, at DAY granularity
+with the rung as the tie-break, the rail's Series fold order. Ties are common:
+every one-way link alone scores 1.0. The reader's `Newest` toggle re-sorts
+client-side (below); the server has one order.
 
 **The why line joins its reasons with ` · `** in a fixed source order —
 `cites this page`, `cited by this page`, `shares <ref>, <ref>`, then
@@ -1871,6 +1876,64 @@ themes. `--text-dim` is 3.24:1 dark / 3.74:1 light and `--text-muted` measures
 carrying the PR numbers the pairing rests on. A hovered row is not a transient
 state: it is where the pointer is whenever a row is being read.
 
+**Each row's meta line** (`relatedSectionHtml(items, editable, opts)`, all pure):
+- **A strength bar** — one segment per counting signal (link, PRs, sessions),
+  each as wide as what that signal adds (`strengthParts` in
+  `related-constants.ts`, the one spelling of the weights that `strengthOf`
+  sums), on the fixed scale of `STRENGTH_MAX`, so bars compare across pages.
+  A digest's shared PRs draw no segment, since its `signals.prs` is `[]`.
+  Segments are `--status-info` / `--status-magenta` / `--status-cyan`, each
+  measured at ≥ 3:1 against the row at rest and hovered in both themes; the
+  track is an outline, not a fill.
+- **The score**, one decimal.
+- **The NEIGHBOUR's age** (a proxy — a link carries no timestamp): the
+  worked-on signal falling back to the update signal (`pageDateSignal(p,
+  "worked", now)`), in the rail's spelling (`formatRailAge`), at the one
+  `recencyNow()` instant. Its source marking (`workedAxisSource` + `workedChip`,
+  the one derivation the rail's rows read too) is passed only while
+  `workedAxisOn` is on; on a wiki the ledger does not cover (jarvis, the nais
+  pod) the age has no `fallback` underline, as the rail hides its worked mode
+  there. A listing that flips `workedAxisOn` repaints the block.
+- **The series pill**, labelled from the rail's `seriesLabels`
+  (`seriesLabelFor`). A row's LISTING fields — series included — are read from
+  the listing the rail holds at render time, not from the page response, so a
+  series write from the block's own `⋯` (whose forced listing refetch also
+  repaints the block) moves the pill without reopening the page. The fresh
+  listing entry REPLACES the row's listing fields (`freshenRelated` keeps only
+  `why`, `strength` and `signals` from the row): `toListing` omits an absent
+  optional key, so a merge kept a series the page had been removed from. Open
+  hop rows are read the same way.
+
+**`Strongest | Newest`** sits in the header once there are two rows, remembered
+per wiki in `localStorage` (`muninn.wiki.related-order.v1:<wiki>`, every access
+in try/catch). `Newest` sorts on `pageWorkedMs` at one instant — the axis the
+age shows, so the ages always read in order, and deliberately not the
+`status_date`-first order the server's tie-break uses. Hop rows follow the same
+toggle. Switching it keeps every open ▸ open, with its answer.
+
+**▸ is the second hop.** It opens THAT row's own related work under the row:
+`GET /api/wiki/related?wiki=&relPath=<row>&exclude=<open page>&limit=6` answers
+`computeRelated` for the row's page minus the open page and the open page's
+own attachments (compared through `normalizeRelPath`). `exclude` resolves
+(`resolveExcludeRef`) as the relPath the listing spells (case-insensitive), the
+same relPath without its extension, or a folder-less stem that exactly one
+non-attachment page has — never a title or an alias, which `index.resolve`
+would also match; one that resolves nothing is compared as given. `limit` is digits only (`parseRelatedHopLimit`), clamped to 1–20, and
+anything else — signed, fractional, `1e3`, `0x10`, `5abc` — is the default 6
+(`RELATED_HOP_LIMIT_DEFAULT`/`_MAX` in `related-constants.ts`, which the reader's
+fetch reads too); `total` is the count before it. The client caches each
+answer for the life of ONE page open — every `renderConnections` (a page open,
+A → start → A, an in-place reload) resets it and bumps a generation, so an
+answer arriving for an earlier open is dropped rather than cached for this one
+— sends one request per hop while one is in flight, and does not cache a
+failure: it shows `Related work unavailable.` and the next open asks again. ▸ carries `aria-controls` to
+its body, which is `aria-live="polite"`. The block is still
+one hop: this is an explicit request for another page's one hop, which is why
+`related.ts`'s "never transitive" holds. The route is in the `wiki-read` group
+and in `WIKI_READ_SLICE_PATHS` — a GET over data `/api/wiki/page` already
+serves there, computed in process with no egress, so it is not on
+`SIDE_EFFECTING_GETS`.
+
 **Each row carries the series editor's `⋯` opener** (`seriesMenuBtnHtml`, on a
 writable wiki and only where `canEditSeriesPage` allows — see Series → The editor). Which rows appear
 does not depend on `series` or `series_label`.
@@ -1881,14 +1944,28 @@ false shapes, the anchored normaliser and the dropped `prs:` entry),
 `related.test.ts` (each source, the multi-reason why, the three cuts with the hub
 threshold driven at 25 and 26, the same two cuts applied to the OPEN page, the
 `.html` stem case, the attachment exclusion and its non-child control, the
-never-transitive case, the shares reason's order and count, the case fold and the
-self guard), `wiki-related-view.test.ts` (the empty-block guard — the shape a
-spec cannot reach, since an omitted block has no element to assert on),
+never-transitive case, the shares reason's order and count, the case fold, the
+self guard, the strength order and its tie), `wiki-related-view.test.ts` (the
+empty-block guard — the shape a spec cannot reach, since an omitted block has no
+element to assert on — the bar segments, the age marking, both orders, the hop
+rows in the toggle's order, an open hop across a re-render and the ▸'s
+`aria-controls`/`aria-live`, its body id stable across the toggle),
+`routes/wiki-related-routes.test.ts` (the exclude cut, case-folded, with its
+no-exclude control, an extensionless or stem `exclude`, a title, an alias, a
+shared stem and an attachment's stem cutting nothing, the strict `limit` table
+and the row shape),
 `wiki-provenance.test.ts` (the strip on `/api/wiki/pages`, `related[]` on
 `/api/wiki/page`) and `e2e/wiki-related-work.spec.ts` (the chain end to end, both
 cuts against a real index, the listing's absent key, the why line's full
-visibility, and the contrast at rest AND hovered in both themes). The spec sizes
-its fixture from `src/wiki/related-constants.ts` rather than re-typing the
+visibility, the contrast at rest AND hovered in both themes — bar segments at
+3:1, score, age, ▸ and the toggle at 4.5:1 — strongest-first order, the toggle
+and its remembered choice, the ▸ hop's cut, an open ▸ surviving the toggle, one
+request for a ▸ re-clicked in flight, a refetch after A → start → A, an
+answer for an earlier open dropped, a failed hop shown and refetched, a series
+write from the block's `⋯` moving the pill, Remove from series taking it off
+the row and an open hop, the worked axis flipped by a listing adopted at a
+navigation that then fails, and a digest with no PR segment).
+The spec sizes its fixture from `src/wiki/related-constants.ts` rather than re-typing the
 numbers, so the FIXTURE TRACKS the constant and the boundary case holds at any
 value — which is also why the import catches no drift by itself (measured:
 25 → 10 and 25 → 30 both leave the spec green). The spec PINS each value

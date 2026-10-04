@@ -67,7 +67,7 @@ beforeEach(() => {
 
 describe("the zone middleware", () => {
   test("the wiki read slice reaches role `user` only when the mount says the slice is served", async () => {
-    const WIKI = ["/wiki", "/api/wiki/pages", "/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/html", "/api/wiki/graph"];
+    const WIKI = ["/wiki", "/api/wiki/pages", "/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/related", "/api/wiki/html", "/api/wiki/graph"];
     const byDefault = appAs("user");
     const slice = appAs("user", LOCAL, "operator", { wikiReadSlice: true });
     for (const path of WIKI) {

@@ -108,7 +108,7 @@ export function wikiToolsRegistered(profile: MuninnProfile): boolean {
 
 /**
  * Is the wiki READ slice the whole wiki surface this profile serves — `wiki`
- * dropped, `wiki-read` kept? Only then are the slice's six GET paths in the
+ * dropped, `wiki-read` kept? Only then are the slice's seven GET paths in the
  * auth user zone (`src/auth/zones.ts`, `WIKI_READ_SLICE_PATHS`), and only then
  * do the read routes serve read-only roots alone. On `default` the reader is
  * the operator's full surface and role `user` gets 403 on all of it.

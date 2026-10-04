@@ -169,7 +169,7 @@ const CASES = "- id: MEL-1\n  status: hold\n  owner: Fag\n- id: MEL-2\n  status:
 const RUNS = "Teller,08.09,18.09\nKandidater,132,16\n";
 const SECOND = ["---", "title: Andre del", "series: felles", "---", "", "# Andre del", "", "Del to av serien.", ""].join("\n");
 const EXPLAINER = "<!doctype html><html><head><title>Kart</title></head><body><p>Innebygd kart.</p></body></html>";
-const OTHER = ["---", "title: Annen side", "---", "", "# Annen side", "", "Lenker tilbake til [[testside]].", ""].join("\n");
+const OTHER = ["---", "title: Annen side", "---", "", "# Annen side", "", "Lenker tilbake til [[testside]] og [[andre-del]].", ""].join("\n");
 
 const servers: ChildProcess[] = [];
 let root = "";
@@ -298,6 +298,10 @@ const READER_CONTROLS = [
   "[data-prov-toggle]",
   "[data-prov-retry]",
   "[data-sess-copy]",
+  // Related work: the order toggle (localStorage) and the ▸ second hop, which
+  // reads `/api/wiki/related` — a read-slice path.
+  "[data-rel-order]",
+  "[data-rel-hop]",
   // In-reader links, the embed's own tab (`/api/wiki/html`), and the rail tabs.
   "a.wiki-link",
   "a.embed-open",
@@ -344,7 +348,14 @@ async function unexpectedControls(page: Page): Promise<string[]> {
  *  the read slice. */
 async function apiLinksOutsideSlice(page: Page): Promise<string[]> {
   return page.evaluate(() => {
-    const slice = ["/api/wiki/pages", "/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/html", "/api/wiki/graph"];
+    const slice = [
+      "/api/wiki/pages",
+      "/api/wiki/page",
+      "/api/wiki/page/provenance",
+      "/api/wiki/related",
+      "/api/wiki/html",
+      "/api/wiki/graph",
+    ];
     return Array.from(document.querySelectorAll<HTMLElement>("a[href], iframe[src], form[action]"))
       .map((el) => el.getAttribute("href") ?? el.getAttribute("src") ?? el.getAttribute("action") ?? "")
       .filter((u) => {
@@ -430,6 +441,31 @@ for (const scheme of ["light", "dark"] as const) {
   });
 }
 
+test("a role-user opens Related work's second hop — a read-slice GET, no page or attachment of the open one", async ({ page }) => {
+  const seen = watch(page);
+  const hops: number[] = [];
+  page.on("response", (res) => {
+    if (new URL(res.url()).pathname === "/api/wiki/related") hops.push(res.status());
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
+  const row = page.locator(".wiki-conn-item.wiki-conn-related", { hasText: "Annen side" });
+  await expect(row).toBeVisible();
+  await row.locator("[data-rel-hop]").click();
+  const hopRows = page.locator(".wiki-rel-hop-row");
+  // `annen-side` links back to the open page and on to `andre-del`: the hop
+  // holds `andre-del` and never the page that is open, nor its attachment.
+  await expect(hopRows).toHaveText([/Andre del/]);
+  const hopBody = page.locator('.wiki-rel-hop-body[data-rel-hop-for="annen-side.md"]');
+  await expect(hopBody).toContainText("Related to Annen side");
+  await expect(hopBody).not.toContainText("Testside");
+  await expect(hopBody).not.toContainText("Kart");
+  expect(hops).toEqual([200]);
+  // The ▸ is a reader control; nothing in the open hop is an unexpected one.
+  expect(await unexpectedControls(page)).toEqual([]);
+  expect(seen.failed).toEqual([]);
+  expect(seen.errors).toEqual([]);
+});
+
 test("the overview makes no request outside the read slice, and has no Atlas tab — even linked", async ({ page }) => {
   const seen = watch(page);
   const paths: string[] = [];
@@ -478,12 +514,13 @@ const VIA_PROXY = { "x-forwarded-for": "203.0.113.9", "x-muninn-token": SECRET }
 const ZONE_REFUSAL = { error: "forbidden", reason: "admin-only route" };
 const Q = `wiki=${WIKI}`;
 
-/** All six read-slice paths, each with parameters that make it answer 200. */
+/** All seven read-slice paths, each with parameters that make it answer 200. */
 const READS = [
   `/wiki?${Q}`,
   `/api/wiki/pages?${Q}`,
   `/api/wiki/page?${Q}&relPath=${encodeURIComponent(PAGE_REL)}`,
   `/api/wiki/page/provenance?${Q}&relPath=${encodeURIComponent(PAGE_REL)}`,
+  `/api/wiki/related?${Q}&relPath=annen-side.md&exclude=${encodeURIComponent(PAGE_REL)}`,
   `/api/wiki/html?${Q}&relPath=plans/testside.html`,
   `/api/wiki/graph?${Q}&scope=wiki&level=1&depth=0`,
 ];
@@ -515,7 +552,7 @@ async function probe(base: string, p: string, method: "GET" | "POST" = "GET") {
 }
 
 test.describe("zone rows under nais — role `user`", () => {
-  test("all six read-slice paths pass the zone and answer 200", async () => {
+  test("all seven read-slice paths pass the zone and answer 200", async () => {
     for (const p of READS) {
       expect(`${p} → ${(await probe(BASE, p)).status}`).toBe(`${p} → 200`);
     }
@@ -552,7 +589,7 @@ test.describe("zone rows under nais — role `user`", () => {
 });
 
 test.describe("zone rows under nais — role `admin`", () => {
-  test("all six read-slice paths answer 200", async () => {
+  test("all seven read-slice paths answer 200", async () => {
     for (const p of READS) {
       expect(`${p} → ${(await probe(ADMIN_BASE, p)).status}`).toBe(`${p} → 200`);
     }

@@ -893,6 +893,21 @@ export function workedSourceOf(
 }
 
 /**
+ * The source a WORKED-ON date chip marks, given the date signal the row shows:
+ * `workedSourceOf` when there is a signal (it already answers `fallback` for an
+ * update date standing in for a worked one), `null` when there is none. The
+ * rail's rows and Related work's ages both read it, so the two mark one page
+ * the same way.
+ */
+export function workedAxisSource(
+  p: WikiRecencyFields,
+  now: number,
+  signal: { ms: number; label: string; kind: WikiDateKind } | null | undefined,
+): WorkedSource | null {
+  return signal ? workedSourceOf(p, now, signal) : null;
+}
+
+/**
  * Recency of a page in epoch ms — the sort key behind "Recently updated". 0 when a
  * page has no usable signal at all. See `updatedSignal` for which signals count and
  * why mtime is conditional.
