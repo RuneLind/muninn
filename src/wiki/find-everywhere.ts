@@ -27,11 +27,8 @@
  */
 
 import {
-  FIND_SHORT_WORD,
   findFreeTokens,
-  foldText,
   inFindPool,
-  parseFindQuery,
   rankFind,
   type FindRow,
 } from "../dashboard/views/components/wiki-find.ts";
@@ -527,53 +524,12 @@ interface HuginnHit {
   relevance?: unknown;
 }
 
-/** Function words that sit in almost any snippet, so they are no evidence:
- *  English and Norwegian, folded the way the palette folds a query word
- *  (`når` is `nar`). Measured on real huginn: "the qzxv wplkj", "and
- *  frobnicate zzyzx" and "for blorptastic" each made an unrelated #1 a head. */
-export const EVIDENCE_STOPWORDS: ReadonlySet<string> = new Set(
-  [
-    "the", "and", "for", "with", "from", "that", "this", "are", "was", "you", "not", "but",
-    "all", "any", "can", "has", "have", "how", "its", "our", "out", "who", "why", "what",
-    "when", "which",
-    "med", "som", "det", "den", "til", "av", "og", "er", "har", "ikke", "fra", "men",
-    "kan", "var", "vil", "skal", "hva", "hvor", "hvorfor", "når", "eller", "også",
-  ].map(foldText),
-);
-
-/** The query's terms that count as lexical evidence: free words of at least
- *  `FIND_SHORT_WORD` code points that are not stopwords, and numbers (`#639`
- *  or a bare `639`), folded the way the palette folds them. */
-export function lexicalTerms(query: string): { words: string[]; numbers: string[] } {
-  const q = parseFindQuery(query);
-  const numbers = new Set(q.numbers);
-  const words: string[] = [];
-  for (const w of q.words) {
-    if (/^\d+$/.test(w)) numbers.add(w);
-    else if (Array.from(w).length >= FIND_SHORT_WORD && !EVIDENCE_STOPWORDS.has(w)) words.push(w);
-  }
-  return { words, numbers: [...numbers] };
-}
-
-/** Does the text carry a long query word (substring) or a query number
- *  (whole, not inside a longer number)? */
-export function hasLexicalEvidence(text: string, terms: { words: string[]; numbers: string[] }): boolean {
-  const hay = foldText(text);
-  if (terms.words.some((w) => hay.includes(w))) return true;
-  return terms.numbers.some((n) => new RegExp(`(?<!\\d)${n}(?!\\d)`).test(hay));
-}
-
-function huginnLeg(
-  body: unknown,
-  loaded: readonly LoadedWiki[],
-  terms: { words: string[]; numbers: string[] },
-): Leg<{ rank: number; snippet: string }> {
+function huginnLeg(body: unknown, loaded: readonly LoadedWiki[]): Leg<{ rank: number; snippet: string }> {
   const results = (body as { results?: unknown } | null)?.results;
   if (!Array.isArray(results)) throw new BadShape("huginn answered without a results list");
   const keys: string[] = [];
   const reasons = new Map<string, { rank: number; snippet: string }>();
   const relevance = new Map<string, unknown>();
-  const evidence = new Map<string, boolean>();
   for (const hit of results as HuginnHit[]) {
     if (typeof hit?.collection !== "string" || typeof hit.id !== "string") continue;
     for (const { wiki, index } of loaded) {
@@ -591,17 +547,26 @@ function huginnLeg(
             snippet: plainSnippet(typeof hit.snippet === "string" ? hit.snippet : ""),
           });
           relevance.set(key, typeof hit.relevance === "number" ? hit.relevance : Symbol());
-          const raw = typeof hit.snippet === "string" ? hit.snippet : "";
-          evidence.set(key, hasLexicalEvidence(`${displayTitleOf(meta)}\n${meta.relPath}\n${raw}`, terms));
         }
       }
       break;
     }
   }
   const top = keys.slice(0, LEG_DEPTH);
-  // Brief-mode relevance is rank-derived: nonsense gets a confident #1. A
-  // huginn #1 leads only with one query word or number on the page; else it votes.
-  return { keys: top, reasons, heads: tiedHeads(top, (k) => relevance.get(k), (k) => evidence.get(k) === true) };
+  // Candidates only: `agreedHuginnHeads` keeps the ones another leg also found.
+  return { keys: top, reasons, heads: tiedHeads(top, (k) => relevance.get(k), () => true) };
+}
+
+/** A huginn #1 (or a page tied with it) leads only when the text leg or the
+ *  sessions leg also returned it, at any rank; otherwise it only votes.
+ *  `brief=true` relevance is rank-derived, so nonsense gets a confident #1,
+ *  and two rounds of a lexical-evidence word list still leaked function words. */
+export function agreedHuginnHeads(
+  huginnHeads: readonly string[],
+  others: ReadonlyArray<{ keys: readonly string[] }>,
+): string[] {
+  const seen = new Set(others.flatMap((l) => l.keys));
+  return huginnHeads.filter((k) => seen.has(k));
 }
 
 interface UsageSession {
@@ -809,7 +774,8 @@ async function loadIndexes(
  * Heads: the text leg's #1 when it is a full-band row (a partial #1 hit only
  * some words — a long `status_note` hits `which`/`from`/`count` by substring,
  * and measured on the real wikis one such plan, as a head, pushed the target
- * to #4); huginn's #1; the sessions leg's #1 only when its session is in
+ * to #4); huginn's #1 only when the text or sessions leg also returned it
+ * (`agreedHuginnHeads`); the sessions leg's #1 only when its session is in
  * claude-usage's top `SESSIONS_HEAD_TOP`. A page tied with a head on that
  * leg's own score is a head too — a tie is never split by spelling.
  */
@@ -863,7 +829,6 @@ export async function findEverywhere(
   const textP = runLeg(async () => textLeg(loaded, query.text, deps.now()), null, outer);
 
   const collections = [...new Set(loaded.flatMap((l) => l.wiki.collections ?? []))];
-  const terms = lexicalTerms(query.text);
   const huginnP: Promise<{ value?: Leg<{ rank: number; snippet: string }>; report: LegReport }> = remoteTooShort
     ? Promise.resolve({ report: tooShort })
     : collections.length
@@ -871,7 +836,7 @@ export async function findEverywhere(
           async (signal) => {
             const params = new URLSearchParams({ q: query.remote, limit: String(HUGINN_LIMIT), brief: "true" });
             for (const c of collections) params.append("collection", c);
-            return huginnLeg(await deps.huginn(`/api/search?${params}`, signal), loaded, terms);
+            return huginnLeg(await deps.huginn(`/api/search?${params}`, signal), loaded);
           },
           deps.huginnTimeoutMs ?? HUGINN_TIMEOUT_MS,
           outer,
@@ -903,6 +868,7 @@ export async function findEverywhere(
   const text = textRun.value ?? emptyLeg<{ rank: number }>();
   const huginn = huginnRun.value ?? emptyLeg<{ rank: number; snippet: string }>();
   const sessions = sessionsRun.value ?? emptyLeg<SessionReason[]>();
+  huginn.heads = agreedHuginnHeads(huginn.heads, [text, sessions]);
 
   const metaOf = new Map<string, { wiki: string; meta: WikiPageMeta }>();
   for (const { wiki, index } of loaded) {

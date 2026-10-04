@@ -62,8 +62,8 @@ export function uniqueWikiRoots<T extends { root: string; collections?: readonly
       continue;
     }
     const kept = out[i]!;
-    const merged = [...new Set([...(kept.collections ?? []), ...(w.collections ?? [])])];
-    if (merged.length !== (kept.collections?.length ?? 0)) out[i] = { ...kept, collections: merged };
+    if (!kept.collections && !w.collections) continue;
+    out[i] = { ...kept, collections: [...new Set([...(kept.collections ?? []), ...(w.collections ?? [])])] };
   }
   return out;
 }

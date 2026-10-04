@@ -2194,16 +2194,16 @@ one such plan was text #1 for two unrelated queries. A sessions #1 is a head
 only when its session is in claude-usage's top `SESSIONS_HEAD_TOP` (5):
 session search ranks loosely, and a page carried by the 20th session is a
 vote, not an answer. Huginn ties on its `relevance` — and a huginn #1 (or a
-page tied with it) is a head only with **lexical evidence**: at least one long
-query word (≥ 3 folded characters, a substring, and not in
-`EVIDENCE_STOPWORDS`, a fixed English + Norwegian function-word set) or query
-number (`#639` or a bare `639`; whole, not inside a longer number) in its
-title, relPath or snippet. `brief=true` relevance is rank-derived, so nonsense
-("qzxv wplkj frobnicate", "🧭🧭") got a confident #1, and "#639" made a
-semantic-only page a head; and before the stopword set, "the qzxv wplkj",
-"and frobnicate zzyzx" and "for blorptastic" each did too, because `the`,
-`and` and `for` sit in nearly every snippet. Without evidence the hit only
-votes. The text leg's cross-wiki merge, the sessions leg's page order and
+page tied with it) is a head only on **agreement**: the text leg or the
+sessions leg also returned that page for this query, at any rank
+(`agreedHuginnHeads`); otherwise it only votes. `brief=true` relevance is
+rank-derived, so nonsense ("qzxv wplkj frobnicate", "🧭🧭") gets a confident
+#1. A word-list rule cannot close this: round 1 required a long query word in
+the title, relPath or snippet, and "the qzxv wplkj" made an unrelated page a
+head; round 2 added an English + Norwegian stopword list, and its verify pass
+measured 11 more function words (`about`, `will`, `were`, `also`, `more`,
+`jeg`, `noe`, `hvem`, `være`, `etter`, `mellom`) that still did on real
+huginn. The text leg's cross-wiki merge, the sessions leg's page order and
 `fuseLegs` break ties by code unit, never `localeCompare` (ICU ignores
 `\u0000`, the key's separator). `rankFind`'s own per-wiki order is the
 palette's and still ends on `localeCompare` by relPath (`byPath`).

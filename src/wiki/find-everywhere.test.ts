@@ -296,7 +296,8 @@ describe("findEverywhere — legs and the join", () => {
     expect(calls[0]).toContain("limit=15");
     const gate = r.results.find((x) => x.relPath === "plans/gate.mdx")!;
     expect(gate.legs.huginn).toEqual({ rank: 1, snippet: "gate runs" });
-    expect(gate.head).toBe(true);
+    // No other leg returned it, so huginn's #1 only votes (`agreedHuginnHeads`).
+    expect(gate.head).toBe(false);
     expect(r.results.find((x) => x.relPath === "plans/two.mdx")!.legs.huginn!.rank).toBe(2);
     expect(r.results.some((x) => x.relPath === "plans/missing.mdx")).toBe(false);
   });
@@ -366,13 +367,13 @@ describe("findEverywhere — heads", () => {
   test("a partial-band text #1 is no head", async () => {
     const a = await wiki({
       "plans/partial.mdx": page("Which count note"),
-      "plans/target.mdx": page("Konsoll kjøringer"),
+      "plans/target.mdx": page("Konsoll kjøringer", [`sessions: [${S1}]`]),
     });
     const r = await findEverywhere(
       "which gate runs count",
       20,
       deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], {
-        sessions: null,
+        sessions: { sessions: [{ sessionId: S1, snippet: "" }] },
         huginn: { results: [{ collection: "c", id: "plans/target.mdx", snippet: "which gate runs count" }] },
       }),
     );
@@ -399,8 +400,8 @@ describe("findEverywhere — heads", () => {
       "a-text.md": page("Zeta gate"),
       "c-session.md": page("One", [`sessions: [${S1}]`]),
       "d-session.md": page("Two", [`sessions: [${S1}]`]),
-      "e-hug.md": page("Hug one"),
-      "f-hug.md": page("Hug two"),
+      "e-hug.md": page("Hug one", [`sessions: [${S2}]`]),
+      "f-hug.md": page("Hug two", [`sessions: [${S2}]`]),
     });
     const r = await findEverywhere(
       "zeta gate",
@@ -412,7 +413,8 @@ describe("findEverywhere — heads", () => {
             { collection: "c", id: "f-hug.md", relevance: 0.7, snippet: "the gate" },
           ],
         },
-        sessions: { sessions: [{ sessionId: S1, snippet: "" }] },
+        // S2 puts both huginn pages in the sessions leg, below its #1: agreement, not a sessions head.
+        sessions: { sessions: [{ sessionId: S1, snippet: "" }, { sessionId: S2, snippet: "" }] },
       }),
     );
     const heads = r.results.filter((x) => x.head).map((x) => x.relPath).sort();
@@ -420,12 +422,15 @@ describe("findEverywhere — heads", () => {
   });
 
   test("an untied huginn #2 is no head", async () => {
-    const a = await wiki({ "e.md": page("E"), "f.md": page("F") });
+    const far = SESSIONS_HEAD_TOP + 1;
+    const a = await wiki({ "e.md": page("E", [`sessions: [${sid(far)}]`]), "f.md": page("F", [`sessions: [${sid(far)}]`]) });
+    // Both pages agree through a session past the sessions head gate, so only huginn's order decides.
+    const unmatched = Array.from({ length: SESSIONS_HEAD_TOP }, (_, i) => ({ sessionId: sid(i + 1), snippet: "" }));
     const r = await findEverywhere(
       "zzqq",
       20,
       deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], {
-        sessions: null,
+        sessions: { sessions: [...unmatched, { sessionId: sid(far), snippet: "" }] },
         huginn: {
           results: [
             { collection: "c", id: "e.md", relevance: 0.8, snippet: "zzqq here" },
@@ -853,54 +858,6 @@ describe("fix round 1 — short numbers (item 9)", () => {
   });
 });
 
-describe("fix round 1 — a huginn head needs lexical evidence (item 10)", () => {
-  const hug = (results: unknown[]): Fakes => ({ sessions: null, huginn: { results } });
-
-  test("nonsense words or an emoji get no huginn head", async () => {
-    const a = await wiki({ "cap.md": page("Capra notes") });
-    for (const q of ["qzxv wplkj frobnicate", "🧭🧭"]) {
-      const r = await findEverywhere(
-        q,
-        20,
-        deps(
-          [{ name: "w", root: a.root, index: a.index, collections: ["c"] }],
-          hug([{ collection: "c", id: "cap.md", relevance: 1, snippet: "semantic neighbour" }]),
-        ),
-      );
-      expect(r.results.map((x) => [x.relPath, x.legs.huginn?.rank, x.head])).toEqual([["cap.md", 1, false]]);
-    }
-  });
-
-  test("a number counts only as a whole number, in the title, path or snippet", async () => {
-    const a = await wiki({ "cap.md": page("Capra notes"), "pr.md": page("PR notes"), "near.md": page("Near") });
-    const run = async (id: string, snippet: string) =>
-      (
-        await findEverywhere(
-          "#639",
-          20,
-          deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], hug([{ collection: "c", id, relevance: 1, snippet }])),
-        )
-      ).results.find((x) => x.relPath === id)!.head;
-    expect(await run("cap.md", "about the find palette")).toBe(false);
-    expect(await run("near.md", "PR 16390 merged")).toBe(false);
-    expect(await run("pr.md", "merged as muninn#639 today")).toBe(true);
-  });
-
-  test("a long query word in the title or relPath is evidence; a short one is not", async () => {
-    const a = await wiki({ "plans/kode-wiki.mdx": page("Shared notes"), "x.md": page("It is ok") });
-    const run = async (q: string, id: string) =>
-      (
-        await findEverywhere(
-          q,
-          20,
-          deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], hug([{ collection: "c", id, relevance: 1, snippet: "" }])),
-        )
-      ).results.find((x) => x.relPath === id)!.head;
-    expect(await run("felles kode", "plans/kode-wiki.mdx")).toBe(true);
-    expect(await run("zz ok", "x.md")).toBe(false);
-  });
-});
-
 describe("fix round 1 — deterministic ties (item 11)", () => {
   test("keys ICU collates as equal still order by code unit, whatever the input order", () => {
     const x = "mimir\u0000x.md";
@@ -1099,68 +1056,6 @@ describe("fix round 1 — registry entries sharing a root (item 18)", () => {
 });
 
 // ── Fix round 2 ─────────────────────────────────────────────────────────────
-
-/** Is the huginn #1 `id` a head for `q`, with this snippet? One wiki, sessions off. */
-async function huginnHead(files: Record<string, string>, q: string, id: string, snippet: string): Promise<boolean> {
-  const a = await wiki(files);
-  const r = await findEverywhere(
-    q,
-    20,
-    deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], {
-      sessions: null,
-      huginn: { results: [{ collection: "c", id, relevance: 1, snippet }] },
-    }),
-  );
-  return r.results.find((x) => x.relPath === id)!.head;
-}
-
-describe("fix round 2 — stopwords are no lexical evidence (item 1)", () => {
-  // Snippet text is synthetic; the three queries are the ones that made an
-  // unrelated huginn #1 a head on the real index.
-  const snippet = "This is the page for the team, and all of what was not there.";
-  for (const q of ["the qzxv wplkj", "and frobnicate zzyzx", "for blorptastic"]) {
-    test(`"${q}" makes no huginn head`, async () => {
-      expect(await huginnHead({ "cap.md": page("Capra notes") }, q, "cap.md", snippet)).toBe(false);
-    });
-  }
-
-  test("Norwegian function words are no evidence either, folded like the query", async () => {
-    const files = { "cap.md": page("Capra notes") };
-    expect(await huginnHead(files, "når qzxv", "cap.md", "Når det er også ikke klart")).toBe(false);
-    expect(await huginnHead(files, "også qzxv", "cap.md", "Når det er også ikke klart")).toBe(false);
-  });
-
-  test("control: a real word beside a stopword is evidence", async () => {
-    expect(await huginnHead({ "cap.md": page("Capra notes") }, "the palette", "cap.md", "the palette notes")).toBe(true);
-  });
-});
-
-describe("fix round 2 — lexical evidence pins (item 6)", () => {
-  test("a query word in the title alone is evidence", async () => {
-    // `zzqq` keeps the text leg partial, so only huginn can make a head.
-    expect(await huginnHead({ "x.md": page("Kodeverk notes") }, "kodeverk zzqq", "x.md", "")).toBe(true);
-  });
-
-  test("a number with a digit on only one side is no evidence", async () => {
-    const files = { "cap.md": page("Capra notes") };
-    expect(await huginnHead(files, "#639", "cap.md", "PR 1639 merged")).toBe(false);
-    expect(await huginnHead(files, "#639", "cap.md", "PR 6390 merged")).toBe(false);
-  });
-
-  test("a three-code-point word counts", async () => {
-    expect(await huginnHead({ "cap.md": page("Capra notes") }, "pdf", "cap.md", "export as pdf")).toBe(true);
-  });
-
-  test("the haystack is folded: `kjøring` matches `Kjøring`", async () => {
-    expect(await huginnHead({ "cap.md": page("Capra notes") }, "kjøring", "cap.md", "Kjøring av jobben")).toBe(true);
-  });
-
-  test("a bare `639` is a number, not a substring word", async () => {
-    const files = { "cap.md": page("Capra notes") };
-    expect(await huginnHead(files, "639", "cap.md", "PR 16390 merged")).toBe(false);
-    expect(await huginnHead(files, "639", "cap.md", "merged as muninn 639 today")).toBe(true);
-  });
-});
 
 describe("fix round 2 — registry entries sharing a root merge collections (item 2)", () => {
   test("uniqueWikiRoots keeps the first name and unions the collections", async () => {
@@ -1368,5 +1263,85 @@ describe("fix round 2 — legs and logging pins (item 6)", () => {
     logLegFailures(body, { huginn: "h1:8321", sessions: "u" }, logger);
     logLegFailures(body, { huginn: "h2:8321", sessions: "u" }, logger);
     expect(lines).toEqual(["warn", "warn"]);
+  });
+});
+
+// ── Fix round 3 (class check) ───────────────────────────────────────────────
+
+/** The huginn #1 `id` for `q` (relevance 1, this snippet), and what the other legs made of it. */
+async function huginnOne(
+  files: Record<string, string>,
+  q: string,
+  id: string,
+  snippet: string,
+  sessions: unknown[] | null = null,
+): Promise<FindEverywhereResponse["results"][number]> {
+  const a = await wiki(files);
+  const r = await findEverywhere(
+    q,
+    20,
+    deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], {
+      sessions: sessions === null ? null : { sessions },
+      huginn: { results: [{ collection: "c", id, relevance: 1, snippet }] },
+    }),
+  );
+  return r.results.find((x) => x.relPath === id)!;
+}
+
+describe("fix round 3 — a huginn head needs another leg to agree", () => {
+  // The function words the round-2 verify pass found leaking past the stopword list.
+  const leaked = ["about", "will", "were", "also", "more", "jeg", "noe", "hvem", "være", "etter", "mellom"];
+  for (const w of leaked) {
+    test(`"${w} qzxv wplkj" makes no huginn head, the word in title and snippet`, async () => {
+      const hit = await huginnOne({ "cap.md": page(`Capra ${w} notes`) }, `${w} qzxv wplkj`, "cap.md", `what ${w} the team said`);
+      expect(hit.legs.text).toBeUndefined();
+      expect(hit.legs.huginn?.rank).toBe(1);
+      expect(hit.head).toBe(false);
+    });
+  }
+
+  test("a real query word in the title alone makes no huginn head", async () => {
+    const hit = await huginnOne({ "pal.md": page("Palette notes") }, "palette qzxv wplkj", "pal.md", "the palette");
+    expect(hit.legs.text).toBeUndefined();
+    expect(hit.head).toBe(false);
+  });
+
+  test("nonsense words or an emoji get no huginn head", async () => {
+    for (const q of ["qzxv wplkj frobnicate", "🧭🧭"]) {
+      expect((await huginnOne({ "cap.md": page("Capra notes") }, q, "cap.md", "semantic neighbour")).head).toBe(false);
+    }
+  });
+
+  test("the huginn #1 the text leg also returned is a head, though it is not the text head", async () => {
+    // `palette export`: full.md is the text leg's full-band #1; pal.md is a
+    // partial row, so the text leg alone would never make it a head.
+    const hit = await huginnOne(
+      { "full.md": page("Palette export"), "pal.md": page("Palette notes") },
+      "palette export",
+      "pal.md",
+      "",
+    );
+    expect(hit.legs.text?.rank).toBe(2);
+    expect(hit.head).toBe(true);
+  });
+
+  test("the huginn #1 the sessions leg also returned is a head, though it is not the sessions head", async () => {
+    const far = SESSIONS_HEAD_TOP + 1;
+    const unmatched = Array.from({ length: SESSIONS_HEAD_TOP }, (_, i) => ({ sessionId: sid(i + 1), snippet: "" }));
+    const files = { "cap.md": page("Capra notes", [`sessions: [${sid(far)}]`]) };
+    const hit = await huginnOne(files, "qzxv wplkj", "cap.md", "", [...unmatched, { sessionId: sid(far), snippet: "" }]);
+    expect(hit.legs.sessions?.[0]?.rank).toBe(far);
+    expect(hit.legs.text).toBeUndefined();
+    expect(hit.head).toBe(true);
+  });
+});
+
+describe("fix round 3 — uniqueWikiRoots unions past duplicate collections", () => {
+  test("a kept entry with a duplicate collection still gains the next entry's", () => {
+    const kept = uniqueWikiRoots([
+      { name: "a", root: "/w", collections: ["c1", "c1"] },
+      { name: "b", root: "/w", collections: ["c2"] },
+    ]);
+    expect(kept.map((w) => [w.name, w.collections])).toEqual([["a", ["c1", "c2"]]]);
   });
 });
