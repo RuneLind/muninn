@@ -123,7 +123,8 @@ test.afterAll(async () => {
 
 const palette = (page: Page) => page.locator("#wikiFind");
 const input = (page: Page) => page.locator("#wikiFindInput");
-const rows = (page: Page) => page.locator("#wikiFindList .wiki-find-row");
+// Local rows only: the Everywhere section below them is `wiki-find-everywhere.spec.ts`.
+const rows = (page: Page) => page.locator("#wikiFindList .wiki-find-row:not(.wiki-find-every-row)");
 
 async function openReader(page: Page): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(OPEN)}`);
@@ -255,7 +256,7 @@ test("a no-series best match is the first row", async ({ page }) => {
   await expect(rows(page)).toHaveCount(3);
   await expect(rows(page).first()).toHaveAttribute("data-relpath", "plans/gamma-report.mdx");
   // The series group is there too — below the no-series row, not above it.
-  await expect(page.locator("#wikiFindList .wiki-find-group")).toHaveCount(1);
+  await expect(page.locator("#wikiFindList .wiki-find-group:not(.wiki-find-every-head)")).toHaveCount(1);
 });
 
 test("Enter opens the active row", async ({ page }) => {

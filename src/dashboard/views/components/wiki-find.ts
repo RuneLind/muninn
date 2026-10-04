@@ -5,7 +5,8 @@
  * the way the rail does it — and nothing else, so `bun test` loads it and the
  * /wiki bundle carries it.
  *
- * There is no find route. The server supplies one thing the listing cannot:
+ * The local rows need no route (the palette's Everywhere section is
+ * `GET /api/wiki/find-everywhere`). The server supplies one thing the listing cannot:
  * `near` on `/api/wiki/page` — closeness to the open page over the neighbour
  * rule (`src/wiki/strength.ts`), keyed by the listing's own `relPath` spelling.
  *
@@ -171,6 +172,22 @@ export function parseFindQuery(raw: string): FindQuery {
     if (word) q.words.push(word);
   }
   return q;
+}
+
+/**
+ * The query's free words in their TYPED spelling (not folded), joined by one
+ * space — every filter token (`in:`, `type:`, `#tag`, `age:`, `is:retired`)
+ * dropped, `"` removed. What find-everywhere sends to huginn and claude-usage,
+ * which fold on their own and would read `type:plan` as a word.
+ */
+export function freeText(raw: string): string {
+  const out: string[] = [];
+  for (const tok of tokenize(raw)) {
+    if (parseFindQuery(tok).words.length !== 1) continue;
+    const word = (tok.startsWith("#") ? tok.slice(1) : tok).replace(/"/g, "");
+    if (word) out.push(word);
+  }
+  return out.join(" ");
 }
 
 /** Does the query say anything at all? */

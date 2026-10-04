@@ -7426,6 +7426,9 @@ initFindPalette({
   openPage: (relPath) => loadPageByRelPath(relPath),
   hrefFor: (relPath) => pageUrlByRelPath(relPath),
   onOpen: () => hideRefPeek(),
+  wikiName: () => WIKI,
+  // The read slice (nais) does not register the Everywhere route.
+  everywhere: () => wikiToolsFlag(),
 });
 
 initChatOptions({

@@ -2009,8 +2009,9 @@ with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
 
 **The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
 the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
-it; the rail's search box is unchanged. It ranks `allPages` in the browser —
-there is no find route. Grammar: free words soft-ANDed (below), a `"` on a free word dropped
+it; the rail's search box is unchanged. It ranks `allPages` in the browser
+(the local rows; the Everywhere section below them is the one route, see
+"Find everywhere" after this section). Grammar: free words soft-ANDed (below), a `"` on a free word dropped
 (no phrase search) — but a quoted value after an unknown key stays one word
 (`foo:"a b"` is the word `foo:a b`); `in:<text>`/`in:"<text>"` a substring of the series key or label;
 `series:<key>` the series whose key IS that key, in the rail's fold (`"`
@@ -2062,6 +2063,58 @@ nothing. During an IME composition the root acts on
 no key. Acceptance: `strength.test.ts`,
 `session-refs.test.ts`, `routes/wiki-near.test.ts`,
 `views/components/wiki-find.test.ts` and `e2e/wiki-find.spec.ts`.
+
+**Find everywhere** (`GET /api/wiki/find-everywhere?q=&limit=`, default 20,
+max 50; core `src/wiki/find-everywhere.ts`, route
+`dashboard/routes/wiki-find-everywhere.ts`). Tier 2 of the palette: one query
+over EVERY registered wiki through three legs run in parallel, fused, no model
+call. Registered in the `wiki` group (nais drops it, and the palette asks only
+when `wikiToolsFlag()`), admin by the zone model's default-deny like
+`/api/wiki/similar`, and on `SIDE_EFFECTING_GETS` as an amplifier. The legs
+see the query's FREE words in their typed spelling (`freeText`; filter tokens
+dropped), and a query under 2 characters answers empty without asking any:
+- **text** — `rankFind` over each wiki's pages, merged by (words hit, score),
+  top 30.
+- **huginn** — ONE `/api/search` over the union of every wiki's `collections`,
+  `limit=15`, **`brief=true`, 3 s budget**. `brief` is load-bearing: measured
+  2026-10-04, the default (reranked) search took 5–12 s, `brief` 50–210 ms
+  with near-identical ranks. A hit is a page only when a wiki whose
+  `collections` hold its collection resolves its `id` as a relPath; the rest
+  are dropped.
+- **sessions** — claude-usage `/api/search?limit=25` (2 s budget, shared with
+  an `/api/sessions-by-id` title lookup), joined on the bare id onto every page
+  whose `sessions:` names the session (`sessionPages`, one inverted index per
+  index build). Page score = Σ 1/(60 + i) over its sessions' 0-based ranks.
+  This is the leg that finds a page by the words of the sessions that WROTE
+  it: "felles melosys-kode-wiki" never appears in
+  `plans/melosys-muninn-shared-wiki.mdx`. `CLAUDE_USAGE_URL` unset ⇒ the leg
+  reports `unconfigured`.
+
+Retired (`culled`) and bookkeeping pages are dropped from the two remote legs;
+the text leg has the palette's own pool. **Fusion** is reciprocal rank fusion
+(k = 60, weight 1 per leg), then **heads first**: every page that is #1 in some
+leg moves to the top, in fused order. Plain RRF dropped "which gate runs count"
+from #3 to #7, because pages mediocre in two legs outvoted huginn's #1. One
+exception: a text #1 in the palette's partial band (it hit only some words) is
+no head — a long `status_note` hits `which`/`from`/`count` by substring, and one
+such plan was text #1 for two unrelated queries. A failing or unconfigured leg
+never fails the request; `sources` reports `ok`/`error`/`unconfigured` and the
+ms of each. Session snippets carry their match spans as offsets (`marks`), not
+markup, so the client escapes the text and wraps the spans itself.
+
+The palette's **Everywhere** section (`findEverywhereHtml`) asks 250 ms after a
+keystroke once the free text reaches 3 characters, aborts the in-flight fetch on
+the next keystroke and drops any answer whose query is no longer the box's. It
+lists fused rows not already shown locally (wiki label, reason chips `text #n`,
+`huginn #n`, `session <8-char id> #n` with the session title as tooltip,
+`leg #1` on a head), and gives a LOCAL row the same chips in place. The section
+paints alone — the local rows are never re-rendered when it lands — so focus and
+the selection stay put (the #639 focus finding). The arrow keys walk both
+sections; an Everywhere row of this wiki opens in place, another wiki's loads
+its reader URL. Acceptance: `src/wiki/find-everywhere.test.ts`,
+`views/components/wiki-find-everywhere-view.test.ts`,
+`e2e/wiki-find-everywhere.spec.ts` and the nais case in
+`e2e/wiki-nais-read.spec.ts`.
 
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 

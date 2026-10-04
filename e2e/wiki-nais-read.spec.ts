@@ -485,6 +485,26 @@ test("the overview makes no request outside the read slice, and has no Atlas tab
   expect(seen.errors).toEqual([]);
 });
 
+test("the find palette ranks locally and never asks for the Everywhere section", async ({ page }) => {
+  const seen = watch(page);
+  const paths: string[] = [];
+  page.on("request", (req) => {
+    const u = new URL(req.url());
+    if (u.origin === BASE) paths.push(u.pathname);
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
+  await expect(page.locator("#wikiList .wiki-list-item").first()).toBeVisible();
+  await page.locator("body").press("/");
+  await page.locator("#wikiFindInput").fill("annen side");
+  await expect(page.locator("#wikiFindList .wiki-find-row").first()).toBeVisible();
+  // Past the Everywhere debounce (250 ms): a fetch would have started by now.
+  await page.waitForTimeout(800);
+  expect(paths).not.toContain("/api/wiki/find-everywhere");
+  await expect(page.locator("#wikiFindEvery")).toBeEmpty();
+  expect(seen.failed).toEqual([]);
+  expect(seen.errors).toEqual([]);
+});
+
 test("return-to-overview on a view=atlas overview pushes no history entry", async ({ page }) => {
   // Under the slice `view=atlas` boots Hubs, so that URL already denotes the
   // overview and `goToStart` must not push. The overview renders no breadcrumb,
