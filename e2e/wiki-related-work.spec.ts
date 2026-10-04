@@ -59,6 +59,8 @@ const OPEN = "plans/a.mdx";
  *  prose, as a pull URL. Both have to reach `prRefs` for `c` to pair. */
 const REF_AUTHORED = "RuneLind/muninn#549";
 const REF_BODY = "RuneLind/muninn#550";
+/** The session the sessions case shares. */
+const SESSION_ID = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
 
 function md(title: string, fm: string[], body: string): string {
   return ["---", `title: ${title}`, ...fm, "---", "", body, ""].join("\n");
@@ -122,6 +124,14 @@ const PAGES: Array<[string, string]> = [
     // in its body the assertion below could not fail under any rule.
     md("Unrelated plan", ["status_date: 2026-09-13"], `Names ${REF_AUTHORED} once.`),
   ],
+  // A pair sharing one stamped session and nothing else — the open page spells
+  // it `provider:id`, the other bare. Linked to nothing above, so the block
+  // under test is unchanged.
+  [
+    "plans/sess-open.mdx",
+    md("Session open", [`sessions: [claude-code:${SESSION_ID}]`, "status_date: 2026-09-12"], "Body."),
+  ],
+  ["plans/sess-twin.mdx", md("Session twin", [`sessions: [${SESSION_ID}]`, "status_date: 2026-09-11"], "Body.")],
 ];
 
 /** The rows the block must hold, newest first, with their why lines. */
@@ -257,6 +267,16 @@ test("the HUB and the DIGEST are cut, though both are in the wiki and one cites 
   expect(texts.join(" | ")).not.toContain("Hub page");
   expect(texts.join(" | ")).not.toContain("Digest page");
   expect(texts.join(" | ")).not.toContain("Unrelated plan");
+});
+
+test("a page sharing a stamped session appears, with the session as its reason", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/sess-open.mdx")}`);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Session open");
+  await expect(relatedRows(page)).toHaveCount(1);
+  await expect(relatedRows(page).first().locator("> .wiki-conn-text > span")).toHaveText("Session twin");
+  await expect(relatedRows(page).first().locator(".wiki-conn-why")).toHaveText(
+    `shares session claude-code:${SESSION_ID}`,
+  );
 });
 
 test("`/api/wiki/pages` rows carry no `prRefs` — the listing did not grow", async () => {

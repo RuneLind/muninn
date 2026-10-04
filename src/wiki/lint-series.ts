@@ -13,7 +13,8 @@
  *
  * Its own module rather than three more functions in `lint.ts`: it is the only
  * check that needs the SERIES vocabulary (`wiki-groups.ts`) and the RELATED
- * WORK cuts (`related.ts` + `related-constants.ts`), and it is the only one
+ * WORK cuts (`isBookkeeping` in `strength.ts`, re-exported by `related.ts`, and
+ * the numbers in `related-constants.ts`), and it is the only one
  * carrying a `fix`. The split is for READING, not for load: `lint.ts` imports
  * `checkSeries` as a VALUE, so every reader of the seven hygiene checks pulls
  * this module and both of its graphs anyway. What the direction does buy is

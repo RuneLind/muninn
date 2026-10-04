@@ -1518,8 +1518,8 @@ carry a machine-readable `fix` the gardener turns into review-gate rows.
 | `series-unnamed` (8.2) | a cluster of linked pages that declares no `series:` at all |
 | `series-inconsistent` (8.3) | a series whose declaration is half-written |
 
-**The four cuts are REUSED, never re-declared** — `isBookkeeping` (exported from
-`related.ts` for this), `RELATED_HUB_BACKLINKS` (25), `RELATED_DIGEST_PRS` (15)
+**The four cuts are REUSED, never re-declared** — `isBookkeeping` (declared in
+`strength.ts`, re-exported from `related.ts` for this), `RELATED_HUB_BACKLINKS` (25), `RELATED_DIGEST_PRS` (15)
 and `RELATED_SHARED_PRS_MIN` (2), with the measurements in
 `related-constants.ts`. Hubs and bookkeeping pages are cut from BOTH ends of
 every pair, exactly as `computeRelated` cuts the open page: each says "this page
@@ -1678,8 +1678,13 @@ because it ANSWERS a question — "what else is this piece of work?" — while
 `Linked from` and `Links to` under it are the raw lists it is derived from.
 
 ```
-related = cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never transitive
+related = cites ∪ cited-by ∪ shares ≥2 PR refs ∪ shares a session, minus hubs, never transitive
 ```
+
+Membership is ONE neighbour rule, `neighbours()` in `strength.ts`, which the
+find palette's near map reads too (below). `computeRelated` turns each
+neighbour into a why line and orders the rows newest first; the score the rule
+also computes does not reach the row yet.
 
 Deterministic: no model, no embedding, and it changes only when a page's text
 changes. `Similar` in the same panel is the semantic answer; this one is the
@@ -1776,7 +1781,12 @@ response), `plans/index.md` 246, `log.md` 189, and `flows/how-we-build.mdx` — 
 as a candidate at 27 backlinks — 36. Symmetric, the largest block on that corpus
 is **33** rows (`overview.md`), which is the link graph's own bound: there is no
 `RELATED_MAX` cap, because a cap drops rows from a page that really does have
-that many neighbours.
+that many neighbours. A FOURTH cut arrived with the session signal: a session
+stamped on more than `STRENGTH_SESSION_DIGEST` (12) pages is a sweep and pairs
+nothing (see "The neighbour rule and find" below). Its reason reads
+`shares session <ref>` in the OPEN page's own spelling, two at most, and the
+view wraps each ref in a `<span class="wiki-why-sess">` so CSS can shorten it
+while the copied text stays whole.
 
 - **Hubs**: a candidate with more than `RELATED_HUB_BACKLINKS` (25) backlinks is
   dropped, from EVERY source. A page cited by the whole wiki is not related work
@@ -1879,6 +1889,66 @@ value — which is also why the import catches no drift by itself (measured:
 25 → 10 and 25 → 30 both leave the spec green). The spec PINS each value
 instead, one `toBe` per constant: a threshold is a measurement, and moving it
 means re-measuring on the live wiki and moving the pin in the same edit.
+
+## The neighbour rule and find (`strength.ts`, `session-refs.ts`, the `/` palette)
+
+**One rule, two readers.** `neighbours(index, relPath)` answers the pages one
+hop from a page, each with a score and the signals that put it there;
+`computeRelated` (Related work) and `nearScores` (find) both call it.
+
+| Signal | Counts when | Weight |
+|---|---|---|
+| Link | either direction | 1.0 one way, 1.6 both ways |
+| Shared PR refs | ≥ `RELATED_SHARED_PRS_MIN` (2), both ends ≤ `RELATED_DIGEST_PRS` (15) refs | 0.6 per ref, max 1.8 |
+| Shared stamped session | ≥ 1, the session on ≤ `STRENGTH_SESSION_DIGEST` (12) pages | 1.2 per session, max 2.4 |
+
+A pair is a neighbour iff a signal counts, so every neighbour scores ≥ 1.0;
+`STRENGTH_MAX` (5.8) is derived from the three ceilings in
+`related-constants.ts`. Cuts and their sides: bookkeeping and hub on both ends
+(an open page that is either gets nothing), the PR digest on both ends of the
+PR signal, the session digest on the session (counted over every index page
+stamping it), culled and the open page's own attachments on the candidate only.
+Sessions are keyed on the bare id (`claude-code:<id>` and `<id>` pair),
+deduplicated per page and shape-checked — the helpers live in the leaf
+`session-refs.ts`, which imports only `provenance.ts`, so nothing browser-side
+pulls `session-ledger.ts`'s logging. PR and session sharing read inverted maps
+built once per index object (a `WeakMap`), never per request. Pure, index-only,
+age-free: `worked-order-invariant.test.ts` holds. Lint check 8.1 keeps its own
+session pairing.
+
+**The near map.** `GET /api/wiki/page` ships `near`: relPath → closeness for
+the open page. A first-hop page scores `s/(s+1)` (≥ 0.5); a second-hop page
+`near(parent) × 0.55 × s/(s+1)` (≤ ≈0.40), so no second hop outranks a first.
+The walk never expands through a hub, keeps the best score per page and keeps
+the `NEAR_MAX` (200) strongest. ⚠️ Keys are the listing's `relPath` spelling —
+never the lowercased `normalizeRelPath` key, which zeroes the boost on any path
+with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
+`nearScores` together take 0.04 ms median, 0.84 ms max per page.
+
+**The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
+the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
+it; the rail's search box is unchanged. It ranks `allPages` in the browser —
+there is no find route. Grammar: free words ANDed; `in:<text>`/`in:"<text>"`
+on series key or label; `type:<prefix>`; `age:<N`/`age:>N` days on the
+worked-on axis; `#tag` a tag prefix but `#<digits>` a number word;
+`is:retired` admits culled pages; any other `key:` is a free word. A digit
+word matches a whole number in the title, ISO dates removed first, so `9` does
+not hit `2026-09-…`. Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
+pool drops bookkeeping pages, attachment children and (unless `is:retired`)
+culled pages; a superseded page stays and names its successor. Rows group by
+series, groups ordered by their best row; a no-series row is a group of one,
+so the best match is always the first row. The highlighter is ONE pass with a
+combined pattern — word-by-word replacement corrupts its own `<mark>` markup.
+
+⚠️ **The dialog root owns every key pressed inside it**: its keydown handles
+the palette's keys and then stops propagation on every keydown, so no
+document-level reader shortcut (`]`, `f`, `g`, `t`, the pane ladder's Escape)
+fires from inside the palette. Capture-phase listeners still run first: the
+graph card's Escape stands aside under `modalOpen`, and the ref-link peek's has
+nothing to close, since opening hides any peek (`hideRefPeek`). Closing REMOVES
+the node and returns focus to the opener. Acceptance: `strength.test.ts`,
+`session-refs.test.ts`, `routes/wiki-near.test.ts`,
+`views/components/wiki-find.test.ts` and `e2e/wiki-find.spec.ts`.
 
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 

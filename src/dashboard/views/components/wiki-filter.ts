@@ -1136,7 +1136,7 @@ export function pageFollowups(p: WikiListing): string {
  * `/`-boundary suffixes — `memory/MEM` matches `…/memory/MEMORY.md`, `x-muninn/`
  * does not match `-Users-x-muninn/…` because it starts mid-segment.
  */
-function relPathMatchesQuery(relPath: string, q: string): boolean {
+export function relPathMatchesQuery(relPath: string, q: string): boolean {
   const rel = relPath.toLowerCase();
   if (rel.startsWith(q)) return true;
   for (let i = rel.indexOf("/"); i !== -1; i = rel.indexOf("/", i + 1)) {

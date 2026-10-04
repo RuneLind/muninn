@@ -17,8 +17,10 @@
  * number the paragraphs below were measured against. Re-measure on the live
  * wiki before moving either, and move the pin in the same edit.
  *
- * `related.ts` re-exports all four, so the rule and its tests still read one
- * name each.
+ * `related.ts` re-exports the four `RELATED_*` cuts, so the rule and its tests
+ * still read one name each. The `STRENGTH_*` weights below them belong to
+ * `strength.ts`, the one neighbour rule both Related work and the find
+ * palette's near map read.
  */
 
 /**
@@ -57,3 +59,52 @@ export const RELATED_SHARED_PRS_MIN = 2;
 
 /** How many of the shared refs the `shares …` reason names. */
 export const RELATED_SHARED_PRS_SHOWN = 2;
+
+/**
+ * A stamped session on more pages than this is a DIGEST session — a sweep, a
+ * backfill, a review pass that touched half a folder — and sharing it says
+ * nothing about two pages being one piece of work. The count is over EVERY page
+ * in the index carrying the session, bookkeeping and culled pages included, so
+ * a session does not escape the cap by stamping pages the rule later cuts.
+ */
+export const STRENGTH_SESSION_DIGEST = 12;
+
+/** A link in ONE direction between the two pages. */
+export const STRENGTH_LINK_ONE_WAY = 1.0;
+/** Links in BOTH directions — more than one way, less than two: the second
+ *  direction confirms the first rather than doubling it. */
+export const STRENGTH_LINK_BOTH_WAYS = 1.6;
+/** Per shared PR ref, counted only at `RELATED_SHARED_PRS_MIN` or more. */
+export const STRENGTH_PR_WEIGHT = 0.6;
+/** The PR signal's ceiling — three refs' worth. */
+export const STRENGTH_PR_CAP = 1.8;
+/** Per shared stamped session. A session is a stronger claim than a PR number:
+ *  the same agent sitting wrote both pages. */
+export const STRENGTH_SESSION_WEIGHT = 1.2;
+/** The session signal's ceiling — two sessions' worth. */
+export const STRENGTH_SESSION_CAP = 2.4;
+
+/**
+ * The highest score a neighbour can reach: both-ways link plus both caps.
+ * DERIVED, so moving a weight moves the ceiling with it — PR 2's strength bar
+ * divides by this.
+ */
+export const STRENGTH_MAX = STRENGTH_LINK_BOTH_WAYS + STRENGTH_PR_CAP + STRENGTH_SESSION_CAP;
+
+/**
+ * How much a SECOND hop keeps of its parent's closeness. A first-hop page
+ * scores `s/(s+1)` (≥ 0.5, since every neighbour scores ≥ 1.0); a second-hop
+ * page `near(parent) × 0.55 × s/(s+1)`, whose ceiling at `STRENGTH_MAX` is
+ * ≈0.40 — so no second-hop page ever outranks a first-hop one.
+ */
+export const NEAR_HOP_DECAY = 0.55;
+
+/** The near map keeps this many strongest entries — the payload bound on
+ *  `/api/wiki/page`'s `near`. */
+export const NEAR_MAX = 200;
+
+/** The session reason's prefix — `shares session <ref>`, the OPEN page's own
+ *  spelling of each shared ref, at most `RELATED_SHARED_PRS_SHOWN` and
+ *  comma-joined like the PR reason. Here rather than in `related.ts` because
+ *  the browser's `wiki-related-view.ts` parses it back out to wrap the refs. */
+export const REASON_SESSION_PREFIX = "shares session ";

@@ -170,7 +170,8 @@ import { enhanceEmbeds } from "./wiki-embed.ts";
 import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
 import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
-import { enhanceRefLinks } from "./wiki-ref-links.ts";
+import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
+import { initFindPalette } from "./wiki-find-palette.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
@@ -473,6 +474,10 @@ interface WikiPageDetail {
    *  every write this client makes (`POST /api/wiki/series` answers the new
    *  hash), so the editor's own first write cannot leave it stale. */
   hash?: string;
+  /** The find palette's closeness map: relPath (the listing's spelling) →
+   *  (0, 1), one and two hops over the neighbour rule. ABSENT on an older
+   *  server; `{}` for a bookkeeping or hub page. */
+  near?: Record<string, number>;
   error?: string;
 }
 
@@ -599,6 +604,13 @@ let currentRelPath: string | null = null;
  * popover reports.
  */
 let currentPageHash: string | null = null;
+/**
+ * The `near` map of the page whose response last rendered, keyed by that page's
+ * relPath — the find palette boosts by it only while that page is still the
+ * open one, so an explainer or the start view (no page response) ranks with no
+ * closeness at all rather than with the previous page's.
+ */
+let currentNear: { relPath: string; near: Record<string, number> } | null = null;
 /**
  * The listing of the page currently rendered in the article pane — stamped by
  * `renderBreadcrumb`, which every article render path calls.
@@ -3930,6 +3942,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // actually came back.
       currentRelPath = data.meta.relPath || null;
       currentPageHash = typeof data.hash === "string" ? data.hash : null;
+      currentNear = currentRelPath ? { relPath: currentRelPath, near: data.near ?? {} } : null;
       renderBreadcrumb(data.meta);
       if (push) {
         graphIssue = ""; // a click opens a page: graph mode re-roots on it
@@ -7221,6 +7234,18 @@ document.addEventListener("click", (e) => {
 // chain above and the body delegate; the dialog's is the chain in
 // `wireChatOptions` (`wiki-chat-options.ts`). One chain made that exclusivity
 // structural; three make it a convention nothing enforces.
+// The find palette (`/`, ⌘K): ranks `allPages` in the browser, boosted by the
+// open page's `near` map. It owns every key pressed inside it; its opening
+// listener is document-level, bubble phase. See `wiki-find-palette.ts`.
+initFindPalette({
+  getPages: () => allPages,
+  getNear: () => (currentNear && currentNear.relPath === currentRelPath ? currentNear.near : {}),
+  getScannedAt: () => scannedAtMs,
+  openPage: (relPath) => loadPageByRelPath(relPath),
+  hrefFor: (relPath) => pageUrlByRelPath(relPath),
+  onOpen: () => hideRefPeek(),
+});
+
 initChatOptions({
   getShownTurn: () => askShownTurn,
   getAskTurns: () => askTurns,

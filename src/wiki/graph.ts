@@ -21,12 +21,12 @@
  */
 
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
-import { echoQuery, enrichSessions, parsePrRef, parseSessionRef, type ProvenanceMerge } from "./provenance.ts";
-import { dedupeSessionRefs, type ProvenanceContext } from "./provenance-service.ts";
+import { echoQuery, enrichSessions, parsePrRef, type ProvenanceMerge } from "./provenance.ts";
+import type { ProvenanceContext } from "./provenance-service.ts";
+import { bareId, isSessionIdShape, stampedSessionRefs } from "./session-refs.ts";
 import {
   fetchMergesForSessions,
   fetchSessionsById,
-  isSessionIdShape,
   type MergeLedgerResult,
   type SessionLedgerResult,
 } from "./session-ledger.ts";
@@ -83,8 +83,6 @@ export function graphLedgerPort(
 
 type GraphResult = { ok: true; payload: GraphPayload } | { ok: false; status: 400 | 404; error: string };
 
-const bareId = (ref: string): string => parseSessionRef(ref).id;
-
 const issueId = (tracker: string, key: string) => `issue:${issueKeyId(tracker, key)}`;
 const pageId = (relPath: string) => `page:${relPath}`;
 const sessionId = (bare: string) => `session:${bare}`;
@@ -92,10 +90,6 @@ const prId = (ref: string) => `pr:${ref.toLowerCase()}`;
 
 /** A bookkeeping page (`index`, `log`, `CLAUDE`): never a graph node. */
 const isBookkeeping = (page: { relPath: string }): boolean => isMetaStem(pageStemOf(page.relPath));
-
-/** A page's stamped session refs that can be session ids at all. */
-const stampedSessionRefs = (page: WikiPageMeta): string[] =>
-  dedupeSessionRefs(page.sessions ?? []).filter((ref) => isSessionIdShape(bareId(ref)));
 
 const GITHUB_PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/pull\/([0-9]+)(?:[/?#].*)?$/;
 const PR_COORDINATE = /^[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)#([0-9]+)$/;

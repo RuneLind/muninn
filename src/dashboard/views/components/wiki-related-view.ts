@@ -14,6 +14,22 @@
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, type WikiListing } from "./wiki-filter.ts";
 import { canEditSeriesPage, seriesMenuBtnHtml } from "./wiki-series-menu.ts";
+import { REASON_SESSION_PREFIX } from "../../../wiki/related-constants.ts";
+
+/**
+ * One reason, escaped and wrapped in `<em>`. A `shares session …` reason wraps
+ * each ref in a `<span class="wiki-why-sess">` so CSS can shorten a 45-byte
+ * session id on screen while the text stays whole for copying. Parsed from the
+ * reason text, since the row carries no structured signals yet.
+ */
+function reasonHtml(reason: string): string {
+  if (!reason.startsWith(REASON_SESSION_PREFIX)) return `<em>${esc(reason)}</em>`;
+  const refs = reason
+    .slice(REASON_SESSION_PREFIX.length)
+    .split(", ")
+    .map((ref) => `<span class="wiki-why-sess" title="${esc(ref)}">${esc(ref)}</span>`);
+  return `<em>${esc(REASON_SESSION_PREFIX)}${refs.join(", ")}</em>`;
+}
 
 /** One `Related work` row: an ordinary listing row plus the one line saying why
  *  it is there (`cites this page · shares RuneLind/muninn#550, …`). */
@@ -48,10 +64,7 @@ export function relatedSectionHtml(items: RelatedListing[], editable = false): s
   let html =
     `<div class="wiki-conn-section"><div class="wiki-conn-title">Related work (${items.length})</div>`;
   items.forEach((p) => {
-    const why = p.why
-      .split(" · ")
-      .map((r) => `<em>${esc(r)}</em>`)
-      .join(" · ");
+    const why = p.why.split(" · ").map(reasonHtml).join(" · ");
     html +=
       `<div class="wiki-conn-item wiki-conn-related" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +

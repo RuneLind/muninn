@@ -3,8 +3,13 @@
  * is there.
  *
  * ```
- * related = cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never transitive
+ * related = cites ∪ cited-by ∪ shares ≥2 PR refs ∪ shares a session,
+ *           minus hubs, never transitive
  * ```
+ *
+ * The membership rule is `neighbours()` in `strength.ts` — the ONE neighbour
+ * rule, which the find palette's near map reads too. This module turns each
+ * neighbour into a why line and orders the rows.
  *
  * Deterministic, no model and no embedding: it changes only when a page's text
  * changes. That is the point — the `Similar` section beside it in the same panel
@@ -19,10 +24,12 @@
  * page that mentions a busy week; two is what made the dry run's pairs read as
  * one piece of work.
  *
- * **All three cuts are SYMMETRIC**: bookkeeping, hub and digest each say "this
- * page is not a piece of work", which is as true of the page you have open as
- * of a candidate. A bookkeeping or hub page therefore gets no block at all —
- * see {@link computeRelated} for what the one-sided version measured.
+ * **Bookkeeping, hub and PR digest are SYMMETRIC cuts**: each says "this page
+ * is not a piece of work", which is as true of the page you have open as of a
+ * candidate. A bookkeeping or hub page therefore gets no block at all — see
+ * {@link computeRelated} for what the one-sided version measured. The FOURTH,
+ * the session digest (`STRENGTH_SESSION_DIGEST`), cuts a session stamped on
+ * too many pages, whichever end is open.
  *
  * Pure and index-only: it takes the built `WikiIndex` and a relPath and returns
  * the DECISION (which pages, and why), never a listing row. The route
@@ -32,9 +39,10 @@
  */
 
 import { bySeriesDateDesc } from "../dashboard/views/components/wiki-groups.ts";
-import { isMetaStem, pageStemOf } from "../dashboard/views/components/wiki-filter.ts";
-import { normalizeRelPath, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import type { WikiIndex } from "./store.ts";
+import { isBookkeeping, neighbours } from "./strength.ts";
 import {
+  REASON_SESSION_PREFIX,
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
   RELATED_SHARED_PRS_MIN,
@@ -51,33 +59,10 @@ export {
   RELATED_SHARED_PRS_SHOWN,
 };
 
-/**
- * BOOKKEEPING pages are never related work, whatever the link graph says —
- * `index`, `log` and `CLAUDE`, by stem, in any folder.
- *
- * The stem comes from `pageStemOf`, the RAIL's own spelling, which strips any
- * extension: `wikiPageStem` strips only `.md`/`.mdx`, so `plans/index.html` read
- * as the stem `index.html`, sat under `Bookkeeping` in the rail and arrived here
- * as ordinary related work. ⚠️ `isMetaStem` is case-SENSITIVE on `CLAUDE` alone
- * (inherited from the rail, where the same predicate decides the tail).
- *
- * Exported for the lint's series checks (`lint-series.ts`), which apply the same
- * four cuts — the constants AND this predicate — rather than re-declaring them.
- *
- * The hub cut alone does not reach these pages, and that is measured rather than
- * assumed: on mimir (547 pages) `index.md` has **3** backlinks, `log.md` 4 and
- * `plans/index.md` 6 — all far under `RELATED_HUB_BACKLINKS`, because a catalog
- * page LINKS OUT rather than being linked to. Without the cut they led the block
- * on both acceptance pages.
- */
-export function isBookkeeping(relPath: string): boolean {
-  return isMetaStem(pageStemOf(relPath));
-}
-
-/** How many pages link to this one. The hub test's one reader. */
-function backlinkCount(index: WikiIndex, key: string): number {
-  return index.backlinks.get(key)?.length ?? 0;
-}
+// `isBookkeeping` lives with the neighbour rule in `strength.ts` and is
+// re-exported here so `lint-series.ts`'s import is unchanged and the
+// dependency runs one way: `related.ts` → `strength.ts`.
+export { isBookkeeping };
 
 /** One related page: which page, and the one line saying why it is there. */
 export interface RelatedRef {
@@ -88,7 +73,7 @@ export interface RelatedRef {
   why: string;
 }
 
-/** The two link reasons. The three sources below run in a fixed order and a why
+/** The two link reasons. The four sources below run in a fixed order and a why
  *  line prints its reasons in the order they were added, so a page reached by
  *  two of them reads the same way on every build. */
 const REASON_CITES = "cites this page";
@@ -118,78 +103,17 @@ const REASON_CITED_BY = "cited by this page";
  * have that many neighbours.
  */
 export function computeRelated(index: WikiIndex, relPath: string): RelatedRef[] {
-  const self = index.resolveRelPath(relPath);
-  if (!self) return [];
-  const selfKey = normalizeRelPath(self.relPath);
-  if (isBookkeeping(self.relPath)) return [];
-  if (backlinkCount(index, selfKey) > RELATED_HUB_BACKLINKS) return [];
-
-  /** Candidate key → its reasons, in the order this function adds them. */
-  const reasons = new Map<string, string[]>();
-  const pages = new Map<string, WikiPageMeta>();
-
-  const push = (candidateKey: string, why: string): void => {
-    if (candidateKey === selfKey) return;
-    const meta = index.resolveRelPath(candidateKey);
-    if (!meta) return;
-    if (isBookkeeping(meta.relPath)) return;
-    // A CULLED page is retired work: it stays in Linked from / Links to (marked),
-    // but it is not "related work" a reader should continue in.
-    if (meta.culled) return;
-    // The open page's OWN attachments are not related work: the rail already
-    // shows them as this page's attachment chip, so a row here is the same file
-    // twice on one screen. Scoped to THIS page's children — an `.html` explainer
-    // belonging to some other page is an ordinary candidate.
-    if (meta.parent !== undefined && normalizeRelPath(meta.parent) === selfKey) return;
-    // The hub cut applies to EVERY source, link included: a page cited by the
-    // whole wiki is not related work just because this page cites it too.
-    if (backlinkCount(index, candidateKey) > RELATED_HUB_BACKLINKS) return;
-    pages.set(candidateKey, meta);
-    const list = reasons.get(candidateKey);
-    if (list) {
-      if (!list.includes(why)) list.push(why);
-    } else {
-      reasons.set(candidateKey, [why]);
-    }
-  };
-
-  // 1. Pages that cite this one, and 2. pages this one cites. Both are already
-  //    in the index as normalized relPaths — this is the "one hop" in full.
-  for (const from of index.backlinks.get(selfKey) ?? []) push(from, REASON_CITES);
-  for (const to of index.outgoing.get(selfKey) ?? []) push(to, REASON_CITED_BY);
-
-  // 3. Pages sharing at least RELATED_SHARED_PRS_MIN PR references.
-  const selfRefs = self.prRefs ?? [];
-  if (selfRefs.length >= RELATED_SHARED_PRS_MIN && selfRefs.length <= RELATED_DIGEST_PRS) {
-    // Case-insensitive, because the two ends may have got their spelling from a
-    // frontmatter line and from prose. The VALUE kept is the open page's, so the
-    // why line reads in one spelling however the other page wrote it.
-    const selfByKey = new Map(selfRefs.map((r) => [r.toLowerCase(), r]));
-    for (const candidate of index.pages) {
-      const key = normalizeRelPath(candidate.relPath);
-      if (key === selfKey) continue;
-      const refs = candidate.prRefs ?? [];
-      if (refs.length > RELATED_DIGEST_PRS) continue;
-      const shared: string[] = [];
-      const seen = new Set<string>();
-      for (const ref of refs) {
-        const k = ref.toLowerCase();
-        const mine = selfByKey.get(k);
-        if (!mine || seen.has(k)) continue;
-        seen.add(k);
-        shared.push(mine);
+  return neighbours(index, relPath)
+    .map((n) => {
+      const why: string[] = [];
+      if (n.signals.cites) why.push(REASON_CITES);
+      if (n.signals.citedBy) why.push(REASON_CITED_BY);
+      if (n.signals.prs.length) why.push(`shares ${n.signals.prs.slice(0, RELATED_SHARED_PRS_SHOWN).join(", ")}`);
+      if (n.signals.sessions.length) {
+        why.push(`${REASON_SESSION_PREFIX}${n.signals.sessions.slice(0, RELATED_SHARED_PRS_SHOWN).join(", ")}`);
       }
-      if (shared.length < RELATED_SHARED_PRS_MIN) continue;
-      // Ordered by the OPEN page's own list, so the two refs the reason names
-      // are the first two THIS page declares rather than whichever pair the
-      // candidate happened to write first.
-      shared.sort((a, b) => selfRefs.indexOf(a) - selfRefs.indexOf(b));
-      push(key, `shares ${shared.slice(0, RELATED_SHARED_PRS_SHOWN).join(", ")}`);
-    }
-  }
-
-  return [...reasons]
-    .map(([key, why]) => ({ meta: pages.get(key)!, why: why.join(" · ") }))
+      return { meta: n.meta, why: why.join(" · ") };
+    })
     .sort((a, b) => bySeriesDateDesc(a.meta, b.meta))
     .map(({ meta, why }) => ({ relPath: meta.relPath, why }));
 }

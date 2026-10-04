@@ -86,35 +86,10 @@ export const SESSION_IDS_PER_CALL = 200;
  * process does not choose.
  */
 export const SESSION_IDS_QUERY_MAX_BYTES = 12_000;
-
-/**
- * The longest session id muninn will ask about. A longer value on a page cannot
- * BE a session id, and sending it is how ONE malformed frontmatter entry takes
- * out the whole batch it rides in (a 431 has no body naming the offender).
- *
- * 128 because that is the cap the WRITER enforces: claude-usage's `wiki-stamp`
- * only ever stamps a ref matching `SESSION_REF_RE`
- * (`/^[a-z][a-z0-9-]*:[A-Za-z0-9._-]{1,128}$/`, `src/wiki-stamp.ts:47`), so no
- * id that pipeline put on a page can exceed it. It is NOT a storage limit —
- * every `session_id` column in claude-usage's sqlite schema (`src/store.ts`) is
- * a bare `TEXT`, which sqlite does not bound — so a longer value is refused
- * here as frontmatter damage, not because the ledger could not hold it.
- */
-export const SESSION_ID_MAX_CHARS = 128;
-
-/**
- * The characters a session id is made of, across every provider that stamps
- * one: Claude Code uuids, opencode's `ses_…`, and anything else built from the
- * same alphabet. Anything outside it — a space, a slash, a `%` — is frontmatter
- * damage rather than an id, and refusing it here is what keeps a query string
- * from carrying something that is not one.
- */
-export const SESSION_ID_SHAPE = /^[A-Za-z0-9._-]+$/;
-
-/** Is this a value claude-usage could hold at all? */
-export function isSessionIdShape(id: string): boolean {
-  return id.length > 0 && id.length <= SESSION_ID_MAX_CHARS && SESSION_ID_SHAPE.test(id);
-}
+// The id-shape rule lives in the leaf `session-refs.ts` (browser-safe, no
+// logging); re-exported here so existing importers read the same names.
+export { SESSION_ID_MAX_CHARS, SESSION_ID_SHAPE, isSessionIdShape } from "./session-refs.ts";
+import { isSessionIdShape } from "./session-refs.ts";
 
 export interface SessionLedgerResult {
   /**

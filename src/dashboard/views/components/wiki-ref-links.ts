@@ -320,6 +320,12 @@ function hidePeek(): void {
   card?.remove();
 }
 
+/** Hide any peek card, and cancel one about to show. The find palette calls it
+ *  as it opens, so no peek (and no peek-owned Escape) outlives the open. */
+export function hideRefPeek(): void {
+  hidePeek();
+}
+
 function showPeek(a: HTMLAnchorElement): void {
   const target = document.getElementById(a.dataset.ref ?? "");
   if (!target) return;
