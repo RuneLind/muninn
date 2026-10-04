@@ -1665,9 +1665,10 @@ export function registerWikiReadRoutes(
   // (`exclude`) and that page's own attachments, which the open page's block
   // already leaves out. It is another page's block, not a transitive walk:
   // `related.ts`'s one-hop rule holds. Same resolution and 400/404/503 ladder
-  // as `/api/wiki/page`. `exclude` resolves like a page reference
-  // (`resolveExcludeRef`: relPath with or without extension, or a stem
-  // exactly one non-attachment page has — never a title or alias); one that names no page is compared as given. `limit` is digits
+  // as `/api/wiki/page`. `exclude` resolves more narrowly than a page
+  // reference (`resolveExcludeRef`: relPath with or without extension, or a
+  // stem exactly one non-attachment page has — never a title, an alias or an
+  // attachment's stem); one that names no page is compared as given. `limit` is digits
   // only, clamped to 1–20, default 6 (`parseRelatedHopLimit`), and `total` is
   // the row count before it, so the reader can say how many it left out.
   app.get("/api/wiki/related", async (c) => {
