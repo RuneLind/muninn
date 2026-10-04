@@ -17,8 +17,9 @@
  * and leave `modalOpen` true — and returns focus to the opener. The shell also
  * closes it on Back/Forward. A page load does NOT close it: the boot's own
  * `?relPath=` load lands after a palette the reader opened while the listing
- * was still in flight, and every page load the reader starts from inside the
- * palette closes it first (`openRow`).
+ * was still in flight, a fact-check reload or a boot heal can land under it
+ * too, and every page load the reader starts from inside the palette closes
+ * it first (`openRow`).
  *
  * During an IME composition the root still stops every key but acts on none:
  * Enter and Escape belong to the composition there.
