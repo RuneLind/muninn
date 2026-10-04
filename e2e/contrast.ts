@@ -51,9 +51,16 @@ export async function contrastOf(locator: Locator): Promise<number> {
  * `withOpacity` also fades the text by every ancestor's `opacity` (and its own
  * colour alpha) over that background — what a reader sees in a dimmed box with
  * no fill of its own. Off by default, so the rail specs measure what they did.
+ *
+ * `fill` measures the element's own BACKGROUND instead of its text — a graphic
+ * such as a bar segment, which WCAG 1.4.11 holds to 3:1 — against what its
+ * ancestors paint behind it, its own alpha composited over them.
  */
-export async function paintedContrast(locator: Locator, opts?: { withOpacity?: boolean }): Promise<number> {
-  return locator.evaluate((el, withOpacity) => {
+export async function paintedContrast(
+  locator: Locator,
+  opts?: { withOpacity?: boolean; fill?: boolean },
+): Promise<number> {
+  return locator.evaluate((el, [withOpacity, fill]) => {
     // A color-mix() computes to `color(srgb r g b / a)` with 0–1 channels,
     // not `rgb()`; read as 0–255 channels it is near-black.
     const rgba = (c: string) => {
@@ -62,7 +69,8 @@ export async function paintedContrast(locator: Locator, opts?: { withOpacity?: b
       return { r: n[0]! * k, g: n[1]! * k, b: n[2]! * k, a: n.length > 3 ? n[3]! : 1 };
     };
     const layers: ReturnType<typeof rgba>[] = [];
-    for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) {
+    const behind = fill ? (el as HTMLElement).parentElement : (el as HTMLElement);
+    for (let n: HTMLElement | null = behind; n; n = n.parentElement) {
       const c = rgba(getComputedStyle(n).backgroundColor);
       if (c.a === 0) continue;
       layers.push(c);
@@ -79,8 +87,10 @@ export async function paintedContrast(locator: Locator, opts?: { withOpacity?: b
       };
       return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
     };
-    let fg = rgba(getComputedStyle(el).color);
-    if (withOpacity) {
+    let fg = rgba(getComputedStyle(el)[fill ? "backgroundColor" : "color"]);
+    if (fill) {
+      fg = { r: fg.r * fg.a + bg.r * (1 - fg.a), g: fg.g * fg.a + bg.g * (1 - fg.a), b: fg.b * fg.a + bg.b * (1 - fg.a), a: 1 };
+    } else if (withOpacity) {
       let alpha = fg.a;
       for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) {
         alpha *= Number(getComputedStyle(n).opacity);
@@ -90,5 +100,5 @@ export async function paintedContrast(locator: Locator, opts?: { withOpacity?: b
     const a = lum(fg);
     const b = lum(bg);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  }, opts?.withOpacity ?? false);
+  }, [opts?.withOpacity ?? false, opts?.fill ?? false] as const);
 }

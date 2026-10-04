@@ -470,3 +470,17 @@ describe("pinned rules", () => {
     expect(order(pages, "driftsplan")).toEqual(["k.md"]);
   });
 });
+
+describe("seriesLabelFor — one spelling of a row's series label", () => {
+  test("the rail's label for a series member, empty for a page in no series", async () => {
+    const { seriesLabelFor, seriesLabels } = await import("./wiki-find.ts");
+    const pages = [
+      pg("plans/head.md", { series: "recall", seriesLabel: "Recall work" } as Partial<WikiListing>),
+      pg("plans/m.md", { series: "Recall" } as Partial<WikiListing>),
+      pg("plans/solo.md"),
+    ];
+    const labels = seriesLabels(pages);
+    expect(seriesLabelFor(pages[1]!, labels)).toBe("Recall work");
+    expect(seriesLabelFor(pages[2]!, labels)).toBe("");
+  });
+});

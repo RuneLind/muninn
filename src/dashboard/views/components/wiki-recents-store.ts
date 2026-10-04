@@ -20,16 +20,17 @@ import {
   PINS_MAX,
   RECENTS_KEY_PREFIX,
   foldsKey,
+  parseRelatedOrder,
   parseRelPathList,
   pinsKey,
   relatedOrderKey,
+  type RelatedOrder,
   serializeRelPathList,
   sortKey,
   togglePin,
   toggleFold,
 } from "./wiki-recents.ts";
 import { parseWikiSortMode, type WikiSortMode } from "./wiki-filter.ts";
-import { parseRelatedOrder, type RelatedOrder } from "./wiki-related-view.ts";
 
 /** The slice of `Storage` the purge below needs, so a unit test can hand it a
  *  fake instead of a browser. */

@@ -1758,11 +1758,12 @@ Every clause of that is a shape the corpus contains:
   documenting this very feature, and without the mask every page explaining
   provenance pairs with PR 543.
 
-**The listing does not grow.** `toListing` strips `prRefs` on ALL THREE callers
-and opts it in for NONE — not even `includeProvenance`. It is the input to
+**The listing does not grow.** `toListing` strips `prRefs` on every caller and
+opts it in for NONE — not even `includeProvenance`. It is the input to
 `computeRelated`, which runs server-side and hands each row the refs it SHARES
-with the open page (`signals.prs`, and the first two in its `why`); the raw list is a dozen refs per page that no
-LIST renders. Measured on a 547-page mimir clone, `GET /api/wiki/pages`:
+with the open page (`signals.prs`, and the first two in its `why`); the raw
+list is a dozen refs per page that no LIST renders. Measured on a 547-page
+mimir clone, `GET /api/wiki/pages`:
 **385,013 bytes before and after**, every row byte-identical.
 
 ### The rule (`computeRelated`, pure)
@@ -1888,24 +1889,39 @@ state: it is where the pointer is whenever a row is being read.
 - **The NEIGHBOUR's age** (a proxy — a link carries no timestamp): the
   worked-on signal falling back to the update signal (`pageDateSignal(p,
   "worked", now)`), in the rail's spelling (`formatRailAge`), at the one
-  `recencyNow()` instant. Its source marking (`workedSourceOf` + `workedChip`,
-  exactly as the rail derives it) is passed only while `workedAxisOn` is on; on
-  a wiki the ledger does not cover (jarvis, the nais pod) the age has no
-  `fallback` underline, as the rail hides its worked mode there.
-- **The series pill**, labelled from the rail's `seriesLabels`.
+  `recencyNow()` instant. Its source marking (`workedAxisSource` + `workedChip`,
+  the one derivation the rail's rows read too) is passed only while
+  `workedAxisOn` is on; on a wiki the ledger does not cover (jarvis, the nais
+  pod) the age has no `fallback` underline, as the rail hides its worked mode
+  there. A listing that flips `workedAxisOn` repaints the block.
+- **The series pill**, labelled from the rail's `seriesLabels`
+  (`seriesLabelFor`). A row's LISTING fields — series included — are read from
+  the listing the rail holds at render time, not from the page response, so a
+  series write from the block's own `⋯` (whose forced listing refetch also
+  repaints the block) moves the pill without reopening the page.
 
 **`Strongest | Newest`** sits in the header once there are two rows, remembered
 per wiki in `localStorage` (`muninn.wiki.related-order.v1:<wiki>`, every access
 in try/catch). `Newest` sorts on `pageWorkedMs` at one instant — the axis the
 age shows, so the ages always read in order, and deliberately not the
-`status_date`-first order the server's tie-break uses.
+`status_date`-first order the server's tie-break uses. Hop rows follow the same
+toggle. Switching it keeps every open ▸ open, with its answer.
 
 **▸ is the second hop.** It opens THAT row's own related work under the row:
 `GET /api/wiki/related?wiki=&relPath=<row>&exclude=<open page>&limit=6` answers
 `computeRelated` for the row's page minus the open page and the open page's
-own attachments (compared through `normalizeRelPath`), with `limit` clamped to
-1–20 (default 6) and `total` the count before it. The client caches each answer
-for the life of the page open and does not cache a failure. The block is still
+own attachments (compared through `normalizeRelPath`). `exclude` resolves like
+a page reference (`resolveExcludeRef`): the relPath as the listing spells it
+(case-insensitive), the same relPath without its extension, or a folder-less
+stem that names exactly one page; one that resolves nothing is compared as
+given. `limit` is digits only (`parseRelatedHopLimit`), clamped to 1–20, and
+anything else — signed, fractional, `1e3`, `0x10`, `5abc` — is the default 6
+(`RELATED_HOP_LIMIT_DEFAULT`/`_MAX` in `related-constants.ts`, which the reader's
+fetch reads too); `total` is the count before it. The client caches each
+answer for the life of ONE page open — every `renderConnections` (a page open,
+A → start → A, an in-place reload) resets it — sends one request per hop while
+one is in flight, and does not cache a failure. ▸ carries `aria-controls` to
+its body, which is `aria-live="polite"`. The block is still
 one hop: this is an explicit request for another page's one hop, which is why
 `related.ts`'s "never transitive" holds. The route is in the `wiki-read` group
 and in `WIKI_READ_SLICE_PATHS` — a GET over data `/api/wiki/page` already
@@ -1925,16 +1941,20 @@ threshold driven at 25 and 26, the same two cuts applied to the OPEN page, the
 never-transitive case, the shares reason's order and count, the case fold, the
 self guard, the strength order and its tie), `wiki-related-view.test.ts` (the
 empty-block guard — the shape a spec cannot reach, since an omitted block has no
-element to assert on — the bar segments, the age marking, both orders and the
-hop rows), `routes/wiki-related-routes.test.ts` (the exclude cut, case-folded,
-with its no-exclude control, the clamp and the row shape),
+element to assert on — the bar segments, the age marking, both orders, the hop
+rows in the toggle's order, an open hop across a re-render and the ▸'s
+`aria-controls`/`aria-live`), `routes/wiki-related-routes.test.ts` (the exclude
+cut, case-folded, with its no-exclude control, an extensionless or stem
+`exclude`, the strict `limit` table and the row shape),
 `wiki-provenance.test.ts` (the strip on `/api/wiki/pages`, `related[]` on
 `/api/wiki/page`) and `e2e/wiki-related-work.spec.ts` (the chain end to end, both
 cuts against a real index, the listing's absent key, the why line's full
 visibility, the contrast at rest AND hovered in both themes — bar segments at
-3:1, score and age at 4.5:1 — strongest-first order, the toggle and its
-remembered choice, the ▸ hop's cut, and a digest with no PR segment). The spec sizes
-its fixture from `src/wiki/related-constants.ts` rather than re-typing the
+3:1, score, age, ▸ and the toggle at 4.5:1 — strongest-first order, the toggle
+and its remembered choice, the ▸ hop's cut, an open ▸ surviving the toggle, one
+request for a ▸ re-clicked in flight, a refetch after A → start → A, a series
+write from the block's `⋯` moving the pill, and a digest with no PR segment).
+The spec sizes its fixture from `src/wiki/related-constants.ts` rather than re-typing the
 numbers, so the FIXTURE TRACKS the constant and the boundary case holds at any
 value — which is also why the import catches no drift by itself (measured:
 25 → 10 and 25 → 30 both leave the spec green). The spec PINS each value

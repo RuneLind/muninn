@@ -31,6 +31,7 @@ import {
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
 import { computeRelated, type RelatedRef } from "../../wiki/related.ts";
+import { RELATED_HOP_LIMIT_DEFAULT, RELATED_HOP_LIMIT_MAX } from "../../wiki/related-constants.ts";
 import { nearScores } from "../../wiki/strength.ts";
 import { ctxStampable, pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import {
@@ -1257,14 +1258,6 @@ async function getCollectionUpdateStatus(
  *  callers (programmatic writers) are not throttled. */
 export const WIKI_HTTP_REFRESH_MIN_INTERVAL_MS = 15_000;
 
-/** The whole wiki surface — the read slice plus everything else — which is
- *  what the `default` profile registers (as the `wiki-read` and `wiki` groups).
- *  Kept as one call for the route tests, which drive the full surface on a
- *  bare `Hono`. */
-/** `/api/wiki/related`'s `limit` bounds: the reader asks for 6. */
-export const RELATED_HOP_LIMIT_DEFAULT = 6;
-export const RELATED_HOP_LIMIT_MAX = 20;
-
 /** `computeRelated`'s decisions as listing rows — `toListing` (caller 4 of its
  *  strip list) plus `why`, `strength` and `signals`. Shared by `/api/wiki/page`
  *  and `/api/wiki/related`, so the two answer one row shape. */
@@ -1275,6 +1268,44 @@ function relatedRows(index: WikiIndex, refs: RelatedRef[]) {
   });
 }
 
+/** `/api/wiki/related`'s `limit`: digits only, clamped to 1–`RELATED_HOP_LIMIT_MAX`;
+ *  anything else (absent, empty, signed, fractional, `1e3`, `0x10`, `5abc`) is
+ *  the default. A prefix parse read `1e3` as 1 and `5abc` as 5. */
+export function parseRelatedHopLimit(raw: string | undefined): number {
+  if (raw === undefined || !/^\d+$/.test(raw)) return RELATED_HOP_LIMIT_DEFAULT;
+  return Math.min(RELATED_HOP_LIMIT_MAX, Math.max(1, Number(raw)));
+}
+
+/** The page extensions an extensionless `exclude` is tried with, in the store's
+ *  same-stem precedence order. */
+const EXCLUDE_EXTENSIONS = [".md", ".mdx", ".html"] as const;
+
+/**
+ * `/api/wiki/related`'s `exclude`, resolved the way a page reference is: a
+ * relPath as the listing spells it (case-insensitive), the same relPath without
+ * its extension, or — with no folder in it — a stem that names exactly one
+ * page. `undefined` when none of those finds a page.
+ */
+export function resolveExcludeRef(index: WikiIndex, raw: string): WikiPageMeta | undefined {
+  const ref = raw.trim();
+  if (!ref) return undefined;
+  const exact = index.resolveRelPath(ref);
+  if (exact) return exact;
+  if (!/\.(md|mdx|html)$/i.test(ref)) {
+    for (const ext of EXCLUDE_EXTENSIONS) {
+      const hit = index.resolveRelPath(ref + ext);
+      if (hit) return hit;
+    }
+  }
+  if (ref.includes("/")) return undefined;
+  const byName = index.resolve(ref);
+  return byName && stemIsUnique(index, byName.name) ? byName : undefined;
+}
+
+/** The whole wiki surface — the read slice plus everything else — which is
+ *  what the `default` profile registers (as the `wiki-read` and `wiki` groups).
+ *  Kept as one call for the route tests, which drive the full surface on a
+ *  bare `Hono`. */
 export function registerWikiRoutes(
   app: Hono,
   config: Config,
@@ -1515,7 +1546,8 @@ export function registerWikiReadRoutes(
   // folder can't shadow the intended page), else by `name` (first-stem-match, the
   // legacy wikilink/list-click path).
   /**
-   * The ONE resolution `/api/wiki/page` and `/api/wiki/page/provenance` share:
+   * The ONE resolution `/api/wiki/page`, `/api/wiki/page/provenance` and
+   * `/api/wiki/related` share:
    * `wiki`/`bot` → registry entry, `relPath` (collision-proof) else `name`
    * (first-stem-match) → page. The 400/404/503 ladder is the contract both
    * answer, so it lives once.
@@ -1600,8 +1632,9 @@ export function registerWikiReadRoutes(
       //
       // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why`,
       // `strength` and `signals` — it cannot use `listings()` itself, which
-      // answers a bare listing and would drop the fields this block exists for. The array is bounded by the
-      // link graph and by the three cuts, not by a cap: measured over the
+      // answers a bare listing and would drop the fields this block exists
+      // for. The array is bounded by the link graph and by the three cuts, not
+      // by a cap: measured over the
       // 547-page mimir clone 2026-09-20, the largest block is 33 rows
       // (`overview.md`), and the pages that answered hundreds — `index.md` at
       // 340, `plans/index.md` 246, `log.md` 189 — are bookkeeping or hubs, which
@@ -1622,19 +1655,19 @@ export function registerWikiReadRoutes(
   // (`exclude`) and that page's own attachments, which the open page's block
   // already leaves out. It is another page's block, not a transitive walk:
   // `related.ts`'s one-hop rule holds. Same resolution and 400/404/503 ladder
-  // as `/api/wiki/page`; `limit` is clamped to 1–20 (default 6) and `total` is
+  // as `/api/wiki/page`. `exclude` resolves like a page reference
+  // (`resolveExcludeRef`: relPath with or without extension, or a unique
+  // stem); one that names no page is compared as given. `limit` is digits
+  // only, clamped to 1–20, default 6 (`parseRelatedHopLimit`), and `total` is
   // the row count before it, so the reader can say how many it left out.
   app.get("/api/wiki/related", async (c) => {
     const resolved = await resolvePageRequest(c);
     if (!resolved.ok) return resolved.res;
     const { index, meta } = resolved;
-    const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
-    const limit = Number.isFinite(rawLimit)
-      ? Math.min(RELATED_HOP_LIMIT_MAX, Math.max(1, rawLimit))
-      : RELATED_HOP_LIMIT_DEFAULT;
+    const limit = parseRelatedHopLimit(c.req.query("limit"));
     const excludeQ = c.req.query("exclude");
     const excludeKey = excludeQ
-      ? normalizeRelPath(index.resolveRelPath(excludeQ)?.relPath ?? excludeQ)
+      ? normalizeRelPath(resolveExcludeRef(index, excludeQ)?.relPath ?? excludeQ)
       : null;
     const kept = computeRelated(index, meta.relPath).filter((r) => {
       if (excludeKey === null) return true;

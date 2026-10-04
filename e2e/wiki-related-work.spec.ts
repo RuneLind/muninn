@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { contrastOf } from "./contrast.ts";
+import { contrastOf, paintedContrast } from "./contrast.ts";
 /**
  * The REAL constants, imported rather than re-typed. `src/wiki/related.ts`
  * itself is unloadable here — it reaches `registry.ts`, whose `import.meta.dir`
@@ -166,6 +166,13 @@ const PAGES: Array<[string, string]> = [
     ),
   ],
   ["plans/dg-peer.mdx", md("Digest peer", ["status_date: 2026-09-08"], "Reads [[dg-open]]. Names muninn#700 and muninn#701.")],
+  // The series-pill cluster: `ser-open` cites `ser-nb`, a member of `alpha`
+  // (labelled by its head `ser-alpha`); `ser-beta` heads `beta`. Joining
+  // `ser-nb` to `beta` from the block's own ⋯ must move its pill.
+  ["plans/ser-open.mdx", md("Series open", ["status_date: 2026-09-07"], "Reads [[ser-nb]].")],
+  ["plans/ser-nb.mdx", md("Series neighbour", ["series: alpha", "status_date: 2026-09-06"], "Body.")],
+  ["plans/ser-alpha.mdx", md("Alpha head", ["series: alpha", "series_label: Alpha line", "status_date: 2026-09-05"], "Body.")],
+  ["plans/ser-beta.mdx", md("Beta head", ["series: beta", "series_label: Beta line", "status_date: 2026-09-04"], "Body.")],
 ];
 
 /** How many days old each row's file is: the age the row shows. */
@@ -528,32 +535,8 @@ for (const scheme of ["light", "dark"] as const) {
 }
 
 /** Contrast of an element's own BACKGROUND (a bar segment is a graphic, not
- *  text) against the nearest ancestor that paints one — WCAG 1.4.11 asks 3:1. */
-function fillContrast(locator: import("@playwright/test").Locator): Promise<number> {
-  return locator.evaluate((el) => {
-    const lum = (c: string): number => {
-      const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
-      const ch = (v: number) => {
-        const s = v / 255;
-        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-      };
-      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
-    };
-    let node: HTMLElement | null = el.parentElement;
-    let bg = "rgb(255, 255, 255)";
-    while (node) {
-      const c = getComputedStyle(node).backgroundColor;
-      if (c && !/rgba\(0, 0, 0, 0\)|transparent/.test(c)) {
-        bg = c;
-        break;
-      }
-      node = node.parentElement;
-    }
-    const a = lum(getComputedStyle(el).backgroundColor);
-    const b = lum(bg);
-    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-  });
-}
+ *  text) against what paints behind it — WCAG 1.4.11 asks 3:1. */
+const fillContrast = (locator: import("@playwright/test").Locator) => paintedContrast(locator, { fill: true });
 
 for (const scheme of ["light", "dark"] as const) {
   test(`the bar segments clear 3:1 and the score and age 4.5:1 in the ${scheme} theme, at rest and hovered`, async ({
@@ -579,5 +562,115 @@ for (const scheme of ["light", "dark"] as const) {
     await measure(sess, [".seg-sess"]);
     await sess.hover();
     await measure(sess, [".seg-sess"]);
+  });
+}
+
+test("▸ stays open across Strongest | Newest, with its rows", async ({ page }) => {
+  await openReader(page);
+  const row = relatedRows(page).filter({ hasText: "Sharing blog" });
+  await row.locator("[data-rel-hop]").click();
+  const hopBody = page.locator('.wiki-rel-hop-body[data-rel-hop-for="blogs/c.mdx"]');
+  await expect(hopBody.locator(".wiki-rel-hop-row")).toHaveCount(1);
+  await page.locator('#connBody [data-rel-order="newest"]').click();
+  await expect(page.locator('#connBody [data-rel-order="newest"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(row.locator("[data-rel-hop]")).toHaveAttribute("aria-expanded", "true");
+  await expect(hopBody).toBeVisible();
+  await expect(hopBody.locator(".wiki-rel-hop-row > .wiki-conn-text > span")).toHaveText(["Citing plan"]);
+});
+
+test("re-clicking ▸ while its fetch is in flight sends no second request", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let requests = 0;
+  await page.route("**/api/wiki/related**", async (route) => {
+    requests++;
+    await gate;
+    await route.continue();
+  });
+  await openReader(page);
+  const btn = relatedRows(page).filter({ hasText: "Sharing blog" }).locator("[data-rel-hop]");
+  await btn.click();
+  await expect(btn).toHaveAttribute("aria-expanded", "true");
+  await btn.click();
+  await expect(btn).toHaveAttribute("aria-expanded", "false");
+  await btn.click();
+  await expect(btn).toHaveAttribute("aria-expanded", "true");
+  release();
+  const hopBody = page.locator('.wiki-rel-hop-body[data-rel-hop-for="blogs/c.mdx"]');
+  await expect(hopBody.locator(".wiki-rel-hop-row")).toHaveCount(1);
+  expect(requests).toBe(1);
+});
+
+test("the hop cache lives for ONE page open: leaving for the start view and coming back refetches", async ({
+  page,
+}) => {
+  let requests = 0;
+  page.on("request", (req) => {
+    if (req.url().includes("/api/wiki/related")) requests++;
+  });
+  await openReader(page);
+  const btn = () => relatedRows(page).filter({ hasText: "Sharing blog" }).locator("[data-rel-hop]");
+  await btn().click();
+  await expect(page.locator(".wiki-rel-hop-row")).toHaveCount(1);
+  expect(requests).toBe(1);
+  // A → start → A through the reader's own popstate handler: the same relPath
+  // renders its connections again, which is a new page open.
+  await page.evaluate((wiki) => {
+    history.pushState({}, "", `/wiki?wiki=${wiki}`);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, WIKI);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Knowledge Wiki");
+  await page.evaluate(
+    ([wiki, rel]) => {
+      history.pushState({ relPath: rel }, "", `/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel!)}`);
+      dispatchEvent(new PopStateEvent("popstate"));
+    },
+    [WIKI, OPEN],
+  );
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("A page");
+  await expect(btn()).toHaveAttribute("aria-expanded", "false");
+  await btn().click();
+  await expect(page.locator(".wiki-rel-hop-row")).toHaveCount(1);
+  expect(requests).toBe(2);
+});
+
+test("a series write from the block's own ⋯ moves that row's pill without reopening the page", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/ser-open.mdx")}`);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Series open");
+  const nb = relatedRows(page).filter({ hasText: "Series neighbour" });
+  await expect(nb.locator(".wiki-rel-series")).toHaveText("Alpha line");
+  await nb.hover();
+  await nb.locator("[data-series-menu]").click();
+  await page.locator('#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="beta"]').click();
+  await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Series open");
+  await expect(nb.locator(".wiki-rel-series")).toHaveText("Beta line");
+});
+
+for (const scheme of ["light", "dark"] as const) {
+  test(`▸ and the order toggle clear 4.5:1 in the ${scheme} theme, at rest and hovered`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await openReader(page);
+    const row = relatedRows(page).nth(0);
+    const hop = row.locator("[data-rel-hop]");
+    const toggles = page.locator("#connBody .wiki-rel-order button");
+    const check = async (label: string) => {
+      expect(await paintedContrast(hop), `${scheme} ▸ ${label}`).toBeGreaterThanOrEqual(4.5);
+      for (let i = 0; i < 2; i++) {
+        expect(await paintedContrast(toggles.nth(i)), `${scheme} toggle ${i} ${label}`).toBeGreaterThanOrEqual(4.5);
+      }
+    };
+    await check("at rest");
+    // The pointer on the row's title: ▸ keeps its rest colour over the hover fill.
+    await row.locator("> .wiki-conn-text > span").hover();
+    await check("row hovered");
+    await hop.hover();
+    expect(await paintedContrast(hop), `${scheme} ▸ hovered`).toBeGreaterThanOrEqual(4.5);
+    for (let i = 0; i < 2; i++) {
+      await toggles.nth(i).hover();
+      expect(await paintedContrast(toggles.nth(i)), `${scheme} toggle ${i} hovered`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 }

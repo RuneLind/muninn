@@ -2573,14 +2573,16 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-rel-order button {
       background: none; border: 0; padding: 1px 7px; cursor: pointer;
-      font-size: 10.5px; font-weight: 500; color: var(--text-soft);
+      font-family: inherit; font-size: 10.5px; font-weight: 500; color: var(--text-soft);
     }
     .wiki-rel-order button[aria-pressed="true"] { background: var(--bg-surface); color: var(--text-primary); font-weight: 600; }
     /* The ▸ second-hop opener, always visible: a control revealed on hover is a
-       control a finger cannot reach. */
+       control a finger cannot reach. --text-soft, not --text-muted: muted
+       measured 4.42:1 over the hovered row in the light theme
+       (e2e/wiki-related-work.spec.ts). */
     .wiki-rel-hop {
       background: none; border: 0; padding: 0; width: 12px; flex-shrink: 0; cursor: pointer;
-      font-size: 11px; line-height: 1.55; color: var(--text-muted);
+      font-family: inherit; font-size: 11px; line-height: 1.55; color: var(--text-soft);
     }
     .wiki-rel-hop:hover, .wiki-rel-hop[aria-expanded="true"] { color: var(--text-primary); }
     /* The meta line: strength bar, score, the neighbour's age, its series.

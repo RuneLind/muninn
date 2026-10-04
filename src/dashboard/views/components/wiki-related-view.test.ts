@@ -10,7 +10,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   orderRelated,
-  parseRelatedOrder,
   relatedAgeHtml,
   relatedHopHtml,
   relatedSectionHtml,
@@ -111,16 +110,13 @@ describe("relatedSectionHtml", () => {
     expect(html).toContain('data-rel-order="newest" aria-pressed="true"');
   });
 
-  test("an unknown stored order is the default", () => {
-    expect(parseRelatedOrder("newest")).toBe("newest");
-    for (const raw of [null, undefined, "", "oldest", "NEWEST"]) expect(parseRelatedOrder(raw)).toBe("strongest");
-  });
-
   test("▸ renders per row, with its own hop body beside the row, only when asked", () => {
     expect(relatedSectionHtml([row()])).not.toContain("data-rel-hop");
     const html = relatedSectionHtml([row()], false, { hops: true });
     expect(html).toContain('data-rel-hop="plans/citer.md" aria-expanded="false"');
-    expect(html).toContain('<div class="wiki-rel-hop-body" data-rel-hop-for="plans/citer.md" hidden></div>');
+    expect(html).toContain(
+      '<div class="wiki-rel-hop-body" id="wiki-rel-hop-0" data-rel-hop-for="plans/citer.md" aria-live="polite" hidden></div>',
+    );
   });
 });
 
@@ -189,5 +185,44 @@ describe("relatedHopHtml", () => {
     expect(html).toContain('class="wiki-conn-item wiki-rel-hop-row" data-page="citer" data-relpath="plans/citer.md"');
     expect(html).not.toContain("data-rel-hop=");
     expect(html).not.toContain("data-series-menu");
+  });
+});
+
+describe("fix round 1 — hop a11y, open state and order", () => {
+  test("▸ names the body it controls, and the body announces Loading → rows", () => {
+    const html = relatedSectionHtml([row(), row({ name: "b", relPath: "plans/b.md" })], false, { hops: true });
+    const controls = [...html.matchAll(/data-rel-hop="[^"]+"[^>]*aria-controls="([^"]+)"/g)].map((m) => m[1]);
+    expect(controls).toHaveLength(2);
+    expect(new Set(controls).size).toBe(2);
+    for (const id of controls) {
+      expect(html).toMatch(new RegExp(`<div class="wiki-rel-hop-body" id="${id}" [^>]*aria-live="polite"`));
+    }
+  });
+
+  test("an open hop renders open — expanded, ▾, body shown with its rows — across a re-render", () => {
+    const hop = { related: [row({ name: "deep", relPath: "plans/deep.md", title: "Deep page" })], total: 1 };
+    const html = relatedSectionHtml([row()], false, {
+      hops: true,
+      now: NOW,
+      hopState: (rel) => (rel === "plans/citer.md" ? hop : undefined),
+    });
+    expect(html).toMatch(/data-rel-hop="plans\/citer.md" aria-expanded="true"[^>]*>▾<\/button>/);
+    expect(html).not.toMatch(/data-rel-hop-for="plans\/citer.md"[^>]*hidden/);
+    expect(html).toContain("Deep page");
+    // In flight: open, Loading.
+    const loading = relatedSectionHtml([row()], false, { hops: true, hopState: () => null });
+    expect(loading).toContain('aria-expanded="true"');
+    expect(loading).toContain("Loading");
+  });
+
+  test("hop rows follow the block's order toggle", () => {
+    const strong = row({ name: "s", relPath: "s.md", title: "Strong old", strength: 2.8, workedMs: NOW - 9 * DAY } as Partial<RelatedListing>);
+    const fresh = row({ name: "f", relPath: "f.md", title: "Weak new", strength: 1, workedMs: NOW - 1 * DAY } as Partial<RelatedListing>);
+    const body = { related: [strong, fresh], total: 2 };
+    const at = (html: string) => [html.indexOf("Strong old"), html.indexOf("Weak new")];
+    const [s1, f1] = at(relatedHopHtml("Hop", body, { now: NOW, order: "strongest" }));
+    expect(s1!).toBeLessThan(f1!);
+    const [s2, f2] = at(relatedHopHtml("Hop", body, { now: NOW, order: "newest" }));
+    expect(f2!).toBeLessThan(s2!);
   });
 });

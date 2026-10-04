@@ -90,6 +90,15 @@ export function relatedOrderKey(wiki: string): string {
   return RELATED_ORDER_KEY_PREFIX + wiki;
 }
 
+/** Related work's two orders. `strongest` is the server's; `newest` re-sorts on
+ *  the worked-on axis the row's age shows. */
+export type RelatedOrder = "strongest" | "newest";
+
+/** Parse a stored order; anything else is the default. */
+export function parseRelatedOrder(raw: string | null | undefined): RelatedOrder {
+  return raw === "newest" ? "newest" : "strongest";
+}
+
 /**
  * The fold key space, deliberately ONE flat string namespace rather than two
  * stores: a page group is keyed by the parent's normalized relPath, a SECTION by

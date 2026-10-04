@@ -12,7 +12,8 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { registerWikiRoutes, RELATED_HOP_LIMIT_MAX } from "./wiki-routes.ts";
+import { registerWikiRoutes } from "./wiki-routes.ts";
+import { RELATED_HOP_LIMIT_DEFAULT, RELATED_HOP_LIMIT_MAX } from "../../wiki/related-constants.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 
@@ -109,13 +110,41 @@ describe("GET /api/wiki/related", () => {
     expect(Object.keys(pageBody.related[0]!).sort()).toEqual(Object.keys(side).sort());
   });
 
-  test("limit defaults to 6 and is clamped to 1–20; total counts every row", async () => {
-    expect((await related("relPath=big/wide.md")).related).toHaveLength(6);
-    for (const [limit, want] of [["0", 1], ["-3", 1], ["3", 3], ["99", RELATED_HOP_LIMIT_MAX], ["x", 6]] as const) {
-      const body = await related(`relPath=big/wide.md&limit=${limit}`);
+  test("limit: a plain integer clamped to 1–20; anything else is the default; total counts every row", async () => {
+    expect(RELATED_HOP_LIMIT_DEFAULT).toBe(6);
+    expect(RELATED_HOP_LIMIT_MAX).toBe(20);
+    expect((await related("relPath=big/wide.md")).related).toHaveLength(RELATED_HOP_LIMIT_DEFAULT);
+    const D = RELATED_HOP_LIMIT_DEFAULT;
+    // A prefix parse read `1e3` and `0x10` as 1 and `5abc` as 5; a strict one
+    // reads only digits.
+    const table: Array<[string | null, number]> = [
+      ["0", 1],
+      ["3", 3],
+      ["999", RELATED_HOP_LIMIT_MAX],
+      ["-1", D],
+      ["abc", D],
+      ["", D],
+      [null, D],
+      ["1.9", D],
+      ["1e3", D],
+      ["0x10", D],
+      ["5abc", D],
+    ];
+    for (const [limit, want] of table) {
+      const q = limit === null ? "" : `&limit=${encodeURIComponent(limit)}`;
+      const body = await related(`relPath=big/wide.md${q}`);
       expect(`${limit} → ${body.related.length}`).toBe(`${limit} → ${want}`);
       expect(body.total).toBe(25);
     }
+  });
+
+  test("exclude resolves like the target page: relPath with or without extension, or a unique stem", async () => {
+    for (const exclude of ["plans/Open", "plans/open", "Open", "open"]) {
+      const body = await related(`relPath=plans/hop.md&exclude=${encodeURIComponent(exclude)}`);
+      expect(body.related.map((r) => r.relPath).sort(), exclude).toEqual(["plans/other.md", "plans/side.md"]);
+    }
+    // An unknown exclude cuts nothing.
+    expect((await related("relPath=plans/hop.md&exclude=nope")).total).toBe(4);
   });
 
   test("the /api/wiki/page ladder: 400 with no page, 404 for an unknown one", async () => {

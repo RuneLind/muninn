@@ -17,10 +17,11 @@
  * number the paragraphs below were measured against. Re-measure on the live
  * wiki before moving either, and move the pin in the same edit.
  *
- * `related.ts` re-exports the four `RELATED_*` constants, so the rule and its tests
- * still read one name each. The `STRENGTH_*` weights below them belong to
- * `strength.ts`, the one neighbour rule both Related work and the find
- * palette's near map read.
+ * `related.ts` re-exports the four `RELATED_*` threshold constants, so the rule
+ * and its tests still read one name each. The `STRENGTH_*` weights below them
+ * are spelled once, by `strengthParts`: `strengthOf` (`strength.ts`, the one
+ * neighbour rule Related work and the find palette's near map both read) sums
+ * it, and the Related work bar (`wiki-related-view.ts`) draws it.
  */
 
 /**
@@ -133,3 +134,8 @@ export const NEAR_MAX = 200;
  *  comma-joined like the PR reason. Here rather than in `related.ts` because
  *  the browser's `wiki-related-view.ts` parses it back out to wrap the refs. */
 export const REASON_SESSION_PREFIX = "shares session ";
+
+/** `GET /api/wiki/related`'s `limit`: the default the reader's ▸ asks for, and
+ *  the ceiling a caller is clamped to. */
+export const RELATED_HOP_LIMIT_DEFAULT = 6;
+export const RELATED_HOP_LIMIT_MAX = 20;

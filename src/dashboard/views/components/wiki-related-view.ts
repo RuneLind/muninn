@@ -17,10 +17,11 @@ import {
   displayTitleOf,
   pageDateSignal,
   pageWorkedMs,
+  workedAxisSource,
   workedChip,
-  workedSourceOf,
   type WikiListing,
 } from "./wiki-filter.ts";
+import type { RelatedOrder } from "./wiki-recents.ts";
 import { formatRailAge } from "./wiki-activity-rank.ts";
 import { canEditSeriesPage, seriesMenuBtnHtml } from "./wiki-series-menu.ts";
 import {
@@ -48,15 +49,6 @@ export interface RelatedListing extends WikiListing {
   signals?: RelatedRowSignals;
 }
 
-/** The block's two orders. `strongest` is the server's; `newest` re-sorts on
- *  the worked-on axis the row's age shows. */
-export type RelatedOrder = "strongest" | "newest";
-
-/** Parse a stored order; anything else is the default. */
-export function parseRelatedOrder(raw: string | null | undefined): RelatedOrder {
-  return raw === "newest" ? "newest" : "strongest";
-}
-
 /** Data attributes the browser's click delegate keys on. */
 export const RELATED_ORDER_ATTR = "data-rel-order";
 export const RELATED_HOP_ATTR = "data-rel-hop";
@@ -74,6 +66,10 @@ export interface RelatedViewOptions {
   /** A series key → its display label (the rail's `seriesLabels`). Absent ⇒ the
    *  row's own `seriesLabel`, else the key. */
   seriesLabelOf?: (p: WikiListing) => string;
+  /** Which rows' second hop is OPEN, by the row's relPath: `undefined` closed,
+   *  `null` open and loading, an answer open and rendered — so a re-render (the
+   *  order toggle, a series write) keeps what the reader opened. */
+  hopState?: (relPath: string) => RelatedHopResponse | null | undefined;
 }
 
 /**
@@ -86,8 +82,10 @@ export interface RelatedViewOptions {
  */
 function reasonHtml(reason: string, sessions: string[] | undefined): string {
   if (!reason.startsWith(REASON_SESSION_PREFIX)) return `<em>${esc(reason)}</em>`;
-  const refs = (sessions ? sessions.slice(0, RELATED_SHARED_PRS_SHOWN) : reason.slice(REASON_SESSION_PREFIX.length).split(", "))
-    .map((ref) => `<span class="wiki-why-sess" title="${esc(ref)}">${esc(ref)}</span>`);
+  const raw = sessions
+    ? sessions.slice(0, RELATED_SHARED_PRS_SHOWN)
+    : reason.slice(REASON_SESSION_PREFIX.length).split(", ");
+  const refs = raw.map((ref) => `<span class="wiki-why-sess" title="${esc(ref)}">${esc(ref)}</span>`);
   return `<em>${esc(REASON_SESSION_PREFIX)}${refs.join(", ")}</em>`;
 }
 
@@ -137,11 +135,7 @@ export function strengthBarHtml(p: RelatedListing): string {
 export function relatedAgeHtml(p: WikiListing, now: number, workedAxis: boolean): string {
   const signal = pageDateSignal(p, "worked", now);
   if (!signal) return "";
-  const source = workedAxis
-    ? signal.kind === "worked"
-      ? workedSourceOf(p, now, signal)
-      : ({ kind: "fallback" } as const)
-    : null;
+  const source = workedAxis ? workedAxisSource(p, now, signal) : null;
   const chip = workedChip(source, signal.label, signal.kind === "added" ? "added" : "updated");
   return `<span class="wiki-rel-age${chip.cls}" title="${esc(chip.title)}">${esc(formatRailAge(signal.ms, now, signal.label))}</span>`;
 }
@@ -225,12 +219,19 @@ export function relatedSectionHtml(
   let html =
     `<div class="wiki-conn-section wiki-related">` +
     `<div class="wiki-conn-title wiki-rel-head"><span class="wiki-rel-count">Related work (${items.length})</span>${toggle}</div>`;
+  // A body id per row, by its place in the SERVER's order — stable across the
+  // order toggle, unique within the block.
+  const bodyIds = new Map(items.map((p, i) => [p, `wiki-rel-hop-${i}`]));
   for (const p of orderRelated(items, order, now)) {
+    const bodyId = bodyIds.get(p)!;
+    const hop = opts.hops ? opts.hopState?.(p.relPath) : undefined;
+    const open = hop !== undefined;
     html +=
       `<div class="wiki-conn-item wiki-conn-related" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       (opts.hops
-        ? `<button type="button" class="wiki-rel-hop" ${RELATED_HOP_ATTR}="${esc(p.relPath)}" aria-expanded="false" ` +
-          `aria-label="Show what ${esc(displayTitleOf(p))} is related to" title="Its related work">▸</button>`
+        ? `<button type="button" class="wiki-rel-hop" ${RELATED_HOP_ATTR}="${esc(p.relPath)}" aria-expanded="${open}" ` +
+          `aria-controls="${bodyId}" aria-label="Show what ${esc(displayTitleOf(p))} is related to" ` +
+          `title="Its related work">${open ? "▾" : "▸"}</button>`
         : "") +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       `<div class="wiki-conn-text"><span>${esc(displayTitleOf(p))}</span>` +
@@ -239,7 +240,11 @@ export function relatedSectionHtml(
       `</div>` +
       (editable && canEditSeriesPage(p.relPath) ? seriesMenuBtnHtml(p.relPath, !!p.series) : "") +
       `</div>`;
-    if (opts.hops) html += `<div class="wiki-rel-hop-body" ${RELATED_HOP_BODY_ATTR}="${esc(p.relPath)}" hidden></div>`;
+    if (opts.hops) {
+      html +=
+        `<div class="wiki-rel-hop-body" id="${bodyId}" ${RELATED_HOP_BODY_ATTR}="${esc(p.relPath)}" aria-live="polite"` +
+        (open ? `>${relatedHopHtml(displayTitleOf(p), hop, opts)}</div>` : ` hidden></div>`);
+    }
   }
   return html + "</div>";
 }
@@ -253,10 +258,11 @@ export interface RelatedHopResponse {
 
 /**
  * The second hop under a row: the rows `/api/wiki/related` answered for that
- * page, minus the open page and its attachments (the server's cut). Each row
- * opens its page through the same delegated handler; it carries no ▸ and no
- * `⋯`, so the walk stops here. The why line is in the HOP page's terms ("cites
- * this page" = cites the page the ▸ sits on), which the head line names.
+ * page, minus the open page and its attachments (the server's cut), in the
+ * block's own order. Each row opens its page through the same delegated
+ * handler; it carries no ▸ and no `⋯`, so the walk stops here. The why line is
+ * in the HOP page's terms ("cites this page" = cites the page the ▸ sits on),
+ * which the head line names.
  */
 export function relatedHopHtml(
   via: string,
@@ -269,7 +275,7 @@ export function relatedHopHtml(
   if (!body.related.length) return `<div class="wiki-rel-hop-note">Nothing else is related to ${esc(via)}.</div>`;
   const more = body.total > body.related.length ? ` · ${body.related.length} of ${body.total}` : "";
   let html = `<div class="wiki-rel-hop-head">Related to ${esc(via)}${esc(more)}</div>`;
-  for (const p of body.related) {
+  for (const p of orderRelated(body.related, opts.order ?? "strongest", now)) {
     html +=
       `<div class="wiki-conn-item wiki-rel-hop-row" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +

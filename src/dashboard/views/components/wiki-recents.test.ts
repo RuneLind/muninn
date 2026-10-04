@@ -3058,3 +3058,9 @@ describe("buildRail — a child in a subfolder of its parent", () => {
     expect(open.shown).toBe(arc.length);
   });
 });
+
+test("parseRelatedOrder lives beside relatedOrderKey: an unknown stored order is the default", async () => {
+  const { parseRelatedOrder } = await import("./wiki-recents.ts");
+  expect(parseRelatedOrder("newest")).toBe("newest");
+  for (const raw of [null, undefined, "", "oldest", "NEWEST"]) expect(parseRelatedOrder(raw)).toBe("strongest");
+});
