@@ -58,7 +58,8 @@ import { bareId, stampedSessionRefs } from "./session-refs.ts";
  *
  * Exported for the lint's series checks (`lint-series.ts`, through `related.ts`'s
  * re-export), which apply the same four cuts — the constants AND this predicate
- * — rather than re-declaring them.
+ * — rather than re-declaring them, and for graph mode (`graph.ts`), which never
+ * draws one.
  *
  * The hub cut alone does not reach these pages, and that is measured rather than
  * assumed: on mimir (547 pages) `index.md` has **3** backlinks, `log.md` 4 and
@@ -198,19 +199,21 @@ export function neighbours(index: WikiIndex, relPath: string): Neighbour[] {
     // Ordered by the OPEN page's own list, so the refs a reason names are the
     // first ones THIS page declares.
     const ordered = [...selfByKey.values()].sort((a, b) => selfRefs.indexOf(a) - selfRefs.indexOf(b));
-    const shared = new Map<string, string[]>();
+    // A Set per candidate: two pages whose relPaths differ only by case share
+    // one normalized key, so the ref map lists that key twice under one ref.
+    const shared = new Map<string, Set<string>>();
     for (const mine of ordered) {
       for (const key of maps.prPages.get(mine.toLowerCase()) ?? []) {
         if (key === selfKey) continue;
-        const list = shared.get(key);
-        if (list) list.push(mine);
-        else shared.set(key, [mine]);
+        const set = shared.get(key);
+        if (set) set.add(mine);
+        else shared.set(key, new Set([mine]));
       }
     }
     for (const [key, refs] of shared) {
-      if (refs.length < RELATED_SHARED_PRS_MIN) continue;
+      if (refs.size < RELATED_SHARED_PRS_MIN) continue;
       const e = entry(key);
-      if (e) e.signals.prs = refs;
+      if (e) e.signals.prs = [...refs];
     }
   }
 

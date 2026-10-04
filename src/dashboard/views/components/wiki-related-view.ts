@@ -18,8 +18,9 @@ import { REASON_SESSION_PREFIX } from "../../../wiki/related-constants.ts";
 
 /**
  * One reason, escaped and wrapped in `<em>`. A `shares session …` reason wraps
- * each ref in a `<span class="wiki-why-sess">` so CSS can shorten a 45-byte
- * session id on screen while the text stays whole for copying. Parsed from the
+ * each ref in a `<span class="wiki-why-sess">` so CSS can shorten a session
+ * ref (a bare uuid is 36 characters, `claude-code:<uuid>` 48) on screen while
+ * the text stays whole for copying. Parsed from the
  * reason text, since the row carries no structured signals yet.
  */
 function reasonHtml(reason: string): string {

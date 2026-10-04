@@ -73,9 +73,9 @@ export interface RelatedRef {
   why: string;
 }
 
-/** The two link reasons. The four sources below run in a fixed order and a why
- *  line prints its reasons in the order they were added, so a page reached by
- *  two of them reads the same way on every build. */
+/** The two link reasons. A why line pushes its reasons in one fixed order —
+ *  cites, cited by, shares PRs, shares session — so a page reached by two
+ *  signals reads the same way on every build. */
 const REASON_CITES = "cites this page";
 const REASON_CITED_BY = "cited by this page";
 
@@ -97,10 +97,11 @@ const REASON_CITED_BY = "cited by this page";
  * 547-page mimir clone with the cuts on candidates only, opening `index.md`
  * yielded **340** rows (+220 KB on one response), `plans/index.md` 246, `log.md`
  * 189 and `flows/how-we-build.mdx` — cut as a candidate at 27 backlinks — 36.
- * With both applied to the open page as well, the largest block on that corpus
- * is **33** rows (`overview.md`), which is the link graph's own bound: no cap is
- * declared, because a cap would silently drop rows from a page that really does
- * have that many neighbours.
+ * With both applied to the open page as well, the largest block on that clone
+ * was **33** rows (`overview.md`, 2026-09-20) — the link graph's own bound, and
+ * a past measurement: live mimir on 2026-10-04 (585 pages) gave 58. No cap is declared, because a cap
+ * would silently drop rows from a page that really does have that many
+ * neighbours.
  */
 export function computeRelated(index: WikiIndex, relPath: string): RelatedRef[] {
   return neighbours(index, relPath)

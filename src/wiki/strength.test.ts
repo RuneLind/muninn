@@ -26,6 +26,7 @@ import {
   type NeighbourSignals,
 } from "./strength.ts";
 import {
+  NEAR_HOP_DECAY,
   NEAR_MAX,
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
@@ -200,6 +201,25 @@ describe("neighbours — the signals", () => {
   });
 });
 
+test("one shared PR ref is no signal even when two pages' relPaths differ only by case", () => {
+  // Synthetic: a real scan of a case-insensitive filesystem cannot hold
+  // `plans/Other.md` and `plans/other.md` at once. Both normalize to one key,
+  // so the inverted PR map lists that key twice under the one ref.
+  const metas = new Map<string, WikiPageMeta>();
+  const add = (rel: string, prRefs: string[]) =>
+    metas.set(rel, { relPath: rel, name: rel, title: rel, type: "plan", tags: [], aliases: [], prRefs } as unknown as WikiPageMeta);
+  add("plans/open.md", ["o/r#1", "o/r#2"]);
+  add("plans/Other.md", ["o/r#1"]);
+  add("plans/other.md", ["o/r#1"]);
+  const index = {
+    pages: [...metas.values()],
+    outgoing: new Map<string, string[]>(),
+    backlinks: new Map<string, string[]>(),
+    resolveRelPath: (rp: string) => metas.get(rp) ?? [...metas.values()].find((m) => m.relPath.toLowerCase() === rp.toLowerCase()),
+  } as unknown as WikiIndex;
+  expect(neighbours(index, "plans/open.md")).toEqual([]);
+});
+
 describe("neighbours — the digest caps", () => {
   test("a PR digest is cut from the PR signal on EITHER end", async () => {
     const many = Array.from({ length: RELATED_DIGEST_PRS - 1 }, (_, i) => `huginn#${i + 1}`).join(" ");
@@ -319,8 +339,18 @@ describe("neighbours — the cuts and their sides", () => {
 });
 
 describe("hop ordering", () => {
-  test("STRENGTH_MAX is derived from the three ceilings", () => {
-    expect(STRENGTH_MAX).toBeCloseTo(STRENGTH_LINK_BOTH_WAYS + STRENGTH_PR_CAP + STRENGTH_SESSION_CAP, 10);
+  test("the tuned numbers are the ones the docblocks were measured against", () => {
+    // Value pins: a move must be a deliberate edit here too.
+    expect(STRENGTH_LINK_ONE_WAY).toBe(1.0);
+    expect(STRENGTH_LINK_BOTH_WAYS).toBe(1.6);
+    expect(STRENGTH_PR_WEIGHT).toBe(0.6);
+    expect(STRENGTH_PR_CAP).toBe(1.8);
+    expect(STRENGTH_SESSION_WEIGHT).toBe(1.2);
+    expect(STRENGTH_SESSION_CAP).toBe(2.4);
+    expect(STRENGTH_SESSION_DIGEST).toBe(12);
+    expect(STRENGTH_MAX).toBeCloseTo(5.8, 10);
+    expect(NEAR_HOP_DECAY).toBe(0.55);
+    expect(NEAR_MAX).toBe(200);
   });
 
   test("max(hop 2) < min(hop 1) over every reachable signal combination", () => {

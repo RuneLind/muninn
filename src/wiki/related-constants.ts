@@ -17,7 +17,7 @@
  * number the paragraphs below were measured against. Re-measure on the live
  * wiki before moving either, and move the pin in the same edit.
  *
- * `related.ts` re-exports the four `RELATED_*` cuts, so the rule and its tests
+ * `related.ts` re-exports the four `RELATED_*` constants, so the rule and its tests
  * still read one name each. The `STRENGTH_*` weights below them belong to
  * `strength.ts`, the one neighbour rule both Related work and the find
  * palette's near map read.
@@ -66,6 +66,9 @@ export const RELATED_SHARED_PRS_SHOWN = 2;
  * nothing about two pages being one piece of work. The count is over EVERY page
  * in the index carrying the session, bookkeeping and culled pages included, so
  * a session does not escape the cap by stamping pages the rule later cuts.
+ *
+ * 12 is a forward-looking guard, not a measurement: on 2026-10-04 no session
+ * sat on more than 3 mimir pages. Revisit after the provenance backfill.
  */
 export const STRENGTH_SESSION_DIGEST = 12;
 

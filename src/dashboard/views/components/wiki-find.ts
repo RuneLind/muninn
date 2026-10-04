@@ -1,26 +1,33 @@
 /**
  * FIND — the reader's palette (`/`, ⌘K) ranks the listing it already holds.
- * Pure and browser-safe: it reads `wiki-filter.ts` helpers and nothing else, so
- * `bun test` loads it and the /wiki bundle carries it.
+ * Pure and browser-safe: it reads `wiki-filter.ts`, `escape.ts` and the rail's
+ * series helpers in `wiki-groups.ts` — so a series is grouped, keyed and labelled
+ * the way the rail does it — and nothing else, so `bun test` loads it and the
+ * /wiki bundle carries it.
  *
  * There is no find route. The server supplies one thing the listing cannot:
  * `near` on `/api/wiki/page` — closeness to the open page over the neighbour
  * rule (`src/wiki/strength.ts`), keyed by the listing's own `relPath` spelling.
  *
- * Grammar (`parseFindQuery`): free words are ANDed. `in:<text>` /
- * `in:"<text with spaces>"` keeps pages whose series key or label contains the
- * text; `type:<prefix>`; `age:<N` / `age:>N` days on the worked-on axis; `#tag`
- * a tag prefix, but `#<digits>` a number word; `is:retired` admits culled
- * pages. Any other `key:` token is a free word. Within one key the values are
- * ORed (`type:plan type:blog`), across keys ANDed.
+ * Grammar (`parseFindQuery`): free words are ANDed, stray `"` dropped (no
+ * phrase search). `in:<text>` / `in:"<text with spaces>"` keeps pages whose
+ * series key or label contains the text; `series:<key>` (what a chip applies)
+ * keeps the series whose key IS that key, in the rail's fold; `type:<prefix>`;
+ * `age:<N` / `age:>N` days on the worked-on axis; `#tag` a tag prefix, but
+ * `#<digits>` a number word; `is:retired` admits culled pages. A known key with
+ * no value yet (`in:`, `type:`, `#`, `age:<`) is ignored; any other `key:` token
+ * is a free word. `in:`, `series:` and `type:` OR their values (`type:plan
+ * type:blog`); two `#tag`s AND; two `age:` bounds AND, so a second bound of the
+ * same direction keeps the tighter. Across keys everything ANDs.
  *
  * Score, per page: each word SUMS the weights of the fields it hits (title 3,
  * series 2, tags/aliases 1.5, description 1, relPath 1); a word that hits no
  * field drops the page. Total = text × (1 + 0.8 × near) + 0.6 × e^(−age/30).
- * A pure-digit word matches a WHOLE number in the title (weight 4, ISO dates
- * removed first, so `9` does not hit `2026-09-…`) or the description (1).
+ * A pure-digit word matches a WHOLE number outside any ISO date in the title
+ * (weight 4, so `9` does not hit `2026-09-…`) or the description (1).
  */
 
+import { escHtml } from "./escape.ts";
 import {
   displayTitleOf,
   isMetaPage,
@@ -28,6 +35,7 @@ import {
   relPathMatchesQuery,
   type WikiListing,
 } from "./wiki-filter.ts";
+import { seriesCensusKey, seriesHead, seriesKeyOf, seriesMembersByFoldKey } from "./wiki-groups.ts";
 
 /** How many rows the palette shows. */
 export const FIND_ROWS_MAX = 40;
@@ -53,6 +61,8 @@ export interface FindQuery {
   words: string[];
   /** `in:` values, folded. */
   inSeries: string[];
+  /** `series:` keys, in {@link seriesMatchKey}'s form. */
+  series: string[];
   /** `type:` prefixes, folded. */
   types: string[];
   /** `#tag` prefixes, folded, `#` dropped. */
@@ -89,25 +99,45 @@ function unquote(v: string): string {
   return v.startsWith('"') ? v.slice(1, v.endsWith('"') && v.length > 1 ? -1 : undefined) : v;
 }
 
+/**
+ * The form a `series:` value and a page's series key are compared in: the
+ * rail's fold (trimmed, lower-cased), with any `"` removed on BOTH sides — a
+ * chip cannot quote a key that contains one.
+ */
+export function seriesMatchKey(key: string): string {
+  return seriesCensusKey(key.replace(/"/g, ""));
+}
+
+/** Keys that are syntax even before a value is typed. */
+const KNOWN_KEYS = new Set(["in", "series", "type", "is", "age"]);
+
 export function parseFindQuery(raw: string): FindQuery {
-  const q: FindQuery = { words: [], inSeries: [], types: [], tags: [], retired: false };
+  const q: FindQuery = { words: [], inSeries: [], series: [], types: [], tags: [], retired: false };
   for (const tok of tokenize(raw)) {
     const colon = tok.indexOf(":");
     const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
     const value = colon > 0 ? unquote(tok.slice(colon + 1)) : "";
-    if (key === "in" && value.trim()) {
+    // Mid-typing: `in:`, `in:"`, `age:<` — no filter, and not a word either.
+    if (KNOWN_KEYS.has(key) && /^[<>]?$/.test(value.trim())) continue;
+    if (key === "in") {
       q.inSeries.push(foldText(value.trim()));
       continue;
     }
-    if (key === "type" && value.trim()) {
+    if (key === "series") {
+      const k = seriesMatchKey(value);
+      if (k) q.series.push(k);
+      continue;
+    }
+    if (key === "type") {
       q.types.push(foldText(value.trim()));
       continue;
     }
     if (key === "age") {
       const m = /^([<>])(\d+)$/.exec(value);
       if (m) {
-        if (m[1] === "<") q.ageLt = Number(m[2]);
-        else q.ageGt = Number(m[2]);
+        const n = Number(m[2]);
+        if (m[1] === "<") q.ageLt = q.ageLt === undefined ? n : Math.min(q.ageLt, n);
+        else q.ageGt = q.ageGt === undefined ? n : Math.max(q.ageGt, n);
         continue;
       }
     }
@@ -115,13 +145,14 @@ export function parseFindQuery(raw: string): FindQuery {
       q.retired = true;
       continue;
     }
-    if (tok.startsWith("#") && tok.length > 1) {
+    if (tok === "#") continue;
+    if (tok.startsWith("#")) {
       const rest = tok.slice(1);
       if (/^\d+$/.test(rest)) q.words.push(rest);
       else q.tags.push(foldText(rest));
       continue;
     }
-    const word = foldText(tok);
+    const word = foldText(tok.replace(/"/g, ""));
     if (word) q.words.push(word);
   }
   return q;
@@ -132,6 +163,7 @@ function isEmptyQuery(q: FindQuery): boolean {
   return (
     !q.words.length &&
     !q.inSeries.length &&
+    !q.series.length &&
     !q.types.length &&
     !q.tags.length &&
     q.ageLt === undefined &&
@@ -140,20 +172,42 @@ function isEmptyQuery(q: FindQuery): boolean {
   );
 }
 
-/** A day, `YYYY-MM-DD`, or a month, `YYYY-MM` — removed before number matching. */
+/** A day, `YYYY-MM-DD`, or a month, `YYYY-MM` — a digit word never matches
+ *  inside one, in the scorer and the highlighter alike. */
 const ISO_DATE = /\b\d{4}-\d{2}(?:-\d{2})?\b/g;
 
-function hasWholeNumber(text: string, digits: string): boolean {
-  return new RegExp(`(?<!\\d)${digits}(?!\\d)`).test(text.replace(ISO_DATE, " "));
+function isoDateSpans(text: string): Array<[number, number]> {
+  return [...text.matchAll(ISO_DATE)].map((m) => [m.index, m.index + m[0].length]);
 }
 
-/** A series' display label per folded key, from the head page that carries it
- *  (`series_label:` sits on one page only). */
-export function seriesLabels(pages: readonly WikiListing[]): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const p of pages) {
-    if (p.series && p.seriesLabel) out.set(foldText(p.series.trim()), p.seriesLabel);
+function insideSpan(spans: ReadonlyArray<[number, number]>, start: number, end: number): boolean {
+  return spans.some(([a, b]) => start < b && end > a);
+}
+
+const wholeNumberSource = (digits: string): string => `(?<!\\d)${digits}(?!\\d)`;
+
+function hasWholeNumber(text: string, digits: string): boolean {
+  const spans = isoDateSpans(text);
+  for (const m of text.matchAll(new RegExp(wholeNumberSource(digits), "g"))) {
+    if (!insideSpan(spans, m.index, m.index + m[0].length)) return true;
   }
+  return false;
+}
+
+const labelMemo = new WeakMap<readonly WikiListing[], Map<string, string>>();
+
+/** A series' display label per rail fold key (`seriesCensusKey`): the rail's
+ *  `seriesHead` label, else the head's own spelling of the key. Memoized per
+ *  listing array — the shell replaces the array on every refetch. */
+export function seriesLabels(pages: readonly WikiListing[]): Map<string, string> {
+  const hit = labelMemo.get(pages);
+  if (hit) return hit;
+  const out = new Map<string, string>();
+  for (const [fold, members] of seriesMembersByFoldKey(pages)) {
+    const head = seriesHead(members);
+    out.set(fold, head?.seriesLabel || (head ? seriesKeyOf(head) : fold));
+  }
+  labelMemo.set(pages, out);
   return out;
 }
 
@@ -171,19 +225,20 @@ export interface FindRow {
   score: number;
   /** The page's closeness to the open page, 0 when none. */
   near: number;
-  /** Folded series key, `""` when the page has none. */
+  /** The rail's fold of the series key, `""` when the page has none. */
   seriesKey: string;
   seriesLabel: string;
 }
 
 export interface FindGroup {
-  /** Folded series key, `""` for a no-series row (a group of one). */
+  /** The rail's fold of the series key, `""` for a no-series row (a group of one). */
   seriesKey: string;
   seriesLabel: string;
   rows: FindRow[];
 }
 
 export interface FindChip {
+  /** {@link seriesMatchKey} of the series — what `token` matches. */
   seriesKey: string;
   label: string;
   /** Matches in this series across ALL results, not only the shown rows. */
@@ -220,8 +275,9 @@ function textScore(
 ): number {
   if (!words.length) return 1;
   const titles = [...new Set([foldText(p.title), foldText(displayTitleOf(p))])];
-  const key = p.series ? foldText(p.series.trim()) : "";
-  const label = key ? foldText(labels.get(key) ?? "") : "";
+  const raw = seriesKeyOf(p);
+  const key = foldText(raw);
+  const label = raw ? foldText(labels.get(seriesCensusKey(raw)) ?? "") : "";
   const tags = [...p.tags, ...p.aliases].map(foldText);
   const desc = foldText(p.description ?? "");
   const rel = foldText(p.relPath);
@@ -250,12 +306,14 @@ function passesFilters(
   labels: Map<string, string>,
   ageDays: number | null,
 ): boolean {
+  const raw = seriesKeyOf(p);
   if (q.inSeries.length) {
-    if (!p.series) return false;
-    const key = foldText(p.series.trim());
-    const label = foldText(labels.get(key) ?? "");
+    if (!raw) return false;
+    const key = foldText(raw);
+    const label = foldText(labels.get(seriesCensusKey(raw)) ?? "");
     if (!q.inSeries.some((v) => key.includes(v) || label.includes(v))) return false;
   }
+  if (q.series.length && !q.series.includes(seriesMatchKey(raw))) return false;
   if (q.types.length && !q.types.some((t) => foldText(p.type).startsWith(t))) return false;
   if (q.tags.length) {
     const tags = p.tags.map(foldText);
@@ -287,29 +345,33 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
     if (text === 0) continue;
     const n = near[p.relPath] ?? 0;
     const recency = ageDays === null ? 0 : FIND_RECENCY_WEIGHT * Math.exp(-ageDays / FIND_RECENCY_DAYS);
-    const key = p.series ? foldText(p.series.trim()) : "";
+    const raw = seriesKeyOf(p);
+    const key = raw ? seriesCensusKey(raw) : "";
     scored.push({
       page: p,
       score: text * (1 + FIND_NEAR_BOOST * n) + recency,
       near: n,
       seriesKey: key,
-      seriesLabel: key ? labels.get(key) ?? p.series!.trim() : "",
+      seriesLabel: key ? labels.get(key) ?? raw : "",
     });
   }
   scored.sort((a, b) => b.score - a.score || a.page.relPath.localeCompare(b.page.relPath));
 
-  // Chips count every match, before the row cap.
+  // Chips count every match, before the row cap, keyed on exactly what the
+  // chip's `series:` token matches — so applying a chip yields its count.
   const chipMap = new Map<string, FindChip>();
   for (const r of scored) {
     if (!r.seriesKey) continue;
-    const c = chipMap.get(r.seriesKey);
+    const match = seriesMatchKey(r.seriesKey);
+    if (!match) continue;
+    const c = chipMap.get(match);
     if (c) c.count++;
     else {
-      chipMap.set(r.seriesKey, {
-        seriesKey: r.seriesKey,
+      chipMap.set(match, {
+        seriesKey: match,
         label: r.seriesLabel,
         count: 1,
-        token: `in:"${r.page.series!.trim().replace(/"/g, "")}"`,
+        token: /\s/.test(match) ? `series:"${match}"` : `series:${match}`,
       });
     }
   }
@@ -341,14 +403,10 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
   };
 }
 
-/** The query with every `in:` token replaced by `token`. */
+/** The query with every `in:` and `series:` token replaced by `token`. */
 export function applySeriesChip(raw: string, token: string): string {
-  const rest = tokenize(raw).filter((t) => !/^in:/i.test(t));
+  const rest = tokenize(raw).filter((t) => !/^(in|series):/i.test(t));
   return [...rest, token].join(" ");
-}
-
-function escText(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 /**
@@ -358,11 +416,12 @@ function escText(s: string): string {
  * `mark`) matches inside a `<mark class=…>` it inserted.
  *
  * Matching runs on a folded copy with an index map back to the raw text, so
- * `kjoring` marks `Kjøring`. Digit terms match whole numbers only.
+ * `kjoring` marks `Kjøring`. Digit terms match whole numbers outside ISO
+ * dates only — the scorer's rule, so a mark never claims a hit scoring refused.
  */
 export function highlightFind(text: string, terms: readonly string[]): string {
   const usable = [...new Set(terms.filter(Boolean))].sort((a, b) => b.length - a.length);
-  if (!usable.length || !text) return escText(text);
+  if (!usable.length || !text) return escHtml(text);
   // Fold char by char, recording which raw index each folded char came from.
   let folded = "";
   const from: number[] = [];
@@ -374,8 +433,9 @@ export function highlightFind(text: string, terms: readonly string[]): string {
     }
   }
   const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const alt = usable.map((t) => (/^\d+$/.test(t) ? `(?<!\\d)${t}(?!\\d)` : esc(t))).join("|");
+  const alt = usable.map((t) => (/^\d+$/.test(t) ? wholeNumberSource(t) : esc(t))).join("|");
   const re = new RegExp(alt, "g");
+  const dates = isoDateSpans(folded);
   let out = "";
   let at = 0;
   for (let m = re.exec(folded); m; m = re.exec(folded)) {
@@ -383,11 +443,12 @@ export function highlightFind(text: string, terms: readonly string[]): string {
       re.lastIndex++;
       continue;
     }
+    if (/^\d+$/.test(m[0]) && insideSpan(dates, m.index, m.index + m[0].length)) continue;
     const start = from[m.index]!;
     const end = from[m.index + m[0].length - 1]! + 1;
     if (start < at) continue;
-    out += escText(text.slice(at, start)) + `<mark>${escText(text.slice(start, end))}</mark>`;
+    out += escHtml(text.slice(at, start)) + `<mark>${escHtml(text.slice(start, end))}</mark>`;
     at = end;
   }
-  return out + escText(text.slice(at));
+  return out + escHtml(text.slice(at));
 }

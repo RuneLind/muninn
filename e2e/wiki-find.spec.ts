@@ -12,6 +12,10 @@
  *     outranks an equal text match two hops away only if every link holds.
  *  3. **Open, close, focus.** Focus returns to whatever opened the palette, and
  *     ⌘K toggles it rather than reopening.
+ *  4. **Timing and state the shell owns.** A key inside the 120 ms debounce, an
+ *     IME composition, a listing that has not arrived, a Back press, a failed
+ *     page load and an open Tools menu — each needs the real shell around the
+ *     palette.
  *
  * Fixture: a temp wiki whose pages all share one mtime (`settleWikiMtimes`,
  * then `utimesSync` on the pair the near-boost case compares), because an
@@ -189,7 +193,7 @@ test("on a chip, `]`, `f` and `t` change nothing; Enter applies the chip; Escape
   await expect(palette(page)).toBeVisible();
 
   await page.keyboard.press("Enter");
-  await expect(input(page)).toHaveValue('member in:"two-words"');
+  await expect(input(page)).toHaveValue("member series:two-words");
   await expect(rows(page)).toHaveCount(2);
 
   // Escape from a NON-input focus closes too.
@@ -255,4 +259,130 @@ test("Escape in focus mode closes the palette and keeps focus mode", async ({ pa
   await page.keyboard.press("Escape");
   await expect(palette(page)).toHaveCount(0);
   await expect(page.locator(".wiki-layout")).toHaveClass(/focus-mode/);
+});
+
+const h1 = (page: Page) => page.locator(".wiki-article-head h1");
+
+/** Dispatch keydowns on the input synchronously — every one lands inside the
+ *  debounce, which `page.keyboard` cannot promise. */
+async function keysNow(page: Page, steps: Array<{ value?: string; key?: string; init?: Record<string, unknown> }>) {
+  await page.evaluate((list) => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    for (const s of list) {
+      if (s.value !== undefined) {
+        box.value = s.value;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      if (s.key) {
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: s.key, bubbles: true, cancelable: true, ...(s.init ?? {}) }));
+      }
+    }
+  }, steps);
+}
+
+test("Enter right after typing opens the FRESH top row, whatever the stale list's active row was", async ({ page }) => {
+  await openReader(page);
+  await find(page, "member");
+  await keysNow(page, [{ key: "ArrowDown" }, { value: "gamma" }, { key: "Enter" }]);
+  await expect(palette(page)).toHaveCount(0);
+  await expect(h1(page)).toHaveText("Gamma gamma report");
+});
+
+test("an arrow inside the debounce moves over the fresh results", async ({ page }) => {
+  await openReader(page);
+  await find(page, "member");
+  // Stale list: active row 1. Fresh "gamma" list: report, gamma-one, gamma-two.
+  await keysNow(page, [{ key: "ArrowDown" }, { value: "gamma" }, { key: "ArrowDown" }, { key: "Enter" }]);
+  await expect(palette(page)).toHaveCount(0);
+  await expect(h1(page)).toHaveText("Gamma one");
+});
+
+test("Enter and Escape during an IME composition do nothing palette-specific", async ({ page }) => {
+  await openReader(page);
+  await find(page, "fix rounds");
+  await keysNow(page, [
+    { key: "Enter", init: { isComposing: true } },
+    { key: "Escape", init: { isComposing: true } },
+    { key: "Enter", init: { keyCode: 229 } },
+  ]);
+  await expect(palette(page)).toBeVisible();
+  await expect(h1(page)).toHaveText("Open plan");
+});
+
+test("Space on a focused result row opens it", async ({ page }) => {
+  await openReader(page);
+  await find(page, "fix rounds");
+  await page.keyboard.press("Tab");
+  await expect(rows(page).first()).toBeFocused();
+  await page.keyboard.press(" ");
+  await expect(palette(page)).toHaveCount(0);
+  await expect(h1(page)).toHaveText("Four fix rounds on widget #500");
+});
+
+test("`/` with the Tools menu open does not open the palette", async ({ page }) => {
+  await openReader(page);
+  const tools = page.locator("details.nav-dropdown").first();
+  await tools.locator("summary").click();
+  await expect(tools).toHaveAttribute("open", "");
+  await page.keyboard.press("/");
+  await page.waitForTimeout(150);
+  await expect(palette(page)).toHaveCount(0);
+  // Checked separately: ⌘K toggles, so pressed after an opening `/` it would close.
+  await page.keyboard.press("ControlOrMeta+k");
+  await page.waitForTimeout(150);
+  await expect(palette(page)).toHaveCount(0);
+});
+
+test("Back with the palette open closes it", async ({ page }) => {
+  await openReader(page);
+  await find(page, "fix rounds");
+  await page.keyboard.press("Enter");
+  await expect(h1(page)).toHaveText("Four fix rounds on widget #500");
+  await find(page, "gamma");
+  await page.goBack();
+  await expect(h1(page)).toHaveText("Open plan");
+  await expect(palette(page)).toHaveCount(0);
+});
+
+test("Back to the start view with the palette open closes it", async ({ page }) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+  await expect(page.locator("#wikiList .wiki-list-item").first()).toBeVisible();
+  await find(page, "fix rounds");
+  await page.keyboard.press("Enter");
+  await expect(h1(page)).toHaveText("Four fix rounds on widget #500");
+  await find(page, "gamma");
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Knowledge Wiki" })).toBeVisible();
+  await expect(palette(page)).toHaveCount(0);
+});
+
+test("a palette opened before the listing arrives says so, then ranks it", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route(/\/api\/wiki\/pages\?/, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`, { waitUntil: "domcontentloaded" });
+  await page.locator("body").press("/");
+  await expect(palette(page)).toBeVisible();
+  await input(page).fill("gamma");
+  // Past the debounce, so only the listing's arrival can re-render the list.
+  await page.waitForTimeout(400);
+  await expect(page.locator("#wikiFindList .wiki-find-empty")).toHaveText("Loading pages…");
+  release();
+  await expect(rows(page)).toHaveCount(3);
+});
+
+test("after a failed page load the previous page's closeness no longer boosts", async ({ page }) => {
+  await openReader(page);
+  await page.evaluate((wiki) => {
+    history.pushState({}, "", `/wiki?wiki=${wiki}&relPath=${encodeURIComponent("plans/missing.mdx")}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, WIKI);
+  await expect(page.locator("#articleWrap .wiki-empty-state")).toBeVisible();
+  await find(page, "ledger notes");
+  await expect(rows(page)).toHaveCount(2);
+  // Equal text, equal dates, no closeness: the relPath tie-break decides.
+  await expect(rows(page).first()).toHaveAttribute("data-relpath", "notes/far.mdx");
 });

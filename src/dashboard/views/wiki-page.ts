@@ -2559,7 +2559,7 @@ export async function renderWikiPage(opts?: {
       overflow-wrap: anywhere;
     }
     .wiki-conn-why em { font-style: normal; }
-    /* A session id is ~45 characters of hex; shortened on screen, whole in the
+    /* A session ref runs 36 (bare uuid) to 48 (claude-code:<uuid>) characters; shortened on screen, whole in the
        DOM so a copy takes the full ref (the span carries it as a title too). */
     .wiki-why-sess {
       display: inline-block; max-width: 16ch; overflow: hidden;

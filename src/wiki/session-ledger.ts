@@ -40,6 +40,7 @@ import {
 } from "../utils/claude-usage-fetch.ts";
 import { getLog } from "../logging.ts";
 import { HANDOFF_READS_MAX, PR_READS_MAX, type HandoffRun, type ProvenanceMerge } from "./provenance.ts";
+import { isSessionIdShape } from "./session-refs.ts";
 
 const log = getLog("wiki", "session-ledger");
 
@@ -89,7 +90,6 @@ export const SESSION_IDS_QUERY_MAX_BYTES = 12_000;
 // The id-shape rule lives in the leaf `session-refs.ts` (browser-safe, no
 // logging); re-exported here so existing importers read the same names.
 export { SESSION_ID_MAX_CHARS, SESSION_ID_SHAPE, isSessionIdShape } from "./session-refs.ts";
-import { isSessionIdShape } from "./session-refs.ts";
 
 export interface SessionLedgerResult {
   /**

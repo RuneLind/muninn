@@ -619,8 +619,8 @@ function dedupeMerges(merges: readonly ProvenanceMerge[]): ProvenanceMerge[] {
   return out;
 }
 
-// `dedupeSessionRefs` and `bareId` live in the leaf `session-refs.ts`;
-// re-exported so this module's importers are unchanged.
+// `dedupeSessionRefs` lives in the leaf `session-refs.ts`; re-exported so this
+// module's importers are unchanged.
 export { dedupeSessionRefs } from "./session-refs.ts";
 
 /**

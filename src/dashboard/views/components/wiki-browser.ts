@@ -171,7 +171,7 @@ import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
 import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
 import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
-import { initFindPalette } from "./wiki-find-palette.ts";
+import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find-palette.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
@@ -337,7 +337,7 @@ import {
   graphToggleHtml,
   type GraphAdjacency,
 } from "./wiki-graph-view.ts";
-import { modalOpen } from "./wiki-panes.ts";
+import { modalOpen, navMenuOpen, readerKeyEventOf } from "./wiki-panes.ts";
 import { graphDefaults, parseIssueRoot, type GraphLevel, type GraphPayload } from "../../../wiki/graph-types.ts";
 // The provenance strip: one collapsed line under the title that opens into the
 // chain. Every string and every fragment of markup lives in that module (pure,
@@ -563,6 +563,8 @@ function syncDisplayFromUrl(): void {
 }
 
 let allPages: WikiListing[] = [];
+/** Has any listing arrived? Before it, the find palette says "Loading". */
+let pagesLoaded = false;
 /** The server's index-scan instant from `/api/wiki/pages`, kept solely to anchor the
  *  recency reads' `now` (see `recencyNow`). Null until the listing lands / on a
  *  degraded response. */
@@ -3865,6 +3867,7 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 }
 
 function loadPage(name: string, push: boolean, revealHash = true): void {
+  if (isFindOpen()) closeFind(false); // a navigation leaves the palette's rows stale
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
@@ -3894,6 +3897,7 @@ function loadPage(name: string, push: boolean, revealHash = true): void {
  *  pushed history entry so Back/reload/share re-resolve the SAME page;
  *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true, revealHash = true): void {
+  if (isFindOpen()) closeFind(false); // a navigation leaves the palette's rows stale
   hideExplainPill();
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
@@ -3925,6 +3929,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       setAtlasFull(false);
       navInFlight = false;
       if (data.error) {
+        // The previous page's closeness must not boost a find on this one.
+        currentNear = null;
         removeGraph();
         document.getElementById("articleWrap")!.innerHTML =
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
@@ -4292,7 +4298,7 @@ function escapeOwnedElsewhere(): boolean {
   return (
     modalOpen(document) ||
     (document.getElementById("wikiExplainBtn")?.getClientRects().length ?? 0) > 0 ||
-    !!document.querySelector("details.nav-dropdown[open]")
+    navMenuOpen(document)
   );
 }
 // Escape with a card open, and no other owner active, closes the card and
@@ -4310,20 +4316,9 @@ document.addEventListener(
   true,
 );
 document.addEventListener("keydown", (e) => {
-  const t = e.target as HTMLElement | null;
-  const toggles = graphKeyToggles({
-    key: e.key,
-    ctrlKey: e.ctrlKey,
-    metaKey: e.metaKey,
-    altKey: e.altKey,
-    shiftKey: e.shiftKey,
-    repeat: e.repeat,
-    targetTag: t?.tagName ?? null,
-    targetEditable: !!t?.isContentEditable,
-    // Any open modal or menu, not only one around the focused element
-    // (`modalOpen` says why).
-    targetInDialog: !!t?.closest?.('[aria-modal="true"], dialog[open]') || modalOpen(document),
-  });
+  // Any open modal or menu, not only one around the focused element
+  // (`modalOpen` says why).
+  const toggles = graphKeyToggles(readerKeyEventOf(e));
   // Only where the toggle is on screen: an article or an issue graph, on a
   // wiki with a tracker — never the overview or an Ask answer.
   if (!toggles || !document.getElementById(GRAPH_TOGGLE_ID)) return;
@@ -4783,6 +4778,9 @@ window.addEventListener("hashchange", () => {
 });
 
 window.addEventListener("popstate", () => {
+  // Back/Forward is a navigation: an open find palette's rows describe the
+  // page being left.
+  if (isFindOpen()) closeFind(false);
   const params = new URLSearchParams(location.search);
   // The project rides in the URL, so Back/Forward is a facet change too — and it
   // is the one path where the address bar leads. Adopted on EVERY branch (the
@@ -7239,6 +7237,7 @@ document.addEventListener("click", (e) => {
 // listener is document-level, bubble phase. See `wiki-find-palette.ts`.
 initFindPalette({
   getPages: () => allPages,
+  isLoaded: () => pagesLoaded,
   getNear: () => (currentNear && currentNear.relPath === currentRelPath ? currentNear.near : {}),
   getScannedAt: () => scannedAtMs,
   openPage: (relPath) => loadPageByRelPath(relPath),
@@ -7583,6 +7582,7 @@ function currentViewState() {
  *  boot heal) may read `?project=` off the address bar. */
 function setPagesData(data: WikiPagesResponse, boot = false): void {
   allPages = data.pages;
+  pagesLoaded = true;
   // Anchor every recency read to the server's scan instant BEFORE the first render
   // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
   // future-date guard on every frontmatter-dated page in the wiki at once.
@@ -7646,6 +7646,8 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // boot render already paints the chip the URL asked for as active.
   adoptProjectFilter(boot);
   adoptJiraFilter(boot);
+  // A palette opened before this listing arrived is showing "Loading".
+  refreshFind();
 }
 
 /** Adopt a fresh page set and repaint everything derived from it. Filters, the

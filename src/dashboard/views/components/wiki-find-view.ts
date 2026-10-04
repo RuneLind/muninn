@@ -62,6 +62,11 @@ export function findChipsHtml(result: FindResult): string {
 
 export const findRowId = (i: number): string => `wikiFindRow-${i}`;
 
+/** The list before the reader's listing has arrived. */
+export function findLoadingHtml(): string {
+  return `<div class="wiki-find-empty">Loading pages…</div>`;
+}
+
 /**
  * The result list. `hrefFor` gives each row a real link (middle-click and
  * Shift-Enter open it in a new tab); `titleOf` resolves a superseded page's

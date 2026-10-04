@@ -14,11 +14,14 @@
  * because opening the palette hides any peek.
  *
  * Closing REMOVES the node — opacity or visibility would keep client rects
- * and leave `modalOpen` true — and returns focus to the opener.
+ * and leave `modalOpen` true — and returns focus to the opener. The shell also
+ * closes it on a navigation it did not start (Back, another page load).
+ *
+ * During an IME composition the root still stops every key but acts on none:
+ * Enter and Escape belong to the composition there.
  */
 
-import { anchorNow } from "./wiki-filter.ts";
-import type { WikiListing } from "./wiki-filter.ts";
+import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
 import { applySeriesChip, rankFind, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
@@ -28,17 +31,20 @@ import {
   FIND_SCRIM_ID,
   findChipsHtml,
   findListHtml,
+  findLoadingHtml,
   findPaletteHtml,
   findRowId,
   isFindToggleKey,
   isMacPlatform,
 } from "./wiki-find-view.ts";
-import { modalOpen, readerKeyRefused } from "./wiki-panes.ts";
+import { modalOpen, navMenuOpen, readerKeyEventOf, readerKeyRefused } from "./wiki-panes.ts";
 
 /** What the palette needs from the shell. */
 export interface FindPalettePort {
   /** The listing the rail holds. */
   getPages(): readonly WikiListing[];
+  /** Has the first listing arrived? */
+  isLoaded(): boolean;
   /** The open page's `near` map, `{}` when no page is open. */
   getNear(): Record<string, number>;
   /** The listing's scan instant, for `anchorNow`. */
@@ -72,7 +78,7 @@ function input(): HTMLInputElement | null {
 function titleOf(relPath: string): string | undefined {
   const key = relPath.toLowerCase();
   const p = port?.getPages().find((x) => x.relPath.toLowerCase() === key);
-  return p ? p.displayTitle || p.title : undefined;
+  return p ? displayTitleOf(p) : undefined;
 }
 
 function render(): void {
@@ -82,6 +88,13 @@ function render(): void {
   const chips = document.getElementById(FIND_CHIPS_ID);
   if (!box || !list || !chips) return;
   const query = box.value;
+  if (!port.isLoaded()) {
+    result = null;
+    chips.innerHTML = "";
+    list.innerHTML = findLoadingHtml();
+    box.removeAttribute("aria-activedescendant");
+    return;
+  }
   result = rankFind(port.getPages(), query, {
     near: port.getNear(),
     now: anchorNow(Date.now(), port.getScannedAt()),
@@ -105,6 +118,21 @@ function syncActive(): void {
     el.setAttribute("aria-selected", String(i === active));
     if (i === active) el.scrollIntoView({ block: "nearest" });
   });
+}
+
+/** Rank a query change the debounce still holds, NOW, from the top row —
+ *  so a key pressed inside the debounce acts on the fresh results. */
+function flushPending(): void {
+  if (!debounce) return;
+  clearTimeout(debounce);
+  debounce = null;
+  active = 0;
+  render();
+}
+
+/** Re-rank an open palette — the shell calls it when the listing changes. */
+export function refreshFind(): void {
+  if (isFindOpen()) render();
 }
 
 function scheduleRender(): void {
@@ -188,14 +216,19 @@ function trapTab(e: KeyboardEvent, root: HTMLElement): void {
 /** The dialog root's one keydown: the palette's keys, then stop EVERY key. */
 function onRootKeydown(e: KeyboardEvent): void {
   const root = e.currentTarget as HTMLElement;
-  const inInput = (e.target as HTMLElement | null)?.id === FIND_INPUT_ID;
-  if (e.key === "Escape" || isFindToggleKey(e, mac)) {
+  const target = e.target as HTMLElement | null;
+  const inInput = target?.id === FIND_INPUT_ID;
+  // 229: Safari's keydown during a composition reports `isComposing` false.
+  if (e.isComposing || e.keyCode === 229) {
+    // the composition's key, not the palette's
+  } else if (e.key === "Escape" || isFindToggleKey(e, mac)) {
     e.preventDefault();
     closeFind(true);
   } else if (e.key === "Tab") {
     trapTab(e, root);
   } else if (inInput && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
     e.preventDefault();
+    flushPending();
     const n = result?.rows.length ?? 0;
     if (n) {
       active = e.key === "ArrowDown" ? (active + 1) % n : (active - 1 + n) % n;
@@ -203,13 +236,12 @@ function onRootKeydown(e: KeyboardEvent): void {
     }
   } else if (inInput && e.key === "Enter") {
     e.preventDefault();
-    if (debounce) {
-      // Enter before the debounce fired: rank what is typed now.
-      clearTimeout(debounce);
-      debounce = null;
-      render();
-    }
+    flushPending();
     openRow(active, e.shiftKey);
+  } else if (e.key === " " && target?.hasAttribute("data-find-row")) {
+    // A link does not activate on Space; a row is an option, which does.
+    e.preventDefault();
+    openRow(Number(target.getAttribute("data-find-row")), false);
   }
   e.stopPropagation();
 }
@@ -240,33 +272,18 @@ function onRootClick(e: MouseEvent): void {
  * The opening listener, on the document in the bubble phase. `/` opens from
  * the page but types into a text field; ⌘K (Ctrl-K off a Mac) opens from
  * anywhere, a text field included. Both are refused while another dialog or
- * menu is open. Keys pressed inside the palette never reach here: its root
- * stops them.
+ * menu is open — the header's Tools menu included, which `modalOpen` cannot
+ * see. Keys pressed inside the palette never reach here: its root stops them.
  */
 function onDocumentKeydown(e: KeyboardEvent): void {
-  if (isFindOpen()) return;
+  if (isFindOpen() || navMenuOpen(document)) return;
   if (isFindToggleKey(e, mac)) {
     if (modalOpen(document)) return;
     e.preventDefault();
     openFind();
     return;
   }
-  if (e.key !== "/") return;
-  const t = e.target as HTMLElement | null;
-  if (
-    readerKeyRefused({
-      key: e.key,
-      ctrlKey: e.ctrlKey,
-      metaKey: e.metaKey,
-      altKey: e.altKey,
-      repeat: e.repeat,
-      targetTag: t?.tagName ?? null,
-      targetEditable: !!t?.isContentEditable,
-      targetInDialog: !!t?.closest?.('[aria-modal="true"], dialog[open]') || modalOpen(document),
-    })
-  ) {
-    return;
-  }
+  if (e.key !== "/" || readerKeyRefused(readerKeyEventOf(e))) return;
   e.preventDefault();
   openFind();
 }

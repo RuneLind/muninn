@@ -1778,15 +1778,16 @@ true of the page you have open as of a candidate, so a bookkeeping or hub page
 gets no block at all. Measured on the 547-page clone with the first two applied
 to candidates only, opening `index.md` answered **340** rows (+220 KB on one
 response), `plans/index.md` 246, `log.md` 189, and `flows/how-we-build.mdx` — cut
-as a candidate at 27 backlinks — 36. Symmetric, the largest block on that corpus
-is **33** rows (`overview.md`), which is the link graph's own bound: there is no
-`RELATED_MAX` cap, because a cap drops rows from a page that really does have
-that many neighbours. A FOURTH cut arrived with the session signal: a session
-stamped on more than `STRENGTH_SESSION_DIGEST` (12) pages is a sweep and pairs
-nothing (see "The neighbour rule and find" below). Its reason reads
-`shares session <ref>` in the OPEN page's own spelling, two at most, and the
-view wraps each ref in a `<span class="wiki-why-sess">` so CSS can shorten it
-while the copied text stays whole.
+as a candidate at 27 backlinks — 36. Symmetric, the largest block was **33**
+rows (`overview.md`) on the 547-page clone, 2026-09-20 — a past measurement of
+the link graph's own bound; live mimir on 2026-10-04 (585 pages) gave 58
+(`archive/mimir/2026-09-27-plan-backlog-triage.mdx`). There is no `RELATED_MAX` cap,
+because a cap drops rows from a page that really does have that many
+neighbours. A FOURTH cut arrived with the session signal: a session stamped on
+more than `STRENGTH_SESSION_DIGEST` (12) pages is a sweep and pairs nothing (see
+"The neighbour rule and find" below). 12 is a forward-looking guard, not a
+measurement: on 2026-10-04 no session sat on more than 3 mimir pages; revisit
+after the provenance backfill.
 
 - **Hubs**: a candidate with more than `RELATED_HUB_BACKLINKS` (25) backlinks is
   dropped, from EVERY source. A page cited by the whole wiki is not related work
@@ -1827,11 +1828,15 @@ disagree. `seriesDateSignal` takes a structural `PageDateFields` for that reason
 the server's `WikiPageMeta` satisfies it as well as the client's `WikiListing`.
 
 **The why line joins its reasons with ` · `** in a fixed source order —
-`cites this page`, `cited by this page`, then
-`shares <ref>, <ref>`. The shares reason names the first two shared refs in the
+`cites this page`, `cited by this page`, `shares <ref>, <ref>`, then
+`shares session <ref>`. The shares reason names the first two shared refs in the
 OPEN page's own `prRefs` order, in the full `RuneLind/<repo>#N` spelling: the
 reader pastes that into a PR search, and a display form the ledger does not use
-is one more spelling to reconcile.
+is one more spelling to reconcile. The session reason names at most two shared
+sessions in the OPEN page's own deduplicated spelling (a bare ref is replaced by
+its prefixed twin, whitespace trimmed), and the view wraps each ref in a
+`<span class="wiki-why-sess">` so CSS can shorten it while the copied text stays
+whole.
 
 Series membership changes nothing here. A series member is an ordinary
 candidate — the block is about links, and the rail already groups the series.
@@ -1928,12 +1933,17 @@ with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
 **The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
 the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
 it; the rail's search box is unchanged. It ranks `allPages` in the browser —
-there is no find route. Grammar: free words ANDed; `in:<text>`/`in:"<text>"`
-on series key or label; `type:<prefix>`; `age:<N`/`age:>N` days on the
-worked-on axis; `#tag` a tag prefix but `#<digits>` a number word;
-`is:retired` admits culled pages; any other `key:` is a free word. A digit
-word matches a whole number in the title, ISO dates removed first, so `9` does
-not hit `2026-09-…`. Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
+there is no find route. Grammar: free words ANDed, stray `"` dropped (no phrase
+search); `in:<text>`/`in:"<text>"` a substring of the series key or label;
+`series:<key>` the series whose key IS that key, in the rail's fold (what a
+series chip applies, so a chip's count is what applying it yields);
+`type:<prefix>`; `age:<N`/`age:>N` days on the worked-on axis, two bounds of
+one direction keeping the tighter; `#tag` a tag prefix but `#<digits>` a
+number word; `is:retired` admits culled pages; a known key with no value yet
+(`in:`, `type:`, `#`, `age:<`) is ignored; any other `key:` is a free word. A
+digit word matches a whole number outside any ISO date, in the scorer and the
+highlighter alike, so `9` does not hit `2026-09-…`. Series groups, keys and
+labels are the rail's (`seriesKeyOf`, `seriesCensusKey`, `seriesHead`). Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
 pool drops bookkeeping pages, attachment children and (unless `is:retired`)
 culled pages; a superseded page stays and names its successor. Rows group by
 series, groups ordered by their best row; a no-series row is a group of one,
@@ -1946,7 +1956,12 @@ document-level reader shortcut (`]`, `f`, `g`, `t`, the pane ladder's Escape)
 fires from inside the palette. Capture-phase listeners still run first: the
 graph card's Escape stands aside under `modalOpen`, and the ref-link peek's has
 nothing to close, since opening hides any peek (`hideRefPeek`). Closing REMOVES
-the node and returns focus to the opener. Acceptance: `strength.test.ts`,
+the node and returns focus to the opener. Opening is refused while another
+dialog or menu is open — the header's Tools menu included, which `modalOpen`
+does not see (`navMenuOpen`). A palette opened before the listing arrives says
+"Loading pages…" and re-ranks when it lands; Back, or any other page load the
+palette did not start, closes it. During an IME composition the root acts on
+no key. Acceptance: `strength.test.ts`,
 `session-refs.test.ts`, `routes/wiki-near.test.ts`,
 `views/components/wiki-find.test.ts` and `e2e/wiki-find.spec.ts`.
 

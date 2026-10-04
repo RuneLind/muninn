@@ -44,7 +44,6 @@ export function isSessionIdShape(id: string): boolean {
   return id.length > 0 && id.length <= SESSION_ID_MAX_CHARS && SESSION_ID_SHAPE.test(id);
 }
 
-
 /**
  * First-wins dedup on the bare id, preserving the page's own order — with ONE
  * exception: a PREFIXED spelling replaces a bare one already kept.

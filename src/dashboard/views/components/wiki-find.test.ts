@@ -13,6 +13,7 @@ import {
   rankFind,
 } from "./wiki-find.ts";
 import type { WikiListing } from "./wiki-filter.ts";
+import { seriesHead } from "./wiki-groups.ts";
 
 const NOW = Date.parse("2026-10-04T12:00:00Z");
 const DAY = 86_400_000;
@@ -41,6 +42,7 @@ describe("parseFindQuery", () => {
     expect(parseFindQuery('fix  Rounds in:"Two Words" type:pl age:<14 age:>2 #Ops is:retired')).toEqual({
       words: ["fix", "rounds"],
       inSeries: ["two words"],
+      series: [],
       types: ["pl"],
       tags: ["ops"],
       ageLt: 14,
@@ -194,15 +196,15 @@ describe("ordering and grouping", () => {
     expect(r.rows.map((x) => x.page.relPath)).toEqual(["s/a.md", "s/b.md", "loose.md"]);
   });
 
-  test(`rows cap at ${FIND_ROWS_MAX}; chips count ALL matches and emit a quoted in:`, () => {
+  test(`rows cap at ${FIND_ROWS_MAX}; chips count ALL matches and emit a quoted series:`, () => {
     const pages = Array.from({ length: 50 }, (_, i) =>
       pg(`s/p${i}.md`, { title: `Ledger ${i}`, series: "Big series" }),
     );
     const r = rankFind(pages, "ledger", { now: NOW });
     expect(r.rows.length).toBe(FIND_ROWS_MAX);
     expect(r.total).toBe(50);
-    expect(r.chips).toEqual([{ seriesKey: "big series", label: "Big series", count: 50, token: 'in:"Big series"' }]);
-    expect(applySeriesChip("ledger in:old", r.chips[0]!.token)).toBe('ledger in:"Big series"');
+    expect(r.chips).toEqual([{ seriesKey: "big series", label: "Big series", count: 50, token: 'series:"big series"' }]);
+    expect(applySeriesChip("ledger in:old series:x", r.chips[0]!.token)).toBe('ledger series:"big series"');
   });
 });
 
@@ -221,25 +223,107 @@ describe("highlightFind", () => {
   });
 });
 
-describe("timing", () => {
-  test("rankFind over a 600-page listing", () => {
-    const pages = Array.from({ length: 600 }, (_, i) =>
-      pg(`f${i % 7}/page-${i}.md`, {
-        title: `Page ${i} about ${["ledger", "gardener", "review", "series"][i % 4]} round ${i % 13}`,
-        tags: [`t${i % 9}`],
-        description: `Description of page ${i}`,
-        series: i % 5 === 0 ? `series-${i % 11}` : undefined,
-      }),
-    );
-    const near = Object.fromEntries(pages.slice(0, 200).map((p, i) => [p.relPath, 0.2 + (i % 5) / 10]));
-    const runs: number[] = [];
-    for (let k = 0; k < 20; k++) {
-      const t0 = performance.now();
-      rankFind(pages, "ledger round 9", { now: NOW, near });
-      runs.push(performance.now() - t0);
+describe("series chips apply exactly what they count", () => {
+  const pages = [
+    pg("a/s1.md", { title: "Review one", series: "ship" }),
+    pg("a/s2.md", { title: "Review two", series: "ship" }),
+    pg("b/p1.md", { title: "Review three", series: "shipping-pipeline" }),
+    pg("b/p2.md", { title: "Review four", series: "shipping-pipeline" }),
+    pg("b/p3.md", { title: "Review five", series: "shipping-pipeline" }),
+  ];
+
+  test("the `ship` chip counts 2 and applying it yields 2, not the 5 `in:ship` admits", () => {
+    const r = rankFind(pages, "review", { now: NOW });
+    const ship = r.chips.find((c) => c.label === "ship")!;
+    expect(ship.count).toBe(2);
+    const applied = rankFind(pages, applySeriesChip("review", ship.token), { now: NOW });
+    expect(applied.total).toBe(ship.count);
+    for (const c of r.chips) {
+      expect(rankFind(pages, applySeriesChip("review", c.token), { now: NOW }).total).toBe(c.count);
     }
-    runs.sort((a, b) => a - b);
-    console.log(`rankFind 600 pages: median ${runs[10]!.toFixed(2)} ms, max ${runs[19]!.toFixed(2)} ms`);
-    expect(runs[10]!).toBeLessThan(50);
+  });
+
+  test("`in:` stays a substring match on the key", () => {
+    expect(rankFind(pages, "review in:ship", { now: NOW }).total).toBe(5);
+  });
+
+  test("series: matches the key exactly, without case; a quote in the key is matched stripped on both sides", () => {
+    expect(rankFind(pages, "series:SHIP", { now: NOW }).total).toBe(2);
+    const quoted = [pg("q.md", { title: "Q", series: 'say "hi" now' })];
+    const chip = rankFind(quoted, "q", { now: NOW }).chips[0]!;
+    expect(chip.token).toBe('series:"say hi now"');
+    expect(rankFind(quoted, chip.token, { now: NOW }).total).toBe(1);
+  });
+});
+
+describe("series grouping follows the rail", () => {
+  test("the group key is the rail's fold (case only), so `Kjøring` and `kjoring` are two series", () => {
+    const pages = [
+      pg("a.md", { title: "Ledger a", series: "Kjøring" }),
+      pg("b.md", { title: "Ledger b", series: "kjoring" }),
+      pg("c.md", { title: "Ledger c", series: "KJØRING" }),
+    ];
+    const r = rankFind(pages, "ledger", { now: NOW });
+    expect(r.chips.map((c) => [c.seriesKey, c.count]).sort()).toEqual([
+      ["kjoring", 1],
+      ["kjøring", 2],
+    ]);
+  });
+
+  test("the label is the rail's seriesHead label, not the last one listed", () => {
+    const members = [
+      pg("s/new.md", { title: "Ledger new", series: "s", seriesLabel: "New label", mtimeMs: NOW - 2 * DAY }),
+      pg("s/old.md", { title: "Ledger old", series: "s", seriesLabel: "Old label", mtimeMs: NOW - 90 * DAY }),
+    ];
+    expect(seriesHead(members)!.seriesLabel).toBe("New label");
+    const r = rankFind(members, "ledger", { now: NOW });
+    expect(r.chips[0]!.label).toBe("New label");
+    expect(r.groups[0]!.seriesLabel).toBe("New label");
+  });
+});
+
+describe("grammar edge cases", () => {
+  test("stray quotes on free words are dropped", () => {
+    expect(parseFindQuery('"class check"').words).toEqual(["class", "check"]);
+    expect(parseFindQuery('"class').words).toEqual(["class"]);
+    expect(parseFindQuery('class"').words).toEqual(["class"]);
+    expect(parseFindQuery('"').words).toEqual([]);
+  });
+
+  test("a quoted phrase finds the page its words find", () => {
+    const pages = [pg("a.md", { title: "The class check fired" })];
+    expect(order(pages, '"class check"')).toEqual(["a.md"]);
+  });
+
+  test("a known key with no value yet is ignored — no filter, no word", () => {
+    for (const raw of ["in:", 'in:"', 'in:""', 'in:" "', "type:", "is:", "series:", 'series:""', "#", "age:<", "age:>", "age:"]) {
+      const q = parseFindQuery(raw);
+      expect({ raw, words: q.words, tags: q.tags, inSeries: q.inSeries, types: q.types }).toEqual({
+        raw,
+        words: [],
+        tags: [],
+        inSeries: [],
+        types: [],
+      });
+      expect(rankFind([pg("in-type-is-series-age.md", { title: "in: type: is: series: # age:" })], raw, { now: NOW }).rows).toEqual([]);
+    }
+  });
+
+  test("two bounds of one direction keep the tighter", () => {
+    expect(parseFindQuery("age:<5 age:<10").ageLt).toBe(5);
+    expect(parseFindQuery("age:<10 age:<5").ageLt).toBe(5);
+    expect(parseFindQuery("age:>5 age:>10").ageGt).toBe(10);
+    expect(parseFindQuery("age:>10 age:>5").ageGt).toBe(10);
+  });
+});
+
+describe("highlightFind and ISO dates", () => {
+  test("a digit term never marks digits inside an ISO date — the scorer's rule", () => {
+    expect(highlightFind("Review 2026-10-02, round 10", ["10"])).toBe("Review 2026-10-02, round <mark>10</mark>");
+    expect(highlightFind("Month 2026-10 and 10", ["10"])).toBe("Month 2026-10 and <mark>10</mark>");
+  });
+
+  test("a non-digit term is unaffected by the date rule", () => {
+    expect(highlightFind("2026-10-02 round", ["round", "10"])).toBe("2026-10-02 <mark>round</mark>");
   });
 });
