@@ -571,3 +571,103 @@ test("aria-activedescendant follows the selection on a section-only repaint", as
   });
   expect(state).toEqual({ desc: null, rows: 0 });
 });
+
+// ── Fix round 2 ─────────────────────────────────────────────────────────────
+
+/** Record the `q` of every find-everywhere request the page makes. */
+function recordRequests(page: Page): string[] {
+  const sent: string[] = [];
+  page.on("request", (req) => {
+    const u = new URL(req.url());
+    if (u.pathname === "/api/wiki/find-everywhere") sent.push(u.searchParams.get("q") ?? "");
+  });
+  return sent;
+}
+
+test("a quoted filter-shaped word reaches claude-usage as a word", async ({ page }) => {
+  const sent = recordRequests(page);
+  await openReader(page);
+  await find(page, '"type:plan" felles');
+  await expect(target(page)).toHaveCount(1);
+  // claude-usage gets the word the local ranker reads, not just `felles`.
+  expect(ledger.searches).toEqual(["type:plan felles"]);
+  expect(sent).toEqual(['"type:plan" felles']);
+});
+
+test("a filter inside the debounce, removed while composing, brings back the last answer with no request", async ({ page }) => {
+  const sent = recordRequests(page);
+  await openReader(page);
+  await find(page, "felles kode");
+  await expect(target(page)).toHaveCount(1);
+  // A new free text, then a filter inside its debounce: the fetch is cancelled.
+  await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    for (const v of ["felles kode x", "felles kode x type:plan"]) {
+      box.value = v;
+      box.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    }
+  });
+  await page.waitForTimeout(FIND_EVERY_DEBOUNCE_MS * 2);
+  await expect(every(page).locator("[data-find-filtered]")).toBeVisible();
+  // Back to the answered free text inside a composition: no fetch is
+  // scheduled, so only the restored answer can paint the rows.
+  await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    box.value = "felles kode";
+    box.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+  });
+  await page.waitForTimeout(FIND_EVERY_DEBOUNCE_MS * 2);
+  await expect(target(page)).toHaveCount(1);
+  await expect(every(page)).not.toContainText("Searching everywhere…");
+  await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "kode" }));
+  });
+  await page.waitForTimeout(FIND_EVERY_DEBOUNCE_MS * 2);
+  await expect(target(page)).toHaveCount(1);
+  expect(sent).toEqual(["felles kode"]);
+});
+
+test("typing an unfinished key back onto the answered free text asks nothing again", async ({ page }) => {
+  await openReader(page);
+  await find(page, "felles");
+  await expect(every(page).locator(".wiki-find-every-row").first()).toBeVisible();
+  expect(ledger.searches).toEqual(["felles"]);
+  // `felles t`, `felles ty`, … each schedule a fetch; `felles type:` is the
+  // answered free text again.
+  await input(page).pressSequentially(" type:", { delay: 30 });
+  await page.waitForTimeout(FIND_EVERY_DEBOUNCE_MS * 3);
+  await expect(every(page).locator(".wiki-find-every-row").first()).toBeVisible();
+  expect(ledger.searches).toEqual(["felles"]);
+});
+
+test("a listing that lands keeps focus on this wiki's Everywhere row as it becomes a local row", async ({ page }) => {
+  const release = await holdListing(page);
+  await find(page, "felles kode");
+  const everyBucket = everyRows(page).filter({ hasText: "Felles bucket notes" });
+  await expect(everyBucket).toHaveCount(1);
+  await tabTo(page, everyBucket);
+  release();
+  const local = localRows(page).filter({ hasText: "Felles bucket notes" });
+  await expect(local).toHaveCount(1);
+  await expect(local).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(h1(page)).toHaveText("Felles bucket notes");
+});
+
+test("a listing that lands keeps this wiki's selected Everywhere row selected as a local row", async ({ page }) => {
+  const release = await holdListing(page);
+  await find(page, "felles kode");
+  const everyBucket = everyRows(page).filter({ hasText: "Felles bucket notes" });
+  await expect(everyBucket).toHaveCount(1);
+  const index = Number(await everyBucket.getAttribute("data-find-row"));
+  for (let i = 0; i < index; i++) await page.keyboard.press("ArrowDown");
+  await expect(everyBucket).toHaveAttribute("aria-selected", "true");
+  release();
+  const local = localRows(page).filter({ hasText: "Felles bucket notes" });
+  await expect(local).toHaveCount(1);
+  expect(Number(await local.getAttribute("data-find-row"))).not.toBe(index);
+  await expect(local).toHaveAttribute("aria-selected", "true");
+  await expect(input(page)).toHaveAttribute("aria-activedescendant", (await local.getAttribute("id"))!);
+});

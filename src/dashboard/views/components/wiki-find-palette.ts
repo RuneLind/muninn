@@ -26,7 +26,7 @@
  */
 
 import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { applySeriesChip, findFreeTokens, rankFind, type FindResult } from "./wiki-find.ts";
+import { applySeriesChip, everywhereRequestQuery, rankFind, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
   FIND_EVERY_ID,
@@ -225,9 +225,10 @@ function addLocalReasons(view: FindEverywhereView | null): void {
 
 /**
  * Paint the Everywhere section alone, when its response lands. The local rows
- * stay in place — they only gain reason chips — so neither the selection nor
- * focus moves (a whole-list repaint under a Tab-focused row dropped focus to
- * `<body>`, the #639 finding).
+ * stay in place — they only gain reason chips. The section's rows are new
+ * nodes, so the selection moves to its row by identity (wiki + relPath), and a
+ * focused row's focus is restored by identity — never dropped to `<body>` (a
+ * whole-list repaint under a Tab-focused row did that, the #639 finding).
  */
 function paintEverywhere(): void {
   const box = document.getElementById(FIND_EVERY_ID);
@@ -256,20 +257,25 @@ function cancelEverywhere(): void {
  * the rows on screen, and only the dedupe re-runs. A filter suppresses the
  * section without dropping what was fetched, but a fetch still waiting on its
  * debounce is cancelled and the last answer kept; free text typed under a
- * filter is not fetched.
+ * filter is not fetched. Free text that returns to the last answer's key
+ * reuses that answer instead of asking again.
  */
 function updateEverywhere(): void {
   const query = input()?.value ?? "";
   const plan = everywherePlan(query, !!port?.everywhere());
-  if (plan.kind === "fetch" && every?.key !== plan.key) {
+  if (plan.kind === "fetch" && every?.key !== plan.key && everySettled?.key === plan.key && everySettled.status === "done") {
+    // Back to the free text of the last answer (`felles t…` → `felles type:`):
+    // reuse it rather than ask again. A failed answer is asked again.
+    cancelEverywhere();
+    every = everySettled;
+  } else if (plan.kind === "fetch" && every?.key !== plan.key) {
     cancelEverywhere();
     every = { key: plan.key, status: "pending" };
     const key = plan.key;
-    // The free words as typed: filters out, `#12` kept a hard number for the
-    // text leg (its remote form is the key).
-    const q = findFreeTokens(query)
-      .map((t) => t.text)
-      .join(" ");
+    // The free words: filters out, `#12` kept a hard number for the text leg
+    // (its remote form is the key), and quoted where the server's parse
+    // would otherwise read a filter or a number.
+    const q = everywhereRequestQuery(query);
     everyTimer = setTimeout(() => {
       everyTimer = null;
       void fetchEverywhere(key, q);

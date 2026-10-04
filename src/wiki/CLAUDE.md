@@ -2103,7 +2103,11 @@ filter exactly when `parseFindQuery` reads it as one, and a quoted phrase
 after an unknown key counts as its words), and `sources.query.truncated` says
 when a cap cut it. The text leg gets the free tokens as typed, so `#12` stays
 a hard number there; the remote legs get `freeText` — the same tokens with
-`#12` sent as `12`. Text under 2 code points answers empty with every leg
+`#12` sent as `12`. A token's text form re-parses to itself: a word the
+parser would read as a filter or a number when bare (`"type:plan"`, `"#tag"`,
+`"#12"` typed quoted) is quoted, so the palette's request, the cap and the text
+leg's own `rankFind` all read the same free words the box did
+(`everywhereRequestQuery`). Text under 2 code points answers empty with every leg
 `skipped` (`query too short`); the check reads the TEXT form, so `#5` still
 runs the text leg while the remote legs skip its one-digit remote form.
 - **text** — `rankFind` over each wiki's pages with every palette rule,
@@ -2149,14 +2153,19 @@ expressions go; headings, bullets, checkboxes, table rows (cells joined by
 `[label](url)` and images flatten to their text, an unclosed `[[` or `[` keeps
 its text, and five entities are decoded. A `<` opens a tag only before `/`,
 `!`, or a letter with no word character in front, so `x<y and z>w` stays
-prose; `__init__` stays (emphasis is stripped at word boundaries). Session snippets carry their
+prose. A tag or `{` with no closer ends the snippet only when it reads as cut
+off — a tag to the end of the text with a bare name, an `=` or a `{`, or a `{`
+before a non-space — so `when n <k the loop ends…` and `Use { to open a block`
+stay prose. Inside `{…}` a quote counts only when paired (`{x | x's > 0}`
+closes at its `}`); `__init__` stays (emphasis is stripped at word boundaries). Session snippets carry their
 match spans as offsets (`marks`), not markup, so the client escapes the text
 and wraps the spans itself.
 
 **Bounds, in order.** The wiki indexes load FIRST, all in parallel under one
-`INDEX_TIMEOUT_MS` (2.5 s). The route lists a root once (`uniqueWikiRoots`,
-first entry wins — `findSelfWikiName`'s rule), so an aliased root is not
-searched twice. A wiki that misses the bound answers from its **last-good
+`INDEX_TIMEOUT_MS` (2.5 s). The route lists a root once (`uniqueWikiRoots`:
+the first entry's name wins — `findSelfWikiName`'s rule — and the collections
+are the union of every entry's), so an aliased root is not searched twice and
+a hit in the second entry's collection still resolves. A wiki that misses the bound answers from its **last-good
 index** (kept per root in `find-everywhere.ts`) and is named in
 `sources.indexes.stale`: after the store's 5-minute TTL every expired wiki
 rebuilds at once (measured 1.85–1.97 s for 5 wikis), so a modest slowdown
@@ -2186,12 +2195,18 @@ only when its session is in claude-usage's top `SESSIONS_HEAD_TOP` (5):
 session search ranks loosely, and a page carried by the 20th session is a
 vote, not an answer. Huginn ties on its `relevance` — and a huginn #1 (or a
 page tied with it) is a head only with **lexical evidence**: at least one long
-query word (≥ 3 folded characters, a substring) or query number (whole, not
-inside a longer number) in its title, relPath or snippet. `brief=true`
-relevance is rank-derived, so nonsense ("qzxv wplkj frobnicate", "🧭🧭") got a
-confident #1, and "#639" made a semantic-only page a head; without evidence the
-hit only votes. Ties in every sort break on the key by code unit, never
-`localeCompare` (ICU ignores `\u0000`, the key's separator).
+query word (≥ 3 folded characters, a substring, and not in
+`EVIDENCE_STOPWORDS`, a fixed English + Norwegian function-word set) or query
+number (`#639` or a bare `639`; whole, not inside a longer number) in its
+title, relPath or snippet. `brief=true` relevance is rank-derived, so nonsense
+("qzxv wplkj frobnicate", "🧭🧭") got a confident #1, and "#639" made a
+semantic-only page a head; and before the stopword set, "the qzxv wplkj",
+"and frobnicate zzyzx" and "for blorptastic" each did too, because `the`,
+`and` and `for` sit in nearly every snippet. Without evidence the hit only
+votes. The text leg's cross-wiki merge, the sessions leg's page order and
+`fuseLegs` break ties by code unit, never `localeCompare` (ICU ignores
+`\u0000`, the key's separator). `rankFind`'s own per-wiki order is the
+palette's and still ends on `localeCompare` by relPath (`byPath`).
 
 A failed leg is logged: the first sighting of a (leg, label, host) warns,
 repeats log `info`, an `aborted` leg logs nothing, and no line carries the
@@ -2217,8 +2232,10 @@ filter token, a chip) neither aborts nor refetches nor blanks the rows; only
 the dedupe re-runs. A new key fetches 250 ms after the keystroke, aborts the
 fetch it replaces and drops any answer for a key that is no longer the box's.
 A filter typed inside that debounce cancels the fetch and keeps the last
-answer; the request carries the free words only (filters out, `#12` kept),
-never the box's raw text. During an IME composition nothing is fetched and the
+answer, and free text that returns to the last answer's key (`felles t…` →
+`felles type:`) reuses it rather than asking again; the request carries the
+free words only (filters out, `#12` kept, filter-shaped words quoted), never
+the box's raw text. During an IME composition nothing is fetched and the
 last answer's rows stay on screen; `compositionend` fetches. A listing still
 loading (or failed) leaves Everywhere as the list, its first row active; when
 the listing lands or fails, the selected row and a focused row follow their

@@ -47,13 +47,24 @@ export function findSelfWikiName(
 }
 
 /**
- * One entry per ROOT, first wins — `findSelfWikiName`'s rule. `WIKI_EXTRA=a=/w,b=/w`,
- * or a bot's `wikiDir` registered again in `WIKI_EXTRA`, would otherwise list
- * every page of that root twice.
+ * One entry per ROOT. `WIKI_EXTRA=a=/w,b=/w`, or a bot's `wikiDir` registered
+ * again in `WIKI_EXTRA`, would otherwise list every page of that root twice.
+ * The first entry's name wins (`findSelfWikiName`'s rule); the collections are
+ * the union of every entry's, so a hit in the second entry's collection still
+ * resolves to the root's page.
  */
-export function uniqueWikiRoots<T extends { root: string }>(wikis: readonly T[]): T[] {
+export function uniqueWikiRoots<T extends { root: string; collections?: readonly string[] }>(wikis: readonly T[]): T[] {
   const out: T[] = [];
-  for (const w of wikis) if (!out.some((o) => sameWikiRoot(o.root, w.root))) out.push(w);
+  for (const w of wikis) {
+    const i = out.findIndex((o) => sameWikiRoot(o.root, w.root));
+    if (i === -1) {
+      out.push(w);
+      continue;
+    }
+    const kept = out[i]!;
+    const merged = [...new Set([...(kept.collections ?? []), ...(w.collections ?? [])])];
+    if (merged.length !== (kept.collections?.length ?? 0)) out[i] = { ...kept, collections: merged };
+  }
   return out;
 }
 

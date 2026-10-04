@@ -253,15 +253,34 @@ export function hasFindFilters(raw: string): boolean {
  * — what huginn and claude-usage are sent. A quoted phrase after an unknown
  * key (`foo:"a b"`) is one word to the ranker but yields one entry per word
  * here, so a cap on entries is a cap on words.
+ *
+ * `text` re-parses to itself: a word the parser would read as something else
+ * when unquoted (`"type:plan"`, `"#tag"`, `"#12"`) is sent quoted, so the
+ * server's parse of the joined texts yields these same entries.
  */
 export function findFreeTokens(raw: string): Array<{ text: string; remote: string }> {
   const out: Array<{ text: string; remote: string }> = [];
   for (const tok of tokenize(raw)) {
     const t = classifyToken(tok);
     if (t.kind === "number") out.push({ text: `#${t.digits}`, remote: t.digits });
-    else if (t.kind === "word") for (const w of t.raw.split(/\s+/)) if (w) out.push({ text: w, remote: w });
+    else if (t.kind === "word") for (const w of t.raw.split(/\s+/)) if (w) out.push({ text: wordText(w), remote: w });
   }
   return out;
+}
+
+/** A free word as the parser reads it back: bare when it parses as that same
+ *  word, else quoted (a quoted token is never a key, a tag or a number). */
+function wordText(w: string): string {
+  const t = classifyToken(w);
+  return t.kind === "word" && t.raw === w ? w : `"${w}"`;
+}
+
+/** What the palette sends the Everywhere route: the free words' `text` forms,
+ *  filters out. `capFindEverywhereQuery` parses it back to the same entries. */
+export function everywhereRequestQuery(raw: string): string {
+  return findFreeTokens(raw)
+    .map((t) => t.text)
+    .join(" ");
 }
 
 /** The free words the remote legs are sent, joined by one space — and the key

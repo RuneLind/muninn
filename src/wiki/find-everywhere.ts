@@ -284,17 +284,26 @@ function dropFences(s: string): string {
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
 
 /** Index just past the construct opened at `from` and closed by `close` at
- *  depth 0 outside quotes (`{` nests when `close` is `}`), or -1 when the clip
- *  cut it off. Quotes and braces inside protect a `>` or `}`. */
-function skipBalanced(s: string, from: number, close: ">" | "}"): number {
+ *  depth 0 outside quotes (`{` nests when `close` is `}`), or -1 when none
+ *  closes it. Quotes and braces inside protect a `>` or `}`. Inside an
+ *  expression (`close` is `}`) a quote counts only when the same character
+ *  follows it somewhere, so the apostrophe in `{x | x's > 0}` is a letter.
+ *  `quotes` false reads every quote as a letter: the second try, for a stray
+ *  quote that pairs past the real closer (`{x's} and it's`). */
+function skipBalanced(s: string, from: number, close: ">" | "}", quotes = true): number {
   let depth = 0;
   let quote = "";
   for (let i = from; i < s.length; i++) {
     const ch = s[i]!;
     if (quote) {
       if (ch === quote) quote = "";
-    } else if (ch === '"' || ch === "'" || (ch === "`" && close === "}")) quote = ch;
-    else if (ch === "{") depth++;
+    } else if (
+      quotes &&
+      (ch === '"' || ch === "'" || (ch === "`" && close === "}")) &&
+      (close === ">" || s.indexOf(ch, i + 1) !== -1)
+    ) {
+      quote = ch;
+    } else if (ch === "{") depth++;
     else if (ch === "}" && depth > 0) {
       depth--;
       if (depth === 0 && close === "}") return i + 1;
@@ -303,12 +312,38 @@ function skipBalanced(s: string, from: number, close: ">" | "}"): number {
   return -1;
 }
 
+/** `skipBalanced`, then again with quotes read as letters. */
+function closerOf(s: string, from: number, close: ">" | "}"): number {
+  const end = skipBalanced(s, from, close);
+  return end !== -1 ? end : skipBalanced(s, from, close, false);
+}
+
+const TAG_NAME = String.raw`[A-Za-z][\w.:-]*`;
+const ATTR_NAME = String.raw`[A-Za-z_:@][\w.:-]*`;
+const ATTR_VALUE = String.raw`"[^"]*"|'[^']*'|\{[^{}]*\}|[^\s"'=<>\x60{}]+`;
+/** An unclosed tag the clip cut: a name, finished attributes, then at most
+ *  one attribute cut mid-value. */
+const CUT_TAG = new RegExp(
+  String.raw`^<[/!]?${TAG_NAME}(?:\s+(?:${ATTR_NAME}(?:\s*=\s*(?:${ATTR_VALUE}))?|\{[^{}]*\}))*` +
+    String.raw`(?:\s+(?:${ATTR_NAME}\s*=\s*(?:"[^"]*|'[^']*|\{[\s\S]*)?|\{[\s\S]*))?\s*/?$`,
+);
+
+/** Is `tail` (a `<` to the end of the text) a tag the clip cut off, rather
+ *  than a `<` in prose? It reads as a tag to the very end and says so: a bare
+ *  name, or an `=` or `{`. `n <k the loop ends…` is prose. */
+function isCutTag(tail: string): boolean {
+  if (!CUT_TAG.test(tail)) return false;
+  return /^<[/!]?\S*\s*$/.test(tail) || /[={]/.test(tail);
+}
+
 /**
  * One left-to-right pass over inline markup: `<!-- … -->`, MDX/HTML tags
  * (attributes may hold `>` inside quotes or braces) and `{…}` expressions out,
  * inline code kept without its backticks. A `<` opens a tag when `/` or `!`
  * follows it, or a letter does and no word character precedes it — so
- * `x<y and z>w` stays prose. A construct the clip cut off ends the snippet.
+ * `x<y and z>w` stays prose. A construct with no closer ends the snippet only
+ * when it reads as cut off: a comment, a tag to the end (`isCutTag`), a `{`
+ * before a non-space. Otherwise its `<` or `{` is prose.
  */
 function stripInlineMarkup(s: string): string {
   let out = "";
@@ -337,18 +372,25 @@ function stripInlineMarkup(s: string): string {
     const next = s[i + 1] ?? "";
     const opensTag = /[A-Za-z]/.test(next) ? !(i > 0 && WORD_CHAR.test(s[i - 1]!)) : next === "/" || next === "!";
     if (ch === "<" && opensTag) {
-      const end = skipBalanced(s, i + 1, ">");
-      if (end === -1) break;
-      out += " ";
-      i = end;
-      continue;
+      const end = closerOf(s, i + 1, ">");
+      if (end !== -1) {
+        out += " ";
+        i = end;
+        continue;
+      }
+      // Unclosed: a tag the clip cut off ends the snippet; else `<` is prose.
+      if (isCutTag(s.slice(i))) break;
     }
     if (ch === "{") {
-      const end = skipBalanced(s, i, "}");
-      if (end === -1) break;
-      out += " ";
-      i = end;
-      continue;
+      const end = closerOf(s, i, "}");
+      if (end !== -1) {
+        out += " ";
+        i = end;
+        continue;
+      }
+      // Unclosed: `{expr` the clip cut off ends the snippet; a `{` before
+      // white space (`Use { to open a block`) is prose.
+      if (!/\s/.test(s[i + 1] ?? "")) break;
     }
     out += ch;
     i++;
@@ -485,15 +527,30 @@ interface HuginnHit {
   relevance?: unknown;
 }
 
-/** The query's terms that count as lexical evidence: long free words and
- *  numbers, folded the way the palette folds them. */
+/** Function words that sit in almost any snippet, so they are no evidence:
+ *  English and Norwegian, folded the way the palette folds a query word
+ *  (`når` is `nar`). Measured on real huginn: "the qzxv wplkj", "and
+ *  frobnicate zzyzx" and "for blorptastic" each made an unrelated #1 a head. */
+export const EVIDENCE_STOPWORDS: ReadonlySet<string> = new Set(
+  [
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "you", "not", "but",
+    "all", "any", "can", "has", "have", "how", "its", "our", "out", "who", "why", "what",
+    "when", "which",
+    "med", "som", "det", "den", "til", "av", "og", "er", "har", "ikke", "fra", "men",
+    "kan", "var", "vil", "skal", "hva", "hvor", "hvorfor", "når", "eller", "også",
+  ].map(foldText),
+);
+
+/** The query's terms that count as lexical evidence: free words of at least
+ *  `FIND_SHORT_WORD` code points that are not stopwords, and numbers (`#639`
+ *  or a bare `639`), folded the way the palette folds them. */
 export function lexicalTerms(query: string): { words: string[]; numbers: string[] } {
   const q = parseFindQuery(query);
   const numbers = new Set(q.numbers);
   const words: string[] = [];
   for (const w of q.words) {
     if (/^\d+$/.test(w)) numbers.add(w);
-    else if (Array.from(w).length >= FIND_SHORT_WORD) words.push(w);
+    else if (Array.from(w).length >= FIND_SHORT_WORD && !EVIDENCE_STOPWORDS.has(w)) words.push(w);
   }
   return { words, numbers: [...numbers] };
 }

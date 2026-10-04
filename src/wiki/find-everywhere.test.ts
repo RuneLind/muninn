@@ -47,6 +47,12 @@ import {
 } from "../dashboard/routes/wiki-find-everywhere.ts";
 import { createOriginMiddleware } from "../auth/origin.ts";
 import type { Config } from "../config.ts";
+import {
+  everywhereRequestQuery,
+  findFreeTokens,
+  freeText,
+  parseFindQuery,
+} from "../dashboard/views/components/wiki-find.ts";
 
 const S1 = "11111111-1111-4111-8111-111111111111";
 const S2 = "22222222-2222-4222-8222-222222222222";
@@ -1089,5 +1095,278 @@ describe("fix round 1 — registry entries sharing a root (item 18)", () => {
     const res = await app.request("/api/wiki/find-everywhere?q=palette");
     const body = (await res.json()) as { results: Array<{ wiki: string; relPath: string }> };
     expect(body.results.map(keyOf)).toEqual(["a:p.md"]);
+  });
+});
+
+// ── Fix round 2 ─────────────────────────────────────────────────────────────
+
+/** Is the huginn #1 `id` a head for `q`, with this snippet? One wiki, sessions off. */
+async function huginnHead(files: Record<string, string>, q: string, id: string, snippet: string): Promise<boolean> {
+  const a = await wiki(files);
+  const r = await findEverywhere(
+    q,
+    20,
+    deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], {
+      sessions: null,
+      huginn: { results: [{ collection: "c", id, relevance: 1, snippet }] },
+    }),
+  );
+  return r.results.find((x) => x.relPath === id)!.head;
+}
+
+describe("fix round 2 — stopwords are no lexical evidence (item 1)", () => {
+  // Snippet text is synthetic; the three queries are the ones that made an
+  // unrelated huginn #1 a head on the real index.
+  const snippet = "This is the page for the team, and all of what was not there.";
+  for (const q of ["the qzxv wplkj", "and frobnicate zzyzx", "for blorptastic"]) {
+    test(`"${q}" makes no huginn head`, async () => {
+      expect(await huginnHead({ "cap.md": page("Capra notes") }, q, "cap.md", snippet)).toBe(false);
+    });
+  }
+
+  test("Norwegian function words are no evidence either, folded like the query", async () => {
+    const files = { "cap.md": page("Capra notes") };
+    expect(await huginnHead(files, "når qzxv", "cap.md", "Når det er også ikke klart")).toBe(false);
+    expect(await huginnHead(files, "også qzxv", "cap.md", "Når det er også ikke klart")).toBe(false);
+  });
+
+  test("control: a real word beside a stopword is evidence", async () => {
+    expect(await huginnHead({ "cap.md": page("Capra notes") }, "the palette", "cap.md", "the palette notes")).toBe(true);
+  });
+});
+
+describe("fix round 2 — lexical evidence pins (item 6)", () => {
+  test("a query word in the title alone is evidence", async () => {
+    // `zzqq` keeps the text leg partial, so only huginn can make a head.
+    expect(await huginnHead({ "x.md": page("Kodeverk notes") }, "kodeverk zzqq", "x.md", "")).toBe(true);
+  });
+
+  test("a number with a digit on only one side is no evidence", async () => {
+    const files = { "cap.md": page("Capra notes") };
+    expect(await huginnHead(files, "#639", "cap.md", "PR 1639 merged")).toBe(false);
+    expect(await huginnHead(files, "#639", "cap.md", "PR 6390 merged")).toBe(false);
+  });
+
+  test("a three-code-point word counts", async () => {
+    expect(await huginnHead({ "cap.md": page("Capra notes") }, "pdf", "cap.md", "export as pdf")).toBe(true);
+  });
+
+  test("the haystack is folded: `kjøring` matches `Kjøring`", async () => {
+    expect(await huginnHead({ "cap.md": page("Capra notes") }, "kjøring", "cap.md", "Kjøring av jobben")).toBe(true);
+  });
+
+  test("a bare `639` is a number, not a substring word", async () => {
+    const files = { "cap.md": page("Capra notes") };
+    expect(await huginnHead(files, "639", "cap.md", "PR 16390 merged")).toBe(false);
+    expect(await huginnHead(files, "639", "cap.md", "merged as muninn 639 today")).toBe(true);
+  });
+});
+
+describe("fix round 2 — registry entries sharing a root merge collections (item 2)", () => {
+  test("uniqueWikiRoots keeps the first name and unions the collections", async () => {
+    const a = await wiki({ "p.md": page("P") });
+    const kept = uniqueWikiRoots([
+      { name: "a", root: a.root, collections: ["c1"] },
+      { name: "b", root: `${a.root}/`, collections: ["c2", "c1"] },
+      { name: "c", root: "/elsewhere" },
+    ]);
+    expect(kept.map((w) => [w.name, w.collections])).toEqual([
+      ["a", ["c1", "c2"]],
+      ["c", undefined],
+    ]);
+  });
+
+  test("the route asks huginn for both collections and a c2 hit resolves once", async () => {
+    const a = await wiki({ "p.md": page("Palette") });
+    const calls: string[] = [];
+    const base = deps(
+      [{ name: "a", root: a.root, index: a.index }],
+      { sessions: null, huginn: { results: [{ collection: "c2", id: "p.md", relevance: 1, snippet: "zzqq" }] } },
+      calls,
+    );
+    __setFindEverywhereDepsForTest({
+      ...base,
+      wikis: () => [
+        { name: "a", root: a.root, collections: ["c1"] },
+        { name: "b", root: a.root, collections: ["c2"] },
+      ],
+    });
+    const app = new Hono();
+    registerWikiFindEverywhereRoute(app, { knowledgeApiUrl: "http://unused", claudeUsageUrl: null } as unknown as Config);
+    const res = await app.request("/api/wiki/find-everywhere?q=zzqq");
+    const body = (await res.json()) as FindEverywhereResponse;
+    const sent = new URL(`http://x${calls.find((c) => c.startsWith("huginn"))!.slice(7)}`).searchParams.getAll("collection");
+    expect(sent).toEqual(["c1", "c2"]);
+    expect(body.results.map((r) => [keyOf(r), r.legs.huginn?.rank])).toEqual([["a:p.md", 1]]);
+  });
+});
+
+describe("fix round 2 — plainSnippet ends only on markup the clip cut off (item 3)", () => {
+  const cases: Array<[string, string, string]> = [
+    ["an apostrophe inside braces", "f(x) = {x | x's > 0} and then more text here", "f(x) = and then more text here"],
+    ["a lone brace in prose", "Use { to open a block; then close it later", "Use { to open a block; then close it later"],
+    ["a lone brace before an ellipsis", "Use { to open a block; then…", "Use { to open a block; then…"],
+    ["a `<` before a letter in prose", "when n <k the loop ends…", "when n <k the loop ends…"],
+    ["a `<` before a letter, punctuation after", "when n <k the loop ends early, so it holds", "when n <k the loop ends early, so it holds"],
+    ["a stray quote pairing past the closer", "{x's} and it's done", "and it's done"],
+    ["a paired quote still guards a brace", 'Count {a: "}", b: x\'s} rows', "Count rows"],
+    ["a `<` before plain words to the end", "if n <k then stop", "if n <k then stop"],
+    ["a `<` before an `=` that is no attribute", "when n <k we call f(x) = y", "when n <k we call f(x) = y"],
+    ["a cut bare tag name still ends", "tail <Callout", "tail"],
+    ["a cut expression still ends", "tail {items.map(", "tail"],
+  ];
+  for (const [name, raw, want] of cases) {
+    test(name, () => {
+      expect(plainSnippet(raw)).toBe(want);
+    });
+  }
+});
+
+describe("fix round 2 — plainSnippet pins (item 6)", () => {
+  test("brace depth inside a tag protects a bare `>`", () => {
+    expect(plainSnippet("Before <X a={b > c} /> after")).toBe("Before after");
+  });
+
+  test("a backtick quote inside braces protects a `}`", () => {
+    expect(plainSnippet("Count {`a}b`} rows")).toBe("Count rows");
+  });
+
+  test("a fence closes only on its own character, at least as long", () => {
+    expect(plainSnippet("Before\n````\ncode\n```\nstill code\n````\nafter")).toBe("Before after");
+    expect(plainSnippet("Before\n```\ncode\n~~~\nstill code\n```\nafter")).toBe("Before after");
+  });
+
+  test("`<!` opens a tag", () => {
+    expect(plainSnippet("a <!DOCTYPE html> b")).toBe("a b");
+  });
+});
+
+describe("fix round 2 — the palette's request parses back to the box's free words (item 4)", () => {
+  // `wire` is what the palette sends: the free words' text forms, joined.
+  const wire = (box: string) =>
+    findFreeTokens(box)
+      .map((t) => t.text)
+      .join(" ");
+  const boxes: Array<[string, string]> = [
+    ['"type:plan" felles', "type:plan felles"],
+    ['"#tag" felles', "#tag felles"],
+    ['foo:"x type:plan"', "foo:x type:plan"],
+    ['"#12"', "#12"],
+  ];
+  for (const [box, remote] of boxes) {
+    test(`${box} reaches the legs as the box's words`, async () => {
+      const sent = wire(box);
+      expect(findFreeTokens(sent)).toEqual(findFreeTokens(box));
+      const cap = capFindEverywhereQuery(sent);
+      expect(cap.remote).toBe(freeText(box));
+      expect(cap.remote).toBe(remote);
+      const parsed = parseFindQuery(cap.text);
+      expect([parsed.types, parsed.tags, parsed.numbers]).toEqual([[], [], []]);
+      const a = await wiki({ "p.md": page("P") });
+      const calls: string[] = [];
+      await findEverywhere(sent, 20, deps([{ name: "w", root: a.root, index: a.index, collections: ["c"] }], {}, calls));
+      expect(sentQ(calls, "usage")).toBe(remote);
+    });
+  }
+
+  test("the palette sends exactly that form", () => {
+    for (const [box] of boxes) expect(everywhereRequestQuery(box)).toBe(wire(box));
+  });
+});
+
+describe("fix round 2 — legs and logging pins (item 6)", () => {
+  test("an abort during the index load names each wiki `aborted`", async () => {
+    const a = await wiki({ "p.md": page("Palette") });
+    const ctrl = new AbortController();
+    const r = await findEverywhere("palette", 20, {
+      ...deps([{ name: "w", root: a.root, index: a.index }], { sessions: null }),
+      index: async () => {
+        ctrl.abort();
+        return a.index;
+      },
+      signal: ctrl.signal,
+    });
+    expect(r.sources.indexes.skipped).toEqual([{ wiki: "w", error: "aborted" }]);
+  });
+
+  test("titles: failed on an answer without a sessions list", async () => {
+    const a = await wiki({ "p.md": page("P", [`sessions: [${S1}]`]) });
+    const r = await findEverywhere(
+      "zzqq",
+      20,
+      deps([{ name: "w", root: a.root, index: a.index }], { sessions: { sessions: [{ sessionId: S1, snippet: "" }] }, titles: { nope: 1 } }),
+    );
+    expect(r.sources.sessions.titles).toBe("failed");
+  });
+
+  test("a page's session score follows its session's rank", async () => {
+    const a = await wiki({ "a.md": page("A", [`sessions: [${S2}]`]), "b.md": page("B", [`sessions: [${S1}]`]) });
+    const r = await findEverywhere(
+      "zzqq",
+      20,
+      deps([{ name: "w", root: a.root, index: a.index }], {
+        sessions: { sessions: [{ sessionId: S1, snippet: "" }, { sessionId: S2, snippet: "" }] },
+      }),
+    );
+    expect(r.results.map((x) => x.relPath)).toEqual(["b.md", "a.md"]);
+  });
+
+  test("a session id with surrounding white space still joins", async () => {
+    const a = await wiki({ "p.md": page("P", [`sessions: [${S1}]`]) });
+    const r = await findEverywhere(
+      "zzqq",
+      20,
+      deps([{ name: "w", root: a.root, index: a.index }], { sessions: { sessions: [{ sessionId: `  ${S1} `, snippet: "" }] } }),
+    );
+    expect(r.results.map((x) => x.relPath)).toEqual(["p.md"]);
+  });
+
+  // `ab` and `a­b` collate as equal under ICU; by code unit `ab` is first.
+  const twins = (index: WikiIndex, order: "ab-first" | "shy-first") => {
+    const w = [
+      { name: "ab", root: "/r-ab", index },
+      { name: "a­b", root: "/r-shy", index },
+    ];
+    return order === "ab-first" ? w : [w[1]!, w[0]!];
+  };
+
+  test("the text leg breaks a cross-wiki tie by code unit, whatever the registry order", async () => {
+    expect("ab".localeCompare("a­b")).toBe(0);
+    const a = await wiki({ "p.md": page("Palette notes") });
+    for (const order of ["ab-first", "shy-first"] as const) {
+      const r = await findEverywhere("palette", 20, deps(twins(a.index, order), { sessions: null }));
+      expect(r.results.map((x) => [x.wiki, x.legs.text?.rank])).toEqual([
+        ["ab", 1],
+        ["a­b", 2],
+      ]);
+    }
+  });
+
+  test("the sessions leg breaks a score tie by code unit, whatever the registry order", async () => {
+    const a = await wiki({ "p.md": page("P", [`sessions: [${S1}]`]) });
+    for (const order of ["ab-first", "shy-first"] as const) {
+      const r = await findEverywhere("zzqq", 20, deps(twins(a.index, order), { sessions: { sessions: [{ sessionId: S1, snippet: "" }] } }));
+      expect(r.results.map((x) => x.wiki)).toEqual(["ab", "a­b"]);
+      expect(r.results[0]!.score).toBeGreaterThan(r.results[1]!.score);
+    }
+  });
+
+  test("the warn-once key includes the host", () => {
+    const lines: string[] = [];
+    const logger = { warn: () => void lines.push("warn"), info: () => void lines.push("info") };
+    const body: FindEverywhereResponse = {
+      q: "x",
+      results: [],
+      sources: {
+        query: { truncated: false },
+        indexes: { ms: 0, skipped: [], stale: [] },
+        text: { status: "ok", ms: 0 },
+        huginn: { status: "error", ms: 0, error: "timeout" },
+        sessions: { status: "ok", ms: 0 },
+      },
+    };
+    logLegFailures(body, { huginn: "h1:8321", sessions: "u" }, logger);
+    logLegFailures(body, { huginn: "h2:8321", sessions: "u" }, logger);
+    expect(lines).toEqual(["warn", "warn"]);
   });
 });
