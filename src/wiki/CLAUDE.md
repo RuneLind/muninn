@@ -2017,10 +2017,11 @@ there is no find route. Grammar: free words soft-ANDed (below) and deduplicated 
 stripped on both sides) — what a series chip applies. A chip REPLACES the
 query's `series:` tokens and keeps every other token, `in:` included, so its
 count is what applying it yields for any listing and query (a seeded property
-test in `wiki-find.test.ts` pins it): its full rows, plus its partial rows when
-that series alone has fewer than `PARTIAL_BAND_MAX_FULL` full rows — the band
-is decided on the set the chip produces, so a chip can count more rows than the
-current list shows for its series. Chips sort by full rows first, then count;
+test in `wiki-find.test.ts` pins it): its full rows, plus at most
+`PARTIAL_BAND_MAX` of its partial rows when that series alone has fewer than
+`PARTIAL_BAND_MAX_FULL` full rows — the band rules run on the set the chip
+produces, so a chip can count more rows than the current list shows for its
+series. Chips sort by full rows first, then count;
 `type:<prefix>`; `age:<N`/`age:>N` days on the worked-on axis, two bounds of
 one direction keeping the tighter; `#tag` a tag prefix but `#<digits>` a
 REQUIRED number word (a bare `12` stays a free word); `is:retired` admits culled pages; a known key with no value yet
@@ -2034,16 +2035,21 @@ characters, since `i` or a half-typed `w` hits most pages (measured: "felles i"
 listed 556 of 587 mimir pages before this rule). A page hitting all words is in
 the full band, ranked as before; one hitting fewer but at least `findNeed(n)` of
 the n LONG words (1 for n ≤ 2, ⌈n/2⌉ from 3) is in the partial band, strictly
-below every full row, ordered by words hit, then score — so a one-word query is
-plain AND. The partial band is shown only while the full band has fewer than
-`PARTIAL_BAND_MAX_FULL` (5) rows: it rescues a weak query, and more words must
-keep narrowing one that already works. With 5 or more full rows, partial rows
-are in none of `rows`, `groups`, `total`, `partials` or the footer. A series group never
+below every full row — so a one-word query is plain AND. The partial band is a
+bounded rescue: a query whose full band has `PARTIAL_BAND_MAX_FULL` (5) or more
+rows gets no partial rows, and a weaker one gets at most `PARTIAL_BAND_MAX`
+(10), ordered by words hit, then by the rarity of the long words the page hit
+(Σ ln(1 + pool / pages hitting the word), over this query's filtered pool),
+then score. Measured on mimir: `wiki` has 151 full rows, while `wiki retire`
+has 4, so before the cap it listed 150 partial rows hitting only `wiki`; now it
+lists 4 + 10, pages hitting `retire` first. Partial rows past the cap are in
+none of `rows`, `groups`, `total`, `partials`, chips or the footer. A series group never
 spans two words-hit tiers, or a partial row would show inside a full group. A
 partial row carries a `partial m/n` pill whose title names the words it hit
 (the hit may sit in a field the row does not show) and marks only its own
-words. The footer for rows past the cap says how many of them are partial, and
-adds "narrow the query" only when a hidden row is a full match. A
+words. The footer for rows past the cap says "N more — narrow the query": the
+largest partial result (4 + 10) fits under `FIND_ROWS_MAX`, so only full rows
+are ever hidden, and another word can drop them. A
 digit word matches a whole number outside any ISO date, in the scorer and the
 highlighter alike, so `9` does not hit `2026-09-…`. Series groups, keys and
 labels are the rail's (`seriesKeyOf`, `seriesCensusKey`, `seriesHead`). Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The

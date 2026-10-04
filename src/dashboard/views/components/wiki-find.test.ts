@@ -15,6 +15,7 @@ import {
   rankFind,
   seriesMatchKey,
 } from "./wiki-find.ts";
+import * as find from "./wiki-find.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import { seriesHead, seriesKeyOf } from "./wiki-groups.ts";
 
@@ -722,16 +723,90 @@ describe("fix round 1: required words, dedupe, the full-band threshold", () => {
 });
 
 describe("the footer for rows past the cap", () => {
-  test("names hidden partial rows, and says narrow only when a hidden row is a full match", async () => {
+  test("only full rows are ever hidden, so the footer always says narrow the query", async () => {
     const { findMoreText } = await import("./wiki-find-view.ts");
+    // The largest partial result fits under the row cap.
+    expect(PARTIAL_BAND_MAX_FULL - 1 + 10).toBeLessThanOrEqual(FIND_ROWS_MAX);
     const fulls = Array.from({ length: 45 }, (_, i) => pg(`f${i}.md`, { title: `Ledger notes ${i}` }));
     expect(findMoreText(rankFind(fulls, "ledger notes", { now: NOW }))).toBe("5 more — narrow the query");
-    const parts = Array.from({ length: 44 }, (_, i) => pg(`p${i}.md`, { title: `Ledger ${i}` }));
-    const mixed = rankFind([pg("f.md", { title: "Ledger notes" }), ...parts], "ledger notes", { now: NOW });
-    expect(findMoreText(mixed)).toBe("5 more — 5 are partial matches");
-    const one = rankFind([pg("f.md", { title: "Ledger notes" }), ...parts.slice(0, 40)], "ledger notes", { now: NOW });
-    expect(findMoreText(one)).toBe("1 more — 1 is a partial match");
     expect(findMoreText(rankFind(fulls.slice(0, 3), "ledger notes", { now: NOW }))).toBe("");
+    const parts = Array.from({ length: 44 }, (_, i) => pg(`p${i}.md`, { title: `Ledger ${i}` }));
+    const weak = rankFind([...fulls.slice(0, 4), ...parts], "ledger notes", { now: NOW });
+    expect([weak.rows.length, weak.total, weak.partials]).toEqual([14, 14, 10]);
+    expect(findMoreText(weak)).toBe("");
+  });
+});
+
+describe("fix round 2: the partial band is a bounded rescue", () => {
+  test("PARTIAL_BAND_MAX is 10", () => {
+    expect((find as Record<string, unknown>).PARTIAL_BAND_MAX).toBe(10);
+  });
+
+  test("rarer matched words rank first: on `felles wiki` the page hitting `felles` leads the partial band", () => {
+    const pages = [
+      ...Array.from({ length: 8 }, (_, i) =>
+        pg(`w${i}.md`, { title: `Wiki page ${i}`, tags: ["wiki"], description: "wiki" }),
+      ),
+      pg("felles.md", { title: "Felles bucket" }),
+    ];
+    const r = rankFind(pages, "felles wiki", { now: NOW });
+    expect(r.rows.every((x) => x.partial)).toBe(true);
+    expect(r.rows[0]!.page.relPath).toBe("felles.md");
+    // The wiki-only pages outscore it; rarity, not score, put it first.
+    expect(r.rows[1]!.score).toBeGreaterThan(r.rows[0]!.score);
+  });
+
+  test("`wiki retire`: 4 full rows, then at most 10 partial rows, retire-hitting pages first", () => {
+    const pages = [
+      ...Array.from({ length: 4 }, (_, i) => pg(`full${i}.md`, { title: `Wiki retire ${i}` })),
+      ...Array.from({ length: 15 }, (_, i) =>
+        pg(`wiki${i}.md`, { title: `Wiki ${i}`, tags: ["wiki"], description: "wiki" }),
+      ),
+      pg("retire-a.md", { title: "Retire a" }),
+      pg("retire-b.md", { title: "Retire b" }),
+    ];
+    const r = rankFind(pages, "wiki retire", { now: NOW });
+    expect([r.total, r.partials, r.rows.length]).toEqual([14, 10, 14]);
+    expect(r.rows.slice(0, 4).every((x) => !x.partial)).toBe(true);
+    expect(r.rows.slice(4, 6).map((x) => x.page.relPath).sort()).toEqual(["retire-a.md", "retire-b.md"]);
+    expect(r.rows.slice(6).every((x) => x.terms.join() === "wiki")).toBe(true);
+  });
+
+  test("a chip counts its series under the cap, and applying it yields that count", () => {
+    const pages = [
+      ...Array.from({ length: 12 }, (_, i) => pg(`s/${i}.md`, { title: `Ledger ${i}`, series: "s" })),
+      pg("t/1.md", { title: "Ledger notes", series: "t" }),
+    ];
+    const r = rankFind(pages, "ledger notes", { now: NOW });
+    expect(r.chips.map((c) => [c.seriesKey, c.full, c.count])).toEqual([
+      ["t", 1, 1],
+      ["s", 0, 10],
+    ]);
+    for (const c of r.chips) {
+      expect(rankFind(pages, applySeriesChip("ledger notes", c.token), { now: NOW }).total).toBe(c.count);
+    }
+  });
+
+  test("a `#<digits>` word does not count as a hit the page lacks: `fix rounds #500` on a page missing `rounds` is partial 2/3", async () => {
+    const { findListHtml } = await import("./wiki-find-view.ts");
+    const pages = [pg("fix.md", { title: "Fix widget #500" }), pg("other.md", { title: "Fix widget 400" })];
+    const r = rankFind(pages, "fix rounds #500", { now: NOW });
+    expect(r.rows.map((x) => [x.page.relPath, x.matched, x.partial])).toEqual([["fix.md", 2, true]]);
+    expect(r.terms).toEqual(["fix", "rounds", "500"]);
+    expect(findListHtml(r, "fix rounds #500", 0, (x) => x, () => undefined)).toContain(">partial 2/3</span>");
+  });
+
+  test("the short-word cut-off is 3: a 2-character word (`12`, `ab`) is required", () => {
+    const pages = [
+      pg("both.md", { title: "Felles round 12 ab" }),
+      pg("felles.md", { title: "Felles bucket" }),
+      pg("n12.md", { title: "Round 12 notes" }),
+      pg("ab.md", { title: "About ab" }),
+    ];
+    expect(order(pages, "felles 12")).toEqual(["both.md"]);
+    expect(order(pages, "felles ab")).toEqual(["both.md"]);
+    // Three characters is long again: `bucket` alone is enough under `felles bucket xyz`.
+    expect(order(pages, "felles bucket xyz")).toEqual(["felles.md"]);
   });
 });
 

@@ -23,8 +23,9 @@
  * their values (`type:plan type:blog`); two `#tag`s AND; two `age:` bounds AND,
  * so a second bound of the same direction keeps the tighter. Across keys
  * everything ANDs. A chip REPLACES the `series:` tokens and keeps the rest, so
- * it yields exactly the count it shows (pinned by a property test): full rows
- * in that series, plus its partial rows when the series alone has fewer than
+ * it yields exactly the count it shows (pinned by a property test): what the
+ * query returns inside that series alone — its full rows, plus at most
+ * `PARTIAL_BAND_MAX` of its partial rows when it has fewer than
  * `PARTIAL_BAND_MAX_FULL` full rows.
  *
  * Score, per page: each word SUMS the weights of the fields it hits (title 3,
@@ -38,10 +39,14 @@
  * `FIND_SHORT_WORD` characters (folded), which matches too much to be the one
  * missing. A page hitting every word is in the FULL band, ranked as above. A
  * page hitting fewer, but at least `findNeed(n)` of the n LONG words (1 for
- * n ≤ 2, ⌈n/2⌉ from 3), is in the PARTIAL band, strictly below every full row,
- * ordered by words hit, then score. The partial band is shown only while the
- * full band has fewer than `PARTIAL_BAND_MAX_FULL` rows. So a one-word query
- * behaves as plain AND. A partial row marks only its own words.
+ * n ≤ 2, ⌈n/2⌉ from 3), is in the PARTIAL band, strictly below every full row.
+ * The partial band is a bounded rescue for a weak query: a query whose full
+ * band has `PARTIAL_BAND_MAX_FULL` or more rows gets no partial rows, and a
+ * weaker one gets at most `PARTIAL_BAND_MAX`, ordered by words hit, then by
+ * the rarity of the long words the page hit (Σ ln(1 + pool / pages hitting
+ * the word), over the filtered pool for this query), then score. So on
+ * "felles wiki" a page hitting `felles` outranks one hitting only `wiki`. A
+ * one-word query behaves as plain AND. A partial row marks only its own words.
  */
 
 import { escHtml } from "./escape.ts";
@@ -66,12 +71,15 @@ export const FIND_WEIGHTS = {
   statusNote: 1,
   relPath: 1,
 } as const;
-/** A free word shorter than this (folded) is required: `i`, `w`, `12` hit
- *  most pages, so as the missing word they flooded the partial band. */
+/** A free word shorter than this (folded) is required, by length alone.
+ *  Measured on mimir (559 pages in the pool): `i` hits 556, `w` 398 — as the
+ *  missing word they flooded the partial band. `12` (21 pages) is required
+ *  only because it is short. */
 export const FIND_SHORT_WORD = 3;
-/** The partial band is shown only while the full band has fewer rows than
- *  this: more words must keep narrowing a query that already works. */
+/** A query whose full band has this many rows or more gets no partial rows. */
 export const PARTIAL_BAND_MAX_FULL = 5;
+/** The most partial rows a query returns, rarest matched words first. */
+export const PARTIAL_BAND_MAX = 10;
 /** How much `near` multiplies the text score at its ceiling. */
 export const FIND_NEAR_BOOST = 0.8;
 /** The recency term's weight and decay (days). */
@@ -293,8 +301,9 @@ export interface FindChip {
   /** {@link seriesMatchKey} of the series — what `token` matches. */
   seriesKey: string;
   label: string;
-  /** What applying the chip yields: its full rows, plus its partial rows
-   *  when those are fewer than `PARTIAL_BAND_MAX_FULL`. Not only shown rows. */
+  /** What applying the chip yields: its full rows, plus at most
+   *  `PARTIAL_BAND_MAX` of its partial rows when it has fewer than
+   *  `PARTIAL_BAND_MAX_FULL` full rows. Not only shown rows. */
   count: number;
   /** Full-band rows in this series — chips sort on it first. */
   full: number;
@@ -308,11 +317,10 @@ export interface FindResult {
   rows: FindRow[];
   groups: FindGroup[];
   chips: FindChip[];
-  /** All listed matches before the row cap — partial ones only when the
-   *  partial band is shown. */
+  /** All returned matches before the row cap: the full band, plus the
+   *  partial band when it is shown (capped at `PARTIAL_BAND_MAX`). */
   total: number;
-  /** How many of `total` are partial rows; the footer says how many of the
-   *  hidden rows are. */
+  /** How many of `total` are partial rows. */
   partials: number;
   /** The query's folded words, free and `#<digits>`. A row marks its own `terms`. */
   terms: string[];
@@ -408,13 +416,21 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
   const near = opts.near ?? {};
   const required = new Set([...q.numbers, ...q.words.filter((w) => w.length < FIND_SHORT_WORD)]);
   const need = findNeed(terms.length - required.size);
+  // Pages per long word over the filtered pool — the partial band's rarity.
+  const wordHits = new Map(terms.filter((w) => !required.has(w)).map((w) => [w, 0]));
+  let pool = 0;
   const candidates: FindRow[] = [];
   for (const p of pages) {
     if (!inFindPool(p, q.retired)) continue;
     const ms = pageWorkedMs(p, opts.now);
     const ageDays = ms > 0 ? Math.max(0, (opts.now - ms) / DAY_MS) : null;
     if (!passesFilters(p, q, labels, ageDays)) continue;
+    pool++;
     const text = textScore(p, terms, labels);
+    for (const w of text.hit) {
+      const n = wordHits.get(w);
+      if (n !== undefined) wordHits.set(w, n + 1);
+    }
     const hitRequired = text.hit.filter((w) => required.has(w)).length;
     if (hitRequired < required.size || text.hit.length - hitRequired < need) continue;
     const n = near[p.relPath] ?? 0;
@@ -432,17 +448,26 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
       seriesLabel: key ? seriesLabelFor(p, labels) || raw : "",
     });
   }
-  // Words hit first: the full band (every word) sits above every partial row.
-  candidates.sort(
-    (a, b) => b.matched - a.matched || b.score - a.score || a.page.relPath.localeCompare(b.page.relPath),
+  const rarity = (r: FindRow) =>
+    r.terms.reduce((sum, w) => {
+      const n = wordHits.get(w);
+      return n ? sum + Math.log(1 + pool / n) : sum;
+    }, 0);
+  const byPath = (a: FindRow, b: FindRow) => a.page.relPath.localeCompare(b.page.relPath);
+  const full = candidates.filter((r) => !r.partial).sort((a, b) => b.score - a.score || byPath(a, b));
+  const rare = new Map(candidates.filter((r) => r.partial).map((r) => [r, rarity(r)]));
+  const partial = [...rare.keys()].sort(
+    (a, b) => b.matched - a.matched || rare.get(b)! - rare.get(a)! || b.score - a.score || byPath(a, b),
   );
-  const showPartials = candidates.filter((r) => !r.partial).length < PARTIAL_BAND_MAX_FULL;
-  const scored = showPartials ? candidates : candidates.filter((r) => !r.partial);
+  // The full band sits above every partial row; the partial band is a
+  // bounded rescue for a weak full band, not a second result list.
+  const scored = full.length < PARTIAL_BAND_MAX_FULL ? [...full, ...partial.slice(0, PARTIAL_BAND_MAX)] : full;
 
-  // Chips count every candidate before the row cap, keyed on exactly what the
-  // chip's `series:` token matches. Applying a chip decides the partial band
-  // on that series' own full rows, so the count does too — and equals what
-  // applying it yields. A chip exists for each series among the listed rows.
+  // Chips count before the row cap, keyed on exactly what the chip's
+  // `series:` token matches. Applying a chip runs the band rules on that
+  // series alone — the threshold on its own full rows, the cap on its own
+  // partial rows — so the count does too, and equals what applying it yields.
+  // A chip exists for each series among the returned rows.
   const tally = new Map<string, { label: string; full: number; partial: number }>();
   for (const r of candidates) {
     const match = r.seriesKey ? seriesMatchKey(r.seriesKey) : "";
@@ -460,7 +485,7 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
     chipMap.set(match, {
       seriesKey: match,
       label: t.label,
-      count: t.full + (t.full < PARTIAL_BAND_MAX_FULL ? t.partial : 0),
+      count: t.full + (t.full < PARTIAL_BAND_MAX_FULL ? Math.min(t.partial, PARTIAL_BAND_MAX) : 0),
       full: t.full,
       token: /\s/.test(match) ? `series:"${match}"` : `series:${match}`,
     });

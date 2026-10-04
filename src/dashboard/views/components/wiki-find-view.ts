@@ -100,15 +100,14 @@ export function findListHtml(
   return html;
 }
 
-/** The footer for rows past the cap: how many are partial, and the narrow
- *  hint only when a hidden row is a full match (more words drop partials). */
+/** The footer for rows past the cap. Only full rows are ever hidden: a
+ *  partial band exists only beside fewer than `PARTIAL_BAND_MAX_FULL` full
+ *  rows and holds at most `PARTIAL_BAND_MAX`, which fits under
+ *  `FIND_ROWS_MAX` (pinned by a test). So a hidden row hit every word, and
+ *  another word can drop it. */
 export function findMoreText(result: FindResult): string {
   const hidden = result.total - result.rows.length;
-  if (hidden <= 0) return "";
-  const hiddenPartial = result.partials - result.rows.filter((r) => r.partial).length;
-  if (hiddenPartial <= 0) return `${hidden} more — narrow the query`;
-  const partial = `${hiddenPartial} ${hiddenPartial === 1 ? "is a partial match" : "are partial matches"}`;
-  return hiddenPartial < hidden ? `${hidden} more — ${partial}; narrow the query` : `${hidden} more — ${partial}`;
+  return hidden > 0 ? `${hidden} more — narrow the query` : "";
 }
 
 function findRowHtml(
