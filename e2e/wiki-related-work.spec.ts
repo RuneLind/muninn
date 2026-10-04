@@ -32,6 +32,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { contrastOf, paintedContrast } from "./contrast.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 /**
  * The REAL constants, imported rather than re-typed. `src/wiki/related.ts`
  * itself is unloadable here — it reaches `registry.ts`, whose `import.meta.dir`
@@ -173,6 +174,18 @@ const PAGES: Array<[string, string]> = [
   ["plans/ser-nb.mdx", md("Series neighbour", ["series: alpha", "status_date: 2026-09-06"], "Body.")],
   ["plans/ser-alpha.mdx", md("Alpha head", ["series: alpha", "series_label: Alpha line", "status_date: 2026-09-05"], "Body.")],
   ["plans/ser-beta.mdx", md("Beta head", ["series: beta", "series_label: Beta line", "status_date: 2026-09-04"], "Body.")],
+  // The remove cluster: `rm-open` cites `rm-a` and `rm-b`, and `rm-a` cites
+  // `rm-b` — so `rm-b`, a `gamma` member, is a block row AND a row in `rm-a`'s
+  // hop. Removing it from the series must take its pill off both.
+  ["plans/rm-open.mdx", md("Remove open", ["status_date: 2026-09-03"], "Reads [[rm-a]] and [[rm-b]].")],
+  ["plans/rm-a.mdx", md("Remove via", ["status_date: 2026-09-02"], "Reads [[rm-b]].")],
+  ["plans/rm-b.mdx", md("Remove member", ["series: gamma", "status_date: 2026-09-01"], "Body.")],
+  ["plans/rm-head.mdx", md("Gamma head", ["series: gamma", "series_label: Gamma line", "status_date: 2026-08-31"], "Body.")],
+  // The generation cluster: `g-a` and `g-b` both cite `g-x`, so `g-x`'s hop is
+  // `[g-b]` from `g-a` and `[g-a]` from `g-b` — the two answers differ.
+  ["plans/g-a.mdx", md("Gen A", ["status_date: 2026-08-30"], "Reads [[g-x]].")],
+  ["plans/g-b.mdx", md("Gen B", ["status_date: 2026-08-29"], "Reads [[g-x]].")],
+  ["plans/g-x.mdx", md("Gen X", ["status_date: 2026-08-28"], "Body.")],
 ];
 
 /** How many days old each row's file is: the age the row shows. */
@@ -674,3 +687,152 @@ for (const scheme of ["light", "dark"] as const) {
     }
   });
 }
+
+/** Open a page through the reader's own popstate handler — a navigation the
+ *  reader did not click, so nothing else races it. */
+async function popTo(page: Page, rel: string): Promise<void> {
+  await page.evaluate(
+    ([wiki, r]) => {
+      history.pushState({ relPath: r }, "", `/wiki?wiki=${wiki}&relPath=${encodeURIComponent(r!)}`);
+      dispatchEvent(new PopStateEvent("popstate"));
+    },
+    [WIKI, rel],
+  );
+}
+
+test("Remove from series on a block row takes its pill off — in the block AND in an open hop — without a reload", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/rm-open.mdx")}`);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Remove open");
+  const member = relatedRows(page).filter({ hasText: "Remove member" });
+  await expect(member.locator(".wiki-rel-series")).toHaveText("Gamma line");
+  // `rm-a`'s hop holds the same page.
+  await relatedRows(page).filter({ hasText: "Remove via" }).locator("[data-rel-hop]").click();
+  const hopMember = page
+    .locator('.wiki-rel-hop-body[data-rel-hop-for="plans/rm-a.mdx"] .wiki-rel-hop-row')
+    .filter({ hasText: "Remove member" });
+  await expect(hopMember.locator(".wiki-rel-series")).toHaveText("Gamma line");
+
+  await member.hover();
+  await member.locator("[data-series-menu]").click();
+  await page.locator('#wikiSeriesMenu [data-series-cmd="remove"]').click();
+  await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Remove open");
+  // A field going set → ABSENT: the fresh listing row omits `series`, so a
+  // merge over the page response's stale row would keep the old pill.
+  await expect(member.locator(".wiki-rel-series")).toHaveCount(0);
+  await expect(hopMember).toHaveCount(1);
+  await expect(hopMember.locator(".wiki-rel-series")).toHaveCount(0);
+});
+
+test("a hop answer landing after the reader moved on is dropped — the new page asks for its own", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const excludes: Array<string | null> = [];
+  await page.route("**/api/wiki/related**", async (route) => {
+    const exclude = new URL(route.request().url()).searchParams.get("exclude");
+    excludes.push(exclude);
+    if (exclude === "plans/g-a.mdx") await gate;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent("plans/g-a.mdx")}`);
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Gen A");
+  const btn = () => relatedRows(page).filter({ hasText: "Gen X" }).locator("[data-rel-hop]");
+  await btn().click();
+  await expect.poll(() => excludes.length).toBe(1);
+
+  // A → B while A's answer (`g-x` minus A, i.e. `[Gen B]`) is in flight.
+  await popTo(page, "plans/g-b.mdx");
+  await expect(page.locator(".wiki-article-head h1")).toHaveText("Gen B");
+  await expect(btn()).toHaveAttribute("aria-expanded", "false");
+  const landed = page.waitForEvent("requestfinished", (r) => new URL(r.url()).searchParams.get("exclude") === "plans/g-a.mdx");
+  release();
+  await landed;
+  // The page's own `.then` chain runs after the body arrives.
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 150)));
+
+  await btn().click();
+  const hopBody = page.locator('.wiki-rel-hop-body[data-rel-hop-for="plans/g-x.mdx"]');
+  await expect(hopBody.locator(".wiki-rel-hop-row > .wiki-conn-text > span")).toHaveText(["Gen A"]);
+  await expect(hopBody).not.toContainText("Gen B");
+  // B asked for its own answer, with B excluded.
+  expect(excludes).toEqual(["plans/g-a.mdx", "plans/g-b.mdx"]);
+});
+
+test("a failed hop says so, and the next open asks again — a network failure and an error answer alike", async ({
+  page,
+}) => {
+  let n = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/related**", async (route) => {
+    n++;
+    if (n === 1) return route.abort("failed");
+    if (n === 2) {
+      return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) });
+    }
+    await gate;
+    return route.continue();
+  });
+  await openReader(page);
+  const btn = relatedRows(page).filter({ hasText: "Sharing blog" }).locator("[data-rel-hop]");
+  const hopBody = page.locator('.wiki-rel-hop-body[data-rel-hop-for="blogs/c.mdx"]');
+
+  await btn.click();
+  await expect(hopBody).toHaveText("Related work unavailable.");
+  expect(n).toBe(1);
+  await btn.click();
+  await expect(btn).toHaveAttribute("aria-expanded", "false");
+  await btn.click();
+  await expect(hopBody).toHaveText("Related work unavailable.");
+  expect(n).toBe(2);
+
+  // Closed and reopened again: a fresh request, shown as Loading — not the
+  // failure left over from the last open.
+  await btn.click();
+  await btn.click();
+  await expect.poll(() => n).toBe(3);
+  await expect(hopBody).toHaveText("Loading…");
+  release();
+  await expect(hopBody.locator(".wiki-rel-hop-row > .wiki-conn-text > span")).toHaveText(["Citing plan"]);
+  expect(n).toBe(3);
+});
+
+test("a listing adopted as a navigation starts repaints the block under its worked axis, though the navigation fails", async ({
+  page,
+}) => {
+  await page.clock.install();
+  // The boot listing as served; a FORCED refresh comes back saying the ledger
+  // covers this wiki, which turns the worked axis on.
+  await page.route("**/api/wiki/pages**", async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    if (new URL(route.request().url()).searchParams.get("refresh") === "1") {
+      body.workedCoverage = { matched: 1, total: body.pages.length, returned: 1, asOfMs: Date.now() };
+    }
+    await route.fulfill({ response: res, json: body });
+  });
+  await openReader(page);
+  const ages = page.locator("#connBody .wiki-conn-related .wiki-rel-age");
+  await expect(ages).toHaveCount(EXPECTED.length);
+  await expect(page.locator("#connBody .wiki-rel-age.fallback")).toHaveCount(0);
+
+  // A focus refetch past the throttle: under an open article the listing waits.
+  const refetched = page.waitForEvent(
+    "requestfinished",
+    (r) => r.url().includes("/api/wiki/pages") && new URL(r.url()).searchParams.get("refresh") === "1",
+  );
+  await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await refetched;
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 150)));
+  await expect(page.locator("#connBody .wiki-rel-age.fallback")).toHaveCount(0);
+
+  // The navigation that adopts it fails; the block it leaves on screen is
+  // repainted under the axis the adopted listing turned on.
+  await page.route((url) => url.pathname === "/api/wiki/page", (route) => route.abort("failed"));
+  await relatedRows(page).first().locator("> .wiki-conn-text > span").click();
+  await expect(page.locator("#articleWrap .wiki-empty-state")).toContainText("Failed to load page");
+  await expect(page.locator("#connBody .wiki-conn-related .wiki-rel-age.fallback")).toHaveCount(EXPECTED.length);
+});

@@ -3029,16 +3029,17 @@ function relatedHopState(rel: string): RelatedHopResponse | null | undefined {
 
 /**
  * Related rows with their LISTING fields taken from the listing the rail holds
- * now (`why`, `strength` and `signals` stay the row's). The block's rows come
- * from the page response, which a series write or a later listing does not
- * re-send — without this a row kept the series it had when the page opened
- * while the label lookup read the fresh listing.
+ * now; only `why`, `strength` and `signals` stay the row's. The block's rows
+ * come from the page response, which a series write or a later listing does
+ * not re-send. The fresh entry REPLACES the row's listing fields rather than
+ * merging over them: `toListing` omits an absent optional key, so a merge kept
+ * a `series` (or `seriesLabel`, `culled`, …) the page had since lost.
  */
 function freshenRelated(rows: RelatedListing[]): RelatedListing[] {
   const byRel = new Map(allPages.map((p) => [normalizeRel(p.relPath), p]));
   return rows.map((p) => {
     const fresh = byRel.get(normalizeRel(p.relPath));
-    return fresh ? { ...p, ...fresh, why: p.why, strength: p.strength, signals: p.signals } : p;
+    return fresh ? { ...fresh, why: p.why, strength: p.strength, signals: p.signals } : p;
   });
 }
 

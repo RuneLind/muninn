@@ -1898,7 +1898,11 @@ state: it is where the pointer is whenever a row is being read.
   (`seriesLabelFor`). A row's LISTING fields — series included — are read from
   the listing the rail holds at render time, not from the page response, so a
   series write from the block's own `⋯` (whose forced listing refetch also
-  repaints the block) moves the pill without reopening the page.
+  repaints the block) moves the pill without reopening the page. The fresh
+  listing entry REPLACES the row's listing fields (`freshenRelated` keeps only
+  `why`, `strength` and `signals` from the row): `toListing` omits an absent
+  optional key, so a merge kept a series the page had been removed from. Open
+  hop rows are read the same way.
 
 **`Strongest | Newest`** sits in the header once there are two rows, remembered
 per wiki in `localStorage` (`muninn.wiki.related-order.v1:<wiki>`, every access
@@ -1910,17 +1914,19 @@ toggle. Switching it keeps every open ▸ open, with its answer.
 **▸ is the second hop.** It opens THAT row's own related work under the row:
 `GET /api/wiki/related?wiki=&relPath=<row>&exclude=<open page>&limit=6` answers
 `computeRelated` for the row's page minus the open page and the open page's
-own attachments (compared through `normalizeRelPath`). `exclude` resolves like
-a page reference (`resolveExcludeRef`): the relPath as the listing spells it
-(case-insensitive), the same relPath without its extension, or a folder-less
-stem that names exactly one page; one that resolves nothing is compared as
-given. `limit` is digits only (`parseRelatedHopLimit`), clamped to 1–20, and
+own attachments (compared through `normalizeRelPath`). `exclude` resolves
+(`resolveExcludeRef`) as the relPath the listing spells (case-insensitive), the
+same relPath without its extension, or a folder-less stem that exactly one
+non-attachment page has — never a title or an alias, which `index.resolve`
+would also match; one that resolves nothing is compared as given. `limit` is digits only (`parseRelatedHopLimit`), clamped to 1–20, and
 anything else — signed, fractional, `1e3`, `0x10`, `5abc` — is the default 6
 (`RELATED_HOP_LIMIT_DEFAULT`/`_MAX` in `related-constants.ts`, which the reader's
 fetch reads too); `total` is the count before it. The client caches each
 answer for the life of ONE page open — every `renderConnections` (a page open,
-A → start → A, an in-place reload) resets it — sends one request per hop while
-one is in flight, and does not cache a failure. ▸ carries `aria-controls` to
+A → start → A, an in-place reload) resets it and bumps a generation, so an
+answer arriving for an earlier open is dropped rather than cached for this one
+— sends one request per hop while one is in flight, and does not cache a
+failure: it shows `Related work unavailable.` and the next open asks again. ▸ carries `aria-controls` to
 its body, which is `aria-live="polite"`. The block is still
 one hop: this is an explicit request for another page's one hop, which is why
 `related.ts`'s "never transitive" holds. The route is in the `wiki-read` group
@@ -1943,17 +1949,22 @@ self guard, the strength order and its tie), `wiki-related-view.test.ts` (the
 empty-block guard — the shape a spec cannot reach, since an omitted block has no
 element to assert on — the bar segments, the age marking, both orders, the hop
 rows in the toggle's order, an open hop across a re-render and the ▸'s
-`aria-controls`/`aria-live`), `routes/wiki-related-routes.test.ts` (the exclude
-cut, case-folded, with its no-exclude control, an extensionless or stem
-`exclude`, the strict `limit` table and the row shape),
+`aria-controls`/`aria-live`, its body id stable across the toggle),
+`routes/wiki-related-routes.test.ts` (the exclude cut, case-folded, with its
+no-exclude control, an extensionless or stem `exclude`, a title, an alias, a
+shared stem and an attachment's stem cutting nothing, the strict `limit` table
+and the row shape),
 `wiki-provenance.test.ts` (the strip on `/api/wiki/pages`, `related[]` on
 `/api/wiki/page`) and `e2e/wiki-related-work.spec.ts` (the chain end to end, both
 cuts against a real index, the listing's absent key, the why line's full
 visibility, the contrast at rest AND hovered in both themes — bar segments at
 3:1, score, age, ▸ and the toggle at 4.5:1 — strongest-first order, the toggle
 and its remembered choice, the ▸ hop's cut, an open ▸ surviving the toggle, one
-request for a ▸ re-clicked in flight, a refetch after A → start → A, a series
-write from the block's `⋯` moving the pill, and a digest with no PR segment).
+request for a ▸ re-clicked in flight, a refetch after A → start → A, an
+answer for an earlier open dropped, a failed hop shown and refetched, a series
+write from the block's `⋯` moving the pill, Remove from series taking it off
+the row and an open hop, the worked axis flipped by a listing adopted at a
+navigation that then fails, and a digest with no PR segment).
 The spec sizes its fixture from `src/wiki/related-constants.ts` rather than re-typing the
 numbers, so the FIXTURE TRACKS the constant and the boundary case holds at any
 value — which is also why the import catches no drift by itself (measured:

@@ -153,3 +153,116 @@ describe("GET /api/wiki/related", () => {
     expect((await app.request("/api/wiki/related?wiki=__none__&relPath=plans/hop.md")).status).toBe(404);
   });
 });
+
+/**
+ * `exclude` names a page the way the docs say — a relPath (case-insensitive),
+ * the relPath without its extension, or a folder-less STEM exactly one
+ * non-attachment page has — and nothing else: not a title, not an alias, not a
+ * stem two pages share, not an attachment's own stem. One hub cites every
+ * candidate, so a cut shows as a row missing from the hub's block.
+ */
+describe("GET /api/wiki/related — what `exclude` resolves", () => {
+  let root = "";
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  const ALL = [
+    "a/x.md",
+    "b/y.md",
+    "c/aliased.md",
+    "d/dup.md",
+    "e/dup.md",
+    "f/solo-prototype.html",
+    "f/solo.md",
+    "h/pair.html",
+    "h/pair.md",
+  ];
+
+  beforeAll(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-related-exclude-"));
+    const html = (t: string) => `<html><head><title>${t}</title></head><body>x</body></html>`;
+    const files: Array<[string, string]> = [
+      ["hub.md", page("Hub", ALL.map((rel, i) => `[l${i}](${rel})`).join(" "))],
+      // Two pages sharing a TITLE, neither carrying it as a stem.
+      ["a/x.md", page("Overview", "x")],
+      ["b/y.md", page("Overview", "y")],
+      // A page known by an alias.
+      ["c/aliased.md", ["---", "title: Nicknamed page", "aliases: [Nick]", "---", "", "z", ""].join("\n")],
+      // One stem, two pages.
+      ["d/dup.md", page("Dup D", "d")],
+      ["e/dup.md", page("Dup E", "e")],
+      // A unique stem with a suffix attachment (`solo-prototype` is the
+      // attachment's own stem, and no page's).
+      ["f/solo.md", page("Solo", "s")],
+      ["f/solo-prototype.html", html("Solo prototype")],
+      // A same-stem attachment: `pair` is two files, one page.
+      ["h/pair.md", page("Pair", "p")],
+      ["h/pair.html", html("Pair diagram")],
+    ];
+    for (const [rel, body] of files) {
+      await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+      await writeFile(path.join(root, rel), body, "utf8");
+    }
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `exwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterAll(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /** The hub's rows with `exclude` applied, as sorted relPaths. */
+  const kept = async (exclude: string | null): Promise<string[]> => {
+    const q = exclude === null ? "" : `&exclude=${encodeURIComponent(exclude)}`;
+    const res = await app.request(`/api/wiki/related?wiki=exwiki&relPath=hub.md&limit=20${q}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { related: Row[] };
+    return body.related.map((r) => r.relPath).sort();
+  };
+  const without = (...cut: string[]) => ALL.filter((r) => !cut.includes(r));
+
+  test("control: without exclude, the hub's block holds every candidate", async () => {
+    expect(await kept(null)).toEqual(ALL);
+  });
+
+  test("a TITLE cuts nothing — a unique one, or one two pages share", async () => {
+    for (const ref of ["Overview", "overview", "Nicknamed page"]) expect(await kept(ref), ref).toEqual(ALL);
+  });
+
+  test("an ALIAS cuts nothing", async () => {
+    expect(await kept("Nick")).toEqual(ALL);
+    expect(await kept("nick")).toEqual(ALL);
+  });
+
+  test("a stem two pages share cuts nothing", async () => {
+    for (const ref of ["dup", "DUP"]) expect(await kept(ref), ref).toEqual(ALL);
+  });
+
+  test("a unique stem cuts its page and the page's attachments, in any case", async () => {
+    for (const ref of ["solo", "SOLO", "Solo", " solo "]) {
+      expect(await kept(ref), ref).toEqual(without("f/solo.md", "f/solo-prototype.html"));
+    }
+    // `pair` is two files — the page and its same-stem attachment — and one page.
+    expect(await kept("pair")).toEqual(without("h/pair.md", "h/pair.html"));
+  });
+
+  test("an attachment's own stem names no page, so it cuts nothing", async () => {
+    expect(await kept("solo-prototype")).toEqual(ALL);
+  });
+
+  test("a stem under a folder it is not in cuts nothing; relPaths cut in any case", async () => {
+    expect(await kept("zz/solo")).toEqual(ALL);
+    expect(await kept("D/DUP")).toEqual(without("d/dup.md"));
+    expect(await kept("e/dup.md")).toEqual(without("e/dup.md"));
+    expect(await kept("F/Solo-Prototype.HTML")).toEqual(without("f/solo-prototype.html"));
+  });
+});

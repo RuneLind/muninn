@@ -3,7 +3,7 @@ import { resolveServingProfile, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
-import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
 import { issueRowsFor } from "../../wiki/trackers/rows.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
@@ -1281,10 +1281,11 @@ export function parseRelatedHopLimit(raw: string | undefined): number {
 const EXCLUDE_EXTENSIONS = [".md", ".mdx", ".html"] as const;
 
 /**
- * `/api/wiki/related`'s `exclude`, resolved the way a page reference is: a
- * relPath as the listing spells it (case-insensitive), the same relPath without
- * its extension, or — with no folder in it — a stem that names exactly one
- * page. `undefined` when none of those finds a page.
+ * `/api/wiki/related`'s `exclude`: a relPath as the listing spells it
+ * (case-insensitive), the same relPath without its extension, or a folder-less
+ * STEM that exactly one non-attachment page has. Never a title or an alias —
+ * `index.resolve` matches both, and cut a page by its title. `undefined` when
+ * none of those finds a page.
  */
 export function resolveExcludeRef(index: WikiIndex, raw: string): WikiPageMeta | undefined {
   const ref = raw.trim();
@@ -1297,9 +1298,18 @@ export function resolveExcludeRef(index: WikiIndex, raw: string): WikiPageMeta |
       if (hit) return hit;
     }
   }
-  if (ref.includes("/")) return undefined;
-  const byName = index.resolve(ref);
-  return byName && stemIsUnique(index, byName.name) ? byName : undefined;
+  // A page name carries no folder, so a ref with one matches no stem below.
+  const key = stemKey(ref);
+  let only: WikiPageMeta | undefined;
+  for (const p of index.pages) {
+    // An attachment (an `.html` paired to its page) is part of that page, not
+    // a page of its own; a superseded page is a page.
+    if (p.parent && p.pairedBy !== "superseded") continue;
+    if (stemKey(p.name) !== key) continue;
+    if (only) return undefined;
+    only = p;
+  }
+  return only;
 }
 
 /** The whole wiki surface — the read slice plus everything else — which is
@@ -1656,8 +1666,8 @@ export function registerWikiReadRoutes(
   // already leaves out. It is another page's block, not a transitive walk:
   // `related.ts`'s one-hop rule holds. Same resolution and 400/404/503 ladder
   // as `/api/wiki/page`. `exclude` resolves like a page reference
-  // (`resolveExcludeRef`: relPath with or without extension, or a unique
-  // stem); one that names no page is compared as given. `limit` is digits
+  // (`resolveExcludeRef`: relPath with or without extension, or a stem
+  // exactly one non-attachment page has — never a title or alias); one that names no page is compared as given. `limit` is digits
   // only, clamped to 1–20, default 6 (`parseRelatedHopLimit`), and `total` is
   // the row count before it, so the reader can say how many it left out.
   app.get("/api/wiki/related", async (c) => {

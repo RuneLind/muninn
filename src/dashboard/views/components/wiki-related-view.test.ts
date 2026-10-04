@@ -226,3 +226,24 @@ describe("fix round 1 — hop a11y, open state and order", () => {
     expect(f2!).toBeLessThan(s2!);
   });
 });
+
+describe("fix round 2 — hop body ids", () => {
+  test("each row keeps its hop body id across Strongest | Newest — numbered in the SERVER's order", () => {
+    // Server order: strong-old first. Newest flips them, so an id numbered by
+    // the SHOWN order would swap between the two renders.
+    const strong = row({ name: "s", relPath: "s.md", strength: 2.8, workedMs: NOW - 9 * DAY } as Partial<RelatedListing>);
+    const fresh = row({ name: "f", relPath: "f.md", strength: 1, workedMs: NOW - 1 * DAY } as Partial<RelatedListing>);
+    const idsOf = (order: "strongest" | "newest") => {
+      const html = relatedSectionHtml([strong, fresh], false, { hops: true, now: NOW, order });
+      const shown = [...html.matchAll(/data-rel-hop="([^"]+)"[^>]*aria-controls="([^"]+)"/g)].map((m) => [m[1], m[2]]);
+      return { shown: shown.map(([rel]) => rel), ids: Object.fromEntries(shown) };
+    };
+    const a = idsOf("strongest");
+    const b = idsOf("newest");
+    // The control: the two renders really do show the rows in opposite orders.
+    expect(a.shown).toEqual(["s.md", "f.md"]);
+    expect(b.shown).toEqual(["f.md", "s.md"]);
+    expect(b.ids).toEqual(a.ids);
+    expect(a.ids).toEqual({ "s.md": "wiki-rel-hop-0", "f.md": "wiki-rel-hop-1" });
+  });
+});
