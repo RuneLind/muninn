@@ -57,6 +57,11 @@ function md(title: string, fm: string[], body: string): string {
  *  - a series `two-words` labelled "Two words" (head `alpha`, member `beta`),
  *    plus a loose page that also says "member": the chip and the quoted `in:`.
  *  - `gamma-report` — a no-series page that out-scores a series group.
+ *  - `shared-wiki` says "felles" only in its `status_note`; `wiki-glossary`
+ *    shares just the word "wiki" — the full row and the partial row.
+ *  - `ledger-totals` carries "ledger" but not "notes", and "widget" but not
+ *    500: a partial row under "ledger notes", and no row at all under
+ *    `widget #500` (`#<digits>` is required in both bands).
  */
 const PAGES: Array<[string, string]> = [
   [OPEN, md("Open plan", [], "Links [[hop1]] and [[bridge]].")],
@@ -70,6 +75,9 @@ const PAGES: Array<[string, string]> = [
   ["plans/gamma-one.mdx", md("Gamma one", ["series: greek"], "x")],
   ["plans/gamma-two.mdx", md("Gamma two", ["series: greek"], "x")],
   ["plans/gamma-report.mdx", md("Gamma gamma report", ["tags: [gamma]", "description: All about gamma."], "x")],
+  ["plans/shared-wiki.mdx", md("Shared wiki rollout", ["plan_status: active", "status_note: felles bucket live"], "x")],
+  ["plans/wiki-glossary.mdx", md("Wiki glossary", [], "x")],
+  ["plans/ledger-totals.mdx", md("Ledger totals for widget", [], "x")],
 ];
 
 let server: ChildProcess | undefined;
@@ -120,6 +128,18 @@ test.afterAll(async () => {
 const palette = (page: Page) => page.locator("#wikiFind");
 const input = (page: Page) => page.locator("#wikiFindInput");
 const rows = (page: Page) => page.locator("#wikiFindList .wiki-find-row");
+/** Rows in the full band — every free word hit, no `partial m/n` pill. */
+const fullRows = (page: Page) => rows(page).filter({ hasNot: page.locator(".wiki-find-partial") });
+
+/** "ledger notes": the two full matches, then `ledger-totals` as a partial row. */
+async function expectLedgerNotes(page: Page, first: string, second: string): Promise<void> {
+  await expect(fullRows(page)).toHaveCount(2);
+  await expect(rows(page)).toHaveCount(3);
+  await expect(rows(page).first()).toHaveAttribute("data-relpath", first);
+  await expect(rows(page).nth(1)).toHaveAttribute("data-relpath", second);
+  await expect(rows(page).nth(2)).toHaveAttribute("data-relpath", "plans/ledger-totals.mdx");
+  await expect(rows(page).nth(2).locator(".wiki-find-partial")).toHaveText("partial 1/2");
+}
 
 async function openReader(page: Page): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(OPEN)}`);
@@ -208,9 +228,30 @@ test("a two-word query ranks the expected page first; `#<digits>` finds a number
   await openReader(page);
   await find(page, "fix rounds");
   await expect(rows(page).first().locator(".wiki-find-title")).toHaveText("Four fix rounds on widget #500");
+  await expect(fullRows(page)).toHaveCount(1);
   await input(page).fill("#500");
   await expect(rows(page)).toHaveCount(1);
   await expect(rows(page).first().locator(".wiki-find-title")).toHaveText("Four fix rounds on widget #500");
+  // `#<digits>` stays required: "Ledger totals for widget" hits widget, not 500, and is no row at all.
+  // "widget" alone lists both first, so the drop to one row proves the fresh list rendered.
+  await input(page).fill("widget");
+  await expect(rows(page)).toHaveCount(2);
+  await input(page).fill("widget #500");
+  await expect(rows(page)).toHaveCount(1);
+  await expect(fullRows(page)).toHaveCount(1);
+  await expect(rows(page).first()).toHaveAttribute("data-relpath", "archive/four-fix-rounds.mdx");
+});
+
+test("a word only the status_note carries finds the page; a page hitting fewer words follows, marked partial", async ({ page }) => {
+  await openReader(page);
+  await find(page, "felles wiki");
+  await expect(rows(page)).toHaveCount(2);
+  const [full, partial] = [rows(page).first(), rows(page).nth(1)];
+  await expect(full).toHaveAttribute("data-relpath", "plans/shared-wiki.mdx");
+  await expect(full.locator(".wiki-find-partial")).toHaveCount(0);
+  await expect(partial).toHaveAttribute("data-relpath", "plans/wiki-glossary.mdx");
+  await expect(partial.locator(".wiki-find-partial")).toHaveText("partial 1/2");
+  await expect(partial.locator(".wiki-find-title mark")).toHaveText(["Wiki"]);
 });
 
 test('`in:"two words"` narrows to the series by its label', async ({ page }) => {
@@ -228,9 +269,7 @@ test("a one-hop page outranks an equal text match two hops away", async ({ page 
   expect(near["plans/hop1.mdx"]).toBeGreaterThan(near["notes/far.mdx"] ?? 0);
   expect(near["notes/far.mdx"]).toBeGreaterThan(0);
   await find(page, "ledger notes");
-  await expect(rows(page)).toHaveCount(2);
-  await expect(rows(page).first()).toHaveAttribute("data-relpath", "plans/hop1.mdx");
-  await expect(rows(page).nth(1)).toHaveAttribute("data-relpath", "notes/far.mdx");
+  await expectLedgerNotes(page, "plans/hop1.mdx", "notes/far.mdx");
 });
 
 test("a no-series best match is the first row", async ({ page }) => {
@@ -383,9 +422,8 @@ test("after a failed page load the previous page's closeness no longer boosts", 
   }, WIKI);
   await expect(page.locator("#articleWrap .wiki-empty-state")).toBeVisible();
   await find(page, "ledger notes");
-  await expect(rows(page)).toHaveCount(2);
   // Equal text, equal dates, no closeness: the relPath tie-break decides.
-  await expect(rows(page).first()).toHaveAttribute("data-relpath", "notes/far.mdx");
+  await expectLedgerNotes(page, "notes/far.mdx", "plans/hop1.mdx");
 });
 
 test("a deep-link boot keeps a palette opened before the listing landed: rows ranked, focus in the input", async ({ page }) => {
@@ -450,8 +488,7 @@ test("after an ABORTED page load the previous page's closeness no longer boosts"
   }, WIKI);
   await expect(page.locator("#articleWrap .wiki-empty-state")).toContainText("Failed to load page");
   await find(page, "ledger notes");
-  await expect(rows(page)).toHaveCount(2);
-  await expect(rows(page).first()).toHaveAttribute("data-relpath", "notes/far.mdx");
+  await expectLedgerNotes(page, "notes/far.mdx", "plans/hop1.mdx");
 });
 
 test("a failed boot listing says so in an open palette instead of loading forever", async ({ page }) => {

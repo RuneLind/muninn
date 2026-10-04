@@ -6,7 +6,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { highlightFind, type FindResult } from "./wiki-find.ts";
+import { highlightFind, type FindResult, type FindRow } from "./wiki-find.ts";
 
 export const FIND_ID = "wikiFind";
 export const FIND_SCRIM_ID = "wikiFindScrim";
@@ -48,7 +48,8 @@ export function findPaletteHtml(): string {
   );
 }
 
-/** The chip row: one button per series among ALL matches, count beside it. */
+/** The chip row: one button per series among the returned rows (row cap
+ *  included, dropped partial rows not), at most `FIND_CHIPS_MAX`, count beside it. */
 export function findChipsHtml(result: FindResult): string {
   return result.chips
     .slice(0, FIND_CHIPS_MAX)
@@ -91,24 +92,35 @@ export function findListHtml(
   for (const g of result.groups) {
     if (g.seriesKey) html += `<div class="wiki-find-group" role="presentation">${esc(g.seriesLabel)}</div>`;
     for (const r of g.rows) {
-      html += findRowHtml(r.page, i, i === active, result.terms, hrefFor(r.page.relPath), titleOf);
+      html += findRowHtml(r, result.terms.length, i, i === active, hrefFor(r.page.relPath), titleOf);
       i++;
     }
   }
-  if (result.total > result.rows.length) {
-    html += `<div class="wiki-find-more">${result.total - result.rows.length} more — narrow the query</div>`;
-  }
+  const more = findMoreText(result);
+  if (more) html += `<div class="wiki-find-more">${esc(more)}</div>`;
   return html;
 }
 
+/** The footer for rows past the row cap. At `FIND_ROWS_MAX`, the palette's
+ *  only limit, only full rows are ever hidden: a partial band exists only
+ *  beside fewer than `PARTIAL_BAND_MAX_FULL` full rows and holds at most
+ *  `PARTIAL_BAND_MAX`, which fits under it (pinned by a test). So a hidden row
+ *  hit every word, and another word can drop it. */
+export function findMoreText(result: FindResult): string {
+  const hidden = result.total - result.rows.length;
+  return hidden > 0 ? `${hidden} more — narrow the query` : "";
+}
+
 function findRowHtml(
-  p: WikiListing,
+  r: FindRow,
+  words: number,
   i: number,
   active: boolean,
-  terms: readonly string[],
   href: string,
   titleOf: (relPath: string) => string | undefined,
 ): string {
+  const p: WikiListing = r.page;
+  const terms = r.terms;
   const notes: string[] = [];
   if (p.pairedBy === "superseded" && p.parent) {
     notes.push(`superseded by ${esc(titleOf(p.parent) ?? p.parent)}`);
@@ -118,7 +130,11 @@ function findRowHtml(
     `<a class="wiki-find-row${active ? " active" : ""}" id="${findRowId(i)}" role="option" ` +
     `aria-selected="${active}" data-find-row="${i}" data-relpath="${esc(p.relPath)}" href="${esc(href)}">` +
     `<span class="wiki-find-title">${highlightFind(displayTitleOf(p), terms)}</span>` +
-    `<span class="wiki-find-meta"><span class="wiki-find-type">${esc(p.type)}</span>` +
+    `<span class="wiki-find-meta">` +
+    (r.partial
+      ? `<span class="wiki-find-partial" title="Matches ${esc(r.terms.join(", "))} — ${r.matched} of ${words} words">partial ${r.matched}/${words}</span>`
+      : "") +
+    `<span class="wiki-find-type">${esc(p.type)}</span>` +
     `<span class="wiki-find-path">${highlightFind(p.relPath, terms)}</span>` +
     (notes.length ? `<span class="wiki-find-note">${notes.join(" · ")}</span>` : "") +
     `</span></a>`
@@ -171,6 +187,10 @@ export function findPaletteStyles(): string {
     .wiki-find-meta { display: flex; gap: 8px; font-size: 11px; color: var(--text-muted); min-width: 0; }
     .wiki-find-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .wiki-find-type { flex-shrink: 0; }
+    .wiki-find-partial {
+      flex-shrink: 0; padding: 0 6px; border-radius: 999px; font-size: 10.5px;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-muted);
+    }
     .wiki-find-note { flex-shrink: 0; color: var(--text-soft); }
     .wiki-find mark { background: none; color: var(--accent-light); font-weight: 600; }
     .wiki-find-empty, .wiki-find-more { padding: 10px 14px; font-size: 12.5px; color: var(--text-muted); }

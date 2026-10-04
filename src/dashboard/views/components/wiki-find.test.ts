@@ -6,13 +6,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   applySeriesChip,
+  findNeed,
   FIND_ROWS_MAX,
   foldText,
   highlightFind,
+  PARTIAL_BAND_MAX,
+  PARTIAL_BAND_MAX_FULL,
   parseFindQuery,
   rankFind,
   seriesMatchKey,
 } from "./wiki-find.ts";
+import * as find from "./wiki-find.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import { seriesHead, seriesKeyOf } from "./wiki-groups.ts";
 
@@ -42,6 +46,7 @@ describe("parseFindQuery", () => {
   test("free words, quoted in:, type:, age:, #tag, is:retired", () => {
     expect(parseFindQuery('fix  Rounds in:"Two Words" type:pl age:<14 age:>2 #Ops is:retired')).toEqual({
       words: ["fix", "rounds"],
+      numbers: [],
       inSeries: ["two words"],
       series: [],
       types: ["pl"],
@@ -52,10 +57,20 @@ describe("parseFindQuery", () => {
     });
   });
 
-  test("`#<digits>` is a number word, not a tag", () => {
+  test("`#<digits>` is a required number, not a tag or a free word; a bare `12` stays a free word", () => {
     const q = parseFindQuery("#500");
-    expect(q.words).toEqual(["500"]);
+    expect(q.numbers).toEqual(["500"]);
+    expect(q.words).toEqual([]);
     expect(q.tags).toEqual([]);
+    expect(parseFindQuery("12").words).toEqual(["12"]);
+    expect(parseFindQuery("12").numbers).toEqual([]);
+  });
+
+  test("free words dedupe after folding; a word also given as `#<digits>` is the number only", () => {
+    expect(parseFindQuery("alpha Alpha ALPHA beta").words).toEqual(["alpha", "beta"]);
+    expect(parseFindQuery("Kjøring kjoring").words).toEqual(["kjoring"]);
+    const q = parseFindQuery("500 #500 #500");
+    expect([q.words, q.numbers]).toEqual([[], ["500"]]);
   });
 
   test("an unknown key, a bad age and `is:` anything else are free words", () => {
@@ -69,9 +84,24 @@ describe("parseFindQuery", () => {
 });
 
 describe("matching", () => {
-  test("words are ANDed: a word hitting no field drops the page", () => {
+  test("a page hitting every word ranks above one hitting some, and is not marked partial", () => {
     const pages = [pg("a.md", { title: "Alpha beta" }), pg("b.md", { title: "Alpha gamma" })];
-    expect(order(pages, "alpha beta")).toEqual(["a.md"]);
+    const r = rankFind(pages, "alpha beta", { now: NOW });
+    expect(r.rows.map((x) => [x.page.relPath, x.partial, x.matched])).toEqual([
+      ["a.md", false, 2],
+      ["b.md", true, 1],
+    ]);
+    expect(r.rows[1]!.terms).toEqual(["alpha"]);
+    expect(r.partials).toBe(1);
+  });
+
+  test("status_note is a free-word field at the description's weight", () => {
+    const noted = pg("n.md", { title: "Shared wiki", status_note: "Felles bucket deployed" });
+    const described = pg("d.md", { title: "Shared wiki", description: "felles" });
+    const r = rankFind([noted, described, pg("x.md", { title: "Shared wiki" })], "felles", { now: NOW });
+    expect(r.rows.map((x) => x.page.relPath).sort()).toEqual(["d.md", "n.md"]);
+    expect(r.rows[0]!.score).toBe(r.rows[1]!.score);
+    expect(order([pg("r.md", { title: "R", status_note: "round 12 done" })], "12")).toEqual(["r.md"]);
   });
 
   test("a digit word matches a WHOLE number in the title, ISO dates removed", () => {
@@ -204,7 +234,9 @@ describe("ordering and grouping", () => {
     const r = rankFind(pages, "ledger", { now: NOW });
     expect(r.rows.length).toBe(FIND_ROWS_MAX);
     expect(r.total).toBe(50);
-    expect(r.chips).toEqual([{ seriesKey: "big series", label: "Big series", count: 50, token: 'series:"big series"' }]);
+    expect(r.chips).toEqual([
+      { seriesKey: "big series", label: "Big series", count: 50, full: 50, token: 'series:"big series"' },
+    ]);
     expect(applySeriesChip("ledger in:old series:x", r.chips[0]!.token)).toBe('ledger in:old series:"big series"');
   });
 });
@@ -400,6 +432,7 @@ describe("chip invariant (property): a chip's count is what applying it yields",
   test("for 600 seeded listings × 4 queries: count == applied total, applying twice is idempotent, every applied row is in the chip's series", () => {
     const bad: string[] = [];
     let chipsSeen = 0;
+    let ownBand = 0;
     for (let seed = 1; seed <= 600 && bad.length < 5; seed++) {
       const r = prng(seed);
       const pages = listing(r);
@@ -408,6 +441,8 @@ describe("chip invariant (property): a chip's count is what applying it yields",
         const res = rankFind(pages, q, { now: NOW, limit: 1000 });
         for (const c of res.chips) {
           chipsSeen++;
+          // A chip whose count differs from its rows here: the band was decided on its own series.
+          if (res.rows.filter((x) => seriesMatchKey(seriesKeyOf(x.page)) === c.seriesKey).length !== c.count) ownBand++;
           const applied = applySeriesChip(q, c.token);
           const got = rankFind(pages, applied, { now: NOW, limit: 1000 });
           const twice = applySeriesChip(applied, c.token);
@@ -426,6 +461,7 @@ describe("chip invariant (property): a chip's count is what applying it yields",
     }
     expect(bad).toEqual([]);
     expect(chipsSeen).toBeGreaterThan(500);
+    expect(ownBand).toBeGreaterThan(0);
   });
 
   test("a series key `<` or `>` is a series, not an empty value (only `age:` reads `<`/`>` as unfinished)", () => {
@@ -482,5 +518,344 @@ describe("seriesLabelFor — one spelling of a row's series label", () => {
     const labels = seriesLabels(pages);
     expect(seriesLabelFor(pages[1]!, labels)).toBe("Recall work");
     expect(seriesLabelFor(pages[2]!, labels)).toBe("");
+  });
+});
+
+describe("soft AND for free words", () => {
+  test("the need rule: 1 for one or two words, ⌈n/2⌉ from three", () => {
+    expect([0, 1, 2, 3, 4, 5].map(findNeed)).toEqual([0, 1, 1, 2, 2, 3]);
+  });
+
+  // Titles hit words won..fou by name; the query decides how many count.
+  const pages = [
+    pg("all.md", { title: "won two tri fou" }),
+    pg("three.md", { title: "won two tri" }),
+    pg("two.md", { title: "won two" }),
+    pg("one.md", { title: "won" }),
+    pg("none.md", { title: "zzz" }),
+  ];
+  const listed = (q: string) => order(pages, q).sort();
+
+  test("n=1: plain AND", () => {
+    expect(listed("tri")).toEqual(["all.md", "three.md"]);
+  });
+
+  test("n=2: one word is enough", () => {
+    expect(listed("two fou")).toEqual(["all.md", "three.md", "two.md"]);
+  });
+
+  test("n=3: two words are needed", () => {
+    expect(listed("won two fou")).toEqual(["all.md", "three.md", "two.md"]);
+  });
+
+  test("n=4: two words are needed", () => {
+    expect(listed("won two tri fou")).toEqual(["all.md", "three.md", "two.md"]);
+    expect(listed("two tri xxx yyy")).toEqual(["all.md", "three.md"]);
+  });
+
+  test("the full band sits above every partial row, even one with a far higher score", () => {
+    const strong = pg("strong.md", {
+      title: "Ledger ledger",
+      tags: ["ledger"],
+      description: "ledger",
+      series: "ledger",
+      workedMs: NOW,
+    });
+    const weak = pg("weak.md", { title: "Plain", description: "ledger review", mtimeMs: NOW - 900 * DAY });
+    const r = rankFind([strong, weak], "ledger review", { now: NOW, near: { "strong.md": 1 } });
+    expect(r.rows.map((x) => x.page.relPath)).toEqual(["weak.md", "strong.md"]);
+    expect(r.rows[1]!.score).toBeGreaterThan(r.rows[0]!.score);
+  });
+
+  test("inside the partial band: words hit first, then score", () => {
+    const p = [
+      pg("hi-score-one.md", { title: "ant", tags: ["ant"], description: "ant" }),
+      pg("two-words.md", { title: "ant bee" }),
+      pg("low-one.md", { title: "ant" }),
+    ];
+    expect(order(p, "ant bee cat")).toEqual(["two-words.md"]);
+    expect(order(p, "ant bee")).toEqual(["two-words.md", "hi-score-one.md", "low-one.md"]);
+    expect(order(p, "ant bee cat dog")).toEqual(["two-words.md"]);
+  });
+
+  test("a partial series row never groups above a full row ranked after its series head", () => {
+    const p = [
+      pg("s/head.md", { title: "ant bee", series: "s", tags: ["ant"] }),
+      pg("loose.md", { title: "ant bee" }),
+      pg("s/part.md", { title: "ant", series: "s" }),
+    ];
+    const r = rankFind(p, "ant bee", { now: NOW });
+    expect(r.rows.map((x) => x.page.relPath)).toEqual(["s/head.md", "loose.md", "s/part.md"]);
+    expect(r.groups.map((g) => g.seriesKey)).toEqual(["s", "", "s"]);
+  });
+
+  test("filters stay hard: a page outside in:/type:/#tag/age: never appears, partial or not", () => {
+    const p = [
+      pg("in.md", { title: "ant", series: "keep", type: "plan", tags: ["ops"], workedMs: NOW - DAY }),
+      pg("out-series.md", { title: "ant bee", series: "other", type: "plan", tags: ["ops"], workedMs: NOW - DAY }),
+      pg("out-type.md", { title: "ant bee", series: "keep", type: "blog", tags: ["ops"], workedMs: NOW - DAY }),
+      pg("out-tag.md", { title: "ant bee", series: "keep", type: "plan", workedMs: NOW - DAY }),
+      pg("out-age.md", { title: "ant bee", series: "keep", type: "plan", tags: ["ops"], workedMs: NOW - 99 * DAY }),
+    ];
+    expect(order(p, "ant bee in:keep type:pl #ops age:<30")).toEqual(["in.md"]);
+    expect(order(p, "ant bee in:keep type:pl #ops")).toEqual(["out-age.md", "in.md"]);
+  });
+
+  test("chips count partial rows too, and applying one yields that count", () => {
+    const p = [
+      pg("a/1.md", { title: "ant bee", series: "a" }),
+      pg("a/2.md", { title: "ant", series: "a" }),
+      pg("b/1.md", { title: "bee", series: "b" }),
+      pg("c.md", { title: "cat", series: "a" }),
+    ];
+    const r = rankFind(p, "ant bee", { now: NOW });
+    expect(r.total).toBe(3);
+    expect(r.partials).toBe(2);
+    expect(r.chips.map((c) => [c.seriesKey, c.count])).toEqual([
+      ["a", 2],
+      ["b", 1],
+    ]);
+    for (const c of r.chips) {
+      const applied = rankFind(p, applySeriesChip("ant bee", c.token), { now: NOW });
+      expect(applied.total).toBe(c.count);
+    }
+  });
+});
+
+describe("fix round 1: required words, dedupe, the full-band threshold", () => {
+  const listedFull = (pages: WikiListing[], q: string) =>
+    rankFind(pages, q, { now: NOW }).rows.map((r) => [r.page.relPath, r.partial]);
+
+  test("`#<digits>` is required in both bands: `widget #500` never lists a page without 500", () => {
+    const pages = [
+      pg("both.md", { title: "Four fix rounds on widget #500" }),
+      pg("widget.md", { title: "Widget other" }),
+      pg("num.md", { title: "Round #500 notes" }),
+    ];
+    expect(listedFull(pages, "widget #500")).toEqual([["both.md", false]]);
+    expect(listedFull(pages, "#500").map(([p]) => p).sort()).toEqual(["both.md", "num.md"]);
+  });
+
+  test("a repeated word counts once: `alpha alpha beta` is n=2, whichever word repeats", () => {
+    const pages = [
+      pg("ab.md", { title: "Alpha beta" }),
+      pg("a.md", { title: "Alpha only" }),
+      pg("b.md", { title: "Beta only" }),
+    ];
+    const base = rankFind(pages, "alpha beta", { now: NOW });
+    for (const q of ["alpha alpha beta", "alpha beta beta", "Alpha ALPHA beta"]) {
+      const r = rankFind(pages, q, { now: NOW });
+      expect(r.terms).toEqual(["alpha", "beta"]);
+      expect(r.rows.map((x) => [x.page.relPath, x.matched, x.partial])).toEqual(
+        base.rows.map((x) => [x.page.relPath, x.matched, x.partial]),
+      );
+    }
+    expect(base.rows.map((x) => x.page.relPath)).toEqual(["ab.md", "a.md", "b.md"]);
+    expect(base.rows[1]!.matched).toBe(1);
+  });
+
+  test("a word shorter than 3 characters is required: `felles i` lists only pages hitting both", () => {
+    const pages = [
+      pg("both.md", { title: "Felles wiki" }),
+      pg("felles.md", { title: "Felles bucket" }),
+      pg("i.md", { title: "Something with an i" }),
+    ];
+    expect(listedFull(pages, "felles i")).toEqual([["both.md", false]]);
+    // A half-typed second word floods the same way without the rule.
+    expect(listedFull([...pages, pg("w.md", { title: "Wonder" })], "felles w")).toEqual([["both.md", false]]);
+  });
+
+  test("need counts LONG words only: `ant bee cat x` needs x plus two of the three", () => {
+    const pages = [
+      pg("x-ant.md", { title: "ant x" }),
+      pg("x-ant-bee.md", { title: "ant bee x" }),
+      pg("ant-bee.md", { title: "ant bee" }),
+      pg("all.md", { title: "ant bee cat x" }),
+    ];
+    expect(listedFull(pages, "ant bee cat x")).toEqual([
+      ["all.md", false],
+      ["x-ant-bee.md", true],
+    ]);
+  });
+
+  test(`the partial band shows only while the full band has fewer than ${PARTIAL_BAND_MAX_FULL} rows`, () => {
+    const full = (n: number) => Array.from({ length: n }, (_, i) => pg(`f${i}.md`, { title: `Ledger notes ${i}` }));
+    const part = pg("part.md", { title: "Ledger totals" });
+    const weak = rankFind([...full(PARTIAL_BAND_MAX_FULL - 1), part], "ledger notes", { now: NOW });
+    expect(weak.rows.at(-1)!.page.relPath).toBe("part.md");
+    expect([weak.total, weak.partials]).toEqual([PARTIAL_BAND_MAX_FULL, 1]);
+    const strong = rankFind([...full(PARTIAL_BAND_MAX_FULL), part], "ledger notes", { now: NOW });
+    expect(strong.rows.some((r) => r.partial)).toBe(false);
+    expect([strong.total, strong.partials]).toEqual([PARTIAL_BAND_MAX_FULL, 0]);
+  });
+
+  test("a chip decides the band on its own series: count == applied total when the whole query hides partials", () => {
+    const pages = [
+      ...Array.from({ length: 5 }, (_, i) => pg(`t/${i}.md`, { title: `Ledger notes ${i}`, series: "t" })),
+      pg("t/p.md", { title: "Ledger tally", series: "t" }),
+      pg("s/full.md", { title: "Ledger notes s", series: "s" }),
+      pg("s/p1.md", { title: "Ledger one", series: "s" }),
+      pg("s/p2.md", { title: "Ledger two", series: "s" }),
+      pg("u/p.md", { title: "Ledger three", series: "u" }),
+    ];
+    const r = rankFind(pages, "ledger notes", { now: NOW });
+    expect(r.partials).toBe(0);
+    expect(r.total).toBe(6);
+    expect(r.chips.map((c) => [c.seriesKey, c.full, c.count])).toEqual([
+      ["t", 5, 5],
+      ["s", 1, 3],
+    ]);
+    for (const c of r.chips) {
+      expect(rankFind(pages, applySeriesChip("ledger notes", c.token), { now: NOW }).total).toBe(c.count);
+    }
+  });
+
+  test("chips sort by full-band rows first: the series holding the only full match leads", () => {
+    const pages = [
+      pg("b/full.md", { title: "Ledger notes", series: "b" }),
+      ...Array.from({ length: 3 }, (_, i) => pg(`a/${i}.md`, { title: `Ledger ${i}`, series: "a" })),
+    ];
+    const r = rankFind(pages, "ledger notes", { now: NOW });
+    expect(r.chips.map((c) => [c.seriesKey, c.full, c.count])).toEqual([
+      ["b", 1, 1],
+      ["a", 0, 3],
+    ]);
+  });
+});
+
+describe("the footer for rows past the cap", () => {
+  test("only full rows are ever hidden, so the footer always says narrow the query", async () => {
+    const { findMoreText } = await import("./wiki-find-view.ts");
+    // The largest partial result fits under the row cap.
+    expect(PARTIAL_BAND_MAX_FULL - 1 + PARTIAL_BAND_MAX).toBeLessThanOrEqual(FIND_ROWS_MAX);
+    const fulls = Array.from({ length: 45 }, (_, i) => pg(`f${i}.md`, { title: `Ledger notes ${i}` }));
+    expect(findMoreText(rankFind(fulls, "ledger notes", { now: NOW }))).toBe("5 more — narrow the query");
+    expect(findMoreText(rankFind(fulls.slice(0, 3), "ledger notes", { now: NOW }))).toBe("");
+    const parts = Array.from({ length: 44 }, (_, i) => pg(`p${i}.md`, { title: `Ledger ${i}` }));
+    const weak = rankFind([...fulls.slice(0, 4), ...parts], "ledger notes", { now: NOW });
+    expect([weak.rows.length, weak.total, weak.partials]).toEqual([14, 14, 10]);
+    expect(findMoreText(weak)).toBe("");
+  });
+});
+
+describe("fix round 2: the partial band is a bounded rescue", () => {
+  test("PARTIAL_BAND_MAX is 10", () => {
+    expect((find as Record<string, unknown>).PARTIAL_BAND_MAX).toBe(10);
+  });
+
+  test("rarer matched words rank first: on `felles wiki` the page hitting `felles` leads the partial band", () => {
+    const pages = [
+      ...Array.from({ length: 8 }, (_, i) =>
+        pg(`w${i}.md`, { title: `Wiki page ${i}`, tags: ["wiki"], description: "wiki" }),
+      ),
+      pg("felles.md", { title: "Felles bucket" }),
+    ];
+    const r = rankFind(pages, "felles wiki", { now: NOW });
+    expect(r.rows.every((x) => x.partial)).toBe(true);
+    expect(r.rows[0]!.page.relPath).toBe("felles.md");
+    // The wiki-only pages outscore it; rarity, not score, put it first.
+    expect(r.rows[1]!.score).toBeGreaterThan(r.rows[0]!.score);
+  });
+
+  test("`wiki retire`: 4 full rows, then at most 10 partial rows, retire-hitting pages first", () => {
+    const pages = [
+      ...Array.from({ length: 4 }, (_, i) => pg(`full${i}.md`, { title: `Wiki retire ${i}` })),
+      ...Array.from({ length: 15 }, (_, i) =>
+        pg(`wiki${i}.md`, { title: `Wiki ${i}`, tags: ["wiki"], description: "wiki" }),
+      ),
+      pg("retire-a.md", { title: "Retire a" }),
+      pg("retire-b.md", { title: "Retire b" }),
+    ];
+    const r = rankFind(pages, "wiki retire", { now: NOW });
+    expect([r.total, r.partials, r.rows.length]).toEqual([14, 10, 14]);
+    expect(r.rows.slice(0, 4).every((x) => !x.partial)).toBe(true);
+    expect(r.rows.slice(4, 6).map((x) => x.page.relPath).sort()).toEqual(["retire-a.md", "retire-b.md"]);
+    expect(r.rows.slice(6).every((x) => x.terms.join() === "wiki")).toBe(true);
+  });
+
+  test("a chip counts its series under the cap, and applying it yields that count", () => {
+    const pages = [
+      ...Array.from({ length: 12 }, (_, i) => pg(`s/${i}.md`, { title: `Ledger ${i}`, series: "s" })),
+      pg("t/1.md", { title: "Ledger notes", series: "t" }),
+    ];
+    const r = rankFind(pages, "ledger notes", { now: NOW });
+    expect(r.chips.map((c) => [c.seriesKey, c.full, c.count])).toEqual([
+      ["t", 1, 1],
+      ["s", 0, 10],
+    ]);
+    for (const c of r.chips) {
+      expect(rankFind(pages, applySeriesChip("ledger notes", c.token), { now: NOW }).total).toBe(c.count);
+    }
+  });
+
+  test("a `#<digits>` word does not count as a hit the page lacks: `fix rounds #500` on a page missing `rounds` is partial 2/3", async () => {
+    const { findListHtml } = await import("./wiki-find-view.ts");
+    const pages = [pg("fix.md", { title: "Fix widget #500" }), pg("other.md", { title: "Fix widget 400" })];
+    const r = rankFind(pages, "fix rounds #500", { now: NOW });
+    expect(r.rows.map((x) => [x.page.relPath, x.matched, x.partial])).toEqual([["fix.md", 2, true]]);
+    expect(r.terms).toEqual(["fix", "rounds", "500"]);
+    expect(findListHtml(r, "fix rounds #500", 0, (x) => x, () => undefined)).toContain(">partial 2/3</span>");
+  });
+
+  test("the short-word cut-off is 3: a 2-character word (`12`, `ab`) is required", () => {
+    const pages = [
+      pg("both.md", { title: "Felles round 12 ab" }),
+      pg("felles.md", { title: "Felles bucket" }),
+      pg("n12.md", { title: "Round 12 notes" }),
+      pg("ab.md", { title: "About ab" }),
+    ];
+    expect(order(pages, "felles 12")).toEqual(["both.md"]);
+    expect(order(pages, "felles ab")).toEqual(["both.md"]);
+    // Three characters is long again: `bucket` alone is enough under `felles bucket xyz`.
+    expect(order(pages, "felles bucket xyz")).toEqual(["felles.md"]);
+  });
+});
+
+describe("the rarity pool: every filtered page, before word matching", () => {
+  test("a page that misses a required word still counts toward a word's rarity", () => {
+    // `felles` is common in the pool but rare among the listed pages (only
+    // `ab felles.md` also hits the required `ab`). Pool rarity puts the `wiki`
+    // pages first; counting listed pages only would put `felles` first.
+    const pages = [
+      pg("ab-felles.md", { title: "ab felles", mtimeMs: NOW }),
+      ...Array.from({ length: 3 }, (_, i) => pg(`ab-wiki${i}.md`, { title: `ab wiki ${i}` })),
+      ...Array.from({ length: 10 }, (_, i) => pg(`felles${i}.md`, { title: `Felles ${i}` })),
+    ];
+    const r = rankFind(pages, "ab felles wiki", { now: NOW });
+    expect(r.rows.every((x) => x.partial)).toBe(true);
+    expect(r.rows.map((x) => x.page.relPath)).toEqual(["ab-wiki0.md", "ab-wiki1.md", "ab-wiki2.md", "ab-felles.md"]);
+  });
+
+  test("a page a filter drops does not count toward a word's rarity", () => {
+    // Inside `type:plan`, `wiki` is the rarer word; across every type it is the
+    // commoner one. The filtered pool decides.
+    const pages = [
+      pg("plan-wiki.md", { title: "Plan wiki" }),
+      ...Array.from({ length: 3 }, (_, i) => pg(`plan-felles${i}.md`, { title: `Plan felles ${i}`, mtimeMs: NOW })),
+      ...Array.from({ length: 10 }, (_, i) => pg(`blog-wiki${i}.md`, { title: `Blog wiki ${i}`, type: "blog" })),
+    ];
+    const r = rankFind(pages, "type:plan felles wiki", { now: NOW });
+    expect(r.rows.every((x) => x.partial)).toBe(true);
+    expect(r.rows.map((x) => x.page.relPath)).toEqual([
+      "plan-wiki.md",
+      "plan-felles0.md",
+      "plan-felles1.md",
+      "plan-felles2.md",
+    ]);
+  });
+});
+
+describe("the palette row for a partial match", () => {
+  test("carries `partial m/n` and marks only the words it hit; a full row has no marker", async () => {
+    const { findListHtml } = await import("./wiki-find-view.ts");
+    const pages = [pg("full.md", { title: "Alpha beta" }), pg("x/mybeta.md", { title: "Alpha gamma" })];
+    const html = findListHtml(rankFind(pages, "alpha beta", { now: NOW }), "alpha beta", 0, (r) => r, () => undefined);
+    const [full, part] = html.split('<a class="wiki-find-row').slice(1);
+    expect(full).not.toContain("wiki-find-partial");
+    expect(full).toContain("<mark>Alpha</mark> <mark>beta</mark>");
+    expect(part).toContain('<span class="wiki-find-partial" title="Matches alpha — 1 of 2 words">partial 1/2</span>');
+    expect(part).toContain("<mark>Alpha</mark> gamma");
+    // `beta` sits inside the path but scored nothing (not a segment start), so it is not marked.
+    expect(part).toContain('<span class="wiki-find-path">x/mybeta.md</span>');
   });
 });

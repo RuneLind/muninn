@@ -2010,21 +2010,54 @@ with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
 **The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
 the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
 it; the rail's search box is unchanged. It ranks `allPages` in the browser —
-there is no find route. Grammar: free words ANDed, a `"` on a free word dropped
+there is no find route. Grammar: free words soft-ANDed (below) and deduplicated after folding, a `"` on a free word dropped
 (no phrase search) — but a quoted value after an unknown key stays one word
 (`foo:"a b"` is the word `foo:a b`); `in:<text>`/`in:"<text>"` a substring of the series key or label;
 `series:<key>` the series whose key IS that key, in the rail's fold (`"`
 stripped on both sides) — what a series chip applies. A chip REPLACES the
 query's `series:` tokens and keeps every other token, `in:` included, so its
 count is what applying it yields for any listing and query (a seeded property
-test in `wiki-find.test.ts` pins it);
+test in `wiki-find.test.ts` pins it): its full rows, plus at most
+`PARTIAL_BAND_MAX` of its partial rows when that series alone has fewer than
+`PARTIAL_BAND_MAX_FULL` full rows — the band rules run on the set the chip
+produces, so a chip can count more rows than the current list shows for its
+series. Chips sort by full rows first, then count;
 `type:<prefix>`; `age:<N`/`age:>N` days on the worked-on axis, two bounds of
 one direction keeping the tighter; `#tag` a tag prefix but `#<digits>` a
-number word; `is:retired` admits culled pages; a known key with no value yet
+REQUIRED number word (a bare `12` stays a free word); `is:retired` admits culled pages; a known key with no value yet
 (`in:`, `type:`, `#`, `age:<`) is ignored, and `<`/`>` alone counts as no value only after `age:` (a series
-keyed `<` is a real value); any other `key:` is a free word. A
-digit word matches a whole number outside any ISO date, in the scorer and the
-highlighter alike, so `9` does not hit `2026-09-…`. Series groups, keys and
+keyed `<` is a real value); any other `key:` is a free word. A free word
+scores the fields it hits: title 3, series key/label 2, tags/aliases 1.5,
+description 1, `status_note` 1, relPath segment start 1. **Soft AND:** filters
+stay hard; long free words do not. Every listed page hits every REQUIRED word —
+a `#<digits>` word and any free word shorter than `FIND_SHORT_WORD` (3) folded
+characters, since `i` or a half-typed `w` hits most pages (measured: "felles i"
+listed 556 of 587 mimir pages before this rule). A page hitting all words is in
+the full band, ranked as before; one hitting fewer but at least `findNeed(n)` of
+the n LONG words (1 for n ≤ 2, ⌈n/2⌉ from 3) is in the partial band, strictly
+below every full row — so a one-word query is plain AND. The partial band is a
+bounded rescue: a query whose full band has `PARTIAL_BAND_MAX_FULL` (5) or more
+rows gets no partial rows, and a weaker one gets at most `PARTIAL_BAND_MAX`
+(10), ordered by words hit, then by the rarity of the long words the page hit
+(Σ ln(1 + pool / pages hitting the word), over this query's filtered pool),
+then score. Measured on mimir: `wiki` has 151 full rows, while `wiki retire`
+has 4, so before the cap it listed 150 partial rows, 147 of them hitting only
+`wiki`; now it lists 4 + 10, the 3 pages hitting `retire` first. Partial rows
+past the cap are in none of `rows`, `groups`, `total`, `partials` or the
+footer. A chip can still count them: its count is what its series-filtered
+query returns, where the threshold and the cap apply to that series alone
+(measured on mimir: under `wiki retire` the `wiki-provenance` chip counts 7
+while 2 of its rows are listed). A series group never
+spans two words-hit tiers, or a partial row would show inside a full group. A
+partial row carries a `partial m/n` pill whose title names the words it hit
+(the hit may sit in a field the row does not show) and marks only its own
+words. The footer for rows past `FIND_ROWS_MAX` says "N more — narrow the
+query": the largest partial result (4 + 10) fits under that row cap, which is
+the palette's only limit, so only full rows are ever hidden, and another word
+can drop them. A digit word matches a whole number outside any ISO date, in
+the scorer and the highlighter alike, so `9` does not hit `2026-09-…`; it
+scores in the title (4), the description and the `status_note` (1) only, never
+in tags, series or the relPath. Series groups, keys and
 labels are the rail's (`seriesKeyOf`, `seriesCensusKey`, `seriesHead`). Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
 pool drops bookkeeping pages, attachment children and (unless `is:retired`)
 culled pages; a superseded page stays and names its successor. Rows group by
