@@ -5,14 +5,21 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
-import { displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { highlightFind, type FindResult, type FindRow } from "./wiki-find.ts";
+import { articleUrl, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
+import { freeText, hasFindFilters, highlightFind, type FindResult, type FindRow } from "./wiki-find.ts";
+import type {
+  FindEverywhereResponse,
+  FindEverywhereResult,
+  MarkedSnippet,
+} from "../../../wiki/find-everywhere.ts";
 
 export const FIND_ID = "wikiFind";
 export const FIND_SCRIM_ID = "wikiFindScrim";
 export const FIND_INPUT_ID = "wikiFindInput";
 export const FIND_LIST_ID = "wikiFindList";
 export const FIND_CHIPS_ID = "wikiFindChips";
+/** The Everywhere section's container, inside the list. */
+export const FIND_EVERY_ID = "wikiFindEvery";
 /** How many series chips the palette shows above the rows. */
 export const FIND_CHIPS_MAX = 6;
 
@@ -141,6 +148,171 @@ function findRowHtml(
   );
 }
 
+// ── Everywhere (`GET /api/wiki/find-everywhere`) ─────────────────────────
+
+/** The Everywhere fetch's state, keyed on the free text it was asked for
+ *  (`freeText`): an edit that keeps the free text keeps the state. */
+export type FindEverywhereState =
+  | { key: string; status: "pending" }
+  | { key: string; status: "failed" }
+  | { key: string; status: "done"; data: FindEverywhereResponse };
+
+/** Free text shorter than this (code points) asks only the local listing. */
+export const FIND_EVERY_MIN_CHARS = 3;
+
+/** What the Everywhere section does for a query. */
+export type FindEverywherePlan =
+  | { kind: "off" }
+  | { kind: "filtered" }
+  | { kind: "fetch"; key: string };
+
+/**
+ * The plan for a query: `off` when the route is not served or the free text
+ * is too short, `filtered` when a filter token narrows this wiki (filters mean
+ * "this wiki"; the section says so in one line), else `fetch` keyed on the
+ * free text — the key a refetch is decided on.
+ */
+export function everywherePlan(query: string, served: boolean): FindEverywherePlan {
+  if (!served) return { kind: "off" };
+  if (hasFindFilters(query)) return { kind: "filtered" };
+  const key = freeText(query);
+  return Array.from(key).length >= FIND_EVERY_MIN_CHARS ? { kind: "fetch", key } : { kind: "off" };
+}
+
+/** What the section paints: the plan, joined with the fetch state for its key. */
+export type FindEverywhereView =
+  | { kind: "filtered" }
+  | { kind: "pending" }
+  | { kind: "failed" }
+  | { kind: "done"; data: FindEverywhereResponse };
+
+export function everywhereView(
+  plan: FindEverywherePlan,
+  state: FindEverywhereState | null,
+): FindEverywhereView | null {
+  if (plan.kind === "off") return null;
+  if (plan.kind === "filtered") return { kind: "filtered" };
+  // Nothing asked yet (an IME composition still open): no section at all.
+  if (!state) return null;
+  // A pending state is a fetch scheduled for its key. A settled state for
+  // another key means no fetch is scheduled yet (an IME composition still
+  // open): the last answer stays on screen.
+  if (state.status === "pending") return { kind: "pending" };
+  return state.status === "failed" ? { kind: "failed" } : { kind: "done", data: state.data };
+}
+
+export const FIND_EVERY_FILTERED_NOTE = "Everywhere is off while a filter narrows this wiki.";
+
+/** The reader URL of a page in any wiki. */
+export function everywhereHref(wiki: string, relPath: string): string {
+  return articleUrl(wiki, "relPath", relPath, "");
+}
+
+/** The Everywhere rows: fused rows not already shown as a local row. */
+export function everywhereRows(
+  data: FindEverywhereResponse,
+  currentWiki: string,
+  localRelPaths: ReadonlySet<string>,
+): FindEverywhereResult[] {
+  return data.results.filter((r) => !(r.wiki === currentWiki && localRelPaths.has(r.relPath)));
+}
+
+/** Fused rows of the current wiki, by relPath — the reasons a LOCAL row gets. */
+export function localReasons(
+  data: FindEverywhereResponse,
+  currentWiki: string,
+): Map<string, FindEverywhereResult> {
+  return new Map(data.results.filter((r) => r.wiki === currentWiki).map((r) => [r.relPath, r]));
+}
+
+/** Escape a marked snippet and wrap its spans in `<mark>`. */
+export function markedSnippetHtml(s: MarkedSnippet): string {
+  let out = "";
+  let at = 0;
+  for (const [a, b] of [...s.marks].sort((x, y) => x[0] - y[0])) {
+    if (a < at || b <= a) continue;
+    out += esc(s.text.slice(at, a)) + `<mark>${esc(s.text.slice(a, b))}</mark>`;
+    at = b;
+  }
+  return out + esc(s.text.slice(at));
+}
+
+/** Why a fused row is here: one chip per leg that found it. */
+export function findReasonChipsHtml(r: FindEverywhereResult): string {
+  const chips: string[] = [];
+  if (r.head) chips.push(`<span class="wiki-find-reason head" title="First in at least one source">leg #1</span>`);
+  if (r.legs.text) chips.push(`<span class="wiki-find-reason" title="Title, tags or notes match">text #${r.legs.text.rank}</span>`);
+  if (r.legs.huginn) {
+    chips.push(`<span class="wiki-find-reason" title="${esc(r.legs.huginn.snippet || "Huginn search")}">huginn #${r.legs.huginn.rank}</span>`);
+  }
+  for (const s of r.legs.sessions ?? []) {
+    const tip = s.title ? `Session: ${s.title}` : `Session ${s.id}`;
+    chips.push(`<span class="wiki-find-reason session" title="${esc(tip)}">session ${esc(s.id.slice(0, 8))} #${s.rank}</span>`);
+  }
+  return chips.length ? `<span class="wiki-find-reasons">${chips.join("")}</span>` : "";
+}
+
+/**
+ * Everything that makes the answer partial, as one quiet line: each leg that
+ * failed (with its label — `timeout`, `unreachable`, `HTTP 503`…) or is not
+ * configured, each wiki whose index was skipped, and a query cut by the cap.
+ */
+export function findDegradeNote(data: FindEverywhereResponse): string {
+  const out: string[] = [];
+  const names = { text: "text search", huginn: "huginn", sessions: "session search" } as const;
+  for (const leg of ["text", "huginn", "sessions"] as const) {
+    const st = data.sources[leg];
+    if (st.status === "error") out.push(`${names[leg]}: ${st.error ?? "failed"}`);
+    else if (st.status === "unconfigured") out.push(`${names[leg]}: ${st.error ?? "not configured"}`);
+    else if (st.status === "skipped" && st.error !== "query too short") out.push(`${names[leg]}: ${st.error ?? "skipped"}`);
+  }
+  for (const s of data.sources.indexes?.skipped ?? []) out.push(`${s.wiki || "default"} index: ${s.error}`);
+  for (const s of data.sources.indexes?.stale ?? []) out.push(`${s.wiki || "default"} index: stale`);
+  if (data.sources.query?.truncated) out.push("query shortened");
+  return out.length ? `Partial results — ${out.join(" · ")}.` : "";
+}
+
+/**
+ * The Everywhere section. Rows continue the local rows' numbering from
+ * `start`, so one `active` index walks both sections.
+ */
+export function findEverywhereHtml(
+  view: FindEverywhereView | null,
+  rows: readonly FindEverywhereResult[],
+  start: number,
+  active: number,
+): string {
+  if (!view) return "";
+  const head = `<div class="wiki-find-group wiki-find-every-head" role="presentation">Everywhere</div>`;
+  if (view.kind === "filtered") return head + `<div class="wiki-find-every-note" data-find-filtered>${esc(FIND_EVERY_FILTERED_NOTE)}</div>`;
+  if (view.kind === "pending") return head + `<div class="wiki-find-every-note">Searching everywhere…</div>`;
+  if (view.kind === "failed") return head + `<div class="wiki-find-every-note">Couldn't search everywhere.</div>`;
+  const note = findDegradeNote(view.data);
+  const noteHtml = note ? `<div class="wiki-find-every-note" data-find-degrade>${esc(note)}</div>` : "";
+  if (!rows.length) return head + noteHtml + `<div class="wiki-find-every-note">Nothing more in other wikis or sessions.</div>`;
+  let html = head;
+  rows.forEach((r, j) => {
+    const i = start + j;
+    const on = i === active;
+    const snippet = r.legs.sessions?.[0]?.snippet.text
+      ? markedSnippetHtml(r.legs.sessions[0].snippet)
+      : r.legs.huginn?.snippet
+        ? esc(r.legs.huginn.snippet)
+        : "";
+    html +=
+      `<a class="wiki-find-row wiki-find-every-row${on ? " active" : ""}" id="${findRowId(i)}" role="option" ` +
+      `aria-selected="${on}" data-find-row="${i}" data-find-every="${j}" data-relpath="${esc(r.relPath)}" ` +
+      `href="${esc(everywhereHref(r.wiki, r.relPath))}">` +
+      `<span class="wiki-find-title">${esc(r.title)}</span>` +
+      `<span class="wiki-find-meta"><span class="wiki-find-wiki">${esc(r.wiki)}</span>` +
+      `<span class="wiki-find-type">${esc(r.type)}</span>` +
+      `<span class="wiki-find-path">${esc(r.relPath)}</span>${findReasonChipsHtml(r)}</span>` +
+      (snippet ? `<span class="wiki-find-snippet">${snippet}</span>` : "") +
+      `</a>`;
+  });
+  return html + noteHtml;
+}
+
 /** Semantic tokens only, so both themes follow the palette. Closed is
  *  REMOVED from the DOM — never opacity/visibility, which keep client rects
  *  and would leave `modalOpen` true. */
@@ -194,6 +366,19 @@ export function findPaletteStyles(): string {
     .wiki-find-note { flex-shrink: 0; color: var(--text-soft); }
     .wiki-find mark { background: none; color: var(--accent-light); font-weight: 600; }
     .wiki-find-empty, .wiki-find-more { padding: 10px 14px; font-size: 12.5px; color: var(--text-muted); }
+    .wiki-find-every-head { border-top: 1px solid var(--border-secondary); margin-top: 4px; padding-top: 10px; }
+    .wiki-find-every-note { padding: 4px 14px 8px; font-size: 12px; color: var(--text-muted); }
+    .wiki-find-reasons { display: inline-flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0; }
+    .wiki-find-reason {
+      padding: 0 6px; border-radius: 999px; font-size: 10.5px; white-space: nowrap;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-muted);
+    }
+    .wiki-find-reason.head { border-color: var(--accent); color: var(--text-secondary); }
+    .wiki-find-wiki { flex-shrink: 0; color: var(--text-secondary); font-weight: 600; }
+    .wiki-find-snippet {
+      font-size: 11.5px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; min-width: 0;
+    }
     .wiki-find-foot {
       padding: 6px 14px; font-size: 11px; color: var(--text-muted);
       border-top: 1px solid var(--border-secondary);

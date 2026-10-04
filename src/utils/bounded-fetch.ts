@@ -20,6 +20,15 @@ export const BOUNDED_FETCH_TIMEOUT_MS = 10_000;
 /** Hard body cap for one proxied read. */
 export const BOUNDED_FETCH_MAX_BYTES = 8 * 1024 * 1024;
 
+/** A body over the read's byte cap, declared or streamed. A class, so a caller
+ *  can tell "too big" from a broken stream without matching message text. */
+export class BoundedReadCapError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BoundedReadCapError";
+  }
+}
+
 /**
  * Read a response body as BYTES without buffering more than `maxBytes`. The
  * declared `content-length` is the cheap check; the read loop is the guarantee,
@@ -34,7 +43,7 @@ export async function readBoundedBytes(res: Response, maxBytes: number, url: str
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => {});
-    throw new Error(
+    throw new BoundedReadCapError(
       `response body is ${declared} bytes, over the ${maxBytes}-byte cap (${url})`,
     );
   }
@@ -49,7 +58,7 @@ export async function readBoundedBytes(res: Response, maxBytes: number, url: str
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
-        throw new Error(`response body exceeded the ${maxBytes}-byte cap (${url})`);
+        throw new BoundedReadCapError(`response body exceeded the ${maxBytes}-byte cap (${url})`);
       }
       chunks.push(value);
     }

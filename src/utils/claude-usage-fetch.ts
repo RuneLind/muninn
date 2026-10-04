@@ -94,7 +94,7 @@ export async function claudeUsageJson(
   try {
     res = await fetch(url, { signal });
   } catch (err) {
-    throw new Error(named(err, label));
+    throw new ClaudeUsageReadError("fetch", named(err, label), err);
   }
   if (!res.ok) throw new ClaudeUsageHttpError(res.status, label);
 
@@ -105,7 +105,7 @@ export async function claudeUsageJson(
     // failure here or the slow/wrong-service case is exactly what loses it.
     text = await readBounded(res, maxBytes, label);
   } catch (err) {
-    throw new Error(named(err, label));
+    throw new ClaudeUsageReadError("body", named(err, label), err);
   }
 
   try {
@@ -113,7 +113,23 @@ export async function claudeUsageJson(
   } catch (err) {
     // A non-JSON body (an HTML error page from something else on the port) reads
     // as a degraded source, never as an empty ledger.
-    throw new Error(named(err, label));
+    throw new ClaudeUsageReadError("parse", named(err, label), err);
+  }
+}
+
+/**
+ * Every non-HTTP failure of {@link claudeUsageJson}: the message is the one
+ * callers already key on, and `stage` plus `cause` let a caller classify it
+ * (no answer, a broken or over-cap body, a body that is not JSON).
+ */
+export class ClaudeUsageReadError extends Error {
+  constructor(
+    readonly stage: "fetch" | "body" | "parse",
+    message: string,
+    cause: unknown,
+  ) {
+    super(message, { cause });
+    this.name = "ClaudeUsageReadError";
   }
 }
 

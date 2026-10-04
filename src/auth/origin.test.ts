@@ -164,6 +164,15 @@ describe("decideOrigin — the pure rule", () => {
     // inherit the rule by accident.
     expect(isSideEffectingRequest("GET", "/api/wiki/provenancex")).toBe(false);
   });
+
+  test("find-everywhere is listed — one GET sends reader text to huginn and claude-usage", () => {
+    expect(SIDE_EFFECTING_GETS).toContain("/api/wiki/find-everywhere");
+    expect(isSideEffectingRequest("GET", "/api/wiki/find-everywhere")).toBe(true);
+    expect(isSideEffectingRequest("HEAD", "/api/wiki/find-everywhere")).toBe(true);
+    expect(
+      decideOrigin({ ...base, method: "GET", path: "/api/wiki/find-everywhere", secFetchSite: "cross-site" }).allowed,
+    ).toBe(false);
+  });
 });
 
 /**

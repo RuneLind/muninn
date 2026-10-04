@@ -241,10 +241,22 @@ export const E2E_PORTS = {
   // Not bound by anything: the nais reader's `KNOWLEDGE_API_URL` points here so
   // the provenance/graph huginn legs meet a closed port, never a live huginn.
   "wiki-nais-read/dead-huginn": 8795,
+  // Not bound by anything: the same spec's `CLAUDE_USAGE_URL`, so a leg that
+  // should not exist on nais meets a closed port, never a live ledger.
+  "wiki-nais-read/dead-ledger": 8791,
   // ⇪ Felles: one muninn, an allowlisted wiki and one that is not.
   "wiki-felles-publish": 3100,
   // The find palette: one muninn over a temp wiki.
   "wiki-find": 3101,
+  // Not bound by anything: the palette spec's huginn and claude-usage, so its
+  // Everywhere section can never reach a live service on this machine.
+  "wiki-find/dead-huginn": 8793,
+  "wiki-find/dead-ledger": 8792,
+  // The palette's Everywhere section: one muninn, plus in-process stubs for
+  // huginn and claude-usage.
+  "wiki-find-everywhere": 3102,
+  "wiki-find-everywhere/huginn": 3103,
+  "wiki-find-everywhere/ledger": 3104,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

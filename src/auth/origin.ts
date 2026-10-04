@@ -112,6 +112,10 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // Graph mode: at level 2 and up the same ledger reads, for every session a
   // walk reaches — up to `GRAPH_SESSIONS_MAX` refs behind one GET.
   "/api/wiki/graph",
+  // The find palette's Everywhere section: one GET carries reader-typed text to
+  // huginn's search and to claude-usage's (two calls, a third for titles). An
+  // amplifier like the two above; the palette's same-origin fetch passes.
+  "/api/wiki/find-everywhere",
   // On a missing or stale cache it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
   // it — so an `<img>` on any page could start local processes. The chat page
   // calls it with a same-origin `fetch`, which passes.
