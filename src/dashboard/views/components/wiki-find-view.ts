@@ -194,7 +194,10 @@ export function everywhereView(
   if (plan.kind === "filtered") return { kind: "filtered" };
   // Nothing asked yet (an IME composition still open): no section at all.
   if (!state) return null;
-  if (state.key !== plan.key || state.status === "pending") return { kind: "pending" };
+  // A pending state is a fetch scheduled for its key. A settled state for
+  // another key means no fetch is scheduled yet (an IME composition still
+  // open): the last answer stays on screen.
+  if (state.status === "pending") return { kind: "pending" };
   return state.status === "failed" ? { kind: "failed" } : { kind: "done", data: state.data };
 }
 
@@ -261,8 +264,10 @@ export function findDegradeNote(data: FindEverywhereResponse): string {
     const st = data.sources[leg];
     if (st.status === "error") out.push(`${names[leg]}: ${st.error ?? "failed"}`);
     else if (st.status === "unconfigured") out.push(`${names[leg]}: ${st.error ?? "not configured"}`);
+    else if (st.status === "skipped" && st.error !== "query too short") out.push(`${names[leg]}: ${st.error ?? "skipped"}`);
   }
   for (const s of data.sources.indexes?.skipped ?? []) out.push(`${s.wiki || "default"} index: ${s.error}`);
+  for (const s of data.sources.indexes?.stale ?? []) out.push(`${s.wiki || "default"} index: stale`);
   if (data.sources.query?.truncated) out.push("query shortened");
   return out.length ? `Partial results — ${out.join(" · ")}.` : "";
 }

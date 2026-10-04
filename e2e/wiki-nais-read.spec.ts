@@ -16,9 +16,10 @@
  * The fixture is built to make controls render: a `trackers` block (graph
  * mode, issue pills), a page with `jira:`/`sessions:`/`prs:` frontmatter (the
  * provenance strip), an `<Embed>` of a same-stem `.html` (an attachment), and a
- * series. `CLAUDE_USAGE_URL` is blank and `KNOWLEDGE_API_URL` points at a
- * closed port, so the provenance and graph legs degrade and never reach a live
- * service.
+ * series. `CLAUDE_USAGE_URL` and `KNOWLEDGE_API_URL` point at closed ports, so
+ * the provenance and graph legs degrade and never reach a live service, and
+ * `MUNINN_BOTS_DIR` is a temp dir holding one wiki-less bot, so no developer
+ * bot or bot wiki joins the registry.
  *
  * A second muninn at role `admin` carries the zone rows for both roles, next
  * to a second, WRITABLE wiki that the read slice must not serve.
@@ -37,6 +38,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { FIND_EVERY_DEBOUNCE_MS } from "../src/dashboard/views/components/wiki-find-palette.ts";
 import {
   HISTORIC_PILL_CLASS,
   LINE_REFS_TOGGLE_CLASS,
@@ -48,6 +50,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN_PORT = e2ePort("wiki-nais-read/admin");
 const ADMIN_BASE = `http://127.0.0.1:${ADMIN_PORT}`;
 const DEAD_HUGINN = `http://127.0.0.1:${e2ePort("wiki-nais-read/dead-huginn")}`;
+const DEAD_LEDGER = `http://127.0.0.1:${e2ePort("wiki-nais-read/dead-ledger")}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "melosys-felles";
 const WRITABLE = "felles-skrivbar";
@@ -174,6 +177,7 @@ const OTHER = ["---", "title: Annen side", "---", "", "# Annen side", "", "Lenke
 const servers: ChildProcess[] = [];
 let root = "";
 let writableRoot = "";
+let botsDir = "";
 
 function boot(port: number, role: "user" | "admin"): void {
   const base = `http://127.0.0.1:${port}`;
@@ -198,7 +202,8 @@ function boot(port: number, role: "user" | "admin"): void {
         WIKI_EXTRA: `${WRITABLE}=${writableRoot},${WIKI}=${root}`,
         WIKI_READONLY_ROOTS: root,
         KNOWLEDGE_API_URL: DEAD_HUGINN,
-        CLAUDE_USAGE_URL: "",
+        CLAUDE_USAGE_URL: DEAD_LEDGER,
+        MUNINN_BOTS_DIR: botsDir,
       },
       stdio: "ignore",
     }),
@@ -222,6 +227,11 @@ test.beforeAll(async ({}, info) => {
   info.setTimeout(90_000);
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-nais-read-"));
   writableRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-nais-rw-"));
+  // One wiki-less bot: muninn refuses to boot with none, and no developer
+  // bot (or its wiki) under bots/ may join the registry.
+  botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-nais-bots-"));
+  await mkdir(path.join(botsDir, "e2e-nais-bot"));
+  await writeFile(path.join(botsDir, "e2e-nais-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, ".wiki-reader.json"), READER_CONFIG, "utf8");
   await writeFile(path.join(root, PAGE_REL), PAGE, "utf8");
@@ -242,6 +252,7 @@ test.afterAll(async () => {
   for (const s of servers) s.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
   if (writableRoot) await rm(writableRoot, { recursive: true, force: true });
+  if (botsDir) await rm(botsDir, { recursive: true, force: true });
 });
 
 /** Record every same-origin response that failed, and every console error. */
@@ -497,8 +508,9 @@ test("the find palette ranks locally and never asks for the Everywhere section",
   await page.locator("body").press("/");
   await page.locator("#wikiFindInput").fill("annen side");
   await expect(page.locator("#wikiFindList .wiki-find-row").first()).toBeVisible();
-  // Past the Everywhere debounce (250 ms): a fetch would have started by now.
-  await page.waitForTimeout(800);
+  // Past the Everywhere debounce, with margin: a fetch would have been sent by
+  // now. The request listener above is the assertion; the wait only bounds it.
+  await page.waitForTimeout(FIND_EVERY_DEBOUNCE_MS * 3);
   expect(paths).not.toContain("/api/wiki/find-everywhere");
   await expect(page.locator("#wikiFindEvery")).toBeEmpty();
   expect(seen.failed).toEqual([]);

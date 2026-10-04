@@ -12,7 +12,9 @@
 
 import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
-import { readBounded } from "../../utils/bounded-fetch.ts";
+import { getLog } from "../../logging.ts";
+import { BoundedReadCapError, readBounded } from "../../utils/bounded-fetch.ts";
+import { ClaudeUsageHttpError, ClaudeUsageReadError, claudeUsageJson } from "../../utils/claude-usage-fetch.ts";
 import { sameWikiRoot } from "../../wiki/readonly.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
@@ -22,7 +24,11 @@ import {
   findEverywhere,
   parseFindEverywhereLimit,
   type FindEverywhereDeps,
+  type FindEverywhereResponse,
+  type FindEverywhereWiki,
 } from "../../wiki/find-everywhere.ts";
+
+const log = getLog("dashboard", "find-everywhere");
 
 /**
  * The registry name find-everywhere gives the wiki a `/wiki` page serves: the
@@ -40,14 +46,26 @@ export function findSelfWikiName(
   return registry.find((e) => sameWikiRoot(e.root, servedRoot))?.name ?? "";
 }
 
+/**
+ * One entry per ROOT, first wins — `findSelfWikiName`'s rule. `WIKI_EXTRA=a=/w,b=/w`,
+ * or a bot's `wikiDir` registered again in `WIKI_EXTRA`, would otherwise list
+ * every page of that root twice.
+ */
+export function uniqueWikiRoots<T extends { root: string }>(wikis: readonly T[]): T[] {
+  const out: T[] = [];
+  for (const w of wikis) if (!out.some((o) => sameWikiRoot(o.root, w.root))) out.push(w);
+  return out;
+}
+
 /** claude-usage's search answers ~25 sessions with snippets; 2 MB is far past it. */
-const USAGE_MAX_BYTES = 2 * 1024 * 1024;
+export const USAGE_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
  * `GET url` parsed as JSON under `maxBytes`, every failure classified:
  * no answer ⇒ `unreachable`, non-2xx ⇒ the status, an over-cap or non-JSON
  * body ⇒ `bad response`. An abort is rethrown as is — the core names it
- * `timeout` or `aborted` from its own signals.
+ * `timeout` or `aborted` from its own signals. huginn only: `fetchKnowledgeApi`
+ * reads unbounded and maps a bad body to "unreachable".
  */
 export async function fetchLegJson(url: string, signal: AbortSignal, maxBytes: number): Promise<unknown> {
   let res: Response;
@@ -66,12 +84,33 @@ export async function fetchLegJson(url: string, signal: AbortSignal, maxBytes: n
     text = await readBounded(res, maxBytes, url);
   } catch (err) {
     if (signal.aborted) throw err;
-    throw new LegFetchError(/cap/.test(err instanceof Error ? err.message : "") ? "bad response" : "unreachable");
+    throw new LegFetchError(err instanceof BoundedReadCapError ? "bad response" : "unreachable");
   }
   try {
     return JSON.parse(text) as unknown;
   } catch {
     throw new LegFetchError("bad response");
+  }
+}
+
+/**
+ * The sessions leg's read: `claudeUsageJson`, the one way muninn reads
+ * claude-usage, its failures mapped onto the leg labels. The label is the
+ * base URL, so no error message carries the reader's query.
+ */
+export async function usageLegJson(root: string, path: string, signal: AbortSignal): Promise<unknown> {
+  try {
+    return await claudeUsageJson(root, path, { signal, maxBytes: USAGE_MAX_BYTES, label: root });
+  } catch (err) {
+    if (signal.aborted) throw err;
+    if (err instanceof ClaudeUsageHttpError) throw new LegFetchError("http", err.status);
+    if (err instanceof ClaudeUsageReadError) {
+      if (err.stage === "parse" || (err.stage === "body" && err.cause instanceof BoundedReadCapError)) {
+        throw new LegFetchError("bad response");
+      }
+      throw new LegFetchError("unreachable");
+    }
+    throw err;
   }
 }
 
@@ -82,10 +121,54 @@ export function defaultFindEverywhereDeps(config: Config, signal?: AbortSignal):
     wikis: () => getWikiRegistry(),
     index: (root) => getWikiIndex({ root }),
     huginn: (path, s) => fetchLegJson(`${huginnRoot}${path}`, s, HUGINN_MAX_BYTES),
-    claudeUsage: usageRoot ? (path, s) => fetchLegJson(`${usageRoot}${path}`, s, USAGE_MAX_BYTES) : null,
+    claudeUsage: usageRoot ? (path, s) => usageLegJson(usageRoot, path, s) : null,
     now: () => Date.now(),
     signal,
   };
+}
+
+function hostOf(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** (leg, label, host) keys already warned about; capped like `claudeUsageWarnOnce`'s. */
+const warnedLegs = new Set<string>();
+const WARNED_LEGS_MAX = 100;
+
+/** Test seam: forget which leg failures have warned. */
+export function __resetFindEverywhereWarnsForTest(): void {
+  warnedLegs.clear();
+}
+
+/**
+ * Log each failed leg: the first sighting of a (leg, label, host) warns,
+ * repeats log info — the palette asks on every keystroke pause. An `aborted`
+ * leg is the reader moving on, not a failure. The query never reaches a log.
+ */
+export function logLegFailures(
+  body: FindEverywhereResponse,
+  hosts: { huginn: string; sessions: string },
+  logger: { warn(msg: string, props: Record<string, unknown>): void; info(msg: string, props: Record<string, unknown>): void } = log,
+): void {
+  for (const leg of ["text", "huginn", "sessions"] as const) {
+    const r = body.sources[leg];
+    if (r.status !== "error" || r.error === "aborted") continue;
+    const host = leg === "text" ? "local" : hosts[leg];
+    const props = { leg, error: r.error ?? "failed", host };
+    const key = `${leg}\0${props.error}\0${host}`;
+    if (warnedLegs.has(key)) {
+      logger.info("find-everywhere {leg} leg still failing: {error} ({host})", props);
+      continue;
+    }
+    if (warnedLegs.size >= WARNED_LEGS_MAX) warnedLegs.clear();
+    warnedLegs.add(key);
+    logger.warn("find-everywhere {leg} leg failed: {error} ({host})", props);
+  }
 }
 
 let depsOverride: ((signal: AbortSignal) => FindEverywhereDeps) | null = null;
@@ -101,7 +184,12 @@ export function registerWikiFindEverywhereRoute(app: Hono, config: Config): void
     const q = c.req.query("q") ?? "";
     const limit = parseFindEverywhereLimit(c.req.query("limit"));
     const signal = c.req.raw.signal;
-    const body = await findEverywhere(q, limit, depsOverride ? depsOverride(signal) : defaultFindEverywhereDeps(config, signal));
+    const deps = depsOverride ? depsOverride(signal) : defaultFindEverywhereDeps(config, signal);
+    const body = await findEverywhere(q, limit, {
+      ...deps,
+      wikis: (): FindEverywhereWiki[] => uniqueWikiRoots(deps.wikis()),
+    });
+    logLegFailures(body, { huginn: hostOf(config.knowledgeApiUrl), sessions: hostOf(config.claudeUsageUrl) });
     c.header("Cache-Control", "no-store");
     return c.json(body);
   });

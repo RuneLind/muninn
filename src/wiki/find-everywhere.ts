@@ -18,14 +18,23 @@
  * count" from #3 to #7, because pages mediocre in two legs outvoted huginn's #1.
  *
  * Bounds, in order: the wiki indexes load first, under `INDEX_TIMEOUT_MS` (a
- * wiki that fails or is late is skipped and named in `sources.indexes`); then
+ * late wiki answers from its last-good index and is named `stale`; one with
+ * none, or that fails, is skipped and named in `sources.indexes`); then
  * the legs start, each under its own timer combined with the caller's abort
  * signal, so no leg's `ms` includes the index wait. The session titles call
  * has its own `TITLES_TIMEOUT_MS` after the search. The query is capped at
  * `QUERY_MAX_CHARS` code points and `QUERY_MAX_WORDS` free words.
  */
 
-import { findFreeTokens, inFindPool, rankFind, type FindRow } from "../dashboard/views/components/wiki-find.ts";
+import {
+  FIND_SHORT_WORD,
+  findFreeTokens,
+  foldText,
+  inFindPool,
+  parseFindQuery,
+  rankFind,
+  type FindRow,
+} from "../dashboard/views/components/wiki-find.ts";
 import { displayTitleOf, type WikiListing } from "../dashboard/views/components/wiki-filter.ts";
 import { bareId, isSessionIdShape } from "./session-refs.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
@@ -39,8 +48,11 @@ export const SESSIONS_LIMIT = 25;
 /** The whole index load, every wiki in parallel. */
 export const INDEX_TIMEOUT_MS = 2500;
 export const HUGINN_TIMEOUT_MS = 3000;
-/** The session search alone; the titles call has its own budget after it. */
-export const SESSIONS_TIMEOUT_MS = 2000;
+/** The session search alone; the titles call has its own budget after it.
+ *  claude-usage runs its ingest tick in its HTTP process and stalls (measured
+ *  2026-10-04: p50 70 ms, p95 215 ms, ~3 % over 2 s, max 6.8 s); at 2 s, its
+ *  own busy_timeout, results flapped during a stall. */
+export const SESSIONS_TIMEOUT_MS = 3000;
 export const TITLES_TIMEOUT_MS = 400;
 /** huginn's answer is read under this cap (`brief=true` at 15 hits is ~10 KB). */
 export const HUGINN_MAX_BYTES = 1024 * 1024;
@@ -123,14 +135,20 @@ export interface FindEverywhereResult {
   };
 }
 
-export type LegStatus = "ok" | "error" | "unconfigured";
+export type LegStatus = "ok" | "error" | "unconfigured" | "skipped";
 
 export interface LegReport {
   status: LegStatus;
   ms: number;
   /** `timeout`, `unreachable`, `bad response`, `HTTP <n>`, `aborted` or
-   *  `failed`; for `unconfigured`, what is missing. */
+   *  `failed`; for `unconfigured` what is missing, for `skipped` why. */
   error?: string;
+}
+
+/** The sessions leg's report: `ms` is the search alone, `titles` the
+ *  separate title lookup's outcome. */
+export interface SessionsLegReport extends LegReport {
+  titles?: "ok" | "timeout" | "failed" | "skipped";
 }
 
 export interface FindEverywhereResponse {
@@ -139,11 +157,18 @@ export interface FindEverywhereResponse {
   results: FindEverywhereResult[];
   sources: {
     query: { truncated: boolean };
-    /** Wikis whose index failed or missed `INDEX_TIMEOUT_MS`; `ms` is the wait. */
-    indexes: { ms: number; skipped: Array<{ wiki: string; error: string }> };
+    /** Wikis whose index failed or missed `INDEX_TIMEOUT_MS` with no earlier
+     *  index to fall back on (`skipped`), and wikis answered from their
+     *  last-good index because the rebuild missed the bound (`stale`); `ms`
+     *  is the wait. */
+    indexes: {
+      ms: number;
+      skipped: Array<{ wiki: string; error: string }>;
+      stale: Array<{ wiki: string; error: string }>;
+    };
     text: LegReport;
     huginn: LegReport;
-    sessions: LegReport;
+    sessions: SessionsLegReport;
   };
 }
 
@@ -177,6 +202,10 @@ interface LoadedWiki {
 }
 
 const pageKey = (wiki: string, relPath: string): string => `${wiki}\u0000${relPath}`;
+
+/** Code-unit order. ICU `localeCompare` ignores `\u0000`, so two different
+ *  page keys can compare equal there and a tie would fall to sort stability. */
+const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /** The index's pages in the listing shape `rankFind` and `inFindPool` take,
  *  one array per index build (the ranker memoizes its series labels per
@@ -235,21 +264,148 @@ function clip(text: string, max: number): { text: string; cut: number } {
 
 const flatten = (s: string): string => s.replace(/\s+/g, " ").trim();
 
+/** Drop fenced code: each fence pair with what it holds, and an opener the
+ *  clip left unclosed with everything after it. */
+function dropFences(s: string): string {
+  const out: string[] = [];
+  let fence: string | null = null;
+  for (const line of s.split("\n")) {
+    const m = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence === null) {
+      if (m) fence = m[1]!;
+      else out.push(line);
+    } else if (m && m[1]![0] === fence[0] && m[1]!.length >= fence.length && line.trim() === m[1]) {
+      fence = null;
+    }
+  }
+  return out.join("\n");
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/** Index just past the construct opened at `from` and closed by `close` at
+ *  depth 0 outside quotes (`{` nests when `close` is `}`), or -1 when the clip
+ *  cut it off. Quotes and braces inside protect a `>` or `}`. */
+function skipBalanced(s: string, from: number, close: ">" | "}"): number {
+  let depth = 0;
+  let quote = "";
+  for (let i = from; i < s.length; i++) {
+    const ch = s[i]!;
+    if (quote) {
+      if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'" || (ch === "`" && close === "}")) quote = ch;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && close === "}") return i + 1;
+    } else if (ch === close && depth === 0) return i + 1;
+  }
+  return -1;
+}
+
 /**
- * huginn's snippet as plain text: its breadcrumb prefix (a leading `tags: …`
- * line and heading lines) out, MDX/HTML tags out, `[[target|label]]` and
- * `[label](url)` reduced to the label, emphasis markers out — then clipped.
+ * One left-to-right pass over inline markup: `<!-- … -->`, MDX/HTML tags
+ * (attributes may hold `>` inside quotes or braces) and `{…}` expressions out,
+ * inline code kept without its backticks. A `<` opens a tag when `/` or `!`
+ * follows it, or a letter does and no word character precedes it — so
+ * `x<y and z>w` stays prose. A construct the clip cut off ends the snippet.
+ */
+function stripInlineMarkup(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; ) {
+    const ch = s[i]!;
+    if (ch === "`") {
+      let n = 1;
+      while (s[i + n] === "`") n++;
+      const run = "`".repeat(n);
+      const end = s.indexOf(run, i + n);
+      if (end === -1) {
+        i += n;
+      } else {
+        out += s.slice(i + n, end);
+        i = end + n;
+      }
+      continue;
+    }
+    if (ch === "<" && s.startsWith("<!--", i)) {
+      const end = s.indexOf("-->", i + 4);
+      if (end === -1) break;
+      out += " ";
+      i = end + 3;
+      continue;
+    }
+    const next = s[i + 1] ?? "";
+    const opensTag = /[A-Za-z]/.test(next) ? !(i > 0 && WORD_CHAR.test(s[i - 1]!)) : next === "/" || next === "!";
+    if (ch === "<" && opensTag) {
+      const end = skipBalanced(s, i + 1, ">");
+      if (end === -1) break;
+      out += " ";
+      i = end;
+      continue;
+    }
+    if (ch === "{") {
+      const end = skipBalanced(s, i, "}");
+      if (end === -1) break;
+      out += " ";
+      i = end;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** One line of block markdown reduced to its text. */
+function flattenBlockLine(line: string): string {
+  let l = line.replace(/^[ \t]*(?:>[ \t]?)+/, "");
+  l = l.replace(/^[ \t]*\[![\w-]+\][+-]?[ \t]*/, "");
+  l = l.replace(/^[ \t]*#{1,6}[ \t]+/, "");
+  l = l.replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/, "");
+  l = l.replace(/^\[[ xX]\][ \t]+/, "");
+  const t = l.trim();
+  if (t.startsWith("|")) {
+    if (/^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?$/.test(t)) return "";
+    return t
+      .split("|")
+      .map((c) => c.trim())
+      .filter(Boolean)
+      .join(" · ");
+  }
+  return l;
+}
+
+const ENTITIES: Record<string, string> = { "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&amp;": "&" };
+
+/**
+ * huginn's snippet as plain text, before the clip. huginn cuts a chunk
+ * mid-markup, so every construct may arrive unterminated. Out: the breadcrumb
+ * (a leading `tags: …` line and heading line), fenced code, comments, MDX/HTML
+ * tags, `{…}` expressions. Flattened: headings, list bullets and checkboxes,
+ * table rows (cells joined by ` · `, separator rows dropped), blockquotes and
+ * `> [!type]` markers, inline code, `[[target|label]]`, `[label](url)`,
+ * `![alt](src)`, emphasis at word boundaries (`__init__` stays). An unclosed
+ * `[[` or `[` keeps its text. Five entities are decoded last.
  */
 export function plainSnippet(raw: string): string {
   let s = raw.replace(/\r\n?/g, "\n");
   s = s.replace(/^\s*tags:[^\n]*(\n|$)/i, "");
   s = s.replace(/^[ \t]*#{1,6}[ \t]+[^\n]*(\n|$)/, "");
-  s = s.replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
-  s = s.replace(/<\/?[A-Za-z][^<>]*\/?>/g, " ");
-  s = s.replace(/\[\[([^\]|]*)\|([^\]]*)\]\]/g, "$2").replace(/\[\[([^\]]*)\]\]/g, "$1");
-  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
-  s = s.replace(/\*\*|__|~~/g, "");
+  s = dropFences(s);
+  s = stripInlineMarkup(s);
+  s = s.split("\n").map(flattenBlockLine).join("\n");
+  s = s.replace(/!\[([^\]\n]*)\]\([^)\n]*\)?/g, "$1");
+  s = s.replace(/\[\[([^\]|\n]*)\|([^\]\n]*)\]\]/g, "$2").replace(/\[\[([^\]\n]*)\]\]/g, "$1");
+  s = s.replace(/\[\[(?:[^\]|\n]*\|)?/g, "");
+  s = s.replace(/\[([^\]\n]*)\]\([^)\n]*\)?/g, "$1");
+  s = s.replace(/\[(?![^\]\n]*\])/g, "");
+  s = s.replace(/\*\*|~~/g, "");
+  // Strong `__…__` only around more than one identifier word: `__init__` is a name.
+  s = s.replace(/(^|[^\w])__(\S(?:[^\n]*?\S)?)__(?!\w)/g, (m, pre: string, inner: string) =>
+    /^\w+$/.test(inner) ? m : pre + inner,
+  );
   s = s.replace(/(^|[^\w*])[*_]([^*_\n]+?)[*_](?=[^\w*]|$)/g, "$1$2");
+  s = s.replace(/&(?:lt|gt|quot|#39|amp);/g, (e) => ENTITIES[e]!);
   return clip(flatten(s), SNIPPET_MAX).text;
 }
 
@@ -308,8 +464,8 @@ function textLeg(loaded: readonly LoadedWiki[], query: string, now: number): Leg
     (a, b) =>
       b.row.matched - a.row.matched ||
       b.row.score - a.row.score ||
-      a.wiki.localeCompare(b.wiki) ||
-      a.row.page.relPath.localeCompare(b.row.page.relPath),
+      byCodeUnit(a.wiki, b.wiki) ||
+      byCodeUnit(a.row.page.relPath, b.row.page.relPath),
   );
   const top = rows.slice(0, LEG_DEPTH);
   const keys = top.map((r) => pageKey(r.wiki, r.row.page.relPath));
@@ -329,12 +485,38 @@ interface HuginnHit {
   relevance?: unknown;
 }
 
-function huginnLeg(body: unknown, loaded: readonly LoadedWiki[]): Leg<{ rank: number; snippet: string }> {
+/** The query's terms that count as lexical evidence: long free words and
+ *  numbers, folded the way the palette folds them. */
+export function lexicalTerms(query: string): { words: string[]; numbers: string[] } {
+  const q = parseFindQuery(query);
+  const numbers = new Set(q.numbers);
+  const words: string[] = [];
+  for (const w of q.words) {
+    if (/^\d+$/.test(w)) numbers.add(w);
+    else if (Array.from(w).length >= FIND_SHORT_WORD) words.push(w);
+  }
+  return { words, numbers: [...numbers] };
+}
+
+/** Does the text carry a long query word (substring) or a query number
+ *  (whole, not inside a longer number)? */
+export function hasLexicalEvidence(text: string, terms: { words: string[]; numbers: string[] }): boolean {
+  const hay = foldText(text);
+  if (terms.words.some((w) => hay.includes(w))) return true;
+  return terms.numbers.some((n) => new RegExp(`(?<!\\d)${n}(?!\\d)`).test(hay));
+}
+
+function huginnLeg(
+  body: unknown,
+  loaded: readonly LoadedWiki[],
+  terms: { words: string[]; numbers: string[] },
+): Leg<{ rank: number; snippet: string }> {
   const results = (body as { results?: unknown } | null)?.results;
   if (!Array.isArray(results)) throw new BadShape("huginn answered without a results list");
   const keys: string[] = [];
   const reasons = new Map<string, { rank: number; snippet: string }>();
   const relevance = new Map<string, unknown>();
+  const evidence = new Map<string, boolean>();
   for (const hit of results as HuginnHit[]) {
     if (typeof hit?.collection !== "string" || typeof hit.id !== "string") continue;
     for (const { wiki, index } of loaded) {
@@ -352,13 +534,17 @@ function huginnLeg(body: unknown, loaded: readonly LoadedWiki[]): Leg<{ rank: nu
             snippet: plainSnippet(typeof hit.snippet === "string" ? hit.snippet : ""),
           });
           relevance.set(key, typeof hit.relevance === "number" ? hit.relevance : Symbol());
+          const raw = typeof hit.snippet === "string" ? hit.snippet : "";
+          evidence.set(key, hasLexicalEvidence(`${displayTitleOf(meta)}\n${meta.relPath}\n${raw}`, terms));
         }
       }
       break;
     }
   }
   const top = keys.slice(0, LEG_DEPTH);
-  return { keys: top, reasons, heads: tiedHeads(top, (k) => relevance.get(k), () => true) };
+  // Brief-mode relevance is rank-derived: nonsense gets a confident #1. A
+  // huginn #1 leads only with one query word or number on the page; else it votes.
+  return { keys: top, reasons, heads: tiedHeads(top, (k) => relevance.get(k), (k) => evidence.get(k) === true) };
 }
 
 interface UsageSession {
@@ -372,9 +558,14 @@ function sessionLeg(body: unknown, loaded: readonly LoadedWiki[]): Leg<SessionRe
   const score = new Map<string, number>();
   const reasons = new Map<string, SessionReason[]>();
   const byIndex = loaded.map((l) => ({ ...l, map: sessionPages(l.index) }));
-  (sessions as UsageSession[]).forEach((s, i) => {
-    if (typeof s?.sessionId !== "string") return;
-    const id = bareId(s.sessionId);
+  // Ranks count well-formed rows only: a malformed row shifts neither a later
+  // session's rank nor the top-5 head gate.
+  let i = -1;
+  for (const s of sessions as UsageSession[]) {
+    if (typeof s?.sessionId !== "string") continue;
+    const id = bareId(s.sessionId.trim());
+    if (!isSessionIdShape(id)) continue;
+    i++;
     const snippet = markedSnippet(typeof s.snippet === "string" ? s.snippet : "");
     for (const { wiki, index, map } of byIndex) {
       for (const rel of map.get(id) ?? []) {
@@ -388,9 +579,9 @@ function sessionLeg(body: unknown, loaded: readonly LoadedWiki[]): Leg<SessionRe
         score.set(key, (score.get(key) ?? 0) + 1 / (FUSE_K + i));
       }
     }
-  });
+  }
   const keys = [...score.keys()]
-    .sort((a, b) => score.get(b)! - score.get(a)! || a.localeCompare(b))
+    .sort((a, b) => score.get(b)! - score.get(a)! || byCodeUnit(a, b))
     .slice(0, LEG_DEPTH);
   // Session search ranks loosely: a page carried only by a session far down
   // claude-usage's answer is a vote, never a head.
@@ -404,23 +595,24 @@ function sessionLeg(body: unknown, loaded: readonly LoadedWiki[]): Leg<SessionRe
 
 /** Fill `title` on every session reason from `/api/sessions-by-id`. Best
  *  effort under its own budget: a failure or a late answer leaves the titles
- *  off and the leg ok. */
+ *  off and the leg ok; the outcome is reported beside the leg. */
 async function addSessionTitles(
   leg: Leg<SessionReason[]>,
   fetchJson: (path: string, signal: AbortSignal) => Promise<unknown>,
   timeoutMs: number,
   outer: AbortSignal | undefined,
-): Promise<void> {
+): Promise<NonNullable<SessionsLegReport["titles"]>> {
   const ids = [...new Set(leg.keys.flatMap((k) => leg.reasons.get(k)!.map((r) => r.id)))];
-  if (!ids.length) return;
-  const { signal } = legSignal(timeoutMs, outer);
+  if (!ids.length) return "skipped";
+  const { signal, timeout } = legSignal(timeoutMs, outer);
   try {
+    // Ids are shape-checked (`isSessionIdShape`), so encoding cannot throw.
     const body = await raceSignal(
       fetchJson(`/api/sessions-by-id?ids=${ids.map(encodeURIComponent).join(",")}`, signal),
       signal,
     );
     const rows = (body as { sessions?: unknown } | null)?.sessions;
-    if (!Array.isArray(rows)) return;
+    if (!Array.isArray(rows)) return "failed";
     const titles = new Map<string, string>();
     for (const r of rows as Array<{ sessionId?: unknown; title?: unknown }>) {
       if (typeof r?.sessionId === "string" && typeof r.title === "string" && r.title.trim()) {
@@ -431,8 +623,10 @@ async function addSessionTitles(
       const t = titles.get(r.id);
       if (t) r.title = t;
     }
+    return "ok";
   } catch {
     // Titles are a tooltip; the chips stand without them.
+    return timeout?.aborted && !outer?.aborted ? "timeout" : "failed";
   }
 }
 
@@ -490,31 +684,65 @@ async function runLeg<T>(
   }
 }
 
-/** Load every wiki's index in parallel under ONE bound; a wiki whose index
- *  fails or is late is skipped. */
+/**
+ * The last index each root answered with. After the store's 5-minute TTL every
+ * expired wiki rebuilds at once (measured 1.85–1.97 s for 5 wikis against the
+ * 2.5 s bound), so a modest slowdown would skip them all; a late wiki answers
+ * from here instead, and the rebuild it started still lands here when done.
+ */
+const lastGoodIndex = new Map<string, WikiIndex>();
+
+/** Test seam: forget every last-good index. */
+export function __resetFindEverywhereIndexesForTest(): void {
+  lastGoodIndex.clear();
+}
+
+/** Load every wiki's index in parallel under ONE bound. A wiki that misses
+ *  the bound answers from its last-good index (`stale`); one with none, or
+ *  whose load fails, is skipped. */
 async function loadIndexes(
   wikis: readonly FindEverywhereWiki[],
   deps: FindEverywhereDeps,
-): Promise<{ loaded: LoadedWiki[]; skipped: Array<{ wiki: string; error: string }>; ms: number }> {
+): Promise<{
+  loaded: LoadedWiki[];
+  skipped: Array<{ wiki: string; error: string }>;
+  stale: Array<{ wiki: string; error: string }>;
+  ms: number;
+}> {
   const t0 = performance.now();
   const { signal } = legSignal(deps.indexTimeoutMs ?? INDEX_TIMEOUT_MS, deps.signal);
+  type Outcome = LoadedWiki | { wiki: string; error: string; stale?: WikiIndex };
   const outcomes = await Promise.all(
-    wikis.map(async (wiki): Promise<LoadedWiki | { wiki: string; error: string }> => {
+    wikis.map(async (wiki): Promise<Outcome> => {
+      const pending = Promise.resolve()
+        .then(() => deps.index(wiki.root))
+        .then((index) => {
+          if (index) lastGoodIndex.set(wiki.root, index);
+          return index;
+        });
+      pending.catch(() => {});
       try {
-        const index = await raceSignal(deps.index(wiki.root), signal);
+        const index = await raceSignal(pending, signal);
         return index ? { wiki, index } : { wiki: wiki.name, error: "failed" };
       } catch {
-        return { wiki: wiki.name, error: signal.aborted ? (deps.signal?.aborted ? "aborted" : "timeout") : "failed" };
+        if (!signal.aborted) return { wiki: wiki.name, error: "failed" };
+        if (deps.signal?.aborted) return { wiki: wiki.name, error: "aborted" };
+        return { wiki: wiki.name, error: "timeout", stale: lastGoodIndex.get(wiki.root) };
       }
     }),
   );
   const loaded: LoadedWiki[] = [];
   const skipped: Array<{ wiki: string; error: string }> = [];
-  for (const o of outcomes) {
+  const stale: Array<{ wiki: string; error: string }> = [];
+  wikis.forEach((wiki, i) => {
+    const o = outcomes[i]!;
     if ("index" in o) loaded.push(o);
-    else skipped.push(o);
-  }
-  return { loaded, skipped, ms: Math.round(performance.now() - t0) };
+    else if (o.stale) {
+      loaded.push({ wiki, index: o.stale });
+      stale.push({ wiki: o.wiki, error: o.error });
+    } else skipped.push({ wiki: o.wiki, error: o.error });
+  });
+  return { loaded, skipped, stale, ms: Math.round(performance.now() - t0) };
 }
 
 /**
@@ -539,7 +767,7 @@ export function fuseLegs(
   }
   const all = [...score.entries()]
     .map(([key, s]) => ({ key, score: s, head: heads.has(key) }))
-    .sort((a, b) => b.score - a.score || a.key.localeCompare(b.key));
+    .sort((a, b) => b.score - a.score || byCodeUnit(a.key, b.key));
   return [...all.filter((r) => r.head), ...all.filter((r) => !r.head)];
 }
 
@@ -551,58 +779,68 @@ export async function findEverywhere(
   const query = capFindEverywhereQuery(rawQuery);
   const outer = deps.signal;
   const unconfiguredUsage: LegReport = { status: "unconfigured", ms: 0, error: "CLAUDE_USAGE_URL unset" };
-  if (Array.from(query.remote).length < FIND_EVERYWHERE_MIN_CHARS) {
-    const idle: LegReport = { status: "ok", ms: 0 };
-    return {
-      q: query.text,
-      results: [],
-      sources: {
-        query: { truncated: query.truncated },
-        indexes: { ms: 0, skipped: [] },
-        text: idle,
-        huginn: idle,
-        sessions: deps.claudeUsage ? idle : unconfiguredUsage,
-      },
-    };
+  const tooShort: LegReport = { status: "skipped", ms: 0, error: "query too short" };
+  const empty = (indexes: FindEverywhereResponse["sources"]["indexes"], legs: Pick<FindEverywhereResponse["sources"], "text" | "huginn" | "sessions">): FindEverywhereResponse => ({
+    q: query.text,
+    results: [],
+    sources: { query: { truncated: query.truncated }, indexes, ...legs },
+  });
+  // The text form decides: `#5` is a hard number to the text leg even though
+  // its remote form `5` is too short to send anywhere.
+  if (Array.from(query.text).length < FIND_EVERYWHERE_MIN_CHARS) {
+    return empty({ ms: 0, skipped: [], stale: [] }, { text: tooShort, huginn: tooShort, sessions: tooShort });
   }
+  const remoteTooShort = Array.from(query.remote).length < FIND_EVERYWHERE_MIN_CHARS;
 
   // The indexes load BEFORE any leg's timer starts: every leg maps its hits
   // through them, and a slow index build must not eat a remote leg's budget.
-  const indexes = await loadIndexes(deps.wikis(), deps);
+  const wikis = deps.wikis();
+  const indexes = await loadIndexes(wikis, deps);
   const { loaded } = indexes;
+  const indexReport = { ms: indexes.ms, skipped: indexes.skipped, stale: indexes.stale };
+  if (outer?.aborted) {
+    const aborted: LegReport = { status: "error", ms: 0, error: "aborted" };
+    return empty(indexReport, { text: aborted, huginn: aborted, sessions: aborted });
+  }
 
   const textP = runLeg(async () => textLeg(loaded, query.text, deps.now()), null, outer);
 
   const collections = [...new Set(loaded.flatMap((l) => l.wiki.collections ?? []))];
-  const huginnP: Promise<{ value?: Leg<{ rank: number; snippet: string }>; report: LegReport }> = collections.length
-    ? runLeg(
-        async (signal) => {
-          const params = new URLSearchParams({ q: query.remote, limit: String(HUGINN_LIMIT), brief: "true" });
-          for (const c of collections) params.append("collection", c);
-          return huginnLeg(await deps.huginn(`/api/search?${params}`, signal), loaded);
-        },
-        deps.huginnTimeoutMs ?? HUGINN_TIMEOUT_MS,
-        outer,
-      )
-    : Promise.resolve({ report: { status: "unconfigured", ms: 0, error: "no wiki collections" } });
+  const terms = lexicalTerms(query.text);
+  const huginnP: Promise<{ value?: Leg<{ rank: number; snippet: string }>; report: LegReport }> = remoteTooShort
+    ? Promise.resolve({ report: tooShort })
+    : collections.length
+      ? runLeg(
+          async (signal) => {
+            const params = new URLSearchParams({ q: query.remote, limit: String(HUGINN_LIMIT), brief: "true" });
+            for (const c of collections) params.append("collection", c);
+            return huginnLeg(await deps.huginn(`/api/search?${params}`, signal), loaded, terms);
+          },
+          deps.huginnTimeoutMs ?? HUGINN_TIMEOUT_MS,
+          outer,
+        )
+      : Promise.resolve({
+          report: wikis.some((w) => w.collections?.length)
+            ? { status: "skipped", ms: 0, error: "no wiki index loaded" }
+            : { status: "unconfigured", ms: 0, error: "no wiki collections" },
+        });
 
   const usage = deps.claudeUsage;
-  const sessionsP: Promise<{ value?: Leg<SessionReason[]>; report: LegReport }> = usage
-    ? (async () => {
-        const run = await runLeg(
-          async (signal) =>
-            sessionLeg(await usage(`/api/search?q=${encodeURIComponent(query.remote)}&limit=${SESSIONS_LIMIT}`, signal), loaded),
-          deps.sessionsTimeoutMs ?? SESSIONS_TIMEOUT_MS,
-          outer,
-        );
-        if (run.value) {
-          const t0 = performance.now();
-          await addSessionTitles(run.value, usage, deps.titlesTimeoutMs ?? TITLES_TIMEOUT_MS, outer);
-          run.report.ms += Math.round(performance.now() - t0);
-        }
-        return run;
-      })()
-    : Promise.resolve({ report: unconfiguredUsage });
+  const sessionsP: Promise<{ value?: Leg<SessionReason[]>; report: SessionsLegReport }> = !usage
+    ? Promise.resolve({ report: unconfiguredUsage })
+    : remoteTooShort
+      ? Promise.resolve({ report: tooShort })
+      : (async () => {
+          const params = new URLSearchParams({ q: query.remote, limit: String(SESSIONS_LIMIT) });
+          const run: { value?: Leg<SessionReason[]>; report: SessionsLegReport } = await runLeg(
+            async (signal) => sessionLeg(await usage(`/api/search?${params}`, signal), loaded),
+            deps.sessionsTimeoutMs ?? SESSIONS_TIMEOUT_MS,
+            outer,
+          );
+          // The titles call is reported on its own; the leg's `ms` stays the search.
+          if (run.value) run.report.titles = await addSessionTitles(run.value, usage, deps.titlesTimeoutMs ?? TITLES_TIMEOUT_MS, outer);
+          return run;
+        })();
 
   const [textRun, huginnRun, sessionsRun] = await Promise.all([textP, huginnP, sessionsP]);
   const text = textRun.value ?? emptyLeg<{ rank: number }>();
@@ -641,7 +879,7 @@ export async function findEverywhere(
     results,
     sources: {
       query: { truncated: query.truncated },
-      indexes: { ms: indexes.ms, skipped: indexes.skipped },
+      indexes: indexReport,
       text: textRun.report,
       huginn: huginnRun.report,
       sessions: sessionsRun.report,

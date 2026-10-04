@@ -26,7 +26,7 @@
  */
 
 import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { applySeriesChip, rankFind, type FindResult } from "./wiki-find.ts";
+import { applySeriesChip, findFreeTokens, rankFind, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
   FIND_EVERY_ID,
@@ -94,6 +94,9 @@ let shownState: FindListingState = "loading";
 let debounce: ReturnType<typeof setTimeout> | null = null;
 /** The latest Everywhere fetch, keyed on the free text it asked for. */
 let every: FindEverywhereState | null = null;
+/** The last answer that landed (done or failed): what a cancelled pending
+ *  fetch falls back to. */
+let everySettled: FindEverywhereState | null = null;
 /** The Everywhere rows on screen: fused rows not shown as a local row. */
 let everyShown: FindEverywhereResult[] = [];
 let everyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -114,12 +117,49 @@ function titleOf(relPath: string): string | undefined {
   return p ? displayTitleOf(p) : undefined;
 }
 
-function render(): void {
+/** A row's identity across repaints: its wiki and relPath. Its index moves
+ *  when local rows arrive ahead of it or a row is deduped into the local list. */
+function rowIdentity(i: number): string | null {
+  if (!port) return null;
+  const local = result?.rows[i];
+  if (local) return `${port.selfWiki()}\u0000${local.page.relPath}`;
+  const every = everyShown[i - localCount()];
+  return every ? `${every.wiki}\u0000${every.relPath}` : null;
+}
+
+function indexOfIdentity(id: string | null): number {
+  if (id === null) return -1;
+  for (let i = 0; i < rowCount(); i++) if (rowIdentity(i) === id) return i;
+  return -1;
+}
+
+/** The selected row's identity, and the focused row's, before a repaint. */
+function captureRows(): { active: string | null; focused: string | null } {
+  const f = document.activeElement as HTMLElement | null;
+  const focusedIdx = f?.closest?.(`#${FIND_LIST_ID}`) && f.hasAttribute("data-find-row") ? Number(f.getAttribute("data-find-row")) : -1;
+  return { active: rowIdentity(active), focused: focusedIdx >= 0 ? rowIdentity(focusedIdx) : null };
+}
+
+/** After a repaint: the same row stays selected, and a row that had focus
+ *  gets it back — or the input does, never `<body>`. */
+function restoreRows(kept: { active: string | null; focused: string | null }, hadRowFocus: boolean): void {
+  const a = indexOfIdentity(kept.active);
+  active = a >= 0 ? a : active < rowCount() ? active : 0;
+  syncActive(false);
+  if (!hadRowFocus) return;
+  const f = indexOfIdentity(kept.focused);
+  const el = f >= 0 ? document.getElementById(findRowId(f)) : null;
+  (el ?? input())?.focus({ preventScroll: true });
+}
+
+function render(keep = false): void {
   if (!port) return;
   const box = input();
   const list = document.getElementById(FIND_LIST_ID);
   const chips = document.getElementById(FIND_CHIPS_ID);
   if (!box || !list || !chips) return;
+  const kept = keep ? captureRows() : null;
+  const hadRowFocus = !!kept && kept.focused !== null;
   const query = box.value;
   shownState = port.listingState();
   if (shownState !== "ready") {
@@ -144,7 +184,8 @@ function render(): void {
   list.innerHTML =
     localHtml + `<div id="${FIND_EVERY_ID}">${findEverywhereHtml(view, everyShown, localCount(), active)}</div>`;
   addLocalReasons(view);
-  syncActive();
+  if (kept) restoreRows(kept, hadRowFocus);
+  else syncActive();
 }
 
 /** The section's view for the query in the box. */
@@ -191,14 +232,15 @@ function addLocalReasons(view: FindEverywhereView | null): void {
 function paintEverywhere(): void {
   const box = document.getElementById(FIND_EVERY_ID);
   if (!port || !box) return;
+  const kept = captureRows();
+  const hadRowFocus = kept.focused !== null;
   const view = currentView();
   everyShown = shownRows(view);
-  if (active >= rowCount()) active = 0;
   box.innerHTML = findEverywhereHtml(view, everyShown, localCount(), active);
   addLocalReasons(view);
-  // With no local rows the first Everywhere row is the active one: mark it,
-  // without scrolling or moving focus.
-  if (!localCount() && everyShown.length) syncActive(false);
+  // The selection follows its row, aria-activedescendant follows the
+  // selection, and a focused row keeps focus — no scroll on the way.
+  restoreRows(kept, hadRowFocus);
 }
 
 function cancelEverywhere(): void {
@@ -212,19 +254,29 @@ function cancelEverywhere(): void {
  * On a query change. The fetch is keyed on the free text: an edit that keeps
  * it (a filter token, a trailing space, a chip) keeps the fetch in flight and
  * the rows on screen, and only the dedupe re-runs. A filter suppresses the
- * section without dropping what was fetched; free text typed under a filter
- * is not fetched.
+ * section without dropping what was fetched, but a fetch still waiting on its
+ * debounce is cancelled and the last answer kept; free text typed under a
+ * filter is not fetched.
  */
 function updateEverywhere(): void {
-  const plan = everywherePlan(input()?.value ?? "", !!port?.everywhere());
+  const query = input()?.value ?? "";
+  const plan = everywherePlan(query, !!port?.everywhere());
   if (plan.kind === "fetch" && every?.key !== plan.key) {
     cancelEverywhere();
     every = { key: plan.key, status: "pending" };
     const key = plan.key;
+    // The free words as typed: filters out, `#12` kept a hard number for the
+    // text leg (its remote form is the key).
+    const q = findFreeTokens(query)
+      .map((t) => t.text)
+      .join(" ");
     everyTimer = setTimeout(() => {
       everyTimer = null;
-      void fetchEverywhere(key);
+      void fetchEverywhere(key, q);
     }, FIND_EVERY_DEBOUNCE_MS);
+  } else if (plan.kind === "filtered" && everyTimer) {
+    cancelEverywhere();
+    every = everySettled;
   } else if (plan.kind === "off") {
     cancelEverywhere();
     every = null;
@@ -232,13 +284,11 @@ function updateEverywhere(): void {
   paintEverywhere();
 }
 
-async function fetchEverywhere(key: string): Promise<void> {
+async function fetchEverywhere(key: string, q: string): Promise<void> {
   const ctrl = new AbortController();
   everyCtrl = ctrl;
   let next: FindEverywhereState;
   try {
-    // The typed query, not the key: the text leg keeps `#12` a hard number.
-    const q = (input()?.value ?? key).trim();
     const res = await fetch(`/api/wiki/find-everywhere?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     next = { key, status: "done", data: (await res.json()) as FindEverywhereResponse };
@@ -250,6 +300,7 @@ async function fetchEverywhere(key: string): Promise<void> {
   if (ctrl.signal.aborted || everyCtrl !== ctrl || every?.key !== key) return;
   everyCtrl = null;
   every = next;
+  everySettled = next;
   paintEverywhere();
 }
 
@@ -288,7 +339,9 @@ function flushPending(): void {
  * the open dialog. Its rows re-rank over the new listing on the next keystroke.
  */
 export function refreshFind(): void {
-  if (isFindOpen() && shownState !== "ready") render();
+  // `keep`: the rows arrive ahead of the Everywhere rows the reader may have
+  // selected or focused; both follow their row by identity.
+  if (isFindOpen() && shownState !== "ready") render(true);
 }
 
 function scheduleRender(): void {
@@ -364,6 +417,7 @@ export function openFind(): void {
   active = 0;
   result = null;
   every = null;
+  everySettled = null;
   everyShown = [];
   render();
   input()!.focus();
@@ -377,6 +431,7 @@ export function closeFind(returnFocus = true): void {
   }
   cancelEverywhere();
   every = null;
+  everySettled = null;
   everyShown = [];
   document.getElementById(FIND_SCRIM_ID)?.remove();
   result = null;

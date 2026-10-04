@@ -147,52 +147,84 @@ export function seriesMatchKey(key: string): string {
  *  `type:""`) is ignored rather than read as a word. */
 const KNOWN_KEYS = new Set(["in", "series", "type", "is", "age"]);
 
+/** What one query token is, as the parser reads it. The ONE classification:
+ *  `parseFindQuery`, `isFindFilterToken` and `findFreeTokens` all read it. */
+type FindToken =
+  | { kind: "ignored" }
+  | { kind: "in"; value: string }
+  | { kind: "series"; key: string }
+  | { kind: "type"; value: string }
+  | { kind: "age"; dir: "<" | ">"; n: number }
+  | { kind: "retired" }
+  | { kind: "tag"; value: string }
+  | { kind: "number"; digits: string }
+  /** `raw` is the typed token, `"` removed, NOT folded. */
+  | { kind: "word"; raw: string };
+
+const FILTER_KINDS: ReadonlySet<FindToken["kind"]> = new Set(["in", "series", "type", "age", "retired", "tag"]);
+
+function classifyToken(tok: string): FindToken {
+  const colon = tok.indexOf(":");
+  const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+  const value = colon > 0 ? unquote(tok.slice(colon + 1)) : "";
+  // Mid-typing: `in:`, `in:"`, `age:<` — no filter, and not a word either.
+  // `<`/`>` alone is unfinished only for `age:`; elsewhere it is a value
+  // (a series keyed `<` has a chip, and `series:<` must apply it).
+  const v = value.trim();
+  if (KNOWN_KEYS.has(key) && (v === "" || (key === "age" && (v === "<" || v === ">")))) return { kind: "ignored" };
+  if (key === "in") return { kind: "in", value: foldText(v) };
+  if (key === "series") {
+    const k = seriesMatchKey(value);
+    return k ? { kind: "series", key: k } : { kind: "ignored" };
+  }
+  if (key === "type") return { kind: "type", value: foldText(v) };
+  if (key === "age") {
+    const m = /^([<>])(\d+)$/.exec(value);
+    if (m) return { kind: "age", dir: m[1] as "<" | ">", n: Number(m[2]) };
+  }
+  if (key === "is" && value.toLowerCase() === "retired") return { kind: "retired" };
+  if (tok === "#") return { kind: "ignored" };
+  if (tok.startsWith("#")) {
+    const rest = tok.slice(1);
+    return /^\d+$/.test(rest) ? { kind: "number", digits: rest } : { kind: "tag", value: foldText(rest) };
+  }
+  const raw = tok.replace(/"/g, "");
+  return foldText(raw) ? { kind: "word", raw } : { kind: "ignored" };
+}
+
 export function parseFindQuery(raw: string): FindQuery {
   const q: FindQuery = { words: [], numbers: [], inSeries: [], series: [], types: [], tags: [], retired: false };
   for (const tok of tokenize(raw)) {
-    const colon = tok.indexOf(":");
-    const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
-    const value = colon > 0 ? unquote(tok.slice(colon + 1)) : "";
-    // Mid-typing: `in:`, `in:"`, `age:<` — no filter, and not a word either.
-    // `<`/`>` alone is unfinished only for `age:`; elsewhere it is a value
-    // (a series keyed `<` has a chip, and `series:<` must apply it).
-    const v = value.trim();
-    if (KNOWN_KEYS.has(key) && (v === "" || (key === "age" && (v === "<" || v === ">")))) continue;
-    if (key === "in") {
-      q.inSeries.push(foldText(value.trim()));
-      continue;
+    const t = classifyToken(tok);
+    switch (t.kind) {
+      case "ignored":
+        break;
+      case "in":
+        q.inSeries.push(t.value);
+        break;
+      case "series":
+        q.series.push(t.key);
+        break;
+      case "type":
+        q.types.push(t.value);
+        break;
+      case "age":
+        if (t.dir === "<") q.ageLt = q.ageLt === undefined ? t.n : Math.min(q.ageLt, t.n);
+        else q.ageGt = q.ageGt === undefined ? t.n : Math.max(q.ageGt, t.n);
+        break;
+      case "retired":
+        q.retired = true;
+        break;
+      case "tag":
+        q.tags.push(t.value);
+        break;
+      case "number":
+        q.numbers.push(t.digits);
+        break;
+      case "word":
+        q.words.push(foldText(t.raw));
+        break;
     }
-    if (key === "series") {
-      const k = seriesMatchKey(value);
-      if (k) q.series.push(k);
-      continue;
-    }
-    if (key === "type") {
-      q.types.push(foldText(value.trim()));
-      continue;
-    }
-    if (key === "age") {
-      const m = /^([<>])(\d+)$/.exec(value);
-      if (m) {
-        const n = Number(m[2]);
-        if (m[1] === "<") q.ageLt = q.ageLt === undefined ? n : Math.min(q.ageLt, n);
-        else q.ageGt = q.ageGt === undefined ? n : Math.max(q.ageGt, n);
-        continue;
-      }
-    }
-    if (key === "is" && value.toLowerCase() === "retired") {
-      q.retired = true;
-      continue;
-    }
-    if (tok === "#") continue;
-    if (tok.startsWith("#")) {
-      const rest = tok.slice(1);
-      if (/^\d+$/.test(rest)) q.numbers.push(rest);
-      else q.tags.push(foldText(rest));
-      continue;
-    }
-    const word = foldText(tok.replace(/"/g, ""));
-    if (word) q.words.push(word);
   }
   q.numbers = [...new Set(q.numbers)];
   q.words = [...new Set(q.words)].filter((w) => !q.numbers.includes(w));
@@ -200,14 +232,13 @@ export function parseFindQuery(raw: string): FindQuery {
 }
 
 /**
- * Is this token a FILTER — `in:`, `series:`, `type:`, `age:`, `is:` (any
- * value, an empty one included) or a `#tag`? A `#<digits>` token is a number
- * word, not a filter.
+ * Is this token a FILTER — exactly when `parseFindQuery` reads it as one:
+ * `in:`, `series:`, `type:` with a value, `age:<N`/`age:>N`, `is:retired`, a
+ * `#tag`. An unfinished key (`type:`, `age:<`) is ignored, not a filter;
+ * `is:foo` and `age:soon` are words; `#<digits>` is a number word.
  */
 export function isFindFilterToken(tok: string): boolean {
-  const colon = tok.indexOf(":");
-  if (colon > 0 && KNOWN_KEYS.has(tok.slice(0, colon).toLowerCase())) return true;
-  return tok.length > 1 && tok.startsWith("#") && !/^#\d+$/.test(tok);
+  return FILTER_KINDS.has(classifyToken(tok).kind);
 }
 
 /** Does the query narrow by any filter token? The palette's Everywhere
@@ -217,17 +248,18 @@ export function hasFindFilters(raw: string): boolean {
 }
 
 /**
- * The query's free tokens in their TYPED spelling (not folded), filter tokens
- * dropped and `"` removed: `text` keeps `#12` (the palette's hard number),
- * `remote` is its digits `12` — what huginn and claude-usage are sent.
+ * The query's free WORDS in their typed spelling (not folded), `"` removed:
+ * `text` keeps `#12` (the palette's hard number), `remote` is its digits `12`
+ * — what huginn and claude-usage are sent. A quoted phrase after an unknown
+ * key (`foo:"a b"`) is one word to the ranker but yields one entry per word
+ * here, so a cap on entries is a cap on words.
  */
 export function findFreeTokens(raw: string): Array<{ text: string; remote: string }> {
   const out: Array<{ text: string; remote: string }> = [];
   for (const tok of tokenize(raw)) {
-    if (tok === "#" || isFindFilterToken(tok)) continue;
-    const text = tok.replace(/"/g, "");
-    const remote = /^#\d+$/.test(text) ? text.slice(1) : text;
-    if (remote) out.push({ text, remote });
+    const t = classifyToken(tok);
+    if (t.kind === "number") out.push({ text: `#${t.digits}`, remote: t.digits });
+    else if (t.kind === "word") for (const w of t.raw.split(/\s+/)) if (w) out.push({ text: w, remote: w });
   }
   return out;
 }

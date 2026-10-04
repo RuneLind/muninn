@@ -241,6 +241,9 @@ export const E2E_PORTS = {
   // Not bound by anything: the nais reader's `KNOWLEDGE_API_URL` points here so
   // the provenance/graph huginn legs meet a closed port, never a live huginn.
   "wiki-nais-read/dead-huginn": 8795,
+  // Not bound by anything: the same spec's `CLAUDE_USAGE_URL`, so a leg that
+  // should not exist on nais meets a closed port, never a live ledger.
+  "wiki-nais-read/dead-ledger": 8791,
   // ⇪ Felles: one muninn, an allowlisted wiki and one that is not.
   "wiki-felles-publish": 3100,
   // The find palette: one muninn over a temp wiki.

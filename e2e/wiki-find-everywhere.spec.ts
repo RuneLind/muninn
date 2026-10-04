@@ -18,6 +18,11 @@
  *     still loading (or failed) leaves Everywhere as the list.
  *  4. **Degrade and filters.** A dead claude-usage leaves the section working
  *     and names the leg; a filter token turns the section off and says so.
+ *  5. **Repaints keep identity (fix round 1).** A listing that lands or fails
+ *     under a selected or focused Everywhere row keeps that row selected and
+ *     focused; a composition keeps the last answer until a fetch is
+ *     scheduled; a filter inside the debounce cancels the fetch; and
+ *     `aria-activedescendant` follows the selection on every paint.
  *
  * Fixture: two temp wikis registered through `WIKI_EXTRA` (the open one with a
  * huginn collection), `WIKI_DIR` pointing at the open one's root (so bare
@@ -42,6 +47,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
+import { FIND_EVERY_DEBOUNCE_MS } from "../src/dashboard/views/components/wiki-find-palette.ts";
 
 const PORT = e2ePort("wiki-find-everywhere");
 const HUGINN_PORT = e2ePort("wiki-find-everywhere/huginn");
@@ -67,6 +73,9 @@ const PAGES: Array<[string, string]> = [
   [OPEN, md("Open plan", [], "Nothing to see.")],
   ["plans/bucket-notes.mdx", md("Felles bucket notes", [`sessions: [claude-code:${S_SHARED}]`], "x")],
   ["plans/quiet.mdx", md("Quiet notes", [`sessions: [${S_SHARED}]`], "x")],
+  // A partial text match and no head: fused below the session heads, but a
+  // local row once the listing lands — so the rows after it shift index.
+  ["plans/kode-samling.mdx", md("Kode samling", [], "x")],
 ];
 /** The other wiki: the target says neither "felles" nor "kode" anywhere — only
  *  the session that wrote it does. */
@@ -412,4 +421,139 @@ test("an IME composition fetches nothing until compositionend", async ({ page })
   });
   await expect(target(page)).toHaveCount(1);
   expect(ledger.searches).toEqual(["felles kode"]);
+});
+
+// ── Fix round 1 ─────────────────────────────────────────────────────────────
+
+/** Hold the listing until `release()`; `fail` aborts it instead (the boot
+ *  error path) once released. */
+async function holdListing(page: Page, fail = false): Promise<() => void> {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route(/\/api\/wiki\/pages\?/, async (route) => {
+    await gate;
+    if (fail) await route.abort();
+    else await route.continue();
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`, { waitUntil: "domcontentloaded" });
+  return release;
+}
+
+/** Tab from the input until `row` has focus (rows are the only tab stops
+ *  while the listing loads). */
+async function tabTo(page: Page, row: ReturnType<typeof target>): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    if (await row.evaluate((el) => el === document.activeElement)) return;
+    await page.keyboard.press("Tab");
+  }
+  await expect(row).toBeFocused();
+}
+
+test("a listing that lands keeps the arrowed Everywhere row selected, and Enter opens it", async ({ page }) => {
+  const release = await holdListing(page);
+  await find(page, "felles kode");
+  await expect(target(page)).toHaveCount(1);
+  const index = Number(await target(page).getAttribute("data-find-row"));
+  for (let i = 0; i < index; i++) await page.keyboard.press("ArrowDown");
+  await expect(target(page)).toHaveAttribute("aria-selected", "true");
+  release();
+  // "Kode samling" is now a local row ahead of it, so the target's index moved.
+  await expect(localRows(page).filter({ hasText: "Kode samling" })).toHaveCount(1);
+  expect(Number(await target(page).getAttribute("data-find-row"))).toBe(index + 1);
+  await expect(target(page)).toHaveAttribute("aria-selected", "true");
+  await expect(input(page)).toHaveAttribute("aria-activedescendant", (await target(page).getAttribute("id"))!);
+  await expect(page.locator("#wikiFindList .wiki-find-row.active")).toHaveCount(1);
+  await page.keyboard.press("Enter");
+  await expect(h1(page)).toHaveText("Shared wiki for the team");
+});
+
+test("a listing that lands keeps focus on the Tab-focused Everywhere row", async ({ page }) => {
+  const release = await holdListing(page);
+  await find(page, "felles kode");
+  await expect(target(page)).toHaveCount(1);
+  await tabTo(page, target(page));
+  release();
+  await expect(localRows(page).filter({ hasText: "Felles bucket notes" })).toHaveCount(1);
+  await expect(target(page)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(h1(page)).toHaveText("Shared wiki for the team");
+});
+
+test("a listing that fails keeps focus on the Tab-focused Everywhere row", async ({ page }) => {
+  const release = await holdListing(page, true);
+  await find(page, "felles kode");
+  await expect(target(page)).toHaveCount(1);
+  await tabTo(page, target(page));
+  release();
+  await expect(page.locator("#wikiFindList .wiki-find-empty")).toHaveText("Couldn't load pages.");
+  await expect(target(page)).toBeFocused();
+});
+
+test("an IME composition after an answer keeps that answer's rows until a fetch is scheduled", async ({ page }) => {
+  await openReader(page);
+  await find(page, "felles kode");
+  await expect(target(page)).toHaveCount(1);
+  await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    box.value = "felles kode bøtte";
+    box.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+  });
+  // Past the local re-rank and the Everywhere debounce: nothing was scheduled.
+  await page.waitForTimeout(FIND_EVERY_DEBOUNCE_MS * 2);
+  await expect(every(page)).not.toContainText("Searching everywhere…");
+  await expect(target(page)).toHaveCount(1);
+  expect(ledger.searches).toEqual(["felles kode"]);
+  await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "bøtte" }));
+  });
+  await expect.poll(() => ledger.searches).toEqual(["felles kode", "felles kode bøtte"]);
+});
+
+test("a filter typed inside the debounce cancels the fetch, and no request carries a filter", async ({ page }) => {
+  const sent: string[] = [];
+  page.on("request", (req) => {
+    const u = new URL(req.url());
+    if (u.pathname === "/api/wiki/find-everywhere") sent.push(u.searchParams.get("q") ?? "");
+  });
+  await openReader(page);
+  await page.locator("body").press("/");
+  await expect(palette(page)).toBeVisible();
+  // Both keystrokes inside one task: the second lands inside the first's debounce.
+  await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    for (const v of ["felles kode", "felles kode type:plan"]) {
+      box.value = v;
+      box.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    }
+  });
+  await page.waitForTimeout(FIND_EVERY_DEBOUNCE_MS * 3);
+  expect(sent).toEqual([]);
+  await expect(every(page).locator("[data-find-filtered]")).toBeVisible();
+  // Dropping the filter fetches the free text, once.
+  await input(page).fill("felles kode");
+  await expect(target(page)).toHaveCount(1);
+  expect(sent).toEqual(["felles kode"]);
+});
+
+test("aria-activedescendant follows the selection on a section-only repaint", async ({ page }) => {
+  ledger.slowFor = { zzqq: 3_000 };
+  await holdListing(page);
+  await find(page, "felles kode");
+  await expect(everyRows(page)).toHaveCount(4);
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await expect(input(page)).toHaveAttribute("aria-activedescendant", "wikiFindRow-2");
+  // A new free text: the section repaints as pending before any re-rank runs.
+  const state = await page.evaluate(() => {
+    const box = document.getElementById("wikiFindInput") as HTMLInputElement;
+    box.value = "zzqq";
+    box.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    return {
+      desc: box.getAttribute("aria-activedescendant"),
+      rows: document.querySelectorAll("#wikiFindList .wiki-find-row").length,
+    };
+  });
+  expect(state).toEqual({ desc: null, rows: 0 });
 });

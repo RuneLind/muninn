@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { freeText, hasFindFilters } from "./wiki-find.ts";
+import { findFreeTokens, freeText, hasFindFilters, parseFindQuery } from "./wiki-find.ts";
 import {
   FIND_EVERY_FILTERED_NOTE,
   everywhereHref,
@@ -33,7 +33,7 @@ function response(results: FindEverywhereResult[], over: Partial<FindEverywhereR
     results,
     sources: {
       query: { truncated: false },
-      indexes: { ms: 1, skipped: [] },
+      indexes: { ms: 1, skipped: [], stale: [] },
       text: { status: "ok", ms: 1 },
       huginn: { status: "ok", ms: 1 },
       sessions: { status: "ok", ms: 1 },
@@ -67,14 +67,37 @@ describe("everywherePlan — when the section fetches, and on what key", () => {
     expect(key('felles "wiki"')).toBe("felles wiki");
   });
 
-  test("any filter token suppresses the section, an unfinished one included", () => {
-    for (const q of ["felles type:plan", "felles in:x", "felles series:a", "felles age:<14", "felles #tag", "felles is:retired", "felles type:"]) {
+  test("any filter token suppresses the section", () => {
+    for (const q of ["felles type:plan", "felles in:x", "felles series:a", "felles age:<14", "felles age:>3", "felles #tag", "felles is:retired"]) {
       expect(hasFindFilters(q)).toBe(true);
       expect(everywherePlan(q, true)).toEqual({ kind: "filtered" });
     }
     // A number word and an unknown key are not filters.
     expect(everywherePlan("#12 review", true)).toEqual({ kind: "fetch", key: "12 review" });
     expect(everywherePlan("foo:bar baz", true)).toEqual({ kind: "fetch", key: "foo:bar baz" });
+  });
+
+  test("a token is a filter exactly when the ranker reads it as one", () => {
+    // The ranker reads these as WORDS, so the section must send them.
+    for (const [q, key] of [
+      ["felles is:foo", "felles is:foo"],
+      ["felles age:soon", "felles age:soon"],
+      ["felles age:14", "felles age:14"],
+    ] as const) {
+      expect(hasFindFilters(q)).toBe(false);
+      expect(parseFindQuery(q).words).toContain(key.split(" ")[1]!.toLowerCase());
+      expect(everywherePlan(q, true)).toEqual({ kind: "fetch", key });
+    }
+    // An unfinished key narrows nothing in the ranker and is no filter either.
+    for (const q of ["felles type:", "felles in:", "felles age:<", 'felles series:""']) {
+      expect(hasFindFilters(q)).toBe(false);
+      expect(everywherePlan(q, true)).toEqual({ kind: "fetch", key: "felles" });
+    }
+  });
+
+  test("a quoted phrase after an unknown key counts as its words", () => {
+    expect(findFreeTokens('foo:"a b c" d').map((t) => t.remote)).toEqual(["foo:a", "b", "c", "d"]);
+    expect(freeText('foo:"a b"')).toBe("foo:a b");
   });
 
   test("short free text, counted in code points, and an unserved route are off", () => {
@@ -89,7 +112,10 @@ describe("everywherePlan — when the section fetches, and on what key", () => {
     expect(everywhereView({ kind: "off" }, done)).toBeNull();
     expect(everywhereView({ kind: "filtered" }, done)).toEqual({ kind: "filtered" });
     expect(everywhereView({ kind: "fetch", key: "felles" }, done)).toEqual({ kind: "done", data: done.data });
-    expect(everywhereView({ kind: "fetch", key: "other" }, done)).toEqual({ kind: "pending" });
+    // A fetch scheduled for the new key shows as pending...
+    expect(everywhereView({ kind: "fetch", key: "other" }, { key: "other", status: "pending" })).toEqual({ kind: "pending" });
+    // ...but none scheduled yet (an open IME composition) keeps the last answer.
+    expect(everywhereView({ kind: "fetch", key: "other" }, done)).toEqual({ kind: "done", data: done.data });
     expect(everywhereView({ kind: "fetch", key: "felles" }, { key: "felles", status: "failed" })).toEqual({ kind: "failed" });
     expect(everywhereView({ kind: "fetch", key: "felles" }, null)).toBeNull();
   });
@@ -191,11 +217,11 @@ describe("findEverywhereHtml", () => {
       text: { status: "error", ms: 1, error: "failed" },
       huginn: { status: "error", ms: 3000, error: "timeout" },
       sessions: { status: "error", ms: 9, error: "HTTP 503" },
-      indexes: { ms: 2500, skipped: [{ wiki: "mimir", error: "timeout" }, { wiki: "kode", error: "failed" }] },
+      indexes: { ms: 2500, skipped: [{ wiki: "mimir", error: "timeout" }, { wiki: "kode", error: "failed" }], stale: [{ wiki: "jarvis", error: "timeout" }] },
       query: { truncated: true },
     });
     expect(findDegradeNote(data)).toBe(
-      "Partial results — text search: failed · huginn: timeout · session search: HTTP 503 · mimir index: timeout · kode index: failed · query shortened.",
+      "Partial results — text search: failed · huginn: timeout · session search: HTTP 503 · mimir index: timeout · kode index: failed · jarvis index: stale · query shortened.",
     );
     expect(findEverywhereHtml({ kind: "done", data }, [], 0, 0)).toContain("data-find-degrade");
     const unconf = response([], {
@@ -204,5 +230,11 @@ describe("findEverywhereHtml", () => {
     });
     expect(findDegradeNote(unconf)).toBe("Partial results — huginn: no wiki collections · session search: CLAUDE_USAGE_URL unset.");
     expect(findDegradeNote(response([]))).toBe("");
+    // A leg skipped for a reason is named; a too-short query is not news.
+    const skipped = response([], {
+      huginn: { status: "skipped", ms: 0, error: "no wiki index loaded" },
+      sessions: { status: "skipped", ms: 0, error: "query too short" },
+    });
+    expect(findDegradeNote(skipped)).toBe("Partial results — huginn: no wiki index loaded.");
   });
 });

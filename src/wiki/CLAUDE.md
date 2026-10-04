@@ -2098,10 +2098,14 @@ when `wikiToolsFlag()`), admin by the zone model's default-deny like
 `SIDE_EFFECTING_GETS` as an amplifier (a cross-site GET is 403 before any
 upstream call). The query is capped first: `QUERY_MAX_CHARS` (200) code points,
 then `QUERY_MAX_WORDS` (12) free words; filter tokens are dropped
-(`findFreeTokens`), and `sources.query.truncated` says when a cap cut it. Free
-text under 2 code points answers empty without asking any leg. The text leg
-gets the free tokens as typed, so `#12` stays a hard number there; the remote
-legs get `freeText` — the same tokens with `#12` sent as `12`.
+(`findFreeTokens`, which reads the ranker's own classification: a token is a
+filter exactly when `parseFindQuery` reads it as one, and a quoted phrase
+after an unknown key counts as its words), and `sources.query.truncated` says
+when a cap cut it. The text leg gets the free tokens as typed, so `#12` stays
+a hard number there; the remote legs get `freeText` — the same tokens with
+`#12` sent as `12`. Text under 2 code points answers empty with every leg
+`skipped` (`query too short`); the check reads the TEXT form, so `#5` still
+runs the text leg while the remote legs skip its one-digit remote form.
 - **text** — `rankFind` over each wiki's pages with every palette rule,
   merged by (words hit, score), top 30.
 - **huginn** — ONE `/api/search` over the union of the loaded wikis'
@@ -2110,14 +2114,24 @@ legs get `freeText` — the same tokens with `#12` sent as `12`.
   search took 5–12 s, `brief` 50–210 ms with near-identical ranks. A hit is a
   page when a wiki holding its collection resolves its `id` as a relPath, and
   the FIRST wiki that resolves it decides: a page that wiki hides is dropped,
-  never looked up again in another wiki at the same relPath. No wiki has
-  collections ⇒ the leg is `unconfigured` (`no wiki collections`).
-- **sessions** — claude-usage `/api/search?limit=25` (2 s budget), joined on
-  the bare id onto every page whose `sessions:` names the session
+  never looked up again in another wiki at the same relPath. No registered
+  wiki has collections ⇒ the leg is `unconfigured` (`no wiki collections`);
+  some do, but none of their indexes loaded ⇒ `skipped`
+  (`no wiki index loaded`).
+- **sessions** — claude-usage `/api/search?limit=25`, read through
+  `claudeUsageJson` (body capped at 2 MB, query string built by
+  `URLSearchParams`, so a lone surrogate cannot throw) under a **3 s budget**,
+  huginn's. claude-usage runs its ingest tick in its HTTP process and stalls:
+  measured 2026-10-04, p50 70 ms, p95 215 ms, ~3 % over 2 s, max 6.8 s; at
+  2 s (its own busy_timeout) a named target fell from #1 to #11 during a stall.
+  Joined on the bare id onto every page whose `sessions:` names the session
   (`sessionPages`, one inverted index per index build). Page score =
-  Σ 1/(60 + i) over its sessions' 0-based ranks. The `/api/sessions-by-id`
-  title lookup runs after it under its own 400 ms budget and is optional, so it
-  can never spend the search's budget. This is the leg that finds a page by the
+  Σ 1/(60 + i) over the 0-based ranks of WELL-FORMED rows only (a malformed
+  row shifts no later rank and no head gate). The `/api/sessions-by-id` title
+  lookup runs after it under its own 400 ms budget and is optional, so it can
+  never spend the search's budget: the leg's `ms` is the search alone, and
+  `sources.sessions.titles` (`ok`, `timeout`, `failed`, `skipped`) reports the
+  lookup. This is the leg that finds a page by the
   words of the sessions that WROTE it: "felles melosys-kode-wiki" never appears
   in `plans/melosys-muninn-shared-wiki.mdx`. `CLAUDE_USAGE_URL` unset ⇒
   `unconfigured`.
@@ -2125,15 +2139,32 @@ legs get `freeText` — the same tokens with `#12` sent as `12`.
 Both remote legs drop what the palette's pool drops (`inFindPool`): retired and
 bookkeeping pages and attachment children (paired by stem, suffix or link, e.g.
 a `plans/*-prototype.html`); the text leg has the pool already. Huginn
-snippets are reduced to plain text (`plainSnippet`: the `tags: …` / heading
-breadcrumb, MDX/HTML tags, `[[target|label]]` and `[label](url)` to the label,
-emphasis markers) before the ~200-character clip; session snippets carry their
+snippets are reduced to plain text (`plainSnippet`) before the ~200-character
+clip. huginn cuts a chunk mid-markup, so every construct may arrive
+unterminated: the `tags: …` / heading breadcrumb, fenced code (an unclosed
+fence to the end), `<!-- -->`, MDX/HTML tags (attributes may carry `>` inside
+quotes or braces; a tag the clip cut off ends the snippet) and `{…}`
+expressions go; headings, bullets, checkboxes, table rows (cells joined by
+` · `), blockquotes, `> [!type]` markers, inline code, `[[target|label]]`,
+`[label](url)` and images flatten to their text, an unclosed `[[` or `[` keeps
+its text, and five entities are decoded. A `<` opens a tag only before `/`,
+`!`, or a letter with no word character in front, so `x<y and z>w` stays
+prose; `__init__` stays (emphasis is stripped at word boundaries). Session snippets carry their
 match spans as offsets (`marks`), not markup, so the client escapes the text
 and wraps the spans itself.
 
 **Bounds, in order.** The wiki indexes load FIRST, all in parallel under one
-`INDEX_TIMEOUT_MS` (2.5 s); a wiki whose index fails or is late is skipped and
-named in `sources.indexes.skipped`. Only then do the legs start, each on its
+`INDEX_TIMEOUT_MS` (2.5 s). The route lists a root once (`uniqueWikiRoots`,
+first entry wins — `findSelfWikiName`'s rule), so an aliased root is not
+searched twice. A wiki that misses the bound answers from its **last-good
+index** (kept per root in `find-everywhere.ts`) and is named in
+`sources.indexes.stale`: after the store's 5-minute TTL every expired wiki
+rebuilds at once (measured 1.85–1.97 s for 5 wikis), so a modest slowdown
+would otherwise empty the section. The late rebuild still lands as the next
+request's last-good index; nothing waits on it past the bound. A wiki with no
+last-good index, or whose load fails, is skipped and named in
+`sources.indexes.skipped`. A request aborted during the load runs no leg and
+reports all three `aborted`. Only then do the legs start, each on its
 own timer combined (`AbortSignal.any`) with the request's own signal, so no
 leg's `ms` includes the index wait, and a palette fetch the reader abandoned
 (`c.req.raw.signal`) cancels the huginn and claude-usage calls behind it. Each
@@ -2153,7 +2184,18 @@ is no head: a long `status_note` hits `which`/`from`/`count` by substring, and
 one such plan was text #1 for two unrelated queries. A sessions #1 is a head
 only when its session is in claude-usage's top `SESSIONS_HEAD_TOP` (5):
 session search ranks loosely, and a page carried by the 20th session is a
-vote, not an answer. Huginn ties on its `relevance`.
+vote, not an answer. Huginn ties on its `relevance` — and a huginn #1 (or a
+page tied with it) is a head only with **lexical evidence**: at least one long
+query word (≥ 3 folded characters, a substring) or query number (whole, not
+inside a longer number) in its title, relPath or snippet. `brief=true`
+relevance is rank-derived, so nonsense ("qzxv wplkj frobnicate", "🧭🧭") got a
+confident #1, and "#639" made a semantic-only page a head; without evidence the
+hit only votes. Ties in every sort break on the key by code unit, never
+`localeCompare` (ICU ignores `\u0000`, the key's separator).
+
+A failed leg is logged: the first sighting of a (leg, label, host) warns,
+repeats log `info`, an `aborted` leg logs nothing, and no line carries the
+query (`logLegFailures`).
 
 **Egress.** The reader's typed free text (capped as above) goes to
 `knowledgeApiUrl` and `claudeUsageUrl`, and the session ids already stamped on
@@ -2166,26 +2208,43 @@ Readonly).
 
 **The palette's Everywhere section** (`findEverywhereHtml`). `everywherePlan`
 decides per query: off (the route is not served, or free text under 3 code
-points), `filtered` (any filter token — `in:`, `series:`, `type:`, `age:`,
-`is:`, a `#tag` — means "narrow this wiki": no fetch, and one quiet line says
-the section is off), or a fetch KEYED on `freeText`. An edit that keeps the
-free text (a trailing space, quotes, a filter token, a chip) neither aborts
-nor refetches nor blanks the rows; only the dedupe re-runs. A new key fetches
-250 ms after the keystroke, aborts the fetch it replaces and drops any answer
-for a key that is no longer the box's. During an IME composition nothing is
-fetched; `compositionend` fetches. A listing still loading (or failed) leaves
-Everywhere as the list, its first row active. The section lists fused rows not
+points), `filtered` (a token the ranker reads as a filter — `in:`, `series:`
+and `type:` with a value, `age:<N`/`age:>N`, `is:retired`, a `#tag` — means
+"narrow this wiki": no fetch, and one quiet line says the section is off; an
+unfinished `type:` is no filter, and `is:foo` is a word), or a fetch KEYED on
+`freeText`. An edit that keeps the free text (a trailing space, quotes, a
+filter token, a chip) neither aborts nor refetches nor blanks the rows; only
+the dedupe re-runs. A new key fetches 250 ms after the keystroke, aborts the
+fetch it replaces and drops any answer for a key that is no longer the box's.
+A filter typed inside that debounce cancels the fetch and keeps the last
+answer; the request carries the free words only (filters out, `#12` kept),
+never the box's raw text. During an IME composition nothing is fetched and the
+last answer's rows stay on screen; `compositionend` fetches. A listing still
+loading (or failed) leaves Everywhere as the list, its first row active; when
+the listing lands or fails, the selected row and a focused row follow their
+IDENTITY (wiki + relPath) to wherever the repaint put them, so focus never
+drops to `<body>` and Enter never opens a different row, and
+`aria-activedescendant` is re-synced on every paint. The section lists fused rows not
 already shown locally (wiki label, reason chips `text #n`, `huginn #n`,
 `session <8-char id> #n` with the session title as tooltip, `leg #1` on a
 head), and gives a LOCAL row the same chips in place. "This wiki" is the
 REGISTRY name the page injects as `__WIKI_FIND_SELF__` (`findSelfWikiName`):
 under the `WIKI_DIR` override the page's own wiki name is "", while its root
 may still be a registered wiki whose rows must dedupe and open in place. The
-degrade line names every failed or unconfigured leg with its label, every
-skipped index and a cut query. The section paints alone — the local rows are
-never re-rendered when it lands — so focus and the selection stay put (the
-#639 focus finding). The arrow keys walk both sections; an Everywhere row of
-this wiki opens in place, another wiki's loads its reader URL. Acceptance:
+degrade line names every failed, unconfigured or skipped leg with its label
+(a too-short query is not news), every skipped or stale index and a cut
+query. The section paints alone — the local rows are never re-rendered when
+it lands — so focus and the selection stay put (the #639 focus finding). The
+arrow keys walk both sections; an Everywhere row of this wiki opens in place,
+another wiki's loads its reader URL.
+
+Two known limitations. **A session that searched for X makes its stamped page
+match X**: the sessions leg joins on every session a page names, including
+the session that went looking for the page, so the eval that measures this
+leg excludes the campaign's own sessions. And **`e2eEnv()` does not blank
+`KNOWLEDGE_API_URL`**: a spec that boots its own muninn points it at a stub or
+a closed port, but the shared 3011 config server defaults to
+`localhost:8321`, a live huginn on a developer machine. Acceptance:
 `src/wiki/find-everywhere.test.ts`,
 `views/components/wiki-find-everywhere-view.test.ts`,
 `e2e/wiki-find-everywhere.spec.ts` and the nais case in
