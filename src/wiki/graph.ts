@@ -21,16 +21,18 @@
  */
 
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
-import { echoQuery, enrichSessions, parsePrRef, parseSessionRef, type ProvenanceMerge } from "./provenance.ts";
-import { dedupeSessionRefs, type ProvenanceContext } from "./provenance-service.ts";
+import { echoQuery, enrichSessions, parsePrRef, type ProvenanceMerge } from "./provenance.ts";
+import type { ProvenanceContext } from "./provenance-service.ts";
+import { bareId, isSessionIdShape, stampedSessionRefs } from "./session-refs.ts";
 import {
   fetchMergesForSessions,
   fetchSessionsById,
-  isSessionIdShape,
   type MergeLedgerResult,
   type SessionLedgerResult,
 } from "./session-ledger.ts";
-import { isMetaStem, pageStemOf, pageTimeMs } from "../dashboard/views/components/wiki-filter.ts";
+import { pageTimeMs } from "../dashboard/views/components/wiki-filter.ts";
+// A bookkeeping page (`index`, `log`, `CLAUDE`) is never a graph node.
+import { isBookkeeping } from "./strength.ts";
 import { trackerAdapter } from "./trackers/index.ts";
 import { countingPageCount, coveringPlans, isPlanPage, issueKeyId } from "./trackers/rows.ts";
 import { relationsCount, type IssueKeyEntry, type TrackerConfig } from "./trackers/types.ts";
@@ -83,19 +85,11 @@ export function graphLedgerPort(
 
 type GraphResult = { ok: true; payload: GraphPayload } | { ok: false; status: 400 | 404; error: string };
 
-const bareId = (ref: string): string => parseSessionRef(ref).id;
-
 const issueId = (tracker: string, key: string) => `issue:${issueKeyId(tracker, key)}`;
 const pageId = (relPath: string) => `page:${relPath}`;
 const sessionId = (bare: string) => `session:${bare}`;
 const prId = (ref: string) => `pr:${ref.toLowerCase()}`;
 
-/** A bookkeeping page (`index`, `log`, `CLAUDE`): never a graph node. */
-const isBookkeeping = (page: { relPath: string }): boolean => isMetaStem(pageStemOf(page.relPath));
-
-/** A page's stamped session refs that can be session ids at all. */
-const stampedSessionRefs = (page: WikiPageMeta): string[] =>
-  dedupeSessionRefs(page.sessions ?? []).filter((ref) => isSessionIdShape(bareId(ref)));
 
 const GITHUB_PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/pull\/([0-9]+)(?:[/?#].*)?$/;
 const PR_COORDINATE = /^[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)#([0-9]+)$/;
@@ -179,7 +173,7 @@ export async function buildGraph(
   const pagesBySession = new Map<string, WikiPageMeta[]>();
   const pagesByPr = new Map<string, WikiPageMeta[]>();
   for (const page of index.pages) {
-    if (isBookkeeping(page)) continue;
+    if (isBookkeeping(page.relPath)) continue;
     if (lanes.has("session")) {
       for (const ref of stampedSessionRefs(page)) {
         const id = bareId(ref);
@@ -295,7 +289,7 @@ export async function buildGraph(
       for (const p of entry?.pages ?? []) {
         if (!relationsCount(p.relations)) continue;
         const page = index.resolveRelPath(p.relPath);
-        if (!page || isBookkeeping(page)) continue;
+        if (!page || isBookkeeping(page.relPath)) continue;
         out.push({
           id: pageId(page.relPath),
           lane: "page",
@@ -387,7 +381,7 @@ export async function buildGraph(
   if (query.scope === "page") {
     const page = index.resolveRelPath(query.root);
     if (!page) return { ok: false, status: 404, error: `no wiki page for relPath "${echoQuery(query.root)}"` };
-    if (isBookkeeping(page)) {
+    if (isBookkeeping(page.relPath)) {
       return { ok: false, status: 404, error: `"${echoQuery(page.relPath)}" is a bookkeeping page, which the graph never draws` };
     }
     rootEcho = page.relPath;
@@ -408,7 +402,7 @@ export async function buildGraph(
     roots.push(issueNode(parsed.tracker, key));
   } else if (query.scope === "series") {
     const members = index.pages
-      .filter((p) => p.series === query.root && !isBookkeeping(p))
+      .filter((p) => p.series === query.root && !isBookkeeping(p.relPath))
       .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
     if (!members.length) return { ok: false, status: 404, error: `no series "${echoQuery(query.root)}" in this wiki` };
     for (const p of members) roots.push(pageNode(p));
@@ -495,7 +489,7 @@ export async function buildGraph(
   let keylessTruncated = false;
   if (query.keyless) {
     const keyless = index.pages
-      .filter((p) => !isBookkeeping(p) && !(p.issues ?? []).some((r) => configOf.has(r.tracker) && relationsCount(r.relations)))
+      .filter((p) => !isBookkeeping(p.relPath) && !(p.issues ?? []).some((r) => configOf.has(r.tracker) && relationsCount(r.relations)))
       .map((p) => ({ ...pageNode(p), hop: 0 }) as GraphPageNode)
       .sort((a, b) => b.pageTimeMs - a.pageTimeMs || (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
     keylessTruncated = keyless.length > GRAPH_NODES_MAX;
@@ -552,7 +546,7 @@ export function issueAggregates(
   for (const p of entry?.pages ?? []) {
     if (!relationsCount(p.relations)) continue;
     const page = index.resolveRelPath(p.relPath);
-    if (!page || isBookkeeping(page)) continue;
+    if (!page || isBookkeeping(page.relPath)) continue;
     if (p.relations.includes("stamped")) stampedCount++;
     lastActivityMs = Math.max(lastActivityMs, pageTimeMs(page));
     for (const ref of page.prRefs ?? []) if (!prs.has(ref.toLowerCase())) prs.set(ref.toLowerCase(), ref);

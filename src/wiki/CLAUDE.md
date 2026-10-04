@@ -1518,8 +1518,8 @@ carry a machine-readable `fix` the gardener turns into review-gate rows.
 | `series-unnamed` (8.2) | a cluster of linked pages that declares no `series:` at all |
 | `series-inconsistent` (8.3) | a series whose declaration is half-written |
 
-**The four cuts are REUSED, never re-declared** — `isBookkeeping` (exported from
-`related.ts` for this), `RELATED_HUB_BACKLINKS` (25), `RELATED_DIGEST_PRS` (15)
+**The four cuts are REUSED, never re-declared** — `isBookkeeping` (declared in
+`strength.ts`, re-exported from `related.ts` for this), `RELATED_HUB_BACKLINKS` (25), `RELATED_DIGEST_PRS` (15)
 and `RELATED_SHARED_PRS_MIN` (2), with the measurements in
 `related-constants.ts`. Hubs and bookkeeping pages are cut from BOTH ends of
 every pair, exactly as `computeRelated` cuts the open page: each says "this page
@@ -1678,8 +1678,13 @@ because it ANSWERS a question — "what else is this piece of work?" — while
 `Linked from` and `Links to` under it are the raw lists it is derived from.
 
 ```
-related = cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never transitive
+related = cites ∪ cited-by ∪ shares ≥2 PR refs ∪ shares a session, minus hubs, never transitive
 ```
+
+Membership is ONE neighbour rule, `neighbours()` in `strength.ts`, which the
+find palette's near map reads too (below). `computeRelated` turns each
+neighbour into a why line and orders the rows newest first; the score the rule
+also computes does not reach the row yet.
 
 Deterministic: no model, no embedding, and it changes only when a page's text
 changes. `Similar` in the same panel is the semantic answer; this one is the
@@ -1773,10 +1778,16 @@ true of the page you have open as of a candidate, so a bookkeeping or hub page
 gets no block at all. Measured on the 547-page clone with the first two applied
 to candidates only, opening `index.md` answered **340** rows (+220 KB on one
 response), `plans/index.md` 246, `log.md` 189, and `flows/how-we-build.mdx` — cut
-as a candidate at 27 backlinks — 36. Symmetric, the largest block on that corpus
-is **33** rows (`overview.md`), which is the link graph's own bound: there is no
-`RELATED_MAX` cap, because a cap drops rows from a page that really does have
-that many neighbours.
+as a candidate at 27 backlinks — 36. Symmetric, the largest block was **33**
+rows (`overview.md`) on the 547-page clone, 2026-09-20 — a past measurement of
+the link graph's own bound; live mimir on 2026-10-04 (585 pages) gave 58
+(`archive/mimir/2026-09-27-plan-backlog-triage.mdx`). There is no `RELATED_MAX` cap,
+because a cap drops rows from a page that really does have that many
+neighbours. A FOURTH cut arrived with the session signal: a session stamped on
+more than `STRENGTH_SESSION_DIGEST` (12) pages is a sweep and pairs nothing (see
+"The neighbour rule and find" below). 12 is a forward-looking guard, not a
+measurement: on 2026-10-04 no session sat on more than 3 mimir pages; revisit
+after the provenance backfill.
 
 - **Hubs**: a candidate with more than `RELATED_HUB_BACKLINKS` (25) backlinks is
   dropped, from EVERY source. A page cited by the whole wiki is not related work
@@ -1817,11 +1828,15 @@ disagree. `seriesDateSignal` takes a structural `PageDateFields` for that reason
 the server's `WikiPageMeta` satisfies it as well as the client's `WikiListing`.
 
 **The why line joins its reasons with ` · `** in a fixed source order —
-`cites this page`, `cited by this page`, then
-`shares <ref>, <ref>`. The shares reason names the first two shared refs in the
+`cites this page`, `cited by this page`, `shares <ref>, <ref>`, then
+`shares session <ref>`. The shares reason names the first two shared refs in the
 OPEN page's own `prRefs` order, in the full `RuneLind/<repo>#N` spelling: the
 reader pastes that into a PR search, and a display form the ledger does not use
-is one more spelling to reconcile.
+is one more spelling to reconcile. The session reason names at most two shared
+sessions in the OPEN page's own deduplicated spelling (a bare ref is replaced by
+its prefixed twin, whitespace trimmed), and the view wraps each ref in a
+`<span class="wiki-why-sess">` so CSS can shorten it while the copied text stays
+whole.
 
 Series membership changes nothing here. A series member is an ordinary
 candidate — the block is about links, and the rail already groups the series.
@@ -1879,6 +1894,88 @@ value — which is also why the import catches no drift by itself (measured:
 25 → 10 and 25 → 30 both leave the spec green). The spec PINS each value
 instead, one `toBe` per constant: a threshold is a measurement, and moving it
 means re-measuring on the live wiki and moving the pin in the same edit.
+
+## The neighbour rule and find (`strength.ts`, `session-refs.ts`, the `/` palette)
+
+**One rule, two readers.** `neighbours(index, relPath)` answers the pages one
+hop from a page, each with a score and the signals that put it there;
+`computeRelated` (Related work) and `nearScores` (find) both call it.
+
+| Signal | Counts when | Weight |
+|---|---|---|
+| Link | either direction | 1.0 one way, 1.6 both ways |
+| Shared PR refs | ≥ `RELATED_SHARED_PRS_MIN` (2), both ends ≤ `RELATED_DIGEST_PRS` (15) refs | 0.6 per ref, max 1.8 |
+| Shared stamped session | ≥ 1, the session on ≤ `STRENGTH_SESSION_DIGEST` (12) pages | 1.2 per session, max 2.4 |
+
+A pair is a neighbour iff a signal counts, so every neighbour scores ≥ 1.0;
+`STRENGTH_MAX` (5.8) is derived from the three ceilings in
+`related-constants.ts`. Cuts and their sides: bookkeeping and hub on both ends
+(an open page that is either gets nothing), the PR digest on both ends of the
+PR signal, the session digest on the session (counted over every index page
+stamping it), culled and the open page's own attachments on the candidate only.
+Sessions are keyed on the bare id (`claude-code:<id>` and `<id>` pair),
+deduplicated per page and shape-checked — the helpers live in the leaf
+`session-refs.ts`, which imports only `provenance.ts`, so nothing browser-side
+pulls `session-ledger.ts`'s logging. PR and session sharing read inverted maps
+built once per index object (a `WeakMap`), never per request. Pure, index-only,
+age-free: `worked-order-invariant.test.ts` holds. Lint check 8.1 keeps its own
+session pairing.
+
+**The near map.** `GET /api/wiki/page` ships `near`: relPath → closeness for
+the open page. A first-hop page scores `s/(s+1)` (≥ 0.5); a second-hop page
+`near(parent) × 0.55 × s/(s+1)` (≤ ≈0.40), so no second hop outranks a first.
+The walk never expands through a hub, keeps the best score per page and keeps
+the `NEAR_MAX` (200) strongest. ⚠️ Keys are the listing's `relPath` spelling —
+never the lowercased `normalizeRelPath` key, which zeroes the boost on any path
+with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
+`nearScores` together take 0.04 ms median, 0.84 ms max per page.
+
+**The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
+the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
+it; the rail's search box is unchanged. It ranks `allPages` in the browser —
+there is no find route. Grammar: free words ANDed, a `"` on a free word dropped
+(no phrase search) — but a quoted value after an unknown key stays one word
+(`foo:"a b"` is the word `foo:a b`); `in:<text>`/`in:"<text>"` a substring of the series key or label;
+`series:<key>` the series whose key IS that key, in the rail's fold (`"`
+stripped on both sides) — what a series chip applies. A chip REPLACES the
+query's `series:` tokens and keeps every other token, `in:` included, so its
+count is what applying it yields for any listing and query (a seeded property
+test in `wiki-find.test.ts` pins it);
+`type:<prefix>`; `age:<N`/`age:>N` days on the worked-on axis, two bounds of
+one direction keeping the tighter; `#tag` a tag prefix but `#<digits>` a
+number word; `is:retired` admits culled pages; a known key with no value yet
+(`in:`, `type:`, `#`, `age:<`) is ignored, and `<`/`>` alone counts as no value only after `age:` (a series
+keyed `<` is a real value); any other `key:` is a free word. A
+digit word matches a whole number outside any ISO date, in the scorer and the
+highlighter alike, so `9` does not hit `2026-09-…`. Series groups, keys and
+labels are the rail's (`seriesKeyOf`, `seriesCensusKey`, `seriesHead`). Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
+pool drops bookkeeping pages, attachment children and (unless `is:retired`)
+culled pages; a superseded page stays and names its successor. Rows group by
+series, groups ordered by their best row; a no-series row is a group of one,
+so the best match is always the first row. The highlighter is ONE pass with a
+combined pattern — word-by-word replacement corrupts its own `<mark>` markup.
+
+⚠️ **The dialog root owns every key pressed inside it**: its keydown handles
+the palette's keys and then stops propagation on every keydown, so no
+document-level reader shortcut (`]`, `f`, `g`, `t`, the pane ladder's Escape)
+fires from inside the palette. Capture-phase listeners still run first: the
+graph card's Escape stands aside under `modalOpen`, and the ref-link peek's has
+nothing to close, since opening hides any peek (`hideRefPeek`). Closing REMOVES
+the node and returns focus to the opener. Opening is refused while another
+dialog or menu is open — the header's Tools menu included, which `modalOpen`
+does not see (`navMenuOpen`). A palette opened before the listing arrives says
+"Loading pages…" and ranks when it lands, or says "Couldn't load pages." when
+the boot request fails. Once it shows rows, a background adoption (focus
+refetch, heartbeat) does NOT repaint it — that replaced a Tab-focused row and
+dropped focus to `<body>` behind the dialog — so the rows re-rank over the new
+listing on the next keystroke. Back/Forward closes it; a page load does not
+(the boot's own `?relPath=` load lands after a palette opened during it, and a
+load the reader starts from a row closes the palette first). The open page's
+`near` is dropped when a load starts, so a failed or aborted load boosts
+nothing. During an IME composition the root acts on
+no key. Acceptance: `strength.test.ts`,
+`session-refs.test.ts`, `routes/wiki-near.test.ts`,
+`views/components/wiki-find.test.ts` and `e2e/wiki-find.spec.ts`.
 
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 

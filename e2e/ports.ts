@@ -243,6 +243,8 @@ export const E2E_PORTS = {
   "wiki-nais-read/dead-huginn": 8795,
   // ⇪ Felles: one muninn, an allowlisted wiki and one that is not.
   "wiki-felles-publish": 3100,
+  // The find palette: one muninn over a temp wiki.
+  "wiki-find": 3101,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

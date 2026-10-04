@@ -18,7 +18,7 @@
  * _docRequestId, SOURCES, esc) and sum-shelf.ts (isShelfDoc). */
 
 import { RAIL_FUNCTIONS, RAIL_READ_STORAGE_KEY } from "../../../summaries/latest-rail.ts";
-import { MODAL_SELECTOR, modalOpen, readerKeyRefused } from "./wiki-panes.ts";
+import { MODAL_SELECTOR, modalOpen, readerKeyEventOf, readerKeyRefused } from "./wiki-panes.ts";
 
 export { RAIL_READ_STORAGE_KEY };
 
@@ -222,6 +222,7 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
     var MODAL_SELECTOR = ${JSON.stringify(MODAL_SELECTOR)};
     var readerKeyRefused = ${readerKeyRefused.toString()};
     var modalOpen = ${modalOpen.toString()};
+    var readerKeyEventOf = ${readerKeyEventOf.toString()};
 
     var RAIL_READ_KEY = ${JSON.stringify(RAIL_READ_STORAGE_KEY)};
     var _railView = 'latest';     // 'latest' | 'category'
@@ -618,19 +619,9 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
     document.addEventListener('keydown', function(e) {
       if (e.key !== 'j' && e.key !== 'k') return;
       var overlay = document.getElementById('docOverlay');
-      var t = e.target;
       var action = railKeyAction({
         key: e.key,
-        refused: readerKeyRefused({
-          key: e.key,
-          ctrlKey: e.ctrlKey,
-          metaKey: e.metaKey,
-          altKey: e.altKey,
-          repeat: e.repeat,
-          targetTag: t && t.tagName,
-          targetEditable: !!(t && t.isContentEditable),
-          targetInDialog: !!(t && t.closest && t.closest('[aria-modal="true"], dialog[open]')) || modalOpen(document),
-        }),
+        refused: readerKeyRefused(readerKeyEventOf(e)),
         panelOpen: !!overlay && overlay.classList.contains('visible'),
         overlayOpen: docPanelOverlayOpen(),
       });

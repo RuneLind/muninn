@@ -68,6 +68,7 @@ import {
   type SessionLedgerResult,
 } from "./session-ledger.ts";
 import { stampableFor, stampConfigFromEnv } from "./stamp-roots.ts";
+import { bareId, dedupeSessionRefs } from "./session-refs.ts";
 import { loadJiraKeyIndex } from "../jira/verify-keys.ts";
 
 /**
@@ -618,40 +619,9 @@ function dedupeMerges(merges: readonly ProvenanceMerge[]): ProvenanceMerge[] {
   return out;
 }
 
-/**
- * First-wins dedup on the bare id, preserving the page's own order — with ONE
- * exception: a PREFIXED spelling replaces a bare one already kept.
- *
- * The reverse lookup puts the reader's query at the head of the list, and a
- * reader pastes the bare id as often as the prefixed one. Plain first-wins then
- * threw away the `provider:` the matched page carried, so the answer's own chip
- * for the session asked about was the one chip with no provider glyph. The
- * position is kept (the query still leads); only the spelling is upgraded.
- */
-export function dedupeSessionRefs(refs: readonly string[]): string[] {
-  const at = new Map<string, number>();
-  const out: string[] = [];
-  for (const raw of refs) {
-    const ref = raw.trim();
-    if (!ref) continue;
-    const id = bareId(ref);
-    const seen = at.get(id);
-    if (seen === undefined) {
-      at.set(id, out.length);
-      out.push(ref);
-      continue;
-    }
-    // A prefixed spelling is strictly more informative than a bare one; two
-    // prefixed spellings of one id keep the first (the page's own order).
-    if (out[seen] === id && ref !== id) out[seen] = ref;
-  }
-  return out;
-}
-
-function bareId(ref: string): string {
-  const at = ref.indexOf(":");
-  return at <= 0 || at === ref.length - 1 ? ref : ref.slice(at + 1);
-}
+// `dedupeSessionRefs` lives in the leaf `session-refs.ts`; re-exported so this
+// module's importers are unchanged.
+export { dedupeSessionRefs } from "./session-refs.ts";
 
 /**
  * huginn's corpus, under the shared deadline.

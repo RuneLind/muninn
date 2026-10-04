@@ -74,6 +74,36 @@ export function modalOpen(root: Pick<ParentNode, "querySelectorAll">): boolean {
   return Array.prototype.some.call(root.querySelectorAll(MODAL_SELECTOR), (el: Element) => el.getClientRects().length > 0);
 }
 
+/** Is the header's Tools ▾ menu (a native `<details>`) open? It carries no
+ *  `role="menu"`, so {@link modalOpen} does not see it. */
+export function navMenuOpen(root: Pick<ParentNode, "querySelector">): boolean {
+  return !!root.querySelector("details.nav-dropdown[open]");
+}
+
+/**
+ * The {@link ReaderKeyEvent} of a real keydown, shared by the graph-card keys,
+ * the find palette's `/` and the /summaries rail. `targetInDialog` is a dialog
+ * around the target, or {@link modalOpen} anywhere on the page. The pane
+ * toggles (`wiki-pane-toggle.ts`) still build their own literal, whose dialog
+ * test is the target's ancestors only. The /summaries rail injects this with
+ * `.toString()`, so it reads only the event, `document` and `modalOpen`, which
+ * that script declares beside it.
+ */
+export function readerKeyEventOf(e: KeyboardEvent): ReaderKeyEvent & { shiftKey: boolean } {
+  const t = e.target as HTMLElement | null;
+  return {
+    key: e.key,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    altKey: e.altKey,
+    shiftKey: e.shiftKey,
+    repeat: e.repeat,
+    targetTag: t?.tagName ?? null,
+    targetEditable: !!t?.isContentEditable,
+    targetInDialog: !!t?.closest?.('[aria-modal="true"], dialog[open]') || modalOpen(document),
+  };
+}
+
 /**
  * Which action a keydown maps to, or null. `]` toggles the right pane, `F`
  * toggles focus, `Escape` leaves focus. Every one of them is refused while the

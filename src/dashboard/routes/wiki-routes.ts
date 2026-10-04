@@ -31,6 +31,7 @@ import {
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { hasProvenance, jiraCounts } from "../../wiki/provenance.ts";
 import { computeRelated } from "../../wiki/related.ts";
+import { nearScores } from "../../wiki/strength.ts";
 import { ctxStampable, pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import {
   defaultProvenanceContext,
@@ -1573,11 +1574,12 @@ export function registerWikiReadRoutes(
       }),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
-      // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs, minus hubs, never
-      // transitive`, newest first, one `why` line per row. Computed here rather
-      // than in the browser because its input is `prRefs`, which the listing does
-      // not carry (and must not: see `toListing`) — and because the rule reads the
-      // whole index, which the client holds only as the filtered page list.
+      // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs ∪ shares a session,
+      // minus hubs, never transitive` (`neighbours()` in `strength.ts`), newest
+      // first, one `why` line per row. Computed here rather than in the browser
+      // because its inputs are `prRefs` and `sessions`, which the listing does
+      // not carry (and must not: see `toListing`) — and because the rule reads
+      // the whole index, which the client holds only as the filtered page list.
       //
       // A row is `toListing`-shaped like `outgoing`/`backlinks`, plus `why` — it
       // cannot use `listings()` itself, which answers a bare listing and would
@@ -1591,6 +1593,13 @@ export function registerWikiReadRoutes(
         const m = index.resolveRelPath(r.relPath);
         return m ? [{ ...toListing(index, m), why: r.why }] : [];
       }),
+      // NEAR — the find palette's closeness boost: relPath → (0, 1), one and
+      // two hops over the same neighbour rule, capped at `NEAR_MAX` entries.
+      // Keyed by `meta.relPath` exactly as `/api/wiki/pages` spells it, never
+      // the lowercased `normalizeRelPath` key — the client looks rows up by the
+      // listing's spelling, and a lowercased key zeroes the boost on any path
+      // with a capital. `{}` for a bookkeeping or hub page.
+      near: nearScores(index, meta.relPath),
     });
   });
 

@@ -170,7 +170,8 @@ import { enhanceEmbeds } from "./wiki-embed.ts";
 import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
 import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
-import { enhanceRefLinks } from "./wiki-ref-links.ts";
+import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
+import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find-palette.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
@@ -336,7 +337,7 @@ import {
   graphToggleHtml,
   type GraphAdjacency,
 } from "./wiki-graph-view.ts";
-import { modalOpen } from "./wiki-panes.ts";
+import { modalOpen, navMenuOpen, readerKeyEventOf } from "./wiki-panes.ts";
 import { graphDefaults, parseIssueRoot, type GraphLevel, type GraphPayload } from "../../../wiki/graph-types.ts";
 // The provenance strip: one collapsed line under the title that opens into the
 // chain. Every string and every fragment of markup lives in that module (pure,
@@ -473,6 +474,10 @@ interface WikiPageDetail {
    *  every write this client makes (`POST /api/wiki/series` answers the new
    *  hash), so the editor's own first write cannot leave it stale. */
   hash?: string;
+  /** The find palette's closeness map: relPath (the listing's spelling) →
+   *  (0, 1), one and two hops over the neighbour rule. ABSENT on an older
+   *  server; `{}` for a bookkeeping or hub page. */
+  near?: Record<string, number>;
   error?: string;
 }
 
@@ -558,6 +563,10 @@ function syncDisplayFromUrl(): void {
 }
 
 let allPages: WikiListing[] = [];
+/** Has any listing arrived? Before it, the find palette says "Loading". */
+let pagesLoaded = false;
+/** Did the boot request for the listing fail? The palette then says so. */
+let pagesLoadFailed = false;
 /** The server's index-scan instant from `/api/wiki/pages`, kept solely to anchor the
  *  recency reads' `now` (see `recencyNow`). Null until the listing lands / on a
  *  degraded response. */
@@ -599,6 +608,13 @@ let currentRelPath: string | null = null;
  * popover reports.
  */
 let currentPageHash: string | null = null;
+/**
+ * The `near` map of the page whose response last rendered, keyed by that page's
+ * relPath — the find palette boosts by it only while that page is still the
+ * open one, so an explainer or the start view (no page response) ranks with no
+ * closeness at all rather than with the previous page's.
+ */
+let currentNear: { relPath: string; near: Record<string, number> } | null = null;
 /**
  * The listing of the page currently rendered in the article pane — stamped by
  * `renderBreadcrumb`, which every article render path calls.
@@ -3905,6 +3921,9 @@ function loadPageByRelPath(relPath: string, push = true, revealHash = true): voi
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
 function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): void {
+  // The page being left stops boosting a find now: a load that fails (an error
+  // payload or a rejected fetch) leaves `currentRelPath` on it.
+  currentNear = null;
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -3930,6 +3949,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // actually came back.
       currentRelPath = data.meta.relPath || null;
       currentPageHash = typeof data.hash === "string" ? data.hash : null;
+      currentNear = currentRelPath ? { relPath: currentRelPath, near: data.near ?? {} } : null;
       renderBreadcrumb(data.meta);
       if (push) {
         graphIssue = ""; // a click opens a page: graph mode re-roots on it
@@ -4279,7 +4299,7 @@ function escapeOwnedElsewhere(): boolean {
   return (
     modalOpen(document) ||
     (document.getElementById("wikiExplainBtn")?.getClientRects().length ?? 0) > 0 ||
-    !!document.querySelector("details.nav-dropdown[open]")
+    navMenuOpen(document)
   );
 }
 // Escape with a card open, and no other owner active, closes the card and
@@ -4297,20 +4317,9 @@ document.addEventListener(
   true,
 );
 document.addEventListener("keydown", (e) => {
-  const t = e.target as HTMLElement | null;
-  const toggles = graphKeyToggles({
-    key: e.key,
-    ctrlKey: e.ctrlKey,
-    metaKey: e.metaKey,
-    altKey: e.altKey,
-    shiftKey: e.shiftKey,
-    repeat: e.repeat,
-    targetTag: t?.tagName ?? null,
-    targetEditable: !!t?.isContentEditable,
-    // Any open modal or menu, not only one around the focused element
-    // (`modalOpen` says why).
-    targetInDialog: !!t?.closest?.('[aria-modal="true"], dialog[open]') || modalOpen(document),
-  });
+  // Any open modal or menu, not only one around the focused element
+  // (`modalOpen` says why).
+  const toggles = graphKeyToggles(readerKeyEventOf(e));
   // Only where the toggle is on screen: an article or an issue graph, on a
   // wiki with a tracker — never the overview or an Ask answer.
   if (!toggles || !document.getElementById(GRAPH_TOGGLE_ID)) return;
@@ -4770,6 +4779,9 @@ window.addEventListener("hashchange", () => {
 });
 
 window.addEventListener("popstate", () => {
+  // Back/Forward is a navigation: an open find palette's rows describe the
+  // page being left.
+  if (isFindOpen()) closeFind(false);
   const params = new URLSearchParams(location.search);
   // The project rides in the URL, so Back/Forward is a facet change too — and it
   // is the one path where the address bar leads. Adopted on EVERY branch (the
@@ -7221,6 +7233,19 @@ document.addEventListener("click", (e) => {
 // chain above and the body delegate; the dialog's is the chain in
 // `wireChatOptions` (`wiki-chat-options.ts`). One chain made that exclusivity
 // structural; three make it a convention nothing enforces.
+// The find palette (`/`, ⌘K): ranks `allPages` in the browser, boosted by the
+// open page's `near` map. It owns every key pressed inside it; its opening
+// listener is document-level, bubble phase. See `wiki-find-palette.ts`.
+initFindPalette({
+  getPages: () => allPages,
+  listingState: () => (pagesLoaded ? "ready" : pagesLoadFailed ? "failed" : "loading"),
+  getNear: () => (currentNear && currentNear.relPath === currentRelPath ? currentNear.near : {}),
+  getScannedAt: () => scannedAtMs,
+  openPage: (relPath) => loadPageByRelPath(relPath),
+  hrefFor: (relPath) => pageUrlByRelPath(relPath),
+  onOpen: () => hideRefPeek(),
+});
+
 initChatOptions({
   getShownTurn: () => askShownTurn,
   getAskTurns: () => askTurns,
@@ -7558,6 +7583,7 @@ function currentViewState() {
  *  boot heal) may read `?project=` off the address bar. */
 function setPagesData(data: WikiPagesResponse, boot = false): void {
   allPages = data.pages;
+  pagesLoaded = true;
   // Anchor every recency read to the server's scan instant BEFORE the first render
   // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
   // future-date guard on every frontmatter-dated page in the wiki at once.
@@ -7621,6 +7647,9 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // boot render already paints the chip the URL asked for as active.
   adoptProjectFilter(boot);
   adoptJiraFilter(boot);
+  // A palette opened before this listing arrived is showing "Loading" (or the
+  // failure line, when a later refetch heals a failed boot).
+  refreshFind();
 }
 
 /** Adopt a fresh page set and repaint everything derived from it. Filters, the
@@ -7709,6 +7738,9 @@ function applyPendingPages(): void {
 function paintBootError(html: string): void {
   if (pagesRefresh.bootRendered) return;
   document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-empty-state">${html}</div>`;
+  // An open palette is still saying "Loading pages…".
+  pagesLoadFailed = true;
+  refreshFind();
 }
 
 /** Distinguish the two WIKI-set failures the server reports: an unknown wiki

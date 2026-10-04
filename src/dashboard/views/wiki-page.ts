@@ -6,6 +6,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
+import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
 import {
   RAIL_CHIP_SWITCH_SHORT,
@@ -2558,6 +2559,12 @@ export async function renderWikiPage(opts?: {
       overflow-wrap: anywhere;
     }
     .wiki-conn-why em { font-style: normal; }
+    /* A session ref runs 36 (bare uuid) to 48 (claude-code:<uuid>) characters; shortened on screen, whole in the
+       DOM so a copy takes the full ref (the span carries it as a title too). */
+    .wiki-why-sess {
+      display: inline-block; max-width: 16ch; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+    }
 
     .wiki-empty-state { padding: 40px; text-align: center; color: var(--text-muted); font-size: 13px; }
     .wiki-empty-state code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }
@@ -2572,6 +2579,7 @@ export async function renderWikiPage(opts?: {
     }
     ${agentPresenceStyles()}
     ${shareDialogStyles()}
+    ${findPaletteStyles()}
     ${fellesPublishStyles()}
     ${wikiReadonlyStyles()}
     ${wikiReadSliceStyles()}

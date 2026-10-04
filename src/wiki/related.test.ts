@@ -504,3 +504,20 @@ describe("computeRelated — the self guard", () => {
     ]);
   });
 });
+
+describe("computeRelated — shared sessions", () => {
+  test("a page sharing a stamped session appears, the reason in the OPEN page's spelling", async () => {
+    const ID = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
+    await indexOver(
+      [
+        ["plans/open.md", page("Open", [`sessions: [claude-code:${ID}]`, "status_date: 2026-09-20"], "Body.")],
+        ["plans/twin.md", page("Twin", [`sessions: [${ID}]`, "status_date: 2026-09-19"], "Body.")],
+      ],
+      (index) => {
+        expect(whyByPath(index, "plans/open.md")).toEqual({
+          "plans/twin.md": `shares session claude-code:${ID}`,
+        });
+      },
+    );
+  });
+});

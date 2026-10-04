@@ -66,6 +66,15 @@ describe("relatedSectionHtml", () => {
     expect(relatedSectionHtml(rows)).not.toContain("data-series-menu");
   });
 
+  test("a `shares session` reason wraps each ref in its own span, text whole", () => {
+    const html = relatedSectionHtml([row({ why: "cites this page · shares session claude-code:abc, def" })]);
+    expect(html).toContain(
+      '<em>shares session <span class="wiki-why-sess" title="claude-code:abc">claude-code:abc</span>, ' +
+        '<span class="wiki-why-sess" title="def">def</span></em>',
+    );
+    expect(html).toContain("<em>cites this page</em>");
+  });
+
   test("the why line and the title are escaped", () => {
     const html = relatedSectionHtml([row({ title: "<script>", why: "<b>why</b>" })]);
     expect(html).not.toContain("<script>");
