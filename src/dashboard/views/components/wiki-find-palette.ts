@@ -29,19 +29,30 @@ import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
 import { applySeriesChip, rankFind, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
+  FIND_EVERY_ID,
   FIND_ID,
   FIND_INPUT_ID,
   FIND_LIST_ID,
   FIND_SCRIM_ID,
+  everywhereHref,
+  everywherePlan,
+  everywhereRows,
+  everywhereView,
   findChipsHtml,
+  findEverywhereHtml,
   findFailedHtml,
+  findReasonChipsHtml,
   findListHtml,
   findLoadingHtml,
   findPaletteHtml,
   findRowId,
   isFindToggleKey,
   isMacPlatform,
+  localReasons,
+  type FindEverywhereState,
+  type FindEverywhereView,
 } from "./wiki-find-view.ts";
+import type { FindEverywhereResponse, FindEverywhereResult } from "../../../wiki/find-everywhere.ts";
 import { modalOpen, navMenuOpen, readerKeyEventOf, readerKeyRefused } from "./wiki-panes.ts";
 
 /** What the palette needs from the shell. */
@@ -60,12 +71,19 @@ export interface FindPalettePort {
   hrefFor(relPath: string): string;
   /** Called as the palette opens — hides any hover peek. */
   onOpen(): void;
+  /** This wiki's REGISTRY name (`__WIKI_FIND_SELF__`) — Everywhere rows of
+   *  this wiki are deduped against the local rows and open in place. */
+  selfWiki(): string;
+  /** Is `GET /api/wiki/find-everywhere` served here? False on the read slice. */
+  everywhere(): boolean;
 }
 
 export type FindListingState = "loading" | "ready" | "failed";
 
 /** Debounce between a keystroke and a re-rank. */
 export const FIND_DEBOUNCE_MS = 120;
+/** Debounce between a keystroke and the Everywhere fetch. */
+export const FIND_EVERY_DEBOUNCE_MS = 250;
 
 let port: FindPalettePort | null = null;
 let opener: HTMLElement | null = null;
@@ -74,6 +92,12 @@ let active = 0;
 /** The listing state the open palette last painted. */
 let shownState: FindListingState = "loading";
 let debounce: ReturnType<typeof setTimeout> | null = null;
+/** The latest Everywhere fetch, keyed on the free text it asked for. */
+let every: FindEverywhereState | null = null;
+/** The Everywhere rows on screen: fused rows not shown as a local row. */
+let everyShown: FindEverywhereResult[] = [];
+let everyTimer: ReturnType<typeof setTimeout> | null = null;
+let everyCtrl: AbortController | null = null;
 const mac = typeof navigator !== "undefined" && isMacPlatform(navigator.platform || navigator.userAgent || "");
 
 export function isFindOpen(): boolean {
@@ -99,34 +123,149 @@ function render(): void {
   const query = box.value;
   shownState = port.listingState();
   if (shownState !== "ready") {
+    // No listing yet (or it failed): Everywhere is the fallback list.
     result = null;
     chips.innerHTML = "";
-    list.innerHTML = shownState === "failed" ? findFailedHtml() : findLoadingHtml();
-    box.removeAttribute("aria-activedescendant");
-    return;
+  } else {
+    result = rankFind(port.getPages(), query, {
+      near: port.getNear(),
+      now: anchorNow(Date.now(), port.getScannedAt()),
+    });
+    chips.innerHTML = query.trim() ? findChipsHtml(result) : "";
   }
-  result = rankFind(port.getPages(), query, {
-    near: port.getNear(),
-    now: anchorNow(Date.now(), port.getScannedAt()),
-  });
-  if (active >= result.rows.length) active = 0;
-  chips.innerHTML = query.trim() ? findChipsHtml(result) : "";
-  list.innerHTML = findListHtml(result, query, active, port.hrefFor, titleOf);
+  const view = currentView();
+  everyShown = shownRows(view);
+  if (active >= rowCount()) active = 0;
+  const localHtml = result
+    ? findListHtml(result, query, active, port.hrefFor, titleOf)
+    : shownState === "failed"
+      ? findFailedHtml()
+      : findLoadingHtml();
+  list.innerHTML =
+    localHtml + `<div id="${FIND_EVERY_ID}">${findEverywhereHtml(view, everyShown, localCount(), active)}</div>`;
+  addLocalReasons(view);
   syncActive();
 }
 
-function syncActive(): void {
+/** The section's view for the query in the box. */
+function currentView(): FindEverywhereView | null {
+  return everywhereView(everywherePlan(input()?.value ?? "", !!port?.everywhere()), every);
+}
+
+/** The Everywhere rows on screen: fused rows not shown as a local row. */
+function shownRows(view: FindEverywhereView | null): FindEverywhereResult[] {
+  return view?.kind === "done" && port ? everywhereRows(view.data, port.selfWiki(), localRelPaths()) : [];
+}
+
+function localRelPaths(): Set<string> {
+  return new Set(result?.rows.map((r) => r.page.relPath) ?? []);
+}
+
+function localCount(): number {
+  return result?.rows.length ?? 0;
+}
+
+/** Local rows plus Everywhere rows — what the arrow keys walk. */
+function rowCount(): number {
+  return localCount() + everyShown.length;
+}
+
+/** Give each local row the fused response's reasons for it, in place. */
+function addLocalReasons(view: FindEverywhereView | null): void {
+  if (!port || view?.kind !== "done") return;
+  const reasons = localReasons(view.data, port.selfWiki());
+  document.querySelectorAll<HTMLElement>(`#${FIND_LIST_ID} .wiki-find-row:not(.wiki-find-every-row)`).forEach((el) => {
+    const r = reasons.get(el.getAttribute("data-relpath") ?? "");
+    const meta = el.querySelector(".wiki-find-meta");
+    if (!r || !meta || meta.querySelector(".wiki-find-reasons")) return;
+    meta.insertAdjacentHTML("beforeend", findReasonChipsHtml(r));
+  });
+}
+
+/**
+ * Paint the Everywhere section alone, when its response lands. The local rows
+ * stay in place — they only gain reason chips — so neither the selection nor
+ * focus moves (a whole-list repaint under a Tab-focused row dropped focus to
+ * `<body>`, the #639 finding).
+ */
+function paintEverywhere(): void {
+  const box = document.getElementById(FIND_EVERY_ID);
+  if (!port || !box) return;
+  const view = currentView();
+  everyShown = shownRows(view);
+  if (active >= rowCount()) active = 0;
+  box.innerHTML = findEverywhereHtml(view, everyShown, localCount(), active);
+  addLocalReasons(view);
+  // With no local rows the first Everywhere row is the active one: mark it,
+  // without scrolling or moving focus.
+  if (!localCount() && everyShown.length) syncActive(false);
+}
+
+function cancelEverywhere(): void {
+  if (everyTimer) clearTimeout(everyTimer);
+  everyTimer = null;
+  everyCtrl?.abort();
+  everyCtrl = null;
+}
+
+/**
+ * On a query change. The fetch is keyed on the free text: an edit that keeps
+ * it (a filter token, a trailing space, a chip) keeps the fetch in flight and
+ * the rows on screen, and only the dedupe re-runs. A filter suppresses the
+ * section without dropping what was fetched; free text typed under a filter
+ * is not fetched.
+ */
+function updateEverywhere(): void {
+  const plan = everywherePlan(input()?.value ?? "", !!port?.everywhere());
+  if (plan.kind === "fetch" && every?.key !== plan.key) {
+    cancelEverywhere();
+    every = { key: plan.key, status: "pending" };
+    const key = plan.key;
+    everyTimer = setTimeout(() => {
+      everyTimer = null;
+      void fetchEverywhere(key);
+    }, FIND_EVERY_DEBOUNCE_MS);
+  } else if (plan.kind === "off") {
+    cancelEverywhere();
+    every = null;
+  }
+  paintEverywhere();
+}
+
+async function fetchEverywhere(key: string): Promise<void> {
+  const ctrl = new AbortController();
+  everyCtrl = ctrl;
+  let next: FindEverywhereState;
+  try {
+    // The typed query, not the key: the text leg keeps `#12` a hard number.
+    const q = (input()?.value ?? key).trim();
+    const res = await fetch(`/api/wiki/find-everywhere?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    next = { key, status: "done", data: (await res.json()) as FindEverywhereResponse };
+  } catch {
+    if (ctrl.signal.aborted) return;
+    next = { key, status: "failed" };
+  }
+  // A newer free text aborted this fetch or replaced it: drop the answer.
+  if (ctrl.signal.aborted || everyCtrl !== ctrl || every?.key !== key) return;
+  everyCtrl = null;
+  every = next;
+  paintEverywhere();
+}
+
+function syncActive(scroll = true): void {
   const box = input();
-  if (!box || !result) return;
-  if (!result.rows.length) {
+  if (!box) return;
+  if (!rowCount()) {
     box.removeAttribute("aria-activedescendant");
     return;
   }
   box.setAttribute("aria-activedescendant", findRowId(active));
-  document.querySelectorAll<HTMLElement>(`#${FIND_LIST_ID} .wiki-find-row`).forEach((el, i) => {
-    el.classList.toggle("active", i === active);
-    el.setAttribute("aria-selected", String(i === active));
-    if (i === active) el.scrollIntoView({ block: "nearest" });
+  document.querySelectorAll<HTMLElement>(`#${FIND_LIST_ID} .wiki-find-row`).forEach((el) => {
+    const on = Number(el.getAttribute("data-find-row")) === active;
+    el.classList.toggle("active", on);
+    el.setAttribute("aria-selected", String(on));
+    if (on && scroll) el.scrollIntoView({ block: "nearest" });
   });
 }
 
@@ -162,8 +301,13 @@ function scheduleRender(): void {
 }
 
 function openRow(i: number, newTab: boolean): void {
+  if (!port) return;
+  if (i >= localCount()) {
+    openEverywhereRow(everyShown[i - localCount()], newTab);
+    return;
+  }
   const row = result?.rows[i];
-  if (!row || !port) return;
+  if (!row) return;
   if (newTab) {
     window.open(port.hrefFor(row.page.relPath), "_blank", "noopener");
     return;
@@ -171,6 +315,27 @@ function openRow(i: number, newTab: boolean): void {
   const rel = row.page.relPath;
   closeFind(false);
   port.openPage(rel);
+}
+
+/** An Everywhere row: this wiki's page opens in place, another wiki's loads. */
+function openEverywhereRow(r: FindEverywhereResult | undefined, newTab: boolean): void {
+  if (!r || !port) return;
+  const href = everywhereHref(r.wiki, r.relPath);
+  if (newTab) {
+    window.open(href, "_blank", "noopener");
+    return;
+  }
+  const same = r.wiki === port.selfWiki();
+  closeFind(false);
+  if (same) port.openPage(r.relPath);
+  else window.location.assign(href);
+}
+
+function onInput(e: Event): void {
+  scheduleRender();
+  // An IME composition is mid-word: fetch on compositionend instead.
+  if ((e as InputEvent).isComposing) return;
+  updateEverywhere();
 }
 
 export function openFind(): void {
@@ -186,7 +351,9 @@ export function openFind(): void {
   const root = document.getElementById(FIND_ID)!;
   root.addEventListener("keydown", onRootKeydown);
   root.addEventListener("click", onRootClick);
-  root.querySelector(`#${FIND_INPUT_ID}`)!.addEventListener("input", scheduleRender);
+  const box = root.querySelector(`#${FIND_INPUT_ID}`)!;
+  box.addEventListener("input", onInput);
+  box.addEventListener("compositionend", () => updateEverywhere());
   // Outside click: a press on the scrim itself, not on anything inside the dialog.
   scrim.addEventListener("mousedown", (e) => {
     if (e.target === scrim) {
@@ -196,6 +363,8 @@ export function openFind(): void {
   });
   active = 0;
   result = null;
+  every = null;
+  everyShown = [];
   render();
   input()!.focus();
 }
@@ -206,6 +375,9 @@ export function closeFind(returnFocus = true): void {
     clearTimeout(debounce);
     debounce = null;
   }
+  cancelEverywhere();
+  every = null;
+  everyShown = [];
   document.getElementById(FIND_SCRIM_ID)?.remove();
   result = null;
   const back = opener;
@@ -246,7 +418,7 @@ function onRootKeydown(e: KeyboardEvent): void {
   } else if (inInput && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
     e.preventDefault();
     flushPending();
-    const n = result?.rows.length ?? 0;
+    const n = rowCount();
     if (n) {
       active = e.key === "ArrowDown" ? (active + 1) % n : (active - 1 + n) % n;
       syncActive();
@@ -272,6 +444,7 @@ function onRootClick(e: MouseEvent): void {
     box.value = applySeriesChip(box.value, chip.getAttribute("data-find-chip") ?? "");
     active = 0;
     render();
+    updateEverywhere();
     box.focus();
     return;
   }

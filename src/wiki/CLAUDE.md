@@ -2009,8 +2009,9 @@ with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
 
 **The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
 the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
-it; the rail's search box is unchanged. It ranks `allPages` in the browser —
-there is no find route. Grammar: free words soft-ANDed (below) and deduplicated after folding, a `"` on a free word dropped
+it; the rail's search box is unchanged. It ranks `allPages` in the browser
+(the local rows; the Everywhere section below them is the one route, see
+"Find everywhere" after this section). Grammar: free words soft-ANDed (below) and deduplicated after folding, a `"` on a free word dropped
 (no phrase search) — but a quoted value after an unknown key stays one word
 (`foo:"a b"` is the word `foo:a b`); `in:<text>`/`in:"<text>"` a substring of the series key or label;
 `series:<key>` the series whose key IS that key, in the rail's fold (`"`
@@ -2086,6 +2087,109 @@ nothing. During an IME composition the root acts on
 no key. Acceptance: `strength.test.ts`,
 `session-refs.test.ts`, `routes/wiki-near.test.ts`,
 `views/components/wiki-find.test.ts` and `e2e/wiki-find.spec.ts`.
+
+**Find everywhere** (`GET /api/wiki/find-everywhere?q=&limit=`, default 20,
+max 50; core `src/wiki/find-everywhere.ts`, route
+`dashboard/routes/wiki-find-everywhere.ts`). Tier 2 of the palette: one query
+over EVERY registered wiki through three legs run in parallel, fused, no model
+call. Registered in the `wiki` group (nais drops it, and the palette asks only
+when `wikiToolsFlag()`), admin by the zone model's default-deny like
+`/api/wiki/similar`, not in `WIKI_READ_SLICE_PATHS`, and on
+`SIDE_EFFECTING_GETS` as an amplifier (a cross-site GET is 403 before any
+upstream call). The query is capped first: `QUERY_MAX_CHARS` (200) code points,
+then `QUERY_MAX_WORDS` (12) free words; filter tokens are dropped
+(`findFreeTokens`), and `sources.query.truncated` says when a cap cut it. Free
+text under 2 code points answers empty without asking any leg. The text leg
+gets the free tokens as typed, so `#12` stays a hard number there; the remote
+legs get `freeText` — the same tokens with `#12` sent as `12`.
+- **text** — `rankFind` over each wiki's pages with every palette rule,
+  merged by (words hit, score), top 30.
+- **huginn** — ONE `/api/search` over the union of the loaded wikis'
+  `collections`, `limit=15`, **`brief=true`, 3 s budget**, body capped at
+  1 MB. `brief` is load-bearing: measured 2026-10-04, the default (reranked)
+  search took 5–12 s, `brief` 50–210 ms with near-identical ranks. A hit is a
+  page when a wiki holding its collection resolves its `id` as a relPath, and
+  the FIRST wiki that resolves it decides: a page that wiki hides is dropped,
+  never looked up again in another wiki at the same relPath. No wiki has
+  collections ⇒ the leg is `unconfigured` (`no wiki collections`).
+- **sessions** — claude-usage `/api/search?limit=25` (2 s budget), joined on
+  the bare id onto every page whose `sessions:` names the session
+  (`sessionPages`, one inverted index per index build). Page score =
+  Σ 1/(60 + i) over its sessions' 0-based ranks. The `/api/sessions-by-id`
+  title lookup runs after it under its own 400 ms budget and is optional, so it
+  can never spend the search's budget. This is the leg that finds a page by the
+  words of the sessions that WROTE it: "felles melosys-kode-wiki" never appears
+  in `plans/melosys-muninn-shared-wiki.mdx`. `CLAUDE_USAGE_URL` unset ⇒
+  `unconfigured`.
+
+Both remote legs drop what the palette's pool drops (`inFindPool`): retired and
+bookkeeping pages and attachment children (paired by stem, suffix or link, e.g.
+a `plans/*-prototype.html`); the text leg has the pool already. Huginn
+snippets are reduced to plain text (`plainSnippet`: the `tags: …` / heading
+breadcrumb, MDX/HTML tags, `[[target|label]]` and `[label](url)` to the label,
+emphasis markers) before the ~200-character clip; session snippets carry their
+match spans as offsets (`marks`), not markup, so the client escapes the text
+and wraps the spans itself.
+
+**Bounds, in order.** The wiki indexes load FIRST, all in parallel under one
+`INDEX_TIMEOUT_MS` (2.5 s); a wiki whose index fails or is late is skipped and
+named in `sources.indexes.skipped`. Only then do the legs start, each on its
+own timer combined (`AbortSignal.any`) with the request's own signal, so no
+leg's `ms` includes the index wait, and a palette fetch the reader abandoned
+(`c.req.raw.signal`) cancels the huginn and claude-usage calls behind it. Each
+remote call is also raced against its signal, so a seam that ignores the
+signal still cannot hold the leg past its budget. A failed leg says why:
+`timeout`, `aborted`, `unreachable` (no answer), `HTTP <n>`, `bad response`
+(not JSON, over the byte cap, or JSON that is not the contract), else
+`failed`. A failing leg never fails the request.
+
+**Fusion** is reciprocal rank fusion (k = 60, weight 1 per leg), then **heads
+first**: every leg's heads move to the top, in fused order. Plain RRF dropped
+"which gate runs count" from #3 to #7, because pages mediocre in two legs
+outvoted huginn's #1. A leg's heads are its #1 plus every page TIED with it on
+that leg's own score (a tie is never split by spelling) — with two
+restrictions. A text #1 in the palette's partial band (it hit only some words)
+is no head: a long `status_note` hits `which`/`from`/`count` by substring, and
+one such plan was text #1 for two unrelated queries. A sessions #1 is a head
+only when its session is in claude-usage's top `SESSIONS_HEAD_TOP` (5):
+session search ranks loosely, and a page carried by the 20th session is a
+vote, not an answer. Huginn ties on its `relevance`.
+
+**Egress.** The reader's typed free text (capped as above) goes to
+`knowledgeApiUrl` and `claudeUsageUrl`, and the session ids already stamped on
+pages go to claude-usage's title lookup. Either can be another machine: on the
+laptop `CLAUDE_USAGE_URL` is a tailnet address of the mini. Page CONTENT never
+leaves: the legs send the query and ids, and answer with ids the route maps
+onto the local index. That is why this route carries no `WIKI_READONLY_ROOTS`
+prologue and still answers over read-only roots (see the egress list under
+Readonly).
+
+**The palette's Everywhere section** (`findEverywhereHtml`). `everywherePlan`
+decides per query: off (the route is not served, or free text under 3 code
+points), `filtered` (any filter token — `in:`, `series:`, `type:`, `age:`,
+`is:`, a `#tag` — means "narrow this wiki": no fetch, and one quiet line says
+the section is off), or a fetch KEYED on `freeText`. An edit that keeps the
+free text (a trailing space, quotes, a filter token, a chip) neither aborts
+nor refetches nor blanks the rows; only the dedupe re-runs. A new key fetches
+250 ms after the keystroke, aborts the fetch it replaces and drops any answer
+for a key that is no longer the box's. During an IME composition nothing is
+fetched; `compositionend` fetches. A listing still loading (or failed) leaves
+Everywhere as the list, its first row active. The section lists fused rows not
+already shown locally (wiki label, reason chips `text #n`, `huginn #n`,
+`session <8-char id> #n` with the session title as tooltip, `leg #1` on a
+head), and gives a LOCAL row the same chips in place. "This wiki" is the
+REGISTRY name the page injects as `__WIKI_FIND_SELF__` (`findSelfWikiName`):
+under the `WIKI_DIR` override the page's own wiki name is "", while its root
+may still be a registered wiki whose rows must dedupe and open in place. The
+degrade line names every failed or unconfigured leg with its label, every
+skipped index and a cut query. The section paints alone — the local rows are
+never re-rendered when it lands — so focus and the selection stay put (the
+#639 focus finding). The arrow keys walk both sections; an Everywhere row of
+this wiki opens in place, another wiki's loads its reader URL. Acceptance:
+`src/wiki/find-everywhere.test.ts`,
+`views/components/wiki-find-everywhere-view.test.ts`,
+`e2e/wiki-find-everywhere.spec.ts` and the nais case in
+`e2e/wiki-nais-read.spec.ts`.
 
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
@@ -3592,6 +3696,8 @@ So each of them carries a **per-wiki prologue** (`egressRefusal` in `wiki-routes
 | `POST /api/wiki/atlas/draft-synthesis` | the drafting one-shot + a proposal the seam guard then refuses forever |
 | `POST /api/wiki/reindex` | every page BODY shipped to huginn's embedder (collection-gated today, which is one `WIKI_EXTRA` third segment away from being untrue) |
 | `GET /api/wiki/similar` | the page's title, tags and first body paragraph shipped to huginn's embedder on every page open — no model call, the highest-volume egress the reader has |
+
+**Egress that deliberately carries NO prologue: `GET /api/wiki/find-everywhere`.** It does send data off the machine — the reader's typed free text (≤ 200 code points, ≤ 12 words) to `knowledgeApiUrl` and `claudeUsageUrl`, plus the session ids already stamped on pages to claude-usage's title lookup — and either URL may be another host (on the laptop `CLAUDE_USAGE_URL` is the mini's tailnet address). It answers over read-only roots anyway, because nothing it sends is PAGE CONTENT: the query is what the reader typed, the ids are frontmatter refs pointing back at claude-usage's own rows, and the answers are ids the route maps onto the local index. It spends no model call. A read-only root's pages therefore appear in its results like any other wiki's; the route is still admin-only (zone default-deny) and on `SIDE_EFFECTING_GETS`.
 
 **The prologue's entry-less fallback is scoped to the requests it actually serves.** `resolveWikiRequest` answers `entry: undefined` for two unrelated shapes — the `WIKI_DIR` env override (no `?wiki=`/`?bot=` given), which the routes really do serve from `resolveWikiRoot(undefined)` and which therefore must be guarded, and an UNKNOWN name, which they serve not at all. `readonlyCandidateRoot(entry, unknownWiki)` separates them (`null` ⇒ no root ⇒ no refusal): keying on `entry === undefined` alone made a typo inherit the env root's policy, so with `WIKI_DIR` naming a read-only root `?wiki=typo` answered 403 "this wiki is read-only" about a wiki nobody asked for, and `/wiki?wiki=typo` rendered the banner + disabled Ask box to match. An unknown name keeps the preflight error each route already has. The same helper feeds the `/wiki` render flag, so page and routes cannot disagree.
 

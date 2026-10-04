@@ -40,6 +40,14 @@ export function readActiveWikiRoot(): string | null {
   return typeof injected === "string" && injected.trim() !== "" ? injected : null;
 }
 
+/** The registry name of the wiki this page serves (`__WIKI_FIND_SELF__`, see
+ *  `findSelfWikiName`) — set under the `WIKI_DIR` override too, where the
+ *  active name is "". Falls back to the active name on an older page. */
+export function readFindSelfWiki(): string {
+  const injected = (globalThis as { __WIKI_FIND_SELF__?: unknown }).__WIKI_FIND_SELF__;
+  return typeof injected === "string" ? injected : readActiveWikiName();
+}
+
 /** Append the active `wiki` param to a URL so the fetch stays on-wiki. */
 export function withWikiParam(url: string, wiki: string): string {
   if (!wiki) return url;

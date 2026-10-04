@@ -23,7 +23,14 @@
  * untracked temp wiki dates its pages by mtime and the recency term would
  * otherwise decide the order.
  *
- * No model calls: nothing here leaves the process.
+ * Isolation: no model calls, and nothing leaves the process — huginn and
+ * claude-usage point at closed ports (`wiki-find/dead-*`), so the Everywhere
+ * section below the local rows reaches no live service, and `MUNINN_BOTS_DIR`
+ * is a temp dir holding one wiki-less bot, so no developer bot wiki is registered beside the
+ * fixture. The Everywhere section itself is `wiki-find-everywhere.spec.ts`;
+ * here its rows are excluded from `rows()`, and `find()` waits for it to
+ * settle so a key pressed after it never depends on landing inside a debounce
+ * (the in-debounce cases dispatch their keys synchronously, `keysNow`).
  *
  * ENV PREREQUISITE / SPAWN ENV: as every other spec in this directory — a
  * working `.env` at the repo root, and `e2eEnv()` to keep this muninn off
@@ -41,6 +48,8 @@ import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 
 const PORT = e2ePort("wiki-find");
+const DEAD_HUGINN = e2ePort("wiki-find/dead-huginn");
+const DEAD_LEDGER = e2ePort("wiki-find/dead-ledger");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-find";
@@ -82,9 +91,15 @@ const PAGES: Array<[string, string]> = [
 
 let server: ChildProcess | undefined;
 let root = "";
+let botsDir = "";
 
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-find-"));
+  // One wiki-less bot: muninn refuses to boot with none, and no developer
+  // bot (or its wiki) under bots/ may join the registry.
+  botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-find-bots-"));
+  await mkdir(path.join(botsDir, "e2e-find-bot"));
+  await writeFile(path.join(botsDir, "e2e-find-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
   for (const [rel, body] of PAGES) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
     await writeFile(path.join(root, rel), body, "utf8");
@@ -103,6 +118,9 @@ test.beforeAll(async () => {
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
       WIKI_EXTRA: `${WIKI}=${root}`,
+      MUNINN_BOTS_DIR: botsDir,
+      KNOWLEDGE_API_URL: `http://127.0.0.1:${DEAD_HUGINN}`,
+      CLAUDE_USAGE_URL: `http://127.0.0.1:${DEAD_LEDGER}`,
     },
     stdio: "ignore",
   });
@@ -123,11 +141,13 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (botsDir) await rm(botsDir, { recursive: true, force: true });
 });
 
 const palette = (page: Page) => page.locator("#wikiFind");
 const input = (page: Page) => page.locator("#wikiFindInput");
-const rows = (page: Page) => page.locator("#wikiFindList .wiki-find-row");
+// Local rows only: the Everywhere section below them is `wiki-find-everywhere.spec.ts`.
+const rows = (page: Page) => page.locator("#wikiFindList .wiki-find-row:not(.wiki-find-every-row)");
 /** Rows in the full band — every free word hit, no `partial m/n` pill. */
 const fullRows = (page: Page) => rows(page).filter({ hasNot: page.locator(".wiki-find-partial") });
 
@@ -152,6 +172,9 @@ async function find(page: Page, query: string): Promise<void> {
   await expect(palette(page)).toBeVisible();
   await input(page).fill(query);
   await expect(rows(page).first()).toBeVisible();
+  // The Everywhere section has answered (or is off for this query): nothing
+  // repaints under the next key.
+  await expect(page.locator("#wikiFindEvery")).not.toContainText("Searching everywhere…");
 }
 
 test("`/` opens with the input empty and focused", async ({ page }) => {
@@ -278,7 +301,7 @@ test("a no-series best match is the first row", async ({ page }) => {
   await expect(rows(page)).toHaveCount(3);
   await expect(rows(page).first()).toHaveAttribute("data-relpath", "plans/gamma-report.mdx");
   // The series group is there too — below the no-series row, not above it.
-  await expect(page.locator("#wikiFindList .wiki-find-group")).toHaveCount(1);
+  await expect(page.locator("#wikiFindList .wiki-find-group:not(.wiki-find-every-head)")).toHaveCount(1);
 });
 
 test("Enter opens the active row", async ({ page }) => {

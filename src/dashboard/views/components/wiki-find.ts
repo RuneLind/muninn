@@ -5,7 +5,8 @@
  * the way the rail does it — and nothing else, so `bun test` loads it and the
  * /wiki bundle carries it.
  *
- * There is no find route. The server supplies one thing the listing cannot:
+ * The local rows need no route (the palette's Everywhere section is
+ * `GET /api/wiki/find-everywhere`). The server supplies one thing the listing cannot:
  * `near` on `/api/wiki/page` — closeness to the open page over the neighbour
  * rule (`src/wiki/strength.ts`), keyed by the listing's own `relPath` spelling.
  *
@@ -196,6 +197,47 @@ export function parseFindQuery(raw: string): FindQuery {
   q.numbers = [...new Set(q.numbers)];
   q.words = [...new Set(q.words)].filter((w) => !q.numbers.includes(w));
   return q;
+}
+
+/**
+ * Is this token a FILTER — `in:`, `series:`, `type:`, `age:`, `is:` (any
+ * value, an empty one included) or a `#tag`? A `#<digits>` token is a number
+ * word, not a filter.
+ */
+export function isFindFilterToken(tok: string): boolean {
+  const colon = tok.indexOf(":");
+  if (colon > 0 && KNOWN_KEYS.has(tok.slice(0, colon).toLowerCase())) return true;
+  return tok.length > 1 && tok.startsWith("#") && !/^#\d+$/.test(tok);
+}
+
+/** Does the query narrow by any filter token? The palette's Everywhere
+ *  section is off while it does: filters mean "narrow this wiki". */
+export function hasFindFilters(raw: string): boolean {
+  return tokenize(raw).some(isFindFilterToken);
+}
+
+/**
+ * The query's free tokens in their TYPED spelling (not folded), filter tokens
+ * dropped and `"` removed: `text` keeps `#12` (the palette's hard number),
+ * `remote` is its digits `12` — what huginn and claude-usage are sent.
+ */
+export function findFreeTokens(raw: string): Array<{ text: string; remote: string }> {
+  const out: Array<{ text: string; remote: string }> = [];
+  for (const tok of tokenize(raw)) {
+    if (tok === "#" || isFindFilterToken(tok)) continue;
+    const text = tok.replace(/"/g, "");
+    const remote = /^#\d+$/.test(text) ? text.slice(1) : text;
+    if (remote) out.push({ text, remote });
+  }
+  return out;
+}
+
+/** The free words the remote legs are sent, joined by one space — and the key
+ *  the palette refetches Everywhere on. */
+export function freeText(raw: string): string {
+  return findFreeTokens(raw)
+    .map((t) => t.remote)
+    .join(" ");
 }
 
 /** Does the query say anything at all? */
