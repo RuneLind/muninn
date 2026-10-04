@@ -16,9 +16,12 @@
  * `age:<N` / `age:>N` days on the worked-on axis; `#tag` a tag prefix, but
  * `#<digits>` a number word; `is:retired` admits culled pages. A known key with
  * no value yet (`in:`, `type:`, `#`, `age:<`) is ignored; any other `key:` token
- * is a free word. `in:`, `series:` and `type:` OR their values (`type:plan
- * type:blog`); two `#tag`s AND; two `age:` bounds AND, so a second bound of the
- * same direction keeps the tighter. Across keys everything ANDs.
+ * is a free word (quotes and all: `foo:"a b"` is the one word `foo:a b`). `<`
+ * or `>` alone is unfinished only after `age:`. `in:`, `series:` and `type:` OR
+ * their values (`type:plan type:blog`); two `#tag`s AND; two `age:` bounds AND,
+ * so a second bound of the same direction keeps the tighter. Across keys
+ * everything ANDs. A chip REPLACES the `series:` tokens and keeps the rest, so
+ * it yields exactly the count it shows (pinned by a property test).
  *
  * Score, per page: each word SUMS the weights of the fields it hits (title 3,
  * series 2, tags/aliases 1.5, description 1, relPath 1); a word that hits no
@@ -108,7 +111,8 @@ export function seriesMatchKey(key: string): string {
   return seriesCensusKey(key.replace(/"/g, ""));
 }
 
-/** Keys that are syntax even before a value is typed. */
+/** Keys that are syntax even before a value is typed: an empty value (`in:`,
+ *  `type:""`) is ignored rather than read as a word. */
 const KNOWN_KEYS = new Set(["in", "series", "type", "is", "age"]);
 
 export function parseFindQuery(raw: string): FindQuery {
@@ -118,7 +122,10 @@ export function parseFindQuery(raw: string): FindQuery {
     const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
     const value = colon > 0 ? unquote(tok.slice(colon + 1)) : "";
     // Mid-typing: `in:`, `in:"`, `age:<` — no filter, and not a word either.
-    if (KNOWN_KEYS.has(key) && /^[<>]?$/.test(value.trim())) continue;
+    // `<`/`>` alone is unfinished only for `age:`; elsewhere it is a value
+    // (a series keyed `<` has a chip, and `series:<` must apply it).
+    const v = value.trim();
+    if (KNOWN_KEYS.has(key) && (v === "" || (key === "age" && (v === "<" || v === ">")))) continue;
     if (key === "in") {
       q.inSeries.push(foldText(value.trim()));
       continue;
@@ -403,9 +410,18 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
   };
 }
 
-/** The query with every `in:` and `series:` token replaced by `token`. */
+/**
+ * The query with its `series:` tokens replaced by `token`; every other token,
+ * `in:` included, stays. The chip was counted over the rows the WHOLE query
+ * admits, so the applied query must keep every filter but the one it replaces
+ * — dropping `in:` admitted a quote twin (`a"b` beside `ab`) `in:` had kept
+ * out. A dangling `key:"…` is closed first, or the appended token would be
+ * read as part of its value.
+ */
 export function applySeriesChip(raw: string, token: string): string {
-  const rest = tokenize(raw).filter((t) => !/^(in|series):/i.test(t));
+  const rest = tokenize(raw)
+    .filter((t) => !/^series:/i.test(t))
+    .map((t) => (/^[A-Za-z]+:"[^"]*$/.test(t) ? `${t}"` : t));
   return [...rest, token].join(" ");
 }
 

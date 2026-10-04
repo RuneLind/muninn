@@ -1933,14 +1933,19 @@ with a capital. Measured on mimir (585 pages, 2026-10-04): `computeRelated` +
 **The palette** (`views/components/wiki-find{,-view,-palette}.ts`). `/` (from
 the page) and ⌘K (Ctrl-K off a Mac, from anywhere, a text field included) open
 it; the rail's search box is unchanged. It ranks `allPages` in the browser —
-there is no find route. Grammar: free words ANDed, stray `"` dropped (no phrase
-search); `in:<text>`/`in:"<text>"` a substring of the series key or label;
-`series:<key>` the series whose key IS that key, in the rail's fold (what a
-series chip applies, so a chip's count is what applying it yields);
+there is no find route. Grammar: free words ANDed, a `"` on a free word dropped
+(no phrase search) — but a quoted value after an unknown key stays one word
+(`foo:"a b"` is the word `foo:a b`); `in:<text>`/`in:"<text>"` a substring of the series key or label;
+`series:<key>` the series whose key IS that key, in the rail's fold (`"`
+stripped on both sides) — what a series chip applies. A chip REPLACES the
+query's `series:` tokens and keeps every other token, `in:` included, so its
+count is what applying it yields for any listing and query (a seeded property
+test in `wiki-find.test.ts` pins it);
 `type:<prefix>`; `age:<N`/`age:>N` days on the worked-on axis, two bounds of
 one direction keeping the tighter; `#tag` a tag prefix but `#<digits>` a
 number word; `is:retired` admits culled pages; a known key with no value yet
-(`in:`, `type:`, `#`, `age:<`) is ignored; any other `key:` is a free word. A
+(`in:`, `type:`, `#`, `age:<`) is ignored, and `<`/`>` alone counts as no value only after `age:` (a series
+keyed `<` is a real value); any other `key:` is a free word. A
 digit word matches a whole number outside any ISO date, in the scorer and the
 highlighter alike, so `9` does not hit `2026-09-…`. Series groups, keys and
 labels are the rail's (`seriesKeyOf`, `seriesCensusKey`, `seriesHead`). Score = text × (1 + 0.8 × near) + 0.6 × e^(−age/30). The
@@ -1959,8 +1964,15 @@ nothing to close, since opening hides any peek (`hideRefPeek`). Closing REMOVES
 the node and returns focus to the opener. Opening is refused while another
 dialog or menu is open — the header's Tools menu included, which `modalOpen`
 does not see (`navMenuOpen`). A palette opened before the listing arrives says
-"Loading pages…" and re-ranks when it lands; Back, or any other page load the
-palette did not start, closes it. During an IME composition the root acts on
+"Loading pages…" and ranks when it lands, or says "Couldn't load pages." when
+the boot request fails. Once it shows rows, a background adoption (focus
+refetch, heartbeat) does NOT repaint it — that replaced a Tab-focused row and
+dropped focus to `<body>` behind the dialog — so the rows re-rank over the new
+listing on the next keystroke. Back/Forward closes it; a page load does not
+(the boot's own `?relPath=` load lands after a palette opened during it, and a
+load the reader starts from a row closes the palette first). The open page's
+`near` is dropped when a load starts, so a failed or aborted load boosts
+nothing. During an IME composition the root acts on
 no key. Acceptance: `strength.test.ts`,
 `session-refs.test.ts`, `routes/wiki-near.test.ts`,
 `views/components/wiki-find.test.ts` and `e2e/wiki-find.spec.ts`.

@@ -13,9 +13,10 @@
  *  3. **Open, close, focus.** Focus returns to whatever opened the palette, and
  *     ⌘K toggles it rather than reopening.
  *  4. **Timing and state the shell owns.** A key inside the 120 ms debounce, an
- *     IME composition, a listing that has not arrived, a Back press, a failed
- *     page load and an open Tools menu — each needs the real shell around the
- *     palette.
+ *     IME composition, a listing that has not arrived (or failed), a deep-link
+ *     boot's own page load, a background listing adoption, a Back press, a
+ *     failed or aborted page load and an open Tools menu — each needs the real
+ *     shell around the palette.
  *
  * Fixture: a temp wiki whose pages all share one mtime (`settleWikiMtimes`,
  * then `utimesSync` on the pair the near-boost case compares), because an
@@ -385,4 +386,84 @@ test("after a failed page load the previous page's closeness no longer boosts", 
   await expect(rows(page)).toHaveCount(2);
   // Equal text, equal dates, no closeness: the relPath tie-break decides.
   await expect(rows(page).first()).toHaveAttribute("data-relpath", "notes/far.mdx");
+});
+
+test("a deep-link boot keeps a palette opened before the listing landed: rows ranked, focus in the input", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route(/\/api\/wiki\/pages\?/, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(OPEN)}`, { waitUntil: "domcontentloaded" });
+  await page.locator("body").press("/");
+  await expect(palette(page)).toBeVisible();
+  await input(page).fill("gamma");
+  await page.waitForTimeout(400);
+  release();
+  // The boot render's own page load (`?relPath=`) runs after the listing lands.
+  await expect(h1(page)).toHaveText("Open plan");
+  await expect(palette(page)).toBeVisible();
+  await expect(input(page)).toHaveValue("gamma");
+  await expect(rows(page)).toHaveCount(3);
+  await expect(input(page)).toBeFocused();
+});
+
+test("a background listing adoption keeps focus inside an open palette", async ({ page }) => {
+  await page.clock.install();
+  // The focus refetch asks with `?refresh=1`; give it one more page, so the
+  // fingerprint differs and the start view adopts it.
+  await page.route(/\/api\/wiki\/pages\?.*refresh=1/, async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    body.pages.push({ ...body.pages[0], name: "zeta-extra", title: "Zeta extra", relPath: "plans/zeta-extra.mdx" });
+    await route.fulfill({ response: res, json: body });
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+  await expect(page.locator("#wikiList .wiki-list-item").first()).toBeVisible();
+  await page.locator("body").press("/");
+  await input(page).fill("gamma");
+  await page.clock.runFor(300);
+  await expect(rows(page)).toHaveCount(3);
+  await page.keyboard.press("Tab"); // the chip
+  await page.keyboard.press("Tab"); // the first row
+  await expect(rows(page).first()).toBeFocused();
+  const refetch = page.waitForResponse(/\/api\/wiki\/pages\?.*refresh=1/);
+  await page.clock.fastForward(31_000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await refetch;
+  // The adoption has run once the rail lists the extra page.
+  await expect(page.locator('#wikiList [data-relpath="plans/zeta-extra.mdx"]')).toHaveCount(1);
+  expect(await page.evaluate(() => !!document.activeElement?.closest("#wikiFind"))).toBe(true);
+  const layoutClass = await page.locator(".wiki-layout").getAttribute("class");
+  await page.keyboard.press("f");
+  await expect(page.locator(".wiki-layout")).toHaveAttribute("class", layoutClass ?? "");
+  await expect(palette(page)).toBeVisible();
+});
+
+test("after an ABORTED page load the previous page's closeness no longer boosts", async ({ page }) => {
+  await openReader(page);
+  await page.route(/\/api\/wiki\/page\?/, (route) => route.abort());
+  await page.evaluate((wiki) => {
+    history.pushState({}, "", `/wiki?wiki=${wiki}&relPath=${encodeURIComponent("plans/bridge.mdx")}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, WIKI);
+  await expect(page.locator("#articleWrap .wiki-empty-state")).toContainText("Failed to load page");
+  await find(page, "ledger notes");
+  await expect(rows(page)).toHaveCount(2);
+  await expect(rows(page).first()).toHaveAttribute("data-relpath", "notes/far.mdx");
+});
+
+test("a failed boot listing says so in an open palette instead of loading forever", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route(/\/api\/wiki\/pages\?/, async (route) => {
+    await gate;
+    await route.abort();
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`, { waitUntil: "domcontentloaded" });
+  await page.locator("body").press("/");
+  await expect(page.locator("#wikiFindList .wiki-find-empty")).toHaveText("Loading pages…");
+  release();
+  await expect(page.locator("#wikiFindList .wiki-find-empty")).toHaveText("Couldn't load pages.");
 });

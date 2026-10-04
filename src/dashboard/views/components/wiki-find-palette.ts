@@ -15,7 +15,10 @@
  *
  * Closing REMOVES the node — opacity or visibility would keep client rects
  * and leave `modalOpen` true — and returns focus to the opener. The shell also
- * closes it on a navigation it did not start (Back, another page load).
+ * closes it on Back/Forward. A page load does NOT close it: the boot's own
+ * `?relPath=` load lands after a palette the reader opened while the listing
+ * was still in flight, and every page load the reader starts from inside the
+ * palette closes it first (`openRow`).
  *
  * During an IME composition the root still stops every key but acts on none:
  * Enter and Escape belong to the composition there.
@@ -30,6 +33,7 @@ import {
   FIND_LIST_ID,
   FIND_SCRIM_ID,
   findChipsHtml,
+  findFailedHtml,
   findListHtml,
   findLoadingHtml,
   findPaletteHtml,
@@ -43,8 +47,8 @@ import { modalOpen, navMenuOpen, readerKeyEventOf, readerKeyRefused } from "./wi
 export interface FindPalettePort {
   /** The listing the rail holds. */
   getPages(): readonly WikiListing[];
-  /** Has the first listing arrived? */
-  isLoaded(): boolean;
+  /** Has the first listing arrived — or did the boot request for it fail? */
+  listingState(): FindListingState;
   /** The open page's `near` map, `{}` when no page is open. */
   getNear(): Record<string, number>;
   /** The listing's scan instant, for `anchorNow`. */
@@ -57,6 +61,8 @@ export interface FindPalettePort {
   onOpen(): void;
 }
 
+export type FindListingState = "loading" | "ready" | "failed";
+
 /** Debounce between a keystroke and a re-rank. */
 export const FIND_DEBOUNCE_MS = 120;
 
@@ -64,6 +70,8 @@ let port: FindPalettePort | null = null;
 let opener: HTMLElement | null = null;
 let result: FindResult | null = null;
 let active = 0;
+/** The listing state the open palette last painted. */
+let shownState: FindListingState = "loading";
 let debounce: ReturnType<typeof setTimeout> | null = null;
 const mac = typeof navigator !== "undefined" && isMacPlatform(navigator.platform || navigator.userAgent || "");
 
@@ -88,10 +96,11 @@ function render(): void {
   const chips = document.getElementById(FIND_CHIPS_ID);
   if (!box || !list || !chips) return;
   const query = box.value;
-  if (!port.isLoaded()) {
+  shownState = port.listingState();
+  if (shownState !== "ready") {
     result = null;
     chips.innerHTML = "";
-    list.innerHTML = findLoadingHtml();
+    list.innerHTML = shownState === "failed" ? findFailedHtml() : findLoadingHtml();
     box.removeAttribute("aria-activedescendant");
     return;
   }
@@ -130,9 +139,16 @@ function flushPending(): void {
   render();
 }
 
-/** Re-rank an open palette — the shell calls it when the listing changes. */
+/**
+ * Repaint an open palette that is still showing "Loading" or the failure line
+ * — the shell calls it whenever the listing arrives or its boot request fails.
+ * A palette already showing rows is left alone: a background adoption (focus
+ * refetch, heartbeat) would otherwise replace the rows and chips under a
+ * Tab-focused one, dropping focus to `<body>`, where reader keys fire behind
+ * the open dialog. Its rows re-rank over the new listing on the next keystroke.
+ */
 export function refreshFind(): void {
-  if (isFindOpen()) render();
+  if (isFindOpen() && shownState !== "ready") render();
 }
 
 function scheduleRender(): void {

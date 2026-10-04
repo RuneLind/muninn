@@ -11,9 +11,10 @@ import {
   highlightFind,
   parseFindQuery,
   rankFind,
+  seriesMatchKey,
 } from "./wiki-find.ts";
 import type { WikiListing } from "./wiki-filter.ts";
-import { seriesHead } from "./wiki-groups.ts";
+import { seriesHead, seriesKeyOf } from "./wiki-groups.ts";
 
 const NOW = Date.parse("2026-10-04T12:00:00Z");
 const DAY = 86_400_000;
@@ -204,7 +205,7 @@ describe("ordering and grouping", () => {
     expect(r.rows.length).toBe(FIND_ROWS_MAX);
     expect(r.total).toBe(50);
     expect(r.chips).toEqual([{ seriesKey: "big series", label: "Big series", count: 50, token: 'series:"big series"' }]);
-    expect(applySeriesChip("ledger in:old series:x", r.chips[0]!.token)).toBe('ledger series:"big series"');
+    expect(applySeriesChip("ledger in:old series:x", r.chips[0]!.token)).toBe('ledger in:old series:"big series"');
   });
 });
 
@@ -325,5 +326,147 @@ describe("highlightFind and ISO dates", () => {
 
   test("a non-digit term is unaffected by the date rule", () => {
     expect(highlightFind("2026-10-02 round", ["round", "10"])).toBe("2026-10-02 <mark>round</mark>");
+  });
+});
+
+/** mulberry32 — a seeded PRNG, so a failing case reproduces from its seed. */
+function prng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+describe("chip invariant (property): a chip's count is what applying it yields", () => {
+  // Pieces a series key is built from: the grammar's own syntax characters,
+  // diacritics, case variants, whitespace, and keys that are substrings of others.
+  const PIECES = ["<", ">", '"', " ", ":", "#", "ø", "æ", "å", "Ø", "Å", "a", "A", "b", "ab", "ship", "Ship", "shipping", "in:", "é", "é", "  ", "-", "x"];
+  const FIXED = ["<", ">", 'a"b', "ab", "Kjøring", "kjøring", "KJØRING", "  ", '"', "a b", "ship", "shipping-pipeline", "#ops", "in:x", "series:y", '"q"', "<a", ">b c"];
+  const WORDS = ["note", "ledger", "review", "ship", "round", "10", "9", "kjoring", "alpha"];
+  const LABELS = ["Driftsplan", "Ship", "Notes", "<", "a b", ""];
+
+  function pick<T>(r: () => number, xs: readonly T[]): T {
+    return xs[Math.floor(r() * xs.length)]!;
+  }
+
+  function listing(r: () => number): WikiListing[] {
+    const keys = Array.from({ length: 2 + Math.floor(r() * 5) }, () =>
+      r() < 0.5
+        ? pick(r, FIXED)
+        : Array.from({ length: 1 + Math.floor(r() * 3) }, () => pick(r, PIECES)).join(""),
+    );
+    const n = 3 + Math.floor(r() * 25);
+    return Array.from({ length: n }, (_, i) => {
+      const words = Array.from({ length: 1 + Math.floor(r() * 3) }, () => pick(r, WORDS));
+      const label = pick(r, LABELS);
+      return pg(`p/${i}.md`, {
+        title: words.join(" "),
+        series: r() < 0.8 ? pick(r, keys) : undefined,
+        seriesLabel: label || undefined,
+        tags: r() < 0.3 ? ["ops"] : [],
+        type: r() < 0.5 ? "plan" : "blog",
+        culled: r() < 0.1,
+        mtimeMs: NOW - Math.floor(r() * 60) * DAY,
+      });
+    }) as WikiListing[];
+  }
+
+  function query(r: () => number, pages: readonly WikiListing[]): string {
+    const keys = pages.map((p) => p.series ?? "").filter(Boolean);
+    const frag = () => {
+      const k = keys.length ? pick(r, keys) : "ab";
+      const a = Math.floor(r() * k.length);
+      return k.slice(a, a + 1 + Math.floor(r() * 4));
+    };
+    const toks = Array.from({ length: 1 + Math.floor(r() * 3) }, () => {
+      const roll = r();
+      if (roll < 0.35) return pick(r, WORDS);
+      if (roll < 0.55) {
+        const f = frag();
+        return r() < 0.5 || /\s/.test(f) ? `in:"${f}"` : `in:${f}`;
+      }
+      if (roll < 0.65) return `series:"${keys.length ? pick(r, keys) : "x"}"`;
+      return pick(r, ["type:pl", "#ops", "is:retired", "age:<30", "age:>5", '"', "<", ">", 'foo:"a b"', "#", "in:", 'in:"ab']);
+    });
+    // An unclosed quote last: the next token a chip appends must not fall into it.
+    if (r() < 0.15) toks.push(`in:"${frag()}`);
+    return toks.join(" ");
+  }
+
+  test("for 600 seeded listings × 4 queries: count == applied total, applying twice is idempotent, every applied row is in the chip's series", () => {
+    const bad: string[] = [];
+    let chipsSeen = 0;
+    for (let seed = 1; seed <= 600 && bad.length < 5; seed++) {
+      const r = prng(seed);
+      const pages = listing(r);
+      for (let k = 0; k < 4; k++) {
+        const q = query(r, pages);
+        const res = rankFind(pages, q, { now: NOW, limit: 1000 });
+        for (const c of res.chips) {
+          chipsSeen++;
+          const applied = applySeriesChip(q, c.token);
+          const got = rankFind(pages, applied, { now: NOW, limit: 1000 });
+          const twice = applySeriesChip(applied, c.token);
+          const outside = got.rows.filter((x) => seriesMatchKey(seriesKeyOf(x.page)) !== c.seriesKey);
+          if (got.total !== c.count || twice !== applied || outside.length) {
+            bad.push(
+              `seed ${seed}: query ${JSON.stringify(q)} chip ${JSON.stringify(c.token)} count ${c.count} → ` +
+                `${JSON.stringify(applied)} yields ${got.total}` +
+                (twice !== applied ? `; twice ${JSON.stringify(twice)}` : "") +
+                (outside.length ? `; ${outside.length} rows outside the series` : ""),
+            );
+            break;
+          }
+        }
+      }
+    }
+    expect(bad).toEqual([]);
+    expect(chipsSeen).toBeGreaterThan(500);
+  });
+
+  test("a series key `<` or `>` is a series, not an empty value (only `age:` reads `<`/`>` as unfinished)", () => {
+    const pages = [
+      pg("a.md", { title: "Note a", series: "<" }),
+      pg("b.md", { title: "Note b", series: "<" }),
+      pg("c.md", { title: "Note c", series: ">" }),
+    ];
+    const r = rankFind(pages, "note", { now: NOW });
+    const lt = r.chips.find((c) => c.seriesKey === "<")!;
+    expect(lt.count).toBe(2);
+    expect(rankFind(pages, applySeriesChip("note", lt.token), { now: NOW }).total).toBe(2);
+    expect(parseFindQuery("series:<").series).toEqual(["<"]);
+    expect(parseFindQuery("in:>").inSeries).toEqual([">"]);
+    expect(parseFindQuery("age:<").ageLt).toBeUndefined();
+  });
+
+  test("quote twins `a\"b` and `ab` under `in:ab`: the chip keeps `in:` and yields its count", () => {
+    const pages = [pg("q.md", { title: "Note q", series: 'a"b' }), pg("p.md", { title: "Note p", series: "ab" })];
+    const r = rankFind(pages, "note in:ab", { now: NOW });
+    const chip = r.chips[0]!;
+    expect(chip.count).toBe(1);
+    const applied = applySeriesChip("note in:ab", chip.token);
+    expect(applied).toBe("note in:ab series:ab");
+    expect(rankFind(pages, applied, { now: NOW }).total).toBe(1);
+  });
+
+  test("an unclosed quoted value is closed before a chip is appended", () => {
+    expect(applySeriesChip('note in:"ab', "series:ab")).toBe('note in:"ab" series:ab');
+  });
+});
+
+describe("pinned rules", () => {
+  test("the scorer's ISO-date rule: `10` does not hit a date, and does hit a whole 10 beside one", () => {
+    expect(order([pg("d.md", { title: "Notes 2026-10-04" })], "10")).toEqual([]);
+    expect(order([pg("r.md", { title: "Round 10 on 2026-10-04" })], "10")).toEqual(["r.md"]);
+  });
+
+  test("a series label is looked up by the rail's fold of the key — `in:` and a free word both reach it", () => {
+    const pages = [pg("k.md", { title: "Plan", series: "Kjøring", seriesLabel: "Driftsplan" })];
+    expect(order(pages, "in:drift")).toEqual(["k.md"]);
+    expect(order(pages, "driftsplan")).toEqual(["k.md"]);
   });
 });

@@ -67,6 +67,11 @@ export function findLoadingHtml(): string {
   return `<div class="wiki-find-empty">Loading pages…</div>`;
 }
 
+/** The list when the boot request for the listing failed. */
+export function findFailedHtml(): string {
+  return `<div class="wiki-find-empty">Couldn't load pages.</div>`;
+}
+
 /**
  * The result list. `hrefFor` gives each row a real link (middle-click and
  * Shift-Enter open it in a new tab); `titleOf` resolves a superseded page's

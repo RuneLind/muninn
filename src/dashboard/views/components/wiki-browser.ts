@@ -565,6 +565,8 @@ function syncDisplayFromUrl(): void {
 let allPages: WikiListing[] = [];
 /** Has any listing arrived? Before it, the find palette says "Loading". */
 let pagesLoaded = false;
+/** Did the boot request for the listing fail? The palette then says so. */
+let pagesLoadFailed = false;
 /** The server's index-scan instant from `/api/wiki/pages`, kept solely to anchor the
  *  recency reads' `now` (see `recencyNow`). Null until the listing lands / on a
  *  degraded response. */
@@ -3867,7 +3869,6 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 }
 
 function loadPage(name: string, push: boolean, revealHash = true): void {
-  if (isFindOpen()) closeFind(false); // a navigation leaves the palette's rows stale
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
@@ -3897,7 +3898,6 @@ function loadPage(name: string, push: boolean, revealHash = true): void {
  *  pushed history entry so Back/reload/share re-resolve the SAME page;
  *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true, revealHash = true): void {
-  if (isFindOpen()) closeFind(false); // a navigation leaves the palette's rows stale
   hideExplainPill();
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
@@ -3921,6 +3921,9 @@ function loadPageByRelPath(relPath: string, push = true, revealHash = true): voi
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
 function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): void {
+  // The page being left stops boosting a find now: a load that fails (an error
+  // payload or a rejected fetch) leaves `currentRelPath` on it.
+  currentNear = null;
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -3929,8 +3932,6 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       setAtlasFull(false);
       navInFlight = false;
       if (data.error) {
-        // The previous page's closeness must not boost a find on this one.
-        currentNear = null;
         removeGraph();
         document.getElementById("articleWrap")!.innerHTML =
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
@@ -7237,7 +7238,7 @@ document.addEventListener("click", (e) => {
 // listener is document-level, bubble phase. See `wiki-find-palette.ts`.
 initFindPalette({
   getPages: () => allPages,
-  isLoaded: () => pagesLoaded,
+  listingState: () => (pagesLoaded ? "ready" : pagesLoadFailed ? "failed" : "loading"),
   getNear: () => (currentNear && currentNear.relPath === currentRelPath ? currentNear.near : {}),
   getScannedAt: () => scannedAtMs,
   openPage: (relPath) => loadPageByRelPath(relPath),
@@ -7646,7 +7647,8 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // boot render already paints the chip the URL asked for as active.
   adoptProjectFilter(boot);
   adoptJiraFilter(boot);
-  // A palette opened before this listing arrived is showing "Loading".
+  // A palette opened before this listing arrived is showing "Loading" (or the
+  // failure line, when a later refetch heals a failed boot).
   refreshFind();
 }
 
@@ -7736,6 +7738,9 @@ function applyPendingPages(): void {
 function paintBootError(html: string): void {
   if (pagesRefresh.bootRendered) return;
   document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-empty-state">${html}</div>`;
+  // An open palette is still saying "Loading pages…".
+  pagesLoadFailed = true;
+  refreshFind();
 }
 
 /** Distinguish the two WIKI-set failures the server reports: an unknown wiki

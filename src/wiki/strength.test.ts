@@ -339,7 +339,7 @@ describe("neighbours — the cuts and their sides", () => {
 });
 
 describe("hop ordering", () => {
-  test("the tuned numbers are the ones the docblocks were measured against", () => {
+  test("the weights, caps and session-digest guard are pinned at their documented values", () => {
     // Value pins: a move must be a deliberate edit here too.
     expect(STRENGTH_LINK_ONE_WAY).toBe(1.0);
     expect(STRENGTH_LINK_BOTH_WAYS).toBe(1.6);
