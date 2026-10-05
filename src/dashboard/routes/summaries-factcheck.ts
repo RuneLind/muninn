@@ -27,7 +27,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { readSummarySourceText } from "../../summaries/source-text.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
-import { claimSourceUrls, factcheckBodySha256, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
+import { factcheckBodySha256, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
 import {
   getSummaryFactcheck,
   listSummaryFactcheckBadges,
@@ -37,13 +37,25 @@ import {
   type SummaryFactcheckBadge,
   type SummaryFactcheckInput,
 } from "../../db/summary-factchecks.ts";
-import { streamFactcheckSSE, type FactcheckDoneResult } from "./factcheck-sse.ts";
+import { sourcesLineUrls, streamFactcheckSSE, type ClaimOutcome, type FactcheckDoneResult } from "./factcheck-sse.ts";
 import { summaryDocTitle, type SummaryShareDoc } from "./summaries-share.ts";
+import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
+import { enhanceConfidenceHtml } from "../views/components/wiki-ask-render.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "summaries-factcheck");
 
 const DOC_FETCH_TIMEOUT_MS = 10_000;
+
+/** A fact-check answer as reader HTML — the wiki's own pipeline plus its
+ *  confidence chips, rendered here so the /summaries bundle carries no
+ *  markdown renderer. */
+export function renderSummaryFactcheckHtml(answer: string): string {
+  return enhanceConfidenceHtml(renderAskAnswerHtml(answer, []));
+}
+
+/** The engine's `ClaimOutcome`s that mean "no ruling was reached". */
+const PARTIAL_OUTCOMES: ReadonlySet<ClaimOutcome> = new Set(["error", "timeout", "skipped"]);
 
 export interface SummariesFactcheckDeps {
   /** The source file, frontmatter stripped (`readSummarySourceText`); `null` when unreadable. */
@@ -85,7 +97,7 @@ export function savedClaims(result: FactcheckDoneResult): SavedFactcheckClaim[] 
     verdict: c.verdict,
     outcome: c.outcome,
     ...(typeof c.confidence === "number" ? { confidence: c.confidence } : {}),
-    sources: claimSourceUrls(c.markdown),
+    sources: sourcesLineUrls(c.markdown),
   }));
 }
 
@@ -150,12 +162,18 @@ export function registerSummariesFactcheckRoutes(
       wikiName: collection,
       mode: "article",
       baseHash: bodySha256,
+      renderAnswerHtml: renderSummaryFactcheckHtml,
       ...(deps.oneShot ? { oneShot: deps.oneShot } : {}),
       onDone: async (result) => {
         // A run where every claim timed out or was skipped holds no verdict;
         // saving it would replace a real earlier result with nothing.
-        if (result.claimCount === 0) return { saved: false };
+        if (result.claimCount === 0) return { saved: false, reason: "no-verdict" };
         try {
+          // A partial run (a claim errored, timed out or was skipped) never
+          // replaces an earlier result; with none to protect, it still saves.
+          if (result.claims.some((c) => PARTIAL_OUTCOMES.has(c.outcome)) && (await deps.store.get(collection, docId))) {
+            return { saved: false, reason: "partial" };
+          }
           const row = await deps.store.upsert({
             collection,
             docId,
@@ -192,7 +210,7 @@ export function registerSummariesFactcheckRoutes(
     if (!row) return c.json({ result: null, stale: null });
     const sourceText = await deps.readSourceText(doc.collection, doc.docId);
     const stale = sourceText === null ? null : factcheckBodySha256(sourceText) !== row.bodySha256;
-    return c.json({ result: row, stale });
+    return c.json({ result: row, stale, html: renderSummaryFactcheckHtml(row.answer) });
   });
 
   app.get("/api/summaries/factcheck/badges", async (c) => {

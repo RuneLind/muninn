@@ -71,10 +71,12 @@ const SOURCE_TEXT =
 /** Verdict per claim title; anything else answers the compose call. */
 let verdicts: Record<string, string> = {};
 let failClaims = false;
+/** Claim titles whose verify call throws (a per-claim `error` outcome). */
+let failTitles = new Set<string>();
 const oneShot = async (prompt: string) => {
   const m = /CLAIM \((\d+)\/(\d+)\): (.+)/.exec(prompt);
   if (!m) return { result: "Two claims checked.", inputTokens: 1, outputTokens: 1, numTurns: 1 };
-  if (failClaims) throw new Error("upstream exploded");
+  if (failClaims || failTitles.has(m[3]!)) throw new Error("upstream exploded");
   const [, i, n, title] = m;
   const v = verdicts[title!] ?? "✅";
   return {
@@ -130,6 +132,7 @@ beforeEach(() => {
   extractionResult = null;
   verdicts = { "Caffeine half-life is five hours": "❌" };
   failClaims = false;
+  failTitles = new Set();
   source = SOURCE_TEXT;
   saved = [];
   stored = null;
@@ -248,6 +251,28 @@ describe("GET /api/summaries/factcheck — persist on done, never on failure", (
     expect(saved).toEqual([]);
   });
 
+  test("a PARTIAL re-run (a claim errored) does not replace an earlier complete row", async () => {
+    const a = app();
+    await run(a); // earlier complete row: [✅, ❌]
+    expect(saved).toHaveLength(1);
+    expect(stored!.claims.map((c) => c.verdict)).toEqual(["✅", "❌"]);
+    failTitles = new Set(["Caffeine half-life is five hours"]);
+    const { events } = await run(a);
+    expect(saved).toHaveLength(1);
+    expect(stored!.claims.map((c) => c.verdict)).toEqual(["✅", "❌"]);
+    const d = done(events)!;
+    expect(d.saved).toBe(false);
+    expect(d.reason).toBe("partial");
+  });
+
+  test("a partial run with NO earlier row still saves (better than nothing)", async () => {
+    failTitles = new Set(["Caffeine half-life is five hours"]);
+    const { events } = await run(app());
+    expect(saved).toHaveLength(1);
+    expect(saved[0]!.claims.map((c) => c.outcome)).toEqual(["verified", "error"]);
+    expect(done(events)!.saved).toBe(true);
+  });
+
   test("a failed save still sends done, flagged unsaved", async () => {
     upsertThrows = true;
     const { events } = await run(app());
@@ -288,6 +313,28 @@ describe("GET /api/summaries/factcheck/result — stale", () => {
     await run(a);
     source = null;
     expect((await result(a)).stale).toBeNull();
+  });
+});
+
+describe("server-rendered answer HTML (the client bundles no markdown renderer)", () => {
+  test("the stream ends with answer_html carrying confidence chips and clickable sources", async () => {
+    const { events } = await run(app());
+    const names = events.map((e) => e.event);
+    expect(names.indexOf("answer_html")).toBeGreaterThan(names.indexOf("done"));
+    const html = String(events.find((e) => e.event === "answer_html")!.data.html);
+    expect(html).toContain('<span class="wiki-fc-conf-chip hi">85/100</span>');
+    expect(html).toContain('href="https://example.org/a"');
+    expect(html).not.toContain("Confidence: 85/100");
+  });
+
+  test("/result carries the saved answer rendered the same way", async () => {
+    const a = app();
+    await run(a);
+    const r = (await (await a.request(`/api/summaries/factcheck/result?source=youtube&docId=${encodeURIComponent(DOC)}`)).json()) as {
+      html?: string;
+    };
+    expect(r.html).toContain('<span class="wiki-fc-conf-chip hi">85/100</span>');
+    expect(r.html).toContain('href="https://example.org/b"');
   });
 });
 

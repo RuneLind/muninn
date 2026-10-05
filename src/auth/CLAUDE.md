@@ -322,7 +322,7 @@ passes through the Host / same-origin arms instead — known, not fixed.
 Scoped to **side effects, not to methods**. `SIDE_EFFECTING_GETS` (`origin.ts`)
 is the enumerated exception list — the pending consume (and its `/simulator/`
 alias), the research synthesis GET, the wiki ask/digest/explain/fact-check
-model-and-egress GETs, the provenance, graph and find-everywhere amplifiers, the MCP-status
+model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the MCP-status
 probe and the
 two WS upgrade paths. Three examples: `GET /chat/pending/:threadId` is a one-time *consume*
 (a cross-site `<img>` destroys the victim's pending message without reading a

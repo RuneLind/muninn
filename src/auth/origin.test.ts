@@ -165,6 +165,18 @@ describe("decideOrigin — the pure rule", () => {
     expect(isSideEffectingRequest("GET", "/api/wiki/provenancex")).toBe(false);
   });
 
+  test("the /summaries fact check is listed — model spend, web egress and a row write", () => {
+    const path = "/api/summaries/factcheck";
+    expect(isSideEffectingRequest("GET", path)).toBe(true);
+    expect(isSideEffectingRequest("HEAD", path)).toBe(true);
+    expect(
+      decideOrigin({ ...base, mode: "off", method: "GET", path, origin: "https://evil.example", secFetchSite: "cross-site" }).allowed,
+    ).toBe(false);
+    // Its read-only siblings stay off the list.
+    expect(isSideEffectingRequest("GET", "/api/summaries/factcheck/result")).toBe(false);
+    expect(isSideEffectingRequest("GET", "/api/summaries/factcheck/badges")).toBe(false);
+  });
+
   test("find-everywhere is listed — one GET sends reader text to huginn and claude-usage", () => {
     expect(SIDE_EFFECTING_GETS).toContain("/api/wiki/find-everywhere");
     expect(isSideEffectingRequest("GET", "/api/wiki/find-everywhere")).toBe(true);

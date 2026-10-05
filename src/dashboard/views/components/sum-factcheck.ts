@@ -9,10 +9,7 @@ export const sumFactcheckClientScript = makeBundledClientScript("sum-factcheck-b
 
 export function sumFactcheckStyles(): string {
   return `
-    /* Chrome around the summary, not part of it: a copy of the article never
-       picks up the verdicts. */
     .sum-fc {
-      user-select: none;
       margin: 0 0 20px;
       padding: 12px 16px;
       border: 1px solid var(--border-primary);
@@ -21,6 +18,9 @@ export function sumFactcheckStyles(): string {
       font-size: 14px;
     }
     .sum-fc[hidden] { display: none; }
+    /* The chrome opts out of selection; the answer and its sources stay
+       selectable, since quoting a verdict or copying a source is the point. */
+    .sum-fc-head, .sum-fc-progress, .sum-fc-wait, .sum-fc-err { user-select: none; }
     .sum-fc-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
     .sum-fc-title { font-weight: 600; color: var(--text-primary); }
     .sum-fc-chips { display: inline-flex; gap: 6px; }

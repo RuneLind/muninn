@@ -317,17 +317,27 @@ article mode, unchanged prompts) over the summary and saves the result in
 `src/dashboard/views/components/sum-factcheck-client.ts`, a standalone bundle.
 
 - **What is checked.** `readSummarySourceText` (the raw file), cut by
-  `summaryFactcheckBody` (`factcheck-body.ts`) at `## Transcript` and at a
-  `## Visual reference` appendix above it. `body_sha256` hashes that cut text,
+  `summaryFactcheckBody` (`factcheck-body.ts`) at `## Transcript`, minus a
+  `## Visual reference` appendix SECTION (`findAppendixSection`'s bounds, also
+  ended at the closing `> 💬 **Takeaway:**` block, which stays checked).
+  `body_sha256` hashes that cut text,
   so `/result`'s `stale` moves when the SUMMARY changes, not the transcript.
 - **Row identity is `(collection, doc_id)`, not the url.** The doc id is what the
   panel addresses, a re-run pins it, and a pasted `article` may have no url.
 - **The bot is `resolveSummarizerBot`** (role override first) and must have web
-  tools: anything else is a JSON **503** before the stream commits.
+  tools: anything else is a JSON **503** before the stream commits. The route
+  is on `SIDE_EFFECTING_GETS` (`src/auth/origin.ts`); `/result` and `/badges`
+  are read-only and are not.
 - **Saved only on `done`**, through the engine's additive `onDone` hook, which
   does not fire on an error path or once the client is gone; the route also
-  skips a run with no real verdict (`claimCount === 0`). A failed or aborted
+  skips a run with no real verdict (`claimCount === 0`), and a PARTIAL run (any
+  claim `error`/`timeout`/`skipped`) when a row already exists — `done` then
+  carries `saved:false, reason:"partial"`. A failed or aborted
   re-check therefore leaves the earlier row. Because an abort forfeits the
   save, the client keeps a run's stream open when the reader navigates away.
+- **The answer is rendered server-side** (`renderSummaryFactcheckHtml`: the
+  wiki's `renderAskAnswerHtml` + confidence chips), as `answer_html` on the
+  stream and `html` on `/result`, so the client bundle (~12 KB) carries no
+  markdown renderer.
 - **Badges** (`/badges`) are one query over the table; the client patches the
   Latest rail rows and re-reads after every completed check.

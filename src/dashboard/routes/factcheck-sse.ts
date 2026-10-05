@@ -769,6 +769,21 @@ export function linkifySourcesLines(markdown: string): string {
     .join("\n");
 }
 
+/** The http(s) URLs on a block's `Sources:` lines, de-duplicated, in order — the
+ *  same line rule, URL grammar and trailing-punctuation peel as
+ *  {@link linkifySourcesLines}, so what is saved is what the reader can click. */
+export function sourcesLineUrls(markdown: string): string[] {
+  const out: string[] = [];
+  for (const line of markdown.split("\n")) {
+    if (!/^Sources:/.test(line)) continue;
+    for (const m of line.matchAll(SOURCES_URL_RE)) {
+      const url = typeof m[2] === "string" ? m[2] : typeof m[3] === "string" ? splitTrailingUrl(m[3])[0] : "";
+      if (url && !out.includes(url)) out.push(url);
+    }
+  }
+  return out;
+}
+
 /** Assemble the final fact-check markdown: for a multi-claim check, the compose
  *  `lede` on top of the verdict blocks; for a single claim, the lone block IS the
  *  answer (no lede). Blocks are always in claim order. `Sources:` lines are

@@ -1,28 +1,11 @@
 import { test, expect, describe } from "bun:test";
 import {
-  factcheckAnswerHtml,
   factcheckBadgeHtml,
-  factcheckCheckedLabel,
   factcheckProgressHtml,
   factcheckVerdictChipsHtml,
   factcheckVerdictCounts,
 } from "./sum-factcheck-render.ts";
 import { docPanelHtml, DOC_PANEL_FACTCHECK_BTN_ID } from "./doc-panel.ts";
-
-describe("factcheckAnswerHtml", () => {
-  test("renders through the wiki reader's formatter: confidence chip, clickable source", () => {
-    const html = factcheckAnswerHtml(
-      "### ❌ Claim 1/1 — x\n\nWrong.\n\nConfidence: 35/100\n\nSources: [who.int](https://who.int/a)",
-    );
-    expect(html).toContain('<span class="wiki-fc-conf-chip lo">35/100</span>');
-    expect(html).toContain('href="https://who.int/a"');
-    expect(html).not.toContain("Confidence: 35/100");
-  });
-
-  test("escapes HTML in the answer", () => {
-    expect(factcheckAnswerHtml("<img src=x onerror=alert(1)>")).not.toContain("<img");
-  });
-});
 
 describe("verdict chips", () => {
   test("counts in ✅ ⚠️ ❌ ❓ order, a bare ⚠ counted as ⚠️", () => {
@@ -44,16 +27,6 @@ describe("progress", () => {
     expect(html).toMatch(/class="done"><span class="sum-fc-v">✅/);
     expect(html).toMatch(/class="pending"><span class="sum-fc-v">⏳/);
     expect(factcheckProgressHtml([])).toContain("Extracting claims");
-  });
-});
-
-describe("factcheckCheckedLabel", () => {
-  test("minutes, hours, days", () => {
-    const now = 10 * 86_400_000;
-    expect(factcheckCheckedLabel(now - 5_000, now)).toBe("checked just now");
-    expect(factcheckCheckedLabel(now - 5 * 60_000, now)).toBe("checked 5 min ago");
-    expect(factcheckCheckedLabel(now - 3 * 3_600_000, now)).toBe("checked 3 h ago");
-    expect(factcheckCheckedLabel(now - 2 * 86_400_000, now)).toBe("checked 2 d ago");
   });
 });
 

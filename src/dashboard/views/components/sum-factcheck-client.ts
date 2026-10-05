@@ -9,32 +9,38 @@
  * another document or closes the panel: the server saves only a run whose
  * client is still connected, so dropping the stream on navigation would throw
  * the check away. Only the RENDER follows the panel.
+ *
+ * The answer arrives as server-rendered HTML (`answer_html` on the stream,
+ * `html` on `/result`), so this bundle carries no markdown renderer.
  */
 
 import { makeSseFrameParser } from "./client-runtime.ts";
 import {
-  factcheckAnswerHtml,
   factcheckBadgeHtml,
-  factcheckCheckedLabel,
   factcheckProgressHtml,
   factcheckVerdictChipsHtml,
   type FactcheckProgressRow,
 } from "./sum-factcheck-render.ts";
 import { escHtml } from "./escape.ts";
+import { timeAgo } from "./helpers.ts";
 import { DOC_PANEL_FACTCHECK_BTN_ID } from "./doc-panel.ts";
 
 export const SUM_FACTCHECK_SECTION_ID = "sumFactcheck";
 export const SUM_FACTCHECK_BTN_ID = DOC_PANEL_FACTCHECK_BTN_ID;
 
 interface SavedClaim { verdict: string }
-interface SavedResult { answer: string; claims: SavedClaim[]; createdAt: number; botName?: string }
+interface SavedResult { answer: string; html: string | null; claims: SavedClaim[]; createdAt: number }
 interface SavedState { result: SavedResult | null; stale: boolean | null }
 
 interface RunState {
   rows: FactcheckProgressRow[];
   lede: string;
   running: boolean;
+  /** The run's notice; it outlives the run until a newer result or run replaces it. */
   error: string | null;
+  finishedAt: number;
+  /** Set once `done` adopted this run's answer, so its `answer_html` fills it in. */
+  adopted: boolean;
 }
 
 type Badge = { bad: number; total: number };
@@ -52,36 +58,45 @@ function section(): HTMLElement | null {
   return document.getElementById(SUM_FACTCHECK_SECTION_ID);
 }
 
-/** After the article column is rendered for a document. `null` source ⇒ an
- *  unregistered one: no button, no section. */
+/** At the start of an open (`mainEl` null: the article is still loading) and
+ *  again once it is rendered. `null` source ⇒ an unregistered one: no button,
+ *  no section. */
 export function sumFactcheckOnOpen(docId: string, source: string | null, mainEl: HTMLElement | null): void {
   const btn = document.getElementById(SUM_FACTCHECK_BTN_ID) as HTMLButtonElement | null;
   if (btn) btn.hidden = !source;
   current = source ? { source, docId } : null;
-  if (!current || !mainEl) return;
-  let el = section();
-  if (!el || !mainEl.contains(el)) {
-    el?.remove();
-    el = document.createElement("section");
-    el.id = SUM_FACTCHECK_SECTION_ID;
-    el.className = "sum-fc";
-    el.setAttribute("aria-label", "Fact check");
-    const body = mainEl.querySelector("#sumArticleBody");
-    if (body) mainEl.insertBefore(el, body);
-    else mainEl.insertBefore(el, mainEl.firstChild);
+  if (!current) return;
+  const key = keyOf(current.source, current.docId);
+  if (mainEl) {
+    let el = section();
+    if (!el || !mainEl.contains(el)) {
+      el?.remove();
+      el = document.createElement("section");
+      el.id = SUM_FACTCHECK_SECTION_ID;
+      el.className = "sum-fc";
+      el.setAttribute("aria-label", "Fact check");
+      const body = mainEl.querySelector("#sumArticleBody");
+      if (body) mainEl.insertBefore(el, body);
+      else mainEl.insertBefore(el, mainEl.firstChild);
+    }
+    el.dataset.key = key;
   }
   render();
-  const key = keyOf(current.source, current.docId);
   // Re-read on every open: a re-run since the last look moves `stale`.
-  if (!runs.get(key)?.running) void loadSaved(current.source, current.docId);
+  if (mainEl && !runs.get(key)?.running) void loadSaved(current.source, current.docId);
 }
 
 async function loadSaved(source: string, docId: string): Promise<void> {
+  const key = keyOf(source, docId);
   try {
     const res = await fetch(`/api/summaries/factcheck/result?${query(source, docId)}`, { cache: "no-store" });
     if (!res.ok) return;
-    const data = (await res.json()) as SavedState;
-    saved.set(keyOf(source, docId), { result: data.result, stale: data.stale });
+    const data = (await res.json()) as { result: (Omit<SavedResult, "html">) | null; stale: boolean | null; html?: string };
+    const result = data.result ? { ...data.result, html: data.html ?? null } : null;
+    saved.set(key, { result, stale: data.stale });
+    // A result newer than a finished run's notice supersedes it.
+    const run = runs.get(key);
+    if (run && !run.running && result && result.createdAt > run.finishedAt) runs.delete(key);
     render();
   } catch {
     /* no saved result shown; the button still works */
@@ -94,11 +109,12 @@ export function sumFactcheckStart(): void {
   const { source, docId } = current;
   const key = keyOf(source, docId);
   if (runs.get(key)?.running) return;
-  const run: RunState = { rows: [], lede: "", running: true, error: null };
+  const run: RunState = { rows: [], lede: "", running: true, error: null, finishedAt: 0, adopted: false };
   runs.set(key, run);
   render();
   void stream(source, docId, run).finally(() => {
     run.running = false;
+    run.finishedAt = Date.now();
     render();
   });
 }
@@ -138,19 +154,33 @@ async function stream(source: string, docId: string, run: RunState): Promise<voi
         break;
       case "done": {
         finished = true;
+        // Nothing verified, or a partial re-run over an earlier result: the
+        // server saved nothing, and the earlier result stays shown.
         if (data.claimCount === 0) {
-          // Nothing verified, nothing saved: the earlier result stays shown.
           run.error = "No claim could be verified, so nothing was saved.";
           break;
         }
-        const answer = String(data.answer || "");
-        const claims = run.rows.map((r) => ({ verdict: r.verdict || "❓" }));
+        if (data.reason === "partial") {
+          run.error = "Partial run, earlier result kept.";
+          break;
+        }
         saved.set(key, {
-          result: { answer, claims, createdAt: typeof data.checkedAt === "number" ? data.checkedAt : Date.now() },
+          result: {
+            answer: String(data.answer || ""),
+            html: null,
+            claims: run.rows.map((r) => ({ verdict: r.verdict || "❓" })),
+            createdAt: typeof data.checkedAt === "number" ? data.checkedAt : Date.now(),
+          },
           stale: false,
         });
+        run.adopted = true;
         if (data.saved !== true) run.error = "Checked, but the result could not be saved — it will be gone on reload.";
         void sumFactcheckLoadBadges();
+        break;
+      }
+      case "answer_html": {
+        const result = saved.get(key)?.result;
+        if (run.adopted && result && typeof data.html === "string") result.html = data.html;
         break;
       }
       default:
@@ -174,21 +204,24 @@ async function stream(source: string, docId: string, run: RunState): Promise<voi
 }
 
 function render(): void {
-  const el = section();
-  const btn = document.getElementById(SUM_FACTCHECK_BTN_ID) as HTMLButtonElement | null;
-  if (!el || !current) return;
+  if (!current) return;
   const key = keyOf(current.source, current.docId);
   const run = runs.get(key);
   const state = saved.get(key);
+  // The button follows the document the panel is on, even before its article
+  // (and so its section) has rendered.
+  const btn = document.getElementById(SUM_FACTCHECK_BTN_ID) as HTMLButtonElement | null;
   if (btn) btn.disabled = !!run?.running;
 
+  const el = section();
+  if (!el || el.dataset.key !== key) return;
   if (run?.running) {
     el.hidden = false;
     el.innerHTML =
-      head("Fact check", "", '<span class="sum-fc-meta">checking against the web…</span>', false) +
+      head("", '<span class="sum-fc-meta">checking against the web…</span>', false) +
       factcheckProgressHtml(run.rows) +
       (run.lede ? `<div class="sum-fc-lede">${escHtml(run.lede)}</div>` : "") +
-      (run.error ? `<div class="sum-fc-err" role="alert">${escHtml(run.error)}</div>` : "");
+      notice(run.error);
     return;
   }
   const result = state?.result;
@@ -199,23 +232,23 @@ function render(): void {
   }
   el.hidden = false;
   const meta = result
-    ? `<span class="sum-fc-meta">${escHtml(factcheckCheckedLabel(result.createdAt, Date.now()))}</span>` +
+    ? `<span class="sum-fc-meta">checked ${escHtml(timeAgo(result.createdAt))}</span>` +
       (state?.stale ? '<span class="sum-fc-stale" title="The summary changed since this check">stale</span>' : "")
     : "";
   el.innerHTML =
-    head("Fact check", result ? factcheckVerdictChipsHtml(result.claims) : "", meta, true) +
-    (run?.error ? `<div class="sum-fc-err" role="alert">${escHtml(run.error)}</div>` : "") +
-    (result ? `<div class="sum-fc-answer">${factcheckAnswerHtml(result.answer)}</div>` : "");
-  el.querySelectorAll<HTMLAnchorElement>(".sum-fc-answer a[href^='http']").forEach((a) => {
-    a.target = "_blank";
-    a.rel = "noopener";
-  });
+    head(result ? factcheckVerdictChipsHtml(result.claims) : "", meta, true) +
+    notice(run?.error ?? null) +
+    (result ? `<div class="sum-fc-answer">${result.html ?? escHtml(result.answer)}</div>` : "");
   el.querySelector(".sum-fc-recheck")?.addEventListener("click", () => sumFactcheckStart());
 }
 
-function head(title: string, chips: string, meta: string, recheck: boolean): string {
+function notice(text: string | null): string {
+  return text ? `<div class="sum-fc-err" role="alert">${escHtml(text)}</div>` : "";
+}
+
+function head(chips: string, meta: string, recheck: boolean): string {
   return (
-    `<div class="sum-fc-head"><span class="sum-fc-title">✓ ${escHtml(title)}</span>` +
+    '<div class="sum-fc-head"><span class="sum-fc-title">✓ Fact check</span>' +
     `<span class="sum-fc-chips">${chips}</span>${meta}` +
     (recheck ? '<button type="button" class="sum-fc-recheck" title="Run the fact check again">↻ Re-check</button>' : "") +
     "</div>"

@@ -1,12 +1,10 @@
 /**
  * Pure, DOM-free string builders for the `/summaries` doc panel's Fact check
- * section and the Latest rail badge. The answer itself goes through the wiki
- * reader's own renderer (`renderStreamingBody`: `formatWebHtml` + the
- * confidence chips), so a verdict block looks the same on both surfaces.
+ * chrome and the Latest rail badge. The answer itself arrives as server-rendered
+ * HTML (`renderSummaryFactcheckHtml`), so nothing here renders markdown.
  */
 
 import { escHtml } from "./escape.ts";
-import { renderStreamingBody } from "./wiki-ask-render.ts";
 
 export const FACTCHECK_VERDICTS = ["✅", "⚠️", "❌", "❓"] as const;
 
@@ -16,12 +14,6 @@ const VERDICT_LABEL: Record<string, string> = {
   "❌": "contradicted",
   "❓": "unverified",
 };
-
-/** A finished fact-check answer as reader HTML, sources clickable and every
- *  `Confidence: NN/100` line a band-coloured chip. */
-export function factcheckAnswerHtml(answer: string): string {
-  return renderStreamingBody(answer);
-}
 
 /** Count per verdict emoji, in the fixed ✅ ⚠️ ❌ ❓ order. */
 export function factcheckVerdictCounts(claims: { verdict?: string }[]): Record<string, number> {
@@ -67,15 +59,6 @@ export function factcheckProgressHtml(rows: FactcheckProgressRow[]): string {
       .join("") +
     "</ol>"
   );
-}
-
-/** "checked just now" / "checked 3 h ago" / "checked 2 d ago". */
-export function factcheckCheckedLabel(createdAt: number, now: number): string {
-  const s = Math.max(0, Math.round((now - createdAt) / 1000));
-  if (s < 60) return "checked just now";
-  if (s < 3600) return `checked ${Math.floor(s / 60)} min ago`;
-  if (s < 86_400) return `checked ${Math.floor(s / 3600)} h ago`;
-  return `checked ${Math.floor(s / 86_400)} d ago`;
 }
 
 /** The Latest rail badge: ✓ for a check with no ❌ claim, ❌N otherwise. */

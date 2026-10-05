@@ -3,7 +3,7 @@
  * `wiki-ask-render.ts` emits the markup) — one copy shared by the /wiki
  * reader and the /summaries Fact check section.
  */
-export const FACTCHECK_CONF_CHIP_CSS = `
+export const FACTCHECK_CONF_CHIP_CSS = `\
     /* Per-claim confidence line (evidence strength, NOT the verdict) — a band-
        colored chip carrying the 0-100 score, rendered in place of the model's
        Confidence NN/100 text line by enhanceConfidenceHtml. */

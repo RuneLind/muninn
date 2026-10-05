@@ -2357,7 +2357,7 @@ export async function renderWikiPage(opts?: {
       text-decoration: none; cursor: pointer;
     }
     a.wiki-fc-src-chip:hover { border-color: var(--accent); color: var(--text-primary); }
-${FACTCHECK_CONF_CHIP_CSS.slice(1)}    /* Compact per-claim fact-check tool log — a scrolling list of live verify
+${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scrolling list of live verify
        steps, pattern-copied from /agents' .run-tools mini-log (auto-scrolled to
        the newest). Ephemeral: only present while a fact check streams. */
     .wiki-fc-toollog {

@@ -217,16 +217,18 @@ test("a saved check renders with chips, confidence bands and clickable sources; 
   const fc = page.locator("#sumFactcheck");
   await expect(fc).toBeVisible();
   await expect(fc.locator(".sum-fc-chip")).toHaveText(["✅ 2"]);
-  await expect(fc.locator(".sum-fc-meta")).toHaveText("checked 2 h ago");
+  await expect(fc.locator(".sum-fc-meta")).toHaveText("checked 2h ago");
   // The server's own hash of the summary equals the one the row was saved
   // under, so no stale pill.
   await expect(fc.locator(".sum-fc-stale")).toHaveCount(0);
   await expect(fc.locator(".wiki-fc-conf-chip.hi")).toHaveCount(2);
   const src = fc.locator('a[href="https://example.org/source-1"]');
   await expect(src).toHaveAttribute("target", "_blank");
-  // Chrome, not article: the section sits above the summary body and opts out
-  // of selection.
-  expect(await fc.evaluate((el) => getComputedStyle(el).userSelect)).toBe("none");
+  // Chrome, not article: the head opts out of selection, the answer text and
+  // its source links stay selectable.
+  expect(await fc.locator(".sum-fc-head").evaluate((el) => getComputedStyle(el).userSelect)).toBe("none");
+  expect(await fc.locator(".sum-fc-answer").evaluate((el) => getComputedStyle(el).userSelect)).not.toBe("none");
+  expect(await src.evaluate((el) => getComputedStyle(el).userSelect)).not.toBe("none");
   expect(await fc.evaluate((el) => el.nextElementSibling?.id)).toBe("sumArticleBody");
 
   await expect(railRow(page, DOC_FRESH).locator(".sum-fc-badge")).toHaveText("✓");
@@ -270,6 +272,7 @@ test("a check streams progress, renders its verdicts, and the saved row survives
         ["claim_result", { type: "claim_result", index: 1, verdict: "✅", outcome: "verified", markdown: "" }],
         ["claim_result", { type: "claim_result", index: 2, verdict: "❌", outcome: "verified", markdown: "" }],
         ["done", { type: "done", answer: answer(["✅", "❌"]), saved: true, checkedAt: Date.now(), claimCount: 2 }],
+        ["answer_html", { html: '<h4>❌ Claim 2/2 — invented claim 2</h4>\n<span class="wiki-fc-conf-line"><span class="wiki-fc-conf-key">Confidence</span><span class="wiki-fc-conf-chip lo">30/100</span></span>', cited: [] }],
         ["end", {}],
       ]),
     });
@@ -285,12 +288,78 @@ test("a check streams progress, renders its verdicts, and the saved row survives
   await expect(fc.locator(".sum-fc-chip")).toHaveText(["✅ 1", "❌ 1"]);
   await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
   await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+  await expect(fc.locator(".sum-fc-answer .wiki-fc-conf-chip.lo")).toHaveText("30/100");
   await expect(railRow(page, DOC_PLAIN).locator(".sum-fc-badge")).toHaveText("❌1");
 
   await page.unroute("**/api/summaries/factcheck?*");
   await open(page, DOC_PLAIN);
   await expect(page.locator("#sumFactcheck .sum-fc-chip")).toHaveText(["✅ 1", "❌ 1"]);
   await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveCount(0);
+});
+
+const sse = (events: Array<[string, unknown]>) =>
+  events.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join("");
+
+test("a partial re-check keeps the earlier result and says so; a newer saved result clears the notice", async ({ page }) => {
+  await open(page, DOC_FRESH);
+  await expect(page.locator("#sumFactcheck .sum-fc-chip")).toHaveText(["✅ 2"]);
+  await page.route("**/api/summaries/factcheck?*", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: sse([
+        ["claims", { type: "claims", claims: [{ index: 1, title: "invented claim 1" }, { index: 2, title: "invented claim 2" }] }],
+        ["claim_result", { type: "claim_result", index: 1, verdict: "✅", outcome: "verified", markdown: "" }],
+        ["claim_result", { type: "claim_result", index: 2, verdict: "❓", outcome: "error", markdown: "" }],
+        ["done", { type: "done", answer: answer(["✅", "❓"]), saved: false, reason: "partial", claimCount: 1 }],
+        ["end", {}],
+      ]),
+    }),
+  );
+  await page.locator("#sumFactcheck .sum-fc-recheck").click();
+  const fc = page.locator("#sumFactcheck");
+  await expect(fc.locator(".sum-fc-err")).toHaveText("Partial run, earlier result kept.");
+  await expect(fc.locator(".sum-fc-chip")).toHaveText(["✅ 2"]);
+  await page.unroute("**/api/summaries/factcheck?*");
+
+  // A newer saved result (another tab, the next real run) replaces the notice.
+  await sql!`UPDATE summary_factchecks SET created_at = now() WHERE doc_id = ${DOC_FRESH}`;
+  await railRow(page, DOC_STALE).click();
+  await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+  await railRow(page, DOC_FRESH).click();
+  await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+  await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+  await seed(DOC_FRESH, ["✅", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+});
+
+test("the button stays disabled for a running document while its article is still loading", async ({ page }) => {
+  await open(page, DOC_PLAIN);
+  let releaseRun: () => void = () => {};
+  const runHeld = new Promise<void>((r) => { releaseRun = r; });
+  await page.route("**/api/summaries/factcheck?*", async (route) => {
+    await runHeld;
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: sse([["app_error", { message: "stub ended" }], ["end", {}]]) });
+  });
+  const btn = page.locator("#docPanelFactcheck");
+  await btn.click();
+  await expect(btn).toBeDisabled();
+
+  await railRow(page, DOC_STALE).click();
+  await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+  await expect(btn).toBeEnabled();
+
+  let releaseDoc: () => void = () => {};
+  const docHeld = new Promise<void>((r) => { releaseDoc = r; });
+  await page.route((u) => u.pathname.includes("/document/") && u.pathname.includes("unchecked"), async (route) => {
+    await docHeld;
+    await route.continue();
+  });
+  await railRow(page, DOC_PLAIN).click();
+  await expect(page.locator("#sumArticleMain")).toContainText("Loading");
+  await expect(btn).toBeDisabled();
+  releaseDoc();
+  releaseRun();
+  await expect(btn).toBeEnabled();
 });
 
 test("the section's text clears AA in both themes", async ({ page }) => {
