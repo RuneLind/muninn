@@ -19,6 +19,7 @@ import { registerSummariesPromptRoutes } from "./summaries-prompt.ts";
 import { registerSummariesRerunRoutes } from "./summaries-rerun.ts";
 import { registerFramesRoutes } from "./frames-routes.ts";
 import { registerSummariesContextRoutes } from "./summaries-context.ts";
+import { registerSummariesFactcheckRoutes } from "./summaries-factcheck.ts";
 
 const log = getLog("dashboard");
 
@@ -208,6 +209,10 @@ export function registerSummariesRoutes(
   // The doc panel's right-rail context: Same story this week (one search
   // across every summary source) and In your wiki (the doc's source proposals).
   registerSummariesContextRoutes(app, config);
+
+  // Fact check: the doc panel's ✓ Fact check (SSE), its saved result and the
+  // Latest rail's badges. Its own module: an adapter onto the wiki's engine.
+  registerSummariesFactcheckRoutes(app, config);
 
   app.get("/api/summaries/stats", async (c) => {
     const botName = c.req.query("bot") || "jarvis";

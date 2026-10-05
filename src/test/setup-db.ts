@@ -45,6 +45,7 @@ const ALL_TABLES = [
   // whole-listing property (does a limit of N cut anything?) depend on how often
   // the suite has been run.
   "jira_drafts",
+  "summary_factchecks",
 ];
 
 let dbInitialized = false;

@@ -1321,6 +1321,9 @@ export function sumArticleLibraryScript(): string {
       // control only for a registered source the re-run route can serve.
       resetRerunControl(source);
       closeDocPanelMenus(false);
+      // ✓ Fact check follows the same registered-source gate; the section
+      // itself mounts once the article is rendered (below).
+      if (typeof sumFactcheckOnOpen === 'function') sumFactcheckOnOpen(docId, _shareDoc ? source : null, null);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
@@ -1436,6 +1439,7 @@ export function sumArticleLibraryScript(): string {
             mainEl.innerHTML = renderArticleHtml(cleaned);
             if (source === 'vimeo') openVimeoLinksInNewTab(mainEl, videoUrl);
           }
+          if (typeof sumFactcheckOnOpen === 'function') sumFactcheckOnOpen(docId, _shareDoc ? source : null, mainEl);
         }
 
         // Similar searches the summary's opening (readerSimilarQuery), the

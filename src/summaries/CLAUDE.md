@@ -306,3 +306,28 @@ construction — every vertical's own `POST /summarize` answers `duplicate` for 
 document that exists, which a re-run's target always is — and calling the
 summarizer function directly gets past that and past the title/category pin as
 well, so a model that re-picked a different category would write a SECOND file.
+
+## Fact check (`/api/summaries/factcheck*`)
+
+The doc panel's **✓ Fact check** runs the wiki's engine (`streamFactcheckSSE`,
+article mode, unchanged prompts) over the summary and saves the result in
+`summary_factchecks` (migration 079). Server half:
+`src/dashboard/routes/summaries-factcheck.ts`, in the `summaries` route group
+(so `nais` drops it and it stays admin-zone); client half:
+`src/dashboard/views/components/sum-factcheck-client.ts`, a standalone bundle.
+
+- **What is checked.** `readSummarySourceText` (the raw file), cut by
+  `summaryFactcheckBody` (`factcheck-body.ts`) at `## Transcript` and at a
+  `## Visual reference` appendix above it. `body_sha256` hashes that cut text,
+  so `/result`'s `stale` moves when the SUMMARY changes, not the transcript.
+- **Row identity is `(collection, doc_id)`, not the url.** The doc id is what the
+  panel addresses, a re-run pins it, and a pasted `article` may have no url.
+- **The bot is `resolveSummarizerBot`** (role override first) and must have web
+  tools: anything else is a JSON **503** before the stream commits.
+- **Saved only on `done`**, through the engine's additive `onDone` hook, which
+  does not fire on an error path or once the client is gone; the route also
+  skips a run with no real verdict (`claimCount === 0`). A failed or aborted
+  re-check therefore leaves the earlier row. Because an abort forfeits the
+  save, the client keeps a run's stream open when the reader navigates away.
+- **Badges** (`/badges`) are one query over the table; the client patches the
+  Latest rail rows and re-reads after every completed check.
