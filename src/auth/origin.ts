@@ -98,6 +98,10 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   "/api/wiki/explain",
   "/api/wiki/factcheck",
   "/api/wiki/factcheck/claim",
+  // The /summaries twin: the same engine (model spend + live-web egress) and
+  // it writes a `summary_factchecks` row. Exact path — `/result` and
+  // `/badges` beside it are read-only.
+  "/api/summaries/factcheck",
   // Not a model call and not a write — an AMPLIFIER. One GET walks every
   // registered wiki's index and fans out into up to `PROVENANCE_REFS_MAX / 200`
   // requests to claude-usage plus one to huginn, all from this host's network

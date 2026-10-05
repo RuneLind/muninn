@@ -30,6 +30,7 @@ import { sumShelfStyles, sumShelfHtml, sumShelfScript } from "./components/sum-s
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
 import { sumLatestRailStyles, sumLatestRailScript } from "./components/sum-latest-rail.ts";
 import { sumReaderStyles, sumReaderScript } from "./components/sum-reader.ts";
+import { sumFactcheckStyles, sumFactcheckClientScript } from "./components/sum-factcheck.ts";
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { shareDialogClientScript } from "./components/share-dialog-client.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -87,6 +88,8 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
   // template-string scripts in one scope and cannot import). Exactly one copy
   // per page: /wiki imports the module instead and never loads this.
   const shareDialog = await shareDialogClientScript();
+  // The doc panel's ✓ Fact check section + rail badges (sum-factcheck-client.ts).
+  const factcheckClient = await sumFactcheckClientScript();
   // Percentile cuts on the CURRENT huginn author ranking, computed once at render and
   // embedded — the page is fully server-rendered, so the X author tier badges + "Top
   // authors" filter read these directly (no extra endpoint). null when the scores file
@@ -122,6 +125,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     ${sumArticleLibraryStyles()}
     ${sumLatestRailStyles()}
     ${sumReaderStyles()}
+    ${sumFactcheckStyles()}
     ${sumOutcomesStyles()}
     ${sumStatsStyles()}
     ${agentPresenceStyles()}
@@ -266,13 +270,14 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true, rerun: true, moreMenu: true })}
+  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true, rerun: true, moreMenu: true, factcheck: true })}
   ${tracesPromptModalHtml()}
 
   ${MARKED_CDN_SCRIPT}
   <!-- Publishes openShareDialog/closeShareDialog on globalThis. Loaded BEFORE
        the component scripts so their wiring can see it. -->
   <script>${shareDialog}</script>
+  <script>${factcheckClient}</script>
   <script>
     // Summary-source registry projection (from src/summaries/sources.ts).
     const SOURCES = ${clientSourcesJson()};
@@ -341,6 +346,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
 
       loadCandidates();
       loadShelf();
+      sumFactcheckLoadBadges();
       loadOutcomes();
       renderDomainFilter();
 

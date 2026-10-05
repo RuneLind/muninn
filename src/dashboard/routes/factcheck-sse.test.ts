@@ -4,6 +4,7 @@ import {
   runClaimPool,
   assembleFactcheckAnswer,
   linkifySourcesLines,
+  sourcesLineUrls,
   verdictOf,
   parseConfidence,
   realOutcome,
@@ -769,5 +770,23 @@ describe("claimExtractionText", () => {
     // article body is not consulted at all in this mode.
     const sel = "```ts\nconst answer = 42;\n```";
     expect(claimExtractionText({ mode: "sel", sel, strippedBody: BODY, isMdx: true })).toBe(sel);
+  });
+});
+
+describe("sourcesLineUrls", () => {
+  test("reads markdown-link and bare URLs off Sources: lines only, peeled and de-duplicated", () => {
+    const block = [
+      "### ❌ Claim 1/1 — x",
+      "",
+      "See https://not-a-source.example for nothing.",
+      "Sources: [who.int](https://who.int/a), https://nih.gov/b. https://who.int/a",
+    ].join("\n");
+    expect(sourcesLineUrls(block)).toEqual(["https://who.int/a", "https://nih.gov/b"]);
+  });
+
+  test("agrees with what linkifySourcesLines makes clickable, balanced parens kept", () => {
+    const line = "Sources: https://en.wikipedia.org/wiki/Foo_(bar), (see https://x.com/a)";
+    expect(sourcesLineUrls(line)).toEqual(["https://en.wikipedia.org/wiki/Foo_(bar)", "https://x.com/a"]);
+    expect(sourcesLineUrls("### ❓ Claim 1/1 — x\n\nSkipped.")).toEqual([]);
   });
 });

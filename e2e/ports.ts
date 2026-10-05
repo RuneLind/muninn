@@ -257,6 +257,9 @@ export const E2E_PORTS = {
   "wiki-find-everywhere": 3102,
   "wiki-find-everywhere/huginn": 3103,
   "wiki-find-everywhere/ledger": 3104,
+  // The doc panel's ✓ Fact check section and the rail's fact-check badge.
+  "summaries-factcheck": 3105,
+  "summaries-factcheck/huginn": 3106,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

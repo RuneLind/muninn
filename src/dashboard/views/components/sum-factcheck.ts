@@ -1,0 +1,61 @@
+/** The `/summaries` doc panel's Fact check section + Latest rail badge: CSS
+ *  (server-rendered, since the bundle tree-shakes anything the browser entry
+ *  never references) and the standalone client bundle. */
+
+import { makeBundledClientScript } from "./bundle-browser-iife.ts";
+import { FACTCHECK_CONF_CHIP_CSS } from "./factcheck-conf-chip-styles.ts";
+
+export const sumFactcheckClientScript = makeBundledClientScript("sum-factcheck-browser.ts", import.meta.dir);
+
+export function sumFactcheckStyles(): string {
+  return `
+    .sum-fc {
+      margin: 0 0 20px;
+      padding: 12px 16px;
+      border: 1px solid var(--border-primary);
+      border-radius: 8px;
+      background: var(--bg-surface);
+      font-size: 14px;
+    }
+    .sum-fc[hidden] { display: none; }
+    /* The chrome opts out of selection; the answer and its sources stay
+       selectable, since quoting a verdict or copying a source is the point. */
+    .sum-fc-head, .sum-fc-progress, .sum-fc-wait, .sum-fc-err { user-select: none; }
+    .sum-fc-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .sum-fc-title { font-weight: 600; color: var(--text-primary); }
+    .sum-fc-chips { display: inline-flex; gap: 6px; }
+    .sum-fc-chip {
+      font-size: 12px; padding: 1px 8px; border-radius: 999px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-secondary); white-space: nowrap; font-variant-numeric: tabular-nums;
+    }
+    .sum-fc-meta { font-size: 12px; color: var(--text-secondary); }
+    .sum-fc-stale {
+      font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+      /* Darkened toward --text-primary: plain --status-warning on its own
+         tint measured 2.48:1 in the light theme. */
+      color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary));
+      border: 1px solid color-mix(in srgb, var(--status-warning) 45%, transparent);
+      background: color-mix(in srgb, var(--status-warning) 14%, transparent);
+    }
+    .sum-fc-recheck {
+      margin-left: auto; font: inherit; font-size: 12px; cursor: pointer;
+      background: none; color: var(--text-secondary);
+      border: 1px solid var(--border-secondary); border-radius: 6px; padding: 2px 10px;
+    }
+    .sum-fc-recheck:hover { border-color: var(--accent); color: var(--text-primary); }
+    .sum-fc-progress { list-style: none; margin: 10px 0 0; padding: 0; }
+    .sum-fc-progress li { display: flex; gap: 8px; padding: 2px 0; color: var(--text-secondary); }
+    .sum-fc-progress li.pending { color: var(--text-muted); }
+    .sum-fc-wait, .sum-fc-lede { margin-top: 10px; color: var(--text-muted); font-size: 13px; }
+    .sum-fc-err { margin-top: 10px; color: var(--status-error); font-size: 13px; }
+    .sum-fc-answer { margin-top: 10px; color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap; }
+    .sum-fc-answer h4 { margin: 14px 0 4px; font-size: 14px; color: var(--text-primary); white-space: normal; }
+    .sum-fc-answer a { color: var(--accent-light); }
+${FACTCHECK_CONF_CHIP_CSS}
+    /* The Latest rail badge. */
+    .sum-fc-badge { flex-shrink: 0; font-size: 10px; font-weight: 600; }
+    .sum-fc-badge.ok { color: color-mix(in srgb, var(--status-success) 70%, var(--text-primary)); }
+    .sum-fc-badge.bad { color: color-mix(in srgb, var(--status-error) 70%, var(--text-primary)); }
+  `;
+}

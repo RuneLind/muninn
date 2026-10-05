@@ -334,7 +334,7 @@ function applyEdits(summary: string, edits: readonly Edit[]): string {
 }
 
 /** Where the appendix is: its heading line, and the whole section it opens. */
-interface AppendixSection {
+export interface AppendixSection {
   /** Offset of the heading LINE's first character — the boundary inline/appendix is decided by. */
   readonly start: number;
   /** Offset just past the section, i.e. the start of the next heading of the same level or above. */
@@ -353,7 +353,7 @@ interface AppendixSection {
  * The section ENDS at the next heading of the same level or above (`## Transcript`
  * is the one that follows it in a stored capture), or at the end of the text.
  */
-function findAppendixSection(summary: string, code: readonly ProtectedRegion[]): AppendixSection | null {
+export function findAppendixSection(summary: string, code: readonly ProtectedRegion[]): AppendixSection | null {
   const lines = summary.split("\n");
   let offset = 0;
   let start = -1;

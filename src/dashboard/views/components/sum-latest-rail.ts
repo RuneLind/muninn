@@ -527,6 +527,7 @@ ${RAIL_FUNCTIONS.map((fn) => `    var ${fn.name} = ${fn.toString()};`).join("\n"
             '</span>' +
             '<span class="sum-latest-meta">' + sourceBadge(d.source) +
               '<span class="sum-latest-cat">' + esc(railCategoryLabel(railCategory(d.id))) + '</span>' +
+              (typeof sumFactcheckBadgeHtml === 'function' ? sumFactcheckBadgeHtml(d.source, d.id) : '') +
             '</span>' +
           '</a>';
         }).join('');

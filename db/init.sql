@@ -893,6 +893,24 @@ CREATE INDEX idx_user_identities_user_id
   ON user_identities (user_id);
 
 -- ============================================================================
+-- Summary fact-checks: the saved result of a /summaries doc-panel fact check
+-- ============================================================================
+-- One row per document, keyed by huginn's doc id (stable across a re-run).
+-- `body_sha256` hashes the checked summary text, for the "stale" pill.
+-- Rationale: src/db/summary-factchecks.ts. Mirror of migration 079.
+CREATE TABLE summary_factchecks (
+  collection   TEXT NOT NULL,
+  doc_id       TEXT NOT NULL,
+  url          TEXT,
+  body_sha256  TEXT NOT NULL,
+  answer       TEXT NOT NULL,
+  claims       JSONB NOT NULL DEFAULT '[]'::jsonb,
+  bot_name     TEXT NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (collection, doc_id)
+);
+
+-- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================
 CREATE TABLE schema_migrations (

@@ -162,6 +162,33 @@ export interface FactcheckSseOptions {
    * forces nothing without a real model call to outlast it.
    */
   oneShot?: typeof executeOneShot;
+  /**
+   * Persistence hook for a surface that saves its result server-side (the
+   * `/summaries` route; the wiki routes omit it). Awaited once, just before the
+   * `done` event, and only on a run that reached it with the client still
+   * connected — never on an error or abort path, so a failed re-check cannot
+   * replace a saved result. Whatever it returns is merged into the `done`
+   * payload (it cannot override the standard fields); a throw is logged and the
+   * `done` goes out unchanged.
+   */
+  onDone?: (result: FactcheckDoneResult) => Promise<Record<string, unknown> | void>;
+}
+
+/** What {@link FactcheckSseOptions.onDone} receives: the assembled answer and
+ *  one entry per extracted claim, in claim order. */
+export interface FactcheckDoneResult {
+  answer: string;
+  /** Claims that produced a real verdict block (synthetic ❓ excluded). */
+  claimCount: number;
+  claims: Array<{
+    index: number;
+    title: string;
+    quote?: string;
+    verdict: string;
+    outcome: ClaimOutcome;
+    confidence?: number;
+    markdown: string;
+  }>;
 }
 
 /** Shared liveness flag: the client-abort handler (registered on the outer stream)
@@ -742,6 +769,22 @@ export function linkifySourcesLines(markdown: string): string {
     .join("\n");
 }
 
+/** The http(s) URLs on a block's `Sources:` lines, de-duplicated, in order — the
+ *  same line rule, URL grammar and trailing-punctuation peel as
+ *  {@link linkifySourcesLines}, so a saved URL is the same URL the reader's
+ *  link points at (that href percent-encodes parens; this keeps them literal). */
+export function sourcesLineUrls(markdown: string): string[] {
+  const out: string[] = [];
+  for (const line of markdown.split("\n")) {
+    if (!/^Sources:/.test(line)) continue;
+    for (const m of line.matchAll(SOURCES_URL_RE)) {
+      const url = typeof m[2] === "string" ? m[2] : typeof m[3] === "string" ? splitTrailingUrl(m[3])[0] : "";
+      if (url && !out.includes(url)) out.push(url);
+    }
+  }
+  return out;
+}
+
 /** Assemble the final fact-check markdown: for a multi-claim check, the compose
  *  `lede` on top of the verdict blocks; for a single claim, the lone block IS the
  *  answer (no lede). Blocks are always in claim order. `Sources:` lines are
@@ -1244,9 +1287,33 @@ async function runFactcheck(
       tokens: usage.outputTokens,
     });
 
+    let doneExtra: Record<string, unknown> = {};
+    if (opts.onDone && !clientState.gone) {
+      const payload = claimsEventPayload(claims);
+      try {
+        doneExtra = (await opts.onDone({
+          answer,
+          claimCount,
+          claims: outcomes.map((o, i) => ({
+            ...payload[i]!,
+            verdict: verdictOf(o.block),
+            outcome: o.outcome,
+            ...(typeof o.confidence === "number" ? { confidence: o.confidence } : {}),
+            markdown: o.block,
+          })),
+        })) ?? {};
+      } catch (err) {
+        log.warn("Fact check onDone hook failed bot={bot}: {error}", {
+          bot: botConfig.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     await stream.writeSSE({
       event: "done",
       data: JSON.stringify({
+        ...doneExtra,
         type: "done",
         answer,
         cited: [],
