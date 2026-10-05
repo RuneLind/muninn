@@ -17,11 +17,21 @@ describe("summaryFactcheckBody", () => {
       "## Visual reference", "", "![a](f/1.jpg) Slide one.", "",
       "> 💬 **Takeaway:** Sleep matters.", "", "## Transcript", "", "Speech.",
     ].join("\n");
-    const body = summaryFactcheckBody(src);
-    expect(body).toContain("Sleep matters.");
-    expect(body).toContain("## Key takeaways");
-    expect(body).not.toContain("Slide one.");
-    expect(body).not.toContain("Speech.");
+    // Exact: the hash is over this string, so the blank line kept between the
+    // body and the closer is part of the contract.
+    expect(summaryFactcheckBody(src)).toBe(
+      "Intro.\n\n## Key takeaways\n\n- One.\n\n> 💬 **Takeaway:** Sleep matters.",
+    );
+  });
+
+  test("a closer ABOVE the appendix is not duplicated", () => {
+    const src = "Intro.\n\n> 💬 **Takeaway:** T.\n\n## Visual reference\n\n![a](f/1.jpg) Cap.\n\n## Transcript\n\nSpeech.";
+    expect(summaryFactcheckBody(src)).toBe("Intro.\n\n> 💬 **Takeaway:** T.");
+  });
+
+  test("a closer in a LATER section does not cut into that section", () => {
+    const src = "Intro.\n\n## Visual reference\n\n![a](f/1.jpg) Cap.\n\n## Notes\n\nLater.\n\n> 💬 **Takeaway:** T.";
+    expect(summaryFactcheckBody(src)).toBe("Intro.\n\n## Notes\n\nLater.\n\n> 💬 **Takeaway:** T.");
   });
 
   test("the appendix ends at the next heading of its level: a section after it stays", () => {

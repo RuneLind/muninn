@@ -38,7 +38,7 @@ mock.module("../../ai/haiku-direct.ts", () => ({
   },
 }));
 
-const { registerSummariesFactcheckRoutes } = await import("./summaries-factcheck.ts");
+const { registerSummariesFactcheckRoutes, isPartialRun } = await import("./summaries-factcheck.ts");
 const { streamFactcheckSSE } = await import("./factcheck-sse.ts");
 const { factcheckBodySha256 } = await import("../../summaries/factcheck-body.ts");
 type Deps = import("./summaries-factcheck.ts").SummariesFactcheckDeps;
@@ -73,10 +73,13 @@ let verdicts: Record<string, string> = {};
 let failClaims = false;
 /** Claim titles whose verify call throws (a per-claim `error` outcome). */
 let failTitles = new Set<string>();
+/** Claim titles whose verify call times out (a per-claim `timeout` outcome). */
+let timeoutTitles = new Set<string>();
 const oneShot = async (prompt: string) => {
   const m = /CLAIM \((\d+)\/(\d+)\): (.+)/.exec(prompt);
   if (!m) return { result: "Two claims checked.", inputTokens: 1, outputTokens: 1, numTurns: 1 };
   if (failClaims || failTitles.has(m[3]!)) throw new Error("upstream exploded");
+  if (timeoutTitles.has(m[3]!)) throw new Error("Claude Agent SDK timed out after 90000ms");
   const [, i, n, title] = m;
   const v = verdicts[title!] ?? "✅";
   return {
@@ -133,6 +136,7 @@ beforeEach(() => {
   verdicts = { "Caffeine half-life is five hours": "❌" };
   failClaims = false;
   failTitles = new Set();
+  timeoutTitles = new Set();
   source = SOURCE_TEXT;
   saved = [];
   stored = null;
@@ -205,6 +209,7 @@ describe("GET /api/summaries/factcheck — persist on done, never on failure", (
     const { events } = await run(app());
     expect(saved).toEqual([]);
     expect(done(events)!.saved).toBe(false);
+    expect(done(events)!.reason).toBe("no-verdict");
   });
 
   test("a run that extracted no claims ends in app_error and saves nothing", async () => {
@@ -263,6 +268,29 @@ describe("GET /api/summaries/factcheck — persist on done, never on failure", (
     const d = done(events)!;
     expect(d.saved).toBe(false);
     expect(d.reason).toBe("partial");
+  });
+
+  test("a re-run where a claim TIMED OUT is partial too, and keeps the earlier row", async () => {
+    const a = app();
+    await run(a);
+    timeoutTitles = new Set(["Caffeine half-life is five hours"]);
+    const { events } = await run(a);
+    expect(saved).toHaveLength(1);
+    expect(done(events)!.reason).toBe("partial");
+  });
+
+  test("a partial run REPLACES a stale earlier row: its verdicts describe text that is gone", async () => {
+    const a = app();
+    await run(a); // [✅, ❌] saved against SOURCE_TEXT
+    source = SOURCE_TEXT.replace("five hours", "six hours");
+    failTitles = new Set(["Caffeine half-life is five hours"]);
+    const { events } = await run(a);
+    expect(saved).toHaveLength(2);
+    expect(saved[1]!.bodySha256).toBe(factcheckBodySha256(source));
+    expect(saved[1]!.claims.map((c) => c.outcome)).toEqual(["verified", "error"]);
+    const d = done(events)!;
+    expect(d.saved).toBe(true);
+    expect(d.reason).toBeUndefined();
   });
 
   test("a partial run with NO earlier row still saves (better than nothing)", async () => {
@@ -335,6 +363,17 @@ describe("server-rendered answer HTML (the client bundles no markdown renderer)"
     };
     expect(r.html).toContain('<span class="wiki-fc-conf-chip hi">85/100</span>');
     expect(r.html).toContain('href="https://example.org/b"');
+  });
+});
+
+describe("isPartialRun", () => {
+  test("any claim without a ruling makes the run partial; rulings and model-chosen ❓ do not", () => {
+    const run = (o: string) => ({ claims: [{ outcome: "verified" }, { outcome: o }] }) as never;
+    expect(isPartialRun(run("error"))).toBe(true);
+    expect(isPartialRun(run("timeout"))).toBe(true);
+    expect(isPartialRun(run("skipped"))).toBe(true);
+    expect(isPartialRun(run("verified"))).toBe(false);
+    expect(isPartialRun(run("unverifiable"))).toBe(false);
   });
 });
 

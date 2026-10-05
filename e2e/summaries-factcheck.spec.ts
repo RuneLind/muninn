@@ -322,6 +322,30 @@ test("a partial re-check keeps the earlier result and says so; a newer saved res
   await expect(fc.locator(".sum-fc-chip")).toHaveText(["✅ 2"]);
   await page.unroute("**/api/summaries/factcheck?*");
 
+  // A new run starts with no notice of its own, and a clean finish leaves none.
+  let releaseRun: () => void = () => {};
+  const runHeld = new Promise<void>((r) => { releaseRun = r; });
+  await page.route("**/api/summaries/factcheck?*", async (route) => {
+    await runHeld;
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: sse([
+        ["claims", { type: "claims", claims: [{ index: 1, title: "invented claim 1" }] }],
+        ["claim_result", { type: "claim_result", index: 1, verdict: "✅", outcome: "verified", markdown: "" }],
+        ["done", { type: "done", answer: answer(["✅"]), saved: true, checkedAt: Date.now() - 3_600_000, claimCount: 1 }],
+        ["end", {}],
+      ]),
+    });
+  });
+  await fc.locator(".sum-fc-recheck").click();
+  await expect(fc).toContainText("checking against the web");
+  await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+  releaseRun();
+  await expect(fc.locator(".sum-fc-chip")).toHaveText(["✅ 1"]);
+  await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+  await page.unroute("**/api/summaries/factcheck?*");
+
   // A newer saved result (another tab, the next real run) replaces the notice.
   await sql!`UPDATE summary_factchecks SET created_at = now() WHERE doc_id = ${DOC_FRESH}`;
   await railRow(page, DOC_STALE).click();

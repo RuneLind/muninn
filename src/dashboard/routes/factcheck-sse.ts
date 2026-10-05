@@ -771,7 +771,8 @@ export function linkifySourcesLines(markdown: string): string {
 
 /** The http(s) URLs on a block's `Sources:` lines, de-duplicated, in order — the
  *  same line rule, URL grammar and trailing-punctuation peel as
- *  {@link linkifySourcesLines}, so what is saved is what the reader can click. */
+ *  {@link linkifySourcesLines}, so a saved URL is the same URL the reader's
+ *  link points at (that href percent-encodes parens; this keeps them literal). */
 export function sourcesLineUrls(markdown: string): string[] {
   const out: string[] = [];
   for (const line of markdown.split("\n")) {

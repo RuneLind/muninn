@@ -331,7 +331,7 @@ article mode, unchanged prompts) over the summary and saves the result in
 - **Saved only on `done`**, through the engine's additive `onDone` hook, which
   does not fire on an error path or once the client is gone; the route also
   skips a run with no real verdict (`claimCount === 0`), and a PARTIAL run (any
-  claim `error`/`timeout`/`skipped`) when a row already exists — `done` then
+  claim `error`/`timeout`/`skipped`) when a FRESH row exists (a stale one is replaced) — `done` then
   carries `saved:false, reason:"partial"`. A failed or aborted
   re-check therefore leaves the earlier row. Because an abort forfeits the
   save, the client keeps a run's stream open when the reader navigates away.

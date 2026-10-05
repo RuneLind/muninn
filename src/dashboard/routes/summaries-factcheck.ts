@@ -57,6 +57,11 @@ export function renderSummaryFactcheckHtml(answer: string): string {
 /** The engine's `ClaimOutcome`s that mean "no ruling was reached". */
 const PARTIAL_OUTCOMES: ReadonlySet<ClaimOutcome> = new Set(["error", "timeout", "skipped"]);
 
+/** Did any claim end without a ruling? */
+export function isPartialRun(result: Pick<FactcheckDoneResult, "claims">): boolean {
+  return result.claims.some((c) => PARTIAL_OUTCOMES.has(c.outcome));
+}
+
 export interface SummariesFactcheckDeps {
   /** The source file, frontmatter stripped (`readSummarySourceText`); `null` when unreadable. */
   readSourceText: (collection: string, docId: string) => Promise<string | null>;
@@ -170,9 +175,11 @@ export function registerSummariesFactcheckRoutes(
         if (result.claimCount === 0) return { saved: false, reason: "no-verdict" };
         try {
           // A partial run (a claim errored, timed out or was skipped) never
-          // replaces an earlier result; with none to protect, it still saves.
-          if (result.claims.some((c) => PARTIAL_OUTCOMES.has(c.outcome)) && (await deps.store.get(collection, docId))) {
-            return { saved: false, reason: "partial" };
+          // replaces a FRESH earlier result. A stale one describes text that
+          // is gone, and with none at all a partial result is still better.
+          if (isPartialRun(result)) {
+            const earlier = await deps.store.get(collection, docId);
+            if (earlier && earlier.bodySha256 === bodySha256) return { saved: false, reason: "partial" };
           }
           const row = await deps.store.upsert({
             collection,
