@@ -354,8 +354,8 @@ article mode, unchanged prompts) over the summary and saves the result in
   claim a `beyondCut` boolean (required by the parser, saved per claim), and only
   a `beyondCut: true` claim reads "maybe said past the checked part" rather than
   as the summary's fault. Every interpolated string goes through
-  `neutralizePromptTags` (`src/utils/prompt-fence.ts`, which also catches the
-  HTML-escaped, full-width and zero-width-split forms of a tag) and the data rule
+  `neutralizePromptTags` (`src/utils/prompt-fence.ts`; look-alike forms —
+  HTML-escaped, full-width, zero-width-split — are not caught) and the data rule
   is restated after the block: a transcript that closed `</transcript>` flipped
   every verdict before that (the takeaway check's `<body>`/`<takeaway>` get the
   same). The prompt allows for speech-recognition mis-hearings of names.

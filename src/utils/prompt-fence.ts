@@ -24,13 +24,6 @@ export function neutralizePromptFence(text: string): string {
   return text.replace(/"{3,}/g, '"');
 }
 
-/** Characters that render as nothing; one inside a tag name hides it from a plain match. */
-const ZERO_WIDTH_RE = /[\u00AD\u200B-\u200D\u2060\uFEFF]/g;
-/** `<` and its look-alikes: full-width, small form, and the HTML-escaped forms. */
-const TAG_OPEN = "(?:<|\uFF1C|\uFE64|&lt;|&#0*60;|&#x0*3c;)";
-/** `>` and its look-alikes. */
-const TAG_CLOSE = "(?:>|\uFF1E|\uFE65|&gt;|&#0*62;|&#x0*3e;)";
-
 /**
  * Turn every opening or closing marker of the named tags into a bracketed form
  * (`</transcript>` → `[/transcript]`), in any case and spacing.
@@ -40,23 +33,13 @@ const TAG_CLOSE = "(?:>|\uFF1E|\uFE65|&gt;|&#0*62;|&#x0*3e;)";
  * data block early, and what follows reads as instructions. Measured on the
  * transcript check: a transcript carrying `</transcript>` plus an "operator"
  * note flipped every claim of a fixture to `supported`, 2 runs out of 2.
- *
- * A model reads a look-alike marker as the tag too, so each candidate span (a
- * `<` or look-alike up to the next `>` or look-alike, within one line) is
- * NFKC-normalised, cleared of zero-width characters and matched on that: the
- * HTML-escaped `&lt;/transcript&gt;`, full-width `＜/ｔｒａｎｓｃｒｉｐｔ＞` and
- * `</trans\u200Bcript>` all become `[/transcript]`. Text outside a matching span
- * is left byte for byte. Idempotent, since the result holds no opener.
+ * Idempotent, since the result holds no `<` for the tag.
  */
 export function neutralizePromptTags(text: string, tags: readonly string[]): string {
   if (!tags.length) return text;
   const names = tags.map((t) => t.replace(/[^A-Za-z0-9_-]/g, "")).join("|");
-  const strict = new RegExp(`^\\s*(\\/?)\\s*(${names})(?![A-Za-z0-9_-])([^]*)$`, "i");
-  const candidate = new RegExp(`${TAG_OPEN}((?:(?!${TAG_OPEN}|${TAG_CLOSE})[^\\n])*)(${TAG_CLOSE})?`, "gi");
-  return text.replace(candidate, (span: string, body: string) => {
-    const m = strict.exec(body.normalize("NFKC").replace(ZERO_WIDTH_RE, ""));
-    return m ? `[${m[1]}${m[2]}${m[3]}]` : span;
-  });
+  const re = new RegExp(`<\\s*(\\/?)\\s*(${names})(?![A-Za-z0-9_-])(?:([^<>\\n]*)>)?`, "gi");
+  return text.replace(re, (_m, slash: string, name: string, attrs: string | undefined) => `[${slash}${name}${attrs ?? ""}]`);
 }
 
 /**
