@@ -12,9 +12,10 @@
  *   touched.
  * - **Voice (D5, D7).** A summary reports what its source says, so a ❌ or ⚠️ is
  *   ATTRIBUTED ("the video says X; sources say Y") rather than corrected in the
- *   source's mouth — checked mechanically, per claim and in the summary's
- *   language ({@link unattributedEdits}). The noun is `sourceKindNoun`'s,
- *   shared with the drafter rider.
+ *   source's mouth — checked mechanically, per run of a claim's contiguous edits
+ *   and in the summary's language ({@link unattributedEdits}); a failing run
+ *   drops its whole claim. The noun is `sourceKindNoun`'s, shared with the
+ *   drafter rider.
  * - **Structure.** An edit cannot add a line the next read cuts on, and a
  *   rebuild that moves the transcript, the visual section or the checked ranges
  *   is refused ({@link summaryStructureChanged}).
@@ -242,12 +243,30 @@ export interface PlacedEdit {
   readonly end: number;
 }
 
-/** Original text between two edits that ends a run: a blank line, or a line
- *  that opens a list item, heading or quote. */
-const RUN_BREAK_RE = /\n[ \t]*\n|\n[ \t]*(?:[-*+]|\d+[.)]|#{1,6}|>)[ \t]/;
+const BLANK_LINE_RE = /\n[ \t\r]*\n/;
+/** A line that opens a list item, heading, quote or table row. */
+const BLOCK_LINE_RE = /[ \t]*(?:(?:[-*+]|\d+[.)]|#{1,6})[ \t]|>|\|)/y;
+
+/** Is there a block boundary between `prev` and `p` in the original `text`?
+ *  Judged from `prev`'s last non-blank char to `p`'s first, so whitespace and
+ *  markers inside either edit's own range count: a blank line in that span, or
+ *  a line starting in it (read in full) that opens a block. */
+function runBreaks(text: string, prev: PlacedEdit, p: PlacedEdit): boolean {
+  let from = prev.end;
+  while (from > prev.start && /\s/.test(text[from - 1]!)) from--;
+  let to = p.start;
+  while (to < p.end && /\s/.test(text[to]!)) to++;
+  const span = text.slice(from, to);
+  if (BLANK_LINE_RE.test(span)) return true;
+  for (let i = span.indexOf("\n"); i !== -1; i = span.indexOf("\n", i + 1)) {
+    BLOCK_LINE_RE.lastIndex = from + i + 1;
+    if (BLOCK_LINE_RE.test(text)) return true;
+  }
+  return false;
+}
 
 /** A claim's edits split into runs: same slice, consecutive in document order,
- *  no {@link RUN_BREAK_RE} and no other placed edit between neighbours. */
+ *  no {@link runBreaks} and no other placed edit between neighbours. */
 function contiguousRuns(group: readonly PlacedEdit[], all: readonly PlacedEdit[], texts: readonly string[]): PlacedEdit[][] {
   const sorted = [...group].sort((a, b) => a.slice - b.slice || a.start - b.start);
   const runs: PlacedEdit[][] = [];
@@ -256,7 +275,7 @@ function contiguousRuns(group: readonly PlacedEdit[], all: readonly PlacedEdit[]
     const joins =
       prev !== undefined &&
       prev.slice === p.slice &&
-      !RUN_BREAK_RE.test((texts[p.slice] ?? "").slice(prev.end, p.start)) &&
+      !runBreaks(texts[p.slice] ?? "", prev, p) &&
       !all.some((q) => q.slice === p.slice && q.start >= prev.end && q.start < p.start);
     if (joins) runs.at(-1)!.push(p);
     else runs.push([p]);
@@ -373,11 +392,12 @@ export interface ProposeSummaryEditsInput {
 
 /**
  * Propose-side screening, in order: structural lines (per edit), resolution,
- * the claim group, attribution (per claim, {@link unattributedEdits}), the
- * change budget, the per-edit structure check, the claim group again, then the
- * structure check over every kept edit together. The claim group: when any
- * edit for a claim is dropped, every edit for it is (a half correction reads as
- * the whole one). Mutates nothing it was given.
+ * the claim group, attribution (per run, {@link unattributedEdits}), the claim
+ * group again (a failing run drops its whole claim), the change budget, the
+ * per-edit structure check, the claim group again, then the structure check
+ * over every kept edit together. The claim group: when any edit for a claim is
+ * dropped, every edit for it is (a half correction reads as the whole one).
+ * Mutates nothing it was given.
  */
 export function proposeSummaryEdits(input: ProposeSummaryEditsInput): {
   outcomes: SliceEditOutcome[];
@@ -403,11 +423,13 @@ export function proposeSummaryEdits(input: ProposeSummaryEditsInput): {
       }
     }
   };
-  // Attribution reads whole claims, so the claims missing an edit go first; a
-  // failing run then takes its claim's other runs with it at the next dropGroups.
+  // The claims missing an edit go first, so attribution sees only whole claims.
   dropGroups();
   const placed = outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0, end: o.end ?? 0, o }));
   for (const p of unattributedEdits(placed, input)) dropOutcome((p as (typeof placed)[number]).o, "not attributed");
+  // A failing run takes its claim's other runs with it BEFORE the budget, so
+  // they cannot spend budget another claim needs.
+  dropGroups();
   enforceChangeBudget(outcomes, input.bodyLen);
   for (const o of outcomes) {
     if (!o.applied) continue;

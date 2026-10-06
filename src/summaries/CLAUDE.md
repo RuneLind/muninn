@@ -463,9 +463,12 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
 - **Propose screening.** Every ❌/⚠️ edit must contain "the <noun>
   says/claims/states" (`attributionRefusal`, dropped "not attributed"), judged
   per RUN of a claim's contiguous edits (`unattributedEdits`: same slice, no
-  blank line, list item, heading, quote or other edit between), so a split
-  sentence is attributed by either half but a takeaway never covers a body
-  paragraph; apply re-runs the same function; which
+  blank line, no line opening a list item, heading, quote or table row, and no
+  other edit between — read from the last char of one edit to the first of the
+  next, so a marker inside an edit's own `old` counts), so a split sentence is
+  attributed by either half but a takeaway never covers a body paragraph. A
+  failing run drops its whole claim before the change budget; apply re-runs the
+  same function and refuses the request; which
   claims count is the saved `claims` (`correctableVerdict`, #649's predicate);
   and when any edit for a claim drops — bounds, attribution, structure, anchor or
   the change budget — every edit for that claim drops with it

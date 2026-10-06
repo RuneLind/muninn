@@ -428,8 +428,34 @@ describe("attribution is judged per run of contiguous edits (#650 follow-up)", (
     ["another claim's edit between breaks the run", PARA, [{ ...halfA, new: "The video says alpha one; sources say two." }, { ...halfB, new: "Beta three." }, { claimIndex: 2, old: "Gamma.", new: "The video says gamma; sources say delta." }], [DROPPED(1), "not attributed", "ok"]],
     ["a paragraph break between: each edit must attribute alone", "Alpha one.\n\nBeta two.", [halfA, halfB], ["not attributed", "not attributed"]],
     ["different slices: each must attribute alone", TWO_SLICES, [body, { claimIndex: 1, old: "Rest 4 hours.", new: "Rest 7–9 hours." }], [DROPPED(1), "not attributed"]],
+    // fix round 1
+    ["a hard-wrapped line stays one run", "Alpha one.\nBeta two.", [halfA, halfB], ["ok", "ok"]],
+    ["a list marker inside the 2nd edit's old breaks the run", LIST, [takeaway, { claimIndex: 1, old: "- Coffee is fine.", new: "- Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["a newline and marker at the start of the 2nd edit's old break the run", LIST, [takeaway, { claimIndex: 1, old: "\n- Coffee is fine.", new: "\n- Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["a newline at the end of the 1st edit's old does not hide the next item", LIST, [{ ...takeaway, old: `${takeaway.old}\n`, new: `${takeaway.new}\n` }, { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["two table rows are two runs", `| A | Sleep 4 hours |\n| B | Coffee is fine |\n\n${PARA}`, [{ claimIndex: 1, old: "Sleep 4 hours", new: "The video says sleep 4 hours; sources say 7–9" }, { claimIndex: 1, old: "Coffee is fine", new: "Coffee is fine at 4 hours" }], [DROPPED(1), "not attributed"]],
+    ["a quote line with no space after > breaks the run", `>Sleep 4 hours a night.\n>Coffee is fine.\n\n${PARA}`, [takeaway, { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["a CRLF blank line breaks the run", "Alpha one.\r\n\r\nBeta two.", [halfA, halfB], ["not attributed", "not attributed"]],
   ];
   test.each(rows)("%s", async (_name, text, edits, expected) => {
     expect(await propose(text, edits)).toEqual(expected);
+  });
+
+  test("a partly attributed claim drops whole before the change budget, so it cannot crowd out another claim", async () => {
+    const { proposeSummaryEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    const text = "Sleep 4 hours a night.\n\nAdults need 4 hours of sleep.\n\nCoffee is fine.";
+    const r = proposeSummaryEdits({
+      slices: summaryEditSlices(text),
+      edits: [
+        { claimIndex: 1, verdict: "❌", reason: "", old: "Sleep 4 hours a night.", new: `The video says sleep 4 hours a night; sources say 7–9. ${"x".repeat(1480)}` },
+        { claimIndex: 1, verdict: "❌", reason: "", old: "Adults need 4 hours of sleep.", new: SILENT },
+        { claimIndex: 2, verdict: "❌", reason: "", old: "Coffee is fine.", new: `The video says coffee is fine; sources say less. ${"y".repeat(690)}` },
+      ],
+      priorDrops: [],
+      sourceNoun: "the video",
+      correctable: new Set(),
+      bodyLen: text.length,
+    });
+    expect(r.outcomes.map((o) => (o.applied ? "ok" : o.reason))).toEqual([DROPPED(1), "not attributed", "ok"]);
   });
 });
