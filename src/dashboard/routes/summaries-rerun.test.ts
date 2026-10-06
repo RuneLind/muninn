@@ -443,6 +443,14 @@ describe("refusals", () => {
     expect(res.json).not.toHaveProperty("job_id");
   });
 
+  test("an EMPTY appendix is no transcript either: 400, no job", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc({ transcript: null, body: "The stored summary.\n\n## Transcript\n\n" }));
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect([res.status, res.json.code]).toEqual([400, "no_transcript"]);
+    await settle();
+    expect(rec.prompts).toHaveLength(0);
+  });
+
   test("an unknown source is 400 before anything is read", async () => {
     const { deps } = makeDeps(youtubeDoc());
     const res = await post(appFor(deps), { source: "article", docId: DOC_ID });

@@ -170,11 +170,13 @@ export interface StoredCapture {
   /** The summary WITHOUT the transcript appendix, trailing whitespace trimmed. */
   readonly body: string;
   /**
-   * The whitespace {@link body} lost at its end. A transcript-less save puts it
-   * back, so an unchanged save is byte-identical on disk; with a transcript the
-   * appendix owns the separator and this is unused.
+   * Everything in the file after {@link body}, when {@link transcript} is null:
+   * the trailing whitespace, plus an EMPTY `## Transcript` heading when the
+   * document has one. A transcript-less save puts it back, so an unchanged save
+   * is byte-identical on disk; with a transcript the appendix owns the file's
+   * end and this is unused.
    */
-  readonly bodyTrailingWhitespace: string;
+  readonly bodyTail: string;
   /** The appendix's text, trimmed — `null` when the document has none. */
   readonly transcript: string | null;
   readonly windowed: boolean;
@@ -202,7 +204,9 @@ export function readStoredCapture(raw: string): StoredCapture {
     frontmatter,
     frontmatterRaw: { ...fm.byKey },
     body,
-    bodyTrailingWhitespace: split.body.slice(body.length),
+    // `split.body` is a prefix of `fm.body`, so this is the raw text after the
+    // trimmed body — an empty appendix's heading included.
+    bodyTail: fm.body.slice(body.length),
     transcript: transcript === "" ? null : transcript,
     windowed: transcript !== null && transcriptIsWindowed(transcript),
     truncated: transcript !== null && transcript.includes(TRANSCRIPT_TRUNCATION_NOTE),
@@ -525,9 +529,9 @@ export function buildSummarySaveBody(input: {
   }
   let appended: CappedTranscript | null = null;
   if (stored.transcript === null) {
-    // No appendix to own the file's end, so the stored trailing whitespace goes
-    // back — an unchanged save stays byte-identical.
-    body.summary = input.summary.trimEnd() + stored.bodyTrailingWhitespace;
+    // No appendix to own the file's end, so the stored tail goes back — an
+    // unchanged save stays byte-identical.
+    body.summary = input.summary.trimEnd() + stored.bodyTail;
   } else if (descriptor.transcriptCarrier === "summary") {
     // `windowed` picks the capper, and the wrong one is destructive: a flat
     // transcript has no `### [HH:MM:SS]` buckets to cut on. Derived from the

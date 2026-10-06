@@ -59,6 +59,21 @@ describe("transcript-less shapes", () => {
     });
   }
 
+  test("an EMPTY ## Transcript section round-trips byte for byte, heading included", () => {
+    // `transcript` is null for it (re-run refuses it as no_transcript), but a
+    // save that changes nothing must not drop the heading from the file.
+    for (const tail of ["Body.\n\n## Transcript\n\n", "Body.\n\n## Transcript\n", "Body.\n\n## Transcript"]) {
+      const raw = doc(
+        ['date: "2026-08-05"', 'url: "https://x.com/someone/status/1"', 'author: "@someone"', 'category: "ai/general"'],
+        tail,
+      );
+      const stored = readStoredCapture(raw);
+      expect(stored.transcript).toBeNull();
+      expect(stored.body).toBe("Body.");
+      expect(String(bodyFor("x-article", raw, "ai/general/An X post.md").summary)).toBe(tail);
+    }
+  });
+
   test("anthropic sends no author, article and X send theirs", () => {
     expect(bodyFor("anthropic", ANTHROPIC, "ai/claude/A release.md")).not.toHaveProperty("author");
     expect(bodyFor("article", ARTICLE, "ai/general/A post.md").author).toBe("Someone");
