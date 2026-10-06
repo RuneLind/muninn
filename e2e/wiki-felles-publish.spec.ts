@@ -8,8 +8,8 @@
  * flow's dry run and confirm reaching `--fjern`, and the
  * copied command naming the served root.
  *
- * `FELLES_WIKI_PUBLISH_BIN` is a STUB `.ts` that prints its argv and exits 0, so
- * nothing here reaches gcloud or a bucket.
+ * `FELLES_WIKI_PUBLISH_BIN` is a STUB `.ts` that prints its argv and exits 0
+ * (3 for `FAIL_REL`), so nothing here reaches gcloud or a bucket.
  */
 
 import { test, expect } from "@playwright/test";

@@ -13,8 +13,8 @@
  * 415/403 (the stamp route's same-origin gate), 400 bad body, 501 not
  * configured, 403 a wiki not in `FELLES_WIKI_PUBLISH_WIKIS`, 404 no such page,
  * 409 while another run is in flight (one at a time per process).
- * The page must be one the wiki index lists, and the script gets its index
- * spelling: see `fellesScriptArgs` for how each action keeps a dash-led page
+ * The page must be one the wiki index lists. `fellesScriptArgs` builds the
+ * argv from its index relPath (in NFC for remove) and keeps a dash-led page
  * from being read as a flag.
  * A `WIKI_READONLY_ROOTS` root is refused (403): publishing ships the page off
  * the machine, the same egress every other read-only check refuses.
