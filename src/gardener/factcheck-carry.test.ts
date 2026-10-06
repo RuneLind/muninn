@@ -9,10 +9,10 @@ import {
   FACTCHECK_RIDER_MAX,
   pageCarriesFactcheck,
   proposalFactcheckFlag,
-  sourceKindNoun,
   stripReproducedFactcheck,
   withFactcheckAppendix,
 } from "./factcheck-carry.ts";
+import { sourceKindNoun } from "../summaries/source-noun.ts";
 import {
   buildSourceDraftPrompt,
   draftSourcePage,
@@ -73,6 +73,7 @@ function saved(over: Partial<SummaryFactcheck> = {}): SummaryFactcheck {
     createdAt: CHECKED_AT,
     transcript: null,
     transcriptSha256: null,
+    appliedAt: null,
     ...over,
   };
 }

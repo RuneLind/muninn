@@ -11,6 +11,10 @@
  * cleaned copy on any failure), and cut the appendix so they see the same body a
  * capture draft saw. The cut applies to the fallback copy too.
  *
+ * A fact-check block a `/summaries` write-back added is removed too, with its
+ * exact-inverse strip (`factcheck-block.ts`): no drafter or gardener input
+ * carries the block, so a draft never copies the verdicts as content.
+ *
  * The source read keeps `readSummarySourceText`'s own 5 s budget rather than
  * `timeoutMs`, so a stalled `?raw=1` costs a harvested doc 5 s before the
  * fallback, not the JSON read's whole budget.
@@ -20,6 +24,7 @@ import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { readSummarySourceText, withSourceText } from "../summaries/source-text.ts";
 import { encodeDocIdPath } from "../summaries/sources.ts";
 import { splitTranscript } from "../summaries/transcript-split.ts";
+import { stripSummaryFactcheckBlock } from "../summaries/factcheck-block.ts";
 
 export async function fetchSummaryDoc(
   apiUrl: string,
@@ -34,5 +39,7 @@ export async function fetchSummaryDoc(
     }),
     await source,
   );
-  return typeof doc?.text === "string" ? { ...doc, text: splitTranscript(doc.text).body } : doc;
+  return typeof doc?.text === "string"
+    ? { ...doc, text: stripSummaryFactcheckBlock(splitTranscript(doc.text).body) }
+    : doc;
 }

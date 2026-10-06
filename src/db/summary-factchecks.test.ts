@@ -1,9 +1,14 @@
+// Run only under the shared test-DB lock: a case here drops and re-adds the
+// transcript columns on the shared schema, which fails any suite running beside it.
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
 import {
   getSummaryFactcheck,
+  getSummaryFactcheckVersioned,
   listSummaryFactcheckBadges,
+  markSummaryFactcheckApplied,
+  summaryFactchecksHasAppliedAt,
   upsertSummaryFactcheck,
   type SummaryFactcheckInput,
 } from "./summary-factchecks.ts";
@@ -65,5 +70,94 @@ describe("summary_factchecks", () => {
       { collection: "youtube-summaries", docId: "clean.md", bad: 0, total: 1 },
       { collection: "youtube-summaries", docId: "health/sleep/A talk.md", bad: 1, total: 2 },
     ]);
+  });
+});
+
+describe("summary_factchecks: applied_at and the apply CAS (migration 080)", () => {
+  const answerSha = (answer: string) => new Bun.CryptoHasher("sha256").update(answer).digest("hex");
+  /** A fixed microsecond value: `now()` lands on a multiple of 1000 µs about once
+   *  in a thousand runs, and Postgres then prints fewer digits. */
+  const pinCreatedAt = () => getDb()`UPDATE summary_factchecks SET created_at = '2026-10-05 12:00:00.123456+00'`;
+
+  test("the column exists, and the probe says so", async () => {
+    expect(await summaryFactchecksHasAppliedAt()).toBe(true);
+  });
+
+  test("a stamp on the row read in this request sets applied_at and the new hash", async () => {
+    await upsertSummaryFactcheck(base);
+    await pinCreatedAt();
+    const row = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
+    expect(row.appliedAt).toBeNull();
+    // Full precision: the microseconds the epoch-ms value drops.
+    expect(row.createdAtText).toContain(".123456");
+    const ok = await markSummaryFactcheckApplied({
+      collection: base.collection,
+      docId: base.docId,
+      createdAtText: row.createdAtText,
+      answerSha256: answerSha(base.answer),
+      bodySha256: "c".repeat(64),
+    });
+    expect(ok).toBe(true);
+    const after = (await getSummaryFactcheck(base.collection, base.docId))!;
+    expect(after.bodySha256).toBe("c".repeat(64));
+    expect(after.appliedAt).not.toBeNull();
+  });
+
+  test("the epoch-ms created_at does not match the row (the CAS needs the text)", async () => {
+    await upsertSummaryFactcheck(base);
+    await pinCreatedAt();
+    const row = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
+    const ok = await markSummaryFactcheckApplied({
+      collection: base.collection,
+      docId: base.docId,
+      createdAtText: new Date(row.createdAt).toISOString(),
+      answerSha256: answerSha(base.answer),
+      bodySha256: "c".repeat(64),
+    });
+    expect(ok).toBe(false);
+  });
+
+  test("a re-check that landed during the apply wins: 0 rows, row stays un-applied", async () => {
+    await upsertSummaryFactcheck(base);
+    const read = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
+    await upsertSummaryFactcheck({ ...base, answer: "a newer check" });
+    const ok = await markSummaryFactcheckApplied({
+      collection: base.collection,
+      docId: base.docId,
+      createdAtText: read.createdAtText,
+      answerSha256: answerSha(base.answer),
+      bodySha256: "c".repeat(64),
+    });
+    expect(ok).toBe(false);
+    const row = (await getSummaryFactcheck(base.collection, base.docId))!;
+    expect(row.appliedAt).toBeNull();
+    expect(row.bodySha256).toBe(base.bodySha256);
+  });
+
+  test("a re-check clears applied_at", async () => {
+    await upsertSummaryFactcheck(base);
+    await getDb()`UPDATE summary_factchecks SET applied_at = now()`;
+    expect((await getSummaryFactcheck(base.collection, base.docId))!.appliedAt).not.toBeNull();
+    const again = await upsertSummaryFactcheck(base);
+    expect(again.appliedAt).toBeNull();
+  });
+});
+
+describe("summary_factchecks: the upsert without migration 081's columns (080 present)", () => {
+  test("a replacement still clears applied_at", async () => {
+    const sql = getDb();
+    await upsertSummaryFactcheck(base);
+    await sql`UPDATE summary_factchecks SET applied_at = now()`;
+    await sql.unsafe("ALTER TABLE summary_factchecks DROP COLUMN transcript_claims, DROP COLUMN transcript_sha256");
+    try {
+      const again = await upsertSummaryFactcheck({ ...base, answer: "replaced" });
+      expect(again.answer).toBe("replaced");
+      expect(again.appliedAt).toBeNull();
+      expect(again.transcript).toBeNull();
+    } finally {
+      await sql.unsafe(
+        "ALTER TABLE summary_factchecks ADD COLUMN IF NOT EXISTS transcript_claims JSONB, ADD COLUMN IF NOT EXISTS transcript_sha256 TEXT",
+      );
+    }
   });
 });

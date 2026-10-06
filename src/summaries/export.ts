@@ -34,6 +34,7 @@ import { inProtectedRegion, markdownCodeRegions } from "../format/markdown-ast.t
 import { markdownContentStyles } from "../dashboard/views/components/doc-panel.ts";
 import { themeTokenStyles } from "../dashboard/views/shared-styles.ts";
 import { readerDurationSec, readerFormatDuration } from "./reader-article.ts";
+import { dropFactcheckSentinelLines, styleFactcheckCallouts } from "./factcheck-callout.ts";
 import {
   FRAME_SOURCES,
   frameAddressRegExp,
@@ -233,8 +234,10 @@ const exportMarked = new Marked({
   },
 });
 
+/** A fact-check block's sentinel lines are dropped and its callout styled
+ *  (`factcheck-callout.ts`), as in the article view. */
 export function renderExportMarkdown(markdown: string): string {
-  return exportMarked.parse(markdown, { async: false }) as string;
+  return styleFactcheckCallouts(exportMarked.parse(dropFactcheckSentinelLines(markdown), { async: false }) as string);
 }
 
 export interface ExportPageInput {

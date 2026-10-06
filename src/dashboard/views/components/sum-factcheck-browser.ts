@@ -8,11 +8,12 @@
 import {
   sumFactcheckBadgeHtml,
   sumFactcheckLoadBadges,
+  sumFactcheckOnClose,
   sumFactcheckOnOpen,
   sumFactcheckStart,
   SUM_FACTCHECK_BTN_ID,
 } from "./sum-factcheck-client.ts";
 
-Object.assign(globalThis, { sumFactcheckBadgeHtml, sumFactcheckLoadBadges, sumFactcheckOnOpen, sumFactcheckStart });
+Object.assign(globalThis, { sumFactcheckBadgeHtml, sumFactcheckLoadBadges, sumFactcheckOnClose, sumFactcheckOnOpen, sumFactcheckStart });
 
 document.getElementById(SUM_FACTCHECK_BTN_ID)?.addEventListener("click", () => sumFactcheckStart());

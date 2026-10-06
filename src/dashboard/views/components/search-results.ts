@@ -1,5 +1,7 @@
 /** Search page — result list with score bars, chunk expansion, and empty states */
 
+import { plainFactcheckText } from "../../../summaries/factcheck-callout.ts";
+
 export function searchResultsStyles(): string {
   return `
     /* Results */
@@ -253,6 +255,8 @@ export function searchResultsHtml(): string {
 export function searchResultsScript(): string {
   return `
     let searchResults = [];
+    // A summary's written-back fact-check block is indexed too.
+    var plainFactcheckText = ${plainFactcheckText.toString()};
 
     function highlightQuery(text, query) {
       if (!query || !text) return esc(text);
@@ -321,7 +325,7 @@ export function searchResultsScript(): string {
 
         let bestChunkPreview = '';
         if (chunks.length > 0) {
-          const stripped = stripBreadcrumb(chunks[0].content);
+          const stripped = plainFactcheckText(stripBreadcrumb(chunks[0].content));
           const preview = truncate(stripped, 200);
           bestChunkPreview = chunks[0].heading
             ? '<strong>' + esc(chunks[0].heading) + ':</strong> ' + highlightQuery(preview, query)
@@ -352,7 +356,7 @@ export function searchResultsScript(): string {
               headingBadge +
               '<span class="chunk-label">chunk ' + (ci + 1) + '</span>' +
             '</div>' +
-            '<div class="chunk-content">' + highlightQuery(stripBreadcrumb(c.content), query) + '</div>' +
+            '<div class="chunk-content">' + highlightQuery(plainFactcheckText(stripBreadcrumb(c.content)), query) + '</div>' +
           '</div>';
         }).join('');
 

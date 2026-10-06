@@ -31,47 +31,12 @@ import {
   hasFactcheckBlock,
 } from "../wiki/factcheck-context.ts";
 import { sha256, todayOslo } from "./util.ts";
+import { sourceKindNoun } from "../summaries/source-noun.ts";
 
 /** Cap on the findings listed in the rider (chars), per D6. */
 export const FACTCHECK_RIDER_MAX = 2000;
 /** Cap on one claim's quote or correction inside the rider (chars). */
 const RIDER_FIELD_MAX = 450;
-
-/** Hosts whose pages are a video, a talk or a post whatever collection holds them. */
-const HOST_NOUNS: [RegExp, string][] = [
-  [/(^|\.)(youtube\.com|youtu\.be|tiktok\.com)$/, "the video"],
-  [/(^|\.)vimeo\.com$/, "the talk"],
-  [/(^|\.)(x\.com|twitter\.com)$/, "the post"],
-];
-
-/**
- * The noun a page uses for the captured item (D7): from the URL's host first —
- * `article-summaries` holds pasted transcripts of videos and talks too — then
- * from the collection.
- */
-export function sourceKindNoun(collection: string, url?: string | null): string {
-  let host = "";
-  try {
-    host = url ? new URL(url).hostname.toLowerCase() : "";
-  } catch {
-    host = "";
-  }
-  for (const [re, noun] of HOST_NOUNS) if (host && re.test(host)) return noun;
-  switch (collection) {
-    case "vimeo-summaries":
-      return "the talk";
-    case "youtube-summaries":
-    case "tiktok-summaries":
-      return "the video";
-    case "x-articles":
-      return "the post";
-    case "anthropic-summaries":
-    case "article-summaries":
-      return "the article";
-    default:
-      return "the source";
-  }
-}
 
 /** The digest a draft records for the check it was built with. */
 export function factcheckAnswerSha256(saved: Pick<SummaryFactcheck, "answer">): string {

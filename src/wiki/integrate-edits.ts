@@ -2243,6 +2243,36 @@ export function originalsOfOutcomes(outcomes: EditOutcome[]): Map<number, string
 
 // ── Prompt ───────────────────────────────────────────────────────────────────
 
+/**
+ * Who the integrate model is and what each verdict asks of it — the part of the
+ * prompt that differs between a wiki page and a capture summary (D5). Every
+ * other rule (edit nothing else, verbatim `old`, the JSON contract) is shared.
+ */
+export interface IntegrateEditorVoice {
+  /** The system prompt's first line. */
+  readonly role: string;
+  /** What the model is given (the sentence after the role). */
+  readonly given: string;
+  /** One rule line per acted-on verdict: ❌, then ⚠️. */
+  readonly verdictRules: readonly string[];
+  /** The noun the prompt calls the text being edited ("article", "summary"). */
+  readonly noun: string;
+  /** The user turn's opening line. */
+  readonly task: (pageTitle: string, wikiName: string) => string;
+}
+
+/** The wiki page's voice: correct the statement in place. */
+export const WIKI_EDITOR_VOICE: IntegrateEditorVoice = {
+  role: "You are a meticulous wiki editor applying fact-check results to an article.",
+  given: "You are given an article body and the fact-check verdicts for some of its claims.",
+  verdictRules: [
+    "- ❌ (contradicted): correct the statement, and cite the correcting source as a markdown link `[hostname](url)` right there in the sentence.",
+    "- ⚠️ (partly supported): hedge or add the missing precision, with the same in-place source link.",
+  ],
+  noun: "article",
+  task: (pageTitle, wikiName) => `Apply these fact-check verdicts to "${pageTitle}" in the "${wikiName}" knowledge wiki.`,
+};
+
 export interface IntegratePromptInput {
   pageTitle: string;
   wikiName: string;
@@ -2252,6 +2282,8 @@ export interface IntegratePromptInput {
   maskedBody: string;
   /** True when the page carries a trailing `## Sources` section. */
   hasSourcesSection: boolean;
+  /** Default {@link WIKI_EDITOR_VOICE}. */
+  voice?: IntegrateEditorVoice;
 }
 
 /**
@@ -2266,20 +2298,21 @@ export function buildIntegratePrompt(input: IntegratePromptInput): {
   systemPrompt: string;
   userPrompt: string;
 } {
+  const voice = input.voice ?? WIKI_EDITOR_VOICE;
+  const noun = voice.noun;
   const systemPrompt = [
-    "You are a meticulous wiki editor applying fact-check results to an article.",
+    voice.role,
     "",
-    "You are given an article body and the fact-check verdicts for some of its claims.",
-    "Produce a MINIMAL list of in-place text edits that make the article accurate.",
+    voice.given,
+    `Produce a MINIMAL list of in-place text edits that make the ${noun} accurate.`,
     "",
     "Rules:",
-    "- ❌ (contradicted): correct the statement, and cite the correcting source as a markdown link `[hostname](url)` right there in the sentence.",
-    "- ⚠️ (partly supported): hedge or add the missing precision, with the same in-place source link.",
+    ...voice.verdictRules,
     "- Edit NOTHING else. Do not restructure, retitle, reformat, or improve prose that no verdict challenges.",
     "- Use ONLY the source URLs that appear in the verdict blocks. Never invent a URL, and do NOT use any tool — everything you need is in this message.",
     "",
     "Each edit is an exact string replacement:",
-    "- `old` MUST be copied VERBATIM from the article body below, character for character, and must be long enough to occur EXACTLY ONCE in it (extend it with surrounding words if the short form repeats).",
+    `- \`old\` MUST be copied VERBATIM from the ${noun} body below, character for character, and must be long enough to occur EXACTLY ONCE in it (extend it with surrounding words if the short form repeats).`,
     "- `old` must NOT contain, start in, or run past any `[… omitted]` placeholder — those regions are not editable.",
     "- `new` is the full replacement for `old`.",
     "- Prefer a handful of surgical sentence-level edits over one large block.",
@@ -2291,22 +2324,23 @@ export function buildIntegratePrompt(input: IntegratePromptInput): {
   ].join("\n");
 
   const claimLines = input.claims.map((c) => c.block).join("\n\n");
+  const Noun = noun.toUpperCase();
   const userPrompt = [
-    `Apply these fact-check verdicts to "${input.pageTitle}" in the "${input.wikiName}" knowledge wiki.`,
+    voice.task(input.pageTitle, input.wikiName),
     "",
     "VERDICTS:",
     '"""',
     claimLines,
     '"""',
     "",
-    "ARTICLE BODY (copy `old` verbatim from this text; `[… omitted]` regions are not editable):",
+    `${Noun} BODY (copy \`old\` verbatim from this text; \`[… omitted]\` regions are not editable):`,
     '"""',
     input.maskedBody,
     '"""',
     "",
     input.hasSourcesSection
-      ? "The article has a `## Sources` section; a correcting source may be added there as a list item edit INSTEAD of inline when that reads better."
-      : "The article has no `## Sources` section — keep source links inline.",
+      ? `The ${noun} has a \`## Sources\` section; a correcting source may be added there as a list item edit INSTEAD of inline when that reads better.`
+      : `The ${noun} has no \`## Sources\` section — keep source links inline.`,
     "",
     "Output the JSON edit list now.",
   ].join("\n");

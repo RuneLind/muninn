@@ -11,6 +11,7 @@
  * the actual `fetchKnowledgeApi` search.
  */
 
+import { plainFactcheckText } from "../summaries/factcheck-callout.ts";
 import { matchCitationToPage } from "./citation-links.ts";
 import { readWikiPage, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
@@ -134,7 +135,7 @@ function hitSnippet(hit: SimilarSearchHit, cap = 240): string | undefined {
   if (chunk && typeof chunk === "object" && "content" in chunk) {
     const content = (chunk as { content: unknown }).content;
     if (typeof content === "string") {
-      const text = content.replace(/\s+/g, " ").trim();
+      const text = plainFactcheckText(content).replace(/\s+/g, " ").trim();
       if (text) return text.slice(0, cap);
     }
   }

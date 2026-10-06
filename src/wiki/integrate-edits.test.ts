@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   applyEdits,
   buildIntegratePrompt,
+  WIKI_EDITOR_VOICE,
   changedChars,
   changedCharsOfOutcomes,
   collapsedRescueRisk,
@@ -820,4 +821,16 @@ test("preview context is unclamped when no zone is within reach", () => {
   const o = applyEdits(body, [edit({ old: "ships 4M units", new: "ships 2.1M units" })]).outcomes[0]!;
   expect(o.beforeCtx).toBe("Plain intro prose. The device ");
   expect(o.afterCtx).toBe(". Plain trailing prose.\n");
+});
+
+test("buildIntegratePrompt: the wiki prompt is byte-identical to the pre-voice builder (golden)", async () => {
+  const golden = (await Bun.file(new URL("./__fixtures__/integrate-prompt-wiki.golden.json", import.meta.url)).json()) as {
+    input: { pageTitle: string; wikiName: string; claims: never[]; maskedBody: string };
+    withSources: { systemPrompt: string; userPrompt: string };
+    withoutSources: { systemPrompt: string; userPrompt: string };
+  };
+  expect(buildIntegratePrompt({ ...golden.input, hasSourcesSection: true })).toEqual(golden.withSources);
+  expect(buildIntegratePrompt({ ...golden.input, hasSourcesSection: false })).toEqual(golden.withoutSources);
+  // The default IS the wiki voice.
+  expect(buildIntegratePrompt({ ...golden.input, hasSourcesSection: true, voice: WIKI_EDITOR_VOICE })).toEqual(golden.withSources);
 });

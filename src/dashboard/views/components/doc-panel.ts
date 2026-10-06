@@ -1,5 +1,7 @@
 /** Shared document viewer panel — slide-in overlay for rendering markdown documents */
 
+import { factcheckCalloutScript, factcheckCalloutStyles } from "../../../summaries/factcheck-callout.ts";
+
 /** CSS for markdown-rendered content. Used by both the overlay panel and the standalone document page. */
 export function markdownContentStyles(prefix: string): string {
   return `
@@ -35,7 +37,7 @@ export function markdownContentStyles(prefix: string): string {
       color: var(--text-soft);
       background: color-mix(in srgb, var(--accent) 5%, transparent);
       border-radius: 0 6px 6px 0;
-    }
+    }${factcheckCalloutStyles(prefix)}
     ${prefix} table { width: 100%; border-collapse: collapse; margin: 0 0 16px; font-size: 14px; }
     ${prefix} th, ${prefix} td { border: 1px solid var(--border-primary); padding: 8px 12px; text-align: left; }
     ${prefix} th { background: var(--bg-surface); font-weight: 600; color: var(--text-primary); }
@@ -192,6 +194,11 @@ export function docPanelStyles(animationName = "slideIn"): string {
       font-weight: 600;
     }
     .doc-panel-followup.doc-panel-primary:hover { border-color: var(--accent-light); }
+    /* A note that warns (the re-run menu's integrated-corrections line):
+       --status-warning darkened toward the text, as .sum-fc-stale is. */
+    .doc-panel-menu-note.doc-panel-menu-warn {
+      color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary));
+    }
     .doc-panel-menu-rule { height: 1px; background: var(--border-primary); margin: 4px 2px; }
     .doc-panel-menu-note {
       font-size: 11px;
@@ -381,8 +388,10 @@ export function docPanelScript(): string {
         marked.use({ renderer: { html: function(token) { return esc(token.raw || token.text || ''); } } });
         marked.__sanitized = true;
       }
-      return marked.parse(text);
+      // A summary's fact-check block: sentinel lines out, callout styled.
+      return styleFactcheckCallouts(marked.parse(dropFactcheckSentinelLines(text)));
     }
+    ${factcheckCalloutScript()}
 
     // Point the opt-in "Ask a follow-up" header action at /research?q=<title>.
     // No-op unless the page rendered the button via docPanelHtml({askFollowUp:true}).

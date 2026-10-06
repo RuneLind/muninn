@@ -62,6 +62,10 @@ import { getLog } from "../../logging.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
+import { getSummaryFactcheck } from "../../db/summary-factchecks.ts";
+import { findLiveSentinelBlocks } from "../../wiki/factcheck-context.ts";
+import { factcheckBlockDate } from "../../summaries/factcheck-block.ts";
+import { checkedSha256OfRaw } from "../../summaries/factcheck-body.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { mapProseLines } from "../../summaries/transcript-split.ts";
 import {
@@ -169,6 +173,9 @@ export interface SummariesRerunDeps {
    *  other summary write routes share. A test passes its own. */
   claims?: SummarySaveClaims;
   bots: () => BotConfig[];
+  /** The document's saved fact check, for the menu's D13 warning. Absent or
+   *  throwing ⇒ none. */
+  factcheckRow?: (collection: string, docId: string) => Promise<{ appliedAt: number | null; bodySha256: string } | null>;
 }
 
 export function defaultSummariesRerunDeps(knowledgeApiUrl: string): SummariesRerunDeps {
@@ -188,6 +195,7 @@ export function defaultSummariesRerunDeps(knowledgeApiUrl: string): SummariesRer
     ingest: postSummaryIngest,
     oneShot: runCaptureOneShot,
     bots: discoverAllBots,
+    factcheckRow: getSummaryFactcheck,
   };
 }
 
@@ -814,7 +822,7 @@ export function registerSummariesRerunRoutes(
     sourceId: string,
     docId: string,
   ): Promise<
-    | { ok: true; vertical: RerunVertical; collection: string; stored: StoredCapture }
+    | { ok: true; vertical: RerunVertical; collection: string; stored: StoredCapture; raw: string }
     | { ok: false; status: 400 | 404 | 502 | 503; error: string; code: string }
   > {
     const source = getSummarySource(sourceId);
@@ -836,7 +844,7 @@ export function registerSummariesRerunRoutes(
       return { ok: false, status, error: "Could not read the stored document.", code: "upstream" };
     }
     if (!doc) return { ok: false, status: 404, error: "No such document.", code: "not_found" };
-    return { ok: true, vertical, collection: source.collection, stored: readStoredCapture(doc.raw) };
+    return { ok: true, vertical, collection: source.collection, stored: readStoredCapture(doc.raw), raw: doc.raw };
   }
 
   /**
@@ -856,6 +864,15 @@ export function registerSummariesRerunRoutes(
     const loaded = await loadStored(sourceId, docId);
     if (!loaded.ok) return c.json({ error: loaded.error, code: loaded.code }, loaded.status);
     const { vertical, stored } = loaded;
+
+    const fcRow = deps.factcheckRow ? await deps.factcheckRow(loaded.collection, docId).catch(() => null) : null;
+    const factcheck = {
+      blockPresent: findLiveSentinelBlocks(stored.body).length > 0,
+      appliedAt: fcRow?.appliedAt ?? null,
+      appliedDay: fcRow?.appliedAt ? factcheckBlockDate(fcRow.appliedAt) : null,
+      // Applied but no longer fresh: the corrections are already gone.
+      applyFresh: fcRow?.appliedAt ? checkedSha256OfRaw(loaded.raw) === fcRow.bodySha256 : null,
+    };
 
     const bot = resolveSummarizerBot(deps.bots());
     const kinds = bot && vertical.hasKindPicker ? capturePresetOptions(vertical.kinds(bot)) : [];
@@ -907,6 +924,8 @@ export function registerSummariesRerunRoutes(
       promptUrl: vertical.id === "youtube" && videoId ? youtubeWatchUrl(videoId) : url,
       full: { supported: false, reason: FULL_RERUN_UNSUPPORTED },
       bot: bot?.name ?? null,
+      // What a re-run regenerated from the transcript would drop (D13).
+      factcheck,
     });
   });
 

@@ -28,7 +28,8 @@ import type { executeOneShot } from "../../ai/one-shot.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
-import { readSummarySourceText } from "../../summaries/source-text.ts";
+import { filterDocumentText, readSummarySourceText } from "../../summaries/source-text.ts";
+import { buildSummaryFactcheckBlock, factcheckBlockDate } from "../../summaries/factcheck-block.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { factcheckBodySha256, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
 import {
@@ -36,6 +37,7 @@ import {
   listSummaryFactcheckBadges,
   saveSummaryTranscriptCheck,
   summaryFactcheckTranscriptColumnsPresent,
+  summaryFactchecksHasAppliedAt,
   upsertSummaryFactcheck,
   type SavedFactcheckClaim,
   type SummaryFactcheck,
@@ -50,6 +52,7 @@ import { getLog } from "../../logging.ts";
 import { documentTranscript, registerSummariesTranscriptCheckRoute, transcriptSha256 } from "./summaries-factcheck-transcript.ts";
 import { renderTranscriptCheckHtml } from "../views/components/sum-transcript-render.ts";
 import type { TranscriptCheckOptions } from "../../summaries/transcript-check.ts";
+import { MIGRATION_080_ERROR } from "./summaries-factcheck-writeback.ts";
 
 const log = getLog("dashboard", "summaries-factcheck");
 
@@ -83,6 +86,10 @@ export interface SummariesFactcheckDeps {
     saveTranscript: typeof saveSummaryTranscriptCheck;
     /** Whether migration 081's columns exist. */
     transcriptColumnsPresent: () => Promise<boolean>;
+    /** Migration 080's `applied_at` exists. The check route's upsert writes it,
+     *  so without it a full web check would end in a failed save: refused
+     *  first. Absent ⇒ assumed present (tests). */
+    schemaReady?: () => Promise<boolean>;
   };
   bots: () => BotConfig[];
   /** Test seam threaded into the engine; production leaves it unset. */
@@ -107,6 +114,7 @@ export function defaultSummariesFactcheckDeps(knowledgeApiUrl: string): Summarie
       listBadges: listSummaryFactcheckBadges,
       saveTranscript: saveSummaryTranscriptCheck,
       transcriptColumnsPresent: summaryFactcheckTranscriptColumnsPresent,
+      schemaReady: summaryFactchecksHasAppliedAt,
     },
     bots: discoverAllBots,
   };
@@ -161,6 +169,14 @@ export function registerSummariesFactcheckRoutes(
     const bot = resolveSummarizerBot(deps.bots());
     const refusal = summaryFactcheckBotRefusal(bot);
     if (refusal || !bot) return c.json({ error: refusal }, 503);
+    try {
+      if (deps.store.schemaReady && !(await deps.store.schemaReady())) {
+        return c.json({ error: MIGRATION_080_ERROR, code: "migration_080" }, 503);
+      }
+    } catch (err) {
+      log.warn("Summary factcheck: schema check failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "fact-check lookup failed" }, 500);
+    }
 
     const [sourceText, meta] = await Promise.all([
       deps.readSourceText(collection, docId),
@@ -245,9 +261,15 @@ export function registerSummariesFactcheckRoutes(
       !row.transcript || !row.transcriptSha256 || sourceText === null
         ? null
         : transcript === null || transcriptSha256(transcript) !== row.transcriptSha256;
+    // Whether the document carries THIS check's block (➕ Add shows "added").
+    const blockAdded =
+      sourceText === null
+        ? null
+        : sourceText.includes(filterDocumentText(buildSummaryFactcheckBlock(row.answer, factcheckBlockDate(row.createdAt))));
     return c.json({
       result: row,
       stale,
+      blockAdded,
       html: renderSummaryFactcheckHtml(row.answer),
       hasTranscript,
       transcriptStale,

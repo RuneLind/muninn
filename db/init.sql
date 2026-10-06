@@ -910,6 +910,8 @@ CREATE TABLE summary_factchecks (
   -- Migration 081: the transcript check over this row's claims; NULLed by a web re-check.
   transcript_claims JSONB,
   transcript_sha256 TEXT,
+  -- Set by the doc panel's Integrate apply, cleared by a re-check (migration 080).
+  applied_at   TIMESTAMPTZ,
   PRIMARY KEY (collection, doc_id)
 );
 

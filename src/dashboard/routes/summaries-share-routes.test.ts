@@ -477,3 +477,17 @@ describe("GET /api/summaries/share/presets", () => {
     expect(res.headers.get("cache-control")).toContain("no-store");
   });
 });
+
+describe("POST /api/summaries/share — a written-back fact-check block (fix round 1)", () => {
+  test("the block and its sentinels never reach the share model", async () => {
+    const text =
+      "Real body prose.\n\n<!-- factcheck:start -->\n## Fact check (2026-10-06)\n\n> [!factcheck] Claims checked against the web\n>\n> **❌ Claim 1/1 — x**\n<!-- factcheck:end -->\n\n## Transcript\n\nspeech";
+    const { app, seen } = makeApp({ doc: { text } });
+    await (await post(app, ok)).text();
+    expect(seen.ran).toBe(1);
+    expect(seen.prompt).toContain("Real body prose.");
+    expect(seen.prompt).not.toContain("factcheck");
+    expect(seen.prompt).not.toContain("Fact check (2026-10-06)");
+    expect(seen.prompt).not.toContain("Claim 1/1");
+  });
+});

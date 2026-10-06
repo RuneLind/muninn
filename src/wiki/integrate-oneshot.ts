@@ -42,6 +42,8 @@ export interface IntegrateOneShotOptions {
   systemPrompt: string;
   config: Config;
   botConfig: BotConfig;
+  /** The page the `/agents` run links back to; default `/wiki`. */
+  sourcePage?: string;
   /** Test seams — production callers pass neither. */
   oneShot?: typeof executeOneShot;
   tracer?: Tracer;
@@ -63,7 +65,7 @@ export async function runIntegrateOneShot(opts: IntegrateOneShotOptions): Promis
     kind: "factcheck",
     phase: "calling_claude",
     runName: name.length > 60 ? `${name.slice(0, 57)}…` : name,
-    sourcePage: "/wiki",
+    sourcePage: opts.sourcePage ?? "/wiki",
     source: "factcheck-integrate",
     prompt: opts.prompt,
     systemPrompt: opts.systemPrompt,

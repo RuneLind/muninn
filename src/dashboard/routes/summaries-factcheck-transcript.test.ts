@@ -36,6 +36,7 @@ const webRow = (): SummaryFactcheck => ({
   createdAt: 1_700_000_000_000,
   transcript: null,
   transcriptSha256: null,
+  appliedAt: null,
 });
 
 let stored: SummaryFactcheck | null;

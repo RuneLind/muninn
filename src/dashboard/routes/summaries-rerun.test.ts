@@ -49,6 +49,8 @@ import {
 } from "./summaries-rerun.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
 import { SummarySaveClaims } from "../../summaries/summary-save.ts";
+import { buildSummaryFactcheckBlock, insertSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
+import { checkedSha256OfRaw } from "../../summaries/factcheck-body.ts";
 import type { SummaryIngestResponse } from "../../summaries/summarizer-shared.ts";
 import { buildShortVideoSystemPrompt } from "../../video/short-video-prompt.ts";
 import { shortVideoCaptureKinds, SHORT_VIDEO_THINKING } from "../../video/short-video-kinds.ts";
@@ -1007,6 +1009,44 @@ describe("GET /api/summaries/rerun/options", () => {
     expect(data.framesKept).toBe(0);
     expect(data.promptUrl).toBe(`https://www.youtube.com/watch?v=${VIDEO_ID}`);
     expect((data.full as { supported: boolean }).supported).toBe(false);
+  });
+
+  test("names when fact-check corrections were integrated, so the menu can warn (D13)", async () => {
+    const raw = youtubeDoc({ kind: "talk-notes" });
+    const { deps } = makeDeps(raw);
+    const asked: string[] = [];
+    const url = `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`;
+    type Fc = { factcheck: { blockPresent: boolean; appliedAt: number | null; appliedDay: string | null; applyFresh: boolean | null } };
+    const fresh = appFor({
+      ...deps,
+      factcheckRow: async (c, d) => (asked.push(`${c}|${d}`), { appliedAt: Date.UTC(2026, 9, 5, 23, 30), bodySha256: checkedSha256OfRaw(raw) }),
+    });
+    // 23:30 UTC on 5 October is 6 October in Oslo — the block heading's day.
+    expect(((await (await fresh.request(url)).json()) as Fc).factcheck).toEqual({
+      blockPresent: false,
+      appliedAt: Date.UTC(2026, 9, 5, 23, 30),
+      appliedDay: "2026-10-06",
+      applyFresh: true,
+    });
+    expect(asked).toEqual([`youtube-summaries|${DOC_ID}`]);
+    // Applied, but the summary moved since (a re-run already dropped them).
+    const moved = appFor({ ...deps, factcheckRow: async () => ({ appliedAt: 1, bodySha256: "0".repeat(64) }) });
+    expect(((await (await moved.request(url)).json()) as Fc).factcheck.applyFresh).toBe(false);
+    // Unset, and a lookup that throws (no migration 080), both read as "never".
+    expect(((await (await app.request(url)).json()) as Fc).factcheck.appliedAt).toBeNull();
+    const throwing = appFor({ ...deps, factcheckRow: async () => { throw new Error("no column"); } });
+    expect(((await (await throwing.request(url)).json()) as Fc).factcheck.appliedAt).toBeNull();
+  });
+
+  test("an Add-only block is named too: a re-run drops it", async () => {
+    const block = buildSummaryFactcheckBlock("### ❌ Claim 1/1 — x\n\nNo.", "2026-10-06");
+    const raw = youtubeDoc({ body: insertSummaryFactcheckBlock("The stored summary.", block) + "\n" });
+    const url = `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`;
+    const res = await appFor(makeDeps(raw).deps).request(url);
+    expect(((await res.json()) as { factcheck: { blockPresent: boolean; appliedAt: null } }).factcheck).toMatchObject({
+      blockPresent: true,
+      appliedAt: null,
+    });
   });
 
   test("a transcript-less document says so instead of 400ing the menu", async () => {

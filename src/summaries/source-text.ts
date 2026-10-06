@@ -46,7 +46,7 @@ export async function readSummarySourceText(
       controller.abort();
       return null;
     }
-    return filterDocumentText(stripFrontmatter(await res.text()));
+    return sourceTextOfRaw(await res.text());
   } catch (err) {
     log.debug("source file unavailable for {collection}/{docIdPath}, using the cleaned copy: {error}", {
       collection,
@@ -57,6 +57,13 @@ export async function readSummarySourceText(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** A raw file as every summary surface reads it: frontmatter stripped, then
+ *  {@link filterDocumentText}. The fact check's hash input is this, cut
+ *  (`checkedTextOfRaw` in `factcheck-body.ts`). */
+export function sourceTextOfRaw(raw: string): string {
+  return filterDocumentText(stripFrontmatter(raw));
 }
 
 /** `doc` with its `text` replaced by the source body when there is one. */

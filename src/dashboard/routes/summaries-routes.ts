@@ -20,6 +20,7 @@ import { registerSummariesRerunRoutes } from "./summaries-rerun.ts";
 import { registerFramesRoutes } from "./frames-routes.ts";
 import { registerSummariesContextRoutes } from "./summaries-context.ts";
 import { registerSummariesFactcheckRoutes } from "./summaries-factcheck.ts";
+import { registerSummariesFactcheckWritebackRoutes } from "./summaries-factcheck-writeback.ts";
 
 const log = getLog("dashboard");
 
@@ -213,6 +214,8 @@ export function registerSummariesRoutes(
   // Fact check: the doc panel's ✓ Fact check (SSE), its saved result and the
   // Latest rail's badges. Its own module: an adapter onto the wiki's engine.
   registerSummariesFactcheckRoutes(app, config);
+  // …and its write-back: ➕ Add the block, ✎ Integrate the corrections.
+  registerSummariesFactcheckWritebackRoutes(app, config);
 
   app.get("/api/summaries/stats", async (c) => {
     const botName = c.req.query("bot") || "jarvis";
