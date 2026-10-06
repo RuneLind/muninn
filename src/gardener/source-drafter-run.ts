@@ -34,6 +34,7 @@ import {
   type SourceDraftAttemptOutcome,
   type SourceDraftTrigger,
 } from "../db/source-draft-attempts.ts";
+import { getSummaryFactcheck } from "../db/summary-factchecks.ts";
 import { loadConfig } from "../config.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import { docDateMs } from "./harvest.ts";
@@ -49,8 +50,8 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "source-drafter");
 
-const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
-const DOC_FETCH_TIMEOUT_MS = 15_000;
+export const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
+export const DOC_FETCH_TIMEOUT_MS = 15_000;
 
 /**
  * Derive a huginn category from a collection-relative doc id (`<category>/<title>.md`,
@@ -65,8 +66,18 @@ export function categoryFromDocId(docId: string): string {
   return parts.length >= 2 ? parts.slice(0, -1).join("/") : "";
 }
 
+/**
+ * A doc's display title from its id — `<category>/<title>.md` → `<title>`, the
+ * same rule as `titleFromDocId` in `summaries-rerun.ts`: no capture writes a
+ * `title:` key, so the file name is the title.
+ */
+export function titleFromDocId(docId: string): string {
+  const base = docId.split("/").pop() ?? docId;
+  return base.replace(/\.md$/i, "") || docId;
+}
+
 /** The first public http(s) URL among the candidates, or "" when none is public. */
-function firstHttpUrl(...candidates: (string | undefined)[]): string {
+export function firstHttpUrl(...candidates: (string | undefined)[]): string {
   for (const c of candidates) {
     if (typeof c === "string" && /^https?:\/\//i.test(c.trim())) return c.trim();
   }
@@ -79,12 +90,16 @@ function firstHttpUrl(...candidates: (string | undefined)[]): string {
  * knowledge API directly, so this path takes no `apiUrl` — the run-now entry point
  * does its own huginn fetches with one.
  *
- * Every drafter entry point that reaches the MODEL funnels through here, so it is
- * where the attempt is recorded ({@link recordSourceDraftAttempt}). Three of the
- * four outcomes persist nothing else, and the backlog row's whole diagnosis comes
- * from that ledger — a caller that drafts around this function is invisible again.
- * The pre-model guards that return before it ({@link draftOneBacklogDoc}) record
- * through the `recordAttempt` seam instead.
+ * Every drafter entry point that reaches the MODEL funnels through here, except
+ * three: the backfill script, which deliberately writes no attempt row (a backfill
+ * row would replace the capture row linking the doc to its applied page),
+ * `scripts/measure-summary-code.ts --redraft`, a measurement that persists
+ * nothing, and Redraft (`source-redraft.ts`), which upserts its row inside the
+ * transaction that replaces the proposal. Three of the four outcomes persist nothing else,
+ * and the backlog row's whole diagnosis comes from that ledger — a new caller
+ * that drafts around this function is invisible again. The pre-model guards
+ * that return before it ({@link draftOneBacklogDoc}) record through the
+ * `recordAttempt` seam instead.
  */
 export async function runSourceDraftForInput(
   botConfig: BotConfig,
@@ -104,17 +119,8 @@ export async function runSourceDraftForInput(
     liveTopicKeys: () => getLiveTopicKeys(botConfig.name),
     liveSourceDocUrls: () => getLiveSourceDocUrls(botConfig.name),
     insertProposal: (params) => insertWikiProposal(params),
-    callDrafter: async (prompt, title) => {
-      const res = await runDrafterOneShot({
-        title,
-        url: input.url,
-        prompt,
-        config,
-        botConfig,
-        timeoutMs: DRAFT_TIMEOUT_MS,
-      });
-      return res.result;
-    },
+    getFactcheck: getSummaryFactcheck,
+    callDrafter: oneShotDrafter(botConfig, input.url, config),
   });
 
   await recordSourceDraftAttempt({
@@ -131,6 +137,25 @@ export async function runSourceDraftForInput(
   });
 
   return outcome;
+}
+
+/** The drafter's model call as `draftSourcePage` takes it: one fenced, traced one-shot. */
+export function oneShotDrafter(
+  botConfig: BotConfig,
+  url: string,
+  config = loadConfig(),
+): (prompt: string, title: string) => Promise<string> {
+  return async (prompt, title) => {
+    const res = await runDrafterOneShot({
+      title,
+      url,
+      prompt,
+      config,
+      botConfig,
+      timeoutMs: DRAFT_TIMEOUT_MS,
+    });
+    return res.result;
+  };
 }
 
 /** The blocking page's title on a collision skip — the row's "covered by" label. */
@@ -629,6 +654,6 @@ export function triggerSourceDraftFromCapture(
     });
 }
 
-function errMsg(err: unknown): string {
+export function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

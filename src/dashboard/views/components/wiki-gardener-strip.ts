@@ -238,7 +238,7 @@ export interface BacklogDocDraft {
   /** Wiki-relative path of the page that blocked the draft — deep-linked in the row. */
   collidingPath?: string;
   proposalId?: string;
-  trigger: "capture" | "run-now" | "backlog" | "doc";
+  trigger: "capture" | "run-now" | "backlog" | "doc" | "redraft";
   at: number;
 }
 

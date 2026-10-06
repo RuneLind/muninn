@@ -3456,3 +3456,83 @@ describe("GET /api/wiki/linter-findings — check 9 drift over a git wiki", () =
     expect(body.counts["long-page-no-fold"]).toBe(0);
   });
 });
+
+// Item 8 of fix round 1: Redraft spends a model call, so it answers the
+// gardener-disabled switch like `source-draft-run` and its siblings.
+describe("POST /api/wiki/proposals/:id/redraft — a disabled gardener", () => {
+  let root: string;
+  let app: Hono;
+  let origFetch: typeof fetch;
+  let fetches: number;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-redraft-route-"));
+    await Bun.write(path.join(root, "index.md"), "# Index\n");
+    __setBotsForTest([
+      {
+        name: "redraftbot",
+        dir: root,
+        persona: "",
+        telegramAllowedUserIds: [],
+        slackAllowedUserIds: [],
+        wikiDir: root,
+        gardener: { enabled: false },
+      },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __resetGardenerMutexForTest();
+    fetches = 0;
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      throw new Error("must not reach huginn");
+    }) as unknown as typeof fetch;
+    app = new Hono();
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+      getProposalById: async (id) =>
+        ({
+          id,
+          botName: "redraftbot",
+          wikiName: null,
+          topicKey: "source:tiktok-summaries:health/x.md",
+          groupKey: null,
+          lintMeta: null,
+          kind: "source",
+          mode: "create",
+          targetPath: "life/sources/X.mdx",
+          baseHash: null,
+          draft: "---\ntype: source\ntitle: X\n---\n\n# X\n",
+          sourceDocs: [{ collection: "tiktok-summaries", docId: "health/x.md", title: "x", url: "https://www.tiktok.com/@a/video/1" }],
+          rationale: null,
+          containedLinks: null,
+          relatedPages: null,
+          status: "draft",
+          createdAt: Date.now(),
+          resolvedAt: null,
+        }) as never,
+      approveProposal: async () => null,
+      revertProposal: async () => null,
+      ...lintGroupStubs,
+      deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
+    });
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    __setBotsForTest(null);
+    __resetGardenerMutexForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("400 before any fetch or model call", async () => {
+    const res = await app.request("/api/wiki/proposals/p-1/redraft", JSON_POST);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "the wiki gardener is disabled for this bot" });
+    expect(fetches).toBe(0);
+  });
+});
