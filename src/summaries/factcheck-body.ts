@@ -69,6 +69,16 @@ export function factcheckBodySha256(sourceText: string): string {
   return sha256(summaryFactcheckBody(sourceText));
 }
 
+/**
+ * Whether a saved check describes an earlier version of the summary: its body
+ * hash against the SOURCE file's text. `null` (unknown) without the source
+ * file — huginn's cleaned copy hashes differently. One rule for `/result`,
+ * export and share.
+ */
+export function summaryFactcheckStale(row: { bodySha256: string }, sourceText: string | null): boolean | null {
+  return sourceText === null ? null : factcheckBodySha256(sourceText) !== row.bodySha256;
+}
+
 /** sha256 of {@link checkedTextOfRaw}. */
 export function checkedSha256OfRaw(raw: string): string {
   return sha256(checkedTextOfRaw(raw));

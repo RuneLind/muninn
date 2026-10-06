@@ -31,8 +31,9 @@ import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { filterDocumentText, readSummarySourceText } from "../../summaries/source-text.ts";
 import { buildSummaryFactcheckBlock, factcheckBlockDate } from "../../summaries/factcheck-block.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
-import { factcheckBodySha256, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
+import { factcheckBodySha256, summaryFactcheckBody, summaryFactcheckStale } from "../../summaries/factcheck-body.ts";
 import {
+  deleteSummaryFactcheck,
   getSummaryFactcheck,
   listSummaryFactcheckBadges,
   saveSummaryTranscriptCheck,
@@ -49,6 +50,7 @@ import { summaryDocTitle, type SummaryShareDoc } from "./summaries-share.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import { enhanceConfidenceHtml } from "../views/components/wiki-ask-render.ts";
 import { getLog } from "../../logging.ts";
+import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { documentTranscript, registerSummariesTranscriptCheckRoute, transcriptSha256 } from "./summaries-factcheck-transcript.ts";
 import { renderTranscriptCheckHtml } from "../views/components/sum-transcript-render.ts";
 import type { TranscriptCheckOptions } from "../../summaries/transcript-check.ts";
@@ -86,6 +88,8 @@ export interface SummariesFactcheckDeps {
     saveTranscript: typeof saveSummaryTranscriptCheck;
     /** Whether migration 081's columns exist. */
     transcriptColumnsPresent: () => Promise<boolean>;
+    /** Remove a document's row when the document is deleted. Absent ⇒ rows outlive their document. */
+    delete?: (collection: string, docId: string) => Promise<void>;
     /** Migration 080's `applied_at` exists. The check route's upsert writes it,
      *  so without it a full web check would end in a failed save: refused
      *  first. Absent ⇒ assumed present (tests). */
@@ -114,6 +118,7 @@ export function defaultSummariesFactcheckDeps(knowledgeApiUrl: string): Summarie
       listBadges: listSummaryFactcheckBadges,
       saveTranscript: saveSummaryTranscriptCheck,
       transcriptColumnsPresent: summaryFactcheckTranscriptColumnsPresent,
+      delete: deleteSummaryFactcheck,
       schemaReady: summaryFactchecksHasAppliedAt,
     },
     bots: discoverAllBots,
@@ -161,6 +166,24 @@ export function registerSummariesFactcheckRoutes(
   config: Config,
   deps: SummariesFactcheckDeps = defaultSummariesFactcheckDeps(config.knowledgeApiUrl),
 ): void {
+  // A deleted document's check goes with it, or a later capture at the same doc
+  // id would inherit its verdicts. Listeners are synchronous, so the delete is
+  // fired with its own catch; never unsubscribed, like the vertical routes'.
+  const deleteRow = deps.store.delete;
+  if (deleteRow) {
+    onSummaryDocumentDeleted(({ collection, id }) => {
+      void Promise.resolve()
+        .then(() => deleteRow(collection, id))
+        .catch((err) =>
+          log.warn("Summary factcheck: row delete failed collection={collection} doc={doc}: {error}", {
+            collection,
+            doc: id,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    });
+  }
+
   app.get("/api/summaries/factcheck", async (c) => {
     const doc = resolveDoc(c.req.query("source") ?? "", c.req.query("docId") ?? "");
     if (!doc.ok) return c.json({ error: doc.error }, 400);
@@ -256,7 +279,7 @@ export function registerSummariesFactcheckRoutes(
     // `hasTranscript`, same split); `null` when the file is unreadable.
     const transcript = sourceText === null ? null : documentTranscript(sourceText);
     const hasTranscript = sourceText === null ? null : transcript !== null;
-    const stale = sourceText === null ? null : factcheckBodySha256(sourceText) !== row.bodySha256;
+    const stale = summaryFactcheckStale(row, sourceText);
     const transcriptStale =
       !row.transcript || !row.transcriptSha256 || sourceText === null
         ? null

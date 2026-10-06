@@ -181,6 +181,21 @@ test("follow-up: prior turns fold into the retrieval query AND the synthesis pro
   expect(lastUserPrompt).toContain("Follow-up question: Does it support MCP?");
 });
 
+test("a fact-check rider is appended to the synthesis prompt; without one the prompt is unchanged", async () => {
+  await collect("What is Claude Code?");
+  const plain = lastUserPrompt;
+  await streamResearchAnswer(
+    { question: "What is Claude Code?", config, botConfig: bot, tracer: fakeTracer().tracer, factcheckRider: "" },
+    () => {},
+  );
+  expect(lastUserPrompt).toBe(plain);
+  await streamResearchAnswer(
+    { question: "What is Claude Code?", config, botConfig: bot, tracer: fakeTracer().tracer, factcheckRider: "FACT-CHECK FINDINGS: x" },
+    () => {},
+  );
+  expect(lastUserPrompt).toBe(`${plain}\n\nFACT-CHECK FINDINGS: x`);
+});
+
 test("no hits: skips the Claude call and answers with the honest fallback", async () => {
   mockResults = [];
   const events = await collect("something not indexed");
@@ -190,6 +205,27 @@ test("no hits: skips the Claude call and answers with the honest fallback", asyn
   expect(done.lowConfidence).toBe(false);
   expect(done.answer.toLowerCase()).toContain("couldn't find");
   expect(done.cited).toEqual([]);
+});
+
+// Fix round 1: a declined follow-up still shows the summary's saved findings.
+test("a declined ask appends the fact-check note to the canned answer; without one it is unchanged", async () => {
+  mockLowConfidence = true;
+  const plainEvents = await collect("a niche follow-up");
+  const plain = (plainEvents.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>).answer;
+  const NOTE = "**The saved fact check of this summary (2026-10-05) found:**\n\n- Claim 1 (❌ wrong): …";
+  const events: AnswerEvent[] = [];
+  await streamResearchAnswer(
+    { question: "a niche follow-up", config, botConfig: bot, tracer: fakeTracer().tracer, factcheckRider: "FACT-CHECK FINDINGS: x", factcheckNote: NOTE },
+    (e) => {
+      events.push(e);
+    },
+  );
+  expect(lastUserPrompt).toBe(""); // still declined: no synthesis call
+  const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
+  expect(done.answer).toBe(`${plain}\n\n${NOTE}`);
+  expect(done.lowConfidence).toBe(true);
+  const streamed = events.filter((e) => e.type === "delta").map((e) => (e as { text: string }).text).join("");
+  expect(streamed).toBe(done.answer);
 });
 
 test("low confidence: weak-but-nonzero retrieval declines synthesis but still shows the sources", async () => {
@@ -322,4 +358,51 @@ describe("research trace", () => {
     expect(spans.some((s) => s.label === "claude")).toBe(false);
     expect(spans.some((s) => s.op === "finish:ok")).toBe(true);
   });
+});
+
+// PR #653 fix round 2: the note's whole path — route → SSE helper →
+// streamResearchAnswer — with only retrieval and the model mocked (above).
+test("GET /api/research/ask?factcheck=: a declined ask streams the saved findings in its done answer", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { Hono } = await import("hono");
+  const { registerResearchRoutes } = await import("../dashboard/routes/research-routes.ts");
+  const { streamResearchSSE } = await import("../dashboard/routes/research-sse.ts");
+  const botsDir = mkdtempSync(join(tmpdir(), "muninn-ask-bots-"));
+  mkdirSync(join(botsDir, "asker"));
+  writeFileSync(join(botsDir, "asker", "CLAUDE.md"), "test bot");
+  const before = process.env.MUNINN_BOTS_DIR;
+  process.env.MUNINN_BOTS_DIR = botsDir;
+  try {
+    mockResults = [];
+    const app = new Hono();
+    registerResearchRoutes(app, config, {
+      getFactcheck: async () => ({
+        collection: "vimeo-summaries",
+        docId: "health/Talk.md",
+        url: "https://vimeo.com/1",
+        bodySha256: "a".repeat(64),
+        answer: "### ❌ Claim 1/1 — Coffee cures colds\n\nNo trial supports it.\n\nConfidence: 20/100",
+        claims: [{ index: 1, title: "Coffee cures colds", quote: "Coffee cures colds.", verdict: "❌", outcome: "verified", sources: [] }],
+        botName: "jarvis",
+        createdAt: Date.UTC(2026, 9, 5, 10, 0, 0),
+        transcript: null,
+        transcriptSha256: null,
+        appliedAt: null,
+      }),
+      stream: streamResearchSSE,
+    });
+    const res = await app.request(`/api/research/ask?q=coffee&factcheck=${encodeURIComponent("vimeo:health/Talk.md")}`);
+    const body = await res.text();
+    const done = JSON.parse(/event: done\ndata: (.*)\n/.exec(body)![1]!) as Extract<AnswerEvent, { type: "done" }>;
+    expect(done.noHits).toBe(true);
+    expect(done.answer).toContain("**The saved fact check of this summary (2026-10-05) found:**");
+    expect(done.answer).toContain("No trial supports it.");
+    expect(lastUserPrompt).toBe("");
+  } finally {
+    if (before === undefined) delete process.env.MUNINN_BOTS_DIR;
+    else process.env.MUNINN_BOTS_DIR = before;
+    rmSync(botsDir, { recursive: true, force: true });
+  }
 });

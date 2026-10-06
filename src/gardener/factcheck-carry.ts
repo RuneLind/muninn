@@ -99,12 +99,96 @@ export function correctableClaims(saved: Pick<SummaryFactcheck, "claims" | "answ
 
 /** A claim's quote for the rider: curly outer quotes, inner straight quotes
  *  turned single, and no closing full stop, so the line never reads `.".`. */
-function riderQuote(quote: string): string {
-  const inner = clip(quote, RIDER_FIELD_MAX)
+function riderQuote(quote: string, clipped: (text: string, max: number) => string = clip, max = RIDER_FIELD_MAX): string {
+  const inner = clipped(quote, max)
     .replace(/"([^"]*)"/g, "‘$1’")
     .replace(/"/g, "’")
     .replace(/[.!?;:,]+$/, "");
   return `“${inner}”`;
+}
+
+/**
+ * {@link clip} that ends on a sentence when one ends in the last 40% of `max`,
+ * else on a word, so a short field still reads as a statement.
+ */
+function clipWords(text: string, max: number): string {
+  const chars = Array.from(text);
+  if (chars.length <= max) return text;
+  const head = chars.slice(0, max - 1).join("");
+  const floor = Math.floor(head.length * 0.6);
+  let sentence = -1;
+  for (const m of head.matchAll(/[.!?](?=\s)/g)) sentence = m.index;
+  if (sentence >= floor) return head.slice(0, sentence + 1);
+  const space = head.lastIndexOf(" ");
+  return `${(space >= floor ? head.slice(0, space) : head).trimEnd().replace(/[.,;:]+$/, "")}…`;
+}
+
+/** How {@link factcheckFindingLines} shapes and counts a line. */
+export interface FindingLineShape {
+  quoteMax: number;
+  correctionMax: number;
+  /** 0 drops the title whenever there is a quote. */
+  titleMax: number;
+  /** Clip quote and correction at a sentence or word ({@link clipWords}). */
+  wordClip: boolean;
+  /** Count `max` in code points rather than UTF-16 units. */
+  codePoints: boolean;
+  /** Collapse whitespace and `---` runs, so no finding spells a `--- … ---` marker. */
+  neutralizeMarkers: boolean;
+  /** Omit every claim after the first line that does not fit, so a later,
+   *  shorter line never takes an earlier claim's place. */
+  stopAtOverflow: boolean;
+}
+
+/** The drafter's shape. A byte pin in `factcheck-carry.test.ts`, taken on
+ *  origin/main, holds its rider unchanged. */
+const DRAFTER_LINE_SHAPE: FindingLineShape = {
+  quoteMax: RIDER_FIELD_MAX,
+  correctionMax: RIDER_FIELD_MAX,
+  titleMax: 120,
+  wordClip: false,
+  codePoints: false,
+  neutralizeMarkers: false,
+  stopAtOverflow: false,
+};
+
+/**
+ * One `- Claim N (❌ wrong …): <noun> claims “…”. Sources say: …` line per
+ * claim, in the order given, as many as fit in `max`, plus a line counting the
+ * rest. Shared by the drafter rider and the `/summaries` share and Ask riders
+ * (`src/summaries/factcheck-rider.ts`), which pass a tighter `shape`.
+ */
+export function factcheckFindingLines(
+  claims: CorrectableClaim[],
+  noun: string,
+  max: number,
+  shape: FindingLineShape = DRAFTER_LINE_SHAPE,
+): string[] {
+  const cut = shape.wordClip ? clipWords : clip;
+  const clean = (text: string) => (shape.neutralizeMarkers ? text.replace(/\s+/g, " ").replace(/-{3,}/g, "–") : text);
+  const size = (text: string) => (shape.codePoints ? Array.from(text).length : text.length);
+  const lines: string[] = [];
+  let used = 0;
+  let omitted = 0;
+  for (const c of claims) {
+    if (omitted > 0 && shape.stopAtOverflow) {
+      omitted++;
+      continue;
+    }
+    const mark = c.verdict === "bad" ? "❌ wrong" : "⚠️ partly wrong";
+    const claim = c.quote ? riderQuote(clean(c.quote), cut, shape.quoteMax) : cut(clean(c.title), shape.quoteMax).replace(/"/g, "’");
+    const correction = c.correction ? cut(clean(c.correction), shape.correctionMax).replace(/"/g, "’") : "(no correction recorded)";
+    const title = c.title && c.quote && shape.titleMax > 0 ? ` — ${clip(clean(c.title), shape.titleMax).replace(/"/g, "’")}` : "";
+    const line = `- Claim ${c.index} (${mark}${title}): ${noun} claims ${claim}. Sources say: ${correction}`;
+    if (used + size(line) + 1 > max) {
+      omitted++;
+      continue;
+    }
+    lines.push(line);
+    used += size(line) + 1;
+  }
+  if (omitted > 0) lines.push(`- (${omitted} more corrected claim(s) not shown; do not state any claim from the summary as fact unless you are sure it holds)`);
+  return lines;
 }
 
 /**
@@ -119,24 +203,7 @@ export function buildFactcheckRider(saved: SummaryFactcheck | null, collection: 
   if (claims.length === 0) return "";
   const noun = sourceKindNoun(collection, url || saved.url);
   const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
-
-  const lines: string[] = [];
-  let used = 0;
-  let omitted = 0;
-  for (const c of claims) {
-    const mark = c.verdict === "bad" ? "❌ wrong" : "⚠️ partly wrong";
-    const claim = c.quote ? riderQuote(c.quote) : clip(c.title, RIDER_FIELD_MAX).replace(/"/g, "’");
-    const correction = c.correction ? clip(c.correction, RIDER_FIELD_MAX).replace(/"/g, "’") : "(no correction recorded)";
-    const title = c.title && c.quote ? ` — ${clip(c.title, 120).replace(/"/g, "’")}` : "";
-    const line = `- Claim ${c.index} (${mark}${title}): ${noun} claims ${claim}. Sources say: ${correction}`;
-    if (used + line.length + 1 > FACTCHECK_RIDER_MAX) {
-      omitted++;
-      continue;
-    }
-    lines.push(line);
-    used += line.length + 1;
-  }
-  if (omitted > 0) lines.push(`- (${omitted} more corrected claim(s) not shown; do not state any claim from the summary as fact unless you are sure it holds)`);
+  const lines = factcheckFindingLines(claims, noun, FACTCHECK_RIDER_MAX);
 
   return `FACT-CHECK FINDINGS: a fact check of this summary (${todayOslo(saved.createdAt)}) found the claims below wrong (❌) or only partly right (⚠️). The summary reports what ${noun} said, so it still states them. On the page:
 - Never state one of these claims as fact. Attribute it to ${noun} and give what sources say, worded like: ${Noun} claims X; sources say Y.

@@ -1369,7 +1369,12 @@ export function sumArticleLibraryScript(): string {
       // Opt-in "Ask a follow-up" header action (Summaries shelf only — see
       // docPanelHtml({askFollowUp:true})). No-op if the button isn't rendered.
       var followEl = document.getElementById('docPanelFollowUp');
-      if (followEl) followEl.href = '/research?q=' + encodeURIComponent(title);
+      // A registered source also names the document (factcheck=<source>:<docId>),
+      // so the follow-up sees its saved fact check.
+      if (followEl) {
+        followEl.href = '/research?q=' + encodeURIComponent(title) +
+          (_shareDoc ? '&factcheck=' + encodeURIComponent(source + ':' + docId) : '');
+      }
       linksEl.innerHTML = url && linkLabel
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>'
         : '';

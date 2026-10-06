@@ -53,7 +53,10 @@ import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
 import { stripSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
-import { readSummarySourceText, withSourceText } from "../../summaries/source-text.ts";
+import { readSummarySourceText, summarySourceFileText, withSourceText } from "../../summaries/source-text.ts";
+import { summaryFactcheckStale } from "../../summaries/factcheck-body.ts";
+import { getSummaryFactcheck, type SummaryFactcheck } from "../../db/summary-factchecks.ts";
+import { buildShareFactcheckRider } from "../../summaries/factcheck-rider.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
 import { parseShareRequestBody, SHARE_LANGS } from "../../share/wire.ts";
 // The dialog's surface copy — imported, never re-spelled: the 409 below and the
@@ -70,6 +73,8 @@ export interface SummaryShareDoc {
   text?: string;
   title?: string;
   url?: string;
+  /** `"file"` when `text` is the source file (`withSourceText`). */
+  textSource?: string;
 }
 
 /**
@@ -82,6 +87,8 @@ export interface SummariesShareDeps {
   fetchDoc: (collection: string, docId: string) => Promise<SummaryShareDoc | null>;
   /** Test seam threaded into the runner; production leaves it unset. */
   oneShot?: typeof executeOneShot;
+  /** The document's saved fact check (`summary_factchecks`). Absent ⇒ none. */
+  getFactcheck?: (collection: string, docId: string) => Promise<SummaryFactcheck | null>;
 }
 
 /** Doc fetch budget. Ten seconds, matching `/api/summaries/documents` — these
@@ -102,7 +109,36 @@ export function defaultSummariesShareDeps(knowledgeApiUrl: string): SummariesSha
       )) as SummaryShareDoc | null;
       return withSourceText(doc, await source);
     },
+    getFactcheck: getSummaryFactcheck,
   };
+}
+
+/**
+ * The saved check for a document, or `null` — a failed lookup counts as "not
+ * checked", so share and export never fail over the fact-check table.
+ */
+export async function loadSummaryFactcheck(
+  get: ((collection: string, docId: string) => Promise<SummaryFactcheck | null>) | undefined,
+  collection: string,
+  docId: string,
+): Promise<SummaryFactcheck | null> {
+  if (!get) return null;
+  try {
+    return await get(collection, docId);
+  } catch (err) {
+    log.warn("Summary fact-check lookup failed collection={collection} id={id}: {error}", {
+      collection,
+      id: docId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/** The share rider, worded by whether the check still matches the source file. */
+async function shareRider(pending: Promise<SummaryFactcheck | null>, collection: string, doc: SummaryShareDoc): Promise<string> {
+  const row = await pending;
+  return row ? buildShareFactcheckRider(row, collection, doc.url, summaryFactcheckStale(row, summarySourceFileText(doc))) : "";
 }
 
 /**
@@ -270,6 +306,7 @@ export function registerSummariesShareRoutes(
       try {
         let preflightError: string | null = null;
         let doc: SummaryShareDoc | null = null;
+        const factcheck = loadSummaryFactcheck(deps.getFactcheck, source.collection, docId);
         try {
           doc = await deps.fetchDoc(source.collection, docId);
         } catch (err) {
@@ -303,6 +340,8 @@ export function registerSummariesShareRoutes(
               extra: extra.trim(),
               body: prepared,
               title,
+              // The saved check's ❌/⚠️ claims: the post must not repeat them as true.
+              factcheckRider: await shareRider(factcheck, source.collection, doc),
             });
           }
         }

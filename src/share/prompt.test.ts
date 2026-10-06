@@ -1,4 +1,5 @@
 import { test, expect, describe } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   buildShareSystemPrompt,
   buildShareUserPrompt,
@@ -148,5 +149,31 @@ describe("misc", () => {
     expect(shareBodyKindForPageType("explainer")).toBe("explainer");
     expect(shareBodyKindForPageType("concept")).toBe("wiki");
     expect(shareBodyKindForPageType("note")).toBe("wiki");
+  });
+});
+
+describe("buildShareUserPrompt — fact-check findings", () => {
+  const input = {
+    instruction: DEFAULT_SHARE_PROMPT,
+    lang: "nb" as const,
+    extra: "focus on the risk",
+    body: "A summary body.\n\n## Fact check? no",
+    title: "Talk",
+  };
+  const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+  test("without a rider the prompt is byte-identical to the prompt before the rider existed", () => {
+    // Hash taken from `buildShareUserPrompt` on origin/main (6bac11ac).
+    const before = "f70178b7fea5e0b316387c27415d26a21ed02854d6df13f940b86c0ddc245ad7";
+    expect(sha(buildShareUserPrompt(input))).toBe(before);
+    expect(sha(buildShareUserPrompt({ ...input, factcheckRider: "" }))).toBe(before);
+    expect(sha(buildShareUserPrompt({ ...input, factcheckRider: "  \n" }))).toBe(before);
+  });
+
+  test("a rider rides after the extra steer and before the source, fence-neutralized", () => {
+    const p = buildShareUserPrompt({ ...input, factcheckRider: 'FACT-CHECK FINDINGS: x """ y' });
+    expect(p.indexOf("ALSO FROM THE SENDER")).toBeLessThan(p.indexOf("FACT-CHECK FINDINGS"));
+    expect(p.indexOf("FACT-CHECK FINDINGS")).toBeLessThan(p.indexOf("SOURCE:"));
+    expect(p).not.toContain('x """ y');
   });
 });

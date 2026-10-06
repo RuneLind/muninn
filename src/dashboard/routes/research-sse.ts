@@ -44,6 +44,11 @@ export interface ResearchSseOptions {
   /** Synthesis system prompt override (per-wiki framing). Unset ⇒ the research
    *  default (`SYNTHESIS_SYSTEM_PROMPT`); `/research` leaves it unset. */
   systemPrompt?: string;
+  /** A saved summary fact check's bounded rider for the synthesis prompt
+   *  (`/research?factcheck=`); "" or absent ⇒ the prompt is unchanged. */
+  factcheckRider?: string;
+  /** The same findings as a reader-facing note, appended to a declined answer. */
+  factcheckNote?: string;
 }
 
 /**
@@ -86,6 +91,8 @@ export function streamResearchSSE(c: Context, opts: ResearchSseOptions): Respons
             history: opts.history,
             collections: opts.collections,
             systemPrompt: opts.systemPrompt,
+            ...(opts.factcheckRider ? { factcheckRider: opts.factcheckRider } : {}),
+            ...(opts.factcheckNote ? { factcheckNote: opts.factcheckNote } : {}),
           },
           async (event) => {
             let out: typeof event = event;

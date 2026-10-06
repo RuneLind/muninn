@@ -20,6 +20,10 @@
  * reload proves the SERVER-rendered join. Its route is unit- and DB-tested in
  * `summaries-factcheck-transcript.test.ts` / `summaries-transcript-check-db.test.ts`.
  *
+ * "Ask a follow-up" carries `factcheck=<source>:<docId>` to `/research`, which
+ * sends it on every turn; that ask SSE is stubbed too (the rider is
+ * `research-ask-factcheck.test.ts`'s).
+ *
  * Rows are seeded straight into `summary_factchecks`; the fake huginn is an
  * in-process `node:http` server; the bot lives in a temp `MUNINN_BOTS_DIR`.
  * Ports come from `e2e/ports.ts`.
@@ -789,3 +793,47 @@ for (const outcome of ["block", "error"] as const) {
     }
   });
 }
+
+// PR 4: "Ask a follow-up" names the summary (factcheck=<source>:<docId>) and
+// /research sends it on EVERY ask, so a later turn still gets the saved check's
+// rider. The ask SSE is stubbed: the rider itself is `research-ask-factcheck.test.ts`'s.
+test("the follow-up names the summary, the second research turn still carries it, and a new conversation drops it", async ({ page }) => {
+  await open(page, DOC_STALE);
+  const expected = `youtube:${DOC_STALE}`;
+  const follow = page.locator("#docPanelFollowUp");
+  const href = await follow.getAttribute("href");
+  expect(new URL(href!, BASE).searchParams.get("factcheck")).toBe(expected);
+
+  const asks: URL[] = [];
+  await page.route("**/api/research/ask?**", async (route) => {
+    asks.push(new URL(route.request().url()));
+    const ev = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+      body: ev("sources", { type: "sources", citations: [] }) + ev("done", { type: "done", answer: `Stub answer ${asks.length}.`, cited: [] }) + ev("end", {}),
+    });
+  });
+
+  await follow.click();
+  await page.waitForURL(/\/research\?/);
+  // The title auto-asks the first turn.
+  await expect.poll(() => asks.length).toBe(1);
+  await expect(page.locator("#askBtn")).toBeEnabled();
+  await page.locator("#askInput").fill("And the second question?");
+  await page.locator("#askBtn").click();
+  await expect.poll(() => asks.length).toBe(2);
+  expect(asks.map((u) => u.searchParams.get("factcheck"))).toEqual([expected, expected]);
+  // The second turn is a real follow-up: it replays the first.
+  expect(asks[1]!.searchParams.get("history")).toContain("Stub answer 1.");
+
+  // A new conversation is no longer about the summary: no factcheck on the
+  // next ask, and none left in the address bar for a reload.
+  await expect(page.locator("#askBtn")).toBeEnabled();
+  await page.locator("#newConvBtn").click();
+  await page.locator("#askInput").fill("An unrelated question?");
+  await page.locator("#askBtn").click();
+  await expect.poll(() => asks.length).toBe(3);
+  expect(asks[2]!.searchParams.has("factcheck")).toBe(false);
+  expect(new URL(page.url()).searchParams.has("factcheck")).toBe(false);
+});
