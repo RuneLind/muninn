@@ -183,9 +183,10 @@ export type ReplaceDraftOutcome =
    *  replaced meanwhile): rolled back, nothing changed. */
   | { outcome: "superseded_meanwhile" }
   /** Another live row holds the new row's key: rolled back, nothing changed.
-   *  Reachable only when the old row's topic key differs from the new one's (a
-   *  legacy key): while the old row is still a draft, the partial unique index
-   *  refuses any same-key competitor before it can exist. */
+   *  Unreachable today, kept as a defence: Redraft recomputes the key with
+   *  `sourceTopicKey`, unchanged since the drafter shipped (#310), so the new
+   *  key is the old row's, and while that row is a draft the partial unique
+   *  index refuses any same-key competitor before it can exist. */
   | { outcome: "covered" };
 
 class RollbackReplace extends Error {

@@ -247,6 +247,20 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
     expect(out).toMatchObject({ outcome: "drafted", targetPath: "life/sources/Old Title.mdx" });
   });
 
+  // Round 2: the override is sanitized for the prompt (quotes stripped), but
+  // Redraft must not retitle the page it replaces.
+  const QUOTED = 'Stoic Morning Priming and the "Meet Resistance" Statement';
+  for (const reply of ["Stoic Morning Priming and the Meet Resistance Statement", "Stoic Morning Priming and the “Meet Resistance” Statement"]) {
+    test(`a quoted title is kept verbatim in the frontmatter and the H1 (model replied ${reply})`, async () => {
+      const old = await seedOld(undefined, { draft: page(QUOTED) });
+      const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page(reply) });
+      expect(out).toMatchObject({ outcome: "drafted", targetPath: "life/sources/Stoic Morning Priming and the Meet Resistance Statement.mdx" });
+      const fresh = (await getWikiProposalById((out as { proposalId: string }).proposalId))!;
+      expect(fresh.draft).toContain(`\ntitle: ${QUOTED}\n`);
+      expect(fresh.draft).toContain(`\n# ${QUOTED}\n`);
+    });
+  }
+
   // Item 7: the stored source title comes from the doc, not from the old row
   // (which stored the old PAGE title when no capture title was known).
   test("the new row's source title is the doc's own title", async () => {
@@ -273,6 +287,46 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
     const links = sourceRedraft.redraftReplacements(all);
     expect(links.get(old.id)).toBe((out as { proposalId: string }).proposalId);
     expect(links.size).toBe(1);
+  });
+});
+
+describe("redraftTitle and redraftReplacements (pure)", () => {
+  test("redraftTitle reads the frontmatter title before the target stem", () => {
+    expect(sourceRedraft.redraftTitle({ draft: page("Fm Title"), targetPath: "sources/Other Stem.mdx" })).toBe("Fm Title");
+    expect(sourceRedraft.redraftTitle({ draft: "# No frontmatter\n", targetPath: "sources/Other Stem.mdx" })).toBe("Other Stem");
+  });
+
+  type Row = Parameters<typeof sourceRedraft.redraftReplacements>[0][number];
+  const row = (over: Partial<Row>): Row => ({
+    id: "x",
+    botName: BOT,
+    wikiName: null,
+    topicKey: "source:c:d",
+    kind: "source",
+    status: "draft",
+    createdAt: 2000,
+    resolvedAt: null,
+    ...over,
+  });
+  const stale = (over: Partial<Row> = {}) => row({ id: "old", status: "stale", createdAt: 1000, resolvedAt: 2000, ...over });
+  const fresh = (over: Partial<Row> = {}) => row({ id: "new", ...over });
+
+  test("links a staled source row to the source row created at its resolved_at, same key", () => {
+    expect([...sourceRedraft.redraftReplacements([stale(), fresh()])]).toEqual([["old", "new"]]);
+  });
+
+  test("does not link across topic keys, non-stale rows, or non-source kinds", () => {
+    const cases: [string, Row[]][] = [
+      ["another topic key", [stale(), fresh({ topicKey: "source:c:other" })]],
+      ["a rejected (not stale) row", [stale({ status: "rejected" }), fresh()]],
+      ["an approved row", [stale({ status: "approved" }), fresh()]],
+      ["a stale concept row", [stale({ kind: "concept" }), fresh()]],
+      ["a concept replacement", [stale(), fresh({ kind: "concept" })]],
+      ["another bot", [stale(), fresh({ botName: "otherbot" })]],
+    ];
+    for (const [name, rows] of cases) {
+      expect({ name, size: sourceRedraft.redraftReplacements(rows).size }).toEqual({ name, size: 0 });
+    }
   });
 });
 
@@ -398,6 +452,20 @@ describe("listSummaryFactcheckMarks", () => {
     expect(byDoc.get(DOC)).toMatchObject({ bad: 1, warn: 0 });
     expect(byDoc.get("health/broken.md")).toMatchObject({ bad: 0, warn: 0 });
     expect(byDoc.get("health/scalar.md")).toMatchObject({ bad: 0, warn: 0 });
+  });
+
+  test("answerSha256 hashes the answer as stored, edge whitespace included", async () => {
+    const answer = "  \n### ❌ Claim 1/1 — a\n\nb\n  ";
+    await upsertSummaryFactcheck({
+      collection: COLLECTION,
+      docId: DOC,
+      url: URL,
+      bodySha256: "a".repeat(64),
+      answer,
+      claims: [],
+      botName: "jarvis",
+    });
+    expect((await listSummaryFactcheckMarks())[0]!.answerSha256).toBe(sha256(answer));
   });
 
   test("answerSha256 is the JS sha256 of the answer, non-ASCII included", async () => {

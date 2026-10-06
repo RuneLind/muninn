@@ -91,10 +91,11 @@ export function firstHttpUrl(...candidates: (string | undefined)[]): string {
  * does its own huginn fetches with one.
  *
  * Every drafter entry point that reaches the MODEL funnels through here, except
- * two: the backfill script, which deliberately writes no attempt row (a backfill
- * row would replace the capture row linking the doc to its applied page), and
- * Redraft (`source-redraft.ts`), which upserts its row inside the transaction
- * that replaces the proposal. Three of the four outcomes persist nothing else,
+ * three: the backfill script, which deliberately writes no attempt row (a backfill
+ * row would replace the capture row linking the doc to its applied page),
+ * `scripts/measure-summary-code.ts --redraft`, a measurement that persists
+ * nothing, and Redraft (`source-redraft.ts`), which upserts its row inside the
+ * transaction that replaces the proposal. Three of the four outcomes persist nothing else,
  * and the backlog row's whole diagnosis comes from that ledger — a new caller
  * that drafts around this function is invisible again. The pre-model guards
  * that return before it ({@link draftOneBacklogDoc}) record through the

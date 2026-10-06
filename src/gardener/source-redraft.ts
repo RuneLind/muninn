@@ -8,7 +8,8 @@
  *    draft; a doc with no public URL drafts URL-less, the way its capture did
  *    (the pending-ingestion callout instead of a pinned `url:`);
  *  - the old draft's title rides as the title override, so a doc first drafted
- *    through the collision-rename path does not walk back into that collision;
+ *    through the collision-rename path does not walk back into that collision,
+ *    and is kept verbatim (quotes included) in the frontmatter and the H1;
  *  - the two pre-model live checks ignore ONLY the row being replaced; the URL
  *    check against the wiki and every other live proposal still binds;
  *  - after the model call, ONE transaction (`replaceDraftProposal`): CAS the old
@@ -144,7 +145,9 @@ export async function redraftSourceProposal(
       body,
       category: categoryFromDocId(src.docId),
       sourceTitle: titleFromDocId(src.docId),
-      ...(titleOverride ? { titleOverride } : {}),
+      // The override is sanitized for the prompt; the exact spelling is what the
+      // page is filed and titled under.
+      ...(titleOverride ? { titleOverride, titleExact: titleOverride } : {}),
     },
     index,
     today: todayOslo((seams.now ?? Date.now)()),

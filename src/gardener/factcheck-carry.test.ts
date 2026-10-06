@@ -167,6 +167,18 @@ describe("correctableClaims", () => {
 
   // Item 11: the gate counts the saved claims, so the rider does too — a claim
   // found only as an `answer` heading would ride a prompt the gate never locked.
+  test("a duplicated claim index keeps the FIRST claim with that index", () => {
+    const dup = saved({
+      claims: [
+        { index: 1, title: "First", quote: "first quote", verdict: "❌", outcome: "verified", sources: [] },
+        { index: 1, title: "Second", quote: "second quote", verdict: "⚠️", outcome: "verified", sources: [] },
+      ],
+    });
+    const out = correctableClaims(dup);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ index: 1, verdict: "bad", title: "First", quote: "first quote" });
+  });
+
   test("a ❌ heading the saved claims lack does not count", () => {
     expect(correctableClaims(saved({ claims: [] }))).toEqual([]);
     expect(buildFactcheckRider(saved({ claims: [] }), "tiktok-summaries")).toBe("");
@@ -212,12 +224,18 @@ describe("buildFactcheckRider", () => {
 
   // Item 14: from six real drafter runs — 3/6 listed the ⚠️ claim as a bare
   // bullet among the speaker's points, 3/6 judged claims the check never covered.
-  test("states the attribute-every-time and the say-nothing-else rules", () => {
+  // Round 2: "Say nothing about the accuracy of claims not listed here" was
+  // inert (3/3 real runs still judged unlisted claims); this wording measured
+  // 0/3 clear (1 borderline) on the same TikTok doc.
+  test("states the attribute-every-time and the unlisted-claims-were-not-checked rules", () => {
     const rider = buildFactcheckRider(saved(), "tiktok-summaries");
     expect(rider).toContain(
       "Do not state a listed claim as fact anywhere, including in a list of the video's points: attribute it every time.",
     );
-    expect(rider).toContain("Say nothing about the accuracy of claims not listed here.");
+    expect(rider).toContain(
+      "Every other claim in the summary was NOT checked. Report each one exactly as the summary states it, attributed to the video, and pass no verdict on it: no words such as unsupported, unproven, not established or no evidence, and no remark on whether the video cites studies.",
+    );
+    expect(rider).not.toContain("Say nothing about the accuracy");
   });
 
   test("quoting: no nested straight quotes, no '.\".' run", () => {
@@ -418,19 +436,51 @@ describe("stripReproducedFactcheck / pageCarriesFactcheck", () => {
     }
   });
 
-  test("keeps every heading that is not a bare reproduced Fact check", () => {
+  // Round 2: the narrowed rule kept likely reproductions — the rider's own
+  // FACT-CHECK FINDINGS label, "results", a colon, emphasis. Any h2–h6 whose
+  // text starts with the phrase as a word is a reproduction now.
+  test("strips every heading that starts with fact check as a word", () => {
     for (const heading of [
+      "## Fact-check findings",
+      "## Fact check results",
+      "## Fact Check:",
+      "## **Fact check**",
+      "## _Fact-check_ findings",
+      "## *Fact* check",
+      "## ✅ Fact check",
+      "## Fact checks",
+      "## Fact-checked claims",
+      "## Fact-checking",
+      "## Fact check –",
       "## Fact check: the 2024 study",
-      "## Fact checking in newsrooms",
-      "## FactCheck.org",
-      "## Fact-check notes",
-      "## How FactCheck.org works",
       "## Fact check of the claims about sleep",
+      "##\tFact check",
+      "## Fact\u00a0check",
+      "#### FACT-CHECK FINDINGS",
     ]) {
+      const text = page(`Intro.\n\n${heading}\n\n- ❌ wrong\n\n## See also\n- [[Habits]]`);
+      const out = stripReproducedFactcheck(text);
+      expect({ heading, stripped: !out.includes("❌ wrong") }).toEqual({ heading, stripped: true });
+      expect(out).toContain("## See also\n- [[Habits]]");
+      expect(pageCarriesFactcheck(text)).toBe(true);
+    }
+  });
+
+  test("keeps FactCheck.org, a heading that does not start with the phrase, and prose", () => {
+    for (const heading of ["## FactCheck.org", "## How FactCheck.org works", "## Fact checklist for travellers", "## The fact check"]) {
       const text = page(`Intro.\n\n${heading}\n\nReal section prose.\n\n## See also\n- [[Habits]]`);
-      expect(stripReproducedFactcheck(text)).toBe(text);
+      expect({ heading, kept: stripReproducedFactcheck(text) === text }).toEqual({ heading, kept: true });
       expect(pageCarriesFactcheck(text)).toBe(false);
     }
+    const prose = page("FactCheck.org rated the fact check claim false.\n\nFact check: none here.");
+    expect(stripReproducedFactcheck(prose)).toBe(prose);
+  });
+
+  test("headings: false removes a live block only", () => {
+    const text = page("Intro.\n\n## Fact check\n\n- mine\n\n<!-- factcheck:start -->\nx\n<!-- factcheck:end -->");
+    const out = stripReproducedFactcheck(text, { headings: false });
+    expect(out).toContain("## Fact check\n\n- mine");
+    expect(findLiveSentinelBlocks(out)).toHaveLength(0);
   });
 
   test("never strips an H1, even one titled Fact check", () => {
@@ -502,6 +552,56 @@ describe("draftSourcePage — strip order, digest, and what reads the persisted 
       await rm(root, { recursive: true, force: true });
       __resetWikiCacheForTest();
     }
+  });
+});
+
+describe("draftSourcePage — round 2", () => {
+  // The fact-check block's answer is web-derived: a wikilink in it must not
+  // pick a page that Approve then edits (a See-also backlink).
+  test("a [[link]] inside the appended block's answer is not a related page", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "fc-carry-related2-"));
+    await mkdir(path.join(root, "concepts"), { recursive: true });
+    await writeFile(path.join(root, "index.md"), "# Index\n");
+    await writeFile(path.join(root, "concepts", "Habits.md"), "---\ntype: concept\ntitle: Habits\n---\n\n# Habits\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const index = await getWikiIndex({ root });
+    const inserted: InsertWikiProposalParams[] = [];
+    const linked = saved({ answer: ANSWER.replace("not raises them.", "not raises them. See [[Habits]] and [[Nowhere Page]].") });
+    try {
+      const out = await draftSourcePage(
+        deps({
+          inserted,
+          index,
+          wikiDir: root,
+          callDrafter: async () => page("The video claims the words raise cortisol; sources say otherwise."),
+          getFactcheck: async () => linked,
+        }),
+      );
+      expect(out.outcome).toBe("drafted");
+      expect(inserted[0]!.draft).toContain("See [[Habits]]");
+      expect(inserted[0]!.relatedPages ?? []).toEqual([]);
+      // Control: containment already ran before the block (green on round 1).
+      expect(inserted[0]!.containedLinks).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      __resetWikiCacheForTest();
+    }
+  });
+
+  test("with a rider, a reproduced section under any fact-check heading goes", async () => {
+    const inserted: InsertWikiProposalParams[] = [];
+    const reproduced = page("Body.\n\n## Fact-check findings\n\n- ❌ model copy\n\n## See also\n- [[Habits]]");
+    await draftSourcePage(deps({ inserted, callDrafter: async () => reproduced, getFactcheck: async () => saved() }));
+    expect(inserted[0]!.draft).not.toContain("model copy");
+    expect(inserted[0]!.draft).toContain("## See also\n- [[Habits]]");
+  });
+
+  test("without a rider (a ✅/❓-only check), the model's own Fact check section stays", async () => {
+    const inserted: InsertWikiProposalParams[] = [];
+    const own = page("Body.\n\n## Fact check\n\n- the creator's own fact check segment\n\n## See also\n- [[Habits]]");
+    await draftSourcePage(deps({ inserted, callDrafter: async () => own, getFactcheck: async () => okOnly() }));
+    expect(inserted[0]!.draft).toContain("## Fact check\n\n- the creator's own fact check segment");
+    expect(findLiveSentinelBlocks(inserted[0]!.draft)).toHaveLength(1);
   });
 });
 
