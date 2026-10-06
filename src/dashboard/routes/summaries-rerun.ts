@@ -70,8 +70,6 @@ import {
   requireSaveDescriptor,
   saveSummaryBody,
   summarySaveClaims,
-  titleFromDocId,
-  titleRoundTripRefusal,
   type StoredCapture,
   type SummarySaveClaim,
   type SummarySaveClaims,
@@ -888,11 +886,12 @@ export function registerSummariesRerunRoutes(
       // resolves to. Sent so the menu can NAME it without spelling a constant of
       // its own.
       defaultKind: DEFAULT_CAPTURE_KIND,
-      // The title round trip, checked here too so the menu can disable the run
-      // items with the reason rather than offering a click that 409s.
-      titleRoundTrip: (() => {
-        const reason = titleRoundTripRefusal(titleFromDocId(docId));
-        return { ok: reason === null, reason };
+      // The POST's own save preflight (no url, no category, a title that does
+      // not round-trip), so the menu can disable the run items with the reason
+      // rather than offering a click that 400s or 409s.
+      saveable: (() => {
+        const pre = preflightSummarySave(stored, docId);
+        return pre.ok ? { ok: true, code: null, reason: null } : { ok: false, code: pre.code, reason: pre.error };
       })(),
       // NOT stored anywhere: `visual_detail` is a request axis, not a document
       // field. A `## Visual reference` appendix is the one piece of evidence the

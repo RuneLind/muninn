@@ -591,21 +591,34 @@ describe("the title round trip", () => {
     expect(rec.ingests.length).toBe(0);
   });
 
-  test("the options payload carries the same verdict, so the menu can disable the items", async () => {
-    const longTitle = "L".repeat(HUGINN_FILENAME_MAX + 5);
-    const app = appFor(makeDeps(youtubeDoc()).deps);
-    const bad = (await (
-      await app.request(
-        `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(`ai/general/${longTitle}.md`)}`,
-      )
-    ).json()) as { titleRoundTrip: { ok: boolean; reason: string | null } };
-    expect(bad.titleRoundTrip.ok).toBe(false);
-    expect(bad.titleRoundTrip.reason).toContain("second document");
+  test("the options payload carries the whole save preflight, so the menu can disable the items", async () => {
+    type Saveable = { saveable: { ok: boolean; code: string | null; reason: string | null } };
+    const options = async (raw: string, docId: string): Promise<Saveable> =>
+      (await (
+        await appFor(makeDeps(raw).deps).request(
+          `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(docId)}`,
+        )
+      ).json()) as Saveable;
 
-    const good = (await (
-      await app.request(`/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`)
-    ).json()) as { titleRoundTrip: { ok: boolean; reason: string | null } };
-    expect(good.titleRoundTrip).toEqual({ ok: true, reason: null });
+    const longTitle = "L".repeat(HUGINN_FILENAME_MAX + 5);
+    const badTitle = await options(youtubeDoc(), `ai/general/${longTitle}.md`);
+    expect(badTitle.saveable.ok).toBe(false);
+    expect(badTitle.saveable.code).toBe("title_not_round_trippable");
+    expect(badTitle.saveable.reason).toContain("second document");
+
+    // The two refusals the title check alone never saw: the POST answers 400 on
+    // both, so the menu must not offer them as enabled items.
+    const pasted = youtubeDoc().replace(
+      `url: "https://www.youtube.com/watch?v=${VIDEO_ID}"`,
+      'url: "An article pasted into the url field, all of it."',
+    );
+    const noUrl = await options(pasted, DOC_ID);
+    expect([noUrl.saveable.ok, noUrl.saveable.code]).toEqual([false, "no_url"]);
+    const noCategory = await options(youtubeDoc(), "A Talk About Things.md");
+    expect([noCategory.saveable.ok, noCategory.saveable.code]).toEqual([false, "no_category"]);
+
+    const good = await options(youtubeDoc(), DOC_ID);
+    expect(good.saveable).toEqual({ ok: true, code: null, reason: null });
   });
 });
 
