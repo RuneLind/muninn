@@ -157,25 +157,68 @@ not one per run — and the `source` it traces under is the CAPTURE's, not the
 the `x-article` shelf), and comparing a re-run with the capture it re-runs is
 the one thing that attribute is for.
 
-**One run per document at a time, and the claim is BOUNDED.** A per-`(source,
-docId)` in-flight map in the route registration answers **409 `in_flight`** to a
-second POST. Two concurrent runs would spend two model calls and then race each
-other's ingest for one FILE — huginn rewrites the whole document from the request
-body, so the loser's summary is simply gone and which one loses is decided by the
-network. The claim is taken after every other refusal (a 409 has to mean a run is
-under way) and released in a `finally` on the job.
+**The write is the shared save path (`src/summaries/summary-save.ts`).** The
+re-run route calls it today, and the fact-check append and apply routes are next.
+A writer calls `preflightSummarySave` before any model spend (`no_url` — empty OR
+not an http(s) URL — and `no_category` 400, `title_not_round_trippable` 409),
+claims the document from the process-wide `summarySaveClaims` registry, and
+writes through `saveSummaryBody`. That function checks the claim against the
+registry that issued it, refuses a blank summary as `empty_summary` before any
+POST (huginn's YouTube ingest reads an empty `summary` as "summarize it
+yourself"), appends `## Transcript` only when the stored document has one,
+re-sends the stored `summary_kind` (or none), and ingests BLOCKING. A request
+that never reached huginn (connection refused, DNS) or a 4xx is `write_failed`:
+huginn raises every 4xx before it writes. A 5xx, a timeout, or a 2xx with no
+usable `file_path` (an empty body, a 204, non-JSON, a body read that timed out)
+is `write_unknown`, because huginn may have written — its 500 can follow the
+write, when the similarity search or the reindex enqueue throws — and the error
+says to reload before retrying; a `file_path` other than the doc id (the `.md`
+suffix compared case-insensitively) is `forked`, and the response names the
+sibling. A re-run job FAILS on any of these, where it used to complete with a
+warn, and a forked re-run still announces the sibling to the reindex-window
+memory. `saveSummaryBody` warns once per failure, with the caller's
+`logContext`. `article` and `anthropic` have a save descriptor without being
+re-runnable. A round trip through it re-quotes legacy unquoted frontmatter
+(`date: 2026-03-22` → `date: "2026-03-22"`; 682 YouTube and 28 X documents,
+measured 2026-10-06): that is huginn's writer, and the file is a fixed point from
+the second save on.
+
+**One run per document at a time, and the claim is BOUNDED.** The shared
+per-`(source, docId)` claim registry answers **409 `in_flight`** to a second
+POST, or to any other write route holding the document. Two concurrent runs
+would spend two model calls and then race each other's ingest for one FILE —
+huginn rewrites the whole document from the request body, so the loser's summary
+is simply gone and which one loses is decided by the network. The claim is taken
+after every other refusal (a 409 has to mean a run is under way) and released in
+a `finally` on the job.
 
 "Settles" is the connector's promise and not this module's, though: `runRerunJob`
 awaits `deps.oneShot`, and a call that never settles pinned the document at 409
 for the life of the PROCESS, with no way back but a restart. Each claim therefore
 carries a timer sized to the budget that run actually sends —
 `rerunLatchBudgetMs` = `max(summarizeTimeoutFor(frames), bot.timeoutMs)` plus a
-2-minute slack for the tail and the ingest — and the expiry warns, because
-reaching it means a model call outlived its own timeout. The claim is held as a
-TOKEN rather than a bare key, so an expiry followed by a fresh POST is safe: the
-stalled run's `finally` finds a token that is no longer the one on the key and
-releases nothing, where a bare `delete` would open the SECOND run's slot on the
-first one's arrival.
+2-minute slack — and the expiry warns. **An expiry frees the key for OTHER
+writers; it does not cancel the claim.** Work after the model call (the
+closing-takeaway check, frame copies) and a connector's retry loop can outlast
+the budget inside their own timeouts, so at save time `pinForWrite` re-takes a
+lapsed claim only when no claim was taken on the key since it lapsed (each
+claim records a generation from one registry-wide counter; the key keeps its
+newest), and refuses it as `in_flight` otherwise — including when a
+rival claimed, wrote and released in between, since the lapsed run's body was
+built from a read older than that write. The guarantee covers only reads made after
+the claim: a write route claims first, then reads. The pin also suspends the timer for
+the length of the POST, so a claim cannot lapse mid-ingest and let a second
+writer be overwritten; afterwards the timer is re-armed for what is LEFT of the
+budget (the deadline is fixed at claim time, so saves never extend a claim), and
+a second save on the same claim while the first POST is in flight is refused as
+`in_flight`, not queued. The claim is held as a TOKEN rather than a bare key, so
+an expiry followed by a fresh POST is safe: the stalled run's save finds another
+token on the key and writes nothing, and its `finally` releases nothing, where a
+bare `delete` would open the SECOND run's slot on the first one's arrival.
+
+An EMPTY `## Transcript` section reads as `transcript: null` (re-run refuses it
+as `no_transcript`), and a save of it keeps the heading: `bodyTail` is the raw
+text after the trimmed body, so an unchanged save is byte-identical.
 
 **Two refusals that cost nothing and run before any model call.**
 `POST /api/summaries/rerun` requires **`application/json` (415 otherwise)**, the
