@@ -4,11 +4,12 @@
  *
  * What the unit tests cannot reach: the payload field arriving in the shell
  * (`fellesPublish` → the button), the button only on the allowlisted wiki, the
- * dialog's two runs reaching a real spawn with the checkbox's flag, and the
+ * dialog's two runs reaching a real spawn with the checkbox's flag, the remove
+ * flow's dry run and confirm reaching `--fjern`, and the
  * copied command naming the served root.
  *
- * `FELLES_WIKI_PUBLISH_BIN` is a STUB `.ts` that prints its argv and exits 0, so
- * nothing here reaches gcloud or a bucket.
+ * `FELLES_WIKI_PUBLISH_BIN` is a STUB `.ts` that prints its argv and exits 0
+ * (3 for `FAIL_REL`), so nothing here reaches gcloud or a bucket.
  */
 
 import { test, expect } from "@playwright/test";
@@ -19,6 +20,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { contrastOf } from "./contrast.ts";
 import { FELLES_BTN_ID } from "../src/dashboard/views/components/wiki-felles-publish.ts";
 
 const BTN = `#${FELLES_BTN_ID}`;
@@ -30,6 +32,8 @@ const WIKI = "e2e-felles";
 const OTHER = "e2e-felles-other";
 const REL = "plans/2026-09-29-vedtak.mdx";
 const PAGE = ["---", "title: Vedtak", "---", "", "# Vedtak", "", "Body.", ""].join("\n");
+/** The stub exits 3 for this page, so a failing run can be driven. */
+const FAIL_REL = "plans/2026-09-30-feiler.mdx";
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -41,6 +45,7 @@ test.beforeAll(async () => {
   otherRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-felles-other-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
+  await writeFile(path.join(root, FAIL_REL), PAGE.replace(/Vedtak/g, "Feiler"), "utf8");
   await writeFile(path.join(otherRoot, "page.md"), "# Other\n", "utf8");
   stub = path.join(root, "..", `felles-stub-${process.pid}.ts`);
   await writeFile(
@@ -48,7 +53,8 @@ test.beforeAll(async () => {
     // Slow enough that the in-flight case can press Escape mid-run.
     "await Bun.sleep(700);\n" +
     'console.log("ARGS " + JSON.stringify(process.argv.slice(2)));\n' +
-      'console.log("  https://example.test/wiki?wiki=melosys-felles&relPath=x");\n',
+      'console.log("  https://example.test/wiki?wiki=melosys-felles&relPath=x");\n' +
+      `if (process.argv.includes(${JSON.stringify(FAIL_REL)})) process.exit(3);\n`,
     "utf8",
   );
 
@@ -137,6 +143,64 @@ test.describe("Wiki reader: ⇪ Felles", () => {
       `bun ${stub} --tillat-ident ${servedRoot} ${REL}`,
     );
   });
+
+  test("remove dry-runs first, and only Confirm remove reaches --fjern for real", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await page.locator(BTN).click();
+    const dialog = page.locator("dialog.wiki-felles");
+    const out = dialog.locator(".wiki-felles-out");
+    const confirm = dialog.locator(".wiki-felles-confirm");
+    await expect(confirm).toBeHidden();
+
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await expect(out).toContainText(`ARGS ${JSON.stringify(["--fjern", "--dry-run", "--ja", "--", REL])}`);
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Dry run: this is the object a remove deletes/);
+    await expect(confirm).toBeVisible();
+
+    // Cancel withdraws the offer without a run.
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirm).toBeHidden();
+
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await confirm.getByRole("button", { name: "Confirm remove" }).click();
+    await expect(out).toContainText(`ARGS ${JSON.stringify(["--fjern", "--ja", "--", REL])}`);
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Removed/);
+    await expect(confirm).toBeHidden();
+  });
+
+  test("a remove dry run that fails offers no confirm, and any other run withdraws one", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(FAIL_REL)}`);
+    await page.locator(BTN).click();
+    const dialog = page.locator("dialog.wiki-felles");
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Delete failed/);
+    await expect(dialog.locator(".wiki-felles-confirm")).toBeHidden();
+    await page.keyboard.press("Escape");
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await page.locator(BTN).click();
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await expect(dialog.locator(".wiki-felles-confirm")).toBeVisible();
+    await dialog.getByRole("button", { name: "Dry run" }).click();
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/Dry run passed/);
+    await expect(dialog.locator(".wiki-felles-confirm")).toBeHidden();
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`the remove controls read at 4.5:1 in the ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+      await page.locator(BTN).click();
+      const dialog = page.locator("dialog.wiki-felles");
+      const remove = dialog.getByRole("button", { name: "Remove…" });
+      expect(await contrastOf(remove), `${scheme} Remove…`).toBeGreaterThanOrEqual(4.5);
+      await remove.click();
+      const confirmBtn = dialog.getByRole("button", { name: "Confirm remove" });
+      await expect(confirmBtn).toBeVisible();
+      expect(await contrastOf(confirmBtn), `${scheme} Confirm remove`).toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(dialog.locator(".wiki-felles-confirm span")), `${scheme} confirm text`).toBeGreaterThanOrEqual(4.5);
+    });
+  }
 
   test("a wiki not in FELLES_WIKI_PUBLISH_WIKIS has no button", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${OTHER}&relPath=page.md`);

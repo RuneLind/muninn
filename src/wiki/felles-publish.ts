@@ -79,9 +79,28 @@ export function fellesPublishPayloadField(
   return { fellesPublish: { bin: config.bin, ...(config.bucket ? { bucket: config.bucket } : {}) } };
 }
 
-/** The script's flags, in the order the operator types them. */
-export function fellesPublishFlags(opts: { dryRun: boolean; allowIdent: boolean }): string[] {
-  return [...(opts.dryRun ? ["--dry-run"] : []), ...(opts.allowIdent ? ["--tillat-ident"] : [])];
+export type FellesAction = "publish" | "remove";
+
+/** The script's arguments after its path, in the order the operator types them.
+ *
+ *  publish: `[--dry-run] [--tillat-ident] <root> ./<relPath>` — the `./` keeps a
+ *  dash-led page from being read as a flag.
+ *  remove:  `--fjern [--dry-run] --ja -- <relPath>` — here the relPath IS the
+ *  bucket object name, which a `./` would change, so `--` guards it instead
+ *  (Bun swallows a `--` only directly after the script path). It goes in NFC,
+ *  because the script uploads `rel.normalize("NFC")` but deletes the name it is
+ *  given, and readdir hands back an NFD path as it was written. `--ja` answers
+ *  the script's own prompt; the dialog's confirm step is where the reader is asked. */
+export function fellesScriptArgs(opts: {
+  action: FellesAction;
+  dryRun: boolean;
+  allowIdent: boolean;
+  root: string;
+  relPath: string;
+}): string[] {
+  const dry = opts.dryRun ? ["--dry-run"] : [];
+  if (opts.action === "remove") return ["--fjern", ...dry, "--ja", "--", opts.relPath.normalize("NFC")];
+  return [...dry, ...(opts.allowIdent ? ["--tillat-ident"] : []), opts.root, "./" + opts.relPath];
 }
 
 /** Names the child inherits. `PATH` finds `gcloud`; `HOME` and the `CLOUDSDK_*`

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   fellesBtnHtml,
+  fellesDialogHtml,
   fellesOutcomeLine,
   fellesOutputHtml,
   fellesPublishCommand,
@@ -37,6 +38,24 @@ test("each exit code has its own line", () => {
   expect(fellesOutcomeLine(0, true).ok).toBe(true);
   expect(fellesOutcomeLine(0, false).text).toMatch(/^Published/);
   for (const code of [1, 2, 3, 9]) expect(fellesOutcomeLine(code, false).ok).toBe(false);
+});
+
+test("remove has its own line per exit code", () => {
+  // The script's dry run never asks the bucket, so the line must not claim the object exists.
+  expect(fellesOutcomeLine(0, true, "remove").text).toMatch(/does not check/);
+  expect(fellesOutcomeLine(1, false, "remove").text).toMatch(/nothing was removed/);
+  expect(fellesOutcomeLine(1, false, "remove").text).not.toMatch(/may/);
+  expect(fellesOutcomeLine(3, false, "remove").text).toMatch(/gcloud needs a login/);
+  expect(fellesOutcomeLine(0, false, "remove").text).toMatch(/^Removed/);
+  for (const code of [1, 2, 3, 9]) expect(fellesOutcomeLine(code, false, "remove").ok).toBe(false);
+  // Publish copy must never describe a delete.
+  for (const code of [0, 1, 2, 3]) expect(fellesOutcomeLine(code, false, "remove").text).not.toMatch(/upload|Published/);
+});
+
+test("the dialog's remove confirmation starts hidden", () => {
+  const html = fellesDialogHtml("plans/a.mdx");
+  expect(html).toContain('data-felles="remove"');
+  expect(html).toMatch(/<div class="wiki-felles-confirm" hidden>/);
 });
 
 test("exit 1 claims nothing the code cannot know", () => {
