@@ -755,14 +755,15 @@ export const FULL_RERUN_UNSUPPORTED =
   "category, so a re-picked category writes a second file instead of replacing this one.";
 
 /**
- * How long past the model call's own budget a re-run may hold its
- * single-flight claim before the claim is released.
+ * How long past the model call's own budget a re-run keeps OTHER writers out
+ * of its document before the claim lapses.
  *
- * Everything outside that call is bounded and short: the raw file was already
- * read before the claim, the tail is synchronous, and the ingest is one POST to
- * huginn. Two minutes covers all of it with room, and the number only ever
- * matters on a run that has ALREADY outlived its own timeout — where the choice
- * is between releasing the document and pinning it at 409 until a restart.
+ * Not a deadline for the run: work after the model call (the closing-takeaway
+ * check, frame copies) and a connector's own retry loop can outlast it while
+ * staying inside their own timeouts. A lapsed claim still saves when nobody
+ * else took the key (`pinForWrite` in `summary-save.ts`), and the save pins the
+ * claim for the length of its POST. What the number decides is how long a run
+ * that never settles keeps the document at `409 in_flight` for everyone else.
  */
 export const RERUN_LATCH_SLACK_MS = 120_000;
 
@@ -772,9 +773,9 @@ export const RERUN_LATCH_SLACK_MS = 120_000;
  *
  * `summarizeTimeoutFor` is the value passed as `timeoutMs`, so it is what the
  * connector enforces — but a bot whose OWN `timeoutMs` is longer is a
- * configuration this cannot rule out, and a latch that expires before the call
- * it is guarding would hand a second POST a slot while the first is still
- * writing. The max of the two is the only safe reading.
+ * configuration this cannot rule out, and a claim that lapses mid-call lets a
+ * second POST start a run of its own. The max of the two is the closer reading;
+ * a run that still outlives it saves anyway unless that second run claimed.
  */
 export function rerunLatchBudgetMs(frameCount: number, bot: BotConfig): number {
   const callBudget = Math.max(

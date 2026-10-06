@@ -1462,6 +1462,29 @@ describe("the single-flight claim is bounded", () => {
     await settle();
   });
 
+  test("a run that outlived its claim with NO rival still saves", async () => {
+    // The budget bounds how long a stalled run keeps OTHER writers out; it is
+    // not a deadline for the run itself. With nobody else on the key, a late
+    // finish is written rather than thrown away as `in_flight`.
+    const claims = new SummarySaveClaims();
+    const { deps, rec } = makeDeps(youtubeDoc(), { latchBudgetMs: 20, claims });
+    const slow = deps.oneShot;
+    deps.oneShot = (async (o: Parameters<typeof slow>[0]) => {
+      await Bun.sleep(50);
+      return slow(o);
+    }) as typeof slow;
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(200);
+    await Bun.sleep(80);
+    await settle();
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.error ?? "").toBe("");
+    expect(job.status).toBe("complete");
+    expect(rec.ingests).toHaveLength(1);
+    // The run's `finally` released the re-taken key.
+    expect(claims.isHeld("youtube", DOC_ID)).toBe(false);
+  });
+
   test("the default bound outlives the model call it guards", () => {
     // A latch that expired before the run would hand a second POST a slot while
     // the first is still writing the file.

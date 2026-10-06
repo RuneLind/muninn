@@ -215,6 +215,75 @@ describe("the claim carries its issuing registry", () => {
   });
 });
 
+describe("a claim that outlived its budget", () => {
+  const DOC_ID = "ai/general/A post.md";
+  const saveWith = (claim: ReturnType<SummarySaveClaims["claim"]>, ingest: SummaryIngest) =>
+    saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: readStoredCapture(ARTICLE).body,
+      claim: claim!,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest,
+    });
+  const okIngest = (calls: string[]): SummaryIngest => async (o) => {
+    calls.push(o.ingestPath);
+    return { ok: true, status: 200, data: { file_path: DOC_ID } };
+  };
+
+  test("lapsed with NO rival: the save re-takes the key and writes", async () => {
+    // A run that stayed inside its own timeouts can still outlive the budget
+    // (the takeaway check, a connector's retry loop). Nobody else wrote, so
+    // refusing would throw away a finished summary for nothing.
+    const claims = new SummarySaveClaims();
+    const claim = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    const calls: string[] = [];
+    const res = await saveWith(claim, okIngest(calls));
+    expect(res.ok ? "ok" : res.code).toBe("ok");
+    expect(calls).toHaveLength(1);
+    claims.clear();
+  });
+
+  test("lapsed and a rival holds the key: in_flight, nothing posted", async () => {
+    const claims = new SummarySaveClaims();
+    const claim = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const rival = claims.claim("article", DOC_ID, 1_000)!;
+    const calls: string[] = [];
+    const res = await saveWith(claim, okIngest(calls));
+    expect(res.ok ? "ok" : res.code).toBe("in_flight");
+    expect(calls).toHaveLength(0);
+    expect(claims.holds(rival)).toBe(true);
+    claims.clear();
+  });
+
+  test("the claim cannot expire while the ingest is in flight", async () => {
+    // Checked once before a blocking POST whose timer kept running, the claim
+    // lapsed mid-ingest, a second writer claimed, and the first POST landed
+    // over that writer's file.
+    const claims = new SummarySaveClaims();
+    const claim = claims.claim("article", DOC_ID, 30);
+    let rivalDuringIngest: ReturnType<SummarySaveClaims["claim"]> | "unset" = "unset";
+    const ingest: SummaryIngest = async () => {
+      await Bun.sleep(60); // past the 30 ms budget
+      rivalDuringIngest = claims.claim("article", DOC_ID, 1_000);
+      await Bun.sleep(10);
+      return { ok: true, status: 200, data: { file_path: DOC_ID } };
+    };
+    const res = await saveWith(claim, ingest);
+    expect(res.ok ? "ok" : res.code).toBe("ok");
+    expect(rivalDuringIngest).toBeNull();
+    // Still the caller's after the save, until the caller releases it.
+    expect(claims.holds(claim!)).toBe(true);
+    claims.release(claim!);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.clear();
+  });
+});
+
 describe("the claim registry", () => {
   test("one holder per document; release frees it; a stale token releases nothing", async () => {
     const claims = new SummarySaveClaims();
