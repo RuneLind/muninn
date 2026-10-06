@@ -195,6 +195,17 @@ describe("saveSummaryBody", () => {
     expect(res.ok ? "ok" : [res.code, res.siblingDocId]).toEqual(["forked", "ai/general/A post (2).md"]);
   });
 
+  test("an upper-case .MD id answered with huginn's lower-case .md is the same document", async () => {
+    const upper = "ai/general/A post.MD";
+    const h = harness({ ok: true, status: 200, data: { file_path: "ai/general/A post.md" } });
+    const res = await saveSummaryBody({ ...input(h, h.claims.claim("article", upper, 1_000)!), docId: upper });
+    expect(res.ok ? "ok" : res.code).toBe("ok");
+    // The stem still has to match exactly: a case change there is another file.
+    const other = harness({ ok: true, status: 200, data: { file_path: "ai/general/A Post.md" } });
+    const forked = await saveSummaryBody({ ...input(other, other.claims.claim("article", upper, 1_000)!), docId: upper });
+    expect(forked.ok ? "ok" : forked.code).toBe("forked");
+  });
+
   test("an empty or whitespace-only summary is refused before any POST", async () => {
     // huginn's YouTube ingest reads an empty `summary` as "summarize it
     // yourself": it fetches the transcript, runs its own model and overwrites

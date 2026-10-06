@@ -546,6 +546,17 @@ export function buildSummarySaveBody(input: {
 }
 
 /**
+ * Is the path huginn wrote the stored document? huginn always answers a
+ * lower-case `.md`, so the suffix compares case-insensitively; the stem
+ * compares exactly, since a case change there is a different title.
+ */
+function sameDocId(written: string, docId: string): boolean {
+  const stem = (id: string): string | null => (/\.md$/i.test(id) ? id.slice(0, -3) : null);
+  const a = stem(written);
+  return a !== null && a === stem(docId);
+}
+
+/**
  * Write a summary body back over its stored document.
  *
  * Requires a claim the caller took (it never claims a second time); runs the
@@ -658,7 +669,7 @@ async function saveOnce(input: SaveSummaryBodyInput): Promise<SummarySaveResult>
       error: "huginn answered the ingest without a file_path, so whether the document was written is unknown.",
     };
   }
-  if (filePath !== input.docId) {
+  if (!sameDocId(filePath, input.docId)) {
     return {
       ok: false,
       status: 409,
