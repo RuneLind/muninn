@@ -30,23 +30,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   registerSummariesRerunRoutes,
-  readStoredCapture,
-  titleFromDocId,
-  categoryFromDocId,
   listKeptFrames,
-  extraTagsFromStored,
-  titleRoundTripRefusal,
-  TITLE_ROUND_TRIP_MAX,
   FULL_RERUN_UNSUPPORTED,
   type SummariesRerunDeps,
   type RerunDocument,
 } from "./summaries-rerun.ts";
 import {
+  readStoredCapture,
+  titleFromDocId,
+  categoryFromDocId,
+  extraTagsFromStored,
+  titleRoundTripRefusal,
+} from "../../summaries/summary-save.ts";
+import { HUGINN_FILENAME_MAX } from "../../summaries/huginn-filename.ts";
+import {
   rerunLatchBudgetMs,
   RERUN_LATCH_SLACK_MS,
 } from "./summaries-rerun.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
-import { SummarySaveClaims, type SummaryIngestResponse } from "../../summaries/summary-save.ts";
+import { SummarySaveClaims } from "../../summaries/summary-save.ts";
+import type { SummaryIngestResponse } from "../../summaries/summarizer-shared.ts";
 import { buildShortVideoSystemPrompt } from "../../video/short-video-prompt.ts";
 import { shortVideoCaptureKinds, SHORT_VIDEO_THINKING } from "../../video/short-video-kinds.ts";
 import { TIKTOK_SPEC } from "../../tiktok/summarizer.ts";
@@ -544,12 +547,12 @@ describe("the title round trip", () => {
   // it writes a second document. Refused before any model spend.
   test("a clean stem passes, and one PAST the cap does not", () => {
     expect(titleRoundTripRefusal("A Talk About Things")).toBeNull();
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX - 1))).toBeNull();
+    expect(titleRoundTripRefusal("x".repeat(HUGINN_FILENAME_MAX - 1))).toBeNull();
     // At the cap huginn truncates nothing, so this really is a fixed point —
     // the first cut of the guard refused it anyway, on a symptom rather than
     // the rule. Past the cap it is not.
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX))).toBeNull();
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX + 40))).toContain("second document");
+    expect(titleRoundTripRefusal("x".repeat(HUGINN_FILENAME_MAX))).toBeNull();
+    expect(titleRoundTripRefusal("x".repeat(HUGINN_FILENAME_MAX + 40))).toContain("second document");
   });
 
   test("a stem ending in whitespace is refused — a tab as much as a space", () => {
@@ -572,13 +575,13 @@ describe("the title round trip", () => {
   test("a 200-CODE-POINT stem of astral characters is accepted", () => {
     // 200 code points, 400 UTF-16 units: a `String.length` port refuses this,
     // and huginn does not touch it.
-    const astral = "\u{1F600}".repeat(TITLE_ROUND_TRIP_MAX);
-    expect(astral.length).toBe(TITLE_ROUND_TRIP_MAX * 2);
+    const astral = "\u{1F600}".repeat(HUGINN_FILENAME_MAX);
+    expect(astral.length).toBe(HUGINN_FILENAME_MAX * 2);
     expect(titleRoundTripRefusal(astral)).toBeNull();
   });
 
   test("the POST answers 409 and spends nothing", async () => {
-    const longTitle = "L".repeat(TITLE_ROUND_TRIP_MAX + 5);
+    const longTitle = "L".repeat(HUGINN_FILENAME_MAX + 5);
     const { deps, rec } = makeDeps(youtubeDoc());
     const res = await post(appFor(deps), { source: "youtube", docId: `ai/general/${longTitle}.md` });
     expect(res.status).toBe(409);
@@ -589,7 +592,7 @@ describe("the title round trip", () => {
   });
 
   test("the options payload carries the same verdict, so the menu can disable the items", async () => {
-    const longTitle = "L".repeat(TITLE_ROUND_TRIP_MAX + 5);
+    const longTitle = "L".repeat(HUGINN_FILENAME_MAX + 5);
     const app = appFor(makeDeps(youtubeDoc()).deps);
     const bad = (await (
       await app.request(

@@ -65,7 +65,6 @@ import { fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { mapProseLines } from "../../summaries/transcript-split.ts";
 import {
-  postSummaryIngest,
   preflightSummarySave,
   readStoredCapture,
   requireSaveDescriptor,
@@ -74,21 +73,9 @@ import {
   titleFromDocId,
   titleRoundTripRefusal,
   type StoredCapture,
-  type SummaryIngest,
   type SummarySaveClaim,
   type SummarySaveClaims,
   type SummarySaveDescriptor,
-} from "../../summaries/summary-save.ts";
-// Re-exported: these moved to the shared save module, and the re-run's own
-// tests (and any reader of this route) still name them here.
-export {
-  categoryFromDocId,
-  extraTagsFromStored,
-  readStoredCapture,
-  titleFromDocId,
-  titleRoundTripRefusal,
-  TITLE_ROUND_TRIP_MAX,
-  type StoredCapture,
 } from "../../summaries/summary-save.ts";
 import {
   capturePresetOptions,
@@ -118,7 +105,12 @@ import {
   type CaptureFrame,
   type FrameSource,
 } from "../../summaries/frames.ts";
-import { runCaptureOneShot, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS } from "../../summaries/summarizer-shared.ts";
+import {
+  runCaptureOneShot,
+  postSummaryIngest,
+  CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
+  type SummaryIngest,
+} from "../../summaries/summarizer-shared.ts";
 import { summarizeTimeoutFor } from "../../video/media.ts";
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../../youtube/prompt.ts";
@@ -584,7 +576,6 @@ interface RerunJobInput {
   readonly deps: SummariesRerunDeps;
   /** The claim the route took before the model call; the save requires it. */
   readonly claim: SummarySaveClaim;
-  readonly claims: SummarySaveClaims;
 }
 
 async function runRerunJob(input: RerunJobInput): Promise<void> {
@@ -705,7 +696,6 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       summary: finished.summary,
       summaryKind: preset.id,
       claim: input.claim,
-      claims: input.claims,
       knowledgeApiUrl: input.config.knowledgeApiUrl,
       ingest: deps.ingest,
     });
@@ -1052,7 +1042,6 @@ export function registerSummariesRerunRoutes(
       config,
       deps,
       claim,
-      claims,
     }).finally(() => {
       claims.release(claim);
     });

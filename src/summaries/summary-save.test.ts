@@ -10,9 +10,8 @@ import {
   requireSaveDescriptor,
   saveSummaryBody,
   SummarySaveClaims,
-  type SummaryIngest,
-  type SummaryIngestResponse,
 } from "./summary-save.ts";
+import type { SummaryIngest, SummaryIngestResponse } from "./summarizer-shared.ts";
 
 function doc(front: string[], body: string): string {
   return ["---", ...front, "---", "", body].join("\n");
@@ -132,7 +131,6 @@ describe("saveSummaryBody", () => {
     docId: DOC_ID,
     summary: readStoredCapture(ARTICLE).body,
     claim,
-    claims: h.claims,
     knowledgeApiUrl: "http://127.0.0.1:1",
     ingest: h.ingest,
   });
@@ -188,6 +186,32 @@ describe("saveSummaryBody", () => {
     const res = await saveSummaryBody({ ...input(h), stored: readStoredCapture(raw) });
     expect(res.ok ? "ok" : res.code).toBe("no_url");
     expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe("the claim carries its issuing registry", () => {
+  test("a claim from a private registry authorizes the save with no registry passed beside it", async () => {
+    // The save used to check `input.claims ?? summarySaveClaims`: a claim from a
+    // test's own registry, or any registry but the default, read as not held.
+    const own = new SummarySaveClaims();
+    const docId = "ai/general/A post.md";
+    const claim = own.claim("article", docId, 1_000)!;
+    const calls: string[] = [];
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId,
+      summary: readStoredCapture(ARTICLE).body,
+      claim,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest: async (o) => {
+        calls.push(o.ingestPath);
+        return { ok: true, status: 200, data: { file_path: docId } };
+      },
+    });
+    expect(res.ok ? "ok" : res.code).toBe("ok");
+    expect(calls).toEqual(["/api/articles/ingest"]);
+    own.clear();
   });
 });
 

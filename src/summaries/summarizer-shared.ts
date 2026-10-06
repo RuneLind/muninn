@@ -475,6 +475,63 @@ export function ingestTimeoutFor(bodyBytes: number): number {
   return Math.min(INGEST_TIMEOUT_MAX_MS, scaled);
 }
 
+/** What one ingest POST answered — returned rather than logged. */
+export type SummaryIngestResponse =
+  | { ok: true; status: number; data: { file_path?: unknown; similar?: unknown } }
+  | { ok: false; status: number | null; error: string };
+
+/** The ingest seam: one POST, its answer returned. */
+export type SummaryIngest = (opts: {
+  knowledgeApiUrl: string;
+  ingestPath: string;
+  body: Record<string, unknown>;
+  timeoutMs?: number;
+}) => Promise<SummaryIngestResponse>;
+
+/**
+ * One POST to a huginn `<vertical>/ingest`, its answer RETURNED: the blocking
+ * form, which the shared save (`summary-save.ts`) waits on, and the one
+ * {@link ingestSummary} is expressed through. Bounded by
+ * {@link ingestTimeoutFor} over the serialized body's bytes unless the caller
+ * passes a budget.
+ */
+export const postSummaryIngest: SummaryIngest = async (opts) => {
+  const payload = JSON.stringify(opts.body);
+  // BYTES, not code units: the budget bounds what goes on the WIRE, and a
+  // windowed `## Transcript` of a Japanese or Norwegian talk is mostly
+  // multi-byte — `.length` would hand a 3 MB POST the budget of a 1 MB one.
+  const payloadBytes = Buffer.byteLength(payload);
+  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(payloadBytes);
+  // Debug rather than info: one line per ingest, and the only place the
+  // resolved budget is visible (an AbortSignal does not report its deadline).
+  log.debug("Ingesting {bytes} bytes into {path} with a {timeoutMs} ms budget", {
+    bytes: payloadBytes,
+    path: opts.ingestPath,
+    timeoutMs,
+  });
+  try {
+    const res = await fetch(`${opts.knowledgeApiUrl}${opts.ingestPath}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, status: res.status, error: `Ingest returned ${res.status}${text ? `: ${text.slice(0, 300)}` : ""}` };
+    }
+    let data: { file_path?: unknown; similar?: unknown };
+    try {
+      data = (await res.json()) as { file_path?: unknown; similar?: unknown };
+    } catch {
+      return { ok: false, status: res.status, error: `Ingest answered ${res.status} with a body that is not JSON` };
+    }
+    return { ok: true, status: res.status, data: data ?? {} };
+  } catch (err) {
+    return { ok: false, status: null, error: `Ingest failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+};
+
 /**
  * Best-effort POST of a finished summary to a Huginn `<vertical>/ingest`
  * endpoint, shared by every capture summarizer. A failure
@@ -482,8 +539,10 @@ export function ingestTimeoutFor(bodyBytes: number): number {
  * logs a warn and skips the "similar" enrichment. On success, any returned
  * `similar` articles are handed back via `onSimilar`.
  *
- * (anthropic's ingest is intentionally NOT routed through this: it's blocking,
- * fails the job on a non-ok response, and returns a doc `file_path`.)
+ * The POST itself is {@link postSummaryIngest}, whose blocking answer the
+ * shared save path reads. anthropic's ingest still posts inline (blocking, it
+ * fails the job on a non-ok response); moving it onto `postSummaryIngest` is a
+ * follow-up.
  */
 export async function ingestSummary(opts: {
   knowledgeApiUrl: string;
@@ -505,47 +564,20 @@ export async function ingestSummary(opts: {
   /** Abort timeout. Absent ⇒ {@link ingestTimeoutFor} over the serialized body. */
   timeoutMs?: number;
 }): Promise<void> {
-  const payload = JSON.stringify(opts.body);
-  // BYTES, not code units: the budget bounds what goes on the WIRE, and a
-  // windowed `## Transcript` of a Japanese or Norwegian talk is mostly
-  // multi-byte — `.length` would hand a 3 MB POST the budget of a 1 MB one.
-  const payloadBytes = Buffer.byteLength(payload);
-  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(payloadBytes);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  // Debug rather than info: one line per capture, and the only place the
-  // resolved budget is visible (an AbortSignal does not report its deadline).
-  log.debug("Ingesting {bytes} bytes into {path} with a {timeoutMs} ms budget", {
-    bytes: payloadBytes,
-    path: opts.ingestPath,
-    timeoutMs,
+  const res = await postSummaryIngest({
+    knowledgeApiUrl: opts.knowledgeApiUrl,
+    ingestPath: opts.ingestPath,
+    body: opts.body,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
   });
-  try {
-    const res = await fetch(`${opts.knowledgeApiUrl}${opts.ingestPath}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (res.ok) {
-      const data = (await res.json()) as { similar?: SimilarArticle[]; file_path?: string };
-      if (data.similar && data.similar.length > 0) {
-        opts.onSimilar(data.similar);
-      }
-      if (opts.onIngested) {
-        opts.onIngested({
-          filePath: typeof data.file_path === "string" ? data.file_path : undefined,
-        });
-      }
-    } else {
-      log.warn("Knowledge API ingest returned {status}", { status: res.status });
-    }
-  } catch (err) {
-    clearTimeout(timeout);
-    log.warn("Knowledge API ingest failed: {error}", {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  if (!res.ok) {
+    if (res.status !== null) log.warn("Knowledge API ingest returned {status}", { status: res.status });
+    else log.warn("Knowledge API ingest failed: {error}", { error: res.error });
+    return;
+  }
+  const similar = Array.isArray(res.data.similar) ? (res.data.similar as SimilarArticle[]) : [];
+  if (similar.length > 0) opts.onSimilar(similar);
+  if (opts.onIngested) {
+    opts.onIngested({ filePath: typeof res.data.file_path === "string" ? res.data.file_path : undefined });
   }
 }

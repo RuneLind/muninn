@@ -21,8 +21,8 @@
 
 import { getLog } from "../logging.ts";
 import type { SimilarArticle } from "./job-store.ts";
-import { ingestTimeoutFor } from "./summarizer-shared.ts";
-import { sanitizeFilenameLikeHuginn, HUGINN_FILENAME_MAX } from "./huginn-filename.ts";
+import { postSummaryIngest, type SummaryIngest } from "./summarizer-shared.ts";
+import { sanitizeFilenameLikeHuginn } from "./huginn-filename.ts";
 import {
   decodeFrontmatterScalar,
   parseCaptureFrontmatter,
@@ -140,7 +140,7 @@ export const SUMMARY_SAVE_DESCRIPTORS: readonly SummarySaveDescriptor[] = [
   },
 ];
 
-export function saveDescriptorFor(sourceId: string): SummarySaveDescriptor | undefined {
+function saveDescriptorFor(sourceId: string): SummarySaveDescriptor | undefined {
   return SUMMARY_SAVE_DESCRIPTORS.find((d) => d.id === sourceId);
 }
 
@@ -226,9 +226,6 @@ export function categoryFromDocId(docId: string): string | null {
   return at <= 0 ? null : docId.slice(0, at);
 }
 
-/** huginn's `sanitize_filename` truncates to 200 code points. */
-export const TITLE_ROUND_TRIP_MAX = HUGINN_FILENAME_MAX;
-
 /**
  * Why a title read out of a doc id does NOT always post back to the same path:
  * the exact fixed-point test over huginn's own file-name rule (ported, with a
@@ -277,8 +274,10 @@ export type SummarySavePreflight =
   | { ok: true; title: string; category: string; url: string }
   | { ok: false; status: 400 | 409; code: SummarySaveRefusalCode; error: string };
 
-/** An absolute http(s) URL — the one shape huginn's overwrite check can match. */
-export function isHttpUrl(value: string): boolean {
+/** An absolute http(s) URL — the one shape huginn's overwrite check can match.
+ *  Module-private: `src/gardener/draft.ts` and `wiki-gardener-sources.ts` each
+ *  export an `isHttpUrl` with different input rules. */
+function isAbsoluteHttpUrl(value: string): boolean {
   try {
     const u = new URL(value);
     return u.protocol === "http:" || u.protocol === "https:";
@@ -293,15 +292,16 @@ export function isHttpUrl(value: string): boolean {
  *
  * - `no_url` (400): huginn forks a sibling whenever the incoming url is empty,
  *   and a value that is not an http(s) URL is refused too — one stored article
- *   sibling carries 5,485 characters of article text in `url`, against
- *   huginn's 6,144-character frontmatter cap.
+ *   sibling carries pasted article text in `url` (5,421 characters decoded,
+ *   5,485 raw on disk), close to huginn's 6,144-character cap on the WHOLE
+ *   frontmatter block.
  * - `no_category` (400): the id has no directory, so there is no category to
  *   re-file it under.
  * - `title_not_round_trippable` (409): see {@link titleRoundTripRefusal}.
  */
 export function preflightSummarySave(stored: StoredCapture, docId: string): SummarySavePreflight {
   const url = stored.frontmatter.url ?? "";
-  if (!url || !isHttpUrl(url)) {
+  if (!url || !isAbsoluteHttpUrl(url)) {
     return {
       ok: false,
       status: 400,
@@ -327,12 +327,13 @@ export function preflightSummarySave(stored: StoredCapture, docId: string): Summ
 // The per-document claim
 // ---------------------------------------------------------------------------
 
-/** A held claim on one document. Opaque: only the registry that issued it can
- *  release it, and only while it is still the current holder. */
+/** A held claim on one document. It carries the registry that issued it, so a
+ *  save checks the claim against THAT registry and never against a default. */
 export interface SummarySaveClaim {
   readonly sourceId: string;
   readonly docId: string;
   readonly token: symbol;
+  readonly registry: SummarySaveClaims;
 }
 
 /**
@@ -382,7 +383,7 @@ export class SummarySaveClaims {
     // A background bookkeeping timer must not hold the process open.
     timer.unref?.();
     this.held.set(key, { token, timer });
-    return { sourceId, docId, token };
+    return { sourceId, docId, token, registry: this };
   }
 
   /** Is this claim still the current holder? */
@@ -410,45 +411,6 @@ export class SummarySaveClaims {
 export const summarySaveClaims = new SummarySaveClaims();
 
 // ---------------------------------------------------------------------------
-// The blocking ingest
-// ---------------------------------------------------------------------------
-
-export type SummaryIngestResponse =
-  | { ok: true; status: number; data: { file_path?: unknown; similar?: unknown } }
-  | { ok: false; status: number | null; error: string };
-
-/** The ingest seam: one POST, its answer returned rather than logged. */
-export type SummaryIngest = (opts: {
-  knowledgeApiUrl: string;
-  ingestPath: string;
-  body: Record<string, unknown>;
-  timeoutMs?: number;
-}) => Promise<SummaryIngestResponse>;
-
-/** A blocking POST to a huginn `<source>/ingest`, bounded by
- *  `ingestTimeoutFor` over the serialized body's bytes. */
-export const postSummaryIngest: SummaryIngest = async (opts) => {
-  const payload = JSON.stringify(opts.body);
-  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(Buffer.byteLength(payload));
-  try {
-    const res = await fetch(`${opts.knowledgeApiUrl}${opts.ingestPath}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      return { ok: false, status: res.status, error: `Ingest returned ${res.status}${text ? `: ${text.slice(0, 300)}` : ""}` };
-    }
-    const data = (await res.json().catch(() => ({}))) as { file_path?: unknown; similar?: unknown };
-    return { ok: true, status: res.status, data };
-  } catch (err) {
-    return { ok: false, status: null, error: `Ingest failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-};
-
-// ---------------------------------------------------------------------------
 // The save
 // ---------------------------------------------------------------------------
 
@@ -472,9 +434,9 @@ export interface SaveSummaryBodyInput {
   /** Re-run's new kind. Absent ⇒ the stored `summary_kind` is re-sent as it
    *  is, or omitted when the document has none. */
   readonly summaryKind?: string;
-  /** A claim the caller holds on `(descriptor.id, docId)`. */
+  /** A claim the caller holds on `(descriptor.id, docId)`, checked against the
+   *  registry that issued it. */
   readonly claim: SummarySaveClaim;
-  readonly claims?: SummarySaveClaims;
   readonly knowledgeApiUrl: string;
   readonly ingest?: SummaryIngest;
 }
@@ -534,8 +496,8 @@ export function buildSummarySaveBody(input: {
  * stored document is unchanged.
  */
 export async function saveSummaryBody(input: SaveSummaryBodyInput): Promise<SummarySaveResult> {
-  const claims = input.claims ?? summarySaveClaims;
-  if (input.claim.sourceId !== input.descriptor.id || input.claim.docId !== input.docId || !claims.holds(input.claim)) {
+  const { claim } = input;
+  if (claim.sourceId !== input.descriptor.id || claim.docId !== input.docId || !claim.registry.holds(claim)) {
     return {
       ok: false,
       status: 409,
