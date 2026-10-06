@@ -13,8 +13,11 @@
  * The answer arrives as server-rendered HTML (`answer_html` on the stream,
  * `html` on `/result`), so this bundle carries no markdown renderer. So does
  * the transcript check's block (`transcriptHtml` on `/result`, `html` on the
- * transcript POST), whose button shows only when a web result is saved and the
- * document has a transcript (`hasTranscript` on `/result`).
+ * transcript POST), whose button shows only when a fresh web result is saved
+ * and the document has a transcript (`hasTranscript` on `/result`). While a
+ * transcript run is in flight, ↻ Re-check is disabled, a reopen keeps the block
+ * the run writes, and an answer for a web result that has since been replaced
+ * is dropped.
  */
 
 import { makeSseFrameParser } from "./client-runtime.ts";
@@ -43,6 +46,11 @@ interface SavedState {
 
 /** One transcript check: a single JSON POST. */
 interface TranscriptRun { running: boolean; error: string | null }
+
+/** Monotonic order of `/result` reads and transcript writes, per page. */
+let seq = 0;
+/** Per document: the `seq` at which a transcript POST last wrote its block. */
+const transcriptWrittenAt = new Map<string, number>();
 
 interface RunState {
   rows: FactcheckProgressRow[];
@@ -94,13 +102,21 @@ export function sumFactcheckOnOpen(docId: string, source: string | null, mainEl:
     }
     el.dataset.key = key;
   }
+  // A reopen starts without the last transcript run's notice.
+  if (mainEl && transcriptRuns.get(key)?.running === false) transcriptRuns.delete(key);
   render();
   // Re-read on every open: a re-run since the last look moves `stale`.
   if (mainEl && !runs.get(key)?.running) void loadSaved(current.source, current.docId);
 }
 
+/** Drop a finished transcript run's notice: a new web result supersedes it. */
+function clearTranscriptNotice(key: string): void {
+  if (transcriptRuns.get(key)?.running === false) transcriptRuns.delete(key);
+}
+
 async function loadSaved(source: string, docId: string): Promise<void> {
   const key = keyOf(source, docId);
+  const readAt = ++seq;
   try {
     const res = await fetch(`/api/summaries/factcheck/result?${query(source, docId)}`, { cache: "no-store" });
     if (!res.ok) return;
@@ -112,12 +128,20 @@ async function loadSaved(source: string, docId: string): Promise<void> {
       transcriptHtml?: string | null;
     };
     const result = data.result ? { ...data.result, html: data.html ?? null } : null;
+    const before = saved.get(key);
+    // While a transcript run is in flight, or once one wrote its block after
+    // this read began, the block on screen is newer than this answer — unless
+    // the web result itself changed, which replaces both.
+    const sameWebResult = !!before?.result && !!result && before.result.createdAt === result.createdAt;
+    const keepTranscript =
+      sameWebResult && (!!transcriptRuns.get(key)?.running || (transcriptWrittenAt.get(key) ?? 0) > readAt);
     saved.set(key, {
       result,
       stale: data.stale,
       hasTranscript: data.hasTranscript ?? null,
-      transcriptHtml: data.transcriptHtml ?? null,
+      transcriptHtml: keepTranscript ? before!.transcriptHtml : (data.transcriptHtml ?? null),
     });
+    if (result && before?.result && result.createdAt !== before.result.createdAt) clearTranscriptNotice(key);
     // A result newer than a finished run's notice supersedes it.
     const run = runs.get(key);
     if (run && !run.running && result && result.createdAt > run.finishedAt) runs.delete(key);
@@ -132,7 +156,8 @@ export function sumFactcheckStart(): void {
   if (!current) return;
   const { source, docId } = current;
   const key = keyOf(source, docId);
-  if (runs.get(key)?.running) return;
+  // A web run started under a transcript run would replace the claims it checks.
+  if (runs.get(key)?.running || transcriptRuns.get(key)?.running) return;
   const run: RunState = { rows: [], lede: "", running: true, error: null, finishedAt: 0, adopted: false };
   runs.set(key, run);
   render();
@@ -166,6 +191,9 @@ export function sumFactcheckTranscriptStart(): void {
   const { source, docId } = current;
   const key = keyOf(source, docId);
   if (transcriptRuns.get(key)?.running || runs.get(key)?.running) return;
+  // The web result this run checks; an answer is applied only while it is still the shown one.
+  const origin = saved.get(key)?.result?.createdAt;
+  if (origin === undefined) return;
   const run: TranscriptRun = { running: true, error: null };
   transcriptRuns.set(key, run);
   render();
@@ -182,7 +210,9 @@ export function sumFactcheckTranscriptStart(): void {
         return;
       }
       const state = saved.get(key);
-      if (state) state.transcriptHtml = data.html;
+      if (state?.result?.createdAt !== origin) return;
+      state.transcriptHtml = data.html;
+      transcriptWrittenAt.set(key, ++seq);
     } catch (err) {
       run.error = `Transcript check failed: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
@@ -250,6 +280,7 @@ async function stream(source: string, docId: string, run: RunState): Promise<voi
           transcriptHtml: null,
         });
         run.adopted = true;
+        clearTranscriptNotice(key);
         if (data.saved !== true) run.error = "Checked, but the result could not be saved — it will be gone on reload.";
         void sumFactcheckLoadBadges();
         break;
@@ -287,7 +318,7 @@ function render(): void {
   // The button follows the document the panel is on, even before its article
   // (and so its section) has rendered.
   const btn = document.getElementById(SUM_FACTCHECK_BTN_ID) as HTMLButtonElement | null;
-  if (btn) btn.disabled = !!run?.running;
+  if (btn) btn.disabled = !!run?.running || !!transcriptRuns.get(key)?.running;
 
   const el = section();
   if (!el || el.dataset.key !== key) return;
@@ -308,17 +339,19 @@ function render(): void {
   }
   el.hidden = false;
   const tRun = transcriptRuns.get(key);
+  const transcriptRunning = !!tRun?.running;
   const meta = result
     ? `<span class="sum-fc-meta">checked ${escHtml(timeAgo(result.createdAt))}</span>` +
       (state?.stale ? '<span class="sum-fc-stale" title="The summary changed since this check">stale</span>' : "")
     : "";
   const transcriptBtn =
-    result && result.claims.length > 0 && state?.hasTranscript
-      ? `<button type="button" class="sum-fc-txbtn"${tRun?.running ? " disabled" : ""} title="Check each claim against the document's transcript">` +
-        `${tRun?.running ? "checking transcript…" : state.transcriptHtml ? "↻ Transcript" : "⧉ Check transcript"}</button>`
+    // A stale web check is hidden behind ↻ Re-check: the POST refuses it (409 web_check_stale).
+    result && result.claims.length > 0 && state?.hasTranscript && !state.stale
+      ? `<button type="button" class="sum-fc-txbtn"${transcriptRunning ? " disabled" : ""} title="Check each claim against the document's transcript">` +
+        `${transcriptRunning ? "checking transcript…" : state.transcriptHtml ? "↻ Transcript" : "⧉ Check transcript"}</button>`
       : "";
   el.innerHTML =
-    head(result ? factcheckVerdictChipsHtml(result.claims) : "", meta, true, transcriptBtn) +
+    head(result ? factcheckVerdictChipsHtml(result.claims) : "", meta, true, transcriptBtn, transcriptRunning) +
     notice(run?.error ?? null) +
     notice(tRun?.error ?? null) +
     (state?.transcriptHtml ?? "") +
@@ -331,11 +364,13 @@ function notice(text: string | null): string {
   return text ? `<div class="sum-fc-err" role="alert">${escHtml(text)}</div>` : "";
 }
 
-function head(chips: string, meta: string, recheck: boolean, extra = ""): string {
+function head(chips: string, meta: string, recheck: boolean, extra = "", recheckDisabled = false): string {
   return (
     '<div class="sum-fc-head"><span class="sum-fc-title">✓ Fact check</span>' +
     `<span class="sum-fc-chips">${chips}</span>${meta}` +
-    (recheck ? '<button type="button" class="sum-fc-recheck" title="Run the fact check again">↻ Re-check</button>' : "") +
+    (recheck
+      ? `<button type="button" class="sum-fc-recheck"${recheckDisabled ? ' disabled title="Wait for the transcript check to finish"' : ' title="Run the fact check again"'}>↻ Re-check</button>`
+      : "") +
     extra +
     "</div>"
   );

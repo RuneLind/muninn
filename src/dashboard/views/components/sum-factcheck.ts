@@ -43,12 +43,12 @@ export function sumFactcheckStyles(): string {
       background: none; color: var(--text-secondary);
       border: 1px solid var(--border-secondary); border-radius: 6px; padding: 2px 10px;
     }
-    .sum-fc-recheck:hover, .sum-fc-txbtn:hover:not([disabled]) { border-color: var(--accent); color: var(--text-primary); }
+    .sum-fc-recheck:hover:not([disabled]), .sum-fc-txbtn:hover:not([disabled]) { border-color: var(--accent); color: var(--text-primary); }
     .sum-fc-txbtn {
       font: inherit; font-size: 12px; cursor: pointer; background: none; color: var(--text-secondary);
       border: 1px solid var(--border-secondary); border-radius: 6px; padding: 2px 10px;
     }
-    .sum-fc-txbtn[disabled] { cursor: default; opacity: 0.7; }
+    .sum-fc-recheck[disabled], .sum-fc-txbtn[disabled] { cursor: default; opacity: 0.7; }
     .sum-fc-progress { list-style: none; margin: 10px 0 0; padding: 0; }
     .sum-fc-progress li { display: flex; gap: 8px; padding: 2px 0; color: var(--text-secondary); }
     .sum-fc-progress li.pending { color: var(--text-muted); }
