@@ -185,13 +185,6 @@ export interface SourceDraftInput {
    * final, honestly-named skip instead.
    */
   titleOverride?: string;
-  /**
-   * The exact spelling to file under when the drafted title matches
-   * `titleOverride`. Redraft passes the old draft's title here, because
-   * `sanitizeTitleOverride` strips the quote characters a reviewed title may
-   * carry; it is pinned into the frontmatter and the H1.
-   */
-  titleExact?: string;
 }
 
 /**
@@ -281,24 +274,6 @@ export function titleMatchKey(title: string): string {
       .replace(/\s+/g, " ")
       .trim(),
   ).toLowerCase();
-}
-
-/** `draft` with its first body H1 spelled `title`, when that H1 reads as the
- *  same title modulo typography ({@link titleMatchKey}); otherwise unchanged. */
-function pinBodyH1(draft: string, title: string): string {
-  const lines = draft.split("\n");
-  let i = 0;
-  if (lines[0]?.trim() === "---") {
-    i = lines.findIndex((l, n) => n > 0 && l.trim() === "---") + 1;
-    if (i === 0) return draft;
-  }
-  for (; i < lines.length; i++) {
-    const h1 = /^ {0,3}# +(.*?)(?: +#+)? *$/.exec(lines[i]!);
-    if (!h1) continue;
-    if (titleMatchKey(h1[1]!) === titleMatchKey(title)) lines[i] = `# ${title}`;
-    return lines.join("\n");
-  }
-  return draft;
 }
 
 /**
@@ -923,13 +898,10 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
         // spelling is the one that was chosen. Take it for the filename and pin it
         // into the frontmatter, or the page still lands under a title they never
         // typed (the silent rename this check exists to stop, one fold weaker).
-        const exact = input.titleExact?.trim();
-        const chosen = exact && titleMatchKey(exact) === titleMatchKey(overrideTitle) ? exact : overrideTitle;
-        if (title !== chosen) {
-          title = chosen;
-          draftText = pinFrontmatterTitle(draftText, chosen);
+        if (title !== overrideTitle) {
+          title = overrideTitle;
+          draftText = pinFrontmatterTitle(draftText, overrideTitle);
         }
-        if (chosen === exact) draftText = pinBodyH1(draftText, chosen);
       }
 
       if (update) {

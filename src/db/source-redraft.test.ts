@@ -247,20 +247,6 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
     expect(out).toMatchObject({ outcome: "drafted", targetPath: "life/sources/Old Title.mdx" });
   });
 
-  // Round 2: the override is sanitized for the prompt (quotes stripped), but
-  // Redraft must not retitle the page it replaces.
-  const QUOTED = 'Stoic Morning Priming and the "Meet Resistance" Statement';
-  for (const reply of ["Stoic Morning Priming and the Meet Resistance Statement", "Stoic Morning Priming and the “Meet Resistance” Statement"]) {
-    test(`a quoted title is kept verbatim in the frontmatter and the H1 (model replied ${reply})`, async () => {
-      const old = await seedOld(undefined, { draft: page(QUOTED) });
-      const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page(reply) });
-      expect(out).toMatchObject({ outcome: "drafted", targetPath: "life/sources/Stoic Morning Priming and the Meet Resistance Statement.mdx" });
-      const fresh = (await getWikiProposalById((out as { proposalId: string }).proposalId))!;
-      expect(fresh.draft).toContain(`\ntitle: ${QUOTED}\n`);
-      expect(fresh.draft).toContain(`\n# ${QUOTED}\n`);
-    });
-  }
-
   // Item 7: the stored source title comes from the doc, not from the old row
   // (which stored the old PAGE title when no capture title was known).
   test("the new row's source title is the doc's own title", async () => {
