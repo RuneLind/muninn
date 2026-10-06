@@ -847,6 +847,27 @@ describe("the reindex-window memory", () => {
       off();
     }
   });
+
+  test("a forked re-run announces the SIBLING huginn wrote, though the job fails", async () => {
+    // The sibling exists in the collection now; without the announcement a
+    // paste of the same video inside the reindex window captures it a third time.
+    const sibling = "ai/general/A Talk About Things (2).md";
+    const seen: Array<[string, string, string]> = [];
+    const off = registerRecentIngestSink("youtube", (videoId, documentId, url) => {
+      seen.push([videoId, documentId, url]);
+    });
+    try {
+      const { deps } = makeDeps(youtubeDoc(), {
+        ingestAnswer: { ok: true, status: 200, data: { file_path: sibling } },
+      });
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      await settle();
+      expect(getJob(String(res.json.job_id))!.status).toBe("error");
+      expect(seen).toEqual([[VIDEO_ID, sibling, `https://www.youtube.com/watch?v=${VIDEO_ID}`]]);
+    } finally {
+      off();
+    }
+  });
 });
 
 describe("the job", () => {

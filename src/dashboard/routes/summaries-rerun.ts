@@ -700,6 +700,12 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       ingest: deps.ingest,
     });
     if (!saved.ok) {
+      // A fork still put a document in the collection: the sibling. The
+      // reindex-window memory has to see it, or a paste of the same video right
+      // after captures it again.
+      if (saved.code === "forked" && saved.siblingDocId && videoId) {
+        notifyCaptureIngest(vertical.id, videoId, saved.siblingDocId, url);
+      }
       log.warn("Re-run {jobId} of {docId} was not saved ({code}): {error}", {
         jobId,
         docId: input.docId,
