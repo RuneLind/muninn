@@ -655,21 +655,23 @@ export function sumArticleLibraryScript(): string {
       var pop = rerunMenuEl();
       if (!pop) return;
       pop.textContent = '';
-      var titleBad = opts.titleRoundTrip && opts.titleRoundTrip.ok === false
-        ? (opts.titleRoundTrip.reason || 'This document cannot be re-run in place.')
+      // The server's save preflight: no url, no category, or a title that does
+      // not round-trip — each a save that would fork rather than replace.
+      var saveRefusal = opts.saveable && opts.saveable.ok === false
+        ? (opts.saveable.reason || 'This document cannot be re-run in place.')
         : '';
-      var blocked = !opts.hasTranscript || !!titleBad || _rerunBusy;
+      var blocked = !opts.hasTranscript || !!saveRefusal || _rerunBusy;
       // The kind the run uses when the document names none — what "Same
       // settings again" already offers, so it is not offered a second time.
       var effectiveKind = opts.storedKind || opts.defaultKind;
       pop.appendChild(rerunMenuItem(rerunSameLabel(opts), function() {
         startRerun({});
-      }, { disabled: blocked, title: titleBad }));
+      }, { disabled: blocked, title: saveRefusal }));
       (opts.kinds || []).forEach(function(k) {
         if (k.id === effectiveKind) return;
         pop.appendChild(rerunMenuItem('As ' + k.label, function() {
           startRerun({ kind: k.id });
-        }, { disabled: blocked, title: titleBad }));
+        }, { disabled: blocked, title: saveRefusal }));
       });
       pop.appendChild(rerunMenuRule());
       // Full re-fetch is disabled on every vertical today (the server answers
@@ -692,7 +694,7 @@ export function sumArticleLibraryScript(): string {
         disabled: !hasPromptUrl,
         title: hasPromptUrl ? '' : 'This document stores no URL, so there is no prompt snapshot to look up.',
       }));
-      if (titleBad) pop.appendChild(rerunMenuNote(titleBad));
+      if (saveRefusal) pop.appendChild(rerunMenuNote(saveRefusal));
       if (!opts.hasTranscript) {
         pop.appendChild(rerunMenuNote('This summary stored no transcript. Re-running needs one; a full re-fetch is a follow-up.'));
       } else {

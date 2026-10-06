@@ -30,22 +30,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   registerSummariesRerunRoutes,
-  readStoredCapture,
-  titleFromDocId,
-  categoryFromDocId,
   listKeptFrames,
-  extraTagsFromStored,
-  titleRoundTripRefusal,
-  TITLE_ROUND_TRIP_MAX,
   FULL_RERUN_UNSUPPORTED,
   type SummariesRerunDeps,
   type RerunDocument,
 } from "./summaries-rerun.ts";
 import {
+  readStoredCapture,
+  titleFromDocId,
+  categoryFromDocId,
+  extraTagsFromStored,
+  titleRoundTripRefusal,
+} from "../../summaries/summary-save.ts";
+import { HUGINN_FILENAME_MAX } from "../../summaries/huginn-filename.ts";
+import {
   rerunLatchBudgetMs,
   RERUN_LATCH_SLACK_MS,
 } from "./summaries-rerun.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
+import { SummarySaveClaims } from "../../summaries/summary-save.ts";
+import type { SummaryIngestResponse } from "../../summaries/summarizer-shared.ts";
 import { buildShortVideoSystemPrompt } from "../../video/short-video-prompt.ts";
 import { shortVideoCaptureKinds, SHORT_VIDEO_THINKING } from "../../video/short-video-kinds.ts";
 import { TIKTOK_SPEC } from "../../tiktok/summarizer.ts";
@@ -121,6 +125,9 @@ function makeDeps(
     stall?: boolean;
     /** The single-flight claim's own bound, so the EXPIRY is drivable. */
     latchBudgetMs?: number;
+    /** What the blocking ingest answers; default a write of `DOC_ID`. */
+    ingestAnswer?: SummaryIngestResponse;
+    claims?: SummarySaveClaims;
   } = {},
 ): { deps: SummariesRerunDeps; rec: Recorded } {
   const rec: Recorded = { ingests: [], prompts: [] };
@@ -128,8 +135,11 @@ function makeDeps(
     fetchRawDoc: async (): Promise<RerunDocument | null> => (raw === null ? null : { raw }),
     ingest: async (o) => {
       rec.ingests.push({ path: o.ingestPath, body: o.body });
-      o.onIngested?.({ filePath: DOC_ID });
+      return opts.ingestAnswer ?? { ok: true, status: 200, data: { file_path: DOC_ID } };
     },
+    // A registry of its own per test: a stalled run must not pin the next
+    // test's document in the process-wide one.
+    claims: opts.claims ?? new SummarySaveClaims(),
     oneShot: (async (o: Record<string, unknown>) => {
       rec.prompts.push({
         system: o.systemPrompt as string,
@@ -433,6 +443,14 @@ describe("refusals", () => {
     expect(res.json).not.toHaveProperty("job_id");
   });
 
+  test("an EMPTY appendix is no transcript either: 400, no job", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc({ transcript: null, body: "The stored summary.\n\n## Transcript\n\n" }));
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect([res.status, res.json.code]).toEqual([400, "no_transcript"]);
+    await settle();
+    expect(rec.prompts).toHaveLength(0);
+  });
+
   test("an unknown source is 400 before anything is read", async () => {
     const { deps } = makeDeps(youtubeDoc());
     const res = await post(appFor(deps), { source: "article", docId: DOC_ID });
@@ -537,12 +555,12 @@ describe("the title round trip", () => {
   // it writes a second document. Refused before any model spend.
   test("a clean stem passes, and one PAST the cap does not", () => {
     expect(titleRoundTripRefusal("A Talk About Things")).toBeNull();
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX - 1))).toBeNull();
+    expect(titleRoundTripRefusal("x".repeat(HUGINN_FILENAME_MAX - 1))).toBeNull();
     // At the cap huginn truncates nothing, so this really is a fixed point —
     // the first cut of the guard refused it anyway, on a symptom rather than
     // the rule. Past the cap it is not.
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX))).toBeNull();
-    expect(titleRoundTripRefusal("x".repeat(TITLE_ROUND_TRIP_MAX + 40))).toContain("second document");
+    expect(titleRoundTripRefusal("x".repeat(HUGINN_FILENAME_MAX))).toBeNull();
+    expect(titleRoundTripRefusal("x".repeat(HUGINN_FILENAME_MAX + 40))).toContain("second document");
   });
 
   test("a stem ending in whitespace is refused — a tab as much as a space", () => {
@@ -565,13 +583,13 @@ describe("the title round trip", () => {
   test("a 200-CODE-POINT stem of astral characters is accepted", () => {
     // 200 code points, 400 UTF-16 units: a `String.length` port refuses this,
     // and huginn does not touch it.
-    const astral = "\u{1F600}".repeat(TITLE_ROUND_TRIP_MAX);
-    expect(astral.length).toBe(TITLE_ROUND_TRIP_MAX * 2);
+    const astral = "\u{1F600}".repeat(HUGINN_FILENAME_MAX);
+    expect(astral.length).toBe(HUGINN_FILENAME_MAX * 2);
     expect(titleRoundTripRefusal(astral)).toBeNull();
   });
 
   test("the POST answers 409 and spends nothing", async () => {
-    const longTitle = "L".repeat(TITLE_ROUND_TRIP_MAX + 5);
+    const longTitle = "L".repeat(HUGINN_FILENAME_MAX + 5);
     const { deps, rec } = makeDeps(youtubeDoc());
     const res = await post(appFor(deps), { source: "youtube", docId: `ai/general/${longTitle}.md` });
     expect(res.status).toBe(409);
@@ -581,21 +599,34 @@ describe("the title round trip", () => {
     expect(rec.ingests.length).toBe(0);
   });
 
-  test("the options payload carries the same verdict, so the menu can disable the items", async () => {
-    const longTitle = "L".repeat(TITLE_ROUND_TRIP_MAX + 5);
-    const app = appFor(makeDeps(youtubeDoc()).deps);
-    const bad = (await (
-      await app.request(
-        `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(`ai/general/${longTitle}.md`)}`,
-      )
-    ).json()) as { titleRoundTrip: { ok: boolean; reason: string | null } };
-    expect(bad.titleRoundTrip.ok).toBe(false);
-    expect(bad.titleRoundTrip.reason).toContain("second document");
+  test("the options payload carries the whole save preflight, so the menu can disable the items", async () => {
+    type Saveable = { saveable: { ok: boolean; code: string | null; reason: string | null } };
+    const options = async (raw: string, docId: string): Promise<Saveable> =>
+      (await (
+        await appFor(makeDeps(raw).deps).request(
+          `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(docId)}`,
+        )
+      ).json()) as Saveable;
 
-    const good = (await (
-      await app.request(`/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`)
-    ).json()) as { titleRoundTrip: { ok: boolean; reason: string | null } };
-    expect(good.titleRoundTrip).toEqual({ ok: true, reason: null });
+    const longTitle = "L".repeat(HUGINN_FILENAME_MAX + 5);
+    const badTitle = await options(youtubeDoc(), `ai/general/${longTitle}.md`);
+    expect(badTitle.saveable.ok).toBe(false);
+    expect(badTitle.saveable.code).toBe("title_not_round_trippable");
+    expect(badTitle.saveable.reason).toContain("second document");
+
+    // The two refusals the title check alone never saw: the POST answers 400 on
+    // both, so the menu must not offer them as enabled items.
+    const pasted = youtubeDoc().replace(
+      `url: "https://www.youtube.com/watch?v=${VIDEO_ID}"`,
+      'url: "An article pasted into the url field, all of it."',
+    );
+    const noUrl = await options(pasted, DOC_ID);
+    expect([noUrl.saveable.ok, noUrl.saveable.code]).toEqual([false, "no_url"]);
+    const noCategory = await options(youtubeDoc(), "A Talk About Things.md");
+    expect([noCategory.saveable.ok, noCategory.saveable.code]).toEqual([false, "no_category"]);
+
+    const good = await options(youtubeDoc(), DOC_ID);
+    expect(good.saveable).toEqual({ ok: true, code: null, reason: null });
   });
 });
 
@@ -637,6 +668,80 @@ describe("single flight", () => {
     expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
     await settle();
     expect(rec.prompts.length).toBe(2);
+  });
+});
+
+describe("the shared save path", () => {
+  test("a re-run's own save never answers 409 to itself", async () => {
+    // The route claims before the model call and the save REQUIRES that claim:
+    // a save that claimed a second time would find its own run holding the key.
+    const { deps, rec } = makeDeps(youtubeDoc());
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(200);
+    await settle();
+    expect(rec.ingests).toHaveLength(1);
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.status).toBe("complete");
+  });
+
+  test("a second claimant during a running re-run gets in_flight, and the claim is the shared one", async () => {
+    const claims = new SummarySaveClaims();
+    const { deps } = makeDeps(youtubeDoc(), { stall: true, claims });
+    const app = appFor(deps);
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    await settle();
+    // Another write route (PR 2b's append/apply) claims from the same registry.
+    expect(claims.claim("youtube", DOC_ID, 1_000)).toBeNull();
+    claims.clear();
+  });
+
+  test("a document another writer holds is 409 in_flight before any model call", async () => {
+    const claims = new SummarySaveClaims();
+    const held = claims.claim("youtube", DOC_ID, 1_000)!;
+    const { deps, rec } = makeDeps(youtubeDoc(), { claims });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe("in_flight");
+    await settle();
+    expect(rec.prompts).toHaveLength(0);
+    claims.release(held);
+  });
+
+  test("a failed ingest FAILS the job (write_failed), where it used to only warn", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc(), {
+      ingestAnswer: { ok: false, status: 422, error: "Ingest returned 422: boom", mayHaveWritten: false },
+    });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    expect(rec.ingests).toHaveLength(1);
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.status).toBe("error");
+    expect(job.error).toContain("422");
+  });
+
+  test("an ingest that wrote a sibling FAILS the job (forked) and names the sibling", async () => {
+    const sibling = "ai/general/A Talk About Things (2).md";
+    const { deps } = makeDeps(youtubeDoc(), {
+      ingestAnswer: { ok: true, status: 200, data: { file_path: sibling } },
+    });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.status).toBe("error");
+    expect(job.error).toContain(sibling);
+  });
+
+  test("a url that is not an http(s) URL is no_url before a job exists", async () => {
+    const raw = youtubeDoc().replace(
+      `url: "https://www.youtube.com/watch?v=${VIDEO_ID}"`,
+      'url: "An article pasted into the url field, all of it."',
+    );
+    const { deps, rec } = makeDeps(raw);
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(400);
+    expect(res.json.code).toBe("no_url");
+    await settle();
+    expect(rec.prompts).toHaveLength(0);
   });
 });
 
@@ -748,6 +853,69 @@ describe("copyKeptFrame", () => {
   });
 });
 
+describe("the save's warns", () => {
+  async function capturing(run: (records: LogRecord[]) => Promise<void>): Promise<void> {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
+    try {
+      await run(records);
+    } finally {
+      await configure({
+        sinks: {},
+        loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }],
+        reset: true,
+      });
+    }
+  }
+  const warnsFor = (records: LogRecord[], docId: string) =>
+    records.filter((r) => r.level === "warning" && r.properties.docId === docId);
+
+  test("a failed save warns ONCE, and that warn names the job", async () => {
+    await capturing(async (records) => {
+      const { deps } = makeDeps(youtubeDoc(), {
+        ingestAnswer: { ok: false, status: 422, error: "Ingest returned 422: boom", mayHaveWritten: false },
+      });
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      await settle();
+      const warns = warnsFor(records, DOC_ID);
+      expect(warns).toHaveLength(1);
+      expect(warns[0]!.properties.jobId).toBe(res.json.job_id);
+    });
+  });
+
+  test("the truncation warn names the job too", async () => {
+    await capturing(async (records) => {
+      const docId = "ai/general/A long flat one.md";
+      const raw = [
+        "---",
+        `url: "${TIKTOK_URL}"`,
+        'category: "ai/general"',
+        "---",
+        "",
+        "Body.",
+        "",
+        "## Transcript",
+        "",
+        `${"a".repeat(TRANSCRIPT_MAX_BYTES + 10)}\nand a second line.`,
+        "",
+      ].join("\n");
+      const { deps } = makeDeps(raw, { ingestAnswer: { ok: true, status: 200, data: { file_path: docId } } });
+      const res = await post(appFor(deps), { source: "tiktok", docId });
+      await settle();
+      const truncated = warnsFor(records, docId).find((r) => "maxBytes" in r.properties);
+      expect(truncated).toBeDefined();
+      expect(truncated!.properties.jobId).toBe(res.json.job_id);
+    });
+  });
+});
+
 describe("the reindex-window memory", () => {
   test("a finished re-run announces its document to the vertical's sink", async () => {
     const seen: Array<[string, string, string]> = [];
@@ -759,6 +927,27 @@ describe("the reindex-window memory", () => {
       await post(appFor(deps), { source: "youtube", docId: DOC_ID });
       await settle();
       expect(seen).toEqual([[VIDEO_ID, DOC_ID, `https://www.youtube.com/watch?v=${VIDEO_ID}`]]);
+    } finally {
+      off();
+    }
+  });
+
+  test("a forked re-run announces the SIBLING huginn wrote, though the job fails", async () => {
+    // The sibling exists in the collection now; without the announcement a
+    // paste of the same video inside the reindex window captures it a third time.
+    const sibling = "ai/general/A Talk About Things (2).md";
+    const seen: Array<[string, string, string]> = [];
+    const off = registerRecentIngestSink("youtube", (videoId, documentId, url) => {
+      seen.push([videoId, documentId, url]);
+    });
+    try {
+      const { deps } = makeDeps(youtubeDoc(), {
+        ingestAnswer: { ok: true, status: 200, data: { file_path: sibling } },
+      });
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      await settle();
+      expect(getJob(String(res.json.job_id))!.status).toBe("error");
+      expect(seen).toEqual([[VIDEO_ID, sibling, `https://www.youtube.com/watch?v=${VIDEO_ID}`]]);
     } finally {
       off();
     }
@@ -1337,7 +1526,11 @@ describe("the single-flight claim is bounded", () => {
     const rec: Recorded = { ingests: [], prompts: [] };
     const deps: SummariesRerunDeps = {
       fetchRawDoc: async () => ({ raw: youtubeDoc() }),
-      ingest: async (o) => { rec.ingests.push({ path: o.ingestPath, body: o.body }); },
+      ingest: async (o) => {
+        rec.ingests.push({ path: o.ingestPath, body: o.body });
+        return { ok: true, status: 200, data: { file_path: DOC_ID } };
+      },
+      claims: new SummarySaveClaims(),
       oneShot: (async (o: Record<string, unknown>) => {
         rec.prompts.push({
           system: o.systemPrompt as string,
@@ -1372,6 +1565,29 @@ describe("the single-flight claim is bounded", () => {
     expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
     for (const open of gates) open();
     await settle();
+  });
+
+  test("a run that outlived its claim with NO rival still saves", async () => {
+    // The budget bounds how long a stalled run keeps OTHER writers out; it is
+    // not a deadline for the run itself. With nobody else on the key, a late
+    // finish is written rather than thrown away as `in_flight`.
+    const claims = new SummarySaveClaims();
+    const { deps, rec } = makeDeps(youtubeDoc(), { latchBudgetMs: 20, claims });
+    const slow = deps.oneShot;
+    deps.oneShot = (async (o: Parameters<typeof slow>[0]) => {
+      await Bun.sleep(50);
+      return slow(o);
+    }) as typeof slow;
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(200);
+    await Bun.sleep(80);
+    await settle();
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.error ?? "").toBe("");
+    expect(job.status).toBe("complete");
+    expect(rec.ingests).toHaveLength(1);
+    // The run's `finally` released the re-taken key.
+    expect(claims.isHeld("youtube", DOC_ID)).toBe(false);
   });
 
   test("the default bound outlives the model call it guards", () => {

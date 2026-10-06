@@ -382,7 +382,7 @@ const READY_OPTS = {
   ],
   storedKind: "standard",
   defaultKind: "standard",
-  titleRoundTrip: { ok: true, reason: null },
+  saveable: { ok: true, code: null, reason: null },
   framesKept: 0,
   promptUrl: "https://www.youtube.com/watch?v=abcdefghijk",
   full: { supported: false, reason: "A full re-fetch is not available yet: …" },
@@ -426,10 +426,10 @@ describe("renderRerunMenu", () => {
     expect(notes).not.toContain("can only be re-run by downloading the source again");
   });
 
-  test("a title that does not round-trip disables the run items and carries the reason", () => {
+  test("a document the save would refuse disables the run items and carries the reason", () => {
     const h = loadRerun();
-    const reason = "This document's file name is 240 characters…";
-    h.renderRerunMenu({ ...READY_OPTS, titleRoundTrip: { ok: false, reason } });
+    const reason = "The stored document's url is not an http(s) URL…";
+    h.renderRerunMenu({ ...READY_OPTS, saveable: { ok: false, code: "no_url", reason } });
     const items = menuItems(h.menu);
     expect(items[0]).toEqual({ label: "Same settings again", disabled: true, title: reason });
     expect(items[1]!.disabled).toBe(true);

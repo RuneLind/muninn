@@ -459,8 +459,9 @@ const INGEST_TIMEOUT_MAX_MS = 120_000;
  *
  * 15 s is a fine budget for the 6 KB summary this endpoint was written for and
  * a coin flip for the 2 MiB one a windowed `## Transcript` produces: huginn
- * writes the document and reindexes before it answers, and an abort that drops
- * the RESPONSE loses the stored doc id — the only place it ever appears, and
+ * writes the document and runs a similarity search before it answers (the
+ * reindex is a background task that runs after the response), and an abort
+ * that drops the RESPONSE loses the stored doc id — the only place it ever appears, and
  * what the verticals' reindex-window dedup maps are keyed on. The document is
  * written either way, so the timeout does not undo the ingest; it just makes
  * this process forget that it happened.
@@ -475,6 +476,105 @@ export function ingestTimeoutFor(bodyBytes: number): number {
   return Math.min(INGEST_TIMEOUT_MAX_MS, scaled);
 }
 
+/** What one ingest POST answered — returned rather than logged. */
+export type SummaryIngestResponse =
+  /** A 2xx whose body parsed as JSON. `data` is whatever it parsed to: `null`
+   *  for an empty body (Bun's `res.json()` over a socket), or any JSON value. */
+  | { ok: true; status: number; data: unknown }
+  | {
+      ok: false;
+      /** The HTTP status, or `null` when no response arrived. A 2xx here is an
+       *  answer whose body could not be read or parsed. */
+      status: number | null;
+      error: string;
+      /** The request went out and the document may be on disk: a 5xx, a
+       *  timeout, or a 2xx whose body was lost. `false` for a 4xx and for a
+       *  request that never reached huginn. */
+      mayHaveWritten: boolean;
+    };
+
+/** The ingest seam: one POST, its answer returned. */
+export type SummaryIngest = (opts: {
+  knowledgeApiUrl: string;
+  ingestPath: string;
+  body: Record<string, unknown>;
+  timeoutMs?: number;
+}) => Promise<SummaryIngestResponse>;
+
+function isTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+}
+
+/**
+ * One POST to a huginn `<vertical>/ingest`, its answer RETURNED: the blocking
+ * form, which the shared save (`summary-save.ts`) waits on, and the one
+ * {@link ingestSummary} is expressed through. Bounded by
+ * {@link ingestTimeoutFor} over the serialized body's bytes unless the caller
+ * passes a budget; the budget covers the body read too.
+ *
+ * `mayHaveWritten` follows huginn's ingest route (`main/routes/ingest.py`):
+ * every 4xx it sends is raised before the write, while a 500 can follow it (the
+ * similarity search and the reindex enqueue run after the write, inside the
+ * same error wrapper).
+ */
+export const postSummaryIngest: SummaryIngest = async (opts) => {
+  const payload = JSON.stringify(opts.body);
+  // BYTES, not code units: the budget bounds what goes on the WIRE, and a
+  // windowed `## Transcript` of a Japanese or Norwegian talk is mostly
+  // multi-byte — `.length` would hand a 3 MB POST the budget of a 1 MB one.
+  const payloadBytes = Buffer.byteLength(payload);
+  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(payloadBytes);
+  // Debug rather than info: one line per ingest, and the only place the
+  // resolved budget is visible (an AbortSignal does not report its deadline).
+  log.debug("Ingesting {bytes} bytes into {path} with a {timeoutMs} ms budget", {
+    bytes: payloadBytes,
+    path: opts.ingestPath,
+    timeoutMs,
+  });
+  let res: Response;
+  try {
+    res = await fetch(`${opts.knowledgeApiUrl}${opts.ingestPath}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    // A timeout aborts the WAIT, not huginn: the request was sent, so the
+    // document may be on disk.
+    if (isTimeout(err)) {
+      return { ok: false, status: null, error: `Ingest timed out after ${timeoutMs} ms`, mayHaveWritten: true };
+    }
+    return {
+      ok: false,
+      status: null,
+      error: `Ingest failed: ${err instanceof Error ? err.message : String(err)}`,
+      mayHaveWritten: false,
+    };
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return {
+      ok: false,
+      status: res.status,
+      error: `Ingest returned ${res.status}${text ? `: ${text.slice(0, 300)}` : ""}`,
+      mayHaveWritten: res.status >= 500,
+    };
+  }
+  try {
+    return { ok: true, status: res.status, data: await res.json() };
+  } catch (err) {
+    return {
+      ok: false,
+      status: res.status,
+      error: isTimeout(err)
+        ? `Ingest answered ${res.status}, and reading its response body timed out after ${timeoutMs} ms`
+        : `Ingest answered ${res.status} with a body that is not JSON`,
+      mayHaveWritten: true,
+    };
+  }
+};
+
 /**
  * Best-effort POST of a finished summary to a Huginn `<vertical>/ingest`
  * endpoint, shared by every capture summarizer. A failure
@@ -482,8 +582,10 @@ export function ingestTimeoutFor(bodyBytes: number): number {
  * logs a warn and skips the "similar" enrichment. On success, any returned
  * `similar` articles are handed back via `onSimilar`.
  *
- * (anthropic's ingest is intentionally NOT routed through this: it's blocking,
- * fails the job on a non-ok response, and returns a doc `file_path`.)
+ * The POST itself is {@link postSummaryIngest}, whose blocking answer the
+ * shared save path reads. anthropic's ingest still posts inline (blocking, it
+ * fails the job on a non-ok response); moving it onto `postSummaryIngest` is a
+ * follow-up.
  */
 export async function ingestSummary(opts: {
   knowledgeApiUrl: string;
@@ -505,45 +607,35 @@ export async function ingestSummary(opts: {
   /** Abort timeout. Absent ⇒ {@link ingestTimeoutFor} over the serialized body. */
   timeoutMs?: number;
 }): Promise<void> {
-  const payload = JSON.stringify(opts.body);
-  // BYTES, not code units: the budget bounds what goes on the WIRE, and a
-  // windowed `## Transcript` of a Japanese or Norwegian talk is mostly
-  // multi-byte — `.length` would hand a 3 MB POST the budget of a 1 MB one.
-  const payloadBytes = Buffer.byteLength(payload);
-  const timeoutMs = opts.timeoutMs ?? ingestTimeoutFor(payloadBytes);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  // Debug rather than info: one line per capture, and the only place the
-  // resolved budget is visible (an AbortSignal does not report its deadline).
-  log.debug("Ingesting {bytes} bytes into {path} with a {timeoutMs} ms budget", {
-    bytes: payloadBytes,
-    path: opts.ingestPath,
-    timeoutMs,
+  const res = await postSummaryIngest({
+    knowledgeApiUrl: opts.knowledgeApiUrl,
+    ingestPath: opts.ingestPath,
+    body: opts.body,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
   });
-  try {
-    const res = await fetch(`${opts.knowledgeApiUrl}${opts.ingestPath}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (res.ok) {
-      const data = (await res.json()) as { similar?: SimilarArticle[]; file_path?: string };
-      if (data.similar && data.similar.length > 0) {
-        opts.onSimilar(data.similar);
-      }
-      if (opts.onIngested) {
-        opts.onIngested({
-          filePath: typeof data.file_path === "string" ? data.file_path : undefined,
-        });
-      }
-    } else {
+  if (!res.ok) {
+    // A non-2xx status is the only "returned" warn; a lost or unreadable body
+    // warns as a failure, as it did when this function read the body itself.
+    if (res.status !== null && (res.status < 200 || res.status > 299)) {
       log.warn("Knowledge API ingest returned {status}", { status: res.status });
+    } else {
+      log.warn("Knowledge API ingest failed: {error}", { error: res.error });
+    }
+    return;
+  }
+  // The callbacks run inside the try, and a `null` body throws here, so neither
+  // reaches the capture job: best-effort means nothing here can fail it.
+  try {
+    const data = res.data as { similar?: SimilarArticle[]; file_path?: string };
+    if (data.similar && data.similar.length > 0) {
+      opts.onSimilar(data.similar);
+    }
+    if (opts.onIngested) {
+      opts.onIngested({
+        filePath: typeof data.file_path === "string" ? data.file_path : undefined,
+      });
     }
   } catch (err) {
-    clearTimeout(timeout);
     log.warn("Knowledge API ingest failed: {error}", {
       error: err instanceof Error ? err.message : String(err),
     });
