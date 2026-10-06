@@ -756,6 +756,16 @@ describe("fix round 2: apply takes whole claims (D5 on the apply side)", () => {
     const { claimEdits: _drop, ...bare } = EDIT_3;
     const res = await apply(a, p, [bare]);
     expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("bad_edits");
+    expect(ingests).toHaveLength(0);
+  });
+
+  test("a claim whose edits anchor only in part: 400 partial_claim, nothing written", async () => {
+    const a = app();
+    const p = await proposeHalves(a);
+    const res = await apply(a, p, [HALF_A, { ...HALF_B, old: "Not in the summary." }]);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("partial_claim");
     expect(ingests).toHaveLength(0);
   });
 

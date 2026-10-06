@@ -642,3 +642,20 @@ test("a claim split into two edits is one checkbox, and Apply writes both halves
   expect(file).toContain("The video says adults need only 4 hours of sleep a night; sources say adults need 7 or more hours");
   expect(file).toContain(CLAIM_2);
 });
+
+test("unchecking a split claim leaves both its halves out", async ({ page }) => {
+  await reset();
+  completionEdits = [
+    { claimIndex: 1, verdict: "❌", old: "The video says adults need 4 hours", new: "The video says adults need only 4 hours", reason: "first half" },
+    { claimIndex: 1, verdict: "❌", old: "of sleep a night.", new: "of sleep a night; sources say adults need 7 or more hours ([cdc.gov](https://www.cdc.gov/sleep)).", reason: "second half" },
+    DEFAULT_EDITS[1]!,
+  ];
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await fc.locator('.sum-fc-int-cb[data-edit-idxs="0,1"]').uncheck();
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await expect(fc.locator(".sum-fc-wb-msg.ok")).toContainText("Integrated 1 correction");
+  expect(file).toContain(CLAIM_1);
+  expect(file).toContain(EDIT_2_NEW);
+});

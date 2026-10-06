@@ -281,6 +281,13 @@ describe("fix round 2: attribution is judged per claim, over its edits in docume
     new: "and, the video says, unnamed objects dated to ~300 million years or earlier that scientists can't even classify; sources say such objects are unconfirmed candidates ([scientificamerican.com](https://www.scientificamerican.com/x))",
   };
 
+  test("the join is in document order: an attribution that spans two edits reads only that way", async () => {
+    const body = "Alpha one. Beta two.";
+    const first = { claimIndex: 2, verdict: "❌", old: "Alpha one.", new: "Alpha one, as the video" };
+    const second = { claimIndex: 2, verdict: "❌", old: "Beta two.", new: "says, beta two; sources say three." };
+    expect((await propose(body, [second, first], [2])).outcomes.map((o) => o.applied)).toEqual([true, true]);
+  });
+
   test("JWST claim 4: the 'per the video' edit is kept with the attributed one", async () => {
     const r = await propose(JWST, [JWST_PER, JWST_SAYS], [4]);
     expect(r.outcomes.map((o) => o.applied)).toEqual([true, true]);
