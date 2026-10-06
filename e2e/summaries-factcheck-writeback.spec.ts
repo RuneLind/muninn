@@ -659,3 +659,19 @@ test("unchecking a split claim leaves both its halves out", async ({ page }) => 
   expect(file).toContain(CLAIM_1);
   expect(file).toContain(EDIT_2_NEW);
 });
+
+test("a re-check saved elsewhere during Apply: the outcome survives the re-read that brings the new result", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
+  ingestDelayMs = 2000;
+  const n = ingests.length;
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await expect.poll(() => ingests.length).toBe(n + 1);
+  await sql!`UPDATE summary_factchecks SET created_at = now() WHERE doc_id = ${DOC}`;
+  await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now", { timeout: 15_000 });
+  await expect(fc.locator(".sum-fc-wb-msg.error")).toContainText("re-checked during apply");
+  await expect(page.locator("#sumArticleMain")).toContainText("sources say adults need 7 or more hours");
+});
