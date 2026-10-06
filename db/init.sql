@@ -813,7 +813,7 @@ CREATE TABLE source_draft_attempts (
   title          TEXT,
   colliding_path TEXT,                    -- existing page that blocked the draft
   proposal_id    UUID,                    -- set on `drafted` (deliberately no FK)
-  trigger_source TEXT NOT NULL DEFAULT 'capture',  -- capture | run-now | backlog | doc
+  trigger_source TEXT NOT NULL DEFAULT 'capture',  -- capture | run-now | backlog | doc | redraft
   attempted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (bot_name, collection, doc_id)
 );

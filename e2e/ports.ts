@@ -260,6 +260,9 @@ export const E2E_PORTS = {
   // The doc panel's ✓ Fact check section and the rail's fact-check badge.
   "summaries-factcheck": 3105,
   "summaries-factcheck/huginn": 3106,
+  // 3120 rather than the next free 31xx: parallel lanes are adding specs.
+  "gardener-factcheck-flag": 3120,
+  "gardener-factcheck-flag/fake": 8780,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import { normalizeFactVerdict } from "../format/markdown-ast.ts";
 import { parseSavedTranscriptCheck, type SavedTranscriptCheck } from "../summaries/transcript-check-saved.ts";
 import { getLog } from "../logging.ts";
 
@@ -197,4 +198,65 @@ export async function listSummaryFactcheckBadges(): Promise<SummaryFactcheckBadg
     FROM summary_factchecks
   `;
   return rows.map((r) => ({ collection: r.collection, docId: r.doc_id, bad: r.bad, total: r.total }));
+}
+
+/**
+ * The ONE definition of a correctable claim: a saved claim whose verdict is
+ * ❌ (`bad`) or ⚠️ (`warn`). The gate's counts and the drafter's rider both use
+ * it, so a claim the rider carries is a claim the gate counted. Takes `unknown`
+ * because a JSONB value is not guaranteed to be the array it was written as.
+ */
+export function correctableVerdict(claim: unknown): "bad" | "warn" | null {
+  if (!claim || typeof claim !== "object") return null;
+  const verdict = (claim as { verdict?: unknown }).verdict;
+  if (typeof verdict !== "string") return null;
+  const v = normalizeFactVerdict(verdict);
+  return v === "bad" || v === "warn" ? v : null;
+}
+
+/** ❌ and ⚠️ counts over a saved `claims` value; anything but an array counts nothing. */
+export function countCorrectableClaims(claims: unknown): { bad: number; warn: number } {
+  const counts = { bad: 0, warn: 0 };
+  if (!Array.isArray(claims)) return counts;
+  for (const c of claims) {
+    const v = correctableVerdict(c);
+    if (v) counts[v]++;
+  }
+  return counts;
+}
+
+/** What the `/wiki/gardener` gate needs to know about one checked document. */
+export interface SummaryFactcheckMark {
+  collection: string;
+  docId: string;
+  /** Epoch ms of the saved check. */
+  checkedAt: number;
+  /** Claims with a ❌ verdict. */
+  bad: number;
+  /** Claims with a ⚠️ verdict. */
+  warn: number;
+  /** sha256 hex of the saved `answer` — which check a draft was built with. */
+  answerSha256: string;
+}
+
+/**
+ * Every checked document's date, ❌/⚠️ counts and answer digest, in ONE query —
+ * the gate's "needs a redraft" flag. The counting runs here rather than in SQL
+ * so it is {@link countCorrectableClaims}, and so one malformed `claims` value
+ * costs its own row's counts instead of failing the query for every row.
+ */
+export async function listSummaryFactcheckMarks(): Promise<SummaryFactcheckMark[]> {
+  const sql = getDb();
+  const rows = await sql<{ collection: string; doc_id: string; created_at: Date | string; claims: unknown; answer_sha256: string }[]>`
+    SELECT collection, doc_id, created_at, claims,
+           encode(sha256(convert_to(answer, 'UTF8')), 'hex') AS answer_sha256
+    FROM summary_factchecks
+  `;
+  return rows.map((r) => ({
+    collection: r.collection,
+    docId: r.doc_id,
+    checkedAt: new Date(r.created_at).getTime(),
+    ...countCorrectableClaims(r.claims),
+    answerSha256: r.answer_sha256,
+  }));
 }

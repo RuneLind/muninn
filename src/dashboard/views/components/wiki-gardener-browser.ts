@@ -70,6 +70,16 @@ interface ProposalView {
   unresolvedLinks?: string[];
   containedLinks?: string[] | null;
   wiring?: WiringPreview | null;
+  /** Saved summary fact-check flags — see `proposalFactcheckFlag`. */
+  factcheck?: {
+    checkedAt: number;
+    bad: number;
+    warn: number;
+    needsRedraft: boolean;
+    missingBlock: boolean;
+  } | null;
+  /** A stale row Redraft replaced: the replacement's id. */
+  replacedBy?: string | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -154,10 +164,13 @@ function cardHtml(p: ProposalView): string {
 
   // Body
   html += '<div class="gard-body">';
-  if (p.status === "stale") {
+  if (p.status === "stale" && p.replacedBy) {
+    html += `<div class="gard-stale-note" data-replaced-by="${esc(p.replacedBy)}">Replaced by a redraft — the new draft for this source is listed separately.</div>`;
+  } else if (p.status === "stale") {
     html +=
       '<div class="gard-stale-note">Target changed since drafting — this proposal was not applied. The topic becomes eligible again on the next weekly gardener run.</div>';
   }
+  html += factcheckNoteHtml(p);
   if (p.rationale) {
     html += `<div class="gard-rationale">${esc(p.rationale)}</div>`;
   }
@@ -184,10 +197,16 @@ function cardHtml(p: ProposalView): string {
   }
   html += "</div>";
 
-  // Actions (draft only)
+  // Actions (draft only). A draft that does not carry its doc's current
+  // fact-check gets no one-click Approve: the reviewer redrafts it (or rejects
+  // it) instead.
   if (isDraft) {
+    const locked = !!p.factcheck?.needsRedraft;
     html += '<div class="gard-actions">';
-    html += `<button class="gard-btn gard-approve" data-action="approve">Approve</button>`;
+    html += locked
+      ? `<button class="gard-btn gard-approve" data-action="approve" data-fc-locked disabled title="Drafted without the current fact-check — redraft it first">Approve</button>`
+      : `<button class="gard-btn gard-approve" data-action="approve">Approve</button>`;
+    if (locked) html += `<button class="gard-btn gard-redraft" data-action="redraft">Redraft</button>`;
     html += `<button class="gard-btn gard-reject" data-action="reject">Reject</button>`;
     html += '<span class="gard-outcome"></span>';
     html += "</div>";
@@ -255,6 +274,20 @@ function groupCardHtml(rows: ProposalView[]): string {
   return html;
 }
 
+/** The card's fact-check note: "drafted without the current fact-check"
+ *  (blocks one-click Approve) or the at-apply "no fact-check block" note
+ *  (never blocks). */
+function factcheckNoteHtml(p: ProposalView): string {
+  const fc = p.factcheck;
+  if (!fc) return "";
+  const date = fmtDate(fc.checkedAt);
+  const counts = [fc.bad ? `${fc.bad} ❌` : "", fc.warn ? `${fc.warn} ⚠️` : ""].filter(Boolean).join(", ");
+  if (fc.needsRedraft) {
+    return `<div class="gard-fc-note" data-fc="needs-redraft">Drafted without the current fact-check (${esc(date)}): the check found ${esc(counts)}. Redraft to carry the corrections and the fact-check block into the page.</div>`;
+  }
+  return `<div class="gard-fc-note info" data-fc="missing-block">The source doc was fact-checked (${esc(date)}), but this draft carries no fact-check block or Fact check section.</div>`;
+}
+
 function render(): void {
   const list = document.getElementById("gardList")!;
   const shown = statusFilter
@@ -286,6 +319,8 @@ function render(): void {
     html += groupCardHtml(allProposals.filter((r) => r.groupKey === p.groupKey));
   }
   list.innerHTML = html;
+  // A Redraft's state lives here, not on the card this render just replaced.
+  for (const id of new Set([...redraftsInFlight, ...redraftNotes.keys()])) paintRedraftState(id);
   // A group's outcome note lives on the card, which this render just replaced.
   // Re-paint whatever the last group action said, or a `Stopped at …` note is
   // wiped by the very reload the stop triggers.
@@ -325,7 +360,60 @@ const JSON_POST: RequestInit = {
   body: "{}",
 };
 
-async function act(id: string, action: "approve" | "reject", card: HTMLElement): Promise<void> {
+type CardAction = "approve" | "reject" | "redraft";
+
+/** Proposals with a Redraft in flight, and the last Redraft answer per
+ *  proposal. Kept outside the DOM so every re-render (a poll, a filter, an
+ *  inspector action) paints them again instead of re-enabling the card. */
+const redraftsInFlight = new Set<string>();
+const redraftNotes = new Map<string, { text: string; kind: "ok" | "err" | "" }>();
+const REDRAFTING = "Redrafting… (a model call, up to a few minutes)";
+
+function cardById(id: string): HTMLElement | null {
+  return document.querySelector(`#gardList .gard-card[data-id="${cssEscape(id)}"]`);
+}
+
+/** Paint one proposal's Redraft state onto its current card, if it is shown. */
+function paintRedraftState(id: string): void {
+  const card = cardById(id);
+  if (!card) return;
+  if (redraftsInFlight.has(id)) {
+    card.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    setOutcome(card, REDRAFTING, "");
+    return;
+  }
+  const note = redraftNotes.get(id);
+  if (!note) return;
+  // A card that is no longer a draft has no action row to carry the note.
+  if (!card.querySelector(".gard-outcome")) {
+    const el = document.createElement("div");
+    el.className = "gard-outcome";
+    (card.querySelector(".gard-body") ?? card).appendChild(el);
+  }
+  setOutcome(card, note.text, note.kind);
+}
+
+/** A response body as JSON, or null when it is not JSON (a proxy's HTML 502). */
+async function jsonOrNull(res: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const data = await res.json();
+    return data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Re-enable a card's buttons after a failed action, except an Approve the
+ *  fact-check flag locked. */
+function unlockButtons(buttons: NodeListOf<Element>): void {
+  buttons.forEach((b) => {
+    if (!(b as HTMLElement).hasAttribute("data-fc-locked")) (b as HTMLButtonElement).disabled = false;
+  });
+}
+
+async function act(id: string, action: CardAction, card: HTMLElement): Promise<void> {
+  if (action === "redraft") return redraft(id);
+  redraftNotes.delete(id);
   const buttons = card.querySelectorAll(".gard-btn");
   buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
   setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
@@ -337,7 +425,7 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
     const data = await res.json();
     if (!res.ok) {
       setOutcome(card, data.error || "Failed (" + res.status + ")", "err");
-      buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+      unlockButtons(buttons);
       return;
     }
     // Update local state + re-render so the status chip + filters reflect the outcome.
@@ -353,8 +441,55 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
     rerenderStrip();
   } catch (err) {
     setOutcome(card, "Network error: " + (err as Error).message, "err");
-    buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+    unlockButtons(buttons);
   }
+}
+
+/**
+ * Redraft one draft: a real model call, then the server's one-transaction
+ * replace. `drafted`, `superseded_meanwhile` and `covered` all mean the rows
+ * on screen are stale, so the list reloads; every other answer leaves the
+ * draft as it was. The answer is kept in `redraftNotes`, so the reload does
+ * not wipe it.
+ */
+async function redraft(id: string): Promise<void> {
+  if (redraftsInFlight.has(id)) return;
+  redraftNotes.delete(id);
+  redraftsInFlight.add(id);
+  paintRedraftState(id);
+  let note: { text: string; kind: "ok" | "err" | "" } | null = null;
+  let reload = false;
+  try {
+    const res = await fetch(withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/redraft"), JSON_POST);
+    const data = await jsonOrNull(res);
+    const outcome = typeof data?.outcome === "string" ? data.outcome : "";
+    const reason = typeof data?.reason === "string" ? data.reason : "";
+    if (res.ok && outcome === "drafted") {
+      reload = true;
+    } else if (res.ok && outcome === "superseded_meanwhile") {
+      note = { text: "This draft changed meanwhile; nothing was replaced.", kind: "err" };
+      reload = true;
+    } else if (res.ok && outcome === "covered") {
+      note = { text: "Not redrafted (covered): " + reason, kind: "err" };
+      reload = true;
+    } else if (res.ok) {
+      note = { text: "Not redrafted (" + (outcome || "unknown") + "): " + reason, kind: "err" };
+    } else {
+      const error = typeof data?.error === "string" ? data.error : "";
+      note = { text: error || reason || "Failed (" + res.status + ")", kind: "err" };
+    }
+  } catch (err) {
+    note = { text: "Network error: " + (err as Error).message, kind: "err" };
+  }
+  redraftsInFlight.delete(id);
+  if (note) redraftNotes.set(id, note);
+  if (reload) {
+    loadProposals();
+    return;
+  }
+  const card = cardById(id);
+  if (card) unlockButtons(card.querySelectorAll(".gard-btn"));
+  paintRedraftState(id);
 }
 
 /**
@@ -463,7 +598,7 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
   if (actionBtn) {
     const card = actionBtn.closest(".gard-card") as HTMLElement;
     const id = card.getAttribute("data-id")!;
-    act(id, actionBtn.getAttribute("data-action") as "approve" | "reject", card);
+    act(id, actionBtn.getAttribute("data-action") as CardAction, card);
   }
 });
 

@@ -32,6 +32,9 @@
  */
 export const WIKI_READONLY_BLOCKED_SELECTOR = [
   '[data-action="approve"]',
+  // Redraft persists a replacement proposal; the route refuses it like the
+  // drafting verbs.
+  '[data-action="redraft"]',
   // The lint GROUP verbs. Both are listed, unlike the single-row pair: a group
   // Dismiss is not the DB status flip `[data-action="reject"]` is — it is a
   // permanent, un-undoable decision (the `rejected` rows ARE the skip list) about
