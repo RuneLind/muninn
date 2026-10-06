@@ -410,7 +410,8 @@ export async function renderWikiGardenerPage(opts?: {
       background: color-mix(in srgb, var(--status-warning, #d0a000) 12%, transparent);
       border: 1px solid color-mix(in srgb, var(--status-warning, #d0a000) 45%, transparent);
     }
-    .gard-fc-note.info { background: var(--bg-surface); border-color: var(--border-secondary); color: var(--text-muted); }
+    /* --text-soft, not --text-muted: muted on --bg-surface measured 4.42:1 in light mode for this 12.5px text. */
+    .gard-fc-note.info { background: var(--bg-surface); border-color: var(--border-secondary); color: var(--text-soft); }
     .gard-reject { background: transparent; border-color: var(--border-secondary); color: var(--text-muted); }
     .gard-reject:hover:not(:disabled) { border-color: var(--status-magenta); color: var(--status-magenta); }
     .gard-outcome { font-size: 12.5px; color: var(--text-muted); }

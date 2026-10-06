@@ -23,7 +23,8 @@ const log = getLog("db", "source-draft-attempts");
 /** Mirrors `SourceDraftOutcome`'s discriminant. */
 export type SourceDraftAttemptOutcome = "drafted" | "covered" | "skipped" | "error";
 
-/** Which entry point ran the drafter — the four callers of `runSourceDraftForInput`. */
+/** Which entry point ran the drafter: the four callers of `runSourceDraftForInput`,
+ *  and Redraft, which records inside its own transaction. */
 export type SourceDraftTrigger = "capture" | "run-now" | "backlog" | "doc" | "redraft";
 
 export interface SourceDraftAttempt {

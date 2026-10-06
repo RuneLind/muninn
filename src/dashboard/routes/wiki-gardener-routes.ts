@@ -121,7 +121,11 @@ import {
   type FactcheckMark,
   type ProposalFactcheckFlag,
 } from "../../gardener/factcheck-carry.ts";
-import { redraftRefusal, redraftSourceProposal } from "../../gardener/source-redraft.ts";
+import {
+  redraftRefusal,
+  redraftReplacements,
+  redraftSourceProposal,
+} from "../../gardener/source-redraft.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
 
@@ -252,6 +256,8 @@ interface ProposalView {
   wiring: WiringPreview | null;
   /** Saved summary fact-check flags (`proposalFactcheckFlag`); null when none apply. */
   factcheck: ProposalFactcheckFlag | null;
+  /** A `stale` row Redraft replaced: the replacement's id (`redraftReplacements`). */
+  replacedBy: string | null;
 }
 
 /** The checked docs as `<collection>/<docId>` → mark. A missing table or a failed
@@ -1294,6 +1300,7 @@ export function registerWikiGardenerRoutes(
     const index = await getWikiIndex({ root });
     const resolve = index ? index.resolve : () => undefined;
     const factcheckMarks = await loadFactcheckMarks();
+    const replacements = redraftReplacements(rows);
 
     const proposals: ProposalView[] = await Promise.all(
       rows.map(async (p) => {
@@ -1393,6 +1400,7 @@ export function registerWikiGardenerRoutes(
               ? factcheckMarks.get(`${p.sourceDocs[0].collection}/${p.sourceDocs[0].docId}`)
               : undefined,
           ),
+          replacedBy: replacements.get(p.id) ?? null,
         };
       }),
     );
@@ -2640,7 +2648,8 @@ export function registerWikiGardenerRoutes(
 
   // Redraft → re-run the source drafter for a live create-mode draft and replace
   // it in ONE transaction (`redraftSourceProposal`, D6). Offered by the gate on a
-  // draft made before its doc's fact-check; the route accepts any such draft.
+  // draft that does not carry its doc's current fact-check; the route accepts
+  // any draft `redraftRefusal` passes.
   app.post("/api/wiki/proposals/:id/redraft", async (c) => {
     const refused = readonlyRefusal(c);
     if (refused) return refused;
@@ -2653,6 +2662,9 @@ export function registerWikiGardenerRoutes(
     if (refusal) return c.json({ error: refusal, status: existing.status }, 409);
     const bot = getBots().find((b) => b.name === existing.botName && !!b.wikiDir);
     if (!bot || !bot.wikiDir) return c.json({ error: "bot has no wikiDir configured" }, 400);
+    if (bot.gardener?.enabled === false) {
+      return c.json({ error: "the wiki gardener is disabled for this bot" }, 400);
+    }
     if (isReadonlyWikiRoot(bot.wikiDir)) {
       return c.json({ error: wikiReadonlyRootReason(bot.wikiDir), readonly: true }, 403);
     }

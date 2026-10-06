@@ -31,6 +31,9 @@ export interface WikiProposalSourceDoc {
   docId: string;
   title: string;
   url: string;
+  /** sha256 of the saved summary fact-check's `answer` this draft was built
+   *  with (`factcheckAnswerSha256`); absent when the doc had no check then. */
+  factcheckSha256?: string;
 }
 
 /**
@@ -179,7 +182,10 @@ export type ReplaceDraftOutcome =
   /** The old row was no longer a draft (approved, rejected, applied or already
    *  replaced meanwhile): rolled back, nothing changed. */
   | { outcome: "superseded_meanwhile" }
-  /** Another live row holds the new row's key: rolled back, nothing changed. */
+  /** Another live row holds the new row's key: rolled back, nothing changed.
+   *  Reachable only when the old row's topic key differs from the new one's (a
+   *  legacy key): while the old row is still a draft, the partial unique index
+   *  refuses any same-key competitor before it can exist. */
   | { outcome: "covered" };
 
 class RollbackReplace extends Error {
@@ -193,6 +199,9 @@ class RollbackReplace extends Error {
  * live rows rejects the new row while the old one is still a draft. CAS the old
  * row `draft → stale`, insert the new row, and point the doc's attempt row at
  * it. A 0-row CAS or an insert conflict rolls the whole transaction back.
+ * The old row's `resolved_at` and the new row's `created_at` are the same
+ * `now()`, which is how the gate tells a replaced row from a stale one
+ * (`redraftReplacements`).
  */
 export async function replaceDraftProposal(
   oldId: string,

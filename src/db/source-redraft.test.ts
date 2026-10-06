@@ -15,11 +15,14 @@ import {
   getLiveTopicKeys,
   getWikiProposalById,
   insertWikiProposal,
+  listAllWikiProposals,
   type WikiProposal,
 } from "./wiki-proposals.ts";
 import { recordSourceDraftAttempt } from "./source-draft-attempts.ts";
 import { listSummaryFactcheckMarks, upsertSummaryFactcheck } from "./summary-factchecks.ts";
+import * as sourceRedraft from "../gardener/source-redraft.ts";
 import { redraftSourceProposal } from "../gardener/source-redraft.ts";
+import { sha256 } from "../gardener/util.ts";
 import { sourceTopicKey } from "../gardener/source-drafter.ts";
 import { __resetWikiCacheForTest } from "../wiki/store.ts";
 import { FACTCHECK_SENTINEL_START } from "../wiki/factcheck-context.ts";
@@ -43,15 +46,18 @@ function page(title: string, body = "The video claims the words raise cortisol; 
   return `---\ntype: source\ntitle: ${title}\naliases: []\ncreated: 2026-10-06\nupdated: 2026-10-06\ntags: [habits]\nurl: ${URL}\nsources: [${URL}]\n---\n\n# ${title}\n\n${body}\n`;
 }
 
-async function seedOld(topicKey = sourceTopicKey(COLLECTION, DOC)): Promise<WikiProposal> {
+async function seedOld(
+  topicKey = sourceTopicKey(COLLECTION, DOC),
+  over: { url?: string; sourceTitle?: string; draft?: string } = {},
+): Promise<WikiProposal> {
   const old = await insertWikiProposal({
     botName: BOT,
     topicKey,
     kind: "source",
     mode: "create",
     targetPath: "sources/Old Title.mdx",
-    draft: page("Old Title", "Saying these words raises your cortisol."),
-    sourceDocs: [{ collection: COLLECTION, docId: DOC, title: "5 Powerful Words", url: URL }],
+    draft: over.draft ?? page("Old Title", "Saying these words raises your cortisol."),
+    sourceDocs: [{ collection: COLLECTION, docId: DOC, title: over.sourceTitle ?? "5 Powerful Words", url: over.url ?? URL }],
   });
   await getDb()`UPDATE wiki_proposals SET created_at = now() - interval '1 day' WHERE id = ${old!.id}`;
   await recordSourceDraftAttempt({
@@ -111,7 +117,7 @@ describe("redraftSourceProposal — the four outcomes", () => {
       fetchDoc,
       callDrafter: async (prompt) => {
         prompts.push(prompt);
-        return page("Morning Affirmations");
+        return page("Old Title");
       },
     });
     expect(out.outcome).toBe("drafted");
@@ -119,11 +125,11 @@ describe("redraftSourceProposal — the four outcomes", () => {
     expect(after.map((r) => r.status)).toEqual(["stale", "draft"]);
     expect(after[0]!.id).toBe(old.id);
     const fresh = (await getWikiProposalById(after[1]!.id))!;
-    expect(out).toMatchObject({ proposalId: fresh.id, targetPath: "life/sources/Morning Affirmations.mdx" });
+    expect(out).toMatchObject({ proposalId: fresh.id, targetPath: "life/sources/Old Title.mdx" });
     expect(fresh.topicKey).toBe(old.topicKey);
     expect(fresh.draft).toContain(FACTCHECK_SENTINEL_START);
     expect(fresh.draft).toContain("### ❌ Claim 1/2 — Affirmations raise cortisol");
-    expect(prompts[0]).toContain('the video claims "Saying these words raises your cortisol."');
+    expect(prompts[0]).toContain("the video claims “Saying these words raises your cortisol”.");
     expect((await getWikiProposalById(old.id))!.resolvedAt).not.toBeNull();
     expect(await attempt()).toMatchObject({ proposal_id: fresh.id, outcome: "drafted", trigger_source: "redraft" });
   });
@@ -136,7 +142,7 @@ describe("redraftSourceProposal — the four outcomes", () => {
         fetchDoc,
         callDrafter: async () => {
           await getDb()`UPDATE wiki_proposals SET status = ${meanwhile} WHERE id = ${old.id}`;
-          return page("Morning Affirmations");
+          return page("Old Title");
         },
       });
       expect(out.outcome).toBe("superseded_meanwhile");
@@ -164,7 +170,7 @@ describe("redraftSourceProposal — the four outcomes", () => {
           sourceDocs: [{ collection: COLLECTION, docId: DOC, title: "x", url: "https://example.org/other" }],
         });
         competitor = row!.id;
-        return page("Morning Affirmations");
+        return page("Old Title");
       },
     });
     expect(out.outcome).toBe("covered");
@@ -202,6 +208,71 @@ describe("redraftSourceProposal — the four outcomes", () => {
     expect((await rows()).map((r) => [r.id, r.status])).toEqual([[old.id, "draft"]]);
     expect((await getWikiProposalById(old.id))!.draft).toBe(old.draft);
     expect(await attempt()).toEqual(before);
+  });
+});
+
+describe("redraftSourceProposal — what the replacement is built from", () => {
+  // Item 2: a pasted article's capture drafted it URL-less; Redraft takes the
+  // same path instead of refusing a card the gate locked.
+  test("a URL-less doc is redrafted the way the capture drafted it, with the pending callout", async () => {
+    const old = await seedOld(undefined, { url: "", draft: page("Old Title").replace(/^url: .*\n/m, "").replace(/^sources: .*\n/m, "") });
+    const out = await redraftSourceProposal(bot, wikiDir, old, {
+      fetchDoc: async () => ({ text: BODY, metadata: {} }) as never,
+      callDrafter: async () => page("Old Title").replace(/^url: .*\n/m, "").replace(/^sources: .*\n/m, ""),
+    });
+    expect(out.outcome).toBe("drafted");
+    const fresh = (await getWikiProposalById((out as { proposalId: string }).proposalId))!;
+    expect(fresh.draft).toContain("> [!note] Source pending ingestion");
+    expect(fresh.draft).toContain(FACTCHECK_SENTINEL_START);
+    expect(fresh.sourceDocs[0]!.url).toBe("");
+  });
+
+  // Item 6: the old row's title is kept, so a doc drafted through the
+  // collision-rename path does not hit the same collision on Redraft.
+  test("the old draft's title rides as the title override", async () => {
+    const old = await seedOld();
+    // The title the model would pick on its own is taken in the wiki.
+    await writeFile(path.join(wikiDir, "Morning Affirmations.md"), "---\ntitle: Morning Affirmations\n---\n\n# Morning Affirmations\n");
+    __resetWikiCacheForTest();
+    const prompts: string[] = [];
+    const out = await redraftSourceProposal(bot, wikiDir, old, {
+      fetchDoc,
+      callDrafter: async (prompt) => {
+        prompts.push(prompt);
+        return page("Old Title");
+      },
+    });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('TITLE (chosen by the wiki\'s editor — use it VERBATIM): "Old Title"');
+    expect(out).toMatchObject({ outcome: "drafted", targetPath: "life/sources/Old Title.mdx" });
+  });
+
+  // Item 7: the stored source title comes from the doc, not from the old row
+  // (which stored the old PAGE title when no capture title was known).
+  test("the new row's source title is the doc's own title", async () => {
+    const old = await seedOld(undefined, { sourceTitle: "Old Title" });
+    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page("Old Title") });
+    const fresh = (await getWikiProposalById((out as { proposalId: string }).proposalId))!;
+    expect(fresh.sourceDocs[0]!.title).toBe("5 Powerful Words");
+  });
+
+  // Item 1: the replacement records the check it carries.
+  test("the replacement carries the digest of the saved check's answer", async () => {
+    const old = await seedOld();
+    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page("Old Title") });
+    const fresh = (await getWikiProposalById((out as { proposalId: string }).proposalId))!;
+    expect(fresh.sourceDocs[0]!.factcheckSha256).toBe(sha256(ANSWER));
+  });
+
+  // Item 9: the replaced row is recognisable from the listing alone: one
+  // transaction, one now(), so its resolved_at IS the new row's created_at.
+  test("redraftReplacements links the staled row to its replacement", async () => {
+    const old = await seedOld();
+    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page("Old Title") });
+    const all = await listAllWikiProposals(BOT);
+    const links = sourceRedraft.redraftReplacements(all);
+    expect(links.get(old.id)).toBe((out as { proposalId: string }).proposalId);
+    expect(links.size).toBe(1);
   });
 });
 
@@ -287,5 +358,59 @@ describe("listSummaryFactcheckMarks", () => {
     expect(marks).toHaveLength(1);
     expect(marks[0]).toMatchObject({ collection: COLLECTION, docId: DOC, bad: 1, warn: 2 });
     expect(Math.abs(marks[0]!.checkedAt - Date.now())).toBeLessThan(60_000);
+  });
+
+  // Item 11: the gate and the rider count with ONE predicate, so a verdict the
+  // rider reads as ❌ (padded, the word form) is one the gate counts.
+  test("counts with the rider's predicate", async () => {
+    await upsertSummaryFactcheck({
+      collection: COLLECTION,
+      docId: DOC,
+      url: URL,
+      bodySha256: "a".repeat(64),
+      answer: "",
+      claims: [
+        { index: 1, title: "a", verdict: " ❌ ", outcome: "verified", sources: [] },
+        { index: 2, title: "b", verdict: "bad", outcome: "verified", sources: [] },
+        { index: 3, title: "c", verdict: "WARN", outcome: "verified", sources: [] },
+      ],
+      botName: "jarvis",
+    });
+    expect((await listSummaryFactcheckMarks())[0]).toMatchObject({ bad: 2, warn: 1 });
+  });
+
+  test("one malformed claims value costs that row, not every flag", async () => {
+    await upsertSummaryFactcheck({
+      collection: COLLECTION,
+      docId: DOC,
+      url: URL,
+      bodySha256: "a".repeat(64),
+      answer: "ok",
+      claims: [{ index: 1, title: "a", verdict: "❌", outcome: "verified", sources: [] }],
+      botName: "jarvis",
+    });
+    await getDb()`INSERT INTO summary_factchecks (collection, doc_id, url, body_sha256, answer, claims, bot_name)
+      VALUES (${COLLECTION}, 'health/broken.md', null, ${"b".repeat(64)}, 'x', '{"not":"an array"}'::jsonb, 'jarvis')`;
+    await getDb()`INSERT INTO summary_factchecks (collection, doc_id, url, body_sha256, answer, claims, bot_name)
+      VALUES (${COLLECTION}, 'health/scalar.md', null, ${"c".repeat(64)}, 'y', '"❌"'::jsonb, 'jarvis')`;
+    const marks = await listSummaryFactcheckMarks();
+    const byDoc = new Map(marks.map((m) => [m.docId, m]));
+    expect(byDoc.get(DOC)).toMatchObject({ bad: 1, warn: 0 });
+    expect(byDoc.get("health/broken.md")).toMatchObject({ bad: 0, warn: 0 });
+    expect(byDoc.get("health/scalar.md")).toMatchObject({ bad: 0, warn: 0 });
+  });
+
+  test("answerSha256 is the JS sha256 of the answer, non-ASCII included", async () => {
+    const answer = "### ❌ Claim 1/1 — Café Ø\n\nÆrlig talt: “nei”.";
+    await upsertSummaryFactcheck({
+      collection: COLLECTION,
+      docId: DOC,
+      url: URL,
+      bodySha256: "a".repeat(64),
+      answer,
+      claims: [],
+      botName: "jarvis",
+    });
+    expect((await listSummaryFactcheckMarks())[0]!.answerSha256).toBe(sha256(answer));
   });
 });

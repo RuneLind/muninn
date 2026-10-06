@@ -45,7 +45,12 @@ import { categoryToDomain } from "../summaries/domain.ts";
 import { sha256 } from "./util.ts";
 import { missingCodeBlocks } from "./code-block-retention.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
-import { buildFactcheckRider, withFactcheckAppendix } from "./factcheck-carry.ts";
+import {
+  appendFactcheckBlock,
+  buildFactcheckRider,
+  factcheckAnswerSha256,
+  stripReproducedFactcheck,
+} from "./factcheck-carry.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "source-drafter");
@@ -784,7 +789,7 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
           input,
           today,
           existingPages: sourceWikilinkTargets(index),
-          factcheckRider: buildFactcheckRider(factcheck, input.collection),
+          factcheckRider: buildFactcheckRider(factcheck, input.collection, input.url),
         });
 
     // Domain-aware filing: `ai` vs `life` from the capture's category (absent /
@@ -968,6 +973,12 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       break;
     }
 
+    // A fact-check section or block the model reproduced goes BEFORE anything
+    // reads the page: containment, the related-pages pick and the pending
+    // callout all work on what will be persisted, and the saved check's own
+    // block is appended last.
+    if (factcheck) draftText = stripReproducedFactcheck(draftText);
+
     // Persist-time containment (same seams the gardener runs): drop aliases another
     // page owns, pin `url:` to the known capture URL (a hallucinated/injected url
     // can't survive), replace unresolved `sources:` wikilinks with the real URL, and
@@ -1014,9 +1025,10 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
     const pendingDocs =
       update || isHttpUrl(input.url) ? [] : [{ collection: input.collection, docId: input.docId }];
     const finalDraft = appendPendingIngestionCallout(containedDraft, pendingDocs);
-    // The block goes on AFTER containment and the related-pages pick, so neither
-    // reads the check's own text; the gate diff then shows it (D6).
-    const persistedDraft = factcheck ? withFactcheckAppendix(finalDraft, factcheck) : finalDraft;
+    // The block goes on after persist-time containment, which therefore never
+    // de-links inside it; the apply-time pass (`containDraftBodyLinks` in
+    // `apply.ts`) reads the whole persisted draft, block included (D6).
+    const persistedDraft = factcheck ? appendFactcheckBlock(finalDraft, factcheck) : finalDraft;
 
     const row = await deps.insertProposal({
       botName,
@@ -1034,13 +1046,16 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
           docId: input.docId,
           title: input.sourceTitle ?? title.trim(),
           url: input.url,
+          // Which check this draft carries; the gate locks a draft whose
+          // record is missing or names an earlier answer.
+          ...(factcheck ? { factcheckSha256: factcheckAnswerSha256(factcheck) } : {}),
         },
       ],
       rationale: null,
       containedLinks: containedLinks.length > 0 ? { delinked: containedLinks } : null,
       // Both modes: an update target is usually an orphan too, and the See-also
       // edit is idempotent on a page that already links it.
-      relatedPages: sourceRelatedPages(finalDraft, index, targetPath),
+      relatedPages: sourceRelatedPages(persistedDraft, index, targetPath),
     });
 
     if (!row) {

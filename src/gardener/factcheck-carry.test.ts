@@ -1,4 +1,8 @@
 import { test, expect, describe } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { getWikiIndex, __resetWikiCacheForTest } from "../wiki/store.ts";
 import {
   buildFactcheckRider,
   correctableClaims,
@@ -16,7 +20,9 @@ import {
   type SourceDraftInput,
 } from "./source-drafter.ts";
 import { FACTCHECK_SENTINEL_START, findLiveSentinelBlocks } from "../wiki/factcheck-context.ts";
+import * as factchecks from "../db/summary-factchecks.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
+const countCorrectableClaims = (claims: unknown) => factchecks.countCorrectableClaims(claims);
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
 import { sha256 } from "./util.ts";
 
@@ -125,6 +131,23 @@ describe("sourceKindNoun", () => {
     expect(sourceKindNoun("anthropic-summaries")).toBe("the article");
     expect(sourceKindNoun("something-else")).toBe("the source");
   });
+
+  // Item 13: 3 of 12 article-summaries docs are a Vimeo talk and two YouTube
+  // videos, so the URL's host speaks before the collection.
+  test("the URL host decides before the collection", () => {
+    expect(sourceKindNoun("article-summaries", "https://www.youtube.com/watch?v=abc")).toBe("the video");
+    expect(sourceKindNoun("article-summaries", "https://youtu.be/abc")).toBe("the video");
+    expect(sourceKindNoun("article-summaries", "https://vimeo.com/123456")).toBe("the talk");
+    expect(sourceKindNoun("article-summaries", "https://player.vimeo.com/video/1")).toBe("the talk");
+    expect(sourceKindNoun("article-summaries", "https://www.tiktok.com/@a/video/1")).toBe("the video");
+    expect(sourceKindNoun("article-summaries", "https://x.com/a/status/1")).toBe("the post");
+    expect(sourceKindNoun("article-summaries", "https://twitter.com/a/status/1")).toBe("the post");
+    expect(sourceKindNoun("article-summaries", "https://example.org/essay")).toBe("the article");
+    expect(sourceKindNoun("article-summaries", "")).toBe("the article");
+    expect(sourceKindNoun("article-summaries", "not a url")).toBe("the article");
+    // A look-alike host is not the platform.
+    expect(sourceKindNoun("article-summaries", "https://notyoutube.com/x")).toBe("the article");
+  });
 });
 
 describe("correctableClaims", () => {
@@ -142,9 +165,29 @@ describe("correctableClaims", () => {
     expect(claims[1]!.correction).not.toContain("Sources");
   });
 
-  test("a ❌ heading the saved claims lack still counts", () => {
-    const claims = correctableClaims(saved({ claims: [] }));
-    expect(claims.map((c) => c.index)).toEqual([1, 2]);
+  // Item 11: the gate counts the saved claims, so the rider does too — a claim
+  // found only as an `answer` heading would ride a prompt the gate never locked.
+  test("a ❌ heading the saved claims lack does not count", () => {
+    expect(correctableClaims(saved({ claims: [] }))).toEqual([]);
+    expect(buildFactcheckRider(saved({ claims: [] }), "tiktok-summaries")).toBe("");
+  });
+
+  test("the rider and the gate count with one predicate", () => {
+    const claims = [
+      { index: 1, title: "a", verdict: " ❌ ", outcome: "verified", sources: [] },
+      { index: 2, title: "b", verdict: "⚠", outcome: "verified", sources: [] },
+      { index: 3, title: "c", verdict: "BAD", outcome: "verified", sources: [] },
+      { index: 4, title: "d", verdict: "✅", outcome: "verified", sources: [] },
+    ];
+    expect(correctableClaims(saved({ claims })).map((c) => [c.index, c.verdict])).toEqual([
+      [1, "bad"],
+      [2, "warn"],
+      [3, "bad"],
+    ]);
+    expect(countCorrectableClaims(claims)).toEqual({ bad: 2, warn: 1 });
+    // A malformed value counts nothing rather than throwing.
+    expect(countCorrectableClaims({ x: 1 })).toEqual({ bad: 0, warn: 0 });
+    expect(countCorrectableClaims([null, 7, { verdict: 3 }, { verdict: "❌" }])).toEqual({ bad: 1, warn: 0 });
   });
 });
 
@@ -156,16 +199,40 @@ describe("buildFactcheckRider", () => {
 
   test("attributes each ❌/⚠️ claim to the source kind and states the two rules", () => {
     const rider = buildFactcheckRider(saved(), "tiktok-summaries");
-    expect(rider).toContain('the video claims "Saying these words raises your cortisol and wakes you up."');
-    expect(rider).toContain("Sources say: Studies of self-affirmation find it LOWERS cortisol");
-    expect(rider).toContain("the video claims \"It takes 21 days to form a habit.\"");
+    expect(rider).toContain("the video claims “Saying these words raises your cortisol and wakes you up”. Sources say: Studies of self-affirmation find it LOWERS cortisol");
+    expect(rider).toContain("the video claims “It takes 21 days to form a habit”.");
     expect(rider).toContain("Never state one of these claims as fact");
-    expect(rider).toContain('"The video claims X; sources say Y."');
+    expect(rider).toContain("The video claims X; sources say Y.");
     expect(rider).toContain("Do not reproduce the fact-check section; it is added for you.");
     expect(rider).toContain("2026-10-06");
     // The ✅ claim is not a finding.
     expect(rider).not.toContain("Sleep supports memory");
-    expect(buildFactcheckRider(saved(), "vimeo-summaries")).toContain("the talk claims");
+    expect(buildFactcheckRider(saved({ url: null }), "vimeo-summaries")).toContain("the talk claims");
+  });
+
+  // Item 14: from six real drafter runs — 3/6 listed the ⚠️ claim as a bare
+  // bullet among the speaker's points, 3/6 judged claims the check never covered.
+  test("states the attribute-every-time and the say-nothing-else rules", () => {
+    const rider = buildFactcheckRider(saved(), "tiktok-summaries");
+    expect(rider).toContain(
+      "Do not state a listed claim as fact anywhere, including in a list of the video's points: attribute it every time.",
+    );
+    expect(rider).toContain("Say nothing about the accuracy of claims not listed here.");
+  });
+
+  test("quoting: no nested straight quotes, no '.\".' run", () => {
+    const quoted = saved({
+      claims: [{ index: 1, title: "t", quote: 'He said "five words" fix stress.', verdict: "❌", outcome: "verified", sources: [] }],
+    });
+    const rider = buildFactcheckRider(quoted, "tiktok-summaries");
+    const line = rider.split("\n").find((l) => l.startsWith("- Claim 1"))!;
+    expect(line).toContain("the video claims “He said ‘five words’ fix stress”. Sources say:");
+    expect(rider).not.toMatch(/[.!?]["”]\./);
+    expect(rider).not.toContain('"');
+  });
+  test("the URL host picks the noun in the rider", () => {
+    const rider = buildFactcheckRider(saved({ collection: "article-summaries", url: "https://vimeo.com/1" }), "article-summaries");
+    expect(rider).toContain("the talk claims");
   });
 
   test("the findings are capped at FACTCHECK_RIDER_MAX chars and the rest is counted", () => {
@@ -324,49 +391,194 @@ describe("stripReproducedFactcheck / pageCarriesFactcheck", () => {
     const twice = withFactcheckAppendix(once, saved());
     expect(twice).toBe(once);
     expect(pageCarriesFactcheck(once)).toBe(true);
-    expect(pageCarriesFactcheck(page("Body.\n\n### Fact-check notes\n\nx"))).toBe(true);
+    expect(pageCarriesFactcheck(page("Body.\n\n### Fact-check\n\nx"))).toBe(true);
     expect(pageCarriesFactcheck(page("Body."))).toBe(false);
+  });
+
+  // Item 4: only a reproduced fact-check heading goes — h2–h6 whose whole text
+  // is "Fact check", optionally a date or a parenthetical.
+  test("strips exactly a reproduced Fact check heading section", () => {
+    for (const heading of [
+      "## Fact check",
+      "## Fact-check",
+      "## Factcheck",
+      "### Fact Check",
+      "## Fact check (2026-10-06)",
+      "## Fact check — 2026-10-06",
+      "## Fact check: 2026-10-06",
+      "## Fact check 2026-10-06",
+      "###### Fact check (from the summary)",
+      "  ## Fact check ##",
+    ]) {
+      const text = page(`Intro.\n\n${heading}\n\n- ❌ wrong\n\n## See also\n- [[Habits]]`);
+      const out = stripReproducedFactcheck(text);
+      expect(out).not.toContain("❌ wrong");
+      expect(out).toContain("## See also\n- [[Habits]]");
+      expect(pageCarriesFactcheck(text)).toBe(true);
+    }
+  });
+
+  test("keeps every heading that is not a bare reproduced Fact check", () => {
+    for (const heading of [
+      "## Fact check: the 2024 study",
+      "## Fact checking in newsrooms",
+      "## FactCheck.org",
+      "## Fact-check notes",
+      "## How FactCheck.org works",
+      "## Fact check of the claims about sleep",
+    ]) {
+      const text = page(`Intro.\n\n${heading}\n\nReal section prose.\n\n## See also\n- [[Habits]]`);
+      expect(stripReproducedFactcheck(text)).toBe(text);
+      expect(pageCarriesFactcheck(text)).toBe(false);
+    }
+  });
+
+  test("never strips an H1, even one titled Fact check", () => {
+    const h1 = `---\ntype: source\ntitle: Fact check\n---\n\n# Fact check\n\nThe whole page body.\n\n## Details\n\nMore.`;
+    expect(stripReproducedFactcheck(h1)).toBe(h1);
+    const h1b = `---\ntype: source\ntitle: x\n---\n\n# Fact check (2026-10-06)\n\nBody.`;
+    expect(stripReproducedFactcheck(h1b)).toBe(h1b);
+    expect(pageCarriesFactcheck(h1b)).toBe(false);
+  });
+});
+
+describe("draftSourcePage — strip order, digest, and what reads the persisted draft", () => {
+  const reproducedTail = (extra = "") =>
+    page(`The video claims the words raise cortisol; sources say otherwise.${extra}\n\n## Fact check\n\n- ❌ wrong, see [[Cortisol Myths]] and [[Habits]]`);
+
+  // Item 3: a URL-less doc gets its callout appended after the body; a trailing
+  // model "## Fact check" section must not take that callout with it.
+  test("a URL-less doc keeps its Source pending ingestion callout", async () => {
+    const inserted: InsertWikiProposalParams[] = [];
+    const d = deps({ inserted, callDrafter: async () => reproducedTail(), getFactcheck: async () => saved() });
+    d.input = { ...d.input, url: "" };
+    const out = await draftSourcePage(d);
+    expect(out.outcome).toBe("drafted");
+    const draft = inserted[0]!.draft;
+    expect(draft).toContain("> [!note] Source pending ingestion");
+    expect(draft).toContain("`tiktok-summaries/health/5 Powerful Words.md` has no public URL yet.");
+    expect(draft).not.toContain("❌ wrong, see");
+    expect(findLiveSentinelBlocks(draft)).toHaveLength(1);
+  });
+
+  // Item 1: the row records WHICH check it was built with.
+  test("the source doc records the digest of the check's answer; no check, no digest", async () => {
+    const inserted: InsertWikiProposalParams[] = [];
+    await draftSourcePage(deps({ inserted, getFactcheck: async () => saved() }));
+    expect(inserted[0]!.sourceDocs[0]!.factcheckSha256).toBe(sha256(ANSWER));
+    const plain: InsertWikiProposalParams[] = [];
+    await draftSourcePage(deps({ inserted: plain, getFactcheck: async () => null }));
+    expect("factcheckSha256" in plain[0]!.sourceDocs[0]!).toBe(false);
+  });
+
+  // Item 5: related pages and de-linked links are read off what is persisted,
+  // not off a section the strip then removes.
+  test("relatedPages and containedLinks ignore a stripped Fact check section", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "fc-carry-related-"));
+    await mkdir(path.join(root, "concepts"), { recursive: true });
+    await writeFile(path.join(root, "index.md"), "# Index\n");
+    await writeFile(path.join(root, "concepts", "Habits.md"), "---\ntype: concept\ntitle: Habits\n---\n\n# Habits\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const index = await getWikiIndex({ root });
+    const inserted: InsertWikiProposalParams[] = [];
+    const d = deps({ inserted, index, wikiDir: root, callDrafter: async () => reproducedTail(), getFactcheck: async () => saved() });
+    try {
+      const out = await draftSourcePage(d);
+      expect(out.outcome).toBe("drafted");
+      expect(inserted[0]!.relatedPages ?? []).toEqual([]);
+      expect(inserted[0]!.containedLinks).toBeNull();
+      // Control: the same link in the kept body IS picked up.
+      const kept: InsertWikiProposalParams[] = [];
+      await draftSourcePage({
+        ...d,
+        insertProposal: async (params) => {
+          kept.push(params);
+          return { id: "row-2", ...params } as unknown as WikiProposal;
+        },
+        callDrafter: async () => reproducedTail(" See [[Habits]]."),
+      });
+      expect(kept[0]!.relatedPages).toEqual([{ title: "Habits", relPath: "concepts/Habits.md" }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      __resetWikiCacheForTest();
+    }
   });
 });
 
 describe("proposalFactcheckFlag (the gate flag)", () => {
-  const draftBefore = {
+  const SHA = sha256(ANSWER);
+  const doc = { collection: "tiktok-summaries", docId: "health/5 Powerful Words.md", title: "5 Powerful Words", url: URL };
+  /** A live create draft that carries no record of any check. */
+  const plain = {
     kind: "source",
     mode: "create",
     status: "draft",
-    createdAt: CHECKED_AT - 86_400_000,
+    wikiName: null as string | null,
     draft: page("Body."),
+    sourceDocs: [doc] as WikiProposal["sourceDocs"],
   };
-  const mark = { checkedAt: CHECKED_AT, bad: 1, warn: 1 };
+  /** The same draft built with the current check: its digest and its block. */
+  const carrying = {
+    ...plain,
+    draft: withFactcheckAppendix(page("Body."), saved()),
+    sourceDocs: [{ ...doc, factcheckSha256: SHA }] as WikiProposal["sourceDocs"],
+  };
+  const mark = { checkedAt: CHECKED_AT, bad: 1, warn: 1, answerSha256: SHA };
 
-  test("a create draft older than a check with ❌/⚠️ is flagged drafted-before", () => {
-    expect(proposalFactcheckFlag(draftBefore, mark)).toEqual({ ...mark, draftedBefore: true, missingBlock: true });
-    expect(proposalFactcheckFlag(draftBefore, { checkedAt: CHECKED_AT, bad: 0, warn: 1 })!.draftedBefore).toBe(true);
+  test("a live create draft that does not carry the current ❌/⚠️ check is locked", () => {
+    expect(proposalFactcheckFlag(plain, mark)).toEqual({
+      checkedAt: CHECKED_AT,
+      bad: 1,
+      warn: 1,
+      needsRedraft: true,
+      missingBlock: true,
+    });
+    expect(proposalFactcheckFlag(plain, { ...mark, bad: 0 })!.needsRedraft).toBe(true);
+  });
+
+  // Item 1: the drafter read "no check", the check was saved during the model
+  // call, the row landed after it. No timestamp tells that apart; the digest does.
+  test("a draft NEWER than the check that does not carry it is still locked", () => {
+    // No createdAt on either input: the lock reads no timestamp at all.
+    expect(proposalFactcheckFlag(plain, mark)!.needsRedraft).toBe(true);
+    const otherCheck = { ...carrying, sourceDocs: [{ ...doc, factcheckSha256: sha256("an earlier answer") }] };
+    expect(proposalFactcheckFlag(otherCheck, mark)!.needsRedraft).toBe(true);
+  });
+
+  test("a draft carrying the current check is not locked, however recent the check row", () => {
+    expect(proposalFactcheckFlag(carrying, mark)).toBeNull();
+    // A re-check that saved the same answer moves checkedAt only.
+    expect(proposalFactcheckFlag(carrying, { ...mark, checkedAt: CHECKED_AT + 86_400_000 })).toBeNull();
   });
 
   test("a ✅/❓-only check flags nothing", () => {
-    expect(proposalFactcheckFlag(draftBefore, { checkedAt: CHECKED_AT, bad: 0, warn: 0 })).toBeNull();
+    expect(proposalFactcheckFlag(plain, { ...mark, bad: 0, warn: 0 })).toBeNull();
   });
 
   test("no check, another kind, or a terminal row flags nothing", () => {
-    expect(proposalFactcheckFlag(draftBefore, undefined)).toBeNull();
-    expect(proposalFactcheckFlag({ ...draftBefore, kind: "concept" }, mark)).toBeNull();
+    expect(proposalFactcheckFlag(plain, undefined)).toBeNull();
+    expect(proposalFactcheckFlag({ ...plain, kind: "concept" }, mark)).toBeNull();
     for (const status of ["applied", "rejected", "stale", "error"]) {
-      expect(proposalFactcheckFlag({ ...draftBefore, status }, mark)).toBeNull();
+      expect(proposalFactcheckFlag({ ...plain, status }, mark)).toBeNull();
     }
   });
 
-  test("a draft made after the check with its block flags nothing; without one it is the at-apply note only", () => {
-    const after = { ...draftBefore, createdAt: CHECKED_AT + 1000, draft: withFactcheckAppendix(page("Body."), saved()) };
-    expect(proposalFactcheckFlag(after, mark)).toBeNull();
-    expect(proposalFactcheckFlag({ ...after, draft: page("Body.") }, mark)).toEqual({
-      ...mark,
-      draftedBefore: false,
-      missingBlock: true,
-    });
-    // An approved row is mid-apply: the note, never the Redraft lock.
-    expect(proposalFactcheckFlag({ ...draftBefore, status: "approved" }, mark)!.draftedBefore).toBe(false);
-    // An update-mode draft gets the note only; Redraft is create mode.
-    expect(proposalFactcheckFlag({ ...draftBefore, mode: "update" }, mark)!.draftedBefore).toBe(false);
+  // Item 2: the lock is `redraftRefusal`'s own predicate, so it never strands a
+  // card whose only way out Redraft would refuse.
+  test("a draft Redraft would refuse is never locked; it gets the note only", () => {
+    const wikiKeyed = proposalFactcheckFlag({ ...plain, wikiName: "mimir" }, mark)!;
+    expect(wikiKeyed.needsRedraft).toBe(false);
+    expect(wikiKeyed.missingBlock).toBe(true);
+    const noDoc = proposalFactcheckFlag({ ...plain, sourceDocs: [{ ...doc, docId: "" }] }, mark);
+    expect(noDoc === null || noDoc.needsRedraft === false).toBe(true);
+    // An approved row is mid-apply: the note, never the lock.
+    expect(proposalFactcheckFlag({ ...plain, status: "approved" }, mark)!.needsRedraft).toBe(false);
+  });
+
+  // Item 12: update mode never appends and Redraft refuses it, so the note
+  // would be one nothing can clear.
+  test("an update-mode row gets no flag at all", () => {
+    expect(proposalFactcheckFlag({ ...plain, mode: "update" }, mark)).toBeNull();
+    expect(proposalFactcheckFlag({ ...plain, mode: "update", status: "approved" }, mark)).toBeNull();
   });
 });
