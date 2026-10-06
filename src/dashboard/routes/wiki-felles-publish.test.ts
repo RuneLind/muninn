@@ -97,6 +97,46 @@ describe("the spawn", () => {
     }
   });
 
+  test("remove spawns --fjern on the index spelling, with no root", async () => {
+    for (const relPath of ["plans/a.mdx", "./plans/a.mdx"]) {
+      const res = await post(appWith(), { wiki: "kode", relPath, dryRun: false, action: "remove" });
+      expect(res.status).toBe(200);
+      const lines = (await readFile(argvFile, "utf8")).trim().split("\n");
+      expect(lines).toEqual(["--fjern", "--ja", "--", "plans/a.mdx", "DB=unset"]);
+    }
+    await post(appWith(), { ...ok, action: "remove" });
+    expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(0, 5)).toEqual([
+      "--fjern",
+      "--dry-run",
+      "--ja",
+      "--",
+      "plans/a.mdx",
+    ]);
+  });
+
+  test("a dash-led page is removed as an object name, never read as a flag", async () => {
+    const res = await post(appWith(), { wiki: "kode", relPath: "-x.md", dryRun: true, action: "remove" });
+    expect(res.status).toBe(200);
+    expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(0, 5)).toEqual([
+      "--fjern",
+      "--dry-run",
+      "--ja",
+      "--",
+      "-x.md",
+    ]);
+  });
+
+  test("a remove that does not return says the delete may have finished", async () => {
+    const app = appWith({
+      runProc: async () => {
+        throw new ProcTimeoutError("felles-publish", 5);
+      },
+    });
+    const res = await post(app, { ...ok, action: "remove" });
+    expect(res.status).toBe(504);
+    expect(((await res.json()) as { error: string }).error).toMatch(/delete may still have finished/);
+  });
+
   test("a real Bun child does not load the .env in its working directory", async () => {
     // Bun reads `.env` from the cwd it starts in, which is muninn's own repo
     // root in production; an env allowlist means nothing if that file refills it.
@@ -165,6 +205,9 @@ describe("refusals before any spawn", () => {
     ["cross-site", { "sec-fetch-site": "cross-site" }, ok, 403],
     ["missing relPath", {}, { ...ok, relPath: "" }, 400],
     ["non-boolean dryRun", {}, { ...ok, dryRun: "yes" }, 400],
+    ["publish without allowIdent", {}, { wiki: "kode", relPath: "plans/a.mdx", dryRun: true }, 400],
+    ["unknown action", {}, { ...ok, action: "delete" }, 400],
+    ["remove of a page outside the index", {}, { ...ok, action: "remove", relPath: "plans/missing.mdx" }, 404],
     ["unknown wiki", {}, { ...ok, wiki: "nope" }, 404],
     ["wiki not allowlisted", {}, { ...ok, wiki: "mimir" }, 403],
     ["no such page", {}, { ...ok, relPath: "plans/missing.mdx" }, 404],

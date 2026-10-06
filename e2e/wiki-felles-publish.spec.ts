@@ -4,7 +4,8 @@
  *
  * What the unit tests cannot reach: the payload field arriving in the shell
  * (`fellesPublish` → the button), the button only on the allowlisted wiki, the
- * dialog's two runs reaching a real spawn with the checkbox's flag, and the
+ * dialog's two runs reaching a real spawn with the checkbox's flag, the remove
+ * flow's dry run and confirm reaching `--fjern`, and the
  * copied command naming the served root.
  *
  * `FELLES_WIKI_PUBLISH_BIN` is a STUB `.ts` that prints its argv and exits 0, so
@@ -19,6 +20,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { contrastOf } from "./contrast.ts";
 import { FELLES_BTN_ID } from "../src/dashboard/views/components/wiki-felles-publish.ts";
 
 const BTN = `#${FELLES_BTN_ID}`;
@@ -137,6 +139,46 @@ test.describe("Wiki reader: ⇪ Felles", () => {
       `bun ${stub} --tillat-ident ${servedRoot} ${REL}`,
     );
   });
+
+  test("remove dry-runs first, and only Confirm remove reaches --fjern for real", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await page.locator(BTN).click();
+    const dialog = page.locator("dialog.wiki-felles");
+    const out = dialog.locator(".wiki-felles-out");
+    const confirm = dialog.locator(".wiki-felles-confirm");
+    await expect(confirm).toBeHidden();
+
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await expect(out).toContainText(`ARGS ${JSON.stringify(["--fjern", "--dry-run", "--ja", "--", REL])}`);
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Dry run: the object below would be deleted/);
+    await expect(confirm).toBeVisible();
+
+    // Cancel withdraws the offer without a run.
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirm).toBeHidden();
+
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await confirm.getByRole("button", { name: "Confirm remove" }).click();
+    await expect(out).toContainText(`ARGS ${JSON.stringify(["--fjern", "--ja", "--", REL])}`);
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Removed/);
+    await expect(confirm).toBeHidden();
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`the remove controls read at 4.5:1 in the ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+      await page.locator(BTN).click();
+      const dialog = page.locator("dialog.wiki-felles");
+      const remove = dialog.getByRole("button", { name: "Remove…" });
+      expect(await contrastOf(remove), `${scheme} Remove…`).toBeGreaterThanOrEqual(4.5);
+      await remove.click();
+      const confirmBtn = dialog.getByRole("button", { name: "Confirm remove" });
+      await expect(confirmBtn).toBeVisible();
+      expect(await contrastOf(confirmBtn), `${scheme} Confirm remove`).toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(dialog.locator(".wiki-felles-confirm span")), `${scheme} confirm text`).toBeGreaterThanOrEqual(4.5);
+    });
+  }
 
   test("a wiki not in FELLES_WIKI_PUBLISH_WIKIS has no button", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${OTHER}&relPath=page.md`);

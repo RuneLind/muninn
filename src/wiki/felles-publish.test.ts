@@ -3,7 +3,7 @@ import {
   fellesPublishableFor,
   fellesPublishChildEnv,
   fellesPublishConfigFromEnv,
-  fellesPublishFlags,
+  fellesScriptArgs,
   fellesPublishPayloadField,
 } from "./felles-publish.ts";
 
@@ -63,9 +63,37 @@ describe("fellesPublishableFor", () => {
   });
 });
 
-test("flags come in the order the operator types them", () => {
-  expect(fellesPublishFlags({ dryRun: true, allowIdent: true })).toEqual(["--dry-run", "--tillat-ident"]);
-  expect(fellesPublishFlags({ dryRun: false, allowIdent: false })).toEqual([]);
+test("publish args come in the order the operator types them", () => {
+  const page = { root: "/w", relPath: "plans/a.mdx" };
+  expect(fellesScriptArgs({ action: "publish", dryRun: true, allowIdent: true, ...page })).toEqual([
+    "--dry-run",
+    "--tillat-ident",
+    "/w",
+    "./plans/a.mdx",
+  ]);
+  expect(fellesScriptArgs({ action: "publish", dryRun: false, allowIdent: false, ...page })).toEqual([
+    "/w",
+    "./plans/a.mdx",
+  ]);
+});
+
+test("remove names the bare object after --, and never passes the root or --tillat-ident", () => {
+  // The relPath is the bucket object name here, so a ./ prefix would name a
+  // different object; `--` keeps a dash-led page from reading as a flag.
+  const page = { root: "/w", relPath: "-x.md" };
+  expect(fellesScriptArgs({ action: "remove", dryRun: true, allowIdent: true, ...page })).toEqual([
+    "--fjern",
+    "--dry-run",
+    "--ja",
+    "--",
+    "-x.md",
+  ]);
+  expect(fellesScriptArgs({ action: "remove", dryRun: false, allowIdent: false, ...page })).toEqual([
+    "--fjern",
+    "--ja",
+    "--",
+    "-x.md",
+  ]);
 });
 
 test("the child environment is an allowlist", () => {

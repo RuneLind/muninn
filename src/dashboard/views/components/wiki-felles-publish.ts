@@ -1,8 +1,8 @@
 /// <reference lib="dom" />
 /**
  * The reader's ⇪ Felles control: publish the open page to the melosys-felles
- * bucket through `POST /api/wiki/felles-publish`, or copy the command line that
- * does the same from a terminal. Shown only on a wiki whose `/api/wiki/pages`
+ * bucket through `POST /api/wiki/felles-publish`, remove it from there again, or
+ * copy the publish command line for a terminal. Shown only on a wiki whose `/api/wiki/pages`
  * payload carries `fellesPublish` (see `src/wiki/felles-publish.ts`).
  *
  * The pure half (command line, outcome copy, markup) is exported for tests; the
@@ -42,8 +42,15 @@ export function fellesPublishCommand(opts: {
   ].join(" ");
 }
 
+export type FellesAction = "publish" | "remove";
+
 /** One line for the script's exit code (`publiser-felles-wiki.ts` header). */
-export function fellesOutcomeLine(exitCode: number, dryRun: boolean): { text: string; ok: boolean } {
+export function fellesOutcomeLine(
+  exitCode: number,
+  dryRun: boolean,
+  action: FellesAction = "publish",
+): { text: string; ok: boolean } {
+  if (action === "remove") return fellesRemoveOutcomeLine(exitCode, dryRun);
   switch (exitCode) {
     case 0:
       return dryRun
@@ -56,6 +63,25 @@ export function fellesOutcomeLine(exitCode: number, dryRun: boolean): { text: st
       return { text: "Usage or environment error — nothing was uploaded. See the output.", ok: false };
     case 3:
       return { text: "Upload failed. See the output.", ok: false };
+    default:
+      return { text: `The script exited with code ${exitCode}.`, ok: false };
+  }
+}
+
+/** The bucket has no soft delete, so the dry run is the step that shows what
+ *  goes; the confirm button is the step that deletes. */
+function fellesRemoveOutcomeLine(exitCode: number, dryRun: boolean): { text: string; ok: boolean } {
+  switch (exitCode) {
+    case 0:
+      return dryRun
+        ? { text: "Dry run: the object below would be deleted. Nothing was removed yet.", ok: true }
+        : { text: "Removed. The pod drops the page within about 2 minutes.", ok: true };
+    case 1:
+      return { text: "The script refused the path, or failed. Nothing may have been removed. See the output.", ok: false };
+    case 2:
+      return { text: "Usage or environment error — nothing was removed. See the output.", ok: false };
+    case 3:
+      return { text: "Delete failed — the page may not be in the bucket. See the output.", ok: false };
     default:
       return { text: `The script exited with code ${exitCode}.`, ok: false };
   }
@@ -81,7 +107,7 @@ export function fellesBtnHtml(relPath: string): string {
 
 export function fellesDialogHtml(relPath: string): string {
   return (
-    `<div class="wiki-felles-body"><div class="wiki-felles-head"><span>Publish to melosys-felles</span>` +
+    `<div class="wiki-felles-body"><div class="wiki-felles-head"><span>melosys-felles</span>` +
     `<button type="button" class="wiki-felles-x" data-felles="close" aria-label="Close">✕</button></div>` +
     `<div class="wiki-felles-path" title="${esc(relPath)}">${esc(relPath)}</div>` +
     `<label class="wiki-felles-check"><input type="checkbox" data-felles="ident" checked> ` +
@@ -90,6 +116,12 @@ export function fellesDialogHtml(relPath: string): string {
     `<button type="button" data-felles="dry">Dry run</button>` +
     `<button type="button" class="primary" data-felles="publish">Publish</button>` +
     `<button type="button" class="wiki-felles-copy" data-felles="copy" title="Copy the command line">⧉ Copy command</button>` +
+    `<button type="button" class="danger" data-felles="remove" title="Delete this page from the melosys-felles bucket">Remove…</button>` +
+    `</div>` +
+    `<div class="wiki-felles-confirm" hidden>` +
+    `<span>Delete it from the bucket? The bucket keeps no copy; your local page stays.</span>` +
+    `<button type="button" class="danger" data-felles="remove-confirm">Confirm remove</button>` +
+    `<button type="button" data-felles="remove-cancel">Cancel</button>` +
     `</div>` +
     `<div class="wiki-felles-status" role="status"></div>` +
     `<pre class="wiki-felles-out" hidden></pre></div>`
@@ -120,7 +152,16 @@ export function fellesPublishStyles(): string {
       border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
     }
     .wiki-felles-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .wiki-felles-actions button[disabled] { opacity: 0.5; cursor: default; }
+    /* Red marks the edge only: --status-error measures under 4.5:1 as text on
+       the light inset, the same reason the status line keeps its words primary. */
+    .wiki-felles-actions button.danger, .wiki-felles-confirm button.danger { border-color: var(--status-error); }
+    .wiki-felles-actions button[disabled], .wiki-felles-confirm button[disabled] { opacity: 0.5; cursor: default; }
+    .wiki-felles-actions .danger { margin-left: auto; }
+    .wiki-felles-confirm:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+    .wiki-felles-confirm button {
+      padding: 5px 12px; border-radius: 8px; cursor: pointer; font-size: 12.5px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
+    }
     .wiki-felles-status { margin-top: 10px; min-height: 1.2em; color: var(--text-secondary); }
     /* The status colours measure under 4.5:1 as text on the light surface, so
        they mark the edge and the words stay --text-primary. */
@@ -162,11 +203,15 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
   const ident = q<HTMLInputElement>('[data-felles="ident"]');
   const status = q<HTMLElement>(".wiki-felles-status");
   const out = q<HTMLElement>(".wiki-felles-out");
+  const confirmRow = q<HTMLElement>(".wiki-felles-confirm");
   // ✕ is disabled with the run buttons: closing mid-run would drop the result
   // and let a re-opened dialog start a second upload beside the first.
   const runButtons = [
     q<HTMLButtonElement>('[data-felles="dry"]'),
     q<HTMLButtonElement>('[data-felles="publish"]'),
+    q<HTMLButtonElement>('[data-felles="remove"]'),
+    q<HTMLButtonElement>('[data-felles="remove-confirm"]'),
+    q<HTMLButtonElement>('[data-felles="remove-cancel"]'),
     q<HTMLButtonElement>('[data-felles="close"]'),
   ];
   let running = false;
@@ -179,24 +224,29 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     status.className = "wiki-felles-status" + (kind ? " " + kind : "");
   };
 
-  async function run(dryRun: boolean): Promise<void> {
+  // Remove is two runs: the script's own dry run names the object, and only
+  // then does the confirm row offer the real delete. Any other run hides it.
+  async function run(action: FellesAction, dryRun: boolean): Promise<void> {
     if (running) return;
     running = true;
     runButtons.forEach((b) => (b.disabled = true));
-    setStatus(dryRun ? "Running dry run…" : "Publishing…", "");
+    confirmRow.hidden = true;
+    const verb = action === "remove" ? "Removing…" : "Publishing…";
+    setStatus(dryRun ? "Running dry run…" : verb, "");
     out.hidden = true;
     try {
       const res = await fetch("/api/wiki/felles-publish", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wiki: opts.wiki, relPath: opts.relPath, dryRun, allowIdent: ident.checked }),
+        body: JSON.stringify({ wiki: opts.wiki, relPath: opts.relPath, dryRun, allowIdent: ident.checked, action }),
       });
       const data = (await res.json().catch(() => null)) as
         | { exitCode?: number; output?: string; error?: string }
         | null;
       if (res.ok && data && typeof data.exitCode === "number") {
-        const line = fellesOutcomeLine(data.exitCode, dryRun);
+        const line = fellesOutcomeLine(data.exitCode, dryRun, action);
         setStatus(line.text, line.ok ? "ok" : "err");
+        if (action === "remove" && dryRun && data.exitCode === 0) confirmRow.hidden = false;
         if (data.output) {
           out.innerHTML = fellesOutputHtml(data.output);
           out.hidden = false;
@@ -218,8 +268,15 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     if (target === dialog && !running) return dialog.close();
     const action = target.closest("[data-felles]")?.getAttribute("data-felles");
     if (action === "close") dialog.close();
-    else if (action === "dry") void run(true);
-    else if (action === "publish") void run(false);
+    else if (action === "dry") void run("publish", true);
+    else if (action === "publish") void run("publish", false);
+    else if (action === "remove") void run("remove", true);
+    else if (action === "remove-confirm") void run("remove", false);
+    else if (action === "remove-cancel") {
+      confirmRow.hidden = true;
+      setStatus("", "");
+      out.hidden = true;
+    }
     else if (action === "copy") {
       const btn = target.closest("button") as HTMLButtonElement;
       const command = fellesPublishCommand({ ...opts, allowIdent: ident.checked });

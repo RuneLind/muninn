@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   fellesBtnHtml,
+  fellesDialogHtml,
   fellesOutcomeLine,
   fellesOutputHtml,
   fellesPublishCommand,
@@ -37,6 +38,23 @@ test("each exit code has its own line", () => {
   expect(fellesOutcomeLine(0, true).ok).toBe(true);
   expect(fellesOutcomeLine(0, false).text).toMatch(/^Published/);
   for (const code of [1, 2, 3, 9]) expect(fellesOutcomeLine(code, false).ok).toBe(false);
+});
+
+test("remove has its own line per exit code", () => {
+  expect(fellesOutcomeLine(0, true, "remove")).toEqual({
+    text: "Dry run: the object below would be deleted. Nothing was removed yet.",
+    ok: true,
+  });
+  expect(fellesOutcomeLine(0, false, "remove").text).toMatch(/^Removed/);
+  for (const code of [1, 2, 3, 9]) expect(fellesOutcomeLine(code, false, "remove").ok).toBe(false);
+  // Publish copy must never describe a delete.
+  for (const code of [0, 1, 2, 3]) expect(fellesOutcomeLine(code, false, "remove").text).not.toMatch(/upload|Published/);
+});
+
+test("the dialog's remove confirmation starts hidden", () => {
+  const html = fellesDialogHtml("plans/a.mdx");
+  expect(html).toContain('data-felles="remove"');
+  expect(html).toMatch(/<div class="wiki-felles-confirm" hidden>/);
 });
 
 test("exit 1 claims nothing the code cannot know", () => {
