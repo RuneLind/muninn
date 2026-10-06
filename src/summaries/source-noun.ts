@@ -2,8 +2,9 @@
  * The noun a summary uses for its captured item (D7): from the URL's host
  * first — `article-summaries` holds pasted transcripts of videos and talks too —
  * then from the collection. Shared by the drafter rider
- * (`src/gardener/factcheck-carry.ts`) and the `/summaries` Integrate
- * (`factcheck-integrate.ts`), so both attribute to the same noun.
+ * (`src/gardener/factcheck-carry.ts`) and the `/summaries` Integrate route
+ * (`src/dashboard/routes/summaries-factcheck-writeback.ts`), so both attribute
+ * to the same noun.
  */
 
 const HOST_NOUNS: readonly [RegExp, string][] = [

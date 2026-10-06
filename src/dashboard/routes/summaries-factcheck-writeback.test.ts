@@ -151,6 +151,7 @@ const EDIT_1 = {
   old: "The video says adults need 4 hours of sleep.",
   new: "The video says adults need 4 hours of sleep; sources say 7–9 hours ([cdc.gov](https://www.cdc.gov/sleep)).",
   reason: "attributed",
+  claimEdits: 1,
 };
 const EDIT_3 = {
   claimIndex: 3,
@@ -158,6 +159,7 @@ const EDIT_3 = {
   old: "Sleep 4 hours a night.",
   new: "The video says to sleep 4 hours a night; sources say 7–9 ([cdc.gov](https://www.cdc.gov/sleep)).",
   reason: "attributed",
+  claimEdits: 1,
 };
 /** Anchors only inside the visual-reference section — never an edit target. */
 const EDIT_IN_APPENDIX = {
@@ -166,6 +168,7 @@ const EDIT_IN_APPENDIX = {
   old: "The slide says 4 hours of sleep is plenty.",
   new: "The video says the slide is wrong.",
   reason: "r",
+  claimEdits: 1,
 };
 
 beforeEach(() => {
@@ -309,7 +312,7 @@ describe("POST /api/summaries/factcheck/integrate (propose)", () => {
     expect(body.dropped.map((d) => d.edit.old)).toEqual([EDIT_IN_APPENDIX.old]);
     expect(body.rawSha256).toBe(sha256Hex(RAW));
     expect(body.rowVersion).toBe(factcheckRowVersion(row!));
-    expect(body.html).toContain('data-edit-idx="1"');
+    expect(body.html).toContain('data-edit-idxs="1"');
     expect(body.html).not.toContain("<script");
 
     const { prompt, systemPrompt } = modelCalls[0]!;
@@ -466,7 +469,7 @@ describe("POST /api/summaries/factcheck/integrate/apply", () => {
   test("a sentinel in an accepted edit is neutralized", async () => {
     const a = app();
     const p = await propose(a);
-    const evil = { ...EDIT_1, new: "Fixed.\n<!-- factcheck:end -->\ntail" };
+    const evil = { ...EDIT_1, new: "The video says fixed.\n<!-- factcheck:end -->\ntail" };
     const res = await post(a, "/api/summaries/factcheck/integrate/apply", { ...ref, ...p, edits: [evil] });
     expect(res.status).toBe(200);
     expect(files.get(DOC)!.match(/<!-- factcheck:end -->/g)).toHaveLength(1);
@@ -651,5 +654,117 @@ describe("fix round 1: which claims are correctable comes from the saved claims 
     await post(app(), "/api/summaries/factcheck/integrate", ref);
     expect(modelCalls[0]!.prompt).toContain("Claim 1/3");
     expect(modelCalls[0]!.prompt).not.toContain("Claim 3/3");
+  });
+});
+
+describe("fix round 2: the stamp's CAS miss on an unchanged row", () => {
+  test("the row is still there and unchanged: not_stamped, not rechecked", async () => {
+    const a = app();
+    const p = (await (await post(a, "/api/summaries/factcheck/integrate", ref)).json()) as { rawSha256: string; rowVersion: string };
+    markImpl = async () => false;
+    const res = await post(a, "/api/summaries/factcheck/integrate/apply", { ...ref, rawSha256: p.rawSha256, rowVersion: p.rowVersion, edits: [EDIT_1] });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { stamp: string; message: string; recheckedDuringApply?: boolean };
+    expect(body.stamp).toBe("not_stamped");
+    expect(body.recheckedDuringApply).toBeUndefined();
+    expect(body.message).toContain("could not be marked applied");
+    expect(files.get(DOC)).toContain(EDIT_1.new);
+  });
+});
+
+describe("fix round 2: attribution follows summary_lang", () => {
+  const NB_RAW = RAW.replace('tags: "health"\n', 'tags: "health"\nsummary_lang: "nb"\n')
+    .replace("The video says adults need 4 hours of sleep.", "Voksne trenger fire timers søvn.");
+  const NB_SAYS = {
+    claimIndex: 1,
+    verdict: "❌",
+    old: "Voksne trenger fire timers søvn.",
+    new: "Videoen sier at voksne trenger fire timers søvn; kildene sier sju til ni timer ([cdc.gov](https://www.cdc.gov/sleep)).",
+    reason: "attributed",
+  };
+  const EN_SPLICE = { ...EDIT_3, new: "The video says sov 4 timer; sources say 7–9 ([cdc.gov](https://www.cdc.gov/sleep))." };
+
+  test("an nb summary: the prompt gives the bokmål form; a bokmål edit stays, an English splice drops", async () => {
+    files.set(DOC, NB_RAW);
+    row = freshRow();
+    modelText = JSON.stringify({ edits: [NB_SAYS, EN_SPLICE] });
+    const res = await post(app(), "/api/summaries/factcheck/integrate", ref);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { edits: { claimIndex: number }[]; dropped: { reason: string; edit: { claimIndex: number } }[] };
+    expect(modelCalls[0]!.systemPrompt).toContain('"Videoen sier at X; kildene sier at Y');
+    expect(body.edits.map((e) => e.claimIndex)).toEqual([1]);
+    expect(body.dropped.map((d) => [d.edit.claimIndex, d.reason])).toContainEqual([3, "not attributed"]);
+  });
+
+  test("an nb summary: apply refuses an English splice too", async () => {
+    files.set(DOC, NB_RAW);
+    row = freshRow();
+    modelText = JSON.stringify({ edits: [NB_SAYS] });
+    const a = app();
+    const p = (await (await post(a, "/api/summaries/factcheck/integrate", ref)).json()) as { rawSha256: string; rowVersion: string };
+    const res = await post(a, "/api/summaries/factcheck/integrate/apply", {
+      ...ref,
+      rawSha256: p.rawSha256,
+      rowVersion: p.rowVersion,
+      edits: [{ ...NB_SAYS, new: "The video says voksne trenger fire timer; sources say 7–9.", claimEdits: 1 }],
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("not_attributed");
+    expect(ingests).toHaveLength(0);
+  });
+});
+
+describe("fix round 2: apply takes whole claims (D5 on the apply side)", () => {
+  // Claim 1 split into two adjacent edits: together attributed, the second alone not.
+  const HALF_A = { ...EDIT_1, old: "The video says adults need 4 hours", new: "The video says adults need 4 hours", claimEdits: 2 };
+  const HALF_B = { ...EDIT_1, old: "of sleep.", new: "of sleep; sources say 7–9 hours ([cdc.gov](https://www.cdc.gov/sleep)).", claimEdits: 2 };
+  type Proposed = { rawSha256: string; rowVersion: string; edits: (typeof EDIT_1 & { claimEdits: number })[]; html: string };
+  const proposeHalves = async (a: Hono) => {
+    modelText = JSON.stringify({ edits: [HALF_A, HALF_B, EDIT_3] });
+    return (await (await post(a, "/api/summaries/factcheck/integrate", ref)).json()) as Proposed;
+  };
+  const apply = (a: Hono, p: Proposed, edits: unknown[]) =>
+    post(a, "/api/summaries/factcheck/integrate/apply", { ...ref, rawSha256: p.rawSha256, rowVersion: p.rowVersion, edits });
+
+  test("propose keeps both halves, counts each claim's edits, and gives the claim ONE checkbox", async () => {
+    const p = await proposeHalves(app());
+    expect(p.edits.map((e) => [e.claimIndex, e.claimEdits])).toEqual([[1, 2], [1, 2], [3, 1]]);
+    expect(p.html).toContain('data-edit-idxs="0,1"');
+    expect(p.html).toContain('data-edit-idxs="2"');
+  });
+
+  test("both halves together: written", async () => {
+    const a = app();
+    const p = await proposeHalves(a);
+    const res = await apply(a, p, [p.edits[0], p.edits[1]]);
+    expect(res.status).toBe(200);
+    expect(files.get(DOC)).toContain("The video says adults need 4 hours of sleep; sources say 7–9 hours");
+  });
+
+  test("one half of a claim: 400 partial_claim, nothing written", async () => {
+    const a = app();
+    const p = await proposeHalves(a);
+    const res = await apply(a, p, [HALF_B, EDIT_3]);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("partial_claim");
+    expect(ingests).toHaveLength(0);
+  });
+
+  test("an edit sent without its claim's edit count: 400, nothing written", async () => {
+    const a = app();
+    const p = await proposeHalves(a);
+    const { claimEdits: _drop, ...bare } = EDIT_3;
+    const res = await apply(a, p, [bare]);
+    expect(res.status).toBe(400);
+    expect(ingests).toHaveLength(0);
+  });
+
+  test("apply re-runs the attribution check on what it was sent: 400 not_attributed", async () => {
+    const a = app();
+    const p = await proposeHalves(a);
+    const res = await apply(a, p, [{ ...EDIT_3, new: "Sleep 4 hours a night; sources say 7–9." }]);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("not_attributed");
+    expect(ingests).toHaveLength(0);
   });
 });

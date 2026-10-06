@@ -4,10 +4,17 @@
  * ✎ Integrate corrections — the DOM half of
  * `src/dashboard/routes/summaries-factcheck-writeback.ts`.
  *
- * The integrate preview arrives as server-rendered HTML (one checkbox per edit,
- * `data-edit-idx` into the proposal's `edits`), so this module carries no diff
- * code. Apply posts the CHECKED edits back with the proposal's `rawSha256` and
- * `rowVersion`; the server re-resolves them against a fresh read.
+ * The integrate preview arrives as server-rendered HTML (one checkbox per
+ * claim, `data-edit-idxs` naming that claim's edits in the proposal's
+ * `edits`), so this module carries no diff code. Apply posts the CHECKED
+ * claims' edits back, each with its `claimEdits` count, plus the proposal's
+ * `rawSha256` and `rowVersion`; the server re-resolves them against a fresh
+ * read and refuses a claim sent in part.
+ *
+ * A new web result drops the preview and any message about the old result,
+ * but never the outcome of a write that landed: append and apply report it and
+ * reload the article (while the panel shows that document) whatever result is
+ * on screen by then.
  *
  * Imports nothing from `wiki-integrate.ts`: the bundle stays the size of its
  * own buttons.
@@ -27,6 +34,7 @@ interface ProposedEdit {
   old: string;
   new: string;
   reason: string;
+  claimEdits: number;
 }
 
 interface Proposal {
@@ -41,7 +49,8 @@ interface Proposal {
 interface WritebackState {
   busy: "" | "append" | "propose" | "apply";
   proposal: Proposal | null;
-  message: { text: string; tone: "ok" | "error"; items?: string[] } | null;
+  /** `write`: the outcome of a write that landed, which a new result keeps. */
+  message: { text: string; tone: "ok" | "error"; items?: string[]; write?: boolean } | null;
   /** The web result the proposal and message belong to (`createdAt`). */
   resultAt: number | null;
   /** The next full open is the write's own reload: keep the message once. */
@@ -63,7 +72,7 @@ function stateFor(key: string): WritebackState {
 function syncResult(s: WritebackState, createdAt: number): void {
   if (s.resultAt !== null && s.resultAt !== createdAt) {
     s.proposal = null;
-    s.message = null;
+    if (!s.message?.write) s.message = null;
   }
   s.resultAt = createdAt;
 }
@@ -182,10 +191,10 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
   const s = stateFor(ctx.key);
   const ref = { source: ctx.source, docId: ctx.docId };
   el.querySelectorAll<HTMLInputElement>(".sum-fc-int-cb").forEach((cb) => {
-    const i = Number(cb.dataset.editIdx);
-    if (s.proposal && Number.isInteger(i)) cb.checked = s.proposal.selected[i] !== false;
+    const idxs = (cb.dataset.editIdxs ?? "").split(",").map(Number).filter(Number.isInteger);
+    if (s.proposal && idxs.length) cb.checked = idxs.every((i) => s.proposal!.selected[i] !== false);
     cb.addEventListener("change", () => {
-      if (s.proposal && Number.isInteger(i)) s.proposal.selected[i] = cb.checked;
+      if (s.proposal) for (const i of idxs) s.proposal.selected[i] = cb.checked;
     });
   });
   el.querySelectorAll<HTMLButtonElement>("[data-wb]").forEach((btn) => {
@@ -205,7 +214,7 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
   });
 
   async function run(action: "append" | "propose" | "apply"): Promise<void> {
-    // A response for a web result that has since been replaced is dropped.
+    // A PREVIEW for a web result that has since been replaced is dropped.
     const origin = s.resultAt;
     const current = () => s.resultAt === origin;
     s.busy = action;
@@ -214,10 +223,9 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
     try {
       if (action === "append") {
         const { status, data } = await post("/api/summaries/factcheck/append", ref);
-        if (!current()) return;
         if (status !== 200) s.message = { text: failureText(data, status), tone: "error" };
         else {
-          s.message = { text: "Added the Fact check section to the summary.", tone: "ok" };
+          s.message = { text: "Added the Fact check section to the summary.", tone: "ok", write: true };
           await ctx.afterWrite();
         }
       } else if (action === "propose") {
@@ -240,7 +248,7 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
         if (!p) return;
         const accepted = p.edits
           .filter((_, i) => p.selected[i] !== false)
-          .map((e) => ({ claimIndex: e.claimIndex, verdict: e.verdict, old: e.old, new: e.new, reason: e.reason }));
+          .map((e) => ({ claimIndex: e.claimIndex, verdict: e.verdict, old: e.old, new: e.new, reason: e.reason, claimEdits: e.claimEdits }));
         if (accepted.length === 0) {
           s.message = { text: "Select at least one edit to apply.", tone: "error" };
           return;
@@ -251,7 +259,6 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
           rowVersion: p.rowVersion,
           edits: accepted,
         });
-        if (!current()) return;
         if (status !== 200) {
           s.message = { text: failureText(data, status), tone: "error" };
         } else {
@@ -280,7 +287,7 @@ function applyMessage(data: Record<string, unknown>, accepted: number): NonNulla
     : [];
   if (data.stamp !== "stamped") {
     const why = typeof data.message === "string" ? data.message : "The summary was written, but the fact check is not marked applied.";
-    return { text: `Applied ${n} edit(s). ${why}`, tone: "error", items };
+    return { text: `Applied ${n} edit(s). ${why}`, tone: "error", items, write: true };
   }
-  return { text: `Integrated ${n} correction(s) and the Fact check section.`, tone: "ok", items };
+  return { text: `Integrated ${n} correction(s) and the Fact check section.`, tone: "ok", items, write: true };
 }

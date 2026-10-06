@@ -12,8 +12,9 @@
  *   touched.
  * - **Voice (D5, D7).** A summary reports what its source says, so a ❌ or ⚠️ is
  *   ATTRIBUTED ("the video says X; sources say Y") rather than corrected in the
- *   source's mouth — checked mechanically ({@link attributionRefusal}). The noun
- *   is `sourceKindNoun`'s, shared with the drafter rider.
+ *   source's mouth — checked mechanically, per claim and in the summary's
+ *   language ({@link unattributedEdits}). The noun is `sourceKindNoun`'s,
+ *   shared with the drafter rider.
  * - **Structure.** An edit cannot add a line the next read cuts on, and a
  *   rebuild that moves the transcript, the visual section or the checked ranges
  *   is refused ({@link summaryStructureChanged}).
@@ -42,21 +43,74 @@ import { VISUAL_REFERENCE_HEADING_RE } from "./visual-detail.ts";
 // The voice (D5, D7)
 // ---------------------------------------------------------------------------
 
-/** The summary editor's voice: every acted-on verdict attributes. `sourceNoun`
- *  is {@link sourceKindNoun}'s ("the video"). */
-export function summaryEditorVoice(sourceNoun: string): IntegrateEditorVoice {
+/**
+ * The summary's language as the attribution check reads it: frontmatter
+ * `summary_lang` (the RESOLVED language a capture writes), absent ⇒ English.
+ * `"other"` gets no literal check.
+ */
+export type SummaryLang = "en" | "nb" | "other";
+
+export function summaryLangOf(summaryLang: string | null | undefined): SummaryLang {
+  const v = (summaryLang ?? "").trim().toLowerCase();
+  if (v === "" || v === "en") return "en";
+  return v === "nb" ? "nb" : "other";
+}
+
+/** `sourceKindNoun`'s nouns in bokmål, definite form. */
+const NB_NOUNS: Readonly<Record<string, string>> = {
+  video: "videoen",
+  talk: "foredraget",
+  post: "innlegget",
+  article: "artikkelen",
+  source: "kilden",
+};
+
+/** The words an attributed edit must carry, in the summary's language — `null`
+ *  for a language the check does not read. */
+function attributionWords(sourceNoun: string, lang: SummaryLang): { noun: string; verbs: readonly string[] } | null {
+  if (lang === "en") return { noun: sourceNoun, verbs: ["says", "claims", "states"] };
+  if (lang === "nb") return { noun: NB_NOUNS[sourceNoun.replace(/^the /, "")] ?? "kilden", verbs: ["sier", "hevder", "påstår"] };
+  return null;
+}
+
+const capitalize = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+
+/** The summary editor's voice: every acted-on verdict attributes, in the
+ *  summary's language. `sourceNoun` is {@link sourceKindNoun}'s ("the video"),
+ *  `summaryLang` the frontmatter value. */
+export function summaryEditorVoice(sourceNoun: string, summaryLang?: string | null): IntegrateEditorVoice {
   const noun = sourceNoun.replace(/^the /, "");
   const article = /^[aeiou]/.test(noun) ? "an" : "a";
+  const lang = summaryLangOf(summaryLang);
+  // English keeps the round-1 wording byte for byte (pinned).
+  const nb = lang === "nb" ? NB_NOUNS[noun] ?? "kilden" : null;
+  const says = nb ? `${capitalize(nb)} sier at` : `The ${noun} says`;
+  const shape = nb ? `"${says} X; kildene sier at Y ([hostname](url))."` : `"The ${noun} says X; sources say Y ([hostname](url))."`;
+  const lowerSays = nb ? `${nb} sier at …` : `the ${noun} says …`;
+  const sourcesSay = nb ? `"Kildene sier …"` : `"Sources say …"`;
+  const words = attributionWords(sourceNoun, lang);
+  const languageRule =
+    lang === "nb"
+      ? [`- Write every edit in Norwegian bokmål, the summary's language — never English, the attribution included.`]
+      : lang === "other"
+        ? [`- Write every edit in the summary's own language, the attribution included: translate the shape above into it.`]
+        : [];
+  const literalRule = words
+    ? [
+        `- Every ❌/⚠️ edit's \`new\` must contain the words "${words.noun} ${words.verbs[0]}" (or "${words.noun} ${words.verbs[1]}" / "${words.noun} ${words.verbs[2]}"), even when the sentence already names a speaker. An edit without them is discarded.`,
+      ]
+    : [];
   return {
     role: `You are a meticulous summary editor applying fact-check results to a summary of ${article} ${noun}.`,
     given:
       `You are given the summary's text and the fact-check verdicts for some of its claims. ` +
       `The summary reports what the ${noun} says, so a correction must never put words in the ${noun}'s mouth.`,
     verdictRules: [
-      `- ❌ (contradicted): ATTRIBUTE, never correct silently. The edited sentence must say what the ${noun} says and then what the sources say, in this shape: "The ${noun} says X; sources say Y ([hostname](url))." Cite the correcting source as a markdown link \`[hostname](url)\` right there in the sentence.`,
-      `- ⚠️ (partly supported): attribute the same way: the claim stays the ${noun}'s ("the ${noun} says …"), followed by what the sources say — the missing precision or the caveat — with the same in-place source link.`,
-      `- For ❌ and ⚠️ alike, the claim must READ as the ${noun}'s after the edit. If it states the claim as plain fact, rewrite it to start from the ${noun} ("The ${noun} says …"), and make \`old\` cover the sentence from its start. Appending "Sources say …" after a sentence that still asserts the claim as fact is NOT attribution.`,
-      `- Every ❌/⚠️ edit's \`new\` must contain the words "the ${noun} says" (or "the ${noun} claims" / "the ${noun} states"), even when the sentence already names a speaker. An edit without them is discarded.`,
+      `- ❌ (contradicted): ATTRIBUTE, never correct silently. The edited sentence must say what the ${noun} says and then what the sources say, in this shape: ${shape} Cite the correcting source as a markdown link \`[hostname](url)\` right there in the sentence.`,
+      `- ⚠️ (partly supported): attribute the same way: the claim stays the ${noun}'s ("${lowerSays}"), followed by what the sources say — the missing precision or the caveat — with the same in-place source link.`,
+      `- For ❌ and ⚠️ alike, the claim must READ as the ${noun}'s after the edit. If it states the claim as plain fact, rewrite it to start from the ${noun} ("${says} …"), and make \`old\` cover the sentence from its start. Appending ${sourcesSay} after a sentence that still asserts the claim as fact is NOT attribution.`,
+      ...languageRule,
+      ...literalRule,
     ],
     noun: "summary",
     task: (title, collection) =>
@@ -165,10 +219,67 @@ export function rebuildSummaryBody(slices: SummaryEditSlices, texts: readonly st
 // Refusals (fix round 1)
 // ---------------------------------------------------------------------------
 
-/** `the <noun> says|claims|states`, case-insensitive: what a ❌/⚠️ edit must carry. */
-export function attributionRefusal(newText: string, sourceNoun: string): string | null {
-  const noun = sourceNoun.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
-  return new RegExp(`\\b${noun}\\s+(?:says|claims|states)\\b`, "i").test(newText) ? null : "not attributed";
+/**
+ * What an attributed ❌/⚠️ text must carry, case-insensitive: `the <noun>
+ * says|claims|states` in English, `<substantiv> sier|hevder|påstår` in bokmål
+ * ("foredraget sier"). `summaryLang` is the frontmatter value; any other
+ * language is not checked (null).
+ */
+export function attributionRefusal(newText: string, sourceNoun: string, summaryLang?: string | null): string | null {
+  const words = attributionWords(sourceNoun, summaryLangOf(summaryLang));
+  if (!words) return null;
+  const noun = words.noun.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+  const re = new RegExp(`(?<![\\p{L}\\p{N}_])${noun}\\s+(?:${words.verbs.join("|")})(?![\\p{L}\\p{N}_])`, "iu");
+  return re.test(newText) ? null : "not attributed";
+}
+
+/** One placed edit, for the per-claim checks. */
+export interface PlacedEdit {
+  readonly edit: IntegrateEdit;
+  readonly slice: number;
+  readonly start: number;
+}
+
+/** Edits group by claim; a claim-0 edit is a group of its own. */
+function claimGroups<T extends { edit: IntegrateEdit }>(items: readonly T[]): T[][] {
+  const groups = new Map<string, T[]>();
+  items.forEach((item, i) => {
+    const key = item.edit.claimIndex > 0 ? `c${item.edit.claimIndex}` : `e${i}`;
+    const g = groups.get(key);
+    if (g) g.push(item);
+    else groups.set(key, [item]);
+  });
+  return [...groups.values()];
+}
+
+/**
+ * The placed edits whose CLAIM is unattributed: a claim needs the check when
+ * the saved claims mark it ❌/⚠️ or any of its edits says ❌/⚠️, and passes
+ * when its edits' `new` texts, joined in document order, attribute — a
+ * sentence split into two edits is attributed by either half.
+ */
+export function unattributedEdits(
+  placed: readonly PlacedEdit[],
+  opts: { sourceNoun: string; summaryLang?: string | null; correctable: ReadonlySet<number> },
+): Set<PlacedEdit> {
+  const out = new Set<PlacedEdit>();
+  for (const group of claimGroups(placed)) {
+    const checked = group.some((p) => opts.correctable.has(p.edit.claimIndex) || /❌|⚠/.test(p.edit.verdict));
+    if (!checked) continue;
+    const text = [...group]
+      .sort((a, b) => a.slice - b.slice || a.start - b.start)
+      .map((p) => p.edit.new)
+      .join(" ");
+    if (attributionRefusal(text, opts.sourceNoun, opts.summaryLang)) for (const p of group) out.add(p);
+  }
+  return out;
+}
+
+/** How many edits each claim has in `edits` (claim 0 counts each edit alone). */
+export function claimEditCounts(edits: readonly IntegrateEdit[]): number[] {
+  const counts = new Map<number, number>();
+  for (const e of edits) if (e.claimIndex > 0) counts.set(e.claimIndex, (counts.get(e.claimIndex) ?? 0) + 1);
+  return edits.map((e) => (e.claimIndex > 0 ? counts.get(e.claimIndex)! : 1));
 }
 
 const FACTCHECK_HEADING_RE = /^ {0,3}#{1,6}[ \t]+fact[ \t-]*check\b/i;
@@ -227,33 +338,49 @@ export interface ProposeSummaryEditsInput {
   /** Drops made before this step (parse, bounds), for the claim-group rule. */
   priorDrops: readonly DroppedEdit[];
   sourceNoun: string;
+  /** The frontmatter `summary_lang` (absent ⇒ English). */
+  summaryLang?: string | null;
   /** Claim indices whose saved verdict is ❌ or ⚠️. */
   correctable: ReadonlySet<number>;
   bodyLen: number;
 }
 
 /**
- * Propose-side screening, in order: structural lines and attribution (per edit),
- * resolution, the change budget, the per-edit structure check, then the claim
- * group — when any edit for a claim is dropped, every edit for it is (a half
- * correction reads as the whole one). Mutates nothing it was given.
+ * Propose-side screening, in order: structural lines (per edit), resolution,
+ * the claim group, attribution (per claim, {@link unattributedEdits}), the
+ * change budget, the per-edit structure check, the claim group again, then the
+ * structure check over every kept edit together. The claim group: when any
+ * edit for a claim is dropped, every edit for it is (a half correction reads as
+ * the whole one). Mutates nothing it was given.
  */
 export function proposeSummaryEdits(input: ProposeSummaryEditsInput): {
   outcomes: SliceEditOutcome[];
   dropped: DroppedEdit[];
   changedChars: number;
 } {
-  const { slices, sourceNoun, correctable } = input;
+  const { slices } = input;
   const screenDrops: DroppedEdit[] = [];
   const kept = input.edits.filter((edit) => {
-    const reason =
-      structuralLineRefusal(edit.new) ??
-      (correctable.has(edit.claimIndex) || /❌|⚠/.test(edit.verdict) ? attributionRefusal(edit.new, sourceNoun) : null);
+    const reason = structuralLineRefusal(edit.new);
     if (reason) screenDrops.push({ edit, reason });
     return !reason;
   });
   const resolved = resolveSummaryEdits(slices, kept);
   const { outcomes } = resolved;
+  const dropGroups = () => {
+    const failed = new Set(
+      [...input.priorDrops, ...screenDrops, ...outcomes.filter((o) => !o.applied)].map((d) => d.edit.claimIndex).filter((i) => i > 0),
+    );
+    for (const o of outcomes) {
+      if (o.applied && failed.has(o.edit.claimIndex)) {
+        dropOutcome(o, `another edit for claim ${o.edit.claimIndex} was dropped, so this one is too`);
+      }
+    }
+  };
+  // Attribution reads whole claims, so the claims missing an edit go first.
+  dropGroups();
+  const placed = outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0, o }));
+  for (const p of unattributedEdits(placed, input)) dropOutcome((p as (typeof placed)[number]).o, "not attributed");
   enforceChangeBudget(outcomes, input.bodyLen);
   for (const o of outcomes) {
     if (!o.applied) continue;
@@ -262,14 +389,7 @@ export function proposeSummaryEdits(input: ProposeSummaryEditsInput): {
       dropOutcome(o, "would change the summary's structure (the transcript, the visual reference or the checked text)");
     }
   }
-  const failed = new Set(
-    [...input.priorDrops, ...screenDrops, ...outcomes.filter((o) => !o.applied)].map((d) => d.edit.claimIndex).filter((i) => i > 0),
-  );
-  for (const o of outcomes) {
-    if (o.applied && failed.has(o.edit.claimIndex)) {
-      dropOutcome(o, `another edit for claim ${o.edit.claimIndex} was dropped, so this one is too`);
-    }
-  }
+  dropGroups();
   const applied = outcomes.filter((o) => o.applied);
   if (applied.length > 1) {
     const together = resolveSummaryEdits(slices, applied.map((o) => o.edit));
@@ -299,35 +419,43 @@ export interface SummaryPreviewEdit {
 }
 
 /**
- * The preview: one card per proposed edit with a checkbox (`data-edit-idx`, the
- * edit's index in the response's `edits`), a line diff of the RAW span it
- * replaces against its replacement, and the dropped edits with their reasons.
+ * The preview: one card per CLAIM with one checkbox (`data-edit-idxs`, the
+ * comma-separated indices of that claim's edits in the response's `edits`), a
+ * line diff per edit of the RAW span it replaces against its replacement, and
+ * the dropped edits with their reasons. A claim-0 edit is a card of its own.
  */
 export function summaryIntegratePreviewHtml(
   edits: readonly SummaryPreviewEdit[],
   dropped: readonly { edit: { claimIndex?: number; old?: string }; reason: string }[],
   claimTitles: ReadonlyMap<number, string>,
 ): string {
-  const cards = edits.map((e, i) => {
-    const diff = lineDiff(e.resolvedText ?? "", e.new)
-      .map((l) => {
-        const cls = l.type === "add" ? "d-add" : l.type === "del" ? "d-del" : "d-ctx";
-        const prefix = l.type === "add" ? "+ " : l.type === "del" ? "- " : "  ";
-        return `<span class="${cls}">${escapeHtml(prefix + l.text)}</span>`;
-      })
-      .join("");
-    const title = claimTitles.get(e.claimIndex);
+  const groups = claimGroups(edits.map((e, i) => ({ edit: { ...e, old: "" }, e, i })));
+  const cards = groups.map((group) => {
+    const first = group[0]!.e;
+    const title = claimTitles.get(first.claimIndex);
+    const parts = group.map(({ e }) => {
+      const diff = lineDiff(e.resolvedText ?? "", e.new)
+        .map((l) => {
+          const cls = l.type === "add" ? "d-add" : l.type === "del" ? "d-del" : "d-ctx";
+          const prefix = l.type === "add" ? "+ " : l.type === "del" ? "- " : "  ";
+          return `<span class="${cls}">${escapeHtml(prefix + l.text)}</span>`;
+        })
+        .join("");
+      return (
+        (e.reason ? `<div class="sum-fc-int-reason">${escapeHtml(e.reason)}</div>` : "") +
+        (e.beforeCtx ? `<div class="sum-fc-int-ctx">…${escapeHtml(e.beforeCtx)}</div>` : "") +
+        `<div class="sum-fc-int-diff">${diff}</div>` +
+        (e.afterCtx ? `<div class="sum-fc-int-ctx">${escapeHtml(e.afterCtx)}…</div>` : "")
+      );
+    });
     return (
       '<div class="sum-fc-int-edit">' +
       '<label class="sum-fc-int-row">' +
-      `<input type="checkbox" class="sum-fc-int-cb" data-edit-idx="${i}" checked>` +
-      `<span class="sum-fc-int-verdict">${escapeHtml(e.verdict)}</span>` +
-      `<span class="sum-fc-int-claim">Claim ${escapeHtml(String(e.claimIndex))}${title ? ` — ${escapeHtml(title)}` : ""}</span>` +
+      `<input type="checkbox" class="sum-fc-int-cb" data-edit-idxs="${group.map((g) => g.i).join(",")}" checked>` +
+      `<span class="sum-fc-int-verdict">${escapeHtml(first.verdict)}</span>` +
+      `<span class="sum-fc-int-claim">Claim ${escapeHtml(String(first.claimIndex))}${title ? ` — ${escapeHtml(title)}` : ""}</span>` +
       "</label>" +
-      (e.reason ? `<div class="sum-fc-int-reason">${escapeHtml(e.reason)}</div>` : "") +
-      (e.beforeCtx ? `<div class="sum-fc-int-ctx">…${escapeHtml(e.beforeCtx)}</div>` : "") +
-      `<div class="sum-fc-int-diff">${diff}</div>` +
-      (e.afterCtx ? `<div class="sum-fc-int-ctx">${escapeHtml(e.afterCtx)}…</div>` : "") +
+      parts.join("") +
       "</div>"
     );
   });

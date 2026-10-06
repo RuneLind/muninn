@@ -1,3 +1,5 @@
+// Run only under the shared test-DB lock: a case here drops and re-adds the
+// transcript columns on the shared schema, which fails any suite running beside it.
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";

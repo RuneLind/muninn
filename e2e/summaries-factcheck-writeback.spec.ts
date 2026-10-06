@@ -321,7 +321,7 @@ test("✎ Integrate previews per edit; only the checked one is written, attribut
   await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
   expect(modelCalls).toBe(1);
   // Leave claim 2 un-integrated.
-  await fc.locator('.sum-fc-int-cb[data-edit-idx="1"]').uncheck();
+  await fc.locator('.sum-fc-int-cb[data-edit-idxs="1"]').uncheck();
   await fc.getByRole("button", { name: "Apply selected" }).click();
   await expect(fc.locator(".sum-fc-wb-msg.ok")).toContainText("Integrated 1 correction");
 
@@ -544,4 +544,101 @@ test("/search chunk previews show no sentinel text or callout marker", async ({ 
   expect(text).not.toContain("[!factcheck]");
   expect(text).toContain("✓ Claims checked against the web");
   searchResults = [];
+});
+
+// ── Fix round 2 ──────────────────────────────────────────────────────────────
+
+const sse = (events: Array<[string, unknown]>) => events.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join("");
+
+/** ↻ Re-check, stubbed at the network boundary (a real check needs web tools):
+ *  the row the route would save is written first, then the stream's frames. */
+async function stubRecheck(page: Page): Promise<void> {
+  await page.route("**/api/summaries/factcheck?*", async (route) => {
+    const [r] = await sql!<{ created_at: Date }[]>`
+      UPDATE summary_factchecks SET created_at = now() WHERE doc_id = ${DOC} RETURNING created_at`;
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: sse([
+        ["claims", { type: "claims", claims: [{ index: 1, title: "Adults need 4 hours of sleep" }, { index: 2, title: "Caffeine half-life is five hours" }] }],
+        ["claim_result", { type: "claim_result", index: 1, verdict: "❌", outcome: "verified", markdown: "" }],
+        ["claim_result", { type: "claim_result", index: 2, verdict: "⚠️", outcome: "verified", markdown: "" }],
+        ["done", { type: "done", answer: ANSWER, saved: true, checkedAt: r!.created_at.getTime(), claimCount: 2 }],
+        ["end", {}],
+      ]),
+    });
+  });
+}
+
+test("a re-check that lands during Apply: the write still reports its outcome and the article reloads", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
+  await stubRecheck(page);
+  ingestDelayMs = 2500;
+  const n = ingests.length;
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await expect.poll(() => ingests.length).toBe(n + 1);
+  await fc.locator(".sum-fc-recheck").click();
+  await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+  await expect(fc.locator(".sum-fc-wb-msg.error")).toContainText("re-checked during apply", { timeout: 15_000 });
+  await expect(page.locator("#sumArticleMain")).toContainText("sources say adults need 7 or more hours");
+  expect((await row()).applied_at).toBeNull();
+  await page.unroute("**/api/summaries/factcheck?*");
+});
+
+test("a re-check that lands during ➕ Add: the write still reports and the article shows the block", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await stubRecheck(page);
+  ingestDelayMs = 2500;
+  const n = ingests.length;
+  await fc.getByRole("button", { name: "➕ Add to summary" }).click();
+  await expect.poll(() => ingests.length).toBe(n + 1);
+  await fc.locator(".sum-fc-recheck").click();
+  await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+  await expect(fc.locator(".sum-fc-wb-msg.ok")).toContainText("Added the Fact check section", { timeout: 15_000 });
+  await expect(page.locator("#sumArticleMain blockquote.sum-fc-callout")).toBeVisible();
+  await page.unroute("**/api/summaries/factcheck?*");
+});
+
+test("a new web result clears a message about the old one", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
+  for (const cb of await fc.locator(".sum-fc-int-cb").all()) await cb.uncheck();
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await expect(fc.locator(".sum-fc-wb-msg.error")).toContainText("Select at least one edit");
+  await stubRecheck(page);
+  await fc.locator(".sum-fc-recheck").click();
+  await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+  await expect(fc.getByRole("button", { name: "✎ Integrate corrections" })).toBeVisible();
+  await expect(fc.locator(".sum-fc-wb-msg")).toHaveCount(0);
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(0);
+  await page.unroute("**/api/summaries/factcheck?*");
+});
+
+test("a claim split into two edits is one checkbox, and Apply writes both halves", async ({ page }) => {
+  await reset();
+  completionEdits = [
+    { claimIndex: 1, verdict: "❌", old: "The video says adults need 4 hours", new: "The video says adults need only 4 hours", reason: "first half" },
+    { claimIndex: 1, verdict: "❌", old: "of sleep a night.", new: "of sleep a night; sources say adults need 7 or more hours ([cdc.gov](https://www.cdc.gov/sleep)).", reason: "second half" },
+    DEFAULT_EDITS[1]!,
+  ];
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
+  await expect(fc.locator(".sum-fc-int-cb")).toHaveCount(2);
+  await expect(fc.locator(".sum-fc-int-diff")).toHaveCount(3);
+  await fc.locator('.sum-fc-int-cb[data-edit-idxs="2"]').uncheck();
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await expect(fc.locator(".sum-fc-wb-msg.ok")).toContainText("Integrated 2 correction");
+  expect(file).toContain("The video says adults need only 4 hours of sleep a night; sources say adults need 7 or more hours");
+  expect(file).toContain(CLAIM_2);
 });

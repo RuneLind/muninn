@@ -30,6 +30,7 @@ import {
   insertSummaryFactcheckBlock,
 } from "../../summaries/factcheck-block.ts";
 import {
+  claimEditCounts,
   proposeSummaryEdits,
   rebuildSummaryBody,
   resolveSummaryEdits,
@@ -40,6 +41,7 @@ import {
   summaryIntegratePreviewHtml,
   summaryPromptBody,
   summaryStructureChanged,
+  unattributedEdits,
 } from "../../summaries/factcheck-integrate.ts";
 import { sourceKindNoun } from "../../summaries/source-noun.ts";
 import { correctableClaims as savedCorrectableClaims } from "../../gardener/factcheck-carry.ts";
@@ -219,11 +221,13 @@ function saveFailure(res: Extract<SummarySaveResult, { ok: false }>): Fail {
   return fail(res.status, res.code, res.error, res.siblingDocId !== undefined ? { siblingDocId: res.siblingDocId } : {});
 }
 
-/** The client's accepted edits, bounded HARD (the client echoes them). */
-function coerceAcceptedEdits(raw: unknown): IntegrateEdit[] | string {
+/** The client's accepted edits, bounded HARD (the client echoes them). Each
+ *  carries `claimEdits`, its claim's edit count from propose. */
+function coerceAcceptedEdits(raw: unknown): { edits: IntegrateEdit[]; claimEdits: number[] } | string {
   if (!Array.isArray(raw) || raw.length === 0) return "edits must be a non-empty array";
   if (raw.length > INTEGRATE_MAX_EDITS) return `too many edits — the cap is ${INTEGRATE_MAX_EDITS} per apply`;
   const out: IntegrateEdit[] = [];
+  const claimEdits: number[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") return "every edit must be an object";
     const o = item as Record<string, unknown>;
@@ -233,6 +237,10 @@ function coerceAcceptedEdits(raw: unknown): IntegrateEdit[] | string {
     if (o.old.length > INTEGRATE_MAX_EDIT_CHARS || o.new.length > INTEGRATE_MAX_EDIT_CHARS) {
       return `an edit exceeds the ${INTEGRATE_MAX_EDIT_CHARS}-char per-edit limit`;
     }
+    if (typeof o.claimEdits !== "number" || !Number.isInteger(o.claimEdits) || o.claimEdits < 1) {
+      return "every edit needs its claim's edit count (claimEdits) from the preview";
+    }
+    claimEdits.push(o.claimEdits);
     out.push({
       claimIndex: typeof o.claimIndex === "number" && o.claimIndex > 0 ? Math.trunc(o.claimIndex) : 0,
       verdict: typeof o.verdict === "string" ? o.verdict : "",
@@ -241,8 +249,10 @@ function coerceAcceptedEdits(raw: unknown): IntegrateEdit[] | string {
       reason: typeof o.reason === "string" ? o.reason : "",
     });
   }
-  return out;
+  return { edits: out, claimEdits };
 }
+
+const PARTIAL_CLAIM_ERROR = "Apply takes a claim's edits together: this request carries only some of one claim's edits. Nothing was written.";
 
 /** What became of the row after a written apply. */
 export type ApplyStamp = "stamped" | "rechecked" | "row_gone" | "not_stamped" | "db_error";
@@ -374,7 +384,7 @@ export function registerSummariesFactcheckWritebackRoutes(
       claims: correctable,
       maskedBody: summaryPromptBody(slices),
       hasSourcesSection: false,
-      voice: summaryEditorVoice(noun),
+      voice: summaryEditorVoice(noun, stored.frontmatter.summary_lang),
     });
     let text: string;
     try {
@@ -394,13 +404,17 @@ export function registerSummariesFactcheckWritebackRoutes(
       edits: bounded.kept,
       priorDrops: [...parsed.dropped, ...bounded.dropped],
       sourceNoun: noun,
+      summaryLang: stored.frontmatter.summary_lang,
       correctable: correctableIdx,
       bodyLen,
     });
-    const edits = screened.outcomes
-      .filter((o) => o.applied)
-      .map((o) => ({
+    const kept = screened.outcomes.filter((o) => o.applied);
+    // Apply takes whole claims: each edit names its claim's edit count.
+    const counts = claimEditCounts(kept.map((o) => o.edit));
+    const edits = kept
+      .map((o, i) => ({
         ...o.edit,
+        claimEdits: counts[i]!,
         slice: o.slice,
         resolvedText: o.resolvedText,
         ...(o.beforeCtx !== undefined ? { beforeCtx: o.beforeCtx } : {}),
@@ -433,8 +447,13 @@ export function registerSummariesFactcheckWritebackRoutes(
     const rawSha256 = typeof req.body.rawSha256 === "string" ? req.body.rawSha256 : "";
     const rowVersion = typeof req.body.rowVersion === "string" ? req.body.rowVersion : "";
     if (!rawSha256 || !rowVersion) return c.json({ error: "rawSha256 and rowVersion are required", code: "bad_request" }, 400);
-    const edits = coerceAcceptedEdits(req.body.edits);
-    if (typeof edits === "string") return c.json({ error: edits, code: "bad_edits" }, 400);
+    const accepted = coerceAcceptedEdits(req.body.edits);
+    if (typeof accepted === "string") return c.json({ error: accepted, code: "bad_edits" }, 400);
+    const { edits } = accepted;
+    const sent = claimEditCounts(edits);
+    if (sent.some((n, i) => n !== accepted.claimEdits[i])) {
+      return c.json({ error: PARTIAL_CLAIM_ERROR, code: "partial_claim" }, 400);
+    }
     for (const edit of edits) {
       const refusal = structuralLineRefusal(edit.new);
       if (refusal) return c.json({ error: `An accepted edit ${refusal}. Nothing was written.`, code: "structural_edit" }, 400);
@@ -470,6 +489,28 @@ export function registerSummariesFactcheckWritebackRoutes(
       }
       if (resolved.appliedCount === 0) {
         return c.json({ error: "None of the accepted edits anchors in the summary. Nothing was written.", code: "nothing_applied" }, 409);
+      }
+      // A claim that anchors only in part would be half a correction.
+      const anchored = new Map<number, boolean[]>();
+      for (const o of resolved.outcomes) {
+        if (o.edit.claimIndex > 0) anchored.set(o.edit.claimIndex, [...(anchored.get(o.edit.claimIndex) ?? []), o.applied]);
+      }
+      if ([...anchored.values()].some((a) => a.includes(true) && a.includes(false))) {
+        return c.json({ error: PARTIAL_CLAIM_ERROR, code: "partial_claim" }, 400);
+      }
+      // The propose-side attribution check, re-run on what the client sent.
+      const placed = resolved.outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0 }));
+      const unattributed = unattributedEdits(placed, {
+        sourceNoun: sourceKindNoun(t.collection, pre.url),
+        summaryLang: stored.frontmatter.summary_lang,
+        correctable: new Set(savedCorrectableClaims(row).map((cl) => cl.index)),
+      });
+      if (unattributed.size > 0) {
+        const claimsOut = [...new Set([...unattributed].map((p) => p.edit.claimIndex))].join(", ");
+        return c.json(
+          { error: `The edits for claim ${claimsOut} do not say what the source says. Nothing was written.`, code: "not_attributed" },
+          400,
+        );
       }
       const summary = insertSummaryFactcheckBlock(
         rebuildSummaryBody(slices, resolved.texts),

@@ -122,7 +122,7 @@ describe("the preview", () => {
       [{ edit: { old: "<img src=x>" }, reason: "not found" }],
       new Map([[2, "Title <x>"]]),
     );
-    expect(html).toContain('data-edit-idx="0"');
+    expect(html).toContain('data-edit-idxs="0"');
     expect(html).not.toContain("<b>");
     expect(html).not.toContain("<img");
     expect(html).toContain("Title &lt;x&gt;");
@@ -177,5 +177,193 @@ describe("fix round 1: summaryStructureChanged", () => {
   test("an unclosed fence at the end swallows the transcript appended after it", async () => {
     const { summaryStructureChanged } = await import("./factcheck-integrate.ts");
     expect(summaryStructureChanged(BASE, `${BASE}\n\n\`\`\`\nunclosed`)).toBe(true);
+  });
+});
+
+describe("fix round 2: attribution follows the summary's language", () => {
+  test("en (and an absent summary_lang): 'the <noun> says|claims|states'", async () => {
+    const { attributionRefusal } = await import("./factcheck-integrate.ts");
+    expect(attributionRefusal("The talk says X; sources say Y.", "the talk", "en")).toBeNull();
+    expect(attributionRefusal("The talk says X; sources say Y.", "the talk", undefined)).toBeNull();
+    expect(attributionRefusal("Foredraget sier at X.", "the talk", "en")).toBe("not attributed");
+  });
+
+  test("nb: the noun in bokmål with sier/hevder/påstår; English and 'kildene sier' alone are not attribution", async () => {
+    const { attributionRefusal } = await import("./factcheck-integrate.ts");
+    // The measured HEAD shape: English spliced into Norwegian prose.
+    expect(attributionRefusal("- 📊 The talk says en egen evaluering viste 23 modeller; sources say 21.", "the talk", "nb")).toBe("not attributed");
+    expect(attributionRefusal("- 📊 Foredraget sier at en egen evaluering viste 23 modeller; kildene sier at rapporten omfatter 21.", "the talk", "nb")).toBeNull();
+    expect(attributionRefusal("Listepris sier lite: foredraget hevder at to modeller ga 2,1× forskjell.", "the talk", "nb")).toBeNull();
+    expect(attributionRefusal("Videoen påstår at søvn er overvurdert.", "the video", "nb")).toBeNull();
+    expect(attributionRefusal("Artikkelen sier at X.", "the article", "nb")).toBeNull();
+    expect(attributionRefusal("Innlegget hevder at X.", "the post", "nb")).toBeNull();
+    expect(attributionRefusal("To modeller ga 2,1× forskjell; kildene sier 1,4× ([knowit.no](https://knowit.example)).", "the talk", "nb")).toBe("not attributed");
+    // The noun is the document's: a talk is not attributed to "videoen".
+    expect(attributionRefusal("Videoen sier at X.", "the talk", "nb")).toBe("not attributed");
+  });
+
+  test("any other language: no literal check", async () => {
+    const { attributionRefusal } = await import("./factcheck-integrate.ts");
+    expect(attributionRefusal("Der Vortrag sagt X; Quellen sagen Y.", "the talk", "de")).toBeNull();
+  });
+
+  test("the nb voice gives the attribution form in bokmål and asks for bokmål edits", () => {
+    const rules = summaryEditorVoice("the talk", "nb").verdictRules.join("\n");
+    expect(rules).toContain('"Foredraget sier at X; kildene sier at Y ([hostname](url)).');
+    expect(rules).toContain('must contain the words "foredraget sier" (or "foredraget hevder" / "foredraget påstår")');
+    expect(rules).toContain("Norwegian bokmål");
+    expect(rules).not.toContain("The talk says");
+    expect(summaryEditorVoice("the video", "nb").verdictRules.join("\n")).toContain('"Videoen sier at X');
+  });
+
+  test("another language's voice keeps the shape, asks for the summary's language, and names no literal words", () => {
+    const rules = summaryEditorVoice("the talk", "de").verdictRules.join("\n");
+    expect(rules).toContain("the summary's own language");
+    expect(rules).not.toContain("An edit without them is discarded");
+    // English is unchanged by the parameter (the pinned prompt above).
+    expect(summaryEditorVoice("the video", "en").verdictRules).toEqual(summaryEditorVoice("the video").verdictRules);
+  });
+});
+
+describe("fix round 2: attribution is judged per claim, over its edits in document order", () => {
+  const propose = async (body: string, edits: { claimIndex: number; verdict: string; old: string; new: string }[], correctable: number[]) => {
+    const { proposeSummaryEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    return proposeSummaryEdits({
+      slices: summaryEditSlices(body),
+      edits: edits.map((e) => ({ reason: "", ...e })),
+      priorDrops: [],
+      sourceNoun: "the video",
+      correctable: new Set(correctable),
+      bodyLen: 20_000,
+    });
+  };
+
+  // Real shape: Light Bulbs claim 5, one sentence split into two adjacent edits.
+  const BULBS =
+    'Red/near-infrared photons at ~0.75 electron volts match the exact energy barrier electrons must cross in this chain — a discovery from the paper "Metabolism in the Solar Photon Field" (Fosbury, Jeffery et al.).\n\nAnother line.';
+  const BULBS_A = {
+    claimIndex: 5,
+    verdict: "⚠️",
+    old: "red/near-infrared photons at ~0.75 electron volts match the exact energy barrier electrons must cross in this chain — a discovery from the paper".replace(/^r/, "R"),
+    new: "The video says red/near-infrared photons at ~0.75 electron volts match the exact energy barrier electrons must cross in this chain — a discovery from the paper",
+  };
+  const BULBS_B = {
+    claimIndex: 5,
+    verdict: "⚠️",
+    old: '"Metabolism in the Solar Photon Field" (Fosbury, Jeffery et al.).',
+    new: '"Metabolism in the Solar Photon Field" (Fosbury, Jeffery et al.); sources say this is a non-peer-reviewed preprint describing an overlap, not an exact match ([biorxiv.org](https://www.biorxiv.org/content/x)).',
+  };
+
+  test("Light Bulbs claim 5: the unattributed second half rides on the first", async () => {
+    const r = await propose(BULBS, [BULBS_A, BULBS_B], [5]);
+    expect(r.outcomes.map((o) => o.applied)).toEqual([true, true]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  test("document order, not list order: the attributed half listed second still covers the claim", async () => {
+    const r = await propose(BULBS, [BULBS_B, BULBS_A], [5]);
+    expect(r.outcomes.map((o) => o.applied)).toEqual([true, true]);
+  });
+
+  // Real shape: JWST claim 4 — "(per the video; sources say ~300 million)" plus an attributed edit.
+  const JWST =
+    "**JADES-GS-z14-0** (~290–350 million years after the Big Bang) and unnamed objects dated to ~300 million years or earlier that scientists can't even classify.";
+  const JWST_PER = {
+    claimIndex: 4,
+    verdict: "⚠️",
+    old: "(~290–350 million years after the Big Bang)",
+    new: "(~290–350 million years after the Big Bang, per the video; sources say ~300 million ([en.wikipedia.org](https://en.wikipedia.org/wiki/JADES-GS-z14-0)))",
+  };
+  const JWST_SAYS = {
+    claimIndex: 4,
+    verdict: "⚠️",
+    old: "and unnamed objects dated to ~300 million years or earlier that scientists can't even classify",
+    new: "and, the video says, unnamed objects dated to ~300 million years or earlier that scientists can't even classify; sources say such objects are unconfirmed candidates ([scientificamerican.com](https://www.scientificamerican.com/x))",
+  };
+
+  test("JWST claim 4: the 'per the video' edit is kept with the attributed one", async () => {
+    const r = await propose(JWST, [JWST_PER, JWST_SAYS], [4]);
+    expect(r.outcomes.map((o) => o.applied)).toEqual([true, true]);
+  });
+
+  test("a claim none of whose edits attributes: every edit drops as not attributed", async () => {
+    const r = await propose(JWST, [JWST_PER, { ...JWST_SAYS, new: JWST_SAYS.new.replace("the video says", "reportedly") }], [4]);
+    expect(r.outcomes.filter((o) => o.applied)).toEqual([]);
+    expect(r.dropped.map((d) => d.reason)).toEqual(["not attributed", "not attributed"]);
+  });
+
+  test("the check covers a claim the saved claims mark ❌/⚠️ even when the model's verdict says ✅", async () => {
+    const r = await propose(JWST, [{ ...JWST_PER, verdict: "✅" }], [4]);
+    expect(r.outcomes.filter((o) => o.applied)).toEqual([]);
+    expect(r.dropped.map((d) => d.reason)).toEqual(["not attributed"]);
+  });
+
+  test("the check covers an edit the model marks ❌ even when the saved claims do not", async () => {
+    const r = await propose(JWST, [{ ...JWST_PER, verdict: "❌" }], []);
+    expect(r.outcomes.filter((o) => o.applied)).toEqual([]);
+    expect(r.dropped.map((d) => d.reason)).toEqual(["not attributed"]);
+  });
+
+  test("a ✅ edit for a claim the saved claims do not mark is not checked", async () => {
+    const r = await propose(JWST, [{ ...JWST_PER, verdict: "✅" }], []);
+    expect(r.outcomes[0]!.applied).toBe(true);
+  });
+
+  test("claim 0 is no group: one claim-0 edit failing does not drop another", async () => {
+    const r = await propose(JWST, [
+      { ...JWST_PER, claimIndex: 0, verdict: "" },
+      { claimIndex: 0, verdict: "", old: "Not in the summary.", new: "x" },
+    ], []);
+    expect(r.outcomes.map((o) => o.applied)).toEqual([true, false]);
+  });
+});
+
+describe("fix round 2: the structure checks", () => {
+  // Found by enumerating pairs of single-line insertions: each edit alone keeps
+  // the structure, together the second closing takeaway moves the cut.
+  const BASE = "Intro claim one.\n\nSecond para two.\n\n## Visual reference\n\nA caption.\n\n## More\n\nTail claim three.\n\nTail four.";
+  test("two edits that each keep the structure but together move it are both dropped", async () => {
+    const { proposeSummaryEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    const a = { claimIndex: 1, verdict: "", old: "three.", new: "three.\n\n> 💬 **Takeaway:** x", reason: "" };
+    const b = { claimIndex: 2, verdict: "", old: "## More", new: "> 💬 **Takeaway:** x\n\n## More", reason: "" };
+    const run = (edits: typeof a[]) =>
+      proposeSummaryEdits({ slices: summaryEditSlices(BASE), edits, priorDrops: [], sourceNoun: "the video", correctable: new Set(), bodyLen: 20_000 });
+    expect(run([a]).outcomes[0]!.applied).toBe(true);
+    expect(run([b]).outcomes[0]!.applied).toBe(true);
+    const both = run([a, b]);
+    expect(both.outcomes.map((o) => o.applied)).toEqual([false, false]);
+    expect(both.dropped.map((d) => d.reason)).toEqual([
+      "together with the other edits, would change the summary's structure",
+      "together with the other edits, would change the summary's structure",
+    ]);
+  });
+
+  test("a stored block below the visual section is no structure change when the write moves it above", async () => {
+    const { summaryStructureChanged } = await import("./factcheck-integrate.ts");
+    const block = buildSummaryFactcheckBlock("### ❌ Claim 1/1 — x\n\nSources say y.", "2026-10-06");
+    const stored = `Intro claim.\n\n## Visual reference\n\nA caption.\n\n${block}`;
+    const written = insertSummaryFactcheckBlock(stored, block);
+    expect(written.indexOf("## Fact check")).toBeLessThan(written.indexOf("## Visual reference"));
+    expect(summaryStructureChanged(stored, written)).toBe(false);
+  });
+});
+
+describe("fix round 2: the preview selects per claim", () => {
+  test("one checkbox per claim, naming every edit index of that claim", () => {
+    const html = summaryIntegratePreviewHtml(
+      [
+        { claimIndex: 5, verdict: "⚠️", new: "a", reason: "", resolvedText: "x" },
+        { claimIndex: 2, verdict: "❌", new: "b", reason: "", resolvedText: "y" },
+        { claimIndex: 5, verdict: "⚠️", new: "c", reason: "", resolvedText: "z" },
+        { claimIndex: 0, verdict: "", new: "d", reason: "", resolvedText: "w" },
+      ],
+      [],
+      new Map(),
+    );
+    expect(html.match(/class="sum-fc-int-cb"/g)).toHaveLength(3);
+    expect(html).toContain('data-edit-idxs="0,2"');
+    expect(html).toContain('data-edit-idxs="1"');
+    expect(html).toContain('data-edit-idxs="3"');
+    expect(html.match(/class="sum-fc-int-diff"/g)).toHaveLength(4);
   });
 });
