@@ -417,6 +417,7 @@ describe("attribution is judged per run of contiguous edits (#650 follow-up)", (
   const silentTakeaway = { ...takeaway, new: "Sleep 7–9 hours a night." };
   const halfA = { claimIndex: 1, old: "Alpha one.", new: "Alpha one, as the video" };
   const halfB = { claimIndex: 1, old: "Beta two.", new: "says, beta two; sources say three." };
+  const coffee = { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." };
 
   const rows: [string, string, { claimIndex: number; old: string; new: string }[], string[]][] = [
     ["one run, attributed", PARA, [body], ["ok"]],
@@ -436,6 +437,12 @@ describe("attribution is judged per run of contiguous edits (#650 follow-up)", (
     ["two table rows are two runs", `| A | Sleep 4 hours |\n| B | Coffee is fine |\n\n${PARA}`, [{ claimIndex: 1, old: "Sleep 4 hours", new: "The video says sleep 4 hours; sources say 7–9" }, { claimIndex: 1, old: "Coffee is fine", new: "Coffee is fine at 4 hours" }], [DROPPED(1), "not attributed"]],
     ["a quote line with no space after > breaks the run", `>Sleep 4 hours a night.\n>Coffee is fine.\n\n${PARA}`, [takeaway, { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
     ["a CRLF blank line breaks the run", "Alpha one.\r\n\r\nBeta two.", [halfA, halfB], ["not attributed", "not attributed"]],
+    // fix round 2: a boundary inside the 1st edit's own old
+    ["the 1st edit's old ends in \"\\n- \"", "- Sleep 4 hours.\n- Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n- ", new: "The video says sleep 4 hours; sources say 7–9.\n- " }, coffee], [DROPPED(1), "not attributed"]],
+    ["the 1st edit's old ends in \"\\n-\"", "- Sleep 4 hours.\n- Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n-", new: "The video says sleep 4 hours; sources say 7–9.\n-" }, { ...coffee, old: " Coffee is fine.", new: " Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["the 1st edit's old ends in a heading marker", "Sleep 4 hours.\n\n## Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n\n## ", new: "The video says sleep 4 hours; sources say 7–9.\n\n## " }, coffee], [DROPPED(1), "not attributed"]],
+    ["the 1st edit's old ends past a blank line", "Sleep 4 hours.\n\nNote: Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n\nNote:", new: "The video says sleep 4 hours; sources say 7–9.\n\nNote:" }, { ...coffee, old: " Coffee is fine.", new: " Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["the 2nd edit's old runs on into the next item", "- Sleep 4 hours. Coffee is fine.\n- Tea is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.", new: "The video says sleep 4 hours; sources say 7–9." }, { ...coffee, old: "Coffee is fine.\n- Tea is fine.", new: "Coffee is fine.\n- Tea is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
   ];
   test.each(rows)("%s", async (_name, text, edits, expected) => {
     expect(await propose(text, edits)).toEqual(expected);
