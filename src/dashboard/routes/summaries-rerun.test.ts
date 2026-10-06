@@ -709,14 +709,14 @@ describe("the shared save path", () => {
 
   test("a failed ingest FAILS the job (write_failed), where it used to only warn", async () => {
     const { deps, rec } = makeDeps(youtubeDoc(), {
-      ingestAnswer: { ok: false, status: 500, error: "Ingest returned 500: boom" },
+      ingestAnswer: { ok: false, status: 422, error: "Ingest returned 422: boom", mayHaveWritten: false },
     });
     const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
     await settle();
     expect(rec.ingests).toHaveLength(1);
     const job = getJob(String(res.json.job_id))!;
     expect(job.status).toBe("error");
-    expect(job.error).toContain("500");
+    expect(job.error).toContain("422");
   });
 
   test("an ingest that wrote a sibling FAILS the job (forked) and names the sibling", async () => {
@@ -880,7 +880,7 @@ describe("the save's warns", () => {
   test("a failed save warns ONCE, and that warn names the job", async () => {
     await capturing(async (records) => {
       const { deps } = makeDeps(youtubeDoc(), {
-        ingestAnswer: { ok: false, status: 500, error: "Ingest returned 500: boom" },
+        ingestAnswer: { ok: false, status: 422, error: "Ingest returned 422: boom", mayHaveWritten: false },
       });
       const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
       await settle();

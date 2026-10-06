@@ -182,15 +182,18 @@ describe("saveSummaryBody", () => {
   });
 
   test("a non-OK answer is write_failed", async () => {
-    const h = harness({ ok: false, status: 422, error: "Ingest returned 422" });
+    const h = harness({ ok: false, status: 422, error: "Ingest returned 422", mayHaveWritten: false });
     const res = await saveSummaryBody(input(h));
     expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["write_failed", 502]);
   });
 
-  test("an answer with no file_path is write_failed", async () => {
-    const h = harness({ ok: true, status: 200, data: {} });
-    const res = await saveSummaryBody(input(h));
-    expect(res.ok ? "ok" : res.code).toBe("write_failed");
+  test("a 2xx with no usable file_path is write_unknown: the request landed", async () => {
+    for (const data of [{}, null, { file_path: 7 }, "ingested"]) {
+      const h = harness({ ok: true, status: 200, data } as SummaryIngestResponse);
+      const res = await saveSummaryBody(input(h));
+      expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["write_unknown", 502]);
+      if (!res.ok) expect(res.error).toContain("Reload");
+    }
   });
 
   test("a different file_path is forked and names the sibling", async () => {
@@ -318,8 +321,9 @@ describe("a claim that outlived its budget", () => {
     const res = await saveWith(claim, ingest);
     expect(res.ok ? "ok" : res.code).toBe("ok");
     expect(rivalDuringIngest).toBeNull();
-    // Still the caller's after the save, until the caller releases it.
-    expect(claims.holds(claim!)).toBe(true);
+    // The budget ran out during the POST, so the key frees the moment the
+    // write ends: the deadline is the claim's, not reset by the write.
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
     claims.release(claim!);
     expect(claims.isHeld("article", DOC_ID)).toBe(false);
     claims.clear();
@@ -423,4 +427,256 @@ describe("the descriptor table", () => {
       }
     });
   }
+});
+
+describe("a lapsed claim after a whole rival write", () => {
+  const DOC_ID = "ai/general/A post.md";
+  test("claim → lapse → rival claims, saves and releases → the stale save is refused, disk unchanged", async () => {
+    // The key is free again when the stale writer comes back, but its body was
+    // built from a read that predates the rival's write: posting it would
+    // overwrite the rival's summary with an older one.
+    const claims = new SummarySaveClaims();
+    const disk: string[] = [];
+    const ingest: SummaryIngest = async (o) => {
+      disk.push(String(o.body.summary));
+      return { ok: true, status: 200, data: { file_path: DOC_ID } };
+    };
+    const save = (claim: ReturnType<SummarySaveClaims["claim"]>, summary: string) =>
+      saveSummaryBody({
+        descriptor: requireSaveDescriptor("article"),
+        stored: readStoredCapture(ARTICLE),
+        docId: DOC_ID,
+        summary,
+        claim: claim!,
+        knowledgeApiUrl: "http://127.0.0.1:1",
+        ingest,
+      });
+    const a = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const b = claims.claim("article", DOC_ID, 1_000);
+    expect(b).not.toBeNull();
+    expect((await save(b, "B's summary")).ok).toBe(true);
+    claims.release(b!);
+    const stale = await save(a, "A's stale summary");
+    expect(stale.ok ? "ok" : stale.code).toBe("in_flight");
+    expect(disk.map((d) => d.trim())).toEqual(["B's summary"]);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.clear();
+  });
+
+  test("a lapsed claim the caller released does not save", async () => {
+    const claims = new SummarySaveClaims();
+    const calls: string[] = [];
+    const a = claims.claim("article", DOC_ID, 20)!;
+    await Bun.sleep(40);
+    claims.release(a);
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "Late.",
+      claim: a,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest: async (o) => {
+        calls.push(o.ingestPath);
+        return { ok: true, status: 200, data: { file_path: DOC_ID } };
+      },
+    });
+    expect(res.ok ? "ok" : res.code).toBe("in_flight");
+    expect(calls).toHaveLength(0);
+    claims.clear();
+  });
+});
+
+describe("the claim's budget is fixed at claim time", () => {
+  const DOC_ID = "ai/general/A post.md";
+  const save = (claim: ReturnType<SummarySaveClaims["claim"]>, ingest: SummaryIngest) =>
+    saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A summary.",
+      claim: claim!,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest,
+    });
+  const quick: SummaryIngest = async () => ({ ok: true, status: 200, data: { file_path: DOC_ID } });
+
+  test("a POST does not hand the claim a fresh budget", async () => {
+    // 200 ms budget, a 150 ms POST right away: the key frees at ~200 ms, not
+    // 200 ms after the POST ended (~350 ms).
+    const claims = new SummarySaveClaims();
+    const t0 = Date.now();
+    const claim = claims.claim("article", DOC_ID, 200);
+    const res = await save(claim, async () => {
+      await Bun.sleep(150);
+      return { ok: true, status: 200, data: { file_path: DOC_ID } };
+    });
+    expect(res.ok).toBe(true);
+    expect(claims.holds(claim!)).toBe(true);
+    await Bun.sleep(Math.max(0, 270 - (Date.now() - t0)));
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.clear();
+  });
+
+  test("repeated saves on one never-released claim do not keep it held", async () => {
+    const claims = new SummarySaveClaims();
+    const claim = claims.claim("article", DOC_ID, 60);
+    for (let i = 0; i < 4; i++) {
+      await Bun.sleep(40);
+      await save(claim, quick);
+    }
+    // 160 ms in, past the 60 ms budget.
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.clear();
+  });
+
+  test("an unreleased claim frees after a save, and after a POST that threw", async () => {
+    const claims = new SummarySaveClaims();
+    const a = claims.claim("article", DOC_ID, 50);
+    expect((await save(a, quick)).ok).toBe(true);
+    expect(claims.isHeld("article", DOC_ID)).toBe(true);
+    await Bun.sleep(90);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+
+    const b = claims.claim("article", DOC_ID, 50);
+    await expect(
+      save(b, async () => {
+        throw new Error("network down");
+      }),
+    ).rejects.toThrow("network down");
+    expect(claims.isHeld("article", DOC_ID)).toBe(true);
+    await Bun.sleep(90);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.clear();
+  });
+
+  test("a second save on the same claim while the first POST is in flight is refused", async () => {
+    // Refused rather than queued: the second body would overwrite the first
+    // one's write, and while the first POST is in flight the claim is pinned.
+    const claims = new SummarySaveClaims();
+    const claim = claims.claim("article", DOC_ID, 1_000);
+    const posted: string[] = [];
+    const first = save(claim, async () => {
+      posted.push("first");
+      await Bun.sleep(60);
+      return { ok: true, status: 200, data: { file_path: DOC_ID } };
+    });
+    await Bun.sleep(10);
+    const second = await save(claim, async () => {
+      posted.push("second");
+      return { ok: true, status: 200, data: { file_path: DOC_ID } };
+    });
+    expect(second.ok ? "ok" : second.code).toBe("in_flight");
+    if (!second.ok) expect(second.error).toContain("already in flight");
+    expect((await first).ok).toBe(true);
+    expect(posted).toEqual(["first"]);
+    claims.clear();
+  });
+
+  test("a second pin after an unpin is not undone by a timer the first unpin armed", async () => {
+    // pin → unpin arms the timer; a second unpin must not arm another, or the
+    // orphan fires during the next pinned write and frees the key mid-POST.
+    const claims = new SummarySaveClaims();
+    const claim = claims.claim("article", DOC_ID, 50)!;
+    claims.pinForWrite(claim);
+    claims.unpinAfterWrite(claim);
+    claims.unpinAfterWrite(claim);
+    claims.pinForWrite(claim);
+    await Bun.sleep(100);
+    expect(claims.isHeld("article", DOC_ID)).toBe(true);
+    claims.unpinAfterWrite(claim);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.clear();
+  });
+});
+
+describe("what huginn's answer says about the write", () => {
+  // A huginn stand-in, one path per answer shape. A real socket, so Bun's own
+  // body handling (an empty body reads as `null` through `res.json()`) is what
+  // the classification sees.
+  const huginn = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      await req.text();
+      const p = new URL(req.url).pathname;
+      if (p === "/500") return Response.json({ detail: "YouTube ingest failed: similarity boom" }, { status: 500 });
+      if (p === "/503") return Response.json({ detail: "not configured" }, { status: 503 });
+      if (p === "/422") return Response.json({ detail: "validation" }, { status: 422 });
+      if (p === "/400") return Response.json({ detail: "Invalid category" }, { status: 400 });
+      if (p === "/204") return new Response(null, { status: 204 });
+      if (p === "/empty") return new Response("", { status: 200 });
+      if (p === "/null") return new Response("null", { status: 200, headers: { "content-type": "application/json" } });
+      if (p === "/html") return new Response("<html>ok</html>", { status: 200 });
+      if (p === "/stall") {
+        const stream = new ReadableStream({
+          async start(c) {
+            c.enqueue(new TextEncoder().encode('{"file_path":'));
+            await Bun.sleep(300);
+            c.enqueue(new TextEncoder().encode('"ai/general/A post.md"}'));
+            c.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return Response.json({ file_path: "ai/general/A post.md", similar: [] });
+    },
+  });
+  afterAll(() => huginn.stop(true));
+  const DOC_ID = "ai/general/A post.md";
+  const saveVia = async (path: string) => {
+    const claims = new SummarySaveClaims();
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A new summary.",
+      claim: claims.claim("article", DOC_ID, 5_000)!,
+      knowledgeApiUrl: `http://127.0.0.1:${huginn.port}`,
+      ingest: (o) => postSummaryIngest({ ...o, ingestPath: path, timeoutMs: 100 }),
+    });
+    claims.clear();
+    return res;
+  };
+
+  // huginn answers 500 AFTER the write when the similarity search or the
+  // reindex enqueue throws (`_ingest_errors` wraps write → similar → enqueue).
+  for (const path of ["/500", "/503"]) {
+    test(`a ${path.slice(1)} is write_unknown`, async () => {
+      const res = await saveVia(path);
+      expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["write_unknown", 502]);
+      if (!res.ok) expect(res.error).toContain("Reload");
+    });
+  }
+
+  // Every 4xx huginn sends is raised before `write_categorized_markdown`.
+  for (const path of ["/422", "/400"]) {
+    test(`a ${path.slice(1)} is write_failed`, async () => {
+      const res = await saveVia(path);
+      expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["write_failed", 502]);
+    });
+  }
+
+  for (const path of ["/204", "/empty", "/null", "/html"]) {
+    test(`a 2xx answer with no usable file_path (${path.slice(1)}) is write_unknown`, async () => {
+      const res = await saveVia(path);
+      expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["write_unknown", 502]);
+    });
+  }
+
+  test("a body read that times out is write_unknown and says the BODY read timed out", async () => {
+    const res = await saveVia("/stall");
+    expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["write_unknown", 502]);
+    if (!res.ok) {
+      expect(res.error).toContain("timed out");
+      expect(res.error).toContain("response body");
+      expect(res.error).not.toContain("not JSON");
+    }
+  });
+
+  test("a good answer still writes", async () => {
+    const res = await saveVia("/ok");
+    expect(res.ok ? "ok" : res.code).toBe("ok");
+  });
 });

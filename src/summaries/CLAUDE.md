@@ -166,9 +166,12 @@ writes through `saveSummaryBody`. That function checks the claim against the
 registry that issued it, refuses a blank summary as `empty_summary` before any
 POST (huginn's YouTube ingest reads an empty `summary` as "summarize it
 yourself"), appends `## Transcript` only when the stored document has one,
-re-sends the stored `summary_kind` (or none), and ingests BLOCKING. A failed POST
-or a missing `file_path` is `write_failed`; a timeout, or a 2xx whose body is not
-JSON, is `write_unknown`, because huginn writes before it answers and the error
+re-sends the stored `summary_kind` (or none), and ingests BLOCKING. A request
+that never reached huginn (connection refused, DNS) or a 4xx is `write_failed`:
+huginn raises every 4xx before it writes. A 5xx, a timeout, or a 2xx with no
+usable `file_path` (an empty body, a 204, non-JSON, a body read that timed out)
+is `write_unknown`, because huginn may have written — its 500 can follow the
+write, when the similarity search or the reindex enqueue throws — and the error
 says to reload before retrying; a `file_path` other than the doc id (the `.md`
 suffix compared case-insensitively) is `forked`, and the response names the
 sibling. A re-run job FAILS on any of these, where it used to complete with a
@@ -198,10 +201,15 @@ carries a timer sized to the budget that run actually sends —
 writers; it does not cancel the claim.** Work after the model call (the
 closing-takeaway check, frame copies) and a connector's retry loop can outlast
 the budget inside their own timeouts, so at save time `pinForWrite` re-takes a
-lapsed claim when nobody else holds the key, and refuses it as `in_flight` when
-someone does. The pin also suspends the timer for the length of the POST, so a
-claim cannot lapse mid-ingest and let a second writer be overwritten; the timer
-is re-armed afterwards. The claim is held as a TOKEN rather than a bare key, so
+lapsed claim only when no claim was taken on the key since it lapsed (a per-key
+generation counter), and refuses it as `in_flight` otherwise — including when a
+rival claimed, wrote and released in between, since the lapsed run's body was
+built from a read older than that write. The pin also suspends the timer for
+the length of the POST, so a claim cannot lapse mid-ingest and let a second
+writer be overwritten; afterwards the timer is re-armed for what is LEFT of the
+budget (the deadline is fixed at claim time, so saves never extend a claim), and
+a second save on the same claim while the first POST is in flight is refused as
+`in_flight`, not queued. The claim is held as a TOKEN rather than a bare key, so
 an expiry followed by a fresh POST is safe: the stalled run's save finds another
 token on the key and writes nothing, and its `finally` releases nothing, where a
 bare `delete` would open the SECOND run's slot on the first one's arrival.

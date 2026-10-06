@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { afterAll, test, expect, describe } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
 import {
   buildSummarySystemPrompt,
@@ -251,6 +251,146 @@ test("ingestSummary is best-effort: a fetch rejection is swallowed", async () =>
   } finally {
     restore();
   }
+});
+
+// --- ingestSummary keeps its pre-#647 behaviour for every capture caller ---
+//
+// `ingestSummary` is expressed through `postSummaryIngest` now; the five
+// capture callers (short-video, vimeo, x-article, youtube, article) must not see
+// a difference beyond the timeout also bounding the body read.
+
+describe("ingestSummary behaves as it did before the shared POST", () => {
+  const ok = () =>
+    new Response(JSON.stringify({ file_path: "ai/general/T.md", similar: [{ title: "S", url: "https://s" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  async function captureWarns(run: () => Promise<void>): Promise<string[]> {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "warning" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
+    try {
+      await run();
+    } finally {
+      await configure({ sinks: {}, loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }], reset: true });
+    }
+    return records.filter((r) => r.level === "warning").map((r) => String(r.rawMessage));
+  }
+
+  test("a throwing onIngested is swallowed, as a warn", async () => {
+    const restore = stubFetch(ok);
+    try {
+      const warns = await captureWarns(async () => {
+        await expect(
+          ingestSummary({
+            knowledgeApiUrl: "http://kb.test",
+            ingestPath: "/api/youtube/ingest",
+            body: {},
+            onSimilar: () => {},
+            onIngested: () => {
+              throw new Error("cb boom");
+            },
+          }),
+        ).resolves.toBeUndefined();
+      });
+      expect(warns).toEqual(["Knowledge API ingest failed: {error}"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a throwing onSimilar is swallowed, as a warn", async () => {
+    const restore = stubFetch(ok);
+    try {
+      await expect(
+        ingestSummary({
+          knowledgeApiUrl: "http://kb.test",
+          ingestPath: "/api/youtube/ingest",
+          body: {},
+          onSimilar: () => {
+            throw new Error("cb boom");
+          },
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  // A real socket: over one, Bun's `res.json()` reads an empty body as `null`,
+  // where a constructed `new Response("")` throws instead.
+  const huginn = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      await req.text();
+      const p = new URL(req.url).pathname;
+      if (p === "/empty") return new Response("", { status: 200 });
+      return new Response("null", { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  afterAll(() => huginn.stop(true));
+  for (const [name, path] of [
+    ["an empty body", "/empty"],
+    ["a JSON null", "/null"],
+  ] as const) {
+    test(`a 200 with ${name} does not call onIngested`, async () => {
+      let called = false;
+      const warns = await captureWarns(() =>
+        ingestSummary({
+          knowledgeApiUrl: `http://127.0.0.1:${huginn.port}`,
+          ingestPath: path,
+          body: {},
+          onSimilar: () => {},
+          onIngested: () => {
+            called = true;
+          },
+        }),
+      );
+      expect(called).toBe(false);
+      expect(warns).toEqual(["Knowledge API ingest failed: {error}"]);
+    });
+  }
+
+  test("a non-JSON 200 warns as a failed ingest, not as an ingest that 'returned 200'", async () => {
+    const restore = stubFetch(() => new Response("<html>ok</html>", { status: 200 }));
+    try {
+      const warns = await captureWarns(() =>
+        ingestSummary({
+          knowledgeApiUrl: "http://kb.test",
+          ingestPath: "/api/youtube/ingest",
+          body: {},
+          onSimilar: () => {},
+        }),
+      );
+      expect(warns).toEqual(["Knowledge API ingest failed: {error}"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a 500 still warns 'returned {status}'", async () => {
+    const restore = stubFetch(() => new Response("nope", { status: 500 }));
+    try {
+      const warns = await captureWarns(() =>
+        ingestSummary({
+          knowledgeApiUrl: "http://kb.test",
+          ingestPath: "/api/youtube/ingest",
+          body: {},
+          onSimilar: () => {},
+        }),
+      );
+      expect(warns).toEqual(["Knowledge API ingest returned {status}"]);
+    } finally {
+      restore();
+    }
+  });
 });
 
 // --- runCaptureOneShot: the capture verticals' observability seam -------------

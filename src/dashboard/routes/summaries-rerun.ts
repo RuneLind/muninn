@@ -761,8 +761,8 @@ export const FULL_RERUN_UNSUPPORTED =
  * Not a deadline for the run: work after the model call (the closing-takeaway
  * check, frame copies) and a connector's own retry loop can outlast it while
  * staying inside their own timeouts. A lapsed claim still saves when nobody
- * else took the key (`pinForWrite` in `summary-save.ts`), and the save pins the
- * claim for the length of its POST. What the number decides is how long a run
+ * claimed the key since it lapsed (`pinForWrite` in `summary-save.ts`), and the
+ * save pins the claim for the length of its POST. What the number decides is how long a run
  * that never settles keeps the document at `409 in_flight` for everyone else.
  */
 export const RERUN_LATCH_SLACK_MS = 120_000;

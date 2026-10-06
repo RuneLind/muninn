@@ -11,14 +11,16 @@
  * - {@link preflightSummarySave}: the fork refusals, run BEFORE any model spend
  *   (`no_url` and `no_category` 400, `title_not_round_trippable` 409).
  * - {@link SummarySaveClaims}: one writer per `(sourceId, docId)` at a time, a
- *   token with a budget timer. The caller claims around its own read → model →
- *   write; anyone else is `409 in_flight`. A claim that lapsed still saves when
- *   no other writer took the key, and is pinned for the length of its POST.
+ *   token with a budget fixed at claim time. The caller claims around its own
+ *   read → model → write; anyone else is `409 in_flight`. A claim that lapsed
+ *   still saves when no claim was taken on the key since it lapsed, and is
+ *   pinned for the length of its POST.
  * - {@link saveSummaryBody}: builds the ingest body (every stored frontmatter
  *   field the vertical's ingest model accepts, re-sent), posts it BLOCKING, and
  *   reports what huginn wrote — `empty_summary` before any POST, `write_failed`
- *   on a failed POST, `write_unknown` when the answer was lost after the
- *   request went out, `forked` when the path it wrote is not the document's.
+ *   when the request never reached huginn or it answered 4xx, `write_unknown`
+ *   when it may have written (a 5xx, a timeout, a 2xx with no usable
+ *   `file_path`), `forked` when the path it wrote is not the document's.
  */
 
 import { getLog } from "../logging.ts";
@@ -353,14 +355,17 @@ export interface SummarySaveClaim {
  * around its own read → model → write; a second claimant gets `null`
  * (the route's `409 in_flight`).
  *
- * Each claim carries a budget timer, because "the writer settles" is a
- * connector's promise and not this module's: a model call that never settles
- * would pin the document for the life of the process. The expiry warns and
- * frees the key for OTHER writers; it does not cancel the claim. A claim that
- * lapsed may still write ({@link pinForWrite}) as long as nobody else took the
- * key in the meantime — a run that outlived the budget inside its own timeouts
- * keeps its summary. The claim is a TOKEN, so a stalled writer that settles
- * after someone else claimed releases nothing and writes nothing.
+ * Each claim carries a budget, its deadline fixed when it is claimed, because
+ * "the writer settles" is a connector's promise and not this module's: a model
+ * call that never settles would pin the document for the life of the process.
+ * The expiry warns and frees the key for OTHER writers; it does not cancel the
+ * claim. A lapsed claim may still write ({@link pinForWrite}) only when no
+ * other claim was taken on the key since it lapsed — a run that outlived the
+ * budget inside its own timeouts keeps its summary, while a run whose read
+ * predates someone else's whole claim → write → release is refused, since its
+ * body would overwrite the newer write. The claim is a TOKEN, so a stalled
+ * writer that settles after someone else claimed releases nothing and writes
+ * nothing.
  *
  * Module-level ({@link summarySaveClaims}) so every write route shares one; a
  * class so a test can hold its own.
@@ -368,31 +373,62 @@ export interface SummarySaveClaim {
 export class SummarySaveClaims {
   private readonly held = new Map<
     string,
-    { token: symbol; budgetMs: number; timer: ReturnType<typeof setTimeout> | null }
+    {
+      token: symbol;
+      /** This claim's {@link claim} generation. */
+      generation: number;
+      budgetMs: number;
+      /** `Date.now()` past which the claim lapses. Never moved by a write. */
+      deadline: number;
+      timer: ReturnType<typeof setTimeout> | null;
+      /** A POST is in flight on this claim ({@link pinForWrite}). */
+      writing: boolean;
+    }
   >();
-  /** Claims whose timer fired before anyone released them, with their budget:
-   *  still the caller's to write with, if the key is free. */
-  private readonly lapsed = new WeakMap<SummarySaveClaim, number>();
+  /** Per key, the generation of the newest successful {@link claim}. Deleted
+   *  when the holder releases, so it stays bounded by the keys held or lapsed. */
+  private readonly latestGeneration = new Map<string, number>();
+  private nextGeneration = 1;
+  /** The claims that lapsed before anyone released them, with what a
+   *  re-take needs. */
+  private readonly lapsed = new WeakMap<SummarySaveClaim, { generation: number; budgetMs: number; deadline: number }>();
 
   /** `JSON.stringify` over the pair: injective with no separator guess. */
   private key(sourceId: string, docId: string): string {
     return JSON.stringify([sourceId, docId]);
   }
 
-  private arm(key: string, claim: SummarySaveClaim, budgetMs: number): ReturnType<typeof setTimeout> {
+  /** Free the key for other writers; the claim may still re-take it. */
+  private lapse(key: string, claim: SummarySaveClaim): void {
+    const held = this.held.get(key);
+    if (!held || held.token !== claim.token) return;
+    const { generation, budgetMs, deadline } = held;
+    this.held.delete(key);
+    this.lapsed.set(claim, { generation, budgetMs, deadline });
+    log.warn("The save claim on {docId} ({sourceId}) was not released within {budgetMs} ms — releasing it", {
+      docId: claim.docId,
+      sourceId: claim.sourceId,
+      budgetMs,
+    });
+  }
+
+  /** Arm the timer for what is LEFT of the budget; lapse now when none is. */
+  private arm(key: string, claim: SummarySaveClaim): void {
+    const held = this.held.get(key);
+    if (!held || held.token !== claim.token) return;
+    const remaining = held.deadline - Date.now();
+    if (remaining <= 0) {
+      this.lapse(key, claim);
+      return;
+    }
     const timer = setTimeout(() => {
-      if (this.held.get(key)?.token !== claim.token) return;
-      this.held.delete(key);
-      this.lapsed.set(claim, budgetMs);
-      log.warn("The save claim on {docId} ({sourceId}) was not released within {budgetMs} ms — releasing it", {
-        docId: claim.docId,
-        sourceId: claim.sourceId,
-        budgetMs,
-      });
-    }, budgetMs);
+      const current = this.held.get(key);
+      if (current?.token !== claim.token || current.timer !== timer) return;
+      this.lapse(key, claim);
+    }, remaining);
     // A background bookkeeping timer must not hold the process open.
     timer.unref?.();
-    return timer;
+    held.timer = timer;
   }
 
   isHeld(sourceId: string, docId: string): boolean {
@@ -404,7 +440,17 @@ export class SummarySaveClaims {
     const key = this.key(sourceId, docId);
     if (this.held.has(key)) return null;
     const claim: SummarySaveClaim = { sourceId, docId, token: Symbol(key), registry: this };
-    this.held.set(key, { token: claim.token, budgetMs, timer: this.arm(key, claim, budgetMs) });
+    const generation = this.nextGeneration++;
+    this.latestGeneration.set(key, generation);
+    this.held.set(key, {
+      token: claim.token,
+      generation,
+      budgetMs,
+      deadline: Date.now() + budgetMs,
+      timer: null,
+      writing: false,
+    });
+    this.arm(key, claim);
     return claim;
   }
 
@@ -418,37 +464,50 @@ export class SummarySaveClaims {
    * the claim cannot lapse while the POST is in flight and a second writer
    * cannot claim and be overwritten by it.
    *
-   * `true` when this claim holds the key now — still its own, or RE-TAKEN after
-   * it lapsed with nobody else on it. `false` when another writer holds the key,
-   * or the caller already released this claim. Pair with {@link unpinAfterWrite}.
+   * `"pinned"` when this claim holds the key now — still its own, or RE-TAKEN
+   * after it lapsed with no claim taken on the key since. `"writing"` when this
+   * claim already has a POST in flight (a second concurrent save on one claim
+   * is refused, not queued). `"taken"` when another writer holds the key or
+   * claimed it after this one lapsed, `"released"` when the caller already
+   * released this claim. Pair a `"pinned"` with {@link unpinAfterWrite}.
    */
-  pinForWrite(claim: SummarySaveClaim): boolean {
+  pinForWrite(claim: SummarySaveClaim): "pinned" | "writing" | "taken" | "released" {
     const key = this.key(claim.sourceId, claim.docId);
     const held = this.held.get(key);
     if (held) {
-      if (held.token !== claim.token) return false;
+      if (held.token !== claim.token) return "taken";
+      if (held.writing) return "writing";
       if (held.timer) clearTimeout(held.timer);
       held.timer = null;
-      return true;
+      held.writing = true;
+      return "pinned";
     }
-    const budgetMs = this.lapsed.get(claim);
-    if (budgetMs === undefined) return false;
+    const lapsed = this.lapsed.get(claim);
+    if (lapsed === undefined) return "released";
+    if (this.latestGeneration.get(key) !== lapsed.generation) {
+      // Someone claimed the key after this one lapsed; whatever they wrote is
+      // newer than the read this claim's body was built from.
+      this.lapsed.delete(claim);
+      return "taken";
+    }
     this.lapsed.delete(claim);
-    this.held.set(key, { token: claim.token, budgetMs, timer: null });
+    this.held.set(key, { token: claim.token, ...lapsed, timer: null, writing: true });
     log.info("The save claim on {docId} ({sourceId}) had lapsed with no other writer — re-taken for the write", {
       docId: claim.docId,
       sourceId: claim.sourceId,
     });
-    return true;
+    return "pinned";
   }
 
-  /** End a {@link pinForWrite}: re-arm the budget timer, so a caller that never
-   *  releases still frees the key. A no-op when the claim no longer holds it. */
+  /** End a {@link pinForWrite}: re-arm the timer for what is left of the
+   *  budget (a claim past its deadline lapses here), so a caller that never
+   *  releases still frees the key. A no-op unless this claim is writing. */
   unpinAfterWrite(claim: SummarySaveClaim): void {
     const key = this.key(claim.sourceId, claim.docId);
     const held = this.held.get(key);
-    if (!held || held.token !== claim.token || held.timer) return;
-    held.timer = this.arm(key, claim, held.budgetMs);
+    if (!held || held.token !== claim.token || !held.writing) return;
+    held.writing = false;
+    this.arm(key, claim);
   }
 
   /** Release a claim; a no-op when it expired and someone else holds the key. */
@@ -459,6 +518,7 @@ export class SummarySaveClaims {
     if (!held || held.token !== claim.token) return;
     if (held.timer) clearTimeout(held.timer);
     this.held.delete(key);
+    this.latestGeneration.delete(key);
   }
 
   /** Drop every claim and its timer. Tests only. */
@@ -635,14 +695,18 @@ async function saveOnce(input: SaveSummaryBodyInput): Promise<SummarySaveResult>
 
   // Pinned for the POST: the claim can neither lapse mid-ingest nor be lost to
   // a second writer that would then be overwritten by this one.
-  if (!claim.registry.pinForWrite(claim)) {
+  const pin = claim.registry.pinForWrite(claim);
+  if (pin !== "pinned") {
     return {
       ok: false,
       status: 409,
       code: "in_flight",
-      error: claim.registry.isHeld(claim.sourceId, claim.docId)
-        ? "Another write took this document after this one's claim lapsed. Nothing was saved."
-        : "This write's claim was already released. Nothing was saved.",
+      error:
+        pin === "writing"
+          ? "A save on this claim is already in flight. Nothing was saved."
+          : pin === "taken"
+            ? "Another write took this document after this one's claim lapsed. Nothing was saved."
+            : "This write's claim was already released. Nothing was saved.",
     };
   }
   let res: Awaited<ReturnType<SummaryIngest>>;
@@ -655,24 +719,25 @@ async function saveOnce(input: SaveSummaryBodyInput): Promise<SummarySaveResult>
   } finally {
     claim.registry.unpinAfterWrite(claim);
   }
+  const RELOAD = "The document may have been written anyway — Reload it before retrying.";
   if (!res.ok) {
     if (res.mayHaveWritten) {
-      return {
-        ok: false,
-        status: 502,
-        code: "write_unknown",
-        error: `${res.error}. The document may have been written anyway — Reload it before retrying.`,
-      };
+      return { ok: false, status: 502, code: "write_unknown", error: `${res.error}. ${RELOAD}` };
     }
     return { ok: false, status: 502, code: "write_failed", error: res.error };
   }
-  const filePath = typeof res.data.file_path === "string" ? res.data.file_path : "";
+  const data = (typeof res.data === "object" && res.data !== null ? res.data : {}) as {
+    file_path?: unknown;
+    similar?: unknown;
+  };
+  const filePath = typeof data.file_path === "string" ? data.file_path : "";
   if (!filePath) {
+    // The request landed (a 2xx), so the write may well have too.
     return {
       ok: false,
       status: 502,
-      code: "write_failed",
-      error: "huginn answered the ingest without a file_path, so whether the document was written is unknown.",
+      code: "write_unknown",
+      error: `huginn answered the ingest ${res.status} without a file_path. ${RELOAD}`,
     };
   }
   if (!sameDocId(filePath, input.docId)) {
@@ -686,6 +751,6 @@ async function saveOnce(input: SaveSummaryBodyInput): Promise<SummarySaveResult>
       siblingDocId: filePath,
     };
   }
-  const similar = Array.isArray(res.data.similar) ? (res.data.similar as SimilarArticle[]) : [];
+  const similar = Array.isArray(data.similar) ? (data.similar as SimilarArticle[]) : [];
   return { ok: true, filePath, similar, appended };
 }
