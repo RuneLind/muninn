@@ -363,7 +363,10 @@ export interface SummarySaveClaim {
  * other claim was taken on the key since it lapsed — a run that outlived the
  * budget inside its own timeouts keeps its summary, while a run whose read
  * predates someone else's whole claim → write → release is refused, since its
- * body would overwrite the newer write. The claim is a TOKEN, so a stalled
+ * body would overwrite the newer write. That guarantee covers only reads made
+ * AFTER {@link claim}: a caller must claim before it reads the document it will
+ * rebuild (re-run reads first, which is safe only because it regenerates the
+ * summary from the transcript). The claim is a TOKEN, so a stalled
  * writer that settles after someone else claimed releases nothing and writes
  * nothing.
  *
@@ -385,8 +388,9 @@ export class SummarySaveClaims {
       writing: boolean;
     }
   >();
-  /** Per key, the generation of the newest successful {@link claim}: one
-   *  number per key at most, deleted when the holder releases. */
+  /** Per key, the generation of the newest successful {@link claim}, drawn
+   *  from one registry-wide counter. At most one number per key; deleted when a
+   *  HELD claim is released, kept when a lapsed claim is (bounded growth). */
   private readonly latestGeneration = new Map<string, number>();
   private nextGeneration = 1;
   /** The claims that lapsed before anyone released them, with what a

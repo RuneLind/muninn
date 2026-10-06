@@ -201,10 +201,12 @@ carries a timer sized to the budget that run actually sends —
 writers; it does not cancel the claim.** Work after the model call (the
 closing-takeaway check, frame copies) and a connector's retry loop can outlast
 the budget inside their own timeouts, so at save time `pinForWrite` re-takes a
-lapsed claim only when no claim was taken on the key since it lapsed (a per-key
-generation counter), and refuses it as `in_flight` otherwise — including when a
+lapsed claim only when no claim was taken on the key since it lapsed (each
+claim records a generation from one registry-wide counter; the key keeps its
+newest), and refuses it as `in_flight` otherwise — including when a
 rival claimed, wrote and released in between, since the lapsed run's body was
-built from a read older than that write. The pin also suspends the timer for
+built from a read older than that write. The guarantee covers only reads made after
+the claim: a write route claims first, then reads. The pin also suspends the timer for
 the length of the POST, so a claim cannot lapse mid-ingest and let a second
 writer be overwritten; afterwards the timer is re-armed for what is LEFT of the
 budget (the deadline is fixed at claim time, so saves never extend a claim), and
