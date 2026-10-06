@@ -15,9 +15,9 @@
  * the transcript check's block (`transcriptHtml` on `/result`, `html` on the
  * transcript POST), whose button shows only when a fresh web result is saved
  * and the document has a transcript (`hasTranscript` on `/result`). While a
- * transcript run is in flight, ↻ Re-check is disabled, a reopen keeps the block
- * the run writes, and an answer for a web result that has since been replaced
- * is dropped.
+ * transcript run is in flight, ↻ Re-check and the panel's ✓ Fact check are
+ * disabled, a reopen keeps the block the run writes, and an answer for a web
+ * result that has since been replaced is dropped.
  */
 
 import { makeSseFrameParser } from "./client-runtime.ts";
@@ -129,12 +129,12 @@ async function loadSaved(source: string, docId: string): Promise<void> {
     };
     const result = data.result ? { ...data.result, html: data.html ?? null } : null;
     const before = saved.get(key);
-    // While a transcript run is in flight, or once one wrote its block after
-    // this read began, the block on screen is newer than this answer — unless
-    // the web result itself changed, which replaces both.
+    // Once a transcript POST wrote its block after this read began, the block
+    // on screen is newer than this answer — unless the web result itself
+    // changed, which replaces both. A read answered while a run is still in
+    // flight shows the server's block; the POST's answer replaces it on landing.
     const sameWebResult = !!before?.result && !!result && before.result.createdAt === result.createdAt;
-    const keepTranscript =
-      sameWebResult && (!!transcriptRuns.get(key)?.running || (transcriptWrittenAt.get(key) ?? 0) > readAt);
+    const keepTranscript = sameWebResult && (transcriptWrittenAt.get(key) ?? 0) > readAt;
     saved.set(key, {
       result,
       stale: data.stale,

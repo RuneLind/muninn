@@ -4,6 +4,7 @@ import {
   capTranscript,
   checkClaimsAgainstTranscript,
   describeCut,
+  parseSavedTranscriptCheck,
   parseTranscriptVerdicts,
   transcriptReading,
   transcriptRouterOptions,
@@ -68,7 +69,7 @@ describe("buildTranscriptCheckPrompt", () => {
     expect(whole).not.toContain("is CUT");
     const cut = buildTranscriptCheckPrompt(claims, "T", { truncated: true, keptChars: 1, totalChars: 9 });
     expect(cut).toContain("first 1 of 9 characters");
-    expect(cut).toContain("beyond the cut");
+    expect(cut).toContain("beyondCut");
   });
 });
 
@@ -130,7 +131,7 @@ describe("the call", () => {
       call: async (p) => {
         prompts.push(p);
         return {
-          result: JSON.stringify({ claims: [{ index: 1, verdict: "supported", note: "n" }, { index: 2, verdict: "not in transcript", note: "m" }] }),
+          result: JSON.stringify({ claims: [{ index: 1, verdict: "supported", note: "n" }, { index: 2, verdict: "not in transcript", note: "m", beyondCut: false }] }),
           model: "m",
           inputTokens: 1,
           outputTokens: 1,
@@ -206,14 +207,148 @@ describe("fix round 1", () => {
     expect(parseTranscriptVerdicts(JSON.stringify({ claims: [{ index: 1, verdict: "supported" }] }), one)[0]!.index).toBe(1);
   });
 
-  test("past a cut, not in transcript blames nobody: the claim may sit in the unchecked part", () => {
+  test("past a cut, a not-in-transcript claim the model places beyond the cut blames nobody", () => {
     const cut = { truncated: true, keptChars: 10, totalChars: 20 };
     for (const web of ["❌", "⚠️", "✅", "❓", undefined]) {
-      const r = transcriptReading(web, "not in transcript", cut);
+      const r = transcriptReading(web, "not in transcript", cut, true);
       expect(r).toBe("maybe said past the checked part");
     }
     expect(transcriptReading("❌", "not in transcript", whole)).toBe("the summary added it");
     expect(transcriptReading("❌", "supported", cut)).toBe("the source got it wrong");
     expect(transcriptReading("✅", "contradicts transcript", cut)).toBe("the summary misreports the source");
+  });
+});
+
+describe("fix round 2", () => {
+  const whole = { truncated: false, keptChars: 1, totalChars: 1 };
+  const cut = { truncated: true, keptChars: 10, totalChars: 20 };
+
+  test("a paragraph break straddling the window's end is seen, ahead of an earlier one", () => {
+    const t = `${"a".repeat(70)}\n\n${"b".repeat(27)}\n\n${"c".repeat(50)}`;
+    expect(t.indexOf("\n\n", 71)).toBe(99);
+    expect(capTranscript(t, 100).text).toBe(`${"a".repeat(70)}\n\n${"b".repeat(27)}`);
+  });
+
+  test("a tab-separated transcript is cut at its last tab, not mid-word", () => {
+    const t = "abcdefgh\t".repeat(15);
+    const r = capTranscript(t, 100);
+    expect(r.text).toBe(t.slice(0, 98));
+  });
+
+  test("a question or an exclamation ends a sentence for the cut", () => {
+    const q = `${"Why is that so? ".repeat(4)}and then more words keep going on and on here`;
+    expect(capTranscript(q, 90).text).toBe("Why is that so? ".repeat(4).trimEnd());
+    const x = `${"It works fine! ".repeat(4)}and then more words keep going on and on here`;
+    expect(capTranscript(x, 90).text).toBe("It works fine! ".repeat(4).trimEnd());
+  });
+
+  test("a non-integer asked index is never answered: the answer's index must be an integer", () => {
+    const half = [{ index: 1.5, title: "H" }];
+    expect(() => parseTranscriptVerdicts(JSON.stringify({ claims: [{ index: 1.5, verdict: "supported" }] }), half)).toThrow(/claim\(s\) 1\.5/);
+  });
+
+  test("past a cut, every not-in-transcript claim says whether it lies beyond the cut, and only those read as maybe said later", () => {
+    const two = [{ index: 1, title: "A" }, { index: 2, title: "B" }];
+    const answer = JSON.stringify({
+      claims: [
+        { index: 1, verdict: "not in transcript", note: "n", beyondCut: true },
+        { index: 2, verdict: "not in transcript", note: "m", beyondCut: false },
+      ],
+    });
+    expect(parseTranscriptVerdicts(answer, two, cut)).toEqual([
+      { index: 1, verdict: "not in transcript", note: "n", beyondCut: true },
+      { index: 2, verdict: "not in transcript", note: "m", beyondCut: false },
+    ]);
+    // Uncut, the flag means nothing and is not kept.
+    expect(parseTranscriptVerdicts(answer, two, whole)).toEqual([
+      { index: 1, verdict: "not in transcript", note: "n" },
+      { index: 2, verdict: "not in transcript", note: "m" },
+    ]);
+    // Cut, a missing or non-boolean flag is an unusable answer.
+    for (const beyondCut of [undefined, "true", 1, null]) {
+      const bad = JSON.stringify({ claims: [{ index: 1, verdict: "not in transcript", note: "n", beyondCut }, { index: 2, verdict: "supported" }] });
+      expect(() => parseTranscriptVerdicts(bad, two, cut)).toThrow(/beyondCut/);
+    }
+    // On another verdict it is dropped, cut or not.
+    const sup = JSON.stringify({ claims: [{ index: 1, verdict: "supported", beyondCut: true }, { index: 2, verdict: "contradicts", beyondCut: true }] });
+    expect(parseTranscriptVerdicts(sup, two, cut).map((c) => "beyondCut" in c)).toEqual([false, false]);
+
+    expect(transcriptReading("❌", "not in transcript", cut, true)).toBe("maybe said past the checked part");
+    expect(transcriptReading("❌", "not in transcript", cut, false)).toBe("the summary added it");
+    expect(transcriptReading("✅", "not in transcript", cut, false)).toBe("not from the source");
+    expect(transcriptReading("❌", "not in transcript", cut)).toBe("the summary added it");
+    expect(transcriptReading("❌", "not in transcript", whole, true)).toBe("the summary added it");
+  });
+
+  test("the prompt asks for beyondCut only when the transcript was cut", () => {
+    expect(buildTranscriptCheckPrompt(claims, "T", whole)).not.toContain("beyondCut");
+    const p = buildTranscriptCheckPrompt(claims, "T", cut);
+    expect(p).toContain('"beyondCut": true');
+    expect(p).toContain('"beyondCut": false');
+  });
+
+  test("the check passes its cut to the parser", async () => {
+    const r = await checkClaimsAgainstTranscript([{ index: 1, title: "A" }], `${"a".repeat(60)}\n\n${"b".repeat(60)}`, {
+      botName: "b",
+      maxChars: 100,
+      call: async () => ({
+        result: JSON.stringify({ claims: [{ index: 1, verdict: "not in transcript", note: "n", beyondCut: true }] }),
+        model: "m",
+        inputTokens: 1,
+        outputTokens: 1,
+      }),
+    });
+    expect(r.claims[0]!.beyondCut).toBe(true);
+  });
+
+  describe("parseSavedTranscriptCheck", () => {
+    const good = () => ({
+      claims: [{ index: 1, verdict: "not in transcript", note: "n", beyondCut: true }],
+      cut: { truncated: true, keptChars: 1, totalChars: 2 },
+      model: "m",
+      backend: "cli",
+      botName: "b",
+      checkedAt: 5,
+    });
+    const without = (o: Record<string, unknown>, k: string) => {
+      const c = { ...o };
+      delete c[k];
+      return c;
+    };
+
+    test("a good value round-trips, beyondCut included", () => {
+      expect(parseSavedTranscriptCheck(good())).toEqual(good() as never);
+    });
+
+    test("a claim with a non-string note, a non-integer index or a non-boolean beyondCut is no check", () => {
+      for (const claim of [
+        { index: 1, verdict: "supported", note: 3 },
+        { index: 1, verdict: "supported" },
+        { index: 1.5, verdict: "supported", note: "n" },
+        { index: "1", verdict: "supported", note: "n" },
+        { index: 1, verdict: "not in transcript", note: "n", beyondCut: "yes" },
+      ]) {
+        expect(parseSavedTranscriptCheck({ ...good(), claims: [claim] })).toBeNull();
+      }
+    });
+
+    test("a missing or mistyped model, botName or checkedAt is no check", () => {
+      for (const k of ["model", "botName", "checkedAt"]) {
+        expect(parseSavedTranscriptCheck(without(good(), k))).toBeNull();
+        expect(parseSavedTranscriptCheck({ ...good(), [k]: k === "checkedAt" ? "5" : 5 })).toBeNull();
+      }
+    });
+
+    test("a cut without its counts, or with bad ones, is no check — describeCut would throw on it", () => {
+      for (const c of [
+        { truncated: true },
+        { truncated: "yes", keptChars: 1, totalChars: 2 },
+        { truncated: true, keptChars: -1, totalChars: 2 },
+        { truncated: true, keptChars: 1.5, totalChars: 2 },
+        { truncated: true, keptChars: 0, totalChars: 0 },
+      ]) {
+        expect(parseSavedTranscriptCheck({ ...good(), cut: c })).toBeNull();
+      }
+    });
   });
 });

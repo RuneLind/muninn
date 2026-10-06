@@ -172,3 +172,31 @@ describe("transcript check on the real store", () => {
     }
   });
 });
+
+describe("fix round 2", () => {
+  test("valid claims with a bad cut, note, model or index map to no check — with no sha — and /result still answers 200", async () => {
+    await upsertSummaryFactcheck(web);
+    const a = app();
+    const claims = [{ index: 1, verdict: "supported", note: "n" }];
+    const base = { claims, cut: { truncated: false, keptChars: 1, totalChars: 1 }, model: "m", botName: "b", checkedAt: 0 };
+    for (const bad of [
+      { ...base, cut: { truncated: true } },
+      { ...base, claims: [{ index: 1, verdict: "supported", note: 7 }] },
+      { ...base, claims: [{ index: 1.5, verdict: "supported", note: "n" }] },
+      { ...base, model: 1 },
+      { ...base, botName: null },
+      { ...base, checkedAt: "0" },
+    ]) {
+      await getDb()`UPDATE summary_factchecks SET transcript_claims = ${getDb().json(bad as never)}, transcript_sha256 = ${"d".repeat(64)} WHERE doc_id = ${DOC}`;
+      const row = (await getSummaryFactcheck(web.collection, DOC))!;
+      expect(row.transcript, JSON.stringify(bad)).toBeNull();
+      expect(row.transcriptSha256, JSON.stringify(bad)).toBeNull();
+      const res = await a.request(`/api/summaries/factcheck/result?source=youtube&docId=${encodeURIComponent(DOC)}`);
+      expect(res.status, JSON.stringify(bad)).toBe(200);
+      expect(((await res.json()) as { transcriptHtml: string | null }).transcriptHtml).toBeNull();
+    }
+    // The same row with a good value keeps its sha.
+    await getDb()`UPDATE summary_factchecks SET transcript_claims = ${getDb().json(base as never)}, transcript_sha256 = ${"d".repeat(64)} WHERE doc_id = ${DOC}`;
+    expect((await getSummaryFactcheck(web.collection, DOC))!.transcriptSha256).toBe("d".repeat(64));
+  });
+});

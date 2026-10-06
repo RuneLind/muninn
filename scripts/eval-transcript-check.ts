@@ -12,6 +12,8 @@
  *     transcript`) the check flagged as anything but `supported`;
  *   - class accuracy: claims given exactly the expected verdict;
  *   - false positives: claims expected `supported` flagged otherwise;
+ *   - past a cut, `beyondCut` against each claim's `expectedBeyondCut`, and the
+ *     panel's reading of every claim with a `webVerdict`;
  *   - latency per call, and each fixture's cut.
  *
  * The calls are REAL and spend money; nothing reads or writes the database or
@@ -23,7 +25,9 @@ import { TRANSCRIPT_FIXTURES } from "../src/summaries/__fixtures__/transcript-ch
 import {
   checkClaimsAgainstTranscript,
   describeCut,
+  transcriptReading,
   TRANSCRIPT_CHECK_MAX_CHARS,
+  type TranscriptCut,
   TRANSCRIPT_CHECK_TIMEOUT_MS,
   type TranscriptClaimVerdict,
 } from "../src/summaries/transcript-check.ts";
@@ -53,12 +57,15 @@ let total = 0;
 let supportedExpected = 0;
 let falsePositives = 0;
 let failures = 0;
+let beyondAsked = 0;
+let beyondRight = 0;
 const latencies: number[] = [];
 const report: unknown[] = [];
 
 for (const f of fixtures) {
   const claims = f.claims.map(({ index, title, quote }) => ({ index, title, ...(quote ? { quote } : {}) }));
   let got: TranscriptClaimVerdict[] = [];
+  let gotCut: TranscriptCut | undefined;
   let line = "";
   try {
     const r = await checkClaimsAgainstTranscript(claims, f.transcript, {
@@ -69,6 +76,7 @@ for (const f of fixtures) {
       ...(backend ? { haikuBackend: backend } : {}),
     });
     got = r.claims;
+    gotCut = r.cut;
     latencies.push(r.latencyMs);
     line = `${(r.latencyMs / 1000).toFixed(1)}s ${r.model}${r.backend ? `/${r.backend}` : ""} ${r.inputTokens}/${r.outputTokens} tok`;
     const cut = describeCut(r.cut);
@@ -94,7 +102,14 @@ for (const f of fixtures) {
     if (mismatch && g.verdict !== "supported") hits += 1;
     if (!mismatch && g.verdict !== "supported") falsePositives += 1;
     const mark = g.verdict === c.expected ? "ok " : mismatch === (g.verdict !== "supported") ? "~  " : "XX ";
-    console.log(`  ${mark}${c.index}. ${g.verdict} (expected ${c.expected}) — ${c.title}\n       ${g.note}`);
+    let extra = "";
+    if (c.expectedBeyondCut !== undefined && g.verdict === "not in transcript") {
+      beyondAsked += 1;
+      if (g.beyondCut === c.expectedBeyondCut) beyondRight += 1;
+      extra += ` beyondCut=${g.beyondCut} (expected ${c.expectedBeyondCut})`;
+    }
+    if (c.webVerdict) extra += ` reading(web ${c.webVerdict}): ${transcriptReading(c.webVerdict, g.verdict, gotCut, g.beyondCut) ?? "none"}`;
+    console.log(`  ${mark}${c.index}. ${g.verdict} (expected ${c.expected})${extra} — ${c.title}\n       ${g.note}`);
   }
 }
 
@@ -111,6 +126,7 @@ const summary = {
   supportedExpected,
   falsePositives,
   callFailures: failures,
+  beyondCut: { asked: beyondAsked, right: beyondRight },
   latencyMs: { median, max: sorted.at(-1) ?? 0, min: sorted[0] ?? 0 },
   maxChars,
   timeoutMs,

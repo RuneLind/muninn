@@ -14,6 +14,11 @@ export interface TranscriptClaimVerdict {
   index: number;
   verdict: TranscriptVerdict;
   note: string;
+  /**
+   * Only on a `not in transcript` verdict over a CUT transcript: whether the
+   * model judged the claim's subject to lie in the part that was not sent.
+   */
+  beyondCut?: boolean;
 }
 
 export interface TranscriptCut {
@@ -51,7 +56,13 @@ export function parseSavedTranscriptCheck(value: unknown): SavedTranscriptCheck 
     if (!isRecord(c) || typeof c.index !== "number" || !Number.isInteger(c.index)) return null;
     if (typeof c.verdict !== "string" || !(TRANSCRIPT_VERDICTS as readonly string[]).includes(c.verdict)) return null;
     if (typeof c.note !== "string") return null;
-    claims.push({ index: c.index, verdict: c.verdict as TranscriptVerdict, note: c.note });
+    if (c.beyondCut !== undefined && typeof c.beyondCut !== "boolean") return null;
+    claims.push({
+      index: c.index,
+      verdict: c.verdict as TranscriptVerdict,
+      note: c.note,
+      ...(typeof c.beyondCut === "boolean" ? { beyondCut: c.beyondCut } : {}),
+    });
   }
   const { truncated, keptChars, totalChars } = value.cut;
   if (typeof truncated !== "boolean" || !isCount(keptChars) || !isCount(totalChars) || (truncated && totalChars === 0)) return null;

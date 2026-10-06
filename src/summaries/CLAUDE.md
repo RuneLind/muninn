@@ -350,9 +350,12 @@ article mode, unchanged prompts) over the summary and saves the result in
   with the takeaway check's Sonnet request (withheld on vertex, which runs its
   own model), 120 s timeout per router attempt, the transcript capped at
   60 000 chars at the last paragraph / line / sentence / word boundary with the
-  cut saved and shown; past a cut, `not in transcript` reads "maybe said past
-  the checked part", not as the summary's fault. Every interpolated string goes
-  through `neutralizePromptTags` (`src/utils/prompt-fence.ts`) and the data rule
+  cut saved and shown; past a cut, the model gives every `not in transcript`
+  claim a `beyondCut` boolean (required by the parser, saved per claim), and only
+  a `beyondCut: true` claim reads "maybe said past the checked part" rather than
+  as the summary's fault. Every interpolated string goes through
+  `neutralizePromptTags` (`src/utils/prompt-fence.ts`, which also catches the
+  HTML-escaped, full-width and zero-width-split forms of a tag) and the data rule
   is restated after the block: a transcript that closed `</transcript>` flipped
   every verdict before that (the takeaway check's `<body>`/`<takeaway>` get the
   same). The prompt allows for speech-recognition mis-hearings of names.

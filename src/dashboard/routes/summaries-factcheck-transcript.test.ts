@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { registerSummariesFactcheckRoutes, type SummariesFactcheckDeps } from "./summaries-factcheck.ts";
 import { documentTranscript, TRANSCRIPT_MIGRATION_MISSING, transcriptSha256 } from "./summaries-factcheck-transcript.ts";
 import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
+import { splitTranscript } from "../../summaries/transcript-split.ts";
 import { isSideEffectingRequest, SIDE_EFFECTING_GETS, decideOrigin } from "../../auth/origin.ts";
 import type { SummaryFactcheck } from "../../db/summary-factchecks.ts";
 import type { SavedTranscriptCheck } from "../../summaries/transcript-check.ts";
@@ -299,8 +300,55 @@ describe("fix round 1", () => {
     expect(((await res.json()) as { transcript: SavedTranscriptCheck }).transcript.backend).toBe("cli");
   });
 
-  test("documentTranscript reads past a frontmatter block, so a heading-shaped frontmatter line is no transcript", () => {
-    expect(documentTranscript("---\nnote: x\n## Transcript\n---\nOnly a summary.\n")).toBeNull();
-    expect(documentTranscript("---\ntitle: t\n---\nSummary.\n\n## Transcript\n\nSaid.\n")).toBe("Said.");
+});
+
+describe("fix round 2", () => {
+  // `readSummarySourceText` strips the frontmatter; a body that itself opens
+  // with a rule must not lose its transcript to a second strip.
+  const RULED = `---\n\nA summary that opens with a rule.\n\n## Transcript\n\nSaid this.\n\n---\n\nSaid that.\n`;
+
+  test("documentTranscript is the re-run options' split: a body opening with a rule keeps its transcript", () => {
+    expect(documentTranscript(RULED)).toBe(splitTranscript(RULED).transcript!.trim());
+    expect(documentTranscript(RULED)).toContain("Said this.");
+  });
+
+  test("such a body shows the button on /result and is checked by the POST", async () => {
+    source = RULED;
+    stored = { ...webRow(), bodySha256: factcheckBodySha256(RULED) };
+    const a = app();
+    const r = (await (await a.request(`/api/summaries/factcheck/result?source=youtube&docId=${encodeURIComponent(DOC)}`)).json()) as {
+      hasTranscript: boolean | null;
+    };
+    expect(r.hasTranscript).toBe(true);
+    const res = await post(a);
+    expect(res.status).toBe(200);
+    expect(prompts[0]).toContain("Said this.");
+  });
+
+  test("a store error on the re-read after a failed save is a 409 to retry, not a 404", async () => {
+    saveResult = false;
+    let calls = 0;
+    const a = new Hono();
+    registerSummariesFactcheckRoutes(a, config, {
+      readSourceText: async () => source,
+      fetchDocMeta: async () => null,
+      store: {
+        upsert: async () => { throw new Error("x"); },
+        get: async () => {
+          calls += 1;
+          if (calls > 1) throw new Error("db down");
+          return stored;
+        },
+        listBadges: async () => [],
+        saveTranscript: async () => false,
+        transcriptColumnsPresent: async () => true,
+      },
+      bots: () => [bot],
+      transcriptCall: async () => ({ result: answer as string, model: "m", inputTokens: 1, outputTokens: 1 }),
+    });
+    const res = await post(a);
+    expect(calls).toBe(2);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("web_check_changed");
   });
 });

@@ -28,7 +28,7 @@ export function renderTranscriptCheckHtml(
       const tChip = t
         ? `<span class="sum-fc-tchip" data-tverdict="${escHtml(t.verdict)}">transcript: ${escHtml(t.verdict)}</span>`
         : '<span class="sum-fc-tchip" data-tverdict="none">transcript: no verdict</span>';
-      const reading = t ? transcriptReading(web, t.verdict, check.cut) : null;
+      const reading = t ? transcriptReading(web, t.verdict, check.cut, t.beyondCut) : null;
       return (
         `<li data-claim-index="${escHtml(String(w.index))}">` +
         `<span class="sum-fc-v" title="${escHtml(WEB_LABEL[web] ?? "web")}">${escHtml(web)}</span>` +

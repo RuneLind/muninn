@@ -18,7 +18,6 @@ import { createHash } from "node:crypto";
 import { resolveSummarizerBot } from "../../bots/config.ts";
 import { splitTranscript } from "../../summaries/transcript-split.ts";
 import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
-import { stripFrontmatter } from "../../wiki/store.ts";
 import {
   checkClaimsAgainstTranscript,
   describeCut,
@@ -38,12 +37,13 @@ export const TRANSCRIPT_MIGRATION_MISSING =
   "The transcript check needs migration 081 (summary_factchecks.transcript_claims and transcript_sha256). Run `bun run db:migrate`.";
 
 /**
- * The document's transcript appendix, trimmed, or `null` when it has none. A
- * leading frontmatter block is skipped first (`readSummarySourceText` already
- * strips it; this keeps the answer right for any other reader of the file).
+ * The document's transcript appendix, trimmed, or `null` when it has none —
+ * the re-run options' `splitTranscript` predicate. `sourceText` is the body
+ * `readSummarySourceText` returns, frontmatter already stripped; stripping
+ * again would eat a body that opens with a `---` rule.
  */
 export function documentTranscript(sourceText: string): string | null {
-  const t = splitTranscript(stripFrontmatter(sourceText)).transcript?.trim();
+  const t = splitTranscript(sourceText).transcript?.trim();
   return t ? t : null;
 }
 

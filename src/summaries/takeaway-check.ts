@@ -186,6 +186,9 @@ export interface TakeawayVerdict {
   readonly rewrite: string | null;
 }
 
+/** The tags the check prompt fences its data in; neither interpolated text may carry one. */
+const TAKEAWAY_PROMPT_TAGS = ["body", "takeaway"] as const;
+
 /**
  * The check prompt. It names the three defect classes the 2026-09-08 review
  * found by name — an added cause, an added ranking, a reversal — because a
@@ -194,9 +197,6 @@ export interface TakeawayVerdict {
  * closer's own language, and it must not be "punchier": the whole point is a
  * line the body would sign.
  */
-/** The tags the check prompt fences its data in; neither interpolated text may carry one. */
-const TAKEAWAY_PROMPT_TAGS = ["body", "takeaway"] as const;
-
 export function buildTakeawayCheckPrompt(body: string, takeaway: string): string {
   return `You are checking the closing takeaway of a summary against the summary's own body. The reader often reads ONLY the takeaway, so it must not say anything the body does not.
 

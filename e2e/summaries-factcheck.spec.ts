@@ -645,3 +645,147 @@ test("a transcript error notice clears on reopen and when a new web result lands
     await resetFresh();
   }
 });
+
+// ── Fix round 2 ──────────────────────────────────────────────────────────
+
+/** A saved transcript check on DOC_FRESH whose block shows `note` on claim 1. */
+async function seedTranscriptBlock(note: string): Promise<void> {
+  await saveTranscriptCheck(
+    {
+      claims: [
+        { index: 1, verdict: "supported", note },
+        { index: 2, verdict: "supported", note: "also said" },
+      ],
+      cut: { truncated: false, keptChars: 30, totalChars: 30 },
+      model: "stub",
+      botName: BOT,
+      checkedAt: Date.now(),
+    },
+    transcriptSha(DOC_FRESH),
+  );
+}
+/** Another tab re-checks DOC_FRESH's web claims: a new result, transcript columns nulled. */
+const recheckElsewhere = () =>
+  sql!`UPDATE summary_factchecks SET created_at = now(), transcript_claims = NULL, transcript_sha256 = NULL WHERE doc_id = ${DOC_FRESH}`;
+const isFreshResult = (u: URL) => u.pathname === "/api/summaries/factcheck/result" && u.searchParams.get("docId") === DOC_FRESH;
+
+test("during a transcript run the panel's ✓ Fact check button is disabled, and a web start is refused", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    const panelBtn = page.locator("#docPanelFactcheck"); // DOC_PANEL_FACTCHECK_BTN_ID
+    await expect(panelBtn).toBeVisible();
+    await expect(panelBtn).toBeEnabled();
+    const gate = held();
+    await page.route(TX_ROUTE, async (route) => {
+      await gate.promise;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">done block</div>' }),
+      });
+    });
+    const webStarts: string[] = [];
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/summaries/factcheck") webStarts.push(r.url());
+    });
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+    await expect(panelBtn).toBeDisabled();
+    // The start guard on its own, past the disabled buttons.
+    await page.evaluate(() => (globalThis as unknown as { sumFactcheckStart: () => void }).sumFactcheckStart());
+    await page.waitForTimeout(300);
+    expect(webStarts).toEqual([]);
+    await expect(fc).not.toContainText("checking against the web");
+    gate.release();
+    await expect(fc.locator(".sum-fc-tx")).toHaveText("done block");
+    await expect(panelBtn).toBeEnabled();
+    await page.unroute(TX_ROUTE);
+  } finally {
+    await resetFresh();
+  }
+});
+
+test("a reopen mid-run onto a new web result drops the block that was there before", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  await seedTranscriptBlock("OLD NOTE");
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    await expect(fc.locator(".sum-fc-tx")).toContainText("OLD NOTE");
+    const gate = held();
+    await page.route(TX_ROUTE, async (route) => {
+      await gate.promise;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">late block</div>' }),
+      });
+    });
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+    await recheckElsewhere();
+    await railRow(page, DOC_STALE).click();
+    await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+    await railRow(page, DOC_FRESH).click();
+    await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+    await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+    gate.release();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeEnabled();
+    await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+    await page.unroute(TX_ROUTE);
+  } finally {
+    await resetFresh();
+  }
+});
+
+for (const outcome of ["block", "error"] as const) {
+  test(`a new web result read before a transcript ${outcome} lands and answered after it replaces that ${outcome}`, async ({ page }) => {
+    await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+    await seedTranscriptBlock("OLD NOTE");
+    try {
+      await open(page, DOC_FRESH);
+      const fc = page.locator("#sumFactcheck");
+      await expect(fc.locator(".sum-fc-tx")).toContainText("OLD NOTE");
+      const post = held();
+      await page.route(TX_ROUTE, async (route) => {
+        await post.promise;
+        await route.fulfill(
+          outcome === "block"
+            ? { status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">late block</div>' }) }
+            : { status: 502, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Transcript check failed: stub down" }) },
+        );
+      });
+      await fc.locator(".sum-fc-txbtn").click();
+      await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+      await recheckElsewhere();
+
+      // The reopen's /result (the new web result) is read before the POST lands and answered after it.
+      const resultGate = held();
+      let fetched: () => void = () => {};
+      const resultFetched = new Promise<void>((r) => { fetched = r; });
+      await page.route(isFreshResult, async (route) => {
+        const response = await route.fetch();
+        fetched();
+        await resultGate.promise;
+        await route.fulfill({ response });
+      });
+      await railRow(page, DOC_STALE).click();
+      await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+      await railRow(page, DOC_FRESH).click();
+      await resultFetched;
+      post.release();
+      if (outcome === "block") await expect(fc.locator(".sum-fc-tx")).toHaveText("late block");
+      else await expect(fc.locator(".sum-fc-err")).toHaveText("Transcript check failed: stub down");
+      resultGate.release();
+      await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+      await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+      await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+      await page.unroute(TX_ROUTE);
+      await page.unroute(isFreshResult);
+    } finally {
+      await resetFresh();
+    }
+  });
+}

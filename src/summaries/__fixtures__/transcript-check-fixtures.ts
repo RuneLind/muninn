@@ -6,7 +6,8 @@
  * the classes the takeaway check named on real captures: an added cause, a
  * changed number, a hedge turned certain, a view the speaker rejected, and a
  * claim with no source at all. Fixture 10 is longer than the 60,000-character
- * cap, with one claim supported only past the cut. Fixtures 11 and 12 are
+ * cap, with one claim said only past the cut (`expectedBeyondCut: true`) and one
+ * the summary added about the checked part (`expectedBeyondCut: false`). Fixtures 11 and 12 are
  * fixture 07 with a prompt injection planted in the transcript — one closing
  * the `<transcript>` tag, one inline — and expect fixture 07's verdicts
  * unchanged. Fixture 13 is lower-case automatic captions that mis-hear a
@@ -18,7 +19,14 @@ import type { TranscriptCheckInputClaim, TranscriptVerdict } from "../transcript
 export interface TranscriptFixture {
   id: string;
   transcript: string;
-  claims: Array<TranscriptCheckInputClaim & { expected: TranscriptVerdict; webVerdict?: string }>;
+  claims: Array<
+    TranscriptCheckInputClaim & {
+      expected: TranscriptVerdict;
+      webVerdict?: string;
+      /** Past a cut, a `not in transcript` claim's expected `beyondCut`. */
+      expectedBeyondCut?: boolean;
+    }
+  >;
 }
 
 const sleep = `### [00:00:00]
@@ -324,8 +332,10 @@ export const TRANSCRIPT_FIXTURES: TranscriptFixture[] = [
       { index: 1, title: "The tram network opened in 1894 with two lines", quote: "It opened in 1894 with two lines.", expected: "supported" },
       { index: 2, title: "The network opened with four electric lines", quote: "Four electric lines opened at once.", expected: "contradicts transcript" },
       // Said only at 02:30:00, past the 60,000-character cut: under the cap the
-      // correct verdict is "not in transcript", and the note should say so.
-      { index: 3, title: "The network was electrified in 1899", quote: "Electrification came in 1899.", expected: "not in transcript" },
+      // correct verdict is "not in transcript", placed beyond the cut.
+      { index: 3, title: "The network was electrified in 1899", quote: "Electrification came in 1899.", expected: "not in transcript", webVerdict: "❌", expectedBeyondCut: true },
+      // About the lecture's opening, which the checked part holds whole: the summary added it.
+      { index: 4, title: "The speaker opened the lecture by thanking the city archive", quote: "He began by thanking the city archive.", expected: "not in transcript", webVerdict: "❌", expectedBeyondCut: false },
     ],
   },
   {
