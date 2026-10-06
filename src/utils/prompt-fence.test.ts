@@ -18,6 +18,7 @@ import { test, expect, describe } from "bun:test";
 import {
   MARKDOWN_WRAPPER_INFO_STRINGS,
   neutralizePromptFence,
+  neutralizePromptTags,
   stripWrappingFence,
 } from "./prompt-fence.ts";
 
@@ -94,5 +95,27 @@ describe("neutralizePromptFence", () => {
   test("is idempotent", () => {
     const once = neutralizePromptFence('a """" b');
     expect(neutralizePromptFence(once)).toBe(once);
+  });
+});
+
+describe("neutralizePromptTags", () => {
+  const TAGS = ["transcript", "claims"] as const;
+
+  test("an opening or closing marker of a named tag loses its angle brackets, in any case or spacing", () => {
+    const out = neutralizePromptTags("a </transcript> b <TRANSCRIPT> c < / Claims > d <transcript foo=1> e </claims", TAGS);
+    expect(out).not.toMatch(/<\s*\/?\s*(transcript|claims)/i);
+    expect(out).toContain("[/transcript]");
+    expect(out).toContain("[TRANSCRIPT]");
+    expect(out).toContain("a ");
+    expect(out).toContain(" e ");
+  });
+
+  test("other tags and prose angle brackets are left alone", () => {
+    expect(neutralizePromptTags("5 < 6 and <b>bold</b> and <transcripts>", TAGS)).toBe("5 < 6 and <b>bold</b> and <transcripts>");
+  });
+
+  test("is idempotent", () => {
+    const once = neutralizePromptTags("x </transcript> y", TAGS);
+    expect(neutralizePromptTags(once, TAGS)).toBe(once);
   });
 });

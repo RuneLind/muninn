@@ -384,3 +384,34 @@ article mode, unchanged prompts) over the summary and saves the result in
   markdown renderer.
 - **Badges** (`/badges`) are one query over the table; the client patches the
   Latest rail rows and re-reads after every completed check.
+- **Transcript check** (`POST /api/summaries/factcheck/transcript`,
+  `src/dashboard/routes/summaries-factcheck-transcript.ts`; pure half
+  `transcript-check.ts`). Its input is the saved row's web claims (index,
+  title, quote), so its verdicts — `supported` / `not in transcript` /
+  `contradicts transcript` — join the web verdicts by `index`; web ❌ plus
+  transcript `supported` reads "the source got it wrong". One Haiku-router call
+  with the takeaway check's Sonnet request (withheld on vertex, which runs its
+  own model), 120 s timeout per router attempt, the transcript capped at
+  60 000 chars at the last paragraph / line / sentence / word boundary with the
+  cut saved and shown; past a cut, the model gives every `not in transcript`
+  claim a `beyondCut` boolean (required by the parser, saved per claim), and only
+  a `beyondCut: true` claim reads "maybe said past the checked part" rather than
+  as the summary's fault. Every interpolated string goes through
+  `neutralizePromptTags` (`src/utils/prompt-fence.ts`; look-alike forms —
+  HTML-escaped, full-width, zero-width-split — are not caught) and the data rule
+  is restated after the block: a transcript that closed `</transcript>` flipped
+  every verdict before that (the takeaway check's `<body>`/`<takeaway>` get the
+  same). The prompt allows for speech-recognition mis-hearings of names.
+  JSON in, JSON out; `application/json` and an object body required; a POST, so
+  the origin guard covers it by method. 409 `web_check_stale` once the summary
+  changed since the web check (the panel hides the button then); 404 when the
+  row was deleted mid-call.
+  Saved in the row's `transcript_claims` / `transcript_sha256` (migration 081)
+  only while its claims are still the ones it read (jsonb equality in the
+  `UPDATE`); every web upsert NULLs both, and on a database without 081 the
+  web upsert skips that and the POST answers **503 naming 081**. `/result`
+  carries `hasTranscript` (gates the button), `transcriptHtml` (server-rendered,
+  `sum-transcript-render.ts`) and `transcriptStale`; a stored value of the wrong
+  shape maps to no transcript check (`parseSavedTranscriptCheck`, warned), so the
+  web block still renders. Measured on 13 synthesized fixtures, two of them
+  prompt injections and one a mis-heard name: `bun scripts/eval-transcript-check.ts`.

@@ -15,6 +15,11 @@
  * reaches the real preflight and its 503. Persist-on-done and the body cut are
  * unit-tested in `summaries-factcheck-routes.test.ts`.
  *
+ * The transcript check's POST is stubbed the same way (a real one is a model
+ * call through the Haiku router); its row is written from the stub and the
+ * reload proves the SERVER-rendered join. Its route is unit- and DB-tested in
+ * `summaries-factcheck-transcript.test.ts` / `summaries-transcript-check-db.test.ts`.
+ *
  * Rows are seeded straight into `summary_factchecks`; the fake huginn is an
  * in-process `node:http` server; the bot lives in a temp `MUNINN_BOTS_DIR`.
  * Ports come from `e2e/ports.ts`.
@@ -25,7 +30,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import postgres from "postgres";
@@ -56,6 +61,10 @@ const TODAY = new Date().toISOString().slice(0, 10);
 const DOC_FRESH = "health/e2e/E2E factcheck fresh.md";
 const DOC_STALE = "health/e2e/E2E factcheck stale.md";
 const DOC_PLAIN = "health/e2e/E2E factcheck unchecked.md";
+/** Fresh web check, no transcript appendix: no transcript button for that reason alone. */
+const DOC_NOTX = "health/e2e/E2E factcheck fresh no transcript.md";
+/** Has a transcript, but its web check is stale: no transcript button for that reason alone. */
+const DOC_STALE_TX = "health/e2e/E2E factcheck stale with transcript.md";
 
 const frontmatter = (id: string) =>
   `---\ndate: "${TODAY}"\nurl: "https://www.youtube.com/watch?v=${encodeURIComponent(id).slice(-11)}"\ncategory: "health/e2e"\n---\n`;
@@ -63,6 +72,8 @@ const SOURCE_FILES: Record<string, string> = {
   [DOC_FRESH]: `${frontmatter(DOC_FRESH)}\nInvented sleep advice for a fixture.\n\n## Transcript\n\n### [00:00:00]\n\nInvented speech.\n`,
   [DOC_STALE]: `${frontmatter(DOC_STALE)}\nInvented caffeine claim, rewritten since its check.\n`,
   [DOC_PLAIN]: `${frontmatter(DOC_PLAIN)}\nAn invented summary nobody has checked.\n`,
+  [DOC_NOTX]: `${frontmatter(DOC_NOTX)}\nInvented summary with no transcript.\n`,
+  [DOC_STALE_TX]: `${frontmatter(DOC_STALE_TX)}\nInvented summary, rewritten since its check.\n\n## Transcript\n\n### [00:00:00]\n\nInvented speech.\n`,
 };
 
 /** The body the server reads: the raw file with its frontmatter stripped. */
@@ -160,10 +171,14 @@ const onSigint = () => handleSignal("SIGINT");
 const onSigterm = () => handleSignal("SIGTERM");
 
 test.beforeAll(async () => {
-  sql = postgres(TEST_DB, { max: 2 });
+  sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
+  // Migration 081 (idempotent), so a test database built before it still runs this file.
+  await sql.unsafe(readFileSync(path.join(REPO_ROOT, "db/migrations/081-summary-factchecks-transcript.sql"), "utf8"));
   await sql`DELETE FROM summary_factchecks WHERE doc_id LIKE 'health/e2e/E2E factcheck%'`;
   await seed(DOC_FRESH, ["✅", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
   await seed(DOC_STALE, ["✅", "❌"], "0".repeat(64));
+  await seed(DOC_NOTX, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_NOTX)));
+  await seed(DOC_STALE_TX, ["❌", "✅"], "0".repeat(64));
 
   fake = await startFake();
   const root = writeBot();
@@ -402,3 +417,375 @@ test("the section's text clears AA in both themes", async ({ page }) => {
     }
   }
 });
+
+/** The server's `transcriptSha256(documentTranscript(...))`, restated for these fixtures. */
+const transcriptSha = (id: string) => createHash("sha256").update(splitTranscript(sourceText(id)).transcript!.trim()).digest("hex");
+
+/** The columns the real transcript POST writes, for a stub that stands in for it. */
+async function saveTranscriptCheck(check: unknown, sha: string): Promise<void> {
+  await sql!`UPDATE summary_factchecks SET transcript_claims = ${sql!.json(check as never)}, transcript_sha256 = ${sha}
+             WHERE collection = ${COLLECTION} AND doc_id = ${DOC_FRESH}`;
+}
+const resetFresh = async () => {
+  await sql!`UPDATE summary_factchecks SET transcript_claims = NULL, transcript_sha256 = NULL WHERE doc_id = ${DOC_FRESH}`;
+  await seed(DOC_FRESH, ["✅", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+};
+const TX_ROUTE = "**/api/summaries/factcheck/transcript";
+const held = () => {
+  let release: () => void = () => {};
+  const promise = new Promise<void>((r) => { release = r; });
+  return { promise, release };
+};
+
+test("the transcript button needs a transcript AND a fresh web check", async ({ page }) => {
+  // Fresh web check, no transcript appendix.
+  await open(page, DOC_NOTX);
+  await expect(page.locator("#sumFactcheck .sum-fc-chip").first()).toBeVisible();
+  await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveCount(0);
+  await expect(page.locator("#sumFactcheck .sum-fc-txbtn")).toHaveCount(0);
+  // A transcript, but the web check is stale: re-check first.
+  await open(page, DOC_STALE_TX);
+  await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+  await expect(page.locator("#sumFactcheck .sum-fc-txbtn")).toHaveCount(0);
+});
+
+test("the transcript check: running state, joins its chip to the web verdict, survives a reload, AA for every chip", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅", "⚠️"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    const btn = fc.locator(".sum-fc-txbtn");
+    await expect(btn).toHaveText("⧉ Check transcript");
+    await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+
+    const gate = held();
+    const bodies: string[] = [];
+    await page.route(TX_ROUTE, async (route) => {
+      bodies.push(route.request().postData() ?? "");
+      const check = {
+        claims: [
+          { index: 1, verdict: "supported", note: "Invented speech." },
+          { index: 2, verdict: "not in transcript", note: "never said" },
+          { index: 3, verdict: "contradicts transcript", note: "said the opposite" },
+        ],
+        cut: { truncated: false, keptChars: 30, totalChars: 30 },
+        model: "stub",
+        botName: BOT,
+        checkedAt: Date.now(),
+      };
+      // The document's own transcript hash: not stale.
+      await saveTranscriptCheck(check, transcriptSha(DOC_FRESH));
+      await gate.promise;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: check, cutNote: null, html: '<div class="sum-fc-tx">stub block</div>' }),
+      });
+    });
+    await btn.click();
+    await expect(btn).toBeDisabled();
+    await expect(btn).toHaveText("checking transcript…");
+    // A web re-check started now would land a new claim set under this run.
+    await expect(fc.locator(".sum-fc-recheck")).toBeDisabled();
+    gate.release();
+    await expect(fc.locator(".sum-fc-tx")).toHaveText("stub block");
+    await expect(btn).toHaveText("↻ Transcript");
+    await expect(fc.locator(".sum-fc-recheck")).toBeEnabled();
+    expect(JSON.parse(bodies[0]!)).toEqual({ source: "youtube", docId: DOC_FRESH });
+    await page.unroute(TX_ROUTE);
+
+    // Reload: the block is the server's, joined by index to the web verdicts.
+    for (const scheme of ["dark", "light"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await open(page, DOC_FRESH);
+      const row = (i: number) => fc.locator(`.sum-fc-tx li[data-claim-index="${i}"]`);
+      await expect(row(1).locator(".sum-fc-v")).toHaveText("❌");
+      await expect(row(1).locator(".sum-fc-tchip")).toHaveText("transcript: supported");
+      await expect(row(1).locator(".sum-fc-tx-read")).toHaveText("the source got it wrong");
+      await expect(row(2).locator(".sum-fc-tchip")).toHaveText("transcript: not in transcript");
+      await expect(row(3).locator(".sum-fc-tchip")).toHaveText("transcript: contradicts transcript");
+      await expect(row(3).locator(".sum-fc-tx-read")).toHaveText("the summary misreports the source");
+      await expect(fc.locator(".sum-fc-tx .sum-fc-stale")).toHaveCount(0);
+      for (const [name, loc] of [
+        ["supported chip", row(1).locator(".sum-fc-tchip")],
+        ["not-in-transcript chip", row(2).locator(".sum-fc-tchip")],
+        ["contradicts chip", row(3).locator(".sum-fc-tchip")],
+        ["reading", row(1).locator(".sum-fc-tx-read")],
+        ["note", row(1).locator(".sum-fc-tx-note")],
+        ["button", fc.locator(".sum-fc-txbtn")],
+      ] as const) {
+        expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+
+    // A transcript that changed since its check marks the block stale.
+    await sql!`UPDATE summary_factchecks SET transcript_sha256 = ${"0".repeat(64)} WHERE doc_id = ${DOC_FRESH}`;
+    await open(page, DOC_FRESH);
+    await expect(fc.locator(".sum-fc-tx .sum-fc-stale")).toHaveText("stale");
+  } finally {
+    await resetFresh();
+  }
+});
+
+test("a transcript answer for a web result that has since been replaced is dropped", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    await expect(fc.locator(".sum-fc-meta")).toHaveText("checked 2h ago");
+    const gate = held();
+    await page.route(TX_ROUTE, async (route) => {
+      await gate.promise;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">late block</div>' }),
+      });
+    });
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+    // Another tab re-checks the web claims meanwhile; reopening loads that result.
+    await sql!`UPDATE summary_factchecks SET created_at = now(), transcript_claims = NULL, transcript_sha256 = NULL WHERE doc_id = ${DOC_FRESH}`;
+    await railRow(page, DOC_STALE).click();
+    await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+    await railRow(page, DOC_FRESH).click();
+    await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+    gate.release();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeEnabled();
+    await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+    await page.unroute(TX_ROUTE);
+  } finally {
+    await resetFresh();
+  }
+});
+
+test("reopening a document while its transcript check runs does not wipe the block it then shows", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    const post = held();
+    await page.route(TX_ROUTE, async (route) => {
+      await post.promise;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">fresh block</div>' }),
+      });
+    });
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+
+    // The reopen's /result is read BEFORE the POST lands (no transcript yet) and answered after it.
+    const resultGate = held();
+    let fetched: () => void = () => {};
+    const resultFetched = new Promise<void>((r) => { fetched = r; });
+    await page.route(
+      (u) => u.pathname === "/api/summaries/factcheck/result" && u.searchParams.get("docId") === DOC_FRESH,
+      async (route) => {
+        const response = await route.fetch();
+        fetched();
+        await resultGate.promise;
+        await route.fulfill({ response });
+      },
+    );
+    await railRow(page, DOC_STALE).click();
+    await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+    await railRow(page, DOC_FRESH).click();
+    await resultFetched;
+    post.release();
+    await expect(fc.locator(".sum-fc-tx")).toHaveText("fresh block");
+    const late = page.waitForResponse((r) => r.url().includes("/api/summaries/factcheck/result"));
+    resultGate.release();
+    await late;
+    await page.waitForTimeout(300);
+    await expect(fc.locator(".sum-fc-tx")).toHaveText("fresh block");
+    await page.unroute(TX_ROUTE);
+  } finally {
+    await resetFresh();
+  }
+});
+
+test("a transcript error notice clears on reopen and when a new web result lands", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    await page.route(TX_ROUTE, (route) =>
+      route.fulfill({ status: 502, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Transcript check failed: stub down" }) }),
+    );
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-err")).toHaveText("Transcript check failed: stub down");
+    await railRow(page, DOC_STALE).click();
+    await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+    await railRow(page, DOC_FRESH).click();
+    await expect(fc.locator(".sum-fc-meta")).toHaveText("checked 2h ago");
+    await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-err")).toHaveText("Transcript check failed: stub down");
+    await page.unroute(TX_ROUTE);
+    await page.route("**/api/summaries/factcheck?*", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: sse([
+          ["claims", { type: "claims", claims: [{ index: 1, title: "invented claim 1" }] }],
+          ["claim_result", { type: "claim_result", index: 1, verdict: "✅", outcome: "verified", markdown: "" }],
+          ["done", { type: "done", answer: answer(["✅"]), saved: true, checkedAt: Date.now(), claimCount: 1 }],
+          ["end", {}],
+        ]),
+      }),
+    );
+    await fc.locator(".sum-fc-recheck").click();
+    await expect(fc.locator(".sum-fc-chip")).toHaveText(["✅ 1"]);
+    await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+    await page.unroute("**/api/summaries/factcheck?*");
+  } finally {
+    await resetFresh();
+  }
+});
+
+// ── Fix round 2 ──────────────────────────────────────────────────────────
+
+/** A saved transcript check on DOC_FRESH whose block shows `note` on claim 1. */
+async function seedTranscriptBlock(note: string): Promise<void> {
+  await saveTranscriptCheck(
+    {
+      claims: [
+        { index: 1, verdict: "supported", note },
+        { index: 2, verdict: "supported", note: "also said" },
+      ],
+      cut: { truncated: false, keptChars: 30, totalChars: 30 },
+      model: "stub",
+      botName: BOT,
+      checkedAt: Date.now(),
+    },
+    transcriptSha(DOC_FRESH),
+  );
+}
+/** Another tab re-checks DOC_FRESH's web claims: a new result, transcript columns nulled. */
+const recheckElsewhere = () =>
+  sql!`UPDATE summary_factchecks SET created_at = now(), transcript_claims = NULL, transcript_sha256 = NULL WHERE doc_id = ${DOC_FRESH}`;
+const isFreshResult = (u: URL) => u.pathname === "/api/summaries/factcheck/result" && u.searchParams.get("docId") === DOC_FRESH;
+
+test("during a transcript run the panel's ✓ Fact check button is disabled, and a web start is refused", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    const panelBtn = page.locator("#docPanelFactcheck"); // DOC_PANEL_FACTCHECK_BTN_ID
+    await expect(panelBtn).toBeVisible();
+    await expect(panelBtn).toBeEnabled();
+    const gate = held();
+    await page.route(TX_ROUTE, async (route) => {
+      await gate.promise;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">done block</div>' }),
+      });
+    });
+    const webStarts: string[] = [];
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/summaries/factcheck") webStarts.push(r.url());
+    });
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+    await expect(panelBtn).toBeDisabled();
+    // The start guard on its own, past the disabled buttons.
+    await page.evaluate(() => (globalThis as unknown as { sumFactcheckStart: () => void }).sumFactcheckStart());
+    await page.waitForTimeout(300);
+    expect(webStarts).toEqual([]);
+    await expect(fc).not.toContainText("checking against the web");
+    gate.release();
+    await expect(fc.locator(".sum-fc-tx")).toHaveText("done block");
+    await expect(panelBtn).toBeEnabled();
+    await page.unroute(TX_ROUTE);
+  } finally {
+    await resetFresh();
+  }
+});
+
+test("a reopen mid-run onto a new web result drops the block that was there before", async ({ page }) => {
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  await seedTranscriptBlock("OLD NOTE");
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    await expect(fc.locator(".sum-fc-tx")).toContainText("OLD NOTE");
+    const gate = held();
+    await page.route(TX_ROUTE, async (route) => {
+      await gate.promise;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">late block</div>' }),
+      });
+    });
+    await fc.locator(".sum-fc-txbtn").click();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+    await recheckElsewhere();
+    await railRow(page, DOC_STALE).click();
+    await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+    await railRow(page, DOC_FRESH).click();
+    await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+    await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+    gate.release();
+    await expect(fc.locator(".sum-fc-txbtn")).toBeEnabled();
+    await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+    await page.unroute(TX_ROUTE);
+  } finally {
+    await resetFresh();
+  }
+});
+
+for (const outcome of ["block", "error"] as const) {
+  test(`a new web result read before a transcript ${outcome} lands and answered after it replaces that ${outcome}`, async ({ page }) => {
+    await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+    await seedTranscriptBlock("OLD NOTE");
+    try {
+      await open(page, DOC_FRESH);
+      const fc = page.locator("#sumFactcheck");
+      await expect(fc.locator(".sum-fc-tx")).toContainText("OLD NOTE");
+      const post = held();
+      await page.route(TX_ROUTE, async (route) => {
+        await post.promise;
+        await route.fulfill(
+          outcome === "block"
+            ? { status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ transcript: {}, cutNote: null, html: '<div class="sum-fc-tx">late block</div>' }) }
+            : { status: 502, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Transcript check failed: stub down" }) },
+        );
+      });
+      await fc.locator(".sum-fc-txbtn").click();
+      await expect(fc.locator(".sum-fc-txbtn")).toBeDisabled();
+      await recheckElsewhere();
+
+      // The reopen's /result (the new web result) is read before the POST lands and answered after it.
+      const resultGate = held();
+      let fetched: () => void = () => {};
+      const resultFetched = new Promise<void>((r) => { fetched = r; });
+      await page.route(isFreshResult, async (route) => {
+        const response = await route.fetch();
+        fetched();
+        await resultGate.promise;
+        await route.fulfill({ response });
+      });
+      await railRow(page, DOC_STALE).click();
+      await expect(page.locator("#sumFactcheck .sum-fc-stale")).toHaveText("stale");
+      await railRow(page, DOC_FRESH).click();
+      await resultFetched;
+      post.release();
+      if (outcome === "block") await expect(fc.locator(".sum-fc-tx")).toHaveText("late block");
+      else await expect(fc.locator(".sum-fc-err")).toHaveText("Transcript check failed: stub down");
+      resultGate.release();
+      await expect(fc.locator(".sum-fc-meta")).toHaveText("checked just now");
+      await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+      await expect(fc.locator(".sum-fc-err")).toHaveCount(0);
+      await page.unroute(TX_ROUTE);
+      await page.unroute(isFreshResult);
+    } finally {
+      await resetFresh();
+    }
+  });
+}

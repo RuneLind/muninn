@@ -1,5 +1,9 @@
 import { getDb } from "./client.ts";
 import { normalizeFactVerdict } from "../format/markdown-ast.ts";
+import { parseSavedTranscriptCheck, type SavedTranscriptCheck } from "../summaries/transcript-check-saved.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("db", "summary-factchecks");
 
 /**
  * CRUD for `summary_factchecks` — the saved result of the `/summaries` doc
@@ -32,9 +36,13 @@ export interface SummaryFactcheck {
   botName: string;
   /** Epoch ms. */
   createdAt: number;
+  /** The transcript check over these claims (migration 081); `null` when none ran since the web check. */
+  transcript: SavedTranscriptCheck | null;
+  /** sha256 of the transcript that check read. */
+  transcriptSha256: string | null;
 }
 
-export type SummaryFactcheckInput = Omit<SummaryFactcheck, "createdAt">;
+export type SummaryFactcheckInput = Omit<SummaryFactcheck, "createdAt" | "transcript" | "transcriptSha256">;
 
 /** The Latest-rail badge for one checked document. */
 export interface SummaryFactcheckBadge {
@@ -55,9 +63,22 @@ interface Row {
   claims: SavedFactcheckClaim[] | null;
   bot_name: string;
   created_at: Date | string;
+  /** Absent on a database without migration 081. */
+  transcript_claims?: unknown;
+  transcript_sha256?: string | null;
 }
 
 function mapRow(r: Row): SummaryFactcheck {
+  // A stored value the renderer cannot read is dropped with a warn, so the web
+  // check on the same row still renders.
+  const raw = r.transcript_claims ?? null;
+  const transcript = raw === null ? null : parseSavedTranscriptCheck(raw);
+  if (raw !== null && transcript === null) {
+    log.warn("summary_factchecks.transcript_claims has an unreadable shape; ignoring it collection={collection} doc={doc}", {
+      collection: r.collection,
+      doc: r.doc_id,
+    });
+  }
   return {
     collection: r.collection,
     docId: r.doc_id,
@@ -67,13 +88,55 @@ function mapRow(r: Row): SummaryFactcheck {
     claims: Array.isArray(r.claims) ? r.claims : [],
     botName: r.bot_name,
     createdAt: new Date(r.created_at).getTime(),
+    transcript,
+    transcriptSha256: transcript ? (r.transcript_sha256 ?? null) : null,
   };
 }
 
-/** Insert, or replace the document's earlier result. Returns the saved row. */
+/**
+ * Whether migration 081's two columns exist. Asked on every call rather than
+ * cached, so applying the migration takes effect without a restart; the table
+ * holds only hand-started checks, so the extra query is per click.
+ */
+export async function summaryFactcheckTranscriptColumnsPresent(): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'summary_factchecks'
+      AND column_name IN ('transcript_claims', 'transcript_sha256')
+  `;
+  return rows[0]?.n === 2;
+}
+
+/**
+ * Insert, or replace the document's earlier result. Returns the saved row.
+ *
+ * A replacement is a NEW claim set, so it sets the transcript check back to
+ * NULL: its verdicts join by index and would pair with claims they never saw.
+ * On a database without migration 081 there is nothing to clear.
+ */
 export async function upsertSummaryFactcheck(input: SummaryFactcheckInput): Promise<SummaryFactcheck> {
   const sql = getDb();
-  const rows = await sql<Row[]>`
+  const clearTranscript = await summaryFactcheckTranscriptColumnsPresent();
+  const rows = clearTranscript
+    ? await sql<Row[]>`
+    INSERT INTO summary_factchecks
+      (collection, doc_id, url, body_sha256, answer, claims, bot_name, created_at)
+    VALUES
+      (${input.collection}, ${input.docId}, ${input.url}, ${input.bodySha256},
+       ${input.answer}, ${sql.json(input.claims as never)}, ${input.botName}, now())
+    ON CONFLICT (collection, doc_id) DO UPDATE SET
+      url = EXCLUDED.url,
+      body_sha256 = EXCLUDED.body_sha256,
+      answer = EXCLUDED.answer,
+      claims = EXCLUDED.claims,
+      bot_name = EXCLUDED.bot_name,
+      created_at = EXCLUDED.created_at,
+      transcript_claims = NULL,
+      transcript_sha256 = NULL
+    RETURNING *
+  `
+    : await sql<Row[]>`
     INSERT INTO summary_factchecks
       (collection, doc_id, url, body_sha256, answer, claims, bot_name, created_at)
     VALUES
@@ -89,6 +152,31 @@ export async function upsertSummaryFactcheck(input: SummaryFactcheckInput): Prom
     RETURNING *
   `;
   return mapRow(rows[0]!);
+}
+
+/**
+ * Save a transcript check onto the row whose claims it read. `expectClaims` is
+ * that claim set: a web re-check that replaced it while the call ran makes the
+ * update match nothing, and the answer is `false` rather than verdicts filed
+ * against claims they were not given.
+ */
+export async function saveSummaryTranscriptCheck(input: {
+  collection: string;
+  docId: string;
+  expectClaims: SavedFactcheckClaim[];
+  check: SavedTranscriptCheck;
+  transcriptSha256: string;
+}): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE summary_factchecks
+    SET transcript_claims = ${sql.json(input.check as never)},
+        transcript_sha256 = ${input.transcriptSha256}
+    WHERE collection = ${input.collection} AND doc_id = ${input.docId}
+      AND claims = ${sql.json(input.expectClaims as never)}
+    RETURNING doc_id
+  `;
+  return rows.length === 1;
 }
 
 export async function getSummaryFactcheck(collection: string, docId: string): Promise<SummaryFactcheck | null> {

@@ -71,6 +71,8 @@ function saved(over: Partial<SummaryFactcheck> = {}): SummaryFactcheck {
     ],
     botName: "jarvis",
     createdAt: CHECKED_AT,
+    transcript: null,
+    transcriptSha256: null,
     ...over,
   };
 }

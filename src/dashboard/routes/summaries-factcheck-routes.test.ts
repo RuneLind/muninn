@@ -103,7 +103,7 @@ function app(bots: unknown[] = [webBot]): Hono {
       upsert: async (row) => {
         if (upsertThrows) throw new Error("db down");
         saved.push(row);
-        stored = { ...row, createdAt: 1_700_000_000_000 };
+        stored = { ...row, createdAt: 1_700_000_000_000, transcript: null, transcriptSha256: null };
         return stored;
       },
       get: async () => stored,
@@ -111,6 +111,8 @@ function app(bots: unknown[] = [webBot]): Hono {
         { collection: "youtube-summaries", docId: DOC, bad: 1, total: 2 },
         { collection: "not-a-summary-collection", docId: "x.md", bad: 0, total: 1 },
       ],
+      saveTranscript: async () => true,
+      transcriptColumnsPresent: async () => true,
     },
     bots: () => bots as never,
     oneShot: oneShot as never,
@@ -232,9 +234,11 @@ describe("GET /api/summaries/factcheck — persist on done, never on failure", (
       readSourceText: async () => SOURCE_TEXT,
       fetchDocMeta: async () => null,
       store: {
-        upsert: async (row) => { saved.push(row); return { ...row, createdAt: 1 }; },
+        upsert: async (row) => { saved.push(row); return { ...row, createdAt: 1, transcript: null, transcriptSha256: null }; },
         get: async () => null,
         listBadges: async () => [],
+        saveTranscript: async () => true,
+        transcriptColumnsPresent: async () => true,
       },
       bots: () => [webBot],
       oneShot: (async (prompt: string, ...rest: unknown[]) => {
