@@ -499,8 +499,9 @@ export function registerSummariesFactcheckWritebackRoutes(
         return c.json({ error: PARTIAL_CLAIM_ERROR, code: "partial_claim" }, 400);
       }
       // The propose-side attribution check, re-run on what the client sent.
-      const placed = resolved.outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0 }));
+      const placed = resolved.outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0, end: o.end ?? 0 }));
       const unattributed = unattributedEdits(placed, {
+        slices,
         sourceNoun: sourceKindNoun(t.collection, pre.url),
         summaryLang: stored.frontmatter.summary_lang,
         correctable: new Set(savedCorrectableClaims(row).map((cl) => cl.index)),

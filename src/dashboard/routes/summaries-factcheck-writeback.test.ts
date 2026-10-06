@@ -777,4 +777,16 @@ describe("fix round 2: apply takes whole claims (D5 on the apply side)", () => {
     expect(((await res.json()) as { code: string }).code).toBe("not_attributed");
     expect(ingests).toHaveLength(0);
   });
+
+  test("apply judges each run alone: an attributed paragraph does not cover a silent takeaway", async () => {
+    const a = app();
+    const p = await proposeHalves(a);
+    const res = await apply(a, p, [
+      { ...EDIT_1, claimEdits: 2 },
+      { ...EDIT_1, old: "Caffeine has a half-life of about five hours.", new: "Caffeine has a half-life of about 7–9 hours.", claimEdits: 2 },
+    ]);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("not_attributed");
+    expect(ingests).toHaveLength(0);
+  });
 });

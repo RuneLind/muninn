@@ -391,3 +391,45 @@ describe("fix round 2: the preview selects per claim", () => {
     expect(html.match(/class="sum-fc-int-diff"/g)).toHaveLength(5);
   });
 });
+
+describe("attribution is judged per run of contiguous edits (#650 follow-up)", () => {
+  const propose = async (body: string, edits: { claimIndex: number; old: string; new: string }[]) => {
+    const { proposeSummaryEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    const r = proposeSummaryEdits({
+      slices: summaryEditSlices(body),
+      edits: edits.map((e) => ({ reason: "", verdict: "❌", ...e })),
+      priorDrops: [],
+      sourceNoun: "the video",
+      correctable: new Set(),
+      bodyLen: 20_000,
+    });
+    return r.outcomes.map((o) => (o.applied ? "ok" : o.reason));
+  };
+  const SAYS = "The video says adults need 4 hours of sleep; sources say 7–9.";
+  const SILENT = "Adults need 7–9 hours of sleep.";
+  const PARA = "Adults need 4 hours of sleep. Alpha one. Gamma. Beta two.";
+  const TWO_SLICES = `${PARA}\n\n## Visual reference\n\nCap.\n\n> 💬 **Takeaway:** Rest 4 hours.`;
+  const LIST = `## Key takeaways\n\n- Sleep 4 hours a night.\n- Coffee is fine.\n\n${PARA}`;
+  const DROPPED = (c: number) => `another edit for claim ${c} was dropped, so this one is too`;
+  const body = { claimIndex: 1, old: "Adults need 4 hours of sleep.", new: SAYS };
+  const silentBody = { ...body, new: SILENT };
+  const takeaway = { claimIndex: 1, old: "Sleep 4 hours a night.", new: "The video says sleep 4 hours a night; sources say 7–9." };
+  const silentTakeaway = { ...takeaway, new: "Sleep 7–9 hours a night." };
+  const halfA = { claimIndex: 1, old: "Alpha one.", new: "Alpha one, as the video" };
+  const halfB = { claimIndex: 1, old: "Beta two.", new: "says, beta two; sources say three." };
+
+  const rows: [string, string, { claimIndex: number; old: string; new: string }[], string[]][] = [
+    ["one run, attributed", PARA, [body], ["ok"]],
+    ["one run, unattributed", PARA, [silentBody], ["not attributed"]],
+    ["several runs, all attributed", LIST, [takeaway, body], ["ok", "ok"]],
+    ["several runs, one unattributed: the takeaway does not cover the body", LIST, [takeaway, silentBody], [DROPPED(1), "not attributed"]],
+    ["two list items are two runs", LIST, [takeaway, { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["an attribution spanning two contiguous edits", PARA.replace(" Gamma.", ""), [halfB, halfA], ["ok", "ok"]],
+    ["another claim's edit between breaks the run", PARA, [{ ...halfA, new: "The video says alpha one; sources say two." }, { ...halfB, new: "Beta three." }, { claimIndex: 2, old: "Gamma.", new: "The video says gamma; sources say delta." }], [DROPPED(1), "not attributed", "ok"]],
+    ["a paragraph break between: each edit must attribute alone", "Alpha one.\n\nBeta two.", [halfA, halfB], ["not attributed", "not attributed"]],
+    ["different slices: each must attribute alone", TWO_SLICES, [body, { claimIndex: 1, old: "Rest 4 hours.", new: "Rest 7–9 hours." }], [DROPPED(1), "not attributed"]],
+  ];
+  test.each(rows)("%s", async (_name, text, edits, expected) => {
+    expect(await propose(text, edits)).toEqual(expected);
+  });
+});

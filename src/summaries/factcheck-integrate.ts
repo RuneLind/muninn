@@ -233,11 +233,35 @@ export function attributionRefusal(newText: string, sourceNoun: string, summaryL
   return re.test(newText) ? null : "not attributed";
 }
 
-/** One placed edit, for the per-claim checks. */
+/** One placed edit, for the per-claim checks: `[start, end)` in its slice's
+ *  ORIGINAL text. */
 export interface PlacedEdit {
   readonly edit: IntegrateEdit;
   readonly slice: number;
   readonly start: number;
+  readonly end: number;
+}
+
+/** Original text between two edits that ends a run: a blank line, or a line
+ *  that opens a list item, heading or quote. */
+const RUN_BREAK_RE = /\n[ \t]*\n|\n[ \t]*(?:[-*+]|\d+[.)]|#{1,6}|>)[ \t]/;
+
+/** A claim's edits split into runs: same slice, consecutive in document order,
+ *  no {@link RUN_BREAK_RE} and no other placed edit between neighbours. */
+function contiguousRuns(group: readonly PlacedEdit[], all: readonly PlacedEdit[], texts: readonly string[]): PlacedEdit[][] {
+  const sorted = [...group].sort((a, b) => a.slice - b.slice || a.start - b.start);
+  const runs: PlacedEdit[][] = [];
+  for (const p of sorted) {
+    const prev = runs.at(-1)?.at(-1);
+    const joins =
+      prev !== undefined &&
+      prev.slice === p.slice &&
+      !RUN_BREAK_RE.test((texts[p.slice] ?? "").slice(prev.end, p.start)) &&
+      !all.some((q) => q.slice === p.slice && q.start >= prev.end && q.start < p.start);
+    if (joins) runs.at(-1)!.push(p);
+    else runs.push([p]);
+  }
+  return runs;
 }
 
 /** Edits group by claim; a claim-0 edit is a group of its own. */
@@ -253,24 +277,26 @@ function claimGroups<T extends { edit: IntegrateEdit }>(items: readonly T[]): T[
 }
 
 /**
- * The placed edits whose CLAIM is unattributed: a claim needs the check when
- * the saved claims mark it ❌/⚠️ or any of its edits says ❌/⚠️, and passes
- * when its edits' `new` texts, joined in document order, attribute — a
- * sentence split into two edits is attributed by either half.
+ * The placed edits that are unattributed: a claim needs the check when the
+ * saved claims mark it ❌/⚠️ or any of its edits says ❌/⚠️, and each RUN of
+ * its edits ({@link contiguousRuns}) must attribute on its own, `new` texts
+ * joined in document order — a sentence split into two edits is attributed by
+ * either half, but a takeaway cannot cover a body paragraph. `slices` gives
+ * the original text between edits.
  */
 export function unattributedEdits(
   placed: readonly PlacedEdit[],
-  opts: { sourceNoun: string; summaryLang?: string | null; correctable: ReadonlySet<number> },
+  opts: { slices: SummaryEditSlices; sourceNoun: string; summaryLang?: string | null; correctable: ReadonlySet<number> },
 ): Set<PlacedEdit> {
   const out = new Set<PlacedEdit>();
+  const texts = sliceTexts(opts.slices);
   for (const group of claimGroups(placed)) {
     const checked = group.some((p) => opts.correctable.has(p.edit.claimIndex) || /❌|⚠/.test(p.edit.verdict));
     if (!checked) continue;
-    const text = [...group]
-      .sort((a, b) => a.slice - b.slice || a.start - b.start)
-      .map((p) => p.edit.new)
-      .join(" ");
-    if (attributionRefusal(text, opts.sourceNoun, opts.summaryLang)) for (const p of group) out.add(p);
+    for (const run of contiguousRuns(group, placed, texts)) {
+      const text = run.map((p) => p.edit.new).join(" ");
+      if (attributionRefusal(text, opts.sourceNoun, opts.summaryLang)) for (const p of run) out.add(p);
+    }
   }
   return out;
 }
@@ -377,9 +403,10 @@ export function proposeSummaryEdits(input: ProposeSummaryEditsInput): {
       }
     }
   };
-  // Attribution reads whole claims, so the claims missing an edit go first.
+  // Attribution reads whole claims, so the claims missing an edit go first; a
+  // failing run then takes its claim's other runs with it at the next dropGroups.
   dropGroups();
-  const placed = outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0, o }));
+  const placed = outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0, end: o.end ?? 0, o }));
   for (const p of unattributedEdits(placed, input)) dropOutcome((p as (typeof placed)[number]).o, "not attributed");
   enforceChangeBudget(outcomes, input.bodyLen);
   for (const o of outcomes) {
