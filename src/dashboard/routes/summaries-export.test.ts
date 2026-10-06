@@ -210,6 +210,9 @@ describe("GET /api/summaries/export — the saved fact check", () => {
     factchecks.set("fc-stale.md", row(plain));
     docs.set("fc-norow.md", { text: written, textSource: "file" });
     docs.set("fc-lookup-fails.md", { text: plain, textSource: "file" });
+    // Huginn's cleaned copy: its hash never matches, and staleness is unknown.
+    docs.set("fc-cleaned.md", { text: plain.replace("Intro line.", "Cleaned intro.") });
+    factchecks.set("fc-cleaned.md", row(plain));
   });
 
   test.each([["fc-plain.md"], ["fc-written.md"]])(
@@ -231,6 +234,13 @@ describe("GET /api/summaries/export — the saved fact check", () => {
     const html = await exportHtml("fc-stale.md");
     expect(headings(html)).toBe(1);
     expect(html).toContain(EXPORT_FACTCHECK_STALE_NOTE.replaceAll("_", ""));
+  });
+
+  test("over huginn's cleaned copy the check is exported without a stale note", async () => {
+    const html = await exportHtml("fc-cleaned.md");
+    expect(headings(html)).toBe(1);
+    expect(html).toContain("No trial supports it.");
+    expect(html).not.toContain(EXPORT_FACTCHECK_STALE_NOTE.replaceAll("_", ""));
   });
 
   test("no row: the document is exported as it is, its own block once", async () => {

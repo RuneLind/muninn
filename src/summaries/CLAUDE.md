@@ -510,9 +510,12 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   `correctableClaims`/`factcheckFindingLines`, attributed per D7) above the
   source; no row ⇒ the prompt is byte-identical (hash-pinned in
   `src/share/prompt.test.ts`). The Share and Ask riders list ❌ before ⚠️, in
-  the roomiest of three compact line shapes that holds every claim (budget in
-  code points, `---` runs collapsed so no finding spells a marker); the
-  drafter keeps its own shape and order, byte for byte. Staleness is
+  the roomiest of nine compact line shapes that holds every claim (the
+  correction gets the room, the quote shrinks first; budget in code points;
+  `---` runs collapsed so no finding spells a marker), and they stop at the
+  first line that does not fit, so no ⚠️ line is listed once a ❌ line is not.
+  The drafter keeps its own shape and order, byte-pinned in
+  `src/gardener/factcheck-carry.test.ts`. Staleness is
   `summaryFactcheckStale` (`factcheck-body.ts`, shared with `/result` and
   export): Share says the summary "still states" the claims only when the
   check matches the source file, else "may"; Ask reads no file and always says

@@ -213,12 +213,86 @@ describe("factcheckFindingLines budget units (fix round 1)", () => {
   test("a code-point shape counts an astral character once; the drafter default counts UTF-16 units", async () => {
     const { factcheckFindingLines } = await import("../gardener/factcheck-carry.ts");
     const claim = (index: number) => ({ index, verdict: "bad" as const, title: "t", quote: "", correction: "😀".repeat(100) });
-    const shape = { quoteMax: 160, correctionMax: 280, titleMax: 0, wordClip: true, codePoints: true, neutralizeMarkers: true };
+    const shape = { quoteMax: 160, correctionMax: 280, titleMax: 0, wordClip: true, codePoints: true, neutralizeMarkers: true, stopAtOverflow: false };
     const line = factcheckFindingLines([claim(1)], "the talk", 10_000, shape)[0]!;
     // Room for exactly two lines in code points, one in UTF-16 units.
     const max = 2 * (Array.from(line).length + 1);
     const claimLines = (lines: string[]) => lines.filter((l) => l.startsWith("- Claim "));
     expect(claimLines(factcheckFindingLines([claim(1), claim(2)], "the talk", max, shape))).toHaveLength(2);
     expect(claimLines(factcheckFindingLines([claim(1), claim(2)], "the talk", max))).toHaveLength(1);
+  });
+});
+
+// PR #653 fix round 2.
+describe("rider budget and shapes (fix round 2)", () => {
+  /** A check of `claims` [verdict, correction, quote] triples, numbered from 1. */
+  function check(claims: Array<[string, string, string]>): SummaryFactcheck {
+    return saved({
+      answer: claims.map(([v, correction], i) => `### ${v} Claim ${i + 1}/${claims.length} — claim ${i + 1}\n\n${correction}`).join("\n\n"),
+      claims: claims.map(([v, , quote], i) => ({ index: i + 1, title: `claim ${i + 1}`, quote, verdict: v, outcome: "verified", sources: [] })),
+    });
+  }
+  const listed = (rider: string) => [...rider.matchAll(/^- Claim (\d+) \(/gm)].map((m) => Number(m[1]));
+
+  test("once a ❌ claim is left out, no ⚠️ claim is listed", () => {
+    const long = "The evidence points the other way in a long careful way that goes on and on ".repeat(5);
+    const longQuote = "The speaker states a very long thing about the topic at great length here ".repeat(3);
+    const row = check([...Array.from({ length: 8 }, () => ["❌", long, longQuote] as [string, string, string]), ["⚠️", "Short fix.", "short q"]]);
+    for (const rider of [buildShareFactcheckRider(row, "vimeo-summaries"), buildAskFactcheckRider(row, "vimeo-summaries")]) {
+      const shown = listed(rider);
+      expect(shown.length).toBeLessThan(8);
+      expect(shown).toEqual(Array.from({ length: shown.length }, (_, i) => i + 1));
+      expect(rider).toContain(`(${9 - shown.length} more corrected claim(s) not shown`);
+    }
+  });
+
+  test("the roomiest shape gives one claim's correction 360+ code points before its quote", () => {
+    const correction = `${"The trial found the opposite effect in adults ".repeat(8).trim()}.`;
+    const quote = "The speaker says this at great length, over and over again, ".repeat(4);
+    expect(Array.from(correction).length).toBeGreaterThan(360);
+    const rider = buildShareFactcheckRider(check([["❌", correction, quote]]), "vimeo-summaries");
+    expect(rider).toContain(`Sources say: ${correction}`);
+    const shownQuote = /claims “([^”]*)”/.exec(rider)![1]!;
+    expect(Array.from(shownQuote).length).toBeLessThanOrEqual(120);
+  });
+
+  test("the riders count their budget in code points", () => {
+    // Four lines of ~350 code points fit the 2,000 budget; in UTF-16 units they do not.
+    const emoji = "😀".repeat(300);
+    const row = check(Array.from({ length: 4 }, () => ["❌", emoji, "q"] as [string, string, string]));
+    const rider = buildShareFactcheckRider(row, "vimeo-summaries");
+    expect(listed(rider)).toEqual([1, 2, 3, 4]);
+    expect(rider.split(`Sources say: ${emoji}\n`)).toHaveLength(5);
+  });
+
+  test("the decline note holds every claim of a long check", () => {
+    const long = "The trial found the opposite effect in adults, and the review agreed. ".repeat(6);
+    const row = check(Array.from({ length: 4 }, (_, i) => [i ? "⚠️" : "❌", long, "The speaker said so."] as [string, string, string]));
+    const note = buildAskFactcheckNote(row, "vimeo-summaries");
+    expect(listed(note)).toEqual([1, 2, 3, 4]);
+    expect(note).not.toContain("not shown");
+  });
+
+  test("a clipped correction ends on a sentence near the cap, else on a word", async () => {
+    const { factcheckFindingLines } = await import("../gardener/factcheck-carry.ts");
+    const shape = { quoteMax: 100, correctionMax: 200, titleMax: 0, wordClip: true, codePoints: true, neutralizeMarkers: true, stopAtOverflow: true };
+    const correctionOf = (correction: string) =>
+      factcheckFindingLines([{ index: 1, verdict: "warn", title: "t", quote: "q", correction }], "the talk", 10_000, shape)[0]!.split("Sources say: ")[1]!;
+    // A realistic ⚠️ correction: the second sentence ends past 60% of the cap.
+    const confirmed = "Cortisol does peak around 7 to 9 in the morning, as several clinics confirm.";
+    const corrected = "But no trial shows that coffee then blunts caffeine or speeds tolerance.";
+    expect(correctionOf(`${confirmed} ${corrected} A third sentence follows here and runs past the cap of two hundred.`)).toBe(
+      `${confirmed} ${corrected}`,
+    );
+    // A sentence that ends early is not taken: the clip ends on a word instead.
+    const early = correctionOf(`No. ${"word ".repeat(80)}`);
+    expect(early.endsWith("word…")).toBe(true);
+    expect(Array.from(early).length).toBeGreaterThan(150);
+  });
+});
+
+describe("parseFactcheckParam keeps the source segment strict (fix round 2)", () => {
+  test.each([[" vimeo:health/Talk.md"], ["vimeo :health/Talk.md"]])("%p names no document", (value) => {
+    expect(parseFactcheckParam(value)).toBeNull();
   });
 });

@@ -359,3 +359,50 @@ describe("research trace", () => {
     expect(spans.some((s) => s.op === "finish:ok")).toBe(true);
   });
 });
+
+// PR #653 fix round 2: the note's whole path — route → SSE helper →
+// streamResearchAnswer — with only retrieval and the model mocked (above).
+test("GET /api/research/ask?factcheck=: a declined ask streams the saved findings in its done answer", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { Hono } = await import("hono");
+  const { registerResearchRoutes } = await import("../dashboard/routes/research-routes.ts");
+  const { streamResearchSSE } = await import("../dashboard/routes/research-sse.ts");
+  const botsDir = mkdtempSync(join(tmpdir(), "muninn-ask-bots-"));
+  mkdirSync(join(botsDir, "asker"));
+  writeFileSync(join(botsDir, "asker", "CLAUDE.md"), "test bot");
+  const before = process.env.MUNINN_BOTS_DIR;
+  process.env.MUNINN_BOTS_DIR = botsDir;
+  try {
+    mockResults = [];
+    const app = new Hono();
+    registerResearchRoutes(app, config, {
+      getFactcheck: async () => ({
+        collection: "vimeo-summaries",
+        docId: "health/Talk.md",
+        url: "https://vimeo.com/1",
+        bodySha256: "a".repeat(64),
+        answer: "### ❌ Claim 1/1 — Coffee cures colds\n\nNo trial supports it.\n\nConfidence: 20/100",
+        claims: [{ index: 1, title: "Coffee cures colds", quote: "Coffee cures colds.", verdict: "❌", outcome: "verified", sources: [] }],
+        botName: "jarvis",
+        createdAt: Date.UTC(2026, 9, 5, 10, 0, 0),
+        transcript: null,
+        transcriptSha256: null,
+        appliedAt: null,
+      }),
+      stream: streamResearchSSE,
+    });
+    const res = await app.request(`/api/research/ask?q=coffee&factcheck=${encodeURIComponent("vimeo:health/Talk.md")}`);
+    const body = await res.text();
+    const done = JSON.parse(/event: done\ndata: (.*)\n/.exec(body)![1]!) as Extract<AnswerEvent, { type: "done" }>;
+    expect(done.noHits).toBe(true);
+    expect(done.answer).toContain("**The saved fact check of this summary (2026-10-05) found:**");
+    expect(done.answer).toContain("No trial supports it.");
+    expect(lastUserPrompt).toBe("");
+  } finally {
+    if (before === undefined) delete process.env.MUNINN_BOTS_DIR;
+    else process.env.MUNINN_BOTS_DIR = before;
+    rmSync(botsDir, { recursive: true, force: true });
+  }
+});

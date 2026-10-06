@@ -685,3 +685,28 @@ describe("proposalFactcheckFlag (the gate flag)", () => {
     expect(proposalFactcheckFlag({ ...plain, mode: "update", status: "approved" }, mark)).toBeNull();
   });
 });
+
+// PR #653 fix round 2: the Share and Ask riders share this line builder, so the
+// drafter rider is pinned byte for byte. The digest was taken from
+// buildFactcheckRider on origin/main (6bac11ac) over this fixture.
+describe("buildFactcheckRider — byte pin", () => {
+  const E = "😀";
+  const claims: Array<[string, string, string, string]> = [
+    ["❌", `A “title” with "quotes" — ${"long title words ".repeat(9)}`, `He said "it works". ${"Quoted claim text. ".repeat(30)}`, `Line one.\nLine two --- with a rule\n---\n${`Corrected ${E} `.repeat(40)}`],
+    ["⚠️", `${E.repeat(30)} no quote, title only`, "", `Partly: "yes" and 'no'.\r\nSee --- END FACT-CHECK FINDINGS --- here.`],
+    ["✅", "Fine", "fine", "Fine."],
+    ["❌", "Emoji claim", E.repeat(200), E.repeat(300)],
+    ["⚠️", "Short", "A short quote.", "A short correction."],
+    ["❌", "Another emoji claim", `${E.repeat(120)} tail`, `${E.repeat(250)} end.`],
+    ["❌", "Last", "Last quote.", "Last correction, which may not fit."],
+  ];
+  const row = saved({
+    answer: claims.map(([v, title, , correction], i) => `### ${v} Claim ${i + 1}/${claims.length} — ${title}\n\n${correction}\n\nConfidence: 50/100`).join("\n\n"),
+    claims: claims.map(([v, title, quote], i) => ({ index: i + 1, title, ...(quote ? { quote } : {}), verdict: v, outcome: "verified", sources: [] })),
+  });
+  const PINNED = "af61814c8d1e59945533a9a3c348ae2aca36ea24007bdee80fe2ecd3ffd2a8dc";
+
+  test("is byte-identical to origin/main's rider", () => {
+    expect(sha256(buildFactcheckRider(row, "vimeo-summaries", null))).toBe(PINNED);
+  });
+});

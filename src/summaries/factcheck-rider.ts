@@ -27,13 +27,21 @@ export const ASK_FACTCHECK_RIDER_MAX = 2000;
 const BEGIN = "--- BEGIN FACT-CHECK FINDINGS ---";
 const END = "--- END FACT-CHECK FINDINGS ---";
 
-/** Share and Ask line shapes, roomiest first: the riders take the first in
- *  which every claim fits, so a typical 4–5 claims fit the Ask cap (measured
- *  on real answers, PR #653 fix round 1). */
+/** Share and Ask line shapes as [quote, correction] code points, roomiest
+ *  first: the riders take the first that holds every claim. The correction
+ *  gets the room — a ⚠️ correction confirms first and corrects second — and a
+ *  tighter shape shrinks the quote first (measured on six real answers, PR #653
+ *  fix round 2). */
 const LINE_SHAPES: FindingLineShape[] = [
-  [160, 280],
-  [120, 200],
-  [90, 150],
+  [110, 440],
+  [90, 400],
+  [80, 360],
+  [70, 320],
+  [60, 280],
+  [50, 250],
+  [45, 220],
+  [40, 190],
+  [35, 160],
 ].map(([quoteMax, correctionMax]) => ({
   quoteMax: quoteMax!,
   correctionMax: correctionMax!,
@@ -41,6 +49,7 @@ const LINE_SHAPES: FindingLineShape[] = [
   wordClip: true,
   codePoints: true,
   neutralizeMarkers: true,
+  stopAtOverflow: true,
 }));
 
 /** Room for the omitted-count line, which `factcheckFindingLines` does not budget. */
@@ -65,7 +74,7 @@ export function parseFactcheckParam(value: string | null | undefined): Factcheck
   if (!value) return null;
   const at = value.indexOf(":");
   if (at <= 0) return null;
-  const source = getSummarySource(value.slice(0, at).trim());
+  const source = getSummarySource(value.slice(0, at));
   const docId = value.slice(at + 1);
   if (!source || !docId || !isSafeDocId(docId)) return null;
   return { source: source.id, collection: source.collection, docId };
@@ -75,7 +84,8 @@ function capitalize(noun: string): string {
   return noun.charAt(0).toUpperCase() + noun.slice(1);
 }
 
-/** ❌ before ⚠️, claim order within each, so a budget drops ⚠️ lines first. */
+/** ❌ before ⚠️, claim order within each. With `stopAtOverflow`, a budget
+ *  then drops ⚠️ lines first, and no ⚠️ line is listed once a ❌ line is not. */
 function wrongFirst(claims: CorrectableClaim[]): CorrectableClaim[] {
   return [...claims].sort((a, b) => (a.verdict === b.verdict ? a.index - b.index : a.verdict === "bad" ? -1 : 1));
 }

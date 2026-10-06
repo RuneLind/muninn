@@ -135,9 +135,13 @@ export interface FindingLineShape {
   codePoints: boolean;
   /** Collapse whitespace and `---` runs, so no finding spells a `--- … ---` marker. */
   neutralizeMarkers: boolean;
+  /** Omit every claim after the first line that does not fit, so a later,
+   *  shorter line never takes an earlier claim's place. */
+  stopAtOverflow: boolean;
 }
 
-/** The drafter's shape. Its rider is hash-pinned, so this one never changes. */
+/** The drafter's shape. A byte pin in `factcheck-carry.test.ts`, taken on
+ *  origin/main, holds its rider unchanged. */
 const DRAFTER_LINE_SHAPE: FindingLineShape = {
   quoteMax: RIDER_FIELD_MAX,
   correctionMax: RIDER_FIELD_MAX,
@@ -145,6 +149,7 @@ const DRAFTER_LINE_SHAPE: FindingLineShape = {
   wordClip: false,
   codePoints: false,
   neutralizeMarkers: false,
+  stopAtOverflow: false,
 };
 
 /**
@@ -166,6 +171,10 @@ export function factcheckFindingLines(
   let used = 0;
   let omitted = 0;
   for (const c of claims) {
+    if (omitted > 0 && shape.stopAtOverflow) {
+      omitted++;
+      continue;
+    }
     const mark = c.verdict === "bad" ? "❌ wrong" : "⚠️ partly wrong";
     const claim = c.quote ? riderQuote(clean(c.quote), cut, shape.quoteMax) : cut(clean(c.title), shape.quoteMax).replace(/"/g, "’");
     const correction = c.correction ? cut(clean(c.correction), shape.correctionMax).replace(/"/g, "’") : "(no correction recorded)";
