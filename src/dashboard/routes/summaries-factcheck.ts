@@ -31,7 +31,7 @@ import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { filterDocumentText, readSummarySourceText } from "../../summaries/source-text.ts";
 import { buildSummaryFactcheckBlock, factcheckBlockDate } from "../../summaries/factcheck-block.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
-import { factcheckBodySha256, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
+import { factcheckBodySha256, summaryFactcheckBody, summaryFactcheckStale } from "../../summaries/factcheck-body.ts";
 import {
   deleteSummaryFactcheck,
   getSummaryFactcheck,
@@ -279,7 +279,7 @@ export function registerSummariesFactcheckRoutes(
     // `hasTranscript`, same split); `null` when the file is unreadable.
     const transcript = sourceText === null ? null : documentTranscript(sourceText);
     const hasTranscript = sourceText === null ? null : transcript !== null;
-    const stale = sourceText === null ? null : factcheckBodySha256(sourceText) !== row.bodySha256;
+    const stale = summaryFactcheckStale(row, sourceText);
     const transcriptStale =
       !row.transcript || !row.transcriptSha256 || sourceText === null
         ? null

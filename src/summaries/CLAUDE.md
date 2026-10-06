@@ -509,10 +509,20 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   (`factcheck-rider.ts`: the ❌/⚠️ claims and corrections through the drafter's
   `correctableClaims`/`factcheckFindingLines`, attributed per D7) above the
   source; no row ⇒ the prompt is byte-identical (hash-pinned in
-  `src/share/prompt.test.ts`). Ask: both "Ask a follow-up" setters add
+  `src/share/prompt.test.ts`). The Share and Ask riders list ❌ before ⚠️, in
+  the roomiest of three compact line shapes that holds every claim (budget in
+  code points, `---` runs collapsed so no finding spells a marker); the
+  drafter keeps its own shape and order, byte for byte. Staleness is
+  `summaryFactcheckStale` (`factcheck-body.ts`, shared with `/result` and
+  export): Share says the summary "still states" the claims only when the
+  check matches the source file, else "may"; Ask reads no file and always says
+  "may". Ask: both "Ask a follow-up" setters add
   `factcheck=<source>:<docId>` for a registered source, `/research` sends it on
-  every ask, and `/api/research/ask` adds `buildAskFactcheckRider` (≤ 2,000
-  chars) to the synthesis user prompt; unknown, malformed or no row ⇒ no rider.
+  every ask until ＋ New conversation clears it, and `/api/research/ask` adds
+  `buildAskFactcheckRider` (≤ 2,000 code points; it permits the corrections
+  without a `[n]` citation) to the synthesis user prompt; unknown, malformed or
+  no row ⇒ no rider. A coverage DECLINE runs no synthesis, so the route also
+  passes `buildAskFactcheckNote`, which the canned decline answer ends with.
   The ask route is admin-zone, and rows are keyed by document, not user. A
   `/summaries` Delete removes the row (`onSummaryDocumentDeleted` →
   `deleteSummaryFactcheck`, fired with its own catch).

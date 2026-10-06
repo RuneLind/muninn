@@ -47,6 +47,8 @@ export interface ResearchSseOptions {
   /** A saved summary fact check's bounded rider for the synthesis prompt
    *  (`/research?factcheck=`); "" or absent ⇒ the prompt is unchanged. */
   factcheckRider?: string;
+  /** The same findings as a reader-facing note, appended to a declined answer. */
+  factcheckNote?: string;
 }
 
 /**
@@ -90,6 +92,7 @@ export function streamResearchSSE(c: Context, opts: ResearchSseOptions): Respons
             collections: opts.collections,
             systemPrompt: opts.systemPrompt,
             ...(opts.factcheckRider ? { factcheckRider: opts.factcheckRider } : {}),
+            ...(opts.factcheckNote ? { factcheckNote: opts.factcheckNote } : {}),
           },
           async (event) => {
             let out: typeof event = event;

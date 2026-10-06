@@ -207,6 +207,27 @@ test("no hits: skips the Claude call and answers with the honest fallback", asyn
   expect(done.cited).toEqual([]);
 });
 
+// Fix round 1: a declined follow-up still shows the summary's saved findings.
+test("a declined ask appends the fact-check note to the canned answer; without one it is unchanged", async () => {
+  mockLowConfidence = true;
+  const plainEvents = await collect("a niche follow-up");
+  const plain = (plainEvents.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>).answer;
+  const NOTE = "**The saved fact check of this summary (2026-10-05) found:**\n\n- Claim 1 (❌ wrong): …";
+  const events: AnswerEvent[] = [];
+  await streamResearchAnswer(
+    { question: "a niche follow-up", config, botConfig: bot, tracer: fakeTracer().tracer, factcheckRider: "FACT-CHECK FINDINGS: x", factcheckNote: NOTE },
+    (e) => {
+      events.push(e);
+    },
+  );
+  expect(lastUserPrompt).toBe(""); // still declined: no synthesis call
+  const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
+  expect(done.answer).toBe(`${plain}\n\n${NOTE}`);
+  expect(done.lowConfidence).toBe(true);
+  const streamed = events.filter((e) => e.type === "delta").map((e) => (e as { text: string }).text).join("");
+  expect(streamed).toBe(done.answer);
+});
+
 test("low confidence: weak-but-nonzero retrieval declines synthesis but still shows the sources", async () => {
   // Documents came back, but Huginn flagged every sub-search lowConfidence —
   // the honest relevance floor declines rather than grounding on weak neighbours.

@@ -66,6 +66,11 @@ export function sourceTextOfRaw(raw: string): string {
   return filterDocumentText(stripFrontmatter(raw));
 }
 
+/** The source file's text a {@link withSourceText} doc carries, else `null`. */
+export function summarySourceFileText(doc: { text?: string; textSource?: string } | null): string | null {
+  return doc && doc.textSource === "file" ? (doc.text ?? "") : null;
+}
+
 /** `doc` with its `text` replaced by the source body when there is one. */
 export function withSourceText<T>(doc: T, source: string | null): T {
   if (source === null || doc === null || typeof doc !== "object") return doc;

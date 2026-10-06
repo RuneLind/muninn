@@ -562,6 +562,15 @@ export async function renderResearchPage(): Promise<string> {
       if (currentSource) { currentSource.close(); currentSource = null; }
       turns = [];
       active = null;
+      // A new conversation no longer follows up on the summary.
+      FACTCHECK_DOC = '';
+      try {
+        var u = new URL(window.location.href);
+        if (u.searchParams.has('factcheck')) {
+          u.searchParams.delete('factcheck');
+          history.replaceState(history.state, '', u.pathname + u.search + u.hash);
+        }
+      } catch (e) {}
       document.getElementById('turnsWrap').innerHTML = '';
       document.getElementById('emptyHint').style.display = '';
       document.getElementById('askBtn').disabled = false;
@@ -625,7 +634,7 @@ export async function renderResearchPage(): Promise<string> {
 
     // A follow-up from a summary's doc panel names the summary
     // (factcheck=<source>:<docId>). Read once, sent on every ask like profile,
-    // so later turns keep its saved fact check.
+    // so later turns keep its saved fact check; newConversation clears it.
     var FACTCHECK_DOC = (function() {
       try { return new URLSearchParams(window.location.search).get('factcheck') || ''; } catch (e) { return ''; }
     })();

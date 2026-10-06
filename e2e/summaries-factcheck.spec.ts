@@ -797,7 +797,7 @@ for (const outcome of ["block", "error"] as const) {
 // PR 4: "Ask a follow-up" names the summary (factcheck=<source>:<docId>) and
 // /research sends it on EVERY ask, so a later turn still gets the saved check's
 // rider. The ask SSE is stubbed: the rider itself is `research-ask-factcheck.test.ts`'s.
-test("the follow-up names the summary, and the second research turn still carries it", async ({ page }) => {
+test("the follow-up names the summary, the second research turn still carries it, and a new conversation drops it", async ({ page }) => {
   await open(page, DOC_STALE);
   const expected = `youtube:${DOC_STALE}`;
   const follow = page.locator("#docPanelFollowUp");
@@ -826,4 +826,14 @@ test("the follow-up names the summary, and the second research turn still carrie
   expect(asks.map((u) => u.searchParams.get("factcheck"))).toEqual([expected, expected]);
   // The second turn is a real follow-up: it replays the first.
   expect(asks[1]!.searchParams.get("history")).toContain("Stub answer 1.");
+
+  // A new conversation is no longer about the summary: no factcheck on the
+  // next ask, and none left in the address bar for a reload.
+  await expect(page.locator("#askBtn")).toBeEnabled();
+  await page.locator("#newConvBtn").click();
+  await page.locator("#askInput").fill("An unrelated question?");
+  await page.locator("#askBtn").click();
+  await expect.poll(() => asks.length).toBe(3);
+  expect(asks[2]!.searchParams.has("factcheck")).toBe(false);
+  expect(new URL(page.url()).searchParams.has("factcheck")).toBe(false);
 });

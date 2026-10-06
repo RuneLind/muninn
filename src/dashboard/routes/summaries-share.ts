@@ -53,7 +53,8 @@ import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
 import { stripSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
-import { readSummarySourceText, withSourceText } from "../../summaries/source-text.ts";
+import { readSummarySourceText, summarySourceFileText, withSourceText } from "../../summaries/source-text.ts";
+import { summaryFactcheckStale } from "../../summaries/factcheck-body.ts";
 import { getSummaryFactcheck, type SummaryFactcheck } from "../../db/summary-factchecks.ts";
 import { buildShareFactcheckRider } from "../../summaries/factcheck-rider.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
@@ -72,6 +73,8 @@ export interface SummaryShareDoc {
   text?: string;
   title?: string;
   url?: string;
+  /** `"file"` when `text` is the source file (`withSourceText`). */
+  textSource?: string;
 }
 
 /**
@@ -130,6 +133,12 @@ export async function loadSummaryFactcheck(
     });
     return null;
   }
+}
+
+/** The share rider, worded by whether the check still matches the source file. */
+async function shareRider(pending: Promise<SummaryFactcheck | null>, collection: string, doc: SummaryShareDoc): Promise<string> {
+  const row = await pending;
+  return row ? buildShareFactcheckRider(row, collection, doc.url, summaryFactcheckStale(row, summarySourceFileText(doc))) : "";
 }
 
 /**
@@ -332,7 +341,7 @@ export function registerSummariesShareRoutes(
               body: prepared,
               title,
               // The saved check's ❌/⚠️ claims: the post must not repeat them as true.
-              factcheckRider: buildShareFactcheckRider(await factcheck, source.collection, doc.url),
+              factcheckRider: await shareRider(factcheck, source.collection, doc),
             });
           }
         }

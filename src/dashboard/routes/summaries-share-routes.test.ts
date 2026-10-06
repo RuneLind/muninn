@@ -44,6 +44,7 @@ type SummaryFactcheck = import("../../db/summary-factchecks.ts").SummaryFactchec
 const { acquireShareFlight, __resetShareFlightsForTest } = await import("./share-sse.ts");
 const { SHARE_EXTRA_MAX, SHARE_PROMPT_OVERRIDE_MAX } = await import("../../share/wire.ts");
 const { SUMMARY_SOURCES } = await import("../../summaries/sources.ts");
+const { factcheckBodySha256 } = await import("../../summaries/factcheck-body.ts");
 
 const config = {
   tracingEnabled: false,
@@ -570,4 +571,19 @@ describe("POST /api/summaries/share — the saved fact check (PR 4)", () => {
       expect(prompt.match(/FACT-CHECK FINDINGS:/g)).toHaveLength(1);
     },
   );
+
+  // Fix round 1: the frame says the summary STILL states the claims only when
+  // the check matches the source file (`summaryFactcheckStale`).
+  test.each([
+    ["the source file, unchanged since the check", "file", true, "so it still states them."],
+    ["the source file, changed since the check", "file", false, "so it may still state some of them."],
+    ["huginn's cleaned copy (unknown)", undefined, true, "so it may still state some of them."],
+  ] as const)("%s", async (_name, textSource, matching, wording) => {
+    const text = "Coffee cures colds.";
+    const prompt = await promptFor({
+      doc: { text, ...(textSource ? { textSource } : {}) },
+      getFactcheck: async () => ({ ...row(BAD), bodySha256: matching ? factcheckBodySha256(text) : "f".repeat(64) }),
+    });
+    expect(prompt).toContain(wording);
+  });
 });

@@ -35,7 +35,7 @@ import { join, sep as pathSep } from "node:path";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
-import { readSummarySourceText, withSourceText } from "../../summaries/source-text.ts";
+import { readSummarySourceText, summarySourceFileText, withSourceText } from "../../summaries/source-text.ts";
 import { frameDirFor, frameSourceByName, framesRootDir } from "../../summaries/frames.ts";
 import {
   EXPORT_FRAMES_DIR,
@@ -47,7 +47,7 @@ import {
   rewriteFrameUrls,
 } from "../../summaries/export.ts";
 import { getSummaryFactcheck, type SummaryFactcheck } from "../../db/summary-factchecks.ts";
-import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
+import { summaryFactcheckStale } from "../../summaries/factcheck-body.ts";
 import { buildStoredZip, type ZipEntry } from "../../summaries/zip.ts";
 import { readerSourceLinkLabel } from "../../summaries/reader-article.ts";
 import { splitTranscript } from "../../summaries/transcript-split.ts";
@@ -177,7 +177,7 @@ export function registerSummariesExportRoutes(
     // Stale is the `/result` route's comparison, so it needs the source file;
     // over huginn's cleaned copy it is unknown and the note is left out.
     const row = await factcheck;
-    const stale = row !== null && doc.textSource === "file" && factcheckBodySha256(doc.text ?? "") !== row.bodySha256;
+    const stale = row !== null && summaryFactcheckStale(row, summarySourceFileText(doc)) === true;
     const factcheckBlock = row ? exportFactcheckBlock(row.answer, row.createdAt, stale) : undefined;
 
     const title = summaryDocTitle(docId, doc);

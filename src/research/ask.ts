@@ -89,6 +89,10 @@ export interface ResearchAnswerOptions {
   /** A saved summary fact check's findings (`buildAskFactcheckRider`), appended
    *  to the synthesis user prompt. "" or absent leaves the prompt unchanged. */
   factcheckRider?: string;
+  /** The same findings as a labelled note (`buildAskFactcheckNote`). A declined
+   *  ask runs no synthesis, so the rider is never read; the note is appended to
+   *  the canned decline instead. */
+  factcheckNote?: string;
 }
 
 /**
@@ -167,7 +171,8 @@ export async function streamResearchAnswer(
       subSearches: result.subSearches,
     });
     if (coverage !== "answer") {
-      const message = coverageMessage(coverage);
+      const note = opts.factcheckNote?.trim();
+      const message = coverageMessage(coverage) + (note ? `\n\n${note}` : "");
       log.info("Research declined coverage={coverage} botName={botName} hits={hits}", {
         coverage,
         botName: botConfig.name,

@@ -22,7 +22,7 @@ import { checkMcpServerHealth } from "../../ai/connectors/mcp-health.ts";
 import { applyCors, corsHeaders } from "../../auth/cors.ts";
 import { requireOwnUser } from "../../auth/guard.ts";
 import { getSummaryFactcheck, type SummaryFactcheck } from "../../db/summary-factchecks.ts";
-import { buildAskFactcheckRider, parseFactcheckParam } from "../../summaries/factcheck-rider.ts";
+import { buildAskFactcheckNote, buildAskFactcheckRider, parseFactcheckParam } from "../../summaries/factcheck-rider.ts";
 
 const log = getLog("dashboard");
 
@@ -45,23 +45,25 @@ export interface ResearchRouteDeps {
 const defaultResearchRouteDeps: ResearchRouteDeps = { getFactcheck: getSummaryFactcheck, stream: streamResearchSSE };
 
 /**
- * The Ask rider for `factcheck=<source>:<docId>`, or "" — unknown, malformed,
- * no row, a row with nothing wrong, or a failed lookup all ask without one.
+ * The Ask rider and decline note for `factcheck=<source>:<docId>`, both "" when
+ * the value is unknown or malformed, there is no row, the row has nothing
+ * wrong, or the lookup fails.
  */
-export async function researchFactcheckRider(
+export async function researchFactcheck(
   param: string | undefined,
   getFactcheck: ResearchRouteDeps["getFactcheck"],
-): Promise<string> {
+): Promise<{ rider: string; note: string }> {
   const ref = parseFactcheckParam(param);
-  if (!ref) return "";
+  if (!ref) return { rider: "", note: "" };
   try {
-    return buildAskFactcheckRider(await getFactcheck(ref.collection, ref.docId), ref.collection);
+    const row = await getFactcheck(ref.collection, ref.docId);
+    return { rider: buildAskFactcheckRider(row, ref.collection), note: buildAskFactcheckNote(row, ref.collection) };
   } catch (err) {
     log.warn("Research ask: fact-check lookup failed for {doc}: {error}", {
       doc: `${ref.collection}/${ref.docId}`,
       error: err instanceof Error ? err.message : String(err),
     });
-    return "";
+    return { rider: "", note: "" };
   }
 }
 
@@ -114,7 +116,7 @@ export function registerResearchRoutes(
     // fact check rides into the synthesis prompt. Like `profile`, the page
     // sends it on every ask. The route is admin-zone (`src/auth/origin.ts`), so
     // reading any document's row adds nothing to what the caller can reach.
-    const factcheckRider = await researchFactcheckRider(c.req.query("factcheck"), deps.getFactcheck);
+    const { rider: factcheckRider, note: factcheckNote } = await researchFactcheck(c.req.query("factcheck"), deps.getFactcheck);
 
     log.info("Research ask: bot={bot} profile={profile} turn={turn} factcheck={factcheck} q={q}", {
       bot: botConfig.name,
@@ -140,6 +142,7 @@ export function registerResearchRoutes(
       // client-side). See renderResearchAnswerHtml for why it's not the Ask renderer.
       renderAnswerHtml: (answer) => renderResearchAnswerHtml(answer),
       ...(factcheckRider ? { factcheckRider } : {}),
+      ...(factcheckNote ? { factcheckNote } : {}),
     });
   });
 

@@ -396,8 +396,9 @@ export function docPanelScript(): string {
 
     // Point the opt-in "Ask a follow-up" header action at /research?q=<title>.
     // No-op unless the page rendered the button via docPanelHtml({askFollowUp:true}).
-    // A summary document also names itself (factcheck=<source>:<docId>), so the
-    // follow-up sees its saved fact check; other collections (search) do not.
+    // A document in a registered summary source's collection (SUMMARY_SOURCES)
+    // also names itself (factcheck=<source>:<docId>), so the follow-up sees its
+    // saved fact check; a document in any other collection gets the bare link.
     var DOC_PANEL_SUMMARY_SOURCE_BY_COLLECTION = ${JSON.stringify(Object.fromEntries(SUMMARY_SOURCES.map((s) => [s.collection, s.id]))).replace(/</g, "\\u003c")};
     function setFollowUpHref(title, collection, docId) {
       var el = document.getElementById('docPanelFollowUp');

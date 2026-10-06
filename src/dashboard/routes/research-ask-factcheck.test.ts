@@ -57,8 +57,18 @@ describe("GET /api/research/ask — factcheck", () => {
     const rider = seen.opts[0]!.factcheckRider!;
     expect(rider).toContain("the talk claims “Coffee cures colds”");
     expect(rider).toContain("No trial supports it.");
-    expect(rider).toContain("The talk claims X; sources say Y.");
+    expect(rider).toContain("The talk claims X; the saved fact check found Y.");
     expect(Array.from(rider).length).toBeLessThanOrEqual(ASK_FACTCHECK_RIDER_MAX);
+  });
+
+  // Fix round 1: a declined ask runs no synthesis, so the route also hands the
+  // stream a reader-facing note of the same findings.
+  test("the options also carry the decline note with the correction", async () => {
+    const { app, seen } = harness(async () => row);
+    await ask(app, `&factcheck=${encodeURIComponent(`vimeo:${DOC}`)}`);
+    const note = seen.opts[0]!.factcheckNote!;
+    expect(note).toContain("The saved fact check of this summary (2026-10-05) found:");
+    expect(note).toContain("No trial supports it.");
   });
 
   test("without the parameter the options carry no rider and nothing is looked up", async () => {
@@ -95,6 +105,7 @@ describe("GET /api/research/ask — factcheck", () => {
       expect(res.status).toBe(200);
       expect(seen.lookups).toHaveLength(1);
       expect("factcheckRider" in seen.opts[0]!).toBe(false);
+      expect("factcheckNote" in seen.opts[0]!).toBe(false);
     }
   });
 });
