@@ -25,6 +25,24 @@ export function neutralizePromptFence(text: string): string {
 }
 
 /**
+ * Turn every opening or closing marker of the named tags into a bracketed form
+ * (`</transcript>` → `[/transcript]`), in any case and spacing.
+ *
+ * The XML-tag counterpart of {@link neutralizePromptFence}, for prompts that
+ * fence data between `<tag>` lines: a field that closes its own tag ends the
+ * data block early, and what follows reads as instructions. Measured on the
+ * transcript check: a transcript carrying `</transcript>` plus an "operator"
+ * note flipped every claim of a fixture to `supported`, 2 runs out of 2.
+ * Idempotent, since the result holds no `<` for the tag.
+ */
+export function neutralizePromptTags(text: string, tags: readonly string[]): string {
+  if (!tags.length) return text;
+  const names = tags.map((t) => t.replace(/[^A-Za-z0-9_-]/g, "")).join("|");
+  const re = new RegExp(`<\\s*(\\/?)\\s*(${names})(?![A-Za-z0-9_-])(?:([^<>\\n]*)>)?`, "gi");
+  return text.replace(re, (_m, slash: string, name: string, attrs: string | undefined) => `[${slash}${name}${attrs ?? ""}]`);
+}
+
+/**
  * Info strings that make a fence a WRAPPER rather than content — the DEFAULT set,
  * and the one every caller gets unless it says otherwise.
  *

@@ -348,13 +348,24 @@ article mode, unchanged prompts) over the summary and saves the result in
   `contradicts transcript` — join the web verdicts by `index`; web ❌ plus
   transcript `supported` reads "the source got it wrong". One Haiku-router call
   with the takeaway check's Sonnet request (withheld on vertex, which runs its
-  own model), 120 s timeout, the transcript capped at 60 000 chars at a
-  paragraph boundary with the cut saved and shown. JSON in, JSON out;
-  `application/json` required; a POST, so the origin guard covers it by method.
+  own model), 120 s timeout per router attempt, the transcript capped at
+  60 000 chars at the last paragraph / line / sentence / word boundary with the
+  cut saved and shown; past a cut, `not in transcript` reads "maybe said past
+  the checked part", not as the summary's fault. Every interpolated string goes
+  through `neutralizePromptTags` (`src/utils/prompt-fence.ts`) and the data rule
+  is restated after the block: a transcript that closed `</transcript>` flipped
+  every verdict before that (the takeaway check's `<body>`/`<takeaway>` get the
+  same). The prompt allows for speech-recognition mis-hearings of names.
+  JSON in, JSON out; `application/json` and an object body required; a POST, so
+  the origin guard covers it by method. 409 `web_check_stale` once the summary
+  changed since the web check (the panel hides the button then); 404 when the
+  row was deleted mid-call.
   Saved in the row's `transcript_claims` / `transcript_sha256` (migration 081)
   only while its claims are still the ones it read (jsonb equality in the
   `UPDATE`); every web upsert NULLs both, and on a database without 081 the
   web upsert skips that and the POST answers **503 naming 081**. `/result`
   carries `hasTranscript` (gates the button), `transcriptHtml` (server-rendered,
-  `sum-transcript-render.ts`) and `transcriptStale`. Measured on 10 synthesized
-  fixtures: `bun scripts/eval-transcript-check.ts`.
+  `sum-transcript-render.ts`) and `transcriptStale`; a stored value of the wrong
+  shape maps to no transcript check (`parseSavedTranscriptCheck`, warned), so the
+  web block still renders. Measured on 13 synthesized fixtures, two of them
+  prompt injections and one a mis-heard name: `bun scripts/eval-transcript-check.ts`.

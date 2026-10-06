@@ -1,5 +1,8 @@
 import { getDb } from "./client.ts";
-import type { SavedTranscriptCheck } from "../summaries/transcript-check.ts";
+import { parseSavedTranscriptCheck, type SavedTranscriptCheck } from "../summaries/transcript-check-saved.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("db", "summary-factchecks");
 
 /**
  * CRUD for `summary_factchecks` — the saved result of the `/summaries` doc
@@ -60,11 +63,21 @@ interface Row {
   bot_name: string;
   created_at: Date | string;
   /** Absent on a database without migration 081. */
-  transcript_claims?: SavedTranscriptCheck | null;
+  transcript_claims?: unknown;
   transcript_sha256?: string | null;
 }
 
 function mapRow(r: Row): SummaryFactcheck {
+  // A stored value the renderer cannot read is dropped with a warn, so the web
+  // check on the same row still renders.
+  const raw = r.transcript_claims ?? null;
+  const transcript = raw === null ? null : parseSavedTranscriptCheck(raw);
+  if (raw !== null && transcript === null) {
+    log.warn("summary_factchecks.transcript_claims has an unreadable shape; ignoring it collection={collection} doc={doc}", {
+      collection: r.collection,
+      doc: r.doc_id,
+    });
+  }
   return {
     collection: r.collection,
     docId: r.doc_id,
@@ -74,8 +87,8 @@ function mapRow(r: Row): SummaryFactcheck {
     claims: Array.isArray(r.claims) ? r.claims : [],
     botName: r.bot_name,
     createdAt: new Date(r.created_at).getTime(),
-    transcript: r.transcript_claims && typeof r.transcript_claims === "object" ? r.transcript_claims : null,
-    transcriptSha256: r.transcript_sha256 ?? null,
+    transcript,
+    transcriptSha256: transcript ? (r.transcript_sha256 ?? null) : null,
   };
 }
 

@@ -8,7 +8,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { registerSummariesFactcheckRoutes, type SummariesFactcheckDeps } from "./summaries-factcheck.ts";
-import { TRANSCRIPT_MIGRATION_MISSING, transcriptSha256 } from "./summaries-factcheck-transcript.ts";
+import { documentTranscript, TRANSCRIPT_MIGRATION_MISSING, transcriptSha256 } from "./summaries-factcheck-transcript.ts";
+import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
 import { isSideEffectingRequest, SIDE_EFFECTING_GETS, decideOrigin } from "../../auth/origin.ts";
 import type { SummaryFactcheck } from "../../db/summary-factchecks.ts";
 import type { SavedTranscriptCheck } from "../../summaries/transcript-check.ts";
@@ -23,7 +24,8 @@ const webRow = (): SummaryFactcheck => ({
   collection: "youtube-summaries",
   docId: DOC,
   url: null,
-  bodySha256: "a".repeat(64),
+  // The checked summary's own hash: a fresh web check (a stale one is refused).
+  bodySha256: factcheckBodySha256(SOURCE_TEXT),
   answer: "### ❌ Claim 1/2 — half-life nine hours\n\n### ✅ Claim 2/2 — coffee exists",
   claims: [
     { index: 1, title: "Caffeine's half-life is nine hours", quote: "a half-life of nine hours", verdict: "❌", outcome: "verified", sources: [] },
@@ -42,6 +44,7 @@ let saveResult: boolean;
 let saves: Parameters<SummariesFactcheckDeps["store"]["saveTranscript"]>[0][];
 let prompts: string[];
 let answer: string | Error;
+let onCall: () => void;
 
 function app(bots: unknown[] = [bot]): Hono {
   const deps: SummariesFactcheckDeps = {
@@ -61,8 +64,9 @@ function app(bots: unknown[] = [bot]): Hono {
     bots: () => bots as never,
     transcriptCall: async (p) => {
       prompts.push(p);
+      onCall();
       if (answer instanceof Error) throw answer;
-      return { result: answer, model: "claude-sonnet-5-5", inputTokens: 10, outputTokens: 5 };
+      return { result: answer, model: "claude-sonnet-5-5", inputTokens: 10, outputTokens: 5, backend: "cli" };
     },
   };
   const a = new Hono();
@@ -84,6 +88,7 @@ beforeEach(() => {
   saveResult = true;
   saves = [];
   prompts = [];
+  onCall = () => {};
   answer = JSON.stringify({
     claims: [
       { index: 1, verdict: "supported", note: "\"half-life is nine hours\"" },
@@ -252,5 +257,50 @@ describe("GET /api/summaries/factcheck/result — transcript half", () => {
     const later = await result(a);
     expect(later.transcriptStale).toBe(true);
     expect(later.transcriptHtml).toContain("sum-fc-stale");
+  });
+});
+
+describe("fix round 1", () => {
+  test("a literal JSON null, an array or a string body is a 400 JSON answer, not a 500", async () => {
+    for (const raw of ["null", "[]", '"x"', "3"]) {
+      const res = await app().request("/api/summaries/factcheck/transcript", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: raw,
+      });
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type") ?? "").toContain("application/json");
+      expect(((await res.json()) as { code: string }).code).toBe("bad_request");
+    }
+    expect(prompts).toHaveLength(0);
+  });
+
+  test("a web check over a summary that changed since is refused with 409 web_check_stale, before any call", async () => {
+    stored = { ...webRow(), bodySha256: "0".repeat(64) };
+    const res = await post(app());
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("web_check_stale");
+    expect(prompts).toHaveLength(0);
+    expect(saves).toHaveLength(0);
+  });
+
+  test("a row deleted while the call ran is a 404, not a web-check-changed 409", async () => {
+    saveResult = false;
+    onCall = () => { stored = null; };
+    const res = await post(app());
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { code: string }).code).toBe("not_found");
+  });
+
+  test("the saved check names the backend that answered beside the model", async () => {
+    const res = await post(app());
+    expect(res.status).toBe(200);
+    expect(saves[0]!.check.backend).toBe("cli");
+    expect(((await res.json()) as { transcript: SavedTranscriptCheck }).transcript.backend).toBe("cli");
+  });
+
+  test("documentTranscript reads past a frontmatter block, so a heading-shaped frontmatter line is no transcript", () => {
+    expect(documentTranscript("---\nnote: x\n## Transcript\n---\nOnly a summary.\n")).toBeNull();
+    expect(documentTranscript("---\ntitle: t\n---\nSummary.\n\n## Transcript\n\nSaid.\n")).toBe("Said.");
   });
 });

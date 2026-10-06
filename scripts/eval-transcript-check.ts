@@ -1,5 +1,5 @@
 /**
- * Measure the transcript check (`src/summaries/transcript-check.ts`) on the ten
+ * Measure the transcript check (`src/summaries/transcript-check.ts`) on the
  * synthesized fixtures in `src/summaries/__fixtures__/transcript-check-fixtures.ts`.
  *
  *   bun scripts/eval-transcript-check.ts [--only 03-startup] [--out <file.json>]

@@ -41,4 +41,22 @@ describe("renderTranscriptCheckHtml", () => {
     expect(html).toContain("first 100 of 400 characters");
     expect(renderTranscriptCheckHtml([{ index: 1, title: "t", verdict: "✅" }], check([{ index: 1, verdict: "supported", note: "" }]))).not.toContain("sum-fc-tx-cut");
   });
+
+  test("past a cut, a not-in-transcript row blames nobody", () => {
+    const html = renderTranscriptCheckHtml(
+      [{ index: 3, title: "electrified in 1899", verdict: "❌" }],
+      check([{ index: 3, verdict: "not in transcript", note: "beyond the cut" }], true),
+    );
+    expect(html).toContain("maybe said past the checked part");
+    expect(html).not.toContain("the summary added it");
+  });
+
+  test("the claim index attribute is escaped like every other field", () => {
+    const html = renderTranscriptCheckHtml(
+      [{ index: '1" onmouseover="alert(1)' as unknown as number, title: "t", verdict: "✅" }],
+      check([{ index: 1, verdict: "supported", note: "" }]),
+    );
+    expect(html).not.toContain('onmouseover="alert(1)"');
+    expect(html).toContain("&quot;");
+  });
 });

@@ -17,6 +17,7 @@ import { setupTestDb } from "../../test/setup-db.ts";
 import { getDb } from "../../db/client.ts";
 import { getSummaryFactcheck, upsertSummaryFactcheck, type SummaryFactcheckInput } from "../../db/summary-factchecks.ts";
 import { defaultSummariesFactcheckDeps, registerSummariesFactcheckRoutes } from "./summaries-factcheck.ts";
+import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
 
 setupTestDb();
 
@@ -34,7 +35,7 @@ const web: SummaryFactcheckInput = {
   collection: "youtube-summaries",
   docId: DOC,
   url: "https://www.youtube.com/watch?v=synthetic",
-  bodySha256: "c".repeat(64),
+  bodySha256: factcheckBodySha256(SOURCE_TEXT),
   answer: "### ❌ Claim 1/2 — opened 1931\n\n### ✅ Claim 2/2 — six lanes",
   claims: [
     { index: 1, title: "The bridge opened in 1931", quote: "opened in 1931", verdict: "❌", outcome: "verified", sources: [] },
@@ -149,6 +150,25 @@ describe("transcript check on the real store", () => {
       expect(r.transcriptHtml).toBeNull();
     } finally {
       await applyMigration();
+    }
+  });
+
+  test("a malformed transcript_claims value maps to no transcript check, and /result still renders the web check", async () => {
+    await upsertSummaryFactcheck(web);
+    const a = app();
+    for (const bad of [
+      { claims: "nope" },
+      [1, 2],
+      { claims: [{ index: 1, verdict: "supported", note: "n" }] },
+      { claims: [{ index: 1, verdict: "maybe", note: "n" }], cut: { truncated: false, keptChars: 1, totalChars: 1 }, model: "m", botName: "b", checkedAt: 0 },
+    ]) {
+      await getDb()`UPDATE summary_factchecks SET transcript_claims = ${getDb().json(bad as never)}, transcript_sha256 = ${"d".repeat(64)} WHERE doc_id = ${DOC}`;
+      expect((await getSummaryFactcheck(web.collection, DOC))!.transcript).toBeNull();
+      const res = await a.request(`/api/summaries/factcheck/result?source=youtube&docId=${encodeURIComponent(DOC)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { html: string; transcriptHtml: string | null };
+      expect(body.html).toContain("Claim 1/2");
+      expect(body.transcriptHtml).toBeNull();
     }
   });
 });
