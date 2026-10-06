@@ -181,6 +181,21 @@ test("follow-up: prior turns fold into the retrieval query AND the synthesis pro
   expect(lastUserPrompt).toContain("Follow-up question: Does it support MCP?");
 });
 
+test("a fact-check rider is appended to the synthesis prompt; without one the prompt is unchanged", async () => {
+  await collect("What is Claude Code?");
+  const plain = lastUserPrompt;
+  await streamResearchAnswer(
+    { question: "What is Claude Code?", config, botConfig: bot, tracer: fakeTracer().tracer, factcheckRider: "" },
+    () => {},
+  );
+  expect(lastUserPrompt).toBe(plain);
+  await streamResearchAnswer(
+    { question: "What is Claude Code?", config, botConfig: bot, tracer: fakeTracer().tracer, factcheckRider: "FACT-CHECK FINDINGS: x" },
+    () => {},
+  );
+  expect(lastUserPrompt).toBe(`${plain}\n\nFACT-CHECK FINDINGS: x`);
+});
+
 test("no hits: skips the Claude call and answers with the honest fallback", async () => {
   mockResults = [];
   const events = await collect("something not indexed");

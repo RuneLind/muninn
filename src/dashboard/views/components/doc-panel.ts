@@ -1,6 +1,7 @@
 /** Shared document viewer panel — slide-in overlay for rendering markdown documents */
 
 import { factcheckCalloutScript, factcheckCalloutStyles } from "../../../summaries/factcheck-callout.ts";
+import { SUMMARY_SOURCES } from "../../../summaries/sources.ts";
 
 /** CSS for markdown-rendered content. Used by both the overlay panel and the standalone document page. */
 export function markdownContentStyles(prefix: string): string {
@@ -395,9 +396,17 @@ export function docPanelScript(): string {
 
     // Point the opt-in "Ask a follow-up" header action at /research?q=<title>.
     // No-op unless the page rendered the button via docPanelHtml({askFollowUp:true}).
-    function setFollowUpHref(title) {
+    // A summary document also names itself (factcheck=<source>:<docId>), so the
+    // follow-up sees its saved fact check; other collections (search) do not.
+    var DOC_PANEL_SUMMARY_SOURCE_BY_COLLECTION = ${JSON.stringify(Object.fromEntries(SUMMARY_SOURCES.map((s) => [s.collection, s.id]))).replace(/</g, "\\u003c")};
+    function setFollowUpHref(title, collection, docId) {
       var el = document.getElementById('docPanelFollowUp');
-      if (el && title) el.href = '/research?q=' + encodeURIComponent(title);
+      if (!el || !title) return;
+      var href = '/research?q=' + encodeURIComponent(title);
+      var source = collection && Object.prototype.hasOwnProperty.call(DOC_PANEL_SUMMARY_SOURCE_BY_COLLECTION, collection)
+        ? DOC_PANEL_SUMMARY_SOURCE_BY_COLLECTION[collection] : null;
+      if (source && docId) href += '&factcheck=' + encodeURIComponent(source + ':' + docId);
+      el.href = href;
     }
 
     function openDocPanel(collection, docId, webUrl) {
@@ -407,7 +416,7 @@ export function docPanelScript(): string {
       var bodyEl = document.getElementById('docPanelBody');
 
       titleEl.textContent = docId.replace(/\\.md$/, '').split('/').pop();
-      setFollowUpHref(titleEl.textContent);
+      setFollowUpHref(titleEl.textContent, collection, docId);
       linksEl.innerHTML = webUrl
         ? '<a href="' + esc(webUrl) + '" target="_blank" rel="noopener">Open source &rarr;</a>'
         : '';
@@ -423,7 +432,7 @@ export function docPanelScript(): string {
         })
         .then(function(doc) {
           titleEl.textContent = (doc.id || docId).replace(/\\.md$/, '').split('/').pop();
-          setFollowUpHref(titleEl.textContent);
+          setFollowUpHref(titleEl.textContent, collection, docId);
           if (doc.url) {
             linksEl.innerHTML = '<a href="' + esc(doc.url) + '" target="_blank" rel="noopener">Open source &rarr;</a>';
           }

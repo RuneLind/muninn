@@ -454,3 +454,62 @@ describe("GET /api/summaries/factcheck/result — blockAdded (fix round 1)", () 
     expect((await result(a)).blockAdded).toBeNull();
   });
 });
+
+const { notifySummaryDocumentDeleted } = await import("../../summaries/document-deleted.ts");
+
+describe("a deleted document takes its saved check with it", () => {
+  const deleted: string[] = [];
+  let deleteFails: "reject" | "throw" | null = null;
+
+  beforeEach(() => {
+    deleted.length = 0;
+    deleteFails = null;
+  });
+
+  // ONE registration for the describe: listeners are never unsubscribed.
+  const a = new Hono();
+  registerSummariesFactcheckRoutes(a, config, {
+    readSourceText: async () => null,
+    fetchDocMeta: async () => null,
+    store: {
+      upsert: async () => {
+        throw new Error("unused");
+      },
+      get: async () => null,
+      listBadges: async () => [],
+      saveTranscript: async () => true,
+      transcriptColumnsPresent: async () => true,
+      delete: (collection, docId) => {
+        if (deleteFails === "throw") throw new Error("sync throw");
+        deleted.push(`${collection}|${docId}`);
+        return deleteFails === "reject" ? Promise.reject(new Error("db down")) : Promise.resolve();
+      },
+    },
+    bots: () => [],
+  });
+
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  test("the row is removed by collection and doc id", async () => {
+    notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC });
+    await settle();
+    expect(deleted).toEqual([`youtube-summaries|${DOC}`]);
+  });
+
+  test("a failing delete — rejected or thrown — raises no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      for (const mode of ["reject", "throw"] as const) {
+        deleteFails = mode;
+        expect(() => notifySummaryDocumentDeleted({ collection: "youtube-summaries", id: DOC })).not.toThrow();
+        await settle();
+      }
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+    expect(deleted).toEqual([`youtube-summaries|${DOC}`]);
+  });
+});

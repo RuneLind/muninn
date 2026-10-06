@@ -42,13 +42,16 @@ import {
   EXPORT_PAGE_NAME,
   exportBaseName,
   findFrameReference,
+  exportFactcheckBlock,
   renderExportPage,
   rewriteFrameUrls,
 } from "../../summaries/export.ts";
+import { getSummaryFactcheck, type SummaryFactcheck } from "../../db/summary-factchecks.ts";
+import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
 import { buildStoredZip, type ZipEntry } from "../../summaries/zip.ts";
 import { readerSourceLinkLabel } from "../../summaries/reader-article.ts";
 import { splitTranscript } from "../../summaries/transcript-split.ts";
-import { summaryDocTitle } from "./summaries-share.ts";
+import { loadSummaryFactcheck, summaryDocTitle } from "./summaries-share.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "summaries-export");
@@ -59,6 +62,8 @@ export interface SummaryExportDoc {
   title?: string;
   url?: string;
   metadata?: Record<string, unknown>;
+  /** `"file"` when `text` is the source file (`withSourceText`). */
+  textSource?: string;
 }
 
 export interface SummariesExportDeps {
@@ -67,6 +72,8 @@ export interface SummariesExportDeps {
   fetchDoc: (collection: string, docId: string) => Promise<SummaryExportDoc | null>;
   /** Where kept frames are read from; default {@link framesRootDir}. A TEST MUST pass one. */
   framesRoot?: string;
+  /** The document's saved fact check (`summary_factchecks`). Absent ⇒ none. */
+  getFactcheck?: (collection: string, docId: string) => Promise<SummaryFactcheck | null>;
 }
 
 const DOC_FETCH_TIMEOUT_MS = 10_000;
@@ -94,6 +101,7 @@ export function defaultSummariesExportDeps(knowledgeApiUrl: string): SummariesEx
         throw err;
       }
     },
+    getFactcheck: getSummaryFactcheck,
   };
 }
 
@@ -122,6 +130,7 @@ export function registerSummariesExportRoutes(
     if (!docId) return c.json({ error: "docId is required" }, 400);
     if (!isSafeDocId(docId)) return c.json({ error: "docId is not a document path" }, 400);
 
+    const factcheck = loadSummaryFactcheck(deps.getFactcheck, source.collection, docId);
     let doc: SummaryExportDoc | null;
     try {
       doc = await deps.fetchDoc(source.collection, docId);
@@ -164,6 +173,13 @@ export function registerSummariesExportRoutes(
       }
     }
 
+    // The saved check goes in once, in place of any block the document carries.
+    // Stale is the `/result` route's comparison, so it needs the source file;
+    // over huginn's cleaned copy it is unknown and the note is left out.
+    const row = await factcheck;
+    const stale = row !== null && doc.textSource === "file" && factcheckBodySha256(doc.text ?? "") !== row.bodySha256;
+    const factcheckBlock = row ? exportFactcheckBlock(row.answer, row.createdAt, stale) : undefined;
+
     const title = summaryDocTitle(docId, doc);
     const html = renderExportPage({
       title,
@@ -174,6 +190,7 @@ export function registerSummariesExportRoutes(
       metadata: doc.metadata,
       markdown,
       sourceId: source.id,
+      ...(factcheckBlock ? { factcheckBlock } : {}),
     });
     entries.unshift({ name: EXPORT_PAGE_NAME, data: new TextEncoder().encode(html) });
 

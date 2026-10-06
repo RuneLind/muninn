@@ -206,6 +206,12 @@ export async function getSummaryFactcheck(collection: string, docId: string): Pr
   return rows[0] ? mapRow(rows[0]) : null;
 }
 
+/** Remove a document's saved check — its document left the collection. */
+export async function deleteSummaryFactcheck(collection: string, docId: string): Promise<void> {
+  const sql = getDb();
+  await sql`DELETE FROM summary_factchecks WHERE collection = ${collection} AND doc_id = ${docId}`;
+}
+
 /** Every checked document's badge, in ONE query (the table holds only
  *  hand-started checks, so it stays small). */
 export async function listSummaryFactcheckBadges(): Promise<SummaryFactcheckBadge[]> {

@@ -40,6 +40,7 @@ const { registerSummariesShareRoutes, summaryShareFlightKey, summaryDocTitle } =
   "./summaries-share.ts"
 );
 type SummaryShareDoc = import("./summaries-share.ts").SummaryShareDoc;
+type SummaryFactcheck = import("../../db/summary-factchecks.ts").SummaryFactcheck;
 const { acquireShareFlight, __resetShareFlightsForTest } = await import("./share-sse.ts");
 const { SHARE_EXTRA_MAX, SHARE_PROMPT_OVERRIDE_MAX } = await import("../../share/wire.ts");
 const { SUMMARY_SOURCES } = await import("../../summaries/sources.ts");
@@ -101,11 +102,16 @@ interface Seen {
 }
 
 function makeApp(
-  over: { doc?: SummaryShareDoc | null; throwOnFetch?: boolean } = {},
+  over: {
+    doc?: SummaryShareDoc | null;
+    throwOnFetch?: boolean;
+    getFactcheck?: (collection: string, docId: string) => Promise<SummaryFactcheck | null>;
+  } = {},
 ): { app: Hono; seen: Seen } {
   const seen: Seen = { fetched: [], prompt: "", systemPrompt: "", ran: 0 };
   const app = new Hono();
   registerSummariesShareRoutes(app, config, {
+    ...(over.getFactcheck ? { getFactcheck: over.getFactcheck } : {}),
     fetchDoc: async (collection, docId) => {
       seen.fetched.push({ collection, docId });
       if (over.throwOnFetch) throw new Error("Knowledge API unreachable");
@@ -490,4 +496,78 @@ describe("POST /api/summaries/share — a written-back fact-check block (fix rou
     expect(seen.prompt).not.toContain("Fact check (2026-10-06)");
     expect(seen.prompt).not.toContain("Claim 1/1");
   });
+});
+
+describe("POST /api/summaries/share — the saved fact check (PR 4)", () => {
+  const ANSWER = "One claim is wrong.\n\n### ❌ Claim 1/2 — Coffee cures colds\n\nNo trial supports it.\n\nConfidence: 20/100\n\n### ✅ Claim 2/2 — Sleep helps\n\nYes.";
+  const row = (claims: SummaryFactcheck["claims"]): SummaryFactcheck => ({
+    collection: OK_COLLECTION,
+    docId: DOC_ID,
+    url: "https://www.youtube.com/watch?v=abc",
+    bodySha256: "a".repeat(64),
+    answer: ANSWER,
+    claims,
+    botName: "jarvis",
+    createdAt: Date.UTC(2026, 9, 5, 10, 0, 0),
+    transcript: null,
+    transcriptSha256: null,
+    appliedAt: null,
+  });
+  const BAD = [
+    { index: 1, title: "Coffee cures colds", quote: "Coffee cures colds.", verdict: "❌", outcome: "verified", sources: [] },
+    { index: 2, title: "Sleep helps", verdict: "✅", outcome: "verified", sources: [] },
+  ];
+  const BLOCKED =
+    "Coffee cures colds.\n\n<!-- factcheck:start -->\n## Fact check (2026-10-05)\n\n> [!factcheck] Claims checked against the web\n>\n> **❌ Claim 1/2 — Coffee cures colds**\n<!-- factcheck:end -->\n\n## Transcript\n\nspeech";
+
+  async function promptFor(over: Parameters<typeof makeApp>[0]): Promise<string> {
+    const { app, seen } = makeApp(over);
+    await (await post(app, ok)).text();
+    expect(seen.ran).toBe(1);
+    return seen.prompt;
+  }
+
+  test("no row, a row with nothing wrong, or a failed lookup: the prompt is byte-identical", async () => {
+    for (const text of ["Coffee cures colds.", BLOCKED]) {
+      const before = await promptFor({ doc: { text } });
+      expect(await promptFor({ doc: { text }, getFactcheck: async () => null })).toBe(before);
+      expect(await promptFor({ doc: { text }, getFactcheck: async () => row([BAD[1]!]) })).toBe(before);
+      expect(
+        await promptFor({
+          doc: { text },
+          getFactcheck: async () => {
+            throw new Error("db down");
+          },
+        }),
+      ).toBe(before);
+    }
+  });
+
+  test.each([["a body without a block", "Coffee cures colds."], ["a body after a write-back", BLOCKED]])(
+    "%s: the rider lists the wrong claim; the source carries no block",
+    async (_name, text) => {
+      const seenKeys: string[] = [];
+      const prompt = await promptFor({
+        doc: { text, url: "https://www.youtube.com/watch?v=abc" },
+        getFactcheck: async (collection, docId) => {
+          seenKeys.push(`${collection}|${docId}`);
+          return row(BAD);
+        },
+      });
+      expect(seenKeys).toEqual([`${OK_COLLECTION}|${DOC_ID}`]);
+      const at = prompt.indexOf("SOURCE:");
+      const rider = prompt.slice(0, at);
+      const source = prompt.slice(at);
+      expect(rider).toContain("FACT-CHECK FINDINGS");
+      expect(rider).toContain("the video claims “Coffee cures colds”");
+      expect(rider).toContain("No trial supports it.");
+      expect(rider).toContain("Never repeat one of these claims as true");
+      expect(rider).not.toContain("Sleep helps");
+      expect(source).toContain("Coffee cures colds.");
+      expect(source).not.toContain("Fact check (");
+      expect(source).not.toContain("[!factcheck]");
+      expect(source).not.toContain("factcheck:");
+      expect(prompt.match(/FACT-CHECK FINDINGS:/g)).toHaveLength(1);
+    },
+  );
 });

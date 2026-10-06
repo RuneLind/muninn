@@ -75,6 +75,22 @@ describe("docPanelHtml askFollowUp", () => {
     expect(script).toContain("setFollowUpHref");
     expect(script).toContain("/research?q=");
   });
+
+  test("a summary collection adds factcheck=<source>:<docId>; any other collection does not", () => {
+    const el = { href: "" };
+    const doc = { getElementById: () => el, addEventListener: () => {} };
+    const setFollowUpHref = new Function("document", `${docPanelScript()}; return setFollowUpHref;`)(doc) as (
+      title: string,
+      collection?: string,
+      docId?: string,
+    ) => void;
+    setFollowUpHref("A Talk", "x-articles", "tech/A: Talk.md");
+    expect(el.href).toBe("/research?q=A%20Talk&factcheck=" + encodeURIComponent("x-article:tech/A: Talk.md"));
+    setFollowUpHref("A Talk", "wiki", "concepts/a.md");
+    expect(el.href).toBe("/research?q=A%20Talk");
+    setFollowUpHref("A Talk", "toString", "x.md");
+    expect(el.href).toBe("/research?q=A%20Talk");
+  });
 });
 
 describe("docPanelHtml moreMenu", () => {

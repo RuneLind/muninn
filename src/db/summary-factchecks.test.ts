@@ -4,6 +4,7 @@ import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
 import {
+  deleteSummaryFactcheck,
   getSummaryFactcheck,
   getSummaryFactcheckVersioned,
   listSummaryFactcheckBadges,
@@ -60,6 +61,15 @@ describe("summary_factchecks", () => {
     await upsertSummaryFactcheck({ ...base, collection: "article-summaries", url: null });
     expect((await getSummaryFactcheck("article-summaries", base.docId))!.url).toBeNull();
     expect((await getSummaryFactcheck(base.collection, base.docId))!.url).toBe(base.url);
+  });
+
+  test("delete removes that document's row only", async () => {
+    await upsertSummaryFactcheck(base);
+    await upsertSummaryFactcheck({ ...base, collection: "article-summaries", url: null });
+    await deleteSummaryFactcheck(base.collection, base.docId);
+    expect(await getSummaryFactcheck(base.collection, base.docId)).toBeNull();
+    expect(await getSummaryFactcheck("article-summaries", base.docId)).not.toBeNull();
+    await deleteSummaryFactcheck(base.collection, "nope.md");
   });
 
   test("badges count ❌ claims and the total, in one listing", async () => {

@@ -21,6 +21,8 @@ import { parseMcpConfig } from "../../ai/connectors/copilot-mcp.ts";
 import { checkMcpServerHealth } from "../../ai/connectors/mcp-health.ts";
 import { applyCors, corsHeaders } from "../../auth/cors.ts";
 import { requireOwnUser } from "../../auth/guard.ts";
+import { getSummaryFactcheck, type SummaryFactcheck } from "../../db/summary-factchecks.ts";
+import { buildAskFactcheckRider, parseFactcheckParam } from "../../summaries/factcheck-rider.ts";
 
 const log = getLog("dashboard");
 
@@ -33,7 +35,41 @@ Gi en oppsummering av:
 - Koblinger til eksisterende arbeid
 - Eventuelle mangler eller uklarheter`;
 
-export function registerResearchRoutes(app: Hono, config: Config): void {
+/** Seams for the route test; production uses the defaults. */
+export interface ResearchRouteDeps {
+  /** The saved summary fact check a `factcheck=` follow-up names. */
+  getFactcheck: (collection: string, docId: string) => Promise<SummaryFactcheck | null>;
+  stream: typeof streamResearchSSE;
+}
+
+const defaultResearchRouteDeps: ResearchRouteDeps = { getFactcheck: getSummaryFactcheck, stream: streamResearchSSE };
+
+/**
+ * The Ask rider for `factcheck=<source>:<docId>`, or "" — unknown, malformed,
+ * no row, a row with nothing wrong, or a failed lookup all ask without one.
+ */
+export async function researchFactcheckRider(
+  param: string | undefined,
+  getFactcheck: ResearchRouteDeps["getFactcheck"],
+): Promise<string> {
+  const ref = parseFactcheckParam(param);
+  if (!ref) return "";
+  try {
+    return buildAskFactcheckRider(await getFactcheck(ref.collection, ref.docId), ref.collection);
+  } catch (err) {
+    log.warn("Research ask: fact-check lookup failed for {doc}: {error}", {
+      doc: `${ref.collection}/${ref.docId}`,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "";
+  }
+}
+
+export function registerResearchRoutes(
+  app: Hono,
+  config: Config,
+  deps: ResearchRouteDeps = defaultResearchRouteDeps,
+): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
   app.get("/research", async (c) => {
@@ -52,7 +88,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
   // SSE over GET so the browser drives it with a plain EventSource; the question
   // rides in the `q` query param and the synthesizing bot in `bot` (defaults to
   // a fast Research bot — see resolveResearchBot; pass an explicit bot to pin one).
-  app.get("/api/research/ask", (c) => {
+  app.get("/api/research/ask", async (c) => {
     const question = (c.req.query("q") ?? "").trim();
     const botName = c.req.query("bot")?.trim();
     if (!question) return c.json({ error: "Missing query parameter: q" }, 400);
@@ -74,14 +110,21 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const botConfig = requested ?? resolveResearchBot(allBots);
     if (!botConfig) return c.json({ error: "No bots configured" }, 500);
 
-    log.info("Research ask: bot={bot} profile={profile} turn={turn} q={q}", {
+    // A follow-up from a summary's doc panel names that summary; its saved
+    // fact check rides into the synthesis prompt. Like `profile`, the page
+    // sends it on every ask. The route is admin-zone (`src/auth/origin.ts`), so
+    // reading any document's row adds nothing to what the caller can reach.
+    const factcheckRider = await researchFactcheckRider(c.req.query("factcheck"), deps.getFactcheck);
+
+    log.info("Research ask: bot={bot} profile={profile} turn={turn} factcheck={factcheck} q={q}", {
       bot: botConfig.name,
       profile: profile.label,
       turn: history.length + 1,
+      factcheck: factcheckRider !== "",
       q: question.slice(0, 120),
     });
 
-    return streamResearchSSE(c, {
+    return deps.stream(c, {
       question,
       config,
       botConfig,
@@ -96,6 +139,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       // swaps its streamed plain text for this (and re-linkifies `[n]` markers
       // client-side). See renderResearchAnswerHtml for why it's not the Ask renderer.
       renderAnswerHtml: (answer) => renderResearchAnswerHtml(answer),
+      ...(factcheckRider ? { factcheckRider } : {}),
     });
   });
 

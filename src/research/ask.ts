@@ -86,6 +86,9 @@ export interface ResearchAnswerOptions {
   systemPrompt?: string;
   /** Injectable tracer (tests pass a recording one to avoid DB span writes). */
   tracer?: Tracer;
+  /** A saved summary fact check's findings (`buildAskFactcheckRider`), appended
+   *  to the synthesis user prompt. "" or absent leaves the prompt unchanged. */
+  factcheckRider?: string;
 }
 
 /**
@@ -196,7 +199,8 @@ export async function streamResearchAnswer(
     await emit({ type: "phase", phase: "synthesizing" });
     agentStatus.updatePhase(reqId, "synthesizing");
 
-    const userPrompt = buildSynthesisUserPrompt(question, citations, history);
+    const rider = opts.factcheckRider?.trim();
+    const userPrompt = buildSynthesisUserPrompt(question, citations, history) + (rider ? `\n\n${rider}` : "");
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
         void emit({ type: "delta", text: event.text });

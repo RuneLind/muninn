@@ -77,10 +77,14 @@ export interface ShareTaskInput {
   title: string;
   /** Registered wiki name, when the source came from one. */
   wikiName?: string;
+  /** A saved fact check's rider (`buildShareFactcheckRider`), placed just above
+   *  the source. "" or absent leaves the prompt byte-identical. */
+  factcheckRider?: string;
 }
 
 /**
- * Assemble the user prompt: instruction → rider → extra → fenced source.
+ * Assemble the user prompt: instruction → rider → extra → fact-check findings
+ * (summaries only) → fenced source.
  *
  * Every interpolated string is fence-neutralized, including the instruction: a
  * per-bot `prompts/share.md` is a file on disk rather than reader input, but it is
@@ -92,6 +96,8 @@ export function buildShareUserPrompt(input: ShareTaskInput): string {
   parts.push(languageRider(input.lang));
   const extra = neutralizeShareFence((input.extra ?? "").trim());
   if (extra) parts.push(`ALSO FROM THE SENDER (follow this too):\n${extra}`);
+  const factcheck = neutralizeShareFence((input.factcheckRider ?? "").trim());
+  if (factcheck) parts.push(factcheck);
   const title = neutralizeShareFence(input.title.trim()) || "(untitled)";
   const where = input.wikiName ? ` — from the "${neutralizeShareFence(input.wikiName)}" wiki` : "";
   parts.push(

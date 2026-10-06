@@ -623,6 +623,13 @@ export async function renderResearchPage(): Promise<string> {
       if (a.renderRaf) { cancelAnimationFrame(a.renderRaf); a.renderRaf = 0; }
     }
 
+    // A follow-up from a summary's doc panel names the summary
+    // (factcheck=<source>:<docId>). Read once, sent on every ask like profile,
+    // so later turns keep its saved fact check.
+    var FACTCHECK_DOC = (function() {
+      try { return new URLSearchParams(window.location.search).get('factcheck') || ''; } catch (e) { return ''; }
+    })();
+
     function askQuestion() {
       var input = document.getElementById('askInput');
       var q = input.value.trim();
@@ -647,6 +654,7 @@ export async function renderResearchPage(): Promise<string> {
       var url = '/api/research/ask?q=' + encodeURIComponent(q);
       if (selectedBot) url += '&bot=' + encodeURIComponent(selectedBot);
       url += '&profile=' + encodeURIComponent(selectedProfile);
+      if (FACTCHECK_DOC) url += '&factcheck=' + encodeURIComponent(FACTCHECK_DOC);
       var hist = compactHistory();
       if (hist) url += '&history=' + encodeURIComponent(hist);
 

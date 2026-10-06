@@ -35,6 +35,7 @@ import { markdownContentStyles } from "../dashboard/views/components/doc-panel.t
 import { themeTokenStyles } from "../dashboard/views/shared-styles.ts";
 import { readerDurationSec, readerFormatDuration } from "./reader-article.ts";
 import { dropFactcheckSentinelLines, styleFactcheckCallouts } from "./factcheck-callout.ts";
+import { buildSummaryFactcheckBlock, factcheckBlockDate, insertSummaryFactcheckBlock } from "./factcheck-block.ts";
 import {
   FRAME_SOURCES,
   frameAddressRegExp,
@@ -252,6 +253,20 @@ export interface ExportPageInput {
   markdown: string;
   /** Vimeo and YouTube captures get their timestamps linked; others do not. */
   sourceId: string;
+  /** The saved fact check's block ({@link exportFactcheckBlock}). Set, it
+   *  replaces any block the document carries; absent, the markdown is as is. */
+  factcheckBlock?: string;
+}
+
+/** The note a stale check's block opens with. */
+export const EXPORT_FACTCHECK_STALE_NOTE =
+  "_This check was made against an earlier version of this summary, which has changed since._";
+
+/** The block for a saved check, dated by its Oslo day, with the stale note
+ *  when the summary changed since the check. */
+export function exportFactcheckBlock(answer: string, createdAt: number, stale: boolean): string {
+  const text = stale ? `${EXPORT_FACTCHECK_STALE_NOTE}\n\n${answer}` : answer;
+  return buildSummaryFactcheckBlock(text, factcheckBlockDate(createdAt));
 }
 
 function metaString(meta: Record<string, unknown> | undefined, key: string): string | null {
@@ -281,7 +296,12 @@ export function renderExportPage(input: ExportPageInput): string {
       : input.sourceId === "youtube"
         ? linkYouTubeTimestamps(input.markdown, input.url)
         : input.markdown;
-  const parts = splitTranscript(md);
+  const split = splitTranscript(md);
+  // Into the transcript-less part, which `insertSummaryFactcheckBlock` expects:
+  // above `## Visual reference`, never inside the collapsed transcript below.
+  const parts = input.factcheckBlock
+    ? { ...split, body: insertSummaryFactcheckBlock(split.body, input.factcheckBlock) }
+    : split;
   const meta = input.metadata;
   const facts: string[] = [];
   const speaker = metaString(meta, "speaker");

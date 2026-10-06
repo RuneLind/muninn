@@ -108,6 +108,33 @@ function riderQuote(quote: string): string {
 }
 
 /**
+ * One `- Claim N (❌ wrong …): <noun> claims “…”. Sources say: …` line per
+ * claim, as many as fit in `max` chars, plus a line counting the rest. Shared
+ * by the drafter rider and the `/summaries` share and Ask riders
+ * (`src/summaries/factcheck-rider.ts`).
+ */
+export function factcheckFindingLines(claims: CorrectableClaim[], noun: string, max: number): string[] {
+  const lines: string[] = [];
+  let used = 0;
+  let omitted = 0;
+  for (const c of claims) {
+    const mark = c.verdict === "bad" ? "❌ wrong" : "⚠️ partly wrong";
+    const claim = c.quote ? riderQuote(c.quote) : clip(c.title, RIDER_FIELD_MAX).replace(/"/g, "’");
+    const correction = c.correction ? clip(c.correction, RIDER_FIELD_MAX).replace(/"/g, "’") : "(no correction recorded)";
+    const title = c.title && c.quote ? ` — ${clip(c.title, 120).replace(/"/g, "’")}` : "";
+    const line = `- Claim ${c.index} (${mark}${title}): ${noun} claims ${claim}. Sources say: ${correction}`;
+    if (used + line.length + 1 > max) {
+      omitted++;
+      continue;
+    }
+    lines.push(line);
+    used += line.length + 1;
+  }
+  if (omitted > 0) lines.push(`- (${omitted} more corrected claim(s) not shown; do not state any claim from the summary as fact unless you are sure it holds)`);
+  return lines;
+}
+
+/**
  * The drafter rider for a saved check — "" when the check has no ❌/⚠️ claim (or
  * no row), so {@link buildSourceDraftPrompt} stays byte-identical. The findings
  * are web-derived model text and summary quotes, so they sit between markers and
@@ -119,24 +146,7 @@ export function buildFactcheckRider(saved: SummaryFactcheck | null, collection: 
   if (claims.length === 0) return "";
   const noun = sourceKindNoun(collection, url || saved.url);
   const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
-
-  const lines: string[] = [];
-  let used = 0;
-  let omitted = 0;
-  for (const c of claims) {
-    const mark = c.verdict === "bad" ? "❌ wrong" : "⚠️ partly wrong";
-    const claim = c.quote ? riderQuote(c.quote) : clip(c.title, RIDER_FIELD_MAX).replace(/"/g, "’");
-    const correction = c.correction ? clip(c.correction, RIDER_FIELD_MAX).replace(/"/g, "’") : "(no correction recorded)";
-    const title = c.title && c.quote ? ` — ${clip(c.title, 120).replace(/"/g, "’")}` : "";
-    const line = `- Claim ${c.index} (${mark}${title}): ${noun} claims ${claim}. Sources say: ${correction}`;
-    if (used + line.length + 1 > FACTCHECK_RIDER_MAX) {
-      omitted++;
-      continue;
-    }
-    lines.push(line);
-    used += line.length + 1;
-  }
-  if (omitted > 0) lines.push(`- (${omitted} more corrected claim(s) not shown; do not state any claim from the summary as fact unless you are sure it holds)`);
+  const lines = factcheckFindingLines(claims, noun, FACTCHECK_RIDER_MAX);
 
   return `FACT-CHECK FINDINGS: a fact check of this summary (${todayOslo(saved.createdAt)}) found the claims below wrong (❌) or only partly right (⚠️). The summary reports what ${noun} said, so it still states them. On the page:
 - Never state one of these claims as fact. Attribute it to ${noun} and give what sources say, worded like: ${Noun} claims X; sources say Y.

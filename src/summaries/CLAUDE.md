@@ -499,6 +499,23 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   `factcheck: {blockPresent, appliedAt, appliedDay, applyFresh}`; the menu warns
   that a re-run drops the corrections (dated by the Oslo day), says "re-check to
   re-apply" once they are already gone, or names an Add-only section.
+- **Export, Share and Ask see the verdicts (PR 4).** Export inserts the saved
+  answer once (`exportFactcheckBlock`, dated, with a stale note when
+  `factcheckBodySha256` of the source file no longer matches the row) into the
+  TRANSCRIPT-LESS part `renderExportPage` splits off, so it sits above
+  `## Visual reference` and outside the collapsed `<details>`; the insert strips
+  any block the document carries. No row ⇒ the document as it is. Share keeps
+  its `stripSummaryFactcheckBlock` source and adds `buildShareFactcheckRider`
+  (`factcheck-rider.ts`: the ❌/⚠️ claims and corrections through the drafter's
+  `correctableClaims`/`factcheckFindingLines`, attributed per D7) above the
+  source; no row ⇒ the prompt is byte-identical (hash-pinned in
+  `src/share/prompt.test.ts`). Ask: both "Ask a follow-up" setters add
+  `factcheck=<source>:<docId>` for a registered source, `/research` sends it on
+  every ask, and `/api/research/ask` adds `buildAskFactcheckRider` (≤ 2,000
+  chars) to the synthesis user prompt; unknown, malformed or no row ⇒ no rider.
+  The ask route is admin-zone, and rows are keyed by document, not user. A
+  `/summaries` Delete removes the row (`onSummaryDocumentDeleted` →
+  `deleteSummaryFactcheck`, fired with its own catch).
 - **Not for `article`/`anthropic` re-runs (L5).** Measured 2026-10-06: none of
   the 44 stored `article-summaries` + `anthropic-summaries` documents keeps its
   source text, so there is nothing to regenerate from.

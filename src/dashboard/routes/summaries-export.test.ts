@@ -11,17 +11,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerSummariesExportRoutes, contentDisposition, type SummaryExportDoc } from "./summaries-export.ts";
 import { KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
+import type { SummaryFactcheck } from "../../db/summary-factchecks.ts";
+import { buildSummaryFactcheckBlock, insertSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
+import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
+import { EXPORT_FACTCHECK_STALE_NOTE } from "../../summaries/export.ts";
 
 const config = { knowledgeApiUrl: "http://127.0.0.1:1" } as never;
 
 let root = "";
 const docs = new Map<string, SummaryExportDoc>();
 const calls: Array<[string, string]> = [];
+const factchecks = new Map<string, SummaryFactcheck>();
 
 function app(): Hono {
   const a = new Hono();
   registerSummariesExportRoutes(a, config, {
     framesRoot: root,
+    getFactcheck: async (_collection, docId) => {
+      if (docId === "fc-lookup-fails.md") throw new Error("db down");
+      return factchecks.get(docId) ?? null;
+    },
     fetchDoc: async (collection, docId) => {
       calls.push([collection, docId]);
       if (docId === "boom.md") throw new KnowledgeApiError("Knowledge API unreachable", 503);
@@ -158,5 +167,77 @@ describe("GET /api/summaries/export", () => {
 describe("contentDisposition", () => {
   test("ASCII fallback plus RFC 5987 form", () => {
     expect(contentDisposition('Æ "x"')).toBe(`attachment; filename="_ 'x'.zip"; filename*=UTF-8''%C3%86%20%22x%22.zip`);
+  });
+});
+
+describe("GET /api/summaries/export — the saved fact check", () => {
+  const CHECKED = Date.UTC(2026, 9, 5, 10, 0, 0);
+  const ANSWER = "One claim is wrong.\n\n### ❌ Claim 1/1 — Coffee cures colds\n\nNo trial supports it.\n\nConfidence: 20/100";
+  const SUMMARY = "Intro line.\n\nCoffee cures colds, the talk says.\n\n## Visual reference\n\nA slide.\n\n> 💬 **Takeaway:** coffee.";
+  const TRANSCRIPT = "## Transcript\n\n### [00:00:00]\n\nCoffee cures colds.\n";
+  const plain = `${SUMMARY}\n\n${TRANSCRIPT}`;
+  // PR 2's write-back: the block inserted into the transcript-less body.
+  const written = `${insertSummaryFactcheckBlock(SUMMARY, buildSummaryFactcheckBlock(ANSWER, "2026-10-05"))}\n\n${TRANSCRIPT}`;
+  const row = (text: string, over: Partial<SummaryFactcheck> = {}): SummaryFactcheck => ({
+    collection: "vimeo-summaries",
+    docId: "x",
+    url: null,
+    bodySha256: factcheckBodySha256(text),
+    answer: ANSWER,
+    claims: [{ index: 1, title: "Coffee cures colds", verdict: "❌", outcome: "verified", sources: [] }],
+    botName: "jarvis",
+    createdAt: CHECKED,
+    transcript: null,
+    transcriptSha256: null,
+    appliedAt: null,
+    ...over,
+  });
+
+  async function exportHtml(docId: string): Promise<string> {
+    const res = await app().request("/api/summaries/export?source=vimeo&docId=" + encodeURIComponent(docId));
+    expect(res.status).toBe(200);
+    // A store-only archive: the page's bytes sit in it verbatim.
+    return new TextDecoder().decode(new Uint8Array(await res.arrayBuffer()));
+  }
+  const headings = (html: string) => html.match(/<h2>Fact check \(/g)?.length ?? 0;
+
+  beforeAll(() => {
+    docs.set("fc-plain.md", { text: plain, textSource: "file" });
+    factchecks.set("fc-plain.md", row(plain));
+    docs.set("fc-written.md", { text: written, textSource: "file" });
+    factchecks.set("fc-written.md", row(written));
+    docs.set("fc-stale.md", { text: plain.replace("Intro line.", "Rewritten intro."), textSource: "file" });
+    factchecks.set("fc-stale.md", row(plain));
+    docs.set("fc-norow.md", { text: written, textSource: "file" });
+    docs.set("fc-lookup-fails.md", { text: plain, textSource: "file" });
+  });
+
+  test.each([["fc-plain.md"], ["fc-written.md"]])(
+    "%s: one Fact check section, above the visual reference and outside the collapsed transcript",
+    async (docId) => {
+      const html = await exportHtml(docId);
+      expect(headings(html)).toBe(1);
+      expect(html).toContain("<h2>Fact check (2026-10-05)</h2>");
+      expect(html.indexOf("Fact check (")).toBeLessThan(html.indexOf("<h2>Visual reference</h2>"));
+      expect(html.indexOf("Fact check (")).toBeLessThan(html.indexOf('<details class="transcript">'));
+      expect(html).toContain("No trial supports it.");
+      expect(html).not.toContain("<!--");
+      expect(html).not.toContain("&lt;!--");
+      expect(html).not.toContain(EXPORT_FACTCHECK_STALE_NOTE.replaceAll("_", ""));
+    },
+  );
+
+  test("a check older than the summary's last change carries the stale note", async () => {
+    const html = await exportHtml("fc-stale.md");
+    expect(headings(html)).toBe(1);
+    expect(html).toContain(EXPORT_FACTCHECK_STALE_NOTE.replaceAll("_", ""));
+  });
+
+  test("no row: the document is exported as it is, its own block once", async () => {
+    expect(headings(await exportHtml("fc-norow.md"))).toBe(1);
+  });
+
+  test("a failed lookup exports without a check rather than failing", async () => {
+    expect(headings(await exportHtml("fc-lookup-fails.md"))).toBe(0);
   });
 });
