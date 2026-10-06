@@ -3,7 +3,11 @@
  * `summary_kind`, the claim it requires, and what huginn's answer turns into.
  */
 import { afterAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { SUMMARY_SOURCES } from "./sources.ts";
 import {
+  SUMMARY_SAVE_DESCRIPTORS,
   buildSummarySaveBody,
   preflightSummarySave,
   readStoredCapture,
@@ -386,4 +390,37 @@ describe("an ingest whose answer never arrived", () => {
     expect(res.ok ? "ok" : res.code).toBe("write_failed");
     claims.clear();
   });
+});
+
+describe("the descriptor table", () => {
+  test("names exactly the summary sources", () => {
+    const ids = (xs: readonly { id: string }[]) => xs.map((x) => x.id).sort();
+    expect(ids(SUMMARY_SAVE_DESCRIPTORS)).toEqual(ids(SUMMARY_SOURCES));
+  });
+
+  // Each vertical's CAPTURE posts to a literal of its own; the descriptor states
+  // the path again. A file whose ingest paths are not exactly the descriptor's
+  // is a save that writes to a different collection than the capture did.
+  const CAPTURE_FILES: Record<string, string[]> = {
+    youtube: ["src/youtube/summarizer.ts"],
+    vimeo: ["src/vimeo/summarizer.ts"],
+    tiktok: ["src/tiktok/summarizer.ts"],
+    "x-article": ["src/x-article/summarizer.ts", "src/x-article/video.ts"],
+    anthropic: ["src/anthropic/summarizer.ts"],
+    article: ["src/article/summarizer.ts"],
+  };
+  const repoRoot = join(import.meta.dir, "..", "..");
+
+  test("every source has a capture file to pin against", () => {
+    expect(Object.keys(CAPTURE_FILES).sort()).toEqual(SUMMARY_SAVE_DESCRIPTORS.map((d) => d.id).sort());
+  });
+
+  for (const d of SUMMARY_SAVE_DESCRIPTORS) {
+    test(`${d.id}: the capture posts to the descriptor's ingest path and no other`, () => {
+      for (const file of CAPTURE_FILES[d.id] ?? []) {
+        const paths = new Set(readFileSync(join(repoRoot, file), "utf8").match(/\/api\/[a-z-]+\/ingest\b/g) ?? []);
+        expect({ file, paths: [...paths] }).toEqual({ file, paths: [d.ingestPath] });
+      }
+    });
+  }
 });
