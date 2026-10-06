@@ -51,7 +51,7 @@
     "@huggingface/transformers": "^3.8.1",
     "@logtape/file": "^2.3.4",
     "@logtape/logtape": "^2.3.4",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@scalar/hono-api-reference": "^0.10.20",
     "@slack/bolt": "^4.7.3",
     "grammy": "^1.46.0",
@@ -62,7 +62,7 @@
     "yaml": "^2.9.1"
   },
   "overrides": {
-    "sharp": "0.35.4",
+    "sharp": "0.35.5",
     "proxy-addr": "2.0.8"
   }
 }
