@@ -471,7 +471,7 @@ export type SummarySaveResult =
   | {
       ok: false;
       status: 400 | 409 | 502;
-      code: SummarySaveRefusalCode | "empty_summary" | "in_flight" | "write_failed" | "forked";
+      code: SummarySaveRefusalCode | "empty_summary" | "in_flight" | "write_failed" | "write_unknown" | "forked";
       error: string;
       /** `forked` only: the sibling huginn wrote, for the delete action. */
       siblingDocId?: string;
@@ -618,6 +618,14 @@ export async function saveSummaryBody(input: SaveSummaryBodyInput): Promise<Summ
   }
   if (!res.ok) {
     log.warn("Saving {docId} failed: {error}", { docId: input.docId, error: res.error });
+    if (res.mayHaveWritten) {
+      return {
+        ok: false,
+        status: 502,
+        code: "write_unknown",
+        error: `${res.error}. The document may have been written anyway — Reload it before retrying.`,
+      };
+    }
     return { ok: false, status: 502, code: "write_failed", error: res.error };
   }
   const filePath = typeof res.data.file_path === "string" ? res.data.file_path : "";

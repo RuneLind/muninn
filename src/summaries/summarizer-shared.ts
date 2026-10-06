@@ -478,7 +478,14 @@ export function ingestTimeoutFor(bodyBytes: number): number {
 /** What one ingest POST answered — returned rather than logged. */
 export type SummaryIngestResponse =
   | { ok: true; status: number; data: { file_path?: unknown; similar?: unknown } }
-  | { ok: false; status: number | null; error: string };
+  | {
+      ok: false;
+      status: number | null;
+      error: string;
+      /** The request went out and the answer was lost (a timeout, or a 2xx
+       *  whose body is unreadable): huginn may have written the document. */
+      mayHaveWritten?: boolean;
+    };
 
 /** The ingest seam: one POST, its answer returned. */
 export type SummaryIngest = (opts: {
@@ -524,10 +531,20 @@ export const postSummaryIngest: SummaryIngest = async (opts) => {
     try {
       data = (await res.json()) as { file_path?: unknown; similar?: unknown };
     } catch {
-      return { ok: false, status: res.status, error: `Ingest answered ${res.status} with a body that is not JSON` };
+      return {
+        ok: false,
+        status: res.status,
+        error: `Ingest answered ${res.status} with a body that is not JSON`,
+        mayHaveWritten: true,
+      };
     }
     return { ok: true, status: res.status, data: data ?? {} };
   } catch (err) {
+    // A timeout aborts the WAIT, not huginn: it writes and reindexes before it
+    // answers, so the document may be on disk.
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      return { ok: false, status: null, error: `Ingest timed out after ${timeoutMs} ms`, mayHaveWritten: true };
+    }
     return { ok: false, status: null, error: `Ingest failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 };

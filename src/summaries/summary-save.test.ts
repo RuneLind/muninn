@@ -2,7 +2,7 @@
  * The shared summary save path: the transcript-less shapes, the stored
  * `summary_kind`, the claim it requires, and what huginn's answer turns into.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import {
   buildSummarySaveBody,
   preflightSummarySave,
@@ -11,7 +11,7 @@ import {
   saveSummaryBody,
   SummarySaveClaims,
 } from "./summary-save.ts";
-import type { SummaryIngest, SummaryIngestResponse } from "./summarizer-shared.ts";
+import { postSummaryIngest, type SummaryIngest, type SummaryIngestResponse } from "./summarizer-shared.ts";
 
 function doc(front: string[], body: string): string {
   return ["---", ...front, "---", "", body].join("\n");
@@ -308,6 +308,56 @@ describe("the claim registry", () => {
     expect(claims.holds(b)).toBe(true);
     claims.release(b);
     expect(claims.isHeld("tiktok", "x/y.md")).toBe(false);
+    claims.clear();
+  });
+});
+
+describe("an ingest whose answer never arrived", () => {
+  // A local huginn stand-in that answers only after the caller gave up: the
+  // POST was sent and read, so the document may well be on disk.
+  const slow = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      await req.text();
+      await Bun.sleep(300);
+      return Response.json({ file_path: "ai/general/A post.md" });
+    },
+  });
+  afterAll(() => slow.stop(true));
+  const DOC_ID = "ai/general/A post.md";
+
+  test("a timeout after the request was sent is write_unknown and says to reload first", async () => {
+    const claims = new SummarySaveClaims();
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A new summary.",
+      claim: claims.claim("article", DOC_ID, 1_000)!,
+      knowledgeApiUrl: `http://127.0.0.1:${slow.port}`,
+      ingest: (o) => postSummaryIngest({ ...o, timeoutMs: 40 }),
+    });
+    expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["write_unknown", 502]);
+    if (!res.ok) {
+      expect(res.error).toContain("may have been written");
+      expect(res.error).toContain("Reload");
+    }
+    claims.clear();
+  });
+
+  test("a refused connection is still a plain write_failed: nothing was sent", async () => {
+    const claims = new SummarySaveClaims();
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A new summary.",
+      claim: claims.claim("article", DOC_ID, 1_000)!,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest: (o) => postSummaryIngest({ ...o, timeoutMs: 2_000 }),
+    });
+    expect(res.ok ? "ok" : res.code).toBe("write_failed");
     claims.clear();
   });
 });
