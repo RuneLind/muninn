@@ -845,6 +845,69 @@ describe("copyKeptFrame", () => {
   });
 });
 
+describe("the save's warns", () => {
+  async function capturing(run: (records: LogRecord[]) => Promise<void>): Promise<void> {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+      reset: true,
+    });
+    try {
+      await run(records);
+    } finally {
+      await configure({
+        sinks: {},
+        loggers: [{ category: ["logtape", "meta"], sinks: [], lowestLevel: "error" }],
+        reset: true,
+      });
+    }
+  }
+  const warnsFor = (records: LogRecord[], docId: string) =>
+    records.filter((r) => r.level === "warning" && r.properties.docId === docId);
+
+  test("a failed save warns ONCE, and that warn names the job", async () => {
+    await capturing(async (records) => {
+      const { deps } = makeDeps(youtubeDoc(), {
+        ingestAnswer: { ok: false, status: 500, error: "Ingest returned 500: boom" },
+      });
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      await settle();
+      const warns = warnsFor(records, DOC_ID);
+      expect(warns).toHaveLength(1);
+      expect(warns[0]!.properties.jobId).toBe(res.json.job_id);
+    });
+  });
+
+  test("the truncation warn names the job too", async () => {
+    await capturing(async (records) => {
+      const docId = "ai/general/A long flat one.md";
+      const raw = [
+        "---",
+        `url: "${TIKTOK_URL}"`,
+        'category: "ai/general"',
+        "---",
+        "",
+        "Body.",
+        "",
+        "## Transcript",
+        "",
+        `${"a".repeat(TRANSCRIPT_MAX_BYTES + 10)}\nand a second line.`,
+        "",
+      ].join("\n");
+      const { deps } = makeDeps(raw, { ingestAnswer: { ok: true, status: 200, data: { file_path: docId } } });
+      const res = await post(appFor(deps), { source: "tiktok", docId });
+      await settle();
+      const truncated = warnsFor(records, docId).find((r) => "maxBytes" in r.properties);
+      expect(truncated).toBeDefined();
+      expect(truncated!.properties.jobId).toBe(res.json.job_id);
+    });
+  });
+});
+
 describe("the reindex-window memory", () => {
   test("a finished re-run announces its document to the vertical's sink", async () => {
     const seen: Array<[string, string, string]> = [];

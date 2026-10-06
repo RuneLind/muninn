@@ -696,6 +696,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       claim: input.claim,
       knowledgeApiUrl: input.config.knowledgeApiUrl,
       ingest: deps.ingest,
+      logContext: { jobId },
     });
     if (!saved.ok) {
       // A fork still put a document in the collection: the sibling. The
@@ -704,12 +705,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       if (saved.code === "forked" && saved.siblingDocId && videoId) {
         notifyCaptureIngest(vertical.id, videoId, saved.siblingDocId, url);
       }
-      log.warn("Re-run {jobId} of {docId} was not saved ({code}): {error}", {
-        jobId,
-        docId: input.docId,
-        code: saved.code,
-        error: saved.error,
-      });
+      // `saveSummaryBody` already warned, with this job's id.
       store.failJob(jobId, saved.error);
       return;
     }

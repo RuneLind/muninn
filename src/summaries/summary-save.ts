@@ -491,6 +491,8 @@ export interface SaveSummaryBodyInput {
   readonly claim: SummarySaveClaim;
   readonly knowledgeApiUrl: string;
   readonly ingest?: SummaryIngest;
+  /** Extra properties on the save's log lines, e.g. `{ jobId }`. */
+  readonly logContext?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -542,12 +544,27 @@ export function buildSummarySaveBody(input: {
 /**
  * Write a summary body back over its stored document.
  *
- * Requires a HELD claim (it never claims a second time); runs the preflight
- * again, so a caller that skipped it cannot fork; posts blocking; and treats
- * any path other than `docId` as `forked` — huginn wrote a sibling and the
- * stored document is unchanged.
+ * Requires a claim the caller took (it never claims a second time); runs the
+ * preflight again, so a caller that skipped it cannot fork; posts blocking; and
+ * treats any path other than `docId` as `forked` — huginn wrote a sibling and
+ * the stored document is unchanged. Every result that is not a write warns
+ * exactly once, here, so a caller does not warn again.
  */
 export async function saveSummaryBody(input: SaveSummaryBodyInput): Promise<SummarySaveResult> {
+  const result = await saveOnce(input);
+  if (!result.ok) {
+    log.warn("Saving {docId} did not write ({code}): {error}", {
+      ...input.logContext,
+      docId: input.docId,
+      code: result.code,
+      error: result.error,
+      ...(result.siblingDocId !== undefined ? { siblingDocId: result.siblingDocId } : {}),
+    });
+  }
+  return result;
+}
+
+async function saveOnce(input: SaveSummaryBodyInput): Promise<SummarySaveResult> {
   const { claim } = input;
   if (claim.sourceId !== input.descriptor.id || claim.docId !== input.docId) {
     return {
@@ -586,6 +603,7 @@ export async function saveSummaryBody(input: SaveSummaryBodyInput): Promise<Summ
       "Saving {docId}: transcript truncated at the {maxBytes}-byte bound " +
         "({transcriptBytes} bytes in, {keptBytes} kept) — the document ends mid-talk",
       {
+        ...input.logContext,
         docId: input.docId,
         maxBytes: TRANSCRIPT_MAX_BYTES,
         transcriptBytes: appended.inputBytes,
@@ -617,7 +635,6 @@ export async function saveSummaryBody(input: SaveSummaryBodyInput): Promise<Summ
     claim.registry.unpinAfterWrite(claim);
   }
   if (!res.ok) {
-    log.warn("Saving {docId} failed: {error}", { docId: input.docId, error: res.error });
     if (res.mayHaveWritten) {
       return {
         ok: false,
@@ -638,10 +655,6 @@ export async function saveSummaryBody(input: SaveSummaryBodyInput): Promise<Summ
     };
   }
   if (filePath !== input.docId) {
-    log.warn("Saving {docId} wrote {written} instead — the stored document was not overwritten", {
-      docId: input.docId,
-      written: filePath,
-    });
     return {
       ok: false,
       status: 409,
