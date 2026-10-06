@@ -12,9 +12,10 @@
  *   touched.
  * - **Voice (D5, D7).** A summary reports what its source says, so a ❌ or ⚠️ is
  *   ATTRIBUTED ("the video says X; sources say Y") rather than corrected in the
- *   source's mouth — checked mechanically, per claim and in the summary's
- *   language ({@link unattributedEdits}). The noun is `sourceKindNoun`'s,
- *   shared with the drafter rider.
+ *   source's mouth — checked mechanically, per run of a claim's contiguous edits
+ *   and in the summary's language ({@link unattributedEdits}); a failing run
+ *   drops its whole claim. The noun is `sourceKindNoun`'s, shared with the
+ *   drafter rider.
  * - **Structure.** An edit cannot add a line the next read cuts on, and a
  *   rebuild that moves the transcript, the visual section or the checked ranges
  *   is refused ({@link summaryStructureChanged}).
@@ -233,11 +234,57 @@ export function attributionRefusal(newText: string, sourceNoun: string, summaryL
   return re.test(newText) ? null : "not attributed";
 }
 
-/** One placed edit, for the per-claim checks. */
+/** One placed edit, for the per-claim checks: `[start, end)` in its slice's
+ *  ORIGINAL text. */
 export interface PlacedEdit {
   readonly edit: IntegrateEdit;
   readonly slice: number;
   readonly start: number;
+  readonly end: number;
+}
+
+const BLANK_LINE_RE = /\n[ \t\r]*\n/;
+/** A line that opens a list item, heading, quote or table row. */
+const BLOCK_LINE_RE = /[ \t]*(?:(?:[-*+]|\d+[.)]|#{1,6})[ \t]|>|\|)/y;
+
+/** Is there a block boundary between `prev` and `p` in the original `text`?
+ *  Invariant: they join iff no blank line and no line opening a block (read in
+ *  full) starts inside the span from `prev`'s first non-blank char to `p`'s
+ *  last, where an all-blank edit contributes its whole range. So both edits'
+ *  interiors count (an edit spanning two blocks never joins), the whitespace
+ *  outside the pair does not, and an all-blank edit cannot hide a blank line. */
+function runBreaks(text: string, prev: PlacedEdit, p: PlacedEdit): boolean {
+  let from = prev.start;
+  while (from < prev.end && /\s/.test(text[from]!)) from++;
+  if (from === prev.end) from = prev.start;
+  let to = p.end;
+  while (to > p.start && /\s/.test(text[to - 1]!)) to--;
+  if (to === p.start) to = p.end;
+  const span = text.slice(from, to);
+  if (BLANK_LINE_RE.test(span)) return true;
+  for (let i = span.indexOf("\n"); i !== -1; i = span.indexOf("\n", i + 1)) {
+    BLOCK_LINE_RE.lastIndex = from + i + 1;
+    if (BLOCK_LINE_RE.test(text)) return true;
+  }
+  return false;
+}
+
+/** A claim's edits split into runs: same slice, consecutive in document order,
+ *  no {@link runBreaks} and no other placed edit between neighbours. */
+function contiguousRuns(group: readonly PlacedEdit[], all: readonly PlacedEdit[], texts: readonly string[]): PlacedEdit[][] {
+  const sorted = [...group].sort((a, b) => a.slice - b.slice || a.start - b.start);
+  const runs: PlacedEdit[][] = [];
+  for (const p of sorted) {
+    const prev = runs.at(-1)?.at(-1);
+    const joins =
+      prev !== undefined &&
+      prev.slice === p.slice &&
+      !runBreaks(texts[p.slice] ?? "", prev, p) &&
+      !all.some((q) => q.slice === p.slice && q.start >= prev.end && q.start < p.start);
+    if (joins) runs.at(-1)!.push(p);
+    else runs.push([p]);
+  }
+  return runs;
 }
 
 /** Edits group by claim; a claim-0 edit is a group of its own. */
@@ -253,24 +300,26 @@ function claimGroups<T extends { edit: IntegrateEdit }>(items: readonly T[]): T[
 }
 
 /**
- * The placed edits whose CLAIM is unattributed: a claim needs the check when
- * the saved claims mark it ❌/⚠️ or any of its edits says ❌/⚠️, and passes
- * when its edits' `new` texts, joined in document order, attribute — a
- * sentence split into two edits is attributed by either half.
+ * The placed edits that are unattributed: a claim needs the check when the
+ * saved claims mark it ❌/⚠️ or any of its edits says ❌/⚠️, and each RUN of
+ * its edits ({@link contiguousRuns}) must attribute on its own, `new` texts
+ * joined in document order — a sentence split into two edits is attributed by
+ * either half, but a takeaway cannot cover a body paragraph. `slices` gives
+ * the original text between edits.
  */
 export function unattributedEdits(
   placed: readonly PlacedEdit[],
-  opts: { sourceNoun: string; summaryLang?: string | null; correctable: ReadonlySet<number> },
+  opts: { slices: SummaryEditSlices; sourceNoun: string; summaryLang?: string | null; correctable: ReadonlySet<number> },
 ): Set<PlacedEdit> {
   const out = new Set<PlacedEdit>();
+  const texts = sliceTexts(opts.slices);
   for (const group of claimGroups(placed)) {
     const checked = group.some((p) => opts.correctable.has(p.edit.claimIndex) || /❌|⚠/.test(p.edit.verdict));
     if (!checked) continue;
-    const text = [...group]
-      .sort((a, b) => a.slice - b.slice || a.start - b.start)
-      .map((p) => p.edit.new)
-      .join(" ");
-    if (attributionRefusal(text, opts.sourceNoun, opts.summaryLang)) for (const p of group) out.add(p);
+    for (const run of contiguousRuns(group, placed, texts)) {
+      const text = run.map((p) => p.edit.new).join(" ");
+      if (attributionRefusal(text, opts.sourceNoun, opts.summaryLang)) for (const p of run) out.add(p);
+    }
   }
   return out;
 }
@@ -347,11 +396,12 @@ export interface ProposeSummaryEditsInput {
 
 /**
  * Propose-side screening, in order: structural lines (per edit), resolution,
- * the claim group, attribution (per claim, {@link unattributedEdits}), the
- * change budget, the per-edit structure check, the claim group again, then the
- * structure check over every kept edit together. The claim group: when any
- * edit for a claim is dropped, every edit for it is (a half correction reads as
- * the whole one). Mutates nothing it was given.
+ * the claim group, attribution (per run, {@link unattributedEdits}), the claim
+ * group again (a failing run drops its whole claim), the change budget, the
+ * per-edit structure check, the claim group again, then the structure check
+ * over every kept edit together. The claim group: when any edit for a claim is
+ * dropped, every edit for it is (a half correction reads as the whole one).
+ * Mutates nothing it was given.
  */
 export function proposeSummaryEdits(input: ProposeSummaryEditsInput): {
   outcomes: SliceEditOutcome[];
@@ -377,10 +427,13 @@ export function proposeSummaryEdits(input: ProposeSummaryEditsInput): {
       }
     }
   };
-  // Attribution reads whole claims, so the claims missing an edit go first.
+  // The claims missing an edit go first, so attribution sees only whole claims.
   dropGroups();
-  const placed = outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0, o }));
+  const placed = outcomes.filter((o) => o.applied).map((o) => ({ edit: o.edit, slice: o.slice, start: o.start ?? 0, end: o.end ?? 0, o }));
   for (const p of unattributedEdits(placed, input)) dropOutcome((p as (typeof placed)[number]).o, "not attributed");
+  // A failing run takes its claim's other runs with it BEFORE the budget, so
+  // they cannot spend budget another claim needs.
+  dropGroups();
   enforceChangeBudget(outcomes, input.bodyLen);
   for (const o of outcomes) {
     if (!o.applied) continue;

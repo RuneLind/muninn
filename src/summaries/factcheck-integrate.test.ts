@@ -391,3 +391,160 @@ describe("fix round 2: the preview selects per claim", () => {
     expect(html.match(/class="sum-fc-int-diff"/g)).toHaveLength(5);
   });
 });
+
+describe("attribution is judged per run of contiguous edits (#650 follow-up)", () => {
+  const propose = async (body: string, edits: { claimIndex: number; old: string; new: string }[]) => {
+    const { proposeSummaryEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    const r = proposeSummaryEdits({
+      slices: summaryEditSlices(body),
+      edits: edits.map((e) => ({ reason: "", verdict: "❌", ...e })),
+      priorDrops: [],
+      sourceNoun: "the video",
+      correctable: new Set(),
+      bodyLen: 20_000,
+    });
+    return r.outcomes.map((o) => (o.applied ? "ok" : o.reason));
+  };
+  const SAYS = "The video says adults need 4 hours of sleep; sources say 7–9.";
+  const SILENT = "Adults need 7–9 hours of sleep.";
+  const PARA = "Adults need 4 hours of sleep. Alpha one. Gamma. Beta two.";
+  const TWO_SLICES = `${PARA}\n\n## Visual reference\n\nCap.\n\n> 💬 **Takeaway:** Rest 4 hours.`;
+  const LIST = `## Key takeaways\n\n- Sleep 4 hours a night.\n- Coffee is fine.\n\n${PARA}`;
+  const DROPPED = (c: number) => `another edit for claim ${c} was dropped, so this one is too`;
+  const body = { claimIndex: 1, old: "Adults need 4 hours of sleep.", new: SAYS };
+  const silentBody = { ...body, new: SILENT };
+  const takeaway = { claimIndex: 1, old: "Sleep 4 hours a night.", new: "The video says sleep 4 hours a night; sources say 7–9." };
+  const silentTakeaway = { ...takeaway, new: "Sleep 7–9 hours a night." };
+  const halfA = { claimIndex: 1, old: "Alpha one.", new: "Alpha one, as the video" };
+  const halfB = { claimIndex: 1, old: "Beta two.", new: "says, beta two; sources say three." };
+  const coffee = { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." };
+
+  const rows: [string, string, { claimIndex: number; old: string; new: string }[], string[]][] = [
+    ["one run, attributed", PARA, [body], ["ok"]],
+    ["one run, unattributed", PARA, [silentBody], ["not attributed"]],
+    ["several runs, all attributed", LIST, [takeaway, body], ["ok", "ok"]],
+    ["several runs, one unattributed: the takeaway does not cover the body", LIST, [takeaway, silentBody], [DROPPED(1), "not attributed"]],
+    ["two list items are two runs", LIST, [takeaway, { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["an attribution spanning two contiguous edits", PARA.replace(" Gamma.", ""), [halfB, halfA], ["ok", "ok"]],
+    ["another claim's edit between breaks the run", PARA, [{ ...halfA, new: "The video says alpha one; sources say two." }, { ...halfB, new: "Beta three." }, { claimIndex: 2, old: "Gamma.", new: "The video says gamma; sources say delta." }], [DROPPED(1), "not attributed", "ok"]],
+    ["a paragraph break between: each edit must attribute alone", "Alpha one.\n\nBeta two.", [halfA, halfB], ["not attributed", "not attributed"]],
+    ["different slices: each must attribute alone", TWO_SLICES, [body, { claimIndex: 1, old: "Rest 4 hours.", new: "Rest 7–9 hours." }], [DROPPED(1), "not attributed"]],
+    // fix round 1
+    ["a hard-wrapped line stays one run", "Alpha one.\nBeta two.", [halfA, halfB], ["ok", "ok"]],
+    ["a list marker inside the 2nd edit's old breaks the run", LIST, [takeaway, { claimIndex: 1, old: "- Coffee is fine.", new: "- Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["a newline and marker at the start of the 2nd edit's old break the run", LIST, [takeaway, { claimIndex: 1, old: "\n- Coffee is fine.", new: "\n- Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["a newline at the end of the 1st edit's old does not hide the next item", LIST, [{ ...takeaway, old: `${takeaway.old}\n`, new: `${takeaway.new}\n` }, { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["two table rows are two runs", `| A | Sleep 4 hours |\n| B | Coffee is fine |\n\n${PARA}`, [{ claimIndex: 1, old: "Sleep 4 hours", new: "The video says sleep 4 hours; sources say 7–9" }, { claimIndex: 1, old: "Coffee is fine", new: "Coffee is fine at 4 hours" }], [DROPPED(1), "not attributed"]],
+    ["a quote line with no space after > breaks the run", `>Sleep 4 hours a night.\n>Coffee is fine.\n\n${PARA}`, [takeaway, { claimIndex: 1, old: "Coffee is fine.", new: "Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["a CRLF blank line breaks the run", "Alpha one.\r\n\r\nBeta two.", [halfA, halfB], ["not attributed", "not attributed"]],
+    // fix round 2: a boundary inside the 1st edit's own old
+    ["the 1st edit's old ends in \"\\n- \"", "- Sleep 4 hours.\n- Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n- ", new: "The video says sleep 4 hours; sources say 7–9.\n- " }, coffee], [DROPPED(1), "not attributed"]],
+    ["the 1st edit's old ends in \"\\n-\"", "- Sleep 4 hours.\n- Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n-", new: "The video says sleep 4 hours; sources say 7–9.\n-" }, { ...coffee, old: " Coffee is fine.", new: " Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["the 1st edit's old ends in a heading marker", "Sleep 4 hours.\n\n## Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n\n## ", new: "The video says sleep 4 hours; sources say 7–9.\n\n## " }, coffee], [DROPPED(1), "not attributed"]],
+    ["the 1st edit's old ends past a blank line", "Sleep 4 hours.\n\nNote: Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n\nNote:", new: "The video says sleep 4 hours; sources say 7–9.\n\nNote:" }, { ...coffee, old: " Coffee is fine.", new: " Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    ["the 2nd edit's old runs on into the next item", "- Sleep 4 hours. Coffee is fine.\n- Tea is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.", new: "The video says sleep 4 hours; sources say 7–9." }, { ...coffee, old: "Coffee is fine.\n- Tea is fine.", new: "Coffee is fine.\n- Tea is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    // class check (round 3); the full state space is the enumerated test below
+    ["an all-blank edit does not bridge the blank line it is", "Sleep 4 hours.\n\nCoffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.", new: "Sleep 7–9 hours." }, { claimIndex: 1, old: "\n\n", new: "\n\n\n" }, { ...coffee, new: "The video says coffee is fine." }], ["not attributed", "not attributed", DROPPED(1)]],
+    ["the newline and marker before the 1st edit's text are outside the span", "Intro\n- Alpha one. Beta two.", [{ claimIndex: 1, old: "\n- Alpha one.", new: "\n- The video says alpha one; sources say two." }, { ...halfB, new: "Beta three." }], ["ok", "ok"]],
+  ];
+  test.each(rows)("%s", async (_name, text, edits, expected) => {
+    expect(await propose(text, edits)).toEqual(expected);
+  });
+
+  test("a partly attributed claim drops whole before the change budget, so it cannot crowd out another claim", async () => {
+    const { proposeSummaryEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    const text = "Sleep 4 hours a night.\n\nAdults need 4 hours of sleep.\n\nCoffee is fine.";
+    const r = proposeSummaryEdits({
+      slices: summaryEditSlices(text),
+      edits: [
+        { claimIndex: 1, verdict: "❌", reason: "", old: "Sleep 4 hours a night.", new: `The video says sleep 4 hours a night; sources say 7–9. ${"x".repeat(1480)}` },
+        { claimIndex: 1, verdict: "❌", reason: "", old: "Adults need 4 hours of sleep.", new: SILENT },
+        { claimIndex: 2, verdict: "❌", reason: "", old: "Coffee is fine.", new: `The video says coffee is fine; sources say less. ${"y".repeat(690)}` },
+      ],
+      priorDrops: [],
+      sourceNoun: "the video",
+      correctable: new Set(),
+      bodyLen: text.length,
+    });
+    expect(r.outcomes.map((o) => (o.applied ? "ok" : o.reason))).toEqual([DROPPED(1), "not attributed", "ok"]);
+  });
+});
+
+// Class check (round 3): every neighbour pair of one claim's edits, by shape.
+// The expectation is derived per CLASS from the invariant on `runBreaks`, not
+// from the text, so it does not restate the implementation.
+describe("run breaks over the whole state space of two neighbouring edits", () => {
+  // prev / p shapes; `I` = an internal boundary, `W` = all blank (reachable only
+  // through the exported functions: both routes refuse a blank `old`).
+  const PREV = { C: "Alpha one.", L: "\n- Alpha one.", T: "Alpha one.\n", W1: "\n", W2: "\n\n", W3: "\r\n\r\n", I1: "Alpha one.\n- ", I2: "Alpha one.\n\n## " };
+  const P = { C: "Beta two.", L: "\n- Beta two.", T: "Beta two.\n", W1: "\n", W2: "\n\n", W3: "\r\n\r\n", I1: "Beta two.\n- ", I2: "Beta two.\n\n## " };
+  const GAP = { none: "", space: " ", wrap: "\n", crlf: "\r\n", blank: "\n\n", list: "\n- ", ordinal: "\n1. ", heading: "\n## ", quote: "\n> ", table: "\n| " };
+  const SUFFIX = { plain: "Omega.", marker: "- Omega." };
+  type K<T> = keyof T & string;
+
+  // Newlines each part puts at the pair's junction; two or more form a blank line.
+  const NL: Record<string, number> = { "prev:T": 1, "prev:W1": 1, "gap:wrap": 1, "gap:crlf": 1, "p:W1": 1 };
+  const expectBreak = (prev: K<typeof PREV>, p: K<typeof P>, gap: K<typeof GAP>, suffix: K<typeof SUFFIX>): boolean =>
+    ["W2", "W3", "I1", "I2"].includes(prev) || // a blank line or block line inside prev from its text on
+    ["L", "W2", "W3", "I1", "I2"].includes(p) || // ... inside p up to its text's end
+    !["none", "space", "wrap", "crlf"].includes(gap) || // a blank or block line between
+    (NL[`prev:${prev}`] ?? 0) + (NL[`gap:${gap}`] ?? 0) + (NL[`p:${p}`] ?? 0) >= 2 || // a blank line across the junction
+    (p === "W1" && suffix === "marker"); // an all-blank p's newline opens the next line inside the span
+
+  const joins = async (prev: string, p: string, gap: string, suffix: string): Promise<boolean> => {
+    const { unattributedEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    const text = `Intro${prev}${gap}${p}${suffix}`;
+    const slices = summaryEditSlices(text);
+    expect(slices.ranges).toEqual([{ start: 0, end: text.length }]);
+    const at = (start: number, old: string, n: string) => ({ edit: { claimIndex: 1, verdict: "❌", reason: "", old, new: n }, slice: 0, start, end: start + old.length });
+    const a = at(5, prev, "The video says alpha one; sources say two.");
+    const b = at(5 + prev.length + gap.length, p, "Beta three.");
+    // prev attributes alone, p is silent: p is flagged iff the pair breaks.
+    return !unattributedEdits([a, b], { slices, sourceNoun: "the video", correctable: new Set() }).has(b);
+  };
+
+  test("the hand-written anchors", async () => {
+    const anchors: [K<typeof PREV>, K<typeof P>, K<typeof GAP>, K<typeof SUFFIX>, boolean][] = [
+      ["C", "C", "wrap", "plain", true], // hard wrap
+      ["C", "C", "crlf", "marker", true], // CRLF wrap
+      ["C", "C", "space", "plain", true],
+      ["C", "C", "blank", "plain", false],
+      ["C", "C", "ordinal", "plain", false],
+      ["C", "C", "quote", "plain", false],
+      ["C", "C", "table", "plain", false],
+      ["C", "C", "heading", "plain", false],
+      ["L", "C", "space", "plain", true], // leading "\n- " of prev is outside the span
+      ["T", "C", "none", "plain", true],
+      ["T", "C", "wrap", "plain", false], // "\n" + "\n" = a blank line
+      ["C", "T", "none", "marker", true], // trailing "\n" of p is outside the span
+      ["W1", "C", "none", "plain", true], // a wrap edit stays in its paragraph
+      ["W2", "C", "none", "plain", false], // the round-3 finding
+      ["C", "W2", "none", "plain", false], // ... mirrored
+      ["W3", "C", "none", "plain", false],
+      ["C", "W1", "none", "plain", true],
+      ["C", "W1", "none", "marker", false],
+      ["I1", "C", "none", "plain", false],
+      ["C", "I2", "none", "plain", false],
+      ["C", "L", "space", "plain", false],
+    ];
+    for (const [prev, p, gap, suffix, join] of anchors) {
+      expect({ prev, p, gap, suffix, join: await joins(PREV[prev], P[p], GAP[gap], SUFFIX[suffix]) }).toEqual({ prev, p, gap, suffix, join });
+      expect(!expectBreak(prev, p, gap, suffix)).toBe(join);
+    }
+  });
+
+  test("every prev × p × gap × suffix combination follows the invariant", async () => {
+    const wrong: string[] = [];
+    let rows = 0;
+    for (const prev of Object.keys(PREV) as K<typeof PREV>[])
+      for (const p of Object.keys(P) as K<typeof P>[])
+        for (const gap of Object.keys(GAP) as K<typeof GAP>[])
+          for (const suffix of Object.keys(SUFFIX) as K<typeof SUFFIX>[]) {
+            rows++;
+            const want = !expectBreak(prev, p, gap, suffix);
+            if ((await joins(PREV[prev], P[p], GAP[gap], SUFFIX[suffix])) !== want) wrong.push(`${prev}+${gap}+${p}+${suffix}: want ${want ? "join" : "break"}`);
+          }
+    expect(rows).toBe(8 * 8 * 10 * 2);
+    expect(wrong).toEqual([]);
+  });
+});
