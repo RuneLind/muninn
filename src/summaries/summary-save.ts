@@ -471,7 +471,7 @@ export type SummarySaveResult =
   | {
       ok: false;
       status: 400 | 409 | 502;
-      code: SummarySaveRefusalCode | "in_flight" | "write_failed" | "forked";
+      code: SummarySaveRefusalCode | "empty_summary" | "in_flight" | "write_failed" | "forked";
       error: string;
       /** `forked` only: the sibling huginn wrote, for the delete action. */
       siblingDocId?: string;
@@ -559,6 +559,17 @@ export async function saveSummaryBody(input: SaveSummaryBodyInput): Promise<Summ
   }
   const pre = preflightSummarySave(input.stored, input.docId);
   if (!pre.ok) return pre;
+  // huginn's YouTube ingest reads an empty `summary` as "summarize it
+  // yourself" — it fetches the transcript, runs its own model and overwrites
+  // the document — so a blank body is never posted, on any source.
+  if (input.summary.trim() === "") {
+    return {
+      ok: false,
+      status: 400,
+      code: "empty_summary",
+      error: "The new summary is empty, so nothing was saved and the stored document is unchanged.",
+    };
+  }
 
   const { body, appended } = buildSummarySaveBody({
     descriptor: input.descriptor,

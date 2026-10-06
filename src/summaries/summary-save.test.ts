@@ -180,6 +180,18 @@ describe("saveSummaryBody", () => {
     expect(res.ok ? "ok" : [res.code, res.siblingDocId]).toEqual(["forked", "ai/general/A post (2).md"]);
   });
 
+  test("an empty or whitespace-only summary is refused before any POST", async () => {
+    // huginn's YouTube ingest reads an empty `summary` as "summarize it
+    // yourself": it fetches the transcript, runs its own model and overwrites
+    // the document.
+    for (const summary of ["", "   \n\t\n"]) {
+      const h = harness({ ok: true, status: 200, data: { file_path: DOC_ID } });
+      const res = await saveSummaryBody({ ...input(h), summary });
+      expect(res.ok ? "ok" : [res.code, res.status]).toEqual(["empty_summary", 400]);
+      expect(h.calls).toHaveLength(0);
+    }
+  });
+
   test("a URL-less document is refused, not written", async () => {
     const h = harness({ ok: true, status: 200, data: { file_path: DOC_ID } });
     const raw = ARTICLE.replace('url: "https://example.com/post"\n', 'url: ""\n');
