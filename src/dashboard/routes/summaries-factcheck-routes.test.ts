@@ -424,3 +424,33 @@ describe("the wiki's done payload is unchanged without onDone", () => {
     ]);
   });
 });
+
+const { buildSummaryFactcheckBlock, factcheckBlockDate, insertSummaryFactcheckBlock } = await import(
+  "../../summaries/factcheck-block.ts"
+);
+describe("GET /api/summaries/factcheck/result — blockAdded (fix round 1)", () => {
+  const withBlock = (answer: string, createdAt: number) => {
+    const cut = SOURCE_TEXT.indexOf("\n\n## Transcript");
+    const body = insertSummaryFactcheckBlock(SOURCE_TEXT.slice(0, cut), buildSummaryFactcheckBlock(answer, factcheckBlockDate(createdAt)));
+    return body + SOURCE_TEXT.slice(cut);
+  };
+  const result = async (a: Hono) =>
+    (await (await a.request(`/api/summaries/factcheck/result?source=youtube&docId=${encodeURIComponent(DOC)}`)).json()) as {
+      blockAdded: boolean | null;
+      stale: boolean | null;
+    };
+
+  test("true when the document carries this check's block, false without one or with an older one", async () => {
+    const a = app();
+    await run(a);
+    expect((await result(a)).blockAdded).toBe(false);
+    source = withBlock(stored!.answer, stored!.createdAt);
+    const r = await result(a);
+    expect(r.blockAdded).toBe(true);
+    expect(r.stale).toBe(false);
+    source = withBlock("An older check's answer.", stored!.createdAt);
+    expect((await result(a)).blockAdded).toBe(false);
+    source = null;
+    expect((await result(a)).blockAdded).toBeNull();
+  });
+});

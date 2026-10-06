@@ -30,7 +30,7 @@ import {
 import { escHtml } from "./escape.ts";
 import { timeAgo } from "./helpers.ts";
 import { DOC_PANEL_FACTCHECK_BTN_ID } from "./doc-panel.ts";
-import { wireWriteback, writebackHtml } from "./sum-factcheck-writeback-client.ts";
+import { wireWriteback, writebackHtml, writebackKeepMessage, writebackOnOpen } from "./sum-factcheck-writeback-client.ts";
 
 export const SUM_FACTCHECK_SECTION_ID = "sumFactcheck";
 export const SUM_FACTCHECK_BTN_ID = DOC_PANEL_FACTCHECK_BTN_ID;
@@ -40,6 +40,8 @@ interface SavedResult { answer: string; html: string | null; claims: SavedClaim[
 interface SavedState {
   result: SavedResult | null;
   stale: boolean | null;
+  /** The document carries this result's Fact check section (`null`: unknown). */
+  blockAdded: boolean | null;
   /** `null` when unknown (no saved result yet, or the file was unreadable). */
   hasTranscript: boolean | null;
   transcriptHtml: string | null;
@@ -103,11 +105,17 @@ export function sumFactcheckOnOpen(docId: string, source: string | null, mainEl:
     }
     el.dataset.key = key;
   }
-  // A reopen starts without the last transcript run's notice.
+  // A reopen starts without the last transcript run's notice or write-back message.
   if (mainEl && transcriptRuns.get(key)?.running === false) transcriptRuns.delete(key);
+  if (mainEl) writebackOnOpen(key);
   render();
   // Re-read on every open: a re-run since the last look moves `stale`.
   if (mainEl && !runs.get(key)?.running) void loadSaved(current.source, current.docId);
+}
+
+/** The panel closed: nothing that finishes later may reopen or redraw it. */
+export function sumFactcheckOnClose(): void {
+  current = null;
 }
 
 /** Drop a finished transcript run's notice: a new web result supersedes it. */
@@ -124,6 +132,7 @@ async function loadSaved(source: string, docId: string): Promise<void> {
     const data = (await res.json()) as {
       result: (Omit<SavedResult, "html">) | null;
       stale: boolean | null;
+      blockAdded?: boolean | null;
       html?: string;
       hasTranscript?: boolean | null;
       transcriptHtml?: string | null;
@@ -139,6 +148,7 @@ async function loadSaved(source: string, docId: string): Promise<void> {
     saved.set(key, {
       result,
       stale: data.stale,
+      blockAdded: data.blockAdded ?? null,
       hasTranscript: data.hasTranscript ?? null,
       transcriptHtml: keepTranscript ? before!.transcriptHtml : (data.transcriptHtml ?? null),
     });
@@ -276,6 +286,8 @@ async function stream(source: string, docId: string, run: RunState): Promise<voi
             createdAt: typeof data.checkedAt === "number" ? data.checkedAt : Date.now(),
           },
           stale: false,
+          // A new check: the section on the page, if any, is an older one's.
+          blockAdded: false,
           // A new claim set: the server nulled the transcript check with it.
           hasTranscript: saved.get(key)?.hasTranscript ?? null,
           transcriptHtml: null,
@@ -357,7 +369,7 @@ function render(): void {
     notice(tRun?.error ?? null) +
     (state?.transcriptHtml ?? "") +
     (result ? `<div class="sum-fc-answer">${result.html ?? escHtml(result.answer)}</div>` : "") +
-    (result ? writebackHtml(key, result, state?.stale ?? null) : "");
+    (result ? writebackHtml(key, result, state?.stale ?? null, state?.blockAdded ?? null) : "");
   el.querySelector(".sum-fc-recheck")?.addEventListener("click", () => sumFactcheckStart());
   el.querySelector(".sum-fc-txbtn")?.addEventListener("click", () => sumFactcheckTranscriptStart());
   if (result) {
@@ -367,11 +379,16 @@ function render(): void {
       docId,
       key,
       render,
-      afterWrite: () => {
-        void loadSaved(source, docId);
-        // The article shows the written file: re-open it in place.
+      afterWrite: async () => {
+        const reread = loadSaved(source, docId);
+        // The article shows the written file: re-open it in place — only while
+        // the panel still shows this document (closing it clears `current`).
         const reopen = (globalThis as { openSummaryDoc?: (id: string, url: string, src: string) => void }).openSummaryDoc;
-        if (current && current.source === source && current.docId === docId) reopen?.(docId, "", source);
+        if (current && current.source === source && current.docId === docId && reopen) {
+          writebackKeepMessage(key);
+          reopen(docId, "", source);
+        }
+        await reread;
       },
     });
   }

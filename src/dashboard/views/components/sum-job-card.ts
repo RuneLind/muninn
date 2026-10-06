@@ -447,7 +447,7 @@ export function sumJobCardScript(): string {
     function cleanSnippet(text) {
       if (!text) return '';
       // Strip [collection > path > title] prefix and tags: line
-      return text.replace(/^\\[.*?\\]\\s*/, '').replace(/^tags:.*\\n?/m, '').trim();
+      return plainFactcheckText(text.replace(/^\\[.*?\\]\\s*/, '').replace(/^tags:.*\\n?/m, '')).trim();
     }
 
     function renderSimilar(articles) {

@@ -17,6 +17,7 @@ import { escHtml } from "./escape.ts";
 
 export interface WritebackSaved {
   claims: { verdict: string }[];
+  createdAt: number;
   appliedAt?: number | null;
 }
 
@@ -40,7 +41,11 @@ interface Proposal {
 interface WritebackState {
   busy: "" | "append" | "propose" | "apply";
   proposal: Proposal | null;
-  message: { text: string; tone: "ok" | "error" } | null;
+  message: { text: string; tone: "ok" | "error"; items?: string[] } | null;
+  /** The web result the proposal and message belong to (`createdAt`). */
+  resultAt: number | null;
+  /** The next full open is the write's own reload: keep the message once. */
+  keepMessage: boolean;
 }
 
 const states = new Map<string, WritebackState>();
@@ -48,10 +53,31 @@ const states = new Map<string, WritebackState>();
 function stateFor(key: string): WritebackState {
   let s = states.get(key);
   if (!s) {
-    s = { busy: "", proposal: null, message: null };
+    s = { busy: "", proposal: null, message: null, resultAt: null, keepMessage: false };
     states.set(key, s);
   }
   return s;
+}
+
+/** A new web result replaces the proposal and the message it was made for. */
+function syncResult(s: WritebackState, createdAt: number): void {
+  if (s.resultAt !== null && s.resultAt !== createdAt) {
+    s.proposal = null;
+    s.message = null;
+  }
+  s.resultAt = createdAt;
+}
+
+/** A full open of the document: a reader coming back sees no stale message. */
+export function writebackOnOpen(key: string): void {
+  const s = stateFor(key);
+  if (s.keepMessage) s.keepMessage = false;
+  else s.message = null;
+}
+
+/** The write is about to reopen the document it wrote. */
+export function writebackKeepMessage(key: string): void {
+  stateFor(key).keepMessage = true;
 }
 
 const CORRECTABLE = new Set(["❌", "⚠️", "⚠"]);
@@ -61,11 +87,15 @@ export function hasCorrectableVerdict(saved: WritebackSaved): boolean {
   return saved.claims.some((c) => CORRECTABLE.has(c.verdict));
 }
 
-/** The write-back block under the answer. `stale` is `/result`'s. */
-export function writebackHtml(key: string, saved: WritebackSaved, stale: boolean | null): string {
+/** The write-back block under the answer. `stale` and `blockAdded` are `/result`'s. */
+export function writebackHtml(key: string, saved: WritebackSaved, stale: boolean | null, blockAdded: boolean | null = null): string {
   const s = stateFor(key);
+  syncResult(s, saved.createdAt);
+  const items = s.message?.items?.length
+    ? `<ul class="sum-fc-wb-items">${s.message.items.map((i) => `<li>${escHtml(i)}</li>`).join("")}</ul>`
+    : "";
   const msg = s.message
-    ? `<div class="sum-fc-wb-msg ${s.message.tone}" role="${s.message.tone === "error" ? "alert" : "status"}">${escHtml(s.message.text)}</div>`
+    ? `<div class="sum-fc-wb-msg ${s.message.tone}" role="${s.message.tone === "error" ? "alert" : "status"}">${escHtml(s.message.text)}${items}</div>`
     : "";
   if (stale && saved.appliedAt) {
     return (
@@ -99,13 +129,16 @@ export function writebackHtml(key: string, saved: WritebackSaved, stale: boolean
   const applied = saved.appliedAt
     ? `<span class="sum-fc-wb-done" data-wb-applied>Corrections integrated</span>`
     : "";
+  // Hidden while an apply's reload runs: the row is not yet re-read as applied.
   const integrate =
-    hasCorrectableVerdict(saved) && !saved.appliedAt
+    hasCorrectableVerdict(saved) && !saved.appliedAt && s.busy !== "apply"
       ? `<button type="button" class="sum-fc-wb-btn" data-wb="propose"${busy ? " disabled" : ""} title="Rewrite the ❌/⚠️ sentences to say what the sources say, after a preview">${s.busy === "propose" ? "Proposing…" : "✎ Integrate corrections"}</button>`
       : "";
   return (
     '<div class="sum-fc-wb"><div class="sum-fc-int-actions">' +
-    `<button type="button" class="sum-fc-wb-btn" data-wb="append"${busy ? " disabled" : ""} title="Add these verdicts to the stored summary as a Fact check section">${s.busy === "append" ? "Adding…" : "➕ Add to summary"}</button>` +
+    (blockAdded
+      ? '<span class="sum-fc-wb-done" data-wb-added>Fact check section added</span>'
+      : `<button type="button" class="sum-fc-wb-btn" data-wb="append"${busy ? " disabled" : ""} title="Add these verdicts to the stored summary as a Fact check section">${s.busy === "append" ? "Adding…" : "➕ Add to summary"}</button>`) +
     integrate +
     applied +
     "</div>" +
@@ -120,8 +153,9 @@ export interface WritebackContext {
   key: string;
   /** Re-render the section. */
   render: () => void;
-  /** After a write: re-read the saved row and reload the article. */
-  afterWrite: () => void;
+  /** After a write: re-read the saved row (resolves when it is back) and
+   *  reload the article if the panel still shows it. */
+  afterWrite: () => Promise<void>;
 }
 
 async function post(path: string, body: unknown): Promise<{ status: number; data: Record<string, unknown> }> {
@@ -171,19 +205,24 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
   });
 
   async function run(action: "append" | "propose" | "apply"): Promise<void> {
+    // A response for a web result that has since been replaced is dropped.
+    const origin = s.resultAt;
+    const current = () => s.resultAt === origin;
     s.busy = action;
     s.message = null;
     ctx.render();
     try {
       if (action === "append") {
         const { status, data } = await post("/api/summaries/factcheck/append", ref);
+        if (!current()) return;
         if (status !== 200) s.message = { text: failureText(data, status), tone: "error" };
         else {
           s.message = { text: "Added the Fact check section to the summary.", tone: "ok" };
-          ctx.afterWrite();
+          await ctx.afterWrite();
         }
       } else if (action === "propose") {
         const { status, data } = await post("/api/summaries/factcheck/integrate", ref);
+        if (!current()) return;
         if (status !== 200) s.message = { text: failureText(data, status), tone: "error" };
         else {
           const edits = Array.isArray(data.edits) ? (data.edits as ProposedEdit[]) : [];
@@ -212,15 +251,13 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
           rowVersion: p.rowVersion,
           edits: accepted,
         });
+        if (!current()) return;
         if (status !== 200) {
           s.message = { text: failureText(data, status), tone: "error" };
         } else {
           s.proposal = null;
-          const n = typeof data.applied === "number" ? data.applied : accepted.length;
-          s.message = data.recheckedDuringApply
-            ? { text: `Applied ${n} edit(s). The fact check was re-checked during apply, so it is not marked applied.`, tone: "error" }
-            : { text: `Integrated ${n} correction(s) and the Fact check section.`, tone: "ok" };
-          ctx.afterWrite();
+          s.message = applyMessage(data, accepted.length);
+          await ctx.afterWrite();
         }
       }
     } catch (err) {
@@ -230,4 +267,20 @@ export function wireWriteback(el: HTMLElement, ctx: WritebackContext): void {
       ctx.render();
     }
   }
+}
+
+/** The apply's result as one message: the count, what the stamp came to, and
+ *  each accepted edit that did not anchor. */
+function applyMessage(data: Record<string, unknown>, accepted: number): NonNullable<WritebackState["message"]> {
+  const n = typeof data.applied === "number" ? data.applied : accepted;
+  const items = Array.isArray(data.notApplied)
+    ? (data.notApplied as { reason?: string; edit?: { claimIndex?: number; old?: string } }[]).map(
+        (d) => `Claim ${d.edit?.claimIndex ?? "?"} not applied (${d.reason ?? "could not be placed"}): “${(d.edit?.old ?? "").slice(0, 120)}”`,
+      )
+    : [];
+  if (data.stamp !== "stamped") {
+    const why = typeof data.message === "string" ? data.message : "The summary was written, but the fact check is not marked applied.";
+    return { text: `Applied ${n} edit(s). ${why}`, tone: "error", items };
+  }
+  return { text: `Integrated ${n} correction(s) and the Fact check section.`, tone: "ok", items };
 }

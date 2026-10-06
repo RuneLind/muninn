@@ -441,12 +441,31 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   equal is `409 already_applied` for propose; set and different is the "summary
   changed since the integrate — re-check to re-apply" notice (`changedSinceApply`).
 - **Propose → apply CAS.** Propose returns `rawSha256` and `rowVersion`
-  (`created_at` text + sha256 of the answer). Apply refuses either moving with
-  `409 recheck`, claims the document BEFORE its read, re-resolves the CLIENT's
-  accepted edits against that read, writes the edits AND the block in one save,
-  re-stamps `body_sha256` from the re-read written file and sets `applied_at`
-  with a row CAS. 0 rows (a re-check landed meanwhile) answers 200
-  `recheckedDuringApply`: the file stays written, the row un-applied.
+  (`created_at` text + sha256 of the answer). Apply's edits come FROM THE CLIENT
+  (the preview's checked ones, echoed back): it bounds them hard (count, size,
+  sentinels neutralized, structural lines refused 400 `structural_edit`), claims
+  the document BEFORE its read, reads the row under the claim and refuses a moved
+  file, a moved row version, a stale `body_sha256` or an applied row with the
+  propose-side `409 recheck`/`409 already_applied`, re-resolves the edits against
+  that read, refuses a rebuild whose structure moved (`409 structure_changed`),
+  writes the edits AND the block in one save, re-stamps `body_sha256` from the
+  re-read written file and sets `applied_at` with a row CAS. The response's
+  `stamp` names the outcome: `stamped`, `rechecked` (a re-check landed;
+  `recheckedDuringApply`), `row_gone`, `not_stamped` or `db_error` — in every
+  case but the first the file stays written and the row un-applied; a re-check
+  is the way out.
+- **Structure (fix round 1).** No edit may add an unfenced `## Transcript`,
+  visual-reference heading, fact-check heading or sentinel line
+  (`structuralLineRefusal`), and a rebuild must read back with the same checked
+  ranges, the same text between them and the transcript where it was
+  (`summaryStructureChanged`) — at propose per edit and together, at apply on the
+  written body.
+- **Propose screening.** Every ❌/⚠️ edit must contain "the <noun>
+  says/claims/states" (`attributionRefusal`, dropped "not attributed"); which
+  claims count is the saved `claims` (`correctableVerdict`, #649's predicate);
+  and when any edit for a claim drops — bounds, attribution, structure, anchor or
+  the change budget — every edit for that claim drops with it
+  (`proposeSummaryEdits`).
 - **Slices, not new zone kinds.** The model sees, and edits resolve in, the two
   ranges the check reads (`summaryCheckedRanges`), each masked and spliced on its
   own; an `old` that anchors in both is ambiguous and drops. The visual-reference
@@ -455,8 +474,9 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   `WIKI_EDITOR_VOICE` (byte-identical, golden-pinned in
   `src/wiki/__fixtures__/integrate-prompt-wiki.golden.json`); summaries get
   `summaryEditorVoice(noun)`, which ATTRIBUTES every ❌ and ⚠️ ("the video says
-  X; sources say Y") in the system prompt. The noun comes from the URL host
-  first (YouTube/TikTok → video, Vimeo → talk, X → post), then the collection.
+  X; sources say Y") in the system prompt. The noun is `sourceKindNoun`
+  (`source-noun.ts`, shared with the drafter rider): the URL host first, then
+  the collection.
   Runs on `SUMMARIZER_BOT` through `runIntegrateOneShot` (tools fenced).
 - **Every route** loads `answer`/`claims` from the row, requires
   `application/json`, and answers **503 `migration_080`** while `applied_at` is
@@ -465,9 +485,20 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   inside both page `renderMarkdown`s (`sum-job-card.ts` for `/summaries`,
   `doc-panel.ts` for the doc panel elsewhere and the search document page) and in
   `renderExportMarkdown`; they reach the page as `.toString()` source, so they
-  call nothing outside themselves and carry no literal `<!--`.
+  call nothing outside themselves and carry no literal `<!--`. Plain-text
+  previews — the `/search` chunk cards, the `/summaries` Similar snippet, the
+  wiki Similar snippet — run `plainFactcheckText` instead; the share body strips
+  the block (`stripSummaryFactcheckBlock` before `prepareSummaryDocBody`).
+- **The client.** `/result` reports `blockAdded` (the document carries THIS
+  check's block), which replaces ➕ Add with "Fact check section added". The
+  proposal and message belong to one web result (`createdAt`) and drop when it
+  changes; a full open clears the message (except the write's own reload);
+  closing the panel (`sumFactcheckOnClose`) stops a late write from reopening it;
+  ✎ Integrate stays hidden until the apply's re-read returns.
 - **Re-run interplay (D13).** `GET /api/summaries/rerun/options` carries
-  `factcheckAppliedAt`; the menu warns that a re-run drops the corrections.
+  `factcheck: {blockPresent, appliedAt, appliedDay, applyFresh}`; the menu warns
+  that a re-run drops the corrections (dated by the Oslo day), says "re-check to
+  re-apply" once they are already gone, or names an Add-only section.
 - **Not for `article`/`anthropic` re-runs (L5).** Measured 2026-10-06: none of
   the 44 stored `article-summaries` + `anthropic-summaries` documents keeps its
   source text, so there is nothing to regenerate from.

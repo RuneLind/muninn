@@ -28,7 +28,8 @@ import type { executeOneShot } from "../../ai/one-shot.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
-import { readSummarySourceText } from "../../summaries/source-text.ts";
+import { filterDocumentText, readSummarySourceText } from "../../summaries/source-text.ts";
+import { buildSummaryFactcheckBlock, factcheckBlockDate } from "../../summaries/factcheck-block.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { factcheckBodySha256, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
 import {
@@ -260,9 +261,15 @@ export function registerSummariesFactcheckRoutes(
       !row.transcript || !row.transcriptSha256 || sourceText === null
         ? null
         : transcript === null || transcriptSha256(transcript) !== row.transcriptSha256;
+    // Whether the document carries THIS check's block (➕ Add shows "added").
+    const blockAdded =
+      sourceText === null
+        ? null
+        : sourceText.includes(filterDocumentText(buildSummaryFactcheckBlock(row.answer, factcheckBlockDate(row.createdAt))));
     return c.json({
       result: row,
       stale,
+      blockAdded,
       html: renderSummaryFactcheckHtml(row.answer),
       hasTranscript,
       transcriptStale,

@@ -1,33 +1,8 @@
 /**
- * Fact-check WRITE-BACK for `/summaries` — the doc panel's ➕ Add and ✎ Integrate.
- *
- *  - `POST /api/summaries/factcheck/append` — insert (or replace) the saved
- *    check's fact-check block in the stored summary. The prose is not touched,
- *    and the checked text is unchanged by construction (D11), so the row's
- *    `body_sha256` stays valid; the route asserts it before it writes.
- *  - `POST /api/summaries/factcheck/integrate` — PROPOSE. Runs the fenced
- *    integrate one-shot on the summarizer bot over the summary's raw slices and
- *    returns a range-resolved edit list plus its server-rendered preview. Writes
- *    nothing.
- *  - `POST /api/summaries/factcheck/integrate/apply` — APPLY the accepted edits,
- *    always with the block in the same write, then re-stamp the row.
- *
- * Every route takes `{source, docId}`, loads `answer`/`claims` from the saved
- * row (never from the client), requires `application/json`, and answers 503 until
- * migration 080 adds `applied_at`. They are POSTs, so the origin guard covers
- * them by method.
- *
- * The CAS (D12) is two steps. Propose and append compare the checked text of the
- * raw file (`checkedTextOfRaw`) with the row's `body_sha256` (`409 recheck` on a
- * mismatch). Propose returns `rawSha256` and `rowVersion` (`created_at` text +
- * sha256 of the answer); apply refuses a changed row version or a changed raw
- * file with `409 recheck`, builds and ingests from that one read, and stamps the
- * row with a CAS on the same `created_at` text and answer — 0 rows means a
- * re-check landed during the apply: the file stays written and the row stays
- * un-applied.
- *
- * Append and apply claim the document (`summarySaveClaims`, shared with re-run)
- * BEFORE their read, which is what the claim's stale-write guarantee covers.
+ * Fact-check write-back for `/summaries`: `POST /api/summaries/factcheck/append`
+ * (➕ Add), `…/integrate` (propose; writes nothing) and `…/integrate/apply`. The
+ * contract — the D12 CAS, the claim, what apply refuses and how the row is
+ * stamped — is in `src/summaries/CLAUDE.md` ("Fact-check write-back").
  */
 
 import type { Context, Hono } from "hono";
@@ -47,26 +22,30 @@ import {
 } from "../../summaries/summary-save.ts";
 import type { SummaryIngest } from "../../summaries/summarizer-shared.ts";
 import { filterDocumentText } from "../../summaries/source-text.ts";
-import { checkedSha256OfRaw, sha256Hex, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
+import { checkedSha256OfRaw, summaryFactcheckBody } from "../../summaries/factcheck-body.ts";
+import { sha256 } from "../../gardener/util.ts";
 import {
   buildSummaryFactcheckBlock,
   factcheckBlockDate,
   insertSummaryFactcheckBlock,
 } from "../../summaries/factcheck-block.ts";
 import {
+  proposeSummaryEdits,
   rebuildSummaryBody,
   resolveSummaryEdits,
+  structuralLineRefusal,
   summaryEditorVoice,
   summaryEditSlices,
   summaryIntegrateBodyLen,
   summaryIntegratePreviewHtml,
   summaryPromptBody,
-  summarySourceNoun,
+  summaryStructureChanged,
 } from "../../summaries/factcheck-integrate.ts";
+import { sourceKindNoun } from "../../summaries/source-noun.ts";
+import { correctableClaims as savedCorrectableClaims } from "../../gardener/factcheck-carry.ts";
 import {
   buildIntegratePrompt,
   changedCharsOfOutcomes,
-  enforceChangeBudget,
   enforceEditBounds,
   INTEGRATE_BODY_MAX,
   INTEGRATE_MAX_EDIT_CHARS,
@@ -78,7 +57,7 @@ import {
   type IntegrateEdit,
 } from "../../wiki/integrate-edits.ts";
 import { runIntegrateOneShot } from "../../wiki/integrate-oneshot.ts";
-import { correctableClaims } from "../views/components/wiki-integrate.ts";
+import { parseFactcheckClaims } from "../views/components/wiki-integrate.ts";
 import {
   getSummaryFactcheckVersioned,
   markSummaryFactcheckApplied,
@@ -153,7 +132,7 @@ export function defaultSummariesFactcheckWritebackDeps(config: Config): Summarie
 
 /** The row version propose hands out and apply compares (D12). */
 export function factcheckRowVersion(row: Pick<VersionedSummaryFactcheck, "createdAtText" | "answer">): string {
-  return `${row.createdAtText}|${sha256Hex(row.answer)}`;
+  return `${row.createdAtText}|${sha256(row.answer)}`;
 }
 
 type Fail = { status: 400 | 404 | 409 | 500 | 502 | 503; body: Record<string, unknown> };
@@ -265,6 +244,42 @@ function coerceAcceptedEdits(raw: unknown): IntegrateEdit[] | string {
   return out;
 }
 
+/** What became of the row after a written apply. */
+export type ApplyStamp = "stamped" | "rechecked" | "row_gone" | "not_stamped" | "db_error";
+
+const STAMP_MESSAGES: Record<Exclude<ApplyStamp, "stamped">, string> = {
+  rechecked: "The summary was written, but the fact check was re-checked during apply, so it is not marked applied.",
+  row_gone: "The summary was written, but its fact check was deleted during apply, so nothing is marked applied.",
+  not_stamped: "The summary was written, but the fact check could not be marked applied. Re-check the summary to bring it up to date.",
+  db_error:
+    "The summary was written, but the fact check could not be marked applied (database error). Re-check the summary to bring it up to date.",
+};
+
+/** The row CAS, then — when it matched nothing — which of the three reasons it was. */
+async function stampApplied(
+  deps: SummariesFactcheckWritebackDeps,
+  t: Target,
+  row: VersionedSummaryFactcheck,
+  bodySha256: string,
+): Promise<ApplyStamp> {
+  try {
+    const ok = await deps.store.markApplied({
+      collection: t.collection,
+      docId: t.docId,
+      createdAtText: row.createdAtText,
+      answerSha256: sha256(row.answer),
+      bodySha256,
+    });
+    if (ok) return "stamped";
+    const now = await deps.store.get(t.collection, t.docId);
+    if (!now) return "row_gone";
+    return factcheckRowVersion(now) !== factcheckRowVersion(row) ? "rechecked" : "not_stamped";
+  } catch (err) {
+    log.warn("Summary factcheck apply: stamping the row failed for {doc}: {error}", { doc: t.docId, error: errText(err) });
+    return "db_error";
+  }
+}
+
 export function registerSummariesFactcheckWritebackRoutes(
   app: Hono,
   config: Config,
@@ -297,7 +312,7 @@ export function registerSummariesFactcheckWritebackRoutes(
       const summary = insertSummaryFactcheckBlock(stored.body, buildSummaryFactcheckBlock(row.answer, factcheckBlockDate(row.createdAt)));
       // D11 by construction; asserted, because a write that moved the hash would
       // make the row describe text that is no longer there.
-      if (sha256Hex(summaryFactcheckBody(filterDocumentText(summary))) !== row.bodySha256) {
+      if (sha256(summaryFactcheckBody(filterDocumentText(summary))) !== row.bodySha256) {
         log.error("Summary factcheck append: the block would move the checked text of {doc} — not written", { doc: t.docId });
         return c.json({ error: "Adding the block would change the checked text. Nothing was written.", code: "hash_drift" }, 500);
       }
@@ -334,7 +349,7 @@ export function registerSummariesFactcheckWritebackRoutes(
     const refusal = hashRefusal(row, raw, true);
     if (refusal) return respond(c, refusal);
 
-    const rawSha256 = sha256Hex(raw);
+    const rawSha256 = sha256(raw);
     const rowVersion = factcheckRowVersion(row);
     const slices = summaryEditSlices(stored.body);
     const bodyLen = summaryIntegrateBodyLen(slices);
@@ -342,14 +357,17 @@ export function registerSummariesFactcheckWritebackRoutes(
     if (bodyLen > INTEGRATE_BODY_MAX) {
       return c.json({ error: "summary too long to integrate", code: "too_long", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
     }
-    const correctable = correctableClaims(row.answer);
+    // Which claims are ❌/⚠️ is the saved claims' verdict (#649's predicate); the
+    // model is shown each one's verdict block from the answer.
+    const correctableIdx = new Set(savedCorrectableClaims(row).map((cl) => cl.index));
+    const correctable = parseFactcheckClaims(row.answer).filter((a) => correctableIdx.has(a.index));
     if (correctable.length === 0) {
       return c.json({ edits: [], dropped: [], note: "No ❌ or ⚠️ claims to integrate.", html: "", rawSha256, rowVersion, budget });
     }
     const bot = resolveSummarizerBot(deps.bots());
     if (!bot) return c.json({ error: "No bots configured to run the integrate.", code: "no_bot" }, 503);
 
-    const noun = summarySourceNoun(pre.url, t.collection);
+    const noun = sourceKindNoun(t.collection, pre.url);
     const prompts = buildIntegratePrompt({
       pageTitle: pre.title,
       wikiName: t.collection,
@@ -371,9 +389,15 @@ export function registerSummariesFactcheckWritebackRoutes(
       return c.json({ error: "the editor model returned no usable edit list", code: "model_unparseable" }, 502);
     }
     const bounded = enforceEditBounds(parsed.edits);
-    const resolved = resolveSummaryEdits(slices, bounded.kept);
-    const budgetDrops = enforceChangeBudget(resolved.outcomes, bodyLen);
-    const edits = resolved.outcomes
+    const screened = proposeSummaryEdits({
+      slices,
+      edits: bounded.kept,
+      priorDrops: [...parsed.dropped, ...bounded.dropped],
+      sourceNoun: noun,
+      correctable: correctableIdx,
+      bodyLen,
+    });
+    const edits = screened.outcomes
       .filter((o) => o.applied)
       .map((o) => ({
         ...o.edit,
@@ -382,11 +406,7 @@ export function registerSummariesFactcheckWritebackRoutes(
         ...(o.beforeCtx !== undefined ? { beforeCtx: o.beforeCtx } : {}),
         ...(o.afterCtx !== undefined ? { afterCtx: o.afterCtx } : {}),
       }));
-    const dropped: DroppedEdit[] = [
-      ...parsed.dropped,
-      ...bounded.dropped,
-      ...resolved.outcomes.filter((o) => !o.applied).map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" })),
-    ];
+    const dropped: DroppedEdit[] = [...parsed.dropped, ...bounded.dropped, ...screened.dropped];
     const titles = new Map(correctable.map((cl) => [cl.index, cl.title]));
     log.info("Summary factcheck integrate: {collection}/{doc} noun={noun} proposed={n} dropped={d}", {
       collection: t.collection,
@@ -402,7 +422,7 @@ export function registerSummariesFactcheckWritebackRoutes(
       html: summaryIntegratePreviewHtml(edits, dropped, titles),
       rawSha256,
       rowVersion,
-      budget: { ...budget, proposedChangedChars: budgetDrops.changedChars },
+      budget: { ...budget, proposedChangedChars: screened.changedChars },
     });
   });
 
@@ -415,11 +435,9 @@ export function registerSummariesFactcheckWritebackRoutes(
     if (!rawSha256 || !rowVersion) return c.json({ error: "rawSha256 and rowVersion are required", code: "bad_request" }, 400);
     const edits = coerceAcceptedEdits(req.body.edits);
     if (typeof edits === "string") return c.json({ error: edits, code: "bad_edits" }, 400);
-
-    const row = await loadRow(deps, t);
-    if ("status" in row) return respond(c, row);
-    if (factcheckRowVersion(row) !== rowVersion) {
-      return c.json({ error: "The fact check was re-run since this preview. Integrate again.", code: "recheck" }, 409);
+    for (const edit of edits) {
+      const refusal = structuralLineRefusal(edit.new);
+      if (refusal) return c.json({ error: `An accepted edit ${refusal}. Nothing was written.`, code: "structural_edit" }, 400);
     }
 
     const claim = claims.claim(t.sourceId, t.docId, WRITEBACK_CLAIM_BUDGET_MS);
@@ -427,12 +445,21 @@ export function registerSummariesFactcheckWritebackRoutes(
     try {
       const raw = await loadRaw(deps, t);
       if (typeof raw !== "string") return respond(c, raw);
-      if (sha256Hex(raw) !== rawSha256) {
+      if (sha256(raw) !== rawSha256) {
         return c.json({ error: "The summary changed since this preview. Integrate again.", code: "recheck" }, 409);
       }
       const stored = readStoredCapture(raw);
       const pre = preflightSummarySave(stored, t.docId);
       if (!pre.ok) return c.json({ error: pre.error, code: pre.code }, pre.status);
+      // The row is read under the claim, after the raw read, so its freshness and
+      // its applied state are checked against the file this write rebuilds from.
+      const row = await loadRow(deps, t);
+      if ("status" in row) return respond(c, row);
+      if (factcheckRowVersion(row) !== rowVersion) {
+        return c.json({ error: "The fact check was re-run since this preview. Integrate again.", code: "recheck" }, 409);
+      }
+      const refusal = hashRefusal(row, raw, true);
+      if (refusal) return respond(c, refusal);
 
       const slices = summaryEditSlices(stored.body);
       const resolved = resolveSummaryEdits(slices, edits);
@@ -448,6 +475,16 @@ export function registerSummariesFactcheckWritebackRoutes(
         rebuildSummaryBody(slices, resolved.texts),
         buildSummaryFactcheckBlock(row.answer, factcheckBlockDate(row.createdAt)),
       );
+      if (summaryStructureChanged(stored.body, summary)) {
+        log.warn("Summary factcheck apply: the edits would move the structure of {doc} — not written", { doc: t.docId });
+        return c.json(
+          {
+            error: "The accepted edits would change where the summary's transcript, visual reference or checked text begin. Nothing was written.",
+            code: "structure_changed",
+          },
+          409,
+        );
+      }
       const saved = await saveSummaryBody({
         descriptor: requireSaveDescriptor(t.sourceId),
         stored,
@@ -461,7 +498,7 @@ export function registerSummariesFactcheckWritebackRoutes(
       if (!saved.ok) return respond(c, saveFailure(saved));
 
       // Re-stamp from the WRITTEN file; the predicted hash only when the re-read fails.
-      let bodySha256 = sha256Hex(summaryFactcheckBody(filterDocumentText(summary)));
+      let bodySha256 = sha256(summaryFactcheckBody(filterDocumentText(summary)));
       try {
         const written = await deps.readRaw(t.collection, t.docId);
         if (written !== null) bodySha256 = checkedSha256OfRaw(written);
@@ -469,35 +506,23 @@ export function registerSummariesFactcheckWritebackRoutes(
       } catch (err) {
         log.warn("Summary factcheck apply: re-read of {doc} failed ({error}); stamping the predicted hash", { doc: t.docId, error: errText(err) });
       }
-      let stamped: boolean;
-      try {
-        stamped = await deps.store.markApplied({
-          collection: t.collection,
-          docId: t.docId,
-          createdAtText: row.createdAtText,
-          answerSha256: sha256Hex(row.answer),
-          bodySha256,
-        });
-      } catch (err) {
-        log.warn("Summary factcheck apply: stamping the row failed for {doc}: {error}", { doc: t.docId, error: errText(err) });
-        stamped = false;
-      }
+      const stamp = await stampApplied(deps, t, row, bodySha256);
       const applied = resolved.appliedCount;
       const notApplied = resolved.outcomes.filter((o) => !o.applied).map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" }));
-      log.info("Summary factcheck integrated: {collection}/{doc} applied={applied} stamped={stamped}", {
+      log.info("Summary factcheck integrated: {collection}/{doc} applied={applied} stamp={stamp}", {
         collection: t.collection,
         doc: t.docId,
         applied,
-        stamped,
+        stamp,
       });
       return c.json({
         ok: true,
         applied,
         notApplied,
         filePath: saved.filePath,
-        ...(stamped
-          ? { appliedAt: now() }
-          : { recheckedDuringApply: true, message: "The summary was written, but the fact check was re-checked during apply, so it is not marked applied." }),
+        stamp,
+        ...(stamp === "stamped" ? { appliedAt: now() } : { message: STAMP_MESSAGES[stamp] }),
+        ...(stamp === "rechecked" ? { recheckedDuringApply: true } : {}),
       });
     } finally {
       claims.release(claim);

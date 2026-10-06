@@ -21,13 +21,14 @@ export function dropFactcheckSentinelLines(markdown: string): string {
   return String(markdown)
     .split("\n")
     .filter(function (line) {
-      const m = /^\s*(`{3,}|~{3,})/.exec(line);
+      const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
       if (m) {
         if (fence === null) {
           fence = m[1]!;
           return true;
         }
-        if (m[1]!.charAt(0) === fence.charAt(0) && m[1]!.length >= fence.length) {
+        // A closing fence carries no info string (CommonMark): "```js" is content.
+        if (m[1]!.charAt(0) === fence.charAt(0) && m[1]!.length >= fence.length && m[2]!.trim() === "") {
           fence = null;
           return true;
         }
@@ -54,9 +55,18 @@ export function styleFactcheckCallouts(html: string): string {
   });
 }
 
-export const FACTCHECK_CALLOUT_FUNCTIONS = [dropFactcheckSentinelLines, styleFactcheckCallouts] as const;
+/** Plain text that may carry a block — a search chunk, a Similar snippet — with
+ *  the sentinels removed wherever they sit and the callout marker shown as "✓". */
+export function plainFactcheckText(text: string): string {
+  // `fromCharCode(60)` is "<": no comment opener in the inlined source (the
+  // transpiler folds "<" + "!--" back into one).
+  const sentinel = new RegExp(String.fromCharCode(60) + "!--\\s*factcheck:(?:start|end)\\s*-->[ \\t]*\\n?", "g");
+  return String(text).replace(sentinel, "").replace(/\[!factcheck\][ \t]*/g, "✓ ");
+}
 
-/** The two functions as page-script declarations. */
+export const FACTCHECK_CALLOUT_FUNCTIONS = [dropFactcheckSentinelLines, styleFactcheckCallouts, plainFactcheckText] as const;
+
+/** The functions as page-script declarations. */
 export function factcheckCalloutScript(): string {
   return FACTCHECK_CALLOUT_FUNCTIONS.map((f) => `var ${f.name} = ${f.toString()};`).join("\n");
 }

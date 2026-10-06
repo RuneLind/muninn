@@ -9,10 +9,10 @@ import {
   FACTCHECK_RIDER_MAX,
   pageCarriesFactcheck,
   proposalFactcheckFlag,
-  sourceKindNoun,
   stripReproducedFactcheck,
   withFactcheckAppendix,
 } from "./factcheck-carry.ts";
+import { sourceKindNoun } from "../summaries/source-noun.ts";
 import {
   buildSourceDraftPrompt,
   draftSourcePage,

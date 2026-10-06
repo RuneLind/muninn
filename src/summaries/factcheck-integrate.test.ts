@@ -6,29 +6,9 @@ import {
   summaryEditSlices,
   summaryIntegratePreviewHtml,
   summaryPromptBody,
-  summarySourceNoun,
 } from "./factcheck-integrate.ts";
 import { buildIntegratePrompt } from "../wiki/integrate-edits.ts";
 import { buildSummaryFactcheckBlock, insertSummaryFactcheckBlock } from "./factcheck-block.ts";
-
-describe("summarySourceNoun (D7): the host first, then the collection", () => {
-  test.each([
-    ["https://www.youtube.com/watch?v=x", "article-summaries", "video"],
-    ["https://youtu.be/x", "article-summaries", "video"],
-    ["https://vimeo.com/123", "article-summaries", "talk"],
-    ["https://www.tiktok.com/@a/video/1", "article-summaries", "video"],
-    ["https://x.com/a/status/1", "article-summaries", "post"],
-    ["https://twitter.com/a/status/1", "youtube-summaries", "post"],
-    ["https://example.org/post", "youtube-summaries", "video"],
-    ["https://example.org/post", "vimeo-summaries", "talk"],
-    ["https://example.org/post", "x-articles", "post"],
-    ["https://www.anthropic.com/news/x", "anthropic-summaries", "article"],
-    ["not a url", "article-summaries", "article"],
-    [null, "tiktok-summaries", "video"],
-  ] as const)("%s in %s → %s", (url, collection, noun) => {
-    expect(summarySourceNoun(url, collection)).toBe(noun);
-  });
-});
 
 describe("the summary editor's system prompt (D5, D7)", () => {
   test("pinned: attribute every ❌ and ⚠️, in the system prompt", () => {
@@ -38,7 +18,7 @@ describe("the summary editor's system prompt (D5, D7)", () => {
       claims: [],
       maskedBody: "Body.",
       hasSourcesSection: false,
-      voice: summaryEditorVoice("video"),
+      voice: summaryEditorVoice("the video"),
     });
     expect(systemPrompt).toBe(
       [
@@ -50,7 +30,8 @@ describe("the summary editor's system prompt (D5, D7)", () => {
         "Rules:",
         '- ❌ (contradicted): ATTRIBUTE, never correct silently. The edited sentence must say what the video says and then what the sources say, in this shape: "The video says X; sources say Y ([hostname](url))." Cite the correcting source as a markdown link `[hostname](url)` right there in the sentence.',
         '- ⚠️ (partly supported): attribute the same way: the claim stays the video\'s ("the video says …"), followed by what the sources say — the missing precision or the caveat — with the same in-place source link.',
-        '- For ❌ and ⚠️ alike, the claim must READ as the video\'s after the edit. If the sentence already names its source (the video, its speaker, "is described as", "claims"), keep that and add what the sources say. If it states the claim as plain fact, rewrite it to start from the video ("The video says …"), and make `old` cover the sentence from its start. Appending "Sources say …" after a sentence that still asserts the claim as fact is NOT attribution.',
+        '- For ❌ and ⚠️ alike, the claim must READ as the video\'s after the edit. If it states the claim as plain fact, rewrite it to start from the video ("The video says …"), and make `old` cover the sentence from its start. Appending "Sources say …" after a sentence that still asserts the claim as fact is NOT attribution.',
+        '- Every ❌/⚠️ edit\'s `new` must contain the words "the video says" (or "the video claims" / "the video states"), even when the sentence already names a speaker. An edit without them is discarded.',
         "- Edit NOTHING else. Do not restructure, retitle, reformat, or improve prose that no verdict challenges.",
         "- Use ONLY the source URLs that appear in the verdict blocks. Never invent a URL, and do NOT use any tool — everything you need is in this message.",
         "",
@@ -73,9 +54,9 @@ describe("the summary editor's system prompt (D5, D7)", () => {
   });
 
   test("the noun follows the source", () => {
-    expect(summaryEditorVoice("talk").verdictRules[0]).toContain('"The talk says X; sources say Y');
-    expect(summaryEditorVoice("post").verdictRules[1]).toContain("the post says");
-    expect(summaryEditorVoice("article").role).toContain("a summary of an article.");
+    expect(summaryEditorVoice("the talk").verdictRules[0]).toContain('"The talk says X; sources say Y');
+    expect(summaryEditorVoice("the post").verdictRules[1]).toContain("the post says");
+    expect(summaryEditorVoice("the article").role).toContain("a summary of an article.");
   });
 });
 
@@ -146,5 +127,36 @@ describe("the preview", () => {
     expect(html).not.toContain("<img");
     expect(html).toContain("Title &lt;x&gt;");
     expect(html).toContain("1 not applied");
+  });
+});
+
+describe("fix round 1: the per-edit refusals", () => {
+  // Real shapes from the 2026-10-06 propose runs on the scratch corpus.
+  const JWST_CLAIM_8 =
+    "as flagged by Nobel laureate Adam Riess (sources confirm his Nobel and Hubble-tension work but do not show him commenting on early galaxy formation in these pages ([skyatnightmagazine.com](https://www.skyatnightmagazine.com/space-science/webb-broken-cosmology))).*";
+  const TRAILING_PER =
+    "A single 15-minute dose of 670nm red light cut blood sugar elevation by 27.7%, per the video; sources say the study was by City, University of London ([news-medical.net](https://www.news-medical.net/x)).";
+
+  test("an edit with no 'the video says/claims/states' is not attributed", async () => {
+    const { attributionRefusal } = await import("./factcheck-integrate.ts");
+    expect(attributionRefusal(JWST_CLAIM_8, "the video")).toBe("not attributed");
+    expect(attributionRefusal(TRAILING_PER, "the video")).toBe("not attributed");
+    expect(attributionRefusal("The video says X; sources say Y.", "the video")).toBeNull();
+    expect(attributionRefusal("and, the Video Claims, Y", "the video")).toBeNull();
+    expect(attributionRefusal("the talk states X", "the talk")).toBeNull();
+    expect(attributionRefusal("the video says X", "the talk")).toBe("not attributed");
+  });
+
+  test("an unfenced structural line in an edit is refused, naming it", async () => {
+    const { structuralLineRefusal } = await import("./factcheck-integrate.ts");
+    expect(structuralLineRefusal("Fixed.\n\n## Transcript\n\nx")).toContain("## Transcript");
+    expect(structuralLineRefusal("Fixed.\n\n## Visual reference\n\nx")).toContain("Visual reference");
+    expect(structuralLineRefusal("Fixed.\n\n### **Visual references**:")).toContain("Visual references");
+    expect(structuralLineRefusal("Fixed.\n## Fact check (2026-10-06)")).toContain("Fact check");
+    expect(structuralLineRefusal("Fixed.\n<!-- factcheck:end -->")).toContain("factcheck:end");
+    // Prose that mentions them, and a fenced example, are content.
+    expect(structuralLineRefusal("The transcript says ## Transcript is a heading.")).toBeNull();
+    expect(structuralLineRefusal("```\n## Transcript\n```")).toBeNull();
+    expect(structuralLineRefusal("The video says X; sources say Y.")).toBeNull();
   });
 });

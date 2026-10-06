@@ -90,9 +90,11 @@ export function sumFactcheckStyles(): string {
     }
     .sum-fc-wb-btn:hover { border-color: var(--accent); color: var(--text-primary); }
     .sum-fc-wb-btn:disabled { opacity: 0.55; cursor: default; }
-    .sum-fc-wb-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    /* --accent-hover fill: white on dark --accent is 4.32:1 (the wiki chat-escalation precedent). */
+    .sum-fc-wb-btn.primary { background: var(--accent-hover); border-color: var(--accent); color: #fff; }
     .sum-fc-wb-done { font-size: 12px; font-weight: 600; color: color-mix(in srgb, var(--status-success) 70%, var(--text-primary)); }
     .sum-fc-wb-msg { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
+    .sum-fc-wb-items { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
     .sum-fc-wb-msg.error { color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
     .sum-fc-int { margin-top: 4px; padding: 10px 12px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-card); white-space: normal; }
     .sum-fc-int-head { font-weight: 600; color: var(--text-primary); font-size: 13px; }
@@ -100,12 +102,13 @@ export function sumFactcheckStyles(): string {
     .sum-fc-int-edit { border-top: 1px solid var(--border-secondary); padding: 8px 0; margin-top: 8px; }
     .sum-fc-int-row { display: flex; align-items: baseline; gap: 8px; cursor: pointer; flex-wrap: wrap; color: var(--text-primary); font-size: 13px; }
     .sum-fc-int-reason { font-size: 12px; color: var(--text-secondary); margin: 2px 0 0 24px; }
-    .sum-fc-int-ctx { font-size: 12px; color: var(--text-muted); margin: 4px 0; }
+    /* --text-soft, not --text-muted: muted on --bg-card is 4.42:1 in light. */
+    .sum-fc-int-ctx { font-size: 12px; color: var(--text-soft); margin: 4px 0; }
     .sum-fc-int-diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin: 4px 0; }
     .sum-fc-int-diff .d-add { display: block; white-space: pre-wrap; color: color-mix(in srgb, var(--status-success) 65%, var(--text-primary)); background: color-mix(in srgb, var(--status-success) 12%, transparent); }
     .sum-fc-int-diff .d-del { display: block; white-space: pre-wrap; color: color-mix(in srgb, var(--status-error) 65%, var(--text-primary)); background: color-mix(in srgb, var(--status-error) 12%, transparent); }
-    .sum-fc-int-diff .d-ctx { display: block; white-space: pre-wrap; color: var(--text-muted); }
-    .sum-fc-int-dropped { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
+    .sum-fc-int-diff .d-ctx { display: block; white-space: pre-wrap; color: var(--text-soft); }
+    .sum-fc-int-dropped { margin-top: 8px; font-size: 12px; color: var(--text-soft); }
     .sum-fc-int-dropped summary { cursor: pointer; }
     .sum-fc-int-drop { display: flex; gap: 8px; padding: 2px 0; }
     .sum-fc-int-drop-reason { flex-shrink: 0; color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }

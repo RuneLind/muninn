@@ -73,6 +73,9 @@ describe("summary_factchecks", () => {
 
 describe("summary_factchecks: applied_at and the apply CAS (migration 080)", () => {
   const answerSha = (answer: string) => new Bun.CryptoHasher("sha256").update(answer).digest("hex");
+  /** A fixed microsecond value: `now()` lands on a multiple of 1000 µs about once
+   *  in a thousand runs, and Postgres then prints fewer digits. */
+  const pinCreatedAt = () => getDb()`UPDATE summary_factchecks SET created_at = '2026-10-05 12:00:00.123456+00'`;
 
   test("the column exists, and the probe says so", async () => {
     expect(await summaryFactchecksHasAppliedAt()).toBe(true);
@@ -80,10 +83,11 @@ describe("summary_factchecks: applied_at and the apply CAS (migration 080)", () 
 
   test("a stamp on the row read in this request sets applied_at and the new hash", async () => {
     await upsertSummaryFactcheck(base);
+    await pinCreatedAt();
     const row = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
     expect(row.appliedAt).toBeNull();
-    // Full precision: now() carries microseconds the epoch-ms value drops.
-    expect(row.createdAtText).toMatch(/\.\d{4,6}/);
+    // Full precision: the microseconds the epoch-ms value drops.
+    expect(row.createdAtText).toContain(".123456");
     const ok = await markSummaryFactcheckApplied({
       collection: base.collection,
       docId: base.docId,
@@ -99,6 +103,7 @@ describe("summary_factchecks: applied_at and the apply CAS (migration 080)", () 
 
   test("the epoch-ms created_at does not match the row (the CAS needs the text)", async () => {
     await upsertSummaryFactcheck(base);
+    await pinCreatedAt();
     const row = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
     const ok = await markSummaryFactcheckApplied({
       collection: base.collection,
@@ -133,5 +138,24 @@ describe("summary_factchecks: applied_at and the apply CAS (migration 080)", () 
     expect((await getSummaryFactcheck(base.collection, base.docId))!.appliedAt).not.toBeNull();
     const again = await upsertSummaryFactcheck(base);
     expect(again.appliedAt).toBeNull();
+  });
+});
+
+describe("summary_factchecks: the upsert without migration 081's columns (080 present)", () => {
+  test("a replacement still clears applied_at", async () => {
+    const sql = getDb();
+    await upsertSummaryFactcheck(base);
+    await sql`UPDATE summary_factchecks SET applied_at = now()`;
+    await sql.unsafe("ALTER TABLE summary_factchecks DROP COLUMN transcript_claims, DROP COLUMN transcript_sha256");
+    try {
+      const again = await upsertSummaryFactcheck({ ...base, answer: "replaced" });
+      expect(again.answer).toBe("replaced");
+      expect(again.appliedAt).toBeNull();
+      expect(again.transcript).toBeNull();
+    } finally {
+      await sql.unsafe(
+        "ALTER TABLE summary_factchecks ADD COLUMN IF NOT EXISTS transcript_claims JSONB, ADD COLUMN IF NOT EXISTS transcript_sha256 TEXT",
+      );
+    }
   });
 });

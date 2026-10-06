@@ -13,7 +13,8 @@ import {
   type SummariesFactcheckWritebackDeps,
 } from "./summaries-factcheck-writeback.ts";
 import { SummarySaveClaims } from "../../summaries/summary-save.ts";
-import { checkedSha256OfRaw, checkedTextOfRaw, sha256Hex } from "../../summaries/factcheck-body.ts";
+import { checkedSha256OfRaw, checkedTextOfRaw } from "../../summaries/factcheck-body.ts";
+import { sha256 as sha256Hex } from "../../gardener/util.ts";
 import { hasFactcheckBlock } from "../../wiki/factcheck-context.ts";
 import { isSideEffectingRequest } from "../../auth/origin.ts";
 import type { VersionedSummaryFactcheck } from "../../db/summary-factchecks.ts";
@@ -59,6 +60,13 @@ const ANSWER = [
   "Sources: [cdc.gov](https://www.cdc.gov/sleep)",
 ].join("\n");
 
+/** The saved claims for ANSWER — which ones are ❌/⚠️ is read from HERE (#649's predicate). */
+const CLAIMS = [
+  { index: 1, title: "Adults need 4 hours", verdict: "❌", outcome: "verified", sources: [] },
+  { index: 2, title: "Caffeine half-life", verdict: "✅", outcome: "verified", sources: [] },
+  { index: 3, title: "Sleep 4 hours a night", verdict: "❌", outcome: "verified", sources: [] },
+];
+
 let files: Map<string, string>;
 let row: VersionedSummaryFactcheck | null;
 let modelText: string;
@@ -66,6 +74,8 @@ let modelCalls: { prompt: string; systemPrompt: string }[];
 let ingests: Record<string, unknown>[];
 let ingestAnswerPath: string | null;
 let markResult: boolean | null;
+/** Replaces the fake CAS entirely when set (a throw, a delete, a re-check). */
+let markImpl: ((input: Record<string, unknown>) => Promise<boolean>) | null;
 let marks: Record<string, unknown>[];
 let claims: SummarySaveClaims;
 let schemaReady: boolean;
@@ -78,7 +88,7 @@ function freshRow(over: Partial<VersionedSummaryFactcheck> = {}): VersionedSumma
     url: URL_,
     bodySha256: checkedSha256OfRaw(files.get(DOC)!),
     answer: ANSWER,
-    claims: [],
+    claims: CLAIMS,
     botName: "summarizer",
     createdAt: Date.UTC(2026, 9, 5, 12),
     createdAtText: "2026-10-05 12:00:00.123456+00",
@@ -104,6 +114,7 @@ function app(over: Partial<SummariesFactcheckWritebackDeps> = {}): Hono {
       get: async () => row,
       markApplied: async (input) => {
         marks.push(input);
+        if (markImpl) return markImpl(input);
         if (markResult !== null) return markResult;
         if (!row || row.createdAtText !== input.createdAtText || sha256Hex(row.answer) !== input.answerSha256) return false;
         row = { ...row, bodySha256: input.bodySha256, appliedAt: 1 };
@@ -149,7 +160,13 @@ const EDIT_3 = {
   reason: "attributed",
 };
 /** Anchors only inside the visual-reference section — never an edit target. */
-const EDIT_IN_APPENDIX = { claimIndex: 1, verdict: "❌", old: "The slide says 4 hours of sleep is plenty.", new: "x", reason: "r" };
+const EDIT_IN_APPENDIX = {
+  claimIndex: 2,
+  verdict: "❌",
+  old: "The slide says 4 hours of sleep is plenty.",
+  new: "The video says the slide is wrong.",
+  reason: "r",
+};
 
 beforeEach(() => {
   files = new Map([[DOC, RAW]]);
@@ -159,6 +176,7 @@ beforeEach(() => {
   ingests = [];
   ingestAnswerPath = null;
   markResult = null;
+  markImpl = null;
   marks = [];
   claims = new SummarySaveClaims();
   schemaReady = true;
@@ -345,7 +363,10 @@ describe("POST /api/summaries/factcheck/integrate (propose)", () => {
   });
 
   test("no ❌/⚠️ claim: no model call", async () => {
-    row = freshRow({ answer: "### ✅ Claim 1/1 — fine\n\nSupported." });
+    row = freshRow({
+      answer: "### ✅ Claim 1/1 — fine\n\nSupported.",
+      claims: [{ index: 1, title: "fine", verdict: "✅", outcome: "verified", sources: [] }],
+    });
     const res = await post(app(), "/api/summaries/factcheck/integrate", ref);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { edits: unknown[] }).edits).toEqual([]);
@@ -402,7 +423,10 @@ describe("POST /api/summaries/factcheck/integrate/apply", () => {
   test("a re-check DURING apply: the file stays written, the row stays un-applied", async () => {
     const a = app();
     const p = await propose(a);
-    markResult = false;
+    markImpl = async () => {
+      row = freshRow({ createdAtText: "2026-10-05 12:30:00.000001+00" });
+      return false;
+    };
     const res = await post(a, "/api/summaries/factcheck/integrate/apply", { ...ref, ...p, edits: [p.edits[0]] });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { recheckedDuringApply: boolean; message: string };
@@ -446,5 +470,186 @@ describe("POST /api/summaries/factcheck/integrate/apply", () => {
     const res = await post(a, "/api/summaries/factcheck/integrate/apply", { ...ref, ...p, edits: [evil] });
     expect(res.status).toBe(200);
     expect(files.get(DOC)!.match(/<!-- factcheck:end -->/g)).toHaveLength(1);
+  });
+});
+
+describe("fix round 1: an edit cannot change the summary's structure (D1)", () => {
+  type Proposed = { edits: { old: string; new: string }[]; dropped: { reason: string; edit: { old: string } }[] };
+  const proposeWith = async (edits: unknown[]) => {
+    modelText = JSON.stringify({ edits });
+    return (await (await post(app(), "/api/summaries/factcheck/integrate", ref)).json()) as Proposed;
+  };
+  const applyWith = async (edit: typeof EDIT_1) => {
+    const a = app();
+    const p = (await (await post(a, "/api/summaries/factcheck/integrate", ref)).json()) as { rawSha256: string; rowVersion: string };
+    return post(a, "/api/summaries/factcheck/integrate/apply", { ...ref, rawSha256: p.rawSha256, rowVersion: p.rowVersion, edits: [edit] });
+  };
+
+  test("propose drops an edit that adds a ## Transcript heading, with the reason", async () => {
+    const body = await proposeWith([{ ...EDIT_1, new: `${EDIT_1.new}\n\n## Transcript\n\nInjected.` }, EDIT_3]);
+    expect(body.edits.map((e) => e.old)).toEqual([EDIT_3.old]);
+    expect(body.dropped.find((d) => d.edit.old === EDIT_1.old)?.reason).toContain("## Transcript");
+  });
+
+  test("propose drops an edit that adds a fact-check heading", async () => {
+    const body = await proposeWith([{ ...EDIT_1, new: `${EDIT_1.new}\n\n## Fact check (2026-01-01)\n\nx` }]);
+    expect(body.edits).toEqual([]);
+    expect(body.dropped[0]!.reason).toContain("Fact check");
+  });
+
+  test("propose drops an edit that would fence off the rest of the summary", async () => {
+    const body = await proposeWith([{ ...EDIT_1, new: `${EDIT_1.new}\n\n\`\`\`\nunclosed` }]);
+    expect(body.edits).toEqual([]);
+    expect(body.dropped[0]!.reason).toContain("structure");
+  });
+
+  test("apply refuses a ## Transcript heading: 400, nothing written", async () => {
+    const res = await applyWith({ ...EDIT_1, new: `${EDIT_1.new}\n\n## Transcript\n\nInjected.` });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("structural_edit");
+    expect(ingests).toHaveLength(0);
+  });
+
+  test("apply refuses a ## Visual reference heading: 400, nothing written", async () => {
+    const res = await applyWith({ ...EDIT_1, new: `${EDIT_1.new}\n\n## Visual reference\n\nmoved` });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("structural_edit");
+    expect(ingests).toHaveLength(0);
+  });
+
+  test("apply refuses a rebuild that moves the transcript or the visual section: 409, nothing written", async () => {
+    const res = await applyWith({ ...EDIT_1, new: `${EDIT_1.new}\n\n\`\`\`\nunclosed` });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("structure_changed");
+    expect(ingests).toHaveLength(0);
+  });
+});
+
+describe("fix round 1: apply re-checks freshness under its claim (D2)", () => {
+  const proposeThenApply = async (mutate: () => void) => {
+    const a = app();
+    const p = (await (await post(a, "/api/summaries/factcheck/integrate", ref)).json()) as { rawSha256: string; rowVersion: string };
+    mutate();
+    return post(a, "/api/summaries/factcheck/integrate/apply", { ...ref, rawSha256: p.rawSha256, rowVersion: p.rowVersion, edits: [EDIT_1] });
+  };
+
+  test("an already-applied row (same version, same file): 409 already_applied, nothing written", async () => {
+    const res = await proposeThenApply(() => { row = { ...row!, appliedAt: 5 }; });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("already_applied");
+    expect(ingests).toHaveLength(0);
+  });
+
+  test("a row whose checked-text hash no longer matches: 409 recheck, nothing written", async () => {
+    const res = await proposeThenApply(() => { row = { ...row!, bodySha256: "0".repeat(64) }; });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("recheck");
+    expect(ingests).toHaveLength(0);
+  });
+});
+
+describe("fix round 1: the stamp's outcome is named (D3)", () => {
+  const applyOnce = async () => {
+    const a = app();
+    const p = (await (await post(a, "/api/summaries/factcheck/integrate", ref)).json()) as { rawSha256: string; rowVersion: string };
+    const res = await post(a, "/api/summaries/factcheck/integrate/apply", {
+      ...ref,
+      rawSha256: p.rawSha256,
+      rowVersion: p.rowVersion,
+      edits: [EDIT_1, { ...EDIT_3, old: "Not in the summary." }],
+    });
+    return (await res.json()) as {
+      stamp: string;
+      message?: string;
+      recheckedDuringApply?: boolean;
+      notApplied: { reason: string; edit: { old: string } }[];
+    };
+  };
+
+  test("a DB error: the file is written, the row is not stamped, and the message says so", async () => {
+    markImpl = async () => { throw new Error("db down"); };
+    const body = await applyOnce();
+    expect(body.stamp).toBe("db_error");
+    expect(body.recheckedDuringApply).toBeUndefined();
+    expect(body.message).toContain("could not be marked applied");
+    expect(files.get(DOC)).toContain(EDIT_1.new);
+  });
+
+  test("the row deleted mid-apply: stamp row_gone", async () => {
+    markImpl = async () => { row = null; return false; };
+    const body = await applyOnce();
+    expect(body.stamp).toBe("row_gone");
+    expect(body.message).toContain("deleted");
+  });
+
+  test("a re-check landed: stamp rechecked", async () => {
+    markImpl = async () => { row = freshRow({ createdAtText: "2026-10-05 13:00:00.000001+00" }); return false; };
+    const body = await applyOnce();
+    expect(body.stamp).toBe("rechecked");
+    expect(body.recheckedDuringApply).toBe(true);
+  });
+
+  test("a stamped apply says stamped and lists the edit that did not anchor", async () => {
+    const body = await applyOnce();
+    expect(body.stamp).toBe("stamped");
+    expect(body.notApplied.map((n) => n.edit.old)).toEqual(["Not in the summary."]);
+  });
+});
+
+describe("fix round 1: a ❌/⚠️ edit must attribute (D4) and one claim's edits stand or fall together (D5)", () => {
+  type Proposed = { edits: { old: string; claimIndex: number }[]; dropped: { reason: string; edit: { old: string; claimIndex: number } }[] };
+  const proposeWith = async (edits: unknown[]) => {
+    modelText = JSON.stringify({ edits });
+    return (await (await post(app(), "/api/summaries/factcheck/integrate", ref)).json()) as Proposed;
+  };
+
+  test("an edit attributed only by a trailing 'per the video' is dropped as not attributed", async () => {
+    const body = await proposeWith([
+      EDIT_1,
+      { ...EDIT_3, new: "Sleep 4 hours a night, per the video; sources say 7–9 ([cdc.gov](https://www.cdc.gov/sleep))." },
+    ]);
+    expect(body.edits.map((e) => e.claimIndex)).toEqual([1]);
+    expect(body.dropped.find((d) => d.edit.claimIndex === 3)?.reason).toBe("not attributed");
+  });
+
+  test("one claim's edit fails to anchor: its other edit is dropped too, with the reason", async () => {
+    const body = await proposeWith([
+      EDIT_1,
+      EDIT_3,
+      { ...EDIT_3, old: "Not in the summary.", new: "The video says something else; sources say otherwise." },
+    ]);
+    expect(body.edits.map((e) => e.claimIndex)).toEqual([1]);
+    const reasons = body.dropped.filter((d) => d.edit.claimIndex === 3).map((d) => d.reason);
+    expect(reasons).toHaveLength(2);
+    expect(reasons.some((r) => r.includes("another edit for claim 3 was dropped"))).toBe(true);
+  });
+
+  test("the change budget drops one half of a claim: both halves go", async () => {
+    const long = (lead: string) => `${lead} ${"and sources say more detail here. ".repeat(34)}([cdc.gov](https://www.cdc.gov/sleep)).`;
+    const body = await proposeWith([
+      { ...EDIT_3, new: long("The video says to sleep 4 hours a night;") },
+      { ...EDIT_3, old: "Caffeine has a half-life of about five hours.", new: long("The video says caffeine lasts five hours;") },
+      EDIT_1,
+    ]);
+    expect(body.edits.map((e) => e.claimIndex)).toEqual([1]);
+    const reasons = body.dropped.filter((d) => d.edit.claimIndex === 3).map((d) => d.reason);
+    expect(reasons.some((r) => r.includes("change budget"))).toBe(true);
+    expect(reasons.some((r) => r.includes("another edit for claim 3 was dropped"))).toBe(true);
+  });
+});
+
+describe("fix round 1: which claims are correctable comes from the saved claims (D11)", () => {
+  test("answer headings say ❌ but the saved claims say ✅: no model call", async () => {
+    row = freshRow({ claims: CLAIMS.map((c) => ({ ...c, verdict: "✅" })) });
+    const res = await post(app(), "/api/summaries/factcheck/integrate", ref);
+    expect(res.status).toBe(200);
+    expect(modelCalls).toHaveLength(0);
+  });
+
+  test("only the saved ❌/⚠️ claims reach the prompt", async () => {
+    row = freshRow({ claims: CLAIMS.map((c) => ({ ...c, verdict: c.index === 3 ? "✅" : c.verdict })) });
+    await post(app(), "/api/summaries/factcheck/integrate", ref);
+    expect(modelCalls[0]!.prompt).toContain("Claim 1/3");
+    expect(modelCalls[0]!.prompt).not.toContain("Claim 3/3");
   });
 });

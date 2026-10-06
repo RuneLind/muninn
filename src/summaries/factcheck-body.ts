@@ -13,14 +13,13 @@
  * removed first, with its exact-inverse strip, so a re-check never sees its own
  * verdicts and adding the block never moves the hash (D11).
  */
-import { createHash } from "node:crypto";
 import { splitTranscript } from "./transcript-split.ts";
 import { findAppendixSection } from "./visual-detail.ts";
 import { markdownCodeRegions } from "../format/markdown-ast.ts";
 import { splitClosingTakeaway } from "./takeaway-check.ts";
-import { hasFactcheckBlock } from "../wiki/factcheck-context.ts";
 import { stripSummaryFactcheckBlock } from "./factcheck-block.ts";
 import { sourceTextOfRaw } from "./source-text.ts";
+import { sha256 } from "../gardener/util.ts";
 
 /** A `[start, end)` range of a transcript-less summary body. */
 export interface CheckedRange {
@@ -47,8 +46,7 @@ export function summaryCheckedRanges(body: string): CheckedRange[] {
 }
 
 export function summaryFactcheckBody(sourceText: string): string {
-  const text = hasFactcheckBlock(sourceText) ? stripSummaryFactcheckBlock(sourceText) : sourceText;
-  const { body } = splitTranscript(text);
+  const { body } = splitTranscript(stripSummaryFactcheckBlock(sourceText));
   return summaryCheckedRanges(body)
     .map((r) => body.slice(r.start, r.end))
     .join("")
@@ -66,16 +64,12 @@ export function checkedTextOfRaw(raw: string): string {
   return summaryFactcheckBody(sourceTextOfRaw(raw));
 }
 
-export function sha256Hex(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
 /** sha256 of the checked text — the `body_sha256` a saved row carries. */
 export function factcheckBodySha256(sourceText: string): string {
-  return sha256Hex(summaryFactcheckBody(sourceText));
+  return sha256(summaryFactcheckBody(sourceText));
 }
 
 /** sha256 of {@link checkedTextOfRaw}. */
 export function checkedSha256OfRaw(raw: string): string {
-  return sha256Hex(checkedTextOfRaw(raw));
+  return sha256(checkedTextOfRaw(raw));
 }

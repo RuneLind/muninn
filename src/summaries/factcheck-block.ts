@@ -1,19 +1,11 @@
 /**
- * The fact-check block a `/summaries` write-back adds to a stored summary, and
- * its exact inverse.
+ * The fact-check block a `/summaries` write-back adds to a stored summary (D3):
+ * the wiki's sentinel pair around a `## Fact check (date)` heading (a huginn
+ * chunk of its own) and a `> [!factcheck]` callout.
  *
- * The block (D3) is the wiki's sentinel pair around a `## Fact check (date)`
- * heading and a `> [!factcheck]` callout. The heading gives huginn a chunk of its
- * own; the sentinels let {@link stripSummaryFactcheckBlock} find it again with
- * the wiki's own live-block walker (`findLiveSentinelBlocks`).
- *
- * Insert and strip are EXACT INVERSES (D11): the insert writes the block plus
- * one `\n\n` separator, and the strip removes the block plus that separator. So `checkedTextOfRaw` of a written-back file equals that of the file before
- * the write, and Add never moves `body_sha256`. The wiki's `stripFactcheckBlock`
- * is not used: it collapses every run of 3+ newlines across the whole body, code
- * fences included, which would change the hash of any summary carrying one.
- *
- * Exported for PR 4 (export and share), which inserts the block the same way.
+ * Insert and strip are EXACT INVERSES (D11), so adding the block never moves
+ * `body_sha256`. The wiki's `stripFactcheckBlock` is not used: it collapses
+ * every run of 3+ newlines across the body, code fences included.
  */
 
 import {
@@ -23,6 +15,7 @@ import {
 } from "../wiki/factcheck-context.ts";
 import { findAppendixSection } from "./visual-detail.ts";
 import { markdownCodeRegions } from "../format/markdown-ast.ts";
+import { todayOslo } from "../gardener/util.ts";
 
 /** The callout's marker, which the reader and the export style. */
 export const SUMMARY_FACTCHECK_CALLOUT_MARKER = "[!factcheck]";
@@ -30,12 +23,9 @@ export const SUMMARY_FACTCHECK_CALLOUT_MARKER = "[!factcheck]";
 export const SUMMARY_FACTCHECK_CALLOUT_TITLE = "Claims checked against the web";
 
 /**
- * The block for one saved check. `dateOslo` is the check's date (`YYYY-MM-DD`).
- *
- * The answer is quoted line by line under a title line and one bare `>`, so the
- * title is a paragraph of its own; claim headings are demoted to bold because a
- * blockquote cannot carry a heading the reader would style. Embedded sentinel
- * strings are neutralized, or one on its own line would end the block early.
+ * The block for one saved check, dated `dateOslo` (`YYYY-MM-DD`). Claim headings
+ * are demoted to bold (a blockquote carries no heading the reader styles), and
+ * embedded sentinels are neutralized, or one would end the block early.
  */
 export function buildSummaryFactcheckBlock(answer: string, dateOslo: string): string {
   const safe = answer
@@ -51,12 +41,9 @@ export function buildSummaryFactcheckBlock(answer: string, dateOslo: string): st
 }
 
 /**
- * `text` with every live fact-check block removed, each with ONE `\n\n`: the one
- * directly after it (the separator {@link insertSummaryFactcheckBlock} wrote in
- * front of the visual-reference section, or the one the save writes in front of
- * `## Transcript`), else the one directly before it (the insert's separator at
- * the end of a body). Nothing else moves.
- * Works on a raw file (frontmatter included) or on a stored body.
+ * `text` with every live block removed, each with ONE `\n\n` — the one after it,
+ * else the one before it (the insert's separator at the end of a body). Works on
+ * a raw file or a stored body.
  */
 export function stripSummaryFactcheckBlock(text: string): string {
   const spans = findLiveSentinelBlocks(text);
@@ -77,12 +64,8 @@ export function stripSummaryFactcheckBlock(text: string): string {
   return out + text.slice(at);
 }
 
-/**
- * `body` — a stored summary WITHOUT its transcript (`readStoredCapture().body`)
- * — with `block` in place of any earlier one: above the `## Visual reference`
- * section when there is one, else at the end of the body, which the save puts
- * above `## Transcript`.
- */
+/** `body` (no transcript) with `block` in place of any earlier one: above the
+ *  `## Visual reference` section, else at the end. */
 export function insertSummaryFactcheckBlock(body: string, block: string): string {
   const base = stripSummaryFactcheckBlock(body);
   const appendix = findAppendixSection(base, markdownCodeRegions(base));
@@ -92,10 +75,5 @@ export function insertSummaryFactcheckBlock(body: string, block: string): string
 
 /** The check's date as the block names it: the Oslo calendar day of `epochMs`. */
 export function factcheckBlockDate(epochMs: number): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Oslo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(epochMs));
+  return todayOslo(epochMs);
 }

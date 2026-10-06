@@ -52,6 +52,7 @@ import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
+import { stripSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
 import { readSummarySourceText, withSourceText } from "../../summaries/source-text.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
 import { parseShareRequestBody, SHARE_LANGS } from "../../share/wire.ts";
@@ -288,7 +289,8 @@ export function registerSummariesShareRoutes(
         } else {
           // The canonical strip — the server owns it so the post never depends on
           // which client rendered the document.
-          const prepared = prepareSummaryDocBody(doc.text ?? "");
+          // A written-back fact-check block is not the source's content.
+          const prepared = prepareSummaryDocBody(stripSummaryFactcheckBlock(doc.text ?? ""));
           if (!prepared.trim()) {
             preflightError = `"${title}" has no text to summarize.`;
           } else {

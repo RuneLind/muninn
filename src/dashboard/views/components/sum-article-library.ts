@@ -416,6 +416,8 @@ export function sumArticleLibraryScript(): string {
       // showing, and Generate would still summarize it. Same seam (and same
       // reason) as the reader's closeShareDialogOnNavigate.
       if (typeof closeShareDialog === 'function') closeShareDialog();
+      // A fact-check write still running must not reopen the panel it finishes into.
+      if (typeof sumFactcheckOnClose === 'function') sumFactcheckOnClose();
       // A re-run started from this panel keeps running. Its ONE stream moves to
       // the shelf's job card, which is the surface the reader can now see; the
       // menu and its status line go with the panel.
@@ -655,15 +657,24 @@ export function sumArticleLibraryScript(): string {
       var pop = rerunMenuEl();
       if (!pop) return;
       pop.textContent = '';
-      // D13: corrections integrated from a fact check live only in the summary
-      // text, so a run regenerated from the transcript drops them.
-      if (opts.factcheckAppliedAt) {
-        var appliedNote = rerunMenuNote('Fact-check corrections were integrated into this summary on ' +
-          new Date(opts.factcheckAppliedAt).toISOString().slice(0, 10) +
-          '. A re-run regenerates it from the transcript and drops them.');
-        appliedNote.classList.add('doc-panel-menu-warn');
-        appliedNote.setAttribute('data-rerun-warn', 'factcheck-applied');
-        pop.appendChild(appliedNote);
+      // D13: what a run regenerated from the transcript drops — integrated
+      // corrections (only while they are still in the text) and the section.
+      var fc = opts.factcheck || {};
+      var fcNote = null;
+      if (fc.appliedAt && fc.applyFresh !== false) {
+        fcNote = rerunMenuNote('Fact-check corrections were integrated into this summary on ' + (fc.appliedDay || '') +
+          '. A re-run regenerates it from the transcript and drops them, with the Fact check section.');
+        fcNote.setAttribute('data-rerun-warn', 'factcheck-applied');
+      } else if (fc.appliedAt) {
+        fcNote = rerunMenuNote('The integrated fact-check corrections are no longer in this summary — re-check to re-apply.');
+        fcNote.setAttribute('data-rerun-warn', 'factcheck-stale');
+      } else if (fc.blockPresent) {
+        fcNote = rerunMenuNote('This summary carries a Fact check section. A re-run regenerates it from the transcript and drops it.');
+        fcNote.setAttribute('data-rerun-warn', 'factcheck-block');
+      }
+      if (fcNote) {
+        fcNote.classList.add('doc-panel-menu-warn');
+        pop.appendChild(fcNote);
       }
       // The server's save preflight: no url, no category, or a title that does
       // not round-trip — each a save that would fork rather than replace.

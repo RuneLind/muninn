@@ -100,13 +100,19 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+const DEFAULT_EDITS = [
+  { claimIndex: 1, verdict: "❌", old: CLAIM_1, new: EDIT_1_NEW, reason: "attributed" },
+  { claimIndex: 2, verdict: "⚠️", old: CLAIM_2, new: EDIT_2_NEW, reason: "attributed" },
+];
+/** What the fake model proposes; a test that needs another preview swaps it. */
+let completionEdits: unknown[] = DEFAULT_EDITS;
+/** Held before the ingest answers, so a test can act while Add or Apply runs. */
+let ingestDelayMs = 0;
+/** What the fake `/api/search` answers. */
+let searchResults: unknown[] = [];
+
 function writeCompletion(res: ServerResponse): void {
-  const content = JSON.stringify({
-    edits: [
-      { claimIndex: 1, verdict: "❌", old: CLAIM_1, new: EDIT_1_NEW, reason: "attributed" },
-      { claimIndex: 2, verdict: "⚠️", old: CLAIM_2, new: EDIT_2_NEW, reason: "attributed" },
-    ],
-  });
+  const content = JSON.stringify({ edits: completionEdits });
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   res.write(`data: ${JSON.stringify({ model: "e2e-fake", choices: [{ index: 0, delta: { content } }] })}\n\n`);
   res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
@@ -131,6 +137,7 @@ async function startFake(): Promise<Server> {
       if (p === "/api/youtube/ingest") {
         const body = JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>;
         ingests.push(body);
+        if (ingestDelayMs) await new Promise((r) => setTimeout(r, ingestDelayMs));
         file = `---\ndate: "${body.date}"\nurl: "${body.url}"\ncategory: "${body.category}"\ntags: "health, e2e"\n---\n\n${String(body.summary)}`;
         return json({ file_path: `${body.category}/${body.title}.md`, similar: [] });
       }
@@ -148,7 +155,7 @@ async function startFake(): Promise<Server> {
         return json({ id: DOC, url: VIDEO_URL, text: file.replace(/^---\n[\s\S]*?\n---\n/, "") });
       }
       if (p === "/api/collections") return json({ collections: [{ name: COLLECTION }] });
-      if (p === "/api/search") return json({ results: [] });
+      if (p === "/api/search") return json({ results: searchResults });
       return json({ status: "ok" });
     })();
   });
@@ -342,4 +349,173 @@ test("a summary changed after the integrate shows the re-check notice, not an In
   );
   await expect(fc.getByRole("button", { name: "✎ Integrate corrections" })).toHaveCount(0);
   await expect(fc.getByRole("button", { name: "➕ Add to summary" })).toHaveCount(0);
+});
+
+// ── Fix round 1 ──────────────────────────────────────────────────────────────
+
+async function reset(): Promise<void> {
+  file = ORIGINAL;
+  completionEdits = DEFAULT_EDITS;
+  ingestDelayMs = 0;
+  await seedRow();
+}
+
+async function closePanel(page: Page): Promise<void> {
+  await page.locator(".doc-panel-close").click();
+  await expect(page.locator("#docOverlay")).not.toHaveClass(/visible/);
+}
+
+async function reopen(page: Page): Promise<void> {
+  await page.evaluate(([id, src]) => (globalThis as unknown as { openSummaryDoc: (a: string, b: string, c: string) => void }).openSummaryDoc(id!, "", src!), [DOC, "youtube"]);
+  await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
+  await expect(page.locator("#sumFactcheck .sum-fc-chip").first()).toBeVisible();
+}
+
+test("after ➕ Add the section says it is added; the message clears on reopen", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "➕ Add to summary" }).click();
+  await expect(fc.locator(".sum-fc-wb-msg.ok")).toContainText("Added the Fact check section");
+  await expect(fc.locator("[data-wb-added]")).toHaveText("Fact check section added");
+  await expect(fc.getByRole("button", { name: "➕ Add to summary" })).toHaveCount(0);
+  await closePanel(page);
+  await reopen(page);
+  await expect(fc.locator("[data-wb-added]")).toBeVisible();
+  await expect(fc.locator(".sum-fc-wb-msg")).toHaveCount(0);
+  // The re-run menu names the block a re-run would drop.
+  await page.locator("#docPanelRerun").click();
+  await expect(page.locator('#docPanelRerunMenu [data-rerun-warn="factcheck-block"]')).toContainText("Fact check section");
+});
+
+test("closing the panel while Apply runs keeps it closed", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
+  ingestDelayMs = 1500;
+  const n = ingests.length;
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await closePanel(page);
+  await expect.poll(() => ingests.length).toBe(n + 1);
+  await page.waitForTimeout(2500);
+  await expect(page.locator("#docOverlay")).not.toHaveClass(/visible/);
+});
+
+test("after Apply, ✎ Integrate stays hidden until the saved row is re-read", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
+  // The re-read after the write is slow: that is the window under test.
+  await page.route("**/api/summaries/factcheck/result**", async (route) => {
+    await new Promise((r) => setTimeout(r, 3000));
+    await route.continue().catch(() => {});
+  });
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await expect(fc.locator(".sum-fc-wb-msg.ok")).toContainText("Integrated", { timeout: 15_000 });
+  const deadline = Date.now() + 2500;
+  while (Date.now() < deadline) {
+    expect(await fc.getByRole("button", { name: "✎ Integrate corrections" }).count()).toBe(0);
+    await page.waitForTimeout(100);
+  }
+  await page.unroute("**/api/summaries/factcheck/result**");
+  await expect(fc.locator("[data-wb-applied]")).toBeVisible({ timeout: 15_000 });
+  await expect(fc.getByRole("button", { name: "✎ Integrate corrections" })).toHaveCount(0);
+});
+
+test("a new web result drops the open preview", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(2);
+  await sql!`UPDATE summary_factchecks SET created_at = now() WHERE doc_id = ${DOC}`;
+  await closePanel(page);
+  await reopen(page);
+  await expect(fc.getByRole("button", { name: "✎ Integrate corrections" })).toBeVisible();
+  await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(0);
+});
+
+test("the integrate preview reads at AA in both themes", async ({ page }) => {
+  await reset();
+  // A multi-line edit (diff context lines, a trailing context line) and one that
+  // cannot anchor (the "not applied" list).
+  completionEdits = [
+    {
+      claimIndex: 1,
+      verdict: "❌",
+      old: `${CLAIM_1}\n\n## Key takeaways`,
+      new: `${EDIT_1_NEW}\n\n## Key takeaways`,
+      reason: "attributed",
+    },
+    { claimIndex: 2, verdict: "⚠️", old: "Not in the summary at all.", new: EDIT_2_NEW, reason: "attributed" },
+  ];
+  for (const scheme of ["dark", "light"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await open(page);
+    const fc = page.locator("#sumFactcheck");
+    await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+    await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(1);
+    for (const [name, loc] of [
+      ["Apply button", fc.getByRole("button", { name: "Apply selected" })],
+      ["context line", fc.locator(".sum-fc-int-ctx").first()],
+      ["diff context", fc.locator(".d-ctx").last()],
+      ["not-applied list", fc.locator(".sum-fc-int-dropped summary")],
+    ] as const) {
+      await expect(loc).toBeVisible();
+      expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
+    }
+  }
+});
+
+test("a re-run after the corrections are gone says re-check, not 'integrated'", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await fc.getByRole("button", { name: "Apply selected" }).click();
+  await expect(fc.locator("[data-wb-applied]")).toBeVisible({ timeout: 15_000 });
+  // A re-run regenerated the summary: the integrated text is gone.
+  file = ORIGINAL;
+  await closePanel(page);
+  await reopen(page);
+  await page.locator("#docPanelRerun").click();
+  const menu = page.locator("#docPanelRerunMenu");
+  await expect(menu.locator('[data-rerun-warn="factcheck-stale"]')).toContainText("re-check to re-apply");
+  await expect(menu.locator('[data-rerun-warn="factcheck-applied"]')).toHaveCount(0);
+});
+
+test("/search chunk previews show no sentinel text or callout marker", async ({ page }) => {
+  searchResults = [
+    {
+      id: DOC,
+      title: "E2E writeback",
+      collection: COLLECTION,
+      relevance: 0.9,
+      matchedChunks: [
+        {
+          heading: "Fact check (2026-10-06)",
+          relevance: 0.9,
+          content:
+            "[youtube > health > E2E writeback]\n## Fact check (2026-10-06)\n\n> [!factcheck] Claims checked against the web\n>\n> **❌ Claim 1/2 — sleep**\n<!-- factcheck:end -->",
+        },
+        { heading: "Summary", relevance: 0.8, content: "Lede about sleep.\n<!-- factcheck:start -->" },
+      ],
+    },
+  ];
+  await page.goto(`${BASE}/search`);
+  await page.locator("#searchInput").fill("sleep claims");
+  await page.locator("#searchBtn").click();
+  const results = page.locator("#results");
+  await expect(results.locator(".result-card")).toHaveCount(1);
+  await results.locator(".result-chunks-toggle").click();
+  const text = await results.innerText();
+  expect(text).not.toContain("<!--");
+  expect(text).not.toContain("factcheck:");
+  expect(text).not.toContain("[!factcheck]");
+  expect(text).toContain("✓ Claims checked against the web");
+  searchResults = [];
 });

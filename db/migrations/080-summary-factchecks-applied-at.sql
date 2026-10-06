@@ -1,11 +1,3 @@
--- When a /summaries fact check was last integrated into its document (the
--- doc panel's Integrate apply). NULL until then, and set back to NULL by a
--- re-check, whose upsert replaces the verdicts it describes.
---
--- The apply also re-stamps `body_sha256` from the written file, so "applied and
--- the checked text still hashes to the row" means the corrections are in the
--- summary (propose answers 409 already_applied), and "applied but the hash
--- moved" means the summary changed since (the "re-check to re-apply" notice).
---
--- ⚠️ Mirrored in db/init.sql, or schema-drift.test.ts reds.
+-- When a /summaries fact check was last integrated into its document; cleared
+-- by a re-check. Mirrored in db/init.sql. Contract: src/summaries/CLAUDE.md.
 ALTER TABLE summary_factchecks ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;

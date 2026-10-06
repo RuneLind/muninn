@@ -58,3 +58,37 @@ describe("the summary fact-check block, rendered", () => {
     expect(api.styleFactcheckCallouts(html)).toBe(styleFactcheckCallouts(html));
   });
 });
+
+describe("fix round 1", () => {
+  test("a fence line with an info string does not close a fence (CommonMark)", () => {
+    const md = "```\n```js\n<!-- factcheck:end -->\n```\nafter";
+    expect(dropFactcheckSentinelLines(md)).toBe(md);
+    const tilde = "~~~\n~~~ts\n<!-- factcheck:start -->\n~~~";
+    expect(dropFactcheckSentinelLines(tilde)).toBe(tilde);
+  });
+
+  test("a closing fence may carry trailing spaces", () => {
+    expect(dropFactcheckSentinelLines("```\ncode\n```   \n<!-- factcheck:end -->\nx")).toBe("```\ncode\n```   \nx");
+  });
+
+  test("plainFactcheckText: a chunk preview loses the sentinels and the callout marker", async () => {
+    const { plainFactcheckText } = await import("./factcheck-callout.ts");
+    const chunk = "Lede line.\n<!-- factcheck:start -->\n## Fact check (2026-10-06)\n\n> [!factcheck] Claims checked against the web\n>\n> **❌ Claim 1/1 — x**\n<!-- factcheck:end -->";
+    const out = plainFactcheckText(chunk);
+    expect(out).not.toContain("<!--");
+    expect(out).not.toContain("factcheck:");
+    expect(out).not.toContain("[!factcheck]");
+    expect(out).toContain("✓ Claims checked against the web");
+    expect(out).toContain("**❌ Claim 1/1 — x**");
+    // Whitespace-collapsed (the wiki's Similar snippet) works the same.
+    expect(plainFactcheckText(chunk.replace(/\s+/g, " "))).not.toContain("factcheck:");
+  });
+
+  test("the /search page and the /summaries similar list run chunk text through it", async () => {
+    const { searchResultsScript } = await import("../dashboard/views/components/search-results.ts");
+    const script = searchResultsScript();
+    expect(script).toContain("var plainFactcheckText = function");
+    expect(script).toContain("plainFactcheckText(stripBreadcrumb(c.content))");
+    expect(script).toContain("plainFactcheckText(stripBreadcrumb(chunks[0].content))");
+  });
+});
