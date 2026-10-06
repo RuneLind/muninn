@@ -29,9 +29,9 @@ const END = "--- END FACT-CHECK FINDINGS ---";
 
 /** Share and Ask line shapes as [quote, correction] code points, roomiest
  *  first: the riders take the first that holds every claim. The correction
- *  gets the room — a ⚠️ correction confirms first and corrects second — and a
- *  tighter shape shrinks the quote first (measured on six real answers, PR #653
- *  fix round 2). */
+ *  gets the larger share at every rung — a ⚠️ correction confirms first and
+ *  corrects second — though both fields shrink down the ladder (measured on six
+ *  real answers, PR #653 fix round 2). */
 const LINE_SHAPES: FindingLineShape[] = [
   [110, 440],
   [90, 400],

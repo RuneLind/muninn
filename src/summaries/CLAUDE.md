@@ -511,7 +511,7 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   source; no row ⇒ the prompt is byte-identical (hash-pinned in
   `src/share/prompt.test.ts`). The Share and Ask riders list ❌ before ⚠️, in
   the roomiest of nine compact line shapes that holds every claim (the
-  correction gets the room, the quote shrinks first; budget in code points;
+  correction gets the larger share at every rung (both fields shrink down the ladder); budget in code points;
   `---` runs collapsed so no finding spells a marker), and they stop at the
   first line that does not fit, so no ⚠️ line is listed once a ❌ line is not.
   The drafter keeps its own shape and order, byte-pinned in
