@@ -72,7 +72,8 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     const wiki = typeof body?.wiki === "string" ? body.wiki.trim() : "";
     const relPath = typeof body?.relPath === "string" ? body.relPath.trim() : "";
     if (!wiki || !relPath) return c.json({ error: "wiki and relPath are required" }, 400);
-    const action = body?.action ?? "publish";
+    // Absent means publish; any other value, null included, is a 400.
+    const action = body?.action === undefined ? "publish" : body.action;
     if (action !== "publish" && action !== "remove") {
       return c.json({ error: 'action must be "publish" or "remove"' }, 400);
     }

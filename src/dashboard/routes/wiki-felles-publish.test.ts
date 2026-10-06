@@ -207,6 +207,7 @@ describe("refusals before any spawn", () => {
     ["non-boolean dryRun", {}, { ...ok, dryRun: "yes" }, 400],
     ["publish without allowIdent", {}, { wiki: "kode", relPath: "plans/a.mdx", dryRun: true }, 400],
     ["unknown action", {}, { ...ok, action: "delete" }, 400],
+    ["null action", {}, { ...ok, action: null }, 400],
     ["remove of a page outside the index", {}, { ...ok, action: "remove", relPath: "plans/missing.mdx" }, 404],
     ["unknown wiki", {}, { ...ok, wiki: "nope" }, 404],
     ["wiki not allowlisted", {}, { ...ok, wiki: "mimir" }, 403],

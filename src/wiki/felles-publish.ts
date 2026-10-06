@@ -87,8 +87,10 @@ export type FellesAction = "publish" | "remove";
  *  dash-led page from being read as a flag.
  *  remove:  `--fjern [--dry-run] --ja -- <relPath>` — here the relPath IS the
  *  bucket object name, which a `./` would change, so `--` guards it instead
- *  (Bun swallows a `--` only directly after the script path). `--ja` answers the
- *  script's own prompt; the dialog's confirm step is where the reader is asked. */
+ *  (Bun swallows a `--` only directly after the script path). It goes in NFC,
+ *  because the script uploads `rel.normalize("NFC")` but deletes the name it is
+ *  given, and readdir hands back an NFD path as it was written. `--ja` answers
+ *  the script's own prompt; the dialog's confirm step is where the reader is asked. */
 export function fellesScriptArgs(opts: {
   action: FellesAction;
   dryRun: boolean;
@@ -97,7 +99,7 @@ export function fellesScriptArgs(opts: {
   relPath: string;
 }): string[] {
   const dry = opts.dryRun ? ["--dry-run"] : [];
-  if (opts.action === "remove") return ["--fjern", ...dry, "--ja", "--", opts.relPath];
+  if (opts.action === "remove") return ["--fjern", ...dry, "--ja", "--", opts.relPath.normalize("NFC")];
   return [...dry, ...(opts.allowIdent ? ["--tillat-ident"] : []), opts.root, "./" + opts.relPath];
 }
 

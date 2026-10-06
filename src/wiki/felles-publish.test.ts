@@ -96,6 +96,14 @@ test("remove names the bare object after --, and never passes the root or --till
   ]);
 });
 
+test("remove names the object in NFC, the spelling publish uploaded", () => {
+  // The script uploads `rel.normalize("NFC")` but deletes the name it is given,
+  // and readdir on APFS hands back an NFD spelling as written.
+  const nfd = "plans/pa\u030A.md";
+  const [object] = fellesScriptArgs({ action: "remove", dryRun: true, allowIdent: false, root: "/w", relPath: nfd }).slice(-1);
+  expect(object).toBe("plans/p\u00E5.md");
+});
+
 test("the child environment is an allowlist", () => {
   const env = fellesPublishChildEnv({
     PATH: "/usr/bin",

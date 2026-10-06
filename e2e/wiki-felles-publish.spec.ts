@@ -32,6 +32,8 @@ const WIKI = "e2e-felles";
 const OTHER = "e2e-felles-other";
 const REL = "plans/2026-09-29-vedtak.mdx";
 const PAGE = ["---", "title: Vedtak", "---", "", "# Vedtak", "", "Body.", ""].join("\n");
+/** The stub exits 3 for this page, so a failing run can be driven. */
+const FAIL_REL = "plans/2026-09-30-feiler.mdx";
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -43,6 +45,7 @@ test.beforeAll(async () => {
   otherRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-felles-other-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
+  await writeFile(path.join(root, FAIL_REL), PAGE.replace(/Vedtak/g, "Feiler"), "utf8");
   await writeFile(path.join(otherRoot, "page.md"), "# Other\n", "utf8");
   stub = path.join(root, "..", `felles-stub-${process.pid}.ts`);
   await writeFile(
@@ -50,7 +53,8 @@ test.beforeAll(async () => {
     // Slow enough that the in-flight case can press Escape mid-run.
     "await Bun.sleep(700);\n" +
     'console.log("ARGS " + JSON.stringify(process.argv.slice(2)));\n' +
-      'console.log("  https://example.test/wiki?wiki=melosys-felles&relPath=x");\n',
+      'console.log("  https://example.test/wiki?wiki=melosys-felles&relPath=x");\n' +
+      `if (process.argv.includes(${JSON.stringify(FAIL_REL)})) process.exit(3);\n`,
     "utf8",
   );
 
@@ -150,7 +154,7 @@ test.describe("Wiki reader: ⇪ Felles", () => {
 
     await dialog.getByRole("button", { name: "Remove…" }).click();
     await expect(out).toContainText(`ARGS ${JSON.stringify(["--fjern", "--dry-run", "--ja", "--", REL])}`);
-    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Dry run: the object below would be deleted/);
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Dry run: this is the object a remove deletes/);
     await expect(confirm).toBeVisible();
 
     // Cancel withdraws the offer without a run.
@@ -162,6 +166,24 @@ test.describe("Wiki reader: ⇪ Felles", () => {
     await expect(out).toContainText(`ARGS ${JSON.stringify(["--fjern", "--ja", "--", REL])}`);
     await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Removed/);
     await expect(confirm).toBeHidden();
+  });
+
+  test("a remove dry run that fails offers no confirm, and any other run withdraws one", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(FAIL_REL)}`);
+    await page.locator(BTN).click();
+    const dialog = page.locator("dialog.wiki-felles");
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Delete failed/);
+    await expect(dialog.locator(".wiki-felles-confirm")).toBeHidden();
+    await page.keyboard.press("Escape");
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await page.locator(BTN).click();
+    await dialog.getByRole("button", { name: "Remove…" }).click();
+    await expect(dialog.locator(".wiki-felles-confirm")).toBeVisible();
+    await dialog.getByRole("button", { name: "Dry run" }).click();
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/Dry run passed/);
+    await expect(dialog.locator(".wiki-felles-confirm")).toBeHidden();
   });
 
   for (const scheme of ["light", "dark"] as const) {

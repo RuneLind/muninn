@@ -41,10 +41,11 @@ test("each exit code has its own line", () => {
 });
 
 test("remove has its own line per exit code", () => {
-  expect(fellesOutcomeLine(0, true, "remove")).toEqual({
-    text: "Dry run: the object below would be deleted. Nothing was removed yet.",
-    ok: true,
-  });
+  // The script's dry run never asks the bucket, so the line must not claim the object exists.
+  expect(fellesOutcomeLine(0, true, "remove").text).toMatch(/does not check/);
+  expect(fellesOutcomeLine(1, false, "remove").text).toMatch(/nothing was removed/);
+  expect(fellesOutcomeLine(1, false, "remove").text).not.toMatch(/may/);
+  expect(fellesOutcomeLine(3, false, "remove").text).toMatch(/gcloud needs a login/);
   expect(fellesOutcomeLine(0, false, "remove").text).toMatch(/^Removed/);
   for (const code of [1, 2, 3, 9]) expect(fellesOutcomeLine(code, false, "remove").ok).toBe(false);
   // Publish copy must never describe a delete.

@@ -68,20 +68,21 @@ export function fellesOutcomeLine(
   }
 }
 
-/** The bucket has no soft delete, so the dry run is the step that shows what
- *  goes; the confirm button is the step that deletes. */
+/** The bucket has no soft delete, so the dry run names the object first and
+ *  the confirm button deletes it. The script's dry run never asks the bucket,
+ *  so its line claims the name, not that the object exists. */
 function fellesRemoveOutcomeLine(exitCode: number, dryRun: boolean): { text: string; ok: boolean } {
   switch (exitCode) {
     case 0:
       return dryRun
-        ? { text: "Dry run: the object below would be deleted. Nothing was removed yet.", ok: true }
+        ? { text: "Dry run: this is the object a remove deletes. The dry run does not check that it is in the bucket.", ok: true }
         : { text: "Removed. The pod drops the page within about 2 minutes.", ok: true };
     case 1:
-      return { text: "The script refused the path, or failed. Nothing may have been removed. See the output.", ok: false };
+      return { text: "The script refused the path or failed before deleting — nothing was removed. See the output.", ok: false };
     case 2:
       return { text: "Usage or environment error — nothing was removed. See the output.", ok: false };
     case 3:
-      return { text: "Delete failed — the page may not be in the bucket. See the output.", ok: false };
+      return { text: "Delete failed — the page may not be in the bucket, or gcloud needs a login. See the output.", ok: false };
     default:
       return { text: `The script exited with code ${exitCode}.`, ok: false };
   }
