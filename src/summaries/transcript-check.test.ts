@@ -285,6 +285,9 @@ describe("fix round 2", () => {
     const p = buildTranscriptCheckPrompt(claims, "T", cut);
     expect(p).toContain('"beyondCut": true');
     expect(p).toContain('"beyondCut": false');
+    // The answer format names the field too, not only the rule.
+    const format = p.slice(p.indexOf("Answer with ONE JSON object"), p.indexOf("\n<claims>\n"));
+    expect(format).toContain('"beyondCut": true | false');
   });
 
   test("the check passes its cut to the parser", async () => {
