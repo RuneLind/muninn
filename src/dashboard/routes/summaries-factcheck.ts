@@ -36,6 +36,7 @@ import {
   listSummaryFactcheckBadges,
   saveSummaryTranscriptCheck,
   summaryFactcheckTranscriptColumnsPresent,
+  summaryFactchecksHasAppliedAt,
   upsertSummaryFactcheck,
   type SavedFactcheckClaim,
   type SummaryFactcheck,
@@ -50,6 +51,7 @@ import { getLog } from "../../logging.ts";
 import { documentTranscript, registerSummariesTranscriptCheckRoute, transcriptSha256 } from "./summaries-factcheck-transcript.ts";
 import { renderTranscriptCheckHtml } from "../views/components/sum-transcript-render.ts";
 import type { TranscriptCheckOptions } from "../../summaries/transcript-check.ts";
+import { MIGRATION_080_ERROR } from "./summaries-factcheck-writeback.ts";
 
 const log = getLog("dashboard", "summaries-factcheck");
 
@@ -83,6 +85,10 @@ export interface SummariesFactcheckDeps {
     saveTranscript: typeof saveSummaryTranscriptCheck;
     /** Whether migration 081's columns exist. */
     transcriptColumnsPresent: () => Promise<boolean>;
+    /** Migration 080's `applied_at` exists. The check route's upsert writes it,
+     *  so without it a full web check would end in a failed save: refused
+     *  first. Absent ⇒ assumed present (tests). */
+    schemaReady?: () => Promise<boolean>;
   };
   bots: () => BotConfig[];
   /** Test seam threaded into the engine; production leaves it unset. */
@@ -107,6 +113,7 @@ export function defaultSummariesFactcheckDeps(knowledgeApiUrl: string): Summarie
       listBadges: listSummaryFactcheckBadges,
       saveTranscript: saveSummaryTranscriptCheck,
       transcriptColumnsPresent: summaryFactcheckTranscriptColumnsPresent,
+      schemaReady: summaryFactchecksHasAppliedAt,
     },
     bots: discoverAllBots,
   };
@@ -161,6 +168,14 @@ export function registerSummariesFactcheckRoutes(
     const bot = resolveSummarizerBot(deps.bots());
     const refusal = summaryFactcheckBotRefusal(bot);
     if (refusal || !bot) return c.json({ error: refusal }, 503);
+    try {
+      if (deps.store.schemaReady && !(await deps.store.schemaReady())) {
+        return c.json({ error: MIGRATION_080_ERROR, code: "migration_080" }, 503);
+      }
+    } catch (err) {
+      log.warn("Summary factcheck: schema check failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "fact-check lookup failed" }, 500);
+    }
 
     const [sourceText, meta] = await Promise.all([
       deps.readSourceText(collection, docId),

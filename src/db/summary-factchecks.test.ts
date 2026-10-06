@@ -3,7 +3,10 @@ import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
 import {
   getSummaryFactcheck,
+  getSummaryFactcheckVersioned,
   listSummaryFactcheckBadges,
+  markSummaryFactcheckApplied,
+  summaryFactchecksHasAppliedAt,
   upsertSummaryFactcheck,
   type SummaryFactcheckInput,
 } from "./summary-factchecks.ts";
@@ -65,5 +68,70 @@ describe("summary_factchecks", () => {
       { collection: "youtube-summaries", docId: "clean.md", bad: 0, total: 1 },
       { collection: "youtube-summaries", docId: "health/sleep/A talk.md", bad: 1, total: 2 },
     ]);
+  });
+});
+
+describe("summary_factchecks: applied_at and the apply CAS (migration 080)", () => {
+  const answerSha = (answer: string) => new Bun.CryptoHasher("sha256").update(answer).digest("hex");
+
+  test("the column exists, and the probe says so", async () => {
+    expect(await summaryFactchecksHasAppliedAt()).toBe(true);
+  });
+
+  test("a stamp on the row read in this request sets applied_at and the new hash", async () => {
+    await upsertSummaryFactcheck(base);
+    const row = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
+    expect(row.appliedAt).toBeNull();
+    // Full precision: now() carries microseconds the epoch-ms value drops.
+    expect(row.createdAtText).toMatch(/\.\d{4,6}/);
+    const ok = await markSummaryFactcheckApplied({
+      collection: base.collection,
+      docId: base.docId,
+      createdAtText: row.createdAtText,
+      answerSha256: answerSha(base.answer),
+      bodySha256: "c".repeat(64),
+    });
+    expect(ok).toBe(true);
+    const after = (await getSummaryFactcheck(base.collection, base.docId))!;
+    expect(after.bodySha256).toBe("c".repeat(64));
+    expect(after.appliedAt).not.toBeNull();
+  });
+
+  test("the epoch-ms created_at does not match the row (the CAS needs the text)", async () => {
+    await upsertSummaryFactcheck(base);
+    const row = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
+    const ok = await markSummaryFactcheckApplied({
+      collection: base.collection,
+      docId: base.docId,
+      createdAtText: new Date(row.createdAt).toISOString(),
+      answerSha256: answerSha(base.answer),
+      bodySha256: "c".repeat(64),
+    });
+    expect(ok).toBe(false);
+  });
+
+  test("a re-check that landed during the apply wins: 0 rows, row stays un-applied", async () => {
+    await upsertSummaryFactcheck(base);
+    const read = (await getSummaryFactcheckVersioned(base.collection, base.docId))!;
+    await upsertSummaryFactcheck({ ...base, answer: "a newer check" });
+    const ok = await markSummaryFactcheckApplied({
+      collection: base.collection,
+      docId: base.docId,
+      createdAtText: read.createdAtText,
+      answerSha256: answerSha(base.answer),
+      bodySha256: "c".repeat(64),
+    });
+    expect(ok).toBe(false);
+    const row = (await getSummaryFactcheck(base.collection, base.docId))!;
+    expect(row.appliedAt).toBeNull();
+    expect(row.bodySha256).toBe(base.bodySha256);
+  });
+
+  test("a re-check clears applied_at", async () => {
+    await upsertSummaryFactcheck(base);
+    await getDb()`UPDATE summary_factchecks SET applied_at = now()`;
+    expect((await getSummaryFactcheck(base.collection, base.docId))!.appliedAt).not.toBeNull();
+    const again = await upsertSummaryFactcheck(base);
+    expect(again.appliedAt).toBeNull();
   });
 });

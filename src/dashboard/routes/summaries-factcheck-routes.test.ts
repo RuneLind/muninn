@@ -94,6 +94,8 @@ let source: string | null = SOURCE_TEXT;
 let saved: RowInput[] = [];
 let stored: Row | null = null;
 let upsertThrows = false;
+/** Migration 080's column; `false` ⇒ the route must refuse before any work. */
+let schemaReady = true;
 
 function app(bots: unknown[] = [webBot]): Hono {
   const deps: Deps = {
@@ -103,10 +105,11 @@ function app(bots: unknown[] = [webBot]): Hono {
       upsert: async (row) => {
         if (upsertThrows) throw new Error("db down");
         saved.push(row);
-        stored = { ...row, createdAt: 1_700_000_000_000, transcript: null, transcriptSha256: null };
+        stored = { ...row, createdAt: 1_700_000_000_000, transcript: null, transcriptSha256: null, appliedAt: null };
         return stored;
       },
       get: async () => stored,
+      schemaReady: async () => schemaReady,
       listBadges: async () => [
         { collection: "youtube-summaries", docId: DOC, bad: 1, total: 2 },
         { collection: "not-a-summary-collection", docId: "x.md", bad: 0, total: 1 },
@@ -143,6 +146,7 @@ beforeEach(() => {
   saved = [];
   stored = null;
   upsertThrows = false;
+  schemaReady = true;
 });
 
 describe("GET /api/summaries/factcheck — request checks", () => {
@@ -162,6 +166,17 @@ describe("GET /api/summaries/factcheck — request checks", () => {
 
   test("no bots at all is a 503", async () => {
     expect((await run(app([]))).res.status).toBe(503);
+  });
+
+  test("a database without migration 080 is a 503 naming it, before any model call", async () => {
+    schemaReady = false;
+    const { res } = await run(app());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe("migration_080");
+    expect(body.error).toContain("migration 080");
+    expect(extractionPrompts).toEqual([]);
+    expect(saved).toEqual([]);
   });
 });
 
@@ -234,7 +249,7 @@ describe("GET /api/summaries/factcheck — persist on done, never on failure", (
       readSourceText: async () => SOURCE_TEXT,
       fetchDocMeta: async () => null,
       store: {
-        upsert: async (row) => { saved.push(row); return { ...row, createdAt: 1, transcript: null, transcriptSha256: null }; },
+        upsert: async (row) => { saved.push(row); return { ...row, createdAt: 1, transcript: null, transcriptSha256: null, appliedAt: null }; },
         get: async () => null,
         listBadges: async () => [],
         saveTranscript: async () => true,

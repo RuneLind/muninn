@@ -2,6 +2,7 @@
  * streaming, and similar articles. Source-aware: streaming + similar calls are
  * routed to the active job's source (SOURCES[source].apiBase). */
 
+import { factcheckCalloutScript } from "../../../summaries/factcheck-callout.ts";
 import { markdownContentStyles } from "./doc-panel.ts";
 
 export function sumJobCardStyles(): string {
@@ -401,8 +402,10 @@ export function sumJobCardScript(): string {
         marked.use({ renderer: { html: function(token) { return esc(token.raw || token.text || ''); } } });
         marked.__sanitized = true;
       }
-      return marked.parse(text);
+      // A summary's fact-check block: sentinel lines out, callout styled.
+      return styleFactcheckCallouts(marked.parse(dropFactcheckSentinelLines(text)));
     }
+    ${factcheckCalloutScript()}
 
     function updateStatusBadge(status) {
       var badge = document.getElementById('statusBadge');

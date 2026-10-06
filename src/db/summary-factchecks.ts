@@ -40,9 +40,21 @@ export interface SummaryFactcheck {
   transcript: SavedTranscriptCheck | null;
   /** sha256 of the transcript that check read. */
   transcriptSha256: string | null;
+  /** Epoch ms of the last Integrate apply; `null` until then and after a
+   *  re-check (migration 080). */
+  appliedAt: number | null;
 }
 
-export type SummaryFactcheckInput = Omit<SummaryFactcheck, "createdAt" | "transcript" | "transcriptSha256">;
+export type SummaryFactcheckInput = Omit<SummaryFactcheck, "createdAt" | "transcript" | "transcriptSha256" | "appliedAt">;
+
+/**
+ * A row read for a write: `createdAtText` is `created_at` as Postgres prints it,
+ * full precision. The write routes' row CAS compares THAT, never the epoch-ms
+ * value, which drops the microseconds `now()` stores.
+ */
+export interface VersionedSummaryFactcheck extends SummaryFactcheck {
+  createdAtText: string;
+}
 
 /** The Latest-rail badge for one checked document. */
 export interface SummaryFactcheckBadge {
@@ -66,6 +78,8 @@ interface Row {
   /** Absent on a database without migration 081. */
   transcript_claims?: unknown;
   transcript_sha256?: string | null;
+  /** Absent on a database without migration 080. */
+  applied_at?: Date | string | null;
 }
 
 function mapRow(r: Row): SummaryFactcheck {
@@ -90,6 +104,7 @@ function mapRow(r: Row): SummaryFactcheck {
     createdAt: new Date(r.created_at).getTime(),
     transcript,
     transcriptSha256: transcript ? (r.transcript_sha256 ?? null) : null,
+    appliedAt: r.applied_at ? new Date(r.applied_at).getTime() : null,
   };
 }
 
@@ -113,7 +128,9 @@ export async function summaryFactcheckTranscriptColumnsPresent(): Promise<boolea
  *
  * A replacement is a NEW claim set, so it sets the transcript check back to
  * NULL: its verdicts join by index and would pair with claims they never saw.
- * On a database without migration 081 there is nothing to clear.
+ * On a database without migration 081 there is nothing to clear. A replacement
+ * also clears `applied_at` (migration 080, which the check route requires): the
+ * verdicts the integrate wrote are gone.
  */
 export async function upsertSummaryFactcheck(input: SummaryFactcheckInput): Promise<SummaryFactcheck> {
   const sql = getDb();
@@ -132,6 +149,7 @@ export async function upsertSummaryFactcheck(input: SummaryFactcheckInput): Prom
       claims = EXCLUDED.claims,
       bot_name = EXCLUDED.bot_name,
       created_at = EXCLUDED.created_at,
+      applied_at = NULL,
       transcript_claims = NULL,
       transcript_sha256 = NULL
     RETURNING *
@@ -148,7 +166,8 @@ export async function upsertSummaryFactcheck(input: SummaryFactcheckInput): Prom
       answer = EXCLUDED.answer,
       claims = EXCLUDED.claims,
       bot_name = EXCLUDED.bot_name,
-      created_at = EXCLUDED.created_at
+      created_at = EXCLUDED.created_at,
+      applied_at = NULL
     RETURNING *
   `;
   return mapRow(rows[0]!);
@@ -259,4 +278,63 @@ export async function listSummaryFactcheckMarks(): Promise<SummaryFactcheckMark[
     ...countCorrectableClaims(r.claims),
     answerSha256: r.answer_sha256,
   }));
+}
+
+/** The row for a write route, with its full-precision `created_at` text. */
+export async function getSummaryFactcheckVersioned(
+  collection: string,
+  docId: string,
+): Promise<VersionedSummaryFactcheck | null> {
+  const sql = getDb();
+  const rows = await sql<(Row & { created_at_text: string })[]>`
+    SELECT *, created_at::text AS created_at_text
+    FROM summary_factchecks WHERE collection = ${collection} AND doc_id = ${docId}
+  `;
+  const r = rows[0];
+  return r ? { ...mapRow(r), createdAtText: r.created_at_text } : null;
+}
+
+/**
+ * Stamp an Integrate apply: `applied_at = now()` and the checked-text hash of
+ * the file the apply wrote. A CAS on the row the apply read — the same
+ * `created_at` (full precision) and the same answer — so a re-check that landed
+ * while the apply ran is never marked applied. `false` when no row matched.
+ */
+export async function markSummaryFactcheckApplied(input: {
+  collection: string;
+  docId: string;
+  createdAtText: string;
+  answerSha256: string;
+  bodySha256: string;
+}): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE summary_factchecks
+    SET applied_at = now(), body_sha256 = ${input.bodySha256}
+    WHERE collection = ${input.collection} AND doc_id = ${input.docId}
+      -- Bound as TEXT: a parameter the server types as timestamptz goes through
+      -- postgres.js's Date serializer, which drops the microseconds (measured).
+      AND created_at = ${input.createdAtText}::text::timestamptz
+      AND encode(sha256(convert_to(answer, 'UTF8')), 'hex') = ${input.answerSha256}
+    RETURNING 1
+  `;
+  return rows.length === 1;
+}
+
+let appliedAtColumnSeen = false;
+
+/**
+ * Does the table carry migration 080's `applied_at`? The check route and the
+ * write routes answer 503 without it, before any model spend. Only a YES is
+ * cached, so running the migration needs no restart.
+ */
+export async function summaryFactchecksHasAppliedAt(): Promise<boolean> {
+  if (appliedAtColumnSeen) return true;
+  const sql = getDb();
+  const rows = await sql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'summary_factchecks' AND column_name = 'applied_at'
+  `;
+  appliedAtColumnSeen = rows.length > 0;
+  return appliedAtColumnSeen;
 }

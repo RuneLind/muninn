@@ -62,6 +62,7 @@ import { getLog } from "../../logging.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
+import { getSummaryFactcheck } from "../../db/summary-factchecks.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId, SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { mapProseLines } from "../../summaries/transcript-split.ts";
 import {
@@ -169,6 +170,10 @@ export interface SummariesRerunDeps {
    *  other summary write routes share. A test passes its own. */
   claims?: SummarySaveClaims;
   bots: () => BotConfig[];
+  /** When the document's saved fact check was last integrated (epoch ms), or
+   *  `null` — the menu warns that a re-run drops those corrections (D13).
+   *  Absent ⇒ never. Never throws into the route. */
+  factcheckAppliedAt?: (collection: string, docId: string) => Promise<number | null>;
 }
 
 export function defaultSummariesRerunDeps(knowledgeApiUrl: string): SummariesRerunDeps {
@@ -188,6 +193,7 @@ export function defaultSummariesRerunDeps(knowledgeApiUrl: string): SummariesRer
     ingest: postSummaryIngest,
     oneShot: runCaptureOneShot,
     bots: discoverAllBots,
+    factcheckAppliedAt: async (collection, docId) => (await getSummaryFactcheck(collection, docId))?.appliedAt ?? null,
   };
 }
 
@@ -857,6 +863,10 @@ export function registerSummariesRerunRoutes(
     if (!loaded.ok) return c.json({ error: loaded.error, code: loaded.code }, loaded.status);
     const { vertical, stored } = loaded;
 
+    const factcheckAppliedAt = deps.factcheckAppliedAt
+      ? await deps.factcheckAppliedAt(loaded.collection, docId).catch(() => null)
+      : null;
+
     const bot = resolveSummarizerBot(deps.bots());
     const kinds = bot && vertical.hasKindPicker ? capturePresetOptions(vertical.kinds(bot)) : [];
     // NULL, not the default, for a document written before kinds existed. The
@@ -907,6 +917,9 @@ export function registerSummariesRerunRoutes(
       promptUrl: vertical.id === "youtube" && videoId ? youtubeWatchUrl(videoId) : url,
       full: { supported: false, reason: FULL_RERUN_UNSUPPORTED },
       bot: bot?.name ?? null,
+      // Fact-check corrections integrated into this summary: a re-run
+      // regenerates it from the transcript and drops them (D13).
+      factcheckAppliedAt,
     });
   });
 

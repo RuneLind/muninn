@@ -73,6 +73,7 @@ function saved(over: Partial<SummaryFactcheck> = {}): SummaryFactcheck {
     createdAt: CHECKED_AT,
     transcript: null,
     transcriptSha256: null,
+    appliedAt: null,
     ...over,
   };
 }

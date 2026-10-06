@@ -655,6 +655,16 @@ export function sumArticleLibraryScript(): string {
       var pop = rerunMenuEl();
       if (!pop) return;
       pop.textContent = '';
+      // D13: corrections integrated from a fact check live only in the summary
+      // text, so a run regenerated from the transcript drops them.
+      if (opts.factcheckAppliedAt) {
+        var appliedNote = rerunMenuNote('Fact-check corrections were integrated into this summary on ' +
+          new Date(opts.factcheckAppliedAt).toISOString().slice(0, 10) +
+          '. A re-run regenerates it from the transcript and drops them.');
+        appliedNote.classList.add('doc-panel-menu-warn');
+        appliedNote.setAttribute('data-rerun-warn', 'factcheck-applied');
+        pop.appendChild(appliedNote);
+      }
       // The server's save preflight: no url, no category, or a title that does
       // not round-trip — each a save that would fork rather than replace.
       var saveRefusal = opts.saveable && opts.saveable.ok === false

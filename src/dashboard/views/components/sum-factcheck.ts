@@ -81,6 +81,35 @@ export function sumFactcheckStyles(): string {
     }
     .sum-fc-tx-read { font-size: 12px; font-weight: 600; color: var(--text-primary); }
     .sum-fc-tx-note { flex-basis: 100%; padding-left: 24px; font-size: 12px; color: var(--text-secondary); }
+    /* ➕ Add / ✎ Integrate (sum-factcheck-writeback-client.ts). */
+    .sum-fc-wb { margin-top: 12px; }
+    .sum-fc-int-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .sum-fc-wb-btn {
+      font: inherit; font-size: 12px; cursor: pointer; background: none; color: var(--text-secondary);
+      border: 1px solid var(--border-secondary); border-radius: 6px; padding: 3px 10px;
+    }
+    .sum-fc-wb-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+    .sum-fc-wb-btn:disabled { opacity: 0.55; cursor: default; }
+    .sum-fc-wb-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .sum-fc-wb-done { font-size: 12px; font-weight: 600; color: color-mix(in srgb, var(--status-success) 70%, var(--text-primary)); }
+    .sum-fc-wb-msg { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
+    .sum-fc-wb-msg.error { color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
+    .sum-fc-int { margin-top: 4px; padding: 10px 12px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-card); white-space: normal; }
+    .sum-fc-int-head { font-weight: 600; color: var(--text-primary); font-size: 13px; }
+    .sum-fc-int-note { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+    .sum-fc-int-edit { border-top: 1px solid var(--border-secondary); padding: 8px 0; margin-top: 8px; }
+    .sum-fc-int-row { display: flex; align-items: baseline; gap: 8px; cursor: pointer; flex-wrap: wrap; color: var(--text-primary); font-size: 13px; }
+    .sum-fc-int-reason { font-size: 12px; color: var(--text-secondary); margin: 2px 0 0 24px; }
+    .sum-fc-int-ctx { font-size: 12px; color: var(--text-muted); margin: 4px 0; }
+    .sum-fc-int-diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin: 4px 0; }
+    .sum-fc-int-diff .d-add { display: block; white-space: pre-wrap; color: color-mix(in srgb, var(--status-success) 65%, var(--text-primary)); background: color-mix(in srgb, var(--status-success) 12%, transparent); }
+    .sum-fc-int-diff .d-del { display: block; white-space: pre-wrap; color: color-mix(in srgb, var(--status-error) 65%, var(--text-primary)); background: color-mix(in srgb, var(--status-error) 12%, transparent); }
+    .sum-fc-int-diff .d-ctx { display: block; white-space: pre-wrap; color: var(--text-muted); }
+    .sum-fc-int-dropped { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
+    .sum-fc-int-dropped summary { cursor: pointer; }
+    .sum-fc-int-drop { display: flex; gap: 8px; padding: 2px 0; }
+    .sum-fc-int-drop-reason { flex-shrink: 0; color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
+    .sum-fc-int-drop-quote { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 ${FACTCHECK_CONF_CHIP_CSS}
     /* The Latest rail badge. */
     .sum-fc-badge { flex-shrink: 0; font-size: 10px; font-weight: 600; }

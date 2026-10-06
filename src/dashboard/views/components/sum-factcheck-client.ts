@@ -30,12 +30,13 @@ import {
 import { escHtml } from "./escape.ts";
 import { timeAgo } from "./helpers.ts";
 import { DOC_PANEL_FACTCHECK_BTN_ID } from "./doc-panel.ts";
+import { wireWriteback, writebackHtml } from "./sum-factcheck-writeback-client.ts";
 
 export const SUM_FACTCHECK_SECTION_ID = "sumFactcheck";
 export const SUM_FACTCHECK_BTN_ID = DOC_PANEL_FACTCHECK_BTN_ID;
 
 interface SavedClaim { verdict: string }
-interface SavedResult { answer: string; html: string | null; claims: SavedClaim[]; createdAt: number }
+interface SavedResult { answer: string; html: string | null; claims: SavedClaim[]; createdAt: number; appliedAt?: number | null }
 interface SavedState {
   result: SavedResult | null;
   stale: boolean | null;
@@ -355,9 +356,25 @@ function render(): void {
     notice(run?.error ?? null) +
     notice(tRun?.error ?? null) +
     (state?.transcriptHtml ?? "") +
-    (result ? `<div class="sum-fc-answer">${result.html ?? escHtml(result.answer)}</div>` : "");
+    (result ? `<div class="sum-fc-answer">${result.html ?? escHtml(result.answer)}</div>` : "") +
+    (result ? writebackHtml(key, result, state?.stale ?? null) : "");
   el.querySelector(".sum-fc-recheck")?.addEventListener("click", () => sumFactcheckStart());
   el.querySelector(".sum-fc-txbtn")?.addEventListener("click", () => sumFactcheckTranscriptStart());
+  if (result) {
+    const { source, docId } = current;
+    wireWriteback(el, {
+      source,
+      docId,
+      key,
+      render,
+      afterWrite: () => {
+        void loadSaved(source, docId);
+        // The article shows the written file: re-open it in place.
+        const reopen = (globalThis as { openSummaryDoc?: (id: string, url: string, src: string) => void }).openSummaryDoc;
+        if (current && current.source === source && current.docId === docId) reopen?.(docId, "", source);
+      },
+    });
+  }
 }
 
 function notice(text: string | null): string {

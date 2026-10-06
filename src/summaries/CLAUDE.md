@@ -415,3 +415,59 @@ article mode, unchanged prompts) over the summary and saves the result in
   shape maps to no transcript check (`parseSavedTranscriptCheck`, warned), so the
   web block still renders. Measured on 13 synthesized fixtures, two of them
   prompt injections and one a mis-heard name: `bun scripts/eval-transcript-check.ts`.
+
+### Write-back: ➕ Add and ✎ Integrate (`/api/summaries/factcheck/{append,integrate,integrate/apply}`)
+
+Server half: `src/dashboard/routes/summaries-factcheck-writeback.ts`; pure halves:
+`factcheck-block.ts` (the block), `factcheck-integrate.ts` (slices, voice,
+preview) and `factcheck-callout.ts` (how the block reads); client half:
+`sum-factcheck-writeback-client.ts`, in the same bundle as the section.
+
+- **The block (D3).** `<!-- factcheck:start -->`, `## Fact check (date)` (the
+  check's Oslo day; the heading gives huginn a chunk), a `> [!factcheck]`
+  callout quoting the answer, `<!-- factcheck:end -->`. Inserted above the
+  `## Visual reference` section, else at the end of the body (above
+  `## Transcript`), replacing an earlier one.
+- **Insert and strip are exact inverses (D11).** The strip removes the block
+  plus ONE `\n\n` — the one after it, else the one before it — and nothing
+  else: never the wiki's `stripFactcheckBlock`, which collapses every 3+ newline
+  run in the body, code fences included. `summaryFactcheckBody` strips first, so
+  Add never moves `body_sha256` and a re-check never reads its own verdicts;
+  `fetchSummaryDoc` strips too, so no drafter or gardener input carries it.
+  Pinned by a five-shape property test through `buildSummarySaveBody` and a
+  restated huginn write (`factcheck-block.test.ts`).
+- **One hash input (D12):** `checkedTextOfRaw(raw)` = `summaryFactcheckBody(sourceTextOfRaw(raw))`.
+  Append and propose compare it with the row (`409 recheck`); `applied_at` set and
+  equal is `409 already_applied` for propose; set and different is the "summary
+  changed since the integrate — re-check to re-apply" notice (`changedSinceApply`).
+- **Propose → apply CAS.** Propose returns `rawSha256` and `rowVersion`
+  (`created_at` text + sha256 of the answer). Apply refuses either moving with
+  `409 recheck`, claims the document BEFORE its read, re-resolves the CLIENT's
+  accepted edits against that read, writes the edits AND the block in one save,
+  re-stamps `body_sha256` from the re-read written file and sets `applied_at`
+  with a row CAS. 0 rows (a re-check landed meanwhile) answers 200
+  `recheckedDuringApply`: the file stays written, the row un-applied.
+- **Slices, not new zone kinds.** The model sees, and edits resolve in, the two
+  ranges the check reads (`summaryCheckedRanges`), each masked and spliced on its
+  own; an `old` that anchors in both is ambiguous and drops. The visual-reference
+  section and the transcript are never touched.
+- **Voice (D5, D7).** `buildIntegratePrompt`'s `voice` parameter: the wiki keeps
+  `WIKI_EDITOR_VOICE` (byte-identical, golden-pinned in
+  `src/wiki/__fixtures__/integrate-prompt-wiki.golden.json`); summaries get
+  `summaryEditorVoice(noun)`, which ATTRIBUTES every ❌ and ⚠️ ("the video says
+  X; sources say Y") in the system prompt. The noun comes from the URL host
+  first (YouTube/TikTok → video, Vimeo → talk, X → post), then the collection.
+  Runs on `SUMMARIZER_BOT` through `runIntegrateOneShot` (tools fenced).
+- **Every route** loads `answer`/`claims` from the row, requires
+  `application/json`, and answers **503 `migration_080`** while `applied_at` is
+  missing — as does the check route, whose upsert writes it.
+- **Rendering.** `dropFactcheckSentinelLines` + `styleFactcheckCallouts` run
+  inside both page `renderMarkdown`s (`sum-job-card.ts` for `/summaries`,
+  `doc-panel.ts` for the doc panel elsewhere and the search document page) and in
+  `renderExportMarkdown`; they reach the page as `.toString()` source, so they
+  call nothing outside themselves and carry no literal `<!--`.
+- **Re-run interplay (D13).** `GET /api/summaries/rerun/options` carries
+  `factcheckAppliedAt`; the menu warns that a re-run drops the corrections.
+- **Not for `article`/`anthropic` re-runs (L5).** Measured 2026-10-06: none of
+  the 44 stored `article-summaries` + `anthropic-summaries` documents keeps its
+  source text, so there is nothing to regenerate from.

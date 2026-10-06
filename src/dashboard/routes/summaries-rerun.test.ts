@@ -1009,6 +1009,19 @@ describe("GET /api/summaries/rerun/options", () => {
     expect((data.full as { supported: boolean }).supported).toBe(false);
   });
 
+  test("names when fact-check corrections were integrated, so the menu can warn (D13)", async () => {
+    const { deps } = makeDeps(youtubeDoc({ kind: "talk-notes" }));
+    const asked: string[] = [];
+    const withApplied = appFor({ ...deps, factcheckAppliedAt: async (c, d) => (asked.push(`${c}|${d}`), 1_760_000_000_000) });
+    const url = `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`;
+    expect(((await (await withApplied.request(url)).json()) as { factcheckAppliedAt: unknown }).factcheckAppliedAt).toBe(1_760_000_000_000);
+    expect(asked).toEqual([`youtube-summaries|${DOC_ID}`]);
+    // Unset, and a lookup that throws (no migration 080), both read as "never".
+    expect(((await (await app.request(url)).json()) as { factcheckAppliedAt: unknown }).factcheckAppliedAt).toBeNull();
+    const throwing = appFor({ ...deps, factcheckAppliedAt: async () => { throw new Error("no column"); } });
+    expect(((await (await throwing.request(url)).json()) as { factcheckAppliedAt: unknown }).factcheckAppliedAt).toBeNull();
+  });
+
   test("a transcript-less document says so instead of 400ing the menu", async () => {
     const res = await appFor(makeDeps(youtubeDoc({ transcript: null })).deps).request(
       `/api/summaries/rerun/options?source=youtube&docId=${encodeURIComponent(DOC_ID)}`,
