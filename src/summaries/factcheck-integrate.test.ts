@@ -443,6 +443,9 @@ describe("attribution is judged per run of contiguous edits (#650 follow-up)", (
     ["the 1st edit's old ends in a heading marker", "Sleep 4 hours.\n\n## Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n\n## ", new: "The video says sleep 4 hours; sources say 7–9.\n\n## " }, coffee], [DROPPED(1), "not attributed"]],
     ["the 1st edit's old ends past a blank line", "Sleep 4 hours.\n\nNote: Coffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.\n\nNote:", new: "The video says sleep 4 hours; sources say 7–9.\n\nNote:" }, { ...coffee, old: " Coffee is fine.", new: " Coffee is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
     ["the 2nd edit's old runs on into the next item", "- Sleep 4 hours. Coffee is fine.\n- Tea is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.", new: "The video says sleep 4 hours; sources say 7–9." }, { ...coffee, old: "Coffee is fine.\n- Tea is fine.", new: "Coffee is fine.\n- Tea is fine at 4 hours." }], [DROPPED(1), "not attributed"]],
+    // class check (round 3); the full state space is the enumerated test below
+    ["an all-blank edit does not bridge the blank line it is", "Sleep 4 hours.\n\nCoffee is fine.", [{ claimIndex: 1, old: "Sleep 4 hours.", new: "Sleep 7–9 hours." }, { claimIndex: 1, old: "\n\n", new: "\n\n\n" }, { ...coffee, new: "The video says coffee is fine." }], ["not attributed", "not attributed", DROPPED(1)]],
+    ["the newline and marker before the 1st edit's text are outside the span", "Intro\n- Alpha one. Beta two.", [{ claimIndex: 1, old: "\n- Alpha one.", new: "\n- The video says alpha one; sources say two." }, { ...halfB, new: "Beta three." }], ["ok", "ok"]],
   ];
   test.each(rows)("%s", async (_name, text, edits, expected) => {
     expect(await propose(text, edits)).toEqual(expected);
@@ -464,5 +467,84 @@ describe("attribution is judged per run of contiguous edits (#650 follow-up)", (
       bodyLen: text.length,
     });
     expect(r.outcomes.map((o) => (o.applied ? "ok" : o.reason))).toEqual([DROPPED(1), "not attributed", "ok"]);
+  });
+});
+
+// Class check (round 3): every neighbour pair of one claim's edits, by shape.
+// The expectation is derived per CLASS from the invariant on `runBreaks`, not
+// from the text, so it does not restate the implementation.
+describe("run breaks over the whole state space of two neighbouring edits", () => {
+  // prev / p shapes; `I` = an internal boundary, `W` = all blank (reachable only
+  // through the exported functions: both routes refuse a blank `old`).
+  const PREV = { C: "Alpha one.", L: "\n- Alpha one.", T: "Alpha one.\n", W1: "\n", W2: "\n\n", W3: "\r\n\r\n", I1: "Alpha one.\n- ", I2: "Alpha one.\n\n## " };
+  const P = { C: "Beta two.", L: "\n- Beta two.", T: "Beta two.\n", W1: "\n", W2: "\n\n", W3: "\r\n\r\n", I1: "Beta two.\n- ", I2: "Beta two.\n\n## " };
+  const GAP = { none: "", space: " ", wrap: "\n", crlf: "\r\n", blank: "\n\n", list: "\n- ", ordinal: "\n1. ", heading: "\n## ", quote: "\n> ", table: "\n| " };
+  const SUFFIX = { plain: "Omega.", marker: "- Omega." };
+  type K<T> = keyof T & string;
+
+  // Newlines each part puts at the pair's junction; two or more form a blank line.
+  const NL: Record<string, number> = { "prev:T": 1, "prev:W1": 1, "gap:wrap": 1, "gap:crlf": 1, "p:W1": 1 };
+  const expectBreak = (prev: K<typeof PREV>, p: K<typeof P>, gap: K<typeof GAP>, suffix: K<typeof SUFFIX>): boolean =>
+    ["W2", "W3", "I1", "I2"].includes(prev) || // a blank line or block line inside prev from its text on
+    ["L", "W2", "W3", "I1", "I2"].includes(p) || // ... inside p up to its text's end
+    !["none", "space", "wrap", "crlf"].includes(gap) || // a blank or block line between
+    (NL[`prev:${prev}`] ?? 0) + (NL[`gap:${gap}`] ?? 0) + (NL[`p:${p}`] ?? 0) >= 2 || // a blank line across the junction
+    (p === "W1" && suffix === "marker"); // an all-blank p's newline opens the next line inside the span
+
+  const joins = async (prev: string, p: string, gap: string, suffix: string): Promise<boolean> => {
+    const { unattributedEdits, summaryEditSlices } = await import("./factcheck-integrate.ts");
+    const text = `Intro${prev}${gap}${p}${suffix}`;
+    const slices = summaryEditSlices(text);
+    expect(slices.ranges).toEqual([{ start: 0, end: text.length }]);
+    const at = (start: number, old: string, n: string) => ({ edit: { claimIndex: 1, verdict: "❌", reason: "", old, new: n }, slice: 0, start, end: start + old.length });
+    const a = at(5, prev, "The video says alpha one; sources say two.");
+    const b = at(5 + prev.length + gap.length, p, "Beta three.");
+    // prev attributes alone, p is silent: p is flagged iff the pair breaks.
+    return !unattributedEdits([a, b], { slices, sourceNoun: "the video", correctable: new Set() }).has(b);
+  };
+
+  test("the hand-written anchors", async () => {
+    const anchors: [K<typeof PREV>, K<typeof P>, K<typeof GAP>, K<typeof SUFFIX>, boolean][] = [
+      ["C", "C", "wrap", "plain", true], // hard wrap
+      ["C", "C", "crlf", "marker", true], // CRLF wrap
+      ["C", "C", "space", "plain", true],
+      ["C", "C", "blank", "plain", false],
+      ["C", "C", "ordinal", "plain", false],
+      ["C", "C", "quote", "plain", false],
+      ["C", "C", "table", "plain", false],
+      ["C", "C", "heading", "plain", false],
+      ["L", "C", "space", "plain", true], // leading "\n- " of prev is outside the span
+      ["T", "C", "none", "plain", true],
+      ["T", "C", "wrap", "plain", false], // "\n" + "\n" = a blank line
+      ["C", "T", "none", "marker", true], // trailing "\n" of p is outside the span
+      ["W1", "C", "none", "plain", true], // a wrap edit stays in its paragraph
+      ["W2", "C", "none", "plain", false], // the round-3 finding
+      ["C", "W2", "none", "plain", false], // ... mirrored
+      ["W3", "C", "none", "plain", false],
+      ["C", "W1", "none", "plain", true],
+      ["C", "W1", "none", "marker", false],
+      ["I1", "C", "none", "plain", false],
+      ["C", "I2", "none", "plain", false],
+      ["C", "L", "space", "plain", false],
+    ];
+    for (const [prev, p, gap, suffix, join] of anchors) {
+      expect({ prev, p, gap, suffix, join: await joins(PREV[prev], P[p], GAP[gap], SUFFIX[suffix]) }).toEqual({ prev, p, gap, suffix, join });
+      expect(!expectBreak(prev, p, gap, suffix)).toBe(join);
+    }
+  });
+
+  test("every prev × p × gap × suffix combination follows the invariant", async () => {
+    const wrong: string[] = [];
+    let rows = 0;
+    for (const prev of Object.keys(PREV) as K<typeof PREV>[])
+      for (const p of Object.keys(P) as K<typeof P>[])
+        for (const gap of Object.keys(GAP) as K<typeof GAP>[])
+          for (const suffix of Object.keys(SUFFIX) as K<typeof SUFFIX>[]) {
+            rows++;
+            const want = !expectBreak(prev, p, gap, suffix);
+            if ((await joins(PREV[prev], P[p], GAP[gap], SUFFIX[suffix])) !== want) wrong.push(`${prev}+${gap}+${p}+${suffix}: want ${want ? "join" : "break"}`);
+          }
+    expect(rows).toBe(8 * 8 * 10 * 2);
+    expect(wrong).toEqual([]);
   });
 });

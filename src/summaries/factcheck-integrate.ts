@@ -248,15 +248,18 @@ const BLANK_LINE_RE = /\n[ \t\r]*\n/;
 const BLOCK_LINE_RE = /[ \t]*(?:(?:[-*+]|\d+[.)]|#{1,6})[ \t]|>|\|)/y;
 
 /** Is there a block boundary between `prev` and `p` in the original `text`?
- *  Judged from `prev`'s FIRST non-blank char to `p`'s LAST, so both edits'
- *  own interiors count: a blank line in that span, or a line starting in it
- *  (read in full) that opens a block. An edit that itself spans two blocks
- *  therefore never joins a neighbour. */
+ *  Invariant: they join iff no blank line and no line opening a block (read in
+ *  full) starts inside the span from `prev`'s first non-blank char to `p`'s
+ *  last, where an all-blank edit contributes its whole range. So both edits'
+ *  interiors count (an edit spanning two blocks never joins), the whitespace
+ *  outside the pair does not, and an all-blank edit cannot hide a blank line. */
 function runBreaks(text: string, prev: PlacedEdit, p: PlacedEdit): boolean {
   let from = prev.start;
   while (from < prev.end && /\s/.test(text[from]!)) from++;
+  if (from === prev.end) from = prev.start;
   let to = p.end;
   while (to > p.start && /\s/.test(text[to - 1]!)) to--;
+  if (to === p.start) to = p.end;
   const span = text.slice(from, to);
   if (BLANK_LINE_RE.test(span)) return true;
   for (let i = span.indexOf("\n"); i !== -1; i = span.indexOf("\n", i + 1)) {
