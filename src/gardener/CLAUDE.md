@@ -48,6 +48,26 @@ Three of the four outcomes (`covered`/`skipped`/`error`) persist NO `wiki_propos
 
 Both collision skips carry the BLOCKING PAGE (`findCollidingPage` returns the page, not a boolean) so the row deep-links it. **`POST /api/wiki/gardener/source-draft-doc`** re-runs one doc with an optional `title` override: the drafter uses it verbatim and **forgoes the collision retry** — that retry's SKIP branch is exactly what drops these docs, and it must not overrule a title a human chose. An override that is also taken is answered from the index before any model call; `sanitizeTitleOverride` collapses whitespace + drops quotes, since the value is interpolated into the prompt.
 
+### Summary fact-checks — carried into the draft, flagged at the gate (2026-10-06)
+
+A summary fact-check is saved in `summary_factchecks`, keyed `(collection, doc_id)`. The source drafter reads that row through the `getFactcheck` seam, keyed by its own `input.collection` + `input.docId`, and never parses the summary body for it (`factcheck-carry.ts`). In **create mode only**:
+
+- **The rider.** `buildFactcheckRider` lists the ❌/⚠️ claims with their corrections, parsed from `answer`, capped at 2,000 chars. It tells the model to attribute each one ("The video claims X; sources say Y", with the noun picked per collection by `sourceKindNoun`) and not to reproduce the fact-check section. When there is no row, or the check found only ✅/❓, the rider is empty and the prompt is byte-identical to the prompt for an unchecked doc (a test pins its hash). A lookup that throws counts as "not checked".
+- **The block.** The persisted draft gets `buildFactcheckAppendix`'s `.mdx` block appended, so the gate diff shows it. `withFactcheckAppendix` first removes any block or `Fact check` section the model wrote anyway, so the page never carries two. Containment and the related-pages pick run before the append, so they never read the check's text.
+
+Update mode (the backfill reviser) does no lookup, adds no rider and appends nothing.
+
+**The gate** (`proposalFactcheckFlag`, on the `/api/wiki/proposals` payload as `factcheck`) looks only at live `source` rows from a doc whose check found at least one ❌ or ⚠️. A ✅/❓-only check flags nothing. A **create-mode draft older than the check** is flagged "Drafted before fact-check". Its card disables Approve and offers **Redraft**; Reject still works. Any live row from such a doc whose draft carries neither the block nor a `Fact check` heading gets a note, and that note never blocks Approve.
+
+**Redraft** (`POST /api/wiki/proposals/:id/redraft`, `application/json`, both read-only refusals, under the per-bot `runExclusive`) re-reads the doc through `fetchSummaryDoc` and runs `draftSourcePage`. Its two live checks skip ONLY the replaced row (`getLiveTopicKeys`/`getLiveSourceDocUrls` take an `excludeId`); the check for the URL already in the wiki, and the checks against every other live proposal, still apply. The persist is ONE transaction (`replaceDraftProposal`), because the partial unique index refuses a second live row: CAS the old row `draft → stale`, insert the new row, upsert the attempt row to point at it (`trigger_source = redraft`). Its four outcomes, exhaustive:
+
+- **`drafted`.** The CAS and the insert each touch one row, and the transaction commits.
+- **`superseded_meanwhile`.** The CAS touches 0 rows, because the old row was approved, rejected or applied during the model call. The transaction rolls back and nothing changes.
+- **`covered`.** The insert conflicts with another live row for the key. The transaction rolls back.
+- **A model failure or skip.** No transaction runs. The old draft and the attempt row stay as they were.
+
+Pages already applied, and the weekly and consolidation drafters, are out of scope.
+
 ## Lint fixes (`kind: "lint"`, `src/gardener/lint-proposals.ts`)
 
 The fourth thing that fills the review gate, and the only one with **no model

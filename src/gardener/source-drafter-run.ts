@@ -34,6 +34,7 @@ import {
   type SourceDraftAttemptOutcome,
   type SourceDraftTrigger,
 } from "../db/source-draft-attempts.ts";
+import { getSummaryFactcheck } from "../db/summary-factchecks.ts";
 import { loadConfig } from "../config.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import { docDateMs } from "./harvest.ts";
@@ -104,6 +105,7 @@ export async function runSourceDraftForInput(
     liveTopicKeys: () => getLiveTopicKeys(botConfig.name),
     liveSourceDocUrls: () => getLiveSourceDocUrls(botConfig.name),
     insertProposal: (params) => insertWikiProposal(params),
+    getFactcheck: getSummaryFactcheck,
     callDrafter: async (prompt, title) => {
       const res = await runDrafterOneShot({
         title,

@@ -1,5 +1,10 @@
+import type { Sql } from "postgres";
 import { getDb } from "./client.ts";
 import type { LintMeta } from "../gardener/lint-markers.ts";
+import {
+  recordSourceDraftAttemptIn,
+  type RecordSourceDraftAttemptParams,
+} from "./source-draft-attempts.ts";
 
 /**
  * Wiki-gardener proposals — drafted knowledge-wiki pages awaiting review.
@@ -135,7 +140,13 @@ export interface InsertWikiProposalParams {
 export async function insertWikiProposal(
   params: InsertWikiProposalParams,
 ): Promise<WikiProposal | null> {
-  const sql = getDb();
+  return insertWikiProposalWith(getDb(), params);
+}
+
+async function insertWikiProposalWith(
+  sql: Sql,
+  params: InsertWikiProposalParams,
+): Promise<WikiProposal | null> {
   const [row] = await sql`
     INSERT INTO wiki_proposals (
       bot_name, wiki_name, topic_key, group_key, lint_meta, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
@@ -160,6 +171,52 @@ export async function insertWikiProposal(
     RETURNING *
   `;
   return row ? mapRow(row) : null;
+}
+
+/** What {@link replaceDraftProposal}'s one transaction did. */
+export type ReplaceDraftOutcome =
+  | { outcome: "drafted"; row: WikiProposal }
+  /** The old row was no longer a draft (approved, rejected, applied or already
+   *  replaced meanwhile): rolled back, nothing changed. */
+  | { outcome: "superseded_meanwhile" }
+  /** Another live row holds the new row's key: rolled back, nothing changed. */
+  | { outcome: "covered" };
+
+class RollbackReplace extends Error {
+  constructor(readonly outcome: "superseded_meanwhile" | "covered") {
+    super(outcome);
+  }
+}
+
+/**
+ * Redraft's persist (D6): ONE transaction, because the partial unique index on
+ * live rows rejects the new row while the old one is still a draft. CAS the old
+ * row `draft → stale`, insert the new row, and point the doc's attempt row at
+ * it. A 0-row CAS or an insert conflict rolls the whole transaction back.
+ */
+export async function replaceDraftProposal(
+  oldId: string,
+  params: InsertWikiProposalParams,
+  attempt: (newProposalId: string) => RecordSourceDraftAttemptParams,
+): Promise<ReplaceDraftOutcome> {
+  try {
+    return await getDb().begin(async (_tx) => {
+      const tx = _tx as unknown as Sql;
+      const staled = await tx`
+        UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+        WHERE id = ${oldId} AND status = 'draft'
+        RETURNING id
+      `;
+      if (staled.length !== 1) throw new RollbackReplace("superseded_meanwhile");
+      const row = await insertWikiProposalWith(tx, params);
+      if (!row) throw new RollbackReplace("covered");
+      await recordSourceDraftAttemptIn(tx, attempt(row.id));
+      return { outcome: "drafted" as const, row };
+    });
+  } catch (err) {
+    if (err instanceof RollbackReplace) return { outcome: err.outcome };
+    throw err;
+  }
 }
 
 /**
@@ -329,11 +386,13 @@ export async function markWikiProposalError(id: string): Promise<WikiProposal | 
  * TopicKeys with a live (draft/approved) proposal for this bot — the cluster-time
  * skip list guarding "one topic = at most one live proposal".
  */
-export async function getLiveTopicKeys(botName: string): Promise<string[]> {
+export async function getLiveTopicKeys(botName: string, excludeId?: string): Promise<string[]> {
   const sql = getDb();
+  // `excludeId`: Redraft's pre-model check ignores ONLY the row it replaces.
   const rows = await sql`
     SELECT DISTINCT topic_key FROM wiki_proposals
     WHERE bot_name = ${botName} AND wiki_name IS NULL AND status IN ('draft', 'approved')
+      ${excludeId ? sql`AND id <> ${excludeId}` : sql``}
   `;
   return rows.map((r) => r.topic_key as string);
 }
@@ -378,11 +437,12 @@ export async function getLiveOrAppliedTopicKeysByWiki(wikiName: string): Promise
  * `topic_key`s, so the topic-key guard alone can't catch it. Returns raw URLs (the
  * caller normalizes); empty/absent urls are dropped.
  */
-export async function getLiveSourceDocUrls(botName: string): Promise<string[]> {
+export async function getLiveSourceDocUrls(botName: string, excludeId?: string): Promise<string[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT source_docs FROM wiki_proposals
     WHERE bot_name = ${botName} AND wiki_name IS NULL AND kind = 'source' AND status IN ('draft', 'approved')
+      ${excludeId ? sql`AND id <> ${excludeId}` : sql``}
   `;
   const urls: string[] = [];
   for (const row of rows) {

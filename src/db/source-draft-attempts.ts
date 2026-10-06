@@ -1,3 +1,4 @@
+import type { Sql } from "postgres";
 import { getDb } from "./client.ts";
 import { getLog } from "../logging.ts";
 
@@ -23,7 +24,7 @@ const log = getLog("db", "source-draft-attempts");
 export type SourceDraftAttemptOutcome = "drafted" | "covered" | "skipped" | "error";
 
 /** Which entry point ran the drafter — the four callers of `runSourceDraftForInput`. */
-export type SourceDraftTrigger = "capture" | "run-now" | "backlog" | "doc";
+export type SourceDraftTrigger = "capture" | "run-now" | "backlog" | "doc" | "redraft";
 
 export interface SourceDraftAttempt {
   collection: string;
@@ -60,8 +61,26 @@ export async function recordSourceDraftAttempt(
   params: RecordSourceDraftAttemptParams,
 ): Promise<void> {
   try {
-    const sql = getDb();
-    await sql`
+    await recordSourceDraftAttemptIn(getDb(), params);
+  } catch (err) {
+    log.warn("Failed to record source-draft attempt for {collection}/{id}: {error}", {
+      collection: params.collection,
+      id: params.docId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * The same upsert on a caller's connection, and THROWING: Redraft runs it inside
+ * the transaction that replaces the proposal, so the row moves only when the
+ * replacement commits.
+ */
+export async function recordSourceDraftAttemptIn(
+  sql: Sql,
+  params: RecordSourceDraftAttemptParams,
+): Promise<void> {
+  await sql`
       INSERT INTO source_draft_attempts
         (bot_name, collection, doc_id, outcome, degraded, reason, title, colliding_path,
          proposal_id, trigger_source, attempted_at)
@@ -78,13 +97,6 @@ export async function recordSourceDraftAttempt(
         trigger_source = EXCLUDED.trigger_source,
         attempted_at   = now()
     `;
-  } catch (err) {
-    log.warn("Failed to record source-draft attempt for {collection}/{id}: {error}", {
-      collection: params.collection,
-      id: params.docId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
 }
 
 /**

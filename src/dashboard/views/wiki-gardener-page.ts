@@ -403,6 +403,14 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-btn:disabled { opacity: 0.5; cursor: default; }
     .gard-approve { background: color-mix(in srgb, var(--status-success) 20%, transparent); border-color: var(--status-success); color: var(--status-success); }
     .gard-approve:hover:not(:disabled) { background: color-mix(in srgb, var(--status-success) 32%, transparent); }
+    .gard-redraft { background: transparent; border-color: var(--status-info); color: var(--status-info); }
+    .gard-redraft:hover:not(:disabled) { background: color-mix(in srgb, var(--status-info) 14%, transparent); }
+    .gard-fc-note {
+      font-size: 12.5px; color: var(--text-secondary); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px;
+      background: color-mix(in srgb, var(--status-warning, #d0a000) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--status-warning, #d0a000) 45%, transparent);
+    }
+    .gard-fc-note.info { background: var(--bg-surface); border-color: var(--border-secondary); color: var(--text-muted); }
     .gard-reject { background: transparent; border-color: var(--border-secondary); color: var(--text-muted); }
     .gard-reject:hover:not(:disabled) { border-color: var(--status-magenta); color: var(--status-magenta); }
     .gard-outcome { font-size: 12.5px; color: var(--text-muted); }

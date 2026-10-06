@@ -115,6 +115,13 @@ import { Tracer } from "../../tracing/index.ts";
 import { getLog } from "../../logging.ts";
 import { readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
 import { requireJsonRequest } from "./json-request.ts";
+import { listSummaryFactcheckMarks } from "../../db/summary-factchecks.ts";
+import {
+  proposalFactcheckFlag,
+  type FactcheckMark,
+  type ProposalFactcheckFlag,
+} from "../../gardener/factcheck-carry.ts";
+import { redraftRefusal, redraftSourceProposal } from "../../gardener/source-redraft.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
 
@@ -243,6 +250,22 @@ interface ProposalView {
   /** Read-time preview of the apply-time wire stage (index line + inbound See-also
    *  targets). Null for terminal rows (nothing will be wired). */
   wiring: WiringPreview | null;
+  /** Saved summary fact-check flags (`proposalFactcheckFlag`); null when none apply. */
+  factcheck: ProposalFactcheckFlag | null;
+}
+
+/** The checked docs as `<collection>/<docId>` → mark. A missing table or a failed
+ *  read means no flags, never a failed listing. */
+async function loadFactcheckMarks(): Promise<Map<string, FactcheckMark>> {
+  try {
+    const marks = await listSummaryFactcheckMarks();
+    return new Map(marks.map((m) => [`${m.collection}/${m.docId}`, m]));
+  } catch (err) {
+    log.warn("Wiki-gardener: fact-check marks unavailable, listing without flags: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return new Map();
+  }
 }
 
 async function readFileOrNull(absPath: string): Promise<string | null> {
@@ -1270,6 +1293,7 @@ export function registerWikiGardenerRoutes(
     }
     const index = await getWikiIndex({ root });
     const resolve = index ? index.resolve : () => undefined;
+    const factcheckMarks = await loadFactcheckMarks();
 
     const proposals: ProposalView[] = await Promise.all(
       rows.map(async (p) => {
@@ -1363,6 +1387,12 @@ export function registerWikiGardenerRoutes(
           unresolvedLinks,
           containedLinks,
           wiring,
+          factcheck: proposalFactcheckFlag(
+            p,
+            p.sourceDocs[0]
+              ? factcheckMarks.get(`${p.sourceDocs[0].collection}/${p.sourceDocs[0].docId}`)
+              : undefined,
+          ),
         };
       }),
     );
@@ -2606,6 +2636,39 @@ export function registerWikiGardenerRoutes(
     // cleanup must never turn a successful reject into a failure.
     await deleteSourceDraftAttemptForProposal(id);
     return c.json({ outcome: "rejected" });
+  });
+
+  // Redraft → re-run the source drafter for a live create-mode draft and replace
+  // it in ONE transaction (`redraftSourceProposal`, D6). Offered by the gate on a
+  // draft made before its doc's fact-check; the route accepts any such draft.
+  app.post("/api/wiki/proposals/:id/redraft", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    const id = c.req.param("id");
+    const existing = await backlogDeps.getProposalById(id);
+    if (!existing) return c.json({ error: "proposal not found" }, 404);
+    const refusal = redraftRefusal(existing);
+    if (refusal) return c.json({ error: refusal, status: existing.status }, 409);
+    const bot = getBots().find((b) => b.name === existing.botName && !!b.wikiDir);
+    if (!bot || !bot.wikiDir) return c.json({ error: "bot has no wikiDir configured" }, 400);
+    if (isReadonlyWikiRoot(bot.wikiDir)) {
+      return c.json({ error: wikiReadonlyRootReason(bot.wikiDir), readonly: true }, 403);
+    }
+    const wikiDir = bot.wikiDir;
+    const run = runExclusive(bot.name, () => redraftSourceProposal(bot, wikiDir, existing));
+    if (run === null) {
+      return c.json({ error: "a gardener run is already in flight for this bot" }, 409);
+    }
+    try {
+      const result = await run;
+      return c.json(result, result.outcome === "error" ? 500 : 200);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error("Redraft of proposal {id} failed: {error}", { id, error: message });
+      return c.json({ error: message }, 500);
+    }
   });
 
   // ── Lint fixes: seeding, and the two GROUP verbs ──────────────────────────

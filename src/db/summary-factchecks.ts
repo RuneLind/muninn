@@ -110,3 +110,36 @@ export async function listSummaryFactcheckBadges(): Promise<SummaryFactcheckBadg
   `;
   return rows.map((r) => ({ collection: r.collection, docId: r.doc_id, bad: r.bad, total: r.total }));
 }
+
+/** What the `/wiki/gardener` gate needs to know about one checked document. */
+export interface SummaryFactcheckMark {
+  collection: string;
+  docId: string;
+  /** Epoch ms of the saved check. */
+  checkedAt: number;
+  /** Claims with a ❌ verdict. */
+  bad: number;
+  /** Claims with a ⚠️ verdict. */
+  warn: number;
+}
+
+/** Every checked document's date and ❌/⚠️ counts, in ONE query — the gate's
+ *  "drafted before fact-check" flag (PR 3). */
+export async function listSummaryFactcheckMarks(): Promise<SummaryFactcheckMark[]> {
+  const sql = getDb();
+  const rows = await sql<{ collection: string; doc_id: string; created_at: Date | string; bad: number; warn: number }[]>`
+    SELECT collection, doc_id, created_at,
+           (SELECT count(*) FROM jsonb_array_elements(claims) c
+             WHERE replace(c->>'verdict', E'️', '') = '❌')::int AS bad,
+           (SELECT count(*) FROM jsonb_array_elements(claims) c
+             WHERE replace(c->>'verdict', E'️', '') = '⚠')::int AS warn
+    FROM summary_factchecks
+  `;
+  return rows.map((r) => ({
+    collection: r.collection,
+    docId: r.doc_id,
+    checkedAt: new Date(r.created_at).getTime(),
+    bad: r.bad,
+    warn: r.warn,
+  }));
+}

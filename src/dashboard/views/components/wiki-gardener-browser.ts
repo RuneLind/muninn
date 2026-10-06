@@ -70,6 +70,14 @@ interface ProposalView {
   unresolvedLinks?: string[];
   containedLinks?: string[] | null;
   wiring?: WiringPreview | null;
+  /** Saved summary fact-check flags — see `proposalFactcheckFlag`. */
+  factcheck?: {
+    checkedAt: number;
+    bad: number;
+    warn: number;
+    draftedBefore: boolean;
+    missingBlock: boolean;
+  } | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -158,6 +166,7 @@ function cardHtml(p: ProposalView): string {
     html +=
       '<div class="gard-stale-note">Target changed since drafting — this proposal was not applied. The topic becomes eligible again on the next weekly gardener run.</div>';
   }
+  html += factcheckNoteHtml(p);
   if (p.rationale) {
     html += `<div class="gard-rationale">${esc(p.rationale)}</div>`;
   }
@@ -184,10 +193,15 @@ function cardHtml(p: ProposalView): string {
   }
   html += "</div>";
 
-  // Actions (draft only)
+  // Actions (draft only). A draft made before its doc's fact-check gets no
+  // one-click Approve: the reviewer redrafts it (or rejects it) instead.
   if (isDraft) {
+    const locked = !!p.factcheck?.draftedBefore;
     html += '<div class="gard-actions">';
-    html += `<button class="gard-btn gard-approve" data-action="approve">Approve</button>`;
+    html += locked
+      ? `<button class="gard-btn gard-approve" data-action="approve" data-fc-locked disabled title="Drafted before the fact-check — redraft it first">Approve</button>`
+      : `<button class="gard-btn gard-approve" data-action="approve">Approve</button>`;
+    if (locked) html += `<button class="gard-btn gard-redraft" data-action="redraft">Redraft</button>`;
     html += `<button class="gard-btn gard-reject" data-action="reject">Reject</button>`;
     html += '<span class="gard-outcome"></span>';
     html += "</div>";
@@ -253,6 +267,19 @@ function groupCardHtml(rows: ProposalView[]): string {
   html += "</div>";
   html += "</div>";
   return html;
+}
+
+/** The card's fact-check note: "drafted before fact-check" (blocks one-click
+ *  Approve) or the at-apply "no fact-check block" note (never blocks). */
+function factcheckNoteHtml(p: ProposalView): string {
+  const fc = p.factcheck;
+  if (!fc) return "";
+  const date = fmtDate(fc.checkedAt);
+  const counts = [fc.bad ? `${fc.bad} ❌` : "", fc.warn ? `${fc.warn} ⚠️` : ""].filter(Boolean).join(", ");
+  if (fc.draftedBefore) {
+    return `<div class="gard-fc-note" data-fc="drafted-before">Drafted before fact-check (${esc(date)}): the check found ${esc(counts)}. Redraft to carry the corrections and the fact-check block into the page.</div>`;
+  }
+  return `<div class="gard-fc-note info" data-fc="missing-block">The source doc was fact-checked (${esc(date)}), but this draft carries no fact-check block or Fact check section.</div>`;
 }
 
 function render(): void {
@@ -325,7 +352,18 @@ const JSON_POST: RequestInit = {
   body: "{}",
 };
 
-async function act(id: string, action: "approve" | "reject", card: HTMLElement): Promise<void> {
+type CardAction = "approve" | "reject" | "redraft";
+
+/** Re-enable a card's buttons after a failed action, except an Approve the
+ *  fact-check flag locked. */
+function unlockButtons(buttons: NodeListOf<Element>): void {
+  buttons.forEach((b) => {
+    if (!(b as HTMLElement).hasAttribute("data-fc-locked")) (b as HTMLButtonElement).disabled = false;
+  });
+}
+
+async function act(id: string, action: CardAction, card: HTMLElement): Promise<void> {
+  if (action === "redraft") return redraft(id, card);
   const buttons = card.querySelectorAll(".gard-btn");
   buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
   setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
@@ -337,7 +375,7 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
     const data = await res.json();
     if (!res.ok) {
       setOutcome(card, data.error || "Failed (" + res.status + ")", "err");
-      buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+      unlockButtons(buttons);
       return;
     }
     // Update local state + re-render so the status chip + filters reflect the outcome.
@@ -353,7 +391,39 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
     rerenderStrip();
   } catch (err) {
     setOutcome(card, "Network error: " + (err as Error).message, "err");
-    buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
+    unlockButtons(buttons);
+  }
+}
+
+/**
+ * Redraft one draft: a real model call, then the server's one-transaction
+ * replace. `drafted` and `superseded_meanwhile` both moved (or found moved)
+ * rows, so the list reloads; every other answer leaves the draft as it was.
+ */
+async function redraft(id: string, card: HTMLElement): Promise<void> {
+  const buttons = card.querySelectorAll(".gard-btn");
+  buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  setOutcome(card, "Redrafting… (a model call, up to a few minutes)", "");
+  try {
+    const res = await fetch(withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/redraft"), JSON_POST);
+    const data = await res.json();
+    if (res.ok && data.outcome === "drafted") {
+      loadProposals();
+      return;
+    }
+    if (res.ok && data.outcome === "superseded_meanwhile") {
+      setOutcome(card, "This draft changed meanwhile; nothing was replaced.", "err");
+      loadProposals();
+      return;
+    }
+    const note = res.ok
+      ? "Not redrafted (" + data.outcome + "): " + (data.reason || "")
+      : data.error || data.reason || "Failed (" + res.status + ")";
+    setOutcome(card, note, "err");
+    unlockButtons(buttons);
+  } catch (err) {
+    setOutcome(card, "Network error: " + (err as Error).message, "err");
+    unlockButtons(buttons);
   }
 }
 
@@ -463,7 +533,7 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
   if (actionBtn) {
     const card = actionBtn.closest(".gard-card") as HTMLElement;
     const id = card.getAttribute("data-id")!;
-    act(id, actionBtn.getAttribute("data-action") as "approve" | "reject", card);
+    act(id, actionBtn.getAttribute("data-action") as CardAction, card);
   }
 });
 
