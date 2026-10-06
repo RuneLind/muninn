@@ -316,6 +316,21 @@ describe("fix round 2: attribution is judged per claim, over its edits in docume
     expect(r.outcomes[0]!.applied).toBe(true);
   });
 
+  test("a claim whose attributed edit cannot be placed: the rest drop for the missing edit, not as unattributed", async () => {
+    const r = await propose(JWST, [{ ...JWST_SAYS, old: "Not in the summary." }, JWST_PER], [4]);
+    expect(r.outcomes.filter((o) => o.applied)).toEqual([]);
+    expect(r.dropped.find((d) => d.edit.old === JWST_PER.old)?.reason).toBe("another edit for claim 4 was dropped, so this one is too");
+  });
+
+  test("claim-0 edits are judged one by one: an attributed one does not cover another", async () => {
+    const r = await propose(JWST, [
+      { ...JWST_SAYS, claimIndex: 0, verdict: "❌" },
+      { ...JWST_PER, claimIndex: 0, verdict: "❌" },
+    ], []);
+    expect(r.outcomes.filter((o) => o.applied).map((o) => o.edit.old)).toEqual([JWST_SAYS.old]);
+    expect(r.dropped.map((d) => d.reason)).toEqual(["not attributed"]);
+  });
+
   test("claim 0 is no group: one claim-0 edit failing does not drop another", async () => {
     const r = await propose(JWST, [
       { ...JWST_PER, claimIndex: 0, verdict: "" },
@@ -363,14 +378,16 @@ describe("fix round 2: the preview selects per claim", () => {
         { claimIndex: 2, verdict: "❌", new: "b", reason: "", resolvedText: "y" },
         { claimIndex: 5, verdict: "⚠️", new: "c", reason: "", resolvedText: "z" },
         { claimIndex: 0, verdict: "", new: "d", reason: "", resolvedText: "w" },
+        { claimIndex: 0, verdict: "", new: "e", reason: "", resolvedText: "v" },
       ],
       [],
       new Map(),
     );
-    expect(html.match(/class="sum-fc-int-cb"/g)).toHaveLength(3);
+    expect(html.match(/class="sum-fc-int-cb"/g)).toHaveLength(4);
     expect(html).toContain('data-edit-idxs="0,2"');
     expect(html).toContain('data-edit-idxs="1"');
     expect(html).toContain('data-edit-idxs="3"');
-    expect(html.match(/class="sum-fc-int-diff"/g)).toHaveLength(4);
+    expect(html).toContain('data-edit-idxs="4"');
+    expect(html.match(/class="sum-fc-int-diff"/g)).toHaveLength(5);
   });
 });
