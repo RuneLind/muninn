@@ -108,6 +108,8 @@ const DEFAULT_EDITS = [
 let completionEdits: unknown[] = DEFAULT_EDITS;
 /** Held before the ingest answers, so a test can act while Add or Apply runs. */
 let ingestDelayMs = 0;
+/** Held before the model answers, so a test can act while a propose runs. */
+let completionDelayMs = 0;
 /** What the fake `/api/search` answers. */
 let searchResults: unknown[] = [];
 
@@ -132,6 +134,7 @@ async function startFake(): Promise<Server> {
       if (p === "/v1/chat/completions") {
         modelCalls += 1;
         await readBody(req);
+        if (completionDelayMs) await new Promise((r) => setTimeout(r, completionDelayMs));
         return writeCompletion(res);
       }
       if (p === "/api/youtube/ingest") {
@@ -357,6 +360,7 @@ async function reset(): Promise<void> {
   file = ORIGINAL;
   completionEdits = DEFAULT_EDITS;
   ingestDelayMs = 0;
+  completionDelayMs = 0;
   await seedRow();
 }
 
@@ -437,6 +441,28 @@ test("a new web result drops the open preview", async ({ page }) => {
   await reopen(page);
   await expect(fc.getByRole("button", { name: "✎ Integrate corrections" })).toBeVisible();
   await expect(fc.locator(".sum-fc-int-edit")).toHaveCount(0);
+});
+
+test("a propose that returns after a new web result is dropped", async ({ page }) => {
+  await reset();
+  await open(page);
+  const fc = page.locator("#sumFactcheck");
+  completionDelayMs = 3000;
+  const calls = modelCalls;
+  await fc.getByRole("button", { name: "✎ Integrate corrections" }).click();
+  await expect.poll(() => modelCalls).toBe(calls + 1);
+  // A re-check lands while the editor model is still answering.
+  await sql!`UPDATE summary_factchecks SET created_at = now() WHERE doc_id = ${DOC}`;
+  await closePanel(page);
+  await reopen(page);
+  // The new result is on screen while the propose is still out…
+  await expect(fc.locator(".sum-fc-meta")).toContainText("just now");
+  await expect(fc.getByRole("button", { name: "Proposing…" })).toBeVisible();
+  // …and when the propose lands it is dropped, not shown for the new result.
+  await expect(fc.getByRole("button", { name: "Proposing…" })).toHaveCount(0, { timeout: 15_000 });
+  expect(await fc.locator(".sum-fc-int-edit").count()).toBe(0);
+  await expect(fc.getByRole("button", { name: "✎ Integrate corrections" })).toBeVisible();
+  completionDelayMs = 0;
 });
 
 test("the integrate preview reads at AA in both themes", async ({ page }) => {

@@ -160,3 +160,22 @@ describe("fix round 1: the per-edit refusals", () => {
     expect(structuralLineRefusal("The video says X; sources say Y.")).toBeNull();
   });
 });
+
+describe("fix round 1: summaryStructureChanged", () => {
+  const BASE = "Intro claim.\n\n## Visual reference\n\nA caption.\n\n## More\n\nTail claim.";
+  test("unchanged structure: prose edits in either slice", async () => {
+    const { summaryStructureChanged } = await import("./factcheck-integrate.ts");
+    expect(summaryStructureChanged(BASE, BASE.replace("Intro claim.", "The video says intro; sources say no."))).toBe(false);
+    expect(summaryStructureChanged(BASE, BASE.replace("Tail claim.", "The video says tail."))).toBe(false);
+  });
+
+  test("a heading demoted after the visual section moves the cut: prose would leave the checked text", async () => {
+    const { summaryStructureChanged } = await import("./factcheck-integrate.ts");
+    expect(summaryStructureChanged(BASE, BASE.replace("## More", "### More"))).toBe(true);
+  });
+
+  test("an unclosed fence at the end swallows the transcript appended after it", async () => {
+    const { summaryStructureChanged } = await import("./factcheck-integrate.ts");
+    expect(summaryStructureChanged(BASE, `${BASE}\n\n\`\`\`\nunclosed`)).toBe(true);
+  });
+});
