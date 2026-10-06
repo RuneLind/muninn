@@ -341,3 +341,20 @@ article mode, unchanged prompts) over the summary and saves the result in
   markdown renderer.
 - **Badges** (`/badges`) are one query over the table; the client patches the
   Latest rail rows and re-reads after every completed check.
+- **Transcript check** (`POST /api/summaries/factcheck/transcript`,
+  `src/dashboard/routes/summaries-factcheck-transcript.ts`; pure half
+  `transcript-check.ts`). Its input is the saved row's web claims (index,
+  title, quote), so its verdicts — `supported` / `not in transcript` /
+  `contradicts transcript` — join the web verdicts by `index`; web ❌ plus
+  transcript `supported` reads "the source got it wrong". One Haiku-router call
+  with the takeaway check's Sonnet request (withheld on vertex, which runs its
+  own model), 120 s timeout, the transcript capped at 60 000 chars at a
+  paragraph boundary with the cut saved and shown. JSON in, JSON out;
+  `application/json` required; a POST, so the origin guard covers it by method.
+  Saved in the row's `transcript_claims` / `transcript_sha256` (migration 081)
+  only while its claims are still the ones it read (jsonb equality in the
+  `UPDATE`); every web upsert NULLs both, and on a database without 081 the
+  web upsert skips that and the POST answers **503 naming 081**. `/result`
+  carries `hasTranscript` (gates the button), `transcriptHtml` (server-rendered,
+  `sum-transcript-render.ts`) and `transcriptStale`. Measured on 10 synthesized
+  fixtures: `bun scripts/eval-transcript-check.ts`.

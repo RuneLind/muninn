@@ -12,6 +12,9 @@
  *    source file could not be read to compare).
  *  - `GET /api/summaries/factcheck/badges` — every checked document's ✓/❌N
  *    badge, one query, for the Latest rail.
+ *  - `POST /api/summaries/factcheck/transcript` — the saved claims against the
+ *    document's transcript (`summaries-factcheck-transcript.ts`); `/result`
+ *    carries its verdicts and `hasTranscript`, which gates the button.
  *
  * Addressed by `{source, docId}` like share and export: the doc id is what the
  * panel holds, and a re-run keeps it. Registered inside the `summaries` route
@@ -31,6 +34,8 @@ import { factcheckBodySha256, summaryFactcheckBody } from "../../summaries/factc
 import {
   getSummaryFactcheck,
   listSummaryFactcheckBadges,
+  saveSummaryTranscriptCheck,
+  summaryFactcheckTranscriptColumnsPresent,
   upsertSummaryFactcheck,
   type SavedFactcheckClaim,
   type SummaryFactcheck,
@@ -42,6 +47,9 @@ import { summaryDocTitle, type SummaryShareDoc } from "./summaries-share.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import { enhanceConfidenceHtml } from "../views/components/wiki-ask-render.ts";
 import { getLog } from "../../logging.ts";
+import { documentTranscript, registerSummariesTranscriptCheckRoute, transcriptSha256 } from "./summaries-factcheck-transcript.ts";
+import { renderTranscriptCheckHtml } from "../views/components/sum-transcript-render.ts";
+import type { TranscriptCheckOptions } from "../../summaries/transcript-check.ts";
 
 const log = getLog("dashboard", "summaries-factcheck");
 
@@ -71,10 +79,16 @@ export interface SummariesFactcheckDeps {
     upsert: (row: SummaryFactcheckInput) => Promise<SummaryFactcheck>;
     get: (collection: string, docId: string) => Promise<SummaryFactcheck | null>;
     listBadges: () => Promise<SummaryFactcheckBadge[]>;
+    /** Save a transcript check; `false` when the row's claims are no longer `expectClaims`. */
+    saveTranscript: typeof saveSummaryTranscriptCheck;
+    /** Whether migration 081's columns exist. */
+    transcriptColumnsPresent: () => Promise<boolean>;
   };
   bots: () => BotConfig[];
   /** Test seam threaded into the engine; production leaves it unset. */
   oneShot?: typeof executeOneShot;
+  /** Test seam for the transcript check's model call; production leaves it unset. */
+  transcriptCall?: TranscriptCheckOptions["call"];
 }
 
 export function defaultSummariesFactcheckDeps(knowledgeApiUrl: string): SummariesFactcheckDeps {
@@ -87,7 +101,13 @@ export function defaultSummariesFactcheckDeps(knowledgeApiUrl: string): Summarie
         `/api/document/${encodeURIComponent(collection)}/${encodeDocIdPath(docId)}`,
         { timeoutMs: DOC_FETCH_TIMEOUT_MS },
       )) as SummaryShareDoc | null,
-    store: { upsert: upsertSummaryFactcheck, get: getSummaryFactcheck, listBadges: listSummaryFactcheckBadges },
+    store: {
+      upsert: upsertSummaryFactcheck,
+      get: getSummaryFactcheck,
+      listBadges: listSummaryFactcheckBadges,
+      saveTranscript: saveSummaryTranscriptCheck,
+      transcriptColumnsPresent: summaryFactcheckTranscriptColumnsPresent,
+    },
     bots: discoverAllBots,
   };
 }
@@ -216,9 +236,26 @@ export function registerSummariesFactcheckRoutes(
     }
     if (!row) return c.json({ result: null, stale: null });
     const sourceText = await deps.readSourceText(doc.collection, doc.docId);
+    // The transcript check's button needs a transcript (the re-run options'
+    // `hasTranscript`, same split); `null` when the file is unreadable.
+    const transcript = sourceText === null ? null : documentTranscript(sourceText);
+    const hasTranscript = sourceText === null ? null : transcript !== null;
     const stale = sourceText === null ? null : factcheckBodySha256(sourceText) !== row.bodySha256;
-    return c.json({ result: row, stale, html: renderSummaryFactcheckHtml(row.answer) });
+    const transcriptStale =
+      !row.transcript || !row.transcriptSha256 || sourceText === null
+        ? null
+        : transcript === null || transcriptSha256(transcript) !== row.transcriptSha256;
+    return c.json({
+      result: row,
+      stale,
+      html: renderSummaryFactcheckHtml(row.answer),
+      hasTranscript,
+      transcriptStale,
+      transcriptHtml: row.transcript ? renderTranscriptCheckHtml(row.claims, row.transcript, { stale: transcriptStale }) : null,
+    });
   });
+
+  registerSummariesTranscriptCheckRoute(app, deps);
 
   app.get("/api/summaries/factcheck/badges", async (c) => {
     c.header("Cache-Control", "no-store");

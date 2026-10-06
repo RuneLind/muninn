@@ -15,6 +15,11 @@
  * reaches the real preflight and its 503. Persist-on-done and the body cut are
  * unit-tested in `summaries-factcheck-routes.test.ts`.
  *
+ * The transcript check's POST is stubbed the same way (a real one is a model
+ * call through the Haiku router); its row is written from the stub and the
+ * reload proves the SERVER-rendered join. Its route is unit- and DB-tested in
+ * `summaries-factcheck-transcript.test.ts` / `summaries-transcript-check-db.test.ts`.
+ *
  * Rows are seeded straight into `summary_factchecks`; the fake huginn is an
  * in-process `node:http` server; the bot lives in a temp `MUNINN_BOTS_DIR`.
  * Ports come from `e2e/ports.ts`.
@@ -25,7 +30,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import postgres from "postgres";
@@ -160,7 +165,9 @@ const onSigint = () => handleSignal("SIGINT");
 const onSigterm = () => handleSignal("SIGTERM");
 
 test.beforeAll(async () => {
-  sql = postgres(TEST_DB, { max: 2 });
+  sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
+  // Migration 081 (idempotent), so a test database built before it still runs this file.
+  await sql.unsafe(readFileSync(path.join(REPO_ROOT, "db/migrations/081-summary-factchecks-transcript.sql"), "utf8"));
   await sql`DELETE FROM summary_factchecks WHERE doc_id LIKE 'health/e2e/E2E factcheck%'`;
   await seed(DOC_FRESH, ["✅", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
   await seed(DOC_STALE, ["✅", "❌"], "0".repeat(64));
@@ -400,5 +407,79 @@ test("the section's text clears AA in both themes", async ({ page }) => {
     ] as const) {
       expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
     }
+  }
+});
+
+test("the transcript check: shown only with a transcript, joins its chip to the web verdict, survives a reload", async ({ page }) => {
+  // No transcript appendix: no button, whatever the saved result.
+  await open(page, DOC_STALE);
+  await expect(page.locator("#sumFactcheck .sum-fc-chip").first()).toBeVisible();
+  await expect(page.locator("#sumFactcheck .sum-fc-txbtn")).toHaveCount(0);
+
+  await seed(DOC_FRESH, ["❌", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
+  try {
+    await open(page, DOC_FRESH);
+    const fc = page.locator("#sumFactcheck");
+    const btn = fc.locator(".sum-fc-txbtn");
+    await expect(btn).toHaveText("⧉ Check transcript");
+    await expect(fc.locator(".sum-fc-tx")).toHaveCount(0);
+
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const bodies: string[] = [];
+    await page.route("**/api/summaries/factcheck/transcript", async (route) => {
+      bodies.push(route.request().postData() ?? "");
+      // The columns the real route's save writes.
+      const check = {
+        claims: [
+          { index: 1, verdict: "supported", note: "Invented speech." },
+          { index: 2, verdict: "not in transcript", note: "never said" },
+        ],
+        cut: { truncated: false, keptChars: 30, totalChars: 30 },
+        model: "stub",
+        botName: BOT,
+        checkedAt: Date.now(),
+      };
+      await sql!`UPDATE summary_factchecks SET transcript_claims = ${sql!.json(check as never)}, transcript_sha256 = ${"0".repeat(64)}
+                 WHERE collection = ${COLLECTION} AND doc_id = ${DOC_FRESH}`;
+      await held;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: check, cutNote: null, html: '<div class="sum-fc-tx">stub block</div>' }),
+      });
+    });
+    await btn.click();
+    await expect(btn).toBeDisabled();
+    await expect(btn).toHaveText("checking transcript…");
+    release();
+    await expect(fc.locator(".sum-fc-tx")).toHaveText("stub block");
+    await expect(btn).toHaveText("↻ Transcript");
+    expect(JSON.parse(bodies[0]!)).toEqual({ source: "youtube", docId: DOC_FRESH });
+    await page.unroute("**/api/summaries/factcheck/transcript");
+
+    // Reload: the block is the server's, joined by index to the web verdicts.
+    for (const scheme of ["dark", "light"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await open(page, DOC_FRESH);
+      const row1 = fc.locator('.sum-fc-tx li[data-claim-index="1"]');
+      await expect(row1.locator(".sum-fc-v")).toHaveText("❌");
+      await expect(row1.locator(".sum-fc-tchip")).toHaveText("transcript: supported");
+      await expect(row1.locator(".sum-fc-tx-read")).toHaveText("the source got it wrong");
+      await expect(fc.locator('.sum-fc-tx li[data-claim-index="2"] .sum-fc-tchip')).toHaveText("transcript: not in transcript");
+      // The stub saved a different transcript hash than the document's.
+      await expect(fc.locator(".sum-fc-tx .sum-fc-stale")).toHaveText("stale");
+      for (const [name, loc] of [
+        ["transcript chip", row1.locator(".sum-fc-tchip")],
+        ["reading", row1.locator(".sum-fc-tx-read")],
+        ["note", row1.locator(".sum-fc-tx-note")],
+        ["button", fc.locator(".sum-fc-txbtn")],
+      ] as const) {
+        expect(await paintedContrast(loc), `${scheme} ${name}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  } finally {
+    await sql!`UPDATE summary_factchecks SET transcript_claims = NULL, transcript_sha256 = NULL WHERE doc_id = ${DOC_FRESH}`;
+    await seed(DOC_FRESH, ["✅", "✅"], factcheckBodySha256(sourceText(DOC_FRESH)));
   }
 });

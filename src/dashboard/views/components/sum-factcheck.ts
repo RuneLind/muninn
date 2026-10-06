@@ -43,7 +43,12 @@ export function sumFactcheckStyles(): string {
       background: none; color: var(--text-secondary);
       border: 1px solid var(--border-secondary); border-radius: 6px; padding: 2px 10px;
     }
-    .sum-fc-recheck:hover { border-color: var(--accent); color: var(--text-primary); }
+    .sum-fc-recheck:hover, .sum-fc-txbtn:hover:not([disabled]) { border-color: var(--accent); color: var(--text-primary); }
+    .sum-fc-txbtn {
+      font: inherit; font-size: 12px; cursor: pointer; background: none; color: var(--text-secondary);
+      border: 1px solid var(--border-secondary); border-radius: 6px; padding: 2px 10px;
+    }
+    .sum-fc-txbtn[disabled] { cursor: default; opacity: 0.7; }
     .sum-fc-progress { list-style: none; margin: 10px 0 0; padding: 0; }
     .sum-fc-progress li { display: flex; gap: 8px; padding: 2px 0; color: var(--text-secondary); }
     .sum-fc-progress li.pending { color: var(--text-muted); }
@@ -52,6 +57,30 @@ export function sumFactcheckStyles(): string {
     .sum-fc-answer { margin-top: 10px; color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap; }
     .sum-fc-answer h4 { margin: 14px 0 4px; font-size: 14px; color: var(--text-primary); white-space: normal; }
     .sum-fc-answer a { color: var(--accent-light); }
+    /* The transcript check (server-rendered by sum-transcript-render.ts). */
+    .sum-fc-tx { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-secondary); }
+    .sum-fc-tx-head { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+    .sum-fc-tx-cut { margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
+    .sum-fc-tx-list { list-style: none; margin: 6px 0 0; padding: 0; }
+    .sum-fc-tx-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; padding: 3px 0; color: var(--text-secondary); }
+    .sum-fc-tchip {
+      font-size: 11px; padding: 0 7px; border-radius: 999px; white-space: nowrap;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-secondary);
+    }
+    .sum-fc-tchip[data-tverdict="supported"] {
+      color: color-mix(in srgb, var(--status-success) 60%, var(--text-primary));
+      border-color: color-mix(in srgb, var(--status-success) 45%, transparent);
+    }
+    .sum-fc-tchip[data-tverdict="contradicts transcript"] {
+      color: color-mix(in srgb, var(--status-error) 60%, var(--text-primary));
+      border-color: color-mix(in srgb, var(--status-error) 45%, transparent);
+    }
+    .sum-fc-tchip[data-tverdict="not in transcript"] {
+      color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary));
+      border-color: color-mix(in srgb, var(--status-warning) 45%, transparent);
+    }
+    .sum-fc-tx-read { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+    .sum-fc-tx-note { flex-basis: 100%; padding-left: 24px; font-size: 12px; color: var(--text-secondary); }
 ${FACTCHECK_CONF_CHIP_CSS}
     /* The Latest rail badge. */
     .sum-fc-badge { flex-shrink: 0; font-size: 10px; font-weight: 600; }

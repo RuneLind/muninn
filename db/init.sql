@@ -907,6 +907,9 @@ CREATE TABLE summary_factchecks (
   claims       JSONB NOT NULL DEFAULT '[]'::jsonb,
   bot_name     TEXT NOT NULL,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Migration 081: the transcript check over this row's claims; NULLed by a web re-check.
+  transcript_claims JSONB,
+  transcript_sha256 TEXT,
   PRIMARY KEY (collection, doc_id)
 );
 
