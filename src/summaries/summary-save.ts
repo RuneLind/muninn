@@ -385,8 +385,8 @@ export class SummarySaveClaims {
       writing: boolean;
     }
   >();
-  /** Per key, the generation of the newest successful {@link claim}. Deleted
-   *  when the holder releases, so it stays bounded by the keys held or lapsed. */
+  /** Per key, the generation of the newest successful {@link claim}: one
+   *  number per key at most, deleted when the holder releases. */
   private readonly latestGeneration = new Map<string, number>();
   private nextGeneration = 1;
   /** The claims that lapsed before anyone released them, with what a
@@ -421,11 +421,9 @@ export class SummarySaveClaims {
       this.lapse(key, claim);
       return;
     }
-    const timer = setTimeout(() => {
-      const current = this.held.get(key);
-      if (current?.token !== claim.token || current.timer !== timer) return;
-      this.lapse(key, claim);
-    }, remaining);
+    // `lapse` checks the token; the timer is armed only from `claim` and from
+    // the end of a pinned write, both with no timer running.
+    const timer = setTimeout(() => this.lapse(key, claim), remaining);
     // A background bookkeeping timer must not hold the process open.
     timer.unref?.();
     held.timer = timer;
