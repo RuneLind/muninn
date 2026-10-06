@@ -46,6 +46,7 @@ import {
   RERUN_LATCH_SLACK_MS,
 } from "./summaries-rerun.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
+import { SummarySaveClaims, type SummaryIngestResponse } from "../../summaries/summary-save.ts";
 import { buildShortVideoSystemPrompt } from "../../video/short-video-prompt.ts";
 import { shortVideoCaptureKinds, SHORT_VIDEO_THINKING } from "../../video/short-video-kinds.ts";
 import { TIKTOK_SPEC } from "../../tiktok/summarizer.ts";
@@ -121,6 +122,9 @@ function makeDeps(
     stall?: boolean;
     /** The single-flight claim's own bound, so the EXPIRY is drivable. */
     latchBudgetMs?: number;
+    /** What the blocking ingest answers; default a write of `DOC_ID`. */
+    ingestAnswer?: SummaryIngestResponse;
+    claims?: SummarySaveClaims;
   } = {},
 ): { deps: SummariesRerunDeps; rec: Recorded } {
   const rec: Recorded = { ingests: [], prompts: [] };
@@ -128,8 +132,11 @@ function makeDeps(
     fetchRawDoc: async (): Promise<RerunDocument | null> => (raw === null ? null : { raw }),
     ingest: async (o) => {
       rec.ingests.push({ path: o.ingestPath, body: o.body });
-      o.onIngested?.({ filePath: DOC_ID });
+      return opts.ingestAnswer ?? { ok: true, status: 200, data: { file_path: DOC_ID } };
     },
+    // A registry of its own per test: a stalled run must not pin the next
+    // test's document in the process-wide one.
+    claims: opts.claims ?? new SummarySaveClaims(),
     oneShot: (async (o: Record<string, unknown>) => {
       rec.prompts.push({
         system: o.systemPrompt as string,
@@ -637,6 +644,80 @@ describe("single flight", () => {
     expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
     await settle();
     expect(rec.prompts.length).toBe(2);
+  });
+});
+
+describe("the shared save path", () => {
+  test("a re-run's own save never answers 409 to itself", async () => {
+    // The route claims before the model call and the save REQUIRES that claim:
+    // a save that claimed a second time would find its own run holding the key.
+    const { deps, rec } = makeDeps(youtubeDoc());
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(200);
+    await settle();
+    expect(rec.ingests).toHaveLength(1);
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.status).toBe("complete");
+  });
+
+  test("a second claimant during a running re-run gets in_flight, and the claim is the shared one", async () => {
+    const claims = new SummarySaveClaims();
+    const { deps } = makeDeps(youtubeDoc(), { stall: true, claims });
+    const app = appFor(deps);
+    expect((await post(app, { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    await settle();
+    // Another write route (PR 2b's append/apply) claims from the same registry.
+    expect(claims.claim("youtube", DOC_ID, 1_000)).toBeNull();
+    claims.clear();
+  });
+
+  test("a document another writer holds is 409 in_flight before any model call", async () => {
+    const claims = new SummarySaveClaims();
+    const held = claims.claim("youtube", DOC_ID, 1_000)!;
+    const { deps, rec } = makeDeps(youtubeDoc(), { claims });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe("in_flight");
+    await settle();
+    expect(rec.prompts).toHaveLength(0);
+    claims.release(held);
+  });
+
+  test("a failed ingest FAILS the job (write_failed), where it used to only warn", async () => {
+    const { deps, rec } = makeDeps(youtubeDoc(), {
+      ingestAnswer: { ok: false, status: 500, error: "Ingest returned 500: boom" },
+    });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    expect(rec.ingests).toHaveLength(1);
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.status).toBe("error");
+    expect(job.error).toContain("500");
+  });
+
+  test("an ingest that wrote a sibling FAILS the job (forked) and names the sibling", async () => {
+    const sibling = "ai/general/A Talk About Things (2).md";
+    const { deps } = makeDeps(youtubeDoc(), {
+      ingestAnswer: { ok: true, status: 200, data: { file_path: sibling } },
+    });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    await settle();
+    const job = getJob(String(res.json.job_id))!;
+    expect(job.status).toBe("error");
+    expect(job.error).toContain(sibling);
+  });
+
+  test("a url that is not an http(s) URL is no_url before a job exists", async () => {
+    const raw = youtubeDoc().replace(
+      `url: "https://www.youtube.com/watch?v=${VIDEO_ID}"`,
+      'url: "An article pasted into the url field, all of it."',
+    );
+    const { deps, rec } = makeDeps(raw);
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(400);
+    expect(res.json.code).toBe("no_url");
+    await settle();
+    expect(rec.prompts).toHaveLength(0);
   });
 });
 
@@ -1337,7 +1418,11 @@ describe("the single-flight claim is bounded", () => {
     const rec: Recorded = { ingests: [], prompts: [] };
     const deps: SummariesRerunDeps = {
       fetchRawDoc: async () => ({ raw: youtubeDoc() }),
-      ingest: async (o) => { rec.ingests.push({ path: o.ingestPath, body: o.body }); },
+      ingest: async (o) => {
+        rec.ingests.push({ path: o.ingestPath, body: o.body });
+        return { ok: true, status: 200, data: { file_path: DOC_ID } };
+      },
+      claims: new SummarySaveClaims(),
       oneShot: (async (o: Record<string, unknown>) => {
         rec.prompts.push({
           system: o.systemPrompt as string,

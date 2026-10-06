@@ -157,9 +157,24 @@ not one per run — and the `source` it traces under is the CAPTURE's, not the
 the `x-article` shelf), and comparing a re-run with the capture it re-runs is
 the one thing that attribute is for.
 
-**One run per document at a time, and the claim is BOUNDED.** A per-`(source,
-docId)` in-flight map in the route registration answers **409 `in_flight`** to a
-second POST. Two concurrent runs would spend two model calls and then race each
+**The write is the shared save path (`src/summaries/summary-save.ts`).** Every
+route that writes a summary back calls `preflightSummarySave` before any model
+spend (`no_url` — empty OR not an http(s) URL — and `no_category` 400,
+`title_not_round_trippable` 409), claims the document from the process-wide
+`summarySaveClaims` registry, and writes through `saveSummaryBody`, which
+requires that held claim, appends `## Transcript` only when the stored document
+has one, re-sends the stored `summary_kind` (or none), and ingests BLOCKING: a
+failed POST or a missing `file_path` is `write_failed`, a `file_path` other than
+the doc id is `forked` (the response names the sibling). A re-run job FAILS on
+either, where it used to complete with a warn. `article` and `anthropic` have a
+save descriptor without being re-runnable. A round trip through it re-quotes
+legacy unquoted frontmatter (`date: 2026-03-22` → `date: "2026-03-22"`; 682
+YouTube and 28 X documents, measured 2026-10-06): that is huginn's writer, and
+the file is a fixed point from the second save on.
+
+**One run per document at a time, and the claim is BOUNDED.** The shared
+per-`(source, docId)` claim registry answers **409 `in_flight`** to a second
+POST — or to any other write route holding the document. Two concurrent runs would spend two model calls and then race each
 other's ingest for one FILE — huginn rewrites the whole document from the request
 body, so the loser's summary is simply gone and which one loses is decided by the
 network. The claim is taken after every other refusal (a 409 has to mean a run is
