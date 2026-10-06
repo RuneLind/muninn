@@ -12,11 +12,13 @@
  *   (`no_url` and `no_category` 400, `title_not_round_trippable` 409).
  * - {@link SummarySaveClaims}: one writer per `(sourceId, docId)` at a time, a
  *   token with a budget timer. The caller claims around its own read → model →
- *   write; anyone else is `409 in_flight`.
+ *   write; anyone else is `409 in_flight`. A claim that lapsed still saves when
+ *   no other writer took the key, and is pinned for the length of its POST.
  * - {@link saveSummaryBody}: builds the ingest body (every stored frontmatter
  *   field the vertical's ingest model accepts, re-sent), posts it BLOCKING, and
- *   reports what huginn wrote — `write_failed` on a failed POST, `forked` when
- *   the path it wrote is not the document's.
+ *   reports what huginn wrote — `empty_summary` before any POST, `write_failed`
+ *   on a failed POST, `write_unknown` when the answer was lost after the
+ *   request went out, `forked` when the path it wrote is not the document's.
  */
 
 import { getLog } from "../logging.ts";
@@ -78,6 +80,9 @@ export interface SummarySaveDescriptor {
  * `x-article` covers both shapes on that shelf: a pasted X post (no transcript)
  * and an X video capture (a flat transcript in the summary string) — one
  * collection, one ingest model.
+ *
+ * Exported for tests (the parity and ingest-path pins); callers use
+ * {@link requireSaveDescriptor}.
  */
 export const SUMMARY_SAVE_DESCRIPTORS: readonly SummarySaveDescriptor[] = [
   {
@@ -216,7 +221,7 @@ export function readStoredCapture(raw: string): StoredCapture {
 /**
  * The document's display title, from the FILE NAME: no capture vertical writes
  * a `title:` key, and a title read back out of the path posts back to the same
- * path when it passes {@link titleRoundTripRefusal}.
+ * path when it passes {@link titleRoundTripRefusal}. Exported for tests.
  */
 export function titleFromDocId(docId: string): string {
   const base = docId.split("/").pop() ?? docId;
@@ -224,7 +229,7 @@ export function titleFromDocId(docId: string): string {
 }
 
 /** The category the document is filed under — its own directory. `null` for an
- *  id with no directory part. */
+ *  id with no directory part. Exported for tests. */
 export function categoryFromDocId(docId: string): string | null {
   const at = docId.lastIndexOf("/");
   return at <= 0 ? null : docId.slice(0, at);
@@ -235,7 +240,7 @@ export function categoryFromDocId(docId: string): string | null {
  * the exact fixed-point test over huginn's own file-name rule (ported, with a
  * cross-language fixture test in `huginn-filename.test.ts`). A different name
  * is a SECOND DOCUMENT. Returns the reason, or `null` when the title
- * round-trips.
+ * round-trips. Exported for tests.
  */
 export function titleRoundTripRefusal(title: string): string | null {
   const sanitized = sanitizeFilenameLikeHuginn(title);
@@ -251,7 +256,7 @@ export function titleRoundTripRefusal(title: string): string | null {
  * from the category. Preserves the tag SET, not the line's bytes: a hand-edited
  * line converges to huginn's category-first, deduped shape on the first save
  * and is a fixed point from then on. Subtracted by VALUE, since
- * `build_summary_tags` dedupes.
+ * `build_summary_tags` dedupes. Exported for tests.
  */
 export function extraTagsFromStored(rawTags: string | undefined, category: string): string[] {
   if (rawTags === undefined) return [];
@@ -503,7 +508,8 @@ export interface SaveSummaryBodyInput {
  * The ingest body: every frontmatter field the source accepts, re-sent from its
  * RAW on-disk text, `title`/`category` pinned to the stored path, the stored
  * tags (minus the category parts) where the model takes them, and the
- * transcript appended only when the document has one.
+ * transcript appended only when the document has one. Exported for tests;
+ * callers save through {@link saveSummaryBody}.
  */
 export function buildSummarySaveBody(input: {
   descriptor: SummarySaveDescriptor;
