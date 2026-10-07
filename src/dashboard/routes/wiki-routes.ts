@@ -21,7 +21,7 @@ import {
 } from "../views/components/wiki-atlas-semantic.ts";
 import { getLiveOrAppliedTopicKeysByWiki } from "../../db/wiki-proposals.ts";
 import { draftAndPersistSynthesis } from "../../gardener/synthesis-drafter.ts";
-import { renderWikiHtml } from "../../wiki/render.ts";
+import { questionRenderOptionsFor, renderWikiHtml } from "../../wiki/render.ts";
 import { loadPageFiles, resolveContainedFile } from "../../wiki/page-files.ts";
 import {
   listWikis,
@@ -1628,10 +1628,14 @@ export function registerWikiReadRoutes(
       // a link opened on a non-default wiki lands on the DEFAULT one.
       // `files`: the `<Query>` cards' csv/sql, read beside the page under the
       // index root's containment check (`loadPageFiles`) before the sync render.
+      // `question`: a `<Question>` card's `questions_to:`, label language and
+      // whether this wiki takes answers. Always read-only until
+      // `WIKI_ANSWER_WIKIS` (answer cards PR 2) decides it per wiki.
       html: renderWikiHtml(markdown, index.resolve, {
         stripTitle: meta.title,
         wiki: entry?.name,
         files: await loadPageFiles(index.root, meta.relPath, markdown),
+        question: questionRenderOptionsFor(markdown, index.readerConfig, false),
       }),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),

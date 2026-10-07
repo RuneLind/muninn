@@ -133,6 +133,8 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   Timeline: null,
   DecisionLog: null,
   RunChecklist: null,
+  // A question card's body is prose; a fence in it is an ordinary fence.
+  Question: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

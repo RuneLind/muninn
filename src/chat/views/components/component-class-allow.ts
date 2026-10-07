@@ -102,6 +102,8 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "gtl-date", "gtl-text", "decision-log", "dl-list", "dl-item", "dl-dim", "dl-noid", "dl-id", "dl-text",
   "run-checklist", "rc-head", "rc-count", "rc-row", "rc-command", "rc-expect", "rc-stop", "rc-label",
   "rc-value",
+  // `<Question>`: chat gets the plain bordered question (no wiki, no state).
+  "question", "question-plain", "q-head", "q-label", "q-id", "q-body",
   // Syntax highlighting. Imported from the module that EMITS them rather than
   // retyped: a `tok-*` class added there and forgotten here renders colorless
   // in chat while looking perfect in /wiki — a bug visible on one surface only.

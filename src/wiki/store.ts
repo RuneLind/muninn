@@ -26,6 +26,7 @@ import {
   type ActivityWeights,
 } from "../dashboard/views/components/wiki-activity-rank.ts";
 import { parseCullLabels, type CullLabels } from "../dashboard/views/components/wiki-cull-view.ts";
+import { parseQuestionLanguage, type QuestionLanguage } from "../format/question-labels.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -186,6 +187,13 @@ export interface WikiReaderConfig {
    * configs stay valid; `readWikiReaderConfig` always sets it.
    */
   cullLabels?: CullLabels;
+  /**
+   * The language an answer card's labels use (`language`: `en` or `no`,
+   * default `en`) — "Stilt til" and "Åpent" on a Norwegian wiki. A bad value
+   * warns and falls back to `en`. Optional so hand-built configs stay valid;
+   * `readWikiReaderConfig` always sets it.
+   */
+  language?: QuestionLanguage;
 }
 
 /**
@@ -1986,6 +1994,10 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
   // `cullLabels` is validated per field: a bad label warns and
   // drops itself, and the default stands in for it.
   const cull = parseCullLabels(obj.cullLabels);
+  const language = parseQuestionLanguage(obj.language);
+  if (language.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "language", reason: language.warning });
+  }
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
@@ -2010,6 +2022,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     project: parseProjectRule(obj.project, root),
     activity: activity.weights,
     cullLabels: cull.labels,
+    language: language.language,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

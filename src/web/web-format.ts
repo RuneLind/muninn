@@ -43,6 +43,14 @@ import {
   type PageFiles,
 } from "../format/query-block.ts";
 import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
+import {
+  formatQuestionTarget,
+  parseQuestionAttrs,
+  parseQuestionPage,
+  type QuestionRenderOptions,
+  type QuestionState,
+} from "../format/question.ts";
+import { questionLabels } from "../format/question-labels.ts";
 import { caseBoardWarnings, caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
 import {
   betterLabelWarnings,
@@ -162,25 +170,131 @@ function factCheckSections(children: Block[]): string {
  * `renderInline`. The chat-page client picks this up automatically via
  * `web-format-browser.ts`'s bundle.
  */
-export function formatWebHtml(text: string, opts?: { files?: PageFiles }): string {
+export function formatWebHtml(
+  text: string,
+  opts?: {
+    files?: PageFiles;
+    /** The wiki page around a `<Question>` (`renderWikiHtml`). Absent ⇒ a
+     *  `<Question>` renders as a plain bordered question, as in chat. */
+    question?: QuestionRenderOptions;
+  },
+): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
   // inside the shared renderer, so it rides a module slot for the length of
-  // this synchronous call.
+  // this synchronous call. So does the `<Question>` pre-pass.
   const prev = currentPageFiles;
+  const prevQuestion = currentQuestionPage;
   currentPageFiles = opts?.files;
   try {
-    const rendered = renderBlocks(parseBlocks(text), webRenderer);
+    const blocks = parseBlocks(text);
+    // The DecisionLog usually sits below the `<Question>`, and the renderer
+    // sees one block at a time, so every card's state is read off the whole
+    // page first. A substring test keeps the walk off every chat delta.
+    currentQuestionPage = text.includes("<Question") ? questionPage(blocks, opts?.question) : undefined;
+    const rendered = renderBlocks(blocks, webRenderer);
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
-    return uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
+    const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
+    return currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
   } finally {
     currentPageFiles = prev;
+    currentQuestionPage = prevQuestion;
   }
 }
 
 /** The page's sibling files for the call in progress; absent ⇒ the `Query`,
  *  `CaseBoard` and `DeltaTable` blocks say their file is not loaded here. */
 let currentPageFiles: PageFiles | undefined;
+
+/** What a `<Question>` card reads from the page around it, for the call in
+ *  progress: the closed-ids pre-pass, the duplicate ids and the wiki's
+ *  options. Absent ⇒ no `<Question>` on the page. */
+interface QuestionPage {
+  states: Map<string, QuestionState>;
+  duplicates: Set<string>;
+  options?: QuestionRenderOptions;
+}
+let currentQuestionPage: QuestionPage | undefined;
+
+function questionPage(blocks: Block[], options: QuestionRenderOptions | undefined): QuestionPage {
+  const parsed = parseQuestionPage(blocks);
+  const duplicates = new Set<string>();
+  for (const q of parsed.questions) if (q.duplicate && q.id !== null) duplicates.add(q.id);
+  return { states: parsed.states, duplicates, ...(options ? { options } : {}) };
+}
+
+const LOG_ANCHOR_RE = /<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)"><a class="dl-id" href="#\1">([^<]*)<\/a>/g;
+const QUESTION_LINK_RE = /<a class="(q-id|q-decision)" href="#[^"]*">([^<]*)<\/a>/g;
+
+/** A card's id and decision links pointed at the anchor their DecisionLog item
+ *  ended up with: `uniqueLogAnchors` renames an item whose slug a Query card,
+ *  a case or an earlier item holds (`o2` → `o2-2`), after the cards rendered.
+ *  The FIRST item carrying an id is the one that decides the card, so it is
+ *  the one the link names. */
+function retargetQuestionLinks(html: string): string {
+  if (!html.includes('<a class="q-')) return html;
+  const anchorOf = new Map<string, string>();
+  for (const m of html.matchAll(LOG_ANCHOR_RE)) if (!anchorOf.has(m[2]!)) anchorOf.set(m[2]!, m[1]!);
+  return html.replace(QUESTION_LINK_RE, (whole, cls: string, text: string) => {
+    const anchor = anchorOf.get(text);
+    return anchor ? `<a class="${cls}" href="#${anchor}">${text}</a>` : whole;
+  });
+}
+
+/**
+ * A `<Question>` as an answer card. With the wiki's options it carries the id
+ * (linking the DecisionLog item, whose anchor it never takes: the card has NO
+ * `id` attribute, or `uniqueLogAnchors` would rename the item `o3-2`), the
+ * state from the pre-pass (D6), the body and who it is for, plus the data
+ * attributes the reader's client hydrates (PR 3). Without them — chat, a
+ * gardener preview — it is a plain bordered question with no state.
+ */
+function questionCardHtml(attrs: Record<string, string>, body: string): string {
+  // The parser's own attribute read, so the card and PR 2's route cannot
+  // disagree about a question's choices or who it is for.
+  const parsed = parseQuestionAttrs(attrs);
+  const id = parsed.id ?? "";
+  const page = currentQuestionPage;
+  const opts = page?.options;
+  const L = questionLabels(opts?.language);
+  // Linked only when a DecisionLog item carries the id; `retargetQuestionLinks`
+  // then points it at the item's final anchor.
+  const idHtml = id
+    ? opts && page.states.has(id)
+      ? `<a class="q-id" href="#${anchorSlug(id)}">${escapeHtml(id)}</a>`
+      : `<span class="q-id">${escapeHtml(id)}</span>`
+    : "";
+  const lead = `<span class="q-label">${escapeHtml(id ? L.question : L.noId)}</span>`;
+  const bodyHtml = `<div class="q-body">${body}</div>`;
+  if (!opts) {
+    return `<section class="question question-plain"${id ? ` data-question-id="${escapeHtml(id)}"` : ""}><div class="q-head">${lead}${idHtml}</div>${bodyHtml}</section>`;
+  }
+  const state: QuestionState | null = id ? (page.states.get(id) ?? { kind: "open" }) : null;
+  const stateHtml = !state
+    ? ""
+    : state.kind === "decided"
+      ? `<span class="q-state">${escapeHtml(L.decided)} → <a class="q-decision" href="#${anchorSlug(state.decision)}">${escapeHtml(state.decision)}</a></span>`
+      : `<span class="q-state">${escapeHtml(state.kind === "closed" ? L.closed : L.open)}</span>`;
+  const blockTo = parsed.to;
+  const to = blockTo ?? opts.questionsTo;
+  const toSource = blockTo ? "block" : opts.questionsTo.length ? "page" : "none";
+  const forHtml = to.length
+    ? `<div class="q-for"><span class="q-for-label">${escapeHtml(L.for)}</span> ${escapeHtml(to.map((t) => t.name).join(", "))}</div>`
+    : "";
+  const duplicate = id && page.duplicates.has(id) ? `<p class="q-note q-duplicate">${escapeHtml(L.duplicate)}</p>` : "";
+  const choices = parsed.choices;
+  const data =
+    (id ? ` data-question-id="${escapeHtml(id)}"` : "") +
+    ` data-question-state="${state ? state.kind : "none"}"` +
+    (state?.kind === "decided" ? ` data-question-decision="${escapeHtml(state.decision)}"` : "") +
+    ` data-wiki-answerable="${opts.answerable ? "true" : "false"}"` +
+    ` data-question-lang="${opts.language}"` +
+    (choices.length ? ` data-question-choices="${escapeHtml(choices.join("|"))}"` : "") +
+    ` data-question-to-source="${toSource}"` +
+    (to.length ? ` data-question-to="${escapeHtml(to.map(formatQuestionTarget).join("|"))}"` : "");
+  const cls = `question q-${state ? state.kind : "noid"}`;
+  return `<section class="${cls}"${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
+}
 
 const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
 
@@ -1034,6 +1148,8 @@ const webRenderer: BlockRenderer = {
           `</details>`
         );
       }
+      case "Question":
+        return questionCardHtml(attrs, children);
       default: {
         const _exhaustive: never = name;
         return _exhaustive;

@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Fifteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Sixteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -44,6 +44,15 @@
  *                      report-page DRIFT, on LIVE report pages only (a live
  *                      `plan_status`, or none under `plans/`); report-only.
  *                      Rules and the scope: `lint-drift.ts`.
+ * 10. question-block — a `<Question>` whose card cannot follow its DecisionLog
+ *                      item: no `id`, an id no `<DecisionLog>` item carries,
+ *                      an id two `<Question>` blocks share (the answer route
+ *                      refuses it), an id two DecisionLog items carry (the
+ *                      first decides), an item carrying a near-miss close
+ *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`),
+ *                      or a `questions_to:` written as a block list, which
+ *                      `parseFrontmatter` does not read. Rules:
+ *                      `src/format/question.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -59,6 +68,7 @@ import {
   isMarkdownWikiPath,
   parseFrontmatter,
   normalizeRelPath,
+  stripFrontmatter,
 } from "./store.ts";
 import {
   FUTURE_DATE_SKEW_MS,
@@ -67,13 +77,14 @@ import {
 import {
   fencedLineMask,
   frontmatterEndLine,
-  maskLineCodeSpans,
   NESTED_MARKUP_RE,
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
+import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
-import { countFactWrappers } from "../format/markdown-ast.ts";
+import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
+import { closeNearMisses, itemReopened, parseQuestionPage, type QuestionState } from "../format/question.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
 export const LINT_CHECKS = [
@@ -85,6 +96,7 @@ export const LINT_CHECKS = [
   "nested-annotation",
   "unrendered-fact-mark",
   "stem-collision",
+  "question-block",
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
 ] as const;
@@ -371,6 +383,176 @@ function checkUnrenderedFactMarks(page: WikiPageMeta, rawContent: string): LintF
   ];
 }
 
+/** A `<Question>` open-tag line and the id its attributes carry. */
+interface QuestionTagLine {
+  /** 1-based. */
+  line: number;
+  /** Trimmed; null when absent or blank, as `parseQuestionAttrs` reads it. */
+  id: string | null;
+}
+
+/** The parser's open-tag match (`COMPONENT_OPEN_RE`, on the trimmed line) when
+ *  it names `<Question>` and is not self-closing. */
+function questionOpen(line: string): RegExpMatchArray | null {
+  const m = line.trim().match(COMPONENT_OPEN_RE);
+  return m && m[1] === "Question" && m[3] !== "/" ? m : null;
+}
+
+/** A multi-line `<Question>` opened on line `i` has a matching `</Question>`
+ *  line below it, counting nested opens the way `tryParseComponent` does.
+ *  Fenced lines are code, not tags. */
+function questionCloses(lines: readonly string[], fenced: readonly boolean[], i: number): boolean {
+  let nesting = 1;
+  for (let j = i + 1; j < lines.length; j++) {
+    if (fenced[j]) continue;
+    const t = lines[j]!.trim();
+    if (t === "</Question>") {
+      if (--nesting === 0) return true;
+    } else {
+      const open = questionOpen(t);
+      if (open && !open[4]!.includes("</Question>")) nesting++;
+    }
+  }
+  return false;
+}
+
+/**
+ * Every line the component parser reads as a `<Question>` block's opening tag,
+ * in source order — the order `parseQuestions` returns the blocks in. The test
+ * is `tryParseComponent`'s own: the trimmed line is the parser's open-tag shape
+ * (`COMPONENT_OPEN_RE`), not self-closing, and either closes on the same line
+ * with nothing after the close or owns its line and is closed below. Lines in
+ * the frontmatter or a fence are skipped. Like the parser, an indented tag or
+ * one inside an HTML comment counts.
+ */
+function questionTagLines(lines: readonly string[]): QuestionTagLine[] {
+  const fenced = fencedLineMask(lines);
+  const out: QuestionTagLine[] = [];
+  for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
+    if (fenced[i]) continue;
+    const m = questionOpen(lines[i]!);
+    if (!m) continue;
+    const rest = m[4]!;
+    const inline = rest.indexOf("</Question>");
+    const block =
+      inline !== -1
+        ? rest.slice(inline + "</Question>".length).trim() === ""
+        : rest.trim() === "" && questionCloses(lines, fenced, i);
+    if (!block) continue;
+    const id = (/(?:^|\s)id="([^"]*)"/.exec(m[2]!)?.[1] ?? "").trim();
+    out.push({ line: i + 1, id: id === "" ? null : id });
+  }
+  return out;
+}
+
+/**
+ * The line of each `<Question>` block: the Nth block carrying an id is on the
+ * Nth tag line carrying it, when the two counts for that id agree, and gets no
+ * line when they do not (a tag the parser does not read as a block, nested
+ * past its depth limit, say). On a page where every tag is a block this is
+ * plain source order; a stray tag costs only the blocks sharing its id.
+ */
+function questionLines(questions: readonly { id: string | null }[], tags: readonly QuestionTagLine[]): (number | undefined)[] {
+  const tagsById = new Map<string | null, number[]>();
+  for (const t of tags) tagsById.set(t.id, [...(tagsById.get(t.id) ?? []), t.line]);
+  const blocksById = new Map<string | null, number>();
+  for (const q of questions) blocksById.set(q.id, (blocksById.get(q.id) ?? 0) + 1);
+  const seen = new Map<string | null, number>();
+  return questions.map((q) => {
+    const n = seen.get(q.id) ?? 0;
+    seen.set(q.id, n + 1);
+    const lines = tagsById.get(q.id) ?? [];
+    return lines.length === blocksById.get(q.id) ? lines[n] : undefined;
+  });
+}
+
+/** A DecisionLog item's own text as a lint message quotes it: one line, at
+ *  most 40 characters. */
+const quoteItem = (text: string): string => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return JSON.stringify(flat.length > 40 ? `${flat.slice(0, 39)}…` : flat);
+};
+
+/** What a near-miss finding says the card shows, from the state the renderer
+ *  computed — the warning stands in every state (D6), the consequence differs.
+ *  An open card says why it is open: reopened, or never canonically closed. */
+function nearMissConsequence(id: string, quoted: string, state: QuestionState | undefined, text: string): string {
+  if (state?.kind === "decided") {
+    return `DecisionLog item ${id} says ${quoted} outside its canonical close; the card shows Decided → ${state.decision}`;
+  }
+  if (state?.kind === "closed") {
+    return `DecisionLog item ${id} says ${quoted} but has no canonical close naming a decision this page defines, so its card shows Closed without a decision`;
+  }
+  if (itemReopened(text)) {
+    return `DecisionLog item ${id} says ${quoted} outside its canonical phrases; its last canonical phrase reopens it (Reopened <date>.), so its card stays open`;
+  }
+  return `DecisionLog item ${id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`;
+}
+
+/**
+ * Check 10 — a `<Question>` whose answer card cannot follow its DecisionLog
+ * item. Reads the page through the one parse the renderer runs
+ * (`parseQuestionPage`), so the finding and the card agree. A page that never
+ * spells `<Question` is skipped before any parse.
+ */
+function checkQuestions(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  if (!rawContent.includes("<Question")) return [];
+  const parsed = parseQuestionPage(parseBlocks(stripFrontmatter(rawContent)));
+  const { questions, entries, states } = parsed;
+  if (questions.length === 0) return [];
+  const lines = rawContent.split("\n");
+  const findings: LintFinding[] = [];
+  const push = (message: string, line?: number) =>
+    findings.push({ check: "question-block", relPath: page.relPath, message, ...(line ? { line } : {}) });
+
+  // `parseFrontmatter` reads an inline list only; a block list parses to
+  // nothing and every card silently loses who it is for.
+  const fmEnd = frontmatterEndLine(lines);
+  for (let i = 1; i < fmEnd - 1; i++) {
+    if (/^questions_to\s*:\s*$/.test(lines[i]!)) {
+      push(
+        'frontmatter questions_to: is not an inline list, so no card names who it is for; write it as questions_to: ["Name (IDENT)", "Name"]',
+        i + 1,
+      );
+    }
+  }
+
+  const blockLines = questionLines(questions, questionTagLines(lines));
+  const lineOf = (k: number) => blockLines[k];
+  const seen = new Set<string>();
+  questions.forEach((q, k) => {
+    const line = lineOf(k);
+    if (q.id === null) {
+      push("a <Question> has no id, so its card cannot name a DecisionLog item", line);
+      return;
+    }
+    if (seen.has(q.id)) return;
+    seen.add(q.id);
+    if (q.duplicate) {
+      const n = questions.filter((o) => o.id === q.id).length;
+      push(`${n} <Question> blocks use id ${q.id}; an answer to that id is refused`, line);
+    }
+    const items = entries.filter((e) => e.id === q.id);
+    const item = items[0];
+    if (!item) {
+      push(`<Question id="${q.id}"> has no item in the page's <DecisionLog>, so its card can never close`, line);
+      return;
+    }
+    if (items.length > 1) {
+      push(
+        `DecisionLog has ${items.length} items for ${q.id} (${items.map((e) => quoteItem(e.itemText)).join(", ")}) — the first decides the card; the others are ignored`,
+        line,
+      );
+    }
+    const words = closeNearMisses(item.text);
+    if (words.length > 0) {
+      const quoted = [...new Set(words)].map((w) => `"${w}"`).join(", ");
+      push(nearMissConsequence(q.id, quoted, states.get(q.id), item.text), line);
+    }
+  });
+  return findings;
+}
+
 /** Hours in `FUTURE_DATE_SKEW_MS`, for the finding message (48). */
 const FUTURE_SKEW_HOURS = Math.round(FUTURE_DATE_SKEW_MS / (60 * 60 * 1000));
 
@@ -605,6 +787,8 @@ export async function lintWiki(
     // wherever it lands, and log.md/index.md carry [[links]] like any page.
     findings.push(...checkNestedAnnotation(page, content));
     findings.push(...checkUnrenderedFactMarks(page, content));
+    // Check 10 — every page: a card's state is the page's own business.
+    findings.push(...checkQuestions(page, content));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.

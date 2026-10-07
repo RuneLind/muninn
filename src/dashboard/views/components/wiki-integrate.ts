@@ -227,7 +227,7 @@ export function frontmatterEndLine(lines: readonly string[]): number {
  *
  * ⚠️ The result is SHORTER than the line, so an offset into it means nothing in the
  * raw line. Any scanner that needs to quote or rewrite what it found must use
- * {@link maskLineCodeSpans} instead.
+ * `maskLineCodeSpans` (`src/format/code-spans.ts`) instead.
  */
 export function stripLineCodeSpans(line: string): string {
   const ranges = lineCodeSpanRanges(line);
@@ -236,34 +236,6 @@ export function stripLineCodeSpans(line: string): string {
   let cursor = 0;
   for (const r of ranges) {
     out += line.slice(cursor, r.start);
-    cursor = r.end;
-  }
-  return out + line.slice(cursor);
-}
-
-/**
- * The SAME-LENGTH form of {@link stripLineCodeSpans}: every code-span code unit
- * becomes a `\n`, so offsets into the result index the raw line unchanged.
- *
- * `\n` is the blank on purpose rather than a space or a private-use sentinel: every
- * scanner reading this string is line-scoped by a `\n` exclusion in its own regex
- * (`WIKILINK_SPAN_SOURCE`, {@link NESTED_MARKUP_RE}, `firstDanglingWikilinkOpen`'s
- * callers), so a blanked span cannot be read as part of a match NOR supply a
- * bracket to one — which a space would.
- *
- * This is what the code-span exclusion has to be for anything that reports an
- * offset: `stripLineCodeSpans` moves every offset left by the length of the spans
- * before it, so a finding located in the stripped text and quoted from the raw line
- * quotes the wrong place (measured: on a line carrying a live occurrence AND a
- * backticked one, the excerpt was the DOCUMENTATION).
- */
-export function maskLineCodeSpans(line: string): string {
-  const ranges = lineCodeSpanRanges(line);
-  if (ranges.length === 0) return line;
-  let out = "";
-  let cursor = 0;
-  for (const r of ranges) {
-    out += line.slice(cursor, r.start) + "\n".repeat(r.end - r.start);
     cursor = r.end;
   }
   return out + line.slice(cursor);

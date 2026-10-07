@@ -19,6 +19,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "nested-annotation": "Markup nested inside a wikilink",
   "unrendered-fact-mark": "Fact-check marks that render as literal markup",
   "stem-collision": "Same-stem pages (one is hidden from the wiki)",
+  "question-block": "Question blocks the DecisionLog cannot close",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

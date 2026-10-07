@@ -1503,7 +1503,7 @@ group apply and why Dismiss is durable: `src/gardener/CLAUDE.md`.
 
      Lint-specific facts: exclusions are `index-truncation`'s, through the same
      shared helpers in `views/components/wiki-integrate.ts` (`fencedLineMask`,
-     `frontmatterEndLine`, `maskLineCodeSpans`, `maskJsxArrayOpeners`) — all of
+     `frontmatterEndLine`, `maskJsxArrayOpeners`, plus `maskLineCodeSpans` from `src/format/code-spans.ts`) — all of
      which matter concretely, since mimir's own plan for this fix quotes the broken
      shape in a ```markdown fence and again in backticks, six times over. The
      excerpt is LOCATED in the masked line and QUOTED from the raw one at that

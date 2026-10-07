@@ -107,6 +107,7 @@ export const COMPONENT_NAMES = [
   "Timeline",
   "DecisionLog",
   "RunChecklist",
+  "Question",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -188,6 +189,10 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   Timeline: [],
   DecisionLog: [],
   RunChecklist: [],
+  // An open question as an answer card: `id` names its DecisionLog item (the
+  // one place its status lives), `choices` and `to` are `|`-separated. Wiki-only;
+  // see `src/format/question.ts`.
+  Question: ["id", "choices", "to"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -226,7 +231,8 @@ function childNesting(name: ComponentName, depth: number, nm: NextMovesNesting):
 // Anchored to the start of a (trimmed) line and gated on a leading `<`, so the
 // common case (a line not starting with `<`) fails the match cheaply — the
 // parser runs on every chat delta re-render, so this stays single-pass.
-const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*(\/?)>(.*)$/;
+// Exported for the wiki linter, which locates a block's tag line by the same shape.
+export const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*(\/?)>(.*)$/;
 /**
  * One double-quoted attribute of a component tag. **Global, so every caller
  * resets `lastIndex` before its own scan** — exported anyway, because the wiki

@@ -39,6 +39,7 @@ import {
 } from "./markdown-ast.ts";
 import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
 import { tldrFallbackLabel } from "./genre-lists.ts";
+import { questionLeadText } from "./question.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
@@ -362,6 +363,12 @@ const emailRenderer: BlockRenderer = {
         return (
           `<div style="margin:16px 0 12px;padding-top:12px;border-top:1px solid ${BORDER};">` +
           `<div style="${S.dim}margin:0 0 8px;">${factCheckSummaryHtml(attrs)}</div>${children}</div>`
+        );
+      case "Question":
+        // A plain bordered question: its lead line, then its body. No state.
+        return (
+          `<div style="margin:12px 0;padding:10px 12px;border:1px solid ${BORDER};border-radius:6px;">` +
+          `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${escapeHtml(questionLeadText(attrs))}</div>${children}</div>`
         );
       default: {
         const _exhaustive: never = name;

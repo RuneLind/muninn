@@ -26,10 +26,12 @@
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
-import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import { parseFrontmatter, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
 import type { PageFiles } from "../format/query-block.ts";
+import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
+import { DEFAULT_QUESTION_LANGUAGE } from "../format/question-labels.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -78,6 +80,9 @@ export function renderWikiHtml(
     /** The page's `<Query>` sibling files, read by the route beforehand
      *  (`loadPageFiles`). Absent ⇒ each card says its result is not loaded here. */
     files?: PageFiles;
+    /** What a `<Question>` card needs from the page and its wiki — built by
+     *  {@link questionRenderOptionsFor}. Absent ⇒ a plain bordered question. */
+    question?: QuestionRenderOptions;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -120,7 +125,10 @@ export function renderWikiHtml(
     return `\x00WIKIPAGELINK${idx}\x00`;
   });
 
-  const renderedHtml = formatWebHtml(withTokens, { files: opts?.files });
+  const renderedHtml = restoreSentinelsInAttributes(
+    formatWebHtml(withTokens, { files: opts?.files, question: opts?.question }),
+    literal,
+  );
   const codeRegions = renderedCodeRegions(renderedHtml);
   const html = renderedHtml.replace(
     /\x00WIKIPAGELINK(\d+)\x00/g,
@@ -136,6 +144,40 @@ export function renderWikiHtml(
     },
   );
   return paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
+}
+
+const SENTINEL_RE = /\x00WIKIPAGELINK(\d+)\x00/g;
+
+/**
+ * A sentinel the renderer copied into an ATTRIBUTE value — a `<Question>`
+ * card echoes `choices=`/`to=` into `data-question-*` — goes back as the
+ * source text, escaped: link HTML there would end the value and break the
+ * tag. Every `"` in rendered text is escaped (`&quot;`), so a `="…"` run is an
+ * attribute value and nothing else.
+ */
+function restoreSentinelsInAttributes(html: string, literal: string[]): string {
+  if (!html.includes("\x00WIKIPAGELINK")) return html;
+  return html.replace(/="[^"]*"/g, (value) =>
+    value.includes("\x00") ? value.replace(SENTINEL_RE, (_m, i: string) => escapeHtml(literal[parseInt(i, 10)] ?? "")) : value,
+  );
+}
+
+/**
+ * The `<Question>` render option for one page: the frontmatter
+ * `questions_to:` (read here because `renderWikiHtml` strips the frontmatter
+ * before rendering), the wiki's `.wiki-reader.json` `language`, and whether
+ * the wiki takes answers. `/api/wiki/page` is the caller.
+ */
+export function questionRenderOptionsFor(
+  markdown: string,
+  readerConfig: WikiReaderConfig | null | undefined,
+  answerable: boolean,
+): QuestionRenderOptions {
+  return {
+    questionsTo: parseQuestionsTo(parseFrontmatter(markdown).questions_to),
+    language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
+    answerable,
+  };
 }
 
 /**
