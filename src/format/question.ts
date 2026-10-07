@@ -64,6 +64,9 @@ export interface QuestionRenderOptions {
   language: QuestionLanguage;
   /** The wiki takes answers (`WIKI_ANSWER_WIKIS`, PR 2). False ⇒ read-only card. */
   answerable: boolean;
+  /** `WIKI_ANSWER_OWNER`, on an answerable wiki only: who a question is for
+   *  when neither `to=` nor `questions_to:` names anyone (D9). */
+  owner?: string | null;
 }
 
 // ── Targets ─────────────────────────────────────────────────────────────────

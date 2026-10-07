@@ -17,7 +17,7 @@ import type { MuninnProfile } from "../config.ts";
 export const ROUTE_GROUPS = [
   "data", "traces", "memsearch", "logs", "search", "research", "tools",
   "summaries", "anthropic", "article", "youtube", "x-article", "tiktok",
-  "vimeo", "sse", "graph", "wiki-read", "wiki", "wiki-gardener", "benchmark", "models",
+  "vimeo", "sse", "graph", "wiki-read", "wiki", "wiki-answers", "wiki-gardener", "benchmark", "models",
   "indexing", "agents", "sync", "claude-usage", "plans", "jira",
 ] as const;
 
@@ -68,6 +68,11 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  * Its GET paths are the auth user zone's read-slice entries under this profile
  * only (`servesWikiReadSliceOnly`), and the reader hides every control that
  * would reach the dropped `wiki` group (`wikiToolsRegistered`).
+ *
+ * `wiki-answers` STAYS too (answer cards, D14): the answer store is a table,
+ * not a working tree, and the pod is where colleagues answer. Its routes
+ * resolve pages through the read slice's scope, check `WIKI_ANSWER_WIKIS` in
+ * the handler, and are outside every user zone until answer cards PR 5.
  *
  * Everything else STAYS, deliberately: `data`, `traces`, `memsearch`, `sse`,
  * `models`, `agents`, `indexing` and `jira` are DB- or huginn-bound and are the

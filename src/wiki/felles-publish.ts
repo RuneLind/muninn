@@ -21,7 +21,7 @@
  * group anyway.
  */
 import path from "node:path";
-import { resolveServingProfile } from "../config.ts";
+import { parseWikiNameList, resolveServingProfile } from "../config.ts";
 import { isReadonlyWikiRoot } from "./readonly.ts";
 
 export const FELLES_PUBLISH_BIN_ENV = "FELLES_WIKI_PUBLISH_BIN";
@@ -43,12 +43,7 @@ export interface FellesPublishConfig {
 export function fellesPublishConfigFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): FellesPublishConfig {
-  const wikis = new Set(
-    (env[FELLES_PUBLISH_WIKIS_ENV] ?? "")
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-  );
+  const wikis = parseWikiNameList(env[FELLES_PUBLISH_WIKIS_ENV]);
   const raw = (env[FELLES_PUBLISH_BIN_ENV] ?? "").trim();
   let profileOk = false;
   try {

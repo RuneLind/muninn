@@ -286,6 +286,17 @@ describe("the wiki read slice in the user zone", () => {
     }
   });
 
+  test("the answer routes stay admin for role `user`, slice or not (answer cards PR 5 opens them)", () => {
+    const routes = wikiRouteTable("answers");
+    expect(routes.length).toBe(2);
+    for (const r of routes) {
+      for (const d of [asUser(r.path, r.method), asSliceUser(r.path, r.method)]) {
+        expect(`${r.method} ${r.path} → ${d.allowed ? "allowed" : d.reason}`).toBe(`${r.method} ${r.path} → default deny`);
+      }
+      expect(asAdmin(r.path, r.method).allowed).toBe(true);
+    }
+  });
+
   test("an admin passes the zone on both halves, slice or not", () => {
     for (const r of [...wikiRouteTable("read"), ...wikiRouteTable("tools")]) {
       expect(asAdmin(r.path, r.method).allowed, `${r.method} ${r.path}`).toBe(true);

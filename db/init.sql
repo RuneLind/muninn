@@ -916,6 +916,31 @@ CREATE TABLE summary_factchecks (
 );
 
 -- ============================================================================
+-- Answer cards: one row per version of an answer to a wiki <Question> (migration 082)
+-- ============================================================================
+CREATE TABLE wiki_answers (
+  answer_id        UUID NOT NULL,
+  version          INTEGER NOT NULL CHECK (version >= 1),
+  wiki             TEXT NOT NULL,
+  rel_path         TEXT NOT NULL,
+  question_id      TEXT NOT NULL,
+  author_user_id   TEXT,
+  author_oid       TEXT,
+  author_nav_ident TEXT,
+  author_name      TEXT NOT NULL,
+  choice           TEXT,
+  body             TEXT NOT NULL DEFAULT '' CHECK (char_length(body) <= 8000),
+  question_hash    TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Set by the copy-out (PR 4) and an admin redact (PR 5); nothing else updates a row.
+  exported_at      TIMESTAMPTZ,
+  redacted_at      TIMESTAMPTZ,
+  PRIMARY KEY (answer_id, version)
+);
+
+CREATE INDEX idx_wiki_answers_page ON wiki_answers (wiki, rel_path, question_id);
+
+-- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================
 CREATE TABLE schema_migrations (

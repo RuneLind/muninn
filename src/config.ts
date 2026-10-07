@@ -104,6 +104,44 @@ const PROFILE_ENV = "MUNINN_PROFILE";
  * every vertical present. `nais` is the pod: no wiki working trees, no
  * `yt-dlp`/`ffmpeg`, colleagues on the other side of the door.
  */
+/**
+ * A comma-separated list of wiki NAMES, trimmed and lower-cased (the registry
+ * matches names without case), blanks dropped. `FELLES_WIKI_PUBLISH_WIKIS` and
+ * `WIKI_ANSWER_WIKIS` both read this way.
+ */
+export function parseWikiNameList(raw: string | undefined): ReadonlySet<string> {
+  return new Set(
+    (raw ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/** Answer cards: which wikis take answers, and whose answers they are with auth off. */
+export interface WikiAnswerConfig {
+  /** `WIKI_ANSWER_WIKIS`, lower-cased. Empty ⇒ every card is read-only. */
+  wikis: ReadonlySet<string>;
+  /** `WIKI_ANSWER_OWNER`, trimmed: the author of every answer under
+   *  `MUNINN_AUTH=off`, and who a question is for when its page names nobody.
+   *  Null ⇒ a write under auth off is refused. */
+  owner: string | null;
+}
+
+/** `WIKI_ANSWER_WIKIS` + `WIKI_ANSWER_OWNER`. A `Config` field and a getter,
+ *  the {@link resolveServingProfile} pair rule: one parse either way. */
+export function resolveWikiAnswerConfig(env: Record<string, string | undefined> = process.env): WikiAnswerConfig {
+  return {
+    wikis: parseWikiNameList(env.WIKI_ANSWER_WIKIS),
+    owner: (env.WIKI_ANSWER_OWNER ?? "").trim() || null,
+  };
+}
+
+/** Does this wiki take answers? Keyed on the registry NAME. */
+export function wikiTakesAnswers(wikiName: string | undefined, cfg: WikiAnswerConfig): boolean {
+  return !!wikiName && cfg.wikis.has(wikiName.toLowerCase());
+}
+
 export const MUNINN_PROFILES = ["default", "nais"] as const;
 export type MuninnProfile = (typeof MUNINN_PROFILES)[number];
 
@@ -775,6 +813,7 @@ export function loadConfig() {
     // chips carry the session id as copyable text and no link, which is the
     // default and is fine: the id is what a search takes.
     claudeUsagePublicUrl: nullableEnv("CLAUDE_USAGE_PUBLIC_URL"),
+    wikiAnswers: resolveWikiAnswerConfig(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

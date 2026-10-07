@@ -162,6 +162,11 @@ const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"
  *  rides along: it lands in the payload and the copied command line. */
 const FELLES_PUBLISH_FLAGS = ["FELLES_WIKI_PUBLISH_BIN", "FELLES_WIKI_PUBLISH_WIKIS", "FELLES_WIKI_BUCKET"];
 
+/** Answer cards (`WIKI_ANSWER_WIKIS`, `WIKI_ANSWER_OWNER`): a developer's value
+ *  would make every matching card answerable and name an owner on every
+ *  `/api/wiki/page` payload. The specs that use them set both explicitly. */
+const WIKI_ANSWER_FLAGS = ["WIKI_ANSWER_WIKIS", "WIKI_ANSWER_OWNER"];
+
 /** The wiki bucket mirror (`src/wiki/bucket-mirror.ts`). A developer's value
  *  would start a poller that writes and DELETES files inside a spawned server's
  *  tmpdir, and change what every `loadConfig()` suite parses. The specs that use
@@ -197,6 +202,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...CLAUDE_USAGE_FLAGS,
   ...WIKI_STAMP_FLAGS,
   ...FELLES_PUBLISH_FLAGS,
+  ...WIKI_ANSWER_FLAGS,
   ...WIKI_BUCKET_MIRROR_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops

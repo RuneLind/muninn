@@ -276,8 +276,11 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
       ? `<span class="q-state">${escapeHtml(L.decided)} → <a class="q-decision" href="#${anchorSlug(state.decision)}">${escapeHtml(state.decision)}</a></span>`
       : `<span class="q-state">${escapeHtml(state.kind === "closed" ? L.closed : L.open)}</span>`;
   const blockTo = parsed.to;
-  const to = blockTo ?? opts.questionsTo;
-  const toSource = blockTo ? "block" : opts.questionsTo.length ? "page" : "none";
+  // Neither `to=` nor `questions_to:` ⇒ the configured owner, on an
+  // answerable wiki (D9).
+  const ownerTo = opts.owner ? [{ name: opts.owner, ident: null }] : [];
+  const to = blockTo ?? (opts.questionsTo.length ? opts.questionsTo : ownerTo);
+  const toSource = blockTo ? "block" : opts.questionsTo.length ? "page" : ownerTo.length ? "owner" : "none";
   const forHtml = to.length
     ? `<div class="q-for"><span class="q-for-label">${escapeHtml(L.for)}</span> ${escapeHtml(to.map((t) => t.name).join(", "))}</div>`
     : "";

@@ -16,7 +16,7 @@
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest, type WikiRegistryEntry, type WikiRequestResolution } from "../../wiki/registry.ts";
 import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
-import { resolveWikiRoot } from "../../wiki/store.ts";
+import { getWikiIndex, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 
 export interface ReadScopeResolution extends WikiRequestResolution {
   /** The registry the request was resolved against — the picker's list. */
@@ -46,4 +46,34 @@ export function resolveReadRequest(
   // the jarvis default, neither of which is servable here.
   if (!r.entry && !r.envOverride && !r.unknownWiki) return { registry, ...r, unknownWiki: true };
   return { registry, ...r };
+}
+
+/** One page resolved in the served scope, or the status and error the read
+ *  routes answer when it is not. */
+export type ScopedPageLookup =
+  | { ok: true; entry: WikiRegistryEntry | undefined; index: WikiIndex; meta: WikiPageMeta }
+  | { ok: false; status: 400 | 404 | 503; error: string };
+
+/**
+ * The page resolution `/api/wiki/page`, `/api/wiki/page/provenance`,
+ * `/api/wiki/related` and the answer routes share: `wiki`/`bot` → registry
+ * entry in the served scope ({@link resolveReadRequest}), then `relPath`
+ * (exact, collision-proof) else `name` (first stem match) → page. Takes values,
+ * not a request, so a POST resolves its body's page through the same ladder.
+ */
+export async function resolveScopedPage(
+  readSliceOnly: boolean,
+  q: { wiki?: string; bot?: string; relPath?: string; name?: string },
+): Promise<ScopedPageLookup> {
+  if (!q.relPath && !q.name) return { ok: false, status: 400, error: "name or relPath query param required" };
+  const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, q.wiki, q.bot);
+  if (unknownWiki) return { ok: false, status: 404, error: "no wiki configured for that name" };
+  const index = await getWikiIndex({ root: entry?.root });
+  if (!index) return { ok: false, status: 503, error: "wiki directory not found" };
+  const meta = q.relPath ? index.resolveRelPath(q.relPath) : index.resolve(q.name!);
+  if (!meta) {
+    const which = q.relPath ? `relPath "${q.relPath}"` : `name "${q.name}"`;
+    return { ok: false, status: 404, error: `no wiki page for ${which}` };
+  }
+  return { ok: true, entry, index, meta };
 }
