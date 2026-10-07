@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { componentBlockCss, factcheckReaderCss } from "../../format/component-styles.ts";
+import { componentBlockCss, factcheckReaderCss, questionReaderCss } from "../../format/component-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -1952,6 +1952,8 @@ export async function renderWikiPage(opts?: {
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}
+    /* Reader-only: the answer card's composer and answers (wiki-answer-cards.ts). */
+    ${questionReaderCss(".wiki-article")}
 
     /* Blog-type article chrome (native .mdx pages with type: blog):
        explainer-style h2 underline for stronger section separation. The accent

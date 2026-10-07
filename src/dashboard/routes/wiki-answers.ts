@@ -27,9 +27,17 @@ import { servesWikiReadSliceOnly } from "../route-groups.ts";
 import { resolveScopedPage } from "./wiki-read-scope.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
-import { readWikiPage, stripFrontmatter } from "../../wiki/store.ts";
+import { parseFrontmatter, readWikiPage, stripFrontmatter } from "../../wiki/store.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
-import { parseQuestionPage, QUESTION_NOT_SURE } from "../../format/question.ts";
+import {
+  isAskedAuthor,
+  parseQuestionPage,
+  parseQuestionsTo,
+  QUESTION_ANSWER_MAX,
+  QUESTION_NOT_SURE,
+  resolveQuestionTargets,
+  type QuestionTarget,
+} from "../../format/question.ts";
 import { sha256 } from "../../gardener/util.ts";
 import { sessionIdentity, sessionRole } from "../../auth/guard.ts";
 import {
@@ -46,9 +54,8 @@ import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki-answers");
 
-/** An answer's body cap, in characters (code points — what Postgres
- *  `char_length` counts, and the table's CHECK). */
-export const WIKI_ANSWER_BODY_MAX = 8000;
+/** An answer's body cap, in code points ({@link QUESTION_ANSWER_MAX}). */
+export const WIKI_ANSWER_BODY_MAX = QUESTION_ANSWER_MAX;
 
 /** The store, injectable so the route's rules are testable without a database. */
 export interface WikiAnswerStore {
@@ -83,6 +90,10 @@ interface AnswerView extends AnswerVersionView {
   firstCreatedAt: number;
   /** The viewer wrote it: may edit it and see its earlier versions. */
   mine: boolean;
+  /** The question names its author (D2): ident when both sides have one,
+   *  else the case-folded name. Null when the page no longer has the question
+   *  or it names nobody. Computed here because the client never sees idents. */
+  asked: boolean | null;
   /** Earlier versions, newest first — with `versions=1`, to the author and an admin only. */
   earlier?: AnswerVersionView[];
 }
@@ -133,6 +144,22 @@ function pageError(c: Context, page: { status: 400 | 404 | 503; error: string })
   return err(c, page.status, page.status === 503 ? "wiki_unavailable" : "no_page", page.error);
 }
 
+/** Who each question on the page is for, by id — the first block wins on a
+ *  duplicated id, as the card shows it. Empty when the page is unreadable. */
+async function questionTargetsOf(
+  page: { index: Parameters<typeof readWikiPage>[0]; meta: Parameters<typeof readWikiPage>[1] },
+  owner: string | null,
+): Promise<Map<string, QuestionTarget[]>> {
+  const out = new Map<string, QuestionTarget[]>();
+  const markdown = await readWikiPage(page.index, page.meta);
+  if (markdown === null) return out;
+  const questionsTo = parseQuestionsTo(parseFrontmatter(markdown).questions_to);
+  for (const q of parseQuestionPage(parseBlocks(stripFrontmatter(markdown))).questions) {
+    if (q.id !== null && !out.has(q.id)) out.set(q.id, resolveQuestionTargets(q.to, questionsTo, owner).to);
+  }
+  return out;
+}
+
 export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiAnswerStore = defaultStore): void {
   const profile = config.profile ?? resolveServingProfile();
   const readSliceOnly = servesWikiReadSliceOnly(profile);
@@ -149,6 +176,7 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
     }
     try {
       const latest = await store.listLatest(page.entry.name, page.meta.relPath);
+      const targets = latest.length ? await questionTargetsOf(page, answerConfig().owner) : new Map();
       const isAdmin = (sessionRole(c) ?? "admin") === "admin";
       const withEarlier = c.req.query("versions") === "1"
         ? latest.filter((a) => a.versionCount > 1 && (isAdmin || isMine(c, a))).map((a) => a.answerId)
@@ -168,6 +196,10 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
         versionCount: a.versionCount,
         firstCreatedAt: a.firstCreatedAt,
         mine: isMine(c, a),
+        asked: (() => {
+          const t = targets.get(a.questionId);
+          return t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t) : null;
+        })(),
         ...(earlier.has(a.answerId) ? { earlier: earlier.get(a.answerId) } : {}),
       }));
       return c.json({ answerable: true, answers });

@@ -14,6 +14,8 @@ import {
   questionStates,
   type QuestionRenderOptions,
   type QuestionState,
+  isAskedAuthor,
+  resolveQuestionTargets,
 } from "./question.ts";
 import { parseQuestionLanguage, QUESTION_LABELS } from "./question-labels.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -618,4 +620,22 @@ describe("fix round 2: pins", () => {
       expect(parsed(inner).body).toBe(body);
     });
   }
+});
+
+describe("who a question is for, and whether an author was asked", () => {
+  const yv = { name: "Yvonne Jacobs", ident: "X111111" };
+  test("to= wins, then questions_to:, then the owner, then nobody", () => {
+    expect(resolveQuestionTargets([yv], [{ name: "Ola", ident: null }], "Owner")).toEqual({ to: [yv], source: "block" });
+    expect(resolveQuestionTargets(null, [yv], "Owner")).toEqual({ to: [yv], source: "page" });
+    expect(resolveQuestionTargets(null, [], "Owner")).toEqual({ to: [{ name: "Owner", ident: null }], source: "owner" });
+    expect(resolveQuestionTargets(null, [], null)).toEqual({ to: [], source: "none" });
+  });
+
+  test("the ident decides when both sides carry one, else the folded name; nobody named is null", () => {
+    expect(isAskedAuthor({ name: "Someone Else", navIdent: "x111111" }, [yv])).toBe(true);
+    expect(isAskedAuthor({ name: "Yvonne Jacobs", navIdent: "Z999999" }, [yv])).toBe(false);
+    expect(isAskedAuthor({ name: " yvonne   JACOBS ", navIdent: null }, [yv])).toBe(true);
+    expect(isAskedAuthor({ name: "Ola", navIdent: "Y222222" }, [{ name: "ola", ident: null }])).toBe(true);
+    expect(isAskedAuthor({ name: "Ola", navIdent: null }, [])).toBeNull();
+  });
 });
