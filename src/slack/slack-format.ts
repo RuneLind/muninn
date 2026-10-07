@@ -16,6 +16,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { tldrFallbackLabel } from "../format/genre-lists.ts";
+import { questionLeadText } from "../format/question.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
@@ -184,6 +185,9 @@ const slackRenderer: BlockRenderer = {
         // The collapsed appendix has no fold here, so it degrades to its summary
         // line followed by the per-claim evidence.
         return `${factCheckSummaryText(attrs)}\n${children}`;
+      case "Question":
+        // No card and no state: a bold lead line naming the question, then its body.
+        return `*${slackLiteral(questionLeadText(attrs))}*\n${children}`;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;

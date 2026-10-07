@@ -319,6 +319,45 @@ describe("GET /api/wiki/html", () => {
     expect(data.backlinks.map((b) => b.name)).toContain("Cites Native");
   });
 
+  // The `<Question>` render option rides /api/wiki/page → renderWikiHtml →
+  // formatWebHtml: the frontmatter's questions_to:, the .wiki-reader.json
+  // language, and answerable — always false until WIKI_ANSWER_WIKIS (PR 2).
+  test("/api/wiki/page renders a <Question> as a read-only card with the page's options", async () => {
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ language: "no" }));
+    await Bun.write(
+      path.join(root, "concepts/Question Page.mdx"),
+      [
+        "---",
+        "title: Question Page",
+        'questions_to: ["Yvonne Jacobs (X111111)"]',
+        "---",
+        "",
+        '<Question id="O3" choices="A|B">',
+        "",
+        "Keep it?",
+        "",
+        "</Question>",
+        "",
+        "<DecisionLog>",
+        "",
+        "- **D99** — Decided.",
+        "- **O3** — Keep it? Lukket 08.10 (D99).",
+        "",
+        "</DecisionLog>",
+      ].join("\n"),
+    );
+    __resetWikiCacheForTest();
+    const res = await app.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Question Page.mdx"));
+    expect(res.status).toBe(200);
+    const { html } = (await res.json()) as { html: string };
+    expect(html).toContain('class="question q-decided"');
+    expect(html).toContain('data-wiki-answerable="false"');
+    expect(html).toContain('data-question-lang="no"');
+    expect(html).toContain('data-question-to="Yvonne Jacobs (X111111)"');
+    expect(html).toContain("Avgjort → ");
+    expect(html).toContain('<li class="dl-item" id="o3">');
+  });
+
   // /api/wiki/atlas returns the projected payload (all seven keys) over the same
   // TTL-cached index, and re-reads no wiki page files on a repeat request within
   // the TTL (projection purity — the second call is served from the cached index).

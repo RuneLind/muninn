@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Fifteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Sixteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -44,6 +44,13 @@
  *                      report-page DRIFT, on LIVE report pages only (a live
  *                      `plan_status`, or none under `plans/`); report-only.
  *                      Rules and the scope: `lint-drift.ts`.
+ * 10. question-block — a `<Question>` whose card cannot follow its DecisionLog
+ *                      item: no `id`, an id no `<DecisionLog>` item carries,
+ *                      an id two `<Question>` blocks share (the answer route
+ *                      refuses it), or an item carrying a near-miss close
+ *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`)
+ *                      that leaves the card silently open. Rules:
+ *                      `src/format/question.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -59,6 +66,7 @@ import {
   isMarkdownWikiPath,
   parseFrontmatter,
   normalizeRelPath,
+  stripFrontmatter,
 } from "./store.ts";
 import {
   FUTURE_DATE_SKEW_MS,
@@ -73,7 +81,8 @@ import {
 } from "../dashboard/views/components/wiki-integrate.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
-import { countFactWrappers } from "../format/markdown-ast.ts";
+import { countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
+import { closeNearMisses, decisionLogEntries, parseQuestions, type DecisionLogEntry } from "../format/question.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
 export const LINT_CHECKS = [
@@ -85,6 +94,7 @@ export const LINT_CHECKS = [
   "nested-annotation",
   "unrendered-fact-mark",
   "stem-collision",
+  "question-block",
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
 ] as const;
@@ -371,6 +381,65 @@ function checkUnrenderedFactMarks(page: WikiPageMeta, rawContent: string): LintF
   ];
 }
 
+/** The 1-based line of the first `<Question …>` tag carrying `id` (or no id
+ *  at all, for `null`), or undefined when none is found on its own line. */
+function questionTagLine(rawContent: string, id: string | null): number | undefined {
+  const lines = rawContent.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*<Question\b([^>]*)>/.exec(lines[i]!);
+    if (!m) continue;
+    const idAttr = /\bid="([^"]*)"/.exec(m[1]!)?.[1]?.trim() ?? "";
+    if (id === null ? idAttr === "" : idAttr === id) return i + 1;
+  }
+  return undefined;
+}
+
+/**
+ * Check 10 — a `<Question>` whose answer card cannot follow its DecisionLog
+ * item. Reads the page through the same pure functions the renderer runs
+ * (`src/format/question.ts`), so the finding and the card agree. A page that
+ * never spells `<Question` is skipped before any parse.
+ */
+function checkQuestions(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  if (!rawContent.includes("<Question")) return [];
+  const blocks = parseBlocks(stripFrontmatter(rawContent));
+  const questions = parseQuestions(blocks);
+  if (questions.length === 0) return [];
+  const items = new Map<string, DecisionLogEntry>();
+  for (const e of decisionLogEntries(blocks)) if (!items.has(e.id)) items.set(e.id, e);
+  const findings: LintFinding[] = [];
+  const push = (message: string, line?: number) =>
+    findings.push({ check: "question-block", relPath: page.relPath, message, ...(line ? { line } : {}) });
+  const seen = new Set<string>();
+  for (const q of questions) {
+    if (q.id === null) {
+      push("a <Question> has no id, so its card cannot name a DecisionLog item", questionTagLine(rawContent, null));
+      continue;
+    }
+    if (seen.has(q.id)) continue;
+    seen.add(q.id);
+    const line = questionTagLine(rawContent, q.id);
+    if (q.duplicate) {
+      const n = questions.filter((o) => o.id === q.id).length;
+      push(`${n} <Question> blocks use id ${q.id}; an answer to that id is refused`, line);
+    }
+    const item = items.get(q.id);
+    if (!item) {
+      push(`<Question id="${q.id}"> has no item in the page's <DecisionLog>, so its card can never close`, line);
+      continue;
+    }
+    const words = closeNearMisses(item.text);
+    if (words.length > 0) {
+      const quoted = [...new Set(words)].map((w) => `"${w}"`).join(", ");
+      push(
+        `DecisionLog item ${q.id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`,
+        line,
+      );
+    }
+  }
+  return findings;
+}
+
 /** Hours in `FUTURE_DATE_SKEW_MS`, for the finding message (48). */
 const FUTURE_SKEW_HOURS = Math.round(FUTURE_DATE_SKEW_MS / (60 * 60 * 1000));
 
@@ -605,6 +674,8 @@ export async function lintWiki(
     // wherever it lands, and log.md/index.md carry [[links]] like any page.
     findings.push(...checkNestedAnnotation(page, content));
     findings.push(...checkUnrenderedFactMarks(page, content));
+    // Check 10 — every page: a card's state is the page's own business.
+    findings.push(...checkQuestions(page, content));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.

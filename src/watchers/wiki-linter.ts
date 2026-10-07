@@ -40,6 +40,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "nested-annotation": { one: "nested annotation", many: "nested annotations" },
   "unrendered-fact-mark": { one: "unrendered fact mark", many: "unrendered fact marks" },
   "stem-collision": { one: "stem collision", many: "stem collisions" },
+  "question-block": { one: "question block problem", many: "question block problems" },
   "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },
   "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },

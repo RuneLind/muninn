@@ -107,6 +107,7 @@ export const COMPONENT_NAMES = [
   "Timeline",
   "DecisionLog",
   "RunChecklist",
+  "Question",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -188,6 +189,10 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   Timeline: [],
   DecisionLog: [],
   RunChecklist: [],
+  // An open question as an answer card: `id` names its DecisionLog item (the
+  // one place its status lives), `choices` and `to` are `|`-separated. Wiki-only;
+  // see `src/format/question.ts`.
+  Question: ["id", "choices", "to"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

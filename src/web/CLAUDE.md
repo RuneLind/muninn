@@ -516,6 +516,21 @@ Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`), no file read. The g
 
 Muted text (`rc-count`, `rc-label`, `dl-dim`) uses `--text-soft`; `e2e/wiki-genre-blocks.spec.ts` pins token and 4.5:1 in both themes, the rail markers, the anchors and the 390px focus layout (no descendant, inline code included, past the article's right edge; inline code in the four blocks wraps with `overflow-wrap: anywhere`). `genre-lists.test.ts` pins that chat's own stylesheet has no rule for any class the four blocks emit.
 
+## `<Question>` — an open question as an answer card
+
+Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`). `<Question id="O3" choices="A|B" to="Name (IDENT)|Name">` wraps the question as the reader should read it. The pure, browser-safe parser is `src/format/question.ts`; the label table (`en`/`no`) is `src/format/question-labels.ts`. The renderer, the wiki linter and the answer route (answer cards PR 2) all read a page through those two modules.
+
+- **State lives in the page's `<DecisionLog>`, never on the block (D6).** `formatWebHtml` runs a pre-pass over the whole page AST (`questionStates`) before it renders any card, since the log usually sits below the question inside a fold. The ONE closing form, outside code spans: whole-word, case-sensitive `Closed`/`Lukket`, a date (`YYYY-MM-DD` or `D.M`/`DD.MM`, optional `.YYYY`, a real calendar day), then `(Dn)` as the next token. `Reopened`/`Gjenåpnet` plus a date reopens. The last canonical phrase in the item wins. A close naming a `D` id some `<DecisionLog>` on the page defines is `decided`; any other id is `closed`. With no canonical phrase, an item `parseLogItem` dims is `closed`, else `open`. The first item carrying an id decides it. The accepted and rejected shapes are a table in `src/format/question.test.ts`.
+- **The card carries NO `id` attribute and is not an ID target** (`wiki-ref-links.ts` `ID_TARGETS`): with one, `uniqueLogAnchors` would rename the DecisionLog item `o3-2`. Its `q-id` chip links `#o3`, the item.
+- **Two shapes.** With the wiki render option (`question: {questionsTo, language, answerable}`, built by `questionRenderOptionsFor` in `src/wiki/render.ts` and passed by `GET /api/wiki/page` only) it is the card: `section.question.q-<open|closed|decided|noid>`, the label, the id, the state pill (`Decided → D99` links `#d99`), the body, and a `q-for` line naming who it is for (`to=` overrides frontmatter `questions_to:`; neither ⇒ no line). The data attributes are the seam the reader's client hydrates: `data-question-id`, `-state`, `-decision`, `-lang`, `-choices`, `-to`, `-to-source` (`block`/`page`/`none`) and `data-wiki-answerable`. Without the option — chat, the gardener preview, the digest — it is `section.question.question-plain`: label, id and body, no state.
+- **Read-only in PR 1.** The route always passes `answerable: false`; `WIKI_ANSWER_WIKIS` (PR 2) decides it per wiki. No composer, no answers, no choices on screen — the choices ride `data-question-choices` only.
+- **Labels follow `.wiki-reader.json` `language`** (`en` default, `no`): `Stilt til`, `Åpent`/`Avgjort`/`Lukket`. A bad value warns and falls back to `en`.
+- **Other surfaces**: Telegram, Slack and email render a `Question O3` lead line (English, no state) over the body; email draws it in a bordered box.
+- **Lint** (`question-block`, `src/wiki/lint.ts`): a `<Question>` with no id, an id no DecisionLog item carries, an id two `<Question>` blocks share, and an item holding a near-miss close (`closeNearMisses`: a whole-word `Closed`/`Lukket`/`Reopened`/`Gjenåpnet` that starts no canonical phrase, or any whole-word `Besvart`/`Answered`). Only items that have a `<Question>` are checked, so the free-text closes already in the wikis stay silent.
+- **Chat** allowlists `question`, `question-plain`, `q-head`, `q-label`, `q-id` and `q-body` — the plain shape's classes.
+
+`e2e/wiki-question-card.spec.ts` drives the reader over a temp wiki: Open, Decided → D99, Closed and reopened cards, the `no` labels, and the `o3` anchor left alone.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.

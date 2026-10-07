@@ -364,6 +364,31 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} a.dl-id:hover { text-decoration: underline; }
     ${scope} .dl-dim, ${scope} .dl-dim .dl-id { color: var(--text-soft); }
+    /* Question: an answer card. The state pill reuses the CaseBoard pill's
+       text-on-tint pairing; muted lines are --text-soft. */
+    ${scope} .question {
+      margin: 1.2rem 0; padding: 0.7rem 1rem; border-radius: 10px; background: var(--bg-surface);
+      border: 1px solid var(--border-secondary); border-left: 3px solid var(--accent);
+    }
+    ${scope} .q-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.5rem; }
+    ${scope} .q-label {
+      font-size: 0.78em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent-light);
+    }
+    ${scope} .q-id {
+      font-family: var(--mono, ui-monospace, monospace); font-weight: 600; color: var(--accent-light); text-decoration: none;
+    }
+    ${scope} a.q-id:hover, ${scope} a.q-decision:hover { text-decoration: underline; }
+    ${scope} .q-state {
+      font-size: 0.8em; padding: 0 0.5rem; border-radius: 999px; color: var(--text-primary);
+      border: 1px solid var(--border-secondary); background: var(--tint-info);
+    }
+    ${scope} .q-decided .q-state { background: var(--tint-success); }
+    ${scope} .q-closed .q-state { background: var(--tint-neutral); }
+    ${scope} .q-decision { color: inherit; font-family: var(--mono, ui-monospace, monospace); font-weight: 600; }
+    ${scope} .q-body { margin-top: 0.4rem; }
+    ${scope} .q-for, ${scope} .q-note { color: var(--text-soft); font-size: 0.85em; margin: 0.4rem 0 0; }
+    ${scope} .q-for-label { font-weight: 600; }
+    ${scope} .question :not(pre) > code { overflow-wrap: anywhere; }
     /* RunChecklist: a step count, then labelled Command / Expect / Stop-if rows
        under each step. */
     ${scope} .run-checklist { margin: 1.2rem 0; }

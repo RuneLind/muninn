@@ -267,6 +267,9 @@ export const E2E_PORTS = {
   // 3125 rather than the next free 31xx: parallel lanes are adding specs.
   "summaries-factcheck-writeback": 3125,
   "summaries-factcheck-writeback/huginn": 3126,
+  // The <Question> answer card in the reader: one muninn over two temp wikis.
+  // 3130 rather than the next free 31xx: the answer-card PRs add specs too.
+  "wiki-question-card": 3130,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
