@@ -150,6 +150,8 @@ beforeAll(async () => {
   __setWikiRegistryForTest([
     { name: "answers", root, source: "extra" },
     { name: "cards-only", root, source: "extra" },
+    // A registered wiki whose directory is gone: the 503 "wiki directory not found".
+    { name: "gone", root: path.join(root, "no-such-dir"), source: "extra" },
   ]);
   __resetWikiCacheForTest();
 });
@@ -207,7 +209,7 @@ describe("edits are append-only, and only the author's", () => {
   test("an edit adds version 2 under the same answer; GET shows one answer", async () => {
     const app = appFor({ identity: yvonne, role: "user" });
     const first = await (await post(app, answer({ questionId: "O3", choice: null, body: "v1" }))).json();
-    const res = await post(app, answer({ questionId: "O3", choice: null, body: "v2", answerId: first.answerId }));
+    const res = await post(app, answer({ questionId: "O3", choice: null, body: "v2", answerId: first.answerId, baseVersion: 1 }));
     expect(res.status).toBe(200);
     expect((await res.json()).version).toBe(2);
     const rows = await getDb()`SELECT version, body FROM wiki_answers WHERE answer_id = ${first.answerId} ORDER BY version`;
@@ -224,7 +226,7 @@ describe("edits are append-only, and only the author's", () => {
   test("a stranger's edit is refused — an admin's included — and adds no row", async () => {
     const first = await (await post(appFor({ identity: yvonne, role: "user" }), answer())).json();
     for (const app of [appFor({ identity: ola, role: "user" }), appFor({ identity: ola, role: "admin" })]) {
-      const res = await post(app, answer({ answerId: first.answerId, body: "hijack" }));
+      const res = await post(app, answer({ answerId: first.answerId, baseVersion: 1, body: "hijack" }));
       expect(res.status).toBe(403);
       expect((await res.json()).code).toBe("not_author");
     }
@@ -250,8 +252,8 @@ describe("edits are append-only, and only the author's", () => {
     };
     const app = appFor({ store });
     const [a, b] = await Promise.all([
-      post(app, answer({ body: "edit A", answerId: first.answerId })),
-      post(app, answer({ body: "edit B", answerId: first.answerId })),
+      post(app, answer({ body: "edit A", answerId: first.answerId, baseVersion: 1 })),
+      post(app, answer({ body: "edit B", answerId: first.answerId, baseVersion: 1 })),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     const lost = a.status === 409 ? a : b;
@@ -263,7 +265,7 @@ describe("edits are append-only, and only the author's", () => {
   test("auth off: any edit is the owner's", async () => {
     const app = appFor();
     const first = await (await post(app, answer())).json();
-    const res = await post(app, answer({ answerId: first.answerId, body: "edited" }));
+    const res = await post(app, answer({ answerId: first.answerId, baseVersion: 1, body: "edited" }));
     expect(res.status).toBe(200);
   });
 
@@ -271,10 +273,10 @@ describe("edits are append-only, and only the author's", () => {
     const app = appFor();
     const first = await (await post(app, answer())).json();
     for (const answerId of [first.answerId.replace(/.$/, first.answerId.endsWith("0") ? "1" : "0"), "not-a-uuid"]) {
-      const res = await post(app, answer({ answerId }));
+      const res = await post(app, answer({ answerId, baseVersion: 1 }));
       expect(res.status).toBe(404);
     }
-    const res = await post(app, answer({ questionId: "O3", choice: null, answerId: first.answerId }));
+    const res = await post(app, answer({ questionId: "O3", choice: null, answerId: first.answerId, baseVersion: 1 }));
     expect(res.status).toBe(404);
     expect((await res.json()).code).toBe("unknown_answer");
   });
@@ -283,7 +285,7 @@ describe("edits are append-only, and only the author's", () => {
     const app = appFor();
     const first = await (await post(app, answer())).json();
     await getDb()`UPDATE wiki_answers SET redacted_at = now(), body = '', choice = NULL WHERE answer_id = ${first.answerId}`;
-    const res = await post(app, answer({ answerId: first.answerId }));
+    const res = await post(app, answer({ answerId: first.answerId, baseVersion: 1 }));
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("answer_redacted");
   });
@@ -350,7 +352,7 @@ describe("GET /api/wiki/answers", () => {
   test("versions=1 adds earlier versions to the author and an admin, not to anyone else", async () => {
     const asYvonne = appFor({ identity: yvonne, role: "user" });
     const first = await (await post(asYvonne, answer({ questionId: "O3", choice: null, body: "first" }))).json();
-    await post(asYvonne, answer({ questionId: "O3", choice: null, body: "second", answerId: first.answerId }));
+    await post(asYvonne, answer({ questionId: "O3", choice: null, body: "second", answerId: first.answerId, baseVersion: 1 }));
     const pick = (data: { answers: { answerId: string }[] }) =>
       data.answers.find((a) => a.answerId === first.answerId) as { earlier?: { version: number; body: string }[] };
 
@@ -367,7 +369,7 @@ describe("GET /api/wiki/answers", () => {
     await getDb()`UPDATE wiki_answers SET exported_at = now() WHERE answer_id = ${first.answerId}`;
     const exported = (await getAnswers(app)).answers.find((a: { answerId: string }) => a.answerId === first.answerId);
     expect(exported.exported).toBe(true);
-    await post(app, answer({ body: "edited after", answerId: first.answerId }));
+    await post(app, answer({ body: "edited after", answerId: first.answerId, baseVersion: 1 }));
     const edited = (await getAnswers(app)).answers.find((a: { answerId: string }) => a.answerId === first.answerId);
     expect([edited.exported, edited.versionCount]).toEqual([false, 2]);
   });
@@ -414,5 +416,97 @@ describe("/api/wiki/page on a wiki that takes answers", () => {
     expect(data.html).toContain('data-wiki-answerable="false"');
     expect(data.html).not.toContain('data-question-to-source="owner"');
     expect(data.html).not.toContain(OWNER);
+  });
+});
+
+describe("fix round 1", () => {
+  const code = async (res: Response) => `${res.status} ${(await res.json()).code}`;
+
+  test("an edit must name the version it was made from; a missing or malformed baseVersion is a 400", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer({ body: "v1" }))).json();
+    for (const baseVersion of [undefined, "1", 0, -1, 1.5, null]) {
+      const res = await post(app, answer({ body: "edit", answerId: first.answerId, baseVersion }));
+      expect(await code(res)).toBe("400 bad_base_version");
+    }
+    const rows = await getDb()`SELECT version FROM wiki_answers WHERE answer_id = ${first.answerId}`;
+    expect(rows.length).toBe(1);
+  });
+
+  test("an edit made from a stale version is a 409, and adds no row", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer({ body: "v1" }))).json();
+    const second = await post(app, answer({ body: "v2", answerId: first.answerId, baseVersion: 1 }));
+    expect(second.status).toBe(200);
+    const saved = await second.json();
+    expect(saved.version).toBe(2);
+    // A second tab still holding version 1.
+    const stale = await post(app, answer({ body: "from the stale tab", answerId: first.answerId, baseVersion: 1 }));
+    expect(await code(stale)).toBe("409 version_conflict");
+    // A base AHEAD of the stored answer is no better.
+    const ahead = await post(app, answer({ body: "from the future", answerId: first.answerId, baseVersion: 7 }));
+    expect(await code(ahead)).toBe("409 version_conflict");
+    // The response's version chains the next edit.
+    const third = await post(app, answer({ body: "v3", answerId: first.answerId, baseVersion: saved.version }));
+    expect((await third.json()).version).toBe(3);
+    const rows = await getDb()`SELECT version, body FROM wiki_answers WHERE answer_id = ${first.answerId} ORDER BY version`;
+    expect(rows.map((r) => [r.version, r.body])).toEqual([
+      [1, "v1"],
+      [2, "v2"],
+      [3, "v3"],
+    ]);
+  });
+
+  test("ten concurrent edits all made from version 1: exactly one lands", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer({ body: "v1" }))).json();
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => post(app, answer({ body: `edit ${i}`, answerId: first.answerId, baseVersion: 1 }))),
+    );
+    const statuses = results.map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 409, 409, 409, 409, 409, 409, 409, 409, 409]);
+    const rows = await getDb()`SELECT version FROM wiki_answers WHERE answer_id = ${first.answerId} ORDER BY version`;
+    expect(rows.map((r) => r.version)).toEqual([1, 2]);
+  });
+
+  test("a NUL or a lone surrogate in body or choice is a 400 before anything is stored", async () => {
+    const before = (await getDb()`SELECT count(*)::int AS n FROM wiki_answers`)[0]!.n;
+    for (const bad of ["a\u0000b", "a\udc00b", "a\ud800", "\ud83db"]) {
+      expect(await code(await post(appFor(), answer({ body: bad })))).toBe("400 bad_text");
+      expect(await code(await post(appFor(), answer({ choice: bad })))).toBe("400 bad_text");
+    }
+    // Refused before the length check: an over-long body carrying a NUL names the NUL.
+    expect(await code(await post(appFor(), answer({ body: "x".repeat(9000) + "\u0000" })))).toBe("400 bad_text");
+    expect((await getDb()`SELECT count(*)::int AS n FROM wiki_answers`)[0]!.n).toBe(before);
+    // A well-formed astral character is fine.
+    expect((await post(appFor(), answer({ body: "ok 😀" }))).status).toBe(201);
+  });
+
+  test("bad_choice names each allowed value once, on a page that spells not-sure itself", async () => {
+    const res = await post(appFor(), answer({ questionId: "O6", choice: "x" }));
+    expect(res.status).toBe(400);
+    const { code: c, error } = await res.json();
+    expect(c).toBe("bad_choice");
+    expect(error.match(/not-sure/g)).toHaveLength(1);
+    expect(error).toContain("later");
+  });
+
+  test("a question with no choices takes no choice at all, not-sure included", async () => {
+    expect(await code(await post(appFor(), answer({ questionId: "O3", choice: QUESTION_NOT_SURE })))).toBe("400 bad_choice");
+    expect((await post(appFor(), answer({ questionId: "O3", choice: null, body: "free text" }))).status).toBe(201);
+  });
+
+  test("a duplicated id renders read-only beside answerable cards", async () => {
+    const res = await appFor().request(`/api/wiki/page?wiki=answers&relPath=${encodeURIComponent(REL)}`);
+    const { html } = (await res.json()) as { html: string };
+    const flag = (id: string) => [...html.matchAll(new RegExp(`data-question-id="${id}"[^>]*data-wiki-answerable="(\\w+)"`, "g"))].map((m) => m[1]);
+    expect(flag("O1")).toEqual(["true"]);
+    expect(flag("O5")).toEqual(["false", "false"]);
+  });
+
+  test("a registered wiki whose directory is gone has its own code, not no_page", async () => {
+    expect(await code(await post(appFor(), answer({ wiki: "gone" })))).toBe("503 wiki_unavailable");
+    const get = await appFor().request(`/api/wiki/answers?wiki=gone&relPath=${encodeURIComponent(REL)}`);
+    expect(await code(get)).toBe("503 wiki_unavailable");
   });
 });

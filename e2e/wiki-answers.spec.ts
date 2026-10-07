@@ -148,7 +148,7 @@ test.describe("Answer store API (MUNINN_AUTH=off)", () => {
     expect(saved.authorName).toBe(OWNER);
 
     const edited = await request.post(`${BASE}/api/wiki/answers`, {
-      data: answer({ body: "Edited: the page's language.", answerId: saved.answerId }),
+      data: answer({ body: "Edited: the page's language.", answerId: saved.answerId, baseVersion: 1 }),
     });
     expect(edited.status()).toBe(200);
     expect((await edited.json()).version).toBe(2);

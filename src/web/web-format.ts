@@ -284,13 +284,15 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
   const forHtml = to.length
     ? `<div class="q-for"><span class="q-for-label">${escapeHtml(L.for)}</span> ${escapeHtml(to.map((t) => t.name).join(", "))}</div>`
     : "";
-  const duplicate = id && page.duplicates.has(id) ? `<p class="q-note q-duplicate">${escapeHtml(L.duplicate)}</p>` : "";
+  const isDuplicate = id !== "" && page.duplicates.has(id);
+  const duplicate = isDuplicate ? `<p class="q-note q-duplicate">${escapeHtml(L.duplicate)}</p>` : "";
   const choices = parsed.choices;
   const data =
     (id ? ` data-question-id="${escapeHtml(id)}"` : "") +
     ` data-question-state="${state ? state.kind : "none"}"` +
     (state?.kind === "decided" ? ` data-question-decision="${escapeHtml(state.decision)}"` : "") +
-    ` data-wiki-answerable="${opts.answerable ? "true" : "false"}"` +
+    // A duplicated id is read-only: the answer route refuses it (409).
+    ` data-wiki-answerable="${opts.answerable && !isDuplicate ? "true" : "false"}"` +
     ` data-question-lang="${opts.language}"` +
     (choices.length ? ` data-question-choices="${escapeHtml(choices.join("|"))}"` : "") +
     ` data-question-to-source="${toSource}"` +

@@ -3,7 +3,7 @@
  * (answer cards PR 2).
  *
  *   GET  /api/wiki/answers?wiki=&relPath=[&versions=1]
- *   POST /api/wiki/answers  {wiki, relPath, questionId, choice?, body, answerId?}
+ *   POST /api/wiki/answers  {wiki, relPath, questionId, choice?, body, answerId?, baseVersion?}
  *
  * Its own group so `MUNINN_PROFILE=nais` keeps it (D14) while it drops `wiki`.
  * Both routes resolve the page through the read slice's own ladder
@@ -15,7 +15,10 @@
  * (`parseQuestionPage`), so a card the reader shows open is exactly a question
  * this route accepts. The author comes from the session, never from the body
  * (D9): with auth off it is `WIKI_ANSWER_OWNER`, and an unset owner refuses the
- * write. An edit (`answerId`) is a new version, accepted only from the author.
+ * write. An edit (`answerId`) is a new version, accepted only from the author,
+ * and names the version it was made from (`baseVersion`): it is stored as
+ * exactly `baseVersion + 1`, so an edit from a stale base — a second tab, a
+ * lost race — is a 409, never a silent overwrite.
  */
 import type { Context, Hono } from "hono";
 import { randomUUID } from "node:crypto";
@@ -116,6 +119,20 @@ function isMine(c: Context, a: { author: WikiAnswerAuthor }): boolean {
 const err = (c: Context, status: 400 | 403 | 404 | 409 | 503, code: string, error: string) =>
   c.json({ error, code }, status);
 
+/** A NUL (Postgres refuses it in text) or an unpaired surrogate (stored as
+ *  U+FFFD, the next character lost — measured on `"a\udc00b"`). */
+function hasUnstorableText(s: string): boolean {
+  return s.includes("\u0000") || !s.isWellFormed();
+}
+
+const versionConflict = (c: Context) =>
+  err(c, 409, "version_conflict", "the answer changed while you were editing it — reload and try again");
+
+/** A page-resolution failure: the 503 "wiki directory not found" has its own code. */
+function pageError(c: Context, page: { status: 400 | 404 | 503; error: string }) {
+  return err(c, page.status, page.status === 503 ? "wiki_unavailable" : "no_page", page.error);
+}
+
 export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiAnswerStore = defaultStore): void {
   const profile = config.profile ?? resolveServingProfile();
   const readSliceOnly = servesWikiReadSliceOnly(profile);
@@ -126,7 +143,7 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
     const relPath = c.req.query("relPath");
     if (!wiki || !relPath) return err(c, 400, "bad_request", "wiki and relPath query params required");
     const page = await resolveScopedPage(readSliceOnly, { wiki, relPath });
-    if (!page.ok) return err(c, page.status as 400 | 404 | 503, "no_page", page.error);
+    if (!page.ok) return pageError(c, page);
     if (!page.entry || !wikiTakesAnswers(page.entry.name, answerConfig())) {
       return c.json({ answerable: false, answers: [] });
     }
@@ -187,9 +204,19 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
     const body = (b.body as string | undefined) ?? "";
     const choice = (b.choice as string | null | undefined) ?? null;
     const answerId = b.answerId as string | undefined;
+    const baseVersion = b.baseVersion;
+    if (answerId !== undefined && !(Number.isInteger(baseVersion) && (baseVersion as number) >= 1)) {
+      return err(c, 400, "bad_base_version", "an edit needs baseVersion: the version it was made from");
+    }
+    if (answerId === undefined && baseVersion !== undefined) {
+      return err(c, 400, "bad_base_version", "baseVersion belongs to an edit (answerId)");
+    }
+    if (hasUnstorableText(body) || (choice !== null && hasUnstorableText(choice))) {
+      return err(c, 400, "bad_text", "body and choice must not contain a NUL or an unpaired surrogate");
+    }
 
     const page = await resolveScopedPage(readSliceOnly, { wiki, relPath });
-    if (!page.ok) return err(c, page.status as 400 | 404 | 503, "no_page", page.error);
+    if (!page.ok) return pageError(c, page);
     const cfg = answerConfig();
     if (!page.entry || !wikiTakesAnswers(page.entry.name, cfg)) {
       return err(c, 403, "not_answerable", `wiki "${wiki}" does not take answers (WIKI_ANSWER_WIKIS)`);
@@ -210,10 +237,15 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
     const state = parsed.states.get(questionId) ?? { kind: "open" as const };
     if (state.kind !== "open") return err(c, 409, "question_closed", `question ${questionId} is ${state.kind}`);
 
-    // A page that declares a choice spelled like the fixed "not sure" value
-    // collapses onto it: the two are one stored value.
+    // The card offers "Not sure yet" only beside parsed choices, so a question
+    // with none takes no choice. A page that declares a choice spelled like the
+    // fixed value collapses onto it: the two are one stored value.
+    if (choice !== null && question.choices.length === 0) {
+      return err(c, 400, "bad_choice", `question ${questionId} declares no choices`);
+    }
     if (choice !== null && choice !== QUESTION_NOT_SURE && !question.choices.includes(choice)) {
-      return err(c, 400, "bad_choice", `choice must be one of: ${[...question.choices, QUESTION_NOT_SURE].join(", ")}`);
+      const allowed = [...new Set([...question.choices, QUESTION_NOT_SURE])];
+      return err(c, 400, "bad_choice", `choice must be one of: ${allowed.join(", ")}`);
     }
     if (body.trim() === "" && choice === null) return err(c, 400, "empty_answer", "an answer needs a body or a choice");
     if ([...body].length > WIKI_ANSWER_BODY_MAX) {
@@ -235,8 +267,11 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
       // No admin passthrough: only the author adds a version (D3).
       if (!isMine(c, latest)) return err(c, 403, "not_author", "only the answer's author may edit it");
       if (latest.redactedAt !== null) return err(c, 409, "answer_redacted", "this answer was redacted");
+      if (baseVersion !== latest.version) return versionConflict(c);
+      // Exactly base + 1: a writer that read the same base and got there first
+      // holds this (answer_id, version), and the primary key refuses the second.
       id = answerId;
-      version = latest.version + 1;
+      version = (baseVersion as number) + 1;
     } else {
       id = randomUUID();
       version = 1;
@@ -256,9 +291,7 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
       });
       return c.json({ answerId: saved.answerId, questionId, ...versionView(saved), mine: true }, version === 1 ? 201 : 200);
     } catch (e) {
-      if (e instanceof WikiAnswerVersionConflict) {
-        return err(c, 409, "version_conflict", "the answer changed while you were editing it — reload and try again");
-      }
+      if (e instanceof WikiAnswerVersionConflict) return versionConflict(c);
       log.error("answer write failed for {wiki}/{relPath}: {error}", {
         wiki,
         relPath,

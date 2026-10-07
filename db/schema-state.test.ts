@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
   classifySchemaState,
   LEDGER_TABLE,
+  pendingMigrationCreators,
   plural,
   tablesDeclaredByInitSql,
 } from "./schema-state.ts";
@@ -453,5 +454,24 @@ describe("plural", () => {
     expect(plural(1, "table")).toBe("1 table");
     expect(plural(2, "table")).toBe("2 tables");
     expect(plural(0, "table")).toBe("0 tables");
+  });
+});
+
+describe("pendingMigrationCreators — which missing tables a not-yet-applied migration creates", () => {
+  const migrations = [
+    { version: "081", filename: "081-old.sql", sql: "CREATE TABLE old_one (id int);" },
+    { version: "082", filename: "082-new.sql", sql: "CREATE TABLE IF NOT EXISTS new_one (id int);\nCREATE INDEX x ON new_one (id);" },
+    { version: "083", filename: "083-other.sql", sql: "CREATE TABLE already_here (id int);\nALTER TABLE users ADD COLUMN z int;" },
+  ];
+
+  test("names a missing table an unapplied migration creates, and only those", () => {
+    const applied = new Set(["081"]);
+    expect(pendingMigrationCreators(["new_one", "old_one", "nobody_makes_this"], migrations, applied)).toEqual([
+      { table: "new_one", migration: "082-new.sql" },
+    ]);
+  });
+
+  test("an applied migration is never the explanation", () => {
+    expect(pendingMigrationCreators(["new_one"], migrations, new Set(["081", "082", "083"]))).toEqual([]);
   });
 });
