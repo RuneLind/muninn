@@ -59,7 +59,7 @@ import { join } from "node:path";
 import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
 import { openPostgres } from "./postgres-connection.ts";
 import { classifySchemaState, LEDGER_TABLE, tablesDeclaredByInitSql } from "./schema-state.ts";
-import { describeUnusableState } from "./provision.ts";
+import { describeUnusableState, findPendingMigrationCreators } from "./provision.ts";
 
 /** How long to keep retrying a CONNECTION failure. Under docker-compose the app
  *  waits on a `service_healthy` postgres, and on nais the sidecar proxy is up
@@ -264,7 +264,7 @@ async function main(): Promise<number> {
       // as "provisioned but not baselined", with the baseline command printed
       // beside it — the one action that makes it unrepairable.
       if (state.kind !== "complete") {
-        const { summary, remedy } = describeUnusableState(state);
+        const { summary, remedy } = describeUnusableState(state, await findPendingMigrationCreators(sql, state));
         console.error(["", `  ${summary}`, "", ...remedy, ""].join("\n"));
         return 1;
       }

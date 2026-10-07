@@ -741,6 +741,41 @@ describe("the entrypoint's OWN check, on the state that used to be fatal", () =>
     expect(stderr).toContain("INCOMPLETE");
   });
 
+  test("a schema one migration behind a newer image: the migrator first, by name, and it works", async () => {
+    // Fix round 1 on the answer-cards PR: the entrypoint runs this check BEFORE
+    // db/migrate.ts, so a production database at 081 meeting an image that ships
+    // 082 classifies incomplete — and the remedy it printed led with "a psql that
+    // died mid-file" and `DROP SCHEMA public CASCADE`.
+    await provisionDatabase(SCRATCH_URL);
+    await withScratch((sql) => sql.unsafe(`DROP TABLE wiki_answers; DELETE FROM schema_migrations WHERE version = '082'`));
+    const { code, stderr } = await runRequireProvisioned();
+    expect(code).toBe(1);
+    expect(stderr).toContain("wiki_answers (082-wiki-answers.sql)");
+    expect(stderr).toContain("bun db/migrate.ts");
+    expect(stderr).toContain("naisjob");
+    expect(stderr.indexOf("bun db/migrate.ts")).toBeLessThan(stderr.indexOf("DROP SCHEMA"));
+    expect(stderr).toContain("DESTROYS EVERY ROW");
+    expect(stderr).not.toContain("Most likely a `psql");
+
+    // The remedy it names, run: the check passes afterwards.
+    const migrate = Bun.spawn(["bun", "db/migrate.ts"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await migrate.exited).toBe(0);
+    expect((await runRequireProvisioned()).code).toBe(0);
+  });
+
+  test("a stump with no ledger is not told to migrate, and the drop says it destroys data", async () => {
+    await seedStump();
+    const { stderr } = await runRequireProvisioned();
+    expect(stderr).not.toContain("Run the migrations");
+    expect(stderr).toContain("DROP SCHEMA");
+    expect(stderr).toContain("DESTROYS EVERY ROW");
+  });
+
   test("and running the command it DOES print leaves the database repairable", async () => {
     // The whole chain, end to end: the fatal version's own instruction, run.
     await seedStump();

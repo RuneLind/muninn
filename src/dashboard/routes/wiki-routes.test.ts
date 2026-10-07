@@ -321,7 +321,7 @@ describe("GET /api/wiki/html", () => {
 
   // The `<Question>` render option rides /api/wiki/page → renderWikiHtml →
   // formatWebHtml: the frontmatter's questions_to:, the .wiki-reader.json
-  // language, and answerable — always false until WIKI_ANSWER_WIKIS (PR 2).
+  // language, and answerable — false here, a wiki outside WIKI_ANSWER_WIKIS.
   test("/api/wiki/page renders a <Question> as a read-only card with the page's options", async () => {
     await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ language: "no" }));
     await Bun.write(

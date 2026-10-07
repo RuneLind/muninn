@@ -317,6 +317,13 @@ describe("the web card", () => {
     expect(html).toContain('<span class="q-label">Question without id</span>');
   });
 
+  test("on an answerable wiki a duplicated id renders read-only, since the POST refuses it", () => {
+    const md = '<Question id="O3">\n\nOne\n\n</Question>\n\n<Question id="O3">\n\nTwo\n\n</Question>\n\n<Question id="O4">\n\nThree\n\n</Question>';
+    const html = formatWebHtml(md, { question: opts({ answerable: true }) });
+    const flags = [...html.matchAll(/data-question-id="(\w+)"[^>]*data-wiki-answerable="(\w+)"/g)].map((m) => `${m[1]}=${m[2]}`);
+    expect(flags).toEqual(["O3=false", "O3=false", "O4=true"]);
+  });
+
   test("without the wiki option (chat) it is a plain bordered question with no state", () => {
     const html = formatWebHtml(page("Closed 2026-10-08 (D99)."));
     const c = card(html);

@@ -56,13 +56,15 @@
  * `--dryrun` cannot become a real run. `--dry-run` needs no `--yes`; against a
  * database it would refuse it exits 1, not 0.
  */
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
 import { openPostgres, parsePostgresUrl } from "./postgres-connection.ts";
-import type { SchemaState } from "./schema-state.ts";
+import type { PendingMigrationCreator, SchemaState } from "./schema-state.ts";
 import {
   classifySchemaState,
   LEDGER_TABLE,
+  pendingMigrationCreators,
   plural,
   tablesDeclaredByInitSql,
 } from "./schema-state.ts";
@@ -153,7 +155,10 @@ export class ProvisionBaselineError extends Error {
  * say about somebody else's tables or about one empty ledger. Exported so
  * `db/require-provisioned.ts` prints the SAME words the applier does.
  */
-export function describeUnusableState(state: Exclude<SchemaState, { kind: "empty" | "complete" }>): {
+export function describeUnusableState(
+  state: Exclude<SchemaState, { kind: "empty" | "complete" }>,
+  pending: readonly PendingMigrationCreator[] = [],
+): {
   summary: string;
   remedy: string[];
 } {
@@ -215,14 +220,85 @@ export function describeUnusableState(state: Exclude<SchemaState, { kind: "empty
       `${state.present.length > 5 ? ", …" : ""}), and ` +
       `${plural(state.missing.length, "table")} missing (${state.missing.slice(0, 5).join(", ")}` +
       `${state.missing.length > 5 ? ", …" : ""}).`,
-    remedy: [
-      ...doNotBaseline,
-      "  Most likely a `psql -f db/init.sql` that died mid-file — psql without `-1` is not",
-      "  atomic. Decide what is there, then either drop it (a throwaway database:",
-      "  `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) or provision a fresh one.",
-      "  Nothing has been written to it.",
-    ],
+    remedy: state.present.includes(LEDGER_TABLE)
+      ? [...doNotBaseline, ...behindImageRemedy(state.missing, pending), ...lastResortDrop("Last resort, only if")]
+      : [
+          ...doNotBaseline,
+          "  `schema_migrations` is missing too, and a database that is merely behind a newer",
+          "  image always has it — so the migrator is not the fix here.",
+          "",
+          ...lastResortDrop("Most likely"),
+        ],
   };
+}
+
+/** The harmless cause of `incomplete`, first: the boot gate runs before
+ *  `db/migrate.ts`, so a database one release behind the image lacks the tables
+ *  that release's migrations add. */
+function behindImageRemedy(missing: readonly string[], pending: readonly PendingMigrationCreator[]): string[] {
+  const named =
+    pending.length === 0
+      ? []
+      : [
+          pending.length === missing.length
+            ? "  Every missing table is created by a migration this database has not applied:"
+            : "  These missing tables are created by migrations this database has not applied:",
+          ...pending.map((p) => `    ${p.table} (${p.migration})`),
+        ];
+  return [
+    "  First, the non-destructive cause: the schema may be behind a newer image. A table a",
+    "  migration adds is missing until the migrator runs, and this check runs before it.",
+    ...named,
+    "  Run the migrations before anything else:",
+    "",
+    "    bun db/migrate.ts",
+    "",
+    "  (on nais: a naisjob from the new image with `command: bun db/migrate.ts`), then run",
+    "  this check again.",
+    "",
+  ];
+}
+
+/** The schema drop, said as what it is. */
+function lastResortDrop(lead: "Most likely" | "Last resort, only if"): string[] {
+  const cause =
+    lead === "Most likely"
+      ? ["  Most likely a `psql -f db/init.sql` that died mid-file — psql without `-1` is not atomic."]
+      : [
+          "  Last resort, only if the migrations do not create the missing tables: a `psql -f db/init.sql`",
+          "  that died mid-file (psql without `-1` is not atomic).",
+        ];
+  return [
+    ...cause,
+    "  On a throwaway database, drop it and provision again:",
+    "  `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` — this DESTROYS EVERY ROW in the",
+    "  database, so never run it on one that holds data. Or provision a fresh database.",
+    "  Nothing has been written to it.",
+  ];
+}
+
+/**
+ * The missing tables a not-yet-applied migration creates, for the `incomplete`
+ * remedy. Only with the ledger present — without it every migration reads as
+ * unapplied. Best effort: any failure is no hint, never a failed check.
+ */
+export async function findPendingMigrationCreators(
+  sql: ReturnType<typeof openPostgres>["sql"],
+  state: SchemaState,
+  migrationsDir = join(import.meta.dir, "migrations"),
+): Promise<PendingMigrationCreator[]> {
+  if (state.kind !== "incomplete" || !state.present.includes(LEDGER_TABLE)) return [];
+  try {
+    const applied = new Set((await sql`SELECT version FROM schema_migrations`).map((r) => String(r.version)));
+    const migrations = [];
+    for (const filename of (await readdir(migrationsDir)).sort()) {
+      const m = /^(\d{3})-.+\.sql$/.exec(filename);
+      if (m) migrations.push({ version: m[1]!, filename, sql: await Bun.file(join(migrationsDir, filename)).text() });
+    }
+    return pendingMigrationCreators(state.missing, migrations, applied);
+  } catch {
+    return [];
+  }
 }
 
 /** The "could not reach it" message. A function so the elapsed number can be
@@ -359,7 +435,7 @@ export async function provisionDatabase(
     }
 
     if (state.kind !== "empty") {
-      const { summary, remedy } = describeUnusableState(state);
+      const { summary, remedy } = describeUnusableState(state, await findPendingMigrationCreators(sql, state));
       if (opts?.dryRun) {
         notes.push(summary, ...remedy.map((l) => l.trim()).filter(Boolean));
         notes.push("Dry run: would refuse. Nothing here can be provisioned as-is.");

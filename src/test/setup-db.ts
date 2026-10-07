@@ -46,6 +46,7 @@ const ALL_TABLES = [
   // the suite has been run.
   "jira_drafts",
   "summary_factchecks",
+  "wiki_answers",
 ];
 
 let dbInitialized = false;

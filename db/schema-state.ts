@@ -351,3 +351,31 @@ export function classifySchemaState(declared: string[], present: Set<string>): S
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
+
+/** A missing table and the not-yet-applied migration that creates it. */
+export interface PendingMigrationCreator {
+  table: string;
+  migration: string;
+}
+
+/**
+ * Which of the `missing` tables an UNAPPLIED `.sql` migration creates. The boot
+ * gate runs before the migrator, so a database one release behind a newer image
+ * lacks exactly these — the harmless cause of an `incomplete` state. Pure; the
+ * caller reads the files and the ledger.
+ */
+export function pendingMigrationCreators(
+  missing: readonly string[],
+  migrations: readonly { version: string; filename: string; sql: string }[],
+  applied: ReadonlySet<string>,
+): PendingMigrationCreator[] {
+  const wanted = new Set(missing);
+  const out: PendingMigrationCreator[] = [];
+  for (const m of migrations) {
+    if (applied.has(m.version)) continue;
+    for (const table of tablesDeclaredByInitSql(m.sql)) {
+      if (wanted.delete(table)) out.push({ table, migration: m.filename });
+    }
+  }
+  return out;
+}

@@ -251,6 +251,29 @@ describe("the wiki read slice under nais", () => {
     expect(paths.has("/api/wiki/page")).toBe(true);
   });
 
+  test("the answer routes (`wiki-answers`) are KEPT by nais and registered on default (D14)", () => {
+    const answers = wikiRouteTable("answers");
+    expect(answers.map((r) => `${r.method} ${r.path}`).sort()).toEqual(["GET /api/wiki/answers", "POST /api/wiki/answers"]);
+    for (const profile of ["nais", "default"] as const) {
+      const app = build(profile);
+      for (const r of answers) {
+        expect(`${profile} ${r.method} ${r.path} → ${app.routes.some((x) => x.method === r.method && x.path === r.path)}`)
+          .toBe(`${profile} ${r.method} ${r.path} → true`);
+      }
+    }
+  });
+
+  test("…and ANSWER on nais — a handler runs, not Hono's 404", async () => {
+    const app = build("nais");
+    expect((await app.request("/api/wiki/answers")).status).toBe(400);
+    const res = await app.request("/api/wiki/answers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(400);
+  });
+
   test("wikiToolsRegistered and servesWikiReadSliceOnly are complements on both profiles", () => {
     expect(wikiToolsRegistered("nais")).toBe(false);
     expect(wikiToolsRegistered("default")).toBe(true);

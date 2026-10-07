@@ -165,18 +165,22 @@ function restoreSentinelsInAttributes(html: string, literal: string[]): string {
 /**
  * The `<Question>` render option for one page: the frontmatter
  * `questions_to:` (read here because `renderWikiHtml` strips the frontmatter
- * before rendering), the wiki's `.wiki-reader.json` `language`, and whether
- * the wiki takes answers. `/api/wiki/page` is the caller.
+ * before rendering), the wiki's `.wiki-reader.json` `language`, whether the
+ * wiki takes answers, and on such a wiki the owner a question nobody is named
+ * for goes to. `/api/wiki/page` is the caller.
  */
 export function questionRenderOptionsFor(
   markdown: string,
   readerConfig: WikiReaderConfig | null | undefined,
   answerable: boolean,
+  /** `WIKI_ANSWER_OWNER`; used only when `answerable`. */
+  owner: string | null = null,
 ): QuestionRenderOptions {
   return {
     questionsTo: parseQuestionsTo(parseFrontmatter(markdown).questions_to),
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     answerable,
+    ...(answerable && owner ? { owner } : {}),
   };
 }
 

@@ -270,6 +270,9 @@ export const E2E_PORTS = {
   // The <Question> answer card in the reader: one muninn over two temp wikis.
   // 3130 rather than the next free 31xx: the answer-card PRs add specs too.
   "wiki-question-card": 3130,
+  // The answer store's API (answer cards PR 2): one muninn with an owner, one without.
+  "wiki-answers": 3131,
+  "wiki-answers/no-owner": 3132,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

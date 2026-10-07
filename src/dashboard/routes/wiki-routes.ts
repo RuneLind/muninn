@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
-import { resolveServingProfile, type Config } from "../../config.ts";
+import { resolveServingProfile, resolveWikiAnswerConfig, wikiTakesAnswers, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
-import { resolveReadRequest } from "./wiki-read-scope.ts";
+import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
@@ -1560,30 +1560,19 @@ export function registerWikiReadRoutes(
   // legacy wikilink/list-click path).
   /**
    * The ONE resolution `/api/wiki/page`, `/api/wiki/page/provenance` and
-   * `/api/wiki/related` share:
-   * `wiki`/`bot` → registry entry, `relPath` (collision-proof) else `name`
-   * (first-stem-match) → page. The 400/404/503 ladder is the contract both
-   * answer, so it lives once.
+   * `/api/wiki/related` share, over the query string: {@link resolveScopedPage},
+   * which the answer routes call with their body's values. The 400/404/503
+   * ladder is the contract all of them answer, so it lives once.
    */
-  type PageResolution =
-    | { ok: true; entry: ReturnType<typeof resolveWikiRequest>["entry"]; index: NonNullable<Awaited<ReturnType<typeof getWikiIndex>>>; meta: WikiPageMeta }
-    | { ok: false; res: Response };
+  type PageResolution = Extract<ScopedPageLookup, { ok: true }> | { ok: false; res: Response };
   async function resolvePageRequest(c: Context): Promise<PageResolution> {
-    const relPathQ = c.req.query("relPath");
-    const name = c.req.query("name");
-    if (!relPathQ && !name) {
-      return { ok: false, res: c.json({ error: "name or relPath query param required" }, 400) };
-    }
-    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, c.req.query("wiki"), c.req.query("bot"));
-    if (unknownWiki) return { ok: false, res: c.json({ error: "no wiki configured for that name" }, 404) };
-    const index = await getWikiIndex({ root: entry?.root });
-    if (!index) return { ok: false, res: c.json({ error: "wiki directory not found" }, 503) };
-    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
-    if (!meta) {
-      const which = relPathQ ? `relPath "${relPathQ}"` : `name "${name}"`;
-      return { ok: false, res: c.json({ error: `no wiki page for ${which}` }, 404) };
-    }
-    return { ok: true, entry, index, meta };
+    const r = await resolveScopedPage(readSliceOnly, {
+      wiki: c.req.query("wiki"),
+      bot: c.req.query("bot"),
+      relPath: c.req.query("relPath"),
+      name: c.req.query("name"),
+    });
+    return r.ok ? r : { ok: false, res: c.json({ error: r.error }, r.status) };
   }
 
   app.get("/api/wiki/page", async (c) => {
@@ -1592,6 +1581,8 @@ export function registerWikiReadRoutes(
     const { entry, index, meta } = resolved;
     const markdown = await readWikiPage(index, meta);
     if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
+    const answerCfg = config.wikiAnswers ?? resolveWikiAnswerConfig();
+    const answerable = wikiTakesAnswers(entry?.name, answerCfg);
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])
@@ -1628,15 +1619,22 @@ export function registerWikiReadRoutes(
       // a link opened on a non-default wiki lands on the DEFAULT one.
       // `files`: the `<Query>` cards' csv/sql, read beside the page under the
       // index root's containment check (`loadPageFiles`) before the sync render.
-      // `question`: a `<Question>` card's `questions_to:`, label language and
-      // whether this wiki takes answers. Always read-only until
-      // `WIKI_ANSWER_WIKIS` (answer cards PR 2) decides it per wiki.
+      // `question`: a `<Question>` card's `questions_to:`, label language,
+      // whether this wiki takes answers (`WIKI_ANSWER_WIKIS`) and the owner a
+      // question nobody is named for goes to.
       html: renderWikiHtml(markdown, index.resolve, {
         stripTitle: meta.title,
         wiki: entry?.name,
         files: await loadPageFiles(index.root, meta.relPath, markdown),
-        question: questionRenderOptionsFor(markdown, index.readerConfig, false),
+        question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, answerCfg.owner),
       }),
+      // The answer cards' page-level flags, present only on a wiki that takes
+      // answers: the client keys its controls on THIS, never on
+      // `wikiToolsRegistered` or the read-only selectors (D14). `canExport`:
+      // admin, and auth off is admin.
+      ...(answerable
+        ? { answers: { answerable: true, canExport: (c.get("role") ?? "admin") === "admin", owner: answerCfg.owner } }
+        : {}),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
       // RELATED WORK — `cites ∪ cited-by ∪ shares ≥2 PR refs ∪ shares a session,

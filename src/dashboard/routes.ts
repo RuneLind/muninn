@@ -26,6 +26,7 @@ import { registerSSERoutes } from "./routes/sse-routes.ts";
 import { registerGraphRoutes } from "./routes/graph-routes.ts";
 import { registerWikiReadRoutes, registerWikiToolRoutes } from "./routes/wiki-routes.ts";
 import { registerWikiGardenerRoutes } from "./routes/wiki-gardener-routes.ts";
+import { registerWikiAnswerRoutes } from "./routes/wiki-answers.ts";
 import { registerBenchmarkRoutes } from "./routes/benchmark-routes.ts";
 import { registerModelsRoutes } from "./routes/models-routes.ts";
 import { registerIndexingRoutes } from "./routes/indexing-routes.ts";
@@ -123,6 +124,7 @@ export function createDashboardRoutes(config: Config): Hono {
     ["graph", (a) => registerGraphRoutes(a, config)],
     ["wiki-read", (a) => registerWikiReadRoutes(a, config)],
     ["wiki", (a) => registerWikiToolRoutes(a, config)],
+    ["wiki-answers", (a) => registerWikiAnswerRoutes(a, config)],
     ["wiki-gardener", (a) => registerWikiGardenerRoutes(a)],
     ["benchmark", (a) => registerBenchmarkRoutes(a)],
     ["models", (a) => registerModelsRoutes(a)],
