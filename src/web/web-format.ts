@@ -45,10 +45,8 @@ import {
 import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
 import {
   formatQuestionTarget,
-  parseChoices,
-  parseQuestions,
-  parseToAttr,
-  questionStates,
+  parseQuestionAttrs,
+  parseQuestionPage,
   type QuestionRenderOptions,
   type QuestionState,
 } from "../format/question.ts";
@@ -196,7 +194,8 @@ export function formatWebHtml(
     const rendered = renderBlocks(blocks, webRenderer);
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
-    return uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
+    const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
+    return currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
   } finally {
     currentPageFiles = prev;
     currentQuestionPage = prevQuestion;
@@ -218,9 +217,28 @@ interface QuestionPage {
 let currentQuestionPage: QuestionPage | undefined;
 
 function questionPage(blocks: Block[], options: QuestionRenderOptions | undefined): QuestionPage {
+  const parsed = parseQuestionPage(blocks);
   const duplicates = new Set<string>();
-  for (const q of parseQuestions(blocks)) if (q.duplicate && q.id !== null) duplicates.add(q.id);
-  return { states: questionStates(blocks), duplicates, ...(options ? { options } : {}) };
+  for (const q of parsed.questions) if (q.duplicate && q.id !== null) duplicates.add(q.id);
+  return { states: parsed.states, duplicates, ...(options ? { options } : {}) };
+}
+
+const LOG_ANCHOR_RE = /<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)"><a class="dl-id" href="#\1">([^<]*)<\/a>/g;
+const QUESTION_LINK_RE = /<a class="(q-id|q-decision)" href="#[^"]*">([^<]*)<\/a>/g;
+
+/** A card's id and decision links pointed at the anchor their DecisionLog item
+ *  ended up with: `uniqueLogAnchors` renames an item whose slug a Query card,
+ *  a case or an earlier item holds (`o2` → `o2-2`), after the cards rendered.
+ *  The FIRST item carrying an id is the one that decides the card, so it is
+ *  the one the link names. */
+function retargetQuestionLinks(html: string): string {
+  if (!html.includes('<a class="q-')) return html;
+  const anchorOf = new Map<string, string>();
+  for (const m of html.matchAll(LOG_ANCHOR_RE)) if (!anchorOf.has(m[2]!)) anchorOf.set(m[2]!, m[1]!);
+  return html.replace(QUESTION_LINK_RE, (whole, cls: string, text: string) => {
+    const anchor = anchorOf.get(text);
+    return anchor ? `<a class="${cls}" href="#${anchor}">${text}</a>` : whole;
+  });
 }
 
 /**
@@ -232,12 +250,17 @@ function questionPage(blocks: Block[], options: QuestionRenderOptions | undefine
  * gardener preview — it is a plain bordered question with no state.
  */
 function questionCardHtml(attrs: Record<string, string>, body: string): string {
-  const id = (attrs.id ?? "").trim();
+  // The parser's own attribute read, so the card and PR 2's route cannot
+  // disagree about a question's choices or who it is for.
+  const parsed = parseQuestionAttrs(attrs);
+  const id = parsed.id ?? "";
   const page = currentQuestionPage;
   const opts = page?.options;
   const L = questionLabels(opts?.language);
+  // Linked only when a DecisionLog item carries the id; `retargetQuestionLinks`
+  // then points it at the item's final anchor.
   const idHtml = id
-    ? opts
+    ? opts && page.states.has(id)
       ? `<a class="q-id" href="#${anchorSlug(id)}">${escapeHtml(id)}</a>`
       : `<span class="q-id">${escapeHtml(id)}</span>`
     : "";
@@ -252,14 +275,14 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     : state.kind === "decided"
       ? `<span class="q-state">${escapeHtml(L.decided)} → <a class="q-decision" href="#${anchorSlug(state.decision)}">${escapeHtml(state.decision)}</a></span>`
       : `<span class="q-state">${escapeHtml(state.kind === "closed" ? L.closed : L.open)}</span>`;
-  const blockTo = attrs.to === undefined ? null : parseToAttr(attrs.to);
+  const blockTo = parsed.to;
   const to = blockTo ?? opts.questionsTo;
   const toSource = blockTo ? "block" : opts.questionsTo.length ? "page" : "none";
   const forHtml = to.length
     ? `<div class="q-for"><span class="q-for-label">${escapeHtml(L.for)}</span> ${escapeHtml(to.map((t) => t.name).join(", "))}</div>`
     : "";
   const duplicate = id && page.duplicates.has(id) ? `<p class="q-note q-duplicate">${escapeHtml(L.duplicate)}</p>` : "";
-  const choices = parseChoices(attrs.choices);
+  const choices = parsed.choices;
   const data =
     (id ? ` data-question-id="${escapeHtml(id)}"` : "") +
     ` data-question-state="${state ? state.kind : "none"}"` +

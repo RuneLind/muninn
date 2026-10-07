@@ -125,7 +125,10 @@ export function renderWikiHtml(
     return `\x00WIKIPAGELINK${idx}\x00`;
   });
 
-  const renderedHtml = formatWebHtml(withTokens, { files: opts?.files, question: opts?.question });
+  const renderedHtml = restoreSentinelsInAttributes(
+    formatWebHtml(withTokens, { files: opts?.files, question: opts?.question }),
+    literal,
+  );
   const codeRegions = renderedCodeRegions(renderedHtml);
   const html = renderedHtml.replace(
     /\x00WIKIPAGELINK(\d+)\x00/g,
@@ -141,6 +144,22 @@ export function renderWikiHtml(
     },
   );
   return paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
+}
+
+const SENTINEL_RE = /\x00WIKIPAGELINK(\d+)\x00/g;
+
+/**
+ * A sentinel the renderer copied into an ATTRIBUTE value — a `<Question>`
+ * card echoes `choices=`/`to=` into `data-question-*` — goes back as the
+ * source text, escaped: link HTML there would end the value and break the
+ * tag. Every `"` in rendered text is escaped (`&quot;`), so a `="…"` run is an
+ * attribute value and nothing else.
+ */
+function restoreSentinelsInAttributes(html: string, literal: string[]): string {
+  if (!html.includes("\x00WIKIPAGELINK")) return html;
+  return html.replace(/="[^"]*"/g, (value) =>
+    value.includes("\x00") ? value.replace(SENTINEL_RE, (_m, i: string) => escapeHtml(literal[parseInt(i, 10)] ?? "")) : value,
+  );
 }
 
 /**

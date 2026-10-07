@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { paintedContrast } from "./contrast.ts";
 
 const PORT = e2ePort("wiki-question-card");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -30,6 +31,7 @@ const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI_EN = "e2e-question-en";
 const WIKI_NO = "e2e-question-no";
 const PAGE_REL = "plans/questions.mdx";
+const DUP_REL = "plans/duplicate.mdx";
 
 // Synthetic throughout: invented ids, names and wording.
 const question = (id: string, text: string) => [`<Question id="${id}" choices="A|B">`, "", `**${text}**`, "", "</Question>", ""];
@@ -82,6 +84,23 @@ const PAGE_NO = [
   "",
 ].join("\n");
 
+// Two cards on one id, so the duplicate note renders (its contrast is measured).
+const PAGE_DUP = [
+  "---",
+  "title: Duplicate page",
+  "type: plan",
+  "---",
+  "",
+  ...question("O5", "Asked twice?"),
+  ...question("O5", "Asked twice, again?"),
+  "<DecisionLog>",
+  "",
+  "- **O5** — Asked twice?",
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let base = "";
 
@@ -100,9 +119,9 @@ function watch(page: Page): { failed: string[]; errors: string[] } {
   return { failed, errors };
 }
 
-const openPage = async (page: Page, wiki: string) => {
+const openPage = async (page: Page, wiki: string, relPath = PAGE_REL) => {
   const seen = watch(page);
-  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(PAGE_REL)}`);
+  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(relPath)}`);
   await expect(page.locator(".wiki-article section.question").first()).toBeVisible();
   return seen;
 };
@@ -119,6 +138,7 @@ test.beforeAll(async () => {
   await mkdir(path.join(en, "plans"), { recursive: true });
   await mkdir(path.join(no, "plans"), { recursive: true });
   await writeFile(path.join(en, PAGE_REL), PAGE_EN, "utf8");
+  await writeFile(path.join(en, DUP_REL), PAGE_DUP, "utf8");
   await writeFile(path.join(no, PAGE_REL), PAGE_NO, "utf8");
   await writeFile(path.join(no, ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
 
@@ -196,4 +216,54 @@ test.describe("Wiki reader: <Question> answer card", () => {
     await expect(card).toHaveAttribute("data-question-lang", "no");
     expectClean(seen);
   });
+
+  // Token + 4.5:1 in both themes, the genre-blocks pattern: the muted lines
+  // on --text-soft, the labels on --accent-light, and the state pill's text
+  // over each of its three tints.
+  for (const scheme of ["light", "dark"] as const) {
+    test(`card text reads at 4.5:1 on its tokens, ${scheme}`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const seen = await openPage(page, WIKI_EN);
+      await page.mouse.move(0, 0);
+      const token = (name: string) =>
+        page.evaluate((v) => {
+          const p = document.createElement("span");
+          p.style.color = `var(${v})`;
+          document.body.appendChild(p);
+          const c = getComputedStyle(p).color;
+          p.remove();
+          return c;
+        }, name);
+      const soft = await token("--text-soft");
+      const accentLight = await token("--accent-light");
+      const cards = page.locator(".wiki-article section.question");
+      const pinned: [string, ReturnType<Page["locator"]>, string][] = [
+        ["for line", cards.first().locator(".q-for"), soft],
+        ["label", cards.first().locator(".q-label"), accentLight],
+        ["id chip", cards.first().locator(".q-id"), accentLight],
+      ];
+      for (const [name, loc, color] of pinned) {
+        expect(await loc.evaluate((el) => getComputedStyle(el).color), `${name} token`).toBe(color);
+        expect(await paintedContrast(loc), `${name} contrast`).toBeGreaterThanOrEqual(4.5);
+      }
+      const pills = {
+        open: cards.nth(0).locator(".q-state"),
+        decided: cards.nth(1).locator(".q-state"),
+        closed: cards.nth(2).locator(".q-state"),
+        decision: cards.nth(1).locator(".q-decision"),
+        body: cards.first().locator(".q-body strong"),
+      };
+      for (const [name, loc] of Object.entries(pills)) {
+        expect(await paintedContrast(loc), `${name} contrast`).toBeGreaterThanOrEqual(4.5);
+      }
+      expectClean(seen);
+
+      const dupSeen = await openPage(page, WIKI_EN, DUP_REL);
+      const note = page.locator(".wiki-article .q-note").first();
+      await expect(note).toBeVisible();
+      expect(await note.evaluate((el) => getComputedStyle(el).color), "note token").toBe(soft);
+      expect(await paintedContrast(note), "note contrast").toBeGreaterThanOrEqual(4.5);
+      expectClean(dupSeen);
+    });
+  }
 });

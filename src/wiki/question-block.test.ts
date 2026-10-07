@@ -161,3 +161,91 @@ describe("the render option", () => {
     expect(renderWikiHtml(md, resolve)).toContain('class="question question-plain"');
   });
 });
+
+// ── Fix round 1 ────────────────────────────────────────────────────────────
+
+describe("fix round 1: lint", () => {
+  test("a near miss on a dimmed item says the card shows Closed, not that it stays open", async () => {
+    await write("plans/p.mdx", plan(['<Question id="O3">'], ["- **O3** — ~~Keep it? Besvart 06.10: ja.~~"]));
+    expect((await questionFindings()).map((x) => x.message)).toEqual([
+      'DecisionLog item O3 says "Besvart" but has no canonical close naming a decision this page defines, so its card shows Closed without a decision',
+    ]);
+  });
+
+  test("a near miss beside a canonical close names the decided state", async () => {
+    await write("plans/p.mdx", plan(['<Question id="O3">'], ["- **O3** — Besvart 06.10. Closed 2026-10-08 (D99)."]));
+    expect((await questionFindings()).map((x) => x.message)).toEqual([
+      'DecisionLog item O3 says "Besvart" outside its canonical close; the card shows Decided → D99',
+    ]);
+  });
+
+  test("a code span between Closed and its date is a near miss", async () => {
+    await write("plans/p.mdx", plan(['<Question id="O3">'], ["- **O3** — Keep it? Closed `x` 2026-10-08 (D99)."]));
+    expect((await questionFindings()).map((x) => x.message)).toEqual([
+      'DecisionLog item O3 says "Closed" but no canonical close (Closed <date> (Dn).), so its card stays open',
+    ]);
+  });
+
+  test("a later duplicate DecisionLog item for a question's id is named, not silent", async () => {
+    await write("plans/p.mdx", plan(['<Question id="O3">'], ["- **O3** — opened.", "- **O3** — Closed 2026-10-08 (D99)."]));
+    expect((await questionFindings()).map((x) => x.message)).toEqual([
+      'DecisionLog has 2 items for O3 ("opened.", "Closed 2026-10-08 (D99).") — the first decides the card; the others are ignored',
+    ]);
+  });
+
+  test("a questions_to: block list is reported with the inline-list form", async () => {
+    const md = plan(['<Question id="O3">'], ["- **O3** — Keep it?"]).replace(
+      'questions_to: ["Yvonne Jacobs (X111111)", "Ola Nordmann"]',
+      "questions_to:\n  - Yvonne Jacobs (X111111)\n  - Ola Nordmann",
+    );
+    await write("plans/p.mdx", md);
+    expect((await questionFindings()).map((x) => [x.message, x.line])).toEqual([
+      [
+        'frontmatter questions_to: is not an inline list, so no card names who it is for; write it as questions_to: ["Name (IDENT)", "Name"]',
+        5,
+      ],
+    ]);
+  });
+
+  test("a <Question> quoted in a fence above the real one does not take its line", async () => {
+    const md = plan(['<Question id="O7">'], ["- **O3** — Something else."]).replace(
+      "\n\n<Question",
+      '\n\n```markdown\n<Question id="O7">\n```\n\n<Question',
+    );
+    await write("plans/p.mdx", md);
+    expect((await questionFindings()).map((x) => x.line)).toEqual([12]);
+  });
+
+  test("each id-less <Question> gets its own line", async () => {
+    await write("plans/p.mdx", plan(["<Question>", "<Question>"], []));
+    expect((await questionFindings()).map((x) => x.line)).toEqual([8, 14]);
+  });
+});
+
+describe("fix round 1: renderWikiHtml", () => {
+  test("a wikilink in choices= or to= stays text inside the card's data attributes", () => {
+    const md = [
+      '<Question id="O1" choices="[[Foo]]|B" to="[[Bar]] (X1)">',
+      "",
+      "Q?",
+      "",
+      "</Question>",
+      "",
+      "<DecisionLog>",
+      "",
+      "- **O1** — Q?",
+      "",
+      "</DecisionLog>",
+    ].join("\n");
+    const meta = (name: string) => ({ name, relPath: `${name.toLowerCase()}.md` }) as never;
+    const html = renderWikiHtml(md, (t) => (t === "Foo" || t === "Bar" ? meta(t) : undefined), {
+      question: { questionsTo: [], language: "en", answerable: false },
+    });
+    const tag = /<section class="question[^>]*>/.exec(html)?.[0] ?? "";
+    expect(tag).toMatch(/^<section class="question q-open"(?: data-[a-z-]+="[^"<>]*")+>$/);
+    expect(tag).toContain('data-question-choices="[[Foo]]|B"');
+    expect(tag).toContain('data-question-to="[[Bar]] (X1)"');
+    // Outside the tag the same link still renders as a link.
+    expect(html).toContain('<div class="q-for"><span class="q-for-label">For</span> <a href="/wiki?relPath=bar.md" class="wiki-link"');
+  });
+});

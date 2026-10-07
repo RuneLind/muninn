@@ -47,9 +47,11 @@
  * 10. question-block — a `<Question>` whose card cannot follow its DecisionLog
  *                      item: no `id`, an id no `<DecisionLog>` item carries,
  *                      an id two `<Question>` blocks share (the answer route
- *                      refuses it), or an item carrying a near-miss close
- *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`)
- *                      that leaves the card silently open. Rules:
+ *                      refuses it), an id two DecisionLog items carry (the
+ *                      first decides), an item carrying a near-miss close
+ *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`),
+ *                      or a `questions_to:` written as a block list, which
+ *                      `parseFrontmatter` does not read. Rules:
  *                      `src/format/question.ts`.
  *
  * The store's index builder silently drops unresolved link targets
@@ -75,14 +77,14 @@ import {
 import {
   fencedLineMask,
   frontmatterEndLine,
-  maskLineCodeSpans,
   NESTED_MARKUP_RE,
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
+import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
-import { closeNearMisses, decisionLogEntries, parseQuestions, type DecisionLogEntry } from "../format/question.ts";
+import { closeNearMisses, parseQuestionPage, type QuestionState } from "../format/question.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
 export const LINT_CHECKS = [
@@ -381,62 +383,104 @@ function checkUnrenderedFactMarks(page: WikiPageMeta, rawContent: string): LintF
   ];
 }
 
-/** The 1-based line of the first `<Question …>` tag carrying `id` (or no id
- *  at all, for `null`), or undefined when none is found on its own line. */
-function questionTagLine(rawContent: string, id: string | null): number | undefined {
-  const lines = rawContent.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^\s*<Question\b([^>]*)>/.exec(lines[i]!);
-    if (!m) continue;
-    const idAttr = /\bid="([^"]*)"/.exec(m[1]!)?.[1]?.trim() ?? "";
-    if (id === null ? idAttr === "" : idAttr === id) return i + 1;
+/** A `<Question>` opening tag as the component parser reads one: the tag owns
+ *  the (trimmed) line and every attribute is double-quoted. */
+const QUESTION_TAG_RE = /^\s*<Question(?:\s+[A-Za-z][\w-]*="[^"]*")*\s*\/?>/;
+
+/** The 1-based line of every `<Question …>` opening tag outside the
+ *  frontmatter and fenced code, in source order — the order `parseQuestions`
+ *  returns the blocks in, so the Nth block is on the Nth line. */
+function questionTagLines(lines: readonly string[]): number[] {
+  const fenced = fencedLineMask(lines);
+  const out: number[] = [];
+  for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
+    if (!fenced[i] && QUESTION_TAG_RE.test(lines[i]!)) out.push(i + 1);
   }
-  return undefined;
+  return out;
+}
+
+/** A DecisionLog item's own text as a lint message quotes it: one line, at
+ *  most 40 characters. */
+const quoteItem = (text: string): string => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return JSON.stringify(flat.length > 40 ? `${flat.slice(0, 39)}…` : flat);
+};
+
+/** What a near-miss finding says the card shows, from the state the renderer
+ *  computed — the warning stands in every state (D6), the consequence differs. */
+function nearMissConsequence(id: string, quoted: string, state: QuestionState | undefined): string {
+  if (state?.kind === "decided") {
+    return `DecisionLog item ${id} says ${quoted} outside its canonical close; the card shows Decided → ${state.decision}`;
+  }
+  if (state?.kind === "closed") {
+    return `DecisionLog item ${id} says ${quoted} but has no canonical close naming a decision this page defines, so its card shows Closed without a decision`;
+  }
+  return `DecisionLog item ${id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`;
 }
 
 /**
  * Check 10 — a `<Question>` whose answer card cannot follow its DecisionLog
- * item. Reads the page through the same pure functions the renderer runs
- * (`src/format/question.ts`), so the finding and the card agree. A page that
- * never spells `<Question` is skipped before any parse.
+ * item. Reads the page through the one parse the renderer runs
+ * (`parseQuestionPage`), so the finding and the card agree. A page that never
+ * spells `<Question` is skipped before any parse.
  */
 function checkQuestions(page: WikiPageMeta, rawContent: string): LintFinding[] {
   if (!rawContent.includes("<Question")) return [];
-  const blocks = parseBlocks(stripFrontmatter(rawContent));
-  const questions = parseQuestions(blocks);
+  const parsed = parseQuestionPage(parseBlocks(stripFrontmatter(rawContent)));
+  const { questions, entries, states } = parsed;
   if (questions.length === 0) return [];
-  const items = new Map<string, DecisionLogEntry>();
-  for (const e of decisionLogEntries(blocks)) if (!items.has(e.id)) items.set(e.id, e);
+  const lines = rawContent.split("\n");
   const findings: LintFinding[] = [];
   const push = (message: string, line?: number) =>
     findings.push({ check: "question-block", relPath: page.relPath, message, ...(line ? { line } : {}) });
-  const seen = new Set<string>();
-  for (const q of questions) {
-    if (q.id === null) {
-      push("a <Question> has no id, so its card cannot name a DecisionLog item", questionTagLine(rawContent, null));
-      continue;
+
+  // `parseFrontmatter` reads an inline list only; a block list parses to
+  // nothing and every card silently loses who it is for.
+  const fmEnd = frontmatterEndLine(lines);
+  for (let i = 1; i < fmEnd - 1; i++) {
+    if (/^questions_to\s*:\s*$/.test(lines[i]!)) {
+      push(
+        'frontmatter questions_to: is not an inline list, so no card names who it is for; write it as questions_to: ["Name (IDENT)", "Name"]',
+        i + 1,
+      );
     }
-    if (seen.has(q.id)) continue;
+  }
+
+  // The Nth block's tag is the Nth tag line; when the two counts disagree (a
+  // tag the parser does not read as a block) no line is guessed.
+  const tagLines = questionTagLines(lines);
+  const lineOf = (k: number) => (tagLines.length === questions.length ? tagLines[k] : undefined);
+  const seen = new Set<string>();
+  questions.forEach((q, k) => {
+    const line = lineOf(k);
+    if (q.id === null) {
+      push("a <Question> has no id, so its card cannot name a DecisionLog item", line);
+      return;
+    }
+    if (seen.has(q.id)) return;
     seen.add(q.id);
-    const line = questionTagLine(rawContent, q.id);
     if (q.duplicate) {
       const n = questions.filter((o) => o.id === q.id).length;
       push(`${n} <Question> blocks use id ${q.id}; an answer to that id is refused`, line);
     }
-    const item = items.get(q.id);
+    const items = entries.filter((e) => e.id === q.id);
+    const item = items[0];
     if (!item) {
       push(`<Question id="${q.id}"> has no item in the page's <DecisionLog>, so its card can never close`, line);
-      continue;
+      return;
+    }
+    if (items.length > 1) {
+      push(
+        `DecisionLog has ${items.length} items for ${q.id} (${items.map((e) => quoteItem(e.itemText)).join(", ")}) — the first decides the card; the others are ignored`,
+        line,
+      );
     }
     const words = closeNearMisses(item.text);
     if (words.length > 0) {
       const quoted = [...new Set(words)].map((w) => `"${w}"`).join(", ");
-      push(
-        `DecisionLog item ${q.id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`,
-        line,
-      );
+      push(nearMissConsequence(q.id, quoted, states.get(q.id)), line);
     }
-  }
+  });
   return findings;
 }
 

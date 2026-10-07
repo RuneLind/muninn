@@ -3,6 +3,9 @@ import { parseBlocks } from "./markdown-ast.ts";
 import {
   closeNearMisses,
   closedQuestionIds,
+  decisionLogEntries,
+  itemQuestionState,
+  parseQuestionPage,
   formatQuestionTarget,
   parseChoices,
   parseQuestions,
@@ -192,7 +195,7 @@ describe("parseQuestions", () => {
     const body = (inner: string) =>
       parseQuestions(parseBlocks(`<Question id="O1">\n\n${inner}\n\n</Question>`))[0]!.body;
     const a = body("**Keep it?**\n\nA: yes.   B:  no.\n\n- one\n- two");
-    expect(a).toBe("**Keep it?**\nA: yes. B: no.\none\ntwo");
+    expect(a).toBe("**Keep it?**\nA: yes. B: no.\n- one\n- two");
     expect(body("**Keep it?**\n\n\nA: yes. B: no.\n\n- one\n- two")).toBe(a);
     expect(body("**Keep it?**\n\nA: yes. B: maybe.\n\n- one\n- two")).not.toBe(a);
   });
@@ -345,5 +348,183 @@ describe("the text surfaces: a lead line and the body", () => {
   });
   test("a question with no id leads with the bare word", () => {
     expect(formatTelegramHtml("<Question>\n\nQ\n\n</Question>")).toBe("<b>Question</b>\n\nQ");
+  });
+});
+
+// ── Fix round 1 ────────────────────────────────────────────────────────────
+
+describe("fix round 1: the closing rule's white space, code spans, NFD and nested items", () => {
+  const rows: [string, string, QuestionState, string[]][] = [
+    // Item 4: a code span between two tokens is not white space.
+    ["a code span between Closed and the date", "Keep it? Closed `x` 2026-10-08 (D99).", open, ["Closed"]],
+    ["a code span between the date and (Dn)", "Keep it? Closed 2026-10-08 `note` (D99).", open, ["Closed"]],
+    ["a code span between Reopened and the date", "Closed 2026-10-08 (D99). Reopened `x` 2026-10-09.", decided("D99"), ["Reopened"]],
+    // Item 5: one line break inside the phrase's white space, indentation allowed.
+    ["a hard wrap after Closed, indented", "Keep it? Closed\n  2026-10-08 (D99).", decided("D99"), []],
+    ["a hard wrap before (Dn)", "Keep it? Closed 2026-10-08\n(D99)", decided("D99"), []],
+    ["a hard wrap after Reopened", "Closed 2026-10-08 (D99). Reopened\n  2026-10-09.", open, []],
+    ["a blank line inside the phrase is not one break", "Keep it? Closed\n\n2026-10-08 (D99).", open, ["Closed"]],
+    ["a code span and a wrap together are still not white space", "Keep it? Closed `x`\n2026-10-08 (D99).", open, ["Closed"]],
+    ["a wrap and then a code span are still not white space", "Keep it? Closed\n`x` 2026-10-08 (D99).", open, ["Closed"]],
+    // Item 6: an NFD item reads like its NFC spelling.
+    ["an NFD Gjenåpnet reopens", "Lukket 08.10 (D99). Gjenåpnet 09.10.", open, []],
+  ];
+  for (const [label, item, state, words] of rows) {
+    test(label, () => {
+      expect(itemQuestionState(item, false, new Set(["D99"]))).toEqual(state);
+      expect(closeNearMisses(item)).toEqual(words);
+    });
+  }
+
+  test("a hard-wrapped close inside a real DecisionLog item closes the card", () => {
+    expect(stateOf(page("Keep it? Closed\n  2026-10-08 (D99)."))).toEqual(decided("D99"));
+  });
+
+  test("a close in a nested sub-bullet belongs to its item", () => {
+    const md = page("Keep it?\n  - Closed 2026-10-08 (D99).");
+    expect(stateOf(md)).toEqual(decided("D99"));
+    const nested = decisionLogEntries(parseBlocks(md)).find((e) => e.id === "O3")!;
+    expect(closeNearMisses(nested.text)).toEqual([]);
+  });
+
+  test("a close in a paragraph nested under the item belongs to it", () => {
+    expect(stateOf(page("Keep it?\n\n  Closed 2026-10-08 (D99)."))).toEqual(decided("D99"));
+  });
+
+  test("a near miss in a nested sub-bullet is a near miss of its item", () => {
+    const md = page("Keep it?\n  - Besvart 06.10: ja.");
+    const item = decisionLogEntries(parseBlocks(md)).find((e) => e.id === "O3")!;
+    expect(closeNearMisses(item.text)).toEqual(["Besvart"]);
+  });
+});
+
+describe("fix round 1: parseQuestionPage, the one page parse", () => {
+  test("questions, entries and states from one call agree with the single-purpose functions", () => {
+    const md = page("Closed 2026-10-08 (D99).", ["- **O4** — Still open."]);
+    const blocks = parseBlocks(md);
+    const parsed = parseQuestionPage(blocks);
+    expect(parsed.questions.map((q) => q.id)).toEqual(["O3"]);
+    expect(parsed.entries.map((e) => e.id)).toEqual(["D99", "O4", "O3"]);
+    expect(parsed.states.get("O3")).toEqual(decided("D99"));
+    expect(parsed.states.get("O4")).toEqual(open);
+    expect(parsed.states).toEqual(questionStates(blocks));
+  });
+});
+
+describe("fix round 1: to= and the hash input", () => {
+  test('to="" and to="|" fall back to the page\'s questions_to:', () => {
+    for (const to of ["", "|", " | "]) {
+      const qs = parseQuestions(parseBlocks(`<Question id="O1" to="${to}">\n\nQ?\n\n</Question>`));
+      expect(qs[0]!.to).toBeNull();
+    }
+  });
+
+  const parsed = (inner: string, attrs = 'id="O1"') => parseQuestions(parseBlocks(`<Question ${attrs}>\n\n${inner}\n\n</Question>`))[0]!;
+
+  test("reflowing a paragraph leaves the hashed body unchanged", () => {
+    expect(parsed("Keep the block in one\nlanguage on every page?").body).toBe(
+      parsed("Keep the block in one language\non every page?").body,
+    );
+    expect(parsed("- one item that\n  wraps here").body).toBe(parsed("- one item that wraps\n  here").body);
+  });
+
+  test("code-block content and indentation are kept verbatim", () => {
+    expect(parsed("```ts\n  a\n    b\n```").body).not.toBe(parsed("```ts\na\nb\n```").body);
+  });
+
+  test("a heading and a paragraph with the same words differ", () => {
+    expect(parsed("# Keep it?").body).not.toBe(parsed("Keep it?").body);
+  });
+
+  test("two paragraphs and one paragraph with the same words differ", () => {
+    expect(parsed("Keep it?\n\nYes.").body).not.toBe(parsed("Keep it? Yes.").body);
+  });
+
+  test("changing the choices changes the hash input", () => {
+    expect(parsed("Keep it?", 'id="O1" choices="A|B"').hashInput).not.toBe(parsed("Keep it?", 'id="O1" choices="A|C"').hashInput);
+    expect(parsed("Keep it?", 'id="O1" choices="A|B"').hashInput).toBe(parsed("Keep it?", 'id="O1" choices=" A | B "').hashInput);
+    expect(parsed("Keep it?", 'id="O1" choices="A|B"').hashInput).toContain(parsed("Keep it?").body);
+  });
+});
+
+describe("fix round 1: the web card", () => {
+  const opts = (o: Partial<QuestionRenderOptions> = {}): QuestionRenderOptions => ({
+    questionsTo: [],
+    language: "en",
+    answerable: false,
+    ...o,
+  });
+  const card = (html: string) => /<section class="question[^"]*"[^>]*>[\s\S]*?<\/section>/.exec(html)?.[0] ?? "";
+
+  test("data-question-decision is set on a decided card only", () => {
+    expect(card(formatWebHtml(page("Closed 2026-10-08 (D99)."), { question: opts() }))).toContain('data-question-decision="D99"');
+    expect(card(formatWebHtml(page("Closed 2026-10-08 (D98)."), { question: opts() }))).not.toContain("data-question-decision");
+    expect(card(formatWebHtml(page("Keep it?"), { question: opts() }))).not.toContain("data-question-decision");
+  });
+
+  test("the id link follows the DecisionLog item when its anchor is renamed", () => {
+    const md = [
+      '<Query id="O2" question="A query that takes the o2 anchor first">',
+      "",
+      "Body.",
+      "",
+      "</Query>",
+      "",
+      '<Question id="O2">',
+      "",
+      "Q?",
+      "",
+      "</Question>",
+      "",
+      "<DecisionLog>",
+      "",
+      "- **D7** — A decision.",
+      "- **O2** — Q? Closed 2026-10-08 (D7).",
+      "",
+      "</DecisionLog>",
+    ].join("\n");
+    const html = formatWebHtml(md, { question: opts() });
+    expect(html).toContain('<li class="dl-item" id="o2-2">');
+    expect(card(html)).toContain('<a class="q-id" href="#o2-2">O2</a>');
+  });
+
+  test("the decision link follows the D item when its anchor is renamed", () => {
+    const md = [
+      '<Query id="D7" question="A query that takes the d7 anchor first">',
+      "",
+      "Body.",
+      "",
+      "</Query>",
+      "",
+      '<Question id="O2">',
+      "",
+      "Q?",
+      "",
+      "</Question>",
+      "",
+      "<DecisionLog>",
+      "",
+      "- **D7** — A decision.",
+      "- **O2** — Q? Closed 2026-10-08 (D7).",
+      "",
+      "</DecisionLog>",
+    ].join("\n");
+    const html = formatWebHtml(md, { question: opts() });
+    expect(html).toContain('<li class="dl-item" id="d7-2">');
+    expect(card(html)).toContain('<a class="q-decision" href="#d7-2">D7</a>');
+  });
+
+  test("an id with no DecisionLog item renders as plain text, not a dangling link", () => {
+    const md = '<Question id="O9">\n\nQ?\n\n</Question>';
+    const c = card(formatWebHtml(md, { question: opts() }));
+    expect(c).toContain('<span class="q-id">O9</span>');
+    expect(c).not.toContain('href="#o9"');
+  });
+
+  test('to="" keeps the page\'s questions_to: on the card', () => {
+    const md = page("Keep it?").replace('<Question id="O3" choices="A|B">', '<Question id="O3" choices="A|B" to="">');
+    const c = card(formatWebHtml(md, { question: opts({ questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
+    expect(c).toContain('data-question-to-source="page"');
+    expect(c).toContain('data-question-to="Yvonne Jacobs (X111111)"');
   });
 });

@@ -13,14 +13,18 @@
  *   `Reopened <date>` / `Gjenåpnet <date>` — the same date, then `.`, white
  *     space or the end.
  *
+ * The white space between two tokens may hold one line break (a hard-wrapped
+ * item), never a blank line and never a code span. The item is read in NFC,
+ * with its nested sub-bullets as part of it.
+ *
  * The LAST canonical phrase in the item wins. A close naming a decision the
  * page's `<DecisionLog>` defines is `decided`; any other id is `closed`. With
  * no canonical phrase, an item `parseLogItem` dims (struck id, struck
  * remainder, superseded) is `closed`; everything else is `open`.
  */
-import type { Block, ListChild } from "./markdown-ast.ts";
+import type { Block, ListBlock, ListChild } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
-import { lineCodeSpanRanges } from "./code-spans.ts";
+import { maskLineCodeSpans } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
 import { QUESTION_LABELS, type QuestionLanguage } from "./question-labels.ts";
 
@@ -38,13 +42,14 @@ export interface ParsedQuestion {
   id: string | null;
   /** `choices`, `|`-separated, trimmed, blanks and repeats dropped. */
   choices: string[];
-  /** `to`, parsed; null when the block carries no `to` (the page's
-   *  `questions_to:` applies). */
+  /** `to`, parsed; null when the block carries no `to`, or one that names
+   *  nobody (`to=""`, `to="|"`) — the page's `questions_to:` applies. */
   to: QuestionTarget[] | null;
-  /** The block body as normalized text — the input to PR 2's `question_hash`.
-   *  Deterministic: the body's text runs in source order, each line trimmed
-   *  with internal white space collapsed, blank lines dropped. */
+  /** The block body as normalized text ({@link questionBodyText}). */
   body: string;
+  /** PR 2's `question_hash` input: the body plus the parsed choices, so a
+   *  change to either is a different question. */
+  hashInput: string;
   /** Another `<Question>` on the page carries the same id. */
   duplicate: boolean;
 }
@@ -94,6 +99,13 @@ export function formatQuestionTarget(t: QuestionTarget): string {
   return t.ident ? `${t.name} (${t.ident})` : t.name;
 }
 
+/** The three attributes of a `<Question>` tag, read the one way the parser,
+ *  the card and the answer route all read them. */
+export function parseQuestionAttrs(attrs: Record<string, string>): Pick<ParsedQuestion, "id" | "choices" | "to"> {
+  const to = attrs.to === undefined ? [] : parseToAttr(attrs.to);
+  return { id: attrId(attrs), choices: parseChoices(attrs.choices), to: to.length > 0 ? to : null };
+}
+
 export function parseChoices(value: string | undefined): string[] {
   const out: string[] = [];
   for (const c of (value ?? "").split("|")) {
@@ -116,58 +128,83 @@ function eachComponent(blocks: Block[], visit: (b: ComponentBlock) => void): voi
   }
 }
 
-function childText(c: ListChild, out: string[]): void {
-  if (c.type === "code_block") out.push(c.code);
-  else if (c.type === "paragraph") out.push(c.text);
-  else listText(c.items, c.nested, out);
+/** Inline text with its white space collapsed: a soft-wrapped line and its
+ *  reflow read the same. */
+const inlineRun = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/** A text block's paragraphs, each joined across its soft wraps. */
+function paragraphs(lines: string[]): string[] {
+  const out: string[] = [];
+  let run: string[] = [];
+  for (const line of [...lines, ""]) {
+    if (line.trim() !== "") {
+      run.push(line);
+    } else if (run.length > 0) {
+      out.push(inlineRun(run.join(" ")));
+      run = [];
+    }
+  }
+  return out;
 }
 
-function listText(items: string[], nested: (ListChild[] | undefined)[] | undefined, out: string[]): void {
-  items.forEach((item, k) => {
-    out.push(item);
-    for (const c of nested?.[k] ?? []) childText(c, out);
+const fenceText = (lang: string, code: string): string => "```" + lang + "\n" + code + "\n```";
+
+function listSegments(list: ListBlock, depth: number, out: string[]): void {
+  const pad = "  ".repeat(depth);
+  list.items.forEach((item, k) => {
+    const marker = list.type === "ol" ? `${list.start + k}.` : "-";
+    out.push(`${pad}${marker} ${inlineRun(item)}`);
+    for (const c of list.nested?.[k] ?? []) {
+      if (c.type === "code_block") out.push(fenceText(c.lang, c.code));
+      else if (c.type === "paragraph") out.push(`${pad}  ${inlineRun(c.text)}`);
+      else listSegments(c, depth + 1, out);
+    }
   });
 }
 
-function blocksText(blocks: Block[], out: string[]): void {
+function bodySegments(blocks: Block[], out: string[]): void {
   for (const b of blocks) {
     switch (b.type) {
       case "code_block":
-        out.push(b.code);
+        out.push(fenceText(b.lang, b.code));
         break;
       case "hr":
+        out.push("---");
         break;
       case "heading":
-        out.push(b.content);
+        out.push(`${"#".repeat(b.level)} ${inlineRun(b.content)}`);
         break;
       case "blockquote":
+        for (const p of paragraphs(b.lines)) out.push(`> ${p}`);
+        break;
       case "text":
-        out.push(...b.lines);
+        out.push(...paragraphs(b.lines));
         break;
       case "ul":
       case "ol":
-        listText(b.items, b.nested, out);
+        listSegments(b, 0, out);
         break;
       case "table":
-        out.push(b.headers.join(" | "), ...b.rows.map((r) => r.join(" | ")));
+        out.push(...[b.headers, ...b.rows].map((r) => `| ${r.map(inlineRun).join(" | ")} |`));
         break;
       case "component":
-        blocksText(b.children, out);
+        bodySegments(b.children, out);
         break;
     }
   }
 }
 
-/** A block body as normalized text (see {@link ParsedQuestion.body}). */
+/**
+ * A block body as normalized text, the hashed half of {@link ParsedQuestion}.
+ * Reflow-insensitive: a paragraph or list item joins across its soft wraps and
+ * its white space collapses. Everything else is kept: code-block content and
+ * indentation verbatim, a heading's level, a list's markers and nesting, and
+ * the boundary between two paragraphs.
+ */
 export function questionBodyText(children: Block[]): string {
-  const runs: string[] = [];
-  blocksText(children, runs);
-  return runs
-    .join("\n")
-    .split("\n")
-    .map((l) => l.replace(/\s+/g, " ").trim())
-    .filter((l) => l !== "")
-    .join("\n");
+  const segments: string[] = [];
+  bodySegments(children, segments);
+  return segments.join("\n");
 }
 
 function attrId(attrs: Record<string, string>): string | null {
@@ -181,13 +218,9 @@ export function parseQuestions(blocks: Block[]): ParsedQuestion[] {
   const found: ParsedQuestion[] = [];
   eachComponent(blocks, (b) => {
     if (b.name !== "Question") return;
-    found.push({
-      id: attrId(b.attrs),
-      choices: parseChoices(b.attrs.choices),
-      to: b.attrs.to === undefined ? null : parseToAttr(b.attrs.to),
-      body: questionBodyText(b.children),
-      duplicate: false,
-    });
+    const attrs = parseQuestionAttrs(b.attrs);
+    const body = questionBodyText(b.children);
+    found.push({ ...attrs, body, hashInput: `${body}\n\nchoices: ${attrs.choices.join("|")}`, duplicate: false });
   });
   const seen = new Map<string, number>();
   for (const q of found) if (q.id !== null) seen.set(q.id, (seen.get(q.id) ?? 0) + 1);
@@ -198,24 +231,48 @@ export function parseQuestions(blocks: Block[]): ParsedQuestion[] {
 /** One `<DecisionLog>` item that starts with an id. */
 export interface DecisionLogEntry {
   id: string;
-  /** The text after the id (`parseLogItem`'s `text`). */
+  /** The item's own text after the id (`parseLogItem`'s `text`). */
+  itemText: string;
+  /** What the closing rule reads: {@link itemText}, then the text of the
+   *  sub-bullets and paragraphs nested under the item, each after a blank
+   *  line so no phrase spans two of them. Nested code is left out. */
   text: string;
   dim: boolean;
 }
 
+/** The prose nested under one list item, in source order, code left out. */
+function nestedProse(children: ListChild[] | undefined, out: string[]): void {
+  for (const c of children ?? []) {
+    if (c.type === "paragraph") {
+      out.push(c.text);
+    } else if (c.type !== "code_block") {
+      c.items.forEach((item, k) => {
+        out.push(item);
+        nestedProse(c.nested?.[k], out);
+      });
+    }
+  }
+}
+
 /** Every id-led item of every `<DecisionLog>` on the page, in source order —
  *  the top-level items of each list directly in a log's body, which is what
- *  the web renderer gives an anchor. */
+ *  the web renderer gives an anchor. A nested sub-item is part of the item
+ *  above it, never an entry of its own: it gets no anchor, so a D id defined
+ *  only there is not a decision the page defines (its `→ Dn` link would land
+ *  nowhere). */
 export function decisionLogEntries(blocks: Block[]): DecisionLogEntry[] {
   const out: DecisionLogEntry[] = [];
   eachComponent(blocks, (b) => {
     if (b.name !== "DecisionLog") return;
     for (const child of b.children) {
       if (child.type !== "ul" && child.type !== "ol") continue;
-      for (const item of child.items) {
+      child.items.forEach((item, k) => {
         const p = parseLogItem(item);
-        if (p.id) out.push({ id: p.id, text: p.text, dim: p.dim });
-      }
+        if (!p.id) return;
+        const nested: string[] = [];
+        nestedProse(child.nested?.[k], nested);
+        out.push({ id: p.id, itemText: p.text, text: [p.text, ...nested].join("\n\n"), dim: p.dim });
+      });
     }
   });
   return out;
@@ -225,7 +282,10 @@ export function decisionLogEntries(blocks: Block[]): DecisionLogEntry[] {
 
 const DATE = String.raw`(\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}(?:\.\d{4})?)`;
 const WORD_START = String.raw`(?<![\p{L}\p{N}_])`;
-const WS = String.raw`[ \t ]+`;
+/** White space between two tokens: a run on one line, or one line break with
+ *  indentation either side. A masked code span is at least three line breaks
+ *  ({@link maskCodeSpans}), so it never fits. */
+const WS = String.raw`(?:[ \t\u00a0]+|[ \t\u00a0]*\n[ \t\u00a0]*)`;
 const CLOSE_RE = new RegExp(`${WORD_START}(Closed|Lukket)${WS}${DATE}${WS}\\((D\\d{1,4})\\)`, "gu");
 const REOPEN_RE = new RegExp(`${WORD_START}(Reopened|Gjenåpnet)${WS}${DATE}(?=[.\\s]|$)`, "gu");
 const KEYWORD_RE = new RegExp(`${WORD_START}(Closed|Lukket|Reopened|Gjenåpnet)(?![\\p{L}\\p{N}_])`, "gu");
@@ -240,19 +300,13 @@ function isCloseDate(d: string): boolean {
   return isCalendarDay(`${dm[3] ?? "2024"}-${dm[2]!.padStart(2, "0")}-${dm[1]!.padStart(2, "0")}`);
 }
 
-/** The text with every inline code span blanked to spaces, line by line, so
- *  offsets still line up and a phrase inside backticks reads as nothing. */
+/** The item text in NFC with every inline code span blanked to line breaks
+ *  (`maskLineCodeSpans`), line by line: offsets still line up, a phrase inside
+ *  backticks reads as nothing, and a span between two tokens is never white
+ *  space — a span is at least three characters, and {@link WS} admits one
+ *  line break. */
 export function maskCodeSpans(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => {
-      let out = line;
-      for (const r of lineCodeSpanRanges(line)) {
-        out = out.slice(0, r.start) + " ".repeat(r.end - r.start) + out.slice(r.end);
-      }
-      return out;
-    })
-    .join("\n");
+  return text.normalize("NFC").split("\n").map(maskLineCodeSpans).join("\n");
 }
 
 interface CanonicalPhrase {
@@ -302,21 +356,38 @@ export function definedDecisions(entries: DecisionLogEntry[]): Set<string> {
   return new Set(entries.map((e) => e.id).filter((id) => DECISION_ID_RE.test(id)));
 }
 
+/** Everything a `<Question>` reader needs from one page, from one walk. */
+export interface QuestionPage {
+  /** Every `<Question>`, in source order ({@link parseQuestions}). */
+  questions: ParsedQuestion[];
+  /** Every id-led DecisionLog item, in source order, repeats included. */
+  entries: DecisionLogEntry[];
+  /** The D ids the page's `<DecisionLog>` blocks define. */
+  decisions: Set<string>;
+  /** The state of every DecisionLog id on the page. The FIRST item carrying
+   *  an id decides it, the one that keeps the bare anchor; an id with no item
+   *  is absent (the card is open and the linter says why). */
+  states: Map<string, QuestionState>;
+}
+
 /**
- * The state of every DecisionLog id on the page — the closed-ids pre-pass the
- * renderer runs before it renders any card, since the log usually sits below
- * the `<Question>`. The FIRST item carrying an id decides it, the one that
- * keeps the bare anchor. An id with no item is absent (the card is open and
- * the linter says why).
+ * The one page parse the renderer's pre-pass, the linter and the answer route
+ * (PR 2) share. The renderer runs it before any card renders, since the log
+ * usually sits below the `<Question>`.
  */
-export function questionStates(blocks: Block[]): Map<string, QuestionState> {
+export function parseQuestionPage(blocks: Block[]): QuestionPage {
   const entries = decisionLogEntries(blocks);
   const decisions = definedDecisions(entries);
-  const out = new Map<string, QuestionState>();
+  const states = new Map<string, QuestionState>();
   for (const e of entries) {
-    if (!out.has(e.id)) out.set(e.id, itemQuestionState(e.text, e.dim, decisions));
+    if (!states.has(e.id)) states.set(e.id, itemQuestionState(e.text, e.dim, decisions));
   }
-  return out;
+  return { questions: parseQuestions(blocks), entries, decisions, states };
+}
+
+/** The state of every DecisionLog id on the page ({@link QuestionPage.states}). */
+export function questionStates(blocks: Block[]): Map<string, QuestionState> {
+  return parseQuestionPage(blocks).states;
 }
 
 /** The ids whose card is not open — closed or decided. */
