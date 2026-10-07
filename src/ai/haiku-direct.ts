@@ -382,7 +382,7 @@ export async function callHaikuViaCopilot(
     const response = await session.sendAndWait({ prompt }, timeoutMs);
     const resultText = response?.data?.content ?? "";
     // The hardcoded COPILOT_HAIKU_MODEL id is what we requested; if Copilot's
-    // registry renames it the request silently downgrades to Sonnet. The usage
+    // registry lacks it the request silently runs on Copilot's default. The usage
     // event reports the model actually served — flag a mismatch loudly.
     if (!/haiku/i.test(reportedModel)) {
       log.warn(
