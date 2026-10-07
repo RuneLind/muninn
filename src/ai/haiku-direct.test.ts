@@ -450,6 +450,12 @@ describe("callHaikuDirect auth selection", () => {
     expect((sdkCalls[0]!.params as { output_config: unknown }).output_config).toEqual({ effort: "low" });
   });
 
+  test("leaves effort to the model when the caller names one (the Sonnet fact-checks)", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    await callHaikuDirect("hello", { source: "test", model: "claude-sonnet-5-5" });
+    expect(sdkCalls[0]!.params).not.toHaveProperty("output_config");
+  });
+
   test("throws when neither is set", async () => {
     await expect(callHaikuDirect("hello", { source: "test" })).rejects.toThrow(
       /neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN/,

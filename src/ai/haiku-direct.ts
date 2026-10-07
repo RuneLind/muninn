@@ -25,7 +25,9 @@ const log = getLog("ai", "haiku-router");
 // Copilot's model registry uses dotted ids ("claude-haiku-4.5") rather than
 // Anthropic's full date-suffixed form ("claude-haiku-4-5-20251001"). Verified
 // 2026-05-17 via `client.listModels()` — see scripts/smoke-haiku-copilot.ts.
-// Sending an unknown id silently substitutes Sonnet, so this must match exactly.
+// Sending an unknown id silently substitutes Copilot's default model. ⚠️ On
+// 2026-10-07 the catalog listed no Haiku model at all, so this id already falls
+// through to that default; left as a follow-up.
 const COPILOT_HAIKU_MODEL = "claude-haiku-4.5";
 
 export type HaikuBackend = "cli" | "anthropic" | "copilot" | "vertex";
@@ -36,13 +38,15 @@ export type HaikuBackend = "cli" | "anthropic" | "copilot" | "vertex";
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // Haiku 5.5 thinks by default at effort `medium`. Measured 2026-10-07 on the
-// decomposer prompt: medium ~1.7s with a thinking block, `low` ~0.9s with none
-// (Haiku 4.5: ~1.0s). These calls are a latency tier, so they run at `low`.
+// decomposer prompt: medium 1.5–2.0s with a thinking block, `low` 0.9–1.1s with
+// none (Haiku 4.5: 0.9–1.5s). The default Haiku calls are a latency tier, so they
+// run at `low`; a caller that names its own model (the Sonnet fact-checks) keeps
+// that model's default effort.
 const HAIKU_EFFORT = "low";
 
 /** The `system` field for {@link callHaikuDirect}: the caller's persona, with
  *  the Claude Code identity block first when the client authenticates by OAuth. */
-export function anthropicSystem(
+function haikuSystemField(
   authSource: "api-key" | "oauth" | null,
   system: string | undefined,
 ): string | Anthropic.TextBlockParam[] | undefined {
@@ -260,7 +264,7 @@ export async function callHaikuDirect(
   // path auto-loads the bot's CLAUDE.md via cwd, so the prose callers pass
   // `system` explicitly to restore that voice on this backend. Absent for
   // extraction/JSON callers (persona is irrelevant there).
-  const system = anthropicSystem(cachedAuthSource, opts.system);
+  const system = haikuSystemField(cachedAuthSource, opts.system);
 
   let response;
   try {
@@ -269,7 +273,7 @@ export async function callHaikuDirect(
         model: effectiveModel,
         max_tokens: effectiveMaxTokens,
         ...(system ? { system } : {}),
-        output_config: { effort: HAIKU_EFFORT },
+        ...(model ? {} : { output_config: { effort: HAIKU_EFFORT } }),
         messages: [{ role: "user", content: prompt }],
       },
       { timeout: timeoutMs },
