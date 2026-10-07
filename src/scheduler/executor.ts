@@ -92,7 +92,7 @@ export interface HaikuUsage {
 
 export const HAIKU_TIMEOUT_MS = 60_000;
 
-export const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+export const DEFAULT_MODEL = "claude-haiku-5-5";
 
 /**
  * Output ceiling for a router one-shot on the non-CLI backends (the CLI has no

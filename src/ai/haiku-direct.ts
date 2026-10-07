@@ -25,10 +25,36 @@ const log = getLog("ai", "haiku-router");
 // Copilot's model registry uses dotted ids ("claude-haiku-4.5") rather than
 // Anthropic's full date-suffixed form ("claude-haiku-4-5-20251001"). Verified
 // 2026-05-17 via `client.listModels()` — see scripts/smoke-haiku-copilot.ts.
-// Sending an unknown id silently substitutes Sonnet, so this must match exactly.
+// Sending an unknown id silently substitutes Copilot's default model. ⚠️ On
+// 2026-10-07 the catalog listed no Haiku model at all, so this id already falls
+// through to that default; left as a follow-up.
 const COPILOT_HAIKU_MODEL = "claude-haiku-4.5";
 
 export type HaikuBackend = "cli" | "anthropic" | "copilot" | "vertex";
+
+// A Claude Code OAuth token is served for Claude Haiku 5.5 only when the first
+// system block is the Claude Code identity: without it the API answers 429
+// (measured 2026-10-07; Haiku 4.5 did not check). An API key needs no block.
+const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+// Haiku 5.5 thinks by default at effort `medium`. Measured 2026-10-07 on the
+// decomposer prompt: medium 1.5–2.0s with a thinking block, `low` 0.9–1.1s with
+// none (Haiku 4.5: 0.9–1.5s). The default Haiku calls are a latency tier, so they
+// run at `low`; a caller that names its own model (the Sonnet fact-checks) keeps
+// that model's default effort.
+const HAIKU_EFFORT = "low";
+
+/** The `system` field for {@link callHaikuDirect}: the caller's persona, with
+ *  the Claude Code identity block first when the client authenticates by OAuth. */
+function haikuSystemField(
+  authSource: "api-key" | "oauth" | null,
+  system: string | undefined,
+): string | Anthropic.TextBlockParam[] | undefined {
+  if (authSource !== "oauth") return system;
+  const blocks: Anthropic.TextBlockParam[] = [{ type: "text", text: CLAUDE_CODE_IDENTITY }];
+  if (system) blocks.push({ type: "text", text: system });
+  return blocks;
+}
 
 /**
  * Map a Haiku-router {@link HaikuBackend} to the connector vocabulary the trace
@@ -234,6 +260,11 @@ export async function callHaikuDirect(
   const effectiveMaxTokens = maxTokens && maxTokens > 0 ? maxTokens : HAIKU_DEFAULT_MAX_TOKENS;
 
   const client = getAnthropic();
+  // Persona/system prompt for prose paths (goal + task reminders) — the CLI
+  // path auto-loads the bot's CLAUDE.md via cwd, so the prose callers pass
+  // `system` explicitly to restore that voice on this backend. Absent for
+  // extraction/JSON callers (persona is irrelevant there).
+  const system = haikuSystemField(cachedAuthSource, opts.system);
 
   let response;
   try {
@@ -241,11 +272,8 @@ export async function callHaikuDirect(
       {
         model: effectiveModel,
         max_tokens: effectiveMaxTokens,
-        // Persona/system prompt for prose paths (goal + task reminders) — the
-        // CLI path auto-loads the bot's CLAUDE.md via cwd, so the prose callers
-        // pass `system` explicitly to restore that voice on this backend. Absent
-        // for extraction/JSON callers (persona is irrelevant there).
-        ...(opts.system ? { system: opts.system } : {}),
+        ...(system ? { system } : {}),
+        ...(model ? {} : { output_config: { effort: HAIKU_EFFORT } }),
         messages: [{ role: "user", content: prompt }],
       },
       { timeout: timeoutMs },
@@ -354,7 +382,7 @@ export async function callHaikuViaCopilot(
     const response = await session.sendAndWait({ prompt }, timeoutMs);
     const resultText = response?.data?.content ?? "";
     // The hardcoded COPILOT_HAIKU_MODEL id is what we requested; if Copilot's
-    // registry renames it the request silently downgrades to Sonnet. The usage
+    // registry lacks it the request silently runs on Copilot's default. The usage
     // event reports the model actually served — flag a mismatch loudly.
     if (!/haiku/i.test(reportedModel)) {
       log.warn(

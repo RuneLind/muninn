@@ -39,7 +39,7 @@ Scheduler (60s tick, independent)
 
 `spawnHaiku(prompt, opts)` is the Claude CLI leg — the watchers call it directly, and the Haiku router falls back to it:
 
-- Spawns `claude -p <prompt> --output-format json --model claude-haiku-4-5-20251001` via `Bun.spawn`
+- Spawns `claude -p <prompt> --output-format json --model claude-haiku-5-5` via `Bun.spawn`
 - Sets `CLAUDE_CODE_ENTRYPOINT` env var per caller
 - Parses JSON output, extracts token usage (input includes cache tokens)
 - Fires `trackUsage()` → INSERT into `haiku_usage` table (fire-and-forget)
