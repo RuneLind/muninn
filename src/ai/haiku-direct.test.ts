@@ -419,6 +419,37 @@ describe("callHaikuDirect auth selection", () => {
     expect((constructorOpts as { authToken?: string }).authToken).toBe("oauth-test");
   });
 
+  test("OAuth puts the Claude Code identity first, before the caller's persona", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-test";
+    await callHaikuDirect("hello", { source: "test", system: "You are Jarvis." });
+    expect((sdkCalls[0]!.params as { system: unknown }).system).toEqual([
+      { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+      { type: "text", text: "You are Jarvis." },
+    ]);
+  });
+
+  test("OAuth sends the identity block even with no persona", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-test";
+    await callHaikuDirect("hello", { source: "test" });
+    expect((sdkCalls[0]!.params as { system: unknown }).system).toEqual([
+      { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+    ]);
+  });
+
+  test("an API key sends the persona alone, and no system field without one", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    await callHaikuDirect("hello", { source: "test", system: "You are Jarvis." });
+    await callHaikuDirect("hello", { source: "test" });
+    expect((sdkCalls[0]!.params as { system: unknown }).system).toBe("You are Jarvis.");
+    expect(sdkCalls[1]!.params).not.toHaveProperty("system");
+  });
+
+  test("runs at effort low", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    await callHaikuDirect("hello", { source: "test" });
+    expect((sdkCalls[0]!.params as { output_config: unknown }).output_config).toEqual({ effort: "low" });
+  });
+
   test("throws when neither is set", async () => {
     await expect(callHaikuDirect("hello", { source: "test" })).rejects.toThrow(
       /neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN/,

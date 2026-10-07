@@ -30,6 +30,28 @@ const COPILOT_HAIKU_MODEL = "claude-haiku-4.5";
 
 export type HaikuBackend = "cli" | "anthropic" | "copilot" | "vertex";
 
+// A Claude Code OAuth token is served for Claude Haiku 5.5 only when the first
+// system block is the Claude Code identity: without it the API answers 429
+// (measured 2026-10-07; Haiku 4.5 did not check). An API key needs no block.
+const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+// Haiku 5.5 thinks by default at effort `medium`. Measured 2026-10-07 on the
+// decomposer prompt: medium ~1.7s with a thinking block, `low` ~0.9s with none
+// (Haiku 4.5: ~1.0s). These calls are a latency tier, so they run at `low`.
+const HAIKU_EFFORT = "low";
+
+/** The `system` field for {@link callHaikuDirect}: the caller's persona, with
+ *  the Claude Code identity block first when the client authenticates by OAuth. */
+export function anthropicSystem(
+  authSource: "api-key" | "oauth" | null,
+  system: string | undefined,
+): string | Anthropic.TextBlockParam[] | undefined {
+  if (authSource !== "oauth") return system;
+  const blocks: Anthropic.TextBlockParam[] = [{ type: "text", text: CLAUDE_CODE_IDENTITY }];
+  if (system) blocks.push({ type: "text", text: system });
+  return blocks;
+}
+
 /**
  * Map a Haiku-router {@link HaikuBackend} to the connector vocabulary the trace
  * read side speaks: `cli` → `"claude-cli"` (spawnHaiku IS the Claude CLI), and
@@ -234,6 +256,11 @@ export async function callHaikuDirect(
   const effectiveMaxTokens = maxTokens && maxTokens > 0 ? maxTokens : HAIKU_DEFAULT_MAX_TOKENS;
 
   const client = getAnthropic();
+  // Persona/system prompt for prose paths (goal + task reminders) — the CLI
+  // path auto-loads the bot's CLAUDE.md via cwd, so the prose callers pass
+  // `system` explicitly to restore that voice on this backend. Absent for
+  // extraction/JSON callers (persona is irrelevant there).
+  const system = anthropicSystem(cachedAuthSource, opts.system);
 
   let response;
   try {
@@ -241,11 +268,8 @@ export async function callHaikuDirect(
       {
         model: effectiveModel,
         max_tokens: effectiveMaxTokens,
-        // Persona/system prompt for prose paths (goal + task reminders) — the
-        // CLI path auto-loads the bot's CLAUDE.md via cwd, so the prose callers
-        // pass `system` explicitly to restore that voice on this backend. Absent
-        // for extraction/JSON callers (persona is irrelevant there).
-        ...(opts.system ? { system: opts.system } : {}),
+        ...(system ? { system } : {}),
+        output_config: { effort: HAIKU_EFFORT },
         messages: [{ role: "user", content: prompt }],
       },
       { timeout: timeoutMs },
