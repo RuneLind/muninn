@@ -231,7 +231,8 @@ function childNesting(name: ComponentName, depth: number, nm: NextMovesNesting):
 // Anchored to the start of a (trimmed) line and gated on a leading `<`, so the
 // common case (a line not starting with `<`) fails the match cheaply — the
 // parser runs on every chat delta re-render, so this stays single-pass.
-const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*(\/?)>(.*)$/;
+// Exported for the wiki linter, which locates a block's tag line by the same shape.
+export const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*(\/?)>(.*)$/;
 /**
  * One double-quoted attribute of a component tag. **Global, so every caller
  * resets `lastIndex` before its own scan** — exported anyway, because the wiki

@@ -77,12 +77,14 @@ export function codeSpanContent(line: string, range: { start: number; end: numbe
  * code-span code unit becomes a `\n`, so offsets into the result index the raw
  * line unchanged.
  *
- * `\n` is the blank on purpose rather than a space or a private-use sentinel: every
- * scanner reading this string is line-scoped by a `\n` exclusion in its own regex
- * (`WIKILINK_SPAN_SOURCE`, `NESTED_MARKUP_RE`, `firstDanglingWikilinkOpen`'s
- * callers, the `<Question>` closing-phrase regexes in `question.ts`), so a
- * blanked span cannot be read as part of a match NOR supply a bracket to one —
- * which a space would.
+ * `\n` is the blank on purpose rather than a space or a private-use sentinel: the
+ * wikilink scanners reading this string are line-scoped by a `\n` exclusion in
+ * their own regex (`WIKILINK_SPAN_SOURCE`, `NESTED_MARKUP_RE`,
+ * `firstDanglingWikilinkOpen`'s callers), so a blanked span cannot be read as part
+ * of a match NOR supply a bracket to one — which a space would. The `<Question>`
+ * closing-phrase regexes in `question.ts` are NOT line-scoped: their white space
+ * admits one `\n`. They are safe because a span is at least three code units
+ * (`` `x` ``), so its blank is at least three line breaks, more than one fits.
  *
  * This is what the code-span exclusion has to be for anything that reports an
  * offset: `stripLineCodeSpans` moves every offset left by the length of the spans

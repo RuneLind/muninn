@@ -40,7 +40,8 @@ export interface QuestionTarget {
 export interface ParsedQuestion {
   /** The `id` attribute, trimmed; null when absent or blank. */
   id: string | null;
-  /** `choices`, `|`-separated, trimmed, blanks and repeats dropped. */
+  /** `choices`, `|`-separated ({@link splitQuestionList}), trimmed, blanks
+   *  and repeats dropped. */
   choices: string[];
   /** `to`, parsed; null when the block carries no `to`, or one that names
    *  nobody (`to=""`, `to="|"`) — the page's `questions_to:` applies. */
@@ -86,10 +87,38 @@ export function parseQuestionsTo(raw: unknown): QuestionTarget[] {
     .filter((t): t is QuestionTarget => t !== null);
 }
 
-/** `to="A (X1)|B"` — the same entries, `|`-separated. */
+/**
+ * A `|`-separated `to=`/`choices=` value split into its entries. A `|` inside
+ * a `[[…]]` wikilink is the link's alias, not a separator, so
+ * `[[Page|Alias]] (X1)|B` is two entries. A `[[` with no `]]` after it opens
+ * nothing. The card's `data-question-to`/`data-question-choices` re-join
+ * entries with `|`, so a reader of those attributes splits with this too.
+ */
+export function splitQuestionList(value: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let i = 0;
+  while (i < value.length) {
+    if (value.startsWith("[[", i)) {
+      const close = value.indexOf("]]", i + 2);
+      if (close !== -1) {
+        i = close + 2;
+        continue;
+      }
+    }
+    if (value[i] === "|") {
+      out.push(value.slice(start, i));
+      start = i + 1;
+    }
+    i++;
+  }
+  out.push(value.slice(start));
+  return out;
+}
+
+/** `to="A (X1)|B"` — the same entries, `|`-separated ({@link splitQuestionList}). */
 export function parseToAttr(value: string): QuestionTarget[] {
-  return value
-    .split("|")
+  return splitQuestionList(value)
     .map(parseQuestionTarget)
     .filter((t): t is QuestionTarget => t !== null);
 }
@@ -108,7 +137,7 @@ export function parseQuestionAttrs(attrs: Record<string, string>): Pick<ParsedQu
 
 export function parseChoices(value: string | undefined): string[] {
   const out: string[] = [];
-  for (const c of (value ?? "").split("|")) {
+  for (const c of splitQuestionList(value ?? "")) {
     const v = c.trim();
     if (v && !out.includes(v)) out.push(v);
   }
@@ -336,6 +365,13 @@ export function itemQuestionState(text: string, dim: boolean, decisions: Readonl
     return decisions.has(last.decision!) ? { kind: "decided", decision: last.decision! } : { kind: "closed" };
   }
   return dim ? { kind: "closed" } : { kind: "open" };
+}
+
+/** The last canonical phrase in the item reopens it: the item is open because
+ *  it was reopened, not because it was never closed. */
+export function itemReopened(text: string): boolean {
+  const phrases = canonicalPhrases(maskCodeSpans(text));
+  return phrases[phrases.length - 1]?.kind === "reopen";
 }
 
 /** The words in an item that look like a close but are not the canonical

@@ -528,3 +528,87 @@ describe("fix round 1: the web card", () => {
     expect(c).toContain('data-question-to="Yvonne Jacobs (X111111)"');
   });
 });
+
+// ── Fix round 2 ────────────────────────────────────────────────────────────
+
+describe("fix round 2: a wikilink alias in to= and choices=", () => {
+  test("the | inside [[Page|Alias]] is the alias, not a separator", () => {
+    expect(parseToAttr("[[Bar|Alias]] (X1)|Ola Nordmann")).toEqual([
+      { name: "[[Bar|Alias]]", ident: "X1" },
+      { name: "Ola Nordmann", ident: null },
+    ]);
+    expect(parseChoices("[[Foo|F]]|B")).toEqual(["[[Foo|F]]", "B"]);
+    const q = parseQuestions(parseBlocks('<Question id="O1" to="[[Bar|Alias]] (X1)" choices="[[Foo|F]]|B">\n\nQ?\n\n</Question>'))[0]!;
+    expect(q.to).toEqual([{ name: "[[Bar|Alias]]", ident: "X1" }]);
+    expect(q.choices).toEqual(["[[Foo|F]]", "B"]);
+  });
+
+  test("a [[ with no ]] after it opens nothing", () => {
+    expect(parseChoices("[[A|B")).toEqual(["[[A", "B"]);
+    expect(parseChoices("A]]|[[B")).toEqual(["A]]", "[[B"]);
+  });
+
+  test("the card's data-question-to reads back as the same entries", () => {
+    const md = '<Question id="O1" to="[[Bar|Alias]] (X1)">\n\nQ?\n\n</Question>';
+    const html = formatWebHtml(md, { question: { questionsTo: [], language: "en", answerable: false } });
+    const to = /data-question-to="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(to).toBe("[[Bar|Alias]] (X1)");
+    expect(parseToAttr(to)).toHaveLength(1);
+  });
+});
+
+describe("fix round 2: pins", () => {
+  test("the card links the FIRST DecisionLog item carrying its id", () => {
+    const md = [
+      '<Question id="O2">',
+      "",
+      "Q?",
+      "",
+      "</Question>",
+      "",
+      "<DecisionLog>",
+      "",
+      "- **O2** — The item that decides the card.",
+      "- **O2** — A later item, renamed o2-2.",
+      "",
+      "</DecisionLog>",
+    ].join("\n");
+    const html = formatWebHtml(md, { question: { questionsTo: [], language: "en", answerable: false } });
+    expect(html).toContain('<li class="dl-item" id="o2-2">');
+    expect(html).toContain('<a class="q-id" href="#o2">O2</a>');
+  });
+
+  test("no canonical phrase spans an item and its sub-bullet", () => {
+    const md = page("Keep it? Closed\n  - 2026-10-08 (D99).");
+    expect(stateOf(md)).toEqual(open);
+    const item = decisionLogEntries(parseBlocks(md)).find((e) => e.id === "O3")!;
+    expect(closeNearMisses(item.text)).toEqual(["Closed"]);
+  });
+
+  test("a close inside code nested under the item does not close it", () => {
+    const md = page("Keep it?\n\n  ```\n  Closed 2026-10-08 (D99).\n  ```");
+    expect(stateOf(md)).toEqual(open);
+    expect(decisionLogEntries(parseBlocks(md)).find((e) => e.id === "O3")!.text).toBe("Keep it?");
+  });
+
+  const parsed = (inner: string, attrs = 'id="O1"') => parseQuestions(parseBlocks(`<Question ${attrs}>\n\n${inner}\n\n</Question>`))[0]!;
+
+  test("the hash input keeps the body and the choices apart", () => {
+    expect(parsed("Keep it?A").hashInput).not.toBe(parsed("Keep it?", 'id="O1" choices="A"').hashInput);
+    expect(parsed("Keep it?", 'id="O1" choices="A"').hashInput).toBe("Keep it?\n\nchoices: A");
+  });
+
+  // src/web/CLAUDE.md: the hashed body keeps these, so each one changes the hash.
+  const kept: [string, string, string][] = [
+    ["a blockquote's >", "> Quoted\n> line.", "> Quoted line."],
+    ["a thematic break", "A.\n\n---\n\nB.", "A.\n---\nB."],
+    ["an ordered list's numbering", "3. a\n4. b", "3. a\n4. b"],
+    ["a table's pipes", "| a | b |\n|---|---|\n| c | d |", "| a | b |\n| c | d |"],
+    ["a nested paragraph's indent", "- a\n\n  Nested para.", "- a\n  Nested para."],
+  ];
+  for (const [label, inner, body] of kept) {
+    test(`the hashed body keeps ${label}`, () => {
+      expect(parsed(inner).body).toBe(body);
+    });
+  }
+});

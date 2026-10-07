@@ -83,8 +83,8 @@ import {
 import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
-import { countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
-import { closeNearMisses, parseQuestionPage, type QuestionState } from "../format/question.ts";
+import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
+import { closeNearMisses, itemReopened, parseQuestionPage, type QuestionState } from "../format/question.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
 export const LINT_CHECKS = [
@@ -383,20 +383,87 @@ function checkUnrenderedFactMarks(page: WikiPageMeta, rawContent: string): LintF
   ];
 }
 
-/** A `<Question>` opening tag as the component parser reads one: the tag owns
- *  the (trimmed) line and every attribute is double-quoted. */
-const QUESTION_TAG_RE = /^\s*<Question(?:\s+[A-Za-z][\w-]*="[^"]*")*\s*\/?>/;
+/** A `<Question>` open-tag line and the id its attributes carry. */
+interface QuestionTagLine {
+  /** 1-based. */
+  line: number;
+  /** Trimmed; null when absent or blank, as `parseQuestionAttrs` reads it. */
+  id: string | null;
+}
 
-/** The 1-based line of every `<Question …>` opening tag outside the
- *  frontmatter and fenced code, in source order — the order `parseQuestions`
- *  returns the blocks in, so the Nth block is on the Nth line. */
-function questionTagLines(lines: readonly string[]): number[] {
+/** The parser's open-tag match (`COMPONENT_OPEN_RE`, on the trimmed line) when
+ *  it names `<Question>` and is not self-closing. */
+function questionOpen(line: string): RegExpMatchArray | null {
+  const m = line.trim().match(COMPONENT_OPEN_RE);
+  return m && m[1] === "Question" && m[3] !== "/" ? m : null;
+}
+
+/** A multi-line `<Question>` opened on line `i` has a matching `</Question>`
+ *  line below it, counting nested opens the way `tryParseComponent` does.
+ *  Fenced lines are code, not tags. */
+function questionCloses(lines: readonly string[], fenced: readonly boolean[], i: number): boolean {
+  let nesting = 1;
+  for (let j = i + 1; j < lines.length; j++) {
+    if (fenced[j]) continue;
+    const t = lines[j]!.trim();
+    if (t === "</Question>") {
+      if (--nesting === 0) return true;
+    } else {
+      const open = questionOpen(t);
+      if (open && !open[4]!.includes("</Question>")) nesting++;
+    }
+  }
+  return false;
+}
+
+/**
+ * Every line the component parser reads as a `<Question>` block's opening tag,
+ * in source order — the order `parseQuestions` returns the blocks in. The test
+ * is `tryParseComponent`'s own: the trimmed line is the parser's open-tag shape
+ * (`COMPONENT_OPEN_RE`), not self-closing, and either closes on the same line
+ * with nothing after the close or owns its line and is closed below. Lines in
+ * the frontmatter or a fence are skipped. Like the parser, an indented tag or
+ * one inside an HTML comment counts.
+ */
+function questionTagLines(lines: readonly string[]): QuestionTagLine[] {
   const fenced = fencedLineMask(lines);
-  const out: number[] = [];
+  const out: QuestionTagLine[] = [];
   for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
-    if (!fenced[i] && QUESTION_TAG_RE.test(lines[i]!)) out.push(i + 1);
+    if (fenced[i]) continue;
+    const m = questionOpen(lines[i]!);
+    if (!m) continue;
+    const rest = m[4]!;
+    const inline = rest.indexOf("</Question>");
+    const block =
+      inline !== -1
+        ? rest.slice(inline + "</Question>".length).trim() === ""
+        : rest.trim() === "" && questionCloses(lines, fenced, i);
+    if (!block) continue;
+    const id = (/(?:^|\s)id="([^"]*)"/.exec(m[2]!)?.[1] ?? "").trim();
+    out.push({ line: i + 1, id: id === "" ? null : id });
   }
   return out;
+}
+
+/**
+ * The line of each `<Question>` block: the Nth block carrying an id is on the
+ * Nth tag line carrying it, when the two counts for that id agree, and gets no
+ * line when they do not (a tag the parser does not read as a block, nested
+ * past its depth limit, say). On a page where every tag is a block this is
+ * plain source order; a stray tag costs only the blocks sharing its id.
+ */
+function questionLines(questions: readonly { id: string | null }[], tags: readonly QuestionTagLine[]): (number | undefined)[] {
+  const tagsById = new Map<string | null, number[]>();
+  for (const t of tags) tagsById.set(t.id, [...(tagsById.get(t.id) ?? []), t.line]);
+  const blocksById = new Map<string | null, number>();
+  for (const q of questions) blocksById.set(q.id, (blocksById.get(q.id) ?? 0) + 1);
+  const seen = new Map<string | null, number>();
+  return questions.map((q) => {
+    const n = seen.get(q.id) ?? 0;
+    seen.set(q.id, n + 1);
+    const lines = tagsById.get(q.id) ?? [];
+    return lines.length === blocksById.get(q.id) ? lines[n] : undefined;
+  });
 }
 
 /** A DecisionLog item's own text as a lint message quotes it: one line, at
@@ -407,13 +474,17 @@ const quoteItem = (text: string): string => {
 };
 
 /** What a near-miss finding says the card shows, from the state the renderer
- *  computed — the warning stands in every state (D6), the consequence differs. */
-function nearMissConsequence(id: string, quoted: string, state: QuestionState | undefined): string {
+ *  computed — the warning stands in every state (D6), the consequence differs.
+ *  An open card says why it is open: reopened, or never canonically closed. */
+function nearMissConsequence(id: string, quoted: string, state: QuestionState | undefined, text: string): string {
   if (state?.kind === "decided") {
     return `DecisionLog item ${id} says ${quoted} outside its canonical close; the card shows Decided → ${state.decision}`;
   }
   if (state?.kind === "closed") {
     return `DecisionLog item ${id} says ${quoted} but has no canonical close naming a decision this page defines, so its card shows Closed without a decision`;
+  }
+  if (itemReopened(text)) {
+    return `DecisionLog item ${id} says ${quoted} outside its canonical phrases; its last canonical phrase reopens it (Reopened <date>.), so its card stays open`;
   }
   return `DecisionLog item ${id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`;
 }
@@ -446,10 +517,8 @@ function checkQuestions(page: WikiPageMeta, rawContent: string): LintFinding[] {
     }
   }
 
-  // The Nth block's tag is the Nth tag line; when the two counts disagree (a
-  // tag the parser does not read as a block) no line is guessed.
-  const tagLines = questionTagLines(lines);
-  const lineOf = (k: number) => (tagLines.length === questions.length ? tagLines[k] : undefined);
+  const blockLines = questionLines(questions, questionTagLines(lines));
+  const lineOf = (k: number) => blockLines[k];
   const seen = new Set<string>();
   questions.forEach((q, k) => {
     const line = lineOf(k);
@@ -478,7 +547,7 @@ function checkQuestions(page: WikiPageMeta, rawContent: string): LintFinding[] {
     const words = closeNearMisses(item.text);
     if (words.length > 0) {
       const quoted = [...new Set(words)].map((w) => `"${w}"`).join(", ");
-      push(nearMissConsequence(q.id, quoted, states.get(q.id)), line);
+      push(nearMissConsequence(q.id, quoted, states.get(q.id), item.text), line);
     }
   });
   return findings;

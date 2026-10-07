@@ -5,6 +5,7 @@ import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, type LintFinding } from "./lint.ts";
 import { questionRenderOptionsFor, renderWikiHtml } from "./render.ts";
+import { parseToAttr } from "../format/question.ts";
 
 // The `<Question>` block's wiki half: the lint check, the `.wiki-reader.json`
 // `language` key and the render option `/api/wiki/page` threads through
@@ -247,5 +248,113 @@ describe("fix round 1: renderWikiHtml", () => {
     expect(tag).toContain('data-question-to="[[Bar]] (X1)"');
     // Outside the tag the same link still renders as a link.
     expect(html).toContain('<div class="q-for"><span class="q-for-label">For</span> <a href="/wiki?relPath=bar.md" class="wiki-link"');
+  });
+});
+
+// ── Fix round 2 ────────────────────────────────────────────────────────────
+
+/** The 1-based line of the first line of `md` equal to `text`. */
+const lineOfText = (md: string, text: string) => md.split("\n").indexOf(text) + 1;
+
+describe("fix round 2: lint lines", () => {
+  // Each broken shape shares the real block's id, so the per-id placement
+  // cannot rescue a tag test that reads it as a block.
+  const broken: [string, string][] = [
+    ["a self-closing tag", '<Question id="O7" />'],
+    ["an open tag with text after it, closed below", '<Question id="O7"> Keep it?\n\n</Question>'],
+    ["a one-line tag with text after its close", '<Question id="O7">Keep it?</Question> trailing'],
+    ["an unclosed open tag", '<Question id="O7">'],
+  ];
+  for (const [label, shape] of broken) {
+    test(`${label} does not cost the real block its line`, async () => {
+      const md = plan(['<Question id="O7">'], ["- **O3** — Something else."]).replace("\n\n<Question", `\n\n${shape}\n\n<Question`);
+      await write("plans/p.mdx", md);
+      const real = md.split("\n").lastIndexOf('<Question id="O7">') + 1;
+      expect((await questionFindings()).map((x) => [x.message, x.line])).toEqual([
+        ['<Question id="O7"> has no item in the page\'s <DecisionLog>, so its card can never close', real],
+      ]);
+    });
+  }
+
+  test("a self-closing tag inside a block's body does not nest", async () => {
+    const md = plan(['<Question id="O7">'], ["- **O3** — Something else."]).replace(
+      "Question text?",
+      'Question text?\n\n<Question id="O7" />',
+    );
+    await write("plans/p.mdx", md);
+    expect((await questionFindings()).map((x) => x.line)).toEqual([lineOfText(md, '<Question id="O7">')]);
+  });
+
+  test("when the tags and the blocks still disagree, each id is placed on its own", async () => {
+    let deep = '<Question id="DEEP">\n\nQ?\n\n</Question>';
+    for (let i = 0; i < 3; i++) deep = `<Callout type="note">\n\n${deep}\n\n</Callout>`;
+    const md = plan(['<Question id="O7">'], ["- **O3** — Something else."]).replace("\n\n<Question", `\n\n${deep}\n\n<Question`);
+    await write("plans/p.mdx", md);
+    expect((await questionFindings()).map((x) => x.line)).toEqual([lineOfText(md, '<Question id="O7">')]);
+  });
+
+  test("an indented tag and a tag inside an HTML comment are blocks to the parser, and keep their lines", async () => {
+    const md = plan(['    <Question id="O7">'], ["- **O3** — Something else."]).replace(
+      "<DecisionLog>",
+      '<!--\n<Question id="O8">\n\nQuestion text?\n\n</Question>\n-->\n\n<DecisionLog>',
+    );
+    await write("plans/p.mdx", md);
+    expect((await questionFindings()).map((x) => x.line)).toEqual([
+      lineOfText(md, '    <Question id="O7">'),
+      lineOfText(md, '<Question id="O8">'),
+    ]);
+  });
+
+  test("a <Question> quoted in the frontmatter does not take the real block's line", async () => {
+    const md = plan(['<Question id="O7">'], ["- **O3** — Something else."]).replace(
+      "updated: 2026-10-01\n",
+      'updated: 2026-10-01\ndescription: |\n  <Question id="O7">Quoted?</Question>\n',
+    );
+    await write("plans/p.mdx", md);
+    expect((await questionFindings()).map((x) => x.line)).toEqual([lineOfText(md, '<Question id="O7">')]);
+  });
+});
+
+describe("fix round 2: near-miss wording", () => {
+  test("a reopened item says it was reopened, not that it has no canonical close", async () => {
+    await write(
+      "plans/p.mdx",
+      plan(['<Question id="O3">'], ["- **O3** — Besvart 06.10. Closed 2026-10-08 (D99). Reopened 2026-10-09."]),
+    );
+    expect((await questionFindings()).map((x) => x.message)).toEqual([
+      'DecisionLog item O3 says "Besvart" outside its canonical phrases; its last canonical phrase reopens it (Reopened <date>.), so its card stays open',
+    ]);
+  });
+
+  test("a near miss in a sub-bullet under the item is reported", async () => {
+    await write("plans/p.mdx", plan(['<Question id="O3">'], ["- **O3** — Keep it?\n  - Besvart 06.10: ja."]));
+    expect((await questionFindings()).map((x) => x.message)).toEqual([
+      'DecisionLog item O3 says "Besvart" but no canonical close (Closed <date> (Dn).), so its card stays open',
+    ]);
+  });
+});
+
+describe("fix round 2: renderWikiHtml attributes", () => {
+  const render = (tag: string) => {
+    const md = [tag, "", "Q?", "", "</Question>", "", "<DecisionLog>", "", "- **O1** — Q?", "", "</DecisionLog>"].join("\n");
+    const meta = (name: string) => ({ name, relPath: `${name.toLowerCase()}.md` }) as never;
+    const html = renderWikiHtml(md, (t) => meta(t.split("|")[0]!), {
+      question: { questionsTo: [], language: "en", answerable: false },
+    });
+    return /<section class="question[^>]*>/.exec(html)?.[0] ?? "";
+  };
+
+  test("a wikilink alias in to= reads back as one target", () => {
+    const tag = render('<Question id="O1" to="[[Bar|Alias]] (X1)">');
+    const to = /data-question-to="([^"]*)"/.exec(tag)?.[1] ?? "";
+    expect(to).toBe("[[Bar|Alias]] (X1)");
+    expect(parseToAttr(to)).toEqual([{ name: "[[Bar|Alias]]", ident: "X1" }]);
+  });
+
+  test("a restored wikilink is escaped inside the attribute", () => {
+    const tag = render('<Question id="O1" choices="[[A<b]]|B" to="[[C&d]] (X1)">');
+    expect(tag).toMatch(/^<section class="question q-open"(?: data-[a-z-]+="[^"<>]*")+>$/);
+    expect(tag).toContain('data-question-choices="[[A&lt;b]]|B"');
+    expect(tag).toContain('data-question-to="[[C&amp;d]] (X1)"');
   });
 });

@@ -84,7 +84,8 @@ const PAGE_NO = [
   "",
 ].join("\n");
 
-// Two cards on one id, so the duplicate note renders (its contrast is measured).
+// Two cards on one id, so the duplicate note renders (its contrast is measured),
+// and one id with no DecisionLog item, whose chip is a plain span.q-id.
 const PAGE_DUP = [
   "---",
   "title: Duplicate page",
@@ -93,6 +94,7 @@ const PAGE_DUP = [
   "",
   ...question("O5", "Asked twice?"),
   ...question("O5", "Asked twice, again?"),
+  ...question("O9", "Never logged?"),
   "<DecisionLog>",
   "",
   "- **O5** — Asked twice?",
@@ -263,6 +265,12 @@ test.describe("Wiki reader: <Question> answer card", () => {
       await expect(note).toBeVisible();
       expect(await note.evaluate((el) => getComputedStyle(el).color), "note token").toBe(soft);
       expect(await paintedContrast(note), "note contrast").toBeGreaterThanOrEqual(4.5);
+      // The ref-link enhancer adopts a.q-id, so the chip above measures
+      // a.wiki-ref's colour; the no-item span.q-id is the card's own rule.
+      const plainId = page.locator(".wiki-article section.question span.q-id");
+      await expect(plainId).toHaveText("O9");
+      expect(await plainId.evaluate((el) => getComputedStyle(el).color), "plain id token").toBe(accentLight);
+      expect(await paintedContrast(plainId), "plain id contrast").toBeGreaterThanOrEqual(4.5);
       expectClean(dupSeen);
     });
   }
