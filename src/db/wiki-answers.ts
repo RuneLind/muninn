@@ -3,9 +3,9 @@ import { getDb } from "./client.ts";
 /**
  * The answer store for wiki `<Question>` cards (migration 082): one row per
  * VERSION of an answer. Append-only by construction — this module has an
- * insert and reads, and no UPDATE. The only columns ever set after insert are
- * `exported_at` (the copy-out, answer cards PR 4) and `redacted_at` (an admin
- * redact, PR 5); both land with their own routes.
+ * insert, reads, and ONE update: {@link markWikiAnswersExported}, which sets
+ * `exported_at` and nothing else. The only other column ever set after insert
+ * is `redacted_at` (an admin redact, PR 5).
  */
 
 export interface WikiAnswerAuthor {
@@ -135,4 +135,73 @@ export async function listWikiAnswerVersions(answerIds: readonly string[]): Prom
     SELECT * FROM wiki_answers WHERE answer_id = ANY(${answerIds as string[]}::uuid[]) ORDER BY answer_id, version DESC
   `;
   return rows.map(rowToVersion);
+}
+
+/** The last export batch of one page: the rows of its latest `exported_at`,
+ *  the newest version per answer among them, oldest answer first (the order
+ *  {@link listLatestWikiAnswers} uses, so a re-copy reads like the copy). Empty when
+ *  nothing on the page was ever exported. */
+export async function listLastExportedWikiAnswers(wiki: string, relPath: string): Promise<WikiAnswerVersion[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM (
+      SELECT DISTINCT ON (answer_id) *
+      FROM wiki_answers
+      WHERE wiki = ${wiki} AND rel_path = ${relPath}
+        AND exported_at = (
+          SELECT max(exported_at) FROM wiki_answers WHERE wiki = ${wiki} AND rel_path = ${relPath}
+        )
+      ORDER BY answer_id, version DESC
+    ) batch
+    ORDER BY (SELECT min(created_at) FROM wiki_answers f WHERE f.answer_id = batch.answer_id), answer_id
+  `;
+  return rows.map(rowToVersion);
+}
+
+/** One answer of a wiki, by where it points: the orphan check's input. */
+export interface WikiAnswerLocation {
+  answerId: string;
+  relPath: string;
+  questionId: string;
+  authorName: string;
+  /** Epoch ms of the latest version. */
+  createdAt: number;
+}
+
+/** Every answer in one wiki (latest version), for the orphan check. */
+export async function listWikiAnswerLocations(wiki: string): Promise<WikiAnswerLocation[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT ON (answer_id) answer_id, rel_path, question_id, author_name, created_at
+    FROM wiki_answers WHERE wiki = ${wiki}
+    ORDER BY answer_id, version DESC
+  `;
+  return rows.map((r) => ({
+    answerId: r.answer_id,
+    relPath: r.rel_path,
+    questionId: r.question_id,
+    authorName: r.author_name,
+    createdAt: ms(r.created_at)!,
+  }));
+}
+
+/**
+ * Mark an export as copied: in ONE statement, set `exported_at = now()` on
+ * every listed `(answer_id, version)` and on that answer's earlier versions,
+ * where it is still null. `now()` is the transaction's start time, so every
+ * row of one confirm shares one timestamp — the batch `again=1` finds again.
+ * A version saved after the export was read is not listed and stays
+ * unexported; a retried confirm marks nothing. Returns how many rows it set.
+ */
+export async function markWikiAnswersExported(rows: readonly (readonly [string, number])[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const sql = getDb();
+  const ids = rows.map((r) => r[0]);
+  const versions = rows.map((r) => r[1]);
+  const updated = await sql`
+    UPDATE wiki_answers w SET exported_at = now()
+    FROM unnest(${ids as string[]}::uuid[], ${versions as number[]}::int[]) AS l(answer_id, version)
+    WHERE w.answer_id = l.answer_id AND w.version <= l.version AND w.exported_at IS NULL
+  `;
+  return updated.count;
 }

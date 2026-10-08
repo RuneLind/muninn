@@ -275,6 +275,9 @@ export const E2E_PORTS = {
   "wiki-answers/no-owner": 3132,
   // The answer card's composer, edit and log (answer cards PR 3).
   "wiki-answer-card": 3133,
+  // The answer export button (answer cards PR 4): auth off, and nais at role `user`.
+  "wiki-answer-export": 3134,
+  "wiki-answer-export/user": 3135,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

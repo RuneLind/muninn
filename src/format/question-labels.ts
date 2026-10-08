@@ -29,6 +29,20 @@ export interface QuestionLabels {
   notSure: string;
   copyNew: (n: number) => string;
   copyAgain: string;
+  /** The export button's status line (answer cards PR 4). */
+  exportStatus: {
+    /** The answers changed since the block was fetched: a fresh one is loading. */
+    stale: string;
+    copied: (n: number) => string;
+    copiedAgain: (n: number) => string;
+    copyFailed: string;
+    /** The clipboard write worked, the confirm did not: nothing is marked. */
+    confirmFailed: string;
+    loadFailed: string;
+    /** Answers in this wiki whose page or question is gone (O4). */
+    orphans: (n: number) => string;
+    orphansTitle: string;
+  };
   edited: (n: number) => string;
   /** Badge on a closed card holding answers not yet copied. */
   newBadge: (n: number) => string;
@@ -80,6 +94,16 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
     notSure: "Not sure yet",
     copyNew: (n) => `Copy new answers (${n})`,
     copyAgain: "Copy again",
+    exportStatus: {
+      stale: "The answers changed. Loading the new ones; click again.",
+      copied: (n) => `Copied ${n} ${n === 1 ? "answer" : "answers"}.`,
+      copiedAgain: (n) => `Copied ${n} ${n === 1 ? "answer" : "answers"} again.`,
+      copyFailed: "Could not copy to the clipboard. Nothing was marked as copied.",
+      confirmFailed: "Copied, but the answers could not be marked as copied. Click again to retry.",
+      loadFailed: "The answers to copy could not be loaded.",
+      orphans: (n) => `${n} orphaned`,
+      orphansTitle: "Answers in this wiki whose page or question is gone",
+    },
     edited: (n) => `edited ${n}×`,
     newBadge: (n) => `${n} new`,
     noId: "Question without id",
@@ -119,6 +143,16 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
     notSure: "Vet ikke ennå",
     copyNew: (n) => `Kopier nye svar (${n})`,
     copyAgain: "Kopier igjen",
+    exportStatus: {
+      stale: "Svarene er endret. Henter de nye; klikk igjen.",
+      copied: (n) => `Kopierte ${n} svar.`,
+      copiedAgain: (n) => `Kopierte ${n} svar på nytt.`,
+      copyFailed: "Kunne ikke kopiere til utklippstavlen. Ingenting ble merket som kopiert.",
+      confirmFailed: "Kopiert, men svarene kunne ikke merkes som kopiert. Klikk igjen for å prøve på nytt.",
+      loadFailed: "Kunne ikke hente svarene som skal kopieres.",
+      orphans: (n) => `${n} foreldreløse`,
+      orphansTitle: "Svar i denne wikien der siden eller spørsmålet er borte",
+    },
     edited: (n) => `endret ${n}×`,
     newBadge: (n) => `${n} nye`,
     noId: "Spørsmål uten id",

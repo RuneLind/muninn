@@ -191,6 +191,8 @@ import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { enhanceAnswerCards, type PageAnswersInfo } from "./wiki-answer-cards.ts";
+import { mountAnswerExport } from "./wiki-answer-export.ts";
+import { parseQuestionLanguage } from "../../../format/question-labels.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
   askDeclineReason,
@@ -4179,9 +4181,19 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // answers only. After the ref links, so an answer's text is never linked.
       // The registry name, not `WIKI`: under the `WIKI_DIR` override `WIKI` is
       // "" while the answer routes still need the served wiki's own name.
-      enhanceAnswerCards(articleRoot, data.answers, {
+      const answerCards = enhanceAnswerCards(articleRoot, data.answers, {
         wiki: FIND_SELF_WIKI || WIKI,
         relPath: data.meta.relPath,
+      });
+      // The admin's "Copy new answers (N)" / "Copy again", in the breadcrumb
+      // row beside the other page-level actions; removed when the viewer may
+      // not export or the page has no answerable card.
+      mountAnswerExport(document.getElementById("wikiBreadcrumb"), answerCards, data.answers, {
+        wiki: FIND_SELF_WIKI || WIKI,
+        relPath: data.meta.relPath,
+        lang: parseQuestionLanguage(
+          articleRoot.querySelector("section.question[data-question-lang]")?.getAttribute("data-question-lang") ?? undefined,
+        ).language,
       });
       applyDisplay();
       // A `#id` in the URL (a shared `#q-8`): open the folds around it, scroll to
