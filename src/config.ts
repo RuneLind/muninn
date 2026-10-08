@@ -144,9 +144,10 @@ export interface WikiAnswerConfig {
 const ANSWER_GROUP_NAME_RE = /^[a-z0-9æøå_-]+$/;
 /** A NAV ident after upper-casing: letters and digits. */
 const ANSWER_GROUP_IDENT_RE = /^[A-Z0-9]+$/;
-/** A NAV ident's shape after lower-casing. A group name shaped like one would
- *  put an ident on every chip and export heading, so it is refused. */
-const NAV_IDENT_SHAPE_RE = /^[a-z]\d{6}$/;
+/** A NAV ident's shape after lower-casing — a letter and exactly six digits —
+ *  ANYWHERE in the name (`fag-z990001`, `ab123456`). A group name holding one
+ *  would put an ident on every chip and export heading, so it is refused. */
+const NAV_IDENT_SHAPE_RE = /[a-z]\d{6}(?!\d)/;
 
 /**
  * `WIKI_ANSWER_GROUPS` — `fag=A123456,B234567;utvikler=C345678`. Group names

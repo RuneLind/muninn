@@ -419,12 +419,24 @@ describe("WIKI_ANSWER_GROUPS", () => {
       "WIKI_ANSWER_GROUPS entry 1 dropped: the group name has the shape of a NAV ident (a letter and six digits)",
     ]);
     for (const w of warnings) expect(w).not.toMatch(/z990001/i);
-    // Not ident-shaped: kept.
-    expect(plain(parseAnswerGroups("z99=Z990004;team7=Z990005;zz990001=Z990006").groups)).toEqual({
+    // No letter followed by exactly six digits: kept — 5 and 7 digits bound the count.
+    expect(plain(parseAnswerGroups("z99=Z990004;team7=Z990005;z99001=Z990006;z9900011=Z990007;team-2=Z990008").groups)).toEqual({
       z99: ["Z990004"],
       team7: ["Z990005"],
-      zz990001: ["Z990006"],
+      z99001: ["Z990006"],
+      z9900011: ["Z990007"],
+      "team-2": ["Z990008"],
     });
+  });
+
+  test("a group name that CONTAINS an ident is refused too, wherever it sits", () => {
+    const names = ["fag-z990001", "z990001_", "z990001x", "team_z990001", "fagz990001", "zz990001", "ab123456"];
+    const { groups, warnings } = parseAnswerGroups(names.map((n) => `${n}=Z990002`).join(";"));
+    expect(plain(groups)).toEqual({});
+    expect(warnings).toEqual(
+      names.map((_, i) => `WIKI_ANSWER_GROUPS entry ${i + 1} dropped: the group name has the shape of a NAV ident (a letter and six digits)`),
+    );
+    expect(JSON.stringify(answerGroupsBootLines(resolveWikiAnswerConfig({ WIKI_ANSWER_GROUPS: "fag-z990001=Z990002" })))).not.toMatch(/990001/);
   });
 
   test("positions count the raw ;-segments, blank ones included", () => {
