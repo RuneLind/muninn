@@ -669,3 +669,13 @@ describe("answer cards fix round 1", () => {
     expect(html).not.toContain("Y222222");
   });
 });
+
+describe("answer cards fix round 2", () => {
+  test("a format character between a letter and its combining mark still matches the composed name", () => {
+    // NFC cannot compose e + U+0301 across the zero-width space, so the format
+    // characters must be gone before normalizing.
+    const target = [{ name: "René Ås", ident: null }];
+    expect(isAskedAuthor({ name: "Rene​́ Ås", navIdent: null }, target)).toBe(true);
+    expect(isAskedAuthor({ name: "Rene­́ A​̊s", navIdent: null }, target)).toBe(true);
+  });
+});

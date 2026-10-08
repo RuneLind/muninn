@@ -166,10 +166,12 @@ export function resolveQuestionTargets(
   return { to: [], source: "none" };
 }
 
-/** NFC, format characters (zero-width space, soft hyphen, BOM …) dropped, white
- *  space collapsed, lower-cased: a name pasted from a document still matches. */
+/** Format characters (zero-width space, soft hyphen, BOM …) dropped, then
+ *  NFC — in that order, or a format character between a letter and its
+ *  combining mark blocks the composition — white space collapsed, lower-cased:
+ *  a name pasted from a document still matches. */
 const foldName = (s: string) =>
-  s.normalize("NFC").replace(/\p{Cf}/gu, "").trim().replace(/\s+/g, " ").toLowerCase();
+  s.replace(/\p{Cf}/gu, "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
 
 /**
  * Did the page ask this author (D2, the O2 v1 rule)? A target matches on the

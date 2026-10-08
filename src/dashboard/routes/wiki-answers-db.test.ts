@@ -462,12 +462,12 @@ describe("/api/wiki/page on a wiki that takes answers", () => {
   const page = async (app: Hono, wiki: string) => {
     const res = await app.request(`/api/wiki/page?wiki=${wiki}&relPath=${encodeURIComponent(REL)}`);
     expect(res.status).toBe(200);
-    return (await res.json()) as { html: string; answers?: { answerable: boolean; canExport: boolean; owner: string | null } };
+    return (await res.json()) as { html: string; answers?: { answerable: boolean; canExport: boolean } };
   };
 
   test("answerable cards, the page flags, and the owner as the default For", async () => {
     const data = await page(appFor(), "answers");
-    expect(data.answers).toEqual({ answerable: true, canExport: true, owner: OWNER });
+    expect(data.answers).toEqual({ answerable: true, canExport: true });
     expect(data.html).toContain('data-wiki-answerable="true"');
     expect(data.html).toContain('data-question-to-source="owner"');
     expect(data.html).toContain(`data-question-to="${OWNER}"`);
@@ -662,5 +662,18 @@ describe("answer cards fix round 1: WIKI_ANSWER_OWNER in the target format", () 
     // Another spelling of the name, the same ident: asked.
     expect(answers.find((a) => a.body === "owner on B2")?.asked).toBe(true);
     expect(JSON.stringify(answers)).not.toContain("Z555555");
+  });
+});
+
+describe("answer cards fix round 2: the page payload carries no owner ident", () => {
+  test("/api/wiki/page with WIKI_ANSWER_OWNER in the target format names the owner and never the ident", async () => {
+    const app = appFor({ answers: { wikis: new Set(["answers"]), owner: "Rune Lind (Z555555)" } });
+    const res = await app.request(`/api/wiki/page?wiki=answers&relPath=${encodeURIComponent(REL)}`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const data = JSON.parse(text) as { html: string; answers?: Record<string, unknown> };
+    expect(data.answers).toEqual({ answerable: true, canExport: true });
+    expect(data.html).toContain("Rune Lind");
+    expect(text).not.toContain("Z555555");
   });
 });

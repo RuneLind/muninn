@@ -106,3 +106,62 @@ describe("enhanceAnswerCards", () => {
     expect(changes).toBe(before);
   });
 });
+
+/** A section the load-error line can be written into: connected, so
+ *  `showLoadError` writes, and every write is recorded. */
+function connectedSection(id: string): FakeSection & { inserted: string[] } {
+  const base = fakeSection(id);
+  const inserted: string[] = [];
+  return Object.assign(base, {
+    isConnected: true as unknown as false,
+    inserted,
+    querySelector: () => null,
+    insertAdjacentHTML: (_where: string, html: string) => void inserted.push(html),
+  });
+}
+
+/** A fetch whose calls each wait for the test to settle them. */
+function heldFetch() {
+  const calls: { resolve: (r: Response) => void; reject: (e: unknown) => void }[] = [];
+  const fetchFn = (() =>
+    new Promise<Response>((resolve, reject) => calls.push({ resolve, reject }))) as unknown as typeof fetch;
+  return { calls, fetchFn };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe("answer cards fix round 2: what a reload result does", () => {
+  test("a reload answering answerable:false leaves the loaded answers in place", async () => {
+    let body: unknown = { answerable: true, answers: [wire({})] };
+    const fetchFn = (() =>
+      Promise.resolve(new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }))) as unknown as typeof fetch;
+    const handle = enhanceAnswerCards(rootOf([fakeSection("O1")]), { answerable: true }, { wiki: "w", relPath: "p.mdx", fetchFn })!;
+    await handle.refresh();
+    expect(handle.answers().map((a) => a.answerId)).toEqual(["a1"]);
+    body = { answerable: false, answers: [] };
+    await handle.refresh();
+    expect(handle.answers().map((a) => a.answerId)).toEqual(["a1"]);
+  });
+
+  test("a first load that fails says so on the card", async () => {
+    const { calls, fetchFn } = heldFetch();
+    const section = connectedSection("O1");
+    enhanceAnswerCards(rootOf([section]), { answerable: true }, { wiki: "w", relPath: "p.mdx", fetchFn });
+    calls[0]!.reject(new Error("down"));
+    await tick();
+    expect(section.inserted.length).toBe(1);
+    expect(section.inserted[0]).toContain("q-answers-error");
+  });
+
+  test("a failed load a newer request has overtaken writes nothing", async () => {
+    const { calls, fetchFn } = heldFetch();
+    const section = connectedSection("O1");
+    const handle = enhanceAnswerCards(rootOf([section]), { answerable: true }, { wiki: "w", relPath: "p.mdx", fetchFn })!;
+    // A second load goes out while the first is still out, and stays out.
+    void handle.refresh();
+    expect(calls.length).toBe(2);
+    calls[0]!.reject(new Error("down"));
+    await tick();
+    expect(section.inserted).toEqual([]);
+  });
+});

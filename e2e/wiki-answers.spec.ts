@@ -209,7 +209,9 @@ test.describe("Answer store API (MUNINN_AUTH=off)", () => {
     const ro = await (await request.get(`${BASE}/api/wiki/page?wiki=${READONLY_WIKI}&relPath=${encodeURIComponent(REL)}`)).json();
     expect(ro.answers).toBeUndefined();
     const rw = await (await request.get(`${BASE}/api/wiki/page?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`)).json();
-    expect(rw.answers).toEqual({ answerable: true, canExport: true, owner: OWNER });
+    expect(rw.answers).toEqual({ answerable: true, canExport: true });
+    // WIKI_ANSWER_OWNER carries an ident; the page payload carries only the name.
+    expect(JSON.stringify(rw)).not.toContain("X123456");
 
     await page.goto(`${BASE}/wiki?wiki=${READONLY_WIKI}&relPath=${encodeURIComponent(REL)}`);
     const card = page.locator(".wiki-article section.question").first();

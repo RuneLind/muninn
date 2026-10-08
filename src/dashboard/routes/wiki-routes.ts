@@ -1637,9 +1637,10 @@ export function registerWikiReadRoutes(
       // answers and for a viewer the answer routes admit (`answersForViewer`):
       // the client keys its controls on THIS, never on
       // `wikiToolsRegistered` or the read-only selectors (D14). `canExport`:
-      // admin, and auth off is admin.
+      // admin, and auth off is admin. No owner: `WIKI_ANSWER_OWNER` may carry
+      // an ident, and the card already names the owner from the rendered HTML.
       ...(answersForViewer
-        ? { answers: { answerable: true, canExport: (c.get("role") ?? "admin") === "admin", owner: answerCfg.owner } }
+        ? { answers: { answerable: true, canExport: (c.get("role") ?? "admin") === "admin" } }
         : {}),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),

@@ -133,6 +133,11 @@ const FIX_PAGE = [
   ...q("F12", "Submitted twice?"),
   ...q("F13", "Changed while focused?"),
   ...q("F14", "Saved while another card holds focus?"),
+  // Fix round 2.
+  ...q("F15", "A conflict whose reload fails?"),
+  ...q("F16", "Focus on [a link](#f16-target) in the question?"),
+  ...q("F17", "A reload that says answerable false?"),
+  ...q("F18", "Saved to reload another card?"),
 ].join("\n");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -510,7 +515,7 @@ test.describe("Wiki reader: the answer card under reloads, failures and focus", 
     await openPage(page, WIKI, FIX_REL);
     const f2 = fixCard(page, "F2");
     await expect(f2.locator(".q-answers-error")).toHaveText("Answers could not be loaded.");
-    await expect(page.locator(".wiki-article .q-answers-error")).toHaveCount(14);
+    await expect(page.locator(".wiki-article .q-answers-error")).toHaveCount(18);
     await expect(page.locator(".wiki-article form.q-composer")).toHaveCount(0);
   });
 
@@ -675,6 +680,82 @@ test.describe("Wiki reader: the answer card under reloads, failures and focus", 
     await page.waitForTimeout(800);
     expect(posts).toBe(1);
     expect((await rowsFor("F12", FIX_REL)).length).toBe(1);
+    expectClean(seen);
+  });
+});
+
+test.describe("Wiki reader: the answer card, fix round 2", () => {
+  const openFix = async (page: Page) => {
+    const seen = await openPage(page, WIKI, FIX_REL);
+    await expect(card(page, "F1").locator(".q-answer")).toHaveCount(1);
+    return seen;
+  };
+
+  test("a repaint leaves focus alone when it is on a part the repaint does not replace", async ({ page }) => {
+    const seen = await openFix(page);
+    await page.route("**/api/wiki/answers", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const res = await route.fetch();
+      await sleep(800);
+      await route.fulfill({ response: res });
+    });
+    const f16 = card(page, "F16");
+    const f18 = card(page, "F18");
+    await f18.locator("textarea.q-text").fill("F18 saved.");
+    await f18.locator("button.q-save").click();
+    // While F18's save is out, F16 changes elsewhere and the reader focuses
+    // the link in F16's question text.
+    await api({ relPath: FIX_REL, questionId: "F16", body: "F16 answered elsewhere." });
+    const link = f16.locator(".q-body a");
+    await link.focus();
+    await expect(f18.locator(".q-answer")).toHaveCount(1);
+    await expect(f16.locator(".q-answer > .q-answer-body")).toHaveText("F16 answered elsewhere.");
+    await expect(link).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("a 409 whose reload fails keeps the conflict message and offers to load again", async ({ page }) => {
+    const seen = await openFix(page);
+    await page.route("**/api/wiki/answers", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "x", code: "version_conflict" }) })
+        : route.fallback(),
+    );
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "down" }) })
+        : route.fallback(),
+    );
+    const f15 = card(page, "F15");
+    await f15.locator("textarea.q-text").fill("F15 text.");
+    await f15.locator("button.q-save").click();
+    const msg = f15.locator(".q-msg-warn");
+    // Load again appears only once the reload has failed: the text checks
+    // below then read the final message, not the one shown before the reload.
+    await expect(msg.locator("button.q-retry")).toBeVisible();
+    await expect(msg).toContainText("This answer changed somewhere else.");
+    await expect(msg).toContainText("Answers could not be loaded.");
+    await expect(f15.locator("textarea.q-text")).toHaveValue("F15 text.");
+    expect(seen.failed).toEqual(["409 /api/wiki/answers", "500 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("a save whose reload answers answerable:false keeps the cards and offers to load again", async ({ page }) => {
+    const seen = await openFix(page);
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ answerable: false, answers: [] }) })
+        : route.fallback(),
+    );
+    const f17 = card(page, "F17");
+    await f17.locator("textarea.q-text").fill("F17 saved.");
+    await f17.locator("button.q-save").click();
+    const msg = f17.locator(".q-msg");
+    await expect(msg).toContainText("The answer was saved, but the answers could not be loaded again.");
+    await expect(msg.locator("button.q-retry")).toBeVisible();
+    await expect(f17.locator(".q-answer > .q-answer-body")).toHaveText("F17 saved.");
+    // The other cards keep what the first load painted.
+    await expect(card(page, "F1").locator(".q-answer")).toHaveCount(1);
     expectClean(seen);
   });
 });
