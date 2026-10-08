@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import { withStatementTimeout, type StatementTimeoutOption } from "./statement-timeout.ts";
 import { capTextWithNote } from "../summaries/truncation.ts";
 
 /**
@@ -169,7 +170,7 @@ function toSnapshot(r: Record<string, unknown>): PromptSnapshot {
 export async function cleanupOldSnapshots(retention: {
   chatDays: number;
   captureDays: number;
-}): Promise<number> {
+}, opts: StatementTimeoutOption = {}): Promise<number> {
   for (const [name, days] of [
     ["chatDays", retention.chatDays],
     ["captureDays", retention.captureDays],
@@ -180,11 +181,10 @@ export async function cleanupOldSnapshots(retention: {
       );
     }
   }
-  const sql = getDb();
-  const result = await sql`
+  const result = await withStatementTimeout(opts, (sql) => sql`
     DELETE FROM prompt_snapshots
     WHERE (kind = 'capture' AND created_at < NOW() - make_interval(days => ${retention.captureDays}))
        OR (kind <> 'capture' AND created_at < NOW() - make_interval(days => ${retention.chatDays}))
-  `;
+  `);
   return result.count;
 }

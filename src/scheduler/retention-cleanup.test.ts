@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import {
+  RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS,
   retentionCleanupBootLine,
   runRetentionCleanup,
   startRetentionCleanup,
@@ -62,6 +63,20 @@ describe("runRetentionCleanup", () => {
     expect(args.cleanupOldTraces).toBe(7);
     expect(args.cleanupOldSnapshots).toEqual({ chatDays: 3, captureDays: 90 });
     expect(args.cleanupThreadCitations).toBe(7);
+  });
+
+  test("every statement is passed the Postgres statement timeout", async () => {
+    const seen: Record<string, unknown> = {};
+    const deps: RetentionCleanupDeps = {
+      harvestSearchSignals: async (opts) => ((seen.harvest = opts), 0),
+      cleanupOldTraces: async (_d, opts) => ((seen.traces = opts), 0),
+      cleanupOldSnapshots: async (_w, opts) => ((seen.snapshots = opts), 0),
+      cleanupThreadCitations: async (_d, opts) => ((seen.citations = opts), 0),
+    };
+    await runRetentionCleanup(CONFIG, deps);
+    const bound = { statementTimeoutMs: RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS };
+    expect(seen).toEqual({ harvest: bound, traces: bound, snapshots: bound, citations: bound });
+    expect(RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS).toBe(300_000);
   });
 
   test("a harvest failure is logged and the three deletes still run", async () => {
@@ -196,56 +211,6 @@ describe("startRetentionCleanup", () => {
       expect(records.some((r) => r.level === "warning" && r.message.join("").includes("still in flight"))).toBe(true);
     } finally {
       release();
-    }
-  });
-
-  test("a run that hangs past the run bound is abandoned with a warning, and the next tick runs again", async () => {
-    const records = await capture();
-    let runs = 0;
-    let release!: () => void;
-    const never = new Promise<void>((r) => (release = r));
-    const { deps } = recordingDeps({
-      harvestSearchSignals: async () => {
-        runs++;
-        if (runs === 1) await never;
-        return 0;
-      },
-    });
-    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60, runTimeoutMs: 20 });
-    try {
-      await Bun.sleep(150);
-      expect(runs).toBeGreaterThanOrEqual(2);
-      expect(records.some((r) => r.level === "warning" && r.message.join("").includes("timed out after"))).toBe(true);
-    } finally {
-      release();
-    }
-  });
-
-  test("a timed-out run that settles late does not free the slot of the newer run in flight", async () => {
-    let runs = 0;
-    let releaseFirst!: () => void;
-    const first = new Promise<void>((r) => (releaseFirst = r));
-    const never = new Promise<void>(() => {});
-    const { deps } = recordingDeps({
-      harvestSearchSignals: async () => {
-        runs++;
-        await (runs === 1 ? first : never);
-        return 0;
-      },
-    });
-    // Run 1 at 0 ms, abandoned at 100; run 2 at 300, abandoned at 400.
-    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 300, runTimeoutMs: 100 });
-    try {
-      await Bun.sleep(320);
-      expect(runs).toBe(2);
-      releaseFirst(); // run 1 settles late, while run 2 holds the slot
-      await Bun.sleep(10);
-      // Stop must still wait for run 2 (until its bound at ~400 ms), not return at once.
-      const t0 = performance.now();
-      await stopRetentionCleanup(1_000);
-      expect(performance.now() - t0).toBeGreaterThanOrEqual(40);
-    } finally {
-      releaseFirst();
     }
   });
 

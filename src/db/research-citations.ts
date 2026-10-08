@@ -9,6 +9,7 @@
  */
 
 import { getDb } from "./client.ts";
+import { withStatementTimeout, type StatementTimeoutOption } from "./statement-timeout.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("db", "research-citations");
@@ -194,14 +195,13 @@ export async function getCitationsForThread(threadId: string): Promise<CitationR
  * Called from `src/scheduler/retention-cleanup.ts` inside its own try-block, after
  * `cleanupOldTraces`.
  */
-export async function cleanupThreadCitations(retentionDays: number): Promise<number> {
-  const sql = getDb();
-  const result = await sql`
+export async function cleanupThreadCitations(retentionDays: number, opts: StatementTimeoutOption = {}): Promise<number> {
+  const result = await withStatementTimeout(opts, (sql) => sql`
     DELETE FROM research_citations
     WHERE thread_id IS NOT NULL
       AND cited = false
       AND created_at < NOW() - make_interval(days => ${retentionDays})
-  `;
+  `);
   return result.count;
 }
 

@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import { withStatementTimeout, type StatementTimeoutOption } from "./statement-timeout.ts";
 
 // The work-unit child spans a scheduler tick mints directly under its root
 // (src/scheduler/runner.ts): task:<type>, watcher:<type>, goal_reminders and
@@ -421,11 +422,10 @@ export async function getToolUsageStats(userId: string, botName: string, threadI
   }));
 }
 
-export async function cleanupOldTraces(retentionDays: number): Promise<number> {
-  const sql = getDb();
-  const result = await sql`
+export async function cleanupOldTraces(retentionDays: number, opts: StatementTimeoutOption = {}): Promise<number> {
+  const result = await withStatementTimeout(opts, (sql) => sql`
     DELETE FROM traces WHERE created_at < NOW() - make_interval(days => ${retentionDays})
-  `;
+  `);
   return result.count;
 }
 

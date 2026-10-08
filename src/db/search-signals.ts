@@ -20,6 +20,7 @@
  */
 
 import { getDb } from "./client.ts";
+import { withStatementTimeout, type StatementTimeoutOption } from "./statement-timeout.ts";
 
 /**
  * Harvest research `search` spans from `traces` into `search_signals`. Extracts
@@ -31,9 +32,8 @@ import { getDb } from "./client.ts";
  * unique to research-knowledge's per-sub-question searches, so it filters out any
  * unrelated span that happens to be named `search`.
  */
-export async function harvestSearchSignals(): Promise<number> {
-  const sql = getDb();
-  const result = await sql`
+export async function harvestSearchSignals(opts: StatementTimeoutOption = {}): Promise<number> {
+  const result = await withStatementTimeout(opts, (sql) => sql`
     INSERT INTO search_signals (
       span_id, trace_id, bot_name, query, collections,
       result_count, best_score, low_confidence, no_hits,
@@ -68,7 +68,7 @@ export async function harvestSearchSignals(): Promise<number> {
       -- gap, so they are excluded rather than recorded.
       AND NOT (t.attributes ? 'error')
     ON CONFLICT (span_id) DO NOTHING
-  `;
+  `);
   return result.count;
 }
 
