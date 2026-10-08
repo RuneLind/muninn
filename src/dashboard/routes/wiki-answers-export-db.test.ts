@@ -73,6 +73,10 @@ const PAGE = [
   "",
 ].join("\n");
 
+// A page whose questions are asked of the group `fag`, not of a person.
+const GROUP_REL = "plans/gruppe.mdx";
+const GROUP_PAGE = ["---", "title: Gruppe", 'questions_to: ["fag"]', "---", "", '<Question id="G1">', "", "Til faget.", "", "</Question>", ""].join("\n");
+
 let root = "";
 
 function appFor(
@@ -185,6 +189,7 @@ const NO_AGAIN = { block: "", rows: [], count: 0 };
 beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-answer-export-"));
   await Bun.write(path.join(root, REL), PAGE);
+  await Bun.write(path.join(root, GROUP_REL), GROUP_PAGE);
   __setWikiRegistryForTest([
     { name: WIKI, root, source: "extra" },
     { name: "cards-only", root, source: "extra" },
@@ -285,6 +290,17 @@ describe("answer groups in the block", () => {
     expect(body.block).toContain("### E2 — Ola Nordmann [fag, utvikler] (not asked), 07.10.2026 21:33, version 1");
     expect(body.block).toContain("### E5 — Kari Nordmann, 07.10.2026 21:34, version 1");
     expect(body.block).not.toMatch(/X111111|Y222222/);
+  });
+
+  test("a question asked of a group: a member is (asked), a non-member (not asked)", async () => {
+    await insert({ id: randomUUID(), version: 1, rel: GROUP_REL, q: "G1", name: "Ola Nordmann", ident: "Y222222", body: "Medlem.", created: at(0) });
+    await insert({ id: randomUUID(), version: 1, rel: GROUP_REL, q: "G1", name: "Synne Testdal", ident: "X111111", body: "Ikke medlem.", created: at(1) });
+    const groups = new Map([["fag", new Set(["Y222222"])]]);
+    const res = await appFor({ groups }).request(`/api/wiki/answers/export?wiki=${WIKI}&relPath=${encodeURIComponent(GROUP_REL)}`);
+    const { block } = (await res.json()) as { block: string };
+    expect(block).toContain("### G1 — Ola Nordmann [fag] (asked), 07.10.2026 21:32, version 1");
+    expect(block).toContain("### G1 — Synne Testdal (not asked), 07.10.2026 21:33, version 1");
+    expect(block).not.toMatch(/X111111|Y222222/);
   });
 });
 

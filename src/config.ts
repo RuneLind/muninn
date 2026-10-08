@@ -1,5 +1,5 @@
 import { getLog } from "./logging.ts";
-import type { AnswerGroups } from "./format/question.ts";
+import { ownerGroupName, type AnswerGroups } from "./format/question.ts";
 
 const log = getLog("config");
 
@@ -144,6 +144,9 @@ export interface WikiAnswerConfig {
 const ANSWER_GROUP_NAME_RE = /^[a-z0-9æøå_-]+$/;
 /** A NAV ident after upper-casing: letters and digits. */
 const ANSWER_GROUP_IDENT_RE = /^[A-Z0-9]+$/;
+/** A NAV ident's shape after lower-casing. A group name shaped like one would
+ *  put an ident on every chip and export heading, so it is refused. */
+const NAV_IDENT_SHAPE_RE = /^[a-z]\d{6}$/;
 
 /**
  * `WIKI_ANSWER_GROUPS` — `fag=A123456,B234567;utvikler=C345678`. Group names
@@ -155,14 +158,20 @@ const ANSWER_GROUP_IDENT_RE = /^[A-Z0-9]+$/;
 export function parseAnswerGroups(raw: string | undefined): { groups: AnswerGroups; warnings: string[] } {
   const groups = new Map<string, Set<string>>();
   const warnings: string[] = [];
-  const entries = (raw ?? "").split(";").map((e) => e.trim()).filter(Boolean);
-  entries.forEach((entry, i) => {
+  // Positions count the raw `;`-segments, blank ones included, so a warning
+  // points at the segment an operator counts in the value.
+  (raw ?? "").split(";").forEach((segment, i) => {
+    const entry = segment.trim();
+    if (!entry) return;
     const at = `WIKI_ANSWER_GROUPS entry ${i + 1}`;
     const eq = entry.indexOf("=");
     if (eq === -1) return void warnings.push(`${at} dropped: no "=" between the group name and its members`);
     const name = entry.slice(0, eq).trim().toLowerCase();
     if (!ANSWER_GROUP_NAME_RE.test(name)) {
       return void warnings.push(`${at} dropped: the group name must be letters, digits, "_" or "-"`);
+    }
+    if (NAV_IDENT_SHAPE_RE.test(name)) {
+      return void warnings.push(`${at} dropped: the group name has the shape of a NAV ident (a letter and six digits)`);
     }
     const idents = entry.slice(eq + 1).split(",").map((x) => x.trim().toUpperCase()).filter(Boolean);
     if (idents.length === 0) return void warnings.push(`${at} dropped: group "${name}" names no members`);
@@ -178,14 +187,22 @@ export function parseAnswerGroups(raw: string | undefined): { groups: AnswerGrou
   return { groups, warnings };
 }
 
-/** `WIKI_ANSWER_GROUPS` at boot: the dropped entries as warnings, and an info
- *  line with group names and member counts — never an ident. */
+/** `WIKI_ANSWER_GROUPS` at boot: the dropped entries as warnings, plus one when
+ *  `WIKI_ANSWER_OWNER`'s bare name is a group name, and an info line with
+ *  group names and member counts — never an ident. */
 export function answerGroupsBootLines(cfg: WikiAnswerConfig): { info: string | null; warnings: string[] } {
   const groups = cfg.groups ?? new Map();
   const info = groups.size
     ? `Answer groups: ${[...groups].map(([name, members]) => `${name} (${members.size} member${members.size === 1 ? "" : "s"})`).join(", ")}`
     : null;
-  return { info, warnings: cfg.groupWarnings ?? [] };
+  const warnings = [...(cfg.groupWarnings ?? [])];
+  const clash = ownerGroupName(cfg.owner, groups);
+  if (clash) {
+    warnings.push(
+      `WIKI_ANSWER_OWNER is the name of answer group "${clash}": a question naming nobody asks that group, and the owner's own answers under MUNINN_AUTH=off read as not asked — give the owner as "Name (IDENT)" or rename the group`,
+    );
+  }
+  return { info, warnings };
 }
 
 /** `WIKI_ANSWER_WIKIS` + `WIKI_ANSWER_OWNER` + `WIKI_ANSWER_SCANNER` + `WIKI_ANSWER_GROUPS`. A `Config` field and a getter,

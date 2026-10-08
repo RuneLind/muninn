@@ -411,4 +411,38 @@ describe("WIKI_ANSWER_GROUPS", () => {
     expect(lines.warnings).toEqual(['WIKI_ANSWER_GROUPS entry 3 dropped: no "=" between the group name and its members']);
     expect(JSON.stringify(lines)).not.toMatch(/Z9900/);
   });
+
+  test("a group name shaped like a NAV ident is refused by position, never echoed", () => {
+    const { groups, warnings } = parseAnswerGroups("Z990001=Z990002;fag=Z990003");
+    expect(plain(groups)).toEqual({ fag: ["Z990003"] });
+    expect(warnings).toEqual([
+      "WIKI_ANSWER_GROUPS entry 1 dropped: the group name has the shape of a NAV ident (a letter and six digits)",
+    ]);
+    for (const w of warnings) expect(w).not.toMatch(/z990001/i);
+    // Not ident-shaped: kept.
+    expect(plain(parseAnswerGroups("z99=Z990004;team7=Z990005;zz990001=Z990006").groups)).toEqual({
+      z99: ["Z990004"],
+      team7: ["Z990005"],
+      zz990001: ["Z990006"],
+    });
+  });
+
+  test("positions count the raw ;-segments, blank ones included", () => {
+    expect(parseAnswerGroups("fag=Z990001;;;x").warnings).toEqual([
+      'WIKI_ANSWER_GROUPS entry 4 dropped: no "=" between the group name and its members',
+    ]);
+  });
+
+  test("an owner whose bare name is a group name is warned about at boot", () => {
+    const cfg = resolveWikiAnswerConfig({ WIKI_ANSWER_GROUPS: "fag=Z990001", WIKI_ANSWER_OWNER: " FAG " });
+    expect(answerGroupsBootLines(cfg).warnings).toEqual([
+      'WIKI_ANSWER_OWNER is the name of answer group "fag": a question naming nobody asks that group, and the owner\'s own answers under MUNINN_AUTH=off read as not asked — give the owner as "Name (IDENT)" or rename the group',
+    ]);
+    // With an ident the owner is a person, and a different name is no clash.
+    for (const owner of ["fag (Z990009)", "Synne Testdal", "fagansvarlig"]) {
+      expect(answerGroupsBootLines(resolveWikiAnswerConfig({ WIKI_ANSWER_GROUPS: "fag=Z990001", WIKI_ANSWER_OWNER: owner })).warnings).toEqual([]);
+    }
+    // No groups: nothing to clash with.
+    expect(answerGroupsBootLines(resolveWikiAnswerConfig({ WIKI_ANSWER_OWNER: "fag" })).warnings).toEqual([]);
+  });
 });

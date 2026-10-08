@@ -659,11 +659,12 @@ export function registerWikiAnswerRoutes(
       const orphans = await findOrphanAnswers(name, page.index, exportStore);
       const orphanCount = orphans.length;
       const owner = answerConfig().owner;
+      const groups = answerConfig().groups ?? new Map();
       let targets: Map<string, QuestionTarget[]> | null = null;
       const build = async (picked: ExportRow[], exportedAt: number) => {
         if (picked.length === 0) return { block: "", rows: [] as [string, number][], count: 0 };
         targets ??= await questionTargetsOf(page, owner);
-        const answers = picked.map((a) => exportAnswerOf(a, targets!, answerConfig().groups ?? new Map()));
+        const answers = picked.map((a) => exportAnswerOf(a, targets!, groups));
         return {
           block: formatAnswerExport({ wiki: name, relPath: page.meta.relPath, exportedAt, answers, orphanCount }),
           rows: picked.map((a) => [a.answerId, a.version] as [string, number]),

@@ -184,6 +184,13 @@ function targetGroup(t: QuestionTarget, groups: AnswerGroups): ReadonlySet<strin
   return t.ident ? undefined : groups.get(foldName(t.name));
 }
 
+/** The group `WIKI_ANSWER_OWNER` names when given as a bare name (no
+ *  `(IDENT)`) equal to a group name: the owner fallback then asks that group. */
+export function ownerGroupName(owner: string | null | undefined, groups: AnswerGroups): string | null {
+  const t = owner ? parseQuestionTarget(owner) : null;
+  return t && targetGroup(t, groups) ? foldName(t.name) : null;
+}
+
 /** The groups holding this NAV ident, sorted. Never the ident itself. */
 export function authorGroupsOf(navIdent: string | null, groups: AnswerGroups): string[] {
   const ident = navIdent?.trim().toUpperCase();
