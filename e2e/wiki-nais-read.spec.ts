@@ -24,10 +24,17 @@
  * A second muninn at role `admin` carries the zone rows for both roles, next
  * to a second, WRITABLE wiki that the read slice must not serve.
  *
+ * A third, read-only wiki takes answers (`WIKI_ANSWER_WIKIS`, with a stub
+ * `WIKI_ANSWER_SCANNER`), for answer cards PR 5's rows: role `user` reaches GET
+ * and POST `/api/wiki/answers` and nothing else under it; an admin reaches the
+ * export, its confirm and the redact. Those rows write answer rows to the test
+ * database, which is why the servers point `DATABASE_URL` at it.
+ *
  * The browser drives 127.0.0.1, which takes the loopback bypass: the pinned
  * identity at role `user` with no credential — exactly the role under test.
  * The zone rows go through a forwarding header plus the token instead, as a
- * request through the pod's proxy would. No model calls and nothing written.
+ * request through the pod's proxy would. No model calls; the only writes are
+ * the answer rows above, to the test database.
  * The mermaid bundle loads from the CDN, as it does for every reader.
  */
 
@@ -36,8 +43,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { readFileSync } from "node:fs";
+import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 import { FIND_EVERY_DEBOUNCE_MS } from "../src/dashboard/views/components/wiki-find-palette.ts";
 import {
   HISTORIC_PILL_CLASS,
@@ -56,6 +66,31 @@ const WIKI = "melosys-felles";
 const WRITABLE = "felles-skrivbar";
 const PAGE_REL = "plans/testside.mdx";
 const SECRET = "e2e-wiki-nais-read-secret-not-real";
+// Answer cards PR 5: a third read-only wiki that takes answers.
+const ANSWERS_WIKI = "felles-svar-e2e";
+const ANSWERS_REL = "plans/svar.mdx";
+const ANSWERS_PAGE = [
+  "---",
+  "title: Svarside",
+  "---",
+  "",
+  "# Svarside",
+  "",
+  '<Question id="S1" choices="Ja|Nei">',
+  "",
+  "Skal vi gjøre dette?",
+  "",
+  "</Question>",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **S1** — Spørsmål.",
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+const SCANNER_MARKER = "SYNTHETIC-SECRET-0000";
+const SCANNER_STUB = `export function scanAnswer(t) { return t.includes("${SCANNER_MARKER}") ? [{ reason: "stub marker" }] : []; }\n`;
 
 const READER_CONFIG = JSON.stringify({
   typeMap: { plans: "plan" },
@@ -187,6 +222,8 @@ const servers: ChildProcess[] = [];
 let root = "";
 let writableRoot = "";
 let botsDir = "";
+let answersRoot = "";
+let sql: ReturnType<typeof postgres> | null = null;
 
 function boot(port: number, role: "user" | "admin"): void {
   const base = `http://127.0.0.1:${port}`;
@@ -208,8 +245,11 @@ function boot(port: number, role: "user" | "admin"): void {
         MUNINN_ALLOWED_ORIGINS: base,
         // The writable wiki FIRST: a bare request would default to it if the
         // read slice served every registered wiki.
-        WIKI_EXTRA: `${WRITABLE}=${writableRoot},${WIKI}=${root}`,
-        WIKI_READONLY_ROOTS: root,
+        WIKI_EXTRA: `${WRITABLE}=${writableRoot},${WIKI}=${root},${ANSWERS_WIKI}=${answersRoot}`,
+        WIKI_READONLY_ROOTS: `${root},${answersRoot}`,
+        WIKI_ANSWER_WIKIS: ANSWERS_WIKI,
+        WIKI_ANSWER_SCANNER: path.join(answersRoot, ".scanner", "stub.mjs"),
+        DATABASE_URL: TEST_DB,
         KNOWLEDGE_API_URL: DEAD_HUGINN,
         CLAUDE_USAGE_URL: DEAD_LEDGER,
         MUNINN_BOTS_DIR: botsDir,
@@ -251,6 +291,15 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(root, "plans/andre-del.mdx"), SECOND, "utf8");
   await writeFile(path.join(root, "annen-side.md"), OTHER, "utf8");
   await writeFile(path.join(writableRoot, "hemmelig.md"), "# Hemmelig\n\nSkal ikke vises.\n", "utf8");
+  answersRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-nais-answers-"));
+  await mkdir(path.join(answersRoot, "plans"), { recursive: true });
+  await writeFile(path.join(answersRoot, ANSWERS_REL), ANSWERS_PAGE, "utf8");
+  // A dot directory: the wiki index never scans it.
+  await mkdir(path.join(answersRoot, ".scanner"), { recursive: true });
+  await writeFile(path.join(answersRoot, ".scanner", "stub.mjs"), SCANNER_STUB, "utf8");
+  sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
+  await sql.unsafe(readFileSync(path.join(REPO_ROOT, "db/migrations/082-wiki-answers.sql"), "utf8"));
+  await sql`DELETE FROM wiki_answers WHERE wiki = ${ANSWERS_WIKI}`;
 
   boot(PORT, "user");
   boot(ADMIN_PORT, "admin");
@@ -262,6 +311,9 @@ test.afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
   if (writableRoot) await rm(writableRoot, { recursive: true, force: true });
   if (botsDir) await rm(botsDir, { recursive: true, force: true });
+  if (answersRoot) await rm(answersRoot, { recursive: true, force: true });
+  if (sql) await sql`DELETE FROM wiki_answers WHERE wiki = ${ANSWERS_WIKI}`;
+  await sql?.end();
 });
 
 /** Record every same-origin response that failed, and every console error. */
@@ -661,5 +713,79 @@ test.describe("zone rows under nais — role `admin`", () => {
 
   test("the writable wiki is not served to an admin either", async () => {
     expect((await probe(ADMIN_BASE, `/api/wiki/page?wiki=${WRITABLE}&name=hemmelig`)).status).toBe(404);
+  });
+});
+
+// ---- answer cards PR 5: the read slice's one write ------------------------
+
+const ANSWERS = "/api/wiki/answers";
+const ANSWERS_Q = `${ANSWERS}?wiki=${ANSWERS_WIKI}&relPath=${encodeURIComponent(ANSWERS_REL)}`;
+const answerBody = (body: string) => ({ wiki: ANSWERS_WIKI, relPath: ANSWERS_REL, questionId: "S1", choice: "Ja", body });
+
+async function send(base: string, method: string, p: string, body?: unknown) {
+  const res = await fetch(`${base}${p}`, {
+    method,
+    headers: { ...VIA_PROXY, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await res.text();
+  let json: unknown = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    /* not JSON */
+  }
+  return { status: res.status, json: json as Record<string, unknown> | null };
+}
+
+test.describe("answers under nais — role `user`", () => {
+  test("GET and POST /api/wiki/answers pass the zone; the scanner refuses its marker", async () => {
+    expect((await send(BASE, "GET", ANSWERS_Q)).status).toBe(200);
+    expect((await send(BASE, "HEAD", ANSWERS_Q)).status).toBe(200);
+    const saved = await send(BASE, "POST", ANSWERS, answerBody("Ja, fra en kollega."));
+    expect(saved.status).toBe(201);
+    const refused = await send(BASE, "POST", ANSWERS, answerBody(`med ${SCANNER_MARKER}`));
+    expect(refused.status).toBe(422);
+    expect(refused.json!.reasons).toEqual(["stub marker"]);
+  });
+
+  test("every other method on the path, and export, confirm and redact, are the zone's 403", async () => {
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      const r = await send(BASE, method, ANSWERS, {});
+      expect(`${method} → ${r.status}`).toBe(`${method} → 403`);
+      expect(r.json).toEqual(ZONE_REFUSAL);
+    }
+    const id = "00000000-0000-4000-8000-000000000000";
+    for (const [method, p, body] of [
+      ["GET", `${ANSWERS}/export?wiki=${ANSWERS_WIKI}&relPath=${encodeURIComponent(ANSWERS_REL)}`, undefined],
+      ["POST", `${ANSWERS}/export/confirm`, { wiki: ANSWERS_WIKI, relPath: ANSWERS_REL, rows: [[id, 1]] }],
+      ["POST", `${ANSWERS}/redact`, { answerId: id }],
+    ] as const) {
+      const r = await send(BASE, method, p, body);
+      expect(`${method} ${p} → ${r.status}`).toBe(`${method} ${p} → 403`);
+      expect(r.json).toEqual(ZONE_REFUSAL);
+    }
+  });
+
+  test("in the browser the card is answerable for role user", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${ANSWERS_WIKI}&relPath=${encodeURIComponent(ANSWERS_REL)}`);
+    const card = page.locator('.wiki-article section.question[data-question-id="S1"]');
+    await expect(card).toHaveAttribute("data-wiki-answerable", "true");
+    await expect(card.locator(".q-answer").first()).toBeVisible();
+    await expect(card.locator("button.q-redact")).toHaveCount(0);
+  });
+});
+
+test.describe("answers under nais — role `admin`", () => {
+  test("export, confirm and redact pass the zone and answer", async () => {
+    const exp = await send(ADMIN_BASE, "GET", `${ANSWERS}/export?wiki=${ANSWERS_WIKI}&relPath=${encodeURIComponent(ANSWERS_REL)}`);
+    expect(exp.status).toBe(200);
+    const rows = exp.json!.rows as [string, number][];
+    expect(rows.length).toBeGreaterThan(0);
+    const confirm = await send(ADMIN_BASE, "POST", `${ANSWERS}/export/confirm`, { wiki: ANSWERS_WIKI, relPath: ANSWERS_REL, rows });
+    expect(confirm.status).toBe(200);
+    const redact = await send(ADMIN_BASE, "POST", `${ANSWERS}/redact`, { answerId: rows[0]![0] });
+    expect(redact.status).toBe(200);
+    expect(redact.json!.redacted).toBe(true);
   });
 });

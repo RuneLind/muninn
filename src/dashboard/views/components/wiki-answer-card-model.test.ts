@@ -14,6 +14,7 @@ import {
   unexportedCount,
   type AnswerWire,
 } from "./wiki-answer-card-model.ts";
+import * as cardModel from "./wiki-answer-card-model.ts";
 import { QUESTION_LABELS } from "../../../format/question-labels.ts";
 import { QUESTION_ANSWER_MAX as ANSWER_BODY_MAX, QUESTION_NOT_SURE } from "../../../format/question.ts";
 
@@ -254,5 +255,91 @@ describe("fix round 1", () => {
     expect(savedAnswerOf({ answerId: "a", questionId: "O1", version: 1, body: "", createdAt: 1 })).not.toBeNull();
     expect(savedAnswerOf({ answerId: "a" })).toBeNull();
     expect(savedAnswerOf(null)).toBeNull();
+  });
+});
+
+describe("answer cards PR 5: Redact and the scanner", () => {
+  test("Redact… renders only for a viewer who may redact, never on a redacted answer", () => {
+    expect(answerItemHtml(answer(), en, "en", false)).not.toContain("q-redact");
+    expect(answerItemHtml(answer(), en, "en", false, false, { can: false, confirming: false, working: false })).not.toContain("q-redact");
+    // `q-redacted` is the redacted body's class, not the control.
+    const html = answerItemHtml(answer(), en, "en", false, false, { can: true, confirming: false, working: false });
+    expect(html).toContain('<button type="button" class="q-redact" data-answer-id="a1">Redact…</button>');
+    expect(html).not.toContain("q-redact-confirm");
+    expect(answerItemHtml(answer({ redacted: true }), en, "en", false, false, { can: true, confirming: true, working: false })).not.toMatch(/q-redact[ "-]/);
+  });
+
+  test("the inline confirm replaces the button, in the wiki's language; working disables both", () => {
+    const html = answerItemHtml(answer(), no, "no", false, false, { can: true, confirming: true, working: false });
+    expect(html).not.toContain('class="q-redact"');
+    expect(html).toContain('class="q-redact-confirm" role="group"');
+    expect(html).toContain(no.redact.prompt);
+    expect(html).toContain(`<button type="button" class="q-redact-yes" data-answer-id="a1" aria-describedby="q-redact-prompt-a1">Fjern</button>`);
+    expect(html).toContain(`<button type="button" class="q-redact-no" data-answer-id="a1">Avbryt</button>`);
+    const busy = answerItemHtml(answer(), en, "en", false, false, { can: true, confirming: true, working: true });
+    expect(busy).toContain(`class="q-redact-yes" data-answer-id="a1" aria-describedby="q-redact-prompt-a1" disabled>Redacting …</button>`);
+    expect(busy).toContain(`class="q-redact-no" data-answer-id="a1" disabled>`);
+  });
+
+  test("a 422 scanner_refused shows the scanner's reasons; a 503 scanner_unavailable a fixed line", () => {
+    const refused = { error: "scanner_refused", code: "scanner_refused", reasons: ["looks like an id", "a second <reason>"] };
+    expect(saveErrorText(422, refused, en)).toBe("The answer was not saved. The scanner flagged: looks like an id; a second <reason>");
+    expect(saveErrorText(422, refused, no)).toBe("Svaret ble ikke lagret. Skanneren fant: looks like an id; a second <reason>");
+    expect(saveErrorText(503, { error: "x", code: "scanner_unavailable" }, en)).toBe(en.composer.scannerUnavailable);
+    // Any other 422 keeps the server's own sentence.
+    expect(saveErrorText(422, { error: "something else", code: "other" }, en)).toBe("The answer was not saved: something else");
+  });
+});
+
+describe("answer cards PR 5 fix round 1", () => {
+  test("a refusal with no reasons leaves no dangling colon", () => {
+    for (const L of [en, no]) {
+      const text = saveErrorText(422, { error: "scanner_refused", code: "scanner_refused", reasons: [] }, L);
+      expect(text.trim().endsWith(":")).toBe(false);
+    }
+  });
+
+  test("the reasons the server left out are counted after the ones it sent", () => {
+    const refused = { error: "scanner_refused", code: "scanner_refused", reasons: ["a", "b"], moreReasons: 18 };
+    expect(saveErrorText(422, refused, en)).toBe("The answer was not saved. The scanner flagged: a; b (+18 more)");
+    expect(saveErrorText(422, refused, no)).toBe("Svaret ble ikke lagret. Skanneren fant: a; b (+18 til)");
+  });
+
+  test("the inline confirm's prompt describes the group and the Redact button", () => {
+    const html = answerItemHtml(answer(), en, "en", false, false, { can: true, confirming: true, working: false });
+    const id = /<span class="q-redact-prompt" id="([^"]+)"/.exec(html)?.[1];
+    expect(id).toBeTruthy();
+    expect(html).toContain(`class="q-redact-confirm" role="group" aria-label="Redact" aria-describedby="${id}"`);
+    expect(html).toMatch(new RegExp(`class="q-redact-yes"[^>]*aria-describedby="${id}"`));
+  });
+
+  test("a failed redact says why in the wiki's language, by status, never the server's English", () => {
+    const text = (cardModel as unknown as { redactErrorText: (s: number, p: unknown, L: typeof en) => string }).redactErrorText;
+    const english = { error: "only an admin may redact answers", code: "admin_only" };
+    expect(text(403, english, en)).toBe("The answer was not redacted: you may not redact answers.");
+    expect(text(403, english, no)).toBe("Svaret ble ikke fjernet: du har ikke lov til å fjerne svar.");
+    expect(text(404, { error: "no such answer", code: "unknown_answer" }, no)).toBe("Svaret ble ikke fjernet: svaret finnes ikke lenger.");
+    expect(text(0, null, no)).toBe("Svaret ble ikke fjernet: fikk ikke kontakt med serveren.");
+    expect(text(500, { error: "answer not redacted" }, no)).toBe("Svaret ble ikke fjernet (HTTP 500).");
+    for (const s of [403, 404, 0, 500, 413]) expect(text(s, english, no)).not.toContain("admin");
+  });
+
+  test("a 403 says which refusal it was: role (zone or handler), origin guard, or a generic line with the status", () => {
+    const text = (cardModel as unknown as { redactErrorText: (s: number, p: unknown, L: typeof en) => string }).redactErrorText;
+    // src/auth/zone-middleware.ts: the zone's admin refusal.
+    expect(text(403, { error: "forbidden", reason: "admin-only route" }, en)).toBe(
+      "The answer was not redacted: you may not redact answers.",
+    );
+    // src/auth/origin.ts: the origin guard is not a role refusal.
+    expect(text(403, { error: "forbidden", reason: "cross-origin request" }, en)).toBe(
+      "The answer was not redacted: the server refused a request from this page's address.",
+    );
+    expect(text(403, { error: "forbidden", reason: "cross-origin request" }, no)).toBe(
+      "Svaret ble ikke fjernet: serveren avviste en forespørsel fra denne sidens adresse.",
+    );
+    // Anything else (src/auth/guard.ts answers an empty 403): the status, no claim about why.
+    expect(text(403, null, en)).toBe("The answer was not redacted (HTTP 403).");
+    expect(text(403, { error: "forbidden" }, en)).toBe("The answer was not redacted (HTTP 403).");
+    expect(text(403, "not json", no)).toBe("Svaret ble ikke fjernet (HTTP 403).");
   });
 });

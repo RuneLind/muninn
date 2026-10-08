@@ -23,6 +23,9 @@
  *   — never on whatever a later reload put in the list, which would turn a
  *   stale edit into a silent overwrite instead of a 409;
  * - a card is repainted the moment its POST settles, whatever the reload does.
+ *
+ * An admin (the page's `canExport`) gets a Redact control on each answer, with
+ * an inline two-step confirm held on the card record (PR 5).
  */
 import {
   DEFAULT_QUESTION_LANGUAGE,
@@ -41,6 +44,7 @@ import {
   isVersionConflict,
   mergeSavedAnswer,
   overCapText,
+  redactErrorText,
   saveErrorText,
   savedAnswerOf,
   statePillText,
@@ -92,6 +96,10 @@ interface CardUi {
   rebaseOnLoad: boolean;
   /** Answer ids whose log fold the reader has open. */
   openLogs: Set<string>;
+  /** The viewer may redact (an admin: the page's `canExport`). */
+  canRedact: boolean;
+  /** The answer whose Redact confirm is open, and whether its request is out. */
+  redact: { answerId: string; working: boolean } | null;
   /** What the last paint rendered from, so an unchanged card is left alone. */
   paintedKey: string | null;
 }
@@ -180,6 +188,8 @@ export function enhanceAnswerCards(
       message: null,
       rebaseOnLoad: false,
       openLogs: new Set(),
+      canRedact: info.canExport === true,
+      redact: null,
       paintedKey: null,
     };
     ctx.cards.push(ui);
@@ -258,6 +268,9 @@ function focusKeyOf(section: HTMLElement, el: Element): string | null {
   if (el instanceof HTMLInputElement && el.type === "radio") return `radio:${el.value}`;
   if (el instanceof HTMLButtonElement) {
     if (el.classList.contains("q-edit")) return `edit:${el.getAttribute("data-answer-id") ?? ""}`;
+    for (const cls of ["q-redact", "q-redact-yes", "q-redact-no"]) {
+      if (el.classList.contains(cls)) return `${cls}:${el.getAttribute("data-answer-id") ?? ""}`;
+    }
     for (const cls of ["q-save", "q-cancel", "q-retry", "q-clear-choice"]) if (el.classList.contains(cls)) return cls;
   }
   if (el.tagName === "SUMMARY") {
@@ -313,7 +326,14 @@ function restoreFocus(section: HTMLElement, mark: FocusMark | null): void {
 function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
   if (!ui.section.isConnected) return;
   const answers = answersFor(ctx, ui);
-  const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server]);
+  // A confirm whose answer is redacted or gone has nothing left to redact.
+  const target = ui.redact;
+  if (target && !target.working && !answers.some((a) => a.answerId === target.answerId && !a.redacted)) ui.redact = null;
+  // An editor on an answer now redacted closes, its draft discarded: the
+  // draft is the text the admin removed, and saving it is a 409.
+  const edited = ui.editing;
+  if (edited && answers.some((a) => a.answerId === edited.answerId && a.redacted)) resetDraft(ui);
+  const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server, ui.redact]);
   if (!force && key === ui.paintedKey) return;
   const mark = captureFocus(ui.section);
   renderCard(ui, answers);
@@ -347,7 +367,12 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
   const items = answers
     .map(
       (a) =>
-        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null, ui.openLogs.has(a.answerId)) +
+        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null && !redactingNow(ui, a.answerId), ui.openLogs.has(a.answerId), {
+          // Not beside its own open editor: one control per answer at a time.
+          can: ui.canRedact && ui.editing?.answerId !== a.answerId,
+          confirming: ui.redact?.answerId === a.answerId,
+          working: ui.redact?.answerId === a.answerId && ui.redact.working,
+        }) +
         // The editor sits under the answer it edits, so a 409 shows the newer
         // version above the reader's own text.
         (a.answerId === editingId ? composerHtml(composerView(ui), L) : ""),
@@ -365,6 +390,9 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
   const text = section.querySelector<HTMLTextAreaElement>("textarea.q-text");
   if (text) text.value = ui.body;
 }
+
+/** A redact of this answer is out: it offers no Edit until the redact settles. */
+const redactingNow = (ui: CardUi, answerId: string) => ui.redact?.working === true && ui.redact.answerId === answerId;
 
 const composerView = (ui: CardUi) => ({
   questionId: ui.questionId,
@@ -396,6 +424,66 @@ function syncComposer(ui: CardUi): void {
   if (clear) clear.hidden = ui.choice === null;
   const save = form.querySelector<HTMLButtonElement>("button.q-save");
   if (save) save.disabled = ui.sending || !composerCanSave(ui.choice, ui.body);
+}
+
+/** Focus the `cls` button of one answer, else the card. */
+function focusButton(ui: CardUi, cls: string, answerId: string): void {
+  const btn = Array.from(ui.section.querySelectorAll<HTMLButtonElement>(`button.${cls}`)).find(
+    (b) => b.getAttribute("data-answer-id") === answerId,
+  );
+  (btn ?? ui.section).focus({ preventScroll: true });
+}
+
+/** The answer as a redact leaves it, every version emptied. */
+function redactedCopy(a: AnswerWire): AnswerWire {
+  return {
+    ...a,
+    body: "",
+    choice: null,
+    redacted: true,
+    ...(a.earlier ? { earlier: a.earlier.map((v) => ({ ...v, body: "", choice: null, redacted: true })) } : {}),
+  };
+}
+
+/** An admin's confirmed Redact: one POST, then the answers again. The card is
+ *  repainted the moment the POST settles, as a save's is. */
+async function redact(ctx: CardsCtx, ui: CardUi, answerId: string): Promise<void> {
+  ui.redact = { answerId, working: true };
+  paint(ctx, ui, true);
+  let status = 0;
+  let data: unknown = null;
+  try {
+    const res = await ctx.fetchFn("/api/wiki/answers/redact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId }),
+    });
+    status = res.status;
+    data = await res.json().catch(() => null);
+  } catch {
+    status = 0;
+  }
+  ui.redact = null;
+  const moveFocus = focusIsHereOrNowhere(ui);
+  if (status >= 200 && status < 300) {
+    ctx.answers = ctx.answers.map((a) => (a.answerId === answerId ? redactedCopy(a) : a));
+    notify(ctx);
+    paint(ctx, ui, true);
+    // Its Redact… is gone: the card holds focus, the repaint rule.
+    if (moveFocus) ui.section.focus({ preventScroll: true });
+    const r = await loadAnswers(ctx);
+    if (r === "failed" || r === "off") {
+      ui.message = { text: ui.L.redact.reloadFailed, kind: "warn", retry: true };
+      paint(ctx, ui, true);
+    }
+    return;
+  }
+  ui.message = { text: redactErrorText(status, data, ui.L), kind: "error" };
+  paint(ctx, ui, true);
+  if (moveFocus) focusButton(ui, "q-redact", answerId);
+  // The answer is gone: load the answers again, so the card stops showing it
+  // with a Redact… that can only 404 again. The message stays (no retry).
+  if (status === 404) await loadAnswers(ctx);
 }
 
 function focusEdit(ui: CardUi, answerId: string | null): void {
@@ -447,13 +535,15 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
     if (!t || !section.contains(t)) return;
     if (t.classList.contains("q-edit") && !ui.sending) {
       const a = ctx.answers.find((x) => x.answerId === t.getAttribute("data-answer-id"));
-      if (!a) return;
+      if (!a || a.redacted || redactingNow(ui, a.answerId)) return;
       // The base is the version on screen NOW: a newer one saved elsewhere
       // before this edit is saved is a 409, never a silent overwrite.
       ui.editing = { answerId: a.answerId, version: a.version };
       ui.choice = draftChoiceFor(a.choice, ui.choices);
       ui.body = a.body;
       ui.message = null;
+      // An open Redact confirm closes: the answer it named is being edited.
+      if (!ui.redact?.working) ui.redact = null;
       paint(ctx, ui, true);
       section.querySelector<HTMLTextAreaElement>("textarea.q-text")?.focus();
     } else if (t.classList.contains("q-cancel") && !ui.sending) {
@@ -467,6 +557,19 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
       section.querySelectorAll<HTMLInputElement>("form.q-composer input[type=radio]").forEach((r) => (r.checked = false));
       syncComposer(ui);
       section.querySelector<HTMLInputElement>("form.q-composer input[type=radio]")?.focus();
+    } else if (t.classList.contains("q-redact") && ui.canRedact && !ui.redact?.working) {
+      const id = t.getAttribute("data-answer-id") ?? "";
+      ui.redact = { answerId: id, working: false };
+      ui.message = null;
+      paint(ctx, ui, true);
+      focusButton(ui, "q-redact-no", id);
+    } else if (t.classList.contains("q-redact-no") && !ui.redact?.working) {
+      const id = ui.redact?.answerId ?? "";
+      ui.redact = null;
+      paint(ctx, ui, true);
+      focusButton(ui, "q-redact", id);
+    } else if (t.classList.contains("q-redact-yes") && ui.redact && !ui.redact.working) {
+      void redact(ctx, ui, ui.redact.answerId);
     } else if (t.classList.contains("q-retry")) {
       // aria-disabled, not `disabled`: the browser drops focus from a button
       // it disables, so the reload's repaint would find focus on <body>.
@@ -476,6 +579,18 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
         if (r !== "ok" && t.isConnected) t.removeAttribute("aria-disabled");
       });
     }
+  });
+  // Escape inside the Redact confirm is its Cancel. Stopped here, so the
+  // reader's own Escape (leaving focus mode) does not run as well.
+  section.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !ui.redact || ui.redact.working) return;
+    if (!(e.target instanceof Element) || !e.target.closest(".q-redact-confirm")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const id = ui.redact.answerId;
+    ui.redact = null;
+    paint(ctx, ui, true);
+    focusButton(ui, "q-redact", id);
   });
   section.addEventListener("submit", (e) => {
     const form = e.target as HTMLElement;

@@ -1585,8 +1585,8 @@ export function registerWikiReadRoutes(
     const answerCfg = config.wikiAnswers ?? resolveWikiAnswerConfig();
     const answerable = wikiTakesAnswers(entry?.name, answerCfg);
     // The client's controls: on a wiki that takes answers AND for a viewer
-    // whose zone admits the answer routes. Role `user` is outside them until
-    // answer cards PR 5, and a flag here would fire a 403 GET per card.
+    // whose zone admits the answer routes — role `user` only on nais, where
+    // the read slice opens them. Elsewhere a flag would fire a 403 GET per card.
     const answersForViewer = answerable && viewerMayUseAnswers(c.get("role"), readSliceOnly);
 
     const listings = (relPaths: string[] | undefined) =>
@@ -1637,8 +1637,9 @@ export function registerWikiReadRoutes(
       // answers and for a viewer the answer routes admit (`answersForViewer`):
       // the client keys its controls on THIS, never on
       // `wikiToolsRegistered` or the read-only selectors (D14). `canExport`:
-      // admin, and auth off is admin. No owner: `WIKI_ANSWER_OWNER` may carry
-      // an ident, and the card already names the owner from the rendered HTML.
+      // admin, and auth off is admin; it also gates the card's Redact (PR 5).
+      // No owner: `WIKI_ANSWER_OWNER` may carry an ident, and the card already
+      // names the owner from the rendered HTML.
       ...(answersForViewer
         ? { answers: { answerable: true, canExport: (c.get("role") ?? "admin") === "admin" } }
         : {}),

@@ -162,10 +162,11 @@ const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"
  *  rides along: it lands in the payload and the copied command line. */
 const FELLES_PUBLISH_FLAGS = ["FELLES_WIKI_PUBLISH_BIN", "FELLES_WIKI_PUBLISH_WIKIS", "FELLES_WIKI_BUCKET"];
 
-/** Answer cards (`WIKI_ANSWER_WIKIS`, `WIKI_ANSWER_OWNER`): a developer's value
- *  would make every matching card answerable and name an owner on every
- *  `/api/wiki/page` payload. The specs that use them set both explicitly. */
-const WIKI_ANSWER_FLAGS = ["WIKI_ANSWER_WIKIS", "WIKI_ANSWER_OWNER"];
+/** Answer cards (`WIKI_ANSWER_WIKIS`, `WIKI_ANSWER_OWNER`, `WIKI_ANSWER_SCANNER`):
+ *  a developer's value would make every matching card answerable, name an owner
+ *  on every `/api/wiki/page` payload, or run a local scanner module over every
+ *  answer a suite saves. The specs that use them set them explicitly. */
+const WIKI_ANSWER_FLAGS = ["WIKI_ANSWER_WIKIS", "WIKI_ANSWER_OWNER", "WIKI_ANSWER_SCANNER"];
 
 /** The wiki bucket mirror (`src/wiki/bucket-mirror.ts`). A developer's value
  *  would start a poller that writes and DELETES files inside a spawned server's

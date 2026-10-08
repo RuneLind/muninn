@@ -953,8 +953,13 @@ is the one surface the user zone is written around.
    `/api/search/` reads were already owner-guarded, so this is enumeration
    rather than new protection. **Plus, under `MUNINN_PROFILE=nais` only, the
    wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki` and
-   `/api/wiki/{pages,page,page/provenance,related,html,graph}`, GET/HEAD only). The
-   zone middleware is told at mount (`createZoneMiddleware(auth, { wikiReadSlice
+   `/api/wiki/{pages,page,page/provenance,related,html,graph}`, GET/HEAD only),
+   plus the slice's one write: GET/HEAD and POST on the exact path
+   `/api/wiki/answers` (`WIKI_READ_SLICE_METHOD_ENTRIES` — rows of `{methods,
+   path}`, the deny list's shape read the other way; answer cards PR 5). The
+   export, its confirm and the redact under `/api/wiki/answers/*` are exact-path
+   misses, so they stay default-deny, and PUT/DELETE/OPTIONS on the answers path
+   too. The zone middleware is told at mount (`createZoneMiddleware(auth, { wikiReadSlice
    })`, from `servesWikiReadSliceOnly`); on a default-profile instance those
    paths stay admin, because there they are the operator's reader over every
    registered wiki with the host path in the page.

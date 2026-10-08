@@ -1,11 +1,12 @@
+import type { Sql } from "postgres";
 import { getDb } from "./client.ts";
 
 /**
  * The answer store for wiki `<Question>` cards (migration 082): one row per
  * VERSION of an answer. Append-only by construction — this module has an
- * insert, reads, and ONE update: {@link markWikiAnswersExported}, which sets
- * `exported_at` and nothing else. The only other column ever set after insert
- * is `redacted_at` (an admin redact, PR 5).
+ * insert, reads, and two updates: {@link markWikiAnswersExported}, which sets
+ * `exported_at` and nothing else, and {@link redactWikiAnswer} (an admin
+ * redact, PR 5), which empties `body` and `choice` and sets `redacted_at`.
  */
 
 export interface WikiAnswerAuthor {
@@ -69,31 +70,110 @@ function rowToVersion(r: any): WikiAnswerVersion {
   };
 }
 
+/** The answer was redacted before this edit could be stored (PR 5). */
+export class WikiAnswerRedacted extends Error {
+  constructor(readonly answerId: string) {
+    super(`answer ${answerId} was redacted`);
+  }
+}
+
+/**
+ * Take the per-answer write lock for the rest of the transaction. Both the
+ * edit insert and the redact take it in a statement of its OWN, before any
+ * read or write of the answer: under READ COMMITTED every later statement
+ * takes a fresh snapshot, so the statement after the lock sees whatever the
+ * other writer committed while this one waited. An UPDATE that took the lock
+ * inside itself would run on a snapshot from before the wait and miss a
+ * version inserted meanwhile.
+ */
+async function lockAnswer(tx: Sql, answerId: string): Promise<void> {
+  // Hashed in the uuid's canonical text form, so `ABC…` and `abc…` — one row
+  // set to every WHERE here — take one lock.
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${answerId}::uuid::text, 0))`;
+}
+
+/** A test seam: runs inside the write's transaction, after its last
+ *  statement and before the commit, so a test can hold the transaction open. */
+export interface WikiAnswerWriteHooks {
+  beforeCommit?: () => Promise<void>;
+}
+
 /**
  * Insert one version. A unique violation on `(answer_id, version)` — a second
  * writer got there first with the same next version — throws
  * {@link WikiAnswerVersionConflict}, which the route answers 409.
  */
-export async function insertWikiAnswerVersion(input: WikiAnswerVersionInput): Promise<WikiAnswerVersion> {
+export async function insertWikiAnswerVersion(
+  input: WikiAnswerVersionInput,
+  hooks: WikiAnswerWriteHooks = {},
+): Promise<WikiAnswerVersion> {
   const sql = getDb();
   try {
-    const rows = await sql`
-      INSERT INTO wiki_answers (
-        answer_id, version, wiki, rel_path, question_id,
-        author_user_id, author_oid, author_nav_ident, author_name,
-        choice, body, question_hash
-      ) VALUES (
-        ${input.answerId}, ${input.version}, ${input.wiki}, ${input.relPath}, ${input.questionId},
-        ${input.author.userId}, ${input.author.oid}, ${input.author.navIdent}, ${input.author.name},
-        ${input.choice}, ${input.body}, ${input.questionHash}
-      )
-      RETURNING *
-    `;
-    return rowToVersion(rows[0]);
+    return await sql.begin(async (_tx) => {
+      const tx = _tx as unknown as Sql;
+      await lockAnswer(tx, input.answerId);
+      // Inside the lock: a redact that committed while this edit waited is seen here.
+      const redacted = await tx`
+        SELECT 1 FROM wiki_answers WHERE answer_id = ${input.answerId} AND redacted_at IS NOT NULL LIMIT 1
+      `;
+      if (redacted.length > 0) throw new WikiAnswerRedacted(input.answerId);
+      const rows = await tx`
+        INSERT INTO wiki_answers (
+          answer_id, version, wiki, rel_path, question_id,
+          author_user_id, author_oid, author_nav_ident, author_name,
+          choice, body, question_hash
+        ) VALUES (
+          ${input.answerId}, ${input.version}, ${input.wiki}, ${input.relPath}, ${input.questionId},
+          ${input.author.userId}, ${input.author.oid}, ${input.author.navIdent}, ${input.author.name},
+          ${input.choice}, ${input.body}, ${input.questionHash}
+        )
+        RETURNING *
+      `;
+      await hooks.beforeCommit?.();
+      return rowToVersion(rows[0]);
+    });
   } catch (err) {
     if ((err as { code?: string }).code === "23505") throw new WikiAnswerVersionConflict(input.answerId, input.version);
     throw err;
   }
+}
+
+/** What a redact did: how many versions the answer has, and whether every one
+ *  of them was already redacted before this call. */
+export interface WikiAnswerRedaction {
+  versions: number;
+  alreadyRedacted: boolean;
+  /** Epoch ms of the answer's redaction (the first one, on a repeat). */
+  redactedAt: number;
+}
+
+/**
+ * Redact an answer (PR 5): empty `body`, NULL `choice` and set `redacted_at`
+ * on EVERY version, keeping a first `redacted_at`. Null when the id names no
+ * answer.
+ */
+export async function redactWikiAnswer(
+  answerId: string,
+  hooks: WikiAnswerWriteHooks = {},
+): Promise<WikiAnswerRedaction | null> {
+  const sql = getDb();
+  return sql.begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    await lockAnswer(tx, answerId);
+    const [before] = await tx`
+      SELECT count(*)::int AS n, count(*) FILTER (WHERE redacted_at IS NULL)::int AS live
+      FROM wiki_answers WHERE answer_id = ${answerId}
+    `;
+    if (!before || before.n === 0) return null;
+    const rows = await tx`
+      UPDATE wiki_answers SET body = '', choice = NULL, redacted_at = COALESCE(redacted_at, now())
+      WHERE answer_id = ${answerId}
+      RETURNING redacted_at
+    `;
+    await hooks.beforeCommit?.();
+    const at = Math.min(...rows.map((r) => ms(r.redacted_at)!));
+    return { versions: rows.length, alreadyRedacted: before.live === 0, redactedAt: at };
+  });
 }
 
 /** The newest version of one answer, or null when the id names none. */

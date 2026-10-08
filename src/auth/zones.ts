@@ -177,6 +177,33 @@ export const WIKI_READ_SLICE_PATHS: readonly string[] = [
 ];
 
 /**
+ * Method-scoped user-zone rows: an exact path plus the methods role `user` may
+ * call on it — the deny list's shape, read the other way. `GET` implies `HEAD`
+ * here too ({@link ZoneDenyEntry}).
+ */
+export interface ZoneMethodEntry {
+  readonly methods: readonly string[];
+  /** An exact path: never a prefix, so a sub-path stays default-deny. */
+  readonly path: string;
+  readonly note: string;
+}
+
+/**
+ * The read slice's write rows: in the user zone ONLY when
+ * `ZoneDecisionInput.wikiReadSlice` is true, like {@link WIKI_READ_SLICE_PATHS}.
+ * Today one path — the answer card's GET and POST (answer cards PR 5), the
+ * first non-GET route the slice opens. The export, its confirm and the redact
+ * under `/api/wiki/answers/*` are not here and stay admin.
+ */
+export const WIKI_READ_SLICE_METHOD_ENTRIES: readonly ZoneMethodEntry[] = [
+  {
+    methods: ["GET", "POST"],
+    path: "/api/wiki/answers",
+    note: "a colleague reads and writes their own answers; the handler owns authorship and the scanner",
+  },
+];
+
+/**
  * The unfiltered collection reads: every row, for every user, from one call.
  *
  * They stay admin-only, and an admin reading one writes an `activity_log` row
@@ -233,7 +260,8 @@ export interface ZoneDecisionInput {
   readonly role: AuthRole | null | undefined;
   /** True when the wiki read slice is the whole wiki surface served
    *  (`servesWikiReadSliceOnly`). Admits {@link WIKI_READ_SLICE_PATHS} for
-   *  GET/HEAD. Absent ⇒ false. */
+   *  GET/HEAD and {@link WIKI_READ_SLICE_METHOD_ENTRIES} for their methods.
+   *  Absent ⇒ false. */
   readonly wikiReadSlice?: boolean;
 }
 
@@ -261,6 +289,12 @@ export function decideZone(input: ZoneDecisionInput): ZoneDecision {
   if (inPathList(USER_ZONE_PATHS, input.path)) return { allowed: true, zone: "user", reason: "user zone" };
   if (input.wikiReadSlice === true && effective === "GET" && WIKI_READ_SLICE_PATHS.includes(input.path)) {
     return { allowed: true, zone: "user", reason: "wiki read slice" };
+  }
+  if (
+    input.wikiReadSlice === true &&
+    WIKI_READ_SLICE_METHOD_ENTRIES.some((e) => e.path === input.path && e.methods.includes(effective))
+  ) {
+    return { allowed: true, zone: "user", reason: "wiki read slice write" };
   }
   return { allowed: false, zone: "admin", reason: "default deny" };
 }

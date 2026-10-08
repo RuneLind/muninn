@@ -8,12 +8,16 @@
  *   GET  /api/wiki/answers/export?wiki=&orphans=1           (admin; PR 4)
  *   POST /api/wiki/answers/export/confirm  {wiki, relPath, rows: [[answerId, version], …]}  (admin; PR 4)
  *   POST /api/wiki/answers/export/confirm  {wiki, orphans: true, rows}        (admin; the orphan copy)
+ *   POST /api/wiki/answers/redact  {answerId}                                (admin; PR 5)
  *
  * Its own group so `MUNINN_PROFILE=nais` keeps it (D14) while it drops `wiki`.
  * Both routes resolve the page through the read slice's own ladder
  * (`resolveScopedPage`), so on the pod they serve read-only roots only. With
- * auth on, both paths are outside every user zone (`src/auth/zones.ts`), so
- * role `user` gets 403 until PR 5 opens them.
+ * auth on, role `user` reaches GET and POST `/api/wiki/answers` on the nais
+ * profile only (`WIKI_READ_SLICE_METHOD_ENTRIES` in `src/auth/zones.ts`); the
+ * export, its confirm and the redact stay admin. A POST body is scanned by
+ * `WIKI_ANSWER_SCANNER` before it is stored (`src/wiki/answer-scanner.ts`),
+ * and nais refuses a body when no scanner can run.
  *
  * The POST re-reads the page and parses it with the renderer's own parser
  * (`parseQuestionPage`), so a card the reader shows open is exactly a question
@@ -25,6 +29,7 @@
  * lost race — is a 409, never a silent overwrite.
  */
 import type { Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { randomUUID } from "node:crypto";
 import { resolveServingProfile, resolveWikiAnswerConfig, wikiTakesAnswers, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly } from "../route-groups.ts";
@@ -58,12 +63,15 @@ import {
   listWikiAnswerVersions,
   markWikiAnswersExported,
   markWikiOrphanAnswersExported,
+  redactWikiAnswer,
+  WikiAnswerRedacted,
   WikiAnswerVersionConflict,
   type LatestWikiAnswer,
   type WikiAnswerLocation,
   type WikiAnswerAuthor,
   type WikiAnswerVersion,
 } from "../../db/wiki-answers.ts";
+import { scanAnswerText, scannerRequired } from "../../wiki/answer-scanner.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki-answers");
@@ -74,8 +82,25 @@ export const WIKI_ANSWERS_PATH = "/api/wiki/answers";
 export const WIKI_ANSWERS_EXPORT_PATH = "/api/wiki/answers/export";
 /** Marks an export as copied (PR 4): admin only. */
 export const WIKI_ANSWERS_EXPORT_CONFIRM_PATH = "/api/wiki/answers/export/confirm";
+/** Redacts an answer (PR 5): admin only. */
+export const WIKI_ANSWERS_REDACT_PATH = "/api/wiki/answers/redact";
 /** The most `(answerId, version)` rows one confirm takes. */
 export const EXPORT_CONFIRM_MAX_ROWS = 500;
+/** The largest request body the answer POSTs read. Measured 2026-10-08: the
+ *  body cap is 8000 code points, and an ASCII-escaping encoder (Python's
+ *  `json.dumps` default) writes an astral one as a 12-byte surrogate pair, so
+ *  the largest valid body is 96,002 bytes of JSON and a whole edit POST around
+ *  it 96,161; 500 confirm rows are 26,054. wiki, relPath, questionId and choice
+ *  have no cap of their own (each must name a real one), so the limit leaves
+ *  ~35 KB above the measured answer for them. */
+export const WIKI_ANSWER_BODY_LIMIT = 128 * 1024;
+
+/** Refuses a body over {@link WIKI_ANSWER_BODY_LIMIT} with 413 before it is
+ *  parsed: role `user` reaches the answer POST on the pod. */
+export const answerBodyLimit = bodyLimit({
+  maxSize: WIKI_ANSWER_BODY_LIMIT,
+  onError: (c) => c.json({ error: "request body too large", code: "too_large" }, 413),
+});
 
 /**
  * May this viewer read AND post answers? The zone model's own decision for
@@ -96,6 +121,8 @@ export interface WikiAnswerStore {
   getLatest: typeof getLatestWikiAnswerVersion;
   listLatest: typeof listLatestWikiAnswers;
   listVersions: typeof listWikiAnswerVersions;
+  /** Absent ⇒ {@link redactWikiAnswer}. */
+  redact?: typeof redactWikiAnswer;
 }
 
 const defaultStore: WikiAnswerStore = {
@@ -264,7 +291,7 @@ function isMine(c: Context, a: { author: WikiAnswerAuthor }): boolean {
   return identity === null || (a.author.userId !== null && a.author.userId === identity.userId);
 }
 
-const err = (c: Context, status: 400 | 403 | 404 | 409 | 503, code: string, error: string) =>
+const err = (c: Context, status: 400 | 403 | 404 | 409 | 422 | 503, code: string, error: string) =>
   c.json({ error, code }, status);
 
 /** A NUL (Postgres refuses it in text) or an unpaired surrogate (stored as
@@ -272,6 +299,8 @@ const err = (c: Context, status: 400 | 403 | 404 | 409 | 503, code: string, erro
 function hasUnstorableText(s: string): boolean {
   return s.includes("\u0000") || !s.isWellFormed();
 }
+
+const answerRedacted = (c: Context) => err(c, 409, "answer_redacted", "this answer was redacted");
 
 const versionConflict = (c: Context) =>
   err(c, 409, "version_conflict", "the answer changed while you were editing it — reload and try again");
@@ -395,7 +424,7 @@ export function registerWikiAnswerRoutes(
     }
   });
 
-  app.post(WIKI_ANSWERS_PATH, async (c) => {
+  app.post(WIKI_ANSWERS_PATH, answerBodyLimit, async (c) => {
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
     let raw: unknown;
@@ -415,8 +444,13 @@ export function registerWikiAnswerRoutes(
       return err(c, 400, "bad_request", "choice must be a string");
     }
     if (b.answerId !== undefined && typeof b.answerId !== "string") return err(c, 400, "bad_request", "answerId must be a string");
-    const body = (b.body as string | undefined) ?? "";
+    const rawBody = (b.body as string | undefined) ?? "";
+    // A body that is only white space says nothing: stored empty, so the
+    // export prints no empty blockquote.
+    const body = rawBody.trim() === "" ? "" : rawBody;
     const choice = (b.choice as string | null | undefined) ?? null;
+    // Not lowercased: the store casts to uuid before it compares or locks, and
+    // the response echoes `saved.answerId`, the stored spelling.
     const answerId = b.answerId as string | undefined;
     const baseVersion = b.baseVersion;
     if (answerId !== undefined && !(Number.isInteger(baseVersion) && (baseVersion as number) >= 1)) {
@@ -425,7 +459,7 @@ export function registerWikiAnswerRoutes(
     if (answerId === undefined && baseVersion !== undefined) {
       return err(c, 400, "bad_base_version", "baseVersion belongs to an edit (answerId)");
     }
-    if (hasUnstorableText(body) || (choice !== null && hasUnstorableText(choice))) {
+    if (hasUnstorableText(rawBody) || (choice !== null && hasUnstorableText(choice))) {
       return err(c, 400, "bad_text", "body and choice must not contain a NUL or an unpaired surrogate");
     }
 
@@ -461,7 +495,7 @@ export function registerWikiAnswerRoutes(
       const allowed = [...new Set([...question.choices, QUESTION_NOT_SURE])];
       return err(c, 400, "bad_choice", `choice must be one of: ${allowed.join(", ")}`);
     }
-    if (body.trim() === "" && choice === null) return err(c, 400, "empty_answer", "an answer needs a body or a choice");
+    if (body === "" && choice === null) return err(c, 400, "empty_answer", "an answer needs a body or a choice");
     if (codePointLength(body) > QUESTION_ANSWER_MAX) {
       return err(c, 400, "body_too_long", `body is over ${QUESTION_ANSWER_MAX} characters`);
     }
@@ -480,7 +514,9 @@ export function registerWikiAnswerRoutes(
       }
       // No admin passthrough: only the author adds a version (D3).
       if (!isMine(c, latest)) return err(c, 403, "not_author", "only the answer's author may edit it");
-      if (latest.redactedAt !== null) return err(c, 409, "answer_redacted", "this answer was redacted");
+      // A fast answer only: the insert re-checks under the per-answer lock,
+      // which is what closes the race with a concurrent redact.
+      if (latest.redactedAt !== null) return answerRedacted(c);
       if (baseVersion !== latest.version) return versionConflict(c);
       // Exactly base + 1: a writer that read the same base and got there first
       // holds this (answer_id, version), and the primary key refuses the second.
@@ -489,6 +525,33 @@ export function registerWikiAnswerRoutes(
     } else {
       id = randomUUID();
       version = 1;
+    }
+
+    // D16: the body is scanned before it is stored — after every refusal that
+    // does not depend on the text, so a flagged edit that would be refused
+    // anyway says why (not the author, unknown, redacted, stale). `choice` is
+    // not scanned: it is one of the page's own parsed choices. nais needs a
+    // scanner for every body; default runs one only when WIKI_ANSWER_SCANNER is set.
+    if (body !== "") {
+      const scanner = cfg.scanner ?? null;
+      if (scanner === null && scannerRequired(profile)) {
+        return err(c, 503, "scanner_unavailable", "WIKI_ANSWER_SCANNER is not set: this instance stores no answer text");
+      }
+      if (scanner !== null) {
+        const verdict = await scanAnswerText(scanner, body);
+        if (verdict.status === "unavailable") return err(c, 503, "scanner_unavailable", verdict.error);
+        if (verdict.status === "refused") {
+          return c.json(
+            {
+              error: "scanner_refused",
+              code: "scanner_refused",
+              reasons: verdict.reasons,
+              ...(verdict.omitted ? { moreReasons: verdict.omitted } : {}),
+            },
+            422,
+          );
+        }
+      }
     }
 
     try {
@@ -506,12 +569,50 @@ export function registerWikiAnswerRoutes(
       return c.json({ answerId: saved.answerId, questionId, ...versionView(saved), mine: true }, version === 1 ? 201 : 200);
     } catch (e) {
       if (e instanceof WikiAnswerVersionConflict) return versionConflict(c);
+      if (e instanceof WikiAnswerRedacted) return answerRedacted(c);
       log.error("answer write failed for {wiki}/{relPath}: {error}", {
         wiki,
         relPath,
         error: e instanceof Error ? e.message : String(e),
       });
       return c.json({ error: "answer not saved", code: "store_failed" }, 500);
+    }
+  });
+
+  // Redact (D15): empties body and choice on every version and sets
+  // redacted_at. Not keyed on WIKI_ANSWER_WIKIS or the page: cleanup must
+  // still work after a wiki leaves the list or a page is gone. Idempotent —
+  // a second call answers 200 with `alreadyRedacted: true`.
+  app.post(WIKI_ANSWERS_REDACT_PATH, answerBodyLimit, async (c) => {
+    if (!isAdminViewer(c)) return err(c, 403, "admin_only", "only an admin may redact answers");
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return err(c, 400, "bad_request", "body is not JSON");
+    }
+    const rawId = raw && typeof raw === "object" ? (raw as Record<string, unknown>).answerId : undefined;
+    if (typeof rawId !== "string" || !isValidUuid(rawId)) {
+      return err(c, 400, "bad_request", "answerId must be an answer's uuid");
+    }
+    const answerId = rawId.toLowerCase();
+    try {
+      const done = await (store.redact ?? redactWikiAnswer)(answerId);
+      if (!done) return err(c, 404, "unknown_answer", "no such answer");
+      log.info("answer {answerId} redacted ({versions} versions{again})", {
+        answerId,
+        versions: done.versions,
+        again: done.alreadyRedacted ? ", already redacted" : "",
+      });
+      return c.json({ answerId, redacted: true, ...done });
+    } catch (e) {
+      log.error("answer redact failed for {answerId}: {error}", {
+        answerId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return c.json({ error: "answer not redacted", code: "store_failed" }, 500);
     }
   });
 
@@ -582,7 +683,7 @@ export function registerWikiAnswerRoutes(
     }
   });
 
-  app.post(WIKI_ANSWERS_EXPORT_CONFIRM_PATH, async (c) => {
+  app.post(WIKI_ANSWERS_EXPORT_CONFIRM_PATH, answerBodyLimit, async (c) => {
     if (!isAdminViewer(c)) return err(c, 403, "admin_only", "only an admin may export answers");
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;

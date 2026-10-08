@@ -126,14 +126,19 @@ export interface WikiAnswerConfig {
    *  `MUNINN_AUTH=off`, and who a question is for when its page names nobody.
    *  Null ⇒ a write under auth off is refused. */
   owner: string | null;
+  /** `WIKI_ANSWER_SCANNER`, trimmed: the module that scans an answer body
+   *  before it is stored (`src/wiki/answer-scanner.ts`). Null/absent ⇒ unset:
+   *  `nais` then refuses every answer with a body, `default` stores unscanned. */
+  scanner?: string | null;
 }
 
-/** `WIKI_ANSWER_WIKIS` + `WIKI_ANSWER_OWNER`. A `Config` field and a getter,
+/** `WIKI_ANSWER_WIKIS` + `WIKI_ANSWER_OWNER` + `WIKI_ANSWER_SCANNER`. A `Config` field and a getter,
  *  the {@link resolveServingProfile} pair rule: one parse either way. */
 export function resolveWikiAnswerConfig(env: Record<string, string | undefined> = process.env): WikiAnswerConfig {
   return {
     wikis: parseWikiNameList(env.WIKI_ANSWER_WIKIS),
     owner: (env.WIKI_ANSWER_OWNER ?? "").trim() || null,
+    scanner: (env.WIKI_ANSWER_SCANNER ?? "").trim() || null,
   };
 }
 

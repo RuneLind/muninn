@@ -70,9 +70,12 @@ export type RouteGroup = (typeof ROUTE_GROUPS)[number];
  * would reach the dropped `wiki` group (`wikiToolsRegistered`).
  *
  * `wiki-answers` STAYS too (answer cards, D14): the answer store is a table,
- * not a working tree, and the pod is where colleagues answer. Its routes
- * resolve pages through the read slice's scope, check `WIKI_ANSWER_WIKIS` in
- * the handler, and are outside every user zone until answer cards PR 5.
+ * not a working tree, and the pod is where colleagues answer. Its page-keyed
+ * routes resolve pages through the read slice's scope and check
+ * `WIKI_ANSWER_WIKIS` in the handler; the redact is keyed on the answer id
+ * alone, so cleanup outlives the list. Under this profile GET and POST
+ * `/api/wiki/answers` are in the user zone (`WIKI_READ_SLICE_METHOD_ENTRIES`);
+ * the export, its confirm and the redact stay admin.
  *
  * Everything else STAYS, deliberately: `data`, `traces`, `memsearch`, `sse`,
  * `models`, `agents`, `indexing` and `jira` are DB- or huginn-bound and are the

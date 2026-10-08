@@ -753,6 +753,9 @@ describe("the entrypoint's OWN check, on the state that used to be fatal", () =>
     expect(stderr).toContain("wiki_answers (082-wiki-answers.sql)");
     expect(stderr).toContain("bun db/migrate.ts");
     expect(stderr).toContain("naisjob");
+    // A nais `command` is a list of strings, so the hint spells one.
+    expect(stderr).toContain('command: ["bun", "db/migrate.ts"]');
+    expect(stderr).not.toContain("command: bun db/migrate.ts");
     expect(stderr.indexOf("bun db/migrate.ts")).toBeLessThan(stderr.indexOf("DROP SCHEMA"));
     expect(stderr).toContain("DESTROYS EVERY ROW");
     expect(stderr).not.toContain("Most likely a `psql");

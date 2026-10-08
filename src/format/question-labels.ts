@@ -76,6 +76,33 @@ export interface QuestionLabels {
     clearChoice: string;
     /** Why Save is disabled: the body is `n` characters over the cap. */
     overCap: (n: number) => string;
+    /** The answer scanner refused the text; its reasons follow. */
+    scannerRefused: string;
+    /** The scanner refused the text and gave no reason. */
+    scannerRefusedNone: string;
+    /** After the reasons shown: how many more the server left out. */
+    moreReasons: (n: number) => string;
+    /** No answer scanner could run, and this server needs one. */
+    scannerUnavailable: string;
+  };
+  /** An admin's Redact control on each answer, with its inline confirm (PR 5). */
+  redact: {
+    open: string;
+    prompt: string;
+    confirm: string;
+    cancel: string;
+    working: string;
+    failed: string;
+    /** Why a redact failed: a role refusal (403), the origin guard (403),
+     *  no such answer (404), no answer at all. */
+    forbidden: string;
+    origin: string;
+    gone: string;
+    network: string;
+    /** Any other status. */
+    http: (status: number) => string;
+    /** The redact landed; the reload after it did not. */
+    reloadFailed: string;
   };
   redacted: string;
   /** The log fold: an answer's earlier versions. */
@@ -129,6 +156,24 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       retry: "Load again",
       clearChoice: "Clear choice",
       overCap: (n) => `Too long: remove ${n} ${n === 1 ? "character" : "characters"} to save.`,
+      scannerRefused: "The answer was not saved. The scanner flagged:",
+      scannerRefusedNone: "The answer was not saved: the scanner flagged it.",
+      moreReasons: (n) => `(+${n} more)`,
+      scannerUnavailable: "The answer was not saved: this server has no answer scanner available.",
+    },
+    redact: {
+      open: "Redact…",
+      prompt: "Empty this answer's text and choice in every version? This cannot be undone.",
+      confirm: "Redact",
+      cancel: "Cancel",
+      working: "Redacting …",
+      failed: "The answer was not redacted",
+      forbidden: "The answer was not redacted: you may not redact answers.",
+      origin: "The answer was not redacted: the server refused a request from this page's address.",
+      gone: "The answer was not redacted: the answer no longer exists.",
+      network: "The answer was not redacted: could not reach the server.",
+      http: (status) => `The answer was not redacted (HTTP ${status}).`,
+      reloadFailed: "The answer was redacted, but the answers could not be loaded again.",
     },
     redacted: "redacted",
     earlier: (n) => `Earlier versions (${n})`,
@@ -179,6 +224,24 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       retry: "Hent på nytt",
       clearChoice: "Fjern valg",
       overCap: (n) => `For langt: fjern ${n} tegn for å lagre.`,
+      scannerRefused: "Svaret ble ikke lagret. Skanneren fant:",
+      scannerRefusedNone: "Svaret ble ikke lagret: skanneren stoppet det.",
+      moreReasons: (n) => `(+${n} til)`,
+      scannerUnavailable: "Svaret ble ikke lagret: serveren har ingen svarskanner tilgjengelig.",
+    },
+    redact: {
+      open: "Fjern…",
+      prompt: "Tømme teksten og valget i alle versjoner av dette svaret? Det kan ikke angres.",
+      confirm: "Fjern",
+      cancel: "Avbryt",
+      working: "Fjerner …",
+      failed: "Svaret ble ikke fjernet",
+      forbidden: "Svaret ble ikke fjernet: du har ikke lov til å fjerne svar.",
+      origin: "Svaret ble ikke fjernet: serveren avviste en forespørsel fra denne sidens adresse.",
+      gone: "Svaret ble ikke fjernet: svaret finnes ikke lenger.",
+      network: "Svaret ble ikke fjernet: fikk ikke kontakt med serveren.",
+      http: (status) => `Svaret ble ikke fjernet (HTTP ${status}).`,
+      reloadFailed: "Svaret ble fjernet, men svarene kunne ikke hentes på nytt.",
     },
     redacted: "fjernet",
     earlier: (n) => `Tidligere versjoner (${n})`,

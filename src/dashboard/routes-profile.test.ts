@@ -3,7 +3,8 @@ import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { createDashboardRoutes } from "./routes.ts";
 import { NAIS_DROPPED_ROUTE_GROUPS, servesWikiReadSliceOnly, wikiToolsRegistered } from "./route-groups.ts";
-import { wikiRouteTable } from "../test/wiki-route-table.ts";
+import { routeRows, wikiRouteTable } from "../test/wiki-route-table.ts";
+import { answerBodyLimit } from "./routes/wiki-answers.ts";
 import { renderNav } from "./views/shared-styles.ts";
 
 /**
@@ -258,6 +259,7 @@ describe("the wiki read slice under nais", () => {
       "GET /api/wiki/answers/export",
       "POST /api/wiki/answers",
       "POST /api/wiki/answers/export/confirm",
+      "POST /api/wiki/answers/redact",
     ]);
     for (const profile of ["nais", "default"] as const) {
       const app = build(profile);
@@ -303,5 +305,24 @@ describe("the worked-on ledger's boot kick (fix round 2)", () => {
   test("…and it is DERIVED from the drop set, not from the profile name", () => {
     // So a later profile that drops `wiki` skips the kick with no second edit.
     expect(NAIS_DROPPED_ROUTE_GROUPS.includes("wiki")).toBe(true);
+  });
+});
+
+describe("routeRows (src/test/wiki-route-table.ts)", () => {
+  const ok = () => new Response("ok");
+  test("the answer POSTs' body-limit middleware is not a row of its own", () => {
+    const app = new Hono();
+    app.post("/p", answerBodyLimit, ok);
+    expect(routeRows(app)).toEqual([{ method: "POST", path: "/p" }]);
+  });
+
+  test("a second registration of the same route is a second row, so a shadowing duplicate fails the route tables", () => {
+    const app = new Hono();
+    app.post("/p", answerBodyLimit, ok);
+    app.post("/p", ok);
+    expect(routeRows(app)).toEqual([
+      { method: "POST", path: "/p" },
+      { method: "POST", path: "/p" },
+    ]);
   });
 });

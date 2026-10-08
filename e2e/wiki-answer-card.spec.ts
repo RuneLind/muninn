@@ -182,6 +182,31 @@ const FOCUS_PAGE = [
   "",
 ].join("\n");
 
+// PR 5 fix round 1: the admin Redact control (auth off is admin). One
+// question per case; R8 is the card whose save reloads the others.
+const REDACT_REL = "plans/redact.mdx";
+const REDACT_PAGE = [
+  "---",
+  "title: Redact page",
+  "type: plan",
+  "---",
+  "",
+  ...q("R1", "Escape out of the confirm?"),
+  ...q("R2", "Redacted elsewhere while the confirm is open?"),
+  ...q("R3", "A redact the server refuses?"),
+  ...q("R4", "A redact that works?"),
+  ...q("R5", "A redact whose reload fails?"),
+  ...q("R7", "Redact beside an open editor?"),
+  ...q("R8", "Saved to reload R2?"),
+  ...q("R9", "The confirm's look?"),
+  // Fix round 2.
+  ...q("R10", "A redact that answers 404?"),
+  ...q("R11", "Edit while a redact is out?"),
+  ...q("R12", "An editor open on an answer redacted elsewhere?"),
+  ...q("R13", "Saved to reload R12?"),
+  ...q("R14", "Escape out of the confirm in focus mode?"),
+].join("\n");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let server: ChildProcess | undefined;
@@ -213,6 +238,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", STYLE_REL), STYLE_PAGE, "utf8");
   await writeFile(path.join(base, "a", FIX_REL), FIX_PAGE, "utf8");
   await writeFile(path.join(base, "a", FOCUS_REL), FOCUS_PAGE, "utf8");
+  await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -263,6 +289,9 @@ test.beforeAll(async ({}, info) => {
   // The focus page's seeded answers: each one the viewer's, so it has an Edit.
   for (const id of ["G9", "G18", "G20", "G21"]) await api({ relPath: FOCUS_REL, questionId: id, body: `${id} version one.` });
   await api({ relPath: FOCUS_REL, questionId: "G16", choice: "A", body: "G16 version one." });
+  for (const id of ["R1", "R2", "R3", "R4", "R5", "R7", "R9", "R10", "R11", "R12", "R14"]) {
+    await api({ relPath: REDACT_REL, questionId: id, body: `${id} text.` });
+  }
 });
 
 test.afterAll(async () => {
@@ -1124,6 +1153,257 @@ test.describe("Wiki reader: answer card focus across a repaint", () => {
     expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
     expect(seen.errors).toEqual([]);
   });
+});
+
+
+test.describe("Wiki reader: the admin Redact control (PR 5 fix round 1)", () => {
+  const openRedact = async (page: Page) => {
+    const seen = await openPage(page, WIKI, REDACT_REL);
+    await expect(card(page, "R1").locator(".q-answer")).toHaveCount(1);
+    return seen;
+  };
+  const redactPosts = (page: Page) => {
+    const posts: string[] = [];
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/wiki/answers/redact") posts.push(r.method());
+    });
+    return posts;
+  };
+
+  test("Escape inside the confirm cancels it and puts focus back on Redact…", async ({ page }) => {
+    const seen = await openRedact(page);
+    const posts = redactPosts(page);
+    const r1 = card(page, "R1");
+    await r1.locator("button.q-redact").click();
+    await expect(r1.locator("button.q-redact-no")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(r1.locator(".q-redact-confirm")).toHaveCount(0);
+    await expect(r1.locator("button.q-redact")).toBeFocused();
+    // From the Redact button inside the confirm too.
+    await r1.locator("button.q-redact").click();
+    await r1.locator("button.q-redact-yes").focus();
+    await page.keyboard.press("Escape");
+    await expect(r1.locator(".q-redact-confirm")).toHaveCount(0);
+    await expect(r1.locator("button.q-redact")).toBeFocused();
+    expect(posts).toEqual([]);
+    await expect(r1.locator(".q-answer-body")).toHaveText("R1 text.");
+    expectClean(seen);
+  });
+
+  test("the confirm closes when a reload shows the answer redacted elsewhere; the card holds focus", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r2 = card(page, "R2");
+    await r2.locator("button.q-redact").click();
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const body = (await res.json()) as { answers: Record<string, unknown>[] };
+      const answers = body.answers.map((a) => (a.questionId === "R2" ? { ...a, redacted: true, body: "", choice: null } : a));
+      await route.fulfill({ response: res, json: { ...body, answers } });
+    });
+    await page.route("**/api/wiki/answers", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const res = await route.fetch();
+      await sleep(600);
+      await route.fulfill({ response: res });
+    });
+    const r8 = card(page, "R8");
+    await r8.locator("textarea.q-text").fill("R8 saved.");
+    await r8.locator("button.q-save").click();
+    await r2.locator("button.q-redact-no").focus();
+    await expect(r2.locator(".q-redacted")).toBeVisible();
+    await expect(r2.locator(".q-redact-confirm")).toHaveCount(0);
+    await expect(r2).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("a redact the server refuses: the reason in the reader's words, focus back on that answer's Redact…", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r3 = card(page, "R3");
+    const refusals: [string, (route: Route) => Promise<void>, string][] = [
+      [
+        "403",
+        (r) => r.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "only an admin may redact answers", code: "admin_only" }) }),
+        "The answer was not redacted: you may not redact answers.",
+      ],
+      [
+        "404",
+        (r) => r.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "no such answer", code: "unknown_answer" }) }),
+        "The answer was not redacted: the answer no longer exists.",
+      ],
+      ["network", (r) => r.abort(), "The answer was not redacted: could not reach the server."],
+    ];
+    for (const [name, refuse, text] of refusals) {
+      await page.route("**/api/wiki/answers/redact", (route) => refuse(route));
+      await r3.locator("button.q-redact").click();
+      await r3.locator("button.q-redact-yes").click();
+      await expect(r3.locator(".q-msg-error"), name).toHaveText(text);
+      await expect(r3.locator("button.q-redact"), name).toBeFocused();
+      await page.unroute("**/api/wiki/answers/redact");
+    }
+    await expect(r3.locator(".q-answer-body")).toHaveText("R3 text.");
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("a redact that works: the answer shows redacted and the card holds focus", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r4 = card(page, "R4");
+    await r4.locator("button.q-redact").click();
+    await r4.locator("button.q-redact-yes").click();
+    await expect(r4.locator(".q-redacted")).toBeVisible();
+    await expect(r4.locator("button.q-redact")).toHaveCount(0);
+    await expect(r4).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("a redact whose reload fails says it was redacted, shows it redacted and offers to load again", async ({ page }) => {
+    const seen = await openRedact(page);
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "down" }) })
+        : route.fallback(),
+    );
+    const r5 = card(page, "R5");
+    await r5.locator("button.q-redact").click();
+    await r5.locator("button.q-redact-yes").click();
+    const msg = r5.locator(".q-msg-warn");
+    await expect(msg).toContainText("The answer was redacted, but the answers could not be loaded again.");
+    await expect(msg.locator("button.q-retry")).toBeVisible();
+    await expect(r5.locator(".q-redacted")).toBeVisible();
+    await expect(r5).not.toContainText("R5 text.");
+    expect(seen.failed).toEqual(["500 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("an answer whose editor is open offers no Redact…; Edit closes an open confirm", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r7 = card(page, "R7");
+    await r7.locator("button.q-redact").click();
+    await expect(r7.locator(".q-redact-confirm")).toBeVisible();
+    await r7.locator("button.q-edit").click();
+    await expect(r7.locator("form.q-composer")).toBeVisible();
+    await expect(r7.locator(".q-redact-confirm")).toHaveCount(0);
+    await expect(r7.locator("button.q-redact")).toHaveCount(0);
+    await r7.locator("button.q-cancel").click();
+    await expect(r7.locator("button.q-redact")).toBeVisible();
+    expectClean(seen);
+  });
+
+  test("while a redact is out, that answer offers no Edit, and the editor never opens over it", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r11 = card(page, "R11");
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/answers/redact", async (route) => {
+      const res = await route.fetch();
+      await gate;
+      await route.fulfill({ response: res });
+    });
+    try {
+      await r11.locator("button.q-redact").click();
+      await r11.locator("button.q-redact-yes").click();
+      await expect(r11.locator("button.q-redact-yes")).toHaveText("Redacting …");
+      await expect(r11.locator("button.q-edit")).toHaveCount(0);
+    } finally {
+      release();
+    }
+    await expect(r11.locator(".q-redacted")).toBeVisible();
+    await expect(r11.locator("form.q-composer")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("an editor open on an answer a reload shows redacted closes, and its draft is gone", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r12 = card(page, "R12");
+    await r12.locator("button.q-edit").click();
+    await r12.locator("textarea.q-text").fill("R12 text, being edited.");
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const body = (await res.json()) as { answers: Record<string, unknown>[] };
+      const answers = body.answers.map((a) => (a.questionId === "R12" ? { ...a, redacted: true, body: "", choice: null } : a));
+      await route.fulfill({ response: res, json: { ...body, answers } });
+    });
+    const r13 = card(page, "R13");
+    await r13.locator("textarea.q-text").fill("R13 saved.");
+    await r13.locator("button.q-save").click();
+    await expect(r12.locator(".q-redacted")).toBeVisible();
+    await expect(r12.locator("form.q-composer")).toHaveCount(0);
+    await expect(page.locator("textarea.q-text")).toHaveCount(0);
+    await expect(r12).not.toContainText("R12 text");
+    expectClean(seen);
+  });
+
+  test("a redact that answers 404 loads the answers again: the gone answer leaves, with no Redact… left on it", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r10 = card(page, "R10");
+    await page.route("**/api/wiki/answers/redact", (route) =>
+      route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "no such answer", code: "unknown_answer" }) }),
+    );
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const body = (await res.json()) as { answers: Record<string, unknown>[] };
+      await route.fulfill({ response: res, json: { ...body, answers: body.answers.filter((a) => a.questionId !== "R10") } });
+    });
+    await r10.locator("button.q-redact").click();
+    await r10.locator("button.q-redact-yes").click();
+    await expect(r10.locator(".q-msg-error")).toHaveText("The answer was not redacted: the answer no longer exists.");
+    await expect(r10.locator(".q-answer")).toHaveCount(0);
+    await expect(r10.locator("button.q-redact")).toHaveCount(0);
+    await expect(r10).toBeFocused();
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("Escape in the confirm in focus mode closes the confirm and leaves focus mode on", async ({ page }) => {
+    const seen = await openRedact(page);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("f");
+    await expect(page.locator("#wikiFocusExit")).toBeVisible();
+    const r14 = card(page, "R14");
+    await r14.locator("button.q-redact").click();
+    await expect(r14.locator("button.q-redact-no")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(r14.locator(".q-redact-confirm")).toHaveCount(0);
+    await expect(r14.locator("button.q-redact")).toBeFocused();
+    await expect(page.locator("#wikiFocusExit")).toBeVisible();
+    expectClean(seen);
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`the confirm's Cancel border reads at 3:1 on the error tint, ${scheme}`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const seen = await openRedact(page);
+      const r9 = card(page, "R9");
+      await r9.locator("button.q-redact").click();
+      await page.mouse.move(0, 0);
+      const soft = await page.evaluate(() => {
+        const p = document.createElement("span");
+        p.style.color = "var(--text-soft)";
+        document.body.appendChild(p);
+        const c = getComputedStyle(p).color;
+        p.remove();
+        return c;
+      });
+      const no = r9.locator("button.q-redact-no");
+      expect(await no.evaluate((el) => getComputedStyle(el).borderTopColor)).toBe(soft);
+      const ratio = await no.evaluate((el) => {
+        const lum = (c: string) => {
+          const [r, g, b] = c.match(/[\d.]+/g)!.slice(0, 3).map(Number) as [number, number, number];
+          const ch = (v: number) => {
+            const x = v / 255;
+            return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+          };
+          return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+        };
+        const a = lum(getComputedStyle(el).borderTopColor);
+        const b = lum(getComputedStyle(el.closest(".q-redact-confirm")!).backgroundColor);
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      });
+      expect(ratio).toBeGreaterThanOrEqual(3);
+      expectClean(seen);
+    });
+  }
 });
 
 const f9Text = (page: Page) => card(page, "F9").locator("textarea.q-text");

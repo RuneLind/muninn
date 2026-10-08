@@ -801,7 +801,12 @@ afterwards.
 So five states, and only one of them writes: **complete** (refused, and told to
 baseline only when `schema_migrations` is genuinely empty), **incomplete**
 (refused by name, listing what is present and what is missing, and explicitly
-told *not* to baseline), **lone ledger** (only `schema_migrations` — what
+told *not* to baseline; the remedy forks: when the missing tables are ones a
+not-yet-applied migration creates — a database one release behind the image,
+since the boot gate runs before `db/migrate.ts` — it names those migrations and
+says to run `bun db/migrate.ts` first, on nais as a naisjob with
+`command: ["bun", "db/migrate.ts"]`; only otherwise does it lead with the
+mid-file `psql` diagnosis and the schema drop), **lone ledger** (only `schema_migrations` — what
 `db:migrate` or `db:migrate:baseline` against an empty database leaves, with or
 without rows; the remedy is `DROP TABLE schema_migrations`, never a schema
 drop), **foreign** (tables present, none of them init.sql's — which gets neither
