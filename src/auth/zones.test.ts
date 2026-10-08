@@ -288,7 +288,9 @@ describe("the wiki read slice in the user zone", () => {
 
   test("the answer routes stay admin for role `user`, slice or not (answer cards PR 5 opens them)", () => {
     const routes = wikiRouteTable("answers");
-    expect(routes.length).toBe(2);
+    // The two answer routes plus the export GET and its confirm (PR 4), which
+    // stay admin after PR 5 too: their handlers check the role themselves.
+    expect(routes.length).toBe(4);
     for (const r of routes) {
       for (const d of [asUser(r.path, r.method), asSliceUser(r.path, r.method)]) {
         expect(`${r.method} ${r.path} → ${d.allowed ? "allowed" : d.reason}`).toBe(`${r.method} ${r.path} → default deny`);

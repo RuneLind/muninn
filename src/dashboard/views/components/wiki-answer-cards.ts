@@ -62,6 +62,8 @@ export interface AnswerCardsHandle {
   answers(): readonly AnswerWire[];
   /** Answers the export has not copied yet, redacted ones excluded. */
   unexportedCount(): number;
+  /** A load has succeeded at least once (the first one notifies `onChange`). */
+  loaded(): boolean;
   /** Load the answers again and repaint the cards whose data changed. */
   refresh(): Promise<void>;
   /** Called after every change to `answers()`. Returns the unsubscribe. */
@@ -148,6 +150,7 @@ export function enhanceAnswerCards(
   const handle: AnswerCardsHandle = {
     answers: () => ctx.answers,
     unexportedCount: () => unexportedCount(ctx.answers),
+    loaded: () => ctx.loaded,
     refresh: async () => {
       const r = await loadAnswers(ctx);
       if (r === "failed" && !ctx.loaded) showLoadError(ctx);

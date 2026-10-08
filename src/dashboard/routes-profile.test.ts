@@ -253,7 +253,12 @@ describe("the wiki read slice under nais", () => {
 
   test("the answer routes (`wiki-answers`) are KEPT by nais and registered on default (D14)", () => {
     const answers = wikiRouteTable("answers");
-    expect(answers.map((r) => `${r.method} ${r.path}`).sort()).toEqual(["GET /api/wiki/answers", "POST /api/wiki/answers"]);
+    expect(answers.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      "GET /api/wiki/answers",
+      "GET /api/wiki/answers/export",
+      "POST /api/wiki/answers",
+      "POST /api/wiki/answers/export/confirm",
+    ]);
     for (const profile of ["nais", "default"] as const) {
       const app = build(profile);
       for (const r of answers) {

@@ -1353,16 +1353,21 @@ export async function renderWikiPage(opts?: {
        is always visible; the selection-gated one rides the same show/hide. */
     /* …and "💬 Discuss" (chat) and "📤 Share" (a pasteable post) share that
        treatment: all three are article-level actions on the same breadcrumb row. */
-    .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share, .wiki-bc-copy {
+    .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share, .wiki-bc-copy, .wiki-bc-answers {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: transparent; color: var(--text-secondary);
       border: 1px solid var(--border-primary);
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
-    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover, .wiki-bc-share:hover, .wiki-bc-copy:hover {
+    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover, .wiki-bc-share:hover, .wiki-bc-copy:hover, .wiki-bc-answers:hover:not(:disabled) {
       background: var(--tint-neutral); color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
     }
+    /* Answer cards' export (PR 4): admin-only, beside the other page actions. */
+    .wiki-answer-export { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .wiki-bc-answers:disabled { cursor: default; opacity: 0.55; }
+    .wiki-answer-export-msg { font-size: 12px; color: var(--text-muted); }
+    .wiki-answer-export-msg:empty { display: none; }
     /* ⧉ Copy path is a utility, not one of the three article ACTIONS beside it:
        quieter, and ICON-ONLY — the words cost the trail ~104px on a row where
        the trail is the only thing that shrinks, and the tooltip says more than

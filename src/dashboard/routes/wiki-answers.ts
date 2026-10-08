@@ -4,6 +4,10 @@
  *
  *   GET  /api/wiki/answers?wiki=&relPath=[&versions=1]
  *   POST /api/wiki/answers  {wiki, relPath, questionId, choice?, body, answerId?, baseVersion?}
+ *   GET  /api/wiki/answers/export?wiki=&relPath=[&again=1]   (admin; PR 4)
+ *   GET  /api/wiki/answers/export?wiki=&orphans=1           (admin; PR 4)
+ *   POST /api/wiki/answers/export/confirm  {wiki, relPath, rows: [[answerId, version], …]}  (admin; PR 4)
+ *   POST /api/wiki/answers/export/confirm  {wiki, orphans: true, rows}        (admin; the orphan copy)
  *
  * Its own group so `MUNINN_PROFILE=nais` keeps it (D14) while it drops `wiki`.
  * Both routes resolve the page through the read slice's own ladder
@@ -24,10 +28,11 @@ import type { Context, Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { resolveServingProfile, resolveWikiAnswerConfig, wikiTakesAnswers, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly } from "../route-groups.ts";
-import { resolveScopedPage } from "./wiki-read-scope.ts";
+import { resolveReadRequest, resolveScopedPage } from "./wiki-read-scope.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
-import { parseFrontmatter, readWikiPage, stripFrontmatter } from "../../wiki/store.ts";
+import { getWikiIndex, parseFrontmatter, readWikiPage, stripFrontmatter, type WikiIndex } from "../../wiki/store.ts";
+import { answerStamp, formatAnswerExport, formatOrphanExport, type ExportAnswer } from "../../wiki/answer-export.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
 import {
   codePointLength,
@@ -47,10 +52,15 @@ import type { AuthRole } from "../../auth/role.ts";
 import {
   getLatestWikiAnswerVersion,
   insertWikiAnswerVersion,
+  listLastExportedWikiAnswers,
   listLatestWikiAnswers,
+  listWikiAnswerLocations,
   listWikiAnswerVersions,
+  markWikiAnswersExported,
+  markWikiOrphanAnswersExported,
   WikiAnswerVersionConflict,
   type LatestWikiAnswer,
+  type WikiAnswerLocation,
   type WikiAnswerAuthor,
   type WikiAnswerVersion,
 } from "../../db/wiki-answers.ts";
@@ -60,6 +70,12 @@ const log = getLog("dashboard", "wiki-answers");
 
 /** The answer routes' path. */
 export const WIKI_ANSWERS_PATH = "/api/wiki/answers";
+/** The export block (PR 4): admin only, marks nothing. */
+export const WIKI_ANSWERS_EXPORT_PATH = "/api/wiki/answers/export";
+/** Marks an export as copied (PR 4): admin only. */
+export const WIKI_ANSWERS_EXPORT_CONFIRM_PATH = "/api/wiki/answers/export/confirm";
+/** The most `(answerId, version)` rows one confirm takes. */
+export const EXPORT_CONFIRM_MAX_ROWS = 500;
 
 /**
  * May this viewer read AND post answers? The zone model's own decision for
@@ -88,6 +104,106 @@ const defaultStore: WikiAnswerStore = {
   listLatest: listLatestWikiAnswers,
   listVersions: listWikiAnswerVersions,
 };
+
+/** The export's store (PR 4), a seam of its own so PR 2's store stays as it was. */
+export interface WikiAnswerExportStore {
+  listLatest: typeof listLatestWikiAnswers;
+  listLastExported: typeof listLastExportedWikiAnswers;
+  listLocations: typeof listWikiAnswerLocations;
+  markExported: typeof markWikiAnswersExported;
+  markOrphansExported: typeof markWikiOrphanAnswersExported;
+}
+
+const defaultExportStore: WikiAnswerExportStore = {
+  listLatest: listLatestWikiAnswers,
+  listLastExported: listLastExportedWikiAnswers,
+  listLocations: listWikiAnswerLocations,
+  markExported: markWikiAnswersExported,
+  markOrphansExported: markWikiOrphanAnswersExported,
+};
+
+/** One orphaned answer: its page no longer resolves, or its question is gone
+ *  from the page and the DecisionLog item is not closed (O4). Enough to copy it
+ *  by hand. No `asked`: the question that named who was asked is gone. */
+export interface OrphanAnswer {
+  answerId: string;
+  relPath: string;
+  questionId: string;
+  authorName: string;
+  version: number;
+  createdAt: number;
+  /** `createdAt` as the export block prints it (`08.10.2026 09:14`, Oslo). */
+  time: string;
+  choice: string | null;
+  body: string;
+  reason: "page_gone" | "question_gone";
+}
+
+/**
+ * The wiki's orphaned answers (O4): only answers whose latest version is
+ * unexported and not redacted (see {@link listWikiAnswerLocations}). Each
+ * distinct relPath that has such answers is resolved and parsed ONCE. An
+ * answer to a question whose item is closed is never an orphan: the
+ * `<Question>` normally stays after the close, and an item closed in the
+ * DecisionLog settles the question even if the block went. A page that
+ * resolves but cannot be read is skipped, not counted: unknown is not gone.
+ */
+export async function findOrphanAnswers(
+  wiki: string,
+  index: WikiIndex,
+  store: Pick<WikiAnswerExportStore, "listLocations">,
+): Promise<OrphanAnswer[]> {
+  const byPage = new Map<string, WikiAnswerLocation[]>();
+  for (const loc of await store.listLocations(wiki)) {
+    const list = byPage.get(loc.relPath) ?? [];
+    list.push(loc);
+    byPage.set(loc.relPath, list);
+  }
+  const out: OrphanAnswer[] = [];
+  for (const [relPath, locs] of byPage) {
+    const meta = index.resolveRelPath(relPath);
+    let gone: (questionId: string) => boolean;
+    if (!meta) {
+      gone = () => true;
+    } else {
+      const markdown = await readWikiPage(index, meta);
+      if (markdown === null) continue;
+      const parsed = parseQuestionPage(parseBlocks(stripFrontmatter(markdown)));
+      const ids = new Set(parsed.questions.map((q) => q.id).filter((id): id is string => id !== null));
+      gone = (id) => !ids.has(id) && (parsed.states.get(id)?.kind ?? "open") === "open";
+    }
+    for (const l of locs) {
+      if (!gone(l.questionId)) continue;
+      out.push({ ...l, time: answerStamp(l.createdAt), reason: meta ? "question_gone" : "page_gone" });
+    }
+  }
+  return out.sort((a, b) => a.relPath.localeCompare(b.relPath) || a.createdAt - b.createdAt);
+}
+
+/** The orphans as the reader's "Copy orphaned answers" copies them: the block
+ *  and the exact `(answerId, version)` rows a confirm would mark. */
+function orphanExportOf(wiki: string, orphans: readonly OrphanAnswer[], exportedAt: number) {
+  return {
+    block: formatOrphanExport({
+      wiki,
+      exportedAt,
+      answers: orphans.map((o) => ({
+        questionId: o.questionId,
+        authorName: o.authorName,
+        asked: null,
+        createdAt: o.createdAt,
+        choice: o.choice,
+        body: o.body,
+        version: o.version,
+        redacted: false,
+        relPath: o.relPath,
+        reason: o.reason,
+      })),
+    }),
+    rows: orphans.map((o) => [o.answerId, o.version] as [string, number]),
+    count: orphans.length,
+  };
+}
 
 /** One version as the GET shows it. Never the author's oid or NAV ident. */
 interface AnswerVersionView {
@@ -181,7 +297,52 @@ async function questionTargetsOf(
   return out;
 }
 
-export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiAnswerStore = defaultStore): void {
+/** Admin, or auth off. A second lock beside the zone model's default-deny,
+ *  which keeps both export paths out of every user zone today: answer cards
+ *  PR 5 opens the answer routes to role `user`, and the export must not follow. */
+const isAdminViewer = (c: Context) => (sessionRole(c) ?? "admin") === "admin";
+
+/** The largest `version` the column holds (Postgres `int4`). */
+const VERSION_MAX = 2_147_483_647;
+
+/** A confirm row: `[answerId, version]` with a uuid and a version in 1…int4 max. */
+function parseConfirmRows(raw: unknown): [string, number][] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > EXPORT_CONFIRM_MAX_ROWS) return null;
+  const rows: [string, number][] = [];
+  for (const r of raw) {
+    if (!Array.isArray(r) || r.length !== 2) return null;
+    const [id, version] = r;
+    if (typeof id !== "string" || !isValidUuid(id) || !Number.isInteger(version)) return null;
+    if ((version as number) < 1 || (version as number) > VERSION_MAX) return null;
+    rows.push([id, version as number]);
+  }
+  return rows;
+}
+
+/** A stored version the export block prints. */
+type ExportRow = WikiAnswerVersion;
+
+function exportAnswerOf(a: ExportRow, targets: Map<string, QuestionTarget[]>): ExportAnswer {
+  const t = targets.get(a.questionId);
+  const redacted = a.redactedAt !== null;
+  return {
+    questionId: a.questionId,
+    authorName: a.author.name,
+    asked: t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t) : null,
+    createdAt: a.createdAt,
+    choice: redacted ? null : a.choice,
+    body: redacted ? "" : a.body,
+    version: a.version,
+    redacted,
+  };
+}
+
+export function registerWikiAnswerRoutes(
+  app: Hono,
+  config: Config,
+  store: WikiAnswerStore = defaultStore,
+  exportStore: WikiAnswerExportStore = defaultExportStore,
+): void {
   const profile = config.profile ?? resolveServingProfile();
   const readSliceOnly = servesWikiReadSliceOnly(profile);
   const answerConfig = () => config.wikiAnswers ?? resolveWikiAnswerConfig();
@@ -353,4 +514,139 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
       return c.json({ error: "answer not saved", code: "store_failed" }, 500);
     }
   });
+
+  app.get(WIKI_ANSWERS_EXPORT_PATH, async (c) => {
+    if (!isAdminViewer(c)) return err(c, 403, "admin_only", "only an admin may export answers");
+    const wiki = c.req.query("wiki");
+    if (!wiki) return err(c, 400, "bad_request", "wiki query param required");
+    try {
+      if (c.req.query("orphans") === "1") {
+        const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, wiki, undefined);
+        if (unknownWiki || !entry) return err(c, 404, "no_page", "no wiki configured for that name");
+        const index = await getWikiIndex({ root: entry.root });
+        if (!index) return err(c, 503, "wiki_unavailable", "wiki directory not found");
+        if (!wikiTakesAnswers(entry.name, answerConfig())) return c.json({ orphans: [] });
+        return c.json({ orphans: await findOrphanAnswers(entry.name, index, exportStore) });
+      }
+      const relPath = c.req.query("relPath");
+      if (!relPath) return err(c, 400, "bad_request", "relPath query param required");
+      const page = await resolveScopedPage(readSliceOnly, { wiki, relPath });
+      if (!page.ok) return pageError(c, page);
+      const again = c.req.query("again") === "1";
+      if (!page.entry || !wikiTakesAnswers(page.entry.name, answerConfig())) {
+        const empty = { block: "", rows: [], count: 0, orphanCount: 0 };
+        const none = { block: "", rows: [], count: 0 };
+        return c.json(again ? empty : { ...empty, again: none, orphanExport: none });
+      }
+      const name = page.entry.name;
+      // ONE orphan scan per GET, whether or not the page has anything to copy:
+      // the trailer and the reader's orphan button both report it. The reader
+      // asks for the plain GET only, which carries the last batch as `again`
+      // and the orphans' own block as `orphanExport` too.
+      const orphans = await findOrphanAnswers(name, page.index, exportStore);
+      const orphanCount = orphans.length;
+      const owner = answerConfig().owner;
+      let targets: Map<string, QuestionTarget[]> | null = null;
+      const build = async (picked: ExportRow[], exportedAt: number) => {
+        if (picked.length === 0) return { block: "", rows: [] as [string, number][], count: 0 };
+        targets ??= await questionTargetsOf(page, owner);
+        const answers = picked.map((a) => exportAnswerOf(a, targets!));
+        return {
+          block: formatAnswerExport({ wiki: name, relPath: page.meta.relPath, exportedAt, answers, orphanCount }),
+          rows: picked.map((a) => [a.answerId, a.version] as [string, number]),
+          count: picked.length,
+        };
+      };
+      // Again: the page's last export batch, a redacted one shown as redacted,
+      // stamped with that batch's own time.
+      const lastBatch = async () => {
+        const rows = await exportStore.listLastExported(name, page.meta.relPath);
+        return build(rows, rows[0]?.exportedAt ?? Date.now());
+      };
+      if (again) return c.json({ ...(await lastBatch()), orphanCount });
+      // New: the latest version of every answer that is still unexported AND not
+      // redacted — the card's own `unexportedCount` rule, so the button's N and
+      // this list agree. Stamped now; the reader restamps it at the click.
+      const fresh = (await exportStore.listLatest(name, page.meta.relPath)).filter(
+        (a) => a.exportedAt === null && a.redactedAt === null,
+      );
+      return c.json({
+        ...(await build(fresh, Date.now())),
+        orphanCount,
+        again: await lastBatch(),
+        orphanExport: orphanExportOf(name, orphans, Date.now()),
+      });
+    } catch (e) {
+      log.error("answer export failed for {wiki}: {error}", { wiki, error: e instanceof Error ? e.message : String(e) });
+      return c.json({ error: "export unavailable", code: "store_failed" }, 500);
+    }
+  });
+
+  app.post(WIKI_ANSWERS_EXPORT_CONFIRM_PATH, async (c) => {
+    if (!isAdminViewer(c)) return err(c, 403, "admin_only", "only an admin may export answers");
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return err(c, 400, "bad_request", "body is not JSON");
+    }
+    const b = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const wiki = typeof b.wiki === "string" ? b.wiki : undefined;
+    const relPath = typeof b.relPath === "string" ? b.relPath : undefined;
+    if (b.orphans === true) {
+      if (!wiki) return err(c, 400, "bad_request", "wiki required");
+      if (b.relPath !== undefined) return err(c, 400, "bad_request", "an orphan confirm names no relPath");
+      const rows = parseConfirmRows(b.rows);
+      if (!rows) {
+        return err(c, 400, "bad_rows", `rows must be 1–${EXPORT_CONFIRM_MAX_ROWS} [answerId, version] pairs`);
+      }
+      return confirmOrphans(c, wiki, rows);
+    }
+    if (!wiki || !relPath) return err(c, 400, "bad_request", "wiki and relPath required");
+    const rows = parseConfirmRows(b.rows);
+    if (!rows) {
+      return err(c, 400, "bad_rows", `rows must be 1–${EXPORT_CONFIRM_MAX_ROWS} [answerId, version] pairs`);
+    }
+    // The page resolves exactly as the GET resolved it, and only its rows are marked.
+    const page = await resolveScopedPage(readSliceOnly, { wiki, relPath });
+    if (!page.ok) return pageError(c, page);
+    if (!page.entry || !wikiTakesAnswers(page.entry.name, answerConfig())) {
+      return err(c, 403, "not_answerable", `wiki "${wiki}" does not take answers (WIKI_ANSWER_WIKIS)`);
+    }
+    try {
+      return c.json({ marked: await exportStore.markExported(page.entry.name, page.meta.relPath, rows) });
+    } catch (e) {
+      log.error("answer export confirm failed: {error}", { error: e instanceof Error ? e.message : String(e) });
+      return c.json({ error: "export not confirmed", code: "store_failed" }, 500);
+    }
+  });
+
+  /** The orphan copy's confirm: marks only the listed rows that are, right
+   *  now, the latest version of an orphan of this wiki — the orphan rule
+   *  recomputed here, never the client's word — each on its own page. */
+  async function confirmOrphans(c: Context, wiki: string, rows: [string, number][]) {
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, wiki, undefined);
+    if (unknownWiki || !entry) return err(c, 404, "no_page", "no wiki configured for that name");
+    if (!wikiTakesAnswers(entry.name, answerConfig())) {
+      return err(c, 403, "not_answerable", `wiki "${wiki}" does not take answers (WIKI_ANSWER_WIKIS)`);
+    }
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return err(c, 503, "wiki_unavailable", "wiki directory not found");
+    try {
+      const now = new Map(
+        (await findOrphanAnswers(entry.name, index, exportStore)).map((o) => [`${o.answerId}:${o.version}`, o.relPath]),
+      );
+      const verified: [string, number, string][] = [];
+      for (const [id, v] of rows) {
+        const rel = now.get(`${id}:${v}`);
+        if (rel !== undefined) verified.push([id, v, rel]);
+      }
+      return c.json({ marked: await exportStore.markOrphansExported(entry.name, verified) });
+    } catch (e) {
+      log.error("orphan export confirm failed: {error}", { error: e instanceof Error ? e.message : String(e) });
+      return c.json({ error: "export not confirmed", code: "store_failed" }, 500);
+    }
+  }
 }
