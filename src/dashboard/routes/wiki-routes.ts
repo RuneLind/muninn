@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import { resolveServingProfile, resolveWikiAnswerConfig, wikiTakesAnswers, type Config } from "../../config.ts";
+import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
@@ -1583,6 +1584,10 @@ export function registerWikiReadRoutes(
     if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
     const answerCfg = config.wikiAnswers ?? resolveWikiAnswerConfig();
     const answerable = wikiTakesAnswers(entry?.name, answerCfg);
+    // The client's controls: on a wiki that takes answers AND for a viewer
+    // whose zone admits the answer routes. Role `user` is outside them until
+    // answer cards PR 5, and a flag here would fire a 403 GET per card.
+    const answersForViewer = answerable && viewerMayUseAnswers(c.get("role"), readSliceOnly);
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])
@@ -1629,11 +1634,13 @@ export function registerWikiReadRoutes(
         question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, answerCfg.owner),
       }),
       // The answer cards' page-level flags, present only on a wiki that takes
-      // answers: the client keys its controls on THIS, never on
+      // answers and for a viewer the answer routes admit (`answersForViewer`):
+      // the client keys its controls on THIS, never on
       // `wikiToolsRegistered` or the read-only selectors (D14). `canExport`:
-      // admin, and auth off is admin.
-      ...(answerable
-        ? { answers: { answerable: true, canExport: (c.get("role") ?? "admin") === "admin", owner: answerCfg.owner } }
+      // admin, and auth off is admin. No owner: `WIKI_ANSWER_OWNER` may carry
+      // an ident, and the card already names the owner from the rendered HTML.
+      ...(answersForViewer
+        ? { answers: { answerable: true, canExport: (c.get("role") ?? "admin") === "admin" } }
         : {}),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),

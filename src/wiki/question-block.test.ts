@@ -155,7 +155,7 @@ describe("the render option", () => {
     });
     expect(html).toContain('class="question q-decided"');
     expect(html).toContain('data-wiki-answerable="true"');
-    expect(html).toContain('data-question-to="Yvonne Jacobs (X111111)"');
+    expect(html).toContain('data-question-to="Yvonne Jacobs"');
     expect(html).toContain("Avgjort → ");
     expect(html).toContain('<li class="dl-item" id="o3">');
     // Without the option the same page renders the plain question.
@@ -245,7 +245,7 @@ describe("fix round 1: renderWikiHtml", () => {
     const tag = /<section class="question[^>]*>/.exec(html)?.[0] ?? "";
     expect(tag).toMatch(/^<section class="question q-open"(?: data-[a-z-]+="[^"<>]*")+>$/);
     expect(tag).toContain('data-question-choices="[[Foo]]|B"');
-    expect(tag).toContain('data-question-to="[[Bar]] (X1)"');
+    expect(tag).toContain('data-question-to="[[Bar]]"');
     // Outside the tag the same link still renders as a link.
     expect(html).toContain('<div class="q-for"><span class="q-for-label">For</span> <a href="/wiki?relPath=bar.md" class="wiki-link"');
   });
@@ -347,14 +347,14 @@ describe("fix round 2: renderWikiHtml attributes", () => {
   test("a wikilink alias in to= reads back as one target", () => {
     const tag = render('<Question id="O1" to="[[Bar|Alias]] (X1)">');
     const to = /data-question-to="([^"]*)"/.exec(tag)?.[1] ?? "";
-    expect(to).toBe("[[Bar|Alias]] (X1)");
-    expect(parseToAttr(to)).toEqual([{ name: "[[Bar|Alias]]", ident: "X1" }]);
+    expect(to).toBe("[[Bar|Alias]]");
+    expect(parseToAttr(to)).toEqual([{ name: "[[Bar|Alias]]", ident: null }]);
   });
 
   test("a restored wikilink is escaped inside the attribute", () => {
     const tag = render('<Question id="O1" choices="[[A<b]]|B" to="[[C&d]] (X1)">');
     expect(tag).toMatch(/^<section class="question q-open"(?: data-[a-z-]+="[^"<>]*")+>$/);
     expect(tag).toContain('data-question-choices="[[A&lt;b]]|B"');
-    expect(tag).toContain('data-question-to="[[C&amp;d]] (X1)"');
+    expect(tag).toContain('data-question-to="[[C&amp;d]]"');
   });
 });

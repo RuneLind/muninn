@@ -273,6 +273,8 @@ export const E2E_PORTS = {
   // The answer store's API (answer cards PR 2): one muninn with an owner, one without.
   "wiki-answers": 3131,
   "wiki-answers/no-owner": 3132,
+  // The answer card's composer, edit and log (answer cards PR 3).
+  "wiki-answer-card": 3133,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

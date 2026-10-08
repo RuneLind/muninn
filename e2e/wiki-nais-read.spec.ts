@@ -150,10 +150,19 @@ const PAGE = [
   "",
   "</Timeline>",
   "",
+  // A <Question> card: WIKI_ANSWER_WIKIS is unset here, so it renders
+  // read-only — no composer, no answers request (answer cards D7, D14).
+  '<Question id="O1" choices="A|B">',
+  "",
+  "Skal blokken være på norsk?",
+  "",
+  "</Question>",
+  "",
   "<DecisionLog>",
   "",
   "- **D1** — Ikke-yrkesaktive betaler ikke.",
   "- ~~**D2**~~ — Flyttet.",
+  "- **O1** — Språk i blokken?",
   "",
   "</DecisionLog>",
   "",
@@ -328,8 +337,10 @@ const READER_CONTROLS = [
   // explorer's search box and uses chips (client-side filters).
   "a.cb-id",
   "a.query-id",
-  // DecisionLog id chips (in-page anchors).
+  // DecisionLog id chips (in-page anchors), and a <Question> card's id chip,
+  // which links its DecisionLog item.
   "a.dl-id",
+  "a.q-id",
   ".qx-search",
   ".qx-chip",
   // Out to the tracker.
@@ -381,6 +392,10 @@ for (const scheme of ["light", "dark"] as const) {
     const context = await browser.newContext({ colorScheme: scheme });
     const page = await context.newPage();
     const seen = watch(page);
+    const answerRequests: string[] = [];
+    page.on("request", (req) => {
+      if (new URL(req.url()).pathname.startsWith("/api/wiki/answers")) answerRequests.push(req.url());
+    });
 
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
     await expect(page.locator(".callout-info .callout-title")).toHaveText("Merk");
@@ -419,6 +434,11 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(page.locator(`.wiki-list-item[data-relpath="${PAGE_REL}"]`)).toBeVisible();
     await expect(page.locator(".wiki-moves-flag")).toHaveCount(0);
     await expect(page.locator("#statusChips [data-waiting]")).toHaveCount(0);
+    // The <Question> card is read-only: WIKI_ANSWER_WIKIS is unset, so the
+    // page carries no answers flag and the client asks for nothing.
+    await expect(page.locator(".wiki-article section.question")).toHaveAttribute("data-wiki-answerable", "false");
+    await expect(page.locator(".wiki-article .q-composer, .wiki-article .q-answers, .wiki-article .q-edit")).toHaveCount(0);
+    expect(answerRequests).toEqual([]);
     expect(await unexpectedControls(page)).toEqual([]);
     expect(await apiLinksOutsideSlice(page)).toEqual([]);
     // Open the provenance chain: its rows carry controls of their own.

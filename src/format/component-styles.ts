@@ -705,6 +705,86 @@ export function componentBlockCss(scope: string): string {
 }
 
 /**
+ * Reader-only: the answer card's composer, answers and log fold (answer cards
+ * PR 3). Only the wiki reader's client injects this chrome, so chat and
+ * `/research` never ship it. Text sits on --text-primary or --text-soft; each
+ * tint carries --text-primary, pinned at 4.5:1 in `e2e/wiki-answer-card.spec.ts`.
+ */
+export function questionReaderCss(scope: string): string {
+  return `
+    ${scope} .q-answered .q-state { background: var(--tint-warning); }
+    ${scope} .q-copied .q-state { background: var(--tint-neutral); }
+    ${scope} .q-new {
+      font-size: 0.8em; padding: 0 0.5rem; border-radius: 999px; color: var(--text-primary);
+      background: var(--tint-warning); border: 1px solid var(--status-warning);
+    }
+    ${scope} .q-answers { display: grid; gap: 0.4rem; margin-top: 0.6rem; }
+    ${scope} .q-answer {
+      padding: 0.5rem 0.7rem; border-radius: 8px; background: var(--bg-panel);
+      border: 1px dashed var(--border-secondary);
+    }
+    ${scope} .q-by {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 0.4rem;
+      font-size: 0.85em; color: var(--text-soft);
+    }
+    /* A part carries its own leading separator, so a wrap never strands a "·". */
+    ${scope} .q-by > .q-time, ${scope} .q-by > .q-edited { white-space: nowrap; }
+    ${scope} .q-author { color: var(--text-primary); font-weight: 600; }
+    ${scope} .q-asked, ${scope} .q-pick {
+      display: inline-block; padding: 0 0.45rem; border-radius: 999px; font-size: 0.85em; color: var(--text-primary);
+    }
+    ${scope} .q-asked-yes { background: var(--tint-success); }
+    /* "not asked" is a fact, not an alert: no fill, so it reads apart from
+       the Answered pill and the "N new" badge (both --tint-warning). */
+    ${scope} .q-asked-no {
+      background: transparent; color: var(--text-soft); border: 1px dashed var(--border-secondary);
+    }
+    ${scope} .q-pick { background: var(--tint-info); font-weight: 600; margin: 0.3rem 0.4rem 0 0; }
+    ${scope} .q-answer-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.3rem; }
+    ${scope} .q-redacted { color: var(--text-soft); font-style: italic; }
+    ${scope} .q-log { margin-top: 0.4rem; }
+    ${scope} .q-log > summary { cursor: pointer; font-size: 0.85em; color: var(--text-soft); }
+    ${scope} .q-log-item { margin: 0.4rem 0 0; padding-left: 0.6rem; border-left: 2px solid var(--border-secondary); }
+    ${scope} section.question[tabindex]:focus:not(:focus-visible) { outline: none; }
+    ${scope} .q-edit, ${scope} .q-cancel, ${scope} .q-retry, ${scope} .q-clear-choice {
+      font: inherit; font-size: 0.95em; padding: 0 0.55rem; border-radius: 6px; cursor: pointer;
+      background: transparent; color: var(--text-primary); border: 1px solid var(--border-secondary);
+    }
+    ${scope} .q-edit:hover, ${scope} .q-cancel:hover, ${scope} .q-retry:hover, ${scope} .q-clear-choice:hover {
+      border-color: var(--accent);
+    }
+    ${scope} .q-clear-choice[hidden] { display: none; }
+    ${scope} .q-retry { margin-left: 0.4rem; }
+    ${scope} .q-composer { margin-top: 0.6rem; }
+    ${scope} .q-choices { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
+    ${scope} .q-choice {
+      display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.6rem; border-radius: 8px;
+      cursor: pointer; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-secondary);
+    }
+    ${scope} .q-choice:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    ${scope} .q-text {
+      display: block; width: 100%; box-sizing: border-box; min-height: 4.5rem; resize: vertical;
+      padding: 0.5rem 0.6rem; border-radius: 8px; font: inherit; line-height: 1.45;
+      background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-secondary);
+    }
+    ${scope} .q-text:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    ${scope} .q-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
+    ${scope} .q-save {
+      font: inherit; font-weight: 600; padding: 0.3rem 0.9rem; border-radius: 7px; border: none; cursor: pointer;
+      background: var(--accent-hover); color: #fff;
+    }
+    ${scope} .q-save:disabled { opacity: 0.5; cursor: default; }
+    ${scope} .q-count { margin-left: auto; font-size: 0.8em; color: var(--text-soft); font-variant-numeric: tabular-nums; }
+    ${scope} .q-count-over { color: var(--text-primary); background: var(--tint-error); padding: 0 0.4rem; border-radius: 4px; }
+    ${scope} .q-over { font-size: 0.85em; margin: 0.35rem 0 0; color: var(--text-primary); }
+    ${scope} .q-over[hidden] { display: none; }
+    ${scope} .q-msg { font-size: 0.85em; margin: 0.5rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; color: var(--text-primary); }
+    ${scope} .q-msg-error { background: var(--tint-error); border-left: 3px solid var(--status-error); }
+    ${scope} .q-msg-warn { background: var(--tint-warning); border-left: 3px solid var(--status-warning); }
+  `;
+}
+
+/**
  * CSS for the /wiki reader's fact-check INTERACTION layer — the toolbar
  * `wiki-factcheck-reader.ts` inserts above the article, the evidence card a chip
  * expands, and the layer-off state its toggle flips.

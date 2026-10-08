@@ -44,9 +44,9 @@ import {
 } from "../format/query-block.ts";
 import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
 import {
-  formatQuestionTarget,
   parseQuestionAttrs,
   parseQuestionPage,
+  resolveQuestionTargets,
   type QuestionRenderOptions,
   type QuestionState,
 } from "../format/question.ts";
@@ -275,12 +275,9 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     : state.kind === "decided"
       ? `<span class="q-state">${escapeHtml(L.decided)} → <a class="q-decision" href="#${anchorSlug(state.decision)}">${escapeHtml(state.decision)}</a></span>`
       : `<span class="q-state">${escapeHtml(state.kind === "closed" ? L.closed : L.open)}</span>`;
-  const blockTo = parsed.to;
   // Neither `to=` nor `questions_to:` ⇒ the configured owner, on an
   // answerable wiki (D9).
-  const ownerTo = opts.owner ? [{ name: opts.owner, ident: null }] : [];
-  const to = blockTo ?? (opts.questionsTo.length ? opts.questionsTo : ownerTo);
-  const toSource = blockTo ? "block" : opts.questionsTo.length ? "page" : ownerTo.length ? "owner" : "none";
+  const { to, source: toSource } = resolveQuestionTargets(parsed.to, opts.questionsTo, opts.owner);
   const forHtml = to.length
     ? `<div class="q-for"><span class="q-for-label">${escapeHtml(L.for)}</span> ${escapeHtml(to.map((t) => t.name).join(", "))}</div>`
     : "";
@@ -296,7 +293,9 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     ` data-question-lang="${opts.language}"` +
     (choices.length ? ` data-question-choices="${escapeHtml(choices.join("|"))}"` : "") +
     ` data-question-to-source="${toSource}"` +
-    (to.length ? ` data-question-to="${escapeHtml(to.map(formatQuestionTarget).join("|"))}"` : "");
+    // Names only: no client reads an ident, and the reader's page should not
+    // carry one (the answer route computes `asked` on the server).
+    (to.length ? ` data-question-to="${escapeHtml(to.map((t) => t.name).join("|"))}"` : "");
   const cls = `question q-${state ? state.kind : "noid"}`;
   return `<section class="${cls}"${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
 }

@@ -39,7 +39,10 @@ const WIKI = "e2e-answers";
 const READONLY_WIKI = "e2e-answers-readonly";
 const REL = "plans/questions.mdx";
 // Synthetic throughout: invented names, ids and wording.
-const OWNER = "Rune Owner (e2e)";
+// WIKI_ANSWER_OWNER in the target format: the name is the author, the ident
+// is kept for matching (answer cards PR 3 fix round 1).
+const OWNER = "Rune Owner (X123456)";
+const OWNER_NAME = "Rune Owner";
 
 const PAGE = [
   "---",
@@ -145,7 +148,7 @@ test.describe("Answer store API (MUNINN_AUTH=off)", () => {
     });
     expect(created.status()).toBe(201);
     const saved = await created.json();
-    expect(saved.authorName).toBe(OWNER);
+    expect(saved.authorName).toBe(OWNER_NAME);
 
     const edited = await request.post(`${BASE}/api/wiki/answers`, {
       data: answer({ body: "Edited: the page's language.", answerId: saved.answerId, baseVersion: 1 }),
@@ -162,7 +165,7 @@ test.describe("Answer store API (MUNINN_AUTH=off)", () => {
     expect(mine[0]).toMatchObject({
       version: 2,
       versionCount: 2,
-      authorName: OWNER,
+      authorName: OWNER_NAME,
       body: "Edited: the page's language.",
       choice: "B",
       exported: false,
@@ -172,8 +175,8 @@ test.describe("Answer store API (MUNINN_AUTH=off)", () => {
 
     const rows = await sql!`SELECT version, author_name, author_user_id FROM wiki_answers WHERE answer_id = ${saved.answerId} ORDER BY version`;
     expect(rows.map((r) => [r.version, r.author_name, r.author_user_id])).toEqual([
-      [1, OWNER, null],
-      [2, OWNER, null],
+      [1, OWNER_NAME, null],
+      [2, OWNER_NAME, null],
     ]);
   });
 
@@ -206,7 +209,9 @@ test.describe("Answer store API (MUNINN_AUTH=off)", () => {
     const ro = await (await request.get(`${BASE}/api/wiki/page?wiki=${READONLY_WIKI}&relPath=${encodeURIComponent(REL)}`)).json();
     expect(ro.answers).toBeUndefined();
     const rw = await (await request.get(`${BASE}/api/wiki/page?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`)).json();
-    expect(rw.answers).toEqual({ answerable: true, canExport: true, owner: OWNER });
+    expect(rw.answers).toEqual({ answerable: true, canExport: true });
+    // WIKI_ANSWER_OWNER carries an ident; the page payload carries only the name.
+    expect(JSON.stringify(rw)).not.toContain("X123456");
 
     await page.goto(`${BASE}/wiki?wiki=${READONLY_WIKI}&relPath=${encodeURIComponent(REL)}`);
     const card = page.locator(".wiki-article section.question").first();
@@ -217,6 +222,6 @@ test.describe("Answer store API (MUNINN_AUTH=off)", () => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
     const live = page.locator(".wiki-article section.question").first();
     await expect(live).toHaveAttribute("data-wiki-answerable", "true");
-    await expect(live.locator(".q-for")).toHaveText(`For ${OWNER}`);
+    await expect(live.locator(".q-for")).toHaveText(`For ${OWNER_NAME}`);
   });
 });

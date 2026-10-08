@@ -190,6 +190,7 @@ import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
+import { enhanceAnswerCards, type PageAnswersInfo } from "./wiki-answer-cards.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
   askDeclineReason,
@@ -493,6 +494,9 @@ interface WikiPageDetail {
    *  (0, 1), one and two hops over the neighbour rule. ABSENT on an older
    *  server; `{}` for a bookkeeping or hub page. */
   near?: Record<string, number>;
+  /** Present only on a wiki in `WIKI_ANSWER_WIKIS`: the answer cards' own
+   *  flag (D14). Absent ⇒ every `<Question>` card stays read-only. */
+  answers?: PageAnswersInfo;
   error?: string;
 }
 
@@ -4171,6 +4175,14 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // After the fact-check layer, which anchors marks on the text as served;
       // before the hash reveal, which needs the fold and heading ids it adds.
       enhanceRefLinks(articleRoot, data.meta.relPath);
+      // `<Question>` cards: answers, composer and edit, on a wiki that takes
+      // answers only. After the ref links, so an answer's text is never linked.
+      // The registry name, not `WIKI`: under the `WIKI_DIR` override `WIKI` is
+      // "" while the answer routes still need the served wiki's own name.
+      enhanceAnswerCards(articleRoot, data.answers, {
+        wiki: FIND_SELF_WIKI || WIKI,
+        relPath: data.meta.relPath,
+      });
       applyDisplay();
       // A `#id` in the URL (a shared `#q-8`): open the folds around it, scroll to
       // it. Not on an in-place reload (`reloadCheckedPage`): the URL keeps the

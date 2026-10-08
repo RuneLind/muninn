@@ -31,6 +31,18 @@ import { QUESTION_LABELS, type QuestionLanguage } from "./question-labels.ts";
 /** The fixed extra choice every card offers beside its parsed `choices`. */
 export const QUESTION_NOT_SURE = "not-sure";
 
+/** An answer's body cap, in code points — what Postgres `char_length` counts
+ *  and the table's CHECK holds. The route refuses past it and the card's
+ *  composer counts against it. */
+export const QUESTION_ANSWER_MAX = 8000;
+
+/** Characters the way the route and Postgres count them: code points. */
+export function codePointLength(s: string): number {
+  let n = 0;
+  for (const _ of s) n++;
+  return n;
+}
+
 /** One entry of `questions_to:` or `to=`: `Name` or `Name (IDENT)`. */
 export interface QuestionTarget {
   name: string;
@@ -129,6 +141,54 @@ export function parseToAttr(value: string): QuestionTarget[] {
 /** A target as written in `questions_to:` / `to=`. */
 export function formatQuestionTarget(t: QuestionTarget): string {
   return t.ident ? `${t.name} (${t.ident})` : t.name;
+}
+
+/** Where a question's targets came from: `to=`, the page's `questions_to:`,
+ *  the configured owner, or nobody. */
+export type QuestionTargetSource = "block" | "page" | "owner" | "none";
+
+/**
+ * Who a question is for: its `to=` when it names someone, else the page's
+ * `questions_to:`, else the owner (D9). The card's `q-for` line and the answer
+ * route's `asked` flag both read this, so they name the same people.
+ */
+export function resolveQuestionTargets(
+  blockTo: QuestionTarget[] | null,
+  questionsTo: QuestionTarget[],
+  owner: string | null | undefined,
+): { to: QuestionTarget[]; source: QuestionTargetSource } {
+  if (blockTo && blockTo.length) return { to: blockTo, source: "block" };
+  if (questionsTo.length) return { to: questionsTo, source: "page" };
+  // The owner takes the target format: `Rune Lind (X111111)` is a name and an
+  // ident, so the owner's answers match on the ident like any other target's.
+  const ownerTarget = owner ? parseQuestionTarget(owner) : null;
+  if (ownerTarget) return { to: [ownerTarget], source: "owner" };
+  return { to: [], source: "none" };
+}
+
+/** Format characters (zero-width space, soft hyphen, BOM …) dropped, then
+ *  NFC — in that order, or a format character between a letter and its
+ *  combining mark blocks the composition — white space collapsed, lower-cased:
+ *  a name pasted from a document still matches. */
+const foldName = (s: string) =>
+  s.replace(/\p{Cf}/gu, "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * Did the page ask this author (D2, the O2 v1 rule)? A target matches on the
+ * NAV ident when both the target and the author carry one, else on the
+ * case-folded display name. Null when the question names nobody: "not asked"
+ * would claim someone else was.
+ */
+export function isAskedAuthor(
+  author: { name: string; navIdent: string | null },
+  targets: QuestionTarget[],
+): boolean | null {
+  if (targets.length === 0) return null;
+  return targets.some((t) =>
+    t.ident && author.navIdent
+      ? t.ident.trim().toUpperCase() === author.navIdent.trim().toUpperCase()
+      : foldName(t.name) === foldName(author.name),
+  );
 }
 
 /** The three attributes of a `<Question>` tag, read the one way the parser,
