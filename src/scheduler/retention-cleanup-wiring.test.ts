@@ -31,7 +31,14 @@ describe("src/index.ts: retention cleanup wiring", () => {
 
   test("the per-bot scheduler tick no longer runs the cleanup, so it runs once per hour process-wide", async () => {
     const text = await readFile("src/scheduler/runner.ts", "utf8");
-    for (const fn of ["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]) {
+    for (const fn of [
+      "harvestSearchSignals",
+      "cleanupOldTraces",
+      "cleanupOldSnapshots",
+      "cleanupThreadCitations",
+      "runRetentionCleanup",
+      "retention-cleanup",
+    ]) {
       expect(text, `src/scheduler/runner.ts must not call ${fn}`).not.toContain(fn);
     }
   });

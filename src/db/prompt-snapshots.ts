@@ -160,7 +160,7 @@ function toSnapshot(r: Record<string, unknown>): PromptSnapshot {
  *
  * ⚠️ **Both windows must be at least 1 day, and anything smaller THROWS.** These
  * numbers go into `NOW() - make_interval(days => n)`, so `0` resolves to `NOW()`
- * — the next scheduler tick would empty the table — and a negative one reaches
+ * — the next retention cleanup (`src/scheduler/retention-cleanup.ts`) would empty the table — and a negative one reaches
  * into the future and does the same. `src/config.ts` clamps the two env vars
  * (`positiveEnvInt`), but this function is exported and takes two plain numbers,
  * so a caller that COMPUTES a window would bypass that clamp silently. Refusing

@@ -87,6 +87,28 @@ describe("runRetentionCleanup", () => {
     expect(records.some((r) => r.level === "error" && r.properties.error === "trace boom")).toBe(true);
   });
 
+  test("a trace-delete failure still runs the snapshot and citation deletes", async () => {
+    const { deps, calls } = recordingDeps({
+      cleanupOldTraces: async () => {
+        throw new Error("trace boom");
+      },
+    });
+    await runRetentionCleanup(CONFIG, deps);
+    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+  });
+
+  test("a snapshot-delete failure is logged and still runs the citation delete", async () => {
+    const records = await capture();
+    const { deps, calls } = recordingDeps({
+      cleanupOldSnapshots: async () => {
+        throw new Error("snapshot boom");
+      },
+    });
+    await runRetentionCleanup(CONFIG, deps);
+    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+    expect(records.some((r) => r.level === "error" && r.properties.error === "snapshot boom")).toBe(true);
+  });
+
   test("log lines carry counts only: no per-bot property", async () => {
     const records = await capture();
     const { deps } = recordingDeps();
@@ -155,6 +177,75 @@ describe("startRetentionCleanup", () => {
       expect(runs).toBe(1);
     } finally {
       release();
+    }
+  });
+
+  test("a tick skipped because a run is in flight logs a warning", async () => {
+    const records = await capture();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { deps } = recordingDeps({
+      harvestSearchSignals: async () => {
+        await gate;
+        return 0;
+      },
+    });
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 10 });
+    try {
+      await Bun.sleep(50);
+      expect(records.some((r) => r.level === "warning" && r.message.join("").includes("still in flight"))).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
+  test("a run that hangs past the run bound is abandoned with a warning, and the next tick runs again", async () => {
+    const records = await capture();
+    let runs = 0;
+    let release!: () => void;
+    const never = new Promise<void>((r) => (release = r));
+    const { deps } = recordingDeps({
+      harvestSearchSignals: async () => {
+        runs++;
+        if (runs === 1) await never;
+        return 0;
+      },
+    });
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60, runTimeoutMs: 20 });
+    try {
+      await Bun.sleep(150);
+      expect(runs).toBeGreaterThanOrEqual(2);
+      expect(records.some((r) => r.level === "warning" && r.message.join("").includes("timed out after"))).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
+  test("a timed-out run that settles late does not free the slot of the newer run in flight", async () => {
+    let runs = 0;
+    let releaseFirst!: () => void;
+    const first = new Promise<void>((r) => (releaseFirst = r));
+    const never = new Promise<void>(() => {});
+    const { deps } = recordingDeps({
+      harvestSearchSignals: async () => {
+        runs++;
+        await (runs === 1 ? first : never);
+        return 0;
+      },
+    });
+    // Run 1 at 0 ms, abandoned at 100; run 2 at 300, abandoned at 400.
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 300, runTimeoutMs: 100 });
+    try {
+      await Bun.sleep(320);
+      expect(runs).toBe(2);
+      releaseFirst(); // run 1 settles late, while run 2 holds the slot
+      await Bun.sleep(10);
+      // Stop must still wait for run 2 (until its bound at ~400 ms), not return at once.
+      const t0 = performance.now();
+      await stopRetentionCleanup(1_000);
+      expect(performance.now() - t0).toBeGreaterThanOrEqual(40);
+    } finally {
+      releaseFirst();
     }
   });
 

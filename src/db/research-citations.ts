@@ -191,8 +191,8 @@ export async function getCitationsForThread(threadId: string): Promise<CitationR
  *    actually USED the source, which is the signal the Jira composer's thread
  *    seeding is built on. Only the retrieved-and-ignored tail is dropped.
  *
- * Never throws for the caller's benefit: it is called inside the scheduler's own
- * try-block beside `cleanupOldTraces`.
+ * Called from `src/scheduler/retention-cleanup.ts` inside its own try-block, after
+ * `cleanupOldTraces`.
  */
 export async function cleanupThreadCitations(retentionDays: number): Promise<number> {
   const sql = getDb();

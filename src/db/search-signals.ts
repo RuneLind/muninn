@@ -6,7 +6,7 @@
  * corrective-rescue info; muninn stores it in `traces` attributes and today lets
  * it hard-delete with the 7-day trace retention cleanup. `harvestSearchSignals`
  * rolls the research `search` spans into this table BEFORE cleanupOldTraces runs
- * (see src/scheduler/runner.ts), so the signal outlives the trace it came from.
+ * (see src/scheduler/retention-cleanup.ts), so the signal outlives the trace it came from.
  *
  * The source spans are the `search` spans written by
  * src/ai/research-knowledge.ts (name = 'search', one per sub-question), whose
