@@ -191,7 +191,7 @@ import { revealHashTarget } from "./wiki-hash-target.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { enhanceAnswerCards, type PageAnswersInfo } from "./wiki-answer-cards.ts";
-import { mountAnswerExport } from "./wiki-answer-export.ts";
+import { mountAnswerExport, unmountAnswerExport } from "./wiki-answer-export.ts";
 import { parseQuestionLanguage } from "../../../format/question-labels.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
@@ -2600,6 +2600,9 @@ function renderBreadcrumb(m: WikiListing): void {
   // Keyed on relPath (`shareNavigationKey`): under the NAME, moving between two
   // same-stem pages left the dialog open and still aimed at the page just left.
   closeShareDialogOnNavigate(m.relPath || m.name);
+  // The answer export belongs to the page that mounted it; the markdown path
+  // mounts it again after this render, an explainer never does.
+  unmountAnswerExport();
   // Stamped even when there is no breadcrumb node: it is the "which page is open"
   // answer for the Discuss popover, and every render path funnels through here.
   currentArticle = m;
@@ -2691,6 +2694,7 @@ function renderBreadcrumb(m: WikiListing): void {
 function hideBreadcrumb(): void {
   const el = document.getElementById("wikiBreadcrumb");
   if (el) el.style.display = "none";
+  unmountAnswerExport(); // an Ask answer, the start view or an issue graph: no page
   // No page is open any more, so there is nothing for the Discuss button to act
   // on. Leaving the last page stamped here is the stale-state trap: the button is
   // hidden with the breadcrumb, but every other path that reads `currentArticle`

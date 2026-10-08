@@ -21,7 +21,16 @@ import type { Config } from "../../config.ts";
 import type { AuthRole } from "../../auth/role.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
-import { EXPORT_CONFIRM_MAX_ROWS, registerWikiAnswerRoutes } from "./wiki-answers.ts";
+import { EXPORT_CONFIRM_MAX_ROWS, registerWikiAnswerRoutes, type WikiAnswerExportStore } from "./wiki-answers.ts";
+import {
+  getLatestWikiAnswerVersion,
+  insertWikiAnswerVersion,
+  listLastExportedWikiAnswers,
+  listLatestWikiAnswers,
+  listWikiAnswerLocations,
+  listWikiAnswerVersions,
+  markWikiAnswersExported,
+} from "../../db/wiki-answers.ts";
 
 setupTestDb();
 
@@ -65,7 +74,7 @@ const PAGE = [
 
 let root = "";
 
-function appFor(opts: { role?: AuthRole; identity?: boolean } = {}): Hono {
+function appFor(opts: { role?: AuthRole; identity?: boolean; exportStore?: WikiAnswerExportStore } = {}): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     if (opts.identity) {
@@ -86,7 +95,22 @@ function appFor(opts: { role?: AuthRole; identity?: boolean } = {}): Hono {
     profile: "default",
     wikiAnswers: { wikis: new Set([WIKI]), owner: "Rune Owner" },
   } as unknown as Config;
-  registerWikiAnswerRoutes(app, config);
+  registerWikiAnswerRoutes(
+    app,
+    config,
+    {
+      insert: insertWikiAnswerVersion,
+      getLatest: getLatestWikiAnswerVersion,
+      listLatest: listLatestWikiAnswers,
+      listVersions: listWikiAnswerVersions,
+    },
+    opts.exportStore ?? {
+      listLatest: listLatestWikiAnswers,
+      listLastExported: listLastExportedWikiAnswers,
+      listLocations: listWikiAnswerLocations,
+      markExported: markWikiAnswersExported,
+    },
+  );
   return app;
 }
 
@@ -131,15 +155,27 @@ async function seed() {
 
 const getExport = async (app: Hono, extra = "") => {
   const res = await app.request(`/api/wiki/answers/export?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}${extra}`);
-  return { status: res.status, body: (await res.json()) as { block: string; rows: [string, number][]; count: number; orphanCount: number; code?: string } };
+  return {
+    status: res.status,
+    body: (await res.json()) as {
+      block: string;
+      rows: [string, number][];
+      count: number;
+      orphanCount: number;
+      again?: { block: string; rows: [string, number][]; count: number };
+      code?: string;
+    },
+  };
 };
 
-const confirm = (app: Hono, rows: unknown, contentType = "application/json") =>
+const confirm = (app: Hono, rows: unknown, contentType = "application/json", page: Record<string, unknown> = { wiki: WIKI, relPath: REL }) =>
   app.request("/api/wiki/answers/export/confirm", {
     method: "POST",
     headers: { "content-type": contentType },
-    body: JSON.stringify({ rows }),
+    body: JSON.stringify({ ...page, rows }),
   });
+
+const NO_AGAIN = { block: "", rows: [], count: 0 };
 
 beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-answer-export-"));
@@ -199,7 +235,7 @@ describe("who may export", () => {
 
   test("a wiki outside WIKI_ANSWER_WIKIS exports nothing", async () => {
     const res = await appFor().request(`/api/wiki/answers/export?wiki=cards-only&relPath=${encodeURIComponent(REL)}`);
-    expect(await res.json()).toEqual({ block: "", rows: [], count: 0, orphanCount: 0 });
+    expect(await res.json()).toEqual({ block: "", rows: [], count: 0, orphanCount: 0, again: NO_AGAIN });
   });
 });
 
@@ -248,7 +284,10 @@ describe("POST confirm", () => {
     const unmarked = await getDb()`SELECT answer_id FROM wiki_answers WHERE wiki = ${WIKI} AND exported_at IS NULL`;
     expect(unmarked.map((r) => r.answer_id)).toEqual([ids.gone]);
     expect(await (await confirm(app, body.rows)).json()).toEqual({ marked: 0 });
-    expect((await getExport(app)).body).toEqual({ block: "", rows: [], count: 0, orphanCount: 0 });
+    // Nothing new; the renamed page's answer is still an orphan (E5 was copied, so it is not).
+    const after = (await getExport(app)).body;
+    expect([after.block, after.rows, after.count, after.orphanCount]).toEqual(["", [], 0, 1]);
+    expect(after.again?.count).toBe(4);
   });
 
   test("an edit between the GET and the confirm stays unexported, and exports next time in its latest version", async () => {
@@ -289,7 +328,8 @@ describe("GET export again=1", () => {
     expect(again.count).toBe(4);
     const [header, ...rest] = again.block.split("\n");
     expect(header).toContain(" · exported ");
-    expect(rest.join("\n")).toBe(EXPECTED_ANSWERS);
+    // E5 was copied, so only the renamed page's answer is still an orphan.
+    expect(rest.join("\n")).toBe(EXPECTED_ANSWERS.replace("in exp: 2", "in exp: 1"));
     expect(new Set(again.rows.map(([id, v]) => `${id}:${v}`))).toEqual(
       new Set([`${ids.e1}:2`, `${ids.e2}:1`, `${ids.e5}:1`, `${ids.e9}:1`]),
     );
@@ -308,6 +348,98 @@ describe("GET export again=1", () => {
   });
 
   test("nothing ever exported ⇒ empty", async () => {
-    expect((await getExport(appFor(), "&again=1")).body).toEqual({ block: "", rows: [], count: 0, orphanCount: 0 });
+    expect((await getExport(appFor(), "&again=1")).body).toEqual({ block: "", rows: [], count: 0, orphanCount: 2 });
+  });
+});
+
+describe("answer export fix round 1", () => {
+  const countOrphans = async () => {
+    const res = await appFor().request(`/api/wiki/answers/export?wiki=${WIKI}&orphans=1`);
+    return ((await res.json()) as { orphans: { answerId: string; version: number }[] }).orphans;
+  };
+
+  test("a page with nothing to copy still reports the wiki's orphans", async () => {
+    await getDb()`UPDATE wiki_answers SET exported_at = now() WHERE wiki = ${WIKI} AND rel_path = ${REL}`;
+    const plain = (await getExport(appFor())).body;
+    expect([plain.count, plain.orphanCount]).toEqual([0, 1]);
+    const again = (await getExport(appFor(), "&again=1")).body;
+    expect(again.orphanCount).toBe(1);
+  });
+
+  test("an orphan is an answer whose LATEST version is unexported and not redacted", async () => {
+    // The renamed page's answer was copied before the rename: it reached the agent.
+    await getDb()`UPDATE wiki_answers SET exported_at = now() WHERE answer_id = ${ids.gone}`;
+    expect((await countOrphans()).map((o) => o.answerId)).toEqual([ids.e5]);
+    // E5 redacted: nothing left to copy.
+    await getDb()`UPDATE wiki_answers SET redacted_at = now(), body = '', choice = NULL WHERE answer_id = ${ids.e5}`;
+    expect(await countOrphans()).toEqual([]);
+    expect((await getExport(appFor())).body.orphanCount).toBe(0);
+    // An edit after the copy is new again: the renamed page's answer is an orphan in version 2.
+    await insert({ id: ids.gone, version: 2, rel: "plans/gammelt-navn.mdx", q: "E1", name: "Ola Nordmann", body: "Etter kopien.", created: at(30) });
+    expect((await countOrphans()).map((o) => [o.answerId, o.version])).toEqual([[ids.gone, 2]]);
+  });
+
+  test("orphans=1 carries what copying an orphan by hand needs", async () => {
+    await getDb()`UPDATE wiki_answers SET choice = 'A' WHERE answer_id = ${ids.gone}`;
+    const orphans = (await (await appFor().request(`/api/wiki/answers/export?wiki=${WIKI}&orphans=1`)).json()) as {
+      orphans: Record<string, unknown>[];
+    };
+    expect(orphans.orphans.find((o) => o.answerId === ids.gone)).toEqual({
+      answerId: ids.gone,
+      relPath: "plans/gammelt-navn.mdx",
+      questionId: "E1",
+      authorName: "Ola Nordmann",
+      version: 1,
+      createdAt: Date.parse(at(4)),
+      time: "07.10.2026 21:36",
+      choice: "A",
+      body: "Gammel side.",
+      reason: "page_gone",
+    });
+  });
+
+  test("a confirm marks only rows of the page it names", async () => {
+    const app = appFor();
+    // The renamed page's answer, confirmed under this page: not marked.
+    expect(await (await confirm(app, [[ids.gone, 1]])).json()).toEqual({ marked: 0 });
+    expect((await getDb()`SELECT exported_at FROM wiki_answers WHERE answer_id = ${ids.gone}`)[0]!.exported_at).toBeNull();
+    // Without a page, no confirm at all.
+    const res = await confirm(app, [[ids.e2, 1]], "application/json", {});
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ code: "bad_request", error: "wiki and relPath required" });
+    expect((await getDb()`SELECT exported_at FROM wiki_answers WHERE answer_id = ${ids.e2}`)[0]!.exported_at).toBeNull();
+  });
+
+  test("a version the answer does not have marks nothing", async () => {
+    expect(await (await confirm(appFor(), [[ids.e1, 99]])).json()).toEqual({ marked: 0 });
+    const n = (await getDb()`SELECT count(*)::int AS n FROM wiki_answers WHERE answer_id = ${ids.e1} AND exported_at IS NOT NULL`)[0]!.n;
+    expect(n).toBe(0);
+  });
+
+  test("a version past the int4 range is a 400, not a 500", async () => {
+    const res = await confirm(appFor(), [[ids.e1, 2147483648]]);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("bad_rows");
+  });
+
+  test("the plain GET carries the last batch for Copy again, from ONE orphan scan", async () => {
+    let scans = 0;
+    const app = appFor({
+      exportStore: {
+        listLatest: listLatestWikiAnswers,
+        listLastExported: listLastExportedWikiAnswers,
+        listLocations: (w) => (scans++, listWikiAnswerLocations(w)),
+        markExported: markWikiAnswersExported,
+      },
+    });
+    await confirm(app, [[ids.e2, 1]]);
+    scans = 0;
+    const { body } = await getExport(app);
+    expect(scans).toBe(1);
+    expect(body.count).toBe(3);
+    expect(body.again?.count).toBe(1);
+    expect(body.again?.rows).toEqual([[ids.e2, 1]]);
+    expect(body.again?.block).toContain("### E2 — Ola Nordmann (not asked)");
+    expect(body.again?.block).toEndWith(`<!-- orphaned answers in exp: ${body.orphanCount} -->\n`);
   });
 });

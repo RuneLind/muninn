@@ -77,10 +77,31 @@ export function exportHeading(a: ExportAnswer): string {
   return `### ${a.questionId} — ${oneLine(a.authorName)}${asked}, ${answerStamp(a.createdAt)}${choice}, version ${a.version}`;
 }
 
-/** The body as a blockquote, every line prefixed; nothing for an empty or redacted body. */
+/** The body as a blockquote, every line prefixed; nothing for an empty or
+ *  redacted body. CRLF and lone CR count as line breaks, so no `\r` is left
+ *  inside a quoted line. */
 export function quoteBody(body: string): string[] {
   if (body === "") return [];
-  return body.split("\n").map((line) => (line === "" ? ">" : `> ${line}`));
+  return body
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => (line === "" ? ">" : `> ${line}`));
+}
+
+const HEADER_STAMP = / · exported \d{4}-\d{2}-\d{2} \d{2}:\d{2} -->$/;
+
+/**
+ * The block with its header's time set to `ms`. The reader prefetches the
+ * block minutes before the click, so the click stamps the copy with its own
+ * time — the minute `again=1` later prints for the same batch, since the
+ * confirm that follows the copy sets `exported_at`. A block without the header
+ * comes back unchanged.
+ */
+export function restampAnswerExport(block: string, ms: number): string {
+  const nl = block.indexOf("\n");
+  const header = nl === -1 ? block : block.slice(0, nl);
+  if (!header.startsWith("<!-- answers · ") || !HEADER_STAMP.test(header)) return block;
+  return header.replace(HEADER_STAMP, ` · exported ${exportStamp(ms)} -->`) + (nl === -1 ? "" : block.slice(nl));
 }
 
 /** The whole block, or `""` when there is nothing to export. */

@@ -108,3 +108,18 @@ describe("the block", () => {
     expect(block.split("\n")[0]).toBe("<!-- answers · w · a-- >b.md · exported 2026-10-07 21:32 -->");
   });
 });
+
+describe("answer export fix round 1: line breaks", () => {
+  test("CRLF and a lone CR break lines like LF, and no \\r is left in the block", () => {
+    expect(quoteBody("Ett.\r\n\r\nTo.\rTre.")).toEqual(["> Ett.", ">", "> To.", "> Tre."]);
+    const block = formatAnswerExport({
+      wiki: "w",
+      relPath: "p.mdx",
+      exportedAt: SUMMER,
+      answers: [a({ body: "Linje én.\r\nLinje to." })],
+      orphanCount: 0,
+    });
+    expect(block).not.toContain("\r");
+    expect(block).toContain("> Linje én.\n> Linje to.\n");
+  });
+});

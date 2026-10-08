@@ -158,42 +158,67 @@ export async function listLastExportedWikiAnswers(wiki: string, relPath: string)
   return rows.map(rowToVersion);
 }
 
-/** One answer of a wiki, by where it points: the orphan check's input. */
+/** One answer of a wiki whose latest version has not reached the agent yet:
+ *  the orphan check's input. */
 export interface WikiAnswerLocation {
   answerId: string;
   relPath: string;
   questionId: string;
   authorName: string;
+  /** The latest version. */
+  version: number;
   /** Epoch ms of the latest version. */
   createdAt: number;
+  choice: string | null;
+  body: string;
 }
 
-/** Every answer in one wiki (latest version), for the orphan check. */
+/**
+ * Every answer in one wiki whose LATEST version is neither exported nor
+ * redacted, for the orphan check. An exported answer already reached the agent
+ * and a redacted one has nothing left to copy, so neither can be an orphan:
+ * without this rule a plan moved to `archive/` keeps every answer it ever had
+ * counted as orphaned, and the count only grows.
+ */
 export async function listWikiAnswerLocations(wiki: string): Promise<WikiAnswerLocation[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT DISTINCT ON (answer_id) answer_id, rel_path, question_id, author_name, created_at
-    FROM wiki_answers WHERE wiki = ${wiki}
-    ORDER BY answer_id, version DESC
+    SELECT * FROM (
+      SELECT DISTINCT ON (answer_id) answer_id, version, rel_path, question_id, author_name, created_at,
+        choice, body, exported_at, redacted_at
+      FROM wiki_answers WHERE wiki = ${wiki}
+      ORDER BY answer_id, version DESC
+    ) latest
+    WHERE exported_at IS NULL AND redacted_at IS NULL
   `;
   return rows.map((r) => ({
     answerId: r.answer_id,
     relPath: r.rel_path,
     questionId: r.question_id,
     authorName: r.author_name,
+    version: r.version,
     createdAt: ms(r.created_at)!,
+    choice: r.choice,
+    body: r.body,
   }));
 }
 
 /**
  * Mark an export as copied: in ONE statement, set `exported_at = now()` on
  * every listed `(answer_id, version)` and on that answer's earlier versions,
- * where it is still null. `now()` is the transaction's start time, so every
- * row of one confirm shares one timestamp — the batch `again=1` finds again.
- * A version saved after the export was read is not listed and stays
- * unexported; a retried confirm marks nothing. Returns how many rows it set.
+ * where it is still null — but only on rows of the given page, and only for a
+ * listed pair that exists there. A pair naming a version the answer does not
+ * have, or an answer on another page, marks nothing. `now()` is the
+ * transaction's start time, so every row of one confirm shares one timestamp —
+ * the batch `again=1` finds again. A version saved after the export was read
+ * is not listed and stays unexported; a retried confirm marks nothing. Returns
+ * how many rows it set.
  */
-export async function markWikiAnswersExported(rows: readonly (readonly [string, number])[]): Promise<number> {
+export async function markWikiAnswersExported(
+  wiki: string,
+  relPath: string,
+  rows: readonly (readonly [string, number])[],
+): Promise<number> {
   if (rows.length === 0) return 0;
   const sql = getDb();
   const ids = rows.map((r) => r[0]);
@@ -202,6 +227,12 @@ export async function markWikiAnswersExported(rows: readonly (readonly [string, 
     UPDATE wiki_answers w SET exported_at = now()
     FROM unnest(${ids as string[]}::uuid[], ${versions as number[]}::int[]) AS l(answer_id, version)
     WHERE w.answer_id = l.answer_id AND w.version <= l.version AND w.exported_at IS NULL
+      AND w.wiki = ${wiki} AND w.rel_path = ${relPath}
+      AND EXISTS (
+        SELECT 1 FROM wiki_answers x
+        WHERE x.answer_id = l.answer_id AND x.version = l.version
+          AND x.wiki = ${wiki} AND x.rel_path = ${relPath}
+      )
   `;
   return updated.count;
 }
