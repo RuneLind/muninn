@@ -27,6 +27,7 @@ import {
 } from "../config.ts";
 import { adcTokens, type GcpTokenProvider } from "../gcp/access-token.ts";
 import { readBounded, readBoundedBytes } from "../utils/bounded-fetch.ts";
+import { PAGE_FILE_KIND_EXTENSIONS, PAGE_FILE_MAX_BYTES } from "../format/query-block.ts";
 import { isReadonlyWikiRoot } from "./readonly.ts";
 import { findWikiByRoot, getWikiRegistry } from "./registry-memo.ts";
 import { getWikiIndex } from "./store.ts";
@@ -51,8 +52,21 @@ const MAX_LIST_PAGE_BYTES = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 /** The only hidden file admitted, and only at the root. */
 const READER_CONFIG = ".wiki-reader.json";
-/** Pages only: no route serves wiki images, so an image would be unreachable bytes. */
-const ALLOWED_EXTENSIONS = new Set([".md", ".mdx", ".html"]);
+/** Pages, plus the data files a page's `<Query>`/`<CaseBoard>`/`<DeltaTable>`
+ *  reads beside itself (`page-files.ts`). No route serves wiki images, so an
+ *  image would be unreachable bytes. */
+const PAGE_EXTENSIONS: ReadonlySet<string> = new Set([".md", ".mdx", ".html"]);
+const DATA_EXTENSIONS: ReadonlySet<string> = new Set(Object.values(PAGE_FILE_KIND_EXTENSIONS).flat());
+const ALLOWED_EXTENSIONS: ReadonlySet<string> = new Set([...PAGE_EXTENSIONS, ...DATA_EXTENSIONS]);
+/** Per-object cap for a data file: the reader serves none over
+ *  `PAGE_FILE_MAX_BYTES` (1 MB), so bytes past it are never read. The largest
+ *  data file measured 2026-10-08 (melosys-kode-wiki, 28 files) is 26 KB. */
+export const MAX_DATA_OBJECT_BYTES = PAGE_FILE_MAX_BYTES;
+
+/** The byte cap for one mirrored relPath: a data file's, or a page's. */
+export function maxObjectBytesFor(rel: string): number {
+  return DATA_EXTENSIONS.has(path.posix.extname(rel).toLowerCase()) ? MAX_DATA_OBJECT_BYTES : MAX_OBJECT_BYTES;
+}
 /** Temp files for the atomic write — hidden, so the wiki scan skips them. */
 const TMP_INFIX = ".bmtmp-";
 /** `.` + name + `.bmtmp-` + a 36-char UUID: the temp name is the segment plus 44 bytes. */
@@ -737,9 +751,10 @@ export class BucketMirror {
         continue;
       }
       byFold.set(foldKey(rel), rel);
-      if (obj.size > MAX_OBJECT_BYTES) {
+      const cap = maxObjectBytesFor(rel);
+      if (obj.size > cap) {
         result.skipped++;
-        this.#warnObject(obj, `larger than ${MAX_OBJECT_BYTES} bytes (${obj.size}); any local copy is removed`);
+        this.#warnObject(obj, `larger than ${cap} bytes (${obj.size}); any local copy is removed`);
         continue;
       }
       present.add(rel);
@@ -805,7 +820,7 @@ export class BucketMirror {
             inodes.delete(key!);
           }
         }
-        const bytes = await this.#download(obj, signal);
+        const bytes = await this.#download(obj, maxObjectBytesFor(rel), signal);
         signal.throwIfAborted();
         const updated = obj.updated ? Date.parse(obj.updated) : NaN;
         await atomicWrite(realRoot, rel, bytes, Number.isFinite(updated) ? updated : undefined);
@@ -995,14 +1010,14 @@ export class BucketMirror {
     return out;
   }
 
-  async #download(obj: GcsObject, signal: AbortSignal): Promise<Uint8Array> {
+  async #download(obj: GcsObject, cap: number, signal: AbortSignal): Promise<Uint8Array> {
     const url = `${this.deps.gcsBase}/storage/v1/b/${encodeURIComponent(this.entry.bucket)}/o/` +
       `${encodeURIComponent(obj.name)}?alt=media&generation=${encodeURIComponent(obj.generation)}`;
     // identity: a gzip-stored object (`gcloud storage cp -Z`) is otherwise sent
     // compressed and inflated by fetch, so its declared length says nothing.
     const res = await this.#get(url, DOWNLOAD_TIMEOUT_MS, signal, { "Accept-Encoding": "identity" });
     if (!res.ok) throw new GcsHttpError(res.status, "download", await this.#errorBody(res, "download"));
-    return await readBoundedBytes(res, MAX_OBJECT_BYTES, "download");
+    return await readBoundedBytes(res, cap, "download");
   }
 }
 

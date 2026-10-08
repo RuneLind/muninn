@@ -9,6 +9,7 @@ import {
   atomicWrite,
   BucketMirror,
   checkMirrorRoot,
+  MAX_DATA_OBJECT_BYTES,
   MAX_OBJECT_BYTES,
   MIRROR_LOCK,
   MIRROR_MARKER,
@@ -18,6 +19,7 @@ import {
   type BucketMirrorDeps,
   type TokenSource,
 } from "./bucket-mirror.ts";
+import { loadPageFiles } from "./page-files.ts";
 
 // ── Config parse ─────────────────────────────────────────────────
 
@@ -96,6 +98,11 @@ describe("objectRelPath", () => {
     [".wiki-reader.json", "", ".wiki-reader.json"],
     ["p/.wiki-reader.json", "p/", ".wiki-reader.json"],
     ["norsk/æøå side.mdx", "", "norsk/æøå side.mdx"],
+    // The data files a page's Query/CaseBoard/DeltaTable reads beside itself.
+    ["plans/side-sql-resultat/Q-1.csv", "", "plans/side-sql-resultat/Q-1.csv"],
+    ["plans/side-sql-resultat/Q-1.SQL", "", "plans/side-sql-resultat/Q-1.SQL"],
+    ["felles/data/cases.yaml", "felles/", "data/cases.yaml"],
+    ["data/cases.yml", "", "data/cases.yml"],
   ];
   for (const [name, prefix, rel] of ok) {
     test(`admits ${JSON.stringify(name)} under ${JSON.stringify(prefix)}`, () => {
@@ -119,6 +126,11 @@ describe("objectRelPath", () => {
     ["plans/.wiki-reader.json", "", /hidden/],
     [".bucket-mirror", "", /hidden/],
     ["data.json", "", /extension/],
+    ["data.tsv", "", /extension/],
+    ["data.xlsx", "", /extension/],
+    ["notes.txt", "", /extension/],
+    ["plans/.hidden/q.csv", "", /hidden/],
+    ["plans/.q.csv", "", /hidden/],
     ["run.sh", "", /extension/],
     ["README", "", /extension/],
     ["other/x.md", "felles/", /outside the prefix/],
@@ -351,6 +363,47 @@ describe("BucketMirror.pollOnce against a fake GCS", () => {
     objects.set("big.md", { generation: 2, body: "x", size: MAX_OBJECT_BYTES + 1 });
     expect(await m.pollOnce()).toMatchObject({ downloaded: 0, deleted: 0, skipped: 1 });
     expect(await read("big.md")).toBe("small");
+  });
+
+  test("data files in a sibling subfolder are mirrored and read by the page beside them", async () => {
+    const page = [
+      "# Side",
+      '<Query id="Q-1" csv="side-sql-resultat/Q-1.csv" sql="side-sql-resultat/Q-1.sql" />',
+      '<CaseBoard src="../data/cases.yaml" />',
+    ].join("\n");
+    objects.set("plans/side.mdx", { generation: 1, body: page });
+    objects.set("plans/side-sql-resultat/Q-1.csv", { generation: 1, body: "a,b\n1,2\n" });
+    objects.set("plans/side-sql-resultat/Q-1.sql", { generation: 1, body: "select 1;" });
+    objects.set("data/cases.yaml", { generation: 1, body: "- id: x\n" });
+    const m = mirror();
+    expect(await m.pollOnce()).toMatchObject({ listed: 4, downloaded: 4, skipped: 0 });
+    const files = await loadPageFiles(root, "plans/side.mdx", await read("plans/side.mdx"));
+    expect(files.get("side-sql-resultat/Q-1.csv")).toEqual({ ok: true, text: "a,b\n1,2\n" });
+    expect(files.get("side-sql-resultat/Q-1.sql")).toEqual({ ok: true, text: "select 1;" });
+    expect(files.get("../data/cases.yaml")).toEqual({ ok: true, text: "- id: x\n" });
+    // Gone from the bucket ⇒ gone from the mirror, like a page.
+    objects.delete("plans/side-sql-resultat/Q-1.csv");
+    expect(await m.pollOnce()).toMatchObject({ deleted: 1 });
+    expect(existsSync(path.join(root, "plans/side-sql-resultat/Q-1.csv"))).toBe(false);
+    expect(await read("plans/side-sql-resultat/Q-1.sql")).toBe("select 1;");
+  });
+
+  test("a data file over its 1 MB cap is refused, a page of the same size mirrored", async () => {
+    expect(MAX_DATA_OBJECT_BYTES).toBe(1024 * 1024);
+    const over = new Uint8Array(MAX_DATA_OBJECT_BYTES + 1).fill(0x61);
+    objects.set("plans/big.csv", { generation: 1, body: over });
+    objects.set("plans/big.yaml", { generation: 1, body: over });
+    objects.set("plans/big.md", { generation: 1, body: over });
+    objects.set("plans/fits.csv", { generation: 1, body: new Uint8Array(MAX_DATA_OBJECT_BYTES).fill(0x61) });
+    expect(await mirror().pollOnce()).toMatchObject({ listed: 4, downloaded: 2, skipped: 2 });
+    expect((await readdir(path.join(root, "plans"))).sort()).toEqual(["big.md", "fits.csv"]);
+  });
+
+  test("a data file whose body outgrows a small listed size fails at the data cap", async () => {
+    objects.set("a.md", { generation: 1, body: "a" });
+    objects.set("q.csv", { generation: 1, body: new Uint8Array(MAX_DATA_OBJECT_BYTES + 1).fill(0x61), size: 10 });
+    expect(await mirror().pollOnce()).toMatchObject({ downloaded: 1, failed: 1 });
+    expect(existsSync(path.join(root, "q.csv"))).toBe(false);
   });
 
   test("refused names are skipped, never written outside the root", async () => {
