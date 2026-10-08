@@ -7,6 +7,7 @@
  *   GET  /api/wiki/answers/export?wiki=&relPath=[&again=1]   (admin; PR 4)
  *   GET  /api/wiki/answers/export?wiki=&orphans=1           (admin; PR 4)
  *   POST /api/wiki/answers/export/confirm  {wiki, relPath, rows: [[answerId, version], …]}  (admin; PR 4)
+ *   POST /api/wiki/answers/export/confirm  {wiki, orphans: true, rows}        (admin; the orphan copy)
  *
  * Its own group so `MUNINN_PROFILE=nais` keeps it (D14) while it drops `wiki`.
  * Both routes resolve the page through the read slice's own ladder
@@ -31,7 +32,7 @@ import { resolveReadRequest, resolveScopedPage } from "./wiki-read-scope.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { getWikiIndex, parseFrontmatter, readWikiPage, stripFrontmatter, type WikiIndex } from "../../wiki/store.ts";
-import { answerStamp, formatAnswerExport, type ExportAnswer } from "../../wiki/answer-export.ts";
+import { answerStamp, formatAnswerExport, formatOrphanExport, type ExportAnswer } from "../../wiki/answer-export.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
 import {
   codePointLength,
@@ -56,6 +57,7 @@ import {
   listWikiAnswerLocations,
   listWikiAnswerVersions,
   markWikiAnswersExported,
+  markWikiOrphanAnswersExported,
   WikiAnswerVersionConflict,
   type LatestWikiAnswer,
   type WikiAnswerLocation,
@@ -109,6 +111,7 @@ export interface WikiAnswerExportStore {
   listLastExported: typeof listLastExportedWikiAnswers;
   listLocations: typeof listWikiAnswerLocations;
   markExported: typeof markWikiAnswersExported;
+  markOrphansExported: typeof markWikiOrphanAnswersExported;
 }
 
 const defaultExportStore: WikiAnswerExportStore = {
@@ -116,6 +119,7 @@ const defaultExportStore: WikiAnswerExportStore = {
   listLastExported: listLastExportedWikiAnswers,
   listLocations: listWikiAnswerLocations,
   markExported: markWikiAnswersExported,
+  markOrphansExported: markWikiOrphanAnswersExported,
 };
 
 /** One orphaned answer: its page no longer resolves, or its question is gone
@@ -174,6 +178,31 @@ export async function findOrphanAnswers(
     }
   }
   return out.sort((a, b) => a.relPath.localeCompare(b.relPath) || a.createdAt - b.createdAt);
+}
+
+/** The orphans as the reader's "Copy orphaned answers" copies them: the block
+ *  and the exact `(answerId, version)` rows a confirm would mark. */
+function orphanExportOf(wiki: string, orphans: readonly OrphanAnswer[], exportedAt: number) {
+  return {
+    block: formatOrphanExport({
+      wiki,
+      exportedAt,
+      answers: orphans.map((o) => ({
+        questionId: o.questionId,
+        authorName: o.authorName,
+        asked: null,
+        createdAt: o.createdAt,
+        choice: o.choice,
+        body: o.body,
+        version: o.version,
+        redacted: false,
+        relPath: o.relPath,
+        reason: o.reason,
+      })),
+    }),
+    rows: orphans.map((o) => [o.answerId, o.version] as [string, number]),
+    count: orphans.length,
+  };
 }
 
 /** One version as the GET shows it. Never the author's oid or NAV ident. */
@@ -506,13 +535,16 @@ export function registerWikiAnswerRoutes(
       const again = c.req.query("again") === "1";
       if (!page.entry || !wikiTakesAnswers(page.entry.name, answerConfig())) {
         const empty = { block: "", rows: [], count: 0, orphanCount: 0 };
-        return c.json(again ? empty : { ...empty, again: { block: "", rows: [], count: 0 } });
+        const none = { block: "", rows: [], count: 0 };
+        return c.json(again ? empty : { ...empty, again: none, orphanExport: none });
       }
       const name = page.entry.name;
       // ONE orphan scan per GET, whether or not the page has anything to copy:
-      // the trailer and the reader's orphan note both report it. The reader asks
-      // for the plain GET only, which carries the last batch as `again` too.
-      const orphanCount = (await findOrphanAnswers(name, page.index, exportStore)).length;
+      // the trailer and the reader's orphan button both report it. The reader
+      // asks for the plain GET only, which carries the last batch as `again`
+      // and the orphans' own block as `orphanExport` too.
+      const orphans = await findOrphanAnswers(name, page.index, exportStore);
+      const orphanCount = orphans.length;
       const owner = answerConfig().owner;
       let targets: Map<string, QuestionTarget[]> | null = null;
       const build = async (picked: ExportRow[], exportedAt: number) => {
@@ -538,7 +570,12 @@ export function registerWikiAnswerRoutes(
       const fresh = (await exportStore.listLatest(name, page.meta.relPath)).filter(
         (a) => a.exportedAt === null && a.redactedAt === null,
       );
-      return c.json({ ...(await build(fresh, Date.now())), orphanCount, again: await lastBatch() });
+      return c.json({
+        ...(await build(fresh, Date.now())),
+        orphanCount,
+        again: await lastBatch(),
+        orphanExport: orphanExportOf(name, orphans, Date.now()),
+      });
     } catch (e) {
       log.error("answer export failed for {wiki}: {error}", { wiki, error: e instanceof Error ? e.message : String(e) });
       return c.json({ error: "export unavailable", code: "store_failed" }, 500);
@@ -558,6 +595,15 @@ export function registerWikiAnswerRoutes(
     const b = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
     const wiki = typeof b.wiki === "string" ? b.wiki : undefined;
     const relPath = typeof b.relPath === "string" ? b.relPath : undefined;
+    if (b.orphans === true) {
+      if (!wiki) return err(c, 400, "bad_request", "wiki required");
+      if (b.relPath !== undefined) return err(c, 400, "bad_request", "an orphan confirm names no relPath");
+      const rows = parseConfirmRows(b.rows);
+      if (!rows) {
+        return err(c, 400, "bad_rows", `rows must be 1–${EXPORT_CONFIRM_MAX_ROWS} [answerId, version] pairs`);
+      }
+      return confirmOrphans(c, wiki, rows);
+    }
     if (!wiki || !relPath) return err(c, 400, "bad_request", "wiki and relPath required");
     const rows = parseConfirmRows(b.rows);
     if (!rows) {
@@ -576,4 +622,31 @@ export function registerWikiAnswerRoutes(
       return c.json({ error: "export not confirmed", code: "store_failed" }, 500);
     }
   });
+
+  /** The orphan copy's confirm: marks only the listed rows that are, right
+   *  now, the latest version of an orphan of this wiki — the orphan rule
+   *  recomputed here, never the client's word — each on its own page. */
+  async function confirmOrphans(c: Context, wiki: string, rows: [string, number][]) {
+    const { entry, unknownWiki } = resolveReadRequest(readSliceOnly, wiki, undefined);
+    if (unknownWiki || !entry) return err(c, 404, "no_page", "no wiki configured for that name");
+    if (!wikiTakesAnswers(entry.name, answerConfig())) {
+      return err(c, 403, "not_answerable", `wiki "${wiki}" does not take answers (WIKI_ANSWER_WIKIS)`);
+    }
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return err(c, 503, "wiki_unavailable", "wiki directory not found");
+    try {
+      const now = new Map(
+        (await findOrphanAnswers(entry.name, index, exportStore)).map((o) => [`${o.answerId}:${o.version}`, o.relPath]),
+      );
+      const verified: [string, number, string][] = [];
+      for (const [id, v] of rows) {
+        const rel = now.get(`${id}:${v}`);
+        if (rel !== undefined) verified.push([id, v, rel]);
+      }
+      return c.json({ marked: await exportStore.markOrphansExported(entry.name, verified) });
+    } catch (e) {
+      log.error("orphan export confirm failed: {error}", { error: e instanceof Error ? e.message : String(e) });
+      return c.json({ error: "export not confirmed", code: "store_failed" }, 500);
+    }
+  }
 }

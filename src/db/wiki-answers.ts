@@ -212,26 +212,48 @@ export async function listWikiAnswerLocations(wiki: string): Promise<WikiAnswerL
  * transaction's start time, so every row of one confirm shares one timestamp —
  * the batch `again=1` finds again. A version saved after the export was read
  * is not listed and stays unexported; a retried confirm marks nothing. Returns
- * how many rows it set.
+ * how many rows it set. Both confirms run {@link markExported}.
  */
 export async function markWikiAnswersExported(
   wiki: string,
   relPath: string,
   rows: readonly (readonly [string, number])[],
 ): Promise<number> {
+  return markExported(
+    wiki,
+    rows.map(([id, version]) => [id, version, relPath] as const),
+  );
+}
+
+/**
+ * The orphan copy's confirm: {@link markWikiAnswersExported} with each row on
+ * its own page — `[answerId, version, relPath]`, the relPath the orphan check
+ * reported. The caller passes only rows it verified are orphans of `wiki` right
+ * now. One statement, so the whole copy shares one `exported_at`.
+ */
+export async function markWikiOrphanAnswersExported(
+  wiki: string,
+  rows: readonly (readonly [string, number, string])[],
+): Promise<number> {
+  return markExported(wiki, rows);
+}
+
+async function markExported(wiki: string, rows: readonly (readonly [string, number, string])[]): Promise<number> {
   if (rows.length === 0) return 0;
   const sql = getDb();
   const ids = rows.map((r) => r[0]);
   const versions = rows.map((r) => r[1]);
+  const rels = rows.map((r) => r[2]);
   const updated = await sql`
     UPDATE wiki_answers w SET exported_at = now()
-    FROM unnest(${ids as string[]}::uuid[], ${versions as number[]}::int[]) AS l(answer_id, version)
+    FROM unnest(${ids as string[]}::uuid[], ${versions as number[]}::int[], ${rels as string[]}::text[])
+      AS l(answer_id, version, rel_path)
     WHERE w.answer_id = l.answer_id AND w.version <= l.version AND w.exported_at IS NULL
-      AND w.wiki = ${wiki} AND w.rel_path = ${relPath}
+      AND w.wiki = ${wiki} AND w.rel_path = l.rel_path
       AND EXISTS (
         SELECT 1 FROM wiki_answers x
         WHERE x.answer_id = l.answer_id AND x.version = l.version
-          AND x.wiki = ${wiki} AND x.rel_path = ${relPath}
+          AND x.wiki = ${wiki} AND x.rel_path = l.rel_path
       )
   `;
   return updated.count;

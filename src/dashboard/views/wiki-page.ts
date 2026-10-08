@@ -1366,7 +1366,7 @@ export async function renderWikiPage(opts?: {
     /* Answer cards' export (PR 4): admin-only, beside the other page actions. */
     .wiki-answer-export { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .wiki-bc-answers:disabled { cursor: default; opacity: 0.55; }
-    .wiki-answer-export-orphans, .wiki-answer-export-msg { font-size: 12px; color: var(--text-muted); }
+    .wiki-answer-export-msg { font-size: 12px; color: var(--text-muted); }
     .wiki-answer-export-msg:empty { display: none; }
     /* ⧉ Copy path is a utility, not one of the three article ACTIONS beside it:
        quieter, and ICON-ONLY — the words cost the trail ~104px on a row where

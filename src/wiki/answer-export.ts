@@ -90,17 +90,22 @@ export function quoteBody(body: string): string[] {
 
 const HEADER_STAMP = / · exported \d{4}-\d{2}-\d{2} \d{2}:\d{2} -->$/;
 
+/** The page block's header opens with this; the orphan block's with the other. */
+const PAGE_HEADER = "<!-- answers · ";
+const ORPHAN_HEADER = "<!-- orphaned answers · ";
+
 /**
  * The block with its header's time set to `ms`. The reader prefetches the
- * block minutes before the click, so the click stamps the copy with its own
- * time — the minute `again=1` later prints for the same batch, since the
- * confirm that follows the copy sets `exported_at`. A block without the header
- * comes back unchanged.
+ * block minutes before the click, so the copy carries the click's time rather
+ * than the fetch's. The confirm that follows sets `exported_at` with the
+ * database's `now()`, after the clipboard write and a round trip, so the
+ * minute `again=1` later prints is usually this one and can be the next. A
+ * block without either header comes back unchanged.
  */
 export function restampAnswerExport(block: string, ms: number): string {
   const nl = block.indexOf("\n");
   const header = nl === -1 ? block : block.slice(0, nl);
-  if (!header.startsWith("<!-- answers · ") || !HEADER_STAMP.test(header)) return block;
+  if (!(header.startsWith(PAGE_HEADER) || header.startsWith(ORPHAN_HEADER)) || !HEADER_STAMP.test(header)) return block;
   return header.replace(HEADER_STAMP, ` · exported ${exportStamp(ms)} -->`) + (nl === -1 ? "" : block.slice(nl));
 }
 
@@ -113,11 +118,46 @@ export function formatAnswerExport(opts: {
   orphanCount: number;
 }): string {
   if (opts.answers.length === 0) return "";
-  const out = [`<!-- answers · ${commentSafe(opts.wiki)} · ${commentSafe(opts.relPath)} · exported ${exportStamp(opts.exportedAt)} -->`];
+  const out = [`${PAGE_HEADER}${commentSafe(opts.wiki)} · ${commentSafe(opts.relPath)} · exported ${exportStamp(opts.exportedAt)} -->`];
   opts.answers.forEach((a, i) => {
     if (i > 0) out.push("");
     out.push(exportHeading(a), ...(a.redacted ? [] : quoteBody(a.body)));
   });
   out.push("", `<!-- orphaned answers in ${commentSafe(opts.wiki)}: ${opts.orphanCount} -->`);
+  return out.join("\n") + "\n";
+}
+
+/** An orphan as the orphan block prints it: an answer plus the page it was
+ *  given on and why it no longer resolves. */
+export interface OrphanExportAnswer extends ExportAnswer {
+  relPath: string;
+  reason: "page_gone" | "question_gone";
+}
+
+const ORPHAN_REASON = { page_gone: "page gone", question_gone: "question gone" } as const;
+
+/**
+ * The wiki's orphaned answers (O4) as one block, for the reader's "Copy
+ * orphaned answers": a header naming the wiki, then each answer as on a page
+ * block with the page it was given on and why it is an orphan appended to its
+ * heading. No trailer: every answer in it is an orphan. `""` when there are none.
+ *
+ * ```markdown
+ * <!-- orphaned answers · mimir · exported 2026-10-08 09:14 -->
+ * ### O3 — Rune Lind, 07.10.2026 21:32, chose B, version 2 · plans/old.mdx, page gone
+ * > The page's language.
+ * ```
+ */
+export function formatOrphanExport(opts: {
+  wiki: string;
+  exportedAt: number;
+  answers: readonly OrphanExportAnswer[];
+}): string {
+  if (opts.answers.length === 0) return "";
+  const out = [`${ORPHAN_HEADER}${commentSafe(opts.wiki)} · exported ${exportStamp(opts.exportedAt)} -->`];
+  opts.answers.forEach((a, i) => {
+    if (i > 0) out.push("");
+    out.push(`${exportHeading(a)} · ${oneLine(a.relPath)}, ${ORPHAN_REASON[a.reason]}`, ...quoteBody(a.body));
+  });
   return out.join("\n") + "\n";
 }

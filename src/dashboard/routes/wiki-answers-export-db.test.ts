@@ -30,6 +30,7 @@ import {
   listWikiAnswerLocations,
   listWikiAnswerVersions,
   markWikiAnswersExported,
+  markWikiOrphanAnswersExported,
 } from "../../db/wiki-answers.ts";
 
 setupTestDb();
@@ -109,6 +110,7 @@ function appFor(opts: { role?: AuthRole; identity?: boolean; exportStore?: WikiA
       listLastExported: listLastExportedWikiAnswers,
       listLocations: listWikiAnswerLocations,
       markExported: markWikiAnswersExported,
+      markOrphansExported: markWikiOrphanAnswersExported,
     },
   );
   return app;
@@ -163,6 +165,7 @@ const getExport = async (app: Hono, extra = "") => {
       count: number;
       orphanCount: number;
       again?: { block: string; rows: [string, number][]; count: number };
+      orphanExport?: { block: string; rows: [string, number][]; count: number };
       code?: string;
     },
   };
@@ -235,7 +238,7 @@ describe("who may export", () => {
 
   test("a wiki outside WIKI_ANSWER_WIKIS exports nothing", async () => {
     const res = await appFor().request(`/api/wiki/answers/export?wiki=cards-only&relPath=${encodeURIComponent(REL)}`);
-    expect(await res.json()).toEqual({ block: "", rows: [], count: 0, orphanCount: 0, again: NO_AGAIN });
+    expect(await res.json()).toEqual({ block: "", rows: [], count: 0, orphanCount: 0, again: NO_AGAIN, orphanExport: NO_AGAIN });
   });
 });
 
@@ -430,6 +433,7 @@ describe("answer export fix round 1", () => {
         listLastExported: listLastExportedWikiAnswers,
         listLocations: (w) => (scans++, listWikiAnswerLocations(w)),
         markExported: markWikiAnswersExported,
+        markOrphansExported: markWikiOrphanAnswersExported,
       },
     });
     await confirm(app, [[ids.e2, 1]]);
@@ -441,5 +445,101 @@ describe("answer export fix round 1", () => {
     expect(body.again?.rows).toEqual([[ids.e2, 1]]);
     expect(body.again?.block).toContain("### E2 — Ola Nordmann (not asked)");
     expect(body.again?.block).toEndWith(`<!-- orphaned answers in exp: ${body.orphanCount} -->\n`);
+  });
+});
+
+describe("answer export fix round 2: copying orphans", () => {
+  const orphanConfirm = (app: Hono, rows: unknown, extra: Record<string, unknown> = {}, contentType = "application/json") =>
+    app.request("/api/wiki/answers/export/confirm", {
+      method: "POST",
+      headers: { "content-type": contentType },
+      body: JSON.stringify({ wiki: WIKI, orphans: true, rows, ...extra }),
+    });
+  const exportedOf = async (id: string) =>
+    (await getDb()`SELECT version, exported_at FROM wiki_answers WHERE answer_id = ${id} ORDER BY version`).map((r) => [
+      r.version,
+      r.exported_at !== null,
+    ]);
+
+  test("the plain GET carries the orphans as a block of their own, with the rows a confirm marks", async () => {
+    const { body } = await getExport(appFor());
+    const o = body.orphanExport!;
+    const [header, ...rest] = o.block.split("\n");
+    expect(header).toMatch(/^<!-- orphaned answers · exp · exported \d{4}-\d{2}-\d{2} \d{2}:\d{2} -->$/);
+    expect(rest.join("\n")).toBe(
+      [
+        "### E5 — Kari Nordmann, 07.10.2026 21:34, version 1 · plans/eksport.mdx, question gone",
+        "> Til et spørsmål som er borte.",
+        "",
+        "### E1 — Ola Nordmann, 07.10.2026 21:36, version 1 · plans/gammelt-navn.mdx, page gone",
+        "> Gammel side.",
+        "",
+      ].join("\n"),
+    );
+    expect(o.rows).toEqual([
+      [ids.e5, 1],
+      [ids.gone, 1],
+    ]);
+    expect([o.count, body.orphanCount]).toEqual([2, 2]);
+  });
+
+  test("an orphan confirm marks the orphans on their own pages, gone page included, in one timestamp; they stop counting", async () => {
+    const app = appFor();
+    const rows = (await getExport(app)).body.orphanExport!.rows;
+    const res = await orphanConfirm(app, rows);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ marked: 2 });
+    const stamps = await getDb()`SELECT DISTINCT exported_at FROM wiki_answers WHERE answer_id IN (${ids.e5}, ${ids.gone})`;
+    expect(stamps.length).toBe(1);
+    expect(stamps[0]!.exported_at).not.toBeNull();
+    const after = (await getExport(app)).body;
+    expect([after.orphanCount, after.orphanExport]).toEqual([0, NO_AGAIN]);
+    expect(after.block).not.toContain("### E5");
+    expect(await (await orphanConfirm(app, rows)).json()).toEqual({ marked: 0 });
+  });
+
+  test("only rows the server finds are orphans right now are marked", async () => {
+    // The renamed page's answer was edited after the list was read: v1 is no
+    // longer its latest, so listing v1 marks nothing; v2 is the orphan now.
+    await insert({ id: ids.gone, version: 2, rel: "plans/gammelt-navn.mdx", q: "E1", name: "Ola Nordmann", body: "Ny.", created: at(40) });
+    const res = await orphanConfirm(appFor(), [
+      [ids.e5, 1], // an orphan
+      [ids.gone, 1], // not its latest version
+      [ids.e5, 2], // a version that does not exist
+      [ids.e1, 2], // a page answer, not an orphan
+      [ids.e2, 1], // a page answer, not an orphan
+      [ids.e9, 1], // its item is closed: never an orphan
+    ]);
+    expect(await res.json()).toEqual({ marked: 1 });
+    expect(await exportedOf(ids.e5)).toEqual([[1, true]]);
+    expect(await exportedOf(ids.gone)).toEqual([
+      [1, false],
+      [2, false],
+    ]);
+    for (const id of [ids.e1, ids.e2, ids.e9]) expect((await exportedOf(id)).every(([, x]) => x === false)).toBe(true);
+  });
+
+  test("orphan confirm refusals: user 403, not JSON 415, with a relPath 400, unknown wiki 404, wiki without answers 403", async () => {
+    const rows = [[ids.e5, 1]];
+    const user = await orphanConfirm(appFor({ identity: true, role: "user" }), rows);
+    expect([user.status, (await user.json()).code]).toEqual([403, "admin_only"]);
+    expect((await orphanConfirm(appFor(), rows, {}, "text/plain")).status).toBe(415);
+    const both = await orphanConfirm(appFor(), rows, { relPath: REL });
+    expect([both.status, (await both.json()).code]).toEqual([400, "bad_request"]);
+    expect((await orphanConfirm(appFor(), rows, { wiki: "no-such-wiki" })).status).toBe(404);
+    const off = await orphanConfirm(appFor(), rows, { wiki: "cards-only" });
+    expect([off.status, (await off.json()).code]).toEqual([403, "not_answerable"]);
+    expect((await orphanConfirm(appFor(), [])).status).toBe(400);
+    expect(await exportedOf(ids.e5)).toEqual([[1, false]]);
+  });
+
+  test("a page confirm marks under the page the index resolved, not the relPath the request spelled", async () => {
+    const app = appFor();
+    const rows = (await getExport(app)).body.rows;
+    for (const spelled of ["plans//eksport.mdx", "PLANS/Eksport.mdx"]) {
+      await getDb()`UPDATE wiki_answers SET exported_at = NULL WHERE wiki = ${WIKI}`;
+      const res = await confirm(app, rows, "application/json", { wiki: WIKI, relPath: spelled });
+      expect(`${spelled} → ${JSON.stringify(await res.json())}`).toBe(`${spelled} → {"marked":5}`);
+    }
   });
 });

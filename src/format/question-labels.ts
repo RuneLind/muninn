@@ -29,6 +29,8 @@ export interface QuestionLabels {
   notSure: string;
   copyNew: (n: number) => string;
   copyAgain: string;
+  /** The button that copies the wiki's orphaned answers (O4). */
+  copyOrphans: (n: number) => string;
   /** The export button's status line (answer cards PR 4). */
   exportStatus: {
     /** The answers changed since the block was fetched: a fresh one is loading. */
@@ -39,8 +41,9 @@ export interface QuestionLabels {
     /** The clipboard write worked, the confirm did not: nothing is marked. */
     confirmFailed: string;
     loadFailed: string;
-    /** Answers in this wiki whose page or question is gone (O4). */
-    orphans: (n: number) => string;
+    /** Copied orphaned answers: answers in this wiki whose page or question is gone (O4). */
+    copiedOrphans: (n: number) => string;
+    /** The orphan button's tooltip. */
     orphansTitle: string;
   };
   edited: (n: number) => string;
@@ -94,6 +97,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
     notSure: "Not sure yet",
     copyNew: (n) => `Copy new answers (${n})`,
     copyAgain: "Copy again",
+    copyOrphans: (n) => `Copy orphaned answers (${n})`,
     exportStatus: {
       stale: "The answers changed. Loading the new ones; click again.",
       copied: (n) => `Copied ${n} ${n === 1 ? "answer" : "answers"}.`,
@@ -101,7 +105,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       copyFailed: "Could not copy to the clipboard. Nothing was marked as copied.",
       confirmFailed: "Copied, but the answers could not be marked as copied. Click again to retry.",
       loadFailed: "The answers to copy could not be loaded.",
-      orphans: (n) => `${n} orphaned`,
+      copiedOrphans: (n) => `Copied ${n} orphaned ${n === 1 ? "answer" : "answers"}.`,
       orphansTitle: "Answers in this wiki, not copied yet, whose page or question is gone",
     },
     edited: (n) => `edited ${n}×`,
@@ -143,6 +147,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
     notSure: "Vet ikke ennå",
     copyNew: (n) => `Kopier nye svar (${n})`,
     copyAgain: "Kopier igjen",
+    copyOrphans: (n) => `Kopier foreldreløse svar (${n})`,
     exportStatus: {
       stale: "Svarene er endret. Henter de nye; klikk igjen.",
       copied: (n) => `Kopierte ${n} svar.`,
@@ -150,7 +155,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       copyFailed: "Kunne ikke kopiere til utklippstavlen. Ingenting ble merket som kopiert.",
       confirmFailed: "Kopiert, men svarene kunne ikke merkes som kopiert. Klikk igjen for å prøve på nytt.",
       loadFailed: "Kunne ikke hente svarene som skal kopieres.",
-      orphans: (n) => `${n} foreldreløse`,
+      copiedOrphans: (n) => `Kopierte ${n} foreldreløse svar.`,
       orphansTitle: "Svar i denne wikien, ikke kopiert ennå, der siden eller spørsmålet er borte",
     },
     edited: (n) => `endret ${n}×`,

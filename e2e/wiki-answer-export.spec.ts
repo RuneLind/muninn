@@ -12,6 +12,10 @@
  * button is absent for role `user` (a second muninn: `MUNINN_PROFILE=nais`,
  * `MUNINN_AUTH=local`, the loopback session at role `user`).
  *
+ * Fix round 2: "Copy orphaned answers (N)" copies the wiki's orphans and
+ * clears them, and leaving the page for the start view or an explainer takes
+ * the controls away and sends no export GET for the page left.
+ *
  * Synthetic fixtures only. Rows are deleted by wiki name before and after.
  * ENV PREREQUISITE: `bun run db:setup:test`. No model calls.
  */
@@ -37,6 +41,8 @@ const OWNER = "Rune Owner";
 const REL = "plans/export.mdx";
 const STALE_REL = "plans/stale.mdx";
 const FAIL_REL = "plans/fail.mdx";
+const NAV_REL = "plans/nav.mdx";
+const EXPLAINER_REL = "notes/diagram.html";
 const SECRET = "e2e-answer-export-secret-not-real";
 
 const q = (id: string, text: string, attrs = "") => [`<Question id="${id}"${attrs}>`, "", `**${text}**`, "", "</Question>", ""];
@@ -99,6 +105,13 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, REL), page("Eksportside", ["O1", "O2", "O3"]), "utf8");
   await writeFile(path.join(base, STALE_REL), page("Stale page", ["S1", "S2"]), "utf8");
   await writeFile(path.join(base, FAIL_REL), page("Fail page", ["F1"]), "utf8");
+  await writeFile(path.join(base, NAV_REL), page("Nav page", ["N1"]), "utf8");
+  await mkdir(path.join(base, "notes"), { recursive: true });
+  await writeFile(
+    path.join(base, EXPLAINER_REL),
+    "<!doctype html><html><head><title>Diagram</title></head><body><p>A diagram.</p></body></html>\n",
+    "utf8",
+  );
   botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-answer-export-bots-"));
   await mkdir(path.join(botsDir, "e2e-export-bot"));
   await writeFile(path.join(botsDir, "e2e-export-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
@@ -278,6 +291,81 @@ test.describe("Wiki reader: Copy new answers", () => {
     await expect(exportBtn(page)).toBeEnabled();
     expect((await exportedRows(FAIL_REL)).map((r) => r.exported_at)).toEqual([null]);
   });
+});
+
+test.describe("Wiki reader: answer export fix round 2", () => {
+  test("Copy orphaned answers copies the wiki's orphans word for word and clears them", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE });
+    // An answer to a page that was renamed away: an orphan of this wiki.
+    await sql!`
+      INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, body, question_hash)
+      VALUES (gen_random_uuid(), 1, ${WIKI}, 'plans/borte.mdx', 'O7', 'Ola Nordmann', ${"Svar til en side som er borte.\nAndre linje."}, 'seed')
+    `;
+    await open(page, REL);
+    const orphanBtn = page.locator('#wikiAnswerExport button[data-answer-export="orphans"]');
+    await expect(orphanBtn).toHaveText("Copy orphaned answers (1)");
+    await page.evaluate(() => navigator.clipboard.writeText("before"));
+    await orphanBtn.click();
+    await expect(status(page)).toHaveText("Copied 1 orphaned answer.");
+    const lines = (await clipboard(page)).split("\n");
+    expect(lines[0]).toMatch(new RegExp(`^<!-- orphaned answers · ${WIKI} · exported \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} -->$`));
+    expect(lines.slice(1).join("\n").replace(/\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}/g, "<when>")).toBe(
+      [
+        "### O7 — Ola Nordmann, <when>, version 1 · plans/borte.mdx, page gone",
+        "> Svar til en side som er borte.",
+        "> Andre linje.",
+        "",
+      ].join("\n"),
+    );
+    expect((await exportedRows("plans/borte.mdx")).map((r) => r.exported_at !== null)).toEqual([true]);
+    await expect(orphanBtn).toBeHidden();
+  });
+
+  for (const away of ["the start view", "an explainer"] as const) {
+    test(`leaving a page for ${away} removes the controls and sends no export GET for the page left`, async ({ page }) => {
+      await sql!`DELETE FROM wiki_answers WHERE wiki = ${WIKI} AND rel_path = ${NAV_REL}`;
+      await api({ relPath: NAV_REL, questionId: "N1", body: "Et svar." });
+      const exportGets: string[] = [];
+      page.on("request", (req) => {
+        const u = new URL(req.url());
+        if (u.pathname === "/api/wiki/answers/export") exportGets.push(u.searchParams.get("relPath") ?? "");
+      });
+      // Hold the cards' first load: its change notice is what would fetch the
+      // block, and it lands after the reader has left.
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      await page.route(
+        (u) => u.pathname === "/api/wiki/answers",
+        async (route) => {
+          await held;
+          await route.continue();
+        },
+      );
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+      await page.locator(`.wiki-list-item[data-relpath="${NAV_REL}"]`).click();
+      await expect(page.locator(".wiki-article section.question").first()).toBeVisible();
+      await expect(page.locator("#wikiAnswerExport")).toHaveCount(1);
+
+      if (away === "the start view") await page.goBack();
+      else await page.locator(`.wiki-list-item[data-relpath="${EXPLAINER_REL}"]`).click();
+      if (away === "an explainer") await expect(page.locator("iframe.wiki-explainer-frame")).toBeVisible();
+      else await expect(page.locator(".wiki-start")).toBeVisible();
+      await expect(page.locator("#wikiAnswerExport")).toHaveCount(0);
+
+      const landed = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/wiki/answers");
+      release();
+      await landed;
+      await page.waitForTimeout(500);
+      expect(exportGets).toEqual([]);
+
+      // And back on the page: one set of controls, which fetches its block.
+      if (away === "the start view") await page.goForward();
+      else await page.goBack();
+      await expect(page.locator("#wikiAnswerExport")).toHaveCount(1);
+      await expect(exportBtn(page)).toHaveText("Copy new answers (1)");
+      expect(exportGets).toContain(NAV_REL);
+    });
+  }
 });
 
 test.describe("Wiki reader: no export for role user", () => {

@@ -1,8 +1,9 @@
 /// <reference lib="dom" />
 /**
- * The answer cards' export button (answer cards PR 4): "Copy new answers (N)"
- * and "Copy again" in the reader's breadcrumb row, for an admin only (the page
- * payload's `answers.canExport`).
+ * The answer cards' export button (answer cards PR 4): "Copy new answers (N)",
+ * "Copy again" and, when the wiki has any, "Copy orphaned answers (N)" in the
+ * reader's breadcrumb row, for an admin only (the page payload's
+ * `answers.canExport`).
  *
  * The block is fetched BEFORE the click — on mount and after every change the
  * cards report — so the click writes the clipboard synchronously, inside the
@@ -10,7 +11,8 @@
  * write succeeds is the export confirmed, and then the cards reload so they
  * flip to Copied. A block fetched for a different set of answers than the
  * cards now show is never copied: the click reloads the cards and the block
- * and asks the reader to click once more.
+ * and asks the reader to click once more. The orphan button runs the same
+ * sequence over the wiki's orphans (O4), whose block the same GET carries.
  */
 import { questionLabels, type QuestionLabels, type QuestionLanguage } from "../../../format/question-labels.ts";
 import type { AnswerCardsHandle, PageAnswersInfo } from "./wiki-answer-cards.ts";
@@ -28,10 +30,12 @@ export interface ExportBlockWire {
 }
 
 /** What `GET /api/wiki/answers/export` answers: the new block, the wiki's
- *  orphan count, and the page's last batch for "Copy again". */
+ *  orphan count, the page's last batch for "Copy again", and the wiki's
+ *  orphans as a block of their own. */
 export interface ExportWire extends ExportBlockWire {
   orphanCount: number;
   again: ExportBlockWire;
+  orphanExport?: ExportBlockWire;
 }
 
 /** One `(answerId, version)` set as a comparable string. */
@@ -57,7 +61,7 @@ interface ExportUi {
   root: HTMLElement;
   newBtn: HTMLButtonElement;
   againBtn: HTMLButtonElement;
-  orphans: HTMLElement;
+  orphanBtn: HTMLButtonElement;
   msg: HTMLElement;
 }
 
@@ -106,6 +110,7 @@ export function mountAnswerExport(
   let fresh: (ExportBlockWire & { key: string }) | null = null;
   let again: ExportBlockWire | null = null;
   let orphanCount = 0;
+  let orphanBlock: ExportBlockWire | null = null;
   let seq = 0;
   let busy = false;
   // A load failure or a stale click: cleared by the next successful prefetch.
@@ -125,8 +130,9 @@ export function mountAnswerExport(
     ui.newBtn.textContent = L.copyNew(n);
     ui.newBtn.disabled = busy || n === 0;
     ui.againBtn.disabled = busy || !again || again.count === 0;
-    ui.orphans.hidden = orphanCount === 0;
-    ui.orphans.textContent = orphanCount > 0 ? L.exportStatus.orphans(orphanCount) : "";
+    ui.orphanBtn.hidden = orphanCount === 0;
+    ui.orphanBtn.textContent = L.copyOrphans(orphanCount);
+    ui.orphanBtn.disabled = busy || orphanCount === 0;
     ui.msg.textContent = message?.text ?? "";
   };
 
@@ -140,6 +146,7 @@ export function mountAnswerExport(
       fresh = { block: n.block, rows: n.rows, count: n.count, key: exportRowsKey(n.rows) };
       again = n.again ?? null;
       orphanCount = n.orphanCount ?? 0;
+      orphanBlock = n.orphanExport ?? null;
       if (message?.transient) message = null;
     } catch {
       if (mine !== seq) return;
@@ -152,10 +159,9 @@ export function mountAnswerExport(
   ui.newBtn.addEventListener("click", () => {
     if (busy || newCount() === 0) return;
     const pre = fresh;
-    const stale =
-      !pre ||
-      pre.key !== unexportedRowsKey(handle.answers(), confirmed) ||
-      pre.rows.some(([id, v]) => confirmed.has(`${id}:${v}`));
+    // Equal keys also mean no row in `pre` was confirmed in this view: the
+    // cards' key leaves confirmed rows out, so a block holding one differs.
+    const stale = !pre || pre.key !== unexportedRowsKey(handle.answers(), confirmed);
     if (stale) {
       // Never copy a block built for other answers than the cards show. The
       // cards may be the ones behind (another tab answered or exported), so
@@ -170,9 +176,32 @@ export function mountAnswerExport(
       return;
     }
     // Started synchronously, inside the click: the clipboard write needs the
-    // gesture. The header carries the click's time, which is the minute the
-    // confirm below stamps on the rows and "Copy again" prints.
+    // gesture. The header carries the click's time; the confirm stamps the
+    // rows with the database's own clock after the write and a round trip, so
+    // "Copy again" usually prints this minute and can print the next.
     const text = restampAnswerExport(pre.block, now());
+    copyThenConfirm(text, pre.rows, { wiki: opts.wiki, relPath: opts.relPath }, async () => {
+      // No prefetch started before this point may land: its block holds the
+      // rows just marked, and its last batch is the one before this copy.
+      seq++;
+      fresh = null;
+      // What "Copy again" now copies, until the next prefetch brings the
+      // server's own: exactly the text that went to the clipboard.
+      again = { block: text, rows: pre.rows, count: pre.count };
+      message = { text: L.exportStatus.copied(pre.count), transient: false };
+      await handle.refresh();
+    });
+  });
+
+  /** Write `text` to the clipboard inside the click, and only after that
+   *  succeeds confirm `rows` with `page` (`{wiki, relPath}` or
+   *  `{wiki, orphans: true}`); `done` runs after a confirm the server took. */
+  const copyThenConfirm = (
+    text: string,
+    rows: [string, number][],
+    page: Record<string, unknown>,
+    done: () => Promise<void>,
+  ): void => {
     const copied = copy(text);
     busy = true;
     message = null;
@@ -187,28 +216,46 @@ export function mountAnswerExport(
           const r = await fetchFn("/api/wiki/answers/export/confirm", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ wiki: opts.wiki, relPath: opts.relPath, rows: pre.rows }),
+            body: JSON.stringify({ ...page, rows }),
           });
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
         } catch {
           message = { text: L.exportStatus.confirmFailed, transient: false };
           return;
         }
-        for (const [id, v] of pre.rows) confirmed.add(`${id}:${v}`);
-        // No prefetch started before this point may land: its block holds the
-        // rows just marked, and its last batch is the one before this copy.
-        seq++;
-        fresh = null;
-        // What "Copy again" now copies, until the next prefetch brings the
-        // server's own: exactly the text that went to the clipboard.
-        again = { block: text, rows: pre.rows, count: pre.count };
-        message = { text: L.exportStatus.copied(pre.count), transient: false };
-        await handle.refresh();
+        for (const [id, v] of rows) confirmed.add(`${id}:${v}`);
+        await done();
       })
       .finally(() => {
         busy = false;
         render();
       });
+  };
+
+  ui.orphanBtn.addEventListener("click", () => {
+    if (busy || orphanCount === 0) return;
+    const pre = orphanBlock;
+    // The orphans have no cards to compare with: the block is stale when it is
+    // missing or holds a row this view already confirmed (a "Copy new
+    // answers" can mark an orphan whose question left this page).
+    if (!pre || pre.count === 0 || pre.rows.some(([id, v]) => confirmed.has(`${id}:${v}`))) {
+      message = { text: L.exportStatus.stale, transient: true };
+      render();
+      void prefetch();
+      return;
+    }
+    const text = restampAnswerExport(pre.block, now());
+    copyThenConfirm(text, pre.rows, { wiki: opts.wiki, orphans: true }, async () => {
+      seq++;
+      orphanBlock = null;
+      message = { text: L.exportStatus.copiedOrphans(pre.count), transient: false };
+      // An orphan can be an answer on this page whose question is gone, so the
+      // cards reload too; their change notice fetches the block, and when they
+      // changed nothing (or failed) the block is fetched here.
+      const before = seq;
+      await handle.refresh();
+      if (seq === before) await prefetch();
+    });
   });
 
   ui.againBtn.addEventListener("click", () => {
@@ -251,14 +298,16 @@ function build(L: QuestionLabels): ExportUi {
   againBtn.className = "wiki-bc-answers";
   againBtn.setAttribute("data-answer-export", "again");
   againBtn.textContent = L.copyAgain;
-  const orphans = document.createElement("span");
-  orphans.className = "wiki-answer-export-orphans";
-  orphans.title = L.exportStatus.orphansTitle;
-  orphans.hidden = true;
+  const orphanBtn = document.createElement("button");
+  orphanBtn.type = "button";
+  orphanBtn.className = "wiki-bc-answers wiki-answer-export-orphans";
+  orphanBtn.setAttribute("data-answer-export", "orphans");
+  orphanBtn.title = L.exportStatus.orphansTitle;
+  orphanBtn.hidden = true;
   const msg = document.createElement("span");
   msg.className = "wiki-answer-export-msg";
   msg.setAttribute("role", "status");
   msg.setAttribute("aria-live", "polite");
-  root.append(newBtn, againBtn, orphans, msg);
-  return { root, newBtn, againBtn, orphans, msg };
+  root.append(newBtn, againBtn, orphanBtn, msg);
+  return { root, newBtn, againBtn, orphanBtn, msg };
 }

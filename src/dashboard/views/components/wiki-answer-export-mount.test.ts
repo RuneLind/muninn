@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mountAnswerExport, ANSWER_EXPORT_ID } from "./wiki-answer-export.ts";
+import { mountAnswerExport, unmountAnswerExport, ANSWER_EXPORT_ID } from "./wiki-answer-export.ts";
 import type { AnswerCardsHandle } from "./wiki-answer-cards.ts";
 import type { AnswerWire } from "./wiki-answer-card-model.ts";
 import { exportStamp } from "../../../wiki/answer-export.ts";
@@ -85,6 +85,7 @@ afterEach(() => {
 });
 
 const newBtn = () => find(host, (e) => e.getAttribute("data-answer-export") === "new")!;
+const orphanBtn = () => find(host, (e) => e.getAttribute("data-answer-export") === "orphans")!;
 const msg = () => find(host, (e) => e.className === "wiki-answer-export-msg")!;
 const tick = async (n = 5) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
@@ -147,9 +148,15 @@ const OLD_HEADER = "<!-- answers · w · plans/p.mdx · exported 2026-01-01 00:0
 const blockFor = (rows: [string, number][]) =>
   rows.length ? [OLD_HEADER, ...rows.map(([id, v]) => `### O1 — ${id} v${v}`), "", "<!-- orphaned answers in w: 0 -->", ""].join("\n") : "";
 
+const ORPHAN_HEADER = "<!-- orphaned answers · w · exported 2026-01-01 00:00 -->";
+const orphanBlockFor = (rows: [string, number][]) =>
+  rows.length ? [ORPHAN_HEADER, ...rows.map(([id, v]) => `### O1 — ${id} v${v} · plans/gone.mdx, page gone`), ""].join("\n") : "";
+
 /** A fetch that answers the export GET (plain and `again=1`) from `state`, and
- *  the confirm; every call is recorded, and a GET can be held by the test. */
-function fakeServer(state: { rows: [string, number][]; orphanCount?: number; failGet?: boolean }) {
+ *  the confirm; every call is recorded, and a GET can be held by the test.
+ *  `orphans` are the wiki's orphans: a page confirm marks one that is also in
+ *  `rows` (an orphan on this page), an orphan confirm marks only orphans. */
+function fakeServer(state: { rows: [string, number][]; orphanCount?: number; orphans?: [string, number][]; failGet?: boolean }) {
   const calls: { url: string; body?: unknown }[] = [];
   const held: (() => void)[] = [];
   let hold = false;
@@ -157,17 +164,22 @@ function fakeServer(state: { rows: [string, number][]; orphanCount?: number; fai
   const fetchFn = (async (url: string, init?: RequestInit) => {
     calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
     if (url.startsWith("/api/wiki/answers/export/confirm")) {
-      const marked = new Set(((calls.at(-1)!.body as { rows: [string, number][] }).rows).map(([id, v]) => `${id}:${v}`));
-      state.rows = state.rows.filter(([id, v]) => !marked.has(`${id}:${v}`));
+      const body = calls.at(-1)!.body as { rows: [string, number][]; orphans?: boolean };
+      const marked = new Set(body.rows.map(([id, v]) => `${id}:${v}`));
+      if (!body.orphans) state.rows = state.rows.filter(([id, v]) => !marked.has(`${id}:${v}`));
+      state.orphans = (state.orphans ?? []).filter(([id, v]) => !marked.has(`${id}:${v}`));
       return json({ marked: marked.size });
     }
     // Snapshot NOW: a held GET answers what the server had when it was asked.
     const rows = [...state.rows];
+    const orphans = [...(state.orphans ?? [])];
     if (hold) await new Promise<void>((r) => held.push(r));
     if (state.failGet) return new Response("{}", { status: 500 });
     const one = { block: blockFor(rows), rows, count: rows.length };
     const again = { block: "", rows: [], count: 0 };
-    return json(url.includes("again=1") ? { ...again, orphanCount: state.orphanCount ?? 0 } : { ...one, orphanCount: state.orphanCount ?? 0, again });
+    const orphanCount = state.orphanCount ?? orphans.length;
+    const orphanExport = { block: orphanBlockFor(orphans), rows: orphans, count: orphans.length };
+    return json(url.includes("again=1") ? { ...again, orphanCount } : { ...one, orphanCount, again, orphanExport });
   }) as unknown as typeof fetch;
   return {
     calls,
@@ -351,5 +363,115 @@ describe("answer export fix round 1: status, mount and teardown", () => {
     mount(h, srv, { canExport: false });
     expect(find(host, (e) => e.id === ANSWER_EXPORT_ID)).toBeNull();
     expect(h.listeners.size).toBe(0);
+  });
+});
+
+describe("answer export fix round 2: Copy orphaned answers", () => {
+  test("copies the orphan block with the click's time, confirms it as orphans, then fetches again", async () => {
+    const h = fakeHandle([wire("a", 1)]);
+    const srv = fakeServer({ rows: [["a", 1]], orphans: [["g1", 1], ["g2", 3]] });
+    const copies: string[] = [];
+    const click = Date.parse("2026-10-08T07:14:30Z"); // 09:14 Oslo
+    mount(h, srv, { copy: async (t) => (copies.push(t), true), now: () => click });
+    await tick();
+    expect([orphanBtn().hidden, orphanBtn().disabled, orphanBtn().textContent]).toEqual([false, false, "Copy orphaned answers (2)"]);
+    const getsBefore = srv.gets();
+    orphanBtn().click();
+    await tick(10);
+    expect(copies.length).toBe(1);
+    expect(copies[0]!.split("\n")[0]).toBe(`<!-- orphaned answers · w · exported ${exportStamp(click)} -->`);
+    expect(copies[0]!.split("\n").slice(1)).toEqual(orphanBlockFor([["g1", 1], ["g2", 3]]).split("\n").slice(1));
+    expect(srv.confirms().map((c) => c.body)).toEqual([{ wiki: "w", orphans: true, rows: [["g1", 1], ["g2", 3]] }]);
+    expect(srv.gets()).toBeGreaterThan(getsBefore);
+    expect(msg().textContent).toBe("Copied 2 orphaned answers.");
+    expect(orphanBtn().hidden).toBe(true);
+    // The page's own answer was not touched.
+    expect(newBtn().textContent).toBe("Copy new answers (1)");
+  });
+
+  test("a failed card reload after an orphan copy still fetches the block again", async () => {
+    const h = fakeHandle([wire("a", 1)]);
+    const srv = fakeServer({ rows: [["a", 1]], orphans: [["g1", 1]] });
+    mount(h, srv);
+    await tick();
+    h.nextLoad = null;
+    const getsBefore = srv.gets();
+    orphanBtn().click();
+    await tick(10);
+    expect(srv.gets()).toBe(getsBefore + 1);
+    expect(orphanBtn().hidden).toBe(true);
+  });
+
+  test("an orphan that Copy new answers already confirmed is not copied again: the click fetches instead", async () => {
+    // `a` is an answer on this page whose question is gone: both blocks hold it.
+    const h = fakeHandle([wire("a", 1)]);
+    const srv = fakeServer({ rows: [["a", 1]], orphans: [["a", 1]] });
+    const copies: string[] = [];
+    mount(h, srv, { copy: async (t) => (copies.push(t), true) });
+    await tick();
+    // Every later GET is held, and the card reload after the copy fails: the
+    // orphan block on hand is still the one from before the copy.
+    srv.hold(true);
+    h.nextLoad = null;
+    newBtn().click();
+    await tick(10);
+    expect(copies.length).toBe(1);
+    expect(orphanBtn().hidden).toBe(false);
+    const getsBefore = srv.gets();
+    orphanBtn().click();
+    await tick(10);
+    expect(copies.length).toBe(1);
+    expect(srv.confirms().length).toBe(1);
+    expect(srv.gets()).toBe(getsBefore + 1);
+    expect(msg().textContent).toBe("The answers changed. Loading the new ones; click again.");
+    srv.hold(false);
+    srv.release();
+    await tick(10);
+    expect(orphanBtn().hidden).toBe(true);
+  });
+
+  test("a failed clipboard write confirms nothing", async () => {
+    const h = fakeHandle([wire("a", 1)]);
+    const srv = fakeServer({ rows: [["a", 1]], orphans: [["g1", 1]] });
+    mount(h, srv, { copy: async () => false });
+    await tick();
+    orphanBtn().click();
+    await tick(10);
+    expect(srv.confirms()).toEqual([]);
+    expect(msg().textContent).toBe("Could not copy to the clipboard. Nothing was marked as copied.");
+    expect([orphanBtn().hidden, orphanBtn().disabled]).toEqual([false, false]);
+  });
+});
+
+describe("answer export fix round 2: pins", () => {
+  test("unmountAnswerExport takes the controls out of the document and lets go of the cards", async () => {
+    const h = fakeHandle([wire("a", 1)]);
+    const srv = fakeServer({ rows: [["a", 1]] });
+    mount(h, srv);
+    await tick();
+    expect(find(host, (e) => e.id === ANSWER_EXPORT_ID)).not.toBeNull();
+    unmountAnswerExport();
+    expect(find(host, (e) => e.id === ANSWER_EXPORT_ID)).toBeNull();
+    expect(h.listeners.size).toBe(0);
+  });
+
+  test("a stale click whose card reload fails fetches the block itself, and the next click copies", async () => {
+    const h = fakeHandle([wire("a", 1)]);
+    const state = { rows: [["a", 1]] as [string, number][], failGet: true };
+    const srv = fakeServer(state);
+    const copies: string[] = [];
+    mount(h, srv, { copy: async (t) => (copies.push(t), true) });
+    await tick();
+    // The first block never loaded; the server answers now, the cards do not.
+    state.failGet = false;
+    h.nextLoad = null;
+    const getsBefore = srv.gets();
+    newBtn().click();
+    await tick(10);
+    expect(copies).toEqual([]);
+    expect(srv.gets()).toBe(getsBefore + 1);
+    newBtn().click();
+    await tick(10);
+    expect(copies.length).toBe(1);
   });
 });
