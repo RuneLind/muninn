@@ -111,6 +111,17 @@ export const LENS_LABELS: Record<QuestionLanguage, Record<Lens, string>> = {
   no: { overview: "Oversikt", all: "Alt", agent: "Agent" },
 };
 
+/** A DecisionLog item's toggle in Overview (D6): its text, and its
+ *  `aria-label` naming the item; and the badge a closed question carries
+ *  after its first sentence there. */
+export const MORE_WORDS: Record<QuestionLanguage, { more: string; less: string; about: (id: string) => string; closed: string }> = {
+  en: { more: "more", less: "less", about: (id) => `more about ${id}`, closed: "closed" },
+  no: { more: "mer", less: "mindre", about: (id) => `mer om ${id}`, closed: "lukket" },
+};
+
+/** The class on that badge. */
+export const DL_QSTATE_CLASS = "dl-qstate";
+
 // ── WIKI_DEFAULT_LENS (D24) ──────────────────────────────────────────────────
 
 /** A default lens as `WIKI_DEFAULT_LENS` or `.wiki-reader.json` `defaultLens`

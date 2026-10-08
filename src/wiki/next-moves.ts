@@ -17,6 +17,7 @@ import {
   type LaneKind,
 } from "../format/markdown-ast.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import { isAbbreviation } from "../format/abbreviations.ts";
 
 /** Lead sentences kept per page, and their length cap. */
 export const MOVES_STEPS_MAX = 5;
@@ -53,22 +54,14 @@ export function extractNextMoves(content: string): PageNextMoves | null {
   return { counts, youSteps };
 }
 
-/** Abbreviations whose dot is not a sentence end, lowercased, dot included —
- *  English and Norwegian, the two languages the wikis are written in. Not
- *  `no.`: it is far more often the word ending "Say no." than "No. 5". */
-const ABBREVIATIONS = new Set([
-  "e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "incl.", "excl.",
-  "f.eks.", "bl.a.", "dvs.", "osv.", "ca.", "jf.", "evt.", "nr.", "pkt.", "inkl.", "ekskl.", "mht.", "mtp.", "ref.", "kap.", "o.l.", "m.m.", "mv.", "kl.",
-]);
-
 /** Where the first sentence of `text` ends (the index after its `.`/`!`/`?`),
  *  or -1. A dot closing a known abbreviation is not an end. */
 function sentenceEnd(text: string): number {
   const re = /[.!?](?=\s|$)/g;
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m[0] === ".") {
-      const word = text.slice(text.lastIndexOf(" ", m.index) + 1, m.index + 1).toLowerCase();
-      if (ABBREVIATIONS.has(word.replace(/^[("'\[]+/, ""))) continue;
+      const word = text.slice(text.lastIndexOf(" ", m.index) + 1, m.index);
+      if (isAbbreviation(word.replace(/^[("'\[]+/, ""))) continue;
     }
     return m.index + 1;
   }

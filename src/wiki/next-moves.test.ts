@@ -214,6 +214,13 @@ describe("leadSentence", () => {
     expect(leadSentence("Møt kl. 10 i morgen. Så mer.")).toBe("Møt kl. 10 i morgen.");
   });
 
+  test("the abbreviation set is the one the reader's first sentence reads", () => {
+    expect(leadSentence("Ring dr. Hansen i dag. Så mer.")).toBe("Ring dr. Hansen i dag.");
+    expect(leadSentence("Betal 5 kr pr. dag nå. Så mer.")).toBe("Betal 5 kr pr. dag nå.");
+    expect(leadSentence("Gjelder t.o.m. fredag. Så mer.")).toBe("Gjelder t.o.m. fredag.");
+    expect(leadSentence("Open a publish PR. Then wait.")).toBe("Open a publish PR.");
+  });
+
   test("an abbreviation after an opening paren is still one", () => {
     expect(leadSentence("Use a tool (e.g. ripgrep) here. Then more.")).toBe("Use a tool (e.g. ripgrep) here.");
   });

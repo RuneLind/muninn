@@ -64,6 +64,7 @@ import { copyFile, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promi
 import { getLog } from "../logging.ts";
 import { inProtectedRegion, markdownCodeRegions } from "../format/markdown-ast.ts";
 import { frameBudgetFor } from "../video/media.ts";
+import { escapeRegExp } from "../utils/escape-regexp.ts";
 
 const log = getLog("summaries", "frames");
 
@@ -364,10 +365,8 @@ function medianGapSec(frames: readonly CaptureFrame[]): number | null {
   return Math.max(1, Math.round(median));
 }
 
-/** Every character a `RegExp` gives meaning to, made literal. */
-export function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+/** Re-exported: its callers import it from here. */
+export { escapeRegExp };
 
 /**
  * The ONE pattern for "the summary POINTS AT a frames address", and the only

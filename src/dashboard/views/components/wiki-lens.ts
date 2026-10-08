@@ -30,8 +30,10 @@ import { CODE_REF_GROUP_CLASS } from "../../../wiki/code-refs.ts";
 import {
   DL_EXPANDED_CLASS,
   DL_MORE_CLASS,
+  DL_QSTATE_CLASS,
   LENSES,
   LENS_LABELS,
+  MORE_WORDS,
   READER_ONLY_ATTR,
   readStoredLens,
   writeStoredLens,
@@ -81,8 +83,8 @@ const NOTE_WORDS: Record<Lang, { cases: (n: number) => string; chars: string; mi
 };
 
 const SWITCH_TITLE: Record<Lang, string> = {
-  en: "Overview hides the working detail: line refs, history, queries' SQL and tables, developer and handoff folds",
-  no: "Oversikt skjuler arbeidsdetaljene: linjereferanser, historikk, spørringenes SQL og tabeller, utvikler- og overleveringsfold",
+  en: "Overview hides the working detail: line refs, history, queries' SQL and tables, developer and handoff folds, and the rest of each decision after its first sentence",
+  no: "Oversikt skjuler arbeidsdetaljene: linjereferanser, historikk, spørringenes SQL og tabeller, utvikler- og overleveringsfold, og resten av hver beslutning etter første setning",
 };
 
 /** A nominal reading rate for the fold size line, not a measured one. */
@@ -124,11 +126,6 @@ export function decorateFoldSizes(article: Element, lang: Lang): void {
   });
 }
 
-const MORE_WORDS: Record<Lang, { more: string; less: string }> = {
-  en: { more: "more", less: "less" },
-  no: { more: "mer", less: "mindre" },
-};
-
 /** What Overview folds away in an id-led DecisionLog item: the rest of its
  *  text and whatever is nested under it. */
 const DL_REST = ":scope > .dl-text > .dl-rest, :scope > .dl-text ~ *";
@@ -142,21 +139,45 @@ function setExpanded(item: Element, open: boolean, lang: Lang): void {
 }
 
 /** A «mer» toggle in each id-led DecisionLog item that holds more than its
- *  first sentence, right after the first sentence. Shown in Overview only;
- *  reader-only, so a selection leaves it out. Idempotent. */
+ *  first sentence, right after the first sentence, named for its item and
+ *  pointing at what it opens. Shown in Overview only; reader-only, so a
+ *  selection leaves it out. An item whose hidden part holds a fact-check mark
+ *  starts open, so a ❌ is never folded away (K). A closed question gets a
+ *  «lukket» badge after its first sentence, also Overview only (J).
+ *  Idempotent. */
 export function decorateDecisionRests(article: Element, lang: Lang): void {
-  article.querySelectorAll(`.${DL_MORE_CLASS}`).forEach((el) => el.remove());
+  article.querySelectorAll(`.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll(".dl-item[id]").forEach((item) => {
     const text = item.querySelector(":scope > .dl-text");
-    if (!text || !item.querySelector(DL_REST)) return;
+    if (!text) return;
+    const first = text.querySelector(":scope > .dl-first");
+    const id = item.querySelector(":scope > .dl-id")?.textContent?.trim() ?? item.id;
+    const state = item.getAttribute("data-q-state");
+    let badge: HTMLElement | null = null;
+    if (state && state !== "open" && !/^D/i.test(id)) {
+      badge = document.createElement("span");
+      badge.className = DL_QSTATE_CLASS;
+      badge.setAttribute(READER_ONLY_ATTR, "");
+      badge.textContent = MORE_WORDS[lang].closed;
+      if (first) first.after(badge);
+      else text.append(badge);
+    }
+    const rests = Array.from(item.querySelectorAll(DL_REST));
+    if (rests.length === 0) return;
+    rests.forEach((el, k) => {
+      if (!el.id) el.id = `${item.id}-rest${k ? `-${k + 1}` : ""}`;
+    });
     const b = document.createElement("button");
     b.type = "button";
     b.className = DL_MORE_CLASS;
     b.setAttribute(READER_ONLY_ATTR, "");
+    b.setAttribute("aria-label", MORE_WORDS[lang].about(id));
+    b.setAttribute("aria-controls", rests.map((el) => el.id).join(" "));
     b.addEventListener("click", () => setExpanded(item, !item.classList.contains(DL_EXPANDED_CLASS), lang));
-    const first = text.querySelector(":scope > .dl-first");
-    if (first) first.after(b);
+    const before = badge ?? first;
+    if (before) before.after(b);
     else text.append(b);
+    if (rests.some((el) => el.querySelector(".fc-mark, .fc-chip"))) item.classList.add(DL_EXPANDED_CLASS);
     setExpanded(item, item.classList.contains(DL_EXPANDED_CLASS), lang);
   });
 }
@@ -289,12 +310,17 @@ export function lensCss(): string {
   return `
     .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
-    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest,
-    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ * { display: none; }
-    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) .${DL_MORE_CLASS} { display: none; }
+    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
+    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ *:not(.${PEEK_CLASS} *) { display: none; }
+    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) :is(.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}) { display: none; }
     .wiki-article .${DL_MORE_CLASS} {
       font: inherit; font-size: 0.85em; margin-left: 0.4em; padding: 0 0.2em; border: none; background: none;
       color: var(--accent-light); cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+      user-select: none;
+    }
+    .wiki-article .${DL_QSTATE_CLASS} {
+      font-size: 0.8em; margin-left: 0.4em; padding: 0 0.45em; border-radius: 999px; white-space: nowrap;
+      border: 1px solid var(--border-secondary); background: var(--tint-neutral); color: var(--text-soft); user-select: none;
     }
     .wiki-article:not(.${LENS_CLASS_PREFIX}overview) .${CASEBOARD_LENS_NOTE_CLASS} { display: none; }
     .wiki-article .${CASEBOARD_LENS_NOTE_CLASS} { margin: 6px 0 0; font-size: 12px; color: var(--text-soft); }

@@ -20,7 +20,7 @@ import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
-import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
+import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
   escapeHtml,
@@ -177,7 +177,13 @@ const slackRenderer: BlockRenderer = {
         return rawChildren
           .map((b) =>
             b.type === "ul" || b.type === "ol"
-              ? statusRows([b]).map((r) => renderInline(r.text)).join("\n")
+              ? statusRows([b])
+                  .map((r, k) =>
+                    [renderInline(r.text), ...nestedChildren(b.nested?.[k], slackRenderer, (t) => t.split("\n").map(renderInline).join("\n"))]
+                      .map((out, i) => (i === 0 ? out : out.replace(/^(?=.)/gm, "  ")))
+                      .join("\n"),
+                  )
+                  .join("\n")
               : renderBlocks([b], slackRenderer),
           )
           .filter((out) => out.trim() !== "")

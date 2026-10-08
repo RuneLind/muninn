@@ -94,3 +94,10 @@ describe("lint: status-row-long", () => {
     expect(f[0]!.line).toBe(12);
   });
 });
+
+describe("lint: decision-first-sentence reads the reader's split (fix round 1)", () => {
+  test("a first sentence under 15 chars joins the next, so the long joined one warns", async () => {
+    await write("plans/p.mdx", page(["<DecisionLog>", "", `- **D1** — High. Og ${LONG} resten. Mer.`, "", "</DecisionLog>"]));
+    expect(await findings("decision-first-sentence")).toHaveLength(1);
+  });
+});

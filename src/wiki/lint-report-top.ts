@@ -9,21 +9,17 @@
  * |                           | Overview lens shows, D6) is over `FIRST_SENTENCE_MAX` (160) visible chars  |
  * | `status-row-long`         | a `<StatusRows>` row over `STATUS_ROW_MAX` (160) chars as written (D11)    |
  *
- * Both read the page through the renderer's own parser and the shared rules in
- * `src/format/report-top.ts`, so the finding and the reader agree on where a
- * first sentence ends and what a row is. A struck or superseded item is
+ * Both read the page through the renderer's own parser; the first sentence is
+ * the reader's own guarded split (`decisionFirstSentence`) and a row the rule
+ * in `src/format/report-top.ts`, so the finding and the reader agree. A struck or superseded item is
  * skipped: it is history, and the reader dims it.
  */
 
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { decisionLogEntries } from "../format/question.ts";
-import {
-  FIRST_SENTENCE_MAX,
-  firstSentence,
-  STATUS_ROW_MAX,
-  statusRowBlocks,
-  visibleText,
-} from "../format/report-top.ts";
+import { FIRST_SENTENCE_MAX, STATUS_ROW_MAX, statusRowBlocks, visibleText } from "../format/report-top.ts";
+import { decisionFirstSentence } from "../web/web-format.ts";
+import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
@@ -45,8 +41,6 @@ function findLine(lines: readonly string[], fenced: readonly boolean[], from: nu
   return undefined;
 }
 
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
 export function checkReportTop(page: WikiPageMeta, rawContent: string): LintFinding[] {
   const hasLog = rawContent.includes("<DecisionLog");
   const hasRows = rawContent.includes("<StatusRows");
@@ -62,11 +56,11 @@ export function checkReportTop(page: WikiPageMeta, rawContent: string): LintFind
     // hit, so a repeated id points at its own item.
     let from = body;
     for (const e of decisionLogEntries(blocks)) {
-      const idLine = new RegExp(`^\\s*(?:[-*+]|\\d+[.)])\\s+(?:~~)?\\*\\*${escapeRe(e.id)}\\*\\*`);
+      const idLine = new RegExp(`^\\s*(?:[-*+]|\\d+[.)])\\s+(?:~~)?\\*\\*${escapeRegExp(e.id)}\\*\\*`);
       const line = findLine(lines, fenced, from, (l) => idLine.test(l));
       if (line !== undefined) from = line;
       if (e.dim) continue;
-      const first = visibleText(firstSentence(e.itemText));
+      const first = visibleText(decisionFirstSentence(e.itemText));
       if (first.length <= FIRST_SENTENCE_MAX) continue;
       findings.push({
         check: "decision-first-sentence",

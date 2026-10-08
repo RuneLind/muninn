@@ -1684,10 +1684,11 @@ Two warnings on every page, report-only: `decision-first-sentence` (an id-led,
 undimmed `<DecisionLog>` item whose first sentence, the text the Overview lens
 shows, is over 160 visible chars: links count their text, code its content) and
 `status-row-long` (a `<StatusRows>` row over 160 chars as written, the same
-measure as mimir lint check 13). Both read the page through `parseBlocks` and
-the rules in `src/format/report-top.ts`, so the finding and the reader agree on
-where a sentence ends. Measured 2026-10-09: `decision-first-sentence` fires on
-28 of 253 undimmed items on 9 mimir pages and 11 of 135 on 7 kode-wiki pages;
+measure as mimir lint check 13). Both read the page through `parseBlocks`; the first sentence is the reader's
+own guarded split (`decisionFirstSentence` in `src/web/web-format.ts`), so the
+finding and the reader agree on where a sentence ends. Measured 2026-10-09
+(fix round 1): `decision-first-sentence` fires on
+31 items on 10 mimir pages and 11 on 7 kode-wiki pages;
 `status-row-long` on none (no page carries `<StatusRows>` yet). Acceptance:
 `lint-report-top.test.ts`.
 

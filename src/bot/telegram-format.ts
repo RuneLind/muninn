@@ -18,7 +18,7 @@ import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { tldrFallbackLabel } from "../format/genre-lists.ts";
 import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
-import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
+import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
@@ -169,7 +169,13 @@ const telegramRenderer: BlockRenderer = {
         return rawChildren
           .map((b) =>
             b.type === "ul" || b.type === "ol"
-              ? statusRows([b]).map((r) => renderInline(r.text)).join("\n")
+              ? statusRows([b])
+                  .map((r, k) =>
+                    [renderInline(r.text), ...nestedChildren(b.nested?.[k], telegramRenderer, (t) => t.split("\n").map(renderInline).join("\n"))]
+                      .map((out, i) => (i === 0 ? out : out.replace(/^(?=.)/gm, "  ")))
+                      .join("\n"),
+                  )
+                  .join("\n")
               : renderBlocks([b], telegramRenderer),
           )
           .filter((out) => out.trim() !== "")

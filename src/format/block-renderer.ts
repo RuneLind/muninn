@@ -1,4 +1,4 @@
-import type { Block, ComponentName, InlineComponentName, ListBlock } from "./markdown-ast.ts";
+import type { Block, ComponentName, InlineComponentName, ListBlock, ListChild } from "./markdown-ast.ts";
 
 /** What sits under one list item: a child list one `depth` deeper or a fenced
  *  code block, already rendered by the same renderer, or a further paragraph of
@@ -104,6 +104,18 @@ function renderBlock(block: Block, r: BlockRenderer): string {
       return _exhaustive;
     }
   }
+}
+
+/**
+ * What sits under one list item, for a block that prints its items its own way
+ * (`<StatusRows>` on Telegram, Slack and email): each child list one level
+ * deep, as the renderer prints a nested list; a paragraph through `para`; code
+ * as the renderer prints it. In source order.
+ */
+export function nestedChildren(children: ListChild[] | undefined, r: BlockRenderer, para: (text: string) => string): string[] {
+  return (children ?? []).map((c) =>
+    c.type === "code_block" ? r.code_block(c) : c.type === "paragraph" ? para(c.text) : renderList(c, r, 1),
+  );
 }
 
 function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {

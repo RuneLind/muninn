@@ -63,11 +63,11 @@ const PAGE = [
   "",
   "</StatusRows>",
   "",
-  "Se D2 for regelen.",
+  "Se D2 for regelen, og [listen](#beslutningsliste).",
   "",
   '<Fold title="Beslutninger">',
   "",
-  "## Beslutninger",
+  "## Beslutningsliste",
   "",
   "<DecisionLog>",
   "",
@@ -75,6 +75,8 @@ const PAGE = [
   "- **D2** — Regelen gjelder alle saker. Unntaket er sokkel.",
   "  - Detalj under punktet.",
   "- **D3** — Bare én setning.",
+  "- **D4** — Regelen gjelder fra januar i år. Tallet er <Fact n=\"1\" v=\"bad\">41 saker</Fact> totalt.",
+  "- **S1** — Skal vi bytte kø for alle saker? Lukket 07.10 (D1).",
   "",
   "</DecisionLog>",
   "",
@@ -242,6 +244,63 @@ test.describe("Wiki reader: the top of a report page", () => {
     await expect(peek).toBeVisible();
     await expect(peek).toContainText("Regelen gjelder alle saker. Unntaket er sokkel.");
     await expect(peek.locator("button.dl-more")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("a heading peek in Overview shows the decisions whole, with no «mer» toggle (E)", async ({ page }) => {
+    const seen = await open_(page, WIKI);
+    expect(await lensOf(page)).toBe("overview");
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "listen" }).first().hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toBeVisible();
+    await expect(peek.getByText("Unntaket er sokkel.")).toBeVisible();
+    await expect(peek.getByText("Detalj under punktet.")).toBeVisible();
+    await expect(peek.locator("button.dl-more")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("Overview badges a closed question «lukket» after its first sentence; All does not (J)", async ({ page }) => {
+    const seen = await open_(page, WIKI);
+    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    const s1 = page.locator("li.dl-item#s1");
+    await expect(s1.locator(".dl-first")).toHaveText("Skal vi bytte kø for alle saker?");
+    await expect(s1.locator(".dl-rest")).toBeHidden();
+    const badge = s1.locator(".dl-qstate");
+    await expect(badge).toBeVisible();
+    await expect(badge).toHaveText("lukket");
+    await expect(badge).toHaveAttribute("data-reader-only", "");
+    // A decision is no question: no badge.
+    await expect(page.locator("li.dl-item .dl-qstate")).toHaveCount(1);
+    await page.locator(".wiki-lens-switch button[data-lens='all']").click();
+    await expect(badge).toBeHidden();
+    expectClean(seen);
+
+    await open_(page, WIKI_EN);
+    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    await expect(page.locator("li.dl-item#s1 .dl-qstate")).toHaveText("closed");
+  });
+
+  test("an item whose rest holds a fact-check mark opens by default in Overview (K)", async ({ page }) => {
+    const seen = await open_(page, WIKI);
+    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    const d4 = page.locator("li.dl-item#d4");
+    await expect(d4.locator(".dl-rest")).toBeVisible();
+    await expect(d4.locator(".fc-chip")).toBeVisible();
+    await expect(d4.locator("button.dl-more")).toHaveText("mindre");
+    // Its neighbours stay collapsed.
+    await expect(page.locator("li.dl-item#d2 .dl-rest")).toBeHidden();
+    expectClean(seen);
+  });
+
+  test("«mer» names its item, points at its rest and stays out of a copy", async ({ page }) => {
+    const seen = await open_(page, WIKI);
+    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    const more = page.locator("li.dl-item#d2 button.dl-more");
+    await expect(more).toHaveAttribute("aria-label", "mer om D2");
+    const controls = (await more.getAttribute("aria-controls"))!.split(" ");
+    expect(controls.length).toBeGreaterThan(0);
+    for (const id of controls) await expect(page.locator(`li.dl-item#d2 [id="${id}"]`)).toHaveCount(1);
+    expect(await more.evaluate((b) => getComputedStyle(b).userSelect)).toBe("none");
     expectClean(seen);
   });
 

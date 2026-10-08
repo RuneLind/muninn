@@ -41,7 +41,7 @@ import type { Block, ChecklistRow, FactVerdict } from "./markdown-ast.ts";
 import { tldrFallbackLabel } from "./genre-lists.ts";
 import { statusRows } from "./report-top.ts";
 import { questionLeadText } from "./question.ts";
-import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
+import { nestedChildren, ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
 import {
@@ -354,7 +354,7 @@ const emailRenderer: BlockRenderer = {
         return rawChildren
           .map((b) =>
             b.type === "ul" || b.type === "ol"
-              ? `<div style="margin:0 0 12px;">${statusRows([b]).map((r) => `<div style="margin:0 0 4px;color:${TEXT};">${renderInline(r.text)}</div>`).join("")}</div>`
+              ? `<div style="margin:0 0 12px;">${statusRows([b]).map((r, k) => `<div style="margin:0 0 4px;color:${TEXT};">${renderInline(r.text)}${nestedChildren(b.nested?.[k], emailRenderer, (t) => `<p style="margin:4px 0 0;">${itemEmail(t)}</p>`).join("")}</div>`).join("")}</div>`
               : renderBlocks([b], emailRenderer),
           )
           .join("\n");

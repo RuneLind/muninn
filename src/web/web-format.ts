@@ -57,6 +57,7 @@ import {
   markStatePhrases,
   MORE_LABELS,
   splitFirstSentence,
+  type SentenceSplit,
   STATUS_SEPARATOR,
   statusSegments,
   statusRows,
@@ -918,12 +919,57 @@ function logItemHtml(text: string, nested: string, value: string): string {
   );
 }
 
+/** A DecisionLog item's text split after its first sentence (D6), or null.
+ *  The guard: a split is taken only where the two halves render as the whole
+ *  does (white space aside), so no cut can break emphasis, a component, a link
+ *  or a fact mark; the next sentence end is tried instead. The wiki linter
+ *  reads the same split. */
+export function splitDecisionText(text: string): SentenceSplit | null {
+  const flat = (html: string) => html.replace(/\s+/g, " ");
+  return splitFirstSentence(text, (first, rest) => flat(itemHtml(first) + itemHtml(rest)) === flat(itemHtml(text)));
+}
+
+/** The first sentence of a DecisionLog item as Overview shows it: the split's
+ *  first half, else the whole item. */
+export function decisionFirstSentence(text: string): string {
+  return splitDecisionText(text)?.first ?? text;
+}
+
+/** `html` without the two presentational spans a DecisionLog split adds
+ *  (`dl-first`, `dl-rest`), their content kept: what the fact-check render
+ *  guard compares, since a mark may move where an item splits (D6) without
+ *  changing a word of the page. */
+export function unwrapDecisionSplits(html: string): string {
+  if (!html.includes('<span class="dl-first">')) return html;
+  const opens = /<span class="dl-(?:first|rest)">/g;
+  let out = "";
+  let at = 0;
+  for (let m = opens.exec(html); m; m = opens.exec(html)) {
+    // The matching close: a balanced scan over the spans inside.
+    const tagRe = /<span\b[^>]*>|<\/span>/g;
+    tagRe.lastIndex = m.index + m[0].length;
+    let depth = 1;
+    let close = -1;
+    for (let t = tagRe.exec(html); t; t = tagRe.exec(html)) {
+      depth += t[0] === "</span>" ? -1 : 1;
+      if (depth === 0) {
+        close = t.index;
+        break;
+      }
+    }
+    if (close === -1) break;
+    out += html.slice(at, m.index) + html.slice(m.index + m[0].length, close);
+    at = close + "</span>".length;
+    opens.lastIndex = at;
+  }
+  return out + html.slice(at);
+}
+
 /** An id-led item's text: its first sentence and the rest in two spans when
  *  it holds more than one (D6), so the reader's Overview can show the first
- *  alone. Both halves render as the whole would: the split never cuts a code
- *  span, a link or open emphasis (`splitFirstSentence`). */
+ *  alone. */
 function logTextHtml(text: string): string {
-  const split = splitFirstSentence(text);
+  const split = splitDecisionText(text);
   if (!split) return itemHtml(text);
   return `<span class="dl-first">${itemHtml(split.first)}</span><span class="dl-rest">${itemHtml(split.rest)}</span>`;
 }
