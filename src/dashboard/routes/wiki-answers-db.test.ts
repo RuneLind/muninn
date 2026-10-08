@@ -790,6 +790,106 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
     const res = await post(appFor({ answers: cfg(null) }), answer({ body: `${MARKER} is fine here` }));
     expect(res.status).toBe(201);
   });
+
+  // Fix round 1: the scan runs after every refusal that does not depend on the
+  // text, so a flagged body never hides why the edit is refused anyway.
+  test("a stranger's flagged edit is 403 not_author, not 422", async () => {
+    const mine = await (await post(appFor({ identity: yvonne, role: "user", answers: cfg(refuses) }), answer({ body: "clean" }))).json();
+    const res = await post(
+      appFor({ identity: ola, role: "user", answers: cfg(refuses) }),
+      answer({ body: MARKER, answerId: mine.answerId, baseVersion: 1 }),
+    );
+    expect(`${res.status} ${(await res.json()).code}`).toBe("403 not_author");
+  });
+
+  test("a flagged edit of an unknown answer is 404 unknown_answer, not 422", async () => {
+    const res = await post(
+      appFor({ answers: cfg(refuses) }),
+      answer({ body: MARKER, answerId: "00000000-0000-4000-8000-000000000123", baseVersion: 1 }),
+    );
+    expect(`${res.status} ${(await res.json()).code}`).toBe("404 unknown_answer");
+  });
+
+  test("a flagged edit of a redacted answer is 409 answer_redacted, not 422", async () => {
+    const app = appFor({ answers: cfg(refuses) });
+    const first = await (await post(app, answer({ body: "clean" }))).json();
+    await app.request("/api/wiki/answers/redact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId: first.answerId }),
+    });
+    const res = await post(app, answer({ body: MARKER, answerId: first.answerId, baseVersion: 1 }));
+    expect(`${res.status} ${(await res.json()).code}`).toBe("409 answer_redacted");
+  });
+
+  test("nais with the scanner unset: a stranger's edit is 403 not_author, not 503", async () => {
+    await onNais(async () => {
+      const mine = await post(appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(null) }), answer({ body: "" }));
+      expect(mine.status).toBe(201);
+      const { answerId } = await mine.json();
+      const res = await post(
+        appFor({ identity: ola, role: "user", profile: "nais", answers: cfg(null) }),
+        answer({ body: "an edit with text", answerId, baseVersion: 1 }),
+      );
+      expect(`${res.status} ${(await res.json()).code}`).toBe("403 not_author");
+    });
+  });
+
+  test("a 422 carries at most 20 reasons, each at most 300 characters, and counts the rest", async () => {
+    const many = await mod(
+      "many.ts",
+      "export function scanAnswer() { return Array.from({ length: 100 }, (_, i) => ({ reason: String(i).padEnd(1000, 'y') })); }",
+    );
+    const res = await post(appFor({ answers: cfg(many) }), answer({ body: "anything" }));
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.reasons.length).toBe(20);
+    expect(body.reasons.every((r: string) => [...r].length <= 300)).toBe(true);
+    expect(body.moreReasons).toBe(80);
+  });
+});
+
+describe("answer cards PR 5 fix round 1: ids, sizes and blank bodies", () => {
+  const redact = (app: Hono, body: unknown) =>
+    app.request("/api/wiki/answers/redact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  test("a redact naming the id in uppercase answers with the stored lowercase id", async () => {
+    const first = await (await post(appFor(), answer())).json();
+    const res = await redact(appFor(), { answerId: first.answerId.toUpperCase() });
+    expect(res.status).toBe(200);
+    expect((await res.json()).answerId).toBe(first.answerId);
+  });
+
+  const pad = (n: number) => "x".repeat(n * 1024);
+  test("an answer POST over 64 KB is 413 before it is parsed", async () => {
+    expect((await post(appFor(), answer({ body: pad(70) }))).status).toBe(413);
+  });
+
+  test("a redact over 64 KB is 413 before it is parsed", async () => {
+    expect((await redact(appFor(), JSON.stringify({ answerId: "x", pad: pad(70) }))).status).toBe(413);
+  });
+
+  test("an export confirm over 64 KB is 413 before it is parsed", async () => {
+    const confirm = await appFor().request("/api/wiki/answers/export/confirm", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wiki: "answers", relPath: REL, rows: [], pad: pad(70) }),
+    });
+    expect(confirm.status).toBe(413);
+  });
+
+  test("a whitespace-only body with a choice is stored as an empty body", async () => {
+    const res = await post(appFor(), answer({ body: "   \n\t ", choice: "A" }));
+    expect(res.status).toBe(201);
+    const saved = await res.json();
+    expect(saved.body).toBe("");
+    const [row] = await getDb()`SELECT body FROM wiki_answers WHERE answer_id = ${saved.answerId}`;
+    expect(row!.body).toBe("");
+  });
 });
 
 describe("answer cards PR 5: redact (D15)", () => {

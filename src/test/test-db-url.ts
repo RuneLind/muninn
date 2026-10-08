@@ -40,3 +40,13 @@ export function resolveTestDatabaseUrl(env: Record<string, string | undefined> =
 }
 
 export const TEST_DATABASE_URL = resolveTestDatabaseUrl();
+
+/**
+ * The database `scripts/seed-e2e-db.ts` writes: the `MUNINN_TEST_DATABASE_URL`
+ * override when it is set (under the same `_test` rule), else `DATABASE_URL` as
+ * the config resolved it — so a seed and the suites it seeds for read one
+ * database.
+ */
+export function seedDatabaseUrl(env: Record<string, string | undefined>, configured: string): string {
+  return (env.MUNINN_TEST_DATABASE_URL ?? "").trim() ? resolveTestDatabaseUrl(env) : configured;
+}

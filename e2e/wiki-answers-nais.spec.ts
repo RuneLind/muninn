@@ -381,6 +381,10 @@ test.describe("the card in the browser", () => {
   });
 
   test("an admin's card offers Redact… with an inline confirm; Cancel backs out, Redact empties the answer", async ({ page }) => {
+    // Its own answer, so this test reads no other test's rows.
+    const seeded = await call(BASE, PEOPLE.browser, "/api/wiki/answers", answerBody({ choice: null, body: "Et svar som skal fjernes." }));
+    expect(seeded.status).toBe(201);
+    const answerId = String(seeded.json!.answerId);
     let dialogs = 0;
     page.on("dialog", (d) => {
       dialogs++;
@@ -389,7 +393,7 @@ test.describe("the card in the browser", () => {
     await asPerson(page, PEOPLE.admin);
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
     const c = card(page);
-    const target = c.locator(".q-answer", { hasText: "Et rent svar." });
+    const target = c.locator(`.q-answer[data-answer-id="${answerId}"]`);
     await expect(target.locator("button.q-redact")).toHaveText("Redact…");
 
     await target.locator("button.q-redact").click();
@@ -402,10 +406,9 @@ test.describe("the card in the browser", () => {
 
     await target.locator("button.q-redact").click();
     await target.locator("button.q-redact-yes").click();
-    const redacted = c.locator(".q-answer", { hasText: "Test Browser" });
-    await expect(redacted.locator(".q-redacted")).toHaveText("redacted");
-    await expect(redacted.locator("button.q-redact")).toHaveCount(0);
-    await expect(c).not.toContainText("Et rent svar.");
+    await expect(target.locator(".q-redacted")).toHaveText("redacted");
+    await expect(target.locator("button.q-redact")).toHaveCount(0);
+    await expect(c).not.toContainText("Et svar som skal fjernes.");
     expect(dialogs).toBe(0);
   });
 });

@@ -87,7 +87,9 @@ export class WikiAnswerRedacted extends Error {
  * version inserted meanwhile.
  */
 async function lockAnswer(tx: Sql, answerId: string): Promise<void> {
-  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${answerId}::text, 0))`;
+  // Hashed in the uuid's canonical text form, so `ABC…` and `abc…` — one row
+  // set to every WHERE here — take one lock.
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${answerId}::uuid::text, 0))`;
 }
 
 /** A test seam: runs inside the write's transaction, after its last

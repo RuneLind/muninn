@@ -21,5 +21,11 @@ export function wikiRouteTable(half: "read" | "tools" | "answers", profile: "def
   if (half === "read") registerWikiReadRoutes(app, config);
   else if (half === "answers") registerWikiAnswerRoutes(app, config);
   else registerWikiToolRoutes(app, config);
-  return app.routes.filter((r) => r.method !== "ALL").map((r) => ({ method: r.method, path: r.path }));
+  // One row per (method, path): a route-scoped middleware (the answer POSTs'
+  // body limit) is a second `app.routes` entry for the same route.
+  const seen = new Set<string>();
+  return app.routes
+    .filter((r) => r.method !== "ALL")
+    .filter((r) => !seen.has(`${r.method} ${r.path}`) && seen.add(`${r.method} ${r.path}`))
+    .map((r) => ({ method: r.method, path: r.path }));
 }

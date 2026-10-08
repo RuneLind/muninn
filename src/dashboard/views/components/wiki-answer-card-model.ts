@@ -193,12 +193,15 @@ function redactParts(a: AnswerWire, L: QuestionLabels, r: RedactView | undefined
     return { inline: ` <button type="button" class="q-redact" data-answer-id="${id}">${esc(R.open)}</button>`, block: "" };
   }
   const off = r.working ? " disabled" : "";
+  // The prompt says what Redact does ("cannot be undone"): tied to the group
+  // and to the button, so a screen reader announces it with either.
+  const promptId = `q-redact-prompt-${id}`;
   return {
     inline: "",
     block:
-      `<div class="q-redact-confirm" role="group" aria-label="${esc(R.confirm)}">` +
-      `<span class="q-redact-prompt">${esc(R.prompt)}</span> ` +
-      `<button type="button" class="q-redact-yes" data-answer-id="${id}"${off}>${esc(r.working ? R.working : R.confirm)}</button> ` +
+      `<div class="q-redact-confirm" role="group" aria-label="${esc(R.confirm)}" aria-describedby="${promptId}">` +
+      `<span class="q-redact-prompt" id="${promptId}">${esc(R.prompt)}</span> ` +
+      `<button type="button" class="q-redact-yes" data-answer-id="${id}" aria-describedby="${promptId}"${off}>${esc(r.working ? R.working : R.confirm)}</button> ` +
       `<button type="button" class="q-redact-no" data-answer-id="${id}"${off}>${esc(R.cancel)}</button>` +
       `</div>`,
   };
@@ -310,7 +313,12 @@ export function scannerReasonsOf(status: number, payload: unknown): string[] | n
  *  line when no scanner could run, else the server's own sentence. */
 export function saveErrorText(status: number, payload: unknown, L: QuestionLabels): string {
   const reasons = scannerReasonsOf(status, payload);
-  if (reasons) return reasons.length ? `${L.composer.scannerRefused} ${reasons.join("; ")}` : L.composer.scannerRefused;
+  if (reasons) {
+    if (reasons.length === 0) return L.composer.scannerRefusedNone;
+    const more = (payload as { moreReasons?: unknown }).moreReasons;
+    const tail = Number.isInteger(more) && (more as number) > 0 ? ` ${L.composer.moreReasons(more as number)}` : "";
+    return `${L.composer.scannerRefused} ${reasons.join("; ")}${tail}`;
+  }
   if (payload && typeof payload === "object" && (payload as { code?: unknown }).code === "scanner_unavailable") {
     return L.composer.scannerUnavailable;
   }
@@ -321,6 +329,15 @@ export function saveErrorText(status: number, payload: unknown, L: QuestionLabel
         ? `HTTP ${status}`
         : "";
   return error ? `${L.composer.failed}: ${error}` : L.composer.failed;
+}
+
+/** The line a failed redact shows, in the card's language by status — never
+ *  the server's English `error`, which names a role the reader cannot change. */
+export function redactErrorText(status: number, _payload: unknown, L: QuestionLabels): string {
+  if (status === 403) return L.redact.forbidden;
+  if (status === 404) return L.redact.gone;
+  if (status === 0) return L.redact.network;
+  return L.redact.http(status);
 }
 
 /** A 409 that means "someone saved a newer version first". */

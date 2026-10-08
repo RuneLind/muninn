@@ -33,7 +33,8 @@
  * The browser drives 127.0.0.1, which takes the loopback bypass: the pinned
  * identity at role `user` with no credential — exactly the role under test.
  * The zone rows go through a forwarding header plus the token instead, as a
- * request through the pod's proxy would. No model calls and nothing written.
+ * request through the pod's proxy would. No model calls; the only writes are
+ * the answer rows above, to the test database.
  * The mermaid bundle loads from the CDN, as it does for every reader.
  */
 

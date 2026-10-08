@@ -765,6 +765,8 @@ export function questionReaderCss(scope: string): string {
       background: transparent; color: var(--text-primary); border: 1px solid var(--status-error);
     }
     ${scope} .q-redact-yes:disabled, ${scope} .q-redact-no:disabled { opacity: 0.6; cursor: default; }
+    /* On the error tint --border-secondary is ~1.1:1; --text-soft reads at 3:1+ in both themes. */
+    ${scope} .q-redact-confirm .q-redact-no:not(:hover) { border-color: var(--text-soft); }
     ${scope} .q-clear-choice[hidden] { display: none; }
     ${scope} .q-retry { margin-left: 0.4rem; }
     ${scope} .q-composer { margin-top: 0.6rem; }

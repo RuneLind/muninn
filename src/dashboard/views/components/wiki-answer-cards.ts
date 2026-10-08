@@ -44,6 +44,7 @@ import {
   isVersionConflict,
   mergeSavedAnswer,
   overCapText,
+  redactErrorText,
   saveErrorText,
   savedAnswerOf,
   statePillText,
@@ -325,6 +326,9 @@ function restoreFocus(section: HTMLElement, mark: FocusMark | null): void {
 function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
   if (!ui.section.isConnected) return;
   const answers = answersFor(ctx, ui);
+  // A confirm whose answer is redacted or gone has nothing left to redact.
+  const target = ui.redact;
+  if (target && !target.working && !answers.some((a) => a.answerId === target.answerId && !a.redacted)) ui.redact = null;
   const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server, ui.redact]);
   if (!force && key === ui.paintedKey) return;
   const mark = captureFocus(ui.section);
@@ -360,7 +364,8 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
     .map(
       (a) =>
         answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null, ui.openLogs.has(a.answerId), {
-          can: ui.canRedact,
+          // Not beside its own open editor: one control per answer at a time.
+          can: ui.canRedact && ui.editing?.answerId !== a.answerId,
           confirming: ui.redact?.answerId === a.answerId,
           working: ui.redact?.answerId === a.answerId && ui.redact.working,
         }) +
@@ -422,7 +427,19 @@ function focusButton(ui: CardUi, cls: string, answerId: string): void {
   (btn ?? ui.section).focus({ preventScroll: true });
 }
 
-/** An admin's confirmed Redact: one POST, then the answers again. */
+/** The answer as a redact leaves it, every version emptied. */
+function redactedCopy(a: AnswerWire): AnswerWire {
+  return {
+    ...a,
+    body: "",
+    choice: null,
+    redacted: true,
+    ...(a.earlier ? { earlier: a.earlier.map((v) => ({ ...v, body: "", choice: null, redacted: true })) } : {}),
+  };
+}
+
+/** An admin's confirmed Redact: one POST, then the answers again. The card is
+ *  repainted the moment the POST settles, as a save's is. */
 async function redact(ctx: CardsCtx, ui: CardUi, answerId: string): Promise<void> {
   ui.redact = { answerId, working: true };
   paint(ctx, ui, true);
@@ -440,23 +457,23 @@ async function redact(ctx: CardsCtx, ui: CardUi, answerId: string): Promise<void
     status = 0;
   }
   ui.redact = null;
+  const moveFocus = focusIsHereOrNowhere(ui);
   if (status >= 200 && status < 300) {
+    ctx.answers = ctx.answers.map((a) => (a.answerId === answerId ? redactedCopy(a) : a));
+    notify(ctx);
+    paint(ctx, ui, true);
+    // Its Redact… is gone: the card holds focus, the repaint rule.
+    if (moveFocus) ui.section.focus({ preventScroll: true });
     const r = await loadAnswers(ctx);
     if (r === "failed" || r === "off") {
-      ui.message = { text: ui.L.composer.loadFailed, kind: "warn", retry: true };
+      ui.message = { text: ui.L.redact.reloadFailed, kind: "warn", retry: true };
+      paint(ctx, ui, true);
     }
-    paint(ctx, ui, true);
-    if (focusIsHereOrNowhere(ui)) ui.section.focus({ preventScroll: true });
     return;
   }
-  const error =
-    data && typeof data === "object" && typeof (data as { error?: unknown }).error === "string"
-      ? (data as { error: string }).error
-      : status > 0
-        ? `HTTP ${status}`
-        : "";
-  ui.message = { text: error ? `${ui.L.redact.failed}: ${error}` : ui.L.redact.failed, kind: "error" };
+  ui.message = { text: redactErrorText(status, data, ui.L), kind: "error" };
   paint(ctx, ui, true);
+  if (moveFocus) focusButton(ui, "q-redact", answerId);
 }
 
 function focusEdit(ui: CardUi, answerId: string | null): void {
@@ -515,6 +532,8 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
       ui.choice = draftChoiceFor(a.choice, ui.choices);
       ui.body = a.body;
       ui.message = null;
+      // An open Redact confirm closes: the answer it named is being edited.
+      if (!ui.redact?.working) ui.redact = null;
       paint(ctx, ui, true);
       section.querySelector<HTMLTextAreaElement>("textarea.q-text")?.focus();
     } else if (t.classList.contains("q-cancel") && !ui.sending) {
@@ -550,6 +569,18 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
         if (r !== "ok" && t.isConnected) t.removeAttribute("aria-disabled");
       });
     }
+  });
+  // Escape inside the Redact confirm is its Cancel. Stopped here, so the
+  // reader's own Escape (leaving focus mode) does not run as well.
+  section.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !ui.redact || ui.redact.working) return;
+    if (!(e.target instanceof Element) || !e.target.closest(".q-redact-confirm")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const id = ui.redact.answerId;
+    ui.redact = null;
+    paint(ctx, ui, true);
+    focusButton(ui, "q-redact", id);
   });
   section.addEventListener("submit", (e) => {
     const form = e.target as HTMLElement;

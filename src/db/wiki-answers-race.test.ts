@@ -53,6 +53,17 @@ function holdPoint() {
   };
 }
 
+/** Wait until the held write reaches its hook — or surface the error it threw
+ *  before getting there, rather than waiting out the test's own timeout. */
+async function reachedHook(hold: { atHook: Promise<void> }, write: Promise<unknown>): Promise<void> {
+  await Promise.race([
+    hold.atHook,
+    write.then(() => {
+      throw new Error("the held write settled without reaching its hook");
+    }),
+  ]);
+}
+
 /** "settled" when `p` settles within `ms`, else "pending". */
 async function stateAfter(p: Promise<unknown>, ms: number): Promise<"settled" | "pending"> {
   return Promise.race([
@@ -74,7 +85,7 @@ describe("redact and edit serialize per answer", () => {
 
     const hold = holdPoint();
     const redact = redactWikiAnswer(id, { beforeCommit: hold.hook });
-    await hold.atHook;
+    await reachedHook(hold, redact);
 
     const edit = insertWikiAnswerVersion(version(id, 2));
     edit.catch(() => {});
@@ -91,13 +102,31 @@ describe("redact and edit serialize per answer", () => {
     expect(rows.every((r) => r.redacted_at !== null && r.body === "" && r.choice === null)).toBe(true);
   });
 
+  test("(a) with the edit spelling the id in UPPERCASE: the same lock, so the edit still waits and is refused", async () => {
+    const id = randomUUID();
+    await insertWikiAnswerVersion(version(id, 1));
+
+    const hold = holdPoint();
+    const redact = redactWikiAnswer(id, { beforeCommit: hold.hook });
+    await reachedHook(hold, redact);
+
+    const edit = insertWikiAnswerVersion(version(id.toUpperCase(), 2));
+    edit.catch(() => {});
+    const waited = await stateAfter(edit, 400).finally(() => hold.release());
+    expect(waited).toBe("pending");
+
+    expect(await redact).toMatchObject({ versions: 1, alreadyRedacted: false });
+    await expect(edit).rejects.toBeInstanceOf(WikiAnswerRedacted);
+    expect((await rowsOf(id)).map((r) => r.version)).toEqual([1]);
+  });
+
   test("(b) an edit holding the lock with its version inserted makes a redact wait, and the redact covers it", async () => {
     const id = randomUUID();
     await insertWikiAnswerVersion(version(id, 1));
 
     const hold = holdPoint();
     const edit = insertWikiAnswerVersion(version(id, 2), { beforeCommit: hold.hook });
-    await hold.atHook;
+    await reachedHook(hold, edit);
 
     const redact = redactWikiAnswer(id);
     redact.catch(() => {});

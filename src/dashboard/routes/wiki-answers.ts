@@ -29,6 +29,7 @@
  * lost race — is a 409, never a silent overwrite.
  */
 import type { Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { randomUUID } from "node:crypto";
 import { resolveServingProfile, resolveWikiAnswerConfig, wikiTakesAnswers, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly } from "../route-groups.ts";
@@ -85,6 +86,16 @@ export const WIKI_ANSWERS_EXPORT_CONFIRM_PATH = "/api/wiki/answers/export/confir
 export const WIKI_ANSWERS_REDACT_PATH = "/api/wiki/answers/redact";
 /** The most `(answerId, version)` rows one confirm takes. */
 export const EXPORT_CONFIRM_MAX_ROWS = 500;
+/** The largest request body the answer POSTs read. An 8000-character answer
+ *  is at most ~48 KB of JSON (`\uXXXX` escapes); 500 confirm rows ~25 KB. */
+export const WIKI_ANSWER_BODY_LIMIT = 64 * 1024;
+
+/** Refuses a body over {@link WIKI_ANSWER_BODY_LIMIT} with 413 before it is
+ *  parsed: role `user` reaches the answer POST on the pod. */
+const answerBodyLimit = bodyLimit({
+  maxSize: WIKI_ANSWER_BODY_LIMIT,
+  onError: (c) => c.json({ error: "request body too large", code: "too_large" }, 413),
+});
 
 /**
  * May this viewer read AND post answers? The zone model's own decision for
@@ -408,7 +419,7 @@ export function registerWikiAnswerRoutes(
     }
   });
 
-  app.post(WIKI_ANSWERS_PATH, async (c) => {
+  app.post(WIKI_ANSWERS_PATH, answerBodyLimit, async (c) => {
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
     let raw: unknown;
@@ -428,9 +439,14 @@ export function registerWikiAnswerRoutes(
       return err(c, 400, "bad_request", "choice must be a string");
     }
     if (b.answerId !== undefined && typeof b.answerId !== "string") return err(c, 400, "bad_request", "answerId must be a string");
-    const body = (b.body as string | undefined) ?? "";
+    const rawBody = (b.body as string | undefined) ?? "";
+    // A body that is only white space says nothing: stored empty, so the
+    // export prints no empty blockquote.
+    const body = rawBody.trim() === "" ? "" : rawBody;
     const choice = (b.choice as string | null | undefined) ?? null;
-    const answerId = b.answerId as string | undefined;
+    // The stored spelling (Postgres prints a uuid lowercase), so a response
+    // and a log line echo the id the store holds.
+    const answerId = (b.answerId as string | undefined)?.toLowerCase();
     const baseVersion = b.baseVersion;
     if (answerId !== undefined && !(Number.isInteger(baseVersion) && (baseVersion as number) >= 1)) {
       return err(c, 400, "bad_base_version", "an edit needs baseVersion: the version it was made from");
@@ -438,7 +454,7 @@ export function registerWikiAnswerRoutes(
     if (answerId === undefined && baseVersion !== undefined) {
       return err(c, 400, "bad_base_version", "baseVersion belongs to an edit (answerId)");
     }
-    if (hasUnstorableText(body) || (choice !== null && hasUnstorableText(choice))) {
+    if (hasUnstorableText(rawBody) || (choice !== null && hasUnstorableText(choice))) {
       return err(c, 400, "bad_text", "body and choice must not contain a NUL or an unpaired surrogate");
     }
 
@@ -474,26 +490,9 @@ export function registerWikiAnswerRoutes(
       const allowed = [...new Set([...question.choices, QUESTION_NOT_SURE])];
       return err(c, 400, "bad_choice", `choice must be one of: ${allowed.join(", ")}`);
     }
-    if (body.trim() === "" && choice === null) return err(c, 400, "empty_answer", "an answer needs a body or a choice");
+    if (body === "" && choice === null) return err(c, 400, "empty_answer", "an answer needs a body or a choice");
     if (codePointLength(body) > QUESTION_ANSWER_MAX) {
       return err(c, 400, "body_too_long", `body is over ${QUESTION_ANSWER_MAX} characters`);
-    }
-
-    // D16: the body is scanned before anything is stored. `choice` is not —
-    // it is one of the page's own parsed choices. nais needs a scanner for
-    // every body; default runs one only when WIKI_ANSWER_SCANNER is set.
-    if (body.trim() !== "") {
-      const scanner = cfg.scanner ?? null;
-      if (scanner === null && scannerRequired(profile)) {
-        return err(c, 503, "scanner_unavailable", "WIKI_ANSWER_SCANNER is not set: this instance stores no answer text");
-      }
-      if (scanner !== null) {
-        const verdict = await scanAnswerText(scanner, body);
-        if (verdict.status === "unavailable") return err(c, 503, "scanner_unavailable", verdict.error);
-        if (verdict.status === "refused") {
-          return c.json({ error: "scanner_refused", code: "scanner_refused", reasons: verdict.reasons }, 422);
-        }
-      }
     }
 
     let id: string;
@@ -521,6 +520,33 @@ export function registerWikiAnswerRoutes(
     } else {
       id = randomUUID();
       version = 1;
+    }
+
+    // D16: the body is scanned before it is stored — after every refusal that
+    // does not depend on the text, so a flagged edit that would be refused
+    // anyway says why (not the author, unknown, redacted, stale). `choice` is
+    // not scanned: it is one of the page's own parsed choices. nais needs a
+    // scanner for every body; default runs one only when WIKI_ANSWER_SCANNER is set.
+    if (body !== "") {
+      const scanner = cfg.scanner ?? null;
+      if (scanner === null && scannerRequired(profile)) {
+        return err(c, 503, "scanner_unavailable", "WIKI_ANSWER_SCANNER is not set: this instance stores no answer text");
+      }
+      if (scanner !== null) {
+        const verdict = await scanAnswerText(scanner, body);
+        if (verdict.status === "unavailable") return err(c, 503, "scanner_unavailable", verdict.error);
+        if (verdict.status === "refused") {
+          return c.json(
+            {
+              error: "scanner_refused",
+              code: "scanner_refused",
+              reasons: verdict.reasons,
+              ...(verdict.omitted ? { moreReasons: verdict.omitted } : {}),
+            },
+            422,
+          );
+        }
+      }
     }
 
     try {
@@ -552,7 +578,7 @@ export function registerWikiAnswerRoutes(
   // redacted_at. Not keyed on WIKI_ANSWER_WIKIS or the page: cleanup must
   // still work after a wiki leaves the list or a page is gone. Idempotent —
   // a second call answers 200 with `alreadyRedacted: true`.
-  app.post(WIKI_ANSWERS_REDACT_PATH, async (c) => {
+  app.post(WIKI_ANSWERS_REDACT_PATH, answerBodyLimit, async (c) => {
     if (!isAdminViewer(c)) return err(c, 403, "admin_only", "only an admin may redact answers");
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
@@ -562,10 +588,11 @@ export function registerWikiAnswerRoutes(
     } catch {
       return err(c, 400, "bad_request", "body is not JSON");
     }
-    const answerId = raw && typeof raw === "object" ? (raw as Record<string, unknown>).answerId : undefined;
-    if (typeof answerId !== "string" || !isValidUuid(answerId)) {
+    const rawId = raw && typeof raw === "object" ? (raw as Record<string, unknown>).answerId : undefined;
+    if (typeof rawId !== "string" || !isValidUuid(rawId)) {
       return err(c, 400, "bad_request", "answerId must be an answer's uuid");
     }
+    const answerId = rawId.toLowerCase();
     try {
       const done = await (store.redact ?? redactWikiAnswer)(answerId);
       if (!done) return err(c, 404, "unknown_answer", "no such answer");
@@ -651,7 +678,7 @@ export function registerWikiAnswerRoutes(
     }
   });
 
-  app.post(WIKI_ANSWERS_EXPORT_CONFIRM_PATH, async (c) => {
+  app.post(WIKI_ANSWERS_EXPORT_CONFIRM_PATH, answerBodyLimit, async (c) => {
     if (!isAdminViewer(c)) return err(c, 403, "admin_only", "only an admin may export answers");
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
