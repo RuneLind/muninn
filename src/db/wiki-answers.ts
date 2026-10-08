@@ -7,6 +7,8 @@ import { getDb } from "./client.ts";
  * insert, reads, and two updates: {@link markWikiAnswersExported}, which sets
  * `exported_at` and nothing else, and {@link redactWikiAnswer} (an admin
  * redact, PR 5), which empties `body` and `choice` and sets `redacted_at`.
+ * Rows leave only through {@link sweepWikiAnswerRetention} (D17), which
+ * deletes whole answers.
  */
 
 export interface WikiAnswerAuthor {
@@ -70,6 +72,14 @@ function rowToVersion(r: any): WikiAnswerVersion {
   };
 }
 
+/** The answer is gone — the retention sweep (D17) deleted every version while
+ *  this edit waited — so there is nothing to add a version to (route: 404). */
+export class WikiAnswerGone extends Error {
+  constructor(readonly answerId: string) {
+    super(`answer ${answerId} no longer exists`);
+  }
+}
+
 /** The answer was redacted before this edit could be stored (PR 5). */
 export class WikiAnswerRedacted extends Error {
   constructor(readonly answerId: string) {
@@ -117,6 +127,15 @@ export async function insertWikiAnswerVersion(
         SELECT 1 FROM wiki_answers WHERE answer_id = ${input.answerId} AND redacted_at IS NOT NULL LIMIT 1
       `;
       if (redacted.length > 0) throw new WikiAnswerRedacted(input.answerId);
+      // Inside the lock too: a retention sweep that deleted the answer while
+      // this edit waited leaves no base version, and an edit stored then would
+      // be a lone later version with its history gone. No version at all is a
+      // gone answer, not a stale base.
+      if (input.version > 1) {
+        const [top] = await tx`SELECT max(version)::int AS v FROM wiki_answers WHERE answer_id = ${input.answerId}`;
+        if (top?.v == null) throw new WikiAnswerGone(input.answerId);
+        if (top.v !== input.version - 1) throw new WikiAnswerVersionConflict(input.answerId, input.version);
+      }
       const rows = await tx`
         INSERT INTO wiki_answers (
           answer_id, version, wiki, rel_path, question_id,
@@ -298,11 +317,19 @@ export async function markWikiAnswersExported(
   wiki: string,
   relPath: string,
   rows: readonly (readonly [string, number])[],
+  hooks: WikiAnswerExportHooks = {},
 ): Promise<number> {
   return markExported(
     wiki,
     rows.map(([id, version]) => [id, version, relPath] as const),
+    hooks,
   );
+}
+
+/** A test seam: runs inside the confirm's transaction after each answer lock,
+ *  so a test can order two confirms' lock acquisition. */
+export interface WikiAnswerExportHooks {
+  afterLock?: (answerId: string) => Promise<void>;
 }
 
 /**
@@ -318,12 +345,39 @@ export async function markWikiOrphanAnswersExported(
   return markExported(wiki, rows);
 }
 
-async function markExported(wiki: string, rows: readonly (readonly [string, number, string])[]): Promise<number> {
+async function markExported(
+  wiki: string,
+  rows: readonly (readonly [string, number, string])[],
+  hooks: WikiAnswerExportHooks = {},
+): Promise<number> {
   if (rows.length === 0) return 0;
-  const sql = getDb();
   const ids = rows.map((r) => r[0]);
   const versions = rows.map((r) => r[1]);
   const rels = rows.map((r) => r[2]);
+  // Under every listed answer's lock, so a confirm cannot land between the
+  // retention sweep's re-check and its delete (the sweep would delete an answer
+  // the confirm just reported marked). Distinct and SORTED: the sweep and the
+  // redact hold one lock at a time, two confirms take theirs in one order, so
+  // no cycle. The UPDATE is its own statement after them (READ COMMITTED), so
+  // it sees what a sweep committed while this waited.
+  const lockIds = [...new Set(ids.map((id) => id.toLowerCase()))].sort();
+  return getDb().begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    for (const id of lockIds) {
+      await lockAnswer(tx, id);
+      await hooks.afterLock?.(id);
+    }
+    return updateExported(tx, wiki, ids, versions, rels);
+  });
+}
+
+async function updateExported(
+  sql: Sql,
+  wiki: string,
+  ids: string[],
+  versions: number[],
+  rels: string[],
+): Promise<number> {
   const updated = await sql`
     UPDATE wiki_answers w SET exported_at = now()
     FROM unnest(${ids as string[]}::uuid[], ${versions as number[]}::int[], ${rels as string[]}::text[])
@@ -337,4 +391,136 @@ async function markExported(wiki: string, rows: readonly (readonly [string, numb
       )
   `;
   return updated.count;
+}
+
+/** Retention windows in days (decision D17); null ⇒ that rule is off. */
+export interface WikiAnswerRetentionWindows {
+  exportedDays: number | null;
+  unexportedDays: number | null;
+}
+
+/** Answers deleted, per rule (an answer counts under one rule: redacted
+ *  first), and answers whose transaction failed. */
+export interface WikiAnswerRetentionCounts {
+  exported: number;
+  unexported: number;
+  redacted: number;
+  failed: number;
+  /** The first failure's error class and Postgres code (never its message,
+   *  which can carry answer text or ids). */
+  firstFailure?: { errorClass: string; code: string | null };
+  /** A stop was requested, so candidates after it were left for the next sweep. */
+  stopped?: boolean;
+}
+
+type RetentionRule = "exported" | "unexported" | "redacted";
+
+export interface WikiAnswerRetentionHooks {
+  /** Runs inside a per-answer transaction after the re-check, before the delete. */
+  afterRecheck?: (answerId: string) => Promise<void>;
+  /** Runs inside a per-answer transaction after its delete, before the commit. */
+  beforeCommit?: () => Promise<void>;
+  /** Checked before each answer: true ends the sweep there (shutdown). */
+  shouldStop?: () => boolean;
+  /** How long one answer waits for its lock before it counts as failed. */
+  lockTimeoutMs?: number;
+}
+
+/** One held answer lock fails that answer, not the sweep: without a bound the
+ *  sweep, and with the tick guard every later tick, would wait on it. */
+export const RETENTION_LOCK_TIMEOUT_MS = 5_000;
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Which answers a retention rule matches, judged on the LATEST version (an
+ * answer exported and then edited is unexported), and redacted when any
+ * version is. `only` restricts it to one answer, for the re-check under lock.
+ */
+async function retentionCandidates(
+  q: Sql,
+  windows: WikiAnswerRetentionWindows,
+  now: number,
+  only: string | null,
+): Promise<{ answerId: string; rule: RetentionRule }[]> {
+  const exportedBefore = windows.exportedDays == null ? null : new Date(now - windows.exportedDays * DAY_MS);
+  const createdBefore = windows.unexportedDays == null ? null : new Date(now - windows.unexportedDays * DAY_MS);
+  const rows = await q`
+    SELECT answer_id, CASE
+        WHEN redacted THEN 'redacted'
+        WHEN exported_at IS NOT NULL THEN 'exported'
+        ELSE 'unexported'
+      END AS rule
+    FROM (
+      SELECT DISTINCT ON (answer_id) answer_id, exported_at, created_at,
+        bool_or(redacted_at IS NOT NULL) OVER (PARTITION BY answer_id) AS redacted
+      FROM wiki_answers
+      WHERE ${only}::uuid IS NULL OR answer_id = ${only}::uuid
+      ORDER BY answer_id, version DESC
+    ) latest
+    WHERE redacted
+      OR (exported_at < ${exportedBefore}::timestamptz)
+      OR (exported_at IS NULL AND created_at < ${createdBefore}::timestamptz)
+  `;
+  return rows.map((r) => ({ answerId: r.answer_id, rule: r.rule as RetentionRule }));
+}
+
+/**
+ * The retention sweep (D17): `wiki_answers` is a transit buffer, the page and
+ * its git history are the record. Deletes every version of an answer whose
+ * latest version was exported more than `exportedDays` ago, or never exported
+ * and saved more than `unexportedDays` ago, and of every redacted answer. Each
+ * age rule runs only when its window is set; the redacted rule when either is;
+ * both null ⇒ nothing. Page-blind, so an orphaned answer (its page removed)
+ * falls under the same rules.
+ *
+ * One transaction per answer, under {@link lockAnswer}, re-checking the rule
+ * there: a single `DELETE … WHERE answer_id IN (SELECT …)` misses a version an
+ * edit commits meanwhile and leaves it alone with its history gone. An edit
+ * that waited on the lock then finds no version and throws
+ * {@link WikiAnswerGone}; an export confirm takes the same lock. A failing
+ * answer — a lock not granted within `lockTimeoutMs` among them — is counted
+ * in `failed` and the run goes on; `shouldStop` ends it between answers.
+ */
+export async function sweepWikiAnswerRetention(
+  windows: WikiAnswerRetentionWindows,
+  now: number = Date.now(),
+  hooks: WikiAnswerRetentionHooks = {},
+): Promise<WikiAnswerRetentionCounts> {
+  const counts: WikiAnswerRetentionCounts = { exported: 0, unexported: 0, redacted: 0, failed: 0 };
+  if (windows.exportedDays == null && windows.unexportedDays == null) return counts;
+  const sql = getDb();
+  const candidates = await retentionCandidates(sql as unknown as Sql, windows, now, null);
+  const lockTimeout = String(Math.max(1, Math.floor(hooks.lockTimeoutMs ?? RETENTION_LOCK_TIMEOUT_MS)));
+  for (const { answerId } of candidates) {
+    // Shutdown asked: after its wait times out the pool closes, and every
+    // answer left would otherwise count as failed against a closed pool.
+    if (hooks.shouldStop?.()) {
+      counts.stopped = true;
+      break;
+    }
+    // One answer's failure (a lock timeout, a dropped connection) is counted
+    // and the run goes on: the others are due regardless.
+    try {
+      const rule = await sql.begin(async (_tx) => {
+        const tx = _tx as unknown as Sql;
+        await tx`SELECT set_config('lock_timeout', ${lockTimeout}, true)`;
+        await lockAnswer(tx, answerId);
+        const [still] = await retentionCandidates(tx, windows, now, answerId);
+        if (!still) return null;
+        await hooks.afterRecheck?.(answerId);
+        await tx`DELETE FROM wiki_answers WHERE answer_id = ${answerId}`;
+        await hooks.beforeCommit?.();
+        return still.rule;
+      });
+      if (rule) counts[rule]++;
+    } catch (err) {
+      counts.failed++;
+      counts.firstFailure ??= {
+        errorClass: err instanceof Error ? err.constructor.name : typeof err,
+        code: typeof (err as { code?: unknown })?.code === "string" ? (err as { code: string }).code : null,
+      };
+    }
+  }
+  return counts;
 }

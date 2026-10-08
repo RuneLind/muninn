@@ -94,6 +94,10 @@ interface CardUi {
   message: { text: string; kind: "error" | "warn"; retry?: boolean } | null;
   /** A 409 asked for the newer version: move `editing` onto it on the next load. */
   rebaseOnLoad: boolean;
+  /** The draft in the new-answer composer was carried from an editor whose
+   *  answer is gone: the composer stays, and no Edit is offered, until it is
+   *  saved or cancelled — an Edit click would overwrite it. */
+  carried: boolean;
   /** Answer ids whose log fold the reader has open. */
   openLogs: Set<string>;
   /** The viewer may redact (an admin: the page's `canExport`). */
@@ -187,6 +191,7 @@ export function enhanceAnswerCards(
       sending: false,
       message: null,
       rebaseOnLoad: false,
+      carried: false,
       openLogs: new Set(),
       canRedact: info.canExport === true,
       redact: null,
@@ -333,6 +338,17 @@ function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
   // draft is the text the admin removed, and saving it is a 409.
   const edited = ui.editing;
   if (edited && answers.some((a) => a.answerId === edited.answerId && a.redacted)) resetDraft(ui);
+  // An editor on an answer now GONE (the retention sweep deleted it, or any
+  // other cause) has nothing to edit: its draft moves into the new-answer
+  // composer, kept, with a line saying why. Only from a loaded list, and
+  // never mid-save — the list is what says the answer is gone.
+  const editingNow = ui.editing;
+  if (editingNow && ctx.loaded && !ui.sending && !answers.some((a) => a.answerId === editingNow.answerId)) {
+    ui.editing = null;
+    ui.rebaseOnLoad = false;
+    ui.carried = true;
+    ui.message = { text: ui.L.composer.editGone, kind: "warn" };
+  }
   const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server, ui.redact]);
   if (!force && key === ui.paintedKey) return;
   const mark = captureFocus(ui.section);
@@ -367,7 +383,7 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
   const items = answers
     .map(
       (a) =>
-        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null && !redactingNow(ui, a.answerId), ui.openLogs.has(a.answerId), {
+        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null && !ui.carried && !redactingNow(ui, a.answerId), ui.openLogs.has(a.answerId), {
           // Not beside its own open editor: one control per answer at a time.
           can: ui.canRedact && ui.editing?.answerId !== a.answerId,
           confirming: ui.redact?.answerId === a.answerId,
@@ -379,8 +395,9 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
     )
     .join("");
   let html = items ? `<div class="q-answers">${items}</div>` : "";
-  // The viewer composes a new answer until they have one; after that they edit it.
-  if (open && ui.editing === null && !answers.some((a) => a.mine)) html += composerHtml(composerView(ui), L);
+  // The viewer composes a new answer until they have one; after that they edit
+  // it. A carried draft keeps its composer whatever else the viewer has.
+  if (open && ui.editing === null && (ui.carried || !answers.some((a) => a.mine))) html += composerHtml(composerView(ui), L);
   if (ui.message) {
     const retry = ui.message.retry ? ` <button type="button" class="q-retry">${esc(L.composer.retry)}</button>` : "";
     html += `<p class="q-msg q-msg-${ui.message.kind}" role="${ui.message.kind === "error" ? "alert" : "status"}">${esc(ui.message.text)}${retry}</p>`;
@@ -401,6 +418,7 @@ const composerView = (ui: CardUi) => ({
   choice: ui.choice,
   body: ui.body,
   sending: ui.sending,
+  carried: ui.carried,
 });
 
 /** Refresh the counter, the over-cap line, Clear choice and Save in place,
@@ -602,6 +620,7 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
 
 function resetDraft(ui: CardUi): void {
   ui.editing = null;
+  ui.carried = false;
   ui.choice = null;
   ui.body = "";
   ui.rebaseOnLoad = false;
@@ -665,8 +684,17 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
       ui.message = { text: `${L.composer.conflict} ${L.composer.loadFailed}`, kind: "warn", retry: true };
       paint(ctx, ui, true);
     }
+  } else if (base && status === 404 && isUnknownAnswer(data)) {
+    // The answer being edited is gone (the retention sweep): reload, and the
+    // repaint carries the draft into the new-answer composer.
+    ui.message = { text: saveErrorText(status, data, L), kind: "error" };
+    paint(ctx, ui, true);
+    await loadAnswers(ctx);
   } else {
     ui.message = { text: saveErrorText(status, data, L), kind: "error" };
     paint(ctx, ui, true);
   }
 }
+
+const isUnknownAnswer = (payload: unknown) =>
+  !!payload && typeof payload === "object" && (payload as { code?: unknown }).code === "unknown_answer";

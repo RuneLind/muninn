@@ -359,6 +359,24 @@ describe("edits are append-only, and only the author's", () => {
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("answer_redacted");
   });
+
+  test("an edit whose answer the retention sweep deletes after the route read it is 404 unknown_answer, not a 409", async () => {
+    const first = await (await post(appFor(), answer({ body: "v1" }))).json();
+    // The sweep lands between the route's read of the latest version and its insert.
+    const store: WikiAnswerStore = {
+      insert: insertWikiAnswerVersion,
+      listLatest: listLatestWikiAnswers,
+      listVersions: listWikiAnswerVersions,
+      getLatest: async (id) => {
+        const latest = await getLatestWikiAnswerVersion(id);
+        await getDb()`DELETE FROM wiki_answers WHERE answer_id = ${id}`;
+        return latest;
+      },
+    };
+    const res = await post(appFor({ store }), answer({ body: "edited", answerId: first.answerId, baseVersion: 1 }));
+    expect({ status: res.status, code: (await res.json()).code }).toEqual({ status: 404, code: "unknown_answer" });
+    expect((await getDb()`SELECT count(*)::int AS n FROM wiki_answers WHERE answer_id = ${first.answerId}`)[0]!.n).toBe(0);
+  });
 });
 
 describe("refusals", () => {

@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -330,5 +330,41 @@ describe("prompt-snapshot retention clamps", () => {
     const warning = records.find((r) => r.level === "warning" && String(r.message.join("")).includes(CAPTURE));
     expect(warning).toBeDefined();
     expect(String(warning!.message.join("") + JSON.stringify(warning!.properties))).toContain("0");
+  });
+});
+
+/** Answer retention (D17): unset ⇒ off, 0 ⇒ OFF and carried as refused (the
+ *  boot line warns about it once logging is up — never 0, which would delete
+ *  every answer), anything but digits refuses the boot. */
+describe("resolveWikiAnswerRetention", () => {
+  const E = "WIKI_ANSWER_RETENTION_DAYS";
+  const U = "WIKI_ANSWER_UNEXPORTED_DAYS";
+
+  test("unset or blank ⇒ both rules off", () => {
+    expect(resolveWikiAnswerRetention({})).toEqual({ exportedDays: null, unexportedDays: null, refused: [] });
+    expect(resolveWikiAnswerRetention({ [E]: " ", [U]: "" })).toEqual({ exportedDays: null, unexportedDays: null, refused: [] });
+  });
+
+  test("positive integers are honoured, each on its own, surrounding space trimmed", () => {
+    expect(resolveWikiAnswerRetention({ [E]: "30", [U]: " 90 " })).toEqual({ exportedDays: 30, unexportedDays: 90, refused: [] });
+    expect(resolveWikiAnswerRetention({ [U]: "90" })).toEqual({ exportedDays: null, unexportedDays: 90, refused: [] });
+  });
+
+  test("0 turns the rule OFF and is carried as refused, for the boot line to warn about", () => {
+    expect(resolveWikiAnswerRetention({ [E]: "0", [U]: "00" })).toEqual({
+      exportedDays: null,
+      unexportedDays: null,
+      refused: [
+        { name: E, value: "0" },
+        { name: U, value: "00" },
+      ],
+    });
+  });
+
+  test("anything but digits refuses the boot, naming the variable: no lenient parse of a deletion window", () => {
+    for (const raw of ["thirty", "1e3", "1.9", "30d", "0.5", "-5", "+30", "3 0", "0x10"]) {
+      expect(() => resolveWikiAnswerRetention({ [E]: raw })).toThrow(ConfigError);
+      expect(() => resolveWikiAnswerRetention({ [U]: raw })).toThrow(/WIKI_ANSWER_UNEXPORTED_DAYS/);
+    }
   });
 });

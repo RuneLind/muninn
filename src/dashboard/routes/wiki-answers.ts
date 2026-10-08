@@ -65,6 +65,7 @@ import {
   markWikiOrphanAnswersExported,
   redactWikiAnswer,
   WikiAnswerRedacted,
+  WikiAnswerGone,
   WikiAnswerVersionConflict,
   type LatestWikiAnswer,
   type WikiAnswerLocation,
@@ -569,6 +570,9 @@ export function registerWikiAnswerRoutes(
       return c.json({ answerId: saved.answerId, questionId, ...versionView(saved), mine: true }, version === 1 ? 201 : 200);
     } catch (e) {
       if (e instanceof WikiAnswerVersionConflict) return versionConflict(c);
+      // The retention sweep deleted the answer after the read above: the same
+      // answer the read itself would have given a moment later.
+      if (e instanceof WikiAnswerGone) return err(c, 404, "unknown_answer", "no such answer to this question");
       if (e instanceof WikiAnswerRedacted) return answerRedacted(c);
       log.error("answer write failed for {wiki}/{relPath}: {error}", {
         wiki,

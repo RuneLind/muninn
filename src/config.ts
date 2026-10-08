@@ -142,6 +142,46 @@ export function resolveWikiAnswerConfig(env: Record<string, string | undefined> 
   };
 }
 
+/** Answer retention (decision D17): day counts, null ⇒ that rule is off. Both
+ *  null ⇒ no sweep at all, including the redacted rule. */
+export interface WikiAnswerRetention {
+  /** `WIKI_ANSWER_RETENTION_DAYS`: delete an answer this long after its latest `exported_at`. */
+  exportedDays: number | null;
+  /** `WIKI_ANSWER_UNEXPORTED_DAYS`: delete a never-exported answer this long after its latest version. */
+  unexportedDays: number | null;
+  /** Variables set to 0, turned OFF instead. Carried, not logged here:
+   *  `loadConfig()` runs before `setupLogging()`, so a warn from here is
+   *  dropped. The boot line (`answerRetentionBootLines`) warns about them. */
+  refused: { name: string; value: string }[];
+}
+
+/** One retention day count. Unset/blank ⇒ off. Digits only — this is a
+ *  deletion window, so `1e3`, `1.9`, `30d`, `-5` refuse the boot with
+ *  `ConfigError` rather than being read as something else. 0 is OFF, never 0
+ *  days (which would delete every answer on the next sweep), and is reported
+ *  in `refused`. */
+function retentionDays(
+  env: Record<string, string | undefined>,
+  name: string,
+  refused: WikiAnswerRetention["refused"],
+): number | null {
+  const raw = (env[name] ?? "").trim();
+  if (!raw) return null;
+  if (!/^\d+$/.test(raw)) throw new ConfigError(`Environment variable ${name} must be a whole number of days, got: "${raw}"`);
+  const days = Number(raw);
+  if (days >= 1) return days;
+  refused.push({ name, value: raw });
+  return null;
+}
+
+/** `WIKI_ANSWER_RETENTION_DAYS` + `WIKI_ANSWER_UNEXPORTED_DAYS`. */
+export function resolveWikiAnswerRetention(env: Record<string, string | undefined> = process.env): WikiAnswerRetention {
+  const refused: WikiAnswerRetention["refused"] = [];
+  const exportedDays = retentionDays(env, "WIKI_ANSWER_RETENTION_DAYS", refused);
+  const unexportedDays = retentionDays(env, "WIKI_ANSWER_UNEXPORTED_DAYS", refused);
+  return { exportedDays, unexportedDays, refused };
+}
+
 /** Does this wiki take answers? Keyed on the registry NAME. */
 export function wikiTakesAnswers(wikiName: string | undefined, cfg: WikiAnswerConfig): boolean {
   return !!wikiName && cfg.wikis.has(wikiName.toLowerCase());
@@ -819,6 +859,7 @@ export function loadConfig() {
     // default and is fine: the id is what a search takes.
     claudeUsagePublicUrl: nullableEnv("CLAUDE_USAGE_PUBLIC_URL"),
     wikiAnswers: resolveWikiAnswerConfig(),
+    wikiAnswerRetention: resolveWikiAnswerRetention(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
