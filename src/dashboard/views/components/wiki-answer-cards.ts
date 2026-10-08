@@ -363,9 +363,11 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
   section.setAttribute("data-answer-state", state);
   section.classList.toggle("q-answered", state === "answered");
   section.classList.toggle("q-copied", state === "copied");
-  // The server's state class, kept in step once a save's 409 closed the card.
+  // The server's state class and attribute, kept in step once a save's 409
+  // closed the card.
   section.classList.toggle("q-open", ui.server === "open");
   section.classList.toggle("q-closed", ui.server === "closed");
+  if (ui.server !== "none") section.setAttribute("data-question-state", ui.server);
   const pill = statePillText(state, L);
   const pillEl = section.querySelector<HTMLElement>(":scope > .q-head > .q-state");
   if (pill !== null && pillEl) pillEl.textContent = pill;
@@ -689,11 +691,14 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
     }
   } else if (status === 409 && (codeOf(data) === "answer_redacted" || codeOf(data) === "question_closed")) {
     // No retry can save this. Applied here, not left to the reload, which may
-    // fail and does not carry a question's state: a closed card renders no
-    // composer, and paint() closes an editor on a redacted answer, its draft
-    // discarded. The reload then brings the rest of the card up to date.
-    if (codeOf(data) === "question_closed") ui.server = "closed";
-    else if (base) {
+    // fail and does not carry a question's state: a closed card drops the
+    // draft with every edit state (an owed rebase, an editor hiding Redact…),
+    // and paint() closes an editor on a redacted answer, its draft discarded.
+    // The reload then brings the rest of the card up to date.
+    if (codeOf(data) === "question_closed") {
+      ui.server = "closed";
+      resetDraft(ui);
+    } else if (base) {
       ctx.answers = ctx.answers.map((a) => (a.answerId === base.answerId ? redactedCopy(a) : a));
       notify(ctx);
     }

@@ -234,7 +234,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       conflict:
         "Svaret er endret et annet sted. Den nyeste versjonen vises over; teksten din står fortsatt i feltet, og lagrer du den, erstatter den den versjonen.",
       editGone: "Svaret du endret er fjernet. Teksten din er beholdt nedenfor; lagrer du den, blir den et nytt svar.",
-      editRedacted: "Svaret du endret er fjernet. Endringen din ble ikke lagret.",
+      editRedacted: "Svaret du endret er fjernet av en administrator. Endringen din ble ikke lagret.",
       questionClosed: "Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.",
       failed: "Svaret ble ikke lagret",
       loadFailed: "Kunne ikke hente svarene.",

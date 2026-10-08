@@ -231,10 +231,13 @@ const SWEEP_PAGE = [
 ].join("\n");
 
 // A save the server refuses for good: the answer was redacted, or the
-// question closed, after the card was loaded. T2 is closed by rewriting this
-// page mid-test, so its own file keeps the rewrite away from other cases.
+// question closed, after the card was loaded. A case closes its question by
+// rewriting this page mid-test, so its own file keeps the rewrite away from
+// other pages; each id closes once and stays closed. T6 is the card whose
+// save reloads T7.
 const TERMINAL_REL = "plans/terminal.mdx";
-const terminalPage = (closed: boolean) =>
+const terminalClosed = new Set<string>();
+const terminalPage = () =>
   [
     "---",
     "title: Terminal page",
@@ -244,8 +247,22 @@ const terminalPage = (closed: boolean) =>
     ...q("T1", "Redacted while its editor is open?"),
     ...q("T2", "Closed while its answer is being written?"),
     ...q("T3", "Redacted under its editor, and the reload fails?"),
-    ...(closed ? ["<DecisionLog>", "", "- **T2** — Closed mid-write. Closed 2026-10-08 (D98).", "", "</DecisionLog>", ""] : []),
+    ...q("T4", "Closed after a conflict whose reload failed?"),
+    ...q("T5", "Closed under an admin's editor?"),
+    ...q("T6", "Saved to reload T7?"),
+    ...q("T7", "Closed under its editor, then swept?"),
+    "<DecisionLog>",
+    "",
+    ...[...terminalClosed].map((id) => `- **${id}** — Closed mid-write. Closed 2026-10-08 (D98).`),
+    "",
+    "</DecisionLog>",
+    "",
   ].join("\n");
+const closeTerminal = async (id: string) => {
+  terminalClosed.add(id);
+  await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(), "utf8");
+};
+const CLOSED_MSG = "The answer was not saved: the question was closed while you were writing.";
 
 // WIKI_ANSWER_GROUPS: synthetic groups and idents (Z99xxxx). The answers are
 // seeded by SQL with an author ident — auth off has only the owner, no ident.
@@ -294,7 +311,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
   await writeFile(path.join(base, "a", SWEEP_REL), SWEEP_PAGE, "utf8");
   await writeFile(path.join(base, "a", GROUPS_REL), GROUPS_PAGE, "utf8");
-  await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(false), "utf8");
+  await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(), "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -357,7 +374,7 @@ test.beforeAll(async ({}, info) => {
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 first answer." });
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 second answer." });
 
-  for (const id of ["T1", "T3"]) await api({ relPath: TERMINAL_REL, questionId: id, body: `${id} version one.` });
+  for (const id of ["T1", "T3", "T4", "T5", "T7"]) await api({ relPath: TERMINAL_REL, questionId: id, body: `${id} version one.` });
 
   // The groups page: a fag member (also in utvikler) and a utvikler-only author.
   for (const [name, ident, body] of [
@@ -1693,17 +1710,84 @@ test.describe("Wiki reader: a save the server refuses for good", () => {
     const t2 = card(page, "T2");
     await expect(t2.locator(".q-state")).toHaveText("Open");
     await t2.locator("textarea.q-text").fill("T2 text, written as it closed.");
-    await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(true), "utf8");
+    await closeTerminal("T2");
     await t2.locator("button.q-save").click();
 
-    await expect(t2.locator(".q-msg-error")).toHaveText("The answer was not saved: the question was closed while you were writing.");
+    await expect(t2.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
     await expect(t2.locator("form.q-composer")).toHaveCount(0);
     await expect(t2.locator("textarea.q-text, button.q-save")).toHaveCount(0);
     await expect(t2.locator(".q-state")).toHaveText("Closed");
     await expect(t2).toHaveClass(/\bq-closed\b/);
     await expect(t2).not.toHaveClass(/\bq-open\b/);
+    await expect(t2).toHaveAttribute("data-question-state", "closed");
     expect(await rowsFor("T2", TERMINAL_REL)).toHaveLength(0);
     expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("closed after a conflict whose reload failed: the reload after the 409 rebases nothing, and the closed line stays", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t4 = card(page, "T4");
+    await t4.locator("button.q-edit").click();
+    await t4.locator("textarea.q-text").fill("T4 edit.");
+    // A conflict whose reload fails: the card still owes a rebase.
+    await page.route("**/api/wiki/answers", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "x", code: "version_conflict" }) })
+        : route.fallback(),
+    );
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET" ? route.fulfill({ status: 500, body: "{}" }) : route.fallback(),
+    );
+    await t4.locator("button.q-save").click();
+    await expect(t4.locator(".q-msg-warn button.q-retry")).toBeVisible();
+    await page.unroute("**/api/wiki/answers");
+    await page.unroute("**/api/wiki/answers?*");
+    await closeTerminal("T4");
+    await t4.locator("button.q-save").click();
+
+    await expect(t4.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+    await expect(t4.locator("form.q-composer")).toHaveCount(0);
+    // The real reload has landed: the answer is back with its version one.
+    await expect(t4.locator(".q-answer")).toContainText("T4 version one.");
+    await expect(t4.locator(".q-msg")).toHaveText(CLOSED_MSG);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("closed under an admin's own editor: the answer keeps its Redact…", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t5 = card(page, "T5");
+    await expect(t5.locator("button.q-redact")).toHaveCount(1);
+    await t5.locator("button.q-edit").click();
+    await t5.locator("textarea.q-text").fill("T5 edit.");
+    await closeTerminal("T5");
+    await t5.locator("button.q-save").click();
+
+    await expect(t5.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+    await expect(t5.locator("form.q-composer")).toHaveCount(0);
+    await expect(t5.locator("button.q-redact")).toHaveCount(1);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("closed under its editor, then swept: a later reload says nothing about a kept draft", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t7 = card(page, "T7");
+    await expect(t7.locator(".q-answer")).toHaveCount(1);
+    await t7.locator("button.q-edit").click();
+    await t7.locator("textarea.q-text").fill("T7 edit.");
+    await closeTerminal("T7");
+    await t7.locator("button.q-save").click();
+    await expect(t7.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+
+    await sql!`DELETE FROM wiki_answers WHERE wiki = ${WIKI} AND rel_path = ${TERMINAL_REL} AND question_id = 'T7'`;
+    const t6 = card(page, "T6");
+    await t6.locator("textarea.q-text").fill("T6 saved.");
+    await t6.locator("button.q-save").click();
+    await expect(t6.locator(".q-answer")).toHaveCount(1);
+
+    await expect(t7.locator(".q-answer")).toHaveCount(0);
+    await expect(t7.locator(".q-msg")).toHaveText(CLOSED_MSG);
+    await expect(t7.locator("form.q-composer")).toHaveCount(0);
     expect(seen.errors).toEqual([]);
   });
 });

@@ -315,7 +315,9 @@ describe("a save refused for good", () => {
     const redacted = { error: "this answer was redacted", code: "answer_redacted" };
     const closed = { error: "question T2 is decided", code: "question_closed" };
     expect(saveErrorText(409, redacted, en)).toBe("The answer you were editing was redacted. Your change was not saved.");
-    expect(saveErrorText(409, redacted, no)).toBe("Svaret du endret er fjernet. Endringen din ble ikke lagret.");
+    expect(saveErrorText(409, redacted, no)).toBe("Svaret du endret er fjernet av en administrator. Endringen din ble ikke lagret.");
+    // Not editGone's opening: a redacted answer is not a removed one.
+    expect(no.composer.editRedacted.split(". ")[0]).not.toBe(no.composer.editGone.split(". ")[0]);
     expect(saveErrorText(409, closed, en)).toBe("The answer was not saved: the question was closed while you were writing.");
     expect(saveErrorText(409, closed, no)).toBe("Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.");
   });
