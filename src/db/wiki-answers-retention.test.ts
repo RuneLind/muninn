@@ -1,8 +1,9 @@
 /**
  * The answer retention sweep (decision D17) on the real test database: each
  * rule at its boundary, unset windows, the redacted rule, an exported-then-
- * edited answer, an orphan, and the race against a concurrent edit (two
- * transactions in flight, held open by the write seams' `beforeCommit` hooks).
+ * edited answer, an orphan, a per-answer failure, and the races against a
+ * concurrent edit and export confirm (two transactions in flight, held open by
+ * the seams' hooks, with the waiter seen in `pg_locks` before release).
  */
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -67,7 +68,7 @@ describe("sweepWikiAnswerRetention rules", () => {
     const recent = await answer(200, 2);
     await exported(recent, 29);
 
-    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 1, unexported: 0, redacted: 0 });
+    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 1, unexported: 0, redacted: 0, failed: 0 });
     expect(await survivors()).toEqual([recent]);
     expect(await versionsOf(recent)).toEqual([1, 2]);
   });
@@ -75,7 +76,7 @@ describe("sweepWikiAnswerRetention rules", () => {
   test("unexported: 91 days after the latest version deletes; 89 days keeps", async () => {
     const old = await answer(91, 2);
     const recent = await answer(89);
-    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 1, redacted: 0 });
+    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 0 });
     expect(await survivors()).toEqual([recent]);
   });
 
@@ -83,27 +84,27 @@ describe("sweepWikiAnswerRetention rules", () => {
     const id = await answer(200);
     await exported(id, 100);
     await insertWikiAnswerVersion(version(id, 2)); // saved now, not exported
-    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 0, redacted: 0 });
+    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 0, redacted: 0, failed: 0 });
     expect(await versionsOf(id)).toEqual([1, 2]);
 
     // The same answer once its latest version is 91 days old: unexported rule.
     await getDb()`UPDATE wiki_answers SET created_at = now() - interval '91 days' WHERE answer_id = ${id}`;
-    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 1, redacted: 0 });
+    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 0 });
     expect(await survivors()).toEqual([]);
   });
 
-  test("a redacted answer is deleted at once, whatever its age", async () => {
+  test("a redacted answer is deleted at the next sweep, whatever its age", async () => {
     const id = await answer(0, 2);
     await redactWikiAnswer(id);
     const kept = await answer(0);
-    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 0, redacted: 1 });
+    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 0, redacted: 1, failed: 0 });
     expect(await survivors()).toEqual([kept]);
   });
 
   test("the redacted rule runs when only one window is set", async () => {
     const id = await answer(0);
     await redactWikiAnswer(id);
-    expect(await sweepWikiAnswerRetention({ exportedDays: null, unexportedDays: 90 })).toMatchObject({ redacted: 1 });
+    expect(await sweepWikiAnswerRetention({ exportedDays: null, unexportedDays: 90 })).toMatchObject({ redacted: 1, failed: 0 });
     expect(await survivors()).toEqual([]);
   });
 
@@ -116,12 +117,14 @@ describe("sweepWikiAnswerRetention rules", () => {
       exported: 0,
       unexported: 1,
       redacted: 0,
+      failed: 0,
     });
     expect(await survivors()).toEqual([exp]);
     expect(await sweepWikiAnswerRetention({ exportedDays: 30, unexportedDays: null })).toEqual({
       exported: 1,
       unexported: 0,
       redacted: 0,
+      failed: 0,
     });
     expect(await survivors()).toEqual([]);
     void unexp;
@@ -133,7 +136,7 @@ describe("sweepWikiAnswerRetention rules", () => {
     const b = await answer(400);
     const c = await answer(0);
     await redactWikiAnswer(c);
-    expect(await sweepWikiAnswerRetention(OFF)).toEqual({ exported: 0, unexported: 0, redacted: 0 });
+    expect(await sweepWikiAnswerRetention(OFF)).toEqual({ exported: 0, unexported: 0, redacted: 0, failed: 0 });
     expect(await survivors()).toEqual([a, b, c].sort());
   });
 
@@ -144,9 +147,22 @@ describe("sweepWikiAnswerRetention rules", () => {
     const before = (await listWikiAnswerLocations(WIKI)).map((l) => l.answerId).sort();
     expect(before).toEqual([orphanOld, orphanNew, live].sort());
 
-    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 1, redacted: 0 });
+    expect(await sweepWikiAnswerRetention(ON)).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 0 });
     const after = (await listWikiAnswerLocations(WIKI)).map((l) => l.answerId).sort();
     expect(after).toEqual([orphanNew, live].sort());
+  });
+
+  test("one answer whose transaction fails is counted and skipped; the run goes on", async () => {
+    const bad = await answer(91);
+    const good = await answer(91);
+    const counts = await sweepWikiAnswerRetention(ON, Date.now(), {
+      afterRecheck: async (answerId) => {
+        if (answerId === bad) throw new Error("synthetic failure");
+      },
+    });
+    expect(await survivors()).toEqual([bad]);
+    expect(counts).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 1 });
+    void good;
   });
 
   test("an export after a sweep still marks what survived, and only that", async () => {
@@ -170,14 +186,23 @@ function holdPoint() {
   return { release, atHook, hook: async () => (reached(), await released) };
 }
 
-async function stateAfter(p: Promise<unknown>, ms: number): Promise<"settled" | "pending"> {
-  return Promise.race([
-    p.then(
-      () => "settled" as const,
-      () => "settled" as const,
-    ),
-    new Promise<"pending">((r) => setTimeout(() => r("pending"), ms)),
-  ]);
+/** Wait until some transaction in this database is blocked on an advisory
+ *  lock (the per-answer lock), or until `stop()` says the race is over. True
+ *  when a waiter was seen. Throws after 5 s: a race test that never reached
+ *  the lock exercised nothing. */
+async function advisoryWaiter(stop: () => boolean = () => false): Promise<boolean> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (stop()) return false;
+    const [row] = await getDb()`
+      SELECT count(*)::int AS n FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+    `;
+    if (row!.n > 0) return true;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("no transaction ever waited on the per-answer lock");
 }
 
 describe("sweep against a concurrent edit: the whole answer or nothing", () => {
@@ -190,15 +215,15 @@ describe("sweep against a concurrent edit: the whole answer or nothing", () => {
 
     const sweep = sweepWikiAnswerRetention(ON);
     sweep.catch(() => {});
-    // The sweep picked the answer (version 1 is 91 days old) but waits for the lock.
-    const waited = await stateAfter(sweep, 400).finally(() => hold.release());
+    // The sweep picked the answer (version 1 is 91 days old) and is now blocked
+    // on the lock: pg_locks shows it waiting, so the re-check is what decides.
+    await advisoryWaiter().finally(() => hold.release());
 
     expect((await edit).version).toBe(2);
     await sweep;
     // The outcome first: never a lone version 2 with version 1 deleted.
     expect(await versionsOf(id)).toEqual([1, 2]);
-    expect(waited).toBe("pending");
-    expect(await sweep).toEqual({ exported: 0, unexported: 0, redacted: 0 });
+    expect(await sweep).toEqual({ exported: 0, unexported: 0, redacted: 0, failed: 0 });
   });
 
   test("a sweep holding the lock after its delete wins: the waiting edit is refused, nothing lands", async () => {
@@ -210,14 +235,39 @@ describe("sweep against a concurrent edit: the whole answer or nothing", () => {
 
     const edit = insertWikiAnswerVersion(version(id, 2));
     edit.catch(() => {});
-    const waited = await stateAfter(edit, 400).finally(() => hold.release());
+    await advisoryWaiter().finally(() => hold.release());
 
-    await edit.catch(() => {});
+    const err = await edit.then(
+      () => null,
+      (e: unknown) => e,
+    );
     await sweep;
     // The outcome first: never a lone version 2 after the sweep deleted version 1.
     expect(await versionsOf(id)).toEqual([]);
-    expect(waited).toBe("pending");
-    expect(await sweep).toEqual({ exported: 0, unexported: 1, redacted: 0 });
-    await expect(edit).rejects.toBeInstanceOf(WikiAnswerVersionConflict);
+    expect(await sweep).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 0 });
+    // The answer is gone, not changed: the route answers 404 unknown_answer, not 409.
+    expect(err).not.toBeInstanceOf(WikiAnswerVersionConflict);
+    expect((err as Error | null)?.constructor.name).toBe("WikiAnswerGone");
+  });
+
+  test("an export confirm landing between the sweep's re-check and its delete waits for the sweep, and marks nothing", async () => {
+    const id = await answer(91);
+
+    const hold = holdPoint();
+    const sweep = sweepWikiAnswerRetention(ON, Date.now(), { afterRecheck: hold.hook });
+    await hold.atHook;
+
+    let confirmSettled = false;
+    const confirm = markWikiAnswersExported(WIKI, PAGE, [[id, 1]]).finally(() => (confirmSettled = true));
+    confirm.catch(() => {});
+    const waited = await advisoryWaiter(() => confirmSettled).finally(() => hold.release());
+
+    const marked = await confirm;
+    const counts = await sweep;
+    // The outcome first: a confirm that says it marked the answer while the
+    // sweep deletes it anyway (and counts it unexported) is the defect.
+    expect({ marked, left: await versionsOf(id) }).toEqual({ marked: 0, left: [] });
+    expect(counts).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 0 });
+    expect(waited).toBe(true);
   });
 });

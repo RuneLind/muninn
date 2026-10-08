@@ -72,6 +72,14 @@ function rowToVersion(r: any): WikiAnswerVersion {
   };
 }
 
+/** The answer is gone — the retention sweep (D17) deleted every version while
+ *  this edit waited — so there is nothing to add a version to (route: 404). */
+export class WikiAnswerGone extends Error {
+  constructor(readonly answerId: string) {
+    super(`answer ${answerId} no longer exists`);
+  }
+}
+
 /** The answer was redacted before this edit could be stored (PR 5). */
 export class WikiAnswerRedacted extends Error {
   constructor(readonly answerId: string) {
@@ -121,12 +129,12 @@ export async function insertWikiAnswerVersion(
       if (redacted.length > 0) throw new WikiAnswerRedacted(input.answerId);
       // Inside the lock too: a retention sweep that deleted the answer while
       // this edit waited leaves no base version, and an edit stored then would
-      // be a lone later version with its history gone.
+      // be a lone later version with its history gone. No version at all is a
+      // gone answer, not a stale base.
       if (input.version > 1) {
-        const base = await tx`
-          SELECT 1 FROM wiki_answers WHERE answer_id = ${input.answerId} AND version = ${input.version - 1}
-        `;
-        if (base.length === 0) throw new WikiAnswerVersionConflict(input.answerId, input.version);
+        const [top] = await tx`SELECT max(version)::int AS v FROM wiki_answers WHERE answer_id = ${input.answerId}`;
+        if (top?.v == null) throw new WikiAnswerGone(input.answerId);
+        if (top.v !== input.version - 1) throw new WikiAnswerVersionConflict(input.answerId, input.version);
       }
       const rows = await tx`
         INSERT INTO wiki_answers (
@@ -331,10 +339,30 @@ export async function markWikiOrphanAnswersExported(
 
 async function markExported(wiki: string, rows: readonly (readonly [string, number, string])[]): Promise<number> {
   if (rows.length === 0) return 0;
-  const sql = getDb();
   const ids = rows.map((r) => r[0]);
   const versions = rows.map((r) => r[1]);
   const rels = rows.map((r) => r[2]);
+  // Under every listed answer's lock, so a confirm cannot land between the
+  // retention sweep's re-check and its delete (the sweep would delete an answer
+  // the confirm just reported marked). Distinct and SORTED: the sweep and the
+  // redact hold one lock at a time, two confirms take theirs in one order, so
+  // no cycle. The UPDATE is its own statement after them (READ COMMITTED), so
+  // it sees what a sweep committed while this waited.
+  const lockIds = [...new Set(ids.map((id) => id.toLowerCase()))].sort();
+  return getDb().begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    for (const id of lockIds) await lockAnswer(tx, id);
+    return updateExported(tx, wiki, ids, versions, rels);
+  });
+}
+
+async function updateExported(
+  sql: Sql,
+  wiki: string,
+  ids: string[],
+  versions: number[],
+  rels: string[],
+): Promise<number> {
   const updated = await sql`
     UPDATE wiki_answers w SET exported_at = now()
     FROM unnest(${ids as string[]}::uuid[], ${versions as number[]}::int[], ${rels as string[]}::text[])
@@ -356,16 +384,20 @@ export interface WikiAnswerRetentionWindows {
   unexportedDays: number | null;
 }
 
-/** Answers deleted, per rule. An answer counts under one rule: redacted first. */
+/** Answers deleted, per rule (an answer counts under one rule: redacted
+ *  first), and answers whose transaction failed. */
 export interface WikiAnswerRetentionCounts {
   exported: number;
   unexported: number;
   redacted: number;
+  failed: number;
 }
 
-type RetentionRule = keyof WikiAnswerRetentionCounts;
+type RetentionRule = Exclude<keyof WikiAnswerRetentionCounts, "failed">;
 
 export interface WikiAnswerRetentionHooks {
+  /** Runs inside a per-answer transaction after the re-check, before the delete. */
+  afterRecheck?: (answerId: string) => Promise<void>;
   /** Runs inside a per-answer transaction after its delete, before the commit. */
   beforeCommit?: () => Promise<void>;
 }
@@ -416,28 +448,38 @@ async function retentionCandidates(
  *
  * One transaction per answer, under {@link lockAnswer}, re-checking the rule
  * there: a single `DELETE … WHERE answer_id IN (SELECT …)` misses a version an
- * edit commits meanwhile and leaves it alone with its history gone.
+ * edit commits meanwhile and leaves it alone with its history gone. An edit
+ * that waited on the lock then finds no version and throws
+ * {@link WikiAnswerGone}; an export confirm takes the same lock. A failing
+ * answer is counted in `failed` and the run goes on.
  */
 export async function sweepWikiAnswerRetention(
   windows: WikiAnswerRetentionWindows,
   now: number = Date.now(),
   hooks: WikiAnswerRetentionHooks = {},
 ): Promise<WikiAnswerRetentionCounts> {
-  const counts: WikiAnswerRetentionCounts = { exported: 0, unexported: 0, redacted: 0 };
+  const counts: WikiAnswerRetentionCounts = { exported: 0, unexported: 0, redacted: 0, failed: 0 };
   if (windows.exportedDays == null && windows.unexportedDays == null) return counts;
   const sql = getDb();
   const candidates = await retentionCandidates(sql as unknown as Sql, windows, now, null);
   for (const { answerId } of candidates) {
-    const rule = await sql.begin(async (_tx) => {
-      const tx = _tx as unknown as Sql;
-      await lockAnswer(tx, answerId);
-      const [still] = await retentionCandidates(tx, windows, now, answerId);
-      if (!still) return null;
-      await tx`DELETE FROM wiki_answers WHERE answer_id = ${answerId}`;
-      await hooks.beforeCommit?.();
-      return still.rule;
-    });
-    if (rule) counts[rule]++;
+    // One answer's failure (a lock timeout, a dropped connection) is counted
+    // and the run goes on: the others are due regardless.
+    try {
+      const rule = await sql.begin(async (_tx) => {
+        const tx = _tx as unknown as Sql;
+        await lockAnswer(tx, answerId);
+        const [still] = await retentionCandidates(tx, windows, now, answerId);
+        if (!still) return null;
+        await hooks.afterRecheck?.(answerId);
+        await tx`DELETE FROM wiki_answers WHERE answer_id = ${answerId}`;
+        await hooks.beforeCommit?.();
+        return still.rule;
+      });
+      if (rule) counts[rule]++;
+    } catch {
+      counts.failed++;
+    }
   }
   return counts;
 }

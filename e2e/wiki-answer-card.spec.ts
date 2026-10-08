@@ -207,6 +207,20 @@ const REDACT_PAGE = [
   ...q("R14", "Escape out of the confirm in focus mode?"),
 ].join("\n");
 
+// PR 5b fix round 1: an answer the retention sweep deletes while it is being
+// edited. S4 is the card whose save reloads S3's answers.
+const SWEEP_REL = "plans/sweep.mdx";
+const SWEEP_PAGE = [
+  "---",
+  "title: Sweep page",
+  "type: plan",
+  "---",
+  "",
+  ...q("S1", "Swept between Edit and Save?", ' choices="A|B"'),
+  ...q("S3", "Swept while its editor is open, seen on a reload?"),
+  ...q("S4", "Saved to reload S3?"),
+].join("\n");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let server: ChildProcess | undefined;
@@ -239,6 +253,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", FIX_REL), FIX_PAGE, "utf8");
   await writeFile(path.join(base, "a", FOCUS_REL), FOCUS_PAGE, "utf8");
   await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
+  await writeFile(path.join(base, "a", SWEEP_REL), SWEEP_PAGE, "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -292,6 +307,8 @@ test.beforeAll(async ({}, info) => {
   for (const id of ["R1", "R2", "R3", "R4", "R5", "R7", "R9", "R10", "R11", "R12", "R14"]) {
     await api({ relPath: REDACT_REL, questionId: id, body: `${id} text.` });
   }
+  await api({ relPath: SWEEP_REL, questionId: "S1", choice: "A", body: "S1 version one." });
+  await api({ relPath: SWEEP_REL, questionId: "S3", body: "S3 version one." });
 });
 
 test.afterAll(async () => {
@@ -1081,17 +1098,23 @@ test.describe("Wiki reader: answer card focus across a repaint", () => {
     expectClean(seen);
   });
 
-  test("an open edit form the repaint removes: the card holds focus", async ({ page }) => {
+  test("an open edit form whose answer the repaint removes: the draft moves into the new-answer composer, focus stays in its text", async ({ page }) => {
     const seen = await openFocus(page);
     await holdPosts(page);
-    // The reload no longer lists G18's answer, so its editor goes with it.
+    // The reload no longer lists G18's answer (PR 5b: the retention sweep), so
+    // its editor closes and the draft becomes a new answer's.
     await rewriteGets(page, (answers) => answers.filter((a) => a.questionId !== "G18"));
     const g18 = card(page, "G18");
     await g18.locator("button.q-edit").click();
     await saveOn(card(page, "G19"), "G19 saved.");
     await g18.locator("textarea.q-text").focus();
     await expect(g18.locator(".q-answer")).toHaveCount(0);
-    await expect(g18).toBeFocused();
+    await expect(g18.locator(".q-msg")).toHaveText(
+      "The answer you were editing was removed. Your text is kept below; saving it adds it as a new answer.",
+    );
+    await expect(g18.locator("button.q-cancel")).toHaveCount(0);
+    await expect(g18.locator("textarea.q-text")).toHaveValue("G18 version one.");
+    await expect(g18.locator("textarea.q-text")).toBeFocused();
     expectClean(seen);
   });
 
@@ -1407,6 +1430,60 @@ test.describe("Wiki reader: the admin Redact control (PR 5 fix round 1)", () => 
 });
 
 const f9Text = (page: Page) => card(page, "F9").locator("textarea.q-text");
+
+test.describe("Wiki reader: an answer swept while it is being edited (PR 5b fix round 1)", () => {
+  const sweep = (questionId: string) =>
+    sql!`DELETE FROM wiki_answers WHERE wiki = ${WIKI} AND rel_path = ${SWEEP_REL} AND question_id = ${questionId}`;
+  const GONE = "The answer you were editing was removed. Your text is kept below; saving it adds it as a new answer.";
+
+  test("rows deleted between Edit and Save: the draft moves into the new-answer composer, and saves as a new answer", async ({ page }) => {
+    const seen = await openPage(page, WIKI, SWEEP_REL);
+    const s1 = card(page, "S1");
+    await expect(s1.locator(".q-answer")).toHaveCount(1);
+    const before = (await rowsFor("S1", SWEEP_REL))[0]!.answer_id as string;
+    await s1.locator("button.q-edit").click();
+    await s1.locator("input[type=radio][value=B]").check();
+    await s1.locator("textarea.q-text").fill("S1 edited after the sweep.");
+    await sweep("S1");
+    await s1.locator("button.q-save").click();
+
+    await expect(s1.locator(".q-msg")).toHaveText(GONE);
+    await expect(s1.locator(".q-answer")).toHaveCount(0);
+    // One composer, the NEW-answer one (no Cancel: that belongs to an edit), holding the draft.
+    await expect(s1.locator("form.q-composer")).toHaveCount(1);
+    await expect(s1.locator("button.q-cancel")).toHaveCount(0);
+    await expect(s1.locator("textarea.q-text")).toHaveValue("S1 edited after the sweep.");
+    await expect(s1.locator("input[type=radio][value=B]")).toBeChecked();
+
+    await s1.locator("button.q-save").click();
+    await expect(s1.locator(".q-answer")).toHaveCount(1);
+    await expect(s1.locator(".q-msg")).toHaveCount(0);
+    const rows = await rowsFor("S1", SWEEP_REL);
+    expect(rows.map((r) => ({ version: r.version, choice: r.choice, body: r.body }))).toEqual([
+      { version: 1, choice: "B", body: "S1 edited after the sweep." },
+    ]);
+    expect(rows[0]!.answer_id).not.toBe(before);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("a reload that shows the edited answer gone (another card's save) carries the draft into the composer", async ({ page }) => {
+    const seen = await openPage(page, WIKI, SWEEP_REL);
+    const s3 = card(page, "S3");
+    await expect(s3.locator(".q-answer")).toHaveCount(1);
+    await s3.locator("button.q-edit").click();
+    await s3.locator("textarea.q-text").fill("S3 text, mid-edit.");
+    await sweep("S3");
+    const s4 = card(page, "S4");
+    await s4.locator("textarea.q-text").fill("S4 saved.");
+    await s4.locator("button.q-save").click();
+
+    await expect(s3.locator(".q-msg")).toHaveText(GONE);
+    await expect(s3.locator(".q-answer")).toHaveCount(0);
+    await expect(s3.locator("button.q-cancel")).toHaveCount(0);
+    await expect(s3.locator("textarea.q-text")).toHaveValue("S3 text, mid-edit.");
+    expectClean(seen);
+  });
+});
 
 test.describe("Wiki reader: the answer card's look", () => {
   for (const scheme of ["light", "dark"] as const) {

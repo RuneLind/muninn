@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -333,43 +333,38 @@ describe("prompt-snapshot retention clamps", () => {
   });
 });
 
-/** Answer retention (D17): unset ⇒ off, below 1 ⇒ warn and OFF (never 0, which
- *  would delete every answer), a non-integer refuses like `optionalEnvInt`. */
+/** Answer retention (D17): unset ⇒ off, 0 ⇒ OFF and carried as refused (the
+ *  boot line warns about it once logging is up — never 0, which would delete
+ *  every answer), anything but digits refuses the boot. */
 describe("resolveWikiAnswerRetention", () => {
   const E = "WIKI_ANSWER_RETENTION_DAYS";
   const U = "WIKI_ANSWER_UNEXPORTED_DAYS";
 
-  afterEach(async () => {
-    __resetEnvFlagWarningsForTest();
-    await reset();
-  });
-
   test("unset or blank ⇒ both rules off", () => {
-    expect(resolveWikiAnswerRetention({})).toEqual({ exportedDays: null, unexportedDays: null });
-    expect(resolveWikiAnswerRetention({ [E]: " ", [U]: "" })).toEqual({ exportedDays: null, unexportedDays: null });
+    expect(resolveWikiAnswerRetention({})).toEqual({ exportedDays: null, unexportedDays: null, refused: [] });
+    expect(resolveWikiAnswerRetention({ [E]: " ", [U]: "" })).toEqual({ exportedDays: null, unexportedDays: null, refused: [] });
   });
 
-  test("positive integers are honoured, each on its own", () => {
-    expect(resolveWikiAnswerRetention({ [E]: "30", [U]: "90" })).toEqual({ exportedDays: 30, unexportedDays: 90 });
-    expect(resolveWikiAnswerRetention({ [U]: "90" })).toEqual({ exportedDays: null, unexportedDays: 90 });
+  test("positive integers are honoured, each on its own, surrounding space trimmed", () => {
+    expect(resolveWikiAnswerRetention({ [E]: "30", [U]: " 90 " })).toEqual({ exportedDays: 30, unexportedDays: 90, refused: [] });
+    expect(resolveWikiAnswerRetention({ [U]: "90" })).toEqual({ exportedDays: null, unexportedDays: 90, refused: [] });
   });
 
-  test("0 or a negative value warns once and turns the rule OFF, not 0", async () => {
-    const records: LogRecord[] = [];
-    await configure({
-      sinks: { capture: (r: LogRecord) => records.push(r) },
-      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
-      reset: true,
+  test("0 turns the rule OFF and is carried as refused, for the boot line to warn about", () => {
+    expect(resolveWikiAnswerRetention({ [E]: "0", [U]: "00" })).toEqual({
+      exportedDays: null,
+      unexportedDays: null,
+      refused: [
+        { name: E, value: "0" },
+        { name: U, value: "00" },
+      ],
     });
-    expect(resolveWikiAnswerRetention({ [E]: "0", [U]: "-5" })).toEqual({ exportedDays: null, unexportedDays: null });
-    resolveWikiAnswerRetention({ [E]: "0" });
-    const warns = records.filter((r) => r.level === "warning").map((r) => JSON.stringify(r.properties));
-    expect(warns.length).toBe(2);
-    expect(warns.some((w) => w.includes(E))).toBe(true);
-    expect(warns.some((w) => w.includes(U))).toBe(true);
   });
 
-  test("a non-integer refuses the boot, naming the variable", () => {
-    expect(() => resolveWikiAnswerRetention({ [E]: "thirty" })).toThrow(/WIKI_ANSWER_RETENTION_DAYS/);
+  test("anything but digits refuses the boot, naming the variable: no lenient parse of a deletion window", () => {
+    for (const raw of ["thirty", "1e3", "1.9", "30d", "0.5", "-5", "+30", "3 0", "0x10"]) {
+      expect(() => resolveWikiAnswerRetention({ [E]: raw })).toThrow(ConfigError);
+      expect(() => resolveWikiAnswerRetention({ [U]: raw })).toThrow(/WIKI_ANSWER_UNEXPORTED_DAYS/);
+    }
   });
 });

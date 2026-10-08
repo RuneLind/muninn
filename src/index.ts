@@ -22,7 +22,7 @@ import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
-import { startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
+import { answerRetentionBootLines, startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
@@ -253,12 +253,12 @@ hivemindManager.start(allBotConfigs, config).catch((err) => {
 // tabs so a run parked on a dead/silent peer surfaces its re-send affordance.
 startStaleHandoffSweep();
 
-// Answer retention (D17): hourly, on every profile, off when both windows are unset.
+// Answer retention (D17): hourly, on every profile, off when both windows are
+// unset. The config's refusals are logged here: it was loaded before logging.
+const answerRetentionLines = answerRetentionBootLines(config.wikiAnswerRetention);
+for (const line of answerRetentionLines.warnings) log.warn("{line}", { line });
 if (startAnswerRetentionSweep(config.wikiAnswerRetention)) {
-  log.info("Answer retention sweep on: exported {exported} day(s), unexported {unexported} day(s)", {
-    exported: config.wikiAnswerRetention.exportedDays ?? "off",
-    unexported: config.wikiAnswerRetention.unexportedDays ?? "off",
-  });
+  log.info("{line}", { line: answerRetentionLines.info });
 }
 
 // Start research_knowledge MCP server. Bots opt in by adding the server to their
@@ -522,12 +522,14 @@ async function shutdown() {
   log.info("Shutting down...");
   stopScheduler();
   stopStaleHandoffSweep();
-  stopAnswerRetentionSweep();
+  const answerRetentionStopped = stopAnswerRetentionSweep();
   await wikiBucketMirrors?.stop();
   await waitForPendingTicks(10_000);
   // Let in-flight memory/goal/schedule extractions finish their DB writes
   // before the pool closes below — otherwise their writes race closeDb().
   await waitForPendingExtractions(10_000);
+  // A sweep in flight finishes its DB writes before the pool closes below.
+  await answerRetentionStopped;
 
   for (const bot of telegramBotMap.values()) {
     bot.stop();

@@ -66,6 +66,9 @@ export interface QuestionLabels {
     /** A 409 version_conflict: someone saved a newer version first. The
      *  reader's text stays in the editor, now based on that newer version. */
     conflict: string;
+    /** The answer being edited is gone (deleted by the retention sweep): the
+     *  reader's text is kept in the composer as a new answer. */
+    editGone: string;
     failed: string;
     loadFailed: string;
     /** The POST succeeded, the reload of the answers did not. */
@@ -150,6 +153,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       cancel: "Cancel",
       conflict:
         "This answer changed somewhere else. The latest version is shown above; your text is still in the editor, and saving it replaces that version.",
+      editGone: "The answer you were editing was removed. Your text is kept below; saving it adds it as a new answer.",
       failed: "The answer was not saved",
       loadFailed: "Answers could not be loaded.",
       savedReloadFailed: "The answer was saved, but the answers could not be loaded again.",
@@ -218,6 +222,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       cancel: "Avbryt",
       conflict:
         "Svaret er endret et annet sted. Den nyeste versjonen vises over; teksten din står fortsatt i feltet, og lagrer du den, erstatter den den versjonen.",
+      editGone: "Svaret du endret er fjernet. Teksten din er beholdt nedenfor; lagrer du den, blir den et nytt svar.",
       failed: "Svaret ble ikke lagret",
       loadFailed: "Kunne ikke hente svarene.",
       savedReloadFailed: "Svaret ble lagret, men svarene kunne ikke hentes på nytt.",

@@ -333,6 +333,16 @@ function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
   // draft is the text the admin removed, and saving it is a 409.
   const edited = ui.editing;
   if (edited && answers.some((a) => a.answerId === edited.answerId && a.redacted)) resetDraft(ui);
+  // An editor on an answer now GONE (the retention sweep deleted it, or any
+  // other cause) has nothing to edit: its draft moves into the new-answer
+  // composer, kept, with a line saying why. Only from a loaded list, and
+  // never mid-save — the list is what says the answer is gone.
+  const editingNow = ui.editing;
+  if (editingNow && ctx.loaded && !ui.sending && !answers.some((a) => a.answerId === editingNow.answerId)) {
+    ui.editing = null;
+    ui.rebaseOnLoad = false;
+    ui.message = { text: ui.L.composer.editGone, kind: "warn" };
+  }
   const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server, ui.redact]);
   if (!force && key === ui.paintedKey) return;
   const mark = captureFocus(ui.section);
@@ -665,8 +675,17 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
       ui.message = { text: `${L.composer.conflict} ${L.composer.loadFailed}`, kind: "warn", retry: true };
       paint(ctx, ui, true);
     }
+  } else if (base && status === 404 && isUnknownAnswer(data)) {
+    // The answer being edited is gone (the retention sweep): reload, and the
+    // repaint carries the draft into the new-answer composer.
+    ui.message = { text: saveErrorText(status, data, L), kind: "error" };
+    paint(ctx, ui, true);
+    await loadAnswers(ctx);
   } else {
     ui.message = { text: saveErrorText(status, data, L), kind: "error" };
     paint(ctx, ui, true);
   }
 }
+
+const isUnknownAnswer = (payload: unknown) =>
+  !!payload && typeof payload === "object" && (payload as { code?: unknown }).code === "unknown_answer";

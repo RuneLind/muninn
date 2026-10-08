@@ -149,34 +149,37 @@ export interface WikiAnswerRetention {
   exportedDays: number | null;
   /** `WIKI_ANSWER_UNEXPORTED_DAYS`: delete a never-exported answer this long after its latest version. */
   unexportedDays: number | null;
+  /** Variables set to 0, turned OFF instead. Carried, not logged here:
+   *  `loadConfig()` runs before `setupLogging()`, so a warn from here is
+   *  dropped. The boot line (`answerRetentionBootLines`) warns about them. */
+  refused: { name: string; value: string }[];
 }
 
-/** One retention day count. Unset/blank ⇒ off. A non-integer throws `ConfigError`
- *  ({@link optionalEnvInt}'s answer). Below 1 warns and is OFF, never 0: a 0
- *  would delete every answer on the next sweep. */
-function retentionDays(env: Record<string, string | undefined>, name: string): number | null {
+/** One retention day count. Unset/blank ⇒ off. Digits only — this is a
+ *  deletion window, so `1e3`, `1.9`, `30d`, `-5` refuse the boot with
+ *  `ConfigError` rather than being read as something else. 0 is OFF, never 0
+ *  days (which would delete every answer on the next sweep), and is reported
+ *  in `refused`. */
+function retentionDays(
+  env: Record<string, string | undefined>,
+  name: string,
+  refused: WikiAnswerRetention["refused"],
+): number | null {
   const raw = (env[name] ?? "").trim();
   if (!raw) return null;
-  const parsed = parseInt(raw, 10);
-  if (isNaN(parsed)) throw new ConfigError(`Environment variable ${name} must be a valid integer, got: "${raw}"`);
-  if (parsed >= 1) return parsed;
-  const key = `${name}=${parsed}`;
-  if (!warnedEnvFlagValues.has(key)) {
-    warnedEnvFlagValues.add(key);
-    log.warn("{name} is {value}, which would delete every answer on the next sweep — refused, the rule is off", {
-      name,
-      value: parsed,
-    });
-  }
+  if (!/^\d+$/.test(raw)) throw new ConfigError(`Environment variable ${name} must be a whole number of days, got: "${raw}"`);
+  const days = Number(raw);
+  if (days >= 1) return days;
+  refused.push({ name, value: raw });
   return null;
 }
 
 /** `WIKI_ANSWER_RETENTION_DAYS` + `WIKI_ANSWER_UNEXPORTED_DAYS`. */
 export function resolveWikiAnswerRetention(env: Record<string, string | undefined> = process.env): WikiAnswerRetention {
-  return {
-    exportedDays: retentionDays(env, "WIKI_ANSWER_RETENTION_DAYS"),
-    unexportedDays: retentionDays(env, "WIKI_ANSWER_UNEXPORTED_DAYS"),
-  };
+  const refused: WikiAnswerRetention["refused"] = [];
+  const exportedDays = retentionDays(env, "WIKI_ANSWER_RETENTION_DAYS", refused);
+  const unexportedDays = retentionDays(env, "WIKI_ANSWER_UNEXPORTED_DAYS", refused);
+  return { exportedDays, unexportedDays, refused };
 }
 
 /** Does this wiki take answers? Keyed on the registry NAME. */
