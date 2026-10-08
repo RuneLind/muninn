@@ -21,7 +21,7 @@ import type { AuthRole } from "../../auth/role.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
-import { registerWikiAnswerRoutes, type WikiAnswerStore } from "./wiki-answers.ts";
+import { registerWikiAnswerRoutes, WIKI_ANSWER_BODY_LIMIT, type WikiAnswerStore } from "./wiki-answers.ts";
 import {
   getLatestWikiAnswerVersion,
   insertWikiAnswerVersion,
@@ -29,7 +29,7 @@ import {
   listWikiAnswerVersions,
 } from "../../db/wiki-answers.ts";
 import { registerWikiReadRoutes } from "./wiki-routes.ts";
-import { QUESTION_NOT_SURE } from "../../format/question.ts";
+import { QUESTION_ANSWER_MAX, QUESTION_NOT_SURE } from "../../format/question.ts";
 import { __resetAnswerScannerForTest } from "../../wiki/answer-scanner.ts";
 import { sha256 } from "../../gardener/util.ts";
 
@@ -864,22 +864,49 @@ describe("answer cards PR 5 fix round 1: ids, sizes and blank bodies", () => {
     expect((await res.json()).answerId).toBe(first.answerId);
   });
 
-  const pad = (n: number) => "x".repeat(n * 1024);
-  test("an answer POST over 64 KB is 413 before it is parsed", async () => {
-    expect((await post(appFor(), answer({ body: pad(70) }))).status).toBe(413);
+  const over = WIKI_ANSWER_BODY_LIMIT + 1;
+  const pad = (bytes: number) => "x".repeat(bytes);
+  test("an answer POST over the limit is 413 before it is parsed", async () => {
+    expect((await post(appFor(), answer({ body: pad(over) }))).status).toBe(413);
   });
 
-  test("a redact over 64 KB is 413 before it is parsed", async () => {
-    expect((await redact(appFor(), JSON.stringify({ answerId: "x", pad: pad(70) }))).status).toBe(413);
+  test("a redact over the limit is 413 before it is parsed", async () => {
+    expect((await redact(appFor(), JSON.stringify({ answerId: "x", pad: pad(over) }))).status).toBe(413);
   });
 
-  test("an export confirm over 64 KB is 413 before it is parsed", async () => {
+  test("an export confirm over the limit is 413 before it is parsed", async () => {
     const confirm = await appFor().request("/api/wiki/answers/export/confirm", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wiki: "answers", relPath: REL, rows: [], pad: pad(70) }),
+      body: JSON.stringify({ wiki: "answers", relPath: REL, rows: [], pad: pad(over) }),
     });
     expect(confirm.status).toBe(413);
+  });
+
+  /** JSON as an ASCII-only encoder writes it (Python's `json.dumps` default):
+   *  every non-ASCII code unit as `\uXXXX`, so an astral character is 12 bytes. */
+  const asciiJson = (v: unknown) =>
+    JSON.stringify(v).replace(/[\u0080-\uffff]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  const postRaw = (app: Hono, raw: string) =>
+    app.request("/api/wiki/answers", { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+
+  test("the largest answer validation accepts, sent ASCII-escaped, is stored rather than 413", async () => {
+    const raw = asciiJson(answer({ body: "\u{1F600}".repeat(QUESTION_ANSWER_MAX) }));
+    expect(raw.length).toBeGreaterThan(QUESTION_ANSWER_MAX * 12);
+    expect(raw).not.toMatch(/[^\x00-\x7f]/);
+    const res = await postRaw(appFor(), raw);
+    expect(res.status).toBe(201);
+    expect((await res.json()).body).toBe("\u{1F600}".repeat(QUESTION_ANSWER_MAX));
+  });
+
+  test("a POST of exactly the limit is read; one byte more is 413", async () => {
+    const base = JSON.stringify(answer({ pad: "" }));
+    const exact = JSON.stringify(answer({ pad: pad(WIKI_ANSWER_BODY_LIMIT - base.length) }));
+    expect(exact.length).toBe(WIKI_ANSWER_BODY_LIMIT);
+    expect((await postRaw(appFor(), exact)).status).toBe(201);
+    const plusOne = JSON.stringify(answer({ pad: pad(WIKI_ANSWER_BODY_LIMIT - base.length + 1) }));
+    expect(plusOne.length).toBe(WIKI_ANSWER_BODY_LIMIT + 1);
+    expect((await postRaw(appFor(), plusOne)).status).toBe(413);
   });
 
   test("a whitespace-only body with a choice is stored as an empty body", async () => {

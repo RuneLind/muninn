@@ -199,6 +199,12 @@ const REDACT_PAGE = [
   ...q("R7", "Redact beside an open editor?"),
   ...q("R8", "Saved to reload R2?"),
   ...q("R9", "The confirm's look?"),
+  // Fix round 2.
+  ...q("R10", "A redact that answers 404?"),
+  ...q("R11", "Edit while a redact is out?"),
+  ...q("R12", "An editor open on an answer redacted elsewhere?"),
+  ...q("R13", "Saved to reload R12?"),
+  ...q("R14", "Escape out of the confirm in focus mode?"),
 ].join("\n");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -283,7 +289,9 @@ test.beforeAll(async ({}, info) => {
   // The focus page's seeded answers: each one the viewer's, so it has an Edit.
   for (const id of ["G9", "G18", "G20", "G21"]) await api({ relPath: FOCUS_REL, questionId: id, body: `${id} version one.` });
   await api({ relPath: FOCUS_REL, questionId: "G16", choice: "A", body: "G16 version one." });
-  for (const id of ["R1", "R2", "R3", "R4", "R5", "R7", "R9"]) await api({ relPath: REDACT_REL, questionId: id, body: `${id} text.` });
+  for (const id of ["R1", "R2", "R3", "R4", "R5", "R7", "R9", "R10", "R11", "R12", "R14"]) {
+    await api({ relPath: REDACT_REL, questionId: id, body: `${id} text.` });
+  }
 });
 
 test.afterAll(async () => {
@@ -1278,6 +1286,87 @@ test.describe("Wiki reader: the admin Redact control (PR 5 fix round 1)", () => 
     await expect(r7.locator("button.q-redact")).toHaveCount(0);
     await r7.locator("button.q-cancel").click();
     await expect(r7.locator("button.q-redact")).toBeVisible();
+    expectClean(seen);
+  });
+
+  test("while a redact is out, that answer offers no Edit, and the editor never opens over it", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r11 = card(page, "R11");
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/answers/redact", async (route) => {
+      const res = await route.fetch();
+      await gate;
+      await route.fulfill({ response: res });
+    });
+    try {
+      await r11.locator("button.q-redact").click();
+      await r11.locator("button.q-redact-yes").click();
+      await expect(r11.locator("button.q-redact-yes")).toHaveText("Redacting …");
+      await expect(r11.locator("button.q-edit")).toHaveCount(0);
+    } finally {
+      release();
+    }
+    await expect(r11.locator(".q-redacted")).toBeVisible();
+    await expect(r11.locator("form.q-composer")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("an editor open on an answer a reload shows redacted closes, and its draft is gone", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r12 = card(page, "R12");
+    await r12.locator("button.q-edit").click();
+    await r12.locator("textarea.q-text").fill("R12 text, being edited.");
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const body = (await res.json()) as { answers: Record<string, unknown>[] };
+      const answers = body.answers.map((a) => (a.questionId === "R12" ? { ...a, redacted: true, body: "", choice: null } : a));
+      await route.fulfill({ response: res, json: { ...body, answers } });
+    });
+    const r13 = card(page, "R13");
+    await r13.locator("textarea.q-text").fill("R13 saved.");
+    await r13.locator("button.q-save").click();
+    await expect(r12.locator(".q-redacted")).toBeVisible();
+    await expect(r12.locator("form.q-composer")).toHaveCount(0);
+    await expect(page.locator("textarea.q-text")).toHaveCount(0);
+    await expect(r12).not.toContainText("R12 text");
+    expectClean(seen);
+  });
+
+  test("a redact that answers 404 loads the answers again: the gone answer leaves, with no Redact… left on it", async ({ page }) => {
+    const seen = await openRedact(page);
+    const r10 = card(page, "R10");
+    await page.route("**/api/wiki/answers/redact", (route) =>
+      route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "no such answer", code: "unknown_answer" }) }),
+    );
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const body = (await res.json()) as { answers: Record<string, unknown>[] };
+      await route.fulfill({ response: res, json: { ...body, answers: body.answers.filter((a) => a.questionId !== "R10") } });
+    });
+    await r10.locator("button.q-redact").click();
+    await r10.locator("button.q-redact-yes").click();
+    await expect(r10.locator(".q-msg-error")).toHaveText("The answer was not redacted: the answer no longer exists.");
+    await expect(r10.locator(".q-answer")).toHaveCount(0);
+    await expect(r10.locator("button.q-redact")).toHaveCount(0);
+    await expect(r10).toBeFocused();
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("Escape in the confirm in focus mode closes the confirm and leaves focus mode on", async ({ page }) => {
+    const seen = await openRedact(page);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("f");
+    await expect(page.locator("#wikiFocusExit")).toBeVisible();
+    const r14 = card(page, "R14");
+    await r14.locator("button.q-redact").click();
+    await expect(r14.locator("button.q-redact-no")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(r14.locator(".q-redact-confirm")).toHaveCount(0);
+    await expect(r14.locator("button.q-redact")).toBeFocused();
+    await expect(page.locator("#wikiFocusExit")).toBeVisible();
     expectClean(seen);
   });
 

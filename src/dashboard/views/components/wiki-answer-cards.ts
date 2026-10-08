@@ -329,6 +329,10 @@ function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
   // A confirm whose answer is redacted or gone has nothing left to redact.
   const target = ui.redact;
   if (target && !target.working && !answers.some((a) => a.answerId === target.answerId && !a.redacted)) ui.redact = null;
+  // An editor on an answer now redacted closes, its draft discarded: the
+  // draft is the text the admin removed, and saving it is a 409.
+  const edited = ui.editing;
+  if (edited && answers.some((a) => a.answerId === edited.answerId && a.redacted)) resetDraft(ui);
   const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server, ui.redact]);
   if (!force && key === ui.paintedKey) return;
   const mark = captureFocus(ui.section);
@@ -363,7 +367,7 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
   const items = answers
     .map(
       (a) =>
-        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null, ui.openLogs.has(a.answerId), {
+        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null && !redactingNow(ui, a.answerId), ui.openLogs.has(a.answerId), {
           // Not beside its own open editor: one control per answer at a time.
           can: ui.canRedact && ui.editing?.answerId !== a.answerId,
           confirming: ui.redact?.answerId === a.answerId,
@@ -386,6 +390,9 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
   const text = section.querySelector<HTMLTextAreaElement>("textarea.q-text");
   if (text) text.value = ui.body;
 }
+
+/** A redact of this answer is out: it offers no Edit until the redact settles. */
+const redactingNow = (ui: CardUi, answerId: string) => ui.redact?.working === true && ui.redact.answerId === answerId;
 
 const composerView = (ui: CardUi) => ({
   questionId: ui.questionId,
@@ -474,6 +481,9 @@ async function redact(ctx: CardsCtx, ui: CardUi, answerId: string): Promise<void
   ui.message = { text: redactErrorText(status, data, ui.L), kind: "error" };
   paint(ctx, ui, true);
   if (moveFocus) focusButton(ui, "q-redact", answerId);
+  // The answer is gone: load the answers again, so the card stops showing it
+  // with a Redact… that can only 404 again. The message stays (no retry).
+  if (status === 404) await loadAnswers(ctx);
 }
 
 function focusEdit(ui: CardUi, answerId: string | null): void {
@@ -525,7 +535,7 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
     if (!t || !section.contains(t)) return;
     if (t.classList.contains("q-edit") && !ui.sending) {
       const a = ctx.answers.find((x) => x.answerId === t.getAttribute("data-answer-id"));
-      if (!a) return;
+      if (!a || a.redacted || redactingNow(ui, a.answerId)) return;
       // The base is the version on screen NOW: a newer one saved elsewhere
       // before this edit is saved is a 409, never a silent overwrite.
       ui.editing = { answerId: a.answerId, version: a.version };

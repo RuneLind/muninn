@@ -38,7 +38,6 @@ import { ensureUser } from "../src/db/users.ts";
 import { createThread, findThreadByName } from "../src/db/threads.ts";
 import { saveSpan } from "../src/db/traces.ts";
 import { discoverAllBots } from "../src/bots/config.ts";
-import { seedDatabaseUrl } from "../src/test/test-db-url.ts";
 
 const USER_ID = "e2e-seed-user";
 const THREADS = ["main", "e2e-second"];
@@ -51,9 +50,7 @@ function isDuplicateKey(err: unknown): boolean {
 }
 
 async function seed(): Promise<void> {
-  // `MUNINN_TEST_DATABASE_URL` wins when set, as it does for the suites.
-  const loaded = loadConfig();
-  const config = { ...loaded, databaseUrl: seedDatabaseUrl(process.env, loaded.databaseUrl) };
+  const config = loadConfig();
 
   // The rows below are permanent: `e2e-seed-user` and its threads show up in
   // /chat's user picker, the inspector's thread lists and `/api/users` forever,

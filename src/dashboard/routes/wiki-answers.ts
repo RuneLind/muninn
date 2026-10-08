@@ -86,13 +86,18 @@ export const WIKI_ANSWERS_EXPORT_CONFIRM_PATH = "/api/wiki/answers/export/confir
 export const WIKI_ANSWERS_REDACT_PATH = "/api/wiki/answers/redact";
 /** The most `(answerId, version)` rows one confirm takes. */
 export const EXPORT_CONFIRM_MAX_ROWS = 500;
-/** The largest request body the answer POSTs read. An 8000-character answer
- *  is at most ~48 KB of JSON (`\uXXXX` escapes); 500 confirm rows ~25 KB. */
-export const WIKI_ANSWER_BODY_LIMIT = 64 * 1024;
+/** The largest request body the answer POSTs read. Measured 2026-10-08: the
+ *  body cap is 8000 code points, and an ASCII-escaping encoder (Python's
+ *  `json.dumps` default) writes an astral one as a 12-byte surrogate pair, so
+ *  the largest valid body is 96,002 bytes of JSON and a whole edit POST around
+ *  it 96,161; 500 confirm rows are 26,054. wiki, relPath, questionId and choice
+ *  have no cap of their own (each must name a real one), so the limit leaves
+ *  ~35 KB above the measured answer for them. */
+export const WIKI_ANSWER_BODY_LIMIT = 128 * 1024;
 
 /** Refuses a body over {@link WIKI_ANSWER_BODY_LIMIT} with 413 before it is
  *  parsed: role `user` reaches the answer POST on the pod. */
-const answerBodyLimit = bodyLimit({
+export const answerBodyLimit = bodyLimit({
   maxSize: WIKI_ANSWER_BODY_LIMIT,
   onError: (c) => c.json({ error: "request body too large", code: "too_large" }, 413),
 });
@@ -444,9 +449,9 @@ export function registerWikiAnswerRoutes(
     // export prints no empty blockquote.
     const body = rawBody.trim() === "" ? "" : rawBody;
     const choice = (b.choice as string | null | undefined) ?? null;
-    // The stored spelling (Postgres prints a uuid lowercase), so a response
-    // and a log line echo the id the store holds.
-    const answerId = (b.answerId as string | undefined)?.toLowerCase();
+    // Not lowercased: the store casts to uuid before it compares or locks, and
+    // the response echoes `saved.answerId`, the stored spelling.
+    const answerId = b.answerId as string | undefined;
     const baseVersion = b.baseVersion;
     if (answerId !== undefined && !(Number.isInteger(baseVersion) && (baseVersion as number) >= 1)) {
       return err(c, 400, "bad_base_version", "an edit needs baseVersion: the version it was made from");

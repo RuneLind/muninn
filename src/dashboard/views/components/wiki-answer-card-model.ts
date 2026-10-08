@@ -333,8 +333,16 @@ export function saveErrorText(status: number, payload: unknown, L: QuestionLabel
 
 /** The line a failed redact shows, in the card's language by status — never
  *  the server's English `error`, which names a role the reader cannot change. */
-export function redactErrorText(status: number, _payload: unknown, L: QuestionLabels): string {
-  if (status === 403) return L.redact.forbidden;
+export function redactErrorText(status: number, payload: unknown, L: QuestionLabels): string {
+  if (status === 403) {
+    // The three 403 bodies, by who refused: the route's role check
+    // (`code: admin_only`), the zone middleware (`reason: admin-only route`)
+    // and the origin guard (`reason: cross-origin request`, src/auth/origin.ts).
+    const p = payload && typeof payload === "object" ? (payload as { code?: unknown; reason?: unknown }) : {};
+    if (p.code === "admin_only" || p.reason === "admin-only route") return L.redact.forbidden;
+    if (p.reason === "cross-origin request") return L.redact.origin;
+    return L.redact.http(status);
+  }
   if (status === 404) return L.redact.gone;
   if (status === 0) return L.redact.network;
   return L.redact.http(status);

@@ -93,8 +93,10 @@ export interface QuestionLabels {
     cancel: string;
     working: string;
     failed: string;
-    /** Why a redact failed, by status: 403, 404, no answer at all. */
+    /** Why a redact failed: a role refusal (403), the origin guard (403),
+     *  no such answer (404), no answer at all. */
     forbidden: string;
+    origin: string;
     gone: string;
     network: string;
     /** Any other status. */
@@ -167,6 +169,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       working: "Redacting …",
       failed: "The answer was not redacted",
       forbidden: "The answer was not redacted: you may not redact answers.",
+      origin: "The answer was not redacted: the server refused a request from this page's address.",
       gone: "The answer was not redacted: the answer no longer exists.",
       network: "The answer was not redacted: could not reach the server.",
       http: (status) => `The answer was not redacted (HTTP ${status}).`,
@@ -234,6 +237,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       working: "Fjerner …",
       failed: "Svaret ble ikke fjernet",
       forbidden: "Svaret ble ikke fjernet: du har ikke lov til å fjerne svar.",
+      origin: "Svaret ble ikke fjernet: serveren avviste en forespørsel fra denne sidens adresse.",
       gone: "Svaret ble ikke fjernet: svaret finnes ikke lenger.",
       network: "Svaret ble ikke fjernet: fikk ikke kontakt med serveren.",
       http: (status) => `Svaret ble ikke fjernet (HTTP ${status}).`,

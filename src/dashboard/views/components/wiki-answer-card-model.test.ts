@@ -323,4 +323,23 @@ describe("answer cards PR 5 fix round 1", () => {
     expect(text(500, { error: "answer not redacted" }, no)).toBe("Svaret ble ikke fjernet (HTTP 500).");
     for (const s of [403, 404, 0, 500, 413]) expect(text(s, english, no)).not.toContain("admin");
   });
+
+  test("a 403 says which refusal it was: role (zone or handler), origin guard, or a generic line with the status", () => {
+    const text = (cardModel as unknown as { redactErrorText: (s: number, p: unknown, L: typeof en) => string }).redactErrorText;
+    // src/auth/zone-middleware.ts: the zone's admin refusal.
+    expect(text(403, { error: "forbidden", reason: "admin-only route" }, en)).toBe(
+      "The answer was not redacted: you may not redact answers.",
+    );
+    // src/auth/origin.ts: the origin guard is not a role refusal.
+    expect(text(403, { error: "forbidden", reason: "cross-origin request" }, en)).toBe(
+      "The answer was not redacted: the server refused a request from this page's address.",
+    );
+    expect(text(403, { error: "forbidden", reason: "cross-origin request" }, no)).toBe(
+      "Svaret ble ikke fjernet: serveren avviste en forespørsel fra denne sidens adresse.",
+    );
+    // Anything else (src/auth/guard.ts answers an empty 403): the status, no claim about why.
+    expect(text(403, null, en)).toBe("The answer was not redacted (HTTP 403).");
+    expect(text(403, { error: "forbidden" }, en)).toBe("The answer was not redacted (HTTP 403).");
+    expect(text(403, "not json", no)).toBe("Svaret ble ikke fjernet (HTTP 403).");
+  });
 });
