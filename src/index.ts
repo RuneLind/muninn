@@ -23,6 +23,7 @@ import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
 import { answerRetentionBootLines, startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
+import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup } from "./scheduler/retention-cleanup.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
@@ -259,6 +260,12 @@ const answerRetentionLines = answerRetentionBootLines(config.wikiAnswerRetention
 for (const line of answerRetentionLines.warnings) log.warn("{line}", { line });
 if (startAnswerRetentionSweep(config.wikiAnswerRetention)) {
   log.info("{line}", { line: answerRetentionLines.info });
+}
+
+// Trace, prompt-snapshot and thread-citation retention: hourly, process-wide, on
+// every profile — not inside the per-bot scheduler, which needs a Telegram bot.
+if (startRetentionCleanup(config)) {
+  log.info("{line}", { line: retentionCleanupBootLine(config) });
 }
 
 // Start research_knowledge MCP server. Bots opt in by adding the server to their
@@ -523,6 +530,7 @@ async function shutdown() {
   stopScheduler();
   stopStaleHandoffSweep();
   const answerRetentionStopped = stopAnswerRetentionSweep();
+  const retentionCleanupStopped = stopRetentionCleanup();
   await wikiBucketMirrors?.stop();
   await waitForPendingTicks(10_000);
   // Let in-flight memory/goal/schedule extractions finish their DB writes
@@ -530,6 +538,7 @@ async function shutdown() {
   await waitForPendingExtractions(10_000);
   // A sweep in flight finishes its DB writes before the pool closes below.
   await answerRetentionStopped;
+  await retentionCleanupStopped;
 
   for (const bot of telegramBotMap.values()) {
     bot.stop();

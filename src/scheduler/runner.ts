@@ -9,10 +9,6 @@ import { getTasksDueNow } from "../db/scheduled-tasks.ts";
 import { runWatchers, getDueWatchers } from "../watchers/runner.ts";
 import { TICK_TIMEOUT_MS } from "../watchers/timeout.ts";
 import { Tracer } from "../tracing/index.ts";
-import { cleanupOldTraces } from "../db/traces.ts";
-import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
-import { cleanupThreadCitations } from "../db/research-citations.ts";
-import { harvestSearchSignals } from "../db/search-signals.ts";
 import { runScheduledTasksFromList } from "./task-executor.ts";
 import { runGoalRemindersFromList, runGoalCheckinsFromList } from "./goal-runner.ts";
 import { maybeRefreshInterestProfile } from "./profile-refresh.ts";
@@ -22,7 +18,6 @@ const log = getLog("scheduler");
 
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
 const tickRunning = new Map<string, boolean>();
-let lastCleanupAt = 0;
 // TICK_TIMEOUT_MS lives in ../watchers/timeout.ts — checkers derive completion budgets
 // from `min(watcher net, tick)` and importing it from here would close an import cycle.
 
@@ -149,47 +144,5 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
   } catch (err) {
     t?.error(err instanceof Error ? err : String(err));
     throw err;
-  }
-
-  // 6. Retention cleanup — once per hour
-  const now = Date.now();
-  if (now - lastCleanupAt > 3_600_000) {
-    lastCleanupAt = now;
-    // Harvest durable retrieval signals BEFORE the trace delete — the search
-    // quality attrs live only in trace JSONB, so this must run ahead of
-    // cleanupOldTraces or the signal is erased unharvested. Own try-block:
-    // a harvest failure must never block the retention cleanup behind it.
-    try {
-      const harvested = await harvestSearchSignals();
-      if (harvested > 0) {
-        log.info("Harvested {count} search signals", { botName, count: harvested });
-      }
-    } catch (err) {
-      log.error("Search-signal harvest failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
-    }
-    try {
-      const deleted = await cleanupOldTraces(config.tracingRetentionDays);
-      if (deleted > 0) {
-        log.info("Cleaned up {count} old traces", { botName, count: deleted });
-      }
-      const deletedSnapshots = await cleanupOldSnapshots({
-        chatDays: config.promptSnapshotsRetentionDays,
-        captureDays: config.promptSnapshotsCaptureRetentionDays,
-      });
-      if (deletedSnapshots > 0) {
-        log.info("Cleaned up {count} old prompt snapshots", { botName, count: deletedSnapshots });
-      }
-      // The CHAT half of `research_citations` — every `research_knowledge` call
-      // in every thread writes a row per hit and nothing deleted them. Same
-      // window as the traces beside them; `/research` rows and cited rows are
-      // untouched (see `cleanupThreadCitations`). AFTER the trace delete, since
-      // it competes with nothing and the trace pass is the one on a deadline.
-      const deletedCitations = await cleanupThreadCitations(config.tracingRetentionDays);
-      if (deletedCitations > 0) {
-        log.info("Cleaned up {count} old thread citations", { botName, count: deletedCitations });
-      }
-    } catch (err) {
-      log.error("Trace cleanup failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
-    }
   }
 }
