@@ -151,6 +151,28 @@ const OWNER_PAGE = [
   "",
 ].join("\n");
 
+// Answer groups: a question for the group `fag`, by block and by page.
+const GROUP_REL = "plans/groups.mdx";
+const GROUP_PAGE = [
+  "---",
+  "title: Groups",
+  'questions_to: ["Fag"]',
+  "---",
+  "",
+  '<Question id="G1" to="fag">',
+  "",
+  "For the domain experts?",
+  "",
+  "</Question>",
+  "",
+  '<Question id="G2">',
+  "",
+  "For the page's group?",
+  "",
+  "</Question>",
+  "",
+].join("\n");
+
 const OWNER = "Rune Owner";
 let root = "";
 
@@ -217,6 +239,7 @@ beforeAll(async () => {
   await Bun.write(path.join(root, REL), PAGE);
   await Bun.write(path.join(root, ASKED_REL), ASKED_PAGE);
   await Bun.write(path.join(root, OWNER_REL), OWNER_PAGE);
+  await Bun.write(path.join(root, GROUP_REL), GROUP_PAGE);
   __setWikiRegistryForTest([
     { name: "answers", root, source: "extra" },
     { name: "cards-only", root, source: "extra" },
@@ -997,5 +1020,56 @@ describe("answer cards PR 5: redact (D15)", () => {
     const first = await (await post(appFor(), answer())).json();
     const off = appFor({ answers: { wikis: new Set(), owner: OWNER } });
     expect((await redact(off, { answerId: first.answerId })).status).toBe(200);
+  });
+});
+
+describe("answer groups (WIKI_ANSWER_GROUPS)", () => {
+  // Synthetic: Kari is in fag (and utvikler), Ola only in utvikler.
+  const kari: Identity = { ...yvonne, userId: "u-kari", displayName: "Nordmann, Kari", navIdent: "Z990001", oid: "oid-kari" };
+  const olaDev: Identity = { ...yvonne, userId: "u-oladev", displayName: "Utvikler, Ola", navIdent: "Z990003", oid: "oid-oladev" };
+  const groups = new Map([
+    ["fag", new Set(["Z990001", "Z990002"])],
+    ["utvikler", new Set(["Z990001", "Z990003"])],
+  ]);
+  const withGroups = { wikis: new Set(["answers"]), owner: OWNER, groups };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const listOf = async (app: Hono): Promise<{ text: string; answers: any[] }> => {
+    const res = await app.request(`/api/wiki/answers?wiki=answers&relPath=${encodeURIComponent(GROUP_REL)}`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    return { text, answers: JSON.parse(text).answers };
+  };
+  const say = (app: Hono, questionId: string, body: string) =>
+    post(app, { wiki: "answers", relPath: GROUP_REL, questionId, body });
+
+  test("a member is asked by a group target (to= and questions_to:), a non-member is not; each carries its groups and no ident", async () => {
+    expect((await say(appFor({ identity: kari, role: "user", answers: withGroups }), "G1", "kari on G1")).status).toBe(201);
+    expect((await say(appFor({ identity: olaDev, role: "user", answers: withGroups }), "G1", "ola on G1")).status).toBe(201);
+    expect((await say(appFor({ identity: kari, role: "user", answers: withGroups }), "G2", "kari on G2")).status).toBe(201);
+    expect((await say(appFor({ identity: olaDev, role: "user", answers: withGroups }), "G2", "ola on G2")).status).toBe(201);
+    const { text, answers } = await listOf(appFor({ identity: olaDev, role: "user", answers: withGroups }));
+    const by = (body: string) => answers.find((a) => a.body === body);
+    expect([by("kari on G1").asked, by("kari on G1").authorGroups]).toEqual([true, ["fag", "utvikler"]]);
+    expect([by("ola on G1").asked, by("ola on G1").authorGroups]).toEqual([false, ["utvikler"]]);
+    expect([by("kari on G2").asked, by("ola on G2").asked]).toEqual([true, false]);
+    expect(text).not.toMatch(/Z9900\d\d/);
+  });
+
+  test("groups are read from the CURRENT config, never stored: without groups fag is a name, and nobody has a chip", async () => {
+    await say(appFor({ identity: kari, role: "user", answers: withGroups }), "G1", "kari later");
+    const { answers } = await listOf(appFor({ identity: kari, role: "user" }));
+    const k = answers.find((a) => a.body === "kari later");
+    expect([k.asked, k.authorGroups]).toEqual([false, []]);
+    const row = (await getDb()`SELECT * FROM wiki_answers WHERE body = 'kari later'`)[0]!;
+    expect(JSON.stringify(row)).not.toContain("utvikler");
+  });
+
+  test("auth off: the owner's ident from WIKI_ANSWER_OWNER puts the owner in a group", async () => {
+    const app = appFor({ answers: { ...withGroups, owner: "Kari Nordmann (Z990002)" } });
+    await say(app, "G1", "owner on G1");
+    const { text, answers } = await listOf(app);
+    const o = answers.find((a) => a.body === "owner on G1");
+    expect([o.authorName, o.asked, o.authorGroups]).toEqual(["Kari Nordmann", true, ["fag"]]);
+    expect(text).not.toContain("Z990002");
   });
 });

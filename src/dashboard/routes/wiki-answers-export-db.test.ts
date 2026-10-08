@@ -75,7 +75,9 @@ const PAGE = [
 
 let root = "";
 
-function appFor(opts: { role?: AuthRole; identity?: boolean; exportStore?: WikiAnswerExportStore } = {}): Hono {
+function appFor(
+  opts: { role?: AuthRole; identity?: boolean; exportStore?: WikiAnswerExportStore; groups?: Map<string, Set<string>> } = {},
+): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     if (opts.identity) {
@@ -94,7 +96,7 @@ function appFor(opts: { role?: AuthRole; identity?: boolean; exportStore?: WikiA
   const config = {
     dashboardPort: 3010,
     profile: "default",
-    wikiAnswers: { wikis: new Set([WIKI]), owner: "Rune Owner" },
+    wikiAnswers: { wikis: new Set([WIKI]), owner: "Rune Owner", groups: opts.groups },
   } as unknown as Config;
   registerWikiAnswerRoutes(
     app,
@@ -272,6 +274,17 @@ describe("GET export", () => {
       [ids.e5, REL, "E5", "question_gone"],
       [ids.gone, "plans/gammelt-navn.mdx", "E1", "page_gone"],
     ]);
+  });
+});
+
+describe("answer groups in the block", () => {
+  test("a heading names the author's groups from the current config; the block never carries an ident", async () => {
+    const groups = new Map([["fag", new Set(["Y222222"])], ["utvikler", new Set(["Y222222", "X111111"])]]);
+    const { body } = await getExport(appFor({ groups }));
+    expect(body.block).toContain("### E1 — Yvonne Jacobs [utvikler] (asked), 07.10.2026 21:37, chose B, version 2");
+    expect(body.block).toContain("### E2 — Ola Nordmann [fag, utvikler] (not asked), 07.10.2026 21:33, version 1");
+    expect(body.block).toContain("### E5 — Kari Nordmann, 07.10.2026 21:34, version 1");
+    expect(body.block).not.toMatch(/X111111|Y222222/);
   });
 });
 

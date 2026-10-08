@@ -52,6 +52,11 @@ describe("the heading", () => {
   test("the fixed not-sure value reads as words", () => {
     expect(exportHeading(a({ choice: "not-sure" }))).toContain(", chose not sure yet, ");
   });
+  test("the author's groups follow the name in brackets; none ⇒ nothing", () => {
+    expect(exportHeading(a({ authorGroups: ["fag"] }))).toBe("### O3 — Yvonne Jacobs [fag] (asked), 07.10.2026 21:32, chose B, version 2");
+    expect(exportHeading(a({ authorGroups: ["fag"], asked: null }))).toBe("### O3 — Yvonne Jacobs [fag], 07.10.2026 21:32, chose B, version 2");
+    expect(exportHeading(a({ authorGroups: [] }))).toBe(exportHeading(a()));
+  });
   test("redacted replaces the choice", () => {
     expect(exportHeading(a({ redacted: true }))).toBe("### O3 — Yvonne Jacobs (asked), 07.10.2026 21:32, redacted, version 2");
   });
@@ -85,7 +90,7 @@ describe("the block", () => {
       orphanCount: 1,
       answers: [
         a(),
-        a({ questionId: "O4", authorName: "Kari Nordmann", asked: false, choice: null, body: "Første linje.\n\nTredje — «sitat».", version: 1 }),
+        a({ questionId: "O4", authorName: "Kari Nordmann", authorGroups: ["fag", "utvikler"], asked: false, choice: null, body: "Første linje.\n\nTredje — «sitat».", version: 1 }),
         a({ questionId: "O5", asked: null, redacted: true, choice: null, body: "", version: 3 }),
       ],
     });
@@ -95,7 +100,7 @@ describe("the block", () => {
         "### O3 — Yvonne Jacobs (asked), 07.10.2026 21:32, chose B, version 2",
         "> The page's language.",
         "",
-        "### O4 — Kari Nordmann (not asked), 07.10.2026 21:32, version 1",
+        "### O4 — Kari Nordmann [fag, utvikler] (not asked), 07.10.2026 21:32, version 1",
         "> Første linje.",
         ">",
         "> Tredje — «sitat».",

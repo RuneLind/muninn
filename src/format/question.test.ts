@@ -14,6 +14,7 @@ import {
   questionStates,
   type QuestionRenderOptions,
   type QuestionState,
+  authorGroupsOf,
   isAskedAuthor,
   resolveQuestionTargets,
 } from "./question.ts";
@@ -677,5 +678,50 @@ describe("answer cards fix round 2", () => {
     const target = [{ name: "René Ås", ident: null }];
     expect(isAskedAuthor({ name: "Rene​́ Ås", navIdent: null }, target)).toBe(true);
     expect(isAskedAuthor({ name: "Rene­́ A​̊s", navIdent: null }, target)).toBe(true);
+  });
+});
+
+describe("answer groups (WIKI_ANSWER_GROUPS)", () => {
+  // Synthetic idents: Z99xxxx.
+  const groups = new Map([
+    ["fag", new Set(["Z990001", "Z990002"])],
+    ["utvikler", new Set(["Z990002", "Z990003"])],
+  ]);
+  const fag = { name: "fag", ident: null };
+  const kari = { name: "Nordmann, Kari", navIdent: "Z990001" };
+
+  const cases: [string, { name: string; navIdent: string | null }, { name: string; ident: string | null }[], ReadonlyMap<string, ReadonlySet<string>> | undefined, boolean | null][] = [
+    ["a member's ident matches the group", kari, [fag], groups, true],
+    ["the ident is compared upper-cased", { name: "x", navIdent: " z990001 " }, [fag], groups, true],
+    ["the group name is case-folded", kari, [{ name: " FAG ", ident: null }], groups, true],
+    ["a non-member is not asked", { name: "Utvikler, Ola", navIdent: "Z990003" }, [fag], groups, false],
+    ["no ident ⇒ no group match", { name: "Kari", navIdent: null }, [fag], groups, false],
+    ["an author NAMED like the group is not a member", { name: "fag", navIdent: null }, [fag], groups, false],
+    ["an author named like the group with a non-member ident is not asked", { name: "fag", navIdent: "Z990009" }, [fag], groups, false],
+    ["no groups configured: fag is a person's name again", { name: "FAG", navIdent: "Z990009" }, [fag], undefined, true],
+    ["no groups configured: a member ident does not make the name match", kari, [fag], undefined, false],
+    ["a name target beside a group still matches by name", { name: "Ola Nordmann", navIdent: null }, [fag, { name: "ola nordmann", ident: null }], groups, true],
+    ["an ident target unchanged by groups", { name: "x", navIdent: "Z990005" }, [{ name: "fag", ident: "Z990005" }], groups, true],
+    ["an ident target named like a group is a person, not the group", kari, [{ name: "fag", ident: "Z990005" }], groups, false],
+    ["nobody named is still null", kari, [], groups, null],
+  ];
+  for (const [label, author, targets, g, want] of cases) {
+    test(label, () => {
+      expect(isAskedAuthor(author, targets, g)).toBe(want);
+    });
+  }
+
+  test("an author's groups: sorted, from the ident only, never the ident", () => {
+    expect(authorGroupsOf("Z990002", groups)).toEqual(["fag", "utvikler"]);
+    expect(authorGroupsOf("Z990002", new Map([...groups].reverse()))).toEqual(["fag", "utvikler"]);
+    expect(authorGroupsOf(" z990003", groups)).toEqual(["utvikler"]);
+    expect(authorGroupsOf("Z990009", groups)).toEqual([]);
+    expect(authorGroupsOf(null, groups)).toEqual([]);
+    expect(authorGroupsOf("Z990001", new Map())).toEqual([]);
+  });
+
+  test("resolveQuestionTargets knows nothing about groups: the source is unchanged", () => {
+    expect(resolveQuestionTargets(parseToAttr("fag"), [], "Owner")).toEqual({ to: [fag], source: "block" });
+    expect(resolveQuestionTargets(null, [fag], "Owner")).toEqual({ to: [fag], source: "page" });
   });
 });

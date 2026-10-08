@@ -1,5 +1,5 @@
 import { setupLogging, getLog } from "./logging.ts";
-import { ConfigError, loadConfig, resolveServingProfile } from "./config.ts";
+import { answerGroupsBootLines, ConfigError, loadConfig, resolveServingProfile } from "./config.ts";
 import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
@@ -261,6 +261,12 @@ for (const line of answerRetentionLines.warnings) log.warn("{line}", { line });
 if (startAnswerRetentionSweep(config.wikiAnswerRetention)) {
   log.info("{line}", { line: answerRetentionLines.info });
 }
+
+// Answer groups (`WIKI_ANSWER_GROUPS`): names and member counts only — the
+// idents are personal data. Dropped entries are warned about by position.
+const answerGroupLines = answerGroupsBootLines(config.wikiAnswers);
+for (const line of answerGroupLines.warnings) log.warn("{line}", { line });
+if (answerGroupLines.info) log.info("{line}", { line: answerGroupLines.info });
 
 // Trace, prompt-snapshot and thread-citation retention: hourly, process-wide, on
 // every profile — not inside the per-bot scheduler, which needs a Telegram bot.

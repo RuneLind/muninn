@@ -739,6 +739,15 @@ export function questionReaderCss(scope: string): string {
     ${scope} .q-asked-no {
       background: transparent; color: var(--text-soft); border: 1px dashed var(--border-secondary);
     }
+    /* An author's group (WIKI_ANSWER_GROUPS): muted, a fact about the author. */
+    ${scope} .q-group {
+      display: inline-block; padding: 0 0.4rem; border-radius: 4px; font-size: 0.8em;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    ${scope} .q-group-label {
+      position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+      overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    }
     ${scope} .q-pick { background: var(--tint-info); font-weight: 600; margin: 0.3rem 0.4rem 0 0; }
     ${scope} .q-answer-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.3rem; }
     ${scope} .q-redacted { color: var(--text-soft); font-style: italic; }

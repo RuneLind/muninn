@@ -173,22 +173,43 @@ export function resolveQuestionTargets(
 const foldName = (s: string) =>
   s.replace(/\p{Cf}/gu, "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
 
+/** `WIKI_ANSWER_GROUPS`: group name (lower-case) → member NAV idents (upper-case). */
+export type AnswerGroups = ReadonlyMap<string, ReadonlySet<string>>;
+
+const NO_GROUPS: AnswerGroups = new Map();
+
+/** The configured group a target names, if any: an entry with no `(IDENT)`
+ *  whose folded name is a group name. With no groups, every name is a person. */
+function targetGroup(t: QuestionTarget, groups: AnswerGroups): ReadonlySet<string> | undefined {
+  return t.ident ? undefined : groups.get(foldName(t.name));
+}
+
+/** The groups holding this NAV ident, sorted. Never the ident itself. */
+export function authorGroupsOf(navIdent: string | null, groups: AnswerGroups): string[] {
+  const ident = navIdent?.trim().toUpperCase();
+  if (!ident) return [];
+  return [...groups].filter(([, members]) => members.has(ident)).map(([name]) => name).sort();
+}
+
 /**
  * Did the page ask this author (D2, the O2 v1 rule)? A target matches on the
  * NAV ident when both the target and the author carry one, else on the
- * case-folded display name. Null when the question names nobody: "not asked"
- * would claim someone else was.
+ * case-folded display name. A target naming a configured group (`fag`) matches
+ * only an author whose NAV ident is in it. Null when the question names
+ * nobody: "not asked" would claim someone else was.
  */
 export function isAskedAuthor(
   author: { name: string; navIdent: string | null },
   targets: QuestionTarget[],
+  groups: AnswerGroups = NO_GROUPS,
 ): boolean | null {
   if (targets.length === 0) return null;
-  return targets.some((t) =>
-    t.ident && author.navIdent
-      ? t.ident.trim().toUpperCase() === author.navIdent.trim().toUpperCase()
-      : foldName(t.name) === foldName(author.name),
-  );
+  const ident = author.navIdent?.trim().toUpperCase() || null;
+  return targets.some((t) => {
+    const group = targetGroup(t, groups);
+    if (group) return ident !== null && group.has(ident);
+    return t.ident && ident ? t.ident.trim().toUpperCase() === ident : foldName(t.name) === foldName(author.name);
+  });
 }
 
 /** The three attributes of a `<Question>` tag, read the one way the parser,

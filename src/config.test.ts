@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError, parseAnswerGroups, answerGroupsBootLines, resolveWikiAnswerConfig } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -366,5 +366,49 @@ describe("resolveWikiAnswerRetention", () => {
       expect(() => resolveWikiAnswerRetention({ [E]: raw })).toThrow(ConfigError);
       expect(() => resolveWikiAnswerRetention({ [U]: raw })).toThrow(/WIKI_ANSWER_UNEXPORTED_DAYS/);
     }
+  });
+});
+
+describe("WIKI_ANSWER_GROUPS", () => {
+  const plain = (g: ReturnType<typeof parseAnswerGroups>["groups"]) =>
+    Object.fromEntries([...g].map(([k, v]) => [k, [...v].sort()]));
+
+  test("unset or blank ⇒ no groups, no warnings", () => {
+    expect(plain(parseAnswerGroups(undefined).groups)).toEqual({});
+    expect(parseAnswerGroups(" ; ;").warnings).toEqual([]);
+    expect(answerGroupsBootLines(resolveWikiAnswerConfig({}))).toEqual({ info: null, warnings: [] });
+  });
+
+  test("names lower-cased, idents trimmed and upper-cased, empty idents ignored, one ident in two groups", () => {
+    const { groups, warnings } = parseAnswerGroups(" Fag = z990001 , Z990002,, ; utvikler=Z990002;;Ø_test-1=Z990003 ");
+    expect(plain(groups)).toEqual({ fag: ["Z990001", "Z990002"], utvikler: ["Z990002"], "ø_test-1": ["Z990003"] });
+    expect(warnings).toEqual([]);
+  });
+
+  test("duplicates: an ident twice is one member; a group twice merges, with a warning naming the group", () => {
+    const { groups, warnings } = parseAnswerGroups("fag=Z990001,z990001;FAG=Z990002");
+    expect(plain(groups)).toEqual({ fag: ["Z990001", "Z990002"] });
+    expect(warnings).toEqual(['WIKI_ANSWER_GROUPS entry 2: group "fag" is defined again — its members are merged']);
+  });
+
+  test("a malformed entry is dropped with its position and why, and never echoes an ident", () => {
+    const raw = "Z990011,Z990012;b@d=Z990013;tom=;fag=Z990014,not an-ident;ok=Z990015";
+    const { groups, warnings } = parseAnswerGroups(raw);
+    expect(plain(groups)).toEqual({ ok: ["Z990015"] });
+    expect(warnings).toEqual([
+      'WIKI_ANSWER_GROUPS entry 1 dropped: no "=" between the group name and its members',
+      'WIKI_ANSWER_GROUPS entry 2 dropped: the group name must be letters, digits, "_" or "-"',
+      'WIKI_ANSWER_GROUPS entry 3 dropped: group "tom" names no members',
+      'WIKI_ANSWER_GROUPS entry 4 dropped: a member of group "fag" is not a NAV ident (letters and digits only)',
+    ]);
+    for (const w of warnings) expect(w).not.toMatch(/Z9900\d\d|not an-ident/i);
+  });
+
+  test("the boot line names groups and member counts, never an ident; warnings ride along", () => {
+    const cfg = resolveWikiAnswerConfig({ WIKI_ANSWER_GROUPS: "fag=Z990001,Z990002;utvikler=Z990003;x" });
+    const lines = answerGroupsBootLines(cfg);
+    expect(lines.info).toBe("Answer groups: fag (2 members), utvikler (1 member)");
+    expect(lines.warnings).toEqual(['WIKI_ANSWER_GROUPS entry 3 dropped: no "=" between the group name and its members']);
+    expect(JSON.stringify(lines)).not.toMatch(/Z9900/);
   });
 });

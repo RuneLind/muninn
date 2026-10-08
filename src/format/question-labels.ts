@@ -25,6 +25,8 @@ export interface QuestionLabels {
   /** An answer from a person the page asked, or from someone else (D2). */
   asked: string;
   notAsked: string;
+  /** Read by assistive tech before an author's group chip (`fag`). */
+  group: string;
   /** The fixed extra choice every card with `choices` offers. */
   notSure: string;
   copyNew: (n: number) => string;
@@ -124,6 +126,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
     for: "For",
     asked: "asked",
     notAsked: "not asked",
+    group: "group",
     notSure: "Not sure yet",
     copyNew: (n) => `Copy new answers (${n})`,
     copyAgain: "Copy again",
@@ -193,6 +196,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
     for: "Stilt til",
     asked: "spurt",
     notAsked: "ikke spurt",
+    group: "gruppe",
     notSure: "Vet ikke ennå",
     copyNew: (n) => `Kopier nye svar (${n})`,
     copyAgain: "Kopier igjen",
