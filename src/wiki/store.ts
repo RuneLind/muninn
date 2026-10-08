@@ -27,6 +27,7 @@ import {
 } from "../dashboard/views/components/wiki-activity-rank.ts";
 import { parseCullLabels, type CullLabels } from "../dashboard/views/components/wiki-cull-view.ts";
 import { parseQuestionLanguage, type QuestionLanguage } from "../format/question-labels.ts";
+import { parseDefaultLens, parseIdLabels, type IdLabels, type StoredLens } from "../format/reader-lens.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -194,6 +195,20 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   language?: QuestionLanguage;
+  /**
+   * The full names of the page's ids (`idLabels`, D12): prefix letters →
+   * `{one, other}`, e.g. `{"D": {"one": "Beslutning", "other": "beslutninger"}}`.
+   * `{}` ⇒ ids show bare. A bad entry warns and is dropped. Optional so
+   * hand-built configs stay valid; `readWikiReaderConfig` always sets it.
+   */
+  idLabels?: IdLabels;
+  /**
+   * The lens a viewer with no stored choice opens this wiki in (`defaultLens`:
+   * `overview` or `all`, aliases `oversikt`/`alt`). `WIKI_DEFAULT_LENS` beats
+   * it (D24). Null ⇒ All. `agent` is refused: a default never starts the
+   * Agent lens.
+   */
+  defaultLens?: StoredLens | null;
 }
 
 /**
@@ -1998,6 +2013,19 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
   if (language.warning) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "language", reason: language.warning });
   }
+  const idLabels = parseIdLabels(obj.idLabels);
+  for (const reason of idLabels.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "idLabels", reason });
+  }
+  const defaultLens: ReturnType<typeof parseDefaultLens> = obj.defaultLens === undefined ? { lens: null } : parseDefaultLens(obj.defaultLens);
+  if (defaultLens.warning) {
+    log.warn("{file} at {root}: {key} {reason}", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+      key: "defaultLens",
+      reason: `${defaultLens.warning} — ignoring it`,
+    });
+  }
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
@@ -2023,6 +2051,8 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     activity: activity.weights,
     cullLabels: cull.labels,
     language: language.language,
+    idLabels: idLabels.labels,
+    defaultLens: defaultLens.lens,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

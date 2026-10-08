@@ -1057,6 +1057,24 @@ describe("buildWikiIndex", () => {
     }
   });
 
+  test(".wiki-reader.json idLabels and defaultLens (D12, D2): parsed, a bad value dropped", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({
+        idLabels: { D: { one: "Beslutning", other: "beslutninger" }, "Q-": { one: "Query", other: "queries" } },
+        defaultLens: "Oversikt",
+      }),
+    );
+    let index = await buildWikiIndex(root);
+    expect(index.readerConfig?.idLabels).toEqual({ D: { one: "Beslutning", other: "beslutninger" } });
+    expect(index.readerConfig?.defaultLens).toBe("overview");
+    // `agent` is never a default: a page open must not start the Agent lens.
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ defaultLens: "agent" }));
+    index = await buildWikiIndex(root);
+    expect(index.readerConfig?.defaultLens).toBeNull();
+    expect(index.readerConfig?.idLabels).toEqual({});
+  });
+
   test(".wiki-reader.json with no cullLabels ⇒ the English defaults", async () => {
     await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ typeMap: { plans: "plan" } }));
     const index = await buildWikiIndex(root);

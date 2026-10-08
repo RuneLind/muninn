@@ -27,6 +27,11 @@
  */
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
+import { idPrefix, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
+
+/** The noun before an id (D12): the server puts it before a DecisionLog or
+ *  Query chip, the ref links before an id run in prose. */
+export const ID_NOUN_CLASS = "id-noun";
 
 export const REF_CLASS = "wiki-ref";
 export const PEEK_CLASS = "wiki-ref-peek";
@@ -150,8 +155,88 @@ export function refTargets(root: Element): { ids: Map<string, Element>; titles: 
 const SKIP =
   "a, code, pre, summary, h1, h2, h3, h4, h5, h6, button, textarea, input, select, svg, script, style, .mermaid, .query-result";
 
-/** Wrap every reference under `root` in an `a.wiki-ref`. Returns how many. */
-export function linkRefs(root: Element): number {
+/** What may stand between two ids of one run: a list or range separator. */
+const RUN_GAP_RE = /^\s*(?:[,/&–—-]|og|and|eller|or|til|to)?\s*$/u;
+
+/** Whether the text before an id ends with a word that starts with one of the
+ *  noun's forms: «beslutningen D7», «Beslutning D7», «beslutningene D1–D3»,
+ *  «Beslutning (D7)», «beslutning: D7». Only the text after the last blank
+ *  line counts: a text run can still carry one after a component. */
+function ledByNoun(before: string, forms: readonly string[]): boolean {
+  const tail = before.split(/\n[^\S\n]*\n/).pop()!.toLocaleLowerCase();
+  return forms.some((f) => {
+    const form = f.toLocaleLowerCase();
+    // The form, at a word start, then the rest of that word, then only
+    // whitespace, opening brackets or a colon.
+    const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRe(form)}[\\p{L}\\p{N}]*[\\s(\\[{:]*$`, "u");
+    return re.test(tail);
+  });
+}
+
+/**
+ * Where the id nouns go in one text node's matches (D12): a run of ids with
+ * one prefix, joined by a list or range separator (`D1–D11`, `D1 til D11`,
+ * `S1, S2 og S6`), gets the noun once, before its first id, plural when the
+ * run holds more than one. A run whose preceding word starts with the noun
+ * (`Beslutning D7`, `beslutningen D7`) gets none. `preceding` is the inline
+ * text before this node ({@link precedingText}, `**Beslutning** D7`). Returns the noun per
+ * match index that starts a run.
+ */
+export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | undefined, preceding = ""): Map<number, string> {
+  const out = new Map<number, string>();
+  if (!labels || Object.keys(labels).length === 0) return out;
+  let k = 0;
+  while (k < matches.length) {
+    const m = matches[k]!;
+    const prefix = m.kind === "id" ? idPrefix(m.key) : null;
+    let end = k;
+    if (prefix && Object.hasOwn(labels, prefix)) {
+      while (end + 1 < matches.length) {
+        const next = matches[end + 1]!;
+        if (next.kind !== "id" || idPrefix(next.key) !== prefix) break;
+        if (!RUN_GAP_RE.test(text.slice(matches[end]!.end, next.start))) break;
+        end++;
+      }
+      const label = labels[prefix]!;
+      if (!ledByNoun(preceding + text.slice(0, m.start), [label.one, label.other])) {
+        out.set(k, end > k ? label.other : label.one);
+      }
+    }
+    k = end + 1;
+  }
+  return out;
+}
+
+/** The inline elements the text before an id is read back through; any other
+ *  element (a heading, a list, a fold, a `<br>`) ends the read-back. */
+const INLINE = "strong, em, b, i, u, s, del, mark, code, kbd, sup, sub, small, abbr, span, a";
+const PRECEDING_MAX = 80;
+
+/** The text before `node` back to the first non-inline element, through its
+ *  preceding siblings and those of its inline ancestors; the last
+ *  {@link PRECEDING_MAX} chars. */
+function precedingText(node: Text): string {
+  let out = "";
+  let at: Node = node;
+  while (out.length < PRECEDING_MAX) {
+    const prev: Node | null = at.previousSibling;
+    if (prev) {
+      if (prev.nodeType === Node.TEXT_NODE) out = (prev.nodeValue ?? "") + out;
+      else if (prev instanceof Element && prev.matches(INLINE)) out = (prev.textContent ?? "") + out;
+      else if (prev.nodeType !== Node.COMMENT_NODE) break;
+      at = prev;
+      continue;
+    }
+    const parent: Element | null = at.parentElement;
+    if (!parent?.matches(INLINE)) break;
+    at = parent;
+  }
+  return out.slice(-PRECEDING_MAX);
+}
+
+/** Wrap every reference under `root` in an `a.wiki-ref`, with the wiki's id
+ *  nouns before the id runs ({@link nounRuns}). Returns how many links. */
+export function linkRefs(root: Element, idLabels?: IdLabels): number {
   const { ids, titles } = refTargets(root);
   // A server-rendered fragment link to a known kind of target joins in.
   root.querySelectorAll<HTMLAnchorElement>('a[href^="#"]:not(.dl-id):not(.query-id):not(.cb-id)').forEach((a) => {
@@ -175,11 +260,22 @@ export function linkRefs(root: Element): number {
     const text = node.nodeValue ?? "";
     let last = 0;
     let frag: DocumentFragment | null = null;
-    for (const m of findRefs(text, idKeys, titleKeys)) {
+    const matches = findRefs(text, idKeys, titleKeys).filter(
+      (m) => !(m.kind === "id" ? ids : titles).get(m.key)!.contains(node),
+    );
+    const nouns = matches.length && idLabels ? nounRuns(text, matches, idLabels, precedingText(node)) : new Map<number, string>();
+    for (const [k, m] of matches.entries()) {
       const target = (m.kind === "id" ? ids : titles).get(m.key)!;
-      if (target.contains(node)) continue;
       frag ??= document.createDocumentFragment();
       frag.append(text.slice(last, m.start));
+      const noun = nouns.get(k);
+      if (noun) {
+        const span = document.createElement("span");
+        span.className = ID_NOUN_CLASS;
+        span.setAttribute(READER_ONLY_ATTR, "");
+        span.textContent = noun;
+        frag.append(span, " ");
+      }
       const a = document.createElement("a");
       a.className = REF_CLASS;
       a.href = `#${encodeURIComponent(target.id)}`;
@@ -256,7 +352,9 @@ export function peekParts(target: Element): { label: string; where: string; body
   const where = enclosing ? foldTitle(enclosing) : "";
   if (target.matches(".dl-item")) {
     const c = cloneBare(target);
-    c.querySelector(".dl-id")?.remove();
+    // The chip and its noun: the card's label already names the id.
+    c.querySelector(":scope > .dl-id")?.remove();
+    c.querySelector(`:scope > .${ID_NOUN_CLASS}`)?.remove();
     const p = document.createElement("div");
     p.append(...Array.from(c.childNodes));
     return { label: target.querySelector(".dl-id")?.textContent ?? "", where, body: [p], isTitle: false };
@@ -521,7 +619,7 @@ function install(): void {
 
 /** Link the references in a freshly rendered article and reset the jump
  *  history. Called once per page render, before the URL's hash is revealed. */
-export function enhanceRefLinks(articleRoot: Element, relPath = ""): void {
+export function enhanceRefLinks(articleRoot: Element, relPath = "", idLabels?: IdLabels): void {
   install();
   pageRelPath = relPath;
   hidePeek();
@@ -529,7 +627,7 @@ export function enhanceRefLinks(articleRoot: Element, relPath = ""): void {
   backPill = null;
   root = articleRoot;
   article = articleRoot.querySelector(".wiki-article");
-  if (article) linkRefs(article);
+  if (article) linkRefs(article, idLabels);
 }
 
 /** The reader's CSS for links, the peek card and the back pill. */

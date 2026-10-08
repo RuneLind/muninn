@@ -173,13 +173,14 @@ test.describe("Wiki reader: <Fold>", () => {
     await expect(folds).toHaveCount(2);
 
     const closed = folds.nth(0);
-    await expect(closed.locator("summary")).toHaveText("What was measured");
+    // The title, then the size line the reader adds (wiki-lens.ts).
+    await expect(closed.locator("summary")).toHaveText(/^What was measured\d/);
     expect(await closed.evaluate((el) => (el as HTMLDetailsElement).open)).toBe(false);
     // Not merely "the attribute is absent": the body must actually be off screen.
     await expect(closed.locator(".fold-body")).toBeHidden();
 
     const opened = folds.nth(1);
-    await expect(opened.locator("summary")).toHaveText("Current state");
+    await expect(opened.locator("summary")).toHaveText(/^Current state\d/);
     expect(await opened.evaluate((el) => (el as HTMLDetailsElement).open)).toBe(true);
     await expect(opened.locator(".fold-body")).toBeVisible();
     await expect(opened.locator(".fold-body")).toContainText("Nothing built yet.");
