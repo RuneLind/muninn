@@ -161,8 +161,7 @@ const RUN_GAP_RE = /^\s*(?:[,/&–—-]|og|and|eller|or|til|to)?\s*$/u;
 /** Whether the text before an id ends with a word that starts with one of the
  *  noun's forms: «beslutningen D7», «Beslutning D7», «beslutningene D1–D3»,
  *  «Beslutning (D7)», «beslutning: D7». Only the text after the last blank
- *  line counts: a top-level paragraph renders as bare text, so a blank line
- *  is a paragraph break. */
+ *  line counts: a text run can still carry one after a component. */
 function ledByNoun(before: string, forms: readonly string[]): boolean {
   const tail = before.split(/\n[^\S\n]*\n/).pop()!.toLocaleLowerCase();
   return forms.some((f) => {
