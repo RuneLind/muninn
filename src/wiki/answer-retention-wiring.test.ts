@@ -42,7 +42,7 @@ describe("src/index.ts: answer retention wiring", () => {
     // Called early (no tick starts during the other drains), awaited late.
     const stop = text.indexOf("const answerRetentionStopped = stopAnswerRetentionSweep()", shutdown);
     const awaited = text.indexOf("await answerRetentionStopped;", shutdown);
-    const close = text.indexOf("await closeDb()", shutdown);
+    const close = text.indexOf("await closeDb(", shutdown);
     expect(shutdown).toBeGreaterThan(-1);
     expect(stop, "shutdown() must call stopAnswerRetentionSweep()").toBeGreaterThan(shutdown);
     expect(awaited, "shutdown() must await the retention stop").toBeGreaterThan(stop);

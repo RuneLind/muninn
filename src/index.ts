@@ -559,7 +559,8 @@ async function shutdown() {
   await researchMcpServer.stop();
   await serenaManager.stopAll();
   await disconnectAllMcp();
-  await closeDb();
+  // Bounded: a statement still blocked on a lock is terminated, not awaited.
+  await closeDb({ timeoutSeconds: 5 });
   process.exit(0);
 }
 

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import {
   RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS,
+  RETENTION_CLEANUP_STOP_WAIT_MS,
   retentionCleanupBootLine,
   runRetentionCleanup,
   startRetentionCleanup,
@@ -75,7 +76,9 @@ describe("runRetentionCleanup", () => {
     };
     await runRetentionCleanup(CONFIG, deps);
     const bound = { statementTimeoutMs: RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS };
-    expect(seen).toEqual({ harvest: bound, traces: bound, snapshots: bound, citations: bound });
+    // The deletes also get the stop flag, checked between their batches.
+    const withStop = { ...bound, shouldStop: expect.any(Function) };
+    expect(seen).toEqual({ harvest: bound, traces: withStop, snapshots: withStop, citations: withStop });
     expect(RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS).toBe(300_000);
   });
 
@@ -212,6 +215,48 @@ describe("startRetentionCleanup", () => {
     } finally {
       release();
     }
+  });
+
+  test("a stop during a run skips the steps after the one in flight, and the deletes see the flag", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const flags: boolean[] = [];
+    const { deps, calls } = recordingDeps({
+      harvestSearchSignals: async () => {
+        await gate;
+        return 0;
+      },
+    });
+    const traces = deps.cleanupOldTraces;
+    deps.cleanupOldTraces = (async (d: number, opts?: { shouldStop?: () => boolean }) => {
+      flags.push(opts?.shouldStop?.() ?? false);
+      return traces(d, opts as never);
+    }) as RetentionCleanupDeps["cleanupOldTraces"];
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      await stopRetentionCleanup(10);
+    } finally {
+      release();
+    }
+    await Bun.sleep(30);
+    expect(calls).toEqual(["harvestSearchSignals"]);
+    expect(flags).toEqual([]);
+  });
+
+  test("a later start after a stop runs again (the stop flag resets)", async () => {
+    const { deps } = recordingDeps();
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });
+    await Bun.sleep(30);
+    await stopRetentionCleanup();
+    const second = recordingDeps();
+    startRetentionCleanup(CONFIG, { deps: second.deps, firstDelayMs: 0, intervalMs: 60_000 });
+    await Bun.sleep(30);
+    expect(second.calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
+  });
+
+  test("shutdown waits at most a few seconds for a run: the pod's grace period is 30 s", () => {
+    expect(RETENTION_CLEANUP_STOP_WAIT_MS).toBeLessThanOrEqual(5_000);
   });
 
   test("a run that never finishes: stop returns after its bound", async () => {

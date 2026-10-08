@@ -1,5 +1,5 @@
 import { getDb } from "./client.ts";
-import { withStatementTimeout, type StatementTimeoutOption } from "./statement-timeout.ts";
+import { deleteInBatches, type BatchedDeleteOption } from "./batched-delete.ts";
 
 // The work-unit child spans a scheduler tick mints directly under its root
 // (src/scheduler/runner.ts): task:<type>, watcher:<type>, goal_reminders and
@@ -422,11 +422,17 @@ export async function getToolUsageStats(userId: string, botName: string, threadI
   }));
 }
 
-export async function cleanupOldTraces(retentionDays: number, opts: StatementTimeoutOption = {}): Promise<number> {
-  const result = await withStatementTimeout(opts, (sql) => sql`
-    DELETE FROM traces WHERE created_at < NOW() - make_interval(days => ${retentionDays})
+/** Batched, oldest first, on `idx_traces_created` (see `deleteInBatches`). Spans
+ *  carry no FK to each other, so a batch boundary inside a trace is harmless. */
+export async function cleanupOldTraces(retentionDays: number, opts: BatchedDeleteOption = {}): Promise<number> {
+  return deleteInBatches(opts, (sql, limit) => sql`
+    DELETE FROM traces WHERE id IN (
+      SELECT id FROM traces
+      WHERE created_at < NOW() - make_interval(days => ${retentionDays})
+      ORDER BY created_at
+      LIMIT ${limit}
+    )
   `);
-  return result.count;
 }
 
 function mapRow(r: Record<string, any>): SpanRow {
