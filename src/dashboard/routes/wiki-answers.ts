@@ -40,6 +40,7 @@ import { getWikiIndex, parseFrontmatter, readWikiPage, stripFrontmatter, type Wi
 import { answerStamp, formatAnswerExport, formatOrphanExport, type ExportAnswer } from "../../wiki/answer-export.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
 import {
+  authorGroupsOf,
   codePointLength,
   isAskedAuthor,
   parseQuestionPage,
@@ -48,6 +49,7 @@ import {
   QUESTION_ANSWER_MAX,
   QUESTION_NOT_SURE,
   resolveQuestionTargets,
+  type AnswerGroups,
   type QuestionTarget,
 } from "../../format/question.ts";
 import { sha256 } from "../../gardener/util.ts";
@@ -257,6 +259,9 @@ interface AnswerView extends AnswerVersionView {
    *  never leaves the server. It is matched against the page's CURRENT
    *  targets, not the ones the question had when the answer was saved. */
   asked: boolean | null;
+  /** The `WIKI_ANSWER_GROUPS` groups holding the author's stored NAV ident,
+   *  sorted — read from the CURRENT config, never stored, never the ident. */
+  authorGroups: string[];
   /** Earlier versions, newest first — with `versions=1`, to the author and an admin only. */
   earlier?: AnswerVersionView[];
 }
@@ -352,13 +357,14 @@ function parseConfirmRows(raw: unknown): [string, number][] | null {
 /** A stored version the export block prints. */
 type ExportRow = WikiAnswerVersion;
 
-function exportAnswerOf(a: ExportRow, targets: Map<string, QuestionTarget[]>): ExportAnswer {
+function exportAnswerOf(a: ExportRow, targets: Map<string, QuestionTarget[]>, groups: AnswerGroups): ExportAnswer {
   const t = targets.get(a.questionId);
   const redacted = a.redactedAt !== null;
   return {
     questionId: a.questionId,
     authorName: a.author.name,
-    asked: t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t) : null,
+    authorGroups: authorGroupsOf(a.author.navIdent, groups),
+    asked: t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t, groups) : null,
     createdAt: a.createdAt,
     choice: redacted ? null : a.choice,
     body: redacted ? "" : a.body,
@@ -389,6 +395,7 @@ export function registerWikiAnswerRoutes(
     try {
       const latest = await store.listLatest(page.entry.name, page.meta.relPath);
       const targets = latest.length ? await questionTargetsOf(page, answerConfig().owner) : new Map();
+      const groups = answerConfig().groups ?? new Map();
       const isAdmin = (sessionRole(c) ?? "admin") === "admin";
       const withEarlier = c.req.query("versions") === "1"
         ? latest.filter((a) => a.versionCount > 1 && (isAdmin || isMine(c, a))).map((a) => a.answerId)
@@ -410,8 +417,9 @@ export function registerWikiAnswerRoutes(
         mine: isMine(c, a),
         asked: (() => {
           const t = targets.get(a.questionId);
-          return t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t) : null;
+          return t ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, t, groups) : null;
         })(),
+        authorGroups: authorGroupsOf(a.author.navIdent, groups),
         ...(earlier.has(a.answerId) ? { earlier: earlier.get(a.answerId) } : {}),
       }));
       return c.json({ answerable: true, answers });
@@ -651,11 +659,12 @@ export function registerWikiAnswerRoutes(
       const orphans = await findOrphanAnswers(name, page.index, exportStore);
       const orphanCount = orphans.length;
       const owner = answerConfig().owner;
+      const groups = answerConfig().groups ?? new Map();
       let targets: Map<string, QuestionTarget[]> | null = null;
       const build = async (picked: ExportRow[], exportedAt: number) => {
         if (picked.length === 0) return { block: "", rows: [] as [string, number][], count: 0 };
         targets ??= await questionTargetsOf(page, owner);
-        const answers = picked.map((a) => exportAnswerOf(a, targets!));
+        const answers = picked.map((a) => exportAnswerOf(a, targets!, groups));
         return {
           block: formatAnswerExport({ wiki: name, relPath: page.meta.relPath, exportedAt, answers, orphanCount }),
           rows: picked.map((a) => [a.answerId, a.version] as [string, number]),

@@ -12,7 +12,7 @@ const answer = (answerId: string, version: number, over: Partial<AnswerWire> = {
   answerId,
   questionId: "O1",
   version,
-  authorName: "Yvonne Jacobs",
+  authorName: "Synne Testdal",
   choice: null,
   body: "x",
   createdAt: 0,

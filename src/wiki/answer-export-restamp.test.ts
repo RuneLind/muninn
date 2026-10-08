@@ -11,7 +11,7 @@ describe("restampAnswerExport", () => {
     relPath: "plans/a · exported 2026-01-01 00:00.mdx",
     exportedAt: PREFETCH,
     answers: [
-      { questionId: "O3", authorName: "Yvonne Jacobs", asked: true, createdAt: PREFETCH, choice: null, body: "Svar.", version: 1, redacted: false },
+      { questionId: "O3", authorName: "Synne Testdal", asked: true, createdAt: PREFETCH, choice: null, body: "Svar.", version: 1, redacted: false },
     ],
     orphanCount: 0,
   });

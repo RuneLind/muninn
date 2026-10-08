@@ -47,7 +47,7 @@ const wire = (over: Record<string, unknown>) => ({
   questionId: "O1",
   version: 1,
   versionCount: 1,
-  authorName: "Yvonne Jacobs",
+  authorName: "Synne Testdal",
   choice: null,
   body: "x",
   createdAt: 1,

@@ -14,6 +14,7 @@ import {
   questionStates,
   type QuestionRenderOptions,
   type QuestionState,
+  authorGroupsOf,
   isAskedAuthor,
   resolveQuestionTargets,
 } from "./question.ts";
@@ -156,7 +157,7 @@ describe("D6: the closing rule, acceptance row 1", () => {
 describe("parseQuestions", () => {
   test("id, choices, to, body and the duplicate signal", () => {
     const md = [
-      '<Question id="O3" choices="A| B |A|" to="Yvonne Jacobs (X111111)|Ola Nordmann">',
+      '<Question id="O3" choices="A| B |A|" to="Synne Testdal (X111111)|Ola Nordmann">',
       "",
       "**Keep it?**",
       "",
@@ -186,7 +187,7 @@ describe("parseQuestions", () => {
     ]);
     expect(qs[0]!.choices).toEqual(["A", "B"]);
     expect(qs[0]!.to).toEqual([
-      { name: "Yvonne Jacobs", ident: "X111111" },
+      { name: "Synne Testdal", ident: "X111111" },
       { name: "Ola Nordmann", ident: null },
     ]);
     expect(qs[1]!.to).toBeNull();
@@ -209,8 +210,8 @@ describe("parseQuestions", () => {
 
 describe("targets and choices", () => {
   test("questions_to: an inline list of Name / Name (IDENT), or one string", () => {
-    expect(parseQuestionsTo(["Yvonne Jacobs (X111111)", "Ola Nordmann", "  ", '"Kari (Y222222)"'])).toEqual([
-      { name: "Yvonne Jacobs", ident: "X111111" },
+    expect(parseQuestionsTo(["Synne Testdal (X111111)", "Ola Nordmann", "  ", '"Kari (Y222222)"'])).toEqual([
+      { name: "Synne Testdal", ident: "X111111" },
       { name: "Ola Nordmann", ident: null },
       { name: "Kari", ident: "Y222222" },
     ]);
@@ -220,8 +221,8 @@ describe("targets and choices", () => {
   });
 
   test("to= takes the same entries |-separated, and formats back as written", () => {
-    const t = parseToAttr("Yvonne Jacobs (X111111)| Ola Nordmann |");
-    expect(t.map(formatQuestionTarget)).toEqual(["Yvonne Jacobs (X111111)", "Ola Nordmann"]);
+    const t = parseToAttr("Synne Testdal (X111111)| Ola Nordmann |");
+    expect(t.map(formatQuestionTarget)).toEqual(["Synne Testdal (X111111)", "Ola Nordmann"]);
   });
 
   test("choices: trimmed, blanks and repeats dropped", () => {
@@ -285,21 +286,21 @@ describe("the web card", () => {
   });
 
   test("language no: Norwegian labels", () => {
-    const c = card(formatWebHtml(page("Lukket 08.10 (D99)."), { question: opts({ language: "no", questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
+    const c = card(formatWebHtml(page("Lukket 08.10 (D99)."), { question: opts({ language: "no", questionsTo: [{ name: "Synne Testdal", ident: "X111111" }] }) }));
     expect(c).toContain('<span class="q-label">Spørsmål</span>');
     expect(c).toContain("Avgjort → ");
-    expect(c).toContain('<div class="q-for"><span class="q-for-label">Stilt til</span> Yvonne Jacobs</div>');
+    expect(c).toContain('<div class="q-for"><span class="q-for-label">Stilt til</span> Synne Testdal</div>');
     expect(c).toContain('data-question-lang="no"');
   });
 
   test("who it is for: to= overrides questions_to:, and the data carries the names", () => {
     const md = page("Keep it?").replace('<Question id="O3" choices="A|B">', '<Question id="O3" choices="A|B" to="Kari Nordmann (Y222222)">');
-    const c = card(formatWebHtml(md, { question: opts({ questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
+    const c = card(formatWebHtml(md, { question: opts({ questionsTo: [{ name: "Synne Testdal", ident: "X111111" }] }) }));
     expect(c).toContain("For</span> Kari Nordmann</div>");
     expect(c).toContain('data-question-to-source="block"');
     expect(c).toContain('data-question-to="Kari Nordmann"');
     expect(c).toContain('data-question-choices="A|B"');
-    const pageTo = card(formatWebHtml(page("Keep it?"), { question: opts({ questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
+    const pageTo = card(formatWebHtml(page("Keep it?"), { question: opts({ questionsTo: [{ name: "Synne Testdal", ident: "X111111" }] }) }));
     expect(pageTo).toContain('data-question-to-source="page"');
     const none = card(formatWebHtml(page("Keep it?"), { question: opts() }));
     expect(none).toContain('data-question-to-source="none"');
@@ -532,9 +533,9 @@ describe("fix round 1: the web card", () => {
 
   test('to="" keeps the page\'s questions_to: on the card', () => {
     const md = page("Keep it?").replace('<Question id="O3" choices="A|B">', '<Question id="O3" choices="A|B" to="">');
-    const c = card(formatWebHtml(md, { question: opts({ questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
+    const c = card(formatWebHtml(md, { question: opts({ questionsTo: [{ name: "Synne Testdal", ident: "X111111" }] }) }));
     expect(c).toContain('data-question-to-source="page"');
-    expect(c).toContain('data-question-to="Yvonne Jacobs"');
+    expect(c).toContain('data-question-to="Synne Testdal"');
   });
 });
 
@@ -623,7 +624,7 @@ describe("fix round 2: pins", () => {
 });
 
 describe("who a question is for, and whether an author was asked", () => {
-  const yv = { name: "Yvonne Jacobs", ident: "X111111" };
+  const yv = { name: "Synne Testdal", ident: "X111111" };
   test("to= wins, then questions_to:, then the owner, then nobody", () => {
     expect(resolveQuestionTargets([yv], [{ name: "Ola", ident: null }], "Owner")).toEqual({ to: [yv], source: "block" });
     expect(resolveQuestionTargets(null, [yv], "Owner")).toEqual({ to: [yv], source: "page" });
@@ -633,8 +634,8 @@ describe("who a question is for, and whether an author was asked", () => {
 
   test("the ident decides when both sides carry one, else the folded name; nobody named is null", () => {
     expect(isAskedAuthor({ name: "Someone Else", navIdent: "x111111" }, [yv])).toBe(true);
-    expect(isAskedAuthor({ name: "Yvonne Jacobs", navIdent: "Z999999" }, [yv])).toBe(false);
-    expect(isAskedAuthor({ name: " yvonne   JACOBS ", navIdent: null }, [yv])).toBe(true);
+    expect(isAskedAuthor({ name: "Synne Testdal", navIdent: "Z999999" }, [yv])).toBe(false);
+    expect(isAskedAuthor({ name: " synne   TESTDAL ", navIdent: null }, [yv])).toBe(true);
     expect(isAskedAuthor({ name: "Ola", navIdent: "Y222222" }, [{ name: "ola", ident: null }])).toBe(true);
     expect(isAskedAuthor({ name: "Ola", navIdent: null }, [])).toBeNull();
   });
@@ -642,13 +643,13 @@ describe("who a question is for, and whether an author was asked", () => {
 
 describe("answer cards fix round 1", () => {
   test("a pasted name with zero-width or soft-hyphen characters still matches", () => {
-    const target = [{ name: "Yvonne Jacobs", ident: null }];
-    expect(isAskedAuthor({ name: "Yvonne\u200B Jacobs", navIdent: null }, target)).toBe(true);
-    expect(isAskedAuthor({ name: "Yvon\u00ADne Jacobs", navIdent: null }, target)).toBe(true);
-    expect(isAskedAuthor({ name: "\uFEFFYvonne Jacobs\u2060", navIdent: null }, target)).toBe(true);
+    const target = [{ name: "Synne Testdal", ident: null }];
+    expect(isAskedAuthor({ name: "Synne\u200B Testdal", navIdent: null }, target)).toBe(true);
+    expect(isAskedAuthor({ name: "Syn\u00ADne Testdal", navIdent: null }, target)).toBe(true);
+    expect(isAskedAuthor({ name: "\uFEFFSynne Testdal\u2060", navIdent: null }, target)).toBe(true);
     // Decomposed and composed spellings of one name are one name.
     expect(isAskedAuthor({ name: "Ola Nordma\u0308nn", navIdent: null }, [{ name: "Ola Nordm\u00E4nn", ident: null }])).toBe(true);
-    expect(isAskedAuthor({ name: "Yvonne Jakobs", navIdent: null }, target)).toBe(false);
+    expect(isAskedAuthor({ name: "Synne Testdahl", navIdent: null }, target)).toBe(false);
   });
 
   test("the owner is read in the target format: a name and an ident", () => {
@@ -677,5 +678,50 @@ describe("answer cards fix round 2", () => {
     const target = [{ name: "René Ås", ident: null }];
     expect(isAskedAuthor({ name: "Rene​́ Ås", navIdent: null }, target)).toBe(true);
     expect(isAskedAuthor({ name: "Rene­́ A​̊s", navIdent: null }, target)).toBe(true);
+  });
+});
+
+describe("answer groups (WIKI_ANSWER_GROUPS)", () => {
+  // Synthetic idents: Z99xxxx.
+  const groups = new Map([
+    ["fag", new Set(["Z990001", "Z990002"])],
+    ["utvikler", new Set(["Z990002", "Z990003"])],
+  ]);
+  const fag = { name: "fag", ident: null };
+  const kari = { name: "Nordmann, Kari", navIdent: "Z990001" };
+
+  const cases: [string, { name: string; navIdent: string | null }, { name: string; ident: string | null }[], ReadonlyMap<string, ReadonlySet<string>> | undefined, boolean | null][] = [
+    ["a member's ident matches the group", kari, [fag], groups, true],
+    ["the ident is compared upper-cased", { name: "x", navIdent: " z990001 " }, [fag], groups, true],
+    ["the group name is case-folded", kari, [{ name: " FAG ", ident: null }], groups, true],
+    ["a non-member is not asked", { name: "Utvikler, Ola", navIdent: "Z990003" }, [fag], groups, false],
+    ["no ident ⇒ no group match", { name: "Kari", navIdent: null }, [fag], groups, false],
+    ["an author NAMED like the group is not a member", { name: "fag", navIdent: null }, [fag], groups, false],
+    ["an author named like the group with a non-member ident is not asked", { name: "fag", navIdent: "Z990009" }, [fag], groups, false],
+    ["no groups configured: fag is a person's name again", { name: "FAG", navIdent: "Z990009" }, [fag], undefined, true],
+    ["no groups configured: a member ident does not make the name match", kari, [fag], undefined, false],
+    ["a name target beside a group still matches by name", { name: "Ola Nordmann", navIdent: null }, [fag, { name: "ola nordmann", ident: null }], groups, true],
+    ["an ident target unchanged by groups", { name: "x", navIdent: "Z990005" }, [{ name: "fag", ident: "Z990005" }], groups, true],
+    ["an ident target named like a group is a person, not the group", kari, [{ name: "fag", ident: "Z990005" }], groups, false],
+    ["nobody named is still null", kari, [], groups, null],
+  ];
+  for (const [label, author, targets, g, want] of cases) {
+    test(label, () => {
+      expect(isAskedAuthor(author, targets, g)).toBe(want);
+    });
+  }
+
+  test("an author's groups: sorted, from the ident only, never the ident", () => {
+    expect(authorGroupsOf("Z990002", groups)).toEqual(["fag", "utvikler"]);
+    expect(authorGroupsOf("Z990002", new Map([...groups].reverse()))).toEqual(["fag", "utvikler"]);
+    expect(authorGroupsOf(" z990003", groups)).toEqual(["utvikler"]);
+    expect(authorGroupsOf("Z990009", groups)).toEqual([]);
+    expect(authorGroupsOf(null, groups)).toEqual([]);
+    expect(authorGroupsOf("Z990001", new Map())).toEqual([]);
+  });
+
+  test("resolveQuestionTargets knows nothing about groups: the source is unchanged", () => {
+    expect(resolveQuestionTargets(parseToAttr("fag"), [], "Owner")).toEqual({ to: [fag], source: "block" });
+    expect(resolveQuestionTargets(null, [fag], "Owner")).toEqual({ to: [fag], source: "page" });
   });
 });

@@ -37,6 +37,8 @@ export interface AnswerWire extends AnswerVersionWire {
   mine: boolean;
   /** Null when the question names nobody (or is gone from the page). */
   asked?: boolean | null;
+  /** The author's `WIKI_ANSWER_GROUPS` groups, sorted (never an ident). */
+  authorGroups?: string[];
   /** Earlier versions, newest first; only the author and an admin get them. */
   earlier?: AnswerVersionWire[];
 }
@@ -99,7 +101,8 @@ export function draftChoiceFor(stored: string | null, choices: readonly string[]
  * The answer list with a just-saved version folded in, so the card shows the
  * save before (or without) a reload. A new answer gets a provisional entry;
  * an edit replaces its answer's latest version and moves the old one into the
- * log. `asked` is the server's to compute, so a new entry carries none.
+ * log. `asked` and `authorGroups` are the server's to compute, so a new
+ * entry carries none and an edit keeps the previous ones.
  */
 export function mergeSavedAnswer(answers: readonly AnswerWire[], saved: SavedAnswerWire): AnswerWire[] {
   const version: AnswerVersionWire = {
@@ -115,12 +118,12 @@ export function mergeSavedAnswer(answers: readonly AnswerWire[], saved: SavedAns
   if (i === -1) {
     return [
       ...answers,
-      { ...version, answerId: saved.answerId, questionId: saved.questionId, versionCount: saved.version, firstCreatedAt: saved.createdAt, mine: saved.mine, asked: null },
+      { ...version, answerId: saved.answerId, questionId: saved.questionId, versionCount: saved.version, firstCreatedAt: saved.createdAt, mine: saved.mine, asked: null, authorGroups: [] },
     ];
   }
   const prev = answers[i]!;
   if (prev.version >= saved.version) return [...answers];
-  const { answerId, questionId, firstCreatedAt, mine, asked, earlier, ...prevVersion } = prev;
+  const { answerId, questionId, firstCreatedAt, mine, asked, authorGroups, earlier, ...prevVersion } = prev;
   const next: AnswerWire = {
     ...version,
     answerId,
@@ -128,6 +131,7 @@ export function mergeSavedAnswer(answers: readonly AnswerWire[], saved: SavedAns
     firstCreatedAt,
     mine,
     asked,
+    authorGroups,
     versionCount: Math.max(prev.versionCount + 1, saved.version),
     earlier: [
       {
@@ -225,6 +229,9 @@ export function answerItemHtml(
       : a.asked === false
         ? ` <span class="q-asked q-asked-no">${esc(L.notAsked)}</span>`
         : "";
+  const groups = (a.authorGroups ?? [])
+    .map((g) => ` <span class="q-group"><span class="q-group-label">${esc(L.group)} </span>${esc(g)}</span>`)
+    .join("");
   const edited = a.versionCount > 1 ? ` ${byPart("q-edited", L.edited(a.versionCount - 1))}` : "";
   const edit = canEdit
     ? ` <button type="button" class="q-edit" data-answer-id="${esc(a.answerId)}">${esc(L.composer.edit)}</button>`
@@ -243,7 +250,7 @@ export function answerItemHtml(
     : "";
   return (
     `<div class="q-answer" data-answer-id="${esc(a.answerId)}">` +
-    `<div class="q-by"><span class="q-author">${esc(a.authorName)}</span> ${byPart("q-time", formatAnswerTime(a.createdAt, lang))}${asked}${edited}${edit}${redactInline}</div>` +
+    `<div class="q-by"><span class="q-author">${esc(a.authorName)}</span>${groups} ${byPart("q-time", formatAnswerTime(a.createdAt, lang))}${asked}${edited}${edit}${redactInline}</div>` +
     redactBlock +
     versionContentHtml(a, L) +
     log +

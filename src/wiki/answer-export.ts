@@ -4,7 +4,7 @@
  *
  * ```markdown
  * <!-- answers · mimir · plans/x.mdx · exported 2026-10-08 09:14 -->
- * ### O3 — Rune Lind (asked), 07.10.2026 21:32, chose B, version 2
+ * ### O3 — Kari Nordmann [fag] (asked), 07.10.2026 21:32, chose B, version 2
  * > The page's language.
  *
  * <!-- orphaned answers in mimir: 0 -->
@@ -25,6 +25,9 @@ const NOT_SURE_TEXT = "not sure yet";
 export interface ExportAnswer {
   questionId: string;
   authorName: string;
+  /** The author's `WIKI_ANSWER_GROUPS` groups, `[fag, utvikler]` after the
+   *  name; absent or empty ⇒ nothing. */
+  authorGroups?: readonly string[];
   /** Null when the question names nobody or is gone from the page. */
   asked: boolean | null;
   /** Epoch ms of the exported version. */
@@ -74,7 +77,8 @@ export function exportHeading(a: ExportAnswer): string {
     : a.choice !== null
       ? `, chose ${a.choice === QUESTION_NOT_SURE ? NOT_SURE_TEXT : oneLine(a.choice)}`
       : "";
-  return `### ${a.questionId} — ${oneLine(a.authorName)}${asked}, ${answerStamp(a.createdAt)}${choice}, version ${a.version}`;
+  const groups = a.authorGroups?.length ? ` [${a.authorGroups.join(", ")}]` : "";
+  return `### ${a.questionId} — ${oneLine(a.authorName)}${groups}${asked}, ${answerStamp(a.createdAt)}${choice}, version ${a.version}`;
 }
 
 /** The body as a blockquote, every line prefixed; nothing for an empty or

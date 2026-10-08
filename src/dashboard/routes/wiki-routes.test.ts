@@ -329,7 +329,7 @@ describe("GET /api/wiki/html", () => {
       [
         "---",
         "title: Question Page",
-        'questions_to: ["Yvonne Jacobs (X111111)"]',
+        'questions_to: ["Synne Testdal (X111111)"]',
         "---",
         "",
         '<Question id="O3" choices="A|B">',
@@ -353,7 +353,7 @@ describe("GET /api/wiki/html", () => {
     expect(html).toContain('class="question q-decided"');
     expect(html).toContain('data-wiki-answerable="false"');
     expect(html).toContain('data-question-lang="no"');
-    expect(html).toContain('data-question-to="Yvonne Jacobs"');
+    expect(html).toContain('data-question-to="Synne Testdal"');
     expect(html).toContain("Avgjort → ");
     expect(html).toContain('<li class="dl-item" id="o3">');
   });

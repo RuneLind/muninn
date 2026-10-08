@@ -40,7 +40,7 @@ const PAGE_EN = [
   "---",
   "title: Question page",
   "type: plan",
-  'questions_to: ["Yvonne Jacobs (X111111)"]',
+  'questions_to: ["Synne Testdal (X111111)"]',
   "---",
   "",
   "# Question page",
@@ -192,7 +192,7 @@ test.describe("Wiki reader: <Question> answer card", () => {
     await expect(cards.nth(1).locator("a.q-decision")).toHaveAttribute("href", "#d99");
     await expect(cards.nth(1).locator("a.q-id")).toHaveAttribute("href", "#o2");
     // Who it is for, from questions_to:; read-only, since this wiki is not in WIKI_ANSWER_WIKIS.
-    await expect(cards.first().locator(".q-for")).toHaveText("For Yvonne Jacobs");
+    await expect(cards.first().locator(".q-for")).toHaveText("For Synne Testdal");
     await expect(cards.first()).toHaveAttribute("data-wiki-answerable", "false");
     await expect(cards.first()).toHaveAttribute("data-question-choices", "A|B");
     await expect(cards.first().locator(".q-body strong")).toHaveText("Is the first one still open?");

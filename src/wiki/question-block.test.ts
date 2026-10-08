@@ -30,7 +30,7 @@ function plan(questions: string[], logItems: string[]): string {
     "title: A plan",
     "type: plan",
     "updated: 2026-10-01",
-    'questions_to: ["Yvonne Jacobs (X111111)", "Ola Nordmann"]',
+    'questions_to: ["Synne Testdal (X111111)", "Ola Nordmann"]',
     "---",
     "",
     ...questions.flatMap((q) => [q, "", "Question text?", "", "</Question>", ""]),
@@ -138,7 +138,7 @@ describe("the render option", () => {
     const o = questionRenderOptionsFor(md, (await buildWikiIndex(root)).readerConfig, false);
     expect(o).toEqual({
       questionsTo: [
-        { name: "Yvonne Jacobs", ident: "X111111" },
+        { name: "Synne Testdal", ident: "X111111" },
         { name: "Ola Nordmann", ident: null },
       ],
       language: "no",
@@ -151,11 +151,11 @@ describe("the render option", () => {
     const md = plan(['<Question id="O3">'], ["- **O3** — Lukket 08.10 (D99)."]);
     const resolve = () => undefined;
     const html = renderWikiHtml(md, resolve, {
-      question: { questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }], language: "no", answerable: true },
+      question: { questionsTo: [{ name: "Synne Testdal", ident: "X111111" }], language: "no", answerable: true },
     });
     expect(html).toContain('class="question q-decided"');
     expect(html).toContain('data-wiki-answerable="true"');
-    expect(html).toContain('data-question-to="Yvonne Jacobs"');
+    expect(html).toContain('data-question-to="Synne Testdal"');
     expect(html).toContain("Avgjort → ");
     expect(html).toContain('<li class="dl-item" id="o3">');
     // Without the option the same page renders the plain question.
@@ -196,8 +196,8 @@ describe("fix round 1: lint", () => {
 
   test("a questions_to: block list is reported with the inline-list form", async () => {
     const md = plan(['<Question id="O3">'], ["- **O3** — Keep it?"]).replace(
-      'questions_to: ["Yvonne Jacobs (X111111)", "Ola Nordmann"]',
-      "questions_to:\n  - Yvonne Jacobs (X111111)\n  - Ola Nordmann",
+      'questions_to: ["Synne Testdal (X111111)", "Ola Nordmann"]',
+      "questions_to:\n  - Synne Testdal (X111111)\n  - Ola Nordmann",
     );
     await write("plans/p.mdx", md);
     expect((await questionFindings()).map((x) => [x.message, x.line])).toEqual([

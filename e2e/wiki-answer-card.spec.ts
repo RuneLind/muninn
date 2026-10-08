@@ -11,7 +11,10 @@
  * second browser's edit turns a stale edit into the conflict message, a closed
  * card offers no composer while a reopened one takes an answer, and a wiki
  * outside the list never fetches answers at all. Plus token + 4.5:1 in both
- * themes for the new text-on-tint pairs, and the 390px focus layout.
+ * themes for the new text-on-tint pairs, and the 390px focus layout. And
+ * `WIKI_ANSWER_GROUPS`: a `to="fag"` card names the group, a member's answer
+ * (seeded with its NAV ident, since auth off has one author) is asked and
+ * carries the group chip, a non-member's is not asked.
  *
  * Synthetic fixtures only. Rows are deleted by wiki name before and after.
  * ENV PREREQUISITE: `bun run db:setup:test`. No model calls.
@@ -227,6 +230,19 @@ const SWEEP_PAGE = [
   ...q("S8", "A carried draft cancelled?"),
 ].join("\n");
 
+// WIKI_ANSWER_GROUPS: synthetic groups and idents (Z99xxxx). The answers are
+// seeded by SQL with an author ident — auth off has only the owner, no ident.
+const GROUPS_REL = "plans/groups.mdx";
+const GROUPS_PAGE = [
+  "---",
+  "title: Groups page",
+  "type: plan",
+  "---",
+  "",
+  ...q("H1", "For the domain experts?", ' to="fag"'),
+].join("\n");
+const GROUPS_ENV = "fag=Z990001,Z990002;utvikler=Z990002,Z990003";
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let server: ChildProcess | undefined;
@@ -260,6 +276,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", FOCUS_REL), FOCUS_PAGE, "utf8");
   await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
   await writeFile(path.join(base, "a", SWEEP_REL), SWEEP_PAGE, "utf8");
+  await writeFile(path.join(base, "a", GROUPS_REL), GROUPS_PAGE, "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -276,6 +293,7 @@ test.beforeAll(async ({}, info) => {
       WIKI_EXTRA: `${WIKI}=${path.join(base, "a")},${WIKI_NO}=${path.join(base, "no")},${WIKI_RO}=${path.join(base, "ro")}`,
       WIKI_ANSWER_WIKIS: `${WIKI},${WIKI_NO}`,
       WIKI_ANSWER_OWNER: OWNER,
+      WIKI_ANSWER_GROUPS: GROUPS_ENV,
     },
     stdio: "ignore",
   });
@@ -320,6 +338,15 @@ test.beforeAll(async ({}, info) => {
   await api({ relPath: SWEEP_REL, questionId: "S6", body: "S6 version one." });
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 first answer." });
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 second answer." });
+
+  // The groups page: a fag member (also in utvikler) and a utvikler-only author.
+  for (const [name, ident, body] of [
+    ["Nordmann, Kari", "Z990002", "From a fag member."],
+    ["Utvikler, Ola", "Z990003", "From a developer."],
+  ] as const) {
+    await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, author_nav_ident, body, question_hash)
+              VALUES (${randomUUID()}, 1, ${WIKI}, ${GROUPS_REL}, 'H1', ${name}, ${ident}, ${body}, 'seed')`;
+  }
 });
 
 test.afterAll(async () => {
@@ -1717,4 +1744,47 @@ test.describe("Wiki reader: the answer card's look", () => {
     expect(bare).toEqual([]);
     expectClean(seen);
   });
+});
+
+test.describe("Wiki reader: answer groups (WIKI_ANSWER_GROUPS)", () => {
+  const answerBy = (page: Page, body: string) =>
+    card(page, "H1").locator(".q-answer").filter({ has: page.locator(".q-answer-body", { hasText: body }) });
+  const chips = (loc: Locator) =>
+    loc.locator(".q-by .q-group").evaluateAll((els) => els.map((e) => e.lastChild?.textContent ?? ""));
+
+  test('a to="fag" card names the group; a member is asked with its chips, a non-member is not; no ident reaches the page', async ({ page }) => {
+    const seen = await openPage(page, WIKI, GROUPS_REL);
+    const h1 = card(page, "H1");
+    await expect(h1.locator(".q-for")).toHaveText("For fag");
+    await expect(h1.locator(".q-answer")).toHaveCount(2);
+    const member = answerBy(page, "From a fag member.");
+    await expect(member.locator(".q-asked")).toHaveText("asked");
+    expect(await chips(member)).toEqual(["fag", "utvikler"]);
+    await expect(member.locator(".q-group").first()).toHaveText("group fag");
+    const dev = answerBy(page, "From a developer.");
+    await expect(dev.locator(".q-asked")).toHaveText("not asked");
+    expect(await chips(dev)).toEqual(["utvikler"]);
+    expect(await page.content()).not.toMatch(/Z9900\d\d/);
+    expectClean(seen);
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`the group chip reads at 4.5:1 on its token, ${scheme}`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const seen = await openPage(page, WIKI, GROUPS_REL);
+      const chip = answerBy(page, "From a developer.").locator(".q-group");
+      await expect(chip).toHaveCount(1);
+      const soft = await page.evaluate(() => {
+        const p = document.createElement("span");
+        p.style.color = "var(--text-soft)";
+        document.body.appendChild(p);
+        const c = getComputedStyle(p).color;
+        p.remove();
+        return c;
+      });
+      expect(await chip.evaluate((el) => getComputedStyle(el).color), "group chip token").toBe(soft);
+      expect(await paintedContrast(chip), "group chip contrast").toBeGreaterThanOrEqual(4.5);
+      expectClean(seen);
+    });
+  }
 });

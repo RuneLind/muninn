@@ -163,14 +163,16 @@ const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"
 const FELLES_PUBLISH_FLAGS = ["FELLES_WIKI_PUBLISH_BIN", "FELLES_WIKI_PUBLISH_WIKIS", "FELLES_WIKI_BUCKET"];
 
 /** Answer cards (`WIKI_ANSWER_WIKIS`, `WIKI_ANSWER_OWNER`, `WIKI_ANSWER_SCANNER`,
- *  and the two retention windows): a developer's value would make every matching
- *  card answerable, name an owner on every `/api/wiki/page` payload, run a local
- *  scanner module over every answer a suite saves, or start a sweep that deletes
- *  a spawned server's answers. The specs that use them set them explicitly. */
+ *  `WIKI_ANSWER_GROUPS` and the two retention windows): a developer's value
+ *  would make every matching card answerable, name an owner on every
+ *  `/api/wiki/page` payload, run a local scanner module over every answer a
+ *  suite saves, turn a target named like a group into that group, or start a
+ *  sweep that deletes a spawned server's answers. The specs that use them set them explicitly. */
 const WIKI_ANSWER_FLAGS = [
   "WIKI_ANSWER_WIKIS",
   "WIKI_ANSWER_OWNER",
   "WIKI_ANSWER_SCANNER",
+  "WIKI_ANSWER_GROUPS",
   "WIKI_ANSWER_RETENTION_DAYS",
   "WIKI_ANSWER_UNEXPORTED_DAYS",
 ];

@@ -26,7 +26,7 @@ const answer = (over: Partial<AnswerWire> = {}): AnswerWire => ({
   questionId: "O1",
   version: 1,
   versionCount: 1,
-  authorName: "Yvonne Jacobs",
+  authorName: "Synne Testdal",
   choice: null,
   body: "Plain text.",
   createdAt: new Date(2026, 9, 8, 21, 32).getTime(),
@@ -71,7 +71,7 @@ describe("an answer", () => {
       "en",
       false,
     );
-    expect(html).toContain('<span class="q-author">Yvonne Jacobs</span>');
+    expect(html).toContain('<span class="q-author">Synne Testdal</span>');
     expect(html).toContain("2026-10-08 21:32");
     expect(html).toContain('<span class="q-asked q-asked-yes">asked</span>');
     expect(html).toContain("edited 2×");
@@ -249,6 +249,23 @@ describe("fix round 1", () => {
     expect(edited[0]!.earlier?.map((v) => [v.version, v.body])).toEqual([[1, "old"]]);
     // An older save never replaces a newer version already in the list.
     expect(mergeSavedAnswer([answer({ version: 3, versionCount: 3 })], { ...saved, answerId: "a1", version: 2 })[0]!.version).toBe(3);
+  });
+
+  test("answer groups: a muted chip per group after the author, labelled for assistive tech; none ⇒ no chip", () => {
+    const html = answerItemHtml(answer({ authorGroups: ["fag", "utvikler"] }), en, "en", false);
+    expect(html).toContain(
+      '<span class="q-author">Synne Testdal</span> <span class="q-group"><span class="q-group-label">group </span>fag</span> <span class="q-group"><span class="q-group-label">group </span>utvikler</span> <span class="q-time">',
+    );
+    expect(answerItemHtml(answer({ authorGroups: ["fag"] }), no, "no", false)).toContain('<span class="q-group-label">gruppe </span>fag</span>');
+    expect(answerItemHtml(answer(), en, "en", false)).not.toContain("q-group");
+    expect(answerItemHtml(answer({ authorGroups: ["<b>"] }), en, "en", false)).toContain("&lt;b&gt;");
+  });
+
+  test("a saved answer's groups: a new one carries none until the reload, an edit keeps the previous ones", () => {
+    const saved = { answerId: "a9", questionId: "O1", version: 1, authorName: "Y", choice: null, body: "new", createdAt: 5, exported: false, redacted: false, mine: true };
+    expect(mergeSavedAnswer([], saved)[0]!.authorGroups).toEqual([]);
+    const edited = mergeSavedAnswer([answer({ authorGroups: ["fag"] })], { ...saved, answerId: "a1", version: 2 });
+    expect(edited[0]!.authorGroups).toEqual(["fag"]);
   });
 
   test("only a body with the saved answer's shape is read as one", () => {

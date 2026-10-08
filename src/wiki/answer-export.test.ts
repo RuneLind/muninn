@@ -16,7 +16,7 @@ const WINTER = Date.UTC(2026, 0, 15, 8, 5);
 
 const a = (over: Partial<ExportAnswer> = {}): ExportAnswer => ({
   questionId: "O3",
-  authorName: "Yvonne Jacobs",
+  authorName: "Synne Testdal",
   asked: true,
   createdAt: SUMMER,
   choice: "B",
@@ -41,19 +41,24 @@ describe("stamps are Oslo time, whatever the process zone", () => {
 
 describe("the heading", () => {
   test("asked, a choice, a version", () => {
-    expect(exportHeading(a())).toBe("### O3 — Yvonne Jacobs (asked), 07.10.2026 21:32, chose B, version 2");
+    expect(exportHeading(a())).toBe("### O3 — Synne Testdal (asked), 07.10.2026 21:32, chose B, version 2");
   });
   test("not asked; no choice ⇒ no `chose`", () => {
-    expect(exportHeading(a({ asked: false, choice: null }))).toBe("### O3 — Yvonne Jacobs (not asked), 07.10.2026 21:32, version 2");
+    expect(exportHeading(a({ asked: false, choice: null }))).toBe("### O3 — Synne Testdal (not asked), 07.10.2026 21:32, version 2");
   });
   test("asked null ⇒ no label", () => {
-    expect(exportHeading(a({ asked: null }))).toBe("### O3 — Yvonne Jacobs, 07.10.2026 21:32, chose B, version 2");
+    expect(exportHeading(a({ asked: null }))).toBe("### O3 — Synne Testdal, 07.10.2026 21:32, chose B, version 2");
   });
   test("the fixed not-sure value reads as words", () => {
     expect(exportHeading(a({ choice: "not-sure" }))).toContain(", chose not sure yet, ");
   });
+  test("the author's groups follow the name in brackets; none ⇒ nothing", () => {
+    expect(exportHeading(a({ authorGroups: ["fag"] }))).toBe("### O3 — Synne Testdal [fag] (asked), 07.10.2026 21:32, chose B, version 2");
+    expect(exportHeading(a({ authorGroups: ["fag"], asked: null }))).toBe("### O3 — Synne Testdal [fag], 07.10.2026 21:32, chose B, version 2");
+    expect(exportHeading(a({ authorGroups: [] }))).toBe(exportHeading(a()));
+  });
   test("redacted replaces the choice", () => {
-    expect(exportHeading(a({ redacted: true }))).toBe("### O3 — Yvonne Jacobs (asked), 07.10.2026 21:32, redacted, version 2");
+    expect(exportHeading(a({ redacted: true }))).toBe("### O3 — Synne Testdal (asked), 07.10.2026 21:32, redacted, version 2");
   });
   test("a name or choice with a newline stays on one line", () => {
     expect(exportHeading(a({ authorName: "Ola\nNordmann", choice: "A\nB" }))).toBe(
@@ -85,22 +90,22 @@ describe("the block", () => {
       orphanCount: 1,
       answers: [
         a(),
-        a({ questionId: "O4", authorName: "Kari Nordmann", asked: false, choice: null, body: "Første linje.\n\nTredje — «sitat».", version: 1 }),
+        a({ questionId: "O4", authorName: "Kari Nordmann", authorGroups: ["fag", "utvikler"], asked: false, choice: null, body: "Første linje.\n\nTredje — «sitat».", version: 1 }),
         a({ questionId: "O5", asked: null, redacted: true, choice: null, body: "", version: 3 }),
       ],
     });
     expect(block).toBe(
       [
         "<!-- answers · mimir · plans/spørsmål.mdx · exported 2026-01-15 09:05 -->",
-        "### O3 — Yvonne Jacobs (asked), 07.10.2026 21:32, chose B, version 2",
+        "### O3 — Synne Testdal (asked), 07.10.2026 21:32, chose B, version 2",
         "> The page's language.",
         "",
-        "### O4 — Kari Nordmann (not asked), 07.10.2026 21:32, version 1",
+        "### O4 — Kari Nordmann [fag, utvikler] (not asked), 07.10.2026 21:32, version 1",
         "> Første linje.",
         ">",
         "> Tredje — «sitat».",
         "",
-        "### O5 — Yvonne Jacobs, 07.10.2026 21:32, redacted, version 3",
+        "### O5 — Synne Testdal, 07.10.2026 21:32, redacted, version 3",
         "",
         "<!-- orphaned answers in mimir: 1 -->",
         "",
@@ -146,10 +151,10 @@ describe("answer export fix round 2: the orphan block", () => {
     expect(block).toBe(
       [
         "<!-- orphaned answers · mimir · exported 2026-01-15 09:05 -->",
-        "### O3 — Yvonne Jacobs, 07.10.2026 21:32, chose B, version 2 · plans/gammel.mdx, page gone",
+        "### O3 — Synne Testdal, 07.10.2026 21:32, chose B, version 2 · plans/gammel.mdx, page gone",
         "> The page's language.",
         "",
-        "### O9 — Yvonne Jacobs, 07.10.2026 21:32, version 1 · plans/ny side.mdx, question gone",
+        "### O9 — Synne Testdal, 07.10.2026 21:32, version 1 · plans/ny side.mdx, question gone",
         "> Linje én.",
         "> Linje to.",
         "",
