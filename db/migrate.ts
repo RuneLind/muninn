@@ -35,8 +35,6 @@ interface MigrationFile {
   name: string;
   filename: string;
   ext: string;
-  /** The directory it was found in: `MIGRATIONS_DIR`, or a test's own. */
-  dir: string;
 }
 
 /**
@@ -71,8 +69,8 @@ async function getAppliedMigrations(sql: postgres.Sql): Promise<Set<string>> {
   return new Set(rows.map((r) => r.version));
 }
 
-async function discoverMigrations(dir = MIGRATIONS_DIR): Promise<MigrationFile[]> {
-  const files = await readdir(dir);
+async function discoverMigrations(): Promise<MigrationFile[]> {
+  const files = await readdir(MIGRATIONS_DIR);
   const migrations = files
     .filter((f) => /^\d{3}-/.test(f) && !f.includes(".test."))
     .filter((f) => f.endsWith(".sql") || f.endsWith(".ts"))
@@ -80,7 +78,7 @@ async function discoverMigrations(dir = MIGRATIONS_DIR): Promise<MigrationFile[]
     .map((f) => {
       const match = f.match(/^(\d{3})-(.+)\.(sql|ts)$/);
       if (!match) throw new Error(`Unexpected migration filename: ${f}`);
-      return { version: match[1]!, name: match[2]!, filename: f, ext: match[3]!, dir };
+      return { version: match[1]!, name: match[2]!, filename: f, ext: match[3]! };
     });
 
   // Check for duplicate version numbers
@@ -97,7 +95,7 @@ async function discoverMigrations(dir = MIGRATIONS_DIR): Promise<MigrationFile[]
 }
 
 async function runMigration(sql: postgres.Sql, migration: MigrationFile) {
-  const filepath = join(migration.dir, migration.filename);
+  const filepath = join(MIGRATIONS_DIR, migration.filename);
 
   if (migration.ext === "sql") {
     const content = await Bun.file(filepath).text();
@@ -113,23 +111,6 @@ async function runMigration(sql: postgres.Sql, migration: MigrationFile) {
   }
 }
 
-/** Invalid indexes in the current schema: what a failed concurrent build leaves
- *  behind. A build still in progress (`pg_stat_progress_create_index`, which also
- *  lists a REINDEX CONCURRENTLY) is invalid too until it finishes, and is left out. */
-async function invalidIndexes(sql: postgres.Sql): Promise<string[]> {
-  const rows = await sql`
-    SELECT c.relname AS name FROM pg_index i
-    JOIN pg_class c ON c.oid = i.indexrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = current_schema() AND NOT i.indisvalid
-      AND NOT EXISTS (
-        SELECT 1 FROM pg_stat_progress_create_index p
-        WHERE p.index_relid = i.indexrelid OR p.relid = i.indrelid
-      )
-    ORDER BY c.relname`;
-  return rows.map((r) => r.name as string);
-}
-
 /** A connection string this process cannot use — an operator error, not a
  *  failed migration. Separated so the CLI can print it as one line instead of
  *  under a heading that sends the reader looking at the migrations. */
@@ -142,8 +123,7 @@ export class DatabaseUrlError extends Error {
 
 export async function runMigrations(
   databaseUrl: string,
-  // `migrationsDir` is for tests that need a migration file of their own.
-  opts?: { baseline?: boolean; quiet?: boolean; migrationsDir?: string },
+  opts?: { baseline?: boolean; quiet?: boolean },
 ) {
   // `quiet` silences progress chatter for programmatic callers (e.g. the drift
   // test); the CLI path below leaves it off. Errors throw regardless.
@@ -176,7 +156,7 @@ export async function runMigrations(
     await sql`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY})`;
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
-    const all = await discoverMigrations(opts?.migrationsDir);
+    const all = await discoverMigrations();
     const pending = all.filter((m) => !applied.has(m.version));
 
     if (opts?.baseline) {
@@ -228,24 +208,11 @@ export async function runMigrations(
       // partial failure can't leave the DB half-migrated. (016 is the only such
       // migration today — it predates the wrapper, so without this a fresh full
       // replay, like the drift test, would fail on it.)
-      const text = m.ext === "sql" ? await Bun.file(join(m.dir, m.filename)).text() : "";
-      const concurrent = /\bCONCURRENTLY\b/i.test(text);
+      const concurrent =
+        m.ext === "sql" &&
+        /\bCONCURRENTLY\b/i.test(await Bun.file(join(MIGRATIONS_DIR, m.filename)).text());
       if (concurrent) {
-        // A failed concurrent build leaves an INVALID index, which `IF NOT EXISTS`
-        // would then skip for good. So: drop every invalid index in this schema
-        // first (each its own statement, outside any transaction; the planner
-        // never uses an invalid index), and record nothing while one remains.
-        for (const name of await invalidIndexes(sql)) {
-          console.warn(
-            `    dropping invalid index ${name} (a failed concurrent build); it is NOT rebuilt unless a pending migration builds it`,
-          );
-          await sql`DROP INDEX CONCURRENTLY IF EXISTS ${sql(name)}`;
-        }
         await runMigration(sql, m);
-        const invalid = await invalidIndexes(sql);
-        if (invalid.length > 0) {
-          throw new Error(`${m.filename}: invalid index ${invalid.join(", ")} after the migration ran; not recorded`);
-        }
         await sql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
       } else {
         await sql.begin(async (tx) => {
