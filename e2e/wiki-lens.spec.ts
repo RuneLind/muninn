@@ -1,5 +1,5 @@
 /**
- * Reader lenses PR 1: the Overview / All switch, its precedence and storage,
+ * The reader lenses: the Overview / All switch, its precedence and storage,
  * the reveal rule, the counted header pills and the id nouns.
  *
  * What only a real page can answer: that Overview's CSS really takes each
@@ -102,8 +102,11 @@ const REPORT = [
   "<DecisionLog>",
   "",
   "- **S9** — Hva gjør vi nå? Lukket 08.10 (D12).",
+  "- **D13** — Sjekket (`src/main/Gate.kt:200-210`).",
   "",
   "</DecisionLog>",
+  "",
+  "Se D13 for koden.",
   "",
 ].join("\n");
 
@@ -127,6 +130,7 @@ const COUNTS = [
   "- **S6** — Åpent.",
   "- **S7** — Åpent.",
   "- **S8** — Åpent.",
+  "- **R1** — Et funn, ikke et spørsmål.",
   "",
   "</DecisionLog>",
   "",
@@ -137,6 +141,8 @@ const COUNTS = [
   "</DecisionLog>",
   "",
   "Se D2–D11 og S1, S2 og S6.",
+  "",
+  "**Beslutning** D7 gjelder fortsatt.",
   "",
 ].join("\n");
 
@@ -276,8 +282,8 @@ test.describe("Wiki reader: lenses", () => {
     await expect(sw.locator('button[data-lens="agent"]')).toHaveCount(0);
 
     const art = page.locator(".wiki-article");
-    await expect(art.locator(".code-ref-group")).toHaveCount(1);
-    await expect(art.locator(".code-ref-group")).toBeHidden();
+    await expect(art.locator(".code-ref-group")).toHaveCount(2);
+    await expect(art.locator(".code-ref-group").first()).toBeHidden();
     await expect(art.locator("section.historic")).toBeHidden();
     await expect(art.locator(":scope > .fence, :scope > pre")).toHaveCount(1);
     await expect(art.locator(":scope > .fence, :scope > pre")).toBeHidden();
@@ -452,7 +458,7 @@ test.describe("Wiki reader: lenses", () => {
     expectClean(seen);
 
     seen = await open_(page, WIKI, REPORT_REL);
-    await expect(row.locator(".wiki-count-pill-decisions")).toHaveText("1 beslutning");
+    await expect(row.locator(".wiki-count-pill-decisions")).toHaveText("2 beslutninger");
     await expect(row.locator(".wiki-count-pill-open")).toHaveCount(0);
     await expect(row.locator(".wiki-count-pill-queries")).toHaveText("3 queries");
     await expect(row.locator(".wiki-count-pill-cases")).toHaveText("3 saker");
@@ -468,9 +474,130 @@ test.describe("Wiki reader: lenses", () => {
     const seen = await open_(page, WIKI, REPORT_REL);
     const sizes = page.locator(".wiki-article details.fold > summary .fold-size");
     expect(await sizes.count()).toBe(await page.locator(".wiki-article details.fold").count());
-    for (const t of await sizes.allTextContents()) expect(t).toMatch(/^\d+(\.\d)?k? tegn · (<1|\d+) min$/);
+    for (const t of await sizes.allTextContents()) expect(t).toMatch(/^\d+(,\d)?k? tegn · (<1|\d+) min$/);
     // The ref links still read the fold's own title, not the size.
     await expect(page.locator(".wiki-article details.fold#spørringer")).toHaveCount(1);
+    expectClean(seen);
+  });
+
+  test("fix round 1 D-6: in Overview a peek card shows the target whole, line refs included", async ({ page }) => {
+    await setStored(page, "overview");
+    const seen = await open_(page, WIKI, REPORT_REL);
+    expect(await lensOf(page)).toBe("overview");
+    await page.locator(".wiki-article > a.wiki-ref", { hasText: "D13" }).hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toBeVisible();
+    await expect(peek.locator(".code-ref-group")).toHaveCount(1);
+    await expect(peek.locator(".code-ref-group")).toBeVisible();
+    // The article's own copy stays hidden.
+    await expect(page.locator(".wiki-article li.dl-item#d13 .code-ref-group")).toBeHidden();
+    expectClean(seen);
+  });
+
+  test("fix round 1 D-9: the line refs toggle is shown only where line refs are", async ({ page }) => {
+    await setStored(page, "overview");
+    const seen = await open_(page, WIKI, REPORT_REL);
+    const toggle = page.locator(".wiki-article-head .wiki-lineref-toggle");
+    await expect(toggle).toHaveCount(1);
+    await expect(toggle).toBeHidden();
+    await page.locator('.wiki-lens-switch button[data-lens="all"]').click();
+    await expect(toggle).toBeVisible();
+    await page.locator('.wiki-lens-switch button[data-lens="overview"]').click();
+    await expect(toggle).toBeHidden();
+    expectClean(seen);
+  });
+
+  test("fix round 1 D-3: Explain and fact-check send the selection without the reader's own text", async ({ page }) => {
+    await setStored(page, "all");
+    const sent: { path: string; sel: string | null }[] = [];
+    const sse = `event: done\ndata: ${JSON.stringify({ answer: "Svar." })}\n\n`;
+    for (const p of ["**/api/wiki/explain?**", "**/api/wiki/factcheck?**"]) {
+      await page.route(p, (route) => {
+        const u = new URL(route.request().url());
+        sent.push({ path: u.pathname, sel: u.searchParams.get("sel") });
+        return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: sse });
+      });
+    }
+    const select = (selector: string) =>
+      page.evaluate((sel) => {
+        const r = document.createRange();
+        r.selectNodeContents(document.querySelector(sel)!);
+        const w = window.getSelection()!;
+        w.removeAllRanges();
+        w.addRange(r);
+        document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      }, selector);
+
+    await open_(page, WIKI, COUNTS_REL);
+    // The prose after the logs, from «Se» to «S6.», with the client's two nouns in it.
+    const nounsInProse = await page.evaluate(() => {
+      const art = document.querySelector(".wiki-article")!;
+      const first = Array.from(art.childNodes).find((n) => n.nodeType === 3 && n.textContent!.trimStart().startsWith("Se "))!;
+      const s6 = art.querySelector(':scope > a.wiki-ref[data-ref="s6"]')!;
+      const r = document.createRange();
+      r.setStart(first, first.textContent!.indexOf("Se "));
+      r.setEnd(s6.nextSibling!, 1);
+      const w = window.getSelection()!;
+      w.removeAllRanges();
+      w.addRange(r);
+      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      return r.cloneContents().querySelectorAll(".id-noun").length;
+    });
+    expect(nounsInProse).toBe(2);
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+    await page.locator("#wikiExplainBtn").dispatchEvent("mousedown");
+    await expect.poll(() => sent.length).toBe(1);
+    expect(sent[0]!.sel).toBe("Se D2–D11 og S1, S2 og S6.");
+
+    // A DecisionLog item with the server's noun, through the fact-check button.
+    // (The answer replaced the article; open the page again.)
+    await open_(page, WIKI, COUNTS_REL);
+    await select(".wiki-article li.dl-item#s1");
+    await expect(page.locator("#wikiFactcheckBtn")).toBeVisible();
+    await page.locator("#wikiFactcheckBtn").dispatchEvent("mousedown");
+    await expect.poll(() => sent.length).toBe(2);
+    expect(sent[1]!.path).toBe("/api/wiki/factcheck");
+    // The chip and the item text, without «Spørsmål» before them.
+    expect(sent[1]!.sel).toBe("S1Åpent.");
+
+    // A fold summary carries its size line on screen, never in the selection.
+    await open_(page, WIKI, REPORT_REL);
+    await expect(page.locator(".wiki-article details.fold#spørringer > summary .fold-size")).toHaveCount(1);
+    await select(".wiki-article details.fold#spørringer > summary");
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+    await page.locator("#wikiExplainBtn").dispatchEvent("mousedown");
+    await expect.poll(() => sent.length).toBe(3);
+    expect(sent[2]!.sel).toBe("Spørringer");
+  });
+
+  test("fix round 1 D-5: a fact-check append reloads the page in the lens the view showed", async ({ page }) => {
+    await setStored(page, "overview");
+    const appends: unknown[] = [];
+    await page.route("**/api/wiki/factcheck?**", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: `event: done\ndata: ${JSON.stringify({ answer: "Alt stemmer.", baseHash: "h1" })}\n\n`,
+      }),
+    );
+    await page.route("**/api/wiki/factcheck/append", (route) => {
+      appends.push(route.request().postDataJSON());
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ written: true }) });
+    });
+    const seen = await open_(page, WIKI, REPORT_REL);
+    expect(await lensOf(page)).toBe("overview");
+    // A reveal shows All for this view only.
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "D12" }).first().click();
+    expect(await lensOf(page)).toBe("all");
+    await page.locator("#wikiFactcheckArticleBtn").dispatchEvent("mousedown");
+    const add = page.locator("#wikiFactcheckAppendBtn");
+    await expect(add).toBeEnabled();
+    await add.click();
+    await expect.poll(() => appends.length).toBe(1);
+    // The page comes back in place, in All, and nothing was stored.
+    await expect(page.locator(".wiki-article li.dl-item#d12")).toHaveCount(1);
+    await expect.poll(() => lensOf(page)).toBe("all");
+    expect(await stored(page)).toBe("overview");
     expectClean(seen);
   });
 });

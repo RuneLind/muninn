@@ -17,12 +17,18 @@
  *   view to All without storing it, so the next page opens in the stored lens.
  *
  * Also here, because both read the rendered folds: each fold summary's size and
- * reading time (≈1,200 chars a minute).
+ * reading time; and the selection text Explain and fact-check send, without
+ * the text the reader adds to the page.
  */
 
 import { REVEAL_EVENT } from "./wiki-hash-target.ts";
 import { CODE_REF_GROUP_CLASS } from "../../../wiki/code-refs.ts";
-import { LENS_LABELS, readStoredLens, writeStoredLens, type Lens } from "../../../format/reader-lens.ts";
+import { LENSES, LENS_LABELS, READER_ONLY_ATTR, readStoredLens, writeStoredLens, type Lens } from "../../../format/reader-lens.ts";
+import type { QuestionLanguage } from "../../../format/question-labels.ts";
+import { fmtTokens } from "../../../utils/fmt-tokens.ts";
+import { localStore } from "./wiki-local-store.ts";
+import { LINE_REFS_TOGGLE_CLASS } from "./wiki-report-blocks.ts";
+import { PEEK_CLASS } from "./wiki-ref-links.ts";
 
 export const LENS_SWITCH_CLASS = "wiki-lens-switch";
 export const LENS_CLASS_PREFIX = "lens-";
@@ -47,12 +53,13 @@ export const OVERVIEW_HIDDEN: readonly string[] = [
 
 const HIDDEN_SELECTOR = OVERVIEW_HIDDEN.join(", ");
 
-/** Whether Overview hides `el`: it or an ancestor matches a hidden block. */
+/** Whether Overview hides `el`: it or an ancestor matches a hidden block. A
+ *  peek card is never hidden: it shows its target whole in every lens (D3). */
 export function isHiddenByOverview(el: Element): boolean {
-  return el.closest(HIDDEN_SELECTOR) !== null;
+  return el.closest(HIDDEN_SELECTOR) !== null && el.closest(`.${PEEK_CLASS}`) === null;
 }
 
-type Lang = "en" | "no";
+type Lang = QuestionLanguage;
 
 const NOTE_WORDS: Record<Lang, { cases: (n: number) => string; chars: string; min: string }> = {
   en: { cases: (n) => `${n} ${n === 1 ? "case" : "cases"} with status none not shown`, chars: "chars", min: "min" },
@@ -64,29 +71,25 @@ const SWITCH_TITLE: Record<Lang, string> = {
   no: "Oversikt skjuler arbeidsdetaljene: linjereferanser, historikk, spørringenes SQL og tabeller, utvikler- og overleveringsfold",
 };
 
-function localStore(): Storage | undefined {
-  try {
-    return window.localStorage;
-  } catch {
-    return undefined;
-  }
+/** A nominal reading rate for the fold size line, not a measured one. */
+const READING_CHARS_PER_MIN = 1200;
+
+/** `12 345` chars as `12.3k` (`12,3k` in Norwegian); under a thousand, the number. */
+export function formatChars(n: number, lang: Lang = "en"): string {
+  const s = fmtTokens(n);
+  return lang === "no" ? s.replace(".", ",") : s;
 }
 
-/** `12 345` chars as `12.3k`; under a thousand, the number. */
-export function formatChars(n: number): string {
-  return n < 1000 ? String(n) : `${(n / 1000).toFixed(1)}k`;
-}
-
-/** Minutes at ≈1,200 chars a minute; `<1` under half a minute. */
+/** Minutes at {@link READING_CHARS_PER_MIN}; `<1` under half a minute. */
 export function readingMinutes(chars: number): string {
-  const m = Math.round(chars / 1200);
+  const m = Math.round(chars / READING_CHARS_PER_MIN);
   return m < 1 ? "<1" : String(m);
 }
 
 /** A fold's size line, e.g. `5.9k chars · 5 min`. */
 export function foldSizeLabel(chars: number, lang: Lang): string {
   const w = NOTE_WORDS[lang];
-  return `${formatChars(chars)} ${w.chars} · ${readingMinutes(chars)} ${w.min}`;
+  return `${formatChars(chars, lang)} ${w.chars} · ${readingMinutes(chars)} ${w.min}`;
 }
 
 /** Each fold summary gets its body's size and reading time, measured on the
@@ -101,6 +104,7 @@ export function decorateFoldSizes(article: Element, lang: Lang): void {
     if (chars === 0) return;
     const span = document.createElement("span");
     span.className = FOLD_SIZE_CLASS;
+    span.setAttribute(READER_ONLY_ATTR, "");
     span.textContent = foldSizeLabel(chars, lang);
     summary.append(span);
   });
@@ -128,18 +132,23 @@ export interface LensOptions {
   agentAvailable: boolean;
 }
 
-/** The lens this view shows. */
-let current: Lens = "all";
+/** The lens `article` shows, read off its class; null before `enhanceLens`. */
+export function lensOf(article: Element | null): Lens | null {
+  return LENSES.find((l) => article?.classList.contains(`${LENS_CLASS_PREFIX}${l}`)) ?? null;
+}
 
-function applyLens(article: HTMLElement, sw: HTMLElement | null, lens: Lens): void {
-  current = lens;
-  for (const l of ["overview", "all", "agent"] as const) {
+function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElement | null, lens: Lens): void {
+  for (const l of LENSES) {
     article.classList.toggle(`${LENS_CLASS_PREFIX}${l}`, l === lens);
   }
   sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
     const on = b.dataset.lens === lens;
     b.classList.toggle("on", on);
     b.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  // Overview hides every line ref, so the «line refs» toggle has nothing to do.
+  row?.querySelectorAll<HTMLElement>(`.${LINE_REFS_TOGGLE_CLASS}`).forEach((t) => {
+    t.hidden = lens === "overview";
   });
 }
 
@@ -157,7 +166,6 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   noteHiddenCases(article, opts.language);
   decorateFoldSizes(article, opts.language);
 
-  const initial = opts.initial === "agent" && !opts.agentAvailable ? "all" : opts.initial;
   let sw: HTMLElement | null = null;
   if (row && (article.querySelector(HIDDEN_SELECTOR) || opts.agentAvailable)) {
     sw = document.createElement("div");
@@ -166,27 +174,29 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
     sw.setAttribute("aria-label", opts.language === "no" ? "Visning" : "Lens");
     sw.title = SWITCH_TITLE[opts.language];
     const labels = LENS_LABELS[opts.language];
-    const lenses: Lens[] = opts.agentAvailable ? ["overview", "all", "agent"] : ["overview", "all"];
-    for (const lens of lenses) {
+    for (const lens of LENSES) {
+      if (lens === "agent" && !opts.agentAvailable) continue;
       const b = document.createElement("button");
       b.type = "button";
       b.dataset.lens = lens;
       b.textContent = labels[lens];
       b.addEventListener("click", () => {
         writeStoredLens(localStore(), lens);
-        applyLens(article, sw, lens);
+        applyLens(article, row, sw, lens);
       });
       sw.append(b);
     }
     row.append(sw);
   }
-  applyLens(article, sw, initial);
+  // `opts.initial` comes from `resolveLens`, which already turns an Agent the
+  // server does not offer into All.
+  applyLens(article, row, sw, opts.initial);
 
   // D3: a reveal of something this lens hides shows All for this view only.
   article.addEventListener(REVEAL_EVENT, (e) => {
-    if (current !== "overview") return;
+    if (lensOf(article) !== "overview") return;
     const target = e.target;
-    if (target instanceof Element && isHiddenByOverview(target)) applyLens(article, sw, "all");
+    if (target instanceof Element && isHiddenByOverview(target)) applyLens(article, row, sw, "all");
   });
 }
 
@@ -195,10 +205,33 @@ export function storedLens(): string | null {
   return readStoredLens(localStore());
 }
 
-/** The reader's CSS for the switch, the hidden blocks and the fold sizes. */
+/** On the root for one `toString()`: takes the reader's additions out of layout. */
+const READER_ONLY_OFF_CLASS = "reader-only-off";
+
+/**
+ * The selection's text without the reader's own additions ({@link
+ * READER_ONLY_ATTR}): what Explain and fact-check locate in the page source.
+ * The marked nodes are taken out of layout for the one synchronous
+ * `toString()`, which serializes the rendered text, then put back; nothing
+ * paints in between.
+ */
+export function readerSelectionText(sel: Selection): string {
+  const root = document.documentElement;
+  root.classList.add(READER_ONLY_OFF_CLASS);
+  try {
+    return sel.toString();
+  } finally {
+    root.classList.remove(READER_ONLY_OFF_CLASS);
+  }
+}
+
+
+/** The reader's CSS for the switch, the hidden blocks and the fold sizes. A
+ *  peek card sits inside the article and shows its target whole in any lens. */
 export function lensCss(): string {
   return `
-    .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}) { display: none !important; }
+    .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
+    .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
     .wiki-article:not(.${LENS_CLASS_PREFIX}overview) .${CASEBOARD_LENS_NOTE_CLASS} { display: none; }
     .wiki-article .${CASEBOARD_LENS_NOTE_CLASS} { margin: 6px 0 0; font-size: 12px; color: var(--text-soft); }
     .${LENS_SWITCH_CLASS} {

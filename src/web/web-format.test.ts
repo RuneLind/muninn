@@ -640,8 +640,20 @@ describe("formatWebHtml — component blocks", () => {
   });
 
   test('Fold with open="true" renders the details open', () => {
-    const out = formatWebHtml('<Fold title="What was measured" open="true">\n\nprose\n\n</Fold>');
+    const out = formatWebHtml('<Fold title="Current state" open="true">\n\nprose\n\n</Fold>');
     expect(out).toContain('<details class="fold" open>');
+  });
+
+  test("chat renders every fold as plain `fold`: the lens classes are the wiki reader's only", () => {
+    // The chat sanitizer drops a class attribute holding any token it does not
+    // allow, so a lens class here would strip the fold's styling in chat.
+    for (const src of [
+      '<Fold title="Handoff — 08.10">\n\nx\n\n</Fold>',
+      '<Fold title="Log" for="dev">\n\nx\n\n</Fold>',
+      '<Fold title="Log" for="agent">\n\nx\n\n</Fold>',
+    ]) {
+      expect(formatWebHtml(src)).toContain('<details class="fold">');
+    }
   });
 
   test("any other `open` value leaves the fold closed", () => {

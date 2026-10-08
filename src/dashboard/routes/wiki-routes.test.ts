@@ -358,7 +358,7 @@ describe("GET /api/wiki/html", () => {
     expect(html).toContain('<li class="dl-item" id="o3" data-q-state="decided">');
   });
 
-  // The lens switch's page inputs (reader lenses PR 1): the language, the id
+  // The lens switch's page inputs: the language, the id
   // nouns (also on the chips), the file's defaultLens, and no Agent lens.
   test("/api/wiki/page carries the reader payload and renders the id nouns", async () => {
     await Bun.write(
@@ -378,7 +378,7 @@ describe("GET /api/wiki/html", () => {
       defaultLens: "overview",
       agentLens: false,
     });
-    expect(body.html).toContain('data-q-state="open"><span class="id-noun">Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
+    expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
 
   // /api/wiki/atlas returns the projected payload (all seven keys) over the same

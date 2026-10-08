@@ -11,15 +11,22 @@
  * the server says so, and `?lens=agent` anywhere else is All.
  */
 
+import type { QuestionLanguage } from "./question-labels.ts";
+
 export const LENSES = ["overview", "all", "agent"] as const;
 export type Lens = (typeof LENSES)[number];
 /** A lens a viewer may store, and an instance or wiki may name as default. */
 export type StoredLens = Exclude<Lens, "agent">;
 
+/** The attribute on text the reader adds to a page (an id's noun, a fold's
+ *  size line): on screen, but not in the page's source, so a selection sent
+ *  to Explain or fact-check leaves it out. */
+export const READER_ONLY_ATTR = "data-reader-only";
+
 /** localStorage key for the viewer's choice (D1), beside «line refs». */
 export const LENS_KEY = "muninn.wiki.lens.v1";
 
-const LENS_ALIASES: Record<string, Lens> = {
+const LENS_ALIASES: Readonly<Record<string, Lens>> = {
   overview: "overview",
   oversikt: "overview",
   all: "all",
@@ -31,7 +38,10 @@ const LENS_ALIASES: Record<string, Lens> = {
  *  the Norwegian aliases, any case, trimmed. Null for anything else. */
 export function parseLens(raw: unknown): Lens | null {
   if (typeof raw !== "string") return null;
-  return LENS_ALIASES[raw.trim().toLowerCase()] ?? null;
+  const key = raw.trim().toLowerCase();
+  // Own keys only: `constructor` or `__proto__` from a URL, a store or a
+  // config must not resolve to an inherited member.
+  return Object.hasOwn(LENS_ALIASES, key) ? LENS_ALIASES[key]! : null;
 }
 
 /** A lens that may be stored or be a default: Overview or All. */
@@ -43,6 +53,10 @@ export function parseStoredLens(raw: unknown): StoredLens | null {
 export interface LensInputs {
   /** `?lens=` from the URL, raw; consumed once by the caller. */
   url?: string | null;
+  /** The lens of the view an in-place reload replaces (the same page after a
+   *  fact-check append or an integrate apply): it beats the stored choice and
+   *  the default, and is not stored. */
+  inPlace?: Lens | null;
   /** The viewer's stored choice, raw. */
   stored?: string | null;
   /** The page payload's default: `WIKI_DEFAULT_LENS` for this wiki, else the
@@ -52,12 +66,14 @@ export interface LensInputs {
   agentAvailable: boolean;
 }
 
-/** D2's precedence. A URL `agent` where the Agent lens is unavailable is All,
- *  not the next rung: the link asked for everything, and All is everything a
- *  reader can see here. */
+/** D2's precedence, with an in-place reload's own lens after the URL. A URL
+ *  `agent` where the Agent lens is unavailable is All, not the next rung: the
+ *  link asked for everything, and All is everything a reader can see here. */
 export function resolveLens(i: LensInputs): Lens {
   const url = parseLens(i.url);
   if (url) return url === "agent" && !i.agentAvailable ? "all" : url;
+  const kept = parseLens(i.inPlace);
+  if (kept && (kept !== "agent" || i.agentAvailable)) return kept;
   return parseStoredLens(i.stored) ?? parseStoredLens(i.pageDefault) ?? "all";
 }
 
@@ -84,12 +100,23 @@ export function writeStoredLens(storage: Pick<Storage, "setItem"> | undefined, l
 }
 
 /** The switch's labels, in the wiki's `language`. */
-export const LENS_LABELS: Record<"en" | "no", Record<Lens, string>> = {
+export const LENS_LABELS: Record<QuestionLanguage, Record<Lens, string>> = {
   en: { overview: "Overview", all: "All", agent: "Agent" },
   no: { overview: "Oversikt", all: "Alt", agent: "Agent" },
 };
 
 // ── WIKI_DEFAULT_LENS (D24) ──────────────────────────────────────────────────
+
+/** A default lens as `WIKI_DEFAULT_LENS` or `.wiki-reader.json` `defaultLens`
+ *  spells it: Overview or All. Anything else is null with the one warning
+ *  text both sources log. */
+export function parseDefaultLens(raw: unknown): { lens: StoredLens | null; warning?: string } {
+  const lens = parseLens(raw);
+  if (lens === "agent") return { lens: null, warning: "agent cannot be a default lens" };
+  if (lens) return { lens };
+  const shown = typeof raw === "string" ? `"${raw.trim()}"` : JSON.stringify(raw);
+  return { lens: null, warning: `${shown} is not overview, all, oversikt or alt` };
+}
 
 export interface WikiDefaultLens {
   /** Wiki name, lower-cased → its default. */
@@ -111,10 +138,9 @@ export function parseWikiDefaultLens(raw: string | undefined): WikiDefaultLens {
     const eq = entry.indexOf("=");
     const name = eq === -1 ? "" : entry.slice(0, eq).trim().toLowerCase();
     if (!name) return void warnings.push(`${at} dropped: expected wiki=lens`);
-    const value = entry.slice(eq + 1).trim();
-    const lens = parseLens(value);
-    if (lens === "agent") return void warnings.push(`${at} dropped: agent cannot be a default lens`);
-    if (!lens) return void warnings.push(`${at} dropped: "${value}" is not overview, all, oversikt or alt`);
+    const { lens, warning } = parseDefaultLens(entry.slice(eq + 1));
+    if (!lens) return void warnings.push(`${at} dropped: ${warning}`);
+    if (byWiki.has(name)) warnings.push(`${at}: "${name}" is named again — this entry wins`);
     byWiki.set(name, lens);
   });
   return { byWiki, warnings };
@@ -172,6 +198,9 @@ export function parseIdLabels(raw: unknown): { labels: IdLabels; warnings: strin
     if (!LABEL_KEY_RE.test(key)) {
       warnings.push(`key "${key}" is not one to four letters — dropped`);
       continue;
+    }
+    if (key !== key.toUpperCase()) {
+      warnings.push(`key "${key}" has a lower-case letter: id prefixes match by case, so it labels only ids spelled "${key}1"`);
     }
     const v = value as Record<string, unknown> | null;
     const ok = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0 && s.trim().length <= LABEL_MAX;

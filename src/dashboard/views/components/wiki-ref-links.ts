@@ -27,7 +27,7 @@
  */
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
-import { idPrefix, type IdLabels } from "../../../format/reader-lens.ts";
+import { idPrefix, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
 
 /** The noun before an id (D12): the server puts it before a DecisionLog or
  *  Query chip, the ref links before an id run in prose. */
@@ -156,16 +156,30 @@ const SKIP =
   "a, code, pre, summary, h1, h2, h3, h4, h5, h6, button, textarea, input, select, svg, script, style, .mermaid, .query-result";
 
 /** What may stand between two ids of one run: a list or range separator. */
-const RUN_GAP_RE = /^\s*(?:[,/&–—-]|og|and|eller|or)?\s*$/u;
+const RUN_GAP_RE = /^\s*(?:[,/&–—-]|og|and|eller|or|til|to)?\s*$/u;
+
+/** Whether the text before an id ends with a word that starts with one of the
+ *  noun's forms: «beslutningen D7», «Beslutning D7», «beslutningene D1–D3». */
+function ledByNoun(before: string, forms: readonly string[]): boolean {
+  const tail = before.trimEnd().toLocaleLowerCase();
+  return forms.some((f) => {
+    const form = f.toLocaleLowerCase();
+    // The form, at a word start, then the rest of that word and nothing else.
+    const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRe(form)}[\\p{L}\\p{N}]*$`, "u");
+    return re.test(tail);
+  });
+}
 
 /**
  * Where the id nouns go in one text node's matches (D12): a run of ids with
- * one prefix, joined by a list or range separator (`D1–D11`, `S1, S2 og S6`),
- * gets the noun once, before its first id, plural when the run holds more than
- * one. A run already led by its noun (`Beslutning D7`) gets none. Returns the
- * noun per match index that starts a run.
+ * one prefix, joined by a list or range separator (`D1–D11`, `D1 til D11`,
+ * `S1, S2 og S6`), gets the noun once, before its first id, plural when the
+ * run holds more than one. A run whose preceding word starts with the noun
+ * (`Beslutning D7`, `beslutningen D7`) gets none. `preceding` is the text of
+ * the same block before this node (`**Beslutning** D7`). Returns the noun per
+ * match index that starts a run.
  */
-export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | undefined): Map<number, string> {
+export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | undefined, preceding = ""): Map<number, string> {
   const out = new Map<number, string>();
   if (!labels || Object.keys(labels).length === 0) return out;
   let k = 0;
@@ -173,7 +187,7 @@ export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | u
     const m = matches[k]!;
     const prefix = m.kind === "id" ? idPrefix(m.key) : null;
     let end = k;
-    if (prefix && labels[prefix]) {
+    if (prefix && Object.hasOwn(labels, prefix)) {
       while (end + 1 < matches.length) {
         const next = matches[end + 1]!;
         if (next.kind !== "id" || idPrefix(next.key) !== prefix) break;
@@ -181,16 +195,27 @@ export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | u
         end++;
       }
       const label = labels[prefix]!;
-      const before = text.slice(0, m.start).trimEnd().toLocaleLowerCase();
-      const led = [label.one, label.other].some((w) => {
-        const lw = w.toLocaleLowerCase();
-        return before.endsWith(lw) && !/[\p{L}\p{N}]/u.test(before.slice(-lw.length - 1, -lw.length));
-      });
-      if (!led) out.set(k, end > k ? label.other : label.one);
+      if (!ledByNoun(preceding + text.slice(0, m.start), [label.one, label.other])) {
+        out.set(k, end > k ? label.other : label.one);
+      }
     }
     k = end + 1;
   }
   return out;
+}
+
+/** Block elements: the text before an id is read back to the nearest one. */
+const BLOCK = "p, li, td, th, dt, dd, blockquote, h1, h2, h3, h4, h5, h6, figcaption, summary, div, section";
+const PRECEDING_MAX = 80;
+
+/** The text before `node` inside its block, its last {@link PRECEDING_MAX} chars. */
+function precedingText(node: Text): string {
+  const block = node.parentElement?.closest(BLOCK);
+  if (!block) return "";
+  const r = document.createRange();
+  r.setStart(block, 0);
+  r.setEnd(node, 0);
+  return r.toString().slice(-PRECEDING_MAX);
 }
 
 /** Wrap every reference under `root` in an `a.wiki-ref`, with the wiki's id
@@ -222,7 +247,7 @@ export function linkRefs(root: Element, idLabels?: IdLabels): number {
     const matches = findRefs(text, idKeys, titleKeys).filter(
       (m) => !(m.kind === "id" ? ids : titles).get(m.key)!.contains(node),
     );
-    const nouns = nounRuns(text, matches, idLabels);
+    const nouns = matches.length && idLabels ? nounRuns(text, matches, idLabels, precedingText(node)) : new Map<number, string>();
     for (const [k, m] of matches.entries()) {
       const target = (m.kind === "id" ? ids : titles).get(m.key)!;
       frag ??= document.createDocumentFragment();
@@ -231,6 +256,7 @@ export function linkRefs(root: Element, idLabels?: IdLabels): number {
       if (noun) {
         const span = document.createElement("span");
         span.className = ID_NOUN_CLASS;
+        span.setAttribute(READER_ONLY_ATTR, "");
         span.textContent = noun;
         frag.append(span, " ");
       }

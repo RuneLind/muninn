@@ -336,10 +336,10 @@ describe("web: DecisionLog", () => {
 
   test("each item with an id gets an anchor and a chip; an item without one is plain", () => {
     const html = formatWebHtml(md);
-    expect(html).toContain('<li class="dl-item" id="d1" data-q-state="open"><a class="dl-id" href="#d1">D1</a><span class="dl-text">Ikke-yrkesaktive betaler ikke.</span></li>');
-    expect(html).toContain('<li class="dl-item dl-dim" id="d2" data-q-state="closed"><a class="dl-id" href="#d2">D2</a><span class="dl-text"><s>gammel</s></span></li>');
+    expect(html).toContain('<li class="dl-item" id="d1"><a class="dl-id" href="#d1">D1</a><span class="dl-text">Ikke-yrkesaktive betaler ikke.</span></li>');
+    expect(html).toContain('<li class="dl-item dl-dim" id="d2"><a class="dl-id" href="#d2">D2</a><span class="dl-text"><s>gammel</s></span></li>');
     expect(html).toContain('<li class="dl-item dl-noid">Uten id</li>');
-    expect(html).toContain('<li class="dl-item" id="s1" data-q-state="open"><a class="dl-id" href="#s1">S1</a>');
+    expect(html).toContain('<li class="dl-item" id="s1"><a class="dl-id" href="#s1">S1</a>');
   });
 
   test("labels between the lists render in place, in order", () => {
@@ -361,12 +361,12 @@ describe("web: DecisionLog", () => {
     );
     const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
     expect(ids).toEqual(["d1", "d1-2", "d1-3", "s1", "s1-2"]);
-    expect(html).toContain('id="d1-2" data-q-state="open"><a class="dl-id" href="#d1-2">D1</a>');
-    expect(html).toContain('id="s1-2" data-q-state="open"><a class="dl-id" href="#s1-2">S1</a>');
+    expect(html).toContain('id="d1-2"><a class="dl-id" href="#d1-2">D1</a>');
+    expect(html).toContain('id="s1-2"><a class="dl-id" href="#s1-2">S1</a>');
   });
 
   test("an ordered log keeps its item numbers", () => {
-    expect(formatWebHtml("<DecisionLog>\n\n1. **D1** a\n\n3. **D2** b\n\n</DecisionLog>")).toContain('<li class="dl-item" value="3" id="d2" data-q-state="open">');
+    expect(formatWebHtml("<DecisionLog>\n\n1. **D1** a\n\n3. **D2** b\n\n</DecisionLog>")).toContain('<li class="dl-item" value="3" id="d2">');
   });
 });
 

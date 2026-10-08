@@ -1634,12 +1634,8 @@ export function registerWikiReadRoutes(
         question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, answerCfg.owner),
         idLabels: index.readerConfig?.idLabels,
       }),
-      // The reader lenses' page-level inputs: the switch's language, the ids'
-      // nouns for the ref links and pills, the default for a viewer with no
-      // stored choice (`WIKI_DEFAULT_LENS` for this wiki, else the file's
-      // `defaultLens`; D2, D24), and whether the Agent lens is offered. The
-      // Agent lens needs `PLAN_CARD_BIN` and its route (a later PR), so the
-      // flag is false on every instance today.
+      // The lens switch's inputs: language, id nouns, the page's default lens
+      // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
       reader: readerPayload(entry?.name, index.readerConfig, config.wikiDefaultLens ?? resolveWikiDefaultLens()),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):

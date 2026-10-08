@@ -27,7 +27,7 @@ import {
 } from "../dashboard/views/components/wiki-activity-rank.ts";
 import { parseCullLabels, type CullLabels } from "../dashboard/views/components/wiki-cull-view.ts";
 import { parseQuestionLanguage, type QuestionLanguage } from "../format/question-labels.ts";
-import { parseIdLabels, parseStoredLens, type IdLabels, type StoredLens } from "../format/reader-lens.ts";
+import { parseDefaultLens, parseIdLabels, type IdLabels, type StoredLens } from "../format/reader-lens.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -2017,13 +2017,13 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
   for (const reason of idLabels.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "idLabels", reason });
   }
-  const defaultLens = parseStoredLens(obj.defaultLens);
-  if (obj.defaultLens !== undefined && !defaultLens) {
+  const defaultLens: ReturnType<typeof parseDefaultLens> = obj.defaultLens === undefined ? { lens: null } : parseDefaultLens(obj.defaultLens);
+  if (defaultLens.warning) {
     log.warn("{file} at {root}: {key} {reason}", {
       file: WIKI_READER_CONFIG_FILE,
       root,
       key: "defaultLens",
-      reason: "is not overview, all, oversikt or alt — ignoring it",
+      reason: `${defaultLens.warning} — ignoring it`,
     });
   }
   for (const { key, reason } of cull.warnings) {
@@ -2052,7 +2052,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     cullLabels: cull.labels,
     language: language.language,
     idLabels: idLabels.labels,
-    defaultLens,
+    defaultLens: defaultLens.lens,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

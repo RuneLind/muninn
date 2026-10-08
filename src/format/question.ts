@@ -22,7 +22,7 @@
  * no canonical phrase, an item `parseLogItem` dims (struck id, struck
  * remainder, superseded) is `closed`; everything else is `open`.
  */
-import type { Block, ListBlock, ListChild } from "./markdown-ast.ts";
+import { stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { maskLineCodeSpans } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
@@ -410,7 +410,10 @@ const CLOSE_RE = new RegExp(`${WORD_START}(Closed|Lukket)${WS}${DATE}${WS}\\((D\
 const REOPEN_RE = new RegExp(`${WORD_START}(Reopened|Gjenåpnet)${WS}${DATE}(?=[.\\s]|$)`, "gu");
 const KEYWORD_RE = new RegExp(`${WORD_START}(Closed|Lukket|Reopened|Gjenåpnet)(?![\\p{L}\\p{N}_])`, "gu");
 const ANSWERED_RE = new RegExp(`${WORD_START}(Besvart|Answered)(?![\\p{L}\\p{N}_])`, "gu");
-const DECISION_ID_RE = /^D\d{1,4}$/;
+/** A decision id: `D` and one to four digits. */
+export const DECISION_ID_RE = /^D\d{1,4}$/;
+/** The id prefixes the wikis give a question: `S` (spørsmål) and `O` (open). */
+const QUESTION_ID_RE = /^[SO]\d{1,4}$/;
 
 /** A date the calendar has: `YYYY-MM-DD`, or `D.M[.YYYY]` checked against a
  *  leap year when it carries no year. */
@@ -427,6 +430,12 @@ function isCloseDate(d: string): boolean {
  *  line break. */
 export function maskCodeSpans(text: string): string {
   return text.normalize("NFC").split("\n").map(maskLineCodeSpans).join("\n");
+}
+
+/** The text the close rule reads: fact-check marks removed (a `<Fact>` around
+ *  `Lukket 07.10` is annotation, not part of the phrase), code spans masked. */
+function phraseText(text: string): string {
+  return maskCodeSpans(stripFactWrappers(text));
 }
 
 interface CanonicalPhrase {
@@ -449,7 +458,7 @@ function canonicalPhrases(masked: string): CanonicalPhrase[] {
 /** One DecisionLog item's state. `decisions` is the set of D ids the page's
  *  `<DecisionLog>` defines. */
 export function itemQuestionState(text: string, dim: boolean, decisions: ReadonlySet<string>): QuestionState {
-  const phrases = canonicalPhrases(maskCodeSpans(text));
+  const phrases = canonicalPhrases(phraseText(text));
   const last = phrases[phrases.length - 1];
   if (last) {
     if (last.kind === "reopen") return { kind: "open" };
@@ -461,7 +470,7 @@ export function itemQuestionState(text: string, dim: boolean, decisions: Readonl
 /** The last canonical phrase in the item reopens it: the item is open because
  *  it was reopened, not because it was never closed. */
 export function itemReopened(text: string): boolean {
-  const phrases = canonicalPhrases(maskCodeSpans(text));
+  const phrases = canonicalPhrases(phraseText(text));
   return phrases[phrases.length - 1]?.kind === "reopen";
 }
 
@@ -470,12 +479,22 @@ export function itemReopened(text: string): boolean {
  *  no canonical phrase, and every whole-word `Besvart`/`Answered` — outside
  *  code spans, in source order. The lint check's input (D6). */
 export function closeNearMisses(text: string): string[] {
-  const masked = maskCodeSpans(text);
+  const masked = phraseText(text);
   const starts = new Set(canonicalPhrases(masked).map((p) => p.at));
   const hits: { at: number; word: string }[] = [];
   for (const m of masked.matchAll(KEYWORD_RE)) if (!starts.has(m.index!)) hits.push({ at: m.index!, word: m[1]! });
   for (const m of masked.matchAll(ANSWERED_RE)) hits.push({ at: m.index!, word: m[1]! });
   return hits.sort((a, b) => a.at - b.at).map((h) => h.word);
+}
+
+/**
+ * Whether a DecisionLog item counts as an open question (the reader's «N open»
+ * pill): its state is open AND its id is a question's, by prefix (`S`, `O`) or
+ * because the page has a `<Question>` with that id. A log of findings (`R1`,
+ * `BM10`) is open by the close rule and asks nothing.
+ */
+export function isOpenQuestion(id: string, state: QuestionState | undefined, questionIds: ReadonlySet<string>): boolean {
+  return state?.kind === "open" && (QUESTION_ID_RE.test(id) || questionIds.has(id));
 }
 
 /** The D ids the page's `<DecisionLog>` blocks define. */

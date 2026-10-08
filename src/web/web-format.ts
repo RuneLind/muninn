@@ -44,6 +44,7 @@ import {
 } from "../format/query-block.ts";
 import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
 import {
+  isOpenQuestion,
   parseQuestionAttrs,
   parseQuestionPage,
   resolveQuestionTargets,
@@ -52,7 +53,7 @@ import {
 } from "../format/question.ts";
 import { questionLabels } from "../format/question-labels.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
-import { idNoun, type IdLabels } from "../format/reader-lens.ts";
+import { idNoun, READER_ONLY_ATTR, type IdLabels } from "../format/reader-lens.ts";
 import { caseBoardWarnings, caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
 import {
   betterLabelWarnings,
@@ -182,6 +183,10 @@ export function formatWebHtml(
     /** The wiki's `idLabels` (`.wiki-reader.json`): a DecisionLog or Query
      *  id chip gets its noun («Beslutning D7»). Absent ⇒ bare ids. */
     idLabels?: IdLabels;
+    /** The wiki reader's render (`renderWikiHtml`): folds get the lens
+     *  classes and DecisionLog items their state. Absent (chat) ⇒ neither,
+     *  since the chat sanitizer drops a class it does not allow. */
+    reader?: boolean;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -189,7 +194,9 @@ export function formatWebHtml(
   // this synchronous call. So does the `<Question>` pre-pass.
   const prev = currentPageFiles;
   const prevQuestion = currentQuestionPage;
+  const prevReader = currentReader;
   currentPageFiles = opts?.files;
+  currentReader = opts?.reader === true;
   try {
     const blocks = parseBlocks(text);
     // The DecisionLog usually sits below the `<Question>`, and the renderer
@@ -203,14 +210,14 @@ export function formatWebHtml(
     const linked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
     // exactly: the item's state (D8) and the id's noun (D12). The parse is the
-    // one the answer cards use, run whenever the page has a DecisionLog.
-    const states = text.includes("<DecisionLog")
-      ? (currentQuestionPage?.states ?? parseQuestionPage(blocks).states)
-      : undefined;
-    return stampIdChips(linked, states, opts?.idLabels);
+    // one the answer cards use, run on the reader path when the page has a
+    // DecisionLog.
+    const page = currentReader && text.includes("<DecisionLog") ? (currentQuestionPage ?? questionPage(blocks, undefined)) : undefined;
+    return stampIdChips(linked, page, opts?.idLabels);
   } finally {
     currentPageFiles = prev;
     currentQuestionPage = prevQuestion;
+    currentReader = prevReader;
   }
 }
 
@@ -218,12 +225,17 @@ export function formatWebHtml(
  *  `CaseBoard` and `DeltaTable` blocks say their file is not loaded here. */
 let currentPageFiles: PageFiles | undefined;
 
+/** `opts.reader` for the call in progress. */
+let currentReader = false;
+
 /** What a `<Question>` card reads from the page around it, for the call in
  *  progress: the closed-ids pre-pass, the duplicate ids and the wiki's
  *  options. Absent ⇒ no `<Question>` on the page. */
 interface QuestionPage {
   states: Map<string, QuestionState>;
   duplicates: Set<string>;
+  /** The ids the page's `<Question>` blocks carry. */
+  questionIds: Set<string>;
   options?: QuestionRenderOptions;
 }
 let currentQuestionPage: QuestionPage | undefined;
@@ -231,8 +243,13 @@ let currentQuestionPage: QuestionPage | undefined;
 function questionPage(blocks: Block[], options: QuestionRenderOptions | undefined): QuestionPage {
   const parsed = parseQuestionPage(blocks);
   const duplicates = new Set<string>();
-  for (const q of parsed.questions) if (q.duplicate && q.id !== null) duplicates.add(q.id);
-  return { states: parsed.states, duplicates, ...(options ? { options } : {}) };
+  const questionIds = new Set<string>();
+  for (const q of parsed.questions) {
+    if (q.id === null) continue;
+    questionIds.add(q.id);
+    if (q.duplicate) duplicates.add(q.id);
+  }
+  return { states: parsed.states, duplicates, questionIds, ...(options ? { options } : {}) };
 }
 
 const LOG_ANCHOR_RE = /<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)"><a class="dl-id" href="#\1">([^<]*)<\/a>/g;
@@ -323,26 +340,30 @@ function unescapeHtml(s: string): string {
 }
 
 /**
- * The final pass over the finished HTML. Each id-led DecisionLog item gets
- * `data-q-state` (`open`, `closed` or `decided`) from the page parse (D8), the
- * reader's header pills count from it; with `idLabels`, a DecisionLog chip and
- * a Query card's chip get a `<span class="id-noun">` BEFORE them (D12). The
- * chip's own text and its `href` stay the bare id: the ref links and the
+ * The final pass over the finished HTML. On the reader path each id-led
+ * DecisionLog item gets `data-q-state` (`open`, `closed` or `decided`) from the
+ * page parse (D8), plus `data-q-open` when it counts as an open question
+ * (`isOpenQuestion`), which the reader's «N open» pill counts. With `idLabels`,
+ * a DecisionLog chip and a Query card's chip get a `<span class="id-noun">`
+ * BEFORE them (D12), marked `data-reader-only` so a selection leaves it out.
+ * The chip's own text and its `href` stay the bare id: the ref links and the
  * question-card links key on them. Runs after `uniqueLogAnchors` and
  * `retargetQuestionLinks`, which read the `<li>` and its chip as adjacent.
  */
-function stampIdChips(html: string, states: Map<string, QuestionState> | undefined, labels: IdLabels | undefined): string {
+function stampIdChips(html: string, page: QuestionPage | undefined, labels: IdLabels | undefined): string {
   const noun = (idText: string) => {
     const n = idNoun(labels, unescapeHtml(idText));
     // A space after the noun, so the text reads «Beslutning D7» when copied.
-    return n ? `<span class="id-noun">${escapeHtml(n)}</span> ` : "";
+    return n ? `<span class="id-noun" ${READER_ONLY_ATTR}>${escapeHtml(n)}</span> ` : "";
   };
   let out = html;
-  if ((states || labels) && out.includes('<a class="dl-id" href="#')) {
+  if ((page || labels) && out.includes('<a class="dl-id" href="#')) {
     out = out.replace(STAMP_LOG_RE, (_m, cls: string, value: string, anchor: string, chip: string, idText: string) => {
-      const state = states?.get(unescapeHtml(idText));
+      const id = unescapeHtml(idText);
+      const state = page?.states.get(id);
       const stamp = state ? ` data-q-state="${state.kind}"` : "";
-      return `<li class="${cls}"${value} id="${anchor}"${stamp}>${noun(idText)}${chip}`;
+      const open = page && isOpenQuestion(id, state, page.questionIds) ? " data-q-open" : "";
+      return `<li class="${cls}"${value} id="${anchor}"${stamp}${open}>${noun(idText)}${chip}`;
     });
   }
   if (labels && out.includes('class="query-id"')) {
@@ -660,15 +681,19 @@ function codeFenceHtml(lang: string, code: string): string {
   return `<pre><code${langClass}>${highlightCode(code, lang)}</code></pre>`;
 }
 
-/** A `<Fold>`'s classes: `fold-for-<who>` for a `for=` of letters, and
- *  `fold-agent-context` for a title the agent-context list names (D22). The
- *  reader's Overview lens hides `fold-for-dev`, `fold-for-agent` and
- *  `fold-agent-context`; nothing else reads them. */
+/** The `for=` values a fold class is made for: the ones the Overview lens hides. */
+const FOLD_FOR_CLASSES: ReadonlySet<string> = new Set(["dev", "agent"]);
+
+/** A `<Fold>`'s classes. On the reader path only: `fold-for-dev` and
+ *  `fold-for-agent` for those `for=` values, and `fold-agent-context` for a
+ *  title the agent-context list names (D22). The reader's Overview lens hides
+ *  all three; chat gets plain `fold`, the one class its sanitizer allows. */
 function foldClass(title: string, forAttr: string | undefined): string {
+  if (!currentReader) return "fold";
   const who = (forAttr ?? "").trim().toLowerCase();
   return (
     "fold" +
-    (/^[a-z]{1,20}$/.test(who) ? ` fold-for-${who}` : "") +
+    (FOLD_FOR_CLASSES.has(who) ? ` fold-for-${who}` : "") +
     (title && isAgentContextTitle(title) ? " fold-agent-context" : "")
   );
 }

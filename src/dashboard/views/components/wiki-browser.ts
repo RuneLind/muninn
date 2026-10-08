@@ -188,15 +188,14 @@ import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
 import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
 import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find-palette.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
-import { enhanceLens, storedLens } from "./wiki-lens.ts";
-import { resolveLens } from "../../../format/reader-lens.ts";
+import { enhanceLens, lensOf, readerSelectionText, storedLens } from "./wiki-lens.ts";
+import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
 import type { ReaderPayload } from "../../../wiki/render.ts";
-
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { enhanceAnswerCards, type PageAnswersInfo } from "./wiki-answer-cards.ts";
 import { mountAnswerExport, unmountAnswerExport } from "./wiki-answer-export.ts";
-import { parseQuestionLanguage } from "../../../format/question-labels.ts";
+import { DEFAULT_QUESTION_LANGUAGE, parseQuestionLanguage } from "../../../format/question-labels.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
   askDeclineReason,
@@ -410,6 +409,13 @@ const LENS_PARAM = "lens";
  *  with `replaceState`, so a reload shows the stored choice. It never changes
  *  the stored choice. */
 let pendingUrlLens: string | null = new URLSearchParams(location.search).get(LENS_PARAM);
+/** The lens of the view an in-place reload replaces ({@link reloadCheckedPage}),
+ *  keyed by the page's relPath: the reloaded page keeps it, unstored. */
+let inPlaceLens: { relPath: string; lens: Lens } | null = null;
+/** The article this view last rendered, and its page. An Ask or fact-check
+ *  answer replaces it on screen, so an in-place reload reads the lens off this
+ *  element rather than off `#articleWrap`. */
+let renderedArticle: { relPath: string; el: Element } | null = null;
 
 // The wiki's merged type list (built-in defaults + `.wiki-reader.json` customs),
 // stored at boot from the /api/wiki/pages response and used by every type-keyed
@@ -4186,7 +4192,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // queries, cases) and the `line refs` toggle, all counted off the
       // rendered article. No-op on a page with none of them.
       const reader = data.reader;
-      const readerLang = reader?.language === "no" ? "no" : "en";
+      const readerLang = reader?.language ?? DEFAULT_QUESTION_LANGUAGE;
       enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels });
       // `<Query>` result tables: header-click sorting. No-op without one.
       enhanceQueryTables(articleRoot);
@@ -4207,12 +4213,16 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
         agentAvailable: reader?.agentLens === true,
         initial: resolveLens({
           url: pendingUrlLens,
+          inPlace: inPlaceLens && inPlaceLens.relPath === data.meta.relPath ? inPlaceLens.lens : null,
           stored: storedLens(),
           pageDefault: reader?.defaultLens ?? null,
           agentAvailable: reader?.agentLens === true,
         }),
       });
       consumeUrlLens();
+      inPlaceLens = null;
+      const renderedEl = articleRoot.querySelector(".wiki-article");
+      renderedArticle = currentRelPath && renderedEl ? { relPath: currentRelPath, el: renderedEl } : null;
       // `<Question>` cards: answers, composer and edit, on a wiki that takes
       // answers only. After the ref links, so an answer's text is never linked.
       // The registry name, not `WIKI`: under the `WIKI_DIR` override `WIKI` is
@@ -6942,6 +6952,9 @@ function openArticleShare(): void {
  * must not add a history entry.
  */
 function reloadCheckedPage(turn: AskTurn): void {
+  // The same page, reloaded in place: it keeps the lens its view showed.
+  const lens = renderedArticle && renderedArticle.relPath === turn.pageRelPath ? lensOf(renderedArticle.el) : null;
+  inPlaceLens = lens ? { relPath: renderedArticle!.relPath, lens } : null;
   if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false, false);
   else if (turn.page) loadPage(turn.page, false, false);
 }
@@ -7654,7 +7667,9 @@ function maybeShowExplainPill(): void {
   if (meta && meta.type === "explainer") return hideExplainPill();
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideExplainPill();
-  const text = sel.toString().trim();
+  // Without the reader's own text (id nouns, fold sizes): the server locates
+  // this in the page source, which has none of it.
+  const text = readerSelectionText(sel).trim();
   if (text.length < EXPLAIN_MIN_CHARS || text.length > EXPLAIN_MAX_CHARS) return hideExplainPill();
   const wrap = document.getElementById("articleWrap");
   const anchor = sel.anchorNode;

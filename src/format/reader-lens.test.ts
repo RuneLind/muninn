@@ -4,6 +4,7 @@ import {
   idNoun,
   idPrefix,
   pageDefaultLens,
+  parseDefaultLens,
   parseIdLabels,
   parseLens,
   parseWikiDefaultLens,
@@ -142,5 +143,42 @@ describe("id labels (D12)", () => {
     expect(r.warnings).toHaveLength(3);
     expect(parseIdLabels(["D"]).labels).toEqual({});
     expect(parseIdLabels(undefined)).toEqual({ labels: {}, warnings: [] });
+  });
+});
+
+describe("fix round 1", () => {
+  test("D-8: a prototype key is no lens, from any source", () => {
+    for (const raw of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      expect(parseLens(raw)).toBeNull();
+      expect(resolveLens({ url: raw, stored: raw, pageDefault: raw, agentAvailable: false })).toBe("all");
+      expect(parseWikiDefaultLens(`w=${raw}`).byWiki.size).toBe(0);
+    }
+  });
+
+  test("D-5: an in-place reload keeps the view's lens over the stored choice and the default", () => {
+    expect(resolveLens({ inPlace: "all", stored: "overview", pageDefault: "overview", agentAvailable: false })).toBe("all");
+    expect(resolveLens({ inPlace: "overview", stored: "all", agentAvailable: false })).toBe("overview");
+    // Agent survives a reload only where the server still offers it.
+    expect(resolveLens({ inPlace: "agent", stored: "overview", agentAvailable: false })).toBe("overview");
+  });
+});
+
+describe("fix round 1 cleanups: one default-lens parse, the config warnings", () => {
+  test("parseDefaultLens: one warning text for both sources", () => {
+    expect(parseDefaultLens("Oversikt")).toEqual({ lens: "overview" });
+    expect(parseDefaultLens("agent")).toEqual({ lens: null, warning: "agent cannot be a default lens" });
+    expect(parseDefaultLens(" nope ")).toEqual({ lens: null, warning: '"nope" is not overview, all, oversikt or alt' });
+    expect(parseWikiDefaultLens("w=nope").warnings).toEqual(['WIKI_DEFAULT_LENS entry 1 dropped: "nope" is not overview, all, oversikt or alt']);
+  });
+  test("a wiki named twice in WIKI_DEFAULT_LENS warns; the last entry wins", () => {
+    const r = parseWikiDefaultLens("w=overview, W=all");
+    expect(r.byWiki.get("w")).toBe("all");
+    expect(r.warnings).toEqual(['WIKI_DEFAULT_LENS entry 2: "w" is named again — this entry wins']);
+  });
+  test("a lower-case idLabels key warns and stays", () => {
+    const r = parseIdLabels({ d: { one: "Beslutning", other: "beslutninger" } });
+    expect(r.labels.d).toEqual({ one: "Beslutning", other: "beslutninger" });
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toContain('key "d" has a lower-case letter');
   });
 });

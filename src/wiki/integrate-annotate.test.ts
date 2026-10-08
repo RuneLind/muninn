@@ -659,3 +659,13 @@ test("a CRLF body gets CRLF-joined block wrappers, and strip → re-annotate is 
   });
   expect(applyEdits(body, again.edits, true).body).toBe(page.body);
 });
+
+// ── Fix round 1, D-2: a mark over a DecisionLog close phrase ────────────────
+
+test("a mark over a DecisionLog item's close phrase is not refused as changing the render", () => {
+  const body = ["<DecisionLog>", "", "- **D10** — Ja.", "- **S5** Skal vi? Lukket 07.10 (D10)", "", "</DecisionLog>", ""].join("\n");
+  const r = annotate({ body, claims: [anchor(1, "✅")], quotes: [{ index: 1, quote: "Lukket 07.10" }] });
+  expect(r.dropped.map((d) => d.reason)).toEqual([]);
+  expect(r.edits).toHaveLength(1);
+  expect(r.edits[0]!.new).toBe('<Fact n="1" v="ok">Lukket 07.10</Fact>');
+});

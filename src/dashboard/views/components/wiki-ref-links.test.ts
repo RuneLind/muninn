@@ -128,6 +128,32 @@ describe("fold size and reading time", () => {
     expect(readingMinutes(500)).toBe("<1");
     expect(readingMinutes(5_900)).toBe("5");
     expect(foldSizeLabel(5_900, "en")).toBe("5.9k chars · 5 min");
-    expect(foldSizeLabel(21_000, "no")).toBe("21.0k tegn · 18 min");
+    expect(foldSizeLabel(21_000, "no")).toBe("21,0k tegn · 18 min");
+    expect(formatChars(12_345, "no")).toBe("12,3k");
+  });
+});
+
+describe("fix round 1, D-4: a noun the author already wrote", () => {
+  const LABELS = { D: { one: "Beslutning", other: "beslutninger" } };
+  const ids = ["D1", "D3", "D7", "D11"];
+  const nouns = (text: string, preceding = "") => {
+    const ms = findRefs(text, new Set(ids), new Set());
+    const runs = nounRuns(text, ms, LABELS, preceding);
+    return ms.map((m, k) => `${runs.get(k) ?? "-"}:${m.key}`);
+  };
+  test("an inflected form of the noun leads the run", () => {
+    expect(nouns("Se beslutningen D7")).toEqual(["-:D7"]);
+    expect(nouns("beslutningene D1–D3 står")).toEqual(["-:D1", "-:D3"]);
+  });
+  test("the noun at the end of the text before this node leads the run", () => {
+    expect(nouns(" D7 står", "Se **Beslutning")).toEqual(["-:D7"]);
+    expect(nouns(" D7 står", "Se noe annet")).toEqual(["Beslutning:D7"]);
+  });
+  test("a word that only ends with the noun does not lead", () => {
+    expect(nouns("Forbeslutning D7")).toEqual(["Beslutning:D7"]);
+  });
+  test("«til» and «to» join a range", () => {
+    expect(nouns("D1 til D11")).toEqual(["beslutninger:D1", "-:D11"]);
+    expect(nouns("D1 to D11")).toEqual(["beslutninger:D1", "-:D11"]);
   });
 });

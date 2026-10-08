@@ -129,7 +129,7 @@ export function renderWikiHtml(
   });
 
   const renderedHtml = restoreSentinelsInAttributes(
-    formatWebHtml(withTokens, { files: opts?.files, question: opts?.question, idLabels: opts?.idLabels }),
+    formatWebHtml(withTokens, { files: opts?.files, question: opts?.question, idLabels: opts?.idLabels, reader: true }),
     literal,
   );
   const codeRegions = renderedCodeRegions(renderedHtml);
@@ -194,8 +194,7 @@ export interface ReaderPayload {
   idLabels: IdLabels;
   /** `WIKI_DEFAULT_LENS` for this wiki, else the file's `defaultLens`; null ⇒ All. */
   defaultLens: StoredLens | null;
-  /** The Agent lens is offered on this page for this viewer (D7). Always
-   *  false until the Agent route exists. */
+  /** The Agent lens is offered on this page for this viewer (D7). */
   agentLens: boolean;
 }
 

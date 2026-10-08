@@ -17,6 +17,8 @@ const LABELS = {
   Q: { one: "Query", other: "queries" },
 };
 const opts: QuestionRenderOptions = { questionsTo: [], language: "no", answerable: false };
+/** The reader path (`renderWikiHtml`): the stamps and the fold classes. */
+const R = { reader: true } as const;
 
 /** 11 D items (D1 repeated in a second log), S1 S2 S6 S7 S8 open, S5 closed
  *  with the canonical phrase, S3 struck, S4 with a non-canonical close. */
@@ -42,13 +44,13 @@ const ACCEPTANCE_4 = [
 ].join("\n");
 
 const items = (html: string) =>
-  [...html.matchAll(/<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)" data-q-state="(\w+)">(?:<span class="id-noun">[^<]*<\/span> )?<a class="dl-id" href="#\1">([^<]*)<\/a>/g)].map(
+  [...html.matchAll(/<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)" data-q-state="(\w+)"(?: data-q-open)?>(?:<span class="id-noun" data-reader-only>[^<]*<\/span> )?<a class="dl-id" href="#\1">([^<]*)<\/a>/g)].map(
     (m) => ({ anchor: m[1]!, state: m[2]!, id: m[3]! }),
   );
 
 describe("data-q-state (D8)", () => {
   test("acceptance 4: 11 unique decisions, 5 open, anchors unique", () => {
-    const html = formatWebHtml(ACCEPTANCE_4);
+    const html = formatWebHtml(ACCEPTANCE_4, R);
     const all = items(html);
     expect(all).toHaveLength(19);
     // Every id-led item is stamped.
@@ -65,13 +67,14 @@ describe("data-q-state (D8)", () => {
   });
 
   test("a non-canonical close stays open (plan review: S5's «Lukket 07.10: nei i prinsipp (D10)»)", () => {
-    const html = formatWebHtml("<DecisionLog>\n\n- **D10** — Nei.\n- **S5** — Lukket 07.10: nei i prinsipp (D10).\n\n</DecisionLog>");
+    const html = formatWebHtml("<DecisionLog>\n\n- **D10** — Nei.\n- **S5** — Lukket 07.10: nei i prinsipp (D10).\n\n</DecisionLog>", R);
     expect(items(html).find((i) => i.id === "S5")!.state).toBe("open");
   });
 
-  test("a page with no DecisionLog is untouched; chat stamps too", () => {
-    expect(formatWebHtml("Text with D1 in it.")).not.toContain("data-q-state");
-    expect(formatWebHtml("<DecisionLog>\n\n- **D1** — x\n\n</DecisionLog>")).toContain('id="d1" data-q-state="open">');
+  test("a page with no DecisionLog is untouched; chat does not stamp", () => {
+    expect(formatWebHtml("Text with D1 in it.", R)).not.toContain("data-q-state");
+    expect(formatWebHtml("<DecisionLog>\n\n- **D1** — x\n\n</DecisionLog>", R)).toContain('id="d1" data-q-state="open">');
+    expect(formatWebHtml("<DecisionLog>\n\n- **D1** — x\n\n</DecisionLog>")).not.toContain("data-q-state");
   });
 });
 
@@ -103,7 +106,7 @@ describe("the anchor passes on a stamped page", () => {
 
   test("uniqueLogAnchors still renames, retargetQuestionLinks still follows, with and without labels", () => {
     for (const idLabels of [undefined, LABELS]) {
-      const html = formatWebHtml(md, { question: opts, idLabels });
+      const html = formatWebHtml(md, { ...R, question: opts, idLabels });
       const all = items(html);
       expect(all.map((i) => i.anchor)).toEqual(["d7-2", "s1-2"]);
       expect(html).toContain('<a class="q-id" href="#s1-2">S1</a>');
@@ -113,9 +116,9 @@ describe("the anchor passes on a stamped page", () => {
   });
 
   test("the stamp and the nouns are the only difference the final pass makes", () => {
-    const bare = formatWebHtml(md, { question: opts });
-    const labelled = formatWebHtml(md, { question: opts, idLabels: LABELS });
-    expect(labelled.replace(/<span class="id-noun">[^<]*<\/span> /g, "")).toBe(bare);
+    const bare = formatWebHtml(md, { ...R, question: opts });
+    const labelled = formatWebHtml(md, { ...R, question: opts, idLabels: LABELS });
+    expect(labelled.replace(/<span class="id-noun" data-reader-only>[^<]*<\/span> /g, "")).toBe(bare);
   });
 });
 
@@ -123,12 +126,12 @@ describe("id nouns (D12)", () => {
   test("a DecisionLog chip and a Query chip get the noun before them; the chip keeps the bare id", () => {
     const html = formatWebHtml(
       '<Query id="Q-14" question="How many?" />\n\n<DecisionLog>\n\n- **S1** — Open?\n- **D2** — Yes.\n- **O9** — No label.\n\n</DecisionLog>',
-      { idLabels: LABELS },
+      { ...R, idLabels: LABELS },
     );
-    expect(html).toContain('<span class="id-noun">Query</span> <a class="query-id" href="#q-14">Q-14</a>');
-    expect(html).toContain('data-q-state="open"><span class="id-noun">Spørsmål</span> <a class="dl-id" href="#s1">S1</a>');
-    expect(html).toContain('<span class="id-noun">Beslutning</span> <a class="dl-id" href="#d2">D2</a>');
-    expect(html).toContain('data-q-state="open"><a class="dl-id" href="#o9">O9</a>');
+    expect(html).toContain('<span class="id-noun" data-reader-only>Query</span> <a class="query-id" href="#q-14">Q-14</a>');
+    expect(html).toContain('data-q-state="open" data-q-open><span class="id-noun" data-reader-only>Spørsmål</span> <a class="dl-id" href="#s1">S1</a>');
+    expect(html).toContain('<span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d2">D2</a>');
+    expect(html).toContain('data-q-state="open" data-q-open><a class="dl-id" href="#o9">O9</a>');
   });
 
   test("a question card's id chip gets no noun: the card's lead word already names it", () => {
@@ -141,21 +144,21 @@ describe("id nouns (D12)", () => {
 
   test("a page without a <Question> still renders byte-identically with or without the question option", () => {
     const md = "<DecisionLog>\n\n- **O3** — Closed 2026-10-08 (D99).\n\n</DecisionLog>\n\nText.";
-    const html = formatWebHtml(md);
+    const html = formatWebHtml(md, R);
     expect(html).toContain('data-q-state="closed"');
-    expect(formatWebHtml(md, { question: opts })).toBe(html);
+    expect(formatWebHtml(md, { ...R, question: opts })).toBe(html);
   });
 });
 
 describe("<Fold for=…> and the agent-context titles (D5, D22)", () => {
-  test("for= of letters becomes a class; anything else is dropped", () => {
-    expect(formatWebHtml('<Fold title="Samtalen" for="dev">\n\nx\n\n</Fold>')).toContain('<details class="fold fold-for-dev">');
-    expect(formatWebHtml('<Fold title="Log" for="Agent">\n\nx\n\n</Fold>')).toContain('<details class="fold fold-for-agent">');
-    expect(formatWebHtml('<Fold title="Log" for="x y">\n\nx\n\n</Fold>')).toContain('<details class="fold">');
+  test("on the reader path for=\"dev\" and for=\"agent\" become a class, any case; anything else is dropped", () => {
+    expect(formatWebHtml('<Fold title="Samtalen" for="dev">\n\nx\n\n</Fold>', R)).toContain('<details class="fold fold-for-dev">');
+    expect(formatWebHtml('<Fold title="Log" for="Agent">\n\nx\n\n</Fold>', R)).toContain('<details class="fold fold-for-agent">');
+    expect(formatWebHtml('<Fold title="Log" for="x y">\n\nx\n\n</Fold>', R)).toContain('<details class="fold">');
   });
   test("a fold titled with an agent-context name is marked", () => {
-    expect(formatWebHtml('<Fold title="Nåtilstand">\n\nx\n\n</Fold>')).toContain('<details class="fold fold-agent-context">');
-    expect(formatWebHtml('<Fold title="Spørringer">\n\nx\n\n</Fold>')).toContain('<details class="fold">');
+    expect(formatWebHtml('<Fold title="Nåtilstand">\n\nx\n\n</Fold>', R)).toContain('<details class="fold fold-agent-context">');
+    expect(formatWebHtml('<Fold title="Spørringer">\n\nx\n\n</Fold>', R)).toContain('<details class="fold">');
   });
   test("the text renderers print a for= fold in full, as any fold", () => {
     const md = '<Fold title="Samtalen" for="dev">\n\nThe whole log.\n\n</Fold>';
@@ -164,5 +167,52 @@ describe("<Fold for=…> and the agent-context titles (D5, D22)", () => {
       expect(out).toContain("The whole log.");
       expect(out).not.toContain("dev");
     }
+  });
+});
+
+describe("fix round 1", () => {
+  test("D-1: on the reader path only `for=\"dev\"` and `for=\"agent\"` become a class", () => {
+    expect(formatWebHtml('<Fold title="Log" for="dev">\n\nx\n\n</Fold>', R)).toContain('<details class="fold fold-for-dev">');
+    expect(formatWebHtml('<Fold title="Log" for="agent">\n\nx\n\n</Fold>', R)).toContain('<details class="fold fold-for-agent">');
+    expect(formatWebHtml('<Fold title="Log" for="ops">\n\nx\n\n</Fold>', R)).toContain('<details class="fold">');
+  });
+
+  test("D-1: chat stamps no state on a DecisionLog item", () => {
+    expect(formatWebHtml("<DecisionLog>\n\n- **S1** — x\n\n</DecisionLog>")).not.toContain("data-q-state");
+  });
+
+  test("D-2: a fact mark over the close phrase leaves the item's state alone", () => {
+    const plain = "<DecisionLog>\n\n- **D10** — Ja.\n- **S5** Skal vi? Lukket 07.10 (D10)\n\n</DecisionLog>";
+    const marked = plain.replace("Lukket 07.10", '<Fact n="9" v="ok">Lukket 07.10</Fact>');
+    const state = (html: string) => /id="s5" data-q-state="(\w+)"/.exec(html)?.[1];
+    expect(state(formatWebHtml(plain, R))).toBe("decided");
+    expect(state(formatWebHtml(marked, R))).toBe("decided");
+  });
+
+  test("D-7: an open item counts as an open question only with an S/O id or a <Question> of that id", () => {
+    const md = [
+      '<Question id="G1">',
+      "",
+      "Q?",
+      "",
+      "</Question>",
+      "",
+      "<DecisionLog>",
+      "",
+      "- **S1** — Open.",
+      "- **O2** — Open.",
+      "- **G1** — Open, asked by a card.",
+      "- **R1** — A finding.",
+      "- **BM10** — A benchmark row.",
+      "- **O3** — Lukket 07.10 (D1).",
+      "- **D1** — A decision.",
+      "",
+      "</DecisionLog>",
+    ].join("\n");
+    const html = formatWebHtml(md, { ...R, question: opts });
+    const open = [...html.matchAll(/<li class="dl-item[^"]*"[^>]*id="[^"]+"[^>]*data-q-open[^>]*>(?:<span[^>]*>[^<]*<\/span> )?<a class="dl-id" href="#[^"]+">([^<]*)<\/a>/g)].map(
+      (m) => m[1],
+    );
+    expect(open).toEqual(["S1", "O2", "G1"]);
   });
 });

@@ -26,7 +26,10 @@
 
 import { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS } from "../../../wiki/code-refs.ts";
 import type { IdLabels } from "../../../format/reader-lens.ts";
+import { DECISION_ID_RE } from "../../../format/question.ts";
+import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../../../format/question-labels.ts";
 import { revealElement } from "./wiki-hash-target.ts";
+import { localStore } from "./wiki-local-store.ts";
 
 export { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS };
 export const LINE_REFS_KEY = "muninn.wiki.lineRefs.v1";
@@ -53,14 +56,6 @@ export function writeLineRefsOn(storage: Pick<Storage, "setItem"> | undefined, o
     storage?.setItem(LINE_REFS_KEY, on ? "on" : "off");
   } catch {
     /* the toggle still works for this page view */
-  }
-}
-
-function localStore(): Storage | undefined {
-  try {
-    return window.localStorage;
-  } catch {
-    return undefined;
   }
 }
 
@@ -195,10 +190,7 @@ function decorateLaneAges(article: HTMLElement, now: Date): void {
 export const COUNT_PILL_CLASS = "wiki-count-pill";
 export type CountKind = "decisions" | "open" | "queries" | "cases";
 
-/** The same rule as `DECISION_ID_RE` in `src/format/question.ts`. */
-const DECISION_ID_RE = /^D\d{1,4}$/;
-
-const COUNT_WORDS: Record<"en" | "no", Record<CountKind, [string, string]>> = {
+const COUNT_WORDS: Record<QuestionLanguage, Record<CountKind, [string, string]>> = {
   en: { decisions: ["decision", "decisions"], open: ["open", "open"], queries: ["query", "queries"], cases: ["case", "cases"] },
   no: { decisions: ["beslutning", "beslutninger"], open: ["åpent", "åpne"], queries: ["spørring", "spørringer"], cases: ["sak", "saker"] },
 };
@@ -209,7 +201,7 @@ const COUNT_PREFIX: Partial<Record<CountKind, string>> = { decisions: "D", queri
 /** A counted pill's label: `11 decisions`, `5 åpne`, `17 queries`. With
  *  `idLabels` the decision and query nouns are the wiki's own, lower-cased
  *  (`11 beslutninger`). */
-export function countPillLabel(kind: CountKind, n: number, lang: "en" | "no", labels?: IdLabels): string {
+export function countPillLabel(kind: CountKind, n: number, lang: QuestionLanguage, labels?: IdLabels): string {
   const prefix = COUNT_PREFIX[kind];
   const own = prefix ? labels?.[prefix] : undefined;
   const word = own ? (n === 1 ? own.one : own.other).toLocaleLowerCase() : COUNT_WORDS[lang][kind][n === 1 ? 0 : 1];
@@ -230,10 +222,11 @@ interface CountTally {
 
 /**
  * The four counts, read off the rendered page: unique decision ids (an id
- * matching `D` and digits on a stamped DecisionLog item), unique open ids (any
- * other id whose `data-q-state` is `open`), Query cards (unique by id; a card
- * with none counts once) and the cases whose status is not `none` (unique by
- * id). Exported for the unit test.
+ * matching `D` and digits on a stamped DecisionLog item), unique open
+ * questions (an item the renderer marked `data-q-open`, by the one rule in
+ * `isOpenQuestion`), Query cards (unique by id; each card with none counts
+ * once) and the cases whose status is not `none` (unique by id). Exported for
+ * the unit test.
  */
 export function readCounts(article: ParentNode): Record<CountKind, CountTally> {
   const out: Record<CountKind, CountTally> = {
@@ -253,12 +246,15 @@ export function readCounts(article: ParentNode): Record<CountKind, CountTally> {
     const id = li.querySelector(":scope > .dl-id")?.textContent?.trim() ?? "";
     if (!id) return;
     if (DECISION_ID_RE.test(id)) add("decisions", id, li);
-    else if (li.dataset.qState === "open") add("open", id, li);
+    else if (li.hasAttribute("data-q-open")) add("open", id, li);
   });
-  let anon = 0;
   article.querySelectorAll<HTMLElement>("section.query").forEach((card) => {
     const id = card.querySelector(".query-id")?.textContent?.trim();
-    add("queries", id || `\u0000${anon++}`, card);
+    if (id) add("queries", id, card);
+    else {
+      out.queries.count++;
+      out.queries.first ??= card;
+    }
   });
   article.querySelectorAll<HTMLElement>(".cb-group:not([data-status=\"none\"]) .cb-row").forEach((row) => {
     const id = row.querySelector(".cb-id")?.textContent?.trim() ?? row.id;
@@ -269,7 +265,7 @@ export function readCounts(article: ParentNode): Record<CountKind, CountTally> {
 
 export interface ReportBlockOptions {
   /** The wiki's `language`, for the counted pills. */
-  language?: "en" | "no";
+  language?: QuestionLanguage;
   /** The wiki's `idLabels`, for the counted pills' nouns. */
   idLabels?: IdLabels;
 }
@@ -316,7 +312,7 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
   decorateLaneAges(article, now);
 
   const counts = readCounts(article);
-  const lang = opts.language ?? "en";
+  const lang = opts.language ?? DEFAULT_QUESTION_LANGUAGE;
   for (const kind of ["decisions", "open", "queries", "cases"] as const) {
     const c = counts[kind];
     if (c.count === 0 || !c.first) continue;
