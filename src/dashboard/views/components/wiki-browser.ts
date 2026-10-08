@@ -4124,6 +4124,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
   // The page being left stops boosting a find now: a load that fails (an error
   // payload or a rejected fetch) leaves `currentRelPath` on it.
   currentNear = null;
+  // Taken now, so a load that fails cannot leave it for the next one.
+  const inPlace = inPlaceLens;
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -4213,14 +4215,13 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
         agentAvailable: reader?.agentLens === true,
         initial: resolveLens({
           url: pendingUrlLens,
-          inPlace: inPlaceLens && inPlaceLens.relPath === data.meta.relPath ? inPlaceLens.lens : null,
+          inPlace: inPlace && inPlace.relPath === data.meta.relPath ? inPlace.lens : null,
           stored: storedLens(),
           pageDefault: reader?.defaultLens ?? null,
           agentAvailable: reader?.agentLens === true,
         }),
       });
       consumeUrlLens();
-      inPlaceLens = null;
       const renderedEl = articleRoot.querySelector(".wiki-article");
       renderedArticle = currentRelPath && renderedEl ? { relPath: currentRelPath, el: renderedEl } : null;
       // `<Question>` cards: answers, composer and edit, on a wiki that takes
@@ -6955,8 +6956,13 @@ function reloadCheckedPage(turn: AskTurn): void {
   // The same page, reloaded in place: it keeps the lens its view showed.
   const lens = renderedArticle && renderedArticle.relPath === turn.pageRelPath ? lensOf(renderedArticle.el) : null;
   inPlaceLens = lens ? { relPath: renderedArticle!.relPath, lens } : null;
-  if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false, false);
-  else if (turn.page) loadPage(turn.page, false, false);
+  try {
+    if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false, false);
+    else if (turn.page) loadPage(turn.page, false, false);
+  } finally {
+    // The load took its copy synchronously; no later load may read it.
+    inPlaceLens = null;
+  }
 }
 
 /** Persist the shown fact-check answer onto the page as a `> [!factcheck]` callout

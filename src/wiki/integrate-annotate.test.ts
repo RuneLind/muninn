@@ -660,9 +660,12 @@ test("a CRLF body gets CRLF-joined block wrappers, and strip → re-annotate is 
   expect(applyEdits(body, again.edits, true).body).toBe(page.body);
 });
 
-// ── Fix round 1, D-2: a mark over a DecisionLog close phrase ────────────────
+// ── Fix round 1, D-1: the state stamps are reader-only ──────────────────────
+// The refusal check compares the plain render, which carries no item state (D-1),
+// so this holds with or without the close rule's fact strip (D-2, pinned in
+// src/format/id-stamp.test.ts); it fails only when both go.
 
-test("a mark over a DecisionLog item's close phrase is not refused as changing the render", () => {
+test("a mark over a DecisionLog close phrase is not refused: the plain render carries no item state", () => {
   const body = ["<DecisionLog>", "", "- **D10** — Ja.", "- **S5** Skal vi? Lukket 07.10 (D10)", "", "</DecisionLog>", ""].join("\n");
   const r = annotate({ body, claims: [anchor(1, "✅")], quotes: [{ index: 1, quote: "Lukket 07.10" }] });
   expect(r.dropped.map((d) => d.reason)).toEqual([]);

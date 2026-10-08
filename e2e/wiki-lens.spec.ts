@@ -38,6 +38,7 @@ const WIKI_NONE = "e2e-lens-none";
 
 const REPORT_REL = "plans/report.mdx";
 const COUNTS_REL = "plans/counts.mdx";
+const NOUNS_REL = "plans/nouns.mdx";
 
 const fold = (title: string, body: string, attrs = "") => [`<Fold title="${title}"${attrs}>`, "", body, "", "</Fold>", ""].join("\n");
 
@@ -146,6 +147,41 @@ const COUNTS = [
   "",
 ].join("\n");
 
+/** Fix round 2, R1: a bare id after a heading, a list and a bold word that
+ *  ends the previous paragraph gets the noun; the noun the author wrote
+ *  before the id, in bold or before a bold id, is not doubled. */
+const NOUNS = [
+  "---",
+  "title: Nouns page",
+  "type: plan",
+  "---",
+  "",
+  "# Nouns page",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D7** — Sju.",
+  "",
+  "</DecisionLog>",
+  "",
+  "### Beslutninger",
+  "",
+  "D7 gjelder etter overskriften.",
+  "",
+  "- Et punkt om beslutning",
+  "",
+  "D7 gjelder etter lista.",
+  "",
+  "Noe om **beslutning**",
+  "",
+  "D7 gjelder etter fet skrift.",
+  "",
+  "**Beslutning** D7 gjelder fortsatt.",
+  "",
+  "Beslutning **D7** gjelder også.",
+  "",
+].join("\n");
+
 const CASES = [
   "- id: MEL-1",
   "  status: hold",
@@ -224,6 +260,7 @@ test.beforeAll(async () => {
   }
   await writeFile(path.join(main, REPORT_REL), REPORT, "utf8");
   await writeFile(path.join(main, COUNTS_REL), COUNTS, "utf8");
+  await writeFile(path.join(main, NOUNS_REL), NOUNS, "utf8");
   await writeFile(path.join(main, "plans", "data", "q1.csv"), "type,antall\nA,40\nB,2\n", "utf8");
   await writeFile(path.join(main, "plans", "data", "q1.sql"), "SELECT type, COUNT(*) FROM sak GROUP BY type;\n", "utf8");
   await writeFile(path.join(main, "plans", "data", "q2.csv"), "type\nA\nB\nC\n", "utf8");
@@ -599,5 +636,56 @@ test.describe("Wiki reader: lenses", () => {
     await expect.poll(() => lensOf(page)).toBe("all");
     expect(await stored(page)).toBe("overview");
     expectClean(seen);
+  });
+  test("fix round 2 R1: the noun reads back only to the previous block", async ({ page }) => {
+    await setStored(page, "all");
+    const seen = await open_(page, WIKI, NOUNS_REL);
+    const before = await page
+      .locator('.wiki-article a.wiki-ref[data-ref="d7"]')
+      .evaluateAll((as) =>
+        as.map((a) => {
+          // The noun span, then one space, then the link.
+          const gap = a.previousSibling;
+          const prev = gap?.previousSibling as HTMLElement | null | undefined;
+          return gap?.textContent === " " && prev?.classList?.contains("id-noun") ? prev.textContent : "-";
+        }),
+      );
+    // After the heading, after the list, after the bold word; then the author's
+    // own noun before a link, and before a bold id.
+    expect(before).toEqual(["Beslutning", "Beslutning", "Beslutning", "-", "-"]);
+    expectClean(seen);
+  });
+
+  test("fix round 2 R2: a failed in-place reload does not leave its lens for the next open", async ({ page }) => {
+    await setStored(page, "overview");
+    await page.route("**/api/wiki/factcheck?**", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: `event: done\ndata: ${JSON.stringify({ answer: "Alt stemmer.", baseHash: "h1" })}\n\n`,
+      }),
+    );
+    await page.route("**/api/wiki/factcheck/append", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ written: true }) }),
+    );
+    await open_(page, WIKI, REPORT_REL);
+    expect(await lensOf(page)).toBe("overview");
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "D12" }).first().click();
+    expect(await lensOf(page)).toBe("all");
+    // The reload after the append fails.
+    let failed = 0;
+    await page.route("**/api/wiki/page?**", (route) => {
+      failed++;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ error: "boom" }) });
+    });
+    await page.locator("#wikiFactcheckArticleBtn").dispatchEvent("mousedown");
+    await page.locator("#wikiFactcheckAppendBtn").click();
+    await expect(page.locator("#articleWrap .wiki-empty-state")).toHaveText("boom");
+    expect(failed).toBe(1);
+    await page.unroute("**/api/wiki/page?**");
+    // Opening the same page from the rail shows the stored lens.
+    await page.locator(`.wiki-list-item[data-relpath="${REPORT_REL}"]`).first().click();
+    await expect(page.locator(".wiki-article li.dl-item#d12")).toHaveCount(1);
+    expect(await lensOf(page)).toBe("overview");
   });
 });

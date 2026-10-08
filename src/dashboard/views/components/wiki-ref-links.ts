@@ -159,13 +159,17 @@ const SKIP =
 const RUN_GAP_RE = /^\s*(?:[,/&–—-]|og|and|eller|or|til|to)?\s*$/u;
 
 /** Whether the text before an id ends with a word that starts with one of the
- *  noun's forms: «beslutningen D7», «Beslutning D7», «beslutningene D1–D3». */
+ *  noun's forms: «beslutningen D7», «Beslutning D7», «beslutningene D1–D3»,
+ *  «Beslutning (D7)», «beslutning: D7». Only the text after the last blank
+ *  line counts: a top-level paragraph renders as bare text, so a blank line
+ *  is a paragraph break. */
 function ledByNoun(before: string, forms: readonly string[]): boolean {
-  const tail = before.trimEnd().toLocaleLowerCase();
+  const tail = before.split(/\n[^\S\n]*\n/).pop()!.toLocaleLowerCase();
   return forms.some((f) => {
     const form = f.toLocaleLowerCase();
-    // The form, at a word start, then the rest of that word and nothing else.
-    const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRe(form)}[\\p{L}\\p{N}]*$`, "u");
+    // The form, at a word start, then the rest of that word, then only
+    // whitespace, opening brackets or a colon.
+    const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escapeRe(form)}[\\p{L}\\p{N}]*[\\s(\\[{:]*$`, "u");
     return re.test(tail);
   });
 }
@@ -175,8 +179,8 @@ function ledByNoun(before: string, forms: readonly string[]): boolean {
  * one prefix, joined by a list or range separator (`D1–D11`, `D1 til D11`,
  * `S1, S2 og S6`), gets the noun once, before its first id, plural when the
  * run holds more than one. A run whose preceding word starts with the noun
- * (`Beslutning D7`, `beslutningen D7`) gets none. `preceding` is the text of
- * the same block before this node (`**Beslutning** D7`). Returns the noun per
+ * (`Beslutning D7`, `beslutningen D7`) gets none. `preceding` is the inline
+ * text before this node ({@link precedingText}, `**Beslutning** D7`). Returns the noun per
  * match index that starts a run.
  */
 export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | undefined, preceding = ""): Map<number, string> {
@@ -204,18 +208,31 @@ export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | u
   return out;
 }
 
-/** Block elements: the text before an id is read back to the nearest one. */
-const BLOCK = "p, li, td, th, dt, dd, blockquote, h1, h2, h3, h4, h5, h6, figcaption, summary, div, section";
+/** The inline elements the text before an id is read back through; any other
+ *  element (a heading, a list, a fold, a `<br>`) ends the read-back. */
+const INLINE = "strong, em, b, i, u, s, del, mark, code, kbd, sup, sub, small, abbr, span, a";
 const PRECEDING_MAX = 80;
 
-/** The text before `node` inside its block, its last {@link PRECEDING_MAX} chars. */
+/** The text before `node` back to the first non-inline element, through its
+ *  preceding siblings and those of its inline ancestors; the last
+ *  {@link PRECEDING_MAX} chars. */
 function precedingText(node: Text): string {
-  const block = node.parentElement?.closest(BLOCK);
-  if (!block) return "";
-  const r = document.createRange();
-  r.setStart(block, 0);
-  r.setEnd(node, 0);
-  return r.toString().slice(-PRECEDING_MAX);
+  let out = "";
+  let at: Node = node;
+  while (out.length < PRECEDING_MAX) {
+    const prev: Node | null = at.previousSibling;
+    if (prev) {
+      if (prev.nodeType === Node.TEXT_NODE) out = (prev.nodeValue ?? "") + out;
+      else if (prev instanceof Element && prev.matches(INLINE)) out = (prev.textContent ?? "") + out;
+      else if (prev.nodeType !== Node.COMMENT_NODE) break;
+      at = prev;
+      continue;
+    }
+    const parent: Element | null = at.parentElement;
+    if (!parent?.matches(INLINE)) break;
+    at = parent;
+  }
+  return out.slice(-PRECEDING_MAX);
 }
 
 /** Wrap every reference under `root` in an `a.wiki-ref`, with the wiki's id

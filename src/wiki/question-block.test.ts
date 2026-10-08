@@ -358,3 +358,18 @@ describe("fix round 2: renderWikiHtml attributes", () => {
     expect(tag).toContain('data-question-to="[[C&amp;d]]"');
   });
 });
+
+describe("fix round 2: a fact mark over the reopen phrase", () => {
+  test("the near miss still says the item was reopened", async () => {
+    await write(
+      "plans/p.mdx",
+      plan(
+        ['<Question id="O3">'],
+        ['- **O3** — Besvart 06.10. Closed 2026-10-08 (D99). <Fact n="2" v="ok">Reopened 2026-10-09</Fact>.'],
+      ),
+    );
+    expect((await questionFindings()).map((x) => x.message)).toEqual([
+      'DecisionLog item O3 says "Besvart" outside its canonical phrases; its last canonical phrase reopens it (Reopened <date>.), so its card stays open',
+    ]);
+  });
+});

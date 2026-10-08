@@ -157,3 +157,28 @@ describe("fix round 1, D-4: a noun the author already wrote", () => {
     expect(nouns("D1 to D11")).toEqual(["beslutninger:D1", "-:D11"]);
   });
 });
+
+describe("fix round 2: punctuation and block breaks before an id", () => {
+  const LABELS = { D: { one: "Beslutning", other: "beslutninger" } };
+  const ids = ["D1", "D3", "D7"];
+  const nouns = (text: string, preceding = "") => {
+    const ms = findRefs(text, new Set(ids), new Set());
+    const runs = nounRuns(text, ms, LABELS, preceding);
+    return ms.map((m, k) => `${runs.get(k) ?? "-"}:${m.key}`);
+  };
+  test("an opening bracket or a colon after the noun still leads the run", () => {
+    expect(nouns("Beslutning (D7) står")).toEqual(["-:D7"]);
+    expect(nouns("se beslutning: D7")).toEqual(["-:D7"]);
+    expect(nouns("beslutningene [D1–D3]")).toEqual(["-:D1", "-:D3"]);
+  });
+  test("a closing bracket or a full stop after the noun does not", () => {
+    expect(nouns("(se beslutning) D7")).toEqual(["Beslutning:D7"]);
+    expect(nouns("Ny beslutning. D7 står")).toEqual(["Beslutning:D7"]);
+  });
+  test("a blank line ends the read-back: the previous paragraph's last word does not lead", () => {
+    expect(nouns("\n\nD7 holder.", "Noe om beslutning")).toEqual(["Beslutning:D7"]);
+    expect(nouns("Noe om beslutning\n\nD7 holder.")).toEqual(["Beslutning:D7"]);
+    // One line break is a wrapped line of the same paragraph.
+    expect(nouns("Noe om beslutning\nD7 holder.")).toEqual(["-:D7"]);
+  });
+});

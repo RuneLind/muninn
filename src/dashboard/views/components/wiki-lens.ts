@@ -53,10 +53,11 @@ export const OVERVIEW_HIDDEN: readonly string[] = [
 
 const HIDDEN_SELECTOR = OVERVIEW_HIDDEN.join(", ");
 
-/** Whether Overview hides `el`: it or an ancestor matches a hidden block. A
- *  peek card is never hidden: it shows its target whole in every lens (D3). */
+/** Whether Overview hides `el`, an article element: it or an ancestor matches
+ *  a hidden block. (A peek card shows its target whole in every lens through
+ *  the CSS, D3.) */
 export function isHiddenByOverview(el: Element): boolean {
-  return el.closest(HIDDEN_SELECTOR) !== null && el.closest(`.${PEEK_CLASS}`) === null;
+  return el.closest(HIDDEN_SELECTOR) !== null;
 }
 
 type Lang = QuestionLanguage;

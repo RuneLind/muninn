@@ -5,6 +5,7 @@ import {
   closedQuestionIds,
   decisionLogEntries,
   itemQuestionState,
+  itemReopened,
   parseQuestionPage,
   formatQuestionTarget,
   parseChoices,
@@ -736,5 +737,13 @@ describe("fix round 1, D-2: a fact mark is not part of the close phrase", () => 
       expect(itemQuestionState(text, false, decisions)).toEqual({ kind: "decided", decision: "D10" });
     }
     expect(closeNearMisses('<Fact n="9" v="ok">Lukket 07.10</Fact> (D10)')).toEqual([]);
+  });
+});
+
+describe("fix round 2: a fact mark over the reopen phrase", () => {
+  test("a <Fact> around «Gjenåpnet 08.10» still reopens the item", () => {
+    const text = 'Skal vi? Lukket 07.10 (D10). <Fact n="2" v="ok">Gjenåpnet 08.10</Fact>.';
+    expect(itemReopened(text)).toBe(true);
+    expect(itemQuestionState(text, false, new Set(["D10"]))).toEqual({ kind: "open" });
   });
 });
