@@ -1633,6 +1633,7 @@ export function registerWikiReadRoutes(
         files: await loadPageFiles(index.root, meta.relPath, markdown),
         question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, answerCfg.owner),
         idLabels: index.readerConfig?.idLabels,
+        language: index.readerConfig?.language,
       }),
       // The lens switch's inputs: language, id nouns, the page's default lens
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).

@@ -16,6 +16,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { tldrFallbackLabel } from "../format/genre-lists.ts";
+import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
 import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
@@ -160,6 +161,19 @@ const telegramRenderer: BlockRenderer = {
       }
       case "Tldr":
         return `<b>${escapeHtml(tldrFallbackLabel(attrs.label))}:</b>\n${children}`;
+      // Nothing to collapse here: the «Mer om saken» part in full.
+      case "More":
+        return children;
+      // One plain line per row, other blocks in place.
+      case "StatusRows":
+        return rawChildren
+          .map((b) =>
+            b.type === "ul" || b.type === "ol"
+              ? statusRows([b]).map((r) => renderInline(r.text)).join("\n")
+              : renderBlocks([b], telegramRenderer),
+          )
+          .filter((out) => out.trim() !== "")
+          .join("\n\n");
       // The list as written: dates and ids stay text, labelled rows stay items.
       case "Timeline":
       case "DecisionLog":

@@ -86,6 +86,9 @@ export function renderWikiHtml(
     question?: QuestionRenderOptions;
     /** The wiki's `idLabels`: the nouns on DecisionLog and Query id chips. */
     idLabels?: IdLabels;
+    /** The wiki's `language`: the `<More>` label and the `<StatusRows>`
+     *  state phrases. Absent ⇒ the `question` option's, else `en`. */
+    language?: QuestionLanguage;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -129,7 +132,13 @@ export function renderWikiHtml(
   });
 
   const renderedHtml = restoreSentinelsInAttributes(
-    formatWebHtml(withTokens, { files: opts?.files, question: opts?.question, idLabels: opts?.idLabels, reader: true }),
+    formatWebHtml(withTokens, {
+      files: opts?.files,
+      question: opts?.question,
+      idLabels: opts?.idLabels,
+      reader: true,
+      ...(opts?.language ? { language: opts.language } : {}),
+    }),
     literal,
   );
   const codeRegions = renderedCodeRegions(renderedHtml);

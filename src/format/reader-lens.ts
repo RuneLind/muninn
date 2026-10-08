@@ -23,6 +23,12 @@ export type StoredLens = Exclude<Lens, "agent">;
  *  to Explain or fact-check leaves it out. */
 export const READER_ONLY_ATTR = "data-reader-only";
 
+/** The «mer» toggle the reader adds to a `<DecisionLog>` item whose text
+ *  holds more than its first sentence (D6), and the class on an item whose
+ *  rest Overview shows. */
+export const DL_MORE_CLASS = "dl-more";
+export const DL_EXPANDED_CLASS = "dl-expanded";
+
 /** localStorage key for the viewer's choice (D1), beside «line refs». */
 export const LENS_KEY = "muninn.wiki.lens.v1";
 

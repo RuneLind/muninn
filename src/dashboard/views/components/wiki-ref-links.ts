@@ -27,7 +27,7 @@
  */
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
-import { idPrefix, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
+import { DL_MORE_CLASS, idPrefix, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
 
 /** The noun before an id (D12): the server puts it before a DecisionLog or
  *  Query chip, the ref links before an id run in prose. */
@@ -355,6 +355,8 @@ export function peekParts(target: Element): { label: string; where: string; body
     // The chip and its noun: the card's label already names the id.
     c.querySelector(":scope > .dl-id")?.remove();
     c.querySelector(`:scope > .${ID_NOUN_CLASS}`)?.remove();
+    // The whole decision, without the reader's «mer» toggle (D6).
+    c.querySelectorAll(`.${DL_MORE_CLASS}`).forEach((b) => b.remove());
     const p = document.createElement("div");
     p.append(...Array.from(c.childNodes));
     return { label: target.querySelector(".dl-id")?.textContent ?? "", where, body: [p], isTitle: false };

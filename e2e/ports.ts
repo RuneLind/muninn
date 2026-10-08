@@ -286,6 +286,9 @@ export const E2E_PORTS = {
   // Three wikis in one process: the instance default, the file default and no
   // default side by side.
   "wiki-lens": 3139,
+  // The top of a report page (reader lenses PR 2): <More>, <StatusRows> and
+  // a DecisionLog item's first sentence in Overview.
+  "wiki-readable-top": 3140,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

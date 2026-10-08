@@ -1678,6 +1678,19 @@ Acceptance: `lint-drift.test.ts` (each rule as accepted/rejected rows, the
 boundaries, the Oslo day, the lane-line decoys, and `lintWiki` over a temp git
 repo) and the drift case in `wiki-gardener-routes.test.ts`.
 
+### Lint check 11 — the top of a report page (`lint-report-top.ts`)
+
+Two warnings on every page, report-only: `decision-first-sentence` (an id-led,
+undimmed `<DecisionLog>` item whose first sentence, the text the Overview lens
+shows, is over 160 visible chars: links count their text, code its content) and
+`status-row-long` (a `<StatusRows>` row over 160 chars as written, the same
+measure as mimir lint check 13). Both read the page through `parseBlocks` and
+the rules in `src/format/report-top.ts`, so the finding and the reader agree on
+where a sentence ends. Measured 2026-10-09: `decision-first-sentence` fires on
+28 of 253 undimmed items on 9 mimir pages and 11 of 135 on 7 kode-wiki pages;
+`status-row-long` on none (no page carries `<StatusRows>` yet). Acceptance:
+`lint-report-top.test.ts`.
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,

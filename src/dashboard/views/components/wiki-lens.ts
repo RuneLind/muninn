@@ -15,6 +15,10 @@
  *   opens and is then removed from the URL by the caller.
  * - **Reveal.** A `REVEAL_EVENT` from an element Overview hides switches this
  *   view to All without storing it, so the next page opens in the stored lens.
+ * - **Decisions (D6).** Overview shows a `<DecisionLog>` item's first sentence
+ *   and a «mer» toggle; the rest and anything nested under the item open
+ *   behind it. A reveal of an item, or of anything in one (a `#d7` hash, an id
+ *   link, a pill), opens that whole item and stays in Overview.
  *
  * Also here, because both read the rendered folds: each fold summary's size and
  * reading time; and the selection text Explain and fact-check send, without
@@ -23,7 +27,16 @@
 
 import { REVEAL_EVENT } from "./wiki-hash-target.ts";
 import { CODE_REF_GROUP_CLASS } from "../../../wiki/code-refs.ts";
-import { LENSES, LENS_LABELS, READER_ONLY_ATTR, readStoredLens, writeStoredLens, type Lens } from "../../../format/reader-lens.ts";
+import {
+  DL_EXPANDED_CLASS,
+  DL_MORE_CLASS,
+  LENSES,
+  LENS_LABELS,
+  READER_ONLY_ATTR,
+  readStoredLens,
+  writeStoredLens,
+  type Lens,
+} from "../../../format/reader-lens.ts";
 import type { QuestionLanguage } from "../../../format/question-labels.ts";
 import { fmtTokens } from "../../../utils/fmt-tokens.ts";
 import { localStore } from "./wiki-local-store.ts";
@@ -111,6 +124,43 @@ export function decorateFoldSizes(article: Element, lang: Lang): void {
   });
 }
 
+const MORE_WORDS: Record<Lang, { more: string; less: string }> = {
+  en: { more: "more", less: "less" },
+  no: { more: "mer", less: "mindre" },
+};
+
+/** What Overview folds away in an id-led DecisionLog item: the rest of its
+ *  text and whatever is nested under it. */
+const DL_REST = ":scope > .dl-text > .dl-rest, :scope > .dl-text ~ *";
+
+function setExpanded(item: Element, open: boolean, lang: Lang): void {
+  item.classList.toggle(DL_EXPANDED_CLASS, open);
+  const b = item.querySelector<HTMLButtonElement>(`:scope > .dl-text > .${DL_MORE_CLASS}`);
+  if (!b) return;
+  b.textContent = open ? MORE_WORDS[lang].less : MORE_WORDS[lang].more;
+  b.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+/** A «mer» toggle in each id-led DecisionLog item that holds more than its
+ *  first sentence, right after the first sentence. Shown in Overview only;
+ *  reader-only, so a selection leaves it out. Idempotent. */
+export function decorateDecisionRests(article: Element, lang: Lang): void {
+  article.querySelectorAll(`.${DL_MORE_CLASS}`).forEach((el) => el.remove());
+  article.querySelectorAll(".dl-item[id]").forEach((item) => {
+    const text = item.querySelector(":scope > .dl-text");
+    if (!text || !item.querySelector(DL_REST)) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = DL_MORE_CLASS;
+    b.setAttribute(READER_ONLY_ATTR, "");
+    b.addEventListener("click", () => setExpanded(item, !item.classList.contains(DL_EXPANDED_CLASS), lang));
+    const first = text.querySelector(":scope > .dl-first");
+    if (first) first.after(b);
+    else text.append(b);
+    setExpanded(item, item.classList.contains(DL_EXPANDED_CLASS), lang);
+  });
+}
+
 /** Under each CaseBoard with `none` rows, the line Overview shows in their
  *  place. Idempotent. */
 function noteHiddenCases(article: Element, lang: Lang): void {
@@ -166,9 +216,10 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   row?.querySelectorAll(`.${LENS_SWITCH_CLASS}`).forEach((el) => el.remove());
   noteHiddenCases(article, opts.language);
   decorateFoldSizes(article, opts.language);
+  decorateDecisionRests(article, opts.language);
 
   let sw: HTMLElement | null = null;
-  if (row && (article.querySelector(HIDDEN_SELECTOR) || opts.agentAvailable)) {
+  if (row && (article.querySelector(HIDDEN_SELECTOR) || article.querySelector(`.${DL_MORE_CLASS}`) || opts.agentAvailable)) {
     sw = document.createElement("div");
     sw.className = LENS_SWITCH_CLASS;
     sw.setAttribute("role", "group");
@@ -195,9 +246,14 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
 
   // D3: a reveal of something this lens hides shows All for this view only.
   article.addEventListener(REVEAL_EVENT, (e) => {
-    if (lensOf(article) !== "overview") return;
     const target = e.target;
-    if (target instanceof Element && isHiddenByOverview(target)) applyLens(article, row, sw, "all");
+    if (!(target instanceof Element)) return;
+    // D3 + D6: a reveal of a DecisionLog item, or of anything in its rest,
+    // shows the whole item. Nothing else is hidden there, so the lens stays.
+    const item = target.closest(".dl-item[id]");
+    if (item?.querySelector(`:scope > .dl-text > .${DL_MORE_CLASS}`)) setExpanded(item, true, opts.language);
+    if (lensOf(article) !== "overview") return;
+    if (isHiddenByOverview(target)) applyLens(article, row, sw, "all");
   });
 }
 
@@ -233,6 +289,13 @@ export function lensCss(): string {
   return `
     .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
+    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest,
+    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ * { display: none; }
+    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) .${DL_MORE_CLASS} { display: none; }
+    .wiki-article .${DL_MORE_CLASS} {
+      font: inherit; font-size: 0.85em; margin-left: 0.4em; padding: 0 0.2em; border: none; background: none;
+      color: var(--accent-light); cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+    }
     .wiki-article:not(.${LENS_CLASS_PREFIX}overview) .${CASEBOARD_LENS_NOTE_CLASS} { display: none; }
     .wiki-article .${CASEBOARD_LENS_NOTE_CLASS} { margin: 6px 0 0; font-size: 12px; color: var(--text-soft); }
     .${LENS_SWITCH_CLASS} {
