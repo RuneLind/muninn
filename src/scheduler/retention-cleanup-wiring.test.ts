@@ -22,11 +22,17 @@ describe("src/index.ts: retention cleanup wiring", () => {
     const shutdown = text.indexOf("async function shutdown()");
     const stop = text.indexOf("const retentionCleanupStopped = stopRetentionCleanup()", shutdown);
     const awaited = text.indexOf("await retentionCleanupStopped;", shutdown);
-    const close = text.indexOf("await closeDb()", shutdown);
+    const close = text.indexOf("await closeDb(", shutdown);
     expect(shutdown).toBeGreaterThan(-1);
     expect(stop, "shutdown() must call stopRetentionCleanup()").toBeGreaterThan(shutdown);
     expect(awaited, "shutdown() must await the retention cleanup stop").toBeGreaterThan(stop);
     expect(close).toBeGreaterThan(awaited);
+  });
+
+  test("shutdown closes the pool with a timeout, so a statement blocked on a lock cannot hold the exit", async () => {
+    const text = await readFile(INDEX, "utf8");
+    const shutdown = text.indexOf("async function shutdown()");
+    expect(text.slice(shutdown)).toMatch(/await closeDb\(\{ timeoutSeconds: \d+ \}\)/);
   });
 
   test("the per-bot scheduler tick no longer runs the cleanup, so it runs once per hour process-wide", async () => {

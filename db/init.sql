@@ -587,6 +587,8 @@ CREATE TABLE traces (
 CREATE INDEX idx_traces_trace_id ON traces (trace_id, started_at);
 CREATE INDEX idx_traces_root ON traces (started_at DESC) WHERE parent_id IS NULL;
 CREATE INDEX idx_traces_bot ON traces (bot_name, started_at DESC) WHERE parent_id IS NULL;
+-- The retention cleanup's batched delete walks this, oldest first (migration 083).
+CREATE INDEX idx_traces_created ON traces (created_at);
 
 -- ============================================================================
 -- Prompt snapshots: full system + user prompts per trace PASS, for inspection.
