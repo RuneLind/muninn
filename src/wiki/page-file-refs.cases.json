@@ -409,6 +409,111 @@
           "rel": "C.YML"
         }
       ]
+    },
+    {
+      "name": "a Query inside a one-line Callout",
+      "page": "plans/side.mdx",
+      "markdown": "# Side\n\n<Callout tone=\"info\"><Query id=\"q\" csv=\"a.csv\" /></Callout>\n",
+      "refs": [
+        {
+          "ref": "a.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/a.csv"
+        }
+      ]
+    },
+    {
+      "name": "a CaseBoard inside a one-line Fold",
+      "page": "plans/side.mdx",
+      "markdown": "<Fold title=\"x\"><CaseBoard src=\"c.yaml\" /></Fold>\n",
+      "refs": [
+        {
+          "ref": "c.yaml",
+          "kinds": [
+            "yaml"
+          ],
+          "lexical": "ok",
+          "rel": "plans/c.yaml"
+        }
+      ]
+    },
+    {
+      "name": "a DeltaTable inside a one-line Tab",
+      "page": "plans/side.mdx",
+      "markdown": "<Tab label=\"x\"><DeltaTable src=\"d.csv\" /></Tab>\n",
+      "refs": [
+        {
+          "ref": "d.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/d.csv"
+        }
+      ]
+    },
+    {
+      "name": "an inline-closed Query inside a one-line Callout",
+      "page": "plans/side.mdx",
+      "markdown": "<Callout tone=\"info\"><Query id=\"q\" csv=\"b.csv\"></Query></Callout>\n",
+      "refs": [
+        {
+          "ref": "b.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/b.csv"
+        }
+      ]
+    },
+    {
+      "name": "two containers nested on one line",
+      "page": "plans/side.mdx",
+      "markdown": "<Callout><Fold title=\"y\"><Query id=\"q\" sql=\"c.sql\" /></Fold></Callout>\n",
+      "refs": [
+        {
+          "ref": "c.sql",
+          "kinds": [
+            "sql"
+          ],
+          "lexical": "ok",
+          "rel": "plans/c.sql"
+        }
+      ]
+    },
+    {
+      "name": "a one-line container inside a multi-line one",
+      "page": "plans/side.mdx",
+      "markdown": "<Callout>\n<Fold title=\"x\"><Query id=\"q\" csv=\"e.csv\" /></Fold>\n</Callout>\n",
+      "refs": [
+        {
+          "ref": "e.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/e.csv"
+        }
+      ]
+    },
+    {
+      "name": "a tag indented under a list item",
+      "page": "plans/side.mdx",
+      "markdown": "- punkt\n  <Query id=\"q\" csv=\"liste.csv\" />\n",
+      "refs": [
+        {
+          "ref": "liste.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/liste.csv"
+        }
+      ]
     }
   ]
 }
