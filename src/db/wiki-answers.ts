@@ -7,6 +7,8 @@ import { getDb } from "./client.ts";
  * insert, reads, and two updates: {@link markWikiAnswersExported}, which sets
  * `exported_at` and nothing else, and {@link redactWikiAnswer} (an admin
  * redact, PR 5), which empties `body` and `choice` and sets `redacted_at`.
+ * Rows leave only through {@link sweepWikiAnswerRetention} (D17), which
+ * deletes whole answers.
  */
 
 export interface WikiAnswerAuthor {
@@ -117,6 +119,15 @@ export async function insertWikiAnswerVersion(
         SELECT 1 FROM wiki_answers WHERE answer_id = ${input.answerId} AND redacted_at IS NOT NULL LIMIT 1
       `;
       if (redacted.length > 0) throw new WikiAnswerRedacted(input.answerId);
+      // Inside the lock too: a retention sweep that deleted the answer while
+      // this edit waited leaves no base version, and an edit stored then would
+      // be a lone later version with its history gone.
+      if (input.version > 1) {
+        const base = await tx`
+          SELECT 1 FROM wiki_answers WHERE answer_id = ${input.answerId} AND version = ${input.version - 1}
+        `;
+        if (base.length === 0) throw new WikiAnswerVersionConflict(input.answerId, input.version);
+      }
       const rows = await tx`
         INSERT INTO wiki_answers (
           answer_id, version, wiki, rel_path, question_id,
@@ -337,4 +348,96 @@ async function markExported(wiki: string, rows: readonly (readonly [string, numb
       )
   `;
   return updated.count;
+}
+
+/** Retention windows in days (decision D17); null ⇒ that rule is off. */
+export interface WikiAnswerRetentionWindows {
+  exportedDays: number | null;
+  unexportedDays: number | null;
+}
+
+/** Answers deleted, per rule. An answer counts under one rule: redacted first. */
+export interface WikiAnswerRetentionCounts {
+  exported: number;
+  unexported: number;
+  redacted: number;
+}
+
+type RetentionRule = keyof WikiAnswerRetentionCounts;
+
+export interface WikiAnswerRetentionHooks {
+  /** Runs inside a per-answer transaction after its delete, before the commit. */
+  beforeCommit?: () => Promise<void>;
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Which answers a retention rule matches, judged on the LATEST version (an
+ * answer exported and then edited is unexported), and redacted when any
+ * version is. `only` restricts it to one answer, for the re-check under lock.
+ */
+async function retentionCandidates(
+  q: Sql,
+  windows: WikiAnswerRetentionWindows,
+  now: number,
+  only: string | null,
+): Promise<{ answerId: string; rule: RetentionRule }[]> {
+  const exportedBefore = windows.exportedDays == null ? null : new Date(now - windows.exportedDays * DAY_MS);
+  const createdBefore = windows.unexportedDays == null ? null : new Date(now - windows.unexportedDays * DAY_MS);
+  const rows = await q`
+    SELECT answer_id, CASE
+        WHEN redacted THEN 'redacted'
+        WHEN exported_at IS NOT NULL THEN 'exported'
+        ELSE 'unexported'
+      END AS rule
+    FROM (
+      SELECT DISTINCT ON (answer_id) answer_id, exported_at, created_at,
+        bool_or(redacted_at IS NOT NULL) OVER (PARTITION BY answer_id) AS redacted
+      FROM wiki_answers
+      WHERE ${only}::uuid IS NULL OR answer_id = ${only}::uuid
+      ORDER BY answer_id, version DESC
+    ) latest
+    WHERE redacted
+      OR (exported_at < ${exportedBefore}::timestamptz)
+      OR (exported_at IS NULL AND created_at < ${createdBefore}::timestamptz)
+  `;
+  return rows.map((r) => ({ answerId: r.answer_id, rule: r.rule as RetentionRule }));
+}
+
+/**
+ * The retention sweep (D17): `wiki_answers` is a transit buffer, the page and
+ * its git history are the record. Deletes every version of an answer whose
+ * latest version was exported more than `exportedDays` ago, or never exported
+ * and saved more than `unexportedDays` ago, and of every redacted answer. Each
+ * age rule runs only when its window is set; the redacted rule when either is;
+ * both null ⇒ nothing. Page-blind, so an orphaned answer (its page removed)
+ * falls under the same rules.
+ *
+ * One transaction per answer, under {@link lockAnswer}, re-checking the rule
+ * there: a single `DELETE … WHERE answer_id IN (SELECT …)` misses a version an
+ * edit commits meanwhile and leaves it alone with its history gone.
+ */
+export async function sweepWikiAnswerRetention(
+  windows: WikiAnswerRetentionWindows,
+  now: number = Date.now(),
+  hooks: WikiAnswerRetentionHooks = {},
+): Promise<WikiAnswerRetentionCounts> {
+  const counts: WikiAnswerRetentionCounts = { exported: 0, unexported: 0, redacted: 0 };
+  if (windows.exportedDays == null && windows.unexportedDays == null) return counts;
+  const sql = getDb();
+  const candidates = await retentionCandidates(sql as unknown as Sql, windows, now, null);
+  for (const { answerId } of candidates) {
+    const rule = await sql.begin(async (_tx) => {
+      const tx = _tx as unknown as Sql;
+      await lockAnswer(tx, answerId);
+      const [still] = await retentionCandidates(tx, windows, now, answerId);
+      if (!still) return null;
+      await tx`DELETE FROM wiki_answers WHERE answer_id = ${answerId}`;
+      await hooks.beforeCommit?.();
+      return still.rule;
+    });
+    if (rule) counts[rule]++;
+  }
+  return counts;
 }

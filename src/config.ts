@@ -142,6 +142,43 @@ export function resolveWikiAnswerConfig(env: Record<string, string | undefined> 
   };
 }
 
+/** Answer retention (decision D17): day counts, null ⇒ that rule is off. Both
+ *  null ⇒ no sweep at all, including the redacted rule. */
+export interface WikiAnswerRetention {
+  /** `WIKI_ANSWER_RETENTION_DAYS`: delete an answer this long after its latest `exported_at`. */
+  exportedDays: number | null;
+  /** `WIKI_ANSWER_UNEXPORTED_DAYS`: delete a never-exported answer this long after its latest version. */
+  unexportedDays: number | null;
+}
+
+/** One retention day count. Unset/blank ⇒ off. A non-integer throws `ConfigError`
+ *  ({@link optionalEnvInt}'s answer). Below 1 warns and is OFF, never 0: a 0
+ *  would delete every answer on the next sweep. */
+function retentionDays(env: Record<string, string | undefined>, name: string): number | null {
+  const raw = (env[name] ?? "").trim();
+  if (!raw) return null;
+  const parsed = parseInt(raw, 10);
+  if (isNaN(parsed)) throw new ConfigError(`Environment variable ${name} must be a valid integer, got: "${raw}"`);
+  if (parsed >= 1) return parsed;
+  const key = `${name}=${parsed}`;
+  if (!warnedEnvFlagValues.has(key)) {
+    warnedEnvFlagValues.add(key);
+    log.warn("{name} is {value}, which would delete every answer on the next sweep — refused, the rule is off", {
+      name,
+      value: parsed,
+    });
+  }
+  return null;
+}
+
+/** `WIKI_ANSWER_RETENTION_DAYS` + `WIKI_ANSWER_UNEXPORTED_DAYS`. */
+export function resolveWikiAnswerRetention(env: Record<string, string | undefined> = process.env): WikiAnswerRetention {
+  return {
+    exportedDays: retentionDays(env, "WIKI_ANSWER_RETENTION_DAYS"),
+    unexportedDays: retentionDays(env, "WIKI_ANSWER_UNEXPORTED_DAYS"),
+  };
+}
+
 /** Does this wiki take answers? Keyed on the registry NAME. */
 export function wikiTakesAnswers(wikiName: string | undefined, cfg: WikiAnswerConfig): boolean {
   return !!wikiName && cfg.wikis.has(wikiName.toLowerCase());
@@ -819,6 +856,7 @@ export function loadConfig() {
     // default and is fine: the id is what a search takes.
     claudeUsagePublicUrl: nullableEnv("CLAUDE_USAGE_PUBLIC_URL"),
     wikiAnswers: resolveWikiAnswerConfig(),
+    wikiAnswerRetention: resolveWikiAnswerRetention(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -330,5 +330,46 @@ describe("prompt-snapshot retention clamps", () => {
     const warning = records.find((r) => r.level === "warning" && String(r.message.join("")).includes(CAPTURE));
     expect(warning).toBeDefined();
     expect(String(warning!.message.join("") + JSON.stringify(warning!.properties))).toContain("0");
+  });
+});
+
+/** Answer retention (D17): unset ⇒ off, below 1 ⇒ warn and OFF (never 0, which
+ *  would delete every answer), a non-integer refuses like `optionalEnvInt`. */
+describe("resolveWikiAnswerRetention", () => {
+  const E = "WIKI_ANSWER_RETENTION_DAYS";
+  const U = "WIKI_ANSWER_UNEXPORTED_DAYS";
+
+  afterEach(async () => {
+    __resetEnvFlagWarningsForTest();
+    await reset();
+  });
+
+  test("unset or blank ⇒ both rules off", () => {
+    expect(resolveWikiAnswerRetention({})).toEqual({ exportedDays: null, unexportedDays: null });
+    expect(resolveWikiAnswerRetention({ [E]: " ", [U]: "" })).toEqual({ exportedDays: null, unexportedDays: null });
+  });
+
+  test("positive integers are honoured, each on its own", () => {
+    expect(resolveWikiAnswerRetention({ [E]: "30", [U]: "90" })).toEqual({ exportedDays: 30, unexportedDays: 90 });
+    expect(resolveWikiAnswerRetention({ [U]: "90" })).toEqual({ exportedDays: null, unexportedDays: 90 });
+  });
+
+  test("0 or a negative value warns once and turns the rule OFF, not 0", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    expect(resolveWikiAnswerRetention({ [E]: "0", [U]: "-5" })).toEqual({ exportedDays: null, unexportedDays: null });
+    resolveWikiAnswerRetention({ [E]: "0" });
+    const warns = records.filter((r) => r.level === "warning").map((r) => JSON.stringify(r.properties));
+    expect(warns.length).toBe(2);
+    expect(warns.some((w) => w.includes(E))).toBe(true);
+    expect(warns.some((w) => w.includes(U))).toBe(true);
+  });
+
+  test("a non-integer refuses the boot, naming the variable", () => {
+    expect(() => resolveWikiAnswerRetention({ [E]: "thirty" })).toThrow(/WIKI_ANSWER_RETENTION_DAYS/);
   });
 });

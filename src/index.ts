@@ -22,6 +22,7 @@ import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
+import { startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
@@ -251,6 +252,14 @@ hivemindManager.start(allBotConfigs, config).catch((err) => {
 // Periodic stale-handoff sweep (spec-driven dev loop, Phase 5): nudges open chat
 // tabs so a run parked on a dead/silent peer surfaces its re-send affordance.
 startStaleHandoffSweep();
+
+// Answer retention (D17): hourly, on every profile, off when both windows are unset.
+if (startAnswerRetentionSweep(config.wikiAnswerRetention)) {
+  log.info("Answer retention sweep on: exported {exported} day(s), unexported {unexported} day(s)", {
+    exported: config.wikiAnswerRetention.exportedDays ?? "off",
+    unexported: config.wikiAnswerRetention.unexportedDays ?? "off",
+  });
+}
 
 // Start research_knowledge MCP server. Bots opt in by adding the server to their
 // .mcp.json — bots without it just don't see the tool.
@@ -513,6 +522,7 @@ async function shutdown() {
   log.info("Shutting down...");
   stopScheduler();
   stopStaleHandoffSweep();
+  stopAnswerRetentionSweep();
   await wikiBucketMirrors?.stop();
   await waitForPendingTicks(10_000);
   // Let in-flight memory/goal/schedule extractions finish their DB writes
