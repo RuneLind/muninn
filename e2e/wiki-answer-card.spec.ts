@@ -230,6 +230,23 @@ const SWEEP_PAGE = [
   ...q("S8", "A carried draft cancelled?"),
 ].join("\n");
 
+// A save the server refuses for good: the answer was redacted, or the
+// question closed, after the card was loaded. T2 is closed by rewriting this
+// page mid-test, so its own file keeps the rewrite away from other cases.
+const TERMINAL_REL = "plans/terminal.mdx";
+const terminalPage = (closed: boolean) =>
+  [
+    "---",
+    "title: Terminal page",
+    "type: plan",
+    "---",
+    "",
+    ...q("T1", "Redacted while its editor is open?"),
+    ...q("T2", "Closed while its answer is being written?"),
+    ...q("T3", "Redacted under its editor, and the reload fails?"),
+    ...(closed ? ["<DecisionLog>", "", "- **T2** — Closed mid-write. Closed 2026-10-08 (D98).", "", "</DecisionLog>", ""] : []),
+  ].join("\n");
+
 // WIKI_ANSWER_GROUPS: synthetic groups and idents (Z99xxxx). The answers are
 // seeded by SQL with an author ident — auth off has only the owner, no ident.
 const GROUPS_REL = "plans/groups.mdx";
@@ -277,6 +294,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
   await writeFile(path.join(base, "a", SWEEP_REL), SWEEP_PAGE, "utf8");
   await writeFile(path.join(base, "a", GROUPS_REL), GROUPS_PAGE, "utf8");
+  await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(false), "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -338,6 +356,8 @@ test.beforeAll(async ({}, info) => {
   await api({ relPath: SWEEP_REL, questionId: "S6", body: "S6 version one." });
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 first answer." });
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 second answer." });
+
+  for (const id of ["T1", "T3"]) await api({ relPath: TERMINAL_REL, questionId: id, body: `${id} version one.` });
 
   // The groups page: a fag member (also in utvikler) and a utvikler-only author.
   for (const [name, ident, body] of [
@@ -1610,6 +1630,80 @@ test.describe("Wiki reader: an answer swept while it is being edited (PR 5b fix 
     await expect(s6.locator(".q-msg")).toHaveText(GONE);
     await expect(s6.locator("textarea.q-text")).toHaveValue("S6 typed, saving.");
     await expect(s6.locator("form.q-composer")).not.toHaveClass(/q-composer-edit/);
+    expect(seen.errors).toEqual([]);
+  });
+});
+
+test.describe("Wiki reader: a save the server refuses for good", () => {
+  test("an edit whose answer an admin redacted meanwhile: the editor closes, its draft is gone, and the card shows the answer redacted", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t1 = card(page, "T1");
+    await expect(t1.locator(".q-answer")).toHaveCount(1);
+    await t1.locator("button.q-edit").click();
+    await t1.locator("textarea.q-text").fill("T1 draft, redacted under it.");
+    // The admin's redact, elsewhere: the real route, so the save meets the real 409.
+    const answerId = (await rowsFor("T1", TERMINAL_REL))[0]!.answer_id as string;
+    const res = await fetch(`${BASE}/api/wiki/answers/redact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId }),
+    });
+    expect(res.status).toBe(200);
+    await t1.locator("button.q-save").click();
+
+    await expect(t1.locator(".q-msg-error")).toHaveText("The answer you were editing was redacted. Your change was not saved.");
+    await expect(t1.locator(".q-redacted")).toBeVisible();
+    await expect(t1.locator("form.q-composer")).toHaveCount(0);
+    await expect(t1.locator("textarea.q-text")).toHaveCount(0);
+    await expect(t1).not.toContainText("T1 draft");
+    expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("the same refusal whose reload fails: the editor still closes and the answer still shows redacted", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t3 = card(page, "T3");
+    await expect(t3.locator(".q-answer")).toHaveCount(1);
+    await t3.locator("button.q-edit").click();
+    await t3.locator("textarea.q-text").fill("T3 draft, redacted under it.");
+    const answerId = (await rowsFor("T3", TERMINAL_REL))[0]!.answer_id as string;
+    const res = await fetch(`${BASE}/api/wiki/answers/redact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId }),
+    });
+    expect(res.status).toBe(200);
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET" ? route.fulfill({ status: 500, body: "{}" }) : route.fallback(),
+    );
+    await t3.locator("button.q-save").click();
+
+    await expect(t3.locator(".q-msg-error")).toHaveText("The answer you were editing was redacted. Your change was not saved.");
+    await expect(t3.locator(".q-redacted")).toBeVisible();
+    await expect(t3.locator("textarea.q-text")).toHaveCount(0);
+    await expect(t3.locator("button.q-edit")).toHaveCount(0);
+    await expect(t3).not.toContainText("T3 version one.");
+    await expect(t3).not.toContainText("T3 draft");
+    expect(seen.failed).toEqual(["409 /api/wiki/answers", "500 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("a new answer to a question closed meanwhile: no composer, the card reads Closed, and says why", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t2 = card(page, "T2");
+    await expect(t2.locator(".q-state")).toHaveText("Open");
+    await t2.locator("textarea.q-text").fill("T2 text, written as it closed.");
+    await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(true), "utf8");
+    await t2.locator("button.q-save").click();
+
+    await expect(t2.locator(".q-msg-error")).toHaveText("The answer was not saved: the question was closed while you were writing.");
+    await expect(t2.locator("form.q-composer")).toHaveCount(0);
+    await expect(t2.locator("textarea.q-text, button.q-save")).toHaveCount(0);
+    await expect(t2.locator(".q-state")).toHaveText("Closed");
+    await expect(t2).toHaveClass(/\bq-closed\b/);
+    await expect(t2).not.toHaveClass(/\bq-open\b/);
+    expect(await rowsFor("T2", TERMINAL_REL)).toHaveLength(0);
+    expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
     expect(seen.errors).toEqual([]);
   });
 });

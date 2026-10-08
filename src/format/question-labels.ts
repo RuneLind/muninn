@@ -71,6 +71,11 @@ export interface QuestionLabels {
     /** The answer being edited is gone (deleted by the retention sweep): the
      *  reader's text is kept in the composer as a new answer. */
     editGone: string;
+    /** A 409 answer_redacted: an admin redacted the answer being edited. The
+     *  editor closes and the draft goes: it is the text the admin removed. */
+    editRedacted: string;
+    /** A 409 question_closed: the question closed while the reader wrote. */
+    questionClosed: string;
     failed: string;
     loadFailed: string;
     /** The POST succeeded, the reload of the answers did not. */
@@ -157,6 +162,8 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       conflict:
         "This answer changed somewhere else. The latest version is shown above; your text is still in the editor, and saving it replaces that version.",
       editGone: "The answer you were editing was removed. Your text is kept below; saving it adds it as a new answer.",
+      editRedacted: "The answer you were editing was redacted. Your change was not saved.",
+      questionClosed: "The answer was not saved: the question was closed while you were writing.",
       failed: "The answer was not saved",
       loadFailed: "Answers could not be loaded.",
       savedReloadFailed: "The answer was saved, but the answers could not be loaded again.",
@@ -227,6 +234,8 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       conflict:
         "Svaret er endret et annet sted. Den nyeste versjonen vises over; teksten din står fortsatt i feltet, og lagrer du den, erstatter den den versjonen.",
       editGone: "Svaret du endret er fjernet. Teksten din er beholdt nedenfor; lagrer du den, blir den et nytt svar.",
+      editRedacted: "Svaret du endret er fjernet. Endringen din ble ikke lagret.",
+      questionClosed: "Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.",
       failed: "Svaret ble ikke lagret",
       loadFailed: "Kunne ikke hente svarene.",
       savedReloadFailed: "Svaret ble lagret, men svarene kunne ikke hentes på nytt.",
