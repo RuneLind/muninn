@@ -17,9 +17,10 @@ export const RETENTION_CLEANUP_FIRST_DELAY_MS = 60_000;
 export const RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS = 5 * 60_000;
 const BOUND = { statementTimeoutMs: RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS };
 /** How long shutdown waits for a run in flight before closing the pool anyway
- *  (`closeDb`'s timeout then terminates a statement still blocked). The wait
- *  overlaps shutdown's own waits for pending ticks and extractions, so it adds
- *  nothing to the total; it does not bound the shutdown as a whole. */
+ *  (`closeDb`'s timeout then terminates a statement still blocked). It overlaps
+ *  shutdown's waits for ticks and extractions, which return at once when nothing
+ *  is pending (always so for ticks on a pod with no Telegram bot), so it can add
+ *  up to 5 s to shutdown. */
 export const RETENTION_CLEANUP_STOP_WAIT_MS = 5_000;
 
 export type RetentionCleanupConfig = Pick<
