@@ -165,3 +165,25 @@ describe("answer cards fix round 2: what a reload result does", () => {
     expect(section.inserted).toEqual([]);
   });
 });
+
+describe("answer cards fix round 3: a failed reload after a good one", () => {
+  test("a refresh that fails after a successful load writes no load-error line", async () => {
+    const { calls, fetchFn } = heldFetch();
+    // Not connected while the first load lands, so it paints nothing (the
+    // stand-in has no DOM to paint into); connected when the refresh fails,
+    // so a load-error line would be written.
+    const section = connectedSection("O1");
+    let connected = false;
+    Object.defineProperty(section, "isConnected", { get: () => connected });
+    const handle = enhanceAnswerCards(rootOf([section]), { answerable: true }, { wiki: "w", relPath: "p.mdx", fetchFn })!;
+    calls[0]!.resolve(answersResponse([wire({})]));
+    await tick();
+    expect(handle.answers().map((a) => a.answerId)).toEqual(["a1"]);
+    connected = true;
+    const refreshed = handle.refresh();
+    calls[1]!.reject(new Error("down"));
+    await refreshed;
+    expect(section.inserted).toEqual([]);
+    expect(handle.answers().map((a) => a.answerId)).toEqual(["a1"]);
+  });
+});

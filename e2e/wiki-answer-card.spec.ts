@@ -17,7 +17,7 @@
  * ENV PREREQUISITE: `bun run db:setup:test`. No model calls.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page, type Route } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -140,6 +140,48 @@ const FIX_PAGE = [
   ...q("F18", "Saved to reload another card?"),
 ].join("\n");
 
+// Fix round 3: where focus goes across a repaint, one question per cell of the
+// table in the "answer card focus" describe. Odd ids are the card under test,
+// the even id after each is the card whose save reloads the answers.
+const FOCUS_REL = "plans/focus.mdx";
+const FOCUS_PAGE = [
+  "---",
+  "title: Focus page",
+  "type: plan",
+  "---",
+  "",
+  ...q("G1", "Repainted while nothing has focus?"),
+  ...q("G2", "Saved to reload G1?"),
+  ...q("G3", "Repainted while the search box has focus?"),
+  ...q("G4", "Saved to reload G3?"),
+  ...q("G5", "Repainted while its id link has focus?"),
+  ...q("G6", "Saved to reload G5?"),
+  ...q("G7", "Decided, repainted while its decision link has focus?"),
+  ...q("G8", "Saved to reload G7?"),
+  ...q("G9", "Edit gone after a repaint?"),
+  ...q("G10", "Saved to reload G9?"),
+  ...q("G11", "New-answer composer kept across a repaint?", ' choices="A|B"'),
+  ...q("G12", "Saved to reload G11?"),
+  ...q("G13", "New-answer composer gone after a repaint?"),
+  ...q("G14", "Saved to reload G13?"),
+  ...q("G15", "Load again gone once it worked?"),
+  ...q("G16", "Edit form kept across repaints?", ' choices="A|B"'),
+  ...q("G17", "Saved again and again to reload G16?"),
+  ...q("G18", "Edit form gone after a repaint?"),
+  ...q("G19", "Saved to reload G18?"),
+  ...q("G20", "An edit save refused?"),
+  ...q("G21", "An edit save that works?"),
+  ...q("G22", "A conflict whose reload says answerable false?"),
+  "<DecisionLog>",
+  "",
+  "- **D99** — Done.",
+  "- **G5** — Still open.",
+  "- **G7** — Decided. Closed 2026-10-08 (D99).",
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let server: ChildProcess | undefined;
@@ -170,6 +212,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", REL), PAGE, "utf8");
   await writeFile(path.join(base, "a", STYLE_REL), STYLE_PAGE, "utf8");
   await writeFile(path.join(base, "a", FIX_REL), FIX_PAGE, "utf8");
+  await writeFile(path.join(base, "a", FOCUS_REL), FOCUS_PAGE, "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -216,6 +259,10 @@ test.beforeAll(async ({}, info) => {
   const f8 = await api({ relPath: FIX_REL, questionId: "F8", body: "F8 version one." });
   await api({ relPath: FIX_REL, questionId: "F8", body: "F8 version two.", answerId: f8.answerId, baseVersion: 1 });
   await api({ relPath: FIX_REL, questionId: "F13", body: "F13 version one." });
+
+  // The focus page's seeded answers: each one the viewer's, so it has an Edit.
+  for (const id of ["G9", "G18", "G20", "G21"]) await api({ relPath: FOCUS_REL, questionId: id, body: `${id} version one.` });
+  await api({ relPath: FOCUS_REL, questionId: "G16", choice: "A", body: "G16 version one." });
 });
 
 test.afterAll(async () => {
@@ -757,6 +804,325 @@ test.describe("Wiki reader: the answer card, fix round 2", () => {
     // The other cards keep what the first load painted.
     await expect(card(page, "F1").locator(".q-answer")).toHaveCount(1);
     expectClean(seen);
+  });
+});
+
+/**
+ * Fix round 3: where focus goes when a card is repainted, one test per cell.
+ *
+ * | Focus before the repaint                         | Control after   | Focus after                      |
+ * |--------------------------------------------------|-----------------|----------------------------------|
+ * | nothing (`<body>`)                               | —               | untouched                        |
+ * | outside every card (the search box)              | —               | untouched                        |
+ * | another card (F9's textarea)                     | —               | untouched (fix round 1 pin)      |
+ * | question text link (F16)                         | always there    | untouched (fix round 2 pin)      |
+ * | `a.q-id`, `a.q-decision`                         | always there    | untouched                        |
+ * | `.q-answers` (Edit)                              | there (F13)     | same control (fix round 1 pin)   |
+ * | `.q-answers` (Edit)                              | gone            | the card                         |
+ * | `.q-composer`, new answer                        | there           | same control, caret + selection  |
+ * | `.q-composer`, new answer                        | gone            | the card                         |
+ * | `.q-msg` Load again, pressed, its load still out | there           | stays on it (`aria-disabled`)    |
+ * | `.q-msg` Load again, the load worked             | gone            | the card                         |
+ * | edit form inside `.q-answers`                    | there           | same control, caret + selection  |
+ * | edit form inside `.q-answers`                    | gone            | the card                         |
+ * | edit form Save, refused (400/403/409/network)    | disabled in flight | the card                      |
+ * | edit form Save, saved                            | gone            | the answer's Edit (save rule)    |
+ *
+ * `.q-msg` with Load again never survives a repaint (a good load, a save,
+ * Edit and Cancel all clear it), and `.q-answers-error` holds nothing
+ * focusable: neither has a "there" cell.
+ */
+test.describe("Wiki reader: answer card focus across a repaint", () => {
+  const openFocus = async (page: Page) => {
+    const seen = await openPage(page, WIKI, FOCUS_REL);
+    await expect(card(page, "G9").locator(".q-answer")).toHaveCount(1);
+    return seen;
+  };
+  /** Hold every answer POST, so focus can move before the save's reload. */
+  const holdPosts = (page: Page) =>
+    page.route("**/api/wiki/answers", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const res = await route.fetch();
+      await sleep(800);
+      await route.fulfill({ response: res });
+    });
+  /** Rewrite the answers list of every GET from now on. */
+  const rewriteGets = (page: Page, fn: (answers: Record<string, unknown>[]) => Record<string, unknown>[]) =>
+    page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const body = (await res.json()) as { answers: Record<string, unknown>[] };
+      await route.fulfill({ response: res, json: { ...body, answers: fn(body.answers) } });
+    });
+  /** Save on a trigger card: its POST is held, its reload repaints the rest. */
+  const saveOn = async (c: Locator, text: string) => {
+    if ((await c.locator("button.q-edit").count()) > 0) await c.locator("button.q-edit").click();
+    await c.locator("textarea.q-text").fill(text);
+    await c.locator("button.q-save").click();
+  };
+  const otherAnswer = (questionId: string, mine: boolean) => ({
+    answerId: randomUUID(),
+    questionId,
+    version: 1,
+    versionCount: 1,
+    authorName: "Kari Nordmann",
+    choice: null,
+    body: `${questionId} answered elsewhere.`,
+    createdAt: Date.now(),
+    firstCreatedAt: Date.now(),
+    exported: false,
+    redacted: false,
+    mine,
+    asked: false,
+  });
+  const activeIsBody = (page: Page) => page.evaluate(() => document.activeElement === document.body);
+  const selection = (l: Locator) =>
+    l.evaluate((el) => [(el as HTMLTextAreaElement).selectionStart, (el as HTMLTextAreaElement).selectionEnd]);
+
+  test("nothing focused: a repaint leaves focus on the page body", async ({ page }) => {
+    const seen = await openFocus(page);
+    await api({ relPath: FOCUS_REL, questionId: "G1", body: "G1 answered elsewhere." });
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      await sleep(800);
+      await route.fulfill({ response: res });
+    });
+    const g2 = card(page, "G2");
+    await g2.locator("textarea.q-text").fill("G2 saved.");
+    await g2.locator("button.q-save").click();
+    // The save moves focus to G2's Edit; the reader then clicks away while the
+    // reload is out.
+    await expect(g2.locator("button.q-edit")).toBeFocused();
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    expect(await activeIsBody(page)).toBe(true);
+    await expect(card(page, "G1").locator(".q-answer-body")).toHaveText("G1 answered elsewhere.");
+    expect(await activeIsBody(page)).toBe(true);
+    expectClean(seen);
+  });
+
+  test("focus outside every card: the search box keeps focus through a repaint", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    await saveOn(card(page, "G4"), "G4 saved.");
+    await api({ relPath: FOCUS_REL, questionId: "G3", body: "G3 answered elsewhere." });
+    const search = page.locator("#wikiSearch");
+    await search.focus();
+    await expect(card(page, "G3").locator(".q-answer-body")).toHaveText("G3 answered elsewhere.");
+    await expect(search).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("focus on the card's id link: a repaint leaves it there", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    await saveOn(card(page, "G6"), "G6 saved.");
+    await api({ relPath: FOCUS_REL, questionId: "G5", body: "G5 answered elsewhere." });
+    const link = card(page, "G5").locator("a.q-id");
+    await link.focus();
+    await expect(card(page, "G5").locator(".q-answer-body")).toHaveText("G5 answered elsewhere.");
+    await expect(link).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("focus on a decided card's decision link: a repaint leaves it there", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    await rewriteGets(page, (answers) => [...answers, otherAnswer("G7", false)]);
+    await saveOn(card(page, "G8"), "G8 saved.");
+    const g7 = card(page, "G7");
+    const link = g7.locator("a.q-decision");
+    await link.focus();
+    await expect(g7.locator(".q-answer-body")).toHaveText("G7 answered elsewhere.");
+    await expect(g7.locator(".q-new")).toBeVisible();
+    await expect(link).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("focus on an Edit the repaint removes: the card holds focus", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    // The reload says G9's answer was redacted meanwhile: no Edit on it.
+    await rewriteGets(page, (answers) =>
+      answers.map((a) => (a.questionId === "G9" ? { ...a, redacted: true, body: "", choice: null } : a)),
+    );
+    await saveOn(card(page, "G10"), "G10 saved.");
+    const g9 = card(page, "G9");
+    await g9.locator("button.q-edit").focus();
+    await expect(g9.locator(".q-redacted")).toBeVisible();
+    await expect(g9.locator("button.q-edit")).toHaveCount(0);
+    await expect(g9).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("typing in a new-answer composer whose card repaints: focus, caret and selection stay", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    // Someone else answers G11: the card repaints and keeps the viewer's composer.
+    await rewriteGets(page, (answers) => [...answers, otherAnswer("G11", false)]);
+    await saveOn(card(page, "G12"), "G12 saved.");
+    const g11 = card(page, "G11");
+    const text = g11.locator("textarea.q-text");
+    await text.fill("abcdef");
+    await text.evaluate((el) => (el as HTMLTextAreaElement).setSelectionRange(2, 4));
+    await expect(g11.locator(".q-answer-body")).toHaveText("G11 answered elsewhere.");
+    await expect(text).toBeFocused();
+    expect(await selection(text)).toEqual([2, 4]);
+    await text.press("X");
+    await expect(text).toHaveValue("abXef");
+    expectClean(seen);
+  });
+
+  test("typing in a new-answer composer the repaint removes: the card holds focus", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    // The viewer's own answer to G13 arrives (saved in another tab): the
+    // composer gives way to it.
+    await rewriteGets(page, (answers) => [...answers, otherAnswer("G13", true)]);
+    await saveOn(card(page, "G14"), "G14 saved.");
+    const g13 = card(page, "G13");
+    await g13.locator("textarea.q-text").fill("Half a thought");
+    await expect(g13.locator(".q-answer-body")).toHaveText("G13 answered elsewhere.");
+    await expect(g13.locator("form.q-composer")).toHaveCount(0);
+    await expect(g13).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("Load again that works: the line goes and the card holds focus", async ({ page }) => {
+    const seen = await openFocus(page);
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "down" }) })
+        : route.fallback(),
+    );
+    const g15 = card(page, "G15");
+    await g15.locator("textarea.q-text").fill("G15 saved.");
+    await g15.locator("button.q-save").click();
+    const retry = g15.locator(".q-msg button.q-retry");
+    await expect(retry).toBeVisible();
+    await page.unroute("**/api/wiki/answers?*");
+    // The retry's load is held, so a second press lands while it is out.
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      await sleep(800);
+      await route.fulfill({ response: res });
+    });
+    const getsBefore = seen.answerGets.length;
+    await retry.focus();
+    await retry.press("Enter");
+    await retry.press("Enter");
+    await expect(retry).toBeFocused();
+    await expect(g15.locator(".q-msg")).toHaveCount(0);
+    await expect(g15).toBeFocused();
+    expect(seen.answerGets.length - getsBefore).toBe(1);
+    expect(seen.failed).toEqual(["500 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("an open edit form: each of its controls keeps focus through a repaint, the textarea its caret and selection", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    const g16 = card(page, "G16");
+    const g17 = card(page, "G17");
+    const [row] = await rowsFor("G16", FOCUS_REL);
+    await g16.locator("button.q-edit").click();
+    const text = g16.locator("form.q-composer textarea.q-text");
+    await text.fill("abcdef");
+    const controls: [string, Locator][] = [
+      ["textarea", text],
+      ["radio B", g16.locator('form.q-composer input[type="radio"][value="B"]')],
+      ["Clear choice", g16.locator("form.q-composer button.q-clear-choice")],
+      ["Save", g16.locator("form.q-composer button.q-save")],
+      ["Cancel", g16.locator("form.q-composer button.q-cancel")],
+    ];
+    let version = 1;
+    for (const [name, control] of controls) {
+      await saveOn(g17, `G17 save before ${name}.`);
+      // G16 changes elsewhere, so the coming reload repaints it.
+      await api({ relPath: FOCUS_REL, questionId: "G16", choice: "A", body: `G16 version ${version + 1}.`, answerId: row!.answer_id, baseVersion: version });
+      version++;
+      await control.focus();
+      if (name === "textarea") await text.evaluate((el) => (el as HTMLTextAreaElement).setSelectionRange(2, 4));
+      await expect(g16.locator(".q-answer > .q-by .q-edited")).toHaveText(`· edited ${version - 1}×`);
+      await expect(control, name).toBeFocused();
+      if (name === "textarea") expect(await selection(text)).toEqual([2, 4]);
+    }
+    await expect(text).toHaveValue("abcdef");
+    expectClean(seen);
+  });
+
+  test("an open edit form the repaint removes: the card holds focus", async ({ page }) => {
+    const seen = await openFocus(page);
+    await holdPosts(page);
+    // The reload no longer lists G18's answer, so its editor goes with it.
+    await rewriteGets(page, (answers) => answers.filter((a) => a.questionId !== "G18"));
+    const g18 = card(page, "G18");
+    await g18.locator("button.q-edit").click();
+    await saveOn(card(page, "G19"), "G19 saved.");
+    await g18.locator("textarea.q-text").focus();
+    await expect(g18.locator(".q-answer")).toHaveCount(0);
+    await expect(g18).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("an edit Save the server refuses: the card holds focus, whatever the refusal", async ({ page }) => {
+    const seen = await openFocus(page);
+    const g20 = card(page, "G20");
+    await g20.locator("button.q-edit").click();
+    await g20.locator("textarea.q-text").fill("G20 edit.");
+    const refusals: [string, (route: Route) => Promise<void>][] = [
+      ["400", (r) => r.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "Refused for the test." }) })],
+      ["403", (r) => r.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "Not yours." }) })],
+      ["409", (r) => r.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "x", code: "version_conflict" }) })],
+      ["network", (r) => r.abort()],
+    ];
+    for (const [name, refuse] of refusals) {
+      await page.route("**/api/wiki/answers", (route) => (route.request().method() === "POST" ? refuse(route) : route.fallback()));
+      await g20.locator("form.q-composer button.q-save").click();
+      await expect(g20.locator(".q-msg"), name).toBeVisible();
+      await expect(g20.locator("form.q-composer button.q-save"), name).toBeEnabled();
+      await expect(g20, name).toBeFocused();
+      await page.unroute("**/api/wiki/answers");
+    }
+    await expect(g20.locator("textarea.q-text")).toHaveValue("G20 edit.");
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("an edit Save that works: focus lands on the answer's Edit", async ({ page }) => {
+    const seen = await openFocus(page);
+    const g21 = card(page, "G21");
+    await g21.locator("button.q-edit").click();
+    await g21.locator("textarea.q-text").fill("G21 edited.");
+    await g21.locator("form.q-composer button.q-save").click();
+    await expect(g21.locator(".q-edited")).toHaveText("· edited 1×");
+    await expect(g21.locator("button.q-edit")).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("a 409 whose reload answers answerable:false shows the conflict and offers to load again", async ({ page }) => {
+    const seen = await openFocus(page);
+    await page.route("**/api/wiki/answers", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "x", code: "version_conflict" }) })
+        : route.fallback(),
+    );
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ answerable: false, answers: [] }) })
+        : route.fallback(),
+    );
+    const g22 = card(page, "G22");
+    await g22.locator("textarea.q-text").fill("G22 text.");
+    await g22.locator("button.q-save").click();
+    const msg = g22.locator(".q-msg-warn");
+    // Load again appears only once the reload has answered.
+    await expect(msg.locator("button.q-retry")).toBeVisible();
+    await expect(msg).toContainText("This answer changed somewhere else.");
+    await expect(msg).toContainText("Answers could not be loaded.");
+    await expect(g22.locator("textarea.q-text")).toHaveValue("G22 text.");
+    expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
   });
 });
 

@@ -15,8 +15,10 @@
  * - only the NEWEST answers request paints (`loadSeq`), so two reloads that
  *   return in reverse order cannot leave the older list on screen;
  * - a reload repaints only the cards whose data changed; a repaint puts
- *   focus and the caret back on the control it replaced, leaves focus anywhere
- *   else alone, and keeps every open log fold;
+ *   focus, caret and selection back on the control it replaced, nested ones
+ *   (the edit form inside the answers) included, puts it on the card when
+ *   that control is gone or disabled, leaves focus anywhere else alone, and
+ *   keeps every open log fold;
  * - an edit is based on the version the reader clicked Edit on, captured then
  *   — never on whatever a later reload put in the list, which would turn a
  *   stale edit into a silent overwrite instead of a 409;
@@ -268,15 +270,17 @@ interface FocusMark {
   end: number | null;
 }
 
-/** The parts of a card `renderCard` removes and rebuilds. */
+/** The parts of a card `renderCard` removes and rebuilds. An edit form sits
+ *  INSIDE `.q-answers`, so a part can be nested in another. */
 const REPAINTED_PARTS = ".q-answers, .q-composer, .q-msg, .q-answers-error";
 
-/** Focus inside a part the repaint replaces, or null: focus on the question
- *  text, the id link or the card itself survives the repaint untouched. */
+/** Focus inside a part the repaint replaces, at any depth, or null: focus on
+ *  the question text, the id or decision link, or the card itself survives the
+ *  repaint untouched. */
 function captureFocus(section: HTMLElement): FocusMark | null {
   const el = document.activeElement;
   if (!el || !section.contains(el)) return null;
-  if (el.closest(REPAINTED_PARTS)?.parentElement !== section) return null;
+  if (!el.closest(REPAINTED_PARTS)) return null;
   const key = focusKeyOf(section, el) ?? "section";
   const text = el instanceof HTMLTextAreaElement ? el : null;
   return { key, start: text ? text.selectionStart : null, end: text ? text.selectionEnd : null };
@@ -296,7 +300,8 @@ function restoreFocus(section: HTMLElement, mark: FocusMark | null): void {
       return;
     }
   }
-  // The control focus was on is gone: the card holds it.
+  // The control focus was on is gone, or disabled while a save is out: the
+  // card holds it.
   section.focus({ preventScroll: true });
 }
 
@@ -460,9 +465,12 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
       syncComposer(ui);
       section.querySelector<HTMLInputElement>("form.q-composer input[type=radio]")?.focus();
     } else if (t.classList.contains("q-retry")) {
-      (t as HTMLButtonElement).disabled = true;
+      // aria-disabled, not `disabled`: the browser drops focus from a button
+      // it disables, so the reload's repaint would find focus on <body>.
+      if (t.getAttribute("aria-disabled") === "true") return;
+      t.setAttribute("aria-disabled", "true");
       void loadAnswers(ctx).then((r) => {
-        if (r !== "ok" && t.isConnected) (t as HTMLButtonElement).disabled = false;
+        if (r !== "ok" && t.isConnected) t.removeAttribute("aria-disabled");
       });
     }
   });
