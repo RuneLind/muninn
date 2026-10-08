@@ -74,12 +74,13 @@ export function unexportedCount(answers: readonly AnswerWire[]): number {
   return answers.filter(isUnexported).length;
 }
 
-/** The pill text for an open-family state; null for Decided/Closed, whose
- *  pill the server already rendered (with the `→ Dn` link). */
+/** The pill text; null for Decided, whose pill the server already rendered
+ *  with its `→ Dn` link. Closed has one: a card can close under the reader. */
 export function statePillText(state: CardDisplayState, L: QuestionLabels): string | null {
   if (state === "open") return L.open;
   if (state === "answered") return L.answered;
   if (state === "copied") return L.copied;
+  if (state === "closed") return L.closed;
   return null;
 }
 
@@ -329,9 +330,11 @@ export function saveErrorText(status: number, payload: unknown, L: QuestionLabel
     const tail = Number.isInteger(more) && (more as number) > 0 ? ` ${L.composer.moreReasons(more as number)}` : "";
     return `${L.composer.scannerRefused} ${reasons.join("; ")}${tail}`;
   }
-  if (payload && typeof payload === "object" && (payload as { code?: unknown }).code === "scanner_unavailable") {
-    return L.composer.scannerUnavailable;
-  }
+  const code = payload && typeof payload === "object" ? (payload as { code?: unknown }).code : undefined;
+  if (code === "scanner_unavailable") return L.composer.scannerUnavailable;
+  // The two refusals no retry can change, which the card acts on (save()).
+  if (status === 409 && code === "answer_redacted") return L.composer.editRedacted;
+  if (status === 409 && code === "question_closed") return L.composer.questionClosed;
   const error =
     payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
       ? (payload as { error: string }).error

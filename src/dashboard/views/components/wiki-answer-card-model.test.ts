@@ -52,10 +52,12 @@ describe("the five card states", () => {
     test(name, () => expect(cardDisplayState(server, answers)).toBe(want as never));
   }
 
-  test("the pill text follows the wiki's language; Decided/Closed keep the server's pill", () => {
+  test("the pill text follows the wiki's language; Decided keeps the server's pill", () => {
     expect(["open", "answered", "copied"].map((s) => statePillText(s as never, no))).toEqual(["Åpent", "Besvart", "Kopiert"]);
     expect(statePillText("decided", en)).toBeNull();
-    expect(statePillText("closed", en)).toBeNull();
+    // A card can close under the reader (a save's 409 question_closed).
+    expect(statePillText("closed", en)).toBe("Closed");
+    expect(statePillText("closed", no)).toBe("Lukket");
   });
 
   test("the N new badge counts answers whose latest version is not exported", () => {
@@ -156,8 +158,8 @@ describe("the composer", () => {
 
 describe("a failed save", () => {
   test("shows the server's sentence when there is one", () => {
-    expect(saveErrorText(409, { error: "question O1 is closed", code: "question_closed" }, en)).toBe(
-      "The answer was not saved: question O1 is closed",
+    expect(saveErrorText(400, { error: "choice must be one of: A, B", code: "bad_choice" }, en)).toBe(
+      "The answer was not saved: choice must be one of: A, B",
     );
     expect(saveErrorText(502, null, en)).toBe("The answer was not saved: HTTP 502");
     expect(saveErrorText(0, null, no)).toBe("Svaret ble ikke lagret");
@@ -305,6 +307,19 @@ describe("answer cards PR 5: Redact and the scanner", () => {
     expect(saveErrorText(503, { error: "x", code: "scanner_unavailable" }, en)).toBe(en.composer.scannerUnavailable);
     // Any other 422 keeps the server's own sentence.
     expect(saveErrorText(422, { error: "something else", code: "other" }, en)).toBe("The answer was not saved: something else");
+  });
+});
+
+describe("a save refused for good", () => {
+  test("a 409 answer_redacted or question_closed is said in the card's language, never the server's sentence", () => {
+    const redacted = { error: "this answer was redacted", code: "answer_redacted" };
+    const closed = { error: "question T2 is decided", code: "question_closed" };
+    expect(saveErrorText(409, redacted, en)).toBe("The answer you were editing was redacted. Your change was not saved.");
+    expect(saveErrorText(409, redacted, no)).toBe("Svaret du endret er fjernet av en administrator. Endringen din ble ikke lagret.");
+    // Not editGone's opening: a redacted answer is not a removed one.
+    expect(no.composer.editRedacted.split(". ")[0]).not.toBe(no.composer.editGone.split(". ")[0]);
+    expect(saveErrorText(409, closed, en)).toBe("The answer was not saved: the question was closed while you were writing.");
+    expect(saveErrorText(409, closed, no)).toBe("Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.");
   });
 });
 

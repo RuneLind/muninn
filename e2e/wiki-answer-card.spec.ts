@@ -230,6 +230,40 @@ const SWEEP_PAGE = [
   ...q("S8", "A carried draft cancelled?"),
 ].join("\n");
 
+// A save the server refuses for good: the answer was redacted, or the
+// question closed, after the card was loaded. A case closes its question by
+// rewriting this page mid-test, so its own file keeps the rewrite away from
+// other pages; each id closes once and stays closed. T6 is the card whose
+// save reloads T7.
+const TERMINAL_REL = "plans/terminal.mdx";
+const terminalClosed = new Set<string>();
+const terminalPage = () =>
+  [
+    "---",
+    "title: Terminal page",
+    "type: plan",
+    "---",
+    "",
+    ...q("T1", "Redacted while its editor is open?"),
+    ...q("T2", "Closed while its answer is being written?"),
+    ...q("T3", "Redacted under its editor, and the reload fails?"),
+    ...q("T4", "Closed after a conflict whose reload failed?"),
+    ...q("T5", "Closed under an admin's editor?"),
+    ...q("T6", "Saved to reload T7?"),
+    ...q("T7", "Closed under its editor, then swept?"),
+    "<DecisionLog>",
+    "",
+    ...[...terminalClosed].map((id) => `- **${id}** — Closed mid-write. Closed 2026-10-08 (D98).`),
+    "",
+    "</DecisionLog>",
+    "",
+  ].join("\n");
+const closeTerminal = async (id: string) => {
+  terminalClosed.add(id);
+  await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(), "utf8");
+};
+const CLOSED_MSG = "The answer was not saved: the question was closed while you were writing.";
+
 // WIKI_ANSWER_GROUPS: synthetic groups and idents (Z99xxxx). The answers are
 // seeded by SQL with an author ident — auth off has only the owner, no ident.
 const GROUPS_REL = "plans/groups.mdx";
@@ -277,6 +311,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
   await writeFile(path.join(base, "a", SWEEP_REL), SWEEP_PAGE, "utf8");
   await writeFile(path.join(base, "a", GROUPS_REL), GROUPS_PAGE, "utf8");
+  await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(), "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -338,6 +373,8 @@ test.beforeAll(async ({}, info) => {
   await api({ relPath: SWEEP_REL, questionId: "S6", body: "S6 version one." });
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 first answer." });
   await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 second answer." });
+
+  for (const id of ["T1", "T3", "T4", "T5", "T7"]) await api({ relPath: TERMINAL_REL, questionId: id, body: `${id} version one.` });
 
   // The groups page: a fag member (also in utvikler) and a utvikler-only author.
   for (const [name, ident, body] of [
@@ -1610,6 +1647,154 @@ test.describe("Wiki reader: an answer swept while it is being edited (PR 5b fix 
     await expect(s6.locator(".q-msg")).toHaveText(GONE);
     await expect(s6.locator("textarea.q-text")).toHaveValue("S6 typed, saving.");
     await expect(s6.locator("form.q-composer")).not.toHaveClass(/q-composer-edit/);
+    expect(seen.errors).toEqual([]);
+  });
+});
+
+test.describe("Wiki reader: a save the server refuses for good", () => {
+  test("an edit whose answer an admin redacted meanwhile: the editor closes, its draft is gone, and the card shows the answer redacted", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t1 = card(page, "T1");
+    await expect(t1.locator(".q-answer")).toHaveCount(1);
+    await t1.locator("button.q-edit").click();
+    await t1.locator("textarea.q-text").fill("T1 draft, redacted under it.");
+    // The admin's redact, elsewhere: the real route, so the save meets the real 409.
+    const answerId = (await rowsFor("T1", TERMINAL_REL))[0]!.answer_id as string;
+    const res = await fetch(`${BASE}/api/wiki/answers/redact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId }),
+    });
+    expect(res.status).toBe(200);
+    await t1.locator("button.q-save").click();
+
+    await expect(t1.locator(".q-msg-error")).toHaveText("The answer you were editing was redacted. Your change was not saved.");
+    await expect(t1.locator(".q-redacted")).toBeVisible();
+    await expect(t1.locator("form.q-composer")).toHaveCount(0);
+    await expect(t1.locator("textarea.q-text")).toHaveCount(0);
+    await expect(t1).not.toContainText("T1 draft");
+    expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("the same refusal whose reload fails: the editor still closes and the answer still shows redacted", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t3 = card(page, "T3");
+    await expect(t3.locator(".q-answer")).toHaveCount(1);
+    await t3.locator("button.q-edit").click();
+    await t3.locator("textarea.q-text").fill("T3 draft, redacted under it.");
+    const answerId = (await rowsFor("T3", TERMINAL_REL))[0]!.answer_id as string;
+    const res = await fetch(`${BASE}/api/wiki/answers/redact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId }),
+    });
+    expect(res.status).toBe(200);
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET" ? route.fulfill({ status: 500, body: "{}" }) : route.fallback(),
+    );
+    await t3.locator("button.q-save").click();
+
+    await expect(t3.locator(".q-msg-error")).toHaveText("The answer you were editing was redacted. Your change was not saved.");
+    await expect(t3.locator(".q-redacted")).toBeVisible();
+    await expect(t3.locator("textarea.q-text")).toHaveCount(0);
+    await expect(t3.locator("button.q-edit")).toHaveCount(0);
+    await expect(t3).not.toContainText("T3 version one.");
+    await expect(t3).not.toContainText("T3 draft");
+    expect(seen.failed).toEqual(["409 /api/wiki/answers", "500 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("a new answer to a question closed meanwhile: no composer, the card reads Closed, and says why", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t2 = card(page, "T2");
+    await expect(t2.locator(".q-state")).toHaveText("Open");
+    await t2.locator("textarea.q-text").fill("T2 text, written as it closed.");
+    await closeTerminal("T2");
+    await t2.locator("button.q-save").click();
+
+    await expect(t2.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+    await expect(t2.locator("form.q-composer")).toHaveCount(0);
+    await expect(t2.locator("textarea.q-text, button.q-save")).toHaveCount(0);
+    await expect(t2.locator(".q-state")).toHaveText("Closed");
+    await expect(t2).toHaveClass(/\bq-closed\b/);
+    await expect(t2).not.toHaveClass(/\bq-open\b/);
+    await expect(t2).toHaveAttribute("data-question-state", "closed");
+    expect(await rowsFor("T2", TERMINAL_REL)).toHaveLength(0);
+    expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("closed after a conflict whose reload failed: the reload after the 409 rebases nothing, and the closed line stays", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t4 = card(page, "T4");
+    await t4.locator("button.q-edit").click();
+    await t4.locator("textarea.q-text").fill("T4 edit.");
+    // A conflict whose reload fails: the card still owes a rebase.
+    await page.route("**/api/wiki/answers", (route) =>
+      route.request().method() === "POST"
+        ? route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "x", code: "version_conflict" }) })
+        : route.fallback(),
+    );
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET" ? route.fulfill({ status: 500, body: "{}" }) : route.fallback(),
+    );
+    await t4.locator("button.q-save").click();
+    await expect(t4.locator(".q-msg-warn button.q-retry")).toBeVisible();
+    await page.unroute("**/api/wiki/answers");
+    await page.unroute("**/api/wiki/answers?*");
+    await closeTerminal("T4");
+    // The reload after the 409 renames T4's author, so the test can wait for a
+    // paint only that reload makes: it repaints in the same step as the rebase.
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const data = (await res.json()) as { answers: { questionId: string; authorName: string }[] };
+      for (const a of data.answers) if (a.questionId === "T4") a.authorName = "Reload Marker";
+      await route.fulfill({ response: res, json: data });
+    });
+    await t4.locator("button.q-save").click();
+
+    await expect(t4.locator(".q-author")).toHaveText("Reload Marker");
+    await expect(t4.locator("form.q-composer")).toHaveCount(0);
+    await expect(t4.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("closed under an admin's own editor: the answer keeps its Redact…", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t5 = card(page, "T5");
+    await expect(t5.locator("button.q-redact")).toHaveCount(1);
+    await t5.locator("button.q-edit").click();
+    await t5.locator("textarea.q-text").fill("T5 edit.");
+    await closeTerminal("T5");
+    await t5.locator("button.q-save").click();
+
+    await expect(t5.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+    await expect(t5.locator("form.q-composer")).toHaveCount(0);
+    await expect(t5.locator("button.q-redact")).toHaveCount(1);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("closed under its editor, then swept: a later reload says nothing about a kept draft", async ({ page }) => {
+    const seen = await openPage(page, WIKI, TERMINAL_REL);
+    const t7 = card(page, "T7");
+    await expect(t7.locator(".q-answer")).toHaveCount(1);
+    await t7.locator("button.q-edit").click();
+    await t7.locator("textarea.q-text").fill("T7 edit.");
+    await closeTerminal("T7");
+    await t7.locator("button.q-save").click();
+    await expect(t7.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+
+    await sql!`DELETE FROM wiki_answers WHERE wiki = ${WIKI} AND rel_path = ${TERMINAL_REL} AND question_id = 'T7'`;
+    const t6 = card(page, "T6");
+    await t6.locator("textarea.q-text").fill("T6 saved.");
+    await t6.locator("button.q-save").click();
+    await expect(t6.locator(".q-answer")).toHaveCount(1);
+
+    await expect(t7.locator(".q-answer")).toHaveCount(0);
+    await expect(t7.locator(".q-msg")).toHaveText(CLOSED_MSG);
+    await expect(t7.locator("form.q-composer")).toHaveCount(0);
     expect(seen.errors).toEqual([]);
   });
 });
