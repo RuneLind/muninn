@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import { withStatementTimeout, type StatementTimeoutOption } from "./statement-timeout.ts";
 import { capTextWithNote } from "../summaries/truncation.ts";
 
 /**
@@ -160,7 +161,7 @@ function toSnapshot(r: Record<string, unknown>): PromptSnapshot {
  *
  * ⚠️ **Both windows must be at least 1 day, and anything smaller THROWS.** These
  * numbers go into `NOW() - make_interval(days => n)`, so `0` resolves to `NOW()`
- * — the next scheduler tick would empty the table — and a negative one reaches
+ * — the next retention cleanup (`src/scheduler/retention-cleanup.ts`) would empty the table — and a negative one reaches
  * into the future and does the same. `src/config.ts` clamps the two env vars
  * (`positiveEnvInt`), but this function is exported and takes two plain numbers,
  * so a caller that COMPUTES a window would bypass that clamp silently. Refusing
@@ -169,7 +170,7 @@ function toSnapshot(r: Record<string, unknown>): PromptSnapshot {
 export async function cleanupOldSnapshots(retention: {
   chatDays: number;
   captureDays: number;
-}): Promise<number> {
+}, opts: StatementTimeoutOption = {}): Promise<number> {
   for (const [name, days] of [
     ["chatDays", retention.chatDays],
     ["captureDays", retention.captureDays],
@@ -180,11 +181,10 @@ export async function cleanupOldSnapshots(retention: {
       );
     }
   }
-  const sql = getDb();
-  const result = await sql`
+  const result = await withStatementTimeout(opts, (sql) => sql`
     DELETE FROM prompt_snapshots
     WHERE (kind = 'capture' AND created_at < NOW() - make_interval(days => ${retention.captureDays}))
        OR (kind <> 'capture' AND created_at < NOW() - make_interval(days => ${retention.chatDays}))
-  `;
+  `);
   return result.count;
 }
