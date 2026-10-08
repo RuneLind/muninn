@@ -26,7 +26,7 @@ const answer = (over: Partial<AnswerWire> = {}): AnswerWire => ({
   questionId: "O1",
   version: 1,
   versionCount: 1,
-  authorName: "Yvonne Jacobs",
+  authorName: "Synne Testdal",
   choice: null,
   body: "Plain text.",
   createdAt: new Date(2026, 9, 8, 21, 32).getTime(),
@@ -71,7 +71,7 @@ describe("an answer", () => {
       "en",
       false,
     );
-    expect(html).toContain('<span class="q-author">Yvonne Jacobs</span>');
+    expect(html).toContain('<span class="q-author">Synne Testdal</span>');
     expect(html).toContain("2026-10-08 21:32");
     expect(html).toContain('<span class="q-asked q-asked-yes">asked</span>');
     expect(html).toContain("edited 2×");
@@ -254,7 +254,7 @@ describe("fix round 1", () => {
   test("answer groups: a muted chip per group after the author, labelled for assistive tech; none ⇒ no chip", () => {
     const html = answerItemHtml(answer({ authorGroups: ["fag", "utvikler"] }), en, "en", false);
     expect(html).toContain(
-      '<span class="q-author">Yvonne Jacobs</span> <span class="q-group"><span class="q-group-label">group </span>fag</span> <span class="q-group"><span class="q-group-label">group </span>utvikler</span> <span class="q-time">',
+      '<span class="q-author">Synne Testdal</span> <span class="q-group"><span class="q-group-label">group </span>fag</span> <span class="q-group"><span class="q-group-label">group </span>utvikler</span> <span class="q-time">',
     );
     expect(answerItemHtml(answer({ authorGroups: ["fag"] }), no, "no", false)).toContain('<span class="q-group-label">gruppe </span>fag</span>');
     expect(answerItemHtml(answer(), en, "en", false)).not.toContain("q-group");

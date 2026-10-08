@@ -40,7 +40,7 @@ const REL = "plans/eksport.mdx";
 const PAGE = [
   "---",
   "title: Eksport",
-  'questions_to: ["Yvonne Jacobs (X111111)"]',
+  'questions_to: ["Synne Testdal (X111111)"]',
   "---",
   "",
   '<Question id="E1" choices="A|B">',
@@ -145,8 +145,8 @@ async function seed() {
   await getDb()`DELETE FROM wiki_answers WHERE wiki = ${WIKI}`;
   for (const k of Object.keys(ids) as (keyof typeof ids)[]) ids[k] = randomUUID();
   // E1: the person asked (ident match), edited once — v2 is what exports.
-  await insert({ id: ids.e1, version: 1, q: "E1", name: "Yvonne Jacobs", ident: "X111111", choice: "A", body: "Først A.", created: at(0) });
-  await insert({ id: ids.e1, version: 2, q: "E1", name: "Yvonne Jacobs", ident: "X111111", choice: "B", body: "Første linje.\nAndre — «sitat» æøå.", created: at(5) });
+  await insert({ id: ids.e1, version: 1, q: "E1", name: "Synne Testdal", ident: "X111111", choice: "A", body: "Først A.", created: at(0) });
+  await insert({ id: ids.e1, version: 2, q: "E1", name: "Synne Testdal", ident: "X111111", choice: "B", body: "Første linje.\nAndre — «sitat» æøå.", created: at(5) });
   // E2: someone not asked, no choice, a blank line in the body.
   await insert({ id: ids.e2, version: 1, q: "E2", name: "Ola Nordmann", ident: "Y222222", body: "Ett.\n\nTre.", created: at(1) });
   // E5: the question is gone from the page and its item is not closed: an orphan, asked null.
@@ -202,7 +202,7 @@ afterAll(async () => {
 });
 
 const EXPECTED_ANSWERS = [
-  "### E1 — Yvonne Jacobs (asked), 07.10.2026 21:37, chose B, version 2",
+  "### E1 — Synne Testdal (asked), 07.10.2026 21:37, chose B, version 2",
   "> Første linje.",
   "> Andre — «sitat» æøå.",
   "",
@@ -281,7 +281,7 @@ describe("answer groups in the block", () => {
   test("a heading names the author's groups from the current config; the block never carries an ident", async () => {
     const groups = new Map([["fag", new Set(["Y222222"])], ["utvikler", new Set(["Y222222", "X111111"])]]);
     const { body } = await getExport(appFor({ groups }));
-    expect(body.block).toContain("### E1 — Yvonne Jacobs [utvikler] (asked), 07.10.2026 21:37, chose B, version 2");
+    expect(body.block).toContain("### E1 — Synne Testdal [utvikler] (asked), 07.10.2026 21:37, chose B, version 2");
     expect(body.block).toContain("### E2 — Ola Nordmann [fag, utvikler] (not asked), 07.10.2026 21:33, version 1");
     expect(body.block).toContain("### E5 — Kari Nordmann, 07.10.2026 21:34, version 1");
     expect(body.block).not.toMatch(/X111111|Y222222/);
@@ -309,14 +309,14 @@ describe("POST confirm", () => {
   test("an edit between the GET and the confirm stays unexported, and exports next time in its latest version", async () => {
     const app = appFor();
     const { body } = await getExport(app);
-    await insert({ id: ids.e1, version: 3, q: "E1", name: "Yvonne Jacobs", ident: "X111111", choice: "A", body: "Ombestemt.", created: at(9) });
+    await insert({ id: ids.e1, version: 3, q: "E1", name: "Synne Testdal", ident: "X111111", choice: "A", body: "Ombestemt.", created: at(9) });
     expect(await (await confirm(app, body.rows)).json()).toEqual({ marked: 5 });
     const v3 = await getDb()`SELECT exported_at FROM wiki_answers WHERE answer_id = ${ids.e1} AND version = 3`;
     expect(v3[0]!.exported_at).toBeNull();
     const next = (await getExport(app)).body;
     expect(next.count).toBe(1);
     expect(next.rows).toEqual([[ids.e1, 3]]);
-    expect(next.block).toContain("### E1 — Yvonne Jacobs (asked), 07.10.2026 21:41, chose A, version 3\n> Ombestemt.\n");
+    expect(next.block).toContain("### E1 — Synne Testdal (asked), 07.10.2026 21:41, chose A, version 3\n> Ombestemt.\n");
   });
 
   test("refusals: not JSON 415, bad rows 400, over the cap 400", async () => {
@@ -360,7 +360,7 @@ describe("GET export again=1", () => {
     await confirm(app, (await getExport(app)).body.rows);
     await getDb()`UPDATE wiki_answers SET redacted_at = now(), body = '', choice = NULL WHERE answer_id = ${ids.e1}`;
     const again = (await getExport(app, "&again=1")).body;
-    expect(again.block).toContain("### E1 — Yvonne Jacobs (asked), 07.10.2026 21:37, redacted, version 2\n\n### E2");
+    expect(again.block).toContain("### E1 — Synne Testdal (asked), 07.10.2026 21:37, redacted, version 2\n\n### E2");
   });
 
   test("nothing ever exported ⇒ empty", async () => {

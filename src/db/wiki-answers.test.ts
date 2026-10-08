@@ -18,7 +18,7 @@ import {
 
 setupTestDb();
 
-const author = { userId: "u-yvonne", oid: "oid-1", navIdent: "X111111", name: "Yvonne Jacobs" };
+const author = { userId: "u-synne", oid: "oid-1", navIdent: "X111111", name: "Synne Testdal" };
 
 const input = (over: Partial<WikiAnswerVersionInput> = {}): WikiAnswerVersionInput => ({
   answerId: randomUUID(),

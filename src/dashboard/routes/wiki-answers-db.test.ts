@@ -98,7 +98,7 @@ const ASKED_REL = "plans/asked.mdx";
 const ASKED_PAGE = [
   "---",
   "title: Asked",
-  'questions_to: ["Yvonne Jacobs (X111111)"]',
+  'questions_to: ["Synne Testdal (X111111)"]',
   "---",
   "",
   '<Question id="A1">',
@@ -113,7 +113,7 @@ const ASKED_PAGE = [
   "",
   "</Question>",
   "",
-  '<Question id="A3" to="Yvonne Jacobs (Z999999)">',
+  '<Question id="A3" to="Synne Testdal (Z999999)">',
   "",
   "Same name, another ident?",
   "",
@@ -176,15 +176,15 @@ const GROUP_PAGE = [
 const OWNER = "Rune Owner";
 let root = "";
 
-const yvonne: Identity = {
-  userId: "u-yvonne",
-  displayName: "Yvonne Jacobs",
+const synne: Identity = {
+  userId: "u-synne",
+  displayName: "Synne Testdal",
   navIdent: "X111111",
-  oid: "oid-yvonne",
+  oid: "oid-synne",
   provider: "entra",
   expiresAt: null,
 };
-const ola: Identity = { ...yvonne, userId: "u-ola", displayName: "Ola Nordmann", navIdent: "Y222222", oid: "oid-ola" };
+const ola: Identity = { ...synne, userId: "u-ola", displayName: "Ola Nordmann", navIdent: "Y222222", oid: "oid-ola" };
 
 function appFor(
   opts: {
@@ -278,14 +278,14 @@ describe("the author (D9)", () => {
   });
 
   test("an identity: the session's user, name, oid and ident — never the body's", async () => {
-    const res = await post(appFor({ identity: yvonne, role: "user" }), answer({ authorName: "Mallory" }));
+    const res = await post(appFor({ identity: synne, role: "user" }), answer({ authorName: "Mallory" }));
     expect(res.status).toBe(201);
     const { answerId } = await res.json();
     const row = (await getDb()`SELECT * FROM wiki_answers WHERE answer_id = ${answerId}`)[0]!;
     expect([row.author_user_id, row.author_name, row.author_oid, row.author_nav_ident]).toEqual([
-      "u-yvonne",
-      "Yvonne Jacobs",
-      "oid-yvonne",
+      "u-synne",
+      "Synne Testdal",
+      "oid-synne",
       "X111111",
     ]);
   });
@@ -300,7 +300,7 @@ describe("the author (D9)", () => {
 
 describe("edits are append-only, and only the author's", () => {
   test("an edit adds version 2 under the same answer; GET shows one answer", async () => {
-    const app = appFor({ identity: yvonne, role: "user" });
+    const app = appFor({ identity: synne, role: "user" });
     const first = await (await post(app, answer({ questionId: "O3", choice: null, body: "v1" }))).json();
     const res = await post(app, answer({ questionId: "O3", choice: null, body: "v2", answerId: first.answerId, baseVersion: 1 }));
     expect(res.status).toBe(200);
@@ -317,7 +317,7 @@ describe("edits are append-only, and only the author's", () => {
   });
 
   test("a stranger's edit is refused — an admin's included — and adds no row", async () => {
-    const first = await (await post(appFor({ identity: yvonne, role: "user" }), answer())).json();
+    const first = await (await post(appFor({ identity: synne, role: "user" }), answer())).json();
     for (const app of [appFor({ identity: ola, role: "user" }), appFor({ identity: ola, role: "admin" })]) {
       const res = await post(app, answer({ answerId: first.answerId, baseVersion: 1, body: "hijack" }));
       expect(res.status).toBe(403);
@@ -448,30 +448,30 @@ describe("refusals", () => {
 
 describe("GET /api/wiki/answers", () => {
   test("never carries the author's oid or ident; mine is per viewer", async () => {
-    await post(appFor({ identity: yvonne, role: "user" }), answer({ body: "from yvonne" }));
+    await post(appFor({ identity: synne, role: "user" }), answer({ body: "from synne" }));
     const asOla = await getAnswers(appFor({ identity: ola, role: "user" }));
     const text = JSON.stringify(asOla);
-    expect(text).not.toContain("oid-yvonne");
+    expect(text).not.toContain("oid-synne");
     expect(text).not.toContain("X111111");
-    const row = asOla.answers.find((a: { body: string }) => a.body === "from yvonne");
+    const row = asOla.answers.find((a: { body: string }) => a.body === "from synne");
     expect(row.mine).toBe(false);
-    expect(row.authorName).toBe("Yvonne Jacobs");
-    const asYvonne = await getAnswers(appFor({ identity: yvonne, role: "user" }));
-    expect(asYvonne.answers.find((a: { body: string }) => a.body === "from yvonne").mine).toBe(true);
+    expect(row.authorName).toBe("Synne Testdal");
+    const asSynne = await getAnswers(appFor({ identity: synne, role: "user" }));
+    expect(asSynne.answers.find((a: { body: string }) => a.body === "from synne").mine).toBe(true);
   });
 
   test("versions=1 adds earlier versions to the author and an admin, not to anyone else", async () => {
-    const asYvonne = appFor({ identity: yvonne, role: "user" });
-    const first = await (await post(asYvonne, answer({ questionId: "O3", choice: null, body: "first" }))).json();
-    await post(asYvonne, answer({ questionId: "O3", choice: null, body: "second", answerId: first.answerId, baseVersion: 1 }));
+    const asSynne = appFor({ identity: synne, role: "user" });
+    const first = await (await post(asSynne, answer({ questionId: "O3", choice: null, body: "first" }))).json();
+    await post(asSynne, answer({ questionId: "O3", choice: null, body: "second", answerId: first.answerId, baseVersion: 1 }));
     const pick = (data: { answers: { answerId: string }[] }) =>
       data.answers.find((a) => a.answerId === first.answerId) as { earlier?: { version: number; body: string }[] };
 
-    expect(pick(await getAnswers(asYvonne, "&versions=1")).earlier?.map((v) => [v.version, v.body])).toEqual([[1, "first"]]);
+    expect(pick(await getAnswers(asSynne, "&versions=1")).earlier?.map((v) => [v.version, v.body])).toEqual([[1, "first"]]);
     expect(pick(await getAnswers(appFor({ identity: ola, role: "admin" }), "&versions=1")).earlier?.length).toBe(1);
     expect(pick(await getAnswers(appFor({ identity: ola, role: "user" }), "&versions=1")).earlier).toBeUndefined();
     // Without the flag nobody gets them.
-    expect(pick(await getAnswers(asYvonne)).earlier).toBeUndefined();
+    expect(pick(await getAnswers(asSynne)).earlier).toBeUndefined();
   });
 
   test("exported follows the LATEST version", async () => {
@@ -517,11 +517,11 @@ describe("/api/wiki/page on a wiki that takes answers", () => {
   });
 
   test("canExport is admin only", async () => {
-    expect((await page(appFor({ identity: yvonne, role: "admin" }), "answers")).answers?.canExport).toBe(true);
+    expect((await page(appFor({ identity: synne, role: "admin" }), "answers")).answers?.canExport).toBe(true);
   });
 
   test("role user gets no answers flag: the zones refuse it the answer routes (default profile)", async () => {
-    const data = await page(appFor({ identity: yvonne, role: "user" }), "answers");
+    const data = await page(appFor({ identity: synne, role: "user" }), "answers");
     expect(data.answers).toBeUndefined();
     // The card itself still renders, read-only for this viewer.
     expect(data.html).toContain("section class=\"question");
@@ -531,11 +531,11 @@ describe("/api/wiki/page on a wiki that takes answers", () => {
     __setReadonlyWikiRootsForTest([root]);
     __resetWikiCacheForTest();
     try {
-      expect((await page(appFor({ identity: yvonne, role: "user", profile: "nais" }), "answers")).answers).toEqual({
+      expect((await page(appFor({ identity: synne, role: "user", profile: "nais" }), "answers")).answers).toEqual({
         answerable: true,
         canExport: false,
       });
-      expect((await page(appFor({ identity: yvonne, role: "admin", profile: "nais" }), "answers")).answers?.canExport).toBe(true);
+      expect((await page(appFor({ identity: synne, role: "admin", profile: "nais" }), "answers")).answers?.canExport).toBe(true);
     } finally {
       __setReadonlyWikiRootsForTest();
       __resetWikiCacheForTest();
@@ -654,19 +654,19 @@ describe("asked / not asked (D2, the O2 v1 rule)", () => {
     post(app, { wiki: "answers", relPath: rel, questionId, body });
 
   test("the ident decides when both sides carry one; the name only when one side lacks it", async () => {
-    const asYvonne = appFor({ identity: yvonne, role: "user" });
+    const asSynne = appFor({ identity: synne, role: "user" });
     const asOla = appFor({ identity: ola, role: "user" });
-    expect((await say(asYvonne, ASKED_REL, "A1", "yvonne on A1")).status).toBe(201);
+    expect((await say(asSynne, ASKED_REL, "A1", "synne on A1")).status).toBe(201);
     expect((await say(asOla, ASKED_REL, "A1", "ola on A1")).status).toBe(201);
     expect((await say(asOla, ASKED_REL, "A2", "ola on A2")).status).toBe(201);
-    expect((await say(asYvonne, ASKED_REL, "A3", "yvonne on A3")).status).toBe(201);
+    expect((await say(asSynne, ASKED_REL, "A3", "synne on A3")).status).toBe(201);
     const viewer = appFor({ identity: ola, role: "admin" });
-    expect(await askedOf(viewer, ASKED_REL, "yvonne on A1")).toBe(true);
+    expect(await askedOf(viewer, ASKED_REL, "synne on A1")).toBe(true);
     expect(await askedOf(viewer, ASKED_REL, "ola on A1")).toBe(false);
     // to="OLA  nordmann" names no ident: case-folded, whitespace-collapsed name.
     expect(await askedOf(viewer, ASKED_REL, "ola on A2")).toBe(true);
     // Same display name, different ident: the ident wins.
-    expect(await askedOf(viewer, ASKED_REL, "yvonne on A3")).toBe(false);
+    expect(await askedOf(viewer, ASKED_REL, "synne on A3")).toBe(false);
   });
 
   test("auth off: the owner is asked where the question falls back to the owner, and not where it names someone else", async () => {
@@ -679,13 +679,13 @@ describe("asked / not asked (D2, the O2 v1 rule)", () => {
 
   test("a question that names nobody is null, not 'not asked'", async () => {
     const noOwner = { wikis: new Set(["answers"]), owner: null };
-    const asYvonne = appFor({ identity: yvonne, role: "user", answers: noOwner });
-    expect((await say(asYvonne, REL, "O3", "yvonne on O3")).status).toBe(201);
-    expect(await askedOf(asYvonne, REL, "yvonne on O3")).toBeNull();
+    const asSynne = appFor({ identity: synne, role: "user", answers: noOwner });
+    expect((await say(asSynne, REL, "O3", "synne on O3")).status).toBe(201);
+    expect(await askedOf(asSynne, REL, "synne on O3")).toBeNull();
   });
 
   test("the GET still never carries an ident, asked included", async () => {
-    await say(appFor({ identity: yvonne, role: "user" }), ASKED_REL, "A1", "ident check");
+    await say(appFor({ identity: synne, role: "user" }), ASKED_REL, "A1", "ident check");
     const res = await appFor({ identity: ola, role: "user" }).request(`/api/wiki/answers?wiki=answers&relPath=${encodeURIComponent(ASKED_REL)}`);
     const text = await res.text();
     expect(text).not.toContain("X111111");
@@ -760,7 +760,7 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
   test("nais with WIKI_ANSWER_SCANNER unset: a body is 503 scanner_unavailable and nothing is stored", async () => {
     await onNais(async () => {
       const before = await count();
-      const res = await post(appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(null) }), answer());
+      const res = await post(appFor({ identity: synne, role: "user", profile: "nais", answers: cfg(null) }), answer());
       expect(res.status).toBe(503);
       expect((await res.json()).code).toBe("scanner_unavailable");
       expect(await count()).toBe(before);
@@ -769,14 +769,14 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
 
   test("nais with the scanner unset: a choice-only answer has no text to scan and is stored", async () => {
     await onNais(async () => {
-      const res = await post(appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(null) }), answer({ body: "" }));
+      const res = await post(appFor({ identity: synne, role: "user", profile: "nais", answers: cfg(null) }), answer({ body: "" }));
       expect(res.status).toBe(201);
     });
   });
 
   test("a clean body is stored; a flagged one is 422 with the scanner's own reasons, and nothing is stored", async () => {
     await onNais(async () => {
-      const app = appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(refuses) });
+      const app = appFor({ identity: synne, role: "user", profile: "nais", answers: cfg(refuses) });
       expect((await post(app, answer({ body: "nothing to see" }))).status).toBe(201);
       const before = await count();
       const res = await post(app, answer({ body: `line one\ncontains ${MARKER} here` }));
@@ -818,7 +818,7 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
     for (const scanner of cases) {
       for (const profile of ["default", "nais"] as const) {
         await onNais(async () => {
-          const res = await post(appFor({ identity: yvonne, role: "user", profile, answers: cfg(scanner) }), answer());
+          const res = await post(appFor({ identity: synne, role: "user", profile, answers: cfg(scanner) }), answer());
           expect(`${profile} ${scanner} → ${res.status} ${(await res.json()).code}`).toBe(
             `${profile} ${scanner} → 503 scanner_unavailable`,
           );
@@ -835,7 +835,7 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
   // Fix round 1: the scan runs after every refusal that does not depend on the
   // text, so a flagged body never hides why the edit is refused anyway.
   test("a stranger's flagged edit is 403 not_author, not 422", async () => {
-    const mine = await (await post(appFor({ identity: yvonne, role: "user", answers: cfg(refuses) }), answer({ body: "clean" }))).json();
+    const mine = await (await post(appFor({ identity: synne, role: "user", answers: cfg(refuses) }), answer({ body: "clean" }))).json();
     const res = await post(
       appFor({ identity: ola, role: "user", answers: cfg(refuses) }),
       answer({ body: MARKER, answerId: mine.answerId, baseVersion: 1 }),
@@ -865,7 +865,7 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
 
   test("nais with the scanner unset: a stranger's edit is 403 not_author, not 503", async () => {
     await onNais(async () => {
-      const mine = await post(appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(null) }), answer({ body: "" }));
+      const mine = await post(appFor({ identity: synne, role: "user", profile: "nais", answers: cfg(null) }), answer({ body: "" }));
       expect(mine.status).toBe(201);
       const { answerId } = await mine.json();
       const res = await post(
@@ -969,7 +969,7 @@ describe("answer cards PR 5: redact (D15)", () => {
     });
 
   test("an admin redacts every version: body and choice emptied, the GET and the log say redacted", async () => {
-    const app = appFor({ identity: yvonne, role: "user" });
+    const app = appFor({ identity: synne, role: "user" });
     const first = await (await post(app, answer({ body: "v1 text" }))).json();
     await post(app, answer({ body: "v2 text", answerId: first.answerId, baseVersion: 1 }));
     const res = await redact(appFor({ identity: ola, role: "admin" }), { answerId: first.answerId });
@@ -980,7 +980,7 @@ describe("answer cards PR 5: redact (D15)", () => {
       ["", null, true],
       ["", null, true],
     ]);
-    const data = await getAnswers(appFor({ identity: yvonne, role: "user" }), "&versions=1");
+    const data = await getAnswers(appFor({ identity: synne, role: "user" }), "&versions=1");
     const a = data.answers.find((x: { answerId: string }) => x.answerId === first.answerId);
     expect(a).toMatchObject({ redacted: true, body: "", choice: null });
     expect(a.earlier.every((v: { redacted: boolean; body: string }) => v.redacted && v.body === "")).toBe(true);
@@ -1004,7 +1004,7 @@ describe("answer cards PR 5: redact (D15)", () => {
 
   test("refusals: role user 403, unknown 404, a bad id 400, text/plain 415", async () => {
     const first = await (await post(appFor(), answer())).json();
-    const user = await redact(appFor({ identity: yvonne, role: "user" }), { answerId: first.answerId });
+    const user = await redact(appFor({ identity: synne, role: "user" }), { answerId: first.answerId });
     expect(`${user.status} ${(await user.json()).code}`).toBe("403 admin_only");
     const unknown = await redact(appFor(), { answerId: "00000000-0000-4000-8000-000000000000" });
     expect(`${unknown.status} ${(await unknown.json()).code}`).toBe("404 unknown_answer");
@@ -1025,8 +1025,8 @@ describe("answer cards PR 5: redact (D15)", () => {
 
 describe("answer groups (WIKI_ANSWER_GROUPS)", () => {
   // Synthetic: Kari is in fag (and utvikler), Ola only in utvikler.
-  const kari: Identity = { ...yvonne, userId: "u-kari", displayName: "Nordmann, Kari", navIdent: "Z990001", oid: "oid-kari" };
-  const olaDev: Identity = { ...yvonne, userId: "u-oladev", displayName: "Utvikler, Ola", navIdent: "Z990003", oid: "oid-oladev" };
+  const kari: Identity = { ...synne, userId: "u-kari", displayName: "Nordmann, Kari", navIdent: "Z990001", oid: "oid-kari" };
+  const olaDev: Identity = { ...synne, userId: "u-oladev", displayName: "Utvikler, Ola", navIdent: "Z990003", oid: "oid-oladev" };
   const groups = new Map([
     ["fag", new Set(["Z990001", "Z990002"])],
     ["utvikler", new Set(["Z990001", "Z990003"])],
