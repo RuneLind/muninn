@@ -259,6 +259,9 @@ export interface ComposerView {
   choice: string | null;
   body: string;
   sending: boolean;
+  /** A new-answer composer holding a draft carried from an editor whose answer
+   *  is gone: it offers Cancel, which discards that draft. */
+  carried?: boolean;
 }
 
 /** The over-cap line's text, or "" within the cap. */
@@ -293,7 +296,7 @@ export function composerHtml(v: ComposerView, L: QuestionLabels): string {
     `<textarea class="q-text" aria-label="${esc(C.answer)}" placeholder="${esc(C.placeholder)}"${v.sending ? " readonly" : ""}>${esc(v.body)}</textarea>` +
     `<div class="q-row">` +
     `<button type="submit" class="q-save"${v.sending || !composerCanSave(v.choice, v.body) ? " disabled" : ""}>${esc(v.sending ? C.saving : v.editing ? C.saveEdit : C.save)}</button>` +
-    (v.editing ? `<button type="button" class="q-cancel"${v.sending ? " disabled" : ""}>${esc(C.cancel)}</button>` : "") +
+    (v.editing || v.carried ? `<button type="button" class="q-cancel"${v.sending ? " disabled" : ""}>${esc(C.cancel)}</button>` : "") +
     `<span class="q-count${over ? " q-count-over" : ""}">${len} / ${QUESTION_ANSWER_MAX}</span>` +
     `</div>` +
     `<p class="q-over" role="status"${over ? "" : " hidden"}>${esc(over)}</p>` +

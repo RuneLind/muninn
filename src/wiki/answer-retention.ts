@@ -20,12 +20,22 @@ export const ANSWER_RETENTION_STOP_WAIT_MS = 10_000;
 export async function runAnswerRetentionSweep(
   windows: WikiAnswerRetentionWindows,
   sweep: typeof sweepWikiAnswerRetention = sweepWikiAnswerRetention,
+  shouldStop?: () => boolean,
 ): Promise<WikiAnswerRetentionCounts> {
-  const counts = await sweep(windows);
+  const counts = await sweep(windows, Date.now(), { shouldStop });
+  const { exported, unexported, redacted, failed } = counts;
+  const props = { exported, unexported, redacted, failed };
   const message =
     "Answer retention deleted {exported} exported, {unexported} unexported, {redacted} redacted answer(s); {failed} failed";
-  if (counts.failed > 0) log.warn(message, { ...counts });
-  else if (counts.exported + counts.unexported + counts.redacted > 0) log.info(message, { ...counts });
+  if (failed > 0) {
+    // The first failure's class and code, once per sweep: never its message.
+    const first = counts.firstFailure;
+    log.warn(`${message} (first: {errorClass} {code})`, {
+      ...props,
+      errorClass: first?.errorClass ?? "unknown",
+      code: first?.code ?? "no code",
+    });
+  } else if (exported + unexported + redacted > 0) log.info(message, props);
   return counts;
 }
 
@@ -53,6 +63,8 @@ let first: ReturnType<typeof setTimeout> | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 /** The sweep in flight, if any: a tick that finds one skips, and stop waits for it. */
 let running: Promise<unknown> | null = null;
+/** Set by stop: the sweep in flight ends at its next answer. */
+let stopping = false;
 
 /** Start the hourly sweep (idempotent). Starts nothing when both windows are
  *  unset — the laptop default, so the owner's own answers stay. Its own timer,
@@ -64,10 +76,11 @@ export function startAnswerRetentionSweep(
 ): boolean {
   if (first || timer) return true;
   if (windows.exportedDays == null && windows.unexportedDays == null) return false;
+  stopping = false;
   const tick = () => {
     // One sweep at a time: a sweep slower than the interval must not overlap itself.
     if (running) return;
-    running = runAnswerRetentionSweep(windows, opts.sweep)
+    running = runAnswerRetentionSweep(windows, opts.sweep, () => stopping)
       .catch((err) => {
         log.warn("Answer retention sweep failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       })
@@ -88,6 +101,7 @@ export async function stopAnswerRetentionSweep(waitMs = ANSWER_RETENTION_STOP_WA
   if (first) clearTimeout(first);
   if (timer) clearInterval(timer);
   first = timer = null;
+  stopping = true;
   const inFlight = running;
   if (!inFlight) return;
   let timeout: ReturnType<typeof setTimeout> | undefined;

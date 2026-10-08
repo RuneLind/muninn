@@ -161,7 +161,13 @@ describe("sweepWikiAnswerRetention rules", () => {
       },
     });
     expect(await survivors()).toEqual([bad]);
-    expect(counts).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 1 });
+    expect(counts).toEqual({
+      exported: 0,
+      unexported: 1,
+      redacted: 0,
+      failed: 1,
+      firstFailure: { errorClass: "Error", code: null },
+    });
     void good;
   });
 
@@ -270,4 +276,98 @@ describe("sweep against a concurrent edit: the whole answer or nothing", () => {
     expect(counts).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 0 });
     expect(waited).toBe(true);
   });
+});
+
+describe("sweep under shutdown and a held lock (fix round 2)", () => {
+  test("a stop requested mid-sweep ends it before the next answer: nothing left over counts as failed", async () => {
+    await answer(91);
+    await answer(91);
+    let asked = 0;
+    // False before the first answer, true before the second.
+    const counts = await sweepWikiAnswerRetention(ON, Date.now(), { shouldStop: () => asked++ >= 1 });
+    expect(counts).toEqual({ exported: 0, unexported: 1, redacted: 0, failed: 0, stopped: true });
+    expect((await survivors()).length).toBe(1);
+  });
+
+  test("an answer whose lock is held past the bound fails with a lock timeout; the run goes on", async () => {
+    const held = await answer(91);
+    const free = await answer(91);
+    // An edit holds `held`'s lock, its new version not yet committed (so the
+    // sweep still picks the answer from the committed rows).
+    const hold = holdPoint();
+    const edit = insertWikiAnswerVersion(version(held, 2), { beforeCommit: hold.hook });
+    await hold.atHook;
+    try {
+      const sweep = sweepWikiAnswerRetention(ON, Date.now(), { lockTimeoutMs: 200 });
+      const counts = await Promise.race([sweep, Bun.sleep(4_000).then(() => "still waiting on the lock" as const)]);
+      expect(counts).toEqual({
+        exported: 0,
+        unexported: 1,
+        redacted: 0,
+        failed: 1,
+        firstFailure: { errorClass: "PostgresError", code: "55P03" },
+      });
+      expect(await versionsOf(free)).toEqual([]);
+    } finally {
+      hold.release();
+      await edit;
+    }
+    expect(await versionsOf(held)).toEqual([1, 2]);
+  }, 10_000);
+});
+
+describe("two export confirms over the same answers: one lock order, no deadlock", () => {
+  /** An unexported answer whose id starts with `lead` (a hex digit), so the
+   *  test controls how the ids sort. */
+  async function answerStarting(lead: string): Promise<string> {
+    const id = `${lead}${randomUUID().slice(1)}`;
+    await insertWikiAnswerVersion(version(id, 1));
+    return id;
+  }
+
+  /**
+   * Confirm A takes its first lock and then holds until confirm B has taken
+   * ITS first lock (or 500 ms pass). In one shared order B's first lock is A's,
+   * so B waits and A goes on; in opposite orders both hold one lock and want
+   * the other's, and Postgres aborts one with 40P01.
+   */
+  async function raceConfirms(a: [string, number][], b: [string, number][]) {
+    let bLocked!: () => void;
+    const bHasLock = new Promise<void>((r) => (bLocked = r));
+    let aLocked!: () => void;
+    const aHasLock = new Promise<void>((r) => (aLocked = r));
+    let aFirst = true;
+    let bFirst = true;
+    const confirmA = markWikiAnswersExported(WIKI, PAGE, a, {
+      afterLock: async () => {
+        if (!aFirst) return;
+        aFirst = false;
+        aLocked();
+        await Promise.race([bHasLock, Bun.sleep(500)]);
+      },
+    });
+    await aHasLock;
+    const confirmB = markWikiAnswersExported(WIKI, PAGE, b, {
+      afterLock: async () => {
+        if (!bFirst) return;
+        bFirst = false;
+        bLocked();
+      },
+    });
+    const settled = await Promise.allSettled([confirmA, confirmB]);
+    return settled.map((r) => (r.status === "fulfilled" ? r.value : `${(r.reason as { code?: string }).code}: ${r.reason}`));
+  }
+
+  test("the second confirm lists the answers in the reverse order: both complete, every row marked once", async () => {
+    const x = await answerStarting("b");
+    const y = await answerStarting("c");
+    expect(await raceConfirms([[x, 1], [y, 1]], [[y, 1], [x, 1]])).toEqual([2, 0]);
+  }, 15_000);
+
+  test("the second confirm spells one id in upper case: both complete, every row marked once", async () => {
+    const x = await answerStarting("b");
+    const y = await answerStarting("c");
+    // Raw, "C…" sorts before "b…": the lock order would be y, x — the reverse of A's.
+    expect(await raceConfirms([[x, 1], [y, 1]], [[y.toUpperCase(), 1], [x, 1]])).toEqual([2, 0]);
+  }, 15_000);
 });

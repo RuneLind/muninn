@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import {
+  ANSWER_RETENTION_STOP_WAIT_MS,
   answerRetentionBootLines,
   runAnswerRetentionSweep,
   startAnswerRetentionSweep,
@@ -53,12 +54,68 @@ describe("answer retention sweep wrapper", () => {
     expect(records.filter((r) => r.category.includes("answer-retention"))).toEqual([]);
   });
 
-  test("a sweep with failed answers logs one warning line carrying the failure count, counts only", async () => {
+  test("a sweep with failed answers logs one warning line: the counts and the first failure's class and code, nothing else", async () => {
     const records = await capture();
     const counts = { exported: 0, unexported: 1, redacted: 0, failed: 2 };
-    await runAnswerRetentionSweep({ exportedDays: 30, unexportedDays: 90 }, async () => counts);
+    await runAnswerRetentionSweep({ exportedDays: 30, unexportedDays: 90 }, async () => ({
+      ...counts,
+      firstFailure: { errorClass: "PostgresError", code: "55P03" },
+    }));
     const lines = records.filter((r) => r.category.includes("answer-retention"));
-    expect(lines.map((l) => ({ level: l.level, properties: l.properties }))).toEqual([{ level: "warning", properties: counts }]);
+    expect(lines.map((l) => ({ level: l.level, properties: l.properties }))).toEqual([
+      { level: "warning", properties: { ...counts, errorClass: "PostgresError", code: "55P03" } },
+    ]);
+  });
+
+  test("stop asks the sweep in flight to end at its next answer", async () => {
+    let shouldStop: (() => boolean) | undefined;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const sweep = async (_w: unknown, _now?: number, hooks?: { shouldStop?: () => boolean }) => {
+      shouldStop = hooks?.shouldStop;
+      await gate;
+      return ZERO;
+    };
+    startAnswerRetentionSweep({ exportedDays: 30, unexportedDays: null }, { sweep, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      expect(shouldStop).toBeDefined();
+      expect(shouldStop!()).toBe(false);
+      const stop = stopAnswerRetentionSweep();
+      expect(shouldStop!()).toBe(true);
+      release();
+      await stop;
+    } finally {
+      release();
+    }
+  });
+
+  test("a sweep that never finishes: stop returns after its bound, not with the sweep", async () => {
+    const records = await capture();
+    let release!: () => void;
+    const never = new Promise<void>((r) => (release = r));
+    const sweep = async () => {
+      await never;
+      return ZERO;
+    };
+    startAnswerRetentionSweep({ exportedDays: 30, unexportedDays: null }, { sweep, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      const t0 = performance.now();
+      await stopAnswerRetentionSweep(100);
+      const waited = performance.now() - t0;
+      expect(waited).toBeGreaterThanOrEqual(90);
+      expect(waited).toBeLessThan(1_000);
+      expect(records.some((r) => r.level === "warning" && String(r.message.join("")).includes("timed out"))).toBe(true);
+    } finally {
+      release(); // let the hung sweep settle, so `running` clears for the next test
+      await Bun.sleep(10);
+    }
+  });
+
+  test("the default stop bound is at most 10 s", () => {
+    expect(ANSWER_RETENTION_STOP_WAIT_MS).toBeLessThanOrEqual(10_000);
+    expect(ANSWER_RETENTION_STOP_WAIT_MS).toBeGreaterThan(0);
   });
 
   test("a tick while a sweep runs is skipped, and stop waits for the running sweep", async () => {

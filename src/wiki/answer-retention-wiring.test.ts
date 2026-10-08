@@ -25,6 +25,17 @@ describe("src/index.ts: answer retention wiring", () => {
     expect(lines, "src/index.ts must log answerRetentionBootLines(config.wikiAnswerRetention)").toBeGreaterThan(logging);
   });
 
+  test("each refusal warning is logged at warn, and the on line at info inside the start", async () => {
+    const text = await readFile(INDEX, "utf8");
+    expect(text).toMatch(/^const answerRetentionLines = answerRetentionBootLines\(config\.wikiAnswerRetention\);$/m);
+    expect(text, "every refusal warning must reach log.warn").toMatch(
+      /^for \(const line of answerRetentionLines\.warnings\) log\.warn\("\{line\}", \{ line \}\);$/m,
+    );
+    expect(text, "the on line must reach log.info when the sweep starts").toMatch(
+      /^if \(startAnswerRetentionSweep\(config\.wikiAnswerRetention\)\) \{\n  log\.info\("\{line\}", \{ line: answerRetentionLines\.info \}\);\n\}$/m,
+    );
+  });
+
   test("shutdown stops the timers first and awaits the stop before closing the pool", async () => {
     const text = await readFile(INDEX, "utf8");
     const shutdown = text.indexOf("async function shutdown()");

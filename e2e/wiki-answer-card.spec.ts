@@ -219,6 +219,12 @@ const SWEEP_PAGE = [
   ...q("S1", "Swept between Edit and Save?", ' choices="A|B"'),
   ...q("S3", "Swept while its editor is open, seen on a reload?"),
   ...q("S4", "Saved to reload S3?"),
+  // Fix round 2: two answers of the viewer's own (auth off: every answer is
+  // the viewer's), one swept under its editor; and a sweep seen mid-save.
+  ...q("S5", "Swept while the viewer has another answer here?"),
+  ...q("S6", "Swept while its save is out, seen on another card's reload?"),
+  ...q("S7", "Saved to reload S6 mid-save?"),
+  ...q("S8", "A carried draft cancelled?"),
 ].join("\n");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -309,6 +315,11 @@ test.beforeAll(async ({}, info) => {
   }
   await api({ relPath: SWEEP_REL, questionId: "S1", choice: "A", body: "S1 version one." });
   await api({ relPath: SWEEP_REL, questionId: "S3", body: "S3 version one." });
+  await api({ relPath: SWEEP_REL, questionId: "S5", body: "S5 first answer." });
+  await api({ relPath: SWEEP_REL, questionId: "S5", body: "S5 second answer." });
+  await api({ relPath: SWEEP_REL, questionId: "S6", body: "S6 version one." });
+  await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 first answer." });
+  await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 second answer." });
 });
 
 test.afterAll(async () => {
@@ -1112,7 +1123,8 @@ test.describe("Wiki reader: answer card focus across a repaint", () => {
     await expect(g18.locator(".q-msg")).toHaveText(
       "The answer you were editing was removed. Your text is kept below; saving it adds it as a new answer.",
     );
-    await expect(g18.locator("button.q-cancel")).toHaveCount(0);
+    // Its Cancel is the carried draft's discard (fix round 2).
+    await expect(g18.locator("button.q-cancel")).toHaveCount(1);
     await expect(g18.locator("textarea.q-text")).toHaveValue("G18 version one.");
     await expect(g18.locator("textarea.q-text")).toBeFocused();
     expectClean(seen);
@@ -1449,9 +1461,10 @@ test.describe("Wiki reader: an answer swept while it is being edited (PR 5b fix 
 
     await expect(s1.locator(".q-msg")).toHaveText(GONE);
     await expect(s1.locator(".q-answer")).toHaveCount(0);
-    // One composer, the NEW-answer one (no Cancel: that belongs to an edit), holding the draft.
+    // One composer, the NEW-answer one, holding the draft; its Cancel discards it.
     await expect(s1.locator("form.q-composer")).toHaveCount(1);
-    await expect(s1.locator("button.q-cancel")).toHaveCount(0);
+    await expect(s1.locator("form.q-composer")).not.toHaveClass(/q-composer-edit/);
+    await expect(s1.locator("button.q-cancel")).toHaveCount(1);
     await expect(s1.locator("textarea.q-text")).toHaveValue("S1 edited after the sweep.");
     await expect(s1.locator("input[type=radio][value=B]")).toBeChecked();
 
@@ -1479,9 +1492,98 @@ test.describe("Wiki reader: an answer swept while it is being edited (PR 5b fix 
 
     await expect(s3.locator(".q-msg")).toHaveText(GONE);
     await expect(s3.locator(".q-answer")).toHaveCount(0);
-    await expect(s3.locator("button.q-cancel")).toHaveCount(0);
+    await expect(s3.locator("button.q-cancel")).toHaveCount(1);
     await expect(s3.locator("textarea.q-text")).toHaveValue("S3 text, mid-edit.");
     expectClean(seen);
+  });
+
+  test("the viewer has another answer to the same question: the carried draft keeps its composer, no Edit can overwrite it, and it saves as a new answer", async ({ page }) => {
+    const seen = await openPage(page, WIKI, SWEEP_REL);
+    const s5 = card(page, "S5");
+    await expect(s5.locator(".q-answer")).toHaveCount(2);
+    const rows = await rowsFor("S5", SWEEP_REL);
+    const swept = rows.find((r) => r.body === "S5 first answer.")!.answer_id as string;
+    const kept = rows.find((r) => r.body === "S5 second answer.")!.answer_id as string;
+    await s5.locator(`button.q-edit[data-answer-id="${swept}"]`).click();
+    await s5.locator("textarea.q-text").fill("S5 typed before the sweep.");
+    await sql!`DELETE FROM wiki_answers WHERE answer_id = ${swept}`;
+    await s5.locator("button.q-save").click();
+
+    await expect(s5.locator(".q-msg")).toHaveText(GONE);
+    await expect(s5.locator(".q-answer")).toHaveCount(1);
+    // The line says the text is kept below: it is, in a new-answer composer.
+    await expect(s5.locator("form.q-composer")).toHaveCount(1);
+    await expect(s5.locator("form.q-composer")).not.toHaveClass(/q-composer-edit/);
+    await expect(s5.locator("textarea.q-text")).toHaveValue("S5 typed before the sweep.");
+    // The other answer offers no Edit while the draft is kept: one would overwrite it.
+    await expect(s5.locator("button.q-edit")).toHaveCount(0);
+
+    await s5.locator("button.q-save").click();
+    await expect(s5.locator(".q-answer")).toHaveCount(2);
+    await expect(s5.locator("form.q-composer")).toHaveCount(0);
+    await expect(s5.locator("button.q-edit")).toHaveCount(2);
+    const after = await rowsFor("S5", SWEEP_REL);
+    expect(after.map((r) => r.body).sort()).toEqual(["S5 second answer.", "S5 typed before the sweep."]);
+    expect(after.some((r) => r.answer_id === kept)).toBe(true);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("Cancel on a carried draft discards it and gives the other answer its Edit back", async ({ page }) => {
+    const seen = await openPage(page, WIKI, SWEEP_REL);
+    const s8 = card(page, "S8");
+    await expect(s8.locator(".q-answer")).toHaveCount(2);
+    const target = (await rowsFor("S8", SWEEP_REL)).find((r) => r.body === "S8 first answer.")!.answer_id as string;
+    await s8.locator(`button.q-edit[data-answer-id="${target}"]`).click();
+    await s8.locator("textarea.q-text").fill("S8 draft to discard.");
+    await sql!`DELETE FROM wiki_answers WHERE answer_id = ${target}`;
+    await s8.locator("button.q-save").click();
+    await expect(s8.locator(".q-msg")).toHaveText(GONE);
+    await expect(s8.locator("textarea.q-text")).toHaveValue("S8 draft to discard.");
+
+    await s8.locator("button.q-cancel").click();
+    await expect(s8.locator("form.q-composer")).toHaveCount(0);
+    await expect(s8.locator(".q-msg")).toHaveCount(0);
+    await expect(s8.locator("button.q-edit")).toHaveCount(1);
+    await s8.locator("button.q-edit").click();
+    await expect(s8.locator("textarea.q-text")).toHaveValue("S8 second answer.");
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("a reload from another card landing while the edit's save is out leaves the editor alone; the 404 then carries the draft", async ({ page }) => {
+    const seen = await openPage(page, WIKI, SWEEP_REL);
+    const s6 = card(page, "S6");
+    await expect(s6.locator(".q-answer")).toHaveCount(1);
+    const s6Id = (await rowsFor("S6", SWEEP_REL))[0]!.answer_id as string;
+    // Hold S6's save until S7's save and reload have landed.
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let s6Posted!: () => void;
+    const s6Out = new Promise<void>((r) => (s6Posted = r));
+    await page.route("**/api/wiki/answers", async (route) => {
+      const req = route.request();
+      if (req.method() !== "POST" || !(req.postData() ?? "").includes('"questionId":"S6"')) return route.fallback();
+      s6Posted();
+      await released;
+      await route.continue();
+    });
+    await s6.locator("button.q-edit").click();
+    await s6.locator("textarea.q-text").fill("S6 typed, saving.");
+    await s6.locator("button.q-save").click();
+    await s6Out;
+    await sql!`DELETE FROM wiki_answers WHERE answer_id = ${s6Id}`;
+    const s7 = card(page, "S7");
+    await s7.locator("textarea.q-text").fill("S7 saved.");
+    await s7.locator("button.q-save").click();
+    await expect(s7.locator(".q-answer")).toHaveCount(1);
+    // That reload no longer lists S6's answer, but its save is still out.
+    await expect(s6.locator(".q-answer")).toHaveCount(0);
+    await expect(s6.locator(".q-msg")).toHaveCount(0);
+    release();
+
+    await expect(s6.locator(".q-msg")).toHaveText(GONE);
+    await expect(s6.locator("textarea.q-text")).toHaveValue("S6 typed, saving.");
+    await expect(s6.locator("form.q-composer")).not.toHaveClass(/q-composer-edit/);
+    expect(seen.errors).toEqual([]);
   });
 });
 
