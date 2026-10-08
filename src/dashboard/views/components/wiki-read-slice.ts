@@ -19,6 +19,11 @@
  *     (`views/wiki-page.ts`) renders no agent-presence chip, withholds the host
  *     path from `window.__WIKI_ROOT__`, and the `/wiki` route resolves no ask
  *     bot and no gardener badge (`registerWikiReadRoutes`).
+ *
+ * The slice's paths are GET-only with one exception: `POST /api/wiki/answers`,
+ * a colleague's answer to a `<Question>` card (answer cards PR 5, route group
+ * `wiki-answers`). The answer controls key on the page payload's `answers`
+ * flag, not on this class.
  */
 import {
   WIKI_READONLY_BLOCKED_SELECTOR,

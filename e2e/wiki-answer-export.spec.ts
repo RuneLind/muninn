@@ -131,7 +131,8 @@ test.beforeAll(async ({}, info) => {
     stdio: "ignore",
   });
   // The pod shape: the read slice serves the reader to role `user` over a
-  // read-only root; the answer routes are outside that role's zone.
+  // read-only root; of the answer routes only GET and POST /api/wiki/answers
+  // are in that role's zone (answer cards PR 5) — never the export.
   userServer = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -372,14 +373,22 @@ test.describe("Wiki reader: no export for role user", () => {
   test("the button is absent and both export routes answer 403", async ({ page }) => {
     await api({ relPath: REL, questionId: "O3", body: "Et svar en bruker ikke skal kopiere." });
     const exportRequests: string[] = [];
+    const answerStatuses: number[] = [];
     page.on("request", (req) => {
-      if (new URL(req.url()).pathname.startsWith("/api/wiki/answers")) exportRequests.push(req.url());
+      if (new URL(req.url()).pathname.startsWith("/api/wiki/answers/export")) exportRequests.push(req.url());
+    });
+    // Since PR 5 the card itself loads the answers for role user on nais.
+    page.on("response", (res) => {
+      if (new URL(res.url()).pathname === "/api/wiki/answers") answerStatuses.push(res.status());
     });
     await open(page, REL, USER_BASE);
     await expect(card(page, "O3")).toBeVisible();
     await expect(page.locator("#wikiBreadcrumb")).toBeVisible();
     await expect(page.locator("#wikiAnswerExport")).toHaveCount(0);
+    await expect(card(page, "O3").locator(".q-answer")).toBeVisible();
     expect(exportRequests).toEqual([]);
+    expect(answerStatuses.length).toBeGreaterThan(0);
+    expect(answerStatuses.every((s) => s === 200)).toBe(true);
 
     const get = await fetch(`${USER_BASE}/api/wiki/answers/export?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
     expect(get.status).toBe(403);

@@ -8,6 +8,7 @@ import {
   HEALTH_READY_PATH,
   OPEN_ZONE_PATHS,
   USER_ZONE_PATHS,
+  WIKI_READ_SLICE_METHOD_ENTRIES,
   WIKI_READ_SLICE_PATHS,
   decideZone,
   inPathList,
@@ -286,16 +287,51 @@ describe("the wiki read slice in the user zone", () => {
     }
   });
 
-  test("the answer routes stay admin for role `user`, slice or not (answer cards PR 5 opens them)", () => {
+  test("the answer routes: default profile denies role `user` all of them; the slice opens exactly GET/HEAD/POST on the bare path", () => {
     const routes = wikiRouteTable("answers");
-    // The two answer routes plus the export GET and its confirm (PR 4), which
-    // stay admin after PR 5 too: their handlers check the role themselves.
-    expect(routes.length).toBe(4);
+    // GET + POST /api/wiki/answers, the export GET, its confirm and the redact.
+    expect(routes.length).toBe(5);
     for (const r of routes) {
-      for (const d of [asUser(r.path, r.method), asSliceUser(r.path, r.method)]) {
-        expect(`${r.method} ${r.path} → ${d.allowed ? "allowed" : d.reason}`).toBe(`${r.method} ${r.path} → default deny`);
-      }
+      expect(`${r.method} ${r.path} → ${asUser(r.path, r.method).allowed}`).toBe(`${r.method} ${r.path} → false`);
+      const open = r.path === "/api/wiki/answers";
+      expect(`${r.method} ${r.path} → ${asSliceUser(r.path, r.method).allowed}`).toBe(`${r.method} ${r.path} → ${open}`);
       expect(asAdmin(r.path, r.method).allowed).toBe(true);
+      expect(decideZone({ method: r.method, path: r.path, role: "admin", wikiReadSlice: true }).allowed).toBe(true);
+    }
+  });
+
+  test("the answers path under the slice, every method: GET, HEAD and POST pass; PUT, PATCH, DELETE and OPTIONS do not", () => {
+    const path = "/api/wiki/answers";
+    for (const method of ["GET", "HEAD", "POST"]) {
+      expect(asSliceUser(path, method), method).toEqual({ allowed: true, zone: "user", reason: "wiki read slice write" });
+    }
+    for (const method of ["PUT", "PATCH", "DELETE", "OPTIONS"]) {
+      expect(asSliceUser(path, method).allowed, method).toBe(false);
+      expect(asUser(path, method).allowed, method).toBe(false);
+    }
+    for (const method of ["GET", "HEAD", "POST"]) expect(asUser(path, method).allowed, `default ${method}`).toBe(false);
+  });
+
+  test("everything under /api/wiki/answers/ stays admin under the slice — exact path, not a prefix", () => {
+    for (const p of [
+      "/api/wiki/answers/export",
+      "/api/wiki/answers/export/confirm",
+      "/api/wiki/answers/redact",
+      "/api/wiki/answers/",
+      "/api/wiki/answers/x",
+    ]) {
+      for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]) {
+        expect(asSliceUser(p, method).allowed, `${method} ${p}`).toBe(false);
+        expect(asAdmin(p, method).allowed, `${method} ${p}`).toBe(true);
+      }
+    }
+  });
+
+  test("the method rows carry exact paths and a note", () => {
+    for (const e of WIKI_READ_SLICE_METHOD_ENTRIES) {
+      expect(e.path.endsWith("/"), e.path).toBe(false);
+      expect(e.note.length, e.path).toBeGreaterThan(10);
+      expect(inPathList(USER_ZONE_PATHS, e.path), e.path).toBe(false);
     }
   });
 

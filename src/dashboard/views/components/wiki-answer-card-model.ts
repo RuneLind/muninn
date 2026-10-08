@@ -172,15 +172,49 @@ function versionContentHtml(v: AnswerVersionWire, L: QuestionLabels): string {
  *  `white-space: nowrap`, so a wrap never leaves a `·` alone on a line. */
 const byPart = (cls: string, text: string) => `<span class="${cls}">· ${esc(text)}</span>`;
 
+/** An admin's Redact control on one answer (PR 5): the button, or the inline
+ *  two-step confirm once it was pressed. No browser dialog. */
+export interface RedactView {
+  /** The viewer is an admin (the page's `canExport`). */
+  can: boolean;
+  /** This answer's confirm is open. */
+  confirming: boolean;
+  /** The redact request for this answer is out. */
+  working: boolean;
+}
+
+/** The Redact button (on the `q-by` line) or the open confirm (its own line
+ *  under it); empty for a viewer who may not redact or a redacted answer. */
+function redactParts(a: AnswerWire, L: QuestionLabels, r: RedactView | undefined): { inline: string; block: string } {
+  if (!r?.can || a.redacted) return { inline: "", block: "" };
+  const id = esc(a.answerId);
+  const R = L.redact;
+  if (!r.confirming && !r.working) {
+    return { inline: ` <button type="button" class="q-redact" data-answer-id="${id}">${esc(R.open)}</button>`, block: "" };
+  }
+  const off = r.working ? " disabled" : "";
+  return {
+    inline: "",
+    block:
+      `<div class="q-redact-confirm" role="group" aria-label="${esc(R.confirm)}">` +
+      `<span class="q-redact-prompt">${esc(R.prompt)}</span> ` +
+      `<button type="button" class="q-redact-yes" data-answer-id="${id}"${off}>${esc(r.working ? R.working : R.confirm)}</button> ` +
+      `<button type="button" class="q-redact-no" data-answer-id="${id}"${off}>${esc(R.cancel)}</button>` +
+      `</div>`,
+  };
+}
+
 /** One answer: who, when, asked / not asked, edited N×, the choice, the body,
- *  an Edit button when the viewer may edit, and the log fold when the server
- *  sent earlier versions (`logOpen`: the reader left it open). */
+ *  an Edit button when the viewer may edit, an admin's Redact (`redact`), and
+ *  the log fold when the server sent earlier versions (`logOpen`: the reader
+ *  left it open). */
 export function answerItemHtml(
   a: AnswerWire,
   L: QuestionLabels,
   lang: QuestionLanguage,
   canEdit: boolean,
   logOpen = false,
+  redact?: RedactView,
 ): string {
   const asked =
     a.asked === true
@@ -192,6 +226,7 @@ export function answerItemHtml(
   const edit = canEdit
     ? ` <button type="button" class="q-edit" data-answer-id="${esc(a.answerId)}">${esc(L.composer.edit)}</button>`
     : "";
+  const { inline: redactInline, block: redactBlock } = redactParts(a, L, redact);
   const earlier = a.earlier ?? [];
   const log = earlier.length
     ? `<details class="q-log" data-answer-id="${esc(a.answerId)}"${logOpen ? " open" : ""}><summary>${esc(L.earlier(earlier.length))}</summary>` +
@@ -205,7 +240,8 @@ export function answerItemHtml(
     : "";
   return (
     `<div class="q-answer" data-answer-id="${esc(a.answerId)}">` +
-    `<div class="q-by"><span class="q-author">${esc(a.authorName)}</span> ${byPart("q-time", formatAnswerTime(a.createdAt, lang))}${asked}${edited}${edit}</div>` +
+    `<div class="q-by"><span class="q-author">${esc(a.authorName)}</span> ${byPart("q-time", formatAnswerTime(a.createdAt, lang))}${asked}${edited}${edit}${redactInline}</div>` +
+    redactBlock +
     versionContentHtml(a, L) +
     log +
     `</div>`
@@ -262,8 +298,22 @@ export function composerHtml(v: ComposerView, L: QuestionLabels): string {
   );
 }
 
-/** The line a failed save shows: the server's own sentence when it sent one. */
+/** The scanner's own reasons from a 422 `scanner_refused`, or null. */
+export function scannerReasonsOf(status: number, payload: unknown): string[] | null {
+  if (status !== 422 || !payload || typeof payload !== "object") return null;
+  const p = payload as { code?: unknown; reasons?: unknown };
+  if (p.code !== "scanner_refused" || !Array.isArray(p.reasons)) return null;
+  return p.reasons.filter((r): r is string => typeof r === "string");
+}
+
+/** The line a failed save shows: the scanner's reasons on a refusal, a fixed
+ *  line when no scanner could run, else the server's own sentence. */
 export function saveErrorText(status: number, payload: unknown, L: QuestionLabels): string {
+  const reasons = scannerReasonsOf(status, payload);
+  if (reasons) return reasons.length ? `${L.composer.scannerRefused} ${reasons.join("; ")}` : L.composer.scannerRefused;
+  if (payload && typeof payload === "object" && (payload as { code?: unknown }).code === "scanner_unavailable") {
+    return L.composer.scannerUnavailable;
+  }
   const error =
     payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
       ? (payload as { error: string }).error

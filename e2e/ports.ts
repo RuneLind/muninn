@@ -278,6 +278,11 @@ export const E2E_PORTS = {
   // The answer export button (answer cards PR 4): auth off, and nais at role `user`.
   "wiki-answer-export": 3134,
   "wiki-answer-export/user": 3135,
+  // Answers on the pod (answer cards PR 5): entra + nais with a stub Texas and
+  // a stub scanner, plus a second muninn with no scanner configured.
+  "wiki-answers-nais": 3136,
+  "wiki-answers-nais/no-scanner": 3137,
+  "wiki-answers-nais/texas": 3138,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

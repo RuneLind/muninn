@@ -30,6 +30,7 @@ import {
 } from "../../db/wiki-answers.ts";
 import { registerWikiReadRoutes } from "./wiki-routes.ts";
 import { QUESTION_NOT_SURE } from "../../format/question.ts";
+import { __resetAnswerScannerForTest } from "../../wiki/answer-scanner.ts";
 import { sha256 } from "../../gardener/util.ts";
 
 setupTestDb();
@@ -485,12 +486,15 @@ describe("/api/wiki/page on a wiki that takes answers", () => {
     expect(data.html).toContain("section class=\"question");
   });
 
-  test("role user gets no answers flag on nais either; admin there still does", async () => {
+  test("on nais role user gets the answers flag (PR 5 opens the answer routes there), without canExport", async () => {
     __setReadonlyWikiRootsForTest([root]);
     __resetWikiCacheForTest();
     try {
-      expect((await page(appFor({ identity: yvonne, role: "user", profile: "nais" }), "answers")).answers).toBeUndefined();
-      expect((await page(appFor({ identity: yvonne, role: "admin", profile: "nais" }), "answers")).answers?.answerable).toBe(true);
+      expect((await page(appFor({ identity: yvonne, role: "user", profile: "nais" }), "answers")).answers).toEqual({
+        answerable: true,
+        canExport: false,
+      });
+      expect((await page(appFor({ identity: yvonne, role: "admin", profile: "nais" }), "answers")).answers?.canExport).toBe(true);
     } finally {
       __setReadonlyWikiRootsForTest();
       __resetWikiCacheForTest();
@@ -675,5 +679,178 @@ describe("answer cards fix round 2: the page payload carries no owner ident", ()
     expect(data.answers).toEqual({ answerable: true, canExport: true });
     expect(data.html).toContain("Rune Lind");
     expect(text).not.toContain("Z555555");
+  });
+});
+
+describe("answer cards PR 5: the scanner hook (D16)", () => {
+  const MARKER = "SYNTHETIC-SECRET-0000";
+  let dir = "";
+  const mod = async (name: string, source: string) => {
+    const file = path.join(dir, name);
+    await Bun.write(file, source);
+    return file;
+  };
+  const cfg = (scanner: string | null) => ({ wikis: new Set(["answers"]), owner: OWNER, scanner });
+  const onNais = async <T>(fn: () => Promise<T>): Promise<T> => {
+    __setReadonlyWikiRootsForTest([root]);
+    __resetWikiCacheForTest();
+    try {
+      return await fn();
+    } finally {
+      __setReadonlyWikiRootsForTest();
+      __resetWikiCacheForTest();
+    }
+  };
+  const count = async () => (await getDb()`SELECT count(*)::int AS n FROM wiki_answers`)[0]!.n as number;
+  let refuses = "";
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "muninn-answer-scanners-"));
+    refuses = await mod(
+      "refuses.ts",
+      `export function scanAnswer(text) { return text.includes("${MARKER}") ? [{ reason: "synthetic marker found" }, { reason: "second reason" }] : []; }`,
+    );
+  });
+  afterAll(async () => {
+    __resetAnswerScannerForTest();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("nais with WIKI_ANSWER_SCANNER unset: a body is 503 scanner_unavailable and nothing is stored", async () => {
+    await onNais(async () => {
+      const before = await count();
+      const res = await post(appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(null) }), answer());
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe("scanner_unavailable");
+      expect(await count()).toBe(before);
+    });
+  });
+
+  test("nais with the scanner unset: a choice-only answer has no text to scan and is stored", async () => {
+    await onNais(async () => {
+      const res = await post(appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(null) }), answer({ body: "" }));
+      expect(res.status).toBe(201);
+    });
+  });
+
+  test("a clean body is stored; a flagged one is 422 with the scanner's own reasons, and nothing is stored", async () => {
+    await onNais(async () => {
+      const app = appFor({ identity: yvonne, role: "user", profile: "nais", answers: cfg(refuses) });
+      expect((await post(app, answer({ body: "nothing to see" }))).status).toBe(201);
+      const before = await count();
+      const res = await post(app, answer({ body: `line one\ncontains ${MARKER} here` }));
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({
+        error: "scanner_refused",
+        code: "scanner_refused",
+        reasons: ["synthetic marker found", "second reason"],
+      });
+      expect(await count()).toBe(before);
+    });
+  });
+
+  test("an edit is scanned too", async () => {
+    const app = appFor({ answers: cfg(refuses) });
+    const first = await (await post(app, answer({ body: "fine" }))).json();
+    const res = await post(app, answer({ body: MARKER, answerId: first.answerId, baseVersion: 1 }));
+    expect(res.status).toBe(422);
+    const rows = await getDb()`SELECT version FROM wiki_answers WHERE answer_id = ${first.answerId}`;
+    expect(rows.length).toBe(1);
+  });
+
+  test("an async scanner is awaited", async () => {
+    const file = await mod("async.ts", `export async function scanAnswer(t) { await Bun.sleep(5); return t.includes("${MARKER}") ? [{ reason: "async" }] : []; }`);
+    const res = await post(appFor({ answers: cfg(file) }), answer({ body: MARKER }));
+    expect(res.status).toBe(422);
+    expect((await res.json()).reasons).toEqual(["async"]);
+  });
+
+  test("fails closed: no export, a throw, a non-array, a malformed finding, a relative path, a missing file → 503", async () => {
+    const cases = [
+      await mod("noexport.ts", "export const other = 1;"),
+      await mod("throws.ts", "export function scanAnswer() { throw new Error('synthetic failure'); }"),
+      await mod("notarray.ts", "export function scanAnswer() { return 'clean'; }"),
+      await mod("badshape.ts", "export function scanAnswer() { return [{ why: 'x' }]; }"),
+      "relative/scanner.ts",
+      path.join(dir, "missing.ts"),
+    ];
+    for (const scanner of cases) {
+      for (const profile of ["default", "nais"] as const) {
+        await onNais(async () => {
+          const res = await post(appFor({ identity: yvonne, role: "user", profile, answers: cfg(scanner) }), answer());
+          expect(`${profile} ${scanner} → ${res.status} ${(await res.json()).code}`).toBe(
+            `${profile} ${scanner} → 503 scanner_unavailable`,
+          );
+        });
+      }
+    }
+  });
+
+  test("default profile with the scanner unset: stored unscanned, as before", async () => {
+    const res = await post(appFor({ answers: cfg(null) }), answer({ body: `${MARKER} is fine here` }));
+    expect(res.status).toBe(201);
+  });
+});
+
+describe("answer cards PR 5: redact (D15)", () => {
+  const redact = (app: Hono, body: unknown, contentType = "application/json") =>
+    app.request("/api/wiki/answers/redact", {
+      method: "POST",
+      headers: { "content-type": contentType },
+      body: JSON.stringify(body),
+    });
+
+  test("an admin redacts every version: body and choice emptied, the GET and the log say redacted", async () => {
+    const app = appFor({ identity: yvonne, role: "user" });
+    const first = await (await post(app, answer({ body: "v1 text" }))).json();
+    await post(app, answer({ body: "v2 text", answerId: first.answerId, baseVersion: 1 }));
+    const res = await redact(appFor({ identity: ola, role: "admin" }), { answerId: first.answerId });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ answerId: first.answerId, redacted: true, versions: 2, alreadyRedacted: false });
+    const rows = await getDb()`SELECT body, choice, redacted_at FROM wiki_answers WHERE answer_id = ${first.answerId}`;
+    expect(rows.map((r) => [r.body, r.choice, r.redacted_at !== null])).toEqual([
+      ["", null, true],
+      ["", null, true],
+    ]);
+    const data = await getAnswers(appFor({ identity: yvonne, role: "user" }), "&versions=1");
+    const a = data.answers.find((x: { answerId: string }) => x.answerId === first.answerId);
+    expect(a).toMatchObject({ redacted: true, body: "", choice: null });
+    expect(a.earlier.every((v: { redacted: boolean; body: string }) => v.redacted && v.body === "")).toBe(true);
+  });
+
+  test("idempotent: a second redact is 200 with alreadyRedacted", async () => {
+    const first = await (await post(appFor(), answer())).json();
+    expect((await redact(appFor(), { answerId: first.answerId })).status).toBe(200);
+    const again = await redact(appFor(), { answerId: first.answerId });
+    expect(again.status).toBe(200);
+    expect((await again.json()).alreadyRedacted).toBe(true);
+  });
+
+  test("an edit of a redacted answer is 409 answer_redacted", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer())).json();
+    await redact(app, { answerId: first.answerId });
+    const res = await post(app, answer({ body: "again", answerId: first.answerId, baseVersion: 1 }));
+    expect(`${res.status} ${(await res.json()).code}`).toBe("409 answer_redacted");
+  });
+
+  test("refusals: role user 403, unknown 404, a bad id 400, text/plain 415", async () => {
+    const first = await (await post(appFor(), answer())).json();
+    const user = await redact(appFor({ identity: yvonne, role: "user" }), { answerId: first.answerId });
+    expect(`${user.status} ${(await user.json()).code}`).toBe("403 admin_only");
+    const unknown = await redact(appFor(), { answerId: "00000000-0000-4000-8000-000000000000" });
+    expect(`${unknown.status} ${(await unknown.json()).code}`).toBe("404 unknown_answer");
+    for (const answerId of [undefined, 1, "not-a-uuid"]) {
+      expect((await redact(appFor(), { answerId })).status).toBe(400);
+    }
+    expect((await redact(appFor(), { answerId: first.answerId }, "text/plain")).status).toBe(415);
+    const row = (await getDb()`SELECT redacted_at FROM wiki_answers WHERE answer_id = ${first.answerId}`)[0]!;
+    expect(row.redacted_at).toBeNull();
+  });
+
+  test("does not depend on WIKI_ANSWER_WIKIS: cleanup works after the wiki leaves the list", async () => {
+    const first = await (await post(appFor(), answer())).json();
+    const off = appFor({ answers: { wikis: new Set(), owner: OWNER } });
+    expect((await redact(off, { answerId: first.answerId })).status).toBe(200);
   });
 });

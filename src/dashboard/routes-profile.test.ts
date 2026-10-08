@@ -258,6 +258,7 @@ describe("the wiki read slice under nais", () => {
       "GET /api/wiki/answers/export",
       "POST /api/wiki/answers",
       "POST /api/wiki/answers/export/confirm",
+      "POST /api/wiki/answers/redact",
     ]);
     for (const profile of ["nais", "default"] as const) {
       const app = build(profile);

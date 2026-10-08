@@ -256,3 +256,36 @@ describe("fix round 1", () => {
     expect(savedAnswerOf(null)).toBeNull();
   });
 });
+
+describe("answer cards PR 5: Redact and the scanner", () => {
+  test("Redact… renders only for a viewer who may redact, never on a redacted answer", () => {
+    expect(answerItemHtml(answer(), en, "en", false)).not.toContain("q-redact");
+    expect(answerItemHtml(answer(), en, "en", false, false, { can: false, confirming: false, working: false })).not.toContain("q-redact");
+    // `q-redacted` is the redacted body's class, not the control.
+    const html = answerItemHtml(answer(), en, "en", false, false, { can: true, confirming: false, working: false });
+    expect(html).toContain('<button type="button" class="q-redact" data-answer-id="a1">Redact…</button>');
+    expect(html).not.toContain("q-redact-confirm");
+    expect(answerItemHtml(answer({ redacted: true }), en, "en", false, false, { can: true, confirming: true, working: false })).not.toMatch(/q-redact[ "-]/);
+  });
+
+  test("the inline confirm replaces the button, in the wiki's language; working disables both", () => {
+    const html = answerItemHtml(answer(), no, "no", false, false, { can: true, confirming: true, working: false });
+    expect(html).not.toContain('class="q-redact"');
+    expect(html).toContain('class="q-redact-confirm" role="group"');
+    expect(html).toContain(no.redact.prompt);
+    expect(html).toContain(`<button type="button" class="q-redact-yes" data-answer-id="a1">Fjern</button>`);
+    expect(html).toContain(`<button type="button" class="q-redact-no" data-answer-id="a1">Avbryt</button>`);
+    const busy = answerItemHtml(answer(), en, "en", false, false, { can: true, confirming: true, working: true });
+    expect(busy).toContain(`class="q-redact-yes" data-answer-id="a1" disabled>Redacting …</button>`);
+    expect(busy).toContain(`class="q-redact-no" data-answer-id="a1" disabled>`);
+  });
+
+  test("a 422 scanner_refused shows the scanner's reasons; a 503 scanner_unavailable a fixed line", () => {
+    const refused = { error: "scanner_refused", code: "scanner_refused", reasons: ["looks like an id", "a second <reason>"] };
+    expect(saveErrorText(422, refused, en)).toBe("The answer was not saved. The scanner flagged: looks like an id; a second <reason>");
+    expect(saveErrorText(422, refused, no)).toBe("Svaret ble ikke lagret. Skanneren fant: looks like an id; a second <reason>");
+    expect(saveErrorText(503, { error: "x", code: "scanner_unavailable" }, en)).toBe(en.composer.scannerUnavailable);
+    // Any other 422 keeps the server's own sentence.
+    expect(saveErrorText(422, { error: "something else", code: "other" }, en)).toBe("The answer was not saved: something else");
+  });
+});

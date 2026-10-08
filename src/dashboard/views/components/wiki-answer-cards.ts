@@ -23,6 +23,9 @@
  *   — never on whatever a later reload put in the list, which would turn a
  *   stale edit into a silent overwrite instead of a 409;
  * - a card is repainted the moment its POST settles, whatever the reload does.
+ *
+ * An admin (the page's `canExport`) gets a Redact control on each answer, with
+ * an inline two-step confirm held on the card record (PR 5).
  */
 import {
   DEFAULT_QUESTION_LANGUAGE,
@@ -92,6 +95,10 @@ interface CardUi {
   rebaseOnLoad: boolean;
   /** Answer ids whose log fold the reader has open. */
   openLogs: Set<string>;
+  /** The viewer may redact (an admin: the page's `canExport`). */
+  canRedact: boolean;
+  /** The answer whose Redact confirm is open, and whether its request is out. */
+  redact: { answerId: string; working: boolean } | null;
   /** What the last paint rendered from, so an unchanged card is left alone. */
   paintedKey: string | null;
 }
@@ -180,6 +187,8 @@ export function enhanceAnswerCards(
       message: null,
       rebaseOnLoad: false,
       openLogs: new Set(),
+      canRedact: info.canExport === true,
+      redact: null,
       paintedKey: null,
     };
     ctx.cards.push(ui);
@@ -258,6 +267,9 @@ function focusKeyOf(section: HTMLElement, el: Element): string | null {
   if (el instanceof HTMLInputElement && el.type === "radio") return `radio:${el.value}`;
   if (el instanceof HTMLButtonElement) {
     if (el.classList.contains("q-edit")) return `edit:${el.getAttribute("data-answer-id") ?? ""}`;
+    for (const cls of ["q-redact", "q-redact-yes", "q-redact-no"]) {
+      if (el.classList.contains(cls)) return `${cls}:${el.getAttribute("data-answer-id") ?? ""}`;
+    }
     for (const cls of ["q-save", "q-cancel", "q-retry", "q-clear-choice"]) if (el.classList.contains(cls)) return cls;
   }
   if (el.tagName === "SUMMARY") {
@@ -313,7 +325,7 @@ function restoreFocus(section: HTMLElement, mark: FocusMark | null): void {
 function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
   if (!ui.section.isConnected) return;
   const answers = answersFor(ctx, ui);
-  const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server]);
+  const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server, ui.redact]);
   if (!force && key === ui.paintedKey) return;
   const mark = captureFocus(ui.section);
   renderCard(ui, answers);
@@ -347,7 +359,11 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
   const items = answers
     .map(
       (a) =>
-        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null, ui.openLogs.has(a.answerId)) +
+        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null, ui.openLogs.has(a.answerId), {
+          can: ui.canRedact,
+          confirming: ui.redact?.answerId === a.answerId,
+          working: ui.redact?.answerId === a.answerId && ui.redact.working,
+        }) +
         // The editor sits under the answer it edits, so a 409 shows the newer
         // version above the reader's own text.
         (a.answerId === editingId ? composerHtml(composerView(ui), L) : ""),
@@ -396,6 +412,51 @@ function syncComposer(ui: CardUi): void {
   if (clear) clear.hidden = ui.choice === null;
   const save = form.querySelector<HTMLButtonElement>("button.q-save");
   if (save) save.disabled = ui.sending || !composerCanSave(ui.choice, ui.body);
+}
+
+/** Focus the `cls` button of one answer, else the card. */
+function focusButton(ui: CardUi, cls: string, answerId: string): void {
+  const btn = Array.from(ui.section.querySelectorAll<HTMLButtonElement>(`button.${cls}`)).find(
+    (b) => b.getAttribute("data-answer-id") === answerId,
+  );
+  (btn ?? ui.section).focus({ preventScroll: true });
+}
+
+/** An admin's confirmed Redact: one POST, then the answers again. */
+async function redact(ctx: CardsCtx, ui: CardUi, answerId: string): Promise<void> {
+  ui.redact = { answerId, working: true };
+  paint(ctx, ui, true);
+  let status = 0;
+  let data: unknown = null;
+  try {
+    const res = await ctx.fetchFn("/api/wiki/answers/redact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId }),
+    });
+    status = res.status;
+    data = await res.json().catch(() => null);
+  } catch {
+    status = 0;
+  }
+  ui.redact = null;
+  if (status >= 200 && status < 300) {
+    const r = await loadAnswers(ctx);
+    if (r === "failed" || r === "off") {
+      ui.message = { text: ui.L.composer.loadFailed, kind: "warn", retry: true };
+    }
+    paint(ctx, ui, true);
+    if (focusIsHereOrNowhere(ui)) ui.section.focus({ preventScroll: true });
+    return;
+  }
+  const error =
+    data && typeof data === "object" && typeof (data as { error?: unknown }).error === "string"
+      ? (data as { error: string }).error
+      : status > 0
+        ? `HTTP ${status}`
+        : "";
+  ui.message = { text: error ? `${ui.L.redact.failed}: ${error}` : ui.L.redact.failed, kind: "error" };
+  paint(ctx, ui, true);
 }
 
 function focusEdit(ui: CardUi, answerId: string | null): void {
@@ -467,6 +528,19 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
       section.querySelectorAll<HTMLInputElement>("form.q-composer input[type=radio]").forEach((r) => (r.checked = false));
       syncComposer(ui);
       section.querySelector<HTMLInputElement>("form.q-composer input[type=radio]")?.focus();
+    } else if (t.classList.contains("q-redact") && ui.canRedact && !ui.redact?.working) {
+      const id = t.getAttribute("data-answer-id") ?? "";
+      ui.redact = { answerId: id, working: false };
+      ui.message = null;
+      paint(ctx, ui, true);
+      focusButton(ui, "q-redact-no", id);
+    } else if (t.classList.contains("q-redact-no") && !ui.redact?.working) {
+      const id = ui.redact?.answerId ?? "";
+      ui.redact = null;
+      paint(ctx, ui, true);
+      focusButton(ui, "q-redact", id);
+    } else if (t.classList.contains("q-redact-yes") && ui.redact && !ui.redact.working) {
+      void redact(ctx, ui, ui.redact.answerId);
     } else if (t.classList.contains("q-retry")) {
       // aria-disabled, not `disabled`: the browser drops focus from a button
       // it disables, so the reload's repaint would find focus on <body>.

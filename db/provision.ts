@@ -253,7 +253,8 @@ function behindImageRemedy(missing: readonly string[], pending: readonly Pending
     "",
     "    bun db/migrate.ts",
     "",
-    "  (on nais: a naisjob from the new image with `command: bun db/migrate.ts`), then run",
+    '  (on nais: a naisjob from the new image with `command: ["bun", "db/migrate.ts"]` — a',
+    "  nais command is a list of strings), then run",
     "  this check again.",
     "",
   ];

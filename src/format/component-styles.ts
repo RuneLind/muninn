@@ -746,13 +746,25 @@ export function questionReaderCss(scope: string): string {
     ${scope} .q-log > summary { cursor: pointer; font-size: 0.85em; color: var(--text-soft); }
     ${scope} .q-log-item { margin: 0.4rem 0 0; padding-left: 0.6rem; border-left: 2px solid var(--border-secondary); }
     ${scope} section.question[tabindex]:focus:not(:focus-visible) { outline: none; }
-    ${scope} .q-edit, ${scope} .q-cancel, ${scope} .q-retry, ${scope} .q-clear-choice {
+    ${scope} .q-edit, ${scope} .q-cancel, ${scope} .q-retry, ${scope} .q-clear-choice,
+    ${scope} .q-redact, ${scope} .q-redact-no {
       font: inherit; font-size: 0.95em; padding: 0 0.55rem; border-radius: 6px; cursor: pointer;
       background: transparent; color: var(--text-primary); border: 1px solid var(--border-secondary);
     }
-    ${scope} .q-edit:hover, ${scope} .q-cancel:hover, ${scope} .q-retry:hover, ${scope} .q-clear-choice:hover {
+    ${scope} .q-edit:hover, ${scope} .q-cancel:hover, ${scope} .q-retry:hover, ${scope} .q-clear-choice:hover,
+    ${scope} .q-redact:hover, ${scope} .q-redact-no:hover {
       border-color: var(--accent);
     }
+    ${scope} .q-redact-confirm {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.5rem; margin-top: 0.35rem;
+      padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85em; color: var(--text-primary);
+      background: var(--tint-error); border-left: 3px solid var(--status-error);
+    }
+    ${scope} .q-redact-yes {
+      font: inherit; font-weight: 600; padding: 0 0.6rem; border-radius: 6px; cursor: pointer;
+      background: transparent; color: var(--text-primary); border: 1px solid var(--status-error);
+    }
+    ${scope} .q-redact-yes:disabled, ${scope} .q-redact-no:disabled { opacity: 0.6; cursor: default; }
     ${scope} .q-clear-choice[hidden] { display: none; }
     ${scope} .q-retry { margin-left: 0.4rem; }
     ${scope} .q-composer { margin-top: 0.6rem; }
