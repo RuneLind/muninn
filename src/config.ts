@@ -1,5 +1,6 @@
 import { getLog } from "./logging.ts";
 import { ownerGroupName, type AnswerGroups } from "./format/question.ts";
+import { parseWikiDefaultLens, type WikiDefaultLens } from "./format/reader-lens.ts";
 
 const log = getLog("config");
 
@@ -217,6 +218,14 @@ export function resolveWikiAnswerConfig(env: Record<string, string | undefined> 
     groups,
     groupWarnings: warnings,
   };
+}
+
+/** `WIKI_DEFAULT_LENS` (D24): a per-wiki default lens on this instance,
+ *  beating the wiki's own `defaultLens`. A `Config` field and a getter, the
+ *  {@link resolveServingProfile} pair rule. Dropped entries are carried and
+ *  warned about at boot (`loadConfig()` runs before logging). */
+export function resolveWikiDefaultLens(env: Record<string, string | undefined> = process.env): WikiDefaultLens {
+  return parseWikiDefaultLens(env.WIKI_DEFAULT_LENS);
 }
 
 /** Answer retention (decision D17): day counts, null ⇒ that rule is off. Both
@@ -937,6 +946,7 @@ export function loadConfig() {
     claudeUsagePublicUrl: nullableEnv("CLAUDE_USAGE_PUBLIC_URL"),
     wikiAnswers: resolveWikiAnswerConfig(),
     wikiAnswerRetention: resolveWikiAnswerRetention(),
+    wikiDefaultLens: resolveWikiDefaultLens(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

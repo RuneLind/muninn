@@ -1,5 +1,5 @@
 import type { Context, Hono } from "hono";
-import { resolveServingProfile, resolveWikiAnswerConfig, wikiTakesAnswers, type Config } from "../../config.ts";
+import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config } from "../../config.ts";
 import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
@@ -22,7 +22,7 @@ import {
 } from "../views/components/wiki-atlas-semantic.ts";
 import { getLiveOrAppliedTopicKeysByWiki } from "../../db/wiki-proposals.ts";
 import { draftAndPersistSynthesis } from "../../gardener/synthesis-drafter.ts";
-import { questionRenderOptionsFor, renderWikiHtml } from "../../wiki/render.ts";
+import { questionRenderOptionsFor, readerPayload, renderWikiHtml } from "../../wiki/render.ts";
 import { loadPageFiles, resolveContainedFile } from "../../wiki/page-files.ts";
 import {
   listWikis,
@@ -1632,7 +1632,15 @@ export function registerWikiReadRoutes(
         wiki: entry?.name,
         files: await loadPageFiles(index.root, meta.relPath, markdown),
         question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, answerCfg.owner),
+        idLabels: index.readerConfig?.idLabels,
       }),
+      // The reader lenses' page-level inputs: the switch's language, the ids'
+      // nouns for the ref links and pills, the default for a viewer with no
+      // stored choice (`WIKI_DEFAULT_LENS` for this wiki, else the file's
+      // `defaultLens`; D2, D24), and whether the Agent lens is offered. The
+      // Agent lens needs `PLAN_CARD_BIN` and its route (a later PR), so the
+      // flag is false on every instance today.
+      reader: readerPayload(entry?.name, index.readerConfig, config.wikiDefaultLens ?? resolveWikiDefaultLens()),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):
       // the client keys its controls on THIS, never on

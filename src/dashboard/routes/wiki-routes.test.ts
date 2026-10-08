@@ -355,7 +355,30 @@ describe("GET /api/wiki/html", () => {
     expect(html).toContain('data-question-lang="no"');
     expect(html).toContain('data-question-to="Synne Testdal"');
     expect(html).toContain("Avgjort → ");
-    expect(html).toContain('<li class="dl-item" id="o3">');
+    expect(html).toContain('<li class="dl-item" id="o3" data-q-state="decided">');
+  });
+
+  // The lens switch's page inputs (reader lenses PR 1): the language, the id
+  // nouns (also on the chips), the file's defaultLens, and no Agent lens.
+  test("/api/wiki/page carries the reader payload and renders the id nouns", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ language: "no", defaultLens: "oversikt", idLabels: { D: { one: "Beslutning", other: "beslutninger" } } }),
+    );
+    await Bun.write(
+      path.join(root, "concepts/Lens Page.mdx"),
+      ["---", "title: Lens Page", "---", "", "<DecisionLog>", "", "- **D1** — Ja.", "", "</DecisionLog>"].join("\n"),
+    );
+    __resetWikiCacheForTest();
+    const res = await app.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Lens Page.mdx"));
+    const body = (await res.json()) as { html: string; reader: unknown };
+    expect(body.reader).toEqual({
+      language: "no",
+      idLabels: { D: { one: "Beslutning", other: "beslutninger" } },
+      defaultLens: "overview",
+      agentLens: false,
+    });
+    expect(body.html).toContain('data-q-state="open"><span class="id-noun">Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
 
   // /api/wiki/atlas returns the projected payload (all seven keys) over the same

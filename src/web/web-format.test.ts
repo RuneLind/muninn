@@ -640,7 +640,7 @@ describe("formatWebHtml — component blocks", () => {
   });
 
   test('Fold with open="true" renders the details open', () => {
-    const out = formatWebHtml('<Fold title="Current state" open="true">\n\nprose\n\n</Fold>');
+    const out = formatWebHtml('<Fold title="What was measured" open="true">\n\nprose\n\n</Fold>');
     expect(out).toContain('<details class="fold" open>');
   });
 

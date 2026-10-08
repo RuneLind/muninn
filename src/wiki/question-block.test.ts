@@ -157,7 +157,7 @@ describe("the render option", () => {
     expect(html).toContain('data-wiki-answerable="true"');
     expect(html).toContain('data-question-to="Synne Testdal"');
     expect(html).toContain("Avgjort → ");
-    expect(html).toContain('<li class="dl-item" id="o3">');
+    expect(html).toContain('<li class="dl-item" id="o3" data-q-state="decided">');
     // Without the option the same page renders the plain question.
     expect(renderWikiHtml(md, resolve)).toContain('class="question question-plain"');
   });

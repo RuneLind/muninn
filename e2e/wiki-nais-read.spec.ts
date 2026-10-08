@@ -50,10 +50,11 @@ import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 import { FIND_EVERY_DEBOUNCE_MS } from "../src/dashboard/views/components/wiki-find-palette.ts";
 import {
-  HISTORIC_PILL_CLASS,
+  COUNT_PILL_CLASS, HISTORIC_PILL_CLASS,
   LINE_REFS_TOGGLE_CLASS,
   MOVES_PILL_CLASS,
 } from "../src/dashboard/views/components/wiki-report-blocks.ts";
+import { LENS_SWITCH_CLASS } from "../src/dashboard/views/components/wiki-lens.ts";
 
 const PORT = e2ePort("wiki-nais-read");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -385,6 +386,10 @@ const READER_CONTROLS = [
   `.${HISTORIC_PILL_CLASS}`,
   // The NextMoves lane pills (scroll within the page).
   `.${MOVES_PILL_CLASS}`,
+  // The counted pills (scroll within the page) and the lens switch
+  // (a class on the article, localStorage).
+  `.${COUNT_PILL_CLASS}`,
+  `.${LENS_SWITCH_CLASS} button`,
   // CaseBoard row links and Query id links (in-page anchors), and the Query
   // explorer's search box and uses chips (client-side filters).
   "a.cb-id",

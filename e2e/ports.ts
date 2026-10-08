@@ -283,6 +283,9 @@ export const E2E_PORTS = {
   "wiki-answers-nais": 3136,
   "wiki-answers-nais/no-scanner": 3137,
   "wiki-answers-nais/texas": 3138,
+  // Reader lenses PR 1: three wikis in one process, so the instance default,
+  // the file default and no default are provable side by side.
+  "wiki-lens": 3139,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

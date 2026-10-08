@@ -11,6 +11,9 @@
  *    none), summing the counted lanes' `data-count` (the renderer's count, the
  *    one the index uses too; a lane in a settled section counts nowhere), plus
  *    the lane ages (`decorateLaneAges`), computed here from `data-since`.
+ *  - `11 decisions` / `5 open` / `17 queries` / `11 cases` — counted pills
+ *    (D8), from the stamped DecisionLog items, the Query cards and the
+ *    CaseBoard rows not in status `none`; each jumps to its first target.
  *  - `line refs` — a toggle, shown only on a page with a pure ref group
  *    (`span.code-ref-group`, emitted by `src/wiki/code-refs.ts`), that hides
  *    those groups with one class on `.wiki-article`. A chip outside a group is
@@ -22,6 +25,8 @@
  */
 
 import { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS } from "../../../wiki/code-refs.ts";
+import type { IdLabels } from "../../../format/reader-lens.ts";
+import { revealElement } from "./wiki-hash-target.ts";
 
 export { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS };
 export const LINE_REFS_KEY = "muninn.wiki.lineRefs.v1";
@@ -185,29 +190,109 @@ function decorateLaneAges(article: HTMLElement, now: Date): void {
   });
 }
 
-export function enhanceReportBlocks(wrap: ParentNode): void {
+// ── Counted pills (D8) ───────────────────────────────────────────────────────
+
+export const COUNT_PILL_CLASS = "wiki-count-pill";
+export type CountKind = "decisions" | "open" | "queries" | "cases";
+
+/** The same rule as `DECISION_ID_RE` in `src/format/question.ts`. */
+const DECISION_ID_RE = /^D\d{1,4}$/;
+
+const COUNT_WORDS: Record<"en" | "no", Record<CountKind, [string, string]>> = {
+  en: { decisions: ["decision", "decisions"], open: ["open", "open"], queries: ["query", "queries"], cases: ["case", "cases"] },
+  no: { decisions: ["beslutning", "beslutninger"], open: ["åpent", "åpne"], queries: ["spørring", "spørringer"], cases: ["sak", "saker"] },
+};
+
+/** The id prefix whose noun names a count, when the wiki's `idLabels` has it. */
+const COUNT_PREFIX: Partial<Record<CountKind, string>> = { decisions: "D", queries: "Q" };
+
+/** A counted pill's label: `11 decisions`, `5 åpne`, `17 queries`. With
+ *  `idLabels` the decision and query nouns are the wiki's own, lower-cased
+ *  (`11 beslutninger`). */
+export function countPillLabel(kind: CountKind, n: number, lang: "en" | "no", labels?: IdLabels): string {
+  const prefix = COUNT_PREFIX[kind];
+  const own = prefix ? labels?.[prefix] : undefined;
+  const word = own ? (n === 1 ? own.one : own.other).toLocaleLowerCase() : COUNT_WORDS[lang][kind][n === 1 ? 0 : 1];
+  return `${n} ${word}`;
+}
+
+const COUNT_TITLE: Record<CountKind, string> = {
+  decisions: "Jump to the first decision",
+  open: "Jump to the first open question",
+  queries: "Jump to the first query",
+  cases: "Jump to the cases",
+};
+
+interface CountTally {
+  count: number;
+  first: HTMLElement | null;
+}
+
+/**
+ * The four counts, read off the rendered page: unique decision ids (an id
+ * matching `D` and digits on a stamped DecisionLog item), unique open ids (any
+ * other id whose `data-q-state` is `open`), Query cards (unique by id; a card
+ * with none counts once) and the cases whose status is not `none` (unique by
+ * id). Exported for the unit test.
+ */
+export function readCounts(article: ParentNode): Record<CountKind, CountTally> {
+  const out: Record<CountKind, CountTally> = {
+    decisions: { count: 0, first: null },
+    open: { count: 0, first: null },
+    queries: { count: 0, first: null },
+    cases: { count: 0, first: null },
+  };
+  const seen: Record<CountKind, Set<string>> = { decisions: new Set(), open: new Set(), queries: new Set(), cases: new Set() };
+  const add = (kind: CountKind, key: string, el: HTMLElement) => {
+    if (seen[kind].has(key)) return;
+    seen[kind].add(key);
+    out[kind].count++;
+    out[kind].first ??= el;
+  };
+  article.querySelectorAll<HTMLElement>("li.dl-item[data-q-state]").forEach((li) => {
+    const id = li.querySelector(":scope > .dl-id")?.textContent?.trim() ?? "";
+    if (!id) return;
+    if (DECISION_ID_RE.test(id)) add("decisions", id, li);
+    else if (li.dataset.qState === "open") add("open", id, li);
+  });
+  let anon = 0;
+  article.querySelectorAll<HTMLElement>("section.query").forEach((card) => {
+    const id = card.querySelector(".query-id")?.textContent?.trim();
+    add("queries", id || `\u0000${anon++}`, card);
+  });
+  article.querySelectorAll<HTMLElement>(".cb-group:not([data-status=\"none\"]) .cb-row").forEach((row) => {
+    const id = row.querySelector(".cb-id")?.textContent?.trim() ?? row.id;
+    add("cases", id, row);
+  });
+  return out;
+}
+
+export interface ReportBlockOptions {
+  /** The wiki's `language`, for the counted pills. */
+  language?: "en" | "no";
+  /** The wiki's `idLabels`, for the counted pills' nouns. */
+  idLabels?: IdLabels;
+}
+
+export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions = {}): void {
   const article = wrap.querySelector<HTMLElement>(".wiki-article");
   const row = wrap.querySelector<HTMLElement>(".wiki-article-head .wiki-meta-row");
   if (!article || !row) return;
   row
-    .querySelectorAll(`.${HISTORIC_PILL_CLASS}, .${MOVES_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS}`)
+    .querySelectorAll(`.${HISTORIC_PILL_CLASS}, .${MOVES_PILL_CLASS}, .${COUNT_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS}`)
     .forEach((el) => el.remove());
 
   const pills: HTMLButtonElement[] = [];
-  /** A header pill that opens any closed `<details>` around `target` (a block
-   *  inside a closed Fold has no box to scroll to) and scrolls to it. */
+  /** A header pill that reveals `target` (D3): the lens and any closed
+   *  `<details>` around it give way, then it scrolls and flashes. The Historic
+   *  section and a lane carry no id, so the pill passes the element itself. */
   const jumpPill = (className: string, label: string, title: string, target: HTMLElement) => {
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = className;
     pill.textContent = label;
     pill.title = title;
-    pill.addEventListener("click", () => {
-      for (let el = target.parentElement; el && el !== article; el = el.parentElement) {
-        if (el instanceof HTMLDetailsElement) el.open = true;
-      }
-      target.scrollIntoView({ block: "start" });
-    });
+    pill.addEventListener("click", () => revealElement(article, target));
     pills.push(pill);
   };
 
@@ -229,6 +314,19 @@ export function enhanceReportBlocks(wrap: ParentNode): void {
     );
   }
   decorateLaneAges(article, now);
+
+  const counts = readCounts(article);
+  const lang = opts.language ?? "en";
+  for (const kind of ["decisions", "open", "queries", "cases"] as const) {
+    const c = counts[kind];
+    if (c.count === 0 || !c.first) continue;
+    jumpPill(
+      `${COUNT_PILL_CLASS} ${COUNT_PILL_CLASS}-${kind}`,
+      countPillLabel(kind, c.count, lang, opts.idLabels),
+      COUNT_TITLE[kind],
+      c.first,
+    );
+  }
 
   // Beside the status chip: after the last badge/status/flag in the row.
   const anchors = row.querySelectorAll(".wiki-badge, .wiki-status, .wiki-followup-flag");

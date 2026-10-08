@@ -5,8 +5,7 @@
  * SQL), then scroll it into view. The article renders after the page load, so
  * the browser's own fragment scroll has already found nothing by then.
  *
- * Generic: any id in the article, not only a `<Query>` card. Returns whether a
- * target was found.
+ * Generic: any id in the article, not only a `<Query>` card.
  */
 
 /** Dispatched (bubbling) on the element a hash names, before the folds open:
@@ -17,6 +16,8 @@ export const REVEAL_EVENT = "wiki:reveal";
  *  fresh load: the article renders after the browser matched the hash. */
 export const HASH_FLASH_CLASS = "wiki-hash-flash";
 
+/** Resolve a `#fragment` to an element inside `root` and reveal it
+ *  ({@link revealElement}). Returns whether a target was found. */
 export function revealHashTarget(root: Element, hash: string = location.hash): boolean {
   if (hash.length < 2) return false;
   let id: string;
@@ -27,7 +28,19 @@ export function revealHashTarget(root: Element, hash: string = location.hash): b
   }
   const el = document.getElementById(id);
   if (!el || !root.contains(el)) return false;
-  // A filter that hid the target (the Query explorer) shows it again first.
+  revealElement(root, el);
+  return true;
+}
+
+/**
+ * Every path that reveals an element goes through here (D3): a `#id` in the
+ * URL, a bare id link, a card's chip, a header pill. It dispatches
+ * {@link REVEAL_EVENT} on the element first, so a filter or a lens that hid it
+ * shows it again, then opens the folds around it, scrolls and flashes.
+ */
+export function revealElement(root: Element, el: Element): void {
+  // A filter that hid the target (the Query explorer, the Overview lens)
+  // shows it again first.
   el.dispatchEvent(new CustomEvent(REVEAL_EVENT, { bubbles: true }));
   // The target itself too: a `<Fold>` is addressed by its own id.
   for (let p: Element | null = el; p && p !== root; p = p.parentElement) {
@@ -44,5 +57,4 @@ export function revealHashTarget(root: Element, hash: string = location.hash): b
     el.removeEventListener("animationend", end);
   };
   el.addEventListener("animationend", end);
-  return true;
 }

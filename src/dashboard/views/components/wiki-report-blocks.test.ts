@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import {
+  countPillLabel,
   LINE_REFS_KEY,
   daysSince,
   historicPillLabel,
@@ -96,3 +97,20 @@ describe("line refs preference", () => {
 });
 
 test("historic pill label", () => expect(historicPillLabel(2)).toBe("↻ 2 historic"));
+
+describe("counted pills (D8, D12)", () => {
+  const LABELS = { D: { one: "Beslutning", other: "beslutninger" }, Q: { one: "Query", other: "queries" } };
+  test("the wiki's language, singular and plural", () => {
+    expect(countPillLabel("decisions", 11, "en")).toBe("11 decisions");
+    expect(countPillLabel("decisions", 1, "en")).toBe("1 decision");
+    expect(countPillLabel("open", 5, "no")).toBe("5 åpne");
+    expect(countPillLabel("queries", 17, "no")).toBe("17 spørringer");
+    expect(countPillLabel("cases", 11, "no")).toBe("11 saker");
+  });
+  test("idLabels name the decision and query counts, lower-cased", () => {
+    expect(countPillLabel("decisions", 11, "no", LABELS)).toBe("11 beslutninger");
+    expect(countPillLabel("decisions", 1, "no", LABELS)).toBe("1 beslutning");
+    expect(countPillLabel("queries", 17, "en", LABELS)).toBe("17 queries");
+    expect(countPillLabel("open", 5, "en", LABELS)).toBe("5 open");
+  });
+});

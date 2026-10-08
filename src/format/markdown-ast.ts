@@ -163,7 +163,9 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // expanded; a bare `open` is not a component tag at all and the section
   // degrades to visible escaped text.
   // `summary` is a one-line teaser shown beside the title, closed or open.
-  Fold: ["title", "open", "summary"],
+  // `for` names who the fold is for (`dev`, `agent`): the reader's Overview
+  // lens hides those two. The text renderers print every fold in full.
+  Fold: ["title", "open", "summary", "for"],
   // A wrapper marking sections the page keeps as history: `since` names what
   // superseded them (free text, e.g. `melosys-console#270`), `note` says how.
   // Wiki-only: not in `COMPONENT_VOCABULARY_RULES`.

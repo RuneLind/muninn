@@ -274,7 +274,7 @@ describe("the web card", () => {
     expect(c).toContain('<span class="q-state">Decided → <a class="q-decision" href="#d99">D99</a></span>');
     expect(c).toContain('<a class="q-id" href="#o3">O3</a>');
     expect(c).not.toMatch(/<section[^>]*\sid="/);
-    expect(html).toContain('<li class="dl-item" id="o3">');
+    expect(html).toContain('<li class="dl-item" id="o3" data-q-state="decided">');
     expect(html).not.toContain('id="o3-2"');
   });
 
@@ -494,7 +494,7 @@ describe("fix round 1: the web card", () => {
       "</DecisionLog>",
     ].join("\n");
     const html = formatWebHtml(md, { question: opts() });
-    expect(html).toContain('<li class="dl-item" id="o2-2">');
+    expect(html).toContain('<li class="dl-item" id="o2-2" data-q-state="decided">');
     expect(card(html)).toContain('<a class="q-id" href="#o2-2">O2</a>');
   });
 
@@ -520,7 +520,7 @@ describe("fix round 1: the web card", () => {
       "</DecisionLog>",
     ].join("\n");
     const html = formatWebHtml(md, { question: opts() });
-    expect(html).toContain('<li class="dl-item" id="d7-2">');
+    expect(html).toContain('<li class="dl-item" id="d7-2" data-q-state="open">');
     expect(card(html)).toContain('<a class="q-decision" href="#d7-2">D7</a>');
   });
 
@@ -584,7 +584,7 @@ describe("fix round 2: pins", () => {
       "</DecisionLog>",
     ].join("\n");
     const html = formatWebHtml(md, { question: { questionsTo: [], language: "en", answerable: false } });
-    expect(html).toContain('<li class="dl-item" id="o2-2">');
+    expect(html).toContain('<li class="dl-item" id="o2-2" data-q-state="open">');
     expect(html).toContain('<a class="q-id" href="#o2">O2</a>');
   });
 

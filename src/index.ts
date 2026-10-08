@@ -268,6 +268,9 @@ const answerGroupLines = answerGroupsBootLines(config.wikiAnswers);
 for (const line of answerGroupLines.warnings) log.warn("{line}", { line });
 if (answerGroupLines.info) log.info("{line}", { line: answerGroupLines.info });
 
+// `WIKI_DEFAULT_LENS`: entries the parse dropped, by position.
+for (const line of config.wikiDefaultLens.warnings) log.warn("{line}", { line });
+
 // Trace, prompt-snapshot and thread-citation retention: hourly, process-wide, on
 // every profile — not inside the per-bot scheduler, which needs a Telegram bot.
 if (startRetentionCleanup(config)) {
