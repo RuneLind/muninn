@@ -46,10 +46,19 @@ export interface QuestionLabels {
     saving: string;
     edit: string;
     cancel: string;
-    /** A 409 version_conflict: someone saved a newer version first. */
+    /** A 409 version_conflict: someone saved a newer version first. The
+     *  reader's text stays in the editor, now based on that newer version. */
     conflict: string;
     failed: string;
     loadFailed: string;
+    /** The POST succeeded, the reload of the answers did not. */
+    savedReloadFailed: string;
+    /** Button that loads the answers again. */
+    retry: string;
+    /** Button that clears the picked choice. */
+    clearChoice: string;
+    /** Why Save is disabled: the body is `n` characters over the cap. */
+    overCap: (n: number) => string;
   };
   redacted: string;
   /** The log fold: an answer's earlier versions. */
@@ -84,9 +93,14 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       saving: "Saving …",
       edit: "Edit",
       cancel: "Cancel",
-      conflict: "This answer changed somewhere else. The latest version is shown; edit it again to change it.",
+      conflict:
+        "This answer changed somewhere else. The latest version is shown above; your text is still in the editor, and saving it replaces that version.",
       failed: "The answer was not saved",
       loadFailed: "Answers could not be loaded.",
+      savedReloadFailed: "The answer was saved, but the answers could not be loaded again.",
+      retry: "Load again",
+      clearChoice: "Clear choice",
+      overCap: (n) => `Too long: remove ${n} ${n === 1 ? "character" : "characters"} to save.`,
     },
     redacted: "redacted",
     earlier: (n) => `Earlier versions (${n})`,
@@ -118,9 +132,14 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
       saving: "Lagrer …",
       edit: "Endre",
       cancel: "Avbryt",
-      conflict: "Svaret er endret et annet sted. Den nyeste versjonen vises; endre den på nytt om du vil.",
+      conflict:
+        "Svaret er endret et annet sted. Den nyeste versjonen vises over; teksten din står fortsatt i feltet, og lagrer du den, erstatter den den versjonen.",
       failed: "Svaret ble ikke lagret",
       loadFailed: "Kunne ikke hente svarene.",
+      savedReloadFailed: "Svaret ble lagret, men svarene kunne ikke hentes på nytt.",
+      retry: "Hent på nytt",
+      clearChoice: "Fjern valg",
+      overCap: (n) => `For langt: fjern ${n} tegn for å lagre.`,
     },
     redacted: "fjernet",
     earlier: (n) => `Tidligere versjoner (${n})`,

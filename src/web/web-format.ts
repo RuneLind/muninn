@@ -44,7 +44,6 @@ import {
 } from "../format/query-block.ts";
 import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
 import {
-  formatQuestionTarget,
   parseQuestionAttrs,
   parseQuestionPage,
   resolveQuestionTargets,
@@ -294,7 +293,9 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     ` data-question-lang="${opts.language}"` +
     (choices.length ? ` data-question-choices="${escapeHtml(choices.join("|"))}"` : "") +
     ` data-question-to-source="${toSource}"` +
-    (to.length ? ` data-question-to="${escapeHtml(to.map(formatQuestionTarget).join("|"))}"` : "");
+    // Names only: no client reads an ident, and the reader's page should not
+    // carry one (the answer route computes `asked` on the server).
+    (to.length ? ` data-question-to="${escapeHtml(to.map((t) => t.name).join("|"))}"` : "");
   const cls = `question q-${state ? state.kind : "noid"}`;
   return `<section class="${cls}"${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
 }

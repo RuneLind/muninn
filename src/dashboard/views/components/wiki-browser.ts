@@ -4177,8 +4177,10 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       enhanceRefLinks(articleRoot, data.meta.relPath);
       // `<Question>` cards: answers, composer and edit, on a wiki that takes
       // answers only. After the ref links, so an answer's text is never linked.
+      // The registry name, not `WIKI`: under the `WIKI_DIR` override `WIKI` is
+      // "" while the answer routes still need the served wiki's own name.
       enhanceAnswerCards(articleRoot, data.answers, {
-        wiki: readFindSelfWiki() || readActiveWikiName(),
+        wiki: FIND_SELF_WIKI || WIKI,
         relPath: data.meta.relPath,
       });
       applyDisplay();

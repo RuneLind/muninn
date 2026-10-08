@@ -20,6 +20,7 @@ import type { Identity } from "../../auth/introspect.ts";
 import type { AuthRole } from "../../auth/role.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { registerWikiAnswerRoutes, type WikiAnswerStore } from "./wiki-answers.ts";
 import {
   getLatestWikiAnswerVersion,
@@ -127,6 +128,28 @@ const ASKED_PAGE = [
   "",
 ].join("\n");
 
+// The owner written the way WIKI_ANSWER_OWNER takes it: a name and an ident.
+const OWNER_REL = "plans/owner.mdx";
+const OWNER_PAGE = [
+  "---",
+  "title: Owner",
+  'questions_to: ["Rune Lind (Z555555)"]',
+  "---",
+  "",
+  '<Question id="B1">',
+  "",
+  "For the page's person, who is the owner?",
+  "",
+  "</Question>",
+  "",
+  '<Question id="B2" to="R. Lind (Z555555)">',
+  "",
+  "For the owner under another spelling of the name?",
+  "",
+  "</Question>",
+  "",
+].join("\n");
+
 const OWNER = "Rune Owner";
 let root = "";
 
@@ -141,7 +164,13 @@ const yvonne: Identity = {
 const ola: Identity = { ...yvonne, userId: "u-ola", displayName: "Ola Nordmann", navIdent: "Y222222", oid: "oid-ola" };
 
 function appFor(
-  opts: { identity?: Identity; role?: AuthRole; answers?: WikiAnswerConfig; store?: WikiAnswerStore } = {},
+  opts: {
+    identity?: Identity;
+    role?: AuthRole;
+    answers?: WikiAnswerConfig;
+    store?: WikiAnswerStore;
+    profile?: "default" | "nais";
+  } = {},
 ): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -151,7 +180,7 @@ function appFor(
   });
   const config = {
     dashboardPort: 3010,
-    profile: "default",
+    profile: opts.profile ?? "default",
     wikiAnswers: opts.answers ?? { wikis: new Set(["answers"]), owner: OWNER },
   } as unknown as Config;
   registerWikiReadRoutes(app, config);
@@ -186,6 +215,7 @@ beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-answers-"));
   await Bun.write(path.join(root, REL), PAGE);
   await Bun.write(path.join(root, ASKED_REL), ASKED_PAGE);
+  await Bun.write(path.join(root, OWNER_REL), OWNER_PAGE);
   __setWikiRegistryForTest([
     { name: "answers", root, source: "extra" },
     { name: "cards-only", root, source: "extra" },
@@ -445,8 +475,26 @@ describe("/api/wiki/page on a wiki that takes answers", () => {
   });
 
   test("canExport is admin only", async () => {
-    expect((await page(appFor({ identity: yvonne, role: "user" }), "answers")).answers?.canExport).toBe(false);
     expect((await page(appFor({ identity: yvonne, role: "admin" }), "answers")).answers?.canExport).toBe(true);
+  });
+
+  test("role user gets no answers flag: the zones refuse it the answer routes (default profile)", async () => {
+    const data = await page(appFor({ identity: yvonne, role: "user" }), "answers");
+    expect(data.answers).toBeUndefined();
+    // The card itself still renders, read-only for this viewer.
+    expect(data.html).toContain("section class=\"question");
+  });
+
+  test("role user gets no answers flag on nais either; admin there still does", async () => {
+    __setReadonlyWikiRootsForTest([root]);
+    __resetWikiCacheForTest();
+    try {
+      expect((await page(appFor({ identity: yvonne, role: "user", profile: "nais" }), "answers")).answers).toBeUndefined();
+      expect((await page(appFor({ identity: yvonne, role: "admin", profile: "nais" }), "answers")).answers?.answerable).toBe(true);
+    } finally {
+      __setReadonlyWikiRootsForTest();
+      __resetWikiCacheForTest();
+    }
   });
 
   test("a wiki not in WIKI_ANSWER_WIKIS: read-only cards, no flags, no owner", async () => {
@@ -597,5 +645,22 @@ describe("asked / not asked (D2, the O2 v1 rule)", () => {
     const text = await res.text();
     expect(text).not.toContain("X111111");
     expect(text).toContain('"asked":true');
+  });
+});
+
+describe("answer cards fix round 1: WIKI_ANSWER_OWNER in the target format", () => {
+  test("the owner's name is stored without the ident, and the ident decides asked", async () => {
+    const app = appFor({ answers: { wikis: new Set(["answers"]), owner: "Rune Lind (Z555555)" } });
+    const saved = await (await post(app, { wiki: "answers", relPath: OWNER_REL, questionId: "B1", body: "owner on B1" })).json();
+    expect(saved.authorName).toBe("Rune Lind");
+    const row = (await getDb()`SELECT author_name, author_nav_ident FROM wiki_answers WHERE answer_id = ${saved.answerId}`)[0]!;
+    expect([row.author_name, row.author_nav_ident]).toEqual(["Rune Lind", "Z555555"]);
+    await post(app, { wiki: "answers", relPath: OWNER_REL, questionId: "B2", body: "owner on B2" });
+    const res = await app.request(`/api/wiki/answers?wiki=answers&relPath=${encodeURIComponent(OWNER_REL)}`);
+    const { answers } = (await res.json()) as { answers: { body: string; asked: boolean | null; authorName: string }[] };
+    expect(answers.find((a) => a.body === "owner on B1")?.asked).toBe(true);
+    // Another spelling of the name, the same ident: asked.
+    expect(answers.find((a) => a.body === "owner on B2")?.asked).toBe(true);
+    expect(JSON.stringify(answers)).not.toContain("Z555555");
   });
 });

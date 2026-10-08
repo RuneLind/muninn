@@ -353,7 +353,7 @@ describe("GET /api/wiki/html", () => {
     expect(html).toContain('class="question q-decided"');
     expect(html).toContain('data-wiki-answerable="false"');
     expect(html).toContain('data-question-lang="no"');
-    expect(html).toContain('data-question-to="Yvonne Jacobs (X111111)"');
+    expect(html).toContain('data-question-to="Yvonne Jacobs"');
     expect(html).toContain("Avgjort → ");
     expect(html).toContain('<li class="dl-item" id="o3">');
   });

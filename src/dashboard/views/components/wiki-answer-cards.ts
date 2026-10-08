@@ -6,24 +6,40 @@
  *
  * The controls key on the page payload's own `answers.answerable` flag and the
  * card's `data-wiki-answerable` (D14), never on `wikiToolsRegistered` or the
- * read-only selectors: a wiki outside `WIKI_ANSWER_WIKIS` sends no `answers`
- * field, and this module then neither fetches nor renders anything.
+ * read-only selectors: a wiki outside `WIKI_ANSWER_WIKIS`, or a viewer whose
+ * zone does not admit the answer routes, gets no `answers` field, and this
+ * module then neither fetches nor renders anything.
  *
- * All state lives in a per-card record, never in the DOM, and every change
- * re-renders the card from it; a stale response (the reader navigated away)
- * paints nothing because its card is no longer connected.
+ * State lives in a per-card record, never in the DOM. Four rules keep a card
+ * honest while answers load and save around it:
+ * - only the NEWEST answers request paints (`loadSeq`), so two reloads that
+ *   return in reverse order cannot leave the older list on screen;
+ * - a reload repaints only the cards whose data changed, and a repaint keeps
+ *   focus, the caret and every open log fold;
+ * - an edit is based on the version the reader clicked Edit on, captured then
+ *   — never on whatever a later reload put in the list, which would turn a
+ *   stale edit into a silent overwrite instead of a 409;
+ * - a card is repainted the moment its POST settles, whatever the reload does.
  */
-import { questionLabels, QUESTION_LANGUAGES, type QuestionLabels, type QuestionLanguage } from "../../../format/question-labels.ts";
-import { splitQuestionList } from "../../../format/question.ts";
+import {
+  DEFAULT_QUESTION_LANGUAGE,
+  parseQuestionLanguage,
+  questionLabels,
+  type QuestionLabels,
+  type QuestionLanguage,
+} from "../../../format/question-labels.ts";
+import { codePointLength, parseChoices, QUESTION_ANSWER_MAX } from "../../../format/question.ts";
 import {
   answerItemHtml,
-  ANSWER_BODY_MAX,
   cardDisplayState,
-  codePointLength,
   composerCanSave,
   composerHtml,
+  draftChoiceFor,
   isVersionConflict,
+  mergeSavedAnswer,
+  overCapText,
   saveErrorText,
+  savedAnswerOf,
   statePillText,
   unexportedCount,
   type AnswerWire,
@@ -38,6 +54,24 @@ export interface PageAnswersInfo {
   owner?: string | null;
 }
 
+/** What a caller (PR 4's export button) holds on to after hydrating. */
+export interface AnswerCardsHandle {
+  /** Every answer on the page, as the last load or save left it. */
+  answers(): readonly AnswerWire[];
+  /** Answers the export has not copied yet, redacted ones excluded. */
+  unexportedCount(): number;
+  /** Load the answers again and repaint the cards whose data changed. */
+  refresh(): Promise<void>;
+  /** Called after every change to `answers()`. Returns the unsubscribe. */
+  onChange(cb: () => void): () => void;
+}
+
+/** The answer an edit is made from, captured when Edit is clicked. */
+interface EditBase {
+  answerId: string;
+  version: number;
+}
+
 interface CardUi {
   section: HTMLElement;
   questionId: string;
@@ -45,92 +79,167 @@ interface CardUi {
   lang: QuestionLanguage;
   L: QuestionLabels;
   choices: string[];
-  /** The answer being edited, or null. */
-  editing: string | null;
+  editing: EditBase | null;
   choice: string | null;
   body: string;
   sending: boolean;
-  message: { text: string; kind: "error" | "warn" } | null;
+  message: { text: string; kind: "error" | "warn"; retry?: boolean } | null;
+  /** A 409 asked for the newer version: move `editing` onto it on the next load. */
+  rebaseOnLoad: boolean;
+  /** Answer ids whose log fold the reader has open. */
+  openLogs: Set<string>;
+  /** What the last paint rendered from, so an unchanged card is left alone. */
+  paintedKey: string | null;
 }
 
 interface CardsCtx {
   wiki: string;
   relPath: string;
   answers: AnswerWire[];
+  /** A load has succeeded at least once. */
+  loaded: boolean;
   cards: CardUi[];
   fetchFn: typeof fetch;
+  /** The newest answers request issued; only its response paints. */
+  loadSeq: number;
+  listeners: Set<() => void>;
 }
 
-const langOf = (raw: string | null): QuestionLanguage =>
-  (QUESTION_LANGUAGES as readonly string[]).includes(raw ?? "") ? (raw as QuestionLanguage) : "en";
+type LoadResult = "ok" | "failed" | "off" | "stale";
+
+/** Marks a card section this module wired, so a second call never wires it twice. */
+export const ANSWER_CARD_WIRED_ATTR = "data-answer-cards";
+const handles = new WeakMap<Element, AnswerCardsHandle>();
 
 const serverStateOf = (raw: string | null): CardServerState =>
   raw === "open" || raw === "closed" || raw === "decided" ? raw : "none";
 
 /**
- * Hydrate the answerable cards under `root`. A no-op — no fetch — when the
- * page payload carries no `answers` flag or no card is answerable.
+ * Hydrate the answerable cards under `root` and return a handle on them. Null —
+ * and no fetch — when the page payload carries no `answers` flag or no card is
+ * answerable. Idempotent: cards already wired are skipped, and a call that
+ * finds only those returns their existing handle.
  */
 export function enhanceAnswerCards(
   root: HTMLElement,
   info: PageAnswersInfo | undefined,
   opts: { wiki: string; relPath: string; fetchFn?: typeof fetch },
-): void {
-  if (!info?.answerable || !opts.wiki || !opts.relPath) return;
+): AnswerCardsHandle | null {
+  if (!info?.answerable || !opts.wiki || !opts.relPath) return null;
   const sections = Array.from(
     root.querySelectorAll<HTMLElement>('section.question[data-wiki-answerable="true"][data-question-id]'),
   );
-  if (sections.length === 0) return;
+  if (sections.length === 0) return null;
+  const fresh = sections.filter((s) => !s.hasAttribute(ANSWER_CARD_WIRED_ATTR));
+  if (fresh.length === 0) return handles.get(sections[0]!) ?? null;
+
   const ctx: CardsCtx = {
     wiki: opts.wiki,
     relPath: opts.relPath,
     answers: [],
+    loaded: false,
     cards: [],
     fetchFn: opts.fetchFn ?? fetch.bind(globalThis),
+    loadSeq: 0,
+    listeners: new Set(),
   };
-  for (const section of sections) {
-    const lang = langOf(section.getAttribute("data-question-lang"));
-    const choicesAttr = section.getAttribute("data-question-choices");
+  const handle: AnswerCardsHandle = {
+    answers: () => ctx.answers,
+    unexportedCount: () => unexportedCount(ctx.answers),
+    refresh: async () => {
+      const r = await loadAnswers(ctx);
+      if (r === "failed" && !ctx.loaded) showLoadError(ctx);
+    },
+    onChange: (cb) => {
+      ctx.listeners.add(cb);
+      return () => ctx.listeners.delete(cb);
+    },
+  };
+  for (const section of fresh) {
+    section.setAttribute(ANSWER_CARD_WIRED_ATTR, "wired");
+    // Focusable from code only: where focus goes when the control it was on
+    // is gone after a repaint.
+    if (!section.hasAttribute("tabindex")) section.setAttribute("tabindex", "-1");
+    const lang = parseQuestionLanguage(section.getAttribute("data-question-lang") ?? DEFAULT_QUESTION_LANGUAGE).language;
     const ui: CardUi = {
       section,
       questionId: section.getAttribute("data-question-id") ?? "",
       server: serverStateOf(section.getAttribute("data-question-state")),
       lang,
       L: questionLabels(lang),
-      choices: choicesAttr ? splitQuestionList(choicesAttr).map((c) => c.trim()).filter(Boolean) : [],
+      choices: parseChoices(section.getAttribute("data-question-choices") ?? undefined),
       editing: null,
       choice: null,
       body: "",
       sending: false,
       message: null,
+      rebaseOnLoad: false,
+      openLogs: new Set(),
+      paintedKey: null,
     };
     ctx.cards.push(ui);
+    handles.set(section, handle);
     wireCard(ctx, ui);
   }
-  void loadAnswers(ctx);
+  void handle.refresh();
+  return handle;
 }
 
-async function loadAnswers(ctx: CardsCtx): Promise<void> {
+function notify(ctx: CardsCtx): void {
+  for (const cb of ctx.listeners) {
+    try {
+      cb();
+    } catch {
+      /* a listener's failure is its own */
+    }
+  }
+}
+
+async function loadAnswers(ctx: CardsCtx): Promise<LoadResult> {
+  const seq = ++ctx.loadSeq;
   const url =
     `/api/wiki/answers?wiki=${encodeURIComponent(ctx.wiki)}` +
     `&relPath=${encodeURIComponent(ctx.relPath)}&versions=1`;
+  let data: { answerable?: boolean; answers?: AnswerWire[] };
   try {
     const res = await ctx.fetchFn(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { answerable?: boolean; answers?: AnswerWire[] };
-    // A wiki the route says takes no answers: leave the cards read-only.
-    if (data.answerable === false) return;
-    ctx.answers = Array.isArray(data.answers) ? data.answers : [];
+    data = (await res.json()) as typeof data;
   } catch {
-    // The cards stay read-only; one quiet line says why.
-    for (const ui of ctx.cards) {
-      if (!ui.section.isConnected) continue;
-      ui.section.querySelector(".q-answers-error")?.remove();
-      ui.section.insertAdjacentHTML("beforeend", `<p class="q-note q-answers-error">${esc(ui.L.composer.loadFailed)}</p>`);
-    }
-    return;
+    return seq === ctx.loadSeq ? "failed" : "stale";
   }
-  for (const ui of ctx.cards) renderCard(ctx, ui);
+  // A newer request was issued while this one was out: its answer is the
+  // newer list, so this one paints nothing.
+  if (seq !== ctx.loadSeq) return "stale";
+  // A wiki the route says takes no answers: leave the cards as they are.
+  if (data.answerable === false) return "off";
+  ctx.answers = Array.isArray(data.answers) ? data.answers : [];
+  ctx.loaded = true;
+  for (const ui of ctx.cards) {
+    if (ui.message?.retry) ui.message = null;
+    if (ui.rebaseOnLoad) rebaseEdit(ctx, ui);
+    paint(ctx, ui);
+  }
+  notify(ctx);
+  return "ok";
+}
+
+/** After a 409: base the reader's edit on the newer version now on screen. */
+function rebaseEdit(ctx: CardsCtx, ui: CardUi): void {
+  ui.rebaseOnLoad = false;
+  const base = ui.editing;
+  const latest = base ? ctx.answers.find((a) => a.answerId === base.answerId) : undefined;
+  if (base && latest && latest.version > base.version) ui.editing = { answerId: base.answerId, version: latest.version };
+  ui.message = { text: ui.L.composer.conflict, kind: "warn" };
+}
+
+/** The first load failed: the cards stay read-only, and one quiet line says why. */
+function showLoadError(ctx: CardsCtx): void {
+  for (const ui of ctx.cards) {
+    if (!ui.section.isConnected) continue;
+    ui.section.querySelector(":scope > .q-answers-error")?.remove();
+    ui.section.insertAdjacentHTML("beforeend", `<p class="q-note q-answers-error">${esc(ui.L.composer.loadFailed)}</p>`);
+  }
 }
 
 const answersFor = (ctx: CardsCtx, ui: CardUi) =>
@@ -138,10 +247,68 @@ const answersFor = (ctx: CardsCtx, ui: CardUi) =>
     .filter((a) => a.questionId === ui.questionId)
     .sort((a, b) => a.firstCreatedAt - b.firstCreatedAt);
 
-function renderCard(ctx: CardsCtx, ui: CardUi): void {
-  const { section, L } = ui;
-  if (!section.isConnected) return;
+/** Where focus is in a card, as a key a repaint can find again. */
+function focusKeyOf(section: HTMLElement, el: Element): string | null {
+  if (el === section) return "section";
+  if (el instanceof HTMLTextAreaElement && el.classList.contains("q-text")) return "text";
+  if (el instanceof HTMLInputElement && el.type === "radio") return `radio:${el.value}`;
+  if (el instanceof HTMLButtonElement) {
+    if (el.classList.contains("q-edit")) return `edit:${el.getAttribute("data-answer-id") ?? ""}`;
+    for (const cls of ["q-save", "q-cancel", "q-retry", "q-clear-choice"]) if (el.classList.contains(cls)) return cls;
+  }
+  if (el.tagName === "SUMMARY") {
+    const log = el.closest("details.q-log");
+    if (log) return `log:${log.getAttribute("data-answer-id") ?? ""}`;
+  }
+  return null;
+}
+
+interface FocusMark {
+  key: string;
+  start: number | null;
+  end: number | null;
+}
+
+function captureFocus(section: HTMLElement): FocusMark | null {
+  const el = document.activeElement;
+  if (!el || !section.contains(el)) return null;
+  const key = focusKeyOf(section, el) ?? "section";
+  const text = el instanceof HTMLTextAreaElement ? el : null;
+  return { key, start: text ? text.selectionStart : null, end: text ? text.selectionEnd : null };
+}
+
+function restoreFocus(section: HTMLElement, mark: FocusMark | null): void {
+  if (!mark) return;
+  if (mark.key !== "section") {
+    const target = Array.from(
+      section.querySelectorAll<HTMLElement>("textarea.q-text, input[type=radio], button, details.q-log > summary"),
+    ).find((el) => focusKeyOf(section, el) === mark.key);
+    if (target && !(target as HTMLButtonElement | HTMLInputElement).disabled && !target.hidden) {
+      target.focus({ preventScroll: true });
+      if (target instanceof HTMLTextAreaElement && mark.start !== null) {
+        target.setSelectionRange(mark.start, mark.end ?? mark.start);
+      }
+      return;
+    }
+  }
+  section.focus({ preventScroll: true });
+}
+
+/** Repaint a card from its state. Unless `force`, a card whose answers and
+ *  draft state are what it last painted from is left alone. */
+function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
+  if (!ui.section.isConnected) return;
   const answers = answersFor(ctx, ui);
+  const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server]);
+  if (!force && key === ui.paintedKey) return;
+  const mark = captureFocus(ui.section);
+  renderCard(ui, answers);
+  ui.paintedKey = key;
+  restoreFocus(ui.section, mark);
+}
+
+function renderCard(ui: CardUi, answers: AnswerWire[]): void {
+  const { section, L } = ui;
   const state = cardDisplayState(ui.server, answers);
   section.setAttribute("data-answer-state", state);
   section.classList.toggle("q-answered", state === "answered");
@@ -151,7 +318,9 @@ function renderCard(ctx: CardsCtx, ui: CardUi): void {
   if (pill !== null && pillEl) pillEl.textContent = pill;
 
   // Idempotent: drop what an earlier render injected.
-  section.querySelectorAll(":scope > .q-answers, :scope > .q-composer, :scope > .q-msg, :scope > .q-answers-error, :scope > .q-head > .q-new").forEach((el) => el.remove());
+  section
+    .querySelectorAll(":scope > .q-answers, :scope > .q-composer, :scope > .q-msg, :scope > .q-answers-error, :scope > .q-head > .q-new")
+    .forEach((el) => el.remove());
 
   const open = ui.server === "open";
   // A closed card keeps its answers on screen; the ones not yet copied are
@@ -160,18 +329,22 @@ function renderCard(ctx: CardsCtx, ui: CardUi): void {
   if (!open && fresh > 0) {
     section.querySelector(":scope > .q-head")?.insertAdjacentHTML("beforeend", `<span class="q-new">${esc(L.newBadge(fresh))}</span>`);
   }
+  const editingId = open ? (ui.editing?.answerId ?? null) : null;
   const items = answers
-    .map((a) =>
-      open && ui.editing === a.answerId
-        ? composerHtml(composerView(ui), L)
-        : answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null),
+    .map(
+      (a) =>
+        answerItemHtml(a, L, ui.lang, open && a.mine && !a.redacted && ui.editing === null, ui.openLogs.has(a.answerId)) +
+        // The editor sits under the answer it edits, so a 409 shows the newer
+        // version above the reader's own text.
+        (a.answerId === editingId ? composerHtml(composerView(ui), L) : ""),
     )
     .join("");
   let html = items ? `<div class="q-answers">${items}</div>` : "";
   // The viewer composes a new answer until they have one; after that they edit it.
   if (open && ui.editing === null && !answers.some((a) => a.mine)) html += composerHtml(composerView(ui), L);
   if (ui.message) {
-    html += `<p class="q-msg q-msg-${ui.message.kind}" role="${ui.message.kind === "error" ? "alert" : "status"}">${esc(ui.message.text)}</p>`;
+    const retry = ui.message.retry ? ` <button type="button" class="q-retry">${esc(L.composer.retry)}</button>` : "";
+    html += `<p class="q-msg q-msg-${ui.message.kind}" role="${ui.message.kind === "error" ? "alert" : "status"}">${esc(ui.message.text)}${retry}</p>`;
   }
   section.insertAdjacentHTML("beforeend", html);
   // `.value`, not the escaped text node: a textarea's markup drops a leading newline.
@@ -182,24 +355,49 @@ function renderCard(ctx: CardsCtx, ui: CardUi): void {
 const composerView = (ui: CardUi) => ({
   questionId: ui.questionId,
   choices: ui.choices,
-  editing: ui.editing,
+  editing: ui.editing?.answerId ?? null,
   choice: ui.choice,
   body: ui.body,
   sending: ui.sending,
 });
 
-/** Refresh the counter and the Save button in place, so typing keeps focus. */
+/** Refresh the counter, the over-cap line, Clear choice and Save in place,
+ *  so typing keeps focus. */
 function syncComposer(ui: CardUi): void {
   const form = ui.section.querySelector<HTMLFormElement>("form.q-composer");
   if (!form) return;
   const len = codePointLength(ui.body);
   const count = form.querySelector<HTMLElement>(".q-count");
   if (count) {
-    count.textContent = `${len} / ${ANSWER_BODY_MAX}`;
-    count.classList.toggle("q-count-over", len > ANSWER_BODY_MAX);
+    count.textContent = `${len} / ${QUESTION_ANSWER_MAX}`;
+    count.classList.toggle("q-count-over", len > QUESTION_ANSWER_MAX);
   }
+  const over = form.querySelector<HTMLElement>(".q-over");
+  if (over) {
+    const text = overCapText(ui.body, ui.L);
+    over.textContent = text;
+    over.hidden = text === "";
+  }
+  const clear = form.querySelector<HTMLButtonElement>("button.q-clear-choice");
+  if (clear) clear.hidden = ui.choice === null;
   const save = form.querySelector<HTMLButtonElement>("button.q-save");
   if (save) save.disabled = ui.sending || !composerCanSave(ui.choice, ui.body);
+}
+
+function focusEdit(ui: CardUi, answerId: string | null): void {
+  const edit = answerId
+    ? Array.from(ui.section.querySelectorAll<HTMLButtonElement>("button.q-edit")).find(
+        (b) => b.getAttribute("data-answer-id") === answerId,
+      )
+    : undefined;
+  (edit ?? ui.section).focus({ preventScroll: true });
+}
+
+/** Focus is in this card, or nowhere: moving it will not take it from
+ *  somewhere the reader went meanwhile. */
+function focusIsHereOrNowhere(ui: CardUi): boolean {
+  const el = document.activeElement;
+  return !el || el === document.body || ui.section.contains(el);
 }
 
 function wireCard(ctx: CardsCtx, ui: CardUi): void {
@@ -218,21 +416,48 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
       syncComposer(ui);
     }
   });
+  // `toggle` does not bubble: listen in the capture phase.
+  section.addEventListener(
+    "toggle",
+    (e) => {
+      const t = e.target as HTMLElement;
+      if (!(t instanceof HTMLDetailsElement) || !t.classList.contains("q-log")) return;
+      const id = t.getAttribute("data-answer-id") ?? "";
+      if (t.open) ui.openLogs.add(id);
+      else ui.openLogs.delete(id);
+    },
+    true,
+  );
   section.addEventListener("click", (e) => {
     const t = (e.target as HTMLElement).closest<HTMLElement>("button");
     if (!t || !section.contains(t)) return;
     if (t.classList.contains("q-edit") && !ui.sending) {
       const a = ctx.answers.find((x) => x.answerId === t.getAttribute("data-answer-id"));
       if (!a) return;
-      ui.editing = a.answerId;
-      ui.choice = a.choice;
+      // The base is the version on screen NOW: a newer one saved elsewhere
+      // before this edit is saved is a 409, never a silent overwrite.
+      ui.editing = { answerId: a.answerId, version: a.version };
+      ui.choice = draftChoiceFor(a.choice, ui.choices);
       ui.body = a.body;
       ui.message = null;
-      renderCard(ctx, ui);
+      paint(ctx, ui, true);
       section.querySelector<HTMLTextAreaElement>("textarea.q-text")?.focus();
     } else if (t.classList.contains("q-cancel") && !ui.sending) {
+      const id = ui.editing?.answerId ?? null;
       resetDraft(ui);
-      renderCard(ctx, ui);
+      ui.message = null;
+      paint(ctx, ui, true);
+      focusEdit(ui, id);
+    } else if (t.classList.contains("q-clear-choice") && !ui.sending) {
+      ui.choice = null;
+      section.querySelectorAll<HTMLInputElement>("form.q-composer input[type=radio]").forEach((r) => (r.checked = false));
+      syncComposer(ui);
+      section.querySelector<HTMLInputElement>("form.q-composer input[type=radio]")?.focus();
+    } else if (t.classList.contains("q-retry")) {
+      (t as HTMLButtonElement).disabled = true;
+      void loadAnswers(ctx).then((r) => {
+        if (r !== "ok" && t.isConnected) (t as HTMLButtonElement).disabled = false;
+      });
     }
   });
   section.addEventListener("submit", (e) => {
@@ -247,17 +472,17 @@ function resetDraft(ui: CardUi): void {
   ui.editing = null;
   ui.choice = null;
   ui.body = "";
+  ui.rebaseOnLoad = false;
 }
 
 async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
-  // One request in flight per card: a double-click on a NEW answer would
+  // One request in flight per card: a double submit on a NEW answer would
   // otherwise store two answers.
   if (ui.sending || !composerCanSave(ui.choice, ui.body)) return;
-  const editing = ui.editing ? ctx.answers.find((a) => a.answerId === ui.editing) : undefined;
-  if (ui.editing && !editing) return;
+  const base = ui.editing;
   ui.sending = true;
   ui.message = null;
-  renderCard(ctx, ui);
+  paint(ctx, ui, true);
   const payload: Record<string, unknown> = {
     wiki: ctx.wiki,
     relPath: ctx.relPath,
@@ -265,9 +490,7 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
     choice: ui.choice,
     body: ui.body,
   };
-  // The base is the version the card shows: a newer one saved elsewhere is a
-  // 409, never a silent overwrite.
-  if (editing) Object.assign(payload, { answerId: editing.answerId, baseVersion: editing.version });
+  if (base) Object.assign(payload, { answerId: base.answerId, baseVersion: base.version });
   let status = 0;
   let data: unknown = null;
   try {
@@ -281,16 +504,37 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
   } catch {
     status = 0;
   }
+  // Whatever happens next, the card stops saying "Saving …" now.
   ui.sending = false;
+  const { L } = ui;
   if (status >= 200 && status < 300) {
+    const saved = savedAnswerOf(data);
+    if (saved) {
+      ctx.answers = mergeSavedAnswer(ctx.answers, saved);
+      notify(ctx);
+    }
     resetDraft(ui);
-    await loadAnswers(ctx);
+    const moveFocus = focusIsHereOrNowhere(ui);
+    paint(ctx, ui, true);
+    if (moveFocus) focusEdit(ui, saved?.answerId ?? base?.answerId ?? null);
+    const r = await loadAnswers(ctx);
+    if (r === "failed" || r === "off") {
+      ui.message = { text: L.composer.savedReloadFailed, kind: "warn", retry: true };
+      paint(ctx, ui, true);
+    }
   } else if (isVersionConflict(status, data)) {
-    resetDraft(ui);
-    ui.message = { text: ui.L.composer.conflict, kind: "warn" };
-    await loadAnswers(ctx);
+    // Keep the reader's text; show the newer answer above it on the next load
+    // and base the editor on it, so saving again is a deliberate choice.
+    ui.rebaseOnLoad = true;
+    ui.message = { text: L.composer.conflict, kind: "warn" };
+    paint(ctx, ui, true);
+    const r = await loadAnswers(ctx);
+    if (r === "failed" || r === "off") {
+      ui.message = { text: `${L.composer.conflict} ${L.composer.loadFailed}`, kind: "warn", retry: true };
+      paint(ctx, ui, true);
+    }
   } else {
-    ui.message = { text: saveErrorText(status, data, ui.L), kind: "error" };
-    renderCard(ctx, ui);
+    ui.message = { text: saveErrorText(status, data, L), kind: "error" };
+    paint(ctx, ui, true);
   }
 }

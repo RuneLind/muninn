@@ -705,16 +705,6 @@ export function componentBlockCss(scope: string): string {
 }
 
 /**
- * CSS for the /wiki reader's fact-check INTERACTION layer — the toolbar
- * `wiki-factcheck-reader.ts` inserts above the article, the evidence card a chip
- * expands, and the layer-off state its toggle flips.
- *
- * Deliberately NOT part of `componentBlockCss`: nothing client-side inserts a
- * toolbar or a card in web chat or the /research answer pane, so shipping these
- * rules there was dead weight. The shared `.fc-mark`/`.fc-chip`/`.fc-block`
- * rules stay above — those markup shapes DO render in every scope.
- */
-/**
  * Reader-only: the answer card's composer, answers and log fold (answer cards
  * PR 3). Only the wiki reader's client injects this chrome, so chat and
  * `/research` never ship it. Text sits on --text-primary or --text-soft; each
@@ -737,23 +727,34 @@ export function questionReaderCss(scope: string): string {
       display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 0.4rem;
       font-size: 0.85em; color: var(--text-soft);
     }
+    /* A part carries its own leading separator, so a wrap never strands a "·". */
+    ${scope} .q-by > .q-time, ${scope} .q-by > .q-edited { white-space: nowrap; }
     ${scope} .q-author { color: var(--text-primary); font-weight: 600; }
     ${scope} .q-asked, ${scope} .q-pick {
       display: inline-block; padding: 0 0.45rem; border-radius: 999px; font-size: 0.85em; color: var(--text-primary);
     }
     ${scope} .q-asked-yes { background: var(--tint-success); }
-    ${scope} .q-asked-no { background: var(--tint-warning); }
+    /* "not asked" is a fact, not an alert: no fill, so it reads apart from
+       the Answered pill and the "N new" badge (both --tint-warning). */
+    ${scope} .q-asked-no {
+      background: transparent; color: var(--text-soft); border: 1px dashed var(--border-secondary);
+    }
     ${scope} .q-pick { background: var(--tint-info); font-weight: 600; margin: 0.3rem 0.4rem 0 0; }
     ${scope} .q-answer-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.3rem; }
     ${scope} .q-redacted { color: var(--text-soft); font-style: italic; }
     ${scope} .q-log { margin-top: 0.4rem; }
     ${scope} .q-log > summary { cursor: pointer; font-size: 0.85em; color: var(--text-soft); }
     ${scope} .q-log-item { margin: 0.4rem 0 0; padding-left: 0.6rem; border-left: 2px solid var(--border-secondary); }
-    ${scope} .q-edit, ${scope} .q-cancel {
+    ${scope} section.question[tabindex]:focus:not(:focus-visible) { outline: none; }
+    ${scope} .q-edit, ${scope} .q-cancel, ${scope} .q-retry, ${scope} .q-clear-choice {
       font: inherit; font-size: 0.95em; padding: 0 0.55rem; border-radius: 6px; cursor: pointer;
       background: transparent; color: var(--text-primary); border: 1px solid var(--border-secondary);
     }
-    ${scope} .q-edit:hover, ${scope} .q-cancel:hover { border-color: var(--accent); }
+    ${scope} .q-edit:hover, ${scope} .q-cancel:hover, ${scope} .q-retry:hover, ${scope} .q-clear-choice:hover {
+      border-color: var(--accent);
+    }
+    ${scope} .q-clear-choice[hidden] { display: none; }
+    ${scope} .q-retry { margin-left: 0.4rem; }
     ${scope} .q-composer { margin-top: 0.6rem; }
     ${scope} .q-choices { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
     ${scope} .q-choice {
@@ -775,12 +776,24 @@ export function questionReaderCss(scope: string): string {
     ${scope} .q-save:disabled { opacity: 0.5; cursor: default; }
     ${scope} .q-count { margin-left: auto; font-size: 0.8em; color: var(--text-soft); font-variant-numeric: tabular-nums; }
     ${scope} .q-count-over { color: var(--text-primary); background: var(--tint-error); padding: 0 0.4rem; border-radius: 4px; }
+    ${scope} .q-over { font-size: 0.85em; margin: 0.35rem 0 0; color: var(--text-primary); }
+    ${scope} .q-over[hidden] { display: none; }
     ${scope} .q-msg { font-size: 0.85em; margin: 0.5rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; color: var(--text-primary); }
     ${scope} .q-msg-error { background: var(--tint-error); border-left: 3px solid var(--status-error); }
     ${scope} .q-msg-warn { background: var(--tint-warning); border-left: 3px solid var(--status-warning); }
   `;
 }
 
+/**
+ * CSS for the /wiki reader's fact-check INTERACTION layer — the toolbar
+ * `wiki-factcheck-reader.ts` inserts above the article, the evidence card a chip
+ * expands, and the layer-off state its toggle flips.
+ *
+ * Deliberately NOT part of `componentBlockCss`: nothing client-side inserts a
+ * toolbar or a card in web chat or the /research answer pane, so shipping these
+ * rules there was dead weight. The shared `.fc-mark`/`.fc-chip`/`.fc-block`
+ * rules stay above — those markup shapes DO render in every scope.
+ */
 export function factcheckReaderCss(scope: string): string {
   return `
     ${scope} .fc-toolbar {

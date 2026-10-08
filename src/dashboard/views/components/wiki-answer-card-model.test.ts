@@ -1,19 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
-  ANSWER_BODY_MAX,
   answerItemHtml,
   cardDisplayState,
   composerCanSave,
   composerHtml,
+  draftChoiceFor,
   formatAnswerTime,
   isVersionConflict,
+  mergeSavedAnswer,
   saveErrorText,
+  savedAnswerOf,
   statePillText,
   unexportedCount,
   type AnswerWire,
 } from "./wiki-answer-card-model.ts";
 import { QUESTION_LABELS } from "../../../format/question-labels.ts";
-import { QUESTION_NOT_SURE } from "../../../format/question.ts";
+import { QUESTION_ANSWER_MAX as ANSWER_BODY_MAX, QUESTION_NOT_SURE } from "../../../format/question.ts";
 
 const en = QUESTION_LABELS.en;
 const no = QUESTION_LABELS.no;
@@ -164,5 +166,93 @@ describe("a failed save", () => {
     expect(isVersionConflict(409, { code: "version_conflict" })).toBe(true);
     expect(isVersionConflict(409, { code: "question_closed" })).toBe(false);
     expect(isVersionConflict(400, { code: "version_conflict" })).toBe(false);
+  });
+});
+
+describe("fix round 1", () => {
+  test("a redacted answer is not new and does not make a card Answered", () => {
+    expect(unexportedCount([answer({ redacted: true }), answer({ answerId: "a2", exported: true })])).toBe(0);
+    expect(unexportedCount([answer({ redacted: true }), answer({ answerId: "a2" })])).toBe(1);
+    expect(cardDisplayState("open", [answer({ redacted: true })])).toBe("open");
+    expect(cardDisplayState("open", [answer({ redacted: true }), answer({ answerId: "a2", exported: true })])).toBe("copied");
+    expect(cardDisplayState("open", [answer({ redacted: true }), answer({ answerId: "a2" })])).toBe("answered");
+  });
+
+  test("an edit starts from the stored choice only while the card still offers it", () => {
+    expect(draftChoiceFor("A", ["A", "B"])).toBe("A");
+    expect(draftChoiceFor("A", ["X", "Y"])).toBeNull();
+    expect(draftChoiceFor(QUESTION_NOT_SURE, ["X"])).toBe(QUESTION_NOT_SURE);
+    expect(draftChoiceFor(QUESTION_NOT_SURE, [])).toBeNull();
+    expect(draftChoiceFor("A", [])).toBeNull();
+    expect(draftChoiceFor(null, ["A"])).toBeNull();
+  });
+
+  test("over the cap, the composer says why Save is disabled; within it the line is hidden", () => {
+    const view = { questionId: "O1", choices: [], editing: null, choice: null, body: "a".repeat(ANSWER_BODY_MAX + 3), sending: false };
+    expect(composerHtml(view, en)).toContain('<p class="q-over" role="status">Too long: remove 3 characters to save.</p>');
+    expect(composerHtml({ ...view, body: "a".repeat(ANSWER_BODY_MAX + 1) }, no)).toContain(">For langt: fjern 1 tegn for å lagre.</p>");
+    expect(composerHtml({ ...view, body: "ok" }, en)).toContain('<p class="q-over" role="status" hidden></p>');
+  });
+
+  test("a picked choice can be cleared: the Clear choice button shows once one is picked", () => {
+    const view = { questionId: "O1", choices: ["A", "B"], editing: "a1", choice: null, body: "x", sending: false };
+    expect(composerHtml(view, en)).toContain('<button type="button" class="q-clear-choice" hidden>Clear choice</button>');
+    expect(composerHtml({ ...view, choice: "A" }, en)).toContain('<button type="button" class="q-clear-choice">Clear choice</button>');
+    expect(composerHtml({ ...view, choices: [] }, en)).not.toContain("q-clear-choice");
+  });
+
+  test("every separator in a by line rides inside the part it leads, never as a bare text node", () => {
+    const html = answerItemHtml(
+      answer({
+        versionCount: 2,
+        version: 2,
+        earlier: [{ version: 1, authorName: "Y", choice: null, body: "first", createdAt: 0, exported: false, redacted: false }],
+      }),
+      en,
+      "en",
+      true,
+    );
+    const lines = [...html.matchAll(/<div class="q-by">([\s\S]*?)<\/div>/g)].map((m) => m[1]!);
+    expect(lines.length).toBe(2);
+    for (const line of lines) {
+      // Text outside every tag is white space only.
+      expect(line.replace(/<span[^>]*>[^<]*<\/span>|<button[^>]*>[^<]*<\/button>/g, "").trim()).toBe("");
+    }
+    expect(html).toContain('<span class="q-time">· 2026-10-08 21:32</span>');
+    expect(html).toContain('<span class="q-edited">· edited 1×</span>');
+  });
+
+  test("the log fold renders open when the reader left it open", () => {
+    const a = answer({
+      versionCount: 2,
+      version: 2,
+      earlier: [{ version: 1, authorName: "Y", choice: null, body: "first", createdAt: 0, exported: false, redacted: false }],
+    });
+    expect(answerItemHtml(a, en, "en", false, true)).toContain('<details class="q-log" data-answer-id="a1" open>');
+    expect(answerItemHtml(a, en, "en", false)).toContain('<details class="q-log" data-answer-id="a1">');
+  });
+
+  test("a saved answer folds into the list: a new one is appended, an edit moves the old version into the log", () => {
+    const saved = { answerId: "a9", questionId: "O1", version: 1, authorName: "Y", choice: null, body: "new", createdAt: 5, exported: false, redacted: false, mine: true };
+    const added = mergeSavedAnswer([answer()], saved);
+    expect(added.map((a) => [a.answerId, a.versionCount, a.firstCreatedAt, a.asked])).toEqual([
+      ["a1", 1, answer().firstCreatedAt, true],
+      ["a9", 1, 5, null],
+    ]);
+    const edited = mergeSavedAnswer([answer({ body: "old" })], { ...saved, answerId: "a1", version: 2, body: "v2" });
+    expect(edited).toHaveLength(1);
+    expect(edited[0]!.version).toBe(2);
+    expect(edited[0]!.body).toBe("v2");
+    expect(edited[0]!.versionCount).toBe(2);
+    expect(edited[0]!.asked).toBe(true);
+    expect(edited[0]!.earlier?.map((v) => [v.version, v.body])).toEqual([[1, "old"]]);
+    // An older save never replaces a newer version already in the list.
+    expect(mergeSavedAnswer([answer({ version: 3, versionCount: 3 })], { ...saved, answerId: "a1", version: 2 })[0]!.version).toBe(3);
+  });
+
+  test("only a body with the saved answer's shape is read as one", () => {
+    expect(savedAnswerOf({ answerId: "a", questionId: "O1", version: 1, body: "", createdAt: 1 })).not.toBeNull();
+    expect(savedAnswerOf({ answerId: "a" })).toBeNull();
+    expect(savedAnswerOf(null)).toBeNull();
   });
 });

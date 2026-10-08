@@ -30,8 +30,10 @@ import { isValidUuid } from "./route-utils.ts";
 import { parseFrontmatter, readWikiPage, stripFrontmatter } from "../../wiki/store.ts";
 import { parseBlocks } from "../../format/markdown-ast.ts";
 import {
+  codePointLength,
   isAskedAuthor,
   parseQuestionPage,
+  parseQuestionTarget,
   parseQuestionsTo,
   QUESTION_ANSWER_MAX,
   QUESTION_NOT_SURE,
@@ -40,6 +42,8 @@ import {
 } from "../../format/question.ts";
 import { sha256 } from "../../gardener/util.ts";
 import { sessionIdentity, sessionRole } from "../../auth/guard.ts";
+import { decideZone } from "../../auth/zones.ts";
+import type { AuthRole } from "../../auth/role.ts";
 import {
   getLatestWikiAnswerVersion,
   insertWikiAnswerVersion,
@@ -54,8 +58,21 @@ import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki-answers");
 
-/** An answer's body cap, in code points ({@link QUESTION_ANSWER_MAX}). */
-export const WIKI_ANSWER_BODY_MAX = QUESTION_ANSWER_MAX;
+/** The answer routes' path. */
+export const WIKI_ANSWERS_PATH = "/api/wiki/answers";
+
+/**
+ * May this viewer read AND post answers? The zone model's own decision for
+ * both methods, so `/api/wiki/page` never tells a client the cards take
+ * answers when every request it would make answers 403 — and so a later zone
+ * change (answer cards PR 5) flips the page flag with it. With auth off
+ * (`role` undefined) every zone admits it.
+ */
+export function viewerMayUseAnswers(role: AuthRole | null | undefined, wikiReadSlice: boolean): boolean {
+  return (["GET", "POST"] as const).every(
+    (method) => decideZone({ method, path: WIKI_ANSWERS_PATH, role, wikiReadSlice }).allowed,
+  );
+}
 
 /** The store, injectable so the route's rules are testable without a database. */
 export interface WikiAnswerStore {
@@ -92,7 +109,9 @@ interface AnswerView extends AnswerVersionView {
   mine: boolean;
   /** The question names its author (D2): ident when both sides have one,
    *  else the case-folded name. Null when the page no longer has the question
-   *  or it names nobody. Computed here because the client never sees idents. */
+   *  or it names nobody. Computed here because the author's stored NAV ident
+   *  never leaves the server. It is matched against the page's CURRENT
+   *  targets, not the ones the question had when the answer was saved. */
   asked: boolean | null;
   /** Earlier versions, newest first — with `versions=1`, to the author and an admin only. */
   earlier?: AnswerVersionView[];
@@ -112,13 +131,15 @@ function versionView(v: WikiAnswerVersion): AnswerVersionView {
 }
 
 /** The session's author, or the owner with auth off, or null when auth is off
- *  and no owner is configured. */
+ *  and no owner is configured. The owner is read in the target format, so
+ *  `Rune Lind (X111111)` stores the name and keeps the ident for `asked`. */
 function authorFor(c: Context, owner: string | null): WikiAnswerAuthor | null {
   const identity = sessionIdentity(c);
   if (identity) {
     return { userId: identity.userId, oid: identity.oid, navIdent: identity.navIdent, name: identity.displayName };
   }
-  return owner ? { userId: null, oid: null, navIdent: null, name: owner } : null;
+  const target = owner ? parseQuestionTarget(owner) : null;
+  return target ? { userId: null, oid: null, navIdent: target.ident, name: target.name } : null;
 }
 
 /** Did the viewer write this answer? With auth off every answer is the owner's. */
@@ -165,7 +186,7 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
   const readSliceOnly = servesWikiReadSliceOnly(profile);
   const answerConfig = () => config.wikiAnswers ?? resolveWikiAnswerConfig();
 
-  app.get("/api/wiki/answers", async (c) => {
+  app.get(WIKI_ANSWERS_PATH, async (c) => {
     const wiki = c.req.query("wiki");
     const relPath = c.req.query("relPath");
     if (!wiki || !relPath) return err(c, 400, "bad_request", "wiki and relPath query params required");
@@ -213,7 +234,7 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
     }
   });
 
-  app.post("/api/wiki/answers", async (c) => {
+  app.post(WIKI_ANSWERS_PATH, async (c) => {
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
     let raw: unknown;
@@ -280,8 +301,8 @@ export function registerWikiAnswerRoutes(app: Hono, config: Config, store: WikiA
       return err(c, 400, "bad_choice", `choice must be one of: ${allowed.join(", ")}`);
     }
     if (body.trim() === "" && choice === null) return err(c, 400, "empty_answer", "an answer needs a body or a choice");
-    if ([...body].length > WIKI_ANSWER_BODY_MAX) {
-      return err(c, 400, "body_too_long", `body is over ${WIKI_ANSWER_BODY_MAX} characters`);
+    if (codePointLength(body) > QUESTION_ANSWER_MAX) {
+      return err(c, 400, "body_too_long", `body is over ${QUESTION_ANSWER_MAX} characters`);
     }
 
     let id: string;

@@ -38,6 +38,7 @@ const WIKI_NO = "e2e-answer-card-no";
 const WIKI_RO = "e2e-answer-card-ro";
 const REL = "plans/card.mdx";
 const STYLE_REL = "plans/style.mdx";
+const FIX_REL = "plans/fix.mdx";
 // Synthetic throughout: invented names, ids and wording.
 const OWNER = "Rune Owner";
 
@@ -110,6 +111,32 @@ const PAGE_NO = [
   "",
 ].join("\n");
 
+// Fix round 1: one question per case, so no case reads another's answers.
+// F7's stored choice is one the page no longer offers.
+const FIX_PAGE = [
+  "---",
+  "title: Fix page",
+  "type: plan",
+  "---",
+  "",
+  ...q("F1", "Edited from a stale version?", ' choices="A|B"'),
+  ...q("F2", "Saved to trigger a reload?"),
+  ...q("F3", "First of two saves?"),
+  ...q("F4", "Second of two saves?"),
+  ...q("F5", "Saved while the reload fails?"),
+  ...q("F6", "Where does focus go?"),
+  ...q("F7", "A renamed choice?", ' choices="X|Y"'),
+  ...q("F8", "Log fold kept open?"),
+  ...q("F9", "Typing elsewhere?"),
+  ...q("F10", "Saved while typing elsewhere?"),
+  ...q("F11", "Someone else's answer?"),
+  ...q("F12", "Submitted twice?"),
+  ...q("F13", "Changed while focused?"),
+  ...q("F14", "Saved while another card holds focus?"),
+].join("\n");
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 let server: ChildProcess | undefined;
 let base = "";
 let sql: postgres.Sql | undefined;
@@ -137,6 +164,7 @@ test.beforeAll(async ({}, info) => {
   for (const dir of ["a", "no", "ro"]) await mkdir(path.join(base, dir, "plans"), { recursive: true });
   await writeFile(path.join(base, "a", REL), PAGE, "utf8");
   await writeFile(path.join(base, "a", STYLE_REL), STYLE_PAGE, "utf8");
+  await writeFile(path.join(base, "a", FIX_REL), FIX_PAGE, "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
   await writeFile(path.join(base, "no", ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
@@ -174,6 +202,15 @@ test.beforeAll(async ({}, info) => {
   // C2 is closed, so the route refuses it: an answer saved before the close.
   await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, body, question_hash)
             VALUES (${randomUUID()}, 1, ${WIKI}, ${STYLE_REL}, 'C2', ${OWNER}, 'Saved before the close.', 'seed')`;
+
+  // The fix page's seeded state.
+  await api({ relPath: FIX_REL, questionId: "F1", choice: "A", body: "F1 version one." });
+  // F7 was answered with "A" when the page offered A|B; it now offers X|Y.
+  await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, choice, body, question_hash)
+            VALUES (${randomUUID()}, 1, ${WIKI}, ${FIX_REL}, 'F7', ${OWNER}, 'A', 'Picked A back then.', 'seed')`;
+  const f8 = await api({ relPath: FIX_REL, questionId: "F8", body: "F8 version one." });
+  await api({ relPath: FIX_REL, questionId: "F8", body: "F8 version two.", answerId: f8.answerId, baseVersion: 1 });
+  await api({ relPath: FIX_REL, questionId: "F13", body: "F13 version one." });
 });
 
 test.afterAll(async () => {
@@ -319,14 +356,26 @@ test.describe("Wiki reader: the answer card's composer", () => {
 
     await card(a, "O5").locator("button.q-save").click();
     const msg = card(a, "O5").locator(".q-msg");
-    await expect(msg).toHaveText(
-      "This answer changed somewhere else. The latest version is shown; edit it again to change it.",
-    );
+    await expect(msg).toBeVisible();
+    // A's text is still in the editor, and the newer answer is on screen above it.
+    await expect(card(a, "O5").locator("textarea.q-text")).toHaveValue("A's edit, from version one.");
     await expect(card(a, "O5").locator(".q-answer > .q-answer-body")).toHaveText("B got there first.");
+    await expect(msg).toHaveText(
+      "This answer changed somewhere else. The latest version is shown above; your text is still in the editor, and saving it replaces that version.",
+    );
     const rows = await rowsFor("O5");
     expect(rows.map((r) => [r.answer_id, r.version, r.body])).toEqual([
       [first.answerId, 1, "Version one."],
       [first.answerId, 2, "B got there first."],
+    ]);
+    // Saving again is now a deliberate replace of version 2.
+    await card(a, "O5").locator("button.q-save").click();
+    await expect(card(a, "O5").locator(".q-edited")).toHaveText("· edited 2×");
+    await expect(card(a, "O5").locator(".q-answer > .q-answer-body")).toHaveText("A's edit, from version one.");
+    expect((await rowsFor("O5")).map((r) => [r.version, r.body])).toEqual([
+      [1, "Version one."],
+      [2, "B got there first."],
+      [3, "A's edit, from version one."],
     ]);
     // The 409 is the one failed response, and it is the expected one.
     expect(seenA.failed).toEqual(["409 /api/wiki/answers"]);
@@ -362,6 +411,276 @@ test.describe("Wiki reader: the answer card's composer", () => {
   });
 });
 
+test.describe("Wiki reader: the answer card under reloads, failures and focus", () => {
+  const fixCard = (page: Page, id: string) => card(page, id);
+  /** Open the fix page and wait for the first answers load to land (F1 holds a
+   *  seeded answer), so a route installed afterwards sees only later requests. */
+  const openFix = async (page: Page) => {
+    const seen = await openPage(page, WIKI, FIX_REL);
+    await expect(fixCard(page, "F1").locator(".q-answer")).toHaveCount(1);
+    return seen;
+  };
+
+  test("an edit keeps the version it was started from: a newer one saved meanwhile is a 409, not an overwrite", async ({ page }) => {
+    const seen = await openFix(page);
+    const f1 = fixCard(page, "F1");
+    await f1.locator("button.q-edit").click();
+    await f1.locator("textarea.q-text").fill("F1 edit made from version one.");
+    // Another tab saves version 2 while this editor is open.
+    const [row] = await rowsFor("F1", FIX_REL);
+    await api({ relPath: FIX_REL, questionId: "F1", choice: "B", body: "F1 version two, from elsewhere.", answerId: row!.answer_id, baseVersion: 1 });
+    // A save on another card reloads the answers, version 2 included.
+    const f2 = fixCard(page, "F2");
+    await f2.locator("textarea.q-text").fill("F2 saved.");
+    await f2.locator("button.q-save").click();
+    await expect(f2.locator(".q-answer")).toHaveCount(1);
+    const post = page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/wiki/answers");
+    await f1.locator("button.q-save").click();
+    // Sent from version 1, the base the editor was opened on: refused.
+    expect((await post).status()).toBe(409);
+    await expect(f1.locator(".q-msg-warn")).toBeVisible();
+    await expect(f1.locator(".q-answer > .q-answer-body")).toHaveText("F1 version two, from elsewhere.");
+    await expect(f1.locator("textarea.q-text")).toHaveValue("F1 edit made from version one.");
+    expect((await rowsFor("F1", FIX_REL)).map((r) => [r.version, r.body])).toEqual([
+      [1, "F1 version one."],
+      [2, "F1 version two, from elsewhere."],
+    ]);
+    expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("two reloads that return in reverse order: the newer list stays painted and no composer comes back", async ({ page }) => {
+    const seen = await openFix(page);
+    let gets = 0;
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      gets++;
+      // The first reload's answer is read now and delivered last.
+      const res = await route.fetch();
+      if (gets === 1) await sleep(1500);
+      await route.fulfill({ response: res });
+    });
+    const f3 = fixCard(page, "F3");
+    const f4 = fixCard(page, "F4");
+    await f3.locator("textarea.q-text").fill("F3 first.");
+    await f3.locator("button.q-save").click();
+    // F3's reload is out (and held); F4's save and reload go after it.
+    await expect.poll(() => gets).toBe(1);
+    await f4.locator("textarea.q-text").fill("F4 second.");
+    await f4.locator("button.q-save").click();
+    await expect(f4.locator(".q-answer")).toHaveCount(1);
+    await expect.poll(() => gets).toBe(2);
+    // Let the delayed, older list land.
+    await page.waitForTimeout(2000);
+    await expect(f4.locator(".q-answer")).toHaveCount(1);
+    await expect(f4.locator("form.q-composer")).toHaveCount(0);
+    await expect(f3.locator(".q-answer")).toHaveCount(1);
+    expect((await rowsFor("F4", FIX_REL)).length).toBe(1);
+    expectClean(seen);
+  });
+
+  test("a save whose reload fails: the card leaves Saving, shows the answer and offers to load again", async ({ page }) => {
+    const seen = await openFix(page);
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "down" }) })
+        : route.fallback(),
+    );
+    const f5 = fixCard(page, "F5");
+    await f5.locator("textarea.q-text").fill("F5 saved anyway.");
+    await f5.locator("button.q-save").click();
+    const msg = f5.locator(".q-msg");
+    await expect(msg).toContainText("The answer was saved, but the answers could not be loaded again.");
+    await expect(f5.locator("button.q-save")).toHaveCount(0);
+    await expect(f5.locator(".q-answer > .q-answer-body")).toHaveText("F5 saved anyway.");
+    await expect(f5.locator("button.q-edit")).toBeEnabled();
+    await page.unroute("**/api/wiki/answers?*");
+    await msg.locator("button.q-retry").click();
+    await expect(f5.locator(".q-msg")).toHaveCount(0);
+    await expect(f5.locator(".q-asked")).toHaveText("asked");
+    expect((await rowsFor("F5", FIX_REL)).length).toBe(1);
+    expect(seen.failed).toEqual(["500 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("the first load fails: each card says so in one quiet line and offers no composer", async ({ page }) => {
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET" ? route.fulfill({ status: 503, body: "no" }) : route.fallback(),
+    );
+    await openPage(page, WIKI, FIX_REL);
+    const f2 = fixCard(page, "F2");
+    await expect(f2.locator(".q-answers-error")).toHaveText("Answers could not be loaded.");
+    await expect(page.locator(".wiki-article .q-answers-error")).toHaveCount(14);
+    await expect(page.locator(".wiki-article form.q-composer")).toHaveCount(0);
+  });
+
+  test("focus lands on the saved answer's Edit after Save, and back on Edit after Cancel", async ({ page }) => {
+    const seen = await openFix(page);
+    const f6 = fixCard(page, "F6");
+    await f6.locator("textarea.q-text").fill("F6 answer.");
+    await f6.locator("button.q-save").click();
+    const edit = f6.locator("button.q-edit");
+    await expect(edit).toBeFocused();
+    await edit.click();
+    await expect(f6.locator("textarea.q-text")).toBeFocused();
+    await f6.locator("button.q-cancel").click();
+    await expect(f6.locator("button.q-edit")).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("a stored choice the page no longer offers is dropped from the edit, and a picked choice can be cleared", async ({ page }) => {
+    const seen = await openFix(page);
+    const f7 = fixCard(page, "F7");
+    await expect(f7.locator(".q-answer > .q-pick")).toHaveText("A");
+    await f7.locator("button.q-edit").click();
+    await expect(f7.locator('input[type="radio"]:checked')).toHaveCount(0);
+    await f7.locator("textarea.q-text").fill("No choice now, just text.");
+    const post = page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/wiki/answers");
+    await f7.locator("button.q-save").click();
+    // Sent with no choice, not the stale "A" the route would refuse.
+    expect((await post).status()).toBe(200);
+    await expect(f7.locator(".q-edited")).toHaveText("· edited 1×");
+    const rows = await rowsFor("F7", FIX_REL);
+    expect(rows.map((r) => [r.version, r.choice, r.body])).toEqual([
+      [1, "A", "Picked A back then."],
+      [2, null, "No choice now, just text."],
+    ]);
+    // A picked choice can be cleared again before saving.
+    await f7.locator("button.q-edit").click();
+    await expect(f7.locator("button.q-clear-choice")).toBeHidden();
+    await f7.locator(".q-choice", { hasText: "X" }).click();
+    await expect(f7.locator("button.q-clear-choice")).toBeVisible();
+    await f7.locator("button.q-clear-choice").click();
+    await expect(f7.locator('input[type="radio"]:checked')).toHaveCount(0);
+    await expect(f7.locator("button.q-clear-choice")).toBeHidden();
+    await f7.locator("button.q-cancel").click();
+    expectClean(seen);
+  });
+
+  test("a reload repaints only changed cards: typing elsewhere keeps focus and caret, and an open log fold stays open", async ({ page }) => {
+    const seen = await openFix(page);
+    const f8 = fixCard(page, "F8");
+    await f8.locator(".q-log > summary").click();
+    await expect(f8.locator(".q-log")).toHaveAttribute("open", "");
+    // F8 changes elsewhere, so the coming reload repaints it.
+    const [row] = await rowsFor("F8", FIX_REL);
+    await api({ relPath: FIX_REL, questionId: "F8", body: "F8 version three.", answerId: row!.answer_id, baseVersion: 2 });
+    await page.route("**/api/wiki/answers", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const res = await route.fetch();
+      await sleep(800);
+      await route.fulfill({ response: res });
+    });
+    const f10 = fixCard(page, "F10");
+    // An unchanged card is not repainted at all: its nodes survive the reload.
+    await f9Text(page).evaluate((el) => ((el as unknown as { __kept: boolean }).__kept = true));
+    await f10.locator("textarea.q-text").fill("F10 saved while typing elsewhere.");
+    await f10.locator("button.q-save").click();
+    const f9 = f9Text(page);
+    await f9.click();
+    await f9.pressSequentially("abcdef");
+    await f9.press("ArrowLeft");
+    await f9.press("ArrowLeft");
+    // The save lands and the answers reload while F9 holds focus.
+    await expect(f10.locator(".q-answer")).toHaveCount(1);
+    await expect(f8.locator(".q-edited")).toHaveText("· edited 2×");
+    await expect(f9).toBeFocused();
+    await f9.pressSequentially("X");
+    await expect(f9).toHaveValue("abcdXef");
+    await expect(f8.locator(".q-log")).toHaveAttribute("open", "");
+    await expect(f8.locator(".q-log > summary")).toHaveText("Earlier versions (2)");
+    expect(await f9.evaluate((el) => (el as unknown as { __kept?: boolean }).__kept === true)).toBe(true);
+    expectClean(seen);
+  });
+
+  test("a card that changes under focus is repainted with focus back on the same control", async ({ page }) => {
+    const seen = await openFix(page);
+    await page.route("**/api/wiki/answers", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const res = await route.fetch();
+      await sleep(800);
+      await route.fulfill({ response: res });
+    });
+    const f13 = fixCard(page, "F13");
+    const f14 = fixCard(page, "F14");
+    await f14.locator("textarea.q-text").fill("F14 saved.");
+    await f14.locator("button.q-save").click();
+    // While F14's save is out, F13 changes elsewhere and the reader moves to it.
+    const [row] = await rowsFor("F13", FIX_REL);
+    await api({ relPath: FIX_REL, questionId: "F13", body: "F13 version two.", answerId: row!.answer_id, baseVersion: 1 });
+    await f13.locator("button.q-edit").focus();
+    await expect(f14.locator(".q-answer")).toHaveCount(1);
+    await expect(f13.locator(".q-answer > .q-answer-body")).toHaveText("F13 version two.");
+    await expect(f13.locator("button.q-edit")).toBeFocused();
+    expectClean(seen);
+  });
+
+  test("an answer that is not the viewer's has no Edit", async ({ page }) => {
+    await page.route("**/api/wiki/answers?*", (route) =>
+      route.request().method() === "GET"
+        ? route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              answerable: true,
+              answers: [
+                {
+                  answerId: "00000000-0000-4000-8000-000000000011",
+                  questionId: "F11",
+                  version: 1,
+                  versionCount: 1,
+                  authorName: "Kari Nordmann",
+                  choice: null,
+                  body: "Someone else's answer.",
+                  createdAt: Date.now(),
+                  firstCreatedAt: Date.now(),
+                  exported: false,
+                  redacted: false,
+                  mine: false,
+                  asked: false,
+                },
+              ],
+            }),
+          })
+        : route.fallback(),
+    );
+    await openPage(page, WIKI, FIX_REL);
+    const f11 = fixCard(page, "F11");
+    await expect(f11.locator(".q-answer > .q-answer-body")).toHaveText("Someone else's answer.");
+    await expect(f11.locator("button.q-edit")).toHaveCount(0);
+    // Not the viewer's answer, so the viewer still gets a composer of their own.
+    await expect(f11.locator("form.q-composer")).toBeVisible();
+  });
+
+  test("one request in flight per card: a second submit while the first is out sends nothing", async ({ page }) => {
+    const seen = await openFix(page);
+    let posts = 0;
+    await page.route("**/api/wiki/answers", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      posts++;
+      const res = await route.fetch();
+      await sleep(600);
+      await route.fulfill({ response: res });
+    });
+    const f12 = fixCard(page, "F12");
+    await f12.locator("textarea.q-text").fill("Once, however often submitted.");
+    // Two submit events, each on the form on screen at that moment: the Save
+    // button's disabled state plays no part.
+    await f12.evaluate((section) => {
+      for (let i = 0; i < 2; i++) {
+        section.querySelector("form.q-composer")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
+    });
+    await expect(f12.locator(".q-answer")).toHaveCount(1);
+    await page.waitForTimeout(800);
+    expect(posts).toBe(1);
+    expect((await rowsFor("F12", FIX_REL)).length).toBe(1);
+    expectClean(seen);
+  });
+});
+
+const f9Text = (page: Page) => card(page, "F9").locator("textarea.q-text");
+
 test.describe("Wiki reader: the answer card's look", () => {
   for (const scheme of ["light", "dark"] as const) {
     test(`new text-on-tint pairs read at 4.5:1 on their tokens, ${scheme}`, async ({ page }) => {
@@ -389,7 +708,7 @@ test.describe("Wiki reader: the answer card's look", () => {
         ["log summary", c1.locator(".q-log > summary"), soft],
         ["author", c1.locator(".q-author"), primary],
         ["asked", c1.locator(".q-asked"), primary],
-        ["not asked", card(page, "C4").locator(".q-asked"), primary],
+        ["not asked", card(page, "C4").locator(".q-asked"), soft],
         ["choice chip", c1.locator(".q-answer > .q-pick"), primary],
         ["answered pill", c1.locator(".q-state"), primary],
         ["new badge", card(page, "C2").locator(".q-new"), primary],
@@ -398,6 +717,12 @@ test.describe("Wiki reader: the answer card's look", () => {
       ];
       await expect(card(page, "C2").locator(".q-new")).toHaveText("1 new");
       await expect(card(page, "C4").locator(".q-asked")).toHaveText("not asked");
+      // "not asked" is muted, not a third warning: its fill differs from the
+      // Answered pill's and the "N new" badge's.
+      const bg = (loc: ReturnType<Page["locator"]>) => loc.evaluate((el) => getComputedStyle(el).backgroundColor);
+      const notAskedBg = await bg(card(page, "C4").locator(".q-asked"));
+      expect(notAskedBg).not.toBe(await bg(c1.locator(".q-state")));
+      expect(notAskedBg).not.toBe(await bg(card(page, "C2").locator(".q-new")));
       for (const [name, loc, color] of pinned) {
         expect(await loc.evaluate((el) => getComputedStyle(el).color), `${name} token`).toBe(color);
         expect(await paintedContrast(loc), `${name} contrast`).toBeGreaterThanOrEqual(4.5);
@@ -407,6 +732,22 @@ test.describe("Wiki reader: the answer card's look", () => {
       await c3.locator("textarea.q-text").fill("typed");
       expect(await paintedContrast(c3.locator("textarea.q-text")), "textarea contrast").toBeGreaterThanOrEqual(4.5);
       expect(await paintedContrast(c3.locator("button.q-save")), "save contrast").toBeGreaterThanOrEqual(4.5);
+      // Over the cap, the composer says why Save is disabled.
+      await c3.locator("textarea.q-text").fill("x".repeat(8002));
+      const over = c3.locator(".q-over");
+      await expect(over).toBeVisible();
+      await expect(over).toHaveText("Too long: remove 2 characters to save.");
+      await expect(c3.locator("button.q-save")).toBeDisabled();
+      expect(await over.evaluate((el) => getComputedStyle(el).color), "over-cap token").toBe(primary);
+      expect(await paintedContrast(over), "over-cap contrast").toBeGreaterThanOrEqual(4.5);
+      await c3.locator("textarea.q-text").fill("typed");
+      await expect(over).toBeHidden();
+      // The Clear choice control, once a choice is picked.
+      await c3.locator(".q-choice").first().click();
+      const clear = c3.locator("button.q-clear-choice");
+      await expect(clear).toBeVisible();
+      expect(await paintedContrast(clear), "clear choice contrast").toBeGreaterThanOrEqual(4.5);
+      await clear.click();
 
       // The two message tones, from stubbed refusals (no row is written).
       await page.route("**/api/wiki/answers", (route) =>
@@ -458,6 +799,16 @@ test.describe("Wiki reader: the answer card's look", () => {
     expect(m.page).toBe(true);
     expect(m.checked).toBeGreaterThan(30);
     expect(m.overflow).toEqual([]);
+    // No "·" sits in a by line as a bare text node, where a wrap could leave
+    // it alone at the start of a line.
+    const bare = await page.evaluate(() =>
+      Array.from(document.querySelectorAll(".wiki-article .q-by")).flatMap((by) =>
+        Array.from(by.childNodes)
+          .filter((n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").includes("·"))
+          .map((n) => n.textContent),
+      ),
+    );
+    expect(bare).toEqual([]);
     expectClean(seen);
   });
 });

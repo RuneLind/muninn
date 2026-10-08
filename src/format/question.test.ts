@@ -292,12 +292,12 @@ describe("the web card", () => {
     expect(c).toContain('data-question-lang="no"');
   });
 
-  test("who it is for: to= overrides questions_to:, and the data carries the entries as written", () => {
+  test("who it is for: to= overrides questions_to:, and the data carries the names", () => {
     const md = page("Keep it?").replace('<Question id="O3" choices="A|B">', '<Question id="O3" choices="A|B" to="Kari Nordmann (Y222222)">');
     const c = card(formatWebHtml(md, { question: opts({ questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
     expect(c).toContain("For</span> Kari Nordmann</div>");
     expect(c).toContain('data-question-to-source="block"');
-    expect(c).toContain('data-question-to="Kari Nordmann (Y222222)"');
+    expect(c).toContain('data-question-to="Kari Nordmann"');
     expect(c).toContain('data-question-choices="A|B"');
     const pageTo = card(formatWebHtml(page("Keep it?"), { question: opts({ questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
     expect(pageTo).toContain('data-question-to-source="page"');
@@ -534,7 +534,7 @@ describe("fix round 1: the web card", () => {
     const md = page("Keep it?").replace('<Question id="O3" choices="A|B">', '<Question id="O3" choices="A|B" to="">');
     const c = card(formatWebHtml(md, { question: opts({ questionsTo: [{ name: "Yvonne Jacobs", ident: "X111111" }] }) }));
     expect(c).toContain('data-question-to-source="page"');
-    expect(c).toContain('data-question-to="Yvonne Jacobs (X111111)"');
+    expect(c).toContain('data-question-to="Yvonne Jacobs"');
   });
 });
 
@@ -561,7 +561,7 @@ describe("fix round 2: a wikilink alias in to= and choices=", () => {
     const md = '<Question id="O1" to="[[Bar|Alias]] (X1)">\n\nQ?\n\n</Question>';
     const html = formatWebHtml(md, { question: { questionsTo: [], language: "en", answerable: false } });
     const to = /data-question-to="([^"]*)"/.exec(html)?.[1] ?? "";
-    expect(to).toBe("[[Bar|Alias]] (X1)");
+    expect(to).toBe("[[Bar|Alias]]");
     expect(parseToAttr(to)).toHaveLength(1);
   });
 });
@@ -637,5 +637,35 @@ describe("who a question is for, and whether an author was asked", () => {
     expect(isAskedAuthor({ name: " yvonne   JACOBS ", navIdent: null }, [yv])).toBe(true);
     expect(isAskedAuthor({ name: "Ola", navIdent: "Y222222" }, [{ name: "ola", ident: null }])).toBe(true);
     expect(isAskedAuthor({ name: "Ola", navIdent: null }, [])).toBeNull();
+  });
+});
+
+describe("answer cards fix round 1", () => {
+  test("a pasted name with zero-width or soft-hyphen characters still matches", () => {
+    const target = [{ name: "Yvonne Jacobs", ident: null }];
+    expect(isAskedAuthor({ name: "Yvonne\u200B Jacobs", navIdent: null }, target)).toBe(true);
+    expect(isAskedAuthor({ name: "Yvon\u00ADne Jacobs", navIdent: null }, target)).toBe(true);
+    expect(isAskedAuthor({ name: "\uFEFFYvonne Jacobs\u2060", navIdent: null }, target)).toBe(true);
+    // Decomposed and composed spellings of one name are one name.
+    expect(isAskedAuthor({ name: "Ola Nordma\u0308nn", navIdent: null }, [{ name: "Ola Nordm\u00E4nn", ident: null }])).toBe(true);
+    expect(isAskedAuthor({ name: "Yvonne Jakobs", navIdent: null }, target)).toBe(false);
+  });
+
+  test("the owner is read in the target format: a name and an ident", () => {
+    expect(resolveQuestionTargets(null, [], "Rune Lind (X111111)")).toEqual({
+      to: [{ name: "Rune Lind", ident: "X111111" }],
+      source: "owner",
+    });
+    expect(resolveQuestionTargets(null, [], "  ")).toEqual({ to: [], source: "none" });
+    const md = '<Question id="O1">\n\nQ?\n\n</Question>';
+    const html = formatWebHtml(md, { question: { questionsTo: [], language: "en", answerable: true, owner: "Rune Lind (X111111)" } });
+    expect(html).toContain('<span class="q-for-label">For</span> Rune Lind</div>');
+  });
+
+  test("the card's data-question-to carries names, never an ident", () => {
+    const md = '<Question id="O1" to="Kari Nordmann (Y222222)|Ola">\n\nQ?\n\n</Question>';
+    const html = formatWebHtml(md, { question: { questionsTo: [], language: "en", answerable: true } });
+    expect(html).toContain('data-question-to="Kari Nordmann|Ola"');
+    expect(html).not.toContain("Y222222");
   });
 });

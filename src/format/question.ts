@@ -36,6 +36,13 @@ export const QUESTION_NOT_SURE = "not-sure";
  *  composer counts against it. */
 export const QUESTION_ANSWER_MAX = 8000;
 
+/** Characters the way the route and Postgres count them: code points. */
+export function codePointLength(s: string): number {
+  let n = 0;
+  for (const _ of s) n++;
+  return n;
+}
+
 /** One entry of `questions_to:` or `to=`: `Name` or `Name (IDENT)`. */
 export interface QuestionTarget {
   name: string;
@@ -152,11 +159,17 @@ export function resolveQuestionTargets(
 ): { to: QuestionTarget[]; source: QuestionTargetSource } {
   if (blockTo && blockTo.length) return { to: blockTo, source: "block" };
   if (questionsTo.length) return { to: questionsTo, source: "page" };
-  if (owner) return { to: [{ name: owner, ident: null }], source: "owner" };
+  // The owner takes the target format: `Rune Lind (X111111)` is a name and an
+  // ident, so the owner's answers match on the ident like any other target's.
+  const ownerTarget = owner ? parseQuestionTarget(owner) : null;
+  if (ownerTarget) return { to: [ownerTarget], source: "owner" };
   return { to: [], source: "none" };
 }
 
-const foldName = (s: string) => s.normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+/** NFC, format characters (zero-width space, soft hyphen, BOM …) dropped, white
+ *  space collapsed, lower-cased: a name pasted from a document still matches. */
+const foldName = (s: string) =>
+  s.normalize("NFC").replace(/\p{Cf}/gu, "").trim().replace(/\s+/g, " ").toLowerCase();
 
 /**
  * Did the page ask this author (D2, the O2 v1 rule)? A target matches on the
