@@ -1744,13 +1744,20 @@ test.describe("Wiki reader: a save the server refuses for good", () => {
     await page.unroute("**/api/wiki/answers");
     await page.unroute("**/api/wiki/answers?*");
     await closeTerminal("T4");
+    // The reload after the 409 renames T4's author, so the test can wait for a
+    // paint only that reload makes: it repaints in the same step as the rebase.
+    await page.route("**/api/wiki/answers?*", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const data = (await res.json()) as { answers: { questionId: string; authorName: string }[] };
+      for (const a of data.answers) if (a.questionId === "T4") a.authorName = "Reload Marker";
+      await route.fulfill({ response: res, json: data });
+    });
     await t4.locator("button.q-save").click();
 
-    await expect(t4.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
+    await expect(t4.locator(".q-author")).toHaveText("Reload Marker");
     await expect(t4.locator("form.q-composer")).toHaveCount(0);
-    // The real reload has landed: the answer is back with its version one.
-    await expect(t4.locator(".q-answer")).toContainText("T4 version one.");
-    await expect(t4.locator(".q-msg")).toHaveText(CLOSED_MSG);
+    await expect(t4.locator(".q-msg-error")).toHaveText(CLOSED_MSG);
     expect(seen.errors).toEqual([]);
   });
 
