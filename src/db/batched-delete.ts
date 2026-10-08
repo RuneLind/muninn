@@ -40,6 +40,9 @@ export async function deleteInBatches(
   const limit = opts.batchSize ?? RETENTION_DELETE_BATCH_SIZE;
   const maxBatches = opts.maxBatches ?? RETENTION_DELETE_MAX_BATCHES;
   if (!Number.isInteger(limit) || limit < 1) throw new RangeError(`deleteInBatches: batchSize must be a positive integer, got ${limit}`);
+  if (!Number.isInteger(maxBatches) || maxBatches < 1) {
+    throw new RangeError(`deleteInBatches: maxBatches must be a positive integer, got ${maxBatches}`);
+  }
   let deleted = 0;
   for (let n = 0; n < maxBatches; n++) {
     if (opts.shouldStop?.()) break;

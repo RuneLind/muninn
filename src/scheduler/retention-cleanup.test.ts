@@ -14,6 +14,7 @@ import {
   stopRetentionCleanup,
   type RetentionCleanupDeps,
 } from "./retention-cleanup.ts";
+import { BatchedDeleteError } from "../db/batched-delete.ts";
 
 afterEach(async () => {
   await stopRetentionCleanup();
@@ -125,6 +126,21 @@ describe("runRetentionCleanup", () => {
     await runRetentionCleanup(CONFIG, deps);
     expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
     expect(records.some((r) => r.level === "error" && r.properties.error === "snapshot boom")).toBe(true);
+  });
+
+  test("a failed batched delete logs the rows its committed batches removed", async () => {
+    const records = await capture();
+    const fail = (n: number) => async () => {
+      throw new BatchedDeleteError(n, new Error(`boom ${n}`));
+    };
+    const { deps } = recordingDeps({ cleanupOldTraces: fail(3), cleanupOldSnapshots: fail(4), cleanupThreadCitations: fail(5) });
+    await runRetentionCleanup(CONFIG, deps);
+    const errors = records.filter((r) => r.level === "error").map((r) => r.properties);
+    expect(errors).toEqual([
+      { count: 3, error: "boom 3" },
+      { count: 4, error: "boom 4" },
+      { count: 5, error: "boom 5" },
+    ]);
   });
 
   test("log lines carry counts only: no per-bot property", async () => {
@@ -244,6 +260,69 @@ describe("startRetentionCleanup", () => {
     expect(flags).toEqual([]);
   });
 
+  test("a stop during the trace delete skips the snapshot and citation deletes", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { deps, calls } = recordingDeps({
+      cleanupOldTraces: async () => {
+        await gate;
+        return 0;
+      },
+    });
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      await stopRetentionCleanup(10);
+    } finally {
+      release();
+    }
+    await Bun.sleep(30);
+    expect(calls).toEqual(["harvestSearchSignals", "cleanupOldTraces"]);
+  });
+
+  test("each delete is handed the LIVE stop flag: false while running, true once stop is called", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let flag: (() => boolean) | undefined;
+    const { deps } = recordingDeps();
+    deps.cleanupOldTraces = (async (_d: number, opts?: { shouldStop?: () => boolean }) => {
+      flag = opts?.shouldStop;
+      await gate;
+      return 0;
+    }) as RetentionCleanupDeps["cleanupOldTraces"];
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      expect(flag?.()).toBe(false);
+      await stopRetentionCleanup(10);
+      expect(flag?.()).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
+  test("a start after a stop that timed out does not revive the old run", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { deps, calls } = recordingDeps({
+      harvestSearchSignals: async () => {
+        await gate;
+        return 0;
+      },
+    });
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      await stopRetentionCleanup(10); // times out: the harvest is still waiting
+      // A restart in the same process, before the old run has finished.
+      startRetentionCleanup(CONFIG, { deps: recordingDeps().deps, firstDelayMs: 60_000, intervalMs: 60_000 });
+    } finally {
+      release();
+    }
+    await Bun.sleep(30);
+    expect(calls, "the old run must stay stopped").toEqual(["harvestSearchSignals"]);
+  });
+
   test("a later start after a stop runs again (the stop flag resets)", async () => {
     const { deps } = recordingDeps();
     startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });
@@ -255,7 +334,7 @@ describe("startRetentionCleanup", () => {
     expect(second.calls).toEqual(["harvestSearchSignals", "cleanupOldTraces", "cleanupOldSnapshots", "cleanupThreadCitations"]);
   });
 
-  test("shutdown waits at most a few seconds for a run: the pod's grace period is 30 s", () => {
+  test("the stop waits at most a few seconds for a run in flight", () => {
     expect(RETENTION_CLEANUP_STOP_WAIT_MS).toBeLessThanOrEqual(5_000);
   });
 

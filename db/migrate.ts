@@ -111,6 +111,26 @@ async function runMigration(sql: postgres.Sql, migration: MigrationFile) {
   }
 }
 
+/** The index names a migration builds with `CREATE [UNIQUE] INDEX CONCURRENTLY`. */
+export function concurrentIndexNames(text: string): string[] {
+  const re = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([A-Za-z_][A-Za-z0-9_]*)"?/gi;
+  return [...text.matchAll(re)].map((m) => m[1]!);
+}
+
+/** Of `names`, those whose index in the current schema is invalid (and, with
+ *  `missingToo`, those with no index at all). */
+async function invalidIndexes(sql: postgres.Sql, names: string[], opts: { missingToo?: boolean } = {}): Promise<string[]> {
+  if (names.length === 0) return [];
+  const rows = await sql`
+    SELECT c.relname AS name, i.indisvalid AS valid FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND c.relname = ANY(${names})`;
+  const valid = new Set(rows.filter((r) => r.valid).map((r) => r.name as string));
+  const present = new Set(rows.map((r) => r.name as string));
+  return names.filter((n) => !valid.has(n) && (opts.missingToo || present.has(n)));
+}
+
 /** A connection string this process cannot use — an operator error, not a
  *  failed migration. Separated so the CLI can print it as one line instead of
  *  under a heading that sends the reader looking at the migrations. */
@@ -208,11 +228,23 @@ export async function runMigrations(
       // partial failure can't leave the DB half-migrated. (016 is the only such
       // migration today — it predates the wrapper, so without this a fresh full
       // replay, like the drift test, would fail on it.)
-      const concurrent =
-        m.ext === "sql" &&
-        /\bCONCURRENTLY\b/i.test(await Bun.file(join(MIGRATIONS_DIR, m.filename)).text());
+      const text = m.ext === "sql" ? await Bun.file(join(MIGRATIONS_DIR, m.filename)).text() : "";
+      const concurrent = /\bCONCURRENTLY\b/i.test(text);
       if (concurrent) {
+        // A failed concurrent build leaves an INVALID index under its name, which
+        // `IF NOT EXISTS` would then skip for good: drop it first (one statement
+        // per query, outside any transaction), and record nothing unless every
+        // index the file builds ends up valid.
+        const names = concurrentIndexNames(text);
+        for (const name of await invalidIndexes(sql, names)) {
+          say(`    dropping invalid index ${name} left by a failed build`);
+          await sql`DROP INDEX CONCURRENTLY IF EXISTS ${sql(name)}`;
+        }
         await runMigration(sql, m);
+        const invalid = await invalidIndexes(sql, names, { missingToo: true });
+        if (invalid.length > 0) {
+          throw new Error(`${m.filename}: index ${invalid.join(", ")} is invalid or missing after the build; not recorded`);
+        }
         await sql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
       } else {
         await sql.begin(async (tx) => {

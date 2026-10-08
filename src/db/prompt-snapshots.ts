@@ -181,7 +181,8 @@ export async function cleanupOldSnapshots(retention: {
       );
     }
   }
-  // Batched, oldest first; the LEAST bound is what lets `idx_prompt_snapshots_created` serve the OR.
+  // Batched, oldest first; the bound on the shorter window is what lets
+  // `idx_prompt_snapshots_created` serve the OR as an index range.
   const shorter = Math.min(retention.chatDays, retention.captureDays);
   return deleteInBatches(opts, (sql, limit) => sql`
     DELETE FROM prompt_snapshots WHERE id IN (

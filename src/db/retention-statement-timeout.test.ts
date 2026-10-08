@@ -11,6 +11,7 @@ import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
 import { openPostgres } from "../../db/postgres-connection.ts";
 import { closeDb, getDb, initDb } from "./client.ts";
 import { withStatementTimeout } from "./statement-timeout.ts";
+import { deleteInBatches } from "./batched-delete.ts";
 import { cleanupOldTraces } from "./traces.ts";
 import { cleanupOldSnapshots } from "./prompt-snapshots.ts";
 import { cleanupThreadCitations } from "./research-citations.ts";
@@ -143,14 +144,21 @@ describe("retention statements against a held table lock", () => {
 
 const OLD_DAYS = 30;
 
-/** `n` rows older than every window, oldest first, then one fresh row. Returns the old ids in age order. */
-async function seedBacklog(table: "traces" | "prompt_snapshots" | "research_citations", n: number): Promise<string[]> {
+/** `n` rows older than every window, then one fresh row. Inserted oldest first, or
+ *  with `youngestFirst` newest-old first, so heap order and age order differ.
+ *  Returns the old ids in AGE order either way. */
+async function seedBacklog(
+  table: "traces" | "prompt_snapshots" | "research_citations",
+  n: number,
+  { youngestFirst = false } = {},
+): Promise<string[]> {
   const sql = getDb();
   const ids: string[] = [];
   for (let i = 0; i <= n; i++) {
     const fresh = i === n;
-    // Old rows one minute apart, so ORDER BY created_at is the insertion order.
-    const age = fresh ? sql`NOW()` : sql`NOW() - make_interval(days => ${OLD_DAYS}) + make_interval(mins => ${i})`;
+    // Old rows one minute apart.
+    const mins = youngestFirst ? n - i : i;
+    const age = fresh ? sql`NOW()` : sql`NOW() - make_interval(days => ${OLD_DAYS}) + make_interval(mins => ${mins})`;
     let row;
     if (table === "traces") {
       [row] = await sql`INSERT INTO traces (trace_id, name, created_at) VALUES (gen_random_uuid(), 'span', ${age}) RETURNING id`;
@@ -165,7 +173,7 @@ async function seedBacklog(table: "traces" | "prompt_snapshots" | "research_cita
     }
     if (!fresh) ids.push(row!.id);
   }
-  return ids;
+  return youngestFirst ? ids.reverse() : ids;
 }
 
 async function remainingIds(table: string): Promise<string[]> {
@@ -237,6 +245,14 @@ describe("retention deletes run in batches", () => {
       expect(await remainingIds(table)).toHaveLength(1);
     });
 
+    test(`${fn}: batches go oldest first, whatever the insertion order`, async () => {
+      const ids = await seedBacklog(table, 6, { youngestFirst: true });
+      expect(await del({ ...OPT, batchSize: 2, maxBatches: 1 })).toBe(2);
+      const left = new Set(await remainingIds(table));
+      expect(left.has(ids[0]!) || left.has(ids[1]!), "the two oldest rows go first").toBe(false);
+      expect(left.size).toBe(5);
+    });
+
     test(`${fn}: the stop flag ends the run between batches`, async () => {
       await seedBacklog(table, 6);
       let checks = 0;
@@ -246,8 +262,31 @@ describe("retention deletes run in batches", () => {
   }
 });
 
-describe("withStatementTimeout: a timeout below 1 ms is refused", () => {
-  for (const ms of [0, -5, Number.NaN, 0.5, Number.POSITIVE_INFINITY]) {
+describe("deleteInBatches: the loop", () => {
+  test("a short batch ends the run: no empty batches after it", async () => {
+    for (const [counts, expected] of [
+      [[2, 2, 1], 3],
+      [[2, 2, 0], 3],
+      [[1], 1],
+    ] as const) {
+      let calls = 0;
+      const total = await deleteInBatches({ batchSize: 2 }, async () => ({ count: counts[calls++] ?? 0 }));
+      expect(calls, `batches issued for ${counts.join(",")}`).toBe(expected);
+      expect(total).toBe(counts.reduce((a: number, b: number) => a + b, 0));
+    }
+  });
+
+  for (const maxBatches of [0, -1, Number.NaN, 1.5, Number.POSITIVE_INFINITY]) {
+    test(`maxBatches ${maxBatches} is refused before any batch`, async () => {
+      let calls = 0;
+      await expect(deleteInBatches({ maxBatches }, async () => ({ count: calls++ }))).rejects.toThrow(/maxBatches/);
+      expect(calls).toBe(0);
+    });
+  }
+});
+
+describe("withStatementTimeout: a timeout below 1 ms or above Postgres's maximum is refused", () => {
+  for (const ms of [0, -5, Number.NaN, 0.5, Number.POSITIVE_INFINITY, 2_147_483_648]) {
     test(`statementTimeoutMs ${ms} throws and runs nothing`, async () => {
       let ran = false;
       await expect(
@@ -259,6 +298,11 @@ describe("withStatementTimeout: a timeout below 1 ms is refused", () => {
       expect(ran).toBe(false);
     });
   }
+
+  test("2147483647 ms, the largest statement_timeout Postgres takes, is accepted", async () => {
+    const [row] = await withStatementTimeout({ statementTimeoutMs: 2_147_483_647 }, (sql) => sql`SELECT current_setting('statement_timeout') AS s`);
+    expect(row!.s).not.toBe("0");
+  });
 
   test("1 ms is a real bound: pg_sleep times out", async () => {
     await expect(withStatementTimeout({ statementTimeoutMs: 1 }, (sql) => sql`SELECT pg_sleep(0.2)`)).rejects.toThrow(

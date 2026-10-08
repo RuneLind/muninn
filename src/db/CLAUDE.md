@@ -4,7 +4,7 @@
 
 | File | Role |
 |---|---|
-| `client.ts` | `initDb()` / `getDb()` / `closeDb()` — postgres singleton (max 5 connections). `closeDb({ timeoutSeconds })` terminates connections still busy after that long; shutdown passes 5, and a statement run through `withStatementTimeout` then rolls back in Postgres within 1 s rather than waiting out its lock. Constructs the client through **`openPostgres`** (`db/postgres-connection.ts`), never `postgres()` directly: on nais the injected URL carries the Cloud SQL TLS material as query parameters, which postgres.js forwards into the startup packet and the server refuses. A unit test walks `src/` and `db/` and fails on any other construction — tests and `db/setup-test-db.ts` are the named exemptions |
+| `client.ts` | `initDb()` / `getDb()` / `closeDb()` — postgres singleton (max 5 connections). `closeDb({ timeoutSeconds })` terminates connections still busy after that long; shutdown passes 5, and on Postgres 14+ a statement run through `withStatementTimeout` then rolls back within 1 s rather than waiting out its lock (below 14, until its statement timeout). Constructs the client through **`openPostgres`** (`db/postgres-connection.ts`), never `postgres()` directly: on nais the injected URL carries the Cloud SQL TLS material as query parameters, which postgres.js forwards into the startup packet and the server refuses. A unit test walks `src/` and `db/` and fails on any other construction — tests and `db/setup-test-db.ts` are the named exemptions |
 | `messages.ts` | Message CRUD, conversation listing, response metadata, alert messages |
 | `memories.ts` | Memory CRUD, hybrid search (FTS + pgvector RRF), dashboard search, stats |
 | `threads.ts` | Thread CRUD, switch/activate, Slack thread management, cascade delete |

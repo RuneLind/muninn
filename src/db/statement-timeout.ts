@@ -1,10 +1,13 @@
 import type { Sql } from "postgres";
 import { getDb } from "./client.ts";
 
+const PG_MAX_STATEMENT_TIMEOUT_MS = 2_147_483_647;
+
 export interface StatementTimeoutOption {
   /** Bound each statement in Postgres (lock waits included). Unset ⇒ no bound.
    *  Below 1 ms (0, negative, NaN, Infinity) throws: Postgres reads 0 as "no
-   *  timeout", so a computed 0 would silently remove the bound it asked for. */
+   *  timeout", so a computed 0 would silently remove the bound it asked for.
+   *  Above 2147483647 (Postgres's maximum) throws too, before the transaction. */
   statementTimeoutMs?: number;
 }
 
@@ -16,8 +19,10 @@ export async function withStatementTimeout<T>(opts: StatementTimeoutOption, fn: 
   const sql = getDb() as unknown as Sql;
   if (opts.statementTimeoutMs == null) return fn(sql);
   const floored = Math.floor(opts.statementTimeoutMs);
-  if (!Number.isFinite(floored) || floored < 1) {
-    throw new RangeError(`withStatementTimeout: statementTimeoutMs must be at least 1, got ${opts.statementTimeoutMs}`);
+  if (!Number.isFinite(floored) || floored < 1 || floored > PG_MAX_STATEMENT_TIMEOUT_MS) {
+    throw new RangeError(
+      `withStatementTimeout: statementTimeoutMs must be 1 to ${PG_MAX_STATEMENT_TIMEOUT_MS}, got ${opts.statementTimeoutMs}`,
+    );
   }
   const ms = String(floored);
   return (await sql.begin(async (_tx) => {

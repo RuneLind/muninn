@@ -17,7 +17,9 @@ export const RETENTION_CLEANUP_FIRST_DELAY_MS = 60_000;
 export const RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS = 5 * 60_000;
 const BOUND = { statementTimeoutMs: RETENTION_CLEANUP_STATEMENT_TIMEOUT_MS };
 /** How long shutdown waits for a run in flight before closing the pool anyway
- *  (`closeDb` then terminates a statement still blocked). The pod's grace period is 30 s. */
+ *  (`closeDb`'s timeout then terminates a statement still blocked). The wait
+ *  overlaps shutdown's own waits for pending ticks and extractions, so it adds
+ *  nothing to the total; it does not bound the shutdown as a whole. */
 export const RETENTION_CLEANUP_STOP_WAIT_MS = 5_000;
 
 export type RetentionCleanupConfig = Pick<
@@ -92,8 +94,10 @@ let first: ReturnType<typeof setTimeout> | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 /** The run in flight, if any: a tick that finds one skips, and stop waits for it. */
 let running: Promise<unknown> | null = null;
-/** Set by stop, read between steps and between delete batches; reset by start. */
-let stopping = false;
+/** The current start's stop flag, read between steps and between delete
+ *  batches. One object per start, so a later start cannot un-stop a run the
+ *  previous stop flagged and could not wait out. */
+let current: { stopping: boolean } = { stopping: false };
 
 /** Start the hourly cleanup (idempotent). Process-wide and on every profile:
  *  the per-bot scheduler tick runs only for a bot with a Telegram token, which
@@ -105,7 +109,7 @@ export function startRetentionCleanup(
 ): boolean {
   if (first || timer) return true;
   if (!config.schedulerEnabled) return false;
-  stopping = false;
+  const run = (current = { stopping: false });
   const tick = () => {
     if (running) {
       // Each statement is bounded in Postgres, so a run still here an hour on is
@@ -113,7 +117,7 @@ export function startRetentionCleanup(
       log.warn("Retention cleanup skipped: the previous run is still in flight");
       return;
     }
-    running = runRetentionCleanup(config, opts.deps, () => stopping).finally(() => {
+    running = runRetentionCleanup(config, opts.deps, () => run.stopping).finally(() => {
       running = null;
     });
   };
@@ -130,7 +134,7 @@ export async function stopRetentionCleanup(waitMs = RETENTION_CLEANUP_STOP_WAIT_
   if (first) clearTimeout(first);
   if (timer) clearInterval(timer);
   first = timer = null;
-  stopping = true;
+  current.stopping = true;
   const inFlight = running;
   if (!inFlight) return;
   let timeout: ReturnType<typeof setTimeout> | undefined;
