@@ -149,6 +149,28 @@ test("a changed generation updates the page with no manual refresh", async () =>
   }, { timeout: 15_000 }).toBe(true);
 });
 
+test("a Query's CSV and SQL in a subfolder beside the page reach the reader", async () => {
+  const side = "plans/2026-10-08-data-side.mdx";
+  const csv = "plans/data-side-sql-resultat/Q-1.csv";
+  const sql = "plans/data-side-sql-resultat/Q-1.sql";
+  objects.set(side, {
+    generation: 1,
+    body: '# Data\n\n<Query id="Q-1" question="Hvor mange?" answer="To." csv="data-side-sql-resultat/Q-1.csv" sql="data-side-sql-resultat/Q-1.sql" />\n',
+  });
+  objects.set(csv, { generation: 1, body: "status,antall\nSPEILET_RAD,42\n" });
+  objects.set(sql, { generation: 1, body: "select status, count(*) from speilet_tabell;\n" });
+  const html = async () => {
+    const res = await fetch(`${BASE}/api/wiki/page?wiki=${WIKI}&relPath=${encodeURIComponent(side)}`);
+    return res.ok ? ((await res.json()) as { html: string }).html : "";
+  };
+  await expect.poll(html, { timeout: 15_000 }).toContain("SPEILET_RAD");
+  expect(await html()).toContain("speilet_tabell");
+  for (const n of [side, csv, sql]) objects.delete(n);
+  await expect.poll(pageRelPaths, { timeout: 15_000 }).toEqual([REL]);
+  await expect.poll(async () => (await readdir(path.join(root, "plans"))).sort(), { timeout: 15_000 })
+    .toEqual([path.basename(REL)]);
+});
+
 test("a deleted object disappears after the next poll", async () => {
   objects.set("archive/ekstra.md", { generation: 1, body: "# Ekstra\n\nMidlertidig.\n" });
   await expect.poll(async () => (await pageRelPaths()).sort(), { timeout: 15_000 })

@@ -1,0 +1,519 @@
+{
+  "note": "Shared with navikt/melosys-muninn scripts/publiser-felles-wiki.datafiler.cases.json — keep the two copies byte-identical. Each case: what muninn's wiki reader reads for a page (src/wiki/page-files.ts: pageFileRefKinds over parseBlocks after splitFrontmatter, checkPageFileRef, resolveEmbedRelPath).",
+  "cases": [
+    {
+      "name": "self-closing Query with csv and sql in a subfolder beside the page",
+      "page": "plans/side.mdx",
+      "markdown": "# Side\n\n<Query id=\"Q-1\" csv=\"side-sql-resultat/Q-1.csv\" sql=\"side-sql-resultat/Q-1.sql\" />\n",
+      "refs": [
+        {
+          "ref": "side-sql-resultat/Q-1.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/side-sql-resultat/Q-1.csv"
+        },
+        {
+          "ref": "side-sql-resultat/Q-1.sql",
+          "kinds": [
+            "sql"
+          ],
+          "lexical": "ok",
+          "rel": "plans/side-sql-resultat/Q-1.sql"
+        }
+      ]
+    },
+    {
+      "name": "multi-line Query, CaseBoard and DeltaTable",
+      "page": "plans/side.mdx",
+      "markdown": "<CaseBoard src=\"data/cases.yaml\" />\n\n<Query id=\"Q-2\" csv=\"data/Q-2.csv\">\nBody text.\n\n```sql\nselect 1;\n```\n</Query>\n\n<DeltaTable src=\"data/runs.csv\" better=\"lower\" />\n",
+      "refs": [
+        {
+          "ref": "data/cases.yaml",
+          "kinds": [
+            "yaml"
+          ],
+          "lexical": "ok",
+          "rel": "plans/data/cases.yaml"
+        },
+        {
+          "ref": "data/Q-2.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/data/Q-2.csv"
+        },
+        {
+          "ref": "data/runs.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/data/runs.csv"
+        }
+      ]
+    },
+    {
+      "name": "a sibling folder through ..",
+      "page": "plans/side.mdx",
+      "markdown": "<Query id=\"Q\" csv=\"../data/q.csv\" sql=\"../data/q.sql\" />\n",
+      "refs": [
+        {
+          "ref": "../data/q.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "data/q.csv"
+        },
+        {
+          "ref": "../data/q.sql",
+          "kinds": [
+            "sql"
+          ],
+          "lexical": "ok",
+          "rel": "data/q.sql"
+        }
+      ]
+    },
+    {
+      "name": "a .. that climbs above the root",
+      "page": "plans/side.mdx",
+      "markdown": "<Query id=\"Q\" csv=\"../../x.csv\" />\n",
+      "refs": [
+        {
+          "ref": "../../x.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": null
+        }
+      ]
+    },
+    {
+      "name": "a .. that climbs above the root and comes back in",
+      "page": "side.mdx",
+      "markdown": "<Query id=\"Q\" csv=\"../wiki/x.csv\" />\n",
+      "refs": [
+        {
+          "ref": "../wiki/x.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": null
+        }
+      ]
+    },
+    {
+      "name": "a tag inside a code fence names nothing",
+      "page": "a.md",
+      "markdown": "```mdx\n<Query id=\"Q\" csv=\"fenced.csv\" />\n```\n",
+      "refs": []
+    },
+    {
+      "name": "a 4-backtick fence holding a 3-backtick line names nothing",
+      "page": "a.md",
+      "markdown": "````md\n```\n<CaseBoard src=\"fenced.yaml\" />\n```\n````\n",
+      "refs": []
+    },
+    {
+      "name": "an indented fence names nothing",
+      "page": "a.md",
+      "markdown": "1. Step\n\n   ```\n   <Query id=\"Q\" csv=\"indented.csv\" />\n   ```\n",
+      "refs": []
+    },
+    {
+      "name": "an unclosed fence does not hide the tag after it",
+      "page": "a.md",
+      "markdown": "```\n<Query id=\"Q\" csv=\"after-unclosed.csv\" />\n",
+      "refs": [
+        {
+          "ref": "after-unclosed.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "after-unclosed.csv"
+        }
+      ]
+    },
+    {
+      "name": "an opener whose info string holds a backtick is not a fence",
+      "page": "a.md",
+      "markdown": "```x```\n<Query id=\"Q\" csv=\"not-fenced.csv\" />\n",
+      "refs": [
+        {
+          "ref": "not-fenced.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "not-fenced.csv"
+        }
+      ]
+    },
+    {
+      "name": "the frontmatter names nothing",
+      "page": "a.mdx",
+      "markdown": "---\ntitle: T\n<Query id=\"Q\" csv=\"frontmatter.csv\" />\n---\n<Query id=\"Q\" csv=\"body.csv\" />\n",
+      "refs": [
+        {
+          "ref": "body.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "body.csv"
+        }
+      ]
+    },
+    {
+      "name": "CRLF line ends",
+      "page": "a.mdx",
+      "markdown": "---\r\ntitle: T\r\n---\r\n<Query id=\"Q\" csv=\"crlf.csv\">\r\nBody\r\n</Query>\r\n",
+      "refs": [
+        {
+          "ref": "crlf.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "crlf.csv"
+        }
+      ]
+    },
+    {
+      "name": "wrong kind per attribute",
+      "page": "a.mdx",
+      "markdown": "<CaseBoard src=\"cases.csv\" />\n<Query id=\"Q\" csv=\"q.txt\" sql=\"q.yml\" />\n<DeltaTable src=\"d.yaml\" />\n",
+      "refs": [
+        {
+          "ref": "cases.csv",
+          "kinds": [
+            "yaml"
+          ],
+          "lexical": "extension",
+          "rel": null
+        },
+        {
+          "ref": "q.txt",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "extension",
+          "rel": null
+        },
+        {
+          "ref": "q.yml",
+          "kinds": [
+            "sql"
+          ],
+          "lexical": "extension",
+          "rel": null
+        },
+        {
+          "ref": "d.yaml",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "extension",
+          "rel": null
+        }
+      ]
+    },
+    {
+      "name": "invalid refs",
+      "page": "p/a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"/abs.csv\" />\n<Query id=\"B\" csv=\"a\\\\b.csv\" />\n<Query id=\"C\" csv=\".hidden/c.csv\" />\n<Query id=\"D\" csv=\"node_modules/d.csv\" />\n<Query id=\"E\" csv=\"C:x.csv\" />\n",
+      "refs": [
+        {
+          "ref": "/abs.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "invalid",
+          "rel": null
+        },
+        {
+          "ref": "a\\\\b.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "invalid",
+          "rel": null
+        },
+        {
+          "ref": ".hidden/c.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "invalid",
+          "rel": null
+        },
+        {
+          "ref": "node_modules/d.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "invalid",
+          "rel": null
+        },
+        {
+          "ref": "C:x.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "invalid",
+          "rel": null
+        }
+      ]
+    },
+    {
+      "name": "one ref named twice is one file; kinds merge",
+      "page": "a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"r.csv\" />\n<DeltaTable src=\"r.csv\" />\n<Query id=\"B\" csv=\"r.csv\" />\n",
+      "refs": [
+        {
+          "ref": "r.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "r.csv"
+        }
+      ]
+    },
+    {
+      "name": "single-quoted, lower-case and empty attributes name nothing",
+      "page": "a.mdx",
+      "markdown": "<Query id=\"A\" csv='single.csv' />\n<query id=\"B\" csv=\"lower.csv\" />\n<Query id=\"C\" csv=\"\" />\n<CaseBoard src=\"  \" />\n",
+      "refs": []
+    },
+    {
+      "name": "an unclosed multi-line Query names nothing",
+      "page": "a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"unclosed.csv\">\nBody without a close\n",
+      "refs": []
+    },
+    {
+      "name": "inline-closed Query, and one with trailing text after its close",
+      "page": "a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"inline.csv\">Body</Query>\n<Query id=\"B\" csv=\"trailing.csv\">Body</Query> more\n",
+      "refs": [
+        {
+          "ref": "inline.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "inline.csv"
+        }
+      ]
+    },
+    {
+      "name": "a self-closing tag with text after it names nothing",
+      "page": "a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"junk.csv\" /> tail\n",
+      "refs": []
+    },
+    {
+      "name": "a tag indented by spaces, and one inside a Fold",
+      "page": "a.mdx",
+      "markdown": "   <Query id=\"A\" csv=\"indented-tag.csv\" />\n\n<Fold title=\"Details\">\n<CaseBoard src=\"in-fold.yml\" />\n</Fold>\n",
+      "refs": [
+        {
+          "ref": "indented-tag.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "indented-tag.csv"
+        },
+        {
+          "ref": "in-fold.yml",
+          "kinds": [
+            "yaml"
+          ],
+          "lexical": "ok",
+          "rel": "in-fold.yml"
+        }
+      ]
+    },
+    {
+      "name": "a tag inside a blockquote or a list item line names nothing",
+      "page": "a.mdx",
+      "markdown": "> <Query id=\"A\" csv=\"quote.csv\" />\n\n- <Query id=\"B\" csv=\"list.csv\" />\n",
+      "refs": []
+    },
+    {
+      "name": "the last of a repeated attribute wins; unknown attributes are ignored",
+      "page": "a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"first.csv\" csv=\"second.csv\" src=\"ignored.yaml\" />\n",
+      "refs": [
+        {
+          "ref": "second.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "second.csv"
+        }
+      ]
+    },
+    {
+      "name": "a dot segment and ./ in the ref",
+      "page": "plans/a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"./d/./q.csv\" />\n",
+      "refs": [
+        {
+          "ref": "./d/./q.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/d/q.csv"
+        }
+      ]
+    },
+    {
+      "name": "uppercase extension",
+      "page": "a.mdx",
+      "markdown": "<Query id=\"A\" csv=\"Q.CSV\" sql=\"Q.Sql\" />\n<CaseBoard src=\"C.YML\" />\n",
+      "refs": [
+        {
+          "ref": "Q.CSV",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "Q.CSV"
+        },
+        {
+          "ref": "Q.Sql",
+          "kinds": [
+            "sql"
+          ],
+          "lexical": "ok",
+          "rel": "Q.Sql"
+        },
+        {
+          "ref": "C.YML",
+          "kinds": [
+            "yaml"
+          ],
+          "lexical": "ok",
+          "rel": "C.YML"
+        }
+      ]
+    },
+    {
+      "name": "a Query inside a one-line Callout",
+      "page": "plans/side.mdx",
+      "markdown": "# Side\n\n<Callout tone=\"info\"><Query id=\"q\" csv=\"a.csv\" /></Callout>\n",
+      "refs": [
+        {
+          "ref": "a.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/a.csv"
+        }
+      ]
+    },
+    {
+      "name": "a CaseBoard inside a one-line Fold",
+      "page": "plans/side.mdx",
+      "markdown": "<Fold title=\"x\"><CaseBoard src=\"c.yaml\" /></Fold>\n",
+      "refs": [
+        {
+          "ref": "c.yaml",
+          "kinds": [
+            "yaml"
+          ],
+          "lexical": "ok",
+          "rel": "plans/c.yaml"
+        }
+      ]
+    },
+    {
+      "name": "a DeltaTable inside a one-line Tab",
+      "page": "plans/side.mdx",
+      "markdown": "<Tab label=\"x\"><DeltaTable src=\"d.csv\" /></Tab>\n",
+      "refs": [
+        {
+          "ref": "d.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/d.csv"
+        }
+      ]
+    },
+    {
+      "name": "an inline-closed Query inside a one-line Callout",
+      "page": "plans/side.mdx",
+      "markdown": "<Callout tone=\"info\"><Query id=\"q\" csv=\"b.csv\"></Query></Callout>\n",
+      "refs": [
+        {
+          "ref": "b.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/b.csv"
+        }
+      ]
+    },
+    {
+      "name": "two containers nested on one line",
+      "page": "plans/side.mdx",
+      "markdown": "<Callout><Fold title=\"y\"><Query id=\"q\" sql=\"c.sql\" /></Fold></Callout>\n",
+      "refs": [
+        {
+          "ref": "c.sql",
+          "kinds": [
+            "sql"
+          ],
+          "lexical": "ok",
+          "rel": "plans/c.sql"
+        }
+      ]
+    },
+    {
+      "name": "a one-line container inside a multi-line one",
+      "page": "plans/side.mdx",
+      "markdown": "<Callout>\n<Fold title=\"x\"><Query id=\"q\" csv=\"e.csv\" /></Fold>\n</Callout>\n",
+      "refs": [
+        {
+          "ref": "e.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/e.csv"
+        }
+      ]
+    },
+    {
+      "name": "a tag indented under a list item",
+      "page": "plans/side.mdx",
+      "markdown": "- punkt\n  <Query id=\"q\" csv=\"liste.csv\" />\n",
+      "refs": [
+        {
+          "ref": "liste.csv",
+          "kinds": [
+            "csv"
+          ],
+          "lexical": "ok",
+          "rel": "plans/liste.csv"
+        }
+      ]
+    }
+  ]
+}
