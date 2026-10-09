@@ -61,7 +61,7 @@ function sentenceEnd(text: string): number {
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m[0] === ".") {
       const word = text.slice(text.lastIndexOf(" ", m.index) + 1, m.index);
-      if (isAbbreviation(word.replace(/^[("'\[]+/, ""))) continue;
+      if (isAbbreviation(word.replace(/^[("'\[]+/, ""), text.slice(m.index + 1))) continue;
     }
     return m.index + 1;
   }

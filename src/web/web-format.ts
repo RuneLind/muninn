@@ -926,7 +926,8 @@ function logItemHtml(text: string, nested: string, value: string): string {
  *  reads the same split. */
 export function splitDecisionText(text: string): SentenceSplit | null {
   const flat = (html: string) => html.replace(/\s+/g, " ");
-  return splitFirstSentence(text, (first, rest) => flat(itemHtml(first) + itemHtml(rest)) === flat(itemHtml(text)));
+  const whole = flat(itemHtml(text));
+  return splitFirstSentence(text, (first, rest) => flat(itemHtml(first) + itemHtml(rest)) === whole);
 }
 
 /** The first sentence of a DecisionLog item as Overview shows it: the split's

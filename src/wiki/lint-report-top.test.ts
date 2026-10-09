@@ -101,3 +101,12 @@ describe("lint: decision-first-sentence reads the reader's split (fix round 1)",
     expect(await findings("decision-first-sentence")).toHaveLength(1);
   });
 });
+
+describe("lint: decision-first-sentence uses the guarded split (fix round 2, M16)", () => {
+  test("a cut inside emphasis is no first sentence: the lint measures the split the reader takes", async () => {
+    // Unguarded, the first sentence is «_Kort start her nå.» (short); the
+    // reader's guard refuses that cut, so its first sentence runs past the `_`.
+    await write("plans/p.mdx", page(["<DecisionLog>", "", `- **D1** — _Kort start her nå. Og ${LONG} slutt_ her. Resten.`, "", "</DecisionLog>"]));
+    expect(await findings("decision-first-sentence")).toHaveLength(1);
+  });
+});

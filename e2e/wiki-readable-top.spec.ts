@@ -77,6 +77,7 @@ const PAGE = [
   "- **D3** — Bare én setning.",
   "- **D4** — Regelen gjelder fra januar i år. Tallet er <Fact n=\"1\" v=\"bad\">41 saker</Fact> totalt.",
   "- **S1** — Skal vi bytte kø for alle saker? Lukket 07.10 (D1).",
+  "- ~~**D5**~~ — Den gamle regelen for alle saker. Erstattet av D2.",
   "",
   "</DecisionLog>",
   "",
@@ -269,7 +270,11 @@ test.describe("Wiki reader: the top of a report page", () => {
     await expect(badge).toBeVisible();
     await expect(badge).toHaveText("lukket");
     await expect(badge).toHaveAttribute("data-reader-only", "");
-    // A decision is no question: no badge.
+    // Right after the first sentence, and «mer» right after the badge.
+    await expect(s1.locator(":scope > .dl-text > .dl-first + .dl-qstate")).toHaveCount(1);
+    await expect(s1.locator(":scope > .dl-text > .dl-qstate + button.dl-more")).toHaveCount(1);
+    // A decision is no question: no badge, not even a struck (closed) one.
+    await expect(page.locator("li.dl-item#d5")).toHaveAttribute("data-q-state", "closed");
     await expect(page.locator("li.dl-item .dl-qstate")).toHaveCount(1);
     await page.locator(".wiki-lens-switch button[data-lens='all']").click();
     await expect(badge).toBeHidden();
@@ -297,9 +302,10 @@ test.describe("Wiki reader: the top of a report page", () => {
     await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
     const more = page.locator("li.dl-item#d2 button.dl-more");
     await expect(more).toHaveAttribute("aria-label", "mer om D2");
-    const controls = (await more.getAttribute("aria-controls"))!.split(" ");
-    expect(controls.length).toBeGreaterThan(0);
-    for (const id of controls) await expect(page.locator(`li.dl-item#d2 [id="${id}"]`)).toHaveCount(1);
+    // It names the rest of the text and the nested list, and nothing else.
+    await expect(more).toHaveAttribute("aria-controls", "d2-rest d2-rest-2");
+    await expect(page.locator("li.dl-item#d2 > .dl-text > .dl-rest#d2-rest")).toHaveText(" Unntaket er sokkel.");
+    await expect(page.locator("li.dl-item#d2 > #d2-rest-2")).toContainText("Detalj under punktet.");
     expect(await more.evaluate((b) => getComputedStyle(b).userSelect)).toBe("none");
     expectClean(seen);
   });

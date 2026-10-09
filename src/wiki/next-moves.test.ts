@@ -215,10 +215,16 @@ describe("leadSentence", () => {
   });
 
   test("the abbreviation set is the one the reader's first sentence reads", () => {
-    expect(leadSentence("Ring dr. Hansen i dag. Så mer.")).toBe("Ring dr. Hansen i dag.");
+    expect(leadSentence("Ring Dr. Hansen i dag. Så mer.")).toBe("Ring Dr. Hansen i dag.");
     expect(leadSentence("Betal 5 kr pr. dag nå. Så mer.")).toBe("Betal 5 kr pr. dag nå.");
     expect(leadSentence("Gjelder t.o.m. fredag. Så mer.")).toBe("Gjelder t.o.m. fredag.");
     expect(leadSentence("Open a publish PR. Then wait.")).toBe("Open a publish PR.");
+  });
+
+  test("a word that is also an abbreviation ends a sentence where no number or name follows (fix round 2)", () => {
+    expect(leadSentence("Feir i jul. Så mer.")).toBe("Feir i jul.");
+    expect(leadSentence("Ring Jan. Så mer.")).toBe("Ring Jan.");
+    expect(leadSentence("Frist jan. 2027 for alle. Så mer.")).toBe("Frist jan. 2027 for alle.");
   });
 
   test("an abbreviation after an opening paren is still one", () => {

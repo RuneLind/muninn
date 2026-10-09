@@ -93,7 +93,7 @@ const SEGMENT_PROTECTED_RES: readonly RegExp[] = [
   /\[\[[^\]\n]*\]\]/g,
   /!?\[[^\]\n]*\]\([^)\n]*\)/g,
   /<([A-Z][A-Za-z]*)\b[^<>\n]*>[\s\S]*?<\/\1>/g,
-  /<[^<>\n]*>/g,
+  /<\/?[A-Za-z][^<>\n]*>/g,
 ];
 
 /** A row's value split on ` · ` outside code spans, links and tag pairs. */
@@ -142,9 +142,16 @@ function stateRe(lang: QuestionLanguage): RegExp {
   return new RegExp(`(?<![\\p{L}\\p{N}])(?:${alts.join("|")})(?![\\p{L}\\p{N}-])`, "giu");
 }
 
-/** A word that, earlier in a segment, keeps a good state from reading good:
- *  «ikke ennå i prod», "not yet in prod". Either language's, on every page. */
-const NEGATION_RE = /(?<![\p{L}\p{N}])(?:ikke|aldri|not|never|no)(?![\p{L}\p{N}])/iu;
+/** A negation right before a good state, in the page's language, keeps it
+ *  from reading good: «ikke ennå i prod», "not yet in prod". It must be the
+ *  word before the phrase, or the one before that with one adverb between;
+ *  a comma, a tag barrier or any other word breaks it. No negative phrase
+ *  ends in a negation, so one («ikke opprettet, men i prod») never reaches
+ *  the next phrase. */
+const NEGATION_BEFORE_RES: Record<QuestionLanguage, RegExp> = {
+  no: /(?<![\p{L}\p{N}])(?:ikke|aldri)\s+(?:(?:ennå|enda|fortsatt|lenger)\s+)?$/iu,
+  en: /(?<![\p{L}\p{N}])(?:not|never|no)\s+(?:(?:yet|still|ever|longer)\s+)?$/iu,
+};
 
 function toneOf(lang: QuestionLanguage, phrase: string): StatusTone {
   const p = phrase.toLowerCase();
@@ -166,8 +173,8 @@ const VOID_TAG_RE = /^<(br|img|hr|input|wbr)\b|\/>$/i;
  * (`<span class="fc-mark">`) or `<em>` inside a phrase changes nothing: the
  * phrase is coloured piecewise, one span per text run, in the tone of the
  * whole. Never matched: text inside `<code>`, `<a>`, a `.pill` or a chip
- * button. A good phrase after a negation word in the same segment
- * (`NEGATION_RE`) is muted instead.
+ * button. A good phrase right after a negation word
+ * (`NEGATION_BEFORE_RES`) is muted instead.
  */
 export function markStatePhrases(html: string, lang: QuestionLanguage): string {
   const parts = html.split(/(<[^>]*>)/);
@@ -180,6 +187,10 @@ export function markStatePhrases(html: string, lang: QuestionLanguage): string {
     if (part.startsWith("<")) {
       if (part.startsWith("</")) {
         if (stack.pop()) skip--;
+      } else if (/^<br\b/i.test(part)) {
+        // A line break separates words: «i prod<br>neste» ends a phrase.
+        stream += "\x00";
+        owner.push({ part: -1, off: 0 });
       } else if (!VOID_TAG_RE.test(part)) {
         const s = isSkipTag(part);
         stack.push(s);
@@ -203,7 +214,7 @@ export function markStatePhrases(html: string, lang: QuestionLanguage): string {
   const ranges = new Map<number, { start: number; end: number; tone: StatusTone }[]>();
   for (const m of stream.matchAll(re)) {
     let tone = toneOf(lang, m[0]);
-    if (tone === "good" && NEGATION_RE.test(stream.slice(0, m.index))) tone = "muted";
+    if (tone === "good" && NEGATION_BEFORE_RES[lang].test(stream.slice(0, m.index))) tone = "muted";
     // One range per text run the phrase covers.
     for (let i = m.index; i < m.index + m[0].length; ) {
       const { part } = owner[i]!;
@@ -241,6 +252,9 @@ export const FIRST_SENTENCE_MAX = 160;
  *  an Overview reader nothing. */
 export const FIRST_SENTENCE_MIN = 15;
 
+/** How many sentence ends `splitFirstSentence` tries before it gives up. */
+export const SENTENCE_CANDIDATES_MAX = 20;
+
 const CODE_SPAN_RE = /(`+)[\s\S]*?[^`]\1(?!`)|(`+)\2(?!`)/g;
 /** What a sentence end inside is not one: code spans, wikilinks, links, tags,
  *  the reader's parked wikilink sentinels, bare URLs. */
@@ -248,7 +262,7 @@ const PROTECTED_RES: readonly RegExp[] = [
   CODE_SPAN_RE,
   /\[\[[^\]\n]*\]\]/g,
   /!?\[[^\]\n]*\]\([^)\n]*\)/g,
-  /<[^<>\n]*>/g,
+  /<\/?[A-Za-z][^<>\n]*>/g,
   /\x00[^\x00]*\x00/g,
   // A URL's own trailing punctuation is the sentence's, not the URL's.
   /https?:\/\/[^\s<>)\]]*[^\s<>)\].,;:!?]/g,
@@ -278,7 +292,7 @@ export interface SentenceSplit {
 }
 
 /**
- * Every place `text` may split after a sentence, in order: the index where
+ * Every place `text` may split after a sentence (the first `limit`), in order: the index where
  * the rest starts. Read on the text with its `<Fact>` tags taken out, so a
  * fact-check mark moves no sentence end, and mapped back; a place inside a
  * `<Fact>` is none, so a mark is never cut. A place is a `.`, `?` or `!`, then
@@ -292,19 +306,21 @@ export interface SentenceSplit {
  * - the prefix closes every `**` and `~~` it opens (a cheap pre-filter: the
  *   renderer's guard is the authority).
  */
-export function sentenceBreaks(text: string): number[] {
+export function sentenceBreaks(text: string, limit = Infinity): number[] {
   // The Fact tags, found where code spans cannot hide one.
-  const tags: { start: number; end: number; open: boolean }[] = [];
+  const tags: { start: number; end: number; depth: number }[] = [];
   const codeMasked = maskSpans(text, [CODE_SPAN_RE]);
   FACT_TAG_RE.lastIndex = 0;
   for (const m of codeMasked.matchAll(FACT_TAG_RE)) {
-    tags.push({ start: m.index, end: m.index + m[0].length, open: !m[0].startsWith("</") });
+    // A self-closing `<Fact …/>` opens no mark.
+    const depth = m[0].startsWith("</") ? -1 : m[0].endsWith("/>") ? 0 : 1;
+    tags.push({ start: m.index, end: m.index + m[0].length, depth });
   }
   // `plain` is `text` without them; `at[k]` the index in `text` of plain's char k.
   let plain = "";
   const at: number[] = [];
   let from = 0;
-  for (const t of [...tags, { start: text.length, end: text.length, open: false }]) {
+  for (const t of [...tags, { start: text.length, end: text.length, depth: 0 }]) {
     for (let i = from; i < t.start; i++) {
       plain += text[i];
       at.push(i);
@@ -314,13 +330,13 @@ export function sentenceBreaks(text: string): number[] {
   at.push(text.length);
   const insideFact = (pos: number) => {
     let depth = 0;
-    for (const t of tags) if (t.end <= pos) depth += t.open ? 1 : -1;
+    for (const t of tags) if (t.end <= pos) depth += t.depth;
     return depth > 0;
   };
 
   const masked = maskSpans(plain, PROTECTED_RES);
   const out: number[] = [];
-  for (let i = 0; i < masked.length; i++) {
+  for (let i = 0; i < masked.length && out.length < limit; i++) {
     const c = masked[i]!;
     if (c !== "." && c !== "?" && c !== "!") continue;
     if (c === "." && (masked[i - 1] === "." || masked[i + 1] === ".")) continue;
@@ -333,7 +349,7 @@ export function sentenceBreaks(text: string): number[] {
     if (c === "." && /\d$/.test(plain.slice(0, i)) && /\p{Ll}/u.test(next[0])) continue;
     if (c === ".") {
       const word = /([\p{L}.]+)$/u.exec(plain.slice(0, i))?.[1];
-      if (word && isAbbreviation(word)) continue;
+      if (word && isAbbreviation(word, plain.slice(j))) continue;
     }
     const prefix = masked.slice(0, j);
     if ((prefix.match(/\*\*/g) ?? []).length % 2 || (prefix.match(/~~/g) ?? []).length % 2) continue;
@@ -355,7 +371,9 @@ export function splitFirstSentence(
   text: string,
   accept?: (first: string, rest: string) => boolean,
 ): SentenceSplit | null {
-  for (const cut of sentenceBreaks(text)) {
+  // Only the first SENTENCE_CANDIDATES_MAX ends are tried: each costs the
+  // guard a render, and a first sentence lies early or not at all.
+  for (const cut of sentenceBreaks(text, SENTENCE_CANDIDATES_MAX)) {
     const first = text.slice(0, cut);
     const rest = text.slice(cut);
     if (visibleText(first).length < FIRST_SENTENCE_MIN) continue;

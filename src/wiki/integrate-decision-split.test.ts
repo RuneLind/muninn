@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { annotateEdits } from "./integrate-edits.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-integrate.ts";
 
 const anchor = (index: number, verdict: string): FactcheckClaimAnchor => ({
@@ -35,11 +36,13 @@ describe("a mark in a split DecisionLog item is not refused", () => {
   const cases: [string, string][] = [
     ["**D1** The cache holds ten entries. It evicts the oldest first. More text here.", "The cache holds ten entries."],
     ["**D1** The cache holds ten entries. It evicts the oldest first. More text here.", "ten entries. It evicts"],
-    ["**D1** — Vi velger A. Fordi B er dyrt.", "Vi velger A. Fordi B er dyrt"],
+    ["**D1** — Vi velger alternativ A. Fordi B er dyrt.", "Vi velger alternativ A. Fordi B er dyrt"],
     ["**D1** — Vi velger alternativ A nå. Fordi B er dyrt. Og mer.", "alternativ A nå. Fordi B"],
   ];
   for (const [item, quote] of cases) {
     test(quote, () => {
+      // The item splits, so the mark meets a first sentence and a rest.
+      expect(formatWebHtml(log(item))).toContain('<span class="dl-first">');
       const r = marks(log(item), quote);
       expect(r.dropped.map((d) => d.reason)).toEqual([]);
       expect(r.edits).toHaveLength(1);

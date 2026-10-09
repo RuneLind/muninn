@@ -253,10 +253,10 @@ describe("first sentence: abbreviations (C)", () => {
     ["Regelen gjelder t.o.m. Mars neste år. Resten.", "Regelen gjelder t.o.m. Mars neste år."],
     ["Regelen gjelder f.o.m. Mars neste år. Resten.", "Regelen gjelder f.o.m. Mars neste år."],
     ["Endringen er gjort i.h.t. Avtalen med fag. Resten.", "Endringen er gjort i.h.t. Avtalen med fag."],
-    ["Vi ringer i morgen til dr. Hansen om saken. Resten.", "Vi ringer i morgen til dr. Hansen om saken."],
-    ["Abonnementet koster 5 kr. Per måned for alle. Resten.", "Abonnementet koster 5 kr. Per måned for alle."],
-    ["We will ask our mr. Smith about the plan. Rest.", "We will ask our mr. Smith about the plan."],
-    ["It shipped first in the U.S. Market this year. Rest.", "It shipped first in the U.S. Market this year."],
+    ["Vi ringer i morgen til Dr. Hansen om saken. Resten.", "Vi ringer i morgen til Dr. Hansen om saken."],
+    ["Abonnementet koster kr. 50 per måned for alle. Resten.", "Abonnementet koster kr. 50 per måned for alle."],
+    ["We will ask our Mr. Smith about the plan. Rest.", "We will ask our Mr. Smith about the plan."],
+    ["It shipped first in the U.S. market for all. Rest.", "It shipped first in the U.S. market for all."],
     ["The fix finally landed on Oct. 5 after review. Rest.", "The fix finally landed on Oct. 5 after review."],
     ["Abonnementet koster 5 kroner pr. Dag for alle. Resten.", "Abonnementet koster 5 kroner pr. Dag for alle."],
   ];
@@ -352,5 +352,96 @@ describe("visibleText counts what a reader sees", () => {
   test("single emphasis markers dropped, entities decoded", () => {
     expect(visibleText("*ikke* _nå_ A &amp; B &lt;x&gt;")).toBe("ikke nå A & B <x>");
     expect(visibleText("user_id and 2*3")).toBe("user_id and 2*3");
+  });
+});
+
+// ── Fix round 2 ──────────────────────────────────────────────────────────────
+
+describe("state phrases: a negation counts only right before the phrase (V1)", () => {
+  const good = (phrase: string) => `<span class="sr-state sr-good">${phrase}</span>`;
+  test("a negation a negative phrase used does not mute a later «i prod»", () => {
+    expect(markStatePhrases("ikke opprettet, men i prod", "no")).toBe(
+      `<span class="sr-state sr-muted">ikke opprettet</span>, men ${good("i prod")}`,
+    );
+    expect(markStatePhrases("ikke i prod for test, i prod for main", "no")).toBe(
+      `<span class="sr-state sr-muted">ikke i prod</span> for test, ${good("i prod")} for main`,
+    );
+  });
+  test("a negation further back in the segment does not mute", () => {
+    expect(markStatePhrases("PR ikke nødvendig, i prod", "no")).toBe(`PR ikke nødvendig, ${good("i prod")}`);
+    expect(markStatePhrases("No regressions, in prod", "en")).toBe(`No regressions, ${good("in prod")}`);
+  });
+  test("only the page's own language negates", () => {
+    expect(markStatePhrases("Jobben er no i prod", "no")).toBe(`Jobben er no ${good("i prod")}`);
+  });
+  test("a negation right before, or one adverb before, still mutes", () => {
+    expect(markStatePhrases("ikke ennå i prod", "no")).toBe('ikke ennå <span class="sr-state sr-muted">i prod</span>');
+    expect(markStatePhrases("not yet in prod", "en")).toBe('not yet <span class="sr-state sr-muted">in prod</span>');
+    expect(markStatePhrases("<em>ikke</em> i prod", "no")).toBe('<em><span class="sr-state sr-muted">ikke</span></em><span class="sr-state sr-muted"> i prod</span>');
+    expect(markStatePhrases("aldri i prod", "no")).toBe('aldri <span class="sr-state sr-muted">i prod</span>');
+  });
+});
+
+test("a plain `<` and `>` in a row value is no tag: the row keeps its segments (V2)", () => {
+  expect(statusSegments("p95 < 200 ms · feilrate > 1 % · i prod")).toEqual(["p95 < 200 ms", "feilrate > 1 %", "i prod"]);
+  expect(splitFirstSentence("Svartiden er p95 < 200 ms. Feilraten > 1 % i dag. Resten.")?.first).toBe("Svartiden er p95 < 200 ms.");
+});
+
+test("a self-closing `<Fact/>` opens no mark (V3)", () => {
+  expect(splitFirstSentence('We chose option A <Fact n="1" v="ok"/> for now. Then B follows. Rest.')?.first).toBe(
+    'We chose option A <Fact n="1" v="ok"/> for now.',
+  );
+});
+
+describe("first sentence: a word that is also an abbreviation still ends a sentence (V4)", () => {
+  const splits: [string, string][] = [
+    ["Vi feirer alltid i jul. Neste år blir annerledes.", "Vi feirer alltid i jul."],
+    ["Vi snakket lenge med Jan. Han sa ja til planen.", "Vi snakket lenge med Jan."],
+    ["Billetten kostet fem kr. Neste punkt er maten.", "Billetten kostet fem kr."],
+    ["Dette er beskrevet ved kap. Ny setning starter her.", "Dette er beskrevet ved kap."],
+    ["The product launched in the U.S. Then it spread.", "The product launched in the U.S."],
+    ["See the footnote in the ref. Then read the rest.", "See the footnote in the ref."],
+    ["We asked the team about mr. Then we waited.", "We asked the team about mr."],
+    ["They phoned the Dr. after lunch today. Rest.", "They phoned the Dr."],
+  ];
+  for (const [text, first] of splits) {
+    test(`splits: ${first}`, () => expect(splitFirstSentence(text)?.first ?? null).toBe(first));
+  }
+  const holds: [string, string][] = [
+    ["Abonnementet koster kr. 500 per måned. Resten.", "Abonnementet koster kr. 500 per måned."],
+    ["Vi møtes igjen den 5. jan. 2027 i Oslo. Resten.", "Vi møtes igjen den 5. jan. 2027 i Oslo."],
+    ["We will ask our Dr. Smith about the plan. Rest.", "We will ask our Dr. Smith about the plan."],
+    ["The fix finally landed on Oct. 9 after review. Rest.", "The fix finally landed on Oct. 9 after review."],
+    ["It shipped first in the U.S. market this year. Rest.", "It shipped first in the U.S. market this year."],
+    ["Se tabellen i ref. nedenfor for tallene. Resten.", "Se tabellen i ref. nedenfor for tallene."],
+  ];
+  for (const [text, first] of holds) {
+    test(`holds: ${first}`, () => expect(splitFirstSentence(text)?.first ?? null).toBe(first));
+  }
+});
+
+test("an item with a thousand sentence ends inside emphasis renders fast (V5)", () => {
+  const md = "_" + "Dette er en setning. ".repeat(1000) + "Slutt_ her. Resten.";
+  const t0 = performance.now();
+  formatWebHtml(`<DecisionLog>\n\n- **D1** — ${md}\n\n</DecisionLog>`);
+  expect(performance.now() - t0).toBeLessThan(200);
+});
+
+describe("state phrases: pins (V6, V9)", () => {
+  test("a `<br>` separates words: «i prod» before it is a phrase (V9)", () => {
+    expect(markStatePhrases("i prod<br>neste", "no")).toBe('<span class="sr-state sr-good">i prod</span><br>neste');
+  });
+  test("code between two words is a barrier, not a space (M30)", () => {
+    expect(markStatePhrases("i<code>x</code> prod", "no")).toBe("i<code>x</code> prod");
+  });
+  test("a phrase across a fact mark is coloured piecewise, each run in the whole's tone (M19)", () => {
+    const html = formatWebHtml('<StatusRows>\n\n- **Jira:** oppgave 3 merget, ikke <Fact n="1" v="ok">i prod</Fact>\n\n</StatusRows>', {
+      language: "no",
+      reader: true,
+    });
+    expect(html).toContain(
+      '<span class="sr-value">oppgave 3 <span class="sr-state sr-warn">merget, ikke </span>' +
+        '<span class="fc-mark fc-mark-ok" data-fact="1"><span class="sr-state sr-warn">i prod</span></span><button',
+    );
   });
 });
