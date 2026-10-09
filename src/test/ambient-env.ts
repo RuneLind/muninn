@@ -188,6 +188,11 @@ const WIKI_BUCKET_MIRROR_FLAGS = [
   "WIKI_BUCKET_MIRROR_PROJECT_NUMBER",
 ];
 
+/** `WIKI_DEFAULT_LENS` (D24): the lens a viewer with no stored choice opens a
+ *  wiki in. A developer's `melosys-felles=overview` would flip what a spec's
+ *  reader shows first. The lens spec sets it per server. */
+const WIKI_LENS_FLAGS = ["WIKI_DEFAULT_LENS"];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -214,6 +219,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...FELLES_PUBLISH_FLAGS,
   ...WIKI_ANSWER_FLAGS,
   ...WIKI_BUCKET_MIRROR_FLAGS,
+  ...WIKI_LENS_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // fourteen route groups and turns every Claude-CLI spawn into a throw, so the

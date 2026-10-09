@@ -48,6 +48,8 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "loose-sql": { one: "page with loose SQL", many: "pages with loose SQL" },
   "case-table": { one: "case table without a CaseBoard", many: "case tables without a CaseBoard" },
   "long-page-no-fold": { one: "long page with no Fold", many: "long pages with no Fold" },
+  "decision-first-sentence": { one: "long decision first sentence", many: "long decision first sentences" },
+  "status-row-long": { one: "long status row", many: "long status rows" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks

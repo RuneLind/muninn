@@ -31,7 +31,8 @@ import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
 import type { PageFiles } from "../format/query-block.ts";
 import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
-import { DEFAULT_QUESTION_LANGUAGE } from "../format/question-labels.ts";
+import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
+import { pageDefaultLens, type IdLabels, type StoredLens, type WikiDefaultLens } from "../format/reader-lens.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -83,6 +84,11 @@ export function renderWikiHtml(
     /** What a `<Question>` card needs from the page and its wiki — built by
      *  {@link questionRenderOptionsFor}. Absent ⇒ a plain bordered question. */
     question?: QuestionRenderOptions;
+    /** The wiki's `idLabels`: the nouns on DecisionLog and Query id chips. */
+    idLabels?: IdLabels;
+    /** The wiki's `language`: the `<More>` label and the `<StatusRows>`
+     *  state phrases. Absent ⇒ the `question` option's, else `en`. */
+    language?: QuestionLanguage;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -126,7 +132,13 @@ export function renderWikiHtml(
   });
 
   const renderedHtml = restoreSentinelsInAttributes(
-    formatWebHtml(withTokens, { files: opts?.files, question: opts?.question }),
+    formatWebHtml(withTokens, {
+      files: opts?.files,
+      question: opts?.question,
+      idLabels: opts?.idLabels,
+      reader: true,
+      ...(opts?.language ? { language: opts.language } : {}),
+    }),
     literal,
   );
   const codeRegions = renderedCodeRegions(renderedHtml);
@@ -181,6 +193,30 @@ export function questionRenderOptionsFor(
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     answerable,
     ...(answerable && owner ? { owner } : {}),
+  };
+}
+
+/** The page payload's `reader` field: what the lens switch, the ref-link
+ *  nouns and the header pills read. `idLabels` holds display nouns only. */
+export interface ReaderPayload {
+  language: QuestionLanguage;
+  idLabels: IdLabels;
+  /** `WIKI_DEFAULT_LENS` for this wiki, else the file's `defaultLens`; null ⇒ All. */
+  defaultLens: StoredLens | null;
+  /** The Agent lens is offered on this page for this viewer (D7). */
+  agentLens: boolean;
+}
+
+export function readerPayload(
+  wiki: string | undefined,
+  readerConfig: WikiReaderConfig | null | undefined,
+  instanceDefault: WikiDefaultLens | undefined,
+): ReaderPayload {
+  return {
+    language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
+    idLabels: readerConfig?.idLabels ?? {},
+    defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
+    agentLens: false,
   };
 }
 

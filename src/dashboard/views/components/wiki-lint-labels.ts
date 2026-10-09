@@ -27,6 +27,8 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "loose-sql": "SQL fences outside a <Query>",
   "case-table": "Case tables with statuses and no <CaseBoard>",
   "long-page-no-fold": "Long pages with no <Fold>",
+  "decision-first-sentence": "DecisionLog first sentences over 160 chars",
+  "status-row-long": "<StatusRows> rows over 160 chars",
 };
 
 /** A group's heading: its label, plus `(info)` when every finding in it carries

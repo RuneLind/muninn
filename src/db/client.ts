@@ -33,9 +33,12 @@ export function getDb(): postgres.Sql {
   return sql;
 }
 
-export async function closeDb(): Promise<void> {
+/** End the pool. Without `timeoutSeconds` it waits for every query in flight;
+ *  with it, connections still busy after that long are terminated and their
+ *  queries rejected, so a statement blocked on a lock cannot hold shutdown. */
+export async function closeDb(opts: { timeoutSeconds?: number } = {}): Promise<void> {
   if (sql) {
-    await sql.end();
+    await sql.end(opts.timeoutSeconds == null ? undefined : { timeout: opts.timeoutSeconds });
     sql = null;
   }
 }

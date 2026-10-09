@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { paragraphGaps, renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { paragraphGaps, readerPayload, renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { parseWikiDefaultLens } from "../format/reader-lens.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
 
@@ -529,5 +530,21 @@ describe("renderWikiHtml — double-backtick code spans", () => {
     expect(html).toContain("<code>`&lt;Fact n=&quot;2&quot; v=&quot;bad&quot;&gt;ships 2.1M units&lt;/Fact&gt;`</code>");
     expect(html).not.toContain("fc-mark");
     expect(html).toContain('data-wiki-page="Claude Code"');
+  });
+});
+
+describe("readerPayload (the lens switch's page inputs)", () => {
+  const cfg = (extra: Record<string, unknown>) =>
+    ({ typeMap: {}, typeLabels: {}, include: [], titleFrom: [], defaultType: "", folderLabels: {}, project: null, ...extra }) as never;
+  test("WIKI_DEFAULT_LENS beats the file's defaultLens; Agent is offered nowhere yet", () => {
+    const inst = parseWikiDefaultLens("felles=overview");
+    expect(readerPayload("felles", cfg({ defaultLens: "all", language: "no" }), inst)).toEqual({
+      language: "no",
+      idLabels: {},
+      defaultLens: "overview",
+      agentLens: false,
+    });
+    expect(readerPayload("kode", cfg({ defaultLens: "all" }), inst).defaultLens).toBe("all");
+    expect(readerPayload(undefined, null, undefined)).toEqual({ language: "en", idLabels: {}, defaultLens: null, agentLens: false });
   });
 });

@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Sixteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Eighteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -53,6 +53,11 @@
  *                      or a `questions_to:` written as a block list, which
  *                      `parseFrontmatter` does not read. Rules:
  *                      `src/format/question.ts`.
+ * 11. decision-first-sentence / status-row-long — the top of a report page:
+ *                      a DecisionLog item whose first sentence (what the
+ *                      Overview lens shows) runs over 160 chars, and a
+ *                      `<StatusRows>` row over 160 chars. Warnings, report-only.
+ *                      Rules: `lint-report-top.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -83,6 +88,7 @@ import {
 import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
+import { checkReportTop, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import { closeNearMisses, itemReopened, parseQuestionPage, type QuestionState } from "../format/question.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -99,6 +105,7 @@ export const LINT_CHECKS = [
   "question-block",
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
+  ...REPORT_TOP_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -789,6 +796,8 @@ export async function lintWiki(
     findings.push(...checkUnrenderedFactMarks(page, content));
     // Check 10 — every page: a card's state is the page's own business.
     findings.push(...checkQuestions(page, content));
+    // Check 11 — every page with a DecisionLog or StatusRows.
+    findings.push(...checkReportTop(page, content));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.

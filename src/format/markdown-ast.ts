@@ -108,6 +108,8 @@ export const COMPONENT_NAMES = [
   "DecisionLog",
   "RunChecklist",
   "Question",
+  "More",
+  "StatusRows",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -163,7 +165,9 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // expanded; a bare `open` is not a component tag at all and the section
   // degrades to visible escaped text.
   // `summary` is a one-line teaser shown beside the title, closed or open.
-  Fold: ["title", "open", "summary"],
+  // `for` names who the fold is for (`dev`, `agent`): the reader's Overview
+  // lens hides those two. The text renderers print every fold in full.
+  Fold: ["title", "open", "summary", "for"],
   // A wrapper marking sections the page keeps as history: `since` names what
   // superseded them (free text, e.g. `melosys-console#270`), `note` says how.
   // Wiki-only: not in `COMPONENT_VOCABULARY_RULES`.
@@ -193,6 +197,11 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // one place its status lives), `choices` and `to` are `|`-separated. Wiki-only;
   // see `src/format/question.ts`.
   Question: ["id", "choices", "to"],
+  // The top of a report page (`src/format/report-top.ts`). `More` is the
+  // closed «Mer om saken» part of a `Tldr`, labelled by the wiki's
+  // `language`; `StatusRows` a list of `**Label:** value` rows. Wiki-only.
+  More: [],
+  StatusRows: [],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

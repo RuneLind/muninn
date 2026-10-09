@@ -44,13 +44,26 @@ import {
 } from "../format/query-block.ts";
 import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
 import {
+  isOpenQuestion,
   parseQuestionAttrs,
   parseQuestionPage,
   resolveQuestionTargets,
   type QuestionRenderOptions,
   type QuestionState,
 } from "../format/question.ts";
-import { questionLabels } from "../format/question-labels.ts";
+import { questionLabels, type QuestionLanguage } from "../format/question-labels.ts";
+import {
+  isMoreBlock,
+  markStatePhrases,
+  MORE_LABELS,
+  splitFirstSentence,
+  type SentenceSplit,
+  STATUS_SEPARATOR,
+  statusSegments,
+  statusRows,
+} from "../format/report-top.ts";
+import { isAgentContextTitle } from "../format/agent-context.ts";
+import { idNoun, READER_ONLY_ATTR, type IdLabels } from "../format/reader-lens.ts";
 import { caseBoardWarnings, caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
 import {
   betterLabelWarnings,
@@ -177,6 +190,16 @@ export function formatWebHtml(
     /** The wiki page around a `<Question>` (`renderWikiHtml`). Absent ⇒ a
      *  `<Question>` renders as a plain bordered question, as in chat. */
     question?: QuestionRenderOptions;
+    /** The wiki's `idLabels` (`.wiki-reader.json`): a DecisionLog or Query
+     *  id chip gets its noun («Beslutning D7»). Absent ⇒ bare ids. */
+    idLabels?: IdLabels;
+    /** The wiki reader's render (`renderWikiHtml`): folds get the lens
+     *  classes and DecisionLog items their state. Absent (chat) ⇒ neither,
+     *  since the chat sanitizer drops a class it does not allow. */
+    reader?: boolean;
+    /** The wiki's `.wiki-reader.json` `language`: the `<More>` label and the
+     *  `<StatusRows>` state phrases. Absent ⇒ the question option's, else `en`. */
+    language?: QuestionLanguage;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -184,7 +207,11 @@ export function formatWebHtml(
   // this synchronous call. So does the `<Question>` pre-pass.
   const prev = currentPageFiles;
   const prevQuestion = currentQuestionPage;
+  const prevReader = currentReader;
+  const prevLanguage = currentLanguage;
   currentPageFiles = opts?.files;
+  currentReader = opts?.reader === true;
+  currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
     const blocks = parseBlocks(text);
     // The DecisionLog usually sits below the `<Question>`, and the renderer
@@ -195,10 +222,18 @@ export function formatWebHtml(
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
     const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
-    return currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
+    const linked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
+    // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
+    // exactly: the item's state (D8) and the id's noun (D12). The parse is the
+    // one the answer cards use, run on the reader path when the page has a
+    // DecisionLog.
+    const page = currentReader && text.includes("<DecisionLog") ? (currentQuestionPage ?? questionPage(blocks, undefined)) : undefined;
+    return stampIdChips(linked, page, opts?.idLabels);
   } finally {
     currentPageFiles = prev;
     currentQuestionPage = prevQuestion;
+    currentReader = prevReader;
+    currentLanguage = prevLanguage;
   }
 }
 
@@ -206,12 +241,20 @@ export function formatWebHtml(
  *  `CaseBoard` and `DeltaTable` blocks say their file is not loaded here. */
 let currentPageFiles: PageFiles | undefined;
 
+/** `opts.reader` for the call in progress. */
+let currentReader = false;
+
+/** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
+let currentLanguage: QuestionLanguage = "en";
+
 /** What a `<Question>` card reads from the page around it, for the call in
  *  progress: the closed-ids pre-pass, the duplicate ids and the wiki's
  *  options. Absent ⇒ no `<Question>` on the page. */
 interface QuestionPage {
   states: Map<string, QuestionState>;
   duplicates: Set<string>;
+  /** The ids the page's `<Question>` blocks carry. */
+  questionIds: Set<string>;
   options?: QuestionRenderOptions;
 }
 let currentQuestionPage: QuestionPage | undefined;
@@ -219,8 +262,13 @@ let currentQuestionPage: QuestionPage | undefined;
 function questionPage(blocks: Block[], options: QuestionRenderOptions | undefined): QuestionPage {
   const parsed = parseQuestionPage(blocks);
   const duplicates = new Set<string>();
-  for (const q of parsed.questions) if (q.duplicate && q.id !== null) duplicates.add(q.id);
-  return { states: parsed.states, duplicates, ...(options ? { options } : {}) };
+  const questionIds = new Set<string>();
+  for (const q of parsed.questions) {
+    if (q.id === null) continue;
+    questionIds.add(q.id);
+    if (q.duplicate) duplicates.add(q.id);
+  }
+  return { states: parsed.states, duplicates, questionIds, ...(options ? { options } : {}) };
 }
 
 const LOG_ANCHOR_RE = /<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)"><a class="dl-id" href="#\1">([^<]*)<\/a>/g;
@@ -298,6 +346,49 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     (to.length ? ` data-question-to="${escapeHtml(to.map((t) => t.name).join("|"))}"` : "");
   const cls = `question q-${state ? state.kind : "noid"}`;
   return `<section class="${cls}"${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
+}
+
+const STAMP_LOG_RE = /<li class="(dl-item[^"]*)"((?: value="\d+")?) id="([^"]+)">(<a class="dl-id" href="#\3">([^<]*)<\/a>)/g;
+const QUERY_CHIP_RE = /<(?:a class="query-id" href="#[^"]*"|span class="query-id")>([^<]*)<\/(?:a|span)>/g;
+
+/** `escapeHtml`'s five entities back to text, for an id read off the output. */
+function unescapeHtml(s: string): string {
+  return s.replace(/&(amp|lt|gt|quot|#39);/g, (_m, e: string) =>
+    e === "amp" ? "&" : e === "lt" ? "<" : e === "gt" ? ">" : e === "quot" ? '"' : "'",
+  );
+}
+
+/**
+ * The final pass over the finished HTML. On the reader path each id-led
+ * DecisionLog item gets `data-q-state` (`open`, `closed` or `decided`) from the
+ * page parse (D8), plus `data-q-open` when it counts as an open question
+ * (`isOpenQuestion`), which the reader's «N open» pill counts. With `idLabels`,
+ * a DecisionLog chip and a Query card's chip get a `<span class="id-noun">`
+ * BEFORE them (D12), marked `data-reader-only` so a selection leaves it out.
+ * The chip's own text and its `href` stay the bare id: the ref links and the
+ * question-card links key on them. Runs after `uniqueLogAnchors` and
+ * `retargetQuestionLinks`, which read the `<li>` and its chip as adjacent.
+ */
+function stampIdChips(html: string, page: QuestionPage | undefined, labels: IdLabels | undefined): string {
+  const noun = (idText: string) => {
+    const n = idNoun(labels, unescapeHtml(idText));
+    // A space after the noun, so the text reads «Beslutning D7» when copied.
+    return n ? `<span class="id-noun" ${READER_ONLY_ATTR}>${escapeHtml(n)}</span> ` : "";
+  };
+  let out = html;
+  if ((page || labels) && out.includes('<a class="dl-id" href="#')) {
+    out = out.replace(STAMP_LOG_RE, (_m, cls: string, value: string, anchor: string, chip: string, idText: string) => {
+      const id = unescapeHtml(idText);
+      const state = page?.states.get(id);
+      const stamp = state ? ` data-q-state="${state.kind}"` : "";
+      const open = page && isOpenQuestion(id, state, page.questionIds) ? " data-q-open" : "";
+      return `<li class="${cls}"${value} id="${anchor}"${stamp}${open}>${noun(idText)}${chip}`;
+    });
+  }
+  if (labels && out.includes('class="query-id"')) {
+    out = out.replace(QUERY_CHIP_RE, (chip, idText: string) => `${noun(idText)}${chip}`);
+  }
+  return out;
 }
 
 const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
@@ -609,6 +700,23 @@ function codeFenceHtml(lang: string, code: string): string {
   return `<pre><code${langClass}>${highlightCode(code, lang)}</code></pre>`;
 }
 
+/** The `for=` values a fold class is made for: the ones the Overview lens hides. */
+const FOLD_FOR_CLASSES: ReadonlySet<string> = new Set(["dev", "agent"]);
+
+/** A `<Fold>`'s classes. On the reader path only: `fold-for-dev` and
+ *  `fold-for-agent` for those `for=` values, and `fold-agent-context` for a
+ *  title the agent-context list names (D22). The reader's Overview lens hides
+ *  all three; chat gets plain `fold`, the one class its sanitizer allows. */
+function foldClass(title: string, forAttr: string | undefined): string {
+  if (!currentReader) return "fold";
+  const who = (forAttr ?? "").trim().toLowerCase();
+  return (
+    "fold" +
+    (FOLD_FOR_CLASSES.has(who) ? ` fold-for-${who}` : "") +
+    (title && isAgentContextTitle(title) ? " fold-agent-context" : "")
+  );
+}
+
 /**
  * A `<Fold>` body, with the DOUBLED LABEL suppressed.
  *
@@ -807,8 +915,103 @@ function logItemHtml(text: string, nested: string, value: string): string {
   const anchor = anchorSlug(p.id);
   return (
     `<li class="dl-item${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
-    `<span class="dl-text">${itemHtml(p.text)}</span>${nested}</li>`
+    `<span class="dl-text">${logTextHtml(p.text)}</span>${nested}</li>`
   );
+}
+
+/** A DecisionLog item's text split after its first sentence (D6), or null.
+ *  The guard: a split is taken only where the two halves render as the whole
+ *  does (white space aside), so no cut can break emphasis, a component, a link
+ *  or a fact mark; the next sentence end is tried instead. The wiki linter
+ *  reads the same split. */
+export function splitDecisionText(text: string): SentenceSplit | null {
+  const flat = (html: string) => html.replace(/\s+/g, " ");
+  const whole = flat(itemHtml(text));
+  return splitFirstSentence(text, (first, rest) => flat(itemHtml(first) + itemHtml(rest)) === whole);
+}
+
+/** The first sentence of a DecisionLog item as Overview shows it: the split's
+ *  first half, else the whole item. */
+export function decisionFirstSentence(text: string): string {
+  return splitDecisionText(text)?.first ?? text;
+}
+
+/** `html` without the two presentational spans a DecisionLog split adds
+ *  (`dl-first`, `dl-rest`), their content kept: what the fact-check render
+ *  guard compares, since a mark may move where an item splits (D6) without
+ *  changing a word of the page. */
+export function unwrapDecisionSplits(html: string): string {
+  if (!html.includes('<span class="dl-first">')) return html;
+  const opens = /<span class="dl-(?:first|rest)">/g;
+  let out = "";
+  let at = 0;
+  for (let m = opens.exec(html); m; m = opens.exec(html)) {
+    // The matching close: a balanced scan over the spans inside.
+    const tagRe = /<span\b[^>]*>|<\/span>/g;
+    tagRe.lastIndex = m.index + m[0].length;
+    let depth = 1;
+    let close = -1;
+    for (let t = tagRe.exec(html); t; t = tagRe.exec(html)) {
+      depth += t[0] === "</span>" ? -1 : 1;
+      if (depth === 0) {
+        close = t.index;
+        break;
+      }
+    }
+    if (close === -1) break;
+    out += html.slice(at, m.index) + html.slice(m.index + m[0].length, close);
+    at = close + "</span>".length;
+    opens.lastIndex = at;
+  }
+  return out + html.slice(at);
+}
+
+/** An id-led item's text: its first sentence and the rest in two spans when
+ *  it holds more than one (D6), so the reader's Overview can show the first
+ *  alone. */
+function logTextHtml(text: string): string {
+  const split = splitDecisionText(text);
+  if (!split) return itemHtml(text);
+  return `<span class="dl-first">${itemHtml(split.first)}</span><span class="dl-rest">${itemHtml(split.rest)}</span>`;
+}
+
+/** A `<Tldr>` body: a `<More>` directly in it becomes its closed part (D10),
+ *  labelled by the wiki's language; everything else renders as written. */
+function tldrBodyHtml(rawChildren: Block[], children: string): string {
+  if (!rawChildren.some(isMoreBlock)) return children;
+  return rawChildren
+    .map((b) =>
+      isMoreBlock(b)
+        ? `<details class="tldr-more"><summary>${escapeHtml(MORE_LABELS[currentLanguage])}</summary>` +
+          `<div class="tldr-more-body">${renderBlocks(b.children, webRenderer)}</div></details>`
+        : renderBlocks([b], webRenderer),
+    )
+    .join("\n");
+}
+
+/** A `<StatusRows>` body: each list a label column and a value column, one
+ *  row per item; a value's ` · ` segments separated and their state phrases
+ *  coloured (`markStatePhrases`). Other blocks render in place. */
+function statusRowsHtml(rawChildren: Block[]): string {
+  const body = rawChildren
+    .map((b) => {
+      if (b.type !== "ul" && b.type !== "ol") return renderBlocks([b], webRenderer);
+      const rows = statusRows([b])
+        .map((r, k) => {
+          const value = statusSegments(r.value)
+            .map((seg) => markStatePhrases(itemHtml(seg), currentLanguage))
+            .join(`<span class="sr-sep">${STATUS_SEPARATOR}</span>`);
+          const under = (b.nested?.[k] ?? []).map(listChildHtml).join("");
+          return (
+            `<div class="sr-row"><span class="sr-label">${r.label === null ? "" : renderInline(r.label)}</span>` +
+            `<span class="sr-value">${value}${under}</span></div>`
+          );
+        })
+        .join("");
+      return `<div class="sr-grid">${rows}</div>`;
+    })
+    .join("\n");
+  return `<section class="status-rows">${body}</section>`;
 }
 
 /** A list nested under a `RunChecklist` step: labelled entries as rows, the
@@ -1031,7 +1234,7 @@ const webRenderer: BlockRenderer = {
         const teaser = (attrs.summary ?? "").trim();
         const teaserHtml = teaser ? `<span class="fold-summary">${escapeHtml(teaser)}</span>` : "";
         return (
-          `<details class="fold"${openAttr}>` +
+          `<details class="${foldClass(title, attrs.for)}"${openAttr}>` +
           `<summary>${title ? escapeHtml(title) : "Details"}${teaserHtml}</summary>` +
           `<div class="fold-body">${foldBodyHtml(title, children, rawChildren)}</div>` +
           `</details>`
@@ -1117,8 +1320,14 @@ const webRenderer: BlockRenderer = {
       case "Tldr": {
         // The page's lead box, where the author put it.
         const label = attrs.label?.trim() || "TL;DR";
-        return `<section class="tldr"><div class="tldr-label">${escapeHtml(label)}</div><div class="tldr-body">${children}</div></section>`;
+        return `<section class="tldr"><div class="tldr-label">${escapeHtml(label)}</div><div class="tldr-body">${tldrBodyHtml(rawChildren, children)}</div></section>`;
       }
+      case "More":
+        // Only a `<Tldr>` gives it a closed part; anywhere else its body
+        // renders in place.
+        return children;
+      case "StatusRows":
+        return statusRowsHtml(rawChildren);
       case "Timeline":
         // `gtl-`, not `timeline`/`tl-`: chat's inspector styles those unscoped.
         return `<section class="gtl">${wrappedListsHtml(rawChildren, "gtl-list", timelineItemHtml)}</section>`;

@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { findRefs, headingSlug } from "./wiki-ref-links.ts";
+import { findRefs, headingSlug, nounRuns } from "./wiki-ref-links.ts";
+import { foldSizeLabel, formatChars, readingMinutes } from "./wiki-lens.ts";
 
 /** The browser half (wrapping, the peek, the jump and Back) is driven in
  *  e2e/wiki-ref-links.spec.ts. */
@@ -91,4 +92,93 @@ describe("findRefs: quoted titles", () => {
 
 test("an empty index finds nothing", () => {
   expect(findRefs("D4 «Saker»", new Set(), new Set())).toEqual([]);
+});
+
+describe("id nouns in prose (D12)", () => {
+  const LABELS = { S: { one: "Spørsmål", other: "spørsmål" }, D: { one: "Beslutning", other: "beslutninger" } };
+  const ids = ["D1", "D7", "D11", "S1", "S2", "S6", "O3"];
+  const nouns = (text: string) => {
+    const ms = findRefs(text, new Set(ids), new Set());
+    const runs = nounRuns(text, ms, LABELS);
+    return ms.map((m, k) => `${runs.get(k) ?? "-"}:${m.key}`);
+  };
+  test("one id gets the singular", () => {
+    expect(nouns("se D7 for svaret")).toEqual(["Beslutning:D7"]);
+  });
+  test("a range or a list of one prefix gets the plural once", () => {
+    expect(nouns("D1–D11 står")).toEqual(["beslutninger:D1", "-:D11"]);
+    expect(nouns("S1, S2 og S6 venter")).toEqual(["spørsmål:S1", "-:S2", "-:S6"]);
+  });
+  test("a different prefix or prose between ends the run", () => {
+    expect(nouns("S1 og D7")).toEqual(["Spørsmål:S1", "Beslutning:D7"]);
+    expect(nouns("D1 gjelder, men D7 ikke")).toEqual(["Beslutning:D1", "Beslutning:D7"]);
+  });
+  test("an id the author already named gets none; an unlabelled prefix gets none", () => {
+    expect(nouns("Beslutning D7 står")).toEqual(["-:D7"]);
+    expect(nouns("beslutninger D1–D11")).toEqual(["-:D1", "-:D11"]);
+    expect(nouns("O3 er åpent")).toEqual(["-:O3"]);
+    expect(nounRuns("D7", findRefs("D7", new Set(ids), new Set()), undefined).size).toBe(0);
+  });
+});
+
+describe("fold size and reading time", () => {
+  test("chars as k past a thousand; minutes at 1,200 chars a minute", () => {
+    expect(formatChars(950)).toBe("950");
+    expect(formatChars(51_600)).toBe("51.6k");
+    expect(readingMinutes(500)).toBe("<1");
+    expect(readingMinutes(5_900)).toBe("5");
+    expect(foldSizeLabel(5_900, "en")).toBe("5.9k chars · 5 min");
+    expect(foldSizeLabel(21_000, "no")).toBe("21,0k tegn · 18 min");
+    expect(formatChars(12_345, "no")).toBe("12,3k");
+  });
+});
+
+describe("fix round 1, D-4: a noun the author already wrote", () => {
+  const LABELS = { D: { one: "Beslutning", other: "beslutninger" } };
+  const ids = ["D1", "D3", "D7", "D11"];
+  const nouns = (text: string, preceding = "") => {
+    const ms = findRefs(text, new Set(ids), new Set());
+    const runs = nounRuns(text, ms, LABELS, preceding);
+    return ms.map((m, k) => `${runs.get(k) ?? "-"}:${m.key}`);
+  };
+  test("an inflected form of the noun leads the run", () => {
+    expect(nouns("Se beslutningen D7")).toEqual(["-:D7"]);
+    expect(nouns("beslutningene D1–D3 står")).toEqual(["-:D1", "-:D3"]);
+  });
+  test("the noun at the end of the text before this node leads the run", () => {
+    expect(nouns(" D7 står", "Se **Beslutning")).toEqual(["-:D7"]);
+    expect(nouns(" D7 står", "Se noe annet")).toEqual(["Beslutning:D7"]);
+  });
+  test("a word that only ends with the noun does not lead", () => {
+    expect(nouns("Forbeslutning D7")).toEqual(["Beslutning:D7"]);
+  });
+  test("«til» and «to» join a range", () => {
+    expect(nouns("D1 til D11")).toEqual(["beslutninger:D1", "-:D11"]);
+    expect(nouns("D1 to D11")).toEqual(["beslutninger:D1", "-:D11"]);
+  });
+});
+
+describe("fix round 2: punctuation and block breaks before an id", () => {
+  const LABELS = { D: { one: "Beslutning", other: "beslutninger" } };
+  const ids = ["D1", "D3", "D7"];
+  const nouns = (text: string, preceding = "") => {
+    const ms = findRefs(text, new Set(ids), new Set());
+    const runs = nounRuns(text, ms, LABELS, preceding);
+    return ms.map((m, k) => `${runs.get(k) ?? "-"}:${m.key}`);
+  };
+  test("an opening bracket or a colon after the noun still leads the run", () => {
+    expect(nouns("Beslutning (D7) står")).toEqual(["-:D7"]);
+    expect(nouns("se beslutning: D7")).toEqual(["-:D7"]);
+    expect(nouns("beslutningene [D1–D3]")).toEqual(["-:D1", "-:D3"]);
+  });
+  test("a closing bracket or a full stop after the noun does not", () => {
+    expect(nouns("(se beslutning) D7")).toEqual(["Beslutning:D7"]);
+    expect(nouns("Ny beslutning. D7 står")).toEqual(["Beslutning:D7"]);
+  });
+  test("a blank line ends the read-back: the previous paragraph's last word does not lead", () => {
+    expect(nouns("\n\nD7 holder.", "Noe om beslutning")).toEqual(["Beslutning:D7"]);
+    expect(nouns("Noe om beslutning\n\nD7 holder.")).toEqual(["Beslutning:D7"]);
+    // One line break is a wrapped line of the same paragraph.
+    expect(nouns("Noe om beslutning\nD7 holder.")).toEqual(["-:D7"]);
+  });
 });

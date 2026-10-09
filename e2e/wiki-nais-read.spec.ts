@@ -50,10 +50,11 @@ import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 import { FIND_EVERY_DEBOUNCE_MS } from "../src/dashboard/views/components/wiki-find-palette.ts";
 import {
-  HISTORIC_PILL_CLASS,
+  COUNT_PILL_CLASS, HISTORIC_PILL_CLASS,
   LINE_REFS_TOGGLE_CLASS,
   MOVES_PILL_CLASS,
 } from "../src/dashboard/views/components/wiki-report-blocks.ts";
+import { LENS_SWITCH_CLASS } from "../src/dashboard/views/components/wiki-lens.ts";
 
 const PORT = e2ePort("wiki-nais-read");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -195,7 +196,8 @@ const PAGE = [
   "",
   "<DecisionLog>",
   "",
-  "- **D1** — Ikke-yrkesaktive betaler ikke.",
+  // Two sentences: Overview shows the first and a «mer» toggle (D6).
+  "- **D1** — Ikke-yrkesaktive betaler ikke avgift. Begrunnelsen står i runde 6.",
   "- ~~**D2**~~ — Flyttet.",
   "- **O1** — Språk i blokken?",
   "",
@@ -385,6 +387,10 @@ const READER_CONTROLS = [
   `.${HISTORIC_PILL_CLASS}`,
   // The NextMoves lane pills (scroll within the page).
   `.${MOVES_PILL_CLASS}`,
+  // The counted pills (scroll within the page) and the lens switch
+  // (a class on the article, localStorage).
+  `.${COUNT_PILL_CLASS}`,
+  `.${LENS_SWITCH_CLASS} button`,
   // CaseBoard row links and Query id links (in-page anchors), and the Query
   // explorer's search box and uses chips (client-side filters).
   "a.cb-id",
@@ -393,6 +399,8 @@ const READER_CONTROLS = [
   // which links its DecisionLog item.
   "a.dl-id",
   "a.q-id",
+  // A DecisionLog item's «mer» toggle in Overview (a class on the item).
+  "button.dl-more",
   ".qx-search",
   ".qx-chip",
   // Out to the tracker.
@@ -493,6 +501,11 @@ for (const scheme of ["light", "dark"] as const) {
     expect(answerRequests).toEqual([]);
     expect(await unexpectedControls(page)).toEqual([]);
     expect(await apiLinksOutsideSlice(page)).toEqual([]);
+    // In Overview a two-sentence decision carries the «mer» toggle, which
+    // meets the allowlist too.
+    await page.locator(`.${LENS_SWITCH_CLASS} button[data-lens="overview"]`).click();
+    await expect(page.locator(".wiki-article .dl-item#d1 button.dl-more")).toBeVisible();
+    expect(await unexpectedControls(page)).toEqual([]);
     // Open the provenance chain: its rows carry controls of their own.
     await page.locator("[data-prov-toggle]").click();
     await expect(page.locator("#wikiProvChain")).toBeVisible();

@@ -1,5 +1,5 @@
 import { getDb } from "./client.ts";
-import { withStatementTimeout, type StatementTimeoutOption } from "./statement-timeout.ts";
+import { deleteInBatches, type BatchedDeleteOption } from "./batched-delete.ts";
 import { capTextWithNote } from "../summaries/truncation.ts";
 
 /**
@@ -170,7 +170,7 @@ function toSnapshot(r: Record<string, unknown>): PromptSnapshot {
 export async function cleanupOldSnapshots(retention: {
   chatDays: number;
   captureDays: number;
-}, opts: StatementTimeoutOption = {}): Promise<number> {
+}, opts: BatchedDeleteOption = {}): Promise<number> {
   for (const [name, days] of [
     ["chatDays", retention.chatDays],
     ["captureDays", retention.captureDays],
@@ -181,10 +181,17 @@ export async function cleanupOldSnapshots(retention: {
       );
     }
   }
-  const result = await withStatementTimeout(opts, (sql) => sql`
-    DELETE FROM prompt_snapshots
-    WHERE (kind = 'capture' AND created_at < NOW() - make_interval(days => ${retention.captureDays}))
-       OR (kind <> 'capture' AND created_at < NOW() - make_interval(days => ${retention.chatDays}))
+  // Batched, oldest first; the bound on the shorter window is what lets
+  // `idx_prompt_snapshots_created` serve the OR as an index range.
+  const shorter = Math.min(retention.chatDays, retention.captureDays);
+  return deleteInBatches(opts, (sql, limit) => sql`
+    DELETE FROM prompt_snapshots WHERE id IN (
+      SELECT id FROM prompt_snapshots
+      WHERE created_at < NOW() - make_interval(days => ${shorter})
+        AND ((kind = 'capture' AND created_at < NOW() - make_interval(days => ${retention.captureDays}))
+          OR (kind <> 'capture' AND created_at < NOW() - make_interval(days => ${retention.chatDays})))
+      ORDER BY created_at
+      LIMIT ${limit}
+    )
   `);
-  return result.count;
 }

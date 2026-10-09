@@ -1,5 +1,6 @@
 import { getLog } from "./logging.ts";
 import { ownerGroupName, type AnswerGroups } from "./format/question.ts";
+import { parseWikiDefaultLens, type WikiDefaultLens } from "./format/reader-lens.ts";
 
 const log = getLog("config");
 
@@ -144,10 +145,12 @@ export interface WikiAnswerConfig {
 const ANSWER_GROUP_NAME_RE = /^[a-z0-9æøå_-]+$/;
 /** A NAV ident after upper-casing: letters and digits. */
 const ANSWER_GROUP_IDENT_RE = /^[A-Z0-9]+$/;
-/** A NAV ident's shape after lower-casing — a letter and exactly six digits —
- *  ANYWHERE in the name (`fag-z990001`, `ab123456`). A group name holding one
- *  would put an ident on every chip and export heading, so it is refused. */
-const NAV_IDENT_SHAPE_RE = /[a-z]\d{6}(?!\d)/;
+/** Six or more digits in a row, anywhere in the name. A NAV ident is a letter
+ *  and six digits, so a name holding one (`fag-z990001`, garbled `z9900011`)
+ *  would put an ident on every chip and export heading. The rule ignores the
+ *  letter on purpose: it refuses a week-coded `uke202541` too, which an
+ *  operator writes `uke2025-41`, and leaves no letter class to get wrong. */
+const DIGIT_RUN_RE = /\d{6}/;
 
 /**
  * `WIKI_ANSWER_GROUPS` — `fag=A123456,B234567;utvikler=C345678`. Group names
@@ -171,8 +174,8 @@ export function parseAnswerGroups(raw: string | undefined): { groups: AnswerGrou
     if (!ANSWER_GROUP_NAME_RE.test(name)) {
       return void warnings.push(`${at} dropped: the group name must be letters, digits, "_" or "-"`);
     }
-    if (NAV_IDENT_SHAPE_RE.test(name)) {
-      return void warnings.push(`${at} dropped: the group name has the shape of a NAV ident (a letter and six digits)`);
+    if (DIGIT_RUN_RE.test(name)) {
+      return void warnings.push(`${at} dropped: the group name contains six or more digits in a row, which could be a NAV ident`);
     }
     const idents = entry.slice(eq + 1).split(",").map((x) => x.trim().toUpperCase()).filter(Boolean);
     if (idents.length === 0) return void warnings.push(`${at} dropped: group "${name}" names no members`);
@@ -217,6 +220,14 @@ export function resolveWikiAnswerConfig(env: Record<string, string | undefined> 
     groups,
     groupWarnings: warnings,
   };
+}
+
+/** `WIKI_DEFAULT_LENS` (D24): a per-wiki default lens on this instance,
+ *  beating the wiki's own `defaultLens`. A `Config` field and a getter, the
+ *  {@link resolveServingProfile} pair rule. Dropped entries are carried and
+ *  warned about at boot (`loadConfig()` runs before logging). */
+export function resolveWikiDefaultLens(env: Record<string, string | undefined> = process.env): WikiDefaultLens {
+  return parseWikiDefaultLens(env.WIKI_DEFAULT_LENS);
 }
 
 /** Answer retention (decision D17): day counts, null ⇒ that rule is off. Both
@@ -937,6 +948,7 @@ export function loadConfig() {
     claudeUsagePublicUrl: nullableEnv("CLAUDE_USAGE_PUBLIC_URL"),
     wikiAnswers: resolveWikiAnswerConfig(),
     wikiAnswerRetention: resolveWikiAnswerRetention(),
+    wikiDefaultLens: resolveWikiDefaultLens(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

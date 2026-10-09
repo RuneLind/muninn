@@ -78,7 +78,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { FactVerdict } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
-import { formatWebHtml } from "../web/web-format.ts";
+import { formatWebHtml, unwrapDecisionSplits } from "../web/web-format.ts";
 import {
   FACTCHECK_MAX_CLAIMS,
   FACTCHECK_SENTINEL_START,
@@ -1676,7 +1676,10 @@ function markSpanRefusal(
   // measured, an LF-joined and a CRLF-joined block wrapper render byte-identical
   // html, so `nl` is render-invariant here — an earlier comment claimed otherwise and
   // was wrong. The index is substituted outright; see below.
-  const plain = formatWebHtml(body);
+  // A DecisionLog item's first-sentence spans are presentational: a mark may
+  // move where the item splits (it never cuts a mark), so both renders are
+  // compared without them.
+  const plain = unwrapDecisionSplits(formatWebHtml(body));
   // The guard's own mark is spliced under an index the PAGE provably does not use, so
   // `removeOneMark` cannot delete someone else's. `data-fact` is not unique: a page
   // that shows a `<Fact>` in prose renders a real mark with a real index, and if it
@@ -1694,7 +1697,7 @@ function markSpanRefusal(
   const sentinel = unusedFactIndex(plain);
   const mark = wrapperTextFor(body, span, sentinel, verdict, nl);
   const wrapped = body.slice(0, span.start) + mark + body.slice(span.end);
-  return removeOneMark(formatWebHtml(wrapped), sentinel) === plain
+  return removeOneMark(unwrapDecisionSplits(formatWebHtml(wrapped)), sentinel) === plain
     ? null
     : "marking this passage would change how the page renders";
 }

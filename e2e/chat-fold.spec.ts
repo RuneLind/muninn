@@ -127,6 +127,9 @@ test.describe("Chat: <Fold> through the real sanitizer", () => {
     // `open="true"` — the attribute the sanitizer's allowlist has to keep.
     expect(out.open.isOpen).toBe(true);
     expect(out.open.summary).toBe("Current state");
+    // An agent-context title keeps plain `fold` in chat: a lens class would make
+    // the sanitizer drop the whole class attribute.
+    expect(out.open.detailsClass).toBe("fold");
 
     // The duplicate heading keeps its class, and the class actually hides it.
     expect(out.dup.headingClass).toBe("fold-heading-dup");

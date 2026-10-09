@@ -135,6 +135,9 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   RunChecklist: null,
   // A question card's body is prose; a fence in it is an ordinary fence.
   Question: null,
+  // The report-page top: prose and rows, no chrome.
+  More: null,
+  StatusRows: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

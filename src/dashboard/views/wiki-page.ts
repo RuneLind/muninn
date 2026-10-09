@@ -26,12 +26,14 @@ import {
   CODE_REF_GROUP_CLASS,
   CODE_REF_LINK_CLASS,
   CODE_REFS_OFF_CLASS,
+  COUNT_PILL_CLASS,
   HISTORIC_PILL_CLASS,
   LINE_REFS_TOGGLE_CLASS,
   MOVES_AGE_CLASS,
   MOVES_PILL_CLASS,
 } from "./components/wiki-report-blocks.ts";
 import { refLinksCss } from "./components/wiki-ref-links.ts";
+import { lensCss } from "./components/wiki-lens.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -1939,11 +1941,11 @@ export async function renderWikiPage(opts?: {
     .wiki-article a.${CODE_REF_LINK_CLASS} { text-decoration: none; }
     .wiki-article a.${CODE_REF_LINK_CLASS}:hover code.${CODE_REF_CLASS} { border-color: var(--accent); color: var(--text-primary); }
     .wiki-article.${CODE_REFS_OFF_CLASS} .${CODE_REF_GROUP_CLASS} { display: none; }
-    .${HISTORIC_PILL_CLASS}, .${MOVES_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS} {
+    .${HISTORIC_PILL_CLASS}, .${MOVES_PILL_CLASS}, .${COUNT_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS} {
       font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; font-family: inherit;
       border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-secondary);
     }
-    .${HISTORIC_PILL_CLASS}:hover, .${MOVES_PILL_CLASS}:hover, .${LINE_REFS_TOGGLE_CLASS}:hover { color: var(--text-primary); border-color: var(--accent); }
+    .${HISTORIC_PILL_CLASS}:hover, .${MOVES_PILL_CLASS}:hover, .${COUNT_PILL_CLASS}:hover, .${LINE_REFS_TOGGLE_CLASS}:hover { color: var(--text-primary); border-color: var(--accent); }
     /* The you pill is the one that names an action for the reader: accent rule. */
     .${MOVES_PILL_CLASS}-you { border-color: var(--accent); color: var(--text-primary); font-weight: 600; }
     /* Lane ages, added client-side by wiki-report-blocks.ts (never cached). */
@@ -1954,6 +1956,8 @@ export async function renderWikiPage(opts?: {
     .${LINE_REFS_TOGGLE_CLASS}:not(.on) { text-decoration: line-through; }
     /* In-page references, their peek card and the back pill (wiki-ref-links.ts). */
     ${refLinksCss()}
+    /* The lens switch, what Overview hides, and the fold sizes (wiki-lens.ts). */
+    ${lensCss()}
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}
