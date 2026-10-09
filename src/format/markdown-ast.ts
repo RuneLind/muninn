@@ -108,6 +108,8 @@ export const COMPONENT_NAMES = [
   "DecisionLog",
   "RunChecklist",
   "Question",
+  "More",
+  "StatusRows",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -195,6 +197,11 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // one place its status lives), `choices` and `to` are `|`-separated. Wiki-only;
   // see `src/format/question.ts`.
   Question: ["id", "choices", "to"],
+  // The top of a report page (`src/format/report-top.ts`). `More` is the
+  // closed «Mer om saken» part of a `Tldr`, labelled by the wiki's
+  // `language`; `StatusRows` a list of `**Label:** value` rows. Wiki-only.
+  More: [],
+  StatusRows: [],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

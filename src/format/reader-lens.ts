@@ -23,6 +23,12 @@ export type StoredLens = Exclude<Lens, "agent">;
  *  to Explain or fact-check leaves it out. */
 export const READER_ONLY_ATTR = "data-reader-only";
 
+/** The «mer» toggle the reader adds to a `<DecisionLog>` item whose text
+ *  holds more than its first sentence (D6), and the class on an item whose
+ *  rest Overview shows. */
+export const DL_MORE_CLASS = "dl-more";
+export const DL_EXPANDED_CLASS = "dl-expanded";
+
 /** localStorage key for the viewer's choice (D1), beside «line refs». */
 export const LENS_KEY = "muninn.wiki.lens.v1";
 
@@ -104,6 +110,17 @@ export const LENS_LABELS: Record<QuestionLanguage, Record<Lens, string>> = {
   en: { overview: "Overview", all: "All", agent: "Agent" },
   no: { overview: "Oversikt", all: "Alt", agent: "Agent" },
 };
+
+/** A DecisionLog item's toggle in Overview (D6): its text, and its
+ *  `aria-label` naming the item; and the badge a closed question carries
+ *  after its first sentence there. */
+export const MORE_WORDS: Record<QuestionLanguage, { more: string; less: string; about: (id: string) => string; closed: string }> = {
+  en: { more: "more", less: "less", about: (id) => `more about ${id}`, closed: "closed" },
+  no: { more: "mer", less: "mindre", about: (id) => `mer om ${id}`, closed: "lukket" },
+};
+
+/** The class on that badge. */
+export const DL_QSTATE_CLASS = "dl-qstate";
 
 // ── WIKI_DEFAULT_LENS (D24) ──────────────────────────────────────────────────
 

@@ -334,6 +334,35 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .tldr-body > :first-child { margin-top: 0; }
     ${scope} .tldr-body > :last-child { margin-bottom: 0; }
+    /* More: the Tldr's closed «Mer om saken» part, under a hairline. */
+    ${scope} .tldr-more { margin-top: 0.6rem; padding-top: 0.4rem; border-top: 1px solid var(--border-secondary); }
+    ${scope} .tldr-more > summary { cursor: pointer; font-size: 0.92em; font-weight: 600; color: var(--accent-light); }
+    ${scope} .tldr-more-body > :first-child { margin-top: 0.4rem; }
+    ${scope} .tldr-more-body > :last-child { margin-bottom: 0; }
+    /* StatusRows: a label column and a value column; a state phrase is a
+       text-on-tint pill like the CaseBoard's. */
+    ${scope} .status-rows { margin: 1rem 0; }
+    ${scope} .sr-grid {
+      display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.2rem 0.9rem; align-items: baseline;
+      padding: 0.55rem 0.85rem; border: 1px solid var(--border-secondary); border-radius: 9px; background: var(--bg-surface);
+    }
+    ${scope} .sr-grid + .sr-grid { margin-top: 0.5rem; }
+    ${scope} .sr-row { display: contents; }
+    ${scope} .sr-label { color: var(--text-soft); font-size: 0.85em; font-weight: 600; }
+    ${scope} .sr-value { min-width: 0; }
+    ${scope} .sr-sep { color: var(--text-soft); }
+    ${scope} .sr-state {
+      font-size: 0.9em; padding: 0 0.45rem; border-radius: 999px; white-space: nowrap;
+      color: var(--text-primary); border: 1px solid var(--border-secondary);
+    }
+    ${scope} .sr-good { background: var(--tint-success); }
+    ${scope} .sr-warn { background: var(--tint-warning); }
+    ${scope} .sr-muted { background: var(--tint-neutral); }
+    ${scope} .sr-info { background: var(--tint-info); }
+    ${scope} .status-rows :not(pre) > code { overflow-wrap: anywhere; }
+    @media (max-width: 520px) {
+      ${scope} .sr-grid { grid-template-columns: minmax(0, 1fr); }
+    }
     /* Timeline: dated items on a vertical rail, the date as the marker. The gtl-
        prefix, because chat's inspector styles timeline/tl-item unscoped. */
     ${scope} .gtl { margin: 1.2rem 0; }

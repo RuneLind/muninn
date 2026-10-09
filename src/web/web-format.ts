@@ -51,7 +51,17 @@ import {
   type QuestionRenderOptions,
   type QuestionState,
 } from "../format/question.ts";
-import { questionLabels } from "../format/question-labels.ts";
+import { questionLabels, type QuestionLanguage } from "../format/question-labels.ts";
+import {
+  isMoreBlock,
+  markStatePhrases,
+  MORE_LABELS,
+  splitFirstSentence,
+  type SentenceSplit,
+  STATUS_SEPARATOR,
+  statusSegments,
+  statusRows,
+} from "../format/report-top.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { idNoun, READER_ONLY_ATTR, type IdLabels } from "../format/reader-lens.ts";
 import { caseBoardWarnings, caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
@@ -187,6 +197,9 @@ export function formatWebHtml(
      *  classes and DecisionLog items their state. Absent (chat) ⇒ neither,
      *  since the chat sanitizer drops a class it does not allow. */
     reader?: boolean;
+    /** The wiki's `.wiki-reader.json` `language`: the `<More>` label and the
+     *  `<StatusRows>` state phrases. Absent ⇒ the question option's, else `en`. */
+    language?: QuestionLanguage;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -195,8 +208,10 @@ export function formatWebHtml(
   const prev = currentPageFiles;
   const prevQuestion = currentQuestionPage;
   const prevReader = currentReader;
+  const prevLanguage = currentLanguage;
   currentPageFiles = opts?.files;
   currentReader = opts?.reader === true;
+  currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
     const blocks = parseBlocks(text);
     // The DecisionLog usually sits below the `<Question>`, and the renderer
@@ -218,6 +233,7 @@ export function formatWebHtml(
     currentPageFiles = prev;
     currentQuestionPage = prevQuestion;
     currentReader = prevReader;
+    currentLanguage = prevLanguage;
   }
 }
 
@@ -227,6 +243,9 @@ let currentPageFiles: PageFiles | undefined;
 
 /** `opts.reader` for the call in progress. */
 let currentReader = false;
+
+/** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
+let currentLanguage: QuestionLanguage = "en";
 
 /** What a `<Question>` card reads from the page around it, for the call in
  *  progress: the closed-ids pre-pass, the duplicate ids and the wiki's
@@ -896,8 +915,103 @@ function logItemHtml(text: string, nested: string, value: string): string {
   const anchor = anchorSlug(p.id);
   return (
     `<li class="dl-item${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
-    `<span class="dl-text">${itemHtml(p.text)}</span>${nested}</li>`
+    `<span class="dl-text">${logTextHtml(p.text)}</span>${nested}</li>`
   );
+}
+
+/** A DecisionLog item's text split after its first sentence (D6), or null.
+ *  The guard: a split is taken only where the two halves render as the whole
+ *  does (white space aside), so no cut can break emphasis, a component, a link
+ *  or a fact mark; the next sentence end is tried instead. The wiki linter
+ *  reads the same split. */
+export function splitDecisionText(text: string): SentenceSplit | null {
+  const flat = (html: string) => html.replace(/\s+/g, " ");
+  const whole = flat(itemHtml(text));
+  return splitFirstSentence(text, (first, rest) => flat(itemHtml(first) + itemHtml(rest)) === whole);
+}
+
+/** The first sentence of a DecisionLog item as Overview shows it: the split's
+ *  first half, else the whole item. */
+export function decisionFirstSentence(text: string): string {
+  return splitDecisionText(text)?.first ?? text;
+}
+
+/** `html` without the two presentational spans a DecisionLog split adds
+ *  (`dl-first`, `dl-rest`), their content kept: what the fact-check render
+ *  guard compares, since a mark may move where an item splits (D6) without
+ *  changing a word of the page. */
+export function unwrapDecisionSplits(html: string): string {
+  if (!html.includes('<span class="dl-first">')) return html;
+  const opens = /<span class="dl-(?:first|rest)">/g;
+  let out = "";
+  let at = 0;
+  for (let m = opens.exec(html); m; m = opens.exec(html)) {
+    // The matching close: a balanced scan over the spans inside.
+    const tagRe = /<span\b[^>]*>|<\/span>/g;
+    tagRe.lastIndex = m.index + m[0].length;
+    let depth = 1;
+    let close = -1;
+    for (let t = tagRe.exec(html); t; t = tagRe.exec(html)) {
+      depth += t[0] === "</span>" ? -1 : 1;
+      if (depth === 0) {
+        close = t.index;
+        break;
+      }
+    }
+    if (close === -1) break;
+    out += html.slice(at, m.index) + html.slice(m.index + m[0].length, close);
+    at = close + "</span>".length;
+    opens.lastIndex = at;
+  }
+  return out + html.slice(at);
+}
+
+/** An id-led item's text: its first sentence and the rest in two spans when
+ *  it holds more than one (D6), so the reader's Overview can show the first
+ *  alone. */
+function logTextHtml(text: string): string {
+  const split = splitDecisionText(text);
+  if (!split) return itemHtml(text);
+  return `<span class="dl-first">${itemHtml(split.first)}</span><span class="dl-rest">${itemHtml(split.rest)}</span>`;
+}
+
+/** A `<Tldr>` body: a `<More>` directly in it becomes its closed part (D10),
+ *  labelled by the wiki's language; everything else renders as written. */
+function tldrBodyHtml(rawChildren: Block[], children: string): string {
+  if (!rawChildren.some(isMoreBlock)) return children;
+  return rawChildren
+    .map((b) =>
+      isMoreBlock(b)
+        ? `<details class="tldr-more"><summary>${escapeHtml(MORE_LABELS[currentLanguage])}</summary>` +
+          `<div class="tldr-more-body">${renderBlocks(b.children, webRenderer)}</div></details>`
+        : renderBlocks([b], webRenderer),
+    )
+    .join("\n");
+}
+
+/** A `<StatusRows>` body: each list a label column and a value column, one
+ *  row per item; a value's ` · ` segments separated and their state phrases
+ *  coloured (`markStatePhrases`). Other blocks render in place. */
+function statusRowsHtml(rawChildren: Block[]): string {
+  const body = rawChildren
+    .map((b) => {
+      if (b.type !== "ul" && b.type !== "ol") return renderBlocks([b], webRenderer);
+      const rows = statusRows([b])
+        .map((r, k) => {
+          const value = statusSegments(r.value)
+            .map((seg) => markStatePhrases(itemHtml(seg), currentLanguage))
+            .join(`<span class="sr-sep">${STATUS_SEPARATOR}</span>`);
+          const under = (b.nested?.[k] ?? []).map(listChildHtml).join("");
+          return (
+            `<div class="sr-row"><span class="sr-label">${r.label === null ? "" : renderInline(r.label)}</span>` +
+            `<span class="sr-value">${value}${under}</span></div>`
+          );
+        })
+        .join("");
+      return `<div class="sr-grid">${rows}</div>`;
+    })
+    .join("\n");
+  return `<section class="status-rows">${body}</section>`;
 }
 
 /** A list nested under a `RunChecklist` step: labelled entries as rows, the
@@ -1206,8 +1320,14 @@ const webRenderer: BlockRenderer = {
       case "Tldr": {
         // The page's lead box, where the author put it.
         const label = attrs.label?.trim() || "TL;DR";
-        return `<section class="tldr"><div class="tldr-label">${escapeHtml(label)}</div><div class="tldr-body">${children}</div></section>`;
+        return `<section class="tldr"><div class="tldr-label">${escapeHtml(label)}</div><div class="tldr-body">${tldrBodyHtml(rawChildren, children)}</div></section>`;
       }
+      case "More":
+        // Only a `<Tldr>` gives it a closed part; anywhere else its body
+        // renders in place.
+        return children;
+      case "StatusRows":
+        return statusRowsHtml(rawChildren);
       case "Timeline":
         // `gtl-`, not `timeline`/`tl-`: chat's inspector styles those unscoped.
         return `<section class="gtl">${wrappedListsHtml(rawChildren, "gtl-list", timelineItemHtml)}</section>`;

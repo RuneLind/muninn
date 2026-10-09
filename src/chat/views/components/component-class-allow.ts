@@ -100,6 +100,10 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   // `<Tldr>`, `<Timeline>`, `<DecisionLog>`, `<RunChecklist>`: same reason.
   "tldr", "tldr-label", "tldr-body", "gtl", "gtl-list", "gtl-item", "gtl-dated", "gtl-undated",
   "gtl-date", "gtl-text", "decision-log", "dl-list", "dl-item", "dl-dim", "dl-noid", "dl-id", "dl-text",
+  "dl-first", "dl-rest",
+  // `<More>` and `<StatusRows>` (the report-page top).
+  "tldr-more", "tldr-more-body", "status-rows", "sr-grid", "sr-row", "sr-label", "sr-value", "sr-sep",
+  "sr-state", "sr-good", "sr-warn", "sr-muted", "sr-info",
   "run-checklist", "rc-head", "rc-count", "rc-row", "rc-command", "rc-expect", "rc-stop", "rc-label",
   "rc-value",
   // `<Question>`: chat gets the plain bordered question (no wiki, no state).

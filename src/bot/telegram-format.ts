@@ -16,8 +16,9 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { tldrFallbackLabel } from "../format/genre-lists.ts";
+import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
-import { ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
+import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
@@ -160,6 +161,25 @@ const telegramRenderer: BlockRenderer = {
       }
       case "Tldr":
         return `<b>${escapeHtml(tldrFallbackLabel(attrs.label))}:</b>\n${children}`;
+      // Nothing to collapse here: the «Mer om saken» part in full.
+      case "More":
+        return children;
+      // One plain line per row, other blocks in place.
+      case "StatusRows":
+        return rawChildren
+          .map((b) =>
+            b.type === "ul" || b.type === "ol"
+              ? statusRows([b])
+                  .map((r, k) =>
+                    [renderInline(r.text), ...nestedChildren(b.nested?.[k], telegramRenderer, (t) => t.split("\n").map(renderInline).join("\n"))]
+                      .map((out, i) => (i === 0 ? out : out.replace(/^(?=.)/gm, "  ")))
+                      .join("\n"),
+                  )
+                  .join("\n")
+              : renderBlocks([b], telegramRenderer),
+          )
+          .filter((out) => out.trim() !== "")
+          .join("\n\n");
       // The list as written: dates and ids stay text, labelled rows stay items.
       case "Timeline":
       case "DecisionLog":
