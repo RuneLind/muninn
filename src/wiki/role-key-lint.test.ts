@@ -79,8 +79,8 @@ describe("lint: role-key", () => {
     );
     const f = await roleFindings();
     expect(f.map((x) => x.message)).toEqual([
-      'questions_to: names "jus", which is not in .wiki-reader.json roleKeys (fag); a question to it asks nobody',
-      '<Question to=> names "utvikler", which is not in .wiki-reader.json roleKeys (fag); a question to it asks nobody',
+      'questions_to: names "jus", which is not in .wiki-reader.json roleKeys (fag); add it to roleKeys if it is a WIKI_ANSWER_GROUPS group key, or write a person as Name (IDENT)',
+      '<Question to=> names "utvikler", which is not in .wiki-reader.json roleKeys (fag); add it to roleKeys if it is a WIKI_ANSWER_GROUPS group key, or write a person as Name (IDENT)',
     ]);
     expect(f[0]!.line).toBe(5);
   });
@@ -91,5 +91,65 @@ describe("lint: role-key", () => {
     const f = await roleFindings();
     expect(f).toHaveLength(1);
     expect(f[0]!.message).toContain("is not a role key");
+  });
+
+  test("each finding names its own line: the second question, the questions_to: entry, each lane", async () => {
+    await write(".wiki-reader.json", JSON.stringify({ roleKeys: ["utvikler"] }));
+    await write(
+      "plans/p.mdx",
+      page(
+        ["tags: [fagavklaring, fag]", 'questions_to: ["Kari Nordmann", "fag"]'],
+        [
+          '<Question id="S1" to="utvikler">',
+          "Q?",
+          "</Question>",
+          "",
+          '<Question id="S2" to="jus">',
+          "Q?",
+          "</Question>",
+          "",
+          "```",
+          '<Lane kind="you" role="kode">',
+          "```",
+          "",
+          "<NextMoves>",
+          "",
+          '<Lane kind="you" role="jurist">',
+          "",
+          "- a",
+          "",
+          "</Lane>",
+          "",
+          '<Lane kind="waiting" who="Venter" role="jurist">',
+          "",
+          "- b",
+          "",
+          "</Lane>",
+          "",
+          "</NextMoves>",
+        ],
+      ),
+    );
+    const f = await roleFindings();
+    // Frontmatter is lines 1–7 (tags on 5, questions_to on 6), a blank on 8;
+    // body line k is 9 + k. The fenced <Lane> is no lane.
+    expect(f.map((x) => [x.message.slice(0, 18), x.line])).toEqual([
+      ["questions_to: name", 6],
+      ["<Question to=> nam", 13],
+      ['<Lane role="jurist', 23],
+      ['<Lane role="jurist', 29],
+    ]);
+  });
+
+  test("the messages say what to do and claim no effect the reader does not have", async () => {
+    await write(".wiki-reader.json", JSON.stringify({ roleKeys: ["fag"] }));
+    await write("plans/p.mdx", page(['questions_to: ["jus"]'], [...LANES, "", '<Question id="S1" to="utvikler">', "Q?", "</Question>"]));
+    const messages = (await roleFindings()).map((x) => x.message);
+    for (const m of messages) {
+      expect(m).toContain("not in .wiki-reader.json roleKeys (fag)");
+      expect(m).not.toMatch(/asks nobody|no viewer's lane is marked/);
+    }
+    expect(messages.find((m) => m.startsWith("<Lane"))).toContain("add it to roleKeys if it is a WIKI_ANSWER_GROUPS group key");
+    expect(messages.find((m) => m.startsWith("<Question"))).toContain("write a person as Name (IDENT)");
   });
 });

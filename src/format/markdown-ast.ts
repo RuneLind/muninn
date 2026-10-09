@@ -16,7 +16,7 @@
 import { lineCodeSpanRanges } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
 import { ordinals } from "./block-renderer.ts";
-import { normalizeRoleKey, roleLaneLabel } from "./lane-roles.ts";
+import { laneDefaultLabel, normalizeRoleKey, roleLaneLabel } from "./lane-roles.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 
 export type Block =
@@ -176,8 +176,9 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   Historic: ["since", "note"],
   // Who has the next move: a `NextMoves` block holding `Lane` blocks, each a
   // markdown list. `kind` is you | waiting | draft | blocked (see
-  // `normalizeLaneKind`), `who` the lane's label, `since` a `YYYY-MM-DD` the
-  // reader ages client-side. Wiki-only, like `Historic`.
+  // `normalizeLaneKind`), `who` the lane's label, `role` a `WIKI_ANSWER_GROUPS`
+  // key the label is derived from (beats `who`; `normalizeRoleKey`), `since` a
+  // `YYYY-MM-DD` the reader ages client-side. Wiki-only, like `Historic`.
   NextMoves: [],
   Lane: ["kind", "who", "role", "since"],
   // One prod query: `csv`/`sql` name files beside the page, `uses` is a
@@ -357,8 +358,10 @@ export function historicLeadText(attrs: Record<string, string>): string {
 export const LANE_KINDS = ["you", "waiting", "draft", "blocked"] as const;
 export type LaneKind = (typeof LANE_KINDS)[number];
 
-/** The label a lane shows when it carries no `who`. English: `who` is where the
- *  page's own language goes. */
+/** The label a lane shows when it carries neither `role` nor `who`, on every
+ *  surface that knows no wiki (chat, Slack, Telegram, email) and on an English
+ *  wiki. The reader words it in a Norwegian wiki's language
+ *  (`laneDefaultLabel`). */
 export const LANE_DEFAULT_LABEL: Record<LaneKind, string> = {
   you: "You",
   waiting: "Waiting",
@@ -443,7 +446,8 @@ function laneSteps(children: Block[]): string[] {
 }
 
 /** One lane as every surface reads it. `language` is the wiki's: it words a
- *  role lane's label («Venter på fag»); a surface that knows no wiki reads `en`. */
+ *  role lane's label («Venter på fag») and the default label of a lane with
+ *  neither `role` nor `who` («Du»); a surface that knows no wiki reads `en`. */
 export function laneFromAttrs(
   attrs: Record<string, string>,
   children: Block[],
@@ -453,7 +457,9 @@ export function laneFromAttrs(
   const who = attrs.who?.trim() || null;
   const role = normalizeRoleKey(attrs.role);
   // A lane with no `role=` keeps its `who` label (D16).
-  const label = role ? roleLaneLabel(kind, role, language) : (who ?? LANE_DEFAULT_LABEL[kind]);
+  const label = role
+    ? roleLaneLabel(kind, role, language)
+    : (who ?? laneDefaultLabel(kind, language) ?? LANE_DEFAULT_LABEL[kind]);
   const since = parseLaneSince(attrs.since);
   const sinceRaw = since === null && attrs.since?.trim() ? attrs.since.trim() : null;
   return { kind, known, label, who, role, since, sinceRaw, items: laneSteps(children), children };

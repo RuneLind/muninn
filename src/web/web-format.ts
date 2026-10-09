@@ -16,6 +16,7 @@ import {
   diffLineClass,
   parseChecklist,
   nextMovesLanes,
+  isSettledSection,
   laneFromAttrs,
   laneLeadText,
   isTaskList,
@@ -52,7 +53,7 @@ import {
   type QuestionState,
 } from "../format/question.ts";
 import { questionLabels, type QuestionLanguage } from "../format/question-labels.ts";
-import { laneCountText, laneSumPhrase, laneUnit, laneWords } from "../format/lane-roles.ts";
+import { laneCountText, laneSumPhrase, laneUnit, laneWords, type LaneCount } from "../format/lane-roles.ts";
 import { leadSentence } from "../format/lead-sentence.ts";
 import {
   isMoreBlock,
@@ -202,6 +203,9 @@ export function formatWebHtml(
     /** The wiki's `.wiki-reader.json` `language`: the `<More>` label and the
      *  `<StatusRows>` state phrases. Absent ⇒ the question option's, else `en`. */
     language?: QuestionLanguage;
+    /** `renderWikiHtml`'s wikilink sentinels, by index: the text each link
+     *  shows. A lane's peek is plain text, so it reads a link as its text. */
+    wikiLinkTexts?: readonly string[];
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -212,7 +216,9 @@ export function formatWebHtml(
   const prevReader = currentReader;
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
+  const prevLinkTexts = currentLinkTexts;
   currentPageFiles = opts?.files;
+  currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
@@ -245,6 +251,7 @@ export function formatWebHtml(
     currentReader = prevReader;
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
+    currentLinkTexts = prevLinkTexts;
   }
 }
 
@@ -842,8 +849,8 @@ function checklistHtml(
 function laneHtml(lane: NextMovesLane): string {
   const since = lane.since ? ` data-since="${lane.since}"` : "";
   const unknown = lane.known ? "" : " nm-kind-unknown";
-  // The authored label, for the reader's header pill; absent ⇒ the pill's
-  // English default.
+  // The lane's label — the role's or the authored `who` — for the header
+  // pill; a lane with neither ⇒ the pill's English default.
   const who = lane.role || lane.who ? ` data-who="${escapeHtml(lane.label)}"` : "";
   const sinceHtml = lane.since
     ? `<span class="nm-since"${since}>${lane.since}</span>`
@@ -881,79 +888,117 @@ function laneColsClass(n: number): string {
 interface LaneCards {
   /** Lane `children` → the `<Question>` blocks it shows, in item order. */
   byLane: Map<Block[], ComponentBlock[]>;
-  /** Question id → the anchor of its card in the lane. */
+  /** Question id → the anchor of its card in the lane, unique on the page's
+   *  lane cards (`Q.1` and `Q-1` fold to one slug, so the second gets `-2`). */
   moved: Map<string, string>;
 }
 let currentLaneCards: LaneCards | undefined;
 
+/** `opts.wikiLinkTexts` for the call in progress. */
+let currentLinkTexts: readonly string[] | undefined;
+
 /** Characters an id may not touch on either side to count as named. */
 const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
 
-/** The `<Question>` ids an item names, in the order they appear. */
-function namedQuestionIds(text: string, ids: Iterable<string>): string[] {
-  const hits: { id: string; at: number }[] = [];
+/** Where each `<Question>` id an item names sits, in text order. An id counts
+ *  only on its own boundary: `S1` is not named by `S10` or `PS1`. */
+function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number; end: number }[] {
+  const hits: { id: string; at: number; end: number }[] = [];
   for (const id of ids) {
     const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const m = new RegExp(`(?<![${ID_EDGE}])${esc}(?![${ID_EDGE}])`).exec(text);
-    if (m) hits.push({ id, at: m.index });
+    if (m) hits.push({ id, at: m.index, end: m.index + id.length });
   }
-  return hits.sort((a, b) => a.at - b.at).map((h) => h.id);
+  return hits.sort((a, b) => a.at - b.at);
+}
+
+/** The `<Question>` ids an item names, in the order they appear. */
+function namedQuestionIds(text: string, ids: Iterable<string>): string[] {
+  return namedQuestionHits(text, ids).map((h) => h.id);
 }
 
 /**
  * The pre-pass behind D13: the first waiting lane (in document order) whose
  * open items name a `<Question>` on the page takes that card. A duplicated id
  * stays where it is (its card is read-only), and so does a card written inside
- * the lane that names it.
+ * a lane that names it. A `<NextMoves>` in a settled section
+ * (`isSettledSection`) takes no card: its lanes are history, as in
+ * `countedNextMovesLanes`.
  */
 function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   const questions = new Map<string, { block: ComponentBlock; lanes: Block[][] }>();
   const nextMoves: ComponentBlock[] = [];
-  const walk = (bs: Block[], lanes: Block[][]) => {
+  const walk = (bs: Block[], lanes: Block[][], settled: boolean) => {
     for (const b of bs) {
       if (b.type !== "component") continue;
       if (b.name === "Question") {
         const id = parseQuestionAttrs(b.attrs).id;
         if (id !== null && !page.duplicates.has(id) && !questions.has(id)) questions.set(id, { block: b, lanes });
       }
-      if (b.name === "NextMoves") nextMoves.push(b);
-      walk(b.children, b.name === "Lane" ? [...lanes, b.children] : lanes);
+      if (b.name === "NextMoves" && !settled) nextMoves.push(b);
+      walk(b.children, b.name === "Lane" ? [...lanes, b.children] : lanes, settled || isSettledSection(b));
     }
   };
-  walk(blocks, []);
+  walk(blocks, [], false);
+  const waiting = nextMoves.flatMap((block) => nextMovesLanes(block.children).filter((l) => l.kind === "waiting"));
+  const named = (lane: NextMovesLane) => new Set(lane.items.flatMap((item) => namedQuestionIds(item, questions.keys())));
+  // A card already inside a lane that names it stays put: no later lane takes it.
+  const stays = new Set<string>();
+  for (const lane of waiting) {
+    for (const id of named(lane)) if (questions.get(id)!.lanes.includes(lane.children)) stays.add(id);
+  }
   const out: LaneCards = { byLane: new Map(), moved: new Map() };
-  for (const block of nextMoves) {
-    for (const lane of nextMovesLanes(block.children)) {
-      if (lane.kind !== "waiting") continue;
-      for (const item of lane.items) {
-        for (const id of namedQuestionIds(item, questions.keys())) {
-          const q = questions.get(id)!;
-          if (out.moved.has(id) || q.lanes.includes(lane.children)) continue;
-          out.moved.set(id, `nm-q-${anchorSlug(id)}`);
-          const list = out.byLane.get(lane.children) ?? [];
-          list.push(q.block);
-          out.byLane.set(lane.children, list);
-        }
+  const anchors = new Set<string>();
+  for (const lane of waiting) {
+    for (const item of lane.items) {
+      for (const id of namedQuestionIds(item, questions.keys())) {
+        if (stays.has(id) || out.moved.has(id)) continue;
+        const base = `nm-q-${anchorSlug(id)}`;
+        let anchor = base;
+        for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
+        anchors.add(anchor);
+        out.moved.set(id, anchor);
+        const list = out.byLane.get(lane.children) ?? [];
+        list.push(questions.get(id)!.block);
+        out.byLane.set(lane.children, list);
       }
     }
   }
   return out;
 }
 
-/** A few words of an item after the id it names: `S1: alternativ A eller B?`. */
-function questionPeek(id: string, item: string): string {
-  const flat = item
+/** An item's text for a peek: plain, one line. A `renderWikiHtml` wikilink
+ *  sentinel reads as the link's text, and no NUL survives. */
+function peekText(item: string): string {
+  return item
+    .replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => currentLinkTexts?.[Number(i)] ?? "")
+    .replace(/\x00/g, "");
+}
+
+/** Only a joining word or punctuation between two ids: `S1 og S2 — …`. */
+const ID_JOIN_RE = /^[\s:—–\-·,.)&/]*(?:og|and|eller|or)?[\s:—–\-·,.)&/]*$/i;
+
+/** The peek parts an item gives (D13): each id it names with a few words —
+ *  the words after it, up to the next id; an id followed only by a joining
+ *  word shares the next id's words (`S1 og S2 — begge?` ⇒ `S1: begge?`,
+ *  `S2: begge?`). */
+function questionPeeks(item: string, ids: Iterable<string>): { id: string; text: string }[] {
+  const flat = peekText(item)
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
     .replace(/\[\[([^\]]+)\]\]/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/(\*\*|__|`)/g, "")
     .replace(/^\[[ xX]\][ \t]*/, "")
     .split("\n")[0]!;
-  const at = flat.indexOf(id);
-  const rest = (at === -1 ? flat : flat.slice(at + id.length)).replace(/^[\s:—–\-·,.)]+/, "");
-  const words = rest.split(/\s+/).filter(Boolean);
-  const few = words.slice(0, 6).join(" ");
-  return few ? `${id}: ${few}${words.length > 6 ? "…" : ""}` : id;
+  const hits = namedQuestionHits(flat, ids);
+  const segs = hits.map((h, k) => flat.slice(h.end, hits[k + 1]?.at ?? flat.length));
+  return hits.map((h, k) => {
+    let j = k;
+    while (j < segs.length - 1 && ID_JOIN_RE.test(segs[j]!)) j++;
+    const words = segs[j]!.replace(/^[\s:—–\-·,.)]+/, "").split(/\s+/).filter(Boolean);
+    const few = words.slice(0, 6).join(" ");
+    return { id: h.id, text: few ? `${h.id}: ${few}${words.length > 6 ? "…" : ""}` : h.id };
+  });
 }
 
 /** A lane's peek (D13): the question ids it names with a few words each, else
@@ -963,21 +1008,32 @@ function lanePeek(lane: NextMovesLane, ids: Set<string> | undefined): string {
     const parts: string[] = [];
     const seen = new Set<string>();
     for (const item of lane.items) {
-      for (const id of namedQuestionIds(item, ids)) {
-        if (seen.has(id)) continue;
-        seen.add(id);
-        parts.push(questionPeek(id, item));
+      for (const p of questionPeeks(item, ids)) {
+        if (seen.has(p.id)) continue;
+        seen.add(p.id);
+        parts.push(p.text);
       }
     }
     if (parts.length) return parts.join(" · ");
   }
-  return lane.items.length ? leadSentence(lane.items[0]!) : "";
+  return lane.items.length ? leadSentence(peekText(lane.items[0]!)) : "";
 }
 
-/** Does this waiting lane name a `<Question>` on the page? Its number then
- *  counts questions (D14). */
-function laneHasQuestions(lane: NextMovesLane, ids: Set<string> | undefined): boolean {
-  return lane.kind === "waiting" && !!ids?.size && lane.items.some((it) => namedQuestionIds(it, ids).length > 0);
+/** What a lane's number counts (D14): a waiting lane naming `<Question>` cards
+ *  counts the distinct ids it names as questions and its items naming none as
+ *  tasks; any other lane counts its open steps in its kind's unit. */
+function laneCounts(lane: NextMovesLane, ids: Set<string> | undefined): LaneCount[] {
+  if (lane.kind === "waiting" && ids?.size) {
+    const named = new Set<string>();
+    let tasks = 0;
+    for (const item of lane.items) {
+      const hit = namedQuestionIds(item, ids);
+      if (hit.length === 0) tasks++;
+      for (const id of hit) named.add(id);
+    }
+    if (named.size > 0) return [{ n: named.size, unit: "question" }, { n: tasks, unit: "task" }];
+  }
+  return [{ n: lane.items.length, unit: laneUnit(lane.kind) }];
 }
 
 /** A lane's body as the grid renders it: a task list through the checklist marks. */
@@ -1006,15 +1062,21 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
   const ids = currentQuestionPage?.questionIds;
   const rest = rawChildren.filter((b) => !(b.type === "component" && b.name === "Lane") && !isBlankTextBlock(b));
   const intro = rest.length ? `<div class="nm-intro">${renderBlocks(rest, webRenderer)}</div>` : "";
+  // Each lane's `since` as written, to tell a normalised date from the source.
+  const sourceSince = new Map<Block[], string | undefined>();
+  for (const b of rawChildren) if (b.type === "component" && b.name === "Lane") sourceSince.set(b.children, b.attrs.since?.trim());
   const ordered = [...lanes.filter((l) => l.kind !== "blocked"), ...lanes.filter((l) => l.kind === "blocked")];
   const sum: string[] = [];
   const rows = ordered.map((lane) => {
     const n = lane.items.length;
-    const unit = laneUnit(lane.kind, laneHasQuestions(lane, ids));
-    if (n > 0) sum.push(laneSumPhrase({ kind: lane.kind, role: lane.role, label: lane.label, count: n, unit }, lang));
+    const counts = laneCounts(lane, ids);
+    if (n > 0) sum.push(laneSumPhrase({ kind: lane.kind, role: lane.role, label: lane.label, counts }, lang));
     const since = lane.since ? ` data-since="${lane.since}"` : "";
+    // Text the page source does not hold is reader-only, so a selection
+    // Explain or fact-check sends can still be found in the source.
+    const sinceOnly = lane.since && sourceSince.get(lane.children) !== lane.since ? ` ${READER_ONLY_ATTR}` : "";
     const sinceHtml = lane.since
-      ? `<span class="nm-since"${since}>${lane.since}</span>`
+      ? `<span class="nm-since"${since}${sinceOnly}>${lane.since}</span>`
       : lane.sinceRaw
         ? `<span class="nm-since nm-since-raw">${escapeHtml(lane.sinceRaw)}</span>`
         : "";
@@ -1031,12 +1093,12 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     // label, else the authored `who`; absent ⇒ the pill's English default.
     const who = lane.role || lane.who ? ` data-who="${escapeHtml(lane.label)}"` : "";
     const role = lane.role ? ` data-role="${escapeHtml(lane.role)}"` : "";
+    // The label is the source's own text only when it is the authored `who`.
+    const labelOnly = lane.label !== lane.who ? ` ${READER_ONLY_ATTR}` : "";
     return (
       `<details class="nm-lane nm-${lane.kind}${unknown}" data-kind="${lane.kind}" data-count="${n}"${since}${who}${role}>` +
-      // Text the page source does not hold is reader-only, so a selection
-      // Explain or fact-check sends can still be found in the source.
-      `<summary class="nm-head"><span class="nm-who"${lane.role ? ` ${READER_ONLY_ATTR}` : ""}>${escapeHtml(lane.label)}</span>` +
-      `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText(n, unit, lang))}</span>${sinceHtml}` +
+      `<summary class="nm-head"><span class="nm-who"${labelOnly}>${escapeHtml(lane.label)}</span>` +
+      `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText(counts, lang))}</span>${sinceHtml}` +
       (peek ? `<span class="nm-peek" ${READER_ONLY_ATTR}>${escapeHtml(peek)}</span>` : "") +
       `</summary><div class="nm-body">${laneBodyHtml(lane)}${cards ? `<div class="nm-qcards">${cards}</div>` : ""}</div></details>`
     );
@@ -1464,7 +1526,7 @@ const webRenderer: BlockRenderer = {
       }
       case "Lane": {
         // A lane outside `<NextMoves>` renders plain: its label line, then its body.
-        const lane = laneFromAttrs(attrs, rawChildren);
+        const lane = laneFromAttrs(attrs, rawChildren, currentReader ? currentLanguage : undefined);
         return `<p><strong>${laneLeadText(lane, escapeHtml, escapeHtml)}</strong></p>${children}`;
       }
       case "Query": {

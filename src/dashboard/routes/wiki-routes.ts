@@ -207,6 +207,7 @@ import { getBotDefaultUser, getChatPreferences } from "../../db/chat-preferences
 import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
 import { requireOwnUser, sessionIdentity } from "../../auth/guard.ts";
+import { authMode } from "../../auth/policy.ts";
 import { viewerGroupKeys } from "../../format/question.ts";
 
 const log = getLog("dashboard", "wiki");
@@ -1641,7 +1642,7 @@ export function registerWikiReadRoutes(
       // `roles`: the viewer's group keys (D30) — never a member — and the
       // admin's «Se som rolle» (D18).
       reader: readerPayload(entry?.name, index.readerConfig, config.wikiDefaultLens ?? resolveWikiDefaultLens(), {
-        roles: viewerGroupKeys(sessionIdentity(c), answerCfg.owner, answerCfg.groups ?? new Map()),
+        roles: viewerGroupKeys(authMode(), sessionIdentity(c), answerCfg.owner, answerCfg.groups ?? new Map()),
         admin: (c.get("role") ?? "admin") === "admin",
       }),
       // The answer cards' page-level flags, present only on a wiki that takes

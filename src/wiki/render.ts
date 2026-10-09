@@ -112,9 +112,12 @@ export function renderWikiHtml(
   // The source text each sentinel stands for, kept alongside its rendered form:
   // where the sentinel turns out to be inside code, THIS is what goes back.
   const literal: string[] = [];
+  // The text each link shows: a lane's plain-text peek reads a link as this.
+  const linkTexts: string[] = [];
   const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);
     const text = (label ?? target).trim() || target.trim();
+    linkTexts.push(text);
     const meta = resolve(target);
     const html = meta
       ? // `data-relpath` names the page the link RESOLVED to, so the in-page click
@@ -137,6 +140,7 @@ export function renderWikiHtml(
       question: opts?.question,
       idLabels: opts?.idLabels,
       reader: true,
+      wikiLinkTexts: linkTexts,
       ...(opts?.language ? { language: opts.language } : {}),
     }),
     literal,

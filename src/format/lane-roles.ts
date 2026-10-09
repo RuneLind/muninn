@@ -12,10 +12,15 @@
 import type { QuestionLanguage } from "./question-labels.ts";
 
 /** A role key as `roleKeys` and `<Lane role=>` take it, after lower-casing —
- *  the `WIKI_ANSWER_GROUPS` group-name grammar. */
+ *  the `WIKI_ANSWER_GROUPS` group-name grammar (`parseAnswerGroups` in
+ *  `src/config.ts` reads this one copy). */
 export const ROLE_KEY_RE = /^[a-z0-9æøå_-]+$/;
-/** Six digits in a row: the key could be a NAV ident (the group parser's rule). */
-const DIGIT_RUN_RE = /\d{6}/;
+/** Six or more digits in a row, anywhere in the name. A NAV ident is a letter
+ *  and six digits, so a name holding one (`fag-z990001`, garbled `z9900011`)
+ *  would put an ident on every chip and export heading. The rule ignores the
+ *  letter on purpose: it refuses a week-coded `uke202541` too, which an
+ *  operator writes `uke2025-41`, and leaves no letter class to get wrong. */
+export const DIGIT_RUN_RE = /\d{6}/;
 
 /** A `role=` value or a `roleKeys` entry as one key: trimmed, lower-cased.
  *  Null when it is empty or not a key. */
@@ -43,10 +48,22 @@ export function parseRoleKeys(value: unknown): { keys: string[]; warnings: strin
 type Kind = "you" | "waiting" | "draft" | "blocked";
 type Unit = "task" | "question" | "draft";
 
+/** One part of a lane's count: `2 spørsmål`, `1 oppgave`. A waiting lane that
+ *  names `<Question>` cards has two parts; every other lane has one. */
+export interface LaneCount {
+  n: number;
+  unit: Unit;
+}
+
 interface LaneWords {
   title: string;
   /** The label of a lane with `role=` (D15). */
   label: Record<Kind, (role: string) => string>;
+  /** The label of a lane with neither `role=` nor `who=`, on the reader.
+   *  Null ⇒ `LANE_DEFAULT_LABEL` (English, what every other surface shows). */
+  defaults: Record<Kind, string> | null;
+  /** Joins the parts of a count: «2 spørsmål og 1 oppgave». */
+  and: string;
   /** `[one, other]` per unit. */
   units: Record<Unit, [string, string]>;
   /** The count line's phrase for one role lane. */
@@ -73,6 +90,8 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
       draft: (r) => `Utkast til ${r}`,
       blocked: () => "Blokkert",
     },
+    defaults: { you: "Du", waiting: "Venter", draft: "Utkast", blocked: "Blokkert" },
+    and: "og",
     units: { task: ["oppgave", "oppgaver"], question: ["spørsmål", "spørsmål"], draft: ["utkast", "utkast"] },
     sum: {
       waiting: (n, r) => `${n} til ${r}`,
@@ -94,6 +113,8 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
       draft: (r) => `Draft for ${r}`,
       blocked: () => "Blocked",
     },
+    defaults: null,
+    and: "and",
     units: { task: ["task", "tasks"], question: ["question", "questions"], draft: ["draft", "drafts"] },
     sum: {
       waiting: (n, r) => `${n} for ${r}`,
@@ -118,27 +139,39 @@ export function roleLaneLabel(kind: Kind, role: string, lang: QuestionLanguage |
   return laneWords(lang).label[kind](role);
 }
 
-/** What a lane's number counts: questions on a waiting lane naming a
- *  `<Question>`, drafts on a draft lane, tasks otherwise (D14). */
-export function laneUnit(kind: Kind, hasQuestions: boolean): Unit {
-  return kind === "draft" ? "draft" : kind === "waiting" && hasQuestions ? "question" : "task";
+/** The label of a lane with neither `role=` nor `who=` in the wiki's
+ *  language («Du», «Venter»), or null where the English default applies. */
+export function laneDefaultLabel(kind: Kind, lang: QuestionLanguage | undefined): string | null {
+  return laneWords(lang).defaults?.[kind] ?? null;
 }
 
-/** `4 spørsmål`, `1 oppgave`. */
-export function laneCountText(n: number, unit: Unit, lang: QuestionLanguage | undefined): string {
-  const [one, other] = laneWords(lang).units[unit];
-  return `${n} ${n === 1 ? one : other}`;
+/** What a lane's number counts when it names no `<Question>`: drafts on a
+ *  draft lane, tasks otherwise (D14). */
+export function laneUnit(kind: Kind): Unit {
+  return kind === "draft" ? "draft" : "task";
+}
+
+/** `4 spørsmål`, `1 oppgave`, `2 spørsmål og 1 oppgave`. Parts with no count
+ *  are left out; all of them empty reads as the first part's zero. */
+export function laneCountText(counts: readonly LaneCount[], lang: QuestionLanguage | undefined): string {
+  const w = laneWords(lang);
+  const one = ({ n, unit }: LaneCount) => {
+    const [singular, plural] = w.units[unit];
+    return `${n} ${n === 1 ? singular : plural}`;
+  };
+  const parts = counts.filter((c) => c.n > 0);
+  return parts.length ? parts.map(one).join(` ${w.and} `) : one(counts[0] ?? { n: 0, unit: "task" });
 }
 
 /** One lane's phrase in the block's count line (D14): `4 spørsmål til fag`,
- *  `5 oppgaver for utvikler`, `2 blokkert`; a lane with no role reads
- *  `<label>: <n> <unit>`. */
+ *  `2 spørsmål og 1 oppgave til fag`, `5 oppgaver for utvikler`, `2 blokkert`;
+ *  a lane with no role reads `<label>: <count>`. */
 export function laneSumPhrase(
-  lane: { kind: Kind; role: string | null; label: string; count: number; unit: Unit },
+  lane: { kind: Kind; role: string | null; label: string; counts: readonly LaneCount[] },
   lang: QuestionLanguage | undefined,
 ): string {
   const w = laneWords(lang);
-  if (lane.kind === "blocked") return w.blocked(lane.count);
-  const n = laneCountText(lane.count, lane.unit, lang);
+  if (lane.kind === "blocked") return w.blocked(lane.counts.reduce((sum, c) => sum + c.n, 0));
+  const n = laneCountText(lane.counts, lang);
   return lane.role ? w.sum[lane.kind](n, lane.role) : `${lane.label}: ${n}`;
 }

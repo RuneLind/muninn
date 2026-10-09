@@ -39,6 +39,46 @@ const WIKI = "e2e-oppfolging";
 const GROUPS = "fag=X100021;utvikler=X100022";
 const MEMBERS = ["X100021", "X100022"];
 
+// Two waiting lanes, utvikler's written first, and a settled «Oppfølging»
+// block holding a fag lane: the pill follows the viewer's order, and the
+// settled lane is never ordered or marked.
+const TWO_WAITING_REL = "plans/to-venter.mdx";
+const lanesMd = (lanes: [string, string][]) =>
+  ["<NextMoves>", "", ...lanes.flatMap(([attrs, item]) => [`<Lane ${attrs}>`, "", `- ${item}`, "", "</Lane>", ""]), "</NextMoves>"];
+const TWO_WAITING_PAGE = [
+  "---",
+  "title: To som venter",
+  "---",
+  "",
+  ...lanesMd([
+    ['kind="waiting" role="utvikler"', "Svar på kodespørsmålet."],
+    ['kind="waiting" role="fag"', "Svar på fagspørsmålet."],
+  ]),
+  "",
+  '<Historic since="v1">',
+  "",
+  ...lanesMd([['kind="you" role="fag"', "Gammelt steg."]]),
+  "",
+  "</Historic>",
+  "",
+].join("\n");
+// The only role lane is settled: no «Se som rolle».
+const HISTORIC_ONLY_REL = "plans/historisk.mdx";
+const HISTORIC_ONLY_PAGE = [
+  "---",
+  "title: Bare historisk",
+  "---",
+  "",
+  ...lanesMd([['kind="you" who="Du"', "Gjør det."]]),
+  "",
+  '<Historic since="v1">',
+  "",
+  ...lanesMd([['kind="waiting" role="fag"', "Gammelt."]]),
+  "",
+  "</Historic>",
+  "",
+].join("\n");
+
 const servers: ChildProcess[] = [];
 let root = "";
 let botsDir = "";
@@ -62,6 +102,8 @@ test.beforeAll(async ({}, info) => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, ROLE_REL), ROLE_PAGE, "utf8");
   await writeFile(path.join(root, ".wiki-reader.json"), ROLE_READER_CONFIG, "utf8");
+  await writeFile(path.join(root, TWO_WAITING_REL), TWO_WAITING_PAGE, "utf8");
+  await writeFile(path.join(root, HISTORIC_ONLY_REL), HISTORIC_ONLY_PAGE, "utf8");
   botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-oppfolging-roles-bots-"));
   await mkdir(path.join(botsDir, "e2e-oppfolging-bot"));
   await writeFile(path.join(botsDir, "e2e-oppfolging-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
@@ -161,3 +203,40 @@ for (const scheme of ["light", "dark"] as const) {
     expect(await paintedContrast(page.locator(".q-moved-link").first()), "moved link").toBeGreaterThanOrEqual(4.5);
   });
 }
+
+/** The lanes outside settled sections. */
+const liveLanes = (page: Page) => page.locator(".wiki-article .nm-compact:not(section.historic .nm-compact) > .nm-lanes > .nm-lane");
+const liveRoles = (page: Page) => liveLanes(page).evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.role ?? "-"));
+
+test("a settled lane is never ordered or marked, in the real view or «Se som rolle»", async ({ page }) => {
+  await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TWO_WAITING_REL)}`);
+  await expect(liveLanes(page)).toHaveCount(2);
+  await expect.poll(() => liveRoles(page)).toEqual(["fag", "utvikler"]);
+  const settled = page.locator(".wiki-article section.historic .nm-lane");
+  await expect(settled).toHaveCount(1);
+  await expect(settled.locator(".nm-mine-mark")).toHaveCount(0);
+  await expect(settled).not.toHaveClass(/nm-mine/);
+  await page.locator(".wiki-article-head .wiki-role-view select").selectOption("fag");
+  await expect(settled.locator(".nm-mine-mark")).toHaveCount(0);
+});
+
+test("the waiting pill names the viewer's lane, and «Se som rolle» re-derives it", async ({ page }) => {
+  await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TWO_WAITING_REL)}`);
+  await expect.poll(() => liveRoles(page)).toEqual(["fag", "utvikler"]);
+  const pill = page.locator(".wiki-article-head .wiki-moves-pill-waiting");
+  await expect(pill).toHaveText("⏳ Venter på fag · 2");
+  const select = page.locator(".wiki-article-head .wiki-role-view select");
+  await select.selectOption("utvikler");
+  await expect.poll(() => liveRoles(page)).toEqual(["utvikler", "fag"]);
+  await expect(pill).toHaveText("⏳ Venter på utvikler · 2");
+  await expect(page.locator(".wiki-article-head .wiki-moves-pill-waiting")).toHaveCount(1);
+  await select.selectOption("");
+  await expect(pill).toHaveText("⏳ Venter på fag · 2");
+});
+
+test("a page whose only role lane is settled offers no «Se som rolle»", async ({ page }) => {
+  await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(HISTORIC_ONLY_REL)}`);
+  await expect(liveLanes(page)).toHaveCount(1);
+  await expect(page.locator(".wiki-article-head .wiki-moves-pill-you")).toHaveCount(1);
+  await expect(page.locator(".wiki-role-view")).toHaveCount(0);
+});

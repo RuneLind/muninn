@@ -204,8 +204,8 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .nm-compact .nm-head > * { flex: none; }
     ${scope} .nm-compact .nm-head::-webkit-details-marker { display: none; }
-    ${scope} .nm-compact .nm-head::before { content: "▸"; color: var(--text-soft); flex: none; }
-    ${scope} .nm-compact .nm-lane[open] > .nm-head::before { content: "▾"; }
+    ${scope} .nm-compact .nm-head::before { content: "▸" / ""; color: var(--text-soft); flex: none; }
+    ${scope} .nm-compact .nm-lane[open] > .nm-head::before { content: "▾" / ""; }
     ${scope} .nm-compact .nm-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     ${scope} .nm-compact .nm-blocked .nm-who { color: var(--text-secondary); }
     ${scope} .nm-compact .nm-mine-mark {

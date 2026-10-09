@@ -105,7 +105,7 @@ import {
   parseQuestionsTo,
   type QuestionState,
 } from "../format/question.ts";
-import { normalizeRoleKey, ROLE_KEY_RE } from "../format/lane-roles.ts";
+import { normalizeRoleKey } from "../format/lane-roles.ts";
 import type { Block } from "../format/markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
@@ -784,8 +784,13 @@ function checkStemCollisions(index: WikiIndex): LintFinding[] {
 /**
  * Check 12 — role keys (D32). A `<Lane role=>` must name one of the wiki's
  * `roleKeys`; so must a `<Question to=>` or `questions_to:` entry written as a
- * key, on a wiki that declares any. A finding's line is the first source line
- * carrying the offending text, outside the frontmatter for a block.
+ * key, on a wiki that declares any. Each finding names its own line: a lane's
+ * or a question's opening tag (the n-th tag outside code fences is the n-th
+ * block the parser walks), or the `questions_to:` entry in the frontmatter.
+ *
+ * `roleKeys` is the wiki's list of `WIKI_ANSWER_GROUPS` keys; the reader marks
+ * a viewer's lanes and asks a group by the groups themselves, so a finding
+ * says the key is missing from the list, not that something stops working.
  */
 function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonly string[]): LintFinding[] {
   const hasLane = rawContent.includes("<Lane");
@@ -794,41 +799,69 @@ function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonl
   if (!hasLane && !(declared && (hasQuestion || rawContent.includes("questions_to")))) return [];
   const lines = rawContent.split("\n");
   const fmEnd = frontmatterEndLine(lines);
+  const fenced = fencedLineMask(lines);
   const findings: LintFinding[] = [];
   const known = declared ? `.wiki-reader.json roleKeys (${roleKeys.join(", ")})` : "the wiki's roleKeys (.wiki-reader.json declares none)";
-  const lineOf = (needle: string, from: number, to = lines.length): number | undefined => {
-    for (let i = from; i < to; i++) if (lines[i]!.includes(needle)) return i + 1;
-    return undefined;
-  };
   const push = (message: string, line: number | undefined) =>
     findings.push({ check: "role-key", relPath: page.relPath, message, ...(line ? { line } : {}) });
-  /** A `to=`/`questions_to:` entry that names a role: no ident, written as a key. */
+  /** A `to=`/`questions_to:` entry that names a role: no ident, written as a
+   *  key (lower-case; a capitalised name is a person). */
   const roleEntries = (targets: { name: string; ident: string | null }[]) =>
-    targets.filter((t) => t.ident === null && ROLE_KEY_RE.test(t.name) && !/\d{6}/.test(t.name)).map((t) => t.name);
+    targets.filter((t) => t.ident === null && normalizeRoleKey(t.name) === t.name).map((t) => t.name);
+  /** 1-based line of each opening `<Name` tag in the body, outside fences. */
+  const tagLines = (name: string): number[] => {
+    const re = new RegExp(`^\\s*<${name}[\\s>]`);
+    const out: number[] = [];
+    for (let i = fmEnd; i < lines.length; i++) if (!fenced[i] && re.test(lines[i]!)) out.push(i + 1);
+    return out;
+  };
+  const isRole = `add it to roleKeys if it is a WIKI_ANSWER_GROUPS group key`;
 
   if (declared) {
     const fm = parseFrontmatter(rawContent);
+    // The `questions_to:` key's line, and its block-list lines under it.
+    const keyAt = lines.findIndex((l, i) => i < fmEnd && /^questions_to\s*:/.test(l));
+    let keyEnd = keyAt + 1;
+    while (keyAt >= 0 && keyEnd < fmEnd && /^\s/.test(lines[keyEnd]!)) keyEnd++;
+    const entryLine = (role: string): number | undefined => {
+      if (keyAt < 0) return undefined;
+      const esc = role.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(?<![\\p{L}\\p{N}_-])${esc}(?![\\p{L}\\p{N}_-])`, "u");
+      for (let i = keyAt; i < keyEnd; i++) if (re.test(i === keyAt ? lines[i]!.replace(/^questions_to\s*:/, "") : lines[i]!)) return i + 1;
+      return keyAt + 1;
+    };
     for (const role of roleEntries(parseQuestionsTo(fm.questions_to))) {
       if (!roleKeys.includes(role)) {
-        push(`questions_to: names "${role}", which is not in ${known}; a question to it asks nobody`, lineOf(role, 0, fmEnd));
+        push(`questions_to: names "${role}", which is not in ${known}; ${isRole}, or write a person as Name (IDENT)`, entryLine(role));
       }
     }
   }
+  const laneLines = tagLines("Lane");
+  const questionLines = tagLines("Question");
+  let lane = 0;
+  let question = 0;
   const walk = (bs: Block[]) => {
     for (const b of bs) {
       if (b.type !== "component") continue;
-      if (b.name === "Lane" && b.attrs.role !== undefined) {
-        const raw = b.attrs.role;
-        const key = normalizeRoleKey(raw);
-        const at = lineOf(`role="${raw}"`, fmEnd);
-        if (key === null) push(`<Lane role="${raw}"> is not a role key (letters, digits, "_" or "-"), so the lane falls back to its who= label`, at);
-        else if (!roleKeys.includes(key)) push(`<Lane role="${raw}"> names a role not in ${known}, so no viewer's lane is marked`, at);
+      if (b.name === "Lane") {
+        const at = laneLines[lane++];
+        if (b.attrs.role !== undefined) {
+          const raw = b.attrs.role;
+          const key = normalizeRoleKey(raw);
+          if (key === null) {
+            push(`<Lane role="${raw}"> is not a role key (letters, digits, "_" or "-", with no six-digit run), so the lane falls back to its who= label`, at);
+          } else if (!roleKeys.includes(key)) {
+            push(`<Lane role="${raw}"> names a key not in ${known}; ${isRole}`, at);
+          }
+        }
       }
-      if (declared && b.name === "Question") {
-        const to = parseQuestionAttrs(b.attrs).to ?? [];
-        for (const role of roleEntries(to)) {
-          if (!roleKeys.includes(role)) {
-            push(`<Question to=> names "${role}", which is not in ${known}; a question to it asks nobody`, lineOf(`to="`, fmEnd));
+      if (b.name === "Question") {
+        const at = questionLines[question++];
+        if (declared) {
+          for (const role of roleEntries(parseQuestionAttrs(b.attrs).to ?? [])) {
+            if (!roleKeys.includes(role)) {
+              push(`<Question to=> names "${role}", which is not in ${known}; ${isRole}, or write a person as Name (IDENT)`, at);
+            }
           }
         }
       }

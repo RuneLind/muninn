@@ -497,10 +497,11 @@ test.describe("the «Oppfølging» block with two groups (acceptance 6)", () => 
 
   test("utvikler: «Utvikler» first with «deg», and an answer to fag's question carries «ikke spurt» (D31)", async ({ page }) => {
     await openRolePage(page, PEOPLE.utvikler);
-    await expect.poll(() => laneRoles(page)).toEqual(["utvikler", "utvikler", "fag", "-"]);
-    expect(await laneLabels(page)).toEqual(["Utvikler", "Blokkert", "Venter på fag", "Venter på jus"]);
-    expect(await marks(page)).toEqual(["deg", "deg", "", ""]);
-    const fag = lanes(page).nth(2);
+    // A blocked lane stays last and is never marked, the viewer's or not.
+    await expect.poll(() => laneRoles(page)).toEqual(["utvikler", "fag", "-", "utvikler"]);
+    expect(await laneLabels(page)).toEqual(["Utvikler", "Venter på fag", "Venter på jus", "Blokkert"]);
+    expect(await marks(page)).toEqual(["deg", "", "", ""]);
+    const fag = lanes(page).nth(1);
     await fag.locator(":scope > .nm-head").click();
     const s2 = fag.locator('section.question[data-question-id="S2"]');
     // Outside the asked group, the composer is still there (D31).
@@ -527,7 +528,8 @@ test.describe("the «Oppfølging» block with two groups (acceptance 6)", () => 
     await expect.poll(() => laneRoles(page)).toEqual(["fag", "utvikler", "-", "utvikler"]);
     expect(await marks(page)).toEqual(["til deg", "", "", ""]);
     await select.selectOption("utvikler");
-    await expect.poll(() => laneRoles(page)).toEqual(["utvikler", "utvikler", "fag", "-"]);
+    await expect.poll(() => laneRoles(page)).toEqual(["utvikler", "fag", "-", "utvikler"]);
+    expect(await marks(page)).toEqual(["deg", "", "", ""]);
     await select.selectOption("");
     await expect.poll(() => laneRoles(page)).toEqual(AUTHORED_ROLES);
     expect(await marks(page)).toEqual(["", "", "", ""]);

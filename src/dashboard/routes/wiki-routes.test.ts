@@ -51,6 +51,7 @@ import { spliceSentinelBlock, withTrailingNewline } from "../../wiki/append-bloc
 import { todayOslo } from "../../gardener/util.ts";
 import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
+import { __setAuthPolicyForTest } from "../../auth/policy.ts";
 
 /**
  * Route-level tests for the explainer-serving seam `/api/wiki/html`. Uses the
@@ -387,6 +388,40 @@ describe("GET /api/wiki/html", () => {
       roles: { keys: ["fag", "utvikler"], viewer: [], preview: true },
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
+  });
+
+  // The viewer's role keys follow the auth MODE, not just whether a session is
+  // present: the `WIKI_ANSWER_OWNER` fallback is auth off's only.
+  test("/api/wiki/page roles: an authenticated viewer's groups; no owner fallback when authenticating", async () => {
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ roleKeys: ["fag", "utvikler"] }));
+    await Bun.write(path.join(root, "concepts/Role Page.mdx"), "---\ntitle: Role Page\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const groups = new Map([
+      ["fag", new Set(["X100002"])],
+      ["utvikler", new Set(["X100001"])],
+    ]);
+    const cfg = { wikiAnswers: { wikis: new Set<string>(), owner: "Eier (X100001)", groups } };
+    const rolesFor = async (identity: { navIdent: string | null } | null, role: string | null) => {
+      const authed = new Hono();
+      authed.use(async (c, next) => {
+        if (identity) c.set("identity" as never, { userId: "u1", displayName: "Leser", oid: null, provider: "entra", expiresAt: null, ...identity } as never);
+        if (role) c.set("role" as never, role as never);
+        await next();
+      });
+      registerWikiRoutes(authed, cfg as unknown as Parameters<typeof registerWikiRoutes>[1]);
+      const res = await authed.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Role Page.mdx"));
+      return ((await res.json()) as { reader: { roles: unknown } }).reader.roles;
+    };
+    __setAuthPolicyForTest({ authenticating: true, mode: "entra" });
+    try {
+      expect(await rolesFor({ navIdent: "x100002" }, "user")).toEqual({ keys: ["fag", "utvikler"], viewer: ["fag"], preview: false });
+      // No session on an authenticating instance: nobody's roles, not the owner's.
+      expect(await rolesFor(null, "user")).toEqual({ keys: ["fag", "utvikler"], viewer: [], preview: false });
+    } finally {
+      __setAuthPolicyForTest(null);
+    }
+    // Auth off: the owner's groups.
+    expect(await rolesFor(null, null)).toEqual({ keys: ["fag", "utvikler"], viewer: ["utvikler"], preview: true });
   });
 
   // /api/wiki/atlas returns the projected payload (all seven keys) over the same

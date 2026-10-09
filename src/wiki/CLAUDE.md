@@ -1694,11 +1694,19 @@ finding and the reader agree on where a sentence ends. Measured 2026-10-09
 
 ### Lint check 12 — role keys (`role-key`, in `lint.ts`)
 
-A `<Lane role=>` whose value is not a key, or names a key `.wiki-reader.json`
-`roleKeys` does not list, on every wiki (a wiki with no `roleKeys` flags every
-`role=`); and, on a wiki that declares `roleKeys`, a `<Question to=>` or
-`questions_to:` entry with no `(IDENT)`, written as a key (lower-case, no
-spaces), that the list lacks — elsewhere such an entry is a person's name. The
+A `<Lane role=>` whose value is not a key (`normalizeRoleKey`: letters,
+digits, `_` or `-`, with no six-digit run — the `WIKI_ANSWER_GROUPS` group-name
+grammar, one copy in `src/format/lane-roles.ts`), or names a key
+`.wiki-reader.json` `roleKeys` does not list, on every wiki (a wiki with no
+`roleKeys` flags every `role=`); and, on a wiki that declares `roleKeys`, a
+`<Question to=>` or `questions_to:` entry with no `(IDENT)`, written as a key
+(already lower-case — a capitalised entry is a person), that the list lacks.
+The message names the missing key and the remedy — add it to `roleKeys` if it
+is a group key, or write a person as `Name (IDENT)` — and claims no effect:
+the reader marks lanes and asks groups through `WIKI_ANSWER_GROUPS`, not the
+list. Each finding carries its own line: the n-th `<Lane`/`<Question` opening
+tag outside code fences is the n-th block the parser walks, and a
+`questions_to:` entry is found within that key's frontmatter lines. The
 membership itself lives in `WIKI_ANSWER_GROUPS`, so the check runs the same on
 the laptop and the pod. Acceptance: `role-key-lint.test.ts`.
 
