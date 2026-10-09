@@ -543,8 +543,23 @@ describe("readerPayload (the lens switch's page inputs)", () => {
       idLabels: {},
       defaultLens: "overview",
       agentLens: false,
+      roles: { keys: [], viewer: [], preview: false },
     });
     expect(readerPayload("kode", cfg({ defaultLens: "all" }), inst).defaultLens).toBe("all");
-    expect(readerPayload(undefined, null, undefined)).toEqual({ language: "en", idLabels: {}, defaultLens: null, agentLens: false });
+    expect(readerPayload(undefined, null, undefined)).toEqual({
+      language: "en",
+      idLabels: {},
+      defaultLens: null,
+      agentLens: false,
+      roles: { keys: [], viewer: [], preview: false },
+    });
+  });
+
+  test("roles: the wiki's roleKeys, the viewer's group keys and the admin's preview flag", () => {
+    expect(readerPayload("kode", cfg({ roleKeys: ["fag", "utvikler"] }), undefined, { roles: ["fag"], admin: true }).roles).toEqual({
+      keys: ["fag", "utvikler"],
+      viewer: ["fag"],
+      preview: true,
+    });
   });
 });

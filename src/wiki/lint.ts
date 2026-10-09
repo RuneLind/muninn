@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Eighteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Nineteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -58,6 +58,13 @@
  *                      Overview lens shows) runs over 160 chars, and a
  *                      `<StatusRows>` row over 160 chars. Warnings, report-only.
  *                      Rules: `lint-report-top.ts`.
+ * 12. role-key     — a `<Lane role=>`, or a role entry in a `<Question to=>`
+ *                      or `questions_to:`, that `.wiki-reader.json` `roleKeys`
+ *                      does not list (D32). A `role=` is checked on every wiki;
+ *                      a `to=`/`questions_to:` entry counts as a role entry
+ *                      when it carries no `(IDENT)` and is written as a key
+ *                      (lower-case, no spaces), and only on a wiki that
+ *                      declares `roleKeys`, since elsewhere it is a name.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -90,7 +97,16 @@ import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts"
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
-import { closeNearMisses, itemReopened, parseQuestionPage, type QuestionState } from "../format/question.ts";
+import {
+  closeNearMisses,
+  itemReopened,
+  parseQuestionAttrs,
+  parseQuestionPage,
+  parseQuestionsTo,
+  type QuestionState,
+} from "../format/question.ts";
+import { normalizeRoleKey } from "../format/lane-roles.ts";
+import type { Block } from "../format/markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
 export const LINT_CHECKS = [
@@ -103,6 +119,7 @@ export const LINT_CHECKS = [
   "unrendered-fact-mark",
   "stem-collision",
   "question-block",
+  "role-key",
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
   ...REPORT_TOP_LINT_CHECKS,
@@ -765,6 +782,82 @@ function checkStemCollisions(index: WikiIndex): LintFinding[] {
 }
 
 /**
+ * Check 12 — role keys (D32). A `<Lane role=>` must name one of the wiki's
+ * `roleKeys`; so must a `<Question to=>` or `questions_to:` entry written as a
+ * key, on a wiki that declares any. Each finding names its own line: a lane's
+ * or a question's opening tag, read off the block the parser built (a tag it
+ * does not make a block from is never counted), or the `questions_to:` entry in
+ * the frontmatter.
+ *
+ * `roleKeys` is the wiki's list of `WIKI_ANSWER_GROUPS` keys; the reader marks
+ * a viewer's lanes and asks a group by the groups themselves, so a finding
+ * says the key is missing from the list, not that something stops working.
+ */
+function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonly string[]): LintFinding[] {
+  const hasLane = rawContent.includes("<Lane");
+  const hasQuestion = rawContent.includes("<Question");
+  const declared = roleKeys.length > 0;
+  if (!hasLane && !(declared && (hasQuestion || rawContent.includes("questions_to")))) return [];
+  const lines = rawContent.split("\n");
+  const fmEnd = frontmatterEndLine(lines);
+  const body = stripFrontmatter(rawContent);
+  // Lines the frontmatter strip removed: a block's `line` counts from the body.
+  const bodyAt = rawContent.slice(0, rawContent.length - body.length).split("\n").length - 1;
+  const findings: LintFinding[] = [];
+  const known = declared ? `.wiki-reader.json roleKeys (${roleKeys.join(", ")})` : "the wiki's roleKeys (.wiki-reader.json declares none)";
+  const push = (message: string, line: number | undefined) =>
+    findings.push({ check: "role-key", relPath: page.relPath, message, ...(line ? { line } : {}) });
+  /** A `to=`/`questions_to:` entry that names a role: no ident, written as a
+   *  key (lower-case; a capitalised name is a person). */
+  const roleEntries = (targets: { name: string; ident: string | null }[]) =>
+    targets.filter((t) => t.ident === null && normalizeRoleKey(t.name) === t.name).map((t) => t.name);
+  const isRole = `add it to roleKeys if it is a WIKI_ANSWER_GROUPS group key`;
+
+  if (declared) {
+    const fm = parseFrontmatter(rawContent);
+    // The `questions_to:` key's line: `parseFrontmatter` reads an inline list only.
+    const keyAt = lines.findIndex((l, i) => i < fmEnd && /^questions_to\s*:/.test(l));
+    const entryLine = (): number | undefined => (keyAt < 0 ? undefined : keyAt + 1);
+    for (const role of roleEntries(parseQuestionsTo(fm.questions_to))) {
+      if (!roleKeys.includes(role)) {
+        push(`questions_to: names "${role}", which is not in ${known}; ${isRole}, or write a person as Name (IDENT)`, entryLine());
+      }
+    }
+  }
+  const lineOf = (b: { line?: number }) => (b.line === undefined ? undefined : bodyAt + b.line + 1);
+  const walk = (bs: Block[]) => {
+    for (const b of bs) {
+      if (b.type !== "component") continue;
+      if (b.name === "Lane") {
+        const at = lineOf(b);
+        if (b.attrs.role !== undefined) {
+          const raw = b.attrs.role;
+          const key = normalizeRoleKey(raw);
+          if (key === null) {
+            push(`<Lane role="${raw}"> is not a role key (letters, digits, "_" or "-", with no six-digit run), so the lane falls back to its who= label`, at);
+          } else if (!roleKeys.includes(key)) {
+            push(`<Lane role="${raw}"> names a key not in ${known}; ${isRole}`, at);
+          }
+        }
+      }
+      if (b.name === "Question") {
+        const at = lineOf(b);
+        if (declared) {
+          for (const role of roleEntries(parseQuestionAttrs(b.attrs).to ?? [])) {
+            if (!roleKeys.includes(role)) {
+              push(`<Question to=> names "${role}", which is not in ${known}; ${isRole}, or write a person as Name (IDENT)`, at);
+            }
+          }
+        }
+      }
+      walk(b.children);
+    }
+  };
+  walk(parseBlocks(body));
+  return findings;
+}
+
+/**
  * Run every hygiene check over a built wiki index. Returns findings + per-check
  * counts + a timestamp. Report-only: nothing is written. `deps.readFile` is
  * injectable for tests; it defaults to reading the file off disk.
@@ -777,7 +870,7 @@ export async function lintWiki(
   const now = deps?.now ?? (() => Date.now());
   const nowMs = now();
   const findings: LintFinding[] = [];
-  const drift = driftContext(nowMs);
+  const drift = driftContext(nowMs, index.readerConfig?.language);
 
   for (const page of index.pages) {
     if (page.type === "explainer") continue; // no frontmatter, no links
@@ -796,6 +889,8 @@ export async function lintWiki(
     findings.push(...checkUnrenderedFactMarks(page, content));
     // Check 10 — every page: a card's state is the page's own business.
     findings.push(...checkQuestions(page, content));
+    // Check 12 — every page with a role lane or a role-shaped question target.
+    findings.push(...checkRoleKeys(page, content, index.readerConfig?.roleKeys ?? []));
     // Check 11 — every page with a DecisionLog or StatusRows.
     findings.push(...checkReportTop(page, content));
 

@@ -18,6 +18,13 @@
  *   4. The GET never carries an oid or a NAV ident, under any key.
  *   5. In the browser, a colleague's card is answerable and shows the
  *      scanner's reason; an admin's card offers Redact with an inline confirm.
+ *   6. The «Oppfølging» block (reader lenses PR 3, acceptance 6) on a second
+ *      read-only wiki with `roleKeys`, and two colleagues in two
+ *      `WIKI_ANSWER_GROUPS` groups: each sees their own lane first and marked,
+ *      fag answers the lane's questions in it with one composer per question,
+ *      an utvikler's answer reads «ikke spurt» (D31), an admin's «Se som rolle»
+ *      changes the view and no request, and no page payload carries a member's
+ *      ident.
  *
  * The stub Texas is an in-process `node:http` server (Playwright runs this file
  * under Node), the `entra-identity.spec.ts` harness. Synthetic values only:
@@ -40,6 +47,7 @@ import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
+import { AUTHORED_ROLES, ROLE_PAGE, ROLE_READER_CONFIG, ROLE_REL } from "./oppfolging-fixture.ts";
 
 const PORT = e2ePort("wiki-answers-nais");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -49,6 +57,8 @@ const TEXAS_PORT = e2ePort("wiki-answers-nais/texas");
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
 const WIKI = "e2e-felles-svar";
+/** The second wiki: `roleKeys`, `language: no`, role lanes. */
+const ROLE_WIKI = "e2e-felles-oppf";
 const REL = "plans/svar.mdx";
 const TENANT = "example-tenant";
 const MARKER = "SYNTHETIC-SECRET-0000";
@@ -61,7 +71,12 @@ const PEOPLE = {
   other: { token: "tok-other", oid: "00000000-aaaa-4000-8000-000000000002", NAVident: "X100002", name: "Test Other" },
   browser: { token: "tok-browser", oid: "00000000-aaaa-4000-8000-000000000003", NAVident: "X100003", name: "Test Browser" },
   admin: { token: "tok-admin", oid: "00000000-aaaa-4000-8000-000000000009", NAVident: "X100009", name: "Test Admin" },
+  fag: { token: "tok-fag", oid: "00000000-aaaa-4000-8000-000000000011", NAVident: "X100011", name: "Test Fag" },
+  utvikler: { token: "tok-utvikler", oid: "00000000-aaaa-4000-8000-000000000012", NAVident: "X100012", name: "Test Utvikler" },
 } as const;
+/** Two groups, one member each; the other colleagues are in none. */
+const GROUP_MEMBERS = [PEOPLE.fag.NAVident, PEOPLE.utvikler.NAVident];
+const GROUPS = `fag=${PEOPLE.fag.NAVident};utvikler=${PEOPLE.utvikler.NAVident}`;
 type Person = (typeof PEOPLE)[keyof typeof PEOPLE];
 
 const PAGE = [
@@ -95,6 +110,7 @@ let texas: Server | null = null;
 const servers: ChildProcess[] = [];
 let sql: ReturnType<typeof postgres> | null = null;
 let root = "";
+let roleRoot = "";
 let botsDir = "";
 let scannerDir = "";
 
@@ -142,10 +158,11 @@ function boot(port: number, scanner: string): void {
         MUNINN_TENANT: TENANT,
         MUNINN_ADMIN_IDENTS: PEOPLE.admin.NAVident,
         MUNINN_ALLOWED_ORIGINS: `http://127.0.0.1:${port}`,
-        WIKI_EXTRA: `${WIKI}=${root}`,
-        WIKI_READONLY_ROOTS: root,
-        WIKI_ANSWER_WIKIS: WIKI,
+        WIKI_EXTRA: `${WIKI}=${root},${ROLE_WIKI}=${roleRoot}`,
+        WIKI_READONLY_ROOTS: `${root},${roleRoot}`,
+        WIKI_ANSWER_WIKIS: `${WIKI},${ROLE_WIKI}`,
         WIKI_ANSWER_SCANNER: scanner,
+        WIKI_ANSWER_GROUPS: GROUPS,
         MUNINN_BOTS_DIR: botsDir,
       },
       stdio: "ignore",
@@ -168,7 +185,7 @@ async function waitUp(base: string): Promise<void> {
 
 async function clearRows(): Promise<void> {
   const oids = Object.values(PEOPLE).map((p) => p.oid);
-  await sql!`DELETE FROM wiki_answers WHERE wiki = ${WIKI}`;
+  await sql!`DELETE FROM wiki_answers WHERE wiki = ANY(${[WIKI, ROLE_WIKI]})`;
   await sql!`DELETE FROM user_identities WHERE oid = ANY(${oids})`;
   await sql!`DELETE FROM users WHERE id = ANY(${Object.values(PEOPLE).map((p) => `nav-${p.NAVident.toLowerCase()}`)})`;
 }
@@ -182,6 +199,10 @@ test.beforeAll(async ({}, info) => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-answers-nais-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
+  roleRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-oppfolging-nais-"));
+  await mkdir(path.join(roleRoot, "plans"), { recursive: true });
+  await writeFile(path.join(roleRoot, ROLE_REL), ROLE_PAGE, "utf8");
+  await writeFile(path.join(roleRoot, ".wiki-reader.json"), ROLE_READER_CONFIG, "utf8");
   botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-answers-nais-bots-"));
   await mkdir(path.join(botsDir, "e2e-answers-bot"));
   await writeFile(path.join(botsDir, "e2e-answers-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
@@ -198,7 +219,7 @@ test.afterAll(async () => {
   texas?.close();
   if (sql) await clearRows();
   await sql?.end();
-  for (const d of [root, botsDir, scannerDir]) if (d) await rm(d, { recursive: true, force: true });
+  for (const d of [root, roleRoot, botsDir, scannerDir]) if (d) await rm(d, { recursive: true, force: true });
 });
 
 const bearer = (p: Person) => ({ authorization: `Bearer ${p.token}` });
@@ -410,5 +431,128 @@ test.describe("the card in the browser", () => {
     await expect(target.locator("button.q-redact")).toHaveCount(0);
     await expect(c).not.toContainText("Et svar som skal fjernes.");
     expect(dialogs).toBe(0);
+  });
+});
+
+// ── The «Oppfølging» block: role lanes on the pod (reader lenses PR 3) ──────
+
+const roleUrl = `${BASE}/wiki?wiki=${ROLE_WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`;
+const lanes = (page: Page) => page.locator(".wiki-article .nm-compact > .nm-lanes > .nm-lane");
+const laneRoles = (page: Page) => lanes(page).evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.role ?? "-"));
+const laneLabels = (page: Page) => lanes(page).locator(":scope > .nm-head > .nm-who").allTextContents();
+const marks = (page: Page) =>
+  lanes(page).evaluateAll((els) => els.map((e) => e.querySelector(":scope > .nm-head > .nm-mine-mark")?.textContent ?? ""));
+
+async function openRolePage(page: Page, who: Person): Promise<void> {
+  await asPerson(page, who);
+  await page.goto(roleUrl);
+  await expect(lanes(page)).toHaveCount(4);
+}
+
+test.describe("the «Oppfølging» block with two groups (acceptance 6)", () => {
+  test("fag: «Venter på fag» first with «til deg», and both questions answered in the lane, one composer each", async ({ page }) => {
+    await openRolePage(page, PEOPLE.fag);
+    await expect.poll(() => laneRoles(page)).toEqual(["fag", "utvikler", "-", "utvikler"]);
+    expect(await laneLabels(page)).toEqual(["Venter på fag", "Utvikler", "Venter på jus", "Blokkert"]);
+    expect(await marks(page)).toEqual(["til deg", "", "", ""]);
+    // The count line and the peeks match the lanes.
+    await expect(page.locator(".wiki-article .nm-compact .nm-sum")).toHaveText(
+      "2 oppgaver for utvikler · 2 spørsmål til fag · Venter på jus: 1 oppgave · 1 blokkert",
+    );
+    const fag = lanes(page).first();
+    await expect(fag.locator(":scope > .nm-head > .nm-count")).toHaveText("2 spørsmål");
+    await expect(fag.locator(":scope > .nm-head > .nm-peek")).toHaveText("S1: alternativ A eller B for brevet? · S2: hvilket brev gjelder det?");
+    await expect(lanes(page).nth(1).locator(":scope > .nm-head > .nm-peek")).toHaveText("Send melding 3 til fag.");
+
+    // One card per question on the page, both inside the fag lane; their
+    // authored places keep a link.
+    await expect(page.locator(".wiki-article section.question")).toHaveCount(2);
+    await expect(page.locator(".wiki-article .q-moved-link")).toHaveText([
+      "Spørsmål S1: svar under Oppfølging",
+      "Spørsmål S2: svar under Oppfølging",
+    ]);
+    await fag.locator(":scope > .nm-head").click();
+    for (const id of ["S1", "S2"]) {
+      const c = fag.locator(`section.question[data-question-id="${id}"]`);
+      await expect(c.locator("form.q-composer")).toHaveCount(1);
+    }
+    await expect(page.locator(".wiki-article form.q-composer")).toHaveCount(2);
+
+    const s1 = fag.locator('section.question[data-question-id="S1"]');
+    await s1.locator('form.q-composer input[type=radio][value="A"]').check();
+    await s1.locator("form.q-composer textarea.q-text").fill("A, fra fag.");
+    await s1.locator("form.q-composer button.q-save").click();
+    const mine = s1.locator(".q-answer", { hasText: "A, fra fag." });
+    await expect(mine.locator(".q-asked-yes")).toHaveText("spurt");
+    // The chip carries a visually hidden «gruppe» before the key.
+    await expect(mine.locator(".q-group")).toHaveText(/^gruppe\s*fag$/);
+
+    // The one-line link reveals the card in its lane.
+    await fag.locator(":scope > .nm-head").click();
+    await expect(fag).not.toHaveAttribute("open", "");
+    await page.locator('.wiki-article .q-moved-link[href="#nm-q-s2"]').click();
+    await expect(fag).toHaveAttribute("open", "");
+    await expect(fag.locator('section.question[data-question-id="S2"]')).toBeInViewport();
+  });
+
+  test("utvikler: «Utvikler» first with «deg», and an answer to fag's question carries «ikke spurt» (D31)", async ({ page }) => {
+    await openRolePage(page, PEOPLE.utvikler);
+    // A blocked lane stays last and is never marked, the viewer's or not.
+    await expect.poll(() => laneRoles(page)).toEqual(["utvikler", "fag", "-", "utvikler"]);
+    expect(await laneLabels(page)).toEqual(["Utvikler", "Venter på fag", "Venter på jus", "Blokkert"]);
+    expect(await marks(page)).toEqual(["deg", "", "", ""]);
+    const fag = lanes(page).nth(1);
+    await fag.locator(":scope > .nm-head").click();
+    const s2 = fag.locator('section.question[data-question-id="S2"]');
+    // Outside the asked group, the composer is still there (D31).
+    await s2.locator("form.q-composer textarea.q-text").fill("Svar fra utvikler.");
+    await s2.locator("form.q-composer button.q-save").click();
+    await expect(s2.locator(".q-answer", { hasText: "Svar fra utvikler." }).locator(".q-asked-no")).toHaveText("ikke spurt");
+  });
+
+  test("a colleague in no group sees the authored order and no mark, and gets no «Se som rolle»", async ({ page }) => {
+    await openRolePage(page, PEOPLE.other);
+    await expect.poll(() => laneRoles(page)).toEqual(AUTHORED_ROLES);
+    expect(await marks(page)).toEqual(["", "", "", ""]);
+    await expect(page.locator(".wiki-role-view")).toHaveCount(0);
+  });
+
+  test("an admin's «Se som rolle: fag» shows the fag view and sends no request", async ({ page }) => {
+    await openRolePage(page, PEOPLE.admin);
+    await expect.poll(() => laneRoles(page)).toEqual(AUTHORED_ROLES);
+    const select = page.locator(".wiki-article-head .wiki-role-view select");
+    await expect(select.locator("option")).toHaveText(["min visning", "fag", "utvikler"]);
+    const requests: string[] = [];
+    page.on("request", (r) => requests.push(r.url()));
+    await select.selectOption("fag");
+    await expect.poll(() => laneRoles(page)).toEqual(["fag", "utvikler", "-", "utvikler"]);
+    expect(await marks(page)).toEqual(["til deg", "", "", ""]);
+    await select.selectOption("utvikler");
+    await expect.poll(() => laneRoles(page)).toEqual(["utvikler", "fag", "-", "utvikler"]);
+    expect(await marks(page)).toEqual(["deg", "", "", ""]);
+    await select.selectOption("");
+    await expect.poll(() => laneRoles(page)).toEqual(AUTHORED_ROLES);
+    expect(await marks(page)).toEqual(["", "", "", ""]);
+    expect(requests, "the switch is display only").toEqual([]);
+    // The route answers the admin as before: no viewer role.
+    const payload = await call(BASE, PEOPLE.admin, `/api/wiki/page?wiki=${ROLE_WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`);
+    expect((payload.json!.reader as { roles: unknown }).roles).toEqual({ keys: ["fag", "utvikler"], viewer: [], preview: true });
+  });
+
+  test("the page payload carries group keys, never a member's ident", async () => {
+    const expected: [Person, string[], boolean][] = [
+      [PEOPLE.fag, ["fag"], false],
+      [PEOPLE.utvikler, ["utvikler"], false],
+      [PEOPLE.other, [], false],
+      [PEOPLE.admin, [], true],
+    ];
+    for (const [who, viewer, preview] of expected) {
+      const res = await call(BASE, who, `/api/wiki/page?wiki=${ROLE_WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`);
+      expect(res.status).toBe(200);
+      expect((res.json!.reader as { roles: unknown }).roles).toEqual({ keys: ["fag", "utvikler"], viewer, preview });
+      for (const ident of GROUP_MEMBERS) expect(res.text, `${who.name}: ${ident}`).not.toContain(ident);
+      const pages = await call(BASE, who, `/api/wiki/pages?wiki=${ROLE_WIKI}`);
+      for (const ident of GROUP_MEMBERS) expect(pages.text).not.toContain(ident);
+    }
   });
 });

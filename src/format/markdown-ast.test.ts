@@ -160,7 +160,7 @@ describe("parseBlocks", () => {
 describe("parseBlocks — component blocks", () => {
   test("single-line component with inline close", () => {
     expect(parseBlocks("<Verdict value=\"yes\">Fast</Verdict>")).toEqual([
-      { type: "component", name: "Verdict", attrs: { value: "yes" }, children: [{ type: "text", lines: ["Fast"] }] },
+      { type: "component", line: 0, name: "Verdict", attrs: { value: "yes" }, children: [{ type: "text", lines: ["Fast"] }] },
     ]);
   });
 
@@ -168,7 +168,7 @@ describe("parseBlocks — component blocks", () => {
     const input = "<Callout tone=\"warn\" title=\"Watch out\">\n## Inner heading\n\n- a\n- b\n</Callout>";
     expect(parseBlocks(input)).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "Callout",
         attrs: { tone: "warn", title: "Watch out" },
         children: [
@@ -182,7 +182,7 @@ describe("parseBlocks — component blocks", () => {
 
   test("self-closing FileRef with path attr", () => {
     expect(parseBlocks("<FileRef path=\"src/x.ts\" />")).toEqual([
-      { type: "component", name: "FileRef", attrs: { path: "src/x.ts" }, children: [] },
+      { type: "component", line: 0, name: "FileRef", attrs: { path: "src/x.ts" }, children: [] },
     ]);
   });
 
@@ -234,7 +234,7 @@ describe("parseBlocks — component blocks", () => {
     const input = "<Callout tone=\"info\">\n```ts\nconst x = 1;\n```\n</Callout>";
     expect(parseBlocks(input)).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "Callout",
         attrs: { tone: "info" },
         children: [{ type: "code_block", lang: "ts", code: "const x = 1;" }],
@@ -255,7 +255,7 @@ describe("parseBlocks — component blocks", () => {
     const input = "<ComparisonTable>\n| A | B |\n| --- | --- |\n| 1 | 2 |\n</ComparisonTable>";
     expect(parseBlocks(input)).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "ComparisonTable",
         attrs: {},
         children: [{ type: "table", headers: ["A", "B"], rows: [["1", "2"]] }],
@@ -266,7 +266,7 @@ describe("parseBlocks — component blocks", () => {
   test("Meter is a block component; label is its children, attrs kept", () => {
     expect(parseBlocks("<Meter value=\"4\" max=\"5\" tone=\"good\">Autonomy</Meter>")).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "Meter",
         attrs: { value: "4", max: "5", tone: "good" },
         children: [{ type: "text", lines: ["Autonomy"] }],
@@ -283,7 +283,7 @@ describe("parseBlocks — component blocks", () => {
   test("Diff wraps a fenced diff block as its child (fence parsed inside)", () => {
     expect(parseBlocks("<Diff>\n```diff\n-old\n+new\n```\n</Diff>")).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "Diff",
         attrs: {},
         children: [{ type: "code_block", lang: "diff", code: "-old\n+new" }],
@@ -296,7 +296,7 @@ describe("parseBlocks — component blocks", () => {
       parseBlocks("<AnnotatedCode file=\"x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nSets x.\n</AnnotatedCode>"),
     ).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "AnnotatedCode",
         attrs: { file: "x.ts", lang: "ts" },
         children: [
@@ -310,7 +310,7 @@ describe("parseBlocks — component blocks", () => {
   test("Checklist parses its task items as a ul child", () => {
     expect(parseBlocks("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>")).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "Checklist",
         attrs: {},
         children: [{ type: "ul", items: ["[x] Done", "[ ] Todo"] }],
@@ -554,7 +554,7 @@ describe("Fact: own-line = block, mid-text = inline, self-closing allowed", () =
   test("a Fact owning its whole trimmed line is claimed by the BLOCK parser", () => {
     expect(parseBlocks('<Fact n="4" v="bad">The weight was 1.32 kg.</Fact>')).toEqual([
       {
-        type: "component",
+        type: "component", line: 0,
         name: "Fact",
         attrs: { n: "4", v: "bad" },
         children: [{ type: "text", lines: ["The weight was 1.32 kg."] }],
@@ -574,7 +574,7 @@ describe("Fact: own-line = block, mid-text = inline, self-closing allowed", () =
 
   test("the self-closing form parses as a childless component, block and inline", () => {
     expect(parseBlocks('<Fact n="4" v="bad"/>')).toEqual([
-      { type: "component", name: "Fact", attrs: { n: "4", v: "bad" }, children: [] },
+      { type: "component", line: 0, name: "Fact", attrs: { n: "4", v: "bad" }, children: [] },
     ]);
     expect(scanInlineComponents('x <Fact n="4" v="bad"/> y')).toEqual([
       { kind: "text", text: "x " },
@@ -1174,5 +1174,16 @@ describe("nested lists in the AST: fix round 2", () => {
     expect(parseBlocks("- a\n  - b\n  lazy")).toEqual([
       { type: "ul", items: ["a"], nested: [[{ type: "ul", items: ["b\nlazy"] }]] },
     ]);
+  });
+});
+
+describe("parseBlocks — a component's source line", () => {
+  test("counts the input's lines across an extracted fence, into nested bodies", () => {
+    const input = ["x", "```", "a", "b", "```", "<Callout>", "", '<Verdict value="y">ok</Verdict>', "</Callout>"].join("\n");
+    const blocks = parseBlocks(input);
+    const callout = blocks.find((b) => b.type === "component");
+    expect(callout?.type === "component" && callout.line).toBe(5);
+    const verdict = callout?.type === "component" ? callout.children.find((b) => b.type === "component") : undefined;
+    expect(verdict?.type === "component" && verdict.line).toBe(7);
   });
 });

@@ -183,6 +183,44 @@ export function componentBlockCss(scope: string): string {
     ${scope} .nm-body > :first-child { margin-top: 0; }
     ${scope} .nm-body > :last-child { margin-bottom: 0; }
     ${scope} .nm-body > ul, ${scope} .nm-body > ol { margin: 0; padding-left: 1.2rem; }
+    /* The reader's compact «Oppfølging» block (D13): a title with a count line,
+       then one closed <details> per lane — label, count, age and a one-line
+       peek in the summary, the body when opened. The viewer's lanes (the
+       reader's .nm-mine) carry an inset rule and a «deg» mark. */
+    ${scope} .nm-compact .nm-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.75rem; margin-bottom: 0.45rem; }
+    ${scope} .nm-compact .nm-title { font-weight: 700; font-size: 1.1em; color: var(--text-primary); }
+    ${scope} .nm-compact .nm-sum { font-size: 0.88em; color: var(--text-soft); }
+    ${scope} .nm-compact .nm-lanes { border: 1px solid var(--border-secondary); border-radius: 10px; overflow: hidden; }
+    ${scope} .nm-compact .nm-lane {
+      border: 0; border-radius: 0; padding: 0; background: var(--bg-surface);
+      border-top: 1px solid var(--border-secondary);
+    }
+    ${scope} .nm-compact .nm-lane:first-child { border-top: 0; }
+    ${scope} .nm-compact .nm-lane.nm-you { border-left: 0; background: var(--bg-surface); }
+    ${scope} .nm-compact .nm-lane.nm-mine { box-shadow: inset 4px 0 0 var(--accent); }
+    ${scope} .nm-compact .nm-head {
+      display: flex; flex-wrap: nowrap; align-items: baseline; gap: 0.2rem 0.6rem;
+      margin: 0; padding: 0.5rem 0.85rem; cursor: pointer; list-style: none; font-size: 0.9em;
+    }
+    ${scope} .nm-compact .nm-head > * { flex: none; }
+    ${scope} .nm-compact .nm-head::-webkit-details-marker { display: none; }
+    ${scope} .nm-compact .nm-head::before { content: "▸" / ""; color: var(--text-soft); flex: none; }
+    ${scope} .nm-compact .nm-lane[open] > .nm-head::before { content: "▾" / ""; }
+    ${scope} .nm-compact .nm-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    ${scope} .nm-compact .nm-blocked .nm-who { color: var(--text-secondary); }
+    ${scope} .nm-compact .nm-mine-mark {
+      font-size: 0.85em; font-weight: 600; padding: 0 0.4rem; border-radius: 999px;
+      border: 1px solid currentColor; color: var(--accent-light);
+    }
+    ${scope} .nm-compact .nm-head > .nm-peek { flex: 1 1 0; color: var(--text-soft); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    ${scope} .nm-compact .nm-body { padding: 0.2rem 0.95rem 0.75rem; }
+    ${scope} .nm-compact .nm-qcards > .nm-qcard > .question { margin: 0.75rem 0 0; }
+    @container (max-width: 520px) {
+      ${scope} .nm-compact .nm-head { flex-wrap: wrap; }
+      ${scope} .nm-compact .nm-head > .nm-peek { flex: 1 1 100%; }
+    }
+    ${scope} .q-moved { font-size: 0.9em; margin: 0.6rem 0; }
+    ${scope} .q-moved-link { color: var(--accent-light); }
     /* Query: one card per prod query. Muted lines are --text-soft (4.5:1 on
        --bg-surface in both schemes, pinned by e2e/wiki-query.spec.ts). The
        table scrolls inside its own box; the header row stays put. */

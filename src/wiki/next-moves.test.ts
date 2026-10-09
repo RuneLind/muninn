@@ -176,7 +176,7 @@ describe("extractNextMoves", () => {
       const html = renderWikiHtml(page, () => undefined);
       expect(extractNextMoves(page)!.counts.you).toBe(1);
       expect(renderedYou(html)).toBe(1);
-      expect(html.match(/class="next-moves"/g)?.length).toBe(1);
+      expect(html.match(/class="next-moves nm-compact"/g)?.length).toBe(1);
       expect(html).toContain("&lt;NextMoves&gt;");
     });
   }

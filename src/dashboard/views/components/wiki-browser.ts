@@ -4195,7 +4195,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // rendered article. No-op on a page with none of them.
       const reader = data.reader;
       const readerLang = reader?.language ?? DEFAULT_QUESTION_LANGUAGE;
-      enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels });
+      enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels, roles: reader?.roles });
       // `<Query>` result tables: header-click sorting. No-op without one.
       enhanceQueryTables(articleRoot);
       // Two or more adjacent `<Query>` cards: a search box and `uses` chips.

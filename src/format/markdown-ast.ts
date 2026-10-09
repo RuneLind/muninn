@@ -16,6 +16,8 @@
 import { lineCodeSpanRanges } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
 import { ordinals } from "./block-renderer.ts";
+import { laneDefaultLabel, normalizeRoleKey, roleLaneLabel } from "./lane-roles.ts";
+import type { QuestionLanguage } from "./question-labels.ts";
 
 export type Block =
   | CodeBlock
@@ -25,8 +27,18 @@ export type Block =
   | UlBlock
   | OlBlock
   | { type: "table"; headers: string[]; rows: string[][] }
-  | { type: "component"; name: ComponentName; attrs: Record<string, string>; children: Block[] }
+  | ComponentBlock
   | { type: "text"; lines: string[] };
+
+/** `line` is the 0-based line of the opening tag in the text `parseBlocks` was
+ *  given, so a caller can name the tag's line from the block it walks. */
+export interface ComponentBlock {
+  type: "component";
+  name: ComponentName;
+  attrs: Record<string, string>;
+  children: Block[];
+  line?: number;
+}
 
 export interface CodeBlock {
   type: "code_block";
@@ -174,10 +186,11 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   Historic: ["since", "note"],
   // Who has the next move: a `NextMoves` block holding `Lane` blocks, each a
   // markdown list. `kind` is you | waiting | draft | blocked (see
-  // `normalizeLaneKind`), `who` the lane's label, `since` a `YYYY-MM-DD` the
-  // reader ages client-side. Wiki-only, like `Historic`.
+  // `normalizeLaneKind`), `who` the lane's label, `role` a `WIKI_ANSWER_GROUPS`
+  // key the label is derived from (beats `who`; `normalizeRoleKey`), `since` a
+  // `YYYY-MM-DD` the reader ages client-side. Wiki-only, like `Historic`.
   NextMoves: [],
-  Lane: ["kind", "who", "since"],
+  Lane: ["kind", "who", "role", "since"],
   // One prod query: `csv`/`sql` name files beside the page, `uses` is a
   // comma-separated list. Wiki-only; see `src/format/query-block.ts`.
   Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
@@ -355,8 +368,10 @@ export function historicLeadText(attrs: Record<string, string>): string {
 export const LANE_KINDS = ["you", "waiting", "draft", "blocked"] as const;
 export type LaneKind = (typeof LANE_KINDS)[number];
 
-/** The label a lane shows when it carries no `who`. English: `who` is where the
- *  page's own language goes. */
+/** The label a lane shows when it carries neither `role` nor `who`, on every
+ *  surface that knows no wiki (chat, Slack, Telegram, email) and on an English
+ *  wiki. The reader words it in a Norwegian wiki's language
+ *  (`laneDefaultLabel`). */
 export const LANE_DEFAULT_LABEL: Record<LaneKind, string> = {
   you: "You",
   waiting: "Waiting",
@@ -379,10 +394,15 @@ export interface NextMovesLane {
   kind: LaneKind;
   /** False when the source `kind` was unknown or missing (read as `waiting`). */
   known: boolean;
-  /** `who`, trimmed, else the kind's default label. Unescaped. */
+  /** The label every surface shows (D15): from `role` when the lane has one
+   *  (`roleLaneLabel`, in the wiki's language), else `who`, trimmed, else the
+   *  kind's default. Unescaped. */
   label: string;
   /** `who` as authored (trimmed), or null when the lane has none. */
   who: string | null;
+  /** `role` as a role key (`normalizeRoleKey`: trimmed, lower-cased), or null
+   *  when the lane has none or it is not a key. */
+  role: string | null;
   /** `since` as a `YYYY-MM-DD` calendar day (an ISO value, or the house
    *  `DD.MM.YYYY` normalised), else null. */
   since: string | null;
@@ -435,13 +455,24 @@ function laneSteps(children: Block[]): string[] {
   return items;
 }
 
-export function laneFromAttrs(attrs: Record<string, string>, children: Block[]): NextMovesLane {
+/** One lane as every surface reads it. `language` is the wiki's: it words a
+ *  role lane's label («Venter på fag») and the default label of a lane with
+ *  neither `role` nor `who` («Du»); a surface that knows no wiki reads `en`. */
+export function laneFromAttrs(
+  attrs: Record<string, string>,
+  children: Block[],
+  language?: QuestionLanguage,
+): NextMovesLane {
   const { kind, known } = normalizeLaneKind(attrs.kind);
   const who = attrs.who?.trim() || null;
-  const label = who ?? LANE_DEFAULT_LABEL[kind];
+  const role = normalizeRoleKey(attrs.role);
+  // A lane with no `role=` keeps its `who` label (D16).
+  const label = role
+    ? roleLaneLabel(kind, role, language)
+    : (who ?? laneDefaultLabel(kind, language) ?? LANE_DEFAULT_LABEL[kind]);
   const since = parseLaneSince(attrs.since);
   const sinceRaw = since === null && attrs.since?.trim() ? attrs.since.trim() : null;
-  return { kind, known, label, who, since, sinceRaw, items: laneSteps(children), children };
+  return { kind, known, label, who, role, since, sinceRaw, items: laneSteps(children), children };
 }
 
 /** Does a lane list carry a task marker? The web renders such a list with the
@@ -457,10 +488,10 @@ export function taskListRows(list: ListBlock): ChecklistRow[] {
 }
 
 /** The `Lane` blocks directly inside a `NextMoves` body, in source order. */
-export function nextMovesLanes(children: Block[]): NextMovesLane[] {
+export function nextMovesLanes(children: Block[], language?: QuestionLanguage): NextMovesLane[] {
   const out: NextMovesLane[] = [];
   for (const b of children) {
-    if (b.type === "component" && b.name === "Lane") out.push(laneFromAttrs(b.attrs, b.children));
+    if (b.type === "component" && b.name === "Lane") out.push(laneFromAttrs(b.attrs, b.children, language));
   }
   return out;
 }
@@ -481,7 +512,10 @@ export function isSettledSection(b: Block): boolean {
  *  depth: not quoted in code (the parser's rule) and not inside a settled
  *  section ({@link isSettledSection}). `found` is whether any block was seen at
  *  all, counted or not. The one walk the index and the board read. */
-export function countedNextMovesLanes(blocks: Block[]): { lanes: NextMovesLane[]; found: boolean } {
+export function countedNextMovesLanes(
+  blocks: Block[],
+  language?: QuestionLanguage,
+): { lanes: NextMovesLane[]; found: boolean } {
   const lanes: NextMovesLane[] = [];
   let found = false;
   const walk = (bs: Block[], settled: boolean) => {
@@ -489,7 +523,7 @@ export function countedNextMovesLanes(blocks: Block[]): { lanes: NextMovesLane[]
       if (b.type !== "component") continue;
       if (b.name === "NextMoves") {
         found = true;
-        if (!settled) lanes.push(...nextMovesLanes(b.children));
+        if (!settled) lanes.push(...nextMovesLanes(b.children, language));
         continue;
       }
       walk(b.children, settled || isSettledSection(b));
@@ -1050,6 +1084,9 @@ interface FenceStore {
   taken: Set<number>;
   /** Next candidate id. Monotone, so allocation is amortised O(1). */
   next: number;
+  /** `srcLine[k]` is the input line that fence-extracted line `k` came from
+   *  (a placeholder maps to its opener). Filled by `extractFences`. */
+  srcLine: number[];
 }
 
 /**
@@ -1383,7 +1420,7 @@ export function parseBlocks(text: string): Block[] {
   // which is the text the extractor also scans — CRLF collapse only deletes
   // `\r` and leaves the `\n`, so it can neither create nor destroy a
   // placeholder-shaped run between the two.
-  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0 };
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, srcLine: [] };
   const protectedText = extractFences(normalized, store);
 
   return parseBlocksInner(protectedText, store, 0);
@@ -1485,6 +1522,7 @@ function extractFences(text: string, store: FenceStore): string {
     // pinned in `wiki/render.test.ts` -- the discard, and the swallowing not
     // coming back.
     if (!open || info.includes("`")) {
+      store.srcLine.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -1504,6 +1542,7 @@ function extractFences(text: string, store: FenceStore): string {
     }
     if (close === -1) {
       noCloserAtRunAtLeast = Math.min(noCloserAtRunAtLeast, runLen);
+      store.srcLine.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -1516,6 +1555,7 @@ function extractFences(text: string, store: FenceStore): string {
       code: body.join("\n").trimEnd(),
       indent,
     });
+    store.srcLine.push(i);
     out.push(`\x00CB${id}\x00`);
     i = close + 1;
   }
@@ -1534,12 +1574,14 @@ function dedentFenceLine(line: string, indent: number): string {
 }
 
 /** Parse already-fence-extracted text into blocks. `store` is the shared
- *  placeholder store; `depth` is the current component-nesting level. */
+ *  placeholder store; `depth` is the current component-nesting level; `base`
+ *  is the fence-extracted line index of `protectedText`'s first line. */
 function parseBlocksInner(
   protectedText: string,
   store: FenceStore,
   depth: number,
   nm: NextMovesNesting = 0,
+  base = 0,
 ): Block[] {
   const lines = protectedText.split("\n");
   const blocks: Block[] = [];
@@ -1566,7 +1608,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom, nm);
+      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom, nm, base);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -1678,6 +1720,7 @@ function tryParseComponent(
   depth: number,
   noCloseFrom: Map<string, number>,
   nm: NextMovesNesting,
+  base: number,
 ): { block: Block; next: number } | null {
   const m = lines[i]!.trim().match(COMPONENT_OPEN_RE);
   if (!m) return null;
@@ -1694,11 +1737,12 @@ function tryParseComponent(
   const selfClosing = m[3] === "/";
   const rest = m[4]!;
   const closeTag = `</${name}>`;
+  const line = store.srcLine[base + i];
 
   if (selfClosing) {
     // Only a subset may self-close, and the tag must own the whole line.
     if (!SELF_CLOSING_ALLOWED.has(cname) || rest.trim() !== "") return null;
-    return { block: { type: "component", name: cname, attrs, children: [] }, next: i + 1 };
+    return { block: { type: "component", name: cname, attrs, children: [], line }, next: i + 1 };
   }
 
   // Single-line form: `<Name …>content</Name>` all on one line.
@@ -1707,8 +1751,8 @@ function tryParseComponent(
     if (rest.slice(inlineClose + closeTag.length).trim() !== "") return null; // trailing junk
     const content = rest.slice(0, inlineClose);
     const inner = childNesting(cname, depth, nm);
-    const children = parseBlocksInner(content, store, inner.depth, inner.nm);
-    return { block: { type: "component", name: cname, attrs, children }, next: i + 1 };
+    const children = parseBlocksInner(content, store, inner.depth, inner.nm, base + i);
+    return { block: { type: "component", name: cname, attrs, children, line }, next: i + 1 };
   }
 
   // Multi-line form: the open tag must own its line, then scan for the matching
@@ -1749,8 +1793,8 @@ function tryParseComponent(
   }
 
   const inner = childNesting(cname, depth, nm);
-  const children = parseBlocksInner(body.join("\n"), store, inner.depth, inner.nm);
-  return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
+  const children = parseBlocksInner(body.join("\n"), store, inner.depth, inner.nm, base + i + 1);
+  return { block: { type: "component", name: cname, attrs, children, line }, next: j + 1 };
 }
 
 // ── Inline components ───────────────────────────────────────────────────────

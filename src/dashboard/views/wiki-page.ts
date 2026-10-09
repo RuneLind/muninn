@@ -31,6 +31,7 @@ import {
   LINE_REFS_TOGGLE_CLASS,
   MOVES_AGE_CLASS,
   MOVES_PILL_CLASS,
+  ROLE_VIEW_CLASS,
 } from "./components/wiki-report-blocks.ts";
 import { refLinksCss } from "./components/wiki-ref-links.ts";
 import { lensCss } from "./components/wiki-lens.ts";
@@ -1954,6 +1955,12 @@ export async function renderWikiPage(opts?: {
       font-size: 11px; border: 1px solid var(--status-warning); color: var(--text-soft);
     }
     .${LINE_REFS_TOGGLE_CLASS}:not(.on) { text-decoration: line-through; }
+    /* «Se som rolle» (D18): the admin's display-only role switch. */
+    .${ROLE_VIEW_CLASS} { font-size: 11px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px; }
+    .${ROLE_VIEW_CLASS} select {
+      font: inherit; padding: 0 4px; border-radius: 6px;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-primary);
+    }
     /* In-page references, their peek card and the back pill (wiki-ref-links.ts). */
     ${refLinksCss()}
     /* The lens switch, what Overview hides, and the fold sizes (wiki-lens.ts). */

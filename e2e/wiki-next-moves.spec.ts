@@ -1,12 +1,13 @@
 /**
- * `<NextMoves>` end to end: the lane grid in the /wiki reader, the header pills
+ * `<NextMoves>` end to end: the compact «Oppfølging» block in the /wiki reader
+ * (reader lenses PR 3; chat keeps the grid), the header pills
  * that count it and jump to it, the lane ages computed in the browser, and the
  * two surfaces that derive "waiting on you" from the same block — the /plans
  * board's toggle and the /wiki ✋ chip and row flag.
  *
- * What only a real page can answer: that the grid is one column at phone width
- * and several on a desktop, that a pill opens a closed fold and scrolls to the
- * lane, that "not sent · N d" is computed from the viewer's clock (pinned here,
+ * What only a real page can answer: that each lane is one closed line that
+ * opens to its body and nothing overflows at phone width, that a pill opens a
+ * closed fold and the lane and scrolls to it, that "not sent · N d" is computed from the viewer's clock (pinned here,
  * with the timezone), that the toggle brings a SHIPPED plan onto a board whose
  * default scope hides that column, and that every muted line reads at 4.5:1 in
  * both themes.
@@ -250,49 +251,42 @@ test.afterAll(async () => {
 });
 
 test.describe("NextMoves in the reader", () => {
-  test("four lanes: three cards in one row and the blocked strip below at 1440, one column at 390", async ({ page }) => {
+  test("the reader's compact block: a title, a count line, one closed line per lane; no overflow at 390", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await open(page, "plans/report.mdx");
-    const lanes = page.locator(".wiki-article .next-moves .nm-lane");
+    const block = page.locator(".wiki-article .next-moves.nm-compact");
+    await expect(block.locator(".nm-title")).toHaveText("Follow-up");
+    // No role on these lanes: each phrase is the lane's own label (D16).
+    await expect(block.locator(".nm-sum")).toHaveText(
+      "Du: 2 tasks · Venter på fag: 1 task · Utkast, ikke sendt: 2 drafts · 1 blocked",
+    );
+    const lanes = block.locator(".nm-lanes > .nm-lane");
     await expect(lanes).toHaveCount(4);
     await expect(lanes.nth(0)).toHaveAttribute("data-kind", "you");
     await expect(lanes.nth(0).locator(".nm-who")).toHaveText("Du");
-    await expect(lanes.nth(0).locator(".nm-count")).toHaveText("2");
-    // A nested item renders inside its step and is not counted.
+    await expect(lanes.nth(0).locator(".nm-count")).toHaveText("2 tasks");
+    await expect(lanes.nth(0).locator(".nm-peek")).toHaveText("Send Slack-utkastet fra runde 4.");
+    await expect(lanes.nth(3)).toHaveAttribute("data-kind", "blocked");
+    // Closed: one line each. A click opens the body; a nested item renders
+    // inside its step and is not counted.
+    for (const i of [0, 1, 2, 3]) expect(await lanes.nth(i).evaluate((el) => (el as HTMLDetailsElement).open)).toBe(false);
+    const head = (await lanes.nth(0).locator(":scope > .nm-head").boundingBox())!;
+    expect(head.height).toBeLessThan(40);
+    await lanes.nth(0).locator(":scope > .nm-head").click();
     await expect(lanes.nth(0).locator(".nm-body > ol > li")).toHaveCount(2);
     await expect(lanes.nth(0).locator(".nm-body > ol > li ul li")).toHaveText("a nested note, not a step");
-    const box = async (i: number) => (await lanes.nth(i).boundingBox())!;
-    // No card alone on a row: the three cards share one row…
-    const rows = new Map<number, number>();
-    for (const i of [0, 1, 2]) {
-      const y = Math.round((await box(i)).y);
-      rows.set(y, (rows.get(y) ?? 0) + 1);
-    }
-    expect([...rows.values()], "cards per row").toEqual([3]);
-    // …and the blocked lane is the full-width strip below them.
-    await expect(lanes.nth(3)).toHaveAttribute("data-kind", "blocked");
-    const grid = (await page.locator(".wiki-article .nm-grid").boundingBox())!;
-    expect((await box(3)).y).toBeGreaterThan((await box(0)).y + (await box(0)).height);
-    expect(Math.abs((await box(3)).width - grid.width)).toBeLessThan(2);
 
     await page.setViewportSize({ width: 390, height: 844 });
     // At 390 px the reader's rail and pane leave the article no width at all
     // (pre-existing; see wiki-tracker-graph.spec.ts). Focus mode is how a phone
-    // reads a page, so the grid is measured there.
+    // reads a page, so the block is measured there.
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("f");
     await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
-    // One column: every card starts at the same x, each below the one before.
-    await expect.poll(async () => Math.abs((await box(0)).x - (await box(1)).x)).toBeLessThan(2);
-    expect(Math.abs((await box(1)).x - (await box(2)).x)).toBeLessThan(2);
-    expect((await box(1)).y).toBeGreaterThan((await box(0)).y + 10);
-    expect((await box(2)).y).toBeGreaterThan((await box(1)).y + 10);
-    // The grid never overflows the article column (the reader's own 390 px
-    // layout is a separate matter: its three panes do not fit a phone).
-    const fits = await page.locator(".wiki-article .next-moves").evaluate((el) => {
+    const fits = await block.evaluate((el) => {
       const art = el.closest(".wiki-article")!.getBoundingClientRect();
-      const lanes = Array.from(el.querySelectorAll(".nm-lane")).map((l) => l.getBoundingClientRect());
-      return el.scrollWidth <= el.clientWidth + 1 && lanes.every((r) => r.right <= art.right + 1);
+      const heads = Array.from(el.querySelectorAll(".nm-head")).map((l) => l.getBoundingClientRect());
+      return el.scrollWidth <= el.clientWidth + 1 && heads.every((r) => r.right <= art.right + 1);
     });
     expect(fits).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
@@ -420,6 +414,8 @@ test.describe("NextMoves in the reader", () => {
     test(`lane text and pills read at 4.5:1, ${scheme}`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await open(page, "plans/report.mdx");
+      // Every lane open, so its body is painted.
+      await page.locator(".wiki-article .nm-lane").evaluateAll((els) => els.forEach((e) => ((e as HTMLDetailsElement).open = true)));
       await page.mouse.move(0, 0);
       const token = (name: string) =>
         page.evaluate((n) => {
@@ -446,6 +442,9 @@ test.describe("NextMoves in the reader", () => {
         waitingItem: page.locator('.nm-lane[data-kind="waiting"] li').first(),
         draftAge: page.locator(`.${MOVES_AGE_CLASS}`).first(),
         blockedLabel: page.locator('.nm-lane[data-kind="blocked"] .nm-who'),
+        title: page.locator(".nm-compact .nm-title"),
+        countLine: page.locator(".nm-compact .nm-sum"),
+        peek: page.locator(".nm-compact .nm-peek").first(),
         youPill: page.locator(`.${MOVES_PILL_CLASS}-you`),
         waitingPill: page.locator(`.${MOVES_PILL_CLASS}-waiting`),
         draftPill: page.locator(`.${MOVES_PILL_CLASS}-draft`),

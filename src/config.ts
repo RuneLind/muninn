@@ -1,5 +1,7 @@
 import { getLog } from "./logging.ts";
 import { ownerGroupName, type AnswerGroups } from "./format/question.ts";
+// The group-name grammar is a role key's (`<Lane role=>`, `roleKeys`): one copy.
+import { DIGIT_RUN_RE, ROLE_KEY_RE } from "./format/lane-roles.ts";
 import { parseWikiDefaultLens, type WikiDefaultLens } from "./format/reader-lens.ts";
 
 const log = getLog("config");
@@ -141,16 +143,8 @@ export interface WikiAnswerConfig {
   groupWarnings?: string[];
 }
 
-/** A group name as `WIKI_ANSWER_GROUPS` takes it, after lower-casing. */
-const ANSWER_GROUP_NAME_RE = /^[a-z0-9æøå_-]+$/;
 /** A NAV ident after upper-casing: letters and digits. */
 const ANSWER_GROUP_IDENT_RE = /^[A-Z0-9]+$/;
-/** Six or more digits in a row, anywhere in the name. A NAV ident is a letter
- *  and six digits, so a name holding one (`fag-z990001`, garbled `z9900011`)
- *  would put an ident on every chip and export heading. The rule ignores the
- *  letter on purpose: it refuses a week-coded `uke202541` too, which an
- *  operator writes `uke2025-41`, and leaves no letter class to get wrong. */
-const DIGIT_RUN_RE = /\d{6}/;
 
 /**
  * `WIKI_ANSWER_GROUPS` — `fag=A123456,B234567;utvikler=C345678`. Group names
@@ -171,7 +165,7 @@ export function parseAnswerGroups(raw: string | undefined): { groups: AnswerGrou
     const eq = entry.indexOf("=");
     if (eq === -1) return void warnings.push(`${at} dropped: no "=" between the group name and its members`);
     const name = entry.slice(0, eq).trim().toLowerCase();
-    if (!ANSWER_GROUP_NAME_RE.test(name)) {
+    if (!ROLE_KEY_RE.test(name)) {
       return void warnings.push(`${at} dropped: the group name must be letters, digits, "_" or "-"`);
     }
     if (DIGIT_RUN_RE.test(name)) {

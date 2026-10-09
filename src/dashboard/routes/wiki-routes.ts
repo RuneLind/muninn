@@ -206,7 +206,9 @@ import { saveMemory, searchMemoriesHybrid } from "../../db/memories.ts";
 import { getBotDefaultUser, getChatPreferences } from "../../db/chat-preferences.ts";
 import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
-import { requireOwnUser } from "../../auth/guard.ts";
+import { requireOwnUser, sessionIdentity } from "../../auth/guard.ts";
+import { authMode } from "../../auth/policy.ts";
+import { viewerGroupKeys } from "../../format/question.ts";
 
 const log = getLog("dashboard", "wiki");
 
@@ -1637,7 +1639,12 @@ export function registerWikiReadRoutes(
       }),
       // The lens switch's inputs: language, id nouns, the page's default lens
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
-      reader: readerPayload(entry?.name, index.readerConfig, config.wikiDefaultLens ?? resolveWikiDefaultLens()),
+      // `roles`: the viewer's group keys (D30) — never a member — and the
+      // admin's «Se som rolle» (D18).
+      reader: readerPayload(entry?.name, index.readerConfig, config.wikiDefaultLens ?? resolveWikiDefaultLens(), {
+        roles: viewerGroupKeys(authMode(), sessionIdentity(c), answerCfg.owner, answerCfg.groups ?? new Map()),
+        admin: (c.get("role") ?? "admin") === "admin",
+      }),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):
       // the client keys its controls on THIS, never on

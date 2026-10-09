@@ -22,6 +22,7 @@
  * no canonical phrase, an item `parseLogItem` dims (struck id, struck
  * remainder, superseded) is `closed`; everything else is `open`.
  */
+import type { AuthMode } from "../auth/mode.ts";
 import { stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { maskLineCodeSpans } from "./code-spans.ts";
@@ -196,6 +197,22 @@ export function authorGroupsOf(navIdent: string | null, groups: AnswerGroups): s
   const ident = navIdent?.trim().toUpperCase();
   if (!ident) return [];
   return [...groups].filter(([, members]) => members.has(ident)).map(([name]) => name).sort();
+}
+
+/** The viewer's role keys (D30): the groups holding the session's NAV ident;
+ *  with auth off (`mode` `off`) the groups holding `WIKI_ANSWER_OWNER`'s ident
+ *  when it is written `Name (IDENT)`. A session with no ident (`local`) has
+ *  none, and so has a request with no session on an authenticating instance:
+ *  the owner stands in for the viewer only where nobody signs in. Keys only,
+ *  never a member. */
+export function viewerGroupKeys(
+  mode: AuthMode,
+  session: { navIdent: string | null } | null,
+  owner: string | null | undefined,
+  groups: AnswerGroups,
+): string[] {
+  const ident = mode !== "off" ? (session?.navIdent ?? null) : owner ? (parseQuestionTarget(owner)?.ident ?? null) : null;
+  return authorGroupsOf(ident, groups);
 }
 
 /**

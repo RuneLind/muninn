@@ -20,6 +20,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "unrendered-fact-mark": "Fact-check marks that render as literal markup",
   "stem-collision": "Same-stem pages (one is hidden from the wiki)",
   "question-block": "Question blocks the DecisionLog cannot close",
+  "role-key": "Lane roles and question targets outside roleKeys",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

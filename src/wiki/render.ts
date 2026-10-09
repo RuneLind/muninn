@@ -112,9 +112,12 @@ export function renderWikiHtml(
   // The source text each sentinel stands for, kept alongside its rendered form:
   // where the sentinel turns out to be inside code, THIS is what goes back.
   const literal: string[] = [];
+  // The text each link shows: a lane's plain-text peek reads a link as this.
+  const linkTexts: string[] = [];
   const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);
     const text = (label ?? target).trim() || target.trim();
+    linkTexts.push(text);
     const meta = resolve(target);
     const html = meta
       ? // `data-relpath` names the page the link RESOLVED to, so the in-page click
@@ -137,6 +140,7 @@ export function renderWikiHtml(
       question: opts?.question,
       idLabels: opts?.idLabels,
       reader: true,
+      wikiLinkTexts: linkTexts,
       ...(opts?.language ? { language: opts.language } : {}),
     }),
     literal,
@@ -205,18 +209,30 @@ export interface ReaderPayload {
   defaultLens: StoredLens | null;
   /** The Agent lens is offered on this page for this viewer (D7). */
   agentLens: boolean;
+  /** Role lanes (D30, D32, D23): the wiki's `roleKeys`, the viewer's group
+   *  keys (whose lanes the reader puts first and marks «deg»), and whether the
+   *  viewer gets «Se som rolle» (admin). Keys only, never a group member. */
+  roles: ViewerRoles;
+}
+
+export interface ViewerRoles {
+  keys: string[];
+  viewer: string[];
+  preview: boolean;
 }
 
 export function readerPayload(
   wiki: string | undefined,
   readerConfig: WikiReaderConfig | null | undefined,
   instanceDefault: WikiDefaultLens | undefined,
+  viewer: { roles: string[]; admin: boolean } = { roles: [], admin: false },
 ): ReaderPayload {
   return {
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     idLabels: readerConfig?.idLabels ?? {},
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
     agentLens: false,
+    roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
   };
 }
 
