@@ -425,8 +425,9 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
     after = pill;
   }
 
-  // «Se som rolle»: an admin, a wiki with role keys, a page with a live role lane.
-  const roleLane = liveLaneLists(article).some((list) => list.querySelector(":scope > .nm-lane[data-role]"));
+  // «Se som rolle»: an admin, a wiki with role keys, a page with a live role
+  // lane that is not blocked (a blocked lane is never ordered or marked).
+  const roleLane = liveLaneLists(article).some((list) => list.querySelector(":scope > .nm-lane[data-role]:not(.nm-blocked)"));
   if (opts.roles?.preview && opts.roles.keys.length && roleLane) {
     row.appendChild(
       roleViewControl(opts.roles, lang, (roles) => {

@@ -785,8 +785,9 @@ function checkStemCollisions(index: WikiIndex): LintFinding[] {
  * Check 12 — role keys (D32). A `<Lane role=>` must name one of the wiki's
  * `roleKeys`; so must a `<Question to=>` or `questions_to:` entry written as a
  * key, on a wiki that declares any. Each finding names its own line: a lane's
- * or a question's opening tag (the n-th tag outside code fences is the n-th
- * block the parser walks), or the `questions_to:` entry in the frontmatter.
+ * or a question's opening tag, read off the block the parser built (a tag it
+ * does not make a block from is never counted), or the `questions_to:` entry in
+ * the frontmatter.
  *
  * `roleKeys` is the wiki's list of `WIKI_ANSWER_GROUPS` keys; the reader marks
  * a viewer's lanes and asks a group by the groups themselves, so a finding
@@ -799,7 +800,9 @@ function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonl
   if (!hasLane && !(declared && (hasQuestion || rawContent.includes("questions_to")))) return [];
   const lines = rawContent.split("\n");
   const fmEnd = frontmatterEndLine(lines);
-  const fenced = fencedLineMask(lines);
+  const body = stripFrontmatter(rawContent);
+  // Lines the frontmatter strip removed: a block's `line` counts from the body.
+  const bodyAt = rawContent.slice(0, rawContent.length - body.length).split("\n").length - 1;
   const findings: LintFinding[] = [];
   const known = declared ? `.wiki-reader.json roleKeys (${roleKeys.join(", ")})` : "the wiki's roleKeys (.wiki-reader.json declares none)";
   const push = (message: string, line: number | undefined) =>
@@ -808,43 +811,25 @@ function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonl
    *  key (lower-case; a capitalised name is a person). */
   const roleEntries = (targets: { name: string; ident: string | null }[]) =>
     targets.filter((t) => t.ident === null && normalizeRoleKey(t.name) === t.name).map((t) => t.name);
-  /** 1-based line of each opening `<Name` tag in the body, outside fences. */
-  const tagLines = (name: string): number[] => {
-    const re = new RegExp(`^\\s*<${name}[\\s>]`);
-    const out: number[] = [];
-    for (let i = fmEnd; i < lines.length; i++) if (!fenced[i] && re.test(lines[i]!)) out.push(i + 1);
-    return out;
-  };
   const isRole = `add it to roleKeys if it is a WIKI_ANSWER_GROUPS group key`;
 
   if (declared) {
     const fm = parseFrontmatter(rawContent);
-    // The `questions_to:` key's line, and its block-list lines under it.
+    // The `questions_to:` key's line: `parseFrontmatter` reads an inline list only.
     const keyAt = lines.findIndex((l, i) => i < fmEnd && /^questions_to\s*:/.test(l));
-    let keyEnd = keyAt + 1;
-    while (keyAt >= 0 && keyEnd < fmEnd && /^\s/.test(lines[keyEnd]!)) keyEnd++;
-    const entryLine = (role: string): number | undefined => {
-      if (keyAt < 0) return undefined;
-      const esc = role.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const re = new RegExp(`(?<![\\p{L}\\p{N}_-])${esc}(?![\\p{L}\\p{N}_-])`, "u");
-      for (let i = keyAt; i < keyEnd; i++) if (re.test(i === keyAt ? lines[i]!.replace(/^questions_to\s*:/, "") : lines[i]!)) return i + 1;
-      return keyAt + 1;
-    };
+    const entryLine = (): number | undefined => (keyAt < 0 ? undefined : keyAt + 1);
     for (const role of roleEntries(parseQuestionsTo(fm.questions_to))) {
       if (!roleKeys.includes(role)) {
-        push(`questions_to: names "${role}", which is not in ${known}; ${isRole}, or write a person as Name (IDENT)`, entryLine(role));
+        push(`questions_to: names "${role}", which is not in ${known}; ${isRole}, or write a person as Name (IDENT)`, entryLine());
       }
     }
   }
-  const laneLines = tagLines("Lane");
-  const questionLines = tagLines("Question");
-  let lane = 0;
-  let question = 0;
+  const lineOf = (b: { line?: number }) => (b.line === undefined ? undefined : bodyAt + b.line + 1);
   const walk = (bs: Block[]) => {
     for (const b of bs) {
       if (b.type !== "component") continue;
       if (b.name === "Lane") {
-        const at = laneLines[lane++];
+        const at = lineOf(b);
         if (b.attrs.role !== undefined) {
           const raw = b.attrs.role;
           const key = normalizeRoleKey(raw);
@@ -856,7 +841,7 @@ function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonl
         }
       }
       if (b.name === "Question") {
-        const at = questionLines[question++];
+        const at = lineOf(b);
         if (declared) {
           for (const role of roleEntries(parseQuestionAttrs(b.attrs).to ?? [])) {
             if (!roleKeys.includes(role)) {
@@ -868,7 +853,7 @@ function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonl
       walk(b.children);
     }
   };
-  walk(parseBlocks(stripFrontmatter(rawContent)));
+  walk(parseBlocks(body));
   return findings;
 }
 

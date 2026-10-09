@@ -1704,9 +1704,12 @@ grammar, one copy in `src/format/lane-roles.ts`), or names a key
 The message names the missing key and the remedy — add it to `roleKeys` if it
 is a group key, or write a person as `Name (IDENT)` — and claims no effect:
 the reader marks lanes and asks groups through `WIKI_ANSWER_GROUPS`, not the
-list. Each finding carries its own line: the n-th `<Lane`/`<Question` opening
-tag outside code fences is the n-th block the parser walks, and a
-`questions_to:` entry is found within that key's frontmatter lines. The
+list. Each finding carries its own line: a lane's or question's is the
+`line` the parser stores on the component block it built (`ComponentBlock` in
+`src/format/markdown-ast.ts`), so a tag the parser does not make a block from
+(single quotes, an unclosed tag, one past the depth cap) moves nothing; a
+`questions_to:` finding names that key's line, since `parseFrontmatter` reads an
+inline list only. The
 membership itself lives in `WIKI_ANSWER_GROUPS`, so the check runs the same on
 the laptop and the pod. Acceptance: `role-key-lint.test.ts`.
 

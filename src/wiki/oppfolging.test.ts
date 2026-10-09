@@ -334,6 +334,93 @@ describe("fix round 1: a lane with no role and no who on a Norwegian wiki", () =
   });
   test("a Lane outside NextMoves reads the wiki's language", () => {
     const html = reader(['<Lane kind="waiting" role="fag">', "", "- x", "", "</Lane>"].join("\n"));
-    expect(html).toContain("<strong>Venter på fag</strong>");
+    expect(html).toContain("<strong><span data-reader-only>Venter på fag</span></strong>");
+  });
+});
+
+// ── Fix round 2 (#669 verify) ───────────────────────────────────────────────
+
+const peeksOf = (html: string) => [...html.matchAll(/<span class="nm-peek" data-reader-only>([^<]*)<\/span>/g)].map((m) => m[1]);
+const countsOf = (html: string) => [...html.matchAll(/<span class="nm-count" data-reader-only>([^<]*)<\/span>/g)].map((m) => m[1]);
+
+describe("fix round 2: an id inside a wikilink names no question", () => {
+  for (const [name, item, peek] of [
+    ["target", "- se [[S1 notat]] først", "se S1 notat først"],
+    ["label", "- se [[Brevside|om S1]] først", "se om S1 først"],
+  ] as const) {
+    test(`in a link's ${name}: the peek, the count and the cards agree`, () => {
+      const html = reader([...nm([lane('kind="waiting" role="fag"', [item])]), "", ...question("S1")].join("\n"));
+      expect(countsOf(html)).toEqual(["1 oppgave"]);
+      expect(peeksOf(html)).toEqual([peek]);
+      expect(html).not.toContain('class="nm-qcard"');
+    });
+  }
+  test("an id named beside a link to it is named once", () => {
+    const html = reader([...nm([lane('kind="waiting" role="fag"', ["- **S1** — se [[S1 notat]] først"])]), "", ...question("S1")].join("\n"));
+    expect(countsOf(html)).toEqual(["1 spørsmål"]);
+    expect(peeksOf(html)).toEqual(["S1: se S1 notat først"]);
+    expect(html).toContain('<div class="nm-qcard" id="nm-q-s1">');
+  });
+  test("the peek's words follow the id, not the link text before it", () => {
+    const html = reader([...nm([lane('kind="waiting" role="fag"', ["- se [[S1 notat]] om **S1** først"])]), "", ...question("S1")].join("\n"));
+    expect(peeksOf(html)).toEqual(["S1: først"]);
+  });
+});
+
+describe("fix round 2: an id is not the head of a longer one", () => {
+  const page = (ids: string[], item: string) =>
+    [...nm([lane('kind="waiting" role="fag"', [item])]), "", ...ids.flatMap((id) => [...question(id), ""])].join("\n");
+  test("S1 is not named by S1.1", () => {
+    const html = reader(page(["S1", "S1.1"], "- **S1.1** hva nå?"));
+    expect(countsOf(html)).toEqual(["1 spørsmål"]);
+    expect(peeksOf(html)).toEqual(["S1.1: hva nå?"]);
+    expect(html.match(/class="nm-qcard"/g)).toHaveLength(1);
+  });
+  test("S1 is not named by S1-2, nor 1 by Q-1", () => {
+    for (const [ids, item, peek] of [
+      [["S1", "S1-2"], "- **S1-2** hva nå?", "S1-2: hva nå?"],
+      [["Q-1", "1"], "- **Q-1** hva nå?", "Q-1: hva nå?"],
+    ] as const) {
+      const html = reader(page([...ids], item));
+      expect(countsOf(html), item).toEqual(["1 spørsmål"]);
+      expect(peeksOf(html), item).toEqual([peek]);
+      expect(html.match(/class="nm-qcard"/g), item).toHaveLength(1);
+    }
+  });
+  test("a sentence-final id still counts", () => {
+    const html = reader(page(["S1"], "- spør S1."));
+    expect(countsOf(html)).toEqual(["1 spørsmål"]);
+    expect(html).toContain('<div class="nm-qcard" id="nm-q-s1">');
+  });
+});
+
+describe("fix round 2: a Lane outside NextMoves on the reader", () => {
+  test("a derived label and a normalised since are reader-only; who= text is not", () => {
+    const html = reader(['<Lane kind="waiting" role="fag" since="07.10.2026">', "", "- x", "", "</Lane>"].join("\n"));
+    expect(html).toContain("<p><strong><span data-reader-only>Venter på fag</span><span data-reader-only> — since 2026-10-07</span></strong></p>");
+    expect(reader(['<Lane kind="you">', "", "- x", "", "</Lane>"].join("\n"))).toContain("<strong><span data-reader-only>Du</span></strong>");
+    expect(reader(['<Lane kind="you" who="Kari" since="2026-10-01">', "", "- x", "", "</Lane>"].join("\n"))).toContain(
+      "<strong>Kari — since 2026-10-01</strong>",
+    );
+  });
+  test("chat keeps the plain label line", () => {
+    expect(formatWebHtml(['<Lane kind="waiting" who="Kari" since="07.10.2026">', "", "- x", "", "</Lane>"].join("\n"))).toContain(
+      "<p><strong>Kari — since 2026-10-07</strong></p>",
+    );
+  });
+});
+
+describe("fix round 2: a NUL in a lane item", () => {
+  test("never reaches the peek", () => {
+    const html = reader(nm([lane('kind="you" role="utvikler"', ["- Les a\x00b først."])]).join("\n"));
+    expect(peeksOf(html)).toEqual(["Les ab først."]);
+  });
+});
+
+describe("fix round 2: an id the flattened peek loses", () => {
+  test("still gets a part, so the peek names what the count counts", () => {
+    const html = reader([...nm([lane('kind="waiting" role="fag"', ["- se [notat](https://example.com/S1) først"])]), "", ...question("S1")].join("\n"));
+    expect(countsOf(html)).toEqual(["1 spørsmål"]);
+    expect(peeksOf(html)).toEqual(["S1"]);
   });
 });

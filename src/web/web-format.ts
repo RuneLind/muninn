@@ -901,20 +901,24 @@ let currentLinkTexts: readonly string[] | undefined;
 const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
 
 /** Where each `<Question>` id an item names sits, in text order. An id counts
- *  only on its own boundary: `S1` is not named by `S10` or `PS1`. */
+ *  only on its own boundary: `S1` is not named by `S10`, `PS1`, `S1.1`, `S1-2`
+ *  or `1.S1` — a `.` or `-` joined to an id character on its far side extends
+ *  the id — while a sentence-final `S1.` is named. */
 function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number; end: number }[] {
   const hits: { id: string; at: number; end: number }[] = [];
   for (const id of ids) {
     const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const m = new RegExp(`(?<![${ID_EDGE}])${esc}(?![${ID_EDGE}])`).exec(text);
+    const m = new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`).exec(text);
     if (m) hits.push({ id, at: m.index, end: m.index + id.length });
   }
   return hits.sort((a, b) => a.at - b.at);
 }
 
-/** The `<Question>` ids an item names, in the order they appear. */
-function namedQuestionIds(text: string, ids: Iterable<string>): string[] {
-  return namedQuestionHits(text, ids).map((h) => h.id);
+/** The `<Question>` ids an item names, in the order they appear. On the
+ *  reader a wikilink is a sentinel here, so an id in its target or text names
+ *  nothing. The peek, the counts and the card moves all read this, so they agree. */
+function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
+  return namedQuestionHits(item, ids).map((h) => h.id);
 }
 
 /**
@@ -968,12 +972,19 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
 }
 
 /** An item's text for a peek: plain, one line. A `renderWikiHtml` wikilink
- *  sentinel reads as the link's text, and no NUL survives. */
-function peekText(item: string): string {
+ *  sentinel reads as the link's text, wrapped in `open`/`close` when given,
+ *  and no NUL survives (a literal one reaches a list item as written). */
+function peekText(item: string, open = "", close = ""): string {
   return item
-    .replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => currentLinkTexts?.[Number(i)] ?? "")
+    .replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => `${open}${currentLinkTexts?.[Number(i)] ?? ""}${close}`)
     .replace(/\x00/g, "");
 }
+
+/** Brackets a peek puts around link text so no id is found inside it. */
+const LINK_OPEN = "\uE000";
+const LINK_CLOSE = "\uE001";
+const LINK_SPAN_RE = /\uE000[^\uE001]*\uE001/g;
+const LINK_MARK_RE = /[\uE000\uE001]/g;
 
 /** Only a joining word or punctuation between two ids: `S1 og S2 — …`. */
 const ID_JOIN_RE = /^[\s:—–\-·,.)&/]*(?:og|and|eller|or)?[\s:—–\-·,.)&/]*$/i;
@@ -983,15 +994,20 @@ const ID_JOIN_RE = /^[\s:—–\-·,.)&/]*(?:og|and|eller|or)?[\s:—–\-·,.)&
  *  word shares the next id's words (`S1 og S2 — begge?` ⇒ `S1: begge?`,
  *  `S2: begge?`). */
 function questionPeeks(item: string, ids: Iterable<string>): { id: string; text: string }[] {
-  const flat = peekText(item)
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+  const named = namedQuestionIds(item, ids);
+  const flat = peekText(item.replace(LINK_MARK_RE, ""), LINK_OPEN, LINK_CLOSE)
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, `${LINK_OPEN}$2${LINK_CLOSE}`)
+    .replace(/\[\[([^\]]+)\]\]/g, `${LINK_OPEN}$1${LINK_CLOSE}`)
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/(\*\*|__|`)/g, "")
     .replace(/^\[[ xX]\][ \t]*/, "")
     .split("\n")[0]!;
-  const hits = namedQuestionHits(flat, ids);
-  const segs = hits.map((h, k) => flat.slice(h.end, hits[k + 1]?.at ?? flat.length));
+  const found = namedQuestionHits(flat.replace(LINK_SPAN_RE, (m) => " ".repeat(m.length)), named);
+  // An id the item names that the flattening lost (one inside a link's URL)
+  // still gets a part, so the peek names what the count counts.
+  const lost = named.filter((id) => !found.some((h) => h.id === id)).map((id) => ({ id, at: flat.length, end: flat.length }));
+  const hits = [...found, ...lost];
+  const segs = hits.map((h, k) => flat.slice(h.end, hits[k + 1]?.at ?? flat.length).replace(LINK_MARK_RE, ""));
   return hits.map((h, k) => {
     let j = k;
     while (j < segs.length - 1 && ID_JOIN_RE.test(segs[j]!)) j++;
@@ -1527,7 +1543,17 @@ const webRenderer: BlockRenderer = {
       case "Lane": {
         // A lane outside `<NextMoves>` renders plain: its label line, then its body.
         const lane = laneFromAttrs(attrs, rawChildren, currentReader ? currentLanguage : undefined);
-        return `<p><strong>${laneLeadText(lane, escapeHtml, escapeHtml)}</strong></p>${children}`;
+        if (!currentReader) return `<p><strong>${laneLeadText(lane, escapeHtml, escapeHtml)}</strong></p>${children}`;
+        // On the reader, text the source does not hold is reader-only, as in
+        // the compact block: a label not written as who=, a normalised since.
+        const label = lane.label === lane.who ? escapeHtml(lane.label) : `<span ${READER_ONLY_ATTR}>${escapeHtml(lane.label)}</span>`;
+        const since = lane.since ?? lane.sinceRaw;
+        const sinceHtml = !since
+          ? ""
+          : lane.since && lane.since !== attrs.since?.trim()
+            ? `<span ${READER_ONLY_ATTR}> — since ${escapeHtml(since)}</span>`
+            : ` — since ${escapeHtml(since)}`;
+        return `<p><strong>${label}${sinceHtml}</strong></p>${children}`;
       }
       case "Query": {
         // One card per query: header (id, question, answer, run date, uses),

@@ -27,8 +27,18 @@ export type Block =
   | UlBlock
   | OlBlock
   | { type: "table"; headers: string[]; rows: string[][] }
-  | { type: "component"; name: ComponentName; attrs: Record<string, string>; children: Block[] }
+  | ComponentBlock
   | { type: "text"; lines: string[] };
+
+/** `line` is the 0-based line of the opening tag in the text `parseBlocks` was
+ *  given, so a caller can name the tag's line from the block it walks. */
+export interface ComponentBlock {
+  type: "component";
+  name: ComponentName;
+  attrs: Record<string, string>;
+  children: Block[];
+  line?: number;
+}
 
 export interface CodeBlock {
   type: "code_block";
@@ -1074,6 +1084,9 @@ interface FenceStore {
   taken: Set<number>;
   /** Next candidate id. Monotone, so allocation is amortised O(1). */
   next: number;
+  /** `srcLine[k]` is the input line that fence-extracted line `k` came from
+   *  (a placeholder maps to its opener). Filled by `extractFences`. */
+  srcLine: number[];
 }
 
 /**
@@ -1407,7 +1420,7 @@ export function parseBlocks(text: string): Block[] {
   // which is the text the extractor also scans — CRLF collapse only deletes
   // `\r` and leaves the `\n`, so it can neither create nor destroy a
   // placeholder-shaped run between the two.
-  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0 };
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, srcLine: [] };
   const protectedText = extractFences(normalized, store);
 
   return parseBlocksInner(protectedText, store, 0);
@@ -1509,6 +1522,7 @@ function extractFences(text: string, store: FenceStore): string {
     // pinned in `wiki/render.test.ts` -- the discard, and the swallowing not
     // coming back.
     if (!open || info.includes("`")) {
+      store.srcLine.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -1528,6 +1542,7 @@ function extractFences(text: string, store: FenceStore): string {
     }
     if (close === -1) {
       noCloserAtRunAtLeast = Math.min(noCloserAtRunAtLeast, runLen);
+      store.srcLine.push(i);
       out.push(lines[i]!);
       i++;
       continue;
@@ -1540,6 +1555,7 @@ function extractFences(text: string, store: FenceStore): string {
       code: body.join("\n").trimEnd(),
       indent,
     });
+    store.srcLine.push(i);
     out.push(`\x00CB${id}\x00`);
     i = close + 1;
   }
@@ -1558,12 +1574,14 @@ function dedentFenceLine(line: string, indent: number): string {
 }
 
 /** Parse already-fence-extracted text into blocks. `store` is the shared
- *  placeholder store; `depth` is the current component-nesting level. */
+ *  placeholder store; `depth` is the current component-nesting level; `base`
+ *  is the fence-extracted line index of `protectedText`'s first line. */
 function parseBlocksInner(
   protectedText: string,
   store: FenceStore,
   depth: number,
   nm: NextMovesNesting = 0,
+  base = 0,
 ): Block[] {
   const lines = protectedText.split("\n");
   const blocks: Block[] = [];
@@ -1590,7 +1608,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom, nm);
+      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom, nm, base);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -1702,6 +1720,7 @@ function tryParseComponent(
   depth: number,
   noCloseFrom: Map<string, number>,
   nm: NextMovesNesting,
+  base: number,
 ): { block: Block; next: number } | null {
   const m = lines[i]!.trim().match(COMPONENT_OPEN_RE);
   if (!m) return null;
@@ -1718,11 +1737,12 @@ function tryParseComponent(
   const selfClosing = m[3] === "/";
   const rest = m[4]!;
   const closeTag = `</${name}>`;
+  const line = store.srcLine[base + i];
 
   if (selfClosing) {
     // Only a subset may self-close, and the tag must own the whole line.
     if (!SELF_CLOSING_ALLOWED.has(cname) || rest.trim() !== "") return null;
-    return { block: { type: "component", name: cname, attrs, children: [] }, next: i + 1 };
+    return { block: { type: "component", name: cname, attrs, children: [], line }, next: i + 1 };
   }
 
   // Single-line form: `<Name …>content</Name>` all on one line.
@@ -1731,8 +1751,8 @@ function tryParseComponent(
     if (rest.slice(inlineClose + closeTag.length).trim() !== "") return null; // trailing junk
     const content = rest.slice(0, inlineClose);
     const inner = childNesting(cname, depth, nm);
-    const children = parseBlocksInner(content, store, inner.depth, inner.nm);
-    return { block: { type: "component", name: cname, attrs, children }, next: i + 1 };
+    const children = parseBlocksInner(content, store, inner.depth, inner.nm, base + i);
+    return { block: { type: "component", name: cname, attrs, children, line }, next: i + 1 };
   }
 
   // Multi-line form: the open tag must own its line, then scan for the matching
@@ -1773,8 +1793,8 @@ function tryParseComponent(
   }
 
   const inner = childNesting(cname, depth, nm);
-  const children = parseBlocksInner(body.join("\n"), store, inner.depth, inner.nm);
-  return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
+  const children = parseBlocksInner(body.join("\n"), store, inner.depth, inner.nm, base + i + 1);
+  return { block: { type: "component", name: cname, attrs, children, line }, next: j + 1 };
 }
 
 // ── Inline components ───────────────────────────────────────────────────────

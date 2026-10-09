@@ -153,3 +153,47 @@ describe("lint: role-key", () => {
     expect(messages.find((m) => m.startsWith("<Question"))).toContain("write a person as Name (IDENT)");
   });
 });
+
+// A tag the parser does not make a block from must not move a later finding:
+// the line comes from the block the parser built, not from counting tag lines.
+describe("lint: role-key lines past a tag the parser skips", () => {
+  const REAL_LANE = '<Lane kind="you" role="jurist">';
+  const REAL_QUESTION = '<Question id="S2" to="jus">';
+  const SHAPES: [string, string[]][] = [
+    ["single-quoted attribute", ["<Lane kind=\"you\" role='kode'>", "", "- x", "", "</Lane>"]],
+    ["unquoted attribute", ["<Lane kind=you>", "", "- x", "", "</Lane>"]],
+    // The parser trims a line, so an indented tag IS a block: a control, not a skip.
+    ["4-space-indented tag (parsed)", ["- item", "", '    <Lane kind="you" role="fag">', "    - y", "    </Lane>"]],
+    ["tag past the component depth cap", ["<Callout>", "<Callout>", "<Callout>", '<Lane kind="you" role="kode">', "- x", "</Lane>", "</Callout>", "</Callout>", "</Callout>"]],
+    ["tag inside an HTML comment", ["<!--", '<Lane kind="you" role="kode">', "-->"]],
+    ["unclosed tag", ['<Lane kind="you" role="kode">', "", "- x"]],
+    ["single-quoted question id", ["<Question id='S0' to=\"jus\">", "Q?", "</Question>"]],
+  ];
+  test.each(SHAPES)("%s", async (_name, skipped) => {
+    await write(".wiki-reader.json", JSON.stringify({ roleKeys: ["fag"] }));
+    const content = page([], [
+      ...skipped,
+      "",
+      REAL_QUESTION,
+      "Q?",
+      "</Question>",
+      "",
+      "<NextMoves>",
+      "",
+      REAL_LANE,
+      "",
+      "- a",
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+    ]);
+    await write("plans/p.mdx", content);
+    const lines = content.split("\n");
+    const f = (await roleFindings()).filter((x) => x.message.includes("jurist") || x.message.includes('"jus"'));
+    expect(f.map((x) => [x.message.slice(0, 14), x.line])).toEqual([
+      ["<Question to=>", lines.indexOf(REAL_QUESTION) + 1],
+      ['<Lane role="ju', lines.indexOf(REAL_LANE) + 1],
+    ]);
+  });
+});

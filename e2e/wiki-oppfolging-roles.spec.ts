@@ -78,6 +78,19 @@ const HISTORIC_ONLY_PAGE = [
   "</Historic>",
   "",
 ].join("\n");
+// The only role lane is blocked: never ordered or marked, so no «Se som rolle».
+const BLOCKED_ONLY_REL = "plans/blokkert.mdx";
+const BLOCKED_ONLY_PAGE = [
+  "---",
+  "title: Bare blokkert",
+  "---",
+  "",
+  ...lanesMd([
+    ['kind="you" who="Du"', "Gjør det."],
+    ['kind="blocked" role="fag"', "Står fast."],
+  ]),
+  "",
+].join("\n");
 
 const servers: ChildProcess[] = [];
 let root = "";
@@ -104,6 +117,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(root, ".wiki-reader.json"), ROLE_READER_CONFIG, "utf8");
   await writeFile(path.join(root, TWO_WAITING_REL), TWO_WAITING_PAGE, "utf8");
   await writeFile(path.join(root, HISTORIC_ONLY_REL), HISTORIC_ONLY_PAGE, "utf8");
+  await writeFile(path.join(root, BLOCKED_ONLY_REL), BLOCKED_ONLY_PAGE, "utf8");
   botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-oppfolging-roles-bots-"));
   await mkdir(path.join(botsDir, "e2e-oppfolging-bot"));
   await writeFile(path.join(botsDir, "e2e-oppfolging-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
@@ -237,6 +251,14 @@ test("the waiting pill names the viewer's lane, and «Se som rolle» re-derives 
 test("a page whose only role lane is settled offers no «Se som rolle»", async ({ page }) => {
   await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(HISTORIC_ONLY_REL)}`);
   await expect(liveLanes(page)).toHaveCount(1);
+  await expect(page.locator(".wiki-article-head .wiki-moves-pill-you")).toHaveCount(1);
+  await expect(page.locator(".wiki-role-view")).toHaveCount(0);
+});
+
+test("a page whose only role lane is blocked offers no «Se som rolle»", async ({ page }) => {
+  await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(BLOCKED_ONLY_REL)}`);
+  await expect(liveLanes(page)).toHaveCount(2);
+  await expect(page.locator('.wiki-article .nm-lane[data-role="fag"]')).toHaveCount(1);
   await expect(page.locator(".wiki-article-head .wiki-moves-pill-you")).toHaveCount(1);
   await expect(page.locator(".wiki-role-view")).toHaveCount(0);
 });
