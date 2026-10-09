@@ -142,16 +142,28 @@ function stateRe(lang: QuestionLanguage): RegExp {
   return new RegExp(`(?<![\\p{L}\\p{N}])(?:${alts.join("|")})(?![\\p{L}\\p{N}-])`, "giu");
 }
 
-/** A negation right before a good state, in the page's language, keeps it
- *  from reading good: «ikke ennå i prod», "not yet in prod". It must be the
- *  word before the phrase, or the one before that with one adverb between;
- *  a comma, a tag barrier or any other word breaks it. No negative phrase
- *  ends in a negation, so one («ikke opprettet, men i prod») never reaches
- *  the next phrase. */
-const NEGATION_BEFORE_RES: Record<QuestionLanguage, RegExp> = {
-  no: /(?<![\p{L}\p{N}])(?:ikke|aldri)\s+(?:(?:ennå|enda|fortsatt|lenger)\s+)?$/iu,
-  en: /(?<![\p{L}\p{N}])(?:not|never|no)\s+(?:(?:yet|still|ever|longer)\s+)?$/iu,
+/** A negation earlier in the same clause, in the page's language, keeps a
+ *  good state from reading good: «ikke kjørt i prod», "never deployed in
+ *  prod". A clause starts at the segment start or after `,` `;` `:` or the
+ *  conjunction («men», "but"); a tag is no clause end. So «ikke opprettet,
+ *  men i prod» reads good, and «Ikke pushet, deployet eller kjørt i prod»
+ *  does too: a comma list loses its negation (the known limit). A word
+ *  that starts with one («ikke-overlapp», "no-op") negates nothing. */
+const CLAUSE_END_RES: Record<QuestionLanguage, RegExp> = {
+  no: /[,;:]|(?<![\p{L}\p{N}])men(?![\p{L}\p{N}])/giu,
+  en: /[,;:]|(?<![\p{L}\p{N}])but(?![\p{L}\p{N}])/giu,
 };
+const NEGATION_RES: Record<QuestionLanguage, RegExp> = {
+  no: /(?<![\p{L}\p{N}])(?:ikke|aldri|ingen)(?![\p{L}\p{N}-])/iu,
+  en: /(?<![\p{L}\p{N}])(?:not|never|no|cannot)(?![\p{L}\p{N}-])|\p{L}n['’]t(?![\p{L}\p{N}])/iu,
+};
+
+/** Whether the clause `before` ends in (the text up to a phrase) holds a negation. */
+function negatedInClause(before: string, lang: QuestionLanguage): boolean {
+  let start = 0;
+  for (const m of before.matchAll(CLAUSE_END_RES[lang])) start = m.index + m[0].length;
+  return NEGATION_RES[lang].test(before.slice(start));
+}
 
 function toneOf(lang: QuestionLanguage, phrase: string): StatusTone {
   const p = phrase.toLowerCase();
@@ -173,8 +185,8 @@ const VOID_TAG_RE = /^<(br|img|hr|input|wbr)\b|\/>$/i;
  * (`<span class="fc-mark">`) or `<em>` inside a phrase changes nothing: the
  * phrase is coloured piecewise, one span per text run, in the tone of the
  * whole. Never matched: text inside `<code>`, `<a>`, a `.pill` or a chip
- * button. A good phrase right after a negation word
- * (`NEGATION_BEFORE_RES`) is muted instead.
+ * button. A good phrase with a negation earlier in its clause
+ * (`negatedInClause`) is muted instead.
  */
 export function markStatePhrases(html: string, lang: QuestionLanguage): string {
   const parts = html.split(/(<[^>]*>)/);
@@ -214,7 +226,7 @@ export function markStatePhrases(html: string, lang: QuestionLanguage): string {
   const ranges = new Map<number, { start: number; end: number; tone: StatusTone }[]>();
   for (const m of stream.matchAll(re)) {
     let tone = toneOf(lang, m[0]);
-    if (tone === "good" && NEGATION_BEFORE_RES[lang].test(stream.slice(0, m.index))) tone = "muted";
+    if (tone === "good" && negatedInClause(stream.slice(0, m.index), lang)) tone = "muted";
     // One range per text run the phrase covers.
     for (let i = m.index; i < m.index + m[0].length; ) {
       const { part } = owner[i]!;

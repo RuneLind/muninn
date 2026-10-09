@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   FIRST_SENTENCE_MAX,
+  SENTENCE_CANDIDATES_MAX,
   markStatePhrases,
   parseStatusRow,
   splitFirstSentence,
@@ -357,7 +358,7 @@ describe("visibleText counts what a reader sees", () => {
 
 // ── Fix round 2 ──────────────────────────────────────────────────────────────
 
-describe("state phrases: a negation counts only right before the phrase (V1)", () => {
+describe("state phrases: a negation in an earlier clause does not mute (V1)", () => {
   const good = (phrase: string) => `<span class="sr-state sr-good">${phrase}</span>`;
   test("a negation a negative phrase used does not mute a later «i prod»", () => {
     expect(markStatePhrases("ikke opprettet, men i prod", "no")).toBe(
@@ -374,7 +375,7 @@ describe("state phrases: a negation counts only right before the phrase (V1)", (
   test("only the page's own language negates", () => {
     expect(markStatePhrases("Jobben er no i prod", "no")).toBe(`Jobben er no ${good("i prod")}`);
   });
-  test("a negation right before, or one adverb before, still mutes", () => {
+  test("a negation in the same clause still mutes", () => {
     expect(markStatePhrases("ikke ennå i prod", "no")).toBe('ikke ennå <span class="sr-state sr-muted">i prod</span>');
     expect(markStatePhrases("not yet in prod", "en")).toBe('not yet <span class="sr-state sr-muted">in prod</span>');
     expect(markStatePhrases("<em>ikke</em> i prod", "no")).toBe('<em><span class="sr-state sr-muted">ikke</span></em><span class="sr-state sr-muted"> i prod</span>');
@@ -443,5 +444,82 @@ describe("state phrases: pins (V6, V9)", () => {
       '<span class="sr-value">oppgave 3 <span class="sr-state sr-warn">merget, ikke </span>' +
         '<span class="fc-mark fc-mark-ok" data-fact="1"><span class="sr-state sr-warn">i prod</span></span><button',
     );
+  });
+});
+
+// ── Class check: clause scope ────────────────────────────────────────────────
+
+describe("state phrases: a negation mutes a good phrase in its own clause (class check)", () => {
+  const good = (p: string) => `<span class="sr-state sr-good">${p}</span>`;
+  const muted = (p: string) => `<span class="sr-state sr-muted">${p}</span>`;
+  // A clause starts at the segment start or after `,` `;` `:` or `men`/`but`.
+  const table: [string, "no" | "en", string][] = [
+    ["i prod", "no", good("i prod")],
+    ["ikke i prod", "no", muted("ikke i prod")],
+    ["ikke ennå i prod", "no", `ikke ennå ${muted("i prod")}`],
+    ["not yet in prod", "en", `not yet ${muted("in prod")}`],
+    ["ikke kjørt i prod", "no", `ikke kjørt ${muted("i prod")}`],
+    ["ikke deployet i prod", "no", `ikke deployet ${muted("i prod")}`],
+    ["ikke rullet ut i prod", "no", `ikke rullet ut ${muted("i prod")}`],
+    ["ikke helt i prod", "no", `ikke helt ${muted("i prod")}`],
+    ["Ikke sett i prod", "no", `Ikke sett ${muted("i prod")}`],
+    ["ingen endring i prod", "no", `ingen endring ${muted("i prod")}`],
+    ["never deployed in prod", "en", `never deployed ${muted("in prod")}`],
+    ["not deployed in prod", "en", `not deployed ${muted("in prod")}`],
+    ["wasn't deployed in prod", "en", `wasn't deployed ${muted("in prod")}`],
+    ["no rollout in prod", "en", `no rollout ${muted("in prod")}`],
+    // A negation is a whole word.
+    ["nothing changed in prod", "en", `nothing changed ${good("in prod")}`],
+    ["nano build in prod", "en", `nano build ${good("in prod")}`],
+    ["ikke-overlapp i prod", "no", `ikke-overlapp ${good("i prod")}`],
+    ["no-op in prod", "en", `no-op ${good("in prod")}`],
+    ["cannot run in prod", "en", `cannot run ${muted("in prod")}`],
+    ["<em>ikke</em> i prod", "no", `<em>${muted("ikke")}</em>${muted(" i prod")}`],
+    ["<em>ikke</em> kjørt i prod", "no", `<em>ikke</em> kjørt ${muted("i prod")}`],
+    ["ikke kjørt<br>i prod", "no", `ikke kjørt<br>${muted("i prod")}`],
+    ["ikke <code>x</code> i prod", "no", `ikke <code>x</code> ${muted("i prod")}`],
+    ["ikke opprettet, men i prod", "no", `${muted("ikke opprettet")}, men ${good("i prod")}`],
+    ["ikke opprettet men i prod", "no", `${muted("ikke opprettet")} men ${good("i prod")}`],
+    ["not merged but in prod", "en", `not merged but ${good("in prod")}`],
+    ["ikke i prod for test, i prod for main", "no", `${muted("ikke i prod")} for test, ${good("i prod")} for main`],
+    ["PR ikke nødvendig, i prod", "no", `PR ikke nødvendig, ${good("i prod")}`],
+    ["ingen feil, i prod", "no", `ingen feil, ${good("i prod")}`],
+    ["ikke merget; i prod", "no", `ikke merget; ${good("i prod")}`],
+    ["ikke klart: i prod", "no", `ikke klart: ${good("i prod")}`],
+    ["No regressions, in prod", "en", `No regressions, ${good("in prod")}`],
+    ["deployet, ikke merget, i prod", "no", `deployet, ikke merget, ${good("i prod")}`],
+    // Known limit: the comma ends the clause, so the list's negation is lost.
+    ["Ikke pushet, deployet eller kjørt i prod", "no", `Ikke pushet, deployet eller kjørt ${good("i prod")}`],
+    // A negation in the other language does not mute.
+    ["ikke i prod", "en", "ikke i prod"],
+    ["not in prod", "no", "not in prod"],
+    ["ikke kjørt in prod", "en", `ikke kjørt ${good("in prod")}`],
+    ["not deployed i prod", "no", `not deployed ${good("i prod")}`],
+    ["i prod-miljøet", "no", "i prod-miljøet"],
+  ];
+  for (const [input, lang, expected] of table) {
+    test(`${lang}: ${input}`, () => expect(markStatePhrases(input, lang)).toBe(expected));
+  }
+});
+
+describe("first sentence: pins (class check round)", () => {
+  const sentences = (n: number) => Array.from({ length: n }, (_, i) => `Sentence number ${i + 1} is here.`).join(" ");
+  const acceptAt = (n: number) => (first: string) => (first.match(/is here\./g) ?? []).length === n;
+  test(`a split at end ${SENTENCE_CANDIDATES_MAX} is tried, one at end ${SENTENCE_CANDIDATES_MAX + 1} is not`, () => {
+    expect(SENTENCE_CANDIDATES_MAX).toBe(20);
+    expect(splitFirstSentence(sentences(25), acceptAt(20))?.first).toBe(sentences(20));
+    expect(splitFirstSentence(sentences(25), acceptAt(21))).toBeNull();
+  });
+  const holds: [string, string][] = [
+    ["Abonnementet koster kr. **500** per måned. Resten.", "Abonnementet koster kr. **500** per måned."],
+    ["Vi ringer i morgen til Dr. _Hansen_ om saken. Resten.", "Vi ringer i morgen til Dr. _Hansen_ om saken."],
+    ["It shipped first in the U.S. (mostly) this year. Rest.", "It shipped first in the U.S. (mostly) this year."],
+  ];
+  for (const [text, first] of holds) {
+    test(`the gate reads the first letter or digit after the dot: ${first}`, () =>
+      expect(splitFirstSentence(text)?.first ?? null).toBe(first));
+  }
+  test("the gate reads the first letter or digit after the dot: `U.S. (Then` splits", () => {
+    expect(splitFirstSentence("The product launched in the U.S. (Then it spread.) Rest.")?.first).toBe("The product launched in the U.S.");
   });
 });
