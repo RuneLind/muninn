@@ -16,6 +16,8 @@
 import { lineCodeSpanRanges } from "./code-spans.ts";
 import { isCalendarDay } from "./calendar-day.ts";
 import { ordinals } from "./block-renderer.ts";
+import { normalizeRoleKey, roleLaneLabel } from "./lane-roles.ts";
+import type { QuestionLanguage } from "./question-labels.ts";
 
 export type Block =
   | CodeBlock
@@ -177,7 +179,7 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // `normalizeLaneKind`), `who` the lane's label, `since` a `YYYY-MM-DD` the
   // reader ages client-side. Wiki-only, like `Historic`.
   NextMoves: [],
-  Lane: ["kind", "who", "since"],
+  Lane: ["kind", "who", "role", "since"],
   // One prod query: `csv`/`sql` name files beside the page, `uses` is a
   // comma-separated list. Wiki-only; see `src/format/query-block.ts`.
   Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
@@ -379,10 +381,15 @@ export interface NextMovesLane {
   kind: LaneKind;
   /** False when the source `kind` was unknown or missing (read as `waiting`). */
   known: boolean;
-  /** `who`, trimmed, else the kind's default label. Unescaped. */
+  /** The label every surface shows (D15): from `role` when the lane has one
+   *  (`roleLaneLabel`, in the wiki's language), else `who`, trimmed, else the
+   *  kind's default. Unescaped. */
   label: string;
   /** `who` as authored (trimmed), or null when the lane has none. */
   who: string | null;
+  /** `role` as a role key (`normalizeRoleKey`: trimmed, lower-cased), or null
+   *  when the lane has none or it is not a key. */
+  role: string | null;
   /** `since` as a `YYYY-MM-DD` calendar day (an ISO value, or the house
    *  `DD.MM.YYYY` normalised), else null. */
   since: string | null;
@@ -435,13 +442,21 @@ function laneSteps(children: Block[]): string[] {
   return items;
 }
 
-export function laneFromAttrs(attrs: Record<string, string>, children: Block[]): NextMovesLane {
+/** One lane as every surface reads it. `language` is the wiki's: it words a
+ *  role lane's label («Venter på fag»); a surface that knows no wiki reads `en`. */
+export function laneFromAttrs(
+  attrs: Record<string, string>,
+  children: Block[],
+  language?: QuestionLanguage,
+): NextMovesLane {
   const { kind, known } = normalizeLaneKind(attrs.kind);
   const who = attrs.who?.trim() || null;
-  const label = who ?? LANE_DEFAULT_LABEL[kind];
+  const role = normalizeRoleKey(attrs.role);
+  // A lane with no `role=` keeps its `who` label (D16).
+  const label = role ? roleLaneLabel(kind, role, language) : (who ?? LANE_DEFAULT_LABEL[kind]);
   const since = parseLaneSince(attrs.since);
   const sinceRaw = since === null && attrs.since?.trim() ? attrs.since.trim() : null;
-  return { kind, known, label, who, since, sinceRaw, items: laneSteps(children), children };
+  return { kind, known, label, who, role, since, sinceRaw, items: laneSteps(children), children };
 }
 
 /** Does a lane list carry a task marker? The web renders such a list with the
@@ -457,10 +472,10 @@ export function taskListRows(list: ListBlock): ChecklistRow[] {
 }
 
 /** The `Lane` blocks directly inside a `NextMoves` body, in source order. */
-export function nextMovesLanes(children: Block[]): NextMovesLane[] {
+export function nextMovesLanes(children: Block[], language?: QuestionLanguage): NextMovesLane[] {
   const out: NextMovesLane[] = [];
   for (const b of children) {
-    if (b.type === "component" && b.name === "Lane") out.push(laneFromAttrs(b.attrs, b.children));
+    if (b.type === "component" && b.name === "Lane") out.push(laneFromAttrs(b.attrs, b.children, language));
   }
   return out;
 }
@@ -481,7 +496,10 @@ export function isSettledSection(b: Block): boolean {
  *  depth: not quoted in code (the parser's rule) and not inside a settled
  *  section ({@link isSettledSection}). `found` is whether any block was seen at
  *  all, counted or not. The one walk the index and the board read. */
-export function countedNextMovesLanes(blocks: Block[]): { lanes: NextMovesLane[]; found: boolean } {
+export function countedNextMovesLanes(
+  blocks: Block[],
+  language?: QuestionLanguage,
+): { lanes: NextMovesLane[]; found: boolean } {
   const lanes: NextMovesLane[] = [];
   let found = false;
   const walk = (bs: Block[], settled: boolean) => {
@@ -489,7 +507,7 @@ export function countedNextMovesLanes(blocks: Block[]): { lanes: NextMovesLane[]
       if (b.type !== "component") continue;
       if (b.name === "NextMoves") {
         found = true;
-        if (!settled) lanes.push(...nextMovesLanes(b.children));
+        if (!settled) lanes.push(...nextMovesLanes(b.children, language));
         continue;
       }
       walk(b.children, settled || isSettledSection(b));

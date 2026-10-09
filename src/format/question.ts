@@ -198,6 +198,19 @@ export function authorGroupsOf(navIdent: string | null, groups: AnswerGroups): s
   return [...groups].filter(([, members]) => members.has(ident)).map(([name]) => name).sort();
 }
 
+/** The viewer's role keys (D30): the groups holding the session's NAV ident;
+ *  with auth off (no session) the groups holding `WIKI_ANSWER_OWNER`'s ident
+ *  when it is written `Name (IDENT)`. A session with no ident (`local`) has
+ *  none. Keys only, never a member. */
+export function viewerGroupKeys(
+  session: { navIdent: string | null } | null,
+  owner: string | null | undefined,
+  groups: AnswerGroups,
+): string[] {
+  const ident = session ? session.navIdent : owner ? (parseQuestionTarget(owner)?.ident ?? null) : null;
+  return authorGroupsOf(ident, groups);
+}
+
 /**
  * Did the page ask this author (D2, the O2 v1 rule)? A target matches on the
  * NAV ident when both the target and the author carry one, else on the

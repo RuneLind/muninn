@@ -25,9 +25,10 @@
  */
 
 import { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS } from "../../../wiki/code-refs.ts";
-import type { IdLabels } from "../../../format/reader-lens.ts";
+import { READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
 import { DECISION_ID_RE } from "../../../format/question.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../../../format/question-labels.ts";
+import { laneWords } from "../../../format/lane-roles.ts";
 import { revealElement } from "./wiki-hash-target.ts";
 import { localStore } from "./wiki-local-store.ts";
 
@@ -118,7 +119,8 @@ interface MovesTally {
   oldestAgeDays: number | null;
 }
 
-/** The lanes that count: the block's OWN lanes (its grid and strips) of every
+/** The lanes that count: the block's OWN lanes (its grid and strips, or the
+ *  reader's compact list) of every
  *  `.next-moves` block that is neither inside another block nor inside a
  *  settled section (`SETTLED_SECTION_SELECTOR`). The index walk
  *  (`countedNextMovesLanes`) never descends into a block either. */
@@ -126,7 +128,11 @@ function countedLanes(article: HTMLElement): HTMLElement[] {
   return Array.from(article.querySelectorAll<HTMLElement>(".next-moves"))
     .filter((block) => !block.parentElement?.closest(".next-moves") && !block.closest(SETTLED_SECTION_SELECTOR))
     .flatMap((block) =>
-      Array.from(block.querySelectorAll<HTMLElement>(":scope > .nm-grid > .nm-lane, :scope > .nm-strips > .nm-lane")),
+      Array.from(
+        block.querySelectorAll<HTMLElement>(
+          ":scope > .nm-grid > .nm-lane, :scope > .nm-strips > .nm-lane, :scope > .nm-lanes > .nm-lane",
+        ),
+      ),
     );
 }
 
@@ -183,6 +189,71 @@ function decorateLaneAges(article: HTMLElement, now: Date): void {
       else li.append(chip());
     });
   });
+}
+
+// ── Role lanes (D15, D18, D30) ──────────────────────────────────────────────
+
+export const ROLE_VIEW_CLASS = "wiki-role-view";
+export const LANE_MINE_CLASS = "nm-mine";
+export const LANE_MINE_MARK_CLASS = "nm-mine-mark";
+
+/** The viewer's roles, as the page payload's `reader.roles` carries them:
+ *  keys only, never a member (D23). */
+export interface LaneRoles {
+  keys: string[];
+  viewer: string[];
+  preview: boolean;
+}
+
+/**
+ * Put the lanes of `roles` first in every «Oppfølging» block and mark them
+ * «deg» («til deg» on a waiting lane); the rest keep their authored order.
+ * The real view and «Se som rolle» both call this, so the two cannot differ.
+ * Idempotent: the authored order is kept on each lane (`data-nm-order`).
+ */
+export function applyLaneRoles(article: ParentNode, roles: readonly string[]): void {
+  article.querySelectorAll<HTMLElement>(".next-moves.nm-compact > .nm-lanes").forEach((list) => {
+    const lanes = Array.from(list.children).filter((el): el is HTMLElement => el.classList.contains("nm-lane"));
+    lanes.forEach((l, i) => {
+      if (l.dataset.nmOrder === undefined) l.dataset.nmOrder = String(i);
+    });
+    lanes.sort((a, b) => Number(a.dataset.nmOrder) - Number(b.dataset.nmOrder));
+    const words = laneWords(list.parentElement?.dataset.lang === "no" ? "no" : "en");
+    const mine = (l: HTMLElement) => l.dataset.role !== undefined && roles.includes(l.dataset.role);
+    for (const l of [...lanes.filter(mine), ...lanes.filter((l) => !mine(l))]) list.appendChild(l);
+    for (const l of lanes) {
+      l.querySelector(`:scope > .nm-head > .${LANE_MINE_MARK_CLASS}`)?.remove();
+      l.classList.toggle(LANE_MINE_CLASS, mine(l));
+      if (!mine(l)) continue;
+      const mark = document.createElement("span");
+      mark.className = LANE_MINE_MARK_CLASS;
+      mark.setAttribute(READER_ONLY_ATTR, "");
+      mark.textContent = l.dataset.kind === "waiting" ? words.mineWaiting : words.mine;
+      l.querySelector(":scope > .nm-head > .nm-who")?.after(mark);
+    }
+  });
+}
+
+/** «Se som rolle» (D18): the admin's display-only switch over the wiki's
+ *  `roleKeys`. It re-runs {@link applyLaneRoles}; no request, no permission. */
+function roleViewControl(article: HTMLElement, roles: LaneRoles, lang: QuestionLanguage): HTMLElement {
+  const words = laneWords(lang);
+  const label = document.createElement("label");
+  label.className = ROLE_VIEW_CLASS;
+  const select = document.createElement("select");
+  const self = document.createElement("option");
+  self.value = "";
+  self.textContent = words.viewAsSelf;
+  select.append(self);
+  for (const key of roles.keys) {
+    const o = document.createElement("option");
+    o.value = key;
+    o.textContent = key;
+    select.append(o);
+  }
+  select.addEventListener("change", () => applyLaneRoles(article, select.value ? [select.value] : roles.viewer));
+  label.append(`${words.viewAs} `, select);
+  return label;
 }
 
 // ── Counted pills (D8) ───────────────────────────────────────────────────────
@@ -268,6 +339,8 @@ export interface ReportBlockOptions {
   language?: QuestionLanguage;
   /** The wiki's `idLabels`, for the counted pills' nouns. */
   idLabels?: IdLabels;
+  /** The page payload's `reader.roles`: whose lanes go first, and «Se som rolle». */
+  roles?: LaneRoles;
 }
 
 export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions = {}): void {
@@ -275,7 +348,9 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
   const row = wrap.querySelector<HTMLElement>(".wiki-article-head .wiki-meta-row");
   if (!article || !row) return;
   row
-    .querySelectorAll(`.${HISTORIC_PILL_CLASS}, .${MOVES_PILL_CLASS}, .${COUNT_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS}`)
+    .querySelectorAll(
+      `.${HISTORIC_PILL_CLASS}, .${MOVES_PILL_CLASS}, .${COUNT_PILL_CLASS}, .${LINE_REFS_TOGGLE_CLASS}, .${ROLE_VIEW_CLASS}`,
+    )
     .forEach((el) => el.remove());
 
   const pills: HTMLButtonElement[] = [];
@@ -297,6 +372,8 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
     jumpPill(HISTORIC_PILL_CLASS, historicPillLabel(historic.length), "Jump to the first historic section", historic[0]!);
   }
 
+  // The viewer's lanes first (D15), before the pills pick each kind's first lane.
+  applyLaneRoles(article, opts.roles?.viewer ?? []);
   const now = new Date();
   const moves = readMoves(article, now);
   for (const kind of ["you", "waiting", "draft"] as const) {
@@ -331,6 +408,11 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
     if (after) after.after(pill);
     else row.prepend(pill);
     after = pill;
+  }
+
+  // «Se som rolle»: an admin, a wiki with role keys, a page with a role lane.
+  if (opts.roles?.preview && opts.roles.keys.length && article.querySelector(".nm-compact .nm-lane[data-role]")) {
+    row.appendChild(roleViewControl(article, opts.roles, lang));
   }
 
   if (article.querySelector(`span.${CODE_REF_GROUP_CLASS}`)) {

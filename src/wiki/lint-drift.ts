@@ -32,6 +32,7 @@
  * staleness check.
  */
 
+import type { QuestionLanguage } from "../format/question-labels.ts";
 import {
   countedNextMovesLanes,
   parseAttrs,
@@ -223,6 +224,8 @@ export function isCaseRow(row: string[]): boolean {
 export interface DriftContext {
   /** Today, `YYYY-MM-DD`, Europe/Oslo. */
   today: string;
+  /** The wiki's `language`, which words a role lane's label (D15). */
+  language?: QuestionLanguage;
 }
 
 /** A `<Lane …>` opener line as the parser takes one: the tag owns the line
@@ -281,7 +284,7 @@ export function checkDrift(page: WikiPageMeta, content: string, ctx: DriftContex
     if (b.type === "component" && b.name === "Lane") allLanes.push(b);
   });
   let lineOf: number[] | null | undefined;
-  for (const lane of countedNextMovesLanes(blocks).lanes) {
+  for (const lane of countedNextMovesLanes(blocks, ctx.language).lanes) {
     const age = lane.since === null ? 0 : daysBetween(lane.since, ctx.today);
     if (lane.kind !== "draft" || lane.items.length === 0 || age <= DRAFT_LANE_MAX_DAYS) continue;
     lineOf ??= laneLines(content, allLanes);
@@ -342,6 +345,6 @@ export function checkDrift(page: WikiPageMeta, content: string, ctx: DriftContex
 }
 
 /** Build the per-run context: today, Europe/Oslo. */
-export function driftContext(nowMs: number): DriftContext {
-  return { today: todayOslo(nowMs) };
+export function driftContext(nowMs: number, language?: QuestionLanguage): DriftContext {
+  return { today: todayOslo(nowMs), ...(language ? { language } : {}) };
 }

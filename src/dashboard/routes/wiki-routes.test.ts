@@ -363,7 +363,13 @@ describe("GET /api/wiki/html", () => {
   test("/api/wiki/page carries the reader payload and renders the id nouns", async () => {
     await Bun.write(
       path.join(root, ".wiki-reader.json"),
-      JSON.stringify({ language: "no", defaultLens: "oversikt", idLabels: { D: { one: "Beslutning", other: "beslutninger" } } }),
+      JSON.stringify({
+        language: "no",
+        defaultLens: "oversikt",
+        idLabels: { D: { one: "Beslutning", other: "beslutninger" } },
+        // An ident-shaped key is dropped at parse (D32: keys only).
+        roleKeys: ["fag", "Utvikler", "X111111"],
+      }),
     );
     await Bun.write(
       path.join(root, "concepts/Lens Page.mdx"),
@@ -377,6 +383,8 @@ describe("GET /api/wiki/html", () => {
       idLabels: { D: { one: "Beslutning", other: "beslutninger" } },
       defaultLens: "overview",
       agentLens: false,
+      // Auth off with no owner: no viewer role; auth off is admin, so «Se som rolle».
+      roles: { keys: ["fag", "utvikler"], viewer: [], preview: true },
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });

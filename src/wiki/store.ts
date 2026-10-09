@@ -28,6 +28,7 @@ import {
 import { parseCullLabels, type CullLabels } from "../dashboard/views/components/wiki-cull-view.ts";
 import { parseQuestionLanguage, type QuestionLanguage } from "../format/question-labels.ts";
 import { parseDefaultLens, parseIdLabels, type IdLabels, type StoredLens } from "../format/reader-lens.ts";
+import { parseRoleKeys } from "../format/lane-roles.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -209,6 +210,14 @@ export interface WikiReaderConfig {
    * Agent lens.
    */
   defaultLens?: StoredLens | null;
+  /**
+   * The role keys a `<Lane role=>` and a role entry in `to=`/`questions_to:`
+   * may name (`roleKeys`, D32): `WIKI_ANSWER_GROUPS` keys with no members and
+   * no idents. The linter checks against it and «Se som rolle» lists it. A bad
+   * entry warns and is dropped. Optional so hand-built configs stay valid;
+   * `readWikiReaderConfig` always sets it.
+   */
+  roleKeys?: string[];
 }
 
 /**
@@ -2026,6 +2035,10 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
       reason: `${defaultLens.warning} — ignoring it`,
     });
   }
+  const roleKeys = parseRoleKeys(obj.roleKeys);
+  for (const reason of roleKeys.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "roleKeys", reason });
+  }
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
@@ -2053,6 +2066,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     language: language.language,
     idLabels: idLabels.labels,
     defaultLens: defaultLens.lens,
+    roleKeys: roleKeys.keys,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

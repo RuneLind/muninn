@@ -205,18 +205,30 @@ export interface ReaderPayload {
   defaultLens: StoredLens | null;
   /** The Agent lens is offered on this page for this viewer (D7). */
   agentLens: boolean;
+  /** Role lanes (D30, D32, D23): the wiki's `roleKeys`, the viewer's group
+   *  keys (whose lanes the reader puts first and marks «deg»), and whether the
+   *  viewer gets «Se som rolle» (admin). Keys only, never a group member. */
+  roles: ViewerRoles;
+}
+
+export interface ViewerRoles {
+  keys: string[];
+  viewer: string[];
+  preview: boolean;
 }
 
 export function readerPayload(
   wiki: string | undefined,
   readerConfig: WikiReaderConfig | null | undefined,
   instanceDefault: WikiDefaultLens | undefined,
+  viewer: { roles: string[]; admin: boolean } = { roles: [], admin: false },
 ): ReaderPayload {
   return {
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     idLabels: readerConfig?.idLabels ?? {},
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
     agentLens: false,
+    roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
   };
 }
 

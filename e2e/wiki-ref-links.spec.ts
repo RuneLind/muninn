@@ -203,6 +203,13 @@ test.afterAll(async () => {
   if (base) await rm(base, { recursive: true, force: true });
 });
 
+/** The quoted title sits in a lane step, and the reader's «Oppfølging» lanes
+ *  start closed (reader lenses PR 3): open it the way a reader would. */
+async function openLane(page: Page): Promise<void> {
+  await page.locator(".wiki-article .nm-lane").first().locator(":scope > .nm-head").click();
+  await expect(page.locator(".wiki-article .nm-lane").first()).toHaveAttribute("open", "");
+}
+
 test.describe("Wiki reader: in-page references", () => {
   test("ids and quoted titles the page defines become links; nothing else does", async ({ page }) => {
     const seen = await openPage(page);
@@ -271,6 +278,7 @@ test.describe("Wiki reader: in-page references", () => {
 
   test("clicking a quoted title opens its fold; the browser's Back also returns", async ({ page }) => {
     const seen = await openPage(page);
+    await openLane(page);
     await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
     const title = page.locator(".wiki-article a.wiki-ref", { hasText: "«Q2-oppskrift»" });
     await title.hover();
@@ -338,6 +346,7 @@ test.describe("Wiki reader: in-page references", () => {
     });
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=refs`);
     await expect(page.locator(".wiki-article a.wiki-ref").first()).toBeAttached();
+    await openLane(page);
     await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 150));
     const fetchesBefore = pageFetches;
     await page.locator(".wiki-article a.wiki-ref", { hasText: "«Q2-oppskrift»" }).click();
