@@ -217,8 +217,9 @@ test.describe("Wiki reader: Tldr, Timeline, DecisionLog, RunChecklist", () => {
   test("DecisionLog: an anchor and a chip per id; the second log's repeat is suffixed", async ({ page }) => {
     const seen = await openPage(page);
     const ids = await page.locator("section.decision-log .dl-item[id]").evaluateAll((lis) => lis.map((li) => li.id));
-    expect(ids).toEqual(["d1", "d2", "d3", "d4", "s1", "d1-2"]);
-    await expect(page.locator("section.decision-log .dl-id")).toHaveText(["D1", "D2", "D3", "D4", "S1", "D1"]);
+    // The reader lists a log's decisions newest first in every lens (D45).
+    expect(ids).toEqual(["d4", "d3", "d2", "d1", "s1", "d1-2"]);
+    await expect(page.locator("section.decision-log .dl-id")).toHaveText(["D4", "D3", "D2", "D1", "S1", "D1"]);
     await expect(page.locator(".dl-item.dl-noid")).toHaveText("Et punkt uten id");
     await expect(page.locator(".dl-item.dl-noid .dl-id")).toHaveCount(0);
     // Struck and superseded dim; the others do not.

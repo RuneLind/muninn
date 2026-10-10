@@ -1,6 +1,6 @@
 /**
- * Overview's compact DecisionLog and CaseBoard (reader lenses PR 10, D41, D42,
- * acceptance 11).
+ * The reader's compact DecisionLog and CaseBoard (reader lenses PR 10, D41,
+ * D42, acceptance 11), the same in All and Overview since D45.
  *
  * What only a real page can answer: that Overview moves the newest decision
  * first in the DOM — so a mouse selection and Tab follow the screen, and a
@@ -12,9 +12,11 @@
  * opens the note, that the `ok` group shows one row and «+ N til», that both
  * folds open in Overview and a closed one opens again on reload (not stored),
  * while a fold whose block Overview hides and a click on the lens already
- * shown open none, that a #case hash opens its row, that a reveal in All does
- * not carry into Overview, that a fold's size leaves out the reader's own
- * text, and that All renders every item as written.
+ * shown open none, that a #case hash opens its row, that a fold's size leaves
+ * out the reader's own text, and (D45) that All renders both blocks compact
+ * too — newest first, five-cap, case lines — showing the `none` rows Overview
+ * hides, keeps the order across lens switches, and reveals a capped decision
+ * or a folded case from an id link or a hash load.
  *
  * One Norwegian wiki with `idLabels`, instance default Overview, two pages.
  * Synthetic fixtures.
@@ -54,6 +56,8 @@ const PAGE = [
   "# Compact page",
   "",
   "Se D1 for den eldste beslutningen.",
+  "",
+  "Se MEL-1 og MEL-5 for to av sakene.",
   "",
   '<Fold title="Beslutninger">',
   "",
@@ -400,22 +404,83 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     expectClean(seen);
   });
 
-  test("All renders both blocks as written: authored order, the tail in the text, every row, folds closed", async ({ page }) => {
+  test("D45: All renders the DecisionLog compact — newest first, five shown, dates, «mer»; folds as authored", async ({ page }) => {
     const seen = await open_(page, "&lens=all");
     expect(await lensOf(page)).toBe("all");
+    // Folds stay as authored in All: Overview alone opens them.
     await expect(fold(page, "Beslutninger")).not.toHaveAttribute("open", /.*/);
     await fold(page, "Beslutninger").locator(":scope > summary").click();
+    expect(await visibleDecisionOrder(page)).toEqual(["d7", "d6", "d5", "d4", "d3"]);
+    const d7 = page.locator("li.dl-item#d7");
+    await expect(d7.locator(".dl-when")).toHaveText("Fag, 07.10 · runde 7");
+    await expect(d7.locator(".dl-tail")).toBeHidden();
+    await expect(d7.locator(".dl-rest")).toBeHidden();
+    await d7.locator("button.dl-more").click();
+    await expect(d7.locator(".dl-rest")).toBeVisible();
+    const all = page.locator(".wiki-article button.dl-all");
+    await expect(all).toHaveText("Vis alle 7 beslutninger");
+    await all.click();
+    expect(await visibleDecisionOrder(page)).toEqual(["d7", "d6", "d5", "d4", "d3", "d2", "d1"]);
+    await expect(all).toHaveText("Vis bare de 5 nyeste");
+    expectClean(seen);
+  });
+
+  test("D45: All renders the CaseBoard compact and shows the none rows Overview hides", async ({ page }) => {
+    const seen = await open_(page, "&lens=all");
     await fold(page, "Saker").locator(":scope > summary").click();
-    expect(await visibleDecisionOrder(page)).toEqual(["d1", "d2", "d3", "d4", "d5", "d6", "d7"]);
-    await expect(page.locator("li.dl-item#d1 .dl-tail")).toHaveText("Fag, 01.10 (runde 1).");
-    await expect(page.locator("li.dl-item#d1 .dl-when")).toBeHidden();
-    await expect(page.locator(".wiki-article button.dl-all")).toBeHidden();
-    await expect(page.locator(".cb-row#case-mel-1 .cb-note")).toBeVisible();
-    await expect(page.locator(".cb-row#case-mel-1 .cb-line")).toBeHidden();
-    await expect(page.locator(".cb-row#case-mel-6")).toBeVisible();
+    const hold = page.locator(".cb-row#case-mel-1");
+    await expect(hold.locator(".cb-pill")).toHaveText("holdt ute");
+    await expect(hold.locator(".cb-line .cb-head")).toHaveText("Person 1, 2025");
+    await expect(hold.locator(".cb-note")).toBeHidden();
+    await hold.locator("button.cb-more").click();
+    await expect(hold.locator(".cb-note")).toBeVisible();
+    await expect(hold.locator(".cb-refs")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-4")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-5")).toBeHidden();
+    await expect(page.locator(".wiki-article button.cb-okmore")).toHaveText("+ 2 til");
+    // The none rows: shown in All, with no count line; hidden in Overview, with one.
     await expect(page.locator('.cb-group[data-status="none"]')).toBeVisible();
-    // The labels apply in every lens.
-    await expect(page.locator(".cb-row#case-mel-1 .cb-pill")).toHaveText("holdt ute");
+    await expect(page.locator(".cb-row#case-mel-7")).toBeVisible();
+    await expect(page.locator(".cb-lens-note")).toBeHidden();
+    await expect(page.locator(".wiki-article .cb-strip")).toHaveText("1 holdt ute · 1 venter · 1 feil årsavregning · 2 ikke kandidat · 3 ok");
+    await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
+    await expect(page.locator(".cb-row#case-mel-7")).toBeHidden();
+    await expect(page.locator(".cb-lens-note")).toHaveText("2 saker med status «ikke kandidat» er skjult");
+    expectClean(seen);
+  });
+
+  test("D45: in All an id link and a hash load reveal a capped decision and a folded case, staying in All", async ({ page }) => {
+    let seen = await open_(page, "&lens=all", "#d1");
+    const d1 = page.locator("li.dl-item#d1");
+    await expect(d1).toBeVisible();
+    await expect(d1).toBeInViewport();
+    expect(await lensOf(page)).toBe("all");
+    expectClean(seen);
+
+    seen = await open_(page, "&lens=all");
+    await expect(d1).toBeHidden();
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "D1" }).first().click();
+    await expect(d1).toBeVisible();
+    await expect(d1).toBeInViewport();
+    await expect(page.locator(".wiki-article button.dl-all")).toHaveText("Vis bare de 5 nyeste");
+    expect(await lensOf(page)).toBe("all");
+    expectClean(seen);
+
+    seen = await open_(page, "&lens=all", "#case-mel-5");
+    await expect(page.locator(".cb-row#case-mel-5")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-5 .cb-note")).toBeVisible();
+    expect(await lensOf(page)).toBe("all");
+    expectClean(seen);
+
+    seen = await open_(page, "&lens=all");
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "MEL-1" }).first().click();
+    await expect(page.locator(".cb-row#case-mel-1 .cb-note")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-1")).toBeInViewport();
+    await expect(page.locator(".cb-row#case-mel-1 button.cb-more")).toHaveText("mindre");
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "MEL-5" }).first().click();
+    await expect(page.locator(".cb-row#case-mel-5")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-5")).toBeInViewport();
+    expect(await lensOf(page)).toBe("all");
     expectClean(seen);
   });
 
@@ -425,7 +490,9 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await fold(page, "Saker").locator(":scope > summary").click();
     await page.locator(".wiki-lens-switch button[data-lens='all']").click();
     await expect(fold(page, "Beslutninger")).toHaveAttribute("open", "");
-    await expect(page.locator("li.dl-item#d1 .dl-tail")).toBeVisible();
+    // D45: All shows the same compact log, its five-cap included.
+    expect(await visibleDecisionOrder(page)).toEqual(["d7", "d6", "d5", "d4", "d3"]);
+    await expect(page.locator("li.dl-item#d7 .dl-when")).toBeVisible();
     await expect(fold(page, "Saker")).not.toHaveAttribute("open", /.*/);
     await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
     await expect(fold(page, "Saker")).toHaveAttribute("open", "");
@@ -464,11 +531,18 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     }
     expect(rows.slice(0, 7)).toEqual(["d7", "d6", "d5", "s0", "d4", "d3", "s1"]);
 
-    // «Vis alle» sits after the log, and All gets the authored order back.
+    // «Vis alle» sits after the log; D45: switching lenses back and forth keeps
+    // the newest-first order, neither reversing it twice nor restoring the
+    // authored one.
     expect(await page.locator("section.decision-log > :last-child").evaluate((el) => el.className)).toBe("dl-all");
-    await page.locator(".wiki-lens-switch button[data-lens='all']").click();
-    expect(await page.locator(".wiki-article section.decision-log > .dl-list > li").evaluateAll((els) => els.map((e) => e.id))).toEqual([
-      "d1", "d2", "d3", "s0", "d4", "d5", "d6", "d7", "s1",
+    const ids = () => page.locator(".wiki-article section.decision-log > .dl-list > li").evaluateAll((els) => els.map((e) => e.id));
+    for (const lens of ["all", "overview", "all"]) {
+      await page.locator(`.wiki-lens-switch button[data-lens='${lens}']`).click();
+      expect(await ids()).toEqual(listOrder);
+    }
+    // The authored positions ride along, for a peek's copy.
+    expect(await page.locator(".wiki-article section.decision-log > .dl-list > li").evaluateAll((els) => els.map((e) => e.getAttribute("data-dl-order")))).toEqual([
+      "7", "6", "5", "3", "4", "2", "1", "0", "8",
     ]);
     expectClean(seen);
   });
@@ -513,6 +587,8 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
   test("fix round 1, item 8: in All the ok group's rows keep their dashed rule", async ({ page }) => {
     const seen = await open_(page, "&lens=all");
     await fold(page, "Saker").locator(":scope > summary").click();
+    await page.locator(".wiki-article button.cb-okmore").click();
+    await expect(page.locator(".cb-row#case-mel-5")).toBeVisible();
     expect(await page.locator(".cb-row#case-mel-5").evaluate((el) => getComputedStyle(el).borderTopStyle)).toBe("dashed");
     expectClean(seen);
   });
@@ -548,12 +624,12 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     expectClean(seen);
   });
 
-  test("fix round 1, item 11: a reveal in All does not carry «show all» into Overview", async ({ page }) => {
+  test("D45 (was fix round 1, item 11): a reveal in All shows the whole log, and Overview keeps it shown", async ({ page }) => {
     const seen = await open_(page, "&lens=all", "#d1");
     await expect(page.locator("li.dl-item#d1")).toBeVisible();
     await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
-    await expect(page.locator("li.dl-item#d1")).toBeHidden();
-    await expect(page.locator(".wiki-article button.dl-all")).toHaveText("Vis alle 7 beslutninger");
+    await expect(page.locator("li.dl-item#d1")).toBeVisible();
+    await expect(page.locator(".wiki-article button.dl-all")).toHaveText("Vis bare de 5 nyeste");
     expectClean(seen);
   });
 

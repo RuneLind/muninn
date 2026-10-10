@@ -515,8 +515,8 @@ function blockNote(cls: string, text: string): string {
 
 /** One `CaseBoard` row: id link, status pill (its label when `labels=`
  *  names one), owner, note (inline markdown), refs. On the reader the row
- *  also carries Overview's compact line (D42): the note's head and the case's
- *  `kort:` summary; Overview and All pick by class. Every value comes from the
+ *  also carries the reader's compact line (D42): the note's head and the case's
+ *  `kort:` summary, which the reader shows in every lens (D45). Every value comes from the
  *  file and is escaped. */
 function caseRowHtml(c: BoardCase, labels: CaseLabels): string {
   const id = c.anchor
@@ -533,11 +533,11 @@ function caseRowHtml(c: BoardCase, labels: CaseLabels): string {
     ? `<span class="cb-refs">${c.refs.map((r) => `<span class="cb-ref">${escapeHtml(r)}</span>`).join("")}</span>`
     : "";
   // An id link comes first in the row: `CASE_ROW_RE` reads up to it. The
-  // compact line sits before the note, as Overview shows it.
+  // compact line sits before the note, as the reader shows it.
   return `<div class="cb-row"${c.anchor ? ` id="${c.anchor}"` : ""}>${id}${pill}${currentReader ? caseLineHtml(c) : ""}${owner}${note}${refs}</div>`;
 }
 
-/** Overview's compact line for a case (D42): head « · » kort, either part
+/** The reader's compact line for a case (D42): head « · » kort, either part
  *  optional. Reader-only text: the source holds both, in the note and `kort:`. */
 function caseLineHtml(c: BoardCase): string {
   const head = caseNoteHead(c.note);
@@ -546,7 +546,7 @@ function caseLineHtml(c: BoardCase): string {
     head ? `<span class="cb-head">${renderInline(head)}</span>` : "",
     kort ? `<span class="cb-kort">${renderInline(kort)}</span>` : "",
   ].filter(Boolean);
-  // Neither part: no line, and Overview shows the row's note (item 14).
+  // Neither part: no line, and the reader shows the row's note (item 14).
   if (parts.length === 0) return "";
   return `<span class="${CB_LINE_CLASS}" ${READER_ONLY_ATTR}>${parts.join(`<span class="cb-sep"> · </span>`)}</span>`;
 }
@@ -1324,7 +1324,7 @@ function logItemHtml(text: string, nested: string, value: string): string {
   if (!p.id) return `<li class="dl-item dl-noid${dim}"${value}>${itemHtml(p.text)}${nested}</li>`;
   const anchor = anchorSlug(p.id);
   // D41, reader only: a decision item carries `dl-decision`, and its trailing
-  // «<who>, DD.MM (runde N).» becomes a date cell for Overview's compact row,
+  // «<who>, DD.MM (runde N).» becomes a date cell for the reader's compact row,
   // after the text in the DOM as on screen.
   const decision = currentReader && DECISION_ID_RE.test(p.id);
   const tail = decision ? decisionTail(p.text) : null;

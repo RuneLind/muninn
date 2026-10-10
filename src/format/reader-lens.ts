@@ -140,7 +140,6 @@ export const CB_OKMORE_CLASS = "cb-okmore";
 export const CB_EXPANDED_CLASS = "cb-expanded";
 /** The class an article carries in Overview (`lens-` plus the lens). */
 export const LENS_CLASS_PREFIX = "lens-";
-export const OVERVIEW_LENS_CLASS = `${LENS_CLASS_PREFIX}overview`;
 /** Decisions Overview shows before «Vis alle». */
 export const DL_COMPACT_SHOWN = 5;
 export const COMPACT_WORDS: Record<

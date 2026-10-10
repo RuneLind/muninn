@@ -314,14 +314,14 @@ function decodeHash(href: string): string | null {
 }
 
 /** A copy safe to show twice on the page: no ids, no flash, no frames
- *  reloading, no live checkboxes, and none of the Overview lens's decision
+ *  reloading, no live checkboxes, and none of the reader's compact-list
  *  chrome (the «mer» toggle, the «lukket» badge): a peek shows a decision
- *  whole in every lens (D6), and a DecisionLog in its authored order, which
- *  Overview reverses on the page (D41). */
+ *  whole (D6), and a DecisionLog in its authored order, which the page
+ *  reverses (D41, D45). */
 function cloneBare<T extends Node>(n: T): T {
   const c = n.cloneNode(true) as T;
   if (c instanceof Element) {
-    // The reader's lens controls and Overview's compact parts (D6, D41, D42):
+    // The reader's compact-list controls and parts (D6, D41, D42):
     // a peek shows its target whole, as written.
     c.querySelectorAll(
       `.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${DL_WHEN_CLASS}, .${CB_LINE_CLASS}`,
