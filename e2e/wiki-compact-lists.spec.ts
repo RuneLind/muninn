@@ -37,6 +37,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { collapseWithMap, EXPLAIN_FULL_BODY_MAX, locateExcerpt } from "../src/wiki/explain-context.ts";
+import { stripFactWrappers } from "../src/format/markdown-ast.ts";
 
 const PORT = e2ePort("wiki-compact-lists");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -253,6 +255,82 @@ const PLAIN_PAGE = [
   "",
 ].join("\n");
 
+// PR 673 fix round 2: a page over EXPLAIN_FULL_BODY_MAX, so the server has to
+// find a selection in the source rather than send the whole body. Items under
+// 80 characters (the locator's prefix length) and three separators.
+const LOCATE_REL = "plans/locate.mdx";
+const pad = (from: number) =>
+  Array.from(
+    { length: 16 },
+    (_, k) => `Bakgrunnsavsnitt ${from + k} beskriver hvordan årsavregningen ble gjort før omleggingen, uten noen beslutning.`,
+  ).join("\n\n");
+const LOCATE_ITEMS = [
+  "- **D1** — Beslutning nummer 1 gjelder alle saker. Begrunnelse 1. Fag, 01.10 (runde 1).",
+  "- **D2** — Beslutning nummer 2 gjelder alle saker. Begrunnelse 2. Fag, 02.10 (runde 2).",
+  "- **D3**: Beslutning nummer 3 gjelder alle saker. Begrunnelse 3. Fag, 03.10 (runde 3).",
+  "- **D4** Beslutning nummer 4 gjelder alle saker. Begrunnelse 4. Fag, 04.10 (runde 4).",
+  "- **D5** — Beslutning nummer 5 gjelder alle saker. Begrunnelse 5. Fag, 05.10 (runde 5).",
+];
+const LOCATE_PAGE = [
+  "---",
+  "title: Locate page",
+  "type: plan",
+  "---",
+  "",
+  "# Locate page",
+  "",
+  pad(1),
+  "",
+  "Denne siden samler beslutningene om årsavregning for sakene som ble behandlet i fjor og i år.",
+  "",
+  "<DecisionLog>",
+  "",
+  "Loggen gjelder bare 2025.",
+  "",
+  ...LOCATE_ITEMS,
+  "",
+  "</DecisionLog>",
+  "",
+  "Teksten etter loggen forklarer hva som skjer videre med sakene som er holdt ute av lista.",
+  "",
+  pad(101),
+  "",
+].join("\n");
+
+// PR 673 fix round 2, item 3: a page whose only compact block sits in a fold
+// the author left open.
+const OPEN_REL = "plans/open.mdx";
+const OPEN_PAGE = [
+  "---",
+  "title: Open page",
+  "type: plan",
+  "---",
+  "",
+  "# Open page",
+  "",
+  '<Fold title="Beslutninger" open="true">',
+  "",
+  "<DecisionLog>",
+  "",
+  ...[1, 2, 3].map(dl),
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
+/** How the server's locator finds `sel` in `source`: the same two steps as
+ *  `locateExcerpt` (whole collapsed selection, then its first 80 characters),
+ *  over the real `collapseWithMap`. */
+const locatedBy = (source: string, sel: string): "full" | "prefix" | null => {
+  const body = collapseWithMap(stripFactWrappers(source)).collapsed;
+  const needle = collapseWithMap(sel).collapsed.trim();
+  if (!needle) return null;
+  if (body.includes(needle)) return "full";
+  return body.includes(needle.slice(0, 80)) ? "prefix" : null;
+};
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -311,6 +389,8 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, FACT_REL), FACT_PAGE, "utf8");
   await writeFile(path.join(root, "plans", "fact-cases.yaml"), FACT_CASES, "utf8");
   await writeFile(path.join(root, PLAIN_REL), PLAIN_PAGE, "utf8");
+  await writeFile(path.join(root, LOCATE_REL), LOCATE_PAGE, "utf8");
+  await writeFile(path.join(root, OPEN_REL), OPEN_PAGE, "utf8");
   await writeFile(
     path.join(root, ".wiki-reader.json"),
     JSON.stringify({ language: "no", idLabels: { D: { one: "Beslutning", other: "beslutninger" } } }),
@@ -777,7 +857,13 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     }
   });
 
-  test("PR 673 fix round 1, item 2: Explain gets a DecisionLog selection in authored order, rest and tail included", async ({ page }) => {
+  /** Explain's `sel` for the selection `fn` makes, and where the page's own
+   *  selection is after the reader read it. */
+  const explainSel = async (
+    page: Page,
+    fn: () => void,
+    range?: { from: [string, number | string]; to: [string, number | string]; backwards: boolean },
+  ) => {
     const sent: string[] = [];
     await page.route("**/api/wiki/explain?**", (route) => {
       sent.push(new URL(route.request().url()).searchParams.get("sel") ?? "");
@@ -787,21 +873,59 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
         body: `event: done\ndata: ${JSON.stringify({ answer: "Svar." })}\n\n`,
       });
     });
-    const anchors: string[] = [];
-    const explain = async (fn: () => void) => {
-      await page.evaluate(fn);
-      await expect(page.locator("#wikiExplainBtn")).toBeVisible();
-      // The page's own selection is left as the reader made it.
-      anchors.push(await page.evaluate(() => window.getSelection()!.anchorNode?.parentElement?.closest("li")?.id ?? ""));
-      await page.locator("#wikiExplainBtn").dispatchEvent("mousedown");
-      await expect.poll(() => sent.length).toBeGreaterThan(0);
-      return sent.splice(0)[0]!;
-    };
+    if (range)
+      await page.evaluate(({ from, to, backwards }) => {
+        const point = ([selector, at]: [string, number | string]): [Node, number] => {
+          const el = document.querySelector(selector);
+          if (!el) throw new Error(`no ${selector}`);
+          if (at === "end") return [el, el.childNodes.length];
+          const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          let left = typeof at === "number" ? at : -1;
+          for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+            const data = (n as Text).data;
+            if (typeof at === "string") {
+              const k = data.indexOf(at);
+              if (k !== -1) return [n, k];
+              continue;
+            }
+            if (left <= data.length) return [n, left];
+            left -= data.length;
+          }
+          // An element offset: the child index itself.
+          if (typeof at === "number" && el.childNodes.length >= at) return [el, at];
+          throw new Error(`no ${String(at)} in ${selector}`);
+        };
+        const [s, so] = point(from);
+        const [e, eo] = point(to);
+        const w = window.getSelection()!;
+        if (backwards) w.setBaseAndExtent(e, eo, s, so);
+        else {
+          const r = document.createRange();
+          r.setStart(s, so);
+          r.setEnd(e, eo);
+          w.removeAllRanges();
+          w.addRange(r);
+        }
+        document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      }, range);
+    else await page.evaluate(fn);
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+    const after = await page.evaluate(() => {
+      const w = window.getSelection()!;
+      const li = (n: Node | null) => (n instanceof Element ? n : n?.parentElement)?.closest("li")?.id ?? "";
+      return { anchor: li(w.anchorNode), anchorOffset: w.anchorOffset, focus: li(w.focusNode), focusOffset: w.focusOffset };
+    });
+    await page.locator("#wikiExplainBtn").dispatchEvent("mousedown");
+    await expect.poll(() => sent.length).toBeGreaterThan(0);
+    await page.unroute("**/api/wiki/explain?**");
+    return { sel: sent[0]!, after };
+  };
 
+  test("PR 673 fix round 1, item 2: Explain gets a DecisionLog selection in authored order, rest and tail included", async ({ page }) => {
     // One item, from inside its first sentence to its end: the folded rest and
     // the date tail come with it, the date cell and «mer» do not.
     let seen = await open_(page);
-    const one = await explain(() => {
+    const one = await explainSel(page, () => {
       const li = document.querySelector("li.dl-item#d7")!;
       const text = li.querySelector(".dl-first")!.firstChild!;
       const r = document.createRange();
@@ -812,12 +936,14 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
       w.addRange(r);
       document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     });
-    expect(one).toBe("nummer 7 gjelder alle saker. Begrunnelse 7. Fag, 07.10 (runde 7).");
+    expect(one.sel).toBe("nummer 7 gjelder alle saker. Begrunnelse 7. Fag, 07.10 (runde 7).");
+    expect(one.after.anchor).toBe("d7");
     expectClean(seen);
 
-    // Two reordered rows, D7 above D6 on screen: D6 comes first, both whole.
+    // Two reordered rows, D7 above D6 on screen: D6 comes first, both whole,
+    // each with its list marker and separator as the source spells them.
     seen = await open_(page);
-    const two = await explain(() => {
+    const two = await explainSel(page, () => {
       const r = document.createRange();
       r.setStart(document.querySelector("li.dl-item#d7 .dl-first")!.firstChild!, 0);
       const end = document.querySelector("li.dl-item#d6 .dl-first")!.firstChild!;
@@ -827,11 +953,115 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
       w.addRange(r);
       document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     });
-    expect(two.replace(/\s+/g, " ")).toBe(
-      "D6Beslutning nummer 6 gjelder alle saker. Begrunnelse 6. Fag, 06.10 (runde 6). " +
-        "D7Beslutning nummer 7 gjelder alle saker. Begrunnelse 7. Fag, 07.10 (runde 7).",
+    expect(two.sel.replace(/\s+/g, " ")).toBe(
+      "- D6 — Beslutning nummer 6 gjelder alle saker. Begrunnelse 6. Fag, 06.10 (runde 6). " +
+        "- D7 — Beslutning nummer 7 gjelder alle saker. Begrunnelse 7. Fag, 07.10 (runde 7).",
     );
-    expect(anchors).toEqual(["d7", "d7"]);
+    expect(two.after.anchor).toBe("d7");
+    expect(locatedBy(PAGE, two.sel)).toBe("full");
+    expectClean(seen);
+  });
+
+  /** A selection from one point to another, by selector and either a
+   *  character offset into its text, the start of a phrase in it, or "end"
+   *  (after its last child), sent through Explain; returns the `sel` sent. */
+  type Point = [selector: string, at: number | string];
+  const explainRange = async (page: Page, from: Point, to: Point, backwards = false) =>
+    explainSel(page, () => {}, { from, to, backwards });
+
+  test("PR 673 fix round 2, item 1: the text Explain gets for a DecisionLog selection is found in the page source", async ({ page }) => {
+    expect(LOCATE_PAGE.length).toBeGreaterThan(EXPLAIN_FULL_BODY_MAX);
+    const fallback = locateExcerpt(LOCATE_PAGE, "finnes ikke på siden");
+    const located = (sel: string, needle: string) => {
+      const excerpt = locateExcerpt(LOCATE_PAGE, sel);
+      expect(excerpt).not.toBe(fallback);
+      expect(excerpt).toContain(needle);
+    };
+    // Explain replaces the article with its answer: each selection opens the page afresh.
+    const seen: { failed: string[]; errors: string[] }[] = [];
+    const select = async (from: Point, to: Point) => {
+      seen.push(await open_(page, "", "", LOCATE_REL));
+      expect(await visibleDecisionOrder(page)).toEqual(["d5", "d4", "d3", "d2", "d1"]);
+      return (await explainRange(page, from, to)).sel;
+    };
+
+    // Two items, D5 above D4 on screen: whole, in source order, D4's bare-space
+    // separator as written.
+    const two = await select(["li#d5 .dl-first", 0], ["li#d4 .dl-first", 10]);
+    expect(two.replace(/\s+/g, " ")).toBe(
+      "- D4 Beslutning nummer 4 gjelder alle saker. Begrunnelse 4. Fag, 04.10 (runde 4). " +
+        "- D5 — Beslutning nummer 5 gjelder alle saker. Begrunnelse 5. Fag, 05.10 (runde 5).",
+    );
+    expect(locatedBy(LOCATE_PAGE, two)).toBe("full");
+    located(two, "**D4** Beslutning nummer 4");
+
+    // Three items, D3's colon separator included.
+    const three = await select(["li#d5 .dl-first", 5], ["li#d3 .dl-first", 10]);
+    expect(three.replace(/\s+/g, " ").startsWith("- D3: Beslutning nummer 3")).toBe(true);
+    expect(locatedBy(LOCATE_PAGE, three)).toBe("full");
+    located(three, "**D3**: Beslutning nummer 3");
+
+    // From the log's own intro paragraph into the top item: the items between
+    // come in source order.
+    const intro = await select(["section.decision-log", "Loggen"], ["li#d5 .dl-first", 20]);
+    expect(intro.replace(/\s+/g, " ").startsWith("Loggen gjelder bare 2025. - D1 — Beslutning nummer 1")).toBe(true);
+    expect(locatedBy(LOCATE_PAGE, intro)).toBe("full");
+    located(intro, "Loggen gjelder bare 2025.");
+
+    // From the prose before the log: the tag line between them is not on the
+    // page, so the locator finds the prose's first 80 characters.
+    const before = await select([".wiki-article", "Denne siden"], ["li#d5 .dl-first", 20]);
+    expect(before.startsWith("Denne siden samler")).toBe(true);
+    expect(locatedBy(LOCATE_PAGE, before)).toBe("prefix");
+    located(before, "Denne siden samler");
+
+    // From the middle of D2, near the bottom, into the prose after the log:
+    // the passage starts at D1, the first item of the stretch.
+    const after = await select(["li#d2 .dl-first", 11], [".wiki-article", "hva som skjer"]);
+    expect(after.replace(/\s+/g, " ").startsWith("- D1 — Beslutning nummer 1")).toBe(true);
+    expect(after).toContain("Teksten etter loggen forklarer");
+    expect(locatedBy(LOCATE_PAGE, after)).toBe("prefix");
+    located(after, "**D1** — Beslutning nummer 1");
+
+    // One item from its chip: the separator between chip and text is there.
+    const chip = await select(["li#d3 .dl-id", 0], ["li#d3", "end"]);
+    expect(chip).toBe("D3: Beslutning nummer 3 gjelder alle saker. Begrunnelse 3. Fag, 03.10 (runde 3).");
+    expect(locatedBy(LOCATE_PAGE, chip)).toBe("full");
+    located(chip, "**D3**: Beslutning nummer 3");
+    seen.forEach(expectClean);
+  });
+
+  test("PR 673 fix round 2, item 3: a backwards selection keeps its direction after Explain reads it", async ({ page }) => {
+    const seen = await open_(page, "", "", LOCATE_REL);
+    // Made from D4 up to D5: anchor in D4, focus in D5.
+    const { after } = await explainRange(page, ["li#d5 .dl-first", 3], ["li#d4 .dl-first", 10], true);
+    expect(after).toEqual({ anchor: "d4", anchorOffset: 10, focus: "d5", focusOffset: 3 });
+    expectClean(seen);
+  });
+
+  test("PR 673 fix round 2, item 3: a selection that only reaches an item's edge reads as it is on screen", async ({ page }) => {
+    const seen = await open_(page, "", "", LOCATE_REL);
+    // From the prose before the log to the very start of the top item (D5): no
+    // item's text is selected, so no item is read in source order.
+    const { sel } = await explainRange(page, [".wiki-article", "Denne siden"], ["li#d5", 0]);
+    expect(sel.replace(/\s+/g, " ")).toBe(
+      "Denne siden samler beslutningene om årsavregning for sakene som ble behandlet i fjor og i år. Loggen gjelder bare 2025.",
+    );
+    expectClean(seen);
+  });
+
+  test("PR 673 fix round 2, item 3: a fold the author left open holding the only compact block shows no switch", async ({ page }) => {
+    const seen = await open_(page, "", "", OPEN_REL);
+    await expect(page.locator("li.dl-item#d3")).toBeVisible();
+    await expect(page.locator(".wiki-lens-switch")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("PR 673 fix round 2, item 3: a hash to a marked ok row leaves its group folded", async ({ page }) => {
+    const seen = await open_(page, "", "#case-mel-13", FACT_REL);
+    await expect(page.locator(".cb-row#case-mel-13 .fc-mark")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-14")).toBeHidden();
+    await expect(page.locator(".wiki-article button.cb-okmore")).toHaveText("+ 1 til");
     expectClean(seen);
   });
 

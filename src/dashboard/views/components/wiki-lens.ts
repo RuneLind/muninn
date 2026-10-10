@@ -42,6 +42,7 @@ import {
   DL_ORDER_ATTR,
   DL_MORE_CLASS,
   DL_QSTATE_CLASS,
+  DL_SEP_ATTR,
   DL_TAIL_CLASS,
   DL_WHEN_CLASS,
   LENS_CLASS_PREFIX,
@@ -97,7 +98,7 @@ const NOTE_WORDS: Record<Lang, { chars: string; min: string }> = {
 };
 
 const SWITCH_TITLE: Record<Lang, string> = {
-  en: "Overview hides the working detail: line refs, history, queries' SQL and tables, cases with status none («ikke kandidat»), and developer and handoff folds",
+  en: "Overview hides the working detail: line refs, history, queries' SQL and tables, cases with status none (not a candidate), and developer and handoff folds",
   no: "Oversikt skjuler arbeidsdetaljene: linjereferanser, historikk, spørringenes SQL og tabeller, saker med status none («ikke kandidat»), og utvikler- og overleveringsfold",
 };
 
@@ -551,16 +552,47 @@ function rangeHoldsText(range: Range, item: Element): boolean {
   return r.toString().trim() !== "";
 }
 
+/** A boundary that survives nodes inserted around it: a text boundary as is,
+ *  an element boundary as the child it sits before (or the element's end). */
+function pinBoundary(node: Node, offset: number): () => [Node, number] {
+  if (node.nodeType !== Node.ELEMENT_NODE) return () => [node, offset];
+  const child = node.childNodes[offset] ?? null;
+  return () =>
+    child?.parentNode
+      ? [child.parentNode, Array.prototype.indexOf.call(child.parentNode.childNodes, child)]
+      : [node, node.childNodes.length];
+}
+
+/** In `list` (a copy), each item's list marker and an id-led item's separator
+ *  put back as text, so the items read as the source spells them
+ *  (`- **D6** — Beslutning …` reads `- D6 — Beslutning …`): the chip and the
+ *  text show neither. A bullet list is spelled `- `, the form every id-led
+ *  item in the wikis uses; a numbered one carries its numbers. */
+function spellAsSource(list: Element): void {
+  const numbered = list.tagName === "OL";
+  let n = numbered ? (list as HTMLOListElement).start : 0;
+  for (const li of authoredItems(list)) {
+    const value = li.getAttribute("value");
+    if (numbered && value !== null && /^\d+$/.test(value)) n = Number(value);
+    li.insertBefore(document.createTextNode(numbered ? `${n++}. ` : "- "), li.firstChild);
+    const sep = li.querySelector(`:scope > .dl-text`)?.getAttribute(DL_SEP_ATTR);
+    if (sep) li.querySelector(":scope > .dl-id")?.after(document.createTextNode(sep));
+  }
+}
+
 /**
- * A selection that holds text of a DecisionLog item, read in the page's
- * authored order: the reader shows decisions newest first (D41) and folds a
- * decision's rest and date tail away (D6, D45), so `toString()` of the
- * selection on screen is text the page source does not hold. On a copy of the
- * article, outside the lens (so nothing is folded, capped or reordered by
- * CSS), each list it touches is put back in authored order (`data-dl-order`),
- * a boundary that no longer sits in the first (or last) item it touches there
- * moves to that item's start (or end), and that copy is selected for one
- * `toString()`; the real selection is
+ * A selection that holds text of a DecisionLog item, read as the page source
+ * spells it, so Explain and fact-check can locate it there: the reader shows
+ * decisions newest first (D41), folds a decision's rest and date tail away (D6,
+ * D45), and shows an item's id as a chip with no list marker or separator, so
+ * `toString()` of the selection on screen is text the page source does not
+ * hold. On a copy of the article, outside the lens (so nothing is folded,
+ * capped or reordered by CSS), each list it touches is put back in authored
+ * order (`data-dl-order`) with each item's marker and separator as text
+ * ({@link spellAsSource}); a boundary that no longer sits in the first (or
+ * last) item it touches there moves to that item's start (or end), so the
+ * passage is one stretch of the source: an item between two touched ones comes
+ * with them. That copy is selected for one `toString()`; the real selection is
  * then restored, direction included. Null when the selection touches no
  * DecisionLog item, so every other selection reads exactly as before.
  */
@@ -578,6 +610,8 @@ function authoredSelectionText(sel: Selection): string | null {
   const copy = article.cloneNode(true) as HTMLElement;
   const start = nodeAt(copy, nodePath(article, range.startContainer));
   const end = nodeAt(copy, nodePath(article, range.endContainer));
+  const startAt = pinBoundary(start, range.startOffset);
+  const endAt = pinBoundary(end, range.endOffset);
   const touched = items.map((li) => nodeAt(copy, nodePath(article, li)) as Element);
   // Reorder first, then set the range: moving a node collapses a live
   // range's boundary inside it.
@@ -585,6 +619,7 @@ function authoredSelectionText(sel: Selection): string | null {
   let to: Element | null = null;
   for (const list of new Set(touched.map((li) => li.parentElement!))) {
     for (const li of authoredItems(list)) list.append(li);
+    spellAsSource(list);
     // A boundary keeps its offset when it already sits in the item the
     // authored passage starts (or ends) with; otherwise that item is taken
     // whole, so the passage is one stretch of the source.
@@ -596,9 +631,9 @@ function authoredSelectionText(sel: Selection): string | null {
   }
   const r = document.createRange();
   if (from) r.setStartBefore(from);
-  else r.setStart(start, range.startOffset);
+  else r.setStart(...startAt());
   if (to) r.setEndAfter(to);
-  else r.setEnd(end, range.endOffset);
+  else r.setEnd(...endAt());
   // Outside the lens: no compact rule applies, so a rest, a tail and an older
   // decision render as written. The date cell and the toggles are reader-only.
   for (const l of LENSES) copy.classList.remove(`${LENS_CLASS_PREFIX}${l}`);

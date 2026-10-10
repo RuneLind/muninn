@@ -124,6 +124,9 @@ export interface LogItem {
   /** The text after the id and its separator, still wrapped in `~~` when the
    *  whole item was struck; the whole item when there is no id. */
   text: string;
+  /** The separator as written between the id and `text` (` — `, `: `, ` `);
+   *  empty when there is no id. */
+  sep: string;
   /** Struck through or superseded: the reader dims it. */
   dim: boolean;
 }
@@ -144,9 +147,10 @@ export function parseLogItem(item: string): LogItem {
     const rest = afterSeparator(source.slice(m[0].length));
     if (rest === null) break;
     const text = inner === null ? rest : rest ? `~~${rest}~~` : "";
-    return { id: m[1]!, text, dim: struck || inner !== null || wholeStrike(rest) !== null || superseded };
+    const sep = source.slice(m[0].length, source.length - rest.length);
+    return { id: m[1]!, text, sep, dim: struck || inner !== null || wholeStrike(rest) !== null || superseded };
   }
-  return { id: null, text: item, dim: inner !== null || superseded };
+  return { id: null, text: item, sep: "", dim: inner !== null || superseded };
 }
 
 /** A decision item's trailing «<who>, DD.MM[.YYYY] (runde N).» (D41). */

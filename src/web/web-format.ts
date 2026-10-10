@@ -81,6 +81,7 @@ import { isAgentContextTitle } from "../format/agent-context.ts";
 import {
   CB_LINE_CLASS,
   DL_DECISION_CLASS,
+  DL_SEP_ATTR,
   DL_TAIL_CLASS,
   DL_WHEN_CLASS,
   idNoun,
@@ -1331,7 +1332,7 @@ function logItemHtml(text: string, nested: string, value: string): string {
   const when = tail ? `<span class="${DL_WHEN_CLASS}" ${READER_ONLY_ATTR}>${escapeHtml(decisionWhenLabel(tail.when))}</span>` : "";
   return (
     `<li class="dl-item${decision ? ` ${DL_DECISION_CLASS}` : ""}${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
-    `<span class="dl-text">${tail ? tail.html : logTextHtml(p.text, DECISION_ID_RE.test(p.id))}</span>${when}${nested}</li>`
+    `<span class="dl-text"${currentReader ? ` ${DL_SEP_ATTR}="${escapeHtml(p.sep)}"` : ""}>${tail ? tail.html : logTextHtml(p.text, DECISION_ID_RE.test(p.id))}</span>${when}${nested}</li>`
   );
 }
 

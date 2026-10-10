@@ -132,6 +132,10 @@ export const CB_LINE_CLASS = "cb-line";
 /** On each item of a DecisionLog list, set by the reader: its authored
  *  position in the list, which the reader's newest-first order moves away from. */
 export const DL_ORDER_ATTR = "data-dl-order";
+/** On an id-led item's `.dl-text`, reader path only: the separator as written
+ *  between the id and the text (` — `), which the chip and the text do not
+ *  show. The reader puts it back to read a selection as the source spells it. */
+export const DL_SEP_ATTR = "data-dl-sep";
 /** The controls the reader adds, the class on a case row whose note the
  *  reader shows, and the controls' words. */
 export const DL_ALL_CLASS = "dl-all";
