@@ -25,7 +25,7 @@ export const READER_ONLY_ATTR = "data-reader-only";
 
 /** The «mer» toggle the reader adds to a `<DecisionLog>` item whose text
  *  holds more than its first sentence (D6), and the class on an item whose
- *  rest Overview shows. */
+ *  rest the reader shows. */
 export const DL_MORE_CLASS = "dl-more";
 export const DL_EXPANDED_CLASS = "dl-expanded";
 
@@ -111,9 +111,9 @@ export const LENS_LABELS: Record<QuestionLanguage, Record<Lens, string>> = {
   no: { overview: "Oversikt", all: "Alt", agent: "Agent" },
 };
 
-/** A DecisionLog item's toggle in Overview (D6): its text, and its
+/** A DecisionLog item's toggle in every lens (D6, D45): its text, and its
  *  `aria-label` naming the item; and the badge a closed question carries
- *  after its first sentence there. */
+ *  after its first sentence. */
 export const MORE_WORDS: Record<QuestionLanguage, { more: string; less: string; about: (id: string) => string; closed: string }> = {
   en: { more: "more", less: "less", about: (id) => `more about ${id}`, closed: "closed" },
   no: { more: "mer", less: "mindre", about: (id) => `mer om ${id}`, closed: "lukket" },
@@ -122,7 +122,7 @@ export const MORE_WORDS: Record<QuestionLanguage, { more: string; less: string; 
 /** The class on that badge. */
 export const DL_QSTATE_CLASS = "dl-qstate";
 
-/** Overview's compact DecisionLog and CaseBoard (D41, D42). The renderer's
+/** The reader's compact DecisionLog and CaseBoard (D41, D42, D45). The renderer's
  *  marks: a decision item, its date cell and the tail the cell replaces, and a
  *  case row's compact line. */
 export const DL_DECISION_CLASS = "dl-decision";
@@ -130,18 +130,17 @@ export const DL_WHEN_CLASS = "dl-when";
 export const DL_TAIL_CLASS = "dl-tail";
 export const CB_LINE_CLASS = "cb-line";
 /** On each item of a DecisionLog list, set by the reader: its authored
- *  position in the list, which Overview's newest-first order moves away from. */
+ *  position in the list, which the reader's newest-first order moves away from. */
 export const DL_ORDER_ATTR = "data-dl-order";
-/** The controls the reader adds, the class on a case row whose note Overview
- *  shows, and the controls' words. */
+/** The controls the reader adds, the class on a case row whose note the
+ *  reader shows, and the controls' words. */
 export const DL_ALL_CLASS = "dl-all";
 export const CB_MORE_CLASS = "cb-more";
 export const CB_OKMORE_CLASS = "cb-okmore";
 export const CB_EXPANDED_CLASS = "cb-expanded";
-/** The class an article carries in Overview (`lens-` plus the lens). */
+/** The class an article carries for its lens (`lens-` plus the lens). */
 export const LENS_CLASS_PREFIX = "lens-";
-export const OVERVIEW_LENS_CLASS = `${LENS_CLASS_PREFIX}overview`;
-/** Decisions Overview shows before «Vis alle». */
+/** Decisions every lens shows before «Vis alle». */
 export const DL_COMPACT_SHOWN = 5;
 export const COMPACT_WORDS: Record<
   QuestionLanguage,

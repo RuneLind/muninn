@@ -515,8 +515,8 @@ function blockNote(cls: string, text: string): string {
 
 /** One `CaseBoard` row: id link, status pill (its label when `labels=`
  *  names one), owner, note (inline markdown), refs. On the reader the row
- *  also carries Overview's compact line (D42): the note's head and the case's
- *  `kort:` summary; Overview and All pick by class. Every value comes from the
+ *  also carries the reader's compact line (D42): the note's head and the case's
+ *  `kort:` summary, which the reader shows in every lens (D45). Every value comes from the
  *  file and is escaped. */
 function caseRowHtml(c: BoardCase, labels: CaseLabels): string {
   const id = c.anchor
@@ -533,11 +533,11 @@ function caseRowHtml(c: BoardCase, labels: CaseLabels): string {
     ? `<span class="cb-refs">${c.refs.map((r) => `<span class="cb-ref">${escapeHtml(r)}</span>`).join("")}</span>`
     : "";
   // An id link comes first in the row: `CASE_ROW_RE` reads up to it. The
-  // compact line sits before the note, as Overview shows it.
+  // compact line sits before the note, as the reader shows it.
   return `<div class="cb-row"${c.anchor ? ` id="${c.anchor}"` : ""}>${id}${pill}${currentReader ? caseLineHtml(c) : ""}${owner}${note}${refs}</div>`;
 }
 
-/** Overview's compact line for a case (D42): head « · » kort, either part
+/** The reader's compact line for a case (D42): head « · » kort, either part
  *  optional. Reader-only text: the source holds both, in the note and `kort:`. */
 function caseLineHtml(c: BoardCase): string {
   const head = caseNoteHead(c.note);
@@ -546,7 +546,7 @@ function caseLineHtml(c: BoardCase): string {
     head ? `<span class="cb-head">${renderInline(head)}</span>` : "",
     kort ? `<span class="cb-kort">${renderInline(kort)}</span>` : "",
   ].filter(Boolean);
-  // Neither part: no line, and Overview shows the row's note (item 14).
+  // Neither part: no line, and the reader shows the row's note (item 14).
   if (parts.length === 0) return "";
   return `<span class="${CB_LINE_CLASS}" ${READER_ONLY_ATTR}>${parts.join(`<span class="cb-sep"> · </span>`)}</span>`;
 }
@@ -1324,7 +1324,7 @@ function logItemHtml(text: string, nested: string, value: string): string {
   if (!p.id) return `<li class="dl-item dl-noid${dim}"${value}>${itemHtml(p.text)}${nested}</li>`;
   const anchor = anchorSlug(p.id);
   // D41, reader only: a decision item carries `dl-decision`, and its trailing
-  // «<who>, DD.MM (runde N).» becomes a date cell for Overview's compact row,
+  // «<who>, DD.MM (runde N).» becomes a date cell for the reader's compact row,
   // after the text in the DOM as on screen.
   const decision = currentReader && DECISION_ID_RE.test(p.id);
   const tail = decision ? decisionTail(p.text) : null;
@@ -1345,8 +1345,8 @@ function rendersAs(pieces: readonly string[], wholeFlat: string): boolean {
   return flatHtml(pieces.map(itemHtml).join("")) === wholeFlat;
 }
 
-/** A decision item's text with its date tail in `span.dl-tail` (Overview hides
- *  it and shows the date cell instead); a `→ …` pointer after the tail stays
+/** A decision item's text with its date tail in `span.dl-tail` (the reader
+ *  hides it and shows the date cell instead); a `→ …` pointer after the tail stays
  *  in the rest. Null when the item has no tail, or when cutting it out would
  *  change the render. */
 function decisionTail(text: string): { when: DecisionWhen; html: string } | null {
@@ -1371,7 +1371,7 @@ export function splitDecisionText(text: string): SentenceSplit | null {
   return splitFirstSentence(text, (first, rest) => rendersAs([first, rest], whole));
 }
 
-/** An id-led item's text as Overview reads it: `first` is what the row shows;
+/** An id-led item's text as the reader shows it: `first` is what the row shows;
  *  `lead` and `rest` fold away. On a decision (`strikeLead`), a first sentence
  *  that is one `~~strike~~` end to end is an overturned claim: it moves to
  *  `lead`, and the first sentence after it leads (fagavklaring's D9). A
@@ -1398,7 +1398,7 @@ function decisionParts(text: string, strikeLead: boolean): DecisionParts | null 
   return rendersAs([lead, cur.first, cur.rest], flatHtml(itemHtml(text))) ? parts : { lead: "", ...split };
 }
 
-/** The parts' spans: the lead and the rest are `dl-rest`, so Overview's
+/** The parts' spans: the lead and the rest are `dl-rest`, so the reader's
  *  «mer» opens both; `after` (the date tail) closes the rest. */
 function partsHtml(p: DecisionParts, after: string): string {
   const lead = p.lead ? `<span class="dl-rest">${itemHtml(p.lead)}</span>` : "";
@@ -1406,7 +1406,7 @@ function partsHtml(p: DecisionParts, after: string): string {
   return `${lead}<span class="dl-first">${itemHtml(p.first)}</span>${rest}`;
 }
 
-/** The first sentence of a DecisionLog item as Overview shows it: the parts'
+/** The first sentence of a DecisionLog item as the reader shows it: the parts'
  *  first, else the whole item. The struck lead is skipped for a decision id
  *  only. */
 export function decisionFirstSentence(text: string, id: string): string {
@@ -1444,8 +1444,7 @@ export function unwrapDecisionSplits(html: string): string {
 }
 
 /** An id-led item's text: its first sentence and the rest in two spans when
- *  it holds more than one (D6), so the reader's Overview can show the first
- *  alone. */
+ *  it holds more than one (D6), so the reader can show the first alone. */
 function logTextHtml(text: string, strikeLead: boolean): string {
   const parts = decisionParts(text, strikeLead);
   return parts ? partsHtml(parts, "") : itemHtml(text);

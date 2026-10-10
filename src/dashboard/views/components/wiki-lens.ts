@@ -15,10 +15,12 @@
  *   opens and is then removed from the URL by the caller.
  * - **Reveal.** A `REVEAL_EVENT` from an element Overview hides switches this
  *   view to All without storing it, so the next page opens in the stored lens.
- * - **Decisions (D6).** Overview shows a `<DecisionLog>` item's first sentence
- *   and a «mer» toggle; the rest and anything nested under the item open
- *   behind it. A reveal of an item, or of anything in one (a `#d7` hash, an id
- *   link, a pill), opens that whole item and stays in Overview.
+ * - **Compact lists (D6, D41, D42, D45).** Every lens shows a `<DecisionLog>`
+ *   newest first with five decisions and «Vis alle», each item's first sentence
+ *   with «mer» for the rest, and a `<CaseBoard>` row as its compact line with
+ *   «mer» and the `ok` group behind «+ N til». The lenses differ only in what
+ *   they hide. A reveal of anything the compact view folds away (a `#d7` hash,
+ *   an id link, a pill) opens it in the lens on screen.
  *
  * Also here, because both read the rendered folds: each fold summary's size and
  * reading time; and the selection text Explain and fact-check send, without
@@ -95,8 +97,8 @@ const NOTE_WORDS: Record<Lang, { chars: string; min: string }> = {
 };
 
 const SWITCH_TITLE: Record<Lang, string> = {
-  en: "Overview hides the working detail: line refs, history, queries' SQL and tables, developer and handoff folds, and the rest of each decision after its first sentence",
-  no: "Oversikt skjuler arbeidsdetaljene: linjereferanser, historikk, spørringenes SQL og tabeller, utvikler- og overleveringsfold, og resten av hver beslutning etter første setning",
+  en: "Overview hides the working detail: line refs, history, queries' SQL and tables, cases with status none («ikke kandidat»), and developer and handoff folds",
+  no: "Oversikt skjuler arbeidsdetaljene: linjereferanser, historikk, spørringenes SQL og tabeller, saker med status none («ikke kandidat»), og utvikler- og overleveringsfold",
 };
 
 /** A nominal reading rate for the fold size line, not a measured one. */
@@ -141,9 +143,12 @@ export function decorateFoldSizes(article: Element, lang: Lang): void {
   });
 }
 
-/** What Overview folds away in an id-led DecisionLog item: the rest of its
- *  text and whatever is nested under it. */
+/** What every lens folds away in an id-led DecisionLog item (D6, D45): the
+ *  rest of its text and whatever is nested under it. */
 const DL_REST = `:scope > .dl-text > .dl-rest, :scope > .dl-text ~ :not(.${DL_WHEN_CLASS})`;
+
+/** A fact-check mark or chip: what the compact view never folds away (K). */
+const FC_MARK = ".fc-mark, .fc-chip";
 
 function setExpanded(item: Element, open: boolean, lang: Lang): void {
   item.classList.toggle(DL_EXPANDED_CLASS, open);
@@ -155,11 +160,10 @@ function setExpanded(item: Element, open: boolean, lang: Lang): void {
 
 /** A «mer» toggle in each id-led DecisionLog item that holds more than its
  *  first sentence, right after the first sentence, named for its item and
- *  pointing at what it opens. Shown in Overview only; reader-only, so a
+ *  pointing at what it opens. Shown in every lens (D45); reader-only, so a
  *  selection leaves it out. An item whose hidden part holds a fact-check mark
  *  starts open, so a ❌ is never folded away (K). A closed question gets a
- *  «lukket» badge after its first sentence, also Overview only (J).
- *  Idempotent. */
+ *  «lukket» badge after its first sentence (J). Idempotent. */
 export function decorateDecisionRests(article: Element, lang: Lang): void {
   article.querySelectorAll(`.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll(".dl-item[id]").forEach((item) => {
@@ -192,7 +196,7 @@ export function decorateDecisionRests(article: Element, lang: Lang): void {
     const before = badge ?? first;
     if (before) before.after(b);
     else text.append(b);
-    if (rests.some((el) => el.querySelector(".fc-mark, .fc-chip"))) item.classList.add(DL_EXPANDED_CLASS);
+    if (rests.some((el) => el.querySelector(FC_MARK))) item.classList.add(DL_EXPANDED_CLASS);
     setExpanded(item, item.classList.contains(DL_EXPANDED_CLASS), lang);
   });
 }
@@ -217,6 +221,8 @@ function noteHiddenCases(article: Element, lang: Lang): void {
 const SHOW_ALL_CLASS = "lens-show-all";
 /** On a decision past the newest {@link DL_COMPACT_SHOWN}. */
 const DL_OLDER_CLASS = "dl-older";
+/** On an `ok` row past the group's first, which «+ N til» shows. */
+const CB_FOLDED_CLASS = "cb-folded";
 
 function readerButton(cls: string): HTMLButtonElement {
   const b = document.createElement("button");
@@ -255,8 +261,8 @@ function authoredItems(list: Element): Element[] {
 }
 
 /**
- * D41: in each DecisionLog, which decisions (`dl-decision`, marked by the
- * renderer) Overview folds away: all but the newest five, except one holding
+ * D41/D45: in each DecisionLog, which decisions (`dl-decision`, marked by the
+ * renderer) every lens folds away: all but the newest five, except one holding
  * a fact-check mark (K: a ❌ is never folded away). Each item keeps its
  * authored position in `data-dl-order` for {@link orderDecisions}, and a log
  * with folded decisions gets «Vis alle» after its last list. Idempotent.
@@ -272,7 +278,7 @@ export function decorateDecisionOrder(article: Element, lang: Lang): void {
     }
     const items = lists.flatMap((list) => authoredItems(list).filter((li) => li.classList.contains(DL_DECISION_CLASS)));
     const older = items.filter((item, k) => {
-      const fold = items.length - 1 - k >= DL_COMPACT_SHOWN && !item.querySelector(".fc-mark, .fc-chip");
+      const fold = items.length - 1 - k >= DL_COMPACT_SHOWN && !item.querySelector(FC_MARK);
       item.classList.toggle(DL_OLDER_CLASS, fold);
       return fold;
     });
@@ -285,23 +291,28 @@ export function decorateDecisionOrder(article: Element, lang: Lang): void {
   });
 }
 
+/** The newest-first order of a list whose items are decisions where
+ *  `isDecision` says so: the decisions' slots get the decisions reversed, and
+ *  every other item keeps its slot. Returns authored indexes in display order. */
+export function newestFirstOrder(isDecision: readonly boolean[]): number[] {
+  const slots = isDecision.flatMap((d, k) => (d ? [k] : []));
+  const want = isDecision.map((_, k) => k);
+  slots.forEach((k, j) => (want[k] = slots[slots.length - 1 - j]!));
+  return want;
+}
+
 /**
- * D41: Overview reads a DecisionLog newest first. The decision items are moved
- * in the DOM — within each list, into the slots decisions hold, so a question
- * or an item without an id keeps its place — so a selection, Tab and a screen
- * reader follow the order on screen. Any other lens gets the authored order
- * back. Moves nothing when the order is already right. A log in a peek card
- * is left alone: the peek shows its target as written.
+ * D41/D45: a DecisionLog reads newest first in every lens. The decision items
+ * are moved in the DOM — within each list, into the slots decisions hold, so a
+ * question or an item without an id keeps its place — so a selection, Tab and
+ * a screen reader follow the order on screen. The order is computed from the
+ * authored positions (`data-dl-order`), so running it again moves nothing. A
+ * log in a peek card is left alone: the peek shows its target as written.
  */
-function orderDecisions(article: Element, newestFirst: boolean): void {
+function orderDecisions(article: Element): void {
   article.querySelectorAll(`section.decision-log > .dl-list:not(.${PEEK_CLASS} *)`).forEach((list) => {
     const authored = authoredItems(list);
-    const want = authored.slice();
-    if (newestFirst) {
-      const slots = authored.flatMap((li, k) => (li.classList.contains(DL_DECISION_CLASS) ? [k] : []));
-      const reversed = slots.map((k) => authored[k]!).reverse();
-      slots.forEach((k, j) => (want[k] = reversed[j]!));
-    }
+    const want = newestFirstOrder(authored.map((li) => li.classList.contains(DL_DECISION_CLASS))).map((k) => authored[k]!);
     const now = Array.from(list.children);
     if (want.every((li, k) => now[k] === li)) return;
     for (const li of want) list.append(li);
@@ -320,15 +331,17 @@ function setOkShown(group: Element, open: boolean, lang: Lang): void {
   group.classList.toggle(SHOW_ALL_CLASS, open);
   const b = group.querySelector<HTMLButtonElement>(`:scope > .${CB_OKMORE_CLASS}`);
   if (!b) return;
-  const n = group.querySelectorAll(":scope > .cb-row").length - 1;
+  const n = group.querySelectorAll(`:scope > .cb-row.${CB_FOLDED_CLASS}`).length;
   b.textContent = open ? COMPACT_WORDS[lang].okFewer : COMPACT_WORDS[lang].okMore(n);
   b.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 /**
- * D42: each CaseBoard row's compact line gets a «mer» that shows the full
+ * D42/D45: each CaseBoard row's compact line gets a «mer» that shows the full
  * note and the refs, and an `ok` group of more than one row a «+ N til»
- * after its last row. Shown in Overview only. Idempotent.
+ * after its last row. Shown in every lens. As for a decision (K), a row whose
+ * note holds a fact-check mark starts open, and the `ok` group never folds
+ * away a row holding one. Idempotent.
  */
 export function decorateCaseRows(article: Element, lang: Lang): void {
   article.querySelectorAll(`.${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}`).forEach((el) => el.remove());
@@ -342,13 +355,19 @@ export function decorateCaseRows(article: Element, lang: Lang): void {
     b.setAttribute("aria-controls", controlIds(rest, row.id ? `${row.id}-more` : ""));
     b.addEventListener("click", () => setCaseExpanded(row, !row.classList.contains(CB_EXPANDED_CLASS), lang));
     line.append(b);
+    if (rest.some((el) => el.querySelector(FC_MARK))) row.classList.add(CB_EXPANDED_CLASS);
     setCaseExpanded(row, row.classList.contains(CB_EXPANDED_CLASS), lang);
   });
   article.querySelectorAll('.cb-group[data-status="ok"]').forEach((group) => {
     const rows = Array.from(group.querySelectorAll(":scope > .cb-row"));
-    if (rows.length < 2) return;
+    const folded = rows.filter((row, k) => {
+      const fold = k > 0 && !row.querySelector(FC_MARK);
+      row.classList.toggle(CB_FOLDED_CLASS, fold);
+      return fold;
+    });
+    if (folded.length === 0) return;
     const b = readerButton(CB_OKMORE_CLASS);
-    b.setAttribute("aria-controls", controlIds(rows.slice(1), ""));
+    b.setAttribute("aria-controls", controlIds(folded, ""));
     b.addEventListener("click", () => setOkShown(group, !group.classList.contains(SHOW_ALL_CLASS), lang));
     rows[rows.length - 1]!.after(b);
     setOkShown(group, group.classList.contains(SHOW_ALL_CLASS), lang);
@@ -362,16 +381,21 @@ function shownInOverview(block: Element): boolean {
   return !block.matches("section.caseboard") || !!block.querySelector('.cb-group:not([data-status="none"])');
 }
 
-/** Entering Overview opens each `<Fold>` holding a DecisionLog or a CaseBoard
- *  that Overview shows (D41). Nothing is stored, and leaving Overview leaves
- *  the folds as they are: a reader who picks All from an open fold is reading
- *  it. */
-function openCompactFolds(article: Element): void {
-  article.querySelectorAll<HTMLDetailsElement>("details.fold").forEach((f) => {
-    if (isHiddenByOverview(f)) return;
+/** The `<Fold>`s entering Overview opens (D41): each one holding a
+ *  DecisionLog or a CaseBoard that Overview shows. */
+function compactFolds(article: Element): HTMLDetailsElement[] {
+  return Array.from(article.querySelectorAll<HTMLDetailsElement>("details.fold")).filter((f) => {
+    if (isHiddenByOverview(f)) return false;
     const blocks = Array.from(f.querySelectorAll(":scope > .fold-body :is(section.decision-log, section.caseboard)"));
-    if (blocks.some(shownInOverview)) f.open = true;
+    return blocks.some(shownInOverview);
   });
+}
+
+/** Entering Overview opens the {@link compactFolds}. Nothing is stored, and
+ *  leaving Overview leaves the folds as they are: a reader who picks All from
+ *  an open fold is reading it. */
+function openCompactFolds(article: Element): void {
+  for (const f of compactFolds(article)) f.open = true;
 }
 
 export interface LensOptions {
@@ -397,7 +421,6 @@ function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElemen
   for (const l of LENSES) {
     article.classList.toggle(`${LENS_CLASS_PREFIX}${l}`, l === lens);
   }
-  orderDecisions(article, lens === "overview");
   if (lens === "overview" && before !== "overview" && enter) openCompactFolds(article);
   sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
     const on = b.dataset.lens === lens;
@@ -412,9 +435,12 @@ function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElemen
 
 /**
  * Put the switch in the article head and apply `opts.initial`. The switch is
- * shown when the page has something Overview hides or the Agent lens is
- * offered; the class is applied either way. Idempotent per render: the
- * article element is new on every page, so its reveal listener goes with it.
+ * shown when the lenses differ on this page: it has something Overview hides
+ * (a `none` case row among them), a closed fold Overview opens, or the Agent
+ * lens is offered. The compact lists alone do not count: every lens shows
+ * them the same (D45). The class is applied either way. Idempotent per
+ * render: the article element is new on every page, so its reveal listener
+ * goes with it.
  */
 export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   const article = wrap.querySelector<HTMLElement>(".wiki-article");
@@ -426,10 +452,13 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   decorateDecisionRests(article, opts.language);
   decorateDecisionOrder(article, opts.language);
   decorateCaseRows(article, opts.language);
+  orderDecisions(article);
 
   let sw: HTMLElement | null = null;
-  const compact = article.querySelector(`.${DL_MORE_CLASS}, .${DL_DECISION_CLASS}, .${CB_LINE_CLASS}`);
-  if (row && (article.querySelector(HIDDEN_SELECTOR) || compact || opts.agentAvailable)) {
+  // Read before `applyLens` opens any fold: a fold the author left open is
+  // the same in both lenses.
+  const opensFold = compactFolds(article).some((f) => !f.open);
+  if (row && (article.querySelector(HIDDEN_SELECTOR) || opensFold || opts.agentAvailable)) {
     sw = document.createElement("div");
     sw.className = LENS_SWITCH_CLASS;
     sw.setAttribute("role", "group");
@@ -454,24 +483,23 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   // server does not offer into All.
   applyLens(article, row, sw, opts.initial, !opts.inPlace);
 
-  // D3: a reveal of something this lens hides shows All for this view only.
+  // D3: a reveal opens what the compact view folds away, in whichever lens is
+  // on screen (D45), and a reveal of something Overview hides shows All for
+  // this view only.
   article.addEventListener(REVEAL_EVENT, (e) => {
     const target = e.target;
     if (!(target instanceof Element)) return;
-    // D3 + D6: a reveal of a DecisionLog item, or of anything in its rest,
-    // shows the whole item. Nothing else is hidden there, so the lens stays.
+    // D6: a DecisionLog item, or anything in its rest, shows the whole item.
     const item = target.closest(".dl-item[id]");
     if (item?.querySelector(`:scope > .dl-text > .${DL_MORE_CLASS}`)) setExpanded(item, true, opts.language);
-    // D41/D42, in Overview only (a reveal in All must not carry into it): an
-    // older decision shows its whole list; a case row opens its «mer», and a
-    // folded `ok` row shows its group.
-    if (lensOf(article) !== "overview") return;
+    // D41/D42: an older decision shows its whole log; a case row opens its
+    // «mer», and a folded `ok` row shows its group.
     const section = target.closest(`.${DL_OLDER_CLASS}`)?.closest("section.decision-log");
     if (section) setAllShown(section, true, opts.language);
     const caseRow = target.closest(".cb-row");
     if (caseRow?.querySelector(`:scope > .${CB_LINE_CLASS} > .${CB_MORE_CLASS}`)) setCaseExpanded(caseRow, true, opts.language);
     const okGroup = target.closest('.cb-group[data-status="ok"]');
-    if (okGroup && caseRow !== okGroup.querySelector(":scope > .cb-row")) setOkShown(okGroup, true, opts.language);
+    if (okGroup && caseRow?.classList.contains(CB_FOLDED_CLASS)) setOkShown(okGroup, true, opts.language);
     if (isHiddenByOverview(target)) applyLens(article, row, sw, "all");
   });
 }
@@ -489,18 +517,107 @@ const READER_ONLY_OFF_CLASS = "reader-only-off";
  * READER_ONLY_ATTR}): what Explain and fact-check locate in the page source.
  * The marked nodes are taken out of layout for the one synchronous
  * `toString()`, which serializes the rendered text, then put back; nothing
- * paints in between.
+ * paints in between. A selection that touches a DecisionLog item is read off
+ * a copy of the article as written ({@link authoredSelectionText}).
  */
 export function readerSelectionText(sel: Selection): string {
   const root = document.documentElement;
   root.classList.add(READER_ONLY_OFF_CLASS);
   try {
-    return sel.toString();
+    return authoredSelectionText(sel) ?? sel.toString();
   } finally {
     root.classList.remove(READER_ONLY_OFF_CLASS);
   }
 }
 
+/** The child-index path from `root` down to `node`. */
+function nodePath(root: Node, node: Node): number[] {
+  const path: number[] = [];
+  for (let n = node; n !== root; n = n.parentNode!) path.unshift(Array.prototype.indexOf.call(n.parentNode!.childNodes, n));
+  return path;
+}
+
+function nodeAt(root: Node, path: readonly number[]): Node {
+  return path.reduce<Node>((n, k) => n.childNodes[k]!, root);
+}
+
+/** Whether `range` holds any text of `item`, not only a boundary at its edge. */
+function rangeHoldsText(range: Range, item: Element): boolean {
+  if (!range.intersectsNode(item)) return false;
+  const r = document.createRange();
+  r.selectNodeContents(item);
+  if (range.compareBoundaryPoints(Range.START_TO_START, r) > 0) r.setStart(range.startContainer, range.startOffset);
+  if (range.compareBoundaryPoints(Range.END_TO_END, r) < 0) r.setEnd(range.endContainer, range.endOffset);
+  return r.toString().trim() !== "";
+}
+
+/**
+ * A selection that holds text of a DecisionLog item, read in the page's
+ * authored order: the reader shows decisions newest first (D41) and folds a
+ * decision's rest and date tail away (D6, D45), so `toString()` of the
+ * selection on screen is text the page source does not hold. On a copy of the
+ * article, outside the lens (so nothing is folded, capped or reordered by
+ * CSS), each list it touches is put back in authored order (`data-dl-order`),
+ * a boundary that no longer sits in the first (or last) item it touches there
+ * moves to that item's start (or end), and that copy is selected for one
+ * `toString()`; the real selection is
+ * then restored, direction included. Null when the selection touches no
+ * DecisionLog item, so every other selection reads exactly as before.
+ */
+function authoredSelectionText(sel: Selection): string | null {
+  if (sel.rangeCount !== 1) return null;
+  const range = sel.getRangeAt(0);
+  const common = range.commonAncestorContainer;
+  const article = (common instanceof Element ? common : common.parentElement)?.closest<HTMLElement>(".wiki-article");
+  if (!article) return null;
+  const items = Array.from(
+    article.querySelectorAll(`section.decision-log > .dl-list:not(.${PEEK_CLASS} *) > li[${DL_ORDER_ATTR}]`),
+  ).filter((li) => rangeHoldsText(range, li));
+  if (items.length === 0) return null;
+
+  const copy = article.cloneNode(true) as HTMLElement;
+  const start = nodeAt(copy, nodePath(article, range.startContainer));
+  const end = nodeAt(copy, nodePath(article, range.endContainer));
+  const touched = items.map((li) => nodeAt(copy, nodePath(article, li)) as Element);
+  // Reorder first, then set the range: moving a node collapses a live
+  // range's boundary inside it.
+  let from: Element | null = null;
+  let to: Element | null = null;
+  for (const list of new Set(touched.map((li) => li.parentElement!))) {
+    for (const li of authoredItems(list)) list.append(li);
+    // A boundary keeps its offset when it already sits in the item the
+    // authored passage starts (or ends) with; otherwise that item is taken
+    // whole, so the passage is one stretch of the source.
+    const ordered = authoredItems(list).filter((li) => touched.includes(li));
+    const first = ordered[0]!;
+    const last = ordered[ordered.length - 1]!;
+    if (list.contains(start) && !first.contains(start)) from = first;
+    if (list.contains(end) && !last.contains(end)) to = last;
+  }
+  const r = document.createRange();
+  if (from) r.setStartBefore(from);
+  else r.setStart(start, range.startOffset);
+  if (to) r.setEndAfter(to);
+  else r.setEnd(end, range.endOffset);
+  // Outside the lens: no compact rule applies, so a rest, a tail and an older
+  // decision render as written. The date cell and the toggles are reader-only.
+  for (const l of LENSES) copy.classList.remove(`${LENS_CLASS_PREFIX}${l}`);
+  const host = document.createElement("div");
+  host.style.cssText = `position: fixed; left: -100000px; top: 0; width: ${article.clientWidth || 800}px; pointer-events: none;`;
+  host.append(copy);
+  document.body.append(host);
+  const anchor = [sel.anchorNode, sel.anchorOffset, sel.focusNode, sel.focusOffset] as const;
+  try {
+    sel.removeAllRanges();
+    sel.addRange(r);
+    return sel.toString();
+  } finally {
+    sel.removeAllRanges();
+    if (anchor[0] && anchor[2]) sel.setBaseAndExtent(anchor[0], anchor[1], anchor[2], anchor[3]);
+    else sel.addRange(range);
+    host.remove();
+  }
+}
 
 /** The reader's CSS for the switch, the hidden blocks and the fold sizes. A
  *  peek card sits inside the article and shows its target whole in any lens. */
@@ -508,9 +625,8 @@ export function lensCss(): string {
   return `
     .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
-    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
-    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }
-    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) :is(${TOGGLES}, .${DL_QSTATE_CLASS}) { display: none; }
+    ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
+    ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }
     /* The reader's toggles: «mer», «Vis alle», a case's «mer», «+ N til». */
     .wiki-article :is(${TOGGLES}) {
       font: inherit; font-size: 0.85em; padding: 0 0.2em; border: none; background: none;
@@ -542,22 +658,26 @@ ${compactCss()}
   `;
 }
 
-/** The reader's toggles, one selector for their shared style and their
- *  hiding outside Overview. */
+/** The reader's toggles, one selector for their shared style. */
 const TOGGLES = `.${DL_MORE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}`;
 
-/** D41/D42: Overview's compact DecisionLog and CaseBoard rows. Everything is
- *  scoped to Overview and kept out of a peek card, so All renders as before;
- *  the date cell and the compact line are hidden by default in the shared
- *  component CSS (`compactPartsHiddenCss`). A row's parts follow the DOM
+/** An article the lens has set up, in any lens: the compact view (D45) is
+ *  scoped to it, so an article the lens never touched renders as written. */
+const LENSED = `.wiki-article:is(${LENSES.map((l) => `.${LENS_CLASS_PREFIX}${l}`).join(", ")})`;
+
+/** D41/D42/D45: the compact DecisionLog and CaseBoard rows, in every lens.
+ *  Kept out of a peek card, which shows its target as written; the date cell
+ *  and the compact line are hidden by default in the shared component CSS
+ *  (`compactPartsHiddenCss`), so a surface without the lens (the gardener
+ *  preview, chat) renders the blocks as written. A row's parts follow the DOM
  *  order, which is the reading order. */
 function compactCss(): string {
-  const ov = `.wiki-article.${LENS_CLASS_PREFIX}overview`;
+  const art = LENSED;
   const notPeek = `:not(.${PEEK_CLASS} *)`;
-  const dec = `${ov} .dl-item.${DL_DECISION_CLASS}${notPeek}`;
+  const dec = `${art} .dl-item.${DL_DECISION_CLASS}${notPeek}`;
   return `
-    ${ov} .decision-log${notPeek} { container: dl-log / inline-size; }
-    ${ov} .decision-log:not(.${SHOW_ALL_CLASS}) .dl-item.${DL_OLDER_CLASS}${notPeek} { display: none; }
+    ${art} .decision-log${notPeek} { container: dl-log / inline-size; }
+    ${art} .decision-log:not(.${SHOW_ALL_CLASS}) .dl-item.${DL_OLDER_CLASS}${notPeek} { display: none; }
     ${dec} {
       display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 0.5rem;
       padding: 0.45rem 0; border-bottom: 1px solid var(--border-secondary);
@@ -570,7 +690,7 @@ function compactCss(): string {
       white-space: nowrap; font-variant-numeric: tabular-nums;
     }
     ${dec} > .dl-text ~ :not(.${DL_WHEN_CLASS}) { flex-basis: 100%; }
-    ${ov} .${DL_DECISION_CLASS} .${DL_TAIL_CLASS}${notPeek} { display: none; }
+    ${art} .${DL_DECISION_CLASS} .${DL_TAIL_CLASS}${notPeek} { display: none; }
     /* A narrow log: the date drops under the text, and at phone width the text
        under the chip too, so the text keeps the row (measured: the chip with its
        noun is ~117 px and the cell ~120 px at 14 px type). */
@@ -581,11 +701,11 @@ function compactCss(): string {
       ${dec} > .dl-text { flex-basis: 100%; }
     }
     .wiki-article .${DL_ALL_CLASS} { display: block; margin: 0.3rem 0 0.8rem; }
-    ${ov} .caseboard .cb-row:has(> .${CB_LINE_CLASS}):not(.${CB_EXPANDED_CLASS}) > :is(.cb-owner, .cb-note, .cb-refs)${notPeek} { display: none; }
-    ${ov} .caseboard .cb-row > .${CB_LINE_CLASS}${notPeek} { display: inline; flex: 1 1 16rem; min-width: 0; }
-    ${ov} .caseboard .cb-row:has(> .${CB_LINE_CLASS}) > :is(.cb-owner, .cb-note)${notPeek} { flex-basis: 100%; }
-    ${ov} .caseboard .cb-head { color: var(--text-soft); }
-    ${ov} .cb-group[data-status="ok"]:not(.${SHOW_ALL_CLASS}) > .cb-row ~ .cb-row${notPeek} { display: none; }
+    ${art} .caseboard .cb-row:has(> .${CB_LINE_CLASS}):not(.${CB_EXPANDED_CLASS}) > :is(.cb-owner, .cb-note, .cb-refs)${notPeek} { display: none; }
+    ${art} .caseboard .cb-row > .${CB_LINE_CLASS}${notPeek} { display: inline; flex: 1 1 16rem; min-width: 0; }
+    ${art} .caseboard .cb-row:has(> .${CB_LINE_CLASS}) > :is(.cb-owner, .cb-note)${notPeek} { flex-basis: 100%; }
+    ${art} .caseboard .cb-head { color: var(--text-soft); }
+    ${art} .cb-group[data-status="ok"]:not(.${SHOW_ALL_CLASS}) > .cb-row.${CB_FOLDED_CLASS}${notPeek} { display: none; }
     .wiki-article .${CB_OKMORE_CLASS} { display: block; margin: 0.1rem 0 0.3rem; }
   `;
 }
