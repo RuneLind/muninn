@@ -6,8 +6,9 @@
  * Boots a second muninn shaped like the nais pod for a colleague in `<role>`:
  * `MUNINN_PROFILE=nais`, `MUNINN_AUTH=local` at role `user`, and a pinned
  * identity whose `MUNINN_LOCAL_IDENT` is in that group. The reader then orders
- * and marks the lanes for that role, opens in the instance's default lens, and
- * shows only the surface role `user` gets. «Se som rolle» on the pod replays
+ * and marks the lanes for that role and shows only the surface role `user`
+ * gets. `--lens` sets `WIKI_DEFAULT_LENS` for the wiki, as the pod's env does;
+ * without it the wiki's own `defaultLens` applies. «Se som rolle» on the pod replays
  * the lanes for an admin; this shows the rest of the page as the role sees it.
  *
  * What makes it safe to run beside `bun run dev`:
@@ -15,6 +16,9 @@
  *    `<root>/.wiki-reader.json`), so no real ident enters an env or a page;
  *  - `MUNINN_BOTS_DIR` is a fresh temp dir with one token-less bot, and
  *    `e2eEnv()` blanks every platform token, so no bot polls Telegram or Slack;
+ *  - `LOG_DIR=none`, so nothing lands in the dev instance's `logs/` file, and
+ *    `RESEARCH_MCP_PORT=0`, so the research MCP server takes a free port
+ *    rather than 9190, which dev's bots call;
  *  - the wiki root is read-only (`WIKI_READONLY_ROOTS`);
  *  - `DATABASE_URL` is the `_test` database (`TEST_DATABASE_URL`), never the
  *    one `bun run dev` uses. A choice clicked on a card is stored there, under
@@ -67,6 +71,8 @@ export function previewRoleEnv(o: PreviewRoleOptions): Record<string, string> {
     DASHBOARD_HOST: "127.0.0.1",
     SCHEDULER_ENABLED: "false",
     MUNINN_BOTS_DIR: o.botsDir,
+    LOG_DIR: "none",
+    RESEARCH_MCP_PORT: "0",
     MUNINN_PROFILE: "nais",
     MUNINN_AUTH: "local",
     MUNINN_LOCAL_TOKEN: crypto.randomUUID().replaceAll("-", ""),
@@ -78,17 +84,34 @@ export function previewRoleEnv(o: PreviewRoleOptions): Record<string, string> {
     MUNINN_ALLOWED_ORIGINS: `${base},http://localhost:${o.port}`,
     WIKI_EXTRA: `${o.wiki}=${o.root}`,
     WIKI_READONLY_ROOTS: o.root,
-    WIKI_DEFAULT_LENS: `${o.wiki}=${o.lens ?? "overview"}`,
     WIKI_ANSWER_WIKIS: o.wiki,
     WIKI_ANSWER_GROUPS: o.roleKeys.map((k, i) => `${k}=${syntheticIdent(i)}`).join(";"),
+    ...(o.lens ? { WIKI_DEFAULT_LENS: `${o.wiki}=${o.lens}` } : {}),
   };
+}
+
+/** Why a wiki name or root cannot go into `WIKI_EXTRA` and
+ *  `WIKI_READONLY_ROOTS` unchanged, or null. Both lists split on `,`, and
+ *  `WIKI_EXTRA` on `=`, so such a root would register a different, writable
+ *  path. */
+export function previewRootProblem(wiki: string, root: string): string | null {
+  for (const ch of [",", "="]) {
+    if (wiki.includes(ch) || root.includes(ch)) return `a wiki name or root containing "${ch}" cannot be previewed`;
+  }
+  return null;
 }
 
 /** The `roleKeys` of the wiki at `root`, as the reader parses them. */
 export function readRoleKeys(root: string): string[] {
   const file = path.join(root, ".wiki-reader.json");
   if (!existsSync(file)) return [];
-  return parseRoleKeys((JSON.parse(readFileSync(file, "utf8")) as { roleKeys?: unknown }).roleKeys).keys;
+  let config: { roleKeys?: unknown };
+  try {
+    config = JSON.parse(readFileSync(file, "utf8")) as { roleKeys?: unknown };
+  } catch (e) {
+    throw new Error(`${file} is not valid JSON: ${(e as Error).message}`);
+  }
+  return parseRoleKeys(config?.roleKeys).keys;
 }
 
 /** A bots dir with one bot and no platform token: discovery finds a bot and
@@ -110,7 +133,7 @@ function main(argv: string[]): void {
   let role = "";
   let wikiArg = "";
   let port = PREVIEW_DEFAULT_PORT;
-  let lens: "overview" | "all" = "overview";
+  let lens: "overview" | "all" | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] ?? "";
     if (a === "--wiki") wikiArg = argv[++i] ?? "";
@@ -129,6 +152,8 @@ function main(argv: string[]): void {
   const wiki = wikiArg.slice(0, eq);
   const root = path.resolve(wikiArg.slice(eq + 1).replace(/^~(?=\/|$)/, process.env.HOME ?? "~"));
   if (!existsSync(root)) usage(`no wiki root at ${root}`);
+  const problem = previewRootProblem(wiki, root);
+  if (problem) usage(problem);
 
   const botsDir = makePreviewBotsDir();
   let env: Record<string, string>;
@@ -143,7 +168,7 @@ function main(argv: string[]): void {
   console.log(
     [
       `Preview as ${role}: ${url}`,
-      `  pod surface (MUNINN_PROFILE=nais), role user, ${role} = ${env.MUNINN_LOCAL_IDENT} (synthetic), default lens ${lens}`,
+      `  pod surface (MUNINN_PROFILE=nais), role user, ${role} = ${env.MUNINN_LOCAL_IDENT} (synthetic), default lens ${lens ?? "from the wiki"}`,
       `  ${root} is read-only; answers go to the _test database, and one with text is refused (no scanner).`,
       `  Ctrl-C stops it.`,
     ].join("\n"),
@@ -153,12 +178,17 @@ function main(argv: string[]): void {
     env: { ...process.env, ...e2eEnv(), ...env },
     stdio: "inherit",
   });
+  const cleanup = () => rmSync(botsDir, { recursive: true, force: true });
   const stop = () => child.kill("SIGTERM");
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-  child.on("exit", (code) => {
-    rmSync(botsDir, { recursive: true, force: true });
-    process.exit(code ?? 0);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, stop);
+  child.on("error", (e) => {
+    cleanup();
+    console.error(`preview-role: could not start muninn: ${e.message}`);
+    process.exit(1);
+  });
+  child.on("exit", (code, signal) => {
+    cleanup();
+    process.exit(code ?? (signal ? 1 : 0));
   });
 }
 

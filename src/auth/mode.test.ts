@@ -241,6 +241,14 @@ describe("MUNINN_LOCAL_IDENT", () => {
   test("it is INERT outside `local` mode", () => {
     expect(resolveAuthConfig({ MUNINN_LOCAL_IDENT: "nonsense" }).local).toBeNull();
   });
+
+  test("the refusal quotes the value as written, so a grep of .env finds it", () => {
+    expect(() => resolveAuthConfig(localEnv({ MUNINN_LOCAL_IDENT: "bad" }))).toThrow(/MUNINN_LOCAL_IDENT="bad"/);
+  });
+
+  test("a bad MUNINN_LOCAL_ROLE refuses first, in the order src/auth/CLAUDE.md lists", () => {
+    expect(() => resolveAuthConfig(localEnv({ MUNINN_LOCAL_ROLE: "operator", MUNINN_LOCAL_IDENT: "bad" }))).toThrow(/not a role/);
+  });
 });
 
 describe("MUNINN_LOCAL_ROLE", () => {

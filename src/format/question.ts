@@ -201,10 +201,10 @@ export function authorGroupsOf(navIdent: string | null, groups: AnswerGroups): s
 
 /** The viewer's role keys (D30): the groups holding the session's NAV ident;
  *  with auth off (`mode` `off`) the groups holding `WIKI_ANSWER_OWNER`'s ident
- *  when it is written `Name (IDENT)`. A session with no ident (`local`
- *  without `MUNINN_LOCAL_IDENT`) has none, and so has a request with no session on an authenticating instance:
- *  the owner stands in for the viewer only where nobody signs in. Keys only,
- *  never a member. */
+ *  when it is written `Name (IDENT)`. A session with no ident (`local` without
+ *  `MUNINN_LOCAL_IDENT`) has none, and so has a request with no session on an
+ *  authenticating instance: the owner stands in for the viewer only where
+ *  nobody signs in. Keys only, never a member. */
 export function viewerGroupKeys(
   mode: AuthMode,
   session: { navIdent: string | null } | null,

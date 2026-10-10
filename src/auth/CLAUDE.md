@@ -220,8 +220,9 @@ also in `MUNINN_ADMIN_IDENTS` stays `user` (`role.test.ts` pins this).
 Its one caller in the repo is `bun run preview:role` (`scripts/preview-role.ts`),
 which boots a second muninn on port 3013 shaped like the nais pod for one answer
 group: `MUNINN_PROFILE=nais`, `local` at role `user`, synthetic groups from the
-wiki's `roleKeys`, the `_test` database, an empty bots dir and every platform
-token blanked. `e2e/wiki-oppfolging-roles.spec.ts` boots it from the same
+wiki's `roleKeys`, the `_test` database, a temp bots dir with one token-less
+bot, every platform token blanked, `LOG_DIR=none` and `RESEARCH_MCP_PORT=0`
+(a free port, never dev's 9190). `e2e/wiki-oppfolging-roles.spec.ts` boots it from the same
 `previewRoleEnv`. It is in `AUTH_FLAGS` (`src/test/ambient-env.ts`).
 
 ## `AUTH_EXCLUDED_PATHS` is the two health endpoints, and nothing else

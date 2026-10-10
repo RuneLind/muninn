@@ -15,6 +15,18 @@ const log = getLog("research", "mcp-server");
 
 export const RESEARCH_MCP_PORT = 9190;
 
+/** `RESEARCH_MCP_PORT` from the env, else 9190. `0` lets the OS pick a free
+ *  port: `bun run preview:role` sets it so a second instance never takes 9190
+ *  from `bun run dev`. A value that is not a port warns and falls back. */
+export function researchMcpPort(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.RESEARCH_MCP_PORT?.trim();
+  if (!raw) return RESEARCH_MCP_PORT;
+  const n = Number(raw);
+  if (/^\d+$/.test(raw) && n <= 65535) return n;
+  log.warn("RESEARCH_MCP_PORT={raw} is not a port; using {port}", { raw, port: RESEARCH_MCP_PORT });
+  return RESEARCH_MCP_PORT;
+}
+
 interface Session {
   transport: WebStandardStreamableHTTPServerTransport;
   server: McpServer;
@@ -43,7 +55,7 @@ export class ResearchMcpServer {
   private bots = new Map<string, BotEntry>();
   private port: number;
 
-  constructor(port = RESEARCH_MCP_PORT) {
+  constructor(port = researchMcpPort()) {
     this.port = port;
   }
 
@@ -74,6 +86,8 @@ export class ResearchMcpServer {
       idleTimeout: 120,
       fetch: (req) => this.handleHttp(req),
     });
+    // Port 0 asked the OS for one; `url` must name the port it gave.
+    this.port = this.httpServer.port ?? this.port;
     log.info("Research MCP server started on :{port}", { port: this.port });
   }
 

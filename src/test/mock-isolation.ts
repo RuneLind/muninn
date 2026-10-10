@@ -38,7 +38,7 @@ export const MOCK_ALIAS_IMPORT = /import\s*\{[^}]*\bmock\s+as\s+\w+[^}]*\}/;
 export const MOCK_MODULE_SUBSTRING = /\bmock\.module\(/;
 
 /** Where the bun test files live, relative to the repo root, and the pattern they match. */
-export const TEST_FILE_DIRS = ["src", "db", "e2e"] as const;
+export const TEST_FILE_DIRS = ["src", "db", "e2e", "scripts"] as const;
 export const TEST_FILE_GLOB = "**/*.test.ts";
 
 /**

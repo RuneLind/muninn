@@ -1,7 +1,7 @@
 /**
  * The «Oppfølging» block's viewer role in the two modes with no Entra session
  * (reader lenses PR 3, D30). The pod case — two colleagues in two groups — is
- * in `wiki-answers-nais.spec.ts`; this file holds the other two:
+ * in `wiki-answers-nais.spec.ts`; this file holds three others:
  *
  *   - auth off: the viewer's roles are the groups holding `WIKI_ANSWER_OWNER`'s
  *     ident (`Test Eier (X100021)` is in `fag`), so the fag lane goes first and
@@ -15,7 +15,7 @@
  *     Overview, there is no switch, and an answer with text is refused.
  *
  * What a unit test cannot see: the server's per-mode resolution reaching the
- * client, which orders and marks the lanes. Two muninns; no model calls; no DB
+ * client, which orders and marks the lanes. Three muninns; no model calls; no DB
  * rows written. Synthetic names and `X1000NN`/`X9000NN` idents only.
  *
  * SPAWN ENV: `e2eEnv()` blanks the platform tokens and the instance-profile
@@ -32,7 +32,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { paintedContrast } from "./contrast.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
-import { previewRoleEnv } from "../scripts/preview-role.ts";
+import { makePreviewBotsDir, previewRoleEnv, readRoleKeys } from "../scripts/preview-role.ts";
 import { AUTHORED_ROLES, ROLE_PAGE, ROLE_READER_CONFIG, ROLE_REL } from "./oppfolging-fixture.ts";
 
 const OFF_PORT = e2ePort("wiki-oppfolging-roles");
@@ -125,9 +125,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(root, TWO_WAITING_REL), TWO_WAITING_PAGE, "utf8");
   await writeFile(path.join(root, HISTORIC_ONLY_REL), HISTORIC_ONLY_PAGE, "utf8");
   await writeFile(path.join(root, BLOCKED_ONLY_REL), BLOCKED_ONLY_PAGE, "utf8");
-  botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-oppfolging-roles-bots-"));
-  await mkdir(path.join(botsDir, "e2e-oppfolging-bot"));
-  await writeFile(path.join(botsDir, "e2e-oppfolging-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
+  botsDir = makePreviewBotsDir();
   const common = {
     ...process.env,
     ...e2eEnv(),
@@ -167,7 +165,8 @@ test.beforeAll(async ({}, info) => {
       env: {
         ...process.env,
         ...e2eEnv(),
-        ...previewRoleEnv({ role: "fag", wiki: WIKI, root, roleKeys: ["fag", "utvikler"], port: PREVIEW_PORT, botsDir }),
+        // `--lens overview`, as the melosys-muninn pod sets `WIKI_DEFAULT_LENS`.
+        ...previewRoleEnv({ role: "fag", wiki: WIKI, root, roleKeys: readRoleKeys(root), port: PREVIEW_PORT, botsDir, lens: "overview" }),
       },
       stdio: "ignore",
     }),

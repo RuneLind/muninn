@@ -330,6 +330,8 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
     );
   }
 
+  // Role before ident: the boot refusals fire in the order src/auth/CLAUDE.md lists.
+  const localRole = parseLocalRole(env);
   return {
     mode,
     adminIdents,
@@ -341,7 +343,7 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       navIdent: parseLocalIdent(env),
     },
     entra: null,
-    localRole: parseLocalRole(env),
+    localRole,
   };
 }
 
@@ -358,9 +360,9 @@ const NAV_IDENT_RE = /^[A-Z]\d{6}$/;
  * sits in the env looking correct.
  */
 function parseLocalIdent(env: Record<string, string | undefined>): string | null {
-  const raw = trimmed(env, LOCAL_IDENT_ENV).toUpperCase();
+  const raw = trimmed(env, LOCAL_IDENT_ENV);
   if (raw === "") return null;
-  if (NAV_IDENT_RE.test(raw)) return raw;
+  if (NAV_IDENT_RE.test(raw.toUpperCase())) return raw.toUpperCase();
   throw new AuthConfigError(
     `${LOCAL_IDENT_ENV}="${raw}" is not a NAV ident (one letter and six digits). Refusing to start: ` +
     `the identity would carry no answer group, so the role it was set to preview would silently be absent.`,
