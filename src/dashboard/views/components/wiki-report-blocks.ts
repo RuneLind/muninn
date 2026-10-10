@@ -35,6 +35,7 @@ import type { AnswerWire } from "./wiki-answer-card-model.ts";
 import type { ViewerRoles } from "../../../wiki/render.ts";
 import { revealElement } from "./wiki-hash-target.ts";
 import { localStore } from "./wiki-local-store.ts";
+import { PEEK_CLASS } from "./wiki-ref-links.ts";
 
 export { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS };
 export const LINE_REFS_KEY = "muninn.wiki.lineRefs.v1";
@@ -381,17 +382,17 @@ export function readCounts(article: ParentNode): Record<CountKind, CountTally> {
   return out;
 }
 
-/** Where «N beslutninger» lands (D41, D45): the newest decision of `first`'s
- *  log — the highest authored position in its last list holding one, which
- *  the five-cap always shows, in every lens. Before the lens has set up the
- *  article (no `data-dl-order`), the first decision as written. */
+/** Where «N beslutninger» lands (D41, D45): the page's newest decision — the
+ *  highest authored position in the LAST list, in document order, that holds a
+ *  decision, across every DecisionLog in the article. The five-cap always
+ *  shows it, in every lens. Before the lens has set up the article (no
+ *  `data-dl-order`), the first decision as written. */
 export function decisionPillTarget(first: HTMLElement): HTMLElement {
   if (!first.hasAttribute(DL_ORDER_ATTR)) return first;
-  const log = first.closest("section.decision-log");
-  if (!log) return first;
+  const article = first.closest(".wiki-article") ?? first.ownerDocument;
   const order = (li: Element) => Number(li.getAttribute(DL_ORDER_ATTR));
   let newest: HTMLElement | null = null;
-  for (const list of Array.from(log.querySelectorAll(":scope > .dl-list"))) {
+  for (const list of Array.from(article.querySelectorAll(`section.decision-log > .dl-list:not(.${PEEK_CLASS} *)`))) {
     const decisions = Array.from(list.querySelectorAll<HTMLElement>(`:scope > .dl-item.${DL_DECISION_CLASS}`));
     if (decisions.length > 0) newest = decisions.reduce((a, b) => (order(b) > order(a) ? b : a));
   }

@@ -16,7 +16,11 @@
  * out the reader's own text, and (D45) that All renders both blocks compact
  * too — newest first, five-cap, case lines — showing the `none` rows Overview
  * hides, keeps the order across lens switches, and reveals a capped decision
- * or a folded case from an id link or a hash load.
+ * or a folded case from an id link or a hash load. Also that a case holding a
+ * fact-check mark is never folded, that Explain gets a DecisionLog selection
+ * in authored order with its folded text, that no switch shows where both
+ * lenses render the same page, and that the decisions pill lands on the
+ * page's newest decision across logs.
  *
  * One Norwegian wiki with `idLabels`, instance default Overview, two pages.
  * Synthetic fixtures.
@@ -203,6 +207,52 @@ const MULTI_PAGE = [
   "",
 ].join("\n");
 
+// PR 673 fix round 1: case notes holding a fact-check mark (item 1), and a
+// page whose only lens-relevant content is a top-level DecisionLog (item 3).
+const FACT_REL = "plans/fact.mdx";
+const FACT_PAGE = [
+  "---",
+  "title: Fact page",
+  "type: plan",
+  "---",
+  "",
+  "# Fact page",
+  "",
+  '<CaseBoard src="fact-cases.yaml" labels="hold:holdt ute" />',
+  "",
+].join("\n");
+const FACT_CASES = [
+  "- id: MEL-11",
+  "  status: hold",
+  "  note: 'Person 11, 2025 · **Holdt ute.** Gjelder <Fact n=\"1\" v=\"bad\">alle saker i 2023</Fact> og flere'",
+  "- id: MEL-12",
+  "  status: ok",
+  "  note: '2024 · **Første på lista.**'",
+  "- id: MEL-13",
+  "  status: ok",
+  "  note: '2024 · **Andre på lista.** Gjelder <Fact n=\"2\" v=\"bad\">alle saker i 2022</Fact>'",
+  "- id: MEL-14",
+  "  status: ok",
+  "  note: '2024 · **Tredje på lista.**'",
+  "",
+].join("\n");
+const PLAIN_REL = "plans/plain.mdx";
+const PLAIN_PAGE = [
+  "---",
+  "title: Plain page",
+  "type: plan",
+  "---",
+  "",
+  "# Plain page",
+  "",
+  "<DecisionLog>",
+  "",
+  ...[1, 2, 3, 4, 5, 6, 7].map(dl),
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -258,6 +308,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, MARKS_REL), MARKS_PAGE, "utf8");
   await writeFile(path.join(root, "plans", "none.yaml"), NONE_CASES, "utf8");
   await writeFile(path.join(root, MULTI_REL), MULTI_PAGE, "utf8");
+  await writeFile(path.join(root, FACT_REL), FACT_PAGE, "utf8");
+  await writeFile(path.join(root, "plans", "fact-cases.yaml"), FACT_CASES, "utf8");
+  await writeFile(path.join(root, PLAIN_REL), PLAIN_PAGE, "utf8");
   await writeFile(
     path.join(root, ".wiki-reader.json"),
     JSON.stringify({ language: "no", idLabels: { D: { one: "Beslutning", other: "beslutninger" } } }),
@@ -639,11 +692,13 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(fold(page, "Liten").locator(":scope > summary .fold-size")).toHaveText(`${written} tegn · <1 min`);
     expectClean(seen);
   });
-  test("fix round 2, item 3: «N beslutninger» in a two-list log lands on the newest decision and keeps the five-cap", async ({ page }) => {
+  test("fix round 2, item 3: «N beslutninger» lands on the page's newest decision and keeps the five-cap", async ({ page }) => {
     const seen = await open_(page, "", "", MULTI_REL);
     await page.locator(".wiki-article").evaluate((el) => el.closest("#articleWrap")!.scrollTo(0, 99999));
     await page.locator(".wiki-count-pill-decisions").click();
-    await expect(page.locator("li.dl-item#d8")).toBeInViewport();
+    // PR 673 fix round 1, item 4: the last list holding a decision is the
+    // fold's log below the two-list one, so its newest item is the target.
+    await expect(page.locator("li.dl-item#d33")).toBeInViewport();
     await expect(page.locator("li.dl-item#d3")).toBeHidden();
     await expect(page.locator("section.decision-log").first().locator(":scope > button.dl-all")).toHaveText("Vis alle 8 beslutninger");
     const shown = await page
@@ -703,6 +758,110 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(d21).toBeVisible();
     await expect(d21.locator(".dl-when")).toBeVisible();
     await expect(d21.locator("button.dl-more")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("PR 673 fix round 1, item 1: a case whose note holds a fact-check mark is never folded away", async ({ page }) => {
+    for (const lens of ["all", "overview"]) {
+      const seen = await open_(page, `&lens=${lens}`, "", FACT_REL);
+      // The hold row starts open: its note, and the ❌ in it, are on screen.
+      const hold = page.locator(".cb-row#case-mel-11");
+      await expect(hold.locator(".cb-note .fc-mark")).toBeVisible();
+      await expect(hold.locator("button.cb-more")).toHaveText("mindre");
+      // The ok group shows its first row and the marked row; «+ N til» counts only the folded one.
+      await expect(page.locator(".cb-row#case-mel-12")).toBeVisible();
+      await expect(page.locator(".cb-row#case-mel-13 .fc-mark")).toBeVisible();
+      await expect(page.locator(".cb-row#case-mel-14")).toBeHidden();
+      await expect(page.locator(".wiki-article button.cb-okmore")).toHaveText("+ 1 til");
+      expectClean(seen);
+    }
+  });
+
+  test("PR 673 fix round 1, item 2: Explain gets a DecisionLog selection in authored order, rest and tail included", async ({ page }) => {
+    const sent: string[] = [];
+    await page.route("**/api/wiki/explain?**", (route) => {
+      sent.push(new URL(route.request().url()).searchParams.get("sel") ?? "");
+      return route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: `event: done\ndata: ${JSON.stringify({ answer: "Svar." })}\n\n`,
+      });
+    });
+    const anchors: string[] = [];
+    const explain = async (fn: () => void) => {
+      await page.evaluate(fn);
+      await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+      // The page's own selection is left as the reader made it.
+      anchors.push(await page.evaluate(() => window.getSelection()!.anchorNode?.parentElement?.closest("li")?.id ?? ""));
+      await page.locator("#wikiExplainBtn").dispatchEvent("mousedown");
+      await expect.poll(() => sent.length).toBeGreaterThan(0);
+      return sent.splice(0)[0]!;
+    };
+
+    // One item, from inside its first sentence to its end: the folded rest and
+    // the date tail come with it, the date cell and «mer» do not.
+    let seen = await open_(page);
+    const one = await explain(() => {
+      const li = document.querySelector("li.dl-item#d7")!;
+      const text = li.querySelector(".dl-first")!.firstChild!;
+      const r = document.createRange();
+      r.setStart(text, "Beslutning ".length);
+      r.setEnd(li, li.childNodes.length);
+      const w = window.getSelection()!;
+      w.removeAllRanges();
+      w.addRange(r);
+      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+    expect(one).toBe("nummer 7 gjelder alle saker. Begrunnelse 7. Fag, 07.10 (runde 7).");
+    expectClean(seen);
+
+    // Two reordered rows, D7 above D6 on screen: D6 comes first, both whole.
+    seen = await open_(page);
+    const two = await explain(() => {
+      const r = document.createRange();
+      r.setStart(document.querySelector("li.dl-item#d7 .dl-first")!.firstChild!, 0);
+      const end = document.querySelector("li.dl-item#d6 .dl-first")!.firstChild!;
+      r.setEnd(end, end.textContent!.length);
+      const w = window.getSelection()!;
+      w.removeAllRanges();
+      w.addRange(r);
+      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+    expect(two.replace(/\s+/g, " ")).toBe(
+      "D6Beslutning nummer 6 gjelder alle saker. Begrunnelse 6. Fag, 06.10 (runde 6). " +
+        "D7Beslutning nummer 7 gjelder alle saker. Begrunnelse 7. Fag, 07.10 (runde 7).",
+    );
+    expect(anchors).toEqual(["d7", "d7"]);
+    expectClean(seen);
+  });
+
+  test("PR 673 fix round 1, item 3: no lens switch where both lenses show the same page", async ({ page }) => {
+    let seen = await open_(page, "", "", PLAIN_REL);
+    await expect(page.locator("li.dl-item#d7 .dl-when")).toBeVisible();
+    await expect(page.locator(".wiki-lens-switch")).toHaveCount(0);
+    expectClean(seen);
+    // A compact block in a fold Overview opens, or none rows, still show it.
+    seen = await open_(page);
+    await expect(page.locator(".wiki-lens-switch")).toHaveCount(1);
+    expectClean(seen);
+  });
+
+  test("PR 673 fix round 1, items 4–5: in All «N beslutninger» lands on the page's newest decision, across logs", async ({ page }) => {
+    let seen = await open_(page, "&lens=all");
+    await page.locator(".wiki-article").evaluate((el) => el.closest("#articleWrap")!.scrollTo(0, 99999));
+    await page.locator(".wiki-count-pill-decisions").click();
+    await expect(page.locator("li.dl-item#d7")).toBeInViewport();
+    await expect(page.locator("li.dl-item#d1")).toBeHidden();
+    expect(await lensOf(page)).toBe("all");
+    expectClean(seen);
+
+    // Two logs: the newest decision is the last list's, inside the closed fold.
+    seen = await open_(page, "&lens=all", "", MULTI_REL);
+    await expect(fold(page, "Gamle beslutninger")).not.toHaveAttribute("open", /.*/);
+    await page.locator(".wiki-count-pill-decisions").click();
+    await expect(page.locator("li.dl-item#d33")).toBeInViewport();
+    await expect(fold(page, "Gamle beslutninger")).toHaveAttribute("open", "");
+    expect(await lensOf(page)).toBe("all");
     expectClean(seen);
   });
 });

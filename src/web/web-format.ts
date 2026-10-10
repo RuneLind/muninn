@@ -1345,8 +1345,8 @@ function rendersAs(pieces: readonly string[], wholeFlat: string): boolean {
   return flatHtml(pieces.map(itemHtml).join("")) === wholeFlat;
 }
 
-/** A decision item's text with its date tail in `span.dl-tail` (Overview hides
- *  it and shows the date cell instead); a `→ …` pointer after the tail stays
+/** A decision item's text with its date tail in `span.dl-tail` (the reader
+ *  hides it and shows the date cell instead); a `→ …` pointer after the tail stays
  *  in the rest. Null when the item has no tail, or when cutting it out would
  *  change the render. */
 function decisionTail(text: string): { when: DecisionWhen; html: string } | null {
@@ -1371,7 +1371,7 @@ export function splitDecisionText(text: string): SentenceSplit | null {
   return splitFirstSentence(text, (first, rest) => rendersAs([first, rest], whole));
 }
 
-/** An id-led item's text as Overview reads it: `first` is what the row shows;
+/** An id-led item's text as the reader shows it: `first` is what the row shows;
  *  `lead` and `rest` fold away. On a decision (`strikeLead`), a first sentence
  *  that is one `~~strike~~` end to end is an overturned claim: it moves to
  *  `lead`, and the first sentence after it leads (fagavklaring's D9). A
@@ -1398,7 +1398,7 @@ function decisionParts(text: string, strikeLead: boolean): DecisionParts | null 
   return rendersAs([lead, cur.first, cur.rest], flatHtml(itemHtml(text))) ? parts : { lead: "", ...split };
 }
 
-/** The parts' spans: the lead and the rest are `dl-rest`, so Overview's
+/** The parts' spans: the lead and the rest are `dl-rest`, so the reader's
  *  «mer» opens both; `after` (the date tail) closes the rest. */
 function partsHtml(p: DecisionParts, after: string): string {
   const lead = p.lead ? `<span class="dl-rest">${itemHtml(p.lead)}</span>` : "";
@@ -1406,7 +1406,7 @@ function partsHtml(p: DecisionParts, after: string): string {
   return `${lead}<span class="dl-first">${itemHtml(p.first)}</span>${rest}`;
 }
 
-/** The first sentence of a DecisionLog item as Overview shows it: the parts'
+/** The first sentence of a DecisionLog item as the reader shows it: the parts'
  *  first, else the whole item. The struck lead is skipped for a decision id
  *  only. */
 export function decisionFirstSentence(text: string, id: string): string {
@@ -1444,8 +1444,7 @@ export function unwrapDecisionSplits(html: string): string {
 }
 
 /** An id-led item's text: its first sentence and the rest in two spans when
- *  it holds more than one (D6), so the reader's Overview can show the first
- *  alone. */
+ *  it holds more than one (D6), so the reader can show the first alone. */
 function logTextHtml(text: string, strikeLead: boolean): string {
   const parts = decisionParts(text, strikeLead);
   return parts ? partsHtml(parts, "") : itemHtml(text);
