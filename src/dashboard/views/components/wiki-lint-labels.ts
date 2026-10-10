@@ -21,6 +21,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "stem-collision": "Same-stem pages (one is hidden from the wiki)",
   "question-block": "Question blocks the DecisionLog cannot close",
   "role-key": "Lane roles and question targets outside roleKeys",
+  "case-board-labels": "<CaseBoard labels=> entries that name no case status",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

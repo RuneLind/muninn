@@ -11,3 +11,11 @@ export function isCalendarDay(s: string): boolean {
   dt.setUTCFullYear(y, mo - 1, d);
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
 }
+
+/** `D.M` or `D.M.YYYY` (one or two digits each), true only for a day the
+ *  calendar has; a date without a year is checked against a leap year, so
+ *  `29.02` passes and `31.04` does not. */
+export function isDayFirstDate(s: string): boolean {
+  const m = /^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$/.exec(s);
+  return !!m && isCalendarDay(`${m[3] ?? "2024"}-${m[2]!.padStart(2, "0")}-${m[1]!.padStart(2, "0")}`);
+}

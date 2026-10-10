@@ -296,6 +296,8 @@ export const E2E_PORTS = {
   "wiki-oppfolging-roles/local": 3142,
   // `bun run preview:role`'s env (`MUNINN_LOCAL_IDENT` in a group).
   "wiki-oppfolging-roles/preview": 3143,
+  // Overview's compact DecisionLog and CaseBoard rows (reader lenses PR 10, D41, D42).
+  "wiki-compact-lists": 3144,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

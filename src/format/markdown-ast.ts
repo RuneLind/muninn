@@ -194,9 +194,10 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // One prod query: `csv`/`sql` name files beside the page, `uses` is a
   // comma-separated list. Wiki-only; see `src/format/query-block.ts`.
   Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
-  // Tracked cases from a YAML list beside the page. Wiki-only; see
+  // Tracked cases from a YAML list beside the page; `labels` names each
+  // status in the wiki's words (`hold:holdt ute,wait:venter`). Wiki-only; see
   // `src/format/case-board.ts`.
-  CaseBoard: ["src"],
+  CaseBoard: ["src", "labels"],
   // Run-to-run numbers from a CSV beside the page or a pipe-table body, with a
   // computed delta column. Wiki-only; see `src/format/delta-table.ts`.
   DeltaTable: ["src", "better", "decimal"],

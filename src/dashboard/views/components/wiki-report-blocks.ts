@@ -25,7 +25,7 @@
  */
 
 import { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS } from "../../../wiki/code-refs.ts";
-import { READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
+import { DL_DECISION_CLASS, DL_ORDER_ATTR, OVERVIEW_LENS_CLASS, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
 import { DECISION_ID_RE } from "../../../format/question.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../../../format/question-labels.ts";
 import { laneWords } from "../../../format/lane-roles.ts";
@@ -381,6 +381,24 @@ export function readCounts(article: ParentNode): Record<CountKind, CountTally> {
   return out;
 }
 
+/** Where «N beslutninger» lands (D41): in Overview, the newest decision of
+ *  `first`'s log — the highest authored position in its last list holding
+ *  one, which the five-cap always shows; in any other lens the first decision
+ *  as written. Read at click time, since the lens can change after the pills
+ *  are made. */
+export function decisionPillTarget(article: Element, first: HTMLElement): HTMLElement {
+  if (!article.classList.contains(OVERVIEW_LENS_CLASS)) return first;
+  const log = first.closest("section.decision-log");
+  if (!log) return first;
+  const order = (li: Element) => Number(li.getAttribute(DL_ORDER_ATTR));
+  let newest: HTMLElement | null = null;
+  for (const list of Array.from(log.querySelectorAll(":scope > .dl-list"))) {
+    const decisions = Array.from(list.querySelectorAll<HTMLElement>(`:scope > .dl-item.${DL_DECISION_CLASS}`));
+    if (decisions.length > 0) newest = decisions.reduce((a, b) => (order(b) > order(a) ? b : a));
+  }
+  return newest ?? first;
+}
+
 export interface ReportBlockOptions {
   /** The wiki's `language`, for the counted pills. */
   language?: QuestionLanguage;
@@ -404,13 +422,13 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
   /** A header pill that reveals `target` (D3): the lens and any closed
    *  `<details>` around it give way, then it scrolls and flashes. The Historic
    *  section and a lane carry no id, so the pill passes the element itself. */
-  const jumpPill = (className: string, label: string, title: string, target: HTMLElement) => {
+  const jumpPill = (className: string, label: string, title: string, target: HTMLElement | (() => HTMLElement)) => {
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = className;
     pill.textContent = label;
     pill.title = title;
-    pill.addEventListener("click", () => revealElement(article, target));
+    pill.addEventListener("click", () => revealElement(article, typeof target === "function" ? target() : target));
     pills.push(pill);
   };
 
@@ -447,11 +465,12 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
   for (const kind of ["decisions", "open", "queries", "cases"] as const) {
     const c = counts[kind];
     if (c.count === 0 || !c.first) continue;
+    const first = c.first;
     jumpPill(
       `${COUNT_PILL_CLASS} ${COUNT_PILL_CLASS}-${kind}`,
       countPillLabel(kind, c.count, lang, opts.idLabels),
       COUNT_TITLE[kind],
-      c.first,
+      kind === "decisions" ? () => decisionPillTarget(article, first) : first,
     );
   }
 

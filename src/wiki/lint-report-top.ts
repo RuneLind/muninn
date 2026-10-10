@@ -60,7 +60,7 @@ export function checkReportTop(page: WikiPageMeta, rawContent: string): LintFind
       const line = findLine(lines, fenced, from, (l) => idLine.test(l));
       if (line !== undefined) from = line;
       if (e.dim) continue;
-      const first = visibleText(decisionFirstSentence(e.itemText));
+      const first = visibleText(decisionFirstSentence(e.itemText, e.id));
       if (first.length <= FIRST_SENTENCE_MAX) continue;
       findings.push({
         check: "decision-first-sentence",

@@ -65,6 +65,10 @@
  *                      when it carries no `(IDENT)` and is written as a key
  *                      (lower-case, no spaces), and only on a wiki that
  *                      declares `roleKeys`, since elsewhere it is a name.
+ * 13. case-board-labels — a `<CaseBoard labels=>` entry whose key is not a
+ *                      case status (`hold`, `wait`, `wrong`, `none`, `ok`), or
+ *                      that has no `key:label` shape (the board ignores it
+ *                      and shows the status), and a key given twice (D42).
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -106,6 +110,7 @@ import {
   type QuestionState,
 } from "../format/question.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
+import { CASE_STATUSES, parseCaseLabels } from "../format/case-board.ts";
 import type { Block } from "../format/markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
@@ -120,6 +125,7 @@ export const LINT_CHECKS = [
   "stem-collision",
   "question-block",
   "role-key",
+  "case-board-labels",
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
   ...REPORT_TOP_LINT_CHECKS,
@@ -858,6 +864,41 @@ function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonl
 }
 
 /**
+ * Check 13 — a `<CaseBoard labels=>` entry the board cannot use (D42): a key
+ * that is not a case status, or an entry with no `key:label` shape. The board
+ * ignores it and shows the status itself, so the finding names the entry and
+ * the keys it may use. The line is the board's own tag line, off the parser.
+ */
+function checkCaseBoardLabels(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  if (!rawContent.includes("<CaseBoard") || !rawContent.includes("labels=")) return [];
+  const body = stripFrontmatter(rawContent);
+  const bodyAt = rawContent.slice(0, rawContent.length - body.length).split("\n").length - 1;
+  const findings: LintFinding[] = [];
+  const walk = (bs: Block[]) => {
+    for (const b of bs) {
+      if (b.type !== "component") continue;
+      if (b.name === "CaseBoard" && b.attrs.labels !== undefined) {
+        const line = b.line === undefined ? undefined : bodyAt + b.line + 1;
+        const { bad, duplicates } = parseCaseLabels(b.attrs.labels);
+        const messages = [
+          ...bad.map(
+            (entry) =>
+              `<CaseBoard labels=> entry "${entry}" is not status:label with a status of ${CASE_STATUSES.join(", ")}; the board shows the status unlabelled`,
+          ),
+          ...duplicates.map((d) => `<CaseBoard labels=> key "${d.key}" is given more than once; the last label, "${d.label}", applies`),
+        ];
+        for (const message of messages) {
+          findings.push({ check: "case-board-labels", relPath: page.relPath, message, ...(line ? { line } : {}) });
+        }
+      }
+      walk(b.children);
+    }
+  };
+  walk(parseBlocks(body));
+  return findings;
+}
+
+/**
  * Run every hygiene check over a built wiki index. Returns findings + per-check
  * counts + a timestamp. Report-only: nothing is written. `deps.readFile` is
  * injectable for tests; it defaults to reading the file off disk.
@@ -891,6 +932,8 @@ export async function lintWiki(
     findings.push(...checkQuestions(page, content));
     // Check 12 — every page with a role lane or a role-shaped question target.
     findings.push(...checkRoleKeys(page, content, index.readerConfig?.roleKeys ?? []));
+    // Check 13 — every page with a labelled CaseBoard.
+    findings.push(...checkCaseBoardLabels(page, content));
     // Check 11 — every page with a DecisionLog or StatusRows.
     findings.push(...checkReportTop(page, content));
 

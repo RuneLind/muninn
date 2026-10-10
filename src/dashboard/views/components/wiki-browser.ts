@@ -4210,12 +4210,14 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // The lens (D2's precedence): a `?lens=` the page was opened with, once,
       // then the viewer's stored choice, then the page's default. Before the
       // hash reveal, whose REVEAL_EVENT switches a hidden target's view to All.
+      const keptLens = inPlace && inPlace.relPath === data.meta.relPath ? inPlace.lens : null;
       enhanceLens(articleRoot, {
         language: readerLang,
         agentAvailable: reader?.agentLens === true,
+        inPlace: keptLens !== null,
         initial: resolveLens({
           url: pendingUrlLens,
-          inPlace: inPlace && inPlace.relPath === data.meta.relPath ? inPlace.lens : null,
+          inPlace: keptLens,
           stored: storedLens(),
           pageDefault: reader?.defaultLens ?? null,
           agentAvailable: reader?.agentLens === true,

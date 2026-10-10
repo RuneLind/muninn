@@ -346,7 +346,7 @@ test.describe("Wiki reader: lenses", () => {
     await expect(art.locator(".cb-row")).toHaveCount(5);
     await expect(art.locator('.cb-group[data-status="none"]')).toBeHidden();
     await expect(art.locator('.cb-group[data-status="hold"] .cb-row')).toBeVisible();
-    await expect(art.locator(".cb-lens-note")).toHaveText("2 saker med status none vises ikke");
+    await expect(art.locator(".cb-lens-note")).toHaveText("2 saker med status «none» er skjult");
 
     // One click shows everything again.
     await sw.locator('button[data-lens="all"]').click();

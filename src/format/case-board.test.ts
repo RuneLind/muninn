@@ -1,6 +1,15 @@
 import { test, expect, describe } from "bun:test";
 import { parseBlocks, type Block } from "./markdown-ast.ts";
-import { CASEBOARD_MAX_CASES, caseCountParts, groupCases, parseCaseBoard } from "./case-board.ts";
+import {
+  CASEBOARD_MAX_CASES,
+  caseCountParts,
+  caseKort,
+  caseNoteHead,
+  caseStatusLabel,
+  groupCases,
+  parseCaseBoard,
+  parseCaseLabels,
+} from "./case-board.ts";
 import { pageFileRefs, type PageFileResult } from "./query-block.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -294,7 +303,7 @@ describe("fix round 1: CaseBoard", () => {
   test("a non-text owner or ref is named in the warning; a list or mapping note/owner/ref is counted", () => {
     const html = board("- {id: A, status: ok, owner: 7, refs: [12, Q-1, [x]], note: {a: b}}\n");
     expect(html).toContain("quote them to keep them as written: owner 7, refs 12</p>");
-    expect(html).toContain('<p class="cb-warning">2 values that are a list or mapping dropped (note, owner or refs)</p>');
+    expect(html).toContain('<p class="cb-warning">2 values that are a list or mapping dropped (note, kort, owner or refs)</p>');
   });
 
   test("every count on the board uses one formatter", () => {
@@ -361,5 +370,117 @@ describe("fix round 2: CaseBoard", () => {
 
   test("YAML's .nan and -.inf are written back as YAML writes them", () => {
     expect(ok("- id: .nan\n- id: -.inf\n- id: .inf\n").cases.map((c) => c.id)).toEqual([".nan", "-.inf", ".inf"]);
+  });
+});
+
+describe("compact line and labels (D42)", () => {
+  test("kort: is read as text, a block scalar flattened to one line", () => {
+    const b = parseCaseBoard("- id: A\n  status: ok\n  kort: |\n    Første linje\n    andre linje\n");
+    expect(b.ok && b.cases[0]!.kort).toBe("Første linje andre linje");
+    const none = parseCaseBoard("- {id: A, status: ok}\n");
+    expect(none.ok && none.cases[0]!.kort).toBe("");
+  });
+
+  // The fallback chain: kort:, else the note's first bold span, else nothing.
+  const chain: [string, string, string][] = [
+    ["Holdt ute (D7).", "2025 · **Holdt ute for godt** (D6).", "Holdt ute (D7)."],
+    ["", "2025 · **Holdt ute for godt** (D6). **Andre** fet.", "Holdt ute for godt"],
+    ["", "2025 · ingen fet tekst", ""],
+    ["", "", ""],
+    ["", "** ikke fet** her", ""],
+  ];
+  test.each(chain)("kort %p, note %p → %p", (kort, note, want) => {
+    expect(caseKort({ kort, note })).toBe(want);
+  });
+
+  test("the note's head is the text before the first « · »", () => {
+    expect(caseNoteHead("Person 1404, 2025 · Vedtak · mer")).toBe("Person 1404, 2025");
+    expect(caseNoteHead("Ingen skilletegn her")).toBe("");
+    expect(caseNoteHead(" · starter med skille")).toBe("");
+  });
+
+  test("labels=: status keys, case-folded; bad entries kept apart", () => {
+    const { labels, bad } = parseCaseLabels("hold:holdt ute, WAIT : venter,wrong:feil årsavregning,none:ikke kandidat,bogus:x,ok,:tom,ok:");
+    expect(labels).toEqual({ hold: "holdt ute", wait: "venter", wrong: "feil årsavregning", none: "ikke kandidat" });
+    expect(bad).toEqual(["bogus:x", "ok", ":tom", "ok:"]);
+    expect(parseCaseLabels(undefined)).toEqual({ labels: {}, bad: [], duplicates: [] });
+    expect(caseStatusLabel("hold", labels)).toBe("holdt ute");
+    expect(caseStatusLabel("ok", labels)).toBe("ok");
+    expect(caseStatusLabel("unknown", labels)).toBe("unknown");
+  });
+
+  const yaml = [
+    "- id: A",
+    "  status: hold",
+    '  note: "Person 1, 2025 · Vedtak · **Holdt ute** (D7). Mer"',
+    '  kort: "Holdt ute av lista (D7)."',
+    "  refs: [D7]",
+    "- id: B",
+    "  status: ok",
+    '  note: "2024 · **På lista.**"',
+  ].join("\n");
+  const render = (attrs: string, reader: boolean) =>
+    formatWebHtml(`<CaseBoard src="c.yaml"${attrs} />`, { reader, files: files({ "c.yaml": { ok: true, text: yaml } }) });
+
+  test("labels name the pills and the strip in every render; the status rides as a title", () => {
+    for (const reader of [true, false]) {
+      const html = render(' labels="hold:holdt ute"', reader);
+      expect(html).toContain('<span class="cb-pill cb-hold" title="hold">holdt ute</span>');
+      expect(html).toContain('<span class="cb-count cb-count-hold"><span class="cb-n">1</span> holdt ute</span>');
+      expect(html).toContain('<span class="cb-pill cb-ok">ok</span>');
+    }
+  });
+
+  test("the reader adds the compact line before the note; chat does not", () => {
+    const html = render("", true);
+    expect(html).toContain(
+      '<span class="cb-line" data-reader-only><span class="cb-head">Person 1, 2025</span><span class="cb-sep"> · </span><span class="cb-kort">Holdt ute av lista (D7).</span></span><span class="cb-note">',
+    );
+    expect(html).toContain('<span class="cb-line" data-reader-only><span class="cb-head">2024</span><span class="cb-sep"> · </span><span class="cb-kort">På lista.</span></span>');
+    expect(render("", false)).not.toContain("cb-line");
+  });
+});
+
+describe("fix round 1: the compact line (D42)", () => {
+  // Item 12: « · » inside inline markup is no head separator.
+  const heads: [string, string][] = [
+    ["`a · b` fordi", ""],
+    ["**a · b** tekst", ""],
+    ["[lenke · x](u) · rest", "[lenke · x](u)"],
+    ["_a · b_ tekst · rest", "_a · b_ tekst"],
+    ["Person 1, 2025 · Vedtak", "Person 1, 2025"],
+  ];
+  test.each(heads)("item 12: head of %p is %p", (note, want) => {
+    expect(caseNoteHead(note)).toBe(want);
+  });
+
+  // Item 13: the bold fallback skips a span inside the head, and bold inside code.
+  const korts: [string, string][] = [
+    ["**Person 1**, 2025 · **Holdt ute** (D7)", "Holdt ute"],
+    ["**Person 1** · ingen fet her", ""],
+    ["2025 · `**ikke fet**` · **fet**", "fet"],
+    ["`a **x** b` ingen skille", ""],
+  ];
+  test.each(korts)("item 13: kort of note %p is %p", (note, want) => {
+    expect(caseKort({ kort: "", note })).toBe(want);
+  });
+
+  test("item 14: a case with neither head nor kort gets no compact line", () => {
+    const yaml = '- id: A\n  status: wrong\n  note: "Ingen skilletegn og ingen fet tekst"\n';
+    const html = formatWebHtml('<CaseBoard src="c.yaml" />', { reader: true, files: files({ "c.yaml": { ok: true, text: yaml } }) });
+    expect(html).not.toContain("cb-line");
+  });
+
+  test("item 1: the compact line comes before the full note in the DOM", () => {
+    const yaml = '- id: A\n  status: hold\n  note: "Person 1 · **Holdt ute**"\n';
+    const html = formatWebHtml('<CaseBoard src="c.yaml" />', { reader: true, files: files({ "c.yaml": { ok: true, text: yaml } }) });
+    expect(html.indexOf('class="cb-line"')).toBeLessThan(html.indexOf('class="cb-note"'));
+    expect(html.indexOf('class="cb-line"')).toBeGreaterThan(html.indexOf('class="cb-pill'));
+  });
+
+  test("cleanup: each group carries its label for the reader's hidden-cases line", () => {
+    const yaml = "- {id: A, status: none}\n";
+    const html = formatWebHtml('<CaseBoard src="c.yaml" labels="none:ikke kandidat" />', { reader: true, files: files({ "c.yaml": { ok: true, text: yaml } }) });
+    expect(html).toContain('<div class="cb-group" data-status="none" data-label="ikke kandidat">');
   });
 });

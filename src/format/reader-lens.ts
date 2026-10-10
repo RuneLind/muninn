@@ -122,6 +122,53 @@ export const MORE_WORDS: Record<QuestionLanguage, { more: string; less: string; 
 /** The class on that badge. */
 export const DL_QSTATE_CLASS = "dl-qstate";
 
+/** Overview's compact DecisionLog and CaseBoard (D41, D42). The renderer's
+ *  marks: a decision item, its date cell and the tail the cell replaces, and a
+ *  case row's compact line. */
+export const DL_DECISION_CLASS = "dl-decision";
+export const DL_WHEN_CLASS = "dl-when";
+export const DL_TAIL_CLASS = "dl-tail";
+export const CB_LINE_CLASS = "cb-line";
+/** On each item of a DecisionLog list, set by the reader: its authored
+ *  position in the list, which Overview's newest-first order moves away from. */
+export const DL_ORDER_ATTR = "data-dl-order";
+/** The controls the reader adds, the class on a case row whose note Overview
+ *  shows, and the controls' words. */
+export const DL_ALL_CLASS = "dl-all";
+export const CB_MORE_CLASS = "cb-more";
+export const CB_OKMORE_CLASS = "cb-okmore";
+export const CB_EXPANDED_CLASS = "cb-expanded";
+/** The class an article carries in Overview (`lens-` plus the lens). */
+export const LENS_CLASS_PREFIX = "lens-";
+export const OVERVIEW_LENS_CLASS = `${LENS_CLASS_PREFIX}overview`;
+/** Decisions Overview shows before «Vis alle». */
+export const DL_COMPACT_SHOWN = 5;
+export const COMPACT_WORDS: Record<
+  QuestionLanguage,
+  {
+    showAll: (n: number) => string;
+    showNewest: (n: number) => string;
+    okMore: (n: number) => string;
+    okFewer: string;
+    hidden: (n: number, label: string) => string;
+  }
+> = {
+  en: {
+    showAll: (n) => `Show all ${n} decisions`,
+    showNewest: (n) => `Show only the ${n} newest`,
+    okMore: (n) => `+ ${n} more`,
+    okFewer: "show fewer",
+    hidden: (n, label) => `${n} ${n === 1 ? "case" : "cases"} with status “${label}” hidden`,
+  },
+  no: {
+    showAll: (n) => `Vis alle ${n} beslutninger`,
+    showNewest: (n) => `Vis bare de ${n} nyeste`,
+    okMore: (n) => `+ ${n} til`,
+    okFewer: "vis færre",
+    hidden: (n, label) => `${n} ${n === 1 ? "sak" : "saker"} med status «${label}» er skjult`,
+  },
+};
+
 // ── WIKI_DEFAULT_LENS (D24) ──────────────────────────────────────────────────
 
 /** A default lens as `WIKI_DEFAULT_LENS` or `.wiki-reader.json` `defaultLens`

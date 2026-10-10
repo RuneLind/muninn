@@ -7,7 +7,7 @@
  * Every grammar is an enumerated table of accepted shapes, not a tokenizer:
  * anything outside the table reads as plain text.
  */
-import { isCalendarDay } from "./calendar-day.ts";
+import { isCalendarDay, isDayFirstDate } from "./calendar-day.ts";
 import type { ChecklistList, ChecklistRow } from "./markdown-ast.ts";
 
 /** The separator after a leading date or id. The tail after the token must be
@@ -79,9 +79,7 @@ const TIMELINE_DATE_TABLE: readonly { re: RegExp; tail: "separator" | "yearless"
 /** True for a date the calendar has. A date without a year is checked
  *  against a leap year, so `29.02` passes and `31.04` does not. */
 function isTimelineDate(d: string): boolean {
-  const dm = /^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$/.exec(d);
-  if (!dm) return isCalendarDay(d.slice(0, 10));
-  return isCalendarDay(`${dm[3] ?? "2024"}-${dm[2]!.padStart(2, "0")}-${dm[1]!.padStart(2, "0")}`);
+  return isDayFirstDate(d) || isCalendarDay(d.slice(0, 10));
 }
 
 export interface TimelineItem {
@@ -151,6 +149,50 @@ export function parseLogItem(item: string): LogItem {
   return { id: null, text: item, dim: inner !== null || superseded };
 }
 
+/** A decision item's trailing «<who>, DD.MM[.YYYY] (runde N).» (D41). */
+export interface DecisionWhen {
+  who: string;
+  /** `DD.MM` or `DD.MM.YYYY`, as written. */
+  date: string;
+  /** The round as written, word included (`runde 5 og 6`, `Round 2`); null
+   *  when the item names no round. */
+  round: string | null;
+  /** Where the tail starts in the text. */
+  start: number;
+  /** Where the hidden part ends: the end of the text, or the start of a
+   *  trailing `→ …` pointer, which stays with the rest. */
+  end: number;
+}
+
+/** The round words a date tail may name, matched without case. */
+const ROUND_WORDS = new Set(["runde", "round"]);
+
+const WHEN_RE = new RegExp(
+  String.raw`(?:^|(?<=[.!?»)*_]\s))` +
+    // who: one to three words of letters, hyphens and apostrophes (O'Brien),
+    // the first capitalised.
+    String.raw`(\p{Lu}[\p{L}'-]*(?: [\p{L}'-]+){0,2}), ` +
+    `(${DAY_MONTH}(?:\\.\\d{4})?)` +
+    String.raw`(?: \(((\p{L}+) \d{1,3}(?:(?: og | and |, ?|[–/-])\d{1,3})*)\))?` +
+    String.raw`(\s*→[^\n]*?)?\.\s*$`,
+  "u",
+);
+
+/** The item's trailing date line, or null. The date must be a real calendar
+ *  day ({@link isDayFirstDate}). */
+export function parseDecisionWhen(text: string): DecisionWhen | null {
+  const m = WHEN_RE.exec(text);
+  if (!m || !isDayFirstDate(m[2]!)) return null;
+  if (m[4] && !ROUND_WORDS.has(m[4].toLowerCase())) return null;
+  const end = m[5] ? m.index + m[0].indexOf(m[5]) : text.length;
+  return { who: m[1]!, date: m[2]!, round: m[3] ?? null, start: m.index, end };
+}
+
+/** The date cell's text: `Fag, 07.10 · runde 6`, the round word as written. */
+export function decisionWhenLabel(w: DecisionWhen): string {
+  return `${w.who}, ${w.date}${w.round ? ` · ${w.round}` : ""}`;
+}
+
 /** The text with every inline code span (a backtick run, then the same run)
  *  removed. */
 function withoutCodeSpans(text: string): string {
@@ -158,7 +200,7 @@ function withoutCodeSpans(text: string): string {
 }
 
 /** The inside of a text that is one `~~…~~` strike from end to end; null otherwise. */
-function wholeStrike(text: string): string | null {
+export function wholeStrike(text: string): string | null {
   const m = /^~~([\s\S]+)~~$/.exec(text);
   return m && !m[1]!.includes("~~") ? m[1]! : null;
 }

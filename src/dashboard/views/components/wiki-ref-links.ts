@@ -27,7 +27,19 @@
  */
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
-import { DL_MORE_CLASS, DL_QSTATE_CLASS, idPrefix, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
+import {
+  CB_LINE_CLASS,
+  CB_MORE_CLASS,
+  CB_OKMORE_CLASS,
+  DL_ALL_CLASS,
+  DL_MORE_CLASS,
+  DL_ORDER_ATTR,
+  DL_QSTATE_CLASS,
+  DL_WHEN_CLASS,
+  idPrefix,
+  READER_ONLY_ATTR,
+  type IdLabels,
+} from "../../../format/reader-lens.ts";
 
 /** The noun before an id (D12): the server puts it before a DecisionLog or
  *  Query chip, the ref links before an id run in prose. */
@@ -304,11 +316,23 @@ function decodeHash(href: string): string | null {
 /** A copy safe to show twice on the page: no ids, no flash, no frames
  *  reloading, no live checkboxes, and none of the Overview lens's decision
  *  chrome (the «mer» toggle, the «lukket» badge): a peek shows a decision
- *  whole in every lens (D6). */
+ *  whole in every lens (D6), and a DecisionLog in its authored order, which
+ *  Overview reverses on the page (D41). */
 function cloneBare<T extends Node>(n: T): T {
   const c = n.cloneNode(true) as T;
   if (c instanceof Element) {
-    c.querySelectorAll(`.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}`).forEach((b) => b.remove());
+    // The reader's lens controls and Overview's compact parts (D6, D41, D42):
+    // a peek shows its target whole, as written.
+    c.querySelectorAll(
+      `.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${DL_WHEN_CLASS}, .${CB_LINE_CLASS}`,
+    ).forEach((b) => b.remove());
+    for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
+      if (!list.matches(".dl-list")) continue;
+      const items = Array.from(list.children);
+      if (!items.every((li) => li.hasAttribute(DL_ORDER_ATTR))) continue;
+      items.sort((x, y) => Number(x.getAttribute(DL_ORDER_ATTR)) - Number(y.getAttribute(DL_ORDER_ATTR)));
+      list.append(...items);
+    }
     for (const x of [c, ...Array.from(c.querySelectorAll("[id], .wiki-hash-flash, iframe, input"))]) {
       x.removeAttribute("id");
       x.classList.remove(HASH_FLASH_CLASS);

@@ -88,7 +88,7 @@ export const STATUS_SEPARATOR = " · ";
 
 /** What a ` · ` inside is no segment separator: code spans, wikilinks,
  *  links, a component's tag pair with its body, any other tag. */
-const SEGMENT_PROTECTED_RES: readonly RegExp[] = [
+export const SEGMENT_PROTECTED_RES: readonly RegExp[] = [
   /(`+)[\s\S]*?[^`]\1(?!`)|(`+)\2(?!`)/g,
   /\[\[[^\]\n]*\]\]/g,
   /!?\[[^\]\n]*\]\([^)\n]*\)/g,
@@ -98,9 +98,15 @@ const SEGMENT_PROTECTED_RES: readonly RegExp[] = [
 
 /** A row's value split on ` · ` outside code spans, links and tag pairs. */
 export function statusSegments(value: string): string[] {
+  return splitOutside(value, SEGMENT_PROTECTED_RES);
+}
+
+/** `value` split on ` · ` outside every span `res` matches (masked in order,
+ *  so a span inside an earlier one is already hidden). */
+export function splitOutside(value: string, res: readonly RegExp[]): string[] {
   const out: string[] = [];
   let start = 0;
-  const masked = maskSpans(value, SEGMENT_PROTECTED_RES);
+  const masked = maskSpans(value, res);
   for (let i = masked.indexOf(STATUS_SEPARATOR); i !== -1; i = masked.indexOf(STATUS_SEPARATOR, i + STATUS_SEPARATOR.length)) {
     out.push(value.slice(start, i));
     start = i + STATUS_SEPARATOR.length;
@@ -281,7 +287,7 @@ const PROTECTED_RES: readonly RegExp[] = [
 ];
 
 /** `text` with every match of `res` replaced by U+0001 of the same length. */
-function maskSpans(text: string, res: readonly RegExp[]): string {
+export function maskSpans(text: string, res: readonly RegExp[]): string {
   let out = text;
   for (const re of res) {
     re.lastIndex = 0;

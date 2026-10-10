@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { laneFromAttrs, parseBlocks, type Block, type ChecklistRow } from "./markdown-ast.ts";
-import { commandCode, parseLogItem, parseRunEntry, parseTimelineItem, runStepLine } from "./genre-lists.ts";
+import { commandCode, decisionWhenLabel, parseDecisionWhen, parseLogItem, parseRunEntry, parseTimelineItem, runStepLine } from "./genre-lists.ts";
 import { componentBlockCss } from "./component-styles.ts";
 import { chatStyles } from "../chat/views/components/chat-styles.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -663,5 +663,162 @@ describe("plain-text fallbacks", () => {
     const kept = "<RunChecklist>\n\n- [ ]\n  - Kommando: x\n- [ ] b\n\n</RunChecklist>";
     expect(formatSlackMrkdwn(kept)).toBe("☐ \n  ◦ Kommando: x\n☐ b");
     expect(formatEmailHtml(kept).match(/[☐☑]<\/span>/g)).toHaveLength(2);
+  });
+});
+
+describe("DecisionLog date tail (D41)", () => {
+  // [item text, label or null, the text the tail leaves]
+  const rows: [string, string | null, string][] = [
+    ["Regelen gjelder alle. Fag, 28.09 (runde 1).", "Fag, 28.09 · runde 1", "Regelen gjelder alle."],
+    ["Regelen gjelder alle. Fag, 28.09.2026 (runde 12).", "Fag, 28.09.2026 · runde 12", "Regelen gjelder alle."],
+    ["Regelen gjelder alle. Rune Lind, 07.10.", "Rune Lind, 07.10", "Regelen gjelder alle."],
+    ["Regelen gjelder alle. Fag, 7.10.2026.", "Fag, 7.10.2026", "Regelen gjelder alle."],
+    ["To oppgaver. Fag, 28.09 (runde 1) → oppgave 1 og 2.", "Fag, 28.09 · runde 1", "To oppgaver."],
+    // A struck first claim, snudd later, two rounds (fagavklaring's D9).
+    [
+      "~~MEL-1 skal ha en årsavregning.~~ Snudd i runde 6: MEL-1 skal **ikke** ha det ([PR #3](https://x.io/3); i prod). Fag, 07.10 (runde 5 og 6).",
+      "Fag, 07.10 · runde 5 og 6",
+      "~~MEL-1 skal ha en årsavregning.~~ Snudd i runde 6: MEL-1 skal **ikke** ha det ([PR #3](https://x.io/3); i prod).",
+    ],
+    ["Ingen dato her.", null, ""],
+    ["Feil dag. Fag, 31.02 (runde 1).", null, ""],
+    ["Midt i: Fag, 28.09 (runde 1). Så mer tekst.", null, ""],
+    ["fag, 28.09 (runde 1).", null, ""],
+    ["Komma, 28.09 i setningen uten punktum", null, ""],
+  ];
+  test.each(rows)("%s", (text, label, rest) => {
+    const w = parseDecisionWhen(text);
+    expect(w ? decisionWhenLabel(w) : null).toBe(label);
+    if (w) expect(text.slice(0, w.start).trim()).toBe(rest);
+  });
+
+  test("the label keeps the round word as written", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("X. Fag, 01.02 (runde 3).")!)).toBe("Fag, 01.02 · runde 3");
+  });
+
+  test("a pointer after the tail stays in the text", () => {
+    const text = "To oppgaver. Fag, 28.09 (runde 1) → oppgave 1 og 2.";
+    const w = parseDecisionWhen(text)!;
+    expect(text.slice(w.start, w.end).trim()).toBe("Fag, 28.09 (runde 1)");
+    expect(text.slice(w.end).trim()).toBe("→ oppgave 1 og 2.");
+  });
+
+  const log = (items: string[]) => ["<DecisionLog>", "", ...items, "", "</DecisionLog>"].join("\n");
+
+  test("the reader marks decisions and splits the tail out; chat renders as before", () => {
+    const md = log(["- **D1** — Første beslutning gjelder. Fag, 28.09 (runde 1).", "- **S1** — Et spørsmål? Fag, 28.09 (runde 1)."]);
+    const reader = formatWebHtml(md, { reader: true, language: "no" });
+    expect(reader).toContain('<li class="dl-item dl-decision" id="d1"');
+    expect(reader).toContain('<span class="dl-when" data-reader-only>Fag, 28.09 · runde 1</span>');
+    expect(reader).toContain('<span class="dl-tail">Fag, 28.09 (runde 1).</span>');
+    // A question item keeps today's rendering.
+    expect(reader).toMatch(/<li class="dl-item" id="s1"[^>]*><a class="dl-id" href="#s1">S1<\/a><span class="dl-text">/);
+    const chat = formatWebHtml(md);
+    expect(chat).not.toContain("dl-decision");
+    expect(chat).not.toContain("dl-when");
+    expect(chat).not.toContain("dl-tail");
+  });
+
+  test("the tail split leaves the item's text unchanged", () => {
+    const md = log(["- **D2** — Vedtak fattet i flyten skal ha metadata. Fag ba om to oppgaver. Fag, 28.09 (runde 1) → oppgave 1 og 2."]);
+    const text = (html: string) =>
+      html
+        .replace(/<span class="dl-when"[^>]*>[^<]*<\/span>/g, "")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    expect(text(formatWebHtml(md, { reader: true }))).toBe(text(formatWebHtml(md)));
+    const html = formatWebHtml(md, { reader: true });
+    expect(html).toContain('<span class="dl-first">Vedtak fattet i flyten skal ha metadata.</span>');
+    expect(html).toContain('<span class="dl-tail">Fag, 28.09 (runde 1)</span> → oppgave 1 og 2.</span>');
+  });
+
+  test("an item with no tail gets an empty date cell (none rendered)", () => {
+    const html = formatWebHtml(log(["- **D3** — Ingen dato her."]), { reader: true });
+    expect(html).toContain('class="dl-item dl-decision"');
+    expect(html).not.toContain("dl-when");
+  });
+});
+
+describe("fix round 1: the D41 date tail and an overturned first sentence", () => {
+  const log = (items: string[]) => ["<DecisionLog>", "", ...items, "", "</DecisionLog>"].join("\n");
+
+  test("item 15: «Satsen er 3. Se kapittel 4, 3.2.» is no date tail: who carries no digit", () => {
+    expect(parseDecisionWhen("Satsen er 3. Se kapittel 4, 3.2.")).toBeNull();
+    // who is one to three words.
+    expect(parseDecisionWhen("Regel. En to tre fire, 01.02.")).toBeNull();
+    expect(decisionWhenLabel(parseDecisionWhen("Regel. Fag og jus, 01.02.")!)).toBe("Fag og jus, 01.02");
+  });
+
+  test("item 15: the round word is case-insensitive", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("Regelen gjelder alle. Fag, 07.10 (Runde 6).")!)).toBe("Fag, 07.10 · Runde 6");
+    expect(decisionWhenLabel(parseDecisionWhen("The rule holds for all. Team, 07.10 (ROUND 2).")!)).toBe("Team, 07.10 · ROUND 2");
+  });
+
+  test("item 16: the date cell keeps the authored round word", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("The rule holds for all. Team, 07.10 (round 3).")!)).toBe("Team, 07.10 · round 3");
+    const html = formatWebHtml(log(["- **D1** — The rule holds for all cases. Team, 07.10 (round 3)."]), { reader: true, language: "no" });
+    expect(html).toContain('<span class="dl-when" data-reader-only>Team, 07.10 · round 3</span>');
+  });
+
+  test("item 17: a yearless 29.02 is a calendar day (checked against a leap year)", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("Regelen gjelder alle. Fag, 29.02 (runde 1).")!)).toBe("Fag, 29.02 · runde 1");
+    expect(parseDecisionWhen("Regelen gjelder alle. Fag, 29.02.2025 (runde 1).")).toBeNull();
+  });
+
+  test("item 1: the date cell follows the text in the DOM", () => {
+    const html = formatWebHtml(log(["- **D1** — Regelen gjelder alle saker. Fag, 28.09 (runde 1)."]), { reader: true });
+    expect(html.indexOf('class="dl-when"')).toBeGreaterThan(html.indexOf('class="dl-text"'));
+  });
+
+  // Fagavklaring's D9, as written: the first claim struck, the ruling after it.
+  const D9 =
+    "- **D9** — ~~MEL-600070 skal ha en årsavregning for 2024.~~ Snudd i runde 6: MEL-600070 skal **ikke** ha årsavregning, " +
+    "fordi personen er skattepliktig uten andre inntekter, og avgiften ikke skal betales til Nav. Står fast: Melosys skal se bort " +
+    "fra åpne årsavregninger uten år. Fag, 07.10 (runde 5 og 6).";
+
+  test("item 2: a struck first sentence leaves the first sentence of what follows as the row's text", () => {
+    const html = formatWebHtml(log([D9]), { reader: true, language: "no" });
+    expect(html).toContain(
+      '<span class="dl-first">Snudd i runde 6: MEL-600070 skal <strong>ikke</strong> ha årsavregning, fordi personen er skattepliktig uten andre inntekter, og avgiften ikke skal betales til Nav.</span>',
+    );
+    // The struck claim is in the rest, before the first sentence, so All reads the item as written.
+    expect(html).toMatch(/<span class="dl-text"><span class="dl-rest"><s>MEL-600070 skal ha en årsavregning for 2024\.<\/s> ?<\/span><span class="dl-first">/);
+    const text = (h: string) =>
+      h
+        .replace(/<span class="dl-when"[^>]*>[^<]*<\/span>/g, "")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    expect(text(html)).toBe(text(formatWebHtml(log([D9]))));
+  });
+
+  test("fix round 2 item 5: a parenthesis whose word is not a round word is no date tail", () => {
+    expect(parseDecisionWhen("Regelen gjelder alle. Fag, 07.10 (fase 2).")).toBeNull();
+    expect(parseDecisionWhen("Regelen gjelder alle. Fag, 07.10 (runde 2).")).not.toBeNull();
+  });
+
+  test("fix round 2: who may carry an apostrophe inside a word; digits stay out", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("The rule holds for all. O'Brien, 07.10 (round 2).")!)).toBe("O'Brien, 07.10 · round 2");
+    // Mimir's reader-lenses D23/D24 tails stay without a date cell.
+    expect(parseDecisionWhen("A test pins that no group member ident appears in the page payload. Plan review round 1, 08.10.2026.")).toBeNull();
+  });
+
+  // Fagavklaring's S3, as written: a closed question, its question struck.
+  const S3 = "- **S3** — ~~Skal MEL-368918 la være å årsavregnes?~~ Lukket 07.10 (D7).";
+
+  test("fix round 2 item 1: a closed question keeps its struck question as the first sentence", () => {
+    const html = formatWebHtml(log(["- **D7** — MEL-368918 årsavregnes ikke. Fag, 07.10 (runde 6).", S3]), { reader: true, language: "no" });
+    expect(html).toContain('<span class="dl-first"><s>Skal MEL-368918 la være å årsavregnes?</s></span>');
+    expect(html).not.toContain('<span class="dl-first">Lukket 07.10 (D7).</span>');
+    // Off the reader path the same: the struck lead is a decision rule only.
+    expect(formatWebHtml(log([S3]))).toContain('<span class="dl-first"><s>Skal MEL-368918 la være å årsavregnes?</s></span>');
+  });
+
+  test("item 2: the same rule without a date tail, and a struck item stays as it was", () => {
+    const html = formatWebHtml(log(["- **D4** — ~~Gammel regel gjelder her.~~ Ny regel gjelder fra nå av. Begrunnelse følger."]), { reader: true });
+    expect(html).toContain('<span class="dl-first">Ny regel gjelder fra nå av.</span>');
+    const struck = formatWebHtml(log(["- **D5** — ~~Gammel regel gjelder her. Og mer gammelt.~~"]), { reader: true });
+    expect(struck).not.toMatch(/<span class="dl-rest"><s>/);
   });
 });

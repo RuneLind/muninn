@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { componentBlockCss, factcheckReaderCss, questionReaderCss } from "../../format/component-styles.ts";
+import { compactPartsHiddenCss, componentBlockCss, factcheckReaderCss, questionReaderCss } from "../../format/component-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -1931,6 +1931,8 @@ export async function renderWikiPage(opts?: {
     .wiki-article hr { border: none; border-top: 1px solid var(--border-primary); margin: 16px 0; }
     .wiki-article a[target="_blank"] { color: var(--status-info); }
     ${componentBlockCss(".wiki-article")}
+    /* The What's-new digest is a reader-path render outside the article. */
+    ${compactPartsHiddenCss(".wiki-whatsnew")}
     /* Reader-only: line-ref chips (src/wiki/code-refs.ts) and the header chrome
        wiki-report-blocks.ts adds. Chip text is --text-soft: e2e/wiki-report-blocks
        measures it at >= 4.5:1 on the article background and inside a Historic

@@ -4,6 +4,7 @@ import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
 import { wikiReadonlyStyles } from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
+import { compactPartsHiddenCss } from "../../format/component-styles.ts";
 
 /**
  * /wiki/gardener — the wiki-gardener review gate.
@@ -382,6 +383,8 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-group-diff-status { font-family: inherit; color: var(--text-dim); }
 
     /* Preview (mirrors the /wiki article styling, scoped) */
+    /* The preview is a reader-path render without the lens CSS. */
+    ${compactPartsHiddenCss(".gard-preview")}
     .gard-preview { border: 1px solid var(--border-secondary); border-radius: 8px; padding: 16px 20px; background: var(--bg-surface); font-size: 13.5px; line-height: 1.6; color: var(--text-secondary); }
     .gard-preview h1, .gard-preview h2, .gard-preview h3, .gard-preview h4 { color: var(--text-primary); margin: 16px 0 7px; }
     .gard-preview h1 { font-size: 19px; }

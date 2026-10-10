@@ -110,3 +110,22 @@ describe("lint: decision-first-sentence uses the guarded split (fix round 2, M16
     expect(await findings("decision-first-sentence")).toHaveLength(1);
   });
 });
+
+describe("lint: decision-first-sentence takes the struck lead for decisions only (fix round 2, item 1)", () => {
+  test("a closed question's first sentence is its struck question, so a long one warns; a decision's struck lead is skipped", async () => {
+    await write(
+      "plans/p.mdx",
+      page([
+        "<DecisionLog>",
+        "",
+        `- **S1** — ~~Skal ${LONG} gjelde?~~ Lukket 07.10 (D1).`,
+        `- **D1** — ~~Gammel ${LONG} regel.~~ Ny regel gjelder.`,
+        "",
+        "</DecisionLog>",
+      ]),
+    );
+    const f = await findings("decision-first-sentence");
+    expect(f).toHaveLength(1);
+    expect(f[0]!.message).toContain("DecisionLog item S1");
+  });
+});
