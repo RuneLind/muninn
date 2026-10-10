@@ -967,8 +967,9 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
     for (const id of named(lane)) if (questions.get(id)!.lanes.includes(lane.children)) stays.add(id);
   }
   const out: LaneCards = { byLane: new Map(), moved: new Map(), stubs: new Map() };
-  /** Question id → the `<NextMoves>` block whose lane took its card. */
+  /** Question id → the `<NextMoves>` block whose lane took its card, and that lane. */
   const takenBy = new Map<string, ComponentBlock>();
+  const takenLane = new Map<string, Block[]>();
   const anchors = new Set<string>();
   for (const lane of waiting) {
     for (const item of lane.items) {
@@ -980,13 +981,14 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
         anchors.add(anchor);
         out.moved.set(id, anchor);
         takenBy.set(id, lane.block);
+        takenLane.set(id, lane.children);
         const list = out.byLane.get(lane.children) ?? [];
         list.push(questions.get(id)!.block);
         out.byLane.set(lane.children, list);
       }
     }
   }
-  planMovedStubs(blocks, out, takenBy);
+  planMovedStubs(blocks, out, takenBy, takenLane);
   return out;
 }
 
@@ -995,11 +997,19 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
  * other moved cards, blank lines and HTML comments between it and the end of
  * the block that took it leaves nothing; otherwise a run of moved cards taken
  * by one block (blank lines and comments between them allowed) leaves one line
- * naming them all, linking to the first. The arrow points at the block: ↓ when
- * it sits below the line, or when the card is written inside it (its intro or
- * another lane render above the lane the card moves to).
+ * naming them all, linking to the first. The arrow points from the line to the
+ * lane that took the card, in the server's render order: ↓ when the block sits
+ * below the line, ↑ when above. For a card written inside that block, ↓ from
+ * its intro or a lane rendered before the taking lane, ↑ from one rendered after
+ * it — blocked lanes render last (`renderedLaneOrder`). The reader's role
+ * reorder (`applyLaneRoles`) runs later and is not considered.
  */
-function planMovedStubs(blocks: Block[], cards: LaneCards, takenBy: Map<string, ComponentBlock>): void {
+function planMovedStubs(
+  blocks: Block[],
+  cards: LaneCards,
+  takenBy: Map<string, ComponentBlock>,
+  takenLane: Map<string, Block[]>,
+): void {
   const order = new Map<Block, number>();
   const parent = new Map<Block, Block>();
   const lists: Block[][] = [];
@@ -1015,6 +1025,15 @@ function planMovedStubs(blocks: Block[], cards: LaneCards, takenBy: Map<string, 
   const inside = (b: Block, nm: Block): boolean => {
     for (let p = parent.get(b); p; p = parent.get(p)) if (p === nm) return true;
     return false;
+  };
+  const arrowFor = (card: Block, id: string): MovedStub["arrow"] => {
+    const nm = takenBy.get(id)!;
+    if (!inside(card, nm)) return order.get(nm)! < order.get(card)! ? "↑" : "↓";
+    let top = card;
+    while (parent.get(top) !== nm) top = parent.get(top)!;
+    if (top.type !== "component" || top.name !== "Lane") return "↓";
+    const rendered = renderedLaneOrder(nextMovesLanes(nm.children)).map((l) => l.children);
+    return rendered.indexOf(top.children) > rendered.indexOf(takenLane.get(id)!) ? "↑" : "↓";
   };
   const movedId = (b: Block): string | null => {
     if (b.type !== "component" || b.name !== "Question") return null;
@@ -1036,11 +1055,10 @@ function planMovedStubs(blocks: Block[], cards: LaneCards, takenBy: Map<string, 
     const flush = () => {
       const first = run[0];
       if (!first) return;
-      const nm = takenBy.get(first.id)!;
       cards.stubs.set(first.block.attrs, {
         ids: run.map((r) => r.id),
         anchor: cards.moved.get(first.id)!,
-        arrow: !inside(first.block, nm) && order.get(nm)! < order.get(first.block)! ? "↑" : "↓",
+        arrow: arrowFor(first.block, first.id),
       });
       for (const r of run.slice(1)) cards.stubs.set(r.block.attrs, null);
       run = [];
@@ -1081,19 +1099,13 @@ function lanePeek(lane: NextMovesLane): string {
   return lane.items.length ? leadSentence(peekText(lane.items[0]!)) : "";
 }
 
-/** What a lane's number counts (D14): a waiting lane naming `<Question>` cards
- *  counts the distinct ids it names as questions and its items naming none as
- *  tasks; any other lane counts its open steps in its kind's unit. */
-function laneCounts(lane: NextMovesLane, ids: Set<string> | undefined): LaneCount[] {
-  if (lane.kind === "waiting" && ids?.size) {
-    const named = new Set<string>();
-    let tasks = 0;
-    for (const item of lane.items) {
-      const hit = namedQuestionIds(item, ids);
-      if (hit.length === 0) tasks++;
-      for (const id of hit) named.add(id);
-    }
-    if (named.size > 0) return [{ n: named.size, unit: "question" }, { n: tasks, unit: "task" }];
+/** What a lane's number counts (D14): a waiting lane with chips counts its
+ *  chip ids (`laneQuestionIds`) as questions and its items naming none of them
+ *  as tasks; any other lane counts its open steps in its kind's unit. */
+function laneCounts(lane: NextMovesLane, qids: readonly string[]): LaneCount[] {
+  if (lane.kind === "waiting" && qids.length) {
+    const tasks = lane.items.filter((item) => namedQuestionIds(item, qids).length === 0).length;
+    return [{ n: qids.length, unit: "question" }, { n: tasks, unit: "task" }];
   }
   return [{ n: lane.items.length, unit: laneUnit(lane.kind) }];
 }
@@ -1105,6 +1117,11 @@ function laneCounts(lane: NextMovesLane, ids: Set<string> | undefined): LaneCoun
 function laneQuestionIds(lane: NextMovesLane, page: QuestionPage): string[] {
   const named = new Set(lane.items.flatMap((item) => namedQuestionIds(item, page.questionIds)));
   return [...named].filter((id) => !page.duplicates.has(id) && (page.states.get(id)?.kind ?? "open") === "open");
+}
+
+/** The order the compact block renders its lanes in: authored, blocked lanes last. */
+function renderedLaneOrder<T extends { kind: NextMovesLane["kind"] }>(lanes: T[]): T[] {
+  return [...lanes.filter((l) => l.kind !== "blocked"), ...lanes.filter((l) => l.kind === "blocked")];
 }
 
 /** Each lane kind's icon in the compact head (D36). */
@@ -1136,11 +1153,12 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
   const ids = currentQuestionPage?.questionIds;
   const rest = rawChildren.filter((b) => !(b.type === "component" && b.name === "Lane") && !isBlankTextBlock(b));
   const intro = rest.length ? `<div class="nm-intro">${renderBlocks(rest, webRenderer)}</div>` : "";
-  const ordered = [...lanes.filter((l) => l.kind !== "blocked"), ...lanes.filter((l) => l.kind === "blocked")];
+  const ordered = renderedLaneOrder(lanes);
   const sum: string[] = [];
   const rows = ordered.map((lane) => {
     const n = lane.items.length;
-    const counts = laneCounts(lane, ids);
+    const qids = lane.kind === "waiting" && ids?.size && currentQuestionPage ? laneQuestionIds(lane, currentQuestionPage) : [];
+    const counts = laneCounts(lane, qids);
     if (n > 0) sum.push(laneSumPhrase({ kind: lane.kind, role: lane.role, label: lane.label, counts }, lang));
     const since = lane.since ? ` data-since="${lane.since}"` : "";
     // The reader rewrites a dated lane's age (`decorateLaneAges`), so the text
@@ -1156,7 +1174,6 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     // the lead-sentence peek.
     // The row shows whole chips only and hides the rest, so its title names
     // every id.
-    const qids = lane.kind === "waiting" && ids?.size && currentQuestionPage ? laneQuestionIds(lane, currentQuestionPage) : [];
     const peekHtml = qids.length
       ? `<span class="nm-peek nm-peek-q" ${READER_ONLY_ATTR}><span class="nm-qids" title="${escapeHtml(qids.join(", "))}">${qids.map((q) => `<span class="nm-qid">${escapeHtml(q)}</span>`).join(" ")}</span>` +
         `<span class="nm-prog"></span></span>`

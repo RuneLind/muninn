@@ -166,7 +166,6 @@ describe("fix round 1 (#671): lane progress", () => {
     const block = { dataset: { lang: "no" } };
     const el = {
       textContent: "",
-      dataset: { nmQids: JSON.stringify(ids) } as Record<string, string>,
       parentElement: { querySelectorAll: (sel: string) => (sel === ".nm-qid" ? chips : []) },
       closest: (sel: string) => (sel === ".next-moves" ? block : sel === SETTLED_SECTION_SELECTOR && settled ? {} : null),
     };

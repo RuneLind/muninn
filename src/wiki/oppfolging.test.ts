@@ -613,3 +613,73 @@ describe("fix round 1 (#671): the compact head", () => {
     expect(chipsOf(reader(md))).toEqual([["S1"]]);
   });
 });
+
+// ── Fix round 2 (#671 review) ───────────────────────────────────────────────
+
+describe("fix round 2 (#671): a stub inside the taking block points by render order", () => {
+  const stubs = (html: string) =>
+    [...html.matchAll(/<p class="q-moved" data-reader-only><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
+
+  test("a card in a lane rendered below the taking lane points up", () => {
+    const md = nm([
+      lane('kind="waiting" role="fag"', ["- **S1** — hva nå?"]),
+      lane('kind="you" role="utvikler"', ["- Gjør noe."], question("S1")),
+    ]).join("\n");
+    expect(stubs(reader(md))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↑"]);
+  });
+
+  test("a card in a blocked lane authored above the taking lane points up: blocked renders last", () => {
+    const md = nm([
+      lane('kind="blocked" role="utvikler"', ["- Venter på noe."], question("S1")),
+      lane('kind="waiting" role="fag"', ["- **S1** — hva nå?"]),
+    ]).join("\n");
+    expect(stubs(reader(md))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↑"]);
+  });
+});
+
+describe("fix round 2 (#671): chips, M and the question count read one set", () => {
+  const actionsOf = (html: string) => [...html.matchAll(/<span class="nm-cta-open">([^<]*)<\/span>/g)].map((m) => m[1]);
+  const sumOf = (html: string) => /<span class="nm-sum">([^<]*)<\/span>/.exec(html)?.[1];
+  const log = (items: string[]) => ["<DecisionLog>", "", "- **D1** — vi gjør A.", ...items, "", "</DecisionLog>"];
+
+  test("a plainly closed card is not a chip", () => {
+    const md = [
+      ...nm([lane('kind="waiting" role="fag"', ["- **S1** — åpent?", "- **S3** — lukket?"])]),
+      "",
+      ...question("S1"),
+      "",
+      ...question("S3"),
+      "",
+      ...log(["- **S1** — åpent.", "- **S3** — Lukket 2026-10-01 (D9)."]),
+    ].join("\n");
+    expect(chipsOf(reader(md))).toEqual([["S1"]]);
+  });
+
+  test("open, duplicated, decided and open ids: two questions, and the steps naming no open card are tasks", () => {
+    const md = [
+      ...nm([lane('kind="waiting" role="fag"', ["- **S1** — åpent?", "- **S2** — dobbelt?", "- **S3** — avgjort?", "- **S4** — åpent?"])]),
+      "",
+      ...["S1", "S2", "S2", "S3", "S4"].flatMap((id) => [...question(id), ""]),
+      ...log(["- **S1** — åpent.", "- **S3** — Lukket 2026-10-01 (D1).", "- **S4** — åpent."]),
+    ].join("\n");
+    const html = reader(md);
+    expect(chipsOf(html)).toEqual([["S1", "S4"]]);
+    expect(countsOf(html)).toEqual(["2 spørsmål og 2 oppgaver"]);
+    expect(sumOf(html)).toBe("2 spørsmål og 2 oppgaver til fag");
+  });
+
+  test("a lane naming only a decided id counts one task, shows no chips and says «Se alle ▸»", () => {
+    const md = [
+      ...nm([lane('kind="waiting" role="fag"', ["- **S3** — avgjort?"])]),
+      "",
+      ...question("S3"),
+      "",
+      ...log(["- **S3** — Lukket 2026-10-01 (D1)."]),
+    ].join("\n");
+    const html = reader(md);
+    expect(chipsOf(html)).toEqual([]);
+    expect(countsOf(html)).toEqual(["1 oppgave"]);
+    expect(sumOf(html)).toBe("1 oppgave til fag");
+    expect(actionsOf(html)).toEqual(["Se alle ▸"]);
+  });
+});
