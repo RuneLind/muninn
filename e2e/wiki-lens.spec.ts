@@ -594,8 +594,10 @@ test.describe("Wiki reader: lenses", () => {
     await page.locator("#wikiFactcheckBtn").dispatchEvent("mousedown");
     await expect.poll(() => sent.length).toBe(2);
     expect(sent[1]!.path).toBe("/api/wiki/factcheck");
-    // The chip and the item text, without «Spørsmål» before them.
-    expect(sent[1]!.sel).toBe("S1Åpent.");
+    // The chip and the item text, without «Spørsmål» before them, and with the
+    // separator the source writes between them (`- **S1** — Åpent.`), so the
+    // server can find it (PR 673 fix round 2).
+    expect(sent[1]!.sel).toBe("S1 — Åpent.");
 
     // A fold summary carries its size line on screen, never in the selection.
     await open_(page, WIKI, REPORT_REL);

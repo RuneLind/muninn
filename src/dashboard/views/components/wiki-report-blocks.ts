@@ -25,7 +25,7 @@
  */
 
 import { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS } from "../../../wiki/code-refs.ts";
-import { DL_DECISION_CLASS, DL_ORDER_ATTR, OVERVIEW_LENS_CLASS, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
+import { DL_DECISION_CLASS, DL_ORDER_ATTR, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
 import { DECISION_ID_RE } from "../../../format/question.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../../../format/question-labels.ts";
 import { laneWords } from "../../../format/lane-roles.ts";
@@ -35,6 +35,7 @@ import type { AnswerWire } from "./wiki-answer-card-model.ts";
 import type { ViewerRoles } from "../../../wiki/render.ts";
 import { revealElement } from "./wiki-hash-target.ts";
 import { localStore } from "./wiki-local-store.ts";
+import { PEEK_CLASS } from "./wiki-ref-links.ts";
 
 export { CODE_REF_CLASS, CODE_REF_GROUP_CLASS, CODE_REF_LINK_CLASS };
 export const LINE_REFS_KEY = "muninn.wiki.lineRefs.v1";
@@ -327,7 +328,7 @@ export function countPillLabel(kind: CountKind, n: number, lang: QuestionLanguag
 }
 
 const COUNT_TITLE: Record<CountKind, string> = {
-  decisions: "Jump to the first decision",
+  decisions: "Jump to the newest decision",
   open: "Jump to the first open question",
   queries: "Jump to the first query",
   cases: "Jump to the cases",
@@ -381,18 +382,17 @@ export function readCounts(article: ParentNode): Record<CountKind, CountTally> {
   return out;
 }
 
-/** Where «N beslutninger» lands (D41): in Overview, the newest decision of
- *  `first`'s log — the highest authored position in its last list holding
- *  one, which the five-cap always shows; in any other lens the first decision
- *  as written. Read at click time, since the lens can change after the pills
- *  are made. */
-export function decisionPillTarget(article: Element, first: HTMLElement): HTMLElement {
-  if (!article.classList.contains(OVERVIEW_LENS_CLASS)) return first;
-  const log = first.closest("section.decision-log");
-  if (!log) return first;
+/** Where «N beslutninger» lands (D41, D45): the page's newest decision — the
+ *  highest authored position in the LAST list, in document order, that holds a
+ *  decision, across every DecisionLog in the article. The five-cap always
+ *  shows it, in every lens. Before the lens has set up the article (no
+ *  `data-dl-order`), the first decision as written. */
+export function decisionPillTarget(first: HTMLElement): HTMLElement {
+  if (!first.hasAttribute(DL_ORDER_ATTR)) return first;
+  const article = first.closest(".wiki-article") ?? first.ownerDocument;
   const order = (li: Element) => Number(li.getAttribute(DL_ORDER_ATTR));
   let newest: HTMLElement | null = null;
-  for (const list of Array.from(log.querySelectorAll(":scope > .dl-list"))) {
+  for (const list of Array.from(article.querySelectorAll(`section.decision-log > .dl-list:not(.${PEEK_CLASS} *)`))) {
     const decisions = Array.from(list.querySelectorAll<HTMLElement>(`:scope > .dl-item.${DL_DECISION_CLASS}`));
     if (decisions.length > 0) newest = decisions.reduce((a, b) => (order(b) > order(a) ? b : a));
   }
@@ -470,7 +470,7 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
       `${COUNT_PILL_CLASS} ${COUNT_PILL_CLASS}-${kind}`,
       countPillLabel(kind, c.count, lang, opts.idLabels),
       COUNT_TITLE[kind],
-      kind === "decisions" ? () => decisionPillTarget(article, first) : first,
+      kind === "decisions" ? () => decisionPillTarget(first) : first,
     );
   }
 

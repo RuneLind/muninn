@@ -1,9 +1,9 @@
 import { CB_LINE_CLASS, DL_WHEN_CLASS } from "./reader-lens.ts";
 
-/** The reader-only parts of Overview's compact rows (D41, D42) — a decision's
- *  date cell, a case's compact line — hidden by default: only the reader's
- *  Overview lens shows them, so a surface without the lens CSS (the gardener
- *  preview, the digest) renders the page as written. */
+/** The reader-only parts of the compact rows (D41, D42) — a decision's date
+ *  cell, a case's compact line — hidden by default: only the /wiki reader's
+ *  lens CSS shows them, in every lens (D45), so a surface without it (the
+ *  gardener preview, the digest, chat) renders the page as written. */
 export function compactPartsHiddenCss(scope: string): string {
   return `${scope} :is(.${DL_WHEN_CLASS}, .${CB_LINE_CLASS}) { display: none; }`;
 }

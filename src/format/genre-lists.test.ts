@@ -171,7 +171,27 @@ describe("DecisionLog id grammar", () => {
   ];
   for (const [item, id, text, dim] of rows) {
     test(`${JSON.stringify(item)} → ${id ?? "no id"}${dim ? ", dim" : ""}`, () => {
-      expect(parseLogItem(item)).toEqual({ id, text, dim });
+      const { sep: _sep, ...rest } = parseLogItem(item);
+      expect(rest).toEqual({ id, text, dim });
+    });
+  }
+
+  // The separator as written: the reader puts it back between the chip and the
+  // text when it reads a selection in source order.
+  const seps: [string, string][] = [
+    ["**D1** — tekst", " — "],
+    ["**D1** – tekst", " – "],
+    ["**D1**: tekst", ": "],
+    ["**D1** tekst", " "],
+    ["**D1** -tekst", " -"],
+    ["**D1**", ""],
+    ["~~**D2**~~ — tekst", " — "],
+    ["~~**D2** — gammel~~", " — "],
+    ["Uten id", ""],
+  ];
+  for (const [item, sep] of seps) {
+    test(`${JSON.stringify(item)} separator ${JSON.stringify(sep)}`, () => {
+      expect(parseLogItem(item).sep).toBe(sep);
     });
   }
 });
@@ -712,7 +732,9 @@ describe("DecisionLog date tail (D41)", () => {
     expect(reader).toContain('<span class="dl-when" data-reader-only>Fag, 28.09 · runde 1</span>');
     expect(reader).toContain('<span class="dl-tail">Fag, 28.09 (runde 1).</span>');
     // A question item keeps today's rendering.
-    expect(reader).toMatch(/<li class="dl-item" id="s1"[^>]*><a class="dl-id" href="#s1">S1<\/a><span class="dl-text">/);
+    expect(reader).toMatch(/<li class="dl-item" id="s1"[^>]*><a class="dl-id" href="#s1">S1<\/a><span class="dl-text" data-dl-sep=" — ">/);
+    // Chat gets no separator stamp; only the reader reads it back.
+    expect(formatWebHtml(md)).not.toContain("data-dl-sep");
     const chat = formatWebHtml(md);
     expect(chat).not.toContain("dl-decision");
     expect(chat).not.toContain("dl-when");
@@ -783,7 +805,7 @@ describe("fix round 1: the D41 date tail and an overturned first sentence", () =
       '<span class="dl-first">Snudd i runde 6: MEL-600070 skal <strong>ikke</strong> ha årsavregning, fordi personen er skattepliktig uten andre inntekter, og avgiften ikke skal betales til Nav.</span>',
     );
     // The struck claim is in the rest, before the first sentence, so All reads the item as written.
-    expect(html).toMatch(/<span class="dl-text"><span class="dl-rest"><s>MEL-600070 skal ha en årsavregning for 2024\.<\/s> ?<\/span><span class="dl-first">/);
+    expect(html).toMatch(/<span class="dl-text" data-dl-sep=" — "><span class="dl-rest"><s>MEL-600070 skal ha en årsavregning for 2024\.<\/s> ?<\/span><span class="dl-first">/);
     const text = (h: string) =>
       h
         .replace(/<span class="dl-when"[^>]*>[^<]*<\/span>/g, "")

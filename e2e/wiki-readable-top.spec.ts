@@ -5,7 +5,7 @@
  * What only a real page can answer: that the «Mer om saken» part is closed
  * and opens on a click, that the three state phrases are painted in three
  * different colours, that Overview takes an item's rest and nested lines off
- * the screen and «mer» brings them back, that a `#d2` load into a collapsed
+ * the screen and «mer» brings them back (in All too, D45), that a `#d2` load into a collapsed
  * item shows the whole item and keeps Overview (D3), and that the peek card
  * copies the whole decision without the toggle.
  *
@@ -199,7 +199,7 @@ test.describe("Wiki reader: the top of a report page", () => {
     expectClean(seen);
   });
 
-  test("Overview shows a decision's first sentence with «mer»; All shows it whole", async ({ page }) => {
+  test("Overview shows a decision's first sentence with «mer»; so does All (D45)", async ({ page }) => {
     const seen = await open_(page, WIKI);
     expect(await lensOf(page)).toBe("overview");
     // D41: Overview opens the fold that holds the DecisionLog.
@@ -220,9 +220,11 @@ test.describe("Wiki reader: the top of a report page", () => {
     await expect(page.locator("li.dl-item#d3 button.dl-more")).toHaveCount(0);
     await expect(page.locator("li.dl-item#d1 .dl-first")).toHaveText("Vi bruker f.eks. regel A.");
 
+    // D45: All folds the rest the same way, and keeps what the reader opened.
     await page.locator(".wiki-lens-switch button[data-lens='all']").click();
-    await expect(page.locator("li.dl-item#d1 .dl-rest")).toBeVisible();
-    await expect(page.locator("button.dl-more").first()).toBeHidden();
+    await expect(page.locator("li.dl-item#d1 .dl-rest")).toBeHidden();
+    await expect(page.locator("li.dl-item#d1 button.dl-more")).toBeVisible();
+    await expect(d2.locator(".dl-rest")).toBeVisible();
     expectClean(seen);
   });
 
@@ -261,7 +263,7 @@ test.describe("Wiki reader: the top of a report page", () => {
     expectClean(seen);
   });
 
-  test("Overview badges a closed question «lukket» after its first sentence; All does not (J)", async ({ page }) => {
+  test("Overview badges a closed question «lukket» after its first sentence; so does All (J, D45)", async ({ page }) => {
     const seen = await open_(page, WIKI);
     // D41: Overview opens the fold that holds the DecisionLog.
     await expect(page.locator("details.fold", { hasText: "Beslutninger" })).toHaveAttribute("open", "");
@@ -279,7 +281,7 @@ test.describe("Wiki reader: the top of a report page", () => {
     await expect(page.locator("li.dl-item#d5")).toHaveAttribute("data-q-state", "closed");
     await expect(page.locator("li.dl-item .dl-qstate")).toHaveCount(1);
     await page.locator(".wiki-lens-switch button[data-lens='all']").click();
-    await expect(badge).toBeHidden();
+    await expect(badge).toBeVisible();
     expectClean(seen);
 
     // The All click above is stored, so this page opens in All with the fold closed.

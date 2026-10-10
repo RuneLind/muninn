@@ -29,7 +29,7 @@ export interface BoardCase {
   rawStatus: string;
   owner: string;
   note: string;
-  /** The optional one-line summary Overview shows (D42); empty when absent. */
+  /** The optional one-line summary the reader shows (D42); empty when absent. */
   kort: string;
   refs: string[];
 }
@@ -244,7 +244,7 @@ export function groupCases(cases: BoardCase[]): { status: CaseStatus | "unknown"
     .filter((g) => g.cases.length > 0);
 }
 
-// ── Overview's compact line and the labels attribute (D42) ─────────────────
+// ── The reader's compact line and the labels attribute (D42) ─────────────────
 
 /** Emphasis a « · » inside is no head separator: `**…**`, `__…__`, `*…*`, `_…_`. */
 const EMPHASIS_RES: readonly RegExp[] = [
