@@ -1,7 +1,7 @@
 /**
  * The «Oppfølging» block's viewer role in the two modes with no Entra session
  * (reader lenses PR 3, D30). The pod case — two colleagues in two groups — is
- * in `wiki-answers-nais.spec.ts`; this file holds the other two:
+ * in `wiki-answers-nais.spec.ts`; this file holds three others:
  *
  *   - auth off: the viewer's roles are the groups holding `WIKI_ANSWER_OWNER`'s
  *     ident (`Test Eier (X100021)` is in `fag`), so the fag lane goes first and
@@ -9,10 +9,15 @@
  *   - `local` (`MUNINN_PROFILE=nais`, the loopback session at role `user`): the
  *     identity carries no NAV ident, so the viewer has no role — the lanes keep
  *     their authored order, none is marked, and there is no switch.
+ *   - `bun run preview:role fag`'s env (`scripts/preview-role.ts`): the same
+ *     `local`/`nais`/`user` shape with `MUNINN_LOCAL_IDENT` in a synthetic fag
+ *     group, so the fag lane goes first and reads «til deg», `--lens overview`
+ *     opens the page in Overview, there is no switch, and an answer with text
+ *     is refused.
  *
  * What a unit test cannot see: the server's per-mode resolution reaching the
- * client, which orders and marks the lanes. Two muninns; no model calls; no DB
- * rows written. Synthetic names and `X1000NN` idents only.
+ * client, which orders and marks the lanes. Three muninns; no model calls; no DB
+ * rows written. Synthetic names and `X1000NN`/`X9000NN` idents only.
  *
  * SPAWN ENV: `e2eEnv()` blanks the platform tokens and the instance-profile
  * flags (the `MUNINN_AUTH` family and `WIKI_ANSWER_*` included); each boot sets
@@ -28,12 +33,15 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { paintedContrast } from "./contrast.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
+import { makePreviewBotsDir, previewRoleEnv, readRoleKeys } from "../scripts/preview-role.ts";
 import { AUTHORED_ROLES, ROLE_PAGE, ROLE_READER_CONFIG, ROLE_REL } from "./oppfolging-fixture.ts";
 
 const OFF_PORT = e2ePort("wiki-oppfolging-roles");
 const OFF_BASE = `http://127.0.0.1:${OFF_PORT}`;
 const LOCAL_PORT = e2ePort("wiki-oppfolging-roles/local");
 const LOCAL_BASE = `http://127.0.0.1:${LOCAL_PORT}`;
+const PREVIEW_PORT = e2ePort("wiki-oppfolging-roles/preview");
+const PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-oppfolging";
 const GROUPS = "fag=X100021;utvikler=X100022";
@@ -118,9 +126,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(root, TWO_WAITING_REL), TWO_WAITING_PAGE, "utf8");
   await writeFile(path.join(root, HISTORIC_ONLY_REL), HISTORIC_ONLY_PAGE, "utf8");
   await writeFile(path.join(root, BLOCKED_ONLY_REL), BLOCKED_ONLY_PAGE, "utf8");
-  botsDir = await mkdtemp(path.join(tmpdir(), "muninn-e2e-oppfolging-roles-bots-"));
-  await mkdir(path.join(botsDir, "e2e-oppfolging-bot"));
-  await writeFile(path.join(botsDir, "e2e-oppfolging-bot", "CLAUDE.md"), "# throwaway e2e bot, no wiki\n", "utf8");
+  botsDir = makePreviewBotsDir();
   const common = {
     ...process.env,
     ...e2eEnv(),
@@ -155,8 +161,22 @@ test.beforeAll(async ({}, info) => {
       },
       stdio: "ignore",
     }),
+    spawn("bun", ["run", "src/index.ts"], {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        ...e2eEnv(),
+        // `--lens overview`, as the melosys-muninn pod sets `WIKI_DEFAULT_LENS`.
+        ...previewRoleEnv({ role: "fag", wiki: WIKI, root, roleKeys: readRoleKeys(root), port: PREVIEW_PORT, botsDir, lens: "overview" }),
+      },
+      stdio: "ignore",
+    }),
   );
-  await Promise.all([waitUp(`${OFF_BASE}/api/wiki/pages?wiki=${WIKI}`), waitUp(`${LOCAL_BASE}/api/live`)]);
+  await Promise.all([
+    waitUp(`${OFF_BASE}/api/wiki/pages?wiki=${WIKI}`),
+    waitUp(`${LOCAL_BASE}/api/live`),
+    waitUp(`${PREVIEW_BASE}/api/live`),
+  ]);
 });
 
 test.afterAll(async () => {
@@ -204,6 +224,31 @@ test("local: no NAV ident, no role — authored order, no mark, no switch", asyn
   await expect.poll(() => laneRoles(page)).toEqual(AUTHORED_ROLES);
   expect(await marks(page)).toEqual(["", "", "", ""]);
   await expect(page.locator(".wiki-role-view")).toHaveCount(0);
+});
+
+test("preview:role fag: the fag lane first and «til deg», --lens overview opens Overview, no switch, no stored text", async ({ page }) => {
+  const res = await fetch(payloadUrl(PREVIEW_BASE));
+  expect(res.status).toBe(200);
+  const text = await res.text();
+  const payload = JSON.parse(text) as { reader: { roles: unknown; defaultLens: unknown } };
+  expect(payload.reader.roles).toEqual({ keys: ["fag", "utvikler"], viewer: ["fag"], preview: false });
+  expect(payload.reader.defaultLens).toBe("overview");
+  for (const ident of ["X900001", "X900002"]) expect(text).not.toContain(ident);
+
+  await page.goto(pageUrl(PREVIEW_BASE));
+  await expect(lanes(page)).toHaveCount(4);
+  await expect.poll(() => laneRoles(page)).toEqual(["fag", "utvikler", "-", "utvikler"]);
+  expect(await marks(page)).toEqual(["til deg", "", "", ""]);
+  await expect(page.locator(".wiki-article")).toHaveClass(/\blens-overview\b/);
+  await expect(page.locator(".wiki-role-view")).toHaveCount(0);
+
+  const post = await fetch(`${PREVIEW_BASE}/api/wiki/answers`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: PREVIEW_BASE },
+    body: JSON.stringify({ wiki: WIKI, relPath: ROLE_REL, questionId: "S1", choice: "A", body: "Svar fra forhåndsvisningen." }),
+  });
+  expect(post.status).toBe(503);
+  expect(((await post.json()) as { code: string }).code).toBe("scanner_unavailable");
 });
 
 for (const scheme of ["light", "dark"] as const) {

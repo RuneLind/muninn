@@ -20,9 +20,10 @@
 /** Not ours to bind, and not available to a spec:
  *  - 3010 is `bun run dev`, the developer's real instance;
  *  - 3011 is the shared server in `playwright.config.ts` (`reuseExistingServer`);
+ *  - 3013 is `bun run preview:role`'s default (`scripts/preview-role.ts`);
  *  - 9180/9190 are the hivemind + research MCP servers a spawned muninn tries to
  *    open and warns about when they are taken. */
-export const RESERVED_PORTS = [3010, 3011, 9180, 9190] as const;
+export const RESERVED_PORTS = [3010, 3011, 3013, 9180, 9190] as const;
 
 /**
  * One entry per port a spec binds. Names are `<spec-file>`, plus a suffix when a
@@ -293,6 +294,8 @@ export const E2E_PORTS = {
   // off (owner in a group) and in local mode (no role).
   "wiki-oppfolging-roles": 3141,
   "wiki-oppfolging-roles/local": 3142,
+  // `bun run preview:role`'s env (`MUNINN_LOCAL_IDENT` in a group).
+  "wiki-oppfolging-roles/preview": 3143,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

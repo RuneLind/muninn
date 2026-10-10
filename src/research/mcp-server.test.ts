@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { ResearchMcpServer } from "./mcp-server.ts";
+import { ResearchMcpServer, researchMcpPort } from "./mcp-server.ts";
 
 // The HTTP surface tests below only exercise /health and the unknown-bot 404
 // path — neither triggers a Tracer construction or DB write, so no mocks are
@@ -47,5 +47,56 @@ describe("ResearchMcpServer HTTP surface", () => {
   test("non-MCP path returns 404", async () => {
     const res = await fetch(`${base}/random`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("RESEARCH_MCP_PORT", () => {
+  test("unset or blank is 9190; a number is taken; 0 asks the OS for a free port", () => {
+    expect(researchMcpPort({})).toBe(9190);
+    expect(researchMcpPort({ RESEARCH_MCP_PORT: " " })).toBe(9190);
+    expect(researchMcpPort({ RESEARCH_MCP_PORT: "9191" })).toBe(9191);
+    expect(researchMcpPort({ RESEARCH_MCP_PORT: "0" })).toBe(0);
+    expect(researchMcpPort({ RESEARCH_MCP_PORT: " 9191 " })).toBe(9191);
+  });
+
+  test("anything else falls back to 9190", () => {
+    for (const bad of ["abc", "-1", "70000", "91.5"]) expect(researchMcpPort({ RESEARCH_MCP_PORT: bad })).toBe(9190);
+  });
+
+  test("construction reads no env: the singleton is built at import, before logging", () => {
+    const saved = process.env.RESEARCH_MCP_PORT;
+    process.env.RESEARCH_MCP_PORT = "0";
+    try {
+      const server = new ResearchMcpServer();
+      expect((server as unknown as { portOverride: number | undefined }).portOverride).toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env.RESEARCH_MCP_PORT;
+      else process.env.RESEARCH_MCP_PORT = saved;
+    }
+  });
+
+  test("a server built with no port reads RESEARCH_MCP_PORT when it starts", async () => {
+    const saved = process.env.RESEARCH_MCP_PORT;
+    process.env.RESEARCH_MCP_PORT = "0";
+    const server = new ResearchMcpServer();
+    try {
+      server.start();
+      expect(server.url).not.toBe("http://127.0.0.1:9190");
+    } finally {
+      await server.stop();
+      if (saved === undefined) delete process.env.RESEARCH_MCP_PORT;
+      else process.env.RESEARCH_MCP_PORT = saved;
+    }
+  });
+
+  test("port 0 binds a free port, and url names it", async () => {
+    const server = new ResearchMcpServer(0);
+    server.start();
+    try {
+      expect(server.url).not.toBe("http://127.0.0.1:0");
+      expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    } finally {
+      await server.stop();
+    }
   });
 });

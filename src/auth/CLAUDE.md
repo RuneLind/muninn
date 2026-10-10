@@ -50,6 +50,9 @@ which is wide open.
    inverted direction as `MUNINN_AUTH` itself: this variable only ever GRANTS,
    so a typo degrading to `user` would be a silent lockout while `…=admin` sits
    in the `.env` looking correct.
+8. `MUNINN_LOCAL_IDENT` set to anything but a NAV ident (one letter, six
+   digits), in `local` mode. A typo would leave a role preview with no role
+   while the variable looks correct.
 
 `AUTH_ZONES_IMPLEMENTED` is a **constant, not an env var**, and it is `true`
 since PR 2. An override would let exactly the deploy that must not happen happen
@@ -200,6 +203,27 @@ spawns `user`, and the acceptance rows would flip by host.
 `MUNINN_ADMIN_IDENTS` is matched case-insensitively on trimmed values against
 **both** `NAVident` and `oid`, because a claim set missing one of them would
 otherwise leave *nobody* resolving to admin.
+
+### `MUNINN_LOCAL_IDENT` — answer groups for the pinned identity
+
+The pinned `local` identity carries no NAV ident by default, so
+`viewerGroupKeys` gives it no role. `MUNINN_LOCAL_IDENT` sets the ident
+(upper-cased) on that identity, on every channel: the credential, the session
+cookie and the loopback bypass all hand out `localIdentity(config.local)`. The
+reader then orders and marks lanes for the groups that hold it, and an answer
+from it counts as asked.
+
+It is **never a role grant**. `resolveRole` returns `MUNINN_LOCAL_ROLE` for a
+`provider: "local"` identity before it reads any ident, so an ident that is
+also in `MUNINN_ADMIN_IDENTS` stays `user` (`role.test.ts` pins this).
+
+Its one caller in the repo is `bun run preview:role` (`scripts/preview-role.ts`),
+which boots a second muninn on port 3013 shaped like the nais pod for one answer
+group: `MUNINN_PROFILE=nais`, `local` at role `user`, synthetic groups from the
+wiki's `roleKeys`, the `_test` database, a temp bots dir with one token-less
+bot, every platform token blanked, `LOG_DIR=none` and `RESEARCH_MCP_PORT=0`
+(a free port, never dev's 9190). `e2e/wiki-oppfolging-roles.spec.ts` boots it from the same
+`previewRoleEnv`. It is in `AUTH_FLAGS` (`src/test/ambient-env.ts`).
 
 ## `AUTH_EXCLUDED_PATHS` is the two health endpoints, and nothing else
 
