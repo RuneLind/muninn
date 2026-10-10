@@ -439,9 +439,11 @@ test.describe("the card in the browser", () => {
 const roleUrl = `${BASE}/wiki?wiki=${ROLE_WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`;
 const lanes = (page: Page) => page.locator(".wiki-article .nm-compact > .nm-lanes > .nm-lane");
 const laneRoles = (page: Page) => lanes(page).evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.role ?? "-"));
-const laneLabels = (page: Page) => lanes(page).locator(":scope > .nm-head > .nm-who").allTextContents();
+const laneLabels = (page: Page) => lanes(page).locator(":scope > .nm-head .nm-who").allTextContents();
 const marks = (page: Page) =>
-  lanes(page).evaluateAll((els) => els.map((e) => e.querySelector(":scope > .nm-head > .nm-mine-mark")?.textContent ?? ""));
+  lanes(page).evaluateAll((els) => els.map((e) => e.querySelector(":scope > .nm-head .nm-mine-mark")?.textContent ?? ""));
+/** The fag lane's progress slot (D38), filled once the answer client loads. */
+const progress = (page: Page) => page.locator('.wiki-article .nm-lane[data-role="fag"] > .nm-head .nm-prog');
 
 async function openRolePage(page: Page, who: Person): Promise<void> {
   await asPerson(page, who);
@@ -460,17 +462,16 @@ test.describe("the «Oppfølging» block with two groups (acceptance 6)", () => 
       "2 oppgaver for utvikler · 2 spørsmål til fag · Venter på jus: 1 oppgave · 1 blokkert",
     );
     const fag = lanes(page).first();
-    await expect(fag.locator(":scope > .nm-head > .nm-count")).toHaveText("2 spørsmål");
-    await expect(fag.locator(":scope > .nm-head > .nm-peek")).toHaveText("S1: alternativ A eller B for brevet? · S2: hvilket brev gjelder det?");
+    await expect(fag.locator(":scope > .nm-head .nm-count")).toHaveText("2 spørsmål");
+    // D38: the card ids as chips, then the progress once the answers load.
+    await expect(fag.locator(":scope > .nm-head > .nm-peek .nm-qid")).toHaveText(["S1", "S2"]);
+    await expect(progress(page)).toHaveText("· 0 av 2 besvart");
     await expect(lanes(page).nth(1).locator(":scope > .nm-head > .nm-peek")).toHaveText("Send melding 3 til fag.");
 
     // One card per question on the page, both inside the fag lane; their
-    // authored places keep a link.
+    // authored places, below a line of prose, keep one merged line (D39).
     await expect(page.locator(".wiki-article section.question")).toHaveCount(2);
-    await expect(page.locator(".wiki-article .q-moved-link")).toHaveText([
-      "Spørsmål S1: svar under Oppfølging",
-      "Spørsmål S2: svar under Oppfølging",
-    ]);
+    await expect(page.locator(".wiki-article .q-moved-link")).toHaveText(["Spørsmål S1 og S2 står under Oppfølging ↑"]);
     await fag.locator(":scope > .nm-head").click();
     for (const id of ["S1", "S2"]) {
       const c = fag.locator(`section.question[data-question-id="${id}"]`);
@@ -486,13 +487,15 @@ test.describe("the «Oppfølging» block with two groups (acceptance 6)", () => 
     await expect(mine.locator(".q-asked-yes")).toHaveText("spurt");
     // The chip carries a visually hidden «gruppe» before the key.
     await expect(mine.locator(".q-group")).toHaveText(/^gruppe\s*fag$/);
+    // An asked answer counts (D38).
+    await expect(progress(page)).toHaveText("· 1 av 2 besvart");
 
     // The one-line link reveals the card in its lane.
     await fag.locator(":scope > .nm-head").click();
     await expect(fag).not.toHaveAttribute("open", "");
-    await page.locator('.wiki-article .q-moved-link[href="#nm-q-s2"]').click();
+    await page.locator('.wiki-article .q-moved-link[href="#nm-q-s1"]').click();
     await expect(fag).toHaveAttribute("open", "");
-    await expect(fag.locator('section.question[data-question-id="S2"]')).toBeInViewport();
+    await expect(fag.locator('section.question[data-question-id="S1"]')).toBeInViewport();
   });
 
   test("utvikler: «Utvikler» first with «deg», and an answer to fag's question carries «ikke spurt» (D31)", async ({ page }) => {
@@ -502,12 +505,19 @@ test.describe("the «Oppfølging» block with two groups (acceptance 6)", () => 
     expect(await laneLabels(page)).toEqual(["Utvikler", "Venter på fag", "Venter på jus", "Blokkert"]);
     expect(await marks(page)).toEqual(["deg", "", "", ""]);
     const fag = lanes(page).nth(1);
+    // The fag lane is not the viewer's: «Se spørsmålene ▸», not «Se og svar ▸».
+    await expect(fag.locator(":scope > .nm-head .nm-cta-open")).toHaveText("Se spørsmålene ▸");
+    await expect(progress(page)).toHaveText(/^· \d av 2 besvart$/);
+    const before = await progress(page).textContent();
     await fag.locator(":scope > .nm-head").click();
     const s2 = fag.locator('section.question[data-question-id="S2"]');
     // Outside the asked group, the composer is still there (D31).
     await s2.locator("form.q-composer textarea.q-text").fill("Svar fra utvikler.");
     await s2.locator("form.q-composer button.q-save").click();
     await expect(s2.locator(".q-answer", { hasText: "Svar fra utvikler." }).locator(".q-asked-no")).toHaveText("ikke spurt");
+    // An «ikke spurt» answer leaves the progress where it was (D38).
+    await expect(s2.locator(".q-answer", { hasText: "Svar fra utvikler." })).toBeVisible();
+    await expect(progress(page)).toHaveText(before!);
   });
 
   test("a colleague in no group sees the authored order and no mark, and gets no «Se som rolle»", async ({ page }) => {

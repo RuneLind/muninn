@@ -197,27 +197,57 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .nm-compact .nm-lane:first-child { border-top: 0; }
     ${scope} .nm-compact .nm-lane.nm-you { border-left: 0; background: var(--bg-surface); }
-    ${scope} .nm-compact .nm-lane.nm-mine { box-shadow: inset 4px 0 0 var(--accent); }
+    /* D36: each kind its icon and colour; the viewer's lane a filled mark and
+       a stripe in the lane's colour. D40: an inset ring and a 6 % accent hover
+       that follow the row. Every text/fill pair is ≥ 4.5:1 in both themes
+       (e2e/wiki-oppfolging-roles.spec.ts measures them). */
+    ${scope} .nm-compact .nm-lane.nm-mine { box-shadow: inset 4px 0 0 var(--accent-light); }
+    ${scope} .nm-compact .nm-lane.nm-waiting.nm-mine {
+      box-shadow: inset 4px 0 0 var(--status-warning);
+      background: color-mix(in srgb, var(--status-warning) 6%, var(--bg-surface));
+    }
+    ${scope} .nm-compact .nm-lane.nm-draft.nm-mine { box-shadow: inset 4px 0 0 var(--status-info); }
     ${scope} .nm-compact .nm-head {
-      display: flex; flex-wrap: nowrap; align-items: baseline; gap: 0.2rem 0.6rem;
-      margin: 0; padding: 0.5rem 0.85rem; cursor: pointer; list-style: none; font-size: 0.9em;
+      display: grid; grid-template-columns: minmax(12rem, max-content) minmax(0, 1fr) auto auto;
+      align-items: center; gap: 0.3rem 0.9rem;
+      margin: 0; padding: 0.55rem 0.85rem; cursor: pointer; list-style: none; font-size: 0.9em;
     }
-    ${scope} .nm-compact .nm-head > * { flex: none; }
     ${scope} .nm-compact .nm-head::-webkit-details-marker { display: none; }
-    ${scope} .nm-compact .nm-head::before { content: "▸" / ""; color: var(--text-soft); flex: none; }
-    ${scope} .nm-compact .nm-lane[open] > .nm-head::before { content: "▾" / ""; }
-    ${scope} .nm-compact .nm-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-    ${scope} .nm-compact .nm-blocked .nm-who { color: var(--text-secondary); }
+    ${scope} .nm-compact .nm-head:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    ${scope} .nm-compact .nm-head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-light); }
+    ${scope} .nm-compact .nm-lh { grid-column: 1; display: flex; align-items: baseline; gap: 0.45rem; white-space: nowrap; min-width: 0; }
+    ${scope} .nm-compact .nm-ico { width: 1.2em; text-align: center; flex: none; }
+    ${scope} .nm-compact .nm-lh > .nm-count::before { content: "· " / ""; }
+    ${scope} .nm-compact .nm-waiting .nm-who { color: var(--tone-warn); }
+    ${scope} .nm-compact .nm-draft .nm-who { color: var(--tone-info); }
+    ${scope} .nm-compact .nm-blocked .nm-who { color: var(--tone-err); }
     ${scope} .nm-compact .nm-mine-mark {
-      font-size: 0.85em; font-weight: 600; padding: 0 0.4rem; border-radius: 999px;
-      border: 1px solid currentColor; color: var(--accent-light);
+      font-size: 0.8em; font-weight: 700; padding: 0 0.45rem; border-radius: 5px;
+      background: var(--accent-hover); color: #fff;
     }
-    ${scope} .nm-compact .nm-head > .nm-peek { flex: 1 1 0; color: var(--text-soft); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    ${scope} .nm-compact .nm-waiting .nm-mine-mark { background: var(--status-warning); color: #14151a; }
+    ${scope} .nm-compact .nm-head > .nm-peek {
+      grid-column: 2; color: var(--text-soft); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    ${scope} .nm-compact .nm-qid {
+      font-family: var(--mono, ui-monospace, monospace); font-size: 0.9em; font-weight: 700; color: var(--text-primary);
+      border: 1px solid var(--border-secondary); border-radius: 6px; padding: 0 0.35rem; background: var(--bg-inset);
+    }
+    /* The progress never truncates: the chips give way first. */
+    ${scope} .nm-compact .nm-head > .nm-peek-q { display: flex; align-items: baseline; }
+    ${scope} .nm-compact .nm-qids { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    ${scope} .nm-compact .nm-prog { flex: none; margin-left: 0.35rem; font-variant-numeric: tabular-nums; }
+    ${scope} .nm-compact .nm-head > .nm-since { grid-column: 3; font-size: 0.92em; white-space: nowrap; }
+    ${scope} .nm-compact .nm-cta { grid-column: 4; font-size: 0.95em; color: var(--accent-light); white-space: nowrap; }
+    ${scope} .nm-compact .nm-lane[open] > .nm-head .nm-cta-open,
+    ${scope} .nm-compact .nm-lane:not([open]) > .nm-head .nm-cta-close { display: none; }
     ${scope} .nm-compact .nm-body { padding: 0.2rem 0.95rem 0.75rem; }
     ${scope} .nm-compact .nm-qcards > .nm-qcard > .question { margin: 0.75rem 0 0; }
-    @container (max-width: 520px) {
-      ${scope} .nm-compact .nm-head { flex-wrap: wrap; }
-      ${scope} .nm-compact .nm-head > .nm-peek { flex: 1 1 100%; }
+    @container (max-width: 640px) {
+      ${scope} .nm-compact .nm-head { grid-template-columns: minmax(0, 1fr) auto; }
+      ${scope} .nm-compact .nm-lh { white-space: normal; flex-wrap: wrap; }
+      ${scope} .nm-compact .nm-cta { grid-column: 2; grid-row: 1; }
+      ${scope} .nm-compact .nm-head > .nm-peek, ${scope} .nm-compact .nm-head > .nm-since { grid-column: 1 / -1; }
     }
     ${scope} .q-moved { font-size: 0.9em; margin: 0.6rem 0; }
     ${scope} .q-moved-link { color: var(--accent-light); }
@@ -321,13 +351,14 @@ export function componentBlockCss(scope: string): string {
     ${scope} a.cb-id:hover { text-decoration: underline; }
     ${scope} .cb-pill {
       font-size: 0.8em; padding: 0 0.5rem; border-radius: 999px; color: var(--text-primary);
-      border: 1px solid var(--border-secondary);
+      border: 1px solid var(--border-secondary); font-weight: 550;
     }
-    ${scope} .cb-hold { background: var(--tint-warning); }
-    ${scope} .cb-wait { background: var(--tint-info); }
-    ${scope} .cb-wrong { background: var(--tint-error); }
-    ${scope} .cb-none { background: var(--tint-neutral); }
-    ${scope} .cb-ok { background: var(--tint-success); }
+    /* D35: the tone as text on its tint. */
+    ${scope} .cb-hold { background: var(--tint-warning); color: var(--tone-warn); border-color: transparent; }
+    ${scope} .cb-wait { background: var(--tint-info); color: var(--tone-info); border-color: transparent; }
+    ${scope} .cb-wrong { background: var(--tint-error); color: var(--tone-err); border-color: transparent; }
+    ${scope} .cb-none { background: var(--tint-neutral); color: var(--text-soft); }
+    ${scope} .cb-ok { background: var(--tint-success); color: var(--tone-good); border-color: transparent; }
     ${scope} .cb-unknown { background: var(--tint-magenta); border-style: dashed; }
     ${scope} .cb-owner { color: var(--text-soft); font-size: 0.85em; }
     ${scope} .cb-note { flex: 1 1 18rem; min-width: 0; }
@@ -391,12 +422,13 @@ export function componentBlockCss(scope: string): string {
     ${scope} .sr-sep { color: var(--text-soft); }
     ${scope} .sr-state {
       font-size: 0.9em; padding: 0 0.45rem; border-radius: 999px; white-space: nowrap;
-      color: var(--text-primary); border: 1px solid var(--border-secondary);
+      color: var(--text-primary); border: 1px solid transparent; font-weight: 550;
     }
-    ${scope} .sr-good { background: var(--tint-success); }
-    ${scope} .sr-warn { background: var(--tint-warning); }
-    ${scope} .sr-muted { background: var(--tint-neutral); }
-    ${scope} .sr-info { background: var(--tint-info); }
+    /* D35: the tone as text on its tint (muted keeps an outline). */
+    ${scope} .sr-good { background: var(--tint-success); color: var(--tone-good); }
+    ${scope} .sr-warn { background: var(--tint-warning); color: var(--tone-warn); }
+    ${scope} .sr-muted { background: var(--tint-neutral); color: var(--text-soft); border-color: var(--border-secondary); }
+    ${scope} .sr-info { background: var(--tint-info); color: var(--tone-info); }
     ${scope} .status-rows :not(pre) > code { overflow-wrap: anywhere; }
     @media (max-width: 520px) {
       ${scope} .sr-grid { grid-template-columns: minmax(0, 1fr); }

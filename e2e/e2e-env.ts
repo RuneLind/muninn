@@ -58,5 +58,8 @@ export function blankInstanceProfile(): Record<string, string> {
  * still set it back.
  */
 export function e2eEnv(): Record<string, string> {
-  return { ...blankBotTokens(), ...blankInstanceProfile() };
+  // `RESEARCH_MCP_PORT: "0"`: each spawned muninn takes a free port for its
+  // research MCP server instead of 9190, which a parallel spec or the
+  // developer's own muninn already holds (D43, the #670 follow-up).
+  return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0" };
 }

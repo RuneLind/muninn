@@ -45,6 +45,13 @@ const DARK_TOKENS = `
       --status-cyan: #22d3ee;
       --status-magenta: #c084fc;
 
+      /* A state pill's text on its tint (D35): the status colour itself in
+         dark, mixed 60 % toward --text-primary in light (sum-factcheck.ts). */
+      --tone-good: var(--status-success);
+      --tone-warn: var(--status-warning);
+      --tone-info: var(--status-info);
+      --tone-err: var(--status-error);
+
       /* /wiki dates: the day an agent session wrote the page, and a change after
          that session with no ledger row. Own tokens because the light values of
          --status-cyan/--status-warning measure 3.68:1 and 3.19:1 on white, under
@@ -141,6 +148,13 @@ const LIGHT_TOKENS = `
       --status-tool: #c2620a;
       --status-cyan: #0891b2;
       --status-magenta: #9333ea;
+
+      /* A state pill's text on its tint (D35): the status colour itself in
+         dark, mixed 60 % toward --text-primary in light (sum-factcheck.ts). */
+      --tone-good: color-mix(in srgb, var(--status-success) 60%, var(--text-primary));
+      --tone-warn: color-mix(in srgb, var(--status-warning) 60%, var(--text-primary));
+      --tone-info: color-mix(in srgb, var(--status-info) 60%, var(--text-primary));
+      --tone-err: color-mix(in srgb, var(--status-error) 60%, var(--text-primary));
 
       --worked-ink: #0e7490;
       --changed-ink: #b45309;

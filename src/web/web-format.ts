@@ -891,6 +891,19 @@ interface LaneCards {
   /** Question id → the anchor of its card in the lane, unique on the page's
    *  lane cards (`Q.1` and `Q-1` fold to one slug, so the second gets `-2`). */
   moved: Map<string, string>;
+  /** Question id → the `<NextMoves>` block whose lane took its card. */
+  takenBy: Map<string, ComponentBlock>;
+  /** A moved card's authored place (D39), keyed by its block's `attrs`, which
+   *  the renderer hands back unchanged: the run's one line on its first card,
+   *  null (nothing) on the rest of a run and on a card that sits right after
+   *  the block that took it. */
+  stubs: Map<Record<string, string>, MovedStub | null>;
+}
+interface MovedStub {
+  ids: string[];
+  anchor: string;
+  /** ↑ when the block that took the first card sits above the line. */
+  arrow: "↑" | "↓";
 }
 let currentLaneCards: LaneCards | undefined;
 
@@ -944,14 +957,18 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
     }
   };
   walk(blocks, [], false);
-  const waiting = nextMoves.flatMap((block) => nextMovesLanes(block.children).filter((l) => l.kind === "waiting"));
+  const waiting = nextMoves.flatMap((block) =>
+    nextMovesLanes(block.children)
+      .filter((l) => l.kind === "waiting")
+      .map((lane) => Object.assign(lane, { block })),
+  );
   const named = (lane: NextMovesLane) => new Set(lane.items.flatMap((item) => namedQuestionIds(item, questions.keys())));
   // A card already inside a lane that names it stays put: no later lane takes it.
   const stays = new Set<string>();
   for (const lane of waiting) {
     for (const id of named(lane)) if (questions.get(id)!.lanes.includes(lane.children)) stays.add(id);
   }
-  const out: LaneCards = { byLane: new Map(), moved: new Map() };
+  const out: LaneCards = { byLane: new Map(), moved: new Map(), takenBy: new Map(), stubs: new Map() };
   const anchors = new Set<string>();
   for (const lane of waiting) {
     for (const item of lane.items) {
@@ -962,76 +979,86 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
         for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
         anchors.add(anchor);
         out.moved.set(id, anchor);
+        out.takenBy.set(id, lane.block);
         const list = out.byLane.get(lane.children) ?? [];
         list.push(questions.get(id)!.block);
         out.byLane.set(lane.children, list);
       }
     }
   }
+  planMovedStubs(blocks, out);
   return out;
 }
 
+/**
+ * D39: what each moved card leaves at its authored place. A card with only
+ * other moved cards and blank lines between it and the end of the block that
+ * took it leaves nothing; otherwise a run of moved cards (blank lines between
+ * them allowed) leaves one line naming them all, linking to the first.
+ */
+function planMovedStubs(blocks: Block[], cards: LaneCards): void {
+  const order = new Map<Block, number>();
+  const lists: Block[][] = [];
+  const walk = (bs: Block[]) => {
+    lists.push(bs);
+    for (const b of bs) {
+      order.set(b, order.size);
+      if (b.type === "component") walk(b.children);
+    }
+  };
+  walk(blocks);
+  const movedId = (b: Block): string | null => {
+    if (b.type !== "component" || b.name !== "Question") return null;
+    const id = parseQuestionAttrs(b.attrs).id;
+    return id !== null && cards.moved.has(id) ? id : null;
+  };
+  for (const bs of lists) {
+    const silent = new Set<Block>();
+    bs.forEach((b, i) => {
+      if (b.type !== "component" || b.name !== "NextMoves") return;
+      for (const c of bs.slice(i + 1)) {
+        if (isBlankTextBlock(c)) continue;
+        const id = movedId(c);
+        if (id === null) break;
+        if (cards.takenBy.get(id) === b) silent.add(c);
+      }
+    });
+    let run: { block: ComponentBlock; id: string }[] = [];
+    const flush = () => {
+      const first = run[0];
+      if (!first) return;
+      const nm = cards.takenBy.get(first.id)!;
+      cards.stubs.set(first.block.attrs, {
+        ids: run.map((r) => r.id),
+        anchor: cards.moved.get(first.id)!,
+        arrow: order.get(nm)! < order.get(first.block)! ? "↑" : "↓",
+      });
+      for (const r of run.slice(1)) cards.stubs.set(r.block.attrs, null);
+      run = [];
+    };
+    for (const b of bs) {
+      if (isBlankTextBlock(b)) continue;
+      const id = movedId(b);
+      if (id === null) flush();
+      else if (silent.has(b)) cards.stubs.set((b as ComponentBlock).attrs, null);
+      else run.push({ block: b as ComponentBlock, id });
+    }
+    flush();
+  }
+}
+
 /** An item's text for a peek: plain, one line. A `renderWikiHtml` wikilink
- *  sentinel reads as the link's text, wrapped in `open`/`close` when given,
- *  and no NUL survives (a literal one reaches a list item as written). */
-function peekText(item: string, open = "", close = ""): string {
+ *  sentinel reads as the link's text, and no NUL survives (a literal one
+ *  reaches a list item as written). */
+function peekText(item: string): string {
   return item
-    .replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => `${open}${currentLinkTexts?.[Number(i)] ?? ""}${close}`)
+    .replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => currentLinkTexts?.[Number(i)] ?? "")
     .replace(/\x00/g, "");
 }
 
-/** Brackets a peek puts around link text so no id is found inside it. */
-const LINK_OPEN = "\uE000";
-const LINK_CLOSE = "\uE001";
-const LINK_SPAN_RE = /\uE000[^\uE001]*\uE001/g;
-const LINK_MARK_RE = /[\uE000\uE001]/g;
-
-/** Only a joining word or punctuation between two ids: `S1 og S2 — …`. */
-const ID_JOIN_RE = /^[\s:—–\-·,.)&/]*(?:og|and|eller|or)?[\s:—–\-·,.)&/]*$/i;
-
-/** The peek parts an item gives (D13): each id it names with a few words —
- *  the words after it, up to the next id; an id followed only by a joining
- *  word shares the next id's words (`S1 og S2 — begge?` ⇒ `S1: begge?`,
- *  `S2: begge?`). */
-function questionPeeks(item: string, ids: Iterable<string>): { id: string; text: string }[] {
-  const named = namedQuestionIds(item, ids);
-  const flat = peekText(item.replace(LINK_MARK_RE, ""), LINK_OPEN, LINK_CLOSE)
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, `${LINK_OPEN}$2${LINK_CLOSE}`)
-    .replace(/\[\[([^\]]+)\]\]/g, `${LINK_OPEN}$1${LINK_CLOSE}`)
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/(\*\*|__|`)/g, "")
-    .replace(/^\[[ xX]\][ \t]*/, "")
-    .split("\n")[0]!;
-  const found = namedQuestionHits(flat.replace(LINK_SPAN_RE, (m) => " ".repeat(m.length)), named);
-  // An id the item names that the flattening lost (one inside a link's URL)
-  // still gets a part, so the peek names what the count counts.
-  const lost = named.filter((id) => !found.some((h) => h.id === id)).map((id) => ({ id, at: flat.length, end: flat.length }));
-  const hits = [...found, ...lost];
-  const segs = hits.map((h, k) => flat.slice(h.end, hits[k + 1]?.at ?? flat.length).replace(LINK_MARK_RE, ""));
-  return hits.map((h, k) => {
-    let j = k;
-    while (j < segs.length - 1 && ID_JOIN_RE.test(segs[j]!)) j++;
-    const words = segs[j]!.replace(/^[\s:—–\-·,.)]+/, "").split(/\s+/).filter(Boolean);
-    const few = words.slice(0, 6).join(" ");
-    return { id: h.id, text: few ? `${h.id}: ${few}${words.length > 6 ? "…" : ""}` : h.id };
-  });
-}
-
-/** A lane's peek (D13): the question ids it names with a few words each, else
- *  its first open step's lead sentence. Plain text. */
-function lanePeek(lane: NextMovesLane, ids: Set<string> | undefined): string {
-  if (lane.kind === "waiting" && ids && ids.size) {
-    const parts: string[] = [];
-    const seen = new Set<string>();
-    for (const item of lane.items) {
-      for (const p of questionPeeks(item, ids)) {
-        if (seen.has(p.id)) continue;
-        seen.add(p.id);
-        parts.push(p.text);
-      }
-    }
-    if (parts.length) return parts.join(" · ");
-  }
+/** A lane's lead-sentence peek (D13): its first open step's lead sentence,
+ *  plain text. A waiting lane naming cards peeks with chips instead (D38). */
+function lanePeek(lane: NextMovesLane): string {
   return lane.items.length ? leadSentence(peekText(lane.items[0]!)) : "";
 }
 
@@ -1051,6 +1078,14 @@ function laneCounts(lane: NextMovesLane, ids: Set<string> | undefined): LaneCoun
   }
   return [{ n: lane.items.length, unit: laneUnit(lane.kind) }];
 }
+
+/** The distinct `<Question>` ids a lane's items name, in order (D38). */
+function laneQuestionIds(lane: NextMovesLane, ids: Set<string>): string[] {
+  return [...new Set(lane.items.flatMap((item) => namedQuestionIds(item, ids)))];
+}
+
+/** Each lane kind's icon in the compact head (D36). */
+const LANE_ICONS: Record<NextMovesLane["kind"], string> = { waiting: "⏳", you: "✋", draft: "✉", blocked: "⛔" };
 
 /** A lane's body as the grid renders it: a task list through the checklist marks. */
 function laneBodyHtml(lane: NextMovesLane): string {
@@ -1096,7 +1131,19 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
       : lane.sinceRaw
         ? `<span class="nm-since nm-since-raw">${escapeHtml(lane.sinceRaw)}</span>`
         : "";
-    const peek = lanePeek(lane, ids);
+    // D38: a waiting lane naming cards peeks with their ids as chips and a
+    // progress slot the reader's answer client fills; any other lane keeps
+    // the lead-sentence peek.
+    const qids = lane.kind === "waiting" && ids?.size ? laneQuestionIds(lane, ids) : [];
+    const peekHtml = qids.length
+      ? `<span class="nm-peek nm-peek-q" ${READER_ONLY_ATTR}><span class="nm-qids">${qids.map((q) => `<span class="nm-qid">${escapeHtml(q)}</span>`).join(" ")}</span>` +
+        `<span class="nm-prog" data-nm-qids="${escapeHtml(JSON.stringify(qids))}"></span></span>`
+      : (() => {
+          const peek = lanePeek(lane);
+          return peek ? `<span class="nm-peek" ${READER_ONLY_ATTR}>${escapeHtml(peek)}</span>` : "";
+        })();
+    const action =
+      lane.kind === "waiting" ? words.action.questions : lane.kind === "blocked" ? words.action.see : words.action.seeAll;
     const cards = (currentLaneCards?.byLane.get(lane.children) ?? [])
       .map((q) => {
         const id = parseQuestionAttrs(q.attrs).id!;
@@ -1113,9 +1160,11 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     const labelOnly = lane.label !== lane.who ? ` ${READER_ONLY_ATTR}` : "";
     return (
       `<details class="nm-lane nm-${lane.kind}${unknown}" data-kind="${lane.kind}" data-count="${n}"${since}${who}${role}>` +
-      `<summary class="nm-head"><span class="nm-who"${labelOnly}>${escapeHtml(lane.label)}</span>` +
-      `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText(counts, lang))}</span>${sinceHtml}` +
-      (peek ? `<span class="nm-peek" ${READER_ONLY_ATTR}>${escapeHtml(peek)}</span>` : "") +
+      `<summary class="nm-head"><span class="nm-lh"><span class="nm-ico" aria-hidden="true" ${READER_ONLY_ATTR}>${LANE_ICONS[lane.kind]}</span>` +
+      `<span class="nm-who"${labelOnly}>${escapeHtml(lane.label)}</span>` +
+      `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText(counts, lang))}</span></span>` +
+      `${peekHtml}${sinceHtml}` +
+      `<span class="nm-cta" ${READER_ONLY_ATTR}><span class="nm-cta-open">${escapeHtml(action)}</span><span class="nm-cta-close">${escapeHtml(words.action.hide)}</span></span>` +
       `</summary><div class="nm-body">${laneBodyHtml(lane)}${cards ? `<div class="nm-qcards">${cards}</div>` : ""}</div></details>`
     );
   });
@@ -1642,9 +1691,10 @@ const webRenderer: BlockRenderer = {
         // A card a waiting lane holds (D13) leaves a one-line link here, so the
         // page never holds two composers for one question.
         const id = parseQuestionAttrs(attrs).id;
-        const anchor = id !== null ? currentLaneCards?.moved.get(id) : undefined;
-        if (anchor !== undefined) {
-          return `<p class="q-moved" ${READER_ONLY_ATTR}><a class="q-moved-link" href="#${anchor}">${escapeHtml(laneWords(currentLanguage).movedLink(id!))}</a></p>`;
+        if (id !== null && currentLaneCards?.moved.has(id)) {
+          const stub = currentLaneCards.stubs.get(attrs) ?? (currentLaneCards.stubs.has(attrs) ? null : { ids: [id], anchor: currentLaneCards.moved.get(id)!, arrow: "↑" });
+          if (stub === null) return "";
+          return `<p class="q-moved" ${READER_ONLY_ATTR}><a class="q-moved-link" href="#${stub.anchor}">${escapeHtml(laneWords(currentLanguage).movedLink(stub.ids, stub.arrow))}</a></p>`;
         }
         return questionCardHtml(attrs, children);
       }

@@ -1,6 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import {
+  answeredQuestionIds,
   countPillLabel,
+  laneAgeText,
   LINE_REFS_KEY,
   daysSince,
   historicPillLabel,
@@ -35,6 +37,29 @@ describe("NextMoves ages and pills", () => {
     // …and a 23-hour spring day (Europe 2026-03-29, US 2026-03-08) is not lost.
     expect(daysSince("2026-03-28", at(2026, 3, 30, 0))).toBe(2);
     expect(daysSince("2026-03-07", at(2026, 3, 9, 0))).toBe(2);
+  });
+
+  test("D37: a lane's age in the wiki's language; the date alone for a future day", () => {
+    const now = at(2026, 10, 10);
+    expect(laneAgeText("waiting", "2026-10-07", now, "no")).toBe("stilt 07.10 · 3 d");
+    expect(laneAgeText("you", "2026-10-07", now, "no")).toBe("siden 07.10 · 3 d");
+    expect(laneAgeText("waiting", "2026-10-07", now, "en")).toBe("asked 07.10 · 3 d");
+    expect(laneAgeText("blocked", "2026-10-10", now, "en")).toBe("since 10.10 · 0 d");
+    // Another year carries its year; a future day has no age yet.
+    expect(laneAgeText("waiting", "2025-10-07", now, "no")).toBe("stilt 07.10.2025 · 368 d");
+    expect(laneAgeText("waiting", "2026-10-20", now, "no")).toBe("20.10");
+    expect(laneAgeText("waiting", "2026-02-31", now, "no")).toBe("2026-02-31");
+  });
+
+  test("D38: a card counts as answered by a live answer its question asked for", () => {
+    const ids = answeredQuestionIds([
+      { questionId: "S1", asked: true },
+      { questionId: "S2", asked: false },
+      { questionId: "S3", asked: null },
+      { questionId: "S4", asked: true, redacted: true },
+      { questionId: "S5" },
+    ]);
+    expect([...ids].sort()).toEqual(["S1", "S3", "S5"]);
   });
 
   test("pill labels: the English default with no who", () => {

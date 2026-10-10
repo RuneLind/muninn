@@ -100,6 +100,48 @@ const BLOCKED_ONLY_PAGE = [
   "",
 ].join("\n");
 
+// D39: four cards right after the block leave no stub; two further down, past
+// prose, leave one merged line. D35: every state-pill tone, in StatusRows and
+// a CaseBoard, for the contrast case.
+const STUB_REL = "plans/stubber.mdx";
+const STUB_IDS = ["S1", "S2", "S3", "S4", "S5", "S6"];
+const STUB_PAGE = [
+  "---",
+  "title: Stubber",
+  'questions_to: ["fag"]',
+  "---",
+  "",
+  "<StatusRows>",
+  "",
+  "- **Jira:** MEL-1 i prod · MEL-2 merget, ikke i prod · MEL-3 ikke opprettet · MEL-4 opprettet",
+  "",
+  "</StatusRows>",
+  "",
+  '<CaseBoard src="cases.yaml" />',
+  "",
+  "<NextMoves>",
+  "",
+  '<Lane kind="waiting" role="fag" since="07.10.2026">',
+  "",
+  ...STUB_IDS.map((id) => `- **${id}** — spørsmål ${id}?`),
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+  "",
+  ...STUB_IDS.slice(0, 4).flatMap((id) => [`<Question id="${id}" to="fag">`, "", `Spørsmål ${id}?`, "", "</Question>", ""]),
+  "Mer bakgrunn.",
+  "",
+  ...STUB_IDS.slice(4).flatMap((id) => [`<Question id="${id}" to="fag">`, "", `Spørsmål ${id}?`, "", "</Question>", ""]),
+  "<DecisionLog>",
+  "",
+  ...STUB_IDS.map((id) => `- **${id}** — åpent.`),
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+const CASES_YAML = ["- id: A", "  status: hold", "- id: B", "  status: wait", "- id: C", "  status: wrong", "- id: D", "  status: ok", "- id: E", "  status: none", ""].join("\n");
+
 const servers: ChildProcess[] = [];
 let root = "";
 let botsDir = "";
@@ -126,6 +168,8 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(root, TWO_WAITING_REL), TWO_WAITING_PAGE, "utf8");
   await writeFile(path.join(root, HISTORIC_ONLY_REL), HISTORIC_ONLY_PAGE, "utf8");
   await writeFile(path.join(root, BLOCKED_ONLY_REL), BLOCKED_ONLY_PAGE, "utf8");
+  await writeFile(path.join(root, STUB_REL), STUB_PAGE, "utf8");
+  await writeFile(path.join(root, "plans", "cases.yaml"), CASES_YAML, "utf8");
   botsDir = makePreviewBotsDir();
   const common = {
     ...process.env,
@@ -187,7 +231,20 @@ test.afterAll(async () => {
 const lanes = (page: Page) => page.locator(".wiki-article .nm-compact > .nm-lanes > .nm-lane");
 const laneRoles = (page: Page) => lanes(page).evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.role ?? "-"));
 const marks = (page: Page) =>
-  lanes(page).evaluateAll((els) => els.map((e) => e.querySelector(":scope > .nm-head > .nm-mine-mark")?.textContent ?? ""));
+  lanes(page).evaluateAll((els) => els.map((e) => e.querySelector(":scope > .nm-head .nm-mine-mark")?.textContent ?? ""));
+/** A token's computed colour, read off a probe on `body` (pin the token, not a literal). */
+const token = (page: Page, name: string, prop: "color" | "backgroundColor" = "color") =>
+  page.evaluate(
+    ([n, p]) => {
+      const probe = document.createElement("span");
+      probe.style[p as "color"] = `var(${n})`;
+      document.body.appendChild(probe);
+      const c = getComputedStyle(probe)[p as "color"];
+      probe.remove();
+      return c;
+    },
+    [name, prop] as const,
+  );
 const pageUrl = (base: string) => `${base}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`;
 const payloadUrl = (base: string) => `${base}/api/wiki/page?wiki=${WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`;
 
@@ -242,6 +299,26 @@ test("preview:role fag: the fag lane first and «til deg», --lens overview open
   await expect(page.locator(".wiki-article")).toHaveClass(/\blens-overview\b/);
   await expect(page.locator(".wiki-role-view")).toHaveCount(0);
 
+  // Acceptance 10 (D36–D38): the fag viewer's waiting lane.
+  const fag = lanes(page).first();
+  await expect(fag.locator(".nm-ico")).toHaveText("⏳");
+  await expect(fag.locator(".nm-ico")).toHaveAttribute("aria-hidden", "true");
+  expect(await fag.locator(".nm-who").evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--tone-warn"));
+  const mark = fag.locator(".nm-mine-mark");
+  expect(await mark.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(await token(page, "--status-warning", "backgroundColor"));
+  await expect(fag.locator(":scope > .nm-head > .nm-since")).toHaveText(/^stilt 07\.10(\.2026)? · \d+ d$/);
+  await expect(fag.locator(".nm-cta-open")).toHaveText("Se og svar ▸");
+  await expect(fag.locator(".nm-cta-close")).toBeHidden();
+  await expect(fag.locator(".nm-peek .nm-qid")).toHaveText(["S1", "S2"]);
+  // Once the answer client loads, the count follows the ids.
+  await expect(fag.locator(".nm-prog")).toHaveText("· 0 av 2 besvart");
+  // The other lanes keep their own actions.
+  await expect(lanes(page).nth(1).locator(".nm-cta-open")).toHaveText("Se alle ▸");
+  await expect(lanes(page).nth(3).locator(".nm-cta-open")).toHaveText("Se ▸");
+  await fag.locator(":scope > .nm-head").click();
+  await expect(fag.locator(".nm-cta-close")).toHaveText("Skjul ▴");
+  await expect(fag.locator(".nm-cta-open")).toBeHidden();
+
   const post = await fetch(`${PREVIEW_BASE}/api/wiki/answers`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: PREVIEW_BASE },
@@ -261,7 +338,66 @@ for (const scheme of ["light", "dark"] as const) {
     expect(await paintedContrast(page.locator(".wiki-role-view")), "switch label").toBeGreaterThanOrEqual(4.5);
     expect(await paintedContrast(page.locator(".q-moved-link").first()), "moved link").toBeGreaterThanOrEqual(4.5);
   });
+
+  test(`D35–D38: lane labels, marks, actions and every pill tone read at 4.5:1 against their tokens, ${scheme}`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    // The admin switch views the page as fag, then as utvikler, for both marks.
+    await page.goto(pageUrl(OFF_BASE));
+    await expect(lanes(page)).toHaveCount(4);
+    await page.mouse.move(0, 0);
+    const byRole = (role: string, kind: string) => page.locator(`.wiki-article .nm-lane[data-role="${role}"][data-kind="${kind}"]`);
+    const checks: [string, import("@playwright/test").Locator, string, "color" | "backgroundColor"][] = [
+      ["waiting label", byRole("fag", "waiting").locator(".nm-who"), "--tone-warn", "color"],
+      ["blocked label", byRole("utvikler", "blocked").locator(".nm-who"), "--tone-err", "color"],
+      ["you label", byRole("utvikler", "you").locator(".nm-who"), "--accent-light", "color"],
+      ["action", byRole("fag", "waiting").locator(".nm-cta"), "--accent-light", "color"],
+      ["waiting mark fill", byRole("fag", "waiting").locator(".nm-mine-mark"), "--status-warning", "backgroundColor"],
+    ];
+    for (const [name, loc, tok, prop] of checks) {
+      expect(await loc.evaluate((el, p) => getComputedStyle(el)[p as "color"], prop), `${name} token`).toBe(await token(page, tok, prop));
+      expect(await paintedContrast(loc), `${name} contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+    await page.locator(".wiki-article-head .wiki-role-view select").selectOption("utvikler");
+    const youMark = byRole("utvikler", "you").locator(".nm-mine-mark");
+    await expect(youMark).toHaveText("deg");
+    expect(await youMark.evaluate((el) => getComputedStyle(el).backgroundColor), "you mark fill token").toBe(
+      await token(page, "--accent-hover", "backgroundColor"),
+    );
+    expect(await paintedContrast(youMark), "you mark contrast").toBeGreaterThanOrEqual(4.5);
+
+    // D35: the pill tones on their tints.
+    await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(STUB_REL)}`);
+    await page.mouse.move(0, 0);
+    const pills: [string, string][] = [
+      [".sr-state.sr-good", "--tone-good"],
+      [".sr-state.sr-warn", "--tone-warn"],
+      [".sr-state.sr-muted", "--text-soft"],
+      [".sr-state.sr-info", "--tone-info"],
+      [".cb-pill.cb-hold", "--tone-warn"],
+      [".cb-pill.cb-wait", "--tone-info"],
+      [".cb-pill.cb-wrong", "--tone-err"],
+      [".cb-pill.cb-ok", "--tone-good"],
+    ];
+    for (const [sel, tok] of pills) {
+      const pill = page.locator(`.wiki-article ${sel}`).first();
+      await expect(pill, sel).toBeVisible();
+      expect(await pill.evaluate((el) => getComputedStyle(el).color), `${sel} token`).toBe(await token(page, tok));
+      expect(await paintedContrast(pill), `${sel} contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
 }
+
+test("D39: four cards right after the block leave no stub; two past prose leave one merged line", async ({ page }) => {
+  await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(STUB_REL)}`);
+  await expect(page.locator(".wiki-article section.question")).toHaveCount(6);
+  const links = page.locator(".wiki-article .q-moved-link");
+  await expect(links).toHaveText(["Spørsmål S5 og S6 står under Oppfølging ↑"]);
+  await expect(links).toHaveAttribute("href", "#nm-q-s5");
+  const lane = page.locator('.wiki-article .nm-lane[data-role="fag"]');
+  await links.click();
+  await expect(lane).toHaveAttribute("open", "");
+  await expect(lane.locator('section.question[data-question-id="S5"]')).toBeInViewport();
+});
 
 /** The lanes outside settled sections. */
 const liveLanes = (page: Page) => page.locator(".wiki-article .nm-compact:not(section.historic .nm-compact) > .nm-lanes > .nm-lane");
