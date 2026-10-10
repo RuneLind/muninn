@@ -56,10 +56,25 @@ describe("RESEARCH_MCP_PORT", () => {
     expect(researchMcpPort({ RESEARCH_MCP_PORT: " " })).toBe(9190);
     expect(researchMcpPort({ RESEARCH_MCP_PORT: "9191" })).toBe(9191);
     expect(researchMcpPort({ RESEARCH_MCP_PORT: "0" })).toBe(0);
+    expect(researchMcpPort({ RESEARCH_MCP_PORT: " 9191 " })).toBe(9191);
   });
 
   test("anything else falls back to 9190", () => {
     for (const bad of ["abc", "-1", "70000", "91.5"]) expect(researchMcpPort({ RESEARCH_MCP_PORT: bad })).toBe(9190);
+  });
+
+  test("a server built with no port reads RESEARCH_MCP_PORT when it starts", async () => {
+    const saved = process.env.RESEARCH_MCP_PORT;
+    process.env.RESEARCH_MCP_PORT = "0";
+    const server = new ResearchMcpServer();
+    try {
+      server.start();
+      expect(server.url).not.toBe("http://127.0.0.1:9190");
+    } finally {
+      await server.stop();
+      if (saved === undefined) delete process.env.RESEARCH_MCP_PORT;
+      else process.env.RESEARCH_MCP_PORT = saved;
+    }
   });
 
   test("port 0 binds a free port, and url names it", async () => {

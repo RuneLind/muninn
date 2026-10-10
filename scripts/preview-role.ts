@@ -29,7 +29,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "../e2e/e2e-env.ts";
 import { parseRoleKeys } from "../src/format/lane-roles.ts";
@@ -54,8 +54,11 @@ export interface PreviewRoleOptions {
 }
 
 /** The env overrides for one preview muninn. Spread after `...process.env`
- *  and `...e2eEnv()`. Throws when `role` is not one of `roleKeys`. */
+ *  and `...e2eEnv()`. Throws when `role` is not one of `roleKeys`, or when
+ *  `previewRootProblem` refuses the wiki name or root. */
 export function previewRoleEnv(o: PreviewRoleOptions): Record<string, string> {
+  const problem = previewRootProblem(o.wiki, o.root);
+  if (problem) throw new Error(problem);
   const at = o.roleKeys.indexOf(o.role);
   if (at < 0) {
     throw new Error(
@@ -91,9 +94,10 @@ export function previewRoleEnv(o: PreviewRoleOptions): Record<string, string> {
 }
 
 /** Why a wiki name or root cannot go into `WIKI_EXTRA` and
- *  `WIKI_READONLY_ROOTS` unchanged, or null. Both lists split on `,`, and
- *  `WIKI_EXTRA` on `=`, so such a root would register a different, writable
- *  path. */
+ *  `WIKI_READONLY_ROOTS` unchanged, or null. `WIKI_EXTRA` splits on `=`, so
+ *  `w=/p/a=b` registers `/p/a` while `/p/a=b` is the read-only root: a
+ *  writable wiki. Both lists split on `,`, so a comma registers the wrong
+ *  root. */
 export function previewRootProblem(wiki: string, root: string): string | null {
   for (const ch of [",", "="]) {
     if (wiki.includes(ch) || root.includes(ch)) return `a wiki name or root containing "${ch}" cannot be previewed`;
@@ -152,8 +156,6 @@ function main(argv: string[]): void {
   const wiki = wikiArg.slice(0, eq);
   const root = path.resolve(wikiArg.slice(eq + 1).replace(/^~(?=\/|$)/, process.env.HOME ?? "~"));
   if (!existsSync(root)) usage(`no wiki root at ${root}`);
-  const problem = previewRootProblem(wiki, root);
-  if (problem) usage(problem);
 
   const botsDir = makePreviewBotsDir();
   let env: Record<string, string>;
@@ -188,7 +190,7 @@ function main(argv: string[]): void {
   });
   child.on("exit", (code, signal) => {
     cleanup();
-    process.exit(code ?? (signal ? 1 : 0));
+    process.exit(code ?? 128 + (signal ? (osConstants.signals[signal] ?? 0) : 0));
   });
 }
 

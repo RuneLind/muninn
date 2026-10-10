@@ -1,5 +1,8 @@
 import { describe, test, expect } from "bun:test";
-import { previewRoleEnv, previewRootProblem, type PreviewRoleOptions } from "./preview-role.ts";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { previewRoleEnv, previewRootProblem, readRoleKeys, type PreviewRoleOptions } from "./preview-role.ts";
 
 const base: PreviewRoleOptions = {
   role: "fag",
@@ -34,11 +37,23 @@ describe("previewRoleEnv", () => {
   });
 });
 
+describe("readRoleKeys", () => {
+  test("a .wiki-reader.json that is not JSON throws, naming the file", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "preview-role-test-"));
+    writeFileSync(path.join(root, ".wiki-reader.json"), "{ roleKeys: [", "utf8");
+    expect(() => readRoleKeys(root)).toThrow(/\.wiki-reader\.json is not valid JSON/);
+  });
+});
+
 describe("previewRootProblem", () => {
   test("a name or root that WIKI_EXTRA would split is refused", () => {
     expect(previewRootProblem("w", "/p/a=b")).toMatch(/"="/);
     expect(previewRootProblem("w,x", "/p/a")).toMatch(/","/);
     expect(previewRootProblem("w=x", "/p/a")).toMatch(/"="/);
     expect(previewRootProblem("melosys-felles", "/Users/x/melosys-kode-wiki")).toBeNull();
+  });
+
+  test("previewRoleEnv refuses such a root, so no caller can skip the check", () => {
+    expect(() => previewRoleEnv({ ...base, root: "/p/a=b" })).toThrow(/"="/);
   });
 });

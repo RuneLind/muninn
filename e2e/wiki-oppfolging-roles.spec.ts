@@ -11,8 +11,9 @@
  *     their authored order, none is marked, and there is no switch.
  *   - `bun run preview:role fag`'s env (`scripts/preview-role.ts`): the same
  *     `local`/`nais`/`user` shape with `MUNINN_LOCAL_IDENT` in a synthetic fag
- *     group, so the fag lane goes first and reads «til deg», the page opens in
- *     Overview, there is no switch, and an answer with text is refused.
+ *     group, so the fag lane goes first and reads «til deg», `--lens overview`
+ *     opens the page in Overview, there is no switch, and an answer with text
+ *     is refused.
  *
  * What a unit test cannot see: the server's per-mode resolution reaching the
  * client, which orders and marks the lanes. Three muninns; no model calls; no DB
@@ -225,7 +226,7 @@ test("local: no NAV ident, no role — authored order, no mark, no switch", asyn
   await expect(page.locator(".wiki-role-view")).toHaveCount(0);
 });
 
-test("preview:role fag: the fag lane first and «til deg», Overview by default, no switch, no stored text", async ({ page }) => {
+test("preview:role fag: the fag lane first and «til deg», --lens overview opens Overview, no switch, no stored text", async ({ page }) => {
   const res = await fetch(payloadUrl(PREVIEW_BASE));
   expect(res.status).toBe(200);
   const text = await res.text();

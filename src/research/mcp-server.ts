@@ -17,7 +17,8 @@ export const RESEARCH_MCP_PORT = 9190;
 
 /** `RESEARCH_MCP_PORT` from the env, else 9190. `0` lets the OS pick a free
  *  port: `bun run preview:role` sets it so a second instance never takes 9190
- *  from `bun run dev`. A value that is not a port warns and falls back. */
+ *  from `bun run dev`. A value that is not a port warns and falls back; read
+ *  in `start()`, after logging is configured, so the warning prints. */
 export function researchMcpPort(env: Record<string, string | undefined> = process.env): number {
   const raw = env.RESEARCH_MCP_PORT?.trim();
   if (!raw) return RESEARCH_MCP_PORT;
@@ -53,10 +54,12 @@ export class ResearchMcpServer {
   private httpServer: ReturnType<typeof Bun.serve> | null = null;
   private sessions = new Map<string, Session>();
   private bots = new Map<string, BotEntry>();
-  private port: number;
+  private readonly portOverride: number | undefined;
+  private port = RESEARCH_MCP_PORT;
 
-  constructor(port = researchMcpPort()) {
-    this.port = port;
+  /** No `port`: `RESEARCH_MCP_PORT`, read when the server starts. */
+  constructor(port?: number) {
+    this.portOverride = port;
   }
 
   get isRunning(): boolean {
@@ -78,8 +81,9 @@ export class ResearchMcpServer {
 
   start(): void {
     if (this.httpServer) return;
+    const port = this.portOverride ?? researchMcpPort();
     this.httpServer = Bun.serve({
-      port: this.port,
+      port,
       hostname: "127.0.0.1",
       // Decompose Haiku call + 4 parallel searches can take ~30s on a slow path;
       // 120s gives generous headroom.
@@ -87,7 +91,7 @@ export class ResearchMcpServer {
       fetch: (req) => this.handleHttp(req),
     });
     // Port 0 asked the OS for one; `url` must name the port it gave.
-    this.port = this.httpServer.port ?? this.port;
+    this.port = this.httpServer.port ?? port;
     log.info("Research MCP server started on :{port}", { port: this.port });
   }
 
