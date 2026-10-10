@@ -891,8 +891,6 @@ interface LaneCards {
   /** Question id → the anchor of its card in the lane, unique on the page's
    *  lane cards (`Q.1` and `Q-1` fold to one slug, so the second gets `-2`). */
   moved: Map<string, string>;
-  /** Question id → the `<NextMoves>` block whose lane took its card. */
-  takenBy: Map<string, ComponentBlock>;
   /** A moved card's authored place (D39), keyed by its block's `attrs`, which
    *  the renderer hands back unchanged: the run's one line on its first card,
    *  null (nothing) on the rest of a run and on a card that sits right after
@@ -917,12 +915,12 @@ const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
  *  only on its own boundary: `S1` is not named by `S10`, `PS1`, `S1.1`, `S1-2`
  *  or `1.S1` — a `.` or `-` joined to an id character on its far side extends
  *  the id — while a sentence-final `S1.` is named. */
-function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number; end: number }[] {
-  const hits: { id: string; at: number; end: number }[] = [];
+function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number }[] {
+  const hits: { id: string; at: number }[] = [];
   for (const id of ids) {
     const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const m = new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`).exec(text);
-    if (m) hits.push({ id, at: m.index, end: m.index + id.length });
+    if (m) hits.push({ id, at: m.index });
   }
   return hits.sort((a, b) => a.at - b.at);
 }
@@ -968,7 +966,9 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   for (const lane of waiting) {
     for (const id of named(lane)) if (questions.get(id)!.lanes.includes(lane.children)) stays.add(id);
   }
-  const out: LaneCards = { byLane: new Map(), moved: new Map(), takenBy: new Map(), stubs: new Map() };
+  const out: LaneCards = { byLane: new Map(), moved: new Map(), stubs: new Map() };
+  /** Question id → the `<NextMoves>` block whose lane took its card. */
+  const takenBy = new Map<string, ComponentBlock>();
   const anchors = new Set<string>();
   for (const lane of waiting) {
     for (const item of lane.items) {
@@ -979,34 +979,43 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
         for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
         anchors.add(anchor);
         out.moved.set(id, anchor);
-        out.takenBy.set(id, lane.block);
+        takenBy.set(id, lane.block);
         const list = out.byLane.get(lane.children) ?? [];
         list.push(questions.get(id)!.block);
         out.byLane.set(lane.children, list);
       }
     }
   }
-  planMovedStubs(blocks, out);
+  planMovedStubs(blocks, out, takenBy);
   return out;
 }
 
 /**
  * D39: what each moved card leaves at its authored place. A card with only
- * other moved cards and blank lines between it and the end of the block that
- * took it leaves nothing; otherwise a run of moved cards (blank lines between
- * them allowed) leaves one line naming them all, linking to the first.
+ * other moved cards, blank lines and HTML comments between it and the end of
+ * the block that took it leaves nothing; otherwise a run of moved cards taken
+ * by one block (blank lines and comments between them allowed) leaves one line
+ * naming them all, linking to the first. The arrow points at the block: ↓ when
+ * it sits below the line, or when the card is written inside it (its intro or
+ * another lane render above the lane the card moves to).
  */
-function planMovedStubs(blocks: Block[], cards: LaneCards): void {
+function planMovedStubs(blocks: Block[], cards: LaneCards, takenBy: Map<string, ComponentBlock>): void {
   const order = new Map<Block, number>();
+  const parent = new Map<Block, Block>();
   const lists: Block[][] = [];
-  const walk = (bs: Block[]) => {
+  const walk = (bs: Block[], up: Block | undefined) => {
     lists.push(bs);
     for (const b of bs) {
       order.set(b, order.size);
-      if (b.type === "component") walk(b.children);
+      if (up) parent.set(b, up);
+      if (b.type === "component") walk(b.children, b);
     }
   };
-  walk(blocks);
+  walk(blocks, undefined);
+  const inside = (b: Block, nm: Block): boolean => {
+    for (let p = parent.get(b); p; p = parent.get(p)) if (p === nm) return true;
+    return false;
+  };
   const movedId = (b: Block): string | null => {
     if (b.type !== "component" || b.name !== "Question") return null;
     const id = parseQuestionAttrs(b.attrs).id;
@@ -1017,34 +1026,44 @@ function planMovedStubs(blocks: Block[], cards: LaneCards): void {
     bs.forEach((b, i) => {
       if (b.type !== "component" || b.name !== "NextMoves") return;
       for (const c of bs.slice(i + 1)) {
-        if (isBlankTextBlock(c)) continue;
+        if (isBlankOrCommentBlock(c)) continue;
         const id = movedId(c);
         if (id === null) break;
-        if (cards.takenBy.get(id) === b) silent.add(c);
+        if (takenBy.get(id) === b) silent.add(c);
       }
     });
     let run: { block: ComponentBlock; id: string }[] = [];
     const flush = () => {
       const first = run[0];
       if (!first) return;
-      const nm = cards.takenBy.get(first.id)!;
+      const nm = takenBy.get(first.id)!;
       cards.stubs.set(first.block.attrs, {
         ids: run.map((r) => r.id),
         anchor: cards.moved.get(first.id)!,
-        arrow: order.get(nm)! < order.get(first.block)! ? "↑" : "↓",
+        arrow: !inside(first.block, nm) && order.get(nm)! < order.get(first.block)! ? "↑" : "↓",
       });
       for (const r of run.slice(1)) cards.stubs.set(r.block.attrs, null);
       run = [];
     };
     for (const b of bs) {
-      if (isBlankTextBlock(b)) continue;
+      if (isBlankOrCommentBlock(b)) continue;
       const id = movedId(b);
       if (id === null) flush();
       else if (silent.has(b)) cards.stubs.set((b as ComponentBlock).attrs, null);
-      else run.push({ block: b as ComponentBlock, id });
+      else {
+        // One line per taking block: a card another block took starts a new run.
+        if (run[0] && takenBy.get(run[0].id) !== takenBy.get(id)) flush();
+        run.push({ block: b as ComponentBlock, id });
+      }
     }
     flush();
   }
+}
+
+/** A text block holding only blank lines and HTML comments: the D39 walk reads
+ *  it as a blank line. An unclosed `<!--` is content. */
+function isBlankOrCommentBlock(block: Block): boolean {
+  return block.type === "text" && block.lines.join("\n").replace(/<!--[\s\S]*?-->/g, "").trim() === "";
 }
 
 /** An item's text for a peek: plain, one line. A `renderWikiHtml` wikilink
@@ -1079,9 +1098,13 @@ function laneCounts(lane: NextMovesLane, ids: Set<string> | undefined): LaneCoun
   return [{ n: lane.items.length, unit: laneUnit(lane.kind) }];
 }
 
-/** The distinct `<Question>` ids a lane's items name, in order (D38). */
-function laneQuestionIds(lane: NextMovesLane, ids: Set<string>): string[] {
-  return [...new Set(lane.items.flatMap((item) => namedQuestionIds(item, ids)))];
+/** The distinct `<Question>` ids a lane's items name that a reader can answer,
+ *  in order (D38): one card with the id, and that card open. A duplicated id
+ *  (read-only, the route 409s it) and a closed or decided card are left out, so
+ *  the chips and the progress's «av M» count only what can still be answered. */
+function laneQuestionIds(lane: NextMovesLane, page: QuestionPage): string[] {
+  const named = new Set(lane.items.flatMap((item) => namedQuestionIds(item, page.questionIds)));
+  return [...named].filter((id) => !page.duplicates.has(id) && (page.states.get(id)?.kind ?? "open") === "open");
 }
 
 /** Each lane kind's icon in the compact head (D36). */
@@ -1113,9 +1136,6 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
   const ids = currentQuestionPage?.questionIds;
   const rest = rawChildren.filter((b) => !(b.type === "component" && b.name === "Lane") && !isBlankTextBlock(b));
   const intro = rest.length ? `<div class="nm-intro">${renderBlocks(rest, webRenderer)}</div>` : "";
-  // Each lane's `since` as written, to tell a normalised date from the source.
-  const sourceSince = new Map<Block[], string | undefined>();
-  for (const b of rawChildren) if (b.type === "component" && b.name === "Lane") sourceSince.set(b.children, b.attrs.since?.trim());
   const ordered = [...lanes.filter((l) => l.kind !== "blocked"), ...lanes.filter((l) => l.kind === "blocked")];
   const sum: string[] = [];
   const rows = ordered.map((lane) => {
@@ -1123,27 +1143,31 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     const counts = laneCounts(lane, ids);
     if (n > 0) sum.push(laneSumPhrase({ kind: lane.kind, role: lane.role, label: lane.label, counts }, lang));
     const since = lane.since ? ` data-since="${lane.since}"` : "";
-    // Text the page source does not hold is reader-only, so a selection
-    // Explain or fact-check sends can still be found in the source.
-    const sinceOnly = lane.since && sourceSince.get(lane.children) !== lane.since ? ` ${READER_ONLY_ATTR}` : "";
+    // The reader rewrites a dated lane's age (`decorateLaneAges`), so the text
+    // is never the source's: reader-only, so a selection Explain or
+    // fact-check sends can still be found in the source.
     const sinceHtml = lane.since
-      ? `<span class="nm-since"${since}${sinceOnly}>${lane.since}</span>`
+      ? `<span class="nm-since"${since} ${READER_ONLY_ATTR}>${lane.since}</span>`
       : lane.sinceRaw
         ? `<span class="nm-since nm-since-raw">${escapeHtml(lane.sinceRaw)}</span>`
         : "";
     // D38: a waiting lane naming cards peeks with their ids as chips and a
     // progress slot the reader's answer client fills; any other lane keeps
     // the lead-sentence peek.
-    const qids = lane.kind === "waiting" && ids?.size ? laneQuestionIds(lane, ids) : [];
+    // The row shows whole chips only and hides the rest, so its title names
+    // every id.
+    const qids = lane.kind === "waiting" && ids?.size && currentQuestionPage ? laneQuestionIds(lane, currentQuestionPage) : [];
     const peekHtml = qids.length
-      ? `<span class="nm-peek nm-peek-q" ${READER_ONLY_ATTR}><span class="nm-qids">${qids.map((q) => `<span class="nm-qid">${escapeHtml(q)}</span>`).join(" ")}</span>` +
-        `<span class="nm-prog" data-nm-qids="${escapeHtml(JSON.stringify(qids))}"></span></span>`
+      ? `<span class="nm-peek nm-peek-q" ${READER_ONLY_ATTR}><span class="nm-qids" title="${escapeHtml(qids.join(", "))}">${qids.map((q) => `<span class="nm-qid">${escapeHtml(q)}</span>`).join(" ")}</span>` +
+        `<span class="nm-prog"></span></span>`
       : (() => {
           const peek = lanePeek(lane);
           return peek ? `<span class="nm-peek" ${READER_ONLY_ATTR}>${escapeHtml(peek)}</span>` : "";
         })();
+    // The questions action only on a lane with chips; `applyLaneRoles` keeps
+    // the same rule for the viewer's lane.
     const action =
-      lane.kind === "waiting" ? words.action.questions : lane.kind === "blocked" ? words.action.see : words.action.seeAll;
+      lane.kind === "waiting" && qids.length ? words.action.questions : lane.kind === "blocked" ? words.action.see : words.action.seeAll;
     const cards = (currentLaneCards?.byLane.get(lane.children) ?? [])
       .map((q) => {
         const id = parseQuestionAttrs(q.attrs).id!;
@@ -1692,7 +1716,8 @@ const webRenderer: BlockRenderer = {
         // page never holds two composers for one question.
         const id = parseQuestionAttrs(attrs).id;
         if (id !== null && currentLaneCards?.moved.has(id)) {
-          const stub = currentLaneCards.stubs.get(attrs) ?? (currentLaneCards.stubs.has(attrs) ? null : { ids: [id], anchor: currentLaneCards.moved.get(id)!, arrow: "↑" });
+          // `planMovedStubs` visits every component, so a miss renders nothing.
+          const stub = currentLaneCards.stubs.get(attrs) ?? null;
           if (stub === null) return "";
           return `<p class="q-moved" ${READER_ONLY_ATTR}><a class="q-moved-link" href="#${stub.anchor}">${escapeHtml(laneWords(currentLanguage).movedLink(stub.ids, stub.arrow))}</a></p>`;
         }

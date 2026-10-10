@@ -6,7 +6,7 @@
  * copy: the rule the rail is judged against is one rule, and three copies is
  * three places for it to drift while every spec keeps passing.
  */
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 /**
  * The contrast of an element's text against the nearest ancestor that really
@@ -101,4 +101,20 @@ export async function paintedContrast(
     const b = lum(bg);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
   }, [opts?.withOpacity ?? false, opts?.fill ?? false] as const);
+}
+
+/** A token's computed value, read off a probe on `body`: what a rule written
+ *  `var(<name>)` resolves to, so a spec pins the token and not a literal. */
+export async function token(page: Page, name: string, prop: "color" | "backgroundColor" = "color"): Promise<string> {
+  return page.evaluate(
+    ([n, p]) => {
+      const probe = document.createElement("span");
+      probe.style[p as "color"] = `var(${n})`;
+      document.body.appendChild(probe);
+      const c = getComputedStyle(probe)[p as "color"];
+      probe.remove();
+      return c;
+    },
+    [name, prop] as const,
+  );
 }

@@ -30,6 +30,8 @@ import { DECISION_ID_RE } from "../../../format/question.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../../../format/question-labels.ts";
 import { laneWords } from "../../../format/lane-roles.ts";
 import { isCalendarDay } from "../../../format/calendar-day.ts";
+import type { AnswerCardsHandle } from "./wiki-answer-cards.ts";
+import type { AnswerWire } from "./wiki-answer-card-model.ts";
 import type { ViewerRoles } from "../../../wiki/render.ts";
 import { revealElement } from "./wiki-hash-target.ts";
 import { localStore } from "./wiki-local-store.ts";
@@ -159,18 +161,23 @@ function readMoves(article: HTMLElement, now: Date): Record<PillKind | "blocked"
 }
 
 /** `07.10` for a day in `now`'s year, `07.10.2025` otherwise. Null for a bad date. */
-export function laneDateText(since: string, now: Date): string | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(since);
-  if (!m || !isCalendarDay(since)) return null;
-  return Number(m[1]) === now.getFullYear() ? `${m[3]}.${m[2]}` : `${m[3]}.${m[2]}.${m[1]}`;
+function laneDateText(since: string, now: Date): string | null {
+  if (!isCalendarDay(since)) return null;
+  const [y, m, d] = since.split("-");
+  return Number(y) === now.getFullYear() ? `${d}.${m}` : `${d}.${m}.${y}`;
 }
 
 /** A lane head's age (D37), in the wiki's language: «stilt 07.10 · 3 d» on a
  *  waiting lane, «siden 07.10 · 3 d» elsewhere, the date alone for a future
  *  day, and `since` as written when it is not a date. */
-export function laneAgeText(kind: string | undefined, since: string, now: Date, lang: QuestionLanguage): string {
+export function laneAgeText(
+  kind: string | undefined,
+  since: string,
+  now: Date,
+  lang: QuestionLanguage,
+  age: number | null = daysSince(since, now),
+): string {
   const date = laneDateText(since, now);
-  const age = daysSince(since, now);
   if (date === null) return since;
   return age === null ? date : laneWords(lang).age(kind === "waiting", date, age);
 }
@@ -186,10 +193,11 @@ function decorateLaneAges(article: HTMLElement, now: Date): void {
   article.querySelectorAll<HTMLElement>(".next-moves .nm-lane[data-since]").forEach((lane) => {
     const since = lane.dataset.since!;
     const age = daysSince(since, now);
-    const words = laneWords(laneLang(lane));
+    const lang = laneLang(lane);
+    const words = laneWords(lang);
     const sinceEl = lane.querySelector<HTMLElement>(":scope > .nm-head > .nm-since");
     if (sinceEl) {
-      sinceEl.textContent = laneAgeText(lane.dataset.kind, since, now, laneLang(lane));
+      sinceEl.textContent = laneAgeText(lane.dataset.kind, since, now, lang, age);
       sinceEl.title = since;
     }
     if (age === null || lane.dataset.kind !== "draft") return;
@@ -253,9 +261,14 @@ export function applyLaneRoles(article: ParentNode, roles: readonly string[]): v
     for (const l of lanes) {
       l.querySelector(`:scope > .nm-head .${LANE_MINE_MARK_CLASS}`)?.remove();
       l.classList.toggle(LANE_MINE_CLASS, mine(l));
-      // D38: «Se og svar ▸» on the viewer's waiting lane.
+      // D38: «Se og svar ▸» on the viewer's waiting lane — only on a lane with
+      // question chips, the server's rule; a waiting lane naming no card keeps
+      // «Se alle ▸».
       const cta = l.querySelector<HTMLElement>(":scope > .nm-head > .nm-cta > .nm-cta-open");
-      if (cta && l.dataset.kind === "waiting") cta.textContent = mine(l) ? words.action.answer : words.action.questions;
+      if (cta && l.dataset.kind === "waiting") {
+        const hasChips = l.querySelector(":scope > .nm-head .nm-qid") !== null;
+        cta.textContent = !hasChips ? words.action.seeAll : mine(l) ? words.action.answer : words.action.questions;
+      }
       if (!mine(l)) continue;
       const mark = document.createElement("span");
       mark.className = LANE_MINE_MARK_CLASS;
@@ -493,42 +506,32 @@ export function enhanceReportBlocks(wrap: ParentNode, opts: ReportBlockOptions =
 
 // ── Lane progress (D38) ──────────────────────────────────────────────────────
 
-/** What the progress reads off the answer client: one entry per answer. */
-export interface LaneProgressAnswer {
-  questionId: string;
-  asked?: boolean | null;
-  redacted?: boolean;
-}
-
 /** The cards that count as answered (D38): at least one live answer from an
- *  author the question asked. An «ikke spurt» answer (`asked: false`) does not
- *  count; a question that names nobody (`asked: null`) has no one left out. */
-export function answeredQuestionIds(answers: readonly LaneProgressAnswer[]): Set<string> {
-  return new Set(answers.filter((a) => !a.redacted && a.asked !== false).map((a) => a.questionId));
+ *  author the question asked (`asked: true`), or on a question that names
+ *  nobody (`asked: null`, sent by the server). An «ikke spurt» answer
+ *  (`asked: false`) does not count, and neither does a just-saved one whose
+ *  `asked` the server has not sent yet (absent, `mergeSavedAnswer`). */
+export function answeredQuestionIds(answers: readonly Pick<AnswerWire, "questionId" | "asked" | "redacted">[]): Set<string> {
+  return new Set(answers.filter((a) => !a.redacted && (a.asked === true || a.asked === null)).map((a) => a.questionId));
 }
 
 /**
- * Fill each waiting lane's progress slot («0 av 4 besvart») from the answer
- * client, and again after every save, edit or redact it reports. Before the
- * first load — or on a wiki that takes no answers (`cards` null) — the peek
- * shows the ids alone.
+ * Fill each live waiting lane's progress slot («0 av 4 besvart») from the
+ * answer client, and again after every save, edit or redact it reports. The
+ * ids are the slot's own chips. A slot in a settled section is left alone, as
+ * `applyLaneRoles` and the pills leave its lanes. Before the first load — or on
+ * a wiki that takes no answers (`cards` null) — the peek shows the ids alone.
  */
-export function bindLaneProgress(
-  article: ParentNode,
-  cards: { answers(): readonly LaneProgressAnswer[]; loaded(): boolean; onChange(cb: () => void): unknown } | null,
-): void {
-  const slots = Array.from(article.querySelectorAll<HTMLElement>(".nm-compact .nm-prog[data-nm-qids]"));
+export function bindLaneProgress(article: ParentNode, cards: Pick<AnswerCardsHandle, "answers" | "loaded" | "onChange"> | null): void {
+  const slots = Array.from(article.querySelectorAll<HTMLElement>(".nm-compact .nm-prog")).filter(
+    (slot) => !slot.closest(SETTLED_SECTION_SELECTOR),
+  );
   if (!cards || slots.length === 0) return;
   const paint = () => {
     if (!cards.loaded()) return;
     const answered = answeredQuestionIds(cards.answers());
     for (const slot of slots) {
-      let ids: string[];
-      try {
-        ids = JSON.parse(slot.dataset.nmQids ?? "[]");
-      } catch {
-        continue;
-      }
+      const ids = Array.from(slot.parentElement?.querySelectorAll(".nm-qid") ?? [], (c) => c.textContent ?? "");
       const n = ids.filter((id) => answered.has(id)).length;
       slot.textContent = `· ${laneWords(laneLang(slot)).progress(n, ids.length)}`;
     }

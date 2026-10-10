@@ -151,8 +151,8 @@ describe("the compact «Oppfølging» block on the reader (D13, D14)", () => {
     expect(html).toContain('<span class="nm-count" data-reader-only>2 oppgaver</span>');
     // D38: a waiting lane naming cards peeks with their ids and a progress slot.
     expect(html).toContain(
-      '<span class="nm-peek nm-peek-q" data-reader-only><span class="nm-qids"><span class="nm-qid">S1</span> <span class="nm-qid">S6</span></span>' +
-        '<span class="nm-prog" data-nm-qids="[&quot;S1&quot;,&quot;S6&quot;]"></span></span>',
+      '<span class="nm-peek nm-peek-q" data-reader-only><span class="nm-qids" title="S1, S6"><span class="nm-qid">S1</span> <span class="nm-qid">S6</span></span>' +
+        '<span class="nm-prog"></span></span>',
     );
     expect(html).toContain('<span class="nm-peek" data-reader-only>Send melding 3 til fag.</span>');
   });
@@ -348,9 +348,9 @@ describe("fix round 1: a lane with no role and no who on a Norwegian wiki", () =
     expect(html).toContain('<span class="nm-who" data-reader-only>Du</span>');
     expect(html).toContain('<span class="nm-who" data-reader-only>Venter</span>');
     expect(html).toContain('<span class="nm-sum">Du: 1 oppgave · Venter: 1 oppgave · 1 blokkert</span>');
-    // The normalised date is not the source text; an ISO one is.
+    // The reader rewrites every dated lane's age, so neither form is source text.
     expect(html).toContain('<span class="nm-since" data-since="2026-10-07" data-reader-only>2026-10-07</span>');
-    expect(html).toContain('<span class="nm-since" data-since="2026-10-01">2026-10-01</span>');
+    expect(html).toContain('<span class="nm-since" data-since="2026-10-01" data-reader-only>2026-10-01</span>');
     expect(reader(md, "en")).toContain('<span class="nm-who" data-reader-only>You</span>');
   });
   test("chat keeps the English default", () => {
@@ -508,11 +508,108 @@ describe("D36–D38: the compact lane head", () => {
   });
   test("each head ends with its action and the hide text", () => {
     const actions = [...html.matchAll(/<span class="nm-cta-open">([^<]*)<\/span><span class="nm-cta-close">([^<]*)<\/span>/g)].map((m) => `${m[1]}/${m[2]}`);
-    expect(actions).toEqual(["Se alle ▸/Skjul ▴", "Se spørsmålene ▸/Skjul ▴", "Se spørsmålene ▸/Skjul ▴", "Se ▸/Skjul ▴"]);
+    // The jus lane names no card: «Se alle ▸», not the questions action.
+    expect(actions).toEqual(["Se alle ▸/Skjul ▴", "Se spørsmålene ▸/Skjul ▴", "Se alle ▸/Skjul ▴", "Se ▸/Skjul ▴"]);
     const en = reader(PAGE, "en");
     expect(en).toContain('<span class="nm-cta-open">See questions ▸</span><span class="nm-cta-close">Hide ▴</span>');
   });
   test("a waiting lane naming no card keeps its lead-sentence peek", () => {
     expect(html).toContain('<span class="nm-peek" data-reader-only>Ingen svar ennå.</span>');
+  });
+});
+
+// ── Fix round 1 (#671 review) ───────────────────────────────────────────────
+
+describe("fix round 1 (#671): moved-card stubs", () => {
+  const stubs = (html: string) =>
+    [...html.matchAll(/<p class="q-moved" data-reader-only><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
+  const fag = (ids: string[]) => nm([lane('kind="waiting" role="fag"', ids.map((id) => `- **${id}** — hva nå?`))]);
+
+  test("a run of cards taken by two blocks splits into one line per block, each with its own arrow", () => {
+    const md = [...fag(["S1"]), "", "Bakgrunn.", "", ...question("S1"), "", ...question("S2"), "", ...fag(["S2"])].join("\n");
+    expect(stubs(reader(md))).toEqual([
+      "nm-q-s1|Spørsmål S1 står under Oppfølging ↑",
+      "nm-q-s2|Spørsmål S2 står under Oppfølging ↓",
+    ]);
+  });
+
+  test("a card written inside the block that takes it points down: in the intro", () => {
+    const md = [
+      "<NextMoves>",
+      "",
+      ...question("S1"),
+      "",
+      ...lane('kind="waiting" role="fag"', ["- **S1** — hva nå?"]),
+      "",
+      "</NextMoves>",
+    ].join("\n");
+    expect(stubs(reader(md))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↓"]);
+  });
+
+  test("a card written inside the block that takes it points down: in a lane above the taking lane", () => {
+    const md = nm([
+      lane('kind="you" role="utvikler"', ["- Gjør noe."], question("S1")),
+      lane('kind="waiting" role="fag"', ["- **S1** — hva nå?"]),
+    ]).join("\n");
+    expect(stubs(reader(md))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↓"]);
+  });
+
+  test("a card taken by block 1 written right after block 2 leaves a stub pointing up", () => {
+    const md = [...fag(["S1"]), "", "Bakgrunn.", "", ...nm([lane('kind="you" role="utvikler"', ["- Gjør noe."])]), "", ...question("S1")].join("\n");
+    expect(stubs(reader(md))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↑"]);
+  });
+
+  test("an HTML comment between the block and its cards is read as a blank line", () => {
+    const md = [...fag(["S1", "S2"]), "", "<!-- kort notat -->", "", ...question("S1"), "", "<!--", "flere linjer", "-->", "", ...question("S2")].join("\n");
+    expect(stubs(reader(md))).toEqual([]);
+  });
+
+  test("an HTML comment inside a run does not split it", () => {
+    const md = [...fag(["S1", "S2"]), "", "Bakgrunn.", "", ...question("S1"), "", "<!-- notat -->", "", ...question("S2")].join("\n");
+    expect(stubs(reader(md))).toEqual(["nm-q-s1|Spørsmål S1 og S2 står under Oppfølging ↑"]);
+  });
+});
+
+describe("fix round 1 (#671): the compact head", () => {
+  const actionsOf = (html: string) => [...html.matchAll(/<span class="nm-cta-open">([^<]*)<\/span>/g)].map((m) => m[1]);
+
+  test("a waiting lane whose items name no card says «Se alle ▸»", () => {
+    const md = [...nm([lane('kind="waiting" role="fag"', ["- Purre fag på brevet."])]), "", ...question("S9")].join("\n");
+    expect(actionsOf(reader(md))).toEqual(["Se alle ▸"]);
+    expect(actionsOf(reader(md, "en"))).toEqual(["See all ▸"]);
+  });
+
+  test("a since the client rewrites is reader-only, whatever form the source wrote it in", () => {
+    const md = nm([lane('kind="you" role="utvikler" since="2026-10-07"', ["- Gjør noe."])]).join("\n");
+    expect(reader(md)).toContain('<span class="nm-since" data-since="2026-10-07" data-reader-only>2026-10-07</span>');
+  });
+
+  test("the chip row carries every id in its title", () => {
+    const ids = ["S2", "S6", "S7", "S8"];
+    const md = [...nm([lane('kind="waiting" role="fag"', ids.map((id) => `- **${id}** — hva nå?`))]), "", ...ids.flatMap((id) => [...question(id), ""])].join("\n");
+    expect(reader(md)).toContain('<span class="nm-qids" title="S2, S6, S7, S8">');
+  });
+
+  test("chips name only ids with one open card: a duplicated or closed id is left out", () => {
+    const md = [
+      ...nm([lane('kind="waiting" role="fag"', ["- **S1** — åpent?", "- **S2** — dobbelt?", "- **S3** — lukket?"])]),
+      "",
+      ...question("S1"),
+      "",
+      ...question("S2"),
+      "",
+      ...question("S2"),
+      "",
+      ...question("S3"),
+      "",
+      "<DecisionLog>",
+      "",
+      "- **D1** — vi gjør A.",
+      "- **S1** — åpent.",
+      "- **S3** — Lukket 2026-10-01 (D1).",
+      "",
+      "</DecisionLog>",
+    ].join("\n");
+    expect(chipsOf(reader(md))).toEqual([["S1"]]);
   });
 });

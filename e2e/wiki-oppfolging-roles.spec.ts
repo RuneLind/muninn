@@ -24,14 +24,14 @@
  * back what it needs.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { paintedContrast } from "./contrast.ts";
+import { paintedContrast, token } from "./contrast.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 import { makePreviewBotsDir, previewRoleEnv, readRoleKeys } from "../scripts/preview-role.ts";
 import { AUTHORED_ROLES, ROLE_PAGE, ROLE_READER_CONFIG, ROLE_REL } from "./oppfolging-fixture.ts";
@@ -232,19 +232,6 @@ const lanes = (page: Page) => page.locator(".wiki-article .nm-compact > .nm-lane
 const laneRoles = (page: Page) => lanes(page).evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.role ?? "-"));
 const marks = (page: Page) =>
   lanes(page).evaluateAll((els) => els.map((e) => e.querySelector(":scope > .nm-head .nm-mine-mark")?.textContent ?? ""));
-/** A token's computed colour, read off a probe on `body` (pin the token, not a literal). */
-const token = (page: Page, name: string, prop: "color" | "backgroundColor" = "color") =>
-  page.evaluate(
-    ([n, p]) => {
-      const probe = document.createElement("span");
-      probe.style[p as "color"] = `var(${n})`;
-      document.body.appendChild(probe);
-      const c = getComputedStyle(probe)[p as "color"];
-      probe.remove();
-      return c;
-    },
-    [name, prop] as const,
-  );
 const pageUrl = (base: string) => `${base}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`;
 const payloadUrl = (base: string) => `${base}/api/wiki/page?wiki=${WIKI}&relPath=${encodeURIComponent(ROLE_REL)}`;
 
@@ -346,7 +333,7 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(lanes(page)).toHaveCount(4);
     await page.mouse.move(0, 0);
     const byRole = (role: string, kind: string) => page.locator(`.wiki-article .nm-lane[data-role="${role}"][data-kind="${kind}"]`);
-    const checks: [string, import("@playwright/test").Locator, string, "color" | "backgroundColor"][] = [
+    const checks: [string, Locator, string, "color" | "backgroundColor"][] = [
       ["waiting label", byRole("fag", "waiting").locator(".nm-who"), "--tone-warn", "color"],
       ["blocked label", byRole("utvikler", "blocked").locator(".nm-who"), "--tone-err", "color"],
       ["you label", byRole("utvikler", "you").locator(".nm-who"), "--accent-light", "color"],
@@ -442,4 +429,54 @@ test("a page whose only role lane is blocked offers no «Se som rolle»", async 
   await expect(page.locator('.wiki-article .nm-lane[data-role="fag"]')).toHaveCount(1);
   await expect(page.locator(".wiki-article-head .wiki-moves-pill-you")).toHaveCount(1);
   await expect(page.locator(".wiki-role-view")).toHaveCount(0);
+});
+
+// ── Fix round 1 (#671 review) ───────────────────────────────────────────────
+
+test("forced colours: a focused lane head keeps a visible outline", async ({ page }) => {
+  await page.emulateMedia({ forcedColors: "active" });
+  await page.goto(pageUrl(OFF_BASE));
+  const head = lanes(page).first().locator(":scope > .nm-head");
+  await expect(head).toBeVisible();
+  await head.focus();
+  expect(await head.evaluate((el) => el.matches(":focus-visible"))).toBe(true);
+  const outline = await head.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { style: s.outlineStyle, width: s.outlineWidth };
+  });
+  expect(outline.style).not.toBe("none");
+  expect(parseFloat(outline.width)).toBeGreaterThanOrEqual(2);
+});
+
+test("the viewer's waiting lane that names no card says «Se alle ▸»", async ({ page }) => {
+  await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(TWO_WAITING_REL)}`);
+  await expect.poll(() => liveRoles(page)).toEqual(["fag", "utvikler"]);
+  const fag = liveLanes(page).first();
+  await expect(fag.locator(".nm-mine-mark")).toHaveText("til deg");
+  await expect(fag.locator(".nm-cta-open")).toHaveText("Se alle ▸");
+  await expect(liveLanes(page).nth(1).locator(".nm-cta-open")).toHaveText("Se alle ▸");
+});
+
+test("at a 1400 px window the chip row shows whole chips only and names every id", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto(`${OFF_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(STUB_REL)}`);
+  const qids = page.locator('.wiki-article .nm-lane[data-role="fag"] .nm-qids');
+  await expect(qids.locator(".nm-qid")).toHaveCount(STUB_IDS.length);
+  const geo = await qids.evaluate((box) => {
+    const b = box.getBoundingClientRect();
+    return {
+      box: { right: b.right, bottom: b.bottom },
+      chips: Array.from(box.querySelectorAll(".nm-qid"), (c) => {
+        const r = c.getBoundingClientRect();
+        return { id: c.textContent, left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+      }),
+    };
+  });
+  // Shown whole (inside the box) or not shown at all (past its bottom edge).
+  const shown = geo.chips.filter((c) => c.top < geo.box.bottom);
+  for (const c of geo.chips) expect(c.right, `${c.id} right edge`).toBeLessThanOrEqual(geo.box.right + 0.5);
+  for (const c of shown) expect(c.bottom, `${c.id} bottom edge`).toBeLessThanOrEqual(geo.box.bottom + 0.5);
+  expect(shown.length, "at least one chip shows").toBeGreaterThan(0);
+  // A chip the row hides is still named on hover.
+  await expect(qids).toHaveAttribute("title", STUB_IDS.join(", "));
 });

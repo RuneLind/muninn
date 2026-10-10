@@ -103,7 +103,8 @@ export function draftChoiceFor(stored: string | null, choices: readonly string[]
  * save before (or without) a reload. A new answer gets a provisional entry;
  * an edit replaces its answer's latest version and moves the old one into the
  * log. `asked` and `authorGroups` are the server's to compute, so a new
- * entry carries none and an edit keeps the previous ones.
+ * entry carries none (`asked` absent: not yet known, which the lane progress
+ * does not count) and an edit keeps the previous ones.
  */
 export function mergeSavedAnswer(answers: readonly AnswerWire[], saved: SavedAnswerWire): AnswerWire[] {
   const version: AnswerVersionWire = {
@@ -119,7 +120,7 @@ export function mergeSavedAnswer(answers: readonly AnswerWire[], saved: SavedAns
   if (i === -1) {
     return [
       ...answers,
-      { ...version, answerId: saved.answerId, questionId: saved.questionId, versionCount: saved.version, firstCreatedAt: saved.createdAt, mine: saved.mine, asked: null, authorGroups: [] },
+      { ...version, answerId: saved.answerId, questionId: saved.questionId, versionCount: saved.version, firstCreatedAt: saved.createdAt, mine: saved.mine, authorGroups: [] },
     ];
   }
   const prev = answers[i]!;

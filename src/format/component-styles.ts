@@ -214,7 +214,11 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .nm-compact .nm-head::-webkit-details-marker { display: none; }
     ${scope} .nm-compact .nm-head:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-    ${scope} .nm-compact .nm-head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-light); }
+    /* The transparent outline is what forced-colours mode paints (it drops
+       box-shadow); elsewhere the inset ring shows. */
+    ${scope} .nm-compact .nm-head:focus-visible {
+      outline: 2px solid transparent; outline-offset: -2px; box-shadow: inset 0 0 0 2px var(--accent-light);
+    }
     ${scope} .nm-compact .nm-lh { grid-column: 1; display: flex; align-items: baseline; gap: 0.45rem; white-space: nowrap; min-width: 0; }
     ${scope} .nm-compact .nm-ico { width: 1.2em; text-align: center; flex: none; }
     ${scope} .nm-compact .nm-lh > .nm-count::before { content: "· " / ""; }
@@ -225,17 +229,24 @@ export function componentBlockCss(scope: string): string {
       font-size: 0.8em; font-weight: 700; padding: 0 0.45rem; border-radius: 5px;
       background: var(--accent-hover); color: #fff;
     }
-    ${scope} .nm-compact .nm-waiting .nm-mine-mark { background: var(--status-warning); color: #14151a; }
+    ${scope} .nm-compact .nm-waiting .nm-mine-mark { background: var(--status-warning); color: var(--on-warning); }
     ${scope} .nm-compact .nm-head > .nm-peek {
       grid-column: 2; color: var(--text-soft); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     ${scope} .nm-compact .nm-qid {
       font-family: var(--mono, ui-monospace, monospace); font-size: 0.9em; font-weight: 700; color: var(--text-primary);
       border: 1px solid var(--border-secondary); border-radius: 6px; padding: 0 0.35rem; background: var(--bg-inset);
+      line-height: 1.35; white-space: nowrap;
     }
-    /* The progress never truncates: the chips give way first. */
-    ${scope} .nm-compact .nm-head > .nm-peek-q { display: flex; align-items: baseline; }
-    ${scope} .nm-compact .nm-qids { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The progress never truncates: the chips give way first, whole. The row is
+       one line high and wraps, so a chip that does not fit moves to a hidden
+       second line instead of showing cut (the row gap exceeds the row's height,
+       so no part of that line peeks in); the row's title names every id. */
+    ${scope} .nm-compact .nm-head > .nm-peek-q { display: flex; align-items: center; }
+    ${scope} .nm-compact .nm-qids {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 2em 0.3rem;
+      min-width: 0; max-height: 1.6em; overflow: hidden;
+    }
     ${scope} .nm-compact .nm-prog { flex: none; margin-left: 0.35rem; font-variant-numeric: tabular-nums; }
     ${scope} .nm-compact .nm-head > .nm-since { grid-column: 3; font-size: 0.92em; white-space: nowrap; }
     ${scope} .nm-compact .nm-cta { grid-column: 4; font-size: 0.95em; color: var(--accent-light); white-space: nowrap; }
@@ -463,8 +474,8 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} a.dl-id:hover { text-decoration: underline; }
     ${scope} .dl-dim, ${scope} .dl-dim .dl-id { color: var(--text-soft); }
-    /* Question: an answer card. The state pill reuses the CaseBoard pill's
-       text-on-tint pairing; muted lines are --text-soft. */
+    /* Question: an answer card. The state pill is primary text on a tint;
+       muted lines are --text-soft. */
     ${scope} .question {
       margin: 1.2rem 0; padding: 0.7rem 1rem; border-radius: 10px; background: var(--bg-surface);
       border: 1px solid var(--border-secondary); border-left: 3px solid var(--accent);

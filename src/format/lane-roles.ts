@@ -75,7 +75,7 @@ interface LaneWords {
   /** The one line a run of moved `<Question>` cards leaves at its authored
    *  place (D39): «Spørsmål S2, S6 og S7 står under Oppfølging ↑». `arrow` is
    *  ↑ when the block sits above the line, ↓ when below. */
-  movedLink: (ids: readonly string[], arrow: string) => string;
+  movedLink: (ids: readonly string[], arrow: "↑" | "↓") => string;
   /** A lane head's age (D37): «stilt 07.10 · 3 d» on a waiting lane, «siden
    *  07.10 · 3 d» elsewhere. */
   age: (waiting: boolean, date: string, days: number) => string;
@@ -118,7 +118,7 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
     blocked: (n) => `${n} blokkert`,
     mine: "deg",
     mineWaiting: "til deg",
-    movedLink: (ids, arrow) => `Spørsmål ${listIds(ids, "og")} står under Oppfølging ${arrow}`,
+    movedLink: (ids, arrow) => `Spørsmål ${listIds(ids, WORDS.no.and)} står under Oppfølging ${arrow}`,
     age: (waiting, date, days) => `${waiting ? "stilt" : "siden"} ${date} · ${days} d`,
     notSent: (days) => `ikke sendt · ${days} d`,
     drafted: (date) => `utkast ${date}`,
@@ -147,7 +147,7 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
     mine: "you",
     mineWaiting: "for you",
     movedLink: (ids, arrow) =>
-      ids.length === 1 ? `Question ${ids[0]} is under Follow-up ${arrow}` : `Questions ${listIds(ids, "and")} are under Follow-up ${arrow}`,
+      ids.length === 1 ? `Question ${ids[0]} is under Follow-up ${arrow}` : `Questions ${listIds(ids, WORDS.en.and)} are under Follow-up ${arrow}`,
     age: (waiting, date, days) => `${waiting ? "asked" : "since"} ${date} · ${days} d`,
     notSent: (days) => `not sent · ${days} d`,
     drafted: (date) => `drafted ${date}`,
