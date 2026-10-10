@@ -9,6 +9,7 @@
  * loaded and so no parse runs.
  */
 import { anchorSlug, formatCount } from "./query-block.ts";
+import { maskSpans, SEGMENT_PROTECTED_RES, splitOutside } from "./report-top.ts";
 
 /** The status vocabulary, in the board's group order. */
 export const CASE_STATUSES = ["hold", "wait", "wrong", "none", "ok"] as const;
@@ -245,28 +246,55 @@ export function groupCases(cases: BoardCase[]): { status: CaseStatus | "unknown"
 
 // ── Overview's compact line and the labels attribute (D42) ─────────────────
 
-/** The note's head: the text before its first « · »; empty when it has none. */
+/** Emphasis a « · » inside is no head separator: `**…**`, `__…__`, `*…*`, `_…_`. */
+const EMPHASIS_RES: readonly RegExp[] = [
+  /\*\*(?!\s)[^*\n]+?\*\*/g,
+  /__(?!\s)[^_\n]+?__/g,
+  /(?<![*\p{L}\p{N}])\*(?![\s*])[^*\n]+?\*/gu,
+  /(?<![_\p{L}\p{N}])_(?![\s_])[^_\n]+?_/gu,
+];
+/** Everything a head separator may not sit inside: StatusRows' set (code
+ *  spans, wikilinks, links, tags) and emphasis. */
+const HEAD_PROTECTED_RES: readonly RegExp[] = [...SEGMENT_PROTECTED_RES, ...EMPHASIS_RES];
+
+/** The note's head: the text before its first « · » outside inline markup;
+ *  empty when it has none. */
 export function caseNoteHead(note: string): string {
-  const i = note.indexOf(" · ");
-  return i > 0 ? note.slice(0, i).trim() : "";
+  const segs = splitOutside(note, HEAD_PROTECTED_RES);
+  return segs.length > 1 ? segs[0]!.trim() : "";
 }
 
-/** The compact line's summary: `kort:`, else the note's first `**bold**` span,
- *  else empty. */
+/** The compact line's summary: `kort:`, else the note's first `**bold**` span
+ *  after the head and outside code spans, else empty. */
 export function caseKort(c: Pick<BoardCase, "kort" | "note">): string {
   if (c.kort) return c.kort;
-  const m = /\*\*(?!\s)([^*\n]+?)\*\*/.exec(c.note);
-  return m ? m[1]!.trim() : "";
+  const segs = splitOutside(c.note, HEAD_PROTECTED_RES);
+  const from = segs.length > 1 ? segs[0]!.length : 0;
+  // Code spans masked to the same length, so offsets read the note itself.
+  const masked = maskSpans(c.note, SEGMENT_PROTECTED_RES.slice(0, 1));
+  const bold = /\*\*(?!\s)([^*\n]+?)\*\*/g;
+  for (let m = bold.exec(masked); m; m = bold.exec(masked)) {
+    if (m.index >= from) return c.note.slice(m.index + 2, m.index + m[0].length - 2).trim();
+  }
+  return "";
 }
 
 export type CaseLabels = Partial<Record<CaseStatus, string>>;
 
 /** `labels="hold:holdt ute,wait:venter"` read into status → label. A key that
  *  is not a case status, or an entry with no `:` or an empty side, is kept in
- *  `bad` (the linter names it) and ignored. Keys are case-folded. */
-export function parseCaseLabels(raw: string | undefined): { labels: CaseLabels; bad: string[] } {
+ *  `bad` (the linter names it) and ignored. Keys are case-folded; a key given
+ *  twice keeps its last label and is listed in `duplicates`. */
+export function parseCaseLabels(raw: string | undefined): {
+  labels: CaseLabels;
+  bad: string[];
+  /** Keys given more than once, each with the label that applies (the last). */
+  duplicates: { key: CaseStatus; label: string }[];
+} {
   const labels: CaseLabels = {};
   const bad: string[] = [];
+  const seen = new Set<CaseStatus>();
+  const repeated = new Set<CaseStatus>();
   for (const entry of (raw ?? "").split(",")) {
     const e = entry.trim();
     if (!e) continue;
@@ -277,9 +305,12 @@ export function parseCaseLabels(raw: string | undefined): { labels: CaseLabels; 
       bad.push(e);
       continue;
     }
-    labels[key as CaseStatus] = label;
+    const status = key as CaseStatus;
+    if (seen.has(status)) repeated.add(status);
+    seen.add(status);
+    labels[status] = label;
   }
-  return { labels, bad };
+  return { labels, bad, duplicates: [...repeated].map((key) => ({ key, label: labels[key]! })) };
 }
 
 /** A status as the board shows it: its label, else the status itself. */

@@ -67,8 +67,8 @@
  *                      declares `roleKeys`, since elsewhere it is a name.
  * 13. case-board-labels — a `<CaseBoard labels=>` entry whose key is not a
  *                      case status (`hold`, `wait`, `wrong`, `none`, `ok`), or
- *                      that has no `key:label` shape; the board ignores it
- *                      and shows the status (D42).
+ *                      that has no `key:label` shape (the board ignores it
+ *                      and shows the status), and a key given twice (D42).
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -879,13 +879,16 @@ function checkCaseBoardLabels(page: WikiPageMeta, rawContent: string): LintFindi
       if (b.type !== "component") continue;
       if (b.name === "CaseBoard" && b.attrs.labels !== undefined) {
         const line = b.line === undefined ? undefined : bodyAt + b.line + 1;
-        for (const entry of parseCaseLabels(b.attrs.labels).bad) {
-          findings.push({
-            check: "case-board-labels",
-            relPath: page.relPath,
-            message: `<CaseBoard labels=> entry "${entry}" is not status:label with a status of ${CASE_STATUSES.join(", ")}; the board shows the status unlabelled`,
-            ...(line ? { line } : {}),
-          });
+        const { bad, duplicates } = parseCaseLabels(b.attrs.labels);
+        const messages = [
+          ...bad.map(
+            (entry) =>
+              `<CaseBoard labels=> entry "${entry}" is not status:label with a status of ${CASE_STATUSES.join(", ")}; the board shows the status unlabelled`,
+          ),
+          ...duplicates.map((d) => `<CaseBoard labels=> key "${d.key}" is given more than once; the last label, "${d.label}", applies`),
+        ];
+        for (const message of messages) {
+          findings.push({ check: "case-board-labels", relPath: page.relPath, message, ...(line ? { line } : {}) });
         }
       }
       walk(b.children);

@@ -290,13 +290,14 @@ export const E2E_PORTS = {
   // The top of a report page (reader lenses PR 2): <More>, <StatusRows> and
   // a DecisionLog item's first sentence in Overview.
   "wiki-readable-top": 3140,
-  "wiki-compact-lists": 3144,
   // The «Oppfølging» block's viewer roles (reader lenses PR 3, D30) with auth
   // off (owner in a group) and in local mode (no role).
   "wiki-oppfolging-roles": 3141,
   "wiki-oppfolging-roles/local": 3142,
   // `bun run preview:role`'s env (`MUNINN_LOCAL_IDENT` in a group).
   "wiki-oppfolging-roles/preview": 3143,
+  // Overview's compact DecisionLog and CaseBoard rows (reader lenses PR 10, D41, D42).
+  "wiki-compact-lists": 3144,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

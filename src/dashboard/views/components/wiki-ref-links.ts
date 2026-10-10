@@ -27,7 +27,18 @@
  */
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
-import { CB_MORE_CLASS, CB_OKMORE_CLASS, DL_ALL_CLASS, DL_MORE_CLASS, DL_QSTATE_CLASS, idPrefix, READER_ONLY_ATTR, type IdLabels } from "../../../format/reader-lens.ts";
+import {
+  CB_LINE_CLASS,
+  CB_MORE_CLASS,
+  CB_OKMORE_CLASS,
+  DL_ALL_CLASS,
+  DL_MORE_CLASS,
+  DL_QSTATE_CLASS,
+  DL_WHEN_CLASS,
+  idPrefix,
+  READER_ONLY_ATTR,
+  type IdLabels,
+} from "../../../format/reader-lens.ts";
 
 /** The noun before an id (D12): the server puts it before a DecisionLog or
  *  Query chip, the ref links before an id run in prose. */
@@ -311,7 +322,7 @@ function cloneBare<T extends Node>(n: T): T {
     // The reader's lens controls and Overview's compact parts (D6, D41, D42):
     // a peek shows its target whole, as written.
     c.querySelectorAll(
-      `.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .dl-when, .cb-line`,
+      `.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${DL_WHEN_CLASS}, .${CB_LINE_CLASS}`,
     ).forEach((b) => b.remove());
     for (const x of [c, ...Array.from(c.querySelectorAll("[id], .wiki-hash-flash, iframe, input"))]) {
       x.removeAttribute("id");

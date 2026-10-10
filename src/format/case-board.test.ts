@@ -403,7 +403,7 @@ describe("compact line and labels (D42)", () => {
     const { labels, bad } = parseCaseLabels("hold:holdt ute, WAIT : venter,wrong:feil årsavregning,none:ikke kandidat,bogus:x,ok,:tom,ok:");
     expect(labels).toEqual({ hold: "holdt ute", wait: "venter", wrong: "feil årsavregning", none: "ikke kandidat" });
     expect(bad).toEqual(["bogus:x", "ok", ":tom", "ok:"]);
-    expect(parseCaseLabels(undefined)).toEqual({ labels: {}, bad: [] });
+    expect(parseCaseLabels(undefined)).toEqual({ labels: {}, bad: [], duplicates: [] });
     expect(caseStatusLabel("hold", labels)).toBe("holdt ute");
     expect(caseStatusLabel("ok", labels)).toBe("ok");
     expect(caseStatusLabel("unknown", labels)).toBe("unknown");
@@ -431,12 +431,56 @@ describe("compact line and labels (D42)", () => {
     }
   });
 
-  test("the reader adds the compact line beside the row; chat does not", () => {
+  test("the reader adds the compact line before the note; chat does not", () => {
     const html = render("", true);
     expect(html).toContain(
-      '<span class="cb-line" data-reader-only><span class="cb-head">Person 1, 2025</span><span class="cb-sep"> · </span><span class="cb-kort">Holdt ute av lista (D7).</span></span></div>',
+      '<span class="cb-line" data-reader-only><span class="cb-head">Person 1, 2025</span><span class="cb-sep"> · </span><span class="cb-kort">Holdt ute av lista (D7).</span></span><span class="cb-note">',
     );
     expect(html).toContain('<span class="cb-line" data-reader-only><span class="cb-head">2024</span><span class="cb-sep"> · </span><span class="cb-kort">På lista.</span></span>');
     expect(render("", false)).not.toContain("cb-line");
+  });
+});
+
+describe("fix round 1: the compact line (D42)", () => {
+  // Item 12: « · » inside inline markup is no head separator.
+  const heads: [string, string][] = [
+    ["`a · b` fordi", ""],
+    ["**a · b** tekst", ""],
+    ["[lenke · x](u) · rest", "[lenke · x](u)"],
+    ["_a · b_ tekst · rest", "_a · b_ tekst"],
+    ["Person 1, 2025 · Vedtak", "Person 1, 2025"],
+  ];
+  test.each(heads)("item 12: head of %p is %p", (note, want) => {
+    expect(caseNoteHead(note)).toBe(want);
+  });
+
+  // Item 13: the bold fallback skips a span inside the head, and bold inside code.
+  const korts: [string, string][] = [
+    ["**Person 1**, 2025 · **Holdt ute** (D7)", "Holdt ute"],
+    ["**Person 1** · ingen fet her", ""],
+    ["2025 · `**ikke fet**` · **fet**", "fet"],
+    ["`a **x** b` ingen skille", ""],
+  ];
+  test.each(korts)("item 13: kort of note %p is %p", (note, want) => {
+    expect(caseKort({ kort: "", note })).toBe(want);
+  });
+
+  test("item 14: a case with neither head nor kort gets no compact line", () => {
+    const yaml = '- id: A\n  status: wrong\n  note: "Ingen skilletegn og ingen fet tekst"\n';
+    const html = formatWebHtml('<CaseBoard src="c.yaml" />', { reader: true, files: files({ "c.yaml": { ok: true, text: yaml } }) });
+    expect(html).not.toContain("cb-line");
+  });
+
+  test("item 1: the compact line comes before the full note in the DOM", () => {
+    const yaml = '- id: A\n  status: hold\n  note: "Person 1 · **Holdt ute**"\n';
+    const html = formatWebHtml('<CaseBoard src="c.yaml" />', { reader: true, files: files({ "c.yaml": { ok: true, text: yaml } }) });
+    expect(html.indexOf('class="cb-line"')).toBeLessThan(html.indexOf('class="cb-note"'));
+    expect(html.indexOf('class="cb-line"')).toBeGreaterThan(html.indexOf('class="cb-pill'));
+  });
+
+  test("cleanup: each group carries its label for the reader's hidden-cases line", () => {
+    const yaml = "- {id: A, status: none}\n";
+    const html = formatWebHtml('<CaseBoard src="c.yaml" labels="none:ikke kandidat" />', { reader: true, files: files({ "c.yaml": { ok: true, text: yaml } }) });
+    expect(html).toContain('<div class="cb-group" data-status="none" data-label="ikke kandidat">');
   });
 });

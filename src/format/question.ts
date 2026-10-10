@@ -26,7 +26,7 @@ import type { AuthMode } from "../auth/mode.ts";
 import { stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { maskLineCodeSpans } from "./code-spans.ts";
-import { isCalendarDay } from "./calendar-day.ts";
+import { isCalendarDay, isDayFirstDate } from "./calendar-day.ts";
 import { QUESTION_LABELS, type QuestionLanguage } from "./question-labels.ts";
 
 /** The fixed extra choice every card offers beside its parsed `choices`. */
@@ -435,9 +435,7 @@ const QUESTION_ID_RE = /^[SO]\d{1,4}$/;
 /** A date the calendar has: `YYYY-MM-DD`, or `D.M[.YYYY]` checked against a
  *  leap year when it carries no year. */
 function isCloseDate(d: string): boolean {
-  const dm = /^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$/.exec(d);
-  if (!dm) return isCalendarDay(d);
-  return isCalendarDay(`${dm[3] ?? "2024"}-${dm[2]!.padStart(2, "0")}-${dm[1]!.padStart(2, "0")}`);
+  return isDayFirstDate(d) || isCalendarDay(d);
 }
 
 /** The item text in NFC with every inline code span blanked to line breaks

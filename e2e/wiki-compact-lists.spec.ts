@@ -2,16 +2,22 @@
  * Overview's compact DecisionLog and CaseBoard (reader lenses PR 10, D41, D42,
  * acceptance 11).
  *
- * What only a real page can answer: that Overview's CSS puts the newest
- * decision first and hides all but five while the DOM keeps authored order,
- * that the date cell sits in its own column and the tail leaves the text, that
+ * What only a real page can answer: that Overview moves the newest decision
+ * first in the DOM — so a mouse selection and Tab follow the screen, and a
+ * question between decisions keeps its place — and hides all but five (not one
+ * holding a fact-check mark), that the date cell sits right of the text and
+ * under it at 650 px, that the tail leaves the text, that
  * a `#d1` load or an id link into a hidden older decision shows the list, that
  * a case row reads as its compact line with the board's labels and «mer»
  * opens the note, that the `ok` group shows one row and «+ N til», that both
  * folds open in Overview and a closed one opens again on reload (not stored),
- * and that All renders every item as written.
+ * while a fold whose block Overview hides and a click on the lens already
+ * shown open none, that a #case hash opens its row, that a reveal in All does
+ * not carry into Overview, that a fold's size leaves out the reader's own
+ * text, and that All renders every item as written.
  *
- * One Norwegian wiki, instance default Overview. Synthetic fixtures.
+ * One Norwegian wiki with `idLabels`, instance default Overview, two pages.
+ * Synthetic fixtures.
  *
  * No model calls, no DB rows. ENV / SPAWN ENV: no `.env` is required — the
  * spawn inherits `DATABASE_URL` and `e2eEnv()` blanks the platform tokens and
@@ -35,6 +41,8 @@ const REL = "plans/compact.mdx";
 const DECISIONS = [1, 2, 3, 4, 5, 6, 7].map(
   (n) => `- **D${n}** — Beslutning nummer ${n} gjelder alle saker. Begrunnelse ${n}. Fag, 0${n}.10 (runde ${n}).`,
 );
+// A question between decisions keeps its place when Overview reverses them.
+DECISIONS.splice(3, 0, "- **S0** — Et spørsmål mellom beslutningene? Spurt fag 03.10.");
 
 const PAGE = [
   "---",
@@ -96,6 +104,63 @@ const CASES = [
   "",
 ].join("\n");
 
+// Fix round 1: a fact-check mark in an older decision (item 7), a fold whose
+// log Overview hides (item 9), a board with only `none` cases (item 9), and a
+// fold whose size must leave out the reader's own text (item 19).
+const MARKS_REL = "plans/marks.mdx";
+const MARKS_PAGE = [
+  "---",
+  "title: Marks page",
+  "type: plan",
+  "---",
+  "",
+  "# Marks page",
+  "",
+  "<DecisionLog>",
+  "",
+  ...[1, 2, 3, 4, 5, 6, 7].map((n) =>
+    n === 1
+      ? '- **D1** — Beslutning nummer 1 gjelder <Fact n="1" v="bad">alle saker i 2023</Fact>. Fag, 01.10 (runde 1).'
+      : `- **D${n}** — Beslutning nummer ${n} gjelder alle saker. Fag, 0${n}.10 (runde ${n}).`,
+  ),
+  "",
+  "</DecisionLog>",
+  "",
+  '<Fold title="Ytre">',
+  "",
+  "Tekst i den ytre folden.",
+  "",
+  '<Fold title="Utvikler" for="dev">',
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D31** — En beslutning for utviklere gjelder her. Fag, 01.10 (runde 1).",
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
+  "",
+  "</Fold>",
+  "",
+  '<Fold title="Ikke kandidater">',
+  "",
+  '<CaseBoard src="none.yaml" />',
+  "",
+  "</Fold>",
+  "",
+  '<Fold title="Liten">',
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D21** — Kort beslutning her. Fag, 01.10 (runde 1).",
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+const NONE_CASES = '- id: MEL-9\n  status: none\n  note: "Ikke kandidat"\n';
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -114,9 +179,9 @@ function watch(page: Page): { failed: string[]; errors: string[] } {
   return { failed, errors };
 }
 
-const open_ = async (page: Page, query = "", hash = "") => {
+const open_ = async (page: Page, query = "", hash = "", rel = REL) => {
   const seen = watch(page);
-  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}${query}${hash}`);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}${query}${hash}`);
   await expect(page.locator(".wiki-article")).toBeVisible();
   return seen;
 };
@@ -148,7 +213,13 @@ test.beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
   await writeFile(path.join(root, "plans", "cases.yaml"), CASES, "utf8");
-  await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
+  await writeFile(path.join(root, MARKS_REL), MARKS_PAGE, "utf8");
+  await writeFile(path.join(root, "plans", "none.yaml"), NONE_CASES, "utf8");
+  await writeFile(
+    path.join(root, ".wiki-reader.json"),
+    JSON.stringify({ language: "no", idLabels: { D: { one: "Beslutning", other: "beslutninger" } } }),
+    "utf8",
+  );
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -244,7 +315,8 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     const hold = page.locator(".cb-row#case-mel-1");
     await expect(hold.locator(".cb-pill")).toHaveText("holdt ute");
     await expect(hold.locator(".cb-line .cb-head")).toHaveText("Person 1, 2025");
-    await expect(hold.locator(".cb-line .cb-kort")).toHaveText("Holdt ute av 2025-lista (D7).");
+    // The ref links name the decision in the line, as in any prose (D12).
+    await expect(hold.locator(".cb-line .cb-kort")).toHaveText("Holdt ute av 2025-lista (Beslutning D7).");
     await expect(hold.locator(".cb-note")).toBeHidden();
     await expect(hold.locator(".cb-refs")).toBeHidden();
     const more = hold.locator("button.cb-more");
@@ -258,7 +330,10 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(page.locator(".cb-row#case-mel-2 .cb-pill")).toHaveText("venter");
     await expect(page.locator(".cb-row#case-mel-2 .cb-kort")).toHaveText("Blokkert til oppgave 3 er i prod.");
     await expect(page.locator(".cb-row#case-mel-3 .cb-pill")).toHaveText("feil årsavregning");
-    await expect(page.locator(".cb-row#case-mel-3 .cb-line")).toHaveText("mer");
+    // Item 14: neither head nor kort — no compact line, and the note shows.
+    await expect(page.locator(".cb-row#case-mel-3 .cb-line")).toHaveCount(0);
+    await expect(page.locator(".cb-row#case-mel-3 .cb-note")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-3 button.cb-more")).toHaveCount(0);
 
     // `none` stays hidden with its count line, in the board's own word.
     await expect(page.locator('.cb-group[data-status="none"]')).toBeHidden();
@@ -315,6 +390,138 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(fold(page, "Saker")).not.toHaveAttribute("open", /.*/);
     await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
     await expect(fold(page, "Saker")).toHaveAttribute("open", "");
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 1: the DOM follows the screen — selection, Tab, a question kept in place", async ({ page }) => {
+    const seen = await open_(page);
+    // The question between D3 and D4 keeps its slot; the decisions around it reverse.
+    const listOrder = await page
+      .locator(".wiki-article section.decision-log > .dl-list > li")
+      .evaluateAll((els) => els.map((e) => e.id));
+    expect(listOrder).toEqual(["d7", "d6", "d5", "s0", "d4", "d3", "d2", "d1", "s1"]);
+
+    // A mouse selection from D7 down to D6 reads D7 first.
+    const [a, b] = await Promise.all([
+      page.locator("li.dl-item#d7 .dl-first").boundingBox(),
+      page.locator("li.dl-item#d6 .dl-first").boundingBox(),
+    ]);
+    await page.mouse.move(a!.x + 2, a!.y + a!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b!.x + b!.width - 2, b!.y + b!.height / 2, { steps: 8 });
+    await page.mouse.up();
+    const sel = await page.evaluate(() => window.getSelection()?.toString() ?? "");
+    expect(sel).toContain("nummer 7");
+    expect(sel).toContain("nummer 6");
+    expect(sel.indexOf("nummer 7")).toBeLessThan(sel.indexOf("nummer 6"));
+
+    // Tab walks the rows in the order they are drawn.
+    await page.locator("li.dl-item#d7 a.dl-id").focus();
+    const rows: string[] = [];
+    for (let k = 0; k < 24; k++) {
+      const id = await page.evaluate(() => document.activeElement?.closest("li.dl-item")?.id ?? "");
+      if (id && rows[rows.length - 1] !== id) rows.push(id);
+      await page.keyboard.press("Tab");
+    }
+    expect(rows.slice(0, 7)).toEqual(["d7", "d6", "d5", "s0", "d4", "d3", "s1"]);
+
+    // «Vis alle» sits after the log, and All gets the authored order back.
+    expect(await page.locator("section.decision-log > :last-child").evaluate((el) => el.className)).toBe("dl-all");
+    await page.locator(".wiki-lens-switch button[data-lens='all']").click();
+    expect(await page.locator(".wiki-article section.decision-log > .dl-list > li").evaluateAll((els) => els.map((e) => e.id))).toEqual([
+      "d1", "d2", "d3", "s0", "d4", "d5", "d6", "d7", "s1",
+    ]);
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 3: a compact decision row keeps its «Beslutning» noun", async ({ page }) => {
+    const seen = await open_(page);
+    const noun = page.locator("li.dl-item#d7 > .id-noun");
+    await expect(noun).toBeVisible();
+    await expect(noun).toHaveText("Beslutning");
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 5: at 650 px the date cell drops under the text, which keeps the row", async ({ page }) => {
+    await page.setViewportSize({ width: 650, height: 900 });
+    const seen = await open_(page);
+    const row = page.locator("li.dl-item#d7");
+    const [r, t, w] = await Promise.all([row.boundingBox(), row.locator(".dl-text").boundingBox(), row.locator(".dl-when").boundingBox()]);
+    expect(t!.width).toBeGreaterThanOrEqual(0.6 * r!.width);
+    expect(w!.y).toBeGreaterThan(t!.y);
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 6: «7 beslutninger» lands on the newest decision and keeps the five-cap", async ({ page }) => {
+    const seen = await open_(page);
+    await page.locator(".wiki-article").evaluate((el) => el.closest("#articleWrap")!.scrollTo(0, 99999));
+    await page.locator(".wiki-count-pill-decisions").click();
+    await expect(page.locator("li.dl-item#d7")).toBeInViewport();
+    await expect(page.locator("li.dl-item#d1")).toBeHidden();
+    await expect(page.locator(".wiki-article button.dl-all")).toHaveText("Vis alle 7 beslutninger");
+    expect(await lensOf(page)).toBe("overview");
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 7: an older decision holding a fact-check mark is not folded away", async ({ page }) => {
+    const seen = await open_(page, "", "", MARKS_REL);
+    expect((await visibleDecisionOrder(page)).slice(0, 6)).toEqual(["d7", "d6", "d5", "d4", "d3", "d1"]);
+    await expect(page.locator("li.dl-item#d2")).toBeHidden();
+    await expect(page.locator("li.dl-item#d1 .fc-mark")).toBeVisible();
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 8: in All the ok group's rows keep their dashed rule", async ({ page }) => {
+    const seen = await open_(page, "&lens=all");
+    await fold(page, "Saker").locator(":scope > summary").click();
+    expect(await page.locator(".cb-row#case-mel-5").evaluate((el) => getComputedStyle(el).borderTopStyle)).toBe("dashed");
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 9: Overview opens no fold for a block it hides", async ({ page }) => {
+    const seen = await open_(page, "", "", MARKS_REL);
+    await expect(fold(page, "Liten")).toHaveAttribute("open", "");
+    await expect(fold(page, "Ytre")).not.toHaveAttribute("open", /.*/);
+    await expect(fold(page, "Ikke kandidater")).not.toHaveAttribute("open", /.*/);
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 9: a click on Overview while in Overview opens no fold", async ({ page }) => {
+    const seen = await open_(page);
+    await fold(page, "Saker").locator(":scope > summary").click();
+    await expect(fold(page, "Saker")).not.toHaveAttribute("open", /.*/);
+    await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
+    await expect(fold(page, "Saker")).not.toHaveAttribute("open", /.*/);
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 10: a #case hash opens the row's «mer», and reveals a folded ok row", async ({ page }) => {
+    let seen = await open_(page, "", "#case-mel-1");
+    await expect(page.locator(".cb-row#case-mel-1 .cb-note")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-1 button.cb-more")).toHaveText("mindre");
+    expect(await lensOf(page)).toBe("overview");
+    expectClean(seen);
+
+    seen = await open_(page, "", "#case-mel-5");
+    await expect(page.locator(".cb-row#case-mel-5")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-5 .cb-note")).toBeVisible();
+    expect(await lensOf(page)).toBe("overview");
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 11: a reveal in All does not carry «show all» into Overview", async ({ page }) => {
+    const seen = await open_(page, "&lens=all", "#d1");
+    await expect(page.locator("li.dl-item#d1")).toBeVisible();
+    await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
+    await expect(page.locator("li.dl-item#d1")).toBeHidden();
+    await expect(page.locator(".wiki-article button.dl-all")).toHaveText("Vis alle 7 beslutninger");
+    expectClean(seen);
+  });
+
+  test("fix round 1, item 19: a fold's size leaves out the reader's own text", async ({ page }) => {
+    const seen = await open_(page, "", "", MARKS_REL);
+    const written = "D21Kort beslutning her. Fag, 01.10 (runde 1).".length;
+    await expect(fold(page, "Liten").locator(":scope > summary .fold-size")).toHaveText(`${written} tegn · <1 min`);
     expectClean(seen);
   });
 });

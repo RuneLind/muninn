@@ -122,11 +122,22 @@ export const MORE_WORDS: Record<QuestionLanguage, { more: string; less: string; 
 /** The class on that badge. */
 export const DL_QSTATE_CLASS = "dl-qstate";
 
-/** Overview's compact DecisionLog and CaseBoard (D41, D42): the controls the
- *  reader adds, and their words. */
+/** Overview's compact DecisionLog and CaseBoard (D41, D42). The renderer's
+ *  marks: a decision item, its date cell and the tail the cell replaces, and a
+ *  case row's compact line. */
+export const DL_DECISION_CLASS = "dl-decision";
+export const DL_WHEN_CLASS = "dl-when";
+export const DL_TAIL_CLASS = "dl-tail";
+export const CB_LINE_CLASS = "cb-line";
+/** The controls the reader adds, the class on a case row whose note Overview
+ *  shows, and the controls' words. */
 export const DL_ALL_CLASS = "dl-all";
 export const CB_MORE_CLASS = "cb-more";
 export const CB_OKMORE_CLASS = "cb-okmore";
+export const CB_EXPANDED_CLASS = "cb-expanded";
+/** The class an article carries in Overview (`lens-` plus the lens). */
+export const LENS_CLASS_PREFIX = "lens-";
+export const OVERVIEW_LENS_CLASS = `${LENS_CLASS_PREFIX}overview`;
 /** Decisions Overview shows before «Vis alle». */
 export const DL_COMPACT_SHOWN = 5;
 export const COMPACT_WORDS: Record<
@@ -137,7 +148,6 @@ export const COMPACT_WORDS: Record<
     okMore: (n: number) => string;
     okFewer: string;
     hidden: (n: number, label: string) => string;
-    round: string;
   }
 > = {
   en: {
@@ -146,7 +156,6 @@ export const COMPACT_WORDS: Record<
     okMore: (n) => `+ ${n} more`,
     okFewer: "show fewer",
     hidden: (n, label) => `${n} ${n === 1 ? "case" : "cases"} with status “${label}” hidden`,
-    round: "round",
   },
   no: {
     showAll: (n) => `Vis alle ${n} beslutninger`,
@@ -154,7 +163,6 @@ export const COMPACT_WORDS: Record<
     okMore: (n) => `+ ${n} til`,
     okFewer: "vis færre",
     hidden: (n, label) => `${n} ${n === 1 ? "sak" : "saker"} med status «${label}» er skjult`,
-    round: "runde",
   },
 };
 

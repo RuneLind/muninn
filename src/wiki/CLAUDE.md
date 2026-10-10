@@ -1684,9 +1684,10 @@ Two warnings on every page, report-only: `decision-first-sentence` (an id-led,
 undimmed `<DecisionLog>` item whose first sentence, the text the Overview lens
 shows, is over 160 visible chars: links count their text, code its content) and
 `status-row-long` (a `<StatusRows>` row over 160 chars as written, the same
-measure as mimir lint check 13). Both read the page through `parseBlocks`; the first sentence is the reader's
-own guarded split (`decisionFirstSentence` in `src/web/web-format.ts`), so the
-finding and the reader agree on where a sentence ends. Measured 2026-10-09
+measure as mimir's brief-shape check, `scripts/plan-status/brief-shape.ts`). Both read the page through `parseBlocks`; the first sentence is the reader's
+own guarded split (`decisionFirstSentence` in `src/web/web-format.ts`, which
+skips a first sentence struck end to end, as the row does), so the finding and
+the reader agree on where a sentence ends. Measured 2026-10-09
 (fix round 1): `decision-first-sentence` fires on
 31 items on 10 mimir pages and 11 on 7 kode-wiki pages;
 `status-row-long` on none (no page carries `<StatusRows>` yet). Acceptance:
@@ -1717,10 +1718,10 @@ the laptop and the pod. Acceptance: `role-key-lint.test.ts`.
 
 A `<CaseBoard labels=>` entry the board cannot use (D42): a key that is not a
 case status (`hold`, `wait`, `wrong`, `none`, `ok`), or an entry with no
-`key:label` shape. The board ignores it and shows the status unlabelled. Read
-through `parseBlocks` and the renderer's own `parseCaseLabels`, so a tag in a
-fence counts as nothing; the line is the board's tag line. Acceptance: the
-`case-board-labels` cases in `role-key-lint.test.ts`.
+`key:label` shape — the board ignores it and shows the status unlabelled — and
+a key given twice, where the last label applies. Read through `parseBlocks` and
+the renderer's own `parseCaseLabels`, so a tag in a fence counts as nothing;
+the line is the board's tag line. Acceptance: `case-board-lint.test.ts`.
 
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 

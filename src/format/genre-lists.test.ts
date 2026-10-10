@@ -692,8 +692,8 @@ describe("DecisionLog date tail (D41)", () => {
     if (w) expect(text.slice(0, w.start).trim()).toBe(rest);
   });
 
-  test("the label takes the round word", () => {
-    expect(decisionWhenLabel(parseDecisionWhen("X. Fag, 01.02 (runde 3).")!, "round")).toBe("Fag, 01.02 · round 3");
+  test("the label keeps the round word as written", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("X. Fag, 01.02 (runde 3).")!)).toBe("Fag, 01.02 · runde 3");
   });
 
   test("a pointer after the tail stays in the text", () => {
@@ -737,5 +737,66 @@ describe("DecisionLog date tail (D41)", () => {
     const html = formatWebHtml(log(["- **D3** — Ingen dato her."]), { reader: true });
     expect(html).toContain('class="dl-item dl-decision"');
     expect(html).not.toContain("dl-when");
+  });
+});
+
+describe("fix round 1: the D41 date tail and an overturned first sentence", () => {
+  const log = (items: string[]) => ["<DecisionLog>", "", ...items, "", "</DecisionLog>"].join("\n");
+
+  test("item 15: «Satsen er 3. Se kapittel 4, 3.2.» is no date tail: who carries no digit", () => {
+    expect(parseDecisionWhen("Satsen er 3. Se kapittel 4, 3.2.")).toBeNull();
+    // who is one to three words.
+    expect(parseDecisionWhen("Regel. En to tre fire, 01.02.")).toBeNull();
+    expect(decisionWhenLabel(parseDecisionWhen("Regel. Fag og jus, 01.02.")!)).toBe("Fag og jus, 01.02");
+  });
+
+  test("item 15: the round word is case-insensitive", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("Regelen gjelder alle. Fag, 07.10 (Runde 6).")!)).toBe("Fag, 07.10 · Runde 6");
+    expect(decisionWhenLabel(parseDecisionWhen("The rule holds for all. Team, 07.10 (ROUND 2).")!)).toBe("Team, 07.10 · ROUND 2");
+  });
+
+  test("item 16: the date cell keeps the authored round word", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("The rule holds for all. Team, 07.10 (round 3).")!)).toBe("Team, 07.10 · round 3");
+    const html = formatWebHtml(log(["- **D1** — The rule holds for all cases. Team, 07.10 (round 3)."]), { reader: true, language: "no" });
+    expect(html).toContain('<span class="dl-when" data-reader-only>Team, 07.10 · round 3</span>');
+  });
+
+  test("item 17: a yearless 29.02 is a calendar day (checked against a leap year)", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("Regelen gjelder alle. Fag, 29.02 (runde 1).")!)).toBe("Fag, 29.02 · runde 1");
+    expect(parseDecisionWhen("Regelen gjelder alle. Fag, 29.02.2025 (runde 1).")).toBeNull();
+  });
+
+  test("item 1: the date cell follows the text in the DOM", () => {
+    const html = formatWebHtml(log(["- **D1** — Regelen gjelder alle saker. Fag, 28.09 (runde 1)."]), { reader: true });
+    expect(html.indexOf('class="dl-when"')).toBeGreaterThan(html.indexOf('class="dl-text"'));
+  });
+
+  // Fagavklaring's D9, as written: the first claim struck, the ruling after it.
+  const D9 =
+    "- **D9** — ~~MEL-600070 skal ha en årsavregning for 2024.~~ Snudd i runde 6: MEL-600070 skal **ikke** ha årsavregning, " +
+    "fordi personen er skattepliktig uten andre inntekter, og avgiften ikke skal betales til Nav. Står fast: Melosys skal se bort " +
+    "fra åpne årsavregninger uten år. Fag, 07.10 (runde 5 og 6).";
+
+  test("item 2: a struck first sentence leaves the first sentence of what follows as the row's text", () => {
+    const html = formatWebHtml(log([D9]), { reader: true, language: "no" });
+    expect(html).toContain(
+      '<span class="dl-first">Snudd i runde 6: MEL-600070 skal <strong>ikke</strong> ha årsavregning, fordi personen er skattepliktig uten andre inntekter, og avgiften ikke skal betales til Nav.</span>',
+    );
+    // The struck claim is in the rest, before the first sentence, so All reads the item as written.
+    expect(html).toMatch(/<span class="dl-text"><span class="dl-rest"><s>MEL-600070 skal ha en årsavregning for 2024\.<\/s> ?<\/span><span class="dl-first">/);
+    const text = (h: string) =>
+      h
+        .replace(/<span class="dl-when"[^>]*>[^<]*<\/span>/g, "")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    expect(text(html)).toBe(text(formatWebHtml(log([D9]))));
+  });
+
+  test("item 2: the same rule without a date tail, and a struck item stays as it was", () => {
+    const html = formatWebHtml(log(["- **D4** — ~~Gammel regel gjelder her.~~ Ny regel gjelder fra nå av. Begrunnelse følger."]), { reader: true });
+    expect(html).toContain('<span class="dl-first">Ny regel gjelder fra nå av.</span>');
+    const struck = formatWebHtml(log(["- **D5** — ~~Gammel regel gjelder her. Og mer gammelt.~~"]), { reader: true });
+    expect(struck).not.toMatch(/<span class="dl-rest"><s>/);
   });
 });

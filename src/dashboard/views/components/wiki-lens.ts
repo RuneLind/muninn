@@ -28,14 +28,20 @@
 import { REVEAL_EVENT } from "./wiki-hash-target.ts";
 import { CODE_REF_GROUP_CLASS } from "../../../wiki/code-refs.ts";
 import {
+  CB_EXPANDED_CLASS,
+  CB_LINE_CLASS,
   CB_MORE_CLASS,
   CB_OKMORE_CLASS,
   COMPACT_WORDS,
   DL_ALL_CLASS,
   DL_COMPACT_SHOWN,
+  DL_DECISION_CLASS,
   DL_EXPANDED_CLASS,
   DL_MORE_CLASS,
   DL_QSTATE_CLASS,
+  DL_TAIL_CLASS,
+  DL_WHEN_CLASS,
+  LENS_CLASS_PREFIX,
   LENSES,
   LENS_LABELS,
   MORE_WORDS,
@@ -51,7 +57,7 @@ import { LINE_REFS_TOGGLE_CLASS } from "./wiki-report-blocks.ts";
 import { PEEK_CLASS } from "./wiki-ref-links.ts";
 
 export const LENS_SWITCH_CLASS = "wiki-lens-switch";
-export const LENS_CLASS_PREFIX = "lens-";
+export { LENS_CLASS_PREFIX };
 export const FOLD_SIZE_CLASS = "fold-size";
 export const CASEBOARD_LENS_NOTE_CLASS = "cb-lens-note";
 
@@ -82,9 +88,9 @@ export function isHiddenByOverview(el: Element): boolean {
 
 type Lang = QuestionLanguage;
 
-const NOTE_WORDS: Record<Lang, { cases: (n: number) => string; chars: string; min: string }> = {
-  en: { cases: (n) => `${n} ${n === 1 ? "case" : "cases"} with status none not shown`, chars: "chars", min: "min" },
-  no: { cases: (n) => `${n} ${n === 1 ? "sak" : "saker"} med status none vises ikke`, chars: "tegn", min: "min" },
+const NOTE_WORDS: Record<Lang, { chars: string; min: string }> = {
+  en: { chars: "chars", min: "min" },
+  no: { chars: "tegn", min: "min" },
 };
 
 const SWITCH_TITLE: Record<Lang, string> = {
@@ -114,14 +120,17 @@ export function foldSizeLabel(chars: number, lang: Lang): string {
 }
 
 /** Each fold summary gets its body's size and reading time, measured on the
- *  rendered text with white space collapsed. Idempotent. */
+ *  rendered text with white space collapsed and without the text the reader
+ *  adds (an id's noun, a date cell, a compact line). Idempotent. */
 export function decorateFoldSizes(article: Element, lang: Lang): void {
   article.querySelectorAll(`.${FOLD_SIZE_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll<HTMLDetailsElement>("details.fold").forEach((fold) => {
     const summary = fold.querySelector(":scope > summary");
     const body = fold.querySelector(":scope > .fold-body");
     if (!summary || !body) return;
-    const chars = (body.textContent ?? "").replace(/\s+/g, " ").trim().length;
+    const page = body.cloneNode(true) as Element;
+    page.querySelectorAll(`[${READER_ONLY_ATTR}]`).forEach((el) => el.remove());
+    const chars = (page.textContent ?? "").replace(/\s+/g, " ").trim().length;
     if (chars === 0) return;
     const span = document.createElement("span");
     span.className = FOLD_SIZE_CLASS;
@@ -133,7 +142,7 @@ export function decorateFoldSizes(article: Element, lang: Lang): void {
 
 /** What Overview folds away in an id-led DecisionLog item: the rest of its
  *  text and whatever is nested under it. */
-const DL_REST = ":scope > .dl-text > .dl-rest, :scope > .dl-text ~ *";
+const DL_REST = `:scope > .dl-text > .dl-rest, :scope > .dl-text ~ :not(.${DL_WHEN_CLASS})`;
 
 function setExpanded(item: Element, open: boolean, lang: Lang): void {
   item.classList.toggle(DL_EXPANDED_CLASS, open);
@@ -188,26 +197,27 @@ export function decorateDecisionRests(article: Element, lang: Lang): void {
 }
 
 /** Under each CaseBoard with `none` rows, the line Overview shows in their
- *  place, naming the status by the board's own label. Idempotent. */
+ *  place, naming the status by the board's own label (the group's
+ *  `data-label`). Idempotent. */
 function noteHiddenCases(article: Element, lang: Lang): void {
   article.querySelectorAll(`.${CASEBOARD_LENS_NOTE_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll("section.caseboard").forEach((board) => {
-    const n = board.querySelectorAll('.cb-group[data-status="none"] .cb-row').length;
+    const group = board.querySelector('.cb-group[data-status="none"]');
+    const n = group?.querySelectorAll(".cb-row").length ?? 0;
     if (n === 0) return;
-    const label = board.querySelector('.cb-group[data-status="none"] .cb-pill')?.textContent?.trim() || "none";
     const p = document.createElement("p");
     p.className = CASEBOARD_LENS_NOTE_CLASS;
-    p.textContent = COMPACT_WORDS[lang].hidden(n, label);
+    p.textContent = COMPACT_WORDS[lang].hidden(n, group!.getAttribute("data-label") || "none");
     board.append(p);
   });
 }
 
 /** On a section, a list, or an `ok` group: everything is shown. */
 const SHOW_ALL_CLASS = "lens-show-all";
-/** On a DecisionLog list Overview reorders: newest decision first. */
-const DL_COMPACT_LIST_CLASS = "dl-compact";
 /** On a decision past the newest {@link DL_COMPACT_SHOWN}. */
 const DL_OLDER_CLASS = "dl-older";
+/** On each item of a DecisionLog list: its authored position. */
+const DL_ORDER_ATTR = "data-dl-order";
 
 function readerButton(cls: string): HTMLButtonElement {
   const b = document.createElement("button");
@@ -217,42 +227,89 @@ function readerButton(cls: string): HTMLButtonElement {
   return b;
 }
 
+/** Ids for `els` (made from `base` where an element has none), for a
+ *  toggle's `aria-controls`. */
+function controlIds(els: Element[], base: string): string {
+  return els
+    .map((el, k) => {
+      if (!el.id && base) el.id = `${base}-${k + 1}`;
+      return el.id;
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
 function setAllShown(section: Element, open: boolean, lang: Lang): void {
   section.classList.toggle(SHOW_ALL_CLASS, open);
   const b = section.querySelector<HTMLButtonElement>(`:scope > .${DL_ALL_CLASS}`);
   if (!b) return;
-  const n = section.querySelectorAll(".dl-item.dl-decision").length;
+  const n = section.querySelectorAll(`.dl-item.${DL_DECISION_CLASS}`).length;
   b.textContent = open ? COMPACT_WORDS[lang].showNewest(DL_COMPACT_SHOWN) : COMPACT_WORDS[lang].showAll(n);
   b.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
+/** A list's items in authored order, whatever order the DOM holds now. */
+function authoredItems(list: Element): Element[] {
+  return Array.from(list.children).sort(
+    (x, y) => Number(x.getAttribute(DL_ORDER_ATTR)) - Number(y.getAttribute(DL_ORDER_ATTR)),
+  );
+}
+
 /**
- * D41: in each DecisionLog, the decision items (`dl-decision`, marked by the
- * renderer) newest first and the newest five shown. Authored order is kept in
- * the DOM; Overview reorders through `order` on a flex list, so All, a
- * selection and the ref links see the page as written. Items in a second list
- * of the same log reorder within their list. Idempotent.
+ * D41: in each DecisionLog, which decisions (`dl-decision`, marked by the
+ * renderer) Overview folds away: all but the newest five, except one holding
+ * a fact-check mark (K: a ❌ is never folded away). Each item keeps its
+ * authored position in `data-dl-order` for {@link orderDecisions}, and a log
+ * with folded decisions gets «Vis alle» after its last list. Idempotent.
  */
 export function decorateDecisionOrder(article: Element, lang: Lang): void {
   article.querySelectorAll(`.${DL_ALL_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll("section.decision-log").forEach((section) => {
-    const items = Array.from(section.querySelectorAll<HTMLElement>(":scope > .dl-list > .dl-item.dl-decision"));
-    items.forEach((item, k) => {
-      const rank = items.length - 1 - k;
-      item.style.setProperty("--dl-order", String(-(k + 1)));
-      item.classList.toggle(DL_OLDER_CLASS, rank >= DL_COMPACT_SHOWN);
-      item.parentElement?.classList.add(DL_COMPACT_LIST_CLASS);
+    const lists = Array.from(section.querySelectorAll(":scope > .dl-list"));
+    for (const list of lists) {
+      Array.from(list.children).forEach((li, k) => {
+        if (!li.hasAttribute(DL_ORDER_ATTR)) li.setAttribute(DL_ORDER_ATTR, String(k));
+      });
+    }
+    const items = lists.flatMap((list) => authoredItems(list).filter((li) => li.classList.contains(DL_DECISION_CLASS)));
+    const older = items.filter((item, k) => {
+      const fold = items.length - 1 - k >= DL_COMPACT_SHOWN && !item.querySelector(".fc-mark, .fc-chip");
+      item.classList.toggle(DL_OLDER_CLASS, fold);
+      return fold;
     });
-    if (items.length <= DL_COMPACT_SHOWN) return;
+    if (older.length === 0) return;
     const b = readerButton(DL_ALL_CLASS);
+    b.setAttribute("aria-controls", controlIds(older, ""));
     b.addEventListener("click", () => setAllShown(section, !section.classList.contains(SHOW_ALL_CLASS), lang));
-    items[0]!.parentElement!.after(b);
+    lists[lists.length - 1]!.after(b);
     setAllShown(section, section.classList.contains(SHOW_ALL_CLASS), lang);
   });
 }
 
+/**
+ * D41: Overview reads a DecisionLog newest first. The decision items are moved
+ * in the DOM — within each list, into the slots decisions hold, so a question
+ * or an item without an id keeps its place — so a selection, Tab and a screen
+ * reader follow the order on screen. Any other lens gets the authored order
+ * back. Moves nothing when the order is already right.
+ */
+function orderDecisions(article: Element, newestFirst: boolean): void {
+  article.querySelectorAll(`section.decision-log > .dl-list`).forEach((list) => {
+    const authored = authoredItems(list);
+    const want = authored.slice();
+    if (newestFirst) {
+      const slots = authored.flatMap((li, k) => (li.classList.contains(DL_DECISION_CLASS) ? [k] : []));
+      const reversed = slots.map((k) => authored[k]!).reverse();
+      slots.forEach((k, j) => (want[k] = reversed[j]!));
+    }
+    const now = Array.from(list.children);
+    if (want.every((li, k) => now[k] === li)) return;
+    for (const li of want) list.append(li);
+  });
+}
+
 function setCaseExpanded(row: Element, open: boolean, lang: Lang): void {
-  row.classList.toggle(DL_EXPANDED_CLASS, open);
+  row.classList.toggle(CB_EXPANDED_CLASS, open);
   const b = row.querySelector<HTMLButtonElement>(`.${CB_MORE_CLASS}`);
   if (!b) return;
   b.textContent = open ? MORE_WORDS[lang].less : MORE_WORDS[lang].more;
@@ -271,50 +328,59 @@ function setOkShown(group: Element, open: boolean, lang: Lang): void {
 /**
  * D42: each CaseBoard row's compact line gets a «mer» that shows the full
  * note and the refs, and an `ok` group of more than one row a «+ N til»
- * after its first row. Shown in Overview only. Idempotent.
+ * after its last row. Shown in Overview only. Idempotent.
  */
 export function decorateCaseRows(article: Element, lang: Lang): void {
   article.querySelectorAll(`.${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll(".cb-row").forEach((row) => {
-    const line = row.querySelector(":scope > .cb-line");
-    if (!line || !row.querySelector(":scope > :is(.cb-note, .cb-refs, .cb-owner)")) return;
+    const line = row.querySelector(`:scope > .${CB_LINE_CLASS}`);
+    const rest = Array.from(row.querySelectorAll(":scope > :is(.cb-owner, .cb-note, .cb-refs)"));
+    if (!line || rest.length === 0) return;
     const id = row.querySelector(":scope > .cb-id")?.textContent?.trim() ?? row.id;
     const b = readerButton(CB_MORE_CLASS);
     b.setAttribute("aria-label", MORE_WORDS[lang].about(id));
-    b.addEventListener("click", () => setCaseExpanded(row, !row.classList.contains(DL_EXPANDED_CLASS), lang));
+    b.setAttribute("aria-controls", controlIds(rest, row.id ? `${row.id}-more` : ""));
+    b.addEventListener("click", () => setCaseExpanded(row, !row.classList.contains(CB_EXPANDED_CLASS), lang));
     line.append(b);
-    setCaseExpanded(row, row.classList.contains(DL_EXPANDED_CLASS), lang);
+    setCaseExpanded(row, row.classList.contains(CB_EXPANDED_CLASS), lang);
   });
   article.querySelectorAll('.cb-group[data-status="ok"]').forEach((group) => {
-    const rows = group.querySelectorAll(":scope > .cb-row");
-    if (rows.length < 2 || !rows[0]!.querySelector(":scope > .cb-line")) return;
+    const rows = Array.from(group.querySelectorAll(":scope > .cb-row"));
+    if (rows.length < 2) return;
     const b = readerButton(CB_OKMORE_CLASS);
+    b.setAttribute("aria-controls", controlIds(rows.slice(1), ""));
     b.addEventListener("click", () => setOkShown(group, !group.classList.contains(SHOW_ALL_CLASS), lang));
-    rows[0]!.after(b);
+    rows[rows.length - 1]!.after(b);
     setOkShown(group, group.classList.contains(SHOW_ALL_CLASS), lang);
   });
 }
 
-/** The folds Overview opens: a `<Fold>` holding a DecisionLog or a CaseBoard
- *  that Overview itself does not hide. */
-function compactFolds(article: Element): HTMLDetailsElement[] {
-  return Array.from(article.querySelectorAll<HTMLDetailsElement>("details.fold")).filter(
-    (f) => f.querySelector(":scope > .fold-body :is(section.decision-log, section.caseboard)") && !isHiddenByOverview(f),
-  );
+/** Whether Overview shows a DecisionLog or CaseBoard: it is not inside a
+ *  block Overview hides, and a board has a group other than `none`. */
+function shownInOverview(block: Element): boolean {
+  if (isHiddenByOverview(block)) return false;
+  return !block.matches("section.caseboard") || !!block.querySelector('.cb-group:not([data-status="none"])');
 }
 
-/** Entering Overview opens those folds. Nothing is stored, and leaving
- *  Overview leaves them as they are: a reader who picks All from an open
- *  fold is reading it. */
-function openCompactFolds(article: Element, lens: Lens): void {
-  if (lens !== "overview") return;
-  for (const f of compactFolds(article)) f.open = true;
+/** Entering Overview opens each `<Fold>` holding a DecisionLog or a CaseBoard
+ *  that Overview shows (D41). Nothing is stored, and leaving Overview leaves
+ *  the folds as they are: a reader who picks All from an open fold is reading
+ *  it. */
+function openCompactFolds(article: Element): void {
+  article.querySelectorAll<HTMLDetailsElement>("details.fold").forEach((f) => {
+    if (isHiddenByOverview(f)) return;
+    const blocks = Array.from(f.querySelectorAll(":scope > .fold-body :is(section.decision-log, section.caseboard)"));
+    if (blocks.some(shownInOverview)) f.open = true;
+  });
 }
 
 export interface LensOptions {
   language: Lang;
   /** The lens D2's precedence picked for this view. */
   initial: Lens;
+  /** The view replaces the same page in place (a fact-check append): its
+   *  lens is kept, and it is not an entry into Overview, so no fold opens. */
+  inPlace?: boolean;
   /** The server's flag: the Agent button renders only when true. */
   agentAvailable: boolean;
 }
@@ -324,11 +390,15 @@ export function lensOf(article: Element | null): Lens | null {
   return LENSES.find((l) => article?.classList.contains(`${LENS_CLASS_PREFIX}${l}`)) ?? null;
 }
 
-function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElement | null, lens: Lens): void {
+/** Show `lens`. `enter` says whether a switch INTO Overview opens the
+ *  compact folds (D41): not for a view replaced in place. */
+function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElement | null, lens: Lens, enter = true): void {
+  const before = lensOf(article);
   for (const l of LENSES) {
     article.classList.toggle(`${LENS_CLASS_PREFIX}${l}`, l === lens);
   }
-  openCompactFolds(article, lens);
+  orderDecisions(article, lens === "overview");
+  if (lens === "overview" && before !== "overview" && enter) openCompactFolds(article);
   sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
     const on = b.dataset.lens === lens;
     b.classList.toggle("on", on);
@@ -358,7 +428,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   decorateCaseRows(article, opts.language);
 
   let sw: HTMLElement | null = null;
-  const compact = article.querySelector(`.${DL_MORE_CLASS}, .dl-decision, .cb-line`);
+  const compact = article.querySelector(`.${DL_MORE_CLASS}, .${DL_DECISION_CLASS}, .${CB_LINE_CLASS}`);
   if (row && (article.querySelector(HIDDEN_SELECTOR) || compact || opts.agentAvailable)) {
     sw = document.createElement("div");
     sw.className = LENS_SWITCH_CLASS;
@@ -382,7 +452,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   }
   // `opts.initial` comes from `resolveLens`, which already turns an Agent the
   // server does not offer into All.
-  applyLens(article, row, sw, opts.initial);
+  applyLens(article, row, sw, opts.initial, !opts.inPlace);
 
   // D3: a reveal of something this lens hides shows All for this view only.
   article.addEventListener(REVEAL_EVENT, (e) => {
@@ -392,14 +462,16 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
     // shows the whole item. Nothing else is hidden there, so the lens stays.
     const item = target.closest(".dl-item[id]");
     if (item?.querySelector(`:scope > .dl-text > .${DL_MORE_CLASS}`)) setExpanded(item, true, opts.language);
-    // D41/D42: an older decision or a folded `ok` row shows its whole list.
-    if (target.closest(`.${DL_OLDER_CLASS}`)) {
-      const section = target.closest("section.decision-log");
-      if (section) setAllShown(section, true, opts.language);
-    }
-    const okGroup = target.closest('.cb-group[data-status="ok"]');
-    if (okGroup && target.closest(".cb-row") !== okGroup.querySelector(":scope > .cb-row")) setOkShown(okGroup, true, opts.language);
+    // D41/D42, in Overview only (a reveal in All must not carry into it): an
+    // older decision shows its whole list; a case row opens its «mer», and a
+    // folded `ok` row shows its group.
     if (lensOf(article) !== "overview") return;
+    const section = target.closest(`.${DL_OLDER_CLASS}`)?.closest("section.decision-log");
+    if (section) setAllShown(section, true, opts.language);
+    const caseRow = target.closest(".cb-row");
+    if (caseRow?.querySelector(`:scope > .${CB_LINE_CLASS} > .${CB_MORE_CLASS}`)) setCaseExpanded(caseRow, true, opts.language);
+    const okGroup = target.closest('.cb-group[data-status="ok"]');
+    if (okGroup && caseRow !== okGroup.querySelector(":scope > .cb-row")) setOkShown(okGroup, true, opts.language);
     if (isHiddenByOverview(target)) applyLens(article, row, sw, "all");
   });
 }
@@ -437,13 +509,15 @@ export function lensCss(): string {
     .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
     .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
-    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ *:not(.${PEEK_CLASS} *) { display: none; }
-    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) :is(.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}) { display: none; }
-    .wiki-article .${DL_MORE_CLASS} {
-      font: inherit; font-size: 0.85em; margin-left: 0.4em; padding: 0 0.2em; border: none; background: none;
+    .wiki-article.${LENS_CLASS_PREFIX}overview .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }
+    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) :is(${TOGGLES}, .${DL_QSTATE_CLASS}) { display: none; }
+    /* The reader's toggles: «mer», «Vis alle», a case's «mer», «+ N til». */
+    .wiki-article :is(${TOGGLES}) {
+      font: inherit; font-size: 0.85em; padding: 0 0.2em; border: none; background: none;
       color: var(--accent-light); cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
       user-select: none;
     }
+    .wiki-article :is(.${DL_MORE_CLASS}, .${CB_MORE_CLASS}) { margin-left: 0.4em; }
     .wiki-article .${DL_QSTATE_CLASS} {
       font-size: 0.8em; margin-left: 0.4em; padding: 0 0.45em; border-radius: 999px; white-space: nowrap;
       border: 1px solid var(--border-secondary); background: var(--tint-neutral); color: var(--text-soft); user-select: none;
@@ -468,45 +542,50 @@ ${compactCss()}
   `;
 }
 
+/** The reader's toggles, one selector for their shared style and their
+ *  hiding outside Overview. */
+const TOGGLES = `.${DL_MORE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}`;
+
 /** D41/D42: Overview's compact DecisionLog and CaseBoard rows. Everything is
- *  scoped to Overview and kept out of a peek card, so All renders as before. */
+ *  scoped to Overview and kept out of a peek card, so All renders as before;
+ *  the date cell and the compact line are hidden by default in the shared
+ *  component CSS (`compactPartsHiddenCss`). A row's parts follow the DOM
+ *  order, which is the reading order. */
 function compactCss(): string {
   const ov = `.wiki-article.${LENS_CLASS_PREFIX}overview`;
   const notPeek = `:not(.${PEEK_CLASS} *)`;
-  const dec = `${ov} .dl-item.dl-decision${notPeek}`;
-  const toggle = `font: inherit; font-size: 0.85em; padding: 0 0.2em; border: none; background: none;
-      color: var(--accent-light); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; user-select: none;`;
+  const dec = `${ov} .dl-item.${DL_DECISION_CLASS}${notPeek}`;
   return `
-    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) :is(.dl-when, .${DL_ALL_CLASS}, .cb-line, .${CB_OKMORE_CLASS}) { display: none; }
-    .wiki-article .dl-when { display: none; }
-    ${ov} .dl-list.${DL_COMPACT_LIST_CLASS}${notPeek} { display: flex; flex-direction: column; }
-    ${ov} .dl-list.${DL_COMPACT_LIST_CLASS} > .dl-item${notPeek} { order: var(--dl-order, 0); }
+    ${ov} .decision-log${notPeek} { container: dl-log / inline-size; }
     ${ov} .decision-log:not(.${SHOW_ALL_CLASS}) .dl-item.${DL_OLDER_CLASS}${notPeek} { display: none; }
     ${dec} {
-      display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 0.7rem; align-items: baseline;
+      display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 0.5rem;
       padding: 0.45rem 0; border-bottom: 1px solid var(--border-secondary);
     }
-    ${dec} > .dl-id { grid-row: 1; grid-column: 1; margin-right: 0; }
-    ${dec} > .dl-text { grid-row: 1; grid-column: 2; }
-    ${dec} > .dl-when {
-      display: block; grid-row: 1; grid-column: 3; font-size: 0.8em; color: var(--text-soft);
+    ${dec} > :is(.id-noun, .dl-id) { flex: none; }
+    ${dec} > .dl-id { margin-right: 0.2rem; }
+    ${dec} > .dl-text { flex: 1 1 0; min-width: 0; }
+    ${dec} > .${DL_WHEN_CLASS} {
+      display: block; flex: none; margin-left: auto; font-size: 0.8em; color: var(--text-soft);
       white-space: nowrap; font-variant-numeric: tabular-nums;
     }
-    ${dec} > .dl-text ~ * { grid-column: 2 / -1; }
-    ${dec} > .id-noun, ${ov} .dl-decision .dl-tail${notPeek} { display: none; }
-    @media (max-width: 640px) {
-      ${dec} { grid-template-columns: auto minmax(0, 1fr); }
-      ${dec} > .dl-when { grid-row: 2; grid-column: 2; }
+    ${dec} > .dl-text ~ :not(.${DL_WHEN_CLASS}) { flex-basis: 100%; }
+    ${ov} .${DL_DECISION_CLASS} .${DL_TAIL_CLASS}${notPeek} { display: none; }
+    /* A narrow log: the date drops under the text, and at phone width the text
+       under the chip too, so the text keeps the row (measured: the chip with its
+       noun is ~117 px and the cell ~120 px at 14 px type). */
+    @container dl-log (max-width: 28rem) {
+      ${dec} > .${DL_WHEN_CLASS} { flex-basis: 100%; margin-left: 0; white-space: normal; }
     }
-    .wiki-article .${DL_ALL_CLASS} { ${toggle} display: block; margin: 0.3rem 0 0.8rem; }
-    ${ov} .caseboard .cb-row:not(.${DL_EXPANDED_CLASS}) > :is(.cb-owner, .cb-note, .cb-refs)${notPeek} { display: none; }
-    ${ov} .caseboard .cb-row > .cb-line${notPeek} { order: 1; flex: 1 1 16rem; min-width: 0; }
-    ${ov} .caseboard .cb-row > :is(.cb-owner, .cb-note)${notPeek} { order: 2; flex-basis: 100%; }
-    ${ov} .caseboard .cb-row > .cb-refs${notPeek} { order: 3; }
+    @container dl-log (max-width: 18rem) {
+      ${dec} > .dl-text { flex-basis: 100%; }
+    }
+    .wiki-article .${DL_ALL_CLASS} { display: block; margin: 0.3rem 0 0.8rem; }
+    ${ov} .caseboard .cb-row:has(> .${CB_LINE_CLASS}):not(.${CB_EXPANDED_CLASS}) > :is(.cb-owner, .cb-note, .cb-refs)${notPeek} { display: none; }
+    ${ov} .caseboard .cb-row > .${CB_LINE_CLASS}${notPeek} { display: inline; flex: 1 1 16rem; min-width: 0; }
+    ${ov} .caseboard .cb-row:has(> .${CB_LINE_CLASS}) > :is(.cb-owner, .cb-note)${notPeek} { flex-basis: 100%; }
     ${ov} .caseboard .cb-head { color: var(--text-soft); }
     ${ov} .cb-group[data-status="ok"]:not(.${SHOW_ALL_CLASS}) > .cb-row ~ .cb-row${notPeek} { display: none; }
-    .wiki-article .${CB_MORE_CLASS} { ${toggle} margin-left: 0.4em; }
-    .wiki-article:not(.${LENS_CLASS_PREFIX}overview) .${CB_MORE_CLASS} { display: none; }
-    .wiki-article .${CB_OKMORE_CLASS} { ${toggle} display: block; margin: 0.1rem 0 0.3rem; }
+    .wiki-article .${CB_OKMORE_CLASS} { display: block; margin: 0.1rem 0 0.3rem; }
   `;
 }
