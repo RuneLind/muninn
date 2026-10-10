@@ -72,11 +72,28 @@ interface LaneWords {
   /** The mark on the viewer's lane: «til deg» on a waiting lane, «deg» else. */
   mine: string;
   mineWaiting: string;
-  /** The one-line link a `<Question>` card leaves at its authored place. */
-  movedLink: (id: string) => string;
+  /** The one line a run of moved `<Question>` cards leaves at its authored
+   *  place (D39): «Spørsmål S2, S6 og S7 står under Oppfølging ↑». `arrow` is
+   *  ↑ when the block sits above the line, ↓ when below. */
+  movedLink: (ids: readonly string[], arrow: "↑" | "↓") => string;
+  /** A lane head's age (D37): «stilt 07.10 · 3 d» on a waiting lane, «siden
+   *  07.10 · 3 d» elsewhere. */
+  age: (waiting: boolean, date: string, days: number) => string;
+  /** The chip on each open step of a draft lane: «ikke sendt · 3 d». */
+  notSent: (days: number) => string;
+  drafted: (date: string) => string;
+  /** A waiting lane's progress over the cards it names (D38). */
+  progress: (answered: number, of: number) => string;
+  /** The action at the end of a lane head (D38). */
+  action: { answer: string; questions: string; see: string; seeAll: string; hide: string };
   /** «Se som rolle» (D18). */
   viewAs: string;
   viewAsSelf: string;
+}
+
+/** `S2`, `S2 og S6`, `S2, S6 og S7`. */
+function listIds(ids: readonly string[], and: string): string {
+  return ids.length <= 1 ? (ids[0] ?? "") : `${ids.slice(0, -1).join(", ")} ${and} ${ids[ids.length - 1]}`;
 }
 
 const capitalize = (s: string) => (s ? s[0]!.toLocaleUpperCase() + s.slice(1) : s);
@@ -101,7 +118,12 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
     blocked: (n) => `${n} blokkert`,
     mine: "deg",
     mineWaiting: "til deg",
-    movedLink: (id) => `Spørsmål ${id}: svar under Oppfølging`,
+    movedLink: (ids, arrow) => `Spørsmål ${listIds(ids, WORDS.no.and)} står under Oppfølging ${arrow}`,
+    age: (waiting, date, days) => `${waiting ? "stilt" : "siden"} ${date} · ${days} d`,
+    notSent: (days) => `ikke sendt · ${days} d`,
+    drafted: (date) => `utkast ${date}`,
+    progress: (n, of) => `${n} av ${of} besvart`,
+    action: { answer: "Se og svar ▸", questions: "Se spørsmålene ▸", see: "Se ▸", seeAll: "Se alle ▸", hide: "Skjul ▴" },
     viewAs: "Se som rolle",
     viewAsSelf: "min visning",
   },
@@ -124,7 +146,13 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
     blocked: (n) => `${n} blocked`,
     mine: "you",
     mineWaiting: "for you",
-    movedLink: (id) => `Question ${id}: answer under Follow-up`,
+    movedLink: (ids, arrow) =>
+      ids.length === 1 ? `Question ${ids[0]} is under Follow-up ${arrow}` : `Questions ${listIds(ids, WORDS.en.and)} are under Follow-up ${arrow}`,
+    age: (waiting, date, days) => `${waiting ? "asked" : "since"} ${date} · ${days} d`,
+    notSent: (days) => `not sent · ${days} d`,
+    drafted: (date) => `drafted ${date}`,
+    progress: (n, of) => `${n} of ${of} answered`,
+    action: { answer: "Answer ▸", questions: "See questions ▸", see: "See ▸", seeAll: "See all ▸", hide: "Hide ▴" },
     viewAs: "View as role",
     viewAsSelf: "my view",
   },

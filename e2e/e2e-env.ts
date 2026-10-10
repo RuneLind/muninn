@@ -18,6 +18,10 @@
  *      `src/test/preload.ts`; nothing did the equivalent for Playwright, and
  *      `playwright.config.ts`'s `webServer.env` blanked only the tokens.
  *
+ * Beside the blanks, `e2eEnv()` sets `RESEARCH_MCP_PORT=0`, so each spawned
+ * muninn takes a free port for its research MCP server instead of 9190, which a
+ * parallel spec or the developer's own muninn already holds.
+ *
  * THE TRAP, for both classes: a spawned muninn re-reads the dotenv files itself
  * (Bun auto-load, cwd = repo root), so `delete env.MUNINN_WIKI_READONLY` in the
  * parent achieves NOTHING — the absent name is precisely what makes the child
@@ -58,5 +62,8 @@ export function blankInstanceProfile(): Record<string, string> {
  * still set it back.
  */
 export function e2eEnv(): Record<string, string> {
-  return { ...blankBotTokens(), ...blankInstanceProfile() };
+  // `RESEARCH_MCP_PORT: "0"`: each spawned muninn takes a free port for its
+  // research MCP server instead of 9190, which a parallel spec or the
+  // developer's own muninn already holds (D43, the #670 follow-up).
+  return { ...blankBotTokens(), ...blankInstanceProfile(), RESEARCH_MCP_PORT: "0" };
 }

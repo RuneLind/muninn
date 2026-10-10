@@ -182,7 +182,7 @@ import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
-import { enhanceReportBlocks } from "./wiki-report-blocks.ts";
+import { bindLaneProgress, enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
 import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
 import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
@@ -4232,6 +4232,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
         wiki: FIND_SELF_WIKI || WIKI,
         relPath: data.meta.relPath,
       });
+      // D38: each waiting lane's «N av M besvart», kept current by the cards.
+      bindLaneProgress(articleRoot, answerCards);
       // The admin's "Copy new answers (N)" / "Copy again", in the breadcrumb
       // row beside the other page-level actions; removed when the viewer may
       // not export or the page has no answerable card.

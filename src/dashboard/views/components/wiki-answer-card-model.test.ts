@@ -240,8 +240,11 @@ describe("fix round 1", () => {
     const added = mergeSavedAnswer([answer()], saved);
     expect(added.map((a) => [a.answerId, a.versionCount, a.firstCreatedAt, a.asked])).toEqual([
       ["a1", 1, answer().firstCreatedAt, true],
-      ["a9", 1, 5, null],
+      // `asked` is the server's: absent until the reload says (the lane
+      // progress does not count it meanwhile), and the card shows no label.
+      ["a9", 1, 5, undefined],
     ]);
+    expect(answerItemHtml(added[1]!, QUESTION_LABELS.no, "no", true)).not.toContain("q-asked");
     const edited = mergeSavedAnswer([answer({ body: "old" })], { ...saved, answerId: "a1", version: 2, body: "v2" });
     expect(edited).toHaveLength(1);
     expect(edited[0]!.version).toBe(2);

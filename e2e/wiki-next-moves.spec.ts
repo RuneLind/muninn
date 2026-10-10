@@ -300,10 +300,11 @@ test.describe("NextMoves in the reader", () => {
     // Beside the status chip.
     expect(await pills.first().evaluate((el) => el.previousElementSibling?.className)).toContain("wiki-status");
     const waiting = page.locator('.nm-lane[data-kind="waiting"] .nm-since');
-    await expect(waiting).toHaveText("since 1 d");
+    // D37: the lane's age in the wiki's language, «asked» on a waiting lane.
+    await expect(waiting).toHaveText("asked 30.09 · 1 d");
     await expect(waiting).toHaveAttribute("title", "2026-09-30");
     // The draft lane's head carries the same age as the waiting lane's.
-    await expect(page.locator('.nm-lane[data-kind="draft"] .nm-since')).toHaveText("since 2 d");
+    await expect(page.locator('.nm-lane[data-kind="draft"] .nm-since')).toHaveText("since 29.09 · 2 d");
     const chips = page.locator(`.nm-lane[data-kind="draft"] .${MOVES_AGE_CLASS}`);
     await expect(chips).toHaveText(["not sent · 2 d", "not sent · 2 d"]);
     // The chip sits after the item's own text.
@@ -360,7 +361,7 @@ test.describe("NextMoves in the reader", () => {
     await expect(you.locator(".callout-warn .callout-title")).toHaveText("Merk");
     await expect(page.locator(`.${MOVES_PILL_CLASS}-you`)).toHaveText("✋ Du · 1");
     const waiting = page.locator('.nm-lane[data-kind="waiting"] .nm-since');
-    await expect(waiting).toHaveText("since 3 d");
+    await expect(waiting).toHaveText("asked 28.09 · 3 d");
     await expect(waiting).toHaveAttribute("title", "2026-09-28");
     // A done draft was sent: only the open one carries "not sent".
     const draft = page.locator('.nm-lane[data-kind="draft"]');
@@ -442,6 +443,10 @@ test.describe("NextMoves in the reader", () => {
         waitingItem: page.locator('.nm-lane[data-kind="waiting"] li').first(),
         draftAge: page.locator(`.${MOVES_AGE_CLASS}`).first(),
         blockedLabel: page.locator('.nm-lane[data-kind="blocked"] .nm-who'),
+        // D36: the kind colours, and D38's action at the end of the head.
+        waitingLabel: page.locator('.nm-lane[data-kind="waiting"] .nm-who'),
+        draftLabel: page.locator('.nm-lane[data-kind="draft"] .nm-who'),
+        action: page.locator(".nm-compact .nm-cta").first(),
         title: page.locator(".nm-compact .nm-title"),
         countLine: page.locator(".nm-compact .nm-sum"),
         peek: page.locator(".nm-compact .nm-peek").first(),

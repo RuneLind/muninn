@@ -1,7 +1,8 @@
 /**
  * The «Oppfølging» page the role-lane specs share (reader lenses PR 3): a
  * Norwegian wiki with `roleKeys`, a `you` lane for utvikler, a waiting lane for
- * fag naming two `<Question>` cards, a who-only lane and a blocked lane.
+ * fag naming two `<Question>` cards (written below a line of prose, so they
+ * leave one merged stub), a who-only lane and a blocked lane.
  * Synthetic text only.
  */
 
@@ -46,6 +47,9 @@ export const ROLE_PAGE = [
   "</Lane>",
   "",
   "</NextMoves>",
+  "",
+  // Prose between the block and the cards: they leave one merged line (D39).
+  "Bakgrunnen for spørsmålene står her.",
   "",
   '<Question id="S1" choices="A|B" to="fag">',
   "",
