@@ -1331,7 +1331,7 @@ function logItemHtml(text: string, nested: string, value: string): string {
   const when = tail ? `<span class="${DL_WHEN_CLASS}" ${READER_ONLY_ATTR}>${escapeHtml(decisionWhenLabel(tail.when))}</span>` : "";
   return (
     `<li class="dl-item${decision ? ` ${DL_DECISION_CLASS}` : ""}${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
-    `<span class="dl-text">${tail ? tail.html : logTextHtml(p.text)}</span>${when}${nested}</li>`
+    `<span class="dl-text">${tail ? tail.html : logTextHtml(p.text, DECISION_ID_RE.test(p.id))}</span>${when}${nested}</li>`
   );
 }
 
@@ -1357,7 +1357,7 @@ function decisionTail(text: string): { when: DecisionWhen; html: string } | null
   const pointer = text.slice(when.end).trim();
   if (!body || !rendersAs(pointer ? [body, tail, pointer] : [body, tail], flatHtml(itemHtml(text)))) return null;
   const after = ` <span class="${DL_TAIL_CLASS}">${itemHtml(tail)}</span>${pointer ? ` ${itemHtml(pointer)}` : ""}`;
-  const parts = decisionParts(body);
+  const parts = decisionParts(body, true);
   if (parts) return { when, html: partsHtml(parts, after) };
   if (pointer) return { when, html: `<span class="dl-first">${itemHtml(body)}</span><span class="dl-rest">${after}</span>` };
   return { when, html: `${itemHtml(body)}${after}` };
@@ -1372,18 +1372,20 @@ export function splitDecisionText(text: string): SentenceSplit | null {
 }
 
 /** An id-led item's text as Overview reads it: `first` is what the row shows;
- *  `lead` and `rest` fold away. A first sentence that is one `~~strike~~` end
- *  to end is an overturned claim: it moves to `lead`, and the first sentence
- *  after it leads (fagavklaring's D9). */
+ *  `lead` and `rest` fold away. On a decision (`strikeLead`), a first sentence
+ *  that is one `~~strike~~` end to end is an overturned claim: it moves to
+ *  `lead`, and the first sentence after it leads (fagavklaring's D9). A
+ *  question keeps its struck question first (S3). */
 interface DecisionParts {
   lead: string;
   first: string;
   rest: string;
 }
 
-function decisionParts(text: string): DecisionParts | null {
+function decisionParts(text: string, strikeLead: boolean): DecisionParts | null {
   const split = splitDecisionText(text);
   if (!split) return null;
+  if (!strikeLead) return { lead: "", ...split };
   let lead = "";
   let cur: SentenceSplit = split;
   while (wholeStrike(cur.first.trim()) !== null && cur.rest.trim()) {
@@ -1405,9 +1407,10 @@ function partsHtml(p: DecisionParts, after: string): string {
 }
 
 /** The first sentence of a DecisionLog item as Overview shows it: the parts'
- *  first, else the whole item. */
-export function decisionFirstSentence(text: string): string {
-  return decisionParts(text)?.first ?? text;
+ *  first, else the whole item. The struck lead is skipped for a decision id
+ *  only. */
+export function decisionFirstSentence(text: string, id: string): string {
+  return decisionParts(text, DECISION_ID_RE.test(id))?.first ?? text;
 }
 
 /** `html` without the two presentational spans a DecisionLog split adds
@@ -1443,8 +1446,8 @@ export function unwrapDecisionSplits(html: string): string {
 /** An id-led item's text: its first sentence and the rest in two spans when
  *  it holds more than one (D6), so the reader's Overview can show the first
  *  alone. */
-function logTextHtml(text: string): string {
-  const parts = decisionParts(text);
+function logTextHtml(text: string, strikeLead: boolean): string {
+  const parts = decisionParts(text, strikeLead);
   return parts ? partsHtml(parts, "") : itemHtml(text);
 }
 

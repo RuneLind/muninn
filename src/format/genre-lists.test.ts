@@ -793,6 +793,28 @@ describe("fix round 1: the D41 date tail and an overturned first sentence", () =
     expect(text(html)).toBe(text(formatWebHtml(log([D9]))));
   });
 
+  test("fix round 2 item 5: a parenthesis whose word is not a round word is no date tail", () => {
+    expect(parseDecisionWhen("Regelen gjelder alle. Fag, 07.10 (fase 2).")).toBeNull();
+    expect(parseDecisionWhen("Regelen gjelder alle. Fag, 07.10 (runde 2).")).not.toBeNull();
+  });
+
+  test("fix round 2: who may carry an apostrophe inside a word; digits stay out", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("The rule holds for all. O'Brien, 07.10 (round 2).")!)).toBe("O'Brien, 07.10 · round 2");
+    // Mimir's reader-lenses D23/D24 tails stay without a date cell.
+    expect(parseDecisionWhen("A test pins that no group member ident appears in the page payload. Plan review round 1, 08.10.2026.")).toBeNull();
+  });
+
+  // Fagavklaring's S3, as written: a closed question, its question struck.
+  const S3 = "- **S3** — ~~Skal MEL-368918 la være å årsavregnes?~~ Lukket 07.10 (D7).";
+
+  test("fix round 2 item 1: a closed question keeps its struck question as the first sentence", () => {
+    const html = formatWebHtml(log(["- **D7** — MEL-368918 årsavregnes ikke. Fag, 07.10 (runde 6).", S3]), { reader: true, language: "no" });
+    expect(html).toContain('<span class="dl-first"><s>Skal MEL-368918 la være å årsavregnes?</s></span>');
+    expect(html).not.toContain('<span class="dl-first">Lukket 07.10 (D7).</span>');
+    // Off the reader path the same: the struck lead is a decision rule only.
+    expect(formatWebHtml(log([S3]))).toContain('<span class="dl-first"><s>Skal MEL-368918 la være å årsavregnes?</s></span>');
+  });
+
   test("item 2: the same rule without a date tail, and a struck item stays as it was", () => {
     const html = formatWebHtml(log(["- **D4** — ~~Gammel regel gjelder her.~~ Ny regel gjelder fra nå av. Begrunnelse følger."]), { reader: true });
     expect(html).toContain('<span class="dl-first">Ny regel gjelder fra nå av.</span>');

@@ -37,6 +37,7 @@ import {
   DL_COMPACT_SHOWN,
   DL_DECISION_CLASS,
   DL_EXPANDED_CLASS,
+  DL_ORDER_ATTR,
   DL_MORE_CLASS,
   DL_QSTATE_CLASS,
   DL_TAIL_CLASS,
@@ -216,8 +217,6 @@ function noteHiddenCases(article: Element, lang: Lang): void {
 const SHOW_ALL_CLASS = "lens-show-all";
 /** On a decision past the newest {@link DL_COMPACT_SHOWN}. */
 const DL_OLDER_CLASS = "dl-older";
-/** On each item of a DecisionLog list: its authored position. */
-const DL_ORDER_ATTR = "data-dl-order";
 
 function readerButton(cls: string): HTMLButtonElement {
   const b = document.createElement("button");
@@ -291,10 +290,11 @@ export function decorateDecisionOrder(article: Element, lang: Lang): void {
  * in the DOM — within each list, into the slots decisions hold, so a question
  * or an item without an id keeps its place — so a selection, Tab and a screen
  * reader follow the order on screen. Any other lens gets the authored order
- * back. Moves nothing when the order is already right.
+ * back. Moves nothing when the order is already right. A log in a peek card
+ * is left alone: the peek shows its target as written.
  */
 function orderDecisions(article: Element, newestFirst: boolean): void {
-  article.querySelectorAll(`section.decision-log > .dl-list`).forEach((list) => {
+  article.querySelectorAll(`section.decision-log > .dl-list:not(.${PEEK_CLASS} *)`).forEach((list) => {
     const authored = authoredItems(list);
     const want = authored.slice();
     if (newestFirst) {

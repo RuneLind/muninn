@@ -161,6 +161,44 @@ const MARKS_PAGE = [
 ].join("\n");
 const NONE_CASES = '- id: MEL-9\n  status: none\n  note: "Ikke kandidat"\n';
 
+// Fix round 2: a log of two lists with a paragraph between them (items 3, 7),
+// and a ref link to a fold holding a log (item 4).
+const MULTI_REL = "plans/multi.mdx";
+const dl = (n: number) => `- **D${n}** — Beslutning nummer ${n} gjelder alle saker. Fag, 0${n}.10 (runde ${n}).`;
+const MULTI_PAGE = [
+  "---",
+  "title: Multi page",
+  "type: plan",
+  "---",
+  "",
+  "# Multi page",
+  "",
+  "Se «Gamle beslutninger» for de tre første.",
+  "",
+  "<DecisionLog>",
+  "",
+  ...[1, 2, 3].map(dl),
+  "",
+  "Mellomtekst mellom listene.",
+  "",
+  ...[4, 5, 6, 7, 8].map(dl),
+  "",
+  "</DecisionLog>",
+  "",
+  '<Fold title="Gamle beslutninger">',
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D31** — Første gamle beslutning gjelder. Fag, 01.10 (runde 1).",
+  "- **D32** — Andre gamle beslutning gjelder. Fag, 02.10 (runde 2).",
+  "- **D33** — Tredje gamle beslutning gjelder. Fag, 03.10 (runde 3).",
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -215,6 +253,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "plans", "cases.yaml"), CASES, "utf8");
   await writeFile(path.join(root, MARKS_REL), MARKS_PAGE, "utf8");
   await writeFile(path.join(root, "plans", "none.yaml"), NONE_CASES, "utf8");
+  await writeFile(path.join(root, MULTI_REL), MULTI_PAGE, "utf8");
   await writeFile(
     path.join(root, ".wiki-reader.json"),
     JSON.stringify({ language: "no", idLabels: { D: { one: "Beslutning", other: "beslutninger" } } }),
@@ -522,6 +561,72 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     const seen = await open_(page, "", "", MARKS_REL);
     const written = "D21Kort beslutning her. Fag, 01.10 (runde 1).".length;
     await expect(fold(page, "Liten").locator(":scope > summary .fold-size")).toHaveText(`${written} tegn · <1 min`);
+    expectClean(seen);
+  });
+  test("fix round 2, item 3: «N beslutninger» in a two-list log lands on the newest decision and keeps the five-cap", async ({ page }) => {
+    const seen = await open_(page, "", "", MULTI_REL);
+    await page.locator(".wiki-article").evaluate((el) => el.closest("#articleWrap")!.scrollTo(0, 99999));
+    await page.locator(".wiki-count-pill-decisions").click();
+    await expect(page.locator("li.dl-item#d8")).toBeInViewport();
+    await expect(page.locator("li.dl-item#d3")).toBeHidden();
+    await expect(page.locator("section.decision-log").first().locator(":scope > button.dl-all")).toHaveText("Vis alle 8 beslutninger");
+    const shown = await page
+      .locator("section.decision-log")
+      .first()
+      .locator("li.dl-item.dl-decision")
+      .evaluateAll((els) => els.filter((e) => (e as HTMLElement).offsetParent !== null).map((e) => e.id));
+    expect(shown).toEqual(["d8", "d7", "d6", "d5", "d4"]);
+    expect(await lensOf(page)).toBe("overview");
+    expectClean(seen);
+  });
+
+  test("fix round 2, item 7: «Vis alle» sits after the log's last list", async ({ page }) => {
+    const seen = await open_(page, "", "", MULTI_REL);
+    const log = page.locator("section.decision-log").first();
+    expect(await log.locator(":scope > :last-child").evaluate((el) => el.className)).toBe("dl-all");
+    expect(await log.locator(":scope > button.dl-all").evaluate((b) => b.previousElementSibling?.querySelector("li")?.id ?? "")).toBe("d8");
+    expectClean(seen);
+  });
+
+  test("fix round 2, item 4: a peek of a fold shows its DecisionLog in authored order in Overview", async ({ page }) => {
+    const seen = await open_(page, "", "", MULTI_REL);
+    expect(await lensOf(page)).toBe("overview");
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "Gamle beslutninger" }).first().hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toBeVisible();
+    expect(await peek.locator(".dl-id").allTextContents()).toEqual(["D31", "D32", "D33"]);
+    // A lens change while the card is open reorders the page's logs, not the card's.
+    await page.evaluate(() => {
+      for (const lens of ["all", "overview"]) document.querySelector<HTMLElement>(`.wiki-lens-switch button[data-lens='${lens}']`)!.click();
+    });
+    await expect(peek).toBeVisible();
+    expect(await peek.locator(".dl-id").allTextContents()).toEqual(["D31", "D32", "D33"]);
+    // The page's own log stays newest first.
+    expect(await fold(page, "Gamle beslutninger").locator("li.dl-item").evaluateAll((els) => els.map((e) => e.id))).toEqual([
+      "d33", "d32", "d31",
+    ]);
+    expectClean(seen);
+  });
+
+  test("fix round 2, item 6: between 18rem and 28rem the date cell sits under the text", async ({ page }) => {
+    await page.setViewportSize({ width: 760, height: 900 });
+    const seen = await open_(page);
+    const log = page.locator(".wiki-article section.decision-log").first();
+    const width = (await log.boundingBox())!.width;
+    expect(width).toBeGreaterThan(18 * 16);
+    expect(width).toBeLessThan(28 * 16);
+    const row = page.locator("li.dl-item#d7");
+    const [t, w] = await Promise.all([row.locator(".dl-text").boundingBox(), row.locator(".dl-when").boundingBox()]);
+    expect(w!.y).toBeGreaterThanOrEqual(t!.y + t!.height - 1);
+    expectClean(seen);
+  });
+
+  test("fix round 2, item 8: a one-sentence decision with a date tail gets no «mer»", async ({ page }) => {
+    const seen = await open_(page, "", "", MARKS_REL);
+    const d21 = page.locator("li.dl-item#d21");
+    await expect(d21).toBeVisible();
+    await expect(d21.locator(".dl-when")).toBeVisible();
+    await expect(d21.locator("button.dl-more")).toHaveCount(0);
     expectClean(seen);
   });
 });

@@ -129,6 +129,9 @@ export const DL_DECISION_CLASS = "dl-decision";
 export const DL_WHEN_CLASS = "dl-when";
 export const DL_TAIL_CLASS = "dl-tail";
 export const CB_LINE_CLASS = "cb-line";
+/** On each item of a DecisionLog list, set by the reader: its authored
+ *  position in the list, which Overview's newest-first order moves away from. */
+export const DL_ORDER_ATTR = "data-dl-order";
 /** The controls the reader adds, the class on a case row whose note Overview
  *  shows, and the controls' words. */
 export const DL_ALL_CLASS = "dl-all";
