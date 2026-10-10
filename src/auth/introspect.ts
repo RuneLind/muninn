@@ -95,11 +95,11 @@ function createLocalIntrospector(config: AuthConfig): Introspector {
         // this mode has. A session minted before MUNINN_LOCAL_USER changed must
         // NOT keep acting as the old id, so the config wins over the cookie.
         if (session.userId !== local.userId) return DENIED;
-        return { kind: "identity", identity: identityFor(local.userId, local.displayName, session.expiresAt) };
+        return { kind: "identity", identity: localIdentity(local, session.expiresAt) };
       }
 
       if (channel === "credential" && secretMatches(local.token, token)) {
-        return { kind: "identity", identity: identityFor(local.userId, local.displayName, null) };
+        return { kind: "identity", identity: localIdentity(local) };
       }
       return DENIED;
     },
@@ -108,22 +108,16 @@ function createLocalIntrospector(config: AuthConfig): Introspector {
 
 /** The pinned identity as a plain value, so the middleware can hoist it out of
  *  the per-request path instead of re-deriving it through `introspect`. */
-export function localIdentity(local: LocalAuthConfig): Identity {
-  return identityFor(local.userId, local.displayName, null);
-}
-
-function identityFor(userId: string, displayName: string, expiresAt: number | null): Identity {
+export function localIdentity(local: LocalAuthConfig, expiresAt: number | null = null): Identity {
   return {
-    userId,
-    displayName,
-    // Both null, and that is what makes the pinned identity resolve to role
-    // `user` through `resolveRole`'s ordinary path rather than a special case.
-    // Both null because a local session has no such claims. NB this is NOT what
-    // makes the identity resolve to role `user`: `resolveRole` short-circuits on
-    // `provider === "local"` before it looks at any claim. That short-circuit is
-    // load-bearing (see `role.ts`) — do not delete it believing these nulls
-    // would still deliver `user`.
-    navIdent: null,
+    userId: local.userId,
+    displayName: local.displayName,
+    // `navIdent` is `MUNINN_LOCAL_IDENT` (null when unset): it gives the
+    // pinned identity answer groups, never a role. `resolveRole` short-circuits
+    // on `provider === "local"` before it looks at any claim, so an ident that
+    // is also in `MUNINN_ADMIN_IDENTS` still resolves to `MUNINN_LOCAL_ROLE`.
+    // That short-circuit is load-bearing (see `role.ts`).
+    navIdent: local.navIdent,
     oid: null,
     provider: "local",
     expiresAt,

@@ -211,6 +211,7 @@ describe("the resolved local config", () => {
       token: "a-sufficiently-long-secret",
       userId: "rune",
       displayName: "Rune",
+      navIdent: null,
     });
     expect(config.adminIdents).toEqual(["a123456", "b999999"]);
     expect(config.allowedOrigins).toEqual(["https://muninn-host.example-tailnet.ts.net"]);
@@ -218,6 +219,27 @@ describe("the resolved local config", () => {
 
   test("displayName falls back to the pinned userId", () => {
     expect(resolveAuthConfig(localEnv()).local?.displayName).toBe("rune");
+  });
+});
+
+describe("MUNINN_LOCAL_IDENT", () => {
+  test("unset is null, the shipped identity with no viewer role", () => {
+    expect(resolveAuthConfig(localEnv()).local?.navIdent).toBeNull();
+    expect(resolveAuthConfig(localEnv({ MUNINN_LOCAL_IDENT: "  " })).local?.navIdent).toBeNull();
+  });
+
+  test("a NAV ident is trimmed and upper-cased", () => {
+    expect(resolveAuthConfig(localEnv({ MUNINN_LOCAL_IDENT: " x900001 " })).local?.navIdent).toBe("X900001");
+  });
+
+  test("anything else throws — a typo must not preview no role in silence", () => {
+    for (const bad of ["X90001", "X9000011", "fag", "9900001", "X90000A"]) {
+      expect(() => resolveAuthConfig(localEnv({ MUNINN_LOCAL_IDENT: bad }))).toThrow(/not a NAV ident/);
+    }
+  });
+
+  test("it is INERT outside `local` mode", () => {
+    expect(resolveAuthConfig({ MUNINN_LOCAL_IDENT: "nonsense" }).local).toBeNull();
   });
 });
 

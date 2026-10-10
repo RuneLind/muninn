@@ -8,6 +8,7 @@
     "dev": "bun run --watch src/index.ts",
     "predev:chat": "bun run cleanup:kill",
     "dev:chat": "SCHEDULER_ENABLED=false DASHBOARD_PORT=3011 bun run --watch src/index.ts",
+    "preview:role": "bun scripts/preview-role.ts",
     "start": "bun run src/index.ts",
     "cleanup": "bun run scripts/cleanup-stale-mcp.ts",
     "cleanup:kill": "bun run scripts/cleanup-stale-mcp.ts --kill",

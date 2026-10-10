@@ -72,6 +72,11 @@ export interface LocalAuthConfig {
   readonly userId: string;
   /** Display name for the pinned identity — cosmetic. */
   readonly displayName: string;
+  /** `MUNINN_LOCAL_IDENT`, upper-cased, or null. The NAV ident the pinned
+   *  identity carries, so `WIKI_ANSWER_GROUPS` gives it a viewer role (lanes,
+   *  «deg», «spurt»). Never a role grant: `resolveRole` answers a local
+   *  identity from `MUNINN_LOCAL_ROLE` before it reads any ident. */
+  readonly navIdent: string | null;
 }
 
 export interface EntraAuthConfig {
@@ -333,6 +338,7 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       token,
       userId,
       displayName: trimmed(env, "MUNINN_LOCAL_NAME") || userId,
+      navIdent: parseLocalIdent(env),
     },
     entra: null,
     localRole: parseLocalRole(env),
@@ -340,6 +346,26 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
 }
 
 export const LOCAL_ROLE_ENV = "MUNINN_LOCAL_ROLE";
+export const LOCAL_IDENT_ENV = "MUNINN_LOCAL_IDENT";
+
+/** A NAV ident: one letter, six digits. */
+const NAV_IDENT_RE = /^[A-Z]\d{6}$/;
+
+/**
+ * `MUNINN_LOCAL_IDENT`: unset ⇒ null, which is the shipped `local` identity
+ * with no viewer role. A value that is not a NAV ident throws, because the
+ * other direction is a preview that silently shows no role while the variable
+ * sits in the env looking correct.
+ */
+function parseLocalIdent(env: Record<string, string | undefined>): string | null {
+  const raw = trimmed(env, LOCAL_IDENT_ENV).toUpperCase();
+  if (raw === "") return null;
+  if (NAV_IDENT_RE.test(raw)) return raw;
+  throw new AuthConfigError(
+    `${LOCAL_IDENT_ENV}="${raw}" is not a NAV ident (one letter and six digits). Refusing to start: ` +
+    `the identity would carry no answer group, so the role it was set to preview would silently be absent.`,
+  );
+}
 
 /**
  * `MUNINN_LOCAL_ROLE`, the `local`-mode escape hatch for the zone model.

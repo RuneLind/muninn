@@ -8,9 +8,11 @@ import {
   INTROSPECTION_CACHE_MAX_ENTRIES,
   INTROSPECTION_CACHE_MAX_MS,
   INTROSPECTION_NEGATIVE_TTL_MS,
+  localIdentity,
   type NavTokenClaims,
 } from "./introspect.ts";
 import { resolveAuthConfig } from "./mode.ts";
+import { mintSession } from "./session.ts";
 
 /**
  * The Entra introspector, driven with no network and no database.
@@ -485,5 +487,34 @@ describe("createIntrospector dispatch", () => {
       MUNINN_ALLOWED_ORIGINS: "http://127.0.0.1:3010",
     }))).not.toBeNull();
     expect(createIntrospector(CONFIG)).not.toBeNull();
+  });
+});
+
+describe("the local identity carries MUNINN_LOCAL_IDENT", () => {
+  const config = (ident?: string) =>
+    resolveAuthConfig({
+      MUNINN_AUTH: "local",
+      MUNINN_LOCAL_TOKEN: "a-sufficiently-long-secret",
+      MUNINN_LOCAL_USER: "rune",
+      MUNINN_LOCAL_ROLE: "user",
+      MUNINN_ADMIN_IDENTS: "X999999",
+      MUNINN_ALLOWED_ORIGINS: "http://127.0.0.1:3010",
+      ...(ident ? { MUNINN_LOCAL_IDENT: ident } : {}),
+    });
+
+  test("on the credential channel and on a session cookie alike", async () => {
+    const auth = config("x900001");
+    const introspector = createIntrospector(auth)!;
+    const viaSecret = await introspector.introspect("a-sufficiently-long-secret", "credential");
+    const viaSession = await introspector.introspect(mintSession("a-sufficiently-long-secret", "rune"), "session");
+    for (const outcome of [viaSecret, viaSession]) {
+      expect(outcome.kind).toBe("identity");
+      if (outcome.kind === "identity") expect(outcome.identity.navIdent).toBe("X900001");
+    }
+    expect(localIdentity(auth.local!).navIdent).toBe("X900001");
+  });
+
+  test("unset, the identity has no ident, as before", () => {
+    expect(localIdentity(config().local!).navIdent).toBeNull();
   });
 });

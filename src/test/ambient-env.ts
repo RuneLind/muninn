@@ -72,6 +72,9 @@ const AUTH_FLAGS = [
   // acceptance rows would flip by HOST — the same failure shape as
   // `MUNINN_WIKI_READONLY`, on a flag whose direction is "grants more".
   "MUNINN_LOCAL_ROLE",
+  // `MUNINN_LOCAL_IDENT` gives the pinned identity answer groups, so a
+  // developer's value would mark lanes «deg» on one machine only.
+  "MUNINN_LOCAL_IDENT",
   "MUNINN_ADMIN_IDENTS",
   "MUNINN_ALLOWED_ORIGINS",
   "NAIS_CLUSTER_NAME",
