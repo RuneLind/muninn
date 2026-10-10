@@ -122,6 +122,42 @@ export const MORE_WORDS: Record<QuestionLanguage, { more: string; less: string; 
 /** The class on that badge. */
 export const DL_QSTATE_CLASS = "dl-qstate";
 
+/** Overview's compact DecisionLog and CaseBoard (D41, D42): the controls the
+ *  reader adds, and their words. */
+export const DL_ALL_CLASS = "dl-all";
+export const CB_MORE_CLASS = "cb-more";
+export const CB_OKMORE_CLASS = "cb-okmore";
+/** Decisions Overview shows before «Vis alle». */
+export const DL_COMPACT_SHOWN = 5;
+export const COMPACT_WORDS: Record<
+  QuestionLanguage,
+  {
+    showAll: (n: number) => string;
+    showNewest: (n: number) => string;
+    okMore: (n: number) => string;
+    okFewer: string;
+    hidden: (n: number, label: string) => string;
+    round: string;
+  }
+> = {
+  en: {
+    showAll: (n) => `Show all ${n} decisions`,
+    showNewest: (n) => `Show only the ${n} newest`,
+    okMore: (n) => `+ ${n} more`,
+    okFewer: "show fewer",
+    hidden: (n, label) => `${n} ${n === 1 ? "case" : "cases"} with status “${label}” hidden`,
+    round: "round",
+  },
+  no: {
+    showAll: (n) => `Vis alle ${n} beslutninger`,
+    showNewest: (n) => `Vis bare de ${n} nyeste`,
+    okMore: (n) => `+ ${n} til`,
+    okFewer: "vis færre",
+    hidden: (n, label) => `${n} ${n === 1 ? "sak" : "saker"} med status «${label}» er skjult`,
+    round: "runde",
+  },
+};
+
 // ── WIKI_DEFAULT_LENS (D24) ──────────────────────────────────────────────────
 
 /** A default lens as `WIKI_DEFAULT_LENS` or `.wiki-reader.json` `defaultLens`

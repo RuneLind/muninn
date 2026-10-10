@@ -202,7 +202,8 @@ test.describe("Wiki reader: the top of a report page", () => {
   test("Overview shows a decision's first sentence with «mer»; All shows it whole", async ({ page }) => {
     const seen = await open_(page, WIKI);
     expect(await lensOf(page)).toBe("overview");
-    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    // D41: Overview opens the fold that holds the DecisionLog.
+    await expect(page.locator("details.fold", { hasText: "Beslutninger" })).toHaveAttribute("open", "");
     const d2 = page.locator("li.dl-item#d2");
     await expect(d2.locator(".dl-first")).toHaveText("Regelen gjelder alle saker.");
     await expect(d2.locator(".dl-rest")).toBeHidden();
@@ -262,7 +263,8 @@ test.describe("Wiki reader: the top of a report page", () => {
 
   test("Overview badges a closed question «lukket» after its first sentence; All does not (J)", async ({ page }) => {
     const seen = await open_(page, WIKI);
-    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    // D41: Overview opens the fold that holds the DecisionLog.
+    await expect(page.locator("details.fold", { hasText: "Beslutninger" })).toHaveAttribute("open", "");
     const s1 = page.locator("li.dl-item#s1");
     await expect(s1.locator(".dl-first")).toHaveText("Skal vi bytte kø for alle saker?");
     await expect(s1.locator(".dl-rest")).toBeHidden();
@@ -280,6 +282,7 @@ test.describe("Wiki reader: the top of a report page", () => {
     await expect(badge).toBeHidden();
     expectClean(seen);
 
+    // The All click above is stored, so this page opens in All with the fold closed.
     await open_(page, WIKI_EN);
     await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
     await expect(page.locator("li.dl-item#s1 .dl-qstate")).toHaveText("closed");
@@ -287,7 +290,8 @@ test.describe("Wiki reader: the top of a report page", () => {
 
   test("an item whose rest holds a fact-check mark opens by default in Overview (K)", async ({ page }) => {
     const seen = await open_(page, WIKI);
-    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    // D41: Overview opens the fold that holds the DecisionLog.
+    await expect(page.locator("details.fold", { hasText: "Beslutninger" })).toHaveAttribute("open", "");
     const d4 = page.locator("li.dl-item#d4");
     await expect(d4.locator(".dl-rest")).toBeVisible();
     await expect(d4.locator(".fc-chip")).toBeVisible();
@@ -299,7 +303,8 @@ test.describe("Wiki reader: the top of a report page", () => {
 
   test("«mer» names its item, points at its rest and stays out of a copy", async ({ page }) => {
     const seen = await open_(page, WIKI);
-    await page.locator("details.fold > summary", { hasText: "Beslutninger" }).click();
+    // D41: Overview opens the fold that holds the DecisionLog.
+    await expect(page.locator("details.fold", { hasText: "Beslutninger" })).toHaveAttribute("open", "");
     const more = page.locator("li.dl-item#d2 button.dl-more");
     await expect(more).toHaveAttribute("aria-label", "mer om D2");
     // It names the rest of the text and the nested list, and nothing else.

@@ -42,6 +42,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "stem-collision": { one: "stem collision", many: "stem collisions" },
   "question-block": { one: "question block problem", many: "question block problems" },
   "role-key": { one: "unknown role key", many: "unknown role keys" },
+  "case-board-labels": { one: "unusable CaseBoard label", many: "unusable CaseBoard labels" },
   "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },
   "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },

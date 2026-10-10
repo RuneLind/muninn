@@ -159,7 +159,7 @@ describe("web render", () => {
     // The Query card holds `s1`, so the item is `s1-2` and the card's chip follows it.
     expect(html).toContain('<li class="dl-item" id="s1-2" data-q-state="decided"><span class="id-noun" data-reader-only>Spørsmål</span> <a class="dl-id" href="#s1-2">S1</a><span class="dl-text"><span class="dl-first">Hva gjør vi med køen?</span>');
     expect(html).toContain('<a class="q-id" href="#s1-2">S1</a>');
-    expect(html).toContain('<li class="dl-item" id="d1" data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
+    expect(html).toContain('<li class="dl-item dl-decision" id="d1" data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
 });
 

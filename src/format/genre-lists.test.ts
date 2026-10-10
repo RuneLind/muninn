@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { laneFromAttrs, parseBlocks, type Block, type ChecklistRow } from "./markdown-ast.ts";
-import { commandCode, parseLogItem, parseRunEntry, parseTimelineItem, runStepLine } from "./genre-lists.ts";
+import { commandCode, decisionWhenLabel, parseDecisionWhen, parseLogItem, parseRunEntry, parseTimelineItem, runStepLine } from "./genre-lists.ts";
 import { componentBlockCss } from "./component-styles.ts";
 import { chatStyles } from "../chat/views/components/chat-styles.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -663,5 +663,79 @@ describe("plain-text fallbacks", () => {
     const kept = "<RunChecklist>\n\n- [ ]\n  - Kommando: x\n- [ ] b\n\n</RunChecklist>";
     expect(formatSlackMrkdwn(kept)).toBe("☐ \n  ◦ Kommando: x\n☐ b");
     expect(formatEmailHtml(kept).match(/[☐☑]<\/span>/g)).toHaveLength(2);
+  });
+});
+
+describe("DecisionLog date tail (D41)", () => {
+  // [item text, label or null, the text the tail leaves]
+  const rows: [string, string | null, string][] = [
+    ["Regelen gjelder alle. Fag, 28.09 (runde 1).", "Fag, 28.09 · runde 1", "Regelen gjelder alle."],
+    ["Regelen gjelder alle. Fag, 28.09.2026 (runde 12).", "Fag, 28.09.2026 · runde 12", "Regelen gjelder alle."],
+    ["Regelen gjelder alle. Rune Lind, 07.10.", "Rune Lind, 07.10", "Regelen gjelder alle."],
+    ["Regelen gjelder alle. Fag, 7.10.2026.", "Fag, 7.10.2026", "Regelen gjelder alle."],
+    ["To oppgaver. Fag, 28.09 (runde 1) → oppgave 1 og 2.", "Fag, 28.09 · runde 1", "To oppgaver."],
+    // A struck first claim, snudd later, two rounds (fagavklaring's D9).
+    [
+      "~~MEL-1 skal ha en årsavregning.~~ Snudd i runde 6: MEL-1 skal **ikke** ha det ([PR #3](https://x.io/3); i prod). Fag, 07.10 (runde 5 og 6).",
+      "Fag, 07.10 · runde 5 og 6",
+      "~~MEL-1 skal ha en årsavregning.~~ Snudd i runde 6: MEL-1 skal **ikke** ha det ([PR #3](https://x.io/3); i prod).",
+    ],
+    ["Ingen dato her.", null, ""],
+    ["Feil dag. Fag, 31.02 (runde 1).", null, ""],
+    ["Midt i: Fag, 28.09 (runde 1). Så mer tekst.", null, ""],
+    ["fag, 28.09 (runde 1).", null, ""],
+    ["Komma, 28.09 i setningen uten punktum", null, ""],
+  ];
+  test.each(rows)("%s", (text, label, rest) => {
+    const w = parseDecisionWhen(text);
+    expect(w ? decisionWhenLabel(w) : null).toBe(label);
+    if (w) expect(text.slice(0, w.start).trim()).toBe(rest);
+  });
+
+  test("the label takes the round word", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("X. Fag, 01.02 (runde 3).")!, "round")).toBe("Fag, 01.02 · round 3");
+  });
+
+  test("a pointer after the tail stays in the text", () => {
+    const text = "To oppgaver. Fag, 28.09 (runde 1) → oppgave 1 og 2.";
+    const w = parseDecisionWhen(text)!;
+    expect(text.slice(w.start, w.end).trim()).toBe("Fag, 28.09 (runde 1)");
+    expect(text.slice(w.end).trim()).toBe("→ oppgave 1 og 2.");
+  });
+
+  const log = (items: string[]) => ["<DecisionLog>", "", ...items, "", "</DecisionLog>"].join("\n");
+
+  test("the reader marks decisions and splits the tail out; chat renders as before", () => {
+    const md = log(["- **D1** — Første beslutning gjelder. Fag, 28.09 (runde 1).", "- **S1** — Et spørsmål? Fag, 28.09 (runde 1)."]);
+    const reader = formatWebHtml(md, { reader: true, language: "no" });
+    expect(reader).toContain('<li class="dl-item dl-decision" id="d1"');
+    expect(reader).toContain('<span class="dl-when" data-reader-only>Fag, 28.09 · runde 1</span>');
+    expect(reader).toContain('<span class="dl-tail">Fag, 28.09 (runde 1).</span>');
+    // A question item keeps today's rendering.
+    expect(reader).toMatch(/<li class="dl-item" id="s1"[^>]*><a class="dl-id" href="#s1">S1<\/a><span class="dl-text">/);
+    const chat = formatWebHtml(md);
+    expect(chat).not.toContain("dl-decision");
+    expect(chat).not.toContain("dl-when");
+    expect(chat).not.toContain("dl-tail");
+  });
+
+  test("the tail split leaves the item's text unchanged", () => {
+    const md = log(["- **D2** — Vedtak fattet i flyten skal ha metadata. Fag ba om to oppgaver. Fag, 28.09 (runde 1) → oppgave 1 og 2."]);
+    const text = (html: string) =>
+      html
+        .replace(/<span class="dl-when"[^>]*>[^<]*<\/span>/g, "")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    expect(text(formatWebHtml(md, { reader: true }))).toBe(text(formatWebHtml(md)));
+    const html = formatWebHtml(md, { reader: true });
+    expect(html).toContain('<span class="dl-first">Vedtak fattet i flyten skal ha metadata.</span>');
+    expect(html).toContain('<span class="dl-tail">Fag, 28.09 (runde 1)</span> → oppgave 1 og 2.</span>');
+  });
+
+  test("an item with no tail gets an empty date cell (none rendered)", () => {
+    const html = formatWebHtml(log(["- **D3** — Ingen dato her."]), { reader: true });
+    expect(html).toContain('class="dl-item dl-decision"');
+    expect(html).not.toContain("dl-when");
   });
 });

@@ -290,6 +290,7 @@ export const E2E_PORTS = {
   // The top of a report page (reader lenses PR 2): <More>, <StatusRows> and
   // a DecisionLog item's first sentence in Overview.
   "wiki-readable-top": 3140,
+  "wiki-compact-lists": 3144,
   // The «Oppfølging» block's viewer roles (reader lenses PR 3, D30) with auth
   // off (owner in a group) and in local mode (no role).
   "wiki-oppfolging-roles": 3141,

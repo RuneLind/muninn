@@ -197,3 +197,43 @@ describe("lint: role-key lines past a tag the parser skips", () => {
     ]);
   });
 });
+
+// Check 13, `case-board-labels` (D42): a `<CaseBoard labels=>` entry that is
+// not `status:label` with a case status.
+describe("lint: case-board-labels", () => {
+  const findings = async () => {
+    const index = await buildWikiIndex(root);
+    return (await lintWiki(index, { now: () => NOW })).findings.filter((f) => f.check === "case-board-labels");
+  };
+
+  test("an unknown key and a malformed entry are named on the board's line; status keys are clean", async () => {
+    await write(
+      "plans/p.mdx",
+      page([], ["Tekst.", "", '<CaseBoard src="c.yaml" labels="hold:holdt ute,venter:x,ok:ok,none" />']),
+    );
+    const f = await findings();
+    expect(f.map((x) => x.message.split(" is not")[0])).toEqual([
+      '<CaseBoard labels=> entry "venter:x"',
+      '<CaseBoard labels=> entry "none"',
+    ]);
+    expect(f[0]!.message).toContain("hold, wait, wrong, none, ok");
+    // 5 frontmatter lines + blank, then the body's third line.
+    expect(f[0]!.line).toBe(6 + 1 + 2);
+  });
+
+  test("a board with valid labels, or none, and one quoted in a fence are clean", async () => {
+    await write(
+      "plans/p.mdx",
+      page([], [
+        '<CaseBoard src="c.yaml" labels="hold:holdt ute,wait:venter,wrong:feil,none:ikke kandidat,ok:ok" />',
+        "",
+        '<CaseBoard src="d.yaml" />',
+        "",
+        "```",
+        '<CaseBoard src="c.yaml" labels="bogus:x" />',
+        "```",
+      ]),
+    );
+    expect(await findings()).toEqual([]);
+  });
+});

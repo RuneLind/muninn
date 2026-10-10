@@ -1713,6 +1713,15 @@ inline list only. The
 membership itself lives in `WIKI_ANSWER_GROUPS`, so the check runs the same on
 the laptop and the pod. Acceptance: `role-key-lint.test.ts`.
 
+### Lint check 13 — CaseBoard labels (`case-board-labels`, in `lint.ts`)
+
+A `<CaseBoard labels=>` entry the board cannot use (D42): a key that is not a
+case status (`hold`, `wait`, `wrong`, `none`, `ok`), or an entry with no
+`key:label` shape. The board ignores it and shows the status unlabelled. Read
+through `parseBlocks` and the renderer's own `parseCaseLabels`, so a tag in a
+fence counts as nothing; the line is the board's tag line. Acceptance: the
+`case-board-labels` cases in `role-key-lint.test.ts`.
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,

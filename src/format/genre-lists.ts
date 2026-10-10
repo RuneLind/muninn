@@ -151,6 +151,46 @@ export function parseLogItem(item: string): LogItem {
   return { id: null, text: item, dim: inner !== null || superseded };
 }
 
+/** A decision item's trailing «<who>, DD.MM[.YYYY] (runde N).» (D41). */
+export interface DecisionWhen {
+  who: string;
+  /** `DD.MM` or `DD.MM.YYYY`, as written. */
+  date: string;
+  /** `5`, `5 og 6`; null when the item names no round. */
+  round: string | null;
+  /** Where the tail starts in the text. */
+  start: number;
+  /** Where the hidden part ends: the end of the text, or the start of a
+   *  trailing `→ …` pointer, which stays with the rest. */
+  end: number;
+}
+
+const WHEN_RE = new RegExp(
+  String.raw`(?:^|(?<=[.!?»)*_]\s))` +
+    // who: a capitalised name or role, up to four words, no comma.
+    String.raw`(\p{Lu}[\p{L}\p{N}'’-]*(?: [\p{L}\p{N}'’-]+){0,3}), ` +
+    String.raw`(\d{1,2}\.\d{1,2}(?:\.\d{4})?)` +
+    String.raw`(?: \((?:runde|round) (\d{1,3}(?:(?: og | and |, ?|[–/-])\d{1,3})*)\))?` +
+    String.raw`(\s*→[^\n]*?)?\.\s*$`,
+  "u",
+);
+
+/** The item's trailing date line, or null. Day and month must be a real
+ *  calendar day (a leap year when the year is absent). */
+export function parseDecisionWhen(text: string): DecisionWhen | null {
+  const m = WHEN_RE.exec(text);
+  if (!m) return null;
+  const [d, mo, y] = m[2]!.split(".");
+  if (!isCalendarDay(`${y ?? "2024"}-${mo!.padStart(2, "0")}-${d!.padStart(2, "0")}`)) return null;
+  const end = m[4] ? m.index + m[0].indexOf(m[4]) : text.length;
+  return { who: m[1]!, date: m[2]!, round: m[3] ?? null, start: m.index, end };
+}
+
+/** The date cell's text: `Fag, 07.10 · runde 6`. */
+export function decisionWhenLabel(w: DecisionWhen, roundWord = "runde"): string {
+  return `${w.who}, ${w.date}${w.round ? ` · ${roundWord} ${w.round}` : ""}`;
+}
+
 /** The text with every inline code span (a backtick run, then the same run)
  *  removed. */
 function withoutCodeSpans(text: string): string {

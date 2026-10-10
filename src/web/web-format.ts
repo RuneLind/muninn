@@ -43,7 +43,17 @@ import {
   splitQuerySql,
   type PageFiles,
 } from "../format/query-block.ts";
-import { commandCode, parseLogItem, parseTimelineItem, runParts, runStepLine, type RunEntry } from "../format/genre-lists.ts";
+import {
+  commandCode,
+  decisionWhenLabel,
+  parseDecisionWhen,
+  parseLogItem,
+  parseTimelineItem,
+  runParts,
+  runStepLine,
+  type DecisionWhen,
+  type RunEntry,
+} from "../format/genre-lists.ts";
 import {
   isOpenQuestion,
   parseQuestionAttrs,
@@ -66,8 +76,19 @@ import {
   statusRows,
 } from "../format/report-top.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
-import { idNoun, READER_ONLY_ATTR, type IdLabels } from "../format/reader-lens.ts";
-import { caseBoardWarnings, caseCountParts, groupCases, parseCaseBoard, type BoardCase } from "../format/case-board.ts";
+import { COMPACT_WORDS, idNoun, READER_ONLY_ATTR, type IdLabels } from "../format/reader-lens.ts";
+import {
+  caseBoardWarnings,
+  caseCountParts,
+  caseKort,
+  caseNoteHead,
+  caseStatusLabel,
+  groupCases,
+  parseCaseBoard,
+  parseCaseLabels,
+  type BoardCase,
+  type CaseLabels,
+} from "../format/case-board.ts";
 import {
   betterLabelWarnings,
   computeDelta,
@@ -482,37 +503,54 @@ function blockNote(cls: string, text: string): string {
   return `<p class="${cls}">${escapeHtml(text)}</p>`;
 }
 
-/** One `CaseBoard` row: id link, status pill, owner, note (inline markdown),
- *  refs. Every value comes from the file and is escaped. */
-function caseRowHtml(c: BoardCase): string {
+/** One `CaseBoard` row: id link, status pill (its label when `labels=`
+ *  names one), owner, note (inline markdown), refs. On the reader the row
+ *  also carries Overview's compact line (D42): the note's head and the case's
+ *  `kort:` summary; Overview and All pick by class. Every value comes from the
+ *  file and is escaped. */
+function caseRowHtml(c: BoardCase, labels: CaseLabels): string {
   const id = c.anchor
     ? `<a class="cb-id" href="#${c.anchor}">${escapeHtml(c.id)}</a>`
     : `<span class="cb-id">${escapeHtml(c.id)}</span>`;
+  const label = caseStatusLabel(c.status, labels);
   const pill =
     c.status === "unknown"
       ? `<span class="cb-pill cb-unknown" title="${escapeHtml(`status: ${c.rawStatus || "(none)"}`)}">unknown</span>`
-      : `<span class="cb-pill cb-${c.status}">${c.status}</span>`;
+      : `<span class="cb-pill cb-${c.status}"${label !== c.status ? ` title="${c.status}"` : ""}>${escapeHtml(label)}</span>`;
   const owner = c.owner ? `<span class="cb-owner">${escapeHtml(c.owner)}</span>` : "";
   const note = c.note ? `<span class="cb-note">${renderInline(c.note)}</span>` : "";
   const refs = c.refs.length
     ? `<span class="cb-refs">${c.refs.map((r) => `<span class="cb-ref">${escapeHtml(r)}</span>`).join("")}</span>`
     : "";
   // An id link comes first in the row: `CASE_ROW_RE` reads up to it.
-  return `<div class="cb-row"${c.anchor ? ` id="${c.anchor}"` : ""}>${id}${pill}${owner}${note}${refs}</div>`;
+  return `<div class="cb-row"${c.anchor ? ` id="${c.anchor}"` : ""}>${id}${pill}${owner}${note}${refs}${currentReader ? caseLineHtml(c) : ""}</div>`;
 }
 
-/** A `<CaseBoard src>`: the count strip, then the rows grouped by status. */
-function caseBoardHtml(src: string): string {
+/** Overview's compact line for a case (D42): head « · » kort, either part
+ *  optional. Reader-only text: the source holds both, in the note and `kort:`. */
+function caseLineHtml(c: BoardCase): string {
+  const head = caseNoteHead(c.note);
+  const kort = caseKort(c);
+  const parts = [
+    head ? `<span class="cb-head">${renderInline(head)}</span>` : "",
+    kort ? `<span class="cb-kort">${renderInline(kort)}</span>` : "",
+  ].filter(Boolean);
+  return `<span class="cb-line" ${READER_ONLY_ATTR}>${parts.join(`<span class="cb-sep"> · </span>`)}</span>`;
+}
+
+/** A `<CaseBoard src labels>`: the count strip, then the rows grouped by status. */
+function caseBoardHtml(src: string, labelsAttr: string | undefined): string {
   const section = (inner: string) => `<section class="caseboard">${inner}</section>`;
   if (!src) return section(blockNote("cb-unavailable", CASEBOARD_NO_SRC));
   const file = lookupPageFile(currentPageFiles, src, "yaml");
   if (!file.ok) return section(blockNote("cb-unavailable", pageFileFailureText(file.reason, src, "Cases")));
   const board = parseCaseBoard(file.text);
   if (!board.ok) return section(blockNote("cb-unavailable", `${board.reason}: ${pageFileName(src)}`));
+  const { labels } = parseCaseLabels(labelsAttr);
   const parts = caseCountParts(board.counts);
   const strip = parts.length
     ? parts
-        .map(([n, s]) => `<span class="cb-count cb-count-${s}"><span class="cb-n">${formatCount(n)}</span> ${s}</span>`)
+        .map(([n, s]) => `<span class="cb-count cb-count-${s}"><span class="cb-n">${formatCount(n)}</span> ${escapeHtml(caseStatusLabel(s, labels))}</span>`)
         .join(`<span class="cb-sep"> · </span>`)
     : `<span class="cb-count">0 cases</span>`;
   const notes =
@@ -520,7 +558,7 @@ function caseBoardHtml(src: string): string {
       ? blockNote("cb-truncated", `showing ${formatCount(board.cases.length)} of ${formatCount(board.total)} cases`)
       : "") + caseBoardWarnings(board).map((w) => blockNote("cb-warning", w)).join("");
   const groups = groupCases(board.cases)
-    .map((g) => `<div class="cb-group" data-status="${g.status}">${g.cases.map(caseRowHtml).join("")}</div>`)
+    .map((g) => `<div class="cb-group" data-status="${g.status}">${g.cases.map((c) => caseRowHtml(c, labels)).join("")}</div>`)
     .join("");
   return section(`<p class="cb-strip">${strip}</p>${notes}${groups}`);
 }
@@ -1268,10 +1306,46 @@ function logItemHtml(text: string, nested: string, value: string): string {
   const dim = p.dim ? " dl-dim" : "";
   if (!p.id) return `<li class="dl-item dl-noid${dim}"${value}>${itemHtml(p.text)}${nested}</li>`;
   const anchor = anchorSlug(p.id);
+  // D41, reader only: a decision item carries `dl-decision`, and its trailing
+  // «<who>, DD.MM (runde N).» becomes a date cell for Overview's compact row.
+  const decision = currentReader && DECISION_ID_RE.test(p.id);
+  const tail = decision ? decisionTail(p.text) : null;
+  const when = tail ? `<span class="dl-when" ${READER_ONLY_ATTR}>${escapeHtml(decisionWhenLabel(tail.when, COMPACT_WORDS[currentLanguage].round))}</span>` : "";
   return (
-    `<li class="dl-item${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
-    `<span class="dl-text">${logTextHtml(p.text)}</span>${nested}</li>`
+    `<li class="dl-item${decision ? " dl-decision" : ""}${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
+    `${when}<span class="dl-text">${tail ? tail.html : logTextHtml(p.text)}</span>${nested}</li>`
   );
+}
+
+/** A decision id: `D` and digits, the shape the reader's «N decisions» pill counts. */
+const DECISION_ID_RE = /^D\d+$/;
+
+/** A decision item's text with its date tail in `span.dl-tail` (Overview hides
+ *  it and shows the date cell instead); a `→ …` pointer after the tail stays
+ *  in the rest. Null when the item has no tail, or when cutting it out would
+ *  change the render (the `splitDecisionText` guard). */
+function decisionTail(text: string): { when: DecisionWhen; html: string } | null {
+  const when = parseDecisionWhen(text);
+  if (!when) return null;
+  const body = text.slice(0, when.start).trimEnd();
+  const tail = text.slice(when.start, when.end).trim();
+  const pointer = text.slice(when.end).trim();
+  if (!body) return null;
+  const flat = (html: string) => html.replace(/\s+/g, "");
+  if (flat(itemHtml(body) + itemHtml(tail) + (pointer ? itemHtml(pointer) : "")) !== flat(itemHtml(text))) return null;
+  const tailHtml = ` <span class="dl-tail">${itemHtml(tail)}</span>`;
+  const pointerHtml = pointer ? ` ${itemHtml(pointer)}` : "";
+  const split = splitDecisionText(body);
+  if (split) {
+    return {
+      when,
+      html: `<span class="dl-first">${itemHtml(split.first)}</span><span class="dl-rest">${itemHtml(split.rest)}${tailHtml}${pointerHtml}</span>`,
+    };
+  }
+  if (pointer) {
+    return { when, html: `<span class="dl-first">${itemHtml(body)}</span><span class="dl-rest">${tailHtml}${pointerHtml}</span>` };
+  }
+  return { when, html: `${itemHtml(body)}${tailHtml}` };
 }
 
 /** A DecisionLog item's text split after its first sentence (D6), or null.
@@ -1679,7 +1753,7 @@ const webRenderer: BlockRenderer = {
       }
       case "CaseBoard": {
         // Self-closing in the authoring rule; a body, if written, follows the board.
-        const board = caseBoardHtml((attrs.src ?? "").trim());
+        const board = caseBoardHtml((attrs.src ?? "").trim(), attrs.labels);
         return rawChildren.some((b) => !isBlankTextBlock(b)) ? `${board}${children}` : board;
       }
       case "DeltaTable":

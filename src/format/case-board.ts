@@ -28,6 +28,8 @@ export interface BoardCase {
   rawStatus: string;
   owner: string;
   note: string;
+  /** The optional one-line summary Overview shows (D42); empty when absent. */
+  kort: string;
   refs: string[];
 }
 
@@ -115,6 +117,7 @@ function toCase(entry: unknown, notes: Notes): Omit<BoardCase, "anchor"> | "skip
     owner: field("owner", entry.owner, notes),
     // A YAML block scalar keeps its line ends; a note is one inline run.
     note: field("note", entry.note, notes).replace(/\s*\n\s*/g, " "),
+    kort: field("kort", entry.kort, notes).replace(/\s*\n\s*/g, " "),
     refs: refsRaw.map((r) => field("refs", r, notes)).filter(Boolean),
   };
 }
@@ -228,7 +231,7 @@ export function caseBoardWarnings(b: Extract<CaseBoardData, { ok: true }>): stri
     b.coerced.length > 0
       ? `Read as numbers or other non-text, quote them to keep them as written: ${b.coerced.join(", ")}`
       : "",
-    b.dropped > 0 ? `${plural(b.dropped, "value", "values")} that ${b.dropped === 1 ? "is" : "are"} a list or mapping dropped (note, owner or refs)` : "",
+    b.dropped > 0 ? `${plural(b.dropped, "value", "values")} that ${b.dropped === 1 ? "is" : "are"} a list or mapping dropped (note, kort, owner or refs)` : "",
   ].filter(Boolean);
 }
 
@@ -238,4 +241,48 @@ export function groupCases(cases: BoardCase[]): { status: CaseStatus | "unknown"
   return ([...CASE_STATUSES, "unknown"] as const)
     .map((status) => ({ status, cases: cases.filter((c) => c.status === status) }))
     .filter((g) => g.cases.length > 0);
+}
+
+// ── Overview's compact line and the labels attribute (D42) ─────────────────
+
+/** The note's head: the text before its first « · »; empty when it has none. */
+export function caseNoteHead(note: string): string {
+  const i = note.indexOf(" · ");
+  return i > 0 ? note.slice(0, i).trim() : "";
+}
+
+/** The compact line's summary: `kort:`, else the note's first `**bold**` span,
+ *  else empty. */
+export function caseKort(c: Pick<BoardCase, "kort" | "note">): string {
+  if (c.kort) return c.kort;
+  const m = /\*\*(?!\s)([^*\n]+?)\*\*/.exec(c.note);
+  return m ? m[1]!.trim() : "";
+}
+
+export type CaseLabels = Partial<Record<CaseStatus, string>>;
+
+/** `labels="hold:holdt ute,wait:venter"` read into status → label. A key that
+ *  is not a case status, or an entry with no `:` or an empty side, is kept in
+ *  `bad` (the linter names it) and ignored. Keys are case-folded. */
+export function parseCaseLabels(raw: string | undefined): { labels: CaseLabels; bad: string[] } {
+  const labels: CaseLabels = {};
+  const bad: string[] = [];
+  for (const entry of (raw ?? "").split(",")) {
+    const e = entry.trim();
+    if (!e) continue;
+    const at = e.indexOf(":");
+    const key = (at > 0 ? e.slice(0, at) : "").trim().toLowerCase();
+    const label = at > 0 ? e.slice(at + 1).trim() : "";
+    if (!label || !(CASE_STATUSES as readonly string[]).includes(key)) {
+      bad.push(e);
+      continue;
+    }
+    labels[key as CaseStatus] = label;
+  }
+  return { labels, bad };
+}
+
+/** A status as the board shows it: its label, else the status itself. */
+export function caseStatusLabel(status: CaseStatus | "unknown", labels: CaseLabels): string {
+  return status === "unknown" ? status : (labels[status] ?? status);
 }

@@ -399,8 +399,13 @@ const READER_CONTROLS = [
   // which links its DecisionLog item.
   "a.dl-id",
   "a.q-id",
-  // A DecisionLog item's «mer» toggle in Overview (a class on the item).
+  // A DecisionLog item's «mer» toggle in Overview (a class on the item), and
+  // Overview's compact-list toggles (D41, D42): «Vis alle», a case's «mer»,
+  // the `ok` group's «+ N til». Each toggles a class, no request.
   "button.dl-more",
+  "button.dl-all",
+  "button.cb-more",
+  "button.cb-okmore",
   ".qx-search",
   ".qx-chip",
   // Out to the tracker.
