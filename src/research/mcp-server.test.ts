@@ -63,6 +63,18 @@ describe("RESEARCH_MCP_PORT", () => {
     for (const bad of ["abc", "-1", "70000", "91.5"]) expect(researchMcpPort({ RESEARCH_MCP_PORT: bad })).toBe(9190);
   });
 
+  test("construction reads no env: the singleton is built at import, before logging", () => {
+    const saved = process.env.RESEARCH_MCP_PORT;
+    process.env.RESEARCH_MCP_PORT = "0";
+    try {
+      const server = new ResearchMcpServer();
+      expect((server as unknown as { portOverride: number | undefined }).portOverride).toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env.RESEARCH_MCP_PORT;
+      else process.env.RESEARCH_MCP_PORT = saved;
+    }
+  });
+
   test("a server built with no port reads RESEARCH_MCP_PORT when it starts", async () => {
     const saved = process.env.RESEARCH_MCP_PORT;
     process.env.RESEARCH_MCP_PORT = "0";
