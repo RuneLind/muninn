@@ -165,6 +165,11 @@ const WIKI_STAMP_FLAGS = ["WIKI_STAMP_BIN", "WIKI_STAMP_ROOTS", "WIKI_STAMP_BUN"
  *  rides along: it lands in the payload and the copied command line. */
 const FELLES_PUBLISH_FLAGS = ["FELLES_WIKI_PUBLISH_BIN", "FELLES_WIKI_PUBLISH_WIKIS", "FELLES_WIKI_BUCKET"];
 
+/** The Agent lens (`src/wiki/plan-card.ts`): a developer's value would put
+ *  `agentLens: true` on every plan page a suite renders and point the route at
+ *  a real plan-card that calls claude-usage. The specs that use it set it. */
+const PLAN_CARD_FLAGS = ["PLAN_CARD_BIN"];
+
 /** Answer cards (`WIKI_ANSWER_WIKIS`, `WIKI_ANSWER_OWNER`, `WIKI_ANSWER_SCANNER`,
  *  `WIKI_ANSWER_GROUPS` and the two retention windows): a developer's value
  *  would make every matching card answerable, name an owner on every
@@ -220,6 +225,7 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...CLAUDE_USAGE_FLAGS,
   ...WIKI_STAMP_FLAGS,
   ...FELLES_PUBLISH_FLAGS,
+  ...PLAN_CARD_FLAGS,
   ...WIKI_ANSWER_FLAGS,
   ...WIKI_BUCKET_MIRROR_FLAGS,
   ...WIKI_LENS_FLAGS,

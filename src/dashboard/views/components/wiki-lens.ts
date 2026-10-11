@@ -64,6 +64,7 @@ import { fmtTokens } from "../../../utils/fmt-tokens.ts";
 import { localStore } from "./wiki-local-store.ts";
 import { LINE_REFS_TOGGLE_CLASS } from "./wiki-report-blocks.ts";
 import { PEEK_CLASS } from "./wiki-ref-links.ts";
+import { agentPaneCss, setAgentPane, type AgentPaneOptions } from "./wiki-agent-pane.ts";
 
 export const LENS_SWITCH_CLASS = "wiki-lens-switch";
 export { LENS_CLASS_PREFIX };
@@ -467,7 +468,12 @@ export interface LensOptions {
   inPlace?: boolean;
   /** The server's flag: the Agent button renders only when true. */
   agentAvailable: boolean;
+  /** The page the Agent pane asks plan-card about; absent ⇒ no pane. */
+  agent?: AgentPaneOptions;
 }
+
+/** Each article's Agent pane options, read by {@link applyLens}. */
+const agentOptions = new WeakMap<Element, AgentPaneOptions>();
 
 /** The lens `article` shows, read off its class; null before `enhanceLens`. */
 export function lensOf(article: Element | null): Lens | null {
@@ -482,6 +488,8 @@ function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElemen
     article.classList.toggle(`${LENS_CLASS_PREFIX}${l}`, l === lens);
   }
   if (lens === "overview" && before !== "overview" && enter) openCompactFolds(article);
+  // D4: the Agent lens hides the article (CSS) and shows plan-card's card.
+  setAgentPane(article, lens === "agent", agentOptions.get(article) ?? null);
   sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
     const on = b.dataset.lens === lens;
     b.classList.toggle("on", on);
@@ -506,6 +514,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   const article = wrap.querySelector<HTMLElement>(".wiki-article");
   const row = wrap.querySelector<HTMLElement>(".wiki-article-head .wiki-meta-row");
   if (!article) return;
+  if (opts.agentAvailable && opts.agent) agentOptions.set(article, opts.agent);
   row?.querySelectorAll(`.${LENS_SWITCH_CLASS}`).forEach((el) => el.remove());
   noteHiddenCases(article, opts.language);
   decorateFoldSizes(article, opts.language);
@@ -720,6 +729,8 @@ function authoredSelectionText(sel: Selection): string | null {
 export function lensCss(): string {
   return `
     .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
+    .wiki-article.${LENS_CLASS_PREFIX}agent { display: none !important; }
+${agentPaneCss()}
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }

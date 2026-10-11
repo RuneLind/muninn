@@ -185,6 +185,14 @@ describe("decideOrigin — the pure rule", () => {
       decideOrigin({ ...base, method: "GET", path: "/api/wiki/find-everywhere", secFetchSite: "cross-site" }).allowed,
     ).toBe(false);
   });
+
+  test("the Agent lens route is listed — one GET spawns a plan-card child", () => {
+    expect(SIDE_EFFECTING_GETS).toContain("/api/wiki/plan-card");
+    expect(isSideEffectingRequest("GET", "/api/wiki/plan-card")).toBe(true);
+    expect(isSideEffectingRequest("HEAD", "/api/wiki/plan-card")).toBe(true);
+    expect(decideOrigin({ ...base, method: "GET", path: "/api/wiki/plan-card", secFetchSite: "cross-site" }).allowed).toBe(false);
+    expect(decideOrigin({ ...base, method: "GET", path: "/api/wiki/plan-card", secFetchSite: "same-origin" }).allowed).toBe(true);
+  });
 });
 
 /**

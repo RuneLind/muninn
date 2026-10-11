@@ -1228,9 +1228,10 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
   test("PR 675 fix round 1, item 7: nothing hides the none toggle outside Overview", async ({ page }) => {
     const seen = await open_(page, "&lens=all", "", NONE_FACT_REL);
     const more = page.locator('.wiki-article .cb-group[data-status="none"]').first().locator("button.cb-nonemore");
-    // Every lens the reader knows, set on the article directly: the Agent
-    // button renders only where the server offers it, and it never does here.
-    for (const lens of ["all", "agent", "overview"]) {
+    // The two lenses that show the article, set on it directly. The Agent lens
+    // (PR 5) hides the whole article behind plan-card's card, so it has no
+    // toggle to show (e2e/wiki-agent-lens.spec.ts).
+    for (const lens of ["all", "overview"]) {
       await page.locator(".wiki-article").evaluate((el, l) => {
         el.classList.remove("lens-overview", "lens-all", "lens-agent");
         el.classList.add(`lens-${l}`);

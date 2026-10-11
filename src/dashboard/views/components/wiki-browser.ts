@@ -4214,6 +4214,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       enhanceLens(articleRoot, {
         language: readerLang,
         agentAvailable: reader?.agentLens === true,
+        // The Agent pane's page: the registry name, as the answer cards send it.
+        agent: { wiki: FIND_SELF_WIKI || WIKI, relPath: data.meta.relPath },
         inPlace: keptLens !== null,
         initial: resolveLens({
           url: pendingUrlLens,

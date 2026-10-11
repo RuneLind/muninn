@@ -390,6 +390,37 @@ describe("GET /api/wiki/html", () => {
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
 
+  // D7: the Agent flag is server-computed — PLAN_CARD_BIN, plan_status, a
+  // plan-card root, and an admin viewer.
+  test("/api/wiki/page agentLens follows D7", async () => {
+    await Bun.write(path.join(root, "concepts/Agent Plan.mdx"), "---\ntitle: Agent Plan\nplan_status: in-flight\n---\n\nBody.\n");
+    await Bun.write(path.join(root, "concepts/Agent Note.mdx"), "---\ntitle: Agent Note\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const agentFor = async (rel: string, role?: string) => {
+      const a = new Hono();
+      if (role) a.use(async (c, next) => { c.set("role" as never, role as never); await next(); });
+      registerWikiRoutes(a, {} as Parameters<typeof registerWikiRoutes>[1]);
+      const res = await a.request("/api/wiki/page?relPath=" + encodeURIComponent(rel));
+      return ((await res.json()) as { reader: { agentLens: boolean } }).reader.agentLens;
+    };
+    const saved = { bin: process.env.PLAN_CARD_BIN, roots: process.env.WIKI_STAMP_ROOTS };
+    try {
+      expect(await agentFor("concepts/Agent Plan.mdx")).toBe(false);
+      process.env.PLAN_CARD_BIN = "/x/plan-card.ts";
+      process.env.WIKI_STAMP_ROOTS = root;
+      expect(await agentFor("concepts/Agent Plan.mdx")).toBe(true);
+      expect(await agentFor("concepts/Agent Note.mdx")).toBe(false);
+      expect(await agentFor("concepts/Agent Plan.mdx", "user")).toBe(false);
+      process.env.WIKI_STAMP_ROOTS = path.join(root, "concepts");
+      expect(await agentFor("concepts/Agent Plan.mdx")).toBe(false);
+    } finally {
+      if (saved.bin === undefined) delete process.env.PLAN_CARD_BIN;
+      else process.env.PLAN_CARD_BIN = saved.bin;
+      if (saved.roots === undefined) delete process.env.WIKI_STAMP_ROOTS;
+      else process.env.WIKI_STAMP_ROOTS = saved.roots;
+    }
+  });
+
   // The viewer's role keys follow the auth MODE, not just whether a session is
   // present: the `WIKI_ANSWER_OWNER` fallback is auth off's only.
   test("/api/wiki/page roles: an authenticated viewer's groups; no owner fallback when authenticating", async () => {

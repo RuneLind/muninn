@@ -4,7 +4,7 @@ import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
-import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
 import { issueRowsFor } from "../../wiki/trackers/rows.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
@@ -41,6 +41,8 @@ import {
 } from "./wiki-provenance.ts";
 import { registerWikiStampRoute } from "./wiki-stamp.ts";
 import { registerWikiFellesPublishRoute } from "./wiki-felles-publish.ts";
+import { registerWikiPlanCardRoute } from "./wiki-plan-card.ts";
+import { agentLensFor, planCardConfigFromEnv } from "../../wiki/plan-card.ts";
 import { fellesPublishPayloadField } from "../../wiki/felles-publish.ts";
 import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
@@ -1641,10 +1643,24 @@ export function registerWikiReadRoutes(
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
       // `roles`: the viewer's group keys (D30) — never a member — and the
       // admin's «Se som rolle» (D18).
-      reader: readerPayload(entry?.name, index.readerConfig, config.wikiDefaultLens ?? resolveWikiDefaultLens(), {
-        roles: viewerGroupKeys(authMode(), sessionIdentity(c), answerCfg.owner, answerCfg.groups ?? new Map()),
-        admin: (c.get("role") ?? "admin") === "admin",
-      }),
+      reader: readerPayload(
+        entry?.name,
+        index.readerConfig,
+        config.wikiDefaultLens ?? resolveWikiDefaultLens(),
+        {
+          roles: viewerGroupKeys(authMode(), sessionIdentity(c), answerCfg.owner, answerCfg.groups ?? new Map()),
+          admin: (c.get("role") ?? "admin") === "admin",
+        },
+        // D7: only where the plan-card route is registered (not under the
+        // read slice, which drops the `wiki` group).
+        tools &&
+          agentLensFor({
+            config: planCardConfigFromEnv(),
+            wikiDir: resolveWikiRoot(entry?.root),
+            hasPlanStatus: parseFrontmatter(markdown).plan_status !== undefined,
+            admin: (c.get("role") ?? "admin") === "admin",
+          }),
+      ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):
       // the client keys its controls on THIS, never on
@@ -1829,6 +1845,9 @@ export function registerWikiToolRoutes(
   // Publish to the melosys-felles bucket — off unless FELLES_WIKI_PUBLISH_BIN
   // and FELLES_WIKI_PUBLISH_WIKIS are set, and dropped on nais with the group.
   registerWikiFellesPublishRoute(app);
+  // The Agent lens: runs plan-card on a plan page. Off unless PLAN_CARD_BIN is
+  // set; dropped on nais with the group.
+  registerWikiPlanCardRoute(app, config);
   // The series editor's one write, in the same group for the same reason.
   registerWikiSeriesRoutes(app);
   // The issue board's page, in the same group: it reads one wiki's index.
