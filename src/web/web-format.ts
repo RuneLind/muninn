@@ -1,7 +1,7 @@
 import {
   parseBlocks,
   scanInlineComponents,
-  COMPONENT_TAG_SOURCE_SINGLE_LINE,
+  stripFactWrappers,
   normalizeCalloutTone,
   normalizePillTone,
   parseResolvedDate,
@@ -1288,7 +1288,7 @@ function withoutIdOnlyItems(list: Extract<Block, { type: "ul" | "ol" }>, ids: re
   const idOnly = (item: string) => {
     let rest = item.replace(/^\[[ xX]\][ \t]*/, "");
     for (const id of ids) rest = rest.replace(questionIdRe(id, "g"), "");
-    return rest.replace(/[\p{P}\p{S}\s]/gu, "") === "";
+    return rest.replace(/[\p{P}\p{S}\p{M}\s\u200D]/gu, "") === "";
   };
   const keep = list.items.map((_, k) => k).filter((k) => list.nested?.[k]?.length || !idOnly(list.items[k]!));
   if (keep.length === list.items.length) return list;
@@ -1303,43 +1303,40 @@ function withoutIdOnlyItems(list: Extract<Block, { type: "ul" | "ol" }>, ids: re
   return { ...rest, items, ...nested, start: nums[keep[0]!]!, ...(values.some((v) => v !== undefined) ? { values } : {}) };
 }
 
-const ROW_COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
-
-/** Inline markdown as one line of plain text, for a row's summary: component
- *  tags dropped, their inner text kept. The tag pattern names every component,
- *  `<Fact>` marks included. */
-function plainInline(text: string): string {
-  return peekText(text)
-    .replace(ROW_COMPONENT_TAG_RE, "")
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/(\*\*|__|~~)(.+?)\1/g, "$2")
-    .replace(/`([^`]*)`/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/** A `<Question>` card's lead for its row (D4): the body's first bold run
- *  outside code spans, else the lead sentence of its first line. Empty when
- *  the body has no prose (a fence or a table alone). */
-function questionLead(q: ComponentBlock): string {
-  const src = q.children
-    .map((b) => (b.type === "text" ? b.lines.join("\n") : b.type === "ul" || b.type === "ol" ? b.items.join("\n") : b.type === "heading" ? b.content : ""))
-    .join("\n");
-  // Same length as `src`, so a match's offsets read the original text.
+/** A `<Question>` card's lead for its row (D4), as inline HTML: the body's
+ *  first bold run, found outside code spans, else the first sentence of its
+ *  first line (the DecisionLog's split). Fact-check marks are dropped
+ *  (zone-aware), so no chip lands in a `<summary>`; every other inline
+ *  component renders an inline span. Empty when the body has no prose (a
+ *  fence or a table alone). */
+function questionLeadHtml(q: ComponentBlock): string {
+  const src = stripFactWrappers(
+    q.children
+      .map((b) => (b.type === "text" ? b.lines.join("\n") : b.type === "ul" || b.type === "ol" ? b.items.join("\n") : b.type === "heading" ? b.content : ""))
+      .join("\n"),
+  );
+  // Same length as `src`, so a match's offsets slice the original text.
   const masked = src.split("\n").map(maskLineCodeSpans).join("\n");
   const bold = /(\*\*|__)(?=\S)([\s\S]+?)\1/.exec(masked);
-  if (bold) return plainInline(src.slice(bold.index + bold[1]!.length, bold.index + bold[0].length - bold[1]!.length));
-  return plainInline(leadSentence(peekText(src.split("\n").find((l) => l.trim()) ?? "")));
+  let lead: string;
+  if (bold) lead = src.slice(bold.index + bold[1]!.length, bold.index + bold[0].length - bold[1]!.length);
+  else {
+    const line = (src.split("\n").find((l) => l.trim()) ?? "").trim().replace(/^\[[ xX]\][ \t]*/, "");
+    lead = splitDecisionText(line)?.first ?? line;
+  }
+  lead = lead.replace(/\s*\n\s*/g, " ").trim();
+  return lead ? itemHtml(lead) : "";
 }
 
-/** A DecisionLog item's text without its trailing date line (`Rune,
- *  11.10.2026 (runde 2).`), the cut the compact row makes (`decisionTail`). */
-function withoutDateTail(text: string): string {
-  const when = parseDecisionWhen(text);
-  const body = when ? text.slice(0, when.start).trimEnd() : "";
-  return body || text;
+/** The first sentence a decided card's row quotes, as inline HTML: what the
+ *  DecisionLog compact row shows as `dl-first` for the item, by the row's own
+ *  two cuts (the date tail and the sentence split, both under `rendersAs`),
+ *  with fact-check marks dropped (zone-aware). */
+function decisionRowFirstHtml(text: string, id: string): string {
+  const src = stripFactWrappers(text);
+  const isDecision = DECISION_ID_RE.test(id);
+  const body = (isDecision ? decisionTailCut(src)?.body : undefined) ?? src;
+  return itemHtml(decisionParts(body, isDecision)?.first ?? body);
 }
 
 /** The «Avklart» lane (settled questions plan, D1, D3–D6): render-only, so no
@@ -1354,7 +1351,7 @@ function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguag
     const id = parseQuestionAttrs(q.attrs).id!;
     const state = page.states.get(id);
     const decision = state?.kind === "decided" ? state.decision : null;
-    const sentence = decision ? plainInline(decisionFirstSentence(withoutDateTail(page.logText.get(decision) ?? ""), decision)) : "";
+    const sentence = decision ? decisionRowFirstHtml(page.logText.get(decision) ?? "", decision) : "";
     return { q, id, decision, sentence };
   });
   const chip = (r: (typeof rows)[number]) => (r.decision ? `${r.id}→${r.decision}` : r.id);
@@ -1362,15 +1359,15 @@ function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguag
     .map((r) => {
       const anchor = currentLaneCards!.moved.get(r.id)!;
       const pill = r.decision ? `${L.decided} → ${r.decision}` : L.closed;
-      const lead = questionLead(r.q);
+      const lead = questionLeadHtml(r.q);
       const out = r.sentence
-        ? `<span class="q-row-out"><span class="q-row-did">${escapeHtml(r.decision!)}</span> ${escapeHtml(r.sentence)}</span>`
+        ? `<span class="q-row-out"><span class="q-row-did">${escapeHtml(r.decision!)}</span> ${r.sentence}</span>`
         : "";
       return (
         `<details class="q-compact" id="${anchor}"><summary class="q-row" ${READER_ONLY_ATTR}>` +
         `<span class="q-row-tag"><span class="nm-qid">${escapeHtml(r.id)}</span><span class="q-row-state${r.decision ? " q-row-decided" : ""}">${escapeHtml(pill)}</span></span>` +
         // No prose to lead with: no title, rather than an empty cell.
-        (lead ? `<span class="q-row-title">${escapeHtml(lead)}</span>` : "") +
+        (lead ? `<span class="q-row-title">${lead}</span>` : "") +
         `<span class="q-row-cta"><span class="q-row-open">${escapeHtml(words.action.see)}</span><span class="q-row-close">${escapeHtml(words.action.hide)}</span></span>` +
         `${out}</summary>` +
         `<div class="q-row-body">${questionCardHtml(r.q.attrs, renderBlocks(r.q.children, webRenderer))}</div></details>`
@@ -1566,17 +1563,27 @@ function rendersAs(pieces: readonly string[], wholeFlat: string): boolean {
  *  in the rest. Null when the item has no tail, or when cutting it out would
  *  change the render. */
 function decisionTail(text: string): { when: DecisionWhen; html: string } | null {
+  const cut = decisionTailCut(text);
+  if (!cut) return null;
+  const { when, body, tail, pointer } = cut;
+  const after = ` <span class="${DL_TAIL_CLASS}">${itemHtml(tail)}</span>${pointer ? ` ${itemHtml(pointer)}` : ""}`;
+  const parts = decisionParts(body, true);
+  if (parts) return { when, html: partsHtml(parts, after) };
+  if (pointer) return { when, html: `<span class="dl-first">${itemHtml(body)}</span><span class="dl-rest">${after}</span>` };
+  return { when, html: `${itemHtml(body)}${after}` };
+}
+
+/** Where {@link decisionTail} cuts: the item's body, its date tail and a
+ *  `→ …` pointer after it. Null when there is no tail, or when cutting it out
+ *  would change the render. */
+function decisionTailCut(text: string): { when: DecisionWhen; body: string; tail: string; pointer: string } | null {
   const when = parseDecisionWhen(text);
   if (!when) return null;
   const body = text.slice(0, when.start).trimEnd();
   const tail = text.slice(when.start, when.end).trim();
   const pointer = text.slice(when.end).trim();
   if (!body || !rendersAs(pointer ? [body, tail, pointer] : [body, tail], flatHtml(itemHtml(text)))) return null;
-  const after = ` <span class="${DL_TAIL_CLASS}">${itemHtml(tail)}</span>${pointer ? ` ${itemHtml(pointer)}` : ""}`;
-  const parts = decisionParts(body, true);
-  if (parts) return { when, html: partsHtml(parts, after) };
-  if (pointer) return { when, html: `<span class="dl-first">${itemHtml(body)}</span><span class="dl-rest">${after}</span>` };
-  return { when, html: `${itemHtml(body)}${after}` };
+  return { when, body, tail, pointer };
 }
 
 /** A DecisionLog item's text split after its first sentence (D6), or null.

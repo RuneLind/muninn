@@ -801,8 +801,57 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
   });
 
   test("fix round 1: the outcome line drops the D item's date tail", () => {
-    // «A.» is no sentence end to the split, so the item reads as one sentence.
+    // «Vi velger A.» is under FIRST_SENTENCE_MIN (15), so the split joins it
+    // to the tail and only the tail cut separates them.
     expect(text(oneCard("Spm?", "- **D7** — Vi velger A. Rune, 11.10.2026 (runde 2)."))).toMatch(/D7 Vi velger A\.$/);
+  });
+
+  // Fix round 2: the row's text is rendered by the renderer's own seams.
+  const rowHtml = (s: string, part: "title" | "out") =>
+    part === "title"
+      ? /<span class="q-row-title">(.*?)<\/span><span class="q-row-cta">/.exec(s)?.[1]
+      : /<span class="q-row-out"><span class="q-row-did">D7<\/span> (.*)<\/span>$/.exec(s)?.[1];
+  const logFirst = (d7: string) => {
+    const md = [...nm([lane('kind="you"', ["- x"])]), "", ...card("S1", "Spm?"), "<DecisionLog>", "", d7, decided("S1", "D7"), "", "</DecisionLog>"].join("\n");
+    const html = reader(md);
+    const text = /<li[^>]*id="d7"[^>]*>.*?<span class="dl-text"[^>]*>(.*?)<\/span>(?:<span class="dl-when"|<\/li>)/.exec(html)![1]!;
+    return { row: rowHtml(rows(html)[0]!.summary, "out"), text };
+  };
+
+  test("fix round 2: a code span in the bold lead renders as code, its tag kept", () => {
+    expect(rowHtml(oneCard("**Skal vi bruke `<Pill>` her?**"), "title")).toBe("Skal vi bruke <code>&lt;Pill&gt;</code> her?");
+  });
+
+  test("fix round 2: a code span in the D item renders as code, its tag kept", () => {
+    const { row, text } = logFirst('- **D7** — Skriv `<Fact n="1">` rundt passasjen.');
+    expect(row).toBe("Skriv <code>&lt;Fact n=&quot;1&quot;&gt;</code> rundt passasjen.");
+    expect(row).toBe(text);
+  });
+
+  test("fix round 2: no bold run outside code: the first sentence, code and strike rendered", () => {
+    expect(rowHtml(oneCard("Skal vi `**x**` sende nå? Mer tekst her."), "title")).toBe("Skal vi <code>**x**</code> sende nå?");
+    expect(rowHtml(oneCard("~~Gammelt spørsmål~~ Nytt spørsmål her? Mer."), "title")).toBe("<s>Gammelt spørsmål</s> Nytt spørsmål her?");
+  });
+
+  test("fix round 2: a date tail inside a code span or emphasis is not cut, as in the DecisionLog row", () => {
+    const code = logFirst("- **D7** — Vi velger `A. Rune, 11.10.2026 → x`.");
+    expect(code.row).toBe("Vi velger <code>A. Rune, 11.10.2026 → x</code>.");
+    expect(code.row).toBe(code.text);
+    const em = logFirst("- **D7** — _Vi velger A. Rune, 11.10.2026 → x_.");
+    expect(em.row).toBe("<em>Vi velger A. Rune, 11.10.2026 → x</em>.");
+    expect(em.row).toBe(em.text);
+  });
+
+  test("fix round 2: a struck lead renders struck, as in the DecisionLog row", () => {
+    const { row, text } = logFirst("- **D7** — ~~Vi velger B.~~ Vi velger A.");
+    expect(row).toBe("<s>Vi velger B.</s> Vi velger A.");
+    expect(row).toBe(text);
+  });
+
+  test("fix round 2: no fact-check chip lands in a row", () => {
+    const s = oneCard('**Skal vi sende <Fact n="2" v="wrong">B</Fact>?**', '- **D7** — Vi sender <Fact n="1" v="ok">alternativ A</Fact> nå.');
+    expect(s).not.toContain("fc-");
+    expect(rowHtml(s, "title")).toBe("Skal vi sende B?");
   });
 
   test("an open card stays in the waiting lane that names it", () => {
@@ -938,6 +987,12 @@ describe("D2: a waiting-lane item that only names its card", () => {
     expect(fagBody(html)).toBe('<div class="nm-body"><ul><li>Ring fag.</li></ul>');
     expect(chipsOf(html)).toEqual([["S4", "S5"]]);
     expect(countsOf(html)).toEqual(["2 spørsmål og 1 oppgave"]);
+  });
+
+  test("fix round 2: marks and the joiner count as nothing: ✔️ and ☑️ are hidden", () => {
+    for (const item of ["- **S4** ✔️", "- **S4** ☑️", "- **S4** 👍\u200D"]) {
+      expect(fagBody(reader(md([item, "- Ring fag."]))), item).toBe('<div class="nm-body"><ul><li>Ring fag.</li></ul>');
+    }
   });
 
   test("fix round 1: a symbol counts as nothing: `- **S4** ✅` is hidden", () => {

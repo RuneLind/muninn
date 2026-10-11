@@ -41,6 +41,8 @@ const WIKI_NO = "e2e-answer-card-no";
 const WIKI_RO = "e2e-answer-card-ro";
 const REL = "plans/card.mdx";
 const STYLE_REL = "plans/style.mdx";
+// A decided card in the «Avklart» lane, holding an uncopied answer.
+const SETTLED_REL = "plans/settled.mdx";
 const FIX_REL = "plans/fix.mdx";
 // Synthetic throughout: invented names, ids and wording.
 const OWNER = "Rune Owner";
@@ -93,6 +95,32 @@ const STYLE_PAGE = [
   "- **C2** — Two. Closed 2026-10-08 (D99).",
   "- **C3** — Three.",
   "- **C4** — Four.",
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+
+const SETTLED_PAGE = [
+  "---",
+  "title: Settled page",
+  "type: plan",
+  "---",
+  "",
+  "<NextMoves>",
+  "",
+  '<Lane kind="waiting" who="Waiting on fag">',
+  "",
+  "- Call fag.",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+  "",
+  ...q("N1", "Decided with a new answer?"),
+  "<DecisionLog>",
+  "",
+  "- **D99** — Done.",
+  "- **N1** — One. Closed 2026-10-08 (D99).",
   "",
   "</DecisionLog>",
   "",
@@ -306,6 +334,7 @@ test.beforeAll(async ({}, info) => {
   for (const dir of ["a", "no", "ro"]) await mkdir(path.join(base, dir, "plans"), { recursive: true });
   await writeFile(path.join(base, "a", REL), PAGE, "utf8");
   await writeFile(path.join(base, "a", STYLE_REL), STYLE_PAGE, "utf8");
+  await writeFile(path.join(base, "a", SETTLED_REL), SETTLED_PAGE, "utf8");
   await writeFile(path.join(base, "a", FIX_REL), FIX_PAGE, "utf8");
   await writeFile(path.join(base, "a", FOCUS_REL), FOCUS_PAGE, "utf8");
   await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
@@ -350,6 +379,8 @@ test.beforeAll(async ({}, info) => {
   // C2 is closed, so the route refuses it: an answer saved before the close.
   await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, body, question_hash)
             VALUES (${randomUUID()}, 1, ${WIKI}, ${STYLE_REL}, 'C2', ${OWNER}, 'Saved before the close.', 'seed')`;
+  await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, body, question_hash)
+            VALUES (${randomUUID()}, 1, ${WIKI}, ${SETTLED_REL}, 'N1', ${OWNER}, 'Saved before the decision.', 'seed')`;
 
   // The fix page's seeded state.
   await api({ relPath: FIX_REL, questionId: "F1", choice: "A", body: "F1 version one." });
@@ -480,6 +511,20 @@ test.describe("Wiki reader: the answer card's composer", () => {
       [2, OWNER, "not-sure", "Not sure after all."],
     ]);
     expect(new Set(rows.map((r) => r.answer_id)).size).toBe(1);
+    expectClean(seen);
+  });
+
+  test("a settled card in the «Avklart» lane keeps its head: the «N new» badge shows in the opened row", async ({ page }) => {
+    const seen = watch(page);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(SETTLED_REL)}`);
+    const lane = page.locator('.wiki-article .nm-lane[data-kind="settled"]');
+    await lane.locator(":scope > .nm-head").click();
+    const row = lane.locator("details.q-compact#nm-q-n1");
+    await row.locator(":scope > .q-row").click();
+    const n1 = card(page, "N1");
+    await expect(n1.locator(".q-answer-body")).toHaveText("Saved before the decision.");
+    await expect(n1.locator(".q-new")).toBeVisible();
+    await expect(n1.locator(".q-new")).toHaveText("1 new");
     expectClean(seen);
   });
 

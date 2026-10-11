@@ -261,6 +261,28 @@ FILES["plans/settled-noblock.mdx"] = plan("Settled, no block", "in-flight", [
   ...qcard("S2", "Does this also cover old cases?"),
   ...QLOG,
 ]);
+// A settled card with no prose to lead with: its row has no title (fix round 2).
+FILES["plans/settled-noprose.mdx"] = plan("Settled, no prose", "in-flight", [
+  "<NextMoves>",
+  "",
+  '<Lane kind="waiting" who="Waiting on fag">',
+  "",
+  "- Call fag.",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+  "",
+  '<Question id="S1" to="fag">',
+  "",
+  "```text",
+  "only code here",
+  "```",
+  "",
+  "</Question>",
+  "",
+  ...QLOG,
+]);
 // A block inside a Historic takes no settled card (acceptance 8).
 FILES["plans/settled-historic.mdx"] = plan("Settled, historic block", "in-flight", [
   '<Historic since="v1">',
@@ -626,6 +648,18 @@ test.describe("The settled-questions lane", () => {
     await expect(page.locator('.wiki-article .nm-lane[data-kind="settled"]')).toHaveCount(0);
     await expect(page.locator('.wiki-article section.question[data-question-id="S1"]')).toBeVisible();
     await expect(page.locator(".wiki-article .q-moved")).toHaveCount(0);
+  });
+
+  test("a row with no title keeps its action at the right edge", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page, "plans/settled-noprose.mdx");
+    await settled(page).locator(":scope > .nm-head").click();
+    const row = page.locator("details#nm-q-s1 > .q-row");
+    await expect(row.locator(".q-row-title")).toHaveCount(0);
+    const [r, cta] = [(await row.boundingBox())!, (await row.locator(".q-row-cta").boundingBox())!];
+    // Within the row's own right padding.
+    expect(r.x + r.width - (cta.x + cta.width)).toBeLessThan(12);
+    expect(cta.y).toBeLessThan(r.y + 20);
   });
 
   test("the lane and an open row fit at 390", async ({ page }) => {
