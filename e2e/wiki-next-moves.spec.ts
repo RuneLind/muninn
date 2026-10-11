@@ -590,8 +590,10 @@ test.describe("The settled-questions lane", () => {
     await s1.locator(":scope > .q-row").click();
     await expect(s1.locator("section.question .q-body")).toBeVisible();
     await expect(s1.locator("section.question .q-body")).toContainText("Fag answered on the 30th");
-    // The row stands for the card's own head.
-    await expect(s1.locator("section.question .q-head")).toBeHidden();
+    // The card shows whole, head included: its badges and its → D7 link.
+    await expect(s1.locator("section.question .q-head")).toBeVisible();
+    await expect(s1.locator("section.question .q-head a.q-decision")).toBeVisible();
+    await expect(s1.locator("section.question .q-head a.q-decision")).toHaveText("D7");
     await expect(s1.locator(".q-row-close")).toHaveText("Hide ▴");
   });
 

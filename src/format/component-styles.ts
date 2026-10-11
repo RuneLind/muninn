@@ -267,8 +267,7 @@ export function componentBlockCss(scope: string): string {
     ${scope} .nm-compact .nm-qcards > .nm-qcard > .question { margin: 0.75rem 0 0; }
     /* The «Avklart» lane (settled questions plan, D4, D6): one closed row per
        decided or closed card — id and state | question | action, the decision
-       on a second line — opening to the card, whose own head the row stands
-       for. Label, title and outcome are measured ≥ 4.5:1 in both themes by
+       on a second line — opening to the card, head and all. Label, title and outcome are measured ≥ 4.5:1 in both themes by
        e2e/wiki-next-moves.spec.ts. */
     ${scope} .nm-compact .nm-settled .nm-who { color: var(--tone-good); }
     ${scope} .nm-compact .nm-settled-rows { padding: 0.1rem 0.6rem 0.5rem; }
@@ -295,11 +294,10 @@ export function componentBlockCss(scope: string): string {
     ${scope} .nm-compact .q-compact[open] > .q-row .q-row-title,
     ${scope} .nm-compact .q-compact[open] > .q-row .q-row-out { white-space: normal; overflow-wrap: anywhere; }
     ${scope} .nm-compact .q-row-did { font-family: var(--mono, ui-monospace, monospace); font-weight: 600; }
-    ${scope} .nm-compact .q-row-cta { color: var(--accent-light); white-space: nowrap; }
+    ${scope} .nm-compact .q-row-cta { grid-column: 3; grid-row: 1; color: var(--accent-light); white-space: nowrap; }
     ${scope} .nm-compact .q-compact[open] > .q-row .q-row-open,
     ${scope} .nm-compact .q-compact:not([open]) > .q-row .q-row-close { display: none; }
     ${scope} .nm-compact .q-row-body > .question { margin: 0.2rem 0 0.6rem; }
-    ${scope} .nm-compact .q-row-body > .question > .q-head { display: none; }
     @container (max-width: 30rem) {
       ${scope} .nm-compact .q-row { grid-template-columns: minmax(0, 1fr) auto; }
       ${scope} .nm-compact .q-row-cta { grid-column: 2; grid-row: 1; }

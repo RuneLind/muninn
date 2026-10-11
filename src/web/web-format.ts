@@ -1,6 +1,7 @@
 import {
   parseBlocks,
   scanInlineComponents,
+  COMPONENT_TAG_SOURCE_SINGLE_LINE,
   normalizeCalloutTone,
   normalizePillTone,
   parseResolvedDate,
@@ -28,7 +29,7 @@ import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMo
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
-import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
+import { codeSpanContent, lineCodeSpanRanges, maskLineCodeSpans } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
 import {
@@ -1168,13 +1169,7 @@ function planMovedStubs(
     let top = card;
     while (parent.get(top) !== nm) top = parent.get(top)!;
     if (top.type !== "component" || top.name !== "Lane") return "↓";
-    const lanes = nextMovesLanes(nm.children);
-    // The «Avklart» lane renders after the other lanes, before the blocked ones.
-    const rendered = [
-      ...lanes.filter((l) => l.kind !== "blocked").map((l) => l.children),
-      SETTLED_LANE,
-      ...lanes.filter((l) => l.kind === "blocked").map((l) => l.children),
-    ];
+    const rendered = renderedLaneOrder(nextMovesLanes(nm.children)).map((l) => l.children);
     return rendered.indexOf(top.children) > rendered.indexOf(takenLane.get(id)!) ? "↑" : "↓";
   };
   const movedId = (b: Block): string | null => {
@@ -1308,9 +1303,14 @@ function withoutIdOnlyItems(list: Extract<Block, { type: "ul" | "ol" }>, ids: re
   return { ...rest, items, ...nested, start: nums[keep[0]!]!, ...(values.some((v) => v !== undefined) ? { values } : {}) };
 }
 
-/** Inline markdown as one line of plain text, for a row's summary. */
+const ROW_COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
+
+/** Inline markdown as one line of plain text, for a row's summary: component
+ *  tags dropped, their inner text kept. The tag pattern names every component,
+ *  `<Fact>` marks included. */
 function plainInline(text: string): string {
   return peekText(text)
+    .replace(ROW_COMPONENT_TAG_RE, "")
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
     .replace(/\[\[([^\]]+)\]\]/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
@@ -1320,15 +1320,26 @@ function plainInline(text: string): string {
     .trim();
 }
 
-/** A `<Question>` card's lead for its row (D4): the body's first bold run,
- *  else the lead sentence of its first line. */
+/** A `<Question>` card's lead for its row (D4): the body's first bold run
+ *  outside code spans, else the lead sentence of its first line. Empty when
+ *  the body has no prose (a fence or a table alone). */
 function questionLead(q: ComponentBlock): string {
   const src = q.children
     .map((b) => (b.type === "text" ? b.lines.join("\n") : b.type === "ul" || b.type === "ol" ? b.items.join("\n") : b.type === "heading" ? b.content : ""))
     .join("\n");
-  const bold = /(\*\*|__)(?=\S)([\s\S]+?)\1/.exec(src);
-  if (bold) return plainInline(bold[2]!);
-  return leadSentence(peekText(src.split("\n").find((l) => l.trim()) ?? ""));
+  // Same length as `src`, so a match's offsets read the original text.
+  const masked = src.split("\n").map(maskLineCodeSpans).join("\n");
+  const bold = /(\*\*|__)(?=\S)([\s\S]+?)\1/.exec(masked);
+  if (bold) return plainInline(src.slice(bold.index + bold[1]!.length, bold.index + bold[0].length - bold[1]!.length));
+  return plainInline(leadSentence(peekText(src.split("\n").find((l) => l.trim()) ?? "")));
+}
+
+/** A DecisionLog item's text without its trailing date line (`Rune,
+ *  11.10.2026 (runde 2).`), the cut the compact row makes (`decisionTail`). */
+function withoutDateTail(text: string): string {
+  const when = parseDecisionWhen(text);
+  const body = when ? text.slice(0, when.start).trimEnd() : "";
+  return body || text;
 }
 
 /** The «Avklart» lane (settled questions plan, D1, D3–D6): render-only, so no
@@ -1343,7 +1354,7 @@ function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguag
     const id = parseQuestionAttrs(q.attrs).id!;
     const state = page.states.get(id);
     const decision = state?.kind === "decided" ? state.decision : null;
-    const sentence = decision ? plainInline(decisionFirstSentence(page.logText.get(decision) ?? "", decision)) : "";
+    const sentence = decision ? plainInline(decisionFirstSentence(withoutDateTail(page.logText.get(decision) ?? ""), decision)) : "";
     return { q, id, decision, sentence };
   });
   const chip = (r: (typeof rows)[number]) => (r.decision ? `${r.id}→${r.decision}` : r.id);
@@ -1351,13 +1362,15 @@ function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguag
     .map((r) => {
       const anchor = currentLaneCards!.moved.get(r.id)!;
       const pill = r.decision ? `${L.decided} → ${r.decision}` : L.closed;
+      const lead = questionLead(r.q);
       const out = r.sentence
         ? `<span class="q-row-out"><span class="q-row-did">${escapeHtml(r.decision!)}</span> ${escapeHtml(r.sentence)}</span>`
         : "";
       return (
         `<details class="q-compact" id="${anchor}"><summary class="q-row" ${READER_ONLY_ATTR}>` +
         `<span class="q-row-tag"><span class="nm-qid">${escapeHtml(r.id)}</span><span class="q-row-state${r.decision ? " q-row-decided" : ""}">${escapeHtml(pill)}</span></span>` +
-        `<span class="q-row-title">${escapeHtml(questionLead(r.q))}</span>` +
+        // No prose to lead with: no title, rather than an empty cell.
+        (lead ? `<span class="q-row-title">${escapeHtml(lead)}</span>` : "") +
         `<span class="q-row-cta"><span class="q-row-open">${escapeHtml(words.action.see)}</span><span class="q-row-close">${escapeHtml(words.action.hide)}</span></span>` +
         `${out}</summary>` +
         `<div class="q-row-body">${questionCardHtml(r.q.attrs, renderBlocks(r.q.children, webRenderer))}</div></details>`

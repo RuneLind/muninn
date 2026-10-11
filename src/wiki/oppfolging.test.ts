@@ -770,6 +770,41 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(text(rows(reader(md))[0]!.summary)).toContain("Avgjort → D7Skal vi sende A?Se ▸");
   });
 
+  // Fix round 1 (review of 4ba2a69e).
+  const oneCard = (body: string, d7 = "- **D7** — Brevet sendes som alternativ A. Begrunnelsen står i notatet.") =>
+    rows(
+      reader(
+        [...nm([lane('kind="you"', ["- x"])]), "", ...card("S1", body), "<DecisionLog>", "", d7, decided("S1", "D7"), "", "</DecisionLog>"].join("\n"),
+      ),
+    )[0]!.summary;
+
+  test("fix round 1: a <Fact> mark in the D item is not in the outcome line", () => {
+    const s = oneCard("Spm?", '- **D7** — Brevet sendes som <Fact n="1" v="ok">alternativ A</Fact>. Mer her.');
+    expect(text(s)).toContain("D7 Brevet sendes som alternativ A.");
+    expect(s).not.toContain("Fact");
+  });
+
+  test("fix round 1: <Fact> and <Pill> in the bold lead keep their text, not their tags", () => {
+    const s = oneCard('**Skal vi sende <Pill tone="warn">A</Pill> eller <Fact n="2" v="wrong">B</Fact>?** Mer.');
+    expect(text(s)).toContain("Avgjort → D7Skal vi sende A eller B?Se ▸");
+    expect(s).not.toMatch(/Pill|Fact/);
+  });
+
+  test("fix round 1: a bold run inside a code span is not the lead", () => {
+    expect(text(oneCard("Skriv `**ikke fet**` slik. **Det egentlige spørsmålet?**"))).toContain("Avgjort → D7Det egentlige spørsmålet?Se ▸");
+  });
+
+  test("fix round 1: a body with no prose renders no title", () => {
+    const s = oneCard("```text\nkode\n```");
+    expect(s).not.toContain("q-row-title");
+    expect(text(s)).toContain("S1Avgjort → D7Se ▸");
+  });
+
+  test("fix round 1: the outcome line drops the D item's date tail", () => {
+    // «A.» is no sentence end to the split, so the item reads as one sentence.
+    expect(text(oneCard("Spm?", "- **D7** — Vi velger A. Rune, 11.10.2026 (runde 2)."))).toMatch(/D7 Vi velger A\.$/);
+  });
+
   test("an open card stays in the waiting lane that names it", () => {
     const html = reader(PAGE_S);
     expect(html).toContain('<div class="nm-qcard" id="nm-q-s4"><section class="question q-open" data-question-id="S4"');
@@ -903,6 +938,11 @@ describe("D2: a waiting-lane item that only names its card", () => {
     expect(fagBody(html)).toBe('<div class="nm-body"><ul><li>Ring fag.</li></ul>');
     expect(chipsOf(html)).toEqual([["S4", "S5"]]);
     expect(countsOf(html)).toEqual(["2 spørsmål og 1 oppgave"]);
+  });
+
+  test("fix round 1: a symbol counts as nothing: `- **S4** ✅` is hidden", () => {
+    const html = reader(md(["- **S4** ✅", "- Ring fag."]));
+    expect(fagBody(html)).toBe('<div class="nm-body"><ul><li>Ring fag.</li></ul>');
   });
 
   test("an item with more than the id stays", () => {
