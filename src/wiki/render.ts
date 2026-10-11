@@ -29,6 +29,7 @@ import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts"
 import { parseFrontmatter, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
+import { itemDateReference } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
 import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
@@ -141,6 +142,7 @@ export function renderWikiHtml(
       idLabels: opts?.idLabels,
       reader: true,
       wikiLinkTexts: linkTexts,
+      itemDateRef: itemDateRefOf(markdown),
       ...(opts?.language ? { language: opts.language } : {}),
     }),
     literal,
@@ -160,6 +162,15 @@ export function renderWikiHtml(
     },
   );
   return paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
+}
+
+/** D20: the day a yearless item date is read against — the page's
+ *  `status_date`, else today. Only a page holding a dated block pays for the
+ *  frontmatter parse. */
+function itemDateRefOf(markdown: string): string | undefined {
+  if (!/<(?:DecisionLog|Query|NextMoves)\b/.test(markdown)) return undefined;
+  const statusDate = parseFrontmatter(markdown).status_date;
+  return itemDateReference(typeof statusDate === "string" ? statusDate : null, new Date());
 }
 
 const SENTINEL_RE = /\x00WIKIPAGELINK(\d+)\x00/g;

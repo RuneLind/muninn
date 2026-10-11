@@ -35,6 +35,7 @@ import {
 } from "./components/wiki-report-blocks.ts";
 import { refLinksCss } from "./components/wiki-ref-links.ts";
 import { lensCss } from "./components/wiki-lens.ts";
+import { newSinceCss } from "./components/wiki-new-since.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -1967,6 +1968,8 @@ export async function renderWikiPage(opts?: {
     ${refLinksCss()}
     /* The lens switch, what Overview hides, and the fold sizes (wiki-lens.ts). */
     ${lensCss()}
+    /* "New since last read" (D20): item marks and the head line (wiki-new-since.ts). */
+    ${newSinceCss()}
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}

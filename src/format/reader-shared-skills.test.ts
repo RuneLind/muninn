@@ -3,9 +3,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-// D22: the agent-context fold names live twice — this repo's
-// `fixtures/reader-shared.json` and plan-card's copy in the skills repo, whose
-// `CURRENT_STATE_RE` reads them. The copies must not drift. CI has no skills
+// D22: the agent-context fold names and D20's item-date cases live twice —
+// this repo's `fixtures/reader-shared.json` and plan-card's copy in the skills
+// repo, whose `CURRENT_STATE_RE` and date-parser port read them. The copies
+// must not drift. CI has no skills
 // repo, so the test skips there, and its name says why.
 
 const OURS = path.join(import.meta.dir, "fixtures", "reader-shared.json");

@@ -78,6 +78,7 @@ import {
   statusRows,
 } from "../format/report-top.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
+import { ITEM_DATE_ATTR, lastItemDate } from "../format/item-dates.ts";
 import {
   CB_LINE_CLASS,
   DL_DECISION_CLASS,
@@ -238,6 +239,10 @@ export function formatWebHtml(
     /** `renderWikiHtml`'s wikilink sentinels, by index: the text each link
      *  shows. A lane's peek is plain text, so it reads a link as its text. */
     wikiLinkTexts?: readonly string[];
+    /** D20, reader only: the day a yearless date is read against (the page's
+     *  `status_date`, else today). Set ⇒ DecisionLog items, Query cards and
+     *  compact lanes carry their date as `data-item-date`. */
+    itemDateRef?: string;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -249,9 +254,11 @@ export function formatWebHtml(
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
+  const prevItemDateRef = currentItemDateRef;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
+  currentItemDateRef = currentReader ? opts?.itemDateRef : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
     const blocks = parseBlocks(text);
@@ -284,7 +291,19 @@ export function formatWebHtml(
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
+    currentItemDateRef = prevItemDateRef;
   }
+}
+
+/** `opts.itemDateRef` for the call in progress (reader only). */
+let currentItemDateRef: string | undefined;
+
+/** ` data-item-date="YYYY-MM-DD"` for the last date in `text` (D20), or "" —
+ *  off the reader, or when `text` holds none. */
+function itemDateAttr(text: string | null | undefined): string {
+  if (!currentItemDateRef || !text) return "";
+  const d = lastItemDate(text, currentItemDateRef);
+  return d ? ` ${ITEM_DATE_ATTR}="${d}"` : "";
 }
 
 /** The page's sibling files for the call in progress; absent ⇒ the `Query`,
@@ -1256,7 +1275,7 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     // The label is the source's own text only when it is the authored `who`.
     const labelOnly = lane.label !== lane.who ? ` ${READER_ONLY_ATTR}` : "";
     return (
-      `<details class="nm-lane nm-${lane.kind}${unknown}" data-kind="${lane.kind}" data-count="${n}"${since}${who}${role}>` +
+      `<details class="nm-lane nm-${lane.kind}${unknown}" data-kind="${lane.kind}" data-count="${n}"${since}${who}${role}${itemDateAttr(lane.since ?? lane.sinceRaw)}>` +
       `<summary class="nm-head"><span class="nm-lh"><span class="nm-ico" aria-hidden="true" ${READER_ONLY_ATTR}>${LANE_ICONS[lane.kind]}</span>` +
       `<span class="nm-who"${labelOnly}>${escapeHtml(lane.label)}</span>` +
       `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText(counts, lang))}</span></span>` +
@@ -1322,7 +1341,11 @@ function timelineItemHtml(text: string, nested: string, value: string): string {
 function logItemHtml(text: string, nested: string, value: string): string {
   const p = parseLogItem(text);
   const dim = p.dim ? " dl-dim" : "";
-  if (!p.id) return `<li class="dl-item dl-noid${dim}"${value}>${itemHtml(p.text)}${nested}</li>`;
+  // D20: the item's date rides on the `<li>` of an item with no id and on
+  // `.dl-text` otherwise, where the anchor passes' `<li …><a class="dl-id">`
+  // reading cannot see it.
+  const dated = itemDateAttr(p.text);
+  if (!p.id) return `<li class="dl-item dl-noid${dim}"${value}${dated}>${itemHtml(p.text)}${nested}</li>`;
   const anchor = anchorSlug(p.id);
   // D41, reader only: a decision item carries `dl-decision`, and its trailing
   // «<who>, DD.MM (runde N).» becomes a date cell for the reader's compact row,
@@ -1332,7 +1355,7 @@ function logItemHtml(text: string, nested: string, value: string): string {
   const when = tail ? `<span class="${DL_WHEN_CLASS}" ${READER_ONLY_ATTR}>${escapeHtml(decisionWhenLabel(tail.when))}</span>` : "";
   return (
     `<li class="dl-item${decision ? ` ${DL_DECISION_CLASS}` : ""}${dim}"${value} id="${anchor}"><a class="dl-id" href="#${anchor}">${escapeHtml(p.id)}</a>` +
-    `<span class="dl-text"${currentReader ? ` ${DL_SEP_ATTR}="${escapeHtml(p.sep)}"` : ""}>${tail ? tail.html : logTextHtml(p.text, DECISION_ID_RE.test(p.id))}</span>${when}${nested}</li>`
+    `<span class="dl-text"${currentReader ? ` ${DL_SEP_ATTR}="${escapeHtml(p.sep)}"` : ""}${dated}>${tail ? tail.html : logTextHtml(p.text, DECISION_ID_RE.test(p.id))}</span>${when}${nested}</li>`
   );
 }
 
@@ -1787,7 +1810,7 @@ const webRenderer: BlockRenderer = {
           (q.run ? `<span class="query-run">run ${escapeHtml(q.run)}</span>` : "") +
           (uses ? `<span class="query-uses">uses ${uses}</span>` : "");
         const head =
-          `<div class="query-head">${noId}<div class="query-title">${idHtml}${question}</div>${answer}` +
+          `<div class="query-head"${itemDateAttr(q.run)}>${noId}<div class="query-title">${idHtml}${question}</div>${answer}` +
           `${meta ? `<div class="query-meta">${meta}</div>` : ""}</div>`;
         const bodyHtml = body.some((b) => !isBlankTextBlock(b))
           ? `<div class="query-body">${renderBlocks(body, webRenderer)}</div>`
