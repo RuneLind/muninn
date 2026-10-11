@@ -338,6 +338,14 @@ function stripTrailingComment(raw: string): string {
   return i === -1 ? raw : raw.slice(0, i).trim();
 }
 
+/** A frontmatter `status_date` as the index reads it — comment-stripped,
+ *  trimmed and a real `YYYY-MM-DD` day — or undefined. The one reading of the
+ *  field: the reader's item dates (D20) take it from here too. */
+export function readStatusDate(v: string | string[] | undefined): string | undefined {
+  const raw = typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
+  return isCalendarDay(raw) ? raw : undefined;
+}
+
 /** How many offending relPaths the aggregated warn names before collapsing the
  *  rest into a "+N more" count (precedent: the gardener's `evictedTopics`). */
 const PLAN_DROP_SAMPLE_CAP = 5;
@@ -484,9 +492,8 @@ function parsePlanFields(
 
   let status_date: string | undefined;
   if (fm.status_date !== undefined) {
-    const raw = scalar(fm.status_date);
-    if (isCalendarDay(raw)) status_date = raw;
-    else drop("statusDate");
+    status_date = readStatusDate(fm.status_date);
+    if (status_date === undefined) drop("statusDate");
   }
 
   let followups: PlanFollowups | undefined;

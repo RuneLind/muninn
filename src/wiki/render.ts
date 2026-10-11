@@ -23,12 +23,13 @@
  * a markdown-side scanner diverges from what the renderer actually parses.
  */
 
-import { formatWebHtml } from "../web/web-format.ts";
+import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
-import { parseFrontmatter, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
+import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
+import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
 import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
@@ -89,6 +90,9 @@ export function renderWikiHtml(
     /** The wiki's `language`: the `<More>` label and the `<StatusRows>`
      *  state phrases. Absent ⇒ the `question` option's, else `en`. */
     language?: QuestionLanguage;
+    /** The render day (`YYYY-MM-DD`) item dates are read against (D49).
+     *  Absent ⇒ today in Europe/Oslo. For tests and sweeps. */
+    today?: string;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -141,6 +145,7 @@ export function renderWikiHtml(
       idLabels: opts?.idLabels,
       reader: true,
       wikiLinkTexts: linkTexts,
+      itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
     }),
     literal,
@@ -160,6 +165,16 @@ export function renderWikiHtml(
     },
   );
   return paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
+}
+
+/** D20/D49: the days an item date is read against — the page's
+ *  `status_date` (read as the index reads it) else the render day, and the
+ *  render day itself. Only a page holding a dated block pays for the
+ *  frontmatter parse. */
+function itemDateDaysOf(markdown: string, today: string | undefined): ItemDateDays | undefined {
+  if (!/<(?:DecisionLog|Query|NextMoves)\b/.test(markdown)) return undefined;
+  const day = today ?? renderDay();
+  return { ref: itemDateReference(readStatusDate(parseFrontmatter(markdown).status_date), day), today: day };
 }
 
 const SENTINEL_RE = /\x00WIKIPAGELINK(\d+)\x00/g;
