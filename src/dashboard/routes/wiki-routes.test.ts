@@ -421,6 +421,56 @@ describe("GET /api/wiki/html", () => {
     }
   });
 
+  // Fix round 1: the D7 config (env reads, an existsSync per root) is read
+  // only for an admin on a plan page, not on every page open.
+  test("/api/wiki/page reads PLAN_CARD_BIN only for a page with plan_status", async () => {
+    await Bun.write(path.join(root, "concepts/Agent Note2.mdx"), "---\ntitle: Agent Note2\n---\n\nBody.\n");
+    await Bun.write(path.join(root, "concepts/Agent Plan2.mdx"), "---\ntitle: Agent Plan2\nplan_status: in-flight\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const a = new Hono();
+    registerWikiRoutes(a, {} as Parameters<typeof registerWikiRoutes>[1]);
+    let reads = 0;
+    // Not enumerable: a spread of process.env elsewhere is not a read of it.
+    Object.defineProperty(process.env, "PLAN_CARD_BIN", {
+      configurable: true,
+      enumerable: false,
+      get() {
+        reads++;
+        return undefined;
+      },
+    });
+    try {
+      expect((await a.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Agent Note2.mdx"))).status).toBe(200);
+      expect(reads).toBe(0);
+      expect((await a.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Agent Plan2.mdx"))).status).toBe(200);
+      expect(reads).toBe(1);
+    } finally {
+      delete process.env.PLAN_CARD_BIN;
+    }
+  });
+
+  // Fix round 1, item 11: the pair rule — the page reads the profile off its
+  // Config, so a `MUNINN_PROFILE` in the environment does not override it.
+  test("/api/wiki/page agentLens reads the profile off the Config, not the environment", async () => {
+    await Bun.write(path.join(root, "concepts/Agent Plan3.mdx"), "---\ntitle: Agent Plan3\nplan_status: in-flight\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const a = new Hono();
+    registerWikiRoutes(a, { profile: "default" } as Parameters<typeof registerWikiRoutes>[1]);
+    const saved = { bin: process.env.PLAN_CARD_BIN, roots: process.env.WIKI_STAMP_ROOTS, profile: process.env.MUNINN_PROFILE };
+    const restore = (name: string, v: string | undefined) => (v === undefined ? delete process.env[name] : (process.env[name] = v));
+    try {
+      process.env.PLAN_CARD_BIN = "/x/plan-card.ts";
+      process.env.WIKI_STAMP_ROOTS = root;
+      process.env.MUNINN_PROFILE = "nais";
+      const res = await a.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Agent Plan3.mdx"));
+      expect(((await res.json()) as { reader: { agentLens: boolean } }).reader.agentLens).toBe(true);
+    } finally {
+      restore("PLAN_CARD_BIN", saved.bin);
+      restore("WIKI_STAMP_ROOTS", saved.roots);
+      restore("MUNINN_PROFILE", saved.profile);
+    }
+  });
+
   // The viewer's role keys follow the auth MODE, not just whether a session is
   // present: the `WIKI_ANSWER_OWNER` fallback is auth off's only.
   test("/api/wiki/page roles: an authenticated viewer's groups; no owner fallback when authenticating", async () => {

@@ -1655,7 +1655,8 @@ export function registerWikiReadRoutes(
         // read slice, which drops the `wiki` group).
         tools &&
           agentLensFor({
-            config: planCardConfigFromEnv(),
+            // A thunk: read only for an admin on a plan page.
+            config: () => planCardConfigFromEnv(process.env, config.profile ?? resolveServingProfile()),
             wikiDir: resolveWikiRoot(entry?.root),
             hasPlanStatus: parseFrontmatter(markdown).plan_status !== undefined,
             admin: (c.get("role") ?? "admin") === "admin",

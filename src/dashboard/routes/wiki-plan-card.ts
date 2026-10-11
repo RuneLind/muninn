@@ -13,10 +13,16 @@
  * no card.
  *
  * It STARTS A PROCESS, so the path is on `SIDE_EFFECTING_GETS` (a cross-site
- * `<img>` must not start children), and at most one child runs per page and
- * argument set: a second request with the same key while one runs waits on it;
- * a request with other arguments starts its own child after it. In the `wiki`
- * route group, which `MUNINN_PROFILE=nais` drops.
+ * `<img>` must not start children), and at most one child runs per page: a
+ * second request with the same page and arguments while one runs or waits
+ * shares it; a request with other arguments starts its own child after every
+ * earlier one for the page has EXITED (`runProc` settles a timeout only then).
+ * At most {@link PLAN_CARD_MAX_WAITING} argument sets wait per page; one more
+ * answers 429. A waiting run whose every requester has gone (the reader aborted
+ * the fetch) starts no child. The child runs in the script's own directory, so
+ * a `bunfig.toml` in muninn's cwd does not load in it, and leads its own process
+ * group, so the timeout's SIGTERM, then SIGKILL, reach what it started. In the
+ * `wiki` route group, which `MUNINN_PROFILE=nais` drops.
  */
 import path from "node:path";
 import type { Hono } from "hono";
@@ -54,13 +60,30 @@ export interface PlanCardRouteDeps {
   interpreter?: string[];
   /** The port the child's `PLAN_CARD_MUNINN_URL` names; default the config's. */
   port?: number;
+  /** SIGTERM → SIGKILL grace for a timed-out child; default `runProc`'s. */
+  killGraceMs?: number;
 }
 
-type RunOutcome = { ok: true; proc: ProcResult; ms: number } | { ok: false; timeout: boolean; message: string };
+/** Argument sets that may wait behind a page's running child; one more is 429. */
+export const PLAN_CARD_MAX_WAITING = 2;
+
+type RunOutcome =
+  | { ok: true; proc: ProcResult; ms: number }
+  | { ok: false; timeout: boolean; message: string }
+  | { ok: false; abandoned: true };
+
+/** One page + argument set: its run, whether its child has started, and the
+ *  abort signals of the requests waiting on it. */
+interface Flight {
+  page: string;
+  promise: Promise<RunOutcome>;
+  started: boolean;
+  signals: AbortSignal[];
+}
 
 export function registerWikiPlanCardRoute(app: Hono, config: Config, deps: PlanCardRouteDeps = {}): void {
-  // Single flight per page + argument set: same key ⇒ share the running child.
-  const inFlight = new Map<string, Promise<RunOutcome>>();
+  // Single flight per page + argument set: same key ⇒ share the child.
+  const inFlight = new Map<string, Flight>();
 
   app.get(WIKI_PLAN_CARD_PATH, async (c) => {
     // Admin only (D7). The zone model already denies role `user` here (the
@@ -73,10 +96,10 @@ export function registerWikiPlanCardRoute(app: Hono, config: Config, deps: PlanC
     if (since && !isPlanCardSince(since)) return c.json({ error: "since must be a YYYY-MM-DD day" }, 400);
     if (id && !isPlanCardId(id)) return c.json({ error: "id must look like D7, S12, Q-14 or MEL-545776" }, 400);
 
-    const cfg = (deps.config ?? planCardConfigFromEnv)();
+    const profile = config.profile ?? resolveServingProfile();
+    const cfg = deps.config ? deps.config() : planCardConfigFromEnv(process.env, profile);
     if (!cfg.bin) return c.json({ error: `${PLAN_CARD_BIN_ENV} is not set on this instance` }, 501);
 
-    const profile = config.profile ?? resolveServingProfile();
     const page = await resolveScopedPage(servesWikiReadSliceOnly(profile), {
       wiki: c.req.query("wiki"),
       bot: c.req.query("bot"),
@@ -96,31 +119,57 @@ export function registerWikiPlanCardRoute(app: Hono, config: Config, deps: PlanC
     const abs = path.join(root, page.meta.relPath);
     const argv = [...(deps.interpreter ?? stampInterpreterArgv(process.execPath)), ...planCardArgs(cfg.bin, abs, { since, id })];
     const key = JSON.stringify([abs, since, id]);
-    const run = async (): Promise<RunOutcome> => {
-      // Wait for any running child of the same page before starting ours, so
-      // one page never runs two children at once.
+    const signal = c.req.raw.signal;
+    const bin = cfg.bin;
+    const start = async (flight: Flight): Promise<RunOutcome> => {
+      // Every request that asked for this run has gone: start nothing.
+      if (flight.signals.every((s) => s.aborted)) {
+        // Out of the map now, not a microtask later, so a new request starts
+        // a run of its own rather than sharing this answer.
+        if (inFlight.get(key) === flight) inFlight.delete(key);
+        return { ok: false, abandoned: true };
+      }
+      flight.started = true;
       const t0 = performance.now();
       try {
         const proc = await (deps.runProc ?? runProc)(argv, deps.timeoutMs ?? PLAN_CARD_TIMEOUT_MS, "plan-card", {
           env: planCardChildEnv(deps.port ?? config.dashboardPort),
+          cwd: path.dirname(bin),
+          processGroup: true,
+          ...(deps.killGraceMs !== undefined ? { killGraceMs: deps.killGraceMs } : {}),
         });
         return { ok: true, proc, ms: Math.round(performance.now() - t0) };
       } catch (err) {
         return { ok: false, timeout: err instanceof ProcTimeoutError, message: err instanceof Error ? err.message : String(err) };
       }
     };
-    let pending = inFlight.get(key);
-    if (!pending) {
-      // Another argument set for the same page: start after it settles.
-      const samePage = [...inFlight.entries()].filter(([k]) => JSON.parse(k)[0] === abs).map(([, p]) => p);
-      pending = Promise.allSettled(samePage).then(run);
-      inFlight.set(key, pending);
-      void pending.finally(() => {
-        if (inFlight.get(key) === pending) inFlight.delete(key);
+    let flight = inFlight.get(key);
+    if (flight) {
+      flight.signals.push(signal);
+    } else {
+      const samePage = [...inFlight.values()].filter((f) => f.page === abs);
+      if (samePage.filter((f) => !f.started).length >= PLAN_CARD_MAX_WAITING) {
+        return c.json(
+          { error: `plan-card already has ${PLAN_CARD_MAX_WAITING} runs waiting on this page; try again when one has finished`, reason: "busy" },
+          429,
+        );
+      }
+      // Another argument set for the same page: start after every earlier
+      // child has exited, so one page never runs two children at once.
+      const f: Flight = { page: abs, promise: Promise.resolve({ ok: false, abandoned: true }), started: false, signals: [signal] };
+      f.promise = Promise.allSettled(samePage.map((p) => p.promise)).then(() => start(f));
+      inFlight.set(key, f);
+      void f.promise.finally(() => {
+        if (inFlight.get(key) === f) inFlight.delete(key);
       });
+      flight = f;
     }
-    const outcome = await pending;
+    const outcome = await flight.promise;
 
+    if (!outcome.ok && "abandoned" in outcome) {
+      // Only every requester's abort gets here, so nobody reads this answer.
+      return c.json({ error: "the request was cancelled before plan-card started", reason: "cancelled" }, 499 as never);
+    }
     if (!outcome.ok) {
       log.warn("plan-card {kind}: {error}", { kind: outcome.timeout ? "timed out" : "failed to start", error: outcome.message });
       return outcome.timeout

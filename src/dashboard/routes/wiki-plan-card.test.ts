@@ -6,13 +6,14 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
-import { registerWikiPlanCardRoute, type PlanCardRouteDeps } from "./wiki-plan-card.ts";
+import { PLAN_CARD_MAX_WAITING, registerWikiPlanCardRoute, type PlanCardRouteDeps } from "./wiki-plan-card.ts";
 import type { PlanCardConfig } from "../../wiki/plan-card.ts";
 
 let dir = "";
@@ -160,11 +161,111 @@ describe("single flight", () => {
   });
 });
 
+describe("fix round 1: cancellation, the queue bound, the kill and the cwd", () => {
+  test("a waiting run whose requester aborted starts no child", async () => {
+    await stub(`echo "$*" >> "${out}.runs"; sleep 0.4; echo '${JSON.stringify(CARD)}'`);
+    await rm(`${out}.runs`, { force: true });
+    const app = appWith();
+    const first = get(app, "wiki=w&relPath=plans/a.mdx");
+    await Bun.sleep(50);
+    const ctrl = new AbortController();
+    const second = app.request(new Request("http://x/api/wiki/plan-card?wiki=w&relPath=plans/a.mdx&id=D1", { signal: ctrl.signal }));
+    await Bun.sleep(50);
+    ctrl.abort();
+    expect((await first).status).toBe(200);
+    await second;
+    await Bun.sleep(100);
+    const runs = (await readFile(`${out}.runs`, "utf8")).trim().split("\n");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).not.toContain("D1");
+  });
+
+  test(`at most ${PLAN_CARD_MAX_WAITING} argument sets wait per page; one more is 429`, async () => {
+    await stub(`echo "$*" >> "${out}.runs"; sleep 0.6; echo '${JSON.stringify(CARD)}'`);
+    await rm(`${out}.runs`, { force: true });
+    const app = appWith();
+    const running = get(app, "wiki=w&relPath=plans/a.mdx");
+    // Each step waits until the handlers before it have queued (they read the
+    // page first), so the order is the one the assertion names.
+    await Bun.sleep(150);
+    const waiting = [get(app, "wiki=w&relPath=plans/a.mdx&id=D1"), get(app, "wiki=w&relPath=plans/a.mdx&id=D2")];
+    await Bun.sleep(150);
+    // The same arguments as a waiting run share it, so they do not count.
+    const shared = get(app, "wiki=w&relPath=plans/a.mdx&id=D1");
+    await Bun.sleep(50);
+    const over = await get(app, "wiki=w&relPath=plans/a.mdx&id=D3");
+    expect(over.status).toBe(429);
+    expect(((await over.json()) as { reason: string }).reason).toBe("busy");
+    expect((await Promise.all([running, ...waiting, shared])).map((r) => r.status)).toEqual([200, 200, 200, 200]);
+    expect((await readFile(`${out}.runs`, "utf8")).trim().split("\n")).toHaveLength(3);
+  });
+
+  test("a timed-out child that traps SIGTERM is killed, and the page's next child starts only after it exited", async () => {
+    await stub(
+      [
+        `for p in $(cat "${out}.pids" 2>/dev/null); do kill -0 $p 2>/dev/null && echo overlap >> "${out}.overlap"; done`,
+        `echo $$ >> "${out}.pids"`,
+        `if [ "$3" = "FAST" ]; then echo '${JSON.stringify(CARD)}'; exit 0; fi`,
+        `sleep 30 & echo $! > "${out}.gc"`,
+        `trap '' TERM`,
+        `while :; do sleep 0.05; done`,
+      ].join("\n"),
+    );
+    for (const f of ["pids", "overlap", "gc"]) await rm(`${out}.${f}`, { force: true });
+    const app = appWith({ timeoutMs: 200, killGraceMs: 300 });
+    const [a, b] = await Promise.all([get(app, "wiki=w&relPath=plans/a.mdx"), (async () => {
+      await Bun.sleep(50);
+      return get(app, "wiki=w&relPath=plans/a.mdx&id=FAST");
+    })()]);
+    expect([a.status, b.status]).toEqual([504, 200]);
+    expect(await Bun.file(`${out}.overlap`).exists()).toBe(false);
+    // The child's own child went with its process group.
+    const gc = Number((await readFile(`${out}.gc`, "utf8")).trim());
+    let gcAlive = true;
+    try {
+      process.kill(gc, 0);
+    } catch {
+      gcAlive = false;
+    }
+    if (gcAlive) process.kill(gc, "SIGKILL");
+    expect(gcAlive).toBe(false);
+  });
+
+  test("the child runs in the script's directory, not muninn's cwd (whose bunfig.toml Bun would load)", async () => {
+    await stub(`pwd -P > "${out}.pwd"; echo '${JSON.stringify(CARD)}'`);
+    expect((await get(appWith(), "wiki=w&relPath=plans/a.mdx")).status).toBe(200);
+    expect((await readFile(`${out}.pwd`, "utf8")).trim()).toBe(realpathSync(path.dirname(bin)));
+  });
+});
+
 describe("refusals before any spawn", () => {
   test("501 names the variable when PLAN_CARD_BIN is unset", async () => {
     const res = await get(appWith({ config: () => ({ bin: null, roots: [root] }) }), "wiki=w&relPath=plans/a.mdx");
     expect(res.status).toBe(501);
     expect(((await res.json()) as { error: string }).error).toContain("PLAN_CARD_BIN");
+  });
+
+  // Fix round 1, item 11: the pair rule — the route reads the profile off its
+  // Config, so `MUNINN_PROFILE` in the environment overrides it in neither
+  // direction.
+  test("the profile comes from the Config, not the environment", async () => {
+    const saved = { bin: process.env.PLAN_CARD_BIN, profile: process.env.MUNINN_PROFILE };
+    const restore = (name: string, v: string | undefined) => (v === undefined ? delete process.env[name] : (process.env[name] = v));
+    const status = async (profile: "default" | "nais") => {
+      const app = new Hono();
+      registerWikiPlanCardRoute(app, { profile, dashboardPort: 4321 } as Config, { interpreter: ["/bin/bash"] });
+      return (await get(app, "wiki=w&relPath=plans/a.mdx")).status;
+    };
+    try {
+      process.env.PLAN_CARD_BIN = bin;
+      process.env.MUNINN_PROFILE = "default";
+      expect(await status("nais")).toBe(501);
+      process.env.MUNINN_PROFILE = "nais";
+      expect(await status("default")).not.toBe(501);
+    } finally {
+      restore("PLAN_CARD_BIN", saved.bin);
+      restore("MUNINN_PROFILE", saved.profile);
+    }
   });
 
   test("404 for a page without plan_status and for a wiki outside plan-card's roots", async () => {

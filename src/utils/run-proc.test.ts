@@ -10,9 +10,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   ProcTimeoutError,
   runProc,
+  RUN_PROC_KILL_GRACE_MS,
   RUN_PROC_MAX_OUTPUT_BYTES,
   RUN_PROC_TRUNCATED_MARKER,
 } from "./run-proc.ts";
@@ -149,5 +153,77 @@ describe("runProc", () => {
     test("the default cap is the claude-usage read cap", () => {
       expect(RUN_PROC_MAX_OUTPUT_BYTES).toBe(8 * 1024 * 1024);
     });
+  });
+});
+
+describe("runProc: the timeout's kill", () => {
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const pidAt = (file: string) => Number(readFileSync(file, "utf8").trim());
+
+  test("a child that traps SIGTERM gets SIGKILL after the grace, and the rejection waits for its exit", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-kill-"));
+    const pidFile = path.join(dir, "pid");
+    try {
+      const t0 = performance.now();
+      const err = await runProc(
+        ["/bin/bash", "-c", `echo $$ > ${pidFile}; trap '' TERM; while :; do sleep 0.05; done`],
+        150,
+        "trap",
+        { killGraceMs: 300 },
+      ).catch((e) => e);
+      const ms = performance.now() - t0;
+      expect(err).toBeInstanceOf(ProcTimeoutError);
+      // Rejected only once the child is gone, which took the SIGKILL.
+      expect(alive(pidAt(pidFile))).toBe(false);
+      expect(ms).toBeGreaterThanOrEqual(150 + 300 - 20);
+    } finally {
+      try {
+        process.kill(pidAt(pidFile), "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a child that dies on SIGTERM settles the timeout without the grace", async () => {
+    const t0 = performance.now();
+    const err = await runProc(["/bin/bash", "-c", "sleep 5"], 100, "plain").catch((e) => e);
+    expect(err).toBeInstanceOf(ProcTimeoutError);
+    expect(performance.now() - t0).toBeLessThan(100 + RUN_PROC_KILL_GRACE_MS);
+  });
+
+  test("processGroup: the timeout reaches what the child started", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-group-"));
+    const pidFile = path.join(dir, "pid");
+    try {
+      const err = await runProc(["/bin/bash", "-c", `sleep 30 & echo $! > ${pidFile}; wait`], 150, "group", {
+        processGroup: true,
+        killGraceMs: 300,
+      }).catch((e) => e);
+      expect(err).toBeInstanceOf(ProcTimeoutError);
+      await Bun.sleep(50);
+      expect(alive(pidAt(pidFile))).toBe(false);
+    } finally {
+      try {
+        process.kill(pidAt(pidFile), "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("cwd: the child runs where it is told", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-cwd-"));
+    try {
+      const r = await runProc(["/bin/bash", "-c", "pwd -P"], 5_000, "cwd", { cwd: dir });
+      expect(r.stdout.trim()).toBe(realpathSync(dir));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

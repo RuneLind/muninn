@@ -37,14 +37,27 @@ describe("plan-card's roots, mirrored", () => {
 
 describe("D7: the Agent lens's scope", () => {
   const config = { bin: "/x/plan-card.ts", roots: [wikiA] };
-  const base = { config, wikiDir: wikiA, hasPlanStatus: true, admin: true };
+  const base = { config: () => config, wikiDir: wikiA, hasPlanStatus: true, admin: true };
   test("offered only with the variable, plan_status, a plan-card root and an admin", () => {
     expect(agentLensFor(base)).toBe(true);
-    expect(agentLensFor({ ...base, config: { ...config, bin: null } })).toBe(false);
+    expect(agentLensFor({ ...base, config: () => ({ ...config, bin: null }) })).toBe(false);
     expect(agentLensFor({ ...base, hasPlanStatus: false })).toBe(false);
     expect(agentLensFor({ ...base, admin: false })).toBe(false);
     expect(agentLensFor({ ...base, wikiDir: mimir })).toBe(false);
     expect(agentLensFor({ ...base, wikiDir: undefined })).toBe(false);
+  });
+  test("the config is read only for an admin on a plan page", () => {
+    let reads = 0;
+    const counted = () => (reads++, config);
+    agentLensFor({ ...base, config: counted, hasPlanStatus: false });
+    agentLensFor({ ...base, config: counted, admin: false });
+    expect(reads).toBe(0);
+    agentLensFor({ ...base, config: counted });
+    expect(reads).toBe(1);
+  });
+  test("a profile the caller passes beats the environment's (the pair rule)", () => {
+    expect(planCardConfigFromEnv({ PLAN_CARD_BIN: "/x/p.ts" }, "nais").bin).toBeNull();
+    expect(planCardConfigFromEnv({ PLAN_CARD_BIN: "/x/p.ts", MUNINN_PROFILE: "nais" }, "default").bin).toBe("/x/p.ts");
   });
   test("the variable must be absolute and the profile default", () => {
     expect(planCardConfigFromEnv({ PLAN_CARD_BIN: "/x/p.ts" }).bin).toBe("/x/p.ts");
@@ -67,6 +80,20 @@ describe("argv and environment", () => {
     const env = planCardChildEnv(3010, { PATH: "/bin", HOME: "/h", TMPDIR: "/t", WIKI_STAMP_ROOTS: "/w", CLAUDE_USAGE_URL: "http://cu", DATABASE_URL: "x", PLAN_CARD_CLAUDE_USAGE_HOSTS: "y" });
     expect(env).toEqual({ PATH: "/bin", HOME: "/h", TMPDIR: "/t", WIKI_STAMP_ROOTS: "/w", CLAUDE_USAGE_URL: "http://cu", PLAN_CARD_MUNINN_URL: "http://127.0.0.1:3010" });
     expect(planCardChildEnv(1, {})).toEqual({ PLAN_CARD_MUNINN_URL: "http://127.0.0.1:1" });
+  });
+  test("PLAN_CARD_MUNINN_URL names a specific DASHBOARD_HOST, loopback for a wildcard", () => {
+    const url = (host?: string) => planCardChildEnv(3010, host === undefined ? {} : { DASHBOARD_HOST: host }).PLAN_CARD_MUNINN_URL;
+    expect(url()).toBe("http://127.0.0.1:3010");
+    expect(url("")).toBe("http://127.0.0.1:3010");
+    expect(url("0.0.0.0")).toBe("http://127.0.0.1:3010");
+    expect(url("::")).toBe("http://127.0.0.1:3010");
+    expect(url("100.64.1.2")).toBe("http://100.64.1.2:3010");
+    expect(url("::1")).toBe("http://[::1]:3010");
+    expect(url("fd7a:115c::5")).toBe("http://[fd7a:115c::5]:3010");
+  });
+  test("WIKI_STAMP_ROOTS reaches the child resolved, since its cwd is not muninn's", () => {
+    const env = planCardChildEnv(1, { WIKI_STAMP_ROOTS: "rel/w:~/m:/abs" }, "/h");
+    expect(env.WIKI_STAMP_ROOTS).toBe([path.resolve("rel/w"), "/h/m", "/abs"].join(":"));
   });
   test("parsePlanCardJson accepts the --json shape only", () => {
     expect(parsePlanCardJson('{"text":"t","chars":1,"cuts":[{"section":"log","pointer":"p"},{"bad":1}]}\n')).toEqual({ text: "t", chars: 1, cuts: [{ section: "log", pointer: "p" }] });

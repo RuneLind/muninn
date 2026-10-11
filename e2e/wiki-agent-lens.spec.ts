@@ -15,9 +15,19 @@
  * environment names as the card), one with the variable unset (501, no
  * button), one with the REAL `~/.claude/skills/plan-card/plan-card.ts` (that
  * case skips itself where the skills repo is not checked out — CI), and the
- * nais profile at role user and admin (no button, no route). The fixture wiki
- * is an OS temp dir registered via `WIKI_EXTRA` and listed in
- * `WIKI_STAMP_ROOTS`, which is plan-card's roots variable too.
+ * nais profile at role user and admin (no button, no route). The fixture wikis
+ * are OS temp dirs registered via `WIKI_EXTRA` and listed in
+ * `WIKI_STAMP_ROOTS`, which is plan-card's roots variable too: `e2e-agent`
+ * (English), and `e2e-agent-no` (`language: no`, with a `trackers` block so
+ * graph mode has a toggle).
+ *
+ * Fix round 1 adds: leaving Agent restores the article and its head controls;
+ * every reveal path (hash, pill) switches Agent to All; `?lens=agent` runs
+ * once and is spent by the first render of any kind (a failed or rejected
+ * load, the start view, an explainer); re-entering Agent runs again; a new
+ * run aborts the one in flight; an in-place reload (a fact-check append) keeps
+ * the card and starts no child; graph mode hides the pane; the card's leading
+ * newline survives; the pane speaks the wiki's language.
  */
 
 import { test, expect } from "@playwright/test";
@@ -28,6 +38,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { ROLE_PAGE, ROLE_REL } from "./oppfolging-fixture.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -46,6 +57,9 @@ const VIA_PROXY = { "x-forwarded-for": "203.0.113.9", "x-muninn-token": SECRET }
 const WIKI = "e2e-agent";
 const PLAN = "plans/agent-plan.mdx";
 const NOTE = "notes/plain-note.md";
+const EXPLAINER = "notes/explainer.html";
+const WIKI_NO = "e2e-agent-no";
+const CASES = ["- id: MEL-1", "  status: hold", "- id: MEL-3", "  status: none", "- id: MEL-4", "  status: none", ""].join("\n");
 const PLAN_PAGE = [
   "---",
   "title: Agent plan",
@@ -72,13 +86,26 @@ const PLAN_PAGE = [
   "",
   "## Current state",
   "",
-  "Working on D1.",
+  "Working on D1 (`src/main/Gate.kt:120-128`).",
+  "",
+  '<CaseBoard src="data/cases.yaml" />',
+  "",
+  '<Fold title="Older log">',
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D2** — An older decision. Rune, 01.10.2026.",
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
   "",
 ].join("\n");
 const NOTE_PAGE = ["---", "title: Plain note", "---", "", "# Plain note", "", "No plan here.", ""].join("\n");
 
 const servers: ChildProcess[] = [];
 let root = "";
+let rootNo = "";
 let stub = "";
 let runs = "";
 let botsDir = "";
@@ -94,8 +121,8 @@ function boot(port: number, env: Record<string, string>): void {
         DASHBOARD_HOST: "127.0.0.1",
         SCHEDULER_ENABLED: "false",
         DATABASE_URL: TEST_DB,
-        WIKI_EXTRA: `${WIKI}=${root}`,
-        WIKI_STAMP_ROOTS: root,
+        WIKI_EXTRA: `${WIKI}=${root},${WIKI_NO}=${rootNo}`,
+        WIKI_STAMP_ROOTS: `${root}:${rootNo}`,
         ...env,
       },
       stdio: "ignore",
@@ -123,6 +150,19 @@ test.beforeAll(async ({}, info) => {
   await mkdir(path.join(root, "notes"), { recursive: true });
   await writeFile(path.join(root, PLAN), PLAN_PAGE, "utf8");
   await writeFile(path.join(root, NOTE), NOTE_PAGE, "utf8");
+  await writeFile(path.join(root, EXPLAINER), "<!doctype html><title>Explainer</title><h1>Explainer</h1>", "utf8");
+  await mkdir(path.join(root, "plans", "data"), { recursive: true });
+  await writeFile(path.join(root, "plans", "data", "cases.yaml"), CASES, "utf8");
+  rootNo = realpathSync(await mkdtemp(path.join(tmpdir(), "muninn-e2e-agent-no-")));
+  await mkdir(path.join(rootNo, "plans"), { recursive: true });
+  // The shared Oppfølging page with role lanes, made a plan page: «Se som rolle».
+  await writeFile(path.join(rootNo, ROLE_REL), ROLE_PAGE.replace("---\n", "---\nplan_status: in-flight\n"), "utf8");
+  await writeFile(path.join(rootNo, PLAN), PLAN_PAGE.replace("(`src/main/Gate.kt:120-128`)", "").replace('<CaseBoard src="data/cases.yaml" />', ""), "utf8");
+  await writeFile(
+    path.join(rootNo, ".wiki-reader.json"),
+    JSON.stringify({ language: "no", roleKeys: ["fag", "utvikler"], trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"] }] }),
+    "utf8",
+  );
   stub = path.join(root, "..", `plan-card-stub-${process.pid}.ts`);
   runs = path.join(root, "..", `plan-card-runs-${process.pid}.txt`);
   await writeFile(
@@ -133,7 +173,8 @@ test.beforeAll(async ({}, info) => {
       `appendFileSync(${JSON.stringify(runs)}, JSON.stringify(args) + "\\n");`,
       "if (args.includes('SLOW')) await Bun.sleep(800);",
       "const env = Object.keys(process.env).sort().join(',');",
-      "const text = '# Stub card\\nARGS ' + JSON.stringify(args) + '\\nENV ' + env + '\\nMUNINN ' + process.env.PLAN_CARD_MUNINN_URL;",
+      "const lead = args.includes('LEADLF') ? '\\n' : '';",
+      "const text = lead + '# Stub card\\nARGS ' + JSON.stringify(args) + '\\nENV ' + env + '\\nMUNINN ' + process.env.PLAN_CARD_MUNINN_URL;",
       "console.log(JSON.stringify({ text, chars: text.length, cuts: [{ section: 'brief', pointer: 'Brief continues, sed -n 9,20p /x/p.mdx', start: 9, end: 20, file: '/x/p.mdx' }] }));",
       "",
     ].join("\n"),
@@ -167,6 +208,7 @@ test.beforeAll(async ({}, info) => {
 test.afterAll(async () => {
   for (const s of servers) s.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (rootNo) await rm(rootNo, { recursive: true, force: true });
   if (botsDir) await rm(botsDir, { recursive: true, force: true });
   for (const f of [stub, runs]) if (f) await rm(f, { force: true });
 });
@@ -255,6 +297,230 @@ test.describe("Wiki reader: the Agent lens", () => {
       expect([base, route.status]).not.toContainEqual(200);
       expect([403, 404]).toContain(route.status);
     }
+  });
+
+  test("leaving Agent restores the article: to All and to Overview, head controls and folds included", async ({ page }) => {
+    await page.goto(pageUrl(BASE, PLAN));
+    const article = page.locator(".wiki-article");
+    const pane = page.locator(".wiki-agent-pane");
+    const lineRefs = page.locator(".wiki-article-head .wiki-lineref-toggle");
+    const noneFold = article.locator('.cb-group[data-status="none"] .cb-nonemore');
+    const olderLog = article.locator("details.fold#older-log");
+    await expect(lineRefs).toBeVisible();
+    await expect(noneFold).toBeVisible();
+    await page.locator('.wiki-lens-switch button[data-lens="agent"]').click();
+    await expect(pane.locator(".wiki-agent-text")).toContainText("# Stub card");
+    await expect(article).toBeHidden();
+    // The article-only head controls go with the article (item 15).
+    await expect(lineRefs).toBeHidden();
+    await page.locator('.wiki-lens-switch button[data-lens="all"]').click();
+    await expect(article).toBeVisible();
+    await expect(pane).toBeHidden();
+    await expect(lineRefs).toBeVisible();
+    await expect(noneFold).toBeVisible();
+    await expect(olderLog).not.toHaveAttribute("open", "");
+    await page.locator('.wiki-lens-switch button[data-lens="agent"]').click();
+    await expect(article).toBeHidden();
+    await page.locator('.wiki-lens-switch button[data-lens="overview"]').click();
+    await expect(article).toBeVisible();
+    await expect(pane).toBeHidden();
+    // Overview hides line refs (and its toggle) and the `none` group, and opens
+    // the fold holding a DecisionLog (D41).
+    await expect(lineRefs).toBeHidden();
+    await expect(noneFold).toBeHidden();
+    await expect(olderLog).toHaveAttribute("open", "");
+  });
+
+  test("a reveal while in Agent switches to All for this view: a hash and a header pill", async ({ page }) => {
+    await page.goto(pageUrl(BASE, PLAN));
+    const article = page.locator(".wiki-article");
+    const agent = page.locator('.wiki-lens-switch button[data-lens="agent"]');
+    await agent.click();
+    await expect(page.locator(".wiki-agent-text")).toContainText("# Stub card");
+    await page.evaluate(() => {
+      location.hash = "#d1";
+    });
+    await expect(article).toHaveClass(/lens-all/);
+    await expect(article.locator("li.dl-item#d1")).toBeVisible();
+    await expect(page.locator(".wiki-agent-pane")).toBeHidden();
+    // A header pill, from Agent again.
+    await agent.click();
+    await expect(article).toBeHidden();
+    await page.locator(".wiki-article-head .wiki-count-pill").first().click();
+    await expect(article).toHaveClass(/lens-all/);
+    await expect(article).toBeVisible();
+    // Neither reveal stored a lens.
+    expect(await page.evaluate(() => localStorage.getItem("muninn.wiki.lens.v1"))).toBeNull();
+  });
+
+  test("?lens=agent where offered runs plan-card once, leaves the URL and is not stored", async ({ page }) => {
+    await rm(runs, { force: true });
+    await page.goto(pageUrl(BASE, PLAN, "&lens=agent"));
+    await expect(page.locator(".wiki-agent-text")).toContainText("# Stub card");
+    await expect(page.locator(".wiki-article")).toBeHidden();
+    expect(new URL(page.url()).searchParams.has("lens")).toBe(false);
+    expect(await page.evaluate(() => localStorage.getItem("muninn.wiki.lens.v1"))).toBeNull();
+    expect((await readFile(runs, "utf8")).trim().split("\n")).toHaveLength(1);
+    await page.reload();
+    await expect(page.locator(".wiki-article")).toHaveClass(/lens-all/);
+    await expect(page.locator(".wiki-agent-pane")).toHaveCount(0);
+    expect((await readFile(runs, "utf8")).trim().split("\n")).toHaveLength(1);
+  });
+
+  test("a failed load spends ?lens=agent: the next plan opens in All and runs nothing", async ({ page }) => {
+    await rm(runs, { force: true });
+    await page.goto(pageUrl(BASE, "plans/missing.mdx", "&lens=agent"));
+    await expect(page.locator("#articleWrap .wiki-empty-state")).toBeVisible();
+    await page.locator(`.wiki-list-item[data-relpath="${PLAN}"]`).first().click();
+    await expect(page.locator(".wiki-article")).toHaveClass(/lens-all/);
+    await expect(page.locator(".wiki-agent-pane")).toHaveCount(0);
+    expect(existsSync(runs)).toBe(false);
+  });
+
+  test("an explainer and a rejected page fetch spend ?lens=agent too", async ({ page }) => {
+    await rm(runs, { force: true });
+    const plan = page.locator(`.wiki-list-item[data-relpath="${PLAN}"]`).first();
+    // An explainer has no lens.
+    await page.goto(pageUrl(BASE, EXPLAINER, "&lens=agent"));
+    await expect(page.locator(".wiki-explainer-frame")).toBeVisible();
+    await plan.click();
+    await expect(page.locator(".wiki-article")).toHaveClass(/lens-all/);
+    // A page fetch that rejects (not an error payload: the network failed).
+    let failOnce = true;
+    await page.route("**/api/wiki/page?**", (route) => {
+      if (failOnce) {
+        failOnce = false;
+        return route.abort();
+      }
+      return route.continue();
+    });
+    await page.goto(pageUrl(BASE, PLAN, "&lens=agent"));
+    await expect(page.locator("#articleWrap .wiki-empty-state")).toContainText("Failed to load page");
+    await plan.click();
+    await expect(page.locator(".wiki-article")).toHaveClass(/lens-all/);
+    await expect(page.locator(".wiki-agent-pane")).toHaveCount(0);
+    expect(existsSync(runs)).toBe(false);
+  });
+
+  test("the start view spends ?lens=agent: a plan opened from it is All and runs nothing", async ({ page }) => {
+    await rm(runs, { force: true });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&lens=agent`);
+    await expect.poll(() => new URL(page.url()).searchParams.has("lens")).toBe(false);
+    await page.locator(`.wiki-list-item[data-relpath="${PLAN}"]`).first().click();
+    await expect(page.locator(".wiki-article")).toHaveClass(/lens-all/);
+    await expect(page.locator(".wiki-agent-pane")).toHaveCount(0);
+    expect(existsSync(runs)).toBe(false);
+  });
+
+  test("re-entering Agent runs plan-card again with the inputs on screen", async ({ page }) => {
+    await rm(runs, { force: true });
+    await page.goto(pageUrl(BASE, PLAN));
+    const agent = page.locator('.wiki-lens-switch button[data-lens="agent"]');
+    const text = page.locator(".wiki-agent-text");
+    await agent.click();
+    await expect(text).toContainText("# Stub card");
+    await page.locator('.wiki-agent-pane input[name="id"]').fill("S1");
+    await page.locator('.wiki-lens-switch button[data-lens="all"]').click();
+    await agent.click();
+    await expect(text).toContainText('"--id","S1"');
+    const lines = (await readFile(runs, "utf8")).trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[1]!)).toEqual([path.join(root, PLAN), "--id", "S1", "--json"]);
+  });
+
+  test("a new run aborts the one in flight; the body announces and the card keeps its leading newline", async ({ page }) => {
+    await page.goto(pageUrl(BASE, PLAN));
+    await page.locator('.wiki-lens-switch button[data-lens="agent"]').click();
+    const pane = page.locator(".wiki-agent-pane");
+    const body = pane.locator(".wiki-agent-body");
+    await expect(pane.locator(".wiki-agent-text")).toContainText("# Stub card");
+    await expect(body).toHaveAttribute("aria-live", "polite");
+    await expect(body).toHaveAttribute("aria-busy", "false");
+    const aborted: string[] = [];
+    page.on("requestfailed", (r) => {
+      if (r.url().includes("/api/wiki/plan-card")) aborted.push(new URL(r.url()).searchParams.get("id") ?? "");
+    });
+    const id = pane.locator('input[name="id"]');
+    await id.fill("SLOW");
+    await pane.locator('button[type="submit"]').click();
+    await expect(body).toHaveAttribute("aria-busy", "true");
+    await id.fill("LEADLF");
+    await pane.locator('button[type="submit"]').click();
+    await expect(pane.locator(".wiki-agent-text")).toContainText('"LEADLF"');
+    await expect.poll(() => aborted).toEqual(["SLOW"]);
+    // Word for word: the card's first character is its newline.
+    expect((await pane.locator(".wiki-agent-text").textContent())!.startsWith("\n# Stub card")).toBe(true);
+    // Late SLOW answer, if any, never repaints over the newer card.
+    await page.waitForTimeout(1000);
+    await expect(pane.locator(".wiki-agent-text")).toContainText('"LEADLF"');
+    // A navigation aborts the run in flight too.
+    await id.fill("SLOW");
+    await pane.locator('button[type="submit"]').click();
+    await expect(body).toHaveAttribute("aria-busy", "true");
+    await page.locator(`.wiki-list-item[data-relpath="${NOTE}"]`).first().click();
+    await expect.poll(() => aborted).toEqual(["SLOW", "SLOW"]);
+  });
+
+  test("an in-place reload in Agent keeps the card and inputs, marks it stale, and starts no child", async ({ page }) => {
+    const appends: unknown[] = [];
+    await page.route("**/api/wiki/factcheck?**", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: `event: done\ndata: ${JSON.stringify({ answer: "All good.", baseHash: "h1" })}\n\n`,
+      }),
+    );
+    await page.route("**/api/wiki/factcheck/append", (route) => {
+      appends.push(route.request().postDataJSON());
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ written: true }) });
+    });
+    await page.goto(pageUrl(BASE, PLAN));
+    await page.locator('.wiki-lens-switch button[data-lens="agent"]').click();
+    const pane = page.locator(".wiki-agent-pane");
+    await pane.locator('input[name="id"]').fill("D1");
+    await pane.locator('button[type="submit"]').click();
+    await expect(pane.locator(".wiki-agent-text")).toContainText('"--id","D1"');
+    const card = await pane.locator(".wiki-agent-text").textContent();
+    await rm(runs, { force: true });
+    await page.locator("#wikiFactcheckArticleBtn").dispatchEvent("mousedown");
+    await expect(page.locator("#wikiFactcheckAppendBtn")).toBeEnabled();
+    await page.locator("#wikiFactcheckAppendBtn").click();
+    await expect.poll(() => appends.length).toBe(1);
+    // The reloaded page is back in Agent, with the same card and inputs.
+    await expect(page.locator(".wiki-article")).toHaveClass(/lens-agent/);
+    await expect(pane.locator(".wiki-agent-stale")).toBeVisible();
+    await expect(pane.locator(".wiki-agent-text")).toHaveText(card!);
+    await expect(pane.locator('input[name="id"]')).toHaveValue("D1");
+    await page.waitForTimeout(500);
+    expect(existsSync(runs)).toBe(false);
+    // The Run button refreshes it.
+    await pane.locator('button[type="submit"]').click();
+    await expect(pane.locator(".wiki-agent-stale")).toBeHidden();
+    await expect.poll(() => existsSync(runs)).toBe(true);
+  });
+
+  test("«Se som rolle» acts on the article, so Agent hides it", async ({ page }) => {
+    await page.goto(pageUrl(BASE, ROLE_REL).replace(`wiki=${WIKI}`, `wiki=${WIKI_NO}`));
+    const roleView = page.locator(".wiki-article-head .wiki-role-view");
+    await expect(roleView).toBeVisible();
+    await page.locator('.wiki-lens-switch button[data-lens="agent"]').click();
+    await expect(page.locator(".wiki-agent-text")).toContainText("# Stub card");
+    await expect(roleView).toBeHidden();
+    await page.locator('.wiki-lens-switch button[data-lens="all"]').click();
+    await expect(roleView).toBeVisible();
+  });
+
+  test("graph mode hides the Agent pane with the article; a language: no wiki gets Norwegian words", async ({ page }) => {
+    await page.goto(pageUrl(BASE, PLAN).replace(`wiki=${WIKI}`, `wiki=${WIKI_NO}`));
+    await page.locator('.wiki-lens-switch button[data-lens="agent"]').click();
+    const pane = page.locator(".wiki-agent-pane");
+    await expect(pane.locator(".wiki-agent-text")).toContainText("# Stub card");
+    await expect(pane.locator('button[type="submit"]')).toHaveText("Kjør plan-card");
+    await expect(pane.locator(".wiki-agent-meta")).toContainText(" tegn · ");
+    await page.locator("#wikiGraphToggle").click();
+    await expect(pane).toBeHidden();
+    await page.locator("#wikiGraphToggle").click();
+    await expect(pane).toBeVisible();
   });
 
   test("the pane equals a direct run of the real plan-card with the same environment", async ({ page }) => {

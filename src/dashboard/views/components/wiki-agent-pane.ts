@@ -4,21 +4,33 @@
  * page, word for word, in monospace, with its size against the card's 12k cap,
  * the list of cut sections, and `--since` / `--id` inputs.
  *
- * The pane fetches `GET /api/wiki/plan-card` when the Agent lens is shown, and
- * again when the reader runs it with other inputs. Nothing fetches it on a page
- * open: Agent is never stored (D1), so only a click or a `?lens=agent` link
- * shows it. The server decides whether the lens exists (`reader.agentLens`).
+ * The pane fetches `GET /api/wiki/plan-card` each time the reader enters the
+ * Agent lens (a click, or a `?lens=agent` link, the only two ways in: Agent is
+ * never stored, D1), and when the reader runs it with other inputs. Nothing
+ * fetches it on a page open, and an in-place reload of the page (a fact-check
+ * append) carries the shown card and inputs over, marked as possibly stale,
+ * rather than starting a child. A new run aborts the one in flight, so does a
+ * navigation ({@link abortAgentRuns}), and a run that has no answer by
+ * {@link AGENT_CLIENT_DEADLINE_MS} is aborted with an error. The server decides
+ * whether the lens exists (`reader.agentLens`).
  */
+import type { QuestionLanguage } from "../../../format/question-labels.ts";
 
 /** plan-card's `TOTAL_MAX`: the card's own cap, which `--full` alone lifts. */
 export const AGENT_CARD_CAP = 12_000;
 export const AGENT_PANE_CLASS = "wiki-agent-pane";
+/** The client's own deadline: the route's 20 s, its SIGKILL grace, and slack. */
+export const AGENT_CLIENT_DEADLINE_MS = 30_000;
+
+type Lang = QuestionLanguage;
 
 export interface AgentCut {
   section: string;
   pointer: string;
   start?: number;
   end?: number;
+  /** Single lines (a log cut, a capped reference list), in place of a range. */
+  lines?: number[];
   file?: string;
 }
 
@@ -35,7 +47,62 @@ export type AgentPaneState =
   | { kind: "error"; status: number; message: string }
   | { kind: "ok"; card: AgentCard };
 
-const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+/** The pane's words, per wiki language. */
+export const AGENT_WORDS: Record<
+  Lang,
+  {
+    pane: string;
+    since: string;
+    id: string;
+    run: string;
+    running: string;
+    failed: (status: string, message: string) => string;
+    network: string;
+    deadline: (s: number) => string;
+    cuts: (n: number) => string;
+    noCut: string;
+    chars: string;
+    overCap: string;
+    stale: string;
+    notRun: string;
+    locale: string;
+  }
+> = {
+  en: {
+    pane: "Agent: the plan card a session loads",
+    since: "since",
+    id: "id",
+    run: "Run plan-card",
+    running: "Running plan-card…",
+    failed: (status, message) => `plan-card failed (${status}): ${message}`,
+    network: "network",
+    deadline: (s) => `no answer within ${s} s`,
+    cuts: (n) => `${n} cut section${n === 1 ? "" : "s"}`,
+    noCut: "No section cut.",
+    chars: "chars",
+    overCap: "over the cap",
+    stale: "This card is from before the page was reloaded and may be stale. Run plan-card for a fresh one.",
+    notRun: "The page was reloaded. Run plan-card for its card.",
+    locale: "en-US",
+  },
+  no: {
+    pane: "Agent: plankortet en sesjon laster",
+    since: "siden",
+    id: "id",
+    run: "Kjør plan-card",
+    running: "Kjører plan-card…",
+    failed: (status, message) => `plan-card feilet (${status}): ${message}`,
+    network: "nettverk",
+    deadline: (s) => `ikke svar innen ${s} s`,
+    cuts: (n) => `${n} ${n === 1 ? "kuttet seksjon" : "kuttede seksjoner"}`,
+    noCut: "Ingen seksjon er kuttet.",
+    chars: "tegn",
+    overCap: "over taket",
+    stale: "Kortet er fra før siden ble lastet på nytt og kan være utdatert. Kjør plan-card for et ferskt kort.",
+    notRun: "Siden ble lastet på nytt. Kjør plan-card for å se kortet.",
+    locale: "nb-NO",
+  },
+};
 
 /** The route URL for one run; blank inputs are left out. */
 export function agentCardUrl(wiki: string, relPath: string, since: string, id: string): string {
@@ -48,116 +115,195 @@ export function agentCardUrl(wiki: string, relPath: string, since: string, id: s
 }
 
 /** `8,321 / 12,000 chars · 1.2 s`, flagged when over the cap. */
-export function agentMetaText(card: AgentCard): string {
-  const n = (v: number) => v.toLocaleString("en-US");
-  const over = card.chars > AGENT_CARD_CAP ? " (over the cap)" : "";
-  return `${n(card.chars)} / ${n(AGENT_CARD_CAP)} chars${over} · ${(card.ms / 1000).toFixed(1)} s`;
+export function agentMetaText(card: AgentCard, lang: Lang = "en"): string {
+  const w = AGENT_WORDS[lang];
+  const n = (v: number) => v.toLocaleString(w.locale);
+  const over = card.chars > AGENT_CARD_CAP ? ` (${w.overCap})` : "";
+  const secs = (card.ms / 1000).toLocaleString(w.locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `${n(card.chars)} / ${n(AGENT_CARD_CAP)} ${w.chars}${over} · ${secs} s`;
 }
 
-/** One cut as a row: the section, the range the pointer names, and the pointer. */
+/** One cut as a row: the section, the range or lines the pointer names, and
+ *  the pointer. */
 export function agentCutText(c: AgentCut): string {
-  const range = c.start !== undefined && c.end !== undefined ? ` L${c.start}-${c.end}` : "";
+  const range =
+    c.start !== undefined && c.end !== undefined
+      ? ` L${c.start}-${c.end}`
+      : Array.isArray(c.lines) && c.lines.length
+        ? ` ${c.lines.map((n) => `L${n}`).join(", ")}`
+        : "";
   const file = c.file ? ` ${c.file.split("/").pop()}` : "";
   return `${c.section}${range}${file} — ${c.pointer}`;
 }
 
-/** The pane body (everything under the controls) for a state. */
-export function agentBodyHtml(state: AgentPaneState): string {
+const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+
+/** The pane body (everything under the controls) for a state. The card's
+ *  `<pre>` is EMPTY here: the caller sets its `textContent`, because the HTML
+ *  parser drops a `<pre>`'s leading newline and the card is shown word for word. */
+export function agentBodyHtml(state: AgentPaneState, lang: Lang = "en"): string {
+  const w = AGENT_WORDS[lang];
   switch (state.kind) {
     case "idle":
       return "";
     case "loading":
-      return `<p class="wiki-agent-status">Running plan-card…</p>`;
+      return `<p class="wiki-agent-status">${esc(w.running)}</p>`;
     case "error":
-      return `<p class="wiki-agent-status wiki-agent-error" role="alert">plan-card failed (${state.status || "network"}): ${esc(state.message)}</p>`;
+      return `<p class="wiki-agent-status wiki-agent-error" role="alert">${esc(w.failed(state.status ? String(state.status) : w.network, state.message))}</p>`;
     case "ok": {
       const { card } = state;
       const cuts = card.cuts.length
-        ? `<details class="wiki-agent-cuts" open><summary>${card.cuts.length} cut section${card.cuts.length === 1 ? "" : "s"}</summary><ul>${card.cuts
+        ? `<details class="wiki-agent-cuts" open><summary>${esc(w.cuts(card.cuts.length))}</summary><ul>${card.cuts
             .map((c) => `<li>${esc(agentCutText(c))}</li>`)
             .join("")}</ul></details>`
-        : `<p class="wiki-agent-status">No section cut.</p>`;
-      return `${cuts}<pre class="wiki-agent-text">${esc(card.text)}</pre>`;
+        : `<p class="wiki-agent-status">${esc(w.noCut)}</p>`;
+      return `${cuts}<pre class="wiki-agent-text"></pre>`;
     }
   }
+}
+
+/** What an in-place reload carries from the old pane to the new one. */
+export interface AgentPaneSnapshot {
+  since: string;
+  id: string;
+  /** The card on screen, or null when none was (a run in flight, an error). */
+  card: AgentCard | null;
 }
 
 export interface AgentPaneOptions {
   wiki: string;
   relPath: string;
+  /** The wiki's `language`, for the pane's words. */
+  language?: Lang;
+  /** An in-place reload's carry-over: shown instead of a run. */
+  carry?: AgentPaneSnapshot;
   /** Test seam; default `fetch`. */
   fetchImpl?: typeof fetch;
+  /** Test seam; default {@link AGENT_CLIENT_DEADLINE_MS}. */
+  deadlineMs?: number;
 }
 
 interface Pane {
   el: HTMLElement;
-  loaded: boolean;
   run: () => Promise<void>;
+  snapshot: () => AgentPaneSnapshot;
 }
 
 const panes = new WeakMap<Element, Pane>();
+/** The runs in flight, for {@link abortAgentRuns}. */
+const inFlight = new Set<AbortController>();
+
+/** Abort every run in flight: the reader navigated away from its page. */
+export function abortAgentRuns(): void {
+  for (const c of inFlight) c.abort();
+  inFlight.clear();
+}
+
+/** The pane's inputs and card for `article`, for an in-place reload; inputs
+ *  blank and no card when the article has no pane. */
+export function snapshotAgentPane(article: Element): AgentPaneSnapshot {
+  return panes.get(article)?.snapshot() ?? { since: "", id: "", card: null };
+}
 
 function buildPane(article: HTMLElement, opts: AgentPaneOptions): Pane {
+  const lang: Lang = opts.language ?? "en";
+  const w = AGENT_WORDS[lang];
   const el = document.createElement("section");
   el.className = AGENT_PANE_CLASS;
-  el.setAttribute("aria-label", "Agent: the plan card a session loads");
+  el.setAttribute("aria-label", w.pane);
   el.innerHTML =
     `<form class="wiki-agent-controls">` +
-    `<label>since <input type="date" name="since"></label>` +
-    `<label>id <input type="text" name="id" placeholder="D7, S1, Q-14" size="10" maxlength="40" autocomplete="off"></label>` +
-    `<button type="submit">Run plan-card</button>` +
-    `<span class="wiki-agent-meta" aria-live="polite"></span>` +
-    `</form><div class="wiki-agent-body"></div>`;
+    `<label>${esc(w.since)} <input type="date" name="since"></label>` +
+    `<label>${esc(w.id)} <input type="text" name="id" placeholder="D7, S1, Q-14" size="10" maxlength="40" autocomplete="off"></label>` +
+    `<button type="submit">${esc(w.run)}</button>` +
+    `<span class="wiki-agent-meta"></span>` +
+    `</form><p class="wiki-agent-status wiki-agent-stale" hidden></p><div class="wiki-agent-body" aria-live="polite"></div>`;
   article.after(el);
   const form = el.querySelector("form")!;
   const body = el.querySelector<HTMLElement>(".wiki-agent-body")!;
   const meta = el.querySelector<HTMLElement>(".wiki-agent-meta")!;
-  let seq = 0;
+  const stale = el.querySelector<HTMLElement>(".wiki-agent-stale")!;
+  const input = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
+  let shown: AgentCard | null = null;
+  let current: AbortController | null = null;
   const paint = (state: AgentPaneState) => {
-    body.innerHTML = agentBodyHtml(state);
-    meta.textContent = state.kind === "ok" ? agentMetaText(state.card) : "";
+    body.innerHTML = agentBodyHtml(state, lang);
+    body.setAttribute("aria-busy", state.kind === "loading" ? "true" : "false");
+    shown = state.kind === "ok" ? state.card : null;
+    if (state.kind === "ok") body.querySelector<HTMLElement>(".wiki-agent-text")!.textContent = state.card.text;
+    meta.textContent = state.kind === "ok" ? agentMetaText(state.card, lang) : "";
   };
   const pane: Pane = {
     el,
-    loaded: false,
+    snapshot: () => ({ since: input("since").value, id: input("id").value, card: shown }),
     run: async () => {
-      const mine = ++seq;
-      pane.loaded = true;
-      const since = (form.elements.namedItem("since") as HTMLInputElement).value;
-      const id = (form.elements.namedItem("id") as HTMLInputElement).value;
+      // A new run supersedes the one in flight.
+      current?.abort();
+      const ctrl = new AbortController();
+      current = ctrl;
+      inFlight.add(ctrl);
+      stale.hidden = true;
       paint({ kind: "loading" });
+      const deadline = opts.deadlineMs ?? AGENT_CLIENT_DEADLINE_MS;
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        ctrl.abort();
+      }, deadline);
       let state: AgentPaneState;
       try {
-        const res = await (opts.fetchImpl ?? fetch)(agentCardUrl(opts.wiki, opts.relPath, since, id));
+        const res = await (opts.fetchImpl ?? fetch)(agentCardUrl(opts.wiki, opts.relPath, input("since").value, input("id").value), {
+          signal: ctrl.signal,
+        });
         const json = (await res.json().catch(() => null)) as (AgentCard & { error?: string }) | null;
         state =
           res.ok && json && typeof json.text === "string"
             ? { kind: "ok", card: { text: json.text, chars: json.chars, cuts: Array.isArray(json.cuts) ? json.cuts : [], ms: json.ms ?? 0 } }
             : { kind: "error", status: res.status, message: json?.error ?? res.statusText };
       } catch (e) {
-        state = { kind: "error", status: 0, message: e instanceof Error ? e.message : String(e) };
+        state = { kind: "error", status: 0, message: timedOut ? w.deadline(Math.round(deadline / 1000)) : e instanceof Error ? e.message : String(e) };
+      } finally {
+        clearTimeout(timer);
+        inFlight.delete(ctrl);
       }
-      // A later run (or another page) owns the pane now.
-      if (mine === seq && el.isConnected) paint(state);
+      // Superseded by a later run, or aborted by a navigation: that one owns
+      // the pane (or there is no pane on screen any more).
+      if (ctrl.signal.aborted && !timedOut) return;
+      if (current === ctrl && el.isConnected) paint(state);
     },
   };
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     void pane.run();
   });
+  if (opts.carry) {
+    input("since").value = opts.carry.since;
+    input("id").value = opts.carry.id;
+    if (opts.carry.card) paint({ kind: "ok", card: opts.carry.card });
+    stale.textContent = opts.carry.card ? w.stale : w.notRun;
+    stale.hidden = false;
+  }
   return pane;
 }
 
-/** Show or hide the pane for `article`; the first show runs plan-card. */
+/**
+ * Show or hide the pane for `article`. Entering the Agent lens runs plan-card
+ * (a click is the reader's request, so a re-entry runs it again with the
+ * inputs on screen); a pane built from an in-place reload's `carry` does not.
+ */
 export function setAgentPane(article: HTMLElement, shown: boolean, opts: AgentPaneOptions | null): void {
   let pane = panes.get(article);
+  let carried = false;
   if (!pane && shown && opts) {
     pane = buildPane(article, opts);
     panes.set(article, pane);
+    carried = !!opts.carry;
+    pane.el.hidden = true;
   }
   if (!pane) return;
+  const entering = shown && pane.el.hidden;
   pane.el.hidden = !shown;
-  if (shown && !pane.loaded) void pane.run();
+  if (entering && !carried) void pane.run();
 }
 
 /** The pane's CSS; the lens CSS hides the article itself in the Agent lens. */

@@ -16,15 +16,17 @@
  * `parseStampRoots`: an entry is `~`-expanded and resolved (a relative one
  * against this process's cwd, which is the child's too), `/` is kept, and a
  * root that does not exist is dropped; unset ⇒ its two defaults under `~/source`.
- * A drift shows up as an Agent button whose route answers 404.
+ * A drift shows up as an Agent button whose route answers 404. The child runs
+ * in the script's own directory (not muninn's cwd, whose `bunfig.toml` Bun
+ * would load), so {@link planCardChildEnv} hands it `WIKI_STAMP_ROOTS` with
+ * each entry already resolved against muninn's cwd.
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { resolveServingProfile } from "../config.ts";
+import { resolveServingProfile, type MuninnProfile } from "../config.ts";
 import { sameWikiRoot } from "./readonly.ts";
-import { STAMP_CHILD_ENV_NAMES } from "../dashboard/routes/wiki-stamp.ts";
-import { WIKI_STAMP_ROOTS_ENV } from "./stamp-roots.ts";
+import { STAMP_CHILD_ENV_NAMES, WIKI_STAMP_ROOTS_ENV } from "./stamp-roots.ts";
 
 export const PLAN_CARD_BIN_ENV = "PLAN_CARD_BIN";
 
@@ -55,20 +57,28 @@ export interface PlanCardConfig {
   roots: string[];
 }
 
+/** One `WIKI_STAMP_ROOTS` entry as plan-card resolves it: `~` expanded, then
+ *  resolved against the cwd. */
+function resolveRootEntry(r: string, home: string): string {
+  return path.resolve(r.replace(/^~(?=$|\/)/, home));
+}
+
 /** plan-card's `resolveRoots`, for this process's environment. */
 export function planCardRoots(env: Record<string, string | undefined> = process.env, home = homedir()): string[] {
   const raw = env[WIKI_STAMP_ROOTS_ENV]?.trim();
   const list = raw ? raw.split(":").filter(Boolean) : [path.join(home, "source/private/mimir"), path.join(home, "source/nav/melosys-kode-wiki")];
-  return list.map((r) => path.resolve(r.replace(/^~(?=$|\/)/, home))).filter((r) => existsSync(r));
+  return list.map((r) => resolveRootEntry(r, home)).filter((r) => existsSync(r));
 }
 
 /** Read at request time. Off unless the variable names an absolute path and
- *  this is the `default` profile (nais drops the route group anyway). */
-export function planCardConfigFromEnv(env: Record<string, string | undefined> = process.env): PlanCardConfig {
+ *  the serving profile is `default` (nais drops the route group anyway).
+ *  `profile`: the caller's `config.profile` where a `Config` exists (the pair
+ *  rule); absent ⇒ parsed from `env`. */
+export function planCardConfigFromEnv(env: Record<string, string | undefined> = process.env, profile?: MuninnProfile): PlanCardConfig {
   const raw = (env[PLAN_CARD_BIN_ENV] ?? "").trim();
   let profileOk = false;
   try {
-    profileOk = resolveServingProfile(env) === "default";
+    profileOk = (profile ?? resolveServingProfile(env)) === "default";
   } catch {
     // An unknown profile refuses the boot elsewhere; here it means off.
   }
@@ -80,15 +90,18 @@ export function planCardRootFor(wikiDir: string, roots: readonly string[]): stri
   return roots.find((r) => sameWikiRoot(wikiDir, r)) ?? null;
 }
 
-/** D7: is the Agent lens offered for this page and viewer? */
+/** D7: is the Agent lens offered for this page and viewer? `config` is a
+ *  thunk, read only once the page and viewer qualify: every `/api/wiki/page`
+ *  asks, and most pages carry no `plan_status`. */
 export function agentLensFor(opts: {
-  config: PlanCardConfig;
+  config: () => PlanCardConfig;
   wikiDir: string | undefined;
   hasPlanStatus: boolean;
   admin: boolean;
 }): boolean {
-  const { config } = opts;
-  return !!config.bin && opts.admin && opts.hasPlanStatus && !!opts.wikiDir && planCardRootFor(opts.wikiDir, config.roots) !== null;
+  if (!opts.admin || !opts.hasPlanStatus || !opts.wikiDir) return false;
+  const config = opts.config();
+  return !!config.bin && planCardRootFor(opts.wikiDir, config.roots) !== null;
 }
 
 /** The child's argv after the interpreter. */
@@ -97,19 +110,34 @@ export function planCardArgs(bin: string, abs: string, opts: { since?: string; i
 }
 
 /**
- * D7's allowlisted environment: Stamp's `PATH`, `HOME`, `TMPDIR`, plus
- * `WIKI_STAMP_ROOTS` and `CLAUDE_USAGE_URL` when this process has them, and
- * `PLAN_CARD_MUNINN_URL` pointing back at this instance on loopback (which
- * assumes a loopback or `0.0.0.0` bind). Nothing else of muninn's reaches the
- * child; `--no-env-file` keeps Bun from reloading muninn's `.env`.
+ * The base URL the child calls this instance on: `DASHBOARD_HOST` when it
+ * names one address (a LAN or tailnet IP, `::1`, bracketed when IPv6),
+ * loopback for a wildcard bind (`0.0.0.0`, `::`) or none (the server's own
+ * `127.0.0.1` default).
  */
-export function planCardChildEnv(port: number, source: Record<string, string | undefined> = process.env): Record<string, string> {
+export function planCardMuninnUrl(port: number, host: string | undefined): string {
+  const h = (host ?? "").trim();
+  if (!h || h === "0.0.0.0" || h === "::" || h === "[::]") return `http://127.0.0.1:${port}`;
+  return `http://${h.includes(":") && !h.startsWith("[") ? `[${h}]` : h}:${port}`;
+}
+
+/**
+ * D7's allowlisted environment: Stamp's `PATH`, `HOME`, `TMPDIR`, plus
+ * `WIKI_STAMP_ROOTS` (each entry resolved, since the child runs in another
+ * cwd) and `CLAUDE_USAGE_URL` when this process has them, and
+ * `PLAN_CARD_MUNINN_URL` pointing back at this instance
+ * ({@link planCardMuninnUrl}). Nothing else of muninn's reaches the child;
+ * `--no-env-file` keeps Bun from reloading muninn's `.env`.
+ */
+export function planCardChildEnv(port: number, source: Record<string, string | undefined> = process.env, home = homedir()): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const name of [...STAMP_CHILD_ENV_NAMES, WIKI_STAMP_ROOTS_ENV, "CLAUDE_USAGE_URL"]) {
+  for (const name of [...STAMP_CHILD_ENV_NAMES, "CLAUDE_USAGE_URL"]) {
     const value = source[name];
     if (typeof value === "string" && value) env[name] = value;
   }
-  env.PLAN_CARD_MUNINN_URL = `http://127.0.0.1:${port}`;
+  const roots = source[WIKI_STAMP_ROOTS_ENV]?.trim();
+  if (roots) env[WIKI_STAMP_ROOTS_ENV] = roots.split(":").filter(Boolean).map((r) => resolveRootEntry(r, home)).join(":");
+  env.PLAN_CARD_MUNINN_URL = planCardMuninnUrl(port, source.DASHBOARD_HOST);
   return env;
 }
 
@@ -119,6 +147,8 @@ export interface PlanCardCut {
   pointer: string;
   start?: number;
   end?: number;
+  /** Single lines (a log cut, a capped reference list), in place of a range. */
+  lines?: number[];
   file?: string;
 }
 
