@@ -421,9 +421,19 @@ test.describe("Wiki reader: chat dialog", () => {
     // Article mode has the most content (context row + six chips), and the viewport
     // is shrunk AFTER opening — the breadcrumb's Discuss button is itself off screen
     // at this height.
+    // The chat-target answer is held back so the scroll below lands BEFORE the
+    // dialog's second render whenever the test forgets to wait for it: that render
+    // grows the panel and keeps `scrollTop`, so Send ends up below the fold while
+    // the scroll check still passes. On CI's 2-core runner the answer was late
+    // often enough to make this test flaky.
+    await page.route("**/api/wiki/chat-target**", async (route) => {
+      await new Promise((r) => setTimeout(r, 800));
+      await route.continue();
+    });
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=${encodeURIComponent("Wiki gardener")}`);
     await page.locator("#wikiDiscussBtn").click();
     await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    await settled(page);
     await page.setViewportSize({ width: 900, height: 320 });
     const panel = page.locator("#wikiChatOpt");
     await panel.evaluate((el) => { el.scrollTop = el.scrollHeight; });
