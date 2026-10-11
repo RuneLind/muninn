@@ -26,6 +26,7 @@
  */
 
 import { getLog } from "../logging.ts";
+import { RUN_PROC_KILL_GRACE_MS, RUN_PROC_POST_KILL_WAIT_MS as POST_KILL_WAIT_MS } from "./run-proc-bounds.ts";
 
 const log = getLog("utils", "run-proc");
 
@@ -50,12 +51,7 @@ export interface RunProcOptions {
   killGraceMs?: number;
 }
 
-/** Between the timeout's SIGTERM and its SIGKILL. */
-export const RUN_PROC_KILL_GRACE_MS = 2_000;
-
-/** After the SIGKILL, how long the timeout waits for the exit before it gives
- *  up on seeing one (a child stuck in an uninterruptible wait). */
-const POST_KILL_WAIT_MS = 1_000;
+export { RUN_PROC_KILL_GRACE_MS };
 
 /** Bytes kept per stream. See the header for why there is a cap at all. */
 export const RUN_PROC_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -183,21 +179,20 @@ export async function runProc(
       });
       signal("SIGTERM");
       const grace = opts.killGraceMs ?? RUN_PROC_KILL_GRACE_MS;
+      // Fires only while the child is still there: an exit inside the grace
+      // settles below first, and that path clears this timer.
       const killTimer = setTimeout(() => {
-        // A group member can outlive the leader, so the group gets the
-        // SIGKILL even when the leader has exited.
-        if (!exited || opts.processGroup) {
-          if (!exited) log.error("{label} ignored SIGTERM for {grace}ms — SIGKILL to PID {pid}", { label, grace, pid: proc.pid });
-          signal("SIGKILL");
-        }
+        log.error("{label} ignored SIGTERM for {grace}ms — SIGKILL to PID {pid}", { label, grace, pid: proc.pid });
+        signal("SIGKILL");
       }, grace);
       const fail = () => {
         clearTimeout(killTimer);
         reject(new ProcTimeoutError(label, timeoutMs));
       };
       void Promise.race([proc.exited, Bun.sleep(grace + POST_KILL_WAIT_MS)]).then(() => {
-        // A group leader that died on SIGTERM may leave members: SIGKILL them
-        // now rather than wait for the grace.
+        // A group leader that died on SIGTERM may leave members that trap
+        // it: this is the only SIGKILL they get, since the grace timer is
+        // cleared below.
         if (opts.processGroup && exited) signal("SIGKILL");
         fail();
       });

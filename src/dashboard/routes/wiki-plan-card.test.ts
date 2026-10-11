@@ -13,7 +13,14 @@ import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
-import { PLAN_CARD_MAX_WAITING, registerWikiPlanCardRoute, type PlanCardRouteDeps } from "./wiki-plan-card.ts";
+import {
+  PLAN_CARD_MAX_WAITING,
+  joinPlanCardFlight,
+  registerWikiPlanCardRoute,
+  type Flight,
+  type PlanCardRouteDeps,
+  type RunOutcome,
+} from "./wiki-plan-card.ts";
 import type { PlanCardConfig } from "../../wiki/plan-card.ts";
 
 let dir = "";
@@ -235,6 +242,30 @@ describe("fix round 1: cancellation, the queue bound, the kill and the cwd", () 
     await stub(`pwd -P > "${out}.pwd"; echo '${JSON.stringify(CARD)}'`);
     expect((await get(appWith(), "wiki=w&relPath=plans/a.mdx")).status).toBe(200);
     expect((await readFile(`${out}.pwd`, "utf8")).trim()).toBe(realpathSync(path.dirname(bin)));
+  });
+});
+
+describe("fix round 2: a request between abandonment and the run's finally", () => {
+  test("never joins the abandoned run, on whichever microtask it arrives", async () => {
+    const outcomes: string[] = [];
+    // Sweep the arrival over the microtasks around B's abandonment: the window
+    // between B leaving no requester and B's `finally` is a few of them.
+    for (let hops = 0; hops < 12; hops++) {
+      const table = new Map<string, Flight>();
+      const a = Promise.withResolvers<RunOutcome>();
+      joinPlanCardFlight(table, "a", "/p", new AbortController().signal, () => a.promise);
+      const gone = new AbortController();
+      gone.abort();
+      const fail = (message: string) => async (): Promise<RunOutcome> => ({ ok: false, timeout: false, message });
+      joinPlanCardFlight(table, "b", "/p", gone.signal, fail("b"));
+      a.resolve({ ok: false, timeout: false, message: "a" });
+      for (let i = 0; i < hops; i++) await Promise.resolve();
+      const c = joinPlanCardFlight(table, "b", "/p", new AbortController().signal, fail("c"));
+      if (c === "busy") throw new Error("busy");
+      const o = await c.promise;
+      outcomes.push("abandoned" in o ? `abandoned@${hops}` : "ran");
+    }
+    expect(outcomes.filter((o) => o !== "ran")).toEqual([]);
   });
 });
 

@@ -348,6 +348,7 @@ import {
   GRAPH_FOCUS_ATTR,
   GRAPH_LEVEL_ID,
   GRAPH_NODE_ATTR,
+  GRAPH_ON_CLASS,
   GRAPH_OPEN_ATTR,
   GRAPH_SECTION_ID,
   GRAPH_TOGGLE_ID,
@@ -4329,10 +4330,9 @@ function applyDisplay(): void {
     toggle.setAttribute("aria-pressed", on ? "true" : "false");
   }
   if (on && !wasOn) readingScrollTop = wrap.scrollTop;
-  // The Agent pane too: it sits beside the article it stands in for.
-  wrap.querySelectorAll<HTMLElement>(":scope > .wiki-article, :scope > .wiki-explainer-frame, :scope > .wiki-agent-pane").forEach((el) => {
-    el.classList.toggle("wiki-graph-hidden", on);
-  });
+  // One class on the pane, not one per child: a child built while graph mode
+  // is on (an Agent pane from the lens switch) is hidden by the same CSS rule.
+  wrap.classList.toggle(GRAPH_ON_CLASS, on);
   if (!on) {
     removeGraph();
     if (wasOn) wrap.scrollTop = readingScrollTop;
@@ -4355,6 +4355,7 @@ function removeGraph(): void {
   graphResize?.disconnect();
   graphResize = null;
   document.getElementById(GRAPH_SECTION_ID)?.remove();
+  document.getElementById("articleWrap")?.classList.remove(GRAPH_ON_CLASS);
 }
 
 function loadGraph(): void {

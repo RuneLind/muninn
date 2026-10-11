@@ -11,16 +11,20 @@
  * append) carries the shown card and inputs over, marked as possibly stale,
  * rather than starting a child. A new run aborts the one in flight, so does a
  * navigation ({@link abortAgentRuns}), and a run that has no answer by
- * {@link AGENT_CLIENT_DEADLINE_MS} is aborted with an error. The server decides
+ * {@link AGENT_CLIENT_DEADLINE_MS} (the route's worst case, queue wait
+ * included) is aborted with an error. A visually hidden status line is the
+ * live region, so a screen reader hears the outcome, not the card. The server decides
  * whether the lens exists (`reader.agentLens`).
  */
 import type { QuestionLanguage } from "../../../format/question-labels.ts";
+import { PLAN_CARD_CLIENT_DEADLINE_MS } from "../../../wiki/plan-card-bounds.ts";
 
 /** plan-card's `TOTAL_MAX`: the card's own cap, which `--full` alone lifts. */
 export const AGENT_CARD_CAP = 12_000;
 export const AGENT_PANE_CLASS = "wiki-agent-pane";
-/** The client's own deadline: the route's 20 s, its SIGKILL grace, and slack. */
-export const AGENT_CLIENT_DEADLINE_MS = 30_000;
+/** The client's own deadline: the route's worst case for an admitted request,
+ *  its queue wait included (see `PLAN_CARD_CLIENT_DEADLINE_MS`). */
+export const AGENT_CLIENT_DEADLINE_MS = PLAN_CARD_CLIENT_DEADLINE_MS;
 
 type Lang = QuestionLanguage;
 
@@ -56,6 +60,7 @@ export const AGENT_WORDS: Record<
     id: string;
     run: string;
     running: string;
+    done: (chars: string) => string;
     failed: (status: string, message: string) => string;
     network: string;
     deadline: (s: number) => string;
@@ -74,6 +79,7 @@ export const AGENT_WORDS: Record<
     id: "id",
     run: "Run plan-card",
     running: "Running plan-card…",
+    done: (chars) => `plan-card done: ${chars} chars`,
     failed: (status, message) => `plan-card failed (${status}): ${message}`,
     network: "network",
     deadline: (s) => `no answer within ${s} s`,
@@ -91,6 +97,7 @@ export const AGENT_WORDS: Record<
     id: "id",
     run: "Kjør plan-card",
     running: "Kjører plan-card…",
+    done: (chars) => `plan-card ferdig: ${chars} tegn`,
     failed: (status, message) => `plan-card feilet (${status}): ${message}`,
     network: "nettverk",
     deadline: (s) => `ikke svar innen ${s} s`,
@@ -149,7 +156,7 @@ export function agentBodyHtml(state: AgentPaneState, lang: Lang = "en"): string 
     case "loading":
       return `<p class="wiki-agent-status">${esc(w.running)}</p>`;
     case "error":
-      return `<p class="wiki-agent-status wiki-agent-error" role="alert">${esc(w.failed(state.status ? String(state.status) : w.network, state.message))}</p>`;
+      return `<p class="wiki-agent-status wiki-agent-error">${esc(w.failed(state.status ? String(state.status) : w.network, state.message))}</p>`;
     case "ok": {
       const { card } = state;
       const cuts = card.cuts.length
@@ -160,6 +167,55 @@ export function agentBodyHtml(state: AgentPaneState, lang: Lang = "en"): string 
       return `${cuts}<pre class="wiki-agent-text"></pre>`;
     }
   }
+}
+
+/** The pane's live status line: one short sentence per state, so a screen
+ *  reader hears "running", "done, N chars" or the error, never the card. */
+export function agentLiveText(state: AgentPaneState, lang: Lang = "en"): string {
+  const w = AGENT_WORDS[lang];
+  switch (state.kind) {
+    case "idle":
+      return "";
+    case "loading":
+      return w.running;
+    case "error":
+      return w.failed(state.status ? String(state.status) : w.network, state.message);
+    case "ok":
+      return w.done(state.card.chars.toLocaleString(w.locale));
+  }
+}
+
+/**
+ * One run's request: the state it ends in, or null when `ctrl` was aborted from
+ * outside (a newer run, a navigation), whose owner paints the pane. A run with
+ * no answer by `deadlineMs` is aborted and ends in an error naming the deadline.
+ */
+export async function fetchAgentCard(
+  url: string,
+  ctrl: AbortController,
+  opts: { fetchImpl?: typeof fetch; deadlineMs?: number; language?: Lang } = {},
+): Promise<AgentPaneState | null> {
+  const w = AGENT_WORDS[opts.language ?? "en"];
+  const deadline = opts.deadlineMs ?? AGENT_CLIENT_DEADLINE_MS;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, deadline);
+  let state: AgentPaneState;
+  try {
+    const res = await (opts.fetchImpl ?? fetch)(url, { signal: ctrl.signal });
+    const json = (await res.json().catch(() => null)) as (AgentCard & { error?: string }) | null;
+    state =
+      res.ok && json && typeof json.text === "string"
+        ? { kind: "ok", card: { text: json.text, chars: json.chars, cuts: Array.isArray(json.cuts) ? json.cuts : [], ms: json.ms ?? 0 } }
+        : { kind: "error", status: res.status, message: json?.error ?? res.statusText };
+  } catch (e) {
+    state = { kind: "error", status: 0, message: timedOut ? w.deadline(Math.round(deadline / 1000)) : e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
+  return ctrl.signal.aborted && !timedOut ? null : state;
 }
 
 /** What an in-place reload carries from the old pane to the new one. */
@@ -217,12 +273,14 @@ function buildPane(article: HTMLElement, opts: AgentPaneOptions): Pane {
     `<label>${esc(w.id)} <input type="text" name="id" placeholder="D7, S1, Q-14" size="10" maxlength="40" autocomplete="off"></label>` +
     `<button type="submit">${esc(w.run)}</button>` +
     `<span class="wiki-agent-meta"></span>` +
-    `</form><p class="wiki-agent-status wiki-agent-stale" hidden></p><div class="wiki-agent-body" aria-live="polite"></div>`;
+    `</form><p class="wiki-agent-live" role="status" aria-live="polite"></p>` +
+    `<p class="wiki-agent-status wiki-agent-stale" hidden></p><div class="wiki-agent-body"></div>`;
   article.after(el);
   const form = el.querySelector("form")!;
   const body = el.querySelector<HTMLElement>(".wiki-agent-body")!;
   const meta = el.querySelector<HTMLElement>(".wiki-agent-meta")!;
   const stale = el.querySelector<HTMLElement>(".wiki-agent-stale")!;
+  const live = el.querySelector<HTMLElement>(".wiki-agent-live")!;
   const input = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
   let shown: AgentCard | null = null;
   let current: AbortController | null = null;
@@ -232,6 +290,7 @@ function buildPane(article: HTMLElement, opts: AgentPaneOptions): Pane {
     shown = state.kind === "ok" ? state.card : null;
     if (state.kind === "ok") body.querySelector<HTMLElement>(".wiki-agent-text")!.textContent = state.card.text;
     meta.textContent = state.kind === "ok" ? agentMetaText(state.card, lang) : "";
+    live.textContent = agentLiveText(state, lang);
   };
   const pane: Pane = {
     el,
@@ -244,31 +303,15 @@ function buildPane(article: HTMLElement, opts: AgentPaneOptions): Pane {
       inFlight.add(ctrl);
       stale.hidden = true;
       paint({ kind: "loading" });
-      const deadline = opts.deadlineMs ?? AGENT_CLIENT_DEADLINE_MS;
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        ctrl.abort();
-      }, deadline);
-      let state: AgentPaneState;
-      try {
-        const res = await (opts.fetchImpl ?? fetch)(agentCardUrl(opts.wiki, opts.relPath, input("since").value, input("id").value), {
-          signal: ctrl.signal,
-        });
-        const json = (await res.json().catch(() => null)) as (AgentCard & { error?: string }) | null;
-        state =
-          res.ok && json && typeof json.text === "string"
-            ? { kind: "ok", card: { text: json.text, chars: json.chars, cuts: Array.isArray(json.cuts) ? json.cuts : [], ms: json.ms ?? 0 } }
-            : { kind: "error", status: res.status, message: json?.error ?? res.statusText };
-      } catch (e) {
-        state = { kind: "error", status: 0, message: timedOut ? w.deadline(Math.round(deadline / 1000)) : e instanceof Error ? e.message : String(e) };
-      } finally {
-        clearTimeout(timer);
-        inFlight.delete(ctrl);
-      }
+      const state = await fetchAgentCard(agentCardUrl(opts.wiki, opts.relPath, input("since").value, input("id").value), ctrl, {
+        fetchImpl: opts.fetchImpl,
+        deadlineMs: opts.deadlineMs,
+        language: lang,
+      });
+      inFlight.delete(ctrl);
       // Superseded by a later run, or aborted by a navigation: that one owns
       // the pane (or there is no pane on screen any more).
-      if (ctrl.signal.aborted && !timedOut) return;
+      if (!state) return;
       if (current === ctrl && el.isConnected) paint(state);
     },
   };
@@ -315,6 +358,7 @@ export function agentPaneCss(): string {
     .${AGENT_PANE_CLASS} input { font: inherit; padding: 2px 6px; background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; }
     .${AGENT_PANE_CLASS} button { font: inherit; padding: 2px 10px; border: 1px solid var(--border-secondary); border-radius: 4px; background: var(--bg-surface); color: var(--text-primary); cursor: pointer; }
     .${AGENT_PANE_CLASS} .wiki-agent-meta { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-soft); }
+    .${AGENT_PANE_CLASS} .wiki-agent-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
     .${AGENT_PANE_CLASS} .wiki-agent-status { font-size: 12px; color: var(--text-soft); margin: 4px 0; }
     .${AGENT_PANE_CLASS} .wiki-agent-error { color: var(--status-error, var(--text-primary)); }
     .${AGENT_PANE_CLASS} .wiki-agent-cuts { font-size: 12px; color: var(--text-secondary); margin: 4px 0 8px; }

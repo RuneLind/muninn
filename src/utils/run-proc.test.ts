@@ -217,6 +217,34 @@ describe("runProc: the timeout's kill", () => {
     }
   });
 
+  test("processGroup: a member that traps SIGTERM dies once its leader died on it, without the grace", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-member-"));
+    const pidFile = path.join(dir, "pid");
+    try {
+      const t0 = performance.now();
+      const err = await runProc(
+        ["/bin/bash", "-c", `bash -c "trap '' TERM; while :; do sleep 0.05; done" & echo $! > ${pidFile}; wait`],
+        300,
+        "member",
+        // A grace far past the assertions: the member's SIGKILL must not come
+        // from the grace timer.
+        { processGroup: true, killGraceMs: 10_000 },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(ProcTimeoutError);
+      expect(performance.now() - t0).toBeLessThan(2_000);
+      // Reparented, then reaped: allow that a moment.
+      const member = pidAt(pidFile);
+      const deadline = performance.now() + 1_000;
+      while (alive(member) && performance.now() < deadline) await Bun.sleep(20);
+      expect(alive(member)).toBe(false);
+    } finally {
+      try {
+        process.kill(pidAt(pidFile), "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("cwd: the child runs where it is told", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "run-proc-cwd-"));
     try {

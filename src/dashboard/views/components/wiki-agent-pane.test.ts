@@ -1,5 +1,15 @@
-import { describe, expect, test } from "bun:test";
-import { agentBodyHtml, agentCardUrl, agentCutText, agentMetaText } from "./wiki-agent-pane.ts";
+import { afterEach, describe, expect, jest, test } from "bun:test";
+import {
+  AGENT_CLIENT_DEADLINE_MS,
+  agentBodyHtml,
+  agentCardUrl,
+  agentCutText,
+  agentLiveText,
+  agentMetaText,
+  fetchAgentCard,
+} from "./wiki-agent-pane.ts";
+import { PLAN_CARD_MAX_WAITING, PLAN_CARD_TIMEOUT_MS } from "../../../wiki/plan-card-bounds.ts";
+import { RUN_PROC_KILL_GRACE_MS, RUN_PROC_POST_KILL_WAIT_MS } from "../../../utils/run-proc-bounds.ts";
 
 describe("Agent pane, the pure half", () => {
   test("the route URL leaves blank inputs out", () => {
@@ -33,4 +43,58 @@ describe("Agent pane, the pure half", () => {
     expect(agentBodyHtml({ kind: "ok", card: { text: "t", chars: 1, cuts: [], ms: 0 } }, "no")).toContain("Ingen seksjon er kuttet.");
     expect(agentBodyHtml({ kind: "ok", card: { text: "t", chars: 1, cuts: [{ section: "a", pointer: "p" }, { section: "b", pointer: "q" }], ms: 0 } }, "no")).toContain("2 kuttede seksjoner");
   });
+  test("the live line is one short sentence per state, never the card", () => {
+    const card = { text: "# T\n" + "x".repeat(5000), chars: 8321, cuts: [], ms: 0 };
+    expect(agentLiveText({ kind: "ok", card })).toBe("plan-card done: 8,321 chars");
+    expect(agentLiveText({ kind: "loading" }, "no")).toBe("Kjører plan-card…");
+    expect(agentLiveText({ kind: "error", status: 504, message: "slow" })).toBe("plan-card failed (504): slow");
+    expect(agentLiveText({ kind: "idle" })).toBe("");
+    // The body no longer announces itself: the error is said once, by the live line.
+    expect(agentBodyHtml({ kind: "error", status: 504, message: "slow" })).not.toContain("role=");
+  });
 });
+
+describe("Agent pane: the client deadline", () => {
+  afterEach(() => jest.useRealTimers());
+
+  /** A fetch that answers only when aborted, as a request queued on the server does. */
+  const hanging: typeof fetch = ((_url: string, init?: RequestInit) =>
+    new Promise((_, reject) => init!.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))))) as typeof fetch;
+
+  test("covers a request queued behind the most runs the route admits, then its own run", () => {
+    const runMax = PLAN_CARD_TIMEOUT_MS + RUN_PROC_KILL_GRACE_MS + RUN_PROC_POST_KILL_WAIT_MS;
+    expect(AGENT_CLIENT_DEADLINE_MS).toBeGreaterThan((PLAN_CARD_MAX_WAITING + 1) * runMax);
+    // A run queued behind another argument set answered after 31 s on a real server.
+    expect(AGENT_CLIENT_DEADLINE_MS).toBeGreaterThan(31_023);
+  });
+
+  test("no answer by the deadline aborts the request and ends in an error naming it", async () => {
+    jest.useFakeTimers();
+    const ctrl = new AbortController();
+    let settled = false;
+    const run = fetchAgentCard("/api/wiki/plan-card?relPath=p.mdx", ctrl, { fetchImpl: hanging }).then((s) => {
+      settled = true;
+      return s;
+    });
+    jest.advanceTimersByTime(AGENT_CLIENT_DEADLINE_MS - 1);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(ctrl.signal.aborted).toBe(false);
+    jest.advanceTimersByTime(1);
+    // Settles within microtasks of the deadline; awaiting `run` outright would
+    // hang (not fail) if the timer stopped aborting, since timers are fake.
+    for (let i = 0; i < 20 && !settled; i++) await Promise.resolve();
+    expect(settled).toBe(true);
+    expect(ctrl.signal.aborted).toBe(true);
+    const state = await run;
+    expect(state).toEqual({ kind: "error", status: 0, message: `no answer within ${Math.round(AGENT_CLIENT_DEADLINE_MS / 1000)} s` });
+  });
+
+  test("an abort from outside (a newer run, a navigation) ends in null, not an error", async () => {
+    const ctrl = new AbortController();
+    const run = fetchAgentCard("/x", ctrl, { fetchImpl: hanging });
+    ctrl.abort();
+    expect(await run).toBeNull();
+  });
+});
+

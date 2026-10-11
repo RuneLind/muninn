@@ -28,6 +28,9 @@
  * run aborts the one in flight; an in-place reload (a fact-check append) keeps
  * the card and starts no child; graph mode hides the pane; the card's leading
  * newline survives; the pane speaks the wiki's language.
+ *
+ * Fix round 2 adds: a pane built while graph mode is on stays hidden; an issue
+ * graph spends `?lens=agent`; the live region is the status line, not the body.
  */
 
 import { test, expect } from "@playwright/test";
@@ -434,7 +437,10 @@ test.describe("Wiki reader: the Agent lens", () => {
     const pane = page.locator(".wiki-agent-pane");
     const body = pane.locator(".wiki-agent-body");
     await expect(pane.locator(".wiki-agent-text")).toContainText("# Stub card");
-    await expect(body).toHaveAttribute("aria-live", "polite");
+    // The live region is the short status line, not the card's body.
+    await expect(body).not.toHaveAttribute("aria-live", /.*/);
+    await expect(pane.locator('.wiki-agent-live[role="status"]')).toHaveAttribute("aria-live", "polite");
+    await expect(pane.locator(".wiki-agent-live")).toHaveText(/^plan-card done: [\d,]+ chars$/);
     await expect(body).toHaveAttribute("aria-busy", "false");
     const aborted: string[] = [];
     page.on("requestfailed", (r) => {
@@ -521,6 +527,31 @@ test.describe("Wiki reader: the Agent lens", () => {
     await expect(pane).toBeHidden();
     await page.locator("#wikiGraphToggle").click();
     await expect(pane).toBeVisible();
+  });
+
+  test("graph mode first, then Agent: the pane built in graph mode is hidden, and shows when graph mode ends", async ({ page }) => {
+    await page.goto(pageUrl(BASE, PLAN).replace(`wiki=${WIKI}`, `wiki=${WIKI_NO}`));
+    await page.locator("#wikiGraphToggle").click();
+    await expect(page.locator("#wikiGraph")).toBeVisible();
+    await page.locator('.wiki-lens-switch button[data-lens="agent"]').click();
+    const pane = page.locator(".wiki-agent-pane");
+    await expect(pane).toHaveCount(1);
+    await expect(pane.locator(".wiki-agent-text")).toContainText("# Stub card");
+    await expect(pane).toBeHidden();
+    await expect(page.locator("#wikiGraph")).toBeVisible();
+    await page.locator("#wikiGraphToggle").click();
+    await expect(pane).toBeVisible();
+  });
+
+  test("an issue graph spends ?lens=agent: a plan opened from it is All and runs nothing", async ({ page }) => {
+    await rm(runs, { force: true });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_NO}&display=graph&issue=${encodeURIComponent("jira:DEMO-1")}&lens=agent`);
+    await expect(page.locator("#articleWrap h1")).toHaveText("DEMO-1");
+    await expect.poll(() => new URL(page.url()).searchParams.has("lens")).toBe(false);
+    await page.locator(`.wiki-list-item[data-relpath="${PLAN}"]`).first().click();
+    await expect(page.locator(".wiki-article")).toHaveClass(/lens-all/);
+    await expect(page.locator(".wiki-agent-pane")).toHaveCount(0);
+    expect(existsSync(runs)).toBe(false);
   });
 
   test("the pane equals a direct run of the real plan-card with the same environment", async ({ page }) => {

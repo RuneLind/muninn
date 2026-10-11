@@ -30,9 +30,7 @@ import { STAMP_CHILD_ENV_NAMES, WIKI_STAMP_ROOTS_ENV } from "./stamp-roots.ts";
 
 export const PLAN_CARD_BIN_ENV = "PLAN_CARD_BIN";
 
-/** The route's bound on one child (D7). plan-card's own worst case is about
- *  12 s: two muninn calls at 3 s and up to three claude-usage hosts at 3 s. */
-export const PLAN_CARD_TIMEOUT_MS = 20_000;
+export { PLAN_CARD_TIMEOUT_MS } from "./plan-card-bounds.ts";
 
 /** `--since`: a real `YYYY-MM-DD` day. Checked here so nothing else reaches argv. */
 export function isPlanCardSince(v: string): boolean {

@@ -34,6 +34,7 @@ import {
   ROLE_VIEW_CLASS,
 } from "./components/wiki-report-blocks.ts";
 import { refLinksCss } from "./components/wiki-ref-links.ts";
+import { GRAPH_ON_CLASS } from "./components/wiki-graph-view.ts";
 import { lensCss } from "./components/wiki-lens.ts";
 import { NEW_TAG_LOOK, newSinceCss } from "./components/wiki-new-since.ts";
 import {
@@ -1218,7 +1219,9 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-graph-toggle:hover { color: var(--text-primary); border-color: var(--accent); }
     .wiki-graph-toggle.on { color: var(--accent-light); border-color: var(--accent); }
-    .wiki-graph-hidden { display: none !important; }
+    #articleWrap.${GRAPH_ON_CLASS} > .wiki-article,
+    #articleWrap.${GRAPH_ON_CLASS} > .wiki-explainer-frame,
+    #articleWrap.${GRAPH_ON_CLASS} > .wiki-agent-pane { display: none !important; }
     .wiki-graph { margin-top: 12px; }
     .wiki-graph-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
     .wiki-graph-title { margin-right: auto; overflow-wrap: anywhere; }
