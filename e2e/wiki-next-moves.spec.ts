@@ -12,6 +12,14 @@
  * default scope hides that column, and that every muted line reads at 4.5:1 in
  * both themes.
  *
+ * The settled-questions lane (plan muninn-wiki-settled-questions-lane, PR 1):
+ * decided and closed `<Question>` cards move into a closed «Avklart»/"Settled"
+ * lane, one row per card that opens to the card, and a waiting-lane item that
+ * only names its card is not printed. A real page answers that the rows open
+ * and hide the card's own head, that `#nm-q-<id>` and the pointer line open
+ * both `<details>`, that no header pill counts the lane, and that its text
+ * reads at 4.5:1.
+ *
  * No model calls, no DB rows. The temp wiki is registered as `mimir` because
  * that is the name the /plans board reads; `CLAUDE_USAGE_URL` points at a
  * reserved dead port so the board renders no money.
@@ -201,6 +209,77 @@ const FILES: Record<string, string> = {
     "</NextMoves>",
   ]),
 };
+
+// The settled-questions lane. No `you` lane on these pages, so the ✋ counts
+// the tests above assert are unchanged.
+const qcard = (id: string, body: string) => [`<Question id="${id}" to="fag">`, "", body, "", "</Question>", ""];
+const QLOG = [
+  "<DecisionLog>",
+  "",
+  "- **D7** — The letter goes out as option A, with the old wording.",
+  "- **D8** — The decision waits for the yearly run.",
+  "- **S1** — Closed 2026-09-30 (D7).",
+  "- **S2** — Closed 2026-09-30 (D99).",
+  "- **S3** — Closed 2026-09-30 (D8).",
+  "- **S4** — open.",
+  "",
+  "</DecisionLog>",
+];
+FILES["plans/settled-q.mdx"] = plan("Settled questions", "in-flight", [
+  "<NextMoves>",
+  "",
+  '<Lane kind="waiting" who="Waiting on fag" since="2026-09-30">',
+  "",
+  "- **S4**",
+  "",
+  "</Lane>",
+  "",
+  '<Lane kind="blocked" who="Blocked">',
+  "",
+  "- Person 1404 waits on task 3.",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+  "",
+  ...qcard("S1", "**Should the letter go out as A or B?** Fag answered on the 30th, with a long reason that runs on."),
+  ...qcard("S2", "Does this also cover old cases? More context here."),
+  ...qcard("S4", "Is a first decision needed?"),
+  "**What.** The prose starts here.",
+  "",
+  ...FILLER,
+  '<Fold title="The conversation with fag">',
+  "",
+  ...qcard("S3", "**Do we wait for the yearly run?**"),
+  "</Fold>",
+  "",
+  ...QLOG,
+]);
+// Settled cards and no block: they render where they are written (acceptance 7).
+FILES["plans/settled-noblock.mdx"] = plan("Settled, no block", "in-flight", [
+  ...qcard("S1", "**Should the letter go out as A or B?**"),
+  ...qcard("S2", "Does this also cover old cases?"),
+  ...QLOG,
+]);
+// A block inside a Historic takes no settled card (acceptance 8).
+FILES["plans/settled-historic.mdx"] = plan("Settled, historic block", "in-flight", [
+  '<Historic since="v1">',
+  "",
+  "<NextMoves>",
+  "",
+  '<Lane kind="waiting" who="Waiting on fag">',
+  "",
+  "- Old question.",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+  "",
+  "</Historic>",
+  "",
+  ...qcard("S1", "**Should the letter go out as A or B?**"),
+  ...QLOG,
+]);
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -453,6 +532,154 @@ test.describe("NextMoves in the reader", () => {
         youPill: page.locator(`.${MOVES_PILL_CLASS}-you`),
         waitingPill: page.locator(`.${MOVES_PILL_CLASS}-waiting`),
         draftPill: page.locator(`.${MOVES_PILL_CLASS}-draft`),
+      };
+      for (const [name, loc] of Object.entries(targets)) {
+        expect(await paintedContrast(loc), `${name} contrast`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+});
+
+test.describe("The settled-questions lane", () => {
+  const settled = (page: Page) => page.locator('.wiki-article .nm-lane[data-kind="settled"]');
+  const isOpen = (loc: ReturnType<Page["locator"]>) => loc.evaluate((el) => (el as HTMLDetailsElement).open);
+
+  test("a closed lane after the waiting lane, chips per card, no header pill; a row opens to the full card", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page, "plans/settled-q.mdx");
+    const block = page.locator(".wiki-article .next-moves.nm-compact");
+    await expect(block.locator(".nm-lanes > .nm-lane")).toHaveCount(3);
+    expect(await block.locator(".nm-lanes > .nm-lane").evaluateAll((els) => els.map((e) => e.getAttribute("data-kind")))).toEqual([
+      "waiting",
+      "settled",
+      "blocked",
+    ]);
+    await expect(block.locator(".nm-sum")).toHaveText("Waiting on fag: 1 question · Settled: 3 · 1 blocked");
+    const lane = settled(page);
+    expect(await isOpen(lane)).toBe(false);
+    await expect(lane.locator(":scope > .nm-head .nm-who")).toHaveText("Settled");
+    await expect(lane.locator(":scope > .nm-head .nm-count")).toHaveText("3 questions");
+    await expect(lane.locator(":scope > .nm-head .nm-qid")).toHaveText(["S1→D7", "S2", "S3→D8"]);
+    await expect(lane.locator(":scope > .nm-head .nm-cta-open")).toHaveText("See ▸");
+    // D3: the header pills count the authored lanes only.
+    await expect(page.locator(`.${MOVES_PILL_CLASS}`)).toHaveText(["⏳ Waiting on fag · 1"]);
+    // Nothing between the block and «What.»: every card moved, and the adjacent
+    // ones left no line. S3 in the fold left its pointer.
+    await expect(page.locator(".wiki-article section.question")).toHaveCount(4);
+    expect(await page.locator(".wiki-article section.question").evaluateAll((els) => els.every((e) => e.closest(".next-moves")))).toBe(true);
+    await expect(page.locator(".wiki-article .q-moved")).toHaveText(["Question S3 is under Follow-up ↑"]);
+    // D2: the waiting lane prints no `- **S4**` item; its card is there, its count unchanged.
+    const waiting = block.locator('.nm-lane[data-kind="waiting"]');
+    await expect(waiting.locator(".nm-body li")).toHaveCount(0);
+    await expect(waiting.locator(".nm-body ul")).toHaveCount(0);
+    await expect(waiting.locator(".nm-count")).toHaveText("1 question");
+    await expect(waiting.locator(".nm-qid")).toHaveText(["S4"]);
+    await expect(waiting.locator('.nm-qcard section.question[data-question-id="S4"]')).toHaveCount(1);
+
+    await lane.locator(":scope > .nm-head").click();
+    const rows = lane.locator("details.q-compact");
+    await expect(rows).toHaveCount(3);
+    for (const i of [0, 1, 2]) expect(await isOpen(rows.nth(i))).toBe(false);
+    const s1 = lane.locator("details#nm-q-s1");
+    await expect(s1.locator(".q-row-title")).toHaveText("Should the letter go out as A or B?");
+    await expect(s1.locator(".q-row-state")).toHaveText("Decided → D7");
+    await expect(s1.locator(".q-row-out")).toHaveText("D7 The letter goes out as option A, with the old wording.");
+    await expect(lane.locator("details#nm-q-s2 .q-row-state")).toHaveText("Closed");
+    await expect(lane.locator("details#nm-q-s2 .q-row-out")).toHaveCount(0);
+    await expect(s1.locator("section.question")).toBeHidden();
+    await s1.locator(":scope > .q-row").click();
+    await expect(s1.locator("section.question .q-body")).toBeVisible();
+    await expect(s1.locator("section.question .q-body")).toContainText("Fag answered on the 30th");
+    // The row stands for the card's own head.
+    await expect(s1.locator("section.question .q-head")).toBeHidden();
+    await expect(s1.locator(".q-row-close")).toHaveText("Hide ▴");
+  });
+
+  test("#nm-q-<id> and the pointer line open the lane and the row", async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 700 });
+    await open(page, "plans/settled-q.mdx");
+    await page.evaluate(() => (location.hash = "#nm-q-s2"));
+    const row = page.locator("details#nm-q-s2");
+    await expect.poll(() => isOpen(settled(page))).toBe(true);
+    await expect.poll(() => isOpen(row)).toBe(true);
+    await expect(row).toBeInViewport();
+    // The pointer line in the fold: a fresh view, then the link.
+    await open(page, "plans/settled-q.mdx");
+    expect(await isOpen(settled(page))).toBe(false);
+    await page.locator('.wiki-article details.fold:has(.q-moved) > summary').click();
+    await page.locator(".wiki-article .q-moved-link").click();
+    const s3 = page.locator("details#nm-q-s3");
+    await expect.poll(() => isOpen(settled(page))).toBe(true);
+    await expect.poll(() => isOpen(s3)).toBe(true);
+    await expect(s3).toBeInViewport();
+  });
+
+  test("no block: settled cards stay where they are written; a block in a Historic takes none", async ({ page }) => {
+    await open(page, "plans/settled-noblock.mdx");
+    await expect(page.locator(".wiki-article section.question")).toHaveCount(2);
+    await expect(page.locator(".wiki-article .q-compact")).toHaveCount(0);
+    await expect(page.locator(".wiki-article .q-moved")).toHaveCount(0);
+    await open(page, "plans/settled-historic.mdx");
+    await expect(page.locator(".wiki-article section.historic .nm-lane")).toHaveCount(1);
+    await expect(page.locator('.wiki-article .nm-lane[data-kind="settled"]')).toHaveCount(0);
+    await expect(page.locator('.wiki-article section.question[data-question-id="S1"]')).toBeVisible();
+    await expect(page.locator(".wiki-article .q-moved")).toHaveCount(0);
+  });
+
+  test("the lane and an open row fit at 390", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page, "plans/settled-q.mdx");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("f");
+    await expect.poll(async () => (await page.locator(".wiki-article").boundingBox())!.width).toBeGreaterThan(250);
+    await settled(page).locator(":scope > .nm-head").click();
+    await page.locator("details#nm-q-s1 > .q-row").click();
+    const fits = await page.locator(".wiki-article .next-moves").evaluate((el) => {
+      const art = el.closest(".wiki-article")!.getBoundingClientRect();
+      const parts = Array.from(el.querySelectorAll(".nm-head, .q-row, .q-row-title, .q-row-out, .q-row-cta")).map((n) => n.getBoundingClientRect());
+      return el.scrollWidth <= el.clientWidth + 1 && parts.every((r) => r.right <= art.right + 1);
+    });
+    expect(fits).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+    // An open row wraps its question and outcome rather than cutting them.
+    for (const part of [".q-row-title", ".q-row-out"]) {
+      const clipped = await page.locator(`details#nm-q-s1 ${part}`).evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+      expect(clipped, part).toBe(false);
+    }
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`label, count, chips and row text read at 4.5:1, ${scheme}`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await open(page, "plans/settled-q.mdx");
+      await settled(page).evaluate((el) => ((el as HTMLDetailsElement).open = true));
+      await page.mouse.move(0, 0);
+      const token = (name: string) =>
+        page.evaluate((n) => {
+          const p = document.createElement("span");
+          p.style.color = `var(${n})`;
+          document.body.appendChild(p);
+          const c = getComputedStyle(p).color;
+          p.remove();
+          return c;
+        }, name);
+      const lane = settled(page);
+      const head = lane.locator(":scope > .nm-head");
+      const s1 = lane.locator("details#nm-q-s1");
+      expect(await head.locator(".nm-who").evaluate((el) => getComputedStyle(el).color), "label token").toBe(await token("--tone-good"));
+      expect(await s1.locator(".q-row-out").evaluate((el) => getComputedStyle(el).color), "outcome token").toBe(await token("--text-soft"));
+      const targets = {
+        label: head.locator(".nm-who"),
+        count: head.locator(".nm-count"),
+        chip: head.locator(".nm-qid").first(),
+        action: head.locator(".nm-cta"),
+        rowId: s1.locator(".q-row-tag .nm-qid"),
+        rowState: s1.locator(".q-row-state"),
+        closedState: lane.locator("details#nm-q-s2 .q-row-state"),
+        rowTitle: s1.locator(".q-row-title"),
+        rowOutcome: s1.locator(".q-row-out"),
+        rowAction: s1.locator(".q-row-cta"),
       };
       for (const [name, loc] of Object.entries(targets)) {
         expect(await paintedContrast(loc), `${name} contrast`).toBeGreaterThanOrEqual(4.5);

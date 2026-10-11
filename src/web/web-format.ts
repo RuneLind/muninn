@@ -346,6 +346,9 @@ interface QuestionPage {
   duplicates: Set<string>;
   /** The ids the page's `<Question>` blocks carry. */
   questionIds: Set<string>;
+  /** Each DecisionLog id's own text after the id, from the first item that
+   *  carries it: what a settled card's row quotes from its decision. */
+  logText: Map<string, string>;
   options?: QuestionRenderOptions;
 }
 let currentQuestionPage: QuestionPage | undefined;
@@ -359,7 +362,9 @@ function questionPage(blocks: Block[], options: QuestionRenderOptions | undefine
     questionIds.add(q.id);
     if (q.duplicate) duplicates.add(q.id);
   }
-  return { states: parsed.states, duplicates, questionIds, ...(options ? { options } : {}) };
+  const logText = new Map<string, string>();
+  for (const e of parsed.entries) if (!logText.has(e.id)) logText.set(e.id, e.itemText);
+  return { states: parsed.states, duplicates, questionIds, logText, ...(options ? { options } : {}) };
 }
 
 const LOG_ANCHOR_RE = /<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)"><a class="dl-id" href="#\1">([^<]*)<\/a>/g;
@@ -988,6 +993,10 @@ interface LaneCards {
   /** Question id → the anchor of its card in the lane, unique on the page's
    *  lane cards (`Q.1` and `Q-1` fold to one slug, so the second gets `-2`). */
   moved: Map<string, string>;
+  /** The page's first live `<NextMoves>` (by its `children`) → the decided
+   *  and closed cards its render-only «Avklart» lane shows, in page order
+   *  (settled questions plan, D1, D10). */
+  settled: Map<Block[], ComponentBlock[]>;
   /** A moved card's authored place (D39), keyed by its block's `attrs`, which
    *  the renderer hands back unchanged: the run's one line on its first card,
    *  null (nothing) on the rest of a run and on a card that sits right after
@@ -1015,11 +1024,16 @@ const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
 function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number }[] {
   const hits: { id: string; at: number }[] = [];
   for (const id of ids) {
-    const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const m = new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`).exec(text);
+    const m = questionIdRe(id).exec(text);
     if (m) hits.push({ id, at: m.index });
   }
   return hits.sort((a, b) => a.at - b.at);
+}
+
+/** `id` on its own boundary, as {@link namedQuestionHits} reads it. */
+function questionIdRe(id: string, flags = ""): RegExp {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`, flags);
 }
 
 /** The `<Question>` ids an item names, in the order they appear. On the
@@ -1036,22 +1050,30 @@ function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
  * a lane that names it. A `<NextMoves>` in a settled section
  * (`isSettledSection`) takes no card: its lanes are history, as in
  * `countedNextMovesLanes`.
+ *
+ * A decided or closed card goes to no waiting lane: the page's first live
+ * `<NextMoves>` with a lane takes it into its render-only «Avklart» lane
+ * (settled questions plan, D1, D10) — unless it sits in a settled section or
+ * inside a lane, where it stays.
  */
 function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
-  const questions = new Map<string, { block: ComponentBlock; lanes: Block[][] }>();
+  const questions = new Map<string, { block: ComponentBlock; lanes: Block[][]; settledSection: boolean }>();
   const nextMoves: ComponentBlock[] = [];
   const walk = (bs: Block[], lanes: Block[][], settled: boolean) => {
     for (const b of bs) {
       if (b.type !== "component") continue;
       if (b.name === "Question") {
         const id = parseQuestionAttrs(b.attrs).id;
-        if (id !== null && !page.duplicates.has(id) && !questions.has(id)) questions.set(id, { block: b, lanes });
+        if (id !== null && !page.duplicates.has(id) && !questions.has(id)) {
+          questions.set(id, { block: b, lanes, settledSection: settled });
+        }
       }
       if (b.name === "NextMoves" && !settled) nextMoves.push(b);
       walk(b.children, b.name === "Lane" ? [...lanes, b.children] : lanes, settled || isSettledSection(b));
     }
   };
   walk(blocks, [], false);
+  const isSettled = (id: string) => (page.states.get(id)?.kind ?? "open") !== "open";
   const waiting = nextMoves.flatMap((block) =>
     nextMovesLanes(block.children)
       .filter((l) => l.kind === "waiting")
@@ -1063,31 +1085,48 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   for (const lane of waiting) {
     for (const id of named(lane)) if (questions.get(id)!.lanes.includes(lane.children)) stays.add(id);
   }
-  const out: LaneCards = { byLane: new Map(), moved: new Map(), stubs: new Map() };
+  const out: LaneCards = { byLane: new Map(), moved: new Map(), settled: new Map(), stubs: new Map() };
   /** Question id → the `<NextMoves>` block whose lane took its card, and that lane. */
   const takenBy = new Map<string, ComponentBlock>();
   const takenLane = new Map<string, Block[]>();
   const anchors = new Set<string>();
+  const take = (id: string, block: ComponentBlock, lane: Block[], list: ComponentBlock[]) => {
+    const base = `nm-q-${anchorSlug(id)}`;
+    let anchor = base;
+    for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
+    anchors.add(anchor);
+    out.moved.set(id, anchor);
+    takenBy.set(id, block);
+    takenLane.set(id, lane);
+    list.push(questions.get(id)!.block);
+  };
   for (const lane of waiting) {
     for (const item of lane.items) {
       for (const id of namedQuestionIds(item, questions.keys())) {
-        if (stays.has(id) || out.moved.has(id)) continue;
-        const base = `nm-q-${anchorSlug(id)}`;
-        let anchor = base;
-        for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
-        anchors.add(anchor);
-        out.moved.set(id, anchor);
-        takenBy.set(id, lane.block);
-        takenLane.set(id, lane.children);
+        if (stays.has(id) || out.moved.has(id) || isSettled(id)) continue;
         const list = out.byLane.get(lane.children) ?? [];
-        list.push(questions.get(id)!.block);
         out.byLane.set(lane.children, list);
+        take(id, lane.block, lane.children, list);
       }
     }
+  }
+  // A block with no lane renders as plain markdown, so it has no lane list to
+  // add the «Avklart» lane to.
+  const host = nextMoves.find((b) => nextMovesLanes(b.children).length > 0);
+  if (host) {
+    const list: ComponentBlock[] = [];
+    for (const [id, q] of questions) {
+      if (isSettled(id) && !q.settledSection && q.lanes.length === 0) take(id, host, SETTLED_LANE, list);
+    }
+    if (list.length) out.settled.set(host.children, list);
   }
   planMovedStubs(blocks, out, takenBy, takenLane);
   return out;
 }
+
+/** The «Avklart» lane's key where a lane's `children` would be: it has no
+ *  block of its own. */
+const SETTLED_LANE: Block[] = [];
 
 /**
  * D39: what each moved card leaves at its authored place. A card with only
@@ -1129,7 +1168,13 @@ function planMovedStubs(
     let top = card;
     while (parent.get(top) !== nm) top = parent.get(top)!;
     if (top.type !== "component" || top.name !== "Lane") return "↓";
-    const rendered = renderedLaneOrder(nextMovesLanes(nm.children)).map((l) => l.children);
+    const lanes = nextMovesLanes(nm.children);
+    // The «Avklart» lane renders after the other lanes, before the blocked ones.
+    const rendered = [
+      ...lanes.filter((l) => l.kind !== "blocked").map((l) => l.children),
+      SETTLED_LANE,
+      ...lanes.filter((l) => l.kind === "blocked").map((l) => l.children),
+    ];
     return rendered.indexOf(top.children) > rendered.indexOf(takenLane.get(id)!) ? "↑" : "↓";
   };
   const movedId = (b: Block): string | null => {
@@ -1224,15 +1269,111 @@ function renderedLaneOrder<T extends { kind: NextMovesLane["kind"] }>(lanes: T[]
 /** Each lane kind's icon in the compact head (D36). */
 const LANE_ICONS: Record<NextMovesLane["kind"], string> = { waiting: "⏳", you: "✋", draft: "✉", blocked: "⛔" };
 
-/** A lane's body as the grid renders it: a task list through the checklist marks. */
-function laneBodyHtml(lane: NextMovesLane): string {
+/** A lane's body as the grid renders it: a task list through the checklist
+ *  marks. `taken` are the ids of the cards the lane holds: a top-level item
+ *  that is only those ids (D2) is not rendered, since the card under it
+ *  stands for it. The lane's counts still read it. */
+function laneBodyHtml(lane: NextMovesLane, taken: readonly string[] = []): string {
   return lane.children
-    .map((b) =>
-      (b.type === "ul" || b.type === "ol") && isTaskList(b)
+    .map((raw) => {
+      const b = taken.length && (raw.type === "ul" || raw.type === "ol") ? withoutIdOnlyItems(raw, taken) : raw;
+      if (b === null) return "";
+      return (b.type === "ul" || b.type === "ol") && isTaskList(b)
         ? checklistHtml(taskListRows(b), b.type === "ol", b.type === "ol" ? b.start : 1, b.type === "ol" ? b.values : undefined)
-        : renderBlocks([b], webRenderer),
-    )
+        : renderBlocks([b], webRenderer);
+    })
+    .filter((html) => html !== "")
     .join("\n");
+}
+
+/** `list` without its top-level items whose text is only some of `ids`, after
+ *  markup, punctuation and white space (D2). An item with anything under it
+ *  stays. Null when no item is left; an ordered list keeps its numbers. */
+function withoutIdOnlyItems(list: Extract<Block, { type: "ul" | "ol" }>, ids: readonly string[]): Block | null {
+  const idOnly = (item: string) => {
+    let rest = item.replace(/^\[[ xX]\][ \t]*/, "");
+    for (const id of ids) rest = rest.replace(questionIdRe(id, "g"), "");
+    return rest.replace(/[\p{P}\p{S}\s]/gu, "") === "";
+  };
+  const keep = list.items.map((_, k) => k).filter((k) => list.nested?.[k]?.length || !idOnly(list.items[k]!));
+  if (keep.length === list.items.length) return list;
+  if (keep.length === 0) return null;
+  const items = keep.map((k) => list.items[k]!);
+  const nested = list.nested ? { nested: keep.map((k) => list.nested![k]) } : {};
+  if (list.type === "ul") return { ...list, items, ...nested };
+  let n = list.start - 1;
+  const nums = list.items.map((_, k) => (n = list.values?.[k] ?? n + 1));
+  const values = keep.map((k, j) => (j > 0 && nums[k] !== nums[keep[j - 1]!]! + 1 ? nums[k] : undefined));
+  const { values: _old, ...rest } = list;
+  return { ...rest, items, ...nested, start: nums[keep[0]!]!, ...(values.some((v) => v !== undefined) ? { values } : {}) };
+}
+
+/** Inline markdown as one line of plain text, for a row's summary. */
+function plainInline(text: string): string {
+  return peekText(text)
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
+    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__|~~)(.+?)\1/g, "$2")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** A `<Question>` card's lead for its row (D4): the body's first bold run,
+ *  else the lead sentence of its first line. */
+function questionLead(q: ComponentBlock): string {
+  const src = q.children
+    .map((b) => (b.type === "text" ? b.lines.join("\n") : b.type === "ul" || b.type === "ol" ? b.items.join("\n") : b.type === "heading" ? b.content : ""))
+    .join("\n");
+  const bold = /(\*\*|__)(?=\S)([\s\S]+?)\1/.exec(src);
+  if (bold) return plainInline(bold[2]!);
+  return leadSentence(peekText(src.split("\n").find((l) => l.trim()) ?? ""));
+}
+
+/** The «Avklart» lane (settled questions plan, D1, D3–D6): render-only, so no
+ *  `data-role`, `data-since` or `data-count` for the reader's pills, roles and
+ *  progress to read. One closed row per decided or closed card; the row opens
+ *  to the card as the page renders it. */
+function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguage): string {
+  const words = laneWords(lang);
+  const L = questionLabels(lang);
+  const page = currentQuestionPage!;
+  const rows = cards.map((q) => {
+    const id = parseQuestionAttrs(q.attrs).id!;
+    const state = page.states.get(id);
+    const decision = state?.kind === "decided" ? state.decision : null;
+    const sentence = decision ? plainInline(decisionFirstSentence(page.logText.get(decision) ?? "", decision)) : "";
+    return { q, id, decision, sentence };
+  });
+  const chip = (r: (typeof rows)[number]) => (r.decision ? `${r.id}→${r.decision}` : r.id);
+  const rowHtml = rows
+    .map((r) => {
+      const anchor = currentLaneCards!.moved.get(r.id)!;
+      const pill = r.decision ? `${L.decided} → ${r.decision}` : L.closed;
+      const out = r.sentence
+        ? `<span class="q-row-out"><span class="q-row-did">${escapeHtml(r.decision!)}</span> ${escapeHtml(r.sentence)}</span>`
+        : "";
+      return (
+        `<details class="q-compact" id="${anchor}"><summary class="q-row" ${READER_ONLY_ATTR}>` +
+        `<span class="q-row-tag"><span class="nm-qid">${escapeHtml(r.id)}</span><span class="q-row-state${r.decision ? " q-row-decided" : ""}">${escapeHtml(pill)}</span></span>` +
+        `<span class="q-row-title">${escapeHtml(questionLead(r.q))}</span>` +
+        `<span class="q-row-cta"><span class="q-row-open">${escapeHtml(words.action.see)}</span><span class="q-row-close">${escapeHtml(words.action.hide)}</span></span>` +
+        `${out}</summary>` +
+        `<div class="q-row-body">${questionCardHtml(r.q.attrs, renderBlocks(r.q.children, webRenderer))}</div></details>`
+      );
+    })
+    .join("");
+  const chips = rows.map(chip);
+  return (
+    `<details class="nm-lane nm-settled" data-kind="settled">` +
+    `<summary class="nm-head"><span class="nm-lh"><span class="nm-ico" aria-hidden="true" ${READER_ONLY_ATTR}>✓</span>` +
+    `<span class="nm-who" ${READER_ONLY_ATTR}>${escapeHtml(words.settled)}</span>` +
+    `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText([{ n: rows.length, unit: "question" }], lang))}</span></span>` +
+    `<span class="nm-peek nm-peek-q" ${READER_ONLY_ATTR}><span class="nm-qids" title="${escapeHtml(chips.join(", "))}">${chips.map((c) => `<span class="nm-qid">${escapeHtml(c)}</span>`).join(" ")}</span></span>` +
+    `<span class="nm-cta" ${READER_ONLY_ATTR}><span class="nm-cta-open">${escapeHtml(words.action.see)}</span><span class="nm-cta-close">${escapeHtml(words.action.hide)}</span></span>` +
+    `</summary><div class="nm-body nm-settled-rows">${rowHtml}</div></details>`
+  );
 }
 
 /**
@@ -1282,7 +1423,9 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     // the same rule for the viewer's lane.
     const action =
       lane.kind === "waiting" && qids.length ? words.action.questions : lane.kind === "blocked" ? words.action.see : words.action.seeAll;
-    const cards = (currentLaneCards?.byLane.get(lane.children) ?? [])
+    const held = currentLaneCards?.byLane.get(lane.children) ?? [];
+    const taken = held.map((q) => parseQuestionAttrs(q.attrs).id!);
+    const cards = held
       .map((q) => {
         const id = parseQuestionAttrs(q.attrs).id!;
         const anchor = currentLaneCards!.moved.get(id)!;
@@ -1303,9 +1446,18 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
       `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText(counts, lang))}</span></span>` +
       `${peekHtml}${sinceHtml}` +
       `<span class="nm-cta" ${READER_ONLY_ATTR}><span class="nm-cta-open">${escapeHtml(action)}</span><span class="nm-cta-close">${escapeHtml(words.action.hide)}</span></span>` +
-      `</summary><div class="nm-body">${laneBodyHtml(lane)}${cards ? `<div class="nm-qcards">${cards}</div>` : ""}</div></details>`
+      `</summary><div class="nm-body">${laneBodyHtml(lane, taken)}${cards ? `<div class="nm-qcards">${cards}</div>` : ""}</div></details>`
     );
   });
+  // The «Avklart» lane sits after the other lanes and before the blocked ones
+  // (D6), in the rows and in the count line alike.
+  const settled = currentLaneCards?.settled.get(rawChildren);
+  if (settled?.length) {
+    const at = ordered.filter((l) => l.kind !== "blocked").length;
+    rows.splice(at, 0, settledLaneHtml(settled, lang));
+    const sumAt = ordered.slice(0, at).filter((l) => l.items.length > 0).length;
+    sum.splice(sumAt, 0, words.settledSum(settled.length));
+  }
   const sumHtml = sum.length ? `<span class="nm-sum">${escapeHtml(sum.join(" · "))}</span>` : "";
   return (
     `<section class="next-moves nm-compact" data-lang="${lang}">` +
