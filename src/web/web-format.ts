@@ -1350,8 +1350,8 @@ const FACT_MARK_OPEN_RE = new RegExp(`<span class="${FACT_MARK_CLASS} ${FACT_MAR
 
 /** Rendered inline HTML without fact-check chrome, read off the markup the
  *  renderer emits (`factMarkParts`): every chip button removed, every mark span
- *  unwrapped. So no button lands in a `<summary>`, however the source spelled
- *  the mark. The block form (`div.fc-mark-block`) cannot occur here: both
+ *  unwrapped. A mark the caller sliced in half (a `<Fact>` crossing the
+ *  lead's `<strong>` boundary) has no balanced close and stays: #680. The block form (`div.fc-mark-block`) cannot occur here: both
  *  callers hand in inline HTML. */
 function withoutFactChrome(html: string): string {
   let out = spliceRanges(html, elementRanges(html, FACT_CHIP_OPEN_RE, "button"), false);
@@ -1364,8 +1364,9 @@ function withoutFactChrome(html: string): string {
 /** A `<Question>` card's lead for its row (D4), read off the card body as it
  *  renders (`bodyHtml`): the first `<strong>` outside code, else the first
  *  sentence of the body's first line (the DecisionLog split, a leading `[ ]`
- *  dropped), rendered inline. Fact-check chrome removed. Empty when the body
- *  has no prose (a fence or a table alone). */
+ *  dropped), rendered inline. Fact-check chrome removed. The scan covers the
+ *  whole rendered body, so a bold table cell, Callout or Fold text can win:
+ *  #680. */
 function questionLeadHtml(q: ComponentBlock, bodyHtml: string): string {
   const code = [...elementRanges(bodyHtml, /<code\b[^>]*>/, "code"), ...elementRanges(bodyHtml, /<pre\b[^>]*>/, "pre")];
   const strong = elementRanges(bodyHtml, /<strong>/, "strong").find((r) => !code.some((c) => r.start > c.start && r.start < c.end));
