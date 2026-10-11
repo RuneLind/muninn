@@ -9,7 +9,9 @@
  *   each `<Query>` card's body, result table and SQL (the card shows its id,
  *   question and answer), CaseBoard rows with status `none` (the board states
  *   how many), and every fold marked `for="dev"`/`for="agent"` or titled with
- *   an agent-context name (D22).
+ *   an agent-context name (D22). In the article head it hides the series strip
+ *   and timeline and the provenance cost line with its chain, and keeps the
+ *   strip's Jira row ({@link OVERVIEW_HIDDEN_HEAD}).
  * - **Choice.** A click on Overview or All is stored per viewer
  *   (`muninn.wiki.lens.v1`); Agent never is. `?lens=` applies to the view it
  *   opens and is then removed from the URL by the caller.
@@ -95,11 +97,42 @@ export const OVERVIEW_HIDDEN: readonly string[] = [
 
 const HIDDEN_SELECTOR = OVERVIEW_HIDDEN.join(", ");
 
-/** Whether Overview hides `el`, an article element: it or an ancestor matches
- *  a hidden block. (A peek card shows its target whole in every lens through
- *  the CSS, D3.) */
+/** What Overview hides in `.wiki-article-head`, the article's preceding
+ *  sibling, which the article's lens class cannot reach by descent: the series
+ *  strip and timeline, and the provenance cost line with the chain it opens
+ *  (whose notes sit inside it). The strip's Jira row stays, so a strip holding
+ *  only a cost line goes whole, border and all. The placeholder and the failed
+ *  line stay: they stand for the Jira row too. */
+export const OVERVIEW_HIDDEN_HEAD: readonly string[] = [
+  ".wiki-series-head",
+  ".wiki-prov-line",
+  ".wiki-prov-chain",
+  ".wiki-prov-strip:has(> .wiki-prov-line):not(:has(> .wiki-prov-jira-row))",
+];
+
+const HEAD_HIDDEN_SELECTOR = OVERVIEW_HIDDEN_HEAD.join(", ");
+
+/** The article head of an article in Overview. */
+const HEAD_IN_OVERVIEW = `.wiki-article-head:has(~ .wiki-article.${LENS_CLASS_PREFIX}overview)`;
+
+/** Whether Overview hides `el`, an article or article-head element: it or an
+ *  ancestor matches a hidden block. (A peek card shows its target whole in
+ *  every lens through the CSS, D3.) */
 export function isHiddenByOverview(el: Element): boolean {
-  return el.closest(HIDDEN_SELECTOR) !== null;
+  if (el.closest(HIDDEN_SELECTOR) !== null) return true;
+  return el.closest(".wiki-article-head") !== null && el.closest(HEAD_HIDDEN_SELECTOR) !== null;
+}
+
+/** Whether the lenses differ on a page, so the switch is shown: Overview hides
+ *  something in the article or its head, a closed fold Overview opens, or the
+ *  Agent lens is offered. The compact lists alone do not count (D45). */
+export function lensSwitchWanted(p: {
+  articleHides: boolean;
+  headHides: boolean;
+  opensFold: boolean;
+  agentAvailable: boolean;
+}): boolean {
+  return p.articleHides || p.headHides || p.opensFold || p.agentAvailable;
 }
 
 type Lang = QuestionLanguage;
@@ -109,9 +142,9 @@ const NOTE_WORDS: Record<Lang, { chars: string; min: string }> = {
   no: { chars: "tegn", min: "min" },
 };
 
-const SWITCH_TITLE: Record<Lang, string> = {
-  en: "Overview hides the working detail: line refs, history, queries' SQL and tables, cases with status none (not a candidate), and developer and handoff folds",
-  no: "Oversikt skjuler arbeidsdetaljene: linjereferanser, historikk, spørringenes SQL og tabeller, saker med status none («ikke kandidat»), og utvikler- og overleveringsfold",
+export const SWITCH_TITLE: Record<Lang, string> = {
+  en: "Overview hides the working detail: the series and its timeline, the sessions' cost, line refs, history, queries' SQL and tables, cases with status none (not a candidate), and developer and handoff folds",
+  no: "Oversikt skjuler arbeidsdetaljene: serien og tidslinjen, sesjonenes kostnad, linjereferanser, historikk, spørringenes SQL og tabeller, saker med status none («ikke kandidat»), og utvikler- og overleveringsfold",
 };
 
 /** A nominal reading rate for the fold size line, not a measured one. */
@@ -486,6 +519,15 @@ export function lensOf(article: Element | null): Lens | null {
   return LENSES.find((l) => article?.classList.contains(`${LENS_CLASS_PREFIX}${l}`)) ?? null;
 }
 
+/** The switch's buttons pressed for `lens`. */
+function markSwitch(sw: HTMLElement | null, lens: Lens): void {
+  sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
+    const on = b.dataset.lens === lens;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
 /** Show `lens`. `enter` says whether a switch INTO Overview opens the
  *  compact folds (D41): not for a view replaced in place. */
 function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElement | null, lens: Lens, enter = true): void {
@@ -496,11 +538,7 @@ function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElemen
   if (lens === "overview" && before !== "overview" && enter) openCompactFolds(article);
   // D4: the Agent lens hides the article (CSS) and shows plan-card's card.
   setAgentPane(article, lens === "agent", agentOptions.get(article) ?? null);
-  sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
-    const on = b.dataset.lens === lens;
-    b.classList.toggle("on", on);
-    b.setAttribute("aria-pressed", on ? "true" : "false");
-  });
+  markSwitch(sw, lens);
   // Overview hides every line ref, so the «line refs» toggle has nothing to
   // do; Agent hides the article it and «Se som rolle» act on.
   row?.querySelectorAll<HTMLElement>(`.${LINE_REFS_TOGGLE_CLASS}`).forEach((t) => {
@@ -511,14 +549,55 @@ function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElemen
   });
 }
 
+/** What `enhanceLens` set up for an article, for {@link refreshLensSwitch}. */
+interface LensContext {
+  opts: LensOptions;
+  row: HTMLElement | null;
+  sw: HTMLElement | null;
+}
+const contexts = new WeakMap<HTMLElement, LensContext>();
+
+/** Build the switch into `row`. */
+function mountSwitch(article: HTMLElement, row: HTMLElement, ctx: LensContext): HTMLElement {
+  const { opts } = ctx;
+  const sw = document.createElement("div");
+  sw.className = LENS_SWITCH_CLASS;
+  sw.setAttribute("role", "group");
+  sw.setAttribute("aria-label", opts.language === "no" ? "Visning" : "Lens");
+  sw.title = SWITCH_TITLE[opts.language];
+  const labels = LENS_LABELS[opts.language];
+  for (const lens of LENSES) {
+    if (lens === "agent" && !opts.agentAvailable) continue;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.lens = lens;
+    b.textContent = labels[lens];
+    b.addEventListener("click", () => {
+      writeStoredLens(localStore(), lens);
+      if (lensSwitchClosesNoneFolds(lensOf(article), lens)) closeNoneGroups(article, opts.language);
+      applyLens(article, ctx.row, ctx.sw, lens);
+    });
+    sw.append(b);
+  }
+  row.append(sw);
+  ctx.sw = sw;
+  return sw;
+}
+
+/** The article head beside `article`, whose blocks Overview hides too. */
+function headOf(article: HTMLElement): Element | null {
+  return article.parentElement?.querySelector(":scope > .wiki-article-head") ?? null;
+}
+
 /**
  * Put the switch in the article head and apply `opts.initial`. The switch is
- * shown when the lenses differ on this page: it has something Overview hides
- * (a `none` case row among them), a closed fold Overview opens, or the Agent
- * lens is offered. The compact lists alone do not count: every lens shows
- * them the same (D45). The class is applied either way. Idempotent per
- * render: the article element is new on every page, so its reveal listener
- * goes with it.
+ * shown when the lenses differ on this page ({@link lensSwitchWanted}): it has
+ * something Overview hides in the article or its head (a `none` case row among
+ * them), a closed fold Overview opens, or the Agent lens is offered. A head
+ * block that lands later (the provenance strip, a repainted series strip)
+ * brings the switch through {@link refreshLensSwitch}. The class is applied
+ * either way. Idempotent per render: the article element is new on every page,
+ * so its reveal listener goes with it.
  */
 export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   const article = wrap.querySelector<HTMLElement>(".wiki-article");
@@ -533,35 +612,21 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   decorateCaseRows(article, opts.language);
   orderDecisions(article);
 
-  let sw: HTMLElement | null = null;
+  const ctx: LensContext = { opts, row, sw: null };
+  contexts.set(article, ctx);
   // Read before `applyLens` opens any fold: a fold the author left open is
   // the same in both lenses.
   const opensFold = compactFolds(article).some((f) => !f.open);
-  if (row && (article.querySelector(HIDDEN_SELECTOR) || opensFold || opts.agentAvailable)) {
-    sw = document.createElement("div");
-    sw.className = LENS_SWITCH_CLASS;
-    sw.setAttribute("role", "group");
-    sw.setAttribute("aria-label", opts.language === "no" ? "Visning" : "Lens");
-    sw.title = SWITCH_TITLE[opts.language];
-    const labels = LENS_LABELS[opts.language];
-    for (const lens of LENSES) {
-      if (lens === "agent" && !opts.agentAvailable) continue;
-      const b = document.createElement("button");
-      b.type = "button";
-      b.dataset.lens = lens;
-      b.textContent = labels[lens];
-      b.addEventListener("click", () => {
-        writeStoredLens(localStore(), lens);
-        if (lensSwitchClosesNoneFolds(lensOf(article), lens)) closeNoneGroups(article, opts.language);
-        applyLens(article, row, sw, lens);
-      });
-      sw.append(b);
-    }
-    row.append(sw);
-  }
+  const wanted = lensSwitchWanted({
+    articleHides: article.querySelector(HIDDEN_SELECTOR) !== null,
+    headHides: headOf(article)?.querySelector(HEAD_HIDDEN_SELECTOR) != null,
+    opensFold,
+    agentAvailable: opts.agentAvailable,
+  });
+  if (row && wanted) mountSwitch(article, row, ctx);
   // `opts.initial` comes from `resolveLens`, which already turns an Agent the
   // server does not offer into All.
-  applyLens(article, row, sw, opts.initial, !opts.inPlace);
+  applyLens(article, row, ctx.sw, opts.initial, !opts.inPlace);
 
   // D3: a reveal opens what the compact view folds away, in whichever lens is
   // on screen (D45), and a reveal of something Overview hides, or of anything
@@ -581,8 +646,32 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
     // D47: so does a folded `none` row (from Overview, with the switch to All).
     const group = caseRow?.closest(".cb-group");
     if (group && caseRow?.classList.contains(CB_FOLDED_CLASS)) setGroupShown(group, true, opts.language);
-    if (lensOf(article) === "agent" || isHiddenByOverview(target)) applyLens(article, row, sw, "all");
+    if (lensOf(article) === "agent" || isHiddenByOverview(target)) applyLens(article, ctx.row, ctx.sw, "all");
   });
+}
+
+/**
+ * Show the switch when a head block Overview hides has landed since
+ * `enhanceLens` ran: the provenance strip arrives after the article, and the
+ * series strip is repainted from a fresh listing. The caller calls it after
+ * every such write. A no-op when the switch is already on screen, before
+ * `enhanceLens`, and on a page with no `.wiki-article` (an explainer). The
+ * switch is never taken away here: a block that leaves leaves All and Overview
+ * alike on screen, and a switch that vanishes under the reader's pointer is
+ * worse than one that changes nothing.
+ */
+export function refreshLensSwitch(wrap: ParentNode): void {
+  const article = wrap.querySelector<HTMLElement>(".wiki-article");
+  const ctx = article ? contexts.get(article) : undefined;
+  if (!article || !ctx || ctx.sw?.isConnected) return;
+  if (headOf(article)?.querySelector(HEAD_HIDDEN_SELECTOR) == null) return;
+  const row = wrap.querySelector<HTMLElement>(".wiki-article-head .wiki-meta-row");
+  if (!row) return;
+  ctx.row = row;
+  row.querySelectorAll(`.${LENS_SWITCH_CLASS}`).forEach((el) => el.remove());
+  const sw = mountSwitch(article, row, ctx);
+  const lens = lensOf(article);
+  if (lens) markSwitch(sw, lens);
 }
 
 /** The stored lens, for the caller's precedence. */
@@ -739,6 +828,7 @@ function authoredSelectionText(sel: Selection): string | null {
 export function lensCss(): string {
   return `
     .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
+    ${HEAD_IN_OVERVIEW} :is(${HEAD_HIDDEN_SELECTOR}) { display: none !important; }
     .wiki-article.${LENS_CLASS_PREFIX}agent { display: none !important; }
     .${ROLE_VIEW_CLASS}[hidden] { display: none; }
 ${agentPaneCss()}

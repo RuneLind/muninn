@@ -9,10 +9,13 @@
  * header pill, a `#q-n` load) shows All for that view only, and that the
  * pills count the rendered page.
  *
- * Three wikis in one process: `e2e-lens` (Norwegian, `idLabels`, file
+ * Four wikis in one process: `e2e-lens` (Norwegian, `idLabels`, file
  * `defaultLens: all`, instance `WIKI_DEFAULT_LENS=e2e-lens=overview`),
- * `e2e-lens-file` (file `defaultLens: oversikt`, no instance default) and
- * `e2e-lens-none` (no reader config). Synthetic fixtures only.
+ * `e2e-lens-file` (file `defaultLens: oversikt`, no instance default),
+ * `e2e-lens-none` (no reader config) and `e2e-lens-head` (instance default
+ * overview: a series and a provenance strip in the article head, which only a
+ * real page can show Overview reaching from the article's sibling, and whose
+ * strip lands after the switch is decided). Synthetic fixtures only.
  *
  * No model calls, no DB rows. ENV / SPAWN ENV: no `.env` is required — the
  * spawn inherits `DATABASE_URL` and `e2eEnv()` blanks the platform tokens and
@@ -35,6 +38,7 @@ const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-lens";
 const WIKI_FILE = "e2e-lens-file";
 const WIKI_NONE = "e2e-lens-none";
+const WIKI_HEAD = "e2e-lens-head";
 
 const REPORT_REL = "plans/report.mdx";
 const COUNTS_REL = "plans/counts.mdx";
@@ -198,6 +202,33 @@ const CASES = [
 
 const PLAIN = (title: string) => ["---", `title: ${title}`, "---", "", `# ${title}`, "", "Lesbar tekst.", "", "<Historic>", "", "Gammelt.", "", "</Historic>", ""].join("\n");
 
+/** The head wiki: a series member carrying Jira keys and sessions, a member
+ *  carrying neither, a page with sessions and nothing else, and a bare page.
+ *  The session ids are synthetic; no ledger is configured, so the cost line
+ *  says so and is still the line Overview hides. */
+const HEAD_REL = "plans/head.mdx";
+const SERIES_ONLY_REL = "plans/head-2.mdx";
+const PROV_ONLY_REL = "prov-only.md";
+const BARE_REL = "bare.md";
+const headPage = (title: string, fm: string[]) =>
+  ["---", `title: ${title}`, ...fm, "---", "", `# ${title}`, "", "Readable prose and nothing Overview hides.", ""].join("\n");
+const HEAD_PAGES: Array<[string, string]> = [
+  [
+    HEAD_REL,
+    headPage("Head page", [
+      "type: plan",
+      "series: lh",
+      "series_label: Lens head series",
+      "plan_status: in-flight",
+      "jira: [MELOSYS-8337, MELOSYS-8308]",
+      "sessions: [claude-code:aaaaaaaa-0000-4000-8000-000000000001, claude-code:aaaaaaaa-0000-4000-8000-000000000002]",
+    ]),
+  ],
+  [SERIES_ONLY_REL, headPage("Series only", ["type: plan", "series: lh", "plan_status: shipped"])],
+  [PROV_ONLY_REL, headPage("Provenance only", ["sessions: [claude-code:aaaaaaaa-0000-4000-8000-000000000003]"])],
+  [BARE_REL, headPage("Bare page", [])],
+];
+
 const ID_LABELS = {
   S: { one: "Spørsmål", other: "spørsmål" },
   D: { one: "Beslutning", other: "beslutninger" },
@@ -273,6 +304,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(file, "plans", "page.mdx"), PLAIN("File page"), "utf8");
   await writeFile(path.join(file, ".wiki-reader.json"), JSON.stringify({ defaultLens: "oversikt" }), "utf8");
   await writeFile(path.join(none, "plans", "page.mdx"), PLAIN("None page"), "utf8");
+  const head = path.join(root, "head");
+  await mkdir(path.join(head, "plans"), { recursive: true });
+  for (const [rel, body] of HEAD_PAGES) await writeFile(path.join(head, rel), body, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -282,8 +316,8 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${main},${WIKI_FILE}=${file},${WIKI_NONE}=${none}`,
-      WIKI_DEFAULT_LENS: `${WIKI}=overview`,
+      WIKI_EXTRA: `${WIKI}=${main},${WIKI_FILE}=${file},${WIKI_NONE}=${none},${WIKI_HEAD}=${path.join(root, "head")}`,
+      WIKI_DEFAULT_LENS: `${WIKI}=overview,${WIKI_HEAD}=overview`,
     },
     stdio: "ignore",
   });
@@ -689,5 +723,105 @@ test.describe("Wiki reader: lenses", () => {
     await page.locator(`.wiki-list-item[data-relpath="${REPORT_REL}"]`).first().click();
     await expect(page.locator(".wiki-article li.dl-item#d12")).toHaveCount(1);
     expect(await lensOf(page)).toBe("overview");
+  });
+
+  test("Overview hides the series strip and the session cost in the head, and keeps the Jira row", async ({ page }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI_HEAD, HEAD_REL);
+    const headEl = page.locator(".wiki-article-head");
+    // The strip arrives after the article: wait for its Jira row.
+    const jiraRow = headEl.locator(".wiki-prov-jira-row");
+    await expect(jiraRow.locator(".wiki-prov-jira-key")).toHaveText(["MELOSYS-8337", "MELOSYS-8308"]);
+    expect(await lensOf(page)).toBe("overview");
+    const series = headEl.locator(".wiki-series-head");
+    const line = headEl.locator(".wiki-prov-line");
+    await expect(series).toHaveCount(1);
+    await expect(line).toHaveCount(1);
+    await expect(headEl.locator(".wiki-prov-chain")).toHaveCount(1);
+
+    const displays = () =>
+      page.evaluate(() =>
+        Object.fromEntries(
+          [".wiki-series-head", ".wiki-prov-line", ".wiki-prov-chain", ".wiki-prov-strip", ".wiki-prov-jira-row"].map((sel) => {
+            const el = document.querySelector(`.wiki-article-head ${sel}`);
+            return [sel, el ? getComputedStyle(el).display : "absent"];
+          }),
+        ),
+      );
+    const overview = await displays();
+    console.log("Overview computed display:", JSON.stringify(overview));
+    expect(overview[".wiki-series-head"]).toBe("none");
+    expect(overview[".wiki-prov-line"]).toBe("none");
+    expect(overview[".wiki-prov-jira-row"]).not.toBe("none");
+    await expect(series).toBeHidden();
+    await expect(line).toBeHidden();
+    await expect(jiraRow).toBeVisible();
+    await expect(jiraRow.locator(".wiki-prov-jira-key").first()).toBeVisible();
+
+    // The switch's tooltip names what it hides.
+    const sw = headEl.locator(".wiki-lens-switch");
+    await expect(sw).toHaveCount(1);
+    await expect(sw).toHaveAttribute("title", /the series and its timeline, the sessions' cost/);
+
+    // All shows both again, with no refetch: the same nodes come back.
+    await series.evaluate((el) => {
+      (el as HTMLElement).dataset.e2eSame = "1";
+    });
+    await sw.locator('button[data-lens="all"]').click();
+    expect(await lensOf(page)).toBe("all");
+    await expect(series).toBeVisible();
+    await expect(line).toBeVisible();
+    await expect(jiraRow).toBeVisible();
+    await expect(series).toHaveAttribute("data-e2e-same", "1");
+    const all = await displays();
+    console.log("All computed display:", JSON.stringify(all));
+    expect(all[".wiki-series-head"]).not.toBe("none");
+    expect(all[".wiki-prov-line"]).not.toBe("none");
+    // And the chain opens from the line in All.
+    await line.click();
+    await expect(headEl.locator(".wiki-prov-chain")).toBeVisible();
+    expectClean(seen);
+  });
+
+  test("a page whose only difference is the series strip still gets the switch", async ({ page }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI_HEAD, SERIES_ONLY_REL);
+    expect(await lensOf(page)).toBe("overview");
+    const headEl = page.locator(".wiki-article-head");
+    await expect(headEl.locator(".wiki-series-head")).toHaveCount(1);
+    await expect(headEl.locator(".wiki-series-head")).toBeHidden();
+    const sw = headEl.locator(".wiki-lens-switch");
+    await expect(sw).toHaveCount(1);
+    await sw.locator('button[data-lens="all"]').click();
+    await expect(headEl.locator(".wiki-series-head")).toBeVisible();
+    expectClean(seen);
+  });
+
+  test("a cost line that lands after the article brings the switch, once", async ({ page }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI_HEAD, PROV_ONLY_REL);
+    const headEl = page.locator(".wiki-article-head");
+    const line = headEl.locator(".wiki-prov-line");
+    await expect(line).toHaveCount(1);
+    expect(await lensOf(page)).toBe("overview");
+    // No Jira row, so the strip goes whole, border and all.
+    await expect(headEl.locator(".wiki-prov-strip")).toBeHidden();
+    const sw = headEl.locator(".wiki-lens-switch");
+    await expect(sw).toHaveCount(1);
+    await expect(sw.locator('button[aria-pressed="true"]')).toHaveText("Overview");
+    await sw.locator('button[data-lens="all"]').click();
+    await expect(line).toBeVisible();
+    await expect(sw.locator('button[aria-pressed="true"]')).toHaveText("All");
+    await expect(headEl.locator(".wiki-lens-switch")).toHaveCount(1);
+    expectClean(seen);
+  });
+
+  test("a page where the lenses do not differ gets no switch", async ({ page }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI_HEAD, BARE_REL);
+    expect(await lensOf(page)).toBe("overview");
+    await expect(page.locator(".wiki-article-head .wiki-meta-row")).toBeVisible();
+    await expect(page.locator(".wiki-lens-switch")).toHaveCount(0);
+    expectClean(seen);
   });
 });
