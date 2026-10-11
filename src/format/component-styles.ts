@@ -265,6 +265,44 @@ export function componentBlockCss(scope: string): string {
     ${scope} .nm-compact .nm-lane:not([open]) > .nm-head .nm-cta-close { display: none; }
     ${scope} .nm-compact .nm-body { padding: 0.2rem 0.95rem 0.75rem; }
     ${scope} .nm-compact .nm-qcards > .nm-qcard > .question { margin: 0.75rem 0 0; }
+    /* The «Avklart» lane (settled questions plan, D4, D6): one closed row per
+       decided or closed card — id and state | question | action, the decision
+       on a second line — opening to the card, head and all. Label, title and outcome are measured ≥ 4.5:1 in both themes by
+       e2e/wiki-next-moves.spec.ts. */
+    ${scope} .nm-compact .nm-settled .nm-who { color: var(--tone-good); }
+    ${scope} .nm-compact .nm-settled-rows { padding: 0.1rem 0.6rem 0.5rem; }
+    ${scope} .nm-compact .q-compact + .q-compact { border-top: 1px solid var(--border-secondary); }
+    ${scope} .nm-compact .q-row {
+      display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 0.15rem 0.7rem;
+      padding: 0.45rem 0.35rem; cursor: pointer; list-style: none; font-size: 0.9em;
+    }
+    ${scope} .nm-compact .q-row::-webkit-details-marker { display: none; }
+    ${scope} .nm-compact .q-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    ${scope} .nm-compact .q-row:focus-visible {
+      outline: 2px solid transparent; outline-offset: -2px; box-shadow: inset 0 0 0 2px var(--accent-light);
+    }
+    ${scope} .nm-compact .q-row-tag { display: flex; align-items: baseline; gap: 0.4rem; white-space: nowrap; }
+    ${scope} .nm-compact .q-row-state {
+      font-size: 0.85em; padding: 0 0.45rem; border-radius: 999px; color: var(--text-primary);
+      border: 1px solid var(--border-secondary); background: var(--tint-neutral);
+    }
+    ${scope} .nm-compact .q-row-state.q-row-decided { background: var(--tint-success); }
+    ${scope} .nm-compact .q-row-title,
+    ${scope} .nm-compact .q-row-out { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    ${scope} .nm-compact .q-row-title { color: var(--text-primary); }
+    ${scope} .nm-compact .q-row-out { grid-column: 1 / -1; color: var(--text-soft); }
+    ${scope} .nm-compact .q-compact[open] > .q-row .q-row-title,
+    ${scope} .nm-compact .q-compact[open] > .q-row .q-row-out { white-space: normal; overflow-wrap: anywhere; }
+    ${scope} .nm-compact .q-row-did { font-family: var(--mono, ui-monospace, monospace); font-weight: 600; }
+    ${scope} .nm-compact .q-row-cta { grid-column: 3; grid-row: 1; color: var(--accent-light); white-space: nowrap; }
+    ${scope} .nm-compact .q-compact[open] > .q-row .q-row-open,
+    ${scope} .nm-compact .q-compact:not([open]) > .q-row .q-row-close { display: none; }
+    ${scope} .nm-compact .q-row-body > .question { margin: 0.2rem 0 0.6rem; }
+    @container (max-width: 30rem) {
+      ${scope} .nm-compact .q-row { grid-template-columns: minmax(0, 1fr) auto; }
+      ${scope} .nm-compact .q-row-cta { grid-column: 2; grid-row: 1; }
+      ${scope} .nm-compact .q-row-title { grid-column: 1 / -1; }
+    }
     @container (max-width: 640px) {
       ${scope} .nm-compact .nm-head { grid-template-columns: minmax(0, 1fr) auto; }
       ${scope} .nm-compact .nm-lh { white-space: normal; flex-wrap: wrap; }

@@ -86,6 +86,10 @@ interface LaneWords {
   progress: (answered: number, of: number) => string;
   /** The action at the end of a lane head (D38). */
   action: { answer: string; questions: string; see: string; seeAll: string; hide: string };
+  /** The render-only lane of decided and closed `<Question>` cards (settled
+   *  questions plan, D1, D9), and its phrase in the count line. */
+  settled: string;
+  settledSum: (n: number) => string;
   /** «Se som rolle» (D18). */
   viewAs: string;
   viewAsSelf: string;
@@ -124,6 +128,8 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
     drafted: (date) => `utkast ${date}`,
     progress: (n, of) => `${n} av ${of} besvart`,
     action: { answer: "Se og svar ▸", questions: "Se spørsmålene ▸", see: "Se ▸", seeAll: "Se alle ▸", hide: "Skjul ▴" },
+    settled: "Avklart",
+    settledSum: (n) => `Avklart: ${n}`,
     viewAs: "Se som rolle",
     viewAsSelf: "min visning",
   },
@@ -153,6 +159,8 @@ const WORDS: Record<QuestionLanguage, LaneWords> = {
     drafted: (date) => `drafted ${date}`,
     progress: (n, of) => `${n} of ${of} answered`,
     action: { answer: "Answer ▸", questions: "See questions ▸", see: "See ▸", seeAll: "See all ▸", hide: "Hide ▴" },
+    settled: "Settled",
+    settledSum: (n) => `Settled: ${n}`,
     viewAs: "View as role",
     viewAsSelf: "my view",
   },

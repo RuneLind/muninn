@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml, questionRenderOptionsFor } from "./render.ts";
-import { laneFromAttrs, parseBlocks } from "../format/markdown-ast.ts";
+import { countedNextMovesLanes, laneFromAttrs, parseBlocks } from "../format/markdown-ast.ts";
 import { parseRoleKeys, normalizeRoleKey, laneSumPhrase } from "../format/lane-roles.ts";
 import { viewerGroupKeys } from "../format/question.ts";
 
@@ -664,8 +664,9 @@ describe("fix round 2 (#671): chips, M and the question count read one set", () 
     ].join("\n");
     const html = reader(md);
     expect(chipsOf(html)).toEqual([["S1", "S4"]]);
-    expect(countsOf(html)).toEqual(["2 spørsmål og 2 oppgaver"]);
-    expect(sumOf(html)).toBe("2 spørsmål og 2 oppgaver til fag");
+    // The decided S3 is in the «Avklart» lane (settled questions plan, D1).
+    expect(countsOf(html)).toEqual(["2 spørsmål og 2 oppgaver", "1 spørsmål"]);
+    expect(sumOf(html)).toBe("2 spørsmål og 2 oppgaver til fag · Avklart: 1");
   });
 
   test("a lane naming only a decided id counts one task, shows no chips and says «Se alle ▸»", () => {
@@ -678,8 +679,434 @@ describe("fix round 2 (#671): chips, M and the question count read one set", () 
     ].join("\n");
     const html = reader(md);
     expect(chipsOf(html)).toEqual([]);
-    expect(countsOf(html)).toEqual(["1 oppgave"]);
-    expect(sumOf(html)).toBe("1 oppgave til fag");
-    expect(actionsOf(html)).toEqual(["Se alle ▸"]);
+    expect(countsOf(html)).toEqual(["1 oppgave", "1 spørsmål"]);
+    expect(sumOf(html)).toBe("1 oppgave til fag · Avklart: 1");
+    expect(actionsOf(html)).toEqual(["Se alle ▸", "Se ▸"]);
+  });
+});
+
+// ── Settled questions lane (plan muninn-wiki-settled-questions-lane, PR 1) ──
+
+describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)", () => {
+  const log = (items: string[]) => [
+    "<DecisionLog>",
+    "",
+    "- **D7** — Brevet sendes som alternativ A. Begrunnelsen står i notatet.",
+    "- **D8** — Vi venter med vedtaket.",
+    ...items,
+    "",
+    "</DecisionLog>",
+  ];
+  const decided = (id: string, d: string) => `- **${id}** — Lukket 2026-10-01 (${d}).`;
+  const closed = (id: string) => `- **${id}** — Lukket 2026-10-01 (D99).`;
+  const card = (id: string, body: string) => [`<Question id="${id}" to="fag">`, "", body, "", "</Question>", ""];
+  const settledLane = (html: string) => {
+    const at = html.indexOf('<details class="nm-lane nm-settled"');
+    return at === -1 ? "" : html.slice(at, html.indexOf("</div></details>", html.lastIndexOf("</section></div></details>")) + 16);
+  };
+  const laneKinds = (html: string) => [...html.matchAll(/<details class="nm-lane nm-\w+[^"]*" data-kind="(\w+)"/g)].map((m) => m[1]);
+  const rows = (html: string) =>
+    [...html.matchAll(/<details class="q-compact" id="([^"]+)"><summary class="q-row" data-reader-only>(.*?)<\/summary>/g)].map((m) => ({
+      anchor: m[1],
+      summary: m[2]!,
+    }));
+  const text = (html: string) => html.replace(/<[^>]+>/g, "");
+  const stubs = (html: string) =>
+    [...html.matchAll(/<p class="q-moved" data-reader-only><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
+  const sumOf = (html: string) => /<span class="nm-sum">([^<]*)<\/span>/.exec(html)?.[1];
+
+  const PAGE_S = [
+    ...nm([
+      lane('kind="you" role="utvikler"', ["- Send brevet."]),
+      lane('kind="blocked" role="utvikler"', ["- Venter på oppgave 3."]),
+      lane('kind="waiting" role="fag"', ["- **S4** — frist fredag"]),
+    ]),
+    "",
+    ...card("S1", "**Skal brevet sendes som A eller B?** Fag har svart."),
+    ...card("S2", "Gjelder dette også gamle saker? Mer forklaring."),
+    ...card("S4", "Åpent spørsmål?"),
+    "**Hva.** Prosa.",
+    "",
+    ...log([decided("S1", "D7"), closed("S2"), "- **S4** — åpent."]),
+  ].join("\n");
+
+  test("decided and closed cards move into a closed lane after the waiting lanes and before the blocked one", () => {
+    const html = reader(PAGE_S);
+    expect(laneKinds(html)).toEqual(["you", "waiting", "settled", "blocked"]);
+    // Closed by default, no attributes the pills, roles or progress read (D3).
+    expect(html).toContain('<details class="nm-lane nm-settled" data-kind="settled"><summary class="nm-head">');
+    const lane = settledLane(html);
+    expect(lane).not.toMatch(/data-(count|role|since|who)=/);
+    expect(lane).not.toContain("nm-prog");
+    expect(lane).toContain('<span class="nm-ico" aria-hidden="true" data-reader-only>✓</span>');
+    expect(lane).toContain('<span class="nm-who" data-reader-only>Avklart</span>');
+    expect(lane).toContain('<span class="nm-count" data-reader-only>2 spørsmål</span>');
+    expect(lane).toContain('<span class="nm-qids" title="S1→D7, S2"><span class="nm-qid">S1→D7</span> <span class="nm-qid">S2</span></span>');
+    expect(lane).toContain('<span class="nm-cta-open">Se ▸</span><span class="nm-cta-close">Skjul ▴</span>');
+    // One card per id, inside the lane.
+    for (const id of ["S1", "S2"]) {
+      expect(html.match(new RegExp(`data-question-id="${id}"`, "g")), id).toHaveLength(1);
+      expect(lane).toContain(`data-question-id="${id}"`);
+    }
+    // Nothing between the block and the prose: adjacent cards leave no line.
+    expect(stubs(html)).toEqual([]);
+  });
+
+  test("each row: id chip, state pill, question lead, the decision's first sentence; the card is its body", () => {
+    const [s1, s2] = rows(reader(PAGE_S));
+    expect(s1!.anchor).toBe("nm-q-s1");
+    expect(text(s1!.summary)).toBe("S1Avgjort → D7Skal brevet sendes som A eller B?Se ▸Skjul ▴D7 Brevet sendes som alternativ A.");
+    expect(s1!.summary).toContain('<span class="q-row-state q-row-decided">Avgjort → D7</span>');
+    // A closed card: bare id, «Lukket», the lead sentence, no outcome line.
+    expect(s2!.anchor).toBe("nm-q-s2");
+    expect(text(s2!.summary)).toBe("S2LukketGjelder dette også gamle saker?Se ▸Skjul ▴");
+    expect(s2!.summary).not.toContain("q-row-out");
+    const html = reader(PAGE_S);
+    expect(html).toContain('</summary><div class="q-row-body"><section class="question q-decided" data-question-id="S1"');
+  });
+
+  test("the lead is the body's first bold run, wherever it sits", () => {
+    const md = [...nm([lane('kind="you"', ["- x"])]), "", ...card("S1", "Bakgrunn først. **Skal vi sende A?** Mer."), ...log([decided("S1", "D7")])].join("\n");
+    expect(text(rows(reader(md))[0]!.summary)).toContain("Avgjort → D7Skal vi sende A?Se ▸");
+  });
+
+  // Fix round 1 (review of 4ba2a69e).
+  const oneCard = (body: string, d7 = "- **D7** — Brevet sendes som alternativ A. Begrunnelsen står i notatet.") =>
+    rows(
+      reader(
+        [...nm([lane('kind="you"', ["- x"])]), "", ...card("S1", body), "<DecisionLog>", "", d7, decided("S1", "D7"), "", "</DecisionLog>"].join("\n"),
+      ),
+    )[0]!.summary;
+
+  test("fix round 1: a <Fact> mark in the D item is not in the outcome line", () => {
+    const s = oneCard("Spm?", '- **D7** — Brevet sendes som <Fact n="1" v="ok">alternativ A</Fact>. Mer her.');
+    expect(text(s)).toContain("D7 Brevet sendes som alternativ A.");
+    expect(s).not.toContain("Fact");
+  });
+
+  test("fix round 1: <Fact> and <Pill> in the bold lead keep their text, not their tags", () => {
+    const s = oneCard('**Skal vi sende <Pill tone="warn">A</Pill> eller <Fact n="2" v="wrong">B</Fact>?** Mer.');
+    expect(text(s)).toContain("Avgjort → D7Skal vi sende A eller B?Se ▸");
+    expect(s).not.toMatch(/Pill|Fact/);
+  });
+
+  test("fix round 1: a bold run inside a code span is not the lead", () => {
+    expect(text(oneCard("Skriv `**ikke fet**` slik. **Det egentlige spørsmålet?**"))).toContain("Avgjort → D7Det egentlige spørsmålet?Se ▸");
+  });
+
+  test("fix round 1: a body with no prose renders no title", () => {
+    const s = oneCard("```text\nkode\n```");
+    expect(s).not.toContain("q-row-title");
+    expect(text(s)).toContain("S1Avgjort → D7Se ▸");
+  });
+
+  test("fix round 1: the outcome line drops the D item's date tail", () => {
+    // «Vi velger A.» is under FIRST_SENTENCE_MIN (15), so the split joins it
+    // to the tail and only the tail cut separates them.
+    expect(text(oneCard("Spm?", "- **D7** — Vi velger A. Rune, 11.10.2026 (runde 2)."))).toMatch(/D7 Vi velger A\.$/);
+  });
+
+  // Fix round 2: the row's text is rendered by the renderer's own seams.
+  const rowHtml = (s: string, part: "title" | "out") =>
+    part === "title"
+      ? /<span class="q-row-title">(.*?)<\/span><span class="q-row-cta">/.exec(s)?.[1]
+      : /<span class="q-row-out"><span class="q-row-did">D7<\/span> (.*)<\/span>$/.exec(s)?.[1];
+  const logFirst = (d7: string) => {
+    const md = [...nm([lane('kind="you"', ["- x"])]), "", ...card("S1", "Spm?"), "<DecisionLog>", "", d7, decided("S1", "D7"), "", "</DecisionLog>"].join("\n");
+    const html = reader(md);
+    const text = /<li[^>]*id="d7"[^>]*>.*?<span class="dl-text"[^>]*>(.*?)<\/span>(?:<span class="dl-when"|<\/li>)/.exec(html)![1]!;
+    return { row: rowHtml(rows(html)[0]!.summary, "out"), text };
+  };
+
+  test("fix round 2: a code span in the bold lead renders as code, its tag kept", () => {
+    expect(rowHtml(oneCard("**Skal vi bruke `<Pill>` her?**"), "title")).toBe("Skal vi bruke <code>&lt;Pill&gt;</code> her?");
+  });
+
+  test("fix round 2: a code span in the D item renders as code, its tag kept", () => {
+    const { row, text } = logFirst('- **D7** — Skriv `<Fact n="1">` rundt passasjen.');
+    expect(row).toBe("Skriv <code>&lt;Fact n=&quot;1&quot;&gt;</code> rundt passasjen.");
+    expect(row).toBe(text);
+  });
+
+  test("fix round 2: no bold run outside code: the first sentence, code and strike rendered", () => {
+    expect(rowHtml(oneCard("Skal vi `**x**` sende nå? Mer tekst her."), "title")).toBe("Skal vi <code>**x**</code> sende nå?");
+    expect(rowHtml(oneCard("~~Gammelt spørsmål~~ Nytt spørsmål her? Mer."), "title")).toBe("<s>Gammelt spørsmål</s> Nytt spørsmål her?");
+  });
+
+  test("fix round 2: a date tail inside a code span or emphasis is not cut, as in the DecisionLog row", () => {
+    const code = logFirst("- **D7** — Vi velger `A. Rune, 11.10.2026 → x`.");
+    expect(code.row).toBe("Vi velger <code>A. Rune, 11.10.2026 → x</code>.");
+    expect(code.row).toBe(code.text);
+    const em = logFirst("- **D7** — _Vi velger A. Rune, 11.10.2026 → x_.");
+    expect(em.row).toBe("<em>Vi velger A. Rune, 11.10.2026 → x</em>.");
+    expect(em.row).toBe(em.text);
+  });
+
+  test("fix round 2: a struck lead renders struck, as in the DecisionLog row", () => {
+    const { row, text } = logFirst("- **D7** — ~~Vi velger B.~~ Vi velger A.");
+    expect(row).toBe("<s>Vi velger B.</s> Vi velger A.");
+    expect(row).toBe(text);
+  });
+
+  test("fix round 2: no fact-check chip lands in a row", () => {
+    const s = oneCard('**Skal vi sende <Fact n="2" v="wrong">B</Fact>?**', '- **D7** — Vi sender <Fact n="1" v="ok">alternativ A</Fact> nå.');
+    expect(s).not.toContain("fc-");
+    expect(rowHtml(s, "title")).toBe("Skal vi sende B?");
+  });
+
+  // Fix round 3: the row reads the RENDERED card body and log row.
+  /** The inner HTML of the first element `open` matches, balanced on `tag`. */
+  const innerOf = (html: string, open: string, tag: string): string | undefined => {
+    const at = html.indexOf(open);
+    if (at === -1) return undefined;
+    const re = new RegExp(`<${tag}\\b[^>]*>|</${tag}>`, "g");
+    re.lastIndex = at + open.length;
+    let depth = 1;
+    for (let m = re.exec(html); m; m = re.exec(html)) {
+      depth += m[0] === `</${tag}>` ? -1 : 1;
+      if (depth === 0) return html.slice(at + open.length, m.index);
+    }
+    return undefined;
+  };
+  const plain = (html: string) => html.replace(/<button[\s\S]*?<\/button>/g, "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  /** The log row's first sentence as text: `dl-first`, else `dl-text` without
+   *  its rest and date tail. */
+  const logRowFirst = (html: string) => {
+    const li = innerOf(html, html.slice(html.search(/<li[^>]*id="d7"/), html.indexOf(">", html.search(/<li[^>]*id="d7"/)) + 1), "li")!;
+    const first = innerOf(li, '<span class="dl-first">', "span");
+    if (first !== undefined) return plain(first);
+    const textOpen = li.slice(li.indexOf('<span class="dl-text"'), li.indexOf(">", li.indexOf('<span class="dl-text"')) + 1);
+    let t = innerOf(li, textOpen, "span")!;
+    for (const cls of ["dl-rest", "dl-tail"]) {
+      const inner = innerOf(t, `<span class="${cls}">`, "span");
+      if (inner !== undefined) t = t.replace(`<span class="${cls}">${inner}</span>`, "");
+    }
+    return plain(t);
+  };
+  const parity = (d7: string) => {
+    const md = [...nm([lane('kind="you"', ["- x"])]), "", ...card("S1", "Spm?"), "<DecisionLog>", "", d7, decided("S1", "D7"), "", "</DecisionLog>"].join("\n");
+    const html = reader(md);
+    return { row: plain(rowHtml(rows(html)[0]!.summary, "out")!), log: logRowFirst(html) };
+  };
+
+  test("fix round 3: a bold run that opens with a code span is the lead", () => {
+    expect(rowHtml(oneCard("**`impact` skal utelate testkall?** Mer tekst."), "title")).toBe("<code>impact</code> skal utelate testkall?");
+  });
+
+  test("fix round 3: the first <strong> in the rendered body wins, after a prose line too", () => {
+    expect(rowHtml(oneCard("Bakgrunn for saken.\n\n**`<Pill>` eller `<Verdict>`?**"), "title")).toBe(
+      "<code>&lt;Pill&gt;</code> eller <code>&lt;Verdict&gt;</code>?",
+    );
+  });
+
+  test("fix round 3: a <strong> inside code (a FileRef) is not the lead", () => {
+    expect(rowHtml(oneCard("<FileRef>**ikke denne** src/a.ts</FileRef>\n\n**Det egentlige spørsmålet?**"), "title")).toBe("Det egentlige spørsmålet?");
+  });
+
+  test("fix round 3: a mark after an inline ```x``` span leaves no chip or mark in the row", () => {
+    for (const body of ['```x``` <Fact n="1" v="ok">tekst her</Fact> nå?', '**```x``` <Fact n="1" v="ok">tekst her</Fact> nå?**']) {
+      const s = oneCard(body, '- **D7** — ```x``` <Fact n="2" v="bad">Vi gjør A for brevet</Fact> nå.');
+      expect(s, body).not.toContain("fc-");
+      expect(plain(rowHtml(s, "title")!), body).toBe("x tekst her nå?");
+      expect(plain(rowHtml(s, "out")!), body).toBe("x Vi gjør A for brevet nå.");
+    }
+  });
+
+  test("fix round 3: the outcome is the log row's first sentence, a mark across a sentence end or the tail included", () => {
+    for (const d7 of [
+      '- **D7** — <Fact n="1" v="ok">Brevet sendes som alternativ A. Begrunnelsen</Fact> står i notatet.',
+      '- **D7** — Vi venter med vedtaket til neste år. <Fact n="2" v="ok">Rune, 11.10.2026</Fact>.',
+      '- **D7** — <Fact n="3" v="bad">Vi venter med vedtaket. Rune, 11.10.2026 (runde 2).</Fact>',
+      "- **D7** — Vi venter med vedtaket til neste år. Rune, 11.10.2026 (runde 2).",
+    ]) {
+      const { row, log } = parity(d7);
+      expect(row, d7).toBe(log);
+      expect(row, d7).not.toBe("");
+    }
+  });
+
+  test("fix round 3: a struck lead of a full sentence leaves the next sentence as the outcome", () => {
+    const { row, log } = parity("- **D7** — ~~Vi velger alternativ B for brevet.~~ Vi velger alternativ A for brevet.");
+    expect(row).toBe("Vi velger alternativ A for brevet.");
+    expect(row).toBe(log);
+  });
+
+  test("fix round 3: the fallback drops a leading [ ] marker", () => {
+    expect(rowHtml(oneCard("[ ] Skal vi sende brevet nå? Mer tekst."), "title")).toBe("Skal vi sende brevet nå?");
+  });
+
+  test("an open card stays in the waiting lane that names it", () => {
+    const html = reader(PAGE_S);
+    expect(html).toContain('<div class="nm-qcard" id="nm-q-s4"><section class="question q-open" data-question-id="S4"');
+    expect(settledLane(html)).not.toContain('data-question-id="S4"');
+  });
+
+  test("a settled card named by a waiting lane goes to «Avklart», not to that lane", () => {
+    const md = [...nm([lane('kind="waiting" role="fag"', ["- **S1** — avgjort?", "- annet"])]), "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n");
+    const html = reader(md);
+    expect(html).not.toContain('class="nm-qcard"');
+    expect(rows(html).map((r) => r.anchor)).toEqual(["nm-q-s1"]);
+  });
+
+  test("a settled card inside a Lane, or inside a Historic, stays where it is written", () => {
+    const md = [
+      ...nm([lane('kind="you" role="utvikler"', ["- Gjør noe."], card("S1", "I lanen?"))]),
+      "",
+      '<Historic since="v1">',
+      "",
+      ...card("S2", "Historisk?"),
+      "</Historic>",
+      "",
+      ...log([decided("S1", "D7"), closed("S2")]),
+    ].join("\n");
+    const html = reader(md);
+    expect(html).not.toContain("nm-settled");
+    expect(html).not.toContain("q-compact");
+    expect(html.match(/data-question-id="S[12]"/g)).toHaveLength(2);
+    expect(stubs(html)).toEqual([]);
+  });
+
+  test("no live NextMoves: settled cards render where they are written", () => {
+    const none = reader([...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"));
+    expect(none).not.toContain("q-compact");
+    expect(none).toContain('<section class="question q-decided" data-question-id="S1"');
+    // A block inside a Historic takes none either.
+    const hist = reader(
+      ['<Historic since="v1">', "", ...nm([lane('kind="you"', ["- gammelt"])]), "", "</Historic>", "", ...card("S1", "Spm?"), ...log([decided("S1", "D7")])].join("\n"),
+    );
+    expect(hist).not.toContain("nm-settled");
+    expect(hist).not.toContain("q-moved");
+  });
+
+  test("without the question option (gardener preview, digest) nothing moves", () => {
+    const plain = renderWikiHtml(PAGE_S, () => undefined);
+    expect(plain).toContain("nm-compact");
+    expect(plain).not.toContain("nm-settled");
+    expect(plain).not.toContain("q-compact");
+  });
+
+  test("D39: a settled card away from the block leaves the pointer line; one above the block points down", () => {
+    const below = [...nm([lane('kind="you"', ["- x"])]), "", "Prosa.", "", ...card("S1", "Spm?"), ...card("S2", "Spm?"), ...log([decided("S1", "D7"), closed("S2")])].join("\n");
+    expect(stubs(reader(below))).toEqual(["nm-q-s1|Spørsmål S1 og S2 står under Oppfølging ↑"]);
+    const fold = [...nm([lane('kind="you"', ["- x"])]), "", '<Fold title="Samtalen med fag">', "", ...card("S1", "Spm?"), "</Fold>", "", ...log([decided("S1", "D7")])].join("\n");
+    expect(stubs(reader(fold))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↑"]);
+    const above = [...card("S1", "Spm?"), ...nm([lane('kind="you"', ["- x"])]), "", ...log([decided("S1", "D7")])].join("\n");
+    expect(stubs(reader(above))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↓"]);
+  });
+
+  test("a settled card in the block's intro points down to the lane", () => {
+    const md = ["<NextMoves>", "", ...card("S1", "Spm?"), ...lane('kind="you"', ["- x"]), "", "</NextMoves>", "", ...log([decided("S1", "D7")])].join("\n");
+    expect(stubs(reader(md))).toEqual(["nm-q-s1|Spørsmål S1 står under Oppfølging ↓"]);
+  });
+
+  test("open and settled cards share one anchor set", () => {
+    const md = [
+      ...nm([lane('kind="waiting" role="fag"', ["- **s1** åpent"])]),
+      "",
+      ...card("s1", "Åpent?"),
+      ...card("S1", "Avgjort?"),
+      ...log(["- **s1** — åpent.", decided("S1", "D7")]),
+    ].join("\n");
+    const html = reader(md);
+    // `s1` and `S1` fold to one slug: the settled card gets the next anchor.
+    expect(html).toContain('<div class="nm-qcard" id="nm-q-s1">');
+    expect(rows(html).map((r) => r.anchor)).toEqual(["nm-q-s1-2"]);
+  });
+
+  test("the count line: «Avklart: N» after the waiting phrases, before blocked", () => {
+    expect(sumOf(reader(PAGE_S))).toBe("1 oppgave for utvikler · 1 spørsmål til fag · Avklart: 2 · 1 blokkert");
+  });
+
+  test("only the first live block with a lane hosts the lane", () => {
+    const md = [
+      "<NextMoves>",
+      "",
+      "Bare tekst.",
+      "",
+      "</NextMoves>",
+      "",
+      ...nm([lane('kind="you"', ["- en"])]),
+      "",
+      ...nm([lane('kind="you"', ["- to"])]),
+      "",
+      ...card("S1", "Spm?"),
+      ...log([decided("S1", "D7")]),
+    ].join("\n");
+    const html = reader(md);
+    expect(html.match(/class="nm-lane nm-settled"/g)).toHaveLength(1);
+    const blocks = html.split('<section class="next-moves nm-compact"');
+    expect(blocks[1]).toContain("nm-settled");
+    expect(blocks[2]).not.toContain("nm-settled");
+  });
+
+  test("the index walk never sees the lane (D3)", () => {
+    const { lanes } = countedNextMovesLanes(parseBlocks(PAGE_S));
+    expect(lanes.map((l) => l.kind)).toEqual(["you", "blocked", "waiting"]);
+  });
+
+  test("English wiki: Settled, the English units and pill", () => {
+    const en = reader(PAGE_S, "en");
+    expect(en).toContain('<span class="nm-who" data-reader-only>Settled</span>');
+    expect(en).toContain('<span class="nm-count" data-reader-only>2 questions</span>');
+    expect(sumOf(en)).toBe("1 task for utvikler · 1 question for fag · Settled: 2 · 1 blocked");
+    expect(rows(en)[0]!.summary).toContain(">Decided → D7</span>");
+    expect(rows(en)[1]!.summary).toContain(">Closed</span>");
+    expect(rows(en)[0]!.summary).toContain('<span class="q-row-open">See ▸</span><span class="q-row-close">Hide ▴</span>');
+  });
+});
+
+describe("D2: a waiting-lane item that only names its card", () => {
+  const fagBody = (html: string) => {
+    const at = html.indexOf('data-role="fag"');
+    return html.slice(html.indexOf('<div class="nm-body">', at), html.indexOf('<div class="nm-qcards">', at));
+  };
+  const md = (items: string[]) =>
+    [...nm([lane('kind="waiting" role="fag"', items)]), "", ...question("S4"), "", ...question("S5")].join("\n");
+
+  test("an id-only item is not rendered; the count and the chips still read it", () => {
+    const html = reader(md(["- **S4**", "- S5.", "- Ring fag."]));
+    expect(fagBody(html)).toBe('<div class="nm-body"><ul><li>Ring fag.</li></ul>');
+    expect(chipsOf(html)).toEqual([["S4", "S5"]]);
+    expect(countsOf(html)).toEqual(["2 spørsmål og 1 oppgave"]);
+  });
+
+  test("fix round 2: marks and the joiner count as nothing: ✔️ and ☑️ are hidden", () => {
+    for (const item of ["- **S4** ✔️", "- **S4** ☑️", "- **S4** 👍\u200D"]) {
+      expect(fagBody(reader(md([item, "- Ring fag."]))), item).toBe('<div class="nm-body"><ul><li>Ring fag.</li></ul>');
+    }
+  });
+
+  test("fix round 1: a symbol counts as nothing: `- **S4** ✅` is hidden", () => {
+    const html = reader(md(["- **S4** ✅", "- Ring fag."]));
+    expect(fagBody(html)).toBe('<div class="nm-body"><ul><li>Ring fag.</li></ul>');
+  });
+
+  test("an item with more than the id stays", () => {
+    const html = reader(md(["- **S4** — frist fredag", "- S5"]));
+    expect(fagBody(html)).toBe('<div class="nm-body"><ul><li><strong>S4</strong> — frist fredag</li></ul>');
+  });
+
+  test("an id-only item with something under it stays", () => {
+    const html = reader(md(["- **S4**", "  - frist fredag", "- S5"]));
+    expect(fagBody(html)).toContain("<li><strong>S4</strong>");
+    expect(fagBody(html)).toContain("frist fredag");
+    expect(fagBody(html)).not.toContain("S5");
+  });
+
+  test("a list left empty renders no <ul>", () => {
+    const html = reader(md(["- **S4**", "- [ ] S5"]));
+    expect(fagBody(html)).toBe('<div class="nm-body">');
+    expect(countsOf(html)).toEqual(["2 spørsmål"]);
+  });
+
+  test("an ordered list keeps its numbers", () => {
+    const html = reader(md(["1. **S4**", "2. Ring fag.", "3. Skriv notat."]));
+    expect(fagBody(html)).toContain('<ol start="2">');
+  });
+
+  test("an id the lane did not take keeps its item", () => {
+    // S5 is a card in no lane's hold here: a duplicated id stays in place.
+    const html = reader([...nm([lane('kind="waiting" role="fag"', ["- **S4**", "- **S5**"])]), "", ...question("S4"), "", ...question("S5"), "", ...question("S5")].join("\n"));
+    expect(fagBody(html)).toBe('<div class="nm-body"><ul><li><strong>S5</strong></li></ul>');
   });
 });

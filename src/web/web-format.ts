@@ -124,6 +124,11 @@ const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.nam
 // wires the chip's expand-on-click, so an article with JS disabled still shows
 // which passages were checked and how they came out.
 
+/** The classes a fact-check mark and its chip carry; {@link withoutFactChrome}
+ *  reads the rendered markup by the same names. */
+const FACT_MARK_CLASS = "fc-mark";
+const FACT_CHIP_CLASS = "fc-chip";
+
 /** The three generated pieces of a `Fact` mark, kept separate because the wrapped
  *  PROSE must keep flowing through the rest of the inline pipeline (bold, links)
  *  rather than being escaped as an opaque label. */
@@ -139,14 +144,14 @@ function factMarkParts(attrs: Record<string, string>): {
     ? `Fact check: ${FACT_VERDICT_WORD[v]}`
     : `Claim ${n} — ${FACT_VERDICT_WORD[v]}`;
   return {
-    open: `<span class="fc-mark fc-mark-${v}"${nAttr}>`,
+    open: `<span class="${FACT_MARK_CLASS} ${FACT_MARK_CLASS}-${v}"${nAttr}>`,
     close: `</span>`,
     // A real <button>: the chip is the interactive affordance for the evidence
     // card, so it must be keyboard-reachable and announce itself. The glyph is
     // aria-hidden (a screen reader saying "check mark" is noise) and the label
     // rides a visually-hidden span instead.
     chip:
-      `<button type="button" class="fc-chip fc-chip-${v}"${nAttr}` +
+      `<button type="button" class="${FACT_CHIP_CLASS} ${FACT_CHIP_CLASS}-${v}"${nAttr}` +
       ` aria-expanded="false" title="${escapeHtml(label)}">` +
       `<span aria-hidden="true">${FACT_VERDICT_MARK[v]}</span>` +
       `<span class="fc-chip-label">${escapeHtml(label)}</span></button>`,
@@ -346,6 +351,9 @@ interface QuestionPage {
   duplicates: Set<string>;
   /** The ids the page's `<Question>` blocks carry. */
   questionIds: Set<string>;
+  /** Each DecisionLog id's own text after the id, from the first item that
+   *  carries it: what a settled card's row quotes from its decision. */
+  logText: Map<string, string>;
   options?: QuestionRenderOptions;
 }
 let currentQuestionPage: QuestionPage | undefined;
@@ -359,7 +367,9 @@ function questionPage(blocks: Block[], options: QuestionRenderOptions | undefine
     questionIds.add(q.id);
     if (q.duplicate) duplicates.add(q.id);
   }
-  return { states: parsed.states, duplicates, questionIds, ...(options ? { options } : {}) };
+  const logText = new Map<string, string>();
+  for (const e of parsed.entries) if (!logText.has(e.id)) logText.set(e.id, e.itemText);
+  return { states: parsed.states, duplicates, questionIds, logText, ...(options ? { options } : {}) };
 }
 
 const LOG_ANCHOR_RE = /<li class="dl-item[^"]*"(?: value="\d+")? id="([^"]+)"><a class="dl-id" href="#\1">([^<]*)<\/a>/g;
@@ -988,6 +998,10 @@ interface LaneCards {
   /** Question id → the anchor of its card in the lane, unique on the page's
    *  lane cards (`Q.1` and `Q-1` fold to one slug, so the second gets `-2`). */
   moved: Map<string, string>;
+  /** The page's first live `<NextMoves>` (by its `children`) → the decided
+   *  and closed cards its render-only «Avklart» lane shows, in page order
+   *  (settled questions plan, D1, D10). */
+  settled: Map<Block[], ComponentBlock[]>;
   /** A moved card's authored place (D39), keyed by its block's `attrs`, which
    *  the renderer hands back unchanged: the run's one line on its first card,
    *  null (nothing) on the rest of a run and on a card that sits right after
@@ -1015,11 +1029,16 @@ const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
 function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number }[] {
   const hits: { id: string; at: number }[] = [];
   for (const id of ids) {
-    const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const m = new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`).exec(text);
+    const m = questionIdRe(id).exec(text);
     if (m) hits.push({ id, at: m.index });
   }
   return hits.sort((a, b) => a.at - b.at);
+}
+
+/** `id` on its own boundary, as {@link namedQuestionHits} reads it. */
+function questionIdRe(id: string, flags = ""): RegExp {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`, flags);
 }
 
 /** The `<Question>` ids an item names, in the order they appear. On the
@@ -1036,22 +1055,30 @@ function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
  * a lane that names it. A `<NextMoves>` in a settled section
  * (`isSettledSection`) takes no card: its lanes are history, as in
  * `countedNextMovesLanes`.
+ *
+ * A decided or closed card goes to no waiting lane: the page's first live
+ * `<NextMoves>` with a lane takes it into its render-only «Avklart» lane
+ * (settled questions plan, D1, D10) — unless it sits in a settled section or
+ * inside a lane, where it stays.
  */
 function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
-  const questions = new Map<string, { block: ComponentBlock; lanes: Block[][] }>();
+  const questions = new Map<string, { block: ComponentBlock; lanes: Block[][]; settledSection: boolean }>();
   const nextMoves: ComponentBlock[] = [];
   const walk = (bs: Block[], lanes: Block[][], settled: boolean) => {
     for (const b of bs) {
       if (b.type !== "component") continue;
       if (b.name === "Question") {
         const id = parseQuestionAttrs(b.attrs).id;
-        if (id !== null && !page.duplicates.has(id) && !questions.has(id)) questions.set(id, { block: b, lanes });
+        if (id !== null && !page.duplicates.has(id) && !questions.has(id)) {
+          questions.set(id, { block: b, lanes, settledSection: settled });
+        }
       }
       if (b.name === "NextMoves" && !settled) nextMoves.push(b);
       walk(b.children, b.name === "Lane" ? [...lanes, b.children] : lanes, settled || isSettledSection(b));
     }
   };
   walk(blocks, [], false);
+  const isSettled = (id: string) => (page.states.get(id)?.kind ?? "open") !== "open";
   const waiting = nextMoves.flatMap((block) =>
     nextMovesLanes(block.children)
       .filter((l) => l.kind === "waiting")
@@ -1063,31 +1090,48 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   for (const lane of waiting) {
     for (const id of named(lane)) if (questions.get(id)!.lanes.includes(lane.children)) stays.add(id);
   }
-  const out: LaneCards = { byLane: new Map(), moved: new Map(), stubs: new Map() };
+  const out: LaneCards = { byLane: new Map(), moved: new Map(), settled: new Map(), stubs: new Map() };
   /** Question id → the `<NextMoves>` block whose lane took its card, and that lane. */
   const takenBy = new Map<string, ComponentBlock>();
   const takenLane = new Map<string, Block[]>();
   const anchors = new Set<string>();
+  const take = (id: string, block: ComponentBlock, lane: Block[], list: ComponentBlock[]) => {
+    const base = `nm-q-${anchorSlug(id)}`;
+    let anchor = base;
+    for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
+    anchors.add(anchor);
+    out.moved.set(id, anchor);
+    takenBy.set(id, block);
+    takenLane.set(id, lane);
+    list.push(questions.get(id)!.block);
+  };
   for (const lane of waiting) {
     for (const item of lane.items) {
       for (const id of namedQuestionIds(item, questions.keys())) {
-        if (stays.has(id) || out.moved.has(id)) continue;
-        const base = `nm-q-${anchorSlug(id)}`;
-        let anchor = base;
-        for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
-        anchors.add(anchor);
-        out.moved.set(id, anchor);
-        takenBy.set(id, lane.block);
-        takenLane.set(id, lane.children);
+        if (stays.has(id) || out.moved.has(id) || isSettled(id)) continue;
         const list = out.byLane.get(lane.children) ?? [];
-        list.push(questions.get(id)!.block);
         out.byLane.set(lane.children, list);
+        take(id, lane.block, lane.children, list);
       }
     }
+  }
+  // A block with no lane renders as plain markdown, so it has no lane list to
+  // add the «Avklart» lane to.
+  const host = nextMoves.find((b) => nextMovesLanes(b.children).length > 0);
+  if (host) {
+    const list: ComponentBlock[] = [];
+    for (const [id, q] of questions) {
+      if (isSettled(id) && !q.settledSection && q.lanes.length === 0) take(id, host, SETTLED_LANE, list);
+    }
+    if (list.length) out.settled.set(host.children, list);
   }
   planMovedStubs(blocks, out, takenBy, takenLane);
   return out;
 }
+
+/** The «Avklart» lane's key where a lane's `children` would be: it has no
+ *  block of its own. */
+const SETTLED_LANE: Block[] = [];
 
 /**
  * D39: what each moved card leaves at its authored place. A card with only
@@ -1224,15 +1268,177 @@ function renderedLaneOrder<T extends { kind: NextMovesLane["kind"] }>(lanes: T[]
 /** Each lane kind's icon in the compact head (D36). */
 const LANE_ICONS: Record<NextMovesLane["kind"], string> = { waiting: "⏳", you: "✋", draft: "✉", blocked: "⛔" };
 
-/** A lane's body as the grid renders it: a task list through the checklist marks. */
-function laneBodyHtml(lane: NextMovesLane): string {
+/** A lane's body as the grid renders it: a task list through the checklist
+ *  marks. `taken` are the ids of the cards the lane holds: a top-level item
+ *  that is only those ids (D2) is not rendered, since the card under it
+ *  stands for it. The lane's counts still read it. */
+function laneBodyHtml(lane: NextMovesLane, taken: readonly string[] = []): string {
   return lane.children
-    .map((b) =>
-      (b.type === "ul" || b.type === "ol") && isTaskList(b)
+    .map((raw) => {
+      const b = taken.length && (raw.type === "ul" || raw.type === "ol") ? withoutIdOnlyItems(raw, taken) : raw;
+      if (b === null) return "";
+      return (b.type === "ul" || b.type === "ol") && isTaskList(b)
         ? checklistHtml(taskListRows(b), b.type === "ol", b.type === "ol" ? b.start : 1, b.type === "ol" ? b.values : undefined)
-        : renderBlocks([b], webRenderer),
-    )
+        : renderBlocks([b], webRenderer);
+    })
+    .filter((html) => html !== "")
     .join("\n");
+}
+
+/** `list` without its top-level items whose text is only some of `ids`, after
+ *  markup, punctuation and white space (D2). An item with anything under it
+ *  stays. Null when no item is left; an ordered list keeps its numbers. */
+function withoutIdOnlyItems(list: Extract<Block, { type: "ul" | "ol" }>, ids: readonly string[]): Block | null {
+  const idOnly = (item: string) => {
+    let rest = item.replace(/^\[[ xX]\][ \t]*/, "");
+    for (const id of ids) rest = rest.replace(questionIdRe(id, "g"), "");
+    return rest.replace(/[\p{P}\p{S}\p{M}\s\u200D]/gu, "") === "";
+  };
+  const keep = list.items.map((_, k) => k).filter((k) => list.nested?.[k]?.length || !idOnly(list.items[k]!));
+  if (keep.length === list.items.length) return list;
+  if (keep.length === 0) return null;
+  const items = keep.map((k) => list.items[k]!);
+  const nested = list.nested ? { nested: keep.map((k) => list.nested![k]) } : {};
+  if (list.type === "ul") return { ...list, items, ...nested };
+  let n = list.start - 1;
+  const nums = list.items.map((_, k) => (n = list.values?.[k] ?? n + 1));
+  const values = keep.map((k, j) => (j > 0 && nums[k] !== nums[keep[j - 1]!]! + 1 ? nums[k] : undefined));
+  const { values: _old, ...rest } = list;
+  return { ...rest, items, ...nested, start: nums[keep[0]!]!, ...(values.some((v) => v !== undefined) ? { values } : {}) };
+}
+
+/** Each element `open` finds in `html`, with its balanced close (`tag`
+ *  elements nested inside counted). A match inside an earlier match's range is
+ *  not reported. */
+function elementRanges(html: string, open: RegExp, tag: string): { start: number; innerStart: number; innerEnd: number; end: number }[] {
+  const out: { start: number; innerStart: number; innerEnd: number; end: number }[] = [];
+  const re = new RegExp(open.source, "g");
+  const closeTag = `</${tag}>`;
+  for (let m = re.exec(html); m; m = re.exec(html)) {
+    const tagRe = new RegExp(`<${tag}\\b[^>]*>|</${tag}>`, "g");
+    tagRe.lastIndex = m.index + m[0].length;
+    let depth = 1;
+    let close = -1;
+    for (let t = tagRe.exec(html); t; t = tagRe.exec(html)) {
+      depth += t[0] === closeTag ? -1 : 1;
+      if (depth === 0) {
+        close = t.index;
+        break;
+      }
+    }
+    if (close === -1) break;
+    out.push({ start: m.index, innerStart: m.index + m[0].length, innerEnd: close, end: close + closeTag.length });
+    re.lastIndex = close + closeTag.length;
+  }
+  return out;
+}
+
+/** `html` with the given ranges replaced by their inner HTML (`keep`) or
+ *  removed whole. */
+function spliceRanges(html: string, ranges: ReturnType<typeof elementRanges>, keep: boolean): string {
+  let out = "";
+  let at = 0;
+  for (const r of ranges) {
+    out += html.slice(at, r.start) + (keep ? html.slice(r.innerStart, r.innerEnd) : "");
+    at = r.end;
+  }
+  return out + html.slice(at);
+}
+
+const FACT_CHIP_OPEN_RE = new RegExp(`<button type="button" class="${FACT_CHIP_CLASS} ${FACT_CHIP_CLASS}-[a-z]+"[^>]*>`);
+const FACT_MARK_OPEN_RE = new RegExp(`<span class="${FACT_MARK_CLASS} ${FACT_MARK_CLASS}-[a-z]+"[^>]*>`);
+
+/** Rendered inline HTML without fact-check chrome, read off the markup the
+ *  renderer emits (`factMarkParts`): every chip button removed, every mark span
+ *  unwrapped. A mark the caller sliced in half (a `<Fact>` crossing the
+ *  lead's `<strong>` boundary) has no balanced close and stays: #680. The block form (`div.fc-mark-block`) cannot occur here: both
+ *  callers hand in inline HTML. */
+function withoutFactChrome(html: string): string {
+  let out = spliceRanges(html, elementRanges(html, FACT_CHIP_OPEN_RE, "button"), false);
+  for (let marks = elementRanges(out, FACT_MARK_OPEN_RE, "span"); marks.length; marks = elementRanges(out, FACT_MARK_OPEN_RE, "span")) {
+    out = spliceRanges(out, marks, true);
+  }
+  return out;
+}
+
+/** A `<Question>` card's lead for its row (D4), read off the card body as it
+ *  renders (`bodyHtml`): the first `<strong>` outside code, else the first
+ *  sentence of the body's first line (the DecisionLog split, a leading `[ ]`
+ *  dropped), rendered inline. Fact-check chrome removed. The scan covers the
+ *  whole rendered body, so a bold table cell, Callout or Fold text can win:
+ *  #680. */
+function questionLeadHtml(q: ComponentBlock, bodyHtml: string): string {
+  const code = [...elementRanges(bodyHtml, /<code\b[^>]*>/, "code"), ...elementRanges(bodyHtml, /<pre\b[^>]*>/, "pre")];
+  const strong = elementRanges(bodyHtml, /<strong>/, "strong").find((r) => !code.some((c) => r.start > c.start && r.start < c.end));
+  if (strong) return withoutFactChrome(bodyHtml.slice(strong.innerStart, strong.innerEnd)).trim();
+  const src = q.children
+    .map((b) => (b.type === "text" ? b.lines.join("\n") : b.type === "ul" || b.type === "ol" ? b.items.join("\n") : b.type === "heading" ? b.content : ""))
+    .join("\n");
+  const line = (src.split("\n").find((l) => l.trim()) ?? "").trim().replace(/^\[[ xX]\][ \t]*/, "");
+  return line ? withoutFactChrome(itemHtml(splitDecisionText(line)?.first ?? line)).trim() : "";
+}
+
+/** The first sentence a decided card's row quotes: the DecisionLog compact
+ *  row's own `.dl-text` HTML for the item (`decisionTail`, else
+ *  `logTextHtml`, fact marks in), its `dl-first` part — or, with no split,
+ *  everything but the date tail — then fact-check chrome removed. So the text
+ *  is the log row's first sentence by construction. */
+function decisionRowFirstHtml(text: string, id: string): string {
+  const isDecision = DECISION_ID_RE.test(id);
+  const html = (isDecision ? decisionTail(text)?.html : undefined) ?? logTextHtml(text, isDecision);
+  const first = elementRanges(html, /<span class="dl-first">/, "span")[0];
+  const shown = first
+    ? html.slice(first.innerStart, first.innerEnd)
+    : spliceRanges(html, elementRanges(html, new RegExp(`<span class="(?:dl-rest|${DL_TAIL_CLASS})">`), "span"), false);
+  return withoutFactChrome(shown).trim();
+}
+
+/** The «Avklart» lane (settled questions plan, D1, D3–D6): render-only, so no
+ *  `data-role`, `data-since` or `data-count` for the reader's pills, roles and
+ *  progress to read. One closed row per decided or closed card; the row opens
+ *  to the card as the page renders it. */
+function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguage): string {
+  const words = laneWords(lang);
+  const L = questionLabels(lang);
+  const page = currentQuestionPage!;
+  const rows = cards.map((q) => {
+    const id = parseQuestionAttrs(q.attrs).id!;
+    const state = page.states.get(id);
+    const decision = state?.kind === "decided" ? state.decision : null;
+    const sentence = decision ? decisionRowFirstHtml(page.logText.get(decision) ?? "", decision) : "";
+    return { q, id, decision, sentence };
+  });
+  const chip = (r: (typeof rows)[number]) => (r.decision ? `${r.id}→${r.decision}` : r.id);
+  const rowHtml = rows
+    .map((r) => {
+      const anchor = currentLaneCards!.moved.get(r.id)!;
+      const pill = r.decision ? `${L.decided} → ${r.decision}` : L.closed;
+      const body = renderBlocks(r.q.children, webRenderer);
+      const lead = questionLeadHtml(r.q, body);
+      const out = r.sentence
+        ? `<span class="q-row-out"><span class="q-row-did">${escapeHtml(r.decision!)}</span> ${r.sentence}</span>`
+        : "";
+      return (
+        `<details class="q-compact" id="${anchor}"><summary class="q-row" ${READER_ONLY_ATTR}>` +
+        `<span class="q-row-tag"><span class="nm-qid">${escapeHtml(r.id)}</span><span class="q-row-state${r.decision ? " q-row-decided" : ""}">${escapeHtml(pill)}</span></span>` +
+        // No prose to lead with: no title, rather than an empty cell.
+        (lead ? `<span class="q-row-title">${lead}</span>` : "") +
+        `<span class="q-row-cta"><span class="q-row-open">${escapeHtml(words.action.see)}</span><span class="q-row-close">${escapeHtml(words.action.hide)}</span></span>` +
+        `${out}</summary>` +
+        `<div class="q-row-body">${questionCardHtml(r.q.attrs, body)}</div></details>`
+      );
+    })
+    .join("");
+  const chips = rows.map(chip);
+  return (
+    `<details class="nm-lane nm-settled" data-kind="settled">` +
+    `<summary class="nm-head"><span class="nm-lh"><span class="nm-ico" aria-hidden="true" ${READER_ONLY_ATTR}>✓</span>` +
+    `<span class="nm-who" ${READER_ONLY_ATTR}>${escapeHtml(words.settled)}</span>` +
+    `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText([{ n: rows.length, unit: "question" }], lang))}</span></span>` +
+    `<span class="nm-peek nm-peek-q" ${READER_ONLY_ATTR}><span class="nm-qids" title="${escapeHtml(chips.join(", "))}">${chips.map((c) => `<span class="nm-qid">${escapeHtml(c)}</span>`).join(" ")}</span></span>` +
+    `<span class="nm-cta" ${READER_ONLY_ATTR}><span class="nm-cta-open">${escapeHtml(words.action.see)}</span><span class="nm-cta-close">${escapeHtml(words.action.hide)}</span></span>` +
+    `</summary><div class="nm-body nm-settled-rows">${rowHtml}</div></details>`
+  );
 }
 
 /**
@@ -1282,7 +1488,9 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
     // the same rule for the viewer's lane.
     const action =
       lane.kind === "waiting" && qids.length ? words.action.questions : lane.kind === "blocked" ? words.action.see : words.action.seeAll;
-    const cards = (currentLaneCards?.byLane.get(lane.children) ?? [])
+    const held = currentLaneCards?.byLane.get(lane.children) ?? [];
+    const taken = held.map((q) => parseQuestionAttrs(q.attrs).id!);
+    const cards = held
       .map((q) => {
         const id = parseQuestionAttrs(q.attrs).id!;
         const anchor = currentLaneCards!.moved.get(id)!;
@@ -1303,9 +1511,18 @@ function compactNextMovesHtml(lanes: NextMovesLane[], rawChildren: Block[]): str
       `<span class="nm-count" ${READER_ONLY_ATTR}>${escapeHtml(laneCountText(counts, lang))}</span></span>` +
       `${peekHtml}${sinceHtml}` +
       `<span class="nm-cta" ${READER_ONLY_ATTR}><span class="nm-cta-open">${escapeHtml(action)}</span><span class="nm-cta-close">${escapeHtml(words.action.hide)}</span></span>` +
-      `</summary><div class="nm-body">${laneBodyHtml(lane)}${cards ? `<div class="nm-qcards">${cards}</div>` : ""}</div></details>`
+      `</summary><div class="nm-body">${laneBodyHtml(lane, taken)}${cards ? `<div class="nm-qcards">${cards}</div>` : ""}</div></details>`
     );
   });
+  // The «Avklart» lane sits after the other lanes and before the blocked ones
+  // (D6), in the rows and in the count line alike.
+  const settled = currentLaneCards?.settled.get(rawChildren);
+  if (settled?.length) {
+    const at = ordered.filter((l) => l.kind !== "blocked").length;
+    rows.splice(at, 0, settledLaneHtml(settled, lang));
+    const sumAt = ordered.slice(0, at).filter((l) => l.items.length > 0).length;
+    sum.splice(sumAt, 0, words.settledSum(settled.length));
+  }
   const sumHtml = sum.length ? `<span class="nm-sum">${escapeHtml(sum.join(" · "))}</span>` : "";
   return (
     `<section class="next-moves nm-compact" data-lang="${lang}">` +
@@ -1401,17 +1618,27 @@ function rendersAs(pieces: readonly string[], wholeFlat: string): boolean {
  *  in the rest. Null when the item has no tail, or when cutting it out would
  *  change the render. */
 function decisionTail(text: string): { when: DecisionWhen; html: string } | null {
+  const cut = decisionTailCut(text);
+  if (!cut) return null;
+  const { when, body, tail, pointer } = cut;
+  const after = ` <span class="${DL_TAIL_CLASS}">${itemHtml(tail)}</span>${pointer ? ` ${itemHtml(pointer)}` : ""}`;
+  const parts = decisionParts(body, true);
+  if (parts) return { when, html: partsHtml(parts, after) };
+  if (pointer) return { when, html: `<span class="dl-first">${itemHtml(body)}</span><span class="dl-rest">${after}</span>` };
+  return { when, html: `${itemHtml(body)}${after}` };
+}
+
+/** Where {@link decisionTail} cuts: the item's body, its date tail and a
+ *  `→ …` pointer after it. Null when there is no tail, or when cutting it out
+ *  would change the render. */
+function decisionTailCut(text: string): { when: DecisionWhen; body: string; tail: string; pointer: string } | null {
   const when = parseDecisionWhen(text);
   if (!when) return null;
   const body = text.slice(0, when.start).trimEnd();
   const tail = text.slice(when.start, when.end).trim();
   const pointer = text.slice(when.end).trim();
   if (!body || !rendersAs(pointer ? [body, tail, pointer] : [body, tail], flatHtml(itemHtml(text)))) return null;
-  const after = ` <span class="${DL_TAIL_CLASS}">${itemHtml(tail)}</span>${pointer ? ` ${itemHtml(pointer)}` : ""}`;
-  const parts = decisionParts(body, true);
-  if (parts) return { when, html: partsHtml(parts, after) };
-  if (pointer) return { when, html: `<span class="dl-first">${itemHtml(body)}</span><span class="dl-rest">${after}</span>` };
-  return { when, html: `${itemHtml(body)}${after}` };
+  return { when, body, tail, pointer };
 }
 
 /** A DecisionLog item's text split after its first sentence (D6), or null.
@@ -1470,28 +1697,7 @@ export function decisionFirstSentence(text: string, id: string): string {
  *  changing a word of the page. */
 export function unwrapDecisionSplits(html: string): string {
   if (!html.includes('<span class="dl-first">')) return html;
-  const opens = /<span class="dl-(?:first|rest)">/g;
-  let out = "";
-  let at = 0;
-  for (let m = opens.exec(html); m; m = opens.exec(html)) {
-    // The matching close: a balanced scan over the spans inside.
-    const tagRe = /<span\b[^>]*>|<\/span>/g;
-    tagRe.lastIndex = m.index + m[0].length;
-    let depth = 1;
-    let close = -1;
-    for (let t = tagRe.exec(html); t; t = tagRe.exec(html)) {
-      depth += t[0] === "</span>" ? -1 : 1;
-      if (depth === 0) {
-        close = t.index;
-        break;
-      }
-    }
-    if (close === -1) break;
-    out += html.slice(at, m.index) + html.slice(m.index + m[0].length, close);
-    at = close + "</span>".length;
-    opens.lastIndex = at;
-  }
-  return out + html.slice(at);
+  return spliceRanges(html, elementRanges(html, /<span class="dl-(?:first|rest)">/, "span"), true);
 }
 
 /** An id-led item's text: its first sentence and the rest in two spans when
