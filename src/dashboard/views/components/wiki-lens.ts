@@ -21,6 +21,10 @@
  *   «mer» and the `ok` group behind «+ N til». The lenses differ only in what
  *   they hide. A reveal of anything the compact view folds away (a `#d7` hash,
  *   an id link, a pill) opens it in the lens on screen.
+ * - **`none` cases (D47).** Overview hides the group and says how many; every
+ *   other lens folds the group's rows behind «+ N ikke kandidat», except a row
+ *   holding a fact-check mark. A switch into or out of Overview closes that
+ *   fold again.
  *
  * Also here, because both read the rendered folds: each fold summary's size and
  * reading time; and the selection text Explain and fact-check send, without
@@ -33,6 +37,7 @@ import {
   CB_EXPANDED_CLASS,
   CB_LINE_CLASS,
   CB_MORE_CLASS,
+  CB_NONEMORE_CLASS,
   CB_OKMORE_CLASS,
   COMPACT_WORDS,
   DL_ALL_CLASS,
@@ -222,7 +227,8 @@ function noteHiddenCases(article: Element, lang: Lang): void {
 const SHOW_ALL_CLASS = "lens-show-all";
 /** On a decision past the newest {@link DL_COMPACT_SHOWN}. */
 const DL_OLDER_CLASS = "dl-older";
-/** On an `ok` row past the group's first, which «+ N til» shows. */
+/** On a row its group's toggle folds: an `ok` row past the first, every `none`
+ *  row; never one holding a fact-check mark. */
 const CB_FOLDED_CLASS = "cb-folded";
 
 function readerButton(cls: string): HTMLButtonElement {
@@ -328,13 +334,62 @@ function setCaseExpanded(row: Element, open: boolean, lang: Lang): void {
   b.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
-function setOkShown(group: Element, open: boolean, lang: Lang): void {
+/** The CaseBoard groups that fold rows behind a toggle after their last row:
+ *  `ok` all but its first («+ N til», D42), `none` every row (D47). Neither
+ *  folds a row holding a fact-check mark (K). */
+const GROUP_FOLDS = {
+  ok: {
+    cls: CB_OKMORE_CLASS,
+    more: (w: CompactWords, n: number) => w.okMore(n),
+    fewer: (w: CompactWords, _label: string) => w.okFewer,
+  },
+  none: {
+    cls: CB_NONEMORE_CLASS,
+    more: (w: CompactWords, n: number, label: string) => w.noneMore(n, label),
+    fewer: (w: CompactWords, label: string) => w.noneFewer(label),
+  },
+} as const;
+type CompactWords = (typeof COMPACT_WORDS)[Lang];
+type FoldStatus = keyof typeof GROUP_FOLDS;
+
+function foldStatus(group: Element): FoldStatus | null {
+  const status = group.getAttribute("data-status");
+  return status === "ok" || status === "none" ? status : null;
+}
+
+/** A group's label for its toggle: the board's own word, else, for `none`,
+ *  the language's (`data-label` is the bare status when the board names none). */
+function groupLabel(group: Element, status: FoldStatus, lang: Lang): string {
+  const label = group.getAttribute("data-label") || status;
+  return status === "none" && label === "none" ? COMPACT_WORDS[lang].noneLabel : label;
+}
+
+function setGroupShown(group: Element, open: boolean, lang: Lang): void {
   group.classList.toggle(SHOW_ALL_CLASS, open);
-  const b = group.querySelector<HTMLButtonElement>(`:scope > .${CB_OKMORE_CLASS}`);
+  const status = foldStatus(group);
+  if (!status) return;
+  const fold = GROUP_FOLDS[status];
+  const b = group.querySelector<HTMLButtonElement>(`:scope > .${fold.cls}`);
   if (!b) return;
+  const w = COMPACT_WORDS[lang];
   const n = group.querySelectorAll(`:scope > .cb-row.${CB_FOLDED_CLASS}`).length;
-  b.textContent = open ? COMPACT_WORDS[lang].okFewer : COMPACT_WORDS[lang].okMore(n);
+  const label = groupLabel(group, status, lang);
+  // No aria-label: the visible text is the accessible name (WCAG 2.5.3).
+  b.textContent = open ? fold.fewer(w, label) : fold.more(w, n, label);
   b.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+/** D47: a switch into or out of Overview closes the `none` folds, so All never
+ *  comes back to a group the reader opened before Overview hid it. A switch
+ *  between two other lenses leaves them as they are. */
+export function lensSwitchClosesNoneFolds(from: Lens | null, to: Lens): boolean {
+  return from !== to && (from === "overview" || to === "overview");
+}
+
+function closeNoneGroups(article: Element, lang: Lang): void {
+  article
+    .querySelectorAll(`.cb-group[data-status="none"].${SHOW_ALL_CLASS}`)
+    .forEach((group) => setGroupShown(group, false, lang));
 }
 
 /**
@@ -342,10 +397,13 @@ function setOkShown(group: Element, open: boolean, lang: Lang): void {
  * note and the refs, and an `ok` group of more than one row a «+ N til»
  * after its last row. Shown in every lens. As for a decision (K), a row whose
  * note holds a fact-check mark starts open, and the `ok` group never folds
- * away a row holding one. Idempotent.
+ * away a row holding one. D47: a `none` group folds its rows behind «+ N
+ * ikke kandidat» after its last row, with the same exemption; Overview hides
+ * the group, button and all.
+ * Idempotent.
  */
 export function decorateCaseRows(article: Element, lang: Lang): void {
-  article.querySelectorAll(`.${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}`).forEach((el) => el.remove());
+  article.querySelectorAll(`.${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${CB_NONEMORE_CLASS}`).forEach((el) => el.remove());
   article.querySelectorAll(".cb-row").forEach((row) => {
     const line = row.querySelector(`:scope > .${CB_LINE_CLASS}`);
     const rest = Array.from(row.querySelectorAll(":scope > :is(.cb-owner, .cb-note, .cb-refs)"));
@@ -359,19 +417,20 @@ export function decorateCaseRows(article: Element, lang: Lang): void {
     if (rest.some((el) => el.querySelector(FC_MARK))) row.classList.add(CB_EXPANDED_CLASS);
     setCaseExpanded(row, row.classList.contains(CB_EXPANDED_CLASS), lang);
   });
-  article.querySelectorAll('.cb-group[data-status="ok"]').forEach((group) => {
+  article.querySelectorAll('.cb-group:is([data-status="ok"], [data-status="none"])').forEach((group) => {
+    const status = foldStatus(group)!;
     const rows = Array.from(group.querySelectorAll(":scope > .cb-row"));
     const folded = rows.filter((row, k) => {
-      const fold = k > 0 && !row.querySelector(FC_MARK);
+      const fold = (status === "none" || k > 0) && !row.querySelector(FC_MARK);
       row.classList.toggle(CB_FOLDED_CLASS, fold);
       return fold;
     });
     if (folded.length === 0) return;
-    const b = readerButton(CB_OKMORE_CLASS);
+    const b = readerButton(GROUP_FOLDS[status].cls);
     b.setAttribute("aria-controls", controlIds(folded, ""));
-    b.addEventListener("click", () => setOkShown(group, !group.classList.contains(SHOW_ALL_CLASS), lang));
+    b.addEventListener("click", () => setGroupShown(group, !group.classList.contains(SHOW_ALL_CLASS), lang));
     rows[rows.length - 1]!.after(b);
-    setOkShown(group, group.classList.contains(SHOW_ALL_CLASS), lang);
+    setGroupShown(group, group.classList.contains(SHOW_ALL_CLASS), lang);
   });
 }
 
@@ -474,6 +533,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
       b.textContent = labels[lens];
       b.addEventListener("click", () => {
         writeStoredLens(localStore(), lens);
+        if (lensSwitchClosesNoneFolds(lensOf(article), lens)) closeNoneGroups(article, opts.language);
         applyLens(article, row, sw, lens);
       });
       sw.append(b);
@@ -499,8 +559,9 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
     if (section) setAllShown(section, true, opts.language);
     const caseRow = target.closest(".cb-row");
     if (caseRow?.querySelector(`:scope > .${CB_LINE_CLASS} > .${CB_MORE_CLASS}`)) setCaseExpanded(caseRow, true, opts.language);
-    const okGroup = target.closest('.cb-group[data-status="ok"]');
-    if (okGroup && caseRow?.classList.contains(CB_FOLDED_CLASS)) setOkShown(okGroup, true, opts.language);
+    // D47: so does a folded `none` row (from Overview, with the switch to All).
+    const group = caseRow?.closest(".cb-group");
+    if (group && caseRow?.classList.contains(CB_FOLDED_CLASS)) setGroupShown(group, true, opts.language);
     if (isHiddenByOverview(target)) applyLens(article, row, sw, "all");
   });
 }
@@ -662,7 +723,7 @@ export function lensCss(): string {
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }
-    /* The reader's toggles: «mer», «Vis alle», a case's «mer», «+ N til». */
+    /* The reader's toggles: «mer», «Vis alle», a case's «mer», «+ N til», «+ N ikke kandidat». */
     .wiki-article :is(${TOGGLES}) {
       font: inherit; font-size: 0.85em; padding: 0 0.2em; border: none; background: none;
       color: var(--accent-light); cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
@@ -694,7 +755,7 @@ ${compactCss()}
 }
 
 /** The reader's toggles, one selector for their shared style. */
-const TOGGLES = `.${DL_MORE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}`;
+const TOGGLES = `.${DL_MORE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${CB_NONEMORE_CLASS}`;
 
 /** An article the lens has set up, in any lens: the compact view (D45) is
  *  scoped to it, so an article the lens never touched renders as written. */
@@ -740,7 +801,7 @@ function compactCss(): string {
     ${art} .caseboard .cb-row > .${CB_LINE_CLASS}${notPeek} { display: inline; flex: 1 1 16rem; min-width: 0; }
     ${art} .caseboard .cb-row:has(> .${CB_LINE_CLASS}) > :is(.cb-owner, .cb-note)${notPeek} { flex-basis: 100%; }
     ${art} .caseboard .cb-head { color: var(--text-soft); }
-    ${art} .cb-group[data-status="ok"]:not(.${SHOW_ALL_CLASS}) > .cb-row.${CB_FOLDED_CLASS}${notPeek} { display: none; }
-    .wiki-article .${CB_OKMORE_CLASS} { display: block; margin: 0.1rem 0 0.3rem; }
+    ${art} .cb-group:not(.${SHOW_ALL_CLASS}) > .cb-row.${CB_FOLDED_CLASS}${notPeek} { display: none; }
+    .wiki-article :is(.${CB_OKMORE_CLASS}, .${CB_NONEMORE_CLASS}) { display: block; margin: 0.1rem 0 0.3rem; }
   `;
 }

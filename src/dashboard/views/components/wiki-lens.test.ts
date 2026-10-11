@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { lensCss, newestFirstOrder } from "./wiki-lens.ts";
+import { lensCss, lensSwitchClosesNoneFolds, newestFirstOrder } from "./wiki-lens.ts";
 
 /** The rules of `lensCss()` that carry `needle`, one per line. */
 function rulesWith(needle: string): string[] {
@@ -29,7 +29,7 @@ describe("lensCss: the compact lists are the same in every lens (D45)", () => {
     expect(rulesWith(".dl-older").some((r) => r.startsWith(`${LENSED} .decision-log:not(.lens-show-all)`))).toBe(true);
     expect(rulesWith("> .dl-when {").some((r) => r.startsWith(`${LENSED} .dl-item.dl-decision`))).toBe(true);
     expect(rulesWith("> .cb-line").some((r) => r.startsWith(`${LENSED} .caseboard .cb-row > .cb-line`))).toBe(true);
-    expect(rulesWith('data-status="ok"').some((r) => r.startsWith(LENSED))).toBe(true);
+    expect(rulesWith("> .cb-row.cb-folded").some((r) => r.startsWith(LENSED))).toBe(true);
   });
 
   test("a decision's rest folds behind «mer» in any lens", () => {
@@ -37,7 +37,11 @@ describe("lensCss: the compact lists are the same in every lens (D45)", () => {
   });
 
   test("no rule hides the reader's toggles outside Overview", () => {
-    expect(rulesWith(":not(.lens-overview)").filter((r) => /dl-more|dl-all|cb-more|cb-okmore|dl-qstate/.test(r))).toEqual([]);
+    // Any rule that names a toggle and hides something: Overview's alone may.
+    const hides = lensCss()
+      .split("}")
+      .filter((r) => /display:\s*none/.test(r) && /dl-more|dl-all|cb-more|cb-okmore|cb-nonemore|dl-qstate/.test(r));
+    expect(hides.filter((r) => !r.trim().startsWith(".wiki-article.lens-overview"))).toEqual([]);
   });
 
   test("the compact parts stay scoped to an article the lens set up", () => {
@@ -45,8 +49,31 @@ describe("lensCss: the compact lists are the same in every lens (D45)", () => {
     expect(art.filter((r) => r.startsWith(".wiki-article ") && /display: (block|inline)/.test(r))).toEqual([]);
   });
 
-  test("Overview alone hides the none rows and shows their count line", () => {
-    expect(rulesWith('.cb-group[data-status="none"]').every((r) => r.startsWith(".wiki-article.lens-overview"))).toBe(true);
+  test("Overview alone hides the none group whole and shows its count line", () => {
+    expect(rulesWith('.cb-group[data-status="none"]').some((r) => r.startsWith(".wiki-article.lens-overview :is("))).toBe(true);
     expect(rulesWith(".cb-lens-note { display: none; }")).toEqual([".wiki-article:not(.lens-overview) .cb-lens-note { display: none; }"]);
+  });
+
+  test("D47: one rule folds the ok and none rows the reader marked, in every lens", () => {
+    expect(rulesWith("> .cb-row")
+      .filter((r) => r.endsWith("{ display: none; }"))).toEqual([
+      `${LENSED} .cb-group:not(.lens-show-all) > .cb-row.cb-folded:not(.wiki-ref-peek *) { display: none; }`,
+    ]);
+  });
+});
+
+describe("lensSwitchClosesNoneFolds (D47)", () => {
+  test("a switch into or out of Overview closes the none folds", () => {
+    expect(lensSwitchClosesNoneFolds("all", "overview")).toBe(true);
+    expect(lensSwitchClosesNoneFolds("overview", "all")).toBe(true);
+    expect(lensSwitchClosesNoneFolds("agent", "overview")).toBe(true);
+    expect(lensSwitchClosesNoneFolds("overview", "agent")).toBe(true);
+  });
+
+  test("a switch between two other lenses, or to the lens on screen, leaves them open", () => {
+    expect(lensSwitchClosesNoneFolds("all", "agent")).toBe(false);
+    expect(lensSwitchClosesNoneFolds("agent", "all")).toBe(false);
+    expect(lensSwitchClosesNoneFolds("all", "all")).toBe(false);
+    expect(lensSwitchClosesNoneFolds("overview", "overview")).toBe(false);
   });
 });
