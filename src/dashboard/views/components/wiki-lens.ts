@@ -338,11 +338,15 @@ function setCaseExpanded(row: Element, open: boolean, lang: Lang): void {
  *  `ok` all but its first («+ N til», D42), `none` every row (D47). Neither
  *  folds a row holding a fact-check mark (K). */
 const GROUP_FOLDS = {
-  ok: { cls: CB_OKMORE_CLASS, more: (w: CompactWords, n: number) => w.okMore(n), fewer: (w: CompactWords) => w.okFewer },
+  ok: {
+    cls: CB_OKMORE_CLASS,
+    more: (w: CompactWords, n: number) => w.okMore(n),
+    fewer: (w: CompactWords, _label: string) => w.okFewer,
+  },
   none: {
     cls: CB_NONEMORE_CLASS,
     more: (w: CompactWords, n: number, label: string) => w.noneMore(n, label),
-    fewer: (w: CompactWords) => w.noneFewer,
+    fewer: (w: CompactWords, label: string) => w.noneFewer(label),
   },
 } as const;
 type CompactWords = (typeof COMPACT_WORDS)[Lang];
@@ -370,8 +374,8 @@ function setGroupShown(group: Element, open: boolean, lang: Lang): void {
   const w = COMPACT_WORDS[lang];
   const n = group.querySelectorAll(`:scope > .cb-row.${CB_FOLDED_CLASS}`).length;
   const label = groupLabel(group, status, lang);
-  b.textContent = open ? fold.fewer(w) : fold.more(w, n, label);
-  b.setAttribute("aria-label", w.groupToggle(open, n, label));
+  // No aria-label: the visible text is the accessible name (WCAG 2.5.3).
+  b.textContent = open ? fold.fewer(w, label) : fold.more(w, n, label);
   b.setAttribute("aria-expanded", open ? "true" : "false");
 }
 

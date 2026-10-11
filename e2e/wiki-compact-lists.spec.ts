@@ -648,7 +648,7 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(page.locator(".wiki-article .cb-strip")).toHaveText("1 holdt ute · 1 venter · 1 feil årsavregning · 2 ikke kandidat · 3 ok");
     await noneMore.click();
     for (const id of ["case-mel-7", "case-mel-8"]) await expect(page.locator(`.cb-row#${id}`)).toBeVisible();
-    await expect(noneMore).toHaveText("skjul");
+    await expect(noneMore).toHaveText("skjul ikke kandidat");
     await expect(noneMore).toHaveAttribute("aria-expanded", "true");
     // The ok group's «+ N til» is its own toggle.
     await expect(page.locator(".wiki-article button.cb-okmore")).toHaveText("+ 2 til");
@@ -676,7 +676,7 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(page.locator(".cb-row#case-mel-7")).toBeVisible();
     await expect(page.locator(".cb-row#case-mel-7")).toBeInViewport();
     await expect(page.locator(".cb-row#case-mel-8")).toBeVisible();
-    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveText("skjul");
+    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveText("skjul ikke kandidat");
     expect(await lensOf(page)).toBe("all");
     expectClean(seen);
 
@@ -684,7 +684,7 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(page.locator(".cb-row#case-mel-8")).toBeVisible();
     expect(await lensOf(page)).toBe("all");
     await expect(page.locator(".cb-row#case-mel-8")).toBeInViewport();
-    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveText("skjul");
+    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveText("skjul ikke kandidat");
     await expect(page.locator(".cb-lens-note")).toBeHidden();
     expectClean(seen);
   });
@@ -1191,12 +1191,10 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     for (const id of ["case-mel-23", "case-mel-24"]) await expect(page.locator(`.cb-row#${id}`)).toBeHidden();
     const more = none.locator("button.cb-nonemore");
     await expect(more).toHaveText("+ 2 ikke kandidat");
-    await expect(more).toHaveAttribute("aria-label", "vis 2 ikke kandidat");
     await expect(more).toHaveAttribute("aria-controls", "case-mel-23 case-mel-24");
     await more.click();
     for (const id of ["case-mel-23", "case-mel-24"]) await expect(page.locator(`.cb-row#${id}`)).toBeVisible();
-    await expect(more).toHaveText("skjul");
-    await expect(more).toHaveAttribute("aria-label", "skjul 2 ikke kandidat");
+    await expect(more).toHaveText("skjul ikke kandidat");
     // A group whose every row is marked folds nothing, so it gets no button.
     await expect(page.locator(".cb-row#case-mel-25 .fc-mark")).toBeVisible();
     await expect(marked.locator("button.cb-nonemore")).toHaveCount(0);
@@ -1206,13 +1204,24 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     expectClean(seen);
   });
 
-  test("PR 675 fix round 1, item 6: the ok toggle names what it shows and hides", async ({ page }) => {
+  test("PR 675 fix round 2: each group toggle's accessible name is its visible text (WCAG 2.5.3)", async ({ page }) => {
     const seen = await open_(page, "&lens=all");
     await fold(page, "Saker").locator(":scope > summary").click();
-    const ok = page.locator(".wiki-article button.cb-okmore");
-    await expect(ok).toHaveAttribute("aria-label", "vis 2 ok");
-    await ok.click();
-    await expect(ok).toHaveAttribute("aria-label", "skjul 2 ok");
+    const article = page.locator(".wiki-article");
+    const ok = article.locator("button.cb-okmore");
+    const none = article.locator("button.cb-nonemore");
+    // No aria-label, so a voice-control user can say what the button shows.
+    for (const [b, closed, open] of [
+      [ok, "+ 2 til", "vis færre"],
+      [none, "+ 2 ikke kandidat", "skjul ikke kandidat"],
+    ] as const) {
+      await expect(b).not.toHaveAttribute("aria-label");
+      await expect(article.getByRole("button", { name: closed, exact: true })).toHaveCount(1);
+      await b.click();
+      await expect(b).toHaveAttribute("aria-expanded", "true");
+      await expect(b).not.toHaveAttribute("aria-label");
+      await expect(article.getByRole("button", { name: open, exact: true })).toHaveCount(1);
+    }
     expectClean(seen);
   });
 

@@ -157,12 +157,11 @@ export const COMPACT_WORDS: Record<
     okFewer: string;
     hidden: (n: number, label: string) => string;
     /** D47: the `none` group's toggle, closed and open, and its label when
-     *  the board names none (`data-label` is then the bare status). */
+     *  the board names none (`data-label` is then the bare status). Both
+     *  states name the group, since the visible text is the accessible name. */
     noneMore: (n: number, label: string) => string;
-    noneFewer: string;
+    noneFewer: (label: string) => string;
     noneLabel: string;
-    /** A group toggle's accessible name: what it shows, closed, or hides, open. */
-    groupToggle: (open: boolean, n: number, label: string) => string;
   }
 > = {
   en: {
@@ -172,9 +171,8 @@ export const COMPACT_WORDS: Record<
     okFewer: "show fewer",
     hidden: (n, label) => `${n} ${n === 1 ? "case" : "cases"} with status “${label}” hidden`,
     noneMore: (n, label) => `+ ${n} ${label}`,
-    noneFewer: "hide",
+    noneFewer: (label) => `hide ${label}`,
     noneLabel: "not a candidate",
-    groupToggle: (open, n, label) => `${open ? "hide" : "show"} ${n} ${label}`,
   },
   no: {
     showAll: (n) => `Vis alle ${n} beslutninger`,
@@ -183,9 +181,8 @@ export const COMPACT_WORDS: Record<
     okFewer: "vis færre",
     hidden: (n, label) => `${n} ${n === 1 ? "sak" : "saker"} med status «${label}» er skjult`,
     noneMore: (n, label) => `+ ${n} ${label}`,
-    noneFewer: "skjul",
+    noneFewer: (label) => `skjul ${label}`,
     noneLabel: "ikke kandidat",
-    groupToggle: (open, n, label) => `${open ? "skjul" : "vis"} ${n} ${label}`,
   },
 };
 
