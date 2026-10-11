@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { itemDateReference, itemDates, lastItemDate, resolveYearless } from "./item-dates.ts";
+import { itemDate, itemDateReference, itemDates, renderDay, resolveYearless } from "./item-dates.ts";
 import shared from "./fixtures/reader-shared.json";
 
 // D20/D22: the cases live in the shared fixture, which plan-card's port reads
@@ -9,25 +9,21 @@ interface ItemDateCase {
   name: string;
   text: string;
   statusDate: string | null;
-  today?: string;
+  /** The render day: a later date is skipped (D49), and with no usable
+   *  `statusDate` it is the reference for a yearless date. */
+  today: string;
   expected: string | null;
 }
 
 const cases = shared.itemDateCases as ItemDateCase[];
 
-const localDate = (iso: string) => {
-  const [y, m, d] = iso.split("-").map(Number) as [number, number, number];
-  return new Date(y, m - 1, d, 12);
-};
-
-describe("item dates (D20), from the shared fixture", () => {
-  test("the fixture covers the acceptance-8 kinds", () => {
-    expect(cases.length).toBeGreaterThanOrEqual(20);
+describe("item dates (D20, D49), from the shared fixture", () => {
+  test("the fixture covers the acceptance-8 kinds and D49's", () => {
+    expect(cases.length).toBeGreaterThanOrEqual(55);
   });
   for (const c of cases) {
     test(c.name, () => {
-      const ref = itemDateReference(c.statusDate, c.today ? localDate(c.today) : new Date(2026, 9, 7, 12));
-      expect(lastItemDate(c.text, ref)).toBe(c.expected);
+      expect(itemDate(c.text, itemDateReference(c.statusDate, c.today), c.today)).toBe(c.expected);
     });
   }
 });
@@ -63,9 +59,19 @@ describe("itemDates", () => {
 });
 
 describe("itemDateReference", () => {
-  test("status_date when it is a calendar day, else today's local day", () => {
-    expect(itemDateReference("2026-10-07", new Date(2027, 0, 2))).toBe("2026-10-07");
-    expect(itemDateReference(undefined, new Date(2027, 0, 2, 23, 59))).toBe("2027-01-02");
-    expect(itemDateReference("07.10.2026", new Date(2027, 0, 2))).toBe("2027-01-02");
+  test("status_date when it is a calendar day, else the render day", () => {
+    expect(itemDateReference("2026-10-07", "2027-01-02")).toBe("2026-10-07");
+    expect(itemDateReference(undefined, "2027-01-02")).toBe("2027-01-02");
+    expect(itemDateReference("07.10.2026", "2027-01-02")).toBe("2027-01-02");
+  });
+});
+
+describe("renderDay", () => {
+  test("is the day in Europe/Oslo, whatever the process timezone", () => {
+    // 22:30 UTC on 10 Oct is 00:30 on 11 Oct in Oslo (CEST), and 23:30 UTC on
+    // 31 Dec is 00:30 on 1 Jan (CET).
+    expect(renderDay(new Date(Date.UTC(2026, 9, 10, 22, 30)))).toBe("2026-10-11");
+    expect(renderDay(new Date(Date.UTC(2026, 11, 31, 23, 30)))).toBe("2027-01-01");
+    expect(renderDay(new Date(Date.UTC(2026, 9, 10, 21, 30)))).toBe("2026-10-10");
   });
 });

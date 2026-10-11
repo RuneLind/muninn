@@ -78,7 +78,7 @@ import {
   statusRows,
 } from "../format/report-top.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
-import { ITEM_DATE_ATTR, lastItemDate } from "../format/item-dates.ts";
+import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
 import {
   CB_LINE_CLASS,
   DL_DECISION_CLASS,
@@ -239,10 +239,11 @@ export function formatWebHtml(
     /** `renderWikiHtml`'s wikilink sentinels, by index: the text each link
      *  shows. A lane's peek is plain text, so it reads a link as its text. */
     wikiLinkTexts?: readonly string[];
-    /** D20, reader only: the day a yearless date is read against (the page's
-     *  `status_date`, else today). Set ⇒ DecisionLog items, Query cards and
+    /** D20/D49, reader only: `ref` is the day a yearless date is read against
+     *  (the page's `status_date`, else the render day), `today` the render day,
+     *  after which a date is skipped. Set ⇒ DecisionLog items, Query cards and
      *  compact lanes carry their date as `data-item-date`. */
-    itemDateRef?: string;
+    itemDates?: ItemDateDays;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -254,11 +255,11 @@ export function formatWebHtml(
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
-  const prevItemDateRef = currentItemDateRef;
+  const prevItemDates = currentItemDates;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
-  currentItemDateRef = currentReader ? opts?.itemDateRef : undefined;
+  currentItemDates = currentReader ? opts?.itemDates : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
     const blocks = parseBlocks(text);
@@ -291,18 +292,39 @@ export function formatWebHtml(
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
-    currentItemDateRef = prevItemDateRef;
+    currentItemDates = prevItemDates;
   }
 }
 
-/** `opts.itemDateRef` for the call in progress (reader only). */
-let currentItemDateRef: string | undefined;
+/** The two days an item date is read with (D20/D49). */
+export interface ItemDateDays {
+  ref: string;
+  today: string;
+}
 
-/** ` data-item-date="YYYY-MM-DD"` for the last date in `text` (D20), or "" —
- *  off the reader, or when `text` holds none. */
+/** `opts.itemDates` for the call in progress (reader only). */
+let currentItemDates: ItemDateDays | undefined;
+
+/** The source text of what sits under a list item — nested items and
+ *  paragraphs, not code — for its date. */
+function listChildrenText(children: readonly ListChild[] | undefined): string {
+  if (!children) return "";
+  return children
+    .map((c) => {
+      if (c.type === "paragraph") return c.text;
+      if (c.type === "code_block") return "";
+      return c.items.map((t, k) => `${t}\n${listChildrenText(c.nested?.[k])}`).join("\n");
+    })
+    .join("\n");
+}
+
+/** ` data-item-date="YYYY-MM-DD"` for the latest date in `text` not after the
+ *  render day (D20/D49), or "" — off the reader, or when `text` holds none. A
+ *  wikilink is read as the text it shows, so a label's date counts. */
 function itemDateAttr(text: string | null | undefined): string {
-  if (!currentItemDateRef || !text) return "";
-  const d = lastItemDate(text, currentItemDateRef);
+  if (!currentItemDates || !text) return "";
+  const shown = text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => ` ${currentLinkTexts?.[Number(i)] ?? ""} `);
+  const d = itemDate(shown, currentItemDates.ref, currentItemDates.today);
   return d ? ` ${ITEM_DATE_ATTR}="${d}"` : "";
 }
 
@@ -1306,14 +1328,19 @@ function listChildHtml(c: ListChild): string {
 function wrappedListsHtml(
   blocks: Block[],
   listClass: string,
-  li: (text: string, nested: string, value: string) => string,
+  li: (text: string, nested: string, value: string, children: readonly ListChild[] | undefined) => string,
 ): string {
   return blocks
     .map((b) => {
       if (b.type !== "ul" && b.type !== "ol") return renderBlocks([b], webRenderer);
       const lis = b.items
         .map((text, k) =>
-          li(text, (b.nested?.[k] ?? []).map(listChildHtml).join(""), b.type === "ol" ? liValue(b.values, k) : ""),
+          li(
+            text,
+            (b.nested?.[k] ?? []).map(listChildHtml).join(""),
+            b.type === "ol" ? liValue(b.values, k) : "",
+            b.nested?.[k],
+          ),
         )
         .join("");
       return b.type === "ul"
@@ -1338,13 +1365,13 @@ function timelineItemHtml(text: string, nested: string, value: string): string {
  *  unique by `uniqueLogAnchors`), dimmed when struck or superseded. An item
  *  with no id is a plain item. The id link must follow the `<li>` directly:
  *  `LOG_ITEM_RE` reads it there. */
-function logItemHtml(text: string, nested: string, value: string): string {
+function logItemHtml(text: string, nested: string, value: string, children: readonly ListChild[] | undefined): string {
   const p = parseLogItem(text);
   const dim = p.dim ? " dl-dim" : "";
-  // D20: the item's date rides on the `<li>` of an item with no id and on
-  // `.dl-text` otherwise, where the anchor passes' `<li …><a class="dl-id">`
-  // reading cannot see it.
-  const dated = itemDateAttr(p.text);
+  // D20: the item's date — from its text and the lines under it (D49) — rides
+  // on the `<li>` of an item with no id and on `.dl-text` otherwise, where the
+  // anchor passes' `<li …><a class="dl-id">` reading cannot see it.
+  const dated = itemDateAttr(`${p.text}\n${listChildrenText(children)}`);
   if (!p.id) return `<li class="dl-item dl-noid${dim}"${value}${dated}>${itemHtml(p.text)}${nested}</li>`;
   const anchor = anchorSlug(p.id);
   // D41, reader only: a decision item carries `dl-decision`, and its trailing

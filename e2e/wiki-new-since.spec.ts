@@ -5,16 +5,19 @@
  * and the client's stored last visit meet — items dated by a Query's `run=`,
  * by a lane's `since=`, by a date mid-way through a DecisionLog item, by a
  * yearless date (a few days after a lagging `status_date`, and a December date
- * on a January one) and by an item with several dates (the last one wins)
- * carry the mark exactly when that date is after the seeded visit, in
- * Overview and in All; that the head reads `✦ N nye siden <date>` and
- * «endret siden»; that a first visit marks nothing and stores the visit; and
- * that the mark leaves the compact DecisionLog (five rows, date cell) as it
- * was.
+ * on a January one), by an item with several dates (the latest not after the
+ * render day wins, D49 — a far-future deadline is skipped) and by a date in a
+ * nested line carry the mark exactly when that date is after the seeded visit,
+ * in Overview and in All; that the head reads `✦ N nye siden <date>` and
+ * «endret siden», and its pill steps through the new items; that the tab keeps
+ * its baseline over a reload and Back while a new tab after the visit marks
+ * nothing; that a first visit marks nothing and stores the visit; that an `en`
+ * wiki spells the date `Oct 7`; and that the mark leaves the compact
+ * DecisionLog (five rows, date cell) as it was.
  *
- * One Norwegian wiki, instance default Overview, two pages. Synthetic
- * fixtures. The browser runs in Europe/Oslo so the seeded visits fall on the
- * days the assertions name.
+ * One Norwegian wiki (instance default Overview, two pages) and one English
+ * wiki. Synthetic fixtures. The browser runs in Europe/Oslo so the seeded
+ * visits fall on the days the assertions name.
  *
  * No model calls, no DB rows. ENV / SPAWN ENV: no `.env` is required — the
  * spawn inherits `DATABASE_URL` and `e2eEnv()` blanks the platform tokens and
@@ -33,6 +36,7 @@ const PORT = e2ePort("wiki-new-since");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const WIKI = "e2e-new-since";
+const WIKI_EN = "e2e-new-since-en";
 const TZ = "Europe/Oslo";
 const VISIT_KEY = "muninn.wiki.lastVisit.v1";
 
@@ -69,12 +73,14 @@ const AUTUMN = [
   "<DecisionLog>",
   "",
   "- **D1** — Gammel beslutning gjelder alle saker. Fag, 01.10 (runde 1).",
+  "  - Fulgt opp på nytt 08.10.",
   "- **D2** — Avklart 08.10 med fag, og gjelder alle saker framover.",
   "- **D3** — Vedtatt for alle saker i år. Fag, 10.10 (runde 3).",
   "- **D4** — Spurt 09.10 og lukket igjen 06.10 (runde 4).",
   "- **D5** — Lukket 06.10 og besvart på nytt 09.10.",
   "- **D6** — Bekreftet i møtet 2026-10-08 med fag.",
   "- **D7** — Tatt samme dag som besøket. Fag, 07.10 (runde 7).",
+  "  - Avgjøres tidligst 2099-01-01.",
   "",
   "</DecisionLog>",
   "",
@@ -91,13 +97,14 @@ const AUTUMN = [
 ].join("\n");
 
 const WINTER_REL = "plans/winter.mdx";
-// status_date 05.01.2027; the visit is 20.12.2026 at noon (CET).
-const WINTER_VISIT = Date.parse("2026-12-20T11:00:00Z");
+// status_date 05.01.2026; the visit is 20.12.2025 at noon (CET). Past dates:
+// a date after the render day gives no mark (D49).
+const WINTER_VISIT = Date.parse("2025-12-20T11:00:00Z");
 const WINTER = [
   "---",
   "title: Winter page",
   "type: plan",
-  "status_date: 2027-01-05",
+  "status_date: 2026-01-05",
   "---",
   "",
   "# Winter page",
@@ -112,8 +119,27 @@ const WINTER = [
   "",
 ].join("\n");
 
+const EN_REL = "plans/english.mdx";
+const EN = [
+  "---",
+  "title: English page",
+  "type: plan",
+  "status_date: 2026-10-07",
+  "---",
+  "",
+  "# English page",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D1** — Agreed with the team on 08.10 for every case.",
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
+let rootEn = "";
 
 test.use({ timezoneId: TZ });
 
@@ -133,7 +159,7 @@ function watch(page: Page): { failed: string[]; errors: string[] } {
 }
 
 /** Seed this viewer's last visit to `rel` (or nothing), then open it. */
-const openWithVisit = async (page: Page, rel: string, visit: number | null) => {
+const openWithVisit = async (page: Page, rel: string, visit: number | null, wiki = WIKI) => {
   await page.addInitScript(
     ([key, entry, at]) => {
       // Once per test: the page stores its own visit on load, and a reload
@@ -143,10 +169,10 @@ const openWithVisit = async (page: Page, rel: string, visit: number | null) => {
       localStorage.removeItem(key as string);
       if (at !== null) localStorage.setItem(key as string, JSON.stringify({ [entry as string]: at }));
     },
-    [VISIT_KEY, `${WIKI}\n${rel}`, visit] as const,
+    [VISIT_KEY, `${wiki}\n${rel}`, visit] as const,
   );
   const seen = watch(page);
-  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
+  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel)}`);
   await expect(page.locator(".wiki-article")).toBeVisible();
   return seen;
 };
@@ -186,6 +212,9 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, AUTUMN_REL), AUTUMN, "utf8");
   await writeFile(path.join(root, WINTER_REL), WINTER, "utf8");
   await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
+  rootEn = await mkdtemp(path.join(tmpdir(), "muninn-e2e-new-since-en-"));
+  await mkdir(path.join(rootEn, "plans"), { recursive: true });
+  await writeFile(path.join(rootEn, EN_REL), EN, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -195,7 +224,7 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WIKI_EXTRA: `${WIKI}=${root},${WIKI_EN}=${rootEn}`,
       WIKI_DEFAULT_LENS: `${WIKI}=overview`,
     },
     stdio: "ignore",
@@ -217,37 +246,39 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (rootEn) await rm(rootEn, { recursive: true, force: true });
 });
 
 test.describe("Wiki reader: new since last read (D20)", () => {
-  test("acceptance 8: run=, since=, a mid-text date, a date after a lagging status_date and the last of several dates — in Overview and All", async ({ page }) => {
+  test("acceptance 8: run=, since=, a mid-text date, a date after a lagging status_date, the latest of several dates and a nested line — in Overview and All", async ({ page }) => {
     const seen = await openWithVisit(page, AUTUMN_REL, AUTUMN_VISIT);
     expect(await lensOf(page)).toBe("overview");
 
     const expected = {
       // D2 by its mid-text 08.10, D3 by 10.10 (three days after the lagging
-      // status_date), D5 by the last of 06.10/09.10, D6 by its ISO date. D4's
-      // last date is 06.10, so its earlier 09.10 does not make it new; D7 is
-      // dated the visit day itself (new means strictly after); D1 is old.
-      decisions: ["d6", "d5", "d3", "d2"],
+      // status_date), D4 and D5 by the latest of 06.10/09.10 whatever their
+      // order (D49), D6 by its ISO date, D1 by the 08.10 in its nested line.
+      // D7 is dated the visit day itself (new means strictly after): its
+      // nested 2099 deadline is after the render day and skipped.
+      decisions: ["d6", "d5", "d4", "d3", "d2", "d1"],
       queries: ["Q-1"],
       laneItems: ["fag: Spørsmål en til fag", "fag: Spørsmål to til fag"],
       lanes: ["fag"],
-      total: 7,
+      total: 9,
     };
     // Overview shows a DecisionLog newest first, so the decisions come back
     // in that DOM order.
     expect(await marked(page)).toEqual(expected);
 
     const head = page.locator(".wiki-article-head .wiki-meta-row");
-    await expect(head.locator(".wiki-new-since")).toHaveText(/^✦ 7 nye siden 07\.10(\.2026)?$/);
+    await expect(head.locator(".wiki-new-since")).toHaveText(/^✦ 9 nye siden 07\.10(\.2026)?$/);
     // The page file was written after the visit.
     await expect(head.locator(".wiki-changed-since")).toHaveText(/^endret siden 07\.10(\.2026)?$/);
 
     // The mark is the rail's NEW tag in the wiki's language, and pseudo
     // content, never text: a copied decision reads as written.
     expect(await tagOf(page, "li.dl-item#d3")).toBe('"NY"');
-    expect(await tagOf(page, "li.dl-item#d4")).toBe("none");
+    expect(await tagOf(page, "li.dl-item#d7")).toBe("none");
     await expect(page.locator("li.dl-item#d3 .dl-text")).not.toContainText("NY");
     expect(await tagOf(page, 'section.query#q-1 .query-head')).toBe('"NY"');
     expect(await tagOf(page, '.nm-lane[data-who="fag"] .nm-who')).toBe('"NY"');
@@ -260,32 +291,96 @@ test.describe("Wiki reader: new since last read (D20)", () => {
     expect(visible).toEqual(["d7", "d6", "d5", "d4", "d3"]);
     await expect(page.locator("li.dl-item#d3 .dl-when")).toHaveText("Fag, 10.10 · runde 3");
 
-    // The head line reveals the first new item, opening its lane.
+    // The head line reveals the new items one per click, in document order,
+    // wrapping; the first opens its lane, and a hidden older decision (D1,
+    // behind «Vis alle» in Overview) is shown when its turn comes.
+    await page.locator(".wiki-article").evaluate((art) => {
+      (window as unknown as { revealed: string[] }).revealed = [];
+      art.addEventListener("wiki:reveal", (e) => {
+        const el = e.target as HTMLElement;
+        (window as unknown as { revealed: string[] }).revealed.push(
+          el.id || el.querySelector(".query-id")?.textContent || el.textContent!.trim(),
+        );
+      });
+    });
     await head.locator(".wiki-new-since").click();
     await expect(page.locator('.nm-lane[data-who="fag"]')).toHaveAttribute("open", "");
     await expect(page.locator('.nm-lane[data-who="fag"] li.item-new').first()).toBeVisible();
+    for (let i = 1; i < 10; i++) await head.locator(".wiki-new-since").click();
+    expect(await page.evaluate(() => (window as unknown as { revealed: string[] }).revealed)).toEqual([
+      "Spørsmål en til fag",
+      "Spørsmål to til fag",
+      "d6",
+      "d5",
+      "d4",
+      "d3",
+      "d2",
+      "d1",
+      "Q-1",
+      "Spørsmål en til fag",
+    ]);
+    await expect(page.locator("li.dl-item#d1")).toBeVisible();
 
     // All: the same marks and the same line.
     await page.locator('.wiki-lens-switch button[data-lens="all"]').click();
     expect(await lensOf(page)).toBe("all");
     expect(await marked(page)).toEqual(expected);
-    await expect(head.locator(".wiki-new-since")).toHaveText(/^✦ 7 nye siden 07\.10(\.2026)?$/);
+    await expect(head.locator(".wiki-new-since")).toHaveText(/^✦ 9 nye siden 07\.10(\.2026)?$/);
     expect(await tagOf(page, "li.dl-item#d6")).toBe('"NY"');
     expectClean(seen);
   });
 
   test("yearless dates take the year nearest a January status_date", async ({ page }) => {
     const seen = await openWithVisit(page, WINTER_REL, WINTER_VISIT);
-    // 18.12 reads as 2026-12-18 (before the visit), not 2027-12-18; 03.01 as
-    // 2027-01-03 (after it), not 2026-01-03.
+    // 18.12 reads as 2025-12-18 (before the visit), not 2026-12-18; 03.01 as
+    // 2026-01-03 (after it), not 2025-01-03.
     const m = await marked(page);
     expect(m.decisions).toEqual(["d3", "d2"]);
     expect(m.total).toBe(2);
-    await expect(page.locator(".wiki-new-since")).toHaveText(/^✦ 2 nye siden 20\.12(\.2026)?$/);
+    await expect(page.locator(".wiki-new-since")).toHaveText(/^✦ 2 nye siden 20\.12\.2025$/);
     expectClean(seen);
   });
 
-  test("a first visit marks nothing and stores the visit; a reload then marks nothing", async ({ page }) => {
+  test("a reload and Back in the same tab keep the marks; a new tab after the visit marks nothing", async ({ page }) => {
+    const before = Date.now();
+    const seen = await openWithVisit(page, AUTUMN_REL, AUTUMN_VISIT);
+    expect((await marked(page)).total).toBe(9);
+    // This visit is stored at once…
+    const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "{}"), VISIT_KEY);
+    expect(stored[`${WIKI}\n${AUTUMN_REL}`]).toBeGreaterThanOrEqual(before);
+
+    // …but the tab keeps the baseline it first read: F5 marks the same items.
+    await page.reload();
+    await expect(page.locator(".wiki-article")).toBeVisible();
+    expect((await marked(page)).total).toBe(9);
+    await expect(page.locator(".wiki-new-since")).toHaveText(/^✦ 9 nye siden 07\.10(\.2026)?$/);
+
+    // Away and Back: the same.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(WINTER_REL)}`);
+    await expect(page.locator(".wiki-article-head")).toContainText("Winter page");
+    await page.goBack();
+    await expect(page.locator(".wiki-article-head")).toContainText("Autumn page");
+    expect((await marked(page)).total).toBe(9);
+
+    // A new tab reads the visit this tab stored: nothing on the page is newer.
+    const other = await page.context().newPage();
+    await other.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(AUTUMN_REL)}`);
+    await expect(other.locator(".wiki-article")).toBeVisible();
+    expect((await marked(other)).total).toBe(0);
+    await expect(other.locator(".wiki-new-since")).toHaveCount(0);
+    await other.close();
+    expectClean(seen);
+  });
+
+  test("an English wiki spells the visit day as a month name", async ({ page }) => {
+    const seen = await openWithVisit(page, EN_REL, AUTUMN_VISIT, WIKI_EN);
+    expect((await marked(page)).decisions).toEqual(["d1"]);
+    await expect(page.locator(".wiki-new-since")).toHaveText(/^✦ 1 new since Oct 7(, 2026)?$/);
+    expect(await tagOf(page, "li.dl-item#d1")).toBe('"NEW"');
+    expectClean(seen);
+  });
+
+  test("a first visit marks nothing and stores the visit; a reload in the tab still marks nothing", async ({ page }) => {
     const before = Date.now();
     const seen = await openWithVisit(page, AUTUMN_REL, null);
     expect((await marked(page)).total).toBe(0);

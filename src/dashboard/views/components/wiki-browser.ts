@@ -4226,8 +4226,9 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
         }),
       });
       consumeUrlLens();
-      // D20: the items dated after this viewer's last visit, and whether the
-      // page changed since. Reads the stored visit before storing this one.
+      // D20: the items dated after this tab's baseline visit, and whether the
+      // page changed since. Any render — an in-place reload after the reader's
+      // own write included — keeps the tab's baseline and stores this visit.
       if (data.meta.relPath) {
         const changedMs = pageTimeMs(data.meta, recencyNow());
         enhanceNewSince(articleRoot, {
@@ -4235,7 +4236,6 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
           relPath: data.meta.relPath,
           language: readerLang,
           changedMs: changedMs > 0 ? changedMs : null,
-          inPlace: keptLens !== null,
         });
       }
       const renderedEl = articleRoot.querySelector(".wiki-article");

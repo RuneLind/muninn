@@ -11,9 +11,12 @@
  *  - an item is new when that day is strictly after the stored visit's local
  *    day. A lane marks each of its top-level items (the lane itself when it
  *    holds none);
- *  - the head gets `✦ N nye siden 07.10` (a button that reveals the first new
- *    item) and `endret siden 07.10` when the page itself changed after the
- *    visit. A first visit marks nothing.
+ *  - the head gets `✦ N nye siden 07.10` (a button that reveals the next new
+ *    item, one per click, wrapping) and `endret siden 07.10` when the page
+ *    itself changed after the visit. A first visit marks nothing;
+ *  - the baseline is per tab: the first render of a page in a tab reads the
+ *    stored visit and keeps it in `sessionStorage`, so Back/Forward, F5 and an
+ *    in-place reload mark the same items; every render stores the new visit.
  *
  * The mark is a class plus a CSS `::before`, so it is never text: a selection,
  * Explain and fact-check never see it, and a peek card's copy is unmarked by
@@ -27,8 +30,11 @@ import { localStore } from "./wiki-local-store.ts";
 import { PEEK_CLASS } from "./wiki-ref-links.ts";
 
 export const LAST_VISIT_KEY = "muninn.wiki.lastVisit.v1";
-/** How many pages the store remembers; the oldest visits drop first. */
-export const LAST_VISIT_MAX = 400;
+/** How many pages of ONE wiki the store remembers; that wiki's oldest visits
+ *  drop first, so a big wiki never evicts another wiki's pages. */
+export const LAST_VISIT_MAX_PER_WIKI = 400;
+/** The `sessionStorage` key prefix of a tab's baseline for one page. */
+export const VISIT_BASELINE_KEY = "muninn.wiki.visitBaseline.v1";
 export const NEW_ITEM_CLASS = "item-new";
 export const NEW_LANE_CLASS = "nm-lane-new";
 export const NEW_SINCE_PILL_CLASS = "wiki-new-since";
@@ -58,6 +64,8 @@ const WORDS: Record<QuestionLanguage, {
 };
 
 export const visitKey = (wiki: string, relPath: string): string => `${wiki}\n${relPath}`;
+/** The wiki half of a {@link visitKey}. */
+const wikiOfKey = (key: string): string => key.slice(0, Math.max(0, key.indexOf("\n")));
 
 /** The stored visits, `{key: epoch ms}`; anything unreadable is `{}`. */
 function readVisits(storage: Pick<Storage, "getItem"> | undefined): Record<string, number> {
@@ -82,14 +90,20 @@ export function readLastVisit(storage: Pick<Storage, "getItem"> | undefined, key
   return Object.hasOwn(visits, key) ? visits[key]! : null;
 }
 
-/** Store `at` as the visit, keeping the newest {@link LAST_VISIT_MAX}. */
+/** Store `at` as the visit, keeping the newest {@link LAST_VISIT_MAX_PER_WIKI}
+ *  of each wiki. */
 export function writeLastVisit(storage: Pick<Storage, "getItem" | "setItem"> | undefined, key: string, at: number): void {
   try {
     const visits = readVisits(storage);
     visits[key] = at;
+    const perWiki = new Map<string, number>();
     const kept = Object.entries(visits)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, LAST_VISIT_MAX);
+      .filter(([k]) => {
+        const n = (perWiki.get(wikiOfKey(k)) ?? 0) + 1;
+        perWiki.set(wikiOfKey(k), n);
+        return n <= LAST_VISIT_MAX_PER_WIKI;
+      });
     storage?.setItem(LAST_VISIT_KEY, JSON.stringify(Object.fromEntries(kept)));
   } catch {
     /* the marks still work for this view */
@@ -103,10 +117,57 @@ export function localIsoDay(ms: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** `07.10` in `now`'s year, `07.10.2025` otherwise — the lane ages' spelling. */
-export function visitDateText(ms: number, now: Date): string {
+const EN_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** The visit's day in the wiki's language: `07.10` (`07.10.2025` in another
+ *  year) on `no`, the lane ages' spelling; `Oct 7` (`Oct 7, 2025`) on `en`,
+ *  where `07.10` reads as July 10. */
+export function visitDateText(ms: number, now: Date, language: QuestionLanguage): string {
   const [y, m, d] = localIsoDay(ms).split("-");
-  return Number(y) === now.getFullYear() ? `${d}.${m}` : `${d}.${m}.${y}`;
+  const thisYear = Number(y) === now.getFullYear();
+  if (language === "no") return thisYear ? `${d}.${m}` : `${d}.${m}.${y}`;
+  const md = `${EN_MONTHS[Number(m) - 1]} ${Number(d)}`;
+  return thisYear ? md : `${md}, ${y}`;
+}
+
+type SessionLike = Pick<Storage, "getItem" | "setItem">;
+
+/** The tab's baseline where `sessionStorage` cannot hold it. */
+const memoryBaselines = new Map<string, number | null>();
+
+/**
+ * This tab's baseline for the page: the visit its first render in the tab
+ * read, or null for a first visit. On the first render in a tab, `stored` is
+ * that visit and is recorded; later renders get the recorded one back.
+ */
+export function tabBaseline(session: SessionLike | undefined, key: string, stored: () => number | null): number | null {
+  const sKey = `${VISIT_BASELINE_KEY}\n${key}`;
+  try {
+    const raw = session?.getItem(sKey);
+    if (raw != null) {
+      const v: unknown = JSON.parse(raw);
+      if (v === null || (typeof v === "number" && Number.isFinite(v) && v > 0)) return v as number | null;
+    }
+  } catch {
+    /* fall through to memory */
+  }
+  if (memoryBaselines.has(key)) return memoryBaselines.get(key)!;
+  const baseline = stored();
+  memoryBaselines.set(key, baseline);
+  try {
+    session?.setItem(sKey, JSON.stringify(baseline));
+  } catch {
+    /* memory holds it for this document */
+  }
+  return baseline;
+}
+
+function sessionStore(): Storage | undefined {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The elements a dated element marks: a lane's top-level items (the lane
@@ -154,19 +215,16 @@ export interface NewSinceOptions {
   language: QuestionLanguage;
   /** The page's last-modified time (the reader's update signal), epoch ms. */
   changedMs: number | null;
-  /** An in-place reload of the page on screen: keep this view's baseline and
-   *  store nothing. */
-  inPlace?: boolean;
   now?: Date;
   storage?: Pick<Storage, "getItem" | "setItem">;
+  session?: SessionLike;
 }
 
-/** The baseline the last render of each page used, for an in-place reload. */
-const baselines = new Map<string, number | null>();
-
 /**
- * Read the last visit BEFORE storing this one, mark what is newer, and put the
- * count and «changed since» in the head's meta row. Idempotent.
+ * Take this tab's baseline (reading the stored visit BEFORE storing this one
+ * on the tab's first render of the page), store this visit, mark what is
+ * newer than the baseline, and put the count and «changed since» in the
+ * head's meta row. Idempotent.
  */
 export function enhanceNewSince(wrap: ParentNode, opts: NewSinceOptions): void {
   const article = wrap.querySelector<HTMLElement>(".wiki-article");
@@ -176,19 +234,13 @@ export function enhanceNewSince(wrap: ParentNode, opts: NewSinceOptions): void {
   const storage = opts.storage ?? localStore();
   const now = opts.now ?? new Date();
   const key = visitKey(opts.wiki, opts.relPath);
-  let since: number | null;
-  if (opts.inPlace && baselines.has(key)) {
-    since = baselines.get(key)!;
-  } else {
-    since = readLastVisit(storage, key);
-    baselines.set(key, since);
-    writeLastVisit(storage, key, now.getTime());
-  }
+  const since = tabBaseline(opts.session ?? sessionStore(), key, () => readLastVisit(storage, key));
+  writeLastVisit(storage, key, now.getTime());
   const words = WORDS[opts.language] ?? WORDS.en;
   article.style.setProperty("--new-label", JSON.stringify(words.tag));
   const marked = markNewItems(article, since === null ? null : localIsoDay(since));
   if (since === null || !row) return;
-  const date = visitDateText(since, now);
+  const date = visitDateText(since, now, opts.language);
   const parts: HTMLElement[] = [];
   if (marked.length > 0) {
     const pill = document.createElement("button");
@@ -196,10 +248,17 @@ export function enhanceNewSince(wrap: ParentNode, opts: NewSinceOptions): void {
     pill.className = NEW_SINCE_PILL_CLASS;
     pill.textContent = words.newSince(marked.length, date);
     pill.title = words.title;
+    let step = 0;
     pill.addEventListener("click", () => {
-      // The first in document order NOW: the lens may have reordered a log.
-      const first = article.querySelector<HTMLElement>(`.${NEW_ITEM_CLASS}:not(.${PEEK_CLASS} *)`);
-      if (first) revealElement(article, first);
+      // Document order NOW (the lens may have reordered a log); each click
+      // reveals the next, wrapping, and opens what hides it (D3).
+      const all = Array.from(article.querySelectorAll<HTMLElement>(`.${NEW_ITEM_CLASS}`)).filter(
+        (el) => !el.closest(`.${PEEK_CLASS}`),
+      );
+      if (all.length === 0) return;
+      const target = all[step % all.length]!;
+      step = (step % all.length) + 1;
+      revealElement(article, target);
     });
     parts.push(pill);
   }
@@ -220,16 +279,20 @@ export function enhanceNewSince(wrap: ParentNode, opts: NewSinceOptions): void {
   else row.prepend(...parts);
 }
 
-/** The reader's CSS for the marks and the head line. The tag is the rail's
- *  NEW tag (`.wiki-new-tag`): `--tok-str`, bordered, small caps-weight. */
+/** The NEW tag's look, shared by the rail's `.wiki-new-tag` (wiki-page.ts)
+ *  and the item marks here: `--tok-str`, bordered, bold small type. */
+export const NEW_TAG_LOOK = `
+      font-size: 9.5px; font-weight: 700; letter-spacing: .06em; line-height: 1.35;
+      color: var(--tok-str); border: 1px solid color-mix(in srgb, var(--tok-str) 55%, transparent);
+      border-radius: 3px; padding: 0 3px;`;
+
+/** The reader's CSS for the marks and the head line. */
 export function newSinceCss(): string {
   const notPeek = `:not(.${PEEK_CLASS} *)`;
   const tag = `
       content: var(--new-label, "NEW");
-      display: inline-block; vertical-align: 0.1em;
-      font-size: 9.5px; font-weight: 700; letter-spacing: .06em; line-height: 1.35;
-      color: var(--tok-str); border: 1px solid color-mix(in srgb, var(--tok-str) 55%, transparent);
-      border-radius: 3px; padding: 0 3px; margin-right: 6px; white-space: nowrap;`;
+      display: inline-block; vertical-align: 0.1em;${NEW_TAG_LOOK}
+      margin-right: 6px; white-space: nowrap;`;
   return `
     .wiki-article .${NEW_ITEM_CLASS}${notPeek}::before {${tag}
     }
