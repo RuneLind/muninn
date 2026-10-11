@@ -1,23 +1,33 @@
 /**
- * D20 (amended by D49) — the dates "new since last read" marks by: one parser
- * that the reader uses and plan-card ports, both pinned by
- * `fixtures/reader-shared.json`'s `itemDateCases`.
+ * D20 (amended by D49) — the dates "new since last read" marks by: one parser,
+ * pinned by `fixtures/reader-shared.json`'s `itemDateCases`, which PR 5's
+ * plan-card port will read too.
  *
  *  - a `<Query>` by its `run=`, every item in a `<Lane>` by the lane's
  *    `since=`, and a `<DecisionLog>` item by its text (nested lines and
  *    wikilink labels included): each is the LATEST date in the value that is
- *    not after the render day (`itemDate`). A later date is a deadline or a
- *    yearless range start that resolved into next year, not an event, and is
- *    skipped; a `run=`/`since=` after the render day gives no date at all;
+ *    not after the render day (`itemDate`). A later date is a deadline, not an
+ *    event, and is skipped; a `run=`/`since=` after the render day gives no
+ *    date at all;
  *  - a date is `YYYY-MM-DD` (a time may follow: `T14:05`, `T14:05Z`),
  *    `D.M.YYYY` or `D.M` (one or two digits each, but a yearless one needs a
- *    two-digit month), a real calendar day; a pair or range gives both ends
- *    (`07.10-08.10`, `07.10/08.10`, `7.-8.10`);
- *  - a date with no year takes the year that puts it nearest the reference
- *    day — the page's `status_date`, else the render day — and only within
- *    six months (183 days) of it; further than that from every candidate year
- *    is no date, never a guess. Three candidate years always leave one within
- *    183 days, so in practice only a 29.02 far from a leap year reads null.
+ *    two-digit month), a real calendar day;
+ *  - the unit is a date EXPRESSION: one date, or a pair or range of them
+ *    (`07.10-08.10`, `07.10/08.10`, `07.10,08.10`, `7.-8.10`,
+ *    `01.01.–14.03.2025`). What makes a yearless date something else (a time
+ *    after `kl.`, an amount, a section number) is read before the
+ *    expression's first date and after its last, and refuses every date in
+ *    it;
+ *  - in an expression, a yearless date next to a dated one takes its year
+ *    from it: a start the end's year (one less when the start's day of year
+ *    is later), an end the start's (one more when it is earlier), never the
+ *    nearest-year rule below;
+ *  - otherwise a date with no year takes the year that puts it nearest the
+ *    reference day — the page's `status_date`, else the render day — and
+ *    only within six months (183 days) of it; further than that from every
+ *    candidate year is no date, never a guess. Three candidate years always
+ *    leave one within 183 days, so in practice only a 29.02 far from a leap
+ *    year reads null.
  *
  * Dependency-free so the browser bundle and a port can share it.
  */
@@ -131,67 +141,149 @@ const TOKEN_START = [
 /**
  * Every date token, in text order: ISO (a time may follow), day-first with or
  * without a year, and the bare-day start of a `7.-8.10` range (groups 7–9:
- * that day, then the end's month and year). A yearless one is not before `%`,
- * a ratio's `:` (`4.12:1`) or a decimal comma (`1.2,5`); an ISO one not before
- * a file extension (`2026-10-08.md`) or a path (`2026-10-03-wiki`).
+ * that day, then the end's month and year). A day-first one is not part of a
+ * longer number (`1.2.3`, `1.2,5`); an ISO one is not before a file extension
+ * (`2026-10-08.md`) or a path (`2026-10-03-wiki`). What the words around an
+ * expression make of it is {@link refusedExpression}'s.
  */
 const DATE_TOKEN_RE = new RegExp(
   String.raw`(?:${TOKEN_START})(?:` +
     String.raw`(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?(?![\p{L}\p{N}_-]|\/(?!${ISO})|\.[\p{L}\p{N}])` +
-    String.raw`|(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?![\p{L}\p{N}]|_[\p{L}\p{N}]|\.\d|,(?!${DM})\d|\s?%|:\d)` +
+    String.raw`|(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?(?![\p{L}\p{N}]|_[\p{L}\p{N}]|\.\d|,(?!${DM})\d)` +
     String.raw`|(\d{1,2})\.(?=-\d{1,2}\.(\d{1,2})(?:\.(\d{4}))?(?![\p{L}\p{N}]|\.\d))` +
     `)`,
   "gu",
 );
 
-/** The word before a yearless `D.M` that makes it a section number, any case. */
-const SECTION_WORD_RE =
-  /(?:§|\b(?:art|artikkel|artikler|article|kap|kapittel|chapter|pkt|punkt|nr|ledd|avsn|avsnitt|section|versjon|version|v|jf))\.?\s*$/iu;
+/** What joins two dates into one expression: `-` or `–` (a dot and spaces
+ *  around it allowed: `01.01.–14.03.2025`, `07.10 - 08.10`), or a glued `/`
+ *  or `,`. */
+const JOINER_RE = /^(?:\.?\s*[-–]\s*|[/,])$/u;
 
-/** The word before a yearless `D.M` that makes it a time of day (`kl. 09.10`). */
-const TIME_WORD_RE = /(?<!\p{L})(?:kl|klokka|klokken)\.?\s*$/iu;
+/** How a guard word may meet the date: `kl. 09.10`, `kl 09.10`, `kl:09.10`,
+ *  `Versjon:01.10`. */
+const WORD_GLUE = String.raw`(?:\.?\s*|\.?[,:/])$`;
 
-/** A currency before or after a yearless `D.M` makes it an amount
+/** The word before a yearless expression that makes it a section number, any case. */
+const SECTION_WORD_RE = new RegExp(
+  String.raw`(?:§|\b(?:art|artikkel|artikler|article|kap|kapittel|chapter|pkt|punkt|nr|ledd|avsn|avsnitt|section|versjon|version|v|jf))` +
+    WORD_GLUE,
+  "iu",
+);
+
+/** The word before a yearless expression that makes it a time of day (`kl. 09.10`). */
+const TIME_WORD_RE = new RegExp(String.raw`(?<!\p{L})(?:kl|klokka|klokken)` + WORD_GLUE, "iu");
+
+/** A currency before or after a yearless expression makes it an amount
  *  (`NOK 1.10`, `~ 1.10 kr`). */
-const CURRENCY_BEFORE_RE = /(?:[~$€£]|(?<!\p{L})(?:NOK|USD|EUR|kr))\.?\s*$/iu;
+const CURRENCY_BEFORE_RE = new RegExp(String.raw`(?:[~$€£]|(?<!\p{L})(?:NOK|USD|EUR|kr))` + WORD_GLUE, "iu");
 const CURRENCY_AFTER_RE = /^\s?(?:kr(?!\p{L})|kroner|NOK|USD|EUR|[$€£])/iu;
+/** After a yearless expression: a percentage (`12.10 %`) or a ratio's `:` (`4.12:1`). */
+const NUMBER_AFTER_RE = /^(?:\s?%|:\d)/u;
 
-/** Whether the text around a yearless token makes it something other than a date. */
-function notAYearlessDate(s: string, start: number, end: number): boolean {
+/** Whether the text around a yearless expression (`start`…`end`) makes it
+ *  something other than dates. */
+function refusedExpression(s: string, start: number, end: number): boolean {
   const before = s.slice(Math.max(0, start - 12), start);
+  const after = s.slice(end, end + 8);
   return (
     SECTION_WORD_RE.test(before) ||
     TIME_WORD_RE.test(before) ||
     CURRENCY_BEFORE_RE.test(before) ||
-    CURRENCY_AFTER_RE.test(s.slice(end, end + 8))
+    CURRENCY_AFTER_RE.test(after) ||
+    NUMBER_AFTER_RE.test(after)
   );
 }
 
-/** The dates in `text`, in order, each resolved against `ref`; a token that
- *  is no calendar day, or a yearless one outside the window, is left out. */
-export function itemDates(text: string, ref: string): string[] {
-  const s = scannable(text);
-  const out: string[] = [];
+interface DateToken {
+  start: number;
+  end: number;
+  day: number;
+  month: number;
+  /** The written year, or null for `D.M`. */
+  year: number | null;
+  /** A yearless token with a one-digit month: never a date. */
+  unreadable: boolean;
+  /** The resolved day, once known. */
+  iso: string | null;
+}
+
+/** Each token the regex finds, unresolved, in text order. */
+function dateTokens(s: string): DateToken[] {
+  const out: DateToken[] = [];
   for (const m of s.matchAll(DATE_TOKEN_RE)) {
-    const at = m.index!;
+    const start = m.index!;
+    const end = start + m[0].length;
     if (m[1]) {
-      const iso = isoDay(Number(m[1]), Number(m[2]), Number(m[3]));
-      if (iso) out.push(iso);
+      out.push({ start, end, day: Number(m[3]), month: Number(m[2]), year: Number(m[1]), unreadable: false, iso: null });
       continue;
     }
     // A `D.M` token, or the bare-day start of a range with the end's month.
-    const [day, month, year, monthText] = m[4]
-      ? [Number(m[4]), Number(m[5]), m[6], m[5]!]
-      : [Number(m[7]), Number(m[8]), m[9], m[8]!];
-    if (year) {
-      const iso = isoDay(Number(year), month, day);
-      if (iso) out.push(iso);
-      continue;
+    const [day, monthText, year] = m[4] ? [m[4], m[5]!, m[6]] : [m[7]!, m[8]!, m[9]];
+    out.push({
+      start,
+      end,
+      day: Number(day),
+      month: Number(monthText),
+      year: year ? Number(year) : null,
+      unreadable: !year && monthText.length !== 2,
+      iso: null,
+    });
+  }
+  return out;
+}
+
+/** The tokens grouped into expressions: neighbours joined by {@link JOINER_RE}. */
+function expressions(s: string, tokens: DateToken[]): DateToken[][] {
+  const out: DateToken[][] = [];
+  for (const t of tokens) {
+    const last = out[out.length - 1];
+    const prev = last?.[last.length - 1];
+    if (last && prev && JOINER_RE.test(s.slice(prev.end, t.start))) last.push(t);
+    else out.push([t]);
+  }
+  return out;
+}
+
+/** An ISO day's month and day as `MMDD`, for a day-of-year comparison. */
+const monthDay = (iso: string): number => Number(iso.slice(5, 7)) * 100 + Number(iso.slice(8, 10));
+
+/** Year inference inside one expression: each yearless date next to a
+ *  resolved one takes its year from it — from the right first (a start from
+ *  its end), then from the left (an end from its start). */
+function resolveFromNeighbours(expr: DateToken[]): void {
+  const open = (t: DateToken) => t.iso === null && t.year === null && !t.unreadable;
+  for (let i = expr.length - 2; i >= 0; i--) {
+    const t = expr[i]!;
+    const next = expr[i + 1]!.iso;
+    if (!open(t) || !next) continue;
+    const y = Number(next.slice(0, 4)) - (t.month * 100 + t.day > monthDay(next) ? 1 : 0);
+    t.iso = isoDay(y, t.month, t.day);
+  }
+  for (let i = 1; i < expr.length; i++) {
+    const t = expr[i]!;
+    const prev = expr[i - 1]!.iso;
+    if (!open(t) || !prev) continue;
+    const y = Number(prev.slice(0, 4)) + (t.month * 100 + t.day < monthDay(prev) ? 1 : 0);
+    t.iso = isoDay(y, t.month, t.day);
+  }
+}
+
+/** The dates in `text`, in order, each resolved against `ref`; a token that
+ *  is no calendar day, or a yearless one outside the window, is left out, and
+ *  a refused expression gives none. */
+export function itemDates(text: string, ref: string): string[] {
+  const s = scannable(text);
+  const out: string[] = [];
+  for (const expr of expressions(s, dateTokens(s))) {
+    if (expr.some((t) => t.year === null) && refusedExpression(s, expr[0]!.start, expr[expr.length - 1]!.end)) continue;
+    for (const t of expr) if (t.year !== null) t.iso = isoDay(t.year, t.month, t.day);
+    resolveFromNeighbours(expr);
+    // No written year in the expression: each by the reference day.
+    for (const t of expr) {
+      if (t.iso === null && t.year === null && !t.unreadable) t.iso = resolveYearless(t.day, t.month, ref);
     }
-    if (monthText.length !== 2) continue;
-    if (notAYearlessDate(s, at, at + m[0].length)) continue;
-    const iso = resolveYearless(day, month, ref);
-    if (iso) out.push(iso);
+    for (const t of expr) if (t.iso) out.push(t.iso);
   }
   return out;
 }

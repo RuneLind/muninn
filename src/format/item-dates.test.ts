@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { itemDate, itemDateReference, itemDates, renderDay, resolveYearless } from "./item-dates.ts";
 import shared from "./fixtures/reader-shared.json";
 
-// D20/D22: the cases live in the shared fixture, which plan-card's port reads
-// too, so both parsers answer the same inputs the same way.
+// D20/D22: the cases live in the shared fixture, which PR 5's plan-card port
+// will read too, so both parsers answer the same inputs the same way.
 
 interface ItemDateCase {
   name: string;
@@ -18,8 +18,8 @@ interface ItemDateCase {
 const cases = shared.itemDateCases as ItemDateCase[];
 
 describe("item dates (D20, D49), from the shared fixture", () => {
-  test("the fixture covers the acceptance-8 kinds and D49's", () => {
-    expect(cases.length).toBeGreaterThanOrEqual(55);
+  test("the fixture covers the acceptance-8 kinds, D49's and the date expressions'", () => {
+    expect(cases.length).toBeGreaterThanOrEqual(74);
   });
   for (const c of cases) {
     test(c.name, () => {

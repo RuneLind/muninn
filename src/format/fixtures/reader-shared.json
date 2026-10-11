@@ -40,7 +40,7 @@
     { "name": "a sentence-final date", "text": "Lukket 08.10.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-08" },
     { "name": "an older event written last does not date the item", "text": "Besvart 06.10: ja. 13 saker fra 31.08 til 25.09.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-06" },
     { "name": "a deadline after the render day is skipped", "text": "Lukket 07.10, avgjøres tidligst 28.10.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-07" },
-    { "name": "a yearless range start that resolves into next year is skipped", "text": "Lukket 07.10. Gjelder perioden 01.01.–14.03.2025.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-07" },
+    { "name": "a yearless range start takes the dated end's year", "text": "Lukket 07.10. Gjelder perioden 01.01.–14.03.2025.", "statusDate": "2026-10-09", "today": "2026-10-11", "expected": "2026-10-07" },
     { "name": "a run= after the render day is no date", "text": "2026-10-20", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
     { "name": "a since= on the render day is a date", "text": "2026-10-11", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-11" },
     { "name": "a hyphen range gives both ends", "text": "Møte 07.10-08.10.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-08" },
@@ -67,6 +67,21 @@
     { "name": "jf. before a yearless date is a cross-reference", "text": "Se jf. 12.10-notatet.", "statusDate": "2026-10-07", "today": "2026-10-20", "expected": null },
     { "name": "an ISO date before a file extension is no date", "text": "Se 2026-10-08.md for detaljer.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
     { "name": "an ISO date with a time", "text": "Kjørt 2026-10-07T14:05.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-07" },
-    { "name": "an ISO date with a UTC time", "text": "Kjørt 2026-10-07T14:05Z", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-07" }
+    { "name": "an ISO date with a UTC time", "text": "Kjørt 2026-10-07T14:05Z", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-07" },
+    { "name": "a yearless range start keeps the dated end's year in January", "text": "Lukket 07.10. Gjelder perioden 01.01.–14.03.2025.", "statusDate": "2026-10-09", "today": "2027-01-05", "expected": "2026-10-07" },
+    { "name": "a yearless range start keeps the dated end's year after the start date", "text": "Lukket 07.10. Gjelder perioden 01.01.–14.03.2025.", "statusDate": "2026-10-09", "today": "2027-03-20", "expected": "2026-10-07" },
+    { "name": "a yearless range start later in the year than the end takes the year before", "text": "Perioden 15.11–2027-02-01.", "statusDate": "2026-04-01", "today": "2027-01-10", "expected": "2026-11-15" },
+    { "name": "a yearless range end earlier in the year than the start takes the year after", "text": "Gjelder fra 01.11.2026–31.01.", "statusDate": "2026-07-01", "today": "2027-02-10", "expected": "2027-01-31" },
+    { "name": "kl. before a yearless range refuses both ends", "text": "Møte kl. 09.10-10.10.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "NOK before a yearless pair refuses both", "text": "Pris NOK 1.05/1.09.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "§ before a yearless range refuses both ends", "text": "Etter § 12.08-12.09 i loven.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "avsn. before a yearless pair refuses both", "text": "Se avsn. 3.08/3.09.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "kr after a yearless range refuses both ends", "text": "Kostet 1.05-1.09 kr.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "a percentage after a yearless range refuses both ends", "text": "Andel 1.05-1.10 % av sakene.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "a refusal stays inside its expression", "text": "Lukket 07.10, møte kl. 09.10.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": "2026-10-07" },
+    { "name": "a section word glued by a colon", "text": "Versjon:01.10", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "kl glued by a colon", "text": "Møte kl:09.10", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "a refusal refuses a dated end of the expression too", "text": "Møte kl. 09.10-10.10.2026.", "statusDate": "2026-10-07", "today": "2026-10-11", "expected": null },
+    { "name": "a yearless pair resolves each date by the reference day", "text": "Svart 09.10/07.10.", "statusDate": "2026-10-07", "today": "2027-10-08", "expected": "2026-10-09" }
   ]
 }

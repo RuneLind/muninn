@@ -99,14 +99,29 @@ describe("the tab's baseline", () => {
     expect(tabBaseline(session, key, () => 7_000)).toBeNull();
   });
 
-  test("a new tab reads the stored visit again", () => {
+  test("after F5 the tab's sessionStorage baseline beats this document's memory", () => {
     const key = visitKey("w", "plans/two-tabs.mdx");
     expect(tabBaseline(memory(), key, () => 1_000)).toBe(1_000);
-    // A fresh sessionStorage holding this page's baseline from another
-    // document is what F5 gives; one with a different value wins over memory.
+    // F5 gives a new document whose sessionStorage holds the baseline the
+    // earlier document recorded; it wins over anything memory holds. (A new
+    // tab, whose sessionStorage and memory are both empty, is driven in
+    // e2e/wiki-new-since.spec.ts.)
     const reloaded = memory();
     reloaded.data.set(`${VISIT_BASELINE_KEY}\n${key}`, "2000");
     expect(tabBaseline(reloaded, key, () => 3_000)).toBe(2_000);
+  });
+
+  test("a first visit's null baseline is recorded in sessionStorage, so F5 keeps it", () => {
+    const key = visitKey("w", "plans/first-f5.mdx");
+    const session = memory();
+    expect(tabBaseline(session, key, () => null)).toBeNull();
+    // Memory would answer this document; F5 starts a new one, which only
+    // sessionStorage reaches.
+    expect(session.data.get(`${VISIT_BASELINE_KEY}\n${key}`)).toBe("null");
+    const fresh = visitKey("w", "plans/first-f5-reloaded.mdx");
+    const reloaded = memory();
+    reloaded.data.set(`${VISIT_BASELINE_KEY}\n${fresh}`, "null");
+    expect(tabBaseline(reloaded, fresh, () => 7_000)).toBeNull();
   });
 
   test("a throwing sessionStorage falls back to memory for this document", () => {

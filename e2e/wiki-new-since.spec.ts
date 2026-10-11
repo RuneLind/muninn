@@ -10,12 +10,14 @@
  * nested line carry the mark exactly when that date is after the seeded visit,
  * in Overview and in All; that the head reads `✦ N nye siden <date>` and
  * «endret siden», and its pill steps through the new items; that the tab keeps
- * its baseline over a reload and Back while a new tab after the visit marks
- * nothing; that a first visit marks nothing and stores the visit; that an `en`
+ * its baseline over a reload, Back and an in-place reload after the reader's
+ * own write (a stubbed fact-check append) while a new tab after the visit
+ * marks nothing; that the pill never steps onto a peek card's copy of a new
+ * item; that a first visit marks nothing and stores the visit; that an `en`
  * wiki spells the date `Oct 7`; and that the mark leaves the compact
  * DecisionLog (five rows, date cell) as it was.
  *
- * One Norwegian wiki (instance default Overview, two pages) and one English
+ * One Norwegian wiki (instance default Overview, three pages) and one English
  * wiki. Synthetic fixtures. The browser runs in Europe/Oslo so the seeded
  * visits fall on the days the assertions name.
  *
@@ -119,6 +121,30 @@ const WINTER = [
   "",
 ].join("\n");
 
+const PEEK_REL = "plans/peek.mdx";
+// A heading link whose peek card copies the DecisionLog under it, marks and all.
+const PEEK = [
+  "---",
+  "title: Peek page",
+  "type: plan",
+  "status_date: 2026-10-07",
+  "---",
+  "",
+  "# Peek page",
+  "",
+  "Se [Logg](#logg).",
+  "",
+  "## Logg",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D1** — Gammel beslutning gjelder. Fag, 01.10.",
+  "- **D2** — Ny beslutning gjelder. Fag, 09.10.",
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+
 const EN_REL = "plans/english.mdx";
 const EN = [
   "---",
@@ -211,6 +237,7 @@ test.beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, AUTUMN_REL), AUTUMN, "utf8");
   await writeFile(path.join(root, WINTER_REL), WINTER, "utf8");
+  await writeFile(path.join(root, PEEK_REL), PEEK, "utf8");
   await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ language: "no" }), "utf8");
   rootEn = await mkdtemp(path.join(tmpdir(), "muninn-e2e-new-since-en-"));
   await mkdir(path.join(rootEn, "plans"), { recursive: true });
@@ -369,6 +396,56 @@ test.describe("Wiki reader: new since last read (D20)", () => {
     expect((await marked(other)).total).toBe(0);
     await expect(other.locator(".wiki-new-since")).toHaveCount(0);
     await other.close();
+    expectClean(seen);
+  });
+
+  test("the pill steps over a peek card's copy of a new item", async ({ page }) => {
+    const seen = await openWithVisit(page, PEEK_REL, AUTUMN_VISIT);
+    expect((await marked(page)).decisions).toEqual(["d2"]);
+    await page.locator('.wiki-article a.wiki-ref[href="#logg"]').hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toBeVisible();
+    // The copy keeps the mark's class (the CSS hides its tag there), so only
+    // the pill's own filter keeps it out of the steps.
+    await expect(peek.locator(".item-new")).toHaveCount(1);
+    const revealed = await page.locator(".wiki-article").evaluate((art) => {
+      const out: string[] = [];
+      art.addEventListener("wiki:reveal", (e) => out.push((e.target as HTMLElement).id || "peek copy"));
+      const pill = document.querySelector<HTMLButtonElement>(".wiki-new-since")!;
+      // Both clicks before the first reveal's scroll retires the card.
+      pill.click();
+      pill.click();
+      return out;
+    });
+    expect(revealed).toEqual(["d2", "d2"]);
+    expectClean(seen);
+  });
+
+  test("an in-place reload after the reader's own write keeps the tab's marks", async ({ page }) => {
+    const appends: unknown[] = [];
+    await page.route("**/api/wiki/factcheck?**", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: `event: done\ndata: ${JSON.stringify({ answer: "Alt stemmer.", baseHash: "h1" })}\n\n`,
+      }),
+    );
+    await page.route("**/api/wiki/factcheck/append", (route) => {
+      appends.push(route.request().postDataJSON());
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ written: true }) });
+    });
+    const seen = await openWithVisit(page, AUTUMN_REL, AUTUMN_VISIT);
+    expect((await marked(page)).total).toBe(9);
+    await page.locator("#wikiFactcheckArticleBtn").dispatchEvent("mousedown");
+    const add = page.locator("#wikiFactcheckAppendBtn");
+    await expect(add).toBeEnabled();
+    // The answer replaced the article; the append reloads the page in place.
+    await add.click();
+    await expect.poll(() => appends.length).toBe(1);
+    await expect(page.locator(".wiki-article li.dl-item#d3")).toHaveCount(1);
+    // This render stored a later visit, but the tab's baseline is still 07.10.
+    expect((await marked(page)).total).toBe(9);
+    await expect(page.locator(".wiki-new-since")).toHaveText(/^✦ 9 nye siden 07\.10(\.2026)?$/);
     expectClean(seen);
   });
 
