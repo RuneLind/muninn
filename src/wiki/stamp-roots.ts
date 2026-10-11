@@ -36,6 +36,12 @@ export const WIKI_STAMP_BIN_ENV = "WIKI_STAMP_BIN";
 export const WIKI_STAMP_ROOTS_ENV = "WIKI_STAMP_ROOTS";
 export const WIKI_STAMP_BUN_ENV = "WIKI_STAMP_BUN";
 
+/** The names a spawned wiki CLI inherits from this process (Stamp, and the
+ *  Agent lens's plan-card): the child's WHOLE environment beyond what each
+ *  caller adds. Here rather than in the Stamp route so `src/wiki/plan-card.ts`
+ *  does not import a route module. Why these three: `stampChildEnv`. */
+export const STAMP_CHILD_ENV_NAMES: readonly string[] = ["PATH", "HOME", "TMPDIR"];
+
 /**
  * muninn's own bound on one Stamp spawn.
  *

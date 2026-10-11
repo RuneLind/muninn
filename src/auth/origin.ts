@@ -120,6 +120,10 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // huginn's search and to claude-usage's (two calls, a third for titles). An
   // amplifier like the two above; the palette's same-origin fetch passes.
   "/api/wiki/find-everywhere",
+  // The Agent lens SPAWNS a plan-card child per request (up to 20 s, and it
+  // calls back into this instance and into claude-usage), so an `<img>` on any
+  // page must not be able to start one. The reader's same-origin fetch passes.
+  "/api/wiki/plan-card",
   // On a missing or stale cache it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
   // it — so an `<img>` on any page could start local processes. The chat page
   // calls it with a same-origin `fetch`, which passes.

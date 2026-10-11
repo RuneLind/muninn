@@ -241,12 +241,15 @@ export function readerPayload(
   readerConfig: WikiReaderConfig | null | undefined,
   instanceDefault: WikiDefaultLens | undefined,
   viewer: { roles: string[]; admin: boolean } = { roles: [], admin: false },
+  /** D7, computed by the caller (`agentLensFor`): `PLAN_CARD_BIN` set, the
+   *  page carries `plan_status`, its root is a plan-card root, viewer admin. */
+  agentLens = false,
 ): ReaderPayload {
   return {
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     idLabels: readerConfig?.idLabels ?? {},
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
-    agentLens: false,
+    agentLens,
     roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
   };
 }

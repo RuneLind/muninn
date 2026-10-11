@@ -189,6 +189,7 @@ import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
 import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find-palette.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { enhanceLens, lensOf, readerSelectionText, storedLens } from "./wiki-lens.ts";
+import { abortAgentRuns, snapshotAgentPane, type AgentPaneSnapshot } from "./wiki-agent-pane.ts";
 import { enhanceNewSince } from "./wiki-new-since.ts";
 import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
 import type { ReaderPayload } from "../../../wiki/render.ts";
@@ -347,6 +348,7 @@ import {
   GRAPH_FOCUS_ATTR,
   GRAPH_LEVEL_ID,
   GRAPH_NODE_ATTR,
+  GRAPH_ON_CLASS,
   GRAPH_OPEN_ATTR,
   GRAPH_SECTION_ID,
   GRAPH_TOGGLE_ID,
@@ -412,8 +414,10 @@ const LENS_PARAM = "lens";
  *  the stored choice. */
 let pendingUrlLens: string | null = new URLSearchParams(location.search).get(LENS_PARAM);
 /** The lens of the view an in-place reload replaces ({@link reloadCheckedPage}),
- *  keyed by the page's relPath: the reloaded page keeps it, unstored. */
-let inPlaceLens: { relPath: string; lens: Lens } | null = null;
+ *  keyed by the page's relPath: the reloaded page keeps it, unstored. In the
+ *  Agent lens, also the pane's inputs and card, which the new pane shows as
+ *  possibly stale instead of starting a plan-card child. */
+let inPlaceLens: { relPath: string; lens: Lens; agent?: AgentPaneSnapshot } | null = null;
 /** The article this view last rendered, and its page. An Ask or fact-check
  *  answer replaces it on screen, so an in-place reload reads the lens off this
  *  element rather than off `#articleWrap`. */
@@ -2894,6 +2898,9 @@ function renderStart(): void {
   // Returning to the browse view is the moment a page set stashed during reading
   // becomes safe to apply — before anything below reads `allPages`.
   applyPendingPages();
+  // No article: a `?lens=` is spent, and a plan-card run in flight is dropped.
+  consumeUrlLens();
+  abortAgentRuns();
   currentName = null;
   currentRelPath = null; // the two identities are cleared together, always
   currentPageHash = null;
@@ -3986,6 +3993,9 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
  *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
+  // An explainer has no lens: a `?lens=` is spent, and a plan-card run dropped.
+  consumeUrlLens();
+  abortAgentRuns();
   setAtlasFull(false);
   currentName = m.name;
   // The listing IS the identity here (no page response to wait for), so the
@@ -4126,6 +4136,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
   // The page being left stops boosting a find now: a load that fails (an error
   // payload or a rejected fetch) leaves `currentRelPath` on it.
   currentNear = null;
+  // Its Agent pane's plan-card run, if one is in flight, is no longer wanted.
+  abortAgentRuns();
   // Taken now, so a load that fails cannot leave it for the next one.
   const inPlace = inPlaceLens;
   fetch(url)
@@ -4137,6 +4149,9 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       navInFlight = false;
       if (data.error) {
         removeGraph();
+        // A `?lens=` is for the first page this view renders; a failed one
+        // spends it, so a later page never opens in a lens its URL did not name.
+        consumeUrlLens();
         document.getElementById("articleWrap")!.innerHTML =
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
         // The PREVIOUS page's `currentName` deliberately survives a failed load, so
@@ -4216,6 +4231,14 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       enhanceLens(articleRoot, {
         language: readerLang,
         agentAvailable: reader?.agentLens === true,
+        // The Agent pane's page: the registry name, as the answer cards send it.
+        // An in-place reload in Agent carries the pane over instead of running.
+        agent: {
+          wiki: FIND_SELF_WIKI || WIKI,
+          relPath: data.meta.relPath,
+          language: readerLang,
+          carry: keptLens === "agent" ? (inPlace?.agent ?? { since: "", id: "", card: null }) : undefined,
+        },
         inPlace: keptLens !== null,
         initial: resolveLens({
           url: pendingUrlLens,
@@ -4276,6 +4299,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       setAtlasFull(false);
       navInFlight = false;
       removeGraph();
+      consumeUrlLens();
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">Failed to load page: ${esc(err.message)}</div>`;
       renderList();
@@ -4306,9 +4330,9 @@ function applyDisplay(): void {
     toggle.setAttribute("aria-pressed", on ? "true" : "false");
   }
   if (on && !wasOn) readingScrollTop = wrap.scrollTop;
-  wrap.querySelectorAll<HTMLElement>(":scope > .wiki-article, :scope > .wiki-explainer-frame").forEach((el) => {
-    el.classList.toggle("wiki-graph-hidden", on);
-  });
+  // One class on the pane, not one per child: a child built while graph mode
+  // is on (an Agent pane from the lens switch) is hidden by the same CSS rule.
+  wrap.classList.toggle(GRAPH_ON_CLASS, on);
   if (!on) {
     removeGraph();
     if (wasOn) wrap.scrollTop = readingScrollTop;
@@ -4331,6 +4355,7 @@ function removeGraph(): void {
   graphResize?.disconnect();
   graphResize = null;
   document.getElementById(GRAPH_SECTION_ID)?.remove();
+  document.getElementById("articleWrap")?.classList.remove(GRAPH_ON_CLASS);
 }
 
 function loadGraph(): void {
@@ -4501,6 +4526,8 @@ function focusGraphNode(id: string): void {
 /** `?display=graph&issue=jira:KEY` with no page open: the issue's own head and
  *  its graph fill the article pane. */
 function renderIssueGraph(): void {
+  consumeUrlLens();
+  abortAgentRuns();
   const wrap = document.getElementById("articleWrap");
   const root = parseIssueRoot(graphIssue);
   if (!wrap || !root) return;
@@ -6973,7 +7000,9 @@ function openArticleShare(): void {
 function reloadCheckedPage(turn: AskTurn): void {
   // The same page, reloaded in place: it keeps the lens its view showed.
   const lens = renderedArticle && renderedArticle.relPath === turn.pageRelPath ? lensOf(renderedArticle.el) : null;
-  inPlaceLens = lens ? { relPath: renderedArticle!.relPath, lens } : null;
+  inPlaceLens = lens
+    ? { relPath: renderedArticle!.relPath, lens, ...(lens === "agent" ? { agent: snapshotAgentPane(renderedArticle!.el) } : {}) }
+    : null;
   try {
     if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false, false);
     else if (turn.page) loadPage(turn.page, false, false);

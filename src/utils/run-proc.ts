@@ -26,6 +26,7 @@
  */
 
 import { getLog } from "../logging.ts";
+import { RUN_PROC_KILL_GRACE_MS, RUN_PROC_POST_KILL_WAIT_MS as POST_KILL_WAIT_MS } from "./run-proc-bounds.ts";
 
 const log = getLog("utils", "run-proc");
 
@@ -40,7 +41,17 @@ export interface RunProcOptions {
   env?: Record<string, string | undefined>;
   /** Per-stream output cap. Defaults to {@link RUN_PROC_MAX_OUTPUT_BYTES}. */
   maxOutputBytes?: number;
+  /** The child's working directory. Omit to inherit this process's. */
+  cwd?: string;
+  /** Start the child as its own process-group leader (`setsid`), so the
+   *  timeout's signals reach every process it started, not only itself. */
+  processGroup?: boolean;
+  /** How long a timed-out child gets between SIGTERM and SIGKILL. Defaults to
+   *  {@link RUN_PROC_KILL_GRACE_MS}. */
+  killGraceMs?: number;
 }
+
+export { RUN_PROC_KILL_GRACE_MS };
 
 /** Bytes kept per stream. See the header for why there is a cap at all. */
 export const RUN_PROC_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -118,6 +129,13 @@ export class ProcTimeoutError extends Error {
  * Spawn a process, draining stdout AND stderr concurrently with exit (awaiting
  * `exited` first can deadlock if the pipe buffer fills — same fix as stt.ts),
  * and kill it if it runs past `timeoutMs` (mirrors executor.ts's timeout).
+ *
+ * The timeout sends SIGTERM, then SIGKILL after `killGraceMs` if the child is
+ * still there (a child that traps SIGTERM would otherwise outlive its
+ * deadline), and rejects only once the child has EXITED, or {@link
+ * POST_KILL_WAIT_MS} after the SIGKILL. A caller that holds a lock for the
+ * child's lifetime (the Agent lens's one-child-per-page) can release it on the
+ * rejection.
  */
 export async function runProc(
   cmd: string[],
@@ -130,18 +148,54 @@ export async function runProc(
     stderr: "pipe",
     stdin: "ignore",
     ...(opts.env ? { env: opts.env } : {}),
+    ...(opts.cwd ? { cwd: opts.cwd } : {}),
+    ...(opts.processGroup ? { detached: true } : {}),
+  });
+
+  // The whole group when the child leads one, else the child alone. A group
+  // whose members have all gone throws ESRCH, which is the goal reached.
+  const signal = (sig: NodeJS.Signals) => {
+    try {
+      if (opts.processGroup) process.kill(-proc.pid, sig);
+      else proc.kill(sig);
+    } catch {
+      /* already gone */
+    }
+  };
+  let exited = false;
+  void proc.exited.then(() => {
+    exited = true;
   });
 
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(() => {
+      timedOut = true;
       log.error("{label} timed out after {timeoutMs}ms — killing PID {pid}", {
         label,
         timeoutMs,
         pid: proc.pid,
       });
-      proc.kill();
-      reject(new ProcTimeoutError(label, timeoutMs));
+      signal("SIGTERM");
+      const grace = opts.killGraceMs ?? RUN_PROC_KILL_GRACE_MS;
+      // Fires only while the child is still there: an exit inside the grace
+      // settles below first, and that path clears this timer.
+      const killTimer = setTimeout(() => {
+        log.error("{label} ignored SIGTERM for {grace}ms — SIGKILL to PID {pid}", { label, grace, pid: proc.pid });
+        signal("SIGKILL");
+      }, grace);
+      const fail = () => {
+        clearTimeout(killTimer);
+        reject(new ProcTimeoutError(label, timeoutMs));
+      };
+      void Promise.race([proc.exited, Bun.sleep(grace + POST_KILL_WAIT_MS)]).then(() => {
+        // A group leader that died on SIGTERM may leave members that trap
+        // it: this is the only SIGKILL they get, since the grace timer is
+        // cleared below.
+        if (opts.processGroup && exited) signal("SIGKILL");
+        fail();
+      });
     }, timeoutMs);
   });
 
@@ -156,7 +210,10 @@ export async function runProc(
   })();
 
   try {
-    return await Promise.race([workPromise, timeoutPromise]);
+    const result = await Promise.race([workPromise, timeoutPromise]);
+    // The SIGTERM's own exit can drain first: it is still the timeout.
+    if (timedOut) await timeoutPromise;
+    return result;
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer);
   }

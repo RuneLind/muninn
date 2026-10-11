@@ -13,14 +13,20 @@
  * - **Choice.** A click on Overview or All is stored per viewer
  *   (`muninn.wiki.lens.v1`); Agent never is. `?lens=` applies to the view it
  *   opens and is then removed from the URL by the caller.
- * - **Reveal.** A `REVEAL_EVENT` from an element Overview hides switches this
- *   view to All without storing it, so the next page opens in the stored lens.
+ * - **Reveal.** A `REVEAL_EVENT` from an element Overview hides, or from any
+ *   element while the Agent lens is on (it hides the whole article), switches
+ *   this view to All without storing it, so the next page opens in the stored
+ *   lens.
+ * - **Agent (D4).** Hides the article and shows plan-card's card in a pane
+ *   beside it (`wiki-agent-pane.ts`), with the article-only head controls (the
+ *   «line refs» toggle, «Se som rolle») hidden; the header pills stay, since a
+ *   pill's reveal switches to All.
  * - **Compact lists (D6, D41, D42, D45).** Every lens shows a `<DecisionLog>`
  *   newest first with five decisions and «Vis alle», each item's first sentence
  *   with «mer» for the rest, and a `<CaseBoard>` row as its compact line with
  *   «mer» and the `ok` group behind «+ N til». The lenses differ only in what
  *   they hide. A reveal of anything the compact view folds away (a `#d7` hash,
- *   an id link, a pill) opens it in the lens on screen.
+ *   an id link, a pill) opens it in the lens on screen, or in All from Agent.
  * - **`none` cases (D47).** Overview hides the group and says how many; every
  *   other lens folds the group's rows behind «+ N ikke kandidat», except a row
  *   holding a fact-check mark. A switch into or out of Overview closes that
@@ -62,8 +68,9 @@ import {
 import type { QuestionLanguage } from "../../../format/question-labels.ts";
 import { fmtTokens } from "../../../utils/fmt-tokens.ts";
 import { localStore } from "./wiki-local-store.ts";
-import { LINE_REFS_TOGGLE_CLASS } from "./wiki-report-blocks.ts";
+import { LINE_REFS_TOGGLE_CLASS, ROLE_VIEW_CLASS } from "./wiki-report-blocks.ts";
 import { PEEK_CLASS } from "./wiki-ref-links.ts";
+import { agentPaneCss, setAgentPane, type AgentPaneOptions } from "./wiki-agent-pane.ts";
 
 export const LENS_SWITCH_CLASS = "wiki-lens-switch";
 export { LENS_CLASS_PREFIX };
@@ -467,7 +474,12 @@ export interface LensOptions {
   inPlace?: boolean;
   /** The server's flag: the Agent button renders only when true. */
   agentAvailable: boolean;
+  /** The page the Agent pane asks plan-card about; absent ⇒ no pane. */
+  agent?: AgentPaneOptions;
 }
+
+/** Each article's Agent pane options, read by {@link applyLens}. */
+const agentOptions = new WeakMap<Element, AgentPaneOptions>();
 
 /** The lens `article` shows, read off its class; null before `enhanceLens`. */
 export function lensOf(article: Element | null): Lens | null {
@@ -482,14 +494,20 @@ function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElemen
     article.classList.toggle(`${LENS_CLASS_PREFIX}${l}`, l === lens);
   }
   if (lens === "overview" && before !== "overview" && enter) openCompactFolds(article);
+  // D4: the Agent lens hides the article (CSS) and shows plan-card's card.
+  setAgentPane(article, lens === "agent", agentOptions.get(article) ?? null);
   sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
     const on = b.dataset.lens === lens;
     b.classList.toggle("on", on);
     b.setAttribute("aria-pressed", on ? "true" : "false");
   });
-  // Overview hides every line ref, so the «line refs» toggle has nothing to do.
+  // Overview hides every line ref, so the «line refs» toggle has nothing to
+  // do; Agent hides the article it and «Se som rolle» act on.
   row?.querySelectorAll<HTMLElement>(`.${LINE_REFS_TOGGLE_CLASS}`).forEach((t) => {
-    t.hidden = lens === "overview";
+    t.hidden = lens === "overview" || lens === "agent";
+  });
+  row?.querySelectorAll<HTMLElement>(`.${ROLE_VIEW_CLASS}`).forEach((t) => {
+    t.hidden = lens === "agent";
   });
 }
 
@@ -506,6 +524,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   const article = wrap.querySelector<HTMLElement>(".wiki-article");
   const row = wrap.querySelector<HTMLElement>(".wiki-article-head .wiki-meta-row");
   if (!article) return;
+  if (opts.agentAvailable && opts.agent) agentOptions.set(article, opts.agent);
   row?.querySelectorAll(`.${LENS_SWITCH_CLASS}`).forEach((el) => el.remove());
   noteHiddenCases(article, opts.language);
   decorateFoldSizes(article, opts.language);
@@ -545,8 +564,8 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   applyLens(article, row, sw, opts.initial, !opts.inPlace);
 
   // D3: a reveal opens what the compact view folds away, in whichever lens is
-  // on screen (D45), and a reveal of something Overview hides shows All for
-  // this view only.
+  // on screen (D45), and a reveal of something Overview hides, or of anything
+  // while Agent hides the whole article, shows All for this view only.
   article.addEventListener(REVEAL_EVENT, (e) => {
     const target = e.target;
     if (!(target instanceof Element)) return;
@@ -562,7 +581,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
     // D47: so does a folded `none` row (from Overview, with the switch to All).
     const group = caseRow?.closest(".cb-group");
     if (group && caseRow?.classList.contains(CB_FOLDED_CLASS)) setGroupShown(group, true, opts.language);
-    if (isHiddenByOverview(target)) applyLens(article, row, sw, "all");
+    if (lensOf(article) === "agent" || isHiddenByOverview(target)) applyLens(article, row, sw, "all");
   });
 }
 
@@ -720,6 +739,9 @@ function authoredSelectionText(sel: Selection): string | null {
 export function lensCss(): string {
   return `
     .wiki-article.${LENS_CLASS_PREFIX}overview :is(${HIDDEN_SELECTOR}):not(.${PEEK_CLASS} *) { display: none !important; }
+    .wiki-article.${LENS_CLASS_PREFIX}agent { display: none !important; }
+    .${ROLE_VIEW_CLASS}[hidden] { display: none; }
+${agentPaneCss()}
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }

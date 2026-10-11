@@ -107,6 +107,7 @@ import {
 } from "../../wiki/readonly.ts";
 import {
   isStampRoot,
+  STAMP_CHILD_ENV_NAMES,
   stampConfigFromEnv,
   WIKI_STAMP_BIN_ENV,
   WIKI_STAMP_ROOTS_ENV,
@@ -157,8 +158,8 @@ interface StampReport {
  */
 const SESSION_REF_RE = /^[a-z][a-z0-9-]*:[A-Za-z0-9._-]{1,128}$/;
 
-/** The child's WHOLE environment, by name. See {@link stampChildEnv}. */
-export const STAMP_CHILD_ENV_NAMES: readonly string[] = ["PATH", "HOME", "TMPDIR"];
+/** The child's WHOLE environment, by name, now in `wiki/stamp-roots.ts`. See {@link stampChildEnv}. */
+export { STAMP_CHILD_ENV_NAMES };
 
 /**
  * The environment the stamp child is given: an ALLOWLIST, not `process.env`.

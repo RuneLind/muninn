@@ -25,6 +25,9 @@ import {
 
 export const GRAPH_SECTION_ID = "wikiGraph";
 export const GRAPH_TOGGLE_ID = "wikiGraphToggle";
+/** On `#articleWrap` while graph mode shows: hides every child the graph
+ *  stands in for (article, explainer frame, Agent pane), whenever it was built. */
+export const GRAPH_ON_CLASS = "wiki-graph-on";
 export const GRAPH_CARD_ID = "wikiGraphCard";
 export const GRAPH_LEVEL_ID = "wikiGraphLevel";
 export const GRAPH_DEPTH_ID = "wikiGraphDepth";
