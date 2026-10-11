@@ -512,6 +512,8 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(page.locator(".wiki-article .dl-item#d1 button.dl-more")).toBeVisible();
     expect(await unexpectedControls(page)).toEqual([]);
     // Open the provenance chain: its rows carry controls of their own.
+    // Overview hides the cost line and its chain, so open it in All.
+    await page.locator(`.${LENS_SWITCH_CLASS} button[data-lens="all"]`).click();
     await page.locator("[data-prov-toggle]").click();
     await expect(page.locator("#wikiProvChain")).toBeVisible();
     expect(await unexpectedControls(page)).toEqual([]);
