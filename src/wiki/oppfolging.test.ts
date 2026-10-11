@@ -854,6 +854,87 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     expect(rowHtml(s, "title")).toBe("Skal vi sende B?");
   });
 
+  // Fix round 3: the row reads the RENDERED card body and log row.
+  /** The inner HTML of the first element `open` matches, balanced on `tag`. */
+  const innerOf = (html: string, open: string, tag: string): string | undefined => {
+    const at = html.indexOf(open);
+    if (at === -1) return undefined;
+    const re = new RegExp(`<${tag}\\b[^>]*>|</${tag}>`, "g");
+    re.lastIndex = at + open.length;
+    let depth = 1;
+    for (let m = re.exec(html); m; m = re.exec(html)) {
+      depth += m[0] === `</${tag}>` ? -1 : 1;
+      if (depth === 0) return html.slice(at + open.length, m.index);
+    }
+    return undefined;
+  };
+  const plain = (html: string) => html.replace(/<button[\s\S]*?<\/button>/g, "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  /** The log row's first sentence as text: `dl-first`, else `dl-text` without
+   *  its rest and date tail. */
+  const logRowFirst = (html: string) => {
+    const li = innerOf(html, html.slice(html.search(/<li[^>]*id="d7"/), html.indexOf(">", html.search(/<li[^>]*id="d7"/)) + 1), "li")!;
+    const first = innerOf(li, '<span class="dl-first">', "span");
+    if (first !== undefined) return plain(first);
+    const textOpen = li.slice(li.indexOf('<span class="dl-text"'), li.indexOf(">", li.indexOf('<span class="dl-text"')) + 1);
+    let t = innerOf(li, textOpen, "span")!;
+    for (const cls of ["dl-rest", "dl-tail"]) {
+      const inner = innerOf(t, `<span class="${cls}">`, "span");
+      if (inner !== undefined) t = t.replace(`<span class="${cls}">${inner}</span>`, "");
+    }
+    return plain(t);
+  };
+  const parity = (d7: string) => {
+    const md = [...nm([lane('kind="you"', ["- x"])]), "", ...card("S1", "Spm?"), "<DecisionLog>", "", d7, decided("S1", "D7"), "", "</DecisionLog>"].join("\n");
+    const html = reader(md);
+    return { row: plain(rowHtml(rows(html)[0]!.summary, "out")!), log: logRowFirst(html) };
+  };
+
+  test("fix round 3: a bold run that opens with a code span is the lead", () => {
+    expect(rowHtml(oneCard("**`impact` skal utelate testkall?** Mer tekst."), "title")).toBe("<code>impact</code> skal utelate testkall?");
+  });
+
+  test("fix round 3: the first <strong> in the rendered body wins, after a prose line too", () => {
+    expect(rowHtml(oneCard("Bakgrunn for saken.\n\n**`<Pill>` eller `<Verdict>`?**"), "title")).toBe(
+      "<code>&lt;Pill&gt;</code> eller <code>&lt;Verdict&gt;</code>?",
+    );
+  });
+
+  test("fix round 3: a <strong> inside code (a FileRef) is not the lead", () => {
+    expect(rowHtml(oneCard("<FileRef>**ikke denne** src/a.ts</FileRef>\n\n**Det egentlige spørsmålet?**"), "title")).toBe("Det egentlige spørsmålet?");
+  });
+
+  test("fix round 3: a mark after an inline ```x``` span leaves no chip or mark in the row", () => {
+    for (const body of ['```x``` <Fact n="1" v="ok">tekst her</Fact> nå?', '**```x``` <Fact n="1" v="ok">tekst her</Fact> nå?**']) {
+      const s = oneCard(body, '- **D7** — ```x``` <Fact n="2" v="bad">Vi gjør A for brevet</Fact> nå.');
+      expect(s, body).not.toContain("fc-");
+      expect(plain(rowHtml(s, "title")!), body).toBe("x tekst her nå?");
+      expect(plain(rowHtml(s, "out")!), body).toBe("x Vi gjør A for brevet nå.");
+    }
+  });
+
+  test("fix round 3: the outcome is the log row's first sentence, a mark across a sentence end or the tail included", () => {
+    for (const d7 of [
+      '- **D7** — <Fact n="1" v="ok">Brevet sendes som alternativ A. Begrunnelsen</Fact> står i notatet.',
+      '- **D7** — Vi venter med vedtaket til neste år. <Fact n="2" v="ok">Rune, 11.10.2026</Fact>.',
+      '- **D7** — <Fact n="3" v="bad">Vi venter med vedtaket. Rune, 11.10.2026 (runde 2).</Fact>',
+      "- **D7** — Vi venter med vedtaket til neste år. Rune, 11.10.2026 (runde 2).",
+    ]) {
+      const { row, log } = parity(d7);
+      expect(row, d7).toBe(log);
+      expect(row, d7).not.toBe("");
+    }
+  });
+
+  test("fix round 3: a struck lead of a full sentence leaves the next sentence as the outcome", () => {
+    const { row, log } = parity("- **D7** — ~~Vi velger alternativ B for brevet.~~ Vi velger alternativ A for brevet.");
+    expect(row).toBe("Vi velger alternativ A for brevet.");
+    expect(row).toBe(log);
+  });
+
+  test("fix round 3: the fallback drops a leading [ ] marker", () => {
+    expect(rowHtml(oneCard("[ ] Skal vi sende brevet nå? Mer tekst."), "title")).toBe("Skal vi sende brevet nå?");
+  });
+
   test("an open card stays in the waiting lane that names it", () => {
     const html = reader(PAGE_S);
     expect(html).toContain('<div class="nm-qcard" id="nm-q-s4"><section class="question q-open" data-question-id="S4"');

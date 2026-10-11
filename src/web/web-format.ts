@@ -1,7 +1,6 @@
 import {
   parseBlocks,
   scanInlineComponents,
-  stripFactWrappers,
   normalizeCalloutTone,
   normalizePillTone,
   parseResolvedDate,
@@ -29,7 +28,7 @@ import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMo
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
-import { codeSpanContent, lineCodeSpanRanges, maskLineCodeSpans } from "../format/code-spans.ts";
+import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
 import {
@@ -125,6 +124,11 @@ const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.nam
 // wires the chip's expand-on-click, so an article with JS disabled still shows
 // which passages were checked and how they came out.
 
+/** The classes a fact-check mark and its chip carry; {@link withoutFactChrome}
+ *  reads the rendered markup by the same names. */
+const FACT_MARK_CLASS = "fc-mark";
+const FACT_CHIP_CLASS = "fc-chip";
+
 /** The three generated pieces of a `Fact` mark, kept separate because the wrapped
  *  PROSE must keep flowing through the rest of the inline pipeline (bold, links)
  *  rather than being escaped as an opaque label. */
@@ -140,14 +144,14 @@ function factMarkParts(attrs: Record<string, string>): {
     ? `Fact check: ${FACT_VERDICT_WORD[v]}`
     : `Claim ${n} — ${FACT_VERDICT_WORD[v]}`;
   return {
-    open: `<span class="fc-mark fc-mark-${v}"${nAttr}>`,
+    open: `<span class="${FACT_MARK_CLASS} ${FACT_MARK_CLASS}-${v}"${nAttr}>`,
     close: `</span>`,
     // A real <button>: the chip is the interactive affordance for the evidence
     // card, so it must be keyboard-reachable and announce itself. The glyph is
     // aria-hidden (a screen reader saying "check mark" is noise) and the label
     // rides a visually-hidden span instead.
     chip:
-      `<button type="button" class="fc-chip fc-chip-${v}"${nAttr}` +
+      `<button type="button" class="${FACT_CHIP_CLASS} ${FACT_CHIP_CLASS}-${v}"${nAttr}` +
       ` aria-expanded="false" title="${escapeHtml(label)}">` +
       `<span aria-hidden="true">${FACT_VERDICT_MARK[v]}</span>` +
       `<span class="fc-chip-label">${escapeHtml(label)}</span></button>`,
@@ -1303,40 +1307,89 @@ function withoutIdOnlyItems(list: Extract<Block, { type: "ul" | "ol" }>, ids: re
   return { ...rest, items, ...nested, start: nums[keep[0]!]!, ...(values.some((v) => v !== undefined) ? { values } : {}) };
 }
 
-/** A `<Question>` card's lead for its row (D4), as inline HTML: the body's
- *  first bold run, found outside code spans, else the first sentence of its
- *  first line (the DecisionLog's split). Fact-check marks are dropped
- *  (zone-aware), so no chip lands in a `<summary>`; every other inline
- *  component renders an inline span. Empty when the body has no prose (a
- *  fence or a table alone). */
-function questionLeadHtml(q: ComponentBlock): string {
-  const src = stripFactWrappers(
-    q.children
-      .map((b) => (b.type === "text" ? b.lines.join("\n") : b.type === "ul" || b.type === "ol" ? b.items.join("\n") : b.type === "heading" ? b.content : ""))
-      .join("\n"),
-  );
-  // Same length as `src`, so a match's offsets slice the original text.
-  const masked = src.split("\n").map(maskLineCodeSpans).join("\n");
-  const bold = /(\*\*|__)(?=\S)([\s\S]+?)\1/.exec(masked);
-  let lead: string;
-  if (bold) lead = src.slice(bold.index + bold[1]!.length, bold.index + bold[0].length - bold[1]!.length);
-  else {
-    const line = (src.split("\n").find((l) => l.trim()) ?? "").trim().replace(/^\[[ xX]\][ \t]*/, "");
-    lead = splitDecisionText(line)?.first ?? line;
+/** Each element `open` finds in `html`, with its balanced close (`tag`
+ *  elements nested inside counted). A match inside an earlier match's range is
+ *  not reported. */
+function elementRanges(html: string, open: RegExp, tag: string): { start: number; innerStart: number; innerEnd: number; end: number }[] {
+  const out: { start: number; innerStart: number; innerEnd: number; end: number }[] = [];
+  const re = new RegExp(open.source, "g");
+  const closeTag = `</${tag}>`;
+  for (let m = re.exec(html); m; m = re.exec(html)) {
+    const tagRe = new RegExp(`<${tag}\\b[^>]*>|</${tag}>`, "g");
+    tagRe.lastIndex = m.index + m[0].length;
+    let depth = 1;
+    let close = -1;
+    for (let t = tagRe.exec(html); t; t = tagRe.exec(html)) {
+      depth += t[0] === closeTag ? -1 : 1;
+      if (depth === 0) {
+        close = t.index;
+        break;
+      }
+    }
+    if (close === -1) break;
+    out.push({ start: m.index, innerStart: m.index + m[0].length, innerEnd: close, end: close + closeTag.length });
+    re.lastIndex = close + closeTag.length;
   }
-  lead = lead.replace(/\s*\n\s*/g, " ").trim();
-  return lead ? itemHtml(lead) : "";
+  return out;
 }
 
-/** The first sentence a decided card's row quotes, as inline HTML: what the
- *  DecisionLog compact row shows as `dl-first` for the item, by the row's own
- *  two cuts (the date tail and the sentence split, both under `rendersAs`),
- *  with fact-check marks dropped (zone-aware). */
+/** `html` with the given ranges replaced by their inner HTML (`keep`) or
+ *  removed whole. */
+function spliceRanges(html: string, ranges: ReturnType<typeof elementRanges>, keep: boolean): string {
+  let out = "";
+  let at = 0;
+  for (const r of ranges) {
+    out += html.slice(at, r.start) + (keep ? html.slice(r.innerStart, r.innerEnd) : "");
+    at = r.end;
+  }
+  return out + html.slice(at);
+}
+
+const FACT_CHIP_OPEN_RE = new RegExp(`<button type="button" class="${FACT_CHIP_CLASS} ${FACT_CHIP_CLASS}-[a-z]+"[^>]*>`);
+const FACT_MARK_OPEN_RE = new RegExp(`<span class="${FACT_MARK_CLASS} ${FACT_MARK_CLASS}-[a-z]+"[^>]*>`);
+
+/** Rendered inline HTML without fact-check chrome, read off the markup the
+ *  renderer emits (`factMarkParts`): every chip button removed, every mark span
+ *  unwrapped. So no button lands in a `<summary>`, however the source spelled
+ *  the mark. The block form (`div.fc-mark-block`) cannot occur here: both
+ *  callers hand in inline HTML. */
+function withoutFactChrome(html: string): string {
+  let out = spliceRanges(html, elementRanges(html, FACT_CHIP_OPEN_RE, "button"), false);
+  for (let marks = elementRanges(out, FACT_MARK_OPEN_RE, "span"); marks.length; marks = elementRanges(out, FACT_MARK_OPEN_RE, "span")) {
+    out = spliceRanges(out, marks, true);
+  }
+  return out;
+}
+
+/** A `<Question>` card's lead for its row (D4), read off the card body as it
+ *  renders (`bodyHtml`): the first `<strong>` outside code, else the first
+ *  sentence of the body's first line (the DecisionLog split, a leading `[ ]`
+ *  dropped), rendered inline. Fact-check chrome removed. Empty when the body
+ *  has no prose (a fence or a table alone). */
+function questionLeadHtml(q: ComponentBlock, bodyHtml: string): string {
+  const code = [...elementRanges(bodyHtml, /<code\b[^>]*>/, "code"), ...elementRanges(bodyHtml, /<pre\b[^>]*>/, "pre")];
+  const strong = elementRanges(bodyHtml, /<strong>/, "strong").find((r) => !code.some((c) => r.start > c.start && r.start < c.end));
+  if (strong) return withoutFactChrome(bodyHtml.slice(strong.innerStart, strong.innerEnd)).trim();
+  const src = q.children
+    .map((b) => (b.type === "text" ? b.lines.join("\n") : b.type === "ul" || b.type === "ol" ? b.items.join("\n") : b.type === "heading" ? b.content : ""))
+    .join("\n");
+  const line = (src.split("\n").find((l) => l.trim()) ?? "").trim().replace(/^\[[ xX]\][ \t]*/, "");
+  return line ? withoutFactChrome(itemHtml(splitDecisionText(line)?.first ?? line)).trim() : "";
+}
+
+/** The first sentence a decided card's row quotes: the DecisionLog compact
+ *  row's own `.dl-text` HTML for the item (`decisionTail`, else
+ *  `logTextHtml`, fact marks in), its `dl-first` part — or, with no split,
+ *  everything but the date tail — then fact-check chrome removed. So the text
+ *  is the log row's first sentence by construction. */
 function decisionRowFirstHtml(text: string, id: string): string {
-  const src = stripFactWrappers(text);
   const isDecision = DECISION_ID_RE.test(id);
-  const body = (isDecision ? decisionTailCut(src)?.body : undefined) ?? src;
-  return itemHtml(decisionParts(body, isDecision)?.first ?? body);
+  const html = (isDecision ? decisionTail(text)?.html : undefined) ?? logTextHtml(text, isDecision);
+  const first = elementRanges(html, /<span class="dl-first">/, "span")[0];
+  const shown = first
+    ? html.slice(first.innerStart, first.innerEnd)
+    : spliceRanges(html, elementRanges(html, new RegExp(`<span class="(?:dl-rest|${DL_TAIL_CLASS})">`), "span"), false);
+  return withoutFactChrome(shown).trim();
 }
 
 /** The «Avklart» lane (settled questions plan, D1, D3–D6): render-only, so no
@@ -1359,7 +1412,8 @@ function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguag
     .map((r) => {
       const anchor = currentLaneCards!.moved.get(r.id)!;
       const pill = r.decision ? `${L.decided} → ${r.decision}` : L.closed;
-      const lead = questionLeadHtml(r.q);
+      const body = renderBlocks(r.q.children, webRenderer);
+      const lead = questionLeadHtml(r.q, body);
       const out = r.sentence
         ? `<span class="q-row-out"><span class="q-row-did">${escapeHtml(r.decision!)}</span> ${r.sentence}</span>`
         : "";
@@ -1370,7 +1424,7 @@ function settledLaneHtml(cards: readonly ComponentBlock[], lang: QuestionLanguag
         (lead ? `<span class="q-row-title">${lead}</span>` : "") +
         `<span class="q-row-cta"><span class="q-row-open">${escapeHtml(words.action.see)}</span><span class="q-row-close">${escapeHtml(words.action.hide)}</span></span>` +
         `${out}</summary>` +
-        `<div class="q-row-body">${questionCardHtml(r.q.attrs, renderBlocks(r.q.children, webRenderer))}</div></details>`
+        `<div class="q-row-body">${questionCardHtml(r.q.attrs, body)}</div></details>`
       );
     })
     .join("");
@@ -1642,28 +1696,7 @@ export function decisionFirstSentence(text: string, id: string): string {
  *  changing a word of the page. */
 export function unwrapDecisionSplits(html: string): string {
   if (!html.includes('<span class="dl-first">')) return html;
-  const opens = /<span class="dl-(?:first|rest)">/g;
-  let out = "";
-  let at = 0;
-  for (let m = opens.exec(html); m; m = opens.exec(html)) {
-    // The matching close: a balanced scan over the spans inside.
-    const tagRe = /<span\b[^>]*>|<\/span>/g;
-    tagRe.lastIndex = m.index + m[0].length;
-    let depth = 1;
-    let close = -1;
-    for (let t = tagRe.exec(html); t; t = tagRe.exec(html)) {
-      depth += t[0] === "</span>" ? -1 : 1;
-      if (depth === 0) {
-        close = t.index;
-        break;
-      }
-    }
-    if (close === -1) break;
-    out += html.slice(at, m.index) + html.slice(m.index + m[0].length, close);
-    at = close + "</span>".length;
-    opens.lastIndex = at;
-  }
-  return out + html.slice(at);
+  return spliceRanges(html, elementRanges(html, /<span class="dl-(?:first|rest)">/, "span"), true);
 }
 
 /** An id-led item's text: its first sentence and the rest in two spans when
