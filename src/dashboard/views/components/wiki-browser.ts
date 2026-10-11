@@ -190,6 +190,7 @@ import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find
 import { revealHashTarget } from "./wiki-hash-target.ts";
 import { enhanceLens, lensOf, readerSelectionText, storedLens } from "./wiki-lens.ts";
 import { abortAgentRuns, snapshotAgentPane, type AgentPaneSnapshot } from "./wiki-agent-pane.ts";
+import { enhanceNewSince } from "./wiki-new-since.ts";
 import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
 import type { ReaderPayload } from "../../../wiki/render.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
@@ -316,6 +317,7 @@ import {
   searchWithJira,
   searchWithProject,
   sortPages,
+  pageTimeMs,
   statusCounts,
   statusFacetVisible,
   STATUS_ORDER,
@@ -4246,6 +4248,18 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
         }),
       });
       consumeUrlLens();
+      // D20: the items dated after this tab's baseline visit, and whether the
+      // page changed since. Any render — an in-place reload after the reader's
+      // own write included — keeps the tab's baseline and stores this visit.
+      if (data.meta.relPath) {
+        const changedMs = pageTimeMs(data.meta, recencyNow());
+        enhanceNewSince(articleRoot, {
+          wiki: FIND_SELF_WIKI || WIKI,
+          relPath: data.meta.relPath,
+          language: readerLang,
+          changedMs: changedMs > 0 ? changedMs : null,
+        });
+      }
       const renderedEl = articleRoot.querySelector(".wiki-article");
       renderedArticle = currentRelPath && renderedEl ? { relPath: currentRelPath, el: renderedEl } : null;
       // `<Question>` cards: answers, composer and edit, on a wiki that takes

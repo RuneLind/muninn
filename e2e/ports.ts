@@ -298,13 +298,15 @@ export const E2E_PORTS = {
   "wiki-oppfolging-roles/preview": 3143,
   // Overview's compact DecisionLog and CaseBoard rows (reader lenses PR 10, D41, D42).
   "wiki-compact-lists": 3144,
+  // "New since last read" (reader lenses PR 4, D20, acceptance 8).
+  "wiki-new-since": 3145,
   // The Agent lens (reader lenses PR 5): a stub plan-card, no PLAN_CARD_BIN,
   // the real plan-card, and the nais profile at role user and admin.
-  "wiki-agent-lens": 3145,
-  "wiki-agent-lens/unset": 3146,
-  "wiki-agent-lens/real": 3147,
-  "wiki-agent-lens/nais-user": 3148,
-  "wiki-agent-lens/nais-admin": 3149,
+  "wiki-agent-lens": 3146,
+  "wiki-agent-lens/unset": 3147,
+  "wiki-agent-lens/real": 3148,
+  "wiki-agent-lens/nais-user": 3149,
+  "wiki-agent-lens/nais-admin": 3150,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

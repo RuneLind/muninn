@@ -35,6 +35,7 @@ import {
 } from "./components/wiki-report-blocks.ts";
 import { refLinksCss } from "./components/wiki-ref-links.ts";
 import { lensCss } from "./components/wiki-lens.ts";
+import { NEW_TAG_LOOK, newSinceCss } from "./components/wiki-new-since.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -785,10 +786,8 @@ export async function renderWikiPage(opts?: {
        ramp darkened for exactly that reason (shared-styles.ts says so where it
        is declared) and measures 6.34:1 light; in the DARK theme the two tokens
        are the same value. */
-    .wiki-new-tag {
-      font-size: 9.5px; font-weight: 700; letter-spacing: .06em; line-height: 1.35;
-      color: var(--tok-str); border: 1px solid color-mix(in srgb, var(--tok-str) 55%, transparent);
-      border-radius: 3px; padding: 0 3px; margin: 1px 2px 0 0; flex-shrink: 0;
+    .wiki-new-tag {${NEW_TAG_LOOK}
+      margin: 1px 2px 0 0; flex-shrink: 0;
     }
     .wiki-list-meta.new { color: var(--tok-str); font-weight: 600; }
     /* ★ and the date share one flex slot, so the ★ costs the row its own width
@@ -1967,6 +1966,8 @@ export async function renderWikiPage(opts?: {
     ${refLinksCss()}
     /* The lens switch, what Overview hides, and the fold sizes (wiki-lens.ts). */
     ${lensCss()}
+    /* "New since last read" (D20): item marks and the head line (wiki-new-since.ts). */
+    ${newSinceCss()}
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}
