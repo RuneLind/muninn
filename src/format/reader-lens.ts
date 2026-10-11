@@ -141,6 +141,8 @@ export const DL_SEP_ATTR = "data-dl-sep";
 export const DL_ALL_CLASS = "dl-all";
 export const CB_MORE_CLASS = "cb-more";
 export const CB_OKMORE_CLASS = "cb-okmore";
+/** The toggle that folds a CaseBoard's `none` group outside Overview (D47). */
+export const CB_NONEMORE_CLASS = "cb-nonemore";
 export const CB_EXPANDED_CLASS = "cb-expanded";
 /** The class an article carries for its lens (`lens-` plus the lens). */
 export const LENS_CLASS_PREFIX = "lens-";
@@ -154,6 +156,11 @@ export const COMPACT_WORDS: Record<
     okMore: (n: number) => string;
     okFewer: string;
     hidden: (n: number, label: string) => string;
+    /** D47: the `none` group's toggle, closed and open, and its label when
+     *  the board names none (`data-label` is then the bare status). */
+    noneMore: (n: number, label: string) => string;
+    noneFewer: string;
+    noneLabel: string;
   }
 > = {
   en: {
@@ -162,6 +169,9 @@ export const COMPACT_WORDS: Record<
     okMore: (n) => `+ ${n} more`,
     okFewer: "show fewer",
     hidden: (n, label) => `${n} ${n === 1 ? "case" : "cases"} with status “${label}” hidden`,
+    noneMore: (n, label) => `+ ${n} ${label}`,
+    noneFewer: "hide",
+    noneLabel: "not a candidate",
   },
   no: {
     showAll: (n) => `Vis alle ${n} beslutninger`,
@@ -169,6 +179,9 @@ export const COMPACT_WORDS: Record<
     okMore: (n) => `+ ${n} til`,
     okFewer: "vis færre",
     hidden: (n, label) => `${n} ${n === 1 ? "sak" : "saker"} med status «${label}» er skjult`,
+    noneMore: (n, label) => `+ ${n} ${label}`,
+    noneFewer: "skjul",
+    noneLabel: "ikke kandidat",
   },
 };
 

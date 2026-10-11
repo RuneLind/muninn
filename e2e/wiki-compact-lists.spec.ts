@@ -14,9 +14,10 @@
  * while a fold whose block Overview hides and a click on the lens already
  * shown open none, that a #case hash opens its row, that a fold's size leaves
  * out the reader's own text, and (D45) that All renders both blocks compact
- * too — newest first, five-cap, case lines — showing the `none` rows Overview
- * hides, keeps the order across lens switches, and reveals a capped decision
- * or a folded case from an id link or a hash load. Also that a case holding a
+ * too — newest first, five-cap, case lines — folding the `none` group Overview
+ * hides behind «+ N ikke kandidat» (D47; a lens switch folds it again, a hash
+ * to a `none` case opens it), keeps the order across lens switches, and
+ * reveals a capped decision or a folded case from an id link or a hash load. Also that a case holding a
  * fact-check mark is never folded, that Explain gets a DecisionLog selection
  * in authored order with its folded text, that no switch shows where both
  * lenses render the same page, and that the decisions pill lands on the
@@ -571,14 +572,67 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(page.locator(".cb-row#case-mel-4")).toBeVisible();
     await expect(page.locator(".cb-row#case-mel-5")).toBeHidden();
     await expect(page.locator(".wiki-article button.cb-okmore")).toHaveText("+ 2 til");
-    // The none rows: shown in All, with no count line; hidden in Overview, with one.
-    await expect(page.locator('.cb-group[data-status="none"]')).toBeVisible();
-    await expect(page.locator(".cb-row#case-mel-7")).toBeVisible();
+    // D47: the none rows fold whole behind «+ 2 ikke kandidat» in All, with no
+    // count line; the button opens and closes them.
+    const none = page.locator('.cb-group[data-status="none"]');
+    const noneMore = none.locator("button.cb-nonemore");
+    await expect(none).toBeVisible();
+    await expect(noneMore).toHaveText("+ 2 ikke kandidat");
+    await expect(noneMore).toHaveAttribute("aria-expanded", "false");
+    await expect(none.locator(".cb-row")).toHaveCount(2);
+    for (const id of ["case-mel-7", "case-mel-8"]) await expect(page.locator(`.cb-row#${id}`)).toBeHidden();
     await expect(page.locator(".cb-lens-note")).toBeHidden();
     await expect(page.locator(".wiki-article .cb-strip")).toHaveText("1 holdt ute · 1 venter · 1 feil årsavregning · 2 ikke kandidat · 3 ok");
+    await noneMore.click();
+    for (const id of ["case-mel-7", "case-mel-8"]) await expect(page.locator(`.cb-row#${id}`)).toBeVisible();
+    await expect(noneMore).toHaveText("skjul");
+    await expect(noneMore).toHaveAttribute("aria-expanded", "true");
+    // The ok group's «+ N til» is its own toggle.
+    await expect(page.locator(".wiki-article button.cb-okmore")).toHaveText("+ 2 til");
+    await expect(page.locator(".cb-row#case-mel-5")).toBeHidden();
+    // Overview: the group is gone, button and all, and the count line shows.
     await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
-    await expect(page.locator(".cb-row#case-mel-7")).toBeHidden();
+    await expect(none).toBeHidden();
+    await expect(noneMore).toBeHidden();
     await expect(page.locator(".cb-lens-note")).toHaveText("2 saker med status «ikke kandidat» er skjult");
+    // Back to All: folded again, one button.
+    await page.locator(".wiki-lens-switch button[data-lens='all']").click();
+    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveCount(1);
+    await expect(noneMore).toHaveText("+ 2 ikke kandidat");
+    await expect(page.locator(".cb-row#case-mel-7")).toBeHidden();
+    await noneMore.click();
+    await expect(page.locator(".cb-row#case-mel-7")).toBeVisible();
+    await noneMore.click();
+    await expect(page.locator(".cb-row#case-mel-7")).toBeHidden();
+    await expect(noneMore).toHaveText("+ 2 ikke kandidat");
+    expectClean(seen);
+  });
+
+  test("D47: a #case hash to a none case opens the fold in All, and in Overview switches to All", async ({ page }) => {
+    let seen = await open_(page, "&lens=all", "#case-mel-7");
+    await expect(page.locator(".cb-row#case-mel-7")).toBeVisible();
+    await expect(page.locator(".cb-row#case-mel-7")).toBeInViewport();
+    await expect(page.locator(".cb-row#case-mel-8")).toBeVisible();
+    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveText("skjul");
+    expect(await lensOf(page)).toBe("all");
+    expectClean(seen);
+
+    seen = await open_(page, "", "#case-mel-8");
+    await expect(page.locator(".cb-row#case-mel-8")).toBeVisible();
+    expect(await lensOf(page)).toBe("all");
+    await expect(page.locator(".cb-row#case-mel-8")).toBeInViewport();
+    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveText("skjul");
+    await expect(page.locator(".cb-lens-note")).toBeHidden();
+    expectClean(seen);
+  });
+
+  test("D47: a board with no labels reads «+ N ikke kandidat» in the wiki's language", async ({ page }) => {
+    const seen = await open_(page, "&lens=all", "", MARKS_REL);
+    await fold(page, "Ikke kandidater").locator(":scope > summary").click();
+    const none = page.locator('.wiki-article .cb-group[data-status="none"]').first();
+    await expect(none).toHaveAttribute("data-label", "none");
+    await expect(none.locator("button.cb-nonemore")).toHaveText("+ 1 ikke kandidat");
+    await expect(none.locator(".cb-row")).toBeHidden();
     expectClean(seen);
   });
 

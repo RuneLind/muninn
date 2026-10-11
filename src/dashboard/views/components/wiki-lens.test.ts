@@ -45,8 +45,14 @@ describe("lensCss: the compact lists are the same in every lens (D45)", () => {
     expect(art.filter((r) => r.startsWith(".wiki-article ") && /display: (block|inline)/.test(r))).toEqual([]);
   });
 
-  test("Overview alone hides the none rows and shows their count line", () => {
-    expect(rulesWith('.cb-group[data-status="none"]').every((r) => r.startsWith(".wiki-article.lens-overview"))).toBe(true);
+  test("Overview alone hides the none group whole and shows its count line", () => {
+    expect(rulesWith('.cb-group[data-status="none"]').some((r) => r.startsWith(".wiki-article.lens-overview :is("))).toBe(true);
     expect(rulesWith(".cb-lens-note { display: none; }")).toEqual([".wiki-article:not(.lens-overview) .cb-lens-note { display: none; }"]);
+  });
+
+  test("D47: every lens folds the none group's rows until «+ N ikke kandidat» opens it", () => {
+    const fold = rulesWith('.cb-group[data-status="none"]:not(.lens-show-all) > .cb-row');
+    expect(fold).toEqual([`${LENSED} .cb-group[data-status="none"]:not(.lens-show-all) > .cb-row:not(.wiki-ref-peek *) { display: none; }`]);
+    expect(rulesWith(":not(.lens-overview)").filter((r) => /cb-nonemore/.test(r))).toEqual([]);
   });
 });
