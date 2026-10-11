@@ -188,7 +188,7 @@ import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
 import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
 import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find-palette.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
-import { enhanceLens, lensOf, readerSelectionText, storedLens } from "./wiki-lens.ts";
+import { enhanceLens, lensOf, readerSelectionText, refreshLensSwitch, storedLens } from "./wiki-lens.ts";
 import { abortAgentRuns, snapshotAgentPane, type AgentPaneSnapshot } from "./wiki-agent-pane.ts";
 import { enhanceNewSince } from "./wiki-new-since.ts";
 import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
@@ -2289,9 +2289,15 @@ let provLoadSeq = 0;
  * OTHER writer could leave and got one wrong. What a load may WRITE is decided
  * in `loadProvStrip` (an empty or failed answer replaces only a placeholder);
  * where it goes is decided here. An open chain stays open across the
- * replacement: the reader was looking at it.
+ * replacement: the reader was looking at it. A cost line that lands brings
+ * the lens switch with it when Overview hides nothing else on the page.
  */
 function placeProvStrip(html: string): void {
+  writeProvStrip(html);
+  refreshLensSwitch(document.getElementById("articleWrap")!);
+}
+
+function writeProvStrip(html: string): void {
   const existing = document.querySelector(".wiki-prov-strip");
   if (!existing) {
     document.querySelector(".wiki-article-head .wiki-meta-row")?.insertAdjacentHTML("afterend", html);
@@ -3811,10 +3817,11 @@ function repaintSeriesHead(): void {
   if (existing) {
     if (html) existing.outerHTML = html;
     else existing.remove();
-    return;
+  } else if (html) {
+    host.querySelector(".wiki-meta-row")?.insertAdjacentHTML("afterend", html);
   }
-  if (!html) return;
-  host.querySelector(".wiki-meta-row")?.insertAdjacentHTML("afterend", html);
+  // A series strip that appears brings the lens switch, as a cost line does.
+  if (html) refreshLensSwitch(document.getElementById("articleWrap")!);
 }
 
 document.addEventListener("keydown", (e) => {

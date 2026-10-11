@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { lensCss, lensSwitchClosesNoneFolds, newestFirstOrder } from "./wiki-lens.ts";
+import {
+  OVERVIEW_HIDDEN_HEAD,
+  SWITCH_TITLE,
+  lensCss,
+  lensSwitchClosesNoneFolds,
+  lensSwitchWanted,
+  newestFirstOrder,
+} from "./wiki-lens.ts";
 
 /** The rules of `lensCss()` that carry `needle`, one per line. */
 function rulesWith(needle: string): string[] {
@@ -75,5 +82,55 @@ describe("lensSwitchClosesNoneFolds (D47)", () => {
     expect(lensSwitchClosesNoneFolds("agent", "all")).toBe(false);
     expect(lensSwitchClosesNoneFolds("all", "all")).toBe(false);
     expect(lensSwitchClosesNoneFolds("overview", "overview")).toBe(false);
+  });
+});
+
+describe("Overview in the article head: the series strip and the session cost", () => {
+  const HEAD = ".wiki-article-head:has(~ .wiki-article.lens-overview) :is(";
+
+  test("one rule hides the head list, reached from the article's sibling", () => {
+    const rules = rulesWith(HEAD);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.endsWith("{ display: none !important; }")).toBe(true);
+    for (const sel of OVERVIEW_HIDDEN_HEAD) expect(rules[0]!).toContain(sel);
+  });
+
+  test("the series head, the cost line and its chain are listed; the Jira row is not", () => {
+    expect(OVERVIEW_HIDDEN_HEAD).toContain(".wiki-series-head");
+    expect(OVERVIEW_HIDDEN_HEAD).toContain(".wiki-prov-line");
+    expect(OVERVIEW_HIDDEN_HEAD).toContain(".wiki-prov-chain");
+    expect(OVERVIEW_HIDDEN_HEAD).not.toContain(".wiki-prov-jira-row");
+    expect(OVERVIEW_HIDDEN_HEAD).not.toContain(".wiki-prov-strip");
+    // A strip goes whole only when it holds no Jira row.
+    expect(OVERVIEW_HIDDEN_HEAD.filter((s) => s.startsWith(".wiki-prov-strip"))).toEqual([
+      ".wiki-prov-strip:has(> .wiki-prov-line):not(:has(> .wiki-prov-jira-row))",
+    ]);
+  });
+
+  test("no rule outside Overview hides a head block", () => {
+    const hides = lensCss()
+      .split("}")
+      .filter((r) => /display:\s*none/.test(r) && /wiki-series-head|wiki-prov-/.test(r));
+    expect(hides.map((r) => r.trim().startsWith(HEAD))).toEqual([true]);
+  });
+
+  test("the switch's tooltip names the series and the session cost", () => {
+    expect(SWITCH_TITLE.en).toContain("the series and its timeline, the sessions' cost");
+    expect(SWITCH_TITLE.no).toContain("serien og tidslinjen, sesjonenes kostnad");
+  });
+});
+
+describe("lensSwitchWanted", () => {
+  const none = { articleHides: false, headHides: false, opensFold: false, agentAvailable: false };
+
+  test("a head block Overview hides is enough on its own", () => {
+    expect(lensSwitchWanted({ ...none, headHides: true })).toBe(true);
+  });
+
+  test("each other reason still shows it, and a page with none shows no switch", () => {
+    expect(lensSwitchWanted({ ...none, articleHides: true })).toBe(true);
+    expect(lensSwitchWanted({ ...none, opensFold: true })).toBe(true);
+    expect(lensSwitchWanted({ ...none, agentAvailable: true })).toBe(true);
+    expect(lensSwitchWanted(none)).toBe(false);
   });
 });
