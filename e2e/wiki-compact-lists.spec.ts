@@ -15,7 +15,8 @@
  * shown open none, that a #case hash opens its row, that a fold's size leaves
  * out the reader's own text, and (D45) that All renders both blocks compact
  * too — newest first, five-cap, case lines — folding the `none` group Overview
- * hides behind «+ N ikke kandidat» (D47; a lens switch folds it again, a hash
+ * hides behind «+ N ikke kandidat» (D47; a switch into or out of Overview folds
+ * it again, a marked case never folds, a hash
  * to a `none` case opens it), keeps the order across lens switches, and
  * reveals a capped decision or a folded case from an id link or a hash load. Also that a case holding a
  * fact-check mark is never folded, that Explain gets a DecisionLog selection
@@ -239,6 +240,64 @@ const FACT_CASES = [
   "  note: '2024 · **Tredje på lista.**'",
   "",
 ].join("\n");
+// PR 675 fix round 1: `none` cases holding a fact-check mark (item 1), a
+// `none` group whose every row is marked (item 2), and a CaseBoard inside a
+// Callout, which a heading's peek copies whole (item 5).
+const NONE_FACT_REL = "plans/none-fact.mdx";
+const NONE_FACT_PAGE = [
+  "---",
+  "title: None fact page",
+  "type: plan",
+  "---",
+  "",
+  "# None fact page",
+  "",
+  '<CaseBoard src="none-fact.yaml" labels="none:ikke kandidat" />',
+  "",
+  '<CaseBoard src="none-marked.yaml" />',
+  "",
+].join("\n");
+const NONE_FACT_CASES = [
+  "- id: MEL-21",
+  "  status: ok",
+  "  note: '2024 · **På lista.**'",
+  "- id: MEL-22",
+  "  status: none",
+  "  note: 'Ikke kandidat · Gjelder <Fact n=\"1\" v=\"bad\">alle saker i 2021</Fact>'",
+  "- id: MEL-23",
+  "  status: none",
+  "  note: 'Ikke kandidat'",
+  "- id: MEL-24",
+  "  status: none",
+  "  note: 'Ikke kandidat'",
+  "",
+].join("\n");
+const NONE_MARKED_CASES = [
+  "- id: MEL-25",
+  "  status: none",
+  "  note: 'Ikke kandidat · Gjelder <Fact n=\"2\" v=\"bad\">alle saker i 2020</Fact>'",
+  "",
+].join("\n");
+const NEST_REL = "plans/nest.mdx";
+const NEST_PAGE = [
+  "---",
+  "title: Nest page",
+  "type: plan",
+  "---",
+  "",
+  "# Nest page",
+  "",
+  "Se «Nestet tavle» for sakene.",
+  "",
+  "## Nestet tavle",
+  "",
+  "<Callout>",
+  "",
+  '<CaseBoard src="none.yaml" />',
+  "",
+  "</Callout>",
+  "",
+].join("\n");
 const PLAIN_REL = "plans/plain.mdx";
 const PLAIN_PAGE = [
   "---",
@@ -390,6 +449,10 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, FACT_REL), FACT_PAGE, "utf8");
   await writeFile(path.join(root, "plans", "fact-cases.yaml"), FACT_CASES, "utf8");
   await writeFile(path.join(root, PLAIN_REL), PLAIN_PAGE, "utf8");
+  await writeFile(path.join(root, NONE_FACT_REL), NONE_FACT_PAGE, "utf8");
+  await writeFile(path.join(root, "plans", "none-fact.yaml"), NONE_FACT_CASES, "utf8");
+  await writeFile(path.join(root, "plans", "none-marked.yaml"), NONE_MARKED_CASES, "utf8");
+  await writeFile(path.join(root, NEST_REL), NEST_PAGE, "utf8");
   await writeFile(path.join(root, LOCATE_REL), LOCATE_PAGE, "utf8");
   await writeFile(path.join(root, OPEN_REL), OPEN_PAGE, "utf8");
   await writeFile(
@@ -1116,6 +1179,67 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     await expect(page.locator(".cb-row#case-mel-13 .fc-mark")).toBeVisible();
     await expect(page.locator(".cb-row#case-mel-14")).toBeHidden();
     await expect(page.locator(".wiki-article button.cb-okmore")).toHaveText("+ 1 til");
+    expectClean(seen);
+  });
+
+  test("PR 675 fix round 1, items 1–2: All's none fold never folds away a case holding a fact-check mark", async ({ page }) => {
+    const seen = await open_(page, "&lens=all", "", NONE_FACT_REL);
+    const groups = page.locator('.wiki-article .cb-group[data-status="none"]');
+    const [none, marked] = [groups.nth(0), groups.nth(1)];
+    // The marked row and its ❌ show; the unmarked rows fold, and «+ N» counts only those.
+    await expect(page.locator(".cb-row#case-mel-22 .fc-mark")).toBeVisible();
+    for (const id of ["case-mel-23", "case-mel-24"]) await expect(page.locator(`.cb-row#${id}`)).toBeHidden();
+    const more = none.locator("button.cb-nonemore");
+    await expect(more).toHaveText("+ 2 ikke kandidat");
+    await expect(more).toHaveAttribute("aria-label", "vis 2 ikke kandidat");
+    await expect(more).toHaveAttribute("aria-controls", "case-mel-23 case-mel-24");
+    await more.click();
+    for (const id of ["case-mel-23", "case-mel-24"]) await expect(page.locator(`.cb-row#${id}`)).toBeVisible();
+    await expect(more).toHaveText("skjul");
+    await expect(more).toHaveAttribute("aria-label", "skjul 2 ikke kandidat");
+    // A group whose every row is marked folds nothing, so it gets no button.
+    await expect(page.locator(".cb-row#case-mel-25 .fc-mark")).toBeVisible();
+    await expect(marked.locator("button.cb-nonemore")).toHaveCount(0);
+    // Overview still hides the whole group, the marked row included (unchanged).
+    await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
+    await expect(page.locator(".cb-row#case-mel-22")).toBeHidden();
+    expectClean(seen);
+  });
+
+  test("PR 675 fix round 1, item 6: the ok toggle names what it shows and hides", async ({ page }) => {
+    const seen = await open_(page, "&lens=all");
+    await fold(page, "Saker").locator(":scope > summary").click();
+    const ok = page.locator(".wiki-article button.cb-okmore");
+    await expect(ok).toHaveAttribute("aria-label", "vis 2 ok");
+    await ok.click();
+    await expect(ok).toHaveAttribute("aria-label", "skjul 2 ok");
+    expectClean(seen);
+  });
+
+  test("PR 675 fix round 1, item 7: nothing hides the none toggle outside Overview", async ({ page }) => {
+    const seen = await open_(page, "&lens=all", "", NONE_FACT_REL);
+    const more = page.locator('.wiki-article .cb-group[data-status="none"]').first().locator("button.cb-nonemore");
+    // Every lens the reader knows, set on the article directly: the Agent
+    // button renders only where the server offers it, and it never does here.
+    for (const lens of ["all", "agent", "overview"]) {
+      await page.locator(".wiki-article").evaluate((el, l) => {
+        el.classList.remove("lens-overview", "lens-all", "lens-agent");
+        el.classList.add(`lens-${l}`);
+      }, lens);
+      if (lens === "overview") await expect(more).toBeHidden();
+      else await expect(more).toBeVisible();
+    }
+    expectClean(seen);
+  });
+
+  test("PR 675 fix round 1, item 5: a heading's peek of a CaseBoard in a Callout drops the none toggle", async ({ page }) => {
+    const seen = await open_(page, "&lens=all", "", NEST_REL);
+    await expect(page.locator(".wiki-article button.cb-nonemore")).toHaveText("+ 1 ikke kandidat");
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "Nestet tavle" }).hover();
+    const peek = page.locator(".wiki-ref-peek .wiki-ref-peek-body");
+    await expect(peek.locator(".cb-row")).toBeVisible();
+    await expect(peek.locator(".cb-row")).toContainText("Ikke kandidat");
+    await expect(peek.locator("button")).toHaveCount(0);
     expectClean(seen);
   });
 

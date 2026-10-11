@@ -161,6 +161,8 @@ export const COMPACT_WORDS: Record<
     noneMore: (n: number, label: string) => string;
     noneFewer: string;
     noneLabel: string;
+    /** A group toggle's accessible name: what it shows, closed, or hides, open. */
+    groupToggle: (open: boolean, n: number, label: string) => string;
   }
 > = {
   en: {
@@ -172,6 +174,7 @@ export const COMPACT_WORDS: Record<
     noneMore: (n, label) => `+ ${n} ${label}`,
     noneFewer: "hide",
     noneLabel: "not a candidate",
+    groupToggle: (open, n, label) => `${open ? "hide" : "show"} ${n} ${label}`,
   },
   no: {
     showAll: (n) => `Vis alle ${n} beslutninger`,
@@ -182,6 +185,7 @@ export const COMPACT_WORDS: Record<
     noneMore: (n, label) => `+ ${n} ${label}`,
     noneFewer: "skjul",
     noneLabel: "ikke kandidat",
+    groupToggle: (open, n, label) => `${open ? "skjul" : "vis"} ${n} ${label}`,
   },
 };
 
