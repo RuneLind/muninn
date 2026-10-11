@@ -31,6 +31,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { LENS_KEY } from "../src/format/reader-lens.ts";
 import { AGENT_CONTEXT_FOLD_NAMES } from "../src/format/agent-context.ts";
+import { LAST_VISIT_KEY as VISIT_KEY } from "../src/dashboard/views/components/wiki-new-since.ts";
 
 const PORT = e2ePort("wiki-lens");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -210,6 +211,9 @@ const HEAD_REL = "plans/head.mdx";
 const SERIES_ONLY_REL = "plans/head-2.mdx";
 const PROV_ONLY_REL = "prov-only.md";
 const BARE_REL = "bare.md";
+/** Joins the `lh` series from the rail during its test: nothing Overview
+ *  hides until then. */
+const JOIN_REL = "plans/join.mdx";
 const headPage = (title: string, fm: string[]) =>
   ["---", `title: ${title}`, ...fm, "---", "", `# ${title}`, "", "Readable prose and nothing Overview hides.", ""].join("\n");
 const HEAD_PAGES: Array<[string, string]> = [
@@ -227,6 +231,7 @@ const HEAD_PAGES: Array<[string, string]> = [
   [SERIES_ONLY_REL, headPage("Series only", ["type: plan", "series: lh", "plan_status: shipped"])],
   [PROV_ONLY_REL, headPage("Provenance only", ["sessions: [claude-code:aaaaaaaa-0000-4000-8000-000000000003]"])],
   [BARE_REL, headPage("Bare page", [])],
+  [JOIN_REL, headPage("Join page", ["type: plan"])],
 ];
 
 const ID_LABELS = {
@@ -777,9 +782,16 @@ test.describe("Wiki reader: lenses", () => {
     console.log("All computed display:", JSON.stringify(all));
     expect(all[".wiki-series-head"]).not.toBe("none");
     expect(all[".wiki-prov-line"]).not.toBe("none");
-    // And the chain opens from the line in All.
+    // And the chain opens from the line in All; Overview hides it open, and
+    // All shows it again, still open.
+    const chain = headEl.locator(".wiki-prov-chain");
     await line.click();
-    await expect(headEl.locator(".wiki-prov-chain")).toBeVisible();
+    await expect(chain).toBeVisible();
+    await sw.locator('button[data-lens="overview"]').click();
+    expect(await lensOf(page)).toBe("overview");
+    await expect(chain).toBeHidden();
+    await sw.locator('button[data-lens="all"]').click();
+    await expect(chain).toBeVisible();
     expectClean(seen);
   });
 
@@ -822,6 +834,57 @@ test.describe("Wiki reader: lenses", () => {
     expect(await lensOf(page)).toBe("overview");
     await expect(page.locator(".wiki-article-head .wiki-meta-row")).toBeVisible();
     await expect(page.locator(".wiki-lens-switch")).toHaveCount(0);
+    expectClean(seen);
+  });
+
+  test("a late switch lands where a render-time one does: last in the meta row, after the new-since chip", async ({ page }) => {
+    // SERIES_ONLY_REL mounts the switch at render; PROV_ONLY_REL when its
+    // strip lands. An old stored visit gives both a «changed since» chip.
+    for (const rel of [SERIES_ONLY_REL, PROV_ONLY_REL]) {
+      await setStored(page, null);
+      await page.evaluate(
+        ([k, entry, at]) => localStorage.setItem(k, JSON.stringify({ [entry]: at })),
+        [VISIT_KEY, `${WIKI_HEAD}\n${rel}`, Date.parse("2020-01-01T10:00:00Z")] as const,
+      );
+      const seen = await open_(page, WIKI_HEAD, rel);
+      const row = page.locator(".wiki-article-head .wiki-meta-row");
+      await expect(row.locator(".wiki-lens-switch")).toHaveCount(1);
+      await expect(row.locator(".wiki-changed-since")).toHaveCount(1);
+      const order = await row.evaluate((r) => Array.from(r.children).map((c) => c.className));
+      const chip = order.indexOf("wiki-changed-since");
+      expect(chip, `${rel}: ${order.join(" | ")}`).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("wiki-lens-switch"), `${rel}: ${order.join(" | ")}`).toBe(order.length - 1);
+      expectClean(seen);
+    }
+  });
+
+  test("a page that joins a series from the rail gets the switch, once, and Overview hides the new strip", async ({
+    page,
+  }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI_HEAD, JOIN_REL);
+    expect(await lensOf(page)).toBe("overview");
+    const headEl = page.locator(".wiki-article-head");
+    await expect(headEl.locator(".wiki-series-head")).toHaveCount(0);
+    await expect(page.locator(".wiki-lens-switch")).toHaveCount(0);
+
+    const railRow = page.locator(`.wiki-list-item[data-relpath="${JOIN_REL}"]`);
+    await railRow.hover();
+    await railRow.locator("[data-series-menu]").click();
+    await page.locator('#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="lh"]').click();
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+
+    // `repaintSeriesHead` adds the strip from the fresh listing.
+    const series = headEl.locator(".wiki-series-head");
+    await expect(series).toHaveCount(1);
+    await expect(page.locator(".wiki-lens-switch")).toHaveCount(1);
+    expect(await lensOf(page)).toBe("overview");
+    await expect(series).toBeHidden();
+    const sw = headEl.locator(".wiki-lens-switch");
+    await expect(sw.locator('button[aria-pressed="true"]')).toHaveText("Overview");
+    await sw.locator('button[data-lens="all"]').click();
+    await expect(series).toBeVisible();
+    await expect(page.locator(".wiki-lens-switch")).toHaveCount(1);
     expectClean(seen);
   });
 });

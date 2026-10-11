@@ -18,7 +18,7 @@
  * - **Reveal.** A `REVEAL_EVENT` from an element Overview hides, or from any
  *   element while the Agent lens is on (it hides the whole article), switches
  *   this view to All without storing it, so the next page opens in the stored
- *   lens.
+ *   lens. A reveal in the article head does not switch it.
  * - **Agent (D4).** Hides the article and shows plan-card's card in a pane
  *   beside it (`wiki-agent-pane.ts`), with the article-only head controls (the
  *   «line refs» toggle, «Se som rolle») hidden; the header pills stay, since a
@@ -115,12 +115,13 @@ const HEAD_HIDDEN_SELECTOR = OVERVIEW_HIDDEN_HEAD.join(", ");
 /** The article head of an article in Overview. */
 const HEAD_IN_OVERVIEW = `.wiki-article-head:has(~ .wiki-article.${LENS_CLASS_PREFIX}overview)`;
 
-/** Whether Overview hides `el`, an article or article-head element: it or an
- *  ancestor matches a hidden block. (A peek card shows its target whole in
- *  every lens through the CSS, D3.) */
+/** Whether Overview hides `el`, an article element: it or an ancestor matches
+ *  a hidden block. (A peek card shows its target whole in every lens through
+ *  the CSS, D3.) Article elements only: a reveal or a link target in the head
+ *  ({@link OVERVIEW_HIDDEN_HEAD}) does not flip the lens, since the reveal
+ *  listener sits on `.wiki-article`. */
 export function isHiddenByOverview(el: Element): boolean {
-  if (el.closest(HIDDEN_SELECTOR) !== null) return true;
-  return el.closest(".wiki-article-head") !== null && el.closest(HEAD_HIDDEN_SELECTOR) !== null;
+  return el.closest(HIDDEN_SELECTOR) !== null;
 }
 
 /** Whether the lenses differ on a page, so the switch is shown: Overview hides
