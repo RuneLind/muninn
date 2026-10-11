@@ -30,6 +30,7 @@ import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
 import {
   CB_LINE_CLASS,
   CB_MORE_CLASS,
+  CB_NONEMORE_CLASS,
   CB_OKMORE_CLASS,
   DL_ALL_CLASS,
   DL_MORE_CLASS,
@@ -324,7 +325,7 @@ function cloneBare<T extends Node>(n: T): T {
     // The reader's compact-list controls and parts (D6, D41, D42):
     // a peek shows its target whole, as written.
     c.querySelectorAll(
-      `.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${DL_WHEN_CLASS}, .${CB_LINE_CLASS}`,
+      `.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${CB_NONEMORE_CLASS}, .${DL_WHEN_CLASS}, .${CB_LINE_CLASS}`,
     ).forEach((b) => b.remove());
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;
