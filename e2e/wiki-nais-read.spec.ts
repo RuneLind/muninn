@@ -55,6 +55,7 @@ import {
   MOVES_PILL_CLASS,
 } from "../src/dashboard/views/components/wiki-report-blocks.ts";
 import { LENS_SWITCH_CLASS } from "../src/dashboard/views/components/wiki-lens.ts";
+import { HEADER_HINT_TEXT } from "../src/dashboard/views/shared-styles.ts";
 
 const PORT = e2ePort("wiki-nais-read");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -555,6 +556,14 @@ test("a role-user reads full height, and m brings the header back without the na
   await expect(header).toBeHidden();
   const full = (await page.locator(".wiki-layout").boundingBox())!;
   expect([Math.round(full.y), Math.round(full.height)]).toEqual([0, 900]);
+  // The first load says how to bring the header back, once.
+  await expect(page.locator(".header-hint")).toHaveText(HEADER_HINT_TEXT);
+  await page.reload();
+  await expect(page.locator(".callout-info .callout-title")).toHaveText("Merk");
+  await expect(header).toBeHidden();
+  // No retry: the notice is created while the page parses and removes itself
+  // after 3 s, so a retrying assertion would wait it out.
+  expect(await page.locator(".header-hint").count()).toBe(0);
 
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.keyboard.press("m");
