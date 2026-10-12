@@ -911,7 +911,7 @@ test.describe("Wiki reader: provenance", () => {
     await expect(page.locator(".wiki-list-item")).toHaveCount(ALL_PAGES);
     // The facet lives inside the Filters disclosure, closed until a filter is
     // set — the `project` row's own placement.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const chips = page.locator("#jiraChips .wiki-chip");
     await expect(chips.filter({ hasText: "MELOSYS-8045" })).toHaveText("MELOSYS-8045 1");
     await expect(chips.filter({ hasText: "MELOSYS-7790" })).toHaveText("MELOSYS-7790 1");
@@ -944,7 +944,7 @@ test.describe("Wiki reader: provenance", () => {
     await expect(page.locator(".wiki-list-item")).toHaveCount(ALL_PAGES);
     // No filter survived, so nothing auto-opened the stack — open it by hand to
     // see that the row is there and nothing in it is highlighted.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await expect(page.locator("#jiraChips .wiki-chip.active")).toHaveText("All issues");
     await expect.poll(() => new URL(page.url()).searchParams.get("jira")).toBeNull();
   });

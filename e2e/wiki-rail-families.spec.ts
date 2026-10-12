@@ -172,6 +172,21 @@ const row = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relp
 const groupRow = (page: Page, key: string) => page.locator(`.wiki-list-group[data-group="${key}"]`);
 const toggle = (page: Page) => page.locator("#wikiGroupFamilies");
 
+/** The view toggles live in the toolbar's options pane; open it if it is shut. */
+async function openOptions(page: Page): Promise<void> {
+  const btn = page.locator("#wikiOptionsBtn");
+  if ((await btn.getAttribute("aria-expanded")) !== "true") await btn.click();
+  await expect(page.locator("#wikiOptions")).toBeVisible();
+}
+
+/** Flip a view toggle the way a reader does: open the pane, set it, Escape. */
+async function setToggle(page: Page, on: boolean): Promise<void> {
+  await openOptions(page);
+  await toggle(page).setChecked(on);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#wikiOptions")).toBeHidden();
+}
+
 async function relPaths(page: Page): Promise<string[]> {
   return page
     .locator(".wiki-list-item")
@@ -198,7 +213,7 @@ async function setRailWidth(page: Page, width: number): Promise<void> {
 }
 
 async function turnGroupingOn(page: Page): Promise<void> {
-  await toggle(page).check();
+  await setToggle(page, true);
   await expect(page.locator(".wiki-list-group").first()).toBeAttached();
 }
 
@@ -272,7 +287,7 @@ test.describe("Wiki rail: families and months", () => {
     expect(await relPaths(page)).toEqual(PLANS_CLOSED);
 
     // Turning the toggle back off leaves the rail flat, whatever is stored.
-    await toggle(page).uncheck();
+    await setToggle(page, false);
     expect(await relPaths(page)).toEqual(PLANS_FLAT);
     await expect(page.locator(".wiki-list-group")).toHaveCount(0);
   });
@@ -406,35 +421,137 @@ test.describe("Wiki rail: families and months", () => {
     await expect(groupRow(page, FAMILY_KEY).locator(".wiki-fold-chip-counts")).toBeVisible();
   });
 
-  test("the sort row wraps the TOGGLE, never the count", async ({ page }) => {
-    // Measured, because the first cut claimed the toggle wrapped and it was
-    // `#wikiCount` that did — alone, left-aligned under the select. The rule:
-    // the select and the count keep line one at every rail width, and the toggle
-    // is what takes a second line when it does not fit.
+  test("the toolbar keeps sort · Filters · count · options on one line", async ({ page }) => {
+    // The toggles left the row for the options pane, so the row holds four
+    // controls; under RAIL_TOOLBAR_COMPACT the Filters word drops. Measured at
+    // each width: all four share one line, in order, and none overlaps the next.
     await page.setViewportSize({ width: 1400, height: 900 });
-    for (const width of [RAIL_WIDTH_MIN, RAIL_WIDTH_DEFAULT, 312]) {
+    for (const width of [RAIL_WIDTH_MIN, RAIL_WIDTH_DEFAULT, 312, 340]) {
       await openRail(page);
       await setRailWidth(page, width);
       await openRail(page);
-      const box = await page.evaluate(() => {
-        const r = (sel: string) => {
+      const boxes = await page.evaluate(() =>
+        ["#wikiSort", "#wikiFiltersBtn", "#wikiCount", "#wikiOptionsBtn"].map((sel) => {
           const b = document.querySelector(sel)!.getBoundingClientRect();
-          return { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
-        };
-        return { sort: r("#wikiSort"), count: r("#wikiCount"), toggle: r(".wiki-group-toggle") };
-      });
-      const sameLine = (a: { top: number; bottom: number }, b: { top: number; bottom: number }) =>
-        a.top < b.bottom && b.top < a.bottom;
-      // The count shares the select's line at every width, and stays to its right.
-      expect(sameLine(box.sort, box.count), `count on the select's line at ${width}`).toBe(true);
-      expect(box.count.left).toBeGreaterThanOrEqual(box.sort.right);
-      // The toggle is on that line or under it — never overlapping either.
-      if (sameLine(box.sort, box.toggle)) {
-        expect(box.toggle.left).toBeGreaterThanOrEqual(box.count.right);
-      } else {
-        expect(box.toggle.top).toBeGreaterThanOrEqual(box.sort.bottom);
+          return { sel, top: b.top, bottom: b.bottom, left: b.left, right: b.right, width: b.width };
+        }),
+      );
+      const head = await page.locator(".wiki-browse-head").evaluate((el) => el.getBoundingClientRect().right);
+      for (let i = 1; i < boxes.length; i++) {
+        const a = boxes[i - 1]!;
+        const b = boxes[i]!;
+        expect(a.top < b.bottom && b.top < a.bottom, `${b.sel} on ${a.sel}'s line at ${width}`).toBe(true);
+        expect(b.left, `${b.sel} after ${a.sel} at ${width}`).toBeGreaterThanOrEqual(a.right);
       }
+      expect(boxes[3]!.right).toBeLessThanOrEqual(head);
+      // The select gives way, but never to less than its own label's room.
+      expect(boxes[0]!.width, `select width at ${width}`).toBeGreaterThanOrEqual(90);
+      // The word shows only where it fits, and names the button either way.
+      const word = await page.locator("#wikiFiltersBtn .wiki-tool-label").evaluate((el) => el.getBoundingClientRect().width);
+      if (width >= 340) expect(word, `Filters word at ${width}`).toBeGreaterThan(20);
+      else expect(word, `Filters word at ${width}`).toBeLessThanOrEqual(1);
+      await expect(page.locator("#wikiFiltersBtn")).toHaveAccessibleName("Filters");
     }
+  });
+
+  // The view-options pane: it says what is on while closed, and it never
+  // outlives the reader's attention — focus leaving it, Escape from anywhere,
+  // or a reader shortcut closes it, since an open role="dialog" makes the
+  // page's single keys stand aside.
+  test("the dot and a chip say group families is on; × turns it off and focuses the button", async ({ page }) => {
+    await openRail(page);
+    await expect(page.locator("#wikiOptionsDot")).toBeHidden();
+    await expect(page.locator("#wikiActiveOptions")).toBeHidden();
+    await turnGroupingOn(page);
+    await expect(page.locator("#wikiOptionsDot")).toBeVisible();
+    await expect(page.locator("#wikiActiveOptions .wiki-active-option-label")).toHaveText("group families");
+    await page.locator('[data-view-option-off="families"]').click();
+    await expect(toggle(page)).not.toBeChecked();
+    await expect(page.locator("#wikiOptionsDot")).toBeHidden();
+    await expect(page.locator("#wikiActiveOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+  });
+
+  test("tabbing out of the view-options pane closes it", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await toggle(page).focus();
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("Escape closes the view-options pane wherever focus is", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    // Safari does not focus a clicked button: the pane is open with focus on <body>.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    // A bubble-phase listener stands in for every other Escape owner (focus
+    // mode, a graph card): the pane's Escape must reach none of them.
+    await page.evaluate(() => {
+      (window as unknown as { escSeen: number }).escSeen = 0;
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") (window as unknown as { escSeen: number }).escSeen++;
+      });
+    });
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+    expect(await page.evaluate(() => (window as unknown as { escSeen: number }).escSeen)).toBe(0);
+  });
+
+  test("Space on the options button closes the pane it opened", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+    await page.keyboard.press(" ");
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("a letter typed on a pane checkbox leaves the pane and focus where they are", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await toggle(page).focus();
+    await page.keyboard.press("f");
+    await expect(page.locator("#wikiOptions")).toBeVisible();
+    await expect(toggle(page)).toBeFocused();
+    await expect(page.locator(".wiki-layout")).not.toHaveClass(/\bfocus-mode\b/);
+  });
+
+  test("a re-render keeps keyboard focus on a chip's ×", async ({ page }) => {
+    await openRail(page);
+    await turnGroupingOn(page);
+    const off = page.locator('[data-view-option-off="families"]');
+    await off.focus();
+    // A render the reader did not cause from the ×: the search input's own
+    // event, fired without moving focus.
+    await page.evaluate(() => {
+      const q = document.getElementById("wikiSearch") as HTMLInputElement;
+      q.value = "pair";
+      q.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await expect(off).toBeFocused();
+  });
+
+  test("a reader shortcut closes the view-options pane, then runs", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+    await page.keyboard.press("f");
+    await expect(page.locator(".wiki-layout")).toHaveClass(/\bfocus-mode\b/);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-layout")).not.toHaveClass(/\bfocus-mode\b/);
+    // Not left open behind focus mode, to reappear when it ends.
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+  });
+
+  test("a stored Show retired on a wiki with no retired page shows no dot or chip", async ({ page }) => {
+    await openRail(page);
+    await page.evaluate((key) => localStorage.setItem(key, JSON.stringify(["toggle:retired"])), `muninn.wiki.folds.v1:${WIKI}`);
+    await openRail(page);
+    await expect(page.locator("#wikiOptionsDot")).toBeHidden();
+    await expect(page.locator("#wikiActiveOptions")).toBeHidden();
   });
 
   // Both themes, measured rather than eyeballed — these are a label, a count and
@@ -452,7 +569,9 @@ test.describe("Wiki rail: families and months", () => {
       const group = groupRow(page, FAMILY_KEY);
       expect(await contrastOf(group.locator(".wiki-group-label"))).toBeGreaterThanOrEqual(4.5);
       expect(await contrastOf(group.locator(".wiki-fold-chip-label"))).toBeGreaterThanOrEqual(4.5);
+      await openOptions(page);
       expect(await contrastOf(page.locator(".wiki-group-toggle"))).toBeGreaterThanOrEqual(4.5);
+      await page.keyboard.press("Escape");
       // …and in the state the reader clicks the group row in: hovered, which
       // paints a background of its own behind the transparent chip.
       await group.locator(".wiki-group-label").hover();
