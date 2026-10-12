@@ -685,6 +685,13 @@ test.describe("zone rows under nais — role `user`", () => {
     expect(res.headers.get("location")).toBe("/wiki");
   });
 
+  test("the chat page renders without the nav", async () => {
+    const r = await probe(BASE, "/chat");
+    expect(r.status).toBe(200);
+    expect(r.text).toContain("uninn</h1>");
+    expect(r.text).not.toContain("<nav");
+  });
+
   test("all seven read-slice paths pass the zone and answer 200", async () => {
     for (const p of READS) {
       expect(`${p} → ${(await probe(BASE, p)).status}`).toBe(`${p} → 200`);
