@@ -772,6 +772,16 @@ describe("fix round 1: the D41 date tail and an overturned first sentence", () =
     expect(decisionWhenLabel(parseDecisionWhen("Regel. Fag og jus, 01.02.")!)).toBe("Fag og jus, 01.02");
   });
 
+  test("who may be a model name with a version (Opus-5.5)", () => {
+    expect(decisionWhenLabel(parseDecisionWhen("Ventetiden står. Opus-5.5, 11.10.2026.")!)).toBe("Opus-5.5, 11.10.2026");
+    expect(decisionWhenLabel(parseDecisionWhen("Regel. Fable-5.1, 01.02 (runde 2).")!)).toBe("Fable-5.1, 01.02 · runde 2");
+    // The version rides on the first word only, and needs its hyphen.
+    expect(parseDecisionWhen("Regel. Fag og jus-2, 01.02.")).toBeNull();
+    expect(parseDecisionWhen("Regel. Opus 5.5, 01.02.")).toBeNull();
+    const html = formatWebHtml(log(["- **D3** — Ventetiden i fyllSakstype står. Opus-5.5, 11.10.2026."]), { reader: true, language: "no" });
+    expect(html).toContain('<span class="dl-when" data-reader-only>Opus-5.5, 11.10.2026</span>');
+  });
+
   test("item 15: the round word is case-insensitive", () => {
     expect(decisionWhenLabel(parseDecisionWhen("Regelen gjelder alle. Fag, 07.10 (Runde 6).")!)).toBe("Fag, 07.10 · Runde 6");
     expect(decisionWhenLabel(parseDecisionWhen("The rule holds for all. Team, 07.10 (ROUND 2).")!)).toBe("Team, 07.10 · ROUND 2");
