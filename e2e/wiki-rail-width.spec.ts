@@ -68,6 +68,8 @@ const BARE = "plans/bare.mdx";
 const CROWDED = "plans/crowded.mdx";
 /** The same marks beside a LONG one-kind chip, `10 superseded`. */
 const CROWDED_LONG = "plans/crowded-long.mdx";
+/** The widest pill (`superseded`), a ⚑ and ✋ 12 beside a SHORT chip, `3 attached`. */
+const CROWDED_SHORT = "plans/crowded-short.mdx";
 /** A NEW in-flight plan with a ⚑: the fullest meta line in the fixture (pill,
  *  ⚑ and the NEW tag), with its green age on line one. */
 const NEW_FLIGHT = "plans/new-flight.mdx";
@@ -152,6 +154,33 @@ const EDGE_PAGES: Array<[string, string]> = [
     `plans/crowded-long-old-${i + 1}.md`,
     md(`Crowded long retired ${i + 1}`, ["superseded_by: [[crowded-long]]"]),
   ]),
+  [
+    CROWDED_SHORT,
+    [
+      "---",
+      "title: Crowded short plan",
+      SETTLED_CREATED_LINE,
+      "plan_status: superseded",
+      "followups: open",
+      "---",
+      "",
+      "# Crowded short plan",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you" who="Du">',
+      "",
+      ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`),
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+      "",
+    ].join("\n"),
+  ],
+  ...Array.from({ length: 3 }, (_, i): [string, string] => [`plans/crowded-short-prototype-${i + 1}.html`, html(`Crowded short mock ${i + 1}`)]),
+  // Attachments of the NEW plan, so its meta line carries NEW and a chip.
+  ...Array.from({ length: 2 }, (_, i): [string, string] => [`plans/new-flight-prototype-${i + 1}.html`, html(`New flight mock ${i + 1}`)]),
   ...Array.from({ length: 10 }, (_, i): [string, string] => [
     `plans/crowded-old-${i + 1}.md`,
     md(`Crowded retired ${i + 1}`, ["superseded_by: [[crowded]]"]),
@@ -171,8 +200,8 @@ const EDGE_PAGES: Array<[string, string]> = [
     ].join("\n"),
   ],
 ];
-/** Rows on screen with every group closed: the two title pages + six parents + the new plan. */
-const CLOSED_ROWS = 2 + 6 + 1;
+/** Rows on screen with every group closed: the two title pages + seven parents + the new plan. */
+const CLOSED_ROWS = 2 + 7 + 1;
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -572,7 +601,7 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
       };
     });
   }
-  const MARKED = [SUP10, BIG, THREE, BARE, NEW_FLIGHT, CROWDED, CROWDED_LONG];
+  const MARKED = [SUP10, BIG, THREE, BARE, NEW_FLIGHT, CROWDED, CROWDED_LONG, CROWDED_SHORT];
 
   test("line one is icon · title · age, flush right, and the title takes the rest of it", async ({ page }) => {
     for (const width of [260, 300, 312]) {
@@ -614,11 +643,11 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     for (const g of all.slice(0, MARKED.length)) expect(Math.abs(g.subMarkLeft! - left)).toBeLessThan(0.5);
   });
 
-  test("a crowded meta line stays one line from 260 to 400px: the chip's breakpoint counts the marks beside it", async ({ page }) => {
-    const forms: Record<string, string[]> = { [CROWDED]: [], [CROWDED_LONG]: [] };
+  test("a crowded meta line stays one line from 260 to 400px: each chip breakpoint counts the marks beside it", async ({ page }) => {
+    const forms: Record<string, string[]> = { [CROWDED]: [], [CROWDED_LONG]: [], [CROWDED_SHORT]: [] };
     for (let width = 260; width <= 400; width += 20) {
       await openAt(page, width);
-      for (const rel of [CROWDED, CROWDED_LONG]) {
+      for (const rel of [CROWDED, CROWDED_LONG, CROWDED_SHORT]) {
         const m = await rowOf(page, rel).evaluate((el) => {
           const sub = el.querySelector(".wiki-list-sub") as HTMLElement;
           const marks = Array.from(sub.querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-moves-flag, .wiki-fold-chip"));
@@ -646,7 +675,7 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     }
     // Both breakpoints actually switch inside the range: counts where the marks
     // leave too little room, words once they leave enough.
-    for (const rel of [CROWDED, CROWDED_LONG]) {
+    for (const rel of [CROWDED, CROWDED_LONG, CROWDED_SHORT]) {
       expect(forms[rel]![0], `${rel} at 260: ${forms[rel]}`).toBe("compact");
       expect(forms[rel]!.at(-1), `${rel} at 400: ${forms[rel]}`).toBe("full");
     }
@@ -681,6 +710,57 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     // Pill THEN ⚑, as the article header's badges; ✋ after them, as the header's
     // lane pills; the chip last, where it can take the rest of the line.
     expect(order).toEqual(["wiki-status", "wiki-followup-flag", "wiki-moves-flag", "wiki-fold-chip"]);
+    // NEW sits before the chip too.
+    const withNew = await rowOf(page, NEW_FLIGHT).evaluate((el) =>
+      Array.from((el.querySelector(".wiki-list-sub") as HTMLElement).querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-moves-flag, .wiki-new-tag, .wiki-fold-chip")).map(
+        (k) => (k.className.match(/wiki-(status|followup-flag|moves-flag|new-tag|fold-chip)/) ?? [""])[0],
+      ),
+    );
+    expect(withNew).toEqual(["wiki-status", "wiki-followup-flag", "wiki-new-tag", "wiki-fold-chip"]);
+  });
+
+  test("a meta line too full even for the compact chip wraps its slot rather than overflowing", async ({ page }) => {
+    await openAt(page, 260);
+    // Squeeze each row's meta line until the marks before the chip still fit
+    // but leave its slot only `room` px: under the compact chip's floor for the
+    // row's counts class (CROWDED `12 · 10`, default class, floor 62; BIG
+    // `120 · 100`, counts-wide, floor 76, and 66 is above the default floor, so
+    // only the wide floor wraps it). Measured from the row, so a platform's
+    // wider pill moves the squeeze, not the case.
+    for (const [rel, room] of [
+      [CROWDED, 20],
+      [BIG, 66],
+    ] as const) {
+      const pad = await rowOf(page, rel).evaluate((el, slot) => {
+        const sub = el.querySelector(".wiki-list-sub") as HTMLElement;
+        const cs = getComputedStyle(sub);
+        const gap = parseFloat(cs.columnGap);
+        const before = Array.from(sub.children).filter((k) => !k.matches(".wiki-fold-chip-wrap")) as HTMLElement[];
+        const marks = before.reduce((w, k) => w + k.getBoundingClientRect().width + gap, 0);
+        return sub.getBoundingClientRect().width - parseFloat(cs.paddingRight) - (marks + slot);
+      }, room);
+      await page.addStyleTag({ content: `.wiki-list-item[data-relpath="${rel}"] .wiki-list-sub { padding-left: ${pad}px; }` });
+      const m = await rowOf(page, rel).evaluate((el) => {
+        const r = (q: string) => (el.querySelector(q) as HTMLElement).getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        const counts = el.querySelector(".wiki-fold-chip-counts") as HTMLElement;
+        return {
+          compact: getComputedStyle(counts).display !== "none",
+          chipPastRow: r(".wiki-fold-chip").right - (el.getBoundingClientRect().right - parseFloat(cs.paddingRight)),
+          // The marks before the chip stayed on one line…
+          marksSpread: Math.abs(r(".wiki-status").top - r(".wiki-followup-flag").top),
+          // …and the slot went under them.
+          slotBelowPill: r(".wiki-fold-chip-wrap").top - r(".wiki-status").top,
+          clipped: counts.scrollWidth - counts.clientWidth > 1,
+        };
+      });
+      const at = `${rel} (pad ${pad}): ${JSON.stringify(m)}`;
+      expect(m.compact, at).toBe(true);
+      expect(m.marksSpread, at).toBeLessThan(6);
+      expect(m.chipPastRow, at).toBeLessThanOrEqual(0.5);
+      expect(m.slotBelowPill, at).toBeGreaterThan(8);
+      expect(m.clipped, at).toBe(false);
+    }
   });
 
   test("a row with no marks has no meta line and stays one line", async ({ page }) => {

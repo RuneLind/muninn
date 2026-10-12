@@ -1847,6 +1847,7 @@ function renderList(): void {
     // The group CHIP: what is folded under this row, and the control that
     // opens it. A click here toggles; a click anywhere else on the row opens
     // the page, as it always has.
+    const compact = entry.children?.length ? foldChipCompactLabel(entry.children) : "";
     const chipHtml = entry.children?.length
       ? (() => {
           const full = foldChipLabel(entry.children);
@@ -1855,7 +1856,6 @@ function renderList(): void {
           // shapes, three measured budgets), and the digits pick how much row
           // the compact form is guaranteed — see `foldChipLabelClass` and
           // `foldChipCountsClass`.
-          const compact = foldChipCompactLabel(entry.children);
           const sizeClasses = cls(foldChipLabelClass(full)) + cls(foldChipCountsClass(compact));
           const why = entry.forcedOpen
             ? forcedOpenWhy("group")
@@ -1890,7 +1890,7 @@ function renderList(): void {
     // leave, not by the whole line's width. The slot's floor is the compact
     // form's (its counts class), so a line too full for that wraps the chip.
     const chipSlot = chipHtml
-      ? `<span class="wiki-fold-chip-wrap${cls(foldChipCountsClass(foldChipCompactLabel(entry.children!)))}">${chipHtml}</span>`
+      ? `<span class="wiki-fold-chip-wrap${cls(foldChipCountsClass(compact))}">${chipHtml}</span>`
       : "";
     const subItems =
       statusPillHtml(p) +
