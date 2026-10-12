@@ -493,7 +493,8 @@ export async function renderWikiPage(opts?: {
       .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
       .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
     }
-    /* A two-kind label with a three-digit count is wider than the wide budget. */
+    /* A two-kind label with a three- or four-digit count is wider than the
+       wide budget. */
     @container railchip (max-width: ${RAIL_CHIP_LABEL_WIDE_3D}px) {
       .wiki-fold-chip.is-wide.counts-wide { flex-shrink: 0; }
       .wiki-fold-chip.is-wide.counts-wide .wiki-fold-chip-label { display: none; }

@@ -117,12 +117,12 @@ export const RAIL_ISSUE_PILLS_COL = 28;
 export const RAIL_CHIP_LABEL_SHORT = 88;
 export const RAIL_CHIP_LABEL_LONG = 103;
 export const RAIL_CHIP_LABEL_WIDE = 174;
-/** A two-kind label with a three-digit count (`counts-wide`): measured 180.0px
- *  of chip for `120 attached · 100 superseded`, and the compact pair measures
- *  4.3px wider at `999 · 999` than at `120 · 100`, so 186. Found by the
- *  no-clipped-chip sweep: under 174 alone it showed clipped words at slots of
- *  175–180px. */
-export const RAIL_CHIP_LABEL_WIDE_3D = 186;
+/** A two-kind label with a three- or four-digit count (`counts-wide`). On
+ *  macOS: 180.0px of chip for `120 attached · 100 superseded`, up to 197.7px
+ *  for a four-digit pair. CI's Linux fonts paint it wider: at 186 the
+ *  no-clipped-chip sweep found `120 attached · 100 superseded` clipped at a
+ *  326px rail (run 38313899886). So 198. */
+export const RAIL_CHIP_LABEL_WIDE_3D = 198;
 
 /**
  * The same swap for a family/month row's WIDE roll-up chip — its own number,

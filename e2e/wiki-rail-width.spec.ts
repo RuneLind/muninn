@@ -220,10 +220,12 @@ test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-"));
   await writeFile(
     path.join(root, LONG_REL),
-    ["---", `title: ${LONG_TITLE}`, "---", "", `# ${LONG_TITLE}`, "", "Body.", ""].join("\n"),
+    ["---", `title: ${LONG_TITLE}`, SETTLED_CREATED_LINE, "---", "", `# ${LONG_TITLE}`, "", "Body.", ""].join("\n"),
     "utf8",
   );
-  await writeFile(path.join(root, SHORT_REL), ["---", "title: Short", "---", "", "# Short", "", "Body.", ""].join("\n"), "utf8");
+  // `created:` pinned like every fixture page: on Linux `utimes` leaves the
+  // birthtime at now, so without it these two read as NEW (CI run 38313899886).
+  await writeFile(path.join(root, SHORT_REL), ["---", "title: Short", SETTLED_CREATED_LINE, "---", "", "# Short", "", "Body.", ""].join("\n"), "utf8");
   for (const [rel, body] of EDGE_PAGES) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
     await writeFile(path.join(root, rel), body, "utf8");
