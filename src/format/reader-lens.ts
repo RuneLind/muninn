@@ -111,6 +111,24 @@ export const LENS_LABELS: Record<QuestionLanguage, Record<Lens, string>> = {
   no: { overview: "Oversikt", all: "Alt", agent: "Agent" },
 };
 
+/** The breadcrumb chip's symbol for each lens: half a page, the whole page, a card. */
+export const LENS_ICONS: Record<Lens, string> = { overview: "◐", all: "●", agent: "▤" };
+
+/** The lens the `v` key and the breadcrumb chip switch to: Overview and All
+ *  swap, and Agent, which hides the article, gives way to All. */
+export function toggledLens(lens: Lens | null): StoredLens {
+  return lens === "all" ? "overview" : "all";
+}
+
+/** The breadcrumb chip's tooltip: the lens on screen and what `v` switches to. */
+export function lensChipTitle(lang: QuestionLanguage, lens: Lens): string {
+  const l = LENS_LABELS[lang];
+  const next = l[toggledLens(lens)];
+  return lang === "no"
+    ? `Visning: ${l[lens]}. Klikk eller trykk v for ${next}.`
+    : `Lens: ${l[lens]}. Click or press v for ${next}.`;
+}
+
 /** A DecisionLog item's toggle in every lens (D6, D45): its text, and its
  *  `aria-label` naming the item; and the badge a closed question carries
  *  after its first sentence. */

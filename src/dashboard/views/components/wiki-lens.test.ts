@@ -3,6 +3,7 @@ import {
   OVERVIEW_HIDDEN_HEAD,
   SWITCH_TITLE,
   lensCss,
+  lensKeyToggles,
   lensSwitchClosesNoneFolds,
   lensSwitchWanted,
   newestFirstOrder,
@@ -132,5 +133,24 @@ describe("lensSwitchWanted", () => {
     expect(lensSwitchWanted({ ...none, opensFold: true })).toBe(true);
     expect(lensSwitchWanted({ ...none, agentAvailable: true })).toBe(true);
     expect(lensSwitchWanted(none)).toBe(false);
+  });
+});
+
+describe("lensKeyToggles", () => {
+  test("v and V toggle", () => {
+    expect(lensKeyToggles({ key: "v" })).toBe(true);
+    expect(lensKeyToggles({ key: "V" })).toBe(true);
+    expect(lensKeyToggles({ key: "g" })).toBe(false);
+  });
+
+  test("refused while typing, with a modifier or Shift, on repeat and in a dialog", () => {
+    expect(lensKeyToggles({ key: "v", targetTag: "input" })).toBe(false);
+    expect(lensKeyToggles({ key: "v", targetTag: "TEXTAREA" })).toBe(false);
+    expect(lensKeyToggles({ key: "v", targetEditable: true })).toBe(false);
+    expect(lensKeyToggles({ key: "v", metaKey: true })).toBe(false);
+    expect(lensKeyToggles({ key: "v", ctrlKey: true })).toBe(false);
+    expect(lensKeyToggles({ key: "V", shiftKey: true })).toBe(false);
+    expect(lensKeyToggles({ key: "v", repeat: true })).toBe(false);
+    expect(lensKeyToggles({ key: "v", targetInDialog: true })).toBe(false);
   });
 });

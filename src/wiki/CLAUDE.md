@@ -2122,7 +2122,7 @@ combined pattern — word-by-word replacement corrupts its own `<mark>` markup.
 
 ⚠️ **The dialog root owns every key pressed inside it**: its keydown handles
 the palette's keys and then stops propagation on every keydown, so no
-document-level reader shortcut (`]`, `f`, `g`, `t`, the pane ladder's Escape)
+document-level reader shortcut (`]`, `f`, `g`, `t`, `v`, the pane ladder's Escape)
 fires from inside the palette. Capture-phase listeners still run first: the
 graph card's Escape stands aside under `modalOpen`, and the ref-link peek's has
 nothing to close, since opening hides any peek (`hideRefPeek`). Closing REMOVES

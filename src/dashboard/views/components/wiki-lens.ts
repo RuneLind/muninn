@@ -59,14 +59,18 @@ import {
   DL_TAIL_CLASS,
   DL_WHEN_CLASS,
   LENS_CLASS_PREFIX,
+  LENS_ICONS,
   LENSES,
   LENS_LABELS,
+  lensChipTitle,
   MORE_WORDS,
   READER_ONLY_ATTR,
   readStoredLens,
+  toggledLens,
   writeStoredLens,
   type Lens,
 } from "../../../format/reader-lens.ts";
+import { readerKeyRefused, type ReaderKeyEvent } from "./wiki-panes.ts";
 import type { QuestionLanguage } from "../../../format/question-labels.ts";
 import { fmtTokens } from "../../../utils/fmt-tokens.ts";
 import { localStore } from "./wiki-local-store.ts";
@@ -75,6 +79,8 @@ import { PEEK_CLASS } from "./wiki-ref-links.ts";
 import { agentPaneCss, setAgentPane, type AgentPaneOptions } from "./wiki-agent-pane.ts";
 
 export const LENS_SWITCH_CLASS = "wiki-lens-switch";
+/** The breadcrumb chip: the lens on screen, and a click to the other one. */
+export const LENS_CHIP_CLASS = "wiki-bc-lens";
 export { LENS_CLASS_PREFIX };
 export const FOLD_SIZE_CLASS = "fold-size";
 export const CASEBOARD_LENS_NOTE_CLASS = "cb-lens-note";
@@ -510,6 +516,8 @@ export interface LensOptions {
   agentAvailable: boolean;
   /** The page the Agent pane asks plan-card about; absent ⇒ no pane. */
   agent?: AgentPaneOptions;
+  /** The breadcrumb bar the lens chip goes in; absent ⇒ no chip. */
+  chipHost?: HTMLElement | null;
 }
 
 /** Each article's Agent pane options, read by {@link applyLens}. */
@@ -520,18 +528,25 @@ export function lensOf(article: Element | null): Lens | null {
   return LENSES.find((l) => article?.classList.contains(`${LENS_CLASS_PREFIX}${l}`)) ?? null;
 }
 
-/** The switch's buttons pressed for `lens`. */
-function markSwitch(sw: HTMLElement | null, lens: Lens): void {
-  sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
+/** The switch's buttons pressed for `lens`, and the chip naming it. */
+function markSwitch(ctx: LensContext, lens: Lens): void {
+  ctx.sw?.querySelectorAll<HTMLButtonElement>("button[data-lens]").forEach((b) => {
     const on = b.dataset.lens === lens;
     b.classList.toggle("on", on);
     b.setAttribute("aria-pressed", on ? "true" : "false");
   });
+  const chip = ctx.chip;
+  if (!chip) return;
+  const lang = ctx.opts.language;
+  chip.dataset.lens = lens;
+  chip.textContent = `${LENS_ICONS[lens]} ${LENS_LABELS[lang][lens]}`;
+  chip.title = lensChipTitle(lang, lens);
 }
 
 /** Show `lens`. `enter` says whether a switch INTO Overview opens the
  *  compact folds (D41): not for a view replaced in place. */
-function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElement | null, lens: Lens, enter = true): void {
+function applyLens(article: HTMLElement, ctx: LensContext, lens: Lens, enter = true): void {
+  const row = ctx.row;
   const before = lensOf(article);
   for (const l of LENSES) {
     article.classList.toggle(`${LENS_CLASS_PREFIX}${l}`, l === lens);
@@ -539,7 +554,7 @@ function applyLens(article: HTMLElement, row: HTMLElement | null, sw: HTMLElemen
   if (lens === "overview" && before !== "overview" && enter) openCompactFolds(article);
   // D4: the Agent lens hides the article (CSS) and shows plan-card's card.
   setAgentPane(article, lens === "agent", agentOptions.get(article) ?? null);
-  markSwitch(sw, lens);
+  markSwitch(ctx, lens);
   // Overview hides every line ref, so the «line refs» toggle has nothing to
   // do; Agent hides the article it and «Se som rolle» act on.
   row?.querySelectorAll<HTMLElement>(`.${LINE_REFS_TOGGLE_CLASS}`).forEach((t) => {
@@ -555,6 +570,7 @@ interface LensContext {
   opts: LensOptions;
   row: HTMLElement | null;
   sw: HTMLElement | null;
+  chip: HTMLButtonElement | null;
 }
 const contexts = new WeakMap<HTMLElement, LensContext>();
 
@@ -573,16 +589,39 @@ function mountSwitch(article: HTMLElement, row: HTMLElement, ctx: LensContext): 
     b.type = "button";
     b.dataset.lens = lens;
     b.textContent = labels[lens];
-    b.addEventListener("click", () => {
-      writeStoredLens(localStore(), lens);
-      if (lensSwitchClosesNoneFolds(lensOf(article), lens)) closeNoneGroups(article, opts.language);
-      applyLens(article, ctx.row, ctx.sw, lens);
-    });
+    b.addEventListener("click", () => chooseLens(article, ctx, lens));
     sw.append(b);
   }
   row.append(sw);
   ctx.sw = sw;
+  mountChip(article, ctx);
   return sw;
+}
+
+/** The reader picks `lens` (a switch button, the chip, `v`): stored, as D2's
+ *  choice, and shown. */
+function chooseLens(article: HTMLElement, ctx: LensContext, lens: Lens): void {
+  writeStoredLens(localStore(), lens);
+  if (lensSwitchClosesNoneFolds(lensOf(article), lens)) closeNoneGroups(article, ctx.opts.language);
+  applyLens(article, ctx, lens);
+}
+
+/** The chip in the breadcrumb bar, which stays on screen while the article
+ *  scrolls: first in its action cluster, before ⧉ Copy path. It comes and goes
+ *  with the switch, so a page where the lenses do not differ has neither. */
+function mountChip(article: HTMLElement, ctx: LensContext): void {
+  const host = ctx.opts.chipHost;
+  if (!host) return;
+  host.querySelectorAll(`.${LENS_CHIP_CLASS}`).forEach((el) => el.remove());
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = LENS_CHIP_CLASS;
+  chip.setAttribute("aria-keyshortcuts", "v");
+  chip.addEventListener("click", () => chooseLens(article, ctx, toggledLens(lensOf(article))));
+  const before = host.querySelector(":scope > .wiki-bc-copy");
+  if (before) before.before(chip);
+  else host.append(chip);
+  ctx.chip = chip;
 }
 
 /** The article head beside `article`, whose blocks Overview hides too. */
@@ -606,6 +645,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   if (!article) return;
   if (opts.agentAvailable && opts.agent) agentOptions.set(article, opts.agent);
   row?.querySelectorAll(`.${LENS_SWITCH_CLASS}`).forEach((el) => el.remove());
+  opts.chipHost?.querySelectorAll(`.${LENS_CHIP_CLASS}`).forEach((el) => el.remove());
   noteHiddenCases(article, opts.language);
   decorateFoldSizes(article, opts.language);
   decorateDecisionRests(article, opts.language);
@@ -613,7 +653,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   decorateCaseRows(article, opts.language);
   orderDecisions(article);
 
-  const ctx: LensContext = { opts, row, sw: null };
+  const ctx: LensContext = { opts, row, sw: null, chip: null };
   contexts.set(article, ctx);
   // Read before `applyLens` opens any fold: a fold the author left open is
   // the same in both lenses.
@@ -627,7 +667,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
   if (row && wanted) mountSwitch(article, row, ctx);
   // `opts.initial` comes from `resolveLens`, which already turns an Agent the
   // server does not offer into All.
-  applyLens(article, row, ctx.sw, opts.initial, !opts.inPlace);
+  applyLens(article, ctx, opts.initial, !opts.inPlace);
 
   // D3: a reveal opens what the compact view folds away, in whichever lens is
   // on screen (D45), and a reveal of something Overview hides, or of anything
@@ -647,7 +687,7 @@ export function enhanceLens(wrap: ParentNode, opts: LensOptions): void {
     // D47: so does a folded `none` row (from Overview, with the switch to All).
     const group = caseRow?.closest(".cb-group");
     if (group && caseRow?.classList.contains(CB_FOLDED_CLASS)) setGroupShown(group, true, opts.language);
-    if (lensOf(article) === "agent" || isHiddenByOverview(target)) applyLens(article, ctx.row, ctx.sw, "all");
+    if (lensOf(article) === "agent" || isHiddenByOverview(target)) applyLens(article, ctx, "all");
   });
 }
 
@@ -670,9 +710,27 @@ export function refreshLensSwitch(wrap: ParentNode): void {
   if (!row) return;
   ctx.row = row;
   row.querySelectorAll(`.${LENS_SWITCH_CLASS}`).forEach((el) => el.remove());
-  const sw = mountSwitch(article, row, ctx);
+  mountSwitch(article, row, ctx);
   const lens = lensOf(article);
-  if (lens) markSwitch(sw, lens);
+  if (lens) markSwitch(ctx, lens);
+}
+
+/** Whether a keydown is the lens key, `v`: refused where every reader key is
+ *  ({@link readerKeyRefused}), and with Shift held. */
+export function lensKeyToggles(e: ReaderKeyEvent & { shiftKey?: boolean }): boolean {
+  if (readerKeyRefused(e) || e.shiftKey) return false;
+  return e.key === "v" || e.key === "V";
+}
+
+/** `v`: Overview and All swap on the page in `wrap`, as a click on the chip
+ *  does. False, and nothing happens, where the switch is not on screen: the
+ *  lenses do not differ there, or no article is. */
+export function toggleLens(wrap: ParentNode): boolean {
+  const article = wrap.querySelector<HTMLElement>(".wiki-article");
+  const ctx = article ? contexts.get(article) : undefined;
+  if (!article || !ctx?.sw?.isConnected) return false;
+  chooseLens(article, ctx, toggledLens(lensOf(article)));
+  return true;
 }
 
 /** The stored lens, for the caller's precedence. */
@@ -861,6 +919,15 @@ ${compactCss()}
     .${LENS_SWITCH_CLASS} button + button { border-left: 1px solid var(--border-secondary); }
     .${LENS_SWITCH_CLASS} button:hover, .${LENS_SWITCH_CLASS} button:focus-visible { color: var(--text-primary); }
     .${LENS_SWITCH_CLASS} button.on { background: var(--accent); color: #fff; font-weight: 600; }
+    /* The breadcrumb chip: the copy-path button's shape (.wiki-bc-copy in
+       wiki-page.ts), tinted while Overview hides something. */
+    .${LENS_CHIP_CLASS} {
+      font: inherit; font-size: 12px; font-weight: 500; white-space: nowrap; cursor: pointer;
+      padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border-secondary);
+      background: var(--bg-surface); color: var(--text-secondary);
+    }
+    .${LENS_CHIP_CLASS}:hover, .${LENS_CHIP_CLASS}:focus-visible { color: var(--text-primary); border-color: var(--accent); }
+    .${LENS_CHIP_CLASS}[data-lens="overview"] { border-color: var(--accent); color: var(--accent-light); }
     .wiki-article details.fold > summary .${FOLD_SIZE_CLASS} {
       margin-left: 8px; font-size: 11px; font-weight: 400; color: var(--text-soft); white-space: nowrap;
     }

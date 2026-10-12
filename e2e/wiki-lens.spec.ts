@@ -434,6 +434,63 @@ test.describe("Wiki reader: lenses", () => {
     expectClean(seen);
   });
 
+  test("the breadcrumb chip names the lens, and a click or v swaps Overview and All", async ({ page }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI, REPORT_REL);
+    expect(await lensOf(page)).toBe("overview");
+    const chip = page.locator("#wikiBreadcrumb .wiki-bc-lens");
+    await expect(chip).toHaveCount(1);
+    await expect(chip).toHaveText("◐ Oversikt");
+    await expect(chip).toHaveAttribute("title", "Visning: Oversikt. Klikk eller trykk v for Alt.");
+    // First in the action cluster, before ⧉ Copy path.
+    const next = await chip.evaluate((el) => el.nextElementSibling?.id ?? "");
+    expect(next).toBe("wikiCopyPathBtn");
+    const sw = page.locator(".wiki-article-head .wiki-lens-switch");
+
+    // The chip stays in view while the article scrolls; the head switch does not.
+    await page.locator(".wiki-article-wrap").evaluate((el) => el.scrollTo(0, el.scrollHeight));
+    await expect(chip).toBeInViewport();
+
+    await chip.click();
+    expect(await lensOf(page)).toBe("all");
+    await expect(chip).toHaveText("● Alt");
+    await expect(sw.locator('button[aria-pressed="true"]')).toHaveText("Alt");
+    expect(await stored(page)).toBe("all");
+
+    // `v` from the page body swaps back and stores the choice, as a click does.
+    await page.locator(".wiki-article-head h1").click();
+    await page.keyboard.press("v");
+    expect(await lensOf(page)).toBe("overview");
+    await expect(chip).toHaveText("◐ Oversikt");
+    expect(await stored(page)).toBe("overview");
+
+    // Never while typing: the find palette's input takes the letter.
+    await page.keyboard.press("/");
+    const input = page.locator('[role="dialog"] input').first();
+    await expect(input).toBeFocused();
+    await page.keyboard.press("v");
+    expect(await lensOf(page)).toBe("overview");
+    await expect(input).toHaveValue("v");
+    await page.keyboard.press("Escape");
+
+    // The switch in the head and the chip agree after a head-switch click.
+    await sw.locator('button[data-lens="all"]').click();
+    await expect(chip).toHaveText("● Alt");
+    expectClean(seen);
+  });
+
+  test("a page where the lenses do not differ gets no chip, and v does nothing", async ({ page }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI_HEAD, BARE_REL);
+    await expect(page.locator("#wikiBreadcrumb")).toBeVisible();
+    await expect(page.locator(".wiki-bc-lens")).toHaveCount(0);
+    await page.locator(".wiki-article-head h1").click();
+    await page.keyboard.press("v");
+    expect(await lensOf(page)).toBe("overview");
+    expect(await stored(page)).toBe(null);
+    expectClean(seen);
+  });
+
   test("acceptance 2: the wiki's own default applies only when nothing is stored", async ({ page }) => {
     await setStored(page, null);
     await open_(page, WIKI_FILE, "plans/page.mdx");
