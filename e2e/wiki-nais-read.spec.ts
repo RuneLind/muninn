@@ -54,7 +54,7 @@ import {
   LINE_REFS_TOGGLE_CLASS,
   MOVES_PILL_CLASS,
 } from "../src/dashboard/views/components/wiki-report-blocks.ts";
-import { LENS_SWITCH_CLASS } from "../src/dashboard/views/components/wiki-lens.ts";
+import { LENS_CHIP_CLASS, LENS_SWITCH_CLASS } from "../src/dashboard/views/components/wiki-lens.ts";
 import { HEADER_HINT_TEXT } from "../src/dashboard/views/shared-styles.ts";
 
 const PORT = e2ePort("wiki-nais-read");
@@ -391,10 +391,11 @@ const READER_CONTROLS = [
   `.${HISTORIC_PILL_CLASS}`,
   // The NextMoves lane pills (scroll within the page).
   `.${MOVES_PILL_CLASS}`,
-  // The counted pills (scroll within the page) and the lens switch
-  // (a class on the article, localStorage).
+  // The counted pills (scroll within the page), the lens switch and its
+  // breadcrumb chip (a class on the article, localStorage).
   `.${COUNT_PILL_CLASS}`,
   `.${LENS_SWITCH_CLASS} button`,
+  `.${LENS_CHIP_CLASS}`,
   // CaseBoard row links and Query id links (in-page anchors), and the Query
   // explorer's search box and uses chips (client-side filters).
   "a.cb-id",
