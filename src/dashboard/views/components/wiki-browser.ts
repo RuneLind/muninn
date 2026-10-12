@@ -1418,8 +1418,13 @@ function paintViewOptions(): void {
     `<button type="button" data-view-option-off="${key}" aria-label="${esc(`Turn off: ${text}`)}" title="Turn off">×</button></span>`;
   const html = (families ? chip("families", "group families") : "") + (retired ? chip("retired", cullLabels().marker) : "");
   // Every renderList repaints this; rewriting unchanged markup would drop the
-  // focus of a × the reader is on.
-  if (strip.innerHTML !== html) strip.innerHTML = html;
+  // focus of a × the reader is on. Compared against the markup last written,
+  // not `innerHTML`, which the browser re-serialises (an escaped quote in a
+  // marker would never compare equal).
+  if (strip.dataset.html !== html) {
+    strip.innerHTML = html;
+    strip.dataset.html = html;
+  }
   strip.hidden = !html;
 }
 
@@ -5136,9 +5141,12 @@ if (optionsBtn && optionsPane) {
   // Capture phase. Escape closes the pane and stops, so it neither leaves focus
   // mode nor closes a graph card (whose own capture listener, registered
   // earlier, already stood aside for the open dialog). A shortcut key — one
-  // printable character, no modifier, not Space, which toggles a checkbox —
-  // closes the pane and carries on, so modalOpen() is false by the time the
-  // shortcut's own listener reads it.
+  // printable character other than Space (the button's own key), no
+  // modifier — pressed OUTSIDE the pane (on its button,
+  // or on <body> in Safari, which does not focus a clicked button) closes it and
+  // carries on, so modalOpen() is false by the time the shortcut's own listener
+  // reads it. Inside the pane the target is a checkbox, which every shortcut
+  // owner treats as typing; the key is left to it.
   document.addEventListener(
     "keydown",
     (e) => {
@@ -5148,7 +5156,14 @@ if (optionsBtn && optionsPane) {
         e.stopPropagation();
         setOptionsOpen(false);
         optionsBtn.focus();
-      } else if (e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      } else if (
+        e.key.length === 1 &&
+        e.key !== " " &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !optionsPane.contains(e.target as Node)
+      ) {
         setOptionsOpen(false);
       }
     },

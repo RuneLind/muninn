@@ -942,7 +942,8 @@ constants were re-budgeted by the layout follow-up (above), not by this change.
 (`#wikiOptionsBtn` → `#wikiOptions`, a non-modal `role="dialog"`). Because an
 open dialog makes `modalOpen()` true page-wide, the pane never outlives the
 reader's attention: the button, a pointer or focus outside it, Escape from
-anywhere, and a reader shortcut key (which then runs) all close it. While a
+anywhere, and a reader shortcut key pressed outside it (which then runs) all
+close it; a key on a pane checkbox is the checkbox's. While a
 toggle is on, a dot sits on the button and `#wikiActiveOptions` shows one
 removable chip per option, named for the state (`group families`, the wiki's
 retired `marker`), so a closed pane never hides why the rail looks different. A

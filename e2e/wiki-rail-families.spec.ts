@@ -486,8 +486,52 @@ test.describe("Wiki rail: families and months", () => {
     await openOptions(page);
     // Safari does not focus a clicked button: the pane is open with focus on <body>.
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    // A bubble-phase listener stands in for every other Escape owner (focus
+    // mode, a graph card): the pane's Escape must reach none of them.
+    await page.evaluate(() => {
+      (window as unknown as { escSeen: number }).escSeen = 0;
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") (window as unknown as { escSeen: number }).escSeen++;
+      });
+    });
     await page.keyboard.press("Escape");
     await expect(page.locator("#wikiOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+    expect(await page.evaluate(() => (window as unknown as { escSeen: number }).escSeen)).toBe(0);
+  });
+
+  test("Space on the options button closes the pane it opened", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+    await page.keyboard.press(" ");
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("a letter typed on a pane checkbox leaves the pane and focus where they are", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await toggle(page).focus();
+    await page.keyboard.press("f");
+    await expect(page.locator("#wikiOptions")).toBeVisible();
+    await expect(toggle(page)).toBeFocused();
+    await expect(page.locator(".wiki-layout")).not.toHaveClass(/\bfocus-mode\b/);
+  });
+
+  test("a re-render keeps keyboard focus on a chip's ×", async ({ page }) => {
+    await openRail(page);
+    await turnGroupingOn(page);
+    const off = page.locator('[data-view-option-off="families"]');
+    await off.focus();
+    // A render the reader did not cause from the ×: the search input's own
+    // event, fired without moving focus.
+    await page.evaluate(() => {
+      const q = document.getElementById("wikiSearch") as HTMLInputElement;
+      q.value = "pair";
+      q.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await expect(off).toBeFocused();
   });
 
   test("a reader shortcut closes the view-options pane, then runs", async ({ page }) => {
