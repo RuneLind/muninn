@@ -214,20 +214,53 @@ describe("renderNav for role `user`", () => {
         expect(`${profile}/${page} <nav>: ${html.includes("<nav")}`).toBe(`${profile}/${page} <nav>: false`);
         expect(`${profile}/${page} hrefs: ${hrefs(html).join(",")}`).toBe(`${profile}/${page} hrefs: `);
         expect(html).not.toContain("nav-sep");
-        expect(html).not.toContain(HEADER_HIDDEN_KEY);
         expect(html).toContain("uninn</h1>");
       }
     }
   });
 
-  test("the `m` hint sits on the wordmark for a viewer with the nav, never on the nav or for role `user`", () => {
+  test("the `m` hint sits on the wordmark for every role, never on the nav", () => {
     const h1 = (html: string): string => html.match(/<h1[^>]*>/)![0];
-    for (const role of ["admin", null] as const) {
-      const html = renderNav("wiki", { profile: "default", role });
-      expect(h1(html)).toContain('title="Press m to hide or show the header"');
-      expect(html.match(/<nav[^>]*>/)![0]).toBe("<nav>");
+    for (const role of ["admin", null, "user"] as const) {
+      const html = renderNav("wiki", { profile: "nais", role });
+      expect(`${role}: ${h1(html)}`).toBe(`${role}: <h1 title="Press m to hide or show the header">`);
+      if (role !== "user") expect(html.match(/<nav[^>]*>/)![0]).toBe("<nav>");
     }
-    expect(h1(renderNav("wiki", { profile: "nais", role: "user" }))).toBe("<h1>");
+  });
+
+  /**
+   * The header's starting state, run from the emitted early-apply script: role
+   * `user` starts hidden, everyone else shown, and a choice stored with `m`
+   * beats the default either way. Storage that throws falls back to the
+   * default.
+   */
+  test("role `user` starts with the header hidden; a stored choice wins for every role", () => {
+    const startsHidden = (role: "user" | "admin" | null, stored: string | null | "throws"): boolean => {
+      const html = renderNav("wiki", { profile: "nais", role });
+      const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!).find((s) => s.includes("__navToggle"))!;
+      const classes = new Set<string>();
+      const document = {
+        documentElement: { classList: { add: (c: string) => classes.add(c), toggle: () => false } },
+        addEventListener: () => {},
+      };
+      const localStorage = {
+        getItem: () => { if (stored === "throws") throw new Error("blocked"); return stored; },
+        setItem: () => {},
+      };
+      new Function("window", "document", "localStorage", "setTimeout", script)({}, document, localStorage, () => {});
+      return classes.has(HEADER_HIDDEN_CLASS);
+    };
+    const rows: string[] = [];
+    for (const role of ["user", "admin", null] as const) {
+      for (const stored of [null, "1", "0", "throws"] as const) rows.push(`${role}/${stored} → ${startsHidden(role, stored) ? "hidden" : "shown"}`);
+    }
+    expect(rows).toEqual([
+      "user/null → hidden", "user/1 → hidden", "user/0 → shown", "user/throws → hidden",
+      "admin/null → shown", "admin/1 → hidden", "admin/0 → shown", "admin/throws → shown",
+      "null/null → shown", "null/1 → hidden", "null/0 → shown", "null/throws → shown",
+    ]);
+    // The stored key is the one the toggle writes.
+    expect(renderNav("wiki", { profile: "nais", role: "user" })).toContain(HEADER_HIDDEN_KEY);
   });
 
   /**

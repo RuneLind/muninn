@@ -642,8 +642,11 @@ export function renderNav(
   // `<html>` before the header is parsed, so a hidden header never flashes. The
   // key is refused while typing, with a modifier, on repeat, while the Tools ▾
   // menu is open and while a modal or menu is on screen — the reader's own
-  // single-key rules (`navMenuOpen`, `modalOpen`).
-  const navToggle = !linksForRole ? "" : `
+  // single-key rules (`navMenuOpen`, `modalOpen`). Role `user` starts with the
+  // header hidden (the pod's colleagues read the wiki full height); a choice
+  // made with `m` is stored and beats that default, for every role.
+  const headerHiddenByDefault = !linksForRole;
+  const navToggle = `
   <style>
     html.${HEADER_HIDDEN_CLASS} { --header-h: 0px; }
     html.${HEADER_HIDDEN_CLASS} body > header { display: none; }
@@ -655,7 +658,11 @@ export function renderNav(
     }
   </style>
   <script>
-    try { if (localStorage.getItem(${JSON.stringify(HEADER_HIDDEN_KEY)}) === '1') document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)}); } catch (e) {}
+    (function() {
+      var stored = null;
+      try { stored = localStorage.getItem(${JSON.stringify(HEADER_HIDDEN_KEY)}); } catch (e) {}
+      if (stored === '1' || (stored === null && ${headerHiddenByDefault})) document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)});
+    })();
     if (!window.__navToggle) (function() {
       window.__navToggle = true;
       // The reader's shared key guards (wiki-panes.ts), scoped to this IIFE.
@@ -739,7 +746,7 @@ ${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape
   </script>
   <header>
     <div class="header-left">
-      <h1${linksForRole ? ` title="Press m to hide or show the header"` : ""}><span>M</span>uninn</h1>
+      <h1 title="Press m to hide or show the header"><span>M</span>uninn</h1>
       ${!linksForRole ? "" : `<nav>
         ${link("dashboard", "/", "Dashboard")}
         ${link("agents", "/agents", "Agents")}
