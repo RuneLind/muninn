@@ -5,7 +5,7 @@ import { createDashboardRoutes } from "./routes.ts";
 import { NAIS_DROPPED_ROUTE_GROUPS, servesWikiReadSliceOnly, wikiToolsRegistered } from "./route-groups.ts";
 import { routeRows, wikiRouteTable } from "../test/wiki-route-table.ts";
 import { answerBodyLimit } from "./routes/wiki-answers.ts";
-import { renderNav } from "./views/shared-styles.ts";
+import { HEADER_HIDDEN_KEY, renderNav } from "./views/shared-styles.ts";
 
 /**
  * The `nais` serving profile's surface — the routes it drops, and the nav that
@@ -214,7 +214,7 @@ describe("renderNav for role `user`", () => {
         expect(`${profile}/${page} <nav>: ${html.includes("<nav")}`).toBe(`${profile}/${page} <nav>: false`);
         expect(`${profile}/${page} hrefs: ${hrefs(html).join(",")}`).toBe(`${profile}/${page} hrefs: `);
         expect(html).not.toContain("nav-sep");
-        expect(html).not.toContain("muninn-nav-hidden");
+        expect(html).not.toContain(HEADER_HIDDEN_KEY);
         expect(html).toContain("uninn</h1>");
       }
     }

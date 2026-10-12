@@ -188,7 +188,7 @@ export async function renderWikiPage(opts?: {
       grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT}px) minmax(0, 1fr) 300px;
       gap: 16px;
       padding: 16px 24px;
-      height: calc(100vh - 63px);
+      height: calc(100vh - var(--header-h, 63px));
     }
     /* Atlas needs the full viewport for a useful overview: while the Atlas tab
        is active on the start view the layout collapses to the article column

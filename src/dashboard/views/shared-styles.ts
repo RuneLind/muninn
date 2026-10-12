@@ -530,10 +530,12 @@ ${themeTokenStyles()}
     .hover-wash:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 `;
 
-/** localStorage key for the nav links' hidden state, toggled with `m`. */
-export const NAV_HIDDEN_KEY = "muninn-nav-hidden";
-/** The class on `<html>` that hides the nav links. */
-export const NAV_HIDDEN_CLASS = "nav-hidden";
+/** localStorage key for the header's hidden state, toggled with `m`. */
+export const HEADER_HIDDEN_KEY = "muninn-header-hidden";
+/** The class on `<html>` that hides the header. It also sets `--header-h` to
+ *  0, which the pages sized against the header (`calc(100vh - var(--header-h,
+ *  …))`) read, so their content takes the freed height. */
+export const HEADER_HIDDEN_CLASS = "header-hidden";
 
 type NavPage = "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents" | "jira";
 
@@ -633,15 +635,15 @@ export function renderNav(
         } catch (e) { /* storage unavailable: keep the bare link */ }
       });
 `;
-  // `m` hides or shows the nav links, remembered per browser. Applied to
-  // `<html>` before the header is parsed, so a hidden nav never flashes. The
+  // `m` hides or shows the whole header, remembered per browser. Applied to
+  // `<html>` before the header is parsed, so a hidden header never flashes. The
   // key is refused while typing, with a modifier, on repeat, while the Tools ▾
   // menu is open and while a modal or menu is on screen — the reader's own
   // single-key rules (`navMenuOpen`, `modalOpen`).
   const navToggle = !linksForRole ? "" : `
-  <style>html.${NAV_HIDDEN_CLASS} header nav { display: none; }</style>
+  <style>html.${HEADER_HIDDEN_CLASS} { --header-h: 0px; } html.${HEADER_HIDDEN_CLASS} body > header { display: none; }</style>
   <script>
-    try { if (localStorage.getItem(${JSON.stringify(NAV_HIDDEN_KEY)}) === '1') document.documentElement.classList.add(${JSON.stringify(NAV_HIDDEN_CLASS)}); } catch (e) {}
+    try { if (localStorage.getItem(${JSON.stringify(HEADER_HIDDEN_KEY)}) === '1') document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)}); } catch (e) {}
     if (!window.__navToggle) {
       window.__navToggle = true;
       document.addEventListener('keydown', function(e) {
@@ -652,8 +654,8 @@ export function renderNav(
         if (document.querySelector('details.nav-dropdown[open]')) return;
         var modals = document.querySelectorAll(${JSON.stringify(MODAL_SELECTOR)});
         for (var i = 0; i < modals.length; i++) if (modals[i].getClientRects().length > 0) return;
-        var hidden = document.documentElement.classList.toggle(${JSON.stringify(NAV_HIDDEN_CLASS)});
-        try { localStorage.setItem(${JSON.stringify(NAV_HIDDEN_KEY)}, hidden ? '1' : '0'); } catch (e) {}
+        var hidden = document.documentElement.classList.toggle(${JSON.stringify(HEADER_HIDDEN_CLASS)});
+        try { localStorage.setItem(${JSON.stringify(HEADER_HIDDEN_KEY)}, hidden ? '1' : '0'); } catch (e) {}
       });
     }
   </script>`;
@@ -712,7 +714,7 @@ ${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape
   </script>
   <header>
     <div class="header-left">
-      <h1${linksForRole ? ` title="Press m to hide or show the menu"` : ""}><span>M</span>uninn</h1>
+      <h1${linksForRole ? ` title="Press m to hide or show the header"` : ""}><span>M</span>uninn</h1>
       ${!linksForRole ? "" : `<nav>
         ${link("dashboard", "/", "Dashboard")}
         ${link("agents", "/agents", "Agents")}
