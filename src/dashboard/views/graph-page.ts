@@ -18,7 +18,7 @@ export async function renderGraphPage(): Promise<string> {
     .graph-container {
       position: relative;
       width: 100%;
-      height: calc(100vh - 57px);
+      height: calc(100vh - var(--header-h, 63px));
     }
 
     #graph-canvas {

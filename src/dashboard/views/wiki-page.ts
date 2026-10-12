@@ -188,7 +188,7 @@ export async function renderWikiPage(opts?: {
       grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT}px) minmax(0, 1fr) 300px;
       gap: 16px;
       padding: 16px 24px;
-      height: calc(100vh - 63px);
+      height: calc(100vh - var(--header-h, 63px));
     }
     /* Atlas needs the full viewport for a useful overview: while the Atlas tab
        is active on the start view the layout collapses to the article column
@@ -1892,7 +1892,7 @@ export async function renderWikiPage(opts?: {
     /* Standalone HTML explainer rendered in an iframe filling the article pane. */
     .wiki-explainer-frame {
       width: 100%;
-      height: calc(100vh - 200px);
+      height: calc(100vh - var(--header-h, 63px) - 137px);
       min-height: 480px;
       border: 1px solid var(--border-primary);
       border-radius: 8px;

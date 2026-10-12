@@ -2,6 +2,7 @@ import { themeInitScript, themeToggleHtml, themeToggleScript } from "./component
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, type RouteGroup } from "../route-groups.ts";
 import { LAST_WIKI_KEY } from "./components/wiki-home.ts";
+import { MODAL_SELECTOR, modalOpen, navMenuOpen } from "./components/wiki-panes.ts";
 import type { AuthRole } from "../../auth/role.ts";
 
 /** Dark palette — the default, and the forced value under html[data-theme="dark"]. */
@@ -529,6 +530,16 @@ ${themeTokenStyles()}
     .hover-wash:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 `;
 
+/** localStorage key for the header's hidden state, toggled with `m`. */
+export const HEADER_HIDDEN_KEY = "muninn-header-hidden";
+/** The class on `<html>` that hides the header. It also sets `--header-h` to
+ *  0, which the pages sized against the header (`calc(100vh - var(--header-h,
+ *  …))`) read, so their content takes the freed height. */
+export const HEADER_HIDDEN_CLASS = "header-hidden";
+/** The short notice shown when `m` hides the header. */
+export const HEADER_HINT_CLASS = "header-hint";
+export const HEADER_HINT_TEXT = "Header hidden — press m to show it";
+
 type NavPage = "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents" | "jira";
 
 /**
@@ -627,6 +638,52 @@ export function renderNav(
         } catch (e) { /* storage unavailable: keep the bare link */ }
       });
 `;
+  // `m` hides or shows the whole header, remembered per browser. Applied to
+  // `<html>` before the header is parsed, so a hidden header never flashes. The
+  // key is refused while typing, with a modifier, on repeat, while the Tools ▾
+  // menu is open and while a modal or menu is on screen — the reader's own
+  // single-key rules (`navMenuOpen`, `modalOpen`).
+  const navToggle = !linksForRole ? "" : `
+  <style>
+    html.${HEADER_HIDDEN_CLASS} { --header-h: 0px; }
+    html.${HEADER_HIDDEN_CLASS} body > header { display: none; }
+    .${HEADER_HINT_CLASS} {
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 1000;
+      padding: 6px 12px; border-radius: 6px; font-size: 13px;
+      background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-primary);
+      pointer-events: none;
+    }
+  </style>
+  <script>
+    try { if (localStorage.getItem(${JSON.stringify(HEADER_HIDDEN_KEY)}) === '1') document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)}); } catch (e) {}
+    if (!window.__navToggle) (function() {
+      window.__navToggle = true;
+      // The reader's shared key guards (wiki-panes.ts), scoped to this IIFE.
+      var MODAL_SELECTOR = ${JSON.stringify(MODAL_SELECTOR)};
+      var modalOpen = ${modalOpen.toString()};
+      var navMenuOpen = ${navMenuOpen.toString()};
+      document.addEventListener('keydown', function(e) {
+        if (e.key !== 'm' && e.key !== 'M') return;
+        if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+        var t = e.target;
+        if (t && (['INPUT','TEXTAREA','SELECT'].includes(t.tagName) || t.isContentEditable)) return;
+        if (navMenuOpen(document) || modalOpen(document)) return;
+        var hidden = document.documentElement.classList.toggle(${JSON.stringify(HEADER_HIDDEN_CLASS)});
+        try { localStorage.setItem(${JSON.stringify(HEADER_HIDDEN_KEY)}, hidden ? '1' : '0'); } catch (e) {}
+        // Hidden is remembered on every page, so say how to undo it.
+        var old = document.querySelector('.${HEADER_HINT_CLASS}');
+        if (old) old.remove();
+        if (hidden) {
+          var hint = document.createElement('div');
+          hint.className = ${JSON.stringify(HEADER_HINT_CLASS)};
+          hint.setAttribute('role', 'status');
+          hint.textContent = ${JSON.stringify(HEADER_HINT_TEXT)};
+          document.body.appendChild(hint);
+          setTimeout(function() { hint.remove(); }, 3000);
+        }
+      });
+    })();
+  </script>`;
   const toolsDropdown = toolsItems.length === 0 ? "" : `<details class="nav-dropdown">
           <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
           <div class="nav-dropdown-panel">
@@ -634,7 +691,7 @@ ${toolsItems.map((item) => `            ${item}`).join("\n")}
           </div>
         </details>`;
   return `
-  <script>${themeInitScript()}</script>
+  <script>${themeInitScript()}</script>${navToggle}
   <script>
     if (!window.__fullscreenNav) {
       window.__fullscreenNav = true;
@@ -682,7 +739,7 @@ ${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape
   </script>
   <header>
     <div class="header-left">
-      <h1><span>M</span>uninn</h1>
+      <h1${linksForRole ? ` title="Press m to hide or show the header"` : ""}><span>M</span>uninn</h1>
       ${!linksForRole ? "" : `<nav>
         ${link("dashboard", "/", "Dashboard")}
         ${link("agents", "/agents", "Agents")}

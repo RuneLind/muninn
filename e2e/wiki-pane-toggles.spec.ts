@@ -12,6 +12,9 @@
  *  3. F → rail and pane gone, article spans the layout; Esc restores; a reload
  *     does NOT bring focus back.
  *  4. `]` typed into the Ask textarea is a character, not a toggle.
+ *  5. `m` hides the whole header and shows it again; the choice is remembered
+ *     across a reload and on the other pages, and the reader's layout takes
+ *     the freed height (it is sized against the header via `--header-h`).
  *
  * No model calls. ENV / SPAWN: as every spec here — `e2eEnv()` keeps this
  * muninn off Telegram/Slack and off the host's instance-profile flags.
@@ -25,6 +28,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { PANES_KEY, STRIP_WIDTH } from "../src/dashboard/views/components/wiki-panes.ts";
+import { HEADER_HIDDEN_KEY, HEADER_HINT_TEXT } from "../src/dashboard/views/shared-styles.ts";
 
 const PORT = e2ePort("wiki-pane-toggles");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -302,6 +306,92 @@ test.describe("Wiki pane toggles", () => {
     await expect(page.locator("#wikiFocusExit")).toBeVisible();
     await page.locator("body").press("Escape");
     await expect(page.locator("#wikiConnStrip [data-pane-toggle='focus']")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("m hides the whole header and shows it again, remembered across pages", async ({ page }) => {
+    await open(page);
+    const header = page.locator("body > header");
+    await expect(header).toBeVisible();
+    const layout = async () => (await page.locator(LAYOUT).boundingBox())!;
+    // Shown: the layout starts below the header and ends at the viewport.
+    const shown = await layout();
+    expect(Math.round(shown.y)).toBeGreaterThan(0);
+    expect(Math.round(shown.y + shown.height)).toBe(900);
+
+    await page.locator("body").press("m");
+    await expect(header).toBeHidden();
+    // A short notice says how to bring it back, then goes.
+    await expect(page.locator(".header-hint")).toHaveText(HEADER_HINT_TEXT);
+    await expect(page.locator(".header-hint")).toHaveCount(0, { timeout: 5_000 });
+    // Hidden: the layout takes the whole viewport, top to bottom.
+    const hidden = await layout();
+    expect(Math.round(hidden.y)).toBe(0);
+    expect(Math.round(hidden.height)).toBe(900);
+    expect(await page.evaluate((k) => localStorage.getItem(k), HEADER_HIDDEN_KEY)).toBe("1");
+
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("One");
+    await expect(header).toBeHidden();
+    await page.goto(`${BASE}/chat`);
+    await expect(page.locator("#chatInput")).toBeVisible();
+    await expect(header).toBeHidden();
+    const chat = (await page.locator(".sim-layout").boundingBox())!;
+    expect([Math.round(chat.y), Math.round(chat.height)]).toEqual([0, 900]);
+
+    await page.locator("body").press("M");
+    await expect(header).toBeVisible();
+    await expect(page.locator("header h1")).toBeVisible();
+    expect(await page.evaluate((k) => localStorage.getItem(k), HEADER_HIDDEN_KEY)).toBe("0");
+  });
+
+  test("m typed into the Ask box is a character, not a toggle", async ({ page }) => {
+    await open(page);
+    await page.locator(".wiki-conn-tab[data-conntab='ask']").click();
+    const input = page.locator("#wikiAskInput");
+    await input.click();
+    await input.press("m");
+    await expect(input).toHaveValue("m");
+    await expect(page.locator("body > header")).toBeVisible();
+  });
+
+  test("m with a modifier held is not the toggle", async ({ page }) => {
+    await open(page);
+    // Nothing focused, so the typing guard cannot be what refuses it.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    for (const chord of ["Control+m", "Alt+m", "Meta+m"]) {
+      await page.keyboard.press(chord);
+      await expect(page.locator("body > header"), chord).toBeVisible();
+    }
+    // The same unmodified key on the same focus does toggle.
+    await page.keyboard.press("m");
+    await expect(page.locator("body > header")).toBeHidden();
+  });
+
+  test("m is refused while the Tools menu or a dialog is open, and on key repeat", async ({ page }) => {
+    await open(page);
+    const nav = page.locator("body > header");
+    // The nav's own Tools ▾ menu, open: a <details> no dialog selector sees.
+    await page.locator("details.nav-dropdown > summary").click();
+    await expect(page.locator("details.nav-dropdown")).toHaveAttribute("open", "");
+    await page.keyboard.press("m");
+    await expect(nav, "Tools menu open").toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("details.nav-dropdown")).not.toHaveAttribute("open", "");
+    // A visible dialog anywhere on the page.
+    await page.evaluate(() => {
+      const d = document.createElement("div");
+      d.id = "e2eDialog";
+      d.setAttribute("role", "dialog");
+      d.textContent = "dialog";
+      document.body.appendChild(d);
+    });
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("m");
+    await expect(nav, "dialog open").toBeVisible();
+    await page.evaluate(() => document.getElementById("e2eDialog")?.remove());
+    // A held key's repeats do not flicker it.
+    await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "m", repeat: true, bubbles: true })));
+    await expect(nav, "repeat").toBeVisible();
   });
 
   test("] typed into the Ask box is a character, not a toggle", async ({ page }) => {

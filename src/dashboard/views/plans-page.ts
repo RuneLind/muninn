@@ -305,7 +305,7 @@ const PLAN_BOARD_STYLES = `
     .pb-board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding: 14px 0; scrollbar-width: thin; }
     .pb-col {
       flex: 0 0 292px; background: var(--pb-surface-2); border: 1px solid var(--pb-line);
-      border-radius: var(--pb-r); display: flex; flex-direction: column; max-height: calc(100vh - 150px);
+      border-radius: var(--pb-r); display: flex; flex-direction: column; max-height: calc(100vh - var(--header-h, 63px) - 87px);
     }
     .pb-head {
       position: sticky; top: 0; z-index: 2; background: var(--pb-surface-2);

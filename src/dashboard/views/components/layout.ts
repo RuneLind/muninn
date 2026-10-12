@@ -69,7 +69,7 @@ export function layoutStyles(): string {
     /* Master-detail layout (shared by users, threads) */
     .md-layout {
       display: flex;
-      height: calc(100vh - 180px);
+      height: calc(100vh - var(--header-h, 63px) - 117px);
       background: var(--bg-deep);
       border: 1px solid var(--border-primary);
       border-radius: 10px;
