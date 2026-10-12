@@ -55,6 +55,7 @@ import {
   MOVES_PILL_CLASS,
 } from "../src/dashboard/views/components/wiki-report-blocks.ts";
 import { LENS_SWITCH_CLASS } from "../src/dashboard/views/components/wiki-lens.ts";
+import { HEADER_HINT_TEXT } from "../src/dashboard/views/shared-styles.ts";
 
 const PORT = e2ePort("wiki-nais-read");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -467,8 +468,8 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(page.locator("#articleWrap")).toContainText("Blåbærsyltetøy på brødskiva");
     await expect(page.locator("#articleWrap svg").first()).toBeVisible({ timeout: 20_000 });
     await expect(page.locator("#articleWrap svg").first()).toContainText("Søknad mottatt");
-    // Role `user` gets the header without the operator's nav.
-    await expect(page.locator("header h1")).toBeVisible();
+    // Role `user` starts with the header hidden, and it carries no nav.
+    await expect(page.locator("body > header")).toBeHidden();
     await expect(page.locator("header nav")).toHaveCount(0);
     // The rail's own read surface is there…
     await expect(page.locator(".wiki-conn-tab.active")).toHaveText("Connections");
@@ -546,6 +547,35 @@ for (const scheme of ["light", "dark"] as const) {
     await context.close();
   });
 }
+
+test("a role-user reads full height, and m brings the header back without the nav, remembered", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
+  await expect(page.locator(".callout-info .callout-title")).toHaveText("Merk");
+  const header = page.locator("body > header");
+  await expect(header).toBeHidden();
+  const full = (await page.locator(".wiki-layout").boundingBox())!;
+  expect([Math.round(full.y), Math.round(full.height)]).toEqual([0, 900]);
+  // The first load says how to bring the header back, once.
+  await expect(page.locator(".header-hint")).toHaveText(HEADER_HINT_TEXT);
+  await page.reload();
+  await expect(page.locator(".callout-info .callout-title")).toHaveText("Merk");
+  await expect(header).toBeHidden();
+  // No retry: the notice is created while the page parses and removes itself
+  // after 3 s, so a retrying assertion would wait it out.
+  expect(await page.locator(".header-hint").count()).toBe(0);
+
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press("m");
+  await expect(header).toBeVisible();
+  await expect(page.locator("header h1")).toHaveAttribute("title", "Press m to hide or show the header");
+  await expect(page.locator("header nav")).toHaveCount(0);
+
+  // The choice to show it beats the role's default on the next load.
+  await page.reload();
+  await expect(page.locator(".callout-info .callout-title")).toHaveText("Merk");
+  await expect(header).toBeVisible();
+});
 
 test("a role-user opens Related work's second hop — a read-slice GET, no page or attachment of the open one", async ({ page }) => {
   const seen = watch(page);

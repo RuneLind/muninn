@@ -214,20 +214,81 @@ describe("renderNav for role `user`", () => {
         expect(`${profile}/${page} <nav>: ${html.includes("<nav")}`).toBe(`${profile}/${page} <nav>: false`);
         expect(`${profile}/${page} hrefs: ${hrefs(html).join(",")}`).toBe(`${profile}/${page} hrefs: `);
         expect(html).not.toContain("nav-sep");
-        expect(html).not.toContain(HEADER_HIDDEN_KEY);
         expect(html).toContain("uninn</h1>");
       }
     }
   });
 
-  test("the `m` hint sits on the wordmark for a viewer with the nav, never on the nav or for role `user`", () => {
+  test("the `m` hint sits on the wordmark for every role, never on the nav", () => {
     const h1 = (html: string): string => html.match(/<h1[^>]*>/)![0];
-    for (const role of ["admin", null] as const) {
-      const html = renderNav("wiki", { profile: "default", role });
-      expect(h1(html)).toContain('title="Press m to hide or show the header"');
-      expect(html.match(/<nav[^>]*>/)![0]).toBe("<nav>");
+    for (const role of ["admin", null, "user"] as const) {
+      const html = renderNav("wiki", { profile: "nais", role });
+      expect(`${role}: ${h1(html)}`).toBe(`${role}: <h1 title="Press m to hide or show the header">`);
+      if (role !== "user") expect(html.match(/<nav[^>]*>/)![0]).toBe("<nav>");
     }
-    expect(h1(renderNav("wiki", { profile: "nais", role: "user" }))).toBe("<h1>");
+  });
+
+  /**
+   * The header's starting state, run from the emitted early-apply script. On
+   * the pod (`nais`, where the wiki read slice is role `user`'s surface) that
+   * role starts hidden, and the first such load says how to bring the header
+   * back once, then stores the hidden state so the notice does not repeat.
+   * Everyone else starts shown. A stored choice beats the default either way;
+   * storage that throws falls back to the default.
+   */
+  test("role `user` on the pod starts hidden with a one-time notice; a stored choice wins", () => {
+    type Stored = string | null | "throws";
+    const run = (role: "user" | "admin" | null, profile: "nais" | "default", stored: Stored) => {
+      const html = renderNav("wiki", { profile, role });
+      const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!).find((s) => s.includes("__navToggle"))!;
+      const classes = new Set<string>();
+      const hints: string[] = [];
+      let value: Stored = stored;
+      const document = {
+        documentElement: { classList: { add: (c: string) => classes.add(c), toggle: () => false } },
+        addEventListener: () => {},
+        querySelector: () => null,
+        createElement: () => ({ className: "", textContent: "", setAttribute() {}, remove() {} }),
+        body: { appendChild: (el: { textContent: string }) => hints.push(el.textContent) },
+      };
+      const localStorage = {
+        getItem: () => { if (value === "throws") throw new Error("blocked"); return value; },
+        setItem: (_k: string, v: string) => { if (value === "throws") throw new Error("blocked"); value = v; },
+      };
+      new Function("window", "document", "localStorage", "setTimeout", script)({}, document, localStorage, () => {});
+      const hint = hints.length === 0 ? "" : hints.every((h) => h === HEADER_HINT_TEXT) ? ` +notice×${hints.length}` : " +WRONG notice";
+      return `${classes.has(HEADER_HIDDEN_CLASS) ? "hidden" : "shown"}${hint} stored=${value}`;
+    };
+    const rows: string[] = [];
+    for (const role of ["user", "admin", null] as const) {
+      for (const stored of [null, "1", "0", "", "garbage", "throws"] as const) {
+        rows.push(`nais ${role}/${stored} → ${run(role, "nais", stored)}`);
+      }
+    }
+    expect(rows).toEqual([
+      "nais user/null → hidden +notice×1 stored=1",
+      "nais user/1 → hidden stored=1",
+      "nais user/0 → shown stored=0",
+      "nais user/ → shown stored=",
+      "nais user/garbage → shown stored=garbage",
+      "nais user/throws → hidden +notice×1 stored=throws",
+      "nais admin/null → shown stored=null",
+      "nais admin/1 → hidden stored=1",
+      "nais admin/0 → shown stored=0",
+      "nais admin/ → shown stored=",
+      "nais admin/garbage → shown stored=garbage",
+      "nais admin/throws → shown stored=throws",
+      "nais null/null → shown stored=null",
+      "nais null/1 → hidden stored=1",
+      "nais null/0 → shown stored=0",
+      "nais null/ → shown stored=",
+      "nais null/garbage → shown stored=garbage",
+      "nais null/throws → shown stored=throws",
+    ]);
+    // Off the pod role `user` reaches only /chat, whose bot selector is in the
+    // header: it starts shown there.
+    expect(run("user", "default", null)).toBe("shown stored=null");
+    expect(run("user", "default", "1")).toBe("hidden stored=1");
   });
 
   /**

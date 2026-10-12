@@ -1,6 +1,6 @@
 import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
-import { droppedRouteGroups, type RouteGroup } from "../route-groups.ts";
+import { droppedRouteGroups, servesWikiReadSliceOnly, type RouteGroup } from "../route-groups.ts";
 import { LAST_WIKI_KEY } from "./components/wiki-home.ts";
 import { MODAL_SELECTOR, modalOpen, navMenuOpen } from "./components/wiki-panes.ts";
 import type { AuthRole } from "../../auth/role.ts";
@@ -574,7 +574,8 @@ export function renderNav(
   // Read at CALL time when the caller does not say, like `isWikiReadonly()`:
   // a view takes no `Config`, and the option exists so a test never has to set
   // a process-wide flag. Same one parse either way.
-  const dropped = droppedRouteGroups(options?.profile ?? resolveServingProfile());
+  const profile = options?.profile ?? resolveServingProfile();
+  const dropped = droppedRouteGroups(profile);
   // Role `user` gets no links at all: the nav is the operator's map, and the
   // user zone admits that role to one or two pages it reaches without one
   // (`/` sends it to its landing page). On the pod that is the whole team.
@@ -642,8 +643,13 @@ export function renderNav(
   // `<html>` before the header is parsed, so a hidden header never flashes. The
   // key is refused while typing, with a modifier, on repeat, while the Tools ▾
   // menu is open and while a modal or menu is on screen — the reader's own
-  // single-key rules (`navMenuOpen`, `modalOpen`).
-  const navToggle = !linksForRole ? "" : `
+  // single-key rules (`navMenuOpen`, `modalOpen`). On the pod, where the wiki
+  // read slice is role `user`'s surface, that role starts with the header
+  // hidden and its first such load says how to bring it back, once. A choice
+  // made with `m` is stored and beats the default, for every role. Off the pod
+  // role `user` reaches only /chat, whose bot selector is in the header.
+  const headerHiddenByDefault = !linksForRole && servesWikiReadSliceOnly(profile);
+  const navToggle = `
   <style>
     html.${HEADER_HIDDEN_CLASS} { --header-h: 0px; }
     html.${HEADER_HIDDEN_CLASS} body > header { display: none; }
@@ -655,8 +661,29 @@ export function renderNav(
     }
   </style>
   <script>
-    try { if (localStorage.getItem(${JSON.stringify(HEADER_HIDDEN_KEY)}) === '1') document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)}); } catch (e) {}
-    if (!window.__navToggle) (function() {
+    (function() {
+      var KEY = ${JSON.stringify(HEADER_HIDDEN_KEY)};
+      var stored = null;
+      try { stored = localStorage.getItem(KEY); } catch (e) {}
+      var byDefault = stored === null && ${headerHiddenByDefault};
+      if (stored === '1' || byDefault) document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)});
+      // Hidden is remembered on every page, so say how to undo it: on the press
+      // that hides it, and once on a load hidden by the role's default.
+      function showHint() {
+        var old = document.querySelector('.${HEADER_HINT_CLASS}');
+        if (old) old.remove();
+        var hint = document.createElement('div');
+        hint.className = ${JSON.stringify(HEADER_HINT_CLASS)};
+        hint.setAttribute('role', 'status');
+        hint.textContent = ${JSON.stringify(HEADER_HINT_TEXT)};
+        document.body.appendChild(hint);
+        setTimeout(function() { hint.remove(); }, 3000);
+      }
+      if (byDefault) {
+        showHint();
+        try { localStorage.setItem(KEY, '1'); } catch (e) {}
+      }
+      if (window.__navToggle) return;
       window.__navToggle = true;
       // The reader's shared key guards (wiki-panes.ts), scoped to this IIFE.
       var MODAL_SELECTOR = ${JSON.stringify(MODAL_SELECTOR)};
@@ -669,17 +696,11 @@ export function renderNav(
         if (t && (['INPUT','TEXTAREA','SELECT'].includes(t.tagName) || t.isContentEditable)) return;
         if (navMenuOpen(document) || modalOpen(document)) return;
         var hidden = document.documentElement.classList.toggle(${JSON.stringify(HEADER_HIDDEN_CLASS)});
-        try { localStorage.setItem(${JSON.stringify(HEADER_HIDDEN_KEY)}, hidden ? '1' : '0'); } catch (e) {}
-        // Hidden is remembered on every page, so say how to undo it.
-        var old = document.querySelector('.${HEADER_HINT_CLASS}');
-        if (old) old.remove();
-        if (hidden) {
-          var hint = document.createElement('div');
-          hint.className = ${JSON.stringify(HEADER_HINT_CLASS)};
-          hint.setAttribute('role', 'status');
-          hint.textContent = ${JSON.stringify(HEADER_HINT_TEXT)};
-          document.body.appendChild(hint);
-          setTimeout(function() { hint.remove(); }, 3000);
+        try { localStorage.setItem(KEY, hidden ? '1' : '0'); } catch (e) {}
+        if (hidden) showHint();
+        else {
+          var old = document.querySelector('.${HEADER_HINT_CLASS}');
+          if (old) old.remove();
         }
       });
     })();
@@ -739,7 +760,7 @@ ${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape
   </script>
   <header>
     <div class="header-left">
-      <h1${linksForRole ? ` title="Press m to hide or show the header"` : ""}><span>M</span>uninn</h1>
+      <h1 title="Press m to hide or show the header"><span>M</span>uninn</h1>
       ${!linksForRole ? "" : `<nav>
         ${link("dashboard", "/", "Dashboard")}
         ${link("agents", "/agents", "Agents")}
