@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LENS_KEY,
   idNoun,
+  lensChipTitle,
   idPrefix,
   pageDefaultLens,
   parseDefaultLens,
@@ -10,6 +11,7 @@ import {
   parseWikiDefaultLens,
   readStoredLens,
   resolveLens,
+  toggledLens,
   writeStoredLens,
 } from "./reader-lens.ts";
 
@@ -180,5 +182,22 @@ describe("fix round 1 cleanups: one default-lens parse, the config warnings", ()
     expect(r.labels.d).toEqual({ one: "Beslutning", other: "beslutninger" });
     expect(r.warnings).toHaveLength(1);
     expect(r.warnings[0]).toContain('key "d" has a lower-case letter');
+  });
+});
+
+describe("toggledLens", () => {
+  test("Overview and All swap; Agent and no lens give way to All", () => {
+    expect(toggledLens("overview")).toBe("all");
+    expect(toggledLens("all")).toBe("overview");
+    expect(toggledLens("agent")).toBe("all");
+    expect(toggledLens(null)).toBe("all");
+  });
+});
+
+describe("lensChipTitle", () => {
+  test("names the lens on screen and the one v switches to, in the wiki's language", () => {
+    expect(lensChipTitle("no", "overview")).toBe("Visning: Oversikt. Klikk eller trykk v for Alt.");
+    expect(lensChipTitle("en", "all")).toBe("Lens: All. Click or press v for Overview.");
+    expect(lensChipTitle("en", "agent")).toBe("Lens: Agent. Click or press v for All.");
   });
 });
