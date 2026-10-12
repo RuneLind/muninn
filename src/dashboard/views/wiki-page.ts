@@ -46,6 +46,7 @@ import { isWikiReadonly } from "../../wiki/readonly.ts";
 import { WIKI_READ_SLICE_CLASS, wikiReadSliceStyles } from "./components/wiki-read-slice.ts";
 import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 import { FACTCHECK_CONF_CHIP_CSS } from "./components/factcheck-conf-chip-styles.ts";
+import type { AuthRole } from "../../auth/role.ts";
 
 /* Inline stroke icons for the pane toggles — sized/coloured by .wiki-pane-btn. */
 const SVG_COLLAPSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>';
@@ -115,6 +116,8 @@ export async function renderWikiPage(opts?: {
    *  the `WIKI_DIR` override, where `selected` is "" while the root may still
    *  be a registered wiki. Default `selected`. */
   findSelf?: string;
+  /** The viewer's role, for the nav (`renderNav`'s `role`). */
+  role?: AuthRole | null;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
@@ -2654,7 +2657,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
   </style>
 </head>
 <body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
-  ${renderNav("wiki")}
+  ${renderNav("wiki", { role: opts?.role })}
   <div class="wiki-layout">
     <div class="wiki-pane">
       <div class="wiki-browse-head">

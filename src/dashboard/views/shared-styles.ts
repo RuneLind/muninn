@@ -2,6 +2,7 @@ import { themeInitScript, themeToggleHtml, themeToggleScript } from "./component
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, type RouteGroup } from "../route-groups.ts";
 import { LAST_WIKI_KEY } from "./components/wiki-home.ts";
+import type { AuthRole } from "../../auth/role.ts";
 
 /** Dark palette — the default, and the forced value under html[data-theme="dark"]. */
 const DARK_TOKENS = `
@@ -551,13 +552,24 @@ const NAV_PAGE_GROUP: Record<NavPage, RouteGroup | null> = {
 /** Shared header HTML with nav links */
 export function renderNav(
   activePage: NavPage,
-  options?: { headerLeftExtra?: string; headerRight?: string; profile?: MuninnProfile },
+  options?: {
+    headerLeftExtra?: string;
+    headerRight?: string;
+    profile?: MuninnProfile;
+    /** The viewer's role (`sessionRole(c)`); null or absent is auth off. */
+    role?: AuthRole | null;
+  },
 ): string {
   // Read at CALL time when the caller does not say, like `isWikiReadonly()`:
   // a view takes no `Config`, and the option exists so a test never has to set
   // a process-wide flag. Same one parse either way.
   const dropped = droppedRouteGroups(options?.profile ?? resolveServingProfile());
+  // Role `user` gets no links at all: the nav is the operator's map, and the
+  // user zone admits that role to one or two pages it reaches without one
+  // (`/` sends it to its landing page). On the pod that is the whole team.
+  const linksForRole = options?.role !== "user";
   const shown = (page: NavPage): boolean => {
+    if (!linksForRole) return false;
     const group = NAV_PAGE_GROUP[page];
     return group === null || !dropped.has(group);
   };
@@ -671,7 +683,7 @@ ${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape
   <header>
     <div class="header-left">
       <h1><span>M</span>uninn</h1>
-      <nav>
+      ${!linksForRole ? "" : `<nav>
         ${link("dashboard", "/", "Dashboard")}
         ${link("agents", "/agents", "Agents")}
         ${link("traces", "/traces", "Traces")}
@@ -685,7 +697,7 @@ ${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape
         ${link("plans", "/plans", "Plans")}
         <span class="nav-sep" aria-hidden="true"></span>
         ${toolsDropdown}
-      </nav>
+      </nav>`}
 ${options?.headerLeftExtra ?? ""}
     </div>
     <div class="header-right">

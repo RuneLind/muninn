@@ -200,6 +200,36 @@ describe("renderNav under the nais profile", () => {
 });
 
 /**
+ * Role `user` gets no nav: on the pod that is every colleague, who reaches the
+ * wiki from `/` and has no use for the operator's links (and a 403 behind most
+ * of them). Admin and auth off keep the profile's nav unchanged.
+ */
+describe("renderNav for role `user`", () => {
+  const hrefs = (html: string): string[] => [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]!);
+
+  test("renders no nav element and no link, on either profile and either page", () => {
+    for (const profile of ["nais", "default"] as const) {
+      for (const page of ["wiki", "chat"] as const) {
+        const html = renderNav(page, { profile, role: "user" });
+        expect(`${profile}/${page} <nav>: ${html.includes("<nav")}`).toBe(`${profile}/${page} <nav>: false`);
+        expect(`${profile}/${page} hrefs: ${hrefs(html).join(",")}`).toBe(`${profile}/${page} hrefs: `);
+        expect(html).not.toContain("nav-sep");
+        expect(html).toContain("uninn</h1>");
+      }
+    }
+  });
+
+  test("role `admin` and auth off render the profile's nav byte for byte", () => {
+    for (const profile of ["nais", "default"] as const) {
+      const plain = renderNav("wiki", { profile });
+      expect(renderNav("wiki", { profile, role: "admin" })).toBe(plain);
+      expect(renderNav("wiki", { profile, role: null })).toBe(plain);
+      expect(hrefs(plain)).toContain("/wiki");
+    }
+  });
+});
+
+/**
  * The wiki READ slice: the one wiki group `nais` keeps. Its routes answer and
  * every other wiki route is absent — the split the user zone's wiki entries
  * rest on (`src/auth/zones.ts`).

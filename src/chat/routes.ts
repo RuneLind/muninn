@@ -76,7 +76,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Serve the chat UI page
   app.get("/", async (c) => {
-    return c.html(await renderChatPage());
+    return c.html(await renderChatPage({ role: sessionRole(c) }));
   });
 
   // Knowledge viewable collections config for index document links
