@@ -398,7 +398,7 @@ if (isAuthenticatingMode(auth.mode)) {
     "the socket's owner filter and the ZONE model are all in place: role `user` reaches /chat and the " +
     "routes that page calls, and every other route — /traces, /models, /plans, /agents, /logs, " +
     "/api/prompts/:traceId, the unfiltered collection reads — answers 403. GET / redirects a `user` to " +
-    "/chat. Only /api/live and /api/ready are reachable with no credential.",
+    "/chat (/wiki under MUNINN_PROFILE=nais). Only /api/live and /api/ready are reachable with no credential.",
     { mode: auth.mode },
   );
   // ⚠️ The next two lines are about the PINNED identity and the LOOPBACK

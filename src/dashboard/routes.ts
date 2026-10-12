@@ -44,7 +44,7 @@ import { registerJiraRoutes } from "./routes/jira-routes.ts";
  * build hash, `/api/attention`) are profile-independent and always present —
  * they are the instance itself, not a feature. So is the `/chat` slice, which
  * is mounted separately in `src/index.ts` and is therefore not filterable here
- * at all: on the nais profile chat is the whole point.
+ * at all.
  *
  * The profile is `config.profile ?? resolveServingProfile()` — the field where
  * a `Config` carries one, the same parse's env getter where it does not, which

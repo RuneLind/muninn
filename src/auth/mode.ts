@@ -390,7 +390,8 @@ function parseLocalRole(env: Record<string, string | undefined>): AuthRole {
     log.warn(
       `${AUTH_ENV}="local" without ${LOCAL_ROLE_ENV}: the pinned identity resolves to role "user", ` +
       `so the zone model closes the whole operator surface to it — /traces, /models, /plans, /agents, ` +
-      `/logs and the unfiltered collection reads all answer 403, and GET / redirects to /chat. ` +
+      `/logs and the unfiltered collection reads all answer 403, and GET / redirects to /chat ` +
+      `(/wiki under MUNINN_PROFILE=nais). ` +
       `${LOCAL_ROLE_ENV}=admin grants admin ONLY to a request whose identity came from a credential ` +
       `channel. A BROWSER on this host cannot reach the operator surface even with it set: the ` +
       `login redirect strips the token, so the browser's cookie-only request takes the loopback ` +
