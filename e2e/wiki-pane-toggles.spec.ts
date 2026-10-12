@@ -12,6 +12,9 @@
  *  3. F → rail and pane gone, article spans the layout; Esc restores; a reload
  *     does NOT bring focus back.
  *  4. `]` typed into the Ask textarea is a character, not a toggle.
+ *  5. `m` hides the header's nav links and shows them again; the choice is
+ *     remembered across a reload and on the other pages, and leaves the header
+ *     height alone (the reader's layout is sized against it).
  *
  * No model calls. ENV / SPAWN: as every spec here — `e2eEnv()` keeps this
  * muninn off Telegram/Slack and off the host's instance-profile flags.
@@ -25,6 +28,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { PANES_KEY, STRIP_WIDTH } from "../src/dashboard/views/components/wiki-panes.ts";
+import { NAV_HIDDEN_KEY } from "../src/dashboard/views/shared-styles.ts";
 
 const PORT = e2ePort("wiki-pane-toggles");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -302,6 +306,53 @@ test.describe("Wiki pane toggles", () => {
     await expect(page.locator("#wikiFocusExit")).toBeVisible();
     await page.locator("body").press("Escape");
     await expect(page.locator("#wikiConnStrip [data-pane-toggle='focus']")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("m hides the nav links and shows them again, remembered across pages", async ({ page }) => {
+    await open(page);
+    const nav = page.locator("header nav");
+    await expect(nav).toBeVisible();
+    const before = Math.round((await page.locator("header").boundingBox())!.height);
+
+    await page.locator("body").press("m");
+    await expect(nav).toBeHidden();
+    await expect(page.locator("header h1")).toBeVisible();
+    expect(Math.round((await page.locator("header").boundingBox())!.height)).toBe(before);
+    expect(await page.evaluate((k) => localStorage.getItem(k), NAV_HIDDEN_KEY)).toBe("1");
+
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("One");
+    await expect(nav).toBeHidden();
+    await page.goto(`${BASE}/chat`);
+    await expect(page.locator("header h1")).toBeVisible();
+    await expect(page.locator("header nav")).toBeHidden();
+
+    await page.locator("body").press("M");
+    await expect(page.locator("header nav")).toBeVisible();
+    expect(await page.evaluate((k) => localStorage.getItem(k), NAV_HIDDEN_KEY)).toBe("0");
+  });
+
+  test("m typed into the Ask box is a character, not a toggle", async ({ page }) => {
+    await open(page);
+    await page.locator(".wiki-conn-tab[data-conntab='ask']").click();
+    const input = page.locator("#wikiAskInput");
+    await input.click();
+    await input.press("m");
+    await expect(input).toHaveValue("m");
+    await expect(page.locator("header nav")).toBeVisible();
+  });
+
+  test("m with a modifier held is not the toggle", async ({ page }) => {
+    await open(page);
+    // Nothing focused, so the typing guard cannot be what refuses it.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    for (const chord of ["Control+m", "Alt+m", "Meta+m"]) {
+      await page.keyboard.press(chord);
+      await expect(page.locator("header nav"), chord).toBeVisible();
+    }
+    // The same unmodified key on the same focus does toggle.
+    await page.keyboard.press("m");
+    await expect(page.locator("header nav")).toBeHidden();
   });
 
   test("] typed into the Ask box is a character, not a toggle", async ({ page }) => {
