@@ -1394,6 +1394,29 @@ function paintRetiredToggle(): void {
   box.checked = showRetired();
   wrap.hidden = !allPages.some((p) => p.culled) || (n === 0 && !box.checked);
   label.textContent = cullToggleText(n);
+  paintViewOptions();
+}
+
+/**
+ * The view options a closed pane would otherwise hide: a dot on the toolbar's
+ * options button, and one removable chip per option that is on, so a rail that
+ * folds families or shows retired pages always says why.
+ */
+function paintViewOptions(): void {
+  const families = familiesOn();
+  const retired = showRetired();
+  const dot = document.getElementById("wikiOptionsDot");
+  if (dot) dot.hidden = !(families || retired);
+  const strip = document.getElementById("wikiActiveOptions");
+  if (!strip) return;
+  const chip = (key: string, text: string) =>
+    `<span class="wiki-active-option">${esc(text)}<button type="button" data-view-option-off="${key}" ` +
+    `aria-label="${esc(`Turn off: ${text}`)}" title="Turn off">×</button></span>`;
+  const html =
+    (families ? chip("families", "group families") : "") +
+    (retired ? chip("retired", cullToggleText(retiredUnderFacets())) : "");
+  strip.innerHTML = html;
+  strip.hidden = !html;
 }
 
 /** Turn `Show retired` on — the toggle itself, or a reveal control on an empty
@@ -4731,9 +4754,9 @@ document.body.addEventListener("click", (e) => {
   if (target.closest && target.closest(`[${RETIRED_REVEAL_ATTR}]`)) {
     e.preventDefault();
     setShowRetired(true);
-    // The repaint removed the control that had focus; the toggle it turned on
-    // is where a keyboard reader continues.
-    (document.getElementById("wikiShowRetired") as HTMLInputElement | null)?.focus();
+    // The repaint removed the control that had focus; the options button that
+    // holds the toggle it turned on is where a keyboard reader continues.
+    document.getElementById("wikiOptionsBtn")?.focus();
     return;
   }
   // The retired banner's successor link — same shape as `continue at:`, but a
@@ -5049,16 +5072,17 @@ document.getElementById("wikiSort")!.addEventListener("change", () => {
 // same `toggleFolded` every fold uses — the toggle is a sentinel key in that one
 // flat namespace, so nothing about the store changes to hold it.
 const familiesBox = document.getElementById("wikiGroupFamilies") as HTMLInputElement | null;
+function setGroupFamilies(on: boolean): void {
+  if (familiesOn() !== on) openFolds = toggleFolded(WIKI, GROUP_FAMILIES_TOGGLE_KEY);
+  // Painted from the store rather than trusted from the event: a write that
+  // localStorage refused still has to leave the box saying what the rail is
+  // about to render.
+  if (familiesBox) familiesBox.checked = familiesOn();
+  renderList();
+}
 if (familiesBox) {
   familiesBox.checked = familiesOn();
-  familiesBox.addEventListener("change", () => {
-    openFolds = toggleFolded(WIKI, GROUP_FAMILIES_TOGGLE_KEY);
-    // Painted from the store rather than trusted from the event: a write that
-    // localStorage refused still has to leave the box saying what the rail is
-    // about to render.
-    familiesBox.checked = familiesOn();
-    renderList();
-  });
+  familiesBox.addEventListener("change", () => setGroupFamilies(familiesBox.checked));
 }
 
 // `Show retired (N)`, per wiki: the same store and discipline as `group
@@ -5069,6 +5093,56 @@ if (retiredBox) {
   retiredBox.checked = showRetired();
   retiredBox.addEventListener("change", () => setShowRetired(retiredBox.checked));
 }
+
+// The toolbar's Filters button flips the <details> under it. The details keeps
+// its own open state, so syncFilters' auto-open and a background adopt read it
+// as before; aria-expanded follows the details whoever opened it.
+const filtersDetails = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
+const filtersBtn = document.getElementById("wikiFiltersBtn");
+if (filtersDetails && filtersBtn) {
+  filtersBtn.addEventListener("click", () => {
+    filtersDetails.open = !filtersDetails.open;
+  });
+  filtersDetails.addEventListener("toggle", () => {
+    filtersBtn.setAttribute("aria-expanded", String(filtersDetails.open));
+  });
+}
+
+// The view-options pane: opened by its button, closed by the button, a pointer
+// outside it, or Escape (which returns focus to the button and stops there, so
+// it does not also leave focus mode).
+const optionsBtn = document.getElementById("wikiOptionsBtn");
+const optionsPane = document.getElementById("wikiOptions");
+function setOptionsOpen(open: boolean): void {
+  if (!optionsBtn || !optionsPane) return;
+  optionsPane.hidden = !open;
+  optionsBtn.setAttribute("aria-expanded", String(open));
+}
+if (optionsBtn && optionsPane) {
+  optionsBtn.addEventListener("click", () => setOptionsOpen(optionsPane.hidden));
+  document.addEventListener("pointerdown", (e) => {
+    if (optionsPane.hidden) return;
+    const t = e.target as Node;
+    if (optionsPane.contains(t) || optionsBtn.contains(t)) return;
+    setOptionsOpen(false);
+  });
+  optionsBtn.parentElement?.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || optionsPane.hidden) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setOptionsOpen(false);
+    optionsBtn.focus();
+  });
+}
+document.getElementById("wikiActiveOptions")?.addEventListener("click", (e) => {
+  const off = (e.target as HTMLElement).closest?.("[data-view-option-off]");
+  if (!off) return;
+  if (off.getAttribute("data-view-option-off") === "families") setGroupFamilies(false);
+  else setShowRetired(false);
+  // The chip is gone; its option lives behind the options button.
+  optionsBtn?.focus();
+});
+paintViewOptions();
 
 // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
 const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;

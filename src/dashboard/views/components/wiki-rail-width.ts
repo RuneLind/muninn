@@ -24,6 +24,12 @@ export const RAIL_WIDTH_DEFAULT = 300;
 export const RAIL_WIDTH_DEFAULT_NARROW = 260;
 /** Pixels one arrow-key press moves the rail. */
 export const RAIL_WIDTH_KEY_STEP = 16;
+/** Toolbar width (the content box of `.wiki-browse-head`, i.e. rail − 26px) at
+ *  or under which the Filters button drops its word and keeps the funnel and
+ *  badge, so sort · Filters · count · options keep one line. Measured: select
+ *  134 + Filters 72 + options 26 + three 6px gaps, plus 60 for a four-digit
+ *  count = 310, so the word shows from a 336px rail. */
+export const RAIL_TOOLBAR_COMPACT = 310;
 
 /**
  * The page title's FLOOR inside a rail row, in px — the one number the row's

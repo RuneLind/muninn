@@ -418,7 +418,7 @@ test.describe("Wiki reader: tracker links", () => {
     expect(baseline).toBe(Object.keys(PAGES).length - 5);
     for (const rel of [SER_A, TWIN_HTML]) await expect(row(page, rel)).toHaveCount(0);
 
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const chips = page.locator("#jiraChips");
     await expect(chips).toBeVisible();
     await expect(chips.locator(".wiki-chip-row-label")).toHaveText("Jira");
@@ -470,7 +470,7 @@ test.describe("Wiki reader: tracker links", () => {
     await expect(pills(page, STEM_PLAN)).toHaveAttribute("data-issue-rel", "stem");
     await expect(pills(page, ISSUE_PLAN)).toHaveAttribute("data-issue-key", "DEMO-170");
     await expect(pills(page, ISSUE_PLAN)).toHaveAttribute("data-issue-rel", "declared");
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator("#jiraChips [data-jira-more]").click();
     for (const bad of ["ORA-01407", "SAK-4711", "DEMO-122", "DEMO-190", "DEMO-199"]) {
       await expect(page.locator(`[data-issue-key="${bad}"], [data-issue-keys~="${bad}"]`)).toHaveCount(0);
@@ -488,7 +488,7 @@ test.describe("Wiki reader: tracker links", () => {
 
     await openReader(page, `wiki=${WIKI_PLAIN}`);
     await expect(page.locator(".wiki-issue-pill")).toHaveCount(0);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const chips = page.locator("#jiraChips");
     await expect(chips.locator("[data-jira]:not([data-jira=''])")).toHaveCount(1);
     await expect(chips.locator('[data-jira="DEMO-180"]')).toHaveText("DEMO-180 1");
@@ -589,7 +589,7 @@ test.describe("Wiki reader: tracker links", () => {
   test("issue mark: a listing refresh that drops the tracker drops its label and its cap", async ({ page }) => {
     await page.clock.install();
     await openReader(page, `wiki=${WIKI}`);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await expect(page.locator("#jiraChips .wiki-chip-row-label")).toHaveText("Jira");
     // The same reader, handed a listing with no `trackers` (its config lost the
     // block): the label and the cap are the last wiki's no longer.

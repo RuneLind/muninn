@@ -494,7 +494,7 @@ test.describe("NextMoves in the reader", () => {
     await expect(page.locator('.wiki-list-item[data-relpath="plans/settled.mdx"] .wiki-moves-flag')).toHaveCount(0);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/resolved.mdx"] .wiki-moves-flag')).toHaveCount(0);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/report.mdx"] .wiki-moves-flag')).toHaveAttribute("aria-hidden", "true");
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const chip = page.locator("#statusChips [data-waiting]");
     await expect(chip).toHaveText("✋ waiting on you 8");
     await chip.click();

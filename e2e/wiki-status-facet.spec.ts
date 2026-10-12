@@ -182,7 +182,7 @@ test.describe("Wiki reader: plan-status facet", () => {
     await expect(page.locator(".wiki-list-item")).toHaveCount(5);
 
     // The facet lives inside the Filters disclosure, closed until a filter is set.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const statusRow = page.locator("#statusChips");
     await expect(statusRow).toBeVisible();
     await expect(statusRow).toContainText("shipped 2");
@@ -215,7 +215,7 @@ test.describe("Wiki reader: plan-status facet", () => {
     // its chip — leaving an empty list, a badge of 1, and nothing highlighted to
     // explain either, with no way back except reloading.
     await page.goto(`${BASE}/wiki?wiki=${WIKI_WITH}`);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const statusRow = page.locator("#statusChips");
     const blocked = statusRow.locator('[data-status="blocked"]');
 
@@ -264,7 +264,7 @@ test.describe("Wiki reader: plan-status facet", () => {
   test("the facet is absent on a wiki with no plan_status pages", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI_WITHOUT}`);
     await expect(page.locator(".wiki-list-item")).toHaveCount(2);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     // The type row is there — the disclosure IS open, so a hidden status row is a
     // real gate decision and not just an unopened panel.
     await expect(page.locator("#typeChips")).toBeVisible();
@@ -317,7 +317,7 @@ test.describe("Wiki reader: domain facet", () => {
     // The secondary rows live inside the Filters disclosure, closed until a
     // filter is set — and `activeFilterCount` deliberately ignores domain, so
     // clicking a domain chip below will never auto-open it.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const row = page.locator("#domainChips");
     const typeRow = page.locator("#typeChips");
     const tagRow = page.locator("#tagChips");

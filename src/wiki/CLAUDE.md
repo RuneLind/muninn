@@ -722,7 +722,7 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   whatever extension it spells (`b.html` → `b.md`, the page rule 4 folds it
   under), then a spelled extension as written — then wiki-wide; a path form resolves across folders.
 - **Reader UI.** The rail draws from a POOL (`railPool`): live pages only,
-  unless the reader checks `Show retired (N)` or types a search (search still
+  unless the reader checks `Show retired (N)` (view-options pane) or types a search (search still
   reaches a retired page). Every facet count, family roll-up, attachment chip,
   the start view (stats, Hubs, Timeline — the Timeline with the query — and the
   Atlas, filtered client-side by `atlasPoolView`, semantic overlay and cluster
@@ -774,7 +774,7 @@ Acceptance: `culled.test.ts`, plus cases in `lint.test.ts`,
 
 ### Families and months (`wiki-groups.ts`)
 
-The rail's SECOND grouping layer, behind one checkbox in the rail head —
+The rail's SECOND grouping layer, behind one checkbox in the rail head's view-options pane —
 `group families`, **off by default** and remembered per wiki. It is client-only:
 a pure function over the listing's `relPath`s, the pairing the store already
 made, and the wiki's own project names. On:
@@ -937,18 +937,18 @@ the page chip's `is-long` class and breakpoint (inert there: a group row's mid
 is ≥ 213px). The page-row
 constants were re-budgeted by the layout follow-up (above), not by this change.
 
-**The sort row's third control wraps, and it is the TOGGLE.** `group families`
-is last in source order and flex wraps from the end, and `#wikiCount` carries
-`margin-left: auto`, so the select and the count keep the line they shared before
-this row grew a third control. The count's box is on the select's line at every
-width. **The width at which the toggle joins them is a fact about the COUNT,
-not a constant**: it moves with the rendered glyph width of `#wikiCount`'s text
-(a narrow `1` buys two pixels), and with nothing else on that row — the folder
-select lives in the `#wikiFilters` details block, not here. Measured at a 1400px
-viewport, walking the rail one pixel at a time — a listing reading `149 / 545`
-wraps through 321 and shares one line from 322; `440 / 545` from 324; the e2e
-fixture wiki reading `17 / 18` (grouping off) from 305 and `8 / 18` (grouping on)
-from 301. Any single number quoted here without its count text is one of those.
+**The rail head is a one-line toolbar: sort · Filters · count · view options.**
+`group families` and `Show retired (N)` live in the view-options pane
+(`#wikiOptionsBtn` → `#wikiOptions`, a non-modal `role="dialog"`, so
+`modalOpen()` makes the reader's single keys stand aside while it is open;
+Escape, a pointer outside or the button close it). While a toggle is on, a dot
+sits on the button and `#wikiActiveOptions` shows one removable chip per option,
+so a closed pane never hides why the rail looks different. The Filters button
+flips the `#wikiFilters` `<details>`, whose own summary is hidden: its `open`
+state, auto-open and background-adopt rules are unchanged. At or under
+`RAIL_TOOLBAR_COMPACT` (the head's content box, rail − 26px; 310 = a 336px rail)
+the button keeps the funnel and badge and the word is visually hidden, still its
+accessible name. Pinned by `wiki-rail-families.spec.ts` at 260/300/312/340.
 
 Acceptance: `wiki-groups.test.ts` (the rule's state space, on synthetic names —
 a private wiki's file names are a disclosure in a public repo),

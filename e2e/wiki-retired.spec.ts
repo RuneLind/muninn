@@ -258,6 +258,21 @@ async function openRail(page: Page, wiki = WIKI): Promise<void> {
 
 const row = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relpath="${rel}"]`);
 const toggle = (page: Page) => page.locator("#wikiShowRetired");
+
+/** The view toggles live in the toolbar's options pane; open it if it is shut. */
+async function openOptions(page: Page): Promise<void> {
+  const btn = page.locator("#wikiOptionsBtn");
+  if ((await btn.getAttribute("aria-expanded")) !== "true") await btn.click();
+  await expect(page.locator("#wikiOptions")).toBeVisible();
+}
+
+/** Flip a view toggle the way a reader does: open the pane, set it, Escape. */
+async function setToggle(page: Page, on: boolean): Promise<void> {
+  await openOptions(page);
+  await toggle(page).setChecked(on);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#wikiOptions")).toBeHidden();
+}
 const seriesRow = (page: Page) => page.locator('.wiki-list-group[data-group="series:retire"]');
 
 async function selectFolder(page: Page, folder: string): Promise<void> {
@@ -295,6 +310,7 @@ test.describe("Wiki: retired pages", () => {
 
   test("hidden by default: the toggle counts them and #wikiCount leaves them out", async ({ page }) => {
     await openRail(page);
+    await openOptions(page);
     await expect(page.locator("#wikiRetiredToggle")).toBeVisible();
     await expect(page.locator("#wikiRetiredLabel")).toHaveText(`Show retired (${CULLED.length})`);
     await expect(toggle(page)).not.toBeChecked();
@@ -319,14 +335,14 @@ test.describe("Wiki: retired pages", () => {
     await openRail(page);
     await expect(seriesRow(page).locator(".wiki-group-name")).toHaveText(SERIES_LABEL);
     await expect(seriesRow(page).locator(".wiki-group-sub")).toHaveText("2 of 3 shown");
-    await toggle(page).check();
+    await setToggle(page, true);
     await expect(seriesRow(page).locator(".wiki-group-name")).toHaveText(SERIES_LABEL);
     await expect(seriesRow(page).locator(".wiki-group-sub")).toHaveCount(0);
   });
 
   test("the toggle shows them, marked, and persists across a reload", async ({ page }) => {
     await openRail(page);
-    await toggle(page).check();
+    await setToggle(page, true);
     await expect(page.locator("#wikiCount")).toHaveText(new RegExp(` / ${ALL}$`));
     await openAllFolds(page);
     expect((await railRels(page)).sort()).toEqual(PAGES.map(([rel]) => rel).sort());
@@ -343,7 +359,7 @@ test.describe("Wiki: retired pages", () => {
     await expect(page.locator(".wiki-list-item").first()).toBeAttached();
     await expect(toggle(page)).toBeChecked();
     await expect(page.locator("#wikiCount")).toHaveText(new RegExp(` / ${ALL}$`));
-    await toggle(page).uncheck();
+    await setToggle(page, false);
     await page.reload();
     await expect(page.locator(".wiki-list-item").first()).toBeAttached();
     await expect(toggle(page)).not.toBeChecked();
@@ -436,7 +452,7 @@ test.describe("Wiki: retired pages", () => {
     // A3 is newer and retired: the dot is the newest plan that is NOT retired,
     // and its hover says so.
     await expect(row(page, A2)).toHaveAttribute("title", /newest plan in this series that is not retired/);
-    await toggle(page).check();
+    await setToggle(page, true);
     await openAllFolds(page);
     await expect(row(page, A3)).toBeVisible();
     await expect(row(page, A3)).not.toHaveClass(/\blatest\b/);
@@ -463,7 +479,7 @@ test.describe("Wiki: retired pages", () => {
     await expect(row(page, OLD)).toBeVisible();
     await expect(page.locator("#wikiList .wiki-retired-reveal")).toHaveCount(0);
     // A search already reaches retired pages, so an empty result offers none.
-    await toggle(page).uncheck();
+    await setToggle(page, false);
     await page.fill("#wikiSearch", "zzzz-no-such-page");
     await expect(page.locator("#wikiList")).toContainText("No pages match.");
     await expect(page.locator("#wikiList .wiki-retired-reveal")).toHaveCount(0);
@@ -486,6 +502,7 @@ test.describe("Wiki: retired pages", () => {
 
   test("fix 4: the toggle carries no hover of its own", async ({ page }) => {
     await openRail(page);
+    await openOptions(page);
     await expect(page.locator("#wikiRetiredToggle")).toBeVisible();
     await expect(page.locator("#wikiRetiredToggle")).not.toHaveAttribute("title", /.*/);
   });
@@ -493,11 +510,14 @@ test.describe("Wiki: retired pages", () => {
   test("fix 5: the toggle hides at (0) under a facet, unless it is checked", async ({ page }) => {
     await openRail(page);
     await selectFolder(page, "concepts");
+    await openOptions(page);
     await expect(page.locator("#wikiRetiredToggle")).toBeHidden();
     await expect(page.locator("#wikiCount")).not.toHaveAttribute("title", /.*/);
+    await page.keyboard.press("Escape");
     await selectFolder(page, "");
-    await toggle(page).check();
+    await setToggle(page, true);
     await selectFolder(page, "concepts");
+    await openOptions(page);
     await expect(page.locator("#wikiRetiredToggle")).toBeVisible();
     await expect(page.locator("#wikiRetiredLabel")).toHaveText("Show retired (0)");
   });
@@ -514,7 +534,7 @@ test.describe("Wiki: retired pages", () => {
     // With the toggle on (set from Hubs, where the rail is on screen) the node
     // returns, marked.
     await page.goto(`${BASE}/wiki?wiki=${WIKI_ATLAS}&view=hubs`);
-    await toggle(page).check();
+    await setToggle(page, true);
     await page.locator('.wiki-tab[data-tab="atlas"]').click();
     await expect(node(AT_OLD)).toHaveClass(/\bculled\b/);
     await expect(node(AT_OLD)).toHaveAttribute("title", /Retired/);
@@ -541,26 +561,29 @@ test.describe("Wiki: retired pages", () => {
     await expect(card.locator(".wiki-cull-mark")).toHaveText("Retired");
   });
 
-  test("fix 2.6: a keyboard reveal leaves focus on the toggle, not on <body>", async ({ page }) => {
+  test("fix 2.6: a keyboard reveal leaves focus on the options button, not on <body>", async ({ page }) => {
     await openRail(page);
     await selectFolder(page, "archive");
     const reveal = page.locator("#wikiList .wiki-retired-reveal");
     await reveal.focus();
     await page.keyboard.press("Enter");
     await expect(toggle(page)).toBeChecked();
-    await expect(toggle(page)).toBeFocused();
+    // The toggle sits in the closed options pane; the button that opens it is
+    // where a keyboard reader continues, and the strip names what turned on.
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+    await expect(page.locator("#wikiActiveOptions")).toContainText("Show retired");
   });
 
   test("fix 2.2: switching to the Atlas after a toggle flip shows the pool of the moment", async ({ page }) => {
     const node = (rel: string) => page.locator(`.wiki-atlas-canvas[data-view="types"] .wiki-atlas-node[data-key="${rel}"]`);
     await page.goto(`${BASE}/wiki?wiki=${WIKI_ATLAS}&view=hubs`);
-    await toggle(page).check();
+    await setToggle(page, true);
     await page.locator('.wiki-tab[data-tab="atlas"]').click();
     await expect(node(AT_OLD)).toBeAttached();
     // Back to Hubs, the toggle off, and the Atlas again: built from the cached
     // payload, it drops the retired node once more.
     await page.locator('.wiki-tab[data-tab="hubs"]').click();
-    await toggle(page).uncheck();
+    await setToggle(page, false);
     await page.locator('.wiki-tab[data-tab="atlas"]').click();
     await expect(node(AT_LIVE)).toBeAttached();
     await expect(node(AT_OLD)).toHaveCount(0);
@@ -605,7 +628,7 @@ test.describe("Wiki: retired pages", () => {
 
     // Shown: the retired page is a member again, marked, and still not sent.
     await page.goto(`${BASE}/wiki?wiki=${WIKI_SEM}&view=hubs`);
-    await toggle(page).check();
+    await setToggle(page, true);
     await page.locator('.wiki-tab[data-tab="atlas"]').click();
     await semOn();
     await expect(cluster.locator(".wiki-atlas-cluster-head em")).toHaveText("5");

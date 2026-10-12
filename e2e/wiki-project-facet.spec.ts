@@ -207,7 +207,7 @@ test.describe("Wiki reader: project facet", () => {
     await expect(page.locator(".wiki-list-item")).toHaveCount(TOTAL_PAGES);
 
     // The facet lives inside the Filters disclosure, closed until a filter is set.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     const row = page.locator("#projectChips");
     await expect(row).toBeVisible();
     // Five pages, resolved by four different rules, landing on ONE project.
@@ -235,7 +235,7 @@ test.describe("Wiki reader: project facet", () => {
   test("the facet is absent on a wiki that declares no project rule", async ({ page }) => {
     await openReader(page, `wiki=${WIKI_WITHOUT}`);
     await expect(page.locator(".wiki-list-item")).toHaveCount(TOTAL_PAGES);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     // The type row is up, so a hidden project row is a real gate decision and not
     // just an unopened panel.
     await expect(page.locator("#typeChips")).toBeVisible();
@@ -275,7 +275,7 @@ test.describe("Wiki reader: project facet", () => {
     await expect(page.locator(".wiki-list-item")).toHaveCount(TOTAL_PAGES);
     await expect(page.locator("#wikiCount")).toHaveText(`${TOTAL_PAGES} / ${TOTAL_PAGES}`);
     expect(new URL(page.url()).searchParams.has("project")).toBe(false);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     // "All projects" is the active chip — the row is up, nothing is filtered.
     await expect(page.locator('#projectChips [data-project=""]')).toHaveClass(/active/);
     await expect(page.locator("#projectChips .wiki-chip.active")).toHaveCount(1);
@@ -312,7 +312,7 @@ test.describe("Wiki reader: project facet", () => {
     page,
   }) => {
     await openReader(page, `wiki=${WIKI_WITH}`);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
     await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
 
@@ -364,7 +364,7 @@ test.describe("Wiki reader: project facet", () => {
 
     // The crumb is rendered once per ARTICLE; a facet change after that render
     // leaves a middle-click / copy-link handing over the previous filter.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
     expect(await crumbProject()).toBe(PROJECT);
     await page.locator(`#projectChips [data-project=""]`).click();
@@ -381,7 +381,7 @@ test.describe("Wiki reader: project facet", () => {
 
   test("Back does not spring the Filters disclosure open", async ({ page }) => {
     await openReader(page, `wiki=${WIKI_WITH}`);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
     // An ARTICLE entry, so the chip below REPLACES it and Back is a project move
     // and nothing else — the one popstate branch that repaints the facet.
@@ -391,7 +391,7 @@ test.describe("Wiki reader: project facet", () => {
     await expect(page.locator("#wikiCount")).toHaveText(`2 / ${TOTAL_PAGES}`);
 
     // The reader collapses the stack deliberately.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await expect(page.locator("#wikiFilters")).not.toHaveAttribute("open", "");
 
     await page.goBack();
@@ -435,7 +435,7 @@ test.describe("Wiki reader: project facet", () => {
 
   test("writing the param preserves the URL's hash", async ({ page }) => {
     await openReader(page, `wiki=${WIKI_WITH}#wiki-anchor`);
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
     const url = new URL(page.url());
     expect(url.searchParams.get("project")).toBe(PROJECT);

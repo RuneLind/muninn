@@ -17,6 +17,7 @@ import {
   RAIL_MID_MIN_CHIP_NARROW,
   RAIL_MID_MIN_CHIP_WIDE,
   RAIL_TITLE_MIN,
+  RAIL_TOOLBAR_COMPACT,
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
 } from "./components/wiki-rail-width.ts";
@@ -54,6 +55,8 @@ const SVG_EXPAND = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-
 const SVG_CONN = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 11l7.4-4M8.3 13l7.4 4"/></svg>';
 const SVG_ASK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>';
 const SVG_FOCUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>';
+const SVG_FILTER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8.5V19l-4-2v-3.5z"/></svg>';
+const SVG_OPTIONS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h10M18 7h3M3 17h3M11 17h10"/><circle cx="15.5" cy="7" r="2.5"/><circle cx="8.5" cy="17" r="2.5"/></svg>';
 const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>';
 
 /**
@@ -283,19 +286,66 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-folder { flex: 1; }
     .wiki-count { font-size: 11.5px; color: var(--text-dim); }
-    /* The sort row carries three controls once the grouping toggle is in it, and
-       at the narrow rail they do not fit on one line. The TOGGLE is the one that
-       wraps — it is last in source order and flex wraps from the end — so the
-       select and the count keep the line they shared before this row grew a
-       third control. \`margin-left: auto\` on the count is what holds it flush
-       right on that line whether or not the toggle is beside it (the row's own
-       \`justify-content: space-between\` would otherwise centre it between the
-       two). Measured in Chromium at a 1400px viewport: at rail 260 the toggle
-       takes its own line, at 300 and 312 the three share one; the count's box
-       sits on the select's line at every width. Scoped to this row — the folder
-       and presence rows hold one control each. */
-    .wiki-sort-row-main { flex-wrap: wrap; }
-    .wiki-sort-row-main .wiki-count { margin-left: auto; }
+    /* The toolbar: sort · Filters · count · view options, on ONE line at every
+       rail width. Under RAIL_TOOLBAR_COMPACT the Filters button shows the funnel
+       and badge only; the word stays as its accessible name (visually hidden,
+       never display:none). Past that the select gives way (\`min-width: 0\`).
+       \`margin-left: auto\` holds the count flush right. */
+    .wiki-sort-row-main { justify-content: flex-start; gap: 6px; position: relative; }
+    .wiki-sort-row-main .wiki-sort { flex: 0 1 auto; min-width: 0; }
+    .wiki-sort-row-main .wiki-count { margin-left: auto; white-space: nowrap; }
+    .wiki-browse-head { container-type: inline-size; container-name: railhead; }
+    @container railhead (max-width: ${RAIL_TOOLBAR_COMPACT}px) {
+      .wiki-tool-label {
+        position: absolute; width: 1px; height: 1px; overflow: hidden;
+        clip-path: inset(50%); white-space: nowrap;
+      }
+    }
+    .wiki-tool-btn {
+      position: relative; flex-shrink: 0;
+      display: inline-flex; align-items: center; gap: 5px;
+      height: 26px; padding: 0 8px; border-radius: 6px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-secondary); font-family: inherit; font-size: 12px;
+      white-space: nowrap; cursor: pointer;
+    }
+    .wiki-tool-btn svg {
+      width: 14px; height: 14px; fill: none; stroke: currentColor;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .wiki-tool-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+    .wiki-tool-btn[aria-expanded="true"] {
+      border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--accent-light);
+    }
+    .wiki-tool-icon { width: 26px; padding: 0; justify-content: center; }
+    /* A view option is on while the pane is closed. */
+    .wiki-options-dot {
+      position: absolute; top: -4px; right: -4px; width: 9px; height: 9px; border-radius: 50%;
+      background: var(--accent); border: 2px solid var(--bg-panel);
+    }
+    .wiki-options-dot[hidden] { display: none; }
+    .wiki-options-pane {
+      position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+      display: flex; flex-direction: column; gap: 10px;
+      min-width: 190px; max-width: 100%; padding: 10px 12px;
+      background: var(--bg-panel); border: 1px solid var(--border-secondary); border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+    .wiki-options-pane[hidden] { display: none; }
+    /* One removable chip per view option that is on, so a hidden toggle never
+       changes the rail without saying so. */
+    .wiki-active-options { display: flex; flex-wrap: wrap; gap: 5px; }
+    .wiki-active-options[hidden] { display: none; }
+    .wiki-active-option {
+      display: inline-flex; align-items: center; gap: 2px;
+      font-size: 11px; color: var(--text-secondary);
+      border: 1px dashed var(--border-secondary); border-radius: 999px; padding: 1px 2px 1px 8px;
+    }
+    .wiki-active-option button {
+      border: 0; background: none; padding: 0 5px; cursor: pointer;
+      color: var(--text-muted); font-family: inherit; font-size: 13px; line-height: 1;
+    }
+    .wiki-active-option button:hover { color: var(--text-primary); }
     /* --text-secondary, not --text-dim: this is a control's label, and dim
        measures 3.24:1 dark / 3.74:1 light against the rail's ground (the same
        measurement the group chip's own comment records), under the 4.5:1 floor.
@@ -356,23 +406,19 @@ export async function renderWikiPage(opts?: {
     }
 
     /* Filters disclosure — holds the secondary facets (folder + type + tag chips)
-       so the head stays compact. Auto-opened by JS whenever a filter is active. */
+       so the head stays compact. Opened by the toolbar's Filters button
+       (#wikiFiltersBtn), and auto-opened by JS whenever a filter is active. Its
+       own summary is hidden: the button is the control, and the closed details
+       takes no room at all. */
     .wiki-filters { border: 1px solid var(--border-secondary); border-radius: 7px; background: var(--bg-inset); }
-    .wiki-filters-summary {
-      list-style: none; cursor: pointer; user-select: none;
-      display: flex; align-items: center; gap: 7px;
-      padding: 7px 10px; font-size: 12px; color: var(--text-muted);
-    }
-    .wiki-filters-summary::-webkit-details-marker { display: none; }
-    .wiki-filters-summary::before { content: '▸'; font-size: 10px; color: var(--text-dim); transition: transform 0.15s; }
-    .wiki-filters[open] .wiki-filters-summary::before { transform: rotate(90deg); }
-    .wiki-filters-summary:hover { color: var(--text-primary); }
+    .wiki-filters:not([open]) { display: none; }
+    .wiki-filters-summary { display: none; }
     .wiki-filter-count {
       background: var(--accent); color: #fff; font-size: 10px; font-weight: 600;
       min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
       display: inline-flex; align-items: center; justify-content: center;
     }
-    .wiki-filters-body { display: flex; flex-direction: column; gap: 8px; padding: 2px 10px 10px; }
+    .wiki-filters-body { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
 
     /* Coverage footer under the page list — links the full Index card. */
     .wiki-coverage-foot {
@@ -2693,28 +2739,35 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>
           </select>
+          <!-- Filters: the toolbar's button for the <details> below. The details
+               keeps its own (hidden) summary so its open state, toggle event and
+               auto-open stay what they were; this button only flips it. -->
+          <button type="button" class="wiki-tool-btn" id="wikiFiltersBtn" aria-controls="wikiFilters" aria-expanded="false" title="Filters">${SVG_FILTER}<span class="wiki-tool-label">Filters</span><span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></button>
           <span class="wiki-count" id="wikiCount"></span>
-          <!-- Families and archive months, per wiki. Unchecked here and set from
-               the folds store at boot: the server does not know what this browser
-               remembers, and rendering it checked would flash a grouped rail on
-               every reader who has it off.
-               LAST in source order, which is what decides WHICH element wraps:
-               flex wraps from the end, so the toggle takes the second line and
-               the select + count keep the first one they had before this row
-               grew a third control. -->
-          <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
-            <input type="checkbox" id="wikiGroupFamilies">group families
-          </label>
-          <!-- Retired (culled) pages, per wiki: hidden until checked. Hidden
-               while the facets select none (unless checked); the label and its
-               count are painted by the client from the wiki's cullLabels, so it
-               carries no English hover of its own. -->
-          <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden>
-            <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
-          </label>
+          <!-- View options: the two per-wiki toggles the reader sets once and
+               rarely touches, out of the toolbar. Both are unchecked here and
+               painted from the folds store at boot (the server does not know
+               what this browser remembers). The dot says a toggle is on while
+               the pane is closed; the strip under the toolbar names it. The pane
+               is a non-modal role="dialog", so modalOpen() sees it and the
+               reader's single-key shortcuts stand aside while it is open. -->
+          <button type="button" class="wiki-tool-btn wiki-tool-icon" id="wikiOptionsBtn" aria-controls="wikiOptions" aria-expanded="false" aria-label="View options" title="View options">${SVG_OPTIONS}<span class="wiki-options-dot" id="wikiOptionsDot" hidden></span></button>
+          <div class="wiki-options-pane" id="wikiOptions" role="dialog" aria-label="View options" hidden>
+            <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
+              <input type="checkbox" id="wikiGroupFamilies">group families
+            </label>
+            <!-- Retired (culled) pages, per wiki. Hidden on a wiki with none and
+                 while the facets select none (unless checked); the label and its
+                 count are painted by the client from the wiki's cullLabels, so it
+                 carries no English hover of its own. -->
+            <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden>
+              <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
+            </label>
+          </div>
         </div>
+        <div class="wiki-active-options" id="wikiActiveOptions" hidden></div>
         <details class="wiki-filters" id="wikiFilters">
-          <summary class="wiki-filters-summary">Filters<span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></summary>
+          <summary class="wiki-filters-summary">Filters</summary>
           <div class="wiki-filters-body">
             <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
               <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
