@@ -309,10 +309,11 @@ test.describe("Wiki rail: Activity", () => {
     await expect(page.locator("#wikiCount")).toHaveText(`${CLOSED_ROWS} / ${ALL_PAGES}`);
   });
 
-  test("a NEW row carries a NEW tag in its date cell, a changed row no mark, and the title says why", async ({ page }) => {
+  test("a NEW row carries a NEW tag on its meta line and a green age, a changed row no mark, and the title says why", async ({ page }) => {
     await openRail(page);
     const newRow = page.locator(`.wiki-list-item[data-relpath="${BRAND_NEW}"]`);
-    await expect(newRow.locator(".wiki-list-end .wiki-new-tag")).toHaveText("NEW");
+    await expect(newRow.locator(".wiki-list-sub .wiki-new-tag")).toHaveText("NEW");
+    await expect(newRow.locator(".wiki-list-end .wiki-new-tag")).toHaveCount(0);
     await expect(newRow.locator(".wiki-list-meta")).toHaveClass(/\bnew\b/);
     await expect(newRow).toHaveAttribute("title", /^created /);
 

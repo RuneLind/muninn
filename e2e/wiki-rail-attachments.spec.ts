@@ -35,6 +35,8 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import {
   RAIL_TITLE_MIN,
+  RAIL_CHIP_SWITCH_LONG,
+  RAIL_CHIP_SWITCH_WIDE,
   RAIL_WIDTH_KEY,
 } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
@@ -411,9 +413,10 @@ test.describe("Wiki rail: attachments", () => {
   /**
    * The two breakpoints are one design decision, and this is it: a chip whose
    * label is short keeps its WORDS where a long one has already had to give them
-   * up. Driven at a rail width between the two thresholds (330px, set the way a
-   * reader sets it — the stored width), so the reading is ~35px clear of either
-   * one rather than riding the 5px margin the default rail leaves.
+   * up. The chip sits on the row's meta line, whose width is the breakpoints'
+   * container. Driven at a 280px rail, set the way a reader sets it (the stored
+   * width), and the premise is measured rather than derived: the meta line's
+   * content width must lie between the long and the wide breakpoint.
    */
   test("at a mid-width rail the short chip keeps its words and the long one does not", async ({
     page,
@@ -421,7 +424,7 @@ test.describe("Wiki rail: attachments", () => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.addInitScript(
       ([key, width]) => localStorage.setItem(key as string, String(width)),
-      [RAIL_WIDTH_KEY, 330] as const,
+      [RAIL_WIDTH_KEY, 280] as const,
     );
     await openRail(page);
     const formOf = (rel: string) =>
@@ -429,7 +432,14 @@ test.describe("Wiki rail: attachments", () => {
         const full = el.querySelector(".wiki-fold-chip-label") as HTMLElement;
         return getComputedStyle(full).display !== "none" ? "full" : "compact";
       });
-    // `1 attached` fits beside the title floor here…
+    // The premise, measured: this meta line sits between the two breakpoints.
+    const line = await row(page, X).locator(".wiki-list-sub").evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    });
+    expect(line).toBeGreaterThan(RAIL_CHIP_SWITCH_LONG);
+    expect(line).toBeLessThan(RAIL_CHIP_SWITCH_WIDE);
+    // `1 attached` fits on the meta line here…
     expect(await formOf(V)).toBe("full");
     // …and `2 attached · 1 superseded`, twice the width, does not.
     expect(await formOf(X)).toBe("compact");

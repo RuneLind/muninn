@@ -601,6 +601,18 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
 
 ### The row's layout rules (`wiki-page.ts`, constants in `wiki-rail-width.ts`)
 
+**A PAGE row is two lines (since 2026-10-12).** Line one is type icon · title ·
+★+age; the meta line under the title (`.wiki-list-sub`, indented by the icon
+column) carries the status pill, ✋ N, ⚑, the group chip and NEW, in that order.
+A row with none of them has no meta line and stays one line. The meta line is
+the chip's `railmid` container, so the three chip breakpoints below are measured
+against its width; it wraps rather than clipping as the backstop (unpinned: no
+fixture row overflows it once the chip compacts). Pinned by
+`wiki-rail-width.spec.ts` (`line one is icon · title · age…` and its siblings).
+The one-line budget below still governs GROUP rows (family, month and series
+headers), which keep the chip beside the title; it is kept as measured, and the
+page-row figures in it are history.
+
 A rail row is six things — type icon · title · group chip · status pill · ⚑ ·
 ★+date — and only the title is elastic. At the 260px rail (`RAIL_WIDTH_MIN`, i.e.
 any window under 1100px) the title gets what the 226px content box leaves after

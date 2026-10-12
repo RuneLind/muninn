@@ -429,25 +429,34 @@ export async function renderWikiPage(opts?: {
     .wiki-cov-link:hover { color: var(--accent-light); }
 
     .wiki-list { flex: 1; overflow-y: auto; padding: 6px; }
-    /* ONE flex line until the row's floors no longer fit it, and then TWO.
-       The row is six things — type icon · title · group chip · status pill · ⚑ ·
-       ★+date — and at the 260px rail (RAIL_WIDTH_MIN, i.e. any window under
-       1100px) the five that are not the title measure 143.4px plus 40px of gaps,
-       leaving 42.6px for the title AND the chip together. No distribution of
-       42.6px satisfies a readable title and an unclipped count, so at that width
-       the row stops trying: \`.wiki-list-end\` is last in source order and wraps,
-       and the line it leaves holds the title's floor with room to spare
-       (measured 132.3px of title). Nothing is hidden and nothing scrolls
-       sideways — the two failure modes the previous two rounds picked between. */
+    /* A page row is two lines: line one is type icon · title · ★+age, and the
+       META LINE under the title (\`.wiki-list-sub\`) carries the status pill, ✋,
+       ⚑, the group chip and NEW. The title gets line one's width less the age,
+       every title starts at the same x, and the ages form one column. A row with
+       nothing for the meta line has none and stays one line. The meta line is a
+       flex item with a 100% basis, so the row's own flex-wrap puts it on its
+       own line; \`row-gap\` keeps it close to the title. */
     .wiki-list-item {
       padding: 7px 10px;
       border-radius: 7px;
       cursor: pointer;
       display: flex;
       align-items: flex-start;
-      gap: 8px;
+      gap: 3px 8px;
       flex-wrap: wrap;
     }
+    /* Indented by the icon column (14px + the row's 8px gap), so the marks sit
+       under the title they describe. It is the group chip's \`railmid\`
+       container: the chip's three breakpoints were sized as a title floor plus
+       the label, and the floor's ~80px is what the meta line's pill, ✋ and ⚑
+       take beside it. It wraps rather than clipping, as the backstop. */
+    .wiki-list-sub {
+      flex: 0 0 100%; box-sizing: border-box; padding-left: 22px; min-width: 0;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px;
+      container-type: inline-size; container-name: railmid;
+    }
+    .wiki-list-sub > .wiki-status, .wiki-list-sub > .wiki-followup-flag,
+    .wiki-list-sub > .wiki-fold-chip, .wiki-list-sub > .wiki-new-tag { margin: 0; }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
     /* ⌖ Show in list: a brief ring on the row it scrolled to. */
@@ -756,9 +765,9 @@ export async function renderWikiPage(opts?: {
       display: block; color: var(--text-muted); font-size: 10.5px; font-weight: 400;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    /* ✋ = a NextMoves step waiting on the reader: an inline mark inside the
-       title, never a row element (the row's six items are each budgeted). */
-    .wiki-moves-flag { margin-right: 4px; font-size: 11px; }
+    /* ✋ N = open NextMoves steps waiting on the reader, on the meta line beside
+       the status pill and the ⚑. */
+    .wiki-moves-flag { font-size: 10.5px; line-height: 16px; color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
     /* Issue mark: one ticket glyph (+ a count) per row, in a COLUMN of its
        own inside .wiki-list-title, never inside the clamp, where it would be
        clipped on a third line. The title element stays ONE row item (a seventh

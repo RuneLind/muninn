@@ -1021,14 +1021,14 @@ function movesPersonal(): boolean {
   return wikiToolsFlag();
 }
 
-/** The ✋ mark on a rail row whose page has a step waiting on the reader. An
- *  inline span INSIDE `.wiki-list-title`: the row's six flex
- *  items are each budgeted, and a seventh would cost the title its floor.
- *  `aria-hidden`: the row's title attribute is what a screen reader gets. */
+/** The ✋ mark on a rail row whose page has a step waiting on the reader, with
+ *  its count: an item of the row's meta line (`.wiki-list-sub`), beside the
+ *  status pill and the ⚑, so every title starts at the same x. `aria-hidden`:
+ *  the row's title attribute is what a screen reader gets. */
 function movesFlagHtml(p: WikiListing): string {
   const n = p.movesYou ?? 0;
   return n > 0 && movesPersonal()
-    ? `<span class="wiki-moves-flag" aria-hidden="true" title="${n} step${n === 1 ? "" : "s"} waiting on you">✋</span>`
+    ? `<span class="wiki-moves-flag" aria-hidden="true" title="${n} step${n === 1 ? "" : "s"} waiting on you">✋ ${n}</span>`
     : "";
 }
 
@@ -1837,6 +1837,60 @@ function renderList(): void {
     const rowTitle = [culledWhy, entry.activity?.why ?? "", childWhy, memberWhy, latestWhy]
       .filter(Boolean)
       .join("\n");
+    // The META LINE, under the title: status pill · ✋ · ⚑ · group chip · NEW.
+    // Line one is icon · title · ★+age only, so the title has the row's width
+    // less the age, and every title starts at the same x. A row with none of
+    // these has no meta line and stays one line tall. Pill THEN flag, the same
+    // order as the article header's `badgeHtml` — the two surfaces show the
+    // same two facts and must not read differently.
+    // The group CHIP: what is folded under this row, and the control that
+    // opens it. A click here toggles; a click anywhere else on the row opens
+    // the page, as it always has.
+    const chipHtml = entry.children?.length
+      ? (() => {
+          const full = foldChipLabel(entry.children);
+          // The chip's two size classes are the LABEL's, not the group's: the
+          // words pick the breakpoint at which they yield to the counts (three
+          // shapes, three measured budgets), and the digits pick how much row
+          // the compact form is guaranteed — see `foldChipLabelClass` and
+          // `foldChipCountsClass`.
+          const compact = foldChipCompactLabel(entry.children);
+          const sizeClasses = cls(foldChipLabelClass(full)) + cls(foldChipCountsClass(compact));
+          const why = entry.forcedOpen
+            ? forcedOpenWhy("group")
+            : (entry.folded ? "Show" : "Hide") + " what folds under this page";
+          // The full label rides BOTH attributes whichever form is painted —
+          // the compact form is the words moved to the hover, not dropped, and
+          // `aria-label` is what makes that true for a screen reader as well
+          // (a `display:none` span is out of the accessible name).
+          // The dot is drawn by CSS (`.newer::after`, absolute — no chip
+          // width), so its meaning lives here, on both attributes.
+          const hover = `${full} — ${why}` + (entry.childNewer ? " (something inside changed after this page)" : "");
+          return (
+            `<button type="button" class="wiki-fold-chip${sizeClasses}${entry.folded ? " folded" : ""}${entry.childNewer ? " newer" : ""}"` +
+            ` data-fold-key="${esc(normalizeFoldKey(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
+            // Forced open because the reader is ON a page in this group: the same
+            // inert control the section header renders, for the same reason.
+            (entry.forcedOpen ? ` disabled` : "") +
+            ` aria-label="${esc(hover)}" title="${esc(hover)}">` +
+            `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+            // Both forms are rendered and CSS picks one (`wiki-page.ts`): which
+            // fits is a question about the row's remaining space, which the
+            // server does not have and the client would have to recompute on
+            // every rail drag.
+            `<span class="wiki-fold-chip-label">${esc(full)}</span>` +
+            `<span class="wiki-fold-chip-counts">${esc(compact)}</span>` +
+            `</button>`
+          );
+        })()
+      : "";
+    const subItems =
+      statusPillHtml(p) +
+      movesFlagHtml(p) +
+      followupFlagHtml(p) +
+      chipHtml +
+      (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "");
+    const sub = subItems ? `<div class="wiki-list-sub">${subItems}</div>` : "";
     html +=
       // The indent is for a row drawn INSIDE its parent's group. A lifted child
       // (Activity ranked it, or the reader pinned it) sits under an unrelated
@@ -1855,80 +1909,25 @@ function renderList(): void {
       // The type ICON, a fixed 14px lead column on EVERY row — Activity rows grow
       // no extra column, so their titles line up with their neighbours'.
       railTypeIconHtml(p.type) +
-      // Title and chip share ONE box, `.wiki-list-mid`, and that box is what is
-      // left of the row after the icon, the pill, the ⚑ and the ★+date have taken
-      // their intrinsic widths. It is a wrapper for two reasons, both measured:
-      // it gives the pair a single floor the row can wrap against, and its own
-      // width IS "the space left on this row", which is the only thing a CSS
-      // query can ask that tells a plain row from one carrying a pill and a ⚑.
+      // The title's box, `.wiki-list-mid`: what is left of line one after the
+      // icon and the ★+age. The marks that used to share it (pill, ✋, ⚑, the
+      // group chip) are on the meta line below.
       `<div class="wiki-list-mid">` +
-      // `title=` carries the full name: the row ellipsizes, and a status pill +
-      // ⚑ flag eat enough width that plan titles routinely clip. On an Activity
-      // row it carries the derivation UNDER the name as well — this element is
-      // two thirds of the row, and its own `title` is what the pointer lands on
-      // there, so the row's attribute alone is unreachable over most of the row.
-      // Marks inside it (✋) are inline spans, never row elements: the row is
-      // six flex items and `wiki-rail-width.ts` budgets every one of them.
+      // `title=` carries the full name, since the title clamps at two lines. On
+      // an Activity row it carries the derivation UNDER the name as well — this
+      // element is most of the row, and its own `title` is what the pointer
+      // lands on there, so the row's attribute alone is unreachable over it.
       (pills
         ? // A row with issue pills: the title element becomes a flex pair — the
           // clamped text, and the pills in their own column beside it — so the
-          // clamp can never hide them. Still ONE element of the row, for the
-          // ✋'s reason. Rows without pills keep the plain markup.
+          // clamp can never hide them. Rows without pills keep the plain markup.
           `<div class="wiki-list-title has-issues" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
-          `<span class="wiki-list-title-text">` +
-          movesFlagHtml(p) +
-          `${esc(displayTitleOf(p))}</span>` +
+          `<span class="wiki-list-title-text">${esc(displayTitleOf(p))}</span>` +
           pills +
           `</div>`
         : `<div class="wiki-list-title" title="${esc(displayTitleOf(p) + (rowTitle ? "\n" + rowTitle : ""))}">` +
-          movesFlagHtml(p) +
           `${esc(displayTitleOf(p))}</div>`) +
-      // The group CHIP: what is folded under this row, and the control that
-      // opens it. A click here toggles; a click anywhere else on the row opens
-      // the page, as it always has.
-      (entry.children?.length
-        ? (() => {
-            const full = foldChipLabel(entry.children);
-            // The chip's two size classes are the LABEL's, not the group's: the
-            // words pick the breakpoint at which they yield to the counts (three
-            // shapes, three measured budgets), and the digits pick how much row
-            // the compact form is guaranteed — see `foldChipLabelClass` and
-            // `foldChipCountsClass`.
-            const compact = foldChipCompactLabel(entry.children);
-            const sizeClasses = cls(foldChipLabelClass(full)) + cls(foldChipCountsClass(compact));
-            const why = entry.forcedOpen
-              ? forcedOpenWhy("group")
-              : (entry.folded ? "Show" : "Hide") + " what folds under this page";
-            // The full label rides BOTH attributes whichever form is painted —
-            // the compact form is the words moved to the hover, not dropped, and
-            // `aria-label` is what makes that true for a screen reader as well
-            // (a `display:none` span is out of the accessible name).
-            // The dot is drawn by CSS (`.newer::after`, absolute — no chip
-            // width), so its meaning lives here, on both attributes.
-            const hover = `${full} — ${why}` + (entry.childNewer ? " (something inside changed after this page)" : "");
-            return (
-              `<button type="button" class="wiki-fold-chip${sizeClasses}${entry.folded ? " folded" : ""}${entry.childNewer ? " newer" : ""}"` +
-              ` data-fold-key="${esc(normalizeFoldKey(p.relPath))}" aria-expanded="${entry.folded ? "false" : "true"}"` +
-              // Forced open because the reader is ON a page in this group: the same
-              // inert control the section header renders, for the same reason.
-              (entry.forcedOpen ? ` disabled` : "") +
-              ` aria-label="${esc(hover)}" title="${esc(hover)}">` +
-              `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
-              // Both forms are rendered and CSS picks one (`wiki-page.ts`): which
-              // fits is a question about the row's remaining space, which the
-              // server does not have and the client would have to recompute on
-              // every rail drag.
-              `<span class="wiki-fold-chip-label">${esc(full)}</span>` +
-              `<span class="wiki-fold-chip-counts">${esc(compact)}</span>` +
-              `</button>`
-            );
-          })()
-        : "") +
       `</div>` +
-      // Pill THEN flag, the same order as the article header's `badgeHtml` — the
-      // two surfaces show the same two facts and must not read differently.
-      statusPillHtml(p) +
-      followupFlagHtml(p) +
       // ★ and date in ONE flex slot: as a sibling of the title the ★ also cost
       // the row's 8px `gap`, and the pair measured 21px off `.wiki-list-title`
       // on every row — a third of the title box at RAIL_WIDTH_MIN, paid by a
@@ -1949,9 +1948,9 @@ function renderList(): void {
       // The full date on the META element, never on the row — same reason the
       // derivation is repeated onto `.wiki-list-title` above. It carries the
       // signal's label verbatim, time and all, since a hover has room for it.
-      (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
       `<div class="wiki-list-meta${metaClass}"${dateTitle ? ` title="${esc(dateTitle)}"` : ""}>${esc(meta)}</div>` +
       `</div>` +
+      sub +
       `</div>`;
   });
   // Scroll restore lives HERE, not at the refresh call site (the `renderBacklog`

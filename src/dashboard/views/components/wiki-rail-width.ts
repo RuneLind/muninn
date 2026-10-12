@@ -32,6 +32,11 @@ export const RAIL_WIDTH_KEY_STEP = 16;
 export const RAIL_TOOLBAR_COMPACT = 310;
 
 /**
+ * Since 2026-10-12 a PAGE row is two lines (icon · title · ★+age, then a meta
+ * line with the pill, ✋, ⚑, chip and NEW), so the budget below is the GROUP
+ * row's (family, month and series headers keep the chip beside the title). On a
+ * page row the chip's breakpoints are measured against the meta line's width.
+ *
  * The page title's FLOOR inside a rail row, in px — the one number the row's
  * other rules are sized against, and the reason they exist. A row is a flex
  * line of six things (type icon · title · group chip · status pill · ⚑ · ★+date)
