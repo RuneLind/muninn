@@ -1892,7 +1892,7 @@ export async function renderWikiPage(opts?: {
     /* Standalone HTML explainer rendered in an iframe filling the article pane. */
     .wiki-explainer-frame {
       width: 100%;
-      height: calc(100vh - 200px);
+      height: calc(100vh - var(--header-h, 63px) - 137px);
       min-height: 480px;
       border: 1px solid var(--border-primary);
       border-radius: 8px;

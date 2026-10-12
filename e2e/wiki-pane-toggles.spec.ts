@@ -28,7 +28,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { PANES_KEY, STRIP_WIDTH } from "../src/dashboard/views/components/wiki-panes.ts";
-import { HEADER_HIDDEN_KEY } from "../src/dashboard/views/shared-styles.ts";
+import { HEADER_HIDDEN_KEY, HEADER_HINT_TEXT } from "../src/dashboard/views/shared-styles.ts";
 
 const PORT = e2ePort("wiki-pane-toggles");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -320,6 +320,9 @@ test.describe("Wiki pane toggles", () => {
 
     await page.locator("body").press("m");
     await expect(header).toBeHidden();
+    // A short notice says how to bring it back, then goes.
+    await expect(page.locator(".header-hint")).toHaveText(HEADER_HINT_TEXT);
+    await expect(page.locator(".header-hint")).toHaveCount(0, { timeout: 5_000 });
     // Hidden: the layout takes the whole viewport, top to bottom.
     const hidden = await layout();
     expect(Math.round(hidden.y)).toBe(0);

@@ -536,6 +536,9 @@ export const HEADER_HIDDEN_KEY = "muninn-header-hidden";
  *  0, which the pages sized against the header (`calc(100vh - var(--header-h,
  *  …))`) read, so their content takes the freed height. */
 export const HEADER_HIDDEN_CLASS = "header-hidden";
+/** The short notice shown when `m` hides the header. */
+export const HEADER_HINT_CLASS = "header-hint";
+export const HEADER_HINT_TEXT = "Header hidden — press m to show it";
 
 type NavPage = "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents" | "jira";
 
@@ -641,7 +644,16 @@ export function renderNav(
   // menu is open and while a modal or menu is on screen — the reader's own
   // single-key rules (`navMenuOpen`, `modalOpen`).
   const navToggle = !linksForRole ? "" : `
-  <style>html.${HEADER_HIDDEN_CLASS} { --header-h: 0px; } html.${HEADER_HIDDEN_CLASS} body > header { display: none; }</style>
+  <style>
+    html.${HEADER_HIDDEN_CLASS} { --header-h: 0px; }
+    html.${HEADER_HIDDEN_CLASS} body > header { display: none; }
+    .${HEADER_HINT_CLASS} {
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 1000;
+      padding: 6px 12px; border-radius: 6px; font-size: 13px;
+      background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-primary);
+      pointer-events: none;
+    }
+  </style>
   <script>
     try { if (localStorage.getItem(${JSON.stringify(HEADER_HIDDEN_KEY)}) === '1') document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)}); } catch (e) {}
     if (!window.__navToggle) (function() {
@@ -658,6 +670,17 @@ export function renderNav(
         if (navMenuOpen(document) || modalOpen(document)) return;
         var hidden = document.documentElement.classList.toggle(${JSON.stringify(HEADER_HIDDEN_CLASS)});
         try { localStorage.setItem(${JSON.stringify(HEADER_HIDDEN_KEY)}, hidden ? '1' : '0'); } catch (e) {}
+        // Hidden is remembered on every page, so say how to undo it.
+        var old = document.querySelector('.${HEADER_HINT_CLASS}');
+        if (old) old.remove();
+        if (hidden) {
+          var hint = document.createElement('div');
+          hint.className = ${JSON.stringify(HEADER_HINT_CLASS)};
+          hint.setAttribute('role', 'status');
+          hint.textContent = ${JSON.stringify(HEADER_HINT_TEXT)};
+          document.body.appendChild(hint);
+          setTimeout(function() { hint.remove(); }, 3000);
+        }
       });
     })();
   </script>`;

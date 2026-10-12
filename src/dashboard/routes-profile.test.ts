@@ -5,7 +5,7 @@ import { createDashboardRoutes } from "./routes.ts";
 import { NAIS_DROPPED_ROUTE_GROUPS, servesWikiReadSliceOnly, wikiToolsRegistered } from "./route-groups.ts";
 import { routeRows, wikiRouteTable } from "../test/wiki-route-table.ts";
 import { answerBodyLimit } from "./routes/wiki-answers.ts";
-import { HEADER_HIDDEN_KEY, renderNav } from "./views/shared-styles.ts";
+import { HEADER_HIDDEN_CLASS, HEADER_HIDDEN_KEY, HEADER_HINT_TEXT, renderNav } from "./views/shared-styles.ts";
 
 /**
  * The `nais` serving profile's surface — the routes it drops, and the nav that
@@ -228,6 +228,55 @@ describe("renderNav for role `user`", () => {
       expect(html.match(/<nav[^>]*>/)![0]).toBe("<nav>");
     }
     expect(h1(renderNav("wiki", { profile: "nais", role: "user" }))).toBe("<h1>");
+  });
+
+  /**
+   * The toggle's script injects wiki-panes.ts's guards by SOURCE
+   * (`.toString()`), so a renamed identifier or a new helper call passes tsc
+   * and throws in the browser. Run the emitted script against a stub DOM.
+   */
+  test("the emitted `m` script runs: toggles, remembers, hints, and refuses under a menu or dialog", () => {
+    const html = renderNav("wiki", { profile: "default", role: "admin" });
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!).find((s) => s.includes("__navToggle"))!;
+    let listener: ((e: object) => void) | undefined;
+    const classes = new Set<string>();
+    const stored: Record<string, string> = {};
+    const added: { textContent: string }[] = [];
+    let menuOpen = false;
+    let dialogs: { getClientRects(): unknown[] }[] = [];
+    const document = {
+      documentElement: { classList: {
+        add: (c: string) => classes.add(c),
+        toggle: (c: string) => (classes.has(c) ? (classes.delete(c), false) : (classes.add(c), true)),
+      } },
+      addEventListener: (type: string, fn: (e: object) => void) => { if (type === "keydown") listener = fn; },
+      querySelector: (sel: string) => (sel === "details.nav-dropdown[open]" && menuOpen ? {} : null),
+      querySelectorAll: () => dialogs,
+      createElement: () => ({ className: "", textContent: "", setAttribute() {}, remove() {} }),
+      body: { appendChild: (el: { textContent: string }) => added.push(el) },
+    };
+    const localStorage = { getItem: (k: string) => stored[k] ?? null, setItem: (k: string, v: string) => { stored[k] = v; } };
+    new Function("window", "document", "localStorage", "setTimeout", script)({}, document, localStorage, () => {});
+    const m = { key: "m", ctrlKey: false, metaKey: false, altKey: false, repeat: false, target: { tagName: "BODY" } };
+
+    listener!(m);
+    expect(classes.has(HEADER_HIDDEN_CLASS)).toBe(true);
+    expect(stored[HEADER_HIDDEN_KEY]).toBe("1");
+    expect(added.map((el) => el.textContent)).toEqual([HEADER_HINT_TEXT]);
+
+    menuOpen = true;
+    listener!(m);
+    expect(classes.has(HEADER_HIDDEN_CLASS)).toBe(true);
+    menuOpen = false;
+    dialogs = [{ getClientRects: () => [{}] }];
+    listener!(m);
+    expect(classes.has(HEADER_HIDDEN_CLASS)).toBe(true);
+
+    dialogs = [{ getClientRects: () => [] }];
+    listener!(m);
+    expect(classes.has(HEADER_HIDDEN_CLASS)).toBe(false);
+    expect(stored[HEADER_HIDDEN_KEY]).toBe("0");
+    expect(added).toHaveLength(1);
   });
 
   test("role `admin` and auth off render the profile's nav byte for byte", () => {

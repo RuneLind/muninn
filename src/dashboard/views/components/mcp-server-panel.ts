@@ -6,7 +6,7 @@ export function mcpServerPanelStyles(): string {
       display: grid;
       grid-template-columns: 320px 1fr;
       gap: 0;
-      height: calc(100vh - var(--header-h, 57px));
+      height: calc(100vh - var(--header-h, 63px));
     }
 
     /* Left panel */
