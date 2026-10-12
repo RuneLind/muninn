@@ -32,10 +32,13 @@ export const RAIL_WIDTH_KEY_STEP = 16;
 export const RAIL_TOOLBAR_COMPACT = 310;
 
 /**
- * Since 2026-10-12 a PAGE row is two lines (icon · title · ★+age, then a meta
- * line with the pill, ✋, ⚑, chip and NEW), so the budget below is the GROUP
- * row's (family, month and series headers keep the chip beside the title). On a
- * page row the chip's breakpoints are measured against the meta line's width.
+ * Since 2026-10-12 a PAGE row is two lines: icon · title · ★+age, then a meta
+ * line with the pill, ⚑, ✋, NEW and the chip. The chip sits in its own slot
+ * that takes what the other marks leave, and swaps words for counts at the
+ * `RAIL_CHIP_LABEL_*` widths with a `RAIL_CHIP_COMPACT_*` floor. The one-line
+ * budget below (`RAIL_TITLE_MIN` + gap + chip) now applies only to family and
+ * month header rows, which keep the roll-up chip beside the label (a series
+ * header carries no chip). Its page-row measurements are history.
  *
  * The page title's FLOOR inside a rail row, in px — the one number the row's
  * other rules are sized against, and the reason they exist. A row is a flex
@@ -84,9 +87,14 @@ export const RAIL_TITLE_MIN = 72;
  * (70.2px) overflowed the default floor's 60px by 3–9px onto the status pill
  * at rails 260–270; the wide floor (156) makes that row wrap instead.
  */
-export const RAIL_MID_MIN_CHIP_NARROW = RAIL_TITLE_MIN + 8 + 46;
-export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + 62;
-export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + 76;
+/** The compact chip's widest form per counts class, alone: the page row's
+ *  meta-line chip slot takes these as its floor (`.wiki-fold-chip-wrap`). */
+export const RAIL_CHIP_COMPACT_NARROW = 46;
+export const RAIL_CHIP_COMPACT = 62;
+export const RAIL_CHIP_COMPACT_WIDE = 76;
+export const RAIL_MID_MIN_CHIP_NARROW = RAIL_TITLE_MIN + 8 + RAIL_CHIP_COMPACT_NARROW;
+export const RAIL_MID_MIN_CHIP = RAIL_TITLE_MIN + 8 + RAIL_CHIP_COMPACT;
+export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + RAIL_CHIP_COMPACT_WIDE;
 
 /**
  * The widest an issue mark may be: the 11px glyph, its gap and a two-digit
@@ -122,9 +130,14 @@ export const RAIL_ISSUE_PILLS_COL = 28;
  * rather than to a clipped one. The 84→88 raise is unpinned by any test: it
  * removes a sub-pixel clip of `99 attached` in the mid band 164–168 only.
  */
-export const RAIL_CHIP_SWITCH_SHORT = RAIL_TITLE_MIN + 8 + 88;
-export const RAIL_CHIP_SWITCH_LONG = RAIL_TITLE_MIN + 8 + 103;
-export const RAIL_CHIP_SWITCH_WIDE = RAIL_TITLE_MIN + 8 + 174;
+/** Each class's widest FULL label, alone: the breakpoints of the page row's
+ *  meta-line chip slot, which holds nothing but the chip. */
+export const RAIL_CHIP_LABEL_SHORT = 88;
+export const RAIL_CHIP_LABEL_LONG = 103;
+export const RAIL_CHIP_LABEL_WIDE = 174;
+export const RAIL_CHIP_SWITCH_SHORT = RAIL_TITLE_MIN + 8 + RAIL_CHIP_LABEL_SHORT;
+export const RAIL_CHIP_SWITCH_LONG = RAIL_TITLE_MIN + 8 + RAIL_CHIP_LABEL_LONG;
+export const RAIL_CHIP_SWITCH_WIDE = RAIL_TITLE_MIN + 8 + RAIL_CHIP_LABEL_WIDE;
 
 /**
  * The same swap for a family/month row's WIDE roll-up chip — its own number,

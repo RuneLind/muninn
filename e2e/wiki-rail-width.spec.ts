@@ -62,6 +62,12 @@ const SUP10 = "plans/sup10.mdx";
 const BIG = "plans/big.mdx";
 const THREE = "plans/three.mdx";
 const BARE = "plans/bare.mdx";
+/** The crowded meta line: an in-flight pill, a ⚑, ✋ 12 and a two-kind chip
+ *  (`12 attached · 10 superseded`) on one row — every mark that takes room
+ *  beside the chip, at its widest realistic form. */
+const CROWDED = "plans/crowded.mdx";
+/** The same marks beside a LONG one-kind chip, `10 superseded`. */
+const CROWDED_LONG = "plans/crowded-long.mdx";
 /** A NEW in-flight plan with a ⚑: the fullest meta line in the fixture (pill,
  *  ⚑ and the NEW tag), with its green age on line one. */
 const NEW_FLIGHT = "plans/new-flight.mdx";
@@ -93,6 +99,63 @@ const EDGE_PAGES: Array<[string, string]> = [
     html(`Three mock ${i + 1}`),
   ]),
   [BARE, md("Bare plan with a pill and a flag", PILL_AND_FLAG)],
+  [
+    CROWDED,
+    [
+      "---",
+      "title: Crowded plan",
+      SETTLED_CREATED_LINE,
+      "plan_status: in-flight",
+      "followups: open",
+      "---",
+      "",
+      "# Crowded plan",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you" who="Du">',
+      "",
+      ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`),
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+      "",
+    ].join("\n"),
+  ],
+  ...Array.from({ length: 12 }, (_, i): [string, string] => [`plans/crowded-prototype-${i + 1}.html`, html(`Crowded mock ${i + 1}`)]),
+  [
+    CROWDED_LONG,
+    [
+      "---",
+      "title: Crowded long plan",
+      SETTLED_CREATED_LINE,
+      "plan_status: in-flight",
+      "followups: open",
+      "---",
+      "",
+      "# Crowded long plan",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you" who="Du">',
+      "",
+      ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`),
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+      "",
+    ].join("\n"),
+  ],
+  ...Array.from({ length: 10 }, (_, i): [string, string] => [
+    `plans/crowded-long-old-${i + 1}.md`,
+    md(`Crowded long retired ${i + 1}`, ["superseded_by: [[crowded-long]]"]),
+  ]),
+  ...Array.from({ length: 10 }, (_, i): [string, string] => [
+    `plans/crowded-old-${i + 1}.md`,
+    md(`Crowded retired ${i + 1}`, ["superseded_by: [[crowded]]"]),
+  ]),
   // No `created:` line and re-written after the settle (below): NEW in Activity.
   [
     NEW_FLIGHT,
@@ -108,8 +171,8 @@ const EDGE_PAGES: Array<[string, string]> = [
     ].join("\n"),
   ],
 ];
-/** Rows on screen with every group closed: the two title pages + four parents + the new plan. */
-const CLOSED_ROWS = 2 + 4 + 1;
+/** Rows on screen with every group closed: the two title pages + six parents + the new plan. */
+const CLOSED_ROWS = 2 + 6 + 1;
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -509,7 +572,7 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
       };
     });
   }
-  const MARKED = [SUP10, BIG, THREE, BARE, NEW_FLIGHT];
+  const MARKED = [SUP10, BIG, THREE, BARE, NEW_FLIGHT, CROWDED, CROWDED_LONG];
 
   test("line one is icon · title · age, flush right, and the title takes the rest of it", async ({ page }) => {
     for (const width of [260, 300, 312]) {
@@ -549,6 +612,75 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     const left = all[0]!.titleLeft;
     for (const g of all) expect(Math.abs(g.titleLeft - left)).toBeLessThan(0.5);
     for (const g of all.slice(0, MARKED.length)) expect(Math.abs(g.subMarkLeft! - left)).toBeLessThan(0.5);
+  });
+
+  test("a crowded meta line stays one line from 260 to 400px: the chip's breakpoint counts the marks beside it", async ({ page }) => {
+    const forms: Record<string, string[]> = { [CROWDED]: [], [CROWDED_LONG]: [] };
+    for (let width = 260; width <= 400; width += 20) {
+      await openAt(page, width);
+      for (const rel of [CROWDED, CROWDED_LONG]) {
+        const m = await rowOf(page, rel).evaluate((el) => {
+          const sub = el.querySelector(".wiki-list-sub") as HTMLElement;
+          const marks = Array.from(sub.querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-moves-flag, .wiki-fold-chip"));
+          const label = Array.from(sub.querySelectorAll(".wiki-fold-chip-label, .wiki-fold-chip-counts")).find(
+            (e) => getComputedStyle(e).display !== "none",
+          ) as HTMLElement;
+          // Centres, not tops: the marks differ in height. A wrapped mark moves a
+          // whole meta line (~19px); alignment is the next test's business.
+          const mids = marks.map((e) => {
+            const r = e.getBoundingClientRect();
+            return r.top + r.height / 2;
+          });
+          return {
+            marks: marks.length,
+            spread: Math.max(...mids) - Math.min(...mids),
+            clipped: label.scrollWidth - label.clientWidth > 1,
+            label: label.textContent,
+          };
+        });
+        expect(m.marks, `${rel} ${width}`).toBe(4);
+        expect(m.spread, `${rel} one meta line at ${width}: ${JSON.stringify(m)}`).toBeLessThan(6);
+        expect(m.clipped, `${rel} ${width}: ${m.label}`).toBe(false);
+        forms[rel]!.push(/[a-z]/.test(m.label ?? "") ? "full" : "compact");
+      }
+    }
+    // Both breakpoints actually switch inside the range: counts where the marks
+    // leave too little room, words once they leave enough.
+    for (const rel of [CROWDED, CROWDED_LONG]) {
+      expect(forms[rel]![0], `${rel} at 260: ${forms[rel]}`).toBe("compact");
+      expect(forms[rel]!.at(-1), `${rel} at 400: ${forms[rel]}`).toBe("full");
+    }
+  });
+
+  test("the meta line's marks share one centre line", async ({ page }) => {
+    await openAt(page, 340);
+    const m = await rowOf(page, CROWDED).evaluate((el) => {
+      const kids = Array.from((el.querySelector(".wiki-list-sub") as HTMLElement).children) as HTMLElement[];
+      const centre = (e: HTMLElement) => {
+        const r = (e.matches(".wiki-fold-chip-wrap") ? (e.firstElementChild as HTMLElement) : e).getBoundingClientRect();
+        return r.top + r.height / 2;
+      };
+      const centres = kids.map(centre);
+      return {
+        order: kids.map((k) => (k.className.match(/wiki-(status|followup-flag|moves-flag|new-tag|fold-chip)/) ?? [""])[0]),
+        spread: Math.max(...centres) - Math.min(...centres),
+      };
+    });
+    // Measured before the fix: the pill's 1px and the ⚑'s 2px top margin (from
+    // the one-line row) put the centres 1.0px apart.
+    expect(m.spread, JSON.stringify(m)).toBeLessThanOrEqual(0.5);
+  });
+
+  test("the meta line's marks are in the article header's order", async ({ page }) => {
+    await openAt(page, 340);
+    const order = await rowOf(page, CROWDED).evaluate((el) =>
+      Array.from((el.querySelector(".wiki-list-sub") as HTMLElement).querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-moves-flag, .wiki-new-tag, .wiki-fold-chip")).map(
+        (k) => (k.className.match(/wiki-(status|followup-flag|moves-flag|new-tag|fold-chip)/) ?? [""])[0],
+      ),
+    );
+    // Pill THEN ⚑, as the article header's badges; ✋ after them, as the header's
+    // lane pills; the chip last, where it can take the rest of the line.
+    expect(order).toEqual(["wiki-status", "wiki-followup-flag", "wiki-moves-flag", "wiki-fold-chip"]);
   });
 
   test("a row with no marks has no meta line and stays one line", async ({ page }) => {

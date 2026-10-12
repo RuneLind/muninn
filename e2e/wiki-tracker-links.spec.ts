@@ -533,9 +533,9 @@ test.describe("Wiki reader: tracker links", () => {
       const where = `${width}px`;
       await expect(pills(page, TWIN_MD).first(), where).toBeVisible();
       await expect(row(page, MIRROR_MD).locator(".wiki-issue-pill"), where).toHaveCount(0);
-      // The case needs a width where the pill-less row is ONE line. Not 260
-      // since the 14px type icon (7px wider than the dot it replaced): measured,
-      // icon 14 + mid floor 126 + full date 73.7 + two gaps = 229.7 > 226.
+      // The case needs a width where the pill-less row is ONE line; 280 is the
+      // one asserted. (Since the chip moved to the meta line, line one holds at
+      // every width, and the chip no longer shares a box with the issue mark.)
       if (width === 280) expect(await oneLine(page, MIRROR_MD), where).toBe(true);
       expect(await oneLine(page, TWIN_MD), where).toBe(await oneLine(page, MIRROR_MD));
       expect(await chipForm(page, TWIN_MD), where).toBe(await chipForm(page, MIRROR_MD));

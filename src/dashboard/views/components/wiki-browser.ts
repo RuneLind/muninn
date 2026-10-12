@@ -1837,12 +1837,13 @@ function renderList(): void {
     const rowTitle = [culledWhy, entry.activity?.why ?? "", childWhy, memberWhy, latestWhy]
       .filter(Boolean)
       .join("\n");
-    // The META LINE, under the title: status pill · ✋ · ⚑ · group chip · NEW.
+    // The META LINE, under the title: status pill · ⚑ · ✋ · NEW · group chip.
     // Line one is icon · title · ★+age only, so the title has the row's width
     // less the age, and every title starts at the same x. A row with none of
-    // these has no meta line and stays one line tall. Pill THEN flag, the same
-    // order as the article header's `badgeHtml` — the two surfaces show the
-    // same two facts and must not read differently.
+    // these has no meta line and stays one line tall. Pill THEN ⚑ THEN ✋, the
+    // article header's order (`badgeHtml`, then the lane pills after the last
+    // badge) — the two surfaces show the same facts and must not read
+    // differently.
     // The group CHIP: what is folded under this row, and the control that
     // opens it. A click here toggles; a click anywhere else on the row opens
     // the page, as it always has.
@@ -1884,12 +1885,19 @@ function renderList(): void {
           );
         })()
       : "";
+    // The chip goes LAST in a slot that takes the rest of the line: the slot is
+    // its container, so it swaps words for counts by the room the other marks
+    // leave, not by the whole line's width. The slot's floor is the compact
+    // form's (its counts class), so a line too full for that wraps the chip.
+    const chipSlot = chipHtml
+      ? `<span class="wiki-fold-chip-wrap${cls(foldChipCountsClass(foldChipCompactLabel(entry.children!)))}">${chipHtml}</span>`
+      : "";
     const subItems =
       statusPillHtml(p) +
-      movesFlagHtml(p) +
       followupFlagHtml(p) +
-      chipHtml +
-      (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "");
+      movesFlagHtml(p) +
+      (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
+      chipSlot;
     const sub = subItems ? `<div class="wiki-list-sub">${subItems}</div>` : "";
     html +=
       // The indent is for a row drawn INSIDE its parent's group. A lifted child
@@ -1910,8 +1918,8 @@ function renderList(): void {
       // no extra column, so their titles line up with their neighbours'.
       railTypeIconHtml(p.type) +
       // The title's box, `.wiki-list-mid`: what is left of line one after the
-      // icon and the ★+age. The marks that used to share it (pill, ✋, ⚑, the
-      // group chip) are on the meta line below.
+      // icon and the ★+age. The ✋ and the group chip used to share it; they are
+      // on the meta line below, with the pill and the ⚑.
       `<div class="wiki-list-mid">` +
       // `title=` carries the full name, since the title clamps at two lines. On
       // an Activity row it carries the derivation UNDER the name as well — this

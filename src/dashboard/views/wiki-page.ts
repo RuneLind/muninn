@@ -9,6 +9,12 @@ import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
 import {
+  RAIL_CHIP_COMPACT,
+  RAIL_CHIP_COMPACT_NARROW,
+  RAIL_CHIP_COMPACT_WIDE,
+  RAIL_CHIP_LABEL_LONG,
+  RAIL_CHIP_LABEL_SHORT,
+  RAIL_CHIP_LABEL_WIDE,
   RAIL_CHIP_SWITCH_SHORT,
   RAIL_CHIP_SWITCH_LONG,
   RAIL_CHIP_SWITCH_WIDE,
@@ -446,17 +452,44 @@ export async function renderWikiPage(opts?: {
       flex-wrap: wrap;
     }
     /* Indented by the icon column (14px + the row's 8px gap), so the marks sit
-       under the title they describe. It is the group chip's \`railmid\`
-       container: the chip's three breakpoints were sized as a title floor plus
-       the label, and the floor's ~80px is what the meta line's pill, ✋ and ⚑
-       take beside it. It wraps rather than clipping, as the backstop. */
+       under the title they describe. It wraps rather than clipping, as the
+       backstop. */
     .wiki-list-sub {
       flex: 0 0 100%; box-sizing: border-box; padding-left: 22px; min-width: 0;
       display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px;
-      container-type: inline-size; container-name: railmid;
     }
-    .wiki-list-sub > .wiki-status, .wiki-list-sub > .wiki-followup-flag,
-    .wiki-list-sub > .wiki-fold-chip, .wiki-list-sub > .wiki-new-tag { margin: 0; }
+    /* The one-line row's top margins (\`.wiki-list-item .wiki-status\` and its
+       siblings, same specificity, declared later) would win over a plain
+       \`.wiki-list-sub >\` rule; the item class here outranks them. Measured
+       before: the centres sat 1.0px apart. */
+    .wiki-list-item .wiki-list-sub .wiki-status, .wiki-list-item .wiki-list-sub .wiki-followup-flag,
+    .wiki-list-item .wiki-list-sub .wiki-fold-chip, .wiki-list-item .wiki-list-sub .wiki-new-tag { margin: 0; }
+    /* The chip's slot: last on the meta line, it takes what the pill, ⚑, ✋
+       and NEW leave, and it is the chip's container, so the chip swaps words
+       for counts by that room (RAIL_CHIP_LABEL_*), not by the line's. Its floor
+       is the compact form's (RAIL_CHIP_COMPACT_*), so a line too full for even
+       that wraps the slot onto its own line rather than clipping a count. */
+    .wiki-fold-chip-wrap {
+      flex: 1 1 0; min-width: ${RAIL_CHIP_COMPACT}px; display: flex; align-items: center;
+      container-type: inline-size; container-name: railchip;
+    }
+    .wiki-fold-chip-wrap.counts-narrow { min-width: ${RAIL_CHIP_COMPACT_NARROW}px; }
+    .wiki-fold-chip-wrap.counts-wide { min-width: ${RAIL_CHIP_COMPACT_WIDE}px; }
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_SHORT}px) {
+      .wiki-fold-chip:not(.is-wide) { flex-shrink: 0; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_LONG}px) {
+      .wiki-fold-chip.is-long { flex-shrink: 0; }
+      .wiki-fold-chip.is-long .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-long .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_WIDE}px) {
+      .wiki-fold-chip.is-wide { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
+    }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
     /* ⌖ Show in list: a brief ring on the row it scrolled to. */
@@ -466,26 +499,27 @@ export async function renderWikiPage(opts?: {
       to { box-shadow: inset 0 0 0 2px transparent; }
     }
     @media (prefers-reduced-motion: reduce) { .wiki-list-item.reveal-flash { animation: none; } }
-    /* The title and the group chip, in the space the row's fixed parts leave.
-       Its own width is therefore "what is left on this row", which is the ONE
-       question a CSS query can ask that tells a plain row from one carrying a
-       status pill and a ⚑ — every row is the rail's width, so a query on the row
-       could not. \`container-type: inline-size\` is Chromium 105+ / Safari 16 /
-       Firefox 110, and this UI is Chromium; \`:has()\` below is the same era.
-       \`flex: 1 1 0\` so the pair's HYPOTHETICAL size — what the row breaks lines
-       on — is its floor rather than the length of the title text. */
+    /* The title's box: on a page row, line one less the icon and the ★+age; on
+       a family or month header row, the label AND its roll-up chip, in the
+       space the row's other parts leave — that width is what the header chip's
+       container queries (\`railmid\`) read. \`container-type: inline-size\` is
+       Chromium 105+ / Safari 16 / Firefox 110, and this UI is Chromium; \`:has()\`
+       below is the same era. \`flex: 1 1 0\` so the box's HYPOTHETICAL size —
+       what the row breaks lines on — is its floor rather than the length of the
+       title text. */
     .wiki-list-mid {
       display: flex; align-items: flex-start; gap: 8px;
       flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
       container-type: inline-size; container-name: railmid;
     }
-    /* With a chip the pair needs the title's floor, the gap and the widest
+    /* A header row with a chip needs the label's floor, the gap and the widest
        COMPACT chip of the chip's digit class (\`counts-narrow\` for one count of up to
        three digits, \`counts-wide\` for a four-digit, three-digit-pair or
        three-plus-count one, the default in between — the painter sets it from the compact label); under that the row
-       wraps instead. Only when a chip is really there — a plan row carrying a
-       pill and a ⚑ but no chip has 90.6px at the 300px rail, fits its title in
-       it, and must not start wrapping. */
+       wraps instead. Page rows carry their chip on the meta line, so these
+       match only header rows, whose box is the rail less 46.4px, 213.6px at the
+       narrowest (measured, \`wiki-rail-width.ts\`), so no floor here binds: a
+       floor kept, not a working rule. */
     .wiki-list-mid:has(.wiki-fold-chip) { min-width: ${RAIL_MID_MIN_CHIP}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-narrow) { min-width: ${RAIL_MID_MIN_CHIP_NARROW}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-wide) { min-width: ${RAIL_MID_MIN_CHIP_WIDE}px; }
@@ -853,12 +887,10 @@ export async function renderWikiPage(opts?: {
        measured 21px off .wiki-list-title on every row — 42px of title left at
        RAIL_WIDTH_MIN with a status pill and a ⚑ — paid permanently by a reader
        who never pins anything. */
-    /* \`margin-left: auto\` is inert on a row that fits — \`.wiki-list-mid\` grows
-       first and leaves no free space for an auto margin to take — and is what
-       right-aligns this slot on the SECOND line of a row that wrapped, where
-       nothing grows. Rule 3's other half: the pill (\`.wiki-status\`) and the ⚑
-       are already \`flex-shrink: 0\` where they are declared; they are the
-       shortest form of themselves and have nothing to yield. */
+    /* \`margin-left: auto\` is inert while \`.wiki-list-mid\` grows and leaves no
+       free space for an auto margin to take; it keeps this slot flush right if
+       line one ever wraps (a page row's line one holds at every rail width since
+       the marks moved to the meta line, measured 260–560px, children included). */
     .wiki-list-end { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; margin-left: auto; }
     /* The star is VISIBLE by default, and hidden-until-hover only where hover
        really exists. pointer-events:none alone was INERT for the case it was

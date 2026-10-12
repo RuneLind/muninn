@@ -603,14 +603,18 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
 
 **A PAGE row is two lines (since 2026-10-12).** Line one is type icon · title ·
 ★+age; the meta line under the title (`.wiki-list-sub`, indented by the icon
-column) carries the status pill, ✋ N, ⚑, the group chip and NEW, in that order.
-A row with none of them has no meta line and stays one line. The meta line is
-the chip's `railmid` container, so the three chip breakpoints below are measured
-against its width; it wraps rather than clipping as the backstop (unpinned: no
-fixture row overflows it once the chip compacts). Pinned by
-`wiki-rail-width.spec.ts` (`line one is icon · title · age…` and its siblings).
-The one-line budget below still governs GROUP rows (family, month and series
-headers), which keep the chip beside the title; it is kept as measured, and the
+column) carries the status pill, ⚑, ✋ N, NEW and the group chip, in that order
+(the article header's: badges, then the lane pills). A row with none of them has
+no meta line and stays one line. The chip sits last in its own slot
+(`.wiki-fold-chip-wrap`) that takes the room the other marks leave; the slot is
+its container, so it swaps words for counts at `RAIL_CHIP_LABEL_*` (the label
+widths below, alone) with a `RAIL_CHIP_COMPACT_*` floor, and a line too full for
+the compact form wraps the slot rather than clipping a count. Pinned by
+`wiki-rail-width.spec.ts`, including a crowded row (in-flight pill, ⚑, ✋ 12 and
+`12 attached · 10 superseded`) held to one meta line from 260 to 400px. The
+one-line budget below now applies only to family and month header rows, which
+keep the roll-up chip beside the label (a series header carries no chip); there
+its `RAIL_MID_MIN_CHIP*` floors do not bind (the header box is ≥ 213.6px). The
 page-row figures in it are history.
 
 A rail row is six things — type icon · title · group chip · status pill · ⚑ ·
