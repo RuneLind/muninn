@@ -214,6 +214,7 @@ describe("renderNav for role `user`", () => {
         expect(`${profile}/${page} <nav>: ${html.includes("<nav")}`).toBe(`${profile}/${page} <nav>: false`);
         expect(`${profile}/${page} hrefs: ${hrefs(html).join(",")}`).toBe(`${profile}/${page} hrefs: `);
         expect(html).not.toContain("nav-sep");
+        expect(html).not.toContain("muninn-nav-hidden");
         expect(html).toContain("uninn</h1>");
       }
     }

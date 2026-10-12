@@ -635,8 +635,9 @@ export function renderNav(
 `;
   // `m` hides or shows the nav links, remembered per browser. Applied to
   // `<html>` before the header is parsed, so a hidden nav never flashes. The
-  // key is refused while typing, with a modifier, on repeat and while a modal
-  // or menu is on screen — the reader's own single-key rules (`modalOpen`).
+  // key is refused while typing, with a modifier, on repeat, while the Tools ▾
+  // menu is open and while a modal or menu is on screen — the reader's own
+  // single-key rules (`navMenuOpen`, `modalOpen`).
   const navToggle = !linksForRole ? "" : `
   <style>html.${NAV_HIDDEN_CLASS} header nav { display: none; }</style>
   <script>
@@ -648,6 +649,7 @@ export function renderNav(
         if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
         var t = e.target;
         if (t && (['INPUT','TEXTAREA','SELECT'].includes(t.tagName) || t.isContentEditable)) return;
+        if (document.querySelector('details.nav-dropdown[open]')) return;
         var modals = document.querySelectorAll(${JSON.stringify(MODAL_SELECTOR)});
         for (var i = 0; i < modals.length; i++) if (modals[i].getClientRects().length > 0) return;
         var hidden = document.documentElement.classList.toggle(${JSON.stringify(NAV_HIDDEN_CLASS)});
@@ -710,8 +712,8 @@ ${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape
   </script>
   <header>
     <div class="header-left">
-      <h1><span>M</span>uninn</h1>
-      ${!linksForRole ? "" : `<nav title="Press m to hide or show">
+      <h1${linksForRole ? ` title="Press m to hide or show the menu"` : ""}><span>M</span>uninn</h1>
+      ${!linksForRole ? "" : `<nav>
         ${link("dashboard", "/", "Dashboard")}
         ${link("agents", "/agents", "Agents")}
         ${link("traces", "/traces", "Traces")}

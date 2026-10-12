@@ -355,6 +355,33 @@ test.describe("Wiki pane toggles", () => {
     await expect(page.locator("header nav")).toBeHidden();
   });
 
+  test("m is refused while the Tools menu or a dialog is open, and on key repeat", async ({ page }) => {
+    await open(page);
+    const nav = page.locator("header nav");
+    // The nav's own Tools ▾ menu, open: a <details> no dialog selector sees.
+    await page.locator("details.nav-dropdown > summary").click();
+    await expect(page.locator("details.nav-dropdown")).toHaveAttribute("open", "");
+    await page.keyboard.press("m");
+    await expect(nav, "Tools menu open").toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("details.nav-dropdown")).not.toHaveAttribute("open", "");
+    // A visible dialog anywhere on the page.
+    await page.evaluate(() => {
+      const d = document.createElement("div");
+      d.id = "e2eDialog";
+      d.setAttribute("role", "dialog");
+      d.textContent = "dialog";
+      document.body.appendChild(d);
+    });
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("m");
+    await expect(nav, "dialog open").toBeVisible();
+    await page.evaluate(() => document.getElementById("e2eDialog")?.remove());
+    // A held key's repeats do not flicker it.
+    await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "m", repeat: true, bubbles: true })));
+    await expect(nav, "repeat").toBeVisible();
+  });
+
   test("] typed into the Ask box is a character, not a toggle", async ({ page }) => {
     await open(page);
     await page.locator(".wiki-conn-tab[data-conntab='ask']").click();
