@@ -174,8 +174,9 @@ const ROUND_WORDS = new Set(["runde", "round"]);
 const WHEN_RE = new RegExp(
   String.raw`(?:^|(?<=[.!?»)*_]\s))` +
     // who: one to three words of letters, hyphens and apostrophes (O'Brien),
-    // the first capitalised.
-    String.raw`(\p{Lu}[\p{L}'-]*(?: [\p{L}'-]+){0,2}), ` +
+    // the first capitalised; the first may end in a model version (Opus-5.5),
+    // dotted so a section number (Kap-4) is no name.
+    String.raw`(\p{Lu}[\p{L}'-]*(?:-\d{1,2}\.\d{1,2})?(?: [\p{L}'-]+){0,2}), ` +
     `(${DAY_MONTH}(?:\\.\\d{4})?)` +
     String.raw`(?: \(((\p{L}+) \d{1,3}(?:(?: og | and |, ?|[–/-])\d{1,3})*)\))?` +
     String.raw`(\s*→[^\n]*?)?\.\s*$`,
