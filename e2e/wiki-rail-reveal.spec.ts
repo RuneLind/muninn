@@ -177,7 +177,7 @@ test.describe("Wiki rail: follow the open page", () => {
     await openRel(page, TAGGED_REL);
     await expect(page.locator(".wiki-article")).toContainText("Body 80.");
     // A tag the page carries (kept) and a query it does not match (cleared).
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator('#tagChips .wiki-chip[data-tag="keep"]').click();
     await page.locator("#wikiSearch").fill("hub");
     await expect(page.locator(".wiki-list-item.active")).toHaveCount(0);

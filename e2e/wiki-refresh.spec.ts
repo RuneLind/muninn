@@ -220,7 +220,7 @@ test.describe("Wiki reader: listing refresh", () => {
     await expect(page.locator(".wiki-list-item")).toHaveCount(3);
 
     const filters = page.locator("#wikiFilters");
-    await filters.locator("summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator('#typeChips [data-type="concept"]').click();
     await expect(page.locator(".wiki-list-item")).toHaveCount(2); // alpha + beta
     // A search term too — it lives in the DOM input, outside the adopt's render path.
@@ -228,7 +228,7 @@ test.describe("Wiki reader: listing refresh", () => {
 
     // Deliberately collapse the stack again. A gardener write must not spring it
     // back open: only a user action may do that.
-    await filters.locator("summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await expect(filters).not.toHaveAttribute("open", /.*/);
 
     await writeFile(path.join(root, LATE_PAGE.file), LATE_PAGE.body, "utf8");

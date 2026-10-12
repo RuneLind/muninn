@@ -504,7 +504,9 @@ test.describe("Wiki rail: series", () => {
 
   test("a member is not ALSO a plain row, a family row or a blogs row", async ({ page }) => {
     await openRail(page);
+    await page.locator("#wikiOptionsBtn").click();
     await page.locator("#wikiGroupFamilies").check();
+    await page.keyboard.press("Escape");
     await expect(page.locator(".wiki-list-group").first()).toBeAttached();
     await seriesFold(page).click();
     const rel = await relPaths(page);
@@ -726,7 +728,9 @@ test.describe("Wiki rail: series", () => {
   }) => {
     await page.setViewportSize({ width: 1400, height: 900 });
     await openRail(page);
+    await page.locator("#wikiOptionsBtn").click();
     await page.locator("#wikiGroupFamilies").check();
+    await page.keyboard.press("Escape");
     await expect(groupRow(page, "family:plans/other-slate")).toHaveCount(1);
     // The rail is an absolute pseudo-element, not a border, so the series row's
     // `.wiki-list-mid` is exactly a family row's — a border here cost 2px.

@@ -269,7 +269,7 @@ test.describe("Wiki rail: pins, key jump", () => {
 
     // A facet keeps the section and drops the pin that is outside it: the reader
     // who picked a tag still has the pages they pinned IN it.
-    await page.locator("#wikiFilters summary").click();
+    await page.locator("#wikiFiltersBtn").click();
     await page.locator('#tagChips .wiki-chip[data-tag="avregning"]').click();
     expect(await relPathsIn(page, "pinned")).toEqual([ARSAVREGNING]);
     expect(await sectionLabels(page)).toEqual(["Pinned"]);
