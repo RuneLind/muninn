@@ -223,7 +223,8 @@ test.beforeAll(async () => {
     ["---", `title: ${LONG_TITLE}`, SETTLED_CREATED_LINE, "---", "", `# ${LONG_TITLE}`, "", "Body.", ""].join("\n"),
     "utf8",
   );
-  // `created:` pinned like every fixture page: on Linux `utimes` leaves the
+  // `created:` pinned like the fixture's other pages (all but the `.html`
+  // attachments and the deliberately new plan): on Linux `utimes` leaves the
   // birthtime at now, so without it these two read as NEW (CI run 38313899886).
   await writeFile(path.join(root, SHORT_REL), ["---", "title: Short", SETTLED_CREATED_LINE, "---", "", "# Short", "", "Body.", ""].join("\n"), "utf8");
   for (const [rel, body] of EDGE_PAGES) {

@@ -493,8 +493,10 @@ export async function renderWikiPage(opts?: {
       .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
       .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
     }
-    /* A two-kind label with a three- or four-digit count is wider than the
-       wide budget. */
+    /* A two-kind \`counts-wide\` label (a three- or four-digit count) can be
+       wider than the wide budget; the class is judged on the counts, so a
+       narrower one (\`100 attached · 1 superseded\`, 166.9px) switches here too,
+       to counts where its words would fit — the compact-before-clip policy. */
     @container railchip (max-width: ${RAIL_CHIP_LABEL_WIDE_3D}px) {
       .wiki-fold-chip.is-wide.counts-wide { flex-shrink: 0; }
       .wiki-fold-chip.is-wide.counts-wide .wiki-fold-chip-label { display: none; }

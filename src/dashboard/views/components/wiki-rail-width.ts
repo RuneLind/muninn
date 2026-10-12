@@ -95,7 +95,7 @@ export const RAIL_MID_MIN_CHIP_WIDE = RAIL_TITLE_MIN + 8 + RAIL_CHIP_COMPACT_WID
 export const RAIL_ISSUE_PILLS_COL = 28;
 
 /**
- * The three container breakpoints of a page row's chip slot
+ * The container breakpoints of a page row's chip slot
  * (`.wiki-fold-chip-wrap`, the room the meta line's other marks leave), at or
  * under which the chip swaps its words for its counts. Three of them because
  * the full label's width is a fact about the LABEL: measured (the caret
