@@ -63,15 +63,18 @@ const BIG = "plans/big.mdx";
 const THREE = "plans/three.mdx";
 const BARE = "plans/bare.mdx";
 /** The crowded meta line: an in-flight pill, a ⚑, ✋ 12 and a two-kind chip
- *  (`12 attached · 10 superseded`) on one row — every mark that takes room
+ *  (`99 attached · 99 superseded`, 170.6px, its class's widest) on one row — every mark that takes room
  *  beside the chip, at its widest realistic form. */
 const CROWDED = "plans/crowded.mdx";
-/** The same marks beside a LONG one-kind chip, `10 superseded`. */
+/** The same marks beside a LONG one-kind chip at its widest two-digit label,
+ *  `99 superseded` (100.3px of chip). */
 const CROWDED_LONG = "plans/crowded-long.mdx";
-/** The widest pill (`superseded`), a ⚑ and ✋ 12 beside a SHORT chip, `3 attached`. */
+/** The widest pill (`superseded`), a ⚑ and ✋ 12 beside a SHORT chip at its
+ *  widest two-digit label, `99 attached` (85.5px of chip), so a loosened short
+ *  breakpoint clips it. */
 const CROWDED_SHORT = "plans/crowded-short.mdx";
-/** A NEW in-flight plan with a ⚑: the fullest meta line in the fixture (pill,
- *  ⚑ and the NEW tag), with its green age on line one. */
+/** A NEW in-flight plan with a ⚑ and two attachments: its meta line carries a
+ *  pill, ⚑, the NEW tag and a chip, with its green age on line one. */
 const NEW_FLIGHT = "plans/new-flight.mdx";
 const BIG_ATTACHED = 120;
 const BIG_SUPERSEDED = 100;
@@ -125,7 +128,7 @@ const EDGE_PAGES: Array<[string, string]> = [
       "",
     ].join("\n"),
   ],
-  ...Array.from({ length: 12 }, (_, i): [string, string] => [`plans/crowded-prototype-${i + 1}.html`, html(`Crowded mock ${i + 1}`)]),
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [`plans/crowded-prototype-${i + 1}.html`, html(`Crowded mock ${i + 1}`)]),
   [
     CROWDED_LONG,
     [
@@ -150,7 +153,7 @@ const EDGE_PAGES: Array<[string, string]> = [
       "",
     ].join("\n"),
   ],
-  ...Array.from({ length: 10 }, (_, i): [string, string] => [
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [
     `plans/crowded-long-old-${i + 1}.md`,
     md(`Crowded long retired ${i + 1}`, ["superseded_by: [[crowded-long]]"]),
   ]),
@@ -178,10 +181,16 @@ const EDGE_PAGES: Array<[string, string]> = [
       "",
     ].join("\n"),
   ],
-  ...Array.from({ length: 3 }, (_, i): [string, string] => [`plans/crowded-short-prototype-${i + 1}.html`, html(`Crowded short mock ${i + 1}`)]),
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [`plans/crowded-short-prototype-${i + 1}.html`, html(`Crowded short mock ${i + 1}`)]),
+  // A name-stem family of twelve superseded plans: with `group families` on, a
+  // HEADER row whose one-kind roll-up reads `12 superseded`.
+  ...Array.from({ length: 12 }, (_, i): [string, string] => [
+    `plans/gone-slate-${i + 1}.md`,
+    md(`Gone plan ${i + 1}`, ["plan_status: superseded"]),
+  ]),
   // Attachments of the NEW plan, so its meta line carries NEW and a chip.
   ...Array.from({ length: 2 }, (_, i): [string, string] => [`plans/new-flight-prototype-${i + 1}.html`, html(`New flight mock ${i + 1}`)]),
-  ...Array.from({ length: 10 }, (_, i): [string, string] => [
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [
     `plans/crowded-old-${i + 1}.md`,
     md(`Crowded retired ${i + 1}`, ["superseded_by: [[crowded]]"]),
   ]),
@@ -200,8 +209,9 @@ const EDGE_PAGES: Array<[string, string]> = [
     ].join("\n"),
   ],
 ];
-/** Rows on screen with every group closed: the two title pages + seven parents + the new plan. */
-const CLOSED_ROWS = 2 + 7 + 1;
+/** Rows on screen with every group closed and families off: the two title pages
+ *  + seven parents + the new plan + the twelve `gone-slate-*` plans. */
+const CLOSED_ROWS = 2 + 7 + 1 + 12;
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -723,7 +733,7 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     await openAt(page, 260);
     // Squeeze each row's meta line until the marks before the chip still fit
     // but leave its slot only `room` px: under the compact chip's floor for the
-    // row's counts class (CROWDED `12 · 10`, default class, floor 62; BIG
+    // row's counts class (CROWDED `99 · 99`, default class, floor 62; BIG
     // `120 · 100`, counts-wide, floor 76, and 66 is above the default floor, so
     // only the wide floor wraps it). Measured from the row, so a platform's
     // wider pill moves the squeeze, not the case.
@@ -761,6 +771,49 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
       expect(m.slotBelowPill, at).toBeGreaterThan(8);
       expect(m.clipped, at).toBe(false);
     }
+  });
+
+  // The state space, enumerated rather than sampled: every chip label the rail
+  // paints, page and header alike, in either form, is whole. Page rows across
+  // rails 260–400 in 2px steps (each breakpoint's slot band is crossed); header
+  // rows (families on) in windows down to 400px, where the 45% viewport bound
+  // takes the rail under its 260px minimum.
+  async function clippedChips(page: Page): Promise<string[]> {
+    return page.locator("#wikiList").evaluate((list) =>
+      Array.from(list.querySelectorAll(".wiki-fold-chip-label, .wiki-fold-chip-counts"))
+        .filter((e) => getComputedStyle(e).display !== "none")
+        .filter((e) => (e as HTMLElement).scrollWidth - (e as HTMLElement).clientWidth > 1)
+        .map((e) => `${e.closest("[data-relpath], [data-group]")?.getAttribute("data-relpath") ?? e.closest("[data-group]")?.getAttribute("data-group")}: ${e.textContent}`),
+    );
+  }
+
+  test("no page-row chip label is clipped at any rail width from 260 to 400px", async ({ page }) => {
+    const clipped: string[] = [];
+    for (let width = 260; width <= 400; width += 2) {
+      await openAt(page, width);
+      for (const c of await clippedChips(page)) clipped.push(`${width}px ${c}`);
+    }
+    expect(clipped).toEqual([]);
+  });
+
+  test("no header-row chip label is clipped, in windows down to 400px", async ({ page }) => {
+    const clipped: string[] = [];
+    await page.addInitScript(
+      ([key, foldsKey]) => {
+        localStorage.setItem(key as string, "300");
+        localStorage.setItem(foldsKey as string, JSON.stringify(["toggle:families"]));
+      },
+      [RAIL_WIDTH_KEY, `muninn.wiki.folds.v1:${WIKI}`] as const,
+    );
+    for (let vw = 700; vw >= 400; vw -= 20) {
+      await page.setViewportSize({ width: vw, height: 900 });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+      const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
+      await expect(header).toHaveCount(1);
+      await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
+      for (const c of await clippedChips(page)) clipped.push(`${vw}px window ${c}`);
+    }
+    expect(clipped).toEqual([]);
   });
 
   test("a row with no marks has no meta line and stays one line", async ({ page }) => {

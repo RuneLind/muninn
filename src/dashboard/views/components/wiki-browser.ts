@@ -1669,9 +1669,10 @@ function renderList(): void {
       const hover = `${roll.label} — ${why}` + (census ? ` (${census})` : "");
       // A family or month chip: the same two size classes as a page chip, from
       // the same functions, so the two painters can never classify one label two
-      // ways. On a group row (mid ≥ 213.6px at the narrowest rail) only `is-wide` is load-bearing —
-      // it selects RAIL_GROUP_CHIP_SWITCH (235) and fires at the 260px rail;
-      // `is-long` (183) and the counts floors (≤ 156) cannot bind there.
+      // ways. On a group row `is-wide` selects RAIL_GROUP_CHIP_SWITCH (235) and
+      // fires at the 260px rail; a one-kind roll-up's RAIL_CHIP_SWITCH_SHORT
+      // (168) or, for `is-long`, _LONG (183) and the counts floors (≤ 156) bind
+      // only in a window narrow enough to take the rail under 260px.
       // `groupRollup`'s `wide` field says the same thing as the label test.
       const chipHtml = isSeries
         ? ""

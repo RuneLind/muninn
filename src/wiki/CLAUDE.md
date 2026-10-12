@@ -614,7 +614,8 @@ the compact form wraps the slot rather than clipping a count. Pinned by
 `12 attached · 10 superseded`) held to one meta line from 260 to 400px. The
 one-line budget below now applies only to family and month header rows, which
 keep the roll-up chip beside the label (a series header carries no chip); there
-its `RAIL_MID_MIN_CHIP*` floors do not bind (the header box is ≥ 213.6px). The
+its `RAIL_MID_MIN_CHIP*` floors and the one-kind breakpoints bind only in a
+window narrow enough for the 45% viewport bound to take the rail under 260px. The
 page-row figures in it are history.
 
 A rail row is six things — type icon · title · group chip · status pill · ⚑ ·
@@ -947,9 +948,11 @@ measure. It takes ONE number of its own, `RAIL_GROUP_CHIP_SWITCH`: status words
 are shorter than "attached", so a two-count roll-up priced at the ATTACHMENT
 chip's worst case went `display:none` at a mid of 253.6px — exactly the 300px
 shipped rail, which left `9 shipped · 1 superseded` hover-only on every rail
-anybody has. A one-kind roll-up (61–80px) has no breakpoint: a group row's mid
-is ≥ 213.6px, so it keeps its words at every width, a one-status
-`N superseded` slate included. The page-row
+anybody has. A one-kind roll-up (61–80px) keeps `RAIL_CHIP_SWITCH_SHORT`, and a
+one-status `N superseded` slate `RAIL_CHIP_SWITCH_LONG`; they fire only in a
+window narrow enough to take the rail under 260px (a 133.6px header box at a
+400px window), and a round that removed them as dead clipped `12 superseded`
+there. Pinned by the header sweep in `wiki-rail-width.spec.ts`. The page-row
 constants were re-budgeted by the layout follow-up (above), not by this change.
 
 **The rail head is a one-line toolbar: sort · Filters · count · view options.**

@@ -313,8 +313,9 @@ export function foldChipLabelClass(label: string): "" | "is-long" | "is-wide" {
  * widening the narrow budget: the 6px that would cover `9999` cost the 260px
  * rail three chip rows on one line (measured 6 wrapped against 3), for a
  * count no page has (measured while page rows were one line). On a family or
- * month row neither class can fire: a group row's mid is the rail minus
- * 46.4px, 213.6px at the narrowest, above every floor here.
+ * month row these floors bind only in a narrow window: a group row's mid is
+ * the rail minus 46.4px, and the 45% viewport bound takes the rail under 260px
+ * in a window narrower than ~578px.
  */
 export function foldChipCountsClass(compact: string): "" | "counts-narrow" | "counts-wide" {
   if (!compact) return "";

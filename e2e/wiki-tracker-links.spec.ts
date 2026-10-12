@@ -528,7 +528,9 @@ test.describe("Wiki reader: tracker links", () => {
       await expect(row(page, MIRROR_MD).locator(".wiki-issue-pill"), where).toHaveCount(0);
       // The chip is on the meta line and shares no box with the issue mark, so
       // the mark cannot change its form; what the mark could still change is
-      // whether the title line holds.
+      // whether the title line holds. The 280 guard keeps the comparison from
+      // passing as false === false.
+      if (width === 280) expect(await oneLine(page, MIRROR_MD), where).toBe(true);
       expect(await oneLine(page, TWIN_MD), where).toBe(await oneLine(page, MIRROR_MD));
       expect(await clippedPillRows(page), where).toEqual([]);
     }

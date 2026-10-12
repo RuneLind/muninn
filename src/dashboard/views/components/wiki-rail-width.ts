@@ -70,8 +70,10 @@ export const RAIL_TITLE_MIN = 72;
  * (`.wiki-fold-chip-wrap`): a line with less room than that wraps the slot onto
  * a line of its own rather than clipping a count. `RAIL_MID_MIN_CHIP*` add the
  * title floor and gap for a family or month header row, whose label and chip
- * share `.wiki-list-mid`; there they do not bind (the header box is the rail
- * less 46.4px, 213.6px at the narrowest). They were the page row's floors
+ * share `.wiki-list-mid`; the header box is the rail less 46.4px, so they bind
+ * only in a narrow window, where the 45% viewport bound (`effectiveRailWidth`)
+ * takes the rail under its 260px minimum (measured: a 142px header box at a
+ * 400px window). They were the page row's floors
  * while page rows were one line, and the measurements behind them (a `3
  * attached` row with a pill and a ⚑ wrapping at 300px under one 140px floor; a
  * three-digit compact chip overflowing a 60px budget onto the pill) are history.
@@ -115,6 +117,12 @@ export const RAIL_ISSUE_PILLS_COL = 28;
 export const RAIL_CHIP_LABEL_SHORT = 88;
 export const RAIL_CHIP_LABEL_LONG = 103;
 export const RAIL_CHIP_LABEL_WIDE = 174;
+/** A two-kind label with a three-digit count (`counts-wide`): measured 180.0px
+ *  of chip for `120 attached · 100 superseded`, and the compact pair measures
+ *  4.3px wider at `999 · 999` than at `120 · 100`, so 186. Found by the
+ *  no-clipped-chip sweep: under 174 alone it showed clipped words at slots of
+ *  175–180px. */
+export const RAIL_CHIP_LABEL_WIDE_3D = 186;
 
 /**
  * The same swap for a family/month row's WIDE roll-up chip — its own number,
@@ -138,12 +146,19 @@ export const RAIL_CHIP_LABEL_WIDE = 174;
  * 234.8px — falls back to the chip's own ellipsis exactly as an over-long
  * attachment label does; it is a backstop, not a fourth breakpoint.
  *
- * A one-kind roll-up has no breakpoint at all: it measures 61–80.3px
- * (`12 pages`, `10 shipped`, `12 unmarked`) and a group row's mid is ≥ 213.6px,
- * so a month chip keeps its words at every rail width, a one-status
- * `N superseded` slate included.
+ * A one-kind roll-up uses the page chip's label budgets plus the label floor:
+ * `RAIL_CHIP_SWITCH_SHORT` (61–80.3px of chip: `12 pages`, `10 shipped`,
+ * `12 unmarked`) and `RAIL_CHIP_SWITCH_LONG` for a one-status `N superseded`
+ * slate. They fire only in a narrow window: the header box is the rail less
+ * 46.4px, and the 45% viewport bound takes the rail under its 260px minimum in
+ * a window narrower than ~578px (measured: 205.6px of box at a 560px window,
+ * 133.6px at 400, where `12 superseded` clipped with no breakpoint).
  */
 export const RAIL_GROUP_CHIP_SWITCH = RAIL_TITLE_MIN + 8 + 155;
+/** A family or month header's one-kind breakpoints, on its box (`railmid`):
+ *  the label's floor, the gap and the short or long label budget. */
+export const RAIL_CHIP_SWITCH_SHORT = RAIL_TITLE_MIN + 8 + RAIL_CHIP_LABEL_SHORT;
+export const RAIL_CHIP_SWITCH_LONG = RAIL_TITLE_MIN + 8 + RAIL_CHIP_LABEL_LONG;
 /** The share of the window a stored width may take at apply time. */
 export const RAIL_VIEWPORT_SHARE = 0.45;
 

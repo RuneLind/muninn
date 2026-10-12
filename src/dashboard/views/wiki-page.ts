@@ -15,6 +15,9 @@ import {
   RAIL_CHIP_LABEL_LONG,
   RAIL_CHIP_LABEL_SHORT,
   RAIL_CHIP_LABEL_WIDE,
+  RAIL_CHIP_LABEL_WIDE_3D,
+  RAIL_CHIP_SWITCH_LONG,
+  RAIL_CHIP_SWITCH_SHORT,
   RAIL_GROUP_CHIP_SWITCH,
   RAIL_MID_MIN_CHIP,
   RAIL_MID_MIN_CHIP_NARROW,
@@ -490,6 +493,12 @@ export async function renderWikiPage(opts?: {
       .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
       .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
     }
+    /* A two-kind label with a three-digit count is wider than the wide budget. */
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_WIDE_3D}px) {
+      .wiki-fold-chip.is-wide.counts-wide { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide.counts-wide .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide.counts-wide .wiki-fold-chip-counts { display: inline; }
+    }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
     /* ⌖ Show in list: a brief ring on the row it scrolled to. */
@@ -517,9 +526,9 @@ export async function renderWikiPage(opts?: {
        three digits, \`counts-wide\` for a four-digit, three-digit-pair or
        three-plus-count one, the default in between — the painter sets it from the compact label); under that the row
        wraps instead. Page rows carry their chip on the meta line, so these
-       match only header rows, whose box is the rail less 46.4px, 213.6px at the
-       narrowest (measured, \`wiki-rail-width.ts\`), so no floor here binds: a
-       floor kept, not a working rule. */
+       match only header rows, whose box is the rail less 46.4px: they bind in
+       a window narrow enough for the 45% viewport bound to take the rail under
+       260px (measured: a 142px box at a 400px window). */
     .wiki-list-mid:has(.wiki-fold-chip) { min-width: ${RAIL_MID_MIN_CHIP}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-narrow) { min-width: ${RAIL_MID_MIN_CHIP_NARROW}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-wide) { min-width: ${RAIL_MID_MIN_CHIP_WIDE}px; }
@@ -621,11 +630,24 @@ export async function renderWikiPage(opts?: {
        both attributes keep carrying either way. NEVER shrinks: a clipped count
        is a wrong count, and \`10 · 1\` is what \`10 · 10\` clips to. */
     .wiki-fold-chip-counts { display: none; }
-    /* A family or month header's WIDE roll-up: its own breakpoint on the header
-       box (\`railmid\`), since status words are shorter than "attached" — a chip
+    /* A family or month header's chip, on the header box (\`railmid\`). A
+       one-kind roll-up swaps at SHORT, a LONG one (\`N superseded\`, three
+       digits) at LONG as well; both fire only in a narrow window, where the 45%
+       viewport bound takes the rail under 260px (a round removed them as dead
+       and \`12 superseded\` clipped at a 460px window). A WIDE roll-up has its
+       own breakpoint, since status words are shorter than "attached" — a chip
        priced at the attachment worst case went \`display:none\` at a mid of
-       253.6px, exactly the 300px shipped rail. A one-kind roll-up (61–80.3px)
-       needs none: the header box is ≥ 213.6px. See RAIL_GROUP_CHIP_SWITCH. */
+       253.6px, exactly the 300px shipped rail. See RAIL_GROUP_CHIP_SWITCH. */
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_SHORT}px) {
+      .wiki-fold-chip.is-group:not(.is-wide) { flex-shrink: 0; }
+      .wiki-fold-chip.is-group:not(.is-wide) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-group:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railmid (max-width: ${RAIL_CHIP_SWITCH_LONG}px) {
+      .wiki-fold-chip.is-group.is-long { flex-shrink: 0; }
+      .wiki-fold-chip.is-group.is-long .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-group.is-long .wiki-fold-chip-counts { display: inline; }
+    }
     @container railmid (max-width: ${RAIL_GROUP_CHIP_SWITCH}px) {
       .wiki-fold-chip.is-wide.is-group { flex-shrink: 0; }
       .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-label { display: none; }
