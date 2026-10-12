@@ -206,13 +206,6 @@ export const WIKI_READONLY_KEYDOWN_SELECTOR = WIKI_READONLY_DISABLED_INPUTS.join
 /** The placeholder those inputs carry on a read-only wiki. */
 export const WIKI_READONLY_INPUT_PLACEHOLDER = "This wiki is read-only — no questions are sent";
 
-/** The one-line banner under the breadcrumb. States BOTH halves of the guarantee
- *  — never written, never sent to a model — because "read-only" on its own reads
- *  as "you can still ask questions about it", which is the half that matters
- *  most on the root this exists for. */
-export const WIKI_READONLY_BANNER_TEXT =
-  "This wiki is registered read-only — never written, never sent to a model";
-
 /** The Ask-rail hint on a read-only wiki, replacing "Ask a question and this wiki
  *  answers…" — a sentence describing a feature every route here 403s. */
 export const WIKI_READONLY_ASK_HINT =
@@ -374,16 +367,6 @@ export function wikiReadonlyStyles(): string {
     }
     body.wiki-readonly-wiki ${WIKI_READONLY_EGRESS_SELECTOR.split(",").join(", body.wiki-readonly-wiki ")} {
       opacity: 0.45; cursor: not-allowed; filter: grayscale(0.6);
-    }
-    /* Rendered always, shown only under the per-wiki class — see the markup
-       comment in wiki-page.ts for why this is CSS rather than a server branch. */
-    .wiki-readonly-banner { display: none; }
-    body.wiki-readonly-wiki .wiki-readonly-banner {
-      display: block;
-      margin: 0 0 10px; padding: 6px 10px; border-radius: 6px;
-      font-size: 12px; line-height: 1.4;
-      color: var(--text-secondary); background: var(--bg-surface);
-      border: 1px solid var(--status-warning);
     }
     .wiki-readonly-note {
       position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);

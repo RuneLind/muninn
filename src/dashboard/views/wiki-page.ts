@@ -40,7 +40,6 @@ import { NEW_TAG_LOOK, newSinceCss } from "./components/wiki-new-since.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
-  WIKI_READONLY_BANNER_TEXT,
   WIKI_READONLY_INPUT_PLACEHOLDER,
 } from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
@@ -2740,12 +2739,6 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     <div class="wiki-pane">
       <div class="wiki-focus-bar"><button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button></div>
       <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
-      <!-- Read-only banner. Rendered UNCONDITIONALLY and shown by CSS keyed on
-           \`body.wiki-readonly-wiki\` — the same body class the click guard
-           stamps — rather than by a server branch, so the banner and the dimmed
-           controls cannot end up in different states, and so it survives the
-           re-renders that replace the breadcrumb's own innerHTML. -->
-      <div class="wiki-readonly-banner" id="wikiReadonlyBanner">${escHtml(WIKI_READONLY_BANNER_TEXT)}</div>
       <div class="wiki-article-wrap" id="articleWrap">
         <div class="wiki-empty-state">Loading wiki…</div>
       </div>

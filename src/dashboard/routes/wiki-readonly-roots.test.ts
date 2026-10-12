@@ -28,7 +28,6 @@ import {
   wikiReadonlyWikiFlag,
   wikiReadonlyKeyActivates,
   WIKI_READONLY_ASK_HINT,
-  WIKI_READONLY_BANNER_TEXT,
   WIKI_READONLY_BLOCKED_SELECTOR,
   WIKI_READONLY_CLIENT_MESSAGE,
   WIKI_READONLY_DISABLED_INPUTS,
@@ -301,14 +300,13 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
     expect(rwHtml).toContain("window.__WIKI_READONLY_WIKI__ = false");
   });
 
-  test("the read-only page disables the Ask box and shows the banner", async () => {
+  test("the read-only page disables the Ask box", async () => {
     // The placeholder string is ALSO inside the bundled client script (the
     // follow-up bar renders it), so a whole-document `toContain` proves nothing
     // about the Ask box — assert on the rendered element.
     const askBox = (html: string) => html.match(/<textarea[^>]*id="wikiAskInput"[^>]*>/)![0];
 
     const roHtml = await (await app.request("/wiki?wiki=rowiki")).text();
-    expect(roHtml).toContain(WIKI_READONLY_BANNER_TEXT);
     expect(askBox(roHtml)).toContain(" disabled");
     expect(askBox(roHtml)).toContain(WIKI_READONLY_INPUT_PLACEHOLDER);
     expect(roHtml).toContain(WIKI_READONLY_ASK_HINT);
@@ -712,12 +710,9 @@ describe("WIKI_READONLY_ROOTS — client guard", () => {
     expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain("#wikiAskInput");
   });
 
-  test("the banner and the ask-hint state BOTH halves of the guarantee", () => {
-    expect(WIKI_READONLY_BANNER_TEXT).toMatch(/never written/i);
-    expect(WIKI_READONLY_BANNER_TEXT).toMatch(/never sent to a model/i);
+  test("the ask-hint states the no-egress guarantee", () => {
     expect(WIKI_READONLY_ASK_HINT).toMatch(/model|web/);
-    // Neither may claim the INSTANCE flag on a write-owning host.
-    expect(WIKI_READONLY_BANNER_TEXT).not.toContain("MUNINN_WIKI_READONLY");
+    // It may not claim the INSTANCE flag on a write-owning host.
     expect(WIKI_READONLY_ASK_HINT).not.toContain("MUNINN_WIKI_READONLY");
   });
 });
