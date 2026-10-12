@@ -163,9 +163,9 @@ describe("MUNINN_PROFILE=nais route surface", () => {
 /**
  * The nav that goes with it.
  *
- * `renderNav` is on EVERY page, `/chat` included — the pod's one page — so a
- * hardcoded `/wiki` there is a dead link on the only surface a nais deployment
- * has. The nav is not part of `createDashboardRoutes`, so nothing above would
+ * `renderNav` is on EVERY page, `/chat` and `/wiki` included — the two pages a
+ * nais pod serves its users — so a link to a dropped group there is a dead link
+ * on the pod. The nav is not part of `createDashboardRoutes`, so nothing above would
  * have caught it.
  */
 describe("renderNav under the nais profile", () => {

@@ -534,8 +534,8 @@ type NavPage = "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-de
 /**
  * Which route GROUP each nav destination belongs to — the whole reason the nav
  * takes a profile. A link to a group the profile did not register is a 404 from
- * every page that renders this header, `/chat` included, which on a nais pod is
- * the only page there is. Mapping EVERY link (not just today's dropped ones)
+ * every page that renders this header, `/chat` and `/wiki` included — the two
+ * pages a nais pod serves its users. Mapping EVERY link (not just today's dropped ones)
  * means a change to `NAIS_DROPPED_ROUTE_GROUPS` updates the nav by itself.
  *
  * `dashboard` and `chat` map to nothing: `/` is inline in the route factory and
