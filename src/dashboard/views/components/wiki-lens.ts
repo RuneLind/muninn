@@ -617,10 +617,7 @@ function mountChip(article: HTMLElement, ctx: LensContext): void {
   chip.type = "button";
   chip.className = LENS_CHIP_CLASS;
   chip.setAttribute("aria-keyshortcuts", "v");
-  // A chip left behind by a render that did not take it away acts on nothing.
-  chip.addEventListener("click", () => {
-    if (article.isConnected) chooseLens(article, ctx, toggledLens(lensOf(article)));
-  });
+  chip.addEventListener("click", () => chooseLens(article, ctx, toggledLens(lensOf(article))));
   const before = host.querySelector(":scope > .wiki-bc-copy");
   if (before) before.before(chip);
   else host.append(chip);
@@ -718,8 +715,9 @@ export function refreshLensSwitch(wrap: ParentNode): void {
   if (lens) markSwitch(ctx, lens);
 }
 
-/** Take the chip out of `host`: a failed page load leaves the breadcrumb of
- *  the page before it, and the chip must not outlive its article. */
+/** Take the chip out of `host`. A failed page load, an error payload or a
+ *  rejected fetch, leaves the breadcrumb of the page before it, and the chip
+ *  must not outlive its article. */
 export function removeLensChip(host: ParentNode | null): void {
   host?.querySelectorAll(`.${LENS_CHIP_CLASS}`).forEach((el) => el.remove());
 }
@@ -928,15 +926,16 @@ ${compactCss()}
     .${LENS_SWITCH_CLASS} button + button { border-left: 1px solid var(--border-secondary); }
     .${LENS_SWITCH_CLASS} button:hover, .${LENS_SWITCH_CLASS} button:focus-visible { color: var(--text-primary); }
     .${LENS_SWITCH_CLASS} button.on { background: var(--accent); color: #fff; font-weight: 600; }
-    /* The breadcrumb chip: the pill of the row's other buttons (.wiki-bc-copy and
-       its siblings in wiki-page.ts), tinted while Overview hides something. */
+    /* The breadcrumb chip: the pill the row's action buttons share (the
+       .wiki-bc-factcheck rule in wiki-page.ts), tinted while Overview hides something. */
     .${LENS_CHIP_CLASS} {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px; white-space: nowrap; cursor: pointer;
       background: transparent; color: var(--text-secondary); border: 1px solid var(--border-primary);
       font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1;
     }
     .${LENS_CHIP_CLASS}:hover, .${LENS_CHIP_CLASS}:focus-visible {
-      background: var(--tint-neutral); color: var(--text-primary); border-color: var(--accent);
+      background: var(--tint-neutral); color: var(--text-primary);
+      border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
     }
     .${LENS_CHIP_CLASS}[data-lens="overview"] { border-color: var(--accent); color: var(--accent-light); }
     .wiki-article details.fold > summary .${FOLD_SIZE_CLASS} {

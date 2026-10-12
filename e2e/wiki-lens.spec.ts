@@ -479,19 +479,26 @@ test.describe("Wiki reader: lenses", () => {
     expectClean(seen);
   });
 
-  test("a failed page load takes the previous page's chip away", async ({ page }) => {
-    await setStored(page, null);
-    const seen = await open_(page, WIKI, REPORT_REL);
-    const chip = page.locator("#wikiBreadcrumb .wiki-bc-lens");
-    await expect(chip).toHaveText("◐ Oversikt");
-    await page.route("**/api/wiki/page?**", (r) => r.fulfill({ json: { error: "page file unreadable" } }));
-    await page.locator(".wiki-article a.wiki-link", { hasText: "counts" }).click();
-    await expect(page.locator(".wiki-empty-state")).toHaveText("page file unreadable");
-    await expect(chip).toHaveCount(0);
-    expect(await stored(page)).toBe(null);
-    await page.unroute("**/api/wiki/page?**");
-    expectClean(seen);
-  });
+  // Both ways a load fails: an error payload, and a rejected fetch (a 502 whose
+  // HTML body `r.json()` cannot parse).
+  for (const [kind, reply, shown] of [
+    ["an error payload", { json: { error: "page file unreadable" } }, "page file unreadable"],
+    ["a rejected fetch", { status: 502, contentType: "text/html", body: "<html>bad gateway</html>" }, /^Failed to load page/],
+  ] as const) {
+    test(`a failed page load (${kind}) takes the previous page's chip away`, async ({ page }) => {
+      await setStored(page, null);
+      const seen = await open_(page, WIKI, REPORT_REL);
+      const chip = page.locator("#wikiBreadcrumb .wiki-bc-lens");
+      await expect(chip).toHaveText("◐ Oversikt");
+      await page.route("**/api/wiki/page?**", (r) => r.fulfill(reply));
+      await page.locator(".wiki-article a.wiki-link", { hasText: "counts" }).click();
+      await expect(page.locator(".wiki-empty-state")).toHaveText(shown);
+      await expect(chip).toHaveCount(0);
+      await page.unroute("**/api/wiki/page?**");
+      // A 502 logs a console error; the payload case must stay clean.
+      if (kind === "an error payload") expectClean(seen);
+    });
+  }
 
   test("a page where the lenses do not differ gets no chip, and v does nothing", async ({ page }) => {
     await setStored(page, null);

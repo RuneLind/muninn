@@ -4353,6 +4353,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       consumeUrlLens();
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">Failed to load page: ${esc(err.message)}</div>`;
+      removeLensChip(document.getElementById("wikiBreadcrumb"));
       renderList();
     });
 }
