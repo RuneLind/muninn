@@ -466,7 +466,7 @@ test.describe("Wiki reader: lenses", () => {
 
     // Never while typing: the find palette's input takes the letter.
     await page.keyboard.press("/");
-    const input = page.locator('[role="dialog"] input').first();
+    const input = page.locator("#wikiFindInput");
     await expect(input).toBeFocused();
     await page.keyboard.press("v");
     expect(await lensOf(page)).toBe("overview");
@@ -476,6 +476,20 @@ test.describe("Wiki reader: lenses", () => {
     // The switch in the head and the chip agree after a head-switch click.
     await sw.locator('button[data-lens="all"]').click();
     await expect(chip).toHaveText("● Alt");
+    expectClean(seen);
+  });
+
+  test("a failed page load takes the previous page's chip away", async ({ page }) => {
+    await setStored(page, null);
+    const seen = await open_(page, WIKI, REPORT_REL);
+    const chip = page.locator("#wikiBreadcrumb .wiki-bc-lens");
+    await expect(chip).toHaveText("◐ Oversikt");
+    await page.route("**/api/wiki/page?**", (r) => r.fulfill({ json: { error: "page file unreadable" } }));
+    await page.locator(".wiki-article a.wiki-link", { hasText: "counts" }).click();
+    await expect(page.locator(".wiki-empty-state")).toHaveText("page file unreadable");
+    await expect(chip).toHaveCount(0);
+    expect(await stored(page)).toBe(null);
+    await page.unroute("**/api/wiki/page?**");
     expectClean(seen);
   });
 

@@ -188,7 +188,16 @@ import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
 import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
 import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find-palette.ts";
 import { revealHashTarget } from "./wiki-hash-target.ts";
-import { enhanceLens, lensKeyToggles, lensOf, readerSelectionText, refreshLensSwitch, storedLens, toggleLens } from "./wiki-lens.ts";
+import {
+  enhanceLens,
+  lensKeyToggles,
+  lensOf,
+  readerSelectionText,
+  refreshLensSwitch,
+  removeLensChip,
+  storedLens,
+  toggleLens,
+} from "./wiki-lens.ts";
 import { abortAgentRuns, snapshotAgentPane, type AgentPaneSnapshot } from "./wiki-agent-pane.ts";
 import { enhanceNewSince } from "./wiki-new-since.ts";
 import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
@@ -4193,6 +4202,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
         consumeUrlLens();
         document.getElementById("articleWrap")!.innerHTML =
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
+        // The breadcrumb is the previous page's; its lens chip goes with that article.
+        removeLensChip(document.getElementById("wikiBreadcrumb"));
         // The PREVIOUS page's `currentName` deliberately survives a failed load, so
         // the view state keeps reading "article" and a refresh keeps deferring
         // until the reader navigates somewhere that succeeds or returns to start.
