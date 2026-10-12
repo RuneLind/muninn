@@ -18,9 +18,10 @@ import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 import { authedFetchScript, EXPIRED_BANNER_ID } from "./components/authed-fetch.ts";
+import type { AuthRole } from "../../auth/role.ts";
 import { wsRetryScript, WS_STALLED_NOTICE_ID, WS_STALLED_NOTICE_TEXT } from "./components/ws-retry.ts";
 
-export async function renderChatPage(): Promise<string> {
+export async function renderChatPage(opts?: { role?: AuthRole | null }): Promise<string> {
   const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
     await Promise.all([
       webFormatClientScript(),
@@ -46,7 +47,7 @@ export async function renderChatPage(): Promise<string> {
   </style>
 </head>
 <body>
-  ${renderNav("chat", { headerLeftExtra: agentStatusHtml() + botSelectorHtml() })}
+  ${renderNav("chat", { headerLeftExtra: agentStatusHtml() + botSelectorHtml(), role: opts?.role })}
 
   <div class="sim-layout">
     <!-- Left: Threads sidebar -->

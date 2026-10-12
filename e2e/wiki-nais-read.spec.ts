@@ -467,6 +467,9 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(page.locator("#articleWrap")).toContainText("Blåbærsyltetøy på brødskiva");
     await expect(page.locator("#articleWrap svg").first()).toBeVisible({ timeout: 20_000 });
     await expect(page.locator("#articleWrap svg").first()).toContainText("Søknad mottatt");
+    // Role `user` gets the header without the operator's nav.
+    await expect(page.locator("header h1")).toBeVisible();
+    await expect(page.locator("header nav")).toHaveCount(0);
     // The rail's own read surface is there…
     await expect(page.locator(".wiki-conn-tab.active")).toHaveText("Connections");
     // …and the Ask tab, which reaches /api/wiki/ask, is not.
@@ -676,6 +679,19 @@ async function probe(base: string, p: string, method: "GET" | "POST" = "GET") {
 }
 
 test.describe("zone rows under nais — role `user`", () => {
+  test("GET / lands on the wiki, not the chat", async () => {
+    const res = await fetch(`${BASE}/`, { headers: VIA_PROXY, redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/wiki");
+  });
+
+  test("the chat page renders without the nav", async () => {
+    const r = await probe(BASE, "/chat");
+    expect(r.status).toBe(200);
+    expect(r.text).toContain("uninn</h1>");
+    expect(r.text).not.toContain("<nav");
+  });
+
   test("all seven read-slice paths pass the zone and answer 200", async () => {
     for (const p of READS) {
       expect(`${p} → ${(await probe(BASE, p)).status}`).toBe(`${p} → 200`);
@@ -717,6 +733,11 @@ test.describe("zone rows under nais — role `admin`", () => {
     for (const p of READS) {
       expect(`${p} → ${(await probe(ADMIN_BASE, p)).status}`).toBe(`${p} → 200`);
     }
+  });
+
+  test("the reader keeps the nav for an admin, and GET / is the dashboard", async () => {
+    expect((await probe(ADMIN_BASE, `/wiki?${Q}`)).text).toContain('<a href="/wiki" class="nav-link active">Wiki</a>');
+    expect((await probe(ADMIN_BASE, "/")).status).toBe(200);
   });
 
   test("the tool routes pass the zone and meet no handler — absent, not denied", async () => {

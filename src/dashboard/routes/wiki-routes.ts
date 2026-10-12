@@ -208,7 +208,7 @@ import { saveMemory, searchMemoriesHybrid } from "../../db/memories.ts";
 import { getBotDefaultUser, getChatPreferences } from "../../db/chat-preferences.ts";
 import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
-import { requireOwnUser, sessionIdentity } from "../../auth/guard.ts";
+import { requireOwnUser, sessionIdentity, sessionRole } from "../../auth/guard.ts";
 import { authMode } from "../../auth/policy.ts";
 import { viewerGroupKeys } from "../../format/question.ts";
 
@@ -1470,6 +1470,7 @@ export function registerWikiReadRoutes(
         wikiRoot: servedRoot,
         tools,
         findSelf,
+        role: sessionRole(c),
       }),
     );
   });

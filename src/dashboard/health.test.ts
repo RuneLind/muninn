@@ -106,13 +106,13 @@ describe("the two routes, on the real dashboard app", () => {
 });
 
 describe("GET / is role-aware", () => {
-  function appAs(role: AuthRole | null): Hono {
+  function appAs(role: AuthRole | null, profile: Config["profile"] = "default"): Hono {
     const outer = new Hono();
     outer.use("*", async (c, next) => {
       if (role !== null) c.set("role", role);
       await next();
     });
-    outer.route("/", createDashboardRoutes({ dashboardPort: 3010 } as Config));
+    outer.route("/", createDashboardRoutes({ dashboardPort: 3010, profile } as Config));
     return outer;
   }
 
@@ -120,6 +120,18 @@ describe("GET / is role-aware", () => {
     const res = await appAs("user").request("/");
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/chat");
+  });
+
+  test("under nais, where the wiki read slice is in the user zone, role `user` lands on /wiki", async () => {
+    const res = await appAs("user", "nais").request("/");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/wiki");
+  });
+
+  test("under nais, role `admin` still gets the dashboard", async () => {
+    const res = await appAs("admin", "nais").request("/");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<html");
   });
 
   test("role `admin` gets the dashboard", async () => {

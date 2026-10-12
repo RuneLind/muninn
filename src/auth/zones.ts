@@ -119,7 +119,8 @@ export const OPEN_ZONE_PATHS: readonly string[] = [
  * Three entries are worth stating rather than leaving to be inferred:
  *
  *  - **`/` is here** because `GET /` is role-aware in the HANDLER
- *    (`dashboard/routes.ts`): role `user` is redirected to `/chat`. Denying it
+ *    (`dashboard/routes.ts`): role `user` is redirected to `/chat`, or to
+ *    `/wiki` where the read slice is in this zone (nais). Denying it
  *    in the middleware instead would 403 the address people type.
  *  - **The collection routes are absent by construction.** `/api/goals/` is a
  *    prefix and does not match `/api/goals`; the same holds for

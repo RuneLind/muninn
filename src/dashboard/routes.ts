@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { resolveServingProfile, type Config } from "../config.ts";
-import { droppedRouteGroups, type RouteGroup } from "./route-groups.ts";
+import { droppedRouteGroups, servesWikiReadSliceOnly, type RouteGroup } from "./route-groups.ts";
 import { sessionRole } from "../auth/guard.ts";
 import { HEALTH_LIVE_PATH, HEALTH_READY_PATH } from "../auth/zones.ts";
 import { readiness } from "./health.ts";
@@ -44,7 +44,7 @@ import { registerJiraRoutes } from "./routes/jira-routes.ts";
  * build hash, `/api/attention`) are profile-independent and always present —
  * they are the instance itself, not a feature. So is the `/chat` slice, which
  * is mounted separately in `src/index.ts` and is therefore not filterable here
- * at all: on the nais profile chat is the whole point.
+ * at all.
  *
  * The profile is `config.profile ?? resolveServingProfile()` — the field where
  * a `Config` carries one, the same parse's env getter where it does not, which
@@ -54,16 +54,19 @@ import { registerJiraRoutes } from "./routes/jira-routes.ts";
  */
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
-  const dropped = droppedRouteGroups(config.profile ?? resolveServingProfile());
+  const profile = config.profile ?? resolveServingProfile();
+  const dropped = droppedRouteGroups(profile);
 
   // Dashboard home page — role-aware since the zone model landed. `/` is the
   // address people type, and the dashboard behind it is admin-only, so a role
   // `user` is sent to the surface they DO have rather than 403'd at their own
   // bookmark. The branch lives here rather than in the zone middleware because
   // it is a product decision about one route, not a boundary: with auth off
-  // `sessionRole` is null and this is byte-identical to what it was.
+  // `sessionRole` is null and this is byte-identical to what it was. Where the
+  // read slice is in the user zone (the pod), the wiki is that surface.
+  const userLanding = servesWikiReadSliceOnly(profile) ? "/wiki" : "/chat";
   app.get("/", async (c) => {
-    if (sessionRole(c) === "user") return c.redirect("/chat", 302);
+    if (sessionRole(c) === "user") return c.redirect(userLanding, 302);
     return c.html(await renderDashboardPage());
   });
 

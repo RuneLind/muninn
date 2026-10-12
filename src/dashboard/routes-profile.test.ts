@@ -163,9 +163,9 @@ describe("MUNINN_PROFILE=nais route surface", () => {
 /**
  * The nav that goes with it.
  *
- * `renderNav` is on EVERY page, `/chat` included — the pod's one page — so a
- * hardcoded `/wiki` there is a dead link on the only surface a nais deployment
- * has. The nav is not part of `createDashboardRoutes`, so nothing above would
+ * `renderNav` is on EVERY page, `/chat` and `/wiki` included — the two pages a
+ * nais pod serves its users — so a link to a dropped group there is a dead link
+ * on the pod. The nav is not part of `createDashboardRoutes`, so nothing above would
  * have caught it.
  */
 describe("renderNav under the nais profile", () => {
@@ -196,6 +196,36 @@ describe("renderNav under the nais profile", () => {
 
   test("no options at all is the default profile, byte for byte", () => {
     expect(renderNav("dashboard")).toBe(renderNav("dashboard", { profile: "default" }));
+  });
+});
+
+/**
+ * Role `user` gets no nav: on the pod that is every colleague, who reaches the
+ * wiki from `/` and has no use for the operator's links (and a 403 behind most
+ * of them). Admin and auth off keep the profile's nav unchanged.
+ */
+describe("renderNav for role `user`", () => {
+  const hrefs = (html: string): string[] => [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]!);
+
+  test("renders no nav element and no link, on either profile and either page", () => {
+    for (const profile of ["nais", "default"] as const) {
+      for (const page of ["wiki", "chat"] as const) {
+        const html = renderNav(page, { profile, role: "user" });
+        expect(`${profile}/${page} <nav>: ${html.includes("<nav")}`).toBe(`${profile}/${page} <nav>: false`);
+        expect(`${profile}/${page} hrefs: ${hrefs(html).join(",")}`).toBe(`${profile}/${page} hrefs: `);
+        expect(html).not.toContain("nav-sep");
+        expect(html).toContain("uninn</h1>");
+      }
+    }
+  });
+
+  test("role `admin` and auth off render the profile's nav byte for byte", () => {
+    for (const profile of ["nais", "default"] as const) {
+      const plain = renderNav("wiki", { profile });
+      expect(renderNav("wiki", { profile, role: "admin" })).toBe(plain);
+      expect(renderNav("wiki", { profile, role: null })).toBe(plain);
+      expect(hrefs(plain)).toContain("/wiki");
+    }
   });
 });
 
