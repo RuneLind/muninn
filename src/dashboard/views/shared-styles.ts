@@ -2,7 +2,7 @@ import { themeInitScript, themeToggleHtml, themeToggleScript } from "./component
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, type RouteGroup } from "../route-groups.ts";
 import { LAST_WIKI_KEY } from "./components/wiki-home.ts";
-import { MODAL_SELECTOR } from "./components/wiki-panes.ts";
+import { MODAL_SELECTOR, modalOpen, navMenuOpen } from "./components/wiki-panes.ts";
 import type { AuthRole } from "../../auth/role.ts";
 
 /** Dark palette — the default, and the forced value under html[data-theme="dark"]. */
@@ -644,20 +644,22 @@ export function renderNav(
   <style>html.${HEADER_HIDDEN_CLASS} { --header-h: 0px; } html.${HEADER_HIDDEN_CLASS} body > header { display: none; }</style>
   <script>
     try { if (localStorage.getItem(${JSON.stringify(HEADER_HIDDEN_KEY)}) === '1') document.documentElement.classList.add(${JSON.stringify(HEADER_HIDDEN_CLASS)}); } catch (e) {}
-    if (!window.__navToggle) {
+    if (!window.__navToggle) (function() {
       window.__navToggle = true;
+      // The reader's shared key guards (wiki-panes.ts), scoped to this IIFE.
+      var MODAL_SELECTOR = ${JSON.stringify(MODAL_SELECTOR)};
+      var modalOpen = ${modalOpen.toString()};
+      var navMenuOpen = ${navMenuOpen.toString()};
       document.addEventListener('keydown', function(e) {
         if (e.key !== 'm' && e.key !== 'M') return;
         if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
         var t = e.target;
         if (t && (['INPUT','TEXTAREA','SELECT'].includes(t.tagName) || t.isContentEditable)) return;
-        if (document.querySelector('details.nav-dropdown[open]')) return;
-        var modals = document.querySelectorAll(${JSON.stringify(MODAL_SELECTOR)});
-        for (var i = 0; i < modals.length; i++) if (modals[i].getClientRects().length > 0) return;
+        if (navMenuOpen(document) || modalOpen(document)) return;
         var hidden = document.documentElement.classList.toggle(${JSON.stringify(HEADER_HIDDEN_CLASS)});
         try { localStorage.setItem(${JSON.stringify(HEADER_HIDDEN_KEY)}, hidden ? '1' : '0'); } catch (e) {}
       });
-    }
+    })();
   </script>`;
   const toolsDropdown = toolsItems.length === 0 ? "" : `<details class="nav-dropdown">
           <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>

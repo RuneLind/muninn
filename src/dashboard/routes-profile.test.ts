@@ -220,6 +220,16 @@ describe("renderNav for role `user`", () => {
     }
   });
 
+  test("the `m` hint sits on the wordmark for a viewer with the nav, never on the nav or for role `user`", () => {
+    const h1 = (html: string): string => html.match(/<h1[^>]*>/)![0];
+    for (const role of ["admin", null] as const) {
+      const html = renderNav("wiki", { profile: "default", role });
+      expect(h1(html)).toContain('title="Press m to hide or show the header"');
+      expect(html.match(/<nav[^>]*>/)![0]).toBe("<nav>");
+    }
+    expect(h1(renderNav("wiki", { profile: "nais", role: "user" }))).toBe("<h1>");
+  });
+
   test("role `admin` and auth off render the profile's nav byte for byte", () => {
     for (const profile of ["nais", "default"] as const) {
       const plain = renderNav("wiki", { profile });
