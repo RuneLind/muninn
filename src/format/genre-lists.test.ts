@@ -765,7 +765,7 @@ describe("DecisionLog date tail (D41)", () => {
 describe("fix round 1: the D41 date tail and an overturned first sentence", () => {
   const log = (items: string[]) => ["<DecisionLog>", "", ...items, "", "</DecisionLog>"].join("\n");
 
-  test("item 15: «Satsen er 3. Se kapittel 4, 3.2.» is no date tail: who carries no digit", () => {
+  test("item 15: «Satsen er 3. Se kapittel 4, 3.2.» is no date tail: a bare number is no who", () => {
     expect(parseDecisionWhen("Satsen er 3. Se kapittel 4, 3.2.")).toBeNull();
     // who is one to three words.
     expect(parseDecisionWhen("Regel. En to tre fire, 01.02.")).toBeNull();
@@ -775,9 +775,14 @@ describe("fix round 1: the D41 date tail and an overturned first sentence", () =
   test("who may be a model name with a version (Opus-5.5)", () => {
     expect(decisionWhenLabel(parseDecisionWhen("Ventetiden står. Opus-5.5, 11.10.2026.")!)).toBe("Opus-5.5, 11.10.2026");
     expect(decisionWhenLabel(parseDecisionWhen("Regel. Fable-5.1, 01.02 (runde 2).")!)).toBe("Fable-5.1, 01.02 · runde 2");
-    // The version rides on the first word only, and needs its hyphen.
-    expect(parseDecisionWhen("Regel. Fag og jus-2, 01.02.")).toBeNull();
+    // The version rides on the first word only, needs its hyphen and its dot,
+    // and is at most two digits a side, so a section number is no name.
+    expect(parseDecisionWhen("Regel. Fag og jus-2.1, 01.02.")).toBeNull();
     expect(parseDecisionWhen("Regel. Opus 5.5, 01.02.")).toBeNull();
+    expect(parseDecisionWhen("Regel. Opus5.5, 01.02.")).toBeNull();
+    expect(parseDecisionWhen("Satsen er 3. Kap-4, 3.2.")).toBeNull();
+    expect(parseDecisionWhen("Regel gjelder. Steg-3, 05.10.")).toBeNull();
+    expect(parseDecisionWhen("Regel. Opus-555.5, 01.02.")).toBeNull();
     const html = formatWebHtml(log(["- **D3** — Ventetiden i fyllSakstype står. Opus-5.5, 11.10.2026."]), { reader: true, language: "no" });
     expect(html).toContain('<span class="dl-when" data-reader-only>Opus-5.5, 11.10.2026</span>');
   });
