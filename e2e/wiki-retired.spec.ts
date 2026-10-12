@@ -571,7 +571,9 @@ test.describe("Wiki: retired pages", () => {
     // The toggle sits in the closed options pane; the button that opens it is
     // where a keyboard reader continues, and the strip names what turned on.
     await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
-    await expect(page.locator("#wikiActiveOptions")).toContainText("Show retired");
+    // The chip names the STATE with the wiki's own marker, not the toggle's
+    // action text and its count.
+    await expect(page.locator("#wikiActiveOptions .wiki-active-option-label")).toHaveText("Retired");
   });
 
   test("fix 2.2: switching to the Atlas after a toggle flip shows the pool of the moment", async ({ page }) => {

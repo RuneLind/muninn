@@ -454,6 +454,62 @@ test.describe("Wiki rail: families and months", () => {
     }
   });
 
+  // The view-options pane: it says what is on while closed, and it never
+  // outlives the reader's attention — focus leaving it, Escape from anywhere,
+  // or a reader shortcut closes it, since an open role="dialog" makes the
+  // page's single keys stand aside.
+  test("the dot and a chip say group families is on; × turns it off and focuses the button", async ({ page }) => {
+    await openRail(page);
+    await expect(page.locator("#wikiOptionsDot")).toBeHidden();
+    await expect(page.locator("#wikiActiveOptions")).toBeHidden();
+    await turnGroupingOn(page);
+    await expect(page.locator("#wikiOptionsDot")).toBeVisible();
+    await expect(page.locator("#wikiActiveOptions .wiki-active-option-label")).toHaveText("group families");
+    await page.locator('[data-view-option-off="families"]').click();
+    await expect(toggle(page)).not.toBeChecked();
+    await expect(page.locator("#wikiOptionsDot")).toBeHidden();
+    await expect(page.locator("#wikiActiveOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+  });
+
+  test("tabbing out of the view-options pane closes it", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await toggle(page).focus();
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+    await expect(page.locator("#wikiOptionsBtn")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("Escape closes the view-options pane wherever focus is", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    // Safari does not focus a clicked button: the pane is open with focus on <body>.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+  });
+
+  test("a reader shortcut closes the view-options pane, then runs", async ({ page }) => {
+    await openRail(page);
+    await openOptions(page);
+    await expect(page.locator("#wikiOptionsBtn")).toBeFocused();
+    await page.keyboard.press("f");
+    await expect(page.locator(".wiki-layout")).toHaveClass(/\bfocus-mode\b/);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-layout")).not.toHaveClass(/\bfocus-mode\b/);
+    // Not left open behind focus mode, to reappear when it ends.
+    await expect(page.locator("#wikiOptions")).toBeHidden();
+  });
+
+  test("a stored Show retired on a wiki with no retired page shows no dot or chip", async ({ page }) => {
+    await openRail(page);
+    await page.evaluate((key) => localStorage.setItem(key, JSON.stringify(["toggle:retired"])), `muninn.wiki.folds.v1:${WIKI}`);
+    await openRail(page);
+    await expect(page.locator("#wikiOptionsDot")).toBeHidden();
+    await expect(page.locator("#wikiActiveOptions")).toBeHidden();
+  });
+
   // Both themes, measured rather than eyeballed — these are a label, a count and
   // a control's text, so 4.5:1 is the floor, and the background is whatever
   // actually paints behind the element, which a `toHaveCSS("color", <token>)`

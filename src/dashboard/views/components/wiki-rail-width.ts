@@ -28,7 +28,7 @@ export const RAIL_WIDTH_KEY_STEP = 16;
  *  or under which the Filters button drops its word and keeps the funnel and
  *  badge, so sort · Filters · count · options keep one line. Measured: select
  *  134 + Filters 72 + options 26 + three 6px gaps, plus 60 for a four-digit
- *  count = 310, so the word shows from a 336px rail. */
+ *  count = 310. The query includes 310, so the word shows from a 337px rail. */
 export const RAIL_TOOLBAR_COMPACT = 310;
 
 /**

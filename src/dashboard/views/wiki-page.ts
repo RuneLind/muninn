@@ -2749,8 +2749,9 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
                painted from the folds store at boot (the server does not know
                what this browser remembers). The dot says a toggle is on while
                the pane is closed; the strip under the toolbar names it. The pane
-               is a non-modal role="dialog", so modalOpen() sees it and the
-               reader's single-key shortcuts stand aside while it is open. -->
+               is a non-modal role="dialog"; it closes when focus or a pointer
+               leaves it, on Escape, and on a reader shortcut key, which then
+               runs (wiki-browser.ts, setOptionsOpen). -->
           <button type="button" class="wiki-tool-btn wiki-tool-icon" id="wikiOptionsBtn" aria-controls="wikiOptions" aria-expanded="false" aria-label="View options" title="View options">${SVG_OPTIONS}<span class="wiki-options-dot" id="wikiOptionsDot" hidden></span></button>
           <div class="wiki-options-pane" id="wikiOptions" role="dialog" aria-label="View options" hidden>
             <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">

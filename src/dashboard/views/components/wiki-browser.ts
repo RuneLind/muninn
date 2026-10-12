@@ -1404,18 +1404,22 @@ function paintRetiredToggle(): void {
  */
 function paintViewOptions(): void {
   const families = familiesOn();
-  const retired = showRetired();
+  // A stored toggle on a wiki with no retired page changes nothing and has no
+  // control in the pane, so it says nothing either.
+  const retired = showRetired() && allPages.some((p) => p.culled);
   const dot = document.getElementById("wikiOptionsDot");
   if (dot) dot.hidden = !(families || retired);
   const strip = document.getElementById("wikiActiveOptions");
   if (!strip) return;
+  // The chip names the state: the retired chip uses the wiki's own marker
+  // (the word its retired rows carry), not the toggle's action text.
   const chip = (key: string, text: string) =>
-    `<span class="wiki-active-option">${esc(text)}<button type="button" data-view-option-off="${key}" ` +
-    `aria-label="${esc(`Turn off: ${text}`)}" title="Turn off">×</button></span>`;
-  const html =
-    (families ? chip("families", "group families") : "") +
-    (retired ? chip("retired", cullToggleText(retiredUnderFacets())) : "");
-  strip.innerHTML = html;
+    `<span class="wiki-active-option"><span class="wiki-active-option-label">${esc(text)}</span>` +
+    `<button type="button" data-view-option-off="${key}" aria-label="${esc(`Turn off: ${text}`)}" title="Turn off">×</button></span>`;
+  const html = (families ? chip("families", "group families") : "") + (retired ? chip("retired", cullLabels().marker) : "");
+  // Every renderList repaints this; rewriting unchanged markup would drop the
+  // focus of a × the reader is on.
+  if (strip.innerHTML !== html) strip.innerHTML = html;
   strip.hidden = !html;
 }
 
@@ -5108,9 +5112,10 @@ if (filtersDetails && filtersBtn) {
   });
 }
 
-// The view-options pane: opened by its button, closed by the button, a pointer
-// outside it, or Escape (which returns focus to the button and stops there, so
-// it does not also leave focus mode).
+// The view-options pane: opened by its button; closed by the button, a pointer
+// or focus outside it, Escape from anywhere, or a reader shortcut. It is a
+// role="dialog", so while open modalOpen() makes the page's single keys stand
+// aside — it must never stay open once the reader has moved on.
 const optionsBtn = document.getElementById("wikiOptionsBtn");
 const optionsPane = document.getElementById("wikiOptions");
 function setOptionsOpen(open: boolean): void {
@@ -5119,20 +5124,36 @@ function setOptionsOpen(open: boolean): void {
   optionsBtn.setAttribute("aria-expanded", String(open));
 }
 if (optionsBtn && optionsPane) {
+  const inOptions = (n: EventTarget | null) =>
+    n instanceof Node && (optionsPane.contains(n) || optionsBtn.contains(n));
   optionsBtn.addEventListener("click", () => setOptionsOpen(optionsPane.hidden));
   document.addEventListener("pointerdown", (e) => {
-    if (optionsPane.hidden) return;
-    const t = e.target as Node;
-    if (optionsPane.contains(t) || optionsBtn.contains(t)) return;
-    setOptionsOpen(false);
+    if (!optionsPane.hidden && !inOptions(e.target)) setOptionsOpen(false);
   });
-  optionsBtn.parentElement?.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || optionsPane.hidden) return;
-    e.preventDefault();
-    e.stopPropagation();
-    setOptionsOpen(false);
-    optionsBtn.focus();
+  document.addEventListener("focusin", (e) => {
+    if (!optionsPane.hidden && !inOptions(e.target)) setOptionsOpen(false);
   });
+  // Capture phase. Escape closes the pane and stops, so it neither leaves focus
+  // mode nor closes a graph card (whose own capture listener, registered
+  // earlier, already stood aside for the open dialog). A shortcut key — one
+  // printable character, no modifier, not Space, which toggles a checkbox —
+  // closes the pane and carries on, so modalOpen() is false by the time the
+  // shortcut's own listener reads it.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (optionsPane.hidden) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setOptionsOpen(false);
+        optionsBtn.focus();
+      } else if (e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        setOptionsOpen(false);
+      }
+    },
+    true,
+  );
 }
 document.getElementById("wikiActiveOptions")?.addEventListener("click", (e) => {
   const off = (e.target as HTMLElement).closest?.("[data-view-option-off]");

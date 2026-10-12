@@ -939,14 +939,17 @@ constants were re-budgeted by the layout follow-up (above), not by this change.
 
 **The rail head is a one-line toolbar: sort · Filters · count · view options.**
 `group families` and `Show retired (N)` live in the view-options pane
-(`#wikiOptionsBtn` → `#wikiOptions`, a non-modal `role="dialog"`, so
-`modalOpen()` makes the reader's single keys stand aside while it is open;
-Escape, a pointer outside or the button close it). While a toggle is on, a dot
-sits on the button and `#wikiActiveOptions` shows one removable chip per option,
-so a closed pane never hides why the rail looks different. The Filters button
+(`#wikiOptionsBtn` → `#wikiOptions`, a non-modal `role="dialog"`). Because an
+open dialog makes `modalOpen()` true page-wide, the pane never outlives the
+reader's attention: the button, a pointer or focus outside it, Escape from
+anywhere, and a reader shortcut key (which then runs) all close it. While a
+toggle is on, a dot sits on the button and `#wikiActiveOptions` shows one
+removable chip per option, named for the state (`group families`, the wiki's
+retired `marker`), so a closed pane never hides why the rail looks different. A
+stored `Show retired` on a wiki with no retired page shows neither. The Filters button
 flips the `#wikiFilters` `<details>`, whose own summary is hidden: its `open`
 state, auto-open and background-adopt rules are unchanged. At or under
-`RAIL_TOOLBAR_COMPACT` (the head's content box, rail − 26px; 310 = a 336px rail)
+`RAIL_TOOLBAR_COMPACT` (the head's content box, rail − 26px; the word shows from a 337px rail)
 the button keeps the funnel and badge and the word is visually hidden, still its
 accessible name. Pinned by `wiki-rail-families.spec.ts` at 260/300/312/340.
 
