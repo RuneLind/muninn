@@ -611,7 +611,7 @@ its container, so it swaps words for counts at `RAIL_CHIP_LABEL_*` (the label
 widths below, alone) with a `RAIL_CHIP_COMPACT_*` floor, and a line too full for
 the compact form wraps the slot rather than clipping a count. Pinned by
 `wiki-rail-width.spec.ts`, including a crowded row (in-flight pill, ⚑, ✋ 12 and
-`12 attached · 10 superseded`) held to one meta line from 260 to 400px. The
+`99 attached · 99 superseded`) held to one meta line from 260 to 400px. The
 one-line budget below now applies only to family and month header rows, which
 keep the roll-up chip beside the label (a series header carries no chip); there
 its `RAIL_MID_MIN_CHIP*` floors and the one-kind breakpoints bind only in a
@@ -952,7 +952,8 @@ anybody has. A one-kind roll-up (61–80px) keeps `RAIL_CHIP_SWITCH_SHORT`, and 
 one-status `N superseded` slate `RAIL_CHIP_SWITCH_LONG`; they fire only in a
 window narrow enough to take the rail under 260px (a 133.6px header box at a
 400px window), and a round that removed them as dead clipped `12 superseded`
-there. Pinned by the header sweep in `wiki-rail-width.spec.ts`. The page-row
+there. The header sweep in `wiki-rail-width.spec.ts` catches deleting both;
+deleting either alone is unpinned (the two overlap for `N superseded`). The page-row
 constants were re-budgeted by the layout follow-up (above), not by this change.
 
 **The rail head is a one-line toolbar: sort · Filters · count · view options.**

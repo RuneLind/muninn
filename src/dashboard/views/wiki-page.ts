@@ -528,7 +528,8 @@ export async function renderWikiPage(opts?: {
        wraps instead. Page rows carry their chip on the meta line, so these
        match only header rows, whose box is the rail less 46.4px: they bind in
        a window narrow enough for the 45% viewport bound to take the rail under
-       260px (measured: a 142px box at a 400px window). */
+       260px (measured: a 133.6px box at a 400px window, under the 142px
+       default floor). */
     .wiki-list-mid:has(.wiki-fold-chip) { min-width: ${RAIL_MID_MIN_CHIP}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-narrow) { min-width: ${RAIL_MID_MIN_CHIP_NARROW}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-wide) { min-width: ${RAIL_MID_MIN_CHIP_WIDE}px; }

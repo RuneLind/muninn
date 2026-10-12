@@ -72,8 +72,8 @@ export const RAIL_TITLE_MIN = 72;
  * title floor and gap for a family or month header row, whose label and chip
  * share `.wiki-list-mid`; the header box is the rail less 46.4px, so they bind
  * only in a narrow window, where the 45% viewport bound (`effectiveRailWidth`)
- * takes the rail under its 260px minimum (measured: a 142px header box at a
- * 400px window). They were the page row's floors
+ * takes the rail under its 260px minimum (measured: a 133.6px header box at a
+ * 400px window, under the 142px default floor). They were the page row's floors
  * while page rows were one line, and the measurements behind them (a `3
  * attached` row with a pill and a ⚑ wrapping at 300px under one 140px floor; a
  * three-digit compact chip overflowing a 60px budget onto the pill) are history.

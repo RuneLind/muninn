@@ -53,7 +53,7 @@ const SHORT_REL = "short.md";
  * group chip · NEW). Settled (a fixed `created:` and old mtimes) so Activity
  * lifts none of the children out and the chips read their full counts. They
  * began as the edge cases of the old one-line row's width budgets (#557):
- *  - `sup10`: a superseded-only chip, `10 superseded`, the widest one-kind label;
+ *  - `sup10`: a superseded-only chip, `10 superseded`;
  *  - `big`: three-digit counts, `120 · 100`, beside a pill and a ⚑;
  *  - `three`: `3 attached` beside a pill and a ⚑;
  *  - `bare`: a pill and a ⚑ with no chip.
@@ -773,11 +773,13 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     }
   });
 
-  // The state space, enumerated rather than sampled: every chip label the rail
-  // paints, page and header alike, in either form, is whole. Page rows across
-  // rails 260–400 in 2px steps (each breakpoint's slot band is crossed); header
-  // rows (families on) in windows down to 400px, where the 45% viewport bound
-  // takes the rail under its 260px minimum.
+  // A sweep over the fixture's chips, not the whole state space: every chip
+  // label the rail paints for these rows is whole. Page rows across rails
+  // 260–400 in 2px steps; header rows (families on) in windows down to 400px,
+  // where the 45% viewport bound takes the rail under its 260px minimum.
+  // Not covered (a follow-up): three- and four-digit one-kind labels, wide
+  // header roll-ups other than `12 superseded`, windows under 400px, a clip of
+  // 1px or less (the tolerance below), and a band narrower than the 2px step.
   async function clippedChips(page: Page): Promise<string[]> {
     return page.locator("#wikiList").evaluate((list) =>
       Array.from(list.querySelectorAll(".wiki-fold-chip-label, .wiki-fold-chip-counts"))
