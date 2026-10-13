@@ -25,8 +25,12 @@ export default defineConfig({
   // run, none of which reproduce when the spec runs alone, and none at all
   // serially. So CI trades ~1 minute of wall clock for a signal that means
   // something. `retries` stays 0 everywhere: a retry would convert exactly this
-  // class into a silent pass.
+  // class into a silent pass. CI gets its parallelism from shards instead —
+  // separate runners, each as loaded as one serial run (`scripts/e2e-shards.ts`).
   workers: process.env.CI ? 1 : undefined,
+  // `blob` is what the CI fan-in merges and checks; each shard names its file
+  // through PLAYWRIGHT_BLOB_OUTPUT_NAME so the merged directory has no collision.
+  reporter: process.env.CI ? [["dot"], ["blob"]] : "list",
   // A `test.only` left in a spec passes locally and would silently green-light CI
   // on a fraction of the suite.
   forbidOnly: !!process.env.CI,

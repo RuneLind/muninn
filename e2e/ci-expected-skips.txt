@@ -1,0 +1,5 @@
+# Tests CI is expected to skip, one per line as `scripts/e2e-shards.ts check`
+# prints them (file › describe › title). The `e2e` fan-in fails on any skip
+# not listed here and on any listed test that ran, so a spec that starts
+# skipping itself green — a missing fixture, a missing seed row — turns CI red.
+# Add a line only for a skip that is deliberate on a runner, and say why.
