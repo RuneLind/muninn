@@ -37,14 +37,15 @@ function parseWordList(value: unknown, key: string, warnings: string[]): string[
 }
 
 /**
- * Parse the block. Absent ⇒ `null` with no warning. Not an object, `phrases`
+ * Parse the block. Absent or `null` ⇒ `null` with no warning. Not an object, `phrases`
  * not an array, or no usable phrase ⇒ `null` with a warning, so a malformed
  * block turns the checks off rather than running them on half a list (the
  * `roleKeys` fail direction, one level up). A bad `taskWords` drops only that
  * list.
  */
 export function parseStatePhrases(value: unknown): { config: StatePhrasesConfig | null; warnings: string[] } {
-  if (value === undefined) return { config: null, warnings: [] };
+  // `null` is how a generated config writes "no block"; it is absent, not malformed.
+  if (value === undefined || value === null) return { config: null, warnings: [] };
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { config: null, warnings: ["is not an object with phrases and taskWords — ignoring it"] };
   }

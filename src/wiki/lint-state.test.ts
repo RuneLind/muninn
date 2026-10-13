@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, type LintFinding } from "./lint.ts";
-import { parseStatePhrases } from "../format/state-phrases.ts";
 
 // Lint check 14 — state outside its home and state of a key another page owns
 // (living-facts D10). Synthetic fixtures: an English phrase list and DEMO keys.
@@ -38,26 +37,6 @@ const page = (body: string[], fm: string[] = []) =>
 /** The 1-based line of body line `n` (0-based) in {@link page} with `fm` extra keys. */
 const bodyLine = (n: number, fm = 0) => 10 + fm + n;
 
-describe("parseStatePhrases", () => {
-  test("absent is off with no warning; a good block parses, trimmed and deduplicated", () => {
-    expect(parseStatePhrases(undefined)).toEqual({ config: null, warnings: [] });
-    const r = parseStatePhrases({ phrases: [" merged ", "Merged", "in prod"], taskWords: ["PR"] });
-    expect(r.config).toEqual({ phrases: ["merged", "in prod"], taskWords: ["PR"] });
-    expect(r.warnings).toEqual([]);
-  });
-
-  test("a malformed block is off with a warning; a bad entry or taskWords drops alone", () => {
-    for (const bad of [[], "merged", { phrases: "merged" }, { phrases: [] }, { phrases: [3, ""] }]) {
-      const r = parseStatePhrases(bad);
-      expect(r.config).toBeNull();
-      expect(r.warnings.length).toBeGreaterThan(0);
-    }
-    const r = parseStatePhrases({ phrases: ["merged", 7], taskWords: "PR", extra: 1 });
-    expect(r.config).toEqual({ phrases: ["merged"], taskWords: [] });
-    expect(r.warnings).toHaveLength(3);
-  });
-});
-
 describe("lint: state-outside-home", () => {
   test("a prose line with a state phrase and a Jira key warns, with its line", async () => {
     await write("plans/p.mdx", page(["Intro.", "", "The fix for DEMO-12 is merged and waits."]));
@@ -77,13 +56,13 @@ describe("lint: state-outside-home", () => {
           "",
           "The second task is not merged.",
           "",
-          "So 12 can go in prod now.",
+          "So 120 can go in prod now.",
           "",
-          "And 77 is draft still.",
+          "And 770 is draft still.",
           "",
-          "And 99 is draft too.",
+          "And 990 is draft too.",
         ],
-        ["jira: [DEMO-12]", "owns: [DEMO-77]"],
+        ["jira: [DEMO-120]", "owns: [DEMO-770]"],
       ),
     );
     const lines = (await outside()).map((f) => f.line);
@@ -205,7 +184,7 @@ describe("lint: state-outside-home", () => {
   });
 
   test("a table under some other heading is not a ledger", async () => {
-    await write("plans/p.mdx", page(["## Cases", "", "| PR | State |", "|---|---|", "| #5 | merged |"]));
+    await write("plans/p.mdx", page(["## Cases", "", "| PR | State |", "|---|---|", "| #555 | merged |"]));
     expect((await outside()).map((f) => f.line)).toEqual([bodyLine(4)]);
   });
 
@@ -257,11 +236,11 @@ describe("lint: state-not-owner", () => {
   });
 
   test("every home is read: StatusRows, a PR ledger row, status_note; a bare owned number counts as the key", async () => {
-    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1, DEMO-100]"]));
     await write(
       "plans/other.mdx",
       page(
-        ["<StatusRows>", "- 1 is merged", "</StatusRows>", "", "## PR ledger", "", "| PR | Key | State |", "|---|---|---|", "| #4 | DEMO-1 | merged |"],
+        ["<StatusRows>", "- 100 is merged", "</StatusRows>", "", "## PR ledger", "", "| PR | Key | State |", "|---|---|---|", "| #4 | DEMO-1 | merged |"],
         ["status_note: DEMO-1 in prod"],
       ),
     );
@@ -273,5 +252,286 @@ describe("lint: state-not-owner", () => {
     await write("plans/other.mdx", page(["DEMO-1 is merged."]));
     expect(await notOwner()).toEqual([]);
     expect(await outside()).toHaveLength(1);
+  });
+});
+
+// ── Fix round 1 ──────────────────────────────────────────────────────────────
+
+/** Write `plans/p.mdx` and answer the 0-based BODY lines check 1 flags. */
+async function flaggedBody(body: string[], fm: string[] = []): Promise<number[]> {
+  await write("plans/p.mdx", page(body, fm));
+  return (await outside()).map((f) => f.line! - bodyLine(0, fm.length));
+}
+
+describe("check 14 block tracking follows the parser's own blocks", () => {
+  // One probe line after each form: it is prose in every row, so it must flag.
+  // `inside` is the row's verdict on the lines between the tags: exempt (a real
+  // block) or linted (the parser renders the tags as text).
+  const P = "DEMO-9 merged after.";
+  const rows: { form: string; body: string[]; flagged: number[] }[] = [
+    { form: "multi-line block", body: ["<Timeline>", "- DEMO-1 merged", "</Timeline>", P], flagged: [3] },
+    { form: "indented opener at the top level", body: ["  <Timeline>", "  - DEMO-1 merged", "  </Timeline>", P], flagged: [3] },
+    { form: "opener with a quoted attribute", body: ['<Timeline title="x">', "- DEMO-1 merged", "</Timeline>", P], flagged: [3] },
+    { form: "single-line block", body: ["<Timeline>DEMO-1 merged</Timeline>", P], flagged: [1] },
+    { form: "single-line block with trailing prose (text)", body: ["<Timeline>x</Timeline> trailing DEMO-1 merged", P], flagged: [0, 1] },
+    { form: "close mid-line (text)", body: ["<Timeline>", "- DEMO-1 merged</Timeline>", P], flagged: [1, 2] },
+    { form: "Historic closed mid-line (text)", body: ["<Historic>", "DEMO-1 merged.</Historic>", P], flagged: [1, 2] },
+    { form: "multi-line opener (text)", body: ["<Timeline", '  title="x">', "- DEMO-1 merged", "</Timeline>", P], flagged: [2, 4] },
+    { form: "opener with a bare attribute (text)", body: ["<Timeline foo>", "- DEMO-1 merged", "</Timeline>", P], flagged: [1, 3] },
+    { form: "multi-line self-close (text)", body: ["<Timeline", "  items={[]}", "/>", P], flagged: [3] },
+    { form: "self-close of a block that cannot self-close (text)", body: ['<Timeline title="x" />', P], flagged: [1] },
+    { form: "opener after a list marker (text)", body: ["- <Timeline>", "- DEMO-1 merged", "</Timeline>", P], flagged: [1, 3] },
+    { form: "nested inside a Fold", body: ["<Fold>", "<Timeline>", "- DEMO-1 merged", "</Timeline>", "</Fold>", P], flagged: [5] },
+    {
+      form: "same-name nesting",
+      body: ["<Historic>", "<Historic>", "DEMO-1 merged", "</Historic>", "DEMO-2 merged", "</Historic>", P],
+      flagged: [6],
+    },
+    { form: "an opener inside a fence opens nothing", body: ["```", "<Timeline>", "```", "DEMO-1 merged"], flagged: [3] },
+    { form: "a fenced close does not close the block", body: ["<Timeline>", "```", "</Timeline>", "```", "- DEMO-1 merged", "</Timeline>", P], flagged: [6] },
+  ];
+  for (const row of rows) {
+    test(row.form, async () => {
+      expect(await flaggedBody(row.body)).toEqual(row.flagged);
+    });
+  }
+
+  test("a StatusRows the parser does not make a block is no home", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    // Multi-line self-close, and a self-close followed by a comment: text, so
+    // the next line is prose (check 1) and nothing is a home (check 2).
+    expect(await flaggedBody(["<StatusRows", "  rows={[]}", "/>", "DEMO-1 merged"])).toEqual([3]);
+    expect(await flaggedBody(['<StatusRows rows="x" /> {/* x */}', "DEMO-1 merged"])).toEqual([1]);
+    expect(await notOwner()).toEqual([]);
+    // A child self-close on the opener line: the parser renders it as text.
+    expect(await flaggedBody(["<StatusRows><Row k=\"a\" />", "- DEMO-1 merged", "</StatusRows>"])).toEqual([1]);
+  });
+});
+
+describe("check 14 PR references", () => {
+  const noTask = async () => write(".wiki-reader.json", JSON.stringify({ statePhrases: { phrases: ["merged"] } }));
+
+  test("link fragments, paths, versions, numerals and other trackers are not PR refs", async () => {
+    await noTask();
+    const lines = [
+      "See [intro](#1-intro), merged.",
+      "See [step](plan.mdx#3-steg), merged.",
+      "See [[plans/foo#3]], merged.",
+      "See [x](https://example.invalid/a#123), merged.",
+      "Version v1.2#5 merged.",
+      "File foo.md#2 merged.",
+      "Our #1 priority is merged.",
+      "The #3 cases are merged.",
+      "Shipyard#697 merged.",
+    ];
+    expect(await flaggedBody(lines)).toEqual([]);
+  });
+
+  test("PR #n, repo #nnn, repo#n, owner/repo#n, a pull URL and a bare #nnn are", async () => {
+    await noTask();
+    const lines = [
+      "PR #31 merged.",
+      "api #3523 merged.",
+      "melosys-api#12 merged.",
+      "navikt/melosys-api#12 merged.",
+      "https://github.com/o/r/pull/7 merged.",
+      "#3538 merged.",
+      "Only #12 merged.",
+    ];
+    expect(await flaggedBody(lines)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+});
+
+describe("check 14 Jira keys", () => {
+  test("generic shape: the shared key source and its denylist; no date-like run", async () => {
+    expect(await flaggedBody(["UTF-8 merged.", "SHA-256 merged.", "ISO-8601 merged.", "DEMO-2026-09 merged.", "DEMO-12 merged."])).toEqual([4]);
+  });
+
+  test("tracker projects: no leading zero; an owned or named key counts whatever its prefix", async () => {
+    await write(".wiki-reader.json", JSON.stringify({ statePhrases: BLOCK, trackers: [{ id: "jira", projects: ["DEMO"] }] }));
+    await write("plans/owner.mdx", page(["Body."], ["owns: [FAG-8332]"]));
+    expect(await flaggedBody(["DEMO-0145 merged.", "FAG-8332 merged.", "OTHER-5 merged.", "XYZ-77 merged."], ["jira: [XYZ-77]"])).toEqual([1, 3]);
+  });
+});
+
+describe("check 14 owns: and jira: entries", () => {
+  test("an entry is shape-checked, its key taken from prose, and deduplicated", async () => {
+    await write("plans/owner.mdx", page(["Body."], ['owns: ["DEMO-100 (kilde)", "DEMO-100 (kilde)"]']));
+    await write("plans/other.mdx", page(["**Status:** DEMO-100 merged"]));
+    const f = await notOwner();
+    expect(f).toHaveLength(1);
+    expect(f[0]!.message).toContain("DEMO-100, which plans/owner.mdx owns");
+  });
+
+  test("a block list and a comma-separated scalar are read", async () => {
+    await write("plans/a.mdx", page(["Body."], ["owns:", "  - DEMO-100", "  - DEMO-101"]));
+    await write("plans/b.mdx", page(["Body."], ["owns: DEMO-3, DEMO-4"]));
+    await write("plans/other.mdx", page(["**Status:** DEMO-101 merged · DEMO-4 merged"]));
+    expect((await notOwner()).map((f) => f.message.match(/states (\S+), which (\S+) owns/)!.slice(1))).toEqual([
+      ["DEMO-101", "plans/a.mdx"],
+      ["DEMO-4", "plans/b.mdx"],
+    ]);
+  });
+
+  test("an owns: entry that names no key is a warning with its line", async () => {
+    await write("plans/a.mdx", page(["Body."], ["owns: [TBD, DEMO-1]"]));
+    await write("plans/b.mdx", page(["Body."], ["owns:", "  - later"]));
+    await write("plans/c.mdx", page(["Body."], ["owns: DEMO-5, soon"]));
+    const f = await findings("state-owns-unread");
+    expect(f.map((x) => [x.relPath, x.line, x.message.match(/«(.*?)»/)![1]])).toEqual([
+      ["plans/a.mdx", 6, "TBD"],
+      ["plans/b.mdx", 7, "later"],
+      ["plans/c.mdx", 6, "soon"],
+    ]);
+    expect(f[0]!.message).toContain("«TBD»");
+  });
+});
+
+describe("check 14 bare numbers", () => {
+  test("a bare number needs three digits, and not a date or a PR number", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-7, DEMO-120, DEMO-3538]"]));
+    const body = ["Stays in prod 7 days.", "On 120. oktober it merged.", "So 120 merged.", "Ok."];
+    expect(await flaggedBody(body, ["jira: [DEMO-7, DEMO-120]"])).toEqual([2]);
+    await write("plans/other.mdx", page(["**Status:** PR 3538 merged", "", "**Status:** 3538 merged"]));
+    expect((await notOwner()).filter((f) => f.relPath === "plans/other.mdx").map((f) => f.line)).toEqual([bodyLine(2)]);
+  });
+
+  test("a number two owned keys share is attributed to neither", async () => {
+    await write("plans/a.mdx", page(["Body."], ["owns: [AAA-100]"]));
+    await write("plans/b.mdx", page(["Body."], ["owns: [BBB-100]"]));
+    await write("plans/c.mdx", page(["**Status:** 100 merged", "", "**Status:** BBB-100 merged"]));
+    const f = await notOwner();
+    expect(f.map((x) => [x.line, x.message.includes("BBB-100")])).toEqual([[bodyLine(2), true]]);
+  });
+});
+
+describe("check 14 clauses", () => {
+  test("a date's own period and a period inside brackets do not end a clause", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    await write("plans/other.mdx", page(["**Status:** waiting on DEMO-1 since 13.10. merged", "", "**Status:** [DEMO-1 notes. See](x) merged"]));
+    expect((await notOwner()).map((f) => f.line)).toEqual([bodyLine(0), bodyLine(2)]);
+  });
+
+  test("check 1's anchor must sit in the state's own clause (D13); a table row is one clause", async () => {
+    const body = [
+      "A red run is owned by whoever merged it · see PR #345 for the history.",
+      "It merged; PR #345 waits.",
+      "PR #345 is merged.",
+      "| PR #345 | merged |",
+      "| PR #346 | done. Then merged |",
+    ];
+    expect(await flaggedBody(body)).toEqual([2, 3, 4]);
+  });
+
+  test("the finding names the anchor nearest the state in its clause", async () => {
+    await write("plans/p.mdx", page(["DEMO-1 waits for the fix, PR #45 merged."]));
+    const f = await outside();
+    expect(f).toHaveLength(1);
+    expect(f[0]!.message).toContain("beside «PR #45»");
+  });
+});
+
+describe("check 14 homes", () => {
+  test("Status label variants are homes; other words are not", async () => {
+    const body = [
+      "**Status.** DEMO-1 merged",
+      "",
+      "**Status 28.09:** DEMO-1 merged",
+      "",
+      "**Status 12.10.2026** DEMO-1 merged",
+      "",
+      "**Status:** DEMO-1 merged",
+      "",
+      "**Statusen** DEMO-1 merged",
+    ];
+    expect(await flaggedBody(body)).toEqual([8]);
+  });
+
+  test("a ledger label must BE the label; a table without leading pipes counts", async () => {
+    const body = [
+      "## Why PR-oversikt is missing:",
+      "",
+      "| Key | State |",
+      "|---|---|",
+      "| DEMO-1 | merged |",
+      "",
+      "## PR ledger (main)",
+      "",
+      "| Key | State |",
+      "|---|---|",
+      "| DEMO-2 | merged |",
+      "",
+      "PR ledger:",
+      "Key | State",
+      "---|---",
+      "DEMO-3 | merged",
+    ];
+    expect(await flaggedBody(body)).toEqual([4]);
+  });
+
+  test("a Status paragraph keeps a line opening with inline JSX; a quote ends it", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    expect(await flaggedBody(["**Status:** waits", "<Pill>x</Pill> DEMO-2 merged"])).toEqual([]);
+    await write("plans/other.mdx", page(["**Status:** waits", "> a quote", "DEMO-1 merged"]));
+    expect(await notOwner()).toEqual([]);
+  });
+});
+
+describe("check 14 exempt text", () => {
+  test("a lazy quote continuation and a quote in a list item are exempt", async () => {
+    expect(await flaggedBody(["> The team said", "DEMO-1 is merged by now.", "", "- > DEMO-2 merged, said the team.", "", "DEMO-3 merged."])).toEqual([5]);
+  });
+
+  test("HTML and JSX comments are not text, for either check", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    const body = ["<!-- DEMO-1 merged -->", "{/* DEMO-2 merged */}", "<!--", "DEMO-3 merged", "-->", "**Status:** waits {/* DEMO-1 merged */}", "", "DEMO-4 merged."];
+    expect(await flaggedBody(body)).toEqual([7]);
+    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx")).toEqual([]);
+  });
+
+  test("a task word PR does not match a lowercase pr inside a file name", async () => {
+    expect(await flaggedBody(["Runs in e2e-pr.yml and is merged.", "The e2e-pr job merged.", "The api-PR-en is merged."])).toEqual([2]);
+  });
+});
+
+describe("check 14 page scope and owners", () => {
+  test("an archive/ page is out even with a live plan_status", async () => {
+    await write("archive/a.mdx", page(["DEMO-1 is merged."]));
+    expect(await outside()).toEqual([]);
+  });
+
+  test("a culled page and a reserved page own nothing", async () => {
+    await write("plans/gone.mdx", page(["Body."], ["owns: [DEMO-1]", "signal: none", "signal-reason: folded"]));
+    await write("plans/index.md", ["---", "title: Index", "owns: [DEMO-2]", "---", "", "# Index", ""].join("\n"));
+    await write("plans/other.mdx", page(["**Status:** DEMO-1 merged · DEMO-2 merged"]));
+    expect(await notOwner()).toEqual([]);
+  });
+});
+
+describe("check 14 frontmatter", () => {
+  test("a CRLF page's description and status_note are read", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    await write(
+      "plans/p.mdx",
+      ["---", "title: P", "description: Task 2 is not created.", "status_note: DEMO-1 merged", "plan_status: in-flight", "---", "", "# P", ""].join("\r\n"),
+    );
+    expect((await outside()).map((f) => f.line)).toEqual([3]);
+    expect((await notOwner()).map((f) => f.line)).toEqual([4]);
+  });
+
+  test("every continuation line of a multi-line description is linted, at its own line", async () => {
+    const fmPage = (fm: string[]) => ["---", "title: P", ...fm, "plan_status: in-flight", "---", "", "# P", ""].join("\n");
+    await write("plans/a.mdx", fmPage(['description: "Intro text', '  and DEMO-1 is merged."']));
+    await write("plans/b.mdx", fmPage(["description: Intro", "  DEMO-2 merged"]));
+    await write("plans/c.mdx", fmPage(["description: >", "  intro", "", "  DEMO-3 merged"]));
+    await write("plans/d.mdx", fmPage(["description: |2", "  DEMO-4 merged"]));
+    await write("plans/e.mdx", fmPage(["description: >-", "  DEMO-5 merged"]));
+    expect((await outside()).map((f) => [f.relPath, f.line])).toEqual([
+      ["plans/a.mdx", 4],
+      ["plans/b.mdx", 4],
+      ["plans/c.mdx", 6],
+      ["plans/d.mdx", 4],
+      ["plans/e.mdx", 4],
+    ]);
   });
 });

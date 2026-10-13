@@ -2,71 +2,121 @@
  * Lint check 14 — volatile state outside its home (living-facts PR 1, D10).
  * Each volatile fact (a PR's state, a prod release, a Jira status) has one
  * home, on one page: the page whose frontmatter `owns:` lists the key. On a
- * page the homes are `<StatusRows>`, a paragraph that starts with
- * `**Status:**`, a pipe table directly under a `PR ledger` / `PR-oversikt`
- * label or heading, and `status_note`. Every other line names the key and
- * leaves the state to the chip.
+ * page the homes are `<StatusRows>`, a paragraph that starts with a `**Status**`
+ * label, a pipe table directly under a `PR ledger` / `PR-oversikt` label or
+ * heading, and `status_note`. Every other line names the key and leaves the
+ * state to the chip.
  *
  * | check                | fires when                                                                 |
  * |----------------------|----------------------------------------------------------------------------|
- * | `state-outside-home` | a line outside the exempt blocks holds a state phrase or a date qualifier  |
- * |                      | (`per D.M`, `per D.M.YYYY`, `(D.M)`) AND an anchor: a Jira key, the bare    |
- * |                      | number of a key the page names in `jira:`/`owns:`, a PR reference or a      |
+ * | `state-outside-home` | a clause outside the exempt blocks holds a state phrase or a date qualifier |
+ * |                      | (`per D.M`, `per D.M.YYYY`, `(D.M)`) AND an anchor in the same clause: a    |
+ * |                      | Jira key, the bare number of a key the page names, a PR reference or a      |
  * |                      | task word                                                                  |
  * | `state-not-owner`    | a home clause states the state of a key some page owns, on a page whose     |
  * |                      | `owns:` does not list it                                                   |
+ * | `state-owns-unread`  | an `owns:` entry names no key                                              |
  *
- * Scope: live report pages (`isLiveReportPage`, check 9's predicate), not
- * reserved or culled. Frontmatter `description` is linted by check 1;
- * `status_note` is a home. Exempt from check 1, besides the homes: `<Timeline>`,
- * `<DecisionLog>`, `<Historic>`, blockquotes, code fences and inline code.
- * Lanes and plain tables are linted.
+ * Scope: live report pages (`isLiveReportPage`) outside `archive/`, not
+ * reserved or culled. Frontmatter `description` is linted; `status_note` is a
+ * home. Exempt from check 1, besides the homes: `<Timeline>`, `<DecisionLog>`,
+ * `<Historic>` (each exactly where `parseBlocks` makes a block of it),
+ * blockquotes with their lazy continuation lines, code fences, inline code and
+ * HTML/JSX comments. Lanes and plain tables are linted.
  *
  * Off unless `.wiki-reader.json` declares `statePhrases`
  * (`src/format/state-phrases.ts`): the phrases and task words are the wiki's
  * own, so a public repo carries no domain list.
  *
- * A clause (check 2) is the text between `·`, `;` or a sentence end; a state
- * phrase belongs to the nearest key in its clause, and a clause with no key
- * states the page's own work, so it is never a finding. Known gap: a clause
- * that names only a PR cannot be attributed to a key.
+ * A clause ({@link stateClauses}) is the text between `·`, `;` or a sentence
+ * end; a table row is one clause. A state phrase belongs to the nearest key in
+ * its clause, and a home clause with no key states the page's own work, so it
+ * is never a finding. Known gap: a clause that names only a PR cannot be
+ * attributed to a key.
  */
 
 import { maskLineCodeSpans } from "../format/code-spans.ts";
+import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, parseBlocks, type Block } from "../format/markdown-ast.ts";
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
+import { JIRA_KEY_SOURCE } from "../jira/retrieval.ts";
 import { normalizeJiraKey } from "./provenance.ts";
+import { stampedKeys } from "./trackers/jira.ts";
+import { isLiveReportPage } from "./lint-drift.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const STATE_LINT_CHECKS = ["state-outside-home", "state-not-owner"] as const;
+export const STATE_LINT_CHECKS = ["state-outside-home", "state-not-owner", "state-owns-unread"] as const;
 
 /** Blocks whose lines check 1 skips: history, and the one block home. */
-const HISTORY_BLOCKS = ["Timeline", "DecisionLog", "Historic"] as const;
+const HISTORY_BLOCKS: readonly string[] = ["Timeline", "DecisionLog", "Historic"];
 const HOME_BLOCK = "StatusRows";
-const TRACKED_BLOCKS: readonly string[] = [...HISTORY_BLOCKS, HOME_BLOCK];
-/** A component tag opening a line; its attributes may run onto later lines. */
-const TAG_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)(?=[\s>/]|$)/;
 
-/** A Jira-shaped key: a prefix of two or more capitals/digits, a hyphen,
- *  digits, so the page's own `D-1`/`Q-8`/`S-3` ids are not keys. On a wiki
- *  whose trackers name projects the prefix must be one of them
- *  ({@link jiraKeyRe}), so a case id (`MEL-600070`) is not a key either. */
+/** Month words after `12.`: the day of a date, not a sentence end or a key number. */
+const MONTHS =
+  "januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember|" +
+  "january|february|march|may|june|july|october|december|jan|feb|mar|apr|jun|jul|aug|sept?|okt|oct|nov|des|dec";
+
+/** A Jira-shaped key. On a wiki whose trackers name projects the prefix must be
+ *  one of them and the number has no leading zero (`trackers/jira.ts`'s rule);
+ *  otherwise the shared {@link JIRA_KEY_SOURCE} with its denylist, so `UTF-8`
+ *  and `SHA-256` are not keys. Never followed by `-` and a digit, so
+ *  `DEMO-2026-09` is not `DEMO-2026`. */
 function jiraKeyRe(projects: readonly string[]): RegExp {
-  const prefix = projects.length > 0 ? `(?:${projects.map(escapeRegExp).join("|")})` : "[A-Z][A-Z0-9]+";
-  return new RegExp(`(?<![\\p{L}\\p{N}_-])${prefix}-\\d+(?![\\p{L}\\p{N}])`, "gu");
+  const key =
+    projects.length > 0 ? `(?:${projects.map(escapeRegExp).join("|")})-[1-9]\\d{0,7}` : JIRA_KEY_SOURCE;
+  return new RegExp(`(?<![\\p{L}\\p{N}_-])${key}(?![\\p{L}\\p{N}_]|-\\d)`, "gu");
 }
-/** A PR reference: a pull URL, `repo#n`, or a bare `#n`. */
-const PR_REF_RE = /\/pull\/\d+|[\w.-]+#\d+|(?<![\p{L}\p{N}&])#\d+(?!\p{N})/u;
+
+/** Exactly these keys, with the same edges: a key some page `owns:` or this
+ *  page names is a key whatever its prefix. */
+function exactKeysRe(keys: Iterable<string>): RegExp | null {
+  const list = [...new Set(keys)].sort((a, b) => b.length - a.length).map(escapeRegExp);
+  if (list.length === 0) return null;
+  return new RegExp(`(?<![\\p{L}\\p{N}_-])(?:${list.join("|")})(?![\\p{L}\\p{N}_]|-\\d)`, "gu");
+}
+
+/**
+ * A PR reference: a pull URL, `PR #n`, `owner/repo#n`, `repo#n`, or a bare
+ * `#nnn` (which also covers `api #3523`). Read over text whose link destinations and wikilinks are
+ * blanked ({@link maskLinks}), so a `#3-steg` fragment is no reference. The
+ * left edge is `store.ts`'s `PR_REF_SOURCE` class plus `#` and `&`, so
+ * `foo.md#2`, `v1.2#5` and `&#123;` are not; a repo is lower-case, so
+ * `Shipyard#697` is another tracker. Unlike `store.ts`'s `prRefs`, which pairs
+ * pages and so takes a bare `#N` for an anchor or a count, this check reads a
+ * bare `#nnn` as a PR: the kode-wiki writes its PRs that way. Three digits keep
+ * `#1 prioritet` out.
+ */
+const PR_LEFT = "(?<![A-Za-z0-9._/@#&-])";
+const PR_RIGHT = "(?![\\p{L}\\p{N}])";
+const PR_REF_RE = new RegExp(
+  [
+    "https?://[^\\s)]+/pull/\\d+",
+    `(?<![\\p{L}\\p{N}])PR[ \\t]?#\\d+${PR_RIGHT}`,
+    `${PR_LEFT}[A-Za-z0-9_-]+/[a-z][a-z0-9_-]*#\\d+${PR_RIGHT}`,
+    `${PR_LEFT}[a-z][a-z0-9_-]*#\\d+${PR_RIGHT}`,
+    `(?<![\\p{L}\\p{N}&#/.\\]])#\\d{3,}${PR_RIGHT}`,
+  ].join("|"),
+  "gu",
+);
 /** A date qualifier: `per 11.10`, `per 11.10.2026`, `(11.10)`. */
 const DATE_QUALIFIER_RE = /(?<![\p{L}\p{N}])per\s+\d{1,2}\.\d{1,2}(?:\.\d{4})?(?![\p{N}])|\(\d{1,2}\.\d{1,2}\)/giu;
-/** Where a clause ends (check 2): `·`, `;`, or a sentence end. */
-const CLAUSE_END_RE = /[·;]|[.!?](?=\s|$)/gu;
-/** A pipe table's label: a heading or label line naming the PR ledger. */
-const LEDGER_LABEL_RE = /PR[ -]ledger|PR-oversikt/i;
-/** A paragraph that is a home: it opens with `**Status:**`, after an optional list marker. */
-const STATUS_PARA_RE = /^(?:[-*+]\s+|\d+[.)]\s+)?\*\*Status:\*\*/;
+/**
+ * A paragraph that is a home: `**Status` with an optional date and an optional
+ * `:` or `.`, then `**` — `**Status:**`, `**Status.**`, `**Status 28.09:**`,
+ * `**Status 12.10.2026**` — after an optional list marker. `**Statusen**` is not.
+ */
+const STATUS_PARA_RE = /^(?:[-*+]\s+|\d+[.)]\s+)?\*\*Status(?:\s+\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\.?)?[:.]?\*\*/;
+/** A ledger label's own text, once heading marks, `**` and a trailing `:`/`.`
+ *  are gone: the label alone, or with a short parenthetical. */
+const LEDGER_LABEL_RE = /^(?:PR[ -]ledger|PR-oversikt)(?:\s*\([^()]{1,40}\))?$/i;
+/** A blockquote line, after an optional list marker (`- > …`). */
+const QUOTE_RE = /^(?:(?:[-*+]|\d+[.)])\s+)?>/;
+/** A GFM delimiter row, leading pipe optional. */
+const SEPARATOR_RE = /^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?$|^\|\s*:?-+:?\s*\|$/;
+const INLINE_TAG_RE = new RegExp(`^<(?:${INLINE_COMPONENT_NAMES.join("|")})(?=[\\s>/])`);
 
 /** One case-insensitive, word-edged alternation over `words`, longest first so
  *  `ikke opprettet` wins over `opprettet` at the same place. */
@@ -76,26 +126,110 @@ function wordsRe(words: readonly string[]): RegExp | null {
   return new RegExp(`(?<![\\p{L}\\p{N}])(?:${alt})(?![\\p{L}\\p{N}])`, "giu");
 }
 
-/** The bare number of each key, for a `8332 kan i prod` anchor. */
-function keyNumbers(keys: Iterable<string>): Map<string, string> {
-  const out = new Map<string, string>();
+/**
+ * Task words. A word with an upper-case letter (`PR`, `PR-er`) matches as
+ * written, so `e2e-pr.yml` is no PR; an all-lower-case word (`oppgave`) matches
+ * any case. Neither may touch a `.`/`/` path neighbour or a letter, but a
+ * hyphen is fine (`api-PR-en`) and so is a sentence-ending period.
+ */
+function taskWordsRes(words: readonly string[]): RegExp[] {
+  const edge = (alt: string, flags: string) =>
+    new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`, flags);
+  const alt = (ws: string[]) => ws.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
+  const cased = words.filter((w) => /\p{Lu}/u.test(w));
+  const folded = words.filter((w) => !/\p{Lu}/u.test(w));
+  const out: RegExp[] = [];
+  if (cased.length > 0) out.push(edge(alt(cased), "gu"));
+  if (folded.length > 0) out.push(edge(alt(folded), "giu"));
+  return out;
+}
+
+/** Number → the one key it is the number of, or `null` when two keys share it.
+ *  Only numbers of three or more digits: `i prod i 7 dager` names no key. */
+function keyNumbers(keys: Iterable<string>): Map<string, string | null> {
+  const out = new Map<string, string | null>();
   for (const k of keys) {
-    const n = /-(\d+)$/.exec(k)?.[1];
-    if (n && !out.has(n)) out.set(n, k);
+    const n = /-(\d{3,})$/.exec(k)?.[1];
+    if (!n) continue;
+    const had = out.get(n);
+    if (had === undefined) out.set(n, k);
+    else if (had !== k) out.set(n, null);
   }
   return out;
 }
 
+/** A bare key number: not inside a longer number or a path, not a PR number
+ *  (`PR 3538`, `#3538`), not the day of a date (`120. oktober`). */
 function numbersRe(numbers: Iterable<string>): RegExp | null {
-  const list = [...numbers];
+  const list = [...numbers].sort((a, b) => b.length - a.length);
   if (list.length === 0) return null;
-  return new RegExp(`(?<![\\p{L}\\p{N}\\-#/.])(?:${list.join("|")})(?![\\p{N}]|\\.\\d)`, "gu");
+  return new RegExp(
+    `(?<![\\p{L}\\p{N}\\-#/.])(?<!PR\\s?)(?:${list.join("|")})(?![\\p{N}]|\\.\\d|\\.\\s+(?:${MONTHS})(?![\\p{L}]))`,
+    "giu",
+  );
 }
 
-function keyList(value: unknown): string[] {
-  const raw = Array.isArray(value) ? value : typeof value === "string" && value.trim() ? [value] : [];
-  return raw.map((k) => normalizeJiraKey(String(k))).filter((k) => k.length > 0);
+/** One `owns:` entry as written, its 0-based line and the keys it names. */
+export interface OwnsEntry {
+  text: string;
+  line: number;
+  keys: string[];
 }
+
+/** Split a flow list or a comma scalar on commas outside quotes, unquoted. */
+function splitEntries(value: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  for (const ch of value) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === ",") {
+      out.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+const unquote = (s: string) => s.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+
+/**
+ * Every `owns:` entry in the page's frontmatter: an inline list
+ * (`owns: [A-1, B-2]`), a comma scalar (`owns: A-1, B-2`) or a block list
+ * (`owns:` + `  - A-1`). `parseFrontmatter` reads the first form only, so this
+ * reads the raw lines. Each entry is shape-checked through `stampedKeys`
+ * (`trackers/jira.ts`): `TBD` names no key, `"A-1 (kilde)"` names `A-1`.
+ */
+export function readOwns(content: string): OwnsEntry[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const end = frontmatterEndLine(lines);
+  const out: OwnsEntry[] = [];
+  const push = (text: string, line: number) => out.push({ text, line, keys: stampedKeys(text) });
+  for (let i = 1; i < end - 1; i++) {
+    const m = /^owns\s*:(.*)$/.exec(lines[i]!);
+    if (!m) continue;
+    const value = m[1]!.trim();
+    if (value === "") {
+      for (let k = i + 1; k < end - 1; k++) {
+        const item = /^\s+-\s*(.*?)\s*$/.exec(lines[k]!);
+        if (item) {
+          const text = unquote(item[1]!);
+          if (text) push(text, k);
+        } else if (lines[k]!.trim() !== "" && !/^\s*#/.test(lines[k]!)) break;
+      }
+    } else {
+      const inner = value.startsWith("[") ? value.replace(/^\[/, "").replace(/\]\s*$/, "") : value;
+      for (const text of splitEntries(inner)) push(text, i);
+    }
+  }
+  return out;
+}
+
+const ownedKeys = (entries: readonly OwnsEntry[]) => [...new Set(entries.flatMap((e) => e.keys))];
 
 /** A page the state checks read: its meta, its raw content, its frontmatter. */
 export interface StatePage {
@@ -104,132 +238,333 @@ export interface StatePage {
   fm: Record<string, string | string[]>;
 }
 
-/** Where each line of a page stands. `home` lines are exempt from check 1 and
- *  are what check 2 reads; `exempt` lines are read by neither. */
+/** A page check 14 lints: a live report page outside `archive/`. The caller
+ *  has already left out reserved and culled pages. */
+export function isStateScopePage(relPath: string, fm: Record<string, unknown>, planStatus: string | undefined): boolean {
+  return relPath.split("/")[0] !== "archive" && isLiveReportPage(relPath, fm, planStatus);
+}
+
+/** Text units of a page: one or more 0-based lines read as one string. A body
+ *  line is a unit; a frontmatter `description`/`status_note` with its
+ *  continuation lines is one; `row` marks a table row (one clause). */
+interface Unit {
+  lines: number[];
+  row?: true;
+}
+
+/** Where each line of a page stands. `home` units are exempt from check 1 and
+ *  are what check 2 reads; lines in neither are read by neither check. */
 interface LineRoles {
-  /** 0-based line indices check 1 reads. */
-  linted: number[];
-  /** 0-based line indices check 2 reads. */
-  home: number[];
+  linted: Unit[];
+  home: Unit[];
+  /** The page's lines as the checks read them: CRLF folded, comments blanked. */
+  lines: string[];
+}
+
+/** Blank a span same-length, newlines kept, so offsets and lines survive. */
+const blank = (s: string) => s.replace(/[^\n]/g, " ");
+
+/** The page's lines with HTML and JSX comments blanked outside fences. */
+function maskComments(lines: string[], fenced: readonly boolean[], from: number): string[] {
+  const text = lines.join("\n");
+  const starts: number[] = [];
+  let off = 0;
+  for (const l of lines) {
+    starts.push(off);
+    off += l.length + 1;
+  }
+  const lineAt = (pos: number) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid]! <= pos) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  const masked = text.replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}/g, (m, pos: number) => {
+    const line = lineAt(pos);
+    return line >= from && !fenced[line] ? blank(m) : m;
+  });
+  return masked.split("\n");
+}
+
+/** The last line of the tracked block whose tag opens line `start`: the
+ *  parser's own close rule (a line that is exactly `</Name>`, same-name
+ *  nesting counted, fenced lines skipped). */
+function blockEnd(lines: readonly string[], fenced: readonly boolean[], start: number, name: string): number {
+  const m = COMPONENT_OPEN_RE.exec(lines[start]!.trim());
+  const close = `</${name}>`;
+  if (!m || m[3] === "/" || m[4]!.includes(close)) return start;
+  let depth = 1;
+  for (let j = start + 1; j < lines.length; j++) {
+    if (fenced[j]) continue;
+    const t = lines[j]!.trim();
+    if (t === close) {
+      if (--depth === 0) return j;
+      continue;
+    }
+    const o = COMPONENT_OPEN_RE.exec(t);
+    if (o && o[1] === name && o[3] !== "/" && !o[4]!.includes(close)) depth++;
+  }
+  return lines.length - 1;
+}
+
+/** Lines inside a tracked block, by `parseBlocks`: a tag the parser renders as
+ *  text (a multi-line opener, a close mid-line, trailing prose) opens nothing. */
+function trackedLines(lines: readonly string[], fenced: readonly boolean[], body: number): Map<number, "home" | "history"> {
+  const roles = new Map<number, "home" | "history">();
+  const walk = (blocks: Block[]) => {
+    for (const b of blocks) {
+      if (b.type !== "component") continue;
+      if (b.line !== undefined && (b.name === HOME_BLOCK || HISTORY_BLOCKS.includes(b.name))) {
+        const start = body + b.line;
+        const end = blockEnd(lines, fenced, start, b.name);
+        for (let k = start; k <= end; k++) {
+          if (b.name === HOME_BLOCK) roles.set(k, "home");
+          else if (!roles.has(k)) roles.set(k, "history");
+        }
+      }
+      walk(b.children);
+    }
+  };
+  walk(parseBlocks(lines.slice(body).join("\n")));
+  return roles;
+}
+
+/** Each pipe-table row line → the first line of its table: rows that start
+ *  with `|`, or a run of `|` lines whose second line is a delimiter row. */
+function tableRows(lines: readonly string[], fenced: readonly boolean[], body: number): Map<number, number> {
+  const out = new Map<number, number>();
+  for (let i = body; i < lines.length; i++) {
+    if (fenced[i]) continue;
+    const t = lines[i]!.trim();
+    let j = i;
+    if (t.startsWith("|")) {
+      while (j < lines.length && !fenced[j] && lines[j]!.trim().startsWith("|")) out.set(j++, i);
+    } else if (t.includes("|") && i + 1 < lines.length && SEPARATOR_RE.test(lines[i + 1]!.trim())) {
+      while (j < lines.length && !fenced[j] && lines[j]!.trim().includes("|")) out.set(j++, i);
+    }
+    if (j > i) i = j - 1;
+  }
+  return out;
+}
+
+/** Does this label line name the PR ledger and nothing else? */
+function isLedgerLabel(line: string): boolean {
+  const label = line
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\*\*(.*)\*\*$/, "$1")
+    .replace(/[:.]$/, "")
+    .replace(/^\*\*(.*)\*\*$/, "$1")
+    .trim();
+  return LEDGER_LABEL_RE.test(label);
+}
+
+/** A line that starts a new block, ending a paragraph or a lazy quote line.
+ *  An inline component (`<Pill>`) continues the paragraph. */
+function startsBlock(t: string): boolean {
+  if (/^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\||```|~~~)/.test(t)) return true;
+  return t.startsWith("<") && !INLINE_TAG_RE.test(t);
 }
 
 /**
- * Classify a page's lines. Frontmatter: `description` (and its block-scalar
- * continuation) is linted, `status_note` is a home, the rest is neither. Body:
- * fences, blockquotes and the three history blocks are exempt; `<StatusRows>`,
- * a `**Status:**` paragraph and a PR-ledger table are homes; every other line
+ * Classify a page's lines. Frontmatter: `description` and `status_note`, each
+ * with its indented continuation lines (a quoted, plain or block scalar, blank
+ * lines inside a block scalar included), are a linted unit and a home unit;
+ * the rest is neither. Body: fences, comments, blockquotes (with a lazy
+ * continuation line) and the three history blocks are exempt; `<StatusRows>`,
+ * a `**Status**` paragraph and a PR-ledger table are homes; every other line
  * is linted.
  */
 export function stateLineRoles(content: string): LineRoles {
-  const lines = content.split("\n");
-  const body = frontmatterEndLine(lines);
-  const fenced = fencedLineMask(lines);
-  const linted: number[] = [];
-  const home: number[] = [];
+  const raw = content.replace(/\r\n/g, "\n").split("\n");
+  const body = frontmatterEndLine(raw);
+  const fenced = fencedLineMask(raw);
+  const lines = maskComments(raw, fenced, body);
+  const linted: Unit[] = [];
+  const home: Unit[] = [];
 
-  // Frontmatter keys, with an indented continuation for a block scalar.
   if (body > 0) {
     for (let i = 1; i < body - 1; i++) {
-      const m = /^(description|status_note):\s*(.*)$/.exec(lines[i]!);
+      const m = /^(description|status_note):/.exec(lines[i]!);
       if (!m) continue;
-      const into = m[1] === "description" ? linted : home;
-      into.push(i);
-      if (/^[>|][+-]?\s*$/.test(m[2]!.trim())) {
-        for (let k = i + 1; k < body - 1 && /^\s+\S/.test(lines[k]!); k++) into.push(k);
-      }
+      const unit = [i];
+      for (let k = i + 1; k < body - 1 && (lines[k]!.trim() === "" || /^\s/.test(lines[k]!)); k++) unit.push(k);
+      while (unit.length > 1 && lines[unit.at(-1)!]!.trim() === "") unit.pop();
+      (m[1] === "description" ? linted : home).push({ lines: unit });
+      i = unit.at(-1)!;
     }
   }
 
-  const depth = new Map<string, number>();
-  const inside = (names: readonly string[]) => names.some((n) => (depth.get(n) ?? 0) > 0);
+  const tracked = trackedLines(lines, fenced, body);
+  const tables = tableRows(lines, fenced, body);
   let statusPara = false;
   let ledger = false;
+  let quote = false;
+  const reset = () => {
+    statusPara = false;
+    ledger = false;
+    quote = false;
+  };
   for (let i = body; i < lines.length; i++) {
     if (fenced[i]) {
-      statusPara = false;
-      ledger = false;
+      reset();
       continue;
     }
-    const line = lines[i]!;
-    const t = line.trim();
+    const role = tracked.get(i);
+    if (role) {
+      reset();
+      if (role === "home") home.push({ lines: [i] });
+      continue;
+    }
+    const t = lines[i]!.trim();
     if (t === "") {
-      statusPara = false;
-      ledger = false;
+      reset();
       continue;
     }
-
-    // Component open/close lines of the tracked blocks.
-    let tagLine: string | null = null;
-    const open = TAG_OPEN_RE.exec(t);
-    if (open && TRACKED_BLOCKS.includes(open[1]!)) {
-      const name = open[1]!;
-      tagLine = name;
-      const closesHere = /\/>\s*$/.test(t) || t.includes(`</${name}>`);
-      if (!closesHere) depth.set(name, (depth.get(name) ?? 0) + 1);
-    } else {
-      const close = /^<\/([A-Za-z][A-Za-z0-9]*)>/.exec(t);
-      if (close && (depth.get(close[1]!) ?? 0) > 0) {
-        tagLine = close[1]!;
-        depth.set(close[1]!, depth.get(close[1]!)! - 1);
-      }
-    }
-    if (tagLine === HOME_BLOCK || inside([HOME_BLOCK])) {
-      home.push(i);
+    if (QUOTE_RE.test(t)) {
+      reset();
+      quote = true;
       continue;
     }
-    if (tagLine !== null || inside(HISTORY_BLOCKS)) continue;
-    if (t.startsWith(">")) continue;
+    if (quote) {
+      if (!startsBlock(t)) continue; // a lazy continuation stays in the quote
+      quote = false;
+    }
 
-    // A `**Status:**` paragraph runs to the next blank line or block start.
+    // A `**Status**` paragraph runs to the next blank line or block start.
     if (STATUS_PARA_RE.test(t)) statusPara = true;
-    else if (statusPara && /^(?:[-*+]\s|\d+[.)]\s|#|<|\|)/.test(t)) statusPara = false;
+    else if (statusPara && startsBlock(t)) statusPara = false;
     if (statusPara) {
-      home.push(i);
+      home.push({ lines: [i] });
       continue;
     }
 
-    // A pipe table whose nearest non-blank line above is a PR-ledger label.
-    if (t.startsWith("|")) {
-      if (!ledger) {
+    // A table whose nearest non-blank line above is a PR-ledger label.
+    const tableStart = tables.get(i);
+    if (tableStart !== undefined) {
+      if (tableStart === i) {
         let j = i - 1;
         while (j >= body && lines[j]!.trim() === "") j--;
-        const prev = j >= body ? lines[j]!.trim() : "";
-        ledger =
-          !prev.startsWith("|") &&
-          LEDGER_LABEL_RE.test(prev) &&
-          (prev.startsWith("#") || prev.startsWith("**") || prev.endsWith(":"));
+        ledger = j >= body && isLedgerLabel(lines[j]!);
       }
       if (ledger) {
-        home.push(i);
+        home.push({ lines: [i], row: true });
         continue;
       }
-    } else ledger = false;
-
-    linted.push(i);
+      linted.push({ lines: [i], row: true });
+      continue;
+    }
+    ledger = false;
+    linted.push({ lines: [i] });
   }
-  return { linted, home };
+  return { linted, home, lines };
 }
 
-interface Match {
+/**
+ * Where each clause ends, as `[start, end)` spans: at `·`, `;`, or a `.`/`!`/`?`
+ * followed by whitespace or the end. Not inside a matched `[...]` (a link text,
+ * a wikilink), and not at a date's own period (`13.10. merget`, `12. oktober`).
+ * A table row is one clause. Not `trackers/jira.ts`'s `clauseBoundaries`, which
+ * splits a table row by cell and a date at its period, nor `lint-drift.ts`'s
+ * leading-clause regex.
+ */
+export function stateClauses(text: string, row = false): [number, number][] {
+  if (row) return [[0, text.length]];
+  const matched = new Set<number>();
+  const open: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "[") open.push(i);
+    else if (text[i] === "]" && open.length > 0) matched.add(open.pop()!);
+  }
+  const out: [number, number][] = [];
+  let from = 0;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "[") {
+      if (matched.has(i)) depth++;
+      continue;
+    }
+    if (ch === "]") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth > 0) continue;
+    let end = ch === "·" || ch === ";";
+    if (!end && (ch === "." || ch === "!" || ch === "?") && (i + 1 === text.length || /\s/.test(text[i + 1]!))) {
+      const before = text.slice(Math.max(0, i - 12), i);
+      const dateDot = ch === "." && /(?<![\d.])\d{1,2}\.\d{1,2}$/.test(before);
+      const dayDot = ch === "." && /(?<![\d.])\d{1,3}$/.test(before) && new RegExp(`^\\s+(?:${MONTHS})(?![\\p{L}])`, "iu").test(text.slice(i + 1));
+      end = !dateDot && !dayDot;
+    }
+    if (end) {
+      out.push([from, i]);
+      from = i + 1;
+    }
+  }
+  out.push([from, text.length]);
+  return out;
+}
+
+interface Hit {
   text: string;
   start: number;
+  /** The key a key or bare-number hit names; `null` for an ambiguous number. */
+  key?: string | null;
 }
 
-function allMatches(re: RegExp | null, text: string): Match[] {
+function allMatches(re: RegExp | null, text: string): Hit[] {
   if (!re) return [];
   re.lastIndex = 0;
   return [...text.matchAll(re)].map((m) => ({ text: m[0], start: m.index! }));
 }
 
+/** Link destinations and wikilinks blanked, for the PR-reference scan. */
+function maskLinks(text: string): string {
+  return text.replace(/\[\[[^\]\n]*\]\]/g, blank).replace(/\]\(([^)\n]*)\)/g, (m) => "](" + blank(m.slice(2, -1)) + ")");
+}
+
+/** Character gap between two hits (0 when they overlap). */
+function gap(a: Hit, b: Hit): number {
+  const aEnd = a.start + a.text.length;
+  const bEnd = b.start + b.text.length;
+  return b.start >= aEnd ? b.start - aEnd : a.start >= bEnd ? a.start - bEnd : 0;
+}
+
+const nearest = <T extends Hit>(to: Hit, hits: readonly T[]): T => hits.reduce((x, y) => (gap(to, y) < gap(to, x) ? y : x));
+
 /** `"a", "b"` quoted the reader's way. */
 const quoted = (xs: readonly string[]) => xs.map((x) => `«${x}»`).join(", ");
 
+/** A unit's text — its lines joined by one space — and the line of an offset. */
+function unitText(lines: readonly string[], unit: Unit): { text: string; lineAt: (pos: number) => number } {
+  const parts = unit.lines.map((i) => maskLineCodeSpans(lines[i]!));
+  const starts: number[] = [];
+  let off = 0;
+  for (const p of parts) {
+    starts.push(off);
+    off += p.length + 1;
+  }
+  return {
+    text: parts.join(" "),
+    lineAt: (pos) => {
+      let k = 0;
+      while (k + 1 < starts.length && starts[k + 1]! <= pos) k++;
+      return unit.lines[k]!;
+    },
+  };
+}
+
+const inClause = (hits: readonly Hit[], [s, e]: [number, number]) => hits.filter((h) => h.start >= s && h.start < e);
+
 /**
- * Run both state checks over the live report pages in `pages`. `owners` maps
- * every key some page in the wiki owns to the pages that own it (built over
- * every page, live or not, since an owner is any page whose `owns:` lists it).
- * `trackerProjects` is the union of the wiki's tracker projects; empty ⇒ any
- * Jira-shaped key.
+ * Run the state checks over the live report pages in `pages`. `owners` maps
+ * every key some page in the wiki owns to the pages that own it. `trackerProjects`
+ * is the union of the wiki's tracker projects; empty ⇒ any Jira-shaped key.
  */
 export function checkState(
   pages: readonly StatePage[],
@@ -239,69 +574,92 @@ export function checkState(
 ): LintFinding[] {
   const JIRA_KEY_RE = jiraKeyRe(trackerProjects);
   const phraseRe = wordsRe(cfg.phrases);
-  const taskRe = wordsRe(cfg.taskWords);
-  const ownedNumbers = keyNumbers(owners.keys());
+  const taskRes = taskWordsRes(cfg.taskWords);
   const findings: LintFinding[] = [];
 
   for (const { page, content, fm } of pages) {
-    const lines = content.split("\n");
     const roles = stateLineRoles(content);
-    const own = keyList(fm.owns);
-    const named = keyNumbers([...own, ...(page.jira ?? keyList(fm.jira))]);
-    const namedRe = numbersRe(named.keys());
+    const lines = roles.lines;
+    const own = ownedKeys(readOwns(content));
+    const named = [...new Set([...own, ...stampedKeys(fm.jira)])];
+    const exactRe = exactKeysRe([...owners.keys(), ...named]);
+    const isDenied = (k: string) => trackerProjects.length === 0 && JIRA_KEY_DENYLIST.has(k.slice(0, k.indexOf("-")));
+    const keyHits = (text: string): Hit[] => {
+      const seen = new Set<number>();
+      const out: Hit[] = [];
+      for (const h of allMatches(exactRe, text)) {
+        seen.add(h.start);
+        out.push({ ...h, key: normalizeJiraKey(h.text) });
+      }
+      for (const h of allMatches(JIRA_KEY_RE, text)) {
+        if (seen.has(h.start) || isDenied(h.text)) continue;
+        out.push({ ...h, key: normalizeJiraKey(h.text) });
+      }
+      return out;
+    };
+    const namedNumbers = keyNumbers(named);
+    const namedRe = numbersRe(namedNumbers.keys());
 
     // ── Check 1: state outside its home ────────────────────────────────────
-    for (const i of roles.linted) {
-      const text = maskLineCodeSpans(lines[i]!);
-      const states = [...allMatches(phraseRe, text), ...allMatches(DATE_QUALIFIER_RE, text)].map((m) => m.text);
+    for (const unit of roles.linted) {
+      const { text, lineAt } = unitText(lines, unit);
+      const states = [...allMatches(phraseRe, text), ...allMatches(DATE_QUALIFIER_RE, text)];
       if (states.length === 0) continue;
-      const anchor =
-        allMatches(JIRA_KEY_RE, text)[0]?.text ??
-        allMatches(namedRe, text)[0]?.text ??
-        PR_REF_RE.exec(text)?.[0] ??
-        allMatches(taskRe, text)[0]?.text;
-      if (anchor === undefined) continue;
-      findings.push({
-        check: "state-outside-home",
-        relPath: page.relPath,
-        line: i + 1,
-        message: `State outside its home: ${quoted([...new Set(states)])} beside ${quoted([anchor])} — write state only in <StatusRows>, a **Status:** paragraph, the PR ledger or status_note, and name the key or PR elsewhere (D10)`,
-      });
+      const anchors = [
+        ...keyHits(text),
+        ...allMatches(namedRe, text),
+        ...allMatches(PR_REF_RE, maskLinks(text)),
+        ...taskRes.flatMap((re) => allMatches(re, text)),
+      ];
+      if (anchors.length === 0) continue;
+      const byLine = new Map<number, { states: string[]; anchor: string }>();
+      for (const clause of stateClauses(text, unit.row)) {
+        const cs = inClause(states, clause).sort((a, b) => a.start - b.start);
+        const ca = inClause(anchors, clause);
+        if (cs.length === 0 || ca.length === 0) continue;
+        for (const s of cs) {
+          const line = lineAt(s.start);
+          const entry = byLine.get(line) ?? { states: [], anchor: nearest(s, ca).text };
+          if (!entry.states.includes(s.text)) entry.states.push(s.text);
+          byLine.set(line, entry);
+        }
+      }
+      for (const [line, { states: ss, anchor }] of [...byLine].sort((a, b) => a[0] - b[0])) {
+        findings.push({
+          check: "state-outside-home",
+          relPath: page.relPath,
+          line: line + 1,
+          message: `State outside its home: ${quoted(ss)} beside ${quoted([anchor])} — write state only in <StatusRows>, a **Status:** paragraph, the PR ledger or status_note, and name the key or PR elsewhere (D10)`,
+        });
+      }
     }
 
     // ── Check 2: a home states a key this page does not own ────────────────
     if (owners.size === 0) continue;
     const ownSet = new Set(own);
-    const allNumbers = new Map([...ownedNumbers, ...named]);
+    const allNumbers = keyNumbers([...owners.keys(), ...named]);
     const numRe = numbersRe(allNumbers.keys());
-    for (const i of roles.home) {
-      const text = maskLineCodeSpans(lines[i]!);
-      const reported = new Set<string>();
-      let from = 0;
-      const ends = [...text.matchAll(CLAUSE_END_RE)].map((m) => m.index!).concat(text.length);
-      for (const end of ends) {
-        const clause = text.slice(from, end);
-        from = end + 1;
-        const phrases = allMatches(phraseRe, clause);
-        if (phrases.length === 0) continue;
-        const keys = [
-          ...allMatches(JIRA_KEY_RE, clause).map((m) => ({ key: normalizeJiraKey(m.text), start: m.start, len: m.text.length })),
-          ...allMatches(numRe, clause).map((m) => ({ key: allNumbers.get(m.text)!, start: m.start, len: m.text.length })),
-        ];
-        if (keys.length === 0) continue; // the page's own work
-        for (const p of phrases) {
-          const pEnd = p.start + p.text.length;
-          const gap = (k: { start: number; len: number }) =>
-            k.start >= pEnd ? k.start - pEnd : p.start >= k.start + k.len ? p.start - (k.start + k.len) : 0;
-          const nearest = keys.reduce((a, b) => (gap(b) < gap(a) ? b : a));
-          const ownedBy = owners.get(nearest.key);
-          if (!ownedBy || ownSet.has(nearest.key) || reported.has(nearest.key)) continue;
-          reported.add(nearest.key);
+    const reported = new Set<string>();
+    for (const unit of roles.home) {
+      const { text, lineAt } = unitText(lines, unit);
+      const phrases = allMatches(phraseRe, text);
+      if (phrases.length === 0) continue;
+      const keys = [...keyHits(text), ...allMatches(numRe, text).map((h) => ({ ...h, key: allNumbers.get(h.text) ?? null }))];
+      for (const clause of stateClauses(text, unit.row)) {
+        const ck = inClause(keys, clause);
+        if (ck.length === 0) continue; // the page's own work
+        for (const p of inClause(phrases, clause)) {
+          const key = nearest(p, ck).key;
+          if (!key) continue; // a number two keys share names neither
+          const ownedBy = owners.get(key);
+          const line = lineAt(p.start);
+          if (!ownedBy || ownSet.has(key) || reported.has(`${line}:${key}`)) continue;
+          reported.add(`${line}:${key}`);
           findings.push({
             check: "state-not-owner",
             relPath: page.relPath,
-            line: i + 1,
-            message: `${quoted([p.text])} states ${nearest.key}, which ${ownedBy.join(", ")} owns (owns:) — name the key here and keep its state on the owning page (D10)`,
+            line: line + 1,
+            message: `${quoted([p.text])} states ${key}, which ${ownedBy.join(", ")} owns (owns:) — name the key here and keep its state on the owning page (D10)`,
           });
         }
       }
@@ -310,15 +668,40 @@ export function checkState(
   return findings;
 }
 
-/** The wiki-wide owner map: key → the pages whose `owns:` lists it. */
-export function stateOwners(pages: Iterable<{ relPath: string; fm: Record<string, string | string[]> }>): Map<string, string[]> {
+/** A page that may own keys: its relPath and its raw content. */
+export interface OwnerPage {
+  relPath: string;
+  content: string;
+}
+
+/** The wiki-wide owner map: key → the pages whose `owns:` lists it. The caller
+ *  leaves out reserved and culled pages, which own nothing. */
+export function stateOwners(pages: Iterable<OwnerPage>): Map<string, string[]> {
   const owners = new Map<string, string[]>();
-  for (const { relPath, fm } of pages) {
-    for (const key of keyList(fm.owns)) {
+  for (const { relPath, content } of pages) {
+    for (const key of ownedKeys(readOwns(content))) {
       const list = owners.get(key) ?? [];
       if (!list.includes(relPath)) list.push(relPath);
       owners.set(key, list);
     }
   }
   return owners;
+}
+
+/** `state-owns-unread`: an `owns:` entry that names no key would be dropped in
+ *  silence, so a page meant to own a key would own nothing. */
+export function checkOwnsEntries(pages: Iterable<OwnerPage>): LintFinding[] {
+  const out: LintFinding[] = [];
+  for (const { relPath, content } of pages) {
+    for (const e of readOwns(content)) {
+      if (e.keys.length > 0) continue;
+      out.push({
+        check: "state-owns-unread",
+        relPath,
+        line: e.line + 1,
+        message: `owns: entry ${quoted([e.text])} names no Jira key, so this page owns nothing by it — write the key (owns: [PROJ-123]) or remove the entry`,
+      });
+    }
+  }
+  return out;
 }
