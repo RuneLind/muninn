@@ -183,6 +183,21 @@ test.describe("wiki lint fixes", () => {
     expect(variant.message).toContain("spelled 2 ways");
   });
 
+  test("missing-tldr names every live .mdx plan without the box, and the gate renders its group", async ({ page }) => {
+    // Live = plan_status proposed/ready/in-flight/blocked, or none under plans/.
+    // The two shipped plans and the blog are out of scope.
+    const live = [LEAD, FOLLOW, OVERLAP, HEAL_A, HEAL_B, HEAL_C, PROV_HEAD, PROV_VAR].sort();
+    const { body } = await api(`/api/wiki/linter-findings?wiki=${WIKI}`);
+    const flagged = body.findings.filter((f: any) => f.check === "missing-tldr").map((f: any) => f.relPath).sort();
+    expect(flagged).toEqual(live);
+    expect(body.counts["tldr-no-more"]).toBe(0);
+
+    await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
+    const group = page.locator("#lintList .lint-group").filter({ hasText: "Pages with no In short box" });
+    await expect(group.locator(".lint-count")).toHaveText(String(live.length));
+    await expect(group.locator(".lint-path").first()).toContainText(":7");
+  });
+
   test("POST /api/wiki/lint-proposals creates one row per touched page", async () => {
     const { status, body } = await api(`/api/wiki/lint-proposals?wiki=${WIKI}`, JSON_POST);
     expect(status).toBe(200);
