@@ -542,3 +542,11 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
 - **Not for `article`/`anthropic` re-runs (L5).** Measured 2026-10-06: none of
   the 44 stored `article-summaries` + `anthropic-summaries` documents keeps its
   source text, so there is nothing to regenerate from.
+
+## Capture jobs (module overview)
+
+<!-- moved out of the root CLAUDE.md by /doctor on 2026-10-13 -->
+
+Path: `src/summaries/summarizer-shared.ts`
+
+Shared seam for the capture verticals — youtube / vimeo / tiktok / x-video (the four VIDEO ones) plus x-article / anthropic / article (the three TEXT ones; `article` is pasted text, ingested into `article-summaries`). Every vertical's system prompt is a PURE BUILDER its run calls (`src/<vertical>/prompt.ts`, and `src/video/short-video-prompt.ts` for the TikTok/X-video pair, which run ONE job; the four video verticals build their user prompt too — the text ones send the pasted body), and those same four have their post-model tail as ONE function a re-run must call (`finish…Summary`); `/summaries/prompts` shows what every source × kind combination sends, composed by those same builders. **A stored document can be summarized AGAIN from its own `## Transcript` appendix** — `POST /api/summaries/rerun` (`src/dashboard/routes/summaries-rerun.ts`, the `↻ Re-run ▾` menu in the `/summaries` doc panel): it reads the RAW source file (`?raw=1`, huginn #131 — the document JSON is a cleaned copy that shrinks a little on every pass), splits it with the shared `src/summaries/transcript-split.ts`, runs the vertical's own builders and tail in the vertical's own job, and RE-SENDS every frontmatter field with only `summary_kind` changed, `title` and `category` pinned to the stored document — huginn's ingest takes no document id, so a dropped field is an erased field and a differing `url` forks a `(2)` sibling. No download, no source draft, and `full: true` is a stated 501. Full detail, rules and traps: `src/summaries/CLAUDE.md`.
