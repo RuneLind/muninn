@@ -75,6 +75,8 @@ export type FlatTest = {
   outcome: string;
   /** The last `test.skip(…, reason)` description, "" when it gave none. */
   skipReason: string;
+  /** False for a test Playwright skipped because an earlier one in its serial group or `beforeAll` scope failed. */
+  skipAnnotated: boolean;
 };
 
 /** One row per (spec, project); `title` is the describe chain plus the spec title. */
@@ -83,13 +85,15 @@ export function flatten(report: JsonReport): FlatTest[] {
   const walk = (suite: JsonSuite, chain: string[]) => {
     for (const spec of suite.specs ?? []) {
       for (const t of spec.tests) {
+        const skips = (t.annotations ?? []).filter((a) => a.type === "skip");
         out.push({
           id: `${spec.id}:${t.projectName}`,
           file: spec.file,
           title: [spec.file, ...chain, spec.title].join(" › "),
           results: t.results,
           outcome: t.status,
-          skipReason: (t.annotations ?? []).filter((a) => a.type === "skip").at(-1)?.description ?? "",
+          skipReason: skips.at(-1)?.description ?? "",
+          skipAnnotated: skips.length > 0,
         });
       }
     }
@@ -106,9 +110,11 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const problems: string[] = [];
   const ranTests = flatten(merged);
   const ranById = new Map(ranTests.map((t) => [t.id, t]));
-  // A failing serial test or a throwing beforeAll marks the rest of its file
-  // skipped. That is the shard's red, reported by the job; blaming each of
-  // those tests as a new skip would bury the failure under the wrong cause.
+  // A failing serial test or a throwing beforeAll skips the rest of its serial
+  // group or hook scope, with no skip annotation. That is the shard's red,
+  // reported by the job; blaming each of those tests as a new skip would bury
+  // the failure under the wrong cause. A `test.skip` in the same file still
+  // counts, so a pinned skip there does not read as "did not skip".
   const failedFiles = new Set(ranTests.filter((t) => t.outcome === "unexpected").map((t) => t.file));
   const skipped: string[] = [];
   let ran = 0;
@@ -122,7 +128,8 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
     // `retries: 0`, so a second result means two shards ran the same test.
     if (r.results.length > 1) problems.push(`ran ${r.results.length} times: ${t.title}`);
     ran++;
-    if (r.outcome === "skipped" && !failedFiles.has(r.file)) skipped.push(skipKey(t.title, r.skipReason));
+    const afterFailure = failedFiles.has(r.file) && !r.skipAnnotated;
+    if (r.outcome === "skipped" && !afterFailure) skipped.push(skipKey(t.title, r.skipReason));
   }
   // merge-reports gives the second copy of a test two shards both ran a salted
   // id, so a duplicate lands here rather than in the count above.

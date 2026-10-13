@@ -362,9 +362,10 @@ jobs:
   # every shard green. This job compares the merged report with
   # `playwright test --list` — every test ran exactly once — and fails on any
   # skip not named in `e2e/ci-expected-skips.txt`, since a spec that skips
-  # itself green is this suite's worst failure. Each skip is pinned with its reason. The merged HTML report and the
-  # JSON (`bun scripts/e2e-shards.ts refresh e2e-results.json` rewrites the
-  # timing table from it) are uploaded on every run.
+  # itself green is this suite's worst failure. Each skip is pinned with its
+  # reason. The merged HTML report and the JSON are uploaded on every run;
+  # `bun scripts/e2e-shards.ts refresh e2e-results.json` rewrites the timing
+  # table from the JSON.
   e2e:
     needs: e2e-shard
     if: ${{ !cancelled() }}

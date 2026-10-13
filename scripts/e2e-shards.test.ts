@@ -73,6 +73,33 @@ describe("flatten", () => {
   });
 });
 
+describe("flatten: skip reason", () => {
+  const withAnnotations = (annotations: { type: string; description?: string }[]): JsonReport => ({
+    suites: [
+      {
+        title: "x.spec.ts",
+        file: "x.spec.ts",
+        specs: [{ id: "1", title: "t", file: "x.spec.ts", tests: [{ projectName: "chromium", status: "skipped", results: skip, annotations }] }],
+      },
+    ],
+  });
+
+  test("reads the skip annotation, not another type", () => {
+    const [t] = flatten(withAnnotations([{ type: "skip", description: "one bot" }, { type: "issue", description: "#12" }]));
+    expect(t!.skipReason).toBe("one bot");
+  });
+
+  test("takes the last skip: the one that fired", () => {
+    const [t] = flatten(withAnnotations([{ type: "skip", description: "first" }, { type: "skip", description: "second" }]));
+    expect(t!.skipReason).toBe("second");
+  });
+
+  test("a bare test.skip() is annotated with no reason; an after-failure skip is not annotated", () => {
+    expect(flatten(withAnnotations([{ type: "skip" }]))[0]).toMatchObject({ skipReason: "", skipAnnotated: true });
+    expect(flatten(withAnnotations([]))[0]).toMatchObject({ skipReason: "", skipAnnotated: false });
+  });
+});
+
 describe("check", () => {
   const listed = report(spec("1", "x.spec.ts", "one", []), spec("2", "y.spec.ts", "two", []));
 
@@ -139,6 +166,22 @@ describe("check", () => {
       spec("3", "y.spec.ts", "three", pass),
     );
     expect(check(three, merged, [])).toEqual({ problems: [], ran: 3, skipped: [] });
+  });
+
+  test("a pinned skip in a file that also failed still matches its pin", () => {
+    // jira-card: one test fails, the six opt-in skips still skip with their
+    // reason and must not read as "expected to skip, did not".
+    const three = report(spec("1", "x.spec.ts", "one", []), spec("2", "x.spec.ts", "two", []), spec("3", "x.spec.ts", "three", []));
+    const merged = report(
+      spec("1", "x.spec.ts", "one", [{ status: "failed", duration: 10 }], "unexpected"),
+      spec("2", "x.spec.ts", "two", skip, "skipped", "one bot"),
+      spec("3", "x.spec.ts", "three", skip, "skipped"),
+    );
+    expect(check(three, merged, ["x.spec.ts › group › two | one bot"])).toEqual({
+      problems: [],
+      ran: 3,
+      skipped: ["x.spec.ts › group › two | one bot"],
+    });
   });
 
   test("a result for a test --list does not know is a problem", () => {
