@@ -29,6 +29,7 @@ import { parseCullLabels, type CullLabels } from "../dashboard/views/components/
 import { parseQuestionLanguage, type QuestionLanguage } from "../format/question-labels.ts";
 import { parseDefaultLens, parseIdLabels, type IdLabels, type StoredLens } from "../format/reader-lens.ts";
 import { parseRoleKeys } from "../format/lane-roles.ts";
+import { parseStatePhrases, type StatePhrasesConfig } from "../format/state-phrases.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -218,6 +219,14 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   roleKeys?: string[];
+  /**
+   * The state lint's words (`statePhrases`, living-facts D10): `{phrases,
+   * taskWords}`. Null ⇒ the two state checks do not run. A malformed block
+   * warns and is null; a bad entry warns and is dropped
+   * ({@link parseStatePhrases}). Optional so hand-built configs stay valid;
+   * `readWikiReaderConfig` always sets it.
+   */
+  statePhrases?: StatePhrasesConfig | null;
 }
 
 /**
@@ -2046,6 +2055,10 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
   for (const reason of roleKeys.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "roleKeys", reason });
   }
+  const statePhrases = parseStatePhrases(obj.statePhrases);
+  for (const reason of statePhrases.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "statePhrases", reason });
+  }
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
   }
@@ -2074,6 +2087,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     idLabels: idLabels.labels,
     defaultLens: defaultLens.lens,
     roleKeys: roleKeys.keys,
+    statePhrases: statePhrases.config,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

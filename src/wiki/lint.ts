@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Twenty-two check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Twenty-four check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -72,6 +72,11 @@
  *                      case status (`hold`, `wait`, `wrong`, `none`, `ok`), or
  *                      that has no `key:label` shape (the board ignores it
  *                      and shows the status), and a key given twice (D42).
+ * 14. state-outside-home / state-not-owner — volatile state (a PR's, a
+ *                      release's, a Jira issue's) written outside its home on a
+ *                      live report page, and a home stating a key another page
+ *                      `owns:` (D10). Off unless `.wiki-reader.json` declares
+ *                      `statePhrases`. Rules: `lint-state.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -101,8 +106,9 @@ import {
 } from "../dashboard/views/components/wiki-integrate.ts";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
-import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
+import { checkDrift, driftContext, DRIFT_LINT_CHECKS, isLiveReportPage } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
+import { checkState, STATE_LINT_CHECKS, stateOwners, type StatePage } from "./lint-state.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
   closeNearMisses,
@@ -132,6 +138,7 @@ export const LINT_CHECKS = [
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
   ...REPORT_TOP_LINT_CHECKS,
+  ...STATE_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -915,6 +922,11 @@ export async function lintWiki(
   const nowMs = now();
   const findings: LintFinding[] = [];
   const drift = driftContext(nowMs, index.readerConfig?.language);
+  // Check 14 reads every page's `owns:` before it can judge one, so it runs
+  // after the loop over what the loop collected; nothing is kept without a block.
+  const statePhrases = index.readerConfig?.statePhrases ?? null;
+  const stateFrontmatter: { relPath: string; fm: Record<string, string | string[]> }[] = [];
+  const statePages: StatePage[] = [];
 
   for (const page of index.pages) {
     if (page.type === "explainer") continue; // no frontmatter, no links
@@ -953,6 +965,18 @@ export async function lintWiki(
       // Check 11's Tldr half — live report pages and `.mdx` reference pages.
       findings.push(...checkTldr(page, content));
     }
+    if (statePhrases) {
+      const fm = parseFrontmatter(content);
+      stateFrontmatter.push({ relPath: page.relPath, fm });
+      if (!reservedBasename(page.relPath) && !page.culled && isLiveReportPage(page.relPath, fm, page.plan_status)) {
+        statePages.push({ page, content, fm });
+      }
+    }
+  }
+  // Check 14 — live report pages, against the wiki-wide owner map.
+  if (statePhrases) {
+    const projects = (index.readerConfig?.trackers ?? []).flatMap((t) => t.projects);
+    findings.push(...checkState(statePages, stateOwners(stateFrontmatter), statePhrases, projects));
   }
 
   findings.push(...checkOrphans(index));
