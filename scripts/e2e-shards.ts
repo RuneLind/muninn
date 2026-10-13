@@ -20,7 +20,7 @@
  * failure), and the set of skipped tests, each with its reason, equals
  * `e2e/ci-expected-skips.txt`.
  * The skip half exists because this suite's worst failure is a spec that skips
- * itself green when its fixture is missing (root CLAUDE.md, Browser checks).
+ * itself green when its fixture is missing (e2e/CLAUDE.md).
  */
 import { Glob } from "bun";
 import path from "node:path";

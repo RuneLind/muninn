@@ -1107,7 +1107,7 @@ operator auditing themselves on their own feed.
   to `admin` on their first login. The linking TABLE is safe (it keys on `oid`
   and mints a collision id rather than adopting the account), but the role
   allowlist has no such protection. **Prefer `oid` entries** — the boot refusal
-  now says so, and so does the env-var row in the root `CLAUDE.md`.
+  now says so, and so does the env-var row in the `muninn-env` skill.
 - **A revoked token keeps working for up to `INTROSPECTION_CACHE_MAX_MS`** (5
   minutes). That is the price of not asking Texas once per request; the socket's
   own cap is the token's `exp`, which the cache never extends past.
