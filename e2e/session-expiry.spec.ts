@@ -58,6 +58,9 @@ interface Opts {
   /** `GET /chat/events` answers this status permanently. 403 is the measured
    *  case: role `user` on `/api/events`, or a zone denial after a role change. */
   eventsStatus?: number;
+  /** Install `page.clock` before the page loads, so the test drives the page's
+   *  retry timers with {@link advance} instead of waiting them out. */
+  clock?: boolean;
 }
 
 /** Requests the page made, per stubbed route. Reset by `open()`, and NOT reset
@@ -77,6 +80,28 @@ async function open(page: Page, opts: Opts): Promise<void> {
   hits.me = 0;
   hits.sockets = 0;
   eventsStatusNow = opts.eventsStatus;
+
+  if (opts.clock) {
+    // Before `goto`: the RefusedSocket's 10 ms close, the ladder's rungs and the
+    // SSE reconnect must all be fake timers from the first one on.
+    await page.clock.install();
+    // Count the page's fetches still unanswered, so `settle` can tell when a
+    // `/chat/me` probe has answered. Ours is the FIRST callback on the promise,
+    // so the page's own chain on it (classify → act → schedule) runs in the same
+    // microtask checkpoint, before the next `page.evaluate` can read zero.
+    await page.addInitScript(() => {
+      const w = window as unknown as { __fetchesInFlight: number };
+      w.__fetchesInFlight = 0;
+      const realFetch = window.fetch;
+      window.fetch = ((...args: Parameters<typeof fetch>) => {
+        w.__fetchesInFlight += 1;
+        const p = realFetch.apply(window, args);
+        const done = () => { w.__fetchesInFlight -= 1; };
+        p.then(done, done);
+        return p;
+      }) as typeof fetch;
+    });
+  }
 
   if (opts.refuseUpgrade) {
     await page.addInitScript(() => {
@@ -178,6 +203,29 @@ async function reloaded(page: Page): Promise<boolean> {
 
 const banner = (page: Page) => page.locator("#authExpiredBanner");
 
+/** Wait until every fetch the page started has answered and the page has acted
+ *  on it. Under a fake clock a probe answers in REAL time, so this is the gap
+ *  between two clock steps. */
+async function settle(page: Page): Promise<void> {
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __fetchesInFlight: number }).__fetchesInFlight))
+    .toBe(0);
+}
+
+/**
+ * Advance the page's fake clock by `ms`, one `step` at a time, settling after
+ * each step. One large `runFor` would fire the whole ladder's timers before the
+ * first `/chat/me` probe answered: each rung is scheduled only once its probe
+ * has answered, so the rungs after the first would never be due inside it, and
+ * a negative assertion after it could not fail.
+ */
+async function advance(page: Page, ms: number, step = 250): Promise<void> {
+  for (let done = 0; done < ms; done += step) {
+    await page.clock.runFor(Math.min(step, ms - done));
+    await settle(page);
+  }
+}
+
 test.describe("acceptance 19 — the WebSocket half", () => {
   test("a 4401 close RELOADS when the cached provider is entra", async ({ page }) => {
     await open(page, { provider: "entra", interceptWs: true });
@@ -221,11 +269,11 @@ test.describe("acceptance 19 — a REFUSED HANDSHAKE, which carries no code at a
   });
 
   test("local: it banners, and STOPS retrying", async ({ page }) => {
-    await open(page, { provider: "local", refuseUpgrade: true, expireAfterFirstMe: LOCAL_401 });
+    await open(page, { provider: "local", refuseUpgrade: true, expireAfterFirstMe: LOCAL_401, clock: true });
     await markPage(page);
     await expect(banner(page)).toBeVisible();
     // One construction, not one every two seconds. Two full retry windows.
-    await page.waitForTimeout(4200);
+    await advance(page, 4200);
     expect(await page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts)).toBe(1);
     expect(await reloaded(page)).toBe(false);
   });
@@ -247,7 +295,7 @@ test.describe("acceptance 19 — a PERMANENTLY refused EventSource is terminal",
     let navigations = 0;
     page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations++; });
 
-    await open(page, { provider: "entra", eventsStatus: 403 });
+    await open(page, { provider: "entra", eventsStatus: 403, clock: true });
     // The goto, plus exactly one reload.
     await expect.poll(() => navigations, { timeout: 10_000 }).toBe(2);
 
@@ -255,7 +303,7 @@ test.describe("acceptance 19 — a PERMANENTLY refused EventSource is terminal",
     await expect(banner(page)).toBeVisible();
     const afterReload = hits.events;
     // Two full 3 s poll cycles and then some: neither a reconnect nor a reload.
-    await page.waitForTimeout(7000);
+    await advance(page, 7000);
     expect(hits.events).toBe(afterReload);
     expect(navigations).toBe(2);
   });
@@ -269,14 +317,14 @@ test.describe("acceptance 19 — and a latched channel RECOVERS", () => {
     // /chat/events failure killed the stream for the life of the tab and left a
     // "session expired" bar over a session that was fine. Before the latch
     // existed the page recovered in 3 s.
-    await open(page, { provider: "local", eventsStatus: 403 });
+    await open(page, { provider: "local", eventsStatus: 403, clock: true });
     await expect(banner(page)).toBeVisible();
     await markPage(page);
 
     // The stream stays dead while the refusal stands — that half must not
     // regress either, and it is what the latch is FOR.
     const whileRefused = hits.events;
-    await page.waitForTimeout(3500);
+    await advance(page, 3500);
     expect(hits.events).toBe(whileRefused);
 
     // The server comes back.
@@ -301,7 +349,7 @@ test.describe("acceptance 19 — and a latched channel RECOVERS", () => {
     // A released latch has to actually restore the 3 s ladder. Left spent, the
     // fresh stream's first ordinary error takes the terminal branch and the
     // channel is dead again with nothing on screen.
-    await open(page, { provider: "local", eventsStatus: 403 });
+    await open(page, { provider: "local", eventsStatus: 403, clock: true });
     await expect(banner(page)).toBeVisible();
 
     eventsStatusNow = undefined;
@@ -314,8 +362,15 @@ test.describe("acceptance 19 — and a latched channel RECOVERS", () => {
     const afterRecovery = hits.events;
 
     // The stub answers 200 and closes immediately, so the stream ends and the
-    // 3 s reconnect ladder is what produces the next hit.
-    await expect.poll(() => hits.events, { timeout: 12_000 }).toBeGreaterThan(afterRecovery);
+    // 3 s reconnect ladder is what produces the next hit. The stream's end is
+    // not a fetch `settle` can see, so the clock moves inside the poll until it
+    // has.
+    await expect
+      .poll(async () => {
+        await page.clock.runFor(500);
+        return hits.events;
+      }, { timeout: 10_000 })
+      .toBeGreaterThan(afterRecovery);
   });
 });
 
@@ -325,21 +380,20 @@ test.describe("acceptance 19 — a refused UPGRADE whose session is ALIVE is bou
   // "alive, and still refused" retried every 2 s for as long as the tab stayed
   // open, silently — a refusal that is not an expiry gets no banner.
   test("it backs off, gives up, and SAYS so — without claiming an expiry", async ({ page }) => {
-    // The ladder is ~12 s of wall clock by construction, plus a /chat/me probe
-    // per rung; the default 30 s budget is too tight to be honest about.
-    test.setTimeout(60_000);
-
     // NB no `expireAfterFirstMe`: /chat/me keeps answering 200, which is exactly
     // the state that made this unbounded.
-    await open(page, { provider: "local", refuseUpgrade: true });
+    await open(page, { provider: "local", refuseUpgrade: true, clock: true });
     await markPage(page);
 
     const attempts = () => page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts);
     const expected = 1 + WS_PREOPEN_BACKOFF_MS.length;
 
-    // It stops at the cap and stays there — two more full rungs of quiet.
-    await expect.poll(attempts, { timeout: 45_000 }).toBe(expected);
-    await page.waitForTimeout(8000);
+    // The ladder is 2 + 4 + 6 s plus a 10 ms close per attempt. It stops at the
+    // cap and stays there — two more full rungs of quiet.
+    const ladderMs = WS_PREOPEN_BACKOFF_MS.reduce((a, b) => a + b, 0);
+    await advance(page, ladderMs + 1000);
+    expect(await attempts()).toBe(expected);
+    await advance(page, 8000);
     expect(await attempts()).toBe(expected);
 
     // …and the giving-up is VISIBLE, in its own bar.
@@ -374,14 +428,14 @@ test.describe("acceptance 19 — an OUTAGE is not a refusal, and is not bounded"
   // "the chat connection was refused" bar, while muninn was coming back up.
 
   test("a /chat/me that cannot be reached keeps retrying past the ladder's length", async ({ page }) => {
-    test.setTimeout(90_000);
-    await open(page, { provider: "local", refuseUpgrade: true, abortAfterFirstMe: true });
+    await open(page, { provider: "local", refuseUpgrade: true, abortAfterFirstMe: true, clock: true });
     await markPage(page);
 
     const attempts = () => page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts);
     // The ladder would have stopped at 4. Unbounded 2 s retries pass that within
-    // seconds and keep going.
-    await expect.poll(attempts, { timeout: 60_000 }).toBeGreaterThan(1 + WS_PREOPEN_BACKOFF_MS.length + 3);
+    // seconds and keep going: 20 s holds nine of them.
+    await advance(page, 20_000);
+    expect(await attempts()).toBeGreaterThan(1 + WS_PREOPEN_BACKOFF_MS.length + 3);
 
     // And it says NOTHING while it does: nothing has expired, and nothing has
     // been refused. Both bars would be a lie about an outage.
@@ -393,12 +447,12 @@ test.describe("acceptance 19 — an OUTAGE is not a refusal, and is not bounded"
   test("…and a 503 from an introspection outage is the same condition", async ({ page }) => {
     // An authenticating instance answers 503 while token introspection is
     // unavailable. That is Texas being down, not this reader's session.
-    test.setTimeout(90_000);
-    await open(page, { provider: "entra", refuseUpgrade: true, meStatusAfterFirst: 503 });
+    await open(page, { provider: "entra", refuseUpgrade: true, meStatusAfterFirst: 503, clock: true });
     await markPage(page);
 
     const attempts = () => page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts);
-    await expect.poll(attempts, { timeout: 60_000 }).toBeGreaterThan(1 + WS_PREOPEN_BACKOFF_MS.length + 3);
+    await advance(page, 20_000);
+    expect(await attempts()).toBeGreaterThan(1 + WS_PREOPEN_BACKOFF_MS.length + 3);
     await expect(page.locator(`#${WS_STALLED_NOTICE_ID}`)).toHaveCount(0);
     await expect(banner(page)).toHaveCount(0);
     // A 503 must not reload either — that is the storm the breaker exists for.
