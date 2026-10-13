@@ -97,24 +97,35 @@ export function fellesOutputHtml(output: string): string {
   );
 }
 
+/** What the status says about a page's published copy: `stale` for a page
+ *  that changed since, `refused` for one the scanner refuses now (so the
+ *  published copy stays older until it is fixed), null otherwise. */
+export type FellesMark = "stale" | "refused" | null;
+
+export const FELLES_STALE_CLASS = "wiki-felles-stale";
+export const FELLES_REFUSED_CLASS = "wiki-felles-refused";
+const FELLES_BTN_TITLE = "Publish this page to the melosys-felles wiki";
+export const FELLES_STALE_TITLE = "Published copy is out of date — this page changed since it was published to melosys-felles";
+export const FELLES_REFUSED_TITLE = "Local copy is refused by the scanner — the published copy is older";
+
+const MARK_CLASS = { stale: FELLES_STALE_CLASS, refused: FELLES_REFUSED_CLASS } as const;
+const MARK_TITLE = { stale: FELLES_STALE_TITLE, refused: FELLES_REFUSED_TITLE } as const;
+
 /** The breadcrumb button. The page's relPath rides on it, as Copy path's does,
  *  so a click can never act on a page a navigation has since replaced. */
-export function fellesBtnHtml(relPath: string, stale = false): string {
+export function fellesBtnHtml(relPath: string, mark: FellesMark = null): string {
   return (
-    `<button class="wiki-bc-share${stale ? " " + FELLES_STALE_CLASS : ""}" id="${FELLES_BTN_ID}" type="button" ` +
-    `data-felles-relpath="${esc(relPath)}" title="${stale ? FELLES_STALE_TITLE : FELLES_BTN_TITLE}">⇪ Felles</button>`
+    `<button class="wiki-bc-share${mark ? " " + MARK_CLASS[mark] : ""}" id="${FELLES_BTN_ID}" type="button" ` +
+    `data-felles-relpath="${esc(relPath)}" title="${mark ? MARK_TITLE[mark] : FELLES_BTN_TITLE}">⇪ Felles</button>`
   );
 }
 
-export const FELLES_STALE_CLASS = "wiki-felles-stale";
-const FELLES_BTN_TITLE = "Publish this page to the melosys-felles wiki";
-export const FELLES_STALE_TITLE = "Published copy is out of date — this page changed since it was published to melosys-felles";
-
 /** Mark or unmark a rendered ⇪ Felles button, for a status that arrives after
  *  the breadcrumb was drawn. */
-export function setFellesBtnStale(btn: Element, stale: boolean): void {
-  btn.classList.toggle(FELLES_STALE_CLASS, stale);
-  btn.setAttribute("title", stale ? FELLES_STALE_TITLE : FELLES_BTN_TITLE);
+export function setFellesBtnMark(btn: Element, mark: FellesMark): void {
+  btn.classList.toggle(FELLES_STALE_CLASS, mark === "stale");
+  btn.classList.toggle(FELLES_REFUSED_CLASS, mark === "refused");
+  btn.setAttribute("title", mark ? MARK_TITLE[mark] : FELLES_BTN_TITLE);
 }
 
 export function fellesDialogHtml(relPath: string): string {
@@ -192,12 +203,18 @@ export function fellesPublishStyles(): string {
       content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 5px;
       border-radius: 50%; background: var(--status-warning); vertical-align: middle;
     }
+    /* Refused by the scanner: the same dot in the error hue, its own title. */
+    .wiki-bc-share.wiki-felles-refused { border-color: var(--status-error); color: var(--text-primary); }
+    .wiki-bc-share.wiki-felles-refused::after {
+      content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 5px;
+      border-radius: 50%; background: var(--status-error); vertical-align: middle;
+    }
     /* The rail's «Felles: N changed», on its own line under the toolbar. */
     .wiki-felles-sync { display: flex; }
     .wiki-felles-sync[hidden] { display: none; }
     .wiki-felles-sync-btn[data-state="ok"]:not([data-changed="0"]) { color: var(--text-primary); border-color: var(--status-warning); }
     .wiki-felles-sync-btn[data-state="error"] { border-color: var(--status-error); }
-    .wiki-felles-sync-btn[disabled] { cursor: default; }
+    .wiki-felles-sync-btn[aria-disabled="true"] { cursor: default; }
     .wiki-felles-lists { max-height: 45vh; overflow: auto; margin: 8px 0; }
     .wiki-felles-summary { margin: 0 0 6px; color: var(--text-secondary); }
     .wiki-felles-section h3 { margin: 10px 0 4px; font-size: 12.5px; font-weight: 600; }
@@ -209,6 +226,9 @@ export function fellesPublishStyles(): string {
       margin: 2px 0 0; padding-left: 16px; color: var(--text-secondary);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
     }
+    .wiki-felles-self { font-family: inherit; font-style: italic; }
+    .wiki-felles-refresh { margin: 6px 0 0; color: var(--text-primary); padding-left: 8px; border-left: 3px solid var(--status-error); }
+    .wiki-felles-refresh[hidden] { display: none; }
     .wiki-felles-masked { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
     .wiki-felles-warn { color: var(--text-secondary); font-size: 11.5px; border-left: 3px solid var(--status-warning); padding-left: 6px; margin-top: 2px; }
   `;
@@ -220,7 +240,8 @@ export interface OpenFellesOptions {
   bin: string;
   root: string;
   bucket?: string;
-  /** Called after every completed run, so the sync status can refresh. */
+  /** Called after a run that could have changed the bucket — one that ran (or
+   *  timed out) and was not a dry run — so the sync status can refresh. */
   onRun?: () => void;
 }
 
@@ -268,6 +289,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
   // then does the confirm row offer the real delete. Any other run hides it.
   async function run(action: FellesAction, dryRun: boolean): Promise<void> {
     if (running) return;
+    let couldChangeBucket = false;
     running = true;
     runButtons.forEach((b) => (b.disabled = true));
     confirmRow.hidden = true;
@@ -283,6 +305,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
       const data = (await res.json().catch(() => null)) as
         | { exitCode?: number; output?: string; error?: string }
         | null;
+      couldChangeBucket = !dryRun && ((res.ok && typeof data?.exitCode === "number") || res.status === 504);
       if (res.ok && data && typeof data.exitCode === "number") {
         const line = fellesOutcomeLine(data.exitCode, dryRun, action);
         setStatus(line.text, line.ok ? "ok" : "err");
@@ -299,7 +322,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     } finally {
       running = false;
       runButtons.forEach((b) => (b.disabled = false));
-      opts.onRun?.();
+      if (couldChangeBucket) opts.onRun?.();
     }
   }
 
@@ -365,18 +388,21 @@ export interface FellesSyncStatus {
     warnings: string[];
   }[];
   orphans: { path: string; masked: boolean }[];
+  maybeOrphans: { path: string; masked: boolean }[];
   changed: number;
   checkedAt?: number;
 }
 
 export type FellesChipState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ok"; changed: number };
 
-/** The rail chip. Loading is neutral and inert; a failure says so in a few
- *  words (the reason is in the title) and a click retries. */
+/** The rail chip. Loading is neutral and inert — `aria-disabled`, not
+ *  `disabled`, since a disabled button drops keyboard focus to BODY mid-retry;
+ *  a failure says so in a few words (the reason is in the title) and a click
+ *  retries. */
 export function fellesSyncChipHtml(state: FellesChipState): string {
   const base = `class="wiki-tool-btn wiki-felles-sync-btn" id="${FELLES_SYNC_BTN_ID}" type="button"`;
   if (state.kind === "loading") {
-    return `<button ${base} data-state="loading" disabled title="Checking melosys-felles for changed pages">Felles: checking…</button>`;
+    return `<button ${base} data-state="loading" aria-disabled="true" title="Checking melosys-felles for changed pages">Felles: checking…</button>`;
   }
   if (state.kind === "error") {
     return `<button ${base} data-state="error" title="${esc(state.message)} — click to try again">Felles: status failed</button>`;
@@ -392,7 +418,7 @@ export function fellesStatusKey(relPath: string): string {
   return relPath.normalize("NFC");
 }
 
-/** relPath → state, for the stale marker. Masked paths name no page. */
+/** relPath → state, for the ⇪ Felles marker. Masked paths name no page. */
 export function fellesStateMap(status: FellesSyncStatus): Map<string, FellesSyncState> {
   const map = new Map<string, FellesSyncState>();
   for (const p of status.pages) if (!p.masked) map.set(fellesStatusKey(p.relPath), p.state);
@@ -406,8 +432,18 @@ function pathHtml(relPath: string, masked: boolean, hrefFor: (relPath: string) =
   return `<a href="${esc(hrefFor(relPath))}" data-felles-open="${esc(relPath)}">${esc(relPath)}</a>`;
 }
 
-function listHtml(items: string[]): string {
-  return items.length ? `<ul class="wiki-felles-files">${items.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : "";
+function listHtml(items: string[], first = ""): string {
+  return items.length || first
+    ? `<ul class="wiki-felles-files">${first}${items.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>`
+    : "";
+}
+
+/** A changed page's files without its own path, which the link above them
+ *  already names: «page changed» stands in for it. */
+function changedFilesHtml(relPath: string, files: string[]): string {
+  const own = fellesStatusKey(relPath);
+  const others = files.filter((f) => fellesStatusKey(f) !== own);
+  return listHtml(others, others.length < files.length ? `<li class="wiki-felles-self">page changed</li>` : "");
 }
 
 /** The status lists in the sync dialog: changed pages with their files,
@@ -430,7 +466,7 @@ export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: 
       "changed",
       "Changed since published",
       "",
-      changed.map((p) => `<li>${pathHtml(p.relPath, p.masked, hrefFor)}${listHtml(p.changedFiles)}${warn(p.warnings)}</li>`),
+      changed.map((p) => `<li>${pathHtml(p.relPath, p.masked, hrefFor)}${changedFilesHtml(p.relPath, p.changedFiles)}${warn(p.warnings)}</li>`),
     ) +
     section(
       "refused",
@@ -449,6 +485,12 @@ export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: 
       "Orphans in the bucket",
       "Objects in the bucket that belong to no published page. If one is left over, remove it with the script's <code>--fjern</code>.",
       status.orphans.map((o) => `<li><span class="wiki-felles-masked">${esc(o.path)}</span></li>`),
+    ) +
+    section(
+      "maybe-orphans",
+      "Possibly orphaned in the bucket",
+      "No local page names these, but a tracked page is not up to date (changed, refused or missing locally), and the published copy of such a page may still name them. Check that page before removing anything.",
+      (status.maybeOrphans ?? []).map((o) => `<li><span class="wiki-felles-masked">${esc(o.path)}</span></li>`),
     );
   const unchanged = by("unchanged").length;
   return (
@@ -462,6 +504,7 @@ export function fellesSyncDialogHtml(status: FellesSyncStatus, hrefFor: (relPath
     `<div class="wiki-felles-body"><div class="wiki-felles-head"><span>melosys-felles — sync</span>` +
     `<button type="button" class="wiki-felles-x" data-felles="close" aria-label="Close">✕</button></div>` +
     `<div class="wiki-felles-lists">${fellesSyncListHtml(status, hrefFor)}</div>` +
+    `<p class="wiki-felles-refresh" role="alert" hidden></p>` +
     `<label class="wiki-felles-check"><input type="checkbox" data-felles="ident" checked> ` +
     `Allow NAVident and e-mail (<code>--tillat-ident</code>)</label>` +
     `<div class="wiki-felles-actions">` +
@@ -493,6 +536,34 @@ export function fellesSyncOutcomeLine(exitCode: number, dryRun: boolean): { text
   }
 }
 
+/** The sync's line from its exit code AND the status read after it. The real
+ *  wiki carries a page the scanner refuses for good, and `--synk` exits 1
+ *  whenever the status holds a refused page, so exit 1 alone would make every
+ *  sync read as a failure. It is not one when the status after it shows
+ *  nothing left to publish (for a dry run: nothing would be left) and at least
+ *  one refused page — the refusal is the 1. Anything else keeps the
+ *  exit-code line, red. */
+export function fellesSyncRunOutcome(
+  exitCode: number,
+  dryRun: boolean,
+  after: FellesSyncStatus | null,
+): { text: string; ok: boolean } {
+  if (exitCode === 1 && after) {
+    const refused = after.pages.filter((p) => p.state === "refused").length;
+    // A dry run uploads nothing, so the status after it still counts the
+    // changed pages it would have published.
+    if (refused > 0 && (dryRun || after.changed === 0)) {
+      return dryRun
+        ? {
+            text: `Dry run: all changed pages would be published. ${refused} refused page(s) would not — see Refused. Nothing was uploaded.`,
+            ok: true,
+          }
+        : { text: `All changed pages were published. ${refused} refused page(s) were not — see Refused.`, ok: true };
+    }
+  }
+  return fellesSyncOutcomeLine(exitCode, dryRun);
+}
+
 export interface FellesSyncOptions {
   wiki: string;
   /** The reader's address for a page, for the dialog's links. */
@@ -504,54 +575,80 @@ export interface FellesSyncOptions {
 }
 
 export interface FellesSync {
-  /** Fetch the status (again). Concurrent calls share one request. */
-  load(): Promise<void>;
-  /** Is this page's published copy out of date? False until a status arrived. */
-  isStale(relPath: string): boolean;
+  /** Fetch the default status (`--tillat-ident` on) for the chip and the
+   *  marker. Concurrent calls share one request — unless `afterRun`: a run that
+   *  could have changed the bucket has just ended, so this call starts its own
+   *  request and no answer to an older one is applied after it. */
+  load(opts?: { afterRun?: boolean }): Promise<StatusResult>;
+  /** What the last good status says about this page. Null until one arrived. */
+  markFor(relPath: string): FellesMark;
+}
+
+export type StatusResult = { ok: true; status: FellesSyncStatus } | { ok: false; message: string };
+
+async function requestStatus(wiki: string, allowIdent: boolean): Promise<StatusResult> {
+  try {
+    const res = await fetch(
+      `/api/wiki/felles-status?wiki=${encodeURIComponent(wiki)}&allowIdent=${allowIdent ? "1" : "0"}`,
+      { headers: { [STATUS_HEADER]: "status" } },
+    );
+    const data = (await res.json().catch(() => null)) as (FellesSyncStatus & { error?: string }) | null;
+    if (!res.ok || !data || !Array.isArray(data.pages)) return { ok: false, message: data?.error ?? `HTTP ${res.status}` };
+    return { ok: true, status: data };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Wire the rail chip and its dialog. Call once, on a wiki that offers ⇪ Felles. */
 export function initFellesSync(opts: FellesSyncOptions): FellesSync {
+  // The last GOOD default status: a failed reload leaves it and the markers
+  // standing, and only the chip says the status failed.
   let status: FellesSyncStatus | null = null;
   let states = new Map<string, FellesSyncState>();
-  let loading: Promise<void> | null = null;
-  let dialogRefresh: (() => void) | null = null;
+  // Moves on every `afterRun` load; an answer from an older generation is
+  // returned to its caller but never painted.
+  let generation = 0;
+  let inflight: { gen: number; promise: Promise<StatusResult> } | null = null;
 
   const slot = document.getElementById(FELLES_SYNC_SLOT_ID);
+  // The chip is updated IN PLACE, never re-created, so keyboard focus survives
+  // a retry's loading → answer repaint.
   const paint = (state: FellesChipState) => {
     if (!slot) return;
-    slot.innerHTML = fellesSyncChipHtml(state);
+    const t = document.createElement("template");
+    t.innerHTML = fellesSyncChipHtml(state);
+    const fresh = t.content.firstElementChild!;
+    const btn = slot.querySelector("#" + FELLES_SYNC_BTN_ID);
+    if (!btn) slot.replaceChildren(fresh);
+    else {
+      for (const a of Array.from(btn.attributes)) if (!fresh.hasAttribute(a.name)) btn.removeAttribute(a.name);
+      for (const a of Array.from(fresh.attributes)) btn.setAttribute(a.name, a.value);
+      btn.textContent = fresh.textContent;
+    }
     slot.hidden = false;
   };
 
-  async function fetchStatus(): Promise<void> {
+  function load(o: { afterRun?: boolean } = {}): Promise<StatusResult> {
+    if (o.afterRun) generation++;
+    if (inflight && inflight.gen === generation) return inflight.promise;
+    const gen = generation;
     paint({ kind: "loading" });
-    try {
-      const res = await fetch("/api/wiki/felles-status?wiki=" + encodeURIComponent(opts.wiki), {
-        headers: { [STATUS_HEADER]: "status" },
-      });
-      const data = (await res.json().catch(() => null)) as (FellesSyncStatus & { error?: string }) | null;
-      if (!res.ok || !data || !Array.isArray(data.pages)) {
-        status = null;
-        states = new Map();
-        paint({ kind: "error", message: data?.error ?? `HTTP ${res.status}` });
+    const promise: Promise<StatusResult> = requestStatus(opts.wiki, true).then((r) => {
+      if (inflight?.promise === promise) inflight = null;
+      if (gen !== generation) return r;
+      if (r.ok) {
+        status = r.status;
+        states = fellesStateMap(r.status);
+        paint({ kind: "ok", changed: r.status.changed });
       } else {
-        status = data;
-        states = fellesStateMap(data);
-        paint({ kind: "ok", changed: data.changed });
+        paint({ kind: "error", message: r.message });
       }
-    } catch (err) {
-      status = null;
-      states = new Map();
-      paint({ kind: "error", message: err instanceof Error ? err.message : String(err) });
-    }
-    opts.onStatus();
-    dialogRefresh?.();
-  }
-
-  function load(): Promise<void> {
-    if (!loading) loading = fetchStatus().finally(() => (loading = null));
-    return loading;
+      opts.onStatus();
+      return r;
+    });
+    inflight = { gen, promise };
+    return promise;
   }
 
   slot?.addEventListener("click", (e) => {
@@ -559,53 +656,95 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     if (!btn) return;
     const state = btn.getAttribute("data-state");
     if (state === "error") void load();
-    else if (state === "ok" && status) openDialog();
+    else if (state === "ok" && status) openDialog(status);
   });
 
-  function openDialog(): void {
+  function openDialog(initial: FellesSyncStatus): void {
     document.getElementById(SYNC_DIALOG_ID)?.remove();
     const dialog = document.createElement("dialog");
     dialog.id = SYNC_DIALOG_ID;
     dialog.className = "wiki-felles wiki-felles-sync-dialog";
-    dialog.innerHTML = fellesSyncDialogHtml(status!, opts.hrefFor);
+    dialog.innerHTML = fellesSyncDialogHtml(initial, opts.hrefFor);
     document.body.appendChild(dialog);
     let running = false;
     // Same hold as the page dialog: a run in flight keeps it open.
     dialog.addEventListener("close", () => {
       if (running) dialog.showModal();
-      else {
-        dialog.remove();
-        dialogRefresh = null;
-      }
+      else dialog.remove();
     });
     dialog.addEventListener("cancel", (e) => {
       if (running) e.preventDefault();
     });
     const q = <T extends Element>(sel: string) => dialog.querySelector(sel) as T;
     const ident = q<HTMLInputElement>('[data-felles="ident"]');
+    const lists = q<HTMLElement>(".wiki-felles-lists");
+    const refresh = q<HTMLElement>(".wiki-felles-refresh");
     const statusLine = q<HTMLElement>(".wiki-felles-status");
     const out = q<HTMLElement>(".wiki-felles-out");
     const syncBtn = q<HTMLButtonElement>('[data-felles="sync"]');
-    const runButtons = [q<HTMLButtonElement>('[data-felles="sync-dry"]'), syncBtn, q<HTMLButtonElement>('[data-felles="close"]')];
+    // The checkbox is held with the buttons: a run reads it once, and the
+    // status after the run is read with the same flag.
+    const holdDuringRun = [q<HTMLButtonElement>('[data-felles="sync-dry"]'), q<HTMLButtonElement>('[data-felles="close"]'), ident];
     const setStatus = (text: string, kind: "" | "ok" | "err") => {
       statusLine.textContent = text;
       statusLine.className = "wiki-felles-status" + (kind ? " " + kind : "");
     };
-    // A fresh status repaints the lists and the button's count; the run's
-    // result line and output stay.
-    dialogRefresh = () => {
-      if (!status) return;
-      q<HTMLElement>(".wiki-felles-lists").innerHTML = fellesSyncListHtml(status, opts.hrefFor);
-      syncBtn.textContent = `Publish changed (${status.changed})`;
-      if (!running) syncBtn.disabled = status.changed === 0;
+    const setRefresh = (text: string) => {
+      refresh.textContent = text;
+      refresh.hidden = !text;
     };
+
+    // The dialog's own status, read with the checkbox's flag: without
+    // --tillat-ident a page with a NAVident is refused, not changed, so the
+    // chip's count would overstate what Publish changed sends. `viewReady` is
+    // false from the moment the flag or the bucket may have moved until a
+    // status for it arrives; Publish changed stays off meanwhile.
+    let view = initial;
+    let viewReady = true;
+    let viewSeq = 0;
+    const syncEnabled = () => {
+      syncBtn.disabled = running || !viewReady || view.changed === 0;
+    };
+
+    async function reloadView(afterRun: boolean): Promise<FellesSyncStatus | null> {
+      const seq = ++viewSeq;
+      viewReady = false;
+      syncEnabled();
+      const allowIdent = ident.checked;
+      let r: StatusResult;
+      if (afterRun && allowIdent) r = await load({ afterRun: true });
+      else {
+        // After a run the chip refreshes too, with its own default flag.
+        if (afterRun) void load({ afterRun: true });
+        r = await requestStatus(opts.wiki, allowIdent);
+      }
+      if (seq !== viewSeq) return null;
+      if (r.ok) {
+        view = r.status;
+        viewReady = true;
+        lists.innerHTML = fellesSyncListHtml(view, opts.hrefFor);
+        syncBtn.textContent = `Publish changed (${view.changed})`;
+        setRefresh("");
+      } else {
+        setRefresh(`Could not refresh the status: ${r.message}. The lists show the last status; Publish changed stays off until a fresh one arrives.`);
+      }
+      syncEnabled();
+      return r.ok ? r.status : null;
+    }
+
+    ident.addEventListener("change", () => void reloadView(false));
 
     async function run(dryRun: boolean): Promise<void> {
       if (running) return;
       running = true;
-      runButtons.forEach((b) => (b.disabled = true));
+      // Links are inert mid-run: a click would navigate behind the modal.
+      lists.inert = true;
+      holdDuringRun.forEach((b) => (b.disabled = true));
+      syncEnabled();
       setStatus(dryRun ? "Running dry run…" : "Publishing the changed pages… (one upload per file; this can take minutes)", "");
       out.hidden = true;
+      let exitCode: number | null = null;
+      let couldChangeBucket = false;
       try {
         const res = await fetch("/api/wiki/felles-publish", {
           method: "POST",
@@ -613,24 +752,29 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
           body: JSON.stringify({ wiki: opts.wiki, action: "sync", dryRun, allowIdent: ident.checked }),
         });
         const data = (await res.json().catch(() => null)) as { exitCode?: number; output?: string; error?: string } | null;
+        couldChangeBucket = !dryRun && ((res.ok && typeof data?.exitCode === "number") || res.status === 504);
         if (res.ok && data && typeof data.exitCode === "number") {
-          const line = fellesSyncOutcomeLine(data.exitCode, dryRun);
-          setStatus(line.text, line.ok ? "ok" : "err");
+          exitCode = data.exitCode;
           if (data.output) {
             out.innerHTML = fellesOutputHtml(data.output);
             out.hidden = false;
           }
+          setStatus(dryRun ? "Dry run finished." : "Checking the status after the run…", "");
         } else {
           setStatus(data?.error ?? `Request failed (HTTP ${res.status}).`, "err");
         }
       } catch (err) {
         setStatus(`Request failed: ${err instanceof Error ? err.message : String(err)}`, "err");
-      } finally {
-        running = false;
-        runButtons.forEach((b) => (b.disabled = false));
-        syncBtn.disabled = !status || status.changed === 0;
       }
-      await load();
+      const after = couldChangeBucket ? await reloadView(true) : viewReady ? view : null;
+      if (exitCode !== null) {
+        const line = fellesSyncRunOutcome(exitCode, dryRun, after);
+        setStatus(line.text, line.ok ? "ok" : "err");
+      }
+      running = false;
+      lists.inert = false;
+      holdDuringRun.forEach((b) => (b.disabled = false));
+      syncEnabled();
     }
 
     dialog.addEventListener("click", (e) => {
@@ -639,9 +783,10 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       const link = target.closest("[data-felles-open]");
       if (link) {
         const me = e as MouseEvent;
+        if (running) return e.preventDefault();
         if (me.button !== 0 || me.metaKey || me.ctrlKey || me.shiftKey || me.altKey) return;
         e.preventDefault();
-        if (!running) dialog.close();
+        dialog.close();
         opts.openPage(link.getAttribute("data-felles-open") || "");
         return;
       }
@@ -655,6 +800,9 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
 
   return {
     load,
-    isStale: (relPath) => states.get(fellesStatusKey(relPath)) === "changed",
+    markFor: (relPath) => {
+      const state = states.get(fellesStatusKey(relPath));
+      return state === "changed" ? "stale" : state === "refused" ? "refused" : null;
+    },
   };
 }

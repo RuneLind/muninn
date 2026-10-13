@@ -8,7 +8,13 @@
  *     { "bøtte": string,
  *       "sider": [{ "relPath", "tilstand": "uendret"|"endret"|"avvist"|"mangler-lokalt",
  *                   "endredeFiler": string[], "avslag": string[], "advarsler": string[] }],
- *       "foreldreløse": string[] }
+ *       "foreldreløse": string[],
+ *       "muligensForeldreløse": string[] }
+ *
+ * `foreldreløse` are data files no tracked page can name. `muligensForeldreløse`
+ * are data files no page read locally names while some tracked page is not
+ * `uendret`: the bucket's copy of that page may still name them, so the script
+ * prints no `--fjern` line for them and neither does the reader.
  *
  * Anything else is refused whole: the route never passes the script's stdout
  * through, so a changed script version shows up as one short error rather than
@@ -20,12 +26,13 @@
 
 export type FellesPageState = "unchanged" | "changed" | "refused" | "missing-locally";
 
-const STATES: Record<string, FellesPageState> = {
-  uendret: "unchanged",
-  endret: "changed",
-  avvist: "refused",
-  "mangler-lokalt": "missing-locally",
-};
+/** A Map, not an object literal: `toString` or `__proto__` must not read as a state. */
+const STATES = new Map<string, FellesPageState>([
+  ["uendret", "unchanged"],
+  ["endret", "changed"],
+  ["avvist", "refused"],
+  ["mangler-lokalt", "missing-locally"],
+]);
 
 export interface FellesStatusPage {
   relPath: string;
@@ -46,8 +53,11 @@ export interface FellesStatus {
   bucket: string;
   /** In the script's order (sorted by object name). */
   pages: FellesStatusPage[];
-  /** Objects in the bucket with no page in the local wiki. */
+  /** Data files in the bucket that no tracked page can name. */
   orphans: FellesStatusOrphan[];
+  /** Data files no local page names, while some tracked page is not
+   *  `uendret` and its bucket copy may still name them. */
+  maybeOrphans: FellesStatusOrphan[];
   /** How many pages are `changed` — what «Felles: N changed» shows. */
   changed: number;
 }
@@ -74,13 +84,14 @@ export function parseFellesStatus(stdout: string): FellesStatusParse {
   if (typeof o["bøtte"] !== "string") return { ok: false, reason: "bøtte is not a string" };
   if (!Array.isArray(o.sider)) return { ok: false, reason: "sider is not an array" };
   if (!isStringArray(o["foreldreløse"])) return { ok: false, reason: "foreldreløse is not a string array" };
+  if (!isStringArray(o["muligensForeldreløse"])) return { ok: false, reason: "muligensForeldreløse is not a string array" };
 
   const pages: FellesStatusPage[] = [];
   for (const [i, s] of o.sider.entries()) {
     if (!s || typeof s !== "object") return { ok: false, reason: `sider[${i}] is not an object` };
     const p = s as Record<string, unknown>;
     if (typeof p.relPath !== "string" || !p.relPath) return { ok: false, reason: `sider[${i}].relPath is not a string` };
-    const state = typeof p.tilstand === "string" ? STATES[p.tilstand] : undefined;
+    const state = typeof p.tilstand === "string" ? STATES.get(p.tilstand) : undefined;
     if (!state) return { ok: false, reason: `sider[${i}].tilstand is not a known state` };
     for (const key of ["endredeFiler", "avslag", "advarsler"]) {
       if (!isStringArray(p[key])) return { ok: false, reason: `sider[${i}].${key} is not a string array` };
@@ -100,6 +111,7 @@ export function parseFellesStatus(stdout: string): FellesStatusParse {
       bucket: o["bøtte"],
       pages,
       orphans: o["foreldreløse"].map((path) => ({ path, masked: isMaskedPath(path) })),
+      maybeOrphans: o["muligensForeldreløse"].map((path) => ({ path, masked: isMaskedPath(path) })),
       changed: pages.filter((p) => p.state === "changed").length,
     },
   };

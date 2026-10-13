@@ -193,6 +193,14 @@ describe("decideOrigin — the pure rule", () => {
     expect(decideOrigin({ ...base, method: "GET", path: "/api/wiki/plan-card", secFetchSite: "cross-site" }).allowed).toBe(false);
     expect(decideOrigin({ ...base, method: "GET", path: "/api/wiki/plan-card", secFetchSite: "same-origin" }).allowed).toBe(true);
   });
+
+  test("the felles status route is listed — one GET spawns Bun and a gcloud bucket listing", () => {
+    expect(SIDE_EFFECTING_GETS).toContain("/api/wiki/felles-status");
+    expect(isSideEffectingRequest("GET", "/api/wiki/felles-status")).toBe(true);
+    expect(isSideEffectingRequest("HEAD", "/api/wiki/felles-status")).toBe(true);
+    expect(decideOrigin({ ...base, method: "GET", path: "/api/wiki/felles-status", secFetchSite: "cross-site" }).allowed).toBe(false);
+    expect(decideOrigin({ ...base, method: "GET", path: "/api/wiki/felles-status", secFetchSite: "same-origin" }).allowed).toBe(true);
+  });
 });
 
 /**

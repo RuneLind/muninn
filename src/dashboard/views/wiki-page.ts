@@ -2809,7 +2809,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
         <div class="wiki-active-options" id="wikiActiveOptions" hidden></div>
         <!-- «Felles: N changed» — painted by the client on a wiki that offers
              ⇪ Felles, after the page has rendered (wiki-felles-publish.ts). -->
-        <div class="wiki-felles-sync" id="wikiFellesSync" hidden></div>
+        <div class="wiki-felles-sync" id="wikiFellesSync" aria-live="polite" hidden></div>
         <details class="wiki-filters" id="wikiFilters">
           <summary class="wiki-filters-summary">Filters</summary>
           <div class="wiki-filters-body">

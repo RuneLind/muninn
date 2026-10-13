@@ -15,6 +15,10 @@ import {
   shellQuote,
   type FellesSyncStatus,
 } from "./wiki-felles-publish.ts";
+// The names this fix round added, read off the namespace so each test fails on
+// its own rather than the whole file failing to link.
+import * as felles from "./wiki-felles-publish.ts";
+const fellesSyncRunOutcome = (...a: Parameters<typeof felles.fellesSyncRunOutcome>) => felles.fellesSyncRunOutcome(...a);
 
 describe("fellesPublishCommand", () => {
   test("reproduces the manual command", () => {
@@ -113,12 +117,15 @@ describe("the sync status", () => {
       { relPath: "gone.md", masked: false, state: "missing-locally", changedFiles: [], refusals: [], warnings: [] },
     ],
     orphans: [{ path: "old.data.json", masked: false }],
+    maybeOrphans: [],
   };
   const href = (rel: string) => "/wiki?relPath=" + encodeURIComponent(rel);
 
-  test("the chip names its state; loading is inert", () => {
+  test("the chip names its state; loading is inert but keeps focus", () => {
     expect(fellesSyncChipHtml({ kind: "ok", changed: 3 })).toContain(">Felles: 3 changed<");
-    expect(fellesSyncChipHtml({ kind: "loading" })).toMatch(/data-state="loading" disabled/);
+    // aria-disabled, not disabled: a disabled button drops keyboard focus to BODY.
+    expect(fellesSyncChipHtml({ kind: "loading" })).toMatch(/data-state="loading" aria-disabled="true"/);
+    expect(fellesSyncChipHtml({ kind: "loading" })).not.toMatch(/ disabled/);
     const err = fellesSyncChipHtml({ kind: "error", message: 'gcloud <"x">' });
     expect(err).toContain(">Felles: status failed<");
     expect(err).toContain("gcloud &lt;&quot;x&quot;&gt;");
@@ -135,6 +142,29 @@ describe("the sync status", () => {
     expect(html).toContain("Missing locally (1)");
     expect(html).toContain("Orphans in the bucket (1)");
     expect(html).not.toContain('data-felles-open="b.md"');
+  });
+
+  test("a changed page does not list its own path among its files", () => {
+    const html = fellesSyncListHtml(status, href);
+    expect(html).not.toContain("<li>plans/a&lt;b&gt;.mdx</li>");
+    expect(html).toContain('<ul class="wiki-felles-files"><li class="wiki-felles-self">page changed</li><li>plans/a.data.json</li></ul>');
+    // Only a data file changed: no page line.
+    const dataOnly = fellesSyncListHtml(
+      { ...status, pages: [{ ...status.pages[0]!, changedFiles: ["plans/a.data.json"] }] },
+      href,
+    );
+    expect(dataOnly).not.toContain("page changed");
+    expect(dataOnly).toContain('<ul class="wiki-felles-files"><li>plans/a.data.json</li></ul>');
+  });
+
+  test("possible orphans get their own section, with no removal hint", () => {
+    const html = fellesSyncListHtml({ ...status, orphans: [], maybeOrphans: [{ path: "maybe.csv", masked: false }] }, href);
+    expect(html).toContain('<section class="wiki-felles-section maybe-orphans">');
+    expect(html).toContain("Possibly orphaned in the bucket (1)");
+    expect(html).toContain("<li><span class=\"wiki-felles-masked\">maybe.csv</span></li>");
+    expect(html).toMatch(/the published copy of such a page may still name them/);
+    const section = html.slice(html.indexOf("maybe-orphans"));
+    expect(section).not.toContain("--fjern");
   });
 
   test("the dialog offers Publish changed with its count, disabled at zero", () => {
@@ -159,9 +189,53 @@ describe("the sync status", () => {
     expect(fellesSyncOutcomeLine(9, false).text).toBe("The script exited with code 9.");
   });
 
+  test("a refused page gets its own marker, not the stale one", () => {
+    const html = fellesBtnHtml("a.md", "refused");
+    expect(html).toContain(`class="wiki-bc-share ${felles.FELLES_REFUSED_CLASS}"`);
+    expect(html).not.toContain(FELLES_STALE_CLASS);
+    expect(html).toContain('title="Local copy is refused by the scanner — the published copy is older"');
+  });
+
+  describe("the sync outcome reads the run and the status after it", () => {
+    const after = (changed: number, refused: number): FellesSyncStatus => ({
+      ...status,
+      changed,
+      pages: [
+        ...Array.from({ length: changed }, (_, i) => ({ ...status.pages[0]!, relPath: `c${i}.md` })),
+        ...Array.from({ length: refused }, (_, i) => ({ ...status.pages[2]!, relPath: `r${i}.md` })),
+      ],
+    });
+
+    test("exit 1 with nothing changed afterwards and a refused page is not an error", () => {
+      expect(fellesSyncRunOutcome(1, false, after(0, 1))).toEqual({
+        text: "All changed pages were published. 1 refused page(s) were not — see Refused.",
+        ok: true,
+      });
+    });
+
+    test("a dry run's exit 1 with refused pages says what would be published", () => {
+      expect(fellesSyncRunOutcome(1, true, after(2, 2))).toEqual({
+        text: "Dry run: all changed pages would be published. 2 refused page(s) would not — see Refused. Nothing was uploaded.",
+        ok: true,
+      });
+    });
+
+    test("genuine failures stay red", () => {
+      // Still changed after a real run: something did not go up.
+      expect(fellesSyncRunOutcome(1, false, after(1, 1)).ok).toBe(false);
+      // Exit 1 and no refused page: the script crashed.
+      expect(fellesSyncRunOutcome(1, false, after(0, 0)).ok).toBe(false);
+      expect(fellesSyncRunOutcome(1, true, after(1, 0)).ok).toBe(false);
+      // No fresh status to read: the exit code alone.
+      expect(fellesSyncRunOutcome(1, false, null)).toEqual(fellesSyncOutcomeLine(1, false));
+      for (const code of [2, 3, 9]) expect(fellesSyncRunOutcome(code, false, after(0, 1)).ok).toBe(false);
+      expect(fellesSyncRunOutcome(0, false, after(0, 1))).toEqual(fellesSyncOutcomeLine(0, false));
+    });
+  });
+
   test("a stale button carries the marker class and says why", () => {
-    expect(fellesBtnHtml("a.md", true)).toContain(`class="wiki-bc-share ${FELLES_STALE_CLASS}"`);
-    expect(fellesBtnHtml("a.md", true)).toContain(`title="${FELLES_STALE_TITLE}"`);
+    expect(fellesBtnHtml("a.md", "stale")).toContain(`class="wiki-bc-share ${FELLES_STALE_CLASS}"`);
+    expect(fellesBtnHtml("a.md", "stale")).toContain(`title="${FELLES_STALE_TITLE}"`);
     expect(fellesBtnHtml("a.md")).not.toContain(FELLES_STALE_CLASS);
   });
 });

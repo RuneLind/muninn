@@ -23,11 +23,19 @@
  * A `WIKI_READONLY_ROOTS` root is refused (403): publishing ships the page off
  * the machine, the same egress every other read-only check refuses.
  *
- * GET `?wiki=<name>`: 200 `{ bucket, pages, orphans, changed, checkedAt }`
- * (`felles-status.ts`), 502 when the script failed or answered anything but the
- * status shape, 504 on timeout, and the same 501/403/404 as the POST. The
- * status does NOT take the run slot: it is read-only, and the reader asks for it
- * while a long sync runs.
+ * GET `?wiki=<name>[&allowIdent=0|1]` (header `x-muninn-felles: status`):
+ * 200 `{ bucket, pages, orphans, maybeOrphans, changed, checkedAt }`
+ * (`felles-status.ts`); 403 `cross-origin` or `missing-header` from its own
+ * gate; 400 without a wiki or with an `allowIdent` other than 0 or 1; 502 when
+ * the script failed or answered anything but the status shape; 504 on timeout;
+ * and the same 501/403/404 as the POST. `allowIdent` (default 1, the dialogs'
+ * default) is the script's `--tillat-ident`, which decides whether a page with
+ * a NAVident counts as changed or refused. The status does NOT take the run
+ * slot: it is read-only, and the reader asks for it while a long sync runs.
+ *
+ * Every spawn leads its own process group, so a timeout signals gcloud as well
+ * as the script (`runProc`'s `processGroup`: SIGTERM, then SIGKILL after the
+ * grace).
  */
 import { existsSync } from "node:fs";
 import type { Hono } from "hono";
@@ -124,9 +132,10 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
   const now = deps.now ?? Date.now;
   const interpreter = () => deps.interpreter ?? [process.execPath, "--no-env-file"];
 
-  // The status cache, keyed by wiki name. `generation` moves when a run through
-  // the POST ends, so a status spawned before that is neither cached nor joined
-  // by a later request: it may have seen the bucket before the run changed it.
+  // The status cache, keyed by wiki name and `allowIdent`. `generation` moves
+  // when a run that could have changed the bucket ends (spawned, not a dry run),
+  // so a status spawned before that is neither cached nor joined by a later
+  // request: it may have seen the bucket before the run changed it.
   let generation = 0;
   const statusCache = new Map<string, { at: number; gen: number; answer: StatusAnswer }>();
   const statusPending = new Map<string, { gen: number; promise: Promise<StatusAnswer> }>();
@@ -152,16 +161,25 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     return { entry, bin: config.bin };
   }
 
-  async function runStatus(entry: WikiRegistryEntry, bin: string): Promise<StatusAnswer> {
-    const argv = [
-      ...interpreter(),
-      bin,
-      ...fellesScriptArgs({ action: "status", dryRun: false, allowIdent: true, root: entry.root }),
-    ];
+  /** Never rejects: anything that throws is a 502, so a joined request and the
+   *  pending map's cleanup never meet a rejected promise. */
+  async function runStatus(entry: WikiRegistryEntry, bin: string, allowIdent: boolean): Promise<StatusAnswer> {
+    try {
+      return await spawnStatus(entry, bin, allowIdent);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn("felles-status failed: {error}", { error: message });
+      return { http: 502, body: { error: `The status check failed: ${message}`, reason: "internal" } };
+    }
+  }
+
+  async function spawnStatus(entry: WikiRegistryEntry, bin: string, allowIdent: boolean): Promise<StatusAnswer> {
+    const argv = [...interpreter(), bin, ...fellesScriptArgs({ action: "status", dryRun: false, allowIdent, root: entry.root })];
     let proc;
     try {
       proc = await (deps.runProc ?? runProc)(argv, deps.statusTimeoutMs ?? FELLES_STATUS_TIMEOUT_MS, "felles-status", {
         env: fellesPublishChildEnv(),
+        processGroup: true,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -197,12 +215,15 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     if (refusal) return c.json({ error: refusal.error, reason: refusal.reason }, refusal.status);
     const wiki = (c.req.query("wiki") ?? "").trim();
     if (!wiki) return c.json({ error: "wiki is required" }, 400);
+    const identParam = c.req.query("allowIdent") ?? "1";
+    if (identParam !== "0" && identParam !== "1") return c.json({ error: "allowIdent must be 0 or 1" }, 400);
+    const allowIdent = identParam === "1";
     const target = resolveTarget(wiki);
     if (target.refusal) return c.json(target.refusal.body, target.refusal.status);
     const { entry, bin } = target;
     if (!existsSync(bin)) return c.json({ error: `${FELLES_PUBLISH_BIN_ENV} names a file that does not exist` }, 501);
 
-    const key = entry.name.toLowerCase();
+    const key = `${entry.name.toLowerCase()}\u0000${identParam}`;
     const cached = statusCache.get(key);
     const ttl = deps.statusTtlMs ?? FELLES_STATUS_TTL_MS;
     if (cached && cached.gen === generation && now() - cached.at < ttl) return c.json(cached.answer.body, cached.answer.http);
@@ -210,16 +231,13 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     let pending = statusPending.get(key);
     if (!pending || pending.gen !== generation) {
       const gen = generation;
-      const promise = runStatus(entry, bin).then((answer) => {
+      const promise: Promise<StatusAnswer> = runStatus(entry, bin, allowIdent).then((answer) => {
         if (answer.http === 200 && gen === generation) statusCache.set(key, { at: now(), gen, answer });
+        if (statusPending.get(key)?.promise === promise) statusPending.delete(key);
         return answer;
       });
-      const mine = { gen, promise };
-      pending = mine;
-      statusPending.set(key, mine);
-      void promise.finally(() => {
-        if (statusPending.get(key) === mine) statusPending.delete(key);
-      });
+      pending = { gen, promise };
+      statusPending.set(key, pending);
     }
     const answer = await pending.promise;
     return c.json(answer.body, answer.http);
@@ -288,26 +306,35 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       action === "sync" ? (deps.syncTimeoutMs ?? FELLES_SYNC_TIMEOUT_MS) : (deps.timeoutMs ?? FELLES_PUBLISH_TIMEOUT_MS);
     let proc;
     try {
-      proc = await (deps.runProc ?? runProc)(argv, timeoutMs, "felles-publish", { env: fellesPublishChildEnv() });
+      proc = await (deps.runProc ?? runProc)(argv, timeoutMs, "felles-publish", {
+        env: fellesPublishChildEnv(),
+        processGroup: true,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (err instanceof ProcTimeoutError) {
         log.warn("felles-publish did not return: {error}", { error: message });
-        // Only Bun is killed; a gcloud upload or delete it started can still finish.
+        // The whole process group is signalled, gcloud included, but a request
+        // gcloud had already sent can have gone through before it stopped.
+        if (!dryRun) invalidateStatus();
         const error =
           action === "remove"
-            ? "The script did not return in time. The delete may still have finished — check the page on the pod in about 2 minutes."
+            ? "The script did not return in time and was stopped. The delete may already have gone through — check the page on the pod in about 2 minutes."
             : action === "sync"
-              ? "The sync did not return in time. Uploads may still have finished — refresh the status before running it again."
-              : "The publish script did not return in time. An upload may still have finished — run a dry run to check.";
+              ? "The sync did not return in time and was stopped. Pages uploaded before that are published — refresh the status before running it again."
+              : "The publish script did not return in time and was stopped. An upload may already have finished — run a dry run to check.";
         return c.json({ error, reason: "timeout" }, 504);
       }
+      // Bun.spawn threw: nothing ran, so the bucket is as the cache saw it.
       log.warn("felles-publish could not be spawned: {error}", { error: message });
       return c.json({ error: message }, 502);
     } finally {
       inFlight = false;
-      invalidateStatus();
     }
+    // Only a run that could have changed the bucket drops the status cache: a
+    // dry run lists and scans, and must not make every Dry run cost a fresh
+    // gcloud listing.
+    if (!dryRun) invalidateStatus();
     // No relPath in the log line: a path the scanner flags is printed masked by
     // the script, and this line must not undo that.
     log.info("felles-publish {action} exit {exitCode} on {wiki} (dryRun {dryRun})", {

@@ -78,7 +78,7 @@ import {
   FELLES_BTN_ID,
   initFellesSync,
   openFellesPublishDialog,
-  setFellesBtnStale,
+  setFellesBtnMark,
   type FellesSync,
 } from "./wiki-felles-publish.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
@@ -504,7 +504,7 @@ let trackerLabels: Record<string, string> = {};
 let fellesPublishBin: string | null = null;
 /** muninn's `FELLES_WIKI_BUCKET`, for the copied command line. */
 let fellesPublishBucket: string | undefined;
-/** The «Felles: N changed» chip and the status behind ⇪ Felles's stale marker;
+/** The «Felles: N changed» chip and the status behind ⇪ Felles's marker;
  *  started once, on the first listing that offers ⇪ Felles. */
 let fellesSync: FellesSync | null = null;
 
@@ -2780,7 +2780,7 @@ function renderBreadcrumb(m: WikiListing): void {
     // Third article-level action, same row: turn the page into a pasteable post.
     shareArticleBtnHtml() +
     // ⇪ Felles — publish to the melosys-felles bucket, on an allowlisted wiki only.
-    (fellesPublishBin ? fellesBtnHtml(m.relPath, fellesSync?.isStale(m.relPath) ?? false) : "");
+    (fellesPublishBin ? fellesBtnHtml(m.relPath, fellesSync?.markFor(m.relPath) ?? null) : "");
   el.style.display = "flex";
 }
 function hideBreadcrumb(): void {
@@ -7666,7 +7666,7 @@ document.addEventListener("click", (e) => {
         bin: fellesPublishBin,
         root: WIKI_ROOT,
         bucket: fellesPublishBucket,
-        onRun: () => void fellesSync?.load(),
+        onRun: () => void fellesSync?.load({ afterRun: true }),
       });
     }
   }
@@ -8128,7 +8128,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
       // A status that lands after the breadcrumb was drawn repaints its marker.
       onStatus: () => {
         const btn = document.getElementById(FELLES_BTN_ID);
-        if (btn) setFellesBtnStale(btn, sync.isStale(btn.getAttribute("data-felles-relpath") || ""));
+        if (btn) setFellesBtnMark(btn, sync.markFor(btn.getAttribute("data-felles-relpath") || ""));
       },
     });
     fellesSync = sync;

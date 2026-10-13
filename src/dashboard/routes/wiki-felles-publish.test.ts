@@ -134,7 +134,7 @@ describe("the spawn", () => {
     });
     const res = await post(app, { ...ok, action: "remove" });
     expect(res.status).toBe(504);
-    expect(((await res.json()) as { error: string }).error).toMatch(/delete may still have finished/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/was stopped.*The delete may already have gone through/);
   });
 
   test("a real Bun child does not load the .env in its working directory", async () => {
@@ -187,8 +187,24 @@ describe("the spawn", () => {
     const res = await post(app, ok);
     expect((await post(app, ok)).status).toBe(200);
     expect(res.status).toBe(504);
-    expect(((await res.json()) as { error: string }).error).toMatch(/may still have finished/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/was stopped.*An upload may already have finished/);
   });
+});
+
+test("every spawn leads its own process group, so a timeout reaches gcloud too", async () => {
+  const seen: { label: string; processGroup?: boolean }[] = [];
+  const app = appWith({
+    runProc: async (argv, _timeoutMs, label, opts) => {
+      seen.push({ label: argv.includes("--status") ? "status" : label, processGroup: opts?.processGroup });
+      return { stdout: argv.includes("--status") ? JSON.stringify({ "bøtte": "b", sider: [], "foreldreløse": [], "muligensForeldreløse": [] }) : "", stderr: "", exitCode: 0 };
+    },
+  });
+  await post(app, { ...ok, dryRun: false });
+  await post(app, { ...ok, action: "remove", dryRun: false });
+  await post(app, { wiki: "kode", action: "sync", dryRun: false, allowIdent: true });
+  await app.request("/api/wiki/felles-status?wiki=kode", { headers: { "x-muninn-felles": "status" } });
+  expect(seen.map((s) => s.processGroup)).toEqual([true, true, true, true]);
+  expect(seen.map((s) => s.label)).toEqual(["felles-publish", "felles-publish", "felles-publish", "status"]);
 });
 
 describe("refusals before any spawn", () => {
@@ -304,7 +320,7 @@ describe("sync", () => {
     });
     const res = await post(app, sync);
     expect(res.status).toBe(504);
-    expect(((await res.json()) as { error: string }).error).toMatch(/refresh the status/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/was stopped.*refresh the status/);
   });
 
   test.each([
@@ -332,9 +348,10 @@ describe("GET /api/wiki/felles-status", () => {
       { relPath: "-x.md", tilstand: "uendret", endredeFiler: [], avslag: [], advarsler: [] },
     ],
     "foreldreløse": ["gone.md"],
+    "muligensForeldreløse": [],
   };
-  const get = (app: Hono, wiki = "kode", headers: Record<string, string> = { "x-muninn-felles": "status" }) =>
-    app.request(`/api/wiki/felles-status?wiki=${wiki}`, { headers });
+  const get = (app: Hono, wiki = "kode", headers: Record<string, string> = { "x-muninn-felles": "status" }, query = "") =>
+    app.request(`/api/wiki/felles-status?wiki=${wiki}${query}`, { headers });
 
   /** A runProc that counts spawns, records argv, and can be held open. */
   function fake(answer: () => { stdout: string; stderr?: string; exitCode: number } = () => ({ stdout: JSON.stringify(STATUS), exitCode: 0 })) {
@@ -363,6 +380,7 @@ describe("GET /api/wiki/felles-status", () => {
         { relPath: "-x.md", masked: false, state: "unchanged", changedFiles: [], refusals: [], warnings: [] },
       ],
       orphans: [{ path: "gone.md", masked: false }],
+      maybeOrphans: [],
     });
   });
 
@@ -437,16 +455,114 @@ describe("GET /api/wiki/felles-status", () => {
     expect(g.state.calls).toBe(2);
   });
 
-  test("any run through the POST drops the cache", async () => {
+  test("a run that could change the bucket drops the cache", async () => {
     const f = fake();
     const app = appWith({ runProc: f.runProc, now: () => 0 });
     await get(app);
-    for (const body of [ok, { ...ok, action: "remove" }, { wiki: "kode", action: "sync", dryRun: false, allowIdent: true }]) {
+    for (const body of [
+      { ...ok, dryRun: false },
+      { ...ok, action: "remove", dryRun: false },
+      { wiki: "kode", action: "sync", dryRun: false, allowIdent: true },
+    ]) {
       const before = f.state.calls;
       expect((await post(app, body)).status).toBe(200);
       await get(app);
       // One spawn for the POST, one fresh status.
       expect(f.state.calls).toBe(before + 2);
+    }
+  });
+
+  test("a dry run, a refused request and a run that never spawned keep the cache", async () => {
+    let spawnFails = false;
+    let statusCalls = 0;
+    const app = appWith({
+      now: () => 0,
+      runProc: async (argv) => {
+        if (argv.includes("--status")) {
+          statusCalls++;
+          return { stdout: JSON.stringify(STATUS), stderr: "", exitCode: 0 };
+        }
+        if (spawnFails) throw new Error("spawn failed");
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    await get(app);
+    expect(statusCalls).toBe(1);
+    for (const body of [ok, { ...ok, action: "remove" }, { wiki: "kode", action: "sync", dryRun: true, allowIdent: true }]) {
+      expect((await post(app, body)).status).toBe(200);
+    }
+    expect((await post(app, { ...ok, dryRun: "yes" })).status).toBe(400);
+    spawnFails = true;
+    expect((await post(app, { ...ok, dryRun: false })).status).toBe(502);
+    await get(app);
+    expect(statusCalls).toBe(1);
+  });
+
+  test("a run that timed out drops the cache: gcloud may have uploaded before it was stopped", async () => {
+    let statusCalls = 0;
+    const app = appWith({
+      now: () => 0,
+      runProc: async (argv) => {
+        if (argv.includes("--status")) {
+          statusCalls++;
+          return { stdout: JSON.stringify(STATUS), stderr: "", exitCode: 0 };
+        }
+        throw new ProcTimeoutError("felles-publish", 5);
+      },
+    });
+    await get(app);
+    expect((await post(app, { ...ok, dryRun: false })).status).toBe(504);
+    await get(app);
+    expect(statusCalls).toBe(2);
+  });
+
+  test("allowIdent=0 spawns without --tillat-ident, and each flag has its own cache", async () => {
+    const f = fake();
+    const app = appWith({ runProc: f.runProc, now: () => 0 });
+    expect((await get(app, "kode", undefined, "&allowIdent=0")).status).toBe(200);
+    expect(f.state.argv).toEqual(["/bin/bash", bin, "--status", "--json", root]);
+    expect((await get(app, "kode", undefined, "&allowIdent=1")).status).toBe(200);
+    expect(f.state.argv).toEqual(["/bin/bash", bin, "--status", "--json", "--tillat-ident", root]);
+    expect(f.state.calls).toBe(2);
+    // Absent is the dialog's default, the flag on, and shares its cache.
+    await get(app);
+    await get(app, "kode", undefined, "&allowIdent=0");
+    expect(f.state.calls).toBe(2);
+  });
+
+  test("concurrent requests with different flags do not share a spawn", async () => {
+    const f = fake();
+    let release!: () => void;
+    f.state.hold = new Promise<void>((r) => (release = r));
+    const app = appWith({ runProc: f.runProc, now: () => 0 });
+    const a = get(app, "kode", undefined, "&allowIdent=0");
+    const b = get(app, "kode", undefined, "&allowIdent=1");
+    await Bun.sleep(20);
+    release();
+    await Promise.all([a, b]);
+    expect(f.state.calls).toBe(2);
+  });
+
+  test("an allowIdent other than 0 or 1 is a 400 before any spawn", async () => {
+    const f = fake();
+    const res = await get(appWith({ runProc: f.runProc }), "kode", undefined, "&allowIdent=yes");
+    expect(res.status).toBe(400);
+    expect(f.state.calls).toBe(0);
+  });
+
+  test("a status that throws is a 502 and leaves no unhandled rejection", async () => {
+    const seen: unknown[] = [];
+    const onRejection = (reason: unknown) => seen.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      // No stderr: reading it throws inside the status run.
+      const app = appWith({ runProc: (async () => ({ stdout: "", exitCode: 2 })) as unknown as FellesPublishRouteDeps["runProc"] });
+      const res = await get(app);
+      expect(res.status).toBe(502);
+      await Bun.sleep(20);
+      expect(seen).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
     }
   });
 
@@ -492,7 +608,7 @@ describe("GET /api/wiki/felles-status", () => {
     const changedOf = async (res: Response | Promise<Response>) => ((await (await res).json()) as { changed: number }).changed;
     const stale = get(app);
     await Bun.sleep(20);
-    expect((await post(app, ok)).status).toBe(200);
+    expect((await post(app, { ...ok, dryRun: false })).status).toBe(200);
     expect(await changedOf(get(app))).toBe(0);
     expect(statusCalls).toBe(2);
     releaseStatus();

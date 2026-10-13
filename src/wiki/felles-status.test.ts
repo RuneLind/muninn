@@ -10,7 +10,7 @@ const page = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 const status = (over: Record<string, unknown> = {}) =>
-  JSON.stringify({ "bøtte": "melosys-felles", sider: [page()], "foreldreløse": [], ...over });
+  JSON.stringify({ "bøtte": "melosys-felles", sider: [page()], "foreldreløse": [], "muligensForeldreløse": [], ...over });
 
 describe("parseFellesStatus", () => {
   test("translates the script's shape and counts the changed pages", () => {
@@ -23,6 +23,7 @@ describe("parseFellesStatus", () => {
           page({ relPath: "c.md", tilstand: "mangler-lokalt", endredeFiler: [], advarsler: ["w"] }),
         ],
         "foreldreløse": ["old.md", "[skjult sti: x]"],
+        "muligensForeldreløse": ["maybe.csv", "[skjult sti: y]"],
       }) + "\n",
     );
     expect(r).toEqual({
@@ -40,6 +41,10 @@ describe("parseFellesStatus", () => {
           { path: "old.md", masked: false },
           { path: "[skjult sti: x]", masked: true },
         ],
+        maybeOrphans: [
+          { path: "maybe.csv", masked: false },
+          { path: "[skjult sti: y]", masked: true },
+        ],
       },
     });
   });
@@ -53,6 +58,12 @@ describe("parseFellesStatus", () => {
     ["sider not an array", status({ sider: {} })],
     ["foreldreløse with a number", status({ "foreldreløse": [1] })],
     ["unknown tilstand", status({ sider: [page({ tilstand: "changed" })] })],
+    // Inherited keys of a plain object are not states.
+    ["tilstand toString", status({ sider: [page({ tilstand: "toString" })] })],
+    ["tilstand constructor", status({ sider: [page({ tilstand: "constructor" })] })],
+    ["tilstand __proto__", status({ sider: [page({ tilstand: "__proto__" })] })],
+    ["muligensForeldreløse missing", status({ "muligensForeldreløse": undefined })],
+    ["muligensForeldreløse with a number", status({ "muligensForeldreløse": [1] })],
     ["empty relPath", status({ sider: [page({ relPath: "" })] })],
     ["endredeFiler not strings", status({ sider: [page({ endredeFiler: [null] })] })],
     ["avslag missing", status({ sider: [page({ avslag: undefined })] })],
