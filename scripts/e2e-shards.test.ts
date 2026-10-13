@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { check, flatten, parseExpectedSkips, partition, specFiles, timingsFromReport, type JsonReport } from "./e2e-shards.ts";
+import { check, flatten, parseExpectedSkips, partition, pinTitle, specFiles, timingsFromReport, type JsonReport } from "./e2e-shards.ts";
 
 describe("partition", () => {
   test("every file lands in exactly one shard", () => {
@@ -52,7 +52,9 @@ const spec = (
       projectName: "chromium",
       status,
       results,
-      annotations: skipReason === undefined ? [] : [{ type: "skip", description: skipReason }],
+      // A bare test.skip() annotates { type: "skip" } with no description
+      // (Playwright 1.58.2); undefined models a test that never reached a skip.
+      annotations: skipReason === undefined ? [] : [skipReason ? { type: "skip", description: skipReason } : { type: "skip" }],
     },
   ],
 });
@@ -154,7 +156,7 @@ describe("check", () => {
   });
 
   test("a skip with no reason pins as the title and a bare bar", () => {
-    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped"));
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped", ""));
     expect(check(listed, merged, ["y.spec.ts › group › two |"]).problems).toEqual([]);
   });
 
@@ -220,10 +222,110 @@ describe("check", () => {
     ]);
   });
 
+  test("(D) an unannotated skip in a file with no failure is a new skip, not an excused stop", () => {
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped"));
+    expect(check(listed, merged, []).problems).toEqual(["skipped, not in e2e/ci-expected-skips.txt: y.spec.ts › group › two |"]);
+  });
+
+  test("a pinned test whose skip fired and then took a hook failure is the shard's red, not 'did not skip'", () => {
+    // wiki-agent-lens's pin is its file's last test, and the file has an afterAll.
+    const merged = report(
+      spec("1", "x.spec.ts", "one", pass),
+      spec("2", "y.spec.ts", "two", [{ status: "failed", duration: 10 }], "unexpected", "one bot"),
+    );
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual([]);
+  });
+
+  test("a pinned test that failed instead of skipping says so", () => {
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", [{ status: "failed", duration: 10 }], "unexpected"));
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual([
+      "expected to skip, failed instead: y.spec.ts › group › two | one bot",
+    ]);
+  });
+
+  test("a pin naming no listed test says so", () => {
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", pass));
+    expect(check(listed, merged, ["y.spec.ts › group › gone | one bot"]).problems).toEqual([
+      "expected to skip, no such test in --list: y.spec.ts › group › gone | one bot",
+    ]);
+  });
+
+  test("a stopped test does not excuse another test whose title extends it with ' | '", () => {
+    // Real titles carry ' | ' (wiki-share, wiki-related-work). Matched by a
+    // `title | ` prefix, the stopped "copy" excused the pin of "copy | slack".
+    const titles = ["copy", "copy | slack"];
+    const l = report(spec("0", "x.spec.ts", "boom", []), ...titles.map((t, k) => spec(String(k + 1), "x.spec.ts", t, [])));
+    const m = report(
+      spec("0", "x.spec.ts", "boom", [{ status: "failed", duration: 10 }], "unexpected"),
+      spec("1", "x.spec.ts", "copy", skip, "skipped"),
+      spec("2", "x.spec.ts", "copy | slack", pass),
+    );
+    expect(check(l, m, ["x.spec.ts › group › copy | slack | one bot"]).problems).toEqual([
+      "expected to skip, did not: x.spec.ts › group › copy | slack | one bot",
+    ]);
+  });
+
+  test("a pinned test that is listed but never ran resolves to itself, not to a shorter sibling", () => {
+    // Only "copy" ran. The pin names "copy | slack", which never ran: that is
+    // reported once, as "never ran", not blamed on "copy" as a skip it did not take.
+    const l = report(spec("1", "x.spec.ts", "copy", []), spec("2", "x.spec.ts", "copy | slack", []));
+    const m = report(spec("1", "x.spec.ts", "copy", pass));
+    expect(check(l, m, ["x.spec.ts › group › copy | slack | one bot"]).problems).toEqual(["never ran: x.spec.ts › group › copy | slack"]);
+  });
+
+  test("a pinned test the shard never reached (an entry with no results) is reported once, as 'never ran'", () => {
+    // A worker crash or a cancelled shard leaves the test in the report with
+    // results: [], and Playwright computes its outcome as "skipped".
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", [], "skipped"));
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual(["never ran: y.spec.ts › group › two"]);
+  });
+
+  test("an interrupted test reads as interrupted, not as a new skip or a pin that did not skip", () => {
+    // An interrupted result is neither expected nor unexpected, so Playwright
+    // computes the outcome "skipped", with no skip annotation.
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", [{ status: "interrupted", duration: 10 }], "skipped"));
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual(["interrupted: y.spec.ts › group › two"]);
+  });
+
+  test("a pinned test that skipped for ANOTHER reason before a hook failed still reports that skip", () => {
+    // The missing-fixture skip ("no bots") is what the list exists to catch;
+    // a failing afterAll after it must not hide it.
+    const merged = report(
+      spec("1", "x.spec.ts", "one", pass),
+      spec("2", "y.spec.ts", "two", [{ status: "failed", duration: 10 }], "unexpected", "no bots"),
+    );
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual([
+      "skipped, not in e2e/ci-expected-skips.txt: y.spec.ts › group › two | no bots",
+    ]);
+  });
+
   test("a result for a test --list does not know is a problem", () => {
     const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", pass), spec("3", "z.spec.ts", "three", pass));
     expect(check(listed, merged, []).problems).toEqual(["ran but not in --list (in two shards?): z.spec.ts › group › three"]);
   });
+});
+
+describe("pinTitle", () => {
+  test("takes the longest listed title the pin starts with", () => {
+    expect(pinTitle("x › copy | slack | one bot", ["x › copy", "x › copy | slack"])).toBe("x › copy | slack");
+    expect(pinTitle("x › copy | one bot", ["x › copy", "x › copy | slack"])).toBe("x › copy");
+  });
+
+  test("a bare-bar pin matches its title; an unrelated pin matches nothing", () => {
+    expect(pinTitle("x › copy |", ["x › copy"])).toBe("x › copy");
+    expect(pinTitle("x › copying | r", ["x › copy"])).toBeUndefined();
+  });
+});
+
+test("timingsFromReport takes a file's span from first start to last end, gaps included", () => {
+  const at = (s: number, duration: number) => [{ status: "passed", duration, startTime: new Date(Date.UTC(2026, 9, 13, 8, 0, s)).toISOString() }];
+  // 1.0 s of tests inside a 4.0 s span: the 3 s between them is context and hook time.
+  const merged = report(spec("1", "x.spec.ts", "one", at(0, 500)), spec("2", "x.spec.ts", "two", at(3, 1000)));
+  expect(timingsFromReport(merged)).toEqual({ "x.spec.ts": 4 });
+});
+
+test("timingsFromReport gives a file whose tests have no results zero seconds, not a non-number", () => {
+  expect(timingsFromReport(report(spec("1", "x.spec.ts", "one", [])))).toEqual({ "x.spec.ts": 0 });
 });
 
 test("timingsFromReport sums a file's test durations in seconds", () => {

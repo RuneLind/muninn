@@ -56,7 +56,7 @@ function median(xs: number[]): number | undefined {
 }
 
 // --- Playwright JSON reporter shape (the fields read here) ---
-type JsonResult = { status: string; duration: number };
+type JsonResult = { status: string; duration: number; startTime?: string };
 type JsonTest = {
   projectName: string;
   status: string;
@@ -124,18 +124,34 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const failedFiles = new Set(ranTests.filter((t) => t.outcome === "unexpected").map((t) => t.file));
   const stopped = new Set<string>();
   const skipped: string[] = [];
+  const outcomeByTitle = new Map<string, FlatTest>();
+  const titles: string[] = [];
+  // Never ran or interrupted: already a problem of its own, so its pin adds nothing.
+  const unreached = new Set<string>();
   let ran = 0;
   for (const t of flatten(listed)) {
     const r = ranById.get(t.id);
     ranById.delete(t.id);
+    titles.push(t.title);
+    if (r) outcomeByTitle.set(t.title, r);
     if (!r || r.results.length === 0) {
       problems.push(`never ran: ${t.title}`);
+      unreached.add(t.title);
       continue;
     }
     // `retries: 0`, so a second result means two shards ran the same test.
     if (r.results.length > 1) problems.push(`ran ${r.results.length} times: ${t.title}`);
     ran++;
-    if (r.outcome !== "skipped") continue;
+    // Interrupted is neither expected nor unexpected, so Playwright computes
+    // the outcome "skipped", with no skip annotation.
+    if (r.results.some((x) => x.status === "interrupted")) {
+      problems.push(`interrupted: ${t.title}`);
+      unreached.add(t.title);
+      continue;
+    }
+    // A skip that fired and was then charged a failing afterAll/afterEach is
+    // `unexpected`, but its skip and reason are still compared with the list.
+    if (r.outcome !== "skipped" && !(r.outcome === "unexpected" && r.skipAnnotated)) continue;
     if (failedFiles.has(r.file) && !r.skipAnnotated) stopped.add(t.title);
     else skipped.push(skipKey(t.title, r.skipReason));
   }
@@ -146,19 +162,61 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const expected = new Set(expectedSkips);
   const actual = new Set(skipped);
   for (const s of skipped) if (!expected.has(s)) problems.push(`skipped, not in e2e/ci-expected-skips.txt: ${s}`);
-  const isStopped = (pin: string) => [...stopped].some((title) => pin === skipKey(title, "") || pin.startsWith(`${title} | `));
-  for (const s of expectedSkips) {
-    if (!actual.has(s) && !isStopped(s)) problems.push(`expected to skip, did not: ${s}`);
+  for (const pin of expectedSkips) {
+    if (actual.has(pin)) continue;
+    const title = pinTitle(pin, titles);
+    if (title === undefined) {
+      problems.push(`expected to skip, no such test in --list: ${pin}`);
+      continue;
+    }
+    const r = outcomeByTitle.get(title);
+    if (!r || unreached.has(title) || stopped.has(title)) continue;
+    if (r.outcome === "unexpected") {
+      // Skipped for another reason, then a hook failed: that skip is already
+      // reported as not in the list. Failed without skipping: say so.
+      if (!r.skipAnnotated) problems.push(`expected to skip, failed instead: ${pin}`);
+      continue;
+    }
+    problems.push(`expected to skip, did not: ${pin}`);
   }
   return { problems, ran, skipped: skipped.sort() };
 }
 
-/** Seconds per spec file: the sum of its test durations (a file's beforeAll lands in its first test). */
+/**
+ * The test title a pin names. A pin is `title | reason`, and real titles
+ * contain ` | ` too (`wiki-share.spec.ts`, `wiki-related-work.spec.ts`), so
+ * the pin is matched against the titles `--list` knows, longest first, rather
+ * than split on a bar.
+ */
+export function pinTitle(pin: string, titles: string[]): string | undefined {
+  let best: string | undefined;
+  for (const title of titles) {
+    if (pin !== skipKey(title, "") && !pin.startsWith(`${title} | `)) continue;
+    if (best === undefined || title.length > best.length) best = title;
+  }
+  return best;
+}
+
+/**
+ * Seconds per spec file: from its first test's start to its last test's end.
+ * Summing test durations instead misses the time between tests (contexts,
+ * hooks): on run 38367891322 the sum covered 84 % of the shards' Playwright
+ * steps and the span 96 %; the rest is each shard's own server and browser
+ * start. A file whose results carry no start time falls back to the sum.
+ */
 export function timingsFromReport(merged: JsonReport): Timings {
+  const byFile = new Map<string, JsonResult[]>();
+  for (const t of flatten(merged)) byFile.set(t.file, [...(byFile.get(t.file) ?? []), ...t.results]);
   const secs: Timings = {};
-  for (const t of flatten(merged)) {
-    const ms = t.results.reduce((a, r) => a + r.duration, 0);
-    secs[t.file] = (secs[t.file] ?? 0) + ms / 1000;
+  for (const [file, results] of byFile) {
+    const starts = results.map((r) => (r.startTime ? Date.parse(r.startTime) : NaN));
+    if (starts.length > 0 && starts.every(Number.isFinite)) {
+      const first = Math.min(...starts);
+      const last = Math.max(...results.map((r, k) => starts[k]! + r.duration));
+      secs[file] = (last - first) / 1000;
+    } else {
+      secs[file] = results.reduce((a, r) => a + r.duration, 0) / 1000;
+    }
   }
   return Object.fromEntries(
     Object.entries(secs)
