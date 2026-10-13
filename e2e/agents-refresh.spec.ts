@@ -222,14 +222,15 @@ test.describe("Agents page: overview refresh", () => {
 
     // REAL time deliberately: under a fake clock `fastForward` runs the timers
     // synchronously while the fetch rejections resolve afterwards, so a retry
-    // CASCADE never forms and the assertion proves nothing. 11 s is three retry
-    // intervals and well inside one 30 s poll, so every request in the window is
-    // either the boot load or a retry.
+    // CASCADE never forms and the assertion proves nothing. With a 3 s retry
+    // (`OVERVIEW_RETRY_MS`), a per-failure retry makes the third request (boot
+    // + two retries) at ~6 s, so 8 s holds three with ~2 s of margin, well inside
+    // one 30 s poll: every request in the window is the boot load or a retry.
     await page.goto("/agents");
     await expect(page.locator("#recentCard")).toBeVisible();
-    await page.waitForTimeout(11_000);
+    await page.waitForTimeout(8_000);
 
-    // Boot load + at most one fast retry. Per-failure, this window holds four.
+    // Boot load + at most one fast retry. Per-failure, this window holds three.
     expect(requests.length).toBeLessThanOrEqual(2);
   });
 
