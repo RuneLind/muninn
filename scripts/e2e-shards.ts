@@ -17,7 +17,8 @@
  * `check` is the fan-in's gate. Four shards can each be green while the suite
  * is not, so it compares the merged report with `playwright test --list`:
  * every listed test ran exactly once (a file in two lists or in none is a
- * failure), and the set of skipped tests equals `e2e/ci-expected-skips.txt`.
+ * failure), and the set of skipped tests, each with its reason, equals
+ * `e2e/ci-expected-skips.txt`.
  * The skip half exists because this suite's worst failure is a spec that skips
  * itself green when its fixture is missing (root CLAUDE.md, Browser checks).
  */
@@ -56,12 +57,25 @@ function median(xs: number[]): number | undefined {
 
 // --- Playwright JSON reporter shape (the fields read here) ---
 type JsonResult = { status: string; duration: number };
-type JsonTest = { projectName: string; status: string; results: JsonResult[] };
+type JsonTest = {
+  projectName: string;
+  status: string;
+  results: JsonResult[];
+  annotations?: { type: string; description?: string }[];
+};
 type JsonSpec = { id: string; title: string; file: string; tests: JsonTest[] };
 type JsonSuite = { title: string; file: string; specs?: JsonSpec[]; suites?: JsonSuite[] };
 export type JsonReport = { suites: JsonSuite[]; errors?: unknown[] };
 
-export type FlatTest = { id: string; file: string; title: string; results: JsonResult[]; outcome: string };
+export type FlatTest = {
+  id: string;
+  file: string;
+  title: string;
+  results: JsonResult[];
+  outcome: string;
+  /** The last `test.skip(…, reason)` description, "" when it gave none. */
+  skipReason: string;
+};
 
 /** One row per (spec, project); `title` is the describe chain plus the spec title. */
 export function flatten(report: JsonReport): FlatTest[] {
@@ -75,6 +89,7 @@ export function flatten(report: JsonReport): FlatTest[] {
           title: [spec.file, ...chain, spec.title].join(" › "),
           results: t.results,
           outcome: t.status,
+          skipReason: (t.annotations ?? []).filter((a) => a.type === "skip").at(-1)?.description ?? "",
         });
       }
     }
@@ -89,7 +104,12 @@ export type CheckResult = { problems: string[]; ran: number; skipped: string[] }
 
 export function check(listed: JsonReport, merged: JsonReport, expectedSkips: string[]): CheckResult {
   const problems: string[] = [];
-  const ranById = new Map(flatten(merged).map((t) => [t.id, t]));
+  const ranTests = flatten(merged);
+  const ranById = new Map(ranTests.map((t) => [t.id, t]));
+  // A failing serial test or a throwing beforeAll marks the rest of its file
+  // skipped. That is the shard's red, reported by the job; blaming each of
+  // those tests as a new skip would bury the failure under the wrong cause.
+  const failedFiles = new Set(ranTests.filter((t) => t.outcome === "unexpected").map((t) => t.file));
   const skipped: string[] = [];
   let ran = 0;
   for (const t of flatten(listed)) {
@@ -102,7 +122,7 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
     // `retries: 0`, so a second result means two shards ran the same test.
     if (r.results.length > 1) problems.push(`ran ${r.results.length} times: ${t.title}`);
     ran++;
-    if (r.outcome === "skipped") skipped.push(t.title);
+    if (r.outcome === "skipped" && !failedFiles.has(r.file)) skipped.push(skipKey(t.title, r.skipReason));
   }
   // merge-reports gives the second copy of a test two shards both ran a salted
   // id, so a duplicate lands here rather than in the count above.
@@ -129,6 +149,15 @@ export function timingsFromReport(merged: JsonReport): Timings {
   );
 }
 
+/**
+ * A skip is pinned by title AND reason: one test can skip for a deliberate
+ * reason ("only one bot") and for the missing-fixture one ("no bots"), and a
+ * title-only pin would accept both.
+ */
+export function skipKey(title: string, reason: string): string {
+  return `${title} | ${reason}`.trim();
+}
+
 export function parseExpectedSkips(text: string): string[] {
   return text
     .split("\n")
@@ -136,9 +165,11 @@ export function parseExpectedSkips(text: string): string[] {
     .filter((l) => l && !l.startsWith("#"));
 }
 
-async function specFiles(): Promise<string[]> {
+export async function specFiles(dir = E2E_DIR): Promise<string[]> {
   const files: string[] = [];
-  for await (const f of new Glob("*.spec.ts").scan(E2E_DIR)) files.push(f);
+  // Recursive, like `testMatch: "**/*.spec.ts"`; a spec in a subdirectory
+  // that no shard plans would otherwise only surface as "never ran".
+  for await (const f of new Glob("**/*.spec.ts").scan(dir)) files.push(f);
   return files.sort();
 }
 

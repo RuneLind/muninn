@@ -307,7 +307,12 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
       - id: playwright
-        run: echo "version=$(bun -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        # Assigned first: a failing `$(…)` inside `echo` does not fail the step,
+        # and an empty version would make a cache key no Playwright bump changes.
+        run: |
+          version=$(bun -p "require('@playwright/test/package.json').version")
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       # The browser download is cached on the Playwright version; the system
       # libraries chromium needs are apt packages and are installed every time.
       # Only chromium: `playwright.config.ts` defines one project.
@@ -338,6 +343,8 @@ jobs:
           name: blob-report-${{ matrix.shard }}
           path: blob-report/
           retention-days: 7
+          # "Re-run failed jobs" uploads under the same name again.
+          overwrite: true
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -348,13 +355,14 @@ jobs:
           path: test-results/
           retention-days: 7
           if-no-files-found: ignore
+          overwrite: true
 
   # One status named `e2e` for the whole suite. Four green shards are not
   # enough on their own: a file in no shard's list, or in two, still leaves
   # every shard green. This job compares the merged report with
   # `playwright test --list` — every test ran exactly once — and fails on any
   # skip not named in `e2e/ci-expected-skips.txt`, since a spec that skips
-  # itself green is this suite's worst failure. The merged HTML report and the
+  # itself green is this suite's worst failure. Each skip is pinned with its reason. The merged HTML report and the
   # JSON (`bun scripts/e2e-shards.ts refresh e2e-results.json` rewrites the
   # timing table from it) are uploaded on every run.
   e2e:
@@ -391,9 +399,10 @@ jobs:
             playwright-report/
             e2e-results.json
           retention-days: 7
-      # Last, so the check above still runs and reports on a red shard.
+      # Last, and on every outcome, so a red shard is named even when the check
+      # above has failed too.
       - name: Every shard passed
-        if: ${{ needs.e2e-shard.result != 'success' }}
+        if: ${{ !cancelled() && needs.e2e-shard.result != 'success' }}
         run: |
           echo "::error::an e2e shard finished ${{ needs.e2e-shard.result }}"
           exit 1

@@ -1,5 +1,8 @@
 import { describe, test, expect } from "bun:test";
-import { check, flatten, parseExpectedSkips, partition, timingsFromReport, type JsonReport } from "./e2e-shards.ts";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { check, flatten, parseExpectedSkips, partition, specFiles, timingsFromReport, type JsonReport } from "./e2e-shards.ts";
 
 describe("partition", () => {
   test("every file lands in exactly one shard", () => {
@@ -33,11 +36,25 @@ describe("partition", () => {
   });
 });
 
-const spec = (id: string, file: string, title: string, results: { status: string; duration: number }[], status = "expected") => ({
+const spec = (
+  id: string,
+  file: string,
+  title: string,
+  results: { status: string; duration: number }[],
+  status = "expected",
+  skipReason?: string,
+) => ({
   id,
   file,
   title,
-  tests: [{ projectName: "chromium", status, results }],
+  tests: [
+    {
+      projectName: "chromium",
+      status,
+      results,
+      annotations: skipReason === undefined ? [] : [{ type: "skip", description: skipReason }],
+    },
+  ],
 });
 
 function report(...specs: ReturnType<typeof spec>[]): JsonReport {
@@ -60,11 +77,11 @@ describe("check", () => {
   const listed = report(spec("1", "x.spec.ts", "one", []), spec("2", "y.spec.ts", "two", []));
 
   test("clean when every listed test ran once and the skips match", () => {
-    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped"));
-    expect(check(listed, merged, ["y.spec.ts › group › two"])).toEqual({
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped", "one bot"));
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"])).toEqual({
       problems: [],
       ran: 2,
-      skipped: ["y.spec.ts › group › two"],
+      skipped: ["y.spec.ts › group › two | one bot"],
     });
   });
 
@@ -79,17 +96,49 @@ describe("check", () => {
   });
 
   test("a new skip fails, naming the test", () => {
-    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped"));
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped", "one bot"));
     expect(check(listed, merged, []).problems).toEqual([
-      "skipped, not in e2e/ci-expected-skips.txt: y.spec.ts › group › two",
+      "skipped, not in e2e/ci-expected-skips.txt: y.spec.ts › group › two | one bot",
     ]);
   });
 
   test("an expected skip that now runs fails too, so the list cannot rot", () => {
     const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", pass));
-    expect(check(listed, merged, ["y.spec.ts › group › two"]).problems).toEqual([
-      "expected to skip, did not: y.spec.ts › group › two",
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual([
+      "expected to skip, did not: y.spec.ts › group › two | one bot",
     ]);
+  });
+
+  test("a listed skip with a different reason fails: the pin is the reason, not just the title", () => {
+    // inspector's bot-switch case skips on "only one bot" (deliberate on CI)
+    // and on "no bots" (the missing fixture the list exists to catch).
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped", "no bots"));
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual([
+      "skipped, not in e2e/ci-expected-skips.txt: y.spec.ts › group › two | no bots",
+      "expected to skip, did not: y.spec.ts › group › two | one bot",
+    ]);
+  });
+
+  test("a skip with no reason pins as the title and a bare bar", () => {
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", skip, "skipped"));
+    expect(check(listed, merged, ["y.spec.ts › group › two |"]).problems).toEqual([]);
+  });
+
+  test("a test planned but never run (results: []) is a problem", () => {
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", []));
+    expect(check(listed, merged, []).problems).toEqual(["never ran: y.spec.ts › group › two"]);
+  });
+
+  test("tests skipped after a failure in the same file are not blamed as new skips", () => {
+    // A failing serial test or a throwing beforeAll marks the rest of the file
+    // skipped; the failure is the shard's red, not a skip-list problem.
+    const three = report(spec("1", "x.spec.ts", "one", []), spec("2", "x.spec.ts", "two", []), spec("3", "y.spec.ts", "three", []));
+    const merged = report(
+      spec("1", "x.spec.ts", "one", [{ status: "failed", duration: 10 }], "unexpected"),
+      spec("2", "x.spec.ts", "two", skip, "skipped"),
+      spec("3", "y.spec.ts", "three", pass),
+    );
+    expect(check(three, merged, [])).toEqual({ problems: [], ran: 3, skipped: [] });
   });
 
   test("a result for a test --list does not know is a problem", () => {
@@ -109,4 +158,11 @@ test("timingsFromReport sums a file's test durations in seconds", () => {
 
 test("parseExpectedSkips drops blank lines and comments", () => {
   expect(parseExpectedSkips("# why\n\n  a › b  \n# more\nc › d\n")).toEqual(["a › b", "c › d"]);
+});
+
+test("specFiles finds specs in subdirectories too, as testMatch **/*.spec.ts does", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "e2e-shards-"));
+  mkdirSync(path.join(dir, "sub"));
+  for (const f of ["a.spec.ts", "sub/b.spec.ts", "c.test.ts"]) writeFileSync(path.join(dir, f), "");
+  expect(await specFiles(dir)).toEqual(["a.spec.ts", "sub/b.spec.ts"]);
 });
