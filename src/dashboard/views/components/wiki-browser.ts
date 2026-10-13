@@ -73,7 +73,14 @@ import { closeChatOptionsIfNavigatingAway, initChatOptions } from "./wiki-chat-o
 // module — two states, two document listener sets, one split dialog.
 import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
 import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
-import { fellesBtnHtml, FELLES_BTN_ID, openFellesPublishDialog } from "./wiki-felles-publish.ts";
+import {
+  fellesBtnHtml,
+  FELLES_BTN_ID,
+  initFellesSync,
+  openFellesPublishDialog,
+  setFellesBtnMark,
+  type FellesSync,
+} from "./wiki-felles-publish.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
 import {
@@ -497,6 +504,9 @@ let trackerLabels: Record<string, string> = {};
 let fellesPublishBin: string | null = null;
 /** muninn's `FELLES_WIKI_BUCKET`, for the copied command line. */
 let fellesPublishBucket: string | undefined;
+/** The «Felles: N changed» chip and the status behind ⇪ Felles's marker;
+ *  started once, on the first listing that offers ⇪ Felles. */
+let fellesSync: FellesSync | null = null;
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
@@ -2770,7 +2780,7 @@ function renderBreadcrumb(m: WikiListing): void {
     // Third article-level action, same row: turn the page into a pasteable post.
     shareArticleBtnHtml() +
     // ⇪ Felles — publish to the melosys-felles bucket, on an allowlisted wiki only.
-    (fellesPublishBin ? fellesBtnHtml(m.relPath) : "");
+    (fellesPublishBin ? fellesBtnHtml(m.relPath, fellesSync?.markFor(m.relPath) ?? null) : "");
   el.style.display = "flex";
 }
 function hideBreadcrumb(): void {
@@ -7656,6 +7666,7 @@ document.addEventListener("click", (e) => {
         bin: fellesPublishBin,
         root: WIKI_ROOT,
         bucket: fellesPublishBucket,
+        onRun: () => void fellesSync?.load({ afterRun: true }),
       });
     }
   }
@@ -8109,6 +8120,21 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
     data.fellesPublish && typeof data.fellesPublish.bin === "string" ? data.fellesPublish.bin : null;
   fellesPublishBucket =
     typeof data.fellesPublish?.bucket === "string" ? data.fellesPublish.bucket : undefined;
+  if (fellesPublishBin && WIKI && !fellesSync) {
+    const sync = initFellesSync({
+      wiki: WIKI,
+      hrefFor: pageUrlByRelPath,
+      openPage: (relPath) => loadPageByRelPath(relPath),
+      // A status that lands after the breadcrumb was drawn repaints its marker.
+      onStatus: () => {
+        const btn = document.getElementById(FELLES_BTN_ID);
+        if (btn) setFellesBtnMark(btn, sync.markFor(btn.getAttribute("data-felles-relpath") || ""));
+      },
+    });
+    fellesSync = sync;
+    // After the render this listing feeds: the status spawns a bucket listing.
+    setTimeout(() => void sync.load(), 0);
+  }
   // The issue board is a tracker surface: its head link shows only while the
   // listing names a tracker.
   const boardLink = document.getElementById("wikiBoardLink");

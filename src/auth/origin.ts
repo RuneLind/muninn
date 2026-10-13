@@ -124,6 +124,10 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // calls back into this instance and into claude-usage), so an `<img>` on any
   // page must not be able to start one. The reader's same-origin fetch passes.
   "/api/wiki/plan-card",
+  // The felles status SPAWNS Bun and a gcloud bucket listing per uncached
+  // request. The route also requires its own header, which a cross-origin page
+  // cannot send without a preflight; this entry is the instance-wide rule.
+  "/api/wiki/felles-status",
   // On a missing or stale cache it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
   // it — so an `<img>` on any page could start local processes. The chat page
   // calls it with a same-origin `fetch`, which passes.

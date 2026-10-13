@@ -74,7 +74,7 @@ export function fellesPublishPayloadField(
   return { fellesPublish: { bin: config.bin, ...(config.bucket ? { bucket: config.bucket } : {}) } };
 }
 
-export type FellesAction = "publish" | "remove";
+export type FellesAction = "publish" | "remove" | "sync" | "status";
 
 /** The script's arguments after its path, in the order the operator types them.
  *
@@ -85,17 +85,26 @@ export type FellesAction = "publish" | "remove";
  *  (Bun swallows a `--` only directly after the script path). It goes in NFC,
  *  because the script uploads `rel.normalize("NFC")` but deletes the name it is
  *  given, and readdir hands back an NFD path as it was written. `--ja` answers
- *  the script's own prompt; the dialog's confirm step is where the reader is asked. */
+ *  the script's own prompt; the dialog's confirm step is where the reader is asked.
+ *  sync:    `--synk [--dry-run] [--tillat-ident] <root>` — publishes exactly the
+ *  pages the bucket holds an older copy of.
+ *  status:  `--status --json [--tillat-ident] <root>` — read-only; one JSON
+ *  object on stdout (`felles-status.ts` parses it). The whole-wiki modes take
+ *  no relPath. */
 export function fellesScriptArgs(opts: {
   action: FellesAction;
   dryRun: boolean;
   allowIdent: boolean;
   root: string;
-  relPath: string;
+  relPath?: string;
 }): string[] {
   const dry = opts.dryRun ? ["--dry-run"] : [];
+  const ident = opts.allowIdent ? ["--tillat-ident"] : [];
+  if (opts.action === "sync") return ["--synk", ...dry, ...ident, opts.root];
+  if (opts.action === "status") return ["--status", "--json", ...ident, opts.root];
+  if (!opts.relPath) throw new Error(`${opts.action} needs a relPath`);
   if (opts.action === "remove") return ["--fjern", ...dry, "--ja", "--", opts.relPath.normalize("NFC")];
-  return [...dry, ...(opts.allowIdent ? ["--tillat-ident"] : []), opts.root, "./" + opts.relPath];
+  return [...dry, ...ident, opts.root, "./" + opts.relPath];
 }
 
 /** Names the child inherits. `PATH` finds `gcloud`; `HOME` and the `CLOUDSDK_*`
