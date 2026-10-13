@@ -125,10 +125,12 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const stopped = new Set<string>();
   const skipped: string[] = [];
   const outcomeByTitle = new Map<string, FlatTest>();
+  const titles: string[] = [];
   let ran = 0;
   for (const t of flatten(listed)) {
     const r = ranById.get(t.id);
     ranById.delete(t.id);
+    titles.push(t.title);
     if (r) outcomeByTitle.set(t.title, r);
     if (!r || r.results.length === 0) {
       problems.push(`never ran: ${t.title}`);
@@ -137,7 +139,9 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
     // `retries: 0`, so a second result means two shards ran the same test.
     if (r.results.length > 1) problems.push(`ran ${r.results.length} times: ${t.title}`);
     ran++;
-    if (r.outcome !== "skipped") continue;
+    // A skip that fired and was then charged a failing afterAll/afterEach is
+    // `unexpected`, but its skip and reason are still compared with the list.
+    if (r.outcome !== "skipped" && !(r.outcome === "unexpected" && r.skipAnnotated)) continue;
     if (failedFiles.has(r.file) && !r.skipAnnotated) stopped.add(t.title);
     else skipped.push(skipKey(t.title, r.skipReason));
   }
@@ -148,20 +152,19 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const expected = new Set(expectedSkips);
   const actual = new Set(skipped);
   for (const s of skipped) if (!expected.has(s)) problems.push(`skipped, not in e2e/ci-expected-skips.txt: ${s}`);
-  const titles = [...outcomeByTitle.keys()];
   for (const pin of expectedSkips) {
     if (actual.has(pin)) continue;
     const title = pinTitle(pin, titles);
-    const r = title === undefined ? undefined : outcomeByTitle.get(title);
-    if (!r) {
+    if (title === undefined) {
       problems.push(`expected to skip, no such test in --list: ${pin}`);
       continue;
     }
-    if (stopped.has(title!)) continue;
+    const r = outcomeByTitle.get(title);
+    // A listed test with no result is already reported as "never ran".
+    if (!r || stopped.has(title)) continue;
     if (r.outcome === "unexpected") {
-      // Its skip fired and a failing afterAll/afterEach was charged to it, or
-      // it failed instead of skipping. Either way the failure is the shard's
-      // red; only the second deserves a line of its own here.
+      // Skipped for another reason, then a hook failed: that skip is already
+      // reported as not in the list. Failed without skipping: say so.
       if (!r.skipAnnotated) problems.push(`expected to skip, failed instead: ${pin}`);
       continue;
     }

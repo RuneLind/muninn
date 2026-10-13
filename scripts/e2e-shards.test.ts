@@ -265,6 +265,26 @@ describe("check", () => {
     ]);
   });
 
+  test("a pinned test that is listed but never ran resolves to itself, not to a shorter sibling", () => {
+    // Only "copy" ran. The pin names "copy | slack", which never ran: that is
+    // reported once, as "never ran", not blamed on "copy" as a skip it did not take.
+    const l = report(spec("1", "x.spec.ts", "copy", []), spec("2", "x.spec.ts", "copy | slack", []));
+    const m = report(spec("1", "x.spec.ts", "copy", pass));
+    expect(check(l, m, ["x.spec.ts › group › copy | slack | one bot"]).problems).toEqual(["never ran: x.spec.ts › group › copy | slack"]);
+  });
+
+  test("a pinned test that skipped for ANOTHER reason before a hook failed still reports that skip", () => {
+    // The missing-fixture skip ("no bots") is what the list exists to catch;
+    // a failing afterAll after it must not hide it.
+    const merged = report(
+      spec("1", "x.spec.ts", "one", pass),
+      spec("2", "y.spec.ts", "two", [{ status: "failed", duration: 10 }], "unexpected", "no bots"),
+    );
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual([
+      "skipped, not in e2e/ci-expected-skips.txt: y.spec.ts › group › two | no bots",
+    ]);
+  });
+
   test("a result for a test --list does not know is a problem", () => {
     const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", pass), spec("3", "z.spec.ts", "three", pass));
     expect(check(listed, merged, []).problems).toEqual(["ran but not in --list (in two shards?): z.spec.ts › group › three"]);
@@ -288,6 +308,10 @@ test("timingsFromReport takes a file's span from first start to last end, gaps i
   // 1.0 s of tests inside a 4.0 s span: the 3 s between them is context and hook time.
   const merged = report(spec("1", "x.spec.ts", "one", at(0, 500)), spec("2", "x.spec.ts", "two", at(3, 1000)));
   expect(timingsFromReport(merged)).toEqual({ "x.spec.ts": 4 });
+});
+
+test("timingsFromReport gives a file whose tests have no results zero seconds, not a non-number", () => {
+  expect(timingsFromReport(report(spec("1", "x.spec.ts", "one", [])))).toEqual({ "x.spec.ts": 0 });
 });
 
 test("timingsFromReport sums a file's test durations in seconds", () => {
