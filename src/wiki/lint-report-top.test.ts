@@ -163,6 +163,15 @@ describe("lint: missing-tldr / tldr-no-more (live report pages and .mdx referenc
     ]);
   });
 
+  test("every reference folder is in scope, and a live report page outside plans/ too", async () => {
+    const dirs = ["flows", "concepts", "repos", "integrations", "projects", "reading"];
+    for (const d of dirs) await write(`${d}/r.mdx`, fm([])(["# R", "", "Prose."]));
+    await write("notes/r.mdx", fm([])(["# R", "", "Prose."]));
+    await write("archive/live.mdx", fm(["plan_status: in-flight", "status_date: 2026-10-01"])(["# L", "", "Prose."]));
+    const got = (await tldr()).map((x) => x.relPath).sort();
+    expect(got).toEqual([...dirs.map((d) => `${d}/r.mdx`), "archive/live.mdx"].sort());
+  });
+
   test("the finding names the first non-blank line after the H1, and is a warning", async () => {
     await write("plans/p.mdx", page(["# Title", "", "*Italic line.*", "", "## Brief"]));
     const [f] = await tldr();

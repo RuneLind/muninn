@@ -12,10 +12,11 @@
  * |                           | not `<Tldr>` (the In short / Kort fortalt box)                             |
  * | `tldr-no-more` (info)     | that `<Tldr>` holds no `<More>`                                            |
  *
- * Both read the page through the renderer's own parser; the first sentence is
- * the reader's own guarded split (`decisionFirstSentence`) and a row the rule
- * in `src/format/report-top.ts`, so the finding and the reader agree. A struck or superseded item is
- * skipped: it is history, and the reader dims it.
+ * The first two read the page through the renderer's own parser; the first
+ * sentence is the reader's own guarded split (`decisionFirstSentence`) and a row
+ * the rule in `src/format/report-top.ts`, so the finding and the reader agree. A
+ * struck or superseded DecisionLog item is skipped: it is history, and the
+ * reader dims it.
  *
  * The two Tldr checks run from {@link checkTldr}, which `lint.ts` calls only
  * for pages that are neither reserved nor culled, as check 9 does.
