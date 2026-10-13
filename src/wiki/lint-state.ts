@@ -3,8 +3,8 @@
  * Each volatile fact (a PR's state, a prod release, a Jira status) has one
  * home, on one page: the page whose frontmatter `owns:` lists the key. On a
  * page the homes are `<StatusRows>`, a paragraph that starts with a `**Status**`
- * label, a pipe table directly under a `PR ledger` / `PR-oversikt` label or
- * heading, and `status_note`. Every other line names the key and leaves the
+ * label, a leading-pipe table directly under a `PR ledger` / `PR-oversikt` label
+ * or heading, and `status_note`. Every other line names the key and leaves the
  * state to the chip.
  *
  * | check                | fires when                                                                 |
@@ -21,7 +21,7 @@
  * reserved or culled. Frontmatter `description` is linted; `status_note` is a
  * home. Exempt from check 1, besides the homes: `<Timeline>`, `<DecisionLog>`,
  * `<Historic>` (each exactly where `parseBlocks` makes a block of it),
- * blockquotes with their lazy continuation lines, code fences and inline code.
+ * blockquote lines (a line that opens with `>`), code fences and inline code.
  * HTML and JSX comments are linted: this reader renders them as visible text.
  * Lanes and plain tables are linted.
  *
@@ -30,7 +30,8 @@
  * own, so a public repo carries no domain list.
  *
  * A clause ({@link stateClauses}) is the text between `·`, `;` or a sentence
- * end; a table row is one clause. A state phrase belongs to the nearest key in
+ * end (closing emphasis, a paren or a quote may follow the period); a table row
+ * is one clause. A state phrase belongs to the nearest key in
  * its clause, and a home clause with no key states the page's own work, so it
  * is never a finding. Known gap: a clause that names only a PR cannot be
  * attributed to a key.
@@ -113,10 +114,8 @@ const STATUS_PARA_RE = /^(?:[-*+]\s+|\d+[.)]\s+)?\*\*Status(?:\s+\d{1,2}\.\d{1,2
 /** A ledger label's own text, once heading marks, `**` and a trailing `:`/`.`
  *  are gone: the label alone, or with a short parenthetical. */
 const LEDGER_LABEL_RE = /^(?:PR[ -]ledger|PR-oversikt)(?:\s*\([^()]{1,40}\))?$/i;
-/** A blockquote line, after an optional list marker (`- > …`). */
-const QUOTE_RE = /^(?:(?:[-*+]|\d+[.)])\s+)?>/;
-/** A GFM delimiter row, leading pipe optional. */
-const SEPARATOR_RE = /^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?$|^\|\s*:?-+:?\s*\|$/;
+/** A blockquote line. `- > x` is a list item: the reader shows its `>`. */
+const QUOTE_RE = /^>/;
 const INLINE_TAG_RE = new RegExp(`^<(?:${INLINE_COMPONENT_NAMES.join("|")})(?=[\\s>/])`);
 
 /** One case-insensitive, word-edged alternation over `words`, longest first so
@@ -323,8 +322,8 @@ function trackedLines(lines: readonly string[], fenced: readonly boolean[], body
   return roles;
 }
 
-/** Each pipe-table row line → the first line of its table: rows that start
- *  with `|`, or a run of `|` lines whose second line is a delimiter row. */
+/** Each pipe-table row line → the first line of its table: a run of lines that
+ *  start with `|`. Rows without a leading pipe render as text. */
 function tableRows(lines: readonly string[], fenced: readonly boolean[], body: number): Map<number, number> {
   const out = new Map<number, number>();
   for (let i = body; i < lines.length; i++) {
@@ -333,8 +332,6 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
     let j = i;
     if (t.startsWith("|")) {
       while (j < lines.length && !fenced[j] && lines[j]!.trim().startsWith("|")) out.set(j++, i);
-    } else if (t.includes("|") && i + 1 < lines.length && SEPARATOR_RE.test(lines[i + 1]!.trim())) {
-      while (j < lines.length && !fenced[j] && lines[j]!.trim().includes("|")) out.set(j++, i);
     }
     if (j > i) i = j - 1;
   }
@@ -353,8 +350,8 @@ function isLedgerLabel(line: string): boolean {
   return LEDGER_LABEL_RE.test(label);
 }
 
-/** A line that starts a new block, ending a paragraph or a lazy quote line.
- *  An inline component (`<Pill>`) continues the paragraph. */
+/** A line that starts a new block, ending a paragraph. An inline component
+ *  (`<Pill>`) continues the paragraph. */
 function startsBlock(t: string): boolean {
   if (/^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\||```|~~~)/.test(t)) return true;
   return t.startsWith("<") && !INLINE_TAG_RE.test(t);
@@ -364,12 +361,13 @@ function startsBlock(t: string): boolean {
  * Classify a page's lines. Frontmatter: `description` and `status_note`, each
  * with its indented continuation lines (a quoted, plain or block scalar, blank
  * lines inside a block scalar included), are a linted unit and a home unit;
- * the rest is neither. Body: fences, blockquotes (with a lazy
- * continuation line) and the three history blocks are exempt; `<StatusRows>`,
+ * the rest is neither. Body: fences, blockquote lines and the three history
+ * blocks are exempt; `<StatusRows>`,
  * a `**Status**` paragraph and a PR-ledger table are homes; every other line
  * is linted.
  */
 export function stateLineRoles(content: string): LineRoles {
+  // Folded so a CRLF fence is a fence: `fencedLineMask` reads "```\r" as no fence.
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const body = frontmatterEndLine(lines);
   const fenced = fencedLineMask(lines);
@@ -392,11 +390,9 @@ export function stateLineRoles(content: string): LineRoles {
   const tables = tableRows(lines, fenced, body);
   let statusPara = false;
   let ledger = false;
-  let quote = false;
   const reset = () => {
     statusPara = false;
     ledger = false;
-    quote = false;
   };
   for (let i = body; i < lines.length; i++) {
     if (fenced[i]) {
@@ -414,14 +410,10 @@ export function stateLineRoles(content: string): LineRoles {
       reset();
       continue;
     }
+    // The reader renders the unprefixed line after a quote as its own text.
     if (QUOTE_RE.test(t)) {
       reset();
-      quote = true;
       continue;
-    }
-    if (quote) {
-      if (!startsBlock(t)) continue; // a lazy continuation stays in the quote
-      quote = false;
     }
 
     // A `**Status**` paragraph runs to the next blank line or block start.
@@ -455,12 +447,15 @@ export function stateLineRoles(content: string): LineRoles {
 
 /**
  * Where each clause ends, as `[start, end)` spans: at `·`, `;`, or a `.`/`!`/`?`
- * followed by whitespace or the end. Not inside a matched `[...]` (a link text,
+ * followed, after any closing `**`, `__`, `*`, `_`, `)`, `»` or `"`, by
+ * whitespace or the end. Not inside a matched `[...]` (a link text,
  * a wikilink), and not at a date's own period (`13.10. merget`, `12. oktober`).
  * A table row is one clause. Not `trackers/jira.ts`'s `clauseBoundaries`, which
  * splits a table row by cell and a date at its period, nor `lint-drift.ts`'s
  * leading-clause regex.
  */
+const SENTENCE_CLOSERS = "*_)»\"";
+
 export function stateClauses(text: string, row = false): [number, number][] {
   if (row) return [[0, text.length]];
   const matched = new Set<number>();
@@ -484,11 +479,15 @@ export function stateClauses(text: string, row = false): [number, number][] {
     }
     if (depth > 0) continue;
     let end = ch === "·" || ch === ";";
-    if (!end && (ch === "." || ch === "!" || ch === "?") && (i + 1 === text.length || /\s/.test(text[i + 1]!))) {
-      const before = text.slice(Math.max(0, i - 12), i);
-      const dateDot = ch === "." && /(?<![\d.])\d{1,2}\.\d{1,2}$/.test(before);
-      const dayDot = ch === "." && /(?<![\d.])\d{1,3}$/.test(before) && new RegExp(`^\\s+(?:${MONTHS})(?![\\p{L}])`, "iu").test(text.slice(i + 1));
-      end = !dateDot && !dayDot;
+    if (!end && (ch === "." || ch === "!" || ch === "?")) {
+      let j = i + 1;
+      while (j < text.length && SENTENCE_CLOSERS.includes(text[j]!)) j++;
+      if (j === text.length || /\s/.test(text[j]!)) {
+        const before = text.slice(Math.max(0, i - 12), i);
+        const dateDot = ch === "." && /(?<![\d.])\d{1,2}\.\d{1,2}$/.test(before);
+        const dayDot = ch === "." && /(?<![\d.])\d{1,3}$/.test(before) && new RegExp(`^\\s+(?:${MONTHS})(?![\\p{L}])`, "iu").test(text.slice(j));
+        end = !dateDot && !dayDot;
+      }
     }
     if (end) {
       out.push([from, i]);

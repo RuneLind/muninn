@@ -452,6 +452,23 @@ describe("check 14 clauses", () => {
     expect(await flaggedBody(body)).toEqual([2, 3, 4]);
   });
 
+  test("a sentence end before closing emphasis, a paren, a guillemet or a quote ends the clause", async () => {
+    const body = [
+      "**First night (06.10).** 4 of 13 PRs remain open.",
+      "__Merged.__ PR #45 waits.",
+      "*Merged!* PR #45 waits.",
+      "_Merged?_ PR #45 waits.",
+      "(Merged.) PR #45 waits.",
+      "«Merged.» PR #45 waits.",
+      '"Merged." PR #45 waits.',
+      "**PR #45 is merged.**",
+      "PR #45 shipped as 26.279.140721 and merged.",
+      "PR #45 merged.**x** too.",
+      "**PR #45 is due 12.** oktober and merged.",
+    ];
+    expect(await flaggedBody(body)).toEqual([7, 8, 9, 10]);
+  });
+
   test("the finding names the anchor nearest the state in its clause", async () => {
     await write("plans/p.mdx", page(["DEMO-1 waits for the fix, PR #45 merged."]));
     const f = await outside();
@@ -476,7 +493,9 @@ describe("check 14 homes", () => {
     expect(await flaggedBody(body)).toEqual([8]);
   });
 
-  test("a ledger label must BE the label; a table without leading pipes counts", async () => {
+  test("a ledger label must BE the label; a pipe-less table is text, not a ledger", async () => {
+    // The reader renders `Key | State` rows without leading pipes as text, so
+    // under a ledger label they are prose like any other line.
     const body = [
       "## Why PR-oversikt is missing:",
       "",
@@ -495,7 +514,7 @@ describe("check 14 homes", () => {
       "---|---",
       "DEMO-3 | merged",
     ];
-    expect(await flaggedBody(body)).toEqual([4]);
+    expect(await flaggedBody(body)).toEqual([4, 15]);
   });
 
   test("a Status paragraph keeps a line opening with inline JSX; a quote ends it", async () => {
@@ -503,12 +522,16 @@ describe("check 14 homes", () => {
     expect(await flaggedBody(["**Status:** waits", "<Pill>x</Pill> DEMO-2 merged"])).toEqual([]);
     await write("plans/other.mdx", page(["**Status:** waits", "> a quote", "DEMO-1 merged"]));
     expect(await notOwner()).toEqual([]);
+    // The line after the quote renders as its own text: prose, linted by check 1.
+    expect((await outside()).filter((f) => f.relPath === "plans/other.mdx").map((f) => f.line)).toEqual([bodyLine(2)]);
   });
 });
 
 describe("check 14 exempt text", () => {
-  test("a lazy quote continuation and a quote in a list item are exempt", async () => {
-    expect(await flaggedBody(["> The team said", "DEMO-1 is merged by now.", "", "- > DEMO-2 merged, said the team.", "", "DEMO-3 merged."])).toEqual([5]);
+  test("only a `>` line is a quote: a lazy continuation and `- > x` are linted", async () => {
+    // The reader renders the unprefixed line after a quote as a separate text
+    // paragraph, and `- > x` as a list item holding a literal `>`.
+    expect(await flaggedBody(["> The team said", "DEMO-1 is merged by now.", "", "- > DEMO-2 merged, said the team.", "", "> DEMO-3 merged."])).toEqual([1, 3]);
   });
 
   test("HTML and JSX comments are visible text in this reader, for both checks", async () => {
@@ -551,6 +574,14 @@ describe("check 14 frontmatter", () => {
     );
     expect((await outside()).map((f) => f.line)).toEqual([3]);
     expect((await notOwner()).map((f) => f.line)).toEqual([4]);
+  });
+
+  test("a CRLF page's fence is a fence", async () => {
+    // The reader renders a CRLF fence as code; without the fold the closer
+    // carries a `\r` and the fence is not one.
+    const body = ["```", "DEMO-2 merged", "```", "", "DEMO-4 merged."];
+    await write("plans/p.mdx", page(body).replace(/\n/g, "\r\n"));
+    expect((await outside()).map((f) => f.line)).toEqual([bodyLine(4)]);
   });
 
   test("every continuation line of a multi-line description is linted, at its own line", async () => {

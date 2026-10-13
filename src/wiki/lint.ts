@@ -968,7 +968,7 @@ export async function lintWiki(
     }
     // Reserved and culled pages own nothing and are linted for nothing.
     if (statePhrases && !reservedBasename(page.relPath) && !page.culled) {
-      const fm = parseFrontmatter(content.replace(/\r\n/g, "\n"));
+      const fm = parseFrontmatter(content);
       stateOwnerPages.push({ relPath: page.relPath, content });
       if (isStateScopePage(page.relPath, fm, page.plan_status)) statePages.push({ page, content, fm });
     }
