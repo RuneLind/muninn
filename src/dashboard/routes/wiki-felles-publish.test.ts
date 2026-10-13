@@ -246,3 +246,300 @@ describe("refusals before any spawn", () => {
     expect(spawned).toBe(false);
   });
 });
+
+describe("sync", () => {
+  const sync = { wiki: "kode", action: "sync", dryRun: true, allowIdent: true };
+
+  test("spawns --synk on the root, with the dialog's flags", async () => {
+    const res = await post(appWith(), sync);
+    expect(res.status).toBe(200);
+    expect((await readFile(argvFile, "utf8")).trim().split("\n")).toEqual([
+      "--synk",
+      "--dry-run",
+      "--tillat-ident",
+      root,
+      "DB=unset",
+    ]);
+    await post(appWith(), { ...sync, dryRun: false, allowIdent: false });
+    expect((await readFile(argvFile, "utf8")).trim().split("\n")).toEqual(["--synk", root, "DB=unset"]);
+  });
+
+  test("runs under its own, longer timeout", async () => {
+    const seen: number[] = [];
+    const app = appWith({
+      timeoutMs: 1_000,
+      syncTimeoutMs: 9_000,
+      runProc: async (_argv, timeoutMs) => {
+        seen.push(timeoutMs);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    await post(app, sync);
+    await post(app, ok);
+    expect(seen).toEqual([9_000, 1_000]);
+  });
+
+  test("shares the one run slot with publish and remove", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const app = appWith({
+      runProc: async () => {
+        await gate;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    const first = post(app, sync);
+    await Bun.sleep(20);
+    expect((await post(app, ok)).status).toBe(409);
+    expect((await post(app, sync)).status).toBe(409);
+    release();
+    expect((await first).status).toBe(200);
+  });
+
+  test("a sync that does not return is a 504 that says to check the status", async () => {
+    const app = appWith({
+      runProc: async () => {
+        throw new ProcTimeoutError("felles-publish", 5);
+      },
+    });
+    const res = await post(app, sync);
+    expect(res.status).toBe(504);
+    expect(((await res.json()) as { error: string }).error).toMatch(/refresh the status/);
+  });
+
+  test.each([
+    ["a relPath", { ...sync, relPath: "plans/a.mdx" }],
+    ["no allowIdent", { wiki: "kode", action: "sync", dryRun: true }],
+    ["no wiki", { ...sync, wiki: "" }],
+  ])("refuses %s before any spawn", async (_label, body) => {
+    let spawned = false;
+    const app = appWith({
+      runProc: async () => {
+        spawned = true;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    expect((await post(app, body)).status).toBe(400);
+    expect(spawned).toBe(false);
+  });
+});
+
+describe("GET /api/wiki/felles-status", () => {
+  const STATUS = {
+    "bøtte": "b",
+    sider: [
+      { relPath: "plans/a.mdx", tilstand: "endret", endredeFiler: ["plans/a.mdx"], avslag: [], advarsler: [] },
+      { relPath: "-x.md", tilstand: "uendret", endredeFiler: [], avslag: [], advarsler: [] },
+    ],
+    "foreldreløse": ["gone.md"],
+  };
+  const get = (app: Hono, wiki = "kode", headers: Record<string, string> = { "x-muninn-felles": "status" }) =>
+    app.request(`/api/wiki/felles-status?wiki=${wiki}`, { headers });
+
+  /** A runProc that counts spawns, records argv, and can be held open. */
+  function fake(answer: () => { stdout: string; stderr?: string; exitCode: number } = () => ({ stdout: JSON.stringify(STATUS), exitCode: 0 })) {
+    const state = { calls: 0, argv: [] as string[], hold: null as Promise<void> | null };
+    const runProc = async (argv: string[]) => {
+      state.calls++;
+      state.argv = argv;
+      if (state.hold) await state.hold;
+      const a = answer();
+      return { stdout: a.stdout, stderr: a.stderr ?? "", exitCode: a.exitCode };
+    };
+    return { state, runProc };
+  }
+
+  test("spawns --status --json --tillat-ident on the root and serves the validated shape", async () => {
+    const f = fake();
+    const res = await get(appWith({ runProc: f.runProc, now: () => 1_000 }));
+    expect(res.status).toBe(200);
+    expect(f.state.argv).toEqual(["/bin/bash", bin, "--status", "--json", "--tillat-ident", root]);
+    expect(await res.json()).toEqual({
+      bucket: "b",
+      changed: 1,
+      checkedAt: 1_000,
+      pages: [
+        { relPath: "plans/a.mdx", masked: false, state: "changed", changedFiles: ["plans/a.mdx"], refusals: [], warnings: [] },
+        { relPath: "-x.md", masked: false, state: "unchanged", changedFiles: [], refusals: [], warnings: [] },
+      ],
+      orphans: [{ path: "gone.md", masked: false }],
+    });
+  });
+
+  test("the real fake script's argv, through /bin/bash", async () => {
+    await get(appWith());
+    expect((await readFile(argvFile, "utf8")).trim().split("\n")).toEqual([
+      "--status",
+      "--json",
+      "--tillat-ident",
+      root,
+      "DB=unset",
+    ]);
+  });
+
+  test("anything but the status JSON is a 502, never the raw output", async () => {
+    for (const out of [{ stdout: "OK plans/a.mdx", exitCode: 0 }, { stdout: JSON.stringify({ ...STATUS, sider: "x" }), exitCode: 0 }]) {
+      const res = await get(appWith({ runProc: fake(() => out).runProc }));
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { error: string; reason: string };
+      expect(body.reason).toBe("bad-status");
+      expect(body.error).not.toContain("OK plans/a.mdx");
+    }
+  });
+
+  test("a failing script is a 502 with its stderr line; a timeout a 504", async () => {
+    const failed = await get(appWith({ runProc: fake(() => ({ stdout: "", stderr: "Feil: gcloud mangler\n", exitCode: 2 })).runProc }));
+    expect(failed.status).toBe(502);
+    expect(((await failed.json()) as { error: string }).error).toBe("The status script failed (exit 2): Feil: gcloud mangler");
+    const timedOut = await get(
+      appWith({
+        runProc: async () => {
+          throw new ProcTimeoutError("felles-status", 5);
+        },
+      }),
+    );
+    expect(timedOut.status).toBe(504);
+  });
+
+  test("concurrent requests share one spawn", async () => {
+    const f = fake();
+    let release!: () => void;
+    f.state.hold = new Promise<void>((r) => (release = r));
+    const app = appWith({ runProc: f.runProc });
+    const a = get(app);
+    const b = get(app);
+    await Bun.sleep(20);
+    release();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect([ra.status, rb.status]).toEqual([200, 200]);
+    expect(await ra.json()).toEqual(await rb.json());
+    expect(f.state.calls).toBe(1);
+  });
+
+  test("a success is cached for the TTL; a failure is not cached", async () => {
+    let t = 0;
+    const f = fake();
+    const app = appWith({ runProc: f.runProc, now: () => t, statusTtlMs: 100 });
+    await get(app);
+    t = 99;
+    await get(app);
+    expect(f.state.calls).toBe(1);
+    t = 100;
+    await get(app);
+    expect(f.state.calls).toBe(2);
+
+    let code = 2;
+    const g = fake(() => ({ stdout: code ? "" : JSON.stringify(STATUS), exitCode: code }));
+    const app2 = appWith({ runProc: g.runProc, now: () => 0 });
+    expect((await get(app2)).status).toBe(502);
+    code = 0;
+    expect((await get(app2)).status).toBe(200);
+    expect(g.state.calls).toBe(2);
+  });
+
+  test("any run through the POST drops the cache", async () => {
+    const f = fake();
+    const app = appWith({ runProc: f.runProc, now: () => 0 });
+    await get(app);
+    for (const body of [ok, { ...ok, action: "remove" }, { wiki: "kode", action: "sync", dryRun: false, allowIdent: true }]) {
+      const before = f.state.calls;
+      expect((await post(app, body)).status).toBe(200);
+      await get(app);
+      // One spawn for the POST, one fresh status.
+      expect(f.state.calls).toBe(before + 2);
+    }
+  });
+
+  test("does not wait for the run slot, and a status taken mid-run is not cached", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let statusCalls = 0;
+    const app = appWith({
+      now: () => 0,
+      runProc: async (argv) => {
+        if (argv.includes("--status")) {
+          statusCalls++;
+          return { stdout: JSON.stringify(STATUS), stderr: "", exitCode: 0 };
+        }
+        await gate;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    const run = post(app, { wiki: "kode", action: "sync", dryRun: false, allowIdent: true });
+    await Bun.sleep(20);
+    expect((await get(app)).status).toBe(200);
+    release();
+    await run;
+    await get(app);
+    expect(statusCalls).toBe(2);
+  });
+
+  test("a status spawned before a run ends is not joined after it", async () => {
+    let releaseStatus!: () => void;
+    const statusGate = new Promise<void>((r) => (releaseStatus = r));
+    let statusCalls = 0;
+    const app = appWith({
+      now: () => 0,
+      runProc: async (argv) => {
+        if (!argv.includes("--status")) return { stdout: "", stderr: "", exitCode: 0 };
+        // The first status sees the bucket before the run: the page still changed.
+        const first = ++statusCalls === 1;
+        if (first) await statusGate;
+        const tilstand = first ? "endret" : "uendret";
+        return { stdout: JSON.stringify({ ...STATUS, sider: [{ ...STATUS.sider[0], tilstand }] }), stderr: "", exitCode: 0 };
+      },
+    });
+    const changedOf = async (res: Response | Promise<Response>) => ((await (await res).json()) as { changed: number }).changed;
+    const stale = get(app);
+    await Bun.sleep(20);
+    expect((await post(app, ok)).status).toBe(200);
+    expect(await changedOf(get(app))).toBe(0);
+    expect(statusCalls).toBe(2);
+    releaseStatus();
+    expect(await changedOf(stale)).toBe(1);
+    // The stale answer did not overwrite the fresh one in the cache.
+    expect(await changedOf(get(app))).toBe(0);
+    expect(statusCalls).toBe(2);
+  });
+
+  describe("refusals before any spawn", () => {
+    test.each([
+      ["no marker header", "kode", {}, 403],
+      ["a wrong marker", "kode", { "x-muninn-felles": "1" }, 403],
+      ["cross-site", "kode", { "x-muninn-felles": "status", "sec-fetch-site": "cross-site" }, 403],
+      ["a foreign Origin", "kode", { "x-muninn-felles": "status", origin: "https://evil.test", host: "localhost" }, 403],
+      ["no wiki", "", { "x-muninn-felles": "status" }, 400],
+      ["unknown wiki", "nope", { "x-muninn-felles": "status" }, 404],
+      ["wiki not allowlisted", "mimir", { "x-muninn-felles": "status" }, 403],
+    ])("%s", async (_label, wiki, headers, status) => {
+      const f = fake();
+      const res = await get(appWith({ runProc: f.runProc }), wiki, headers as Record<string, string>);
+      expect(res.status).toBe(status);
+      expect(f.state.calls).toBe(0);
+    });
+
+    test("a same-origin request passes the gate", async () => {
+      const f = fake();
+      const res = await get(appWith({ runProc: f.runProc }), "kode", {
+        "x-muninn-felles": "status",
+        "sec-fetch-site": "same-origin",
+        origin: "http://localhost:3010",
+        host: "localhost:3010",
+      });
+      expect(res.status).toBe(200);
+    });
+
+    test("a read-only root and an unconfigured instance", async () => {
+      const f = fake();
+      __setReadonlyWikiRootsForTest([root]);
+      try {
+        expect((await get(appWith({ runProc: f.runProc }))).status).toBe(403);
+      } finally {
+        __setReadonlyWikiRootsForTest();
+      }
+      expect((await get(appWith({ runProc: f.runProc, config: () => config({ bin: null }) }))).status).toBe(501);
+      expect((await get(appWith({ runProc: f.runProc, config: () => config({ bin: "/nope/p.ts" }) }))).status).toBe(501);
+      expect(f.state.calls).toBe(0);
+    });
+  });
+});

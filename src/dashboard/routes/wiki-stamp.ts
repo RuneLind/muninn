@@ -305,7 +305,7 @@ export function decideStampRequest(req: {
 /** Does this `Origin` name the authority the request was addressed to? Compared
  *  on host+port only: a reverse proxy terminates TLS, so the browser's `https`
  *  scheme and muninn's own `http` say nothing about each other. */
-function originMatchesHost(origin: string, host: string): boolean {
+export function originMatchesHost(origin: string, host: string): boolean {
   let authority: string;
   try {
     // `Origin: null` (a sandboxed iframe, a redirected cross-origin POST) does

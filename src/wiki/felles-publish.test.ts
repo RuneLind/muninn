@@ -104,6 +104,28 @@ test("remove names the object in NFC, the spelling publish uploaded", () => {
   expect(object).toBe("plans/p\u00E5.md");
 });
 
+test("sync and status run on the whole wiki: the root, no relPath", () => {
+  const base = { root: "/w", relPath: "plans/a.mdx" };
+  expect(fellesScriptArgs({ action: "sync", dryRun: true, allowIdent: true, ...base })).toEqual([
+    "--synk",
+    "--dry-run",
+    "--tillat-ident",
+    "/w",
+  ]);
+  expect(fellesScriptArgs({ action: "sync", dryRun: false, allowIdent: false, root: "/w" })).toEqual(["--synk", "/w"]);
+  expect(fellesScriptArgs({ action: "status", dryRun: true, allowIdent: true, root: "/w" })).toEqual([
+    "--status",
+    "--json",
+    "--tillat-ident",
+    "/w",
+  ]);
+});
+
+test("a page action without a relPath throws rather than spawning on the root", () => {
+  expect(() => fellesScriptArgs({ action: "publish", dryRun: true, allowIdent: true, root: "/w" })).toThrow();
+  expect(() => fellesScriptArgs({ action: "remove", dryRun: true, allowIdent: true, root: "/w" })).toThrow();
+});
+
 test("the child environment is an allowlist", () => {
   const env = fellesPublishChildEnv({
     PATH: "/usr/bin",

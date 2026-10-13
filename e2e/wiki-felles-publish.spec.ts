@@ -9,7 +9,9 @@
  * copied command naming the served root.
  *
  * `FELLES_WIKI_PUBLISH_BIN` is a STUB `.ts` that prints its argv and exits 0
- * (3 for `FAIL_REL`), so nothing here reaches gcloud or a bucket.
+ * (3 for `FAIL_REL`), so nothing here reaches gcloud or a bucket. For
+ * `--status --json` it prints a status in which `REL` is `endret` until a real
+ * `--synk` has run (a marker file), so the sync flow can be driven end to end.
  */
 
 import { test, expect } from "@playwright/test";
@@ -21,7 +23,11 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { contrastOf } from "./contrast.ts";
-import { FELLES_BTN_ID } from "../src/dashboard/views/components/wiki-felles-publish.ts";
+import {
+  FELLES_BTN_ID,
+  FELLES_STALE_CLASS,
+  FELLES_SYNC_BTN_ID,
+} from "../src/dashboard/views/components/wiki-felles-publish.ts";
 
 const BTN = `#${FELLES_BTN_ID}`;
 const PORT = e2ePort("wiki-felles-publish");
@@ -39,6 +45,7 @@ let server: ChildProcess | undefined;
 let root = "";
 let otherRoot = "";
 let stub = "";
+let syncedMarker = "";
 
 test.beforeAll(async () => {
   root = realpathSync(await mkdtemp(path.join(tmpdir(), "muninn-e2e-felles-")));
@@ -48,10 +55,35 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, FAIL_REL), PAGE.replace(/Vedtak/g, "Feiler"), "utf8");
   await writeFile(path.join(otherRoot, "page.md"), "# Other\n", "utf8");
   stub = path.join(root, "..", `felles-stub-${process.pid}.ts`);
+  syncedMarker = path.join(root, "..", `felles-stub-synced-${process.pid}`);
+  const page = (relPath: string, tilstand: string, extra: Record<string, unknown> = {}) => ({
+    relPath,
+    tilstand,
+    endredeFiler: [],
+    avslag: [],
+    advarsler: [],
+    ...extra,
+  });
+  const statusFor = (synced: boolean) => ({
+    "bøtte": "e2e-bucket",
+    sider: [
+      page(REL, synced ? "uendret" : "endret", synced ? {} : { endredeFiler: [REL, "plans/2026-09-29-vedtak.data.json"] }),
+      page(FAIL_REL, "uendret"),
+      page("[skjult sti: 1 funn]", "avvist", { avslag: ["fødselsnummer"] }),
+    ],
+    "foreldreløse": ["plans/gammel.data.json"],
+  });
   await writeFile(
     stub,
     // Slow enough that the in-flight case can press Escape mid-run.
     "await Bun.sleep(700);\n" +
+      `const marker = ${JSON.stringify(syncedMarker)};\n` +
+      'if (process.argv.includes("--status")) {\n' +
+      `  const synced = await Bun.file(marker).exists();\n` +
+      `  console.log(JSON.stringify(synced ? ${JSON.stringify(statusFor(true))} : ${JSON.stringify(statusFor(false))}));\n` +
+      "  process.exit(0);\n" +
+      "}\n" +
+      'if (process.argv.includes("--synk") && !process.argv.includes("--dry-run")) await Bun.write(marker, "1");\n' +
     'console.log("ARGS " + JSON.stringify(process.argv.slice(2)));\n' +
       'console.log("  https://example.test/wiki?wiki=melosys-felles&relPath=x");\n' +
       `if (process.argv.includes(${JSON.stringify(FAIL_REL)})) process.exit(3);\n`,
@@ -91,6 +123,7 @@ test.afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
   if (otherRoot) await rm(otherRoot, { recursive: true, force: true });
   if (stub) await rm(stub, { force: true });
+  if (syncedMarker) await rm(syncedMarker, { force: true });
 });
 
 test.describe("Wiki reader: ⇪ Felles", () => {
@@ -206,5 +239,91 @@ test.describe("Wiki reader: ⇪ Felles", () => {
     await page.goto(`${BASE}/wiki?wiki=${OTHER}&relPath=page.md`);
     await expect(page.locator("#wikiShareBtn")).toBeVisible();
     await expect(page.locator(BTN)).toHaveCount(0);
+    await expect(page.locator(CHIP)).toHaveCount(0);
+  });
+});
+
+const CHIP = `#${FELLES_SYNC_BTN_ID}`;
+
+test.describe("Wiki reader: Felles sync status", () => {
+  test("the chip counts changed pages, and the dialog lists them", async ({ page }) => {
+    await rm(syncedMarker, { force: true });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    // The article renders while the status (a 700 ms stub) is still loading.
+    await expect(page.locator("#articleWrap h1").first()).toHaveText("Vedtak");
+    await expect(page.locator(CHIP)).toHaveText(/^Felles: (checking…|1 changed)$/);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+    await page.locator(CHIP).click();
+    const dialog = page.locator("dialog.wiki-felles-sync-dialog");
+    await expect(dialog).toBeVisible();
+    const changed = dialog.locator(".wiki-felles-section.changed");
+    await expect(changed.getByRole("link", { name: REL })).toBeVisible();
+    await expect(changed).toContainText("plans/2026-09-29-vedtak.data.json");
+    // A masked path is text, never a link; refusals and orphans are listed.
+    const refused = dialog.locator(".wiki-felles-section.refused");
+    await expect(refused).toContainText("[skjult sti: 1 funn]");
+    await expect(refused).toContainText("fødselsnummer");
+    await expect(refused.locator("a")).toHaveCount(0);
+    await expect(dialog.locator(".wiki-felles-section.orphans")).toContainText("plans/gammel.data.json");
+    await expect(dialog.getByRole("button", { name: "Publish changed (1)" })).toBeEnabled();
+  });
+
+  test("⇪ Felles is marked stale on a changed page only, and navigation repaints it without a refetch", async ({ page }) => {
+    await rm(syncedMarker, { force: true });
+    let statusRequests = 0;
+    page.on("request", (r) => {
+      if (r.url().includes("/api/wiki/felles-status")) statusRequests++;
+    });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+    await expect(page.locator(BTN)).toHaveClass(new RegExp(FELLES_STALE_CLASS));
+    await expect(page.locator(BTN)).toHaveAttribute("title", /Published copy is out of date/);
+
+    await page.locator(`.wiki-list-item[data-relpath="${FAIL_REL}"]`).first().click();
+    await expect(page.locator(BTN)).toHaveAttribute("data-felles-relpath", FAIL_REL);
+    await expect(page.locator(BTN)).not.toHaveClass(new RegExp(FELLES_STALE_CLASS));
+
+    await page.locator(`.wiki-list-item[data-relpath="${REL}"]`).first().click();
+    await expect(page.locator(BTN)).toHaveAttribute("data-felles-relpath", REL);
+    await expect(page.locator(BTN)).toHaveClass(new RegExp(FELLES_STALE_CLASS));
+    expect(statusRequests).toBe(1);
+  });
+
+  for (const scheme of ["light", "dark"] as const) {
+    test(`the chip and the dialog's links read at 4.5:1 in the ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+      await expect(page.locator(CHIP)).toHaveText(/changed$/);
+      expect(await contrastOf(page.locator(CHIP)), `${scheme} chip`).toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(page.locator(BTN)), `${scheme} stale ⇪ Felles`).toBeGreaterThanOrEqual(4.5);
+      await page.locator(CHIP).click();
+      const link = page.locator("dialog.wiki-felles-sync-dialog .wiki-felles-section a").first();
+      await expect(link).toBeVisible();
+      expect(await contrastOf(link), `${scheme} link`).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+
+  test("Publish changed sends --synk, and the chip and the marker refresh", async ({ page }) => {
+    await rm(syncedMarker, { force: true });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+    await page.locator(CHIP).click();
+    const dialog = page.locator("dialog.wiki-felles-sync-dialog");
+    const out = dialog.locator(".wiki-felles-out");
+
+    await dialog.getByRole("button", { name: "Dry run" }).click();
+    await expect(out).toContainText(`ARGS ${JSON.stringify(["--synk", "--dry-run", "--tillat-ident", root])}`);
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Dry run passed/);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+
+    await dialog.getByRole("button", { name: "Publish changed (1)" }).click();
+    await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+    await expect(out).toContainText(`ARGS ${JSON.stringify(["--synk", "--tillat-ident", root])}`);
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Published the changed pages/);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 0 changed");
+    await expect(dialog.getByRole("button", { name: "Publish changed (0)" })).toBeDisabled();
+    await expect(dialog.locator(".wiki-felles-section.changed")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(BTN)).not.toHaveClass(new RegExp(FELLES_STALE_CLASS));
   });
 });
