@@ -340,6 +340,18 @@ describe("check 14 PR references", () => {
     ];
     expect(await flaggedBody(lines)).toEqual([0, 1, 2, 3, 4, 5]);
   });
+
+  test("a pull URL in a link destination is a PR ref; a fragment or wiki path there is not", async () => {
+    await noTask();
+    const lines = [
+      "Fixen [her](https://github.com/navikt/melosys-api/pull/3538) is merged.",
+      "See [x](#1-intro) merged.",
+      "See [x](plan.mdx#3-steg) merged.",
+      "See [[plans/foo#3]] merged.",
+      "See [x](https://github.com/o/r/pull/7#discussion_r1) merged.",
+    ];
+    expect(await flaggedBody(lines)).toEqual([0, 4]);
+  });
 });
 
 describe("check 14 Jira keys", () => {
@@ -373,17 +385,34 @@ describe("check 14 owns: and jira: entries", () => {
     ]);
   });
 
-  test("an owns: entry that names no key is a warning with its line", async () => {
+  test("an owns: that names no key at all is a warning per entry, with its line", async () => {
     await write("plans/a.mdx", page(["Body."], ["owns: [TBD, DEMO-1]"]));
     await write("plans/b.mdx", page(["Body."], ["owns:", "  - later"]));
     await write("plans/c.mdx", page(["Body."], ["owns: DEMO-5, soon"]));
+    await write("plans/d.mdx", page(["Body."], ["owns: [TBD, soon]"]));
     const f = await findings("state-owns-unread");
     expect(f.map((x) => [x.relPath, x.line, x.message.match(/«(.*?)»/)![1]])).toEqual([
-      ["plans/a.mdx", 6, "TBD"],
       ["plans/b.mdx", 7, "later"],
-      ["plans/c.mdx", 6, "soon"],
+      ["plans/d.mdx", 6, "TBD"],
+      ["plans/d.mdx", 6, "soon"],
     ]);
-    expect(f[0]!.message).toContain("«TBD»");
+  });
+
+  test("a zero-indent block list and a comment after owns: still read their keys", async () => {
+    await write("plans/a.mdx", page(["Body."], ["owns:", "- DEMO-100", "- TBD"]));
+    await write("plans/b.mdx", page(["Body."], ["owns:  # later", "  - DEMO-101"]));
+    await write("plans/other.mdx", page(["**Status:** DEMO-100 merged · DEMO-101 merged"]));
+    expect((await notOwner()).map((f) => f.message.match(/states (\S+), which (\S+) owns/)!.slice(1))).toEqual([
+      ["DEMO-100", "plans/a.mdx"],
+      ["DEMO-101", "plans/b.mdx"],
+    ]);
+    expect(await findings("state-owns-unread")).toEqual([]);
+  });
+
+  test("a CRLF owner page owns its keys on an LF page's home", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]).replace(/\n/g, "\r\n"));
+    await write("plans/other.mdx", page(["**Status:** DEMO-1 merged"]));
+    expect((await notOwner()).map((f) => [f.relPath, f.line])).toEqual([["plans/other.mdx", bodyLine(0)]]);
   });
 });
 
@@ -482,11 +511,16 @@ describe("check 14 exempt text", () => {
     expect(await flaggedBody(["> The team said", "DEMO-1 is merged by now.", "", "- > DEMO-2 merged, said the team.", "", "DEMO-3 merged."])).toEqual([5]);
   });
 
-  test("HTML and JSX comments are not text, for either check", async () => {
+  test("HTML and JSX comments are visible text in this reader, for both checks", async () => {
+    // renderWikiHtml escapes `<!-- -->` and `{/* */}` and shows them, so they are prose.
     await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
     const body = ["<!-- DEMO-1 merged -->", "{/* DEMO-2 merged */}", "<!--", "DEMO-3 merged", "-->", "**Status:** waits {/* DEMO-1 merged */}", "", "DEMO-4 merged."];
-    expect(await flaggedBody(body)).toEqual([7]);
-    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx")).toEqual([]);
+    expect(await flaggedBody(body)).toEqual([0, 1, 3, 7]);
+    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx").map((f) => f.line)).toEqual([bodyLine(5)]);
+  });
+
+  test("a comment marker inside inline code hides nothing", async () => {
+    expect(await flaggedBody(["Use `<!--` to hide.", "DEMO-1 merged.", "DEMO-2 merged.", "End `-->` here."])).toEqual([1, 2]);
   });
 
   test("a task word PR does not match a lowercase pr inside a file name", async () => {

@@ -15,14 +15,15 @@
  * |                      | task word                                                                  |
  * | `state-not-owner`    | a home clause states the state of a key some page owns, on a page whose     |
  * |                      | `owns:` does not list it                                                   |
- * | `state-owns-unread`  | an `owns:` entry names no key                                              |
+ * | `state-owns-unread`  | an `owns:` names no key at all (each of its entries is reported)            |
  *
  * Scope: live report pages (`isLiveReportPage`) outside `archive/`, not
  * reserved or culled. Frontmatter `description` is linted; `status_note` is a
  * home. Exempt from check 1, besides the homes: `<Timeline>`, `<DecisionLog>`,
  * `<Historic>` (each exactly where `parseBlocks` makes a block of it),
- * blockquotes with their lazy continuation lines, code fences, inline code and
- * HTML/JSX comments. Lanes and plain tables are linted.
+ * blockquotes with their lazy continuation lines, code fences and inline code.
+ * HTML and JSX comments are linted: this reader renders them as visible text.
+ * Lanes and plain tables are linted.
  *
  * Off unless `.wiki-reader.json` declares `statePhrases`
  * (`src/format/state-phrases.ts`): the phrases and task words are the wiki's
@@ -197,10 +198,25 @@ function splitEntries(value: string): string[] {
 
 const unquote = (s: string) => s.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
 
+/** A YAML value with its trailing comment cut: a `#` at the start or after
+ *  whitespace, outside quotes. */
+function stripComment(value: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "#" && (i === 0 || /\s/.test(value[i - 1]!))) return value.slice(0, i).trim();
+  }
+  return value.trim();
+}
+
 /**
  * Every `owns:` entry in the page's frontmatter: an inline list
  * (`owns: [A-1, B-2]`), a comma scalar (`owns: A-1, B-2`) or a block list
- * (`owns:` + `  - A-1`). `parseFrontmatter` reads the first form only, so this
+ * (`owns:` + `  - A-1`, the items indented or not; a trailing `# comment` is
+ * cut). `parseFrontmatter` reads the first form only, so this
  * reads the raw lines. Each entry is shape-checked through `stampedKeys`
  * (`trackers/jira.ts`): `TBD` names no key, `"A-1 (kilde)"` names `A-1`.
  */
@@ -212,12 +228,12 @@ export function readOwns(content: string): OwnsEntry[] {
   for (let i = 1; i < end - 1; i++) {
     const m = /^owns\s*:(.*)$/.exec(lines[i]!);
     if (!m) continue;
-    const value = m[1]!.trim();
+    const value = stripComment(m[1]!);
     if (value === "") {
       for (let k = i + 1; k < end - 1; k++) {
-        const item = /^\s+-\s*(.*?)\s*$/.exec(lines[k]!);
+        const item = /^\s*-(?:\s+(.*?))?\s*$/.exec(lines[k]!);
         if (item) {
-          const text = unquote(item[1]!);
+          const text = unquote(stripComment(item[1] ?? ""));
           if (text) push(text, k);
         } else if (lines[k]!.trim() !== "" && !/^\s*#/.test(lines[k]!)) break;
       }
@@ -257,38 +273,12 @@ interface Unit {
 interface LineRoles {
   linted: Unit[];
   home: Unit[];
-  /** The page's lines as the checks read them: CRLF folded, comments blanked. */
+  /** The page's lines as the checks read them: CRLF folded. */
   lines: string[];
 }
 
 /** Blank a span same-length, newlines kept, so offsets and lines survive. */
 const blank = (s: string) => s.replace(/[^\n]/g, " ");
-
-/** The page's lines with HTML and JSX comments blanked outside fences. */
-function maskComments(lines: string[], fenced: readonly boolean[], from: number): string[] {
-  const text = lines.join("\n");
-  const starts: number[] = [];
-  let off = 0;
-  for (const l of lines) {
-    starts.push(off);
-    off += l.length + 1;
-  }
-  const lineAt = (pos: number) => {
-    let lo = 0;
-    let hi = starts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (starts[mid]! <= pos) lo = mid;
-      else hi = mid - 1;
-    }
-    return lo;
-  };
-  const masked = text.replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}/g, (m, pos: number) => {
-    const line = lineAt(pos);
-    return line >= from && !fenced[line] ? blank(m) : m;
-  });
-  return masked.split("\n");
-}
 
 /** The last line of the tracked block whose tag opens line `start`: the
  *  parser's own close rule (a line that is exactly `</Name>`, same-name
@@ -374,16 +364,15 @@ function startsBlock(t: string): boolean {
  * Classify a page's lines. Frontmatter: `description` and `status_note`, each
  * with its indented continuation lines (a quoted, plain or block scalar, blank
  * lines inside a block scalar included), are a linted unit and a home unit;
- * the rest is neither. Body: fences, comments, blockquotes (with a lazy
+ * the rest is neither. Body: fences, blockquotes (with a lazy
  * continuation line) and the three history blocks are exempt; `<StatusRows>`,
  * a `**Status**` paragraph and a PR-ledger table are homes; every other line
  * is linted.
  */
 export function stateLineRoles(content: string): LineRoles {
-  const raw = content.replace(/\r\n/g, "\n").split("\n");
-  const body = frontmatterEndLine(raw);
-  const fenced = fencedLineMask(raw);
-  const lines = maskComments(raw, fenced, body);
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const body = frontmatterEndLine(lines);
+  const fenced = fencedLineMask(lines);
   const linted: Unit[] = [];
   const home: Unit[] = [];
 
@@ -523,9 +512,12 @@ function allMatches(re: RegExp | null, text: string): Hit[] {
   return [...text.matchAll(re)].map((m) => ({ text: m[0], start: m.index! }));
 }
 
-/** Link destinations and wikilinks blanked, for the PR-reference scan. */
+/** Wikilinks and link destinations blanked, for the PR-reference scan; a pull
+ *  URL in a destination is kept, since it names a PR. */
 function maskLinks(text: string): string {
-  return text.replace(/\[\[[^\]\n]*\]\]/g, blank).replace(/\]\(([^)\n]*)\)/g, (m) => "](" + blank(m.slice(2, -1)) + ")");
+  return text
+    .replace(/\[\[[^\]\n]*\]\]/g, blank)
+    .replace(/\]\(([^)\n]*)\)/g, (m) => "](" + m.slice(2, -1).replace(/(https?:\/\/[^\s)]+\/pull\/\d+)|[^\n]/g, (c, url) => url ?? " ") + ")");
 }
 
 /** Character gap between two hits (0 when they overlap). */
@@ -688,18 +680,20 @@ export function stateOwners(pages: Iterable<OwnerPage>): Map<string, string[]> {
   return owners;
 }
 
-/** `state-owns-unread`: an `owns:` entry that names no key would be dropped in
- *  silence, so a page meant to own a key would own nothing. */
+/** `state-owns-unread`: an `owns:` that names no key at all would leave the page
+ *  owning nothing in silence. One finding per entry; an `owns:` that names a key
+ *  drops its other entries quietly. */
 export function checkOwnsEntries(pages: Iterable<OwnerPage>): LintFinding[] {
   const out: LintFinding[] = [];
   for (const { relPath, content } of pages) {
-    for (const e of readOwns(content)) {
-      if (e.keys.length > 0) continue;
+    const entries = readOwns(content);
+    if (entries.some((e) => e.keys.length > 0)) continue;
+    for (const e of entries) {
       out.push({
         check: "state-owns-unread",
         relPath,
         line: e.line + 1,
-        message: `owns: entry ${quoted([e.text])} names no Jira key, so this page owns nothing by it — write the key (owns: [PROJ-123]) or remove the entry`,
+        message: `owns: entry ${quoted([e.text])} names no Jira key, and no other owns: entry does, so this page owns nothing — write the key (owns: [PROJ-123]) or remove the entry`,
       });
     }
   }
