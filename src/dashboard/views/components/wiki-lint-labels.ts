@@ -33,6 +33,9 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "status-row-long": "<StatusRows> rows over 160 chars",
   "missing-tldr": "Pages with no In short box (<Tldr>) under the title",
   "tldr-no-more": "In short boxes with no <More>",
+  "state-outside-home": "PR, release or Jira state written outside its home",
+  "state-not-owner": "State of a key another page owns",
+  "state-owns-unread": "owns: entries that name no key",
 };
 
 /** A group's heading: its label, plus `(info)` when every finding in it carries

@@ -54,6 +54,9 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "status-row-long": { one: "long status row", many: "long status rows" },
   "missing-tldr": { one: "page with no In short box", many: "pages with no In short box" },
   "tldr-no-more": { one: "In short box with no More", many: "In short boxes with no More" },
+  "state-outside-home": { one: "state line outside its home", many: "state lines outside their home" },
+  "state-not-owner": { one: "state of a key another page owns", many: "states of keys other pages own" },
+  "state-owns-unread": { one: "owns: entry that names no key", many: "owns: entries that name no key" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks
