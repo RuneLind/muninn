@@ -3,3 +3,18 @@
 # not listed here and on any listed test that ran, so a spec that starts
 # skipping itself green — a missing fixture, a missing seed row — turns CI red.
 # Add a line only for a skip that is deliberate on a runner, and say why.
+
+# CI tracks only bots/jarvis/, so there is no second bot to switch to.
+inspector.spec.ts › Inspector panel API integration › fetches memories, goals, and tasks APIs for the selected bot context
+wiki-chat-dialog.spec.ts › Wiki reader: chat dialog › a resolved wiki offers a bot OVERRIDE behind ⚙ Options
+
+# Opt-in behind JIRA_CARD_THREAD / _USER / _DRAFT, which name a real draft.
+jira-card.spec.ts › the draft card › Kopier markdown puts the RAW markdown on the clipboard
+jira-card.spec.ts › the draft card › Lagre survives a reload — that is the whole reason saved_at exists
+jira-card.spec.ts › the draft card › attaches under the bubble the draft came from, with its badges
+jira-card.spec.ts › the draft card › switching thread away and back re-adopts it — the listing is the authority
+jira-card.spec.ts › the draft card › the stored message is NEVER rewritten — the card is the only place the finalized text lives
+jira-card.spec.ts › the draft card › the 🧾 control opens the picker and no longer opens a tab
+
+# Runs the real plan-card from the claude-skills repo, which a runner has no checkout of.
+wiki-agent-lens.spec.ts › Wiki reader: the Agent lens › the pane equals a direct run of the real plan-card with the same environment
