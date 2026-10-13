@@ -56,7 +56,7 @@ function median(xs: number[]): number | undefined {
 }
 
 // --- Playwright JSON reporter shape (the fields read here) ---
-type JsonResult = { status: string; duration: number };
+type JsonResult = { status: string; duration: number; startTime?: string };
 type JsonTest = {
   projectName: string;
   status: string;
@@ -124,10 +124,12 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const failedFiles = new Set(ranTests.filter((t) => t.outcome === "unexpected").map((t) => t.file));
   const stopped = new Set<string>();
   const skipped: string[] = [];
+  const outcomeByTitle = new Map<string, FlatTest>();
   let ran = 0;
   for (const t of flatten(listed)) {
     const r = ranById.get(t.id);
     ranById.delete(t.id);
+    if (r) outcomeByTitle.set(t.title, r);
     if (!r || r.results.length === 0) {
       problems.push(`never ran: ${t.title}`);
       continue;
@@ -146,19 +148,63 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const expected = new Set(expectedSkips);
   const actual = new Set(skipped);
   for (const s of skipped) if (!expected.has(s)) problems.push(`skipped, not in e2e/ci-expected-skips.txt: ${s}`);
-  const isStopped = (pin: string) => [...stopped].some((title) => pin === skipKey(title, "") || pin.startsWith(`${title} | `));
-  for (const s of expectedSkips) {
-    if (!actual.has(s) && !isStopped(s)) problems.push(`expected to skip, did not: ${s}`);
+  const titles = [...outcomeByTitle.keys()];
+  for (const pin of expectedSkips) {
+    if (actual.has(pin)) continue;
+    const title = pinTitle(pin, titles);
+    const r = title === undefined ? undefined : outcomeByTitle.get(title);
+    if (!r) {
+      problems.push(`expected to skip, no such test in --list: ${pin}`);
+      continue;
+    }
+    if (stopped.has(title!)) continue;
+    if (r.outcome === "unexpected") {
+      // Its skip fired and a failing afterAll/afterEach was charged to it, or
+      // it failed instead of skipping. Either way the failure is the shard's
+      // red; only the second deserves a line of its own here.
+      if (!r.skipAnnotated) problems.push(`expected to skip, failed instead: ${pin}`);
+      continue;
+    }
+    problems.push(`expected to skip, did not: ${pin}`);
   }
   return { problems, ran, skipped: skipped.sort() };
 }
 
-/** Seconds per spec file: the sum of its test durations (a file's beforeAll lands in its first test). */
+/**
+ * The test title a pin names. A pin is `title | reason`, and real titles
+ * contain ` | ` too (`wiki-share.spec.ts`, `wiki-related-work.spec.ts`), so
+ * the pin is matched against the titles `--list` knows, longest first, rather
+ * than split on a bar.
+ */
+export function pinTitle(pin: string, titles: string[]): string | undefined {
+  let best: string | undefined;
+  for (const title of titles) {
+    if (pin !== skipKey(title, "") && !pin.startsWith(`${title} | `)) continue;
+    if (best === undefined || title.length > best.length) best = title;
+  }
+  return best;
+}
+
+/**
+ * Seconds per spec file: from its first test's start to its last test's end.
+ * Summing test durations instead misses the time between tests (contexts,
+ * hooks): on run 38367891322 the sum covered 84 % of the shards' Playwright
+ * steps and the span 96 %; the rest is each shard's own server and browser
+ * start. A file whose results carry no start time falls back to the sum.
+ */
 export function timingsFromReport(merged: JsonReport): Timings {
+  const byFile = new Map<string, JsonResult[]>();
+  for (const t of flatten(merged)) byFile.set(t.file, [...(byFile.get(t.file) ?? []), ...t.results]);
   const secs: Timings = {};
-  for (const t of flatten(merged)) {
-    const ms = t.results.reduce((a, r) => a + r.duration, 0);
-    secs[t.file] = (secs[t.file] ?? 0) + ms / 1000;
+  for (const [file, results] of byFile) {
+    const starts = results.map((r) => (r.startTime ? Date.parse(r.startTime) : NaN));
+    if (starts.length > 0 && starts.every(Number.isFinite)) {
+      const first = Math.min(...starts);
+      const last = Math.max(...results.map((r, k) => starts[k]! + r.duration));
+      secs[file] = (last - first) / 1000;
+    } else {
+      secs[file] = results.reduce((a, r) => a + r.duration, 0) / 1000;
+    }
   }
   return Object.fromEntries(
     Object.entries(secs)
