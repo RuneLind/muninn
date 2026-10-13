@@ -273,6 +273,20 @@ describe("check", () => {
     expect(check(l, m, ["x.spec.ts › group › copy | slack | one bot"]).problems).toEqual(["never ran: x.spec.ts › group › copy | slack"]);
   });
 
+  test("a pinned test the shard never reached (an entry with no results) is reported once, as 'never ran'", () => {
+    // A worker crash or a cancelled shard leaves the test in the report with
+    // results: [], and Playwright computes its outcome as "skipped".
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", [], "skipped"));
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual(["never ran: y.spec.ts › group › two"]);
+  });
+
+  test("an interrupted test reads as interrupted, not as a new skip or a pin that did not skip", () => {
+    // An interrupted result is neither expected nor unexpected, so Playwright
+    // computes the outcome "skipped", with no skip annotation.
+    const merged = report(spec("1", "x.spec.ts", "one", pass), spec("2", "y.spec.ts", "two", [{ status: "interrupted", duration: 10 }], "skipped"));
+    expect(check(listed, merged, ["y.spec.ts › group › two | one bot"]).problems).toEqual(["interrupted: y.spec.ts › group › two"]);
+  });
+
   test("a pinned test that skipped for ANOTHER reason before a hook failed still reports that skip", () => {
     // The missing-fixture skip ("no bots") is what the list exists to catch;
     // a failing afterAll after it must not hide it.

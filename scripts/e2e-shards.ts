@@ -126,6 +126,8 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const skipped: string[] = [];
   const outcomeByTitle = new Map<string, FlatTest>();
   const titles: string[] = [];
+  // Never ran or interrupted: already a problem of its own, so its pin adds nothing.
+  const unreached = new Set<string>();
   let ran = 0;
   for (const t of flatten(listed)) {
     const r = ranById.get(t.id);
@@ -134,11 +136,19 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
     if (r) outcomeByTitle.set(t.title, r);
     if (!r || r.results.length === 0) {
       problems.push(`never ran: ${t.title}`);
+      unreached.add(t.title);
       continue;
     }
     // `retries: 0`, so a second result means two shards ran the same test.
     if (r.results.length > 1) problems.push(`ran ${r.results.length} times: ${t.title}`);
     ran++;
+    // Interrupted is neither expected nor unexpected, so Playwright computes
+    // the outcome "skipped", with no skip annotation.
+    if (r.results.some((x) => x.status === "interrupted")) {
+      problems.push(`interrupted: ${t.title}`);
+      unreached.add(t.title);
+      continue;
+    }
     // A skip that fired and was then charged a failing afterAll/afterEach is
     // `unexpected`, but its skip and reason are still compared with the list.
     if (r.outcome !== "skipped" && !(r.outcome === "unexpected" && r.skipAnnotated)) continue;
@@ -160,8 +170,7 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
       continue;
     }
     const r = outcomeByTitle.get(title);
-    // A listed test with no result is already reported as "never ran".
-    if (!r || stopped.has(title)) continue;
+    if (!r || unreached.has(title) || stopped.has(title)) continue;
     if (r.outcome === "unexpected") {
       // Skipped for another reason, then a hook failed: that skip is already
       // reported as not in the list. Failed without skipping: say so.
