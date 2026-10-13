@@ -172,9 +172,11 @@ test.describe("Wiki reader: <Embed src>", () => {
   test("a navigation to a second embedding page does not stack frames", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
     await expect(page.locator(FRAME)).toHaveCount(1);
-    await page.locator(`.wiki-list-item[data-relpath="${ESCAPE_REL}"]`).click();
+    // The title, not the row's centre: on a two-line row the centre can be the
+    // fold chip on the meta line, which folds rather than opening the page.
+    await page.locator(`.wiki-list-item[data-relpath="${ESCAPE_REL}"] .wiki-list-title`).click();
     await expect(page.locator(".embed-fallback")).toHaveCount(1);
-    await page.locator(`.wiki-list-item[data-relpath="${PAGE_REL}"]`).click();
+    await page.locator(`.wiki-list-item[data-relpath="${PAGE_REL}"] .wiki-list-title`).click();
     await expect(page.locator(FRAME)).toHaveCount(1);
     await expect(page.locator(".embed-open")).toHaveCount(1);
   });

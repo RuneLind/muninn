@@ -494,6 +494,11 @@ test.describe("NextMoves in the reader", () => {
     await expect(page.locator('.wiki-list-item[data-relpath="plans/settled.mdx"] .wiki-moves-flag')).toHaveCount(0);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/resolved.mdx"] .wiki-moves-flag')).toHaveCount(0);
     await expect(page.locator('.wiki-list-item[data-relpath="plans/report.mdx"] .wiki-moves-flag')).toHaveAttribute("aria-hidden", "true");
+    // On the meta line with its count, never inside the title: every title
+    // starts at the same x.
+    const report = page.locator('.wiki-list-item[data-relpath="plans/report.mdx"]');
+    await expect(report.locator(".wiki-list-sub .wiki-moves-flag")).toHaveText(/^✋ [1-9]\d*$/);
+    await expect(report.locator(".wiki-list-title")).not.toContainText("✋");
     await page.locator("#wikiFiltersBtn").click();
     const chip = page.locator("#statusChips [data-waiting]");
     await expect(chip).toHaveText("✋ waiting on you 8");

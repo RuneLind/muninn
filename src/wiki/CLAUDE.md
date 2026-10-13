@@ -586,8 +586,8 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
   `#wikiCount` — goes DOWN, and the chip says by how much (`3 attached`,
   `1 superseded`, joined with ` · ` when mixed). **The chip has TWO forms and
   renders both**, one hidden by CSS: the full label above, and a COMPACT
-  `3 · 1` that the row falls back to when the space left beside the title cannot
-  hold the words. The words are moved, not dropped — `title=` and `aria-label`
+  `3 · 1` that the chip falls back to when its room cannot hold the words (a
+  page row's chip slot on the meta line; a header row's box). The words are moved, not dropped — `title=` and `aria-label`
   carry the full label in either form. See the row-layout rules below.
 - **A query flattens everything.** Groups are for browsing; a hit inside a closed
   group is a result the reader asked for and cannot see.
@@ -600,6 +600,23 @@ one-row invariant is unchanged — sections MOVE a row, never copy it:
   it under a page that is not on screen would delete it from the rail.
 
 ### The row's layout rules (`wiki-page.ts`, constants in `wiki-rail-width.ts`)
+
+**A PAGE row is two lines (since 2026-10-12).** Line one is type icon · title ·
+★+age; the meta line under the title (`.wiki-list-sub`, indented by the icon
+column) carries the status pill, ⚑, ✋ N, NEW and the group chip, in that order
+(the article header's: badges, then the lane pills). A row with none of them has
+no meta line and stays one line. The chip sits last in its own slot
+(`.wiki-fold-chip-wrap`) that takes the room the other marks leave; the slot is
+its container, so it swaps words for counts at `RAIL_CHIP_LABEL_*` (the label
+widths below, alone) with a `RAIL_CHIP_COMPACT_*` floor, and a line too full for
+the compact form wraps the slot rather than clipping a count. Pinned by
+`wiki-rail-width.spec.ts`, including a crowded row (in-flight pill, ⚑, ✋ 12 and
+`99 attached · 99 superseded`) held to one meta line from 260 to 400px. The
+one-line budget below now applies only to family and month header rows, which
+keep the roll-up chip beside the label (a series header carries no chip); there
+its `RAIL_MID_MIN_CHIP*` floors and the one-kind breakpoints bind only in a
+window narrow enough for the 45% viewport bound to take the rail under 260px. The
+page-row figures in it are history.
 
 A rail row is six things — type icon · title · group chip · status pill · ⚑ ·
 ★+date — and only the title is elastic. At the 260px rail (`RAIL_WIDTH_MIN`, i.e.
@@ -931,10 +948,12 @@ measure. It takes ONE number of its own, `RAIL_GROUP_CHIP_SWITCH`: status words
 are shorter than "attached", so a two-count roll-up priced at the ATTACHMENT
 chip's worst case went `display:none` at a mid of 253.6px — exactly the 300px
 shipped rail, which left `9 shipped · 1 superseded` hover-only on every rail
-anybody has. A one-kind roll-up keeps `RAIL_CHIP_SWITCH_SHORT`, which its 61–80px
-was already sized for — except a one-status `N superseded` slate, which carries
-the page chip's `is-long` class and breakpoint (inert there: a group row's mid
-is ≥ 213px). The page-row
+anybody has. A one-kind roll-up (61–80px) keeps `RAIL_CHIP_SWITCH_SHORT`, and a
+one-status `N superseded` slate `RAIL_CHIP_SWITCH_LONG`; they fire only in a
+window narrow enough to take the rail under 260px (a 133.6px header box at a
+400px window), and a round that removed them as dead clipped `12 superseded`
+there. The header sweep in `wiki-rail-width.spec.ts` catches deleting both;
+deleting either alone is unpinned (the two overlap for `N superseded`). The page-row
 constants were re-budgeted by the layout follow-up (above), not by this change.
 
 **The rail head is a one-line toolbar: sort · Filters · count · view options.**

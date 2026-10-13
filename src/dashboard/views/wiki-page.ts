@@ -9,9 +9,15 @@ import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
 import {
-  RAIL_CHIP_SWITCH_SHORT,
+  RAIL_CHIP_COMPACT,
+  RAIL_CHIP_COMPACT_NARROW,
+  RAIL_CHIP_COMPACT_WIDE,
+  RAIL_CHIP_LABEL_LONG,
+  RAIL_CHIP_LABEL_SHORT,
+  RAIL_CHIP_LABEL_WIDE,
+  RAIL_CHIP_LABEL_WIDE_3D,
   RAIL_CHIP_SWITCH_LONG,
-  RAIL_CHIP_SWITCH_WIDE,
+  RAIL_CHIP_SWITCH_SHORT,
   RAIL_GROUP_CHIP_SWITCH,
   RAIL_MID_MIN_CHIP,
   RAIL_MID_MIN_CHIP_NARROW,
@@ -429,24 +435,72 @@ export async function renderWikiPage(opts?: {
     .wiki-cov-link:hover { color: var(--accent-light); }
 
     .wiki-list { flex: 1; overflow-y: auto; padding: 6px; }
-    /* ONE flex line until the row's floors no longer fit it, and then TWO.
-       The row is six things — type icon · title · group chip · status pill · ⚑ ·
-       ★+date — and at the 260px rail (RAIL_WIDTH_MIN, i.e. any window under
-       1100px) the five that are not the title measure 143.4px plus 40px of gaps,
-       leaving 42.6px for the title AND the chip together. No distribution of
-       42.6px satisfies a readable title and an unclipped count, so at that width
-       the row stops trying: \`.wiki-list-end\` is last in source order and wraps,
-       and the line it leaves holds the title's floor with room to spare
-       (measured 132.3px of title). Nothing is hidden and nothing scrolls
-       sideways — the two failure modes the previous two rounds picked between. */
+    /* A page row is two lines: line one is type icon · title · ★+age, and the
+       META LINE under the title (\`.wiki-list-sub\`) carries the status pill, ✋,
+       ⚑, the group chip and NEW. The title gets line one's width less the age,
+       every title starts at the same x, and the ages form one column. A row with
+       nothing for the meta line has none and stays one line. The meta line is a
+       flex item with a 100% basis, so the row's own flex-wrap puts it on its
+       own line; \`row-gap\` keeps it close to the title. */
     .wiki-list-item {
       padding: 7px 10px;
       border-radius: 7px;
       cursor: pointer;
       display: flex;
       align-items: flex-start;
-      gap: 8px;
+      gap: 3px 8px;
       flex-wrap: wrap;
+    }
+    /* Indented by the icon column (14px + the row's 8px gap), so the marks sit
+       under the title they describe. It wraps rather than clipping, as the
+       backstop. */
+    .wiki-list-sub {
+      flex: 0 0 100%; box-sizing: border-box; padding-left: 22px; min-width: 0;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px;
+    }
+    /* The one-line row's top margins (\`.wiki-list-item .wiki-status\` and its
+       siblings, same specificity, declared later) would win over a plain
+       \`.wiki-list-sub >\` rule; the item class here outranks them. Measured
+       before: the centres sat 1.0px apart. */
+    .wiki-list-item .wiki-list-sub .wiki-status, .wiki-list-item .wiki-list-sub .wiki-followup-flag,
+    .wiki-list-item .wiki-list-sub .wiki-fold-chip, .wiki-list-item .wiki-list-sub .wiki-new-tag { margin: 0; }
+    /* The chip's slot: last on the meta line, it takes what the pill, ⚑, ✋
+       and NEW leave, and it is the chip's container, so the chip swaps words
+       for counts by that room (RAIL_CHIP_LABEL_*), not by the line's. Its floor
+       is the compact form's (RAIL_CHIP_COMPACT_*), so a line too full for even
+       that wraps the slot onto its own line rather than clipping a count. */
+    .wiki-fold-chip-wrap {
+      flex: 1 1 0; min-width: ${RAIL_CHIP_COMPACT}px; display: flex; align-items: center;
+      container-type: inline-size; container-name: railchip;
+    }
+    .wiki-fold-chip-wrap.counts-narrow { min-width: ${RAIL_CHIP_COMPACT_NARROW}px; }
+    .wiki-fold-chip-wrap.counts-wide { min-width: ${RAIL_CHIP_COMPACT_WIDE}px; }
+    /* Every one-kind chip swaps at SHORT; a LONG one (\`is-long\`: the word
+       \`superseded\`, or three digits) swaps earlier as well, at LONG > SHORT,
+       so the LONG rule extends the band and needs no \`:not()\`. */
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_SHORT}px) {
+      .wiki-fold-chip:not(.is-wide) { flex-shrink: 0; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_LONG}px) {
+      .wiki-fold-chip.is-long { flex-shrink: 0; }
+      .wiki-fold-chip.is-long .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-long .wiki-fold-chip-counts { display: inline; }
+    }
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_WIDE}px) {
+      .wiki-fold-chip.is-wide { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide .wiki-fold-chip-counts { display: inline; }
+    }
+    /* A two-kind \`counts-wide\` label (a three- or four-digit count) can be
+       wider than the wide budget; the class is judged on the counts, so a
+       narrower one (\`100 attached · 1 superseded\`, 166.9px) switches here too,
+       to counts where its words would fit — the compact-before-clip policy. */
+    @container railchip (max-width: ${RAIL_CHIP_LABEL_WIDE_3D}px) {
+      .wiki-fold-chip.is-wide.counts-wide { flex-shrink: 0; }
+      .wiki-fold-chip.is-wide.counts-wide .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-wide.counts-wide .wiki-fold-chip-counts { display: inline; }
     }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -457,26 +511,28 @@ export async function renderWikiPage(opts?: {
       to { box-shadow: inset 0 0 0 2px transparent; }
     }
     @media (prefers-reduced-motion: reduce) { .wiki-list-item.reveal-flash { animation: none; } }
-    /* The title and the group chip, in the space the row's fixed parts leave.
-       Its own width is therefore "what is left on this row", which is the ONE
-       question a CSS query can ask that tells a plain row from one carrying a
-       status pill and a ⚑ — every row is the rail's width, so a query on the row
-       could not. \`container-type: inline-size\` is Chromium 105+ / Safari 16 /
-       Firefox 110, and this UI is Chromium; \`:has()\` below is the same era.
-       \`flex: 1 1 0\` so the pair's HYPOTHETICAL size — what the row breaks lines
-       on — is its floor rather than the length of the title text. */
+    /* The title's box: on a page row, line one less the icon and the ★+age; on
+       a family or month header row, the label AND its roll-up chip, in the
+       space the row's other parts leave — that width is what the header chip's
+       container queries (\`railmid\`) read. \`container-type: inline-size\` is
+       Chromium 105+ / Safari 16 / Firefox 110, and this UI is Chromium; \`:has()\`
+       below is the same era. \`flex: 1 1 0\` so the box's HYPOTHETICAL size —
+       what the row breaks lines on — is its floor rather than the length of the
+       title text. */
     .wiki-list-mid {
       display: flex; align-items: flex-start; gap: 8px;
       flex: 1 1 0; min-width: ${RAIL_TITLE_MIN}px;
       container-type: inline-size; container-name: railmid;
     }
-    /* With a chip the pair needs the title's floor, the gap and the widest
+    /* A header row with a chip needs the label's floor, the gap and the widest
        COMPACT chip of the chip's digit class (\`counts-narrow\` for one count of up to
        three digits, \`counts-wide\` for a four-digit, three-digit-pair or
        three-plus-count one, the default in between — the painter sets it from the compact label); under that the row
-       wraps instead. Only when a chip is really there — a plan row carrying a
-       pill and a ⚑ but no chip has 90.6px at the 300px rail, fits its title in
-       it, and must not start wrapping. */
+       wraps instead. Page rows carry their chip on the meta line, so these
+       match only header rows, whose box is the rail less 46.4px: they bind in
+       a window narrow enough for the 45% viewport bound to take the rail under
+       260px (measured: a 133.6px box at a 400px window, under the 142px
+       default floor). */
     .wiki-list-mid:has(.wiki-fold-chip) { min-width: ${RAIL_MID_MIN_CHIP}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-narrow) { min-width: ${RAIL_MID_MIN_CHIP_NARROW}px; }
     .wiki-list-mid:has(.wiki-fold-chip.counts-wide) { min-width: ${RAIL_MID_MIN_CHIP_WIDE}px; }
@@ -573,43 +629,29 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-fold-chip-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     /* The COMPACT form — the counts alone, \`▸ 10 · 10\`. Rendered on every chip
-       and hidden until the space left beside the title cannot hold the words,
-       which both attributes keep carrying either way. Three breakpoints because
-       the full label's width is a fact about the label and not about the row:
-       \`99 attached\`, \`99 superseded\` and \`99 attached · 99 superseded\` are
-       85.5, 100.3 and 170.6px of chip, and one threshold sized for the long one
-       strips the words off every short chip at the default rail width, while
-       one sized for the attached-only shape paints a superseded-only word
-       clipped. NEVER shrinks: a clipped count is a wrong count, and \`10 · 1\`
-       is what \`10 · 10\` clips to. */
+       and hidden until the room the chip is given cannot hold the words (a page
+       row's chip slot, \`railchip\`, above; a header row's box, below), which
+       both attributes keep carrying either way. NEVER shrinks: a clipped count
+       is a wrong count, and \`10 · 1\` is what \`10 · 10\` clips to. */
     .wiki-fold-chip-counts { display: none; }
-    /* Every one-kind chip swaps at SHORT; a LONG one (\`is-long\`: the word
-       \`superseded\`, or three digits) swaps earlier as well, at LONG > SHORT —
-       so the LONG rule is an extension of the band, not an exclusion from it,
-       and needs no \`:not()\` on the rule below. */
+    /* A family or month header's chip, on the header box (\`railmid\`). A
+       one-kind roll-up swaps at SHORT, a LONG one (\`N superseded\`, three
+       digits) at LONG as well; both fire only in a narrow window, where the 45%
+       viewport bound takes the rail under 260px (a round removed them as dead
+       and \`12 superseded\` clipped at a 460px window). A WIDE roll-up has its
+       own breakpoint, since status words are shorter than "attached" — a chip
+       priced at the attachment worst case went \`display:none\` at a mid of
+       253.6px, exactly the 300px shipped rail. See RAIL_GROUP_CHIP_SWITCH. */
     @container railmid (max-width: ${RAIL_CHIP_SWITCH_SHORT}px) {
-      .wiki-fold-chip:not(.is-wide) { flex-shrink: 0; }
-      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-label { display: none; }
-      .wiki-fold-chip:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
+      .wiki-fold-chip.is-group:not(.is-wide) { flex-shrink: 0; }
+      .wiki-fold-chip.is-group:not(.is-wide) .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-group:not(.is-wide) .wiki-fold-chip-counts { display: inline; }
     }
     @container railmid (max-width: ${RAIL_CHIP_SWITCH_LONG}px) {
-      .wiki-fold-chip.is-long { flex-shrink: 0; }
-      .wiki-fold-chip.is-long .wiki-fold-chip-label { display: none; }
-      .wiki-fold-chip.is-long .wiki-fold-chip-counts { display: inline; }
+      .wiki-fold-chip.is-group.is-long { flex-shrink: 0; }
+      .wiki-fold-chip.is-group.is-long .wiki-fold-chip-label { display: none; }
+      .wiki-fold-chip.is-group.is-long .wiki-fold-chip-counts { display: inline; }
     }
-    @container railmid (max-width: ${RAIL_CHIP_SWITCH_WIDE}px) {
-      .wiki-fold-chip.is-wide:not(.is-group) { flex-shrink: 0; }
-      .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-label { display: none; }
-      .wiki-fold-chip.is-wide:not(.is-group) .wiki-fold-chip-counts { display: inline; }
-    }
-    /* A WIDE roll-up has its own breakpoint, and the \`:not(.is-group)\` above is
-       what keeps the two from both firing: status words are shorter than
-       "attached", so a chip priced at the attachment worst case went
-       \`display:none\` at a mid of 253.6px — which is exactly the 300px shipped
-       rail, leaving \`9 shipped · 1 superseded\` hover-only on every rail anybody
-       has. A one-kind roll-up keeps the SHORT rule above (61–80.3px of chip,
-       under its 88 budget) or the LONG one for \`N superseded\` — neither can
-       bind on a group row, whose mid is ≥ 213px. See RAIL_GROUP_CHIP_SWITCH. */
     @container railmid (max-width: ${RAIL_GROUP_CHIP_SWITCH}px) {
       .wiki-fold-chip.is-wide.is-group { flex-shrink: 0; }
       .wiki-fold-chip.is-wide.is-group .wiki-fold-chip-label { display: none; }
@@ -756,9 +798,9 @@ export async function renderWikiPage(opts?: {
       display: block; color: var(--text-muted); font-size: 10.5px; font-weight: 400;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    /* ✋ = a NextMoves step waiting on the reader: an inline mark inside the
-       title, never a row element (the row's six items are each budgeted). */
-    .wiki-moves-flag { margin-right: 4px; font-size: 11px; }
+    /* ✋ N = open NextMoves steps waiting on the reader, on the meta line beside
+       the status pill and the ⚑. */
+    .wiki-moves-flag { font-size: 10.5px; line-height: 16px; color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
     /* Issue mark: one ticket glyph (+ a count) per row, in a COLUMN of its
        own inside .wiki-list-title, never inside the clamp, where it would be
        clipped on a third line. The title element stays ONE row item (a seventh
@@ -844,12 +886,10 @@ export async function renderWikiPage(opts?: {
        measured 21px off .wiki-list-title on every row — 42px of title left at
        RAIL_WIDTH_MIN with a status pill and a ⚑ — paid permanently by a reader
        who never pins anything. */
-    /* \`margin-left: auto\` is inert on a row that fits — \`.wiki-list-mid\` grows
-       first and leaves no free space for an auto margin to take — and is what
-       right-aligns this slot on the SECOND line of a row that wrapped, where
-       nothing grows. Rule 3's other half: the pill (\`.wiki-status\`) and the ⚑
-       are already \`flex-shrink: 0\` where they are declared; they are the
-       shortest form of themselves and have nothing to yield. */
+    /* \`margin-left: auto\` is inert while \`.wiki-list-mid\` grows and leaves no
+       free space for an auto margin to take; it keeps this slot flush right if
+       line one ever wraps (a page row's line one holds at every rail width since
+       the marks moved to the meta line, measured 260–560px, children included). */
     .wiki-list-end { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; margin-left: auto; }
     /* The star is VISIBLE by default, and hidden-until-hover only where hover
        really exists. pointer-events:none alone was INERT for the case it was

@@ -12,6 +12,9 @@
  *     bounding box, not on the variable — a variable the grid does not read
  *     would still "persist".
  *  3. **Double-click resets to the shipped default and forgets the stored value.**
+ *  4. **The two-line row**: line one is icon · title · age, every mark is on the
+ *     meta line under the title, and a row with no mark stays one line. Layout
+ *     is measured on the rendered rail at 260–312px.
  *
  * No model calls. ENV / SPAWN: as every spec here — `e2eEnv()` keeps this
  * muninn off Telegram/Slack and off the host's instance-profile flags.
@@ -26,9 +29,6 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import {
-  RAIL_MID_MIN_CHIP,
-  RAIL_MID_MIN_CHIP_NARROW,
-  RAIL_TITLE_MIN,
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
   RAIL_WIDTH_KEY,
@@ -49,25 +49,32 @@ const LONG_REL = "long-title.md";
 const SHORT_REL = "short.md";
 
 /**
- * The row-layout edge cases the round-3 verify pass of #557 found, each a page
- * whose chip or fixed parts sit at the edge of one width budget. Settled (a
- * fixed `created:` and old mtimes) so Activity lifts none of the children out
- * and the chips read their full counts.
- *  - `sup10`: a superseded-only chip, `10 superseded` — the widest one-kind
- *    label, which the attached-only budget did not cover;
- *  - `big`: three-digit counts, `120 · 100`, beside a pill and a ⚑ — a compact
- *    chip wider than the mid box's floor allowed for;
- *  - `three`: `3 attached` beside a pill and a ⚑ at the DEFAULT rail — the one
- *    chip row on mimir that wrapped at 300px;
- *  - `bare`: a pill and a ⚑ with no chip — the row shape that wraps at the
- *    260px rail, where the title floor is what the second line buys.
+ * Rows whose marks stress the two-line row's meta line (status pill · ✋ · ⚑ ·
+ * group chip · NEW). Settled (a fixed `created:` and old mtimes) so Activity
+ * lifts none of the children out and the chips read their full counts. They
+ * began as the edge cases of the old one-line row's width budgets (#557):
+ *  - `sup10`: a superseded-only chip, `10 superseded`;
+ *  - `big`: three-digit counts, `120 · 100`, beside a pill and a ⚑;
+ *  - `three`: `3 attached` beside a pill and a ⚑;
+ *  - `bare`: a pill and a ⚑ with no chip.
  */
 const SUP10 = "plans/sup10.mdx";
 const BIG = "plans/big.mdx";
 const THREE = "plans/three.mdx";
 const BARE = "plans/bare.mdx";
-/** A NEW in-flight plan with a ⚑: Activity's widest end slot (the NEW tag beside
- *  its age) on the row shape that already runs closest to the title floor. */
+/** The crowded meta line: an in-flight pill, a ⚑, ✋ 12 and a two-kind chip
+ *  (`99 attached · 99 superseded`, 170.6px, its class's widest) on one row — every mark that takes room
+ *  beside the chip, at its widest realistic form. */
+const CROWDED = "plans/crowded.mdx";
+/** The same marks beside a LONG one-kind chip at its widest two-digit label,
+ *  `99 superseded` (100.3px of chip). */
+const CROWDED_LONG = "plans/crowded-long.mdx";
+/** The widest pill (`superseded`), a ⚑ and ✋ 12 beside a SHORT chip at its
+ *  widest two-digit label, `99 attached` (85.5px of chip), so a loosened short
+ *  breakpoint clips it. */
+const CROWDED_SHORT = "plans/crowded-short.mdx";
+/** A NEW in-flight plan with a ⚑ and two attachments: its meta line carries a
+ *  pill, ⚑, the NEW tag and a chip, with its green age on line one. */
 const NEW_FLIGHT = "plans/new-flight.mdx";
 const BIG_ATTACHED = 120;
 const BIG_SUPERSEDED = 100;
@@ -97,6 +104,96 @@ const EDGE_PAGES: Array<[string, string]> = [
     html(`Three mock ${i + 1}`),
   ]),
   [BARE, md("Bare plan with a pill and a flag", PILL_AND_FLAG)],
+  [
+    CROWDED,
+    [
+      "---",
+      "title: Crowded plan",
+      SETTLED_CREATED_LINE,
+      "plan_status: in-flight",
+      "followups: open",
+      "---",
+      "",
+      "# Crowded plan",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you" who="Du">',
+      "",
+      ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`),
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+      "",
+    ].join("\n"),
+  ],
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [`plans/crowded-prototype-${i + 1}.html`, html(`Crowded mock ${i + 1}`)]),
+  [
+    CROWDED_LONG,
+    [
+      "---",
+      "title: Crowded long plan",
+      SETTLED_CREATED_LINE,
+      "plan_status: in-flight",
+      "followups: open",
+      "---",
+      "",
+      "# Crowded long plan",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you" who="Du">',
+      "",
+      ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`),
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+      "",
+    ].join("\n"),
+  ],
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [
+    `plans/crowded-long-old-${i + 1}.md`,
+    md(`Crowded long retired ${i + 1}`, ["superseded_by: [[crowded-long]]"]),
+  ]),
+  [
+    CROWDED_SHORT,
+    [
+      "---",
+      "title: Crowded short plan",
+      SETTLED_CREATED_LINE,
+      "plan_status: superseded",
+      "followups: open",
+      "---",
+      "",
+      "# Crowded short plan",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you" who="Du">',
+      "",
+      ...Array.from({ length: 12 }, (_, i) => `${i + 1}. **Step ${i + 1}.**`),
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+      "",
+    ].join("\n"),
+  ],
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [`plans/crowded-short-prototype-${i + 1}.html`, html(`Crowded short mock ${i + 1}`)]),
+  // A name-stem family of twelve superseded plans: with `group families` on, a
+  // HEADER row whose one-kind roll-up reads `12 superseded`.
+  ...Array.from({ length: 12 }, (_, i): [string, string] => [
+    `plans/gone-slate-${i + 1}.md`,
+    md(`Gone plan ${i + 1}`, ["plan_status: superseded"]),
+  ]),
+  // Attachments of the NEW plan, so its meta line carries NEW and a chip.
+  ...Array.from({ length: 2 }, (_, i): [string, string] => [`plans/new-flight-prototype-${i + 1}.html`, html(`New flight mock ${i + 1}`)]),
+  ...Array.from({ length: 99 }, (_, i): [string, string] => [
+    `plans/crowded-old-${i + 1}.md`,
+    md(`Crowded retired ${i + 1}`, ["superseded_by: [[crowded]]"]),
+  ]),
   // No `created:` line and re-written after the settle (below): NEW in Activity.
   [
     NEW_FLIGHT,
@@ -112,8 +209,9 @@ const EDGE_PAGES: Array<[string, string]> = [
     ].join("\n"),
   ],
 ];
-/** Rows on screen with every group closed: the two title pages + four parents + the new plan. */
-const CLOSED_ROWS = 2 + 4 + 1;
+/** Rows on screen with every group closed and families off: the two title pages
+ *  + seven parents + the new plan + the twelve `gone-slate-*` plans. */
+const CLOSED_ROWS = 2 + 7 + 1 + 12;
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -122,10 +220,13 @@ test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-"));
   await writeFile(
     path.join(root, LONG_REL),
-    ["---", `title: ${LONG_TITLE}`, "---", "", `# ${LONG_TITLE}`, "", "Body.", ""].join("\n"),
+    ["---", `title: ${LONG_TITLE}`, SETTLED_CREATED_LINE, "---", "", `# ${LONG_TITLE}`, "", "Body.", ""].join("\n"),
     "utf8",
   );
-  await writeFile(path.join(root, SHORT_REL), ["---", "title: Short", "---", "", "# Short", "", "Body.", ""].join("\n"), "utf8");
+  // `created:` pinned like the fixture's other pages (all but the `.html`
+  // attachments and the deliberately new plan): on Linux `utimes` leaves the
+  // birthtime at now, so without it these two read as NEW (CI run 38313899886).
+  await writeFile(path.join(root, SHORT_REL), ["---", "title: Short", SETTLED_CREATED_LINE, "---", "", "# Short", "", "Body.", ""].join("\n"), "utf8");
   for (const [rel, body] of EDGE_PAGES) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
     await writeFile(path.join(root, rel), body, "utf8");
@@ -475,125 +576,268 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     expect(await railWidth(page)).toBe(width);
   }
   const rowOf = (page: Page, rel: string) => page.locator(`.wiki-list-item[data-relpath="${rel}"]`);
-  /** The geometry every case reads: which chip form is painted and whether it is
-   *  whole, whether the title+chip pair overflows its box, the title's width,
-   *  and whether the ★+date slot sits on the title's line or under it. */
+  /** The geometry every case reads, for the two-line row: line one is icon ·
+   *  title · ★+age, and the meta line under the title holds every mark. */
   function geometry(page: Page, rel: string) {
     return rowOf(page, rel).evaluate((el) => {
       const q = (s: string) => el.querySelector(s) as HTMLElement | null;
+      const rect = (e: Element) => e.getBoundingClientRect();
       const full = q(".wiki-fold-chip-label");
       const counts = q(".wiki-fold-chip-counts");
       const shown = full && getComputedStyle(full).display !== "none" ? full : counts;
-      const chip = q(".wiki-fold-chip");
-      const mid = q(".wiki-list-mid")!;
       const title = q(".wiki-list-title")!;
       const end = q(".wiki-list-end")!;
+      const icon = q(".wiki-type-icon")!;
+      const sub = q(".wiki-list-sub");
+      const cs = getComputedStyle(el);
+      const content = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      const marks = Array.from(el.querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-fold-chip, .wiki-new-tag, .wiki-moves-flag"));
       return {
         label: shown?.textContent ?? "",
         // scrollWidth and clientWidth are rounded apart on a fractional span, so a
         // whole 98.4px label can read 99 > 98; a real clip here is 5px or more.
         labelClipped: shown ? shown.scrollWidth - shown.clientWidth > 1 : false,
-        chipPastMid: chip ? chip.getBoundingClientRect().right - mid.getBoundingClientRect().right : 0,
-        midOverflow: mid.scrollWidth - mid.clientWidth,
-        title: title.getBoundingClientRect().width,
-        wrapped: end.getBoundingClientRect().top > title.getBoundingClientRect().top + 8,
-        endGap: el.getBoundingClientRect().right - 10 - end.getBoundingClientRect().right,
-        kids: Array.from(el.children).map((c) => [(c.getAttribute("class") ?? "").slice(0, 24), Math.round(c.getBoundingClientRect().width), Math.round(c.getBoundingClientRect().top)]),
-        item: el.clientWidth,
+        // Line one: the age on the title's first line, flush right, and the
+        // title holding all the room the icon and the age leave (8px gaps).
+        endOnTitleLine: Math.abs(rect(end).top - rect(title).top) < 4,
+        endGap: rect(el).right - parseFloat(cs.paddingRight) - rect(end).right,
+        titleShort: content - rect(icon).width - rect(end).width - 16 - rect(title).width,
+        titleLeft: rect(title).left,
+        titleIntoAge: rect(title).right - rect(end).left,
+        // The meta line: every mark in it, under the title, inside the row.
+        marks: marks.length,
+        marksOutsideSub: marks.filter((m) => !m.closest(".wiki-list-sub")).length,
+        subBelowTitle: sub ? rect(sub).top >= rect(title).top + 12 : null,
+        subMarkLeft: sub && sub.firstElementChild ? rect(sub.firstElementChild).left : null,
+        subOverflow: sub ? sub.scrollWidth - sub.clientWidth : 0,
+        marksPastRow: marks.filter((m) => rect(m).right > rect(el).right - parseFloat(cs.paddingRight) + 0.5).length,
       };
     });
   }
+  const MARKED = [SUP10, BIG, THREE, BARE, NEW_FLIGHT, CROWDED, CROWDED_LONG, CROWDED_SHORT];
 
-  test("a superseded-only chip is never painted clipped, at the narrow rail and the default", async ({ page }) => {
-    for (const width of [260, 270, 300]) {
+  test("line one is icon · title · age, flush right, and the title takes the rest of it", async ({ page }) => {
+    for (const width of [260, 300, 312]) {
       await openAt(page, width);
-      const g = await geometry(page, SUP10);
-      expect(g.label.replace(/\s+/g, " "), `counts intact at ${width}`).toContain("10");
-      expect(g.labelClipped, `label whole at ${width}: "${g.label}"`).toBe(false);
-      expect(g.chipPastMid, `chip inside its box at ${width}`).toBeLessThanOrEqual(0.5);
+      for (const rel of [...MARKED, LONG_REL, SHORT_REL]) {
+        const g = await geometry(page, rel);
+        expect(g.endOnTitleLine, `${rel} age on the title's line at ${width}`).toBe(true);
+        expect(g.endGap, `${rel} age flush right at ${width}`).toBeLessThanOrEqual(1);
+        expect(g.titleShort, `${rel} title fills line one at ${width}`).toBeLessThanOrEqual(1);
+        expect(g.titleIntoAge, `${rel} title clear of the age at ${width}`).toBeLessThanOrEqual(0.5);
+      }
     }
   });
 
-  test("a three-digit chip beside a pill and a ⚑ stays inside the title+chip box at every width under 270", async ({ page }) => {
-    for (const width of [260, 265, 269, 270, 300]) {
+  test("every mark is on the meta line under the title, whole, and inside the row", async ({ page }) => {
+    for (const width of [260, 270, 300, 312]) {
       await openAt(page, width);
-      const g = await geometry(page, BIG);
-      expect(g.label.replace(/\s+/g, " "), `counts intact at ${width}`).toContain(String(BIG_ATTACHED));
-      expect(g.labelClipped, `label whole at ${width}`).toBe(false);
-      expect(g.midOverflow, `pair fits its box at ${width}`).toBeLessThanOrEqual(0);
-      expect(g.chipPastMid, `chip inside its box at ${width}`).toBeLessThanOrEqual(0.5);
-      expect(g.endGap, `end slot flush right at ${width}`).toBeLessThanOrEqual(1);
+      for (const rel of MARKED) {
+        const g = await geometry(page, rel);
+        const at = `${rel} at ${width}: ${JSON.stringify(g)}`;
+        expect(g.marks, at).toBeGreaterThan(0);
+        expect(g.marksOutsideSub, at).toBe(0);
+        expect(g.subBelowTitle, at).toBe(true);
+        expect(g.subOverflow, at).toBeLessThanOrEqual(0);
+        expect(g.marksPastRow, at).toBe(0);
+        expect(g.labelClipped, at).toBe(false);
+      }
+      // The chips' counts are intact in whichever form is painted.
+      expect((await geometry(page, BIG)).label.replace(/\s+/g, " ")).toContain(String(BIG_ATTACHED));
+      expect((await geometry(page, SUP10)).label.replace(/\s+/g, " ")).toContain("10");
     }
   });
 
-  /**
-   * The narrow floor, pinned as a COUNTERFACTUAL rather than at a width: the
-   * row's fixed parts are platform font metrics (CI's Linux paints the pill at
-   * 61px, the ⚑ at 9 and the date at 73 against 56/6/74 on macOS, and a rail
-   * picked by hand here summed to exactly the content box there and wrapped).
-   * So the case measures the fixed parts on the row itself, computes the rail at
-   * which the narrow floor fits with 4px to spare, asserts one line there, and
-   * asserts the same rail is under what the DEFAULT floor would need — which is
-   * what makes it evidence about the floor and not about the machine. On mimir
-   * the row this stands for (`3 attached` + pill + ⚑ + a compact age) was the
-   * one chip row wrapping at the 300px default; measured 0 after, 1 before.
-   */
-  test("a one-count chip beside a pill and a ⚑ keeps ONE line where only the narrow floor fits", async ({ page }) => {
+  test("every title starts at the same x, and the meta line starts under it", async ({ page }) => {
     await openAt(page, 300);
-    const fixed = await rowOf(page, THREE).evaluate((el) => {
-      const w = (s: string) => (el.querySelector(s) as HTMLElement).getBoundingClientRect().width;
-      const cs = getComputedStyle(el);
-      const gap = parseFloat(cs.gap) || 8;
-      const content = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-      // icon · [mid] · pill · ⚑ · ★+date, and the four gaps between five items.
-      return { parts: w(".wiki-type-icon") + w(".wiki-status") + w(".wiki-followup-flag") + w(".wiki-list-end") + 4 * gap, content };
+    const all = await Promise.all([...MARKED, LONG_REL, SHORT_REL].map((rel) => geometry(page, rel)));
+    const left = all[0]!.titleLeft;
+    for (const g of all) expect(Math.abs(g.titleLeft - left)).toBeLessThan(0.5);
+    for (const g of all.slice(0, MARKED.length)) expect(Math.abs(g.subMarkLeft! - left)).toBeLessThan(0.5);
+  });
+
+  test("a crowded meta line stays one line from 260 to 400px: each chip breakpoint counts the marks beside it", async ({ page }) => {
+    const forms: Record<string, string[]> = { [CROWDED]: [], [CROWDED_LONG]: [], [CROWDED_SHORT]: [] };
+    for (let width = 260; width <= 400; width += 20) {
+      await openAt(page, width);
+      for (const rel of [CROWDED, CROWDED_LONG, CROWDED_SHORT]) {
+        const m = await rowOf(page, rel).evaluate((el) => {
+          const sub = el.querySelector(".wiki-list-sub") as HTMLElement;
+          const marks = Array.from(sub.querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-moves-flag, .wiki-fold-chip"));
+          const label = Array.from(sub.querySelectorAll(".wiki-fold-chip-label, .wiki-fold-chip-counts")).find(
+            (e) => getComputedStyle(e).display !== "none",
+          ) as HTMLElement;
+          // Centres, not tops: the marks differ in height. A wrapped mark moves a
+          // whole meta line (~19px); alignment is the next test's business.
+          const mids = marks.map((e) => {
+            const r = e.getBoundingClientRect();
+            return r.top + r.height / 2;
+          });
+          return {
+            marks: marks.length,
+            spread: Math.max(...mids) - Math.min(...mids),
+            clipped: label.scrollWidth - label.clientWidth > 1,
+            label: label.textContent,
+          };
+        });
+        expect(m.marks, `${rel} ${width}`).toBe(4);
+        expect(m.spread, `${rel} one meta line at ${width}: ${JSON.stringify(m)}`).toBeLessThan(6);
+        expect(m.clipped, `${rel} ${width}: ${m.label}`).toBe(false);
+        forms[rel]!.push(/[a-z]/.test(m.label ?? "") ? "full" : "compact");
+      }
+    }
+    // Both breakpoints actually switch inside the range: counts where the marks
+    // leave too little room, words once they leave enough.
+    for (const rel of [CROWDED, CROWDED_LONG, CROWDED_SHORT]) {
+      expect(forms[rel]![0], `${rel} at 260: ${forms[rel]}`).toBe("compact");
+      expect(forms[rel]!.at(-1), `${rel} at 400: ${forms[rel]}`).toBe("full");
+    }
+  });
+
+  test("the meta line's marks share one centre line", async ({ page }) => {
+    await openAt(page, 340);
+    const m = await rowOf(page, CROWDED).evaluate((el) => {
+      const kids = Array.from((el.querySelector(".wiki-list-sub") as HTMLElement).children) as HTMLElement[];
+      const centre = (e: HTMLElement) => {
+        const r = (e.matches(".wiki-fold-chip-wrap") ? (e.firstElementChild as HTMLElement) : e).getBoundingClientRect();
+        return r.top + r.height / 2;
+      };
+      const centres = kids.map(centre);
+      return {
+        order: kids.map((k) => (k.className.match(/wiki-(status|followup-flag|moves-flag|new-tag|fold-chip)/) ?? [""])[0]),
+        spread: Math.max(...centres) - Math.min(...centres),
+      };
     });
-    // Rail px per content px is 1:1; the offset is whatever the pane, list and
-    // row paddings take, read from this machine rather than assumed.
-    const offset = 300 - fixed.content;
-    const railFor = (floor: number) => Math.ceil(fixed.parts + floor + offset);
-    const width = railFor(RAIL_MID_MIN_CHIP_NARROW) + 4;
-    // The counterfactual: at this rail the default floor would NOT fit.
-    expect(width, `narrow ${railFor(RAIL_MID_MIN_CHIP_NARROW)} vs default ${railFor(RAIL_MID_MIN_CHIP)}`).toBeLessThan(railFor(RAIL_MID_MIN_CHIP));
-    await openAt(page, width);
-    const g = await geometry(page, THREE);
-    expect(g.wrapped, `one line at ${width}: ${JSON.stringify(g)}`).toBe(false);
-    expect(g.labelClipped).toBe(false);
+    // Measured before the fix: the pill's 1px and the ⚑'s 2px top margin (from
+    // the one-line row) put the centres 1.0px apart.
+    expect(m.spread, JSON.stringify(m)).toBeLessThanOrEqual(0.5);
   });
 
-  // The ONE case where the title floor itself is what holds the width: on the
-  // chip rows above it is the mid floor plus the compact chip that does (a
-  // mutation setting both min-widths to 10px leaves them green), so the floor
-  // assertion lives here and nowhere else in this block.
-  // The NEW tag widens the end slot: measured, not derived. At 260 (content 226)
-  // this row measured icon 14 + in-flight pill 57 + ⚑ 6 + end slot 71 (★ 10.6,
-  // tag 32.9, age 21.5) + four 8px gaps = 180, leaving 46px < RAIL_TITLE_MIN.
-  // No tag form fits (it would need ≤ 11px), so the row takes the documented
-  // degrade: it wraps, the title keeps its floor and the date stays flush right.
-  // At the 300px default it is one line.
-  test("a NEW in-flight plan with a ⚑ keeps its title floor at 260 (wrapping) and one line at 300", async ({ page }) => {
-    await openAt(page, 260);
-    await expect(rowOf(page, NEW_FLIGHT).locator(".wiki-new-tag")).toHaveText("NEW");
-    const g = await geometry(page, NEW_FLIGHT);
-    expect(g.title, JSON.stringify(g.kids)).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
-    expect(g.endGap, JSON.stringify(g.kids)).toBeLessThanOrEqual(1);
-    await openAt(page, 300);
-    const h = await geometry(page, NEW_FLIGHT);
-    expect(h.wrapped, JSON.stringify(h.kids)).toBe(false);
-    expect(h.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+  test("the meta line's marks are in the article header's order", async ({ page }) => {
+    await openAt(page, 340);
+    const order = await rowOf(page, CROWDED).evaluate((el) =>
+      Array.from((el.querySelector(".wiki-list-sub") as HTMLElement).querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-moves-flag, .wiki-new-tag, .wiki-fold-chip")).map(
+        (k) => (k.className.match(/wiki-(status|followup-flag|moves-flag|new-tag|fold-chip)/) ?? [""])[0],
+      ),
+    );
+    // Pill THEN ⚑, as the article header's badges; ✋ after them, as the header's
+    // lane pills; the chip last, where it can take the rest of the line.
+    expect(order).toEqual(["wiki-status", "wiki-followup-flag", "wiki-moves-flag", "wiki-fold-chip"]);
+    // NEW sits before the chip too.
+    const withNew = await rowOf(page, NEW_FLIGHT).evaluate((el) =>
+      Array.from((el.querySelector(".wiki-list-sub") as HTMLElement).querySelectorAll(".wiki-status, .wiki-followup-flag, .wiki-moves-flag, .wiki-new-tag, .wiki-fold-chip")).map(
+        (k) => (k.className.match(/wiki-(status|followup-flag|moves-flag|new-tag|fold-chip)/) ?? [""])[0],
+      ),
+    );
+    expect(withNew).toEqual(["wiki-status", "wiki-followup-flag", "wiki-new-tag", "wiki-fold-chip"]);
   });
 
-  test("a chipless pill + ⚑ row at the narrow rail keeps the title floor, and its second line is flush right", async ({ page }) => {
+  test("a meta line too full even for the compact chip wraps its slot rather than overflowing", async ({ page }) => {
     await openAt(page, 260);
-    const g = await geometry(page, BARE);
-    // Whether it wraps is the row's business (measured: it does, at 260 — the
-    // fixed parts leave under the floor); what it must not do is starve the
-    // title or leave the ★+date hanging mid-row.
-    expect(g.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
-    expect(g.endGap).toBeLessThanOrEqual(1);
+    // Squeeze each row's meta line until the marks before the chip still fit
+    // but leave its slot only `room` px: under the compact chip's floor for the
+    // row's counts class (CROWDED `99 · 99`, default class, floor 62; BIG
+    // `120 · 100`, counts-wide, floor 76, and 66 is above the default floor, so
+    // only the wide floor wraps it). Measured from the row, so a platform's
+    // wider pill moves the squeeze, not the case.
+    for (const [rel, room] of [
+      [CROWDED, 20],
+      [BIG, 66],
+    ] as const) {
+      const pad = await rowOf(page, rel).evaluate((el, slot) => {
+        const sub = el.querySelector(".wiki-list-sub") as HTMLElement;
+        const cs = getComputedStyle(sub);
+        const gap = parseFloat(cs.columnGap);
+        const before = Array.from(sub.children).filter((k) => !k.matches(".wiki-fold-chip-wrap")) as HTMLElement[];
+        const marks = before.reduce((w, k) => w + k.getBoundingClientRect().width + gap, 0);
+        return sub.getBoundingClientRect().width - parseFloat(cs.paddingRight) - (marks + slot);
+      }, room);
+      await page.addStyleTag({ content: `.wiki-list-item[data-relpath="${rel}"] .wiki-list-sub { padding-left: ${pad}px; }` });
+      const m = await rowOf(page, rel).evaluate((el) => {
+        const r = (q: string) => (el.querySelector(q) as HTMLElement).getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        const counts = el.querySelector(".wiki-fold-chip-counts") as HTMLElement;
+        return {
+          compact: getComputedStyle(counts).display !== "none",
+          chipPastRow: r(".wiki-fold-chip").right - (el.getBoundingClientRect().right - parseFloat(cs.paddingRight)),
+          // The marks before the chip stayed on one line…
+          marksSpread: Math.abs(r(".wiki-status").top - r(".wiki-followup-flag").top),
+          // …and the slot went under them.
+          slotBelowPill: r(".wiki-fold-chip-wrap").top - r(".wiki-status").top,
+          clipped: counts.scrollWidth - counts.clientWidth > 1,
+        };
+      });
+      const at = `${rel} (pad ${pad}): ${JSON.stringify(m)}`;
+      expect(m.compact, at).toBe(true);
+      expect(m.marksSpread, at).toBeLessThan(6);
+      expect(m.chipPastRow, at).toBeLessThanOrEqual(0.5);
+      expect(m.slotBelowPill, at).toBeGreaterThan(8);
+      expect(m.clipped, at).toBe(false);
+    }
+  });
+
+  // A sweep over the fixture's chips, not the whole state space: every chip
+  // label the rail paints for these rows is whole. Page rows across rails
+  // 260–400 in 2px steps; header rows (families on) in windows down to 400px,
+  // where the 45% viewport bound takes the rail under its 260px minimum.
+  // Not covered (a follow-up): three- and four-digit one-kind labels, wide
+  // header roll-ups other than `12 superseded`, windows under 400px, a clip of
+  // 1px or less (the tolerance below), and a band narrower than the 2px step.
+  async function clippedChips(page: Page): Promise<string[]> {
+    return page.locator("#wikiList").evaluate((list) =>
+      Array.from(list.querySelectorAll(".wiki-fold-chip-label, .wiki-fold-chip-counts"))
+        .filter((e) => getComputedStyle(e).display !== "none")
+        .filter((e) => (e as HTMLElement).scrollWidth - (e as HTMLElement).clientWidth > 1)
+        .map((e) => `${e.closest("[data-relpath], [data-group]")?.getAttribute("data-relpath") ?? e.closest("[data-group]")?.getAttribute("data-group")}: ${e.textContent}`),
+    );
+  }
+
+  test("no page-row chip label is clipped at any rail width from 260 to 400px", async ({ page }) => {
+    const clipped: string[] = [];
+    for (let width = 260; width <= 400; width += 2) {
+      await openAt(page, width);
+      for (const c of await clippedChips(page)) clipped.push(`${width}px ${c}`);
+    }
+    expect(clipped).toEqual([]);
+  });
+
+  test("no header-row chip label is clipped, in windows down to 400px", async ({ page }) => {
+    const clipped: string[] = [];
+    await page.addInitScript(
+      ([key, foldsKey]) => {
+        localStorage.setItem(key as string, "300");
+        localStorage.setItem(foldsKey as string, JSON.stringify(["toggle:families"]));
+      },
+      [RAIL_WIDTH_KEY, `muninn.wiki.folds.v1:${WIKI}`] as const,
+    );
+    for (let vw = 700; vw >= 400; vw -= 20) {
+      await page.setViewportSize({ width: vw, height: 900 });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+      const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
+      await expect(header).toHaveCount(1);
+      await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
+      for (const c of await clippedChips(page)) clipped.push(`${vw}px window ${c}`);
+    }
+    expect(clipped).toEqual([]);
+  });
+
+  test("a row with no marks has no meta line and stays one line", async ({ page }) => {
     await openAt(page, 300);
-    const h = await geometry(page, BARE);
-    expect(h.wrapped, `one line at 300: ${JSON.stringify(h)}`).toBe(false);
-    expect(h.title).toBeGreaterThanOrEqual(RAIL_TITLE_MIN);
+    const short = rowOf(page, SHORT_REL);
+    await expect(short.locator(".wiki-list-sub")).toHaveCount(0);
+    const h = await short.evaluate((el) => {
+      const title = el.querySelector(".wiki-list-title") as HTMLElement;
+      return { row: el.getBoundingClientRect().height, line: parseFloat(getComputedStyle(title).lineHeight) };
+    });
+    // Padding 7 + one 16.25px line + 7: well under a second line.
+    expect(h.row).toBeLessThan(14 + 2 * h.line);
+  });
+
+  test("a NEW plan's tag is on the meta line and its age stays green on line one", async ({ page }) => {
+    await openAt(page, 300);
+    const row = rowOf(page, NEW_FLIGHT);
+    await expect(row.locator(".wiki-list-sub .wiki-new-tag")).toHaveText("NEW");
+    await expect(row.locator(".wiki-list-end .wiki-new-tag")).toHaveCount(0);
+    await expect(row.locator(".wiki-list-end .wiki-list-meta")).toHaveClass(/\bnew\b/);
   });
 });

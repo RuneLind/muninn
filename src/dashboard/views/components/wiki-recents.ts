@@ -279,8 +279,9 @@ export function foldChipCompactLabel(children: readonly WikiListing[]): string {
 
 /**
  * The chip's WORD-size class — which container breakpoint decides when its
- * words yield to the counts (`wiki-page.ts`, the three `@container railmid`
- * rules; budgets in `wiki-rail-width.ts`). Judged on the LABEL both painters
+ * words yield to the counts (`wiki-page.ts`, the three `@container railchip`
+ * rules on a page row's chip slot; budgets `RAIL_CHIP_LABEL_*` in
+ * `wiki-rail-width.ts`). Judged on the LABEL both painters
  * build (a page chip's `N attached`, a family roll-up's `N shipped`), so the two
  * cannot classify the same words differently. Three classes because the full
  * label's width is a fact about the label: measured, `99 attached` is 85.5px
@@ -300,9 +301,10 @@ export function foldChipLabelClass(label: string): "" | "is-long" | "is-wide" {
 }
 
 /**
- * The chip's DIGIT-size class — how much of the row the COMPACT form is
- * guaranteed, i.e. the `.wiki-list-mid` floor that makes the row wrap before the
- * counts can overflow onto the status pill. Judged on the compact label alone:
+ * The chip's DIGIT-size class — how much room the COMPACT form is guaranteed,
+ * i.e. the floor of a page row's chip slot (`.wiki-fold-chip-wrap`,
+ * `RAIL_CHIP_COMPACT_*`) that wraps the slot onto its own line before the counts
+ * can overflow the row. Judged on the compact label alone:
  * one count of up to three digits (`999`, 44.8px) is narrow; two counts of up
  * to two digits (`99 · 99`, 60.9px) is the default the floor was sized for;
  * anything wider (`120 · 100` at 70.2px, `999 · 999` at 74.5px, a four-digit
@@ -310,11 +312,10 @@ export function foldChipLabelClass(label: string): "" | "is-long" | "is-wide" {
  * roll-up of three or four statuses) is wide. Four digits go WIDE rather than
  * widening the narrow budget: the 6px that would cover `9999` cost the 260px
  * rail three chip rows on one line (measured 6 wrapped against 3), for a
- * count no page has. The narrow bucket is what keeps a `3 attached` row
- * with a pill and a ⚑ on one line at the default rail; the wide one is what
- * stops a three-digit chip overflowing its box by 3–9px at rails 260–270.
- * On a family or month row neither class can fire: a group row's mid is the
- * rail minus 46.4px, 213.6px at the narrowest, above every floor here.
+ * count no page has (measured while page rows were one line). On a family or
+ * month row these floors bind only in a narrow window: a group row's mid is
+ * the rail minus 46.4px, and the 45% viewport bound takes the rail under 260px
+ * in a window narrower than ~578px.
  */
 export function foldChipCountsClass(compact: string): "" | "counts-narrow" | "counts-wide" {
   if (!compact) return "";

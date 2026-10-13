@@ -332,13 +332,6 @@ async function oneLine(page: Page, rel: string): Promise<boolean> {
   });
 }
 
-/** Which form the fold chip shows: its words or its counts. */
-async function chipForm(page: Page, rel: string): Promise<string> {
-  return row(page, rel)
-    .locator(".wiki-fold-chip")
-    .evaluate((el) => (getComputedStyle(el.querySelector(".wiki-fold-chip-label")!).display === "none" ? "counts" : "words"));
-}
-
 test.describe("Wiki reader: tracker links", () => {
   test("the index carries every relation; the listing drops mentions (API)", async () => {
     const res = await fetch(`${BASE}/api/wiki/page?wiki=${WIKI}&relPath=${encodeURIComponent(ANCHOR)}`);
@@ -525,7 +518,7 @@ test.describe("Wiki reader: tracker links", () => {
     }
   });
 
-  test("issue mark: a row with a fold chip keeps the line structure and chip form of the same row without a mark, 260–560px", async ({ page }) => {
+  test("issue mark: a row with a fold chip keeps the line structure of the same row without a mark, 260–560px", async ({ page }) => {
     await page.setViewportSize({ width: 1400, height: 1400 });
     for (let width = 260; width <= 560; width += 20) {
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
@@ -533,12 +526,12 @@ test.describe("Wiki reader: tracker links", () => {
       const where = `${width}px`;
       await expect(pills(page, TWIN_MD).first(), where).toBeVisible();
       await expect(row(page, MIRROR_MD).locator(".wiki-issue-pill"), where).toHaveCount(0);
-      // The case needs a width where the pill-less row is ONE line. Not 260
-      // since the 14px type icon (7px wider than the dot it replaced): measured,
-      // icon 14 + mid floor 126 + full date 73.7 + two gaps = 229.7 > 226.
+      // The chip is on the meta line and shares no box with the issue mark, so
+      // the mark cannot change its form; what the mark could still change is
+      // whether the title line holds. The 280 guard keeps the comparison from
+      // passing as false === false.
       if (width === 280) expect(await oneLine(page, MIRROR_MD), where).toBe(true);
       expect(await oneLine(page, TWIN_MD), where).toBe(await oneLine(page, MIRROR_MD));
-      expect(await chipForm(page, TWIN_MD), where).toBe(await chipForm(page, MIRROR_MD));
       expect(await clippedPillRows(page), where).toEqual([]);
     }
   });

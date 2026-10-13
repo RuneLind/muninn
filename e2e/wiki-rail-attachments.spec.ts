@@ -35,6 +35,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import {
   RAIL_TITLE_MIN,
+  RAIL_CHIP_LABEL_WIDE,
   RAIL_WIDTH_KEY,
 } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
@@ -354,7 +355,7 @@ test.describe("Wiki rail: attachments", () => {
           const full = q(".wiki-fold-chip-label");
           const counts = q(".wiki-fold-chip-counts");
           const shown = full && getComputedStyle(full).display !== "none" ? full : counts;
-          const mid = q(".wiki-list-mid")!;
+          const slot = q(".wiki-fold-chip-wrap")!;
           const end = q(".wiki-list-end")!;
           return {
             title: q(".wiki-list-title")!.getBoundingClientRect().width,
@@ -364,8 +365,8 @@ test.describe("Wiki rail: attachments", () => {
             labelClient: shown ? shown.clientWidth : 0,
             hover: q(".wiki-fold-chip")?.getAttribute("title") ?? "",
             aria: q(".wiki-fold-chip")?.getAttribute("aria-label") ?? "",
-            midScroll: mid.scrollWidth,
-            midClient: mid.clientWidth,
+            slotScroll: slot.scrollWidth,
+            slotClient: slot.clientWidth,
             // How far the ★+date slot's right edge sits from the row's own
             // content edge — 0 when it is flush right, whichever line it is on.
             endGap:
@@ -385,10 +386,10 @@ test.describe("Wiki rail: attachments", () => {
         // the accessible name carry the full label in either form.
         expect(m.hover, `hover carries the words, ${where}`).toContain(words);
         expect(m.aria, `accessible name carries the words, ${where}`).toContain(words);
-        // The pair itself must fit the space it was given — a chip overflowing
-        // `.wiki-list-mid` lands on the status pill and is invisible to a check
-        // on `#wikiList`, which the row's own padding absorbs.
-        expect(m.midScroll, `title+chip fit their box, ${where}`).toBeLessThanOrEqual(m.midClient);
+        // The chip must fit the slot it was given on the meta line — an overflow
+        // there is invisible to a check on `#wikiList`, which the row's own
+        // padding absorbs.
+        expect(m.slotScroll, `chip fits its slot, ${where}`).toBeLessThanOrEqual(m.slotClient);
         // …and the ★+date stay flush right, including on the second line of a
         // row that wrapped, where nothing grows to push them there.
         expect(m.endGap, `end slot flush right, ${where}`).toBeLessThanOrEqual(1);
@@ -409,30 +410,29 @@ test.describe("Wiki rail: attachments", () => {
   });
 
   /**
-   * The two breakpoints are one design decision, and this is it: a chip whose
-   * label is short keeps its WORDS where a long one has already had to give them
-   * up. Driven at a rail width between the two thresholds (330px, set the way a
-   * reader sets it — the stored width), so the reading is ~35px clear of either
-   * one rather than riding the 5px margin the default rail leaves.
+   * A chip alone on its meta line keeps its WORDS at every rail width, the
+   * two-kind label included: its slot is the whole meta line, wider than the
+   * wide breakpoint even at the narrowest rail. (Where marks crowd the slot,
+   * the word/count switch is pinned in `wiki-rail-width.spec.ts`.)
    */
-  test("at a mid-width rail the short chip keeps its words and the long one does not", async ({
-    page,
-  }) => {
+  test("a chip alone on its meta line keeps its words, short and long, at 260 and 300px", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
-    await page.addInitScript(
-      ([key, width]) => localStorage.setItem(key as string, String(width)),
-      [RAIL_WIDTH_KEY, 330] as const,
-    );
-    await openRail(page);
     const formOf = (rel: string) =>
       row(page, rel).evaluate((el) => {
         const full = el.querySelector(".wiki-fold-chip-label") as HTMLElement;
         return getComputedStyle(full).display !== "none" ? "full" : "compact";
       });
-    // `1 attached` fits beside the title floor here…
-    expect(await formOf(V)).toBe("full");
-    // …and `2 attached · 1 superseded`, twice the width, does not.
-    expect(await formOf(X)).toBe("compact");
+    for (const width of [260, 300]) {
+      await page.addInitScript(
+        ([key, w]) => localStorage.setItem(key as string, String(w)),
+        [RAIL_WIDTH_KEY, width] as const,
+      );
+      await openRail(page);
+      const slot = await row(page, X).locator(".wiki-fold-chip-wrap").evaluate((el) => el.clientWidth);
+      expect(slot, `slot at ${width}`).toBeGreaterThan(RAIL_CHIP_LABEL_WIDE);
+      expect(await formOf(V), `${width}`).toBe("full");
+      expect(await formOf(X), `${width}`).toBe("full");
+    }
   });
 
   // A LIFTED child: the reader pinned it, so it renders under Pinned rather than
