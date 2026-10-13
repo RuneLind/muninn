@@ -1717,6 +1717,20 @@ the reader agree on where a sentence ends. Measured 2026-10-09
 `status-row-long` on none (no page carries `<StatusRows>` yet). Acceptance:
 `lint-report-top.test.ts`.
 
+Its second half, `checkTldr`, holds the In short box rule (mdx-explainer
+«Report genres» and «Reference page shape»): `missing-tldr` (warning) when the
+first non-blank block after the leading `# ` heading is not a `<Tldr>`, and
+`tldr-no-more` (info) when that `<Tldr>` holds no `<More>` at any depth. Scope
+(`isTldrScope`): an `.mdx` page that is a live report page (`isLiveReportPage`,
+check 9's predicate) or whose first path segment is `flows`, `concepts`,
+`repos`, `integrations`, `projects` or `reading`. A `.md` page is out — it
+renders no components, so it cannot carry the box — and so are reserved and
+culled pages, as in check 9. Read through `parseBlocks`, so a `<Tldr>` in a
+code fence or after a `<Callout>` is still a finding. The line is the first
+non-blank line after the H1, where the box goes. Report-only (plan D3: the box
+is written text). Measured 2026-10-13: `missing-tldr` on 36 live mimir plans
+and 15 kode-wiki plans (the plan's inventory), `tldr-no-more` on none.
+
 ### Lint check 12 — role keys (`role-key`, in `lint.ts`)
 
 A `<Lane role=>` whose value is not a key (`normalizeRoleKey`: letters,

@@ -52,6 +52,8 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "long-page-no-fold": { one: "long page with no Fold", many: "long pages with no Fold" },
   "decision-first-sentence": { one: "long decision first sentence", many: "long decision first sentences" },
   "status-row-long": { one: "long status row", many: "long status rows" },
+  "missing-tldr": { one: "page with no In short box", many: "pages with no In short box" },
+  "tldr-no-more": { one: "In short box with no More", many: "In short boxes with no More" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks

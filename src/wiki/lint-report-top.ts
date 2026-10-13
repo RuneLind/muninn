@@ -8,23 +8,35 @@
  * | `decision-first-sentence` | an id-led `<DecisionLog>` item, not dimmed, whose first sentence (what the |
  * |                           | Overview lens shows, D6) is over `FIRST_SENTENCE_MAX` (160) visible chars  |
  * | `status-row-long`         | a `<StatusRows>` row over `STATUS_ROW_MAX` (160) chars as written (D11)    |
+ * | `missing-tldr`            | an `.mdx` page in {@link isTldrScope} whose first non-blank block after the H1 is |
+ * |                           | not `<Tldr>` (the In short / Kort fortalt box)                             |
+ * | `tldr-no-more` (info)     | that `<Tldr>` holds no `<More>`                                            |
  *
- * Both read the page through the renderer's own parser; the first sentence is
- * the reader's own guarded split (`decisionFirstSentence`) and a row the rule
- * in `src/format/report-top.ts`, so the finding and the reader agree. A struck or superseded item is
- * skipped: it is history, and the reader dims it.
+ * The first two read the page through the renderer's own parser; the first
+ * sentence is the reader's own guarded split (`decisionFirstSentence`) and a row
+ * the rule in `src/format/report-top.ts`, so the finding and the reader agree. A
+ * struck or superseded DecisionLog item is skipped: it is history, and the
+ * reader dims it.
+ *
+ * The two Tldr checks run from {@link checkTldr}, which `lint.ts` calls only
+ * for pages that are neither reserved nor culled, as check 9 does.
  */
 
-import { parseBlocks } from "../format/markdown-ast.ts";
+import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { decisionLogEntries } from "../format/question.ts";
 import { FIRST_SENTENCE_MAX, STATUS_ROW_MAX, statusRowBlocks, visibleText } from "../format/report-top.ts";
 import { decisionFirstSentence } from "../web/web-format.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
-import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import { parseFrontmatter, stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import { isLiveReportPage } from "./lint-drift.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const REPORT_TOP_LINT_CHECKS = ["decision-first-sentence", "status-row-long"] as const;
+export const REPORT_TOP_LINT_CHECKS = ["decision-first-sentence", "status-row-long", "missing-tldr", "tldr-no-more"] as const;
+
+/** Folders whose `.mdx` pages are reference pages and open with the box
+ *  (mdx-explainer «Reference page shape», 2026-10-13). */
+const TLDR_REFERENCE_DIRS = new Set(["flows", "concepts", "repos", "integrations", "projects", "reading"]);
 
 /** `text` cut to `n` chars with an ellipsis, on one line, quoted. */
 function quote(text: string, n = 50): string {
@@ -91,4 +103,61 @@ export function checkReportTop(page: WikiPageMeta, rawContent: string): LintFind
     }
   }
   return findings;
+}
+
+/** An `.mdx` page that is a live report page or sits in a reference folder.
+ *  A `.md` page renders no components, so it cannot carry the box. */
+export function isTldrScope(relPath: string, fm: Record<string, unknown>, planStatus: string | undefined): boolean {
+  if (!relPath.endsWith(".mdx")) return false;
+  return isLiveReportPage(relPath, fm, planStatus) || TLDR_REFERENCE_DIRS.has(relPath.split("/")[0]!);
+}
+
+const isBlank = (b: Block) => b.type === "text" && b.lines.every((l) => l.trim() === "");
+
+function hasMore(blocks: readonly Block[]): boolean {
+  return blocks.some((b) => b.type === "component" && (b.name === "More" || hasMore(b.children)));
+}
+
+/**
+ * `missing-tldr` and `tldr-no-more`: the first non-blank block after the
+ * leading `# ` heading (or the first block, on a page with none) must be a
+ * `<Tldr>`, and that box should hold a `<More>`. The line named is the first
+ * non-blank body line after the H1, where the box goes.
+ */
+export function checkTldr(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  if (!isTldrScope(page.relPath, parseFrontmatter(rawContent), page.plan_status)) return [];
+  const blocks = parseBlocks(stripFrontmatter(rawContent)).filter((b) => !isBlank(b));
+  const h1 = blocks[0]?.type === "heading" && blocks[0].level === 1;
+  const first = blocks[h1 ? 1 : 0];
+
+  const lines = rawContent.split("\n");
+  const fenced = fencedLineMask(lines);
+  let from = frontmatterEndLine(lines);
+  if (h1) {
+    const h1Line = findLine(lines, fenced, from, (l) => /^#\s/.test(l));
+    if (h1Line !== undefined) from = h1Line;
+  }
+  const line = findLine(lines, [], from, (l) => l.trim() !== "");
+  const at = line !== undefined ? { line } : {};
+
+  if (first?.type !== "component" || first.name !== "Tldr") {
+    return [
+      {
+        check: "missing-tldr",
+        relPath: page.relPath,
+        message: "No In short box: the first block after the title is not <Tldr> — open the page with <Tldr> + <More> (mdx-explainer «Reference page shape» / «Report genres»)",
+        ...at,
+      },
+    ];
+  }
+  if (hasMore(first.children)) return [];
+  return [
+    {
+      check: "tldr-no-more",
+      relPath: page.relPath,
+      message: "The <Tldr> box has no <More>: put the background, the question the page answers and «Words on the page» in a <More> inside it",
+      severity: "info",
+      ...at,
+    },
+  ];
 }

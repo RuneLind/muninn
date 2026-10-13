@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Nineteen checks, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Twenty-two check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -57,6 +57,9 @@
  *                      a DecisionLog item whose first sentence (what the
  *                      Overview lens shows) runs over 160 chars, and a
  *                      `<StatusRows>` row over 160 chars. Warnings, report-only.
+ *                      Its missing-tldr / tldr-no-more half (live report pages
+ *                      and `.mdx` reference pages): no `<Tldr>` first under the
+ *                      title, and (info) a `<Tldr>` with no `<More>`.
  *                      Rules: `lint-report-top.ts`.
  * 12. role-key     — a `<Lane role=>`, or a role entry in a `<Question to=>`
  *                      or `questions_to:`, that `.wiki-reader.json` `roleKeys`
@@ -99,7 +102,7 @@ import {
 import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
-import { checkReportTop, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
+import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
   closeNearMisses,
@@ -142,7 +145,7 @@ export interface LintFinding {
   /** 1-based line the finding points at, where one is meaningful (check 9). */
   line?: number;
   /** `info` for a suggestion rather than a defect; absent means a warning.
-   *  Only check 9's `long-page-no-fold` sets it. */
+   *  Check 9's `long-page-no-fold` and check 11's `tldr-no-more` set it. */
   severity?: "info";
   /**
    * The machine-readable remedy, on check 8's findings alone — which pages to
@@ -947,6 +950,8 @@ export async function lintWiki(
       if (sources) findings.push(sources);
       // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
+      // Check 11's Tldr half — live report pages and `.mdx` reference pages.
+      findings.push(...checkTldr(page, content));
     }
   }
 
