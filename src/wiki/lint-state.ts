@@ -15,7 +15,7 @@
  * |                      | task word                                                                  |
  * | `state-not-owner`    | a home clause states the state of a key some page owns, on a page whose     |
  * |                      | `owns:` does not list it                                                   |
- * | `state-owns-unread`  | an `owns:` names no key at all (each of its entries is reported)            |
+ * | `state-owns-unread`  | the frontmatter has `owns:` and it names no Jira key (one per page)         |
  *
  * Scope: live report pages (`isLiveReportPage`) outside `archive/`, not
  * reserved or culled. Frontmatter `description` is linted; `status_note` is a
@@ -169,82 +169,71 @@ function numbersRe(numbers: Iterable<string>): RegExp | null {
   );
 }
 
-/** One `owns:` entry as written, its 0-based line and the keys it names. */
-export interface OwnsEntry {
-  text: string;
-  line: number;
+/** A page's `owns:` as read: whether the frontmatter has the key, the keys it
+ *  names, the entry as written (after `owns:`, whitespace collapsed) and the
+ *  0-based line of the key. */
+export interface OwnsRead {
+  present: boolean;
   keys: string[];
+  raw: string;
+  line: number;
 }
 
-/** Split a flow list or a comma scalar on commas outside quotes, unquoted. */
-function splitEntries(value: string): string[] {
-  const out: string[] = [];
-  let cur = "";
-  let quote: string | null = null;
-  for (const ch of value) {
-    if (quote) {
-      if (ch === quote) quote = null;
-      else cur += ch;
-    } else if (ch === '"' || ch === "'") quote = ch;
-    else if (ch === ",") {
-      out.push(cur);
-      cur = "";
-    } else cur += ch;
+const NO_OWNS: OwnsRead = { present: false, keys: [], raw: "", line: 0 };
+const OWNS_LINE_RE = /^owns\s*:/;
+/** A line that starts a new top-level key: column 0, not a comment or a list item. */
+const TOP_LEVEL_RE = /^[^\s#-]/;
+
+/** A YAML mapping, or `null` when the text does not parse to one. */
+function yamlMap(text: string): Record<string, unknown> | null {
+  try {
+    const v: unknown = Bun.YAML.parse(text);
+    return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
   }
-  out.push(cur);
-  return out.map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
-const unquote = (s: string) => s.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
-
-/** A YAML value with its trailing comment cut: a `#` at the start or after
- *  whitespace, outside quotes. */
-function stripComment(value: string): string {
-  let quote: string | null = null;
-  for (let i = 0; i < value.length; i++) {
-    const ch = value[i]!;
-    if (quote) {
-      if (ch === quote) quote = null;
-    } else if (ch === '"' || ch === "'") quote = ch;
-    else if (ch === "#" && (i === 0 || /\s/.test(value[i - 1]!))) return value.slice(0, i).trim();
-  }
-  return value.trim();
+/** The Jira keys in an `owns:` value: a string is one entry, a list's strings are
+ *  its entries (anything else is ignored), each through `stampedKeys`, with
+ *  denylisted prefixes (`UTF-8`) dropped even when the entry is exactly key-shaped. */
+export function ownsKeys(value: unknown): string[] {
+  const entries =
+    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+  const keys = stampedKeys(entries).filter((k) => !JIRA_KEY_DENYLIST.has(k.slice(0, k.indexOf("-"))));
+  return [...new Set(keys)];
 }
 
 /**
- * Every `owns:` entry in the page's frontmatter: an inline list
- * (`owns: [A-1, B-2]`), a comma scalar (`owns: A-1, B-2`) or a block list
- * (`owns:` + `  - A-1`, the items indented or not; a trailing `# comment` is
- * cut). `parseFrontmatter` reads the first form only, so this
- * reads the raw lines. Each entry is shape-checked through `stampedKeys`
- * (`trackers/jira.ts`): `TBD` names no key, `"A-1 (kilde)"` names `A-1`.
+ * A page's `owns:`, read by a YAML parser (`Bun.YAML`), so every YAML form reads
+ * as YAML reads it: an inline or multi-line flow list, a block list indented or
+ * not, a scalar, comments anywhere. When the whole frontmatter is not valid YAML
+ * (a hand-written page may break it elsewhere), only the `owns:` entry is parsed:
+ * the `owns:` line and its continuation lines, up to the next top-level key; if
+ * that fails too, the value is unreadable and names no key. The sweep reads
+ * `owns:` the same way (claude-skills `plan-status-sweep/scripts/sweep-lib.ts`).
  */
-export function readOwns(content: string): OwnsEntry[] {
+export function readOwns(content: string): OwnsRead {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const end = frontmatterEndLine(lines);
-  const out: OwnsEntry[] = [];
-  const push = (text: string, line: number) => out.push({ text, line, keys: stampedKeys(text) });
-  for (let i = 1; i < end - 1; i++) {
-    const m = /^owns\s*:(.*)$/.exec(lines[i]!);
-    if (!m) continue;
-    const value = stripComment(m[1]!);
-    if (value === "") {
-      for (let k = i + 1; k < end - 1; k++) {
-        const item = /^\s*-(?:\s+(.*?))?\s*$/.exec(lines[k]!);
-        if (item) {
-          const text = unquote(stripComment(item[1] ?? ""));
-          if (text) push(text, k);
-        } else if (lines[k]!.trim() !== "" && !/^\s*#/.test(lines[k]!)) break;
-      }
-    } else {
-      const inner = value.startsWith("[") ? value.replace(/^\[/, "").replace(/\]\s*$/, "") : value;
-      for (const text of splitEntries(inner)) push(text, i);
-    }
+  if (end === 0) return NO_OWNS;
+  const fm = lines.slice(1, end - 1);
+  let at = -1;
+  for (let i = 0; i < fm.length; i++) if (OWNS_LINE_RE.test(fm[i]!)) at = i;
+  let stop = at + 1;
+  while (at >= 0 && stop < fm.length && !TOP_LEVEL_RE.test(fm[stop]!)) stop++;
+  const entry = at < 0 ? [] : fm.slice(at, stop);
+  const raw = entry.join(" ").replace(OWNS_LINE_RE, "").replace(/\s+/g, " ").trim();
+  const line = at < 0 ? 1 : at + 1;
+  const whole = yamlMap(fm.join("\n"));
+  if (whole) {
+    if (!Object.hasOwn(whole, "owns")) return NO_OWNS;
+    return { present: true, keys: ownsKeys(whole.owns), raw, line };
   }
-  return out;
+  if (at < 0) return NO_OWNS;
+  const part = yamlMap(entry.join("\n"));
+  return { present: true, keys: part ? ownsKeys(part.owns) : [], raw, line };
 }
-
-const ownedKeys = (entries: readonly OwnsEntry[]) => [...new Set(entries.flatMap((e) => e.keys))];
 
 /** A page the state checks read: its meta, its raw content, its frontmatter. */
 export interface StatePage {
@@ -571,7 +560,7 @@ export function checkState(
   for (const { page, content, fm } of pages) {
     const roles = stateLineRoles(content);
     const lines = roles.lines;
-    const own = ownedKeys(readOwns(content));
+    const own = readOwns(content).keys;
     const named = [...new Set([...own, ...stampedKeys(fm.jira)])];
     const exactRe = exactKeysRe([...owners.keys(), ...named]);
     const isDenied = (k: string) => trackerProjects.length === 0 && JIRA_KEY_DENYLIST.has(k.slice(0, k.indexOf("-")));
@@ -670,7 +659,7 @@ export interface OwnerPage {
 export function stateOwners(pages: Iterable<OwnerPage>): Map<string, string[]> {
   const owners = new Map<string, string[]>();
   for (const { relPath, content } of pages) {
-    for (const key of ownedKeys(readOwns(content))) {
+    for (const key of readOwns(content).keys) {
       const list = owners.get(key) ?? [];
       if (!list.includes(relPath)) list.push(relPath);
       owners.set(key, list);
@@ -679,22 +668,22 @@ export function stateOwners(pages: Iterable<OwnerPage>): Map<string, string[]> {
   return owners;
 }
 
-/** `state-owns-unread`: an `owns:` that names no key at all would leave the page
- *  owning nothing in silence. One finding per entry; an `owns:` that names a key
- *  drops its other entries quietly. */
+/** `state-owns-unread`: an `owns:` that names no key would leave the page owning
+ *  nothing in silence — `owns:`, `owns: []`, `owns: ~`, `owns: TBD`, a value that
+ *  does not parse. One finding per page, on the `owns:` line. An `owns:` that
+ *  names a key drops its other entries quietly; a page with no `owns:` owns
+ *  nothing and is not reported. */
 export function checkOwnsEntries(pages: Iterable<OwnerPage>): LintFinding[] {
   const out: LintFinding[] = [];
   for (const { relPath, content } of pages) {
-    const entries = readOwns(content);
-    if (entries.some((e) => e.keys.length > 0)) continue;
-    for (const e of entries) {
-      out.push({
-        check: "state-owns-unread",
-        relPath,
-        line: e.line + 1,
-        message: `owns: entry ${quoted([e.text])} names no Jira key, and no other owns: entry does, so this page owns nothing — write the key (owns: [PROJ-123]) or remove the entry`,
-      });
-    }
+    const owns = readOwns(content);
+    if (!owns.present || owns.keys.length > 0) continue;
+    out.push({
+      check: "state-owns-unread",
+      relPath,
+      line: owns.line + 1,
+      message: `owns: ${owns.raw ? quoted([owns.raw]) : "(empty)"} names no Jira key, so this page owns nothing — write the key (owns: [PROJ-123]) or remove owns:`,
+    });
   }
   return out;
 }

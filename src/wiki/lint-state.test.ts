@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, type LintFinding } from "./lint.ts";
+import { checkOwnsEntries, stateOwners } from "./lint-state.ts";
 
 // Lint check 14 — state outside its home and state of a key another page owns
 // (living-facts D10). Synthetic fixtures: an English phrase list and DEMO keys.
@@ -366,8 +367,63 @@ describe("check 14 Jira keys", () => {
   });
 });
 
-describe("check 14 owns: and jira: entries", () => {
-  test("an entry is shape-checked, its key taken from prose, and deduplicated", async () => {
+// The owns: form table. Twin: claude-skills plan-status-sweep/scripts/sweep-lib.test.ts
+// carries the same rows in the same order; change both together.
+const OWNS_FORMS: { form: string; fm: string[]; body?: string; crlf?: true; keys: string[]; warns: boolean }[] = [
+  { form: "no owns key", fm: [], keys: [], warns: false },
+  { form: "inline list", fm: ["owns: [DEMO-1, DEMO-2]"], keys: ["DEMO-1", "DEMO-2"], warns: false },
+  { form: "inline list + comment", fm: ["owns: [DEMO-1, DEMO-2] # the two"], keys: ["DEMO-1", "DEMO-2"], warns: false },
+  { form: "quoted entries, # inside quotes", fm: ["owns: [\"x # y\", 'DEMO-2']"], keys: ["DEMO-2"], warns: false },
+  { form: "quoted entry with prose, repeated", fm: ['owns: ["DEMO-1 (kilde)", "DEMO-1 (kilde)"]'], keys: ["DEMO-1"], warns: false },
+  { form: "comma string", fm: ["owns: DEMO-1, DEMO-2"], keys: ["DEMO-1", "DEMO-2"], warns: false },
+  { form: "block indented", fm: ["owns:", "  - DEMO-1", "  - DEMO-2"], keys: ["DEMO-1", "DEMO-2"], warns: false },
+  { form: "block zero-indent", fm: ["owns:", "- DEMO-1", "- TBD"], keys: ["DEMO-1"], warns: false },
+  { form: "owns: # c + block", fm: ["owns:  # later", "  - DEMO-1"], keys: ["DEMO-1"], warns: false },
+  { form: "  -DEMO-5 (a scalar, not an item)", fm: ["owns:", "  -DEMO-5"], keys: ["DEMO-5"], warns: false },
+  { form: "multi-line flow list", fm: ["owns: [DEMO-1,", "  DEMO-2]"], keys: ["DEMO-1", "DEMO-2"], warns: false },
+  { form: "inline list, # inside an entry", fm: ["owns: [DEMO-1, DEMO-2#x, DEMO-3]"], keys: ["DEMO-1", "DEMO-2", "DEMO-3"], warns: false },
+  { form: "block item whose comment names a key", fm: ["owns:", "  - TBD # DEMO-1"], keys: [], warns: true },
+  { form: "apostrophe in a plain scalar + comment", fm: ["owns: Rune's DEMO-1 # not DEMO-2"], keys: ["DEMO-1"], warns: false },
+  { form: "lower case, repeated", fm: ["owns: [demo-1, DEMO-1]"], keys: ["DEMO-1"], warns: false },
+  { form: "[TBD]", fm: ["owns: [TBD]"], keys: [], warns: true },
+  { form: "[TBD, DEMO-1]", fm: ["owns: [TBD, DEMO-1]"], keys: ["DEMO-1"], warns: false },
+  { form: "TBD", fm: ["owns: TBD"], keys: [], warns: true },
+  { form: "~", fm: ["owns: ~"], keys: [], warns: true },
+  { form: "null", fm: ["owns: null"], keys: [], warns: true },
+  { form: "empty", fm: ["owns:"], keys: [], warns: true },
+  { form: "[]", fm: ["owns: []"], keys: [], warns: true },
+  { form: '""', fm: ['owns: ""'], keys: [], warns: true },
+  { form: "comment only, nothing under", fm: ["owns:  # later"], keys: [], warns: true },
+  { form: "CRLF", fm: ["owns: [DEMO-1]"], crlf: true, keys: ["DEMO-1"], warns: false },
+  { form: "indented plain scalar on the next line", fm: ["owns:", "  DEMO-1"], keys: ["DEMO-1"], warns: false },
+  { form: "a body line owns: X", fm: [], body: "owns: DEMO-1", keys: [], warns: false },
+  { form: "tags: block after an empty owns:", fm: ["owns:", "tags:", "  - DEMO-9"], keys: [], warns: true },
+  { form: "an alias", fm: ["base: &k DEMO-1", "owns: *k"], keys: ["DEMO-1"], warns: false },
+  { form: "invalid YAML elsewhere, inline owns:", fm: ["summary: a: b", "owns: [DEMO-1]"], keys: ["DEMO-1"], warns: false },
+  { form: "invalid YAML elsewhere, zero-indent block", fm: ["summary: a: b", "owns:", "- DEMO-1", "- DEMO-2"], keys: ["DEMO-1", "DEMO-2"], warns: false },
+  { form: "invalid owns: value", fm: ["owns: [DEMO-1"], keys: [], warns: true },
+  { form: "denylisted prefix, exact entry", fm: ["owns: [UTF-8]"], keys: [], warns: true },
+  { form: "denylisted prefix in prose", fm: ["owns: uses UTF-8 for DEMO-1"], keys: ["DEMO-1"], warns: false },
+  { form: "non-string list element", fm: ["owns: [12, DEMO-1]"], keys: ["DEMO-1"], warns: false },
+  { form: "a mapping", fm: ["owns: {a: DEMO-1}"], keys: [], warns: true },
+];
+const ownsFormPage = (row: (typeof OWNS_FORMS)[number]) => {
+  const text = ["---", "title: T", "type: plan", ...row.fm, "plan_status: in-flight", "---", "", "# T", "", row.body ?? "Body.", ""].join("\n");
+  return row.crlf ? text.replace(/\n/g, "\r\n") : text;
+};
+
+describe("check 14 owns: forms", () => {
+  for (const row of OWNS_FORMS) {
+    test(`${row.form}: keys ${row.keys.join(", ") || "none"}${row.warns ? ", warns" : ""}`, () => {
+      const pages = [{ relPath: "plans/p.mdx", content: ownsFormPage(row) }];
+      expect([...stateOwners(pages).keys()]).toEqual(row.keys);
+      expect(checkOwnsEntries(pages).length > 0).toBe(row.warns);
+    });
+  }
+});
+
+describe("check 14 owns: through the linter", () => {
+  test("an owner's key is read off its page and a home elsewhere stating it is reported", async () => {
     await write("plans/owner.mdx", page(["Body."], ['owns: ["DEMO-100 (kilde)", "DEMO-100 (kilde)"]']));
     await write("plans/other.mdx", page(["**Status:** DEMO-100 merged"]));
     const f = await notOwner();
@@ -375,38 +431,16 @@ describe("check 14 owns: and jira: entries", () => {
     expect(f[0]!.message).toContain("DEMO-100, which plans/owner.mdx owns");
   });
 
-  test("a block list and a comma-separated scalar are read", async () => {
-    await write("plans/a.mdx", page(["Body."], ["owns:", "  - DEMO-100", "  - DEMO-101"]));
-    await write("plans/b.mdx", page(["Body."], ["owns: DEMO-3, DEMO-4"]));
-    await write("plans/other.mdx", page(["**Status:** DEMO-101 merged · DEMO-4 merged"]));
-    expect((await notOwner()).map((f) => f.message.match(/states (\S+), which (\S+) owns/)!.slice(1))).toEqual([
-      ["DEMO-101", "plans/a.mdx"],
-      ["DEMO-4", "plans/b.mdx"],
-    ]);
-  });
-
-  test("an owns: that names no key at all is a warning per entry, with its line", async () => {
+  test("an owns: that names no key is one warning on its line, quoting the value", async () => {
     await write("plans/a.mdx", page(["Body."], ["owns: [TBD, DEMO-1]"]));
-    await write("plans/b.mdx", page(["Body."], ["owns:", "  - later"]));
-    await write("plans/c.mdx", page(["Body."], ["owns: DEMO-5, soon"]));
-    await write("plans/d.mdx", page(["Body."], ["owns: [TBD, soon]"]));
+    await write("plans/b.mdx", page(["Body."], ["owns:", "  - later  # soon"]));
+    await write("plans/c.mdx", page(["Body."], ["owns: []"]));
+    await write("plans/d.mdx", page(["Body."]));
     const f = await findings("state-owns-unread");
-    expect(f.map((x) => [x.relPath, x.line, x.message.match(/«(.*?)»/)![1]])).toEqual([
-      ["plans/b.mdx", 7, "later"],
-      ["plans/d.mdx", 6, "TBD"],
-      ["plans/d.mdx", 6, "soon"],
+    expect(f.map((x) => [x.relPath, x.line, x.message.match(/^owns: (.*?) names no Jira key/)![1]])).toEqual([
+      ["plans/b.mdx", 6, "«- later # soon»"],
+      ["plans/c.mdx", 6, "«[]»"],
     ]);
-  });
-
-  test("a zero-indent block list and a comment after owns: still read their keys", async () => {
-    await write("plans/a.mdx", page(["Body."], ["owns:", "- DEMO-100", "- TBD"]));
-    await write("plans/b.mdx", page(["Body."], ["owns:  # later", "  - DEMO-101"]));
-    await write("plans/other.mdx", page(["**Status:** DEMO-100 merged · DEMO-101 merged"]));
-    expect((await notOwner()).map((f) => f.message.match(/states (\S+), which (\S+) owns/)!.slice(1))).toEqual([
-      ["DEMO-100", "plans/a.mdx"],
-      ["DEMO-101", "plans/b.mdx"],
-    ]);
-    expect(await findings("state-owns-unread")).toEqual([]);
   });
 
   test("a CRLF owner page owns its keys on an LF page's home", async () => {
