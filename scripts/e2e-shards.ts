@@ -67,15 +67,21 @@ type JsonSpec = { id: string; title: string; file: string; tests: JsonTest[] };
 type JsonSuite = { title: string; file: string; specs?: JsonSpec[]; suites?: JsonSuite[] };
 export type JsonReport = { suites: JsonSuite[]; errors?: unknown[] };
 
+const SKIP_TYPES = new Set(["skip", "fixme"]);
+
 export type FlatTest = {
   id: string;
   file: string;
   title: string;
   results: JsonResult[];
   outcome: string;
-  /** The last `test.skip(…, reason)` description, "" when it gave none. */
+  /** The last `test.skip`/`test.fixme` reason, "" when it gave none. */
   skipReason: string;
-  /** False for a test Playwright skipped because an earlier one in its serial group or `beforeAll` scope failed. */
+  /**
+   * Whether a `test.skip`/`test.fixme` fired for this test. A test Playwright
+   * skipped because an earlier failure in its serial group or `beforeAll`
+   * scope stopped it carries none: its body, and any skip in it, never ran.
+   */
   skipAnnotated: boolean;
 };
 
@@ -85,7 +91,7 @@ export function flatten(report: JsonReport): FlatTest[] {
   const walk = (suite: JsonSuite, chain: string[]) => {
     for (const spec of suite.specs ?? []) {
       for (const t of spec.tests) {
-        const skips = (t.annotations ?? []).filter((a) => a.type === "skip");
+        const skips = (t.annotations ?? []).filter((a) => SKIP_TYPES.has(a.type));
         out.push({
           id: `${spec.id}:${t.projectName}`,
           file: spec.file,
@@ -110,12 +116,13 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const problems: string[] = [];
   const ranTests = flatten(merged);
   const ranById = new Map(ranTests.map((t) => [t.id, t]));
-  // A failing serial test or a throwing beforeAll skips the rest of its serial
-  // group or hook scope, with no skip annotation. That is the shard's red,
-  // reported by the job; blaming each of those tests as a new skip would bury
-  // the failure under the wrong cause. A `test.skip` in the same file still
-  // counts, so a pinned skip there does not read as "did not skip".
+  // A skipped test in a file with a failure either had its skip fire
+  // (annotated: pinned as usual) or was stopped by an earlier failure in its
+  // serial group or beforeAll scope (unannotated). A stopped test's own skip
+  // never ran, so it is neither a new skip nor a pin that "did not skip"; the
+  // failure is the shard's red, reported by the job.
   const failedFiles = new Set(ranTests.filter((t) => t.outcome === "unexpected").map((t) => t.file));
+  const stopped = new Set<string>();
   const skipped: string[] = [];
   let ran = 0;
   for (const t of flatten(listed)) {
@@ -128,8 +135,9 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
     // `retries: 0`, so a second result means two shards ran the same test.
     if (r.results.length > 1) problems.push(`ran ${r.results.length} times: ${t.title}`);
     ran++;
-    const afterFailure = failedFiles.has(r.file) && !r.skipAnnotated;
-    if (r.outcome === "skipped" && !afterFailure) skipped.push(skipKey(t.title, r.skipReason));
+    if (r.outcome !== "skipped") continue;
+    if (failedFiles.has(r.file) && !r.skipAnnotated) stopped.add(t.title);
+    else skipped.push(skipKey(t.title, r.skipReason));
   }
   // merge-reports gives the second copy of a test two shards both ran a salted
   // id, so a duplicate lands here rather than in the count above.
@@ -138,7 +146,10 @@ export function check(listed: JsonReport, merged: JsonReport, expectedSkips: str
   const expected = new Set(expectedSkips);
   const actual = new Set(skipped);
   for (const s of skipped) if (!expected.has(s)) problems.push(`skipped, not in e2e/ci-expected-skips.txt: ${s}`);
-  for (const s of expectedSkips) if (!actual.has(s)) problems.push(`expected to skip, did not: ${s}`);
+  const isStopped = (pin: string) => [...stopped].some((title) => pin === skipKey(title, "") || pin.startsWith(`${title} | `));
+  for (const s of expectedSkips) {
+    if (!actual.has(s) && !isStopped(s)) problems.push(`expected to skip, did not: ${s}`);
+  }
   return { problems, ran, skipped: skipped.sort() };
 }
 

@@ -94,6 +94,13 @@ describe("flatten: skip reason", () => {
     expect(t!.skipReason).toBe("second");
   });
 
+  test("test.fixme counts as a skip, with its reason", () => {
+    expect(flatten(withAnnotations([{ type: "fixme", description: "flaky on CI" }]))[0]).toMatchObject({
+      skipReason: "flaky on CI",
+      skipAnnotated: true,
+    });
+  });
+
   test("a bare test.skip() is annotated with no reason; an after-failure skip is not annotated", () => {
     expect(flatten(withAnnotations([{ type: "skip" }]))[0]).toMatchObject({ skipReason: "", skipAnnotated: true });
     expect(flatten(withAnnotations([]))[0]).toMatchObject({ skipReason: "", skipAnnotated: false });
@@ -168,20 +175,49 @@ describe("check", () => {
     expect(check(three, merged, [])).toEqual({ problems: [], ran: 3, skipped: [] });
   });
 
-  test("a pinned skip in a file that also failed still matches its pin", () => {
-    // jira-card: one test fails, the six opt-in skips still skip with their
-    // reason and must not read as "expected to skip, did not".
-    const three = report(spec("1", "x.spec.ts", "one", []), spec("2", "x.spec.ts", "two", []), spec("3", "x.spec.ts", "three", []));
-    const merged = report(
-      spec("1", "x.spec.ts", "one", [{ status: "failed", duration: 10 }], "unexpected"),
-      spec("2", "x.spec.ts", "two", skip, "skipped", "one bot"),
-      spec("3", "x.spec.ts", "three", skip, "skipped"),
-    );
-    expect(check(three, merged, ["x.spec.ts › group › two | one bot"])).toEqual({
+  // A skipped test in a file with a failure is one of: (A) annotated
+  // skip/fixme — its skip fired, so it is pinned as usual; (B) unannotated —
+  // an earlier failure in its serial group or beforeAll scope stopped it
+  // before its body ran, so whether it would have skipped is unknown; (C) only
+  // non-skip annotations — the same as B.
+  const failedFile = (...rest: ReturnType<typeof spec>[]) => ({
+    listed: report(spec("1", "x.spec.ts", "one", []), ...rest.map((r) => ({ ...r, tests: r.tests.map((t) => ({ ...t, results: [] })) }))),
+    merged: report(spec("1", "x.spec.ts", "one", [{ status: "failed", duration: 10 }], "unexpected"), ...rest),
+  });
+
+  test("(A) an annotated skip in a file that also failed still matches its pin", () => {
+    const { listed: l, merged: m } = failedFile(spec("2", "x.spec.ts", "two", skip, "skipped", "one bot"));
+    expect(check(l, m, ["x.spec.ts › group › two | one bot"])).toEqual({
       problems: [],
-      ran: 3,
+      ran: 2,
       skipped: ["x.spec.ts › group › two | one bot"],
     });
+  });
+
+  test("(B) a pinned test an earlier failure stopped is not reported as 'did not skip'", () => {
+    // wiki-agent-lens and wiki-chat-dialog skip at runtime under a file-level
+    // beforeAll; if that beforeAll throws, their test.skip never runs.
+    const { listed: l, merged: m } = failedFile(spec("2", "x.spec.ts", "two", skip, "skipped"));
+    expect(check(l, m, ["x.spec.ts › group › two | one bot"])).toEqual({ problems: [], ran: 2, skipped: [] });
+  });
+
+  test("(B) the same holds for a pin with no reason", () => {
+    const { listed: l, merged: m } = failedFile(spec("2", "x.spec.ts", "two", skip, "skipped"));
+    expect(check(l, m, ["x.spec.ts › group › two |"]).problems).toEqual([]);
+  });
+
+  test("(C) a stopped test that carries only a non-skip annotation is still stopped, not a new skip", () => {
+    const stopped = spec("2", "x.spec.ts", "two", skip, "skipped");
+    stopped.tests[0]!.annotations = [{ type: "issue", description: "#12" }];
+    const { listed: l, merged: m } = failedFile(stopped);
+    expect(check(l, m, [])).toEqual({ problems: [], ran: 2, skipped: [] });
+  });
+
+  test("a pinned test that RAN in a failed file still reads as 'did not skip'", () => {
+    const { listed: l, merged: m } = failedFile(spec("2", "x.spec.ts", "two", pass));
+    expect(check(l, m, ["x.spec.ts › group › two | one bot"]).problems).toEqual([
+      "expected to skip, did not: x.spec.ts › group › two | one bot",
+    ]);
   });
 
   test("a result for a test --list does not know is a problem", () => {
