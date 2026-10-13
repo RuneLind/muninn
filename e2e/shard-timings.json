@@ -1,5 +1,5 @@
 {
-  "source": "merged CI report, 2026-10-13",
+  "source": "merged CI report, 2026-10-13; wiki-felles-publish.spec.ts from a local run of that spec, 2026-10-13",
   "seconds": {
     "agents-refresh.spec.ts": 17,
     "auth-zones.spec.ts": 1.9,
@@ -41,7 +41,7 @@
     "wiki-copy-path.spec.ts": 7.9,
     "wiki-embed.spec.ts": 2.4,
     "wiki-factcheck-reader.spec.ts": 2.6,
-    "wiki-felles-publish.spec.ts": 13.8,
+    "wiki-felles-publish.spec.ts": 92,
     "wiki-find-everywhere.spec.ts": 27.8,
     "wiki-find.spec.ts": 14.2,
     "wiki-fold.spec.ts": 3.5,

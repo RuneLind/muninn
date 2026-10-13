@@ -234,14 +234,27 @@ export function fellesPublishStyles(): string {
   `;
 }
 
+/** The route's answers that prove nothing spawned (its header lists them). A
+ *  502 is not among them: the route's own 502 means the spawn threw, but a proxy
+ *  answers 502 too, so the client cannot tell it from a run that went through. */
+const REFUSED_BEFORE_SPAWN = new Set([400, 403, 404, 409, 415, 501]);
+
+/** Whether a run may have changed the bucket, so the sync status must refresh.
+ *  `httpStatus` is null when the request failed without an answer. Only a dry
+ *  run or a refusal before spawning is known to have changed nothing; any
+ *  other outcome (a 200, a 504, a 500, a dropped connection) may have. */
+export function fellesRunCouldChangeBucket(dryRun: boolean, httpStatus: number | null): boolean {
+  return !dryRun && (httpStatus === null || !REFUSED_BEFORE_SPAWN.has(httpStatus));
+}
+
 export interface OpenFellesOptions {
   wiki: string;
   relPath: string;
   bin: string;
   root: string;
   bucket?: string;
-  /** Called after a run that could have changed the bucket — one that ran (or
-   *  timed out) and was not a dry run — so the sync status can refresh. */
+  /** Called after a run that could have changed the bucket
+   *  ({@link fellesRunCouldChangeBucket}), so the sync status can refresh. */
   onRun?: () => void;
 }
 
@@ -289,7 +302,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
   // then does the confirm row offer the real delete. Any other run hides it.
   async function run(action: FellesAction, dryRun: boolean): Promise<void> {
     if (running) return;
-    let couldChangeBucket = false;
+    let httpStatus: number | null = null;
     running = true;
     runButtons.forEach((b) => (b.disabled = true));
     confirmRow.hidden = true;
@@ -305,7 +318,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
       const data = (await res.json().catch(() => null)) as
         | { exitCode?: number; output?: string; error?: string }
         | null;
-      couldChangeBucket = !dryRun && ((res.ok && typeof data?.exitCode === "number") || res.status === 504);
+      httpStatus = res.status;
       if (res.ok && data && typeof data.exitCode === "number") {
         const line = fellesOutcomeLine(data.exitCode, dryRun, action);
         setStatus(line.text, line.ok ? "ok" : "err");
@@ -322,7 +335,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     } finally {
       running = false;
       runButtons.forEach((b) => (b.disabled = false));
-      if (couldChangeBucket) opts.onRun?.();
+      if (fellesRunCouldChangeBucket(dryRun, httpStatus)) opts.onRun?.();
     }
   }
 
@@ -744,7 +757,7 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       setStatus(dryRun ? "Running dry run…" : "Publishing the changed pages… (one upload per file; this can take minutes)", "");
       out.hidden = true;
       let exitCode: number | null = null;
-      let couldChangeBucket = false;
+      let httpStatus: number | null = null;
       try {
         const res = await fetch("/api/wiki/felles-publish", {
           method: "POST",
@@ -752,7 +765,7 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
           body: JSON.stringify({ wiki: opts.wiki, action: "sync", dryRun, allowIdent: ident.checked }),
         });
         const data = (await res.json().catch(() => null)) as { exitCode?: number; output?: string; error?: string } | null;
-        couldChangeBucket = !dryRun && ((res.ok && typeof data?.exitCode === "number") || res.status === 504);
+        httpStatus = res.status;
         if (res.ok && data && typeof data.exitCode === "number") {
           exitCode = data.exitCode;
           if (data.output) {
@@ -766,7 +779,7 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       } catch (err) {
         setStatus(`Request failed: ${err instanceof Error ? err.message : String(err)}`, "err");
       }
-      const after = couldChangeBucket ? await reloadView(true) : viewReady ? view : null;
+      const after = fellesRunCouldChangeBucket(dryRun, httpStatus) ? await reloadView(true) : viewReady ? view : null;
       if (exitCode !== null) {
         const line = fellesSyncRunOutcome(exitCode, dryRun, after);
         setStatus(line.text, line.ok ? "ok" : "err");

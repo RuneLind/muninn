@@ -157,6 +157,16 @@ describe("the sync status", () => {
     expect(dataOnly).toContain('<ul class="wiki-felles-files"><li>plans/a.data.json</li></ul>');
   });
 
+  test("a page's own path is recognised in NFC when readdir answers NFD", () => {
+    // The script names files in NFC; the page's relPath can arrive in NFD.
+    const nfd = "plans/på.mdx";
+    const html = fellesSyncListHtml(
+      { ...status, pages: [{ ...status.pages[0]!, relPath: nfd, changedFiles: [nfd.normalize("NFC"), "plans/x.csv"] }] },
+      href,
+    );
+    expect(html).toContain('<ul class="wiki-felles-files"><li class="wiki-felles-self">page changed</li><li>plans/x.csv</li></ul>');
+  });
+
   test("possible orphans get their own section, with no removal hint", () => {
     const html = fellesSyncListHtml({ ...status, orphans: [], maybeOrphans: [{ path: "maybe.csv", masked: false }] }, href);
     expect(html).toContain('<section class="wiki-felles-section maybe-orphans">');
@@ -231,6 +241,17 @@ describe("the sync status", () => {
       for (const code of [2, 3, 9]) expect(fellesSyncRunOutcome(code, false, after(0, 1)).ok).toBe(false);
       expect(fellesSyncRunOutcome(0, false, after(0, 1))).toEqual(fellesSyncOutcomeLine(0, false));
     });
+  });
+
+  test("only a real run the route refused before spawning skips the status refresh", () => {
+    const could = (dryRun: boolean, status: number | null) => felles.fellesRunCouldChangeBucket(dryRun, status);
+    // The route's refusals before any spawn (its header lists them).
+    for (const s of [400, 403, 404, 409, 415, 501]) expect(could(false, s)).toBe(false);
+    // Ran, timed out, or an outcome the client cannot read: refresh.
+    for (const s of [200, 500, 502, 503, 504]) expect(could(false, s)).toBe(true);
+    expect(could(false, null)).toBe(true);
+    // A dry run changes nothing, whatever came back.
+    for (const s of [200, 504, null]) expect(could(true, s)).toBe(false);
   });
 
   test("a stale button carries the marker class and says why", () => {

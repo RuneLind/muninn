@@ -34,8 +34,11 @@
  * slot: it is read-only, and the reader asks for it while a long sync runs.
  *
  * Every spawn leads its own process group, so a timeout signals gcloud as well
- * as the script (`runProc`'s `processGroup`: SIGTERM, then SIGKILL after the
- * grace).
+ * as the script (`runProc`'s `processGroup`). On a timeout `runProc` sends the
+ * group SIGTERM and rejects once the leader exits or after the grace plus the
+ * post-kill wait; it SIGKILLs the group at once when the leader dies on the
+ * SIGTERM, or when the grace runs out with the leader still there. It does not
+ * wait for the other members, so the run slot can free while one still runs.
  */
 import { existsSync } from "node:fs";
 import type { Hono } from "hono";

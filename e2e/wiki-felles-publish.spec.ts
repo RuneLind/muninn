@@ -18,7 +18,7 @@
  * (`--synk` exits 1, as the real script does with a refused page).
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page, type Route } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -271,11 +271,11 @@ test.describe("Wiki reader: ⇪ Felles", () => {
 
 const CHIP = `#${FELLES_SYNC_BTN_ID}`;
 
-/** Clear every control file, and drop the route's 30 s status cache with a real
- *  (stubbed) run: only a run that could change the bucket drops it. */
+/** Drop the route's 30 s status cache with a real (stubbed) run — only a run
+ *  that could change the bucket drops it — then clear every control file. The
+ *  files go after the run: a sync a previous test left in flight writes
+ *  `synced` when it ends, and the run below waits for it. */
 async function resetStub(): Promise<void> {
-  await rm(ctl, { recursive: true, force: true });
-  await mkdir(ctl, { recursive: true });
   for (let i = 0; ; i++) {
     const res = await fetch(`${BASE}/api/wiki/felles-publish`, {
       method: "POST",
@@ -287,6 +287,8 @@ async function resetStub(): Promise<void> {
     if (res.status !== 409 || i > 20) throw new Error(`reset run answered ${res.status}`);
     await new Promise((r) => setTimeout(r, 300));
   }
+  await rm(ctl, { recursive: true, force: true });
+  await mkdir(ctl, { recursive: true });
 }
 const control = (name: string, value = "1") => writeFile(path.join(ctl, name), value, "utf8");
 
@@ -536,9 +538,180 @@ test.describe("Wiki reader: Felles sync status", () => {
     await control("run-delay", "2500");
     await dialog.getByRole("button", { name: "Publish changed (1)" }).click();
     await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+    // The run read the flag once; the status after it is read with the same one.
+    await expect(dialog.getByRole("checkbox")).toBeDisabled();
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await page.waitForTimeout(500);
     await expect(page.locator(BTN)).toHaveAttribute("data-felles-relpath", FAIL_REL);
     expect(page.url()).toContain(encodeURIComponent(FAIL_REL));
   });
+
+  // The run reaches the server (route.fetch), and the reader then sees an answer
+  // it cannot read: the bucket may have changed, so the status must refresh.
+  const unknownOutcomes: { name: string; answer: (route: Route) => Promise<void> }[] = [
+    { name: "the connection drops", answer: (route) => route.abort("failed") },
+    { name: "a 500 page", answer: (route) => route.fulfill({ status: 500, contentType: "text/html", body: "<h1>500</h1>" }) },
+    { name: "a 200 that is not JSON", answer: (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<p>proxy</p>" }) },
+    {
+      name: "a 504",
+      answer: (route) => route.fulfill({ status: 504, json: { error: "The sync did not return in time and was stopped.", reason: "timeout" } }),
+    },
+  ];
+  for (const { name, answer } of unknownOutcomes) {
+    test(`Publish changed refreshes the status when ${name} after the run`, async ({ page }) => {
+      await resetStub();
+      await page.route("**/api/wiki/felles-publish", async (route) => {
+        await route.fetch();
+        await answer(route);
+      });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+      await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+      await page.locator(CHIP).click();
+      const dialog = page.locator("dialog.wiki-felles-sync-dialog");
+      await dialog.getByRole("button", { name: "Publish changed (1)" }).click();
+      await expect(dialog.locator(".wiki-felles-status")).toHaveClass(/\berr\b/);
+      await expect(page.locator(CHIP)).toHaveText("Felles: 0 changed");
+      await expect(dialog.locator('[data-felles="sync"]')).toHaveText("Publish changed (0)");
+      await expect(dialog.locator('[data-felles="sync"]')).toBeDisabled();
+    });
+  }
+
+  for (const { name, answer } of [unknownOutcomes[0]!, unknownOutcomes[3]!]) {
+    test(`a page publish refreshes the status when ${name} after the run`, async ({ page }) => {
+      await resetStub();
+      await page.route("**/api/wiki/felles-publish", async (route) => {
+        await route.fetch();
+        await answer(route);
+      });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+      await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+      await expect(page.locator(BTN)).toHaveClass(new RegExp(FELLES_STALE_CLASS));
+      await page.locator(BTN).click();
+      const dialog = page.locator("dialog.wiki-felles");
+      await dialog.getByRole("button", { name: "Publish" }).click();
+      await expect(dialog.locator(".wiki-felles-status")).toHaveClass(/\berr\b/);
+      await page.keyboard.press("Escape");
+      await expect(page.locator(CHIP)).toHaveText("Felles: 0 changed");
+      await expect(page.locator(BTN)).not.toHaveClass(new RegExp(FELLES_STALE_CLASS));
+    });
+  }
+
+  test("a run the route refused before spawning does not refresh the status", async ({ page }) => {
+    await resetStub();
+    const traffic = statusTraffic(page);
+    await page.route("**/api/wiki/felles-publish", (route) =>
+      route.fulfill({ status: 409, json: { error: "A publish, remove or sync is already running.", reason: "running" } }),
+    );
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+    await page.locator(CHIP).click();
+    const dialog = page.locator("dialog.wiki-felles-sync-dialog");
+    await dialog.getByRole("button", { name: "Publish changed (1)" }).click();
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/already running/);
+    await page.waitForTimeout(500);
+    expect(traffic.started()).toBe(1);
+    await expect(dialog.getByRole("button", { name: "Publish changed (1)" })).toBeEnabled();
+  });
+
+  test("an older status answer that arrives after a newer one is not painted", async ({ page }) => {
+    await resetStub();
+    // The first status (sent before the publish, so it reads «1 changed») is
+    // held until the one sent after the publish has been answered.
+    let first = true;
+    let releaseOld!: () => void;
+    const oldHeld = new Promise<void>((r) => (releaseOld = r));
+    let oldAnswered!: () => void;
+    const oldDone = new Promise<void>((r) => (oldAnswered = r));
+    await page.route("**/api/wiki/felles-status*", async (route) => {
+      const isOld = first;
+      first = false;
+      const response = await route.fetch();
+      if (isOld) {
+        await oldHeld;
+        await route.fulfill({ response });
+        oldAnswered();
+        return;
+      }
+      await route.fulfill({ response });
+      releaseOld();
+    });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await expect(page.locator(CHIP)).toHaveText("Felles: checking…");
+    await page.locator(BTN).click();
+    const dialog = page.locator("dialog.wiki-felles");
+    await dialog.getByRole("button", { name: "Publish" }).click();
+    await expect(dialog.locator(".wiki-felles-status")).toHaveText(/^Published/);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(CHIP)).toHaveText("Felles: 0 changed");
+    await oldDone;
+    await page.waitForTimeout(300);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 0 changed");
+    await expect(page.locator(BTN)).not.toHaveClass(new RegExp(FELLES_STALE_CLASS));
+  });
+
+  test("the dialog keeps the status for its current flag when an older one answers last", async ({ page }) => {
+    await resetStub();
+    // The flag-off status is held until the dialog's flag-on reload is answered.
+    let releaseOff!: () => void;
+    const offHeld = new Promise<void>((r) => (releaseOff = r));
+    let offAnswered!: () => void;
+    const offDone = new Promise<void>((r) => (offAnswered = r));
+    let sawOff = false;
+    await page.route("**/api/wiki/felles-status*", async (route) => {
+      const off = new URL(route.request().url()).searchParams.get("allowIdent") === "0";
+      if (off) sawOff = true;
+      const response = await route.fetch();
+      if (off) {
+        await offHeld;
+        await route.fulfill({ response });
+        offAnswered();
+        return;
+      }
+      await route.fulfill({ response });
+      if (sawOff) releaseOff();
+    });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+    await page.locator(CHIP).click();
+    const dialog = page.locator("dialog.wiki-felles-sync-dialog");
+    await dialog.getByRole("checkbox").uncheck();
+    await dialog.getByRole("checkbox").check();
+    await offDone;
+    await page.waitForTimeout(300);
+    await expect(dialog.getByRole("button", { name: "Publish changed (1)" })).toBeEnabled();
+    await expect(dialog.locator(".wiki-felles-section.changed").getByRole("link", { name: REL })).toBeVisible();
+  });
+
+  test("a sync with the flag off refreshes the chip too", async ({ page }) => {
+    await resetStub();
+    // The stub refuses REL without --tillat-ident, so the dialog's first flag-off
+    // status is answered with the flag-on one: one changed page to publish.
+    let rewritten = false;
+    await page.route("**/api/wiki/felles-status*", async (route) => {
+      const url = route.request().url();
+      if (!rewritten && new URL(url).searchParams.get("allowIdent") === "0") {
+        rewritten = true;
+        return route.fulfill({ response: await route.fetch({ url: url.replace("allowIdent=0", "allowIdent=1") }) });
+      }
+      return route.continue();
+    });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
+    await page.locator(CHIP).click();
+    const dialog = page.locator("dialog.wiki-felles-sync-dialog");
+    await dialog.getByRole("checkbox").uncheck();
+    await expect(dialog.getByRole("button", { name: "Publish changed (1)" })).toBeEnabled();
+    await dialog.getByRole("button", { name: "Publish changed (1)" }).click();
+    await expect(dialog.locator(".wiki-felles-out")).toContainText(`ARGS ${JSON.stringify(["--synk", root])}`);
+    await expect(page.locator(CHIP)).toHaveText("Felles: 0 changed");
+  });
 });
+
+/** Counts the reader's status requests. */
+function statusTraffic(page: Page): { started: () => number } {
+  let started = 0;
+  page.on("request", (r) => {
+    if (r.url().includes("/api/wiki/felles-status")) started++;
+  });
+  return { started: () => started };
+}
