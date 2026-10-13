@@ -30,8 +30,8 @@
  * own, so a public repo carries no domain list.
  *
  * A clause ({@link stateClauses}) is the text between `·`, `;` or a sentence
- * end (closing emphasis, a paren or a quote may follow the period); a table row
- * is one clause. A state phrase belongs to the nearest key in
+ * end (closing `*`/`_` emphasis may follow the period); a table row is one
+ * clause. A state phrase belongs to the nearest key in
  * its clause, and a home clause with no key states the page's own work, so it
  * is never a finding. Known gap: a clause that names only a PR cannot be
  * attributed to a key.
@@ -436,14 +436,15 @@ export function stateLineRoles(content: string): LineRoles {
 
 /**
  * Where each clause ends, as `[start, end)` spans: at `·`, `;`, or a `.`/`!`/`?`
- * followed, after any closing `**`, `__`, `*`, `_`, `)`, `»` or `"`, by
- * whitespace or the end. Not inside a matched `[...]` (a link text,
+ * followed, after any closing `*`/`_` run, by whitespace or the end. A `)`, `»`
+ * or `"` after the period is no end: an abbreviation closing a parenthetical or
+ * a quote (`(tester osv.) er merget`) is mid-sentence. Not inside a matched `[...]` (a link text,
  * a wikilink), and not at a date's own period (`13.10. merget`, `12. oktober`).
  * A table row is one clause. Not `trackers/jira.ts`'s `clauseBoundaries`, which
  * splits a table row by cell and a date at its period, nor `lint-drift.ts`'s
  * leading-clause regex.
  */
-const SENTENCE_CLOSERS = "*_)»\"";
+const SENTENCE_CLOSERS = "*_";
 
 export function stateClauses(text: string, row = false): [number, number][] {
   if (row) return [[0, text.length]];

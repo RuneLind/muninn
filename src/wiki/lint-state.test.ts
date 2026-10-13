@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, type LintFinding } from "./lint.ts";
-import { checkOwnsEntries, stateOwners } from "./lint-state.ts";
+import { checkOwnsEntries, stateClauses, stateOwners } from "./lint-state.ts";
 
 // Lint check 14 — state outside its home and state of a key another page owns
 // (living-facts D10). Synthetic fixtures: an English phrase list and DEMO keys.
@@ -486,21 +486,61 @@ describe("check 14 clauses", () => {
     expect(await flaggedBody(body)).toEqual([2, 3, 4]);
   });
 
-  test("a sentence end before closing emphasis, a paren, a guillemet or a quote ends the clause", async () => {
-    const body = [
-      "**First night (06.10).** 4 of 13 PRs remain open.",
-      "__Merged.__ PR #45 waits.",
-      "*Merged!* PR #45 waits.",
-      "_Merged?_ PR #45 waits.",
-      "(Merged.) PR #45 waits.",
-      "«Merged.» PR #45 waits.",
-      '"Merged." PR #45 waits.',
-      "**PR #45 is merged.**",
-      "PR #45 shipped as 26.279.140721 and merged.",
-      "PR #45 merged.**x** too.",
-      "**PR #45 is due 12.** oktober and merged.",
-    ];
-    expect(await flaggedBody(body)).toEqual([7, 8, 9, 10]);
+  // Fix round 2, batch 3 — the clause splitter's state space, one row per
+  // shape. A sentence end is `.`/`!`/`?`, then an optional run of `*`/`_`, then
+  // whitespace or the end. `)`, `»` and `"` are not closers: an abbreviation
+  // closing a parenthetical or a quote is mid-sentence.
+  // `flags`, where given: whether check 1 flags the row as a body line.
+  const CLAUSE_ROWS: { text: string; clauses: string[]; flags?: boolean }[] = [
+    // An abbreviation or a period inside a parenthetical or a quote: no end.
+    { text: "PR #45 (refaktorering, tester osv.) er merget.", clauses: ["PR #45 (refaktorering, tester osv.) er merget"], flags: true },
+    { text: "MELOSYS-1234 (se tabellen over.) er i prod fra 13.10.", clauses: ["MELOSYS-1234 (se tabellen over.) er i prod fra 13.10."], flags: true },
+    { text: "DEMO-1 (bl.a.) merget", clauses: ["DEMO-1 (bl.a.) merget"], flags: true },
+    { text: "DEMO-1 (f.eks.) merget", clauses: ["DEMO-1 (f.eks.) merget"] },
+    { text: "DEMO-1 (ca.) merget", clauses: ["DEMO-1 (ca.) merget"] },
+    { text: "DEMO-1 (venter...) merget", clauses: ["DEMO-1 (venter...) merget"] },
+    { text: "PR #45 (se «Status».) merget", clauses: ["PR #45 (se «Status».) merget"] },
+    { text: "DEMO-1 (v26.279.) merget", clauses: ["DEMO-1 (v26.279.) merget"] },
+    { text: "DEMO-1 «merget.» Neste", clauses: ["DEMO-1 «merget.» Neste"] },
+    { text: "(Merged.) PR #45 waits", clauses: ["(Merged.) PR #45 waits"], flags: true },
+    { text: '"Merged." PR #45 waits', clauses: ['"Merged." PR #45 waits'] },
+    // Markup closers between the end and the space: an end.
+    { text: "**Første natt (06.10).** 4 av 13 åpne PR-er", clauses: ["**Første natt (06.10)", "** 4 av 13 åpne PR-er"], flags: false },
+    { text: "__Merged.__ PR #45 waits", clauses: ["__Merged", "__ PR #45 waits"], flags: false },
+    { text: "_Merged._ PR #45 waits", clauses: ["_Merged", "_ PR #45 waits"] },
+    { text: "*Merged!* PR #45 waits", clauses: ["*Merged", "* PR #45 waits"] },
+    // A closer run followed by a non-space: no end.
+    { text: "PR #45 merged.**x** too", clauses: ["PR #45 merged.**x** too"] },
+    { text: "Merged.**x** PR #45 waits", clauses: ["Merged.**x** PR #45 waits"], flags: true },
+    // `!`, `?`, an ellipsis, the end of the text.
+    { text: "Merged! PR #45 waits", clauses: ["Merged", "PR #45 waits"] },
+    { text: "Merged? PR #45 waits", clauses: ["Merged", "PR #45 waits"] },
+    { text: "venter... DEMO-1 merget", clauses: ["venter..", "DEMO-1 merget"] },
+    { text: "PR #45 merged.", clauses: ["PR #45 merged"] },
+    // An abbreviation in running text ends a clause (the rule has no list).
+    { text: "e.g. DEMO-1 merged", clauses: ["e.g", "DEMO-1 merged"] },
+    { text: "nr. 3538 merget", clauses: ["nr", "3538 merget"] },
+    { text: "kl. 14.30 merget", clauses: ["kl", "14.30 merget"] },
+    { text: "DEMO-1 er bl.a. merget", clauses: ["DEMO-1 er bl.a", "merget"], flags: false },
+    { text: "DEMO-1 er f.eks. merget", clauses: ["DEMO-1 er f.eks", "merget"] },
+    { text: "DEMO-1 er ca. merget", clauses: ["DEMO-1 er ca", "merget"] },
+    // A date's own period, a version, brackets: no end.
+    { text: "waiting on DEMO-1 since 13.10. merged", clauses: ["waiting on DEMO-1 since 13.10. merged"] },
+    { text: "DEMO-100 ble 12. oktober merget", clauses: ["DEMO-100 ble 12. oktober merget"] },
+    { text: "**PR #45 is due 12.** oktober and merged", clauses: ["**PR #45 is due 12.** oktober and merged"] },
+    { text: "PR #45 shipped as 26.279.140721 and merged", clauses: ["PR #45 shipped as 26.279.140721 and merged"] },
+    { text: "[DEMO-1 notes. See](x) merged", clauses: ["[DEMO-1 notes. See](x) merged"] },
+    // `·` and `;`.
+    { text: "DEMO-1 waits · PR #45 merged; done", clauses: ["DEMO-1 waits", "PR #45 merged", "done"] },
+  ];
+
+  test("clause boundaries: every shape of a sentence end", async () => {
+    const split = (t: string) => stateClauses(t).map(([s, e]) => t.slice(s, e).trim()).filter(Boolean);
+    expect(CLAUSE_ROWS.map((r) => [r.text, split(r.text)])).toEqual(CLAUSE_ROWS.map((r) => [r.text, r.clauses]));
+    await write(".wiki-reader.json", JSON.stringify({ statePhrases: { phrases: ["merged", "merget", "i prod"], taskWords: ["PR", "PR-er"] } }));
+    const probes = CLAUSE_ROWS.filter((r) => r.flags !== undefined);
+    const flagged = new Set(await flaggedBody(probes.map((r) => r.text)));
+    expect(probes.map((r, i) => [r.text, flagged.has(i)])).toEqual(probes.map((r) => [r.text, r.flags!]));
   });
 
   test("the finding names the anchor nearest the state in its clause", async () => {
@@ -632,5 +672,33 @@ describe("check 14 frontmatter", () => {
       ["plans/d.mdx", 4],
       ["plans/e.mdx", 4],
     ]);
+  });
+});
+
+// ── Fix round 2, batch 3: edges whose mutants survived ───────────────────────
+
+describe("check 14 pinned edges", () => {
+  test("a repo-shaped PR ref does not start after `&` or `#` (an entity, a hashtag)", async () => {
+    await write(".wiki-reader.json", JSON.stringify({ statePhrases: { phrases: ["merged"] } }));
+    expect(await flaggedBody(["The &amp#45 entity merged.", "The #tag#45 merged.", "The api#45 merged."])).toEqual([2]);
+  });
+
+  test("a task word does not touch a `.` on its left or a `.x` on its right, in either case class", async () => {
+    const body = ["The config.PR merged.", "The PR.yml merged.", "The PR merged.", "The config.task merged.", "The task.yml merged.", "The task merged.", "We merged the PR."];
+    expect(await flaggedBody(body)).toEqual([2, 5, 6]);
+  });
+
+  test("a home's `12. oktober` is one clause with its key", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-100]"]));
+    await write("plans/other.mdx", page(["**Status:** DEMO-100 was due 12. oktober merged"]));
+    const f = await notOwner();
+    expect(f.map((x) => [x.relPath, x.line])).toEqual([["plans/other.mdx", bodyLine(0)]]);
+  });
+
+  test("a ledger row is one clause for check 2: key and state in different cells", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    await write("plans/other.mdx", page(["## PR ledger", "", "| Key | Note |", "|---|---|", "| DEMO-1 | Fixed the bug. Then merged |"]));
+    const f = await notOwner();
+    expect(f.map((x) => [x.relPath, x.line])).toEqual([["plans/other.mdx", bodyLine(4)]]);
   });
 });
