@@ -1,0 +1,22 @@
+# Tests CI is expected to skip, one per line as `scripts/e2e-shards.ts check`
+# prints them: `file › describe › title | skip reason`. The reason is part of
+# the pin, because one test can skip deliberately ("only one bot") and for a
+# missing fixture ("no bots") — a title-only pin would accept both. The `e2e`
+# fan-in fails on any skip not listed here and on any listed test that ran, so
+# a spec that starts skipping itself green — a missing fixture, a missing seed row — turns CI red.
+# Add a line only for a skip that is deliberate on a runner, and say why.
+
+# CI tracks only bots/jarvis/, so there is no second bot to switch to.
+inspector.spec.ts › Inspector panel API integration › fetches memories, goals, and tasks APIs for the selected bot context | Only one bot — cannot exercise a bot switch
+wiki-chat-dialog.spec.ts › Wiki reader: chat dialog › a resolved wiki offers a bot OVERRIDE behind ⚙ Options | needs a second bot folder to switch to — CI tracks only jarvis
+
+# Opt-in behind JIRA_CARD_THREAD / _USER / _DRAFT, which name a real draft.
+jira-card.spec.ts › the draft card › Kopier markdown puts the RAW markdown on the clipboard | set JIRA_CARD_THREAD / _USER / _DRAFT to run
+jira-card.spec.ts › the draft card › Lagre survives a reload — that is the whole reason saved_at exists | set JIRA_CARD_THREAD / _USER / _DRAFT to run
+jira-card.spec.ts › the draft card › attaches under the bubble the draft came from, with its badges | set JIRA_CARD_THREAD / _USER / _DRAFT to run
+jira-card.spec.ts › the draft card › switching thread away and back re-adopts it — the listing is the authority | set JIRA_CARD_THREAD / _USER / _DRAFT to run
+jira-card.spec.ts › the draft card › the stored message is NEVER rewritten — the card is the only place the finalized text lives | set JIRA_CARD_THREAD / _USER / _DRAFT to run
+jira-card.spec.ts › the draft card › the 🧾 control opens the picker and no longer opens a tab | set JIRA_CARD_THREAD / _USER / _DRAFT to run
+
+# Runs the real plan-card from the claude-skills repo, which a runner has no checkout of.
+wiki-agent-lens.spec.ts › Wiki reader: the Agent lens › the pane equals a direct run of the real plan-card with the same environment | no plan-card at /home/runner/.claude/skills/plan-card/plan-card.ts (the claude-skills repo is not checked out here, as on CI)

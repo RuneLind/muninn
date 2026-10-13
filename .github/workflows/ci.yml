@@ -253,8 +253,21 @@ jobs:
           grep -q "expected true or false" bogus.log \
             || { echo "::error::the build failed, but not on the build-arg check"; cat bogus.log; exit 1; }
 
-  e2e:
+  # The Playwright suite, split across four runners. One serial run took 13–15
+  # min and set the wall clock of every push; four shards each run a quarter of
+  # it. Each shard still runs `workers: 1` and `retries: 0`
+  # (`playwright.config.ts` says why): the parallelism comes from separate
+  # runners, so no host is more loaded than one serial run was.
+  # `scripts/e2e-shards.ts` packs whole spec files onto shards by the times in
+  # `e2e/shard-timings.json`; `--shard=i/n` balances by test count and left one
+  # shard with half the suite's time.
+  e2e-shard:
     runs-on: ubuntu-latest
+    strategy:
+      # Every shard reports, so one red does not hide another.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -284,15 +297,31 @@ jobs:
       # is ever needed for a spec, it does NOT belong in this env — an e2e server
       # holding a live token fights the production bot for Telegram.
       CI: "true"
+      # One name per shard, so the fan-in's download into one directory does not
+      # overwrite three of the four reports.
+      PLAYWRIGHT_BLOB_OUTPUT_NAME: report-${{ matrix.shard }}.zip
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
-      # `--with-deps` pulls the system libraries headless chromium needs on the
-      # runner image. Only chromium: `playwright.config.ts` defines one project.
-      - run: bunx playwright install --with-deps chromium
+      - id: playwright
+        # Assigned first: a failing `$(…)` inside `echo` does not fail the step,
+        # and an empty version would make a cache key no Playwright bump changes.
+        run: |
+          version=$(bun -p "require('@playwright/test/package.json').version")
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # The browser download is cached on the Playwright version; the system
+      # libraries chromium needs are apt packages and are installed every time.
+      # Only chromium: `playwright.config.ts` defines one project.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - run: bunx playwright install-deps chromium
+      - run: bunx playwright install chromium
       # The schema has to exist before the first server boots — the dashboard and
       # /chat routes query it on the very first request. `db:setup:test` reaches
       # the server through its own hardcoded admin URL, so it needs no env of its
@@ -303,16 +332,78 @@ jobs:
       # the worse half — a green run with the coverage silently gone. The seed is
       # idempotent and lives in `scripts/seed-e2e-db.ts`, which says why.
       - run: bun run db:seed:e2e
-      - run: bun run test:e2e
+      - name: Plan this shard
+        run: |
+          echo "runner cores: $(nproc)"
+          bun scripts/e2e-shards.ts plan ${{ matrix.shard }} ${{ strategy.job-total }} shard.txt
+      - run: bunx playwright test --test-list shard.txt
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: blob-report-${{ matrix.shard }}
+          path: blob-report/
+          retention-days: 7
+          # "Re-run failed jobs" uploads under the same name again.
+          overwrite: true
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-report
-          # `test-results/` is where the list reporter drops each failure's
-          # error-context.md; without it a red CI run says a locator timed out and
-          # nothing about what the page actually contained.
-          path: |
-            playwright-report/
-            test-results/
+          name: playwright-failures-${{ matrix.shard }}
+          # `test-results/` is where each failure's error-context.md lands;
+          # without it a red CI run says a locator timed out and nothing about
+          # what the page actually contained.
+          path: test-results/
           retention-days: 7
           if-no-files-found: ignore
+          overwrite: true
+
+  # One status named `e2e` for the whole suite. Four green shards are not
+  # enough on their own: a file in no shard's list, or in two, still leaves
+  # every shard green. This job compares the merged report with
+  # `playwright test --list` — every test ran exactly once — and fails on any
+  # skip not named in `e2e/ci-expected-skips.txt`, since a spec that skips
+  # itself green is this suite's worst failure. Each skip is pinned with its
+  # reason. The merged HTML report and the JSON are uploaded on every run;
+  # `bun scripts/e2e-shards.ts refresh e2e-results.json` rewrites the timing
+  # table from the JSON.
+  e2e:
+    needs: e2e-shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-*
+          path: all-blob-reports
+          merge-multiple: true
+      - name: Merge the shard reports
+        run: bunx playwright merge-reports --reporter=json,html ./all-blob-reports
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: e2e-results.json
+          PLAYWRIGHT_HTML_OPEN: never
+      - name: Every listed test ran once, and only the expected tests skipped
+        run: |
+          bunx playwright test --list --reporter=json > e2e-list.json
+          bun scripts/e2e-shards.ts check e2e-list.json e2e-results.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: e2e-report
+          path: |
+            playwright-report/
+            e2e-results.json
+          retention-days: 7
+      # Last, and on every outcome, so a red shard is named even when the check
+      # above has failed too.
+      - name: Every shard passed
+        if: ${{ !cancelled() && needs.e2e-shard.result != 'success' }}
+        run: |
+          echo "::error::an e2e shard finished ${{ needs.e2e-shard.result }}"
+          exit 1
