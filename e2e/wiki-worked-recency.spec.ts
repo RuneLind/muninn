@@ -8,8 +8,8 @@
  * the row's date chip, and as the order of a series fold and of the Series
  * section itself.
  *
- * Five things only a real browser against a real server can answer, and three of
- * them are degrades:
+ * Seven things only a real browser against a real server can answer, and three
+ * of them are degrades:
  *
  *  1. **Twelve pages that all read as one age under "Recently updated" spread
  *     09-21 → 07-02 under "Worked on"** — the measured table this plan was
@@ -36,6 +36,12 @@
  *     where a date came from: cyan for a session's write, an amber dot for a
  *     change after it, a dotted underline for "no session — updated date". The
  *     colours are asserted against the resolved tokens in both themes.
+ *  7. **A page a session only TOUCHED** (`wrtouch`, the sessions form, plan
+ *     `muninn-wiki-work-threads` PR 4) **sorts at its pre-touch position**,
+ *     below the page a session focused on, in the rail and in its series fold;
+ *     its chip, its strip cell and its article header still show the real
+ *     touch day with a dotted "touched" mark, and both rows carry a work bar
+ *     whether or not the gate is open.
  *
  * No model calls and no writes: the whole feature is a read.
  *
@@ -64,8 +70,9 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const LEDGER_BASE = `http://127.0.0.1:${LEDGER_PORT}`;
 const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 
-/** The six wikis, by registry name. Each gets its own root AND its own answer
- *  from the fake ledger — which is what puts every degrade in one boot. */
+/** The eight wikis, by registry name (`MARK` and `TOUCH` below). Each gets its
+ *  own root AND its own answer from the fake ledger — which is what puts every
+ *  degrade in one boot. */
 const MAIN = "wrmain";
 const SERIES = "wrseries";
 const BULK = "wrbulk";

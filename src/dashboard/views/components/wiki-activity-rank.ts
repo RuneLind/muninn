@@ -181,12 +181,15 @@ export function workTermFor(raw: number): number {
 }
 
 /** What a page's usable events say at `now`: the events the future guard
- *  accepts, their raw sum and term, the newest one, and the `why` clause. */
+ *  accepts, their raw sum and term, the newest one, the instant a winning work
+ *  term dates the row from, and the `why` clause naming that instant. */
 interface WorkSummary {
   events: WorkEvent[];
   raw: number;
   term: number;
   newestEvent: number;
+  /** State F: the newest focus event. T/T0: the newest event (D22). */
+  workMs: number;
   clause: string;
 }
 
@@ -198,7 +201,9 @@ function workSummary(work: PageWork, now: number): WorkSummary | undefined {
   if (!newest) return undefined;
   const raw = rawWork(events, now);
   const term = workTermFor(raw);
-  return { events, raw, term, newestEvent: newest[0], clause: workClause(events, now, newest[0], raw, term) };
+  const focused = work.state === "F" && isUsableWorkedMs(work.focusMs, now);
+  const workMs = focused ? work.focusMs! : newest[0];
+  return { events, raw, term, newestEvent: newest[0], workMs, clause: workClause(events, now, workMs, focused, raw, term) };
 }
 
 /**
@@ -696,7 +701,7 @@ function scorePage(
   // A page whose every event the future guard rejects has no usable event.
   const work = substitute ? pageWorkState(page) : undefined;
   const summary = work && workSummary(work, now);
-  if (work && summary) return scoreWorkedPage(page, w, now, work, summary);
+  if (work && summary) return scoreWorkedPage(page, w, now, summary);
   // ONE derivation per signal, because each carries three facts this function
   // needs: the stamp, the label the `why` sentence must quote, and (for the update
   // signal) the kind the `isEdit` gate reads.
@@ -846,15 +851,13 @@ function scoreWorkedPage(
   page: WikiListing,
   w: ActivityWeights,
   now: number,
-  work: PageWork,
-  { events, raw, term: workTerm, newestEvent, clause }: WorkSummary,
+  { events, term: workTerm, newestEvent, workMs, clause }: WorkSummary,
 ): ActivityRow {
   const created = pageDateSignal(page, "added", now);
   const updated = pageDateSignal(page, "updated", now);
   const createdMs = created?.ms ?? 0;
   const updMs = updated?.ms ?? 0;
   const newScore = createdMs > 0 ? Math.pow(0.5, (now - createdMs) / MS_PER_DAY / w.halfLifeNewDays) : 0;
-  const workMs = work.state === "F" && isUsableWorkedMs(work.focusMs, now) ? work.focusMs : newestEvent;
   // The unsubstituted change term: today's `changed` row, stamped at the update.
   const unsub = scorePage(page, w, now, null);
   const lateCounts = unsub.kind === "changed" && updMs - newestEvent >= CHANGED_SINCE_MIN_MS;
@@ -900,20 +903,22 @@ export function pageWorkBar(page: Pick<WikiListing, "work">, now: number): { lev
 }
 
 /** The `why` clause naming a page's work: the sessions that focused on it and
- *  their edits, the touches, the passes, the newest event, and the two numbers.
- *  Edits are rolled-up sums (an attachment counts at half weight), so rounded. */
-function workClause(events: readonly WorkEvent[], now: number, newestEvent: number, raw: number, workTerm: number): string {
+ *  their edits, the touches, the passes, the instant a winning work term dates
+ *  the row from (`workMs`, so the clause and the age cell agree), and the two
+ *  numbers. Edits are weighted sums (an attachment counts at half weight),
+ *  rounded, hence the "≈". */
+function workClause(events: readonly WorkEvent[], now: number, workMs: number, focused: boolean, raw: number, workTerm: number): string {
   const tally = { focus: [0, 0], touch: [0, 0], pass: [0, 0] } as Record<"focus" | "touch" | "pass", [number, number]>;
   for (const [, edits, kind] of events) {
     tally[kind][0]++;
     tally[kind][1] += edits;
   }
   const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-  const edits = (sum: number) => n(Math.round(sum), "edit", "edits");
+  const edits = (sum: number) => "≈" + n(Math.round(sum), "edit", "edits");
   const parts: string[] = [];
   if (tally.focus[0]) parts.push(`focused in ${n(tally.focus[0], "session", "sessions")} (${edits(tally.focus[1])})`);
   if (tally.touch[0]) parts.push(`touched in ${n(tally.touch[0], "session", "sessions")} (${edits(tally.touch[1])})`);
   if (tally.pass[0]) parts.push(`${n(tally.pass[0], "maintenance pass", "maintenance passes")} (weight 0)`);
-  const newest = newestEvent > 0 ? `, newest ${agePhrase(newestEvent, now)}` : "";
+  const newest = workMs > 0 ? `, newest ${focused ? "focus " : ""}${agePhrase(workMs, now)}` : "";
   return `${parts.join(", ")}${newest}: raw ${raw.toFixed(2)} → work ${workTerm.toFixed(2)}`;
 }

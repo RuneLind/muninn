@@ -1869,12 +1869,15 @@ function renderList(): void {
     const chipSlot = chipHtml
       ? `<span class="wiki-fold-chip-wrap${cls(foldChipCountsClass(compact))}">${chipHtml}</span>`
       : "";
+    // The work bar goes FIRST, into the meta line's icon gutter (`wiki-page.ts`),
+    // so it takes no room from the marks: pill + ⚑ + ✋ 12 + NEW + bar in line
+    // left the chip 36px at the 260px rail, under its 46px floor, and it wrapped.
     const subItems =
+      workBarHtml(p, now) +
       statusPillHtml(p) +
       followupFlagHtml(p) +
       movesFlagHtml(p) +
       (isNew ? `<span class="wiki-new-tag" title="New page">NEW</span>` : "") +
-      workBarHtml(p, now) +
       chipSlot;
     const sub = subItems ? `<div class="wiki-list-sub">${subItems}</div>` : "";
     html +=

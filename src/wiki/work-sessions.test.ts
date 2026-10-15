@@ -9,6 +9,7 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  clipSessionsAt,
   __resetWorkSessionsForTest,
   kickWorkSessionsRefresh,
   parsePreWindow,
@@ -198,5 +199,34 @@ describe("the index post-pass", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("clipSessionsAt — the replay's view of a session that spans --at", () => {
+  const AT = Date.UTC(2026, 9, 15, 8, 15);
+  const H = 3_600_000;
+  const session = (id: string, first: number, last: number, fileLasts: number[]) => ({
+    id,
+    first,
+    last,
+    files: fileLasts.map((lastMs, i) => ({ p: `p${i}.md`, edits: 1, firstMs: first, lastMs })),
+  });
+
+  test("keeps a spanning session, its last clamped to the newest row the ledger kept", () => {
+    // Resumed after --at: upstream already cut the rows after `until`, but
+    // `first`/`last` span all of them.
+    const spanning = session("s1", AT - 13 * H, AT + 30 * H, [AT - 3 * H, AT - 5 * H]);
+    const ended = session("s2", AT - 6 * H, AT - 2 * H, [AT - 2 * H]);
+    const { sessions, clipped } = clipSessionsAt([spanning, ended], AT);
+    expect(clipped).toBe(1);
+    expect(sessions.map((s) => s.id)).toEqual(["s1", "s2"]);
+    expect(sessions[0]).toEqual({ ...spanning, last: AT - 3 * H });
+    expect(sessions[1]).toBe(ended);
+  });
+
+  test("a spanning session with no file rows left is clamped to --at, never past it", () => {
+    const { sessions, clipped } = clipSessionsAt([session("s", AT - H, AT + H, [])], AT);
+    expect(clipped).toBe(1);
+    expect(sessions[0]!.last).toBe(AT);
   });
 });

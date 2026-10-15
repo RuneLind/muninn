@@ -465,9 +465,12 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-list-sub .wiki-status, .wiki-list-item .wiki-list-sub .wiki-followup-flag,
     .wiki-list-item .wiki-list-sub .wiki-fold-chip, .wiki-list-item .wiki-list-sub .wiki-new-tag { margin: 0; }
     /* The WORK BAR (plan muninn-wiki-work-threads): four 3px steps, lit by the
-       page's work term, before the chip's slot. Fixed width, never shrunk — the
-       slot after it takes what is left, and its e2e measures the pair at 260px. */
+       page's work term. First on the meta line and pulled into its 22px icon
+       gutter: 15px wide at x 3–18, and the -2px right margin plus the 6px gap
+       put the next mark at x 22, under the title. Its margin box is -6px, so
+       it costs the line nothing; the e2e measures the fullest line at 260px. */
     .wiki-work-bar { display: inline-flex; align-items: flex-end; gap: 1px; flex-shrink: 0; height: 9px; }
+    .wiki-list-sub > .wiki-work-bar:first-child { margin: 0 -2px 0 -19px; }
     .wiki-work-bar i { display: block; width: 3px; border-radius: 1px; box-shadow: inset 0 0 0 1px var(--text-dim); }
     .wiki-work-bar i:nth-child(1) { height: 3px; }
     .wiki-work-bar i:nth-child(2) { height: 5px; }

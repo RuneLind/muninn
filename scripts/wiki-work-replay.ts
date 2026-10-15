@@ -22,14 +22,15 @@
  *     wikis, e.g. mimir) and the bots under `MUNINN_BOTS_DIR` (absolute; default
  *     the checkout's `bots/`), whose `wikiDir` registers a bot wiki.
  *
- * Known limits: a session that spans `at` (its `last` is after it) is dropped.
- * Upstream already cuts its rows at `until`, so what it keeps of such a session
- * is only the files it finished before `at`: its per-file counts and its
- * prompt-to-file attribution describe a session that was still running. Dropping
- * it keeps the replay to sessions that had ended. Opencode titles are
- * latest-wins upstream, so `named` reads today's title; a page written only by a
- * dropped session gets a pre-`at` worked date from the summary form but no
- * events.
+ * A session that spans `at` (resumed after it) is CLIPPED, not dropped
+ * (`clipSessionsAt`): upstream already cut its file rows at `until = at`, so it
+ * is kept as the ledger answered then, with its `last` clamped to its newest
+ * kept row. The live rail at `at` saw it that way, and the summary form at
+ * `until = at` keeps the same writes, so the two inputs agree.
+ *
+ * Known limits: a clipped session's prompt-to-file attribution (`text`) is not
+ * cut at `at`, and opencode titles are latest-wins upstream, so `named` reads
+ * today's title.
  *
  * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
  * row's derivation) and the Worked-on top 10 (sort instant, state, shown date).
@@ -44,7 +45,7 @@ import path from "node:path";
 import { getWikiRegistry } from "../src/wiki/registry-memo.ts";
 import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
-import { parsePreWindow, parseWorkSessions, refreshWorkSessions } from "../src/wiki/work-sessions.ts";
+import { clipSessionsAt, parsePreWindow, parseWorkSessions, refreshWorkSessions } from "../src/wiki/work-sessions.ts";
 import { parseWorkedPages } from "../src/wiki/worked-ledger.ts";
 import { threadScore, WORK_WINDOW_MS, type WorkThread } from "../src/wiki/work-focus.ts";
 import { claudeUsageHttpStatus, claudeUsageJson } from "../src/utils/claude-usage-fetch.ts";
@@ -255,10 +256,8 @@ async function main(): Promise<void> {
   for (const [what, r] of checks) {
     if (!r.ok) throw new ReplayError(`the ledger's ${what} answer did not parse: ${r.reason}: ${r.detail}`);
   }
-  const raw = sessionsBody as { sessions: { last: number }[] };
-  const all = raw.sessions;
-  const kept = all.filter((s) => s.last <= at);
-  const spanning = all.length - kept.length;
+  const raw = sessionsBody as { sessions: { last: number; files?: { lastMs: number }[] }[] };
+  const { sessions: kept, clipped } = clipSessionsAt(raw.sessions, at);
 
   // The clone, at the commit authored at or before `at`.
   const toplevel = (await git(registeredRoot, ["rev-parse", "--show-toplevel"])).trim();
@@ -296,7 +295,7 @@ async function main(): Promise<void> {
 
     console.log(`wiki ${entry.name} at ${new Date(at).toISOString()}`);
     console.log(`commit ${commit.sha.slice(0, 10)} (${new Date(commit.at * 1000).toISOString()}), ${index.pages.length} pages, ${stamped} mtimes set`);
-    console.log(`sessions: ${kept.length} kept, ${spanning} dropped (span --at); window from ${new Date(sinceMs).toISOString()}`);
+    console.log(`sessions: ${kept.length} kept, ${clipped} clipped (span --at); window from ${new Date(sinceMs).toISOString()}`);
     printThreads(index, index.work?.threads ?? [], at);
 
     // The rail input the shipped viewer defaults produce — PR 4 prints

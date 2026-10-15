@@ -1335,7 +1335,7 @@ describe("rankActivity — session work (D5)", () => {
     expect(withWork.score).toBeGreaterThan(created.score);
     expect(withWork.kind).toBe("changed");
     expect(withWork.worked).toBe(true);
-    expect(withWork.why).toMatch(/^focused in 1 session \(20 edits\), newest 5h ago: raw [\d.]+ → work [\d.]+; created 5h ago → /);
+    expect(withWork.why).toMatch(/^focused in 1 session \(≈20 edits\), newest focus 5h ago: raw [\d.]+ → work [\d.]+; created 5h ago → /);
   });
 
   test("a hand edit a day after the session still counts; one inside the day does not", () => {
@@ -1427,6 +1427,24 @@ describe("rankActivity — session work (D5)", () => {
       const { page: _p2, ...y } = rowFor(today, rel)!;
       expect(x).toEqual(y);
     }
+  });
+
+  test("the why's newest names the instant the row's age runs from, and edits read as approximate", () => {
+    const hoursIn = (why: string) => Number(/newest (?:focus )?(\d+)h ago/.exec(why)?.[1]);
+    // F: focus 22.5h ago, a later touch 2h ago. The age runs from the focus event.
+    const f = worked(page({ relPath: "notes/f.md", createdDaysAgo: 100 }), { focus: [[22.5, 40]], touch: [[2, 3]], preH: 50 * 24 });
+    const fr = rankActivity([f], wide, NOW, OPEN)[0]!;
+    expect(fr.worked).toBe(true);
+    expect(hoursIn(fr.why)).toBe(Math.round(fr.ageMs / H));
+    expect(fr.why).toContain("newest focus 23h ago");
+    expect(pageWorkBar(f, NOW)!.title).toContain("newest focus 23h ago");
+    // T: the newest event of any kind, as the state table says.
+    const t = worked(page({ relPath: "notes/t.md", createdDaysAgo: 100 }), { touch: [[30, 40], [4, 1]], preH: 50 * 24 });
+    const tr = rankActivity([t], wide, NOW, OPEN)[0]!;
+    expect(hoursIn(tr.why)).toBe(Math.round(tr.ageMs / H));
+    // Edits are weighted sums (attachments at half weight), not literal counts.
+    expect(fr.why).toMatch(/focused in 1 session \(≈40 edits\)/);
+    expect(tr.why).toMatch(/touched in 2 sessions \(≈41 edits\)/);
   });
 });
 
