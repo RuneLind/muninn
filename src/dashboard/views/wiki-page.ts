@@ -869,6 +869,85 @@ export async function renderWikiPage(opts?: {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .wiki-list-ghost-note { flex-shrink: 0; font-size: 10.5px; color: var(--text-muted); }
+    /* WORK THREADS (plan muninn-wiki-work-threads, PR 5): one card per thread
+       above Activity. The header is a fold button (the name, then "N sessions ·
+       ✋ M" and "first → last") beside a 📌; an OPEN card's focus rows are ordinary rail rows
+       carrying \`.thread-row\`, whose left rule is an absolute ::before — no
+       padding, so every width budget a plain row has holds unchanged at the
+       260px rail; and its \`touched:\` line is links, not rows. */
+    .wiki-thread-card { display: flex; align-items: flex-start; }
+    .wiki-thread-fold {
+      display: flex; align-items: flex-start; gap: 8px; flex: 1 1 0; min-width: 0;
+      background: none; border: 0; cursor: pointer; text-align: left;
+      padding: 6px 0 5px 10px; font-family: inherit;
+    }
+    .wiki-thread-fold .wiki-fold-caret { margin-top: 5px; color: var(--text-muted); }
+    .wiki-thread-fold:hover .wiki-fold-caret { color: var(--text-secondary); }
+    .wiki-thread-label { display: block; flex: 1 1 0; min-width: 0; }
+    .wiki-thread-name {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; overflow-wrap: anywhere;
+      font-size: 12.5px; line-height: 1.3; font-weight: 600; color: var(--text-secondary);
+    }
+    .wiki-thread-fold:hover .wiki-thread-name { color: var(--text-primary); }
+    /* Two meta lines, \`N sessions · ✋ M\` over \`first → last\`: by the width
+       table in src/wiki/CLAUDE.md (Work threads) each is one line at the 260
+       and 300px rails on macOS and Linux DejaVu fonts, so nothing is cut and
+       nothing needs an ellipsis. A part is an inline block, so under 260 (the
+       viewport bound) a line breaks between parts, and inside a part only when
+       the part alone is wider than the rail. */
+    .wiki-thread-meta {
+      display: block; margin-top: 1px; font-size: 10.5px; font-weight: 400; line-height: 1.45;
+      color: var(--text-muted);
+    }
+    .wiki-thread-line { display: block; }
+    .wiki-thread-line > span { display: inline-block; }
+    .wiki-thread-fold:hover .wiki-thread-meta { color: var(--text-secondary); }
+    /* The 📌: grey until pinned (aria-pressed carries the state; the glyph is
+       an emoji, so a filter is the only dim it takes). The resting grey's
+       MEDIAN ink pixel holds 3:1 against the rail (WCAG 1.4.11) on macOS and
+       Linux fonts: light darkens the grey pin, dark brightens it. 24px tall
+       (WCAG 2.5.8): the 3px bottom padding adds height, the glyph stays put. */
+    .wiki-thread-pin {
+      --thread-pin-rest: grayscale(1) brightness(2.2) opacity(.8);
+      flex-shrink: 0; background: none; border: 0; cursor: pointer;
+      padding: 5px 10px 3px 4px; min-width: 24px; font-size: 11px; line-height: 16px;
+      filter: var(--thread-pin-rest);
+    }
+    @media (prefers-color-scheme: light) { .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(.55); } }
+    html[data-theme="light"] .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(.55); }
+    html[data-theme="dark"] .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(2.2) opacity(.8); }
+    .wiki-thread-pin.on, .wiki-thread-pin:hover, .wiki-thread-pin:focus-visible { filter: none; }
+    /* Forced colours paint a Canvas backplate behind the glyph, and the filter
+       paints it too: brightness(.55) turned a white Canvas into a grey square.
+       The Canvas follows the OS scheme, never the theme toggle, so these key on
+       prefers-color-scheme alone. Each keeps its Canvas: brightness keeps black
+       black, contrast keeps white white. Grey alone read 2.5:1 on Linux fonts. */
+    @media (forced-colors: active) {
+      .wiki-thread-pin, html[data-theme] .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(2.2) opacity(.8); }
+    }
+    @media (forced-colors: active) and (prefers-color-scheme: light) {
+      .wiki-thread-pin, html[data-theme] .wiki-thread-pin { --thread-pin-rest: grayscale(1) contrast(2); }
+    }
+    .wiki-list-item.thread-row { position: relative; }
+    .wiki-list-item.thread-row::before {
+      content: ""; position: absolute; left: 2px; top: 4px; bottom: 4px;
+      width: 2px; border-radius: 1px; background: var(--border-primary); pointer-events: none;
+    }
+    .wiki-list-item.thread-row:hover::before { background: var(--accent); }
+    /* A card's newest series plan: its dot sits ON the card's rule, as the
+       series body puts it on the series rail, not half across it. */
+    .wiki-list-item.latest.thread-row:not(.wiki-series-cont)::after { left: -1px; }
+    .wiki-thread-touched {
+      padding: 1px 10px 6px 32px; font-size: 11px; line-height: 1.5;
+      color: var(--text-muted); overflow-wrap: anywhere;
+    }
+    .wiki-thread-link { color: var(--accent-light); text-decoration: none; }
+    .wiki-thread-link:hover, .wiki-thread-link:focus-visible { text-decoration: underline; }
+    .wiki-thread-sep { color: var(--text-muted); }
+    @media (forced-colors: active) {
+      .wiki-list-item.thread-row::before { background: CanvasText; }
+    }
     /* \`+N more\` under a closed series in Activity: opens the same fold as the
        series row above it. Indented to the member rows' depth. */
     .wiki-list-more {

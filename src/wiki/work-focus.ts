@@ -105,6 +105,12 @@ export const WORK_WINDOW_MS = 8 * 86_400_000;
 export const WORK_HALF_LIFE_MS = 2 * 86_400_000;
 /** A hub page: more backlinks than `RELATED_HUB_BACKLINKS` (25). */
 export const WORK_HUB_BACKLINKS = 25;
+/** The one hub test: the server's thread keys and D16 ownership, and the
+ *  client's pin anchor, all read it (the listing's `backlinkCount` is the same
+ *  count as `WorkPageInput.backlinks`). */
+export function isWorkHub(backlinks: number): boolean {
+  return backlinks > WORK_HUB_BACKLINKS;
+}
 export const WORK_FOCUS_EVENTS_MAX = 12;
 export const WORK_THREADS_MAX = 20;
 export const WORK_TITLE_MAX = 140;
@@ -248,7 +254,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
     const rec: PageRec = {
       relPath: p.relPath,
       key,
-      hub: p.backlinks > WORK_HUB_BACKLINKS,
+      hub: isWorkHub(p.backlinks),
       ...(anchors.length ? { createdAnchor: Math.min(...anchors) } : {}),
     };
     const preLedger = maxDefined([pre.get(key), ...aliasesOf(p).map((a) => pre.get(a))]);

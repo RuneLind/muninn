@@ -612,12 +612,19 @@ export function workedGateFor(
  * the parent's own row and its children's, and carrying the winner's kind, age
  * and `why` (`via` names the child). Rolled up BEFORE the cut, so the section
  * still holds `weights.rows` families.
+ *
+ * `exclude` (normalized relPaths) is the focus pages of the open work-thread
+ * cards (D19), taken out BEFORE the cut so the lift backfills Activity instead
+ * of shrinking it. At the FAMILY-ROW level: the fold pairs are computed over
+ * every page first, so an excluded parent's attachment children land under a
+ * parent that never ranks and go with it, rather than ranking on their own.
  */
 export function rankActivity(
   pages: readonly WikiListing[],
   weights: ActivityWeights,
   now: number,
   gate?: WorkedGate | null,
+  exclude?: ReadonlySet<string>,
 ): ActivityRow[] {
   const substitute = gate?.open === true ? gate : null;
   const parents = foldParents(pages);
@@ -627,8 +634,9 @@ export function rankActivity(
   const kids = new Map<string, ActivityRow[]>();
   for (const page of pages) {
     if (isMetaPage(page) || page.culled) continue;
-    const row = scorePage(page, weights, now, substitute);
     const key = relKey(page.relPath);
+    if (exclude?.has(key)) continue;
+    const row = scorePage(page, weights, now, substitute);
     const parent = parents.get(key);
     if (!parent) {
       own.set(key, row);

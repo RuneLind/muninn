@@ -16,17 +16,20 @@
  * `readActiveWikiName`), so a browser that reads two wikis keeps two lists.
  */
 import {
-  FOLDS_MAX,
+  FOLDS_READ_MAX,
+  capFolds,
   PINS_MAX,
   RECENTS_KEY_PREFIX,
   foldsKey,
   parseRelatedOrder,
   parseRelPathList,
+  parseThreadPin,
   pinsKey,
   relatedOrderKey,
   type RelatedOrder,
   serializeRelPathList,
   sortKey,
+  threadPinKey,
   togglePin,
   toggleFold,
 } from "./wiki-recents.ts";
@@ -80,7 +83,7 @@ export function togglePinned(wiki: string, relPath: string): string[] {
  * the sentinels are unchanged by its normalization.
  */
 export function readFolds(wiki: string): string[] {
-  return read(foldsKey(wiki), FOLDS_MAX);
+  return capFolds(read(foldsKey(wiki), FOLDS_READ_MAX));
 }
 
 /** Flip one group open/closed and return the new list. */
@@ -123,6 +126,31 @@ export function writeRelatedOrder(wiki: string, order: RelatedOrder): void {
     localStorage.setItem(relatedOrderKey(wiki), order);
   } catch {
     /* best-effort */
+  }
+}
+
+/** The reader's pinned work thread on this wiki (D7) as stored: one page
+ *  relPath, `null` when none (or blank), `undefined` when the read threw — a
+ *  value the pin's state table tells apart from "none" (`threadPinStep`). */
+export function readThreadPin(wiki: string): string | null | undefined {
+  try {
+    return parseThreadPin(localStorage.getItem(threadPinKey(wiki)));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Store the thread pin: a page relPath pins the thread holding it, `null`
+ *  clears it. Answers whether storage took the write, which is what
+ *  `threadPinSettle` needs: a failed write leaves the tab's pin in memory. */
+export function writeThreadPin(wiki: string, relPath: string | null): boolean {
+  const next = relPath === null ? null : parseThreadPin(relPath);
+  try {
+    if (next) localStorage.setItem(threadPinKey(wiki), next);
+    else localStorage.removeItem(threadPinKey(wiki));
+    return true;
+  } catch {
+    return false;
   }
 }
 

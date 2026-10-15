@@ -573,6 +573,9 @@ test.describe("Wiki rail: series", () => {
     const ghost = page.locator(`.wiki-list-ghost[data-ghost-relpath="${FAM_MEMBER}"]`);
     await expect(ghost).toHaveCount(1);
     await expect(ghost).toContainText("pinned above");
+    // A pin's ghost carries no `data-ghost-reason`: its markup is the one from
+    // before work threads (D11); only a thread's ghost names its reason.
+    await expect(ghost).not.toHaveAttribute("data-ghost-reason");
     // The roll-up still counts it: the census is a fact about the series.
     await expect(seriesRow(page).locator(".wiki-group-rollup")).toHaveText(ROLLUP);
     // And the page is counted ONCE.

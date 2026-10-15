@@ -34,6 +34,7 @@ import {
   type RailGroupKind,
 } from "./wiki-groups.ts";
 import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
+import type { WorkThreadSession } from "../../../wiki/work-focus.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -53,6 +54,15 @@ export const FOLDS_KEY_PREFIX = "muninn.wiki.folds.v1:";
 export const SORT_KEY_PREFIX = "muninn.wiki.sort.v1:";
 /** The Related work order this reader PICKED, per wiki. Absent ⇒ strongest. */
 export const RELATED_ORDER_KEY_PREFIX = "muninn.wiki.related-order.v1:";
+/** The work thread this reader PINNED, per wiki (D7): ONE page relPath, and the
+ *  pinned thread is whichever thread holds that page as a focus page — so the
+ *  pin survives the thread growing or merging. Absent ⇒ no pin. */
+export const THREAD_PIN_KEY_PREFIX = "muninn.wiki.threadPin.v1:";
+/** A work-thread card's fold key prefix. Never a bare relPath: that spelling is
+ *  the page's own attachment-group key, and the card would toggle it too. */
+export const THREAD_FOLD_PREFIX = "thread:";
+/** At most this many work-thread cards render (D6). */
+export const THREAD_CARDS_MAX = 5;
 
 /** Pins are the reader's own choice, so the cap is only a bound on the stored
  *  string — but it is enforced on READ as well as on write, so a hand-edited or
@@ -78,6 +88,18 @@ export function pinsKey(wiki: string): string {
  */
 export const FOLDS_MAX = 200;
 
+/**
+ * How many work-thread fold keys (`thread:…` and `closed:thread:…`) are stored,
+ * bounded APART from `FOLDS_MAX`. A thread's key changes as threads merge or age
+ * out, so each change leaves an orphan; sharing the cap let those evict the
+ * reader's own family, month and page folds. At most 5 cards render.
+ */
+export const THREAD_FOLDS_MAX = 20;
+
+/** What a raw read may hold before `capFolds` sorts it out: both caps plus
+ *  room for the mode keys. */
+export const FOLDS_READ_MAX = FOLDS_MAX + THREAD_FOLDS_MAX + 16;
+
 export function foldsKey(wiki: string): string {
   return FOLDS_KEY_PREFIX + wiki;
 }
@@ -88,6 +110,101 @@ export function sortKey(wiki: string): string {
 
 export function relatedOrderKey(wiki: string): string {
   return RELATED_ORDER_KEY_PREFIX + wiki;
+}
+
+export function threadPinKey(wiki: string): string {
+  return THREAD_PIN_KEY_PREFIX + wiki;
+}
+
+/** A work thread's fold key, normalized: `thread:<key relPath>`. */
+export function threadFoldKey(threadKey: string): string {
+  return normalizeFoldKey(THREAD_FOLD_PREFIX + threadKey);
+}
+
+/** A stored thread pin read back: one normalized relPath, or `null` for an
+ *  absent, blank or non-string value. */
+export function parseThreadPin(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const v = normalizeRel(raw.trim());
+  return v || null;
+}
+
+/**
+ * One tab's view of the thread pin (D7). `held` is what the rail renders from.
+ * `known` is the value this tab last READ from storage or WROTE to it
+ * successfully — `undefined` while storage has never been readable. Keeping the
+ * two apart is what lets a failed write keep the pin (`held` moves, `known`
+ * does not) and what tells another tab's write from this tab's own.
+ */
+export interface ThreadPinState {
+  held: string | null;
+  known: string | null | undefined;
+}
+
+/** What asks the pin to decide. `stored` is the key as read now, `undefined`
+ *  when the read threw. `anchor` is `threadPinAnchor` over `held`. */
+export type ThreadPinTrigger =
+  | { kind: "boot"; stored: string | null | undefined }
+  | { kind: "storage"; stored: string | null | undefined; booted: boolean }
+  | { kind: "click"; value: string | null }
+  | { kind: "render"; stored: string | null | undefined; focused: boolean; anchor: string | null };
+
+/** The decision: the next state, the value to write (`write: false` writes
+ *  nothing; the caller writes, then settles with `threadPinSettle`), and
+ *  whether a `storage` event repaints the rail — only once it has rendered,
+ *  and only when the held pin changed. */
+export interface ThreadPinStep {
+  state: ThreadPinState;
+  write: false | { value: string | null };
+  repaint: boolean;
+}
+
+/**
+ * The thread pin's state table (D7), one row per `case` — the rows and their
+ * proof are in `src/wiki/CLAUDE.md` ("Order and pin"). Two rules carry it:
+ *
+ *  - Only a click, or a render this tab caused while it has document focus,
+ *    writes. A `storage` event never writes and the render it causes runs no
+ *    step at all, so one tab's write can never cause another tab's: no write
+ *    loop between any number of tabs.
+ *  - A render writes only while storage still holds `known`. A value this tab
+ *    did not read or write is adopted, never overwritten.
+ */
+export function threadPinStep(state: ThreadPinState, t: ThreadPinTrigger): ThreadPinStep {
+  const none = (s: ThreadPinState): ThreadPinStep => ({ state: s, write: false, repaint: false });
+  switch (t.kind) {
+    case "boot":
+      return none(t.stored === undefined ? { held: null, known: undefined } : { held: t.stored, known: t.stored });
+    case "storage": {
+      if (t.stored === undefined) return none(state);
+      return { state: { held: t.stored, known: t.stored }, write: false, repaint: t.booted && t.stored !== state.held };
+    }
+    case "click":
+      // The reader's explicit choice: written whatever storage holds.
+      return { state: { held: t.value, known: state.known }, write: { value: t.value }, repaint: false };
+    case "render": {
+      const next = t.anchor ?? state.held;
+      // Unreadable storage: no compare is possible, so nothing is written.
+      if (t.stored === undefined) return none({ held: next, known: state.known });
+      // Storage became readable: what it holds is now known; this tab's own
+      // pin (a click whose write failed) stays and is written on a later render.
+      if (state.known === undefined) return none({ held: state.held ?? t.stored, known: t.stored });
+      // Another tab changed the key and this tab never heard: adopt it.
+      if (t.stored !== state.known) return none({ held: t.stored, known: t.stored });
+      const moved = { held: next, known: state.known };
+      return t.focused && next !== t.stored ? { state: moved, write: { value: next }, repaint: false } : none(moved);
+    }
+  }
+}
+
+/** After the write a step asked for: storage holds `value` only when it took. */
+export function threadPinSettle(state: ThreadPinState, value: string | null, ok: boolean): ThreadPinState {
+  return ok ? { held: state.held, known: value } : state;
+}
+
+/** Does a `storage` event concern the pin of `wiki`? `null` is a `clear()`. */
+export function storageEventTouchesThreadPin(key: string | null, wiki: string): boolean {
+  return key === null || key === threadPinKey(wiki);
 }
 
 /** Related work's two orders. `strongest` is the server's; `newest` re-sorts on
@@ -144,6 +261,22 @@ export function isModeFoldKey(key: string): boolean {
   return normalizeFoldKey(key).startsWith("toggle:");
 }
 
+/** Is this a work-thread card's fold key, in either spelling? */
+export function isThreadFoldKey(key: string): boolean {
+  const v = normalizeFoldKey(key);
+  return v.startsWith(THREAD_FOLD_PREFIX) || v.startsWith(CLOSED_FOLD_PREFIX + THREAD_FOLD_PREFIX);
+}
+
+/** The stored fold list, bounded per class: mode keys first and uncapped, then
+ *  the reader's folds (≤ `FOLDS_MAX`), then thread folds (≤ `THREAD_FOLDS_MAX`).
+ *  Order within a class is kept, so the newest entry of each stays first. */
+export function capFolds(list: readonly string[]): string[] {
+  const modes = list.filter((k) => isModeFoldKey(k));
+  const threads = list.filter((k) => isThreadFoldKey(k)).slice(0, THREAD_FOLDS_MAX);
+  const folds = list.filter((k) => !isModeFoldKey(k) && !isThreadFoldKey(k)).slice(0, FOLDS_MAX);
+  return [...modes, ...folds, ...threads];
+}
+
 /** Flip one group and return the new list. A blank key is a no-op.
  *
  *  ⚠️ **The flip is computed from the RENDERED state, not from the presence of
@@ -160,9 +293,8 @@ export function isModeFoldKey(key: string): boolean {
  *  key behaves exactly as it always did (its default is closed, so "open" writes
  *  the key and "closed" is its absence).
  *
- *  Mode keys are EXEMPT from the cap and hoisted to the front, which is what
- *  keeps them exempt on the way back IN too: `readFolds` caps at `FOLDS_MAX` as
- *  well, so a sentinel left at the tail would simply fall off on the next boot. */
+ *  The result goes through `capFolds`, as `readFolds` does: mode keys exempt
+ *  and hoisted to the front, thread folds capped apart from the reader's own. */
 export function toggleFold(open: string[], key: string): string[] {
   const raw = normalizeFoldKey(key);
   if (!raw) return open.slice();
@@ -178,9 +310,7 @@ export function toggleFold(open: string[], key: string): string[] {
   });
   const wantOpen = !openNow;
   const next = wantOpen === defaultsOpen ? rest : [wantOpen ? base : closed, ...rest];
-  const modes = next.filter((k) => isModeFoldKey(k));
-  const folds = next.filter((k) => !isModeFoldKey(k)).slice(0, FOLDS_MAX);
-  return [...modes, ...folds];
+  return capFolds(next);
 }
 
 /**
@@ -579,7 +709,45 @@ export function jumpHeaderLabel(jump: JiraKeyJump): string {
 
 // ── The rail ──────────────────────────────────────────────────────────
 
-export type RailSection = "jump" | "activity" | "pinned" | "series" | "all" | "meta";
+export type RailSection = "jump" | "threads" | "activity" | "pinned" | "series" | "all" | "meta";
+
+/**
+ * One work-thread card as the rail draws it — decided by `openThreadCards`
+ * (`wiki-rail-input.ts`), the ONE function that also hands Activity its exclude
+ * set (D19), so the lift and the ranking cannot disagree about which cards are
+ * open.
+ */
+export interface RailThreadCard {
+  /** The thread's key: the relPath of its earliest non-hub focus event. */
+  key: string;
+  /** `thread:<key>`, normalized — the card's identity in the fold namespace. */
+  foldKey: string;
+  /** What a click writes: the `closed:` spelling on the card that defaults open
+   *  (the first), the plain key on every other. */
+  toggleKey: string;
+  /** The top page's display title, cut at the first ` — `. */
+  name: string;
+  open: boolean;
+  /** The thread holding the reader's pinned page (D7). */
+  pinned: boolean;
+  /** What the 📌 stores: the thread's newest non-hub focus page (a thread of
+   *  hubs only: its newest hub), the last to age out of the window (the `key`
+   *  is the earliest, the first). */
+  pinAnchor: string;
+  /** Focus pages under the current facets, by work term (highest first). */
+  focus: WikiListing[];
+  /** Normalized relPaths of the focus pages created inside the work window. */
+  created: string[];
+  /** Pages the thread only touched, under the current facets — links, never
+   *  rail rows, so they claim nothing. */
+  touched: WikiListing[];
+  /** Newest first, as the server ships them. */
+  sessions: WorkThreadSession[];
+  /** Open `you` steps across the focus rows (`movesYou`). */
+  movesYou: number;
+  /** D6's order score at the anchored `now`. */
+  score: number;
+}
 
 export type RailEntry =
   | {
@@ -639,6 +807,12 @@ export type RailEntry =
        *  group's body there, exactly as a lifted attachment child loses its
        *  indent. */
       member?: { label: string; kind: RailGroupKind };
+      /** Set on a focus row drawn inside an OPEN work-thread card: the card's
+       *  name, for the painter's hover and the card's left rule. */
+      thread?: { name: string };
+      /** Set on a work-thread focus row whose page was created inside the
+       *  work window: the painter draws the NEW tag. */
+      created?: true;
       /**
        * Set on the NEWEST PLAN of a series, wherever that page renders. The
        * painter draws a dot on the series rail (or the row's left edge outside
@@ -669,10 +843,30 @@ export type RailEntry =
       kind: "ghost";
       section: RailSection;
       page: WikiListing;
-      /** Where the page really is. One value today; a value rather than a
-       *  boolean so a second lift reads as a new case rather than as this one.
-       *  Activity is not one: it moves the whole series, never one member. */
-      reason: "pinned";
+      /** Where the page really is: under `Pinned`, or a row in an open
+       *  work-thread card (D13). Activity is not one: it moves the whole
+       *  series, never one member. */
+      reason: "pinned" | "thread";
+    }
+  | {
+      /**
+       * A WORK-THREAD card's header — the fold control for the card, with the
+       * pin beside it. Not a page: no `relPath`, not counted by `shown`.
+       */
+      kind: "thread";
+      section: RailSection;
+      card: RailThreadCard;
+      foldKey: string;
+      toggleKey: string;
+      folded: boolean;
+    }
+  | {
+      /** An open card's one `touched:` line — links, not rows, so `shown`
+       *  does not count them and they claim nothing. */
+      kind: "touched";
+      section: RailSection;
+      foldKey: string;
+      pages: WikiListing[];
     }
   | {
       /**
@@ -704,6 +898,12 @@ export type RailEntry =
        *  this fold and as real rows under `Pinned`. Counted by the roll-up,
        *  never by `shown`. Absent (never `[]`) when none. */
       ghosts?: WikiListing[];
+      /** Why each of `ghosts` is one, index-aligned — the ghost rows' own
+       *  `reason`, carried here too so a CLOSED series (which emits no ghost
+       *  rows) still says it. Set only when a work-thread card lifted a page
+       *  this render; absent, every ghost is a pin's (D11: the model without
+       *  threads is main's). */
+      ghostReasons?: ("pinned" | "thread")[];
       /**
        * SERIES only, and only when a facet is hiding part of the series: how
        * many members this row stands for against how many the series holds in
@@ -810,6 +1010,12 @@ export interface RailInput {
    * A query flattens them like everything else.
    */
   seriesGroups?: readonly RailGroup[];
+  /**
+   * The WORK-THREAD cards (`openThreadCards`), in render order, or nothing with
+   * no sessions memo (D11). An OPEN card's focus pages are lifted out of
+   * Activity, Pinned and the groups (D13); a closed card lifts nothing.
+   */
+  threads?: readonly RailThreadCard[];
   /**
    * The page the reader currently has OPEN, if any. The group HOLDING it is
    * expanded whatever the store says — a reader is never on a page the rail
@@ -1173,6 +1379,9 @@ export function buildRail(input: RailInput): RailModel {
        *  inside that group's body. A member lifted into Activity or Pinned is
        *  emitted without it, and so without the indent. */
       inGroup?: RailGroup;
+      /** Set only by the work-thread block: the open card's name. */
+      thread?: string;
+      created?: boolean;
     } = {},
   ): void => {
     const key = normalizeRel(page.relPath);
@@ -1207,6 +1416,8 @@ export function buildRail(input: RailInput): RailModel {
         ? { member: { label: extra.inGroup.label, kind: extra.inGroup.kind } }
         : {}),
       ...(latestRels.has(key) ? { latest: true as const } : {}),
+      ...(extra.thread !== undefined ? { thread: { name: extra.thread } } : {}),
+      ...(extra.created ? { created: true as const } : {}),
     });
     if (mine.length && !folded) {
       // A child of a group MEMBER stays inside its own parent's group and
@@ -1273,6 +1484,25 @@ export function buildRail(input: RailInput): RailModel {
     return null;
   };
   let pinned: WikiListing[] = [];
+  // ── Work threads: what an OPEN card takes (D13) ───────────────────────
+  // ⚠️ Claimed FIRST, above Activity: the section renders above it, and a page
+  // in an open card leaves Activity, Pinned and its groups the way a pin takes
+  // a page out of a group. The caller ranked Activity with these same pages
+  // excluded (`openThreadCards` decides both), so this skip is the one-row
+  // invariant's backstop rather than the mechanism. A page two cards list
+  // renders in the first — the server already gives a hub to one thread (D16).
+  // A closed card lifts nothing.
+  const cards = grouped ? (input.threads ?? []) : [];
+  /** page key → the open card it renders in. */
+  const threadLifted = new Map<string, RailThreadCard>();
+  for (const c of cards) {
+    if (!c.open) continue;
+    for (const p of c.focus) {
+      const k = normalizeRel(p.relPath);
+      if (!byRel.has(k) || threadLifted.has(k) || claimed.has(k)) continue;
+      threadLifted.set(k, c);
+    }
+  }
   if (grouped) {
     // Deduped by PAGE, like `resolve` and for the same reason: the
     // one-row-per-page invariant must not depend on the caller's input being
@@ -1280,7 +1510,7 @@ export function buildRail(input: RailInput): RailModel {
     const seen = new Set<string>();
     for (const row of activity ?? []) {
       const rel = normalizeRel(row.page.relPath);
-      if (claimed.has(rel) || seen.has(rel)) continue;
+      if (claimed.has(rel) || seen.has(rel) || threadLifted.has(rel)) continue;
       seen.add(rel);
       // ⚠️ A SERIES MEMBER MOVES THE WHOLE SERIES, and this is the one place it
       // is decided — the deliberate difference from a family, where "Activity
@@ -1329,11 +1559,12 @@ export function buildRail(input: RailInput): RailModel {
     // since nothing is drawn yet) for the two-pass reason above: both sections'
     // placements have to be known before the first chip is counted.
     const pinSeen = new Set(claimed);
+    for (const key of threadLifted.keys()) pinSeen.add(key);
     for (const row of activityRows) pinSeen.add(normalizeRel(row.page.relPath));
     for (const key of selfRanked) pinSeen.add(key);
     pinned = resolve(pins, filtered, pinSeen);
-    for (const p of [...activityRows.map((r) => r.page), ...pinned]) {
-      const key = normalizeRel(p.relPath);
+    for (const p of [...threadLifted.keys(), ...activityRows.map((r) => r.page.relPath), ...pinned.map((x) => x.relPath)]) {
+      const key = normalizeRel(p);
       sectionLifted.add(key);
       if (parentOf.has(key)) lifted.add(key);
     }
@@ -1447,6 +1678,7 @@ export function buildRail(input: RailInput): RailModel {
     // ghost rows so the fold does not silently lose them.
     const allGhosts = present.filter((m) => sectionLifted.has(normalizeRel(m.relPath)));
     const ghosts = allGhosts.filter(shownHere);
+    const ghostReasons = ghosts.map((p): "pinned" | "thread" => (threadLifted.has(normalizeRel(p.relPath)) ? "thread" : "pinned"));
     // ⚠️ EVERY rule-4 child in the filtered set counts — unlike a FAMILY's
     // census below, where the lift really does take a page out of the slate for
     // that render. A series' census says which of its members this render holds,
@@ -1477,6 +1709,7 @@ export function buildRail(input: RailInput): RailModel {
       members,
       superseded,
       ...(ghosts.length ? { ghosts } : {}),
+      ...(ghosts.length && threadLifted.size ? { ghostReasons } : {}),
       // Only when the facets are really hiding part of the series: `3 of 3` is a
       // number that reports nothing and reads as a warning. `total` is optional
       // on `RailGroup` because a family and a month carry none; `?? shown` is
@@ -1498,7 +1731,7 @@ export function buildRail(input: RailInput): RailModel {
       // Ghosts last: they are a footnote about pages that are already on screen,
       // not content, and interleaving them into the date order would cost the
       // member rows their own.
-      for (const p of ghosts) entries.push({ kind: "ghost", section, page: p, reason: "pinned" });
+      ghosts.forEach((p, i) => entries.push({ kind: "ghost", section, page: p, reason: ghostReasons[i]! }));
       return true;
     }
     const peek = peekOf(foldKey);
@@ -1509,6 +1742,21 @@ export function buildRail(input: RailInput): RailModel {
     return true;
   };
 
+  if (grouped && cards.length) {
+    entries.push({ kind: "header", section: "threads", label: "Work threads" });
+    const created = (c: RailThreadCard) => new Set(c.created.map(normalizeRel));
+    for (const c of cards) {
+      entries.push({ kind: "thread", section: "threads", card: c, foldKey: c.foldKey, toggleKey: c.toggleKey, folded: !c.open });
+      if (!c.open) continue;
+      const fresh = created(c);
+      for (const p of c.focus) {
+        const k = normalizeRel(p.relPath);
+        if (threadLifted.get(k) !== c || claimed.has(k)) continue;
+        emitRow(p, "threads", { thread: c.name, created: fresh.has(k) });
+      }
+      if (c.touched.length) entries.push({ kind: "touched", section: "threads", foldKey: c.foldKey, pages: c.touched });
+    }
+  }
   if (grouped) {
     if (activityItems.length) {
       entries.push({ kind: "header", section: "activity", label: "Activity" });
@@ -1578,7 +1826,7 @@ export function buildRail(input: RailInput): RailModel {
   // remainder fell through to the `Other pages` header instead — labelled, and
   // wrongly. `seriesEmitted` joins `claimed` because a CLOSED series draws a row
   // and claims no page, so the count alone would report an empty rail above.
-  const above = claimed.size > 0 || seriesEmitted;
+  const above = claimed.size > 0 || seriesEmitted || cards.length > 0;
   const split = !!metaTail && grouped && (above || remainder.some((p) => !isMetaPage(p)));
   const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
   const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];

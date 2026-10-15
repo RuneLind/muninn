@@ -14,7 +14,9 @@ import { describe, expect, test } from "bun:test";
 import {
   purgeRecentsKeys,
   readFolds,
+  readThreadPin,
   toggleFolded,
+  writeThreadPin,
   type RecentsPurgeStorage,
 } from "./wiki-recents-store.ts";
 import {
@@ -24,6 +26,7 @@ import {
   SECTION_META_FOLD_KEY,
   foldsKey,
   isFoldOpen,
+  threadPinKey,
 } from "./wiki-recents.ts";
 import { LAST_WIKI_KEY } from "./wiki-home.ts";
 
@@ -132,7 +135,7 @@ describe("the fold store", () => {
   function withStorage<T>(
     initial: Record<string, string>,
     fn: (map: Map<string, string>) => T,
-    opts: { throws?: boolean } = {},
+    opts: { throws?: boolean; writeThrows?: boolean } = {},
   ): T {
     const map = new Map(Object.entries(initial));
     const original = (globalThis as { localStorage?: unknown }).localStorage;
@@ -143,6 +146,7 @@ describe("the fold store", () => {
       },
       setItem: (k: string, v: string) => {
         if (opts.throws) throw new Error("SecurityError");
+        if (opts.writeThrows) throw new Error("QuotaExceededError");
         map.set(k, v);
       },
       removeItem: (k: string) => {
@@ -171,6 +175,30 @@ describe("the fold store", () => {
       g.localStorage = { getItem: () => null };
     }).not.toThrow();
     g.localStorage = before;
+  });
+
+  test("the work-thread pin: one normalized relPath per wiki, null clears it; an unreadable store reads undefined, a refused write answers false", () => {
+    withStorage({}, (map) => {
+      expect(readThreadPin("mimir")).toBeNull();
+      expect(writeThreadPin("mimir", " Plans/A.mdx ")).toBe(true);
+      expect(map.get(threadPinKey("mimir"))).toBe("plans/a.mdx");
+      expect(readThreadPin("mimir")).toBe("plans/a.mdx");
+      expect(readThreadPin("melosys")).toBeNull();
+      expect(writeThreadPin("mimir", null)).toBe(true);
+      expect(map.has(threadPinKey("mimir"))).toBe(false);
+    });
+    // Every accessor throws: "unreadable" is not "none" — the state table reads
+    // `undefined` as "no compare possible" (`threadPinStep`).
+    withStorage({ [threadPinKey("mimir")]: "plans/a.mdx" }, () => {
+      expect(readThreadPin("mimir")).toBeUndefined();
+      expect(writeThreadPin("mimir", "plans/b.mdx")).toBe(false);
+    }, { throws: true });
+    // A quota: reads work, writes do not.
+    withStorage({ [threadPinKey("mimir")]: "plans/a.mdx" }, (map) => {
+      expect(readThreadPin("mimir")).toBe("plans/a.mdx");
+      expect(writeThreadPin("mimir", "plans/b.mdx")).toBe(false);
+      expect(map.get(threadPinKey("mimir"))).toBe("plans/a.mdx");
+    }, { writeThrows: true });
   });
 
   test("round-trips per wiki, and an untouched wiki holds nothing", () => {
@@ -222,6 +250,59 @@ describe("the fold store", () => {
       expect(stored).toHaveLength(FOLDS_MAX);
       expect(stored[0]).toBe(`plans/p${FOLDS_MAX + 4}.mdx`); // newest first
       expect(readFolds("mimir")).toHaveLength(FOLDS_MAX);
+    });
+  });
+
+  test("thread folds never push the reader's own folds out: 300 thread writes leave every other fold", () => {
+    // A thread's key changes as threads merge or age out, and closing the
+    // default-open first card writes `closed:thread:<key>` — one orphan per
+    // thread. Those must be bounded on their own, never by evicting a family,
+    // month or page fold.
+    const own = ["family:plans/alpha", "closed:month:2026-09", ...Array.from({ length: 150 }, (_, i) => `plans/p${i}.mdx`)];
+    withStorage({ [foldsKey("mimir")]: JSON.stringify(own) }, (map) => {
+      for (let i = 0; i < 300; i++) {
+        toggleFolded("mimir", i % 2 ? `thread:plans/t${i}.mdx` : `closed:thread:plans/t${i}.mdx`);
+      }
+      const folds = readFolds("mimir");
+      for (const k of own) expect(isFoldOpen(folds, k), k).toBe(true);
+      const stored = JSON.parse(map.get(foldsKey("mimir"))!) as string[];
+      for (const k of own) expect(stored, k).toContain(k);
+      // The thread entries are bounded, and the newest one is kept.
+      const threads = stored.filter((k) => k.startsWith("thread:") || k.startsWith("closed:thread:"));
+      // Exactly 20 — the literal, not `THREAD_FOLDS_MAX`, so a changed cap fails here.
+      expect(threads).toHaveLength(20);
+      expect(threads[0]).toBe("thread:plans/t299.mdx");
+      expect(isFoldOpen(folds, "thread:plans/t299.mdx")).toBe(true);
+    });
+  });
+
+  test("a full store — mode keys, 200 own folds, 20 thread folds — reads back whole", () => {
+    // The raw read must hold both caps at once: a read limit of `FOLDS_MAX` alone
+    // returns the first 200 entries and drops every thread fold behind them.
+    const modes = ["toggle:families", "toggle:retired"];
+    const own = Array.from({ length: FOLDS_MAX }, (_, i) => `plans/p${i}.mdx`);
+    const threads = Array.from({ length: 20 }, (_, i) => `thread:plans/t${i}.mdx`);
+    const full = [...modes, ...own, ...threads];
+    withStorage({ [foldsKey("mimir")]: JSON.stringify(full) }, () => {
+      expect(readFolds("mimir")).toEqual(full);
+    });
+  });
+
+  test("the stored order is mode keys, then the reader's folds, then thread folds", () => {
+    withStorage({}, (map) => {
+      toggleFolded("mimir", "thread:plans/t1.mdx");
+      toggleFolded("mimir", "plans/p1.mdx");
+      toggleFolded("mimir", "toggle:families");
+      toggleFolded("mimir", "closed:thread:plans/t2.mdx");
+      toggleFolded("mimir", "family:plans/alpha");
+      const stored = JSON.parse(map.get(foldsKey("mimir"))!) as string[];
+      expect(stored).toEqual([
+        "toggle:families",
+        "family:plans/alpha",
+        "plans/p1.mdx",
+        "closed:thread:plans/t2.mdx",
+        "thread:plans/t1.mdx",
+      ]);
     });
   });
 

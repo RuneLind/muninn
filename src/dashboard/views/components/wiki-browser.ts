@@ -143,10 +143,16 @@ import {
   isPinnedRelPath,
   pairedByWhy,
   parseRelatedOrder,
+  storageEventTouchesThreadPin,
+  threadPinSettle,
+  threadPinStep,
   type RailEntry,
+  type ThreadPinState,
+  type ThreadPinTrigger,
   type RelatedOrder,
 } from "./wiki-recents.ts";
 import {
+  CLOSED_FOLD_PREFIX,
   GROUP_FAMILIES_TOGGLE_KEY,
   groupRollup,
   clipSeriesTitle,
@@ -156,7 +162,7 @@ import {
   seriesStripOrder,
   workedShownDay,
 } from "./wiki-groups.ts";
-import { railInputFor } from "./wiki-rail-input.ts";
+import { railInputFor, threadPinAnchor } from "./wiki-rail-input.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
@@ -176,9 +182,13 @@ import {
   readSort,
   toggleFolded,
   togglePinned,
+  readThreadPin,
   writeRelatedOrder,
   writeSort,
+  writeThreadPin,
 } from "./wiki-recents-store.ts";
+import { railGhostHtml, threadCardHeaderHtml, threadTouchedHtml } from "./wiki-thread-view.ts";
+import type { IndexWork } from "../../../wiki/work-focus.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
 import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -1359,6 +1369,30 @@ let pins: string[] = readPins(WIKI);
  *  remembered per wiki with no second store. */
 let openFolds: string[] = readFolds(WIKI);
 
+/** The reader's pinned work thread on this wiki (D7): `held` (one page
+ *  relPath, what the rail renders) and `known` (what this tab last read or
+ *  wrote). Every change goes through `stepThreadPin`, the state table. */
+let threadPin: ThreadPinState = threadPinStep({ held: null, known: undefined }, { kind: "boot", stored: readThreadPin(WIKI) }).state;
+
+/** Run one row of the pin's state table and perform the write it asks for.
+ *  Answers whether the rail should repaint (`storage` rows only). */
+function stepThreadPin(t: ThreadPinTrigger): boolean {
+  const r = threadPinStep(threadPin, t);
+  threadPin = r.write ? threadPinSettle(r.state, r.write.value, writeThreadPin(WIKI, r.write.value)) : r.state;
+  return r.repaint;
+}
+
+/** Document focus: the only state in which a render may write the pin. */
+function tabHasFocus(): boolean {
+  return document.visibilityState === "visible" && document.hasFocus();
+}
+
+/** The work threads off the last listing (`work`), or null: an older server, a
+ *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
+ *  "keep the last known value" degrade: stale threads would lift pages the
+ *  listing on screen no longer works on. */
+let workFacts: Pick<IndexWork, "threads"> | null = null;
+
 /** Is the reader grouping this wiki's rail into families and months? OFF by
  *  default: the finder-rail retro found the rail is scanned more than browsed,
  *  and a fold that hides a row the reader expected costs more than ten rows they
@@ -1541,7 +1575,9 @@ function forcedOpenWhy(what: "group" | "section"): string {
   return filters.jira ? "the Jira filter shows every matching page" : `the open page is in this ${what}`;
 }
 
-function renderList(): void {
+/** `cause: "storage"` is a repaint after another tab changed the pin: it runs
+ *  no pin step, so it never writes (the no-loop rule, `threadPinStep`). */
+function renderList(cause: "storage" | "local" = "local"): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -1549,11 +1585,22 @@ function renderList(): void {
   // The rail's POOL — `#wikiCount`'s denominator below; `railInputFor` derives
   // the same pool for its own rows.
   const pool = railPool(allPages, showRetired(), filters.q);
+  // D7: keep the thread pin on the pinned thread's newest focus page, so the
+  // pin survives the thread's oldest pages leaving the window
+  // (`threadPinAnchor`); the state table decides whether that is written.
+  if (cause === "local") {
+    stepThreadPin({
+      kind: "render",
+      stored: readThreadPin(WIKI),
+      focused: tabHasFocus(),
+      anchor: threadPinAnchor(workFacts?.threads, allPages, threadPin.held),
+    });
+  }
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
   const rail = buildRail(
     railInputFor(
-      { allPages, projects, activityWeights, workedGate },
+      { allPages, projects, activityWeights, workedGate, work: workFacts },
       {
         mode,
         now,
@@ -1563,6 +1610,7 @@ function renderList(): void {
         pins,
         openFolds,
         openRelPath: currentRelPath || undefined,
+        threadPin: threadPin.held,
       },
     ),
   );
@@ -1575,6 +1623,15 @@ function renderList(): void {
   // and the wiki, and it is the same for all 953 rows.
   const canEditSeries = seriesEditable();
   rail.entries.forEach((entry: RailEntry) => {
+    // A WORK-THREAD card's header and its `touched:` line (`wiki-thread-view.ts`).
+    if (entry.kind === "thread") {
+      html += threadCardHeaderHtml(entry.card, entry.folded, now, movesPersonal());
+      return;
+    }
+    if (entry.kind === "touched") {
+      html += threadTouchedHtml(entry.foldKey, entry.pages, pageUrlByRelPath);
+      return;
+    }
     if (entry.kind === "header") {
       // A FOLDABLE header (today: Bookkeeping) is a real button: it carries the
       // count whether open or closed, so a collapsed section says how much it
@@ -1700,13 +1757,9 @@ function renderList(): void {
     // must keep naming exactly one element per page (four e2e specs rely on it,
     // and `#wikiCount` would disagree with a second row for one page).
     if (entry.kind === "ghost") {
-      const title = displayTitleOf(entry.page);
-      html +=
-        `<div class="wiki-list-ghost wiki-series-cont" data-ghost-relpath="${esc(entry.page.relPath)}"` +
-        ` title="${esc(title + "\npinned — its row is under Pinned, above")}">` +
-        `<div class="wiki-list-ghost-title">${esc(title)}</div>` +
-        `<div class="wiki-list-ghost-note">pinned above</div>` +
-        `</div>`;
+      // Lifted by a pin, or by an open work-thread card (D13) — the note says
+      // which section above holds the real row.
+      html += railGhostHtml(entry.page.relPath, displayTitleOf(entry.page), entry.reason);
       return;
     }
     // The `+N more` row under a CLOSED series in Activity: a second button for
@@ -1730,13 +1783,17 @@ function renderList(): void {
     // mode the date shown is the one actually sorted on (mtime/birthtime or
     // frontmatter) — otherwise a frontmatter-less page would show nothing while
     // sitting at the top, which is exactly what looked broken before.
+    // A work-thread row is about the work, so its cell is the worked-on date
+    // whatever the sort (the `13h` the card's sketch shows).
     const signal: "added" | "updated" | "worked" | null = entry.activity
       ? entry.activity.kind === "new"
         ? "added"
         : entry.activity.worked
           ? "worked"
           : "updated"
-      : mode === "backlinks"
+      : entry.thread
+        ? "worked"
+        : mode === "backlinks"
         ? null
         : // `isRecencySort` is a TYPE PREDICATE, so the mode goes straight to the
           // shared `recencyKindFor` and the mode→kind map lives in one place.
@@ -1781,7 +1838,8 @@ function renderList(): void {
     // A NEW page (its own creation won, not a child's) says so in the date cell:
     // a bordered NEW tag and the age in the same green. "Changed" is Activity's
     // default and carries no mark — its `why` hover holds the derivation.
-    const isNew = entry.activity?.kind === "new" && !entry.activity.via;
+    // A work-thread row created inside the work window says NEW too.
+    const isNew = (entry.activity?.kind === "new" && !entry.activity.via) || !!entry.created;
     const metaClass = chip.cls + (isNew ? " new" : "");
     const dateTitle = chip.title;
     // Every rail row shows a COMPACT age (`formatRailAge`, whose docblock has the
@@ -1810,11 +1868,12 @@ function renderList(): void {
     // The latest dot (a pseudo-element on the series rail) says WHAT it is here,
     // because a dot cannot: the words live in the reader header.
     const latestWhy = entry.latest ? "newest plan in this series that is not retired" : "";
+    const threadWhy = entry.thread ? `In the ${entry.thread.name} work thread` : "";
     const pills = railIssuePillsHtml(p.issues, (id) => trackerLabels[id] ?? "");
     // A retired row (the toggle is on, or a search found it) says so on hover;
     // the row itself is muted by `.culled` and grows no element.
     const culledWhy = p.culled ? cullLabels().marker : "";
-    const rowTitle = [culledWhy, entry.activity?.why ?? "", childWhy, memberWhy, latestWhy]
+    const rowTitle = [culledWhy, entry.activity?.why ?? "", childWhy, memberWhy, threadWhy, latestWhy]
       .filter(Boolean)
       .join("\n");
     // The META LINE, under the title: status pill · ⚑ · ✋ · NEW · group chip.
@@ -1893,7 +1952,7 @@ function renderList(): void {
       // family's own depth it would read as a sibling of the page it belongs to.
       // A SERIES member (and its attachment child) also carries
       // `wiki-series-cont`, which runs the series' accent rail through the row.
-      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}${entry.latest ? " latest" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}${entry.thread ? " thread-row" : ""}${entry.latest ? " latest" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
@@ -4722,6 +4781,8 @@ document.body.addEventListener("click", (e) => {
   // one widget's handler cannot silence document-level listeners that have
   // nothing to do with it.
   if (target.closest && target.closest("[data-pin]")) return;
+  // The work thread's 📌 is the list's own listener's business too.
+  if (target.closest && target.closest("[data-thread-pin]")) return;
   // Same rule for the group chip and the section fold: both live inside a
   // `[data-relpath]` row, both belong to the list's own listener, and a click on
   // either means "show me what is folded here", never "open this page".
@@ -4926,6 +4987,17 @@ document.body.addEventListener("click", (e) => {
  * document synchronously, before any document listener runs. The rule stands as
  * a rule; the story about it was invented.
  */
+/** After a `renderList` that replaced the control the reader pressed, focus the
+ *  same control again wherever it now is (the related-order precedent), so a
+ *  keyboard reader's next Tab continues from it instead of from the page top.
+ *  Prefers a match of the same kind when a key names two controls. */
+function refocusRailControl(selector: string, pressed: Element): void {
+  const found = Array.from(document.querySelectorAll<HTMLElement>(selector));
+  const kind = pressed.classList[0];
+  const pick = found.find((el) => el.classList[0] === kind) ?? found[0];
+  pick?.focus({ preventScroll: true });
+}
+
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
@@ -4939,8 +5011,35 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     e.preventDefault();
     const key = fold.getAttribute("data-fold-key");
     if (!key) return;
+    const hadFocus = document.activeElement === fold;
     openFolds = toggleFolded(WIKI, key);
     renderList();
+    // The key's spelling can flip with the default it is drawn under, so look
+    // for either (`closed:` or not).
+    if (hadFocus) {
+      const base = key.startsWith(CLOSED_FOLD_PREFIX) ? key.slice(CLOSED_FOLD_PREFIX.length) : key;
+      const at = (k: string) => `#wikiList [data-fold-key="${CSS.escape(k)}"]`;
+      refocusRailControl(`${at(base)}, ${at(CLOSED_FOLD_PREFIX + base)}`, fold);
+    }
+    return;
+  }
+  // A work thread's 📌 (D7): the pinned card clears, any other pins its newest
+  // focus page (`pinAnchor`).
+  // This one DOES re-render — the pinned card moves to the top of the section,
+  // so there is no single button to repaint in place (the ★'s rule).
+  const threadPinBtn = target.closest("[data-thread-pin]");
+  if (threadPinBtn) {
+    e.preventDefault();
+    const key = threadPinBtn.getAttribute("data-thread-pin");
+    if (!key) return;
+    const hadFocus = document.activeElement === threadPinBtn;
+    const card = threadPinBtn.closest(".wiki-thread-card")?.getAttribute("data-thread");
+    stepThreadPin({ kind: "click", value: threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key });
+    renderList();
+    // The card moved: follow it by its own key, not by position.
+    if (hadFocus && card) {
+      refocusRailControl(`#wikiList .wiki-thread-card[data-thread="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
+    }
     return;
   }
   const pin = target.closest("[data-pin]");
@@ -8078,6 +8177,8 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // After the weights (it reads `workedGate`) and after `scannedAtMs` (so
   // `recencyNow()` is anchored).
   workedGate = workedGateFor(data.pages, activityWeights, recencyNow(), data.workedCoverage?.asOfMs);
+  // Shape-checked thread by thread in `openThreadCards` (`usableThreads`).
+  workFacts = data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null;
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /
@@ -8316,6 +8417,14 @@ function maybeRefetchPages(refresh: boolean): void {
   if (!shouldRefetch(pagesRefresh, Date.now())) return;
   requestPages({ refresh });
 }
+
+// Another tab pinned, unpinned or cleared storage (D7): adopt what storage now
+// holds and repaint. The repaint is `cause: "storage"`, which writes nothing,
+// so no tab's write can make another tab write.
+window.addEventListener("storage", (e) => {
+  if (!storageEventTouchesThreadPin(e.key, WIKI)) return;
+  if (stepThreadPin({ kind: "storage", stored: readThreadPin(WIKI), booted: pagesRefresh.bootRendered })) renderList("storage");
+});
 
 window.addEventListener("focus", () => maybeRefetchPages(true));
 document.addEventListener("visibilitychange", () => {
