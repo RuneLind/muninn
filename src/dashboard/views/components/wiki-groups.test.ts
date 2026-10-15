@@ -1443,6 +1443,24 @@ describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
     ]);
   });
 
+  // D9: same day, both worked — the later instant wins, whatever the paths say.
+  test("byWorkedDateDesc breaks a same-day worked tie on the instant, not relPath", () => {
+    const at = (h: number) => new Date(2026, 8, 21, h, 0).getTime(); // local, so one day in any TZ
+    const morning = page({ relPath: "a.mdx", workedMs: at(9) });
+    const evening = page({ relPath: "z.mdx", workedMs: at(21) });
+    const uncovered = page({ relPath: "0.mdx", status_date: "2026-09-21" });
+    for (const rows of [[morning, evening], [evening, morning]]) {
+      expect([...rows].sort((x, y) => byWorkedDateDesc(x, y, NOW)).map((p) => p.relPath)).toEqual([
+        "z.mdx",
+        "a.mdx",
+      ]);
+    }
+    // A covered member still sorts before an uncovered one on the same day.
+    expect(
+      [uncovered, morning, evening].sort((x, y) => byWorkedDateDesc(x, y, NOW)).map((p) => p.relPath),
+    ).toEqual(["z.mdx", "a.mdx", "0.mdx"]);
+  });
+
   // ── Acceptance 7, half one: a network field never decides a write ──────────
   test("the head, the newest plan and bySeriesDateDesc are IDENTICAL with workedMs present", () => {
     const base = [

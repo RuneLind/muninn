@@ -1428,7 +1428,9 @@ They did not, and the three consequences were measured on live mimir: a
 `2027-06-01` in the fold and the strip; a series whose frontmatter and file dates
 disagree was PLACED by one chain and PRINTED by the other; and an expanded fold
 read `09-21, 09-17, 09-17, 09-20, 09-15`, because its members sorted on a date
-their own chips did not show.
+their own chips did not show. Two worked members on the same day then compare
+the worked instant (newest first) before `relPath`, so the day cells stay
+monotonic while same-day work reads in the order it happened.
 
 ⚠️ **The chain is worked-then-`seriesDateSignal`, and the second rung is fix
 round 2's correction.** Fix round 1 fell an uncovered member back to the rail's

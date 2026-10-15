@@ -473,8 +473,10 @@ export function workedDateSignal(p: WorkedDateFields, now?: number): SeriesDateS
   return seriesDateSignal(p);
 }
 
-/** Newest WORKED day first, then the rung, then relPath — {@link bySeriesDateDesc}
- *  one axis over. See {@link workedDateSignal} for why it is a second comparator.
+/** Newest WORKED day first, then the rung, then the worked INSTANT, then relPath —
+ *  {@link bySeriesDateDesc} one axis over. See {@link workedDateSignal} for why it is
+ *  a second comparator. The instant only splits two worked-rung members sharing a
+ *  day, so the strip's day cells stay monotonic and same-day work reads newest first.
  *
  *  `now` is optional and captured ONCE per sort by its callers, for `sortPages`'
  *  reason: the future guard compares against it, so a per-comparison clock read
@@ -489,6 +491,9 @@ export function byWorkedDateDesc(
   return (
     sb.ms - sa.ms ||
     sb.rank - sa.rank ||
+    (sa.rank === SERIES_WORKED_RANK && sb.rank === SERIES_WORKED_RANK
+      ? workedSignal(b, now).ms - workedSignal(a, now).ms
+      : 0) ||
     normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath))
   );
 }
