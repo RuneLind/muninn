@@ -627,6 +627,9 @@ export interface RailThreadCard {
   open: boolean;
   /** The thread holding the reader's pinned page (D7). */
   pinned: boolean;
+  /** What the 📌 stores: the thread's newest focus page, the last to age out
+   *  of the window (the `key` is the earliest, the first). */
+  pinAnchor: string;
   /** Focus pages under the current facets, by work term (highest first). */
   focus: WikiListing[];
   /** Normalized relPaths of the focus pages created inside the work window. */

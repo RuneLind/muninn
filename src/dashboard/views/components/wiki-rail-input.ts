@@ -71,8 +71,9 @@ const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0
 const isFiniteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /** The threads of a payload this client can draw: a `key`, string `pages` and
- *  `touched` lists and well-formed sessions. A malformed thread is dropped
- *  whole, never thrown on — the payload crossed the wire. */
+ *  `touched` lists and at least one well-formed session (a malformed session
+ *  is skipped). A malformed thread — one with no usable session included — is
+ *  dropped whole, never thrown on: the payload crossed the wire. */
 export function usableThreads(threads: unknown): WorkThread[] {
   if (!Array.isArray(threads)) return [];
   const out: WorkThread[] = [];
@@ -94,6 +95,7 @@ export function usableThreads(threads: unknown): WorkThread[] {
         title: typeof r.title === "string" ? r.title : "",
       });
     }
+    if (!ss.length) continue;
     out.push({ key, pages: pages as string[], touched: touched as string[], sessions: ss });
   }
   return out;
@@ -105,6 +107,41 @@ export function threadName(title: string): string {
   return cut > 0 ? title.slice(0, cut) : title;
 }
 
+/** The page the 📌 stores for a thread (D7): its NEWEST focus page — the
+ *  highest `work.focusMs` — because the server drops a page from `pages` once
+ *  its last focus event leaves the window, so the newest is the last to go.
+ *  The thread's `key` is its EARLIEST focus page, the first to go. */
+function newestFocusPage(t: WorkThread, byRel: ReadonlyMap<string, WikiListing>): string {
+  let best: { rel: string; ms: number } | null = null;
+  for (const raw of t.pages) {
+    const rel = normalizeRel(raw);
+    const ms = byRel.get(rel)?.work?.focusMs ?? -Infinity;
+    if (!best || ms > best.ms || (ms === best.ms && rel < best.rel)) best = { rel, ms };
+  }
+  return best ? best.rel : normalizeRel(t.key);
+}
+
+/**
+ * The stored pin re-anchored (D7): the newest focus page of the thread holding
+ * `pin`, or null when no thread holds it. `renderList` writes it back whenever
+ * it differs, so a pinned thread stays pinned as it grows and its oldest pages
+ * age out of the window. A thread that ages out WHOLE between two renders
+ * loses its pin — the server no longer names it.
+ */
+export function threadPinAnchor(
+  threads: readonly WorkThread[] | null | undefined,
+  allPages: readonly WikiListing[],
+  pin: string | null,
+): string | null {
+  if (!pin) return null;
+  const pinKey = normalizeRel(pin);
+  const t = usableThreads(threads).find((x) => x.pages.some((p) => normalizeRel(p) === pinKey));
+  if (!t) return null;
+  const byRel = new Map<string, WikiListing>();
+  for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
+  return newestFocusPage(t, byRel);
+}
+
 /**
  * The work-thread cards, in render order, and which are OPEN — the ONE decision
  * `railInputFor` hands both to `rankActivity` (as the exclude set) and to
@@ -113,14 +150,17 @@ export function threadName(title: string): string {
  *  - `pages` is the rail's POOL; a card's rows are those pages under the
  *    facets, so a facet filters each card and a card left with no focus row is
  *    dropped. A query renders no section at all.
- *  - Order (D6) is `threadScore` at the anchored `now`, over the pool's events —
- *    except the PINNED thread (the one holding `pin` as a focus page, D7), which
- *    renders first. At most `THREAD_CARDS_MAX` cards, cut after the drops.
+ *  - Order (D6), name and page OWNERSHIP are decided over `allPages`, the full
+ *    listing, so neither Show retired nor a facet moves or renames a card.
+ *    Order is `threadScore` at the anchored `now` — except the PINNED thread
+ *    (the one holding `pin` as a focus page, D7), which renders first. At most
+ *    `THREAD_CARDS_MAX` cards, cut after the drops.
  *  - The first card defaults OPEN, so it offers the `closed:` spelling (as the
  *    newest month does); every card reads whichever spelling the reader wrote
  *    last (`groupFoldState`). Keys are `thread:<key>`, never a bare relPath.
- *  - Focus rows are ordered by work term; a page an earlier card already holds
- *    is not a row of a later one (a hub has one owner, D16).
+ *  - Focus rows are ordered by work term; a page an earlier thread already
+ *    owns is neither a row of a later card nor its name (a hub has one owner,
+ *    D16).
  */
 export function openThreadCards(
   threads: readonly WorkThread[] | null | undefined,
@@ -129,11 +169,12 @@ export function openThreadCards(
   foldState: readonly string[],
   pin: string | null,
   now: number,
+  allPages: readonly WikiListing[] = pages,
 ): RailThreadCard[] {
   const usable = usableThreads(threads);
   if (!usable.length || !railSectionsVisible(filters)) return [];
   const byRel = new Map<string, WikiListing>();
-  for (const p of pages) byRel.set(normalizeRel(p.relPath), p);
+  for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const visible = new Set(filterPages(pages as WikiListing[], filters).map((p) => normalizeRel(p.relPath)));
   const pinKey = pin ? normalizeRel(pin) : null;
   const term = (p: WikiListing) => pageWorkTerm(p, now);
@@ -159,30 +200,32 @@ export function openThreadCards(
         b.score - a.score ||
         (a.t.key < b.t.key ? -1 : a.t.key > b.t.key ? 1 : 0),
     );
+  // Ownership runs over the full listing in ranked order and through every
+  // thread, a dropped card included, so a facet never hands a hub to a later card.
   const taken = new Set<string>();
   const window = now - WORK_WINDOW_MS;
   const cards: Omit<RailThreadCard, "open" | "toggleKey">[] = [];
   for (const { t, score, pinned } of ranked) {
     if (cards.length >= THREAD_CARDS_MAX) break;
-    const focus = t.pages
+    const owned = t.pages
       .map((rel) => byRel.get(normalizeRel(rel)))
-      .filter((p): p is WikiListing => !!p && visible.has(normalizeRel(p.relPath)) && !taken.has(normalizeRel(p.relPath)))
+      .filter((p): p is WikiListing => !!p && !taken.has(normalizeRel(p.relPath)))
       .sort(byTerm);
+    for (const p of owned) taken.add(normalizeRel(p.relPath));
+    const focus = owned.filter((p) => visible.has(normalizeRel(p.relPath)));
     if (!focus.length) continue;
-    for (const p of focus) taken.add(normalizeRel(p.relPath));
-    const focusKeys = new Set(focus.map((p) => normalizeRel(p.relPath)));
+    const ownedKeys = new Set(owned.map((p) => normalizeRel(p.relPath)));
     const touched = t.touched
       .map((rel) => byRel.get(normalizeRel(rel)))
-      .filter((p): p is WikiListing => !!p && visible.has(normalizeRel(p.relPath)) && !focusKeys.has(normalizeRel(p.relPath)));
-    // Named by the top page of the WHOLE thread, so a facet does not rename it.
-    const all = t.pages.map((rel) => byRel.get(normalizeRel(rel))).filter((p): p is WikiListing => !!p).sort(byTerm);
-    const top = all[0];
-    const name = threadName(top ? displayTitleOf(top) : (t.pages[0] ?? t.key).replace(/^.*\//, "").replace(/\.[^.]+$/, ""));
+      .filter((p): p is WikiListing => !!p && visible.has(normalizeRel(p.relPath)) && !ownedKeys.has(normalizeRel(p.relPath)));
     cards.push({
       key: t.key,
       foldKey: threadFoldKey(t.key),
-      name,
+      // Named by the top page the thread OWNS in the whole listing, so neither
+      // a facet nor Show retired renames it.
+      name: threadName(displayTitleOf(owned[0]!)),
       pinned,
+      pinAnchor: newestFocusPage(t, byRel),
       focus,
       created: focus.filter((p) => pageAddedMs(p, now) >= window).map((p) => normalizeRel(p.relPath)),
       touched,
@@ -243,7 +286,7 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
   // The work-thread cards (D19): decided ONCE, here, so the pages an OPEN card
   // lifts are exactly the ones Activity ranks without. No sessions memo ⇒ no
   // cards ⇒ an empty exclude set ⇒ today's ranking (D11).
-  const threads = openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now);
+  const threads = openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages);
   const exclude = new Set<string>();
   for (const c of threads) if (c.open) for (const p of c.focus) exclude.add(normalizeRel(p.relPath));
   return {

@@ -3156,6 +3156,7 @@ describe("buildRail — work threads", () => {
     name: key,
     open: true,
     pinned: false,
+    pinAnchor: key,
     focus,
     created: [],
     touched: [],

@@ -156,7 +156,7 @@ import {
   seriesStripOrder,
   workedShownDay,
 } from "./wiki-groups.ts";
-import { railInputFor } from "./wiki-rail-input.ts";
+import { railInputFor, threadPinAnchor } from "./wiki-rail-input.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
@@ -1563,6 +1563,10 @@ function renderList(): void {
   // The rail's POOL — `#wikiCount`'s denominator below; `railInputFor` derives
   // the same pool for its own rows.
   const pool = railPool(allPages, showRetired(), filters.q);
+  // D7: keep the thread pin on the pinned thread's NEWEST focus page, so the pin
+  // survives the thread's oldest pages leaving the window (`threadPinAnchor`).
+  const pinAnchor = threadPinAnchor(workFacts?.threads, allPages, threadPin);
+  if (pinAnchor && pinAnchor !== threadPin) threadPin = writeThreadPin(WIKI, pinAnchor);
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
   const rail = buildRail(
@@ -4982,7 +4986,8 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     renderList();
     return;
   }
-  // A work thread's 📌 (D7): the pinned card clears, any other pins its key.
+  // A work thread's 📌 (D7): the pinned card clears, any other pins its newest
+  // focus page (`pinAnchor`).
   // This one DOES re-render — the pinned card moves to the top of the section,
   // so there is no single button to repaint in place (the ★'s rule).
   const threadPinBtn = target.closest("[data-thread-pin]");

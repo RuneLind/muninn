@@ -75,7 +75,7 @@ export function threadCardHeaderHtml(
     `<small class="wiki-thread-meta">${esc(threadMetaLine(card, now, showMoves))}</small>` +
     `</span>` +
     `</button>` +
-    `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.key)}"` +
+    `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +
     ` data-thread-pinned="${card.pinned ? "1" : "0"}" aria-pressed="${card.pinned}"` +
     ` aria-label="${esc(pinLabel)}" title="${esc(pinLabel)}">📌</button>` +
     `</div>`

@@ -25,6 +25,7 @@ const card = (over: Partial<RailThreadCard> = {}): RailThreadCard => ({
   name: "Alpha <work>",
   open: true,
   pinned: false,
+  pinAnchor: "plans/a.mdx",
   focus: [],
   created: [],
   touched: [],

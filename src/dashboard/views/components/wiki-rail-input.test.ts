@@ -6,7 +6,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { openThreadCards, railInputFor, usableThreads, type RailViewer, type RailWikiFacts } from "./wiki-rail-input.ts";
+import { openThreadCards, railInputFor, threadPinAnchor, usableThreads, type RailViewer, type RailWikiFacts } from "./wiki-rail-input.ts";
+import { threadCardHeaderHtml } from "./wiki-thread-view.ts";
 import { buildRail, railSectionsVisible, THREAD_CARDS_MAX, type RailInput } from "./wiki-recents.ts";
 import { threadScore, type WorkThread } from "../../../wiki/work-focus.ts";
 import {
@@ -297,8 +298,9 @@ describe("openThreadCards", () => {
     expect(cardsOf({ threads: [] })).toEqual([]);
     expect(openThreadCards(null, T_PAGES, INERT, [], null, NOW)).toEqual([]);
     expect(openThreadCards(undefined, T_PAGES, INERT, [], null, NOW)).toEqual([]);
-    expect(usableThreads([{ key: "x" }, { key: "y", pages: ["y"], touched: [], sessions: [{ id: "s" }] }, 3])).toEqual([
-      { key: "y", pages: ["y"], touched: [], sessions: [] },
+    const ok = { id: "s", provider: "claude", first: 1, last: 2, title: "t" };
+    expect(usableThreads([{ key: "x" }, { key: "y", pages: ["y"], touched: [], sessions: [{ id: "s" }, ok] }, 3])).toEqual([
+      { key: "y", pages: ["y"], touched: [], sessions: [ok] },
     ]);
   });
 });
@@ -334,5 +336,78 @@ describe("railInputFor — the work-thread lift and Activity agree (D19)", () =>
     const input = railInputFor(without, base());
     expect(input.threads).toBeUndefined();
     expect(JSON.stringify(buildRail(input))).toBe(JSON.stringify(buildRail(legacyRailInput(without, base()))));
+  });
+});
+
+// ── PR 700 fix round 1 batch 1 ──────────────────────────────────────────────
+describe("the thread pin follows the thread as its oldest pages age out (D7)", () => {
+  // Day 0: the thread's key `a` is its EARLIEST focus page, `b` its newest.
+  // Later the server drops `a` (its last focus left the window) and the thread
+  // gains `c`; its key becomes `b`.
+  const P_A = wpage("notes/a.md", [[150, 5]]);
+  const P_B = wpage("notes/b.md", [[2, 9]]);
+  const P_C = wpage("notes/c.md", [[1, 3]]);
+  const PAGES = [P_A, P_B, P_C, wpage("notes/other.md", [[3, 20]])];
+  const DAY0 = [thread("notes/a.md", ["notes/b.md", "notes/a.md"]), thread("notes/other.md", ["notes/other.md"])];
+  const LATER = [thread("notes/b.md", ["notes/b.md", "notes/c.md"]), thread("notes/other.md", ["notes/other.md"])];
+  const pinOf = (cards: ReturnType<typeof cardsOf>, key: string) => {
+    const html = threadCardHeaderHtml(cards.find((c) => c.key === key)!, false, NOW, false);
+    return /data-thread-pin="([^"]+)"/.exec(html)![1]!;
+  };
+
+  test("the 📌 stores a page the thread still holds after its earliest page ages out", () => {
+    const stored = pinOf(cardsOf({ threads: DAY0, pages: PAGES }), "notes/a.md");
+    const later = cardsOf({ threads: LATER, pages: PAGES, pin: stored });
+    expect(later.find((c) => c.key === "notes/b.md")!.pinned).toBe(true);
+    expect(later[0]!.key).toBe("notes/b.md");
+  });
+
+  test("a pin on the thread's oldest page is re-anchored to its newest focus page while the thread is alive", () => {
+    expect(threadPinAnchor(DAY0, PAGES, "notes/a.md")).toBe("notes/b.md");
+    const later = cardsOf({ threads: LATER, pages: PAGES, pin: threadPinAnchor(DAY0, PAGES, "notes/a.md") });
+    expect(later[0]!.pinned).toBe(true);
+    expect(later[0]!.key).toBe("notes/b.md");
+    // Growing: the next render moves the pin to the new newest page.
+    expect(threadPinAnchor(LATER, PAGES, "notes/b.md")).toBe("notes/c.md");
+    // No thread holds the pin ⇒ nothing to re-anchor.
+    expect(threadPinAnchor(LATER, PAGES, "notes/gone.md")).toBeNull();
+    expect(threadPinAnchor(null, PAGES, "notes/b.md")).toBeNull();
+  });
+});
+
+describe("a thread's name and order do not move with Show retired", () => {
+  const RETIRED = wpage("plans/retired-top.mdx", [[1, 50]], { title: "Retired top — detail", culled: true });
+  const LIVE = wpage("plans/live.mdx", [[2, 2]], { title: "Live second" });
+  const MID = wpage("notes/mid-live.md", [[3, 10]], { title: "Middle thread" });
+  const WIKI: RailWikiFacts = {
+    allPages: [RETIRED, LIVE, MID],
+    projects: {},
+    activityWeights: DEFAULT_ACTIVITY_WEIGHTS,
+    workedGate: { open: true, candidates: 1, covered: 1, coverage: 1 },
+    work: { threads: [thread("plans/retired-top.mdx", ["plans/retired-top.mdx", "plans/live.mdx"]), thread("notes/mid-live.md", ["notes/mid-live.md"])] },
+  };
+  const view = (showRetired: boolean) =>
+    railInputFor(WIKI, base({ showRetired })).threads!.map((c) => ({ key: c.key, name: c.name, open: c.open, score: c.score }));
+
+  test("toggling show-retired leaves card order, names and the open card unchanged", () => {
+    expect(view(false)).toEqual(view(true));
+    expect(view(false).map((c) => c.name)).toEqual(["Retired top", "Middle thread"]);
+  });
+
+  test("a later card is not named from a page an earlier card owns (D16)", () => {
+    const cards = cardsOf({
+      threads: [thread("plans/heavy.mdx", ["plans/heavy.mdx"]), thread("notes/x1.md", ["notes/x1.md", "plans/heavy.mdx"])],
+    });
+    const later = cards.find((c) => c.key === "notes/x1.md")!;
+    expect(later.focus.map((p) => p.relPath)).toEqual(["notes/x1.md"]);
+    expect(later.name).toBe("notes/x1.md");
+  });
+});
+
+describe("a thread with no usable session is dropped whole", () => {
+  test("usableThreads and openThreadCards drop it", () => {
+    const bad = { key: "notes/mid.md", pages: ["notes/mid.md"], touched: [], sessions: [{ id: "s" }, null] };
+    expect(usableThreads([bad])).toEqual([]);
+    expect(cardsOf({ threads: [bad, ...T_THREADS.slice(0, 1)] }).map((c) => c.key)).toEqual(["plans/recent.mdx"]);
   });
 });
