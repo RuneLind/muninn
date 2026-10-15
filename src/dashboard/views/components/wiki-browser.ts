@@ -143,31 +143,24 @@ import {
   isPinnedRelPath,
   pairedByWhy,
   parseRelatedOrder,
-  railSectionsVisible,
   type RailEntry,
   type RelatedOrder,
 } from "./wiki-recents.ts";
 import {
   GROUP_FAMILIES_TOGGLE_KEY,
   groupRollup,
-  groupSeries,
-  isMonthGrouping,
-  orderPagesForGroups,
-  orderSeriesGroups,
-  railGroups,
   clipSeriesTitle,
   seriesContinuePlan,
   seriesKeyOf,
   seriesMembersOf,
   seriesStripOrder,
-  withoutSeriesMembers,
   workedDateSignal,
 } from "./wiki-groups.ts";
+import { railInputFor } from "./wiki-rail-input.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
   parseActivityWeights,
-  rankActivity,
   workedGateFor,
   type ActivityWeights,
   type WorkedGate,
@@ -332,7 +325,6 @@ import {
   sanitizeColorToken,
   searchWithJira,
   searchWithProject,
-  sortPages,
   pageTimeMs,
   statusCounts,
   statusFacetVisible,
@@ -465,7 +457,7 @@ let defaultType = "";
 
 /** The wiki's Activity weights (its `.wiki-reader.json` `activity` block merged
  *  over the defaults, server-side), stored at boot from the /api/wiki/pages
- *  response and read by the one `rankActivity` call in `renderList`. The
+ *  response and read by the one `rankActivity` call (`railInputFor`). The
  *  defaults until a payload lands, and after one that carries no such field —
  *  an older server must render the section, not lose it. */
 let activityWeights: ActivityWeights = DEFAULT_ACTIVITY_WEIGHTS;
@@ -1537,78 +1529,26 @@ function renderList(): void {
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
   const now = recencyNow();
-  // The rail's POOL: the live pages, or every page when the reader shows
-  // retired ones or searches (`railPool`). Every count below is over it — except
-  // the series census, which is over `allPages` on purpose (a culled member
-  // counts toward `N of M shown` and can name the fold).
+  // The rail's POOL — `#wikiCount`'s denominator below; `railInputFor` derives
+  // the same pool for its own rows.
   const pool = railPool(allPages, showRetired(), filters.q);
-  const filtered = sortPages(filterPages(pool, filters), mode, now);
-  // The key jump reads the facets WITHOUT the query (the query is the key). Only
-  // computed when the query could name one — on every other keystroke this is the
-  // same single `filterPages` pass the rail has always done.
-  const facetOnly = /[0-9]/.test(filters.q)
-    ? sortPages(filterPages(pool, { ...filters, q: "" }), mode, now)
-    : filtered;
-  // Computed here for `activity`'s reason — `buildRail` arranges, it does not
-  // group — and only when the toggle is on AND the rail is not under a query,
-  // which flattens everything. `projects` is the wiki's own name list, the one
-  // thing the family rule needs that the page rows do not carry.
-  // SERIES are computed whether or not `group families` is on: the toggle guards
-  // the two NAME heuristics, and a series is a key someone wrote. Over the
-  // FILTERED set for the members, over `allPages` for the label, the member total
-  // and the newest plan — those three are facts about the series, and a facet
-  // that hid the head page would otherwise rename the fold.
-  // The SECTION's row order is applied here rather than inside `buildRail`: the
-  // rail arranges what it is handed and owns no ordering rule of its own (the
-  // `activity` and `groups` split), and `orderSeriesGroups` is then a pure
-  // function a unit test can drive without a rail. See its docblock for why the
-  // section diverges from "a group sits where its first member sorts".
-  const seriesGroups = railSectionsVisible(filters)
-    ? orderSeriesGroups(groupSeries(filtered, allPages, now), { sort: mode, now })
-    : [];
-  // ⚠️ A series CLAIMS its members before the family and month rules see the
-  // list, which is what makes the two knock-on cases real and intended: a family
-  // that drops under FAMILY_MIN dissolves into plain rows, and a prefix that was
-  // over FAMILY_MAX may drop to the cap and form.
-  const groups =
-    familiesOn() && railSectionsVisible(filters)
-      ? railGroups(withoutSeriesMembers(filtered, seriesGroups), {
-          folder: filters.folder,
-          sort: mode,
-          projects,
-          now,
-        })
-      : [];
-  // MONTHS decide their own order (newest first), so the rows are re-ordered to
-  // match before the rail places each group at its first member. Families are
-  // left alone: they interleave with single pages by age, which is the reader's
-  // own sort speaking. See `orderPagesForGroups`.
-  const rows = isMonthGrouping(groups) ? orderPagesForGroups(filtered, groups) : filtered;
-  const rail = buildRail({
-    filtered: rows,
-    facetOnly,
-    filters,
-    pins,
-    // `isRecencySort`, not a two-value test: this decides whether the sunk
-    // bookkeeping run gets its `Bookkeeping` header, and without it a third
-    // recency mode sinks them with nothing on screen explaining the tail.
-    metaTail: isRecencySort(mode),
-    // Ranked over the FILTERED pages and on the same anchored instant as the
-    // sort, so a facet narrows Activity exactly as it narrows Pinned and a row's
-    // date cannot disagree with the score that placed it. Skipped entirely under
-    // a query, where `buildRail` renders no sections and would throw the ranking
-    // away — that is a scan of every page on every keystroke.
-    activity: railSectionsVisible(filters) ? rankActivity(rows, activityWeights, now, workedGate) : [],
-    groups,
-    seriesGroups,
-    openFolds,
-    // The page the reader has open — its group is expanded whatever the store
-    // says, so the `.active` row is never inside a closed fold.
-    openRelPath: currentRelPath || undefined,
-    // A Jira filter opens every fold, so its chip's count is the rows on screen
-    // and `#wikiCount` (the facet's promise; a tag filter makes none).
-    expandAll: !!filters.jira,
-  });
+  // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
+  // work replay.
+  const rail = buildRail(
+    railInputFor(
+      { allPages, projects, activityWeights, workedGate },
+      {
+        mode,
+        now,
+        filters,
+        showRetired: showRetired(),
+        familiesOn: familiesOn(),
+        pins,
+        openFolds,
+        openRelPath: currentRelPath || undefined,
+      },
+    ),
+  );
   // The open page's sessions used to be a section at the head of this rail. They
   // are now rows in the chain under the page title, which is where they have
   // room; `railListHtml` below still owns the empty state, because the rule that

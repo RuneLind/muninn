@@ -4352,9 +4352,16 @@ describe("GET /api/wiki/pages?refresh=1 and the worked ledger's back-off", () =>
     const root = await mkdtemp(path.join(tmpdir(), "wiki-pages-nohatch-"));
     await Bun.write(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
     let hits = 0;
+    let sessionHits = 0;
     const server = Bun.serve({
       port: 0,
-      fetch: () => {
+      fetch: (req) => {
+        // The work-sessions memo asks the same host (`sessions=1`, and the
+        // summary form with `until=`); it is counted apart and backed off too.
+        if (/sessions=1|until=/.test(req.url)) {
+          sessionHits += 1;
+          return new Response("nope", { status: 500 });
+        }
         hits += 1;
         return new Response("nope", { status: 500 });
       },
@@ -4373,7 +4380,7 @@ describe("GET /api/wiki/pages?refresh=1 and the worked ledger's back-off", () =>
     };
     try {
       expect((await app.request("/api/wiki/pages")).status).toBe(200);
-      await until(() => hits >= 1, 2000);
+      await until(() => hits >= 1 && sessionHits >= 2, 2000);
       expect(hits).toBe(1);
       // Two focus refetches. Poll the whole window for a hit that must not come.
       expect((await app.request("/api/wiki/pages?refresh=1")).status).toBe(200);
@@ -4382,6 +4389,7 @@ describe("GET /api/wiki/pages?refresh=1 and the worked ledger's back-off", () =>
       // median 1 ms, max 8 ms over 20 runs on loopback (verify pass, fix round 4).
       await until(() => hits >= 2, 500);
       expect(hits).toBe(1);
+      expect(sessionHits).toBe(2);
     } finally {
       server.stop(true);
       if (prevWikiDir === undefined) delete process.env.WIKI_DIR;

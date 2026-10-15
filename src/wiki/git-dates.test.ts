@@ -337,6 +337,16 @@ test("buildWikiGitDates: real repo — this file's own dates are tracked", async
   for (const key of dates.dirty) expect(key.startsWith("src/wiki/")).toBe(false);
 });
 
+test("buildWikiGitDates: real repo — touchTimes lists every non-sweep touch, ascending", async () => {
+  // The work facts read the newest entry at or before their window (`preGitMs`).
+  const dates = await buildWikiGitDates(import.meta.dir);
+  if (!dates || dates.created.size === 0) return;
+  const times = dates.touchTimes.get("store.ts")!;
+  expect(times.length).toBeGreaterThan(1);
+  expect([...times].sort((a, b) => a - b)).toEqual(times);
+  for (const key of dates.touchTimes.keys()) expect(key.startsWith("src/wiki/")).toBe(false);
+});
+
 test("buildWikiGitDates: real repo — an uncommitted edit shows up as DIRTY", async () => {
   // The one signal history cannot supply. Written into the module's own directory so
   // the subtree pathspec + the wiki-relative key are exercised for real; a

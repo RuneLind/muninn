@@ -1061,7 +1061,7 @@ export interface WikiPageListing extends WikiPageMeta {
 export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
-  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean } = {},
+  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean; includeWork?: boolean } = {},
 ): WikiPageListing {
   // `desc` + `pubDate` are stripped by default: they are page-body fields no
   // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
@@ -1127,7 +1127,13 @@ export function toListing(
   // the rest spread on EVERY caller: one number, set only on a page that has
   // any, read by the rail's ✋ row flag and "waiting on you" chip. The client,
   // not this function, hides those two on a shared instance (nais).
-  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, cullReason, supersededBy, ...rest } =
+  //
+  // `work` (the page's session events, `work-focus.ts`) is the FOURTH opt-in,
+  // `includeWork`, passed by callers 1 and 2: the rail scores from the listing
+  // and the article header reads the open page's meta, while the outgoing,
+  // backlink and related rows (3 and 4) render no work — Related swaps in the
+  // listing's fields client-side (`freshenRelated`).
+  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, cullReason, supersededBy, work, ...rest } =
     meta;
   void pubDate;
   void children;
@@ -1147,6 +1153,7 @@ export function toListing(
     ...(opts.includeCull
       ? { ...(cullReason ? { cullReason } : {}), ...(supersededBy ? { supersededBy } : {}) }
       : {}),
+    ...(opts.includeWork && work ? { work } : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };
@@ -1500,7 +1507,7 @@ export function registerWikiReadRoutes(
       return c.json({ pages: [], scannedAt: null, error: "wiki directory not found" });
     }
     return c.json({
-      pages: index.pages.map((m) => toListing(index, m)),
+      pages: index.pages.map((m) => toListing(index, m, { includeWork: true })),
       scannedAt: index.scannedAt,
       // The wiki's ordered type list + labels (built-in defaults merged with its
       // `.wiki-reader.json` customs). The client stores this and renders every
@@ -1553,6 +1560,9 @@ export function registerWikiReadRoutes(
       // memo look like a verdict. Derived, like `projects`, over the same page
       // array the listing ships, so the option and the rows cannot disagree.
       ...(index.workedCoverage ? { workedCoverage: index.workedCoverage } : {}),
+      // The work threads and their window (`work-focus.ts`), ABSENT when no
+      // sessions memo is warm — the listing is then byte for byte today's (D11).
+      ...(index.work ? { work: index.work } : {}),
       // The ⇪ Felles control's gate, present only on a wiki that offers it. The
       // route re-checks; this only decides whether the button renders.
       ...fellesPublishPayloadField(entry?.name, entry?.root),
@@ -1613,7 +1623,7 @@ export function registerWikiReadRoutes(
     return c.json({
       // The two callers that opt fields in — see `toListing`. Deliberately NOT
       // `listings()` below, whose arrays are the link-heavy pages' bulk.
-      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true, includeCull: true }),
+      meta: toListing(index, meta, { includeDesc: true, includeProvenance: true, includeCull: true, includeWork: true }),
       // The page's CONTENT hash — the CAS base `POST /api/wiki/series` (and any
       // later page writer the reader drives) sends back. Beside `meta` rather
       // than inside it: `toListing` is shared with the hot listing and with the

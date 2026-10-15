@@ -35,7 +35,9 @@ import {
   COMPONENT_TAG_SOURCE,
   inProtectedRegion,
   markdownCodeRegions,
+  parseBlocks,
 } from "../format/markdown-ast.ts";
+import { pageFileRefs } from "../format/query-block.ts";
 import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
@@ -56,6 +58,8 @@ import {
   normalizeWorkedPath,
   workedLedgerFor,
 } from "./worked-ledger.ts";
+import { kickWorkSessionsRefresh, workSessionsFor } from "./work-sessions.ts";
+import { computeWorkFocus, type IndexWork, type PageWork, type WorkPageInput } from "./work-focus.ts";
 
 const log = getLog("wiki", "store");
 
@@ -638,6 +642,14 @@ export interface WikiPageMeta {
    */
   workedMs?: number;
   /**
+   * WORK facts for the last 8 days (`work-focus.ts`): this page's per-session
+   * events and its state (F, T, T0). Absent on a page no in-window session
+   * wrote, and on every page when no sessions memo is warm (D11). Rides the
+   * hot listing and the single-page `meta`; `toListing` strips it from the
+   * backlink, outgoing and related rows.
+   */
+  work?: PageWork;
+  /**
    * True when `git status` reports this page dirty (modified / untracked) — the ONLY
    * condition under which its mtime still means something. A clean file's mtime is a
    * checkout or sweep artifact; a dirty file's mtime is an edit git hasn't recorded
@@ -939,6 +951,11 @@ export interface WikiIndex {
    * update predates it, so an edit made after the ledger answered is not judged.
    */
   workedCoverage?: { matched: number; total: number; returned: number; asOfMs: number };
+  /**
+   * The work threads (`work-focus.ts`) as of the sessions memo's answer, and
+   * the window they cover. Absent when no sessions memo is warm (D11).
+   */
+  work?: IndexWork;
   /**
    * `tracker:key` → every page related to that key, with its relations and
    * whether it is a plan (`trackers/rows.ts`). Empty on a wiki with no tracker.
@@ -2988,6 +3005,17 @@ function supersededTargetRef(raw: string, fromDir: string): { dir: string; stem:
   return { dir, stem };
 }
 
+/** The page-file ref attributes the work roll-up reads (`loadPageFiles`'s three
+ *  components); a body without one of them is not parsed. */
+const PAGE_FILE_REF_PROBE = /(?:csv|sql|src)=/;
+
+/** The newest of ascending `times` at or before `limit`. */
+function lastAtOrBefore(times: readonly number[] | undefined, limit: number): number | undefined {
+  if (!times) return undefined;
+  for (let i = times.length - 1; i >= 0; i--) if (times[i]! <= limit) return times[i];
+  return undefined;
+}
+
 /**
  * The worked-ledger keys an `aliases:` entry can stand for — the page's OLD
  * path, when it was moved. An alias is a PATH only when it is path-shaped for
@@ -3371,7 +3399,13 @@ export async function buildWikiIndex(
   // Skipped where the wiki tool surface is not registered (the nais read
   // slice): a role-`user` listing read must not send the host root to
   // claude-usage — the same gate as the boot kick in `src/index.ts`.
-  if (wikiToolsRegistered(resolveServingProfile())) kickWorkedLedgerRefresh(root, { maxAgeMs: CACHE_TTL_MS });
+  if (wikiToolsRegistered(resolveServingProfile())) {
+    kickWorkedLedgerRefresh(root, { maxAgeMs: CACHE_TTL_MS });
+    kickWorkSessionsRefresh(root, { maxAgeMs: CACHE_TTL_MS });
+  }
+  /** Each markdown page's `csv=`/`sql=`/`src=` refs, wiki-relative — the work
+   *  roll-up's owner rule. Only bodies holding one of the substrings parse. */
+  const pageRefs = new Map<string, string[]>();
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -3494,6 +3528,12 @@ export async function buildWikiIndex(
       // the backlinks, the Atlas graph and the lint checks are untouched.
       const embeds = extractEmbedTargets(content, relPath);
       if (embeds.length) pairingEmbeds.set(normalizeRelPath(relPath), embeds);
+      if (PAGE_FILE_REF_PROBE.test(content)) {
+        const refs = pageFileRefs(parseBlocks(splitFrontmatter(content).body))
+          .map((r) => resolveEmbedRelPath(relPath, r))
+          .filter((r): r is string => !!r);
+        if (refs.length) pageRefs.set(relPath, refs);
+      }
       const supersededRaw =
         typeof fm.superseded_by === "string"
           ? fm.superseded_by.trim()
@@ -3704,6 +3744,23 @@ export async function buildWikiIndex(
   // answered for this wiki" is a different fact from "it matched nothing", and the
   // client hides the sort option on the second, not the first.
   let workedCoverage: WikiIndex["workedCoverage"];
+  let topDirsMemo: Set<string> | undefined;
+  /** First-level directories under the root, lower-cased — what makes an
+   *  `aliases:` entry path-shaped (`aliasWorkedPaths`). Read once, on demand. */
+  const topDirsOf = async (): Promise<Set<string>> => {
+    if (topDirsMemo) return topDirsMemo;
+    try {
+      topDirsMemo = new Set(
+        (await readdir(root, { withFileTypes: true }))
+          .filter((d) => d.isDirectory())
+          .map((d) => d.name.toLowerCase()),
+      );
+    } catch {
+      // An unreadable root folds no alias; the page's own path still matches.
+      topDirsMemo = new Set();
+    }
+    return topDirsMemo;
+  };
   const workedMemo = workedLedgerFor(root);
   if (workedMemo) {
     let matched = 0;
@@ -3712,16 +3769,7 @@ export async function buildWikiIndex(
     // folded in and the newest wins — unless a live page sits at that path now,
     // whose writes are its own.
     const livePaths = new Set(pages.map((p) => normalizeWorkedPath(p.relPath)));
-    let topDirs = new Set<string>();
-    try {
-      topDirs = new Set(
-        (await readdir(root, { withFileTypes: true }))
-          .filter((d) => d.isDirectory())
-          .map((d) => d.name.toLowerCase()),
-      );
-    } catch {
-      // An unreadable root folds no alias; the page's own path still matches.
-    }
+    const topDirs = await topDirsOf();
     for (const meta of pages) {
       let w = workedMemo.pages.get(normalizeWorkedPath(meta.relPath));
       for (const alias of meta.aliases) {
@@ -3952,6 +4000,49 @@ export async function buildWikiIndex(
   }
   for (const arr of backlinks.values()) arr.sort();
 
+  // WORK facts — after the backlinks, which decide the hubs. A post-pass on a
+  // warm memo, like the worked date; no memo ⇒ no field anywhere (D11).
+  let work: IndexWork | undefined;
+  const workMemo = workSessionsFor(root);
+  if (workMemo) {
+    const started = performance.now();
+    const topDirs = await topDirsOf();
+    const inputs: WorkPageInput[] = pages.map((meta) => {
+      const key = normalizeRelPath(meta.relPath);
+      const aliasPaths = meta.aliases.flatMap((a) => aliasWorkedPaths(a, topDirs));
+      const preGitMs = lastAtOrBefore(gitDates?.touchTimes.get(meta.relPath), workMemo.sinceMs);
+      return {
+        relPath: meta.relPath,
+        ...(meta.gitCreatedMs !== undefined ? { gitCreatedMs: meta.gitCreatedMs } : {}),
+        ...(meta.birthtimeMs !== undefined ? { birthtimeMs: meta.birthtimeMs } : {}),
+        backlinks: backlinks.get(key)?.length ?? 0,
+        ...(pageRefs.has(meta.relPath) ? { refs: pageRefs.get(meta.relPath) } : {}),
+        ...(aliasPaths.length ? { aliasPaths } : {}),
+        ...(preGitMs !== undefined ? { preGitMs } : {}),
+      };
+    });
+    const result = computeWorkFocus({
+      sessions: workMemo.sessions,
+      pre: workMemo.pre,
+      sinceMs: workMemo.sinceMs,
+      asOfMs: workMemo.asOfMs,
+      pages: inputs,
+      identity: workMemo.identity,
+      otherRoots: workMemo.otherRoots,
+    });
+    for (const meta of pages) {
+      const w = result.pages.get(meta.relPath);
+      if (w) meta.work = w;
+    }
+    work = { asOfMs: workMemo.asOfMs, sinceMs: workMemo.sinceMs, threads: result.threads };
+    log.debug("wiki {root}: work facts — {pages} page(s), {threads} thread(s) in {ms} ms", {
+      root,
+      pages: result.pages.size,
+      threads: result.threads.length,
+      ms: Math.round(performance.now() - started),
+    });
+  }
+
   return {
     pages,
     outgoing,
@@ -3965,6 +4056,7 @@ export async function buildWikiIndex(
     trails,
     shadowed,
     ...(workedCoverage ? { workedCoverage } : {}),
+    ...(work ? { work } : {}),
     issueKeys: buildIssueKeyIndex(pages, trackers),
   };
 }

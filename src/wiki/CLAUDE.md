@@ -1552,6 +1552,31 @@ three ledger degrades in ONE boot — asserted against the spawned server's own
 stderr, since "nothing warned and the axis is just empty" is the failure the
 `pages`-key strictness exists to prevent).
 
+### Work sessions (`work-sessions.ts`, `work-focus.ts`, `work`)
+
+The facts behind Work threads (plan `muninn-wiki-work-threads`): which pages each agent session of the last 8 days was ABOUT, and which sessions belong to one piece of work. PR 3 ships the data; nothing renders it yet.
+
+| Where | What it owns |
+|---|---|
+| `work-sessions.ts` | the memo: claude-usage's sessions form (`/api/files?sessions=1&since=`) and the summary form at `until = since` (each page's newest write before the window), committed as ONE entry only when both parse and the summary answer echoes `until`; the registry name and the other writable roots, resolved at refresh |
+| `work-focus.ts` | pure: fork dedupe, roll-up, bookkeeping out, named/elsewhere, passes, focus, threads — the rules and their order are its docblock |
+| `store.ts` | the `csv=`/`sql=`/`src=` ref scan in the read pass (only bodies holding one of the substrings parse), `preGitMs` from `git-dates.ts`' `touchTimes`, and the post-pass that sets `WikiPageMeta.work` and `WikiIndex.work` |
+| `wiki-routes.ts` | `toListing`'s `includeWork` opt-in: the hot listing and the single-page `meta` carry `work`; outgoing, backlink and related rows do not |
+
+Five rules a caller can get wrong from outside:
+
+- **The memo follows `worked-ledger.ts`**: background refresh kicked by the index build and at boot, never awaited, a failure backs off one TTL and warns once, no fetch without `CLAUDE_USAGE_URL` or on the nais profile (`wikiToolsRegistered`). A body is accepted only when it echoes `form: "sessions"` and every row parses: an older claude-usage answers the raw form, whose `sessions[]` holds ids.
+- **No memo ⇒ no `work` field anywhere** (D11): the listing is byte for byte the pre-PR one, which is how a cold or degraded instance stays unchanged.
+- **This wiki's identity is its REGISTERED root and registry name.** A prompt's absolute path names a page only under that root; a reader link only when its `wiki=` (or `bot=`) is the registry name. `scripts/wiki-work-replay.ts` builds on a clone and passes the registered root as `identityRoot`.
+- **Server decides membership, the browser orders** (D10): `work.events` is the shipped set (newest 12 focus events, the newest touch, the newest pass), and `raw` and thread order are computed from that set on both sides (`rawWork`, `threadScore`). A page with no in-window events carries no `work` (state N); T and T0 carry `preMs`, the pre-touch position (the newer of the ledger's pre-window write and `preGitMs`).
+- **Never series identity** (D8): `work` moves nothing yet, and when PR 4 makes it move order it must leave `seriesDateSignal`, heads and lint alone; `worked-order-invariant.test.ts` stays green.
+
+`railInputFor` (`views/components/wiki-rail-input.ts`) is the rail's input assembly, moved out of `renderList` so the replay and the reader build the rail from one function (D20).
+
+Replay: `bun scripts/wiki-work-replay.ts --wiki <name> --at <iso>` clones the wiki's repo at the newest first-parent commit authored at or before `at`, sets each file's mtime to its last commit, injects the three ledger answers with `now = at`, drops sessions that span `at`, and prints the threads. Its kode-wiki output is NAV data and stays local (D21).
+
+Acceptance: `work-focus.test.ts`, `work-sessions.test.ts`, `store-worked-kick.test.ts` (the nais gate), `routes/wiki-work-routes.test.ts` (the header and the rail row agree; related rows carry none) and `views/components/wiki-rail-input.test.ts` (byte-identical rail).
+
 ### Lint check 8 — the series checks, and the only lint that proposes a fix
 
 The rail can only fold what somebody NAMED, and nothing told a reader which

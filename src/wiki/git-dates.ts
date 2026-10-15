@@ -119,6 +119,14 @@ export interface WikiGitDates {
    * that pass's timestamp and not an edit.
    */
   dirty: Set<string>;
+  /**
+   * Every non-sweep commit time per path, ascending, rename-carried — the
+   * `touches` the walk already keeps. The work facts read the newest one at or
+   * before their window (`preGitMs`). Not filtered by the metadata-only rule:
+   * that walk judges only the newest touch, and judging every one is a blob
+   * read per commit.
+   */
+  touchTimes: Map<string, number[]>;
 }
 
 /** A file entry from `--name-status`: a status letter, optional similarity score,
@@ -881,7 +889,12 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   );
   // `listWikiSubtreeDirty` already returns WIKI-relative paths, so it needs no strip.
   const dirty = new Set(await dirtyPromise);
-  if (!rel) return { created, touched, dirty };
+  const touchTimes = new Map<string, number[]>();
+  for (const [p, list] of parsed.touches) {
+    if (!p.startsWith(prefix)) continue;
+    touchTimes.set(p.slice(prefix.length), list.map((r) => r.ts));
+  }
+  if (!rel) return { created, touched, dirty, touchTimes };
 
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree
   // (the pathspec makes that rare, but a rename's SOURCE can legitimately sit
@@ -891,7 +904,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     for (const [p, ms] of m) if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);
     return out;
   };
-  const out = { created: strip(created), touched: strip(touched), dirty };
+  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes };
   // The strip is the one step that can throw away EVERYTHING while git reported
   // success — a wrong prefix, or paths in a spelling the prefix can't match (the
   // `core.quotePath` class of bug). Distinguished here from the innocent

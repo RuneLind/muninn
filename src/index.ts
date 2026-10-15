@@ -156,6 +156,17 @@ if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+  // Its own try: a failure here must not skip the ledger kicks above, nor be
+  // logged as theirs.
+  try {
+    const { getWikiRegistry } = await import("./wiki/registry-memo.ts");
+    const { kickWorkSessionsRefresh } = await import("./wiki/work-sessions.ts");
+    for (const entry of getWikiRegistry()) kickWorkSessionsRefresh(entry.root);
+  } catch (err) {
+    log.warn("Failed to warm the work-sessions memo: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // GCS bucket mirrors feeding read-only wiki roots (fire-and-forget; every
