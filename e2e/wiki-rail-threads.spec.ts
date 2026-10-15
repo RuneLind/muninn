@@ -389,8 +389,9 @@ const headerFit = (cardEl: Element) => {
  *  the button's top-left padding pixel, the ink's median contrast, its widest
  *  chroma (a grey pin has none, a pressed one is red), and the share of the
  *  box held by the most common non-background colour — a solid square there is
- *  a backplate the filter has painted, not a glyph (measured: under 1% for the
- *  glyph alone, 11% with forced colours' backplate darkened to grey). */
+ *  a backplate the filter has painted, not a glyph (measured: 1–2.3% for the
+ *  glyph alone on Linux DejaVu, 11–15% with forced colours' backplate darkened
+ *  to grey). */
 async function pinPixels(page: Page, pin: import("@playwright/test").Locator) {
   const png = (await pin.screenshot({ animations: "disabled" })).toString("base64");
   return page.evaluate(async (b64) => {
@@ -837,25 +838,25 @@ test.describe("Wiki rail: Work threads", () => {
   }) => {
     test.setTimeout(180_000);
     const rows = headerTable();
-    const font = process.env.PW_TEST_CONNECT_WS_ENDPOINT ? "linux" : "local";
+    const font = process.env.PW_TEST_CONNECT_WS_ENDPOINT ? "remote" : process.platform;
     const failures: string[] = [];
     const widest = new Map<string, number>();
     const passes = [
-      { rail: 260, viewport: 1400, scheme: "light" },
-      { rail: 260, viewport: 1400, scheme: "dark" },
-      { rail: 300, viewport: 1400, scheme: "light" },
-      { rail: 300, viewport: 1400, scheme: "dark" },
+      { rail: 260, win: 1400, scheme: "light" },
+      { rail: 260, win: 1400, scheme: "dark" },
+      { rail: 300, win: 1400, scheme: "light" },
+      { rail: 300, win: 1400, scheme: "dark" },
       // Under 260 only through the viewport bound (a 445 px window): the meta
       // lines may wrap at their separators, but nothing may be cut.
-      { rail: 200, viewport: 445, scheme: "light" },
+      { rail: 200, win: 445, scheme: "light" },
       // A 330 px window: the widest part is wider than the line, so it wraps
       // inside itself rather than running under the 📌.
-      { rail: 148, viewport: 330, scheme: "light" },
+      { rail: 148, win: 330, scheme: "light" },
     ] as const;
     for (const p of passes) {
       await page.emulateMedia({ colorScheme: p.scheme });
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, p.rail] as const);
-      await page.setViewportSize({ width: p.viewport, height: 900 });
+      await page.setViewportSize({ width: p.win, height: 900 });
       await openReader(page, THREADS);
       // Every table row, through the real renderer, after the fixture's cards.
       await page.locator(".wiki-thread-card").last().evaluate((el, html) => el.insertAdjacentHTML("afterend", html), rows.map((r) => r.html).join(""));
