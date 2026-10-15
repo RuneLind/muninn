@@ -22,11 +22,13 @@ import {
   foldsKey,
   parseRelatedOrder,
   parseRelPathList,
+  parseThreadPin,
   pinsKey,
   relatedOrderKey,
   type RelatedOrder,
   serializeRelPathList,
   sortKey,
+  threadPinKey,
   togglePin,
   toggleFold,
 } from "./wiki-recents.ts";
@@ -124,6 +126,32 @@ export function writeRelatedOrder(wiki: string, order: RelatedOrder): void {
   } catch {
     /* best-effort */
   }
+}
+
+/** The reader's pinned work thread on this wiki (D7): the one page relPath
+ *  the pinned thread holds, or `null` — never pinned, unreadable or blank. */
+export function readThreadPin(wiki: string): string | null {
+  try {
+    return parseThreadPin(localStorage.getItem(threadPinKey(wiki)));
+  } catch {
+    return null;
+  }
+}
+
+/** Store the thread pin: a page relPath pins the thread holding it, `null`
+ *  clears it. The caller decides which (a 📌 on the pinned card clears, any
+ *  other pins), because the stored page need not be the card's key any more
+ *  once threads merge. Returns the value the rail should render from, whatever
+ *  the write did — the `togglePinned` settlement. */
+export function writeThreadPin(wiki: string, relPath: string | null): string | null {
+  const next = relPath === null ? null : parseThreadPin(relPath);
+  try {
+    if (next) localStorage.setItem(threadPinKey(wiki), next);
+    else localStorage.removeItem(threadPinKey(wiki));
+  } catch {
+    /* best-effort */
+  }
+  return next;
 }
 
 /**

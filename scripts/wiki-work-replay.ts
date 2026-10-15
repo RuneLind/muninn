@@ -36,7 +36,10 @@
  * latest-wins upstream, so `named` reads today's title.
  *
  * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
- * row's derivation) and the Worked-on top 10 (sort instant, state, shown date).
+ * row's derivation), the rendered Work threads section (cards, open state,
+ * rows), the post-lift Activity section, every series the lift left ghosts in,
+ * and the Worked-on top 10 (sort instant, state, shown date). The sections come
+ * from `railInputFor` + `buildRail`, never a re-assembly (D20).
  *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
  * written anywhere but the temp clone, which is removed on exit.
@@ -144,8 +147,9 @@ function defaultRailInput(
       projects: projectCounts(index.pages),
       activityWeights: weights,
       workedGate: gate,
+      work: index.work ?? null,
     },
-    { mode, now, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [] },
+    { mode, now, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [], threadPin: null },
   );
   return { input, sort: mode, weights, gate };
 }
@@ -163,10 +167,46 @@ function printActivity(input: RailInput, weights: ActivityWeights, gate: WorkedG
   });
 }
 
-/** The Activity section `buildRail` draws from that input — each row, and each
- *  closed series with the members its peek shows (D12). */
+/** The Work threads section `buildRail` draws: each card (open or closed, 📌),
+ *  an open card's focus rows (NEW, work term) and its touched line. */
+function printThreadsSection(input: RailInput, at: number): void {
+  const entries = buildRail(input).entries.filter((e) => e.section === "threads");
+  console.log(`\nWork threads section (buildRail): ${entries.length ? "" : "none"}`);
+  let row = 0;
+  for (const e of entries) {
+    if (e.kind === "thread") {
+      const c = e.card;
+      console.log(`  ${e.folded ? "▸" : "▾"} ${c.name}${c.pinned ? "  📌" : ""}  [${c.score.toFixed(2)}, ${c.sessions.length} sessions]`);
+    } else if (e.kind === "row") {
+      row++;
+      const fresh = e.created ? " NEW" : "";
+      console.log(`     ${String(row).padStart(2)}. ${e.page.relPath}  work ${pageWorkTerm(e.page, at).toFixed(2)}${fresh}`);
+    } else if (e.kind === "touched") {
+      console.log(`     touched: ${e.pages.map((p) => p.relPath).join(" · ")}`);
+    }
+  }
+}
+
+/** Every series that holds a ghost after the lift, and why each ghost is one —
+ *  the group entry carries them whether its fold is open or closed. */
+function printSeriesGhosts(input: RailInput): void {
+  const rail = buildRail(input);
+  const inThread = new Set(rail.entries.flatMap((e) => (e.kind === "row" && e.section === "threads" ? [e.page.relPath] : [])));
+  console.log(`\nSeries ghosts after the lift:`);
+  let any = false;
+  for (const e of rail.entries) {
+    if (e.kind !== "group" || !e.ghosts?.length) continue;
+    any = true;
+    console.log(`  ${e.group.label} (${e.section}${e.folded ? ", closed" : ""}):`);
+    for (const g of e.ghosts) console.log(`     ghost ${g.relPath} — ${inThread.has(g.relPath) ? "in a work thread above" : "pinned above"}`);
+  }
+  if (!any) console.log("  none");
+}
+
+/** The Activity section `buildRail` draws from that input, AFTER the work-thread
+ *  lift — each row, and each closed series with the members its peek shows (D12). */
 function printActivitySection(input: RailInput): void {
-  console.log(`\nActivity section (buildRail):`);
+  console.log(`\nActivity section (buildRail, post-lift):`);
   for (const e of buildRail(input).entries) {
     if (e.section !== "activity" || e.kind === "header") continue;
     if (e.kind === "group") console.log(`  ▸ series ${e.group.label} (${e.members.length} members${e.folded ? ", closed" : ""})`);
@@ -303,11 +343,13 @@ async function main(): Promise<void> {
 
     // The rail input the shipped viewer defaults produce — PR 4 prints
     // `rankActivity` rows 1–10 and the Worked-on top 10 from it, PR 5 the
-    // `buildRail` sections.
+    // `buildRail` sections (Work threads, post-lift Activity, series ghosts).
     const rail = defaultRailInput(index, listing, at);
     console.log(`\nRail input: sort ${rail.sort}, ${rail.input.filtered.length} rows, ${rail.input.activity?.length ?? 0} Activity rows`);
     printActivity(rail.input, rail.weights, rail.gate, at);
+    printThreadsSection(rail.input, at);
     printActivitySection(rail.input);
+    printSeriesGhosts(rail.input);
     printWorkedOn(rail.input, at);
   } finally {
     await cleanup();

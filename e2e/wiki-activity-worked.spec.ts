@@ -49,6 +49,7 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
+import { foldsKey } from "../src/dashboard/views/components/wiki-recents.ts";
 
 const PORT = e2ePort("wiki-activity-worked");
 const LEDGER_PORT = e2ePort("wiki-activity-worked/ledger");
@@ -332,6 +333,15 @@ const activitySnapshot = (page: Page) =>
 /** The index is TTL-cached and never waits on the ledger, so rebuild it once
  *  the memo is warm (see `e2e/wiki-worked-recency.spec.ts`). */
 async function openReader(page: Page, wiki: string, rows: number = PAGES.length): Promise<void> {
+  // `wswork`'s sessions form work threads (PR 5), and the first card defaults
+  // OPEN and lifts its pages out of Activity (D13). These cases pin the Activity
+  // ranking itself, so that card is stored closed — a closed card lifts nothing.
+  if (wiki === WORK_WIKI) {
+    await page.addInitScript(
+      ([key, value]) => localStorage.setItem(key as string, value as string),
+      [foldsKey(WORK_WIKI), JSON.stringify([`closed:thread:${WORK.crowded.rel}`])] as const,
+    );
+  }
   await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`);
   const listing = page.waitForResponse(
     (r) => r.url().includes("/api/wiki/pages") && r.url().includes(`wiki=${wiki}`) && r.ok(),

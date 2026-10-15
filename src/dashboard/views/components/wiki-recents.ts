@@ -34,6 +34,7 @@ import {
   type RailGroupKind,
 } from "./wiki-groups.ts";
 import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
+import type { WorkThreadSession } from "../../../wiki/work-focus.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -53,6 +54,15 @@ export const FOLDS_KEY_PREFIX = "muninn.wiki.folds.v1:";
 export const SORT_KEY_PREFIX = "muninn.wiki.sort.v1:";
 /** The Related work order this reader PICKED, per wiki. Absent ⇒ strongest. */
 export const RELATED_ORDER_KEY_PREFIX = "muninn.wiki.related-order.v1:";
+/** The work thread this reader PINNED, per wiki (D7): ONE page relPath, and the
+ *  pinned thread is whichever thread holds that page as a focus page — so the
+ *  pin survives the thread growing or merging. Absent ⇒ no pin. */
+export const THREAD_PIN_KEY_PREFIX = "muninn.wiki.threadPin.v1:";
+/** A work-thread card's fold key prefix. Never a bare relPath: that spelling is
+ *  the page's own attachment-group key, and the card would toggle it too. */
+export const THREAD_FOLD_PREFIX = "thread:";
+/** At most this many work-thread cards render (D6). */
+export const THREAD_CARDS_MAX = 5;
 
 /** Pins are the reader's own choice, so the cap is only a bound on the stored
  *  string — but it is enforced on READ as well as on write, so a hand-edited or
@@ -88,6 +98,23 @@ export function sortKey(wiki: string): string {
 
 export function relatedOrderKey(wiki: string): string {
   return RELATED_ORDER_KEY_PREFIX + wiki;
+}
+
+export function threadPinKey(wiki: string): string {
+  return THREAD_PIN_KEY_PREFIX + wiki;
+}
+
+/** A work thread's fold key, normalized: `thread:<key relPath>`. */
+export function threadFoldKey(threadKey: string): string {
+  return normalizeFoldKey(THREAD_FOLD_PREFIX + threadKey);
+}
+
+/** A stored thread pin read back: one normalized relPath, or `null` for an
+ *  absent, blank or non-string value. */
+export function parseThreadPin(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const v = normalizeRel(raw.trim());
+  return v || null;
 }
 
 /** Related work's two orders. `strongest` is the server's; `newest` re-sorts on
@@ -579,7 +606,41 @@ export function jumpHeaderLabel(jump: JiraKeyJump): string {
 
 // ── The rail ──────────────────────────────────────────────────────────
 
-export type RailSection = "jump" | "activity" | "pinned" | "series" | "all" | "meta";
+export type RailSection = "jump" | "threads" | "activity" | "pinned" | "series" | "all" | "meta";
+
+/**
+ * One work-thread card as the rail draws it — decided by `openThreadCards`
+ * (`wiki-rail-input.ts`), the ONE function that also hands Activity its exclude
+ * set (D19), so the lift and the ranking cannot disagree about which cards are
+ * open.
+ */
+export interface RailThreadCard {
+  /** The thread's key: the relPath of its earliest non-hub focus event. */
+  key: string;
+  /** `thread:<key>`, normalized — the card's identity in the fold namespace. */
+  foldKey: string;
+  /** What a click writes: the `closed:` spelling on the card that defaults open
+   *  (the first), the plain key on every other. */
+  toggleKey: string;
+  /** The top page's display title, cut at the first ` — `. */
+  name: string;
+  open: boolean;
+  /** The thread holding the reader's pinned page (D7). */
+  pinned: boolean;
+  /** Focus pages under the current facets, by work term (highest first). */
+  focus: WikiListing[];
+  /** Normalized relPaths of the focus pages created inside the work window. */
+  created: string[];
+  /** Pages the thread only touched, under the current facets — links, never
+   *  rail rows, so they claim nothing. */
+  touched: WikiListing[];
+  /** Newest first, as the server ships them. */
+  sessions: WorkThreadSession[];
+  /** Open `you` steps across the focus rows (`movesYou`). */
+  movesYou: number;
+  /** D6's order score at the anchored `now`. */
+  score: number;
+}
 
 export type RailEntry =
   | {
@@ -639,6 +700,12 @@ export type RailEntry =
        *  group's body there, exactly as a lifted attachment child loses its
        *  indent. */
       member?: { label: string; kind: RailGroupKind };
+      /** Set on a focus row drawn inside an OPEN work-thread card: the card's
+       *  name, for the painter's hover and the card's left rule. */
+      thread?: { name: string };
+      /** Set on a work-thread focus row whose page was created inside the
+       *  work window: the painter draws the NEW tag. */
+      created?: true;
       /**
        * Set on the NEWEST PLAN of a series, wherever that page renders. The
        * painter draws a dot on the series rail (or the row's left edge outside
@@ -669,10 +736,30 @@ export type RailEntry =
       kind: "ghost";
       section: RailSection;
       page: WikiListing;
-      /** Where the page really is. One value today; a value rather than a
-       *  boolean so a second lift reads as a new case rather than as this one.
-       *  Activity is not one: it moves the whole series, never one member. */
-      reason: "pinned";
+      /** Where the page really is: under `Pinned`, or a row in an open
+       *  work-thread card (D13). Activity is not one: it moves the whole
+       *  series, never one member. */
+      reason: "pinned" | "thread";
+    }
+  | {
+      /**
+       * A WORK-THREAD card's header — the fold control for the card, with the
+       * pin beside it. Not a page: no `relPath`, not counted by `shown`.
+       */
+      kind: "thread";
+      section: RailSection;
+      card: RailThreadCard;
+      foldKey: string;
+      toggleKey: string;
+      folded: boolean;
+    }
+  | {
+      /** An open card's one `touched:` line — links, not rows, so `shown`
+       *  does not count them and they claim nothing. */
+      kind: "touched";
+      section: RailSection;
+      foldKey: string;
+      pages: WikiListing[];
     }
   | {
       /**
@@ -810,6 +897,12 @@ export interface RailInput {
    * A query flattens them like everything else.
    */
   seriesGroups?: readonly RailGroup[];
+  /**
+   * The WORK-THREAD cards (`openThreadCards`), in render order, or nothing with
+   * no sessions memo (D11). An OPEN card's focus pages are lifted out of
+   * Activity, Pinned and the groups (D13); a closed card lifts nothing.
+   */
+  threads?: readonly RailThreadCard[];
   /**
    * The page the reader currently has OPEN, if any. The group HOLDING it is
    * expanded whatever the store says — a reader is never on a page the rail
@@ -1173,6 +1266,9 @@ export function buildRail(input: RailInput): RailModel {
        *  inside that group's body. A member lifted into Activity or Pinned is
        *  emitted without it, and so without the indent. */
       inGroup?: RailGroup;
+      /** Set only by the work-thread block: the open card's name. */
+      thread?: string;
+      created?: boolean;
     } = {},
   ): void => {
     const key = normalizeRel(page.relPath);
@@ -1207,6 +1303,8 @@ export function buildRail(input: RailInput): RailModel {
         ? { member: { label: extra.inGroup.label, kind: extra.inGroup.kind } }
         : {}),
       ...(latestRels.has(key) ? { latest: true as const } : {}),
+      ...(extra.thread !== undefined ? { thread: { name: extra.thread } } : {}),
+      ...(extra.created ? { created: true as const } : {}),
     });
     if (mine.length && !folded) {
       // A child of a group MEMBER stays inside its own parent's group and
@@ -1273,6 +1371,25 @@ export function buildRail(input: RailInput): RailModel {
     return null;
   };
   let pinned: WikiListing[] = [];
+  // ── Work threads: what an OPEN card takes (D13) ───────────────────────
+  // ⚠️ Claimed FIRST, above Activity: the section renders above it, and a page
+  // in an open card leaves Activity, Pinned and its groups the way a pin takes
+  // a page out of a group. The caller ranked Activity with these same pages
+  // excluded (`openThreadCards` decides both), so this skip is the one-row
+  // invariant's backstop rather than the mechanism. A page two cards list
+  // renders in the first — the server already gives a hub to one thread (D16).
+  // A closed card lifts nothing.
+  const cards = grouped ? (input.threads ?? []) : [];
+  /** page key → the open card it renders in. */
+  const threadLifted = new Map<string, RailThreadCard>();
+  for (const c of cards) {
+    if (!c.open) continue;
+    for (const p of c.focus) {
+      const k = normalizeRel(p.relPath);
+      if (!byRel.has(k) || threadLifted.has(k) || claimed.has(k)) continue;
+      threadLifted.set(k, c);
+    }
+  }
   if (grouped) {
     // Deduped by PAGE, like `resolve` and for the same reason: the
     // one-row-per-page invariant must not depend on the caller's input being
@@ -1280,7 +1397,7 @@ export function buildRail(input: RailInput): RailModel {
     const seen = new Set<string>();
     for (const row of activity ?? []) {
       const rel = normalizeRel(row.page.relPath);
-      if (claimed.has(rel) || seen.has(rel)) continue;
+      if (claimed.has(rel) || seen.has(rel) || threadLifted.has(rel)) continue;
       seen.add(rel);
       // ⚠️ A SERIES MEMBER MOVES THE WHOLE SERIES, and this is the one place it
       // is decided — the deliberate difference from a family, where "Activity
@@ -1329,11 +1446,12 @@ export function buildRail(input: RailInput): RailModel {
     // since nothing is drawn yet) for the two-pass reason above: both sections'
     // placements have to be known before the first chip is counted.
     const pinSeen = new Set(claimed);
+    for (const key of threadLifted.keys()) pinSeen.add(key);
     for (const row of activityRows) pinSeen.add(normalizeRel(row.page.relPath));
     for (const key of selfRanked) pinSeen.add(key);
     pinned = resolve(pins, filtered, pinSeen);
-    for (const p of [...activityRows.map((r) => r.page), ...pinned]) {
-      const key = normalizeRel(p.relPath);
+    for (const p of [...threadLifted.keys(), ...activityRows.map((r) => r.page.relPath), ...pinned.map((x) => x.relPath)]) {
+      const key = normalizeRel(p);
       sectionLifted.add(key);
       if (parentOf.has(key)) lifted.add(key);
     }
@@ -1498,7 +1616,14 @@ export function buildRail(input: RailInput): RailModel {
       // Ghosts last: they are a footnote about pages that are already on screen,
       // not content, and interleaving them into the date order would cost the
       // member rows their own.
-      for (const p of ghosts) entries.push({ kind: "ghost", section, page: p, reason: "pinned" });
+      for (const p of ghosts) {
+        entries.push({
+          kind: "ghost",
+          section,
+          page: p,
+          reason: threadLifted.has(normalizeRel(p.relPath)) ? "thread" : "pinned",
+        });
+      }
       return true;
     }
     const peek = peekOf(foldKey);
@@ -1509,6 +1634,21 @@ export function buildRail(input: RailInput): RailModel {
     return true;
   };
 
+  if (grouped && cards.length) {
+    entries.push({ kind: "header", section: "threads", label: "Work threads" });
+    const created = (c: RailThreadCard) => new Set(c.created.map(normalizeRel));
+    for (const c of cards) {
+      entries.push({ kind: "thread", section: "threads", card: c, foldKey: c.foldKey, toggleKey: c.toggleKey, folded: !c.open });
+      if (!c.open) continue;
+      const fresh = created(c);
+      for (const p of c.focus) {
+        const k = normalizeRel(p.relPath);
+        if (threadLifted.get(k) !== c || claimed.has(k)) continue;
+        emitRow(p, "threads", { thread: c.name, created: fresh.has(k) });
+      }
+      if (c.touched.length) entries.push({ kind: "touched", section: "threads", foldKey: c.foldKey, pages: c.touched });
+    }
+  }
   if (grouped) {
     if (activityItems.length) {
       entries.push({ kind: "header", section: "activity", label: "Activity" });
@@ -1578,7 +1718,7 @@ export function buildRail(input: RailInput): RailModel {
   // remainder fell through to the `Other pages` header instead — labelled, and
   // wrongly. `seriesEmitted` joins `claimed` because a CLOSED series draws a row
   // and claims no page, so the count alone would report an empty rail above.
-  const above = claimed.size > 0 || seriesEmitted;
+  const above = claimed.size > 0 || seriesEmitted || cards.length > 0;
   const split = !!metaTail && grouped && (above || remainder.some((p) => !isMetaPage(p)));
   const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
   const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];

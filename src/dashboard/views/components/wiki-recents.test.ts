@@ -36,8 +36,12 @@ import {
   railSectionsVisible,
   serializeRelPathList,
   togglePin,
+  parseThreadPin,
+  threadFoldKey,
+  threadPinKey,
   type RailEntry,
   type RailSection,
+  type RailThreadCard,
 } from "./wiki-recents.ts";
 import { GROUP_FAMILIES_TOGGLE_KEY, groupRollup, groupSeries, railGroups } from "./wiki-groups.ts";
 import { filterPages, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
@@ -3129,4 +3133,145 @@ test("parseRelatedOrder lives beside relatedOrderKey: an unknown stored order is
   const { parseRelatedOrder } = await import("./wiki-recents.ts");
   expect(parseRelatedOrder("newest")).toBe("newest");
   for (const raw of [null, undefined, "", "oldest", "NEWEST"]) expect(parseRelatedOrder(raw)).toBe("strongest");
+});
+
+// ── Work threads in the rail (plan `muninn-wiki-work-threads`, PR 5) ───────
+// The cards themselves are decided by `openThreadCards` (`wiki-rail-input.ts`,
+// tested there); here they are handed in, and what is pinned is what `buildRail`
+// does with them: the section's place, the lift (D13), its ghost reason, the
+// pin precedence, the forced-open exception and the one-row invariant.
+
+describe("buildRail — work threads", () => {
+  const A = page({ relPath: "plans/a.mdx", series: "alpha", seriesLabel: "Alpha work", plan_status: "in-flight", status_date: "2026-09-01" });
+  const B = page({ relPath: "plans/b.mdx", series: "alpha", plan_status: "shipped", status_date: "2026-05-01" });
+  const C = page({ relPath: "plans/c.mdx" });
+  const D = page({ relPath: "plans/d.mdx" });
+  const HUB = page({ relPath: "concepts/hub.md", backlinkCount: 40 });
+  const ALL = [A, B, C, D, HUB];
+
+  const card = (key: string, focus: WikiListing[], over: Partial<RailThreadCard> = {}): RailThreadCard => ({
+    key,
+    foldKey: `thread:${key}`,
+    toggleKey: `thread:${key}`,
+    name: key,
+    open: true,
+    pinned: false,
+    focus,
+    created: [],
+    touched: [],
+    sessions: [],
+    movesYou: 0,
+    score: 1,
+    ...over,
+  });
+  const act = (p: WikiListing, score: number): ActivityRow => ({ page: p, kind: "changed", score, why: "changed", ageMs: 0 });
+  const build = (over: Partial<Parameters<typeof buildRail>[0]> = {}) =>
+    buildRail({ filtered: ALL, facetOnly: ALL, filters: INERT, pins: [], seriesGroups: groupSeries(ALL), ...over });
+  const headers = (entries: RailEntry[]) =>
+    entries.filter((e) => e.kind === "header").map((e) => (e as { label: string }).label);
+  const rows = (entries: RailEntry[]) => entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+  const sectionOf = (entries: RailEntry[], rel: string) => rows(entries).filter((r) => r.page.relPath === rel).map((r) => r.section);
+  const ghosts = (entries: RailEntry[]) => entries.filter((e) => e.kind === "ghost") as Array<Extract<RailEntry, { kind: "ghost" }>>;
+  const seriesGroup = (entries: RailEntry[]) =>
+    entries.find((e) => e.kind === "group" && e.group.kind === "series") as Extract<RailEntry, { kind: "group" }>;
+
+  test("the section sits ABOVE Activity: header, then one entry per card, an open card's rows and touched line", () => {
+    const m = build({
+      activity: [act(D, 2)],
+      threads: [
+        card("plans/c.mdx", [C, A], { touched: [HUB], created: ["plans/c.mdx"] }),
+        card("plans/hub-thread", [HUB], { open: false }),
+      ],
+    });
+    expect(headers(m.entries).slice(0, 2)).toEqual(["Work threads", "Activity"]);
+    expect(m.entries.slice(0, 6).map((e) => e.kind)).toEqual(["header", "thread", "row", "row", "touched", "thread"]);
+    const cardRows = rows(m.entries).filter((r) => r.section === "threads");
+    expect(cardRows.map((r) => [r.page.relPath, r.thread?.name, r.created ?? false])).toEqual([
+      ["plans/c.mdx", "plans/c.mdx", true],
+      ["plans/a.mdx", "plans/c.mdx", false],
+    ]);
+    // A closed card draws its header alone; the touched line is links, not rows.
+    const touched = m.entries.find((e) => e.kind === "touched") as Extract<RailEntry, { kind: "touched" }>;
+    expect(touched.pages.map((p) => p.relPath)).toEqual(["concepts/hub.md"]);
+  });
+
+  test("a page in an OPEN card leaves Activity and renders once, in the card (D13)", () => {
+    const m = build({ activity: [act(C, 3), act(D, 2)], threads: [card("plans/c.mdx", [C])] });
+    expect(sectionOf(m.entries, "plans/c.mdx")).toEqual(["threads"]);
+    expect(sectionOf(m.entries, "plans/d.mdx")).toEqual(["activity"]);
+    const distinct = new Set(rows(m.entries).map((r) => r.page.relPath));
+    expect(m.shown).toBe(distinct.size);
+  });
+
+  test("a CLOSED card lifts nothing: its page stays where Activity put it", () => {
+    const m = build({ activity: [act(C, 3)], threads: [card("plans/c.mdx", [C], { open: false })] });
+    expect(sectionOf(m.entries, "plans/c.mdx")).toEqual(["activity"]);
+    expect(m.entries.filter((e) => e.kind === "touched")).toEqual([]);
+  });
+
+  test("a series member in an open card is a ghost in its open series, reading 'thread'; a pinned one still reads 'pinned'", () => {
+    const m = build({ threads: [card("plans/a.mdx", [A])], pins: ["plans/b.mdx"], openFolds: ["series:alpha"] });
+    expect(sectionOf(m.entries, "plans/a.mdx")).toEqual(["threads"]);
+    expect(sectionOf(m.entries, "plans/b.mdx")).toEqual(["pinned"]);
+    expect(ghosts(m.entries).map((g) => [g.page.relPath, g.reason])).toEqual([
+      ["plans/a.mdx", "thread"],
+      ["plans/b.mdx", "pinned"],
+    ]);
+    // The roll-up still counts both: the census is of the work.
+    expect(seriesGroup(m.entries).ghosts!.map((p) => p.relPath)).toEqual(["plans/a.mdx", "plans/b.mdx"]);
+  });
+
+  test("a PINNED page in an open card renders in the card, not under Pinned (the card claims first)", () => {
+    const m = build({ threads: [card("plans/c.mdx", [C])], pins: ["plans/c.mdx"] });
+    expect(sectionOf(m.entries, "plans/c.mdx")).toEqual(["threads"]);
+    expect(headers(m.entries)).not.toContain("Pinned");
+    expect(rows(m.entries).find((r) => r.page.relPath === "plans/c.mdx")!.pinned).toBe(true);
+  });
+
+  test("the open page in an OPEN card does not force its series open; in a closed card it does", () => {
+    const lifted = build({ threads: [card("plans/a.mdx", [A])], openRelPath: "plans/a.mdx" });
+    expect(seriesGroup(lifted.entries).folded).toBe(true);
+    expect(seriesGroup(lifted.entries).forcedOpen).toBeUndefined();
+    const closed = build({ threads: [card("plans/a.mdx", [A], { open: false })], openRelPath: "plans/a.mdx" });
+    expect(seriesGroup(closed.entries).folded).toBe(false);
+    expect(seriesGroup(closed.entries).forcedOpen).toBe(true);
+  });
+
+  test("a hub focused by two threads renders once, in its owning card; the other lists it as touched", () => {
+    // The server gives a hub's focus row to ONE thread (D16) and the others list
+    // it as touched — that shape, open both.
+    const m = build({
+      threads: [card("plans/c.mdx", [C, HUB]), card("plans/d.mdx", [D], { touched: [HUB] })],
+    });
+    expect(sectionOf(m.entries, "concepts/hub.md")).toEqual(["threads"]);
+    const owner = m.entries.findIndex((e) => e.kind === "thread" && e.card.key === "plans/c.mdx");
+    const other = m.entries.findIndex((e) => e.kind === "thread" && e.card.key === "plans/d.mdx");
+    const hubAt = m.entries.findIndex((e) => e.kind === "row" && e.page.relPath === "concepts/hub.md");
+    expect(owner < hubAt && hubAt < other).toBe(true);
+    const touched = m.entries.filter((e) => e.kind === "touched") as Array<Extract<RailEntry, { kind: "touched" }>>;
+    expect(touched.map((t) => [t.foldKey, t.pages.map((p) => p.relPath)])).toEqual([["thread:plans/d.mdx", ["concepts/hub.md"]]]);
+    // A payload that broke D16 (the hub a focus page of both) still draws it once, in the first.
+    const broken = build({ threads: [card("plans/c.mdx", [HUB]), card("plans/d.mdx", [HUB, D])] });
+    expect(sectionOf(broken.entries, "concepts/hub.md")).toEqual(["threads"]);
+    expect(rows(broken.entries).filter((r) => r.thread?.name === "plans/d.mdx").map((r) => r.page.relPath)).toEqual(["plans/d.mdx"]);
+  });
+
+  test("a query renders no section, whatever cards are handed in", () => {
+    const q = { ...INERT, q: "plans" };
+    const m = build({ filters: q, threads: [card("plans/c.mdx", [C])] });
+    expect(m.entries.some((e) => e.section === "threads")).toBe(false);
+  });
+
+  test("no cards ⇒ the rail is today's (D11)", () => {
+    const base = build({ activity: [act(C, 3)] });
+    expect(build({ activity: [act(C, 3)], threads: [] })).toEqual(base);
+  });
+
+  test("the pin key and its parse", () => {
+    expect(threadPinKey("melosys")).toBe("muninn.wiki.threadPin.v1:melosys");
+    expect(parseThreadPin("  Plans/A.mdx ")).toBe("plans/a.mdx");
+    expect(parseThreadPin("")).toBeNull();
+    expect(parseThreadPin(null)).toBeNull();
+    expect(threadFoldKey("Plans/A.mdx")).toBe("thread:plans/a.mdx");
+  });
 });

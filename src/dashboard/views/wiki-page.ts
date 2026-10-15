@@ -869,6 +869,56 @@ export async function renderWikiPage(opts?: {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .wiki-list-ghost-note { flex-shrink: 0; font-size: 10.5px; color: var(--text-muted); }
+    /* WORK THREADS (plan muninn-wiki-work-threads, PR 5): one card per thread
+       above Activity. The header is a fold button (name + "N sessions · span ·
+       ✋ M") beside a 📌; an OPEN card's focus rows are ordinary rail rows
+       carrying \`.thread-row\`, whose left rule is an absolute ::before — no
+       padding, so every width budget a plain row has holds unchanged at the
+       260px rail; and its \`touched:\` line is links, not rows. */
+    .wiki-thread-card { display: flex; align-items: flex-start; }
+    .wiki-thread-fold {
+      display: flex; align-items: flex-start; gap: 8px; flex: 1 1 0; min-width: 0;
+      background: none; border: 0; cursor: pointer; text-align: left;
+      padding: 6px 0 5px 10px; font-family: inherit;
+    }
+    .wiki-thread-fold .wiki-fold-caret { margin-top: 5px; color: var(--text-muted); }
+    .wiki-thread-fold:hover .wiki-fold-caret { color: var(--text-secondary); }
+    .wiki-thread-label { display: block; flex: 1 1 0; min-width: 0; }
+    .wiki-thread-name {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; overflow-wrap: anywhere;
+      font-size: 12.5px; line-height: 1.3; font-weight: 600; color: var(--text-secondary);
+    }
+    .wiki-thread-fold:hover .wiki-thread-name { color: var(--text-primary); }
+    .wiki-thread-meta {
+      display: block; margin-top: 1px; font-size: 10.5px; font-weight: 400; line-height: 1.45;
+      color: var(--text-muted); overflow-wrap: anywhere;
+    }
+    .wiki-thread-fold:hover .wiki-thread-meta { color: var(--text-secondary); }
+    /* The 📌: muted until pinned (aria-pressed carries the state; the glyph is
+       an emoji, so grayscale + opacity is the only dim it takes). */
+    .wiki-thread-pin {
+      flex-shrink: 0; background: none; border: 0; cursor: pointer;
+      padding: 5px 10px 0 4px; font-size: 11px; line-height: 16px;
+      opacity: .45; filter: grayscale(1);
+    }
+    .wiki-thread-pin.on, .wiki-thread-pin:hover, .wiki-thread-pin:focus-visible { opacity: 1; filter: none; }
+    .wiki-list-item.thread-row { position: relative; }
+    .wiki-list-item.thread-row::before {
+      content: ""; position: absolute; left: 2px; top: 4px; bottom: 4px;
+      width: 2px; border-radius: 1px; background: var(--border-primary); pointer-events: none;
+    }
+    .wiki-list-item.thread-row:hover::before { background: var(--accent); }
+    .wiki-thread-touched {
+      padding: 1px 10px 6px 32px; font-size: 11px; line-height: 1.5;
+      color: var(--text-muted); overflow-wrap: anywhere;
+    }
+    .wiki-thread-link { color: var(--accent-light); text-decoration: none; }
+    .wiki-thread-link:hover, .wiki-thread-link:focus-visible { text-decoration: underline; }
+    .wiki-thread-sep { color: var(--text-muted); }
+    @media (forced-colors: active) {
+      .wiki-list-item.thread-row::before { background: CanvasText; }
+    }
     /* \`+N more\` under a closed series in Activity: opens the same fold as the
        series row above it. Indented to the member rows' depth. */
     .wiki-list-more {

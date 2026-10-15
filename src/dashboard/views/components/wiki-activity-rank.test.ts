@@ -1540,3 +1540,33 @@ describe("rankActivity — session events the ranking may not use", () => {
     expect(focusRow!.newerChildren).toEqual(["plans/focus.html"]);
   });
 });
+
+describe("rankActivity — the work-thread exclude set (D19)", () => {
+  const six = { ...DEFAULT_ACTIVITY_WEIGHTS, rows: 6 };
+  /** Ten pages created one to ten days ago: the newest rank highest. */
+  const pages = Array.from({ length: 10 }, (_, i) => page({ relPath: `plans/p${i + 1}.mdx`, createdDaysAgo: i + 1 }));
+
+  test("a 6-row Activity beside a 4-page open card still renders 6 rows — the lift backfills", () => {
+    const card = new Set(["plans/p1.mdx", "plans/p2.mdx", "plans/p3.mdx", "plans/p4.mdx"]);
+    const rows = rankActivity(pages, six, NOW, null, card);
+    expect(rows.map((r) => r.page.relPath)).toEqual(["plans/p5.mdx", "plans/p6.mdx", "plans/p7.mdx", "plans/p8.mdx", "plans/p9.mdx", "plans/p10.mdx"]);
+    // Without the set the four would take four of the six slots.
+    expect(rankActivity(pages, six, NOW).map((r) => r.page.relPath).slice(0, 4)).toEqual([...card]);
+  });
+
+  test("an excluded parent takes its attachment child with it: the child does not rank as its own row", () => {
+    const parent = page({ relPath: "plans/host.mdx", createdDaysAgo: 30 });
+    const child = { ...page({ relPath: "plans/host-prototype.html", createdDaysAgo: 0.1 }), parent: "plans/host.mdx", pairedBy: "suffix" } as WikiListing;
+    // Not excluded: the child's fresh creation ranks FOR its parent.
+    const plain = rankActivity([parent, child], six, NOW);
+    expect(plain.map((r) => [r.page.relPath, r.via?.relPath])).toEqual([["plans/host.mdx", "plans/host-prototype.html"]]);
+    // Excluded: neither the family row nor a loose child row.
+    expect(rankActivity([parent, child], six, NOW, null, new Set(["plans/host.mdx"]))).toEqual([]);
+  });
+
+  test("keys are normalized relPaths, and an empty set is today's ranking", () => {
+    expect(rankActivity(pages, six, NOW, null, new Set())).toEqual(rankActivity(pages, six, NOW));
+    const upper = [page({ relPath: "Plans/Up.mdx", createdDaysAgo: 0.5 }), ...pages];
+    expect(rankActivity(upper, six, NOW, null, new Set(["plans/up.mdx"])).some((r) => r.page.relPath === "Plans/Up.mdx")).toBe(false);
+  });
+});

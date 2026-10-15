@@ -176,9 +176,13 @@ import {
   readSort,
   toggleFolded,
   togglePinned,
+  readThreadPin,
   writeRelatedOrder,
   writeSort,
+  writeThreadPin,
 } from "./wiki-recents-store.ts";
+import { threadCardHeaderHtml, threadTouchedHtml } from "./wiki-thread-view.ts";
+import type { IndexWork } from "../../../wiki/work-focus.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
 import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -1359,6 +1363,16 @@ let pins: string[] = readPins(WIKI);
  *  remembered per wiki with no second store. */
 let openFolds: string[] = readFolds(WIKI);
 
+/** The reader's pinned work thread on this wiki (D7) — one page relPath, read
+ *  once at boot and kept in step by the 📌 writer, like `pins`. */
+let threadPin: string | null = readThreadPin(WIKI);
+
+/** The work threads off the last listing (`work`), or null: an older server, a
+ *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
+ *  "keep the last known value" degrade: stale threads would lift pages the
+ *  listing on screen no longer works on. */
+let workFacts: Pick<IndexWork, "threads"> | null = null;
+
 /** Is the reader grouping this wiki's rail into families and months? OFF by
  *  default: the finder-rail retro found the rail is scanned more than browsed,
  *  and a fold that hides a row the reader expected costs more than ten rows they
@@ -1553,7 +1567,7 @@ function renderList(): void {
   // work replay.
   const rail = buildRail(
     railInputFor(
-      { allPages, projects, activityWeights, workedGate },
+      { allPages, projects, activityWeights, workedGate, work: workFacts },
       {
         mode,
         now,
@@ -1563,6 +1577,7 @@ function renderList(): void {
         pins,
         openFolds,
         openRelPath: currentRelPath || undefined,
+        threadPin,
       },
     ),
   );
@@ -1575,6 +1590,15 @@ function renderList(): void {
   // and the wiki, and it is the same for all 953 rows.
   const canEditSeries = seriesEditable();
   rail.entries.forEach((entry: RailEntry) => {
+    // A WORK-THREAD card's header and its `touched:` line (`wiki-thread-view.ts`).
+    if (entry.kind === "thread") {
+      html += threadCardHeaderHtml(entry.card, entry.folded, now, movesPersonal());
+      return;
+    }
+    if (entry.kind === "touched") {
+      html += threadTouchedHtml(entry.foldKey, entry.pages, pageUrlByRelPath);
+      return;
+    }
     if (entry.kind === "header") {
       // A FOLDABLE header (today: Bookkeeping) is a real button: it carries the
       // count whether open or closed, so a collapsed section says how much it
@@ -1701,11 +1725,18 @@ function renderList(): void {
     // and `#wikiCount` would disagree with a second row for one page).
     if (entry.kind === "ghost") {
       const title = displayTitleOf(entry.page);
+      // Lifted by a pin, or by an open work-thread card (D13) — the note says
+      // which section above holds the real row.
+      const inThread = entry.reason === "thread";
+      const note = inThread ? "in a work thread above" : "pinned above";
+      const where = inThread
+        ? "in an open work thread — its row is under Work threads, above"
+        : "pinned — its row is under Pinned, above";
       html +=
-        `<div class="wiki-list-ghost wiki-series-cont" data-ghost-relpath="${esc(entry.page.relPath)}"` +
-        ` title="${esc(title + "\npinned — its row is under Pinned, above")}">` +
+        `<div class="wiki-list-ghost wiki-series-cont" data-ghost-relpath="${esc(entry.page.relPath)}" data-ghost-reason="${entry.reason}"` +
+        ` title="${esc(title + "\n" + where)}">` +
         `<div class="wiki-list-ghost-title">${esc(title)}</div>` +
-        `<div class="wiki-list-ghost-note">pinned above</div>` +
+        `<div class="wiki-list-ghost-note">${note}</div>` +
         `</div>`;
       return;
     }
@@ -1730,13 +1761,17 @@ function renderList(): void {
     // mode the date shown is the one actually sorted on (mtime/birthtime or
     // frontmatter) — otherwise a frontmatter-less page would show nothing while
     // sitting at the top, which is exactly what looked broken before.
+    // A work-thread row is about the work, so its cell is the worked-on date
+    // whatever the sort (the `13h` the card's sketch shows).
     const signal: "added" | "updated" | "worked" | null = entry.activity
       ? entry.activity.kind === "new"
         ? "added"
         : entry.activity.worked
           ? "worked"
           : "updated"
-      : mode === "backlinks"
+      : entry.thread
+        ? "worked"
+        : mode === "backlinks"
         ? null
         : // `isRecencySort` is a TYPE PREDICATE, so the mode goes straight to the
           // shared `recencyKindFor` and the mode→kind map lives in one place.
@@ -1781,7 +1816,8 @@ function renderList(): void {
     // A NEW page (its own creation won, not a child's) says so in the date cell:
     // a bordered NEW tag and the age in the same green. "Changed" is Activity's
     // default and carries no mark — its `why` hover holds the derivation.
-    const isNew = entry.activity?.kind === "new" && !entry.activity.via;
+    // A work-thread row created inside the work window says NEW too.
+    const isNew = (entry.activity?.kind === "new" && !entry.activity.via) || !!entry.created;
     const metaClass = chip.cls + (isNew ? " new" : "");
     const dateTitle = chip.title;
     // Every rail row shows a COMPACT age (`formatRailAge`, whose docblock has the
@@ -1810,11 +1846,12 @@ function renderList(): void {
     // The latest dot (a pseudo-element on the series rail) says WHAT it is here,
     // because a dot cannot: the words live in the reader header.
     const latestWhy = entry.latest ? "newest plan in this series that is not retired" : "";
+    const threadWhy = entry.thread ? `In the ${entry.thread.name} work thread` : "";
     const pills = railIssuePillsHtml(p.issues, (id) => trackerLabels[id] ?? "");
     // A retired row (the toggle is on, or a search found it) says so on hover;
     // the row itself is muted by `.culled` and grows no element.
     const culledWhy = p.culled ? cullLabels().marker : "";
-    const rowTitle = [culledWhy, entry.activity?.why ?? "", childWhy, memberWhy, latestWhy]
+    const rowTitle = [culledWhy, entry.activity?.why ?? "", childWhy, memberWhy, threadWhy, latestWhy]
       .filter(Boolean)
       .join("\n");
     // The META LINE, under the title: status pill · ⚑ · ✋ · NEW · group chip.
@@ -1893,7 +1930,7 @@ function renderList(): void {
       // family's own depth it would read as a sibling of the page it belongs to.
       // A SERIES member (and its attachment child) also carries
       // `wiki-series-cont`, which runs the series' accent rail through the row.
-      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}${entry.latest ? " latest" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}${entry.thread ? " thread-row" : ""}${entry.latest ? " latest" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
@@ -4722,6 +4759,8 @@ document.body.addEventListener("click", (e) => {
   // one widget's handler cannot silence document-level listeners that have
   // nothing to do with it.
   if (target.closest && target.closest("[data-pin]")) return;
+  // The work thread's 📌 is the list's own listener's business too.
+  if (target.closest && target.closest("[data-thread-pin]")) return;
   // Same rule for the group chip and the section fold: both live inside a
   // `[data-relpath]` row, both belong to the list's own listener, and a click on
   // either means "show me what is folded here", never "open this page".
@@ -4940,6 +4979,18 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     const key = fold.getAttribute("data-fold-key");
     if (!key) return;
     openFolds = toggleFolded(WIKI, key);
+    renderList();
+    return;
+  }
+  // A work thread's 📌 (D7): the pinned card clears, any other pins its key.
+  // This one DOES re-render — the pinned card moves to the top of the section,
+  // so there is no single button to repaint in place (the ★'s rule).
+  const threadPinBtn = target.closest("[data-thread-pin]");
+  if (threadPinBtn) {
+    e.preventDefault();
+    const key = threadPinBtn.getAttribute("data-thread-pin");
+    if (!key) return;
+    threadPin = writeThreadPin(WIKI, threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key);
     renderList();
     return;
   }
@@ -8078,6 +8129,8 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // After the weights (it reads `workedGate`) and after `scannedAtMs` (so
   // `recencyNow()` is anchored).
   workedGate = workedGateFor(data.pages, activityWeights, recencyNow(), data.workedCoverage?.asOfMs);
+  // Shape-checked thread by thread in `openThreadCards` (`usableThreads`).
+  workFacts = data.work && typeof data.work === "object" && Array.isArray(data.work.threads) ? data.work : null;
   // NOT the "keep the last known value" degrade the three above use: this map is
   // the membership set a `?project=` link is judged against, and a stale one
   // would admit a project the listing on screen no longer has. An older server /

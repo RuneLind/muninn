@@ -14,7 +14,9 @@ import { describe, expect, test } from "bun:test";
 import {
   purgeRecentsKeys,
   readFolds,
+  readThreadPin,
   toggleFolded,
+  writeThreadPin,
   type RecentsPurgeStorage,
 } from "./wiki-recents-store.ts";
 import {
@@ -24,6 +26,7 @@ import {
   SECTION_META_FOLD_KEY,
   foldsKey,
   isFoldOpen,
+  threadPinKey,
 } from "./wiki-recents.ts";
 import { LAST_WIKI_KEY } from "./wiki-home.ts";
 
@@ -171,6 +174,23 @@ describe("the fold store", () => {
       g.localStorage = { getItem: () => null };
     }).not.toThrow();
     g.localStorage = before;
+  });
+
+  test("the work-thread pin: one normalized relPath per wiki, null clears it, a throwing store degrades to none", () => {
+    withStorage({}, (map) => {
+      expect(readThreadPin("mimir")).toBeNull();
+      expect(writeThreadPin("mimir", " Plans/A.mdx ")).toBe("plans/a.mdx");
+      expect(map.get(threadPinKey("mimir"))).toBe("plans/a.mdx");
+      expect(readThreadPin("mimir")).toBe("plans/a.mdx");
+      expect(readThreadPin("melosys")).toBeNull();
+      expect(writeThreadPin("mimir", null)).toBeNull();
+      expect(map.has(threadPinKey("mimir"))).toBe(false);
+    });
+    withStorage({ [threadPinKey("mimir")]: "plans/a.mdx" }, () => {
+      expect(readThreadPin("mimir")).toBeNull();
+      // The write's answer is what the rail renders from, whatever storage did.
+      expect(writeThreadPin("mimir", "plans/b.mdx")).toBe("plans/b.mdx");
+    }, { throws: true });
   });
 
   test("round-trips per wiki, and an untouched wiki holds nothing", () => {

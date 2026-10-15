@@ -6,8 +6,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { railInputFor, type RailViewer, type RailWikiFacts } from "./wiki-rail-input.ts";
-import { buildRail, railSectionsVisible, type RailInput } from "./wiki-recents.ts";
+import { openThreadCards, railInputFor, usableThreads, type RailViewer, type RailWikiFacts } from "./wiki-rail-input.ts";
+import { buildRail, railSectionsVisible, THREAD_CARDS_MAX, type RailInput } from "./wiki-recents.ts";
+import { threadScore, type WorkThread } from "../../../wiki/work-focus.ts";
 import {
   GROUP_FAMILIES_TOGGLE_KEY,
   groupSeries,
@@ -192,5 +193,146 @@ describe("railInputFor wiring", () => {
     const out = sameAsLegacy(WIRED, viewer);
     expect(out).toContain('"forcedOpen":true');
     expect(railJson(WIRED, base())).not.toContain('"forcedOpen":true');
+  });
+});
+
+// ── Work-thread cards (plan `muninn-wiki-work-threads`, PR 5, D6/D7/D19) ────
+const H = 3_600_000;
+/** A page with focus events `[hours ago, edits]`. */
+const wpage = (rel: string, focus: Array<[number, number]>, over: Partial<WikiListing> = {}): WikiListing =>
+  page({
+    relPath: rel,
+    gitCreatedMs: NOW - 30 * DAY,
+    gitTouchedMs: NOW - 20 * DAY,
+    work: {
+      sinceMs: NOW - 8 * DAY,
+      state: "F",
+      focusMs: NOW - focus[0]![0] * H,
+      events: focus.map(([h, e]) => [NOW - h * H, e, "focus"] as [number, number, "focus"]),
+    },
+    ...over,
+  });
+const thread = (key: string, pages: string[], touched: string[] = [], sessions = 1): WorkThread => ({
+  key,
+  pages,
+  touched,
+  sessions: Array.from({ length: sessions }, (_, i) => ({ id: `${key}#${i}`, provider: "claude", first: NOW - (i + 2) * H, last: NOW - (i + 1) * H, title: `s${i}` })),
+});
+const T_PAGES: WikiListing[] = [
+  wpage("plans/heavy.mdx", [[1, 40]], { title: "Heavy plan — the long tail" }),
+  wpage("plans/heavy-2.mdx", [[2, 3]]),
+  wpage("plans/recent.mdx", [[0.5, 2]], { gitCreatedMs: NOW - 2 * DAY }),
+  wpage("notes/mid.md", [[3, 10]]),
+  wpage("notes/x1.md", [[5, 1]]),
+  wpage("notes/x2.md", [[6, 1]]),
+  wpage("notes/x3.md", [[7, 1]]),
+  page({ relPath: "notes/touched.md", gitCreatedMs: NOW - 90 * DAY }),
+  page({ relPath: "notes/quiet.md", gitCreatedMs: NOW - DAY / 2 }),
+];
+const T_THREADS: WorkThread[] = [
+  thread("plans/recent.mdx", ["plans/recent.mdx"]),
+  thread("plans/heavy.mdx", ["plans/heavy.mdx", "plans/heavy-2.mdx"], ["notes/touched.md"], 3),
+  thread("notes/mid.md", ["notes/mid.md"]),
+  thread("notes/x1.md", ["notes/x1.md"]),
+  thread("notes/x2.md", ["notes/x2.md"]),
+  thread("notes/x3.md", ["notes/x3.md"]),
+];
+const cardsOf = (over: { filters?: WikiFilters; folds?: string[]; pin?: string | null; pages?: WikiListing[]; threads?: unknown } = {}) =>
+  openThreadCards((over.threads ?? T_THREADS) as WorkThread[], over.pages ?? T_PAGES, over.filters ?? INERT, over.folds ?? [], over.pin ?? null, NOW);
+
+describe("openThreadCards", () => {
+  test("D6 order at the anchored now (top raw + 0.3 × rest), at most five cards, the first open with the closed: spelling", () => {
+    const cards = cardsOf();
+    expect(cards.map((c) => c.key)).toEqual(["plans/heavy.mdx", "notes/mid.md", "plans/recent.mdx", "notes/x1.md", "notes/x2.md"]);
+    expect(cards.length).toBe(THREAD_CARDS_MAX);
+    expect(cards.map((c) => c.open)).toEqual([true, false, false, false, false]);
+    expect(cards[0]!.foldKey).toBe("thread:plans/heavy.mdx");
+    expect(cards[0]!.toggleKey).toBe("closed:thread:plans/heavy.mdx");
+    expect(cards[1]!.toggleKey).toBe("thread:notes/mid.md");
+    // The score is the shared `threadScore`, so the server's order and this one agree at asOf.
+    const byRel = (rel: string) => T_PAGES.find((p) => p.relPath === rel)?.work;
+    expect(cards[0]!.score).toBe(threadScore(T_THREADS[1]!, byRel, NOW));
+  });
+
+  test("the card: name cut at ' — ', focus by work term, touched as links, sessions, NEW inside the window", () => {
+    const [heavy] = cardsOf();
+    expect(heavy!.name).toBe("Heavy plan");
+    expect(heavy!.focus.map((p) => p.relPath)).toEqual(["plans/heavy.mdx", "plans/heavy-2.mdx"]);
+    expect(heavy!.touched.map((p) => p.relPath)).toEqual(["notes/touched.md"]);
+    expect(heavy!.sessions.length).toBe(3);
+    expect(heavy!.created).toEqual([]);
+    const recent = cardsOf().find((c) => c.key === "plans/recent.mdx")!;
+    expect(recent.created).toEqual(["plans/recent.mdx"]);
+  });
+
+  test("the pinned thread renders first and marked (D7); a pin on a page no thread focuses pins nothing", () => {
+    const pinned = cardsOf({ pin: "NOTES/X2.md" });
+    expect(pinned[0]!.key).toBe("notes/x2.md");
+    expect(pinned.map((c) => c.pinned)).toEqual([true, false, false, false, false]);
+    // First, so it is the default-open card now.
+    expect(pinned[0]!.open).toBe(true);
+    expect(pinned[0]!.toggleKey).toBe("closed:thread:notes/x2.md");
+    // Holding a page counts any focus page, not only the key.
+    expect(cardsOf({ pin: "plans/heavy-2.mdx" })[0]!.key).toBe("plans/heavy.mdx");
+    const none = cardsOf({ pin: "notes/touched.md" });
+    expect(none.map((c) => c.key)).toEqual(cardsOf().map((c) => c.key));
+    expect(none.some((c) => c.pinned)).toBe(false);
+  });
+
+  test("the fold store decides: a stored close on the first, a stored open on another", () => {
+    const cards = cardsOf({ folds: ["closed:thread:plans/heavy.mdx", "thread:notes/mid.md"] });
+    expect(cards.map((c) => c.open)).toEqual([false, true, false, false, false]);
+  });
+
+  test("a facet filters each card's rows and drops a card left empty; a query renders none", () => {
+    const notes = cardsOf({ filters: { ...INERT, folder: "notes" } });
+    expect(notes.map((c) => c.key)).toEqual(["notes/mid.md", "notes/x1.md", "notes/x2.md", "notes/x3.md"]);
+    const plans = cardsOf({ filters: { ...INERT, folder: "plans" } });
+    expect(plans[0]!.focus.map((p) => p.relPath)).toEqual(["plans/heavy.mdx", "plans/heavy-2.mdx"]);
+    expect(plans[0]!.touched).toEqual([]);
+    expect(cardsOf({ filters: { ...INERT, q: "heavy" } })).toEqual([]);
+  });
+
+  test("no threads, or a malformed payload, is no section (D11)", () => {
+    expect(cardsOf({ threads: [] })).toEqual([]);
+    expect(openThreadCards(null, T_PAGES, INERT, [], null, NOW)).toEqual([]);
+    expect(openThreadCards(undefined, T_PAGES, INERT, [], null, NOW)).toEqual([]);
+    expect(usableThreads([{ key: "x" }, { key: "y", pages: ["y"], touched: [], sessions: [{ id: "s" }] }, 3])).toEqual([
+      { key: "y", pages: ["y"], touched: [], sessions: [] },
+    ]);
+  });
+});
+
+describe("railInputFor — the work-thread lift and Activity agree (D19)", () => {
+  const WORK_WIKI: RailWikiFacts = {
+    allPages: T_PAGES,
+    projects: {},
+    activityWeights: { ...DEFAULT_ACTIVITY_WEIGHTS, rows: 4 },
+    workedGate: { open: true, candidates: 1, covered: 1, coverage: 1 },
+    work: { threads: T_THREADS },
+  };
+  const activityOf = (input: RailInput) => (input.activity ?? []).map((r) => r.page.relPath);
+
+  test("the open card's focus pages are out of the ranking before the cut, so Activity still holds its rows", () => {
+    const input = railInputFor(WORK_WIKI, base());
+    const open = input.threads!.filter((c) => c.open).flatMap((c) => c.focus.map((p) => p.relPath));
+    expect(open).toEqual(["plans/heavy.mdx", "plans/heavy-2.mdx"]);
+    expect(activityOf(input).some((rel) => open.includes(rel))).toBe(false);
+    expect(activityOf(input).length).toBe(4);
+    const rail = buildRail(input);
+    expect(rail.entries.filter((e) => e.kind === "row" && open.includes(e.page.relPath)).map((e) => e.section)).toEqual(["threads", "threads"]);
+  });
+
+  test("closing the card hands its pages back to Activity", () => {
+    const input = railInputFor(WORK_WIKI, base({ openFolds: ["closed:thread:plans/heavy.mdx"] }));
+    expect(input.threads!.every((c) => !c.open)).toBe(true);
+    expect(activityOf(input)).toContain("plans/heavy.mdx");
+  });
+
+  test("without work facts the input carries no threads and the rail is today's", () => {
+    const { work: _work, ...without } = WORK_WIKI;
+    const input = railInputFor(without, base());
+    expect(input.threads).toBeUndefined();
+    expect(JSON.stringify(buildRail(input))).toBe(JSON.stringify(buildRail(legacyRailInput(without, base()))));
   });
 });
