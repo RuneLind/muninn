@@ -99,6 +99,10 @@ const TOUCH_TOUCHED = "plans/touched.md";
  *  series member renders inside its closed fold). */
 const SOLO_FOCUSED = "notes/focused.md";
 const SOLO_TOUCHED = "notes/touched.md";
+/** A touched page with NO ledger summary row (a bash-only write): its chip is
+ *  the update fallback AND touched, so both marks must show. Outside `notes/`,
+ *  which the sort case reads. */
+const BARE_TOUCHED = "misc/bare-touched.md";
 const NOW = Date.now();
 const FOCUS_AT = NOW - 3 * 86_400_000;
 const TOUCH_AT = NOW - 2 * 3_600_000;
@@ -293,6 +297,7 @@ function workAnswer(root: string, url: URL): { status: number; body: string } | 
             sessionRow("touch", TOUCH_TOUCHED, 1, TOUCH_AT, false),
             sessionRow("solo-focus", SOLO_FOCUSED, 30, FOCUS_AT, true),
             sessionRow("solo-touch", SOLO_TOUCHED, 1, TOUCH_AT, false),
+            sessionRow("bare-touch", BARE_TOUCHED, 1, TOUCH_AT, false),
           ]
         : [];
     return { status: 200, body: JSON.stringify({ form: "sessions", root, sessions: rows, truncated: false }) };
@@ -427,6 +432,8 @@ test.beforeAll(async () => {
   await mkdir(path.join(touch, "notes"), { recursive: true });
   await writeFile(path.join(touch, SOLO_FOCUSED), fixture("Solo focused"), "utf8");
   await writeFile(path.join(touch, SOLO_TOUCHED), fixture("Solo touched"), "utf8");
+  await mkdir(path.join(touch, "misc"), { recursive: true });
+  await writeFile(path.join(touch, BARE_TOUCHED), fixture("Bare touched"), "utf8");
 
   for (const name of [BULK, FAIL, BIG, RAW]) {
     const root = await makeRoot(name);
@@ -740,6 +747,33 @@ test.describe("Wiki reader: worked-on recency", () => {
     expect(Number(await level(SOLO_FOCUSED))).toBeGreaterThan(Number(await level(SOLO_TOUCHED)));
   });
 
+  test("PR 4 — a touched page with no ledger row keeps BOTH marks: fallback and touched", async ({ page }) => {
+    await openReader(page, TOUCH);
+    await expect(page.locator("#wikiSort")).toHaveValue("worked");
+    const meta = page.locator(`.wiki-list-item[data-relpath="${BARE_TOUCHED}"] .wiki-list-meta`);
+    await expect(meta).toHaveClass(/\bfallback\b.*\btouched\b/);
+    // Two channels, so neither mark erases the other: the touch is the chip's
+    // dotted underline in its own ink, the fallback a muted dotted rule below.
+    const marks = await meta.evaluate((e) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--text-muted)";
+      document.body.appendChild(probe);
+      const muted = getComputedStyle(probe).color;
+      probe.remove();
+      const cs = getComputedStyle(e);
+      return {
+        underline: `${cs.textDecorationLine} ${cs.textDecorationStyle} ${cs.textDecorationThickness}`,
+        underlineInk: cs.textDecorationColor === cs.color,
+        rule: `${cs.borderBottomStyle} ${cs.borderBottomWidth}`,
+        ruleInk: cs.borderBottomColor === muted,
+      };
+    });
+    expect(marks).toEqual({ underline: "underline dotted 1.5px", underlineInk: true, rule: "dotted 1px", ruleInk: true });
+    // A touched chip WITH a ledger row carries the touch alone, no rule.
+    const solo = page.locator(`.wiki-list-item[data-relpath="${SOLO_TOUCHED}"] .wiki-list-meta`);
+    expect(await solo.evaluate((e) => getComputedStyle(e).borderBottomStyle)).toBe("none");
+  });
+
   test("PR 4 — the fold sorts a touched member at its position; the strip prints its touch, marked", async ({ page }) => {
     await openReader(page, TOUCH);
     await page.goto(`${BASE}/wiki?wiki=${TOUCH}&relPath=${encodeURIComponent(TOUCH_FOCUSED)}`);
@@ -755,6 +789,13 @@ test.describe("Wiki reader: worked-on recency", () => {
     ]);
     await expect(cells.nth(0)).toHaveClass(/\btouched\b/);
     await expect(cells.nth(1)).not.toHaveClass(/\btouched\b/);
+    // The same mark as the rail chip and Related work's age.
+    expect(
+      await cells.nth(0).evaluate((e) => {
+        const cs = getComputedStyle(e);
+        return `${cs.textDecorationLine} ${cs.textDecorationStyle} ${cs.textDecorationThickness}`;
+      }),
+    ).toBe("underline dotted 1.5px");
     // The article header of the touched page says the same.
     await page.goto(`${BASE}/wiki?wiki=${TOUCH}&relPath=${encodeURIComponent(TOUCH_TOUCHED)}`);
     await expect(page.locator("#wikiBreadcrumb .wiki-bc-touched")).toHaveText(

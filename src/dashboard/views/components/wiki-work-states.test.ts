@@ -20,7 +20,9 @@ import {
   type WorkedGate,
 } from "./wiki-activity-rank.ts";
 import {
+  localDay,
   pageAddedMs,
+  pageHeaderDates,
   workedAxisSource,
   workedChip,
   workedShownSignal,
@@ -243,14 +245,40 @@ describe("the state table (D22) — F, T and T0 per winning term", () => {
 
 describe("the state table (D22) — N and C", () => {
   test("N — no events: today's chain and today's score, byte for byte", () => {
-    const p = build({ rel: "n/page.md", createdH: 40 * 24, touchedH: 30, preH: 30 });
+    // A T-shaped page (position, touch) is the strongest test: shipped with any
+    // usable event it would sort on its position and carry a touched mark.
+    const p = build({ rel: "n/page.md", createdH: 40 * 24, touchedH: 30, preH: 30 * 24, write: { edits: 1, h: 5 } });
+    expect(p.work?.state).toBe("T");
     const bare = { ...p };
     delete (bare as { work?: unknown }).work;
-    // `other/busy.md` is the only page with events here; this one has none.
-    expect(p.work).toBeUndefined();
-    expect(workedSortMs(p, NOW)).toBe(workedSignal(bare, NOW).ms);
-    expect(workedShownSignal(p, NOW)).toEqual(workedSignal(bare, NOW));
-    expect(rankActivity([p], wide, NOW, OPEN)).toEqual(rankActivity([bare], wide, NOW, OPEN));
+    // The same page shipping a `work` with no event the client can use: empty,
+    // and every event malformed. Both must be state N, i.e. today's path.
+    const shapes: Array<[string, unknown[]]> = [
+      ["empty", []],
+      ["all invalid", [[ago(5), 1, "review"], [Number.NaN, 2, "touch"], [ago(5), -1, "touch"], [ago(5)]]],
+    ];
+    const header = (x: WikiListing) => pageHeaderDates(x, NOW, { ledger: true });
+    for (const [name, events] of shapes) {
+      const n = { ...p, work: { ...p.work!, events } } as WikiListing;
+      expect(workedSortMs(n, NOW), name).toBe(workedSortMs(bare, NOW));
+      expect(workedShownSignal(n, NOW), name).toEqual(workedShownSignal(bare, NOW));
+      expect(chipCls(n), name).toBe(chipCls(bare));
+      expect(header(n), name).toEqual(header(bare));
+      expect(scored(rankActivity([n], wide, NOW, OPEN)), name).toEqual(scored(rankActivity([bare], wide, NOW, OPEN)));
+    }
+    // …and the comparison can fail: with its events the page differs on each.
+    expect(workedSortMs(p, NOW)).not.toBe(workedSortMs(bare, NOW));
+    expect(chipCls(p)).not.toBe(chipCls(bare));
+  });
+
+  test("T with no ledger row: the header's no-session branch still carries the touched mark", () => {
+    // A bash-only touch: session events, but no `workedMs` summary row.
+    const p = build({ rel: "t/bash-only.md", createdH: 40 * 24, touchedH: 40 * 24, preGitH: 40 * 24, write: { edits: 1, h: 5 } });
+    delete (p as { workedMs?: number }).workedMs;
+    expect(p.work?.state).toBe("T");
+    const h = pageHeaderDates(p, NOW, { ledger: true });
+    expect(h.noSession).toBe(true);
+    expect(h.touched).toEqual({ ms: ago(5), label: localDay(new Date(ago(5))), pass: false });
   });
 
   test("C — a closed gate: today's score, while the worked key still moves per F/T/T0", () => {

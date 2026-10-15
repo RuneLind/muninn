@@ -1765,9 +1765,11 @@ function renderList(): void {
     // Where a worked-on date came from, marked on the chip: a session wrote it
     // (`worked`, and `changed-since` when a change landed after that session with
     // no ledger row) or no session did (`fallback`). An Activity "changed" row on
-    // a wiki whose worked gate is open is a fallback too when the ledger has no
-    // usable row for the page — the one case its update date stands in for a
-    // worked day.
+    // a wiki whose worked gate is open is a fallback too when the page has neither
+    // a usable ledger row nor usable session events — the one case its update
+    // date stands in for a worked day. A page WITH usable events takes the
+    // `events` kind (its T/T0 touch still marked) or no mark at all
+    // (`activityRowSource`).
     const source: WorkedSource | null =
       entry.activity && signal !== null
         ? activityRowSource(datePage, now, signal, dateSignal, entry.activity.kind, !!workedGate?.open)

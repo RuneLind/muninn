@@ -1431,17 +1431,22 @@ needs:
 | T0 — as T, no position | the page's creation (`pageAddedMs`) | today's chain, marked `touched` |
 | N — no events, or no memo | today's chain (`workedSignal`) | today's chain |
 
-The sort instant feeds the rail's Worked-on sort (`pageWorkedMs`), the fold and
+The sort instant feeds the rail's Worked-on sort (`workedSortMs`), the fold and
 Series order (`workedDateSignal`, day-floored; T and T0 take the worked rung at
 their sort instant), `groupMonths` and the find palette's rank. The shown instant
 feeds the row chip (`pageDateSignal(p, "worked")`), the article header
 (`workedSourceOf`), the reader strip's day cell (`workedShownDay`), the palette's
 `age:` filter and Related work's ages and Newest order — so Related ranks a
-touched neighbour by its touch. Ties on the sort instant break on the rung, then
-the shown instant, then relPath. A touched page sorts where it stood before the
-window (D15): falling back to today's chain put a link-touched page back on top,
+touched neighbour by its touch. Ties break differently per surface: the fold
+and Series (`byWorkedDateDesc`) break a tied day on the rung, then (both worked)
+the exact sort instant, then the shown instant, then relPath; the rail's
+`sortPages` sinks meta pages, orders by the sort instant and breaks a tie on the
+shown instant, then the display title (no rung). A touched page sorts where it
+stood before the window (D15): falling back to today's chain put a link-touched page back on top,
 and clamping to the window start lifted older pages. Its chip, strip cell and
-header carry a dotted `touched` mark whose hover names the touch, and the
+header carry a dotted `touched` mark whose hover names the touch (on a chip that
+is also a `fallback`, the fallback moves to a muted dotted bottom rule so both
+marks show), and the
 Worked-on listing's date column and the strip read out of order at that row — a
 stated exception to D9. `changedSince` compares the update against the page's
 newest write of ANY kind (shown instant, `workedMs`, every shipped event), so a
@@ -2099,7 +2104,7 @@ state: it is where the pointer is whenever a row is being read.
 
 **`Strongest | Newest`** sits in the header once there are two rows, remembered
 per wiki in `localStorage` (`muninn.wiki.related-order.v1:<wiki>`, every access
-in try/catch). `Newest` sorts on `pageWorkedMs` at one instant — the axis the
+in try/catch). `Newest` sorts on `workedSortMs` at one instant — the axis the
 age shows, so the ages always read in order, and deliberately not the
 `status_date`-first order the server's tie-break uses. Hop rows follow the same
 toggle. Switching it keeps every open ▸ open, with its answer.

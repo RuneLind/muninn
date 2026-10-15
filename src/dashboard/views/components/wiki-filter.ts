@@ -1302,7 +1302,8 @@ export function workedSortSignal(
   return { ms: chain.ms, worked: chain.kind === "worked" };
 }
 
-/** The Worked-on sort instant in epoch ms ({@link workedSortSignal}). */
+/** The Worked-on sort instant in epoch ms ({@link workedSortSignal}) — the
+ *  rail's "Worked on" key; 0 when the page has no signal at all. */
 export function workedSortMs(p: WikiRecencyFields, now: number = Date.now()): number {
   return workedSortSignal(p, now).ms;
 }
@@ -1322,18 +1323,6 @@ export function workedShownSignal(p: WikiRecencyFields, now: number = Date.now()
   if (!w || w.state === "F") return chain;
   const touched = touchOf(w, now);
   return touched ? { ...chain, touched } : chain;
-}
-
-/**
- * Worked-on recency in epoch ms — the sort key behind "Worked on": the SORT
- * instant ({@link workedSortSignal}), with the update signal as the fallback of
- * a page with no events. 0 when the page has no signal at all.
- *
- * `now` is optional for `pageTimeMs`'s reason: `sortPages` captures ONE instant
- * for the whole pass so the comparator stays pure across the 48h future boundary.
- */
-export function pageWorkedMs(p: WikiRecencyFields, now?: number): number {
-  return workedSortMs(p, now);
 }
 
 /** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
@@ -1512,7 +1501,7 @@ export function recencyKeyFor(
   mode: WikiRecencySort,
 ): (p: WikiListing, now?: number) => number {
   if (mode === "created") return pageAddedMs;
-  if (mode === "worked") return pageWorkedMs;
+  if (mode === "worked") return workedSortMs;
   return pageTimeMs;
 }
 

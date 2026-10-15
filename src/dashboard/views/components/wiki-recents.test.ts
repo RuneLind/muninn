@@ -2447,6 +2447,21 @@ describe("buildRail — series", () => {
     expect(shape(none.entries)).toEqual(shape(build({ activity: [act(C, 9), act(A, 8)] }).entries));
   });
 
+  test("D12 — the peek floor is 0.7 inclusive: 0.7 and 0.72 peek, 0.69 does not", () => {
+    // Literal terms, not WORK_PEEK_MIN: the case pins the tuned value itself.
+    // 0.72 is why the floor is not the plan's 0.75 (a real thread's second
+    // focus page scored 0.73 and dropped behind `+N more`).
+    const terms: Record<string, number> = { "plans/a.mdx": 0.7, "plans/b.mdx": 0.72, "blogs/c.mdx": 0.69 };
+    const m = build({ activity: [act(C, 9), act(A, 8)], workTerm: (p) => terms[p.relPath] ?? 0 });
+    expect(shape(m.entries)).toEqual([
+      "activity:[Alpha work]",
+      "activity:plans/b.mdx",
+      "activity:plans/a.mdx",
+      "activity:+1",
+      "all:plans/loose.mdx",
+    ]);
+  });
+
   test("D12 — the work peek stops at WORK_PEEK_MAX and never shows a lifted member", () => {
     const extra = Array.from({ length: 7 }, (_, i) => plan(`plans/w${i}.mdx`, { status_date: `2026-03-0${i + 1}` }));
     const all = [A, B, C, ...extra, LOOSE];

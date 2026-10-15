@@ -55,7 +55,7 @@ import {
   displayTitleOf,
   isMetaPage,
   pageDateSignal,
-  pageWorkedMs,
+  workedSortMs,
   relPathMatchesQuery,
   type WikiListing,
 } from "./wiki-filter.ts";
@@ -518,7 +518,7 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
     if (!inFindPool(p, q.retired)) continue;
     // Two instants (D22): the RANK reads the Worked-on sort instant — find what
     // you worked on — while `age:` reads the shown one, the page's literal age.
-    const ms = pageWorkedMs(p, opts.now);
+    const ms = workedSortMs(p, opts.now);
     const ageDays = ms > 0 ? Math.max(0, (opts.now - ms) / DAY_MS) : null;
     const shownMs = pageDateSignal(p, "worked", opts.now)?.ms ?? 0;
     const shownAgeDays = shownMs > 0 ? Math.max(0, (opts.now - shownMs) / DAY_MS) : null;

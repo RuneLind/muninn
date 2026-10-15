@@ -1351,6 +1351,32 @@ describe("rankActivity — session work (D5)", () => {
     expect(lag?.why ?? "").not.toMatch(/^changed /);
   });
 
+  test("the late-change bound: an update exactly 24 h after the newest event counts, 1 ms less does not", () => {
+    // A small session three days ago on an old page; the update is placed by ms.
+    const eventMs = hAgo(72);
+    const at = (gitTouchedMs: number) => ({
+      ...worked(page({ relPath: "notes/bound.md", createdDaysAgo: 60 }), { focus: [[72, 1]], preH: 30 * 24 }),
+      gitTouchedMs,
+    });
+    const late = (gitTouchedMs: number) => {
+      const row = rankActivity([at(gitTouchedMs)], wide, NOW, OPEN)[0]!;
+      return { late: /^changed /.test(row.why), ageMs: row.ageMs, worked: !!row.worked };
+    };
+    // Exactly the bound: the change term counts and wins (the work term is tiny).
+    expect(late(eventMs + DAY)).toEqual({ late: true, ageMs: NOW - (eventMs + DAY), worked: false });
+    // One ms short of it: commit lag, so the work term stands.
+    expect(late(eventMs + DAY - 1)).toEqual({ late: false, ageMs: NOW - eventMs, worked: true });
+    // 30 h after: well inside a 48 h bound, so a doubled bound would drop it.
+    expect(late(eventMs + 30 * H).late).toBe(true);
+  });
+
+  test("the work clause rounds a fractional edit sum to the nearest edit", () => {
+    // 2.6 weighted edits (an attachment counts at half weight) read as ≈3.
+    const p = worked(page({ relPath: "notes/half.md", createdDaysAgo: 100 }), { focus: [[5, 2.6]], preH: 50 * 24 });
+    expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toMatch(/focused in 1 session \(≈3 edits\)/);
+    expect(pageWorkBar(p, NOW)!.title).toMatch(/\(≈3 edits\)/);
+  });
+
   test("a page touched once and committed 40 minutes later stays below a focused page", () => {
     const touched = worked(page({ relPath: "notes/touched.md", createdDaysAgo: 100, updatedDaysAgo: (2 * 60 - 40) / (24 * 60) }), {
       touch: [[2, 1]],

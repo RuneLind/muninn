@@ -1015,8 +1015,11 @@ export async function renderWikiPage(opts?: {
     /* A TOUCHED date (D15): the page's in-window events are touches or pass
        markers, so the date is its real one, not focused work. A dotted
        underline in the chip's own ink — weight and colour stay the worked or
-       fallback reading; the hover names the touch. */
+       fallback reading; the hover names the touch. On a fallback chip both
+       marks would be one text-decoration, so the fallback moves to a muted
+       dotted bottom rule (the -1px margin keeps the row height). */
     .wiki-list-meta.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
+    .wiki-list-meta.fallback.touched { border-bottom: 1px dotted var(--text-muted); margin-bottom: -1px; }
 
     /* Neutral default so a custom type (no dedicated type-* rule) still shows a
        dot; the specific rules below override for the built-in types. */
@@ -1700,7 +1703,7 @@ export async function renderWikiPage(opts?: {
     .wiki-series-step.shipped { border-top-color: var(--status-success); }
     .wiki-series-step.shipped::before { background: var(--status-success); }
     .wiki-series-step-date { font-size: 10px; color: var(--text-muted); }
-    .wiki-series-step-date.touched { text-decoration: underline dotted currentColor; text-underline-offset: 2px; }
+    .wiki-series-step-date.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
     .wiki-series-step-title {
       font-size: 11.5px; color: var(--text-secondary); line-height: 1.3;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -2733,6 +2736,8 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     .wiki-rel-meta .wiki-rel-age.fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
     .wiki-rel-meta .wiki-rel-age.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
     .wiki-rel-meta .wiki-rel-age.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
+    /* Both marks on one age: the fallback moves to a rule, as on the rail chip. */
+    .wiki-rel-meta .wiki-rel-age.fallback.touched { border-bottom: 1px dotted var(--text-muted); margin-bottom: -1px; }
     .wiki-rel-meta .wiki-rel-series {
       font-size: 10px; color: var(--text-soft); border: 1px solid var(--border-secondary);
       border-radius: 8px; padding: 0 6px; max-width: 16ch;

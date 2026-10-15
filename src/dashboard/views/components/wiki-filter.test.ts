@@ -24,7 +24,7 @@ import {
   isRecencySort,
   localDay,
   pageDateSignal,
-  pageWorkedMs,
+  workedSortMs,
   recencyKeyFor,
   recencyKindFor,
   displayTitleOf,
@@ -1514,22 +1514,22 @@ const DAY = 86_400_000;
 /** A fixed "now" so no assertion here is a fact about the clock. */
 const NOW = Date.parse("2026-09-22T12:00:00Z");
 
-test("pageWorkedMs takes the worked date, else the update signal", () => {
+test("workedSortMs takes the worked date, else the update signal", () => {
   const worked = NOW - 3 * DAY;
   // Covered: the ledger's own instant wins outright.
-  expect(pageWorkedMs(page({ workedMs: worked, updated: "2026-09-21" }), NOW)).toBe(worked);
+  expect(workedSortMs(page({ workedMs: worked, updated: "2026-09-21" }), NOW)).toBe(worked);
   // Uncovered: the page still sorts somewhere honest rather than as undated.
-  expect(pageWorkedMs(page({ updated: "2026-09-20" }), NOW)).toBe(Date.parse("2026-09-20"));
+  expect(workedSortMs(page({ updated: "2026-09-20" }), NOW)).toBe(Date.parse("2026-09-20"));
   // No signal at all is 0, exactly as `pageTimeMs` reports it.
-  expect(pageWorkedMs(page({}), NOW)).toBe(0);
+  expect(workedSortMs(page({}), NOW)).toBe(0);
   // A zero/NaN/negative stamp is not a date — fall back, never sort on it.
-  expect(pageWorkedMs(page({ workedMs: 0, updated: "2026-09-20" }), NOW)).toBe(
+  expect(workedSortMs(page({ workedMs: 0, updated: "2026-09-20" }), NOW)).toBe(
     Date.parse("2026-09-20"),
   );
   // The future guard applies here too: the ledger's stamps come from whatever
   // clock wrote the transcript.
   expect(
-    pageWorkedMs(page({ workedMs: NOW + 10 * DAY, updated: "2026-09-20" }), NOW),
+    workedSortMs(page({ workedMs: NOW + 10 * DAY, updated: "2026-09-20" }), NOW),
   ).toBe(Date.parse("2026-09-20"));
 });
 
@@ -1588,7 +1588,7 @@ test("isRecencySort names the three date modes and nothing else", () => {
 
 test("recencyKeyFor answers the same key each mode sorts on", () => {
   const p = page({ workedMs: NOW - 5 * DAY, created: "2026-01-01", updated: "2026-09-20" });
-  expect(recencyKeyFor("worked")(p, NOW)).toBe(pageWorkedMs(p, NOW));
+  expect(recencyKeyFor("worked")(p, NOW)).toBe(workedSortMs(p, NOW));
   expect(recencyKeyFor("updated")(p, NOW)).toBe(pageTimeMs(p, NOW));
   expect(recencyKeyFor("created")(p, NOW)).toBe(pageAddedMs(p, NOW));
 });
@@ -1819,7 +1819,7 @@ test("Worked on: a touched-only page with a fresh write sorts below a focused pa
   const bare = (p: WikiListing) => ({ ...p, work: undefined });
   expect(sortPages([bare(touched), bare(focused)], "worked", W_NOW).map((p) => p.relPath)).toEqual(["touched.md", "focused.md"]);
   // The sort key IS the pre-touch position; the shown date is the touch.
-  expect(pageWorkedMs(touched, W_NOW)).toBe(wAgo(10 * 24));
+  expect(workedSortMs(touched, W_NOW)).toBe(wAgo(10 * 24));
   expect(pageDateSignal(touched, "worked", W_NOW)?.ms).toBe(wAgo(1));
 });
 
@@ -1827,7 +1827,7 @@ test("Worked on: pages tied on the sort instant order by their shown instant, no
   // Same pre-touch position; "Aardvark" was touched EARLIER than "Zebra".
   const a = withWork({ name: "a", title: "Aardvark", relPath: "a.md" }, [[5, 1, "touch"]], 10 * 24);
   const z = withWork({ name: "z", title: "Zebra", relPath: "z.md" }, [[2, 1, "touch"]], 10 * 24);
-  expect(pageWorkedMs(a, W_NOW)).toBe(pageWorkedMs(z, W_NOW));
+  expect(workedSortMs(a, W_NOW)).toBe(workedSortMs(z, W_NOW));
   expect(sortPages([a, z], "worked", W_NOW).map((p) => p.title)).toEqual(["Zebra", "Aardvark"]);
 });
 
@@ -1866,7 +1866,7 @@ test("Worked on: changedSince compares the update against the newest write of AN
 
 test("Worked on: no work facts ⇒ the sort, the shown date and the chip are today's", () => {
   const p = page({ relPath: "n.md", workedMs: wAgo(30), gitCreatedMs: wAgo(900), gitTouchedMs: wAgo(40) });
-  expect(pageWorkedMs(p, W_NOW)).toBe(wAgo(30));
+  expect(workedSortMs(p, W_NOW)).toBe(wAgo(30));
   expect(pageDateSignal(p, "worked", W_NOW)).toEqual({ ms: wAgo(30), label: localDay(new Date(wAgo(30))), kind: "worked" });
   expect(workedSourceOf(p, W_NOW)).toEqual({ kind: "worked", worked: localDay(new Date(wAgo(30))) });
 });
