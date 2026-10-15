@@ -37,7 +37,7 @@ import {
   type RailThreadCard,
 } from "./wiki-recents.ts";
 import { normalizeRel } from "./wiki-nav.ts";
-import { threadScore, WORK_WINDOW_MS, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
+import { isWorkHub, threadScore, WORK_WINDOW_MS, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
 
 /** What the wiki's listing says — the same for every viewer. */
 export interface RailWikiFacts {
@@ -107,15 +107,20 @@ export function threadName(title: string): string {
   return cut > 0 ? title.slice(0, cut) : title;
 }
 
-/** The page the 📌 stores for a thread (D7): its NEWEST focus page — the
- *  highest `work.focusMs` — because the server drops a page from `pages` once
- *  its last focus event leaves the window, so the newest is the last to go.
- *  The thread's `key` is its EARLIEST focus page, the first to go. */
+/** The page the 📌 stores for a thread (D7): its NEWEST non-hub focus page —
+ *  the highest `work.focusMs` — because the server drops a page from `pages`
+ *  once its last focus event leaves the window, so the newest is the last to
+ *  go. The thread's `key` is its EARLIEST focus page, the first to go. A hub is
+ *  never the anchor: D16 moves a hub's focus row to whichever thread works it
+ *  most, so a pin on it would follow the hub into another live thread. A thread
+ *  holding hubs only anchors on its key, as the server keys it. */
 function newestFocusPage(t: WorkThread, byRel: ReadonlyMap<string, WikiListing>): string {
   let best: { rel: string; ms: number } | null = null;
   for (const raw of t.pages) {
     const rel = normalizeRel(raw);
-    const ms = byRel.get(rel)?.work?.focusMs ?? -Infinity;
+    const p = byRel.get(rel);
+    if (isWorkHub(p?.backlinkCount ?? 0)) continue;
+    const ms = p?.work?.focusMs ?? -Infinity;
     if (!best || ms > best.ms || (ms === best.ms && rel < best.rel)) best = { rel, ms };
   }
   return best ? best.rel : normalizeRel(t.key);

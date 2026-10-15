@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { openThreadCards, railInputFor, threadPinAnchor, usableThreads, type RailViewer, type RailWikiFacts } from "./wiki-rail-input.ts";
 import { threadCardHeaderHtml } from "./wiki-thread-view.ts";
 import { buildRail, railSectionsVisible, THREAD_CARDS_MAX, type RailInput } from "./wiki-recents.ts";
-import { threadScore, type WorkThread } from "../../../wiki/work-focus.ts";
+import { computeWorkFocus, threadScore, WORK_HUB_BACKLINKS, type WorkSession, type WorkThread } from "../../../wiki/work-focus.ts";
 import {
   GROUP_FAMILIES_TOGGLE_KEY,
   groupSeries,
@@ -482,5 +482,67 @@ describe("a card's touched line never repeats one of its focus rows", () => {
     const [card] = cardsOf({ threads: [thread("notes/f.md", ["notes/f.md"], ["notes/f.md", "notes/t.md"])], pages: [F, T] });
     expect(card!.focus.map((p) => p.relPath)).toEqual(["notes/f.md"]);
     expect(card!.touched.map((p) => p.relPath)).toEqual(["notes/t.md"]);
+  });
+});
+
+describe("the pin anchor is never a hub page (D7 × D16)", () => {
+  // Built through `computeWorkFocus`, so the threads and each page's `work` are
+  // what the server ships. Day 1: one session focuses the hub and `p/a.mdx`,
+  // the hub last. Day 2: a second session works the hub hard; D16 hands the
+  // hub's focus row to that session's thread while thread `p/a.mdx` lives on.
+  const HUB = "flows/hub.mdx";
+  const A = "p/a.mdx";
+  const T1 = NOW;
+  const T2 = NOW + DAY;
+  const at = (t: number, h: number) => t - h * H;
+  const sess = (id: string, named: string[], files: Array<[string, number, number]>): WorkSession => ({
+    id,
+    provider: "claude",
+    title: `session ${id}`,
+    first: Math.min(...files.map((f) => f[2])) - 60_000,
+    last: Math.max(...files.map((f) => f[2])),
+    bulk: false,
+    text: { from: "prompt", paths: named, links: [], files: [] },
+    files: files.map(([p, edits, lastMs]) => ({ p, edits, firstMs: lastMs - 60_000, lastMs })),
+  });
+  const S1 = sess("s1", [HUB, A], [[A, 5, at(T1, 3)], [HUB, 5, at(T1, 1)]]);
+  const S2 = sess("s2", [HUB], [[HUB, 60, at(T2, 1)]]);
+  const BACKLINKS: Record<string, number> = { [HUB]: WORK_HUB_BACKLINKS + 5, [A]: 0 };
+  const world = (asOf: number, sessions: WorkSession[]) => {
+    const r = computeWorkFocus({
+      sessions,
+      pre: new Map(),
+      sinceMs: asOf - 8 * DAY,
+      asOfMs: asOf,
+      pages: [HUB, A].map((relPath) => ({ relPath, backlinks: BACKLINKS[relPath]!, gitCreatedMs: asOf - 40 * DAY })),
+      identity: { roots: ["/w/x"], name: "x" },
+      otherRoots: [],
+    });
+    const pages = [HUB, A].map((rel) => {
+      const work = r.pages.get(rel);
+      return page({ relPath: rel, backlinkCount: BACKLINKS[rel]!, gitCreatedMs: asOf - 40 * DAY, ...(work ? { work } : {}) });
+    });
+    return { threads: r.threads, pages };
+  };
+
+  test("the 📌 stores the thread's newest NON-hub focus page, so the pin stays when the hub moves to another thread", () => {
+    const day1 = world(T1, [S1]);
+    expect(day1.threads.map((t) => [t.key, [...t.pages].sort()])).toEqual([[A, [HUB, A].sort()]]);
+    const [card] = openThreadCards(day1.threads, day1.pages, INERT, [], null, T1);
+    expect(card!.pinAnchor).toBe(A);
+    // The renderer's re-anchor does not move a non-hub pin onto the hub either.
+    expect(threadPinAnchor(day1.threads, day1.pages, A)).toBe(A);
+
+    const day2 = world(T2, [S1, S2]);
+    // The scenario holds: the hub now has its own thread, and `p/a.mdx` lives on.
+    expect(day2.threads.map((t) => [t.key, t.pages]).sort()).toEqual([[HUB, [HUB]], [A, [A]]].sort());
+    const cards = openThreadCards(day2.threads, day2.pages, INERT, [], card!.pinAnchor, T2);
+    expect(cards.find((c) => c.pinned)?.key).toBe(A);
+    expect(threadPinAnchor(day2.threads, day2.pages, card!.pinAnchor)).toBe(A);
+  });
+
+  test("a thread holding hubs only anchors on its key", () => {
+    const day2 = world(T2, [S1, S2]);
+    expect(threadPinAnchor(day2.threads, day2.pages, HUB)).toBe(HUB);
   });
 });

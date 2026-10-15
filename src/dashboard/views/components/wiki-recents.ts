@@ -129,6 +129,26 @@ export function parseThreadPin(raw: string | null | undefined): string | null {
   return v || null;
 }
 
+/**
+ * A re-anchor across tabs (D7): the pin each tab keeps in memory goes stale the
+ * moment another tab pins or unpins, and the rail re-anchors with no user
+ * action. So the write is a compare-and-set: it happens only while storage
+ * still holds the value this tab holds (`held`). Otherwise the tab adopts what
+ * storage holds and writes nothing. `stored` is `undefined` when storage
+ * cannot be read: no other tab's choice is visible there, so the in-memory pin
+ * moves and the write stays best-effort. No `anchor`, or one equal to `held`,
+ * moves nothing.
+ */
+export function threadPinReanchor(
+  stored: string | null | undefined,
+  held: string | null,
+  anchor: string | null,
+): { pin: string | null; write: boolean } {
+  if (!anchor || anchor === held) return { pin: held, write: false };
+  if (stored !== undefined && stored !== held) return { pin: stored, write: false };
+  return { pin: anchor, write: true };
+}
+
 /** Related work's two orders. `strongest` is the server's; `newest` re-sorts on
  *  the worked-on axis the row's age shows. */
 export type RelatedOrder = "strongest" | "newest";

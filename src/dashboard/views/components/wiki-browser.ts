@@ -143,6 +143,7 @@ import {
   isPinnedRelPath,
   pairedByWhy,
   parseRelatedOrder,
+  threadPinKey,
   type RailEntry,
   type RelatedOrder,
 } from "./wiki-recents.ts";
@@ -178,6 +179,7 @@ import {
   toggleFolded,
   togglePinned,
   readThreadPin,
+  reanchorThreadPin,
   writeRelatedOrder,
   writeSort,
   writeThreadPin,
@@ -1365,7 +1367,8 @@ let pins: string[] = readPins(WIKI);
 let openFolds: string[] = readFolds(WIKI);
 
 /** The reader's pinned work thread on this wiki (D7) — one page relPath, read
- *  once at boot and kept in step by the 📌 writer, like `pins`. */
+ *  once at boot and kept in step by the 📌 writer, like `pins`, and by the
+ *  `storage` listener when another tab pins or unpins. */
 let threadPin: string | null = readThreadPin(WIKI);
 
 /** The work threads off the last listing (`work`), or null: an older server, a
@@ -1564,10 +1567,11 @@ function renderList(): void {
   // The rail's POOL — `#wikiCount`'s denominator below; `railInputFor` derives
   // the same pool for its own rows.
   const pool = railPool(allPages, showRetired(), filters.q);
-  // D7: keep the thread pin on the pinned thread's NEWEST focus page, so the pin
-  // survives the thread's oldest pages leaving the window (`threadPinAnchor`).
-  const pinAnchor = threadPinAnchor(workFacts?.threads, allPages, threadPin);
-  if (pinAnchor && pinAnchor !== threadPin) threadPin = writeThreadPin(WIKI, pinAnchor);
+  // D7: keep the thread pin on the pinned thread's NEWEST non-hub focus page, so
+  // the pin survives the thread's oldest pages leaving the window
+  // (`threadPinAnchor`). The write is a compare-and-set against storage, so a
+  // tab rendering a stale pin never undoes another tab's choice.
+  threadPin = reanchorThreadPin(WIKI, threadPin, threadPinAnchor(workFacts?.threads, allPages, threadPin));
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
   const rail = buildRail(
@@ -8389,6 +8393,17 @@ function maybeRefetchPages(refresh: boolean): void {
   if (!shouldRefetch(pagesRefresh, Date.now())) return;
   requestPages({ refresh });
 }
+
+// Another tab pinned or unpinned a work thread on this wiki (D7): adopt its
+// choice and repaint, so this tab neither shows nor re-anchors a stale pin.
+// `key === null` is a `localStorage.clear()`.
+window.addEventListener("storage", (e) => {
+  if (e.key !== null && e.key !== threadPinKey(WIKI)) return;
+  const next = readThreadPin(WIKI);
+  if (next === threadPin) return;
+  threadPin = next;
+  if (pagesRefresh.bootRendered) renderList();
+});
 
 window.addEventListener("focus", () => maybeRefetchPages(true));
 document.addEventListener("visibilitychange", () => {

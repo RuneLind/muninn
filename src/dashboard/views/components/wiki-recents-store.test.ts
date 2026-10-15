@@ -15,6 +15,7 @@ import {
   purgeRecentsKeys,
   readFolds,
   readThreadPin,
+  reanchorThreadPin,
   toggleFolded,
   writeThreadPin,
   type RecentsPurgeStorage,
@@ -27,6 +28,7 @@ import {
   foldsKey,
   isFoldOpen,
   threadPinKey,
+  threadPinReanchor,
 } from "./wiki-recents.ts";
 import { LAST_WIKI_KEY } from "./wiki-home.ts";
 
@@ -191,6 +193,42 @@ describe("the fold store", () => {
       // The write's answer is what the rail renders from, whatever storage did.
       expect(writeThreadPin("mimir", "plans/b.mdx")).toBe("plans/b.mdx");
     }, { throws: true });
+  });
+
+  test("the re-anchor write is a compare-and-set: a tab holding a stale pin never undoes another tab's unpin or repin", () => {
+    const KEY = threadPinKey("mimir");
+    withStorage({ [KEY]: "plans/old.mdx" }, (map) => {
+      // Tabs A and B both booted with plans/old.mdx. A unpins.
+      expect(writeThreadPin("mimir", null)).toBeNull();
+      // B renders from its stale in-memory pin, which re-anchors to plans/new.mdx:
+      // storage no longer holds what B read, so B writes nothing and adopts it.
+      expect(reanchorThreadPin("mimir", "plans/old.mdx", "plans/new.mdx")).toBeNull();
+      expect(map.has(KEY)).toBe(false);
+      // A repins another thread; B, still stale, adopts that choice.
+      writeThreadPin("mimir", "notes/y.md");
+      expect(reanchorThreadPin("mimir", "plans/old.mdx", "plans/new.mdx")).toBe("notes/y.md");
+      expect(map.get(KEY)).toBe("notes/y.md");
+      // A tab whose pin storage still holds re-anchors it.
+      expect(reanchorThreadPin("mimir", "notes/y.md", "notes/z.md")).toBe("notes/z.md");
+      expect(map.get(KEY)).toBe("notes/z.md");
+      // Nothing to move: no read decides anything, nothing is written.
+      expect(reanchorThreadPin("mimir", "notes/q.md", null)).toBe("notes/q.md");
+      expect(reanchorThreadPin("mimir", "notes/q.md", "notes/q.md")).toBe("notes/q.md");
+      expect(map.get(KEY)).toBe("notes/z.md");
+    });
+    // Storage that throws holds no other tab's choice: the in-memory pin moves.
+    withStorage({}, () => {
+      expect(reanchorThreadPin("mimir", "plans/old.mdx", "plans/new.mdx")).toBe("plans/new.mdx");
+    }, { throws: true });
+  });
+
+  test("the decision table: stored value, in-memory value and computed anchor → the pin and whether to write", () => {
+    expect(threadPinReanchor("a.md", "a.md", "b.md")).toEqual({ pin: "b.md", write: true });
+    expect(threadPinReanchor(null, "a.md", "b.md")).toEqual({ pin: null, write: false });
+    expect(threadPinReanchor("c.md", "a.md", "b.md")).toEqual({ pin: "c.md", write: false });
+    expect(threadPinReanchor(undefined, "a.md", "b.md")).toEqual({ pin: "b.md", write: true });
+    expect(threadPinReanchor("c.md", "a.md", null)).toEqual({ pin: "a.md", write: false });
+    expect(threadPinReanchor("c.md", "a.md", "a.md")).toEqual({ pin: "a.md", write: false });
   });
 
   test("round-trips per wiki, and an untouched wiki holds nothing", () => {

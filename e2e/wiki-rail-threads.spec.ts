@@ -1,8 +1,11 @@
 /**
  * /wiki rail — the **Work threads** section (plan `muninn-wiki-work-threads`,
  * PR 5): the cards above Activity, the lift out of Activity and the series
- * ghost (D13), the 📌 surviving a reload (D7), no section when the ledger
- * 404s the sessions form (D11), both themes, and the 260 px rail.
+ * ghost (D13), the 📌 surviving a reload (D7), the renderer's re-anchor write
+ * as the pinned thread grows and ages (D7), two tabs sharing the pin (D7), no
+ * section when the ledger 404s the sessions form (D11), both themes, and the
+ * 260 px rail. The re-anchor stages rewrite the listing in the browser
+ * (`page.route`), since the server's memo cannot be moved forward in time.
  *
  * A browser is needed because the chain is `/api/files?sessions=1` → the
  * work-sessions memo → `work` on the listing → `setPagesData` → `railInputFor`
@@ -39,6 +42,7 @@ import { e2ePort } from "./ports.ts";
 import { paintedContrast } from "./contrast.ts";
 import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { threadPinKey } from "../src/dashboard/views/components/wiki-recents.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-rail-threads");
 const LEDGER_PORT = e2ePort("wiki-rail-threads/ledger");
@@ -197,6 +201,50 @@ async function openReader(page: Page, wiki: string): Promise<void> {
   await expect(sec(page, "activity")).toHaveCount(1);
 }
 
+/** The listing the reader is served, one stage further on (D7): `grown` —
+ *  alpha's thread gains alpha-notes as its newest focus page; `aged` — then
+ *  alpha's own last focus leaves the window, so the server drops it from the
+ *  thread, which lives on. Built from the real answer. */
+type Stage = "real" | "grown" | "aged";
+interface ListingBody {
+  pages: Array<{ relPath: string; work?: { focusMs?: number; events: unknown[] } }>;
+  work?: { threads: Array<{ key: string; pages: string[]; touched: string[] }> };
+}
+function staged(body: ListingBody, stage: Stage): ListingBody {
+  if (stage === "real") return body;
+  const alpha = body.pages.find((p) => p.relPath === ALPHA)!;
+  const notes = body.pages.find((p) => p.relPath === ALPHA_NOTES)!;
+  const newest = alpha.work!.focusMs! + 30 * 60_000;
+  notes.work = { ...alpha.work!, focusMs: newest, events: [[newest, 5, "focus"]] };
+  const t = body.work!.threads.find((x) => x.pages.includes(ALPHA))!;
+  t.pages = [...t.pages, ALPHA_NOTES];
+  t.touched = t.touched.filter((p) => p !== ALPHA_NOTES);
+  if (stage === "aged") {
+    delete alpha.work;
+    t.pages = t.pages.filter((p) => p !== ALPHA);
+  }
+  return body;
+}
+
+/** Serve `page` the THREADS listing at a stage the test moves. */
+async function stageListings(page: Page): Promise<{ set: (s: Stage) => void }> {
+  let stage: Stage = "real";
+  await page.route(
+    (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === THREADS,
+    async (route) => {
+      const res = await route.fetch();
+      await route.fulfill({ response: res, json: staged((await res.json()) as ListingBody, stage) });
+    },
+  );
+  return { set: (s) => (stage = s) };
+}
+
+/** A card by its name: the alpha thread is keyed on its earliest focus page. */
+const card = (page: Page, name: string) =>
+  page.locator(".wiki-thread-card").filter({ has: page.locator(".wiki-thread-name", { hasText: name }) });
+const ALPHA_CARD = "Alpha work";
+const storedPin = (page: Page) => page.evaluate((k) => localStorage.getItem(k), threadPinKey(THREADS));
+
 test.beforeAll(async () => {
   await makeRoot(THREADS);
   await makeRoot(PLAIN);
@@ -326,6 +374,70 @@ test.describe("Wiki rail: Work threads", () => {
     await cards(page).nth(0).locator(".wiki-thread-pin").click();
     await expect(cards(page).nth(0).locator(".wiki-thread-name")).toHaveText("Alpha work");
     expect(await page.evaluate((k) => localStorage.getItem(k), threadPinKey(THREADS))).toBeNull();
+  });
+
+  test("the renderer re-anchors the pin as its thread grows and stores it, so the pin outlives the page it was set on (D7)", async ({
+    page,
+  }) => {
+    const stage = await stageListings(page);
+    await openReader(page, THREADS);
+    await card(page, ALPHA_CARD).locator(".wiki-thread-pin").click();
+    expect(await storedPin(page)).toBe(ALPHA);
+    // The thread gains a newer focus page: the render moves the pin there and
+    // writes it, with no click.
+    stage.set("grown");
+    await page.reload();
+    await expect(card(page, ALPHA_CARD).locator(".wiki-thread-pin")).toHaveAttribute("data-thread-pin", ALPHA_NOTES);
+    await expect.poll(() => storedPin(page)).toBe(ALPHA_NOTES);
+    await expect(cards(page).nth(0).locator(".wiki-thread-name")).toHaveText(ALPHA_CARD);
+    await expect(cards(page).nth(0)).toHaveClass(/\bpinned\b/);
+    // The page the pin was set on ages out of the thread, which lives on: still
+    // pinned, from the stored anchor alone.
+    stage.set("aged");
+    await page.reload();
+    // (The card is renamed: its top page is gone.)
+    await expect(cards(page).nth(0)).toHaveClass(/\bpinned\b/);
+    await expect(cards(page).nth(0).locator(".wiki-thread-pin")).toHaveAttribute("data-thread-pin", ALPHA_NOTES);
+    const rows = await relsIn(page, "threads");
+    expect(rows).toEqual(expect.arrayContaining([ALPHA_TWO, ALPHA_NOTES]));
+    expect(rows).not.toContain(ALPHA);
+    expect(await storedPin(page)).toBe(ALPHA_NOTES);
+  });
+
+  test("across tabs: a tab adopts another tab's unpin and repin, and never writes its stale pin over one (D7)", async ({
+    context,
+  }) => {
+    const a = await context.newPage();
+    const b = await context.newPage();
+    const stageB = await stageListings(b);
+    await openReader(a, THREADS);
+    await card(a, ALPHA_CARD).locator(".wiki-thread-pin").click();
+    expect(await storedPin(a)).toBe(ALPHA);
+    await b.clock.install();
+    await openReader(b, THREADS);
+    await expect(card(b, ALPHA_CARD)).toHaveClass(/\bpinned\b/);
+
+    // A unpins: B repaints from the storage event, with no reload or refetch.
+    await card(a, ALPHA_CARD).locator(".wiki-thread-pin").click();
+    expect(await storedPin(a)).toBeNull();
+    await expect(card(b, ALPHA_CARD)).not.toHaveClass(/\bpinned\b/);
+    // A repins: B follows.
+    await card(a, ALPHA_CARD).locator(".wiki-thread-pin").click();
+    await expect(card(b, ALPHA_CARD)).toHaveClass(/\bpinned\b/);
+
+    // The race the event cannot close: storage changes and B renders before it
+    // hears. A tab's own write fires no storage event in that tab, so clearing
+    // the key from B leaves B holding its stale pin. B then refetches a listing
+    // where that pin would re-anchor (the thread grew): it must write nothing.
+    await b.evaluate((k) => localStorage.removeItem(k), threadPinKey(THREADS));
+    stageB.set("grown");
+    const refetched = b.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes(`wiki=${THREADS}`));
+    await b.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await b.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refetched;
+    await expect(card(b, ALPHA_CARD).locator(".wiki-thread-pin")).toHaveAttribute("data-thread-pin", ALPHA_NOTES);
+    await expect(card(b, ALPHA_CARD)).not.toHaveClass(/\bpinned\b/);
+    expect(await storedPin(b)).toBeNull();
   });
 
   test("keyboard: Enter on a card's fold, a 📌 and a group fold leaves focus on the same control", async ({ page }) => {

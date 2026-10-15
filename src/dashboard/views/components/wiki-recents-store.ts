@@ -30,6 +30,7 @@ import {
   serializeRelPathList,
   sortKey,
   threadPinKey,
+  threadPinReanchor,
   togglePin,
   toggleFold,
 } from "./wiki-recents.ts";
@@ -153,6 +154,21 @@ export function writeThreadPin(wiki: string, relPath: string | null): string | n
     /* best-effort */
   }
   return next;
+}
+
+/** Re-anchor this tab's pin (`threadPinReanchor`): storage is read right
+ *  before the write, and the write happens only if storage still holds `held`.
+ *  Returns the pin the rail should render from. */
+export function reanchorThreadPin(wiki: string, held: string | null, anchor: string | null): string | null {
+  if (!anchor || anchor === held) return held;
+  let stored: string | null | undefined;
+  try {
+    stored = parseThreadPin(localStorage.getItem(threadPinKey(wiki)));
+  } catch {
+    stored = undefined;
+  }
+  const next = threadPinReanchor(stored, held, anchor);
+  return next.write ? writeThreadPin(wiki, next.pin) : next.pin;
 }
 
 /**
