@@ -1459,6 +1459,13 @@ describe("the worked comparator — ORDER moves, IDENTITY does not", () => {
     expect(
       [uncovered, morning, evening].sort((x, y) => byWorkedDateDesc(x, y, NOW)).map((p) => p.relPath),
     ).toEqual(["z.mdx", "a.mdx", "0.mdx"]);
+    // Two uncovered members never read an instant: the tie stays on relPath.
+    const early = page({ relPath: "a.mdx", status_date: "2026-09-21", mtimeMs: at(8) });
+    const late = page({ relPath: "z.mdx", status_date: "2026-09-21", mtimeMs: at(20) });
+    expect([late, early].sort((x, y) => byWorkedDateDesc(x, y, NOW)).map((p) => p.relPath)).toEqual([
+      "a.mdx",
+      "z.mdx",
+    ]);
   });
 
   // ── Acceptance 7, half one: a network field never decides a write ──────────
