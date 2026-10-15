@@ -89,9 +89,9 @@ describe("threadInstantLabel across a DST change (Europe/Oslo)", () => {
 });
 
 describe("threadMetaLine", () => {
-  test("sessions · span · ✋, the ✋ only where it is personal and non-zero", () => {
-    expect(threadMetaLine(card(), NOW, true)).toBe("2 sessions · mon 12.10 15:04 → yesterday 21:26 · ✋ 18");
-    expect(threadMetaLine(card(), NOW, false)).toBe("2 sessions · mon 12.10 15:04 → yesterday 21:26");
+  test("sessions · span · ✋, the ✋ only where it is personal and non-zero; the meta drops the weekday", () => {
+    expect(threadMetaLine(card(), NOW, true)).toBe("2 sessions · 12.10 15:04 → yesterday 21:26 · ✋ 18");
+    expect(threadMetaLine(card(), NOW, false)).toBe("2 sessions · 12.10 15:04 → yesterday 21:26");
     expect(threadMetaLine(card({ movesYou: 0, sessions: card().sessions.slice(0, 1) }), NOW, true)).toBe(
       "1 session · yesterday 20:00 → 21:26",
     );
@@ -119,17 +119,28 @@ describe("threadCardHeaderHtml", () => {
     expect(label(threadCardHeaderHtml(card(), false, NOW, true))).toBe("Pin this work thread first");
     expect(label(threadCardHeaderHtml(card({ pinned: true }), false, NOW, true))).toBe("Pin this work thread first");
   });
+  test("the 📌's hover says its state: a pinned one says a click unpins", () => {
+    const title = (html: string) => /class="wiki-thread-pin[^>]*title="([^"]*)"/.exec(html)![1];
+    expect(title(threadCardHeaderHtml(card(), false, NOW, true))).toBe("Pin this work thread first");
+    expect(title(threadCardHeaderHtml(card({ pinned: true }), false, NOW, true))).toBe("Pinned first. Click to unpin");
+  });
   test("the fold carries no aria-label, so its name is its content: the name and every meta part", () => {
     const html = threadCardHeaderHtml(card(), false, NOW, true);
     const fold = /<button[^>]*class="wiki-thread-fold[^>]*>/.exec(html)![0];
     expect(fold).not.toContain("aria-label");
+    // The span's start and end are separate parts: only the start may shrink.
     expect(html).toContain(
       '<small class="wiki-thread-meta"><span class="wiki-thread-count">2 sessions</span>' +
-        '<span class="wiki-thread-span"> · mon 12.10 15:04 → yesterday 21:26</span>' +
+        '<span class="wiki-thread-from"> · 12.10 15:04</span><span class="wiki-thread-to"> → yesterday 21:26</span>' +
         '<span class="wiki-thread-moves"> · ✋ 18</span></small>',
     );
-    // The hover keeps the whole meta line too, for the span the rail truncates.
-    expect(fold).toContain("2 sessions · mon 12.10 15:04 → yesterday 21:26 · ✋ 18");
+    // The hover (the fold's description) does not repeat the meta the name
+    // already speaks; its session lines carry every start and end.
+    const title = /title="([^"]*)"/.exec(fold)![1]!;
+    expect(title).not.toContain("2 sessions");
+    expect(title).not.toContain("✋");
+    expect(title).toContain("mon 12.10 15:04 → mon 12.10 16:00");
+    expect(title).toContain("yesterday 20:00 → yesterday 21:26");
   });
 });
 

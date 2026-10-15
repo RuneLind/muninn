@@ -890,31 +890,32 @@ export async function renderWikiPage(opts?: {
       font-size: 12.5px; line-height: 1.3; font-weight: 600; color: var(--text-secondary);
     }
     .wiki-thread-fold:hover .wiki-thread-name { color: var(--text-primary); }
-    /* One line at any rail width: the count and ✋ never shrink, the time span
-       gives way with an ellipsis (the full line is in the fold's hover and
-       its accessible name). \`pre\` keeps each part's leading " · ". */
+    /* One line at any rail width: the count, " → last" and ✋ never shrink;
+       only the span's START gives way, with an ellipsis, so the newest time
+       always shows (each session's start is in the fold's hover).
+       \`pre\` keeps each part's leading " · ". */
     .wiki-thread-meta {
       display: flex; margin-top: 1px; font-size: 10.5px; font-weight: 400; line-height: 1.45;
       color: var(--text-muted); white-space: pre; min-width: 0;
     }
     .wiki-thread-meta > span { flex: none; }
-    .wiki-thread-meta > .wiki-thread-span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .wiki-thread-meta > .wiki-thread-from { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .wiki-thread-fold:hover .wiki-thread-meta { color: var(--text-secondary); }
     /* The 📌: grey until pinned (aria-pressed carries the state; the glyph is
-       an emoji, so a filter is the only dim it takes). The resting grey holds
-       3:1 against the rail (WCAG 1.4.11): a plain grayscale pin is a dark grey,
-       so the dark theme brightens it. 24px tall (WCAG 2.5.8): the 3px bottom
-       padding adds height, the glyph stays put. */
+       an emoji, so a filter is the only dim it takes). The resting grey's
+       MEDIAN ink pixel holds 3:1 against the rail (WCAG 1.4.11) on macOS and
+       Linux fonts: light darkens the grey pin, dark brightens it. 24px tall
+       (WCAG 2.5.8): the 3px bottom padding adds height, the glyph stays put. */
     .wiki-thread-pin {
-      --thread-pin-rest: grayscale(1) brightness(2.2);
+      --thread-pin-rest: grayscale(1) brightness(2.2) opacity(.8);
       flex-shrink: 0; background: none; border: 0; cursor: pointer;
       padding: 5px 10px 3px 4px; min-width: 24px; font-size: 11px; line-height: 16px;
-      opacity: .8; filter: var(--thread-pin-rest);
+      filter: var(--thread-pin-rest);
     }
-    @media (prefers-color-scheme: light) { .wiki-thread-pin { --thread-pin-rest: grayscale(1); } }
-    html[data-theme="light"] .wiki-thread-pin { --thread-pin-rest: grayscale(1); }
-    html[data-theme="dark"] .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(2.2); }
-    .wiki-thread-pin.on, .wiki-thread-pin:hover, .wiki-thread-pin:focus-visible { opacity: 1; filter: none; }
+    @media (prefers-color-scheme: light) { .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(.55); } }
+    html[data-theme="light"] .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(.55); }
+    html[data-theme="dark"] .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(2.2) opacity(.8); }
+    .wiki-thread-pin.on, .wiki-thread-pin:hover, .wiki-thread-pin:focus-visible { filter: none; }
     .wiki-list-item.thread-row { position: relative; }
     .wiki-list-item.thread-row::before {
       content: ""; position: absolute; left: 2px; top: 4px; bottom: 4px;

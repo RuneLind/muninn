@@ -41,7 +41,8 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { paintedContrast } from "./contrast.ts";
 import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
-import { threadPinKey } from "../src/dashboard/views/components/wiki-recents.ts";
+import { threadPinKey, type RailThreadCard } from "../src/dashboard/views/components/wiki-recents.ts";
+import { threadCardHeaderHtml } from "../src/dashboard/views/components/wiki-thread-view.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-rail-threads");
@@ -244,6 +245,49 @@ const card = (page: Page, name: string) =>
   page.locator(".wiki-thread-card").filter({ has: page.locator(".wiki-thread-name", { hasText: name }) });
 const ALPHA_CARD = "Alpha work";
 const storedPin = (page: Page) => page.evaluate((k) => localStorage.getItem(k), threadPinKey(THREADS));
+
+/** The header's worst case, built by the real renderer: twelve sessions, a
+ *  cross-day span with an older start date, a two-digit ✋. The fixture's own
+ *  threads are a few hours long and two sessions wide. */
+function worstHeaderHtml(): string {
+  const now = new Date(2026, 9, 15, 10, 0).getTime();
+  const first = new Date(2026, 8, 30, 5, 21).getTime();
+  const last = new Date(2026, 9, 14, 23, 51).getTime();
+  const card: RailThreadCard = {
+    key: "x", foldKey: "thread:x", toggleKey: "closed:thread:x", name: "Alpha work", open: true, pinned: false,
+    pinAnchor: "x", focus: [], created: [], touched: [], movesYou: 88, score: 1,
+    sessions: Array.from({ length: 12 }, (_, i) => ({ id: `w${i}`, provider: "claude", title: "", first: first + i * HOUR, last: last - i * HOUR })),
+  };
+  return threadCardHeaderHtml(card, false, now, true);
+}
+
+/** How a card's meta line fits, measured in the page: the newest time's text
+ *  (the meta's last `[day ]hh:mm`) against the box that clips it, and every
+ *  meta part that overflows its box with the text-overflow it shows. */
+const metaFit = (cardEl: Element) => {
+  const meta = cardEl.querySelector(".wiki-thread-meta") as HTMLElement;
+  const text = meta.textContent ?? "";
+  const m = /((?:today |yesterday |[a-z]{3} \d\d\.\d\d |\d\d\.\d\d )?\d\d:\d\d)(?!.*\d\d:\d\d)/.exec(text);
+  if (!m) throw new Error(`no time in the meta: ${text}`);
+  const lastText = m[1]!;
+  const walker = document.createTreeWalker(meta, NodeFilter.SHOW_TEXT);
+  let hit: { node: Text; i: number } | null = null;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const i = (n as Text).data.lastIndexOf(lastText);
+    if (i >= 0) hit = { node: n as Text, i };
+  }
+  if (!hit) throw new Error(`"${lastText}" is split across nodes in: ${text}`);
+  const range = document.createRange();
+  range.setStart(hit.node, hit.i);
+  range.setEnd(hit.node, hit.i + lastText.length);
+  let clip = hit.node.parentElement!;
+  while (clip !== meta && getComputedStyle(clip).overflow === "visible") clip = clip.parentElement!;
+  const right = Math.min(clip.getBoundingClientRect().right, meta.getBoundingClientRect().right);
+  const clipped = Array.from(meta.querySelectorAll("*"))
+    .filter((e) => e.scrollWidth > e.clientWidth)
+    .map((e) => ({ cls: e.className, textOverflow: getComputedStyle(e).textOverflow, hidden: e.scrollWidth - e.clientWidth }));
+  return { text, lastText, lastHidden: Math.max(0, range.getBoundingClientRect().right - right), clipped };
+};
 
 test.beforeAll(async () => {
   await makeRoot(THREADS);
@@ -519,19 +563,23 @@ test.describe("Wiki rail: Work threads", () => {
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
       await page.setViewportSize({ width: 1400, height: 900 });
       await openReader(page, THREADS);
-      // The header's worst case, written into the real markup: a two-digit
-      // session count, a cross-day span with both dates, a two-digit ✋. The
-      // fixture's own threads are a few hours long and two sessions wide.
-      const head = await page.locator(".wiki-thread-card").first().evaluate((card) => {
+      // The fixture's own card: the newest time shows in full.
+      const own = await page.locator(".wiki-thread-card").first().evaluate(metaFit);
+      expect(own.lastHidden, `${width} fixture card, newest time visible: ${JSON.stringify(own)}`).toBeLessThanOrEqual(0.5);
+      const ownEllipsis = own.clipped.filter((c) => c.textOverflow !== "ellipsis");
+      expect(ownEllipsis, `${width} fixture card: ${JSON.stringify(own)}`).toEqual([]);
+      // The worst case, swapped in for the second card.
+      await page.locator(".wiki-thread-card").nth(1).evaluate((el, html) => (el.outerHTML = html), worstHeaderHtml());
+      const worst = page.locator(".wiki-thread-card").nth(1);
+      const fit = await worst.evaluate(metaFit);
+      const fat = `${width} worst case: ${JSON.stringify(fit)}`;
+      expect(fit.lastText, fat).toBe("yesterday 23:51");
+      expect(fit.lastHidden, `newest time visible, ${fat}`).toBeLessThanOrEqual(0.5);
+      // Whatever gives way shows an ellipsis; at the 260 px rail something does.
+      expect(fit.clipped.filter((c) => c.textOverflow !== "ellipsis"), fat).toEqual([]);
+      if (width === 260) expect(fit.clipped.length, fat).toBeGreaterThan(0);
+      const head = await worst.evaluate((card) => {
         const meta = card.querySelector(".wiki-thread-meta") as HTMLElement;
-        const set = (sel: string, text: string) => {
-          const e = meta.querySelector(sel);
-          if (!e) throw new Error(`no ${sel} in the card meta`);
-          e.textContent = text;
-        };
-        set(".wiki-thread-count", "12 sessions");
-        set(".wiki-thread-span", " · wed 30.09 05:21 → yesterday 23:51");
-        set(".wiki-thread-moves", " · ✋ 88");
         const rect = (e: Element) => e.getBoundingClientRect();
         const mids = Array.from(meta.children).map((c) => rect(c).top + rect(c).height / 2);
         const fold = card.querySelector(".wiki-thread-fold")!;
@@ -601,16 +649,41 @@ test.describe("Wiki rail: Work threads", () => {
     const pressed = cards(page).nth(0).locator(".wiki-thread-pin");
     await expect(pressed).toHaveAttribute("aria-pressed", "true");
     await expect(pressed).toHaveAccessibleName("Pin this work thread first");
+    // The hover tells a mouse user the state and what a click does; the name
+    // stays fixed, so a screen reader hears no "Unpin …, pressed".
+    await expect(pressed).toHaveAttribute("title", "Pinned first. Click to unpin");
+    await expect(pressed).toHaveAccessibleDescription("Pinned first. Click to unpin");
+    expect(await cards(page).nth(0).ariaSnapshot()).toContain('button "Pin this work thread first" [pressed]');
     await pressed.click();
+    await expect(cards(page).nth(1).locator(".wiki-thread-pin")).toHaveAttribute("title", "Pin this work thread first");
     await expect(cards(page).nth(0).locator(".wiki-thread-name")).toHaveText("Alpha work");
+    // The fold's name speaks the meta; its description (the hover) does not
+    // repeat it, and still lists the sessions.
     const fold = cards(page).nth(0).locator(".wiki-thread-fold");
     await expect(fold).toHaveAccessibleName(/Alpha work.*2 sessions.*✋ 12/);
+    await expect(fold).toHaveAccessibleDescription(/session a1/);
+    await expect(fold).not.toHaveAccessibleDescription(/sessions|✋/);
   });
 
-  test("both themes: the resting 📌 reads at 3:1 against the rail", async ({ page }) => {
-    for (const scheme of ["light", "dark"] as const) {
-      await page.emulateMedia({ colorScheme: scheme });
+  test("both themes, by the OS and by the theme toggle: the resting 📌's median ink pixel reads at 3:1 against the rail", async ({
+    page,
+  }) => {
+    // The toggle's html[data-theme] beats the OS preference: each forced theme
+    // is measured under the OPPOSITE OS scheme, so a missing or swapped
+    // override line paints the other theme's pin.
+    const cases = [
+      { os: "light", forced: null, theme: "light" },
+      { os: "dark", forced: null, theme: "dark" },
+      { os: "dark", forced: "light", theme: "light" },
+      { os: "light", forced: "dark", theme: "dark" },
+    ] as const;
+    for (const { os, forced, theme } of cases) {
+      await page.emulateMedia({ colorScheme: os });
       await openReader(page, THREADS);
+      await page.evaluate((t) => {
+        if (t) document.documentElement.setAttribute("data-theme", t);
+        else document.documentElement.removeAttribute("data-theme");
+      }, forced);
       const pin = cards(page).nth(1).locator(".wiki-thread-pin");
       await expect(pin).toHaveAttribute("aria-pressed", "false");
       await page.mouse.move(0, 0);
@@ -642,10 +715,15 @@ test.describe("Wiki rail: Work threads", () => {
           if (r > 1.1) ratios.push(r);
         }
         ratios.sort((a, b) => a - b);
-        // The glyph's body, not its anti-aliased edge: the 75th percentile of ink.
-        return { ink: ratios.length, p75: ratios[Math.floor(ratios.length * 0.75)] ?? 1, max: ratios.at(-1) ?? 1 };
+        const at = (q: number) => ratios[Math.floor(ratios.length * q)] ?? 1;
+        // The median ink pixel: half the glyph, anti-aliased edge included.
+        return { bg, ink: ratios.length, p50: at(0.5), p75: at(0.75), share3: ratios.filter((r) => r >= 3).length / ratios.length };
       }, png);
-      expect(c.p75, `resting 📌 in ${scheme}: ${JSON.stringify(c)}`).toBeGreaterThanOrEqual(3);
+      const at = `resting 📌, OS ${os}, toggle ${forced ?? "none"}: ${JSON.stringify(c)}`;
+      // The rail really is the theme under test, so the case measures that theme.
+      expect(c.bg > 0.5, at).toBe(theme === "light");
+      expect(c.ink, at).toBeGreaterThan(20);
+      expect(c.p50, at).toBeGreaterThanOrEqual(3);
     }
   });
 
