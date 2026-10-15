@@ -3289,6 +3289,73 @@ describe("buildRail — work threads", () => {
     expect(rows(broken.entries).filter((r) => r.thread?.name === "plans/d.mdx").map((r) => r.page.relPath)).toEqual(["plans/d.mdx"]);
   });
 
+  test("a card header counts the rows it holds: drawn when open, what opening it would draw when closed", () => {
+    const pages = (m: ReturnType<typeof build>) =>
+      (m.entries.filter((e) => e.kind === "thread") as Array<Extract<RailEntry, { kind: "thread" }>>).map((e) => [e.card.key, e.pages]);
+    expect(pages(build({ threads: [card("plans/c.mdx", [C, A]), card("plans/d.mdx", [D, B], { open: false })] }))).toEqual([
+      ["plans/c.mdx", 2],
+      ["plans/d.mdx", 2],
+    ]);
+    // A page an earlier OPEN card holds is drawn there, so neither the later
+    // open card nor a closed one counts it.
+    expect(
+      pages(build({ threads: [card("plans/c.mdx", [HUB]), card("plans/d.mdx", [HUB, D]), card("plans/a.mdx", [HUB, A], { open: false })] })),
+    ).toEqual([
+      ["plans/c.mdx", 1],
+      ["plans/d.mdx", 1],
+      ["plans/a.mdx", 1],
+    ]);
+    // A closed card ABOVE the open card that holds a page counts it: opening
+    // it would draw it there, the first card winning (what a click draws).
+    const above = [card("plans/a.mdx", [HUB, A], { open: false }), card("plans/c.mdx", [HUB, C])];
+    expect(pages(build({ threads: above }))).toEqual([
+      ["plans/a.mdx", 2],
+      ["plans/c.mdx", 2],
+    ]);
+    expect(pages(build({ threads: [{ ...above[0]!, open: true }, above[1]!] }))).toEqual([
+      ["plans/a.mdx", 2],
+      ["plans/c.mdx", 1],
+    ]);
+    // "Above" is literal: an open card BELOW a closed one does not take its
+    // pages from the count (a payload breaking D16, the only way to share one).
+    expect(
+      pages(build({ threads: [card("plans/c.mdx", [C]), card("plans/a.mdx", [A, D], { open: false }), card("plans/d.mdx", [D])] })),
+    ).toEqual([
+      ["plans/c.mdx", 1],
+      ["plans/a.mdx", 2],
+      ["plans/d.mdx", 1],
+    ]);
+    // A page listed twice in one card is one page.
+    expect(pages(build({ threads: [card("plans/a.mdx", [A, A, D], { open: false })] }))).toEqual([["plans/a.mdx", 2]]);
+    // A page off the facets is not a row either.
+    const facet = [C, D];
+    expect(pages(build({ filtered: facet, facetOnly: facet, seriesGroups: groupSeries(facet), threads: [card("plans/c.mdx", [C, A], { open: false })] }))).toEqual([
+      ["plans/c.mdx", 1],
+    ]);
+  });
+
+  test("the count is FOCUS pages: an open card's expanded attachments are not counted, and a closed card counts a page another card draws only as a child", () => {
+    const XP = page({ relPath: "plans/x.mdx" });
+    const XC = page({ relPath: "plans/x.html", parent: "plans/x.mdx", pairedBy: "stem" });
+    const fam = [XP, XC, D];
+    const at = (threads: RailThreadCard[]) => {
+      const m = build({ filtered: fam, facetOnly: fam, seriesGroups: groupSeries(fam), openFolds: [normalizeFoldKey("plans/x.mdx")], threads });
+      const heads = m.entries.filter((e) => e.kind === "thread") as Array<Extract<RailEntry, { kind: "thread" }>>;
+      return heads.map((e) => [e.card.key, e.pages, rows(m.entries).filter((r) => r.section === "threads" && r.thread?.name === e.card.name).length]);
+    };
+    // P's row draws its attachment under it: two rows, one focus page.
+    expect(at([card("p", [XP])])).toEqual([["p", 1, 1]]);
+    // Q's focus page XC is P's expanded child; opening Q lifts it out of P.
+    expect(at([card("p", [XP]), card("q", [XC, D], { open: false })])).toEqual([
+      ["p", 1, 1],
+      ["q", 2, 0],
+    ]);
+    expect(at([card("p", [XP]), card("q", [XC, D])])).toEqual([
+      ["p", 1, 1],
+      ["q", 2, 2],
+    ]);
+  });
+
   test("a query renders no section, whatever cards are handed in", () => {
     const q = { ...INERT, q: "plans" };
     const m = build({ filters: q, threads: [card("plans/c.mdx", [C])] });

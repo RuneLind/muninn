@@ -1,7 +1,8 @@
 /**
  * The work-thread card's markup (plan `muninn-wiki-work-threads`, PR 5): the
- * header (name, sessions and span, ✋, 📌) and the `touched:` line, plus the
- * series ghost row and its note, for a pin's ghost and a thread's. Pure string
+ * header (thread glyph, name, sessions and span, ✋, «Show N pages», 📌) and
+ * the `touched:` line, plus the series ghost row and its note, for a pin's
+ * ghost and a thread's. Pure string
  * building, in its own module because `wiki-browser.ts` touches `document` at
  * import time and `bun test` cannot load it (the `wiki-related-view.ts` split).
  * The focus rows are ordinary rail rows, painted by `renderList`.
@@ -68,6 +69,11 @@ export function threadMetaLine(card: RailThreadCard, now: number, showMoves: boo
   return [count, from && `${from} → ${to}`, moves].filter(Boolean).join(" · ");
 }
 
+/** A visually hidden ` · ` for the fold's accessible name, which is its
+ *  content: without it a screen reader runs the name and the two meta lines
+ *  together («✋ 12 today 16:20» reads as one run of numbers). */
+const SR_SEP = `<span class="wiki-sr-only"> · </span>`;
+
 /** The meta as markup: two lines, `N sessions · ✋ M` over `first → last`,
  *  laid out from the width table in `src/wiki/CLAUDE.md` (Work threads): each
  *  line fits on one line at the 260 and 300 px rails on macOS and Linux fonts,
@@ -81,7 +87,7 @@ function threadMetaHtml(card: RailThreadCard, now: number, showMoves: boolean): 
     (moves ? ` <span class="wiki-thread-moves">· ${esc(moves)}</span>` : "") +
     `</span>` +
     (from
-      ? ` <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">${esc(from)}</span>` +
+      ? `${SR_SEP} <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">${esc(from)}</span>` +
         ` <span class="wiki-thread-to">→ ${esc(to)}</span></span>`
       : "")
   );
@@ -97,14 +103,33 @@ export function threadHover(card: RailThreadCard, now: number): string {
   return lines.join("\n");
 }
 
+/** The fold's third line, which says what a click does: `▸ Show 3 pages` on
+ *  a closed card, `▾ Hide 3 pages` (`▾ Hide page` for one) on an open one.
+ *  It is what tells a header from a page row, whose click opens the page. */
+export function threadDiscloseLabel(folded: boolean, pages: number): string {
+  if (pages < 1) return folded ? "Show pages" : "Hide pages";
+  if (pages === 1) return folded ? "Show 1 page" : "Hide page";
+  return `${folded ? "Show" : "Hide"} ${pages} pages`;
+}
+
+/** The timeline glyph that marks a header as a THREAD (sessions on a line),
+ *  in the slot a page row gives its type icon. */
+const THREAD_GLYPH =
+  `<svg class="wiki-thread-glyph" viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor"` +
+  ` stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3.5 1.5v11"/>` +
+  `<circle cx="3.5" cy="3" r="1.6" fill="currentColor"/><circle cx="3.5" cy="7" r="1.6" fill="currentColor"/>` +
+  `<circle cx="3.5" cy="11" r="1.6" fill="currentColor"/><path d="M7 3h5.5M7 7h4M7 11h5"/></svg>`;
+
 /** The card header: a fold button and the 📌 beside it (two sibling buttons —
  *  a button may not hold one). The fold writes `toggleKey`, so the generic
- *  `[data-fold-key]` handler toggles a card like any group. */
+ *  `[data-fold-key]` handler toggles a card like any group. `pages` is the
+ *  rail entry's count (`buildRail`); it defaults to the card's focus pages. */
 export function threadCardHeaderHtml(
   card: RailThreadCard,
   folded: boolean,
   now: number,
   showMoves: boolean,
+  pages: number = card.focus.length,
 ): string {
   const hover = threadHover(card, now);
   const why = folded ? "Show this work thread" : "Hide this work thread";
@@ -122,10 +147,12 @@ export function threadCardHeaderHtml(
     `<button type="button" class="wiki-thread-fold${folded ? " folded" : ""}"` +
     ` data-fold-key="${esc(card.toggleKey)}" aria-expanded="${folded ? "false" : "true"}"` +
     ` title="${esc(hover + "\n" + why)}">` +
-    `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
+    THREAD_GLYPH +
     `<span class="wiki-thread-label">` +
-    `<span class="wiki-thread-name">${esc(card.name)}</span>` +
-    `<small class="wiki-thread-meta">${threadMetaHtml(card, now, showMoves)}</small>` +
+    `<span class="wiki-thread-name">${esc(card.name)}</span>${SR_SEP}` +
+    `<small class="wiki-thread-meta">${threadMetaHtml(card, now, showMoves)}</small>${SR_SEP}` +
+    `<span class="wiki-thread-disclose"><span aria-hidden="true">${folded ? "▸" : "▾"} </span>` +
+    `${esc(threadDiscloseLabel(folded, pages))}</span>` +
     `</span>` +
     `</button>` +
     `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +

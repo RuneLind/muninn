@@ -870,26 +870,41 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-list-ghost-note { flex-shrink: 0; font-size: 10.5px; color: var(--text-muted); }
     /* WORK THREADS (plan muninn-wiki-work-threads, PR 5): one card per thread
-       above Activity. The header is a fold button (the name, then "N sessions ·
-       ✋ M" and "first → last") beside a 📌; an OPEN card's focus rows are ordinary rail rows
-       carrying \`.thread-row\`, whose left rule is an absolute ::before — no
-       padding, so every width budget a plain row has holds unchanged at the
-       260px rail; and its \`touched:\` line is links, not rows. */
-    .wiki-thread-card { display: flex; align-items: flex-start; }
-    .wiki-thread-fold {
-      display: flex; align-items: flex-start; gap: 8px; flex: 1 1 0; min-width: 0;
-      background: none; border: 0; cursor: pointer; text-align: left;
-      padding: 6px 0 5px 10px; font-family: inherit;
+       above Activity. The header is a fold button (a thread glyph, the name,
+       "N sessions · ✋ M" and "first → last", then "▸ Show N pages") beside a
+       📌. Every header is an outlined box, so it never reads as a page row;
+       an OPEN card turns the outline accent and carries it round its focus
+       rows and its \`touched:\` line (links, not rows). The rows' outline is
+       inset shadow plus the absolute ::before rule — no padding, so every
+       width budget a plain row has holds unchanged at the 260px rail. */
+    .wiki-thread-card {
+      display: flex; align-items: flex-start;
+      border: 1px solid var(--border-secondary); border-radius: 8px; margin: 2px 0 6px;
     }
-    .wiki-thread-fold .wiki-fold-caret { margin-top: 5px; color: var(--text-muted); }
-    .wiki-thread-fold:hover .wiki-fold-caret { color: var(--text-secondary); }
+    .wiki-thread-card:hover { border-color: var(--text-dim); }
+    .wiki-thread-card.open {
+      border-color: var(--accent);
+      border-bottom-color: color-mix(in srgb, var(--accent) 35%, var(--bg-panel));
+      border-radius: 8px 8px 0 0; margin-bottom: 0;
+      background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel));
+    }
+    .wiki-thread-fold {
+      display: flex; align-items: flex-start; gap: 6px; flex: 1 1 0; min-width: 0;
+      background: none; border: 0; cursor: pointer; text-align: left;
+      padding: 6px 0 5px 9px; font-family: inherit;
+    }
+    /* 1 px border + 9 px padding: the glyph sits where a row's type icon does. */
+    .wiki-thread-glyph { flex-shrink: 0; margin-top: 1px; color: var(--text-muted); }
+    .wiki-thread-fold:hover .wiki-thread-glyph { color: var(--text-secondary); }
+    .wiki-thread-card.open .wiki-thread-glyph { color: var(--accent-light); }
     .wiki-thread-label { display: block; flex: 1 1 0; min-width: 0; }
     .wiki-thread-name {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; overflow-wrap: anywhere;
       font-size: 12.5px; line-height: 1.3; font-weight: 600; color: var(--text-secondary);
     }
-    .wiki-thread-fold:hover .wiki-thread-name { color: var(--text-primary); }
+    .wiki-thread-fold:hover .wiki-thread-name,
+    .wiki-thread-card.open .wiki-thread-name { color: var(--text-primary); }
     /* Two meta lines, \`N sessions · ✋ M\` over \`first → last\`: by the width
        table in src/wiki/CLAUDE.md (Work threads) each is one line at the 260
        and 300px rails on macOS and Linux DejaVu fonts, so nothing is cut and
@@ -902,7 +917,17 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-thread-line { display: block; }
     .wiki-thread-line > span { display: inline-block; }
-    .wiki-thread-fold:hover .wiki-thread-meta { color: var(--text-secondary); }
+    .wiki-thread-fold:hover .wiki-thread-meta,
+    .wiki-thread-card.open .wiki-thread-meta { color: var(--text-secondary); }
+    /* What a click does, in words: the header is a fold, not a link. */
+    .wiki-thread-disclose {
+      display: block; margin-top: 2px; font-size: 10.5px; line-height: 1.45;
+      font-weight: 600; color: var(--accent-light);
+    }
+    .wiki-sr-only {
+      position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+      overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+    }
     /* The 📌: grey until pinned (aria-pressed carries the state; the glyph is
        an emoji, so a filter is the only dim it takes). The resting grey's
        MEDIAN ink pixel holds 3:1 against the rail (WCAG 1.4.11) on macOS and
@@ -911,7 +936,7 @@ export async function renderWikiPage(opts?: {
     .wiki-thread-pin {
       --thread-pin-rest: grayscale(1) brightness(2.2) opacity(.8);
       flex-shrink: 0; background: none; border: 0; cursor: pointer;
-      padding: 5px 10px 3px 4px; min-width: 24px; font-size: 11px; line-height: 16px;
+      padding: 5px 9px 3px 4px; min-width: 24px; font-size: 11px; line-height: 16px;
       filter: var(--thread-pin-rest);
     }
     @media (prefers-color-scheme: light) { .wiki-thread-pin { --thread-pin-rest: grayscale(1) brightness(.55); } }
@@ -929,24 +954,61 @@ export async function renderWikiPage(opts?: {
     @media (forced-colors: active) and (prefers-color-scheme: light) {
       .wiki-thread-pin, html[data-theme] .wiki-thread-pin { --thread-pin-rest: grayscale(1) contrast(2); }
     }
+    /* The open card's body: every row in the threads section (a focus row and
+       any attachment child under it) and the touched line sit inside the
+       card's accent outline, square-cornered, the last one closing it. */
+    .wiki-list-item[data-section="threads"], .wiki-thread-touched {
+      border-radius: 0; box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent);
+    }
+    .wiki-list-item[data-section="threads"]:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched)),
+    .wiki-thread-touched {
+      border-radius: 0 0 8px 8px; margin-bottom: 8px;
+      box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent), inset 0 -1px var(--accent);
+    }
+    /* The focus row's left edge is also its ::before rule, drawn on the
+       outline: it is what forced colours keep (they drop box shadows), and
+       where a series plan's latest dot sits. */
     .wiki-list-item.thread-row { position: relative; }
     .wiki-list-item.thread-row::before {
-      content: ""; position: absolute; left: 2px; top: 4px; bottom: 4px;
-      width: 2px; border-radius: 1px; background: var(--border-primary); pointer-events: none;
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+      width: 1px; background: var(--accent); pointer-events: none;
     }
-    .wiki-list-item.thread-row:hover::before { background: var(--accent); }
-    /* A card's newest series plan: its dot sits ON the card's rule, as the
-       series body puts it on the series rail, not half across it. */
-    .wiki-list-item.latest.thread-row:not(.wiki-series-cont)::after { left: -1px; }
-    .wiki-thread-touched {
-      padding: 1px 10px 6px 32px; font-size: 11px; line-height: 1.5;
-      color: var(--text-muted); overflow-wrap: anywhere;
+    /* ⌖ Show in list on a card row: the flash animates box-shadow, so it
+       ends on the card's outline (the closing row's bottom edge included)
+       instead of wiping it for 1.2 s. Under no-preference only, so the
+       reduced-motion \`animation: none\` above stays the whole answer. */
+    @media (prefers-reduced-motion: no-preference) {
+      .wiki-list-item[data-section="threads"].reveal-flash { animation-name: wiki-reveal-flash-thread; }
+      .wiki-list-item[data-section="threads"]:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched)).reveal-flash {
+        animation-name: wiki-reveal-flash-thread-last;
+      }
     }
+    @keyframes wiki-reveal-flash-thread {
+      from { box-shadow: inset 0 0 0 2px var(--accent); }
+      to { box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent); }
+    }
+    @keyframes wiki-reveal-flash-thread-last {
+      from { box-shadow: inset 0 0 0 2px var(--accent); }
+      to { box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent), inset 0 -1px var(--accent); }
+    }
+    /* On the row that closes the card, the straight rule stops above the
+       rounded corner, which the inset shadow draws (not in forced colours,
+       which drop the shadow: there the rule runs to the bottom, below). */
+    .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 8px; }
+    /* A card's newest series plan: its dot is centred ON the card's edge. */
+    .wiki-list-item.latest.thread-row:not(.wiki-series-cont)::after { left: -3.5px; }
+    .wiki-thread-touched { padding: 1px 10px 6px 32px; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
     .wiki-thread-link { color: var(--accent-light); text-decoration: none; }
     .wiki-thread-link:hover, .wiki-thread-link:focus-visible { text-decoration: underline; }
     .wiki-thread-sep { color: var(--text-muted); }
+    /* Forced colours paint fills as Canvas and drop shadows: the header keeps
+       its real border (2 px when open, so open still differs from closed) and
+       the focus rows keep the ::before rule; an attachment child row and the
+       touched line lose their outline there. */
     @media (forced-colors: active) {
       .wiki-list-item.thread-row::before { background: CanvasText; }
+      .wiki-thread-card.open { border-width: 2px; border-bottom-width: 1px; }
+      .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 0; }
     }
     /* \`+N more\` under a closed series in Activity: opens the same fold as the
        series row above it. Indented to the member rows' depth. */

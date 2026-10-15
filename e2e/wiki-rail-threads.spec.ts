@@ -351,7 +351,8 @@ const headerFit = (cardEl: Element) => {
   const parts: Array<{ text: string; width: number }> = [];
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const t = n as Text;
-    if (!t.data.trim()) continue;
+    // A screen reader's separator is clipped to 1 px on purpose.
+    if (!t.data.trim() || t.parentElement!.closest(".wiki-sr-only")) continue;
     const range = document.createRange();
     range.selectNodeContents(t);
     const rects = Array.from(range.getClientRects()).filter((b) => b.width > 0);
@@ -386,7 +387,7 @@ const headerFit = (cardEl: Element) => {
 };
 
 /** The 📌's pixels, off a screenshot (an emoji has no CSS colour): against
- *  the button's top-left padding pixel, the ink's median contrast, its widest
+ *  a padding pixel near the button's top-left, the ink's median contrast, its widest
  *  chroma (a grey pin has none, a pressed one is red), and the share of the
  *  box held by the most common non-background colour — a solid square there is
  *  a backplate the filter has painted, not a glyph (measured: 1–2.3% for the
@@ -394,7 +395,14 @@ const headerFit = (cardEl: Element) => {
  *  to grey). */
 async function pinPixels(page: Page, pin: import("@playwright/test").Locator) {
   const png = (await pin.screenshot({ animations: "disabled" })).toString("base64");
-  return page.evaluate(async (b64) => {
+  // [top, right, bottom, left] padding: the glyph is measured inside the
+  // content box (2 px out for its anti-aliasing), since the padding can hold
+  // the card's border and its rounded corner, which are not the pin.
+  const pad = await pin.evaluate((e) => {
+    const cs = getComputedStyle(e);
+    return [cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft].map(parseFloat);
+  });
+  return page.evaluate(async ([b64, [pt, pr, pb, pl]]) => {
     const img = new Image();
     img.src = `data:image/png;base64,${b64}`;
     await img.decode();
@@ -411,12 +419,18 @@ async function pinPixels(page: Page, pin: import("@playwright/test").Locator) {
       };
       return 0.2126 * ch(d[i]!) + 0.7152 * ch(d[i + 1]!) + 0.0722 * ch(d[i + 2]!);
     };
-    const bg = lum(0);
-    const bgKey = `${d[0]},${d[1]},${d[2]}`;
+    // Two pixels in from the top-left, inside the padding: the clip's edge
+    // rows can catch the card's 1 px border.
+    const o = (2 * cv.width + 2) * 4;
+    const bg = lum(o);
+    const bgKey = `${d[o]},${d[o + 1]},${d[o + 2]}`;
     const ratios: number[] = [];
     const counts = new Map<string, number>();
     let chroma = 0;
     for (let i = 0; i < d.length; i += 4) {
+      const x = (i / 4) % cv.width;
+      const y = Math.floor(i / 4 / cv.width);
+      if (x < pl! - 2 || y < pt! - 2 || x >= cv.width - pr! + 2 || y >= cv.height - pb! + 2) continue;
       const l = lum(i);
       const r = (Math.max(l, bg) + 0.05) / (Math.min(l, bg) + 0.05);
       if (r > 1.1) {
@@ -431,7 +445,7 @@ async function pinPixels(page: Page, pin: import("@playwright/test").Locator) {
     const top = Math.max(0, ...counts.values());
     // The median ink pixel: half the glyph, anti-aliased edge included.
     return { bg, ink: ratios.length, p50: at(0.5), chroma, square: top / (d.length / 4) };
-  }, png);
+  }, [png, pad] as const);
 }
 
 test.beforeAll(async () => {
@@ -528,6 +542,121 @@ test.describe("Wiki rail: Work threads", () => {
     // The sort took: under backlinks a plain listing row counts links instead.
     await page.selectOption("#wikiSort", "backlinks");
     expect(await page.locator(".wiki-list-meta", { hasText: "←" }).count()).toBeGreaterThan(0);
+  });
+
+  test("open reads apart from closed: an accent outline round the header, its rows and its touched line; «Show N pages» says what a click does", async ({
+    page,
+  }) => {
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openReader(page, THREADS);
+      const look = () =>
+        page.evaluate(() => {
+          // Tokens resolved on a body probe, so the assertion follows the theme.
+          const probe = document.createElement("div");
+          document.body.append(probe);
+          const token = (v: string) => {
+            probe.style.color = `var(${v})`;
+            return getComputedStyle(probe).color;
+          };
+          const accent = token("--accent");
+          const border = token("--border-secondary");
+          probe.remove();
+          const cs = (sel: string) => getComputedStyle(document.querySelector(sel)!);
+          const card = (i: number) => getComputedStyle(document.querySelectorAll(".wiki-thread-card")[i]!);
+          const rows = Array.from(document.querySelectorAll('.wiki-list-item[data-section="threads"]'));
+          return {
+            accent,
+            border,
+            cardTop: [card(0).borderTopColor, card(1).borderTopColor],
+            cardBg: [card(0).backgroundColor, card(1).backgroundColor],
+            rail: cs(".wiki-layout > .wiki-pane:first-child").backgroundColor,
+            rowShadows: rows.map((r) => getComputedStyle(r).boxShadow),
+            touchedShadow: document.querySelector(".wiki-thread-touched") ? cs(".wiki-thread-touched").boxShadow : null,
+          };
+        });
+      await page.mouse.move(0, 0);
+      const g = await look();
+      const at = `${scheme}: ${JSON.stringify(g)}`;
+      expect(g.cardTop, at).toEqual([g.accent, g.border]);
+      expect([g.rail, "rgba(0, 0, 0, 0)"], `the open header is tinted, ${at}`).not.toContain(g.cardBg[0]);
+      expect(g.cardBg[1], `a closed header is not, ${at}`).toBe("rgba(0, 0, 0, 0)");
+      // Each row carries the accent sides and does NOT close the card; the
+      // touched line closes it.
+      expect(g.rowShadows, at).toHaveLength(2);
+      for (const sh of g.rowShadows) {
+        expect(sh, at).toContain(`${g.accent} 1px 0px 0px 0px inset`);
+        expect(sh, at).not.toContain("0px -1px 0px 0px inset");
+      }
+      expect(g.touchedShadow, at).toContain(`${g.accent} 0px -1px 0px 0px inset`);
+      await expect(cards(page).locator(".wiki-thread-disclose")).toHaveText(["▾ Hide 2 pages", "▸ Show 1 page"]);
+      // Open beta: its header turns accent and says Hide; its row closes the card.
+      await cards(page).nth(1).locator(".wiki-thread-fold").click();
+      await expect(cards(page).nth(1).locator(".wiki-thread-disclose")).toHaveText("▾ Hide page");
+      await page.mouse.move(0, 0);
+      const after = await look();
+      expect(after.cardTop, `${scheme}: ${JSON.stringify(after)}`).toEqual([after.accent, after.accent]);
+      const beta = page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${BETA}"]`);
+      const close = await beta.evaluate((e) => ({
+        shadow: getComputedStyle(e).boxShadow,
+        radius: parseFloat(getComputedStyle(e).borderBottomLeftRadius),
+        ruleBottom: parseFloat(getComputedStyle(e, "::before").bottom),
+      }));
+      expect(close.shadow).toContain(`${after.accent} 0px -1px 0px 0px inset`);
+      // The straight ::before edge stops above the rounded corner, so no
+      // square spur pokes out past the curve.
+      expect(close.ruleBottom, JSON.stringify(close)).toBeGreaterThanOrEqual(close.radius);
+      // Fold state persists: close beta again for the next pass.
+      await cards(page).nth(1).locator(".wiki-thread-fold").click();
+    }
+  });
+
+  test("the ⌖ reveal flash on a card row keeps the card's outline sides", async ({ page }) => {
+    await openReader(page, THREADS);
+    const row = rowsIn(page, "threads").nth(0);
+    const shadow = await row.evaluate((el) => {
+      el.classList.add("reveal-flash");
+      const a = el.getAnimations()[0]!;
+      a.pause();
+      a.currentTime = 1150; // near the end of the 1.2 s flash
+      return getComputedStyle(el).boxShadow;
+    });
+    // Interpolated offsets (0.997px), so read the offsets of each shadow.
+    const offsets = (sh: string) => [...sh.matchAll(/(-?[\d.]+)px (-?[\d.]+)px -?[\d.]+px -?[\d.]+px inset/g)].map((m) => [parseFloat(m[1]!), parseFloat(m[2]!)] as const);
+    const xs = offsets(shadow).map(([x]) => x);
+    expect(Math.max(...xs), shadow).toBeGreaterThan(0.9);
+    expect(Math.min(...xs), shadow).toBeLessThan(-0.9);
+    // The row that closes the card keeps its bottom edge through the flash too.
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
+    const beta = page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${BETA}"]`);
+    const last = await beta.evaluate((el) => {
+      el.classList.add("reveal-flash");
+      const a = el.getAnimations()[0]!;
+      a.pause();
+      a.currentTime = 1150;
+      return getComputedStyle(el).boxShadow;
+    });
+    expect(Math.min(...offsets(last).map(([, y]) => y)), last).toBeLessThan(-0.9);
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
+  });
+
+  test("reduced motion: a card row takes no flash animation at all", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openReader(page, THREADS);
+    const name = await rowsIn(page, "threads").nth(0).evaluate((el) => {
+      el.classList.add("reveal-flash");
+      return getComputedStyle(el).animationName;
+    });
+    expect(name).toBe("none");
+  });
+
+  test("forced colours: the row that closes an open card keeps its left rule to the bottom", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active" });
+    await openReader(page, THREADS);
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
+    const beta = page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${BETA}"]`);
+    expect(await beta.evaluate((e) => getComputedStyle(e, "::before").bottom)).toBe("0px");
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
   });
 
   test("the series shows the lifted members as ghosts reading 'in a work thread above'; closing the card hands them back", async ({
@@ -767,7 +896,7 @@ test.describe("Wiki rail: Work threads", () => {
       await page.addInitScript(([key]) => localStorage.setItem(key as string, "300"), [RAIL_WIDTH_KEY] as const);
       await page.setViewportSize({ width: 1400, height: 900 });
       await openReader(page, THREADS);
-      for (const sel of [".wiki-thread-name", ".wiki-thread-meta", ".wiki-thread-link", ".wiki-thread-touched-label"]) {
+      for (const sel of [".wiki-thread-name", ".wiki-thread-meta", ".wiki-thread-disclose", ".wiki-thread-link", ".wiki-thread-touched-label"]) {
         const c = await paintedContrast(page.locator(sel).first());
         expect(c, `${sel} in ${scheme}`).toBeGreaterThanOrEqual(4.5);
       }
@@ -918,7 +1047,9 @@ test.describe("Wiki rail: Work threads", () => {
     // The fold's name speaks the meta; its description (the hover) does not
     // repeat it, and still lists the sessions.
     const fold = cards(page).nth(0).locator(".wiki-thread-fold");
-    await expect(fold).toHaveAccessibleName(/Alpha work.*2 sessions.*✋ 12/);
+    // The whole name, parts split by the visually hidden ` · `.
+    await expect(fold).toHaveAccessibleName(/^Alpha work · 2 sessions · ✋ 12 · \S+ \d\d:\d\d → \S+(?: \d\d:\d\d)? · Hide 2 pages$/);
+    await expect(cards(page).nth(1).locator(".wiki-thread-fold")).toHaveAccessibleName(/ · Show 1 page$/);
     await expect(fold).toHaveAccessibleDescription(/session a1/);
     await expect(fold).not.toHaveAccessibleDescription(/sessions|✋/);
   });
