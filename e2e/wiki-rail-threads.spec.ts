@@ -539,6 +539,8 @@ test.describe("Wiki rail: Work threads", () => {
     await expect(ghosts).toHaveCount(2);
     await expect(ghosts.locator(".wiki-list-ghost-note")).toHaveText(["in a work thread above", "in a work thread above"]);
     expect(await ghosts.evaluateAll((els) => els.map((e) => e.getAttribute("data-ghost-relpath")).sort())).toEqual([ALPHA_TWO, ALPHA].sort());
+    // A thread's ghost says so in its markup; a pin's carries no reason (D11).
+    expect(await ghosts.evaluateAll((els) => els.map((e) => e.getAttribute("data-ghost-reason")))).toEqual(["thread", "thread"]);
     // Close the alpha card: nothing is lifted, alpha ranks in Activity again.
     await cards(page).nth(0).locator(".wiki-thread-fold").click();
     await expect(rowsIn(page, "threads")).toHaveCount(0);
@@ -726,6 +728,26 @@ test.describe("Wiki rail: Work threads", () => {
     const after = await focused();
     expect(after.startsWith("wiki-group-fold@"), after).toBe(true);
     expect(after.replace(/^wiki-group-fold@(closed:)?/, ""), after).toBe(seriesKey!.replace(/^closed:/, ""));
+  });
+
+  test("a scripted click on a fold or a 📌 leaves focus where it was", async ({ page }) => {
+    // `el.click()` from script does not focus the button, unlike a mouse click in
+    // Chromium — so only this path shows whether the handler refocuses a control
+    // the reader never pressed, and takes focus out of the search box.
+    await openReader(page, THREADS);
+    const beta = await cards(page).nth(1).getAttribute("data-thread");
+    expect(beta).toBeTruthy();
+    await page.focus("#wikiSearch");
+    const activeId = () => page.evaluate(() => document.activeElement?.id ?? "");
+    // A card's fold.
+    await cards(page).nth(1).locator(".wiki-thread-fold").evaluate((el) => (el as HTMLElement).click());
+    await expect(cards(page).nth(1).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
+    expect(await activeId()).toBe("wikiSearch");
+    // A 📌: the card moves to the top, focus stays in the search box.
+    await cards(page).nth(1).locator(".wiki-thread-pin").evaluate((el) => (el as HTMLElement).click());
+    await expect(cards(page).nth(0)).toHaveAttribute("data-thread", beta!);
+    expect(await activeId()).toBe("wikiSearch");
+    await page.evaluate((k) => localStorage.removeItem(k), threadPinKey(THREADS));
   });
 
   test("no section, no bars, when the ledger 404s the sessions form (D11)", async ({ page }) => {

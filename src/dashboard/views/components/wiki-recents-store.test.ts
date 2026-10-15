@@ -269,9 +269,40 @@ describe("the fold store", () => {
       for (const k of own) expect(stored, k).toContain(k);
       // The thread entries are bounded, and the newest one is kept.
       const threads = stored.filter((k) => k.startsWith("thread:") || k.startsWith("closed:thread:"));
-      expect(threads.length).toBeLessThanOrEqual(50);
+      // Exactly 20 — the literal, not `THREAD_FOLDS_MAX`, so a changed cap fails here.
+      expect(threads).toHaveLength(20);
       expect(threads[0]).toBe("thread:plans/t299.mdx");
       expect(isFoldOpen(folds, "thread:plans/t299.mdx")).toBe(true);
+    });
+  });
+
+  test("a full store — mode keys, 200 own folds, 20 thread folds — reads back whole", () => {
+    // The raw read must hold both caps at once: a read limit of `FOLDS_MAX` alone
+    // returns the first 200 entries and drops every thread fold behind them.
+    const modes = ["toggle:families", "toggle:retired"];
+    const own = Array.from({ length: FOLDS_MAX }, (_, i) => `plans/p${i}.mdx`);
+    const threads = Array.from({ length: 20 }, (_, i) => `thread:plans/t${i}.mdx`);
+    const full = [...modes, ...own, ...threads];
+    withStorage({ [foldsKey("mimir")]: JSON.stringify(full) }, () => {
+      expect(readFolds("mimir")).toEqual(full);
+    });
+  });
+
+  test("the stored order is mode keys, then the reader's folds, then thread folds", () => {
+    withStorage({}, (map) => {
+      toggleFolded("mimir", "thread:plans/t1.mdx");
+      toggleFolded("mimir", "plans/p1.mdx");
+      toggleFolded("mimir", "toggle:families");
+      toggleFolded("mimir", "closed:thread:plans/t2.mdx");
+      toggleFolded("mimir", "family:plans/alpha");
+      const stored = JSON.parse(map.get(foldsKey("mimir"))!) as string[];
+      expect(stored).toEqual([
+        "toggle:families",
+        "family:plans/alpha",
+        "plans/p1.mdx",
+        "closed:thread:plans/t2.mdx",
+        "thread:plans/t1.mdx",
+      ]);
     });
   });
 

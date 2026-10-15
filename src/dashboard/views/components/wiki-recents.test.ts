@@ -2078,6 +2078,15 @@ describe("groups (families and months) — fix round 1", () => {
       expect(isFoldOpen(reread, GROUP_FAMILIES_TOGGLE_KEY)).toBe(true);
     });
 
+    test("the pure toggle caps thread folds apart: 25 thread opens keep exactly 20, and no own fold is lost", () => {
+      let folds = ["family:plans/alpha", "plans/p-1.mdx"];
+      for (let i = 0; i < 25; i++) folds = toggleFold(folds, `thread:plans/t-${i}.mdx`);
+      const threads = folds.filter((k) => k.startsWith("thread:"));
+      expect(threads).toHaveLength(20);
+      expect(threads[0]).toBe("thread:plans/t-24.mdx"); // newest first
+      expect(folds.slice(0, 2)).toEqual(["family:plans/alpha", "plans/p-1.mdx"]);
+    });
+
     test("turning the mode off still removes it", () => {
       const on = toggleFold(["plans/p-1.mdx"], GROUP_FAMILIES_TOGGLE_KEY);
       expect(isFoldOpen(on, GROUP_FAMILIES_TOGGLE_KEY)).toBe(true);
