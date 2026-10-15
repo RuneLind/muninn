@@ -621,10 +621,42 @@ test.describe("Wiki rail: Work threads", () => {
       a.currentTime = 1150; // near the end of the 1.2 s flash
       return getComputedStyle(el).boxShadow;
     });
-    // Interpolated offsets (0.997px), so read the x offset of each shadow.
-    const xs = [...shadow.matchAll(/(-?[\d.]+)px -?[\d.]+px -?[\d.]+px -?[\d.]+px inset/g)].map((m) => parseFloat(m[1]!));
+    // Interpolated offsets (0.997px), so read the offsets of each shadow.
+    const offsets = (sh: string) => [...sh.matchAll(/(-?[\d.]+)px (-?[\d.]+)px -?[\d.]+px -?[\d.]+px inset/g)].map((m) => [parseFloat(m[1]!), parseFloat(m[2]!)] as const);
+    const xs = offsets(shadow).map(([x]) => x);
     expect(Math.max(...xs), shadow).toBeGreaterThan(0.9);
     expect(Math.min(...xs), shadow).toBeLessThan(-0.9);
+    // The row that closes the card keeps its bottom edge through the flash too.
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
+    const beta = page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${BETA}"]`);
+    const last = await beta.evaluate((el) => {
+      el.classList.add("reveal-flash");
+      const a = el.getAnimations()[0]!;
+      a.pause();
+      a.currentTime = 1150;
+      return getComputedStyle(el).boxShadow;
+    });
+    expect(Math.min(...offsets(last).map(([, y]) => y)), last).toBeLessThan(-0.9);
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
+  });
+
+  test("reduced motion: a card row takes no flash animation at all", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openReader(page, THREADS);
+    const name = await rowsIn(page, "threads").nth(0).evaluate((el) => {
+      el.classList.add("reveal-flash");
+      return getComputedStyle(el).animationName;
+    });
+    expect(name).toBe("none");
+  });
+
+  test("forced colours: the row that closes an open card keeps its left rule to the bottom", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active" });
+    await openReader(page, THREADS);
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
+    const beta = page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${BETA}"]`);
+    expect(await beta.evaluate((e) => getComputedStyle(e, "::before").bottom)).toBe("0px");
+    await cards(page).nth(1).locator(".wiki-thread-fold").click();
   });
 
   test("the series shows the lifted members as ghosts reading 'in a work thread above'; closing the card hands them back", async ({

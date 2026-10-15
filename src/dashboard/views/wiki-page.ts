@@ -974,14 +974,26 @@ export async function renderWikiPage(opts?: {
       width: 1px; background: var(--accent); pointer-events: none;
     }
     /* ⌖ Show in list on a card row: the flash animates box-shadow, so it
-       ends on the card's sides instead of wiping them for 1.2 s. */
-    .wiki-list-item[data-section="threads"].reveal-flash { animation-name: wiki-reveal-flash-thread; }
+       ends on the card's outline (the closing row's bottom edge included)
+       instead of wiping it for 1.2 s. Under no-preference only, so the
+       reduced-motion \`animation: none\` above stays the whole answer. */
+    @media (prefers-reduced-motion: no-preference) {
+      .wiki-list-item[data-section="threads"].reveal-flash { animation-name: wiki-reveal-flash-thread; }
+      .wiki-list-item[data-section="threads"]:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched)).reveal-flash {
+        animation-name: wiki-reveal-flash-thread-last;
+      }
+    }
     @keyframes wiki-reveal-flash-thread {
       from { box-shadow: inset 0 0 0 2px var(--accent); }
       to { box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent); }
     }
+    @keyframes wiki-reveal-flash-thread-last {
+      from { box-shadow: inset 0 0 0 2px var(--accent); }
+      to { box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent), inset 0 -1px var(--accent); }
+    }
     /* On the row that closes the card, the straight rule stops above the
-       rounded corner, which the inset shadow draws. */
+       rounded corner, which the inset shadow draws (not in forced colours,
+       which drop the shadow: there the rule runs to the bottom, below). */
     .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 8px; }
     /* A card's newest series plan: its dot is centred ON the card's edge. */
     .wiki-list-item.latest.thread-row:not(.wiki-series-cont)::after { left: -3.5px; }
@@ -996,6 +1008,7 @@ export async function renderWikiPage(opts?: {
     @media (forced-colors: active) {
       .wiki-list-item.thread-row::before { background: CanvasText; }
       .wiki-thread-card.open { border-width: 2px; border-bottom-width: 1px; }
+      .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 0; }
     }
     /* \`+N more\` under a closed series in Activity: opens the same fold as the
        series row above it. Indented to the member rows' depth. */

@@ -3316,6 +3316,17 @@ describe("buildRail — work threads", () => {
       ["plans/a.mdx", 2],
       ["plans/c.mdx", 1],
     ]);
+    // "Above" is literal: an open card BELOW a closed one does not take its
+    // pages from the count (a payload breaking D16, the only way to share one).
+    expect(
+      pages(build({ threads: [card("plans/c.mdx", [C]), card("plans/a.mdx", [A, D], { open: false }), card("plans/d.mdx", [D])] })),
+    ).toEqual([
+      ["plans/c.mdx", 1],
+      ["plans/a.mdx", 2],
+      ["plans/d.mdx", 1],
+    ]);
+    // A page listed twice in one card is one page.
+    expect(pages(build({ threads: [card("plans/a.mdx", [A, A, D], { open: false })] }))).toEqual([["plans/a.mdx", 2]]);
     // A page off the facets is not a row either.
     const facet = [C, D];
     expect(pages(build({ filtered: facet, facetOnly: facet, seriesGroups: groupSeries(facet), threads: [card("plans/c.mdx", [C, A], { open: false })] }))).toEqual([
