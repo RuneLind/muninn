@@ -819,6 +819,12 @@ export type RailEntry =
        *  this fold and as real rows under `Pinned`. Counted by the roll-up,
        *  never by `shown`. Absent (never `[]`) when none. */
       ghosts?: WikiListing[];
+      /** Why each of `ghosts` is one, index-aligned — the ghost rows' own
+       *  `reason`, carried here too so a CLOSED series (which emits no ghost
+       *  rows) still says it. Set only when a work-thread card lifted a page
+       *  this render; absent, every ghost is a pin's (D11: the model without
+       *  threads is main's). */
+      ghostReasons?: ("pinned" | "thread")[];
       /**
        * SERIES only, and only when a facet is hiding part of the series: how
        * many members this row stands for against how many the series holds in
@@ -1593,6 +1599,7 @@ export function buildRail(input: RailInput): RailModel {
     // ghost rows so the fold does not silently lose them.
     const allGhosts = present.filter((m) => sectionLifted.has(normalizeRel(m.relPath)));
     const ghosts = allGhosts.filter(shownHere);
+    const ghostReasons = ghosts.map((p): "pinned" | "thread" => (threadLifted.has(normalizeRel(p.relPath)) ? "thread" : "pinned"));
     // ⚠️ EVERY rule-4 child in the filtered set counts — unlike a FAMILY's
     // census below, where the lift really does take a page out of the slate for
     // that render. A series' census says which of its members this render holds,
@@ -1623,6 +1630,7 @@ export function buildRail(input: RailInput): RailModel {
       members,
       superseded,
       ...(ghosts.length ? { ghosts } : {}),
+      ...(ghosts.length && threadLifted.size ? { ghostReasons } : {}),
       // Only when the facets are really hiding part of the series: `3 of 3` is a
       // number that reports nothing and reads as a warning. `total` is optional
       // on `RailGroup` because a family and a month carry none; `?? shown` is
@@ -1644,14 +1652,7 @@ export function buildRail(input: RailInput): RailModel {
       // Ghosts last: they are a footnote about pages that are already on screen,
       // not content, and interleaving them into the date order would cost the
       // member rows their own.
-      for (const p of ghosts) {
-        entries.push({
-          kind: "ghost",
-          section,
-          page: p,
-          reason: threadLifted.has(normalizeRel(p.relPath)) ? "thread" : "pinned",
-        });
-      }
+      ghosts.forEach((p, i) => entries.push({ kind: "ghost", section, page: p, reason: ghostReasons[i]! }));
       return true;
     }
     const peek = peekOf(foldKey);

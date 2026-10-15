@@ -31,6 +31,12 @@
  * `worst` carries the fullest meta line a row can have — pill, ⚑, ✋ 12, NEW,
  * the work bar and the group chip — and the fit case measures it at 260px.
  *
+ * Those sessions also form WORK THREADS (PR 5), and the first card defaults
+ * OPEN, lifting its pages out of Activity (D13). These cases pin the Activity
+ * ranking itself, so `openReader` seeds that card CLOSED in the fold store
+ * (`closed:thread:plans/crowded.mdx`) — a closed card lifts nothing. The
+ * threads section is `e2e/wiki-rail-threads.spec.ts`'s.
+ *
  * No model calls and no writes.
  *
  * ENV PREREQUISITE: a working `.env` (`DATABASE_URL` at minimum) at the repo

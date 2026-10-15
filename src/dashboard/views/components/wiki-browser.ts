@@ -182,7 +182,7 @@ import {
   writeSort,
   writeThreadPin,
 } from "./wiki-recents-store.ts";
-import { threadCardHeaderHtml, threadTouchedHtml } from "./wiki-thread-view.ts";
+import { railGhostHtml, threadCardHeaderHtml, threadTouchedHtml } from "./wiki-thread-view.ts";
 import type { IndexWork } from "../../../wiki/work-focus.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
 import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
@@ -1729,20 +1729,9 @@ function renderList(): void {
     // must keep naming exactly one element per page (four e2e specs rely on it,
     // and `#wikiCount` would disagree with a second row for one page).
     if (entry.kind === "ghost") {
-      const title = displayTitleOf(entry.page);
       // Lifted by a pin, or by an open work-thread card (D13) — the note says
       // which section above holds the real row.
-      const inThread = entry.reason === "thread";
-      const note = inThread ? "in a work thread above" : "pinned above";
-      const where = inThread
-        ? "in an open work thread — its row is under Work threads, above"
-        : "pinned — its row is under Pinned, above";
-      html +=
-        `<div class="wiki-list-ghost wiki-series-cont" data-ghost-relpath="${esc(entry.page.relPath)}" data-ghost-reason="${entry.reason}"` +
-        ` title="${esc(title + "\n" + where)}">` +
-        `<div class="wiki-list-ghost-title">${esc(title)}</div>` +
-        `<div class="wiki-list-ghost-note">${note}</div>` +
-        `</div>`;
+      html += railGhostHtml(entry.page.relPath, displayTitleOf(entry.page), entry.reason);
       return;
     }
     // The `+N more` row under a CLOSED series in Activity: a second button for

@@ -76,6 +76,7 @@ import {
   type WikiListing,
 } from "../src/dashboard/views/components/wiki-filter.ts";
 import { buildRail, type RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
+import { railGhostNote, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
 
 /** A failure the script explains in one stderr line instead of a stack. */
 class ReplayError extends Error {}
@@ -176,7 +177,10 @@ function printThreadsSection(input: RailInput, at: number): void {
   for (const e of entries) {
     if (e.kind === "thread") {
       const c = e.card;
-      console.log(`  ${e.folded ? "▸" : "▾"} ${c.name}${c.pinned ? "  📌" : ""}  [${c.score.toFixed(2)}, ${c.sessions.length} sessions]`);
+      // The header the rail draws: name, then `threadMetaLine` — the view's own
+      // meta line, ✋ included (the owner's view: `movesPersonal` on).
+      console.log(`  ${e.folded ? "▸" : "▾"} ${c.name}${c.pinned ? "  📌" : ""}  [score ${c.score.toFixed(2)}]`);
+      console.log(`      ${threadMetaLine(c, at, true)}`);
     } else if (e.kind === "row") {
       row++;
       const fresh = e.created ? " NEW" : "";
@@ -188,17 +192,18 @@ function printThreadsSection(input: RailInput, at: number): void {
 }
 
 /** Every series that holds a ghost after the lift, and why each ghost is one —
- *  the group entry carries them whether its fold is open or closed. */
+ *  read off the group entry (`ghostReasons`), which carries them whether its
+ *  fold is open or closed; absent, no card lifted anything and every ghost is
+ *  a pin's. The note is the view's own (`railGhostNote`). */
 function printSeriesGhosts(input: RailInput): void {
   const rail = buildRail(input);
-  const inThread = new Set(rail.entries.flatMap((e) => (e.kind === "row" && e.section === "threads" ? [e.page.relPath] : [])));
   console.log(`\nSeries ghosts after the lift:`);
   let any = false;
   for (const e of rail.entries) {
     if (e.kind !== "group" || !e.ghosts?.length) continue;
     any = true;
     console.log(`  ${e.group.label} (${e.section}${e.folded ? ", closed" : ""}):`);
-    for (const g of e.ghosts) console.log(`     ghost ${g.relPath} — ${inThread.has(g.relPath) ? "in a work thread above" : "pinned above"}`);
+    e.ghosts.forEach((g, i) => console.log(`     ghost ${g.relPath} — ${railGhostNote(e.ghostReasons?.[i] ?? "pinned")}`));
   }
   if (!any) console.log("  none");
 }

@@ -5,6 +5,8 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  railGhostHtml,
+  railGhostNote,
   threadCardHeaderHtml,
   threadInstantLabel,
   threadMetaLine,
@@ -140,5 +142,29 @@ describe("threadTouchedHtml", () => {
     expect(html).toContain("A &amp; co");
     expect(html).toContain('href="/wiki?relPath=b.md"');
     expect(threadTouchedHtml("thread:x", [], () => "")).toBe("");
+  });
+});
+
+describe("railGhostHtml", () => {
+  // main (254aed2d)'s ghost row, verbatim — the markup a pin's ghost must keep
+  // without a sessions memo (D11). Literal on purpose: built from a template it
+  // would move with the code under test.
+  const MAIN_PINNED =
+    `<div class="wiki-list-ghost wiki-series-cont" data-ghost-relpath="plans/a&amp;b.mdx"` +
+    ` title="A &lt;b&gt; &quot;x&quot;\npinned — its row is under Pinned, above">` +
+    `<div class="wiki-list-ghost-title">A &lt;b&gt; &quot;x&quot;</div>` +
+    `<div class="wiki-list-ghost-note">pinned above</div>` +
+    `</div>`;
+
+  test("a pin's ghost is byte-identical to main's markup (D11)", () => {
+    expect(railGhostHtml("plans/a&b.mdx", 'A <b> "x"', "pinned")).toBe(MAIN_PINNED);
+  });
+
+  test("a work thread's ghost says so, and alone carries data-ghost-reason", () => {
+    const html = railGhostHtml("plans/a.mdx", "A", "thread");
+    expect(html).toContain(` data-ghost-reason="thread"`);
+    expect(html).toContain(`<div class="wiki-list-ghost-note">in a work thread above</div>`);
+    expect(html).toContain("its row is under Work threads, above");
+    expect(railGhostNote("pinned")).toBe("pinned above");
   });
 });

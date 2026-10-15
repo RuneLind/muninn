@@ -3222,6 +3222,23 @@ describe("buildRail — work threads", () => {
     expect(seriesGroup(m.entries).ghosts!.map((p) => p.relPath)).toEqual(["plans/a.mdx", "plans/b.mdx"]);
   });
 
+  test("a CLOSED series carries its ghosts' reasons on the group entry (the replay reads them, D20)", () => {
+    const m = build({ threads: [card("plans/a.mdx", [A])], pins: ["plans/b.mdx"] });
+    const g = seriesGroup(m.entries);
+    expect(g.folded).toBe(true);
+    expect(ghosts(m.entries)).toEqual([]);
+    expect(g.ghosts!.map((p, i) => [p.relPath, g.ghostReasons![i]])).toEqual([
+      ["plans/a.mdx", "thread"],
+      ["plans/b.mdx", "pinned"],
+    ]);
+  });
+
+  test("no threads: a pinned member's series carries no ghostReasons (D11, the model is main's)", () => {
+    const m = build({ pins: ["plans/b.mdx"] });
+    expect(seriesGroup(m.entries).ghosts!.map((p) => p.relPath)).toEqual(["plans/b.mdx"]);
+    expect(seriesGroup(m.entries)).not.toHaveProperty("ghostReasons");
+  });
+
   test("a PINNED page in an open card renders in the card, not under Pinned (the card claims first)", () => {
     const m = build({ threads: [card("plans/c.mdx", [C])], pins: ["plans/c.mdx"] });
     expect(sectionOf(m.entries, "plans/c.mdx")).toEqual(["threads"]);

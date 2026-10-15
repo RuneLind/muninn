@@ -128,3 +128,27 @@ export function threadTouchedHtml(foldKey: string, pages: readonly WikiListing[]
     `<span class="wiki-thread-touched-label">touched:</span> ${links}</div>`
   );
 }
+
+/** A ghost row's note: which section above holds the real row. */
+export function railGhostNote(reason: "pinned" | "thread"): string {
+  return reason === "thread" ? "in a work thread above" : "pinned above";
+}
+
+/** A series GHOST row (see `renderList`): a dim placeholder for a member lifted
+ *  by a pin or an open work-thread card. `data-ghost-reason` rides only the
+ *  thread case, so a pin's ghost is byte-identical to the markup before work
+ *  threads (D11). */
+export function railGhostHtml(relPath: string, title: string, reason: "pinned" | "thread"): string {
+  const where =
+    reason === "thread"
+      ? "in an open work thread — its row is under Work threads, above"
+      : "pinned — its row is under Pinned, above";
+  return (
+    `<div class="wiki-list-ghost wiki-series-cont" data-ghost-relpath="${esc(relPath)}"` +
+    (reason === "thread" ? ` data-ghost-reason="thread"` : "") +
+    ` title="${esc(title + "\n" + where)}">` +
+    `<div class="wiki-list-ghost-title">${esc(title)}</div>` +
+    `<div class="wiki-list-ghost-note">${railGhostNote(reason)}</div>` +
+    `</div>`
+  );
+}

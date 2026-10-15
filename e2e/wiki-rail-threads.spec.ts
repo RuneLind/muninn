@@ -105,7 +105,11 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
         files: s.files.map(([p, edits]) => ({ p, edits, firstMs: at - 30 * 60_000, lastMs: at })),
       };
     });
-    return json({ form: "sessions", root, sessions, truncated: false });
+    // The real answer's shape (claude-usage `src/routes.ts`): it echoes the
+    // window and the limit too, `until` defaulting to now.
+    const since = Number(url.searchParams.get("since"));
+    const until = url.searchParams.has("until") ? Number(url.searchParams.get("until")) : Date.now();
+    return json({ form: "sessions", root, since, until, limit: 200, truncated: false, sessions });
   }
   const until = url.searchParams.get("until");
   if (until) {
