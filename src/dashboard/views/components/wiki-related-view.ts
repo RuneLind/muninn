@@ -16,7 +16,6 @@ import { escHtml as esc } from "./escape.ts";
 import {
   displayTitleOf,
   pageDateSignal,
-  pageWorkedMs,
   workedAxisSource,
   workedChip,
   type WikiListing,
@@ -148,12 +147,13 @@ function seriesPillHtml(p: WikiListing, labelOf?: (p: WikiListing) => string): s
 }
 
 /** The rows in the chosen order. `strongest` is the server's order, unchanged;
- *  `newest` sorts on `pageWorkedMs` at ONE instant — the date the age column
- *  shows, so the shown ages always read in order — strength breaking a tie. */
+ *  `newest` sorts on the SHOWN worked instant at ONE instant — the date the age
+ *  column shows, so the shown ages always read in order, and a touched
+ *  neighbour ranks by its touch (D22) — strength breaking a tie. */
 export function orderRelated(items: RelatedListing[], order: RelatedOrder, now: number): RelatedListing[] {
   if (order !== "newest") return items;
   return items
-    .map((p, i) => ({ p, i, ms: pageWorkedMs(p, now) }))
+    .map((p, i) => ({ p, i, ms: pageDateSignal(p, "worked", now)?.ms ?? 0 }))
     .sort((a, b) => b.ms - a.ms || (b.p.strength ?? 0) - (a.p.strength ?? 0) || a.i - b.i)
     .map(({ p }) => p);
 }

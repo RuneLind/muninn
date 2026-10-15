@@ -166,6 +166,24 @@ describe("filters", () => {
     expect(order(aged, "age:>14")).toEqual(["old.md"]);
   });
 
+  test("age: reads the SHOWN worked instant; the rank reads the sort instant (D22)", () => {
+    // Touched two hours ago, its pre-touch position 40 days back.
+    const touched = pg("touched.md", {
+      title: "T",
+      workedMs: NOW - 2 * 3_600_000,
+      work: { sinceMs: NOW - 8 * DAY, preMs: NOW - 40 * DAY, state: "T", events: [[NOW - 2 * 3_600_000, 1, "touch"]] },
+    });
+    const focused = pg("focused.md", {
+      title: "F",
+      workedMs: NOW - 5 * DAY,
+      work: { sinceMs: NOW - 8 * DAY, state: "F", focusMs: NOW - 5 * DAY, events: [[NOW - 5 * DAY, 4, "focus"]] },
+    });
+    // The page's literal age: it was written today.
+    expect(order([touched, focused], "age:<1")).toEqual(["touched.md"]);
+    // The rank: what was WORKED on leads, the touch does not lift its page.
+    expect(order([touched, focused], "age:<100")).toEqual(["focused.md", "touched.md"]);
+  });
+
   test("#tag is a tag prefix", () => {
     const tagged = [pg("a.md", { tags: ["operations"] }), pg("b.md", { tags: ["ux"] })];
     expect(order(tagged, "#oper")).toEqual(["a.md"]);

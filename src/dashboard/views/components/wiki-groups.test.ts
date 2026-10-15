@@ -16,6 +16,7 @@ import {
   bySeriesDateDesc,
   orderSeriesGroups,
   workedDateSignal,
+  workedShownDay,
   GROUP_FAMILIES_TOGGLE_KEY,
   NO_STATUS_WORD,
   SERIES_CONTINUE_MAX,
@@ -1769,5 +1770,140 @@ describe("seriesStripOrder", () => {
     const rows = ["a", "b", "c"];
     expect(seriesStripOrder(rows)).toEqual(["c", "b", "a"]);
     expect(rows).toEqual(["a", "b", "c"]);
+  });
+});
+
+// ── The worked rung over session work facts (D14, D15, D22) ─────────────────
+
+describe("the fold and the strip under the work rung", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+  const at = (day: string, h = 12) => new Date(`${day}T${String(h).padStart(2, "0")}:00:00`).getTime(); // local
+  const SINCE = NOW - 8 * 86_400_000;
+  /** A series member with session events: F (focus at `focus`), else T/T0. */
+  const worker = (
+    relPath: string,
+    o: { focus?: number; touch?: number; pre?: number; created?: number; workedMs?: number },
+  ): WikiListing => {
+    const events: Array<[number, number, "focus" | "touch" | "pass"]> = [];
+    if (o.focus) events.push([o.focus, 5, "focus"]);
+    if (o.touch) events.push([o.touch, 1, "touch"]);
+    events.sort((a, b) => b[0] - a[0]);
+    return page({
+      relPath,
+      series: "s",
+      ...(o.created ? { gitCreatedMs: o.created } : {}),
+      workedMs: o.workedMs ?? events[0]![0],
+      work: {
+        sinceMs: SINCE,
+        ...(o.pre ? { preMs: o.pre } : {}),
+        state: o.focus ? "F" : o.pre ? "T" : "T0",
+        ...(o.focus ? { focusMs: o.focus } : {}),
+        events,
+      },
+    });
+  };
+
+  const f = worker("plans/f.mdx", { focus: at("2026-09-18"), touch: at("2026-09-21") });
+  const t = worker("plans/t.mdx", { touch: at("2026-09-21", 9), pre: at("2026-09-10") });
+  const t0 = worker("plans/t0.mdx", { touch: at("2026-09-20"), created: at("2026-09-05") });
+
+  test("F sorts on its newest FOCUS event, T on its pre-touch position, T0 on its creation", () => {
+    expect(workedDateSignal(f, NOW)).toMatchObject({ day: "2026-09-18", rank: 4 });
+    expect(workedDateSignal(t, NOW)).toMatchObject({ day: "2026-09-10", rank: 4 });
+    expect(workedDateSignal(t0, NOW)).toMatchObject({ day: "2026-09-05", rank: 4 });
+    const fold = groupSeries([t0, t, f], [t0, t, f], NOW)[0]!.members.map((m) => m.relPath);
+    expect(fold).toEqual(["plans/f.mdx", "plans/t.mdx", "plans/t0.mdx"]);
+    // The strip is the fold reversed, and prints each member's SHOWN day: a
+    // touched member its real date, marked — out of order there, by design.
+    const strip = seriesStripOrder(groupSeries([t0, t, f], [t0, t, f], NOW)[0]!.members);
+    expect(strip.map((m) => [m.relPath, workedShownDay(m, NOW).day, !!workedShownDay(m, NOW).touched])).toEqual([
+      ["plans/t0.mdx", "2026-09-20", true],
+      ["plans/t.mdx", "2026-09-21", true],
+      ["plans/f.mdx", "2026-09-18", false],
+    ]);
+  });
+
+  test("a same-day tie on the sort instant breaks on the shown instant, then relPath", () => {
+    const a = worker("plans/a.mdx", { touch: at("2026-09-21", 8), pre: at("2026-09-10") });
+    const z = worker("plans/z.mdx", { touch: at("2026-09-21", 20), pre: at("2026-09-10") });
+    for (const rows of [[a, z], [z, a]]) {
+      expect([...rows].sort((x, y) => byWorkedDateDesc(x, y, NOW)).map((p) => p.relPath)).toEqual(["plans/z.mdx", "plans/a.mdx"]);
+    }
+  });
+
+  test("groupMonths files a touched page under its SORT month, not its touch", () => {
+    const t = worker("notes/t.mdx", { touch: at("2026-09-21"), pre: at("2026-08-20") });
+    expect(groupMonths([t], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-08"]);
+    // No work facts: today's worked label decides.
+    const bare = { ...t, work: undefined };
+    expect(groupMonths([bare], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-09"]);
+  });
+
+  test("a page with no events keeps today's fold rung exactly", () => {
+    const p = page({ relPath: "plans/n.mdx", workedMs: at("2026-09-21"), status_date: "2026-09-01" });
+    expect(workedDateSignal(p, NOW)).toEqual({ ms: Date.parse("2026-09-21T00:00:00Z"), day: "2026-09-21", rank: 4 });
+    expect(workedShownDay(p, NOW)).toEqual({ day: "2026-09-21" });
+  });
+});
+
+describe("T/T0 days on the worked rung, west of UTC", () => {
+  // Bun 1.3, `delete process.env.TZ` leaves the previously-set zone in place.
+  const PREV = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  beforeAll(() => {
+    process.env.TZ = "America/New_York";
+  });
+  afterAll(() => {
+    process.env.TZ = PREV;
+  });
+  const NOW = Date.parse("2026-10-15T12:00:00Z");
+  const SINCE = NOW - 8 * 86_400_000;
+  const touched = (relPath: string, at: number, over: Partial<WikiListing>, preMs?: number): WikiListing =>
+    page({
+      relPath,
+      ...over,
+      work: { sinceMs: SINCE, ...(preMs ? { preMs } : {}), state: preMs ? "T" : "T0", events: [[at, 1, "touch"]] },
+    });
+
+  test("the zone really is west of UTC, or this block proves nothing", () => {
+    expect(new Date(Date.parse("2026-10-01T00:00:00Z")).getDate()).toBe(30);
+  });
+
+  test("a T0 page sorts and files under its AUTHORED created: day", () => {
+    const at = Date.parse("2026-10-14T15:00:00Z");
+    const p = touched("notes/a.mdx", at, { created: "2026-10-01", workedMs: at });
+    expect(workedDateSignal(p, NOW)).toMatchObject({ day: "2026-10-01", ms: Date.parse("2026-10-01T00:00:00Z") });
+    expect(workedShownDay({ ...p, work: { ...p.work!, events: [[at, 1, "focus"]], state: "F", focusMs: at } }, NOW).day).toBe("2026-10-14");
+    expect(groupMonths([p], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+  });
+
+  test("a T0 page with no creation signal still files in a month (today's chain)", () => {
+    const at = NOW - 2 * 3_600_000;
+    const p = touched("notes/b.mdx", at, { workedMs: at });
+    expect(groupMonths([p], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+    expect(workedDateSignal(p, NOW)).toMatchObject({ day: "2026-10-15" });
+  });
+
+  test("a T0 page with no creation signal files under its chain's authored updated: day, as state N does", () => {
+    const at = Date.parse("2026-10-14T15:00:00Z");
+    // Today's chain is the frontmatter `updated:` (UTC midnight, the 30th in New York).
+    const p = touched("notes/c.mdx", at, { updated: "2026-10-01" });
+    const bare = { ...p, work: undefined };
+    expect(groupMonths([bare], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+    expect(groupMonths([p], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+    // A T page whose pre-touch position the guard rejects falls through the same way.
+    const t = touched("notes/d.mdx", at, { updated: "2026-10-01" }, NOW + 30 * 86_400_000);
+    expect(groupMonths([t], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+  });
+
+  test("a T page with no ledger write prints its SHOWN day on the strip", () => {
+    const p = touched(
+      "plans/t.mdx",
+      Date.parse("2026-10-10T15:00:00Z"),
+      { status_date: "2026-08-01", gitCreatedMs: Date.parse("2026-06-01T16:00:00Z"), gitTouchedMs: Date.parse("2026-10-10T16:00:00Z") },
+      Date.parse("2026-09-01T16:00:00Z"),
+    );
+    const shown = workedShownDay(p, NOW);
+    expect(shown.day).toBe("2026-10-10");
+    expect(shown.touched?.label).toBe("2026-10-10");
   });
 });

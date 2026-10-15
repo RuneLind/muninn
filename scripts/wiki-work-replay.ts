@@ -3,7 +3,7 @@
  * Replay the work facts of one wiki as of an instant (plan
  * `muninn-wiki-work-threads`, D17):
  *
- *   bun scripts/wiki-work-replay.ts --wiki <name> --at <iso>
+ *   bun scripts/wiki-work-replay.ts --wiki <name> --at <iso> [--pos <relPath>]…
  *
  * Builds the index on a `git clone --shared` of the wiki's repo checked out at
  * the newest first-parent commit authored at or before `at` — content, series,
@@ -22,14 +22,21 @@
  *     wikis, e.g. mimir) and the bots under `MUNINN_BOTS_DIR` (absolute; default
  *     the checkout's `bots/`), whose `wikiDir` registers a bot wiki.
  *
- * Known limits: a session that spans `at` (its `last` is after it) is dropped.
- * Upstream already cuts its rows at `until`, so what it keeps of such a session
- * is only the files it finished before `at`: its per-file counts and its
- * prompt-to-file attribution describe a session that was still running. Dropping
- * it keeps the replay to sessions that had ended. Opencode titles are
- * latest-wins upstream, so `named` reads today's title; a page written only by a
- * dropped session gets a pre-`at` worked date from the summary form but no
- * events.
+ * A session that spans `at` (resumed after it) is CLIPPED, not dropped
+ * (`clipSessionsAt`): it keeps the file rows upstream returns at `until = at`,
+ * with its `last` clamped to the newest of those rows, else `at`. The summary
+ * form at `until = at` drops the same rows, so the two inputs agree.
+ *
+ * Known limits: upstream drops a whole (session, path, op) row whose last write
+ * is after `at`, so a clipped session keeps only the files it finished before
+ * `at`. A file it first wrote before `at` and wrote again after is missing,
+ * though the live rail at `at` saw it; `bulk` is computed over the kept rows
+ * and can differ from the live answer (`first` is unaffected). Its
+ * prompt-to-file attribution (`text`) is not cut at `at`. Opencode titles are
+ * latest-wins upstream, so `named` reads today's title.
+ *
+ * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
+ * row's derivation) and the Worked-on top 10 (sort instant, state, shown date).
  *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
  * written anywhere but the temp clone, which is removed on exit.
@@ -41,15 +48,31 @@ import path from "node:path";
 import { getWikiRegistry } from "../src/wiki/registry-memo.ts";
 import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
-import { parsePreWindow, parseWorkSessions, refreshWorkSessions } from "../src/wiki/work-sessions.ts";
+import { clipSessionsAt, parsePreWindow, parseWorkSessions, refreshWorkSessions } from "../src/wiki/work-sessions.ts";
 import { parseWorkedPages } from "../src/wiki/worked-ledger.ts";
 import { threadScore, WORK_WINDOW_MS, type WorkThread } from "../src/wiki/work-focus.ts";
 import { claudeUsageHttpStatus, claudeUsageJson } from "../src/utils/claude-usage-fetch.ts";
 import { projectCounts, toListing } from "../src/dashboard/routes/wiki-routes.ts";
 import { railInputFor } from "../src/dashboard/views/components/wiki-rail-input.ts";
-import { DEFAULT_ACTIVITY_WEIGHTS, parseActivityWeights, workedGateFor } from "../src/dashboard/views/components/wiki-activity-rank.ts";
-import { resolveSortMode, type WikiFilters, type WikiListing } from "../src/dashboard/views/components/wiki-filter.ts";
-import type { RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
+import {
+  DEFAULT_ACTIVITY_WEIGHTS,
+  pageWorkTerm,
+  parseActivityWeights,
+  rankActivity,
+  workedGateFor,
+  type ActivityWeights,
+  type WorkedGate,
+} from "../src/dashboard/views/components/wiki-activity-rank.ts";
+import {
+  isMetaPage,
+  resolveSortMode,
+  sortPages,
+  workedShownSignal,
+  workedSortMs,
+  type WikiFilters,
+  type WikiListing,
+} from "../src/dashboard/views/components/wiki-filter.ts";
+import { buildRail, type RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
 
 /** A failure the script explains in one stderr line instead of a stack. */
 class ReplayError extends Error {}
@@ -100,7 +123,11 @@ async function stampMtimes(repo: string): Promise<number> {
 
 /** The viewer defaults the shipped rail opens with: no stored sort, families
  *  off, no pins, no open folds, no filters. */
-function defaultRailInput(index: WikiIndex, listing: WikiListing[], now: number): { input: RailInput; sort: string } {
+function defaultRailInput(
+  index: WikiIndex,
+  listing: WikiListing[],
+  now: number,
+): { input: RailInput; sort: string; weights: ActivityWeights; gate: WorkedGate } {
   const filters: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "", status: "", followups: "", waiting: "", project: "", jira: "" };
   const coverage = index.workedCoverage;
   const mode = resolveSortMode({
@@ -110,16 +137,61 @@ function defaultRailInput(index: WikiIndex, listing: WikiListing[], now: number)
     workedShown: coverage ? coverage.matched > 0 : null,
   });
   const weights = index.readerConfig?.activity ? parseActivityWeights(index.readerConfig.activity).weights : DEFAULT_ACTIVITY_WEIGHTS;
+  const gate = workedGateFor(listing, weights, now, coverage?.asOfMs);
   const input = railInputFor(
     {
       allPages: listing,
       projects: projectCounts(index.pages),
       activityWeights: weights,
-      workedGate: workedGateFor(listing, weights, now, coverage?.asOfMs),
+      workedGate: gate,
     },
     { mode, now, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [] },
   );
-  return { input, sort: mode };
+  return { input, sort: mode, weights, gate };
+}
+
+/** The pre-lift Activity ranking, rows 1–10: the same `rankActivity` call
+ *  `railInputFor` makes over the same rows, with room for ten. */
+function printActivity(input: RailInput, weights: ActivityWeights, gate: WorkedGate, at: number): void {
+  const rows = rankActivity(input.filtered, { ...weights, rows: Math.max(weights.rows, 10) }, at, gate).slice(0, 10);
+  console.log(`\nActivity, pre-lift (gate ${gate.open ? "open" : "closed"}: ${gate.covered}/${gate.candidates}, rows ${weights.rows}):`);
+  rows.forEach((r, i) => {
+    const work = pageWorkTerm(r.page, at);
+    const bar = r.page.work ? `  work ${work.toFixed(2)}` : "";
+    console.log(`${String(i + 1).padStart(2)}. ${r.score.toFixed(2)} ${r.kind.padEnd(7)} ${r.page.relPath}${bar}`);
+    console.log(`    ${r.why}`);
+  });
+}
+
+/** The Activity section `buildRail` draws from that input — each row, and each
+ *  closed series with the members its peek shows (D12). */
+function printActivitySection(input: RailInput): void {
+  console.log(`\nActivity section (buildRail):`);
+  for (const e of buildRail(input).entries) {
+    if (e.section !== "activity" || e.kind === "header") continue;
+    if (e.kind === "group") console.log(`  ▸ series ${e.group.label} (${e.members.length} members${e.folded ? ", closed" : ""})`);
+    else if (e.kind === "row") console.log(`  ${e.member ? "    " : ""}${e.page.relPath}`);
+    else if (e.kind === "more") console.log(`      +${e.hidden} more`);
+  }
+}
+
+/** The Worked-on order, top 10, plus the position of every `--pos` page: the
+ *  rail's own sort, bookkeeping sunk. */
+function printWorkedOn(input: RailInput, at: number): void {
+  const all = sortPages(input.filtered, "worked", at).filter((p) => !isMetaPage(p));
+  const watch = process.argv.flatMap((a, i) => (process.argv[i - 1] === "--pos" ? [a] : []));
+  const rows = all.slice(0, 10);
+  console.log(`\nWorked on, top 10:`);
+  for (const rel of watch) {
+    const i = all.findIndex((p) => p.relPath === rel);
+    console.log(`   --pos ${rel}: ${i < 0 ? "not listed" : `row ${i + 1} of ${all.length}`}`);
+  }
+  rows.forEach((p, i) => {
+    const shown = workedShownSignal(p, at);
+    const state = p.work?.state ?? "N";
+    const mark = shown.touched ? `  touched ${shown.touched.label}` : "";
+    console.log(`${String(i + 1).padStart(2)}. ${new Date(workedSortMs(p, at)).toISOString().slice(0, 16)} [${state}] ${p.relPath}  shown ${shown.label}${mark}`);
+  });
 }
 
 function displayTitle(index: WikiIndex, relPath: string): string {
@@ -187,10 +259,8 @@ async function main(): Promise<void> {
   for (const [what, r] of checks) {
     if (!r.ok) throw new ReplayError(`the ledger's ${what} answer did not parse: ${r.reason}: ${r.detail}`);
   }
-  const raw = sessionsBody as { sessions: { last: number }[] };
-  const all = raw.sessions;
-  const kept = all.filter((s) => s.last <= at);
-  const spanning = all.length - kept.length;
+  const raw = sessionsBody as { sessions: { last: number; files?: { lastMs: number }[] }[] };
+  const { sessions: kept, clipped } = clipSessionsAt(raw.sessions, at);
 
   // The clone, at the commit authored at or before `at`.
   const toplevel = (await git(registeredRoot, ["rev-parse", "--show-toplevel"])).trim();
@@ -228,7 +298,7 @@ async function main(): Promise<void> {
 
     console.log(`wiki ${entry.name} at ${new Date(at).toISOString()}`);
     console.log(`commit ${commit.sha.slice(0, 10)} (${new Date(commit.at * 1000).toISOString()}), ${index.pages.length} pages, ${stamped} mtimes set`);
-    console.log(`sessions: ${kept.length} kept, ${spanning} dropped (span --at); window from ${new Date(sinceMs).toISOString()}`);
+    console.log(`sessions: ${kept.length} kept, ${clipped} clipped (span --at); window from ${new Date(sinceMs).toISOString()}`);
     printThreads(index, index.work?.threads ?? [], at);
 
     // The rail input the shipped viewer defaults produce — PR 4 prints
@@ -236,6 +306,9 @@ async function main(): Promise<void> {
     // `buildRail` sections.
     const rail = defaultRailInput(index, listing, at);
     console.log(`\nRail input: sort ${rail.sort}, ${rail.input.filtered.length} rows, ${rail.input.activity?.length ?? 0} Activity rows`);
+    printActivity(rail.input, rail.weights, rail.gate, at);
+    printActivitySection(rail.input);
+    printWorkedOn(rail.input, at);
   } finally {
     await cleanup();
   }

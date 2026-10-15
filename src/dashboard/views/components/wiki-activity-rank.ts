@@ -42,14 +42,19 @@
 
 import { normalizeRel as relKey } from "./wiki-nav.ts";
 import {
+  CHANGED_SINCE_MIN_MS,
   displayTitleOf,
   isImplausibleFutureDate,
   isMetaPage,
   isUsableWorkedMs,
   localDay,
+  newestWorkEvent,
   pageDateSignal,
+  pageWorkState,
+  usableWorkEvents,
   type WikiListing,
 } from "./wiki-filter.ts";
+import { rawWork, type PageWork, type WorkEvent } from "../../../wiki/work-focus.ts";
 
 /**
  * The ranking's knobs. The four percent knobs are 0–100 with the prototype
@@ -152,6 +157,65 @@ const MS_PER_DAY = 86_400_000;
  * which is the intent: a much-linked old page's edit leaves the section sooner.
  */
 export const ACTIVITY_MIN_SCORE = 0.02;
+
+/**
+ * The work term's ceiling (plan `muninn-wiki-work-threads`, D5). Above
+ * `newScore`'s 1.0 and a live plan change's 1.12 on purpose: heavy session work
+ * outranks a fresh creation. Checked on the plan's named replay (2026-10-15):
+ * its heaviest page (raw 7.06) scores 1.29 over same-hour creations at 1.00.
+ */
+export const WORK_CAP = 1.5;
+/** The raw work at which the term reaches half its cap — how much decayed,
+ *  log-scaled editing it takes to count as heavy. */
+export const WORK_SAT = 2.5;
+/** D12: a closed series in Activity peeks at members whose work term clears
+ *  this. 0.7, not the plan's 0.75: on the named replay the thread's second
+ *  focus page scored 0.73 and dropped behind `+N more` at 0.75. */
+export const WORK_PEEK_MIN = 0.7;
+/** D12: at most this many peeked members by work term. */
+export const WORK_PEEK_MAX = 5;
+
+/** `workTerm` for a raw work sum: `WORK_CAP × (1 − 2^(−raw / WORK_SAT))`. */
+export function workTermFor(raw: number): number {
+  return raw > 0 ? WORK_CAP * (1 - Math.pow(2, -raw / WORK_SAT)) : 0;
+}
+
+/** What a page's usable events say at `now`: the events the future guard
+ *  accepts, their raw sum and term, the newest one, the instant a winning work
+ *  term dates the row from, and the `why` clause naming that instant. */
+interface WorkSummary {
+  events: WorkEvent[];
+  raw: number;
+  term: number;
+  newestEvent: number;
+  /** State F: the newest focus event. T/T0: the newest event (D22). */
+  workMs: number;
+  clause: string;
+}
+
+/** The one derivation the score, the bar and the term share. Undefined when no
+ *  event is usable, so the caller takes the no-events path. */
+function workSummary(work: PageWork, now: number): WorkSummary | undefined {
+  const events = usableWorkEvents(work, now);
+  const newest = newestWorkEvent(events);
+  if (!newest) return undefined;
+  const raw = rawWork(events, now);
+  const term = workTermFor(raw);
+  const focused = work.state === "F" && isUsableWorkedMs(work.focusMs, now);
+  const workMs = focused ? work.focusMs! : newest[0];
+  return { events, raw, term, newestEvent: newest[0], workMs, clause: workClause(events, now, workMs, focused, raw, term) };
+}
+
+/**
+ * A page's work term at `now`, from its shipped events — 0 for a page with none
+ * (state N), for one whose events are all pass markers (D4) and for one whose
+ * events the future guard rejects. A FACT about the page, not gated: the caller
+ * decides whether the worked gate lets it score.
+ */
+export function pageWorkTerm(page: Pick<WikiListing, "work">, now: number): number {
+  const w = pageWorkState(page);
+  return w ? workTermFor(rawWork(usableWorkEvents(w, now), now)) : 0;
+}
 
 /** One ranked row: the page, which signal won, its score and the sentence that
  *  explains the placement (rendered as the row's `title=`). */
@@ -632,6 +696,12 @@ function scorePage(
   now: number,
   substitute: Pick<WorkedGate, "asOfMs"> | null,
 ): ActivityRow {
+  // D5: while the gate is open, a page with in-window events scores on its
+  // work; one without keeps the path below exactly.
+  // A page whose every event the future guard rejects has no usable event.
+  const work = substitute ? pageWorkState(page) : undefined;
+  const summary = work && workSummary(work, now);
+  if (work && summary) return scoreWorkedPage(page, w, now, summary);
   // ONE derivation per signal, because each carries three facts this function
   // needs: the stamp, the label the `why` sentence must quote, and (for the update
   // signal) the kind the `isEdit` gate reads.
@@ -755,4 +825,100 @@ function scorePage(
   if (worked && kind === "changed") row.worked = true;
   newestOf.set(row, Math.max(createdMs, isEdit ? changeMs : 0));
   return row;
+}
+
+/**
+ * One page's score while the worked gate is open AND the page carries in-window
+ * events (plan `muninn-wiki-work-threads`, D5, the state table's F/T/T0 rows):
+ *
+ *     score = max(newScore, workTerm, lateChange)
+ *
+ * `newScore` is the creation term the ordinary path computes. `workTerm` is
+ * {@link workTermFor} over the decayed edit sum — no hub, age, type or
+ * `changedWeight` factor, and no `isEdit`/`isChange` gate, since a session
+ * event IS a known edit. `lateChange` is the ordinary change term computed
+ * WITHOUT substitution, counted only when the update lands at least
+ * `CHANGED_SINCE_MIN_MS` (24 h) after the page's newest event: commit lag runs
+ * from seconds past a day, so a shorter bound would let the late commit of a
+ * link touch rank as a change. The gate's demotion and its "no session write on
+ * record" clause do not apply here — the events are the record.
+ *
+ * The row's kind is `new` when the creation term wins, else `changed`; its age
+ * runs from the WINNING term (creation, the newest focus event — the newest
+ * event on a page with none — or the update), so the cell and the `why` agree.
+ */
+function scoreWorkedPage(
+  page: WikiListing,
+  w: ActivityWeights,
+  now: number,
+  { events, term: workTerm, newestEvent, workMs, clause }: WorkSummary,
+): ActivityRow {
+  const created = pageDateSignal(page, "added", now);
+  const updated = pageDateSignal(page, "updated", now);
+  const createdMs = created?.ms ?? 0;
+  const updMs = updated?.ms ?? 0;
+  const newScore = createdMs > 0 ? Math.pow(0.5, (now - createdMs) / MS_PER_DAY / w.halfLifeNewDays) : 0;
+  // The unsubstituted change term: today's `changed` row, stamped at the update.
+  const unsub = scorePage(page, w, now, null);
+  const lateCounts = unsub.kind === "changed" && updMs - newestEvent >= CHANGED_SINCE_MIN_MS;
+  const lateChange = lateCounts ? unsub.score : 0;
+
+  const createdPart = `created ${agePhrase(createdMs, now, created?.label)}`;
+  let row: ActivityRow;
+  if (newScore >= workTerm && newScore >= lateChange) {
+    row = { page, kind: "new", score: newScore, why: `${createdPart} → ${newScore.toFixed(2)}; ${clause}`, ageMs: now - createdMs };
+  } else if (workTerm >= lateChange) {
+    const extra = newScore > 0 ? `; ${createdPart} → ${newScore.toFixed(2)}` : "";
+    row = { page, kind: "changed", score: workTerm, why: clause + extra, ageMs: now - workMs, worked: true };
+  } else {
+    row = { page, kind: "changed", score: lateChange, why: `${unsub.why}; ${clause}`, ageMs: now - updMs };
+  }
+  // D4: a pass is not work, so it never makes this page "newer" for its
+  // parent's `newerChildren`. A touch is a session write and counts.
+  const newestWork = newestWorkEvent(events, ([, , kind]) => kind !== "pass")?.[0] ?? 0;
+  newestOf.set(row, Math.max(createdMs, newestWork, lateCounts ? updMs : 0));
+  return row;
+}
+
+/** The rail row's work bar: how many of its four steps are lit for a work
+ *  term, 0 for a page whose events are all pass markers. */
+export const WORK_BAR_STEPS = 4;
+export function workBarLevel(term: number): number {
+  if (!(term > 0)) return 0;
+  return Math.min(WORK_BAR_STEPS, Math.max(1, Math.ceil((term / WORK_CAP) * WORK_BAR_STEPS)));
+}
+
+/**
+ * The work bar for a rail row: `null` on a page with no usable in-window event (the
+ * row draws none), else its level and the hover — the same clause the Activity
+ * `why` carries. Gate-free: the bar states a fact about the page, while the
+ * gate decides only whether that fact scores.
+ */
+export function pageWorkBar(page: Pick<WikiListing, "work">, now: number): { level: number; title: string } | null {
+  const w = pageWorkState(page);
+  const summary = w && workSummary(w, now);
+  if (!summary) return null;
+  const level = workBarLevel(summary.term);
+  return { level, title: `Work ${level} of ${WORK_BAR_STEPS}: ${summary.clause}` };
+}
+
+/** The `why` clause naming a page's work: the sessions that focused on it and
+ *  their edits, the touches, the passes, the instant a winning work term dates
+ *  the row from (`workMs`, so the clause and the age cell agree), and the two
+ *  numbers. Edits are weighted sums (an attachment counts at half weight),
+ *  rounded, hence the "≈". */
+function workClause(events: readonly WorkEvent[], now: number, workMs: number, focused: boolean, raw: number, workTerm: number): string {
+  const tally = { focus: [0, 0], touch: [0, 0], pass: [0, 0] } as Record<"focus" | "touch" | "pass", [number, number]>;
+  for (const [, edits, kind] of events) {
+    tally[kind][0]++;
+    tally[kind][1] += edits;
+  }
+  const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  const edits = (sum: number) => "≈" + n(Math.round(sum), "edit", "edits");
+  const parts: string[] = [];
+  if (tally.focus[0]) parts.push(`focused in ${n(tally.focus[0], "session", "sessions")} (${edits(tally.focus[1])})`);
+  if (tally.touch[0]) parts.push(`touched in ${n(tally.touch[0], "session", "sessions")} (${edits(tally.touch[1])})`);
+  if (tally.pass[0]) parts.push(`${n(tally.pass[0], "maintenance pass", "maintenance passes")} (weight 0)`);
+  const newest = workMs > 0 ? `, newest ${focused ? "focus " : ""}${agePhrase(workMs, now)}` : "";
+  return `${parts.join(", ")}${newest}: raw ${raw.toFixed(2)} → work ${workTerm.toFixed(2)}`;
 }

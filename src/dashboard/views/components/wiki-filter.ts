@@ -10,7 +10,7 @@
 import { relationsCount, type IssueRelation } from "../../../wiki/trackers/types.ts";
 import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 import { parseIssueRoot } from "../../../wiki/graph-types.ts";
-import type { PageWork } from "../../../wiki/work-focus.ts";
+import type { PageWork, WorkEvent } from "../../../wiki/work-focus.ts";
 
 /**
  * A wiki page's type. Independent client-safe copy of the store's alias (this file
@@ -634,7 +634,7 @@ export function anchorNow(clockNow: number, scannedAt: number | null | undefined
  */
 export type WikiRecencyFields = Pick<
   WikiListing,
-  "updated" | "created" | "gitCreatedMs" | "gitTouchedMs" | "gitDirty" | "mtimeMs" | "workedMs"
+  "updated" | "created" | "gitCreatedMs" | "gitTouchedMs" | "gitDirty" | "mtimeMs" | "workedMs" | "work" | "birthtimeMs"
 >;
 
 function authoredUpdatedDate(
@@ -804,6 +804,7 @@ export function pageHeaderDates(
         out.updated = src.changedSince;
         out.changedSince = true;
       }
+      if (src.touched) out.touched = src.touched;
       return out;
     }
   }
@@ -816,7 +817,14 @@ export function pageHeaderDates(
         : created === updated
           ? { created }
           : { created, updated };
-  if (opts.ledger) out.noSession = true;
+  if (opts.ledger) {
+    // A bash-only touch has no ledger summary row, so it lands here: its events
+    // are the record (D5), so no "no session" claim, and its mark names the touch.
+    const w = pageWorkState(p);
+    if (!w || usableWorkEvents(w, now).length === 0) out.noSession = true;
+    const touched = workedShownSignal(p, now).touched;
+    if (touched) out.touched = touched;
+  }
   return out;
 }
 
@@ -835,6 +843,8 @@ export interface WikiHeaderDates {
   changedSince?: boolean;
   /** No session in the ledger wrote this page: `updated` is the fallback. */
   noSession?: boolean;
+  /** State T/T0: the page's in-window events are touches or pass markers. */
+  touched?: WorkedTouch;
 }
 
 /**
@@ -851,13 +861,18 @@ export function workedChip(
   if (source.kind === "fallback") {
     return { cls: " fallback", title: `${fullDate} (${fallbackKind} — no session write recorded)` };
   }
+  // A T/T0 page (D15): its real date, with a dotted mark whose hover names the touch.
+  const touched = source.touched
+    ? { cls: " touched", line: `\n${touchedLine(source.touched)}` }
+    : { cls: "", line: "" };
+  if (source.kind === "events") return { cls: touched.cls, title: `${fullDate} (${fallbackKind})` + touched.line };
   if (source.changedSince) {
     return {
-      cls: " worked changed-since",
-      title: `${fullDate} (worked)\nchanged ${source.changedSince}, no session write recorded`,
+      cls: " worked changed-since" + touched.cls,
+      title: `${fullDate} (worked)\nchanged ${source.changedSince}, no session write recorded` + touched.line,
     };
   }
-  return { cls: " worked", title: `${fullDate} (worked)` };
+  return { cls: " worked" + touched.cls, title: `${fullDate} (worked)` + touched.line };
 }
 
 /**
@@ -878,21 +893,52 @@ export const CHANGED_SINCE_MIN_MS = 24 * 60 * 60 * 1000;
  *    a script the ledger cannot read, a lint or sync commit.
  *  - `fallback` — no usable ledger row, so any worked-on date shown for it is the
  *    update signal.
+ *  - `events` — an Activity row on a page with session events whose winning
+ *    term is not a worked date: the date is plain, a T/T0 touch still marked.
  */
-export type WorkedSource = { kind: "worked"; worked: string; changedSince?: string } | { kind: "fallback" };
+export type WorkedSource =
+  | { kind: "worked"; worked: string; changedSince?: string; touched?: WorkedTouch }
+  | { kind: "fallback" }
+  | { kind: "events"; touched?: WorkedTouch };
 
+/**
+ * `signal` defaults to the SHOWN worked signal ({@link workedShownSignal}). The
+ * changed-since test compares the update against the page's newest write of ANY
+ * kind — the shown instant, the ledger's `workedMs` and every shipped event — so
+ * a touch after the focused write never reads as "no session write recorded".
+ */
 export function workedSourceOf(
   p: WikiRecencyFields,
   now: number,
   // The row already holds this signal; passing it keeps one derivation per row.
-  signal: { ms: number; label: string; kind: WikiDateKind } = workedSignal(p, now),
+  signal: WikiDateSignal = workedShownSignal(p, now),
 ): WorkedSource {
-  if (signal.kind !== "worked") return { kind: "fallback" };
+  const touched = signal.touched ? { touched: signal.touched } : {};
+  const w = pageWorkState(p);
+  const events = w ? usableWorkEvents(w, now) : [];
+  // D5: a page with usable session events never takes the fallback's "no
+  // session write recorded" claim; its T/T0 touch keeps its mark.
+  if (signal.kind !== "worked") return events.length > 0 ? { kind: "events", ...touched } : { kind: "fallback" };
   const updated = updatedSignal(p, now);
-  if (updated.kind === "updated" && updated.ms - signal.ms > CHANGED_SINCE_MIN_MS && updated.label > signal.label) {
-    return { kind: "worked", worked: signal.label, changedSince: updated.label };
+  let newestWrite = signal.ms;
+  if (isUsableWorkedMs(p.workedMs, now)) newestWrite = Math.max(newestWrite, p.workedMs);
+  const newestEvent = newestWorkEvent(events);
+  if (newestEvent) newestWrite = Math.max(newestWrite, newestEvent[0]);
+  if (
+    updated.kind === "updated" &&
+    updated.ms - newestWrite > CHANGED_SINCE_MIN_MS &&
+    updated.label > localDay(new Date(newestWrite))
+  ) {
+    return { kind: "worked", worked: signal.label, changedSince: updated.label, ...touched };
   }
-  return { kind: "worked", worked: signal.label };
+  return { kind: "worked", worked: signal.label, ...touched };
+}
+
+/** The hover line a touched date carries (D15): the touch it names. */
+export function touchedLine(t: WorkedTouch): string {
+  return t.pass
+    ? `touched ${t.label} by a maintenance pass — not work on this page`
+    : `touched ${t.label} in passing — no session focused on this page`;
 }
 
 /**
@@ -905,9 +951,37 @@ export function workedSourceOf(
 export function workedAxisSource(
   p: WikiRecencyFields,
   now: number,
-  signal: { ms: number; label: string; kind: WikiDateKind } | null | undefined,
+  signal: WikiDateSignal | null | undefined,
 ): WorkedSource | null {
   return signal ? workedSourceOf(p, now, signal) : null;
+}
+
+/**
+ * An Activity row's chip source. `rowSignal` is the axis whose date the row
+ * shows (the winning term's), `dateSignal` that date. A worked row marks its
+ * session; a `changed` row on an open gate with no usable ledger row is the
+ * update standing in for a worked day (`fallback`). A page with usable session
+ * events never takes `fallback`.
+ */
+export function activityRowSource(
+  p: WikiRecencyFields,
+  now: number,
+  rowSignal: "added" | "updated" | "worked",
+  dateSignal: WikiDateSignal | null,
+  rowKind: "new" | "changed",
+  gateOpen: boolean,
+): WorkedSource | null {
+  const base = rowSignal === "worked" && dateSignal ? workedSourceOf(p, now, dateSignal) : null;
+  const w = pageWorkState(p);
+  if (w && usableWorkEvents(w, now).length > 0) {
+    // D5: the events are the record, so no "no session write" claim; the
+    // winning term's date keeps its mark, a T/T0 page its touch (D15).
+    if (base?.kind === "worked") return base;
+    const touched = workedShownSignal(p, now).touched;
+    return touched ? { kind: "events", touched } : null;
+  }
+  if (base) return base;
+  return rowKind === "changed" && gateOpen && !isUsableWorkedMs(p.workedMs, now) ? { kind: "fallback" } : null;
 }
 
 /**
@@ -966,7 +1040,10 @@ export function pageDateLabel(p: WikiListing, now?: number): string {
  * "Recently added" comparator, and one clock read per pass keeps it pure at the 48h
  * boundary.
  */
-function addedSignal(p: WikiListing, now: number = Date.now()): { ms: number; label: string } {
+function addedSignal(
+  p: Pick<WikiListing, "created" | "gitCreatedMs" | "birthtimeMs">,
+  now: number = Date.now(),
+): { ms: number; label: string } {
   const parsedFm = p.created ? Date.parse(p.created) : NaN;
   let best = { ms: 0, label: "" };
   const consider = (ms: number, label: string) => {
@@ -1051,6 +1128,9 @@ export interface WikiDateSignal {
   ms: number;
   label: string;
   kind: WikiDateKind;
+  /** Worked-on axis only: the page's in-window events are all touches or pass
+   *  markers (state T/T0), so the date shown is not focused work. */
+  touched?: WorkedTouch;
 }
 
 /**
@@ -1074,7 +1154,7 @@ export function pageDateSignal(
     which === "added"
       ? { ...addedSignal(p, now), kind: "added" as WikiDateKind }
       : which === "worked"
-        ? workedSignal(p, now)
+        ? workedShownSignal(p, now)
         : updatedSignal(p, now);
   return signal.ms > 0 ? signal : null;
 }
@@ -1124,15 +1204,128 @@ export function isUsableWorkedMs(ms: unknown, now: number): ms is number {
   return typeof ms === "number" && Number.isFinite(ms) && ms > 0 && !isImplausibleFutureDate(ms, now);
 }
 
+/** The touch a T or T0 page's date carries a mark for: its newest non-focus
+ *  event, and whether that was a maintenance pass. */
+export interface WorkedTouch {
+  ms: number;
+  label: string;
+  pass: boolean;
+}
+
+const WORK_EVENT_KINDS: ReadonlySet<unknown> = new Set(["focus", "touch", "pass"]);
+
+/** An event the client can score: a finite instant, finite non-negative edits
+ *  and a kind it knows. A kind a later server adds degrades to "dropped". */
+function isValidWorkEvent(ev: unknown): ev is WorkEvent {
+  if (!Array.isArray(ev) || ev.length < 3) return false;
+  const [ms, edits, kind] = ev as unknown[];
+  return (
+    typeof ms === "number" && Number.isFinite(ms) &&
+    typeof edits === "number" && Number.isFinite(edits) && edits >= 0 &&
+    WORK_EVENT_KINDS.has(kind)
+  );
+}
+
+/** One validation per shipped `work` object (the listing is re-read often). */
+const validatedWork = new WeakMap<object, PageWork | null>();
+
+/** A page's work facts when they carry a valid event — states F, T and T0.
+ *  Absent (state N, no sessions memo, or no event the client can read) ⇒
+ *  today's chain everywhere (D11). Invalid events are dropped here, once. */
+export function pageWorkState(p: Pick<WikiListing, "work">): PageWork | undefined {
+  const w = p.work;
+  if (!w || typeof w !== "object" || !Array.isArray(w.events) || w.events.length === 0) return undefined;
+  let out = validatedWork.get(w);
+  if (out === undefined) {
+    const events = w.events.filter(isValidWorkEvent);
+    out = events.length === 0 ? null : events.length === w.events.length ? w : { ...w, events };
+    validatedWork.set(w, out);
+  }
+  return out ?? undefined;
+}
+
+/** The events the future guard accepts at `now` — the only ones any reader
+ *  may score, date or rank on. */
+export function usableWorkEvents(w: PageWork, now: number): WorkEvent[] {
+  return w.events.filter(([ms]) => isUsableWorkedMs(ms, now));
+}
+
+/** The newest event of `events` passing `keep` (every event by default), or
+ *  undefined. */
+export function newestWorkEvent(
+  events: readonly WorkEvent[],
+  keep: (ev: WorkEvent) => boolean = () => true,
+): WorkEvent | undefined {
+  let best: WorkEvent | undefined;
+  for (const ev of events) if (keep(ev) && (!best || ev[0] > best[0])) best = ev;
+  return best;
+}
+
+/** The newest touch or pass event of a T/T0 page, for its mark's hover. */
+function touchOf(w: PageWork, now: number): WorkedTouch | undefined {
+  const ev = newestWorkEvent(usableWorkEvents(w, now), ([, , kind]) => kind !== "focus");
+  return ev && { ms: ev[0], label: localDay(new Date(ev[0])), pass: ev[2] === "pass" };
+}
+
 /**
- * Worked-on recency in epoch ms — the sort key behind "Worked on", with the
- * update signal as the per-page fallback. 0 when the page has neither.
+ * The Worked-on SORT instant (plan `muninn-wiki-work-threads`, D14, D15, D22),
+ * and whether it is a worked rung at all (`worked: false` is the update-chain
+ * fallback of state N, which the series fold replaces with its own chain).
  *
- * `now` is optional for `pageTimeMs`'s reason: `sortPages` captures ONE instant
- * for the whole pass so the comparator stays pure across the 48h future boundary.
+ *  - **F** (a focus event in the window): the newest focus event.
+ *  - **T** (only touches or pass markers, with a pre-touch position): that
+ *    position, so a touch neither lifts nor sinks the page.
+ *  - **T0** (as T, with no position): the page's creation (`pageAddedMs`),
+ *    else today's chain when the page has no creation signal either.
+ *  - **N** (no events, or no sessions memo): today's chain, {@link workedSignal}.
+ *
+ * The worked gate does not enter (state C sorts per F/T/T0/N): the gate decides
+ * the Activity SCORE only. A stamp the future guard rejects falls one row down
+ * the table (F → today's chain, T → creation).
  */
-export function pageWorkedMs(p: WikiRecencyFields, now?: number): number {
-  return workedSignal(p, now).ms;
+export function workedSortSignal(
+  p: WikiRecencyFields,
+  now: number = Date.now(),
+): { ms: number; worked: boolean; day?: string } {
+  const w = pageWorkState(p);
+  if (w) {
+    if (w.state === "F" && isUsableWorkedMs(w.focusMs, now)) return { ms: w.focusMs, worked: true };
+    if (w.state === "T" && isUsableWorkedMs(w.preMs, now)) return { ms: w.preMs, worked: true };
+    if (w.state !== "F") {
+      // `day` is the creation signal's own label: a frontmatter `created:` is
+      // an authored day, which `localDay` of its UTC midnight shifts west of UTC.
+      const created = addedSignal(p, now);
+      if (created.ms > 0) return { ms: created.ms, worked: true, day: /^\d{4}-\d{2}-\d{2}/.exec(created.label)?.[0] };
+      // No creation signal: today's chain (state N's instant), not undated.
+    }
+  }
+  const chain = workedSignal(p, now);
+  // `day` is the chain's own label, so `groupMonths` files this page exactly as
+  // state N (an authored `updated:` would shift west of UTC under `localDay`).
+  return { ms: chain.ms, worked: chain.kind === "worked", day: chain.label };
+}
+
+/** The Worked-on sort instant in epoch ms ({@link workedSortSignal}) — the
+ *  rail's "Worked on" key; 0 when the page has no signal at all. */
+export function workedSortMs(p: WikiRecencyFields, now: number = Date.now()): number {
+  return workedSortSignal(p, now).ms;
+}
+
+/**
+ * The Worked-on SHOWN date: the newest focus event on an F page; today's chain
+ * ({@link workedSignal}) on every other page, with a `touched` mark on T and T0
+ * (D15: a touched page shows its real date, marked). The row chip, the article
+ * header, Related work and the find palette's `age:` filter read it.
+ */
+export function workedShownSignal(p: WikiRecencyFields, now: number = Date.now()): WikiDateSignal {
+  const w = pageWorkState(p);
+  if (w?.state === "F" && isUsableWorkedMs(w.focusMs, now)) {
+    return { ms: w.focusMs, label: localDay(new Date(w.focusMs)), kind: "worked" };
+  }
+  const chain = workedSignal(p, now);
+  if (!w || w.state === "F") return chain;
+  const touched = touchOf(w, now);
+  return touched ? { ...chain, touched } : chain;
 }
 
 /** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
@@ -1259,10 +1452,15 @@ export function sortPages(
   // pages on mimir and on jarvis alike.
   const byRecency = (sort: WikiRecencySort) => {
     const key = recencyKeyFor(sort);
+    // Worked-on only: pages tied on the SORT instant order by the instant they
+    // SHOW (D22), so two touched pages sharing a pre-touch position read in
+    // the order their own chips name.
+    const shown = (p: WikiListing) => (sort === "worked" ? workedShownSignal(p, now).ms : 0);
     copy.sort(
       (a, b) =>
         Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
         key(b, now) - key(a, now) ||
+        shown(b) - shown(a) ||
         byTitle(a, b),
     );
   };
@@ -1306,7 +1504,7 @@ export function recencyKeyFor(
   mode: WikiRecencySort,
 ): (p: WikiListing, now?: number) => number {
   if (mode === "created") return pageAddedMs;
-  if (mode === "worked") return pageWorkedMs;
+  if (mode === "worked") return workedSortMs;
   return pageTimeMs;
 }
 

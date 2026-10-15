@@ -172,6 +172,17 @@ describe("orderRelated", () => {
   test("newest sorts on the worked-on axis the age shows, update date as the fallback", () => {
     expect(orderRelated([a, c, b], "newest", NOW).map((p) => p.relPath)).toEqual(["b.md", "c.md", "a.md"]);
   });
+
+  test("newest ranks a TOUCHED neighbour by its touch (the shown instant, D22)", () => {
+    const touched = row({
+      relPath: "t.md",
+      strength: 1,
+      workedMs: NOW - 2 * 3_600_000,
+      work: { sinceMs: NOW - 8 * DAY, preMs: NOW - 40 * DAY, state: "T", events: [[NOW - 2 * 3_600_000, 1, "touch"]] },
+    } as Partial<RelatedListing>);
+    expect(orderRelated([a, c, b, touched], "newest", NOW)[0]!.relPath).toBe("t.md");
+    expect(relatedAgeHtml(touched, NOW, true)).toContain('class="wiki-rel-age worked touched"');
+  });
 });
 
 describe("relatedHopHtml", () => {

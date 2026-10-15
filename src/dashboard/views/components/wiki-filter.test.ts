@@ -24,7 +24,7 @@ import {
   isRecencySort,
   localDay,
   pageDateSignal,
-  pageWorkedMs,
+  workedSortMs,
   recencyKeyFor,
   recencyKindFor,
   displayTitleOf,
@@ -41,6 +41,8 @@ import {
   resolveSortMode,
   workedSourceOf,
   workedChip,
+  workedSortSignal,
+  activityRowSource,
   CHANGED_SINCE_MIN_MS,
   pageFolder,
   pageFollowups,
@@ -1512,22 +1514,22 @@ const DAY = 86_400_000;
 /** A fixed "now" so no assertion here is a fact about the clock. */
 const NOW = Date.parse("2026-09-22T12:00:00Z");
 
-test("pageWorkedMs takes the worked date, else the update signal", () => {
+test("workedSortMs takes the worked date, else the update signal", () => {
   const worked = NOW - 3 * DAY;
   // Covered: the ledger's own instant wins outright.
-  expect(pageWorkedMs(page({ workedMs: worked, updated: "2026-09-21" }), NOW)).toBe(worked);
+  expect(workedSortMs(page({ workedMs: worked, updated: "2026-09-21" }), NOW)).toBe(worked);
   // Uncovered: the page still sorts somewhere honest rather than as undated.
-  expect(pageWorkedMs(page({ updated: "2026-09-20" }), NOW)).toBe(Date.parse("2026-09-20"));
+  expect(workedSortMs(page({ updated: "2026-09-20" }), NOW)).toBe(Date.parse("2026-09-20"));
   // No signal at all is 0, exactly as `pageTimeMs` reports it.
-  expect(pageWorkedMs(page({}), NOW)).toBe(0);
+  expect(workedSortMs(page({}), NOW)).toBe(0);
   // A zero/NaN/negative stamp is not a date — fall back, never sort on it.
-  expect(pageWorkedMs(page({ workedMs: 0, updated: "2026-09-20" }), NOW)).toBe(
+  expect(workedSortMs(page({ workedMs: 0, updated: "2026-09-20" }), NOW)).toBe(
     Date.parse("2026-09-20"),
   );
   // The future guard applies here too: the ledger's stamps come from whatever
   // clock wrote the transcript.
   expect(
-    pageWorkedMs(page({ workedMs: NOW + 10 * DAY, updated: "2026-09-20" }), NOW),
+    workedSortMs(page({ workedMs: NOW + 10 * DAY, updated: "2026-09-20" }), NOW),
   ).toBe(Date.parse("2026-09-20"));
 });
 
@@ -1586,7 +1588,7 @@ test("isRecencySort names the three date modes and nothing else", () => {
 
 test("recencyKeyFor answers the same key each mode sorts on", () => {
   const p = page({ workedMs: NOW - 5 * DAY, created: "2026-01-01", updated: "2026-09-20" });
-  expect(recencyKeyFor("worked")(p, NOW)).toBe(pageWorkedMs(p, NOW));
+  expect(recencyKeyFor("worked")(p, NOW)).toBe(workedSortMs(p, NOW));
   expect(recencyKeyFor("updated")(p, NOW)).toBe(pageTimeMs(p, NOW));
   expect(recencyKeyFor("created")(p, NOW)).toBe(pageAddedMs(p, NOW));
 });
@@ -1779,4 +1781,208 @@ test("workedAxisSource: the rail's and Related work's ONE derivation of a date c
   expect(workedAxisSource(worked, now, workedSignal(worked, now))?.kind).toBe("worked");
   expect(workedAxisSource(unworked, now, workedSignal(unworked, now))).toEqual({ kind: "fallback" });
   expect(workedAxisSource(unworked, now, null)).toBeNull();
+});
+
+// ── The Worked-on key over session work facts (D14, D15, D22) ──────────────
+
+const W_NOW = Date.UTC(2026, 9, 15, 8, 0);
+const W_H = 3_600_000;
+const wAgo = (h: number) => W_NOW - h * W_H;
+/** A page with session events: `[hoursAgo, edits, kind]`, newest first. */
+function withWork(
+  over: Partial<WikiListing>,
+  events: Array<[number, number, "focus" | "touch" | "pass"]>,
+  preH?: number,
+): WikiListing {
+  const evs = events.map(([h, e, k]) => [wAgo(h), e, k] as [number, number, "focus" | "touch" | "pass"]).sort((a, b) => b[0] - a[0]);
+  const focus = evs.find((e) => e[2] === "focus");
+  return page({
+    gitCreatedMs: wAgo(60 * 24),
+    gitTouchedMs: wAgo(50 * 24),
+    workedMs: evs[0]![0],
+    ...over,
+    work: {
+      sinceMs: W_NOW - 8 * 24 * W_H,
+      ...(preH === undefined ? {} : { preMs: wAgo(preH) }),
+      state: focus ? "F" : preH === undefined ? "T0" : "T",
+      ...(focus ? { focusMs: focus[0] } : {}),
+      events: evs,
+    },
+  });
+}
+
+test("Worked on: a touched-only page with a fresh write sorts below a focused page", () => {
+  const touched = withWork({ name: "touched", relPath: "touched.md" }, [[1, 1, "touch"]], 10 * 24);
+  const focused = withWork({ name: "focused", relPath: "focused.md" }, [[3 * 24, 6, "focus"]]);
+  expect(sortPages([touched, focused], "worked", W_NOW).map((p) => p.relPath)).toEqual(["focused.md", "touched.md"]);
+  // Today's chain (no work facts) put the fresh touch first.
+  const bare = (p: WikiListing) => ({ ...p, work: undefined });
+  expect(sortPages([bare(touched), bare(focused)], "worked", W_NOW).map((p) => p.relPath)).toEqual(["touched.md", "focused.md"]);
+  // The sort key IS the pre-touch position; the shown date is the touch.
+  expect(workedSortMs(touched, W_NOW)).toBe(wAgo(10 * 24));
+  expect(pageDateSignal(touched, "worked", W_NOW)?.ms).toBe(wAgo(1));
+});
+
+test("Worked on: pages tied on the sort instant order by their shown instant, not their title", () => {
+  // Same pre-touch position; "Aardvark" was touched EARLIER than "Zebra".
+  const a = withWork({ name: "a", title: "Aardvark", relPath: "a.md" }, [[5, 1, "touch"]], 10 * 24);
+  const z = withWork({ name: "z", title: "Zebra", relPath: "z.md" }, [[2, 1, "touch"]], 10 * 24);
+  expect(workedSortMs(a, W_NOW)).toBe(workedSortMs(z, W_NOW));
+  expect(sortPages([a, z], "worked", W_NOW).map((p) => p.title)).toEqual(["Zebra", "Aardvark"]);
+});
+
+test("Worked on: the chip of a touched page carries the touched mark, naming the touch", () => {
+  const touched = withWork({ relPath: "t.md" }, [[3, 1, "touch"]], 10 * 24);
+  const sig = pageDateSignal(touched, "worked", W_NOW)!;
+  const chip = workedChip(workedSourceOf(touched, W_NOW, sig), sig.label);
+  expect(chip.cls).toBe(" worked touched");
+  expect(chip.title).toBe(`${sig.label} (worked)\ntouched ${localDay(new Date(wAgo(3)))} in passing — no session focused on this page`);
+  const pass = withWork({ relPath: "p.md" }, [[3, 1, "pass"]], 10 * 24);
+  const passSig = pageDateSignal(pass, "worked", W_NOW)!;
+  expect(workedChip(workedSourceOf(pass, W_NOW, passSig), passSig.label).title).toMatch(/by a maintenance pass/);
+  // A focused page carries no mark.
+  const focused = withWork({ relPath: "f.md" }, [[3, 4, "focus"]]);
+  const fSig = pageDateSignal(focused, "worked", W_NOW)!;
+  expect(workedChip(workedSourceOf(focused, W_NOW, fSig), fSig.label).cls).toBe(" worked");
+  // The article header marks it too.
+  expect(pageHeaderDates(touched, W_NOW, { ledger: true }).touched?.ms).toBe(wAgo(3));
+});
+
+test("Worked on: changedSince compares the update against the newest write of ANY kind", () => {
+  // Focused five days ago, touched yesterday, committed twelve hours ago: the
+  // commit trails the touch by half a day, so it is the same work.
+  // The ledger's summary row is the focused write (a bash-only touch has none),
+  // so only the shipped touch event says the page was written since.
+  const p = withWork({ relPath: "c.md", gitTouchedMs: wAgo(12), workedMs: wAgo(5 * 24) }, [
+    [5 * 24, 4, "focus"],
+    [24, 1, "touch"],
+  ]);
+  const src = workedSourceOf(p, W_NOW);
+  expect(src).toEqual({ kind: "worked", worked: localDay(new Date(wAgo(5 * 24))) });
+  // Without the touch, the same commit IS a change since the focused write.
+  const alone = withWork({ relPath: "c.md", gitTouchedMs: wAgo(12) }, [[5 * 24, 4, "focus"]]);
+  expect(workedSourceOf({ ...alone, workedMs: wAgo(5 * 24) }, W_NOW)).toMatchObject({ changedSince: localDay(new Date(wAgo(12))) });
+});
+
+test("Worked on: no work facts ⇒ the sort, the shown date and the chip are today's", () => {
+  const p = page({ relPath: "n.md", workedMs: wAgo(30), gitCreatedMs: wAgo(900), gitTouchedMs: wAgo(40) });
+  expect(workedSortMs(p, W_NOW)).toBe(wAgo(30));
+  expect(pageDateSignal(p, "worked", W_NOW)).toEqual({ ms: wAgo(30), label: localDay(new Date(wAgo(30))), kind: "worked" });
+  expect(workedSourceOf(p, W_NOW)).toEqual({ kind: "worked", worked: localDay(new Date(wAgo(30))) });
+});
+
+test("Worked on: a T0 page with no creation signal sorts on today's chain, not as undated", () => {
+  const noBirth = { gitCreatedMs: undefined, gitTouchedMs: undefined };
+  const t0 = withWork({ relPath: "t0.md", ...noBirth }, [[2, 5, "touch"]]);
+  expect(workedSortSignal(t0, W_NOW)).toMatchObject({ ms: wAgo(2), worked: true });
+  // A T page whose pre-touch position the future guard rejects falls the same way.
+  const t = withWork({ relPath: "t.md", ...noBirth }, [[2, 5, "touch"]], -100);
+  expect(t.work!.state).toBe("T");
+  expect(workedSortSignal(t, W_NOW)).toMatchObject({ ms: wAgo(2), worked: true });
+});
+
+test("Activity chip: a page with events never claims 'no session write recorded'; T/T0 carries its touch", () => {
+  // T page, no ledger summary row, update three days after the touch.
+  const t = withWork({ relPath: "t.md", workedMs: undefined, gitTouchedMs: wAgo(2 * 24) }, [[5 * 24, 1, "touch"]], 20 * 24);
+  const cases: Array<["added" | "updated" | "worked", "new" | "changed"]> = [
+    ["updated", "changed"], // lateChange wins
+    ["added", "new"], // newScore wins
+    ["worked", "changed"], // workTerm wins
+  ];
+  for (const [signal, kind] of cases) {
+    const date = pageDateSignal(t, signal, W_NOW);
+    const chip = workedChip(activityRowSource(t, W_NOW, signal, date, kind, true), date!.label, signal === "added" ? "added" : "updated");
+    expect([signal, chip.title.includes("no session write recorded")]).toEqual([signal, false]);
+    expect([signal, chip.cls.includes("touched")]).toEqual([signal, true]);
+    expect(chip.title).toContain(`touched ${localDay(new Date(wAgo(5 * 24)))}`);
+  }
+  // F page where the late change wins: no claim and no touch mark.
+  const f = withWork({ relPath: "f.md", workedMs: undefined, gitTouchedMs: wAgo(24) }, [[5 * 24, 4, "focus"]]);
+  expect(activityRowSource(f, W_NOW, "updated", pageDateSignal(f, "updated", W_NOW), "changed", true)).toBeNull();
+  // No events: today's fallback, unchanged.
+  const n = page({ relPath: "n.md", gitTouchedMs: wAgo(24) });
+  expect(activityRowSource(n, W_NOW, "updated", pageDateSignal(n, "updated", W_NOW), "changed", true)).toEqual({ kind: "fallback" });
+});
+
+// ── Guards on the work facts (PR 4 fix round 2): each test names the mutation it pins ──
+
+test("work guard: a page whose ONLY event has a NaN time is state N for the sort, the months and the chip", async () => {
+  // Pins isValidWorkEvent's Number.isFinite(ms): without it the NaN event keeps
+  // `work` alive and the T page sorts on its pre-touch position.
+  const { pageWorkState } = await import("./wiki-filter.ts");
+  const { groupMonths } = await import("./wiki-groups.ts");
+  const base = page({ relPath: "nan.md", workedMs: wAgo(40 * 24), gitCreatedMs: wAgo(60 * 24), gitTouchedMs: wAgo(50 * 24) });
+  const nan: WikiListing = {
+    ...base,
+    work: { sinceMs: W_NOW - 8 * 24 * W_H, state: "T", preMs: wAgo(10 * 24), events: [[Number.NaN, 1, "touch"]] },
+  };
+  expect(pageWorkState(nan)).toBeUndefined();
+  expect(workedSortSignal(nan, W_NOW)).toEqual(workedSortSignal(base, W_NOW));
+  expect(JSON.stringify(groupMonths([nan], "worked", W_NOW).map((g) => g.label))).toBe(
+    JSON.stringify(groupMonths([base], "worked", W_NOW).map((g) => g.label)),
+  );
+  const chip = (p: WikiListing) => {
+    const sig = pageDateSignal(p, "worked", W_NOW)!;
+    return workedChip(workedSourceOf(p, W_NOW, sig), sig.label);
+  };
+  expect(chip(nan)).toEqual(chip(base));
+});
+
+test("work guard: an event with Infinity edits is dropped, never scored", async () => {
+  // Pins isValidWorkEvent's Number.isFinite(edits): without it raw is Infinity
+  // and the work term saturates at WORK_CAP (1.5).
+  const { pageWorkState } = await import("./wiki-filter.ts");
+  const { pageWorkTerm } = await import("./wiki-activity-rank.ts");
+  const only = withWork({ relPath: "inf.md", workedMs: wAgo(3) }, [[3, Number.POSITIVE_INFINITY, "focus"]]);
+  expect(pageWorkState(only)).toBeUndefined();
+  expect(pageWorkTerm(only, W_NOW)).toBe(0);
+  const mixed = withWork({ relPath: "mix.md" }, [[3, 4, "focus"], [5, Number.POSITIVE_INFINITY, "focus"]]);
+  const clean = withWork({ relPath: "clean.md" }, [[3, 4, "focus"]]);
+  expect(pageWorkState(mixed)!.events).toHaveLength(1);
+  expect(pageWorkTerm(mixed, W_NOW)).toBe(pageWorkTerm(clean, W_NOW));
+  expect(pageWorkTerm(mixed, W_NOW)).toBeLessThan(1.5);
+});
+
+test("work guard: workedSourceOf reads only events the future guard accepts", () => {
+  // Pins workedSourceOf's usableWorkEvents: with w.events a page whose events
+  // are all in the future would claim `events` instead of the fallback.
+  const future = withWork({ relPath: "fut.md", workedMs: undefined }, [[-10 * 24, 3, "touch"]], 20 * 24);
+  expect(workedSourceOf(future, W_NOW)).toEqual({ kind: "fallback" });
+});
+
+test("work guard: the touched mark names only a touch the future guard accepts", async () => {
+  // Pins touchOf's usableWorkEvents: with w.events the future touch is named.
+  const { workedShownSignal } = await import("./wiki-filter.ts");
+  const onlyFuture = withWork({ relPath: "f1.md", workedMs: undefined }, [[-10 * 24, 1, "touch"]], 20 * 24);
+  expect(workedShownSignal(onlyFuture, W_NOW).touched).toBeUndefined();
+  const mixed = withWork({ relPath: "f2.md", workedMs: undefined }, [[-10 * 24, 1, "touch"], [5, 1, "touch"]], 20 * 24);
+  expect(workedShownSignal(mixed, W_NOW).touched?.ms).toBe(wAgo(5));
+});
+
+test("workedChip: an `events` chip is the plain date, with the touch mark only when touched", () => {
+  // Pins the `events` branch: deleting it, or marking it worked, gives ` worked`.
+  const touched = { ms: wAgo(5), label: "2026-10-14", pass: false };
+  expect(workedChip({ kind: "events" }, "2026-10-12")).toEqual({ cls: "", title: "2026-10-12 (updated)" });
+  expect(workedChip({ kind: "events", touched }, "2026-10-12", "added")).toEqual({
+    cls: " touched",
+    title: "2026-10-12 (added)\ntouched 2026-10-14 in passing — no session focused on this page",
+  });
+});
+
+test("activityRowSource: an F page whose work term wins keeps its worked mark", () => {
+  // Pins `if (base?.kind === "worked") return base;`: without it the F row
+  // (no touch) answers null and loses its worked chip.
+  const f = withWork({ relPath: "fw.md" }, [[5, 4, "focus"]]);
+  const sig = pageDateSignal(f, "worked", W_NOW)!;
+  const src = activityRowSource(f, W_NOW, "worked", sig, "changed", true);
+  expect(src).toEqual({ kind: "worked", worked: localDay(new Date(wAgo(5))) });
+  expect(workedChip(src, sig.label).cls).toBe(" worked");
+});
+
+test("activityRowSource: a page whose events are all future-rejected keeps the D11 fallback", () => {
+  // Pins the usableWorkEvents(...).length > 0 guard: without it the page takes
+  // the events branch and answers null.
+  const p = withWork({ relPath: "ff.md", workedMs: undefined, gitTouchedMs: wAgo(24) }, [[-10 * 24, 2, "focus"]]);
+  const sig = pageDateSignal(p, "updated", W_NOW);
+  expect(activityRowSource(p, W_NOW, "updated", sig, "changed", true)).toEqual({ kind: "fallback" });
 });

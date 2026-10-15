@@ -119,6 +119,31 @@ function isStrArray(v: unknown): v is string[] {
 }
 
 /**
+ * A sessions answer as the live rail saw it at `at` (the replay, D17). With
+ * `until = at` upstream already drops every (session, path, op) row whose last
+ * write is after `at`, but a session's `first`/`last` span all of its rows, so
+ * a session resumed after `at` reports a `last` the rail could not have seen.
+ * Such a session is kept with `last` clamped to the newest `lastMs` at or
+ * before `at` among the file rows in `files`, else `at`. `files` is upstream's
+ * capped list, most edits first, so with more files than the cap the newest
+ * kept write can be missing and the clamp lands early. `clipped` counts the
+ * clamped sessions; others pass through as is.
+ */
+export function clipSessionsAt<S extends { last: number; files?: readonly { lastMs: number }[] }>(
+  sessions: readonly S[],
+  at: number,
+): { sessions: S[]; clipped: number } {
+  let clipped = 0;
+  const out = sessions.map((s) => {
+    if (s.last <= at) return s;
+    clipped++;
+    const newest = Math.max(0, ...(s.files ?? []).map((f) => f.lastMs).filter((ms) => ms <= at));
+    return { ...s, last: newest > 0 ? newest : at };
+  });
+  return { sessions: out, clipped };
+}
+
+/**
  * Validate a sessions-form body. ONE malformed row rejects the whole answer,
  * the way `parseWorkedPages` does: a half-read would put a partial picture on
  * screen with nothing saying so.

@@ -464,6 +464,24 @@ export async function renderWikiPage(opts?: {
        before: the centres sat 1.0px apart. */
     .wiki-list-item .wiki-list-sub .wiki-status, .wiki-list-item .wiki-list-sub .wiki-followup-flag,
     .wiki-list-item .wiki-list-sub .wiki-fold-chip, .wiki-list-item .wiki-list-sub .wiki-new-tag { margin: 0; }
+    /* The WORK BAR (plan muninn-wiki-work-threads): four 3px steps, lit by the
+       page's work term. First on the meta line and pulled into its 22px icon
+       gutter: 15px wide at x 3–18, and the line's 4px gap puts the next mark
+       at x 22, under the title. Its margin box is -4px, so it costs the line
+       nothing. A line carrying the bar takes 4px gaps, not 6: its fullest
+       form (pill, ⚑, ✋ 12, NEW, chip) measured 62+9+30+35px on CI's DejaVu
+       Sans at the 260px rail, leaving the chip slot 44px against its 46px
+       compact floor, so the chip wrapped; 4px gaps leave it 52. The e2e
+       measures that line. */
+    .wiki-work-bar { display: inline-flex; align-items: flex-end; gap: 1px; flex-shrink: 0; height: 9px; }
+    .wiki-list-sub:has(> .wiki-work-bar:first-child) { column-gap: 4px; }
+    .wiki-list-sub > .wiki-work-bar:first-child { margin: 0 0 0 -19px; }
+    .wiki-work-bar i { display: block; width: 3px; border-radius: 1px; box-shadow: inset 0 0 0 1px var(--text-dim); }
+    .wiki-work-bar i:nth-child(1) { height: 3px; }
+    .wiki-work-bar i:nth-child(2) { height: 5px; }
+    .wiki-work-bar i:nth-child(3) { height: 7px; }
+    .wiki-work-bar i:nth-child(4) { height: 9px; }
+    .wiki-work-bar i.on { background: var(--worked-ink); box-shadow: none; }
     /* The chip's slot: last on the meta line, it takes what the pill, ⚑, ✋
        and NEW leave, and it is the chip's container, so the chip swaps words
        for counts by that room (RAIL_CHIP_LABEL_*), not by the line's. Its floor
@@ -999,6 +1017,12 @@ export async function renderWikiPage(opts?: {
     .wiki-list-meta.worked { color: var(--worked-ink); font-weight: 600; }
     .wiki-list-meta.fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
     .wiki-list-meta.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
+    /* A TOUCHED date (D15): the page's in-window events are touches or pass
+       markers, so the date is its real one, not focused work. A dotted
+       underline in the chip's own ink — weight and colour stay the worked
+       reading; the hover names the touch. Never on a fallback chip: a page
+       with session events never takes the fallback (D5). */
+    .wiki-list-meta.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
 
     /* Neutral default so a custom type (no dedicated type-* rule) still shows a
        dot; the specific rules below override for the built-in types. */
@@ -1434,6 +1458,7 @@ export async function renderWikiPage(opts?: {
     .wiki-bc-changed { color: var(--changed-ink); }
     .wiki-bc-fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
     .wiki-bc-nosession { font-style: italic; color: var(--text-muted); }
+    .wiki-bc-touched { color: var(--text-muted); text-decoration: underline dotted; text-underline-offset: 2px; }
     .wiki-bc-explain {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: var(--accent); color: #fff;
@@ -1681,6 +1706,7 @@ export async function renderWikiPage(opts?: {
     .wiki-series-step.shipped { border-top-color: var(--status-success); }
     .wiki-series-step.shipped::before { background: var(--status-success); }
     .wiki-series-step-date { font-size: 10px; color: var(--text-muted); }
+    .wiki-series-step-date.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
     .wiki-series-step-title {
       font-size: 11.5px; color: var(--text-secondary); line-height: 1.3;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -2712,6 +2738,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     .wiki-rel-meta .wiki-rel-age.worked { color: var(--worked-ink); font-weight: 600; }
     .wiki-rel-meta .wiki-rel-age.fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
     .wiki-rel-meta .wiki-rel-age.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
+    .wiki-rel-meta .wiki-rel-age.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
     .wiki-rel-meta .wiki-rel-series {
       font-size: 10px; color: var(--text-soft); border: 1px solid var(--border-secondary);
       border-radius: 8px; padding: 0 6px; max-width: 16ch;

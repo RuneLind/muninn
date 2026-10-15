@@ -154,13 +154,15 @@ import {
   seriesKeyOf,
   seriesMembersOf,
   seriesStripOrder,
-  workedDateSignal,
+  workedShownDay,
 } from "./wiki-groups.ts";
 import { railInputFor } from "./wiki-rail-input.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
+  pageWorkBar,
   parseActivityWeights,
+  WORK_BAR_STEPS,
   workedGateFor,
   type ActivityWeights,
   type WorkedGate,
@@ -301,7 +303,8 @@ import {
   resolveSortMode,
   workedAxisSource,
   workedChip,
-  isUsableWorkedMs,
+  touchedLine,
+  activityRowSource,
   type WorkedSource,
   pageDateLabel,
   pageDateSignal,
@@ -1518,6 +1521,20 @@ function paintPinState(): void {
   }
 }
 
+/**
+ * The work bar on a row whose page carries in-window session events (plan
+ * `muninn-wiki-work-threads`): four steps lit by its work term, on the meta
+ * line just before the group chip's slot. Absent on a page with none — and
+ * so everywhere with no sessions memo (D11).
+ */
+function workBarHtml(p: WikiListing, now: number): string {
+  const bar = pageWorkBar(p, now);
+  if (!bar) return "";
+  let steps = "";
+  for (let i = 1; i <= WORK_BAR_STEPS; i++) steps += `<i${i <= bar.level ? ' class="on"' : ""}></i>`;
+  return `<span class="wiki-work-bar" data-work-level="${bar.level}" role="img" aria-label="${esc(bar.title)}" title="${esc(bar.title)}">${steps}</span>`;
+}
+
 /** Why a fold cannot close: a Jira filter opens every fold (`expandAll`), else
  *  the reader is on a page inside it. */
 function forcedOpenWhy(what: "group" | "section"): string {
@@ -1748,14 +1765,17 @@ function renderList(): void {
     // Where a worked-on date came from, marked on the chip: a session wrote it
     // (`worked`, and `changed-since` when a change landed after that session with
     // no ledger row) or no session did (`fallback`). An Activity "changed" row on
-    // a wiki whose worked gate is open is a fallback too when the ledger has no
-    // usable row for the page — the one case its update date stands in for a
-    // worked day.
+    // a wiki whose worked gate is open is a fallback too when the page has neither
+    // a usable ledger row nor usable session events — the one case its update
+    // date stands in for a worked day. A page WITH usable events never takes
+    // `fallback`: its winning worked term keeps its `worked` mark, otherwise it
+    // takes the `events` kind (its T/T0 touch still marked) or no mark at all
+    // (`activityRowSource`).
     const source: WorkedSource | null =
-      signal === "worked" && dateSignal
-        ? workedAxisSource(datePage, now, dateSignal)
-        : entry.activity?.kind === "changed" && workedGate?.open && !isUsableWorkedMs(datePage.workedMs, now)
-          ? { kind: "fallback" }
+      entry.activity && signal !== null
+        ? activityRowSource(datePage, now, signal, dateSignal, entry.activity.kind, !!workedGate?.open)
+        : signal === "worked" && dateSignal
+          ? workedAxisSource(datePage, now, dateSignal)
           : null;
     const chip = workedChip(source, fullDate, dateSignal?.kind === "added" ? "added" : "updated");
     // A NEW page (its own creation won, not a child's) says so in the date cell:
@@ -1852,7 +1872,11 @@ function renderList(): void {
     const chipSlot = chipHtml
       ? `<span class="wiki-fold-chip-wrap${cls(foldChipCountsClass(compact))}">${chipHtml}</span>`
       : "";
+    // The work bar goes FIRST, into the meta line's icon gutter (`wiki-page.ts`),
+    // so it takes no room from the marks: pill + ⚑ + ✋ 12 + NEW + bar in line
+    // left the chip 36px at the 260px rail, under its 46px floor, and it wrapped.
     const subItems =
+      workBarHtml(p, now) +
       statusPillHtml(p) +
       followupFlagHtml(p) +
       movesFlagHtml(p) +
@@ -2691,6 +2715,11 @@ function renderBreadcrumb(m: WikiListing): void {
     );
   }
   if (dates.noSession) slots.push(`<span class="wiki-bc-nosession" title="${esc(NO_SESSION_TITLE)}">no session</span>`);
+  // State T/T0 (D15): the window holds only touches or pass markers for this
+  // page, so the dates above are not focused work — the mark names the touch.
+  if (dates.touched) {
+    slots.push(`<span class="wiki-bc-touched" title="${esc(touchedLine(dates.touched))}">touched ${esc(dates.touched.label)}</span>`);
+  }
   const dateHtml = slots.length ? '<span class="wiki-bc-date">' + slots.join(" · ") + "</span>" : "";
   el.innerHTML =
     '<div class="wiki-bc-trail">' +
@@ -3356,6 +3385,15 @@ function projectHubChipHtml(m: WikiListing): string {
   );
 }
 
+/** One strip cell's date: the SHOWN instant's day (D22) — on a touched page
+ *  (T/T0) its real date, marked, so the strip reads out of order there. */
+function stepDateHtml(p: WikiListing, now: number): string {
+  const shown = workedShownDay(p, now);
+  return shown.touched
+    ? `<div class="wiki-series-step-date touched" title="${esc(touchedLine(shown.touched))}">${esc(shown.day)}</div>`
+    : `<div class="wiki-series-step-date">${esc(shown.day)}</div>`;
+}
+
 /**
  * The SERIES strip under a member's title: what the series is called, how many
  * pages it holds, where to continue, and the members on a date line.
@@ -3384,7 +3422,8 @@ function projectHubChipHtml(m: WikiListing): string {
  *    rail answers "where do I go now" and this answers "how did this get here",
  *    which is a story with a beginning. It is the fold's own order REVERSED, so
  *    the two cannot sequence one series two ways.
- *  - **Dates come from `workedDateSignal`** — the same day the fold sorts on AND
+ *  - **Dates come from `workedShownDay`** — the fold's own day (`workedDateSignal`)
+ *    except on a touched page, which prints its real date with a mark (D22) —
  *    the same one the fold's own rows print in their chips, because after the
  *    one-chain fix all three read one signal. Printing a different chain from
  *    the one the order is computed from is what left an mtime-dated member
@@ -3448,7 +3487,7 @@ function seriesStripHtml(m: WikiListing): string {
       const kind = [pageFolder(p), p.plan_status].filter(Boolean).join(" · ");
       return (
         `<div class="wiki-series-step${isOpen ? " current" : shipped ? " shipped" : ""}">` +
-        `<div class="wiki-series-step-date">${esc(workedDateSignal(p, now).day)}</div>` +
+        stepDateHtml(p, now) +
         `<div class="wiki-series-step-title">${esc(displayTitleOf(p))}${p.culled ? " " + cullMarkHtml() : ""}</div>` +
         `<div class="wiki-series-step-kind">${esc(kind)}</div>` +
         `</div>`
