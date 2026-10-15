@@ -1375,6 +1375,10 @@ describe("rankActivity — session work (D5)", () => {
     const p = worked(page({ relPath: "notes/half.md", createdDaysAgo: 100 }), { focus: [[5, 2.6]], preH: 50 * 24 });
     expect(rankActivity([p], wide, NOW, OPEN)[0]!.why).toMatch(/focused in 1 session \(≈3 edits\)/);
     expect(pageWorkBar(p, NOW)!.title).toMatch(/\(≈3 edits\)/);
+    // 2.4 reads as ≈2: rounding down below the half pins "nearest" against a ceiling.
+    const q = worked(page({ relPath: "notes/less.md", createdDaysAgo: 100 }), { focus: [[5, 2.4]], preH: 50 * 24 });
+    expect(rankActivity([q], wide, NOW, OPEN)[0]!.why).toMatch(/focused in 1 session \(≈2 edits\)/);
+    expect(pageWorkBar(q, NOW)!.title).toMatch(/\(≈2 edits\)/);
   });
 
   test("a page touched once and committed 40 minutes later stays below a focused page", () => {

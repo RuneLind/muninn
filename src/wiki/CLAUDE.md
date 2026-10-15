@@ -2104,8 +2104,10 @@ state: it is where the pointer is whenever a row is being read.
 
 **`Strongest | Newest`** sits in the header once there are two rows, remembered
 per wiki in `localStorage` (`muninn.wiki.related-order.v1:<wiki>`, every access
-in try/catch). `Newest` sorts on `workedSortMs` at one instant — the axis the
-age shows, so the ages always read in order, and deliberately not the
+in try/catch). `Newest` sorts on the shown worked instant
+(`pageDateSignal(p, "worked", now)`) at one instant — the date the age shows,
+so the ages always read in order and a touched neighbour ranks by its touch
+(D22), strength breaking a tie — and deliberately not the
 `status_date`-first order the server's tie-break uses. Hop rows follow the same
 toggle. Switching it keeps every open ▸ open, with its answer.
 

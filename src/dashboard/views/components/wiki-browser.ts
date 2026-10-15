@@ -1767,8 +1767,9 @@ function renderList(): void {
     // no ledger row) or no session did (`fallback`). An Activity "changed" row on
     // a wiki whose worked gate is open is a fallback too when the page has neither
     // a usable ledger row nor usable session events — the one case its update
-    // date stands in for a worked day. A page WITH usable events takes the
-    // `events` kind (its T/T0 touch still marked) or no mark at all
+    // date stands in for a worked day. A page WITH usable events never takes
+    // `fallback`: its winning worked term keeps its `worked` mark, otherwise it
+    // takes the `events` kind (its T/T0 touch still marked) or no mark at all
     // (`activityRowSource`).
     const source: WorkedSource | null =
       entry.activity && signal !== null

@@ -2447,6 +2447,22 @@ describe("buildRail — series", () => {
     expect(shape(none.entries)).toEqual(shape(build({ activity: [act(C, 9), act(A, 8)] }).entries));
   });
 
+  test("D12 — a CULLED member never enters the work peek, whatever its work term", () => {
+    // X's term (0.9) clears the 0.7 floor and outranks A's, so only the cull keeps it out.
+    const X = plan("plans/x.mdx", { plan_status: "in-flight", status_date: "2026-08-01", culled: true });
+    const all = [A, B, C, X, LOOSE];
+    const terms: Record<string, number> = { "plans/a.mdx": 0.8, "plans/x.mdx": 0.9 };
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [act(A, 9)],
+      workTerm: (p) => terms[p.relPath] ?? 0,
+    });
+    const peek = rows(m.entries).filter((r) => r.section === "activity").map((r) => r.page.relPath);
+    expect(peek).toEqual(["plans/a.mdx"]);
+  });
+
   test("D12 — the peek floor is 0.7 inclusive: 0.7 and 0.72 peek, 0.69 does not", () => {
     // Literal terms, not WORK_PEEK_MIN: the case pins the tuned value itself.
     // 0.72 is why the floor is not the plan's 0.75 (a real thread's second
