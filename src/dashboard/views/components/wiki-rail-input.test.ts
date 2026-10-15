@@ -411,3 +411,76 @@ describe("a thread with no usable session is dropped whole", () => {
     expect(cardsOf({ threads: [bad, ...T_THREADS.slice(0, 1)] }).map((c) => c.key)).toEqual(["plans/recent.mdx"]);
   });
 });
+
+// ── PR 700 fix round 1 batch 5: pins on existing behaviour ──────────────────
+describe("a hub has one owner, and a later card never takes it (D16)", () => {
+  const HUB = wpage("plans/hub.mdx", [[1, 40]], { title: "Hub page" });
+  const A = wpage("plans/a.mdx", [[2, 20]], { title: "A page" });
+  const B = wpage("notes/b.md", [[3, 2]], { title: "B page" });
+  // Card 1 (a + hub) outranks card 2 (b + hub): both share the hub's top term.
+  const THREADS = [thread("plans/a.mdx", ["plans/a.mdx", "plans/hub.mdx"]), thread("notes/b.md", ["notes/b.md", "plans/hub.mdx"])];
+  const HUB_WIKI: RailWikiFacts = {
+    allPages: [HUB, A, B],
+    projects: {},
+    activityWeights: DEFAULT_ACTIVITY_WEIGHTS,
+    workedGate: { open: true, candidates: 1, covered: 1, coverage: 1 },
+    work: { threads: THREADS },
+  };
+
+  test("closed card 1 owns the hub: open card 2 neither rows it nor lifts it out of Activity", () => {
+    const viewer = base({ openFolds: ["closed:thread:plans/a.mdx", "thread:notes/b.md"] });
+    const input = railInputFor(HUB_WIKI, viewer);
+    expect(input.threads!.map((c) => [c.key, c.open])).toEqual([
+      ["plans/a.mdx", false],
+      ["notes/b.md", true],
+    ]);
+    expect(input.threads![1]!.focus.map((p) => p.relPath)).toEqual(["notes/b.md"]);
+    // Not in the exclude set: Activity still ranks the hub.
+    expect((input.activity ?? []).map((r) => r.page.relPath)).toContain("plans/hub.mdx");
+    const rail = buildRail(input);
+    const threadRows = rail.entries.filter((e) => e.kind === "row" && e.section === "threads").map((e) => (e.kind === "row" ? e.page.relPath : ""));
+    expect(threadRows).toEqual(["notes/b.md"]);
+  });
+
+  test("a card a facet empties still owns its hub: the later card is not named after it", () => {
+    const filtered = cardsOf({ threads: THREADS, pages: [HUB, A, B], filters: { ...INERT, folder: "notes" } });
+    expect(filtered.map((c) => c.key)).toEqual(["notes/b.md"]);
+    expect(filtered[0]!.focus.map((p) => p.relPath)).toEqual(["notes/b.md"]);
+    expect(filtered[0]!.name).toBe("B page");
+  });
+});
+
+describe("a card's name and pin anchor are stable", () => {
+  test("a facet that hides the top page does not rename the card", () => {
+    const TOP = wpage("plans/top.mdx", [[1, 30]], { title: "Top page — detail" });
+    const LOW = wpage("notes/low.md", [[2, 2]], { title: "Low page" });
+    const T = [thread("plans/top.mdx", ["plans/top.mdx", "notes/low.md"])];
+    const [all] = cardsOf({ threads: T, pages: [TOP, LOW] });
+    const [notes] = cardsOf({ threads: T, pages: [TOP, LOW], filters: { ...INERT, folder: "notes" } });
+    expect(all!.name).toBe("Top page");
+    expect(notes!.focus.map((p) => p.relPath)).toEqual(["notes/low.md"]);
+    expect(notes!.name).toBe("Top page");
+  });
+
+  test("equal focus times anchor the pin on the smaller relPath, whatever the thread's page order", () => {
+    const B = wpage("notes/b.md", [[2, 1]]);
+    const A = wpage("notes/a.md", [[2, 9]]);
+    const T = [thread("notes/b.md", ["notes/b.md", "notes/a.md"])];
+    expect(threadPinAnchor(T, [B, A], "notes/b.md")).toBe("notes/a.md");
+    expect(cardsOf({ threads: T, pages: [B, A] })[0]!.pinAnchor).toBe("notes/a.md");
+    // Neither page carries work: both rank -Infinity, and the tie-break still decides.
+    const Z = page({ relPath: "notes/z.md" });
+    const Y = page({ relPath: "notes/y.md" });
+    expect(threadPinAnchor([thread("notes/z.md", ["notes/z.md", "notes/y.md"])], [Z, Y], "notes/z.md")).toBe("notes/y.md");
+  });
+});
+
+describe("a card's touched line never repeats one of its focus rows", () => {
+  test("a page both focused and touched by the thread is a row, not also a link", () => {
+    const F = wpage("notes/f.md", [[1, 5]]);
+    const T = page({ relPath: "notes/t.md" });
+    const [card] = cardsOf({ threads: [thread("notes/f.md", ["notes/f.md"], ["notes/f.md", "notes/t.md"])], pages: [F, T] });
+    expect(card!.focus.map((p) => p.relPath)).toEqual(["notes/f.md"]);
+    expect(card!.touched.map((p) => p.relPath)).toEqual(["notes/t.md"]);
+  });
+});

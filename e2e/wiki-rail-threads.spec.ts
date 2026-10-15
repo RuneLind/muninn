@@ -279,6 +279,20 @@ test.describe("Wiki rail: Work threads", () => {
     for (const rel of [ALPHA, ALPHA_TWO, BETA]) await expect(page.locator(`.wiki-list-item[data-relpath="${rel}"]`)).toHaveCount(1);
   });
 
+  test("a card row shows its worked-on age whatever the rail sort", async ({ page }) => {
+    await openReader(page, THREADS);
+    const meta = page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${ALPHA}"] .wiki-list-meta`);
+    for (const mode of ["backlinks", "title", "created"]) {
+      await page.selectOption("#wikiSort", mode);
+      await expect(meta, mode).toHaveClass(/\bworked\b/);
+      await expect(meta, mode).toHaveAttribute("title", /\(worked\)/);
+      await expect(meta, mode).not.toContainText("←");
+    }
+    // The sort took: under backlinks a plain listing row counts links instead.
+    await page.selectOption("#wikiSort", "backlinks");
+    expect(await page.locator(".wiki-list-meta", { hasText: "←" }).count()).toBeGreaterThan(0);
+  });
+
   test("the series shows the lifted members as ghosts reading 'in a work thread above'; closing the card hands them back", async ({
     page,
   }) => {
