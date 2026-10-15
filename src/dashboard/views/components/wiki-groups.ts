@@ -470,30 +470,30 @@ export function workedDateSignal(p: WorkedDateFields, now?: number): SeriesDateS
   // is that answer; anything else means the guard rejected it or the ledger
   // holds nothing. T and T0 members take the worked rung at their sort instant.
   const signal = workedSortSignal(p, now);
-  if (signal.worked && signal.ms > 0) return workedRung(signal.ms);
+  if (signal.worked && signal.ms > 0) return workedRung(signal.ms, signal.day);
   return seriesDateSignal(p);
 }
 
 /** A ledger instant floored to its LOCAL day — the same split
- *  `seriesDateSignal` makes between an authored day and an observed one. */
-function workedRung(ms: number): SeriesDateSignal {
-  const day = localDay(new Date(ms));
+ *  `seriesDateSignal` makes between an authored day and an observed one. An
+ *  authored `day` (a T0 page's `created:`) is echoed as is. */
+function workedRung(ms: number, authored?: string): SeriesDateSignal {
+  const day = authored ?? localDay(new Date(ms));
   return { ms: calendarDayMs(day) ?? 0, day, rank: SERIES_WORKED_RANK };
 }
 
 /**
  * The day a member's strip cell PRINTS: the shown instant's day (D22). On a page
  * with a focus event, or none at all, that is {@link workedDateSignal}'s own day.
- * A T or T0 page shows today's chain — its ledger write, else the series chain —
+ * A T or T0 page shows today's chain — its ledger write, else the update —
  * marked `touched`, so the strip reads out of order at that row (a stated
  * exception to D9, like the Series section's).
  */
 export function workedShownDay(p: WorkedDateFields, now?: number): { day: string; touched?: WorkedTouch } {
   const shown = workedShownSignal(p, now);
   if (!shown.touched) return { day: workedDateSignal(p, now).day };
-  const chain = workedSignal(p, now);
-  const day = chain.kind === "worked" ? workedRung(chain.ms).day : seriesDateSignal(p).day;
-  return { day, touched: shown.touched };
+  // The shown instant's own label, the day the row chip and header print.
+  return { day: /^\d{4}-\d{2}-\d{2}/.exec(shown.label)?.[0] ?? "", touched: shown.touched };
 }
 
 /** Newest WORKED day first, then the rung, then the worked INSTANT, then relPath —
@@ -1245,8 +1245,10 @@ export function groupMonths(
     if (!month) {
       // Worked-on files a page under its SORT instant's month (D22), never the
       // shown one: a touched page is filed where it sorts.
-      const sortMs = which === "worked" && pageWorkState(p) ? workedSortSignal(p, now).ms : -1;
-      const signal = sortMs >= 0 ? (sortMs > 0 ? { label: localDay(new Date(sortMs)) } : null) : pageDateSignal(p, which, now);
+      const sort = which === "worked" && pageWorkState(p) ? workedSortSignal(p, now) : null;
+      const signal = sort
+        ? sort.ms > 0 ? { label: sort.day ?? localDay(new Date(sort.ms)) } : null
+        : pageDateSignal(p, which, now);
       if (!signal?.label) continue;
       const m = /^(\d{4})-(\d{2})/.exec(signal.label);
       if (!m) continue;

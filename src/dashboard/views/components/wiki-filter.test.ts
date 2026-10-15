@@ -41,6 +41,8 @@ import {
   resolveSortMode,
   workedSourceOf,
   workedChip,
+  workedSortSignal,
+  activityRowSource,
   CHANGED_SINCE_MIN_MS,
   pageFolder,
   pageFollowups,
@@ -1867,4 +1869,37 @@ test("Worked on: no work facts ⇒ the sort, the shown date and the chip are tod
   expect(pageWorkedMs(p, W_NOW)).toBe(wAgo(30));
   expect(pageDateSignal(p, "worked", W_NOW)).toEqual({ ms: wAgo(30), label: localDay(new Date(wAgo(30))), kind: "worked" });
   expect(workedSourceOf(p, W_NOW)).toEqual({ kind: "worked", worked: localDay(new Date(wAgo(30))) });
+});
+
+test("Worked on: a T0 page with no creation signal sorts on today's chain, not as undated", () => {
+  const noBirth = { gitCreatedMs: undefined, gitTouchedMs: undefined };
+  const t0 = withWork({ relPath: "t0.md", ...noBirth }, [[2, 5, "touch"]]);
+  expect(workedSortSignal(t0, W_NOW)).toMatchObject({ ms: wAgo(2), worked: true });
+  // A T page whose pre-touch position the future guard rejects falls the same way.
+  const t = withWork({ relPath: "t.md", ...noBirth }, [[2, 5, "touch"]], -100);
+  expect(t.work!.state).toBe("T");
+  expect(workedSortSignal(t, W_NOW)).toMatchObject({ ms: wAgo(2), worked: true });
+});
+
+test("Activity chip: a page with events never claims 'no session write recorded'; T/T0 carries its touch", () => {
+  // T page, no ledger summary row, update three days after the touch.
+  const t = withWork({ relPath: "t.md", workedMs: undefined, gitTouchedMs: wAgo(2 * 24) }, [[5 * 24, 1, "touch"]], 20 * 24);
+  const cases: Array<["added" | "updated" | "worked", "new" | "changed"]> = [
+    ["updated", "changed"], // lateChange wins
+    ["added", "new"], // newScore wins
+    ["worked", "changed"], // workTerm wins
+  ];
+  for (const [signal, kind] of cases) {
+    const date = pageDateSignal(t, signal, W_NOW);
+    const chip = workedChip(activityRowSource(t, W_NOW, signal, date, kind, true), date!.label, signal === "added" ? "added" : "updated");
+    expect([signal, chip.title.includes("no session write recorded")]).toEqual([signal, false]);
+    expect([signal, chip.cls.includes("touched")]).toEqual([signal, true]);
+    expect(chip.title).toContain(`touched ${localDay(new Date(wAgo(5 * 24)))}`);
+  }
+  // F page where the late change wins: no claim and no touch mark.
+  const f = withWork({ relPath: "f.md", workedMs: undefined, gitTouchedMs: wAgo(24) }, [[5 * 24, 4, "focus"]]);
+  expect(activityRowSource(f, W_NOW, "updated", pageDateSignal(f, "updated", W_NOW), "changed", true)).toBeNull();
+  // No events: today's fallback, unchanged.
+  const n = page({ relPath: "n.md", gitTouchedMs: wAgo(24) });
+  expect(activityRowSource(n, W_NOW, "updated", pageDateSignal(n, "updated", W_NOW), "changed", true)).toEqual({ kind: "fallback" });
 });

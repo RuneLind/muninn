@@ -304,7 +304,7 @@ import {
   workedAxisSource,
   workedChip,
   touchedLine,
-  isUsableWorkedMs,
+  activityRowSource,
   type WorkedSource,
   pageDateLabel,
   pageDateSignal,
@@ -1769,10 +1769,10 @@ function renderList(): void {
     // usable row for the page — the one case its update date stands in for a
     // worked day.
     const source: WorkedSource | null =
-      signal === "worked" && dateSignal
-        ? workedAxisSource(datePage, now, dateSignal)
-        : entry.activity?.kind === "changed" && workedGate?.open && !isUsableWorkedMs(datePage.workedMs, now)
-          ? { kind: "fallback" }
+      entry.activity && signal !== null
+        ? activityRowSource(datePage, now, signal, dateSignal, entry.activity.kind, !!workedGate?.open)
+        : signal === "worked" && dateSignal
+          ? workedAxisSource(datePage, now, dateSignal)
           : null;
     const chip = workedChip(source, fullDate, dateSignal?.kind === "added" ? "added" : "updated");
     // A NEW page (its own creation won, not a child's) says so in the date cell:

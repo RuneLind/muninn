@@ -861,6 +861,7 @@ export function workedChip(
   const touched = source.touched
     ? { cls: " touched", line: `\n${touchedLine(source.touched)}` }
     : { cls: "", line: "" };
+  if (source.kind === "events") return { cls: touched.cls, title: `${fullDate} (${fallbackKind})` + touched.line };
   if (source.kind === "fallback") {
     return {
       cls: " fallback" + touched.cls,
@@ -894,10 +895,13 @@ export const CHANGED_SINCE_MIN_MS = 24 * 60 * 60 * 1000;
  *    a script the ledger cannot read, a lint or sync commit.
  *  - `fallback` — no usable ledger row, so any worked-on date shown for it is the
  *    update signal.
+ *  - `events` — an Activity row on a page with session events whose winning
+ *    term is not a worked date: the date is plain, a T/T0 touch still marked.
  */
 export type WorkedSource =
   | { kind: "worked"; worked: string; changedSince?: string; touched?: WorkedTouch }
-  | { kind: "fallback"; touched?: WorkedTouch };
+  | { kind: "fallback"; touched?: WorkedTouch }
+  | { kind: "events"; touched?: WorkedTouch };
 
 /**
  * `signal` defaults to the SHOWN worked signal ({@link workedShownSignal}). The
@@ -949,6 +953,34 @@ export function workedAxisSource(
   signal: WikiDateSignal | null | undefined,
 ): WorkedSource | null {
   return signal ? workedSourceOf(p, now, signal) : null;
+}
+
+/**
+ * An Activity row's chip source. `rowSignal` is the axis whose date the row
+ * shows (the winning term's), `dateSignal` that date. A worked row marks its
+ * session; a `changed` row on an open gate with no usable ledger row is the
+ * update standing in for a worked day (`fallback`). A page with usable session
+ * events never takes `fallback`.
+ */
+export function activityRowSource(
+  p: WikiRecencyFields,
+  now: number,
+  rowSignal: "added" | "updated" | "worked",
+  dateSignal: WikiDateSignal | null,
+  rowKind: "new" | "changed",
+  gateOpen: boolean,
+): WorkedSource | null {
+  const base = rowSignal === "worked" && dateSignal ? workedSourceOf(p, now, dateSignal) : null;
+  const w = pageWorkState(p);
+  if (w && usableWorkEvents(w, now).length > 0) {
+    // D5: the events are the record, so no "no session write" claim; the
+    // winning term's date keeps its mark, a T/T0 page its touch (D15).
+    if (base?.kind === "worked") return base;
+    const touched = workedShownSignal(p, now).touched;
+    return touched ? { kind: "events", touched } : null;
+  }
+  if (base) return base;
+  return rowKind === "changed" && gateOpen && !isUsableWorkedMs(p.workedMs, now) ? { kind: "fallback" } : null;
 }
 
 /**
@@ -1242,21 +1274,28 @@ function touchOf(w: PageWork, now: number): WorkedTouch | undefined {
  *  - **F** (a focus event in the window): the newest focus event.
  *  - **T** (only touches or pass markers, with a pre-touch position): that
  *    position, so a touch neither lifts nor sinks the page.
- *  - **T0** (as T, with no position): the page's creation (`pageAddedMs`).
+ *  - **T0** (as T, with no position): the page's creation (`pageAddedMs`),
+ *    else today's chain when the page has no creation signal either.
  *  - **N** (no events, or no sessions memo): today's chain, {@link workedSignal}.
  *
  * The worked gate does not enter (state C sorts per F/T/T0/N): the gate decides
  * the Activity SCORE only. A stamp the future guard rejects falls one row down
  * the table (F → today's chain, T → creation).
  */
-export function workedSortSignal(p: WikiRecencyFields, now: number = Date.now()): { ms: number; worked: boolean } {
+export function workedSortSignal(
+  p: WikiRecencyFields,
+  now: number = Date.now(),
+): { ms: number; worked: boolean; day?: string } {
   const w = pageWorkState(p);
   if (w) {
     if (w.state === "F" && isUsableWorkedMs(w.focusMs, now)) return { ms: w.focusMs, worked: true };
     if (w.state === "T" && isUsableWorkedMs(w.preMs, now)) return { ms: w.preMs, worked: true };
     if (w.state !== "F") {
-      const created = addedSignal(p, now).ms;
-      return { ms: created, worked: created > 0 };
+      // `day` is the creation signal's own label: a frontmatter `created:` is
+      // an authored day, which `localDay` of its UTC midnight shifts west of UTC.
+      const created = addedSignal(p, now);
+      if (created.ms > 0) return { ms: created.ms, worked: true, day: /^\d{4}-\d{2}-\d{2}/.exec(created.label)?.[0] };
+      // No creation signal: today's chain (state N's instant), not undated.
     }
   }
   const chain = workedSignal(p, now);

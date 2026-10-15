@@ -1845,3 +1845,53 @@ describe("the fold and the strip under the work rung", () => {
     expect(workedShownDay(p, NOW)).toEqual({ day: "2026-09-21" });
   });
 });
+
+describe("T/T0 days on the worked rung, west of UTC", () => {
+  // Bun 1.3, `delete process.env.TZ` leaves the previously-set zone in place.
+  const PREV = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  beforeAll(() => {
+    process.env.TZ = "America/New_York";
+  });
+  afterAll(() => {
+    process.env.TZ = PREV;
+  });
+  const NOW = Date.parse("2026-10-15T12:00:00Z");
+  const SINCE = NOW - 8 * 86_400_000;
+  const touched = (relPath: string, at: number, over: Partial<WikiListing>, preMs?: number): WikiListing =>
+    page({
+      relPath,
+      ...over,
+      work: { sinceMs: SINCE, ...(preMs ? { preMs } : {}), state: preMs ? "T" : "T0", events: [[at, 1, "touch"]] },
+    });
+
+  test("the zone really is west of UTC, or this block proves nothing", () => {
+    expect(new Date(Date.parse("2026-10-01T00:00:00Z")).getDate()).toBe(30);
+  });
+
+  test("a T0 page sorts and files under its AUTHORED created: day", () => {
+    const at = Date.parse("2026-10-14T15:00:00Z");
+    const p = touched("notes/a.mdx", at, { created: "2026-10-01", workedMs: at });
+    expect(workedDateSignal(p, NOW)).toMatchObject({ day: "2026-10-01", ms: Date.parse("2026-10-01T00:00:00Z") });
+    expect(workedShownDay({ ...p, work: { ...p.work!, events: [[at, 1, "focus"]], state: "F", focusMs: at } }, NOW).day).toBe("2026-10-14");
+    expect(groupMonths([p], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+  });
+
+  test("a T0 page with no creation signal still files in a month (today's chain)", () => {
+    const at = NOW - 2 * 3_600_000;
+    const p = touched("notes/b.mdx", at, { workedMs: at });
+    expect(groupMonths([p], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+    expect(workedDateSignal(p, NOW)).toMatchObject({ day: "2026-10-15" });
+  });
+
+  test("a T page with no ledger write prints its SHOWN day on the strip", () => {
+    const p = touched(
+      "plans/t.mdx",
+      Date.parse("2026-10-10T15:00:00Z"),
+      { status_date: "2026-08-01", gitCreatedMs: Date.parse("2026-06-01T16:00:00Z"), gitTouchedMs: Date.parse("2026-10-10T16:00:00Z") },
+      Date.parse("2026-09-01T16:00:00Z"),
+    );
+    const shown = workedShownDay(p, NOW);
+    expect(shown.day).toBe("2026-10-10");
+    expect(shown.touched?.label).toBe("2026-10-10");
+  });
+});
