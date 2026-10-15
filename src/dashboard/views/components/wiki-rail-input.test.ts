@@ -114,3 +114,83 @@ describe("railInputFor", () => {
     });
   }
 });
+
+// A second listing whose cases each turn on one input `railInputFor` wires
+// through: an OPEN worked gate, project names, a key jump over `facetOnly`, a
+// Jira filter and an open page inside a closed series. Each case also asserts
+// that its input changes the rail, so a wiring mistake cannot pass by accident.
+const WIRED_PAGES: WikiListing[] = [
+  page({ relPath: "notes/a.mdx", gitCreatedMs: NOW - 3 * DAY, gitTouchedMs: NOW - DAY, workedMs: NOW - DAY + 3_600_000 }),
+  page({ relPath: "notes/b.mdx", gitCreatedMs: NOW - 4 * DAY, gitTouchedMs: NOW - 2 * DAY, workedMs: NOW - 2 * DAY }),
+  page({ relPath: "notes/revived.mdx", gitCreatedMs: NOW - 200 * DAY, gitTouchedMs: NOW - 60 * DAY, workedMs: NOW - 2 * 3_600_000 }),
+  page({ relPath: "plans/proj-x-a.mdx", gitCreatedMs: NOW - 300 * DAY, gitTouchedMs: NOW - 250 * DAY, project: "proj-x", plan_status: "in-flight" }),
+  page({ relPath: "plans/proj-x-b.mdx", gitCreatedMs: NOW - 301 * DAY, gitTouchedMs: NOW - 251 * DAY, project: "proj-x" }),
+  page({ relPath: "plans/proj-x-c.mdx", gitCreatedMs: NOW - 302 * DAY, gitTouchedMs: NOW - 252 * DAY, project: "proj-x" }),
+  page({ relPath: "archive/gamma-one.mdx", gitCreatedMs: NOW - 310 * DAY, gitTouchedMs: NOW - 260 * DAY, series: "gamma", seriesLabel: "Gamma" }),
+  page({ relPath: "archive/gamma-two.mdx", gitCreatedMs: NOW - 311 * DAY, gitTouchedMs: NOW - 261 * DAY, series: "gamma", jira: ["MELO-77"] }),
+  // The key is only in the path, which the text filter does not read for a
+  // query without a "/": the jump finds it over `facetOnly` alone.
+  page({ relPath: "notes/fix-melo-7588.mdx", name: "fix", title: "Fix", gitCreatedMs: NOW - 320 * DAY, gitTouchedMs: NOW - 270 * DAY }),
+];
+const WIRED: RailWikiFacts = {
+  allPages: WIRED_PAGES,
+  projects: { "proj-x": 3 },
+  activityWeights: DEFAULT_ACTIVITY_WEIGHTS,
+  workedGate: workedGateFor(WIRED_PAGES, DEFAULT_ACTIVITY_WEIGHTS, NOW, NOW),
+};
+const base = (over: Partial<RailViewer> = {}): RailViewer => ({
+  mode: "updated",
+  now: NOW,
+  filters: INERT,
+  showRetired: false,
+  familiesOn: false,
+  pins: [],
+  openFolds: [],
+  ...over,
+});
+const railJson = (facts: RailWikiFacts, viewer: RailViewer) => JSON.stringify(buildRail(railInputFor(facts, viewer)));
+const sameAsLegacy = (facts: RailWikiFacts, viewer: RailViewer) => {
+  const after = railJson(facts, viewer);
+  expect(after).toBe(JSON.stringify(buildRail(legacyRailInput(facts, viewer))));
+  return after;
+};
+
+describe("railInputFor wiring", () => {
+  test("an OPEN worked gate reaches the Activity ranking", () => {
+    expect(WIRED.workedGate?.open).toBe(true);
+    const viewer = base({ mode: "worked" });
+    const open = sameAsLegacy(WIRED, viewer);
+    expect(open).not.toBe(railJson({ ...WIRED, workedGate: null }, viewer));
+  });
+  test("the wiki's project names reach the family rule", () => {
+    const viewer = base({ familiesOn: true, openFolds: [GROUP_FAMILIES_TOGGLE_KEY] });
+    const withProjects = sameAsLegacy(WIRED, viewer);
+    expect(withProjects).not.toBe(railJson({ ...WIRED, projects: {} }, viewer));
+  });
+  test("a status facet and a project facet", () => {
+    for (const filters of [{ ...INERT, status: "in-flight" }, { ...INERT, project: "proj-x" }]) {
+      const out = sameAsLegacy(WIRED, base({ filters }));
+      expect(JSON.parse(out).entries.length).toBeGreaterThan(0);
+    }
+  });
+  test("a query without a digit", () => {
+    const out = sameAsLegacy(WIRED, base({ filters: { ...INERT, q: "gamma" } }));
+    expect(out).toContain("archive/gamma-one.mdx");
+  });
+  test("a key jump resolves over the facets without the query", () => {
+    const out = sameAsLegacy(WIRED, base({ filters: { ...INERT, q: "MELO-7588" } }));
+    expect(out).toContain('"section":"jump"');
+    expect(out).toContain("notes/fix-melo-7588.mdx");
+  });
+  test("a Jira filter opens the closed series holding its page", () => {
+    const out = sameAsLegacy(WIRED, base({ filters: { ...INERT, jira: "MELO-77" } }));
+    expect(out).toContain("archive/gamma-two.mdx");
+    expect(out).toContain('"forcedOpen":true');
+  });
+  test("the open page forces its closed series open", () => {
+    const viewer = base({ openRelPath: "archive/gamma-two.mdx" });
+    const out = sameAsLegacy(WIRED, viewer);
+    expect(out).toContain('"forcedOpen":true');
+    expect(railJson(WIRED, base())).not.toContain('"forcedOpen":true');
+  });
+});

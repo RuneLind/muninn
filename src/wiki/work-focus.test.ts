@@ -139,6 +139,29 @@ describe("created (D2)", () => {
     );
     expect(kinds(viaGit, "p/r.mdx")).toEqual(["touch"]);
   });
+  test("only the earliest writer is credited, though a later one is inside the slack too", () => {
+    // The anchor is a late commit: both sessions write within 10 min of it.
+    const anchor = T(30);
+    const r = run(
+      [
+        sess("a", [f("p/new.mdx", 1, anchor - 5 * 60_000), f("p/x.mdx", 9, anchor - 5 * 60_000)]),
+        sess("b", [f("p/new.mdx", 1, anchor + 2 * 60_000), f("p/x.mdx", 9, anchor + 2 * 60_000)]),
+      ],
+      [pg("p/new.mdx", { gitCreatedMs: anchor }), pg("p/x.mdx")],
+    );
+    expect(kinds(r, "p/new.mdx")).toEqual(["touch", "focus"]);
+  });
+  test("a page born just before the window is not created, with no pre-window position to say so", () => {
+    // No ledger write before the window and no preGitMs: only the
+    // creation-date-in-window clause refuses it.
+    const r = run(
+      [sess("a", [f("p/edge.mdx", 1, SINCE + 60_000), f("p/x.mdx", 9, SINCE + 60_000)])],
+      [pg("p/edge.mdx", { gitCreatedMs: SINCE - 5 * 60_000 }), pg("p/x.mdx")],
+    );
+    expect(r.pages.get("p/edge.mdx")).toMatchObject({ state: "T0" });
+    expect(r.pages.get("p/edge.mdx")!.preMs).toBeUndefined();
+    expect(kinds(r, "p/edge.mdx")).toEqual(["touch"]);
+  });
   test("a page born before the window is never created", () => {
     const r = run([sess("a", [f("p/o.mdx", 1, T(10)), f("p/x.mdx", 9, T(10))])], [pg("p/o.mdx", { gitCreatedMs: SINCE - DAY }), pg("p/x.mdx")]);
     expect(kinds(r, "p/o.mdx")).toEqual(["touch"]);
@@ -269,6 +292,29 @@ describe("threads (D6, D16)", () => {
     expect(owners).toHaveLength(1);
     const other = r.threads.find((t) => !t.pages.includes("flows/hub.mdx"))!;
     expect(other.touched).toContain("flows/hub.mdx");
+  });
+  test("a thread keys on its earliest NON-hub focus page, though the hub was focused first", () => {
+    const hub = pg("flows/hub.mdx", { backlinks: 30 });
+    const r = run([sess("s1", [f("flows/hub.mdx", 6, T(30)), f("p/a.mdx", 6, T(29))])], [hub, pg("p/a.mdx")]);
+    expect(r.threads).toHaveLength(1);
+    expect(r.threads[0]!.pages).toContain("flows/hub.mdx");
+    expect(r.threads[0]!.key).toBe("p/a.mdx");
+  });
+  test("equal raw work on a hub: the thread whose session ended later owns its row", () => {
+    const hub = pg("flows/hub.mdx", { backlinks: 30 });
+    // Same edits and lastMs on the hub (equal raw); different firstMs so the
+    // fork dedupe keeps both rows. s2 started later and ends later.
+    const r = run(
+      [
+        sess("s1", [f("flows/hub.mdx", 5, T(22), T(20)), f("p/a.mdx", 5, T(22), T(20))]),
+        sess("s2", [f("flows/hub.mdx", 5, T(21), T(20)), f("p/b.mdx", 5, T(3), T(2))]),
+      ],
+      [hub, pg("p/a.mdx"), pg("p/b.mdx")],
+    );
+    expect(r.threads).toHaveLength(2);
+    const owner = r.threads.find((t) => t.pages.includes("flows/hub.mdx"))!;
+    expect(owner.sessions.map((s) => s.id)).toEqual(["s2"]);
+    expect(r.threads.find((t) => t.key === "p/a.mdx")!.touched).toContain("flows/hub.mdx");
   });
   test("a thread left with only a hub owned elsewhere is dropped; a touch-only session forms none", () => {
     const hub = pg("flows/hub.mdx", { backlinks: 30 });
