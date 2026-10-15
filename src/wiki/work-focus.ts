@@ -151,10 +151,11 @@ export interface WorkFocusResult {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** The ledger's path spelling (`normalizeWorkedPath`'s rule, kept here so this
- *  module imports nothing with IO). */
+/** The one key for ledger paths, prompt tokens and page relPaths:
+ *  `normalizeWorkedPath`'s rule (kept here so this module imports nothing with
+ *  IO) plus `coverageKey`'s NFC fold, since macOS hands back NFD names. */
 export function workPathKey(p: string): string {
-  return normalizeRelPath(p.replace(/\\/g, "/")).replace(/^\/+/, "");
+  return normalizeRelPath(p.replace(/\\/g, "/")).replace(/^\/+/, "").normalize("NFC");
 }
 
 const DATE_PREFIX_RE = /^\d{4}-\d{2}-\d{2}-/;
@@ -166,7 +167,7 @@ function stemOf(p: string): string {
 
 function rootPrefix(root: string): string {
   const r = root.replace(/\\/g, "/").replace(/\/+$/, "");
-  return r.toLowerCase() + "/";
+  return r.toLowerCase().normalize("NFC") + "/";
 }
 
 /** The raw work one event carries at `now`. */
@@ -224,6 +225,16 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   // The vocabulary. Bookkeeping pages are dropped from every event, so they
   // are not in any map below.
   const sorted = [...input.pages].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
+  const pre = new Map<string, number>();
+  for (const [p, ms] of input.pre) {
+    const k = workPathKey(p);
+    pre.set(k, Math.max(ms, pre.get(k) ?? ms));
+  }
+  // An alias path a live page sits at is that page's (the worked post-pass's
+  // `livePaths` rule), for the pre-touch position and the roll-up alike.
+  const liveKeys = new Set(sorted.map((p) => workPathKey(p.relPath)));
+  const aliasesOf = (p: WorkPageInput): string[] =>
+    [...new Set((p.aliasPaths ?? []).map(workPathKey))].filter((a) => !liveKeys.has(a));
   const byKey = new Map<string, PageRec>();
   const metaKeys = new Set<string>();
   const recs: PageRec[] = [];
@@ -240,9 +251,9 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
       hub: p.backlinks > WORK_HUB_BACKLINKS,
       ...(anchors.length ? { createdAnchor: Math.min(...anchors) } : {}),
     };
-    const preLedger = maxDefined([input.pre.get(key), ...(p.aliasPaths ?? []).map((a) => input.pre.get(a))]);
-    const pre = maxDefined([preLedger, p.preGitMs]);
-    if (pre !== undefined) rec.preMs = pre;
+    const preLedger = maxDefined([pre.get(key), ...aliasesOf(p).map((a) => pre.get(a))]);
+    const preMs = maxDefined([preLedger, p.preGitMs]);
+    if (preMs !== undefined) rec.preMs = preMs;
     byKey.set(key, rec);
     recs.push(rec);
   }
@@ -250,7 +261,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   sorted.forEach((p) => {
     const rec = byKey.get(workPathKey(p.relPath));
     if (!rec) return;
-    for (const a of p.aliasPaths ?? []) if (!byKey.has(a) && !metaKeys.has(a) && !aliasOwner.has(a)) aliasOwner.set(a, rec);
+    for (const a of aliasesOf(p)) if (!aliasOwner.has(a)) aliasOwner.set(a, rec);
   });
   const refOwner = new Map<string, PageRec>();
   for (const p of sorted) {
@@ -313,7 +324,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   const namedBy = (s: WorkSession): Set<PageRec> => {
     const out = new Set<PageRec>();
     for (const raw of s.text.paths) {
-      const t = raw.replace(/\\/g, "/");
+      const t = raw.replace(/\\/g, "/").normalize("NFC");
       if (t.startsWith("/")) {
         const lower = t.toLowerCase();
         const root = idRoots.find((r) => lower.startsWith(r));
@@ -332,7 +343,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
     }
     for (const f of s.text.files) {
       if (!PAGE_EXT_RE.test(f)) continue;
-      const hit = nameCount.get(f.toLowerCase());
+      const hit = nameCount.get(f.toLowerCase().normalize("NFC"));
       if (hit) out.add(hit);
     }
     return out;
@@ -340,7 +351,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   const isElsewhere = (s: WorkSession, named: Set<PageRec>): boolean => {
     if (named.size > 0) return false;
     return s.text.paths.some((raw) => {
-      const lower = raw.replace(/\\/g, "/").toLowerCase();
+      const lower = raw.replace(/\\/g, "/").toLowerCase().normalize("NFC");
       if (!lower.startsWith("/")) return false;
       if (idRoots.some((r) => lower.startsWith(r))) return false;
       return otherRoots.some((r) => lower.startsWith(r));
@@ -388,8 +399,11 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
       if (pass) kind = "pass";
       else {
         const anchor = c.page.createdAnchor;
+        // A page with a pre-touch position existed before the window, whatever
+        // git dates its creation (a rename-and-rewrite defeats rename detection).
         const created =
           anchor !== undefined &&
+          c.page.preMs === undefined &&
           anchor >= sinceMs &&
           c.ownFirstMs !== undefined &&
           c.ownFirstMs === earliestOwn.get(c.page) &&

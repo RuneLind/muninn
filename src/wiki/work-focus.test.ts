@@ -122,6 +122,23 @@ describe("created (D2)", () => {
     const r = run([sess("a", [f("p/u.mdx", 1, T(10)), f("p/x.mdx", 9, T(10))])], [pg("p/u.mdx"), pg("p/x.mdx")]);
     expect(kinds(r, "p/u.mdx")).toEqual(["touch"]);
   });
+  test("a page with a pre-window position is not created, though git dates its creation inside the window", () => {
+    // Renamed and rewritten at once: git's rename detection fails, so the
+    // creation commit lands in the window while the old path has history.
+    const viaAlias = run(
+      [sess("A", [f("plans/old.mdx", 1, SINCE + DAY)]), sess("B", [f("plans/x.mdx", 5, T(5))])],
+      [pg("plans/new.mdx", { aliasPaths: ["plans/old.mdx"], gitCreatedMs: SINCE + 5 * DAY }), pg("plans/x.mdx")],
+      { pre: new Map([["plans/old.mdx", SINCE - 30 * DAY]]) },
+    );
+    expect(viaAlias.pages.get("plans/new.mdx")).toMatchObject({ state: "T", preMs: SINCE - 30 * DAY });
+    expect(kinds(viaAlias, "plans/new.mdx")).toEqual(["touch"]);
+    expect(viaAlias.threads.some((t) => t.pages.includes("plans/new.mdx"))).toBe(false);
+    const viaGit = run(
+      [sess("A", [f("p/r.mdx", 1, SINCE + DAY), f("p/x.mdx", 9, SINCE + DAY)])],
+      [pg("p/r.mdx", { gitCreatedMs: SINCE + 2 * DAY, preGitMs: SINCE - 10 * DAY }), pg("p/x.mdx")],
+    );
+    expect(kinds(viaGit, "p/r.mdx")).toEqual(["touch"]);
+  });
   test("a page born before the window is never created", () => {
     const r = run([sess("a", [f("p/o.mdx", 1, T(10)), f("p/x.mdx", 9, T(10))])], [pg("p/o.mdx", { gitCreatedMs: SINCE - DAY }), pg("p/x.mdx")]);
     expect(kinds(r, "p/o.mdx")).toEqual(["touch"]);
@@ -163,6 +180,17 @@ describe("roll-up (D3)", () => {
   test("a file nobody owns counts toward nothing", () => {
     const r = run([sess("a", [f("scripts/x.ts", 9, T(10))])], [pg("p/a.mdx")]);
     expect(r.pages.size).toBe(0);
+  });
+  test("an alias path a live page sits at is that page's, not the renamed one's", () => {
+    const r = run(
+      [sess("a", [f("p/new.mdx", 1, T(5)), f("p/old.mdx", 9, T(5))])],
+      [pg("p/new.mdx", { aliasPaths: ["p/old.mdx"] }), pg("p/old.mdx")],
+      { pre: new Map([["p/old.mdx", SINCE - DAY]]) },
+    );
+    const w = r.pages.get("p/new.mdx")!;
+    expect(w.state).toBe("T0");
+    expect(w.preMs).toBeUndefined();
+    expect(r.pages.get("p/old.mdx")).toMatchObject({ state: "F", preMs: SINCE - DAY });
   });
   test("a renamed page keeps its old path's rows and pre-window write", () => {
     const r = run([sess("a", [f("plans/old.mdx", 5, T(10))])], [pg("plans/new.mdx", { aliasPaths: ["plans/old.mdx"] })], {
@@ -295,6 +323,31 @@ describe("events and states", () => {
       pre: new Map([["p/a.mdx", SINCE - 5 * DAY]]),
     });
     expect(r.pages.get("p/a.mdx")).toMatchObject({ state: "T", preMs: SINCE - 2 * DAY });
+  });
+  test("a ledger path in NFD matches the page's NFC relPath", () => {
+    const nfc = "plans/s\u00e5k.mdx";
+    const nfd = "plans/sa\u030ak.mdx";
+    const r = run([sess("a", [f(nfd, 5, T(10))])], [pg(nfc)], { pre: new Map([[nfd, SINCE - DAY]]) });
+    expect(r.pages.get(nfc)).toMatchObject({ state: "F", preMs: SINCE - DAY });
+  });
+  test("an NFD prompt path or file name names the NFC page", () => {
+    const nfc = "plans/s\u00e5k.mdx";
+    const nfd = "plans/sa\u030ak.mdx";
+    const pages = [pg(nfc), pg("plans/x.mdx")];
+    const writes = () => [f(nfc, 1, T(10)), f("plans/x.mdx", 10, T(10))];
+    expect(kinds(run([sess("a", writes(), { paths: [`/w/kode/${nfd}`] })], pages), nfc)).toEqual(["focus"]);
+    expect(kinds(run([sess("a", writes(), { paths: [nfd] })], pages), nfc)).toEqual(["focus"]);
+    expect(kinds(run([sess("a", writes(), { names: ["sa\u030ak.mdx"] })], pages), nfc)).toEqual(["focus"]);
+  });
+  test("a root and a prompt path match across NFC and NFD, here and elsewhere", () => {
+    const pages = [pg("p/a.mdx"), pg("p/b.mdx")];
+    const writes = () => [f("p/a.mdx", 1, T(10)), f("p/b.mdx", 10, T(10))];
+    const named = (path: string, root: string) =>
+      kinds(run([sess("a", writes(), { paths: [path] })], pages, { identity: { roots: [root], name: "kode" } }), "p/a.mdx");
+    expect(named("/w/ka\u030ade/p/a.mdx", "/w/k\u00e5de")).toEqual(["focus"]);
+    expect(named("/w/k\u00e5de/p/a.mdx", "/w/ka\u030ade")).toEqual(["focus"]);
+    const away = run([sess("a", writes(), { paths: ["/w/mi\u0301mir/x.mdx"] })], pages, { otherRoots: ["/w/m\u00edmir"] });
+    expect(kinds(away, "p/a.mdx")).toEqual(["pass"]);
   });
   test("session titles are cleaned and capped", () => {
     expect(cleanSessionTitle("  a\n\n b  ")).toBe("a b");
