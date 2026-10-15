@@ -1883,6 +1883,18 @@ describe("T/T0 days on the worked rung, west of UTC", () => {
     expect(workedDateSignal(p, NOW)).toMatchObject({ day: "2026-10-15" });
   });
 
+  test("a T0 page with no creation signal files under its chain's authored updated: day, as state N does", () => {
+    const at = Date.parse("2026-10-14T15:00:00Z");
+    // Today's chain is the frontmatter `updated:` (UTC midnight, the 30th in New York).
+    const p = touched("notes/c.mdx", at, { updated: "2026-10-01" });
+    const bare = { ...p, work: undefined };
+    expect(groupMonths([bare], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+    expect(groupMonths([p], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+    // A T page whose pre-touch position the guard rejects falls through the same way.
+    const t = touched("notes/d.mdx", at, { updated: "2026-10-01" }, NOW + 30 * 86_400_000);
+    expect(groupMonths([t], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-10"]);
+  });
+
   test("a T page with no ledger write prints its SHOWN day on the strip", () => {
     const p = touched(
       "plans/t.mdx",

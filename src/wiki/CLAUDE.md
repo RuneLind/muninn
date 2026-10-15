@@ -1444,9 +1444,9 @@ the exact sort instant, then the shown instant, then relPath; the rail's
 shown instant, then the display title (no rung). A touched page sorts where it
 stood before the window (D15): falling back to today's chain put a link-touched page back on top,
 and clamping to the window start lifted older pages. Its chip, strip cell and
-header carry a dotted `touched` mark whose hover names the touch (on a chip that
-is also a `fallback`, the fallback moves to a muted dotted bottom rule so both
-marks show), and the
+header carry a dotted `touched` mark whose hover names the touch (never with a
+`fallback` mark or a `no session` slot: a page with usable events is never the
+fallback, ledger row or not — D5), and the
 Worked-on listing's date column and the strip read out of order at that row — a
 stated exception to D9. `changedSince` compares the update against the page's
 newest write of ANY kind (shown instant, `workedMs`, every shipped event), so a
@@ -1612,7 +1612,7 @@ Five rules a caller can get wrong from outside:
 - `lateChange` is today's change term WITHOUT substitution, counted only when the update lands `CHANGED_SINCE_MIN_MS` (24 h) or more after the page's newest event — commit lag runs past a day.
 - The gate's demotion and its "no session write on record" clause do not apply to such a page. The row's kind is `new` when the creation term wins, else `changed`; its age runs from the WINNING term (creation, the newest focus event — the newest event on a page with none — or the update), and its `why` names the sessions, edits, touches and passes. A page without events, and every page under a closed gate, keeps today's score byte for byte.
 
-The constants were tuned on the plan's named replay and checked on its held-out one: they cannot reorder two work-scored rows (the map is monotone in `raw`) nor the threads (ordered by raw), only work against creation and a late change. A closed series in Activity peeks at up to `WORK_PEEK_MAX` (5) unlifted members of the filtered listing whose `workTerm` clears `WORK_PEEK_MIN` (0.7), by that term (D12, `buildRail`'s `peekOf`, fed `RailInput.workTerm` only while the gate is open); with none, today's 3 by Activity rank. A row whose page carries events shows a four-step **work bar** first on its meta line, in the icon gutter, so it takes no room from the other marks (`pageWorkBar`); it is a fact about the page and ignores the gate. No sessions memo ⇒ no `work` ⇒ no bars, today's peek and today's ranking (D11). `e2e/wiki-activity-worked.spec.ts` measures the bar plus the chips at the 260 px rail on CI's fonts.
+The constants were tuned on the plan's named replay and checked on its held-out one: they cannot reorder two work-scored rows (the map is monotone in `raw`) nor the threads (ordered by raw), only work against creation and a late change. A closed series in Activity peeks at up to `WORK_PEEK_MAX` (5) unlifted members of the filtered listing whose `workTerm` clears `WORK_PEEK_MIN` (0.7), by that term (D12, `buildRail`'s `peekOf`, fed `RailInput.workTerm` only while the gate is open); with none, today's 3 by Activity rank. A row whose page carries events shows a four-step **work bar** first on its meta line, in the icon gutter, so it takes no room from the other marks (`pageWorkBar`), and the line it sits on takes 4px gaps rather than 6 so its fullest form fits the 260 px rail; it is a fact about the page and ignores the gate. No sessions memo ⇒ no `work` ⇒ no bars, today's peek and today's ranking (D11). `e2e/wiki-activity-worked.spec.ts` measures the bar plus the chips at the 260 px rail on CI's fonts.
 
 `railInputFor` (`views/components/wiki-rail-input.ts`) is the rail's input assembly, moved out of `renderList` so the replay and the reader build the rail from one function (D20).
 

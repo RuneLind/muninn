@@ -271,14 +271,29 @@ describe("the state table (D22) — N and C", () => {
     expect(chipCls(p)).not.toBe(chipCls(bare));
   });
 
-  test("T with no ledger row: the header's no-session branch still carries the touched mark", () => {
+  test("T with no ledger row: the header claims no 'no session' (D5) and carries the touched mark", () => {
     // A bash-only touch: session events, but no `workedMs` summary row.
     const p = build({ rel: "t/bash-only.md", createdH: 40 * 24, touchedH: 40 * 24, preGitH: 40 * 24, write: { edits: 1, h: 5 } });
     delete (p as { workedMs?: number }).workedMs;
     expect(p.work?.state).toBe("T");
     const h = pageHeaderDates(p, NOW, { ledger: true });
-    expect(h.noSession).toBe(true);
+    expect(h.noSession).toBeUndefined();
     expect(h.touched).toEqual({ ms: ago(5), label: localDay(new Date(ago(5))), pass: false });
+    const bare = { ...p };
+    delete (bare as { work?: unknown }).work;
+    expect(pageHeaderDates(bare, NOW, { ledger: true }).noSession).toBe(true);
+  });
+
+  test("T with no ledger row: the Worked-on listing chip carries its touch, never 'no session write recorded'", () => {
+    const p = build({ rel: "t/bash-only.md", createdH: 40 * 24, touchedH: 40 * 24, preGitH: 40 * 24, write: { edits: 1, h: 5 } });
+    delete (p as { workedMs?: number }).workedMs;
+    const chip = workedChip(workedAxisSource(p, NOW, workedShownSignal(p, NOW)), "d", "updated");
+    expect(chip.cls).toBe(" touched");
+    expect(chip.title).not.toContain("no session write recorded");
+    // Without its events the same page is the plain fallback, claim and all.
+    const bare = { ...p };
+    delete (bare as { work?: unknown }).work;
+    expect(workedChip(workedAxisSource(bare, NOW, workedShownSignal(bare, NOW)), "d", "updated").cls).toBe(" fallback");
   });
 
   test("C — a closed gate: today's score, while the worked key still moves per F/T/T0", () => {

@@ -99,9 +99,10 @@ const TOUCH_TOUCHED = "plans/touched.md";
  *  series member renders inside its closed fold). */
 const SOLO_FOCUSED = "notes/focused.md";
 const SOLO_TOUCHED = "notes/touched.md";
-/** A touched page with NO ledger summary row (a bash-only write): its chip is
- *  the update fallback AND touched, so both marks must show. Outside `notes/`,
- *  which the sort case reads. */
+/** A touched page with NO ledger summary row (a bash-only write): its events
+ *  are the record (D5), so the chip and the header carry the touch and never
+ *  the fallback's "no session" claim. Outside `notes/`, which the sort case
+ *  reads. The true fallback stays pinned on `MARK_NONE`. */
 const BARE_TOUCHED = "misc/bare-touched.md";
 const NOW = Date.now();
 const FOCUS_AT = NOW - 3 * 86_400_000;
@@ -307,6 +308,10 @@ function workAnswer(root: string, url: URL): { status: number; body: string } | 
       ? [
           { p: TOUCH_TOUCHED, w: TOUCH_PRE, s: 1 },
           { p: SOLO_TOUCHED, w: TOUCH_PRE, s: 1 },
+          // A pre-window write keeps the page T on every host: as T0 its
+          // creation anchor is the file's birthtime, which Linux cannot set
+          // back, so the touch reads as the page's creation (focus) on CI.
+          { p: BARE_TOUCHED, w: TOUCH_PRE, s: 1 },
         ]
       : [];
   return {
@@ -747,31 +752,30 @@ test.describe("Wiki reader: worked-on recency", () => {
     expect(Number(await level(SOLO_FOCUSED))).toBeGreaterThan(Number(await level(SOLO_TOUCHED)));
   });
 
-  test("PR 4 — a touched page with no ledger row keeps BOTH marks: fallback and touched", async ({ page }) => {
+  test("PR 4 — a touched page with no ledger row carries its touch, never the 'no session' claim", async ({ page }) => {
     await openReader(page, TOUCH);
     await expect(page.locator("#wikiSort")).toHaveValue("worked");
     const meta = page.locator(`.wiki-list-item[data-relpath="${BARE_TOUCHED}"] .wiki-list-meta`);
-    await expect(meta).toHaveClass(/\bfallback\b.*\btouched\b/);
-    // Two channels, so neither mark erases the other: the touch is the chip's
-    // dotted underline in its own ink, the fallback a muted dotted rule below.
-    const marks = await meta.evaluate((e) => {
-      const probe = document.createElement("span");
-      probe.style.color = "var(--text-muted)";
-      document.body.appendChild(probe);
-      const muted = getComputedStyle(probe).color;
-      probe.remove();
-      const cs = getComputedStyle(e);
-      return {
-        underline: `${cs.textDecorationLine} ${cs.textDecorationStyle} ${cs.textDecorationThickness}`,
-        underlineInk: cs.textDecorationColor === cs.color,
-        rule: `${cs.borderBottomStyle} ${cs.borderBottomWidth}`,
-        ruleInk: cs.borderBottomColor === muted,
-      };
-    });
-    expect(marks).toEqual({ underline: "underline dotted 1.5px", underlineInk: true, rule: "dotted 1px", ruleInk: true });
-    // A touched chip WITH a ledger row carries the touch alone, no rule.
-    const solo = page.locator(`.wiki-list-item[data-relpath="${SOLO_TOUCHED}"] .wiki-list-meta`);
-    expect(await solo.evaluate((e) => getComputedStyle(e).borderBottomStyle)).toBe("none");
+    await expect(meta).toHaveClass(/\btouched\b/);
+    await expect(meta).not.toHaveClass(/\bfallback\b/);
+    const touchDay = new Date(TOUCH_AT).toISOString().slice(0, 10);
+    await expect(meta).toHaveAttribute(
+      "title",
+      `${SHARED_UPDATED} (updated)\ntouched ${touchDay} in passing — no session focused on this page`,
+    );
+    expect(
+      await meta.evaluate((e) => {
+        const cs = getComputedStyle(e);
+        return `${cs.textDecorationLine} ${cs.textDecorationStyle} ${cs.borderBottomStyle}`;
+      }),
+    ).toBe("underline dotted none");
+    // The article header: the update and the touch, no "no session" slot.
+    await page.goto(`${BASE}/wiki?wiki=${TOUCH}&relPath=${encodeURIComponent(BARE_TOUCHED)}`);
+    const date = page.locator("#wikiBreadcrumb .wiki-bc-date");
+    await expect(date.locator(".wiki-bc-touched")).toHaveText(`touched ${touchDay}`);
+    await expect(date.locator(".wiki-bc-nosession")).toHaveCount(0);
+    await expect(date.locator(".wiki-bc-fallback")).toHaveCount(0);
+    await expect(date).not.toContainText("no session");
   });
 
   test("PR 4 — the fold sorts a touched member at its position; the strip prints its touch, marked", async ({ page }) => {

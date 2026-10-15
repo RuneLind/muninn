@@ -818,9 +818,10 @@ export function pageHeaderDates(
           ? { created }
           : { created, updated };
   if (opts.ledger) {
-    out.noSession = true;
-    // A bash-only touch has no ledger summary row, so it lands here; its mark
-    // still says what the session did to the page.
+    // A bash-only touch has no ledger summary row, so it lands here: its events
+    // are the record (D5), so no "no session" claim, and its mark names the touch.
+    const w = pageWorkState(p);
+    if (!w || usableWorkEvents(w, now).length === 0) out.noSession = true;
     const touched = workedShownSignal(p, now).touched;
     if (touched) out.touched = touched;
   }
@@ -857,17 +858,14 @@ export function workedChip(
   fallbackKind: "updated" | "added" = "updated",
 ): { cls: string; title: string } {
   if (!source) return { cls: "", title: fullDate };
+  if (source.kind === "fallback") {
+    return { cls: " fallback", title: `${fullDate} (${fallbackKind} — no session write recorded)` };
+  }
   // A T/T0 page (D15): its real date, with a dotted mark whose hover names the touch.
   const touched = source.touched
     ? { cls: " touched", line: `\n${touchedLine(source.touched)}` }
     : { cls: "", line: "" };
   if (source.kind === "events") return { cls: touched.cls, title: `${fullDate} (${fallbackKind})` + touched.line };
-  if (source.kind === "fallback") {
-    return {
-      cls: " fallback" + touched.cls,
-      title: `${fullDate} (${fallbackKind} — no session write recorded)` + touched.line,
-    };
-  }
   if (source.changedSince) {
     return {
       cls: " worked changed-since" + touched.cls,
@@ -900,7 +898,7 @@ export const CHANGED_SINCE_MIN_MS = 24 * 60 * 60 * 1000;
  */
 export type WorkedSource =
   | { kind: "worked"; worked: string; changedSince?: string; touched?: WorkedTouch }
-  | { kind: "fallback"; touched?: WorkedTouch }
+  | { kind: "fallback" }
   | { kind: "events"; touched?: WorkedTouch };
 
 /**
@@ -916,12 +914,15 @@ export function workedSourceOf(
   signal: WikiDateSignal = workedShownSignal(p, now),
 ): WorkedSource {
   const touched = signal.touched ? { touched: signal.touched } : {};
-  if (signal.kind !== "worked") return { kind: "fallback", ...touched };
+  const w = pageWorkState(p);
+  const events = w ? usableWorkEvents(w, now) : [];
+  // D5: a page with usable session events never takes the fallback's "no
+  // session write recorded" claim; its T/T0 touch keeps its mark.
+  if (signal.kind !== "worked") return events.length > 0 ? { kind: "events", ...touched } : { kind: "fallback" };
   const updated = updatedSignal(p, now);
   let newestWrite = signal.ms;
   if (isUsableWorkedMs(p.workedMs, now)) newestWrite = Math.max(newestWrite, p.workedMs);
-  const w = pageWorkState(p);
-  const newestEvent = w && newestWorkEvent(usableWorkEvents(w, now));
+  const newestEvent = newestWorkEvent(events);
   if (newestEvent) newestWrite = Math.max(newestWrite, newestEvent[0]);
   if (
     updated.kind === "updated" &&
@@ -1299,7 +1300,9 @@ export function workedSortSignal(
     }
   }
   const chain = workedSignal(p, now);
-  return { ms: chain.ms, worked: chain.kind === "worked" };
+  // `day` is the chain's own label, so `groupMonths` files this page exactly as
+  // state N (an authored `updated:` would shift west of UTC under `localDay`).
+  return { ms: chain.ms, worked: chain.kind === "worked", day: chain.label };
 }
 
 /** The Worked-on sort instant in epoch ms ({@link workedSortSignal}) — the

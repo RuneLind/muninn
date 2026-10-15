@@ -466,11 +466,16 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-list-sub .wiki-fold-chip, .wiki-list-item .wiki-list-sub .wiki-new-tag { margin: 0; }
     /* The WORK BAR (plan muninn-wiki-work-threads): four 3px steps, lit by the
        page's work term. First on the meta line and pulled into its 22px icon
-       gutter: 15px wide at x 3–18, and the -2px right margin plus the 6px gap
-       put the next mark at x 22, under the title. Its margin box is -6px, so
-       it costs the line nothing; the e2e measures the fullest line at 260px. */
+       gutter: 15px wide at x 3–18, and the line's 4px gap puts the next mark
+       at x 22, under the title. Its margin box is -4px, so it costs the line
+       nothing. A line carrying the bar takes 4px gaps, not 6: its fullest
+       form (pill, ⚑, ✋ 12, NEW, chip) measured 62+9+30+35px on CI's DejaVu
+       Sans at the 260px rail, leaving the chip slot 44px against its 46px
+       compact floor, so the chip wrapped; 4px gaps leave it 52. The e2e
+       measures that line. */
     .wiki-work-bar { display: inline-flex; align-items: flex-end; gap: 1px; flex-shrink: 0; height: 9px; }
-    .wiki-list-sub > .wiki-work-bar:first-child { margin: 0 -2px 0 -19px; }
+    .wiki-list-sub:has(> .wiki-work-bar:first-child) { column-gap: 4px; }
+    .wiki-list-sub > .wiki-work-bar:first-child { margin: 0 0 0 -19px; }
     .wiki-work-bar i { display: block; width: 3px; border-radius: 1px; box-shadow: inset 0 0 0 1px var(--text-dim); }
     .wiki-work-bar i:nth-child(1) { height: 3px; }
     .wiki-work-bar i:nth-child(2) { height: 5px; }
@@ -1014,12 +1019,10 @@ export async function renderWikiPage(opts?: {
     .wiki-list-meta.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
     /* A TOUCHED date (D15): the page's in-window events are touches or pass
        markers, so the date is its real one, not focused work. A dotted
-       underline in the chip's own ink — weight and colour stay the worked or
-       fallback reading; the hover names the touch. On a fallback chip both
-       marks would be one text-decoration, so the fallback moves to a muted
-       dotted bottom rule (the -1px margin keeps the row height). */
+       underline in the chip's own ink — weight and colour stay the worked
+       reading; the hover names the touch. Never on a fallback chip: a page
+       with session events never takes the fallback (D5). */
     .wiki-list-meta.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
-    .wiki-list-meta.fallback.touched { border-bottom: 1px dotted var(--text-muted); margin-bottom: -1px; }
 
     /* Neutral default so a custom type (no dedicated type-* rule) still shows a
        dot; the specific rules below override for the built-in types. */
@@ -2736,8 +2739,6 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     .wiki-rel-meta .wiki-rel-age.fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
     .wiki-rel-meta .wiki-rel-age.changed-since::after { content: "•"; color: var(--changed-ink); margin-left: 2px; }
     .wiki-rel-meta .wiki-rel-age.touched { text-decoration: underline dotted currentColor; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
-    /* Both marks on one age: the fallback moves to a rule, as on the rail chip. */
-    .wiki-rel-meta .wiki-rel-age.fallback.touched { border-bottom: 1px dotted var(--text-muted); margin-bottom: -1px; }
     .wiki-rel-meta .wiki-rel-series {
       font-size: 10px; color: var(--text-soft); border: 1px solid var(--border-secondary);
       border-radius: 8px; padding: 0 6px; max-width: 16ch;
