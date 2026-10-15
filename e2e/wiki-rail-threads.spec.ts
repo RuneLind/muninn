@@ -2,7 +2,10 @@
  * /wiki rail — the **Work threads** section (plan `muninn-wiki-work-threads`,
  * PR 5): the cards above Activity, the lift out of Activity and the series
  * ghost (D13), the 📌 surviving a reload (D7), the renderer's re-anchor write
- * as the pinned thread grows and ages (D7), two tabs sharing the pin (D7), no
+ * as the pinned thread grows and ages (D7), two tabs sharing the pin — and
+ * two whose listings disagree writing at most once each, a `clear()` in one
+ * unpinning the other, a quota refusing the write (D7, the pin's state table
+ * in `src/wiki/CLAUDE.md`; writes counted by wrapping `Storage.prototype`), no
  * section when the ledger 404s the sessions form (D11), both themes, and the
  * 260 px rail. The re-anchor stages rewrite the listing in the browser
  * (`page.route`), since the server's memo cannot be moved forward in time.
@@ -205,8 +208,10 @@ async function openReader(page: Page, wiki: string): Promise<void> {
 /** The listing the reader is served, one stage further on (D7): `grown` —
  *  alpha's thread gains alpha-notes as its newest focus page; `aged` — then
  *  alpha's own last focus leaves the window, so the server drops it from the
- *  thread, which lives on. Built from the real answer. */
-type Stage = "real" | "grown" | "aged";
+ *  thread, which lives on; `grownOlder` — alpha-notes joins as a focus page
+ *  OLDER than alpha, the listing a tab loaded before alpha-notes was last
+ *  worked on (its newest page is still alpha). Built from the real answer. */
+type Stage = "real" | "grown" | "aged" | "grownOlder";
 interface ListingBody {
   pages: Array<{ relPath: string; work?: { focusMs?: number; events: unknown[] } }>;
   work?: { threads: Array<{ key: string; pages: string[]; touched: string[] }> };
@@ -215,7 +220,7 @@ function staged(body: ListingBody, stage: Stage): ListingBody {
   if (stage === "real") return body;
   const alpha = body.pages.find((p) => p.relPath === ALPHA)!;
   const notes = body.pages.find((p) => p.relPath === ALPHA_NOTES)!;
-  const newest = alpha.work!.focusMs! + 30 * 60_000;
+  const newest = alpha.work!.focusMs! + (stage === "grownOlder" ? -30 : 30) * 60_000;
   notes.work = { ...alpha.work!, focusMs: newest, events: [[newest, 5, "focus"]] };
   const t = body.work!.threads.find((x) => x.pages.includes(ALPHA))!;
   t.pages = [...t.pages, ALPHA_NOTES];
@@ -245,6 +250,31 @@ const card = (page: Page, name: string) =>
   page.locator(".wiki-thread-card").filter({ has: page.locator(".wiki-thread-name", { hasText: name }) });
 const ALPHA_CARD = "Alpha work";
 const storedPin = (page: Page) => page.evaluate((k) => localStorage.getItem(k), threadPinKey(THREADS));
+
+/** Count this tab's writes of the pin key (`setItem` and `removeItem`), and —
+ *  with `refuse` — make every `setItem` of it throw, as a full quota does. */
+async function watchPinWrites(page: Page, refuse = false): Promise<void> {
+  await page.addInitScript(
+    ([key, refuse]) => {
+      const w = window as unknown as { __pinWrites: number };
+      w.__pinWrites = 0;
+      const set = Storage.prototype.setItem;
+      const remove = Storage.prototype.removeItem;
+      Storage.prototype.setItem = function (k: string, v: string) {
+        if (k !== key) return set.call(this, k, v);
+        w.__pinWrites++;
+        if (refuse) throw new DOMException("quota", "QuotaExceededError");
+        return set.call(this, k, v);
+      };
+      Storage.prototype.removeItem = function (k: string) {
+        if (k === key) w.__pinWrites++;
+        return remove.call(this, k);
+      };
+    },
+    [threadPinKey(THREADS), refuse] as const,
+  );
+}
+const pinWrites = (page: Page) => page.evaluate(() => (window as unknown as { __pinWrites: number }).__pinWrites);
 
 /** The header's worst case, built by the real renderer: twelve sessions, a
  *  cross-day span with an older start date, a two-digit ✋. The fixture's own
@@ -482,6 +512,67 @@ test.describe("Wiki rail: Work threads", () => {
     await expect(card(b, ALPHA_CARD).locator(".wiki-thread-pin")).toHaveAttribute("data-thread-pin", ALPHA_NOTES);
     await expect(card(b, ALPHA_CARD)).not.toHaveClass(/\bpinned\b/);
     expect(await storedPin(b)).toBeNull();
+  });
+
+  test("across tabs: two tabs whose listings disagree on the pinned thread's newest page write at most once each — no write loop (D7)", async ({
+    context,
+  }) => {
+    // B loaded before alpha-notes was last worked on (its newest alpha page is
+    // alpha); A loaded after (alpha-notes). Each would re-anchor the pin to its
+    // own page. A storage event's repaint writes nothing, so the pair settles.
+    const b = await context.newPage();
+    await watchPinWrites(b);
+    (await stageListings(b)).set("grownOlder");
+    await openReader(b, THREADS);
+    await card(b, ALPHA_CARD).locator(".wiki-thread-pin").click();
+    expect(await storedPin(b)).toBe(ALPHA);
+    const a = await context.newPage();
+    await watchPinWrites(a);
+    (await stageListings(a)).set("grown");
+    await openReader(a, THREADS);
+    await expect.poll(() => storedPin(a)).toBe(ALPHA_NOTES);
+    // Let any loop run: with one, both counters climb by hundreds a second.
+    await a.waitForTimeout(1_500);
+    expect(await pinWrites(a)).toBeLessThanOrEqual(1);
+    expect(await pinWrites(b)).toBeLessThanOrEqual(1);
+    expect(await storedPin(a)).toBe(ALPHA_NOTES);
+    // Both still show the alpha thread pinned.
+    await expect(card(a, ALPHA_CARD)).toHaveClass(/\bpinned\b/);
+    await expect(card(b, ALPHA_CARD)).toHaveClass(/\bpinned\b/);
+  });
+
+  test("across tabs: a localStorage.clear() in another tab unpins this one (D7)", async ({ context }) => {
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await openReader(a, THREADS);
+    await card(a, ALPHA_CARD).locator(".wiki-thread-pin").click();
+    await openReader(b, THREADS);
+    await expect(card(b, ALPHA_CARD)).toHaveClass(/\bpinned\b/);
+    await a.evaluate(() => localStorage.clear());
+    await expect(card(b, ALPHA_CARD)).not.toHaveClass(/\bpinned\b/);
+    expect(await storedPin(b)).toBeNull();
+  });
+
+  test("a storage that refuses the write keeps the tab's pin through a re-anchor (D7)", async ({ page }) => {
+    await watchPinWrites(page, true);
+    const stage = await stageListings(page);
+    await page.clock.install();
+    await openReader(page, THREADS);
+    await card(page, ALPHA_CARD).locator(".wiki-thread-pin").click();
+    await expect(card(page, ALPHA_CARD)).toHaveClass(/\bpinned\b/);
+    expect(await storedPin(page)).toBeNull();
+    // The thread grows; the refetch's render re-anchors the pin. The write is
+    // refused again, and the tab keeps the pin it holds.
+    stage.set("grown");
+    const refetched = page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes(`wiki=${THREADS}`));
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refetched;
+    await expect(card(page, ALPHA_CARD).locator(".wiki-thread-pin")).toHaveAttribute("data-thread-pin", ALPHA_NOTES);
+    await expect(card(page, ALPHA_CARD)).toHaveClass(/\bpinned\b/);
+    await expect(cards(page).nth(0).locator(".wiki-thread-name")).toHaveText(ALPHA_CARD);
+    expect(await storedPin(page)).toBeNull();
+    expect(await pinWrites(page)).toBeGreaterThanOrEqual(2);
   });
 
   test("keyboard: Enter on a card's fold, a 📌 and a group fold leaves focus on the same control", async ({ page }) => {

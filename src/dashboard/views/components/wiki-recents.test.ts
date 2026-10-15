@@ -39,9 +39,15 @@ import {
   parseThreadPin,
   threadFoldKey,
   threadPinKey,
+  storageEventTouchesThreadPin,
+  threadPinSettle,
+  threadPinStep,
   type RailEntry,
   type RailSection,
   type RailThreadCard,
+  type ThreadPinState,
+  type ThreadPinStep,
+  type ThreadPinTrigger,
 } from "./wiki-recents.ts";
 import { GROUP_FAMILIES_TOGGLE_KEY, groupRollup, groupSeries, railGroups } from "./wiki-groups.ts";
 import { filterPages, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
@@ -3291,5 +3297,132 @@ describe("buildRail — work threads", () => {
     expect(parseThreadPin("")).toBeNull();
     expect(parseThreadPin(null)).toBeNull();
     expect(threadFoldKey("Plans/A.mdx")).toBe("thread:plans/a.mdx");
+  });
+});
+
+// ── PR 700 class check: the thread pin's state table ─────────────────────────
+// One case per row of the table in `src/wiki/CLAUDE.md` ("Order and pin"). Row
+// ids are the table's. `X`/`Y`/`Z` are pages; the anchor is what
+// `threadPinAnchor` answers for `held` (its own rows are in
+// `wiki-rail-input.test.ts`).
+describe("the thread pin's state table (D7)", () => {
+  const X = "plans/x.mdx";
+  const Y = "plans/y.mdx";
+  const Z = "notes/z.md";
+  const st = (held: string | null, known: string | null | undefined): ThreadPinState => ({ held, known });
+  const render = (stored: string | null | undefined, focused: boolean, anchor: string | null): ThreadPinTrigger => ({
+    kind: "render",
+    stored,
+    focused,
+    anchor,
+  });
+  const out = (held: string | null, known: string | null | undefined, write: false | string | null = false, repaint = false): ThreadPinStep => ({
+    state: { held, known },
+    write: write === false ? false : { value: write },
+    repaint,
+  });
+  const ROWS: Array<[id: string, from: ThreadPinState, t: ThreadPinTrigger, want: ThreadPinStep]> = [
+    ["B1 boot, readable", st(null, undefined), { kind: "boot", stored: X }, out(X, X)],
+    ["B1 boot, readable, empty", st(null, undefined), { kind: "boot", stored: null }, out(null, null)],
+    ["B2 boot, unreadable", st(null, undefined), { kind: "boot", stored: undefined }, out(null, undefined)],
+    ["E1 storage, another tab's pin, booted", st(X, X), { kind: "storage", stored: Y, booted: true }, out(Y, Y, false, true)],
+    ["E2 storage, before the first render", st(X, X), { kind: "storage", stored: Y, booted: false }, out(Y, Y)],
+    ["E3 storage, same held pin", st(X, Y), { kind: "storage", stored: X, booted: true }, out(X, X)],
+    ["E4 storage, clear() or unpin", st(X, X), { kind: "storage", stored: null, booted: true }, out(null, null, false, true)],
+    ["E5 storage, unreadable", st(X, X), { kind: "storage", stored: undefined, booted: true }, out(X, X)],
+    ["C1 click pins", st(X, X), { kind: "click", value: Y }, out(Y, X, Y)],
+    ["C2 click unpins", st(X, X), { kind: "click", value: null }, out(null, X, null)],
+    ["C3 click over a value this tab never read", st(X, X), { kind: "click", value: Y }, out(Y, X, Y)],
+    ["R1 unreadable, anchor moves: memory only", st(X, undefined), render(undefined, true, Y), out(Y, undefined)],
+    ["R1 unreadable, no anchor", st(X, X), render(undefined, true, null), out(X, X)],
+    ["R2 storage readable again, own pin kept", st(X, undefined), render(null, true, Y), out(X, null)],
+    ["R2 storage readable again, no own pin", st(null, undefined), render(Z, true, null), out(Z, Z)],
+    ["R3 storage changed unheard: adopt, focused", st(X, X), render(Z, true, Y), out(Z, Z)],
+    ["R3 storage cleared unheard: adopt", st(X, X), render(null, true, Y), out(null, null)],
+    ["R4 unfocused, anchor moves: memory only", st(X, X), render(X, false, Y), out(Y, X)],
+    ["R4 unfocused, failed write pending: no retry", st(Y, null), render(null, false, Y), out(Y, null)],
+    ["R5 focused, anchor = stored", st(X, X), render(X, true, X), out(X, X)],
+    ["R5 focused, nothing pinned", st(null, null), render(null, true, null), out(null, null)],
+    ["R5 focused, pin no thread holds", st(X, X), render(X, true, null), out(X, X)],
+    ["R6 focused, anchor moves: write", st(X, X), render(X, true, Y), out(Y, X, Y)],
+    ["R6 focused, retry a failed pin write", st(Y, null), render(null, true, null), out(Y, null, Y)],
+    ["R6 focused, retry a failed unpin write", st(null, X), render(X, true, null), out(null, X, null)],
+  ];
+  for (const [id, from, t, want] of ROWS) {
+    test(id, () => expect(threadPinStep(from, t)).toEqual(want));
+  }
+
+  test("S1/S2 settle: storage holds the value only when the write took", () => {
+    expect(threadPinSettle(st(Y, X), Y, true)).toEqual(st(Y, Y));
+    expect(threadPinSettle(st(Y, X), Y, false)).toEqual(st(Y, X));
+    expect(threadPinSettle(st(null, X), null, true)).toEqual(st(null, null));
+  });
+
+  test("K1 the storage key filter: this wiki's pin key, and null (a clear())", () => {
+    expect(storageEventTouchesThreadPin(threadPinKey("mimir"), "mimir")).toBe(true);
+    expect(storageEventTouchesThreadPin(null, "mimir")).toBe(true);
+    expect(storageEventTouchesThreadPin(threadPinKey("melosys"), "mimir")).toBe(false);
+    expect(storageEventTouchesThreadPin(pinsKey("mimir"), "mimir")).toBe(false);
+  });
+
+  test("a refused write never drops the pin: click, then the thread grows, storage refusing every write", () => {
+    let s = threadPinStep(st(null, undefined), { kind: "boot", stored: null }).state;
+    const click = threadPinStep(s, { kind: "click", value: X });
+    s = threadPinSettle(click.state, X, false);
+    expect(s).toEqual(st(X, null));
+    const grown = threadPinStep(s, render(null, true, Y));
+    expect(grown.write).toEqual({ value: Y });
+    s = threadPinSettle(grown.state, Y, false);
+    expect(s.held).toBe(Y);
+  });
+
+  /**
+   * Rule (a), simulated: any number of tabs sharing one storage, each with its
+   * own listing (so each re-anchors the same pin to a different page). A local
+   * render in one tab, then every storage event delivered and every repaint it
+   * asks for run, until nothing is pending: the writes are bounded by the local
+   * renders, never by the events.
+   */
+  test("no write loop between tabs: a storage event's repaint never writes, so one local render costs at most one write", () => {
+    const pages = [X, Y, Z];
+    const tabs = pages.map((_, i) => ({
+      state: st(null, undefined) as ThreadPinState,
+      // Tab i re-anchors any pin onto its own page: the listings disagree.
+      anchorOf: (held: string | null) => (held ? pages[i]! : null),
+      writes: 0,
+    }));
+    let stored: string | null = X;
+    for (const tab of tabs) tab.state = threadPinStep(tab.state, { kind: "boot", stored }).state;
+    const events: Array<{ to: number }> = [];
+    const localRender = (i: number) => {
+      const tab = tabs[i]!;
+      const r = threadPinStep(tab.state, render(stored, true, tab.anchorOf(tab.state.held)));
+      tab.state = r.state;
+      if (r.write) {
+        stored = r.write.value;
+        tab.writes++;
+        tab.state = threadPinSettle(tab.state, r.write.value, true);
+        tabs.forEach((_, j) => j !== i && events.push({ to: j }));
+      }
+    };
+    let delivered = 0;
+    const drain = () => {
+      while (events.length) {
+        const e = events.shift()!;
+        if (++delivered > 1000) throw new Error("a write loop");
+        const tab = tabs[e.to]!;
+        // The repaint a storage event asks for runs no step (`cause: "storage"`).
+        tab.state = threadPinStep(tab.state, { kind: "storage", stored, booted: true }).state;
+      }
+    };
+    for (let i = 0; i < tabs.length; i++) {
+      localRender(i);
+      drain();
+    }
+    // Tab 0 anchors where storage already is; tabs 1 and 2 each write once.
+    expect(tabs.map((t) => t.writes)).toEqual([0, 1, 1]);
+    expect(delivered).toBe(4);
+    // Every tab ends holding what storage holds: the last writer's choice.
+    expect(tabs.map((t) => t.state.held)).toEqual([Z, Z, Z]);
   });
 });

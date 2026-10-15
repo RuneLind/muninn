@@ -107,31 +107,49 @@ export function threadName(title: string): string {
   return cut > 0 ? title.slice(0, cut) : title;
 }
 
+const isHubRel = (rel: string, byRel: ReadonlyMap<string, WikiListing>) => isWorkHub(byRel.get(rel)?.backlinkCount ?? 0);
+
 /** The page the 📌 stores for a thread (D7): its NEWEST non-hub focus page —
  *  the highest `work.focusMs` — because the server drops a page from `pages`
  *  once its last focus event leaves the window, so the newest is the last to
- *  go. The thread's `key` is its EARLIEST focus page, the first to go. A hub is
- *  never the anchor: D16 moves a hub's focus row to whichever thread works it
- *  most, so a pin on it would follow the hub into another live thread. A thread
- *  holding hubs only anchors on its key, as the server keys it. */
+ *  go (the `key` is the earliest, the first). A hub is never the anchor of a
+ *  thread that holds a non-hub page: D16 moves a hub's focus row to whichever
+ *  thread works it most. A thread of hubs only anchors on its newest hub. Ties
+ *  go to the smaller relPath. */
 function newestFocusPage(t: WorkThread, byRel: ReadonlyMap<string, WikiListing>): string {
-  let best: { rel: string; ms: number } | null = null;
-  for (const raw of t.pages) {
-    const rel = normalizeRel(raw);
-    const p = byRel.get(rel);
-    if (isWorkHub(p?.backlinkCount ?? 0)) continue;
-    const ms = p?.work?.focusMs ?? -Infinity;
-    if (!best || ms > best.ms || (ms === best.ms && rel < best.rel)) best = { rel, ms };
-  }
-  return best ? best.rel : normalizeRel(t.key);
+  const pick = (hubs: boolean) => {
+    let best: { rel: string; ms: number } | null = null;
+    for (const raw of t.pages) {
+      const rel = normalizeRel(raw);
+      if (isHubRel(rel, byRel) !== hubs) continue;
+      const ms = byRel.get(rel)?.work?.focusMs ?? -Infinity;
+      if (!best || ms > best.ms || (ms === best.ms && rel < best.rel)) best = { rel, ms };
+    }
+    return best?.rel;
+  };
+  return pick(false) ?? pick(true) ?? normalizeRel(t.key);
+}
+
+/**
+ * Does thread `t` hold the pin on `pinKey` (D7 × D16)? It must hold the page
+ * as a focus page. A pin on a HUB also needs a thread of hubs only: D16 moves
+ * a hub into whichever thread works it most, so a hub pin matched by
+ * membership alone would follow the hub into a thread the reader never pinned.
+ * The hub test reads the listing as it is now, so a pinned page that crosses
+ * the hub threshold while its thread holds other pages stops matching.
+ */
+function threadHoldsPin(t: WorkThread, byRel: ReadonlyMap<string, WikiListing>, pinKey: string): boolean {
+  if (!t.pages.some((p) => normalizeRel(p) === pinKey)) return false;
+  return !isHubRel(pinKey, byRel) || t.pages.every((p) => isHubRel(normalizeRel(p), byRel));
 }
 
 /**
  * The stored pin re-anchored (D7): the newest focus page of the thread holding
- * `pin`, or null when no thread holds it. `renderList` writes it back whenever
- * it differs, so a pinned thread stays pinned as it grows and its oldest pages
- * age out of the window. A thread that ages out WHOLE between two renders
- * loses its pin — the server no longer names it.
+ * `pin` (`threadHoldsPin`), or null when no thread holds it. The pin's state
+ * table (`threadPinStep`) decides whether the move is written, so a pinned
+ * thread stays pinned as it grows and its oldest pages age out of the window.
+ * A thread that ages out WHOLE between two renders loses its pin — the server
+ * no longer names it.
  */
 export function threadPinAnchor(
   threads: readonly WorkThread[] | null | undefined,
@@ -140,11 +158,10 @@ export function threadPinAnchor(
 ): string | null {
   if (!pin) return null;
   const pinKey = normalizeRel(pin);
-  const t = usableThreads(threads).find((x) => x.pages.some((p) => normalizeRel(p) === pinKey));
-  if (!t) return null;
   const byRel = new Map<string, WikiListing>();
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
-  return newestFocusPage(t, byRel);
+  const t = usableThreads(threads).find((x) => threadHoldsPin(x, byRel, pinKey));
+  return t ? newestFocusPage(t, byRel) : null;
 }
 
 /**
@@ -158,7 +175,7 @@ export function threadPinAnchor(
  *  - Order (D6), name and page OWNERSHIP are decided over `allPages`, the full
  *    listing, so neither Show retired nor a facet moves or renames a card.
  *    Order is `threadScore` at the anchored `now` — except the PINNED thread
- *    (the one holding `pin` as a focus page, D7), which renders first. At most
+ *    (the one holding `pin`, `threadHoldsPin`, D7), which renders first. At most
  *    `THREAD_CARDS_MAX` cards, cut after the drops.
  *  - The first card defaults OPEN, so it offers the `closed:` spelling (as the
  *    newest month does); every card reads whichever spelling the reader wrote
@@ -190,7 +207,7 @@ export function openThreadCards(
     .map((t) => ({
       t,
       score: threadScore(t, (rel) => byRel.get(normalizeRel(rel))?.work, now),
-      holdsPin: !!pinKey && t.pages.some((p) => normalizeRel(p) === pinKey),
+      holdsPin: !!pinKey && threadHoldsPin(t, byRel, pinKey),
     }))
     .map((x) => {
       // One pinned thread: the first that holds the page (two cannot, short of

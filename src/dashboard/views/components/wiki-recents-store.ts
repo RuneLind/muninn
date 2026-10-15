@@ -30,7 +30,6 @@ import {
   serializeRelPathList,
   sortKey,
   threadPinKey,
-  threadPinReanchor,
   togglePin,
   toggleFold,
 } from "./wiki-recents.ts";
@@ -130,45 +129,29 @@ export function writeRelatedOrder(wiki: string, order: RelatedOrder): void {
   }
 }
 
-/** The reader's pinned work thread on this wiki (D7): the one page relPath
- *  the pinned thread holds, or `null` — never pinned, unreadable or blank. */
-export function readThreadPin(wiki: string): string | null {
+/** The reader's pinned work thread on this wiki (D7) as stored: one page
+ *  relPath, `null` when none (or blank), `undefined` when the read threw — a
+ *  value the pin's state table tells apart from "none" (`threadPinStep`). */
+export function readThreadPin(wiki: string): string | null | undefined {
   try {
     return parseThreadPin(localStorage.getItem(threadPinKey(wiki)));
   } catch {
-    return null;
+    return undefined;
   }
 }
 
 /** Store the thread pin: a page relPath pins the thread holding it, `null`
- *  clears it. The caller decides which (a 📌 on the pinned card clears, any
- *  other pins), because the stored page need not be the card's key any more
- *  once threads merge. Returns the value the rail should render from, whatever
- *  the write did — the `togglePinned` settlement. */
-export function writeThreadPin(wiki: string, relPath: string | null): string | null {
+ *  clears it. Answers whether storage took the write, which is what
+ *  `threadPinSettle` needs: a failed write leaves the tab's pin in memory. */
+export function writeThreadPin(wiki: string, relPath: string | null): boolean {
   const next = relPath === null ? null : parseThreadPin(relPath);
   try {
     if (next) localStorage.setItem(threadPinKey(wiki), next);
     else localStorage.removeItem(threadPinKey(wiki));
+    return true;
   } catch {
-    /* best-effort */
+    return false;
   }
-  return next;
-}
-
-/** Re-anchor this tab's pin (`threadPinReanchor`): storage is read right
- *  before the write, and the write happens only if storage still holds `held`.
- *  Returns the pin the rail should render from. */
-export function reanchorThreadPin(wiki: string, held: string | null, anchor: string | null): string | null {
-  if (!anchor || anchor === held) return held;
-  let stored: string | null | undefined;
-  try {
-    stored = parseThreadPin(localStorage.getItem(threadPinKey(wiki)));
-  } catch {
-    stored = undefined;
-  }
-  const next = threadPinReanchor(stored, held, anchor);
-  return next.write ? writeThreadPin(wiki, next.pin) : next.pin;
 }
 
 /**

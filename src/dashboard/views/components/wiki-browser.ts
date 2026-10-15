@@ -143,8 +143,12 @@ import {
   isPinnedRelPath,
   pairedByWhy,
   parseRelatedOrder,
-  threadPinKey,
+  storageEventTouchesThreadPin,
+  threadPinSettle,
+  threadPinStep,
   type RailEntry,
+  type ThreadPinState,
+  type ThreadPinTrigger,
   type RelatedOrder,
 } from "./wiki-recents.ts";
 import {
@@ -179,7 +183,6 @@ import {
   toggleFolded,
   togglePinned,
   readThreadPin,
-  reanchorThreadPin,
   writeRelatedOrder,
   writeSort,
   writeThreadPin,
@@ -1366,10 +1369,23 @@ let pins: string[] = readPins(WIKI);
  *  remembered per wiki with no second store. */
 let openFolds: string[] = readFolds(WIKI);
 
-/** The reader's pinned work thread on this wiki (D7) — one page relPath, read
- *  once at boot and kept in step by the 📌 writer, like `pins`, and by the
- *  `storage` listener when another tab pins or unpins. */
-let threadPin: string | null = readThreadPin(WIKI);
+/** The reader's pinned work thread on this wiki (D7): `held` (one page
+ *  relPath, what the rail renders) and `known` (what this tab last read or
+ *  wrote). Every change goes through `stepThreadPin`, the state table. */
+let threadPin: ThreadPinState = threadPinStep({ held: null, known: undefined }, { kind: "boot", stored: readThreadPin(WIKI) }).state;
+
+/** Run one row of the pin's state table and perform the write it asks for.
+ *  Answers whether the rail should repaint (`storage` rows only). */
+function stepThreadPin(t: ThreadPinTrigger): boolean {
+  const r = threadPinStep(threadPin, t);
+  threadPin = r.write ? threadPinSettle(r.state, r.write.value, writeThreadPin(WIKI, r.write.value)) : r.state;
+  return r.repaint;
+}
+
+/** Document focus: the only state in which a render may write the pin. */
+function tabHasFocus(): boolean {
+  return document.visibilityState === "visible" && document.hasFocus();
+}
 
 /** The work threads off the last listing (`work`), or null: an older server, a
  *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
@@ -1559,7 +1575,9 @@ function forcedOpenWhy(what: "group" | "section"): string {
   return filters.jira ? "the Jira filter shows every matching page" : `the open page is in this ${what}`;
 }
 
-function renderList(): void {
+/** `cause: "storage"` is a repaint after another tab changed the pin: it runs
+ *  no pin step, so it never writes (the no-loop rule, `threadPinStep`). */
+function renderList(cause: "storage" | "local" = "local"): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -1567,11 +1585,17 @@ function renderList(): void {
   // The rail's POOL — `#wikiCount`'s denominator below; `railInputFor` derives
   // the same pool for its own rows.
   const pool = railPool(allPages, showRetired(), filters.q);
-  // D7: keep the thread pin on the pinned thread's NEWEST non-hub focus page, so
-  // the pin survives the thread's oldest pages leaving the window
-  // (`threadPinAnchor`). The write is a compare-and-set against storage, so a
-  // tab rendering a stale pin never undoes another tab's choice.
-  threadPin = reanchorThreadPin(WIKI, threadPin, threadPinAnchor(workFacts?.threads, allPages, threadPin));
+  // D7: keep the thread pin on the pinned thread's newest focus page, so the
+  // pin survives the thread's oldest pages leaving the window
+  // (`threadPinAnchor`); the state table decides whether that is written.
+  if (cause === "local") {
+    stepThreadPin({
+      kind: "render",
+      stored: readThreadPin(WIKI),
+      focused: tabHasFocus(),
+      anchor: threadPinAnchor(workFacts?.threads, allPages, threadPin.held),
+    });
+  }
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
   const rail = buildRail(
@@ -1586,7 +1610,7 @@ function renderList(): void {
         pins,
         openFolds,
         openRelPath: currentRelPath || undefined,
-        threadPin,
+        threadPin: threadPin.held,
       },
     ),
   );
@@ -5010,7 +5034,7 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     if (!key) return;
     const hadFocus = document.activeElement === threadPinBtn;
     const card = threadPinBtn.closest(".wiki-thread-card")?.getAttribute("data-thread");
-    threadPin = writeThreadPin(WIKI, threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key);
+    stepThreadPin({ kind: "click", value: threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key });
     renderList();
     // The card moved: follow it by its own key, not by position.
     if (hadFocus && card) {
@@ -8394,15 +8418,12 @@ function maybeRefetchPages(refresh: boolean): void {
   requestPages({ refresh });
 }
 
-// Another tab pinned or unpinned a work thread on this wiki (D7): adopt its
-// choice and repaint, so this tab neither shows nor re-anchors a stale pin.
-// `key === null` is a `localStorage.clear()`.
+// Another tab pinned, unpinned or cleared storage (D7): adopt what storage now
+// holds and repaint. The repaint is `cause: "storage"`, which writes nothing,
+// so no tab's write can make another tab write.
 window.addEventListener("storage", (e) => {
-  if (e.key !== null && e.key !== threadPinKey(WIKI)) return;
-  const next = readThreadPin(WIKI);
-  if (next === threadPin) return;
-  threadPin = next;
-  if (pagesRefresh.bootRendered) renderList();
+  if (!storageEventTouchesThreadPin(e.key, WIKI)) return;
+  if (stepThreadPin({ kind: "storage", stored: readThreadPin(WIKI), booted: pagesRefresh.bootRendered })) renderList("storage");
 });
 
 window.addEventListener("focus", () => maybeRefetchPages(true));

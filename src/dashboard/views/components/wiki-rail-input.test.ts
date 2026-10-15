@@ -541,8 +541,101 @@ describe("the pin anchor is never a hub page (D7 × D16)", () => {
     expect(threadPinAnchor(day2.threads, day2.pages, card!.pinAnchor)).toBe(A);
   });
 
-  test("a thread holding hubs only anchors on its key", () => {
+  test("a thread holding hubs only anchors on its newest hub", () => {
     const day2 = world(T2, [S1, S2]);
     expect(threadPinAnchor(day2.threads, day2.pages, HUB)).toBe(HUB);
+  });
+});
+
+// ── PR 700 class check: the anchor rows of the pin's state table ─────────────
+describe("the pin's anchor rows (D7 × D16): a hub pin never moves to a thread the reader did not pin", () => {
+  const HUB = "flows/hub.mdx";
+  const X = "p/x.mdx";
+  const T1 = NOW;
+  const T2 = NOW + DAY;
+  const at = (t: number, h: number) => t - h * H;
+  const sess = (id: string, named: string[], files: Array<[string, number, number]>): WorkSession => ({
+    id,
+    provider: "claude",
+    title: `session ${id}`,
+    first: Math.min(...files.map((f) => f[2])) - 60_000,
+    last: Math.max(...files.map((f) => f[2])),
+    bulk: false,
+    text: { from: "prompt", paths: named, links: [], files: [] },
+    files: files.map(([p, edits, lastMs]) => ({ p, edits, firstMs: lastMs - 60_000, lastMs })),
+  });
+  const BACKLINKS: Record<string, number> = { [HUB]: WORK_HUB_BACKLINKS + 5, [X]: 0 };
+  const world = (asOf: number, sessions: WorkSession[]) => {
+    const rels = [HUB, X];
+    const r = computeWorkFocus({
+      sessions,
+      pre: new Map(),
+      sinceMs: asOf - 8 * DAY,
+      asOfMs: asOf,
+      pages: rels.map((relPath) => ({ relPath, backlinks: BACKLINKS[relPath]!, gitCreatedMs: asOf - 40 * DAY })),
+      identity: { roots: ["/w/x"], name: "x" },
+      otherRoots: [],
+    });
+    const pages = rels.map((rel) => {
+      const work = r.pages.get(rel);
+      return page({ relPath: rel, backlinkCount: BACKLINKS[rel]!, gitCreatedMs: asOf - 40 * DAY, ...(work ? { work } : {}) });
+    });
+    return { threads: r.threads, pages };
+  };
+
+  test("A4/A5: a hubs-only thread's pin stays on that thread, and does not follow the hub when D16 hands it to a thread with a non-hub page", () => {
+    // Day 1: s1 focuses only the hub — a thread of hubs only, pinned on the hub.
+    const S1 = sess("s1", [HUB], [[HUB, 5, at(T1, 1)]]);
+    const day1 = world(T1, [S1]);
+    expect(day1.threads.map((t) => t.pages)).toEqual([[HUB]]);
+    const [card] = openThreadCards(day1.threads, day1.pages, INERT, [], null, T1);
+    expect(card!.pinAnchor).toBe(HUB);
+    expect(openThreadCards(day1.threads, day1.pages, INERT, [], HUB, T1)[0]!.pinned).toBe(true);
+    expect(threadPinAnchor(day1.threads, day1.pages, HUB)).toBe(HUB);
+    // Day 2: s2 works the hub harder and also focuses p/x. The hub's focus row
+    // moves to s2's thread and s1's thread is gone.
+    const S2 = sess("s2", [HUB, X], [[HUB, 60, at(T2, 1)], [X, 5, at(T2, 2)]]);
+    const day2 = world(T2, [S1, S2]);
+    expect(day2.threads.map((t) => [...t.pages].sort())).toEqual([[HUB, X].sort()]);
+    // The pin matches nothing: no card is pinned, and there is no anchor to write.
+    expect(openThreadCards(day2.threads, day2.pages, INERT, [], HUB, T2).some((c) => c.pinned)).toBe(false);
+    expect(threadPinAnchor(day2.threads, day2.pages, HUB)).toBeNull();
+  });
+
+  test("A6: a thread of several hubs anchors on its newest hub, a tie on the smaller relPath", () => {
+    const hub = (rel: string, h: number) => wpage(rel, [[h, 3]], { backlinkCount: WORK_HUB_BACKLINKS + 1 });
+    const T = [thread("flows/h1.mdx", ["flows/h1.mdx", "flows/h2.mdx", "flows/h3.mdx"])];
+    const pages = [hub("flows/h1.mdx", 5), hub("flows/h2.mdx", 1), hub("flows/h3.mdx", 3)];
+    expect(threadPinAnchor(T, pages, "flows/h1.mdx")).toBe("flows/h2.mdx");
+    expect(cardsOf({ threads: T, pages })[0]!.pinAnchor).toBe("flows/h2.mdx");
+    const tied = [hub("flows/h1.mdx", 2), hub("flows/h2.mdx", 2), hub("flows/h3.mdx", 2)];
+    expect(threadPinAnchor(T, tied, "flows/h3.mdx")).toBe("flows/h1.mdx");
+  });
+
+  test("A2/A3: a non-hub pin re-anchors to the newest NON-hub page, past a newer hub; a pin no thread holds has no anchor", () => {
+    const T = [thread("notes/a.md", ["notes/a.md", "notes/b.md", "flows/hub.mdx"])];
+    const pages = [
+      wpage("notes/a.md", [[5, 3]]),
+      wpage("notes/b.md", [[3, 3]]),
+      wpage("flows/hub.mdx", [[1, 3]], { backlinkCount: WORK_HUB_BACKLINKS + 1 }),
+    ];
+    expect(threadPinAnchor(T, pages, "notes/a.md")).toBe("notes/b.md");
+    expect(threadPinAnchor(T, pages, "notes/gone.md")).toBeNull();
+    expect(threadPinAnchor(T, pages, null)).toBeNull();
+  });
+
+  test("the hub threshold: WORK_HUB_BACKLINKS backlinks is not a hub, one more is", () => {
+    // A mixed thread, the pin on the page at the boundary: at 25 it is an
+    // ordinary page and the thread holds the pin; at 26 it is a hub in a
+    // thread with a non-hub page, so the thread does not.
+    const T = [thread("notes/a.md", ["notes/a.md", "notes/edge.md"])];
+    const at = (n: number) => [wpage("notes/a.md", [[5, 3]]), wpage("notes/edge.md", [[1, 3]], { backlinkCount: n })];
+    expect(threadPinAnchor(T, at(WORK_HUB_BACKLINKS), "notes/edge.md")).toBe("notes/edge.md");
+    expect(cardsOf({ threads: T, pages: at(WORK_HUB_BACKLINKS), pin: "notes/edge.md" })[0]!.pinned).toBe(true);
+    expect(threadPinAnchor(T, at(WORK_HUB_BACKLINKS + 1), "notes/edge.md")).toBeNull();
+    expect(cardsOf({ threads: T, pages: at(WORK_HUB_BACKLINKS + 1), pin: "notes/edge.md" })[0]!.pinned).toBe(false);
+    // And the anchor skips it only as a hub.
+    expect(threadPinAnchor(T, at(WORK_HUB_BACKLINKS), "notes/a.md")).toBe("notes/edge.md");
+    expect(threadPinAnchor(T, at(WORK_HUB_BACKLINKS + 1), "notes/a.md")).toBe("notes/a.md");
   });
 });

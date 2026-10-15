@@ -7,8 +7,10 @@ import { describe, expect, test } from "bun:test";
 import {
   cleanSessionTitle,
   computeWorkFocus,
+  isWorkHub,
   rawWork,
   threadScore,
+  WORK_HUB_BACKLINKS,
   WORK_TITLE_MAX,
   type WorkFocusInput,
   type WorkPageInput,
@@ -398,5 +400,14 @@ describe("events and states", () => {
   test("session titles are cleaned and capped", () => {
     expect(cleanSessionTitle("  a\n\n b  ")).toBe("a b");
     expect([...cleanSessionTitle("x".repeat(500))]).toHaveLength(WORK_TITLE_MAX);
+  });
+});
+
+describe("the hub threshold", () => {
+  test("more than WORK_HUB_BACKLINKS (25) backlinks is a hub; exactly 25 is not", () => {
+    expect(WORK_HUB_BACKLINKS).toBe(25);
+    expect(isWorkHub(25)).toBe(false);
+    expect(isWorkHub(26)).toBe(true);
+    expect(isWorkHub(0)).toBe(false);
   });
 });

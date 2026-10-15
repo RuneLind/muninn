@@ -130,23 +130,81 @@ export function parseThreadPin(raw: string | null | undefined): string | null {
 }
 
 /**
- * A re-anchor across tabs (D7): the pin each tab keeps in memory goes stale the
- * moment another tab pins or unpins, and the rail re-anchors with no user
- * action. So the write is a compare-and-set: it happens only while storage
- * still holds the value this tab holds (`held`). Otherwise the tab adopts what
- * storage holds and writes nothing. `stored` is `undefined` when storage
- * cannot be read: no other tab's choice is visible there, so the in-memory pin
- * moves and the write stays best-effort. No `anchor`, or one equal to `held`,
- * moves nothing.
+ * One tab's view of the thread pin (D7). `held` is what the rail renders from.
+ * `known` is the value this tab last READ from storage or WROTE to it
+ * successfully — `undefined` while storage has never been readable. Keeping the
+ * two apart is what lets a failed write keep the pin (`held` moves, `known`
+ * does not) and what tells another tab's write from this tab's own.
  */
-export function threadPinReanchor(
-  stored: string | null | undefined,
-  held: string | null,
-  anchor: string | null,
-): { pin: string | null; write: boolean } {
-  if (!anchor || anchor === held) return { pin: held, write: false };
-  if (stored !== undefined && stored !== held) return { pin: stored, write: false };
-  return { pin: anchor, write: true };
+export interface ThreadPinState {
+  held: string | null;
+  known: string | null | undefined;
+}
+
+/** What asks the pin to decide. `stored` is the key as read now, `undefined`
+ *  when the read threw. `anchor` is `threadPinAnchor` over `held`. */
+export type ThreadPinTrigger =
+  | { kind: "boot"; stored: string | null | undefined }
+  | { kind: "storage"; stored: string | null | undefined; booted: boolean }
+  | { kind: "click"; value: string | null }
+  | { kind: "render"; stored: string | null | undefined; focused: boolean; anchor: string | null };
+
+/** The decision: the next state, the value to write (`write: false` writes
+ *  nothing; the caller writes, then settles with `threadPinSettle`), and
+ *  whether a `storage` event repaints the rail — only once it has rendered,
+ *  and only when the held pin changed. */
+export interface ThreadPinStep {
+  state: ThreadPinState;
+  write: false | { value: string | null };
+  repaint: boolean;
+}
+
+/**
+ * The thread pin's state table (D7), one row per `case` — the rows and their
+ * proof are in `src/wiki/CLAUDE.md` ("Order and pin"). Two rules carry it:
+ *
+ *  - Only a click, or a render this tab caused while it has document focus,
+ *    writes. A `storage` event never writes and the render it causes runs no
+ *    step at all, so one tab's write can never cause another tab's: no write
+ *    loop between any number of tabs.
+ *  - A render writes only while storage still holds `known`. A value this tab
+ *    did not read or write is adopted, never overwritten.
+ */
+export function threadPinStep(state: ThreadPinState, t: ThreadPinTrigger): ThreadPinStep {
+  const none = (s: ThreadPinState): ThreadPinStep => ({ state: s, write: false, repaint: false });
+  switch (t.kind) {
+    case "boot":
+      return none(t.stored === undefined ? { held: null, known: undefined } : { held: t.stored, known: t.stored });
+    case "storage": {
+      if (t.stored === undefined) return none(state);
+      return { state: { held: t.stored, known: t.stored }, write: false, repaint: t.booted && t.stored !== state.held };
+    }
+    case "click":
+      // The reader's explicit choice: written whatever storage holds.
+      return { state: { held: t.value, known: state.known }, write: { value: t.value }, repaint: false };
+    case "render": {
+      const next = t.anchor ?? state.held;
+      // Unreadable storage: no compare is possible, so nothing is written.
+      if (t.stored === undefined) return none({ held: next, known: state.known });
+      // Storage became readable: what it holds is now known; this tab's own
+      // pin (a click whose write failed) stays and is written on a later render.
+      if (state.known === undefined) return none({ held: state.held ?? t.stored, known: t.stored });
+      // Another tab changed the key and this tab never heard: adopt it.
+      if (t.stored !== state.known) return none({ held: t.stored, known: t.stored });
+      const moved = { held: next, known: state.known };
+      return t.focused && next !== t.stored ? { state: moved, write: { value: next }, repaint: false } : none(moved);
+    }
+  }
+}
+
+/** After the write a step asked for: storage holds `value` only when it took. */
+export function threadPinSettle(state: ThreadPinState, value: string | null, ok: boolean): ThreadPinState {
+  return ok ? { held: state.held, known: value } : state;
+}
+
+/** Does a `storage` event concern the pin of `wiki`? `null` is a `clear()`. */
+export function storageEventTouchesThreadPin(key: string | null, wiki: string): boolean {
+  return key === null || key === threadPinKey(wiki);
 }
 
 /** Related work's two orders. `strongest` is the server's; `newest` re-sorts on
@@ -672,8 +730,9 @@ export interface RailThreadCard {
   open: boolean;
   /** The thread holding the reader's pinned page (D7). */
   pinned: boolean;
-  /** What the 📌 stores: the thread's newest focus page, the last to age out
-   *  of the window (the `key` is the earliest, the first). */
+  /** What the 📌 stores: the thread's newest non-hub focus page (a thread of
+   *  hubs only: its newest hub), the last to age out of the window (the `key`
+   *  is the earliest, the first). */
   pinAnchor: string;
   /** Focus pages under the current facets, by work term (highest first). */
   focus: WikiListing[];
