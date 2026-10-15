@@ -88,6 +88,18 @@ export function pinsKey(wiki: string): string {
  */
 export const FOLDS_MAX = 200;
 
+/**
+ * How many work-thread fold keys (`thread:…` and `closed:thread:…`) are stored,
+ * bounded APART from `FOLDS_MAX`. A thread's key changes as threads merge or age
+ * out, so each change leaves an orphan; sharing the cap let those evict the
+ * reader's own family, month and page folds. At most 5 cards render.
+ */
+export const THREAD_FOLDS_MAX = 20;
+
+/** What a raw read may hold before `capFolds` sorts it out: both caps plus
+ *  room for the mode keys. */
+export const FOLDS_READ_MAX = FOLDS_MAX + THREAD_FOLDS_MAX + 16;
+
 export function foldsKey(wiki: string): string {
   return FOLDS_KEY_PREFIX + wiki;
 }
@@ -171,6 +183,22 @@ export function isModeFoldKey(key: string): boolean {
   return normalizeFoldKey(key).startsWith("toggle:");
 }
 
+/** Is this a work-thread card's fold key, in either spelling? */
+export function isThreadFoldKey(key: string): boolean {
+  const v = normalizeFoldKey(key);
+  return v.startsWith(THREAD_FOLD_PREFIX) || v.startsWith(CLOSED_FOLD_PREFIX + THREAD_FOLD_PREFIX);
+}
+
+/** The stored fold list, bounded per class: mode keys first and uncapped, then
+ *  the reader's folds (≤ `FOLDS_MAX`), then thread folds (≤ `THREAD_FOLDS_MAX`).
+ *  Order within a class is kept, so the newest entry of each stays first. */
+export function capFolds(list: readonly string[]): string[] {
+  const modes = list.filter((k) => isModeFoldKey(k));
+  const threads = list.filter((k) => isThreadFoldKey(k)).slice(0, THREAD_FOLDS_MAX);
+  const folds = list.filter((k) => !isModeFoldKey(k) && !isThreadFoldKey(k)).slice(0, FOLDS_MAX);
+  return [...modes, ...folds, ...threads];
+}
+
 /** Flip one group and return the new list. A blank key is a no-op.
  *
  *  ⚠️ **The flip is computed from the RENDERED state, not from the presence of
@@ -187,9 +215,8 @@ export function isModeFoldKey(key: string): boolean {
  *  key behaves exactly as it always did (its default is closed, so "open" writes
  *  the key and "closed" is its absence).
  *
- *  Mode keys are EXEMPT from the cap and hoisted to the front, which is what
- *  keeps them exempt on the way back IN too: `readFolds` caps at `FOLDS_MAX` as
- *  well, so a sentinel left at the tail would simply fall off on the next boot. */
+ *  The result goes through `capFolds`, as `readFolds` does: mode keys exempt
+ *  and hoisted to the front, thread folds capped apart from the reader's own. */
 export function toggleFold(open: string[], key: string): string[] {
   const raw = normalizeFoldKey(key);
   if (!raw) return open.slice();
@@ -205,9 +232,7 @@ export function toggleFold(open: string[], key: string): string[] {
   });
   const wantOpen = !openNow;
   const next = wantOpen === defaultsOpen ? rest : [wantOpen ? base : closed, ...rest];
-  const modes = next.filter((k) => isModeFoldKey(k));
-  const folds = next.filter((k) => !isModeFoldKey(k)).slice(0, FOLDS_MAX);
-  return [...modes, ...folds];
+  return capFolds(next);
 }
 
 /**

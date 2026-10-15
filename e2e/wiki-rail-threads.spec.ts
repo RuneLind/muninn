@@ -310,6 +310,45 @@ test.describe("Wiki rail: Work threads", () => {
     expect(await page.evaluate((k) => localStorage.getItem(k), threadPinKey(THREADS))).toBeNull();
   });
 
+  test("keyboard: Enter on a card's fold, a 📌 and a group fold leaves focus on the same control", async ({ page }) => {
+    await openReader(page, THREADS);
+    // Which control has focus: its class and the card (or group key) it belongs to.
+    const focused = () =>
+      page.evaluate(() => {
+        const a = document.activeElement as HTMLElement | null;
+        if (!a || a === document.body) return "body";
+        const card = a.closest(".wiki-thread-card");
+        return `${a.className.split(" ")[0]}@${card ? card.getAttribute("data-thread") : a.getAttribute("data-fold-key")}`;
+      });
+    const beta = await cards(page).nth(1).getAttribute("data-thread");
+    expect(beta).toBeTruthy();
+    // The second card's fold: opens, keeps focus, and the next Tab is its 📌.
+    await cards(page).nth(1).locator(".wiki-thread-fold").focus();
+    await page.keyboard.press("Enter");
+    await expect(cards(page).nth(1).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "true");
+    expect(await focused()).toBe(`wiki-thread-fold@${beta}`);
+    await page.keyboard.press("Tab");
+    expect(await focused()).toBe(`wiki-thread-pin@${beta}`);
+    // The 📌 by keyboard: the card moves to the top, and focus moves with it.
+    await page.keyboard.press("Enter");
+    await expect(cards(page).nth(0)).toHaveAttribute("data-thread", beta!);
+    await expect(cards(page).nth(0).locator(".wiki-thread-pin")).toHaveAttribute("aria-pressed", "true");
+    expect(await focused()).toBe(`wiki-thread-pin@${beta}`);
+    // …and again to unpin: back to second place, focus still on its 📌.
+    await page.keyboard.press("Enter");
+    await expect(cards(page).nth(1)).toHaveAttribute("data-thread", beta!);
+    expect(await focused()).toBe(`wiki-thread-pin@${beta}`);
+    // A group fold shares the handler: the series group keeps focus too.
+    const series = page.locator('.wiki-list-group.series[data-section="series"] .wiki-group-fold');
+    const seriesKey = await series.getAttribute("data-fold-key");
+    await series.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".wiki-list-ghost")).toHaveCount(2);
+    const after = await focused();
+    expect(after.startsWith("wiki-group-fold@"), after).toBe(true);
+    expect(after.replace(/^wiki-group-fold@(closed:)?/, ""), after).toBe(seriesKey!.replace(/^closed:/, ""));
+  });
+
   test("no section, no bars, when the ledger 404s the sessions form (D11)", async ({ page }) => {
     const body = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${PLAIN}&refresh=1`)).json()) as { work?: unknown };
     expect(body.work).toBeUndefined();

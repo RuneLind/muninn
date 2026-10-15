@@ -3,7 +3,7 @@
  * meta line, the escaping of every interpolated string, and the touched line.
  * Placement and the lift are `buildRail`'s, tested in `wiki-recents.test.ts`.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   threadCardHeaderHtml,
   threadInstantLabel,
@@ -53,6 +53,36 @@ describe("threadInstantLabel / threadSpanLabel", () => {
     expect(threadSpanLabel(sameDay, NOW)).toBe("today 08:01 → 09:30");
     const older = card({ sessions: [{ id: "s", provider: "claude", first: at(12, 8, 1), last: at(12, 9, 30), title: "" }] });
     expect(threadSpanLabel(older, NOW)).toBe("mon 12.10 08:01 → 09:30");
+  });
+});
+
+// "yesterday" is the previous CALENDAR day, not `now - 24h`: after a 23-hour
+// spring-forward day the two differ. The zone is set for this block alone and
+// restored to an explicit zone (`delete process.env.TZ` does not reset it on Bun).
+describe("threadInstantLabel across a DST change (Europe/Oslo)", () => {
+  const PREV = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  beforeAll(() => {
+    process.env.TZ = "Europe/Oslo";
+  });
+  afterAll(() => {
+    process.env.TZ = PREV;
+  });
+
+  test("the zone really skips an hour on 28 March 2027, or this block proves nothing", () => {
+    const d = new Date(2027, 2, 28, 2, 30);
+    expect(d.getHours()).toBe(3);
+  });
+
+  test("after the 23-hour day, the day before is still yesterday", () => {
+    const now = new Date(2027, 2, 29, 0, 30).getTime();
+    expect(threadInstantLabel(new Date(2027, 2, 28, 0, 15).getTime(), now)).toBe("yesterday 00:15");
+    expect(threadInstantLabel(new Date(2027, 2, 27, 23, 45).getTime(), now)).toBe("sat 27.03 23:45");
+  });
+
+  test("after the 25-hour day, the day before is yesterday and the one before that is not", () => {
+    const now = new Date(2026, 9, 26, 23, 30).getTime();
+    expect(threadInstantLabel(new Date(2026, 9, 25, 0, 15).getTime(), now)).toBe("yesterday 00:15");
+    expect(threadInstantLabel(new Date(2026, 9, 24, 23, 45).getTime(), now)).toBe("sat 24.10 23:45");
   });
 });
 

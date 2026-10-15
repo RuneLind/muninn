@@ -16,7 +16,8 @@
  * `readActiveWikiName`), so a browser that reads two wikis keeps two lists.
  */
 import {
-  FOLDS_MAX,
+  FOLDS_READ_MAX,
+  capFolds,
   PINS_MAX,
   RECENTS_KEY_PREFIX,
   foldsKey,
@@ -82,7 +83,7 @@ export function togglePinned(wiki: string, relPath: string): string[] {
  * the sentinels are unchanged by its normalization.
  */
 export function readFolds(wiki: string): string[] {
-  return read(foldsKey(wiki), FOLDS_MAX);
+  return capFolds(read(foldsKey(wiki), FOLDS_READ_MAX));
 }
 
 /** Flip one group open/closed and return the new list. */

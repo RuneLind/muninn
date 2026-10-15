@@ -10,8 +10,6 @@ import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, localDay, type WikiListing } from "./wiki-filter.ts";
 import type { RailThreadCard } from "./wiki-recents.ts";
 
-const DAY_MS = 86_400_000;
-
 /** One instant as a card shows it, in the viewer's zone: `today 08:01`,
  *  `yesterday 21:26`, else `mon 12.10 15:04`. */
 export function threadInstantLabel(ms: number, now: number): string {
@@ -19,7 +17,12 @@ export function threadInstantLabel(ms: number, now: number): string {
   const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   const day = localDay(d);
   if (day === localDay(new Date(now))) return `today ${hm}`;
-  if (day === localDay(new Date(now - DAY_MS))) return `yesterday ${hm}`;
+  // The previous CALENDAR day: `now - 24h` lands two days back after a 23-hour
+  // spring-forward day. Local noon minus one date never crosses a DST hour.
+  const yesterday = new Date(now);
+  yesterday.setHours(12, 0, 0, 0);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (day === localDay(yesterday)) return `yesterday ${hm}`;
   const wd = d.toLocaleDateString("en-GB", { weekday: "short" }).toLowerCase();
   return `${wd} ${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")} ${hm}`;
 }

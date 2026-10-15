@@ -147,6 +147,7 @@ import {
   type RelatedOrder,
 } from "./wiki-recents.ts";
 import {
+  CLOSED_FOLD_PREFIX,
   GROUP_FAMILIES_TOGGLE_KEY,
   groupRollup,
   clipSeriesTitle,
@@ -4969,6 +4970,17 @@ document.body.addEventListener("click", (e) => {
  * document synchronously, before any document listener runs. The rule stands as
  * a rule; the story about it was invented.
  */
+/** After a `renderList` that replaced the control the reader pressed, focus the
+ *  same control again wherever it now is (the related-order precedent), so a
+ *  keyboard reader's next Tab continues from it instead of from the page top.
+ *  Prefers a match of the same kind when a key names two controls. */
+function refocusRailControl(selector: string, pressed: Element): void {
+  const found = Array.from(document.querySelectorAll<HTMLElement>(selector));
+  const kind = pressed.classList[0];
+  const pick = found.find((el) => el.classList[0] === kind) ?? found[0];
+  pick?.focus({ preventScroll: true });
+}
+
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
@@ -4982,8 +4994,16 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     e.preventDefault();
     const key = fold.getAttribute("data-fold-key");
     if (!key) return;
+    const hadFocus = document.activeElement === fold;
     openFolds = toggleFolded(WIKI, key);
     renderList();
+    // The key's spelling can flip with the default it is drawn under, so look
+    // for either (`closed:` or not).
+    if (hadFocus) {
+      const base = key.startsWith(CLOSED_FOLD_PREFIX) ? key.slice(CLOSED_FOLD_PREFIX.length) : key;
+      const at = (k: string) => `#wikiList [data-fold-key="${CSS.escape(k)}"]`;
+      refocusRailControl(`${at(base)}, ${at(CLOSED_FOLD_PREFIX + base)}`, fold);
+    }
     return;
   }
   // A work thread's 📌 (D7): the pinned card clears, any other pins its newest
@@ -4995,8 +5015,14 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     e.preventDefault();
     const key = threadPinBtn.getAttribute("data-thread-pin");
     if (!key) return;
+    const hadFocus = document.activeElement === threadPinBtn;
+    const card = threadPinBtn.closest(".wiki-thread-card")?.getAttribute("data-thread");
     threadPin = writeThreadPin(WIKI, threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key);
     renderList();
+    // The card moved: follow it by its own key, not by position.
+    if (hadFocus && card) {
+      refocusRailControl(`#wikiList .wiki-thread-card[data-thread="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
+    }
     return;
   }
   const pin = target.closest("[data-pin]");

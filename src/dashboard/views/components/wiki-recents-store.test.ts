@@ -245,6 +245,28 @@ describe("the fold store", () => {
     });
   });
 
+  test("thread folds never push the reader's own folds out: 300 thread writes leave every other fold", () => {
+    // A thread's key changes as threads merge or age out, and closing the
+    // default-open first card writes `closed:thread:<key>` — one orphan per
+    // thread. Those must be bounded on their own, never by evicting a family,
+    // month or page fold.
+    const own = ["family:plans/alpha", "closed:month:2026-09", ...Array.from({ length: 150 }, (_, i) => `plans/p${i}.mdx`)];
+    withStorage({ [foldsKey("mimir")]: JSON.stringify(own) }, (map) => {
+      for (let i = 0; i < 300; i++) {
+        toggleFolded("mimir", i % 2 ? `thread:plans/t${i}.mdx` : `closed:thread:plans/t${i}.mdx`);
+      }
+      const folds = readFolds("mimir");
+      for (const k of own) expect(isFoldOpen(folds, k), k).toBe(true);
+      const stored = JSON.parse(map.get(foldsKey("mimir"))!) as string[];
+      for (const k of own) expect(stored, k).toContain(k);
+      // The thread entries are bounded, and the newest one is kept.
+      const threads = stored.filter((k) => k.startsWith("thread:") || k.startsWith("closed:thread:"));
+      expect(threads.length).toBeLessThanOrEqual(50);
+      expect(threads[0]).toBe("thread:plans/t299.mdx");
+      expect(isFoldOpen(folds, "thread:plans/t299.mdx")).toBe(true);
+    });
+  });
+
   test("anything that is not a list of strings reads as EVERYTHING CLOSED", () => {
     for (const stored of ["{not json", '{"a":1}', '"a string"', "null", '[1,2]', ""]) {
       withStorage({ [foldsKey("mimir")]: stored }, () => {
