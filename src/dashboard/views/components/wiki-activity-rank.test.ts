@@ -17,10 +17,12 @@ import {
   RAIL_AGE_MAX_DAYS,
   rankActivity,
   workedGateFor,
+  type ActivityRow,
   type ActivityWeights,
   type WorkedGate,
 } from "./wiki-activity-rank.ts";
-import { isUsableWorkedMs, localDay, workedSignal, type WikiListing } from "./wiki-filter.ts";
+import { isUsableWorkedMs, localDay, sortPages, workedSignal, type WikiListing } from "./wiki-filter.ts";
+import { computeWorkFocus, type PageWork } from "../../../wiki/work-focus.ts";
 
 const NOW = Date.UTC(2026, 8, 12, 12, 0, 0);
 const DAY = 86_400_000;
@@ -1292,5 +1294,136 @@ describe("rankActivity — the parent's newest signal", () => {
     const gate: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1, asOfMs: NOW };
     const [r] = rankActivity([parent, kid("plans/c.html", 6)], wide, NOW, gate);
     expect(r!.newerChildren).toEqual(["plans/c.html"]);
+  });
+});
+
+describe("rankActivity — session work (D5)", () => {
+  const H = 3_600_000;
+  const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1 };
+  const SHUT: WorkedGate = { open: false, candidates: 10, covered: 1, coverage: 0.1 };
+  const hAgo = (h: number) => NOW - h * H;
+  /** A page carrying session events. `focus`/`touch`/`pass` are [hours ago, edits]. */
+  const worked = (
+    base: WikiListing,
+    ev: { focus?: Array<[number, number]>; touch?: Array<[number, number]>; pass?: Array<[number, number]>; preH?: number },
+  ): WikiListing => {
+    const events: PageWork["events"] = [
+      ...(ev.focus ?? []).map(([h, e]) => [hAgo(h), e, "focus"] as PageWork["events"][number]),
+      ...(ev.touch ?? []).map(([h, e]) => [hAgo(h), e, "touch"] as PageWork["events"][number]),
+      ...(ev.pass ?? []).map(([h, e]) => [hAgo(h), e, "pass"] as PageWork["events"][number]),
+    ].sort((a, b) => b[0] - a[0]);
+    const focus = events.filter((e) => e[2] === "focus");
+    const work: PageWork = {
+      sinceMs: NOW - 8 * DAY,
+      ...(ev.preH === undefined ? {} : { preMs: hAgo(ev.preH) }),
+      state: focus.length ? "F" : ev.preH === undefined ? "T0" : "T",
+      ...(focus.length ? { focusMs: focus[0]![0] } : {}),
+      events,
+    };
+    return { ...base, workedMs: events[0]![0], work };
+  };
+  const rowFor = (rows: ActivityRow[], rel: string) => rows.find((r) => r.page.relPath === rel);
+  const scored = (rows: ActivityRow[]) => rows.map(({ page, ...rest }) => ({ rel: page.relPath, ...rest }));
+
+  test("a page created and worked in one session gets its work, not only its creation", () => {
+    const fresh = page({ relPath: "plans/fresh.md", createdDaysAgo: 5 / 24 });
+    const created = rankActivity([fresh], wide, NOW, OPEN)[0]!;
+    const withWork = rankActivity([worked(fresh, { focus: [[5, 20]] })], wide, NOW, OPEN)[0]!;
+    expect(created.kind).toBe("new");
+    expect(withWork.score).toBeGreaterThan(created.score);
+    expect(withWork.kind).toBe("changed");
+    expect(withWork.worked).toBe(true);
+    expect(withWork.why).toMatch(/^focused in 1 session \(20 edits\), newest 5h ago: raw [\d.]+ → work [\d.]+; created 5h ago → /);
+  });
+
+  test("a hand edit a day after the session still counts; one inside the day does not", () => {
+    // A small session six days ago on an old page, then a git edit.
+    const at = (updatedDaysAgo: number) =>
+      worked(page({ relPath: "notes/late.md", createdDaysAgo: 60, updatedDaysAgo }), { focus: [[6 * 24, 1]], preH: 30 * 24 });
+    const late = rankActivity([at(1)], wide, NOW, OPEN)[0]!;
+    expect(late.why).toMatch(/^changed 1d ago, created /);
+    expect(late.ageMs).toBe(DAY);
+    // 20 hours after the session: the commit lag of the same work, not a change.
+    const lag = rankActivity([at(6 - 20 / 24)], wide, NOW, OPEN)[0];
+    expect(lag?.score ?? 0).toBeLessThan(late.score);
+    expect(lag?.why ?? "").not.toMatch(/^changed /);
+  });
+
+  test("a page touched once and committed 40 minutes later stays below a focused page", () => {
+    const touched = worked(page({ relPath: "notes/touched.md", createdDaysAgo: 100, updatedDaysAgo: (2 * 60 - 40) / (24 * 60) }), {
+      touch: [[2, 1]],
+      preH: 50 * 24,
+    });
+    const focused = worked(page({ relPath: "notes/focused.md", createdDaysAgo: 100, updatedDaysAgo: 10 / 24 }), {
+      focus: [[10, 5]],
+      preH: 50 * 24,
+    });
+    expect(rankActivity([touched, focused], wide, NOW, OPEN).map((r) => r.page.relPath)).toEqual([
+      "notes/focused.md",
+      "notes/touched.md",
+    ]);
+    // Today's path ranked the touch first: its worked stamp is the newer one.
+    const today = (p: WikiListing) => ({ ...p, work: undefined });
+    expect(rankActivity([today(touched), today(focused)], wide, NOW, OPEN)[0]!.page.relPath).toBe("notes/touched.md");
+  });
+
+  test("POPP shape: a page whose only event is a 9-page elsewhere pass rises neither in Activity nor under Worked on", () => {
+    const passAt = NOW - 20 * H;
+    const pages = Array.from({ length: 9 }, (_, i) => ({ relPath: `concepts/c${i}.mdx`, backlinks: 0 }));
+    const r = computeWorkFocus({
+      sessions: [
+        {
+          id: "tldr",
+          provider: "claude",
+          title: "In short boxes",
+          first: passAt - 60_000,
+          last: passAt,
+          bulk: false,
+          text: { from: "prompt", paths: ["/w/mimir/plans/muninn-tldr-coverage.mdx"], links: [], files: [] },
+          files: pages.map((p) => ({ p: p.relPath, edits: 1, firstMs: passAt - 60_000, lastMs: passAt })),
+        },
+      ],
+      pre: new Map([["concepts/c0.mdx", NOW - 40 * DAY]]),
+      sinceMs: NOW - 8 * DAY,
+      asOfMs: NOW,
+      pages,
+      identity: { roots: ["/w/kode"], name: "kode" },
+      otherRoots: ["/w/mimir"],
+    });
+    const work = r.pages.get("concepts/c0.mdx")!;
+    expect(work.state).toBe("T");
+    // The pass committed five minutes after it ran.
+    const popp = {
+      ...page({ relPath: "concepts/c0.mdx", createdDaysAgo: 200, updatedDaysAgo: (20 * 60 - 5) / (24 * 60) }),
+      workedMs: passAt,
+      work,
+    };
+    const other = worked(page({ relPath: "plans/real.md", createdDaysAgo: 30, updatedDaysAgo: 3 }), { focus: [[3 * 24, 4]], preH: 20 * 24 });
+    expect(rowFor(rankActivity([popp, other], wide, NOW, OPEN), "concepts/c0.mdx")).toBeUndefined();
+    expect(sortPages([popp, other], "worked", NOW).map((p) => p.relPath)).toEqual(["plans/real.md", "concepts/c0.mdx"]);
+    // Without its work facts the same page rises on both: the pass is its
+    // newest worked stamp.
+    const bare = { ...popp, work: undefined };
+    expect(rowFor(rankActivity([bare, other], wide, NOW, OPEN), "concepts/c0.mdx")).toBeDefined();
+    expect(sortPages([bare, other], "worked", NOW)[0]!.relPath).toBe("concepts/c0.mdx");
+  });
+
+  test("a closed gate and the no-events path are byte-identical to today", () => {
+    const a = worked(page({ relPath: "a.md", createdDaysAgo: 30, updatedDaysAgo: 0.2 }), { focus: [[3, 9]], preH: 10 * 24 });
+    const b = worked(page({ relPath: "b.md", createdDaysAgo: 2 }), { touch: [[30, 1]] });
+    const c = page({ relPath: "c.md", createdDaysAgo: 30, updatedDaysAgo: 1, workedDaysAgo: 1 });
+    const d = page({ relPath: "d.md", createdDaysAgo: 3 });
+    const strip = (p: WikiListing) => ({ ...p, work: undefined });
+    const listing = [a, b, c, d];
+    // Closed gate: every row as if no page carried events.
+    expect(scored(rankActivity(listing, wide, NOW, SHUT))).toEqual(scored(rankActivity(listing.map(strip), wide, NOW, SHUT)));
+    // Open gate: the pages WITHOUT events score exactly as they did.
+    const open = rankActivity(listing, wide, NOW, OPEN);
+    const today = rankActivity(listing.map(strip), wide, NOW, OPEN);
+    for (const rel of ["c.md", "d.md"]) {
+      const { page: _p1, ...x } = rowFor(open, rel)!;
+      const { page: _p2, ...y } = rowFor(today, rel)!;
+      expect(x).toEqual(y);
+    }
   });
 });

@@ -30,11 +30,15 @@ import {
   localDay,
   pageDateSignal,
   pageFolder,
+  pageWorkState,
   pageStemOf,
   recencyKeyFor,
   recencyKindFor,
+  workedShownSignal,
   workedSignal,
+  workedSortSignal,
   type WikiListing,
+  type WorkedTouch,
   type WikiRecencyFields,
   type WikiSortMode,
 } from "./wiki-filter.ts";
@@ -458,19 +462,38 @@ type WorkedDateFields = WikiRecencyFields & PageDateFields;
  * work"; the order answers "what happened most recently".
  */
 export function workedDateSignal(p: WorkedDateFields, now?: number): SeriesDateSignal {
-  // The WORKED rung comes through `workedSignal` — the ONE guarded worked key,
-  // future guard and all — rather than through a second `p.workedMs` read, so
-  // the rail's chip and this comparator can never disagree about whether the
-  // ledger answered for a page. `kind === "worked"` is that answer; anything
-  // else means the guard rejected it or the ledger holds nothing.
-  const signal = workedSignal(p, now);
-  if (signal.kind === "worked") {
-    // A ledger instant, so its LOCAL day is the spelling to floor by — the same
-    // split `seriesDateSignal` makes between an authored day and an observed one.
-    const day = localDay(new Date(signal.ms));
-    return { ms: calendarDayMs(day) ?? 0, day, rank: SERIES_WORKED_RANK };
-  }
+  // The WORKED rung comes through `workedSortSignal` — the ONE guarded worked
+  // key (the newest focus event, a touched page's pre-touch position or
+  // creation, else the ledger's write), future guard and all — rather than
+  // through a second `p.workedMs` read, so the rail's sort and this comparator
+  // can never disagree about whether the ledger answered for a page. `worked`
+  // is that answer; anything else means the guard rejected it or the ledger
+  // holds nothing. T and T0 members take the worked rung at their sort instant.
+  const signal = workedSortSignal(p, now);
+  if (signal.worked && signal.ms > 0) return workedRung(signal.ms);
   return seriesDateSignal(p);
+}
+
+/** A ledger instant floored to its LOCAL day — the same split
+ *  `seriesDateSignal` makes between an authored day and an observed one. */
+function workedRung(ms: number): SeriesDateSignal {
+  const day = localDay(new Date(ms));
+  return { ms: calendarDayMs(day) ?? 0, day, rank: SERIES_WORKED_RANK };
+}
+
+/**
+ * The day a member's strip cell PRINTS: the shown instant's day (D22). On a page
+ * with a focus event, or none at all, that is {@link workedDateSignal}'s own day.
+ * A T or T0 page shows today's chain — its ledger write, else the series chain —
+ * marked `touched`, so the strip reads out of order at that row (a stated
+ * exception to D9, like the Series section's).
+ */
+export function workedShownDay(p: WorkedDateFields, now?: number): { day: string; touched?: WorkedTouch } {
+  const shown = workedShownSignal(p, now);
+  if (!shown.touched) return { day: workedDateSignal(p, now).day };
+  const chain = workedSignal(p, now);
+  const day = chain.kind === "worked" ? workedRung(chain.ms).day : seriesDateSignal(p).day;
+  return { day, touched: shown.touched };
 }
 
 /** Newest WORKED day first, then the rung, then the worked INSTANT, then relPath —
@@ -488,12 +511,12 @@ export function byWorkedDateDesc(
 ): number {
   const sa = workedDateSignal(a, now);
   const sb = workedDateSignal(b, now);
+  const bothWorked = sa.rank === SERIES_WORKED_RANK && sb.rank === SERIES_WORKED_RANK;
   return (
     sb.ms - sa.ms ||
     sb.rank - sa.rank ||
-    (sa.rank === SERIES_WORKED_RANK && sb.rank === SERIES_WORKED_RANK
-      ? workedSignal(b, now).ms - workedSignal(a, now).ms
-      : 0) ||
+    (bothWorked ? workedSortSignal(b, now).ms - workedSortSignal(a, now).ms : 0) ||
+    (bothWorked ? workedShownSignal(b, now).ms - workedShownSignal(a, now).ms : 0) ||
     normalizeRel(a.relPath).localeCompare(normalizeRel(b.relPath))
   );
 }
@@ -1220,7 +1243,10 @@ export function groupMonths(
     const named = DATED_NAME_RE.exec(pageStemOf(p.relPath));
     let month = named ? named[1] + "-" + named[2] : "";
     if (!month) {
-      const signal = pageDateSignal(p, which, now);
+      // Worked-on files a page under its SORT instant's month (D22), never the
+      // shown one: a touched page is filed where it sorts.
+      const sortMs = which === "worked" && pageWorkState(p) ? workedSortSignal(p, now).ms : -1;
+      const signal = sortMs >= 0 ? (sortMs > 0 ? { label: localDay(new Date(sortMs)) } : null) : pageDateSignal(p, which, now);
       if (!signal?.label) continue;
       const m = /^(\d{4})-(\d{2})/.exec(signal.label);
       if (!m) continue;

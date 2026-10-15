@@ -54,6 +54,7 @@ import { escHtml } from "./escape.ts";
 import {
   displayTitleOf,
   isMetaPage,
+  pageDateSignal,
   pageWorkedMs,
   relPathMatchesQuery,
   type WikiListing,
@@ -515,9 +516,13 @@ export function rankFind(pages: readonly WikiListing[], raw: string, opts: RankO
   const candidates: FindRow[] = [];
   for (const p of pages) {
     if (!inFindPool(p, q.retired)) continue;
+    // Two instants (D22): the RANK reads the Worked-on sort instant — find what
+    // you worked on — while `age:` reads the shown one, the page's literal age.
     const ms = pageWorkedMs(p, opts.now);
     const ageDays = ms > 0 ? Math.max(0, (opts.now - ms) / DAY_MS) : null;
-    if (!passesFilters(p, q, labels, ageDays)) continue;
+    const shownMs = pageDateSignal(p, "worked", opts.now)?.ms ?? 0;
+    const shownAgeDays = shownMs > 0 ? Math.max(0, (opts.now - shownMs) / DAY_MS) : null;
+    if (!passesFilters(p, q, labels, shownAgeDays)) continue;
     pool++;
     const text = textScore(p, terms, labels);
     for (const w of text.hit) {

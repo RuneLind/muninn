@@ -8,6 +8,7 @@
  * rounds went into one drag handle.
  */
 import { describe, expect, test } from "bun:test";
+import { WORK_PEEK_MAX, WORK_PEEK_MIN } from "./wiki-activity-rank.ts";
 import {
   FOLDS_MAX,
   JUMP_MAX,
@@ -2427,6 +2428,40 @@ describe("buildRail — series", () => {
     expect(peek).toHaveLength(SERIES_PEEK_MAX);
     expect(peek).toEqual(["plans/d.mdx", "blogs/c.mdx", "plans/b.mdx"]);
     expect(mores(m.entries)[0]!.hidden).toBe(1);
+  });
+
+  test("D12 — with the work term on, the peek is every member clearing WORK_PEEK_MIN, by that term", () => {
+    // B was never ranked; A and C are. With a work term, the members a session
+    // WORKED on lead — B included — and C (under the floor) drops out.
+    const terms: Record<string, number> = { "plans/a.mdx": 0.8, "plans/b.mdx": 1.3, "blogs/c.mdx": WORK_PEEK_MIN - 0.01 };
+    const m = build({ activity: [act(C, 9), act(A, 8)], workTerm: (p) => terms[p.relPath] ?? 0 });
+    expect(shape(m.entries)).toEqual([
+      "activity:[Alpha work]",
+      "activity:plans/b.mdx",
+      "activity:plans/a.mdx",
+      "activity:+1",
+      "all:plans/loose.mdx",
+    ]);
+    // None clears the floor: today's peek, the ranked members in rank order.
+    const none = build({ activity: [act(C, 9), act(A, 8)], workTerm: () => 0.1 });
+    expect(shape(none.entries)).toEqual(shape(build({ activity: [act(C, 9), act(A, 8)] }).entries));
+  });
+
+  test("D12 — the work peek stops at WORK_PEEK_MAX and never shows a lifted member", () => {
+    const extra = Array.from({ length: 7 }, (_, i) => plan(`plans/w${i}.mdx`, { status_date: `2026-03-0${i + 1}` }));
+    const all = [A, B, C, ...extra, LOOSE];
+    const m = build({
+      filtered: all,
+      facetOnly: all,
+      seriesGroups: groupSeries(all),
+      activity: [act(A, 9)],
+      pins: ["plans/w0.mdx"],
+      workTerm: (p) => (p.relPath.startsWith("plans/w") ? 1 + Number(p.relPath[7]) / 10 : 0),
+    });
+    const peek = rows(m.entries).filter((r) => r.section === "activity").map((r) => r.page.relPath);
+    expect(peek).toHaveLength(WORK_PEEK_MAX);
+    // w0 is pinned (lifted), so six clear the floor and the cap takes five.
+    expect(peek).toEqual(["plans/w6.mdx", "plans/w5.mdx", "plans/w4.mdx", "plans/w3.mdx", "plans/w2.mdx"]);
   });
 
   test("expandAll opens a closed series: every member is a row, none behind `+N more`", () => {

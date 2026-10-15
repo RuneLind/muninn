@@ -1780,3 +1780,91 @@ test("workedAxisSource: the rail's and Related work's ONE derivation of a date c
   expect(workedAxisSource(unworked, now, workedSignal(unworked, now))).toEqual({ kind: "fallback" });
   expect(workedAxisSource(unworked, now, null)).toBeNull();
 });
+
+// ── The Worked-on key over session work facts (D14, D15, D22) ──────────────
+
+const W_NOW = Date.UTC(2026, 9, 15, 8, 0);
+const W_H = 3_600_000;
+const wAgo = (h: number) => W_NOW - h * W_H;
+/** A page with session events: `[hoursAgo, edits, kind]`, newest first. */
+function withWork(
+  over: Partial<WikiListing>,
+  events: Array<[number, number, "focus" | "touch" | "pass"]>,
+  preH?: number,
+): WikiListing {
+  const evs = events.map(([h, e, k]) => [wAgo(h), e, k] as [number, number, "focus" | "touch" | "pass"]).sort((a, b) => b[0] - a[0]);
+  const focus = evs.find((e) => e[2] === "focus");
+  return page({
+    gitCreatedMs: wAgo(60 * 24),
+    gitTouchedMs: wAgo(50 * 24),
+    workedMs: evs[0]![0],
+    ...over,
+    work: {
+      sinceMs: W_NOW - 8 * 24 * W_H,
+      ...(preH === undefined ? {} : { preMs: wAgo(preH) }),
+      state: focus ? "F" : preH === undefined ? "T0" : "T",
+      ...(focus ? { focusMs: focus[0] } : {}),
+      events: evs,
+    },
+  });
+}
+
+test("Worked on: a touched-only page with a fresh write sorts below a focused page", () => {
+  const touched = withWork({ name: "touched", relPath: "touched.md" }, [[1, 1, "touch"]], 10 * 24);
+  const focused = withWork({ name: "focused", relPath: "focused.md" }, [[3 * 24, 6, "focus"]]);
+  expect(sortPages([touched, focused], "worked", W_NOW).map((p) => p.relPath)).toEqual(["focused.md", "touched.md"]);
+  // Today's chain (no work facts) put the fresh touch first.
+  const bare = (p: WikiListing) => ({ ...p, work: undefined });
+  expect(sortPages([bare(touched), bare(focused)], "worked", W_NOW).map((p) => p.relPath)).toEqual(["touched.md", "focused.md"]);
+  // The sort key IS the pre-touch position; the shown date is the touch.
+  expect(pageWorkedMs(touched, W_NOW)).toBe(wAgo(10 * 24));
+  expect(pageDateSignal(touched, "worked", W_NOW)?.ms).toBe(wAgo(1));
+});
+
+test("Worked on: pages tied on the sort instant order by their shown instant, not their title", () => {
+  // Same pre-touch position; "Aardvark" was touched EARLIER than "Zebra".
+  const a = withWork({ name: "a", title: "Aardvark", relPath: "a.md" }, [[5, 1, "touch"]], 10 * 24);
+  const z = withWork({ name: "z", title: "Zebra", relPath: "z.md" }, [[2, 1, "touch"]], 10 * 24);
+  expect(pageWorkedMs(a, W_NOW)).toBe(pageWorkedMs(z, W_NOW));
+  expect(sortPages([a, z], "worked", W_NOW).map((p) => p.title)).toEqual(["Zebra", "Aardvark"]);
+});
+
+test("Worked on: the chip of a touched page carries the touched mark, naming the touch", () => {
+  const touched = withWork({ relPath: "t.md" }, [[3, 1, "touch"]], 10 * 24);
+  const sig = pageDateSignal(touched, "worked", W_NOW)!;
+  const chip = workedChip(workedSourceOf(touched, W_NOW, sig), sig.label);
+  expect(chip.cls).toBe(" worked touched");
+  expect(chip.title).toBe(`${sig.label} (worked)\ntouched ${localDay(new Date(wAgo(3)))} in passing — no session focused on this page`);
+  const pass = withWork({ relPath: "p.md" }, [[3, 1, "pass"]], 10 * 24);
+  const passSig = pageDateSignal(pass, "worked", W_NOW)!;
+  expect(workedChip(workedSourceOf(pass, W_NOW, passSig), passSig.label).title).toMatch(/by a maintenance pass/);
+  // A focused page carries no mark.
+  const focused = withWork({ relPath: "f.md" }, [[3, 4, "focus"]]);
+  const fSig = pageDateSignal(focused, "worked", W_NOW)!;
+  expect(workedChip(workedSourceOf(focused, W_NOW, fSig), fSig.label).cls).toBe(" worked");
+  // The article header marks it too.
+  expect(pageHeaderDates(touched, W_NOW, { ledger: true }).touched?.ms).toBe(wAgo(3));
+});
+
+test("Worked on: changedSince compares the update against the newest write of ANY kind", () => {
+  // Focused five days ago, touched yesterday, committed twelve hours ago: the
+  // commit trails the touch by half a day, so it is the same work.
+  // The ledger's summary row is the focused write (a bash-only touch has none),
+  // so only the shipped touch event says the page was written since.
+  const p = withWork({ relPath: "c.md", gitTouchedMs: wAgo(12), workedMs: wAgo(5 * 24) }, [
+    [5 * 24, 4, "focus"],
+    [24, 1, "touch"],
+  ]);
+  const src = workedSourceOf(p, W_NOW);
+  expect(src).toEqual({ kind: "worked", worked: localDay(new Date(wAgo(5 * 24))) });
+  // Without the touch, the same commit IS a change since the focused write.
+  const alone = withWork({ relPath: "c.md", gitTouchedMs: wAgo(12) }, [[5 * 24, 4, "focus"]]);
+  expect(workedSourceOf({ ...alone, workedMs: wAgo(5 * 24) }, W_NOW)).toMatchObject({ changedSince: localDay(new Date(wAgo(12))) });
+});
+
+test("Worked on: no work facts ⇒ the sort, the shown date and the chip are today's", () => {
+  const p = page({ relPath: "n.md", workedMs: wAgo(30), gitCreatedMs: wAgo(900), gitTouchedMs: wAgo(40) });
+  expect(pageWorkedMs(p, W_NOW)).toBe(wAgo(30));
+  expect(pageDateSignal(p, "worked", W_NOW)).toEqual({ ms: wAgo(30), label: localDay(new Date(wAgo(30))), kind: "worked" });
+  expect(workedSourceOf(p, W_NOW)).toEqual({ kind: "worked", worked: localDay(new Date(wAgo(30))) });
+});

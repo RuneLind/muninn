@@ -16,6 +16,7 @@ import {
   bySeriesDateDesc,
   orderSeriesGroups,
   workedDateSignal,
+  workedShownDay,
   GROUP_FAMILIES_TOGGLE_KEY,
   NO_STATUS_WORD,
   SERIES_CONTINUE_MAX,
@@ -1769,5 +1770,78 @@ describe("seriesStripOrder", () => {
     const rows = ["a", "b", "c"];
     expect(seriesStripOrder(rows)).toEqual(["c", "b", "a"]);
     expect(rows).toEqual(["a", "b", "c"]);
+  });
+});
+
+// ── The worked rung over session work facts (D14, D15, D22) ─────────────────
+
+describe("the fold and the strip under the work rung", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00Z");
+  const at = (day: string, h = 12) => new Date(`${day}T${String(h).padStart(2, "0")}:00:00`).getTime(); // local
+  const SINCE = NOW - 8 * 86_400_000;
+  /** A series member with session events: F (focus at `focus`), else T/T0. */
+  const worker = (
+    relPath: string,
+    o: { focus?: number; touch?: number; pre?: number; created?: number; workedMs?: number },
+  ): WikiListing => {
+    const events: Array<[number, number, "focus" | "touch" | "pass"]> = [];
+    if (o.focus) events.push([o.focus, 5, "focus"]);
+    if (o.touch) events.push([o.touch, 1, "touch"]);
+    events.sort((a, b) => b[0] - a[0]);
+    return page({
+      relPath,
+      series: "s",
+      ...(o.created ? { gitCreatedMs: o.created } : {}),
+      workedMs: o.workedMs ?? events[0]![0],
+      work: {
+        sinceMs: SINCE,
+        ...(o.pre ? { preMs: o.pre } : {}),
+        state: o.focus ? "F" : o.pre ? "T" : "T0",
+        ...(o.focus ? { focusMs: o.focus } : {}),
+        events,
+      },
+    });
+  };
+
+  const f = worker("plans/f.mdx", { focus: at("2026-09-18"), touch: at("2026-09-21") });
+  const t = worker("plans/t.mdx", { touch: at("2026-09-21", 9), pre: at("2026-09-10") });
+  const t0 = worker("plans/t0.mdx", { touch: at("2026-09-20"), created: at("2026-09-05") });
+
+  test("F sorts on its newest FOCUS event, T on its pre-touch position, T0 on its creation", () => {
+    expect(workedDateSignal(f, NOW)).toMatchObject({ day: "2026-09-18", rank: 4 });
+    expect(workedDateSignal(t, NOW)).toMatchObject({ day: "2026-09-10", rank: 4 });
+    expect(workedDateSignal(t0, NOW)).toMatchObject({ day: "2026-09-05", rank: 4 });
+    const fold = groupSeries([t0, t, f], [t0, t, f], NOW)[0]!.members.map((m) => m.relPath);
+    expect(fold).toEqual(["plans/f.mdx", "plans/t.mdx", "plans/t0.mdx"]);
+    // The strip is the fold reversed, and prints each member's SHOWN day: a
+    // touched member its real date, marked — out of order there, by design.
+    const strip = seriesStripOrder(groupSeries([t0, t, f], [t0, t, f], NOW)[0]!.members);
+    expect(strip.map((m) => [m.relPath, workedShownDay(m, NOW).day, !!workedShownDay(m, NOW).touched])).toEqual([
+      ["plans/t0.mdx", "2026-09-20", true],
+      ["plans/t.mdx", "2026-09-21", true],
+      ["plans/f.mdx", "2026-09-18", false],
+    ]);
+  });
+
+  test("a same-day tie on the sort instant breaks on the shown instant, then relPath", () => {
+    const a = worker("plans/a.mdx", { touch: at("2026-09-21", 8), pre: at("2026-09-10") });
+    const z = worker("plans/z.mdx", { touch: at("2026-09-21", 20), pre: at("2026-09-10") });
+    for (const rows of [[a, z], [z, a]]) {
+      expect([...rows].sort((x, y) => byWorkedDateDesc(x, y, NOW)).map((p) => p.relPath)).toEqual(["plans/z.mdx", "plans/a.mdx"]);
+    }
+  });
+
+  test("groupMonths files a touched page under its SORT month, not its touch", () => {
+    const t = worker("notes/t.mdx", { touch: at("2026-09-21"), pre: at("2026-08-20") });
+    expect(groupMonths([t], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-08"]);
+    // No work facts: today's worked label decides.
+    const bare = { ...t, work: undefined };
+    expect(groupMonths([bare], "worked", NOW).map((g) => g.key)).toEqual(["month:2026-09"]);
+  });
+
+  test("a page with no events keeps today's fold rung exactly", () => {
+    const p = page({ relPath: "plans/n.mdx", workedMs: at("2026-09-21"), status_date: "2026-09-01" });
+    expect(workedDateSignal(p, NOW)).toEqual({ ms: Date.parse("2026-09-21T00:00:00Z"), day: "2026-09-21", rank: 4 });
+    expect(workedShownDay(p, NOW)).toEqual({ day: "2026-09-21" });
   });
 });

@@ -1351,7 +1351,7 @@ guard. What belongs here is the CROSS-MODULE map:
 |---|---|
 | `worked-ledger.ts` | the one fetch, the per-root memo, the root spelling, the degrades |
 | `store.ts` | the index post-pass, `workedMs` on `WikiPageMeta`, `workedCoverage` |
-| `wiki-filter.ts` | `workedSignal` — the ONE key — plus the sort mode and the row chip |
+| `wiki-filter.ts` | `workedSignal` — the ONE ledger rung — and, over session work facts, `workedSortSignal` / `workedShownSignal`; plus the sort mode and the row chip |
 | `wiki-groups.ts` | `workedDateSignal`/`byWorkedDateDesc` (that key day-floored, falling back to `seriesDateSignal`), the fold, the Series section order |
 | `wiki-browser.ts` / `views/wiki-page.ts` | the row's hover, the reader strip, the hidden `<option>` |
 
@@ -1418,6 +1418,36 @@ last tiebreak is the relPath and so is a TOTAL order. Pinned in BOTH directions
 by `worked-order-invariant.test.ts` — identical lint findings, identical
 `computeRelated` rows and an identical HEAD with `workedMs` present and absent,
 AND a fold that really does reorder, so neither half can pass vacuously.
+
+**The focused-work rung (D14, D15, D22).** Where the sessions memo answers
+(`work` on the listing, see Work sessions below), the worked key is split in
+two, both in `wiki-filter.ts`, and every surface reads the one its question
+needs:
+
+| State | Sort instant (`workedSortSignal`) | Shown instant (`workedShownSignal`) |
+|---|---|---|
+| F — a focus event in the window | the newest focus event | the newest focus event |
+| T — only touches/pass markers, a pre-touch position (`work.preMs`) | that position | today's chain, marked `touched` |
+| T0 — as T, no position | the page's creation (`pageAddedMs`) | today's chain, marked `touched` |
+| N — no events, or no memo | today's chain (`workedSignal`) | today's chain |
+
+The sort instant feeds the rail's Worked-on sort (`pageWorkedMs`), the fold and
+Series order (`workedDateSignal`, day-floored; T and T0 take the worked rung at
+their sort instant), `groupMonths` and the find palette's rank. The shown instant
+feeds the row chip (`pageDateSignal(p, "worked")`), the article header
+(`workedSourceOf`), the reader strip's day cell (`workedShownDay`), the palette's
+`age:` filter and Related work's ages and Newest order — so Related ranks a
+touched neighbour by its touch. Ties on the sort instant break on the rung, then
+the shown instant, then relPath. A touched page sorts where it stood before the
+window (D15): falling back to today's chain put a link-touched page back on top,
+and clamping to the window start lifted older pages. Its chip, strip cell and
+header carry a dotted `touched` mark whose hover names the touch, and the
+Worked-on listing's date column and the strip read out of order at that row — a
+stated exception to D9. `changedSince` compares the update against the page's
+newest write of ANY kind (shown instant, `workedMs`, every shipped event), so a
+touch after the focused write never reads as "no session write recorded". The
+worked gate does not enter the key (state C sorts per F/T/T0/N); it gates the
+Activity score only.
 
 **ONE WORKED key, four surfaces — the fix round's own rule.** The worked rung of
 `workedDateSignal` is `wiki-filter.ts`'s `workedSignal`, day-floored, so the rail
@@ -1554,7 +1584,7 @@ stderr, since "nothing warned and the axis is just empty" is the failure the
 
 ### Work sessions (`work-sessions.ts`, `work-focus.ts`, `work`)
 
-The facts behind Work threads (plan `muninn-wiki-work-threads`): which pages each agent session of the last 8 days was ABOUT, and which sessions belong to one piece of work. PR 3 ships the data; nothing renders it yet.
+The facts behind Work threads (plan `muninn-wiki-work-threads`): which pages each agent session of the last 8 days was ABOUT, and which sessions belong to one piece of work. PR 3 ships the data; PR 4 ranks on it (the work score below, the focused-work rung in Worked-on recency above).
 
 | Where | What it owns |
 |---|---|
@@ -1569,13 +1599,21 @@ Five rules a caller can get wrong from outside:
 - **No memo ⇒ no `work` field anywhere** (D11): the listing is byte for byte the pre-PR one, which is how a cold or degraded instance stays unchanged.
 - **This wiki's identity is its REGISTERED root and registry name.** A prompt's absolute path names a page only under that root; a reader link only when its `wiki=` (or `bot=`) is the registry name. `scripts/wiki-work-replay.ts` builds on a clone and passes the registered root as `identityRoot`.
 - **Server decides membership, the browser orders** (D10): `work.events` is the shipped set (newest 12 focus events, the newest touch, the newest pass), and `raw` and thread order are computed from that set on both sides (`rawWork`, `threadScore`). A page with no in-window events carries no `work` (state N); T and T0 carry `preMs`, the pre-touch position (the newer of the ledger's pre-window write and `preGitMs`).
-- **Never series identity** (D8): `work` moves nothing yet, and when PR 4 makes it move order it must leave `seriesDateSignal`, heads and lint alone; `worked-order-invariant.test.ts` stays green.
+- **Never series identity** (D8): `work` moves ORDER and placement only — `seriesDateSignal`, heads, `lint-series.ts` and Related's identity never read it; `worked-order-invariant.test.ts` stays green.
+
+**The work score (D5, `wiki-activity-rank.ts`).** While the worked gate is open, a page with in-window events scores `max(newScore, workTerm, lateChange)`:
+
+- `workTerm = WORK_CAP × (1 − 2^(−raw / WORK_SAT))` (1.5, 2.5), over `rawWork` of the shipped events (`log2(1 + edits) × weight × 0.5^(age / 2 d)`, weight focus 1, touch 0.15, pass 0). No hub, age, type or `changedWeight` factor and no `isEdit`/`isChange` gate; the cap sits above a creation's 1.0 on purpose.
+- `lateChange` is today's change term WITHOUT substitution, counted only when the update lands `CHANGED_SINCE_MIN_MS` (24 h) or more after the page's newest event — commit lag runs past a day.
+- The gate's demotion and its "no session write on record" clause do not apply to such a page. The row's kind is `new` when the creation term wins, else `changed`; its age runs from the WINNING term (creation, the newest focus event — the newest event on a page with none — or the update), and its `why` names the sessions, edits, touches and passes. A page without events, and every page under a closed gate, keeps today's score byte for byte.
+
+The constants were tuned on the plan's named replay and checked on its held-out one: they cannot reorder two work-scored rows (the map is monotone in `raw`) nor the threads (ordered by raw), only work against creation and a late change. A closed series in Activity peeks at up to `WORK_PEEK_MAX` (5) unlifted members of the filtered listing whose `workTerm` clears `WORK_PEEK_MIN` (0.7), by that term (D12, `buildRail`'s `peekOf`, fed `RailInput.workTerm` only while the gate is open); with none, today's 3 by Activity rank. A row whose page carries events shows a four-step **work bar** on its meta line, before the group chip's slot (`pageWorkBar`); it is a fact about the page and ignores the gate. No sessions memo ⇒ no `work` ⇒ no bars, today's peek and today's ranking (D11). `e2e/wiki-activity-worked.spec.ts` measures the bar plus the chips at the 260 px rail on CI's fonts.
 
 `railInputFor` (`views/components/wiki-rail-input.ts`) is the rail's input assembly, moved out of `renderList` so the replay and the reader build the rail from one function (D20).
 
-Replay: `bun scripts/wiki-work-replay.ts --wiki <name> --at <iso>` clones the wiki's repo at the newest first-parent commit authored at or before `at`, sets each file's mtime to its last commit, injects the three ledger answers with `now = at`, drops sessions that span `at`, and prints the threads. Its kode-wiki output is NAV data and stays local (D21).
+Replay: `bun scripts/wiki-work-replay.ts --wiki <name> --at <iso> [--pos <relPath>]…` clones the wiki's repo at the newest first-parent commit authored at or before `at`, sets each file's mtime to its last commit, injects the three ledger answers with `now = at`, drops sessions that span `at`, and prints the threads, the pre-lift Activity ranking (rows 1–10 with each derivation), the Activity section `buildRail` draws, and the Worked-on top 10 plus each `--pos` page's position. Its kode-wiki output is NAV data and stays local (D21).
 
-Acceptance: `work-focus.test.ts`, `work-sessions.test.ts`, `store-worked-kick.test.ts` (the nais gate), `routes/wiki-work-routes.test.ts` (the header and the rail row agree; related rows carry none) and `views/components/wiki-rail-input.test.ts` (byte-identical rail).
+Acceptance: `work-focus.test.ts`, `work-sessions.test.ts`, `store-worked-kick.test.ts` (the nais gate), `routes/wiki-work-routes.test.ts` (the header and the rail row agree; related rows carry none), `views/components/wiki-rail-input.test.ts` (byte-identical rail), `views/components/wiki-work-states.test.ts` (the state table row by row, built from `computeWorkFocus`), the D5/D12/D22 cases in `wiki-activity-rank.test.ts`, `wiki-filter.test.ts`, `wiki-groups.test.ts` and `wiki-recents.test.ts`, and `e2e/wiki-activity-worked.spec.ts` + `e2e/wiki-worked-recency.spec.ts` (whose fake ledgers answer the sessions form).
 
 ### Lint check 8 — the series checks, and the only lint that proposes a fix
 

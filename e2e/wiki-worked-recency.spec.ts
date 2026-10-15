@@ -78,6 +78,24 @@ const MARK = "wrmark";
 const MARK_WORKED = "plans/worked.md";
 const MARK_CHANGED = "plans/changed.md";
 const MARK_NONE = "plans/none.md";
+/**
+ * Two pages with SESSION events (the sessions form, plan
+ * `muninn-wiki-work-threads` PR 4): one a session FOCUSED on three days ago,
+ * one a session only TOUCHED two hours ago, whose last write before the window
+ * was 2026-09-01. Both in one series, so the fold and the strip read them too.
+ * Settled like the rest, so the gate stays shut and Activity claims neither.
+ */
+const TOUCH = "wrtouch";
+const TOUCH_FOCUSED = "plans/focused.md";
+const TOUCH_TOUCHED = "plans/touched.md";
+/** The same pair outside any series, so the rail SORT itself is on screen (a
+ *  series member renders inside its closed fold). */
+const SOLO_FOCUSED = "notes/focused.md";
+const SOLO_TOUCHED = "notes/touched.md";
+const NOW = Date.now();
+const FOCUS_AT = NOW - 3 * 86_400_000;
+const TOUCH_AT = NOW - 2 * 3_600_000;
+const TOUCH_PRE = Date.parse("2026-09-01T12:00:00Z");
 
 const roots: Record<string, string> = {};
 let server: ChildProcess | undefined;
@@ -203,6 +221,17 @@ function ledgerAnswer(root: string): { status: number; body: string } | "oversiz
       ]),
     };
   }
+  if (root === roots[TOUCH]) {
+    return {
+      status: 200,
+      body: rows([
+        [TOUCH_FOCUSED, FOCUS_AT],
+        [TOUCH_TOUCHED, TOUCH_AT],
+        [SOLO_FOCUSED, FOCUS_AT],
+        [SOLO_TOUCHED, TOUCH_AT],
+      ]),
+    };
+  }
   if (root === roots[FAIL]) return { status: 500, body: JSON.stringify({ error: "ledger down" }) };
   if (root === roots[BIG]) return "oversized";
   if (root === roots[RAW]) {
@@ -224,6 +253,56 @@ function ledgerAnswer(root: string): { status: number; body: string } | "oversiz
   return { status: 200, body: rows([]) };
 }
 
+/** One session of the sessions form, writing `p` once at `at`. */
+function sessionRow(id: string, p: string, edits: number, at: number, named: boolean) {
+  return {
+    id,
+    provider: "claude",
+    title: `session ${id}`,
+    first: at - 60_000,
+    last: at,
+    bulk: false,
+    text: { from: "prompt", paths: named ? [p] : [], links: [], files: [] },
+    files: [{ p, edits, firstMs: at - 60_000, lastMs: at }],
+  };
+}
+
+/**
+ * The work-sessions memo's two requests (`sessions=1`, and the summary form at
+ * `until=`): the TOUCH wiki gets real sessions; every other well-behaved wiki
+ * an empty window, so its pages carry no `work` and read exactly as before. The
+ * three degrade wikis keep degrading on every form.
+ */
+function workAnswer(root: string, url: URL): { status: number; body: string } | "oversized" | null {
+  const until = url.searchParams.get("until");
+  const sessions = url.searchParams.get("sessions") === "1";
+  if (!sessions && until === null) return null;
+  if (root === roots[FAIL] || root === roots[BIG] || root === roots[RAW]) return ledgerAnswer(root);
+  if (sessions) {
+    const rows =
+      root === roots[TOUCH]
+        ? [
+            sessionRow("focus", TOUCH_FOCUSED, 6, FOCUS_AT, true),
+            sessionRow("touch", TOUCH_TOUCHED, 1, TOUCH_AT, false),
+            sessionRow("solo-focus", SOLO_FOCUSED, 30, FOCUS_AT, true),
+            sessionRow("solo-touch", SOLO_TOUCHED, 1, TOUCH_AT, false),
+          ]
+        : [];
+    return { status: 200, body: JSON.stringify({ form: "sessions", root, sessions: rows, truncated: false }) };
+  }
+  const pre =
+    root === roots[TOUCH]
+      ? [
+          { p: TOUCH_TOUCHED, w: TOUCH_PRE, s: 1 },
+          { p: SOLO_TOUCHED, w: TOUCH_PRE, s: 1 },
+        ]
+      : [];
+  return {
+    status: 200,
+    body: JSON.stringify({ root, pages: pre, pageCount: pre.length, bulk: 10, limit: 5000, truncated: false, until: Number(until) }),
+  };
+}
+
 /** The fake claude-usage. It answers `/api/files` and 404s everything else, so a
  *  leg this spec did not mean to drive fails loudly. */
 function startLedger(): Promise<Server> {
@@ -236,7 +315,8 @@ function startLedger(): Promise<Server> {
       res.end(JSON.stringify({ error: "unexpected path", path: url.pathname }));
       return;
     }
-    const answer = ledgerAnswer(url.searchParams.get("root") ?? "");
+    const root = url.searchParams.get("root") ?? "";
+    const answer = workAnswer(root, url) ?? ledgerAnswer(root);
     if (answer === "oversized") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(oversized);
@@ -334,6 +414,13 @@ test.beforeAll(async () => {
     );
   }
 
+  const touch = await makeRoot(TOUCH);
+  await writeFile(path.join(touch, TOUCH_FOCUSED), fixture("Focused", ["series: wt", "series_label: Work thread"]), "utf8");
+  await writeFile(path.join(touch, TOUCH_TOUCHED), fixture("Touched", ["series: wt"]), "utf8");
+  await mkdir(path.join(touch, "notes"), { recursive: true });
+  await writeFile(path.join(touch, SOLO_FOCUSED), fixture("Solo focused"), "utf8");
+  await writeFile(path.join(touch, SOLO_TOUCHED), fixture("Solo touched"), "utf8");
+
   for (const name of [BULK, FAIL, BIG, RAW]) {
     const root = await makeRoot(name);
     await writeFile(path.join(root, "plans/a.md"), fixture("A"), "utf8");
@@ -380,13 +467,16 @@ test.beforeAll(async () => {
   // …and then wait for the boot kick's answer to reach a REBUILT index. The
   // memo is refreshed in the background and never awaited, so "the server is
   // up" and "the axis is warm" are two different instants.
-  for (const wiki of [MAIN, MARK]) {
+  for (const wiki of [MAIN, MARK, TOUCH]) {
     const warm = Date.now() + 20_000;
     for (;;) {
       const body = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`)).json()) as {
         workedCoverage?: { matched: number };
+        pages?: Array<{ work?: unknown }>;
       };
-      if ((body.workedCoverage?.matched ?? 0) > 0) break;
+      // The TOUCH wiki also waits for its work facts (the second memo).
+      const workWarm = wiki !== TOUCH || (body.pages ?? []).some((p) => p.work);
+      if ((body.workedCoverage?.matched ?? 0) > 0 && workWarm) break;
       if (Date.now() > warm) throw new Error(`the worked ledger memo never warmed for ${wiki}`);
       await new Promise((r) => setTimeout(r, 300));
     }
@@ -611,6 +701,58 @@ test.describe("Wiki reader: worked-on recency", () => {
     // mike-b was worked on 2026-05-01 and mike-a on 09-21 — oldest first, and
     // neither is the shared `updated:` every fixture page carries.
     expect(await dates.allTextContents()).toEqual(["2026-05-01", "2026-09-21"]);
+  });
+
+  test("PR 4 — a page only TOUCHED sorts at its pre-touch position, below the page a session focused on", async ({
+    page,
+  }) => {
+    await openReader(page, TOUCH);
+    await expect(page.locator("#wikiSort")).toHaveValue("worked");
+    // Today's chain would put the touch (two hours ago) first.
+    // The two series pages sit in their closed fold; the solo pair is the sort.
+    expect((await railOrder(page)).filter((r) => r?.startsWith("notes/"))).toEqual([SOLO_FOCUSED, SOLO_TOUCHED]);
+    const metaOf = (rel: string) => page.locator(`.wiki-list-item[data-relpath="${rel}"] .wiki-list-meta`);
+    const touchDay = new Date(TOUCH_AT).toISOString().slice(0, 10);
+    // The chip shows the REAL date, marked: the touch, named on hover.
+    await expect(metaOf(SOLO_TOUCHED)).toHaveClass(/\bworked\b.*\btouched\b/);
+    await expect(metaOf(SOLO_TOUCHED)).toHaveAttribute(
+      "title",
+      `${touchDay} (worked)\ntouched ${touchDay} in passing — no session focused on this page`,
+    );
+    await expect(metaOf(SOLO_FOCUSED)).not.toHaveClass(/\btouched\b/);
+    expect(
+      await metaOf(SOLO_TOUCHED).evaluate((e) => {
+        const cs = getComputedStyle(e);
+        return `${cs.textDecorationLine} ${cs.textDecorationStyle}`;
+      }),
+    ).toBe("underline dotted");
+    // The work bar states a fact about the page, gate or no gate: both rows
+    // carry one, the focused page's fuller.
+    const level = (rel: string) =>
+      page.locator(`.wiki-list-item[data-relpath="${rel}"] .wiki-work-bar`).getAttribute("data-work-level");
+    expect(Number(await level(SOLO_FOCUSED))).toBeGreaterThan(Number(await level(SOLO_TOUCHED)));
+  });
+
+  test("PR 4 — the fold sorts a touched member at its position; the strip prints its touch, marked", async ({ page }) => {
+    await openReader(page, TOUCH);
+    await page.goto(`${BASE}/wiki?wiki=${TOUCH}&relPath=${encodeURIComponent(TOUCH_FOCUSED)}`);
+    const steps = page.locator(".wiki-series-head .wiki-series-tl .wiki-series-step");
+    await expect(steps).toHaveCount(2);
+    // Oldest first: the touched page's pre-touch position (09-01) is older than
+    // the focus three days ago — and its cell prints the touch, out of order.
+    expect(await steps.locator(".wiki-series-step-title").allTextContents()).toEqual(["Touched", "Focused"]);
+    const cells = steps.locator(".wiki-series-step-date");
+    expect(await cells.allTextContents()).toEqual([
+      new Date(TOUCH_AT).toISOString().slice(0, 10),
+      new Date(FOCUS_AT).toISOString().slice(0, 10),
+    ]);
+    await expect(cells.nth(0)).toHaveClass(/\btouched\b/);
+    await expect(cells.nth(1)).not.toHaveClass(/\btouched\b/);
+    // The article header of the touched page says the same.
+    await page.goto(`${BASE}/wiki?wiki=${TOUCH}&relPath=${encodeURIComponent(TOUCH_TOUCHED)}`);
+    await expect(page.locator("#wikiBreadcrumb .wiki-bc-touched")).toHaveText(
+      `touched ${new Date(TOUCH_AT).toISOString().slice(0, 10)}`,
+    );
   });
 
   test("acceptance 4 — three ledger degrades: the listing renders and each warns", async ({

@@ -8,7 +8,7 @@
  */
 
 import { railPool } from "./wiki-cull-view.ts";
-import { rankActivity, type ActivityWeights, type WorkedGate } from "./wiki-activity-rank.ts";
+import { pageWorkTerm, rankActivity, type ActivityWeights, type WorkedGate } from "./wiki-activity-rank.ts";
 import { filterPages, isRecencySort, sortPages, type WikiFilters, type WikiListing, type WikiSortMode } from "./wiki-filter.ts";
 import {
   groupSeries,
@@ -92,6 +92,9 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
     // Ranked over the FILTERED pages and on the same anchored instant as the
     // sort; skipped under a query, where `buildRail` renders no sections.
     activity: railSectionsVisible(filters) ? rankActivity(rows, wiki.activityWeights, now, wiki.workedGate) : [],
+    // The series peek's work term (D12), only while the gate lets work score —
+    // a closed gate keeps today's peek as it keeps today's ranking.
+    ...(wiki.workedGate?.open ? { workTerm: (p: WikiListing) => pageWorkTerm(p, now) } : {}),
     groups,
     seriesGroups,
     openFolds: viewer.openFolds,

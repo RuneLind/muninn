@@ -25,7 +25,7 @@
  */
 
 import { displayTitleOf, isMetaPage, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
-import type { ActivityRow } from "./wiki-activity-rank.ts";
+import { WORK_PEEK_MAX, WORK_PEEK_MIN, type ActivityRow } from "./wiki-activity-rank.ts";
 import {
   CLOSED_FOLD_PREFIX,
   closedFoldKey,
@@ -766,6 +766,12 @@ export interface RailInput {
    * exactly as it narrows Pinned.
    */
   activity?: ActivityRow[];
+  /**
+   * A page's work term (`pageWorkTerm`), handed in only while the wiki's worked
+   * gate is open — the series peek's input (D12). Absent ⇒ today's peek, the
+   * members Activity ranked.
+   */
+  workTerm?: (p: WikiListing) => number;
   /** Recency sort modes only: `sortPages` has sunk the bookkeeping pages
    *  (index/log/CLAUDE) to the tail, so the remainder's trailing meta rows get
    *  a `Bookkeeping` header. Without it the date column jumps back to today at
@@ -1334,10 +1340,27 @@ export function buildRail(input: RailInput): RailModel {
   }
   /** The ranked members a CLOSED series row in Activity shows under it — never
    *  one a pin lifted to `Pinned`, which is on screen there already. */
-  const peekOf = (foldKey: string): WikiListing[] =>
-    (activitySeries.get(foldKey)?.ranked ?? [])
-      .filter((m) => !sectionLifted.has(normalizeRel(m.relPath)))
-      .slice(0, SERIES_PEEK_MAX);
+  const peekOf = (foldKey: string): WikiListing[] => {
+    const entry = activitySeries.get(foldKey);
+    if (!entry) return [];
+    // D12: with the work term on (an open worked gate), the members a session
+    // WORKED on lead the peek — every unlifted member of the filtered listing
+    // whose term clears `WORK_PEEK_MIN`, by that term, up to `WORK_PEEK_MAX`.
+    // A member Activity never ranked can be one of them. With none, today's
+    // peek: the ranked members, in rank order.
+    const workTerm = input.workTerm;
+    if (workTerm) {
+      const byWork = unlifted(entry.group)
+        .filter((m) => !m.culled)
+        .map((m) => ({ m, t: workTerm(m) }))
+        .filter((x) => x.t >= WORK_PEEK_MIN)
+        .sort((a, b) => b.t - a.t || normalizeRel(a.m.relPath).localeCompare(normalizeRel(b.m.relPath)))
+        .slice(0, WORK_PEEK_MAX)
+        .map((x) => x.m);
+      if (byWork.length) return byWork;
+    }
+    return entry.ranked.filter((m) => !sectionLifted.has(normalizeRel(m.relPath))).slice(0, SERIES_PEEK_MAX);
+  };
 
   // ── The groups' open state, decided AFTER the lift ────────────────────
   // ⚠️ Computed HERE, above every emit, because the series rows emit in Activity
@@ -1404,8 +1427,9 @@ export function buildRail(input: RailInput): RailModel {
    * and the rest (drawn in their own block below).
    *
    * An OPEN series draws every member, newest first, then its ghosts. A CLOSED
-   * series in Activity draws the members Activity ranked (up to
-   * `SERIES_PEEK_MAX`, in rank order) and a `+N more` row for the rest — the
+   * series in Activity draws its peek (`peekOf`: the members a session worked
+   * on, by work term, else the ones Activity ranked, up to `SERIES_PEEK_MAX`
+   * in rank order) and a `+N more` row for the rest — the
    * newest work is on screen without opening anything, and the row above says
    * which piece of work it belongs to.
    */
