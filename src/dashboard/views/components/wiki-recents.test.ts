@@ -3289,6 +3289,34 @@ describe("buildRail — work threads", () => {
     expect(rows(broken.entries).filter((r) => r.thread?.name === "plans/d.mdx").map((r) => r.page.relPath)).toEqual(["plans/d.mdx"]);
   });
 
+  test("a card header counts the rows it holds: drawn when open, what opening it would draw when closed", () => {
+    const pages = (m: ReturnType<typeof build>) =>
+      (m.entries.filter((e) => e.kind === "thread") as Array<Extract<RailEntry, { kind: "thread" }>>).map((e) => [e.card.key, e.pages]);
+    expect(pages(build({ threads: [card("plans/c.mdx", [C, A]), card("plans/d.mdx", [D, B], { open: false })] }))).toEqual([
+      ["plans/c.mdx", 2],
+      ["plans/d.mdx", 2],
+    ]);
+    // A page an earlier OPEN card holds is drawn there, so neither the later
+    // open card nor a closed one counts it.
+    expect(
+      pages(build({ threads: [card("plans/c.mdx", [HUB]), card("plans/d.mdx", [HUB, D]), card("plans/a.mdx", [HUB, A], { open: false })] })),
+    ).toEqual([
+      ["plans/c.mdx", 1],
+      ["plans/d.mdx", 1],
+      ["plans/a.mdx", 1],
+    ]);
+    // …nor does a closed card ABOVE the open card that will draw it.
+    expect(pages(build({ threads: [card("plans/a.mdx", [HUB, A], { open: false }), card("plans/c.mdx", [HUB])] }))).toEqual([
+      ["plans/a.mdx", 1],
+      ["plans/c.mdx", 1],
+    ]);
+    // A page off the facets is not a row either.
+    const facet = [C, D];
+    expect(pages(build({ filtered: facet, facetOnly: facet, seriesGroups: groupSeries(facet), threads: [card("plans/c.mdx", [C, A], { open: false })] }))).toEqual([
+      ["plans/c.mdx", 1],
+    ]);
+  });
+
   test("a query renders no section, whatever cards are handed in", () => {
     const q = { ...INERT, q: "plans" };
     const m = build({ filters: q, threads: [card("plans/c.mdx", [C])] });

@@ -1625,7 +1625,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
   rail.entries.forEach((entry: RailEntry) => {
     // A WORK-THREAD card's header and its `touched:` line (`wiki-thread-view.ts`).
     if (entry.kind === "thread") {
-      html += threadCardHeaderHtml(entry.card, entry.folded, now, movesPersonal());
+      html += threadCardHeaderHtml(entry.card, entry.folded, now, movesPersonal(), entry.pages);
       return;
     }
     if (entry.kind === "touched") {

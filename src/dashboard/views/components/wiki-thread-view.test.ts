@@ -8,6 +8,7 @@ import {
   railGhostHtml,
   railGhostNote,
   threadCardHeaderHtml,
+  threadDiscloseLabel,
   threadInstantLabel,
   threadMetaLine,
   threadSpanLabel,
@@ -130,11 +131,16 @@ describe("threadCardHeaderHtml", () => {
     expect(fold).not.toContain("aria-label");
     // Two lines, `N sessions · ✋ M` over `first → last`; each part its own
     // span, a space between parts so a narrow rail breaks only there.
+    // A visually hidden ` · ` between the name, the two lines and the
+    // disclose line, so a screen reader hears four parts, not one run.
     expect(html).toContain(
-      '<small class="wiki-thread-meta"><span class="wiki-thread-line wiki-thread-tally">' +
+      '<span class="wiki-thread-name">Alpha &lt;work&gt;</span><span class="wiki-sr-only"> · </span>' +
+        '<small class="wiki-thread-meta"><span class="wiki-thread-line wiki-thread-tally">' +
         '<span class="wiki-thread-count">2 sessions</span> <span class="wiki-thread-moves">· ✋ 18</span></span>' +
+        '<span class="wiki-sr-only"> · </span>' +
         ' <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">12.10 15:04</span>' +
-        ' <span class="wiki-thread-to">→ yesterday 21:26</span></span></small>',
+        ' <span class="wiki-thread-to">→ yesterday 21:26</span></span></small><span class="wiki-sr-only"> · </span>' +
+        '<span class="wiki-thread-disclose"><span aria-hidden="true">▾ </span>Hide pages</span>',
     );
     // No ✋ (hidden where it is not personal): the tally line is the count alone.
     expect(threadCardHeaderHtml(card(), false, NOW, false)).toContain(
@@ -147,6 +153,24 @@ describe("threadCardHeaderHtml", () => {
     expect(title).not.toContain("✋");
     expect(title).toContain("mon 12.10 15:04 → mon 12.10 16:00");
     expect(title).toContain("yesterday 20:00 → yesterday 21:26");
+  });
+});
+
+describe("the header says it is a thread and what a click does", () => {
+  test("«Show N pages» closed, «Hide …» open; the count is the rail entry's, else the card's focus pages", () => {
+    expect([0, 1, 3].map((n) => threadDiscloseLabel(true, n))).toEqual(["Show pages", "Show 1 page", "Show 3 pages"]);
+    expect([0, 1, 3].map((n) => threadDiscloseLabel(false, n))).toEqual(["Hide pages", "Hide page", "Hide 3 pages"]);
+    const disclose = (html: string) => /<span class="wiki-thread-disclose">(.*?)<\/span><\/span>/.exec(html)![1];
+    expect(disclose(threadCardHeaderHtml(card(), true, NOW, true, 2))).toBe('<span aria-hidden="true">▸ </span>Show 2 pages');
+    expect(disclose(threadCardHeaderHtml(card(), false, NOW, true, 2))).toBe('<span aria-hidden="true">▾ </span>Hide 2 pages');
+    const focus = [{ relPath: "plans/a.mdx" }, { relPath: "plans/b.mdx" }] as WikiListing[];
+    expect(disclose(threadCardHeaderHtml(card({ focus }), true, NOW, true))).toContain("Show 2 pages");
+  });
+  test("a thread glyph, hidden from the name, takes the caret's slot", () => {
+    const html = threadCardHeaderHtml(card(), true, NOW, true);
+    expect(html).toContain('<svg class="wiki-thread-glyph"');
+    expect(/<svg class="wiki-thread-glyph"[^>]*aria-hidden="true"/.test(html)).toBe(true);
+    expect(html).not.toContain("wiki-fold-caret");
   });
 });
 

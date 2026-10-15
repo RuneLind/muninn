@@ -859,6 +859,10 @@ export type RailEntry =
       foldKey: string;
       toggleKey: string;
       folded: boolean;
+      /** The rows the card holds: an open card's rows as drawn, a closed
+       *  card's as opening it would draw them (its focus pages no earlier
+       *  open card holds). The header's «Show N pages» line reads it. */
+      pages: number;
     }
   | {
       /** An open card's one `touched:` line — links, not rows, so `shown`
@@ -1746,13 +1750,21 @@ export function buildRail(input: RailInput): RailModel {
     entries.push({ kind: "header", section: "threads", label: "Work threads" });
     const created = (c: RailThreadCard) => new Set(c.created.map(normalizeRel));
     for (const c of cards) {
-      entries.push({ kind: "thread", section: "threads", card: c, foldKey: c.foldKey, toggleKey: c.toggleKey, folded: !c.open });
-      if (!c.open) continue;
+      const header = { kind: "thread" as const, section: "threads" as const, card: c, foldKey: c.foldKey, toggleKey: c.toggleKey, folded: !c.open, pages: 0 };
+      entries.push(header);
+      if (!c.open) {
+        header.pages = c.focus.filter((p) => {
+          const k = normalizeRel(p.relPath);
+          return byRel.has(k) && !claimed.has(k) && !threadLifted.has(k);
+        }).length;
+        continue;
+      }
       const fresh = created(c);
       for (const p of c.focus) {
         const k = normalizeRel(p.relPath);
         if (threadLifted.get(k) !== c || claimed.has(k)) continue;
         emitRow(p, "threads", { thread: c.name, created: fresh.has(k) });
+        header.pages++;
       }
       if (c.touched.length) entries.push({ kind: "touched", section: "threads", foldKey: c.foldKey, pages: c.touched });
     }
