@@ -859,9 +859,11 @@ export type RailEntry =
       foldKey: string;
       toggleKey: string;
       folded: boolean;
-      /** The rows the card holds: an open card's rows as drawn, a closed
-       *  card's as opening it would draw them (its focus pages no earlier
-       *  open card holds). The header's «Show N pages» line reads it. */
+      /** The FOCUS pages the card draws — an open card's focus rows as
+       *  drawn (an expanded attachment under one is part of its page, not
+       *  counted), a closed card's as opening it would draw them: its focus
+       *  pages no open card ABOVE it holds, the first card winning a shared
+       *  page. The header's «Show N pages» line reads it. */
       pages: number;
     }
   | {
@@ -1749,16 +1751,16 @@ export function buildRail(input: RailInput): RailModel {
   if (grouped && cards.length) {
     entries.push({ kind: "header", section: "threads", label: "Work threads" });
     const created = (c: RailThreadCard) => new Set(c.created.map(normalizeRel));
+    /** Pages the open cards drawn so far hold. */
+    const heldAbove = new Set<string>();
     for (const c of cards) {
       const header = { kind: "thread" as const, section: "threads" as const, card: c, foldKey: c.foldKey, toggleKey: c.toggleKey, folded: !c.open, pages: 0 };
       entries.push(header);
       if (!c.open) {
-        header.pages = c.focus.filter((p) => {
-          const k = normalizeRel(p.relPath);
-          return byRel.has(k) && !claimed.has(k) && !threadLifted.has(k);
-        }).length;
+        header.pages = new Set(c.focus.map((p) => normalizeRel(p.relPath)).filter((k) => byRel.has(k) && !heldAbove.has(k))).size;
         continue;
       }
+      for (const [k, owner] of threadLifted) if (owner === c) heldAbove.add(k);
       const fresh = created(c);
       for (const p of c.focus) {
         const k = normalizeRel(p.relPath);

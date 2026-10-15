@@ -973,6 +973,16 @@ export async function renderWikiPage(opts?: {
       content: ""; position: absolute; left: 0; top: 0; bottom: 0;
       width: 1px; background: var(--accent); pointer-events: none;
     }
+    /* ⌖ Show in list on a card row: the flash animates box-shadow, so it
+       ends on the card's sides instead of wiping them for 1.2 s. */
+    .wiki-list-item[data-section="threads"].reveal-flash { animation-name: wiki-reveal-flash-thread; }
+    @keyframes wiki-reveal-flash-thread {
+      from { box-shadow: inset 0 0 0 2px var(--accent); }
+      to { box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent); }
+    }
+    /* On the row that closes the card, the straight rule stops above the
+       rounded corner, which the inset shadow draws. */
+    .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 8px; }
     /* A card's newest series plan: its dot is centred ON the card's edge. */
     .wiki-list-item.latest.thread-row:not(.wiki-series-cont)::after { left: -3.5px; }
     .wiki-thread-touched { padding: 1px 10px 6px 32px; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
@@ -980,8 +990,9 @@ export async function renderWikiPage(opts?: {
     .wiki-thread-link:hover, .wiki-thread-link:focus-visible { text-decoration: underline; }
     .wiki-thread-sep { color: var(--text-muted); }
     /* Forced colours paint fills as Canvas and drop shadows: the header keeps
-       its real border, the rows keep the ::before rule, and the open header
-       takes a thicker border so open still differs from closed. */
+       its real border (2 px when open, so open still differs from closed) and
+       the focus rows keep the ::before rule; an attachment child row and the
+       touched line lose their outline there. */
     @media (forced-colors: active) {
       .wiki-list-item.thread-row::before { background: CanvasText; }
       .wiki-thread-card.open { border-width: 2px; border-bottom-width: 1px; }

@@ -581,9 +581,13 @@ test.describe("Wiki rail: Work threads", () => {
       expect(g.cardTop, at).toEqual([g.accent, g.border]);
       expect([g.rail, "rgba(0, 0, 0, 0)"], `the open header is tinted, ${at}`).not.toContain(g.cardBg[0]);
       expect(g.cardBg[1], `a closed header is not, ${at}`).toBe("rgba(0, 0, 0, 0)");
-      // Each row carries the accent sides; the touched line closes the card.
+      // Each row carries the accent sides and does NOT close the card; the
+      // touched line closes it.
       expect(g.rowShadows, at).toHaveLength(2);
-      for (const sh of g.rowShadows) expect(sh, at).toContain(`${g.accent} 1px 0px 0px 0px inset`);
+      for (const sh of g.rowShadows) {
+        expect(sh, at).toContain(`${g.accent} 1px 0px 0px 0px inset`);
+        expect(sh, at).not.toContain("0px -1px 0px 0px inset");
+      }
       expect(g.touchedShadow, at).toContain(`${g.accent} 0px -1px 0px 0px inset`);
       await expect(cards(page).locator(".wiki-thread-disclose")).toHaveText(["▾ Hide 2 pages", "▸ Show 1 page"]);
       // Open beta: its header turns accent and says Hide; its row closes the card.
@@ -593,10 +597,34 @@ test.describe("Wiki rail: Work threads", () => {
       const after = await look();
       expect(after.cardTop, `${scheme}: ${JSON.stringify(after)}`).toEqual([after.accent, after.accent]);
       const beta = page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${BETA}"]`);
-      expect(await beta.evaluate((e) => getComputedStyle(e).boxShadow)).toContain(`${after.accent} 0px -1px 0px 0px inset`);
+      const close = await beta.evaluate((e) => ({
+        shadow: getComputedStyle(e).boxShadow,
+        radius: parseFloat(getComputedStyle(e).borderBottomLeftRadius),
+        ruleBottom: parseFloat(getComputedStyle(e, "::before").bottom),
+      }));
+      expect(close.shadow).toContain(`${after.accent} 0px -1px 0px 0px inset`);
+      // The straight ::before edge stops above the rounded corner, so no
+      // square spur pokes out past the curve.
+      expect(close.ruleBottom, JSON.stringify(close)).toBeGreaterThanOrEqual(close.radius);
       // Fold state persists: close beta again for the next pass.
       await cards(page).nth(1).locator(".wiki-thread-fold").click();
     }
+  });
+
+  test("the ⌖ reveal flash on a card row keeps the card's outline sides", async ({ page }) => {
+    await openReader(page, THREADS);
+    const row = rowsIn(page, "threads").nth(0);
+    const shadow = await row.evaluate((el) => {
+      el.classList.add("reveal-flash");
+      const a = el.getAnimations()[0]!;
+      a.pause();
+      a.currentTime = 1150; // near the end of the 1.2 s flash
+      return getComputedStyle(el).boxShadow;
+    });
+    // Interpolated offsets (0.997px), so read the x offset of each shadow.
+    const xs = [...shadow.matchAll(/(-?[\d.]+)px -?[\d.]+px -?[\d.]+px -?[\d.]+px inset/g)].map((m) => parseFloat(m[1]!));
+    expect(Math.max(...xs), shadow).toBeGreaterThan(0.9);
+    expect(Math.min(...xs), shadow).toBeLessThan(-0.9);
   });
 
   test("the series shows the lifted members as ghosts reading 'in a work thread above'; closing the card hands them back", async ({
