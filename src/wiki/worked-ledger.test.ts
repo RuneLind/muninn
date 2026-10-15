@@ -822,9 +822,16 @@ describe("no index build waives the ledger's back-off", () => {
     // so a re-coupling cannot pass on a slow runner.
     const { buildWikiIndex, getWikiIndex } = await import("./store.ts");
     let hits = 0;
+    let sessionHits = 0;
     const server = Bun.serve({
       port: 0,
-      fetch: () => {
+      fetch: (req) => {
+        // The work-sessions memo asks the same host (`sessions=1`, and the
+        // summary form with `until=`); it is counted apart and backed off too.
+        if (/sessions=1|until=/.test(req.url)) {
+          sessionHits += 1;
+          return new Response("nope", { status: 500 });
+        }
         hits += 1;
         return new Response("nope", { status: 500 });
       },
@@ -836,7 +843,7 @@ describe("no index build waives the ledger's back-off", () => {
       await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
 
       await buildWikiIndex(root);
-      await until(() => hits >= 1);
+      await until(() => hits >= 1 && sessionHits >= 2);
       expect(hits).toBe(1);
 
       // Inside the TTL, with the failure backed off: a plain rebuild, a write's
@@ -848,6 +855,7 @@ describe("no index build waives the ledger's back-off", () => {
       // 500 ms is ~60× the positive half (median 1 ms, max 8 ms measured).
       await until(() => hits >= 2, 500);
       expect(hits).toBe(1);
+      expect(sessionHits).toBe(2);
     } finally {
       server.stop(true);
       if (prev === undefined) delete process.env.CLAUDE_USAGE_URL;

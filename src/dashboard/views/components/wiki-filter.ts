@@ -10,6 +10,7 @@
 import { relationsCount, type IssueRelation } from "../../../wiki/trackers/types.ts";
 import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 import { parseIssueRoot } from "../../../wiki/graph-types.ts";
+import type { PageWork } from "../../../wiki/work-focus.ts";
 
 /**
  * A wiki page's type. Independent client-safe copy of the store's alias (this file
@@ -111,6 +112,8 @@ export interface WikiListing {
    *  on an instance pointed at no claude-usage — so a consumer falls back per page
    *  rather than treating absence as "old". */
   workedMs?: number;
+  /** Session work facts (`src/wiki/work-focus.ts`); absent with no sessions memo. */
+  work?: PageWork;
   /** True when git reports the file dirty (modified / untracked). The one condition
    *  under which `mtimeMs` still carries information rather than being a checkout or
    *  sweep artifact. Absent (never `false`) otherwise. */

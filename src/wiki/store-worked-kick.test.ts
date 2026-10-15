@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetWikiCacheForTest, getWikiIndex } from "./store.ts";
 import { __resetWorkedLedgerForTest } from "./worked-ledger.ts";
+import { __resetWorkSessionsForTest } from "./work-sessions.ts";
 
 /**
  * The index build's worked-ledger kick is gated on the wiki tool surface: under
@@ -21,11 +22,12 @@ describe("buildWikiIndex's worked-ledger kick", () => {
     root = await mkdtemp(path.join(tmpdir(), "wiki-kick-"));
     await Bun.write(path.join(root, "A.md"), "# A\n");
     hits = [];
-    server = Bun.serve({ port: 0, fetch: (req) => { hits.push(new URL(req.url).pathname); return Response.json({ rows: [] }); } });
+    server = Bun.serve({ port: 0, fetch: (req) => { hits.push(new URL(req.url).pathname + new URL(req.url).search); return Response.json({ rows: [] }); } });
     for (const k of ["CLAUDE_USAGE_URL", "MUNINN_PROFILE"]) saved[k] = process.env[k];
     process.env.CLAUDE_USAGE_URL = `http://127.0.0.1:${server.port}`;
     __resetWikiCacheForTest();
     __resetWorkedLedgerForTest();
+    __resetWorkSessionsForTest();
   });
 
   afterEach(async () => {
@@ -36,6 +38,7 @@ describe("buildWikiIndex's worked-ledger kick", () => {
     server.stop(true);
     __resetWikiCacheForTest();
     __resetWorkedLedgerForTest();
+    __resetWorkSessionsForTest();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -49,7 +52,10 @@ describe("buildWikiIndex's worked-ledger kick", () => {
   test("default (control): an index build asks claude-usage", async () => {
     delete process.env.MUNINN_PROFILE;
     expect(await getWikiIndex({ root })).not.toBeNull();
-    for (let i = 0; i < 30 && hits.length === 0; i++) await Bun.sleep(10);
+    for (let i = 0; i < 30 && hits.length < 3; i++) await Bun.sleep(10);
     expect(hits.length).toBeGreaterThan(0);
+    // The work-sessions memo rides the same gate: both of its forms are asked.
+    expect(hits.some((h) => h.includes("sessions=1"))).toBe(true);
+    expect(hits.some((h) => h.includes("summary=1") && h.includes("until="))).toBe(true);
   });
 });

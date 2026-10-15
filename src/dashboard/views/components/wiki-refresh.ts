@@ -22,6 +22,7 @@
  */
 
 import type { ListingTracker, WikiListing } from "./wiki-filter.ts";
+import type { IndexWork } from "../../../wiki/work-focus.ts";
 
 /** The `/api/wiki/pages` payload (mirrors `src/dashboard/routes/wiki-routes.ts`).
  *  It lives here rather than in `wiki-browser.ts` so this module can name it
@@ -66,6 +67,8 @@ export interface WikiPagesResponse {
    *  `asOfMs` is when the ledger answered; optional because an older server
    *  sends none, and then Activity demotes nothing. */
   workedCoverage?: { matched: number; total: number; returned: number; asOfMs?: number };
+  /** The work threads (`src/wiki/work-focus.ts`); absent with no sessions memo. */
+  work?: IndexWork;
   /** The publish script's path on a wiki that offers ⇪ Felles; absent elsewhere. */
   fellesPublish?: { bin: string; bucket?: string };
   error?: string;

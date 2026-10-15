@@ -150,7 +150,11 @@ if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
   try {
     const { getWikiRegistry } = await import("./wiki/registry-memo.ts");
     const { kickWorkedLedgerRefresh } = await import("./wiki/worked-ledger.ts");
-    for (const entry of getWikiRegistry()) kickWorkedLedgerRefresh(entry.root);
+    const { kickWorkSessionsRefresh } = await import("./wiki/work-sessions.ts");
+    for (const entry of getWikiRegistry()) {
+      kickWorkedLedgerRefresh(entry.root);
+      kickWorkSessionsRefresh(entry.root);
+    }
   } catch (err) {
     log.warn("Failed to warm the worked-on ledger: {error}", {
       error: err instanceof Error ? err.message : String(err),
