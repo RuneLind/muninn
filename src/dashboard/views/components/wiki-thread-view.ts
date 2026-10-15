@@ -60,21 +60,29 @@ function threadMetaParts(card: RailThreadCard, now: number, showMoves: boolean):
   };
 }
 
-/** The header's second line: `N sessions · first → last · ✋ M`. */
+/** The meta as one plain line, `N sessions · first → last · ✋ M` (the replay
+ *  script's form; the card draws it on two lines). */
 export function threadMetaLine(card: RailThreadCard, now: number, showMoves: boolean): string {
   const { count, from, to, moves } = threadMetaParts(card, now, showMoves);
   return [count, from && `${from} → ${to}`, moves].filter(Boolean).join(" · ");
 }
 
-/** The meta line as markup: one span per part, so the CSS keeps it on one
- *  line. Only the START of the span gives way (ellipsis) at a narrow rail;
- *  ` → last`, the newest time, never shrinks. */
+/** The meta as markup: two lines, `N sessions · ✋ M` over `first → last`,
+ *  laid out from the width table in `src/wiki/CLAUDE.md` (Work threads): each
+ *  line fits on one line at the 260 and 300 px rails on macOS and Linux fonts,
+ *  so nothing is cut. Each part is an inline block, so a rail narrower than
+ *  260 (the viewport bound) breaks a line between parts, at ` · ` or ` → `,
+ *  and only wraps inside a part when the part alone is wider than the rail. */
 function threadMetaHtml(card: RailThreadCard, now: number, showMoves: boolean): string {
   const { count, from, to, moves } = threadMetaParts(card, now, showMoves);
   return (
-    `<span class="wiki-thread-count">${esc(count)}</span>` +
-    (from ? `<span class="wiki-thread-from"> · ${esc(from)}</span><span class="wiki-thread-to"> → ${esc(to)}</span>` : "") +
-    (moves ? `<span class="wiki-thread-moves"> · ${esc(moves)}</span>` : "")
+    `<span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">${esc(count)}</span>` +
+    (moves ? ` <span class="wiki-thread-moves">· ${esc(moves)}</span>` : "") +
+    `</span>` +
+    (from
+      ? ` <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">${esc(from)}</span>` +
+        ` <span class="wiki-thread-to">→ ${esc(to)}</span></span>`
+      : "")
   );
 }
 
@@ -102,7 +110,7 @@ export function threadCardHeaderHtml(
   // No aria-label on the fold: its name is its content (name + meta) and
   // aria-expanded carries the state. Its title, the accessible description,
   // leaves the meta out so a screen reader hears it once; the session lines
-  // still give a mouse user every start and end the meta elides.
+  // give a mouse user each session's own start and end.
   // The 📌's NAME is fixed and aria-pressed carries the state (a flipping
   // name reads "Unpin …, pressed", a double negation). Its title is the
   // visible hover, so it says the state and what a click does.

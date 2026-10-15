@@ -6,8 +6,10 @@
  * two whose listings disagree writing at most once each, a `clear()` in one
  * unpinning the other, a quota refusing the write (D7, the pin's state table
  * in `src/wiki/CLAUDE.md`; writes counted by wrapping `Storage.prototype`), no
- * section when the ledger 404s the sessions form (D11), both themes, and the
- * 260 px rail. The re-anchor stages rewrite the listing in the browser
+ * section when the ledger 404s the sessions form (D11), both themes, the
+ * 260 px rail, the header's width table (every row through the real renderer,
+ * run on CI's Linux DejaVu fonts too) and the 📌's resting/pressed look in
+ * forced colours. The re-anchor stages rewrite the listing in the browser
  * (`page.route`), since the server's memo cannot be moved forward in time.
  *
  * A browser is needed because the chain is `/api/files?sessions=1` → the
@@ -276,48 +278,160 @@ async function watchPinWrites(page: Page, refuse = false): Promise<void> {
 }
 const pinWrites = (page: Page) => page.evaluate(() => (window as unknown as { __pinWrites: number }).__pinWrites);
 
-/** The header's worst case, built by the real renderer: twelve sessions, a
- *  cross-day span with an older start date, a two-digit ✋. The fixture's own
- *  threads are a few hours long and two sessions wide. */
-function worstHeaderHtml(): string {
-  const now = new Date(2026, 9, 15, 10, 0).getTime();
-  const first = new Date(2026, 8, 30, 5, 21).getTime();
-  const last = new Date(2026, 9, 14, 23, 51).getTime();
-  const card: RailThreadCard = {
-    key: "x", foldKey: "thread:x", toggleKey: "closed:thread:x", name: "Alpha work", open: true, pinned: false,
-    pinAnchor: "x", focus: [], created: [], touched: [], movesYou: 88, score: 1,
-    sessions: Array.from({ length: 12 }, (_, i) => ({ id: `w${i}`, provider: "claude", title: "", first: first + i * HOUR, last: last - i * HOUR })),
-  };
-  return threadCardHeaderHtml(card, false, now, true);
+/** The header's WIDTH TABLE (`src/wiki/CLAUDE.md`, Work threads), built by the
+ *  real renderer: every session count (1, 2-digit, 3-digit) × ✋ (absent, as on
+ *  nais, and 1–3 digits) × span form × name (short, long enough to clamp). The
+ *  fixture's own threads are a few hours long and two sessions wide. */
+const TABLE_NOW = new Date(2026, 9, 15, 10, 0).getTime();
+const at = (mo: number, d: number, h: number, m: number) => new Date(2026, mo, d, h, m).getTime();
+const SPANS = [
+  { form: "same day, today", first: at(9, 15, 8, 1), last: at(9, 15, 9, 45) },
+  { form: "same day, yesterday", first: at(9, 14, 5, 21), last: at(9, 14, 23, 51) },
+  { form: "same day, older", first: at(9, 12, 5, 21), last: at(9, 12, 23, 51) },
+  { form: "cross-day, yesterday → today", first: at(9, 14, 5, 21), last: at(9, 15, 9, 45) },
+  { form: "cross-day, older → yesterday", first: at(9, 12, 5, 21), last: at(9, 14, 23, 51) },
+  { form: "cross-day, older → older", first: at(9, 8, 5, 21), last: at(9, 12, 23, 51) },
+  { form: "cross-month → yesterday", first: at(8, 30, 5, 21), last: at(9, 14, 23, 51) },
+] as const;
+const NAMES = ["Alpha work", "Alpha work on the long-running migration of every remaining reader surface to the new store"];
+interface TableRow {
+  id: string;
+  html: string;
+}
+function headerTable(): TableRow[] {
+  const rows: TableRow[] = [];
+  for (const n of [1, 12, 123])
+    for (const moves of [0, 7, 88, 999])
+      for (const span of SPANS)
+        for (const [ni, name] of NAMES.entries()) {
+          const card: RailThreadCard = {
+            key: "x", foldKey: "thread:x", toggleKey: "thread:x", name, open: false, pinned: false,
+            pinAnchor: "x", focus: [], created: [], touched: [], movesYou: moves, score: 1,
+            sessions: Array.from({ length: n }, (_, i) => ({
+              id: `w${i}`, provider: "claude", title: "",
+              first: i === 0 ? span.first : span.first + 1000,
+              last: i === 0 ? span.last : span.last - 1000,
+            })),
+          };
+          const id = `${n}s ✋${moves || "-"} ${span.form} name${ni}`;
+          rows.push({ id, html: threadCardHeaderHtml(card, true, TABLE_NOW, moves > 0) });
+        }
+  return rows;
 }
 
-/** How a card's meta line fits, measured in the page: the newest time's text
- *  (the meta's last `[day ]hh:mm`) against the box that clips it, and every
- *  meta part that overflows its box with the text-overflow it shows. */
-const metaFit = (cardEl: Element) => {
-  const meta = cardEl.querySelector(".wiki-thread-meta") as HTMLElement;
-  const text = meta.textContent ?? "";
-  const m = /((?:today |yesterday |[a-z]{3} \d\d\.\d\d |\d\d\.\d\d )?\d\d:\d\d)(?!.*\d\d:\d\d)/.exec(text);
-  if (!m) throw new Error(`no time in the meta: ${text}`);
-  const lastText = m[1]!;
-  const walker = document.createTreeWalker(meta, NodeFilter.SHOW_TEXT);
-  let hit: { node: Text; i: number } | null = null;
+/** How one header fits, measured in the page per child: every text run inside
+ *  the fold's box and the rail, the fold clear of the 📌, nothing cut by a
+ *  clipping box (a 0-px box with hidden text counts — the glyphs are measured,
+ *  not the computed style), and the lines each declared line takes. The name
+ *  clamps at two lines (the browser draws the clamp's ellipsis), so only its
+ *  vertical overflow is allowed, and only at two lines. */
+const headerFit = (cardEl: Element) => {
+  const r = (e: Element | Range) => e.getBoundingClientRect();
+  const fold = cardEl.querySelector(".wiki-thread-fold")!;
+  const pin = cardEl.querySelector(".wiki-thread-pin")!;
+  const rail = document.querySelector(".wiki-layout > .wiki-pane:first-child")!;
+  const label = cardEl.querySelector(".wiki-thread-label")!;
+  const name = cardEl.querySelector(".wiki-thread-name")!;
+  const issues: string[] = [];
+  const linesOf = (el: Element) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    // Only the lines the element's own box shows: a clamped name's hidden lines still have rects.
+    const box = r(el);
+    const tops = new Set(
+      Array.from(range.getClientRects())
+        .filter((b) => b.width > 0 && b.top + b.height / 2 <= box.bottom)
+        .map((b) => Math.round(b.top + b.height / 2)),
+    );
+    const sorted = [...tops].sort((a, b) => a - b);
+    // Two centres within 3 px are one line (an emoji's box sits a little lower).
+    return sorted.filter((t, i) => i === 0 || t - sorted[i - 1]! > 3).length;
+  };
+  const walker = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+  const parts: Array<{ text: string; width: number }> = [];
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-    const i = (n as Text).data.lastIndexOf(lastText);
-    if (i >= 0) hit = { node: n as Text, i };
+    const t = n as Text;
+    if (!t.data.trim()) continue;
+    const range = document.createRange();
+    range.selectNodeContents(t);
+    const rects = Array.from(range.getClientRects()).filter((b) => b.width > 0);
+    // Per line, the union of its rects (an ellipsis adds a second, overlapping one).
+    const byLine = new Map<number, { l: number; r: number }>();
+    for (const b of rects) {
+      const k = Math.round(b.top + b.height / 2);
+      const o = byLine.get(k);
+      byLine.set(k, { l: Math.min(o?.l ?? b.left, b.left), r: Math.max(o?.r ?? b.right, b.right) });
+    }
+    parts.push({ text: t.data, width: [...byLine.values()].reduce((s, x) => s + x.r - x.l, 0) });
+    if (!rects.length) issues.push(`"${t.data}" draws no glyph`);
+    for (const b of rects) {
+      if (b.left < r(fold).left - 0.5 || b.right > r(fold).right + 0.5) issues.push(`"${t.data}" leaves the fold`);
+      if (b.right > r(rail).right + 0.5) issues.push(`"${t.data}" leaves the rail`);
+      for (let a = t.parentElement!; a !== cardEl; a = a.parentElement!) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX !== "visible" && (b.left < r(a).left - 0.5 || b.right > r(a).right + 0.5))
+          issues.push(`"${t.data}" cut by .${a.className} (${Math.round(b.width)} px of text in ${Math.round(r(a).width)} px)`);
+        const clampedName = a === name && linesOf(name) === 2;
+        if (cs.overflowY !== "visible" && !clampedName && (b.top < r(a).top - 0.5 || b.bottom > r(a).bottom + 0.5))
+          issues.push(`"${t.data}" cut vertically by .${a.className}`);
+      }
+    }
   }
-  if (!hit) throw new Error(`"${lastText}" is split across nodes in: ${text}`);
-  const range = document.createRange();
-  range.setStart(hit.node, hit.i);
-  range.setEnd(hit.node, hit.i + lastText.length);
-  let clip = hit.node.parentElement!;
-  while (clip !== meta && getComputedStyle(clip).overflow === "visible") clip = clip.parentElement!;
-  const right = Math.min(clip.getBoundingClientRect().right, meta.getBoundingClientRect().right);
-  const clipped = Array.from(meta.querySelectorAll("*"))
-    .filter((e) => e.scrollWidth > e.clientWidth)
-    .map((e) => ({ cls: e.className, textOverflow: getComputedStyle(e).textOverflow, hidden: e.scrollWidth - e.clientWidth }));
-  return { text, lastText, lastHidden: Math.max(0, range.getBoundingClientRect().right - right), clipped };
+  if (r(fold).right > r(pin).left + 0.5) issues.push("the fold runs under the 📌");
+  if (r(pin).right > r(rail).right + 0.5) issues.push("the 📌 leaves the rail");
+  if (r(pin).width < 24 || r(pin).height < 24) issues.push(`the 📌 is ${r(pin).width}×${r(pin).height}`);
+  const lines = Array.from(cardEl.querySelectorAll(".wiki-thread-line")).map((l) => ({ cls: l.className, lines: linesOf(l) }));
+  const partLines = Array.from(cardEl.querySelectorAll(".wiki-thread-line > span")).map((q) => ({ text: q.textContent, lines: linesOf(q) }));
+  return { issues, nameLines: linesOf(name), lines, partLines, label: r(label).width, parts };
 };
+
+/** The 📌's pixels, off a screenshot (an emoji has no CSS colour): against
+ *  the button's top-left padding pixel, the ink's median contrast, its widest
+ *  chroma (a grey pin has none, a pressed one is red), and the share of the
+ *  box held by the most common non-background colour — a solid square there is
+ *  a backplate the filter has painted, not a glyph (measured: under 1% for the
+ *  glyph alone, 11% with forced colours' backplate darkened to grey). */
+async function pinPixels(page: Page, pin: import("@playwright/test").Locator) {
+  const png = (await pin.screenshot({ animations: "disabled" })).toString("base64");
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const cv = document.createElement("canvas");
+    cv.width = img.width;
+    cv.height = img.height;
+    const ctx = cv.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(0, 0, cv.width, cv.height).data;
+    const lum = (i: number) => {
+      const ch = (v: number) => {
+        const x = v / 255;
+        return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * ch(d[i]!) + 0.7152 * ch(d[i + 1]!) + 0.0722 * ch(d[i + 2]!);
+    };
+    const bg = lum(0);
+    const bgKey = `${d[0]},${d[1]},${d[2]}`;
+    const ratios: number[] = [];
+    const counts = new Map<string, number>();
+    let chroma = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const l = lum(i);
+      const r = (Math.max(l, bg) + 0.05) / (Math.min(l, bg) + 0.05);
+      if (r > 1.1) {
+        ratios.push(r);
+        chroma = Math.max(chroma, Math.max(d[i]!, d[i + 1]!, d[i + 2]!) - Math.min(d[i]!, d[i + 1]!, d[i + 2]!));
+      }
+      const key = `${d[i]},${d[i + 1]},${d[i + 2]}`;
+      if (key !== bgKey) counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    ratios.sort((a, b) => a - b);
+    const at = (q: number) => ratios[Math.floor(ratios.length * q)] ?? 1;
+    const top = Math.max(0, ...counts.values());
+    // The median ink pixel: half the glyph, anti-aliased edge included.
+    return { bg, ink: ratios.length, p50: at(0.5), chroma, square: top / (d.length / 4) };
+  }, png);
+}
 
 test.beforeAll(async () => {
   await makeRoot(THREADS);
@@ -654,40 +768,8 @@ test.describe("Wiki rail: Work threads", () => {
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
       await page.setViewportSize({ width: 1400, height: 900 });
       await openReader(page, THREADS);
-      // The fixture's own card: the newest time shows in full.
-      const own = await page.locator(".wiki-thread-card").first().evaluate(metaFit);
-      expect(own.lastHidden, `${width} fixture card, newest time visible: ${JSON.stringify(own)}`).toBeLessThanOrEqual(0.5);
-      const ownEllipsis = own.clipped.filter((c) => c.textOverflow !== "ellipsis");
-      expect(ownEllipsis, `${width} fixture card: ${JSON.stringify(own)}`).toEqual([]);
-      // The worst case, swapped in for the second card.
-      await page.locator(".wiki-thread-card").nth(1).evaluate((el, html) => (el.outerHTML = html), worstHeaderHtml());
-      const worst = page.locator(".wiki-thread-card").nth(1);
-      const fit = await worst.evaluate(metaFit);
-      const fat = `${width} worst case: ${JSON.stringify(fit)}`;
-      expect(fit.lastText, fat).toBe("yesterday 23:51");
-      expect(fit.lastHidden, `newest time visible, ${fat}`).toBeLessThanOrEqual(0.5);
-      // Whatever gives way shows an ellipsis; at the 260 px rail something does.
-      expect(fit.clipped.filter((c) => c.textOverflow !== "ellipsis"), fat).toEqual([]);
-      if (width === 260) expect(fit.clipped.length, fat).toBeGreaterThan(0);
-      const head = await worst.evaluate((card) => {
-        const meta = card.querySelector(".wiki-thread-meta") as HTMLElement;
-        const rect = (e: Element) => e.getBoundingClientRect();
-        const mids = Array.from(meta.children).map((c) => rect(c).top + rect(c).height / 2);
-        const fold = card.querySelector(".wiki-thread-fold")!;
-        const pin = card.querySelector(".wiki-thread-pin")!;
-        return {
-          height: rect(meta).height,
-          lineHeight: parseFloat(getComputedStyle(meta).lineHeight),
-          spread: Math.max(...mids) - Math.min(...mids),
-          metaPastFold: rect(meta).right > rect(fold).right + 0.5,
-          foldOverPin: rect(fold).right > rect(pin).left + 0.5,
-        };
-      });
-      const hat = `${width}: ${JSON.stringify(head)}`;
-      expect(head.height, `header meta is one line, ${hat}`).toBeLessThan(head.lineHeight * 1.5);
-      expect(head.spread, `header meta parts share a line, ${hat}`).toBeLessThan(6);
-      expect(head.metaPastFold, hat).toBe(false);
-      expect(head.foldOverPin, hat).toBe(false);
+      const own = await page.locator(".wiki-thread-card").first().evaluate(headerFit);
+      expect(own.issues, `${width} fixture card: ${JSON.stringify(own)}`).toEqual([]);
       const g = await page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${ALPHA}"]`).evaluate((el) => {
         const rect = (e: Element) => e.getBoundingClientRect();
         const rowRight = rect(el).right - parseFloat(getComputedStyle(el).paddingRight);
@@ -726,6 +808,68 @@ test.describe("Wiki rail: Work threads", () => {
       expect(g.metaOverflow, at).toBeLessThanOrEqual(0);
       expect(g.listOverflow, at).toBeLessThanOrEqual(0);
     }
+  });
+
+  test("the header's width table: every row fits at 260 and 300 px in both themes, nothing cut, each meta line one line", async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const rows = headerTable();
+    const font = process.env.PW_TEST_CONNECT_WS_ENDPOINT ? "linux" : "local";
+    const failures: string[] = [];
+    const widest = new Map<string, number>();
+    const passes = [
+      { rail: 260, viewport: 1400, scheme: "light" },
+      { rail: 260, viewport: 1400, scheme: "dark" },
+      { rail: 300, viewport: 1400, scheme: "light" },
+      { rail: 300, viewport: 1400, scheme: "dark" },
+      // Under 260 only through the viewport bound (a 445 px window): the meta
+      // lines may wrap at their separators, but nothing may be cut.
+      { rail: 200, viewport: 445, scheme: "light" },
+      // A 330 px window: the widest part is wider than the line, so it wraps
+      // inside itself rather than running under the 📌.
+      { rail: 148, viewport: 330, scheme: "light" },
+    ] as const;
+    for (const p of passes) {
+      await page.emulateMedia({ colorScheme: p.scheme });
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, p.rail] as const);
+      await page.setViewportSize({ width: p.viewport, height: 900 });
+      await openReader(page, THREADS);
+      // Every table row, through the real renderer, after the fixture's cards.
+      await page.locator(".wiki-thread-card").last().evaluate((el, html) => el.insertAdjacentHTML("afterend", html), rows.map((r) => r.html).join(""));
+      const all = page.locator(".wiki-thread-card");
+      const total = await all.count();
+      const fits: Array<Awaited<ReturnType<typeof headerFit>>> = [];
+      for (let i = total - rows.length; i < total; i++) fits.push(await all.nth(i).evaluate(headerFit));
+      const railW = await page.locator(".wiki-layout > .wiki-pane:first-child").evaluate((e) => Math.round(e.getBoundingClientRect().width));
+      expect(railW, `${JSON.stringify(p)}`).toBe(p.rail);
+      const list = await page.locator("#wikiList").evaluate((e) => e.scrollWidth - e.clientWidth);
+      if (list > 0 && p.rail >= 200) failures.push(`${p.rail}/${p.scheme}: #wikiList scrolls ${list} px sideways`);
+      for (const [i, f] of fits.entries()) {
+        const at = `${font} ${p.rail}/${p.scheme} [${rows[i]!.id}]`;
+        for (const issue of f.issues) failures.push(`${at}: ${issue}`);
+        if (f.lines.length !== 2) failures.push(`${at}: ${f.lines.length} meta lines, not 2`);
+        const maxLines = p.rail >= 260 ? 1 : p.rail >= 200 ? 2 : 4;
+        for (const l of f.lines) if (l.lines > maxLines) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
+        // Down to 200 px a line breaks only BETWEEN its parts.
+        if (p.rail >= 200) for (const q of f.partLines) if (q.lines > 1) failures.push(`${at}: "${q.text}" breaks inside itself`);
+        if (f.nameLines > 2) failures.push(`${at}: the name takes ${f.nameLines} lines`);
+        if (p.rail >= 260 && p.scheme === "light") {
+          widest.set(`label @${p.rail}`, Math.min(widest.get(`label @${p.rail}`) ?? Infinity, f.label));
+          for (const part of f.parts)
+            if (!NAMES.includes(part.text)) widest.set(part.text, Math.max(widest.get(part.text) ?? 0, part.width));
+        }
+      }
+    }
+    // The width table for src/wiki/CLAUDE.md and the PR body.
+    console.log(`[width table, ${font}] ` + JSON.stringify(Object.fromEntries([...widest].map(([k, v]) => [k, Math.round(v * 10) / 10]))));
+    // By kind (the row and the text left out), so a red run reads at a glance.
+    const kinds = new Map<string, number>();
+    for (const f of failures) {
+      const k = f.replace(/\[[^\]]*\]/, "").replace(/"[^"]*"/, "…").replace(/\(\d+ px of text in \d+ px\)/, "");
+      kinds.set(k, (kinds.get(k) ?? 0) + 1);
+    }
+    expect(failures.slice(0, 20), `${failures.length} failures: ${JSON.stringify(Object.fromEntries(kinds))}`).toEqual([]);
   });
 
   test("the 📌 keeps one name while aria-pressed flips, and is a 24 px target; the fold's name carries the meta", async ({ page }) => {
@@ -778,44 +922,52 @@ test.describe("Wiki rail: Work threads", () => {
       const pin = cards(page).nth(1).locator(".wiki-thread-pin");
       await expect(pin).toHaveAttribute("aria-pressed", "false");
       await page.mouse.move(0, 0);
-      const png = (await pin.screenshot({ animations: "disabled" })).toString("base64");
-      // The glyph's ink, measured off the pixels: an emoji has no CSS colour.
-      // The background is the button's top-left padding pixel.
-      const c = await page.evaluate(async (b64) => {
-        const img = new Image();
-        img.src = `data:image/png;base64,${b64}`;
-        await img.decode();
-        const cv = document.createElement("canvas");
-        cv.width = img.width;
-        cv.height = img.height;
-        const ctx = cv.getContext("2d")!;
-        ctx.drawImage(img, 0, 0);
-        const d = ctx.getImageData(0, 0, cv.width, cv.height).data;
-        const lum = (i: number) => {
-          const ch = (v: number) => {
-            const x = v / 255;
-            return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
-          };
-          return 0.2126 * ch(d[i]!) + 0.7152 * ch(d[i + 1]!) + 0.0722 * ch(d[i + 2]!);
-        };
-        const bg = lum(0);
-        const ratios: number[] = [];
-        for (let i = 0; i < d.length; i += 4) {
-          const l = lum(i);
-          const r = (Math.max(l, bg) + 0.05) / (Math.min(l, bg) + 0.05);
-          if (r > 1.1) ratios.push(r);
-        }
-        ratios.sort((a, b) => a - b);
-        const at = (q: number) => ratios[Math.floor(ratios.length * q)] ?? 1;
-        // The median ink pixel: half the glyph, anti-aliased edge included.
-        return { bg, ink: ratios.length, p50: at(0.5), p75: at(0.75), share3: ratios.filter((r) => r >= 3).length / ratios.length };
-      }, png);
+      const c = await pinPixels(page, pin);
       const at = `resting 📌, OS ${os}, toggle ${forced ?? "none"}: ${JSON.stringify(c)}`;
       // The rail really is the theme under test, so the case measures that theme.
       expect(c.bg > 0.5, at).toBe(theme === "light");
       expect(c.ink, at).toBeGreaterThan(20);
       expect(c.p50, at).toBeGreaterThanOrEqual(3);
     }
+  });
+
+  test("the pressed 📌 is the coloured pin and the resting one grey, in both themes and in forced colours, with no backplate square", async ({
+    page,
+  }) => {
+    // Forced colours by the OS scheme and by the theme toggle, whose
+    // html[data-theme] rules out-rank the OS ones.
+    const cases = [
+      { forcedColors: "none", colorScheme: "light", toggle: null },
+      { forcedColors: "none", colorScheme: "dark", toggle: null },
+      { forcedColors: "active", colorScheme: "light", toggle: null },
+      { forcedColors: "active", colorScheme: "dark", toggle: null },
+      { forcedColors: "active", colorScheme: "dark", toggle: "light" },
+      { forcedColors: "active", colorScheme: "light", toggle: "dark" },
+    ] as const;
+    for (const { forcedColors, colorScheme, toggle } of cases) {
+        await page.emulateMedia({ colorScheme, forcedColors });
+        await openReader(page, THREADS);
+        if (toggle) await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), toggle);
+        const resting = cards(page).nth(1).locator(".wiki-thread-pin");
+        await expect(resting).toHaveAttribute("aria-pressed", "false");
+        await page.mouse.move(0, 0);
+        const rest = await pinPixels(page, resting);
+        await resting.click();
+        const pressed = cards(page).nth(0).locator(".wiki-thread-pin");
+        await expect(pressed).toHaveAttribute("aria-pressed", "true");
+        await page.mouse.move(0, 0);
+        await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+        const on = await pinPixels(page, pressed);
+        await pressed.click();
+        await expect(cards(page).nth(0).locator(".wiki-thread-pin")).toHaveAttribute("aria-pressed", "false");
+        const at = `${forcedColors} ${colorScheme} toggle ${toggle}: resting ${JSON.stringify(rest)}, pressed ${JSON.stringify(on)}`;
+        console.log(`[pin] ${at}`);
+        expect(rest.chroma, `the resting 📌 is grey, ${at}`).toBeLessThan(16);
+        expect(on.chroma, `the pressed 📌 keeps its colour, ${at}`).toBeGreaterThan(80);
+        expect(rest.p50, `the resting 📌 reads at 3:1, ${at}`).toBeGreaterThanOrEqual(3);
+        for (const [state, px] of [["resting", rest], ["pressed", on]] as const)
+          expect(px.square, `no solid square behind the ${state} 📌, ${at}`).toBeLessThan(0.04);
+      }
   });
 
   test("a card's newest series plan: the latest dot sits on the card's rule, and the rule shows above and below it", async ({ page }) => {

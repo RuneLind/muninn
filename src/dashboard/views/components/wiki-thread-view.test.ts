@@ -128,11 +128,17 @@ describe("threadCardHeaderHtml", () => {
     const html = threadCardHeaderHtml(card(), false, NOW, true);
     const fold = /<button[^>]*class="wiki-thread-fold[^>]*>/.exec(html)![0];
     expect(fold).not.toContain("aria-label");
-    // The span's start and end are separate parts: only the start may shrink.
+    // Two lines, `N sessions · ✋ M` over `first → last`; each part its own
+    // span, a space between parts so a narrow rail breaks only there.
     expect(html).toContain(
-      '<small class="wiki-thread-meta"><span class="wiki-thread-count">2 sessions</span>' +
-        '<span class="wiki-thread-from"> · 12.10 15:04</span><span class="wiki-thread-to"> → yesterday 21:26</span>' +
-        '<span class="wiki-thread-moves"> · ✋ 18</span></small>',
+      '<small class="wiki-thread-meta"><span class="wiki-thread-line wiki-thread-tally">' +
+        '<span class="wiki-thread-count">2 sessions</span> <span class="wiki-thread-moves">· ✋ 18</span></span>' +
+        ' <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">12.10 15:04</span>' +
+        ' <span class="wiki-thread-to">→ yesterday 21:26</span></span></small>',
+    );
+    // No ✋ (hidden where it is not personal): the tally line is the count alone.
+    expect(threadCardHeaderHtml(card(), false, NOW, false)).toContain(
+      '<span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">2 sessions</span></span>',
     );
     // The hover (the fold's description) does not repeat the meta the name
     // already speaks; its session lines carry every start and end.
