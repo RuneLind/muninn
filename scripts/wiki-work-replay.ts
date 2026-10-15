@@ -15,11 +15,21 @@
  * deps with `now = at`, then `CLAUDE_USAGE_URL` is unset so the build itself
  * fetches nothing for the clone's path.
  *
- * Known limits: a session's per-file counts are aggregates, so a session that
- * spans `at` (its `last` is after it) cannot be split and is dropped; opencode
- * titles are latest-wins upstream, so `named` reads today's title; a page
- * written only by a dropped session gets a pre-`at` worked date from the summary
- * form but no events.
+ * Environment (Bun loads `.env` from the checkout; a worktree or CI checkout
+ * has none, so set these by hand there):
+ *   - `CLAUDE_USAGE_URL` — the ledger's base URL.
+ *   - The wiki registry `--wiki` is looked up in: `WIKI_EXTRA` (standalone
+ *     wikis, e.g. mimir) and the bots under `MUNINN_BOTS_DIR` (absolute; default
+ *     the checkout's `bots/`), whose `wikiDir` registers a bot wiki.
+ *
+ * Known limits: a session that spans `at` (its `last` is after it) is dropped.
+ * Upstream already cuts its rows at `until`, so what it keeps of such a session
+ * is only the files it finished before `at`: its per-file counts and its
+ * prompt-to-file attribution describe a session that was still running. Dropping
+ * it keeps the replay to sessions that had ended. Opencode titles are
+ * latest-wins upstream, so `named` reads today's title; a page written only by a
+ * dropped session gets a pre-`at` worked date from the summary form but no
+ * events.
  *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
  * written anywhere but the temp clone, which is removed on exit.
@@ -31,14 +41,18 @@ import path from "node:path";
 import { getWikiRegistry } from "../src/wiki/registry-memo.ts";
 import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
-import { refreshWorkSessions } from "../src/wiki/work-sessions.ts";
+import { parsePreWindow, parseWorkSessions, refreshWorkSessions } from "../src/wiki/work-sessions.ts";
+import { parseWorkedPages } from "../src/wiki/worked-ledger.ts";
 import { threadScore, WORK_WINDOW_MS, type WorkThread } from "../src/wiki/work-focus.ts";
-import { claudeUsageJson } from "../src/utils/claude-usage-fetch.ts";
+import { claudeUsageHttpStatus, claudeUsageJson } from "../src/utils/claude-usage-fetch.ts";
 import { projectCounts, toListing } from "../src/dashboard/routes/wiki-routes.ts";
 import { railInputFor } from "../src/dashboard/views/components/wiki-rail-input.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS, parseActivityWeights, workedGateFor } from "../src/dashboard/views/components/wiki-activity-rank.ts";
 import { resolveSortMode, type WikiFilters, type WikiListing } from "../src/dashboard/views/components/wiki-filter.ts";
 import type { RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
+
+/** A failure the script explains in one stderr line instead of a stack. */
+class ReplayError extends Error {}
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -112,7 +126,7 @@ function displayTitle(index: WikiIndex, relPath: string): string {
   const p = index.pages.find((m) => m.relPath === relPath);
   const title = p ? (p.displayTitle ?? p.title) : relPath;
   const cut = title.indexOf(" — ");
-  return cut === -1 ? title : title.slice(0, cut);
+  return cut > 0 ? title.slice(0, cut) : title;
 }
 
 function printThreads(index: WikiIndex, threads: WorkThread[], at: number): void {
@@ -137,20 +151,44 @@ async function main(): Promise<void> {
   const sinceMs = at - WORK_WINDOW_MS;
   const registry = getWikiRegistry();
   const entry = registry.find((e) => e.name.toLowerCase() === wikiName.toLowerCase());
-  if (!entry) throw new Error(`no registered wiki named ${wikiName}`);
+  if (!entry) {
+    const names = registry.map((e) => e.name).join(", ") || "none";
+    throw new ReplayError(
+      `no registered wiki named ${wikiName} (registered: ${names}). A wiki registers through WIKI_EXTRA or a bot's wikiDir under MUNINN_BOTS_DIR; set them when the checkout has no .env`,
+    );
+  }
   const baseUrl = (process.env.CLAUDE_USAGE_URL ?? "").trim().replace(/\/+$/, "");
-  if (!baseUrl) throw new Error("CLAUDE_USAGE_URL is not set");
+  if (!baseUrl) throw new ReplayError("CLAUDE_USAGE_URL is not set");
   const registeredRoot = path.resolve(entry.root);
 
   // The three ledger answers, for the REGISTERED root.
-  const q = (p: string) => claudeUsageJson(baseUrl, `/api/files?root=${encodeURIComponent(registeredRoot)}&${p}`, { label: baseUrl });
+  const q = async (p: string): Promise<unknown> => {
+    const route = `/api/files?root=${encodeURIComponent(registeredRoot)}&${p}`;
+    try {
+      return await claudeUsageJson(baseUrl, route, { label: baseUrl });
+    } catch (err) {
+      const status = claudeUsageHttpStatus(err);
+      const why = status === null ? (err instanceof Error ? err.message : String(err)) : `HTTP ${status}`;
+      throw new ReplayError(`${baseUrl}${route}: ${why}`);
+    }
+  };
   const [summaryAt, preWindow, sessionsBody] = await Promise.all([
     q(`summary=1&until=${at}`),
     q(`summary=1&until=${sinceMs}`),
     q(`sessions=1&since=${sinceMs}&until=${at}`),
   ]);
-  const raw = sessionsBody as { sessions?: { last: number }[] };
-  const all = raw.sessions ?? [];
+  // Parsed here, so a bad answer names its reason: the memos' own warns go to
+  // LogTape, which this script does not configure.
+  const checks = [
+    ["summary at --at", parseWorkedPages(summaryAt)],
+    ["summary at window start", parsePreWindow(preWindow, sinceMs)],
+    ["sessions", parseWorkSessions(sessionsBody)],
+  ] as const;
+  for (const [what, r] of checks) {
+    if (!r.ok) throw new ReplayError(`the ledger's ${what} answer did not parse: ${r.reason}: ${r.detail}`);
+  }
+  const raw = sessionsBody as { sessions: { last: number }[] };
+  const all = raw.sessions;
   const kept = all.filter((s) => s.last <= at);
   const spanning = all.length - kept.length;
 
@@ -182,7 +220,7 @@ async function main(): Promise<void> {
       },
       { identityRoot: registeredRoot },
     );
-    if (!memo) throw new Error("the ledger answers did not parse (see the warn above)");
+    if (!memo) throw new ReplayError("the work-sessions memo did not build from answers that parsed");
 
     delete process.env.CLAUDE_USAGE_URL;
     const index = await buildWikiIndex(cloneRoot);
@@ -203,4 +241,10 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+try {
+  await main();
+} catch (err) {
+  if (!(err instanceof ReplayError)) throw err;
+  console.error(`wiki-work-replay: ${err.message}`);
+  process.exit(1);
+}
