@@ -24,22 +24,43 @@ export function threadInstantLabel(ms: number, now: number): string {
   return `${wd} ${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")} ${hm}`;
 }
 
-/** `first → last` over a card's sessions, or "" with none. */
+/** `first → last` over a card's sessions, or "" with none. A span inside one
+ *  day names the day once (`today 14:21 → 16:51`). */
 export function threadSpanLabel(card: Pick<RailThreadCard, "sessions">, now: number): string {
   if (!card.sessions.length) return "";
   const first = Math.min(...card.sessions.map((s) => s.first));
   const last = Math.max(...card.sessions.map((s) => s.last));
-  return `${threadInstantLabel(first, now)} → ${threadInstantLabel(last, now)}`;
+  const from = threadInstantLabel(first, now);
+  const to = threadInstantLabel(last, now);
+  const sameDay = localDay(new Date(first)) === localDay(new Date(last));
+  return `${from} → ${sameDay ? to.slice(to.lastIndexOf(" ") + 1) : to}`;
+}
+
+/** The meta line's three parts; `span` and `moves` are "" when absent. */
+function threadMetaParts(card: RailThreadCard, now: number, showMoves: boolean): { count: string; span: string; moves: string } {
+  const n = card.sessions.length;
+  return {
+    count: `${n} ${n === 1 ? "session" : "sessions"}`,
+    span: threadSpanLabel(card, now),
+    moves: showMoves && card.movesYou > 0 ? `✋ ${card.movesYou}` : "",
+  };
 }
 
 /** The header's second line: `N sessions · first → last · ✋ M`. */
 export function threadMetaLine(card: RailThreadCard, now: number, showMoves: boolean): string {
-  const n = card.sessions.length;
-  const parts = [`${n} ${n === 1 ? "session" : "sessions"}`];
-  const span = threadSpanLabel(card, now);
-  if (span) parts.push(span);
-  if (showMoves && card.movesYou > 0) parts.push(`✋ ${card.movesYou}`);
-  return parts.join(" · ");
+  const { count, span, moves } = threadMetaParts(card, now, showMoves);
+  return [count, span, moves].filter(Boolean).join(" · ");
+}
+
+/** The meta line as markup: one span per part, so the CSS can keep it on one
+ *  line and let only the time span give way (ellipsis) at a narrow rail. */
+function threadMetaHtml(card: RailThreadCard, now: number, showMoves: boolean): string {
+  const { count, span, moves } = threadMetaParts(card, now, showMoves);
+  return (
+    `<span class="wiki-thread-count">${esc(count)}</span>` +
+    (span ? `<span class="wiki-thread-span"> · ${esc(span)}</span>` : "") +
+    (moves ? `<span class="wiki-thread-moves"> · ${esc(moves)}</span>` : "")
+  );
 }
 
 /** The header's hover: the name, then one line per session (newest first). */
@@ -61,18 +82,23 @@ export function threadCardHeaderHtml(
   now: number,
   showMoves: boolean,
 ): string {
+  const meta = threadMetaLine(card, now, showMoves);
   const hover = threadHover(card, now);
   const why = folded ? "Show this work thread" : "Hide this work thread";
-  const pinLabel = card.pinned ? "Unpin this work thread" : "Pin this work thread first";
+  // No aria-label on either button. The fold's name is its content (name +
+  // meta) and aria-expanded carries the state. The 📌's label is fixed and
+  // aria-pressed carries the state: a label that flips as well reads "Unpin
+  // …, pressed", a double negation.
+  const pinLabel = "Pin this work thread first";
   return (
     `<div class="wiki-thread-card${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" data-thread="${esc(card.foldKey)}">` +
     `<button type="button" class="wiki-thread-fold${folded ? " folded" : ""}"` +
     ` data-fold-key="${esc(card.toggleKey)}" aria-expanded="${folded ? "false" : "true"}"` +
-    ` aria-label="${esc(card.name + " · " + why)}" title="${esc(hover + "\n" + why)}">` +
+    ` title="${esc(hover + "\n" + meta + "\n" + why)}">` +
     `<span class="wiki-fold-caret" aria-hidden="true">▸</span>` +
     `<span class="wiki-thread-label">` +
     `<span class="wiki-thread-name">${esc(card.name)}</span>` +
-    `<small class="wiki-thread-meta">${esc(threadMetaLine(card, now, showMoves))}</small>` +
+    `<small class="wiki-thread-meta">${threadMetaHtml(card, now, showMoves)}</small>` +
     `</span>` +
     `</button>` +
     `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +

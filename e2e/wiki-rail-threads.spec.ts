@@ -350,6 +350,36 @@ test.describe("Wiki rail: Work threads", () => {
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
       await page.setViewportSize({ width: 1400, height: 900 });
       await openReader(page, THREADS);
+      // The header's worst case, written into the real markup: a two-digit
+      // session count, a cross-day span with both dates, a two-digit ✋. The
+      // fixture's own threads are a few hours long and two sessions wide.
+      const head = await page.locator(".wiki-thread-card").first().evaluate((card) => {
+        const meta = card.querySelector(".wiki-thread-meta") as HTMLElement;
+        const set = (sel: string, text: string) => {
+          const e = meta.querySelector(sel);
+          if (!e) throw new Error(`no ${sel} in the card meta`);
+          e.textContent = text;
+        };
+        set(".wiki-thread-count", "12 sessions");
+        set(".wiki-thread-span", " · wed 30.09 05:21 → yesterday 23:51");
+        set(".wiki-thread-moves", " · ✋ 88");
+        const rect = (e: Element) => e.getBoundingClientRect();
+        const mids = Array.from(meta.children).map((c) => rect(c).top + rect(c).height / 2);
+        const fold = card.querySelector(".wiki-thread-fold")!;
+        const pin = card.querySelector(".wiki-thread-pin")!;
+        return {
+          height: rect(meta).height,
+          lineHeight: parseFloat(getComputedStyle(meta).lineHeight),
+          spread: Math.max(...mids) - Math.min(...mids),
+          metaPastFold: rect(meta).right > rect(fold).right + 0.5,
+          foldOverPin: rect(fold).right > rect(pin).left + 0.5,
+        };
+      });
+      const hat = `${width}: ${JSON.stringify(head)}`;
+      expect(head.height, `header meta is one line, ${hat}`).toBeLessThan(head.lineHeight * 1.5);
+      expect(head.spread, `header meta parts share a line, ${hat}`).toBeLessThan(6);
+      expect(head.metaPastFold, hat).toBe(false);
+      expect(head.foldOverPin, hat).toBe(false);
       const g = await page.locator(`.wiki-list-item[data-section="threads"][data-relpath="${ALPHA}"]`).evaluate((el) => {
         const rect = (e: Element) => e.getBoundingClientRect();
         const rowRight = rect(el).right - parseFloat(getComputedStyle(el).paddingRight);
@@ -388,5 +418,90 @@ test.describe("Wiki rail: Work threads", () => {
       expect(g.metaOverflow, at).toBeLessThanOrEqual(0);
       expect(g.listOverflow, at).toBeLessThanOrEqual(0);
     }
+  });
+
+  test("the 📌 keeps one name while aria-pressed flips, and is a 24 px target; the fold's name carries the meta", async ({ page }) => {
+    await openReader(page, THREADS);
+    const pin = cards(page).nth(1).locator(".wiki-thread-pin");
+    await expect(pin).toHaveAccessibleName("Pin this work thread first");
+    await expect(pin).toHaveAttribute("aria-pressed", "false");
+    const box = (await pin.boundingBox())!;
+    expect(box.width, JSON.stringify(box)).toBeGreaterThanOrEqual(24);
+    expect(box.height, JSON.stringify(box)).toBeGreaterThanOrEqual(24);
+    await pin.click();
+    const pressed = cards(page).nth(0).locator(".wiki-thread-pin");
+    await expect(pressed).toHaveAttribute("aria-pressed", "true");
+    await expect(pressed).toHaveAccessibleName("Pin this work thread first");
+    await pressed.click();
+    await expect(cards(page).nth(0).locator(".wiki-thread-name")).toHaveText("Alpha work");
+    const fold = cards(page).nth(0).locator(".wiki-thread-fold");
+    await expect(fold).toHaveAccessibleName(/Alpha work.*2 sessions.*✋ 12/);
+  });
+
+  test("both themes: the resting 📌 reads at 3:1 against the rail", async ({ page }) => {
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openReader(page, THREADS);
+      const pin = cards(page).nth(1).locator(".wiki-thread-pin");
+      await expect(pin).toHaveAttribute("aria-pressed", "false");
+      await page.mouse.move(0, 0);
+      const png = (await pin.screenshot({ animations: "disabled" })).toString("base64");
+      // The glyph's ink, measured off the pixels: an emoji has no CSS colour.
+      // The background is the button's top-left padding pixel.
+      const c = await page.evaluate(async (b64) => {
+        const img = new Image();
+        img.src = `data:image/png;base64,${b64}`;
+        await img.decode();
+        const cv = document.createElement("canvas");
+        cv.width = img.width;
+        cv.height = img.height;
+        const ctx = cv.getContext("2d")!;
+        ctx.drawImage(img, 0, 0);
+        const d = ctx.getImageData(0, 0, cv.width, cv.height).data;
+        const lum = (i: number) => {
+          const ch = (v: number) => {
+            const x = v / 255;
+            return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+          };
+          return 0.2126 * ch(d[i]!) + 0.7152 * ch(d[i + 1]!) + 0.0722 * ch(d[i + 2]!);
+        };
+        const bg = lum(0);
+        const ratios: number[] = [];
+        for (let i = 0; i < d.length; i += 4) {
+          const l = lum(i);
+          const r = (Math.max(l, bg) + 0.05) / (Math.min(l, bg) + 0.05);
+          if (r > 1.1) ratios.push(r);
+        }
+        ratios.sort((a, b) => a - b);
+        // The glyph's body, not its anti-aliased edge: the 75th percentile of ink.
+        return { ink: ratios.length, p75: ratios[Math.floor(ratios.length * 0.75)] ?? 1, max: ratios.at(-1) ?? 1 };
+      }, png);
+      expect(c.p75, `resting 📌 in ${scheme}: ${JSON.stringify(c)}`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  test("a card's newest series plan: the latest dot sits on the card's rule, and the rule shows above and below it", async ({ page }) => {
+    await openReader(page, THREADS);
+    const row = page.locator(`.wiki-list-item.thread-row.latest[data-relpath="${ALPHA}"]`);
+    await expect(row).toHaveCount(1);
+    const g = await row.evaluate((el) => {
+      const box = (pseudo: string) => {
+        const cs = getComputedStyle(el, pseudo);
+        const h = el.getBoundingClientRect().height;
+        const left = parseFloat(cs.left);
+        const top = parseFloat(cs.top);
+        const height = cs.height === "auto" ? h - top - parseFloat(cs.bottom) : parseFloat(cs.height);
+        return { left, right: left + parseFloat(cs.width), top, bottom: top + height, content: cs.content };
+      };
+      return { rule: box("::before"), dot: box("::after") };
+    });
+    const at = JSON.stringify(g);
+    expect(g.rule.content, at).not.toBe("none");
+    expect(g.dot.content, at).not.toBe("none");
+    const mid = (b: { left: number; right: number }) => (b.left + b.right) / 2;
+    expect(Math.abs(mid(g.dot) - mid(g.rule)), `dot centred on the rule, ${at}`).toBeLessThanOrEqual(0.5);
+    // The dot's 2px ring included: the rule is still drawn above and below it.
+    expect(g.dot.top - 2 - g.rule.top, `rule above the dot, ${at}`).toBeGreaterThanOrEqual(3);
+    expect(g.rule.bottom - (g.dot.bottom + 2), `rule below the dot, ${at}`).toBeGreaterThanOrEqual(3);
   });
 });

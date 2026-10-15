@@ -48,6 +48,12 @@ describe("threadInstantLabel / threadSpanLabel", () => {
     expect(threadSpanLabel(card(), NOW)).toBe("mon 12.10 15:04 → yesterday 21:26");
     expect(threadSpanLabel(card({ sessions: [] }), NOW)).toBe("");
   });
+  test("a span inside one day names the day once", () => {
+    const sameDay = card({ sessions: [{ id: "s", provider: "claude", first: at(15, 8, 1), last: at(15, 9, 30), title: "" }] });
+    expect(threadSpanLabel(sameDay, NOW)).toBe("today 08:01 → 09:30");
+    const older = card({ sessions: [{ id: "s", provider: "claude", first: at(12, 8, 1), last: at(12, 9, 30), title: "" }] });
+    expect(threadSpanLabel(older, NOW)).toBe("mon 12.10 08:01 → 09:30");
+  });
 });
 
 describe("threadMetaLine", () => {
@@ -55,7 +61,7 @@ describe("threadMetaLine", () => {
     expect(threadMetaLine(card(), NOW, true)).toBe("2 sessions · mon 12.10 15:04 → yesterday 21:26 · ✋ 18");
     expect(threadMetaLine(card(), NOW, false)).toBe("2 sessions · mon 12.10 15:04 → yesterday 21:26");
     expect(threadMetaLine(card({ movesYou: 0, sessions: card().sessions.slice(0, 1) }), NOW, true)).toBe(
-      "1 session · yesterday 20:00 → yesterday 21:26",
+      "1 session · yesterday 20:00 → 21:26",
     );
   });
 });
@@ -75,6 +81,23 @@ describe("threadCardHeaderHtml", () => {
     expect(pinned).toContain('data-thread-pinned="1" aria-pressed="true"');
     expect(pinned).toContain('aria-expanded="false"');
     expect(pinned).toContain("wiki-thread-card pinned");
+  });
+  test("the 📌's label is the same pinned or not; aria-pressed alone says which", () => {
+    const label = (html: string) => /class="wiki-thread-pin[^>]*aria-label="([^"]*)"/.exec(html)![1];
+    expect(label(threadCardHeaderHtml(card(), false, NOW, true))).toBe("Pin this work thread first");
+    expect(label(threadCardHeaderHtml(card({ pinned: true }), false, NOW, true))).toBe("Pin this work thread first");
+  });
+  test("the fold carries no aria-label, so its name is its content: the name and every meta part", () => {
+    const html = threadCardHeaderHtml(card(), false, NOW, true);
+    const fold = /<button[^>]*class="wiki-thread-fold[^>]*>/.exec(html)![0];
+    expect(fold).not.toContain("aria-label");
+    expect(html).toContain(
+      '<small class="wiki-thread-meta"><span class="wiki-thread-count">2 sessions</span>' +
+        '<span class="wiki-thread-span"> · mon 12.10 15:04 → yesterday 21:26</span>' +
+        '<span class="wiki-thread-moves"> · ✋ 18</span></small>',
+    );
+    // The hover keeps the whole meta line too, for the span the rail truncates.
+    expect(fold).toContain("2 sessions · mon 12.10 15:04 → yesterday 21:26 · ✋ 18");
   });
 });
 
