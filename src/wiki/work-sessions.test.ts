@@ -224,6 +224,14 @@ describe("clipSessionsAt — the replay's view of a session that spans --at", ()
     expect(sessions[1]).toBe(ended);
   });
 
+  test("a file row after --at in the input never moves last past --at", () => {
+    // Upstream drops such rows at `until = at`; the clamp must not trust one
+    // that slipped through.
+    const spanning = session("s1", AT - 13 * H, AT + 30 * H, [AT + 2 * H, AT - 3 * H]);
+    const { sessions } = clipSessionsAt([spanning], AT);
+    expect(sessions[0]!.last).toBe(AT - 3 * H);
+  });
+
   test("a spanning session with no file rows left is clamped to --at, never past it", () => {
     const { sessions, clipped } = clipSessionsAt([session("s", AT - H, AT + H, [])], AT);
     expect(clipped).toBe(1);

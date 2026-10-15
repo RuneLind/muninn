@@ -537,6 +537,10 @@ test.describe("Wiki rail: worked-on substitution in Activity", () => {
               widths: marks.map((m) => Math.round(rect(m).width)),
               // The bar sits in the icon gutter, clear of the mark after it.
               barOverlap: rect(bar).right - rect(bar.nextElementSibling ?? bar).left,
+              // The bar stays inside the 22px icon gutter, and the mark after it
+              // starts where the title does.
+              barPastGutter: rect(bar).right - (rect(sub).left + 22),
+              nextVsTitle: rect(bar.nextElementSibling!).left - rect(el.querySelector(".wiki-list-title")!).left,
               subWidth: Math.round(sub.clientWidth),
               pastRow: marks.filter((m) => rect(m).right > rowRight + 0.5).length,
               subOverflow: sub.scrollWidth - sub.clientWidth,
@@ -554,6 +558,8 @@ test.describe("Wiki rail: worked-on substitution in Activity", () => {
         expect(g.subOverflow, at).toBeLessThanOrEqual(0);
         expect(g.barInSub, at).toBe(true);
         expect(g.barOverlap, at).toBeLessThanOrEqual(0);
+        expect(g.barPastGutter, at).toBeLessThanOrEqual(1);
+        expect(Math.abs(g.nextVsTitle), at).toBeLessThanOrEqual(1);
         expect(g.steps.length, at).toBe(4);
         expect(g.steps.every((w) => w >= 2.5), at).toBe(true);
         expect(g.labelClipped, at).toBe(false);

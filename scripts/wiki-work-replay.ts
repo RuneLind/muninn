@@ -23,14 +23,17 @@
  *     the checkout's `bots/`), whose `wikiDir` registers a bot wiki.
  *
  * A session that spans `at` (resumed after it) is CLIPPED, not dropped
- * (`clipSessionsAt`): upstream already cut its file rows at `until = at`, so it
- * is kept as the ledger answered then, with its `last` clamped to its newest
- * kept row. The live rail at `at` saw it that way, and the summary form at
- * `until = at` keeps the same writes, so the two inputs agree.
+ * (`clipSessionsAt`): it keeps the file rows upstream returns at `until = at`,
+ * with its `last` clamped to the newest of those rows, else `at`. The summary
+ * form at `until = at` drops the same rows, so the two inputs agree.
  *
- * Known limits: a clipped session's prompt-to-file attribution (`text`) is not
- * cut at `at`, and opencode titles are latest-wins upstream, so `named` reads
- * today's title.
+ * Known limits: upstream drops a whole (session, path, op) row whose last write
+ * is after `at`, so a clipped session keeps only the files it finished before
+ * `at`. A file it first wrote before `at` and wrote again after is missing,
+ * though the live rail at `at` saw it; `bulk` is computed over the kept rows
+ * and can differ from the live answer (`first` is unaffected). Its
+ * prompt-to-file attribution (`text`) is not cut at `at`. Opencode titles are
+ * latest-wins upstream, so `named` reads today's title.
  *
  * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
  * row's derivation) and the Worked-on top 10 (sort instant, state, shown date).
