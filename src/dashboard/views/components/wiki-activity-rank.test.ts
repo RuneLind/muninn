@@ -13,6 +13,8 @@ import {
   ACTIVITY_ROWS_MIN,
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
+  pageWorkBar,
+  pageWorkTerm,
   parseActivityWeights,
   RAIL_AGE_MAX_DAYS,
   rankActivity,
@@ -1425,5 +1427,68 @@ describe("rankActivity — session work (D5)", () => {
       const { page: _p2, ...y } = rowFor(today, rel)!;
       expect(x).toEqual(y);
     }
+  });
+});
+
+/** PR 699 fix round 1 batch 1: events the client must not score at full weight. */
+describe("rankActivity — session events the ranking may not use", () => {
+  const H = 3_600_000;
+  const OPEN: WorkedGate = { open: true, candidates: 1, covered: 1, coverage: 1 };
+  const withEvents = (base: WikiListing, events: unknown[], state: PageWork["state"] = "F"): WikiListing =>
+    ({ ...base, work: { sinceMs: NOW - 8 * DAY, state, events } as unknown as PageWork }) as WikiListing;
+  const strip = (p: WikiListing): WikiListing => ({ ...p, work: undefined });
+  const scored = (rows: ActivityRow[]) => rows.map(({ page, ...rest }) => ({ rel: page.relPath, ...rest }));
+
+  test("a future-dated event scores nothing: the page takes the no-events path", () => {
+    const future = NOW + 10 * DAY;
+    const oldFuture = withEvents(page({ relPath: "old.md", createdDaysAgo: 200 }), [[future, 100, "focus"]]);
+    (oldFuture.work as PageWork).focusMs = future;
+    const fresh = page({ relPath: "fresh.md", createdDaysAgo: 1 / 24 });
+    const rows = rankActivity([oldFuture, fresh], wide, NOW, OPEN);
+    expect(rows[0]!.page.relPath).toBe("fresh.md");
+    expect(scored(rows)).toEqual(scored(rankActivity([strip(oldFuture), fresh], wide, NOW, OPEN)));
+    expect(pageWorkTerm(oldFuture, NOW)).toBe(0);
+    expect(pageWorkBar(oldFuture, NOW)).toBeNull();
+    // Beside a usable event, the future one adds nothing to raw.
+    const ok: unknown = [NOW - 5 * H, 4, "focus"];
+    const mixed = withEvents(page({ relPath: "m.md", createdDaysAgo: 30 }), [[future, 100, "focus"], ok]);
+    const clean = withEvents(page({ relPath: "m.md", createdDaysAgo: 30 }), [ok]);
+    expect(pageWorkTerm(mixed, NOW)).toBe(pageWorkTerm(clean, NOW));
+    expect(scored(rankActivity([mixed], wide, NOW, OPEN))).toEqual(scored(rankActivity([clean], wide, NOW, OPEN)));
+  });
+
+  test("a malformed event is dropped, never thrown on: unknown kind, short tuple, bad numbers", () => {
+    const ok: unknown = [NOW - 5 * H, 4, "focus"];
+    const bad: unknown[] = [[NOW - 2 * H, 3, "review"], [NOW - 2 * H], [Number.NaN, 2, "focus"], [NOW - H, -1, "touch"], [NOW - H, "3", "focus"], null];
+    const base = page({ relPath: "x.md", createdDaysAgo: 30 });
+    const dirty = withEvents(base, [...bad, ok]);
+    const clean = withEvents(base, [ok]);
+    expect(() => rankActivity([dirty], wide, NOW, OPEN)).not.toThrow();
+    expect(scored(rankActivity([dirty], wide, NOW, OPEN))).toEqual(scored(rankActivity([clean], wide, NOW, OPEN)));
+    expect(pageWorkBar(dirty, NOW)).toEqual(pageWorkBar(clean, NOW));
+    // Nothing valid left: the no-events path, everywhere.
+    const allBad = withEvents(base, bad);
+    expect(scored(rankActivity([allBad], wide, NOW, OPEN))).toEqual(scored(rankActivity([strip(allBad)], wide, NOW, OPEN)));
+    expect(pageWorkBar(allBad, NOW)).toBeNull();
+    expect(() => sortPages([allBad, dirty], "worked", NOW)).not.toThrow();
+  });
+
+  test("a maintenance pass is not newer work for the parent's `newerChildren` (D4); a touch is", () => {
+    const parent = page({ relPath: "plans/p.mdx", title: "P", createdDaysAgo: 3 });
+    const kid = (kind: string) =>
+      ({
+        ...withEvents(page({ relPath: `plans/${kind}.html`, title: kind, createdDaysAgo: 4 }), [[NOW - H, 1, kind]], kind === "focus" ? "F" : "T0"),
+        parent: "plans/p.mdx",
+        pairedBy: "link",
+        type: "explainer",
+      }) as WikiListing;
+    const focusKid = kid("focus");
+    (focusKid.work as PageWork).focusMs = NOW - H;
+    const [passRow] = rankActivity([parent, kid("pass")], wide, NOW, OPEN);
+    expect(passRow!.newerChildren).toBeUndefined();
+    const [touchRow] = rankActivity([parent, kid("touch")], wide, NOW, OPEN);
+    expect(touchRow!.newerChildren).toEqual(["plans/touch.html"]);
+    const [focusRow] = rankActivity([parent, focusKid], wide, NOW, OPEN);
+    expect(focusRow!.newerChildren).toEqual(["plans/focus.html"]);
   });
 });

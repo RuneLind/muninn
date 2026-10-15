@@ -10,7 +10,7 @@
 import { relationsCount, type IssueRelation } from "../../../wiki/trackers/types.ts";
 import { JIRA_TRACKER_ID } from "../../../wiki/trackers/jira-id.ts";
 import { parseIssueRoot } from "../../../wiki/graph-types.ts";
-import type { PageWork } from "../../../wiki/work-focus.ts";
+import type { PageWork, WorkEvent } from "../../../wiki/work-focus.ts";
 
 /**
  * A wiki page's type. Independent client-safe copy of the store's alias (this file
@@ -916,7 +916,9 @@ export function workedSourceOf(
   const updated = updatedSignal(p, now);
   let newestWrite = signal.ms;
   if (isUsableWorkedMs(p.workedMs, now)) newestWrite = Math.max(newestWrite, p.workedMs);
-  for (const [ms] of pageWorkState(p)?.events ?? []) if (isUsableWorkedMs(ms, now)) newestWrite = Math.max(newestWrite, ms);
+  const w = pageWorkState(p);
+  const newestEvent = w && newestWorkEvent(usableWorkEvents(w, now));
+  if (newestEvent) newestWrite = Math.max(newestWrite, newestEvent[0]);
   if (
     updated.kind === "updated" &&
     updated.ms - newestWrite > CHANGED_SINCE_MIN_MS &&
@@ -1177,21 +1179,59 @@ export interface WorkedTouch {
   pass: boolean;
 }
 
-/** A page's work facts when they carry an event — states F, T and T0. Absent
- *  (state N, or no sessions memo at all) ⇒ today's chain everywhere (D11). */
+const WORK_EVENT_KINDS: ReadonlySet<unknown> = new Set(["focus", "touch", "pass"]);
+
+/** An event the client can score: a finite instant, finite non-negative edits
+ *  and a kind it knows. A kind a later server adds degrades to "dropped". */
+function isValidWorkEvent(ev: unknown): ev is WorkEvent {
+  if (!Array.isArray(ev) || ev.length < 3) return false;
+  const [ms, edits, kind] = ev as unknown[];
+  return (
+    typeof ms === "number" && Number.isFinite(ms) &&
+    typeof edits === "number" && Number.isFinite(edits) && edits >= 0 &&
+    WORK_EVENT_KINDS.has(kind)
+  );
+}
+
+/** One validation per shipped `work` object (the listing is re-read often). */
+const validatedWork = new WeakMap<object, PageWork | null>();
+
+/** A page's work facts when they carry a valid event — states F, T and T0.
+ *  Absent (state N, no sessions memo, or no event the client can read) ⇒
+ *  today's chain everywhere (D11). Invalid events are dropped here, once. */
 export function pageWorkState(p: Pick<WikiListing, "work">): PageWork | undefined {
   const w = p.work;
-  return w && Array.isArray(w.events) && w.events.length > 0 ? w : undefined;
+  if (!w || typeof w !== "object" || !Array.isArray(w.events) || w.events.length === 0) return undefined;
+  let out = validatedWork.get(w);
+  if (out === undefined) {
+    const events = w.events.filter(isValidWorkEvent);
+    out = events.length === 0 ? null : events.length === w.events.length ? w : { ...w, events };
+    validatedWork.set(w, out);
+  }
+  return out ?? undefined;
+}
+
+/** The events the future guard accepts at `now` — the only ones any reader
+ *  may score, date or rank on. */
+export function usableWorkEvents(w: PageWork, now: number): WorkEvent[] {
+  return w.events.filter(([ms]) => isUsableWorkedMs(ms, now));
+}
+
+/** The newest event of `events` passing `keep` (every event by default), or
+ *  undefined. */
+export function newestWorkEvent(
+  events: readonly WorkEvent[],
+  keep: (ev: WorkEvent) => boolean = () => true,
+): WorkEvent | undefined {
+  let best: WorkEvent | undefined;
+  for (const ev of events) if (keep(ev) && (!best || ev[0] > best[0])) best = ev;
+  return best;
 }
 
 /** The newest touch or pass event of a T/T0 page, for its mark's hover. */
 function touchOf(w: PageWork, now: number): WorkedTouch | undefined {
-  let best: WorkedTouch | undefined;
-  for (const [ms, , kind] of w.events) {
-    if (kind === "focus" || !isUsableWorkedMs(ms, now)) continue;
-    if (!best || ms > best.ms) best = { ms, label: localDay(new Date(ms)), pass: kind === "pass" };
-  }
-  return best;
+  const ev = newestWorkEvent(usableWorkEvents(w, now), ([, , kind]) => kind !== "focus");
+  return ev && { ms: ev[0], label: localDay(new Date(ev[0])), pass: ev[2] === "pass" };
 }
 
 /**
