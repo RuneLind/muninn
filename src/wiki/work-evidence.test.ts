@@ -134,3 +134,19 @@ describe("completeness and bounds", () => {
     expect(e.contributions).toMatchObject({ complete: false, reasons: ["contributions-cap"] });
   });
 });
+
+describe("fix round 1 batch 2 — lint check 14's reserved-page rule", () => {
+  test("G: a reserved basename owns nothing, whatever its case or its folder", () => {
+    const pages = [
+      meta("projects/x/claude.md", { owns: ["ABC-1"] }),
+      meta("p/Index.MDX", { owns: ["ABC-3"] }),
+      meta("p/claude.md", { owns: ["K-2"] }),
+      meta("p/c.md", { owns: ["K-2"] }),
+      meta("p/ref.mdx", { jira: ["ABC-1", "ABC-3", "K-2"] }),
+    ];
+    const focus = ["projects/x/claude.md", "p/Index.MDX", "p/claude.md", "p/c.md", "p/ref.mdx"];
+    const e = build(pages, focus.map((p) => thread(p, [p])));
+    expect(e.relations.issues).toEqual([["K-2", "p/c.md", "p/ref.mdx"]]);
+    expect(e.relations.ambiguousIssues).toEqual([]);
+  });
+});

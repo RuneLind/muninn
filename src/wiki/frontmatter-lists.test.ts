@@ -248,3 +248,36 @@ describe("fix round 1 — the related: reader's three defects", () => {
     ]);
   });
 });
+
+describe("fix round 1 batch 2 — leading slash and the name census", () => {
+  test("D: a /root-relative path that names no filesystem root falls through to step 4", () => {
+    expect(resolve("related: [/plans/c, /notes/a.md]")).toEqual({ targets: ["plans/c.mdx", "notes/a.md"], skipped: 0, ambiguous: 0 });
+    // Under no root and no page root-relative: still skipped.
+    expect(resolve("related: [/w/other/plans/c.mdx]")).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+  });
+
+  let root = "";
+  beforeAll(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-fm-census-"));
+    await mkdir(path.join(root, "plans"));
+    await writeFile(path.join(root, "plans/a.md"), "---\ntitle: A\n---\n");
+    await writeFile(path.join(root, "c.md"), "---\ntitle: Gamma Doc\n---\n");
+    await writeFile(path.join(root, "c.html"), "<html><head><title>Gamma Doc</title></head><body></body></html>");
+    await writeFile(path.join(root, "x.md"), "---\ntitle: X\n---\n");
+    await writeFile(path.join(root, "x.html"), "<html><head><title>Diagram Only</title></head><body></body></html>");
+    await writeFile(path.join(root, "b.md"), "---\ntitle: B\nrelated: [/plans/a.md, Gamma Doc, Diagram Only]\n---\n");
+  });
+  afterAll(() => rm(root, { recursive: true, force: true }));
+
+  test("D + F: the index resolves /plans/a.md and a title its stem-paired attachment shares", async () => {
+    const index = await buildWikiIndex(root);
+    const b = index.pages.find((p) => p.relPath === "b.md")!;
+    // The graph's own reading of the shared title: the markdown parent.
+    expect(index.resolve("Gamma Doc")?.relPath).toBe("c.md");
+    expect(index.pages.find((p) => p.relPath === "c.html")?.pairedBy).toBe("stem");
+    // A title only the attachment carries is still its own.
+    expect(b.related).toEqual(["plans/a.md", "c.md", "x.html"]);
+    expect(b.relatedSkipped).toBeUndefined();
+    expect(b.relatedAmbiguous).toBeUndefined();
+  });
+});

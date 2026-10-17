@@ -10,7 +10,8 @@
  * and the focus-page set; a relation to a hub focus page counts like any other.
  */
 
-import { isMetaStem, facetJiraKeys } from "../dashboard/views/components/wiki-filter.ts";
+import { facetJiraKeys } from "../dashboard/views/components/wiki-filter.ts";
+import { ownerCensus } from "./frontmatter-lists.ts";
 import { seriesMembersByFoldKey } from "../dashboard/views/components/wiki-groups.ts";
 import type { WikiPageMeta } from "./store.ts";
 import {
@@ -74,15 +75,9 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
   // Owners: the whole wiki, reserved and culled pages owning nothing (lint
   // check 14's rule). Named: a focus page's facet keys — a stamped `jira:`
   // entry, or an inferred ref that counts.
-  const owners = new Map<string, string[]>();
-  for (const p of input.pages) {
-    if (!p.owns || p.culled || isMetaStem(p.name)) continue;
-    for (const key of p.owns) {
-      const list = owners.get(key) ?? [];
-      if (!list.includes(p.relPath)) list.push(p.relPath);
-      owners.set(key, list);
-    }
-  }
+  const owners = ownerCensus(
+    input.pages.map((p) => ({ relPath: p.relPath, owns: p.owns ?? [], ...(p.culled ? { culled: true } : {}) })),
+  );
   const named = new Map<string, string[]>();
   for (const rel of focus) {
     const page = byRel.get(rel);

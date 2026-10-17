@@ -111,6 +111,38 @@ function ownsFrom(fm: Frontmatter): OwnsRead {
   return { present: true, keys: part ? ownsKeys(part.owns) : [], raw, line };
 }
 
+/**
+ * Reserved wiki-infrastructure basenames, any folder, any case — never real
+ * content pages. Matches the gardener's `FORBIDDEN_BASENAMES`
+ * (`src/gardener/draft.ts`), `.mdx` twins included (the source-page drafter
+ * writes native `.mdx`).
+ */
+const RESERVED_BASENAMES = new Set(["log.md", "index.md", "claude.md", "log.mdx", "index.mdx", "claude.mdx"]);
+
+export function isReservedBasename(relPathOrKey: string): boolean {
+  return RESERVED_BASENAMES.has(path.posix.basename(relPathOrKey).toLowerCase());
+}
+
+/**
+ * The wiki-wide `owns:` census (lint check 14's): key → the pages whose `owns:`
+ * lists it, in input order. Reserved and culled pages own nothing. Lint's
+ * `stateOwners` and the work-thread evidence both read it.
+ */
+export function ownerCensus(
+  pages: Iterable<{ relPath: string; owns: readonly string[]; culled?: boolean }>,
+): Map<string, string[]> {
+  const owners = new Map<string, string[]>();
+  for (const { relPath, owns, culled } of pages) {
+    if (culled || isReservedBasename(relPath)) continue;
+    for (const key of owns) {
+      const list = owners.get(key) ?? [];
+      if (!list.includes(relPath)) list.push(relPath);
+      owners.set(key, list);
+    }
+  }
+  return owners;
+}
+
 // ── related: ───────────────────────────────────────────────────────────────
 
 /** One `related:` entry before resolution: a wikilink target (from the scanner
@@ -280,7 +312,8 @@ const PAGE_EXT_RE = /\.(?:mdx?|html)$/i;
  *  1. a link target goes to the wikilink path (`index.resolve`, the graph's
  *     rule), else to an exact relPath (an `.html` page);
  *  2. `./` or `../` resolves against the page's folder;
- *  3. a filesystem-absolute path counts when it is under a root;
+ *  3. a filesystem-absolute path counts when it is under a root; a `/…` path
+ *     that is not goes on to step 4;
  *  4. otherwise a path resolves root-relative with the extension implied, and a
  *     bare name in the page's own folder first (`resolveSupersededBy`'s
  *     pattern), then root-level, then by stem, title or alias — only when it
@@ -316,15 +349,17 @@ export function resolveRelatedEntries(entries: readonly RelatedEntry[], ctx: Rel
       const v = e.value.replace(/\\/g, "/").replace(/#[^\s/]*$/, "").trim();
       if (/^\.{1,2}\//.test(v)) hit = relative(v);
       else if (v.startsWith("/")) {
+        // Under a root it is filesystem-absolute; otherwise (or when that
+        // names no page) `/plans/a.md` is root-relative, step 4.
         const lower = v.normalize("NFC").toLowerCase();
         const root = roots.find((r) => lower.startsWith(r + "/"));
-        hit = root ? byPathImplied(v.normalize("NFC").slice(root.length + 1)) : undefined;
+        hit = (root ? byPathImplied(v.normalize("NFC").slice(root.length + 1)) : undefined) ?? byPathImplied(v);
       } else if (v.includes("/")) hit = byPathImplied(v);
       else if (v) {
         // A bare name: the page's own folder, then the root, then a name.
         const stem = v.replace(PAGE_EXT_RE, "");
         const inDir = (name: string) => (dir === "." ? name : `${dir}/${name}`);
-        hit = byPathImplied(inDir(v)) ?? (stem !== v ? byPathImplied(inDir(stem)) : undefined) ?? byPathImplied(v);
+        hit = byPathImplied(inDir(v)) ?? (stem !== v ? byPathImplied(inDir(stem)) : undefined);
         if (!hit && stem !== v) hit = byPathImplied(stem);
         if (!hit) {
           const named = new Set([...ctx.byName(v.toLowerCase()), ...(stem !== v ? ctx.byName(stem.toLowerCase()) : [])]);

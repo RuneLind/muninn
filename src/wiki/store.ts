@@ -3389,9 +3389,20 @@ export async function buildWikiIndex(
    *  roll-up's owner rule. Only bodies holding one of the substrings parse. */
   const pageRefs = new Map<string, string[]>();
 
-  const register = (key: string, meta: WikiPageMeta) => {
+  /** Every page each `byKey` key can name, under `register`'s own rules — the
+   *  `related:` resolver's uniqueness test reads it, so it cannot disagree
+   *  with `resolve`. A fallback registration (a rule-1 child's title or alias)
+   *  joins a key only when no primary registration claimed it. */
+  const reach = new Map<string, Set<string>>();
+  const primaryKeys = new Set<string>();
+  const register = (key: string, meta: WikiPageMeta, fallback = false) => {
     const k = key.toLowerCase();
     if (!byKey.has(k)) byKey.set(k, meta);
+    if (!fallback) primaryKeys.add(k);
+    else if (primaryKeys.has(k)) return;
+    const set = reach.get(k) ?? new Set<string>();
+    set.add(meta.relPath);
+    reach.set(k, set);
   };
 
   await Promise.all(
@@ -3907,12 +3918,12 @@ export async function buildWikiIndex(
     if (meta.pairedBy === "stem") continue;
     register(meta.name, meta);
   }
-  const titlePass = (meta: WikiPageMeta): void => {
-    register(meta.title, meta);
-    for (const alias of meta.aliases) register(alias, meta);
+  const titlePass = (meta: WikiPageMeta, fallback: boolean): void => {
+    register(meta.title, meta, fallback);
+    for (const alias of meta.aliases) register(alias, meta, fallback);
   };
-  for (const meta of pages) if (meta.pairedBy !== "stem") titlePass(meta);
-  for (const meta of pages) if (meta.pairedBy === "stem") titlePass(meta);
+  for (const meta of pages) if (meta.pairedBy !== "stem") titlePass(meta, false);
+  for (const meta of pages) if (meta.pairedBy === "stem") titlePass(meta, true);
 
   // relPath lookup for the graph: both link kinds resolve to a target *page* and
   // are stored as that page's normalized relPath — unique even when stems collide,
@@ -3958,22 +3969,9 @@ export async function buildWikiIndex(
   }
 
   // `related:` entries to pages (D18). A stem, title or alias counts only when
-  // it names ONE page: `resolve` is first-registration-wins, so the census below
-  // is what tells a unique name from an ambiguous one.
+  // it names ONE page: `resolve` is first-registration-wins, so `reach` (filled
+  // by `register` itself) is what tells a unique name from an ambiguous one.
   if (rawRelated.size) {
-    const named = new Map<string, Set<string>>();
-    const census = (key: string, relPath: string) => {
-      const k = key.trim().toLowerCase();
-      if (!k) return;
-      const set = named.get(k) ?? new Set<string>();
-      set.add(relPath);
-      named.set(k, set);
-    };
-    for (const meta of pages) {
-      if (meta.pairedBy !== "stem") census(meta.name, meta.relPath);
-      census(meta.title, meta.relPath);
-      for (const alias of meta.aliases) census(alias, meta.relPath);
-    }
     const roots = [root, ...(workSessionsFor(root)?.identity.roots ?? [])];
     for (const meta of pages) {
       const entries = rawRelated.get(meta.relPath);
@@ -3982,7 +3980,7 @@ export async function buildWikiIndex(
         fromRelPath: meta.relPath,
         roots,
         byPath: (rel) => resolveRelPath(rel)?.relPath,
-        byName: (key) => [...(named.get(key) ?? [])],
+        byName: (key) => [...(reach.get(key) ?? [])],
         byLink: (target) => resolve(target)?.relPath,
       });
       if (r.targets.length) meta.related = r.targets;

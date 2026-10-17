@@ -47,7 +47,7 @@ import { JIRA_KEY_SOURCE } from "../jira/retrieval.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
-import { readOwns } from "./frontmatter-lists.ts";
+import { ownerCensus, readOwns } from "./frontmatter-lists.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
@@ -590,18 +590,11 @@ export interface OwnerPage {
   content: string;
 }
 
-/** The wiki-wide owner map: key → the pages whose `owns:` lists it. The caller
- *  leaves out reserved and culled pages, which own nothing. */
+/** The wiki-wide owner map: key → the pages whose `owns:` lists it
+ *  (`ownerCensus`, which also leaves out reserved pages; the caller leaves out
+ *  culled ones). */
 export function stateOwners(pages: Iterable<OwnerPage>): Map<string, string[]> {
-  const owners = new Map<string, string[]>();
-  for (const { relPath, content } of pages) {
-    for (const key of readOwns(content).keys) {
-      const list = owners.get(key) ?? [];
-      if (!list.includes(relPath)) list.push(relPath);
-      owners.set(key, list);
-    }
-  }
-  return owners;
+  return ownerCensus([...pages].map(({ relPath, content }) => ({ relPath, owns: readOwns(content).keys })));
 }
 
 /** `state-owns-unread`: an `owns:` that names no key would leave the page owning
