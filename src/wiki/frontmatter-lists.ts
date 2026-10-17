@@ -113,10 +113,11 @@ function ownsFrom(fm: Frontmatter): OwnsRead {
 
 // ── related: ───────────────────────────────────────────────────────────────
 
-/** One `related:` entry before resolution: a wikilink target (from the scanner,
- *  from a string that is a wikilink, or from YAML's nested-list reading of an
- *  unquoted `[[a]]`), or any other string. */
-export type RelatedEntry = { kind: "link"; target: string } | { kind: "text"; value: string };
+/** One `related:` entry before resolution: a wikilink target (from the scanner
+ *  or from a string that is a wikilink), any other string, or an item YAML
+ *  typed as something other than a string (a number, a map), which names no
+ *  page and is counted as skipped. */
+export type RelatedEntry = { kind: "link"; target: string } | { kind: "text"; value: string } | { kind: "unread" };
 
 export interface RelatedRead {
   present: boolean;
@@ -128,16 +129,20 @@ const NO_RELATED: RelatedRead = { present: false, entries: [] };
 /**
  * A page's `related:` entries, read from the raw entry text (D18): every
  * `[[…]]` the wikilink scanner finds in the `related:` line and its
- * continuation lines, plus the strings a YAML parse yields — of the whole
- * frontmatter, else of that entry alone — with nested lists flattened. A YAML
+ * continuation lines, YAML comments dropped, plus the top-level strings a YAML
+ * parse yields — of the whole frontmatter, else of that entry alone. A YAML
  * reader alone loses the unquoted wikilink forms: `[[a]]` parses as a nested
  * list and `[[a]], [[b]]` does not parse at all.
  *
  * A scalar is a one-entry list and `[]` is none. A string that holds a
- * wikilink yields its link targets (the scanner's), and a string inside a
- * nested list is a link target (YAML's reading of `[[a]]`), `|label` and
- * `#fragment` stripped. Link targets dedupe case-insensitively, so
- * `["[[a]]"]` and an unquoted `[[a]]` are one entry each, not two.
+ * wikilink yields its link targets (the scanner's), `|label` and `#fragment`
+ * stripped. A nested list is NOT read from YAML: it is an unquoted `[[…]]`,
+ * which the scanner already read from the raw text, and YAML's reading of it
+ * is typed (`[[1.10]]` is the number 1.1) and split (`[[Foo, Bar]]` is two
+ * items). Not walking it also bounds the read: `Bun.YAML` shares an alias by
+ * reference, so a walk of a nested alias chain costs 9^depth. Any other
+ * non-string item is one `unread` entry. Link targets dedupe
+ * case-insensitively, so `["[[a]]"]` and an unquoted `[[a]]` are one entry.
  */
 export function readRelated(content: string): RelatedRead {
   const fm = Frontmatter.of(content);
@@ -169,25 +174,56 @@ function relatedFrom(fm: Frontmatter): RelatedRead {
     seen.add(`t\u0000${t}`);
     out.push({ kind: "text", value: t });
   };
-  for (const t of extractWikilinks(entry.join("\n"))) link(t);
-  const top = (v: unknown) => {
-    if (v === null || v === undefined) return;
-    if (typeof v === "string") {
-      if (new RegExp(WIKILINK_RE.source).test(v)) for (const t of extractWikilinks(v)) link(t);
-      else text(v);
-    } else if (Array.isArray(v)) nested(v);
-    else text(typeof v === "object" ? JSON.stringify(v) : String(v));
+  for (const t of extractWikilinks(stripYamlComments(entry.join("\n")))) link(t);
+  const item = (v: unknown) => {
+    if (v === null || v === undefined || Array.isArray(v)) return;
+    if (typeof v !== "string") out.push({ kind: "unread" });
+    else if (new RegExp(WIKILINK_RE.source).test(v)) for (const t of extractWikilinks(v)) link(t);
+    else text(v);
   };
-  const nested = (list: readonly unknown[]) => {
-    for (const v of list) {
-      if (Array.isArray(v)) nested(v);
-      else if (typeof v === "string") link(v);
-      else top(v);
-    }
-  };
-  if (Array.isArray(value)) for (const v of value) (Array.isArray(v) ? nested(v) : top(v));
-  else top(value);
+  if (Array.isArray(value)) for (const v of value) item(v);
+  else item(value);
   return { present: true, entries: out };
+}
+
+/** YAML text with its comments dropped: a line whose first non-space
+ *  character is `#`, and from a `#` after whitespace to the line's end — both
+ *  outside a quoted scalar. A quote opens a scalar only where YAML starts one
+ *  (line start, after `:`, `-`, `[`, `{` or `,`), so the apostrophe in
+ *  `Rune's` opens nothing; a quoted scalar may span lines. */
+function stripYamlComments(text: string): string {
+  let out = "";
+  let quote: "'" | '"' | null = null;
+  let prev = ""; // last non-space character outside quotes on this line
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote) {
+      out += ch;
+      if (quote === '"' && ch === "\\") {
+        if (i + 1 < text.length) out += text[++i];
+      } else if (ch === quote) {
+        if (quote === "'" && text[i + 1] === "'") out += text[++i];
+        else {
+          quote = null;
+          prev = ch;
+        }
+      }
+      continue;
+    }
+    if (ch === "\n") {
+      out += ch;
+      prev = "";
+      continue;
+    }
+    if (ch === "#" && (i === 0 || /\s/.test(text[i - 1]!))) {
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++;
+      continue;
+    }
+    if ((ch === "'" || ch === '"') && (prev === "" || ":-[{,".includes(prev))) quote = ch;
+    if (!/\s/.test(ch)) prev = ch;
+    out += ch;
+  }
+  return out;
 }
 
 /** A wikilink target as the scanner leaves it: `|label` and `#fragment`
@@ -271,7 +307,9 @@ export function resolveRelatedEntries(entries: readonly RelatedEntry[], ctx: Rel
   for (const e of entries) {
     let hit: string | undefined;
     let isAmbiguous = false;
-    if (e.kind === "link") {
+    if (e.kind === "unread") {
+      // A number or a map names no page.
+    } else if (e.kind === "link") {
       const t = e.target.replace(/\\/g, "/");
       hit = /^\.{1,2}\//.test(t) ? relative(t) : (ctx.byLink(e.target) ?? ctx.byPath(t));
     } else {

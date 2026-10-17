@@ -163,3 +163,88 @@ describe("the index read pass", () => {
     expect(toListing(index, by("plans/two.md")) as unknown as Record<string, unknown>).not.toHaveProperty("relatedSkipped");
   });
 });
+
+describe("fix round 1 — the related: reader's three defects", () => {
+  /** An alias chain: `a0` holds nine leaves, each `a<i>` nine references to
+   *  `a<i-1>`. `Bun.YAML` shares an alias by reference, so a reader that walks
+   *  the value in full costs 9^depth while the text stays a few hundred bytes. */
+  const aliasBomb = (depth: number, map: boolean) => {
+    let y = map ? "a0: &a0 {k0: lol, k1: lol, k2: lol}\n" : "a0: &a0 [lol,lol,lol,lol,lol,lol,lol,lol,lol]\n";
+    for (let i = 1; i <= depth; i++) {
+      const refs = Array.from({ length: 9 }, (_, j) => (map ? `k${j}: *a${i - 1}` : `*a${i - 1}`)).join(", ");
+      y += map ? `a${i}: &a${i} {${refs}}\n` : `a${i}: &a${i} [${refs}]\n`;
+    }
+    return `---\n${y}related: *a${depth}\n---\nbody\n`;
+  };
+
+  for (const map of [false, true]) {
+    test(`A: a deep YAML alias chain (${map ? "maps" : "lists"}) reads in bounded time`, () => {
+      for (const depth of [3, 5, 7, 9]) {
+        const content = aliasBomb(depth, map);
+        const t = performance.now();
+        readFrontmatterLists(content);
+        readRelated(content);
+        const ms = performance.now() - t;
+        expect({ depth, fast: ms < 100 }).toEqual({ depth, fast: true });
+      }
+    });
+  }
+
+  /** `1.1.md` exists, so a YAML-typed `1.10` read as text would land there. */
+  const numCtx = (): RelatedResolveContext => ({
+    fromRelPath: "notes/b.md",
+    roots: [],
+    byPath: (rel) => (["1.1.md", "notes/b.md"].includes(rel) ? rel : undefined),
+    byName: (key) => (key === "1.1" ? ["1.1.md"] : []),
+    byLink: () => undefined,
+  });
+
+  test("B: an unquoted [[…]] is read once, by the scanner, never as YAML's typed scalar", () => {
+    expect(entries("related: [[123]]")).toEqual([{ kind: "link", target: "123" }]);
+    expect(entries("related: [[true]]")).toEqual([{ kind: "link", target: "true" }]);
+    expect(entries("related: [[Title: sub]]")).toEqual([{ kind: "link", target: "Title: sub" }]);
+    expect(resolve("related: [[Title: sub]]")).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+    expect(entries("related: [[1.10]]")).toEqual([{ kind: "link", target: "1.10" }]);
+    expect(resolveRelatedEntries(entries("related: [[1.10]]"), numCtx())).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+  });
+
+  test("B: [[Foo, Bar]] is one link, not three", () => {
+    expect(entries("related: [[Foo, Bar]]")).toEqual([{ kind: "link", target: "Foo, Bar" }]);
+  });
+
+  test("B: a top-level item YAML types as a map or number is skipped and counted, once", () => {
+    expect(resolve("related:\n  - Title: sub\n  - [[a]]")).toEqual({ targets: ["notes/a.md"], skipped: 1, ambiguous: 0 });
+    expect(resolveRelatedEntries(entries("related: [1.10]"), numCtx())).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+  });
+
+  test("C: a wikilink inside a YAML comment is no entry", () => {
+    expect(entries('related:\n  - "[[b]]"\n# history: [[c]] was the old plan')).toEqual([{ kind: "link", target: "b" }]);
+    expect(entries('related:\n  - "[[b]]"\n  # [[c]] dropped')).toEqual([{ kind: "link", target: "b" }]);
+    expect(entries("related: [[a]] # comment [[c]]")).toEqual([{ kind: "link", target: "a" }]);
+    expect(entries("related: [[a]], [[d]] # was [[c]]")).toEqual([
+      { kind: "link", target: "a" },
+      { kind: "link", target: "d" },
+    ]);
+    expect(entries("related: Rune's notes # [[c]]")).toEqual([{ kind: "text", value: "Rune's notes" }]);
+  });
+
+  test("C: a # with no space before it, or inside quotes, is not a comment", () => {
+    expect(entries("related: [[a#Section]]")).toEqual([{ kind: "link", target: "a" }]);
+    expect(entries('related: ["[[a]] #x"]')).toEqual([{ kind: "link", target: "a" }]);
+    expect(entries('related: "[[a]] # [[c]]"')).toEqual([
+      { kind: "link", target: "a" },
+      { kind: "link", target: "c" },
+    ]);
+    expect(entries("related: '[[a]] # [[c]]'")).toEqual([
+      { kind: "link", target: "a" },
+      { kind: "link", target: "c" },
+    ]);
+    // YAML refuses this one whole, so only the scanner reads it: the quoted
+    // `#` is kept and the links after the quote are read.
+    expect(entries('related: "[[a]] # [[c]]", [[d]]')).toEqual([
+      { kind: "link", target: "a" },
+      { kind: "link", target: "c" },
+      { kind: "link", target: "d" },
+    ]);
+  });
+});
