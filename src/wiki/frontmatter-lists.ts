@@ -146,9 +146,9 @@ export function ownerCensus(
 // ── related: ───────────────────────────────────────────────────────────────
 
 /** One `related:` entry before resolution: a wikilink target (from the scanner
- *  or from a string that is a wikilink), any other string, or an item YAML
- *  typed as something other than a string (a number, a map), which names no
- *  page and is counted as skipped. */
+ *  or from a string that is a wikilink), any other string, or an item that
+ *  names no page — a number, a map, or what lies past the walk's bounds — which
+ *  is counted as skipped. */
 export type RelatedEntry = { kind: "link"; target: string } | { kind: "text"; value: string } | { kind: "unread" };
 
 export interface RelatedRead {
@@ -158,23 +158,37 @@ export interface RelatedRead {
 
 const NO_RELATED: RelatedRead = { present: false, entries: [] };
 
+/** How deep and how many nodes the YAML value is walked. `Bun.YAML` shares an
+ *  alias by reference, so an alias chain costs fanout^depth to walk in full
+ *  while its text stays a few hundred bytes. Past either bound the rest is one
+ *  `unread` entry. */
+const RELATED_WALK_DEPTH_MAX = 8;
+const RELATED_WALK_NODES_MAX = 1000;
+
 /**
- * A page's `related:` entries, read from the raw entry text (D18): every
- * `[[…]]` the wikilink scanner finds in the `related:` line and its
- * continuation lines, YAML comments dropped, plus the top-level strings a YAML
- * parse yields — of the whole frontmatter, else of that entry alone. A YAML
- * reader alone loses the unquoted wikilink forms: `[[a]]` parses as a nested
- * list and `[[a]], [[b]]` does not parse at all.
+ * A page's `related:` entries, read from the raw entry text (D18): the
+ * `related:` line and its continuation lines up to the next top-level key.
  *
- * A scalar is a one-entry list and `[]` is none. A string that holds a
- * wikilink yields its link targets (the scanner's), `|label` and `#fragment`
- * stripped. A nested list is NOT read from YAML: it is an unquoted `[[…]]`,
- * which the scanner already read from the raw text, and YAML's reading of it
- * is typed (`[[1.10]]` is the number 1.1) and split (`[[Foo, Bar]]` is two
- * items). Not walking it also bounds the read: `Bun.YAML` shares an alias by
- * reference, so a walk of a nested alias chain costs 9^depth. Any other
- * non-string item is one `unread` entry. Link targets dedupe
- * case-insensitively, so `["[[a]]"]` and an unquoted `[[a]]` are one entry.
+ * 1. Every `[[…]]` the wikilink scanner (`WIKILINK_RE`) finds there and that
+ *    is not inside a YAML comment is a link entry, `|label` and `#fragment`
+ *    stripped (and the leading `[` of a `[[[a]]]` span). A comment is a `#` at
+ *    a line's start or after whitespace, to the line's end, outside a quoted
+ *    scalar and outside a `[[…]]` span (a span holds no comment, so a `#`, a
+ *    quote or a bracket inside one is inert). A quote opens a scalar only
+ *    where YAML starts one — a line's start or after `:`, `-`, `[`, `{` or
+ *    `,` — and only when it closes later in the entry (`''` and `\"` are
+ *    escapes); a quoted scalar may span lines.
+ * 2. Then the value a YAML parse yields — of the whole frontmatter, else of
+ *    the entry alone — walked with nested lists flattened: a string holding a
+ *    wikilink yields its links, any other string is a text entry. YAML reads an
+ *    unquoted `[[a]]` as a nested list (`[["a"]]`) and refuses `[[a]], [[b]]`;
+ *    a list equal to a scanned span's own YAML reading adds nothing, so
+ *    `[[1.10]]` stays the link `1.10` and `[[Foo, Bar]]` one link, not two
+ *    typed or split items. A null names nothing; any other non-string item is
+ *    one `unread` entry, and so is whatever lies past the walk's bounds.
+ *
+ * A scalar is a one-entry list and `[]` is none. Link targets dedupe
+ * case-insensitively and text exactly, so each target is read once.
  */
 export function readRelated(content: string): RelatedRead {
   const fm = Frontmatter.of(content);
@@ -206,62 +220,129 @@ function relatedFrom(fm: Frontmatter): RelatedRead {
     seen.add(`t\u0000${t}`);
     out.push({ kind: "text", value: t });
   };
-  for (const t of extractWikilinks(stripYamlComments(entry.join("\n")))) link(t);
-  const item = (v: unknown) => {
-    if (v === null || v === undefined || Array.isArray(v)) return;
-    if (typeof v !== "string") out.push({ kind: "unread" });
-    else if (new RegExp(WIKILINK_RE.source).test(v)) for (const t of extractWikilinks(v)) link(t);
-    else text(v);
+  let overrun = false;
+  const unread = () => out.push({ kind: "unread" });
+
+  const spans = uncommentedSpans(entry.join("\n"));
+  for (const s of spans) link(s.inner);
+
+  // YAML's reading of each scanned span, parsed only once a list is met.
+  let readings: unknown[] | undefined;
+  const isReading = (v: unknown) => {
+    readings ??= spans.flatMap((s) => {
+      try {
+        return [Bun.YAML.parse(`[[${s.inner}]]`)];
+      } catch {
+        return [];
+      }
+    });
+    return readings.some((r) => yamlEqual(r, v));
   };
-  if (Array.isArray(value)) for (const v of value) item(v);
-  else item(value);
+  let nodes = 0;
+  const walk = (v: unknown, depth: number) => {
+    if (++nodes > RELATED_WALK_NODES_MAX || depth > RELATED_WALK_DEPTH_MAX) {
+      if (!overrun) unread();
+      overrun = true;
+      return;
+    }
+    if (v === null || v === undefined) return;
+    if (typeof v === "string") {
+      if (new RegExp(WIKILINK_RE.source).test(v)) for (const t of extractWikilinks(v)) link(t);
+      else text(v);
+    } else if (Array.isArray(v)) {
+      if (isReading(v)) return;
+      for (const item of v) walk(item, depth + 1);
+    } else unread();
+  };
+  walk(value, 0);
   return { present: true, entries: out };
 }
 
-/** YAML text with its comments dropped: a line whose first non-space
- *  character is `#`, and from a `#` after whitespace to the line's end — both
- *  outside a quoted scalar. A quote opens a scalar only where YAML starts one
- *  (line start, after `:`, `-`, `[`, `{` or `,`), so the apostrophe in
- *  `Rune's` opens nothing; a quoted scalar may span lines. */
-function stripYamlComments(text: string): string {
-  let out = "";
-  let quote: "'" | '"' | null = null;
+/** Structural equality, walked over `reading` (a small parse of one span), so
+ *  comparing it to a shared alias chain costs the reading's size, not the
+ *  chain's. */
+function yamlEqual(reading: unknown, v: unknown): boolean {
+  if (Array.isArray(reading)) {
+    return Array.isArray(v) && v.length === reading.length && reading.every((r, i) => yamlEqual(r, v[i]));
+  }
+  if (reading !== null && typeof reading === "object") {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+    const rk = Object.keys(reading);
+    const r = reading as Record<string, unknown>;
+    const o = v as Record<string, unknown>;
+    return rk.length === Object.keys(o).length && rk.every((k) => Object.hasOwn(o, k) && yamlEqual(r[k], o[k]));
+  }
+  return Object.is(reading, v);
+}
+
+/** The `[[…]]` spans of `text` outside its YAML comments, each with its inner
+ *  text (between the brackets, a `[[[a]]]` span's extra `[` dropped). */
+function uncommentedSpans(text: string): { inner: string }[] {
+  const spans = [...text.matchAll(new RegExp(WIKILINK_RE.source, "g"))].map((m) => ({
+    start: m.index,
+    end: m.index + m[0].length,
+    inner: m[0].slice(2, -2).replace(/^\[+/, ""),
+  }));
+  // Spans masked to a neutral character: nothing inside one opens a quote or a comment.
+  let masked = text;
+  if (spans.length) {
+    const buf = text.split("");
+    for (const s of spans) for (let i = s.start; i < s.end; i++) buf[i] = "x";
+    masked = buf.join("");
+  }
+  const comments: [number, number][] = [];
   let prev = ""; // last non-space character outside quotes on this line
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!;
-    if (quote) {
-      out += ch;
-      if (quote === '"' && ch === "\\") {
-        if (i + 1 < text.length) out += text[++i];
-      } else if (ch === quote) {
-        if (quote === "'" && text[i + 1] === "'") out += text[++i];
-        else {
-          quote = null;
-          prev = ch;
-        }
-      }
-      continue;
-    }
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i]!;
     if (ch === "\n") {
-      out += ch;
       prev = "";
       continue;
     }
-    if (ch === "#" && (i === 0 || /\s/.test(text[i - 1]!))) {
-      while (i + 1 < text.length && text[i + 1] !== "\n") i++;
+    if (ch === "#" && (i === 0 || /\s/.test(masked[i - 1]!))) {
+      const end = masked.indexOf("\n", i);
+      comments.push([i, end < 0 ? masked.length : end]);
+      i = end < 0 ? masked.length : end - 1;
       continue;
     }
-    if ((ch === "'" || ch === '"') && (prev === "" || ":-[{,".includes(prev))) quote = ch;
+    if ((ch === "'" || ch === '"') && (prev === "" || ":-[{,".includes(prev))) {
+      // A quote that never closes is a literal character, not a scalar.
+      const close = closingQuote(masked, i, ch);
+      if (close >= 0) {
+        i = close;
+        prev = ch;
+        continue;
+      }
+    }
     if (!/\s/.test(ch)) prev = ch;
-    out += ch;
   }
-  return out;
+  // Both lists ascend, and a span lies wholly inside or outside a comment.
+  let c = 0;
+  return spans.filter((s) => {
+    while (c < comments.length && comments[c]![1] <= s.start) c++;
+    return !(c < comments.length && comments[c]![0] <= s.start);
+  });
+}
+
+/** The index of the quote that closes the scalar `quote` opens at `open`, or
+ *  -1: `''` is an escaped quote in a single-quoted scalar, `\` escapes the next
+ *  character in a double-quoted one. */
+function closingQuote(text: string, open: number, quote: "'" | '"'): number {
+  for (let i = open + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (quote === '"' && ch === "\\") i++;
+    else if (ch === quote) {
+      if (quote === "'" && text[i + 1] === "'") i++;
+      else return i;
+    }
+  }
+  return -1;
 }
 
 /** A wikilink target as the scanner leaves it: `|label` and `#fragment`
- *  dropped, backslash escapes removed. */
+ *  dropped, backslash escapes removed, and the leading `[` a `[[[a]]]` span
+ *  carries (the scanner reads it as `[a`). */
 function cleanLinkTarget(target: string): string {
-  let t = target.replace(/\\/g, "").split("|")[0]!.trim();
+  let t = target.replace(/\\/g, "").split("|")[0]!.replace(/^\[+/, "").trim();
   const hash = t.indexOf("#");
   if (hash === 0) return "";
   if (hash > 0) t = t.slice(0, hash).trim();

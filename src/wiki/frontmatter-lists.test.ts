@@ -167,7 +167,8 @@ describe("the index read pass", () => {
 describe("fix round 1 — the related: reader's three defects", () => {
   /** An alias chain: `a0` holds nine leaves, each `a<i>` nine references to
    *  `a<i-1>`. `Bun.YAML` shares an alias by reference, so a reader that walks
-   *  the value in full costs 9^depth while the text stays a few hundred bytes. */
+   *  the value in full costs fanout^depth (here 9^depth) while the text stays a
+   *  few hundred bytes. */
   const aliasBomb = (depth: number, map: boolean) => {
     let y = map ? "a0: &a0 {k0: lol, k1: lol, k2: lol}\n" : "a0: &a0 [lol,lol,lol,lol,lol,lol,lol,lol,lol]\n";
     for (let i = 1; i <= depth; i++) {
@@ -319,5 +320,114 @@ describe("fix round 1 batch 3 — N: the index and the reader share one frontmat
     const long = `---\n${filler}\nowns: [ABC-5]\n---\n\n${"line\n".repeat(100)}`;
     expect(readFrontmatterLists(long).owns).toEqual(readOwns(long));
     expect(readFrontmatterLists(long).owns.keys).toEqual(["ABC-5"]);
+  });
+});
+
+describe("fix round 2 — the related: reader against the whole D18 table", () => {
+  /** Entries as `L:<target>` / `T:<value>` / `U`, sorted: order-insensitive, and a
+   *  duplicate shows as a repeated string. */
+  const read = (content: string) =>
+    readRelated(content)
+      .entries.map((e) => (e.kind === "link" ? `L:${e.target}` : e.kind === "text" ? `T:${e.value}` : "U"))
+      .sort();
+  const fmPage = (value: string) => page(`related:${value.startsWith("\n") ? "" : " "}${value}`);
+  /** `a0` holds `fanout` leaves, each `a<i>` `fanout` references to `a<i-1>`. */
+  const aliasChain = (depth: number, fanout: number) => {
+    let y = `a0: &a0 [${Array(fanout).fill("lol").join(", ")}]\n`;
+    for (let i = 1; i <= depth; i++) y += `a${i}: &a${i} [${Array(fanout).fill(`*a${i - 1}`).join(", ")}]\n`;
+    return `---\n${y}related: *a${depth}\n---\nbody\n`;
+  };
+
+  // [row, raw value after `related:` (a leading \n is a block), expected]
+  const TABLE: [number, string, string[]][] = [
+    [1, "[[a]]", ["L:a"]],
+    [2, "[[a]], [[b]]", ["L:a", "L:b"]],
+    [3, '["[[a]]"]', ["L:a"]],
+    [4, '"[[x]]"', ["L:x"]],
+    [5, "[]", []],
+    [6, "\n  - [[x]]", ["L:x"]],
+    [7, "\n  - plans/a.md\n  - plans/b.md", ["T:plans/a.md", "T:plans/b.md"]],
+    [8, "[plans/a.md, notes/b.md]", ["T:notes/b.md", "T:plans/a.md"]],
+    [9, "some prose words", ["T:some prose words"]],
+    [10, "[[x|PR #702]], [[y]]", ["L:x", "L:y"]],
+    [11, "[[a #Section]]", ["L:a"]],
+    [12, "\n  - [[plan|Fase #2]]", ["L:plan"]],
+    [13, "[[a]] # [[c]]", ["L:a"]],
+    [14, '\n  - "[[b]]"\n# history: [[c]] was the old plan', ["L:b"]],
+    [15, "[['90s design]] # [[c]]", ["L:'90s design"]],
+    [16, "\n  - [['90s design]]\n  # [[c]]\n  - [[d]]", ["L:'90s design", "L:d"]],
+    [17, '"[[a]] # [[c]]", [[d]]', ["L:a", "L:c", "L:d"]],
+    [18, "'[[a]] # [[c]]', [[d]]", ["L:a", "L:c", "L:d"]],
+    [19, "Rune's notes # [[c]]", ["T:Rune's notes"]],
+    [20, "[[O'Brien]] # [[c]]", ["L:O'Brien"]],
+    [21, "\n  - [plans/a.md, plans/b.md]", ["T:plans/a.md", "T:plans/b.md"]],
+    [22, "\n  - - plans/a.md\n    - plans/b.md", ["T:plans/a.md", "T:plans/b.md"]],
+    // No `[[…]]` span (the scanner needs `]]`): YAML's two one-item lists, flattened to text.
+    [23, "[[a], [b]]", ["T:a", "T:b"]],
+    [24, '["[[a]]", [b, c]]', ["L:a", "T:b", "T:c"]],
+    // The scanner's span is `[[[a]]` (target `[a`, its leading `[` dropped);
+    // YAML's `[[["a"]]]` holds that span's own reading, which adds nothing.
+    [25, "[[[a]]]", ["L:a"]],
+    [26, "[[123]]", ["L:123"]],
+    [27, "[[1.10]]", ["L:1.10"]],
+    [28, "[[Foo, Bar]]", ["L:Foo, Bar"]],
+    [29, "[[Title: sub]]", ["L:Title: sub"]],
+    [30, "[1.10]", ["U"]],
+    [31, "[[a#Section]]", ["L:a"]],
+    [32, '\n  - "[[a]]\n  # [[c]]', ["L:a"]],
+    [34, '\n  - "[[a]] # not a comment"', ["L:a"]],
+    // Each row below breaks YAML on purpose, so only the scanner reads it: one
+    // row per quote opener, escape and comment rule the scanner keeps.
+    [35, '"[[a]]\n  # [[c]]", [[d]]', ["L:a", "L:c", "L:d"]], // a quote spans lines
+    [36, '["[[a]] # [[c]]"], [[d]]', ["L:a", "L:c", "L:d"]], // opener `[`
+    [37, '[[d]], "[[a]] # [[c]]"', ["L:a", "L:c", "L:d"]], // opener `,`
+    [38, '\n  - "[[a]] # [[c]]", [[d]]', ["L:a", "L:c", "L:d"]], // opener `-`
+    [39, '\n  "[[a]] # [[c]]", [[d]]', ["L:a", "L:c", "L:d"]], // opener at line start
+    [40, '{"[[a]] # [[c]]": x}, [[d]]', ["L:a", "L:c", "L:d"]], // opener `{`
+    [41, "'it''s [[a]] # [[c]]', [[d]]", ["L:a", "L:c", "L:d"]], // `''` escape
+    [42, '"say \\"hi\\" [[a]] # [[c]]", [[d]]', ["L:a", "L:c", "L:d"]], // `\\"` escape
+    [43, "[[x]], see#y [[a]]", ["L:a", "L:x"]], // `#` after a non-space opens no comment
+    [48, '"[[a]]" "x # [[c]]", [[d]]', ["L:a"]], // a quote right after a closed one opens nothing
+    [49, "[1.10, 2.5, {k: v}, ~]", ["U", "U", "U"]], // each non-string item is one count; a null names nothing
+    [50, '"[[[a]]]"', ["L:a"]], // the string's link and the scanner's span are one target
+    [51, "[['90s]], [[d]] # [['80s]]", ["L:'90s", "L:d"]], // a quote inside a span opens nothing
+    [52, '\n  - [[a]]\n  "[[b]] # [[c]]", [[d]]', ["L:a", "L:b", "L:c", "L:d"]], // each line starts a fresh opener test
+    [53, '\n  - "[[a]]"\n  - - - a\n      - b', ["L:a", "T:a", "T:b"]], // a list longer than a span's reading is not that reading
+  ];
+
+  for (const [row, value, expected] of TABLE) {
+    test(`row ${row}: related: ${JSON.stringify(value)}`, () => {
+      expect(read(fmPage(value))).toEqual([...expected].sort());
+    });
+  }
+
+  test("row 33: the depth-9 alias chain reads in bounded time and is counted, not dropped", () => {
+    const content = aliasChain(9, 9);
+    const t = performance.now();
+    const got = read(content);
+    expect(performance.now() - t).toBeLessThan(100);
+    // Its leaves sit ten lists deep, past the depth bound: counted, never dropped.
+    expect(got).toEqual(["U"]);
+  });
+
+  test("row 44: a list nested past the depth cap is one unread entry", () => {
+    expect(read(aliasChain(20, 1))).toEqual(["U"]);
+  });
+
+  test("row 45: a list past the node cap is one unread entry", () => {
+    expect(read(aliasChain(4, 9))).toEqual(["T:lol", "U"]);
+  });
+
+  test("row 47: an entry of unclosed quotes reads in linear time", () => {
+    const content = page(`related:\n${'  - "[[a]] x\n'.repeat(5000)}`);
+    const t = performance.now();
+    const got = read(content);
+    expect(performance.now() - t).toBeLessThan(100);
+    expect(got).toEqual(["L:a"]);
+  });
+
+  test("row 46: within the caps, a nested list is read whole", () => {
+    expect(read(aliasChain(3, 2))).toEqual(["T:lol"]);
+    expect(read(fmPage("\n  - - - a\n      - b\n    - c"))).toEqual(["T:a", "T:b", "T:c"]);
   });
 });
