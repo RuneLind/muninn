@@ -181,6 +181,15 @@ describe("fix round 1 batch 3 — H: the contribution cap never cuts inside a th
     expect(e.contributions).toMatchObject({ complete: false, reasons: ["contributions-cap"] });
   });
 
+  test("a thread that lands exactly on the cap still ships", () => {
+    const a = rowsFor("a", 199, 5, 3_000);
+    const c = rowsFor("c", 1, 5, 1_000);
+    const threads = [thread("a/p0.mdx", ["a/p0.mdx"]), thread("c/p0.mdx", ["c/p0.mdx"])];
+    const e = build(threads.map((t) => meta(t.key)), threads, { contributions: [...a, ...c] });
+    expect(e.contributions.rows.length).toBe(WORK_EVIDENCE_CONTRIBUTIONS_MAX);
+    expect(e.contributions).toMatchObject({ complete: true, reasons: [], cut: [] });
+  });
+
   test("under the cap nothing is cut", () => {
     const rows = rowsFor("a", 2, 2, 100);
     const e = build([meta("a/p0.mdx")], [thread("a/p0.mdx", ["a/p0.mdx"])], { contributions: rows });

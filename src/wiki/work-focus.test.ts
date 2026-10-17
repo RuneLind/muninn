@@ -523,4 +523,8 @@ describe("fix round 1 batch 3 — I: a contribution names its session the way th
     expect(t.sessions.find((s) => s.id === "s1")!.provider).toBe("claude");
     expect(new Set(t.sessions.map(workSessionRef))).toEqual(new Set(r.contributions.map((c) => c[0])));
   });
+
+  test("a provider the mapping does not name keeps its own spelling", () => {
+    expect(workSessionRef({ provider: "", id: "x" })).toBe(":x");
+  });
 });
