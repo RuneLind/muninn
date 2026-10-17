@@ -37,7 +37,10 @@ import {
   type RailThreadCard,
 } from "./wiki-recents.ts";
 import { normalizeRel } from "./wiki-nav.ts";
-import { isWorkHub, threadScore, WORK_WINDOW_MS, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
+import { WORK_WINDOW_MS, type IndexWork, type WorkThread } from "../../../wiki/work-focus.ts";
+import { newestFocusPage, threadHoldsPin, threadName, threadRankScore, usableThreads } from "./wiki-thread-core.ts";
+
+export { threadName, threadPinAnchor, usableThreads } from "./wiki-thread-core.ts";
 
 /** What the wiki's listing says — the same for every viewer. */
 export interface RailWikiFacts {
@@ -67,102 +70,6 @@ export interface RailViewer {
   threadPin?: string | null;
 }
 
-const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
-const isFiniteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-
-/** The threads of a payload this client can draw: a `key`, string `pages` and
- *  `touched` lists and at least one well-formed session (a malformed session
- *  is skipped). A malformed thread — one with no usable session included — is
- *  dropped whole, never thrown on: the payload crossed the wire. */
-export function usableThreads(threads: unknown): WorkThread[] {
-  if (!Array.isArray(threads)) return [];
-  const out: WorkThread[] = [];
-  for (const t of threads) {
-    if (!t || typeof t !== "object") continue;
-    const { key, pages, touched, sessions } = t as Record<string, unknown>;
-    if (!isStr(key) || !Array.isArray(pages) || !pages.every(isStr)) continue;
-    if (!Array.isArray(touched) || !touched.every(isStr) || !Array.isArray(sessions)) continue;
-    const ss: WorkThreadSession[] = [];
-    for (const x of sessions) {
-      if (!x || typeof x !== "object") continue;
-      const r = x as Record<string, unknown>;
-      if (!isStr(r.id) || !isFiniteNum(r.first) || !isFiniteNum(r.last)) continue;
-      ss.push({
-        id: r.id,
-        provider: typeof r.provider === "string" ? r.provider : "",
-        first: r.first,
-        last: r.last,
-        title: typeof r.title === "string" ? r.title : "",
-      });
-    }
-    if (!ss.length) continue;
-    out.push({ key, pages: pages as string[], touched: touched as string[], sessions: ss });
-  }
-  return out;
-}
-
-/** The card name: the top page's display title, cut at the first ` — `. */
-export function threadName(title: string): string {
-  const cut = title.indexOf(" — ");
-  return cut > 0 ? title.slice(0, cut) : title;
-}
-
-const isHubRel = (rel: string, byRel: ReadonlyMap<string, WikiListing>) => isWorkHub(byRel.get(rel)?.backlinkCount ?? 0);
-
-/** The page the 📌 stores for a thread (D7): its NEWEST non-hub focus page —
- *  the highest `work.focusMs` — because the server drops a page from `pages`
- *  once its last focus event leaves the window, so the newest is the last to
- *  go (the `key` is the earliest, the first). A hub is never the anchor of a
- *  thread that holds a non-hub page: D16 moves a hub's focus row to whichever
- *  thread works it most. A thread of hubs only anchors on its newest hub. Ties
- *  go to the smaller relPath. */
-function newestFocusPage(t: WorkThread, byRel: ReadonlyMap<string, WikiListing>): string {
-  const pick = (hubs: boolean) => {
-    let best: { rel: string; ms: number } | null = null;
-    for (const raw of t.pages) {
-      const rel = normalizeRel(raw);
-      if (isHubRel(rel, byRel) !== hubs) continue;
-      const ms = byRel.get(rel)?.work?.focusMs ?? -Infinity;
-      if (!best || ms > best.ms || (ms === best.ms && rel < best.rel)) best = { rel, ms };
-    }
-    return best?.rel;
-  };
-  return pick(false) ?? pick(true) ?? normalizeRel(t.key);
-}
-
-/**
- * Does thread `t` hold the pin on `pinKey` (D7 × D16)? It must hold the page
- * as a focus page. A pin on a HUB also needs a thread of hubs only: D16 moves
- * a hub into whichever thread works it most, so a hub pin matched by
- * membership alone would follow the hub into a thread the reader never pinned.
- * The hub test reads the listing as it is now, so a pinned page that crosses
- * the hub threshold while its thread holds other pages stops matching.
- */
-function threadHoldsPin(t: WorkThread, byRel: ReadonlyMap<string, WikiListing>, pinKey: string): boolean {
-  if (!t.pages.some((p) => normalizeRel(p) === pinKey)) return false;
-  return !isHubRel(pinKey, byRel) || t.pages.every((p) => isHubRel(normalizeRel(p), byRel));
-}
-
-/**
- * The stored pin re-anchored (D7): the newest focus page of the thread holding
- * `pin` (`threadHoldsPin`), or null when no thread holds it. The pin's state
- * table (`threadPinStep`) decides whether the move is written, so a pinned
- * thread stays pinned as it grows and its oldest pages age out of the window.
- * A thread that ages out WHOLE between two renders loses its pin — the server
- * no longer names it.
- */
-export function threadPinAnchor(
-  threads: readonly WorkThread[] | null | undefined,
-  allPages: readonly WikiListing[],
-  pin: string | null,
-): string | null {
-  if (!pin) return null;
-  const pinKey = normalizeRel(pin);
-  const byRel = new Map<string, WikiListing>();
-  for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
-  const t = usableThreads(threads).find((x) => threadHoldsPin(x, byRel, pinKey));
-  return t ? newestFocusPage(t, byRel) : null;
-}
 
 /**
  * The work-thread cards, in render order, and which are OPEN — the ONE decision
@@ -206,7 +113,7 @@ export function openThreadCards(
   const ranked = usable
     .map((t) => ({
       t,
-      score: threadScore(t, (rel) => byRel.get(normalizeRel(rel))?.work, now),
+      score: threadRankScore(t, byRel, now),
       holdsPin: !!pinKey && threadHoldsPin(t, byRel, pinKey),
     }))
     .map((x) => {
