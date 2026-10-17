@@ -6,9 +6,10 @@
  * VALIDATES it; storage and the record state machine are the reader's (PR 3),
  * and applying splits and anchors to membership is PR 4's.
  *
- * D1's defaults (Related, every box checked) are computed at read time by
- * {@link resolveWorkGroupPrefs} and are never part of a parsed record, so a
- * saved `false` stays `false` and a record nobody wrote stays absent.
+ * D1's defaults (Related, every box checked) apply at read time: wholesale by
+ * {@link resolveWorkGroupPrefs} when no record of this version exists, and
+ * per field inside one, so a saved `false` stays `false` and a record nobody
+ * wrote stays absent.
  * Pure and DOM-free.
  */
 
@@ -68,13 +69,15 @@ function pagePath(v: unknown): string | null {
 
 /**
  * A stored record read back, or null when there is no valid preference: an
- * absent value, unparseable JSON, another version, an unknown stop, or an
- * evidence block without all three booleans. A null makes the caller use D1.
+ * absent value, unparseable JSON, not an object, or another version. A null
+ * makes the caller use D1.
  *
- * The arrays are validated per entry rather than as a whole: a malformed split
- * or anchor is dropped, a duplicate page (or split id) keeps its first entry,
- * and each list is cut at its bound. An absent array reads as empty; a
- * present non-array makes the record invalid.
+ * A record of this version is valid, and each field is validated on its own:
+ * a missing or invalid stop, evidence boolean or array falls back to that
+ * field's default (Related, `true`, empty) while every valid field — a saved
+ * `false` included — is kept. Array entries are validated one by one: a
+ * malformed split or anchor is dropped, a duplicate page (or split id) keeps
+ * its first entry, and each list is cut at its bound.
  */
 export function parseWorkGroupPrefs(raw: unknown): WorkGroupPrefs | null {
   let v = raw;
@@ -86,19 +89,17 @@ export function parseWorkGroupPrefs(raw: unknown): WorkGroupPrefs | null {
     }
   }
   if (!isRecord(v) || v.version !== WORK_GROUP_PREFS_VERSION) return null;
-  const stop = v.stop;
-  if (typeof stop !== "string" || !(WORK_GROUP_STOPS as readonly string[]).includes(stop)) return null;
-  const ev = v.evidence;
-  if (!isRecord(ev)) return null;
-  const { series, related, issue } = ev;
-  if (typeof series !== "boolean" || typeof related !== "boolean" || typeof issue !== "boolean") return null;
-  if (v.splits !== undefined && !Array.isArray(v.splits)) return null;
-  if (v.keptApart !== undefined && !Array.isArray(v.keptApart)) return null;
+  const stop =
+    typeof v.stop === "string" && (WORK_GROUP_STOPS as readonly string[]).includes(v.stop) ? (v.stop as WorkGroupStop) : WORK_GROUP_DEFAULTS.stop;
+  const ev = isRecord(v.evidence) ? v.evidence : {};
+  const flag = (k: keyof WorkGroupEvidenceToggles) => (typeof ev[k] === "boolean" ? (ev[k] as boolean) : WORK_GROUP_DEFAULTS.evidence[k]);
+  const evidence = { series: flag("series"), related: flag("related"), issue: flag("issue") };
+  const list = (x: unknown): unknown[] => (Array.isArray(x) ? x : []);
 
   const splits: WorkGroupSplit[] = [];
   const splitPages = new Set<string>();
   const splitIds = new Set<string>();
-  for (const s of (v.splits as unknown[] | undefined) ?? []) {
+  for (const s of list(v.splits)) {
     if (splits.length >= WORK_GROUP_SPLITS_MAX) break;
     if (!isRecord(s) || typeof s.id !== "string" || !SPLIT_ID_RE.test(s.id)) continue;
     const page = pagePath(s.page);
@@ -108,12 +109,12 @@ export function parseWorkGroupPrefs(raw: unknown): WorkGroupPrefs | null {
     splits.push({ id: s.id, page });
   }
   const keptApart: string[] = [];
-  for (const a of (v.keptApart as unknown[] | undefined) ?? []) {
+  for (const a of list(v.keptApart)) {
     if (keptApart.length >= WORK_GROUP_KEPT_APART_MAX) break;
     const page = pagePath(a);
     if (page && !keptApart.includes(page)) keptApart.push(page);
   }
-  return { version: WORK_GROUP_PREFS_VERSION, stop: stop as WorkGroupStop, evidence: { series, related, issue }, splits, keptApart };
+  return { version: WORK_GROUP_PREFS_VERSION, stop, evidence, splits, keptApart };
 }
 
 /** The settings in force: the record's when one is valid, else D1 with no

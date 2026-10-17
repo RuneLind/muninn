@@ -1,6 +1,6 @@
 /**
- * The work-thread grouping model (`wiki-work-groups.ts`) and its preference
- * parser (`wiki-work-group-prefs.ts`), over synthetic threads and evidence.
+ * The work-thread grouping model (`wiki-work-groups.ts`), over synthetic
+ * threads and evidence. The preference parser has its own file.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -14,15 +14,10 @@ import {
   workSessionCards,
   workUnitsFromThreads,
   type WorkGrouping,
+  type WorkStopAvailability,
   type WorkGroupingInput,
 } from "./wiki-work-groups.ts";
-import {
-  parseWorkGroupPrefs,
-  resolveWorkGroupPrefs,
-  WORK_GROUP_KEPT_APART_MAX,
-  WORK_GROUP_SPLITS_MAX,
-  type WorkGroupEvidenceToggles,
-} from "./wiki-work-group-prefs.ts";
+import type { WorkGroupEvidenceToggles } from "./wiki-work-group-prefs.ts";
 import { openThreadCards } from "./wiki-rail-input.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import { WORK_EVIDENCE_VERSION, type IndexWork, type WorkContribution, type WorkEvidence, type WorkThread } from "../../../wiki/work-focus.ts";
@@ -452,7 +447,7 @@ describe("availability", () => {
     expect(run(bare, pages)).toMatchObject({ stop: "threads", availability: { related: { reasons: ["evidence-absent"] } } });
     const v2 = { ...bare, evidence: { ...evidenceFor(pages, threads), version: 2 } as unknown as WorkEvidence };
     expect(run(v2, pages)).toMatchObject({ stop: "threads", availability: { areas: { reasons: ["evidence-unreadable"] } } });
-    expect(readWorkEvidence({ version: WORK_EVIDENCE_VERSION, relations: [] }).reason).toBe("evidence-unreadable");
+    expect(readWorkEvidence({ version: WORK_EVIDENCE_VERSION, relations: [] }, threads)).toEqual({ evidence: { relations: null, contributions: null } });
   });
 
   test("no threads: no cards (today's fallback)", () => {
@@ -522,62 +517,122 @@ describe("Sessions (D19)", () => {
   });
 });
 
-describe("preferences", () => {
-  const valid = {
-    version: 1,
-    stop: "areas",
-    evidence: { series: false, related: true, issue: false },
-    splits: [{ id: "abc-1", page: "Plans/X.md" }],
-    keptApart: ["plans/y.md"],
-  };
+// ── A malformed evidence part ───────────────────────────────────────────────
 
-  test("a valid record keeps its false values, and resolve keeps them", () => {
-    const p = parseWorkGroupPrefs(valid)!;
-    expect(p).toEqual({ ...valid, version: 1, stop: "areas", splits: [{ id: "abc-1", page: "plans/x.md" }] } as never);
-    expect(resolveWorkGroupPrefs(p).evidence).toEqual({ series: false, related: true, issue: false });
-    expect(parseWorkGroupPrefs(JSON.stringify(valid))).toEqual(p);
+/** The kinds fixture with its evidence block edited after `evidenceFor`. */
+function edited(edit: (ev: Record<string, any>) => void) {
+  const { pages, threads } = kinds();
+  const w = work(pages, threads, {
+    related: [["plans/c.md", "plans/a.md"]],
+    issues: [["KEY-1", "plans/a.md", "plans/d.md"]],
+    rows: [[`claude-code:${threads[0]!.sessions[0]!.id}`, "plans/a.md", "plans/a.md", "focus", 3, NOW - 5 * HOUR, NOW - 2 * HOUR]],
+  });
+  const ev = structuredClone(w.evidence) as unknown as Record<string, any>;
+  edit(ev);
+  return { pages, clean: w, w: { ...w, evidence: ev as unknown as WorkEvidence } };
+}
+
+const UNREADABLE: WorkStopAvailability = { available: false, reasons: ["evidence-unreadable"] };
+const splits = (g: WorkGrouping) => g.groups.flatMap((x) => x.children).map((c) => c.sessions);
+
+describe("a malformed evidence part", () => {
+  test.each([
+    ["related: null", (ev: Record<string, any>) => (ev.relations.related = null)],
+    ["related: an object", (ev: Record<string, any>) => (ev.relations.related = { x: 1 })],
+    ["issues: a short tuple", (ev: Record<string, any>) => (ev.relations.issues = [["KEY-1", "plans/a.md"]])],
+    ["related: one bad entry among good ones", (ev: Record<string, any>) => ev.relations.related.push(["plans/a.md", 3])],
+    ["series: a non-string value", (ev: Record<string, any>) => (ev.relations.series["plans/a.md"] = 7)],
+    ["projects: absent", (ev: Record<string, any>) => delete ev.relations.projects],
+    ["complete: not a boolean", (ev: Record<string, any>) => (ev.relations.complete = "yes")],
+    ["incomplete with no reason", (ev: Record<string, any>) => (ev.relations.complete = false)],
+    ["relations: not an object", (ev: Record<string, any>) => (ev.relations = [])],
+  ])("relations %s: Threads with evidence-unreadable, Sessions untouched", (_, edit) => {
+    const { pages, w } = edited(edit);
+    const g = run(w, pages, { toggles: { ...ALL, series: false } });
+    expect(g.stop).toBe("threads");
+    expect(g.toggles).toEqual({ ...ALL, series: false });
+    expect(g.availability.related).toEqual(UNREADABLE);
+    expect(g.availability.areas).toEqual(UNREADABLE);
+    expect(g.availability.sessions).toEqual({ available: true, reasons: [] });
+    expect(run(w, pages, { stop: "sessions" }).sessions.map((c) => c.ref)).toHaveLength(1);
   });
 
-  test("no valid record means D1: Related with every box checked", () => {
-    const d1 = { stop: "related", evidence: ALL, splits: [], keptApart: [] };
-    for (const raw of [null, undefined, "", "{", 42, [], { ...valid, version: 2 }, { ...valid, version: "1" }, { ...valid, stop: "everything" }, { ...valid, evidence: { series: false, related: true } }, { ...valid, evidence: { ...valid.evidence, issue: "no" } }, { ...valid, splits: "x" }]) {
-      expect(parseWorkGroupPrefs(raw)).toBeNull();
-      expect(resolveWorkGroupPrefs(parseWorkGroupPrefs(raw))).toEqual(d1 as never);
-    }
+  test.each([
+    ["rows: a string", (ev: Record<string, any>) => (ev.contributions.rows = "x")],
+    ["a row of six", (ev: Record<string, any>) => ev.contributions.rows[0].pop()],
+    ["a row of eight", (ev: Record<string, any>) => ev.contributions.rows[0].push(0)],
+    ["a row with a non-numeric time", (ev: Record<string, any>) => (ev.contributions.rows[0][6] = "late")],
+    ["a row of an unknown kind", (ev: Record<string, any>) => (ev.contributions.rows[0][3] = "pass")],
+    ["a ref without a provider prefix", (ev: Record<string, any>) => (ev.contributions.rows[0][0] = ev.contributions.rows[0][0].replace(":", ""))],
+    ["a ref no shipped thread session holds", (ev: Record<string, any>) => (ev.contributions.rows[0][0] = "claude-code:nobody")],
+    ["a ref only another thread holds", (ev: Record<string, any>) => (ev.contributions.rows[0][2] = "plans/b.md")],
+    ["cut: not an array", (ev: Record<string, any>) => (ev.contributions.cut = "plans/b.md")],
+    ["a row of a cut thread", (ev: Record<string, any>) => Object.assign(ev.contributions, { complete: false, reasons: ["contributions-cap"], cut: ["plans/a.md"] })],
+    ["a cut without the cap reason", (ev: Record<string, any>) => (ev.contributions.cut = ["plans/b.md"])],
+    ["contributions: absent", (ev: Record<string, any>) => delete ev.contributions],
+  ])("contributions %s: grouping stays, Sessions and every split unavailable", (_, edit) => {
+    const { pages, w } = edited(edit);
+    const g = run(w, pages);
+    expect(g.stop).toBe("related");
+    expect(g.availability.related).toEqual({ available: true, reasons: [] });
+    expect(g.availability.sessions).toEqual(UNREADABLE);
+    expect(splits(g).every((s) => s.available === false && s.reasons.join() === "evidence-unreadable")).toBe(true);
+    const asked = run(w, pages, { stop: "sessions" });
+    expect([asked.stop, asked.sessions.length]).toEqual(["threads", 0]);
   });
 
-  test("an empty selection is a valid record, not a reason for defaults", () => {
-    const p = parseWorkGroupPrefs({ version: 1, stop: "related", evidence: { series: false, related: false, issue: false } })!;
-    expect(resolveWorkGroupPrefs(p)).toEqual({ stop: "related", evidence: NONE, splits: [], keptApart: [] });
+  test.each([
+    ["the threads count block absent", (ev: Record<string, any>) => delete ev.threads],
+    ["ambiguousIssues malformed", (ev: Record<string, any>) => (ev.relations.ambiguousIssues = [{ key: "K", owners: [3] }, "x"])],
+    ["relatedSkipped malformed", (ev: Record<string, any>) => (ev.relations.relatedSkipped = "x")],
+  ])("%s: a field the model never reads changes nothing", (_, edit) => {
+    const { pages, w, clean } = edited(edit);
+    expect(run(w, pages)).toEqual(run(clean, pages));
+    expect(run(w, pages, { stop: "sessions" })).toEqual(run(clean, pages, { stop: "sessions" }));
+    expect(run(w, pages).availability.sessions.available).toBe(true);
+  });
+});
+
+// ── Split availability agrees with the Sessions stop ────────────────────────
+
+describe("split availability", () => {
+  const withContrib = (complete: boolean, reasons: string[], cut: string[] = []) =>
+    edited((ev) => Object.assign(ev.contributions, { complete, reasons, cut, rows: cut.includes("plans/a.md") ? [] : ev.contributions.rows }));
+
+  test("incomplete with no reason: unavailable everywhere", () => {
+    const { pages, w } = withContrib(false, []);
+    const g = run(w, pages);
+    expect(g.availability.sessions.available).toBe(false);
+    expect(splits(g).every((s) => !s.available)).toBe(true);
+    expect(splits(g).every((s) => s.reasons.join() === g.availability.sessions.reasons.join())).toBe(true);
   });
 
-  test("array entries are validated, deduplicated and bounded", () => {
-    const p = parseWorkGroupPrefs({
-      ...valid,
-      splits: [
-        { id: "ok", page: "a.md" },
-        { id: "bad id!", page: "b.md" },
-        { id: "dup-page", page: "A.md" },
-        { id: "ok", page: "c.md" },
-        { id: "up", page: "../x.md" },
-        { id: "abs", page: "/etc/x.md" },
-        { id: "nopage" },
-        "nope",
-        { id: "fine", page: "d/e.md" },
-      ],
-      keptApart: ["x.md", "X.md", 3, "", "a/../b.md", "y.md"],
-    })!;
-    expect(p.splits).toEqual([
-      { id: "ok", page: "a.md" },
-      { id: "fine", page: "d/e.md" },
-    ]);
-    expect(p.keptApart).toEqual(["x.md", "y.md"]);
-    const many = parseWorkGroupPrefs({
-      ...valid,
-      splits: Array.from({ length: WORK_GROUP_SPLITS_MAX + 5 }, (_, i) => ({ id: `s${i}`, page: `p/${i}.md` })),
-      keptApart: Array.from({ length: WORK_GROUP_KEPT_APART_MAX + 5 }, (_, i) => `k/${i}.md`),
-    })!;
-    expect(many.splits).toHaveLength(WORK_GROUP_SPLITS_MAX);
-    expect(many.keptApart).toHaveLength(WORK_GROUP_KEPT_APART_MAX);
+  test("an unknown reason: unavailable everywhere, with that reason", () => {
+    const { pages, w } = withContrib(false, ["ledger-reshuffled"]);
+    const g = run(w, pages);
+    expect(g.availability.sessions).toEqual({ available: false, reasons: ["ledger-reshuffled"] as never[] });
+    expect(splits(g).every((s) => s.available === false && s.reasons.join() === "ledger-reshuffled")).toBe(true);
+  });
+
+  test("the cap alone: the Sessions stop is unavailable, an uncut thread still splits, a cut one does not", () => {
+    const { pages, w } = withContrib(false, ["contributions-cap"], ["plans/b.md"]);
+    const g = run(w, pages);
+    expect(g.availability.sessions).toEqual({ available: false, reasons: ["contributions-cap"] });
+    const by = Object.fromEntries(g.groups.flatMap((x) => x.children).map((c) => [c.key, c.sessions]));
+    expect(by["plans/b.md"]).toEqual({ available: false, reasons: ["contributions-cap"] });
+    expect(by["plans/a.md"]).toEqual({ available: true, reasons: [] });
+  });
+
+  test("the cap with the ledger clipped: no thread splits", () => {
+    const { pages, w } = withContrib(false, ["contributions-cap", "ledger-truncated"], ["plans/b.md"]);
+    const g = run(w, pages);
+    expect(splits(g).every((s) => !s.available && s.reasons.includes("ledger-truncated"))).toBe(true);
+  });
+
+  test("complete: the stop and every split are available", () => {
+    const { pages, w } = withContrib(true, []);
+    const g = run(w, pages);
+    expect(g.availability.sessions.available).toBe(true);
+    expect(splits(g).every((s) => s.available)).toBe(true);
   });
 });

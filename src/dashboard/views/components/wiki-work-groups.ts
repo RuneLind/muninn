@@ -59,66 +59,90 @@ export interface WorkStopAvailability {
 
 const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-const strRecord = (v: unknown): Record<string, string> | null => {
-  if (!isRec(v)) return null;
-  const out: Record<string, string> = {};
-  for (const [k, x] of Object.entries(v)) if (isStr(x)) out[k] = x;
-  return out;
-};
-const tuples = <T extends unknown[]>(v: unknown, ok: (x: unknown[]) => boolean): T[] =>
-  Array.isArray(v) ? (v.filter((x) => Array.isArray(x) && ok(x)) as T[]) : [];
-const reasons = (v: unknown): WorkEvidenceReason[] => (Array.isArray(v) ? v.filter(isStr) : []) as WorkEvidenceReason[];
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** The relations part as the model reads it. */
+export type ReadWorkRelations = Pick<WorkEvidence["relations"], "complete" | "reasons" | "series" | "projects" | "related" | "issues">;
+/** The contributions part as the model reads it. */
+export type ReadWorkContributions = WorkEvidence["contributions"];
 
 /**
- * The evidence block of a payload, as this client can read it: version
- * {@link WORK_EVIDENCE_VERSION} with both blocks present. A malformed entry
- * is dropped, never thrown on (the payload crossed the wire); a block that is
- * not an object makes the whole evidence unreadable.
+ * The evidence the model reads, part by part: a part that is malformed is
+ * null, so relations and contributions fail apart (the plan's «relations
+ * incomplete» and «contributions incomplete» rules). Fields the model never
+ * reads (`threads`, `ambiguousIssues`, `relatedSkipped`) are not parsed.
  */
-export function readWorkEvidence(raw: unknown): { evidence: WorkEvidence | null; reason?: "evidence-absent" | "evidence-unreadable" } {
-  if (raw === undefined || raw === null) return { evidence: null, reason: "evidence-absent" };
-  if (!isRec(raw) || raw.version !== WORK_EVIDENCE_VERSION) return { evidence: null, reason: "evidence-unreadable" };
-  const r = raw.relations;
-  const c = raw.contributions;
-  const t = raw.threads;
-  if (!isRec(r) || !isRec(c) || !isRec(t)) return { evidence: null, reason: "evidence-unreadable" };
+export interface ReadWorkEvidence {
+  relations: ReadWorkRelations | null;
+  contributions: ReadWorkContributions | null;
+}
+
+/** `complete` and `reasons` agree: complete exactly when there is no reason. */
+function completeness(v: Record<string, unknown>): { complete: boolean; reasons: WorkEvidenceReason[] } | null {
+  const { complete, reasons } = v;
+  if (typeof complete !== "boolean" || !Array.isArray(reasons) || !reasons.every(isStr)) return null;
+  if (complete !== (reasons.length === 0)) return null;
+  return { complete, reasons: reasons as WorkEvidenceReason[] };
+}
+
+function strRecord(v: unknown): Record<string, string> | null {
+  if (!isRec(v)) return null;
+  for (const x of Object.values(v)) if (!isStr(x)) return null;
+  return v as Record<string, string>;
+}
+
+function strTuples<T extends string[]>(v: unknown, n: number): T[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.every((x) => Array.isArray(x) && x.length === n && x.every(isStr)) ? (v as T[]) : null;
+}
+
+function readRelations(r: unknown): ReadWorkRelations | null {
+  if (!isRec(r)) return null;
+  const c = completeness(r);
   const series = strRecord(r.series);
   const projects = strRecord(r.projects);
-  if (!series || !projects) return { evidence: null, reason: "evidence-unreadable" };
-  const skipped = isRec(r.relatedSkipped) ? r.relatedSkipped : {};
-  return {
-    evidence: {
-      version: WORK_EVIDENCE_VERSION,
-      threads: { candidates: Number(t.candidates) || 0, shipped: Number(t.shipped) || 0 },
-      relations: {
-        complete: r.complete === true,
-        reasons: reasons(r.reasons),
-        series,
-        projects,
-        related: tuples<[string, string]>(r.related, (x) => x.length === 2 && x.every(isStr)),
-        issues: tuples<[string, string, string]>(r.issues, (x) => x.length === 3 && x.every(isStr)),
-        ambiguousIssues: Array.isArray(r.ambiguousIssues)
-          ? r.ambiguousIssues.filter((x): x is { key: string; owners: string[] } => isRec(x) && isStr(x.key) && Array.isArray(x.owners))
-          : [],
-        relatedSkipped: { skipped: Number(skipped.skipped) || 0, ambiguous: Number(skipped.ambiguous) || 0 },
-      },
-      contributions: {
-        complete: c.complete === true,
-        reasons: reasons(c.reasons),
-        cut: Array.isArray(c.cut) ? c.cut.filter(isStr) : [],
-        rows: tuples<WorkContribution>(
-          c.rows,
-          (x) =>
-            x.length === 7 &&
-            isStr(x[0]) &&
-            isStr(x[1]) &&
-            isStr(x[2]) &&
-            (x[3] === "focus" || x[3] === "touch") &&
-            [x[4], x[5], x[6]].every((n) => typeof n === "number" && Number.isFinite(n)),
-        ),
-      },
-    },
-  };
+  const related = strTuples<[string, string]>(r.related, 2);
+  const issues = strTuples<[string, string, string]>(r.issues, 3);
+  if (!c || !series || !projects || !related || !issues) return null;
+  return { ...c, series, projects, related, issues };
+}
+
+/** Every row is well-formed and joins its OWN shipped thread's sessions
+ *  through `workSessionRef` (the evidence contract), so a session card
+ *  always has the ledger's title and span. */
+function readContributions(c: unknown, threads: readonly WorkThread[]): ReadWorkContributions | null {
+  if (!isRec(c)) return null;
+  const done = completeness(c);
+  if (!done || !Array.isArray(c.cut) || !c.cut.every(isStr) || !Array.isArray(c.rows)) return null;
+  const cut = c.cut as string[];
+  // `cut` is non-empty exactly when `reasons` holds the cap.
+  if ((cut.length > 0) !== done.reasons.includes("contributions-cap")) return null;
+  const refsOf = new Map(threads.map((t) => [t.key, new Set(t.sessions.map(workSessionRef))] as const));
+  for (const x of c.rows as unknown[]) {
+    if (!Array.isArray(x) || x.length !== 7) return null;
+    const [ref, page, thread, kind, edits, first, last] = x;
+    if (!isStr(ref) || !isStr(page) || !isStr(thread) || (kind !== "focus" && kind !== "touch")) return null;
+    if (!isNum(edits) || !isNum(first) || !isNum(last)) return null;
+    // The join also refuses a ref with no `provider:` prefix: every
+    // `workSessionRef` has one.
+    if (cut.includes(thread) || !refsOf.get(thread)?.has(ref)) return null;
+  }
+  return { ...done, cut, rows: c.rows as WorkContribution[] };
+}
+
+/**
+ * The evidence block of a payload, as this client can read it. Absent, not
+ * an object or another version: no evidence at all. Otherwise each part is
+ * validated whole against the shipped `threads` — one malformed entry makes
+ * that part unreadable (null), never a silently shorter list.
+ */
+export function readWorkEvidence(
+  raw: unknown,
+  threads: unknown,
+): { evidence: ReadWorkEvidence | null; reason?: "evidence-absent" | "evidence-unreadable" } {
+  if (raw === undefined || raw === null) return { evidence: null, reason: "evidence-absent" };
+  if (!isRec(raw) || raw.version !== WORK_EVIDENCE_VERSION) return { evidence: null, reason: "evidence-unreadable" };
+  return { evidence: { relations: readRelations(raw.relations), contributions: readContributions(raw.contributions, usableThreads(threads)) } };
 }
 
 // ── Units ───────────────────────────────────────────────────────────────────
@@ -196,11 +220,11 @@ interface EvidenceIndex {
   seriesLabel: (key: string) => string;
 }
 
-function evidenceIndex(ev: WorkEvidence | null, allPages: readonly WikiListing[]): EvidenceIndex {
+function evidenceIndex(rel: ReadWorkRelations | null, allPages: readonly WikiListing[]): EvidenceIndex {
   const seriesOf = new Map<string, string>();
   const projectOf = new Map<string, string>();
-  for (const [p, k] of Object.entries(ev?.relations.series ?? {})) seriesOf.set(normalizeRel(p), k);
-  for (const [p, k] of Object.entries(ev?.relations.projects ?? {})) projectOf.set(normalizeRel(p), k);
+  for (const [p, k] of Object.entries(rel?.series ?? {})) seriesOf.set(normalizeRel(p), k);
+  for (const [p, k] of Object.entries(rel?.projects ?? {})) projectOf.set(normalizeRel(p), k);
   let census: Map<string, WikiListing[]> | null = null;
   const labels = new Map<string, string>();
   const seriesLabel = (key: string): string => {
@@ -212,7 +236,7 @@ function evidenceIndex(ev: WorkEvidence | null, allPages: readonly WikiListing[]
     labels.set(key, l);
     return l;
   };
-  return { seriesOf, projectOf, related: ev?.relations.related ?? [], issues: ev?.relations.issues ?? [], seriesLabel };
+  return { seriesOf, projectOf, related: rel?.related ?? [], issues: rel?.issues ?? [], seriesLabel };
 }
 
 interface UnitFacts {
@@ -373,26 +397,33 @@ export interface WorkGroupingInput {
 const OK: WorkStopAvailability = { available: true, reasons: [] };
 const off = (...r: WorkGroupUnavailableReason[]): WorkStopAvailability => ({ available: false, reasons: r });
 
-/** Whether one thread's contribution rows ship whole (D15, D19). */
-export function threadSessionsAvailability(evidence: WorkEvidence | null, threadKey: string, absent?: WorkGroupUnavailableReason): WorkStopAvailability {
+/**
+ * Whether one thread's contribution rows ship whole (D15, D19): readable
+ * contributions, and complete — or incomplete only by the cap, with this
+ * thread not among the cut. Any other reason, known or not, holds for every
+ * thread. The Sessions stop ({@link availabilityOf}) needs `complete`, so a
+ * stop that is available implies every split is.
+ */
+export function threadSessionsAvailability(evidence: ReadWorkEvidence | null, threadKey: string, absent?: WorkGroupUnavailableReason): WorkStopAvailability {
   if (!evidence) return off(absent ?? "evidence-absent");
-  const r: WorkGroupUnavailableReason[] = [];
-  if (evidence.contributions.reasons.includes("ledger-truncated")) r.push("ledger-truncated");
-  if (evidence.contributions.cut.includes(threadKey)) r.push("contributions-cap");
-  return r.length ? off(...r) : OK;
+  const c = evidence.contributions;
+  if (!c) return off("evidence-unreadable");
+  if (c.complete) return OK;
+  const other = c.reasons.filter((r) => r !== "contributions-cap");
+  if (other.length) return off(...c.reasons);
+  return c.cut.includes(threadKey) ? off(...c.reasons) : OK;
 }
 
-function availabilityOf(hasThreads: boolean, evidence: WorkEvidence | null, absent?: WorkGroupUnavailableReason): Record<WorkGroupStop, WorkStopAvailability> {
+function availabilityOf(hasThreads: boolean, evidence: ReadWorkEvidence | null, absent?: WorkGroupUnavailableReason): Record<WorkGroupStop, WorkStopAvailability> {
   if (!hasThreads) return { sessions: off("no-threads"), threads: off("no-threads"), related: off("no-threads"), areas: off("no-threads") };
   if (!evidence) {
     const a = off(absent ?? "evidence-absent");
     return { sessions: a, threads: OK, related: a, areas: a };
   }
-  const rel = evidence.relations.complete ? OK : off(...(evidence.relations.reasons.length ? evidence.relations.reasons : (["relations-cap"] as const)));
-  const ses = evidence.contributions.complete
-    ? OK
-    : off(...(evidence.contributions.reasons.length ? evidence.contributions.reasons : (["contributions-cap"] as const)));
-  return { sessions: ses, threads: OK, related: rel, areas: rel };
+  const part = (p: { complete: boolean; reasons: WorkEvidenceReason[] } | null) =>
+    !p ? off("evidence-unreadable") : p.complete ? OK : off(...p.reasons);
+  const rel = part(evidence.relations);
+  return { sessions: part(evidence.contributions), threads: OK, related: rel, areas: rel };
 }
 
 /**
@@ -401,7 +432,7 @@ function availabilityOf(hasThreads: boolean, evidence: WorkEvidence | null, abse
  */
 export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
   const units = input.units ?? workUnitsFromThreads(input.work?.threads);
-  const { evidence, reason } = readWorkEvidence(input.work?.evidence);
+  const { evidence, reason } = readWorkEvidence(input.work?.evidence, input.work?.threads);
   const availability = availabilityOf(units.length > 0, evidence, reason);
   const stop = availability[input.stop].available ? input.stop : "threads";
   const base = {
@@ -418,7 +449,7 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
 
   const byRel = new Map<string, WikiListing>();
   for (const p of input.allPages) byRel.set(normalizeRel(p.relPath), p);
-  const ix = evidenceIndex(evidence, input.allPages);
+  const ix = evidenceIndex(evidence?.relations ?? null, input.allPages);
   const ordered = orderWorkUnits(units, byRel, at);
   const facts = new Map<WorkUnit, UnitFacts>(ordered.map(({ unit }) => [unit, unitFacts(unit, ix)]));
   const grouping = stop === "related" || stop === "areas";
@@ -568,22 +599,20 @@ export function workSessionCards(
   now: number,
   threadKey?: string,
 ): WorkSessionCard[] {
-  const { evidence } = readWorkEvidence(work?.evidence);
-  if (!evidence) return [];
+  const contributions = readWorkEvidence(work?.evidence, work?.threads).evidence?.contributions;
+  if (!contributions) return [];
   const byRel = new Map<string, WikiListing>();
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const meta = new Map<string, WorkThreadSession>();
   for (const t of usableThreads(work?.threads)) for (const s of t.sessions) if (!meta.has(workSessionRef(s))) meta.set(workSessionRef(s), s);
 
-  interface Acc { thread: string; focus: Set<string>; touch: Set<string>; first: number; last: number }
+  interface Acc { thread: string; focus: Set<string>; touch: Set<string> }
   const acc = new Map<string, Acc>();
-  for (const [ref, page, thread, kind, , firstMs, lastMs] of evidence.contributions.rows) {
+  for (const [ref, page, thread, kind] of contributions.rows) {
     if (threadKey !== undefined && thread !== threadKey) continue;
     let a = acc.get(ref);
-    if (!a) acc.set(ref, (a = { thread, focus: new Set(), touch: new Set(), first: firstMs, last: lastMs }));
+    if (!a) acc.set(ref, (a = { thread, focus: new Set(), touch: new Set() }));
     (kind === "focus" ? a.focus : a.touch).add(normalizeRel(page));
-    a.first = Math.min(a.first, firstMs);
-    a.last = Math.max(a.last, lastMs);
   }
   const term = (p: WikiListing) => pageWorkTerm(p, now);
   const byTerm = (a: WikiListing, b: WikiListing) => term(b) - term(a) || cmpStr(normalizeRel(a.relPath), normalizeRel(b.relPath));
@@ -591,18 +620,9 @@ export function workSessionCards(
   const cards = [...acc]
     .filter(([, a]) => a.focus.size > 0)
     .map(([ref, a]) => {
-      const s = meta.get(ref);
-      const colon = ref.indexOf(":");
-      return {
-        ref,
-        id: s?.id ?? ref.slice(colon + 1),
-        provider: s?.provider ?? ref.slice(0, colon),
-        title: s?.title ?? "",
-        first: s?.first ?? a.first,
-        last: s?.last ?? a.last,
-        threadKey: a.thread,
-        acc: a,
-      };
+      // `readContributions` refuses a row whose ref joins no shipped session.
+      const s = meta.get(ref)!;
+      return { ref, id: s.id, provider: s.provider, title: s.title, first: s.first, last: s.last, threadKey: a.thread, acc: a };
     })
     .sort((x, y) => y.last - x.last || cmpStr(x.ref, y.ref));
   const taken = new Set<string>();
