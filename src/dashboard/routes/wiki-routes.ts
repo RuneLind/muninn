@@ -1133,11 +1133,35 @@ export function toListing(
   // and the article header reads the open page's meta, while the outgoing,
   // backlink and related rows (3 and 4) render no work — Related swaps in the
   // listing's fields client-side (`freshenRelated`).
-  const { desc, pubDate, sessions, prs, prRefs, sessionsBackfilled, children, issues, cullReason, supersededBy, work, ...rest } =
-    meta;
+  //
+  // `owns`, `related`, `relatedSkipped` and `relatedAmbiguous` are INDEX-ONLY,
+  // stripped on every caller and opted in by none: the work-thread evidence
+  // (`index.work.evidence`) is the one reader, and it ships its own witnesses.
+  const {
+    desc,
+    pubDate,
+    sessions,
+    prs,
+    prRefs,
+    sessionsBackfilled,
+    children,
+    issues,
+    cullReason,
+    supersededBy,
+    work,
+    owns,
+    related,
+    relatedSkipped,
+    relatedAmbiguous,
+    ...rest
+  } = meta;
   void pubDate;
   void children;
   void prRefs;
+  void owns;
+  void related;
+  void relatedSkipped;
+  void relatedAmbiguous;
   const listedIssues = opts.includeProvenance ? issues : compactIssues(issues);
   return {
     ...rest,

@@ -47,6 +47,7 @@ import { JIRA_KEY_SOURCE } from "../jira/retrieval.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
+import { readOwns } from "./frontmatter-lists.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
@@ -167,72 +168,6 @@ function numbersRe(numbers: Iterable<string>): RegExp | null {
     `(?<![\\p{L}\\p{N}\\-#/.])(?<!PR\\s?)(?:${list.join("|")})(?![\\p{N}]|\\.\\d|\\.\\s+(?:${MONTHS})(?![\\p{L}]))`,
     "giu",
   );
-}
-
-/** A page's `owns:` as read: whether the frontmatter has the key, the keys it
- *  names, the entry as written (after `owns:`, whitespace collapsed) and the
- *  0-based line of the key. */
-export interface OwnsRead {
-  present: boolean;
-  keys: string[];
-  raw: string;
-  line: number;
-}
-
-const NO_OWNS: OwnsRead = { present: false, keys: [], raw: "", line: 0 };
-const OWNS_LINE_RE = /^owns\s*:/;
-/** A line that starts a new top-level key: column 0, not a comment or a list item. */
-const TOP_LEVEL_RE = /^[^\s#-]/;
-
-/** A YAML mapping, or `null` when the text does not parse to one. */
-function yamlMap(text: string): Record<string, unknown> | null {
-  try {
-    const v: unknown = Bun.YAML.parse(text);
-    return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The Jira keys in an `owns:` value: a string is one entry, a list's strings are
- *  its entries (anything else is ignored), each through `stampedKeys`, with
- *  denylisted prefixes (`UTF-8`) dropped even when the entry is exactly key-shaped. */
-export function ownsKeys(value: unknown): string[] {
-  const entries =
-    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
-  const keys = stampedKeys(entries).filter((k) => !JIRA_KEY_DENYLIST.has(k.slice(0, k.indexOf("-"))));
-  return [...new Set(keys)];
-}
-
-/**
- * A page's `owns:`, read by a YAML parser (`Bun.YAML`), so every YAML form reads
- * as YAML reads it: an inline or multi-line flow list, a block list indented or
- * not, a scalar, comments anywhere. When the whole frontmatter is not valid YAML
- * (a hand-written page may break it elsewhere), only the `owns:` entry is parsed:
- * the `owns:` line and its continuation lines, up to the next top-level key; if
- * that fails too, the value is unreadable and names no key. The sweep reads
- * `owns:` the same way (claude-skills `plan-status-sweep/scripts/sweep-lib.ts`).
- */
-export function readOwns(content: string): OwnsRead {
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
-  const end = frontmatterEndLine(lines);
-  if (end === 0) return NO_OWNS;
-  const fm = lines.slice(1, end - 1);
-  let at = -1;
-  for (let i = 0; i < fm.length; i++) if (OWNS_LINE_RE.test(fm[i]!)) at = i;
-  let stop = at + 1;
-  while (at >= 0 && stop < fm.length && !TOP_LEVEL_RE.test(fm[stop]!)) stop++;
-  const entry = at < 0 ? [] : fm.slice(at, stop);
-  const raw = entry.join(" ").replace(OWNS_LINE_RE, "").replace(/\s+/g, " ").trim();
-  const line = at < 0 ? 1 : at + 1;
-  const whole = yamlMap(fm.join("\n"));
-  if (whole) {
-    if (!Object.hasOwn(whole, "owns")) return NO_OWNS;
-    return { present: true, keys: ownsKeys(whole.owns), raw, line };
-  }
-  if (at < 0) return NO_OWNS;
-  const part = yamlMap(entry.join("\n"));
-  return { present: true, keys: part ? ownsKeys(part.owns) : [], raw, line };
 }
 
 /** A page the state checks read: its meta, its raw content, its frontmatter. */

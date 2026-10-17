@@ -1,0 +1,165 @@
+/**
+ * The `related:` reader and resolver (plan `muninn-wiki-work-thread-grouping`,
+ * D18): one case per form a wiki writes, and the five resolution steps. The
+ * `owns:` form table lives in `lint-state.test.ts`. Synthetic names only.
+ */
+
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { readFrontmatterLists, readOwns, readRelated, resolveRelatedEntries, type RelatedResolveContext } from "./frontmatter-lists.ts";
+import { buildWikiIndex } from "./store.ts";
+import { toListing } from "../dashboard/routes/wiki-routes.ts";
+
+const page = (fm: string) => `---\ntitle: X\n${fm}\nstatus: open\n---\n\nBody [[not-related]].\n`;
+const entries = (fm: string) => readRelated(page(fm)).entries;
+
+/** A five-page wiki: `notes/a`, `notes/b`, `plans/c`, `d.mdx` at the root and
+ *  `plans/e.html`; `notes/a` is titled "Alpha" with alias "al"; two pages share
+ *  the title "Twin". Link resolution is the graph's: names and titles. */
+const PAGES: Record<string, { names: string[] }> = {
+  "notes/a.md": { names: ["a", "alpha", "al"] },
+  "notes/b.md": { names: ["b", "twin"] },
+  "plans/c.mdx": { names: ["c", "twin"] },
+  "d.mdx": { names: ["d"] },
+  "plans/e.html": { names: ["e"] },
+};
+const ctx = (from: string): RelatedResolveContext => ({
+  fromRelPath: from,
+  roots: ["/w/wiki", "/Users/x/wiki/"],
+  byPath: (rel) => Object.keys(PAGES).find((p) => p.toLowerCase() === path.posix.normalize(rel).toLowerCase()),
+  byName: (key) => Object.entries(PAGES).filter(([, v]) => v.names.includes(key)).map(([k]) => k),
+  byLink: (t) => {
+    const k = t.toLowerCase();
+    const named = Object.entries(PAGES).find(([, v]) => v.names.includes(k));
+    if (named) return named[0];
+    return Object.keys(PAGES).find((p) => p === `${k}.md` || p === `${k}.mdx`);
+  },
+});
+const resolve = (fm: string, from = "notes/b.md") => resolveRelatedEntries(entries(fm), ctx(from));
+
+describe("readRelated — every form, each target read once", () => {
+  test("unquoted single [[a]] (YAML reads a nested list; the scanner the link)", () => {
+    expect(entries("related: [[a]]")).toEqual([{ kind: "link", target: "a" }]);
+    expect(resolve("related: [[a]]")).toEqual({ targets: ["notes/a.md"], skipped: 0, ambiguous: 0 });
+  });
+  test("unquoted several [[a]], [[d]] (YAML refuses the whole frontmatter)", () => {
+    expect(entries("related: [[a]], [[d]]")).toEqual([
+      { kind: "link", target: "a" },
+      { kind: "link", target: "d" },
+    ]);
+    expect(resolve("related: [[a]], [[d]]").targets).toEqual(["notes/a.md", "d.mdx"]);
+  });
+  test('quoted inline ["[[a]]"] beside an unquoted [[a]] elsewhere is one resolution, not two', () => {
+    expect(entries('related: ["[[a]]", "[[d|Dee]]"]')).toEqual([
+      { kind: "link", target: "a" },
+      { kind: "link", target: "d" },
+    ]);
+    expect(resolve('related: ["[[a]]", "[[A]]"]')).toEqual({ targets: ["notes/a.md"], skipped: 0, ambiguous: 0 });
+  });
+  test('a scalar "[[x]]" is a one-entry list', () => {
+    expect(entries('related: "[[plans/c]]"')).toEqual([{ kind: "link", target: "plans/c" }]);
+    expect(resolve('related: "[[plans/c]]"').targets).toEqual(["plans/c.mdx"]);
+  });
+  test("an empty [] is none, and a page without the key reads nothing", () => {
+    expect(readRelated(page("related: []"))).toEqual({ present: true, entries: [] });
+    expect(readRelated(page("tags: [x]"))).toEqual({ present: false, entries: [] });
+    expect(readRelated("no frontmatter, [[a]]")).toEqual({ present: false, entries: [] });
+  });
+  test("a block list of - [[x]], with a #fragment and a |label stripped", () => {
+    const fm = "related:\n  - [[a#Section]]\n  - [[d|the d page]]";
+    expect(entries(fm)).toEqual([
+      { kind: "link", target: "a" },
+      { kind: "link", target: "d" },
+    ]);
+    expect(resolve(fm).targets).toEqual(["notes/a.md", "d.mdx"]);
+  });
+  test("a block list of paths", () => {
+    const fm = "related:\n  - plans/c.mdx\n  - ../d.mdx";
+    expect(entries(fm)).toEqual([
+      { kind: "text", value: "plans/c.mdx" },
+      { kind: "text", value: "../d.mdx" },
+    ]);
+    expect(resolve(fm).targets).toEqual(["plans/c.mdx", "d.mdx"]);
+  });
+  test("an inline list of bare root-relative paths, extension implied", () => {
+    expect(resolve("related: [plans/c, notes/a]")).toEqual({ targets: ["plans/c.mdx", "notes/a.md"], skipped: 0, ambiguous: 0 });
+  });
+  test("prose and Jira keys are skipped and counted, never an error", () => {
+    expect(entries("related: see the old notes, and more")).toEqual([{ kind: "text", value: "see the old notes, and more" }]);
+    expect(resolve("related: see the old notes, and more")).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+    expect(resolve("related: [ABC-123, ABC-456, [[a]]]")).toEqual({ targets: ["notes/a.md"], skipped: 2, ambiguous: 0 });
+  });
+  test("an entry whose frontmatter breaks YAML elsewhere is read from its own lines", () => {
+    const broken = "---\ntitle: X: Y: [\nrelated:\n  - plans/c.mdx\nowns: [ABC-12]\n---\n";
+    expect(readRelated(broken).entries).toEqual([{ kind: "text", value: "plans/c.mdx" }]);
+    expect(readFrontmatterLists(broken)).toEqual({ owns: readOwns(broken), related: readRelated(broken) });
+    expect(readOwns(broken).keys).toEqual(["ABC-12"]);
+  });
+  test("a related: line inside another key's value is not the key", () => {
+    expect(readRelated(page("description: |\n  related: [[a]]")).entries).toEqual([]);
+  });
+});
+
+describe("resolveRelatedEntries — the five steps", () => {
+  test("1: a link goes to the graph's resolution (name, title, alias), else an exact path (.html)", () => {
+    expect(resolve("related: [[Alpha]], [[al]], [[plans/e.html]]", "d.mdx").targets).toEqual(["notes/a.md", "plans/e.html"]);
+  });
+  test("1: a dangling link is skipped", () => {
+    expect(resolve("related: [[gone]]")).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+  });
+  test("2: ./ and ../ resolve against the page's folder; above the root is skipped", () => {
+    expect(resolve("related: [./a, ../plans/c.mdx]").targets).toEqual(["notes/a.md", "plans/c.mdx"]);
+    expect(resolve("related: [../../x/a.md]")).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+  });
+  test("3: an absolute path counts under a root, in any spelling; elsewhere it is skipped", () => {
+    expect(resolve("related: [/w/wiki/plans/c.mdx, /Users/x/wiki/notes/a]").targets).toEqual(["plans/c.mdx", "notes/a.md"]);
+    expect(resolve("related: [/w/other/plans/c.mdx]")).toEqual({ targets: [], skipped: 1, ambiguous: 0 });
+  });
+  test("4: a bare name tries the page's folder, the root, then a UNIQUE stem, title or alias", () => {
+    expect(resolve("related: [a]", "notes/b.md").targets).toEqual(["notes/a.md"]);
+    expect(resolve("related: [d.mdx]", "notes/b.md").targets).toEqual(["d.mdx"]);
+    expect(resolve("related: [alpha, al]", "plans/c.mdx").targets).toEqual(["notes/a.md"]);
+  });
+  test("4: a title two pages carry is ambiguous: skipped and counted apart", () => {
+    expect(resolve("related: [twin]", "d.mdx")).toEqual({ targets: [], skipped: 0, ambiguous: 1 });
+  });
+  test("the page itself is never a target, and targets dedupe across steps", () => {
+    expect(resolve("related: [[b]], [[a]], [./a.md, notes/a, /w/wiki/notes/a.md]")).toEqual({
+      targets: ["notes/a.md"],
+      skipped: 0,
+      ambiguous: 0,
+    });
+  });
+});
+
+describe("the index read pass", () => {
+  let root = "";
+  beforeAll(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-fm-lists-"));
+    await mkdir(path.join(root, "plans"));
+    await mkdir(path.join(root, "notes"));
+    await writeFile(path.join(root, "plans/one.md"), "---\ntitle: One\nowns: [ABC-12]\nrelated: [[two]], [[Twin]]\n---\n\nBody.\n");
+    await writeFile(path.join(root, "plans/two.md"), "---\ntitle: Two\nrelated:\n  - plans/one\n  - prose here\n---\n");
+    await writeFile(path.join(root, "notes/twin.md"), "---\ntitle: Twin\naliases: [shared]\n---\n");
+    await writeFile(path.join(root, "notes/other.md"), "---\ntitle: Other\naliases: [shared]\nrelated: [shared]\n---\n");
+  });
+  afterAll(() => rm(root, { recursive: true, force: true }));
+
+  test("owns and resolved related land on the page; the listing ships none of them", async () => {
+    const index = await buildWikiIndex(root);
+    const by = (rel: string) => index.pages.find((p) => p.relPath === rel)!;
+    expect(by("plans/one.md")).toMatchObject({ owns: ["ABC-12"], related: ["plans/two.md", "notes/twin.md"] });
+    expect(by("plans/two.md")).toMatchObject({ related: ["plans/one.md"], relatedSkipped: 1 });
+    // `shared` is an alias of two pages (other.md itself included): ambiguous.
+    expect(by("notes/other.md")).toMatchObject({ relatedAmbiguous: 1 });
+    expect(by("notes/other.md").related).toBeUndefined();
+    expect(by("notes/twin.md").owns).toBeUndefined();
+    for (const opts of [{}, { includeDesc: true, includeProvenance: true, includeCull: true, includeWork: true }]) {
+      const row = toListing(index, by("plans/one.md"), opts) as unknown as Record<string, unknown>;
+      for (const k of ["owns", "related", "relatedSkipped", "relatedAmbiguous"]) expect(row[k]).toBeUndefined();
+    }
+    expect(toListing(index, by("plans/two.md")) as unknown as Record<string, unknown>).not.toHaveProperty("relatedSkipped");
+  });
+});

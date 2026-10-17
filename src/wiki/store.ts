@@ -44,6 +44,8 @@ import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { normalizeRelPath } from "./rel-path.ts";
+import { extractWikilinks } from "./wikilinks.ts";
+import { readFrontmatterLists, resolveRelatedEntries, type RelatedEntry } from "./frontmatter-lists.ts";
 import { extractNextMoves } from "./next-moves.ts";
 import {
   inferIssues,
@@ -60,6 +62,7 @@ import {
 } from "./worked-ledger.ts";
 import { kickWorkSessionsRefresh, workSessionsFor } from "./work-sessions.ts";
 import { computeWorkFocus, type IndexWork, type PageWork, type WorkPageInput } from "./work-focus.ts";
+import { buildWorkEvidence } from "./work-evidence.ts";
 
 const log = getLog("wiki", "store");
 
@@ -650,6 +653,17 @@ export interface WikiPageMeta {
    */
   work?: PageWork;
   /**
+   * INDEX-ONLY (`toListing` strips them on every caller): the Jira keys the
+   * page's `owns:` names (`readOwns`), and its `related:` entries resolved to
+   * pages (`resolveRelatedEntries`), with the entries that named no page or
+   * several counted. All absent on a page without the key. The work-thread
+   * evidence (`work-evidence.ts`) reads them.
+   */
+  owns?: string[];
+  related?: string[];
+  relatedSkipped?: number;
+  relatedAmbiguous?: number;
+  /**
    * True when `git status` reports this page dirty (modified / untracked) — the ONLY
    * condition under which its mtime still means something. A clean file's mtime is a
    * checkout or sweep artifact; a dirty file's mtime is an edit git hasn't recorded
@@ -1048,24 +1062,6 @@ function folderStemKey(relPath: string, stem?: string): string {
  */
 export { isMarkdownWikiPath };
 
-/**
- * A `[[wikilink]]`, target and alias both NEWLINE-FREE. Obsidian has no
- * multi-line wikilink, and without the `\n` exclusion an unclosed `[[` (an
- * index one-liner truncated mid-link, say) matched across the line break and
- * consumed the NEXT line's link. Measurements: `src/watchers/CLAUDE.md`
- * (`index-truncation`) owns those numbers.
- *
- * FIVE sibling copies of this shape carry the same exclusion, each for its own
- * consumer: `render.ts`, `digest.ts`, `graph-routes.ts`, `draft.ts`'s
- * `CONTAIN_BODY_RE`, and the two flatteners below (which share one). The sixth was
- * the fact-check annotate pass, and it is now the exported SOURCE
- * `WIKILINK_SPAN_SOURCE` (`dashboard/views/components/wiki-integrate.ts`) — the
- * side of the split that has to answer "is this a link?" rather than "which pages
- * does this page name", so it also rejects a candidate spanning a dangling `[[`
- * ({@link firstDanglingWikilinkOpen}'s rule) and scans a code-span-masked line.
- * This copy stays a copy: `store.ts` must not import a dashboard module.
- */
-const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
 
 /**
  * Index of the FIRST DANGLING `[[` on `line`, or `-1` when every opener is
@@ -1301,25 +1297,9 @@ export function splitInlineArray(body: string): string[] {
   return items;
 }
 
-/**
- * Extract deduped [[wikilink]] targets from raw file content (frontmatter
- * included). Obsidian-style `#anchor` fragments are stripped — `[[Page#Section]]`
- * targets the page (mirroring extractMarkdownLinks' anchor handling), and a bare
- * `[[#anchor]]` is a same-page reference, not a link. Backslash escapes that
- * markdown processors leave in the raw text (e.g. `Page\` from an escaped `\]]`)
- * are dropped so the target matches the page name it refers to.
- */
-export function extractWikilinks(content: string): string[] {
-  const targets = new Set<string>();
-  for (const m of content.matchAll(WIKILINK_RE)) {
-    let target = m[1]!.replace(/\\/g, "").trim();
-    const hash = target.indexOf("#");
-    if (hash === 0) continue; // bare [[#anchor]] — same-page, not a link
-    if (hash > 0) target = target.slice(0, hash).trim();
-    if (target) targets.add(target);
-  }
-  return [...targets];
-}
+/** Re-exported from the IO-free `wikilinks.ts`, which `frontmatter-lists.ts`
+ *  reads too without importing this module. */
+export { extractWikilinks } from "./wikilinks.ts";
 
 const MD_LINK_RE = /(!?)\[(?:[^\]]*)\]\(([^)]+)\)/g;
 
@@ -3376,6 +3356,8 @@ export async function buildWikiIndex(
    *  targets, which are normalized by construction). */
   const pairingEmbeds = new Map<string, string[]>();
   const pairingSuperseded = new Map<string, string>();
+  /** Each markdown page's raw `related:` entries, resolved after registration. */
+  const rawRelated = new Map<string, RelatedEntry[]>();
 
   // Git date signals — ONE `git log` walk (plus a cheap concurrent `git status`) per
   // index build, inheriting the 5-min TTL, kicked off here so it overlaps the
@@ -3498,6 +3480,14 @@ export async function buildWikiIndex(
         // The retired bit. Only `signal: none` culls; see `readCull`.
         ...readCull(fm.signal, fm["signal-reason"]),
       };
+      // `owns:` and `related:` (D18), parsed with ONE YAML pass and only when
+      // the frontmatter mentions either key — most pages carry neither.
+      const fmText = splitFrontmatter(content).frontmatter ?? "";
+      if (fmText.includes("owns") || fmText.includes("related")) {
+        const lists = readFrontmatterLists(content);
+        if (lists.owns.keys.length) meta.owns = lists.owns.keys;
+        if (lists.related.entries.length) rawRelated.set(relPath, lists.related.entries);
+      }
       // Waiting on you, from the body's `<NextMoves>` you lanes.
       const movesYou = extractNextMoves(content)?.counts.you ?? 0;
       if (movesYou > 0) meta.movesYou = movesYou;
@@ -3967,6 +3957,40 @@ export async function buildWikiIndex(
     if (target) meta.supersededBy = target;
   }
 
+  // `related:` entries to pages (D18). A stem, title or alias counts only when
+  // it names ONE page: `resolve` is first-registration-wins, so the census below
+  // is what tells a unique name from an ambiguous one.
+  if (rawRelated.size) {
+    const named = new Map<string, Set<string>>();
+    const census = (key: string, relPath: string) => {
+      const k = key.trim().toLowerCase();
+      if (!k) return;
+      const set = named.get(k) ?? new Set<string>();
+      set.add(relPath);
+      named.set(k, set);
+    };
+    for (const meta of pages) {
+      if (meta.pairedBy !== "stem") census(meta.name, meta.relPath);
+      census(meta.title, meta.relPath);
+      for (const alias of meta.aliases) census(alias, meta.relPath);
+    }
+    const roots = [root, ...(workSessionsFor(root)?.identity.roots ?? [])];
+    for (const meta of pages) {
+      const entries = rawRelated.get(meta.relPath);
+      if (!entries) continue;
+      const r = resolveRelatedEntries(entries, {
+        fromRelPath: meta.relPath,
+        roots,
+        byPath: (rel) => resolveRelPath(rel)?.relPath,
+        byName: (key) => [...(named.get(key) ?? [])],
+        byLink: (target) => resolve(target)?.relPath,
+      });
+      if (r.targets.length) meta.related = r.targets;
+      if (r.skipped) meta.relatedSkipped = r.skipped;
+      if (r.ambiguous) meta.relatedAmbiguous = r.ambiguous;
+    }
+  }
+
   const outgoing = new Map<string, string[]>();
   const backlinks = new Map<string, string[]>();
   for (const meta of pages) {
@@ -4034,7 +4058,18 @@ export async function buildWikiIndex(
       const w = result.pages.get(meta.relPath);
       if (w) meta.work = w;
     }
-    work = { asOfMs: workMemo.asOfMs, sinceMs: workMemo.sinceMs, threads: result.threads };
+    work = {
+      asOfMs: workMemo.asOfMs,
+      sinceMs: workMemo.sinceMs,
+      threads: result.threads,
+      evidence: buildWorkEvidence({
+        threads: result.threads,
+        candidates: result.candidates,
+        contributions: result.contributions,
+        ledgerTruncated: workMemo.truncated,
+        pages,
+      }),
+    };
     log.debug("wiki {root}: work facts — {pages} page(s), {threads} thread(s) in {ms} ms", {
       root,
       pages: result.pages.size,
