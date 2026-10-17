@@ -268,10 +268,41 @@ function cleanLinkTarget(target: string): string {
   return t;
 }
 
+/** A frontmatter line that may hold an `owns` or `related` key: block, quoted,
+ *  indented or flow spelling. Looser than the readers' entry regexes on
+ *  purpose — a false hit costs one YAML parse, a miss drops a key. */
+const LISTS_KEY_RE = /(?:^|[{,])\s*["']?(?:owns|related)["']?\s*:/;
+
+/** Lines split before the whole page is: a frontmatter rarely runs longer. */
+const LISTS_GATE_PREFIX_LINES = 32;
+
+/** The frontmatter as {@link Frontmatter.of} would read it — the same
+ *  `frontmatterEndLine` boundary — when a line of it matches
+ *  {@link LISTS_KEY_RE}, else `null`. Splits a prefix first, the whole page
+ *  only when the fence opens and does not close inside it. Every line before
+ *  the closing fence ended in `\n`, so dropping its one trailing `\r` is what
+ *  `Frontmatter.of`'s CRLF fold does to it. */
+function listsFrontmatter(content: string): Frontmatter | null {
+  for (const limit of [LISTS_GATE_PREFIX_LINES, undefined]) {
+    const lines = content.split("\n", limit);
+    if (lines[0]?.trim() !== "---") return null;
+    const end = frontmatterEndLine(lines);
+    if (end) {
+      const fm = lines.slice(1, end - 1);
+      if (!fm.some((l) => LISTS_KEY_RE.test(l))) return null;
+      return new Frontmatter(fm.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l)));
+    }
+    if (lines.length < LISTS_GATE_PREFIX_LINES) return null;
+  }
+  return null;
+}
+
 /** Owns `owns:` and `related:` of one page with ONE whole-frontmatter parse —
- *  the index read pass. */
+ *  the index read pass. Most pages carry neither key, so a line scan over the
+ *  same frontmatter lines skips the parse (measured 2026-10-18: the read pass
+ *  over mimir and melosys-kode-wiki takes ~0.9–1.7 ms gated, ~5 ms ungated). */
 export function readFrontmatterLists(content: string): { owns: OwnsRead; related: RelatedRead } {
-  const fm = Frontmatter.of(content);
+  const fm = listsFrontmatter(content);
   if (!fm) return { owns: NO_OWNS, related: NO_RELATED };
   return { owns: ownsFrom(fm), related: relatedFrom(fm) };
 }

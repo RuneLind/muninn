@@ -130,8 +130,9 @@ describe("completeness and bounds", () => {
     const e = build(pages, [thread("p/x0.mdx", focus)], { contributions: rows });
     expect(e.relations.related).toHaveLength(WORK_EVIDENCE_RELATIONS_MAX);
     expect(e.relations).toMatchObject({ complete: false, reasons: ["relations-cap"] });
-    expect(e.contributions.rows).toHaveLength(WORK_EVIDENCE_CONTRIBUTIONS_MAX);
-    expect(e.contributions).toMatchObject({ complete: false, reasons: ["contributions-cap"] });
+    // One thread over the cap ships no row at all: a thread is never cut inside.
+    expect(e.contributions.rows).toEqual([]);
+    expect(e.contributions).toMatchObject({ complete: false, reasons: ["contributions-cap"], cut: ["p/x0.mdx"] });
   });
 });
 
@@ -148,5 +149,42 @@ describe("fix round 1 batch 2 — lint check 14's reserved-page rule", () => {
     const e = build(pages, focus.map((p) => thread(p, [p])));
     expect(e.relations.issues).toEqual([["K-2", "p/c.md", "p/ref.mdx"]]);
     expect(e.relations.ambiguousIssues).toEqual([]);
+  });
+});
+
+describe("fix round 1 batch 3 — H: the contribution cap never cuts inside a thread", () => {
+  const rowsFor = (key: string, sessions: number, pagesPer: number, at: number): WorkContribution[] =>
+    Array.from({ length: sessions * pagesPer }, (_, i) => [
+      `claude-code:${key}-s${Math.floor(i / pagesPer)}`,
+      `${key}/p${i % pagesPer}.mdx`,
+      `${key}/p0.mdx`,
+      i % pagesPer === 0 ? "focus" : "touch",
+      1,
+      at - Math.floor(i / pagesPer),
+      at - Math.floor(i / pagesPer),
+    ]);
+
+  test("a thread ships all of its rows or none, in thread order, and the cut threads are named", () => {
+    // a: 995 rows; b: 10 (two sessions × 5 pages) does not fit after a; c: 3 does.
+    const a = rowsFor("a", 199, 5, 3_000);
+    const b = rowsFor("b", 2, 5, 2_000);
+    const c = rowsFor("c", 1, 3, 1_000);
+    const threads = [thread("a/p0.mdx", ["a/p0.mdx"]), thread("b/p0.mdx", ["b/p0.mdx"]), thread("c/p0.mdx", ["c/p0.mdx"])];
+    const e = build(threads.map((t) => meta(t.key)), threads, { contributions: [...a, ...b, ...c] });
+    expect(e.contributions.rows.length).toBeLessThanOrEqual(WORK_EVIDENCE_CONTRIBUTIONS_MAX);
+    for (const [t, all] of [[threads[0]!, a], [threads[1]!, b], [threads[2]!, c]] as const) {
+      const mine = e.contributions.rows.filter((r) => r[2] === t.key);
+      expect(mine.length === 0 || mine.length === all.length).toBe(true);
+    }
+    expect(e.contributions.rows).toEqual([...a, ...c]);
+    expect(e.contributions.cut).toEqual(["b/p0.mdx"]);
+    expect(e.contributions).toMatchObject({ complete: false, reasons: ["contributions-cap"] });
+  });
+
+  test("under the cap nothing is cut", () => {
+    const rows = rowsFor("a", 2, 2, 100);
+    const e = build([meta("a/p0.mdx")], [thread("a/p0.mdx", ["a/p0.mdx"])], { contributions: rows });
+    expect(e.contributions).toMatchObject({ complete: true, reasons: [], cut: [] });
+    expect(e.contributions.rows).toEqual(rows);
   });
 });

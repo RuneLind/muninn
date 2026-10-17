@@ -27,6 +27,7 @@
 
 import { isMetaStem } from "../dashboard/views/components/wiki-filter.ts";
 import { normalizeRelPath } from "./rel-path.ts";
+import { mapLedgerProvider } from "./provenance.ts";
 
 // ── Wire shapes ─────────────────────────────────────────────────────────────
 
@@ -148,12 +149,21 @@ export interface WorkEvidence {
   contributions: {
     complete: boolean;
     reasons: WorkEvidenceReason[];
+    /** Keys of shipped threads whose rows were left out WHOLE by
+     *  `WORK_EVIDENCE_CONTRIBUTIONS_MAX` (in thread order); every other
+     *  thread's rows ship whole. Non-empty exactly when `reasons` holds
+     *  `contributions-cap`. A thread's rows are complete when its key is not
+     *  here and `reasons` does not hold `ledger-truncated`. */
+    cut: string[];
     rows: WorkContribution[];
   };
 }
 
 /** One session's kept work on one page of a shipped thread:
  *  `[provider:id, owner page, thread key, kind, rolled-up edits, firstMs, lastMs]`.
+ *  The session is `workSessionRef`'s spelling (`claude-code:<id>`), so a row
+ *  joins a `WorkThreadSession` through `workSessionRef(session)`, not through
+ *  its raw `provider`.
  *  `kind` is the kind the THREAD kept — a hub focus that `buildThreads` moved to
  *  another thread is a `touch` here. Pass events never appear. */
 export type WorkContribution = [
@@ -536,9 +546,13 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   };
 }
 
-/** The `provider:id` a contribution names a session by. */
+/** The `provider:id` a contribution names a session by: the ledger's
+ *  provider through `mapLedgerProvider`, the one mapping the page `sessions:`
+ *  frontmatter and `providerGlyph` use (`claude` → `claude-code`). A client
+ *  joins a row to a thread's session by `workSessionRef(threadSession)`, since
+ *  `WorkThreadSession.provider` keeps the ledger's spelling. */
 export function workSessionRef(s: { provider: string; id: string }): string {
-  return `${s.provider}:${s.id}`;
+  return `${mapLedgerProvider(s.provider) ?? s.provider}:${s.id}`;
 }
 
 /**

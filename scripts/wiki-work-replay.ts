@@ -66,7 +66,7 @@ import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
 import { clipSessionsAt, parsePreWindow, parseWorkSessions, refreshWorkSessions } from "../src/wiki/work-sessions.ts";
 import { parseWorkedPages } from "../src/wiki/worked-ledger.ts";
-import { threadScore, WORK_WINDOW_MS, type WorkEvidence, type WorkThread } from "../src/wiki/work-focus.ts";
+import { threadScore, WORK_WINDOW_MS, workSessionRef, type WorkEvidence, type WorkThread } from "../src/wiki/work-focus.ts";
 import { claudeUsageHttpStatus, claudeUsageJson } from "../src/utils/claude-usage-fetch.ts";
 import { projectCounts, toListing } from "../src/dashboard/routes/wiki-routes.ts";
 import { railInputFor } from "../src/dashboard/views/components/wiki-rail-input.ts";
@@ -282,7 +282,7 @@ function printEvidence(index: WikiIndex, evidence: WorkEvidence | undefined): vo
   const c = evidence.contributions;
   const why = (complete: boolean, reasons: readonly string[]) => (complete ? "complete" : `INCOMPLETE (${reasons.join(", ")})`);
   console.log(`  version ${evidence.version}; threads ${evidence.threads.shipped} shipped of ${evidence.threads.candidates} candidates`);
-  console.log(`  relations: ${why(r.complete, r.reasons)}; contributions: ${why(c.complete, c.reasons)}`);
+  console.log(`  relations: ${why(r.complete, r.reasons)}; contributions: ${why(c.complete, c.reasons)}${c.cut.length ? `, ${c.cut.length} threads cut whole` : ""}`);
   const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
   const { evidence: _e, ...bare } = index.work!;
   console.log(
@@ -319,7 +319,9 @@ function printEvidence(index: WikiIndex, evidence: WorkEvidence | undefined): vo
   console.log(`  contributions: ${c.rows.length} rows (${c.rows.filter((x) => x[3] === "focus").length} focus) over ${new Set(c.rows.map((x) => x[0])).size} sessions`);
   (index.work?.threads ?? []).forEach((t, i) => {
     const e = perThread.get(t.key);
-    console.log(`    t${i + 1}: ${e?.rows ?? 0} rows, ${e?.focus ?? 0} focus, ${e?.sessions.size ?? 0}/${t.sessions.length} sessions`);
+    const joined = t.sessions.filter((x) => e?.sessions.has(workSessionRef(x))).length;
+    const cut = c.cut.includes(t.key) ? " (cut)" : "";
+    console.log(`    t${i + 1}: ${e?.rows ?? 0} rows, ${e?.focus ?? 0} focus, ${joined}/${t.sessions.length} sessions joined${cut}`);
   });
 }
 

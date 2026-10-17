@@ -202,9 +202,10 @@ describe("grouping evidence on the listing", () => {
       contributions: {
         complete: true,
         reasons: [],
+        cut: [],
         rows: [
-          ["claude:s1", "plans/a.mdx", "plans/a.mdx", "focus", 6, NOW - 3_600_000, NOW - 3_540_000],
-          ["claude:s2", "plans/c.mdx", "plans/c.mdx", "focus", 6, NOW - 4_200_000, NOW - 4_140_000],
+          ["claude-code:s1", "plans/a.mdx", "plans/a.mdx", "focus", 6, NOW - 3_600_000, NOW - 3_540_000],
+          ["claude-code:s2", "plans/c.mdx", "plans/c.mdx", "focus", 6, NOW - 4_200_000, NOW - 4_140_000],
         ],
       },
     });

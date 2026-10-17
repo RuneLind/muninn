@@ -13,6 +13,7 @@ import {
   WORK_HUB_BACKLINKS,
   WORK_THREADS_MAX,
   WORK_TITLE_MAX,
+  workSessionRef,
   type WorkFocusInput,
   type WorkPageInput,
   type WorkSession,
@@ -426,20 +427,20 @@ describe("contributions (grouping evidence)", () => {
     const r = run(sessions, pages);
     expect(r.candidates).toBe(2);
     expect(rows(r).filter((c) => c[2] === "p/a.mdx")).toEqual([
-      ["claude:s2", "p/a.mdx", "p/a.mdx", "focus", 5],
-      ["claude:s2", "p/c.mdx", "p/a.mdx", "focus", 5],
-      ["claude:s1", "p/a.mdx", "p/a.mdx", "focus", 5],
-      ["claude:s1", "p/b.mdx", "p/a.mdx", "touch", 1],
+      ["claude-code:s2", "p/a.mdx", "p/a.mdx", "focus", 5],
+      ["claude-code:s2", "p/c.mdx", "p/a.mdx", "focus", 5],
+      ["claude-code:s1", "p/a.mdx", "p/a.mdx", "focus", 5],
+      ["claude-code:s1", "p/b.mdx", "p/a.mdx", "touch", 1],
     ]);
-    expect(rows(r).filter((c) => c[2] === "p/x.mdx")).toEqual([["claude:s3", "p/x.mdx", "p/x.mdx", "focus", 4]]);
+    expect(rows(r).filter((c) => c[2] === "p/x.mdx")).toEqual([["claude-code:s3", "p/x.mdx", "p/x.mdx", "focus", 4]]);
     // Every session of a thread contributes, and every focus page has a focus row.
     for (const t of r.threads) {
       const mine = r.contributions.filter((c) => c[2] === t.key);
-      expect(new Set(mine.map((c) => c[0]))).toEqual(new Set(t.sessions.map((s) => `${s.provider}:${s.id}`)));
+      expect(new Set(mine.map((c) => c[0]))).toEqual(new Set(t.sessions.map(workSessionRef)));
       for (const p of t.pages) expect(mine.some((c) => c[1] === p && c[3] === "focus")).toBe(true);
     }
     // The first and last event times are the rolled-up row's.
-    expect(r.contributions.find((c) => c[0] === "claude:s3")!.slice(5)).toEqual([T(5), T(5) + 10 * 60_000]);
+    expect(r.contributions.find((c) => c[0] === "claude-code:s3")!.slice(5)).toEqual([T(5), T(5) + 10 * 60_000]);
   });
 
   test("a hub the D16 rule moved to another thread is a touch in the thread that lost it", () => {
@@ -469,15 +470,15 @@ describe("contributions (grouping evidence)", () => {
       ],
       [hub, pg("p/a.mdx"), pg("p/y.mdx"), pg("p/z.mdx")],
     );
-    expect(new Set(r.contributions.map((c) => c[0]))).toEqual(new Set(["claude:s1"]));
+    expect(new Set(r.contributions.map((c) => c[0]))).toEqual(new Set(["claude-code:s1"]));
   });
 
   test("fork dedupe: the fork's repeated rows are not credited to it", () => {
     const row = f("p/a.mdx", 5, T(10));
     // A fork starts after its original and carries the original's rows.
     const r = run([sess("orig", [row]), sess("fork", [row, f("p/b.mdx", 4, T(3))], { first: T(9) })], [pg("p/a.mdx"), pg("p/b.mdx")]);
-    expect(r.contributions.filter((c) => c[1] === "p/a.mdx").map((c) => c[0])).toEqual(["claude:orig"]);
-    expect(r.contributions.filter((c) => c[0] === "claude:fork").map((c) => c[1])).toEqual(["p/b.mdx"]);
+    expect(r.contributions.filter((c) => c[1] === "p/a.mdx").map((c) => c[0])).toEqual(["claude-code:orig"]);
+    expect(r.contributions.filter((c) => c[0] === "claude-code:fork").map((c) => c[1])).toEqual(["p/b.mdx"]);
   });
 
   test("attachments and aliases: a contribution names the canonical owner page", () => {
@@ -502,5 +503,24 @@ describe("contributions (grouping evidence)", () => {
     expect(r.candidates).toBe(n);
     const shipped = new Set(r.threads.map((t) => t.key));
     expect(new Set(r.contributions.map((c) => c[2]))).toEqual(shipped);
+  });
+});
+
+describe("fix round 1 batch 3 — I: a contribution names its session the way the repo does", () => {
+  test("refs go through the provenance mapping, and a thread session joins its rows through workSessionRef", () => {
+    const r = run(
+      [
+        sess("s1", [f("p/a.mdx", 5, T(30))]),
+        { ...sess("o1", [f("p/a.mdx", 4, T(20))]), provider: "opencode" },
+        { ...sess("x1", [f("p/a.mdx", 3, T(10))]), provider: "codex" },
+      ],
+      [pg("p/a.mdx")],
+    );
+    // `claude` is the ledger's spelling; `claude-code` is the frontmatter's, the
+    // stamper's and `providerGlyph`'s. An unknown provider passes through.
+    expect(new Set(r.contributions.map((c) => c[0]))).toEqual(new Set(["claude-code:s1", "opencode:o1", "codex:x1"]));
+    const t = r.threads[0]!;
+    expect(t.sessions.find((s) => s.id === "s1")!.provider).toBe("claude");
+    expect(new Set(t.sessions.map(workSessionRef))).toEqual(new Set(r.contributions.map((c) => c[0])));
   });
 });

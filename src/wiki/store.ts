@@ -3491,14 +3491,11 @@ export async function buildWikiIndex(
         // The retired bit. Only `signal: none` culls; see `readCull`.
         ...readCull(fm.signal, fm["signal-reason"]),
       };
-      // `owns:` and `related:` (D18), parsed with ONE YAML pass and only when
-      // the frontmatter mentions either key — most pages carry neither.
-      const fmText = splitFrontmatter(content).frontmatter ?? "";
-      if (fmText.includes("owns") || fmText.includes("related")) {
-        const lists = readFrontmatterLists(content);
-        if (lists.owns.keys.length) meta.owns = lists.owns.keys;
-        if (lists.related.entries.length) rawRelated.set(relPath, lists.related.entries);
-      }
+      // `owns:` and `related:` (D18), parsed with ONE YAML pass; the reader
+      // skips the parse itself on a page carrying neither key.
+      const lists = readFrontmatterLists(content);
+      if (lists.owns.keys.length) meta.owns = lists.owns.keys;
+      if (lists.related.entries.length) rawRelated.set(relPath, lists.related.entries);
       // Waiting on you, from the body's `<NextMoves>` you lanes.
       const movesYou = extractNextMoves(content)?.counts.you ?? 0;
       if (movesYou > 0) meta.movesYou = movesYou;

@@ -281,3 +281,43 @@ describe("fix round 1 batch 2 — leading slash and the name census", () => {
     expect(b.relatedAmbiguous).toBeUndefined();
   });
 });
+
+describe("fix round 1 batch 3 — N: the index and the reader share one frontmatter boundary", () => {
+  // `----` ends the frontmatter for a `\n---` prefix test but not for
+  // `frontmatterEndLine`, which wants a line that trims to `---`.
+  const DASHED = "---\ntitle: N\nnote: x\n----\nowns: [ABC-7]\nrelated: [[n-target]]\n---\n\nBody.\n";
+  let root = "";
+  beforeAll(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-fm-boundary-"));
+    await writeFile(path.join(root, "n.md"), DASHED);
+    await writeFile(path.join(root, "n-target.md"), "---\ntitle: Target\n---\n");
+  });
+  afterAll(() => rm(root, { recursive: true, force: true }));
+
+  test("a `----` line inside the frontmatter: the index reads what lint check 14's reader reads", async () => {
+    expect(readOwns(DASHED).keys).toEqual(["ABC-7"]);
+    const index = await buildWikiIndex(root);
+    const n = index.pages.find((p) => p.relPath === "n.md")!;
+    expect(n.owns).toEqual(readOwns(DASHED).keys);
+    expect(n.related).toEqual(["n-target.md"]);
+  });
+
+  test("the gate still admits the quoted, flow and indented spellings", () => {
+    expect(readFrontmatterLists('---\ntitle: Q\n"owns": [ABC-1]\n---\n').owns.keys).toEqual(["ABC-1"]);
+    expect(readFrontmatterLists("---\n{title: F, owns: ABC-2, related: [x]}\n---\n")).toMatchObject({
+      owns: { keys: ["ABC-2"] },
+      related: { entries: [{ kind: "text", value: "x" }] },
+    });
+    expect(readFrontmatterLists("---\n  title: I\n  owns: ABC-3\n---\n").owns.keys).toEqual(["ABC-3"]);
+  });
+
+  test("the gate's prefix split agrees with the readers on a CRLF page and on a frontmatter longer than the prefix", () => {
+    const crlf = "---\r\ntitle: C\r\nowns: [ABC-4]\r\nrelated: [[n-target]]\r\n---\r\nBody.\r\n";
+    expect(readFrontmatterLists(crlf)).toEqual({ owns: readOwns(crlf), related: readRelated(crlf) });
+    expect(readFrontmatterLists(crlf).owns.keys).toEqual(["ABC-4"]);
+    const filler = Array.from({ length: 60 }, (_, i) => `k${i}: v`).join("\n");
+    const long = `---\n${filler}\nowns: [ABC-5]\n---\n\n${"line\n".repeat(100)}`;
+    expect(readFrontmatterLists(long).owns).toEqual(readOwns(long));
+    expect(readFrontmatterLists(long).owns.keys).toEqual(["ABC-5"]);
+  });
+});

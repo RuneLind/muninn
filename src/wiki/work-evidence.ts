@@ -27,6 +27,7 @@ import {
  * with frozen answers): 45 relation entries and 64 contribution rows at 17
  * threads on the largest wiki, ~200 bytes a row. The sessions answer itself
  * stops at 200 sessions, so 1000 rows is five pages a session at that cap.
+ * The contribution cap is applied per thread (see `contributions.cut`).
  * Each relation list holds at most {@link WORK_EVIDENCE_RELATIONS_MAX} entries.
  */
 export const WORK_EVIDENCE_RELATIONS_MAX = 300;
@@ -115,11 +116,23 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
 
   const contribReasons: WorkEvidenceReason[] = [];
   if (input.ledgerTruncated) contribReasons.push("ledger-truncated");
-  let rows = [...input.contributions];
-  if (rows.length > WORK_EVIDENCE_CONTRIBUTIONS_MAX) {
-    contribReasons.push("contributions-cap");
-    rows = rows.slice(0, WORK_EVIDENCE_CONTRIBUTIONS_MAX);
+  // The cap cuts on a thread boundary: a thread's rows ship whole or not at
+  // all, in thread order, and a thread that does not fit is named in `cut`
+  // while a later, smaller one may still fit.
+  const byThread = new Map<string, WorkContribution[]>();
+  for (const row of input.contributions) {
+    const list = byThread.get(row[2]) ?? [];
+    list.push(row);
+    byThread.set(row[2], list);
   }
+  const rows: WorkContribution[] = [];
+  const cut: string[] = [];
+  for (const t of input.threads) {
+    const mine = byThread.get(t.key) ?? [];
+    if (rows.length + mine.length <= WORK_EVIDENCE_CONTRIBUTIONS_MAX) rows.push(...mine);
+    else cut.push(t.key);
+  }
+  if (cut.length) contribReasons.push("contributions-cap");
 
   return {
     version: WORK_EVIDENCE_VERSION,
@@ -134,6 +147,6 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
       ambiguousIssues: ambiguousOut,
       relatedSkipped: { skipped, ambiguous },
     },
-    contributions: { complete: contribReasons.length === 0, reasons: contribReasons, rows },
+    contributions: { complete: contribReasons.length === 0, reasons: contribReasons, cut, rows },
   };
 }
