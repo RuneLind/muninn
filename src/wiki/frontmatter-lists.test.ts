@@ -8,7 +8,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readFrontmatterLists, readOwns, readRelated, resolveRelatedEntries, type RelatedResolveContext } from "./frontmatter-lists.ts";
+import {
+  readFrontmatterLists,
+  readOwns,
+  readRelated,
+  resolveRelatedEntries,
+  type RelatedRead,
+  type RelatedResolveContext,
+} from "./frontmatter-lists.ts";
 import { buildWikiIndex } from "./store.ts";
 import { toListing } from "../dashboard/routes/wiki-routes.ts";
 
@@ -429,5 +436,96 @@ describe("fix round 2 — the related: reader against the whole D18 table", () =
   test("row 46: within the caps, a nested list is read whole", () => {
     expect(read(aliasChain(3, 2))).toEqual(["T:lol"]);
     expect(read(fmPage("\n  - - - a\n      - b\n    - c"))).toEqual(["T:a", "T:b", "T:c"]);
+  });
+});
+
+describe("fix round 2 batch 2 — the bare-name root step, the gate's key spellings, its CRLF fold", () => {
+  describe("1: a bare name tries the page's folder, then the root, before a name", () => {
+    let root = "";
+    beforeAll(async () => {
+      root = await mkdtemp(path.join(tmpdir(), "wiki-fm-bare-"));
+      await mkdir(path.join(root, "plans/x"), { recursive: true });
+      await mkdir(path.join(root, "notes"));
+      await writeFile(path.join(root, "foo.md"), "---\ntitle: Foo root\n---\n");
+      await writeFile(path.join(root, "plans/x/foo.md"), "---\ntitle: Foo deep\n---\n");
+      await writeFile(path.join(root, "bar.md"), "---\ntitle: Bar md\n---\n");
+      await writeFile(path.join(root, "bar.html"), "<html><head><title>Bar html</title></head><body></body></html>");
+      await writeFile(path.join(root, "notes/b.md"), "---\ntitle: B\nrelated: [foo, bar.html]\n---\n");
+    });
+    afterAll(() => rm(root, { recursive: true, force: true }));
+
+    test("a stem two pages share resolves at the root, and a spelled .html stays the .html", async () => {
+      const index = await buildWikiIndex(root);
+      const b = index.pages.find((p) => p.relPath === "notes/b.md")!;
+      expect(index.resolve("foo")?.relPath).toBe("foo.md");
+      expect(b.related).toEqual(["foo.md", "bar.html"]);
+      expect(b.relatedAmbiguous).toBeUndefined();
+    });
+  });
+
+  describe("2: the gate passes every key spelling the readers read", () => {
+    const fm = (body: string) => `---\ntitle: X\n${body}\n---\n\nBody.\n`;
+    // [spelling, the readers find owns or related present]
+    const SPELLINGS: [string, string, boolean][] = [
+      ["block", "owns: [ABC-1]\nrelated: [x]", true],
+      ["block list", "owns:\n  - ABC-1\nrelated:\n  - x", true],
+      ["double-quoted", '"owns": [ABC-1]\n"related": [x]', true],
+      ["single-quoted", "'owns': [ABC-1]\n'related': [x]", true],
+      ["flow mapping", "{owns: ABC-2, related: [x]}", false],
+      ["anchored", "&k owns: [ABC-1]\n&r related: [x]", true],
+      ["tagged", "!!str owns: [ABC-1]\n!!str related: [x]", true],
+      ["verbatim tag", "!<tag:yaml.org,2002:str> owns: [ABC-1]", true],
+      ["alias key", "a: &k owns\nb: &r related\n*k : [ABC-1]\n*r : [x]", true],
+      ["merge key", "base: &b {owns: [ABC-1], related: [x]}\n<<: *b", true],
+      ["\\x escape", '"\\x6fwns": [ABC-1]\n"rel\\x61ted": [x]', true],
+      ["\\u escape", '"\\u006fwns": [ABC-1]\n"rel\\u0061ted": [x]', true],
+      ["\\U escape", '"\\U0000006fwns": [ABC-1]\n"rel\\U00000061ted": [x]', true],
+      ["broken YAML, entry fallback", "owns: [ABC-1]\nrelated: [[a]], [[b]]\nbad: [unclosed", true],
+    ];
+    // Whole frontmatters: an indented or flow one, and a lone `?` explicit
+    // key, which Bun.YAML refuses after another key.
+    const WHOLE: [string, string, boolean][] = [
+      ["complex key, owns", "---\n? owns\n: [ABC-1]\n---\n", true],
+      ["complex key, related", "---\n? related\n: [x]\n---\n", true],
+      ["sequence key, owns", "---\n? [owns]\n: [ABC-1]\n---\n", true],
+      ["sequence key, related", "---\n? [related]\n: [x]\n---\n", true],
+      ["escaped line break, explicit owns", '---\n? "ow\\\n  ns"\n: [ABC-1]\n---\n', true],
+      ["escaped line break, explicit related", '---\n? "rel\\\n  ated"\n: [x]\n---\n', true],
+      ["escaped line break, flow key", '---\n{"ow\\\n  ns": [ABC-1], "rel\\\n  ated": [x]}\n---\n', true],
+      ["indented", "---\n  title: I\n  owns: ABC-3\n  related: [x]\n---\n", true],
+      ["flow frontmatter", "---\n{title: F, owns: ABC-2, related: [x]}\n---\n", true],
+      ["anchored flow key", "---\n{title: F, &k owns: [ABC-1], &r related: [x]}\n---\n", true],
+    ];
+    const cases = [...SPELLINGS.map(([n, b, p]): [string, string, boolean] => [n, fm(b), p]), ...WHOLE];
+
+    for (const [name, content, present] of cases) {
+      test(`${name}: gated == ungated`, () => {
+        const ungated = { owns: readOwns(content), related: readRelated(content) };
+        if (present) expect(ungated.owns.present || ungated.related.present).toBe(true);
+        expect(readFrontmatterLists(content)).toEqual(ungated);
+      });
+    }
+
+    test("a frontmatter naming neither key, with no escape, still skips the parse", () => {
+      const content = fm("tags: [a, b]\nstatus: open");
+      expect(readFrontmatterLists(content)).toEqual({ owns: readOwns(content), related: readRelated(content) });
+    });
+  });
+
+  describe("3: the gate folds CRLF the way the readers do", () => {
+    const crlf = (body: string) => `---\r\ntitle: C\r\n${body.replace(/\n/g, "\r\n")}\r\n---\r\nBody.\r\n`;
+    const CASES: [string, string, string[]][] = [
+      ["double-quoted scalar over two lines", 'related: "a\n  b"', ["T:a b"]],
+      ["single-quoted scalar over a blank line", "related: 'a\n\n  b'", ["T:a\nb"]],
+      ["broken YAML, entry fallback", 'related: "a\n  b"\nbad: [unclosed', ["T:a b"]],
+    ];
+    const show = (r: RelatedRead) => r.entries.map((e) => (e.kind === "text" ? `T:${e.value}` : e.kind));
+    for (const [name, body, expected] of CASES) {
+      test(`${name}: gated == ungated`, () => {
+        const content = crlf(body);
+        expect(show(readRelated(content))).toEqual(expected);
+        expect(readFrontmatterLists(content).related).toEqual(readRelated(content));
+      });
+    }
   });
 });

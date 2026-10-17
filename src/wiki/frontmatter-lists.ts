@@ -349,10 +349,14 @@ function cleanLinkTarget(target: string): string {
   return t;
 }
 
-/** A frontmatter line that may hold an `owns` or `related` key: block, quoted,
- *  indented or flow spelling. Looser than the readers' entry regexes on
- *  purpose — a false hit costs one YAML parse, a miss drops a key. */
-const LISTS_KEY_RE = /(?:^|[{,])\s*["']?(?:owns|related)["']?\s*:/;
+/** A frontmatter line that may spell an `owns` or `related` key. A YAML key's
+ *  letters are written out (any quoting, anchor, tag or flow form) or come
+ *  from a double-quoted escape — `\x`, `\u`, `\U`, or a `\` that ends the
+ *  line and joins it to the next — and an alias key repeats an anchored node
+ *  spelled one of those two ways. So the substring or a backslash is a
+ *  superset of what the readers read: a false hit costs one YAML parse, a
+ *  miss drops a key. */
+const LISTS_KEY_RE = /owns|related|\\/;
 
 /** Lines split before the whole page is: a frontmatter rarely runs longer. */
 const LISTS_GATE_PREFIX_LINES = 32;
@@ -362,7 +366,8 @@ const LISTS_GATE_PREFIX_LINES = 32;
  *  {@link LISTS_KEY_RE}, else `null`. Splits a prefix first, the whole page
  *  only when the fence opens and does not close inside it. Every line before
  *  the closing fence ended in `\n`, so dropping its one trailing `\r` is what
- *  `Frontmatter.of`'s CRLF fold does to it. */
+ *  `Frontmatter.of`'s CRLF fold does to it; a quoted scalar spanning lines
+ *  reads differently with the `\r` left in. */
 function listsFrontmatter(content: string): Frontmatter | null {
   for (const limit of [LISTS_GATE_PREFIX_LINES, undefined]) {
     const lines = content.split("\n", limit);
@@ -426,10 +431,11 @@ const PAGE_EXT_RE = /\.(?:mdx?|html)$/i;
  *  2. `./` or `../` resolves against the page's folder;
  *  3. a filesystem-absolute path counts when it is under a root; a `/…` path
  *     that is not goes on to step 4;
- *  4. otherwise a path resolves root-relative with the extension implied, and a
- *     bare name in the page's own folder first (`resolveSupersededBy`'s
- *     pattern), then root-level, then by stem, title or alias — only when it
- *     names one page, else it is ambiguous;
+ *  4. otherwise a path resolves root-relative with the extension implied; a
+ *     bare name resolves in the page's own folder, then at the root — each as
+ *     spelled, then by its stem, the extension implied
+ *     (`resolveSupersededBy`'s pattern) — then by stem, title or alias, only
+ *     when that names one page, else it is ambiguous;
  *  5. anything else is skipped.
  */
 export function resolveRelatedEntries(entries: readonly RelatedEntry[], ctx: RelatedResolveContext): RelatedResolved {
@@ -468,11 +474,15 @@ export function resolveRelatedEntries(entries: readonly RelatedEntry[], ctx: Rel
         hit = (root ? byPathImplied(v.normalize("NFC").slice(root.length + 1)) : undefined) ?? byPathImplied(v);
       } else if (v.includes("/")) hit = byPathImplied(v);
       else if (v) {
-        // A bare name: the page's own folder, then the root, then a name.
+        // A bare name: the page's own folder, then the root — each as
+        // spelled, then by its stem — then a stem, title or alias.
         const stem = v.replace(PAGE_EXT_RE, "");
         const inDir = (name: string) => (dir === "." ? name : `${dir}/${name}`);
-        hit = byPathImplied(inDir(v)) ?? (stem !== v ? byPathImplied(inDir(stem)) : undefined);
-        if (!hit && stem !== v) hit = byPathImplied(stem);
+        hit =
+          byPathImplied(inDir(v)) ??
+          (stem !== v ? byPathImplied(inDir(stem)) : undefined) ??
+          byPathImplied(v) ??
+          (stem !== v ? byPathImplied(stem) : undefined);
         if (!hit) {
           const named = new Set([...ctx.byName(v.toLowerCase()), ...(stem !== v ? ctx.byName(stem.toLowerCase()) : [])]);
           if (named.size === 1) hit = [...named][0];
