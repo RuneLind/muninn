@@ -35,6 +35,7 @@ import {
 } from "./wiki-groups.ts";
 import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
 import type { WorkThreadSession } from "../../../wiki/work-focus.ts";
+import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -61,8 +62,14 @@ export const THREAD_PIN_KEY_PREFIX = "muninn.wiki.threadPin.v1:";
 /** A work-thread card's fold key prefix. Never a bare relPath: that spelling is
  *  the page's own attachment-group key, and the card would toggle it too. */
 export const THREAD_FOLD_PREFIX = "thread:";
-/** At most this many work-thread cards render (D6). */
+/** A work-thread GROUP card's fold key prefix (`group:series:…`,
+ *  `group:project:…`, `group:anchor:…`), a namespace apart from `thread:`, so
+ *  a group and its child fold separately. */
+export const GROUP_FOLD_PREFIX = "group:";
+/** At most this many work-thread cards render (D6), a group card counting once. */
 export const THREAD_CARDS_MAX = 5;
+/** A group card shows this many children; `+ N more threads` shows the rest. */
+export const GROUP_CHILDREN_SHOWN = 3;
 
 /** Pins are the reader's own choice, so the cap is only a bound on the stored
  *  string — but it is enforced on READ as well as on write, so a hand-edited or
@@ -96,9 +103,14 @@ export const FOLDS_MAX = 200;
  */
 export const THREAD_FOLDS_MAX = 20;
 
+/** Group fold keys (`group:…` and `closed:group:…`), bounded apart from both
+ *  the reader's folds and the thread folds, for the same orphan reason: a
+ *  group's key follows its name, which moves as threads join and leave. */
+export const GROUP_FOLDS_MAX = 20;
+
 /** What a raw read may hold before `capFolds` sorts it out: both caps plus
  *  room for the mode keys. */
-export const FOLDS_READ_MAX = FOLDS_MAX + THREAD_FOLDS_MAX + 16;
+export const FOLDS_READ_MAX = FOLDS_MAX + THREAD_FOLDS_MAX + GROUP_FOLDS_MAX + 16;
 
 export function foldsKey(wiki: string): string {
   return FOLDS_KEY_PREFIX + wiki;
@@ -267,14 +279,22 @@ export function isThreadFoldKey(key: string): boolean {
   return v.startsWith(THREAD_FOLD_PREFIX) || v.startsWith(CLOSED_FOLD_PREFIX + THREAD_FOLD_PREFIX);
 }
 
+/** Is this a work-thread GROUP card's fold key, in either spelling? */
+export function isGroupFoldKey(key: string): boolean {
+  const v = normalizeFoldKey(key);
+  return v.startsWith(GROUP_FOLD_PREFIX) || v.startsWith(CLOSED_FOLD_PREFIX + GROUP_FOLD_PREFIX);
+}
+
 /** The stored fold list, bounded per class: mode keys first and uncapped, then
- *  the reader's folds (≤ `FOLDS_MAX`), then thread folds (≤ `THREAD_FOLDS_MAX`).
- *  Order within a class is kept, so the newest entry of each stays first. */
+ *  the reader's folds (≤ `FOLDS_MAX`), then thread folds (≤ `THREAD_FOLDS_MAX`),
+ *  then group folds (≤ `GROUP_FOLDS_MAX`). Order within a class is kept, so the
+ *  newest entry of each stays first. With no group key the list is today's. */
 export function capFolds(list: readonly string[]): string[] {
   const modes = list.filter((k) => isModeFoldKey(k));
   const threads = list.filter((k) => isThreadFoldKey(k)).slice(0, THREAD_FOLDS_MAX);
-  const folds = list.filter((k) => !isModeFoldKey(k) && !isThreadFoldKey(k)).slice(0, FOLDS_MAX);
-  return [...modes, ...folds, ...threads];
+  const groups = list.filter((k) => isGroupFoldKey(k)).slice(0, GROUP_FOLDS_MAX);
+  const folds = list.filter((k) => !isModeFoldKey(k) && !isThreadFoldKey(k) && !isGroupFoldKey(k)).slice(0, FOLDS_MAX);
+  return [...modes, ...folds, ...threads, ...groups];
 }
 
 /** Flip one group and return the new list. A blank key is a no-op.
@@ -747,6 +767,106 @@ export interface RailThreadCard {
   movesYou: number;
   /** D6's order score at the anchored `now`. */
   score: number;
+  /** Set on a CHILD card drawn inside a group card: why it joined. Absent on
+   *  every card of the Threads stop and on a lone thread, which render as
+   *  today. A child's `touched` is empty: the group lists it once. */
+  child?: RailThreadChild;
+}
+
+/** What a child card says about its place in the group. */
+export interface RailThreadChild {
+  /** The group's anchor (the thread the others joined). */
+  anchor: boolean;
+  /** The third meta line: `↔ 5 links · series`, or `anchor`. */
+  why: string;
+  /** One line per witness that joined it, for the why line's hover. */
+  witnesses: string[];
+  /** D9's `also <series>` chips: other series it has focus pages in, by label. */
+  also: string[];
+}
+
+/**
+ * A work-thread GROUP card (plan `muninn-wiki-work-thread-grouping`, PR 3):
+ * threads joined at the Related or Areas stop, decided by the grouping model
+ * (`wiki-work-groups.ts`) and shaped by `openWorkCards` (`wiki-rail-input.ts`).
+ * Its children are ordinary thread cards with a `child` line.
+ */
+export interface RailGroupCard {
+  group: true;
+  /** The anchor thread's key. */
+  key: string;
+  /** `group:series:…`, `group:project:…` or `group:anchor:<anchor key>`. */
+  foldKey: string;
+  toggleKey: string;
+  open: boolean;
+  /** The kind label drawn before the name. */
+  label: "series" | "project" | "related";
+  /** The series label, the project, or the anchor's name. Never a facet's. */
+  name: string;
+  /** A child holds the reader's pinned page (D7). */
+  pinned: boolean;
+  /** What the group's 📌 stores: the anchor child's `pinAnchor`. */
+  pinAnchor: string;
+  /** False only when an active facet hid the anchor's rows and another child
+   *  is visible (`WorkGroupView.anchorVisible`). */
+  anchorVisible: boolean;
+  /** Visible children (`N threads`). */
+  threads: number;
+  /** The visible children's sessions, deduplicated by `workSessionRef`. */
+  sessions: WorkThreadSession[];
+  movesYou: number;
+  /** The children drawn: the first `GROUP_CHILDREN_SHOWN` (and the pinned
+   *  child past them), or every one once `+ N more threads` was pressed. */
+  children: RailThreadCard[];
+  /** Visible children not drawn: the `+ N more threads` count. */
+  hidden: number;
+  /** Pages the children only touched, once for the group (shared context). */
+  context: WikiListing[];
+  /** One line per distinct witness, for the group header's hover. */
+  witnesses: string[];
+  score: number;
+}
+
+/** A card in the Work threads section: a thread, or a group of threads. */
+export type RailWorkCard = RailThreadCard | RailGroupCard;
+
+export function isRailGroupCard(c: RailWorkCard): c is RailGroupCard {
+  return (c as RailGroupCard).group === true;
+}
+
+/**
+ * The thread cards a render draws OPEN, in order: an open thread card, and
+ * the drawn children of an open group that are open themselves. THE lift rule
+ * (D13 at the new level): `railInputFor` hands these cards' focus pages to
+ * Activity as the exclude set and `buildRail` lifts the same ones, so closing
+ * a child or its group returns the rows to Activity.
+ */
+export function openWorkThreadCards(cards: readonly RailWorkCard[]): RailThreadCard[] {
+  const out: RailThreadCard[] = [];
+  for (const c of cards) {
+    if (!isRailGroupCard(c)) {
+      if (c.open) out.push(c);
+      continue;
+    }
+    if (c.open) for (const ch of c.children) if (ch.open) out.push(ch);
+  }
+  return out;
+}
+
+/** The Group control on the Work threads label: the stop drawn, the reader's
+ *  choice, the evidence boxes and each stop's card count. */
+export interface RailWorkControl {
+  /** What the reader chose (D1: Related). */
+  requested: WorkGroupStop;
+  /** What is drawn: Threads when the chosen stop is unavailable. */
+  stop: WorkGroupStop;
+  evidence: WorkGroupEvidenceToggles;
+  /** The boxes apply at the drawn stop (Related, Areas); elsewhere they show
+   *  disabled and keep their values. */
+  evidenceApplies: boolean;
+  /** Threads, Related, Areas (Sessions is PR 4's): available, why not, and
+   *  the cards it would draw under the current facets, uncapped. */
+  stops: { stop: WorkGroupStop; available: boolean; reasons: string[]; cards: number }[];
 }
 
 export type RailEntry =
@@ -764,6 +884,8 @@ export type RailEntry =
       /** How many rows the header stands for — rendered whether or not they are
        *  on screen, so a collapsed section still says how much it holds. */
       count?: number;
+      /** The Work threads header only: the Group control. */
+      control?: RailWorkControl;
     }
   | {
       kind: "row";
@@ -865,6 +987,29 @@ export type RailEntry =
        *  pages no open card ABOVE it holds, the first card winning a shared
        *  page. The header's «Show N pages» line reads it. */
       pages: number;
+    }
+  | {
+      /** A GROUP card's header: its fold, with the 📌 beside it. Open, the
+       *  painter opens the group body, which the `thread-group-end` entry
+       *  closes; the children's `thread` entries sit between. */
+      kind: "thread-group";
+      section: RailSection;
+      card: RailGroupCard;
+      foldKey: string;
+      toggleKey: string;
+      folded: boolean;
+    }
+  | {
+      /** The end of an open group's body: `+ N more threads` and the shared
+       *  context line (links, not rows; a page drawn as a focus row anywhere
+       *  is left out of it). */
+      kind: "thread-group-end";
+      section: RailSection;
+      foldKey: string;
+      /** The group's name, for the end's controls' accessible names. */
+      name: string;
+      hidden: number;
+      context: WikiListing[];
     }
   | {
       /** An open card's one `touched:` line — links, not rows, so `shown`
@@ -1017,11 +1162,15 @@ export interface RailInput {
    */
   seriesGroups?: readonly RailGroup[];
   /**
-   * The WORK-THREAD cards (`openThreadCards`), in render order, or nothing with
-   * no sessions memo (D11). An OPEN card's focus pages are lifted out of
-   * Activity, Pinned and the groups (D13); a closed card lifts nothing.
+   * The WORK-THREAD cards (`openThreadCards`, or `openWorkCards` at a grouping
+   * stop), in render order, or nothing with no sessions memo (D11). An OPEN
+   * card's focus pages are lifted out of Activity, Pinned and the groups
+   * (D13); a closed card lifts nothing. In a group, only an open child of an
+   * open group lifts (`openWorkThreadCards`).
    */
-  threads?: readonly RailThreadCard[];
+  threads?: readonly RailWorkCard[];
+  /** The Group control for the Work threads label; absent ⇒ today's label. */
+  workControl?: RailWorkControl;
   /**
    * The page the reader currently has OPEN, if any. The group HOLDING it is
    * expanded whatever the store says — a reader is never on a page the rail
@@ -1501,8 +1650,7 @@ export function buildRail(input: RailInput): RailModel {
   const cards = grouped ? (input.threads ?? []) : [];
   /** page key → the open card it renders in. */
   const threadLifted = new Map<string, RailThreadCard>();
-  for (const c of cards) {
-    if (!c.open) continue;
+  for (const c of openWorkThreadCards(cards)) {
     for (const p of c.focus) {
       const k = normalizeRel(p.relPath);
       if (!byRel.has(k) || threadLifted.has(k) || claimed.has(k)) continue;
@@ -1749,16 +1897,22 @@ export function buildRail(input: RailInput): RailModel {
   };
 
   if (grouped && cards.length) {
-    entries.push({ kind: "header", section: "threads", label: "Work threads" });
+    entries.push({
+      kind: "header",
+      section: "threads",
+      label: "Work threads",
+      ...(input.workControl ? { control: input.workControl } : {}),
+    });
     const created = (c: RailThreadCard) => new Set(c.created.map(normalizeRel));
     /** Pages the open cards drawn so far hold. */
     const heldAbove = new Set<string>();
-    for (const c of cards) {
+    /** One thread card: a top-level card, or a child inside an open group. */
+    const emitCard = (c: RailThreadCard): void => {
       const header = { kind: "thread" as const, section: "threads" as const, card: c, foldKey: c.foldKey, toggleKey: c.toggleKey, folded: !c.open, pages: 0 };
       entries.push(header);
       if (!c.open) {
         header.pages = new Set(c.focus.map((p) => normalizeRel(p.relPath)).filter((k) => byRel.has(k) && !heldAbove.has(k))).size;
-        continue;
+        return;
       }
       for (const [k, owner] of threadLifted) if (owner === c) heldAbove.add(k);
       const fresh = created(c);
@@ -1769,6 +1923,25 @@ export function buildRail(input: RailInput): RailModel {
         header.pages++;
       }
       if (c.touched.length) entries.push({ kind: "touched", section: "threads", foldKey: c.foldKey, pages: c.touched });
+    };
+    for (const top of cards) {
+      if (!isRailGroupCard(top)) {
+        emitCard(top);
+        continue;
+      }
+      entries.push({ kind: "thread-group", section: "threads", card: top, foldKey: top.foldKey, toggleKey: top.toggleKey, folded: !top.open });
+      // A closed group draws no child and lifts nothing.
+      if (!top.open) continue;
+      for (const ch of top.children) emitCard(ch);
+      entries.push({
+        kind: "thread-group-end",
+        section: "threads",
+        foldKey: top.foldKey,
+        name: top.name,
+        hidden: top.hidden,
+        // A page drawn as a focus row (in this group or another) is left out.
+        context: top.context.filter((p) => !threadLifted.has(normalizeRel(p.relPath))),
+      });
     }
   }
   if (grouped) {

@@ -6,9 +6,10 @@
  * an import cycle once the rail calls the model. Pure and DOM-free.
  */
 
-import type { WikiListing } from "./wiki-filter.ts";
+import { pageWorkTerm } from "./wiki-activity-rank.ts";
+import { pageAddedMs, type WikiListing } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
-import { isWorkHub, threadScore, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
+import { isWorkHub, threadScore, WORK_WINDOW_MS, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
 
 const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 const isFiniteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -119,4 +120,59 @@ export function workGroupingInstant(now: number, asOfMs: number | undefined): nu
  *  units by (D16). `byRel` is keyed on `normalizeRel`. */
 export function threadRankScore(t: WorkThread, byRel: ReadonlyMap<string, WikiListing>, now: number): number {
   return threadScore(t, (rel) => byRel.get(normalizeRel(rel))?.work, now);
+}
+
+// ── Ownership and card rows ─────────────────────────────────────────────────
+// ONE copy for the rail's thread cards (`openThreadCards`) and the grouping
+// model (`groupWorkThreads`, `projectWorkGroups`), so the two cannot drift.
+
+/** Focus-row order at `at`: work term, highest first, then relPath. */
+export function workTermOrder(at: number): (a: WikiListing, b: WikiListing) => number {
+  const term = (p: WikiListing) => pageWorkTerm(p, at);
+  return (a, b) => term(b) - term(a) || (normalizeRel(a.relPath) < normalizeRel(b.relPath) ? -1 : 1);
+}
+
+/**
+ * The focus pages a thread OWNS, taken in drawn order over the full listing:
+ * its pages not yet in `taken`, sorted by `order`, and then added to `taken`.
+ * A hub has one owner (D16): a page an earlier card owns is neither a row nor
+ * the name of a later one. `byRel` is keyed on `normalizeRel`.
+ */
+export function claimOwnedFocus(
+  pages: readonly string[],
+  byRel: ReadonlyMap<string, WikiListing>,
+  taken: Set<string>,
+  order: (a: WikiListing, b: WikiListing) => number,
+): WikiListing[] {
+  const owned = pages
+    .map((rel) => byRel.get(normalizeRel(rel)))
+    .filter((p): p is WikiListing => !!p && !taken.has(normalizeRel(p.relPath)))
+    .sort(order);
+  for (const p of owned) taken.add(normalizeRel(p.relPath));
+  return owned;
+}
+
+/** A card's rows under the facets: its owned focus pages that are `visible`,
+ *  the ones created inside the work window at the reader's `now` (never the
+ *  grouping instant), the touched pages that are visible and not owned, and
+ *  the open `you` steps across the focus rows. */
+export function threadCardRows(
+  owned: readonly WikiListing[],
+  touchedRels: readonly string[],
+  visible: ReadonlySet<string>,
+  byRel: ReadonlyMap<string, WikiListing>,
+  now: number,
+): { focus: WikiListing[]; created: string[]; touched: WikiListing[]; movesYou: number } {
+  const focus = owned.filter((p) => visible.has(normalizeRel(p.relPath)));
+  const ownedKeys = new Set(owned.map((p) => normalizeRel(p.relPath)));
+  const touched = touchedRels
+    .map((rel) => byRel.get(normalizeRel(rel)))
+    .filter((p): p is WikiListing => !!p && visible.has(normalizeRel(p.relPath)) && !ownedKeys.has(normalizeRel(p.relPath)));
+  const window = now - WORK_WINDOW_MS;
+  return {
+    focus,
+    created: focus.filter((p) => pageAddedMs(p, now) >= window).map((p) => normalizeRel(p.relPath)),
+    touched,
+    movesYou: focus.reduce((sum, p) => sum + (p.movesYou ?? 0), 0),
+  };
 }

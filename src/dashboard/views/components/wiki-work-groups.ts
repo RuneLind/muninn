@@ -22,22 +22,24 @@
  */
 
 import { pageWorkTerm } from "./wiki-activity-rank.ts";
-import { displayTitleOf, filterPages, pageAddedMs, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
+import { displayTitleOf, filterPages, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
 import { seriesHead, seriesKeyOf, seriesMembersByFoldKey } from "./wiki-groups.ts";
 import { normalizeRel } from "./wiki-nav.ts";
 import { normalizeFoldKey, railSectionsVisible, THREAD_CARDS_MAX, threadFoldKey } from "./wiki-recents.ts";
 import {
+  claimOwnedFocus,
   newestFocusPage,
+  threadCardRows,
   threadHoldsPin,
   threadName,
   threadRankScore,
   usableThreads,
   workGroupingInstant,
+  workTermOrder,
 } from "./wiki-thread-core.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import {
   WORK_EVIDENCE_VERSION,
-  WORK_WINDOW_MS,
   workSessionRef,
   type IndexWork,
   type WorkContribution,
@@ -492,11 +494,15 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
   }
 
   // Names and fold keys, in grouping order (before the pin, so a pin never
-  // moves a name key between two same-named groups).
+  // moves a name key between two same-named groups or renames a group).
+  const byTerm = workTermOrder(at);
   const namedKeys = new Set<string>();
+  const freeTaken = new Set<string>();
   const named = drafts.map((d) => {
     const anchor = d.members[0]!.unit;
-    if (d.members.length === 1) return { label: "thread" as const, foldKey: threadFoldKey(anchor.key) };
+    // Ownership in this pin-free order, for the RELATED name only.
+    const freeOwned = d.members.map((m) => claimOwnedFocus(m.unit.thread.pages, byRel, freeTaken, byTerm));
+    if (d.members.length === 1) return { label: "thread" as const, foldKey: threadFoldKey(anchor.key), title: "" };
     const fs = d.members.map((m) => facts.get(m.unit)!);
     const af = facts.get(anchor)!;
     const pick = (vals: (f: UnitFacts) => string[], top: string | undefined, labelOf: (k: string) => string) => {
@@ -524,7 +530,12 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
         foldKey = nk;
       }
     }
-    return { label, nameKey, foldKey };
+    // RELATED: the anchor's title — unless the anchor owns no page (an
+    // earlier card's child claimed them all, D16), when that title is another
+    // card's row; then the first child that owns one names it.
+    const at0 = freeOwned.findIndex((o) => o.length > 0);
+    const title = childName(d.members[Math.max(at0, 0)]!.unit, freeOwned[Math.max(at0, 0)]!, byRel);
+    return { label, nameKey, foldKey, title };
   });
 
   // The pin, after grouping: the first unit in order holding the pinned page
@@ -541,19 +552,12 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
   // Ownership over the full listing in the drawn order: a page an earlier
   // child owns is neither a row nor the name of a later one.
   const taken = new Set<string>();
-  const term = (p: WikiListing) => pageWorkTerm(p, at);
-  const byTerm = (a: WikiListing, b: WikiListing) => term(b) - term(a) || cmpStr(normalizeRel(a.relPath), normalizeRel(b.relPath));
   const groups: WorkGroup[] = order.map((i) => {
     const d = drafts[i]!;
     const n = named[i]!;
     const nameSeries = n.label === "series" ? n.nameKey : undefined;
     const children: WorkGroupChild[] = d.members.map((m) => {
-      const owned = m.unit.thread.pages
-        .map((rel) => byRel.get(normalizeRel(rel)))
-        .filter((p): p is WikiListing => !!p && !taken.has(normalizeRel(p.relPath)))
-        .sort(byTerm);
-      for (const p of owned) taken.add(normalizeRel(p.relPath));
-      const top = owned[0] ?? byRel.get(normalizeRel(m.unit.thread.pages[0] ?? ""));
+      const owned = claimOwnedFocus(m.unit.thread.pages, byRel, taken, byTerm);
       const also =
         d.members.length > 1
           ? facts
@@ -566,7 +570,7 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
         unit: m.unit,
         key: m.unit.key,
         foldKey: threadFoldKey(m.unit.key),
-        name: top ? threadName(displayTitleOf(top)) : m.unit.key,
+        name: childName(m.unit, owned, byRel),
         score: m.score,
         pinned: m.unit === pinnedUnit,
         pinAnchor: newestFocusPage(m.unit.thread, byRel),
@@ -579,8 +583,9 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
     });
     const witnesses = uniqueWitnesses(children.flatMap((c) => c.witnesses));
     const anchor = children[0]!;
+    // The fold key stays the anchor's whichever child names a RELATED group.
     const name =
-      n.label === "series" ? ix.seriesLabel(n.nameKey!) : n.label === "project" ? n.nameKey! : anchor.name;
+      n.label === "series" ? ix.seriesLabel(n.nameKey!) : n.label === "project" ? n.nameKey! : n.label === "related" ? n.title : anchor.name;
     return {
       kind: d.members.length > 1 ? "group" : "thread",
       label: n.label,
@@ -594,6 +599,12 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
     };
   });
   return { ...base, groups, sessions: [] };
+}
+
+/** A child's name: the top page it owns, else its first focus page, cut at ` — `. */
+function childName(u: WorkUnit, owned: readonly WikiListing[], byRel: ReadonlyMap<string, WikiListing>): string {
+  const top = owned[0] ?? byRel.get(normalizeRel(u.thread.pages[0] ?? ""));
+  return top ? threadName(displayTitleOf(top)) : u.key;
 }
 
 // ── Sessions (D19) ──────────────────────────────────────────────────────────
@@ -664,8 +675,11 @@ export interface WorkGroupChildView {
 export interface WorkGroupView {
   group: WorkGroup;
   children: WorkGroupChildView[];
-  /** False when the facets hid the anchor and a child is still visible: the
-   *  name stays, and the card says the anchor is outside the filters. */
+  /** False only when an active facet hid every row the anchor owns in the
+   *  pool and a child is still visible: the name stays, and the card says the
+   *  anchor is outside the filters. An anchor with no row even unfiltered
+   *  (it owns no page, or Show retired is off and its pages are retired) is
+   *  not outside the filters: no label. */
   anchorVisible: boolean;
   /** `N threads · M sessions · ✋ K`: sessions deduplicated by
    *  `workSessionRef` across the visible children. */
@@ -690,26 +704,17 @@ export function projectWorkGroups(
 ): WorkGroupView[] {
   if (!railSectionsVisible(filters)) return [];
   const visible = visibleSet(pool, filters);
-  const window = now - WORK_WINDOW_MS;
+  const unfiltered = new Set(pool.map((p) => normalizeRel(p.relPath)));
   const byRel = new Map(pool.map((p) => [normalizeRel(p.relPath), p] as const));
   const out: WorkGroupView[] = [];
   for (const group of grouping.groups) {
     if (out.length >= cap) break;
     const children: WorkGroupChildView[] = [];
     for (const child of group.children) {
-      const focus = child.owned.filter((p) => visible.has(normalizeRel(p.relPath)));
-      if (!focus.length) continue;
-      const ownedKeys = new Set(child.owned.map((p) => normalizeRel(p.relPath)));
-      const touched = child.unit.thread.touched
-        .map((rel) => byRel.get(normalizeRel(rel)))
-        .filter((p): p is WikiListing => !!p && visible.has(normalizeRel(p.relPath)) && !ownedKeys.has(normalizeRel(p.relPath)));
-      children.push({
-        child,
-        focus,
-        created: focus.filter((p) => pageAddedMs(p, now) >= window).map((p) => normalizeRel(p.relPath)),
-        touched,
-        movesYou: focus.reduce((sum, p) => sum + (p.movesYou ?? 0), 0),
-      });
+      // The created window stays on the reader's `now`.
+      const rows = threadCardRows(child.owned, child.unit.thread.touched, visible, byRel, now);
+      if (!rows.focus.length) continue;
+      children.push({ child, ...rows });
     }
     if (!children.length) continue;
     const sessions = new Set<string>();
@@ -717,7 +722,7 @@ export function projectWorkGroups(
     out.push({
       group,
       children,
-      anchorVisible: children[0]!.child === group.children[0],
+      anchorVisible: children[0]!.child === group.children[0] || !group.children[0]!.owned.some((p) => unfiltered.has(normalizeRel(p.relPath))),
       counts: { threads: children.length, sessions: sessions.size, movesYou: children.reduce((n, c) => n + c.movesYou, 0) },
     });
   }

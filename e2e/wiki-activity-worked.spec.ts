@@ -56,6 +56,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { foldsKey } from "../src/dashboard/views/components/wiki-recents.ts";
+import { workGroupKey } from "../src/dashboard/views/components/wiki-work-group-record.ts";
 
 const PORT = e2ePort("wiki-activity-worked");
 const LEDGER_PORT = e2ePort("wiki-activity-worked/ledger");
@@ -342,10 +343,15 @@ async function openReader(page: Page, wiki: string, rows: number = PAGES.length)
   // `wswork`'s sessions form work threads (PR 5), and the first card defaults
   // OPEN and lifts its pages out of Activity (D13). These cases pin the Activity
   // ranking itself, so that card is stored closed — a closed card lifts nothing.
+  // The Group control defaults to Related (D1); these cases read the Threads
+  // stop's cards, so the stop is seeded too.
   if (wiki === WORK_WIKI) {
     await page.addInitScript(
-      ([key, value]) => localStorage.setItem(key as string, value as string),
-      [foldsKey(WORK_WIKI), JSON.stringify([`closed:thread:${WORK.crowded.rel}`])] as const,
+      ([key, value, groupKey, group]) => {
+        localStorage.setItem(key as string, value as string);
+        localStorage.setItem(groupKey as string, group as string);
+      },
+      [foldsKey(WORK_WIKI), JSON.stringify([`closed:thread:${WORK.crowded.rel}`]), workGroupKey(WORK_WIKI), JSON.stringify({ version: 1, stop: "threads" })] as const,
     );
   }
   await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`);

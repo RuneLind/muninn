@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { openThreadCards, railInputFor, threadPinAnchor, usableThreads, type RailViewer, type RailWikiFacts } from "./wiki-rail-input.ts";
 import { threadCardHeaderHtml } from "./wiki-thread-view.ts";
-import { buildRail, railSectionsVisible, THREAD_CARDS_MAX, type RailInput } from "./wiki-recents.ts";
+import { buildRail, railSectionsVisible, THREAD_CARDS_MAX, type RailInput, type RailThreadCard } from "./wiki-recents.ts";
 import { computeWorkFocus, threadScore, WORK_HUB_BACKLINKS, type WorkSession, type WorkThread } from "../../../wiki/work-focus.ts";
 import {
   GROUP_FAMILIES_TOGGLE_KEY,
@@ -317,7 +317,7 @@ describe("railInputFor — the work-thread lift and Activity agree (D19)", () =>
 
   test("the open card's focus pages are out of the ranking before the cut, so Activity still holds its rows", () => {
     const input = railInputFor(WORK_WIKI, base());
-    const open = input.threads!.filter((c) => c.open).flatMap((c) => c.focus.map((p) => p.relPath));
+    const open = (input.threads as RailThreadCard[]).filter((c) => c.open).flatMap((c) => c.focus.map((p) => p.relPath));
     expect(open).toEqual(["plans/heavy.mdx", "plans/heavy-2.mdx"]);
     expect(activityOf(input).some((rel) => open.includes(rel))).toBe(false);
     expect(activityOf(input).length).toBe(4);
@@ -434,7 +434,7 @@ describe("a hub has one owner, and a later card never takes it (D16)", () => {
       ["plans/a.mdx", false],
       ["notes/b.md", true],
     ]);
-    expect(input.threads![1]!.focus.map((p) => p.relPath)).toEqual(["notes/b.md"]);
+    expect((input.threads as RailThreadCard[])[1]!.focus.map((p) => p.relPath)).toEqual(["notes/b.md"]);
     // Not in the exclude set: Activity still ranks the hub.
     expect((input.activity ?? []).map((r) => r.page.relPath)).toContain("plans/hub.mdx");
     const rail = buildRail(input);

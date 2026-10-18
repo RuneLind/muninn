@@ -1001,6 +1001,83 @@ export async function renderWikiPage(opts?: {
     .wiki-thread-link { color: var(--accent-light); text-decoration: none; }
     .wiki-thread-link:hover, .wiki-thread-link:focus-visible { text-decoration: underline; }
     .wiki-thread-sep { color: var(--text-muted); }
+    /* GROUPED WORK THREADS (plan muninn-wiki-work-thread-grouping, PR 3):
+       the Group control on the section label, the group card (today's card,
+       stacked, a group glyph and a kind label), its body (an accent outline
+       holding child cards one size smaller), \`+ N more threads\` and the
+       shared context line. Rows inside a body keep the full rail width, so
+       every row's width budget holds; the width table for the two new
+       headers is in src/wiki/CLAUDE.md (Work threads). */
+    .wiki-work-sec { position: relative; }
+    .wiki-work-sec .wiki-sec-label { flex: 1 1 auto; }
+    .wiki-work-group-btn {
+      font-family: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+      text-transform: none; color: var(--accent-light); background: none;
+      border: 1px solid transparent; border-radius: 5px; padding: 1px 5px; cursor: pointer;
+      min-height: 24px;
+    }
+    .wiki-work-group-btn:hover, .wiki-work-group-btn[aria-expanded="true"] {
+      border-color: var(--border-secondary); background: var(--bg-panel);
+    }
+    .wiki-work-group-btn.fell-back { color: var(--text-secondary); }
+    .wiki-work-local { font-size: 10px; letter-spacing: 0; text-transform: none; color: var(--text-muted); }
+    /* The menu is a popover under the button, inside the label row (so it
+       resets the label's uppercase and tracking). */
+    .wiki-work-menu {
+      position: absolute; top: 100%; right: 4px; z-index: 20; width: min(248px, calc(100% - 8px));
+      text-transform: none; letter-spacing: normal; text-align: left;
+      background: var(--bg-panel); border: 1px solid var(--border-secondary);
+      border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 6px;
+      font-size: 12.5px; color: var(--text-secondary);
+    }
+    .wiki-work-h {
+      font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+      color: var(--text-muted); padding: 6px 6px 3px;
+    }
+    .wiki-work-opt {
+      display: flex; gap: 8px; width: 100%; text-align: left; font: inherit; color: inherit;
+      background: none; border: 0; border-radius: 5px; padding: 4px 6px; cursor: pointer;
+    }
+    .wiki-work-opt:hover, .wiki-work-opt:focus-visible { background: var(--bg-hover); }
+    .wiki-work-opt.off { color: var(--text-muted); }
+    .wiki-work-box.off { cursor: default; }
+    .wiki-work-dot { width: 12px; flex: 0 0 12px; color: var(--accent-light); }
+    .wiki-work-opt-text { flex: 1 1 auto; min-width: 0; }
+    .wiki-work-opt-text small { display: block; color: var(--text-muted); font-size: 11px; }
+    .wiki-work-n { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .wiki-work-hr { border-top: 1px solid var(--border-primary); margin: 5px 0; }
+    .wiki-work-note { font-size: 11px; color: var(--text-muted); padding: 2px 6px 4px; }
+    .wiki-thread-card.wiki-thread-group:not(.open) {
+      box-shadow: 3px 3px 0 -1px var(--bg-panel), 3px 3px 0 0 var(--border-secondary); margin-right: 3px;
+    }
+    .wiki-thread-kind {
+      font-size: 9.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+      color: var(--accent-light);
+    }
+    .wiki-thread-gbody {
+      box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent), inset 0 -1px var(--accent);
+      border-radius: 0 0 8px 8px; padding: 5px 0 6px; margin: 0 0 8px;
+    }
+    .wiki-thread-gbody > .wiki-thread-card { margin: 0 6px 5px; background: var(--bg-panel); }
+    /* An open child spans the body, so its header lines up with its rows,
+       which keep the full rail width (today's row budgets). */
+    .wiki-thread-gbody > .wiki-thread-card.open { margin: 0; background: color-mix(in srgb, var(--accent) 7%, var(--bg-panel)); }
+    .wiki-thread-gbody > .wiki-thread-card.open:not(:first-child) { margin-top: 5px; }
+    .wiki-thread-child .wiki-thread-name { font-size: 12px; }
+    .wiki-thread-why { color: var(--text-muted); }
+    .wiki-thread-chip {
+      font-size: 10px; line-height: 14px; border-radius: 7px; padding: 0 5px; margin-left: 3px;
+      border: 1px solid var(--accent); color: var(--accent-light); max-width: 100%; overflow-wrap: anywhere;
+    }
+    .wiki-thread-more {
+      font-family: inherit; font-size: 11px; font-weight: 600; color: var(--accent-light);
+      background: none; border: 0; padding: 2px 10px 4px; min-height: 24px; cursor: pointer; position: relative;
+    }
+    .wiki-thread-ctx-more {
+      font: inherit; color: var(--accent-light); background: none; border: 0; padding: 0; cursor: pointer; position: relative;
+    }
+    .wiki-thread-ctx-more:hover, .wiki-thread-ctx-more:focus-visible { text-decoration: underline; }
+    .wiki-thread-context { padding: 2px 10px 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
     /* Forced colours paint fills as Canvas and drop shadows: the header keeps
        its real border (2 px when open, so open still differs from closed) and
        the focus rows keep the ::before rule; an attachment child row and the
@@ -1009,6 +1086,16 @@ export async function renderWikiPage(opts?: {
       .wiki-list-item.thread-row::before { background: CanvasText; }
       .wiki-thread-card.open { border-width: 2px; border-bottom-width: 1px; }
       .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 0; }
+      /* The group's two shadows, drawn by an ::after so neither costs layout:
+         an open body's sides and bottom, as wide as its open header's sides
+         (no top: the header closes it); a closed group's stack, a second edge
+         in the margin its shadow used. ::after paints over the rows' Canvas. */
+      .wiki-thread-gbody, .wiki-thread-card.wiki-thread-group:not(.open) { position: relative; }
+      .wiki-thread-gbody::after, .wiki-thread-card.wiki-thread-group:not(.open)::after {
+        content: ""; position: absolute; pointer-events: none; border: 0 solid CanvasText;
+      }
+      .wiki-thread-gbody::after { inset: 0; border-width: 0 2px 2px; border-radius: inherit; }
+      .wiki-thread-card.wiki-thread-group:not(.open)::after { inset: 2px -4px -4px 2px; border-width: 0 1px 1px 0; border-radius: 8px; }
     }
     /* \`+N more\` under a closed series in Activity: opens the same fold as the
        series row above it. Indented to the member rows' depth. */

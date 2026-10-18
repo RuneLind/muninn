@@ -183,11 +183,31 @@ import {
   toggleFolded,
   togglePinned,
   readThreadPin,
+  readWorkGroup,
   writeRelatedOrder,
   writeSort,
   writeThreadPin,
+  writeWorkGroup,
 } from "./wiki-recents-store.ts";
-import { railGhostHtml, threadCardHeaderHtml, threadTouchedHtml } from "./wiki-thread-view.ts";
+import {
+  railGhostHtml,
+  threadCardHeaderHtml,
+  threadGroupBodyStartHtml,
+  threadGroupEndHtml,
+  threadGroupHeaderHtml,
+  threadTouchedHtml,
+  workSectionHeaderHtml,
+} from "./wiki-thread-view.ts";
+import {
+  storageEventTouchesWorkGroup,
+  workGroupPrefsOf,
+  workGroupRecordSettle,
+  workGroupRecordStep,
+  type WorkGroupEdit,
+  type WorkGroupRecordState,
+  type WorkGroupRecordTrigger,
+} from "./wiki-work-group-record.ts";
+import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import type { IndexWork } from "../../../wiki/work-focus.ts";
 import { atlasBodyHtml, atlasCullOf, initAtlas, type AtlasDeps } from "./wiki-atlas.ts";
 import { readSliceStartTab, wikiToolsFlag } from "./wiki-read-slice.ts";
@@ -1382,6 +1402,31 @@ function stepThreadPin(t: ThreadPinTrigger): boolean {
   return r.repaint;
 }
 
+/** The reader's Work threads grouping record on this wiki (D17): `held` (what
+ *  the rail renders from; null = D1), `known` (what this tab last read or
+ *  wrote) and whether the held record lives in this tab only. Every change
+ *  goes through `stepWorkGroup`, the record's state table. */
+let workGroupRec: WorkGroupRecordState = workGroupRecordStep(
+  { held: null, known: undefined, patch: null, failed: false },
+  { kind: "boot", stored: readWorkGroup(WIKI) },
+).state;
+
+/** Run one row of the record's state table and perform the write it asks for.
+ *  Answers whether the rail should repaint (`storage` rows only). */
+function stepWorkGroup(t: WorkGroupRecordTrigger): boolean {
+  const r = workGroupRecordStep(workGroupRec, t);
+  workGroupRec = r.write ? workGroupRecordSettle(r.state, r.write.value, writeWorkGroup(WIKI, r.write.value)) : r.state;
+  return r.repaint;
+}
+
+/** Is the Group menu open? Per tab, never stored. */
+let workMenuOpen = false;
+/** Group fold keys whose `+ N more threads` this tab pressed. Never stored: a
+ *  broad group opens on three children again after a reload. */
+const workMoreOpen = new Set<string>();
+/** Group fold keys whose shared-context `+N` this tab pressed. Never stored. */
+const workContextOpen = new Set<string>();
+
 /** Document focus: the only state in which a render may write the pin. */
 function tabHasFocus(): boolean {
   return document.visibilityState === "visible" && document.hasFocus();
@@ -1391,7 +1436,7 @@ function tabHasFocus(): boolean {
  *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
  *  "keep the last known value" degrade: stale threads would lift pages the
  *  listing on screen no longer works on. */
-let workFacts: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs">>) | null = null;
+let workFacts: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null = null;
 
 /** Is the reader grouping this wiki's rail into families and months? OFF by
  *  default: the finder-rail retro found the rail is scanned more than browsed,
@@ -1575,8 +1620,18 @@ function forcedOpenWhy(what: "group" | "section"): string {
   return filters.jira ? "the Jira filter shows every matching page" : `the open page is in this ${what}`;
 }
 
+/** True while `renderList` puts focus back on the rail control its repaint replaced. */
+let restoringRailFocus = false;
+
 /** `cause: "storage"` is a repaint after another tab changed the pin: it runs
- *  no pin step, so it never writes (the no-loop rule, `threadPinStep`). */
+ *  no pin step, so it never writes (the no-loop rule, `threadPinStep`).
+ *
+ *  Focus (spec "Keep focus after updates"): a repaint never moves focus by
+ *  itself. When the swap below drops focus from a rail control, the same
+ *  control, found again by its own key, gets it back; otherwise focus is left
+ *  alone. No cause gate: every caller (listed in `src/wiki/CLAUDE.md`, Work
+ *  threads) can land while a rail control holds focus. A handler that focuses
+ *  something after its own render still wins. */
 function renderList(cause: "storage" | "local" = "local"): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
@@ -1595,7 +1650,11 @@ function renderList(cause: "storage" | "local" = "local"): void {
       focused: tabHasFocus(),
       anchor: threadPinAnchor(workFacts?.threads, allPages, threadPin.held),
     });
+    // D17: the grouping record runs the pin's table — adopt another tab's
+    // record, or retry a refused write while this tab has focus (R6).
+    stepWorkGroup({ kind: "render", stored: readWorkGroup(WIKI), focused: tabHasFocus() });
   }
+  const groupPrefs = workGroupPrefsOf(workGroupRec.held);
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
   const rail = buildRail(
@@ -1611,6 +1670,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
         openFolds,
         openRelPath: currentRelPath || undefined,
         threadPin: threadPin.held,
+        workGroup: { stop: groupPrefs.stop, evidence: groupPrefs.evidence, moreOpen: [...workMoreOpen] },
       },
     ),
   );
@@ -1630,6 +1690,21 @@ function renderList(cause: "storage" | "local" = "local"): void {
     }
     if (entry.kind === "touched") {
       html += threadTouchedHtml(entry.foldKey, entry.pages, pageUrlByRelPath);
+      return;
+    }
+    // A GROUP card (plan `muninn-wiki-work-thread-grouping`): its header, and
+    // when open the body that holds the child cards, closed by its end entry.
+    if (entry.kind === "thread-group") {
+      html += threadGroupHeaderHtml(entry.card, entry.folded, now, movesPersonal());
+      if (!entry.folded) html += threadGroupBodyStartHtml(entry.foldKey);
+      return;
+    }
+    if (entry.kind === "thread-group-end") {
+      html += threadGroupEndHtml(entry.foldKey, entry.hidden, entry.context, pageUrlByRelPath, entry.name, workContextOpen.has(entry.foldKey));
+      return;
+    }
+    if (entry.kind === "header" && entry.control) {
+      html += workSectionHeaderHtml(entry.label, entry.control, workMenuOpen, workGroupRec.failed);
       return;
     }
     if (entry.kind === "header") {
@@ -2013,7 +2088,19 @@ function renderList(cause: "storage" | "local" = "local"): void {
   const scroll = listEl.scrollTop;
   // Retired pages held back under these facets: the empty rail offers them.
   const heldBack = retiredHeldBack();
+  const focusedEl = document.activeElement;
+  const keptFocus = railControlSelector(focusedEl);
   listEl.innerHTML = railListHtml(html, retiredRevealHtml(heldBack));
+  if (keptFocus && (!document.activeElement || document.activeElement === document.body)) {
+    // The control focus was already on: a popover that closes on focus leaving
+    // it (the options pane) must not read this as the reader moving.
+    restoringRailFocus = true;
+    try {
+      refocusRailControl(keptFocus, focusedEl!);
+    } finally {
+      restoringRailFocus = false;
+    }
+  }
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -4998,9 +5085,128 @@ function refocusRailControl(selector: string, pressed: Element): void {
   pick?.focus({ preventScroll: true });
 }
 
+/** The rail control `el` is, as a selector by its own key that finds it again
+ *  after a repaint; null for anything else (a page row, a link). Covers the
+ *  Group button and its menu items, `+ N more threads`, the shared context's
+ *  `+N`, a 📌 (by its card's key, never by position), and every
+ *  `[data-fold-key]` fold in the rail: thread, group and child cards, series
+ *  and folder groups, Bookkeeping, under either spelling. */
+function railControlSelector(el: Element | null): string | null {
+  if (!(el instanceof HTMLElement) || !el.closest("#wikiList")) return null;
+  const at = (attr: string, v: string) => `#wikiList [${attr}="${CSS.escape(v)}"]`;
+  for (const attr of ["data-work-stop", "data-work-evidence", "data-thread-more", "data-thread-ctx-more"]) {
+    const v = el.getAttribute(attr);
+    if (v !== null) return at(attr, v);
+  }
+  const fold = el.getAttribute("data-fold-key");
+  if (fold !== null) {
+    // Either spelling, as the fold's own click handler looks for.
+    const base = fold.startsWith(CLOSED_FOLD_PREFIX) ? fold.slice(CLOSED_FOLD_PREFIX.length) : fold;
+    return `${at("data-fold-key", base)}, ${at("data-fold-key", CLOSED_FOLD_PREFIX + base)}`;
+  }
+  if (el.hasAttribute("data-thread-pin")) {
+    const cardEl = el.closest(".wiki-thread-card");
+    const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
+    const card = cardEl?.getAttribute(attr);
+    return card ? `#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]` : null;
+  }
+  return el.hasAttribute("data-work-group-menu") ? "#wikiList [data-work-group-menu]" : null;
+}
+
+/** Focus the Group menu's item for `selector`, else its first item. */
+function focusWorkMenuItem(selector?: string): void {
+  const menu = document.querySelector<HTMLElement>("#wikiList .wiki-work-menu");
+  const items = menu ? Array.from(menu.querySelectorAll<HTMLElement>("[role^='menuitem']")) : [];
+  const pick = (selector ? menu?.querySelector<HTMLElement>(selector) : null) ?? items.find((el) => el.getAttribute("aria-checked") === "true") ?? items[0];
+  pick?.focus({ preventScroll: true });
+}
+
+function focusWorkMenuButton(): void {
+  document.querySelector<HTMLElement>("#wikiList [data-work-group-menu]")?.focus({ preventScroll: true });
+}
+
+/** Open or close the Group menu and repaint; focus follows the menu. */
+function setWorkMenu(open: boolean, focus: boolean): void {
+  workMenuOpen = open;
+  renderList();
+  if (!focus) return;
+  if (open) focusWorkMenuItem();
+  else focusWorkMenuButton();
+}
+
+/** One explicit edit from the Group menu: merged onto the record as read now
+ *  and written (D17); the first edit is what creates the record. */
+function editWorkGroup(edit: WorkGroupEdit): void {
+  stepWorkGroup({ kind: "click", stored: readWorkGroup(WIKI), edit });
+}
+
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
+  // A click outside the open Group menu closes it in the pressed control's own
+  // render, which also refocuses that control; the document handler below
+  // repaints only when no render here removed the menu.
+  if (workMenuOpen && !target.closest(".wiki-work-menu, [data-work-group-menu]")) workMenuOpen = false;
+  // The Group control and its menu (plan `muninn-wiki-work-thread-grouping`).
+  // Menu items are buttons, so a keyboard Enter or Space lands here too.
+  if (target.closest("[data-work-group-menu]")) {
+    e.preventDefault();
+    setWorkMenu(!workMenuOpen, true);
+    return;
+  }
+  const stopBtn = target.closest("[data-work-stop]");
+  if (stopBtn) {
+    e.preventDefault();
+    editWorkGroup({ stop: stopBtn.getAttribute("data-work-stop") as WorkGroupStop });
+    setWorkMenu(false, true);
+    return;
+  }
+  const boxBtn = target.closest("[data-work-evidence]");
+  if (boxBtn) {
+    e.preventDefault();
+    // Disabled at Threads: the box keeps its value and the click does nothing.
+    if (boxBtn.getAttribute("aria-disabled") === "true") return;
+    const key = boxBtn.getAttribute("data-work-evidence") as keyof WorkGroupEvidenceToggles;
+    editWorkGroup({ evidence: key, value: boxBtn.getAttribute("aria-checked") !== "true" });
+    renderList();
+    focusWorkMenuItem(`[data-work-evidence="${CSS.escape(key)}"]`);
+    return;
+  }
+  const moreBtn = target.closest("[data-thread-more]");
+  if (moreBtn) {
+    e.preventDefault();
+    const key = moreBtn.getAttribute("data-thread-more");
+    if (!key) return;
+    const hadFocus = document.activeElement === moreBtn;
+    const childCards = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList [data-thread-group-body="${CSS.escape(key)}"] .wiki-thread-card[data-thread]`));
+    // By key, not by count: a pinned child past the first three is drawn
+    // before the press and moves to its own place after it.
+    const before = new Set(childCards().map((c) => c.getAttribute("data-thread")));
+    workMoreOpen.add(key);
+    renderList();
+    // Focus the first child the press revealed.
+    if (hadFocus) {
+      const after = childCards();
+      const card = after.find((c) => !before.has(c.getAttribute("data-thread"))) ?? after[after.length - 1];
+      card?.querySelector<HTMLElement>(".wiki-thread-fold")?.focus({ preventScroll: true });
+    }
+    return;
+  }
+  // The shared context's `+N`: the full list in place, focus on the first link
+  // the press revealed.
+  const ctxBtn = target.closest("[data-thread-ctx-more]");
+  if (ctxBtn) {
+    e.preventDefault();
+    const key = ctxBtn.getAttribute("data-thread-ctx-more");
+    if (!key) return;
+    const hadFocus = document.activeElement === ctxBtn;
+    const links = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-thread-context[data-thread-group="${CSS.escape(key)}"] .wiki-thread-link`));
+    const shown = links().length;
+    workContextOpen.add(key);
+    renderList();
+    if (hadFocus) links()[shown]?.focus({ preventScroll: true });
+    return;
+  }
   // The group chip and the section fold — the rail's second control, on the same
   // listener and BEFORE the pin, since both sit inside a row the body delegate
   // would otherwise open. A fold DOES re-render (`renderList`): unlike the ★,
@@ -5033,12 +5239,15 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     const key = threadPinBtn.getAttribute("data-thread-pin");
     if (!key) return;
     const hadFocus = document.activeElement === threadPinBtn;
-    const card = threadPinBtn.closest(".wiki-thread-card")?.getAttribute("data-thread");
+    const cardEl = threadPinBtn.closest(".wiki-thread-card");
+    // A group card is addressed by its own key, a thread card (child or not) by its.
+    const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
+    const card = cardEl?.getAttribute(attr);
     stepThreadPin({ kind: "click", value: threadPinBtn.getAttribute("data-thread-pinned") === "1" ? null : key });
     renderList();
     // The card moved: follow it by its own key, not by position.
     if (hadFocus && card) {
-      refocusRailControl(`#wikiList .wiki-thread-card[data-thread="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
+      refocusRailControl(`#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]`, threadPinBtn);
     }
     return;
   }
@@ -5251,7 +5460,7 @@ if (optionsBtn && optionsPane) {
     if (!optionsPane.hidden && !inOptions(e.target)) setOptionsOpen(false);
   });
   document.addEventListener("focusin", (e) => {
-    if (!optionsPane.hidden && !inOptions(e.target)) setOptionsOpen(false);
+    if (!optionsPane.hidden && !inOptions(e.target) && !restoringRailFocus) setOptionsOpen(false);
   });
   // Capture phase. Escape closes the pane and stops, so it neither leaves focus
   // mode nor closes a graph card (whose own capture listener, registered
@@ -8422,8 +8631,63 @@ function maybeRefetchPages(refresh: boolean): void {
 // holds and repaint. The repaint is `cause: "storage"`, which writes nothing,
 // so no tab's write can make another tab write.
 window.addEventListener("storage", (e) => {
-  if (!storageEventTouchesThreadPin(e.key, WIKI)) return;
-  if (stepThreadPin({ kind: "storage", stored: readThreadPin(WIKI), booted: pagesRefresh.bootRendered })) renderList("storage");
+  // The pin and the grouping record (D17) each run their own table; one
+  // repaint, `cause: "storage"`, which runs no render step and writes nothing.
+  let repaint = false;
+  if (storageEventTouchesThreadPin(e.key, WIKI)) {
+    repaint = stepThreadPin({ kind: "storage", stored: readThreadPin(WIKI), booted: pagesRefresh.bootRendered }) || repaint;
+  }
+  if (storageEventTouchesWorkGroup(e.key, WIKI)) {
+    repaint = stepWorkGroup({ kind: "storage", stored: readWorkGroup(WIKI), booted: pagesRefresh.bootRendered }) || repaint;
+  }
+  if (repaint) renderList("storage");
+});
+
+// The Group menu's keys: the arrows, Home and End move between its items,
+// Escape and Tab close it and return focus to the Group button, and ArrowDown
+// on the button opens it.
+document.getElementById("wikiList")!.addEventListener("keydown", (e) => {
+  const target = e.target as HTMLElement;
+  if (!target.closest) return;
+  if (target.closest("[data-work-group-menu]") && e.key === "ArrowDown" && !workMenuOpen) {
+    e.preventDefault();
+    setWorkMenu(true, true);
+    return;
+  }
+  const menu = target.closest(".wiki-work-menu");
+  if (!menu) return;
+  const items = Array.from(menu.querySelectorAll<HTMLElement>("[role^='menuitem']"));
+  const at = items.indexOf(target.closest("[role^='menuitem']") as HTMLElement);
+  const move = (i: number) => items[(i + items.length) % items.length]?.focus();
+  if (e.key === "ArrowDown") move(at + 1);
+  else if (e.key === "ArrowUp") move(at - 1);
+  else if (e.key === "Home") move(0);
+  else if (e.key === "End") move(items.length - 1);
+  else if (e.key === "Escape" || e.key === "Tab") setWorkMenu(false, true);
+  else return;
+  e.preventDefault();
+});
+
+// Escape closes the open Group menu wherever focus is (the list's handler above
+// takes it first inside the menu); focus goes to the Group button only when it
+// was lost to the page, never away from a control the reader is on.
+document.addEventListener("keydown", (e) => {
+  if (!workMenuOpen || e.key !== "Escape" || e.defaultPrevented) return;
+  const lost = !document.activeElement || document.activeElement === document.body;
+  setWorkMenu(false, lost);
+  if (lost) e.preventDefault();
+});
+
+// A click outside the open Group menu closes it, unless a rail control's own
+// render (the list handler above) already did.
+document.addEventListener("click", (e) => {
+  if (!document.querySelector("#wikiList .wiki-work-menu")) {
+    workMenuOpen = false;
+    return;
+  }
+  const target = e.target as HTMLElement;
+  if (target.closest?.(".wiki-work-menu, [data-work-group-menu]")) return;
+  setWorkMenu(false, false);
 });
 
 window.addEventListener("focus", () => maybeRefetchPages(true));
