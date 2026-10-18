@@ -62,3 +62,21 @@ test("the script prints the reference and exits non-zero on bad input", async ()
   expect(bad.exitCode).toBe(2);
   expect(bad.stderr.toString()).toContain("usage:");
 });
+
+test("Embed prints src as required and height as pixels, as parseEmbedAttrs reads them", () => {
+  expect(componentLine("Embed", "wiki")).toStartWith("Embed(src: string, height?: pixels (1–5 digits), title?: string) — ");
+});
+
+test("closed vocabularies the spec leaves unchecked print their accepted values", () => {
+  expect(componentLine("DeltaTable", "wiki")).toStartWith(
+    'DeltaTable(src?: string, better?: "lower"|"higher"|"<row>=lower|higher;…", decimal?: "comma"|"dot") — ',
+  );
+  expect(componentLine("Fold", "wiki")).toStartWith('Fold(title?: string, open?: "true", summary?: string, for?: "dev"|"agent") — ');
+});
+
+test("chat prints no inline group: its prompt teaches all six as block-only", () => {
+  const lines = componentReference("chat");
+  expect(lines.some((l) => l.startsWith("# Inline"))).toBe(false);
+  expect(lines.filter((l) => l.startsWith("# ")).every((l) => l.startsWith("# Block"))).toBe(true);
+  expect(namesIn(lines).sort()).toEqual(["Callout", "ComparisonTable", "Figure", "FileRef", "Pill", "Verdict"]);
+});

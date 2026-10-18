@@ -30,10 +30,11 @@ const spec = (name: ComponentName): ComponentSpec => COMPONENT_SPEC[name];
 
 /** One attribute as `name?: type = default`. */
 function attrSignature(name: ComponentName, attr: string, a: AttrSpec): string {
-  const values = a.enum ? [...a.enum, ...(attrDoc(name, attr)?.alsoAccepts ?? [])].map((v) => `"${v}"`).join("|") : undefined;
-  const type = values ?? (a.type ? TYPE_TEXT[a.type] : "string");
+  const doc = attrDoc(name, attr);
+  const values = a.enum ? [...a.enum, ...(doc?.alsoAccepts ?? [])].map((v) => `"${v}"`).join("|") : undefined;
+  const type = values ?? (a.type ? TYPE_TEXT[a.type] : (doc?.printType ?? "string"));
   const def = a.default === undefined ? "" : ` = ${typeof a.default === "string" ? `"${a.default}"` : a.default}`;
-  return `${attr}${a.required ? "" : "?"}: ${type}${def}`;
+  return `${attr}${a.required || doc?.printRequired ? "" : "?"}: ${type}${def}`;
 }
 
 /** One component's signature line, with only the attributes taught to `teach`. */
@@ -44,10 +45,13 @@ export function componentLine(name: ComponentName, teach: TeachTarget): string {
   return `${name}(${attrs.join(", ")}) — ${COMPONENT_DOCS[name].doc}`;
 }
 
-const GROUPS: readonly { heading: string; has: (s: ComponentSpec) => boolean }[] = [
-  { heading: "Block: opening and closing tags each on a line of their own, flush left.", has: (s) => !s.inline && !s.selfClosing },
-  { heading: "Block, may also self-close: <Name … /> on a line of its own.", has: (s) => !s.inline && s.selfClosing === true },
-  { heading: "Inline: mid-sentence or on a line of their own; may also self-close.", has: (s) => s.inline === true },
+const inlineFor = (s: ComponentSpec, teach: TeachTarget): boolean => s.inline === true && teach !== "chat";
+
+// Chat gets no inline group: `COMPONENT_VOCABULARY_RULES` teaches all six as block-only.
+const GROUPS: readonly { heading: string; has: (s: ComponentSpec, teach: TeachTarget) => boolean }[] = [
+  { heading: "Block: opening and closing tags each on a line of their own, flush left.", has: (s, t) => !inlineFor(s, t) && !s.selfClosing },
+  { heading: "Block, may also self-close: <Name … /> on a line of its own.", has: (s, t) => !inlineFor(s, t) && s.selfClosing === true },
+  { heading: "Inline: mid-sentence or on a line of their own; may also self-close.", has: (s, t) => inlineFor(s, t) },
 ];
 
 /** The reference for one target: each group's heading, then its components in spec order. */
@@ -55,7 +59,7 @@ export function componentReference(teach: TeachTarget): string[] {
   const taught = COMPONENT_NAMES.filter((n) => COMPONENT_DOCS[n].teach.includes(teach));
   const out: string[] = [];
   for (const g of GROUPS) {
-    const names = taught.filter((n) => g.has(spec(n)));
+    const names = taught.filter((n) => g.has(spec(n), teach));
     if (names.length === 0) continue;
     if (out.length > 0) out.push("");
     out.push(`# ${g.heading}`, ...names.map((n) => componentLine(n, teach)));

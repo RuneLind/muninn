@@ -31,6 +31,12 @@ export interface AttrDoc {
   onFallback?: string;
   /** The phrasing instead of `onFallback` when `attr` holds an accepted value. */
   onFallbackWhen?: { attr: string; message: string };
+  /** The type the reference prints for an attribute the spec leaves unchecked
+   *  (D9), in place of `string`. Display only: the linter never reads it. */
+  printType?: string;
+  /** Print the attribute as required though the spec does not mark it so,
+   *  because a missing value fails visibly instead of raising a lint finding. */
+  printRequired?: true;
   /** Lane `kind` only: the phrasing for a lane that is not a direct lane of a
    *  `NextMoves` block, whose label the kind decides. */
   onFallbackStray?: string;
@@ -100,8 +106,18 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     attrs: { v: { alsoAccepts: Object.keys(COMPONENT_SPEC.Fact.attrs.v.aliases) } },
   },
   FactCheck: { doc: "Fact-check appendix; written by the fact-check pipeline.", teach: [] },
-  Embed: { doc: "Embeds a standalone .html explainer beside the page.", teach: WIKI },
-  Fold: { doc: "Collapsible section; `open=\"true\"` starts it expanded.", teach: WIKI },
+  Embed: {
+    doc: "Embeds a standalone .html explainer beside the page.",
+    teach: WIKI,
+    // `parseEmbedAttrs` (embed.ts): no src, or a height that is not 1–5 digits, renders "invalid embed".
+    attrs: { src: { printRequired: true }, height: { printType: "pixels (1–5 digits)" } },
+  },
+  Fold: {
+    doc: "Collapsible section; `open=\"true\"` starts it expanded.",
+    teach: WIKI,
+    // web-format.ts: only `open === "true"` expands; `for` gets a class for FOLD_FOR_CLASSES only.
+    attrs: { open: { printType: '"true"' }, for: { printType: '"dev"|"agent"' } },
+  },
   Historic: { doc: "Marks sections the page keeps as history.", teach: WIKI },
   NextMoves: { doc: "Who has the next move; holds `Lane` blocks.", teach: WIKI },
   Lane: {
@@ -122,7 +138,12 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
   },
   Query: { doc: "One prod query with its SQL, CSV result and answer.", teach: WIKI },
   CaseBoard: { doc: "Tracked cases from a YAML file beside the page.", teach: WIKI },
-  DeltaTable: { doc: "Run-to-run numbers with a computed delta column.", teach: WIKI },
+  DeltaTable: {
+    doc: "Run-to-run numbers with a computed delta column.",
+    teach: WIKI,
+    // `parseDeltaAttrs` (delta-table.ts): anything else renders a visible warning.
+    attrs: { better: { printType: '"lower"|"higher"|"<row>=lower|higher;…"' }, decimal: { printType: '"comma"|"dot"' } },
+  },
   Tldr: { doc: "The page's lead box over a short list.", teach: WIKI },
   Timeline: { doc: "A dated list of events.", teach: WIKI },
   DecisionLog: { doc: "A list of decisions, each with an id and status.", teach: WIKI },
