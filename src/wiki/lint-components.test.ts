@@ -13,6 +13,9 @@ const run = (content: string) => checkComponents("plans/x.mdx", content);
 /** The reader's render of a page: the HTML the finding must agree with. */
 const html = (content: string) => renderWikiHtml(content, () => undefined);
 const lines = (content: string) => run(content).map((f) => `${f.line} ${f.message}`);
+/** A render that sees one more tag in the marked text than in the plain. */
+const disagreeing = (content: string) =>
+  renderWikiHtml(content.includes(LINT_MARK_ATTR) ? `${content}\n\n<Verdict value="no"/>` : content, () => undefined);
 
 describe("checkComponents — the plan's acceptance fixture", () => {
   const fixture = page(
@@ -241,13 +244,71 @@ describe("a tag the renderer reads twice is one finding", () => {
     const content = page('<Fold title="Sec">', "", "## Sec", "", 'x <Pill tone="bogus">p</Pill>', "", "</Fold>");
     const seen: ObservedComponentTag[] = [];
     observeComponentTags((t) => seen.push(t), () => html(content));
-    expect(seen.filter((t) => t.name === "Pill").length).toBe(2);
+    expect(seen.filter((t) => t.name === "Pill").length).toBe(1);
     expect(lines(content)).toEqual(['9 Pill tone="bogus" renders as default']);
+  });
+
+  test("a fold read twice is one finding also when the marked render disagrees", () => {
+    const content = page('<Fold title="Sec">', "", "## Sec", "", 'x <Pill tone="bogus">p</Pill>', "", "</Fold>");
+    expect(checkComponents("plans/x.mdx", content, disagreeing).map((f) => [f.line, f.message])).toEqual([
+      [undefined, 'Pill tone="bogus" renders as default'],
+    ]);
+  });
+
+  test("a render that reads the page twice still gives one finding per located tag", () => {
+    const twice = (content: string) => (renderWikiHtml(content, () => undefined), renderWikiHtml(content, () => undefined));
+    expect(checkComponents("plans/x.mdx", page('<Callout tone="success">', "x", "</Callout>"), twice).map((f) => f.line)).toEqual([5]);
+  });
+
+  test("two identical tags on one line are two findings on that line", () => {
+    expect(lines(page('<Pill tone="bad">a</Pill> <Pill tone="bad">b</Pill>'))).toEqual([
+      '5 Pill tone="bad" renders as default',
+      '5 Pill tone="bad" renders as default',
+    ]);
+  });
+
+  test("identical unlocated findings on three lines stay three", () => {
+    const content = page('<Callout tone="caution">', "a", "</Callout>", "", '<Callout tone="caution">', "b", "</Callout>", "", '<Callout tone="caution">', "c", "</Callout>");
+    const found = checkComponents("plans/x.mdx", content, disagreeing);
+    expect(found.map((f) => [f.line, f.message])).toEqual([
+      [undefined, 'Callout tone="caution" renders as info'],
+      [undefined, 'Callout tone="caution" renders as info'],
+      [undefined, 'Callout tone="caution" renders as info'],
+    ]);
   });
 
   test("two identical tags on different lines are two findings, each on its own line", () => {
     const content = page('a <Pill tone="bogus">p</Pill>', "", "`<Pill tone=\"bogus\">` in code", "", 'b <Pill tone="bogus">q</Pill>');
     expect(lines(content)).toEqual(['5 Pill tone="bogus" renders as default', '9 Pill tone="bogus" renders as default']);
+  });
+});
+
+describe("a component name inside another tag's quoted value", () => {
+  test("gets no marker, so the opener keeps its shape and every finding its line", () => {
+    const fold = page('<Fold title="Use <Pill> chips" tone="x">', "", "body", "", "</Fold>", "", '<Pill tone="bad">z</Pill>');
+    expect(lines(fold)).toEqual(['5 Fold tone="x" is not a Fold attribute; the renderer drops it', '11 Pill tone="bad" renders as default']);
+    const callout = page('<Callout tone="success" title="use <Pill> here">', "", "body", "", "</Callout>", "", '<Pill tone="bad">z</Pill>');
+    expect(lines(callout)).toEqual(['5 Callout tone="success" renders as info', '11 Pill tone="bad" renders as default']);
+  });
+
+  test("a tag the scanner reads inside an unclaimed opener's value has no marker; the others keep their lines", () => {
+    const content = page('Prose <Callout title="x <Pill>a</Pill> y"> more.', "", '<Callout tone="success">', "z", "</Callout>");
+    expect(html(content)).toContain('<span class="pill">a</span>');
+    expect(lines(content)).toEqual(['7 Callout tone="success" renders as info']);
+  });
+
+  test("an opener no grammar closes is marked as usual: the tag the scanner reads keeps its line", () => {
+    const content = page('<Callout tone="success" title="use <Pill tone="bad">a</Pill> here">', "", "body", "", "</Callout>");
+    expect(html(content)).toContain('&lt;Callout tone=&quot;success&quot;');
+    expect(lines(content)).toEqual(['5 Pill tone="bad" renders as default']);
+  });
+});
+
+describe("a guard render the page never emits reports nothing", () => {
+  test("a DecisionLog split probe reads a tag the page draws as text", () => {
+    const content = page("<DecisionLog>", "", '- **D1** — The long first part <Pill>a sentence here. Next <Pill tone="bad">b</Pill> tail.', "", "</DecisionLog>");
+    expect(html(content)).toContain("Next &lt;Pill tone=&quot;bad&quot;&gt;b</span>");
+    expect(run(content)).toEqual([]);
   });
 });
 
@@ -357,10 +418,7 @@ describe("known: a child the renderer parses but never emits", () => {
 
 describe("when the marked render disagrees with the plain one", () => {
   test("the plain render's findings come back without a line", () => {
-    // A render that sees one more tag in the marked text than in the plain.
-    const render = (content: string) =>
-      renderWikiHtml(content.includes(LINT_MARK_ATTR) ? `${content}\n\n<Verdict value="no"/>` : content, () => undefined);
-    const findings = checkComponents("plans/x.mdx", page('<Callout tone="success">', "x", "</Callout>"), render);
+    const findings = checkComponents("plans/x.mdx", page('<Callout tone="success">', "x", "</Callout>"), disagreeing);
     expect(findings).toEqual([
       {
         check: "component-value",

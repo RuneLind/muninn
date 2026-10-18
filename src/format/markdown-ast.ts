@@ -35,6 +35,7 @@ import {
   type LaneKind,
 } from "./component-spec.ts";
 import { ordinals } from "./block-renderer.ts";
+import { observingComponentTags, reportComponentTag } from "./component-observer.ts";
 import { laneDefaultLabel, normalizeRoleKey, roleLaneLabel } from "./lane-roles.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 
@@ -53,6 +54,7 @@ export {
   parseResolvedDate,
 };
 export type { ComponentName, FactVerdict, InlineComponentName, LaneKind };
+export { observeComponentTags, type ObservedComponentTag } from "./component-observer.ts";
 
 export type Block =
   | CodeBlock
@@ -64,38 +66,6 @@ export type Block =
   | { type: "table"; headers: string[]; rows: string[][] }
   | ComponentBlock
   | { type: "text"; lines: string[] };
-
-/**
- * One component tag the parser or the inline scanner actually read: the name,
- * the RAW attribute string before {@link parseAttrs} drops unlisted attributes,
- * and, for a block tag, its 0-based line in the text `parseBlocks` was given.
- */
-export interface ObservedComponentTag {
-  name: ComponentName;
-  rawAttrs: string;
-  inline: boolean;
-  line?: number;
-}
-
-/** Set only for the length of one {@link observeComponentTags} call. */
-let componentTagObserver: ((tag: ObservedComponentTag) => void) | null = null;
-
-/**
- * Run `fn` with `observer` told about every component tag `tryParseComponent`
- * accepts and every tag `scanInlineComponents` matches. Synchronous, like
- * `formatWebHtml`'s `files` slot; the previous observer comes back in a
- * `finally`. The wiki linter's author check (`src/wiki/lint-components.ts`) is
- * the caller: the renderer decides which tags count.
- */
-export function observeComponentTags<T>(observer: (tag: ObservedComponentTag) => void, fn: () => T): T {
-  const prev = componentTagObserver;
-  componentTagObserver = observer;
-  try {
-    return fn();
-  } finally {
-    componentTagObserver = prev;
-  }
-}
 
 /** `line` is the 0-based line of the opening tag in the text `parseBlocks` was
  *  given, so a caller can name the tag's line from the block it walks. */
@@ -1590,7 +1560,7 @@ function tryParseComponent(
   if (selfClosing) {
     // Only a subset may self-close, and the tag must own the whole line.
     if (!SELF_CLOSING_ALLOWED.has(cname) || rest.trim() !== "") return null;
-    if (componentTagObserver !== null) componentTagObserver({ name: cname, rawAttrs: m[2]!, inline: false, line });
+    if (observingComponentTags()) reportComponentTag({ name: cname, rawAttrs: m[2]!, inline: false, line });
     return { block: { type: "component", name: cname, attrs, children: [], line }, next: i + 1 };
   }
 
@@ -1599,7 +1569,7 @@ function tryParseComponent(
   if (inlineClose !== -1) {
     if (rest.slice(inlineClose + closeTag.length).trim() !== "") return null; // trailing junk
     // Reported before the children are parsed, so a nested tag follows its parent.
-    if (componentTagObserver !== null) componentTagObserver({ name: cname, rawAttrs: m[2]!, inline: false, line });
+    if (observingComponentTags()) reportComponentTag({ name: cname, rawAttrs: m[2]!, inline: false, line });
     const content = rest.slice(0, inlineClose);
     const inner = childNesting(cname, depth, nm);
     const children = parseBlocksInner(content, store, inner.depth, inner.nm, base + i);
@@ -1643,7 +1613,7 @@ function tryParseComponent(
     return null; // unclosed → fall through as text
   }
 
-  if (componentTagObserver !== null) componentTagObserver({ name: cname, rawAttrs: m[2]!, inline: false, line });
+  if (observingComponentTags()) reportComponentTag({ name: cname, rawAttrs: m[2]!, inline: false, line });
   const inner = childNesting(cname, depth, nm);
   const children = parseBlocksInner(body.join("\n"), store, inner.depth, inner.nm, base + i + 1);
   return { block: { type: "component", name: cname, attrs, children, line }, next: j + 1 };
@@ -1695,7 +1665,7 @@ export function scanInlineComponents(text: string): InlineSegment[] {
   while ((m = INLINE_COMPONENT_RE.exec(text)) !== null) {
     if (m.index > last) segments.push({ kind: "text", text: text.slice(last, m.index) });
     const name = m[1] as InlineComponentName;
-    if (componentTagObserver !== null) componentTagObserver({ name, rawAttrs: m[2] ?? "", inline: true });
+    if (observingComponentTags()) reportComponentTag({ name, rawAttrs: m[2] ?? "", inline: true });
     const attrs = parseAttrs(m[2] ?? "", name);
     // Self-closing → group 3 is undefined; treat as empty inner text.
     segments.push({ kind: "component", name, attrs, text: m[3] ?? "" });

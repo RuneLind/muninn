@@ -25,6 +25,7 @@ import {
   taskListRows,
 } from "../format/markdown-ast.ts";
 import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
+import { withoutComponentTags } from "../format/component-observer.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
@@ -1610,7 +1611,13 @@ const flatHtml = (html: string) => html.replace(/\s+/g, "");
  *  the struck lead): the pieces render as the whole does, white space aside,
  *  so no cut can break emphasis, a component, a link or a fact mark. */
 function rendersAs(pieces: readonly string[], wholeFlat: string): boolean {
-  return flatHtml(pieces.map(itemHtml).join("")) === wholeFlat;
+  return flatHtml(probeItemHtml(pieces)) === wholeFlat;
+}
+
+/** The items rendered and joined for a guard to compare, never emitted: the
+ *  lint observer is not told about tags a fragment reads (`withoutComponentTags`). */
+function probeItemHtml(pieces: readonly string[]): string {
+  return withoutComponentTags(() => pieces.map(itemHtml).join(""));
 }
 
 /** A decision item's text with its date tail in `span.dl-tail` (the reader
@@ -1637,7 +1644,7 @@ function decisionTailCut(text: string): { when: DecisionWhen; body: string; tail
   const body = text.slice(0, when.start).trimEnd();
   const tail = text.slice(when.start, when.end).trim();
   const pointer = text.slice(when.end).trim();
-  if (!body || !rendersAs(pointer ? [body, tail, pointer] : [body, tail], flatHtml(itemHtml(text)))) return null;
+  if (!body || !rendersAs(pointer ? [body, tail, pointer] : [body, tail], flatHtml(probeItemHtml([text])))) return null;
   return { when, body, tail, pointer };
 }
 
@@ -1645,7 +1652,7 @@ function decisionTailCut(text: string): { when: DecisionWhen; body: string; tail
  *  A split is taken only under the {@link rendersAs} guard; the next sentence
  *  end is tried instead. */
 export function splitDecisionText(text: string): SentenceSplit | null {
-  const whole = flatHtml(itemHtml(text));
+  const whole = flatHtml(probeItemHtml([text]));
   return splitFirstSentence(text, (first, rest) => rendersAs([first, rest], whole));
 }
 
@@ -1673,7 +1680,7 @@ function decisionParts(text: string, strikeLead: boolean): DecisionParts | null 
   }
   const parts = { lead, first: cur.first, rest: cur.rest };
   if (!lead) return parts;
-  return rendersAs([lead, cur.first, cur.rest], flatHtml(itemHtml(text))) ? parts : { lead: "", ...split };
+  return rendersAs([lead, cur.first, cur.rest], flatHtml(probeItemHtml([text]))) ? parts : { lead: "", ...split };
 }
 
 /** The parts' spans: the lead and the rest are `dl-rest`, so the reader's

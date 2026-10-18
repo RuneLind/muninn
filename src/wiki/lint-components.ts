@@ -21,11 +21,12 @@
  *
  * **Where a tag is** comes from a second render of the same page with a marker
  * attribute (`muninnlintmark="N"`) inserted after every `<Name` of a component
- * name in the body. A marker is a valid, unlisted attribute: it changes no tag
- * shape the parser or the scanner tests, and `parseAttrs` drops it. The marked
- * render's reports carry the marker, so each finding names the exact source
- * offset. Its reports are used only when they equal the plain render's, tag for
- * tag; otherwise the plain render's findings are returned without a line.
+ * name in the body, except inside the quoted value of a well-formed opener. A
+ * marker is a valid, unlisted attribute: it changes no tag shape the parser or
+ * the scanner tests, and `parseAttrs` drops it. The marked render's reports
+ * carry the marker, so each finding names the exact source offset. Its reports
+ * are used only when they equal the plain render's, tag for tag; otherwise the
+ * plain render's findings are returned without a line.
  *
  * Imports nothing that reads the environment: `scripts/wiki-check.ts` runs it
  * with no `.env`.
@@ -180,31 +181,56 @@ function observe(render: PageRender, content: string): ObservedComponentTag[] {
   return seen;
 }
 
-/** `content` with a marker after every `<Name` in the body, and each marker's
- *  offset in `content`. Frontmatter is left byte for byte. */
+/** The attribute run the parser and the inline scanner read after a tag name,
+ *  and whether a `>` or `/>` closes it (`COMPONENT_OPEN_RE`, `INLINE_COMPONENT_RE`). */
+const OPENER_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*(?=\s*\/?>)/y;
+
+/**
+ * `content` with a marker after every `<Name` in the body, and each marker's
+ * offset in `content`. Frontmatter is left byte for byte. A `<Name` inside the
+ * quoted attribute value of a well-formed opener gets no marker: the marker's
+ * quotes would close that value early and change the opener's shape. A tag
+ * there carries no attribute (the value holds no `"`), so it has no finding; a
+ * render that still reads it reports it with no marker.
+ */
 function markBody(content: string): { marked: string; offsets: number[] } {
   const bodyAt = content.length - splitFrontmatter(content).body.length;
+  const body = content.slice(bodyAt);
   const offsets: number[] = [];
-  const body = content.slice(bodyAt).replace(NAME_RE, (whole: string, _name: string, offset: number) => {
-    offsets.push(bodyAt + offset);
-    return `${whole} ${LINT_MARK_ATTR}="${offsets.length - 1}"`;
-  });
-  return { marked: content.slice(0, bodyAt) + body, offsets };
+  let out = "";
+  let last = 0;
+  NAME_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = NAME_RE.exec(body)) !== null) {
+    const end = m.index + m[0].length;
+    offsets.push(bodyAt + m.index);
+    out += `${body.slice(last, end)} ${LINT_MARK_ATTR}="${offsets.length - 1}"`;
+    last = end;
+    OPENER_RUN_RE.lastIndex = end;
+    const run = OPENER_RUN_RE.exec(body);
+    if (run !== null && run[0].length > 0) NAME_RE.lastIndex = end + run[0].length;
+  }
+  return { marked: content.slice(0, bodyAt) + out + body.slice(last), offsets };
 }
 
 const tagKey = (t: { name: string; inline: boolean; rawAttrs: string }) => `${t.name}\u0000${t.inline}\u0000${t.rawAttrs}`;
 
 /** The marked render's tags with their source offsets, or null when they are
- *  not, tag for tag, the plain render's. */
+ *  not, tag for tag, the plain render's. A tag read with no marker has none. */
 function locate(render: PageRender, content: string, plain: readonly ObservedComponentTag[]): Tag[] | null {
   const { marked, offsets } = markBody(content);
   const tags: Tag[] = [];
   const keys: string[] = [];
   for (const t of observe(render, marked)) {
     const mark = MARK_RE.exec(t.rawAttrs);
-    const offset = mark ? offsets[Number(mark[1])] : undefined;
+    if (mark === null) {
+      keys.push(tagKey(t));
+      tags.push({ name: t.name, attrs: t.rawAttrs });
+      continue;
+    }
+    const offset = offsets[Number(mark[1])];
     if (offset === undefined) return null;
-    const attrs = t.rawAttrs.slice(mark![0].length);
+    const attrs = t.rawAttrs.slice(mark[0].length);
     keys.push(tagKey({ ...t, rawAttrs: attrs }));
     tags.push({ name: t.name, attrs, offset, line: lineAt(content, offset) });
   }
@@ -221,10 +247,11 @@ function lineAt(content: string, offset: number): number {
 }
 
 /**
- * Every component finding on one page, in source order. Pure apart from the
- * render; `lintWiki` calls it on `.mdx` pages and `scripts/wiki-check.ts` on
- * the files it walks. A tag the renderer reads twice (a fold body is rendered
- * twice) is one finding: findings are deduped on (line, name, attribute, value).
+ * Every component finding on one page, located ones in source order, then the
+ * unlocated. Pure apart from the render; `lintWiki` calls it on `.mdx` pages
+ * and `scripts/wiki-check.ts` on the files it walks. The observer reports each
+ * tag the emitted render reads once (`component-observer.ts`); a located tag is
+ * also keyed on its source offset, so one tag is never two findings.
  */
 export function checkComponents(relPath: string, content: string, render: PageRender = readerRender): LintFinding[] {
   if (!content.includes("<")) return [];
@@ -232,17 +259,8 @@ export function checkComponents(relPath: string, content: string, render: PageRe
   const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs }));
   if (unlocated.length === 0) return [];
   const tags = locate(render, content, plain);
-  if (tags === null) return dedupe(unlocated);
-  tags.sort((a, b) => a.offset! - b.offset!);
-  return dedupe(tags.flatMap((t) => checkTag(relPath, t)));
-}
-
-function dedupe(findings: LintFinding[]): LintFinding[] {
-  const seen = new Set<string>();
-  return findings.filter((f) => {
-    const key = `${f.line}\u0000${f.check}\u0000${f.message}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  if (tags === null) return unlocated;
+  const located = tags.filter((t) => t.offset !== undefined).sort((a, b) => a.offset! - b.offset!);
+  const once = located.filter((t, i) => i === 0 || t.offset !== located[i - 1]!.offset);
+  return [...once, ...tags.filter((t) => t.offset === undefined)].flatMap((t) => checkTag(relPath, t));
 }
