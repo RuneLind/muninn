@@ -4,7 +4,7 @@
  * `owns:` form table lives in `lint-state.test.ts`. Synthetic names only.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,7 +16,9 @@ import {
   type RelatedRead,
   type RelatedResolveContext,
 } from "./frontmatter-lists.ts";
+import { frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import { buildWikiIndex } from "./store.ts";
+import { extractWikilinks, WIKILINK_RE } from "./wikilinks.ts";
 import { toListing } from "../dashboard/routes/wiki-routes.ts";
 
 const page = (fm: string) => `---\ntitle: X\n${fm}\nstatus: open\n---\n\nBody [[not-related]].\n`;
@@ -526,6 +528,379 @@ describe("fix round 2 batch 2 — the bare-name root step, the gate's key spelli
         expect(show(readRelated(content))).toEqual(expected);
         expect(readFrontmatterLists(content).related).toEqual(readRelated(content));
       });
+    }
+  });
+});
+
+describe("class check — the related: reader against a YAML oracle", () => {
+  const relatedPage = (value: string) => page(`related:${value.startsWith("\n") ? "" : " "}${value}`);
+  /** Entries as `L:<target>` / `T:<value>` / `U`, sorted. */
+  const read = (content: string) =>
+    readRelated(content)
+      .entries.map((e) => (e.kind === "link" ? `L:${e.target}` : e.kind === "text" ? `T:${e.value}` : "U"))
+      .sort();
+
+  const tryParse = (text: string): { v: unknown } | undefined => {
+    try {
+      return { v: Bun.YAML.parse(text) };
+    } catch {
+      return undefined;
+    }
+  };
+  const relatedOf = (p: { v: unknown } | undefined): { v: unknown } | undefined =>
+    p && p.v !== null && typeof p.v === "object" && Object.hasOwn(p.v, "related")
+      ? { v: (p.v as Record<string, unknown>).related }
+      : undefined;
+  const nodesEqualTo = (v: unknown, r: unknown): number => {
+    let n = Bun.deepEquals(v, r, true) ? 1 : 0;
+    if (v !== null && typeof v === "object") for (const x of Object.values(v)) n += nodesEqualTo(x, r);
+    return n;
+  };
+  /** A link target as the scanner spells it: `|label`, `#fragment`, backslashes
+   *  and a `[[[a]]]` span's extra `[` dropped. */
+  const target = (t: string) => {
+    let s = t.replace(/\\/g, "").split("|")[0]!.replace(/^\[+/, "").trim();
+    const hash = s.indexOf("#");
+    if (hash === 0) return "";
+    if (hash > 0) s = s.slice(0, hash).trim();
+    return s;
+  };
+  const HAS_LINK = new RegExp(WIKILINK_RE.source);
+
+  /**
+   * The oracle: what `readRelated` must answer for a page whose frontmatter
+   * YAML parses whole, derived from YAML alone and never from the reader's own
+   * comment or quote rules. V is the parsed `related` value; a span is a
+   * `[[…]]` the wikilink scanner finds in the entry's text (a `[[[a]]]` span's
+   * extra `[` excluded).
+   *
+   * 1. A span is READ AS A NODE when YAML reads its `[[…]]` alone as a sequence
+   *    R, and writing `x` over the characters inside its outer brackets leaves
+   *    fewer nodes equal to R in V. It is then a link, its target the span's text.
+   *    A span in a comment changes nothing; one inside a quoted or plain string
+   *    changes that string, not the count of R.
+   * 2. V* is the frontmatter re-parsed with each such span overwritten by a
+   *    marker (`[x` + its index + `x…]`: a string no generated entry can spell,
+   *    in the span's own brackets), walked depth-first: a list's items one
+   *    level deeper, depth 8 at most (whatever lies deeper: one unread);
+   *    a marker's list is its span's link, at the list's own depth; in a list,
+   *    a string holding a wikilink is its links, any other string a text, a map
+   *    one unread, any other non-null scalar one unread; inside a map, every
+   *    key and string at any depth is read for links only.
+   * 3. The reader's links (case-folded), texts and unread count equal the
+   *    oracle's: nothing missing, nothing extra.
+   *
+   * Undefined when the frontmatter does not parse: the oracle has no ground
+   * truth there, and the reader falls back to its own lexer.
+   */
+  function oracle(content: string): { links: string[]; texts: string[]; unread: number; asNode: number } | undefined {
+    // The frontmatter the index reads (`frontmatterEndLine`), and the entry: the
+    // `related:` line and its continuation lines up to the next top-level key.
+    const lines = content.split("\n");
+    const fmLines = lines.slice(1, frontmatterEndLine(lines) - 1);
+    const fmText = fmLines.join("\n");
+    const V = relatedOf(tryParse(fmText));
+    if (!V) return undefined;
+    const at = fmLines.findLastIndex((l) => /^related\s*:/.test(l));
+    let stop = at + 1;
+    while (stop < fmLines.length && !/^[^\s#-]/.test(fmLines[stop]!)) stop++;
+    const from = fmLines.slice(0, at).join("\n").length + (at > 0 ? 1 : 0);
+    const spans = [...fmLines.slice(at, stop).join("\n").matchAll(new RegExp(WIKILINK_RE.source, "g"))].map((m) => {
+      const inner = m[0].slice(2, -2).replace(/^\[+/, "");
+      const end = from + m.index + m[0].length;
+      return { start: end - inner.length - 4, end, inner };
+    });
+    const overwrite = (marks: [number, string][]) => {
+      let t = fmText;
+      for (const [i, mark] of marks) t = t.slice(0, spans[i]!.start) + mark + t.slice(spans[i]!.end);
+      return t;
+    };
+    // `[x…x]`: the span's brackets kept, its inside overwritten.
+    const bracketed = (i: number, inside: string) => `[${inside.padEnd(spans[i]!.end - spans[i]!.start - 2, "x")}]`;
+    const asNode: number[] = [];
+    spans.forEach((s, i) => {
+      const r = tryParse(`[[${s.inner}]]`);
+      const without = relatedOf(tryParse(overwrite([[i, bracketed(i, "x")]])));
+      if (r && without && nodesEqualTo(V.v, r.v) > nodesEqualTo(without.v, r.v)) asNode.push(i);
+    });
+    const markers = new Map(asNode.map((i) => [`x${i.toString(36)}`.padEnd(spans[i]!.end - spans[i]!.start - 2, "x"), i]));
+    const star = relatedOf(tryParse(overwrite([...markers].map(([m, i]) => [i, bracketed(i, m)]))));
+    if (!star) throw new Error(`oracle: the marked frontmatter does not parse: ${JSON.stringify(fmText)}`);
+    const links = new Set<string>();
+    const texts = new Set<string>();
+    let unread = 0;
+    let deep = false;
+    const addLink = (t: string) => {
+      if (target(t)) links.add(target(t).toLowerCase());
+    };
+    const linksOf = (s: string) => {
+      const i = markers.get(s);
+      if (i !== undefined) addLink(spans[i]!.inner);
+      else if (HAS_LINK.test(s)) for (const t of extractWikilinks(s)) addLink(t);
+      else return false;
+      return true;
+    };
+    const walk = (v: unknown, depth: number, inList: boolean): void => {
+      if (depth > 8) {
+        if (!deep) unread++;
+        deep = true;
+        return;
+      }
+      if (Array.isArray(v) && v.length === 1 && typeof v[0] === "string" && markers.has(v[0])) linksOf(v[0]);
+      else if (Array.isArray(v)) for (const x of v) walk(x, depth + 1, inList);
+      else if (typeof v === "string") {
+        if (!linksOf(v) && inList && v.trim()) texts.add(v.trim());
+      } else if (v === null || v === undefined) return;
+      else if (typeof v === "object") {
+        if (inList) unread++;
+        for (const [k, x] of Object.entries(v)) {
+          linksOf(k);
+          walk(x, depth + 1, false);
+        }
+      } else if (inList) unread++;
+    };
+    walk(star.v, 0, true);
+    return { links: [...links].sort(), texts: [...texts].sort(), unread, asNode: asNode.length };
+  }
+
+  /** mulberry32: a seeded PRNG, so every run generates the same entries. */
+  const prng = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  // A narrow alphabet; `[[`, `]]` and a block item weighted up, so enough
+  // entries hold a span YAML reads as a node.
+  const TOKENS = ["[[", "[[", "[[", "]]", "]]", "]]", "[", "]", '"', "'", "#", " ", ",", "-", "\n  ", "\n  - ", ":", "a", "b", "\\"];
+  const ENTRIES = 40_000;
+  const soup = (rand: () => number, n: number, tokens = TOKENS) => {
+    let v = "";
+    for (; n > 0; n--) v += tokens[Math.floor(rand() * tokens.length)];
+    return v;
+  };
+  const LINE_TOKENS = TOKENS.filter((t) => !t.includes("\n"));
+  /** One to four block items, half of them `[[…]]` with a comment or a flow
+   *  tail, the rest soup: the shape that puts a span where YAML reads a node. */
+  const blockItems = (rand: () => number) => {
+    let v = "";
+    for (let n = 1 + Math.floor(rand() * 4); n > 0; n--) {
+      const item = soup(rand, 1 + Math.floor(rand() * 4), LINE_TOKENS);
+      const tail = [" # ", ", ", " "][Math.floor(rand() * 3)]! + soup(rand, Math.floor(rand() * 4), LINE_TOKENS);
+      v += `\n  - ${rand() < 0.6 ? `[[${item}]]${rand() < 0.5 ? tail : ""}` : item}`;
+    }
+    return v;
+  };
+
+  test(`oracle: ${ENTRIES} seeded entries, every one YAML parses agrees`, () => {
+    const rand = prng(0x5eed1);
+    const failures: string[] = [];
+    const seen = { parsed: 0, withSpan: 0, asNode: 0, comment: 0 };
+    for (let i = 0; i < ENTRIES; i++) {
+      const value = i % 2 ? soup(rand, 1 + Math.floor(rand() * 14)) : blockItems(rand);
+      const content = relatedPage(value);
+      const want = oracle(content);
+      if (!want) continue;
+      seen.parsed++;
+      if (value.includes("[[") && value.includes("]]")) seen.withSpan++;
+      if (want.asNode) seen.asNode++;
+      if (value.includes("#")) seen.comment++;
+      const entries = readRelated(content).entries;
+      const got = {
+        links: [...new Set(entries.flatMap((e) => (e.kind === "link" ? [e.target.toLowerCase()] : [])))].sort(),
+        texts: entries.flatMap((e) => (e.kind === "text" ? [e.value] : [])).sort(),
+        unread: entries.filter((e) => e.kind === "unread").length,
+      };
+      const { asNode: _, ...expected } = want;
+      if (JSON.stringify(got) !== JSON.stringify(expected)) failures.push(`${JSON.stringify(value)} want ${JSON.stringify(expected)} got ${JSON.stringify(got)}`);
+    }
+    expect({ failures: failures.length, first: failures.slice(0, 5) }).toEqual({ failures: 0, first: [] });
+    // The oracle is not vacuous: enough entries parse, hold a span (one YAML
+    // reads as a node), a comment.
+    expect(seen.parsed).toBeGreaterThan(2_000);
+    expect(seen.withSpan).toBeGreaterThan(200);
+    expect(seen.asNode).toBeGreaterThan(200);
+    expect(seen.comment).toBeGreaterThan(500);
+  });
+
+  // The two shapes the first fuzz found, as rows.
+  test("a span whose ]] lies inside a YAML comment is no link", () => {
+    expect(read(relatedPage('\n  - "x [[a" # see b]]'))).toEqual(["T:x [[a"]);
+  });
+  test("a span inside a single-quoted string is read once, as YAML reads it", () => {
+    expect(read(relatedPage("'[[O''Brien]]'"))).toEqual(["L:O'Brien"]);
+  });
+  test("marking a span never starts a comment: a span before `#` in a multi-line plain scalar", () => {
+    expect(read(relatedPage("\n  - a[[b]]#c\n    d\n  - [[e]]"))).toEqual(["L:b", "L:e"]);
+  });
+  test("a span node in a map value is a link, also where the key is a span", () => {
+    expect(read(relatedPage("\n  - note: [[a]]\n  - [[b]]: [[c]]"))).toEqual(["L:a", "L:c", "U", "U"]);
+    expect(read(relatedPage("\n  - {[[k]]: [[x]], [[5]]: y}"))).toEqual(["L:x", "U"]);
+    expect(read(relatedPage("\n  - {[[k]] : [[x]], [[5]] : y}"))).toEqual(["L:x", "U"]);
+    expect(read(relatedPage("\n  - ? [[5]]\n    : [[x]]"))).toEqual(["L:x", "U"]);
+    expect(read(relatedPage('\n  - {"[[k]] 1": [[x]], "[[5]]": [[y]]}'))).toEqual(["L:5", "L:k", "L:x", "L:y", "U"]);
+  });
+  test("`related:` as the frontmatter's first key: the marks land on its spans", () => {
+    expect(read("---\nrelated:\n  - [[a]]\n  - b\n---\n")).toEqual(["L:a", "T:b"]);
+  });
+  test("inside a map only links are read: a number or a list of one is no entry of its own", () => {
+    expect(read(relatedPage("\n  - {k: 1, j: [2], l: true}"))).toEqual(["U"]);
+  });
+  test("a list holding a number where a commented span's mark would stand is no link", () => {
+    expect(read(relatedPage("\n  - [[a]]\n  # [[b]]\n  - [1]\n  - - - 1"))).toEqual(["L:a", "U", "U"]);
+  });
+  test("links dedupe case-insensitively, texts exactly, and links come first", () => {
+    expect(readRelated(relatedPage('\n  - plans/x\n  - plans/X\n  - "[[Ab]]"\n  - [[aB]]')).entries).toEqual([
+      { kind: "link", target: "Ab" },
+      { kind: "text", value: "plans/x" },
+      { kind: "text", value: "plans/X" },
+    ]);
+  });
+  test("a list aliased three times is read whole; a long string aliased a thousand times is cut", () => {
+    const thrice = `---\nl: &l [${Array.from({ length: 50 }, (_, i) => `item${i}`).join(", ")}]\nrelated: [*l, *l, *l]\n---\n`;
+    expect({ n: read(thrice).length, unread: read(thrice).includes("U") }).toEqual({ n: 50, unread: false });
+    const long = `---\ns: &s ${"w".repeat(10_000)}\nrelated: [${Array(1000).fill("*s").join(", ")}]\n---\n`;
+    const t = performance.now();
+    expect(read(long)).toEqual([`T:${"w".repeat(10_000)}`, "U"]);
+    expect(performance.now() - t).toBeLessThan(100);
+  });
+  test("a long key merged into many maps is cut", () => {
+    let y = `m0: &m0 {${"k".repeat(20_000)}: 1}\n`;
+    for (let i = 1; i <= 2000; i++) y += `m${i}: &m${i} {<<: *m0, a${i}: 1}\n`;
+    const content = `---\n${y}related: [${Array.from({ length: 2000 }, (_, i) => `*m${i + 1}`).join(", ")}]\n---\n`;
+    const t = performance.now();
+    const got = read(content);
+    expect(performance.now() - t).toBeLessThan(100);
+    expect(got.filter((e) => e === "U").length).toBeLessThan(2000);
+  });
+  test("a string whose only `[[…]]` names no page (`[[#x]]`) is neither a link nor a text", () => {
+    expect(read(relatedPage('["[[#x]]", y]'))).toEqual(["T:y"]);
+  });
+  test("a nested list YAML reads is text unless a span outside a comment wrote it", () => {
+    expect(read(relatedPage("\n  - - a\n  # [[a]]"))).toEqual(["T:a"]);
+    expect(read(relatedPage("\n  - - a\n  - [[a]]"))).toEqual(["L:a", "T:a"]);
+  });
+
+  describe("pins: every branch a mutant survived", () => {
+    test("a list YAML types differently from a span's reading is not that reading", () => {
+      expect(read(relatedPage("\n  - [[Title: sub]]\n  - - - {Title: sub, x: y}"))).toEqual(["L:Title: sub", "U"]);
+      expect(read(relatedPage('\n  - [[1.10]]\n  - - - "1.1"'))).toEqual(["L:1.10", "T:1.1"]);
+      expect(read(relatedPage("\n  - [[a]]\n  - [a]"))).toEqual(["L:a", "T:a"]);
+    });
+    test("the walk reads 8 levels of nesting; deeper is one unread, and its siblings are read", () => {
+      expect(read(relatedPage("\n  - - - - - - - - x"))).toEqual(["T:x"]);
+      expect(read(relatedPage("\n  - - - - - - - - - x\n  - - - - - - - - - - y\n  - z"))).toEqual(["T:z", "U"]);
+    });
+    test("a long list is read whole: the budget grows with the text", () => {
+      const plain = Array.from({ length: 3000 }, (_, i) => `  - p${i}`).join("\n");
+      const texts = read(relatedPage(`\n${plain}`));
+      expect({ n: texts.length, unread: texts.includes("U") }).toEqual({ n: 3000, unread: false });
+      const links = Array.from({ length: 3000 }, (_, i) => `  - [[a${i}]]`).join("\n");
+      const got = read(relatedPage(`\n${links}`));
+      expect({ n: got.length, unread: got.includes("U") }).toEqual({ n: 3000, unread: false });
+    });
+    // Each row below breaks YAML on purpose, so the scanner's own comment
+    // rules decide it.
+    test("refused YAML: a backslash escapes only inside a double-quoted scalar", () => {
+      expect(read(relatedPage("\n  - 'C:\\'\n  # [[c]]\n  - 'y'\n  - [[d]], [[e]]"))).toEqual(["L:d", "L:e"]);
+    });
+    test("refused YAML: `\"\"` closes a double-quoted scalar, it is no escape", () => {
+      expect(read(relatedPage('[[a]], "x"" # [[c]]", [[d]]'))).toEqual(["L:a"]);
+    });
+    test("refused YAML: a tab before `#` opens a comment too", () => {
+      expect(read(relatedPage("[[a]], [[b]]\t# [[c]]"))).toEqual(["L:a", "L:b"]);
+    });
+    test("refused YAML: a comment ends at its line, and the next line starts fresh", () => {
+      expect(read(relatedPage('\n  - [[a]] # x\n  "[[b]] # [[c]]", [[d]]'))).toEqual(["L:a", "L:b", "L:c", "L:d"]);
+    });
+  });
+
+  describe("the work budget: an adversarial frontmatter reads in bounded time", () => {
+    const timed = (content: string) => {
+      const t = performance.now();
+      const got = read(content);
+      return { ms: performance.now() - t, got };
+    };
+    /** `big` is one map of `keys` keys; `related:` lists `spans` map-typed
+     *  readings and `refs` items that alias the map. */
+    const aliasedMap = (keys: number, spans: number, refs: number) => {
+      const big = Array.from({ length: keys }, (_, i) => `k${i}: v`).join(", ");
+      const items = [
+        ...Array.from({ length: spans }, (_, i) => `  - [[T${i}: sub]]`),
+        ...Array.from({ length: refs }, () => "  - [[*b]]"),
+      ].join("\n");
+      return `---\nbig: &b {${big}}\nrelated:\n${items}\n---\nbody\n`;
+    };
+
+    test("an aliased 20k-key map behind 999 items, beside 300 map-typed readings", () => {
+      const { ms, got } = timed(aliasedMap(20_000, 300, 999));
+      expect(ms).toBeLessThan(100);
+      expect(got.filter((e) => e.startsWith("L:")).length).toBe(300);
+      expect(got.filter((e) => e === "U").length).toBe(999);
+    });
+    test("one map-typed reading beside 999 items aliasing the map", () => {
+      const { ms, got } = timed(aliasedMap(20_000, 1, 999));
+      expect(ms).toBeLessThan(100);
+      expect(got.filter((e) => e.startsWith("L:")).length).toBe(1);
+    });
+    test("3,000 spans beside an alias chain: every span read, the chain one unread", () => {
+      let defs = "a0: &a0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]\n";
+      for (let i = 1; i <= 6; i++) defs += `a${i}: &a${i} [${Array(9).fill(`*a${i - 1}`).join(", ")}]\n`;
+      const items = [...Array.from({ length: 3000 }, (_, i) => `  - [[s${i}]]`), "  - *a6"].join("\n");
+      const { ms, got } = timed(`---\n${defs}related:\n${items}\n---\nbody\n`);
+      expect(ms).toBeLessThan(100);
+      expect(got.filter((e) => e.startsWith("L:")).length).toBe(3000);
+      expect(got.filter((e) => e === "U").length).toBe(1);
+    });
+  });
+});
+
+describe("class check — resolver step 4's order, and the gate's skip", () => {
+  /** A context over `pages`: exact relPaths, and every page a lowercased stem names. */
+  const ctxOver = (from: string, pages: string[]): RelatedResolveContext => ({
+    fromRelPath: from,
+    roots: [],
+    byPath: (rel) => pages.find((p) => p.toLowerCase() === path.posix.normalize(rel).toLowerCase()),
+    byName: (key) => pages.filter((p) => path.posix.basename(p).replace(/\.(?:mdx?|html)$/i, "").toLowerCase() === key),
+    byLink: () => undefined,
+  });
+  const resolveIn = (value: string, from: string, pages: string[]) =>
+    resolveRelatedEntries(readRelated(page(`related: ${value}`)).entries, ctxOver(from, [from, ...pages]));
+
+  test("own folder as spelled comes before the root", () => {
+    expect(resolveIn("[foo]", "notes/b.md", ["notes/foo.md", "foo.md"]).targets).toEqual(["notes/foo.md"]);
+    expect(resolveIn("[foo.html]", "notes/b.md", ["notes/foo.html", "foo.html"]).targets).toEqual(["notes/foo.html"]);
+  });
+  test("own folder by stem comes before the census", () => {
+    expect(resolveIn("[foo.html]", "notes/b.md", ["notes/foo.md", "plans/x/foo.md"])).toEqual({
+      targets: ["notes/foo.md"],
+      skipped: 0,
+      ambiguous: 0,
+    });
+  });
+  test("the census reads the name as spelled, and its stem", () => {
+    expect(resolveIn("[foo.html]", "notes/b.md", ["plans/x/foo.md"]).targets).toEqual(["plans/x/foo.md"]);
+    // An alias spelled with an extension names its page only as spelled.
+    const aliased = { ...ctxOver("notes/b.md", ["notes/b.md", "plans/x/y.md"]), byName: (key: string) => (key === "spec.md" ? ["plans/x/y.md"] : []) };
+    expect(resolveRelatedEntries(readRelated(page("related: [spec.md]")).entries, aliased).targets).toEqual(["plans/x/y.md"]);
+  });
+  test("the root by stem comes before the census", () => {
+    expect(resolveIn("[foo.html]", "notes/b.md", ["foo.md", "plans/x/foo.md"])).toEqual({
+      targets: ["foo.md"],
+      skipped: 0,
+      ambiguous: 0,
+    });
+  });
+
+  test("a frontmatter naming neither key, with no backslash, is never parsed", () => {
+    const spy = spyOn(Bun.YAML, "parse");
+    try {
+      const none = readFrontmatterLists("---\ntitle: X\ntags: [a, b]\nstatus: open\n---\n\nBody [[x]].\n");
+      expect({ none, calls: spy.mock.calls.length }).toEqual({ none: { owns: readOwns(""), related: readRelated("") }, calls: 0 });
+      readFrontmatterLists("---\ntitle: X\nrelated: [x]\n---\n");
+      expect(spy.mock.calls.length).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
     }
   });
 });
