@@ -46,6 +46,22 @@ test("chat teach set is exactly what COMPONENT_VOCABULARY_RULES names", () => {
   expect(chatAttrs.sort()).toEqual([...taughtAttrs].sort());
 });
 
+// The prompt string is hand-written (it is not generated from the spec), so this
+// pins every value it shows: a tone renamed in the spec turns this red.
+test("every value COMPONENT_VOCABULARY_RULES shows parses with fellBack false", () => {
+  const shown: { name: string; attr: string; value: string }[] = [];
+  for (const m of COMPONENT_VOCABULARY_RULES.matchAll(/<([A-Z][A-Za-z]*)([^>]*)>/g)) {
+    for (const a of m[2]!.matchAll(/([a-z]+)="([^"]*)"/g)) {
+      for (const value of a[2]!.split("|")) shown.push({ name: m[1]!, attr: a[1]!, value });
+    }
+  }
+  expect(shown.length).toBeGreaterThanOrEqual(10);
+  for (const { name, attr, value } of shown) {
+    const fellBack = attrSpec(name as ComponentName, attr).parse(value).fellBack;
+    expect({ name, attr, value, fellBack }).toEqual({ name, attr, value, fellBack: false });
+  }
+});
+
 describe("hints", () => {
   test("every suggest target parses with fellBack false; every source falls back", () => {
     let n = 0;
@@ -111,6 +127,16 @@ describe("the accepted-value and fallback text", () => {
         }
         if (d?.onFallback?.includes("{default}")) expect(spec.default).toBeDefined();
         if (d?.onFallbackWhen) expect(COMPONENT_ATTRS[name]).toContain(d.onFallbackWhen.attr);
+      }
+    }
+  });
+
+  // The reference generator prints `type`, not `accepts`; an attribute with
+  // only `accepts` would print as a bare string.
+  test("an attribute with accepts has a type", () => {
+    for (const name of COMPONENT_NAMES) {
+      for (const [attr, d] of Object.entries(docs[name].attrs ?? {})) {
+        if (d?.accepts !== undefined) expect({ name, attr, type: attrSpec(name, attr).type !== undefined }).toEqual({ name, attr, type: true });
       }
     }
   });

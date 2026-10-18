@@ -5,8 +5,8 @@
  * and hints that map an off-vocabulary value to an accepted one.
  *
  * Kept out of `component-spec.ts` so none of these strings reach the browser
- * bundle: only the wiki linter imports this file (PR 3's reference generator
- * will read it too).
+ * bundle: only the wiki linter and `scripts/component-reference.ts` import
+ * this file.
  */
 
 import { COMPONENT_SPEC, type ComponentAttrName, type ComponentName } from "./component-spec.ts";
