@@ -10,7 +10,8 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, localDay, type WikiListing } from "./wiki-filter.ts";
-import type { RailThreadCard } from "./wiki-recents.ts";
+import type { RailGroupCard, RailThreadCard, RailWorkControl } from "./wiki-recents.ts";
+import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 
 /** One instant as a card shows it, in the viewer's zone: `today 08:01`,
  *  `yesterday 21:26`, else `mon 12.10 15:04`. */
@@ -143,14 +144,14 @@ export function threadCardHeaderHtml(
   const pinLabel = "Pin this work thread first";
   const pinTitle = card.pinned ? "Pinned first. Click to unpin" : pinLabel;
   return (
-    `<div class="wiki-thread-card${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" data-thread="${esc(card.foldKey)}">` +
+    `<div class="wiki-thread-card${card.child ? " wiki-thread-child" : ""}${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" data-thread="${esc(card.foldKey)}">` +
     `<button type="button" class="wiki-thread-fold${folded ? " folded" : ""}"` +
     ` data-fold-key="${esc(card.toggleKey)}" aria-expanded="${folded ? "false" : "true"}"` +
     ` title="${esc(hover + "\n" + why)}">` +
     THREAD_GLYPH +
     `<span class="wiki-thread-label">` +
     `<span class="wiki-thread-name">${esc(card.name)}</span>${SR_SEP}` +
-    `<small class="wiki-thread-meta">${threadMetaHtml(card, now, showMoves)}</small>${SR_SEP}` +
+    `<small class="wiki-thread-meta">${threadMetaHtml(card, now, showMoves)}${card.child ? threadChildLineHtml(card.child) : ""}</small>${SR_SEP}` +
     `<span class="wiki-thread-disclose"><span aria-hidden="true">${folded ? "▸" : "▾"} </span>` +
     `${esc(threadDiscloseLabel(folded, pages))}</span>` +
     `</span>` +
@@ -200,6 +201,248 @@ export function railGhostHtml(relPath: string, title: string, reason: "pinned" |
     ` title="${esc(title + "\n" + where)}">` +
     `<div class="wiki-list-ghost-title">${esc(title)}</div>` +
     `<div class="wiki-list-ghost-note">${railGhostNote(reason)}</div>` +
+    `</div>`
+  );
+}
+
+// ── Grouped Work threads (plan `muninn-wiki-work-thread-grouping`, PR 3) ─────
+
+/** The `also` chip's label budget, in characters. */
+const ALSO_LABEL_MAX = 24;
+
+/** A child card's third meta line: why it joined (`↔ 5 links · series`) or
+ *  `anchor`, then the `also <series>` chip. The hover lists the witnesses. */
+function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>): string {
+  // The chip names the first series, cut to fit one line of the 260 px rail
+  // (width table, src/wiki/CLAUDE.md); the hover names them all in full.
+  const first = child.also[0] ?? "";
+  const label = first.length > ALSO_LABEL_MAX ? first.slice(0, ALSO_LABEL_MAX - 1) + "…" : first;
+  const also = child.also.length
+    ? ` <span class="wiki-thread-chip" title="${esc("Some of its pages are also in: " + child.also.join(", "))}">` +
+      `also ${esc(label)}${child.also.length > 1 ? ` +${child.also.length - 1}` : ""}</span>`
+    : "";
+  if (!child.why && !also) return "";
+  const title = child.witnesses.length ? ` title="${esc("Joined by:\n" + child.witnesses.join("\n"))}"` : "";
+  return (
+    `${SR_SEP} <span class="wiki-thread-line wiki-thread-why"${title}>` +
+    // Each part an inline block, so a narrow rail breaks between parts.
+    child.why
+      .split(" · ")
+      .filter(Boolean)
+      .map((part, i) => `${i ? " " : ""}<span class="wiki-thread-why-part">${i ? "· " : ""}${esc(part)}</span>`)
+      .join("") +
+    also +
+    `</span>`
+  );
+}
+
+/** The group glyph: stacked cards, in the slot a thread card gives its timeline. */
+const GROUP_GLYPH =
+  `<svg class="wiki-thread-glyph" viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor"` +
+  ` stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><rect x="1.5" y="1.5" width="11" height="3" rx="1"/>` +
+  `<rect x="1.5" y="5.5" width="11" height="3" rx="1"/><rect x="1.5" y="9.5" width="11" height="3" rx="1"/></svg>`;
+
+/** The group fold's third line: `▸ Show 3 threads` / `▾ Hide 3 threads`. */
+export function threadGroupDiscloseLabel(folded: boolean, threads: number): string {
+  return `${folded ? "Show" : "Hide"} ${threads} ${threads === 1 ? "thread" : "threads"}`;
+}
+
+/** A group header's tally: `N threads · M sessions · ✋ K`. */
+export function threadGroupTally(card: Pick<RailGroupCard, "threads" | "sessions" | "movesYou">, showMoves: boolean): string {
+  const s = card.sessions.length;
+  return [
+    `${card.threads} ${card.threads === 1 ? "thread" : "threads"}`,
+    `${s} ${s === 1 ? "session" : "sessions"}`,
+    showMoves && card.movesYou > 0 ? `✋ ${card.movesYou}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/**
+ * A GROUP card's header (D10): today's card shell, stacked, with the group
+ * glyph, a kind label (`SERIES`, `RELATED`, `PROJECT`) before the name,
+ * `N threads · M sessions · ✋ K` over the span, and `▸ Show N threads`. Its
+ * 📌 is a separate button that pins the anchor child (or clears the pin when a
+ * child holds it). The hover lists the witnesses that joined the group.
+ */
+export function threadGroupHeaderHtml(card: RailGroupCard, folded: boolean, now: number, showMoves: boolean): string {
+  const s = card.sessions.length;
+  const span = threadSpanEnds(card, now, true);
+  const hover = [card.name + (card.pinned ? " (pinned first)" : ""), ...card.witnesses].join("\n");
+  const why = folded ? "Show this group of work threads" : "Hide this group of work threads";
+  const pinLabel = "Pin this work group first";
+  const pinTitle = card.pinned ? "Pinned first. Click to unpin" : pinLabel;
+  return (
+    `<div class="wiki-thread-card wiki-thread-group${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" data-thread-group="${esc(card.foldKey)}">` +
+    `<button type="button" class="wiki-thread-fold${folded ? " folded" : ""}"` +
+    ` data-fold-key="${esc(card.toggleKey)}" aria-expanded="${folded ? "false" : "true"}"` +
+    ` title="${esc(hover + "\n" + why)}">` +
+    GROUP_GLYPH +
+    `<span class="wiki-thread-label">` +
+    `<span class="wiki-thread-name"><span class="wiki-thread-kind">${esc(card.label)}</span> ${esc(card.name)}</span>${SR_SEP}` +
+    `<small class="wiki-thread-meta">` +
+    `<span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">${esc(`${card.threads} ${card.threads === 1 ? "thread" : "threads"}`)}</span>` +
+    ` <span class="wiki-thread-count">· ${esc(`${s} ${s === 1 ? "session" : "sessions"}`)}</span>` +
+    (showMoves && card.movesYou > 0 ? ` <span class="wiki-thread-moves">· ${esc(`✋ ${card.movesYou}`)}</span>` : "") +
+    `</span>` +
+    (span.from
+      ? `${SR_SEP} <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">${esc(span.from)}</span>` +
+        ` <span class="wiki-thread-to">→ ${esc(span.to)}</span></span>`
+      : "") +
+    (card.anchorVisible ? "" : `${SR_SEP} <span class="wiki-thread-line wiki-thread-why">anchor outside the filters</span>`) +
+    `</small>${SR_SEP}` +
+    `<span class="wiki-thread-disclose"><span aria-hidden="true">${folded ? "▸" : "▾"} </span>` +
+    `${esc(threadGroupDiscloseLabel(folded, card.threads))}</span>` +
+    `</span>` +
+    `</button>` +
+    `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +
+    ` data-thread-pinned="${card.pinned ? "1" : "0"}" aria-pressed="${card.pinned}"` +
+    ` aria-label="${esc(pinLabel)}" title="${esc(pinTitle)}">📌</button>` +
+    `</div>`
+  );
+}
+
+/** An open group's body opens here; `threadGroupEndHtml` closes it. */
+export function threadGroupBodyStartHtml(foldKey: string): string {
+  return `<div class="wiki-thread-gbody" data-section="threads" data-thread-group-body="${esc(foldKey)}">`;
+}
+
+/** How many shared-context links show before `+N`. */
+const CONTEXT_SHOWN = 3;
+
+/** The end of an open group's body: `+ N more threads`, then the shared
+ *  context line (links, not rows), then the body's close. */
+export function threadGroupEndHtml(
+  foldKey: string,
+  hidden: number,
+  context: readonly WikiListing[],
+  hrefFor: (relPath: string) => string,
+): string {
+  const more =
+    hidden > 0
+      ? `<button type="button" class="wiki-thread-more" data-thread-more="${esc(foldKey)}">+ ${hidden} more ${hidden === 1 ? "thread" : "threads"}</button>`
+      : "";
+  let ctx = "";
+  if (context.length) {
+    const shown = context.slice(0, CONTEXT_SHOWN);
+    const rest = context.slice(CONTEXT_SHOWN);
+    const links = shown
+      .map(
+        (p) =>
+          `<a class="wiki-thread-link" href="${esc(hrefFor(p.relPath))}" data-page="${esc(p.name)}"` +
+          ` data-relpath="${esc(p.relPath)}" title="${esc(displayTitleOf(p))}">${esc(displayTitleOf(p))}</a>`,
+      )
+      .join(`<span class="wiki-thread-sep" aria-hidden="true"> · </span>`);
+    const tail = rest.length
+      ? `<span class="wiki-thread-sep" aria-hidden="true"> · </span><span class="wiki-thread-ctx-more" title="${esc(rest.map(displayTitleOf).join("\n"))}">+${rest.length}</span>`
+      : "";
+    ctx =
+      `<div class="wiki-thread-context" data-section="threads" data-thread-group="${esc(foldKey)}">` +
+      `<span class="wiki-thread-touched-label">Shared context:</span> ${links}${tail}</div>`;
+  }
+  return more + ctx + `</div>`;
+}
+
+/** The four stops' names and what each does, for the Group menu. */
+const STOP_TEXT: Record<WorkGroupStop, { name: string; what: string }> = {
+  sessions: { name: "Sessions", what: "Each agent session on its own" },
+  threads: { name: "Threads", what: "Sessions that worked on the same page" },
+  related: { name: "Related", what: "Threads that link each other, share an issue or a series" },
+  areas: { name: "Areas", what: "Related, plus the same project" },
+};
+
+export function workStopName(stop: WorkGroupStop): string {
+  return STOP_TEXT[stop].name;
+}
+
+/** The evidence boxes, in the menu's order. */
+const EVIDENCE_TEXT: readonly [keyof WorkGroupEvidenceToggles, string][] = [
+  ["related", "Explicit related page"],
+  ["issue", "Same owned issue"],
+  ["series", "Same series"],
+];
+
+const REASON_TEXT: Record<string, string> = {
+  "no-threads": "there are no work threads",
+  "evidence-absent": "this server sends no grouping evidence",
+  "evidence-unreadable": "the grouping evidence could not be read",
+  "relations-cap": "the relation lists hit their limit",
+  "ledger-truncated": "the session ledger was cut short",
+  "contributions-cap": "the contribution rows hit their limit",
+};
+
+/** Why a stop is unavailable, in words. An unknown reason (a newer server)
+ *  is named as-is, never rendered as `undefined`. */
+export function workReasonLabel(reason: string): string {
+  return REASON_TEXT[reason] ?? `unknown reason (${reason})`;
+}
+
+/**
+ * The Work threads section label with the Group control (D10): the label,
+ * then `Related ▾` at the right. A drawn stop that is not the chosen one
+ * (relations incomplete) says so on the button. `local` marks a choice that
+ * lives in this tab only (a refused write).
+ */
+export function workSectionHeaderHtml(label: string, control: RailWorkControl, menuOpen: boolean, local: boolean): string {
+  // The open menu sits inside the label row, positioned under the button.
+  const fellBack = control.stop !== control.requested;
+  const reasons = control.stops.find((x) => x.stop === control.requested)?.reasons ?? [];
+  const title = fellBack
+    ? `${workStopName(control.requested)} is unavailable (${reasons.map(workReasonLabel).join("; ")}), so this shows ${workStopName(control.stop)}. Your choice is kept.`
+    : "Choose how work threads are grouped";
+  return (
+    `<div class="wiki-list-sec wiki-work-sec" data-section="threads">` +
+    `<span class="wiki-sec-label">${esc(label)}</span>` +
+    (local ? `<span class="wiki-work-local" title="Storage refused the change, so it lasts until this tab closes">this tab only</span>` : "") +
+    `<button type="button" class="wiki-work-group-btn${fellBack ? " fell-back" : ""}" data-work-group-menu` +
+    ` aria-haspopup="menu" aria-expanded="${menuOpen ? "true" : "false"}" aria-controls="wikiWorkMenu" title="${esc(title)}">` +
+    `${esc(workStopName(control.stop))}${fellBack ? " !" : ""} <span aria-hidden="true">▾</span></button>` +
+    (menuOpen ? workGroupMenuHtml(control, local) : "") +
+    `</div>`
+  );
+}
+
+/** The Group menu (D10): the stops with their card counts, then the evidence
+ *  boxes, disabled where they do not apply (they keep their values). Menu
+ *  items are buttons, so Enter and Space work as clicks; the reader's key
+ *  handler moves focus with the arrows. */
+export function workGroupMenuHtml(control: RailWorkControl, local: boolean): string {
+  const stops = control.stops
+    .map((x) => {
+      const on = x.stop === control.requested;
+      const why = x.available ? "" : `Unavailable: ${x.reasons.map(workReasonLabel).join("; ")}`;
+      return (
+        `<button type="button" role="menuitemradio" class="wiki-work-opt${x.available ? "" : " off"}" data-work-stop="${x.stop}"` +
+        ` aria-checked="${on ? "true" : "false"}"${why ? ` title="${esc(why)}"` : ""}>` +
+        `<span class="wiki-work-dot" aria-hidden="true">${on ? "●" : "○"}</span>` +
+        `<span class="wiki-work-opt-text">${esc(STOP_TEXT[x.stop].name)}<small>${esc(x.available ? STOP_TEXT[x.stop].what : why)}</small></span>` +
+        `<span class="wiki-work-n">${x.available ? x.cards : "—"}</span></button>`
+      );
+    })
+    .join("");
+  const boxes = EVIDENCE_TEXT.map(([k, name]) => {
+    const on = control.evidence[k];
+    return (
+      `<button type="button" role="menuitemcheckbox" class="wiki-work-opt wiki-work-box${control.evidenceApplies ? "" : " off"}" data-work-evidence="${k}"` +
+      ` aria-checked="${on ? "true" : "false"}"${control.evidenceApplies ? "" : ` aria-disabled="true"`}>` +
+      `<span class="wiki-work-dot" aria-hidden="true">${on ? "☑" : "☐"}</span>` +
+      `<span class="wiki-work-opt-text">${esc(name)}</span></button>`
+    );
+  }).join("");
+  const fellBack = control.stop !== control.requested;
+  const note = fellBack
+    ? `${workStopName(control.requested)} is unavailable, so this shows ${workStopName(control.stop)}. Your choice is kept.`
+    : control.evidenceApplies
+      ? "A thread joins a group through a direct connection to its first thread."
+      : "Applies to Related and Areas.";
+  return (
+    `<div class="wiki-work-menu" id="wikiWorkMenu" role="menu" aria-label="Group work threads">` +
+    `<div class="wiki-work-h" role="presentation">Group work by</div>${stops}` +
+    `<div class="wiki-work-hr" role="separator"></div>` +
+    `<div class="wiki-work-h" role="presentation">Connect threads by</div>${boxes}` +
+    `<div class="wiki-work-note" role="presentation">${esc(note)}</div>` +
+    (local ? `<div class="wiki-work-note wiki-work-local-note" role="presentation">This tab only: storage refused the change.</div>` : "") +
     `</div>`
   );
 }

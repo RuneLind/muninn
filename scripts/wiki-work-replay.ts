@@ -95,8 +95,8 @@ import {
   type WikiFilters,
   type WikiListing,
 } from "../src/dashboard/views/components/wiki-filter.ts";
-import { buildRail, type RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
-import { railGhostNote, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
+import { buildRail, isRailGroupCard, type RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
+import { railGhostNote, threadGroupTally, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
 import { groupWorkThreads, type WorkWitness } from "../src/dashboard/views/components/wiki-work-groups.ts";
 import { WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupStop } from "../src/dashboard/views/components/wiki-work-group-prefs.ts";
 
@@ -211,6 +211,53 @@ function printThreadsSection(input: RailInput, at: number): void {
       console.log(`     touched: ${e.pages.map((p) => p.relPath).join(" · ")}`);
     }
   }
+}
+
+/** The GROUPED rail at `--group-stop` / `--group-evidence` (D1 by default):
+ *  the Work threads section `buildRail` draws through `railInputFor` with the
+ *  Group control — group cards, their children with the why line, an open
+ *  child's rows, `+ N more threads`, shared context — then the five-card
+ *  check: cards drawn, threads they hold, and the first card's shape. */
+function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number): void {
+  const { stop, toggles } = groupFlags();
+  const filters: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "", status: "", followups: "", waiting: "", project: "", jira: "" };
+  const input = railInputFor(
+    { allPages: listing, projects: projectCounts(index.pages), activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: null, work: index.work ?? null },
+    { mode: "updated", now: at, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [], threadPin: null, workGroup: { stop, evidence: toggles } },
+  );
+  // Activity's weights and gate never move the cards, so the defaults serve.
+  const ctl = input.workControl;
+  console.log(`\nGrouped rail (buildRail, stop ${stop}, evidence ${Object.entries(toggles).filter(([, v]) => v).map(([k]) => k).join("+") || "none"}):`);
+  if (ctl) {
+    console.log(`  control: drawn ${ctl.stop}${ctl.stop !== ctl.requested ? ` (asked ${ctl.requested})` : ""}; ` + ctl.stops.map((x) => `${x.stop} ${x.available ? x.cards : `— ${x.reasons.join(",")}`}`).join(" · "));
+  }
+  for (const e of buildRail(input).entries.filter((x) => x.section === "threads")) {
+    if (e.kind === "thread-group") {
+      const c = e.card;
+      console.log(`  ${e.folded ? "▸" : "▾"} ${c.label.toUpperCase()} ${c.name}${c.pinned ? "  📌" : ""}  — ${threadGroupTally(c, true)}${c.anchorVisible ? "" : "  (anchor outside the filters)"}`);
+    } else if (e.kind === "thread") {
+      const c = e.card;
+      const pad = c.child ? "      " : "  ";
+      console.log(`${pad}${e.folded ? "▸" : "▾"} ${c.name}${c.pinned ? "  📌" : ""}  — ${threadMetaLine(c, at, true)}${c.child ? `  · ${c.child.why}${c.child.also.length ? `  [also ${c.child.also.join(", ")}]` : ""}` : ""}`);
+    } else if (e.kind === "row") {
+      console.log(`           ${e.page.relPath}`);
+    } else if (e.kind === "thread-group-end") {
+      if (e.hidden) console.log(`      + ${e.hidden} more threads`);
+      if (e.context.length) console.log(`      shared context: ${e.context.map((p) => p.relPath).join(" · ")}`);
+    } else if (e.kind === "touched") {
+      console.log(`      touched: ${e.pages.map((p) => p.relPath).join(" · ")}`);
+    }
+  }
+  const cards = input.threads ?? [];
+  const total = index.work?.threads.length ?? 0;
+  const held = cards.reduce((n, c) => n + (isRailGroupCard(c) ? c.threads : 1), 0);
+  const first = cards[0];
+  const firstShape = !first
+    ? "none"
+    : isRailGroupCard(first)
+      ? `${first.label} group «${first.name}», ${first.threads} children, ${first.children.length} drawn, ${new Set(groupWorkThreads({ work: index.work ?? null, allPages: listing, now: at, stop, toggles }).groups[0]?.children.flatMap((c) => c.owned.map((p) => p.relPath)) ?? []).size} focus pages`
+      : `thread «${first.name}», ${first.focus.length} focus pages`;
+  console.log(`  five-card check: ${cards.length} cards hold ${held} of ${total} threads; first card: ${firstShape}`);
 }
 
 /** Every series that holds a ghost after the lift, and why each ghost is one —
@@ -546,6 +593,7 @@ async function main(): Promise<void> {
     printEvidence(index, index.work?.evidence);
     printRelatedCensus(index);
     printGroups(index, listing, at);
+    printGroupedRail(index, listing, at);
   } finally {
     await cleanup();
   }

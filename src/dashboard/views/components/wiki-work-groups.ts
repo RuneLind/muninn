@@ -22,22 +22,24 @@
  */
 
 import { pageWorkTerm } from "./wiki-activity-rank.ts";
-import { displayTitleOf, filterPages, pageAddedMs, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
+import { displayTitleOf, filterPages, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
 import { seriesHead, seriesKeyOf, seriesMembersByFoldKey } from "./wiki-groups.ts";
 import { normalizeRel } from "./wiki-nav.ts";
 import { normalizeFoldKey, railSectionsVisible, THREAD_CARDS_MAX, threadFoldKey } from "./wiki-recents.ts";
 import {
+  claimOwnedFocus,
   newestFocusPage,
+  threadCardRows,
   threadHoldsPin,
   threadName,
   threadRankScore,
   usableThreads,
   workGroupingInstant,
+  workTermOrder,
 } from "./wiki-thread-core.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import {
   WORK_EVIDENCE_VERSION,
-  WORK_WINDOW_MS,
   workSessionRef,
   type IndexWork,
   type WorkContribution,
@@ -541,18 +543,13 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
   // Ownership over the full listing in the drawn order: a page an earlier
   // child owns is neither a row nor the name of a later one.
   const taken = new Set<string>();
-  const term = (p: WikiListing) => pageWorkTerm(p, at);
-  const byTerm = (a: WikiListing, b: WikiListing) => term(b) - term(a) || cmpStr(normalizeRel(a.relPath), normalizeRel(b.relPath));
+  const byTerm = workTermOrder(at);
   const groups: WorkGroup[] = order.map((i) => {
     const d = drafts[i]!;
     const n = named[i]!;
     const nameSeries = n.label === "series" ? n.nameKey : undefined;
     const children: WorkGroupChild[] = d.members.map((m) => {
-      const owned = m.unit.thread.pages
-        .map((rel) => byRel.get(normalizeRel(rel)))
-        .filter((p): p is WikiListing => !!p && !taken.has(normalizeRel(p.relPath)))
-        .sort(byTerm);
-      for (const p of owned) taken.add(normalizeRel(p.relPath));
+      const owned = claimOwnedFocus(m.unit.thread.pages, byRel, taken, byTerm);
       const top = owned[0] ?? byRel.get(normalizeRel(m.unit.thread.pages[0] ?? ""));
       const also =
         d.members.length > 1
@@ -690,26 +687,16 @@ export function projectWorkGroups(
 ): WorkGroupView[] {
   if (!railSectionsVisible(filters)) return [];
   const visible = visibleSet(pool, filters);
-  const window = now - WORK_WINDOW_MS;
   const byRel = new Map(pool.map((p) => [normalizeRel(p.relPath), p] as const));
   const out: WorkGroupView[] = [];
   for (const group of grouping.groups) {
     if (out.length >= cap) break;
     const children: WorkGroupChildView[] = [];
     for (const child of group.children) {
-      const focus = child.owned.filter((p) => visible.has(normalizeRel(p.relPath)));
-      if (!focus.length) continue;
-      const ownedKeys = new Set(child.owned.map((p) => normalizeRel(p.relPath)));
-      const touched = child.unit.thread.touched
-        .map((rel) => byRel.get(normalizeRel(rel)))
-        .filter((p): p is WikiListing => !!p && visible.has(normalizeRel(p.relPath)) && !ownedKeys.has(normalizeRel(p.relPath)));
-      children.push({
-        child,
-        focus,
-        created: focus.filter((p) => pageAddedMs(p, now) >= window).map((p) => normalizeRel(p.relPath)),
-        touched,
-        movesYou: focus.reduce((sum, p) => sum + (p.movesYou ?? 0), 0),
-      });
+      // The created window stays on the reader's `now`.
+      const rows = threadCardRows(child.owned, child.unit.thread.touched, visible, byRel, now);
+      if (!rows.focus.length) continue;
+      children.push({ child, ...rows });
     }
     if (!children.length) continue;
     const sessions = new Set<string>();

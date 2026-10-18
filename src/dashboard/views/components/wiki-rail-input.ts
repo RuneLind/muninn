@@ -13,7 +13,6 @@ import {
   displayTitleOf,
   filterPages,
   isRecencySort,
-  pageAddedMs,
   sortPages,
   type WikiFilters,
   type WikiListing,
@@ -29,22 +28,39 @@ import {
   withoutSeriesMembers,
 } from "./wiki-groups.ts";
 import {
+  GROUP_CHILDREN_SHOWN,
   groupFoldState,
+  normalizeFoldKey,
+  openWorkThreadCards,
   railSectionsVisible,
   THREAD_CARDS_MAX,
   threadFoldKey,
+  type RailGroupCard,
   type RailInput,
   type RailThreadCard,
+  type RailWorkCard,
+  type RailWorkControl,
 } from "./wiki-recents.ts";
-import { normalizeRel } from "./wiki-nav.ts";
-import { WORK_WINDOW_MS, type IndexWork, type WorkThread } from "../../../wiki/work-focus.ts";
 import {
+  groupWorkThreads,
+  projectWorkGroups,
+  type WorkGroupChild,
+  type WorkGroupChildView,
+  type WorkWitness,
+} from "./wiki-work-groups.ts";
+import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
+import { normalizeRel } from "./wiki-nav.ts";
+import { workSessionRef, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
+import {
+  claimOwnedFocus,
   newestFocusPage,
+  threadCardRows,
   threadHoldsPin,
   threadName,
   threadRankScore,
   usableThreads,
   workGroupingInstant,
+  workTermOrder,
 } from "./wiki-thread-core.ts";
 
 export { threadName, threadPinAnchor, usableThreads } from "./wiki-thread-core.ts";
@@ -58,7 +74,7 @@ export interface RailWikiFacts {
   workedGate: WorkedGate | null;
   /** The work threads (`/api/wiki/pages`' `work`); absent or null with no
    *  sessions memo, which renders no section (D11). */
-  work?: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs">>) | null;
+  work?: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs" | "evidence">>) | null;
 }
 
 /** What this viewer has chosen. */
@@ -75,6 +91,18 @@ export interface RailViewer {
   openRelPath?: string;
   /** The reader's pinned work-thread page (D7), or null. */
   threadPin?: string | null;
+  /** The Group control's settings (`workGroupPrefsOf`, D1 when nothing is
+   *  stored). Absent ⇒ today's Threads cards with no control (the replay's and
+   *  the unit tests' default). */
+  workGroup?: RailWorkGroupView;
+}
+
+/** What the Work threads section is grouped by, for one render. */
+export interface RailWorkGroupView {
+  stop: WorkGroupStop;
+  evidence: WorkGroupEvidenceToggles;
+  /** Group fold keys whose `+ N more threads` the reader pressed (this tab). */
+  moreOpen?: readonly string[];
 }
 
 
@@ -109,18 +137,76 @@ export function openThreadCards(
   allPages: readonly WikiListing[] = pages,
   asOfMs?: number,
 ): RailThreadCard[] {
-  const usable = usableThreads(threads);
-  if (!usable.length || !railSectionsVisible(filters)) return [];
+  if (!railSectionsVisible(filters)) return [];
+  const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs);
+  if (!ranked.length) return [];
   const byRel = new Map<string, WikiListing>();
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const visible = new Set(filterPages(pages as WikiListing[], filters).map((p) => normalizeRel(p.relPath)));
+  const cards: Omit<RailThreadCard, "open" | "toggleKey">[] = [];
+  for (const { t, score, pinned, owned } of ranked) {
+    if (cards.length >= THREAD_CARDS_MAX) break;
+    // The created window stays on the reader's `now`.
+    const rows = threadCardRows(owned, t.touched, visible, byRel, now);
+    if (!rows.focus.length) continue;
+    cards.push({
+      key: t.key,
+      foldKey: threadFoldKey(t.key),
+      // Named by the top page the thread OWNS in the whole listing, so neither
+      // a facet nor Show retired renames it.
+      name: threadName(displayTitleOf(owned[0]!)),
+      pinned,
+      pinAnchor: newestFocusPage(t, byRel),
+      focus: rows.focus,
+      created: rows.created,
+      touched: rows.touched,
+      sessions: t.sessions,
+      movesYou: rows.movesYou,
+      score,
+    });
+  }
+  return cards.map((c, i) => {
+    const stored = groupFoldState(foldState, c.foldKey);
+    const defaultOpen = i === 0;
+    return {
+      ...c,
+      open: stored ? stored === "open" : defaultOpen,
+      toggleKey: defaultOpen ? closedFoldKey(c.foldKey) : c.foldKey,
+    };
+  });
+}
+
+/** One thread as the Threads stop ranks it: its score, whether it holds the
+ *  pin, and the focus pages it owns in the full listing. */
+export interface RankedThread {
+  t: WorkThread;
+  score: number;
+  pinned: boolean;
+  owned: WikiListing[];
+}
+
+/**
+ * The Threads stop's decision BEFORE the facets and the cap: every usable
+ * thread, pinned first, then by `threadRankScore` at the grouping instant,
+ * then key, with ownership over `allPages` in that order through every thread
+ * (so a facet or the cap never hands a hub to a later card). Uncapped, so the
+ * Group menu can count cards and the grouped rail can share the ownership
+ * rule; `openThreadCards` is this plus the facets, the cap and the folds.
+ */
+export function rankThreadCards(
+  threads: readonly WorkThread[] | null | undefined,
+  allPages: readonly WikiListing[],
+  pin: string | null,
+  now: number,
+  asOfMs?: number,
+): RankedThread[] {
+  const usable = usableThreads(threads);
+  if (!usable.length) return [];
+  const byRel = new Map<string, WikiListing>();
+  for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const pinKey = pin ? normalizeRel(pin) : null;
-  // Score, ownership and names at the grouping model's instant; the created
-  // window stays on the reader's `now`.
+  // Score, ownership and names at the grouping model's instant.
   const at = workGroupingInstant(now, asOfMs);
-  const term = (p: WikiListing) => pageWorkTerm(p, at);
-  const byTerm = (a: WikiListing, b: WikiListing) =>
-    term(b) - term(a) || (normalizeRel(a.relPath) < normalizeRel(b.relPath) ? -1 : 1);
   let pinTaken = false;
   const ranked = usable
     .map((t) => ({
@@ -141,49 +227,168 @@ export function openThreadCards(
         b.score - a.score ||
         (a.t.key < b.t.key ? -1 : a.t.key > b.t.key ? 1 : 0),
     );
-  // Ownership runs over the full listing in ranked order and through every
-  // thread, a dropped card included, so a facet never hands a hub to a later card.
   const taken = new Set<string>();
-  const window = now - WORK_WINDOW_MS;
-  const cards: Omit<RailThreadCard, "open" | "toggleKey">[] = [];
-  for (const { t, score, pinned } of ranked) {
-    if (cards.length >= THREAD_CARDS_MAX) break;
-    const owned = t.pages
-      .map((rel) => byRel.get(normalizeRel(rel)))
-      .filter((p): p is WikiListing => !!p && !taken.has(normalizeRel(p.relPath)))
-      .sort(byTerm);
-    for (const p of owned) taken.add(normalizeRel(p.relPath));
-    const focus = owned.filter((p) => visible.has(normalizeRel(p.relPath)));
-    if (!focus.length) continue;
-    const ownedKeys = new Set(owned.map((p) => normalizeRel(p.relPath)));
-    const touched = t.touched
-      .map((rel) => byRel.get(normalizeRel(rel)))
-      .filter((p): p is WikiListing => !!p && visible.has(normalizeRel(p.relPath)) && !ownedKeys.has(normalizeRel(p.relPath)));
-    cards.push({
-      key: t.key,
-      foldKey: threadFoldKey(t.key),
-      // Named by the top page the thread OWNS in the whole listing, so neither
-      // a facet nor Show retired renames it.
-      name: threadName(displayTitleOf(owned[0]!)),
-      pinned,
-      pinAnchor: newestFocusPage(t, byRel),
-      focus,
-      created: focus.filter((p) => pageAddedMs(p, now) >= window).map((p) => normalizeRel(p.relPath)),
-      touched,
-      sessions: t.sessions,
-      movesYou: focus.reduce((sum, p) => sum + (p.movesYou ?? 0), 0),
-      score,
-    });
+  const order = workTermOrder(at);
+  return ranked.map(({ t, score, pinned }) => ({ t, score, pinned, owned: claimOwnedFocus(t.pages, byRel, taken, order) }));
+}
+
+/** The stops PR 3 draws, finest first. Sessions is PR 4's. */
+const DRAWN_STOPS: readonly WorkGroupStop[] = ["threads", "related", "areas"];
+
+/** A page's title for a witness line. */
+function witnessTitle(rel: string, byRel: ReadonlyMap<string, WikiListing>): string {
+  const p = byRel.get(normalizeRel(rel));
+  return p ? displayTitleOf(p) : rel;
+}
+
+/** One witness as a line of the group's or a child's hover. */
+export function witnessLine(w: WorkWitness, byRel: ReadonlyMap<string, WikiListing>): string {
+  switch (w.kind) {
+    case "related":
+      return `${witnessTitle(w.from, byRel)} ↔ ${witnessTitle(w.to, byRel)} (related:)`;
+    case "issue":
+      return `${w.key}: owned by ${witnessTitle(w.owner, byRel)}, named by ${witnessTitle(w.referrer, byRel)}`;
+    case "series":
+      return `series ${w.label}`;
+    case "project":
+      return `project ${w.key}`;
   }
-  return cards.map((c, i) => {
-    const stored = groupFoldState(foldState, c.foldKey);
-    const defaultOpen = i === 0;
-    return {
-      ...c,
-      open: stored ? stored === "open" : defaultOpen,
-      toggleKey: defaultOpen ? closedFoldKey(c.foldKey) : c.foldKey,
-    };
+}
+
+/** A child's third meta line: the evidence kinds that joined it to the anchor
+ *  (`↔ 5 links · ABC-12 · series`), or `anchor`. */
+export function childWhyLine(child: Pick<WorkGroupChild, "witnesses">, anchor: boolean): string {
+  if (anchor) return "anchor";
+  const ws = child.witnesses;
+  const parts: string[] = [];
+  const links = ws.filter((w) => w.kind === "related").length;
+  if (links) parts.push(`${links} ${links === 1 ? "link" : "links"}`);
+  const issues = [...new Set(ws.flatMap((w) => (w.kind === "issue" ? [w.key] : [])))];
+  if (issues.length) parts.push(issues.length > 1 ? `${issues[0]} +${issues.length - 1}` : issues[0]!);
+  if (ws.some((w) => w.kind === "series")) parts.push("series");
+  if (ws.some((w) => w.kind === "project")) parts.push("project");
+  return parts.length ? `↔ ${parts.join(" · ")}` : "";
+}
+
+/**
+ * The Work threads cards at the reader's chosen stop (plan
+ * `muninn-wiki-work-thread-grouping`, PR 3), and the Group control's state.
+ *
+ *  - Threads (chosen, or drawn because the chosen stop is unavailable):
+ *    `openThreadCards`, today's cards byte for byte.
+ *  - Related, Areas: the grouping model over the FULL listing
+ *    (`groupWorkThreads`: membership, names, fold keys, ownership and the pin),
+ *    then the pool and facets on the child rows (`projectWorkGroups`: empty
+ *    children and groups dropped), then at most `THREAD_CARDS_MAX` cards. A
+ *    one-thread card is today's card. A group shows `GROUP_CHILDREN_SHOWN`
+ *    children (plus the pinned one past them) until `+ N more threads`.
+ *  - The first card defaults open and, if it is a group, its first drawn
+ *    child too; both offer the `closed:` spelling.
+ */
+export function openWorkCards(
+  work: RailWikiFacts["work"],
+  pool: readonly WikiListing[],
+  filters: WikiFilters,
+  foldState: readonly string[],
+  pin: string | null,
+  now: number,
+  allPages: readonly WikiListing[],
+  view: RailWorkGroupView,
+): { cards: RailWorkCard[]; control: RailWorkControl } {
+  // PR 3 draws no Sessions stop; a record a later build wrote reads as Threads.
+  const requested: WorkGroupStop = view.stop === "sessions" ? "threads" : view.stop;
+  const grouping = groupWorkThreads({ work, allPages, now, stop: requested, toggles: view.evidence, pin });
+  const visibleAt = (stop: WorkGroupStop) =>
+    projectWorkGroups(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin }), pool, filters, now, Infinity);
+  const sections = railSectionsVisible(filters);
+  const control: RailWorkControl = {
+    requested,
+    stop: grouping.stop,
+    evidence: { ...view.evidence },
+    evidenceApplies: grouping.togglesApply,
+    stops: DRAWN_STOPS.map((stop) => {
+      const a = grouping.availability[stop];
+      return { stop, available: a.available, reasons: [...a.reasons], cards: sections && a.available ? visibleAt(stop).length : 0 };
+    }),
+  };
+  if (grouping.stop === "threads" || !sections) {
+    return { cards: openThreadCards(work?.threads, pool, filters, foldState, pin, now, allPages, work?.asOfMs), control };
+  }
+
+  const byRel = new Map<string, WikiListing>();
+  for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
+  const more = new Set((view.moreOpen ?? []).map(normalizeFoldKey));
+  const views = projectWorkGroups(grouping, pool, filters, now).slice(0, THREAD_CARDS_MAX);
+  const fold = (foldKey: string, defaultOpen: boolean) => {
+    const stored = groupFoldState(foldState, foldKey);
+    return { open: stored ? stored === "open" : defaultOpen, toggleKey: defaultOpen ? closedFoldKey(foldKey) : foldKey };
+  };
+  const threadCard = (cv: WorkGroupChildView, defaultOpen: boolean, child?: RailThreadCard["child"]): RailThreadCard => ({
+    key: cv.child.key,
+    foldKey: cv.child.foldKey,
+    ...fold(cv.child.foldKey, defaultOpen),
+    name: cv.child.name,
+    pinned: cv.child.pinned,
+    pinAnchor: cv.child.pinAnchor,
+    focus: cv.focus,
+    created: cv.created,
+    // A child's touched pages are the group's shared context, listed once.
+    touched: child ? [] : cv.touched,
+    sessions: cv.child.unit.thread.sessions,
+    movesYou: cv.movesYou,
+    score: cv.child.score,
+    ...(child ? { child } : {}),
   });
+  const cards = views.map((gv, i): RailWorkCard => {
+    const g = gv.group;
+    if (g.kind === "thread") return threadCard(gv.children[0]!, i === 0);
+    const anchor = g.children[0]!;
+    const drawnAll = more.has(normalizeFoldKey(g.foldKey));
+    const shownViews = gv.children.filter((cv, j) => drawnAll || j < GROUP_CHILDREN_SHOWN || cv.child.pinned);
+    const children = shownViews.map((cv, j) =>
+      threadCard(cv, i === 0 && j === 0, {
+        anchor: cv.child === anchor,
+        why: childWhyLine(cv.child, cv.child === anchor),
+        witnesses: cv.child.witnesses.map((w) => witnessLine(w, byRel)),
+        also: cv.child.also.map((a) => a.label),
+      }),
+    );
+    // Shared context: the visible pages the children only touched, once,
+    // never a page any child of the group owns.
+    const owned = new Set(g.children.flatMap((c) => c.owned.map((p) => normalizeRel(p.relPath))));
+    const context: WikiListing[] = [];
+    const seen = new Set<string>();
+    for (const cv of gv.children)
+      for (const p of cv.touched) {
+        const k = normalizeRel(p.relPath);
+        if (owned.has(k) || seen.has(k)) continue;
+        seen.add(k);
+        context.push(p);
+      }
+    const sessions = new Map<string, WorkThreadSession>();
+    for (const cv of gv.children) for (const s of cv.child.unit.thread.sessions) if (!sessions.has(workSessionRef(s))) sessions.set(workSessionRef(s), s);
+    const card: RailGroupCard = {
+      group: true,
+      key: g.anchorKey,
+      foldKey: g.foldKey,
+      ...fold(g.foldKey, i === 0),
+      label: g.label === "thread" ? "related" : g.label,
+      name: g.name,
+      pinned: g.pinned,
+      pinAnchor: anchor.pinAnchor,
+      anchorVisible: gv.anchorVisible,
+      threads: gv.counts.threads,
+      sessions: [...sessions.values()].sort((a, b) => b.last - a.last),
+      movesYou: gv.counts.movesYou,
+      children,
+      hidden: gv.children.length - children.length,
+      context,
+      witnesses: g.witnesses.map((w) => witnessLine(w, byRel)),
+      score: anchor.score,
+    };
+    return card;
+  });
+  return { cards, control };
 }
 
 export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput {
@@ -227,9 +432,16 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
   // The work-thread cards (D19): decided ONCE, here, so the pages an OPEN card
   // lifts are exactly the ones Activity ranks without. No sessions memo ⇒ no
   // cards ⇒ an empty exclude set ⇒ today's ranking (D11).
-  const threads = openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, wiki.work?.asOfMs);
+  // With the Group control (`viewer.workGroup`), the stop the reader chose;
+  // without it, today's Threads cards and today's label.
+  const work = viewer.workGroup
+    ? openWorkCards(wiki.work, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, viewer.workGroup)
+    : null;
+  const threads: readonly RailWorkCard[] =
+    work?.cards ??
+    openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, wiki.work?.asOfMs);
   const exclude = new Set<string>();
-  for (const c of threads) if (c.open) for (const p of c.focus) exclude.add(normalizeRel(p.relPath));
+  for (const c of openWorkThreadCards(threads)) for (const p of c.focus) exclude.add(normalizeRel(p.relPath));
   return {
     filtered: rows,
     facetOnly,
@@ -244,6 +456,7 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
       ? rankActivity(rows, wiki.activityWeights, now, wiki.workedGate, exclude.size ? exclude : undefined)
       : [],
     ...(threads.length ? { threads } : {}),
+    ...(threads.length && work ? { workControl: work.control } : {}),
     // The series peek's work term (D12), only while the gate lets work score —
     // a closed gate keeps today's peek as it keeps today's ranking.
     ...(wiki.workedGate?.open ? { workTerm: (p: WikiListing) => pageWorkTerm(p, now) } : {}),

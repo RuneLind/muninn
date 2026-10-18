@@ -1664,6 +1664,45 @@ Why no write loop is possible between any number of tabs: a write happens only o
 
 Acceptance: `wiki-rail-input.test.ts` (order, pin, fold keys, facet drop, the exclude = lift, the hub-free anchor through `computeWorkFocus`, anchor rows A2–A6 and the hub threshold), `wiki-recents.test.ts` (placement, the lift and its ghost reason, pin precedence, the forced-open exception, a hub in two threads, one case per row of the pin's state table and a many-tab simulation), `wiki-activity-rank.test.ts` (the exclude set), `wiki-thread-view.test.ts`, `wiki-recents-store.test.ts` (unreadable vs none, a refused write) and `e2e/wiki-rail-threads.spec.ts` (the re-anchor write through a growing and ageing thread, two tabs, two tabs with disagreeing listings writing at most once each, a `clear()` in another tab, and a quota that refuses the write).
 
+**The grouped rail (plan `muninn-wiki-work-thread-grouping`, PR 3).** The Work threads label carries the Group control (`Related ▾`; `workSectionHeaderHtml`, `wiki-thread-view.ts`): a menu of the stops with their uncapped card counts under the current facets (Threads, Related, Areas; Sessions is PR 4's), then the three evidence boxes, which apply at Related and Areas and show disabled, keeping their values, at Threads. `openWorkCards` (`wiki-rail-input.ts`) decides the cards: at Threads, or when the chosen stop is unavailable (relations incomplete or unreadable, no evidence), `openThreadCards` byte for byte, the button naming the drawn stop with ` !` and the reason in its title; at Related and Areas, `groupWorkThreads` over the full listing, `projectWorkGroups` on the pool and facets (empty children and groups dropped), then `THREAD_CARDS_MAX` cards. A one-thread card is today's card. A group card (`RailGroupCard`) is today's shell, stacked, a group glyph, a kind label (`SERIES`, `RELATED`, `PROJECT`), `N threads · M sessions · ✋ K` (sessions deduplicated by `workSessionRef`) over the span, `anchor outside the filters` when a facet hid the anchor and another child shows, `▸ Show N threads`, and a 📌. Its body holds child cards (`RailThreadCard.child`): today's card one size smaller with a third meta line, `↔ 5 links · ABC-1 · series` or `anchor` (`childWhyLine`, each part an inline block) and an `also <series>` chip whose label is cut to 24 characters (the hover names every series); then `+ N more threads` (in-memory per tab) and one `Shared context:` line of the pages the children only touched, never a page a child owns or a focus row drawn anywhere. Three children show, plus the pinned child past them. The first card and, if it is a group, its first child default open (`closed:` spelling). Group folds are `group:…` keys in their own bounded class (`GROUP_FOLDS_MAX`, 20, `capFolds`); a child keeps `thread:<key>`. **The lift** (`openWorkThreadCards`, THE rule `railInputFor`'s exclude and `buildRail`'s `threadLifted` both read): an open thread card, or an open child inside an open group; closing either returns the rows to Activity, a series member keeps its ghost. A witness line in the group's and the child's hover names the page pair, the owned issue with owner and referrer, the series, or the project.
+
+- **Width table, the two new headers** (`e2e/wiki-rail-thread-groups.spec.ts`, every row through the real renderer: threads 2 / 17 × sessions 1 / 12 / 123 × ✋ absent / 999 × two spans × a short and a clamping name × the three kind labels for the group; sessions × ✋ × spans × names × three why forms × with and without a long `also` for the child; 260 and 300 px, both themes, and 200 px), in px at 10.5 px on macOS (Linux DejaVu: the spec asserts the same rules on CI's fonts):
+
+  | Part | macOS |
+  |---|---|
+  | group label (closed card, stacked: 3 px narrower) at 260 · 300 | 185 · 225 |
+  | kind label `series` · `related` · `project` (9.5 px, uppercase) | 38.6 · 48.7 · 50.3 |
+  | `17 threads` · `· 123 sessions` · `· ✋ 999` | 52.3 · 70.9 · 42.6 |
+  | `anchor outside the filters` | 126.2 |
+  | `Show 17 threads` | 86.3 |
+  | child label (inside a group body, 6 px margins) at 260 · 300 | 176 · 216 |
+  | why parts `↔ 12 links` · `· ABCD-12345 +3` · `· series` · `· project` · `anchor` | 50.5 · 88.7 · 36.4 · 41.8 · 34.7 |
+  | `also` chip at its 24-character cut | 137.5 |
+
+  So the group's tally and span lines and the child's tally and span lines are one line each at 260 and 300 (the widest span line, ~157, fits the child's 176). The why line breaks between its parts, never inside one: the widest why form takes 2 lines at 260 and 300 (3 with the chip at 260), a short why with the chip 2 at 260 and 1 at 300. Child rows inside a group keep the full rail width, so every row's width budget is today's.
+
+**The pin's table at the group level** (no new trigger: the rows above hold; these are the placements). G1 a pin held by a group's child → the group first, that child marked (`pinned`, its 📌 pressed) and the group's 📌 pressed; G2 that child past the first three → it shows anyway, `+ N more` counts the rest; G3 a pin held by a lone thread → today's card first; G4 the holding group past the cap → moved first, so drawn (the pin applies after grouping, before the cap); G5 the holding child's rows all filtered → the child drops, the group keeps its place and its pinned look (rank never reads facets); G6 a pin no thread holds (A2) → no group pinned, the held pin stays; G7 the group's 📌 unpressed → writes the anchor child's `pinAnchor` (a C row), pressed → clears the pin, whichever child held it; G8 a stop change → the pin follows its page at every stop (`threadHoldsPin` over the threads; PR 4 runs it over the threads after splits).
+
+**The grouping record's state table** (D17; `workGroupRecordStep`, `wiki-work-group-record.ts`; key `muninn.wiki.workGroup.v1:<wiki>`). The record is sparse: only the fields a reader set, so D1 is computed at read time and never held or written, and a fresh wiki stores nothing until the first explicit edit. Records compare by a canonical serialization (sorted keys and arrays); a malformed or other-version value reads as none. A tab holds `held` (null = D1), `known` (a record, none, or unknown while storage was never readable) and `failed` (the menu's «this tab only»).
+
+| Row | Trigger and state | Held | Writes |
+|---|---|---|---|
+| B1 / B2 | boot, readable / unreadable | stored (known = stored) / none (known unknown) | no |
+| E1–E4 | `storage` event (another tab's write or `clear()`) | stored (known = stored, failed cleared); repaints once rendered and only on a change, with no render step | no |
+| E5 | `storage` event, unreadable | unchanged | no |
+| C1 | menu edit | the edit merged onto the record as read NOW (known = that read) | yes |
+| C2 | menu edit, write refused | kept; failed set (this tab only) | the attempt |
+| C3 | menu edit, unreadable | the edit merged onto this tab's own record | yes (refused) |
+| R1 | render, unreadable | unchanged | no |
+| R2 | render, readable for the first time | held if set, else stored (known = stored) | no |
+| R3 | render, stored ≠ known | stored (an in-memory change after a refused write is dropped: the other tab's write is newer) | no |
+| R4 / R5 | render, stored = known, no focus / nothing to write | unchanged | no |
+| R6 | render, stored = known, focus, held ≠ stored | unchanged | yes, the retry of a refused write |
+
+No write loop, for the pin's reason: only a click or a focused render this tab caused writes, and a `storage` event writes nothing.
+
+Acceptance: `wiki-work-group-record.test.ts` (one case per row, the sparse reader, the canonical compare, a many-tab run), `wiki-rail-work-groups.test.ts` (Threads byte for byte, the Related cards, default open, why lines, witness dedupe at the group level, shared context, facets before the cap, a hidden anchor, the broad group, the pin rows G1, G2, G4, G5, G6 and G8, availability, the lift and its return, the `created` window on the reader's `now`, `capFolds`), `wiki-thread-view.test.ts` (the headers, the end, the control and menu, a reason label's fallback) and `e2e/wiki-rail-thread-groups.spec.ts` (G1 and G7 in the browser). The three older specs that read the Threads stop's cards seed it (`wiki-rail-threads`, `wiki-activity-worked`); `wiki-worked-recency`'s sessions fixture forms no group under Related, so it runs on D1.
+
 **The grouping evidence (`IndexWork.evidence`, version 1; plan `muninn-wiki-work-thread-grouping`).** An additive block beside `threads`, for a client-side grouping layer; an older client ignores it. Every witness names FOCUS pages of the shipped threads, never threads, so a client can split or regroup without a request:
 
 - `relations.series` / `.projects`: focus page → series census key (members by `seriesMembersByFoldKey`) / listing project.

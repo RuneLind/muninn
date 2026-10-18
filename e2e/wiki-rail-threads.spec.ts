@@ -48,6 +48,7 @@ import { paintedContrast } from "./contrast.ts";
 import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { threadPinKey, type RailThreadCard } from "../src/dashboard/views/components/wiki-recents.ts";
 import { threadCardHeaderHtml } from "../src/dashboard/views/components/wiki-thread-view.ts";
+import { workGroupKey } from "../src/dashboard/views/components/wiki-work-group-record.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-rail-threads");
@@ -496,6 +497,14 @@ test.afterAll(async () => {
 });
 
 test.describe("Wiki rail: Work threads", () => {
+  // These cases pin the Threads stop's cards; the Group control defaults to
+  // Related (D1), so every page of the context starts on Threads.
+  test.beforeEach(async ({ context }) => {
+    await context.addInitScript(
+      ([key, value]) => localStorage.setItem(key as string, value as string),
+      [workGroupKey(THREADS), JSON.stringify({ version: 1, stop: "threads" })] as const,
+    );
+  });
   test("the section sits above Activity; the open card lifts its pages out of Activity, which still holds six rows", async ({
     page,
   }) => {
@@ -797,6 +806,8 @@ test.describe("Wiki rail: Work threads", () => {
     await a.evaluate(() => localStorage.clear());
     await expect(card(b, ALPHA_CARD)).not.toHaveClass(/\bpinned\b/);
     expect(await storedPin(b)).toBeNull();
+    // The clear() took the seeded Threads stop with it: b falls back to D1's Related.
+    await expect(b.locator("[data-work-group-menu]")).toContainText("Related");
   });
 
   test("a storage that refuses the write keeps the tab's pin through a re-anchor (D7)", async ({ page }) => {

@@ -13,8 +13,15 @@ import {
   threadMetaLine,
   threadSpanLabel,
   threadTouchedHtml,
+  threadGroupDiscloseLabel,
+  threadGroupEndHtml,
+  threadGroupHeaderHtml,
+  threadGroupTally,
+  workGroupMenuHtml,
+  workReasonLabel,
+  workSectionHeaderHtml,
 } from "./wiki-thread-view.ts";
-import type { RailThreadCard } from "./wiki-recents.ts";
+import type { RailGroupCard, RailThreadCard, RailWorkControl } from "./wiki-recents.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 
 /** A local Thursday 15 Oct 2026, 10:00 — every label below is in the process zone. */
@@ -207,5 +214,164 @@ describe("railGhostHtml", () => {
     expect(html).toContain(`<div class="wiki-list-ghost-note">in a work thread above</div>`);
     expect(html).toContain("its row is under Work threads, above");
     expect(railGhostNote("pinned")).toBe("pinned above");
+  });
+});
+
+// ── Grouped Work threads (plan `muninn-wiki-work-thread-grouping`, PR 3) ─────
+
+const groupCard = (over: Partial<RailGroupCard> = {}): RailGroupCard => ({
+  group: true,
+  key: "plans/a.mdx",
+  foldKey: "group:series:alpha",
+  toggleKey: "closed:group:series:alpha",
+  open: true,
+  label: "series",
+  name: "Alpha <series>",
+  pinned: false,
+  pinAnchor: "plans/a-two.mdx",
+  anchorVisible: true,
+  threads: 3,
+  sessions: [
+    { id: "s2", provider: "claude", first: at(14, 20), last: at(14, 21, 26), title: "Second" },
+    { id: "s1", provider: "claude", first: at(12, 15, 4), last: at(12, 16), title: "" },
+  ],
+  movesYou: 26,
+  children: [],
+  hidden: 0,
+  context: [],
+  witnesses: ["series Alpha", "A ↔ B (related:)"],
+  score: 1,
+  ...over,
+});
+
+const control = (over: Partial<RailWorkControl> = {}): RailWorkControl => ({
+  requested: "related",
+  stop: "related",
+  evidence: { series: true, related: false, issue: true },
+  evidenceApplies: true,
+  stops: [
+    { stop: "threads", available: true, reasons: [], cards: 17 },
+    { stop: "related", available: true, reasons: [], cards: 3 },
+    { stop: "areas", available: true, reasons: [], cards: 2 },
+  ],
+  ...over,
+});
+
+describe("the group card", () => {
+  test("kind label, escaped name, tally, span, disclose and a separate 📌 for the anchor", () => {
+    const html = threadGroupHeaderHtml(groupCard(), false, NOW, true);
+    expect(html).toContain(`class="wiki-thread-card wiki-thread-group open"`);
+    expect(html).toContain(`data-thread-group="group:series:alpha"`);
+    expect(html).toContain(`data-fold-key="closed:group:series:alpha" aria-expanded="true"`);
+    expect(html).toContain(`<span class="wiki-thread-kind">series</span> Alpha &lt;series&gt;`);
+    expect(html).toContain(`>3 threads</span> <span class="wiki-thread-count">· 2 sessions</span> <span class="wiki-thread-moves">· ✋ 26</span>`);
+    expect(html).toContain(`12.10 15:04</span> <span class="wiki-thread-to">→ yesterday 21:26`);
+    expect(html).toContain("Hide 3 threads");
+    expect(html).toContain(`data-thread-pin="plans/a-two.mdx" data-thread-pinned="0" aria-pressed="false" aria-label="Pin this work group first"`);
+    // The hover lists the witnesses.
+    expect(html).toContain("series Alpha&#10;A ↔ B (related:)".replace("&#10;", "\n"));
+    expect(html).not.toContain("anchor outside the filters");
+  });
+
+  test("closed, stacked; a hidden anchor says so; ✋ hides where it is not personal", () => {
+    const html = threadGroupHeaderHtml(groupCard({ anchorVisible: false, open: false }), true, NOW, false);
+    expect(html).toContain(`class="wiki-thread-card wiki-thread-group"`);
+    expect(html).toContain("Show 3 threads");
+    expect(html).toContain("anchor outside the filters");
+    expect(html).not.toContain("✋");
+  });
+
+  test("tally and disclose words", () => {
+    expect(threadGroupTally(groupCard({ threads: 1, sessions: [groupCard().sessions[0]!] }), true)).toBe("1 thread · 1 session · ✋ 26");
+    expect(threadGroupDiscloseLabel(true, 1)).toBe("Show 1 thread");
+    expect(threadGroupDiscloseLabel(false, 12)).toBe("Hide 12 threads");
+  });
+});
+
+describe("the child card", () => {
+  test("a third meta line: the why parts, then the also chip; the hover lists the witnesses", () => {
+    const html = threadCardHeaderHtml(
+      card({ child: { anchor: false, why: "↔ 5 links · ABC-1 · series", witnesses: ["A ↔ B (related:)"], also: ["Beta <b>", "Gamma"] } }),
+      false,
+      NOW,
+      true,
+    );
+    expect(html).toContain(`class="wiki-thread-card wiki-thread-child open"`);
+    expect(html).toContain(
+      `<span class="wiki-thread-why-part">↔ 5 links</span> <span class="wiki-thread-why-part">· ABC-1</span> <span class="wiki-thread-why-part">· series</span>`,
+    );
+    expect(html).toContain(`>also Beta &lt;b&gt; +1</span>`);
+    expect(html).toContain(`title="Some of its pages are also in: Beta &lt;b&gt;, Gamma"`);
+    expect(html).toContain(`title="Joined by:\nA ↔ B (related:)"`);
+  });
+
+  test("the also chip cuts a long series label to 24 characters; the hover keeps it whole", () => {
+    const long = "A long series label that names a whole piece of work";
+    const html = threadCardHeaderHtml(card({ child: { anchor: false, why: "↔ series", witnesses: [], also: [long] } }), true, NOW, true);
+    expect(html).toContain(`>also A long series label tha…</span>`);
+    expect(html).toContain(`title="Some of its pages are also in: ${long}"`);
+  });
+
+  test("the anchor says anchor; a card with no child line is today's markup", () => {
+    expect(threadCardHeaderHtml(card({ child: { anchor: true, why: "anchor", witnesses: [], also: [] } }), true, NOW, true)).toContain(
+      `<span class="wiki-thread-why-part">anchor</span>`,
+    );
+    expect(threadCardHeaderHtml(card(), true, NOW, true)).not.toContain("wiki-thread-why");
+  });
+});
+
+describe("the group's end", () => {
+  const p = (rel: string, title: string) => ({ relPath: rel, name: rel, title }) as WikiListing;
+  test("+ N more threads, then three shared-context links and +N", () => {
+    const html = threadGroupEndHtml("group:series:alpha", 2, [p("a.md", "A"), p("b.md", "B"), p("c.md", "C"), p("d.md", "D <d>")], (r) => `/wiki?relPath=${r}`);
+    expect(html).toContain(`<button type="button" class="wiki-thread-more" data-thread-more="group:series:alpha">+ 2 more threads</button>`);
+    expect(html).toContain(`Shared context:</span> <a class="wiki-thread-link"`);
+    expect((html.match(/wiki-thread-link/g) ?? []).length).toBe(3);
+    expect(html).toContain(`title="D &lt;d&gt;">+1</span>`);
+    expect(html.endsWith("</div></div>")).toBe(true);
+  });
+  test("nothing hidden and no context: only the body's close", () => {
+    expect(threadGroupEndHtml("g", 0, [], (r) => r)).toBe("</div>");
+  });
+});
+
+describe("the Group control and menu", () => {
+  test("the button names the drawn stop and says when it fell back", () => {
+    expect(workSectionHeaderHtml("Work threads", control(), false, false)).toContain(`aria-expanded="false" aria-controls="wikiWorkMenu" title="Choose how work threads are grouped">Related <span aria-hidden="true">▾</span>`);
+    const fell = workSectionHeaderHtml(
+      "Work threads",
+      control({ stop: "threads", evidenceApplies: false, stops: [{ stop: "threads", available: true, reasons: [], cards: 17 }, { stop: "related", available: false, reasons: ["relations-cap"], cards: 0 }] }),
+      true,
+      true,
+    );
+    expect(fell).toContain("Related is unavailable (the relation lists hit their limit), so this shows Threads. Your choice is kept.");
+    expect(fell).toContain(`>Threads ! <span aria-hidden="true">▾</span>`);
+    expect(fell).toContain("this tab only");
+  });
+
+  test("the menu: the chosen stop checked with counts, the boxes with their values", () => {
+    const html = workGroupMenuHtml(control(), false);
+    expect(html).toContain(`role="menu"`);
+    expect(html).toContain(`data-work-stop="related" aria-checked="true"`);
+    expect(html).toContain(`data-work-stop="threads" aria-checked="false"`);
+    expect(html).toContain(`<span class="wiki-work-n">17</span>`);
+    expect(html).toContain(`data-work-evidence="related" aria-checked="false">`);
+    expect(html).toContain(`data-work-evidence="series" aria-checked="true">`);
+    expect(html).not.toContain("aria-disabled");
+  });
+
+  test("at Threads the boxes show disabled and keep their values", () => {
+    const html = workGroupMenuHtml(control({ requested: "threads", stop: "threads", evidenceApplies: false }), false);
+    expect(html).toContain(`data-work-evidence="related" aria-checked="false" aria-disabled="true"`);
+    expect(html).toContain(`data-work-evidence="series" aria-checked="true" aria-disabled="true"`);
+    expect(html).toContain("Applies to Related and Areas.");
+  });
+
+  test("an unknown reason is named, never undefined", () => {
+    expect(workReasonLabel("relations-cap")).toBe("the relation lists hit their limit");
+    expect(workReasonLabel("brand-new")).toBe("unknown reason (brand-new)");
+    const html = workGroupMenuHtml(control({ stops: [{ stop: "areas", available: false, reasons: ["brand-new"], cards: 0 }] }), false);
+    expect(html).toContain("Unavailable: unknown reason (brand-new)");
+    expect(html).not.toContain("undefined");
   });
 });

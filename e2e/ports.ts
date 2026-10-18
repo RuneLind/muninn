@@ -172,6 +172,11 @@ export const E2E_PORTS = {
   // it (D11), and ONE fake claude-usage.
   "wiki-rail-threads": 3151,
   "wiki-rail-threads/ledger": 3152,
+  // Grouped work threads (plan `muninn-wiki-work-thread-grouping`, PR 3): ONE
+  // muninn over a wiki whose fake ledger's sessions form groups, a read-only
+  // copy, and a wiki whose ledger 404s the form; ONE fake claude-usage.
+  "wiki-rail-thread-groups": 3153,
+  "wiki-rail-thread-groups/ledger": 3154,
   // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.

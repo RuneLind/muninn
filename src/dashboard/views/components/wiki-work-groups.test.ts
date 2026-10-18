@@ -19,6 +19,7 @@ import {
 } from "./wiki-work-groups.ts";
 import type { WorkGroupEvidenceToggles } from "./wiki-work-group-prefs.ts";
 import { openThreadCards, railInputFor } from "./wiki-rail-input.ts";
+import type { RailThreadCard } from "./wiki-recents.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "./wiki-activity-rank.ts";
 import { threadScore } from "../../../wiki/work-focus.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
@@ -285,7 +286,7 @@ describe("order (D16)", () => {
       { allPages: pages, projects: {}, activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: null, work: w },
       { mode: "updated", now: NOW, filters: INERT, showRetired: false, familiesOn: false, pins: [], openFolds: [] },
     );
-    const rail = input.threads!.map((c) => [c.key, c.name, c.focus.map((p) => p.relPath)]);
+    const rail = (input.threads as RailThreadCard[]).map((c) => [c.key, c.name, c.focus.map((p) => p.relPath)]);
     expect(rail).toEqual([
       ["p/a.md", "p/a.md", ["p/a.md"]],
       ["p/b.md", "p/b.md", ["p/b.md"]],

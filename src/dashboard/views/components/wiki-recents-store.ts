@@ -34,6 +34,7 @@ import {
   toggleFold,
 } from "./wiki-recents.ts";
 import { parseWikiSortMode, type WikiSortMode } from "./wiki-filter.ts";
+import { readWorkGroupRecord, serializeWorkGroupRecord, workGroupKey, type WorkGroupRecord } from "./wiki-work-group-record.ts";
 
 /** The slice of `Storage` the purge below needs, so a unit test can hand it a
  *  fake instead of a browser. */
@@ -148,6 +149,28 @@ export function writeThreadPin(wiki: string, relPath: string | null): boolean {
   try {
     if (next) localStorage.setItem(threadPinKey(wiki), next);
     else localStorage.removeItem(threadPinKey(wiki));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The work-thread grouping record (D17): the record, null for none (an
+ *  absent, malformed or other-version value — D1 applies), or `undefined`
+ *  when storage cannot be read. */
+export function readWorkGroup(wiki: string): WorkGroupRecord | null | undefined {
+  try {
+    return readWorkGroupRecord(localStorage.getItem(workGroupKey(wiki)));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Store the record. Answers whether storage took it (`workGroupRecordSettle`):
+ *  a refused write keeps the record in this tab only. */
+export function writeWorkGroup(wiki: string, record: WorkGroupRecord): boolean {
+  try {
+    localStorage.setItem(workGroupKey(wiki), serializeWorkGroupRecord(record));
     return true;
   } catch {
     return false;
