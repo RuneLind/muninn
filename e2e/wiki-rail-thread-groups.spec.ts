@@ -566,6 +566,30 @@ test.describe("Wiki rail: grouped work threads", () => {
     await expect(groupBtn(page)).toContainText("Related");
   });
 
+  test("refused writes: a second edit keeps the first one this tab made", async ({ page }) => {
+    await page.addInitScript(([key]) => {
+      const set = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k: string, v: string) {
+        if (k === key) throw new DOMException("quota", "QuotaExceededError");
+        return set.call(this, k, v);
+      };
+    }, [workGroupKey(GROUPS)] as const);
+    await openReader(page);
+    await groupBtn(page).click();
+    await page.locator('[data-work-evidence="series"]').click();
+    await expect(page.locator('[data-work-evidence="series"]')).toHaveAttribute("aria-checked", "false");
+    await page.locator('[data-work-evidence="related"]').click();
+    await expect(page.locator('[data-work-evidence="related"]')).toHaveAttribute("aria-checked", "false");
+    await expect(page.locator('[data-work-evidence="series"]')).toHaveAttribute("aria-checked", "false");
+    await page.locator('[data-work-stop="areas"]').click();
+    await expect(groupBtn(page)).toContainText("Areas");
+    await groupBtn(page).click();
+    await expect(page.locator('[data-work-evidence="series"]')).toHaveAttribute("aria-checked", "false");
+    await expect(page.locator('[data-work-evidence="related"]')).toHaveAttribute("aria-checked", "false");
+    await expect(page.locator(".wiki-work-local")).toHaveText("this tab only");
+    expect(await stored(page)).toBeNull();
+  });
+
   test("a malformed or other-version record reads as D1, and the first edit replaces it", async ({ page }) => {
     for (const raw of ["{", JSON.stringify({ version: 9, stop: "threads" }), JSON.stringify({ version: 1, stop: "nope", evidence: { series: "x" } })]) {
       await page.evaluate(([k, v]) => localStorage.setItem(k as string, v as string), [workGroupKey(GROUPS), raw] as const).catch(() => {});

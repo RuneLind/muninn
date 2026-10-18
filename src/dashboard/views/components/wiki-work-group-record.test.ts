@@ -25,7 +25,7 @@ const rec = (r: Omit<WorkGroupRecord, "version">): WorkGroupRecord => ({ version
 const AREAS = rec({ stop: "areas" });
 const NO_SERIES = rec({ evidence: { series: false } });
 const THREADS = rec({ stop: "threads" });
-const fresh: WorkGroupRecordState = { held: null, known: null, failed: false };
+const fresh: WorkGroupRecordState = { held: null, known: null, patch: null, failed: false };
 
 describe("readWorkGroupRecord: the sparse record", () => {
   test("none for absent, unparseable, non-object and other-version values", () => {
@@ -100,49 +100,50 @@ describe("applyWorkGroupEdit", () => {
 describe("the record's state table (D17)", () => {
   test("B1: boot, storage readable — held and known are what storage holds", () => {
     expect(workGroupRecordStep(fresh, { kind: "boot", stored: AREAS })).toEqual({
-      state: { held: AREAS, known: AREAS, failed: false },
+      state: { held: AREAS, known: AREAS, patch: null, failed: false },
       write: false,
       repaint: false,
     });
   });
 
   test("B2: boot, storage unreadable — no record, known unknown", () => {
-    expect(workGroupRecordStep(fresh, { kind: "boot", stored: undefined }).state).toEqual({ held: null, known: undefined, failed: false });
+    expect(workGroupRecordStep(fresh, { kind: "boot", stored: undefined }).state).toEqual({ held: null, known: undefined, patch: null, failed: false });
   });
 
   test("E1–E4: a storage event adopts without writing; repaints only once rendered and on a change", () => {
-    const s = { held: null, known: null, failed: false };
+    const s = { held: null, known: null, patch: null, failed: false };
     expect(workGroupRecordStep(s, { kind: "storage", stored: AREAS, booted: true })).toEqual({
-      state: { held: AREAS, known: AREAS, failed: false },
+      state: { held: AREAS, known: AREAS, patch: null, failed: false },
       write: false,
       repaint: true,
     });
     expect(workGroupRecordStep(s, { kind: "storage", stored: AREAS, booted: false }).repaint).toBe(false);
     // The same record in another spelling is no change.
-    const same = { held: AREAS, known: AREAS, failed: false };
+    const same = { held: AREAS, known: AREAS, patch: null, failed: false };
     expect(workGroupRecordStep(same, { kind: "storage", stored: { stop: "areas", version: 1 }, booted: true }).repaint).toBe(false);
     // A clear() in another tab: back to D1.
     expect(workGroupRecordStep(same, { kind: "storage", stored: null, booted: true })).toEqual({
-      state: { held: null, known: null, failed: false },
+      state: { held: null, known: null, patch: null, failed: false },
       write: false,
       repaint: true,
     });
   });
 
   test("E5: a storage event while storage is unreadable changes nothing", () => {
-    const s = { held: AREAS, known: AREAS, failed: false };
+    const s = { held: AREAS, known: AREAS, patch: null, failed: false };
     expect(workGroupRecordStep(s, { kind: "storage", stored: undefined, booted: true })).toEqual({ state: s, write: false, repaint: false });
   });
 
   test("C1: a click merges the edit onto the record as read NOW and writes it; known is that read", () => {
     // This tab holds Threads; another tab has since written an unchecked series box.
-    const s = { held: THREADS, known: THREADS, failed: false };
+    const s = { held: THREADS, known: THREADS, patch: null, failed: false };
     const r = workGroupRecordStep(s, { kind: "click", stored: NO_SERIES, edit: { stop: "areas" } });
     expect(r.write).toEqual({ value: rec({ stop: "areas", evidence: { series: false } }) });
-    expect(r.state).toEqual({ held: rec({ stop: "areas", evidence: { series: false } }), known: NO_SERIES, failed: false });
+    expect(r.state).toEqual({ held: rec({ stop: "areas", evidence: { series: false } }), known: NO_SERIES, patch: AREAS, failed: false });
     expect(workGroupRecordSettle(r.state, r.write ? r.write.value : AREAS, true)).toEqual({
       held: rec({ stop: "areas", evidence: { series: false } }),
       known: rec({ stop: "areas", evidence: { series: false } }),
+      patch: null,
       failed: false,
     });
   });
@@ -150,11 +151,11 @@ describe("the record's state table (D17)", () => {
   test("C2: a refused write keeps the held record and marks it this tab only", () => {
     const r = workGroupRecordStep(fresh, { kind: "click", stored: null, edit: { stop: "areas" } });
     const after = workGroupRecordSettle(r.state, AREAS, false);
-    expect(after).toEqual({ held: AREAS, known: null, failed: true });
+    expect(after).toEqual({ held: AREAS, known: null, patch: AREAS, failed: true });
   });
 
   test("C3: a click while storage is unreadable merges onto this tab's own record", () => {
-    const s = { held: NO_SERIES, known: undefined, failed: false };
+    const s = { held: NO_SERIES, known: undefined, patch: NO_SERIES, failed: false };
     const r = workGroupRecordStep(s, { kind: "click", stored: undefined, edit: { stop: "areas" } });
     expect(r.state.held).toEqual(rec({ stop: "areas", evidence: { series: false } }));
     expect(r.state.known).toBeUndefined();
@@ -162,62 +163,73 @@ describe("the record's state table (D17)", () => {
   });
 
   test("R1: a render with storage unreadable writes nothing and keeps the held record", () => {
-    const s = { held: AREAS, known: undefined, failed: true };
+    const s = { held: AREAS, known: undefined, patch: AREAS, failed: true };
     expect(workGroupRecordStep(s, { kind: "render", stored: undefined, focused: true })).toEqual({ state: s, write: false, repaint: false });
   });
 
   test("R2: storage readable for the first time — known is what it holds; this tab's own record stays", () => {
-    expect(workGroupRecordStep({ held: AREAS, known: undefined, failed: true }, { kind: "render", stored: null, focused: true }).state).toEqual({
+    expect(
+      workGroupRecordStep({ held: AREAS, known: undefined, patch: AREAS, failed: true }, { kind: "render", stored: null, focused: true }).state,
+    ).toEqual({
       held: AREAS,
       known: null,
+      patch: AREAS,
       failed: true,
     });
-    expect(workGroupRecordStep({ held: null, known: undefined, failed: false }, { kind: "render", stored: NO_SERIES, focused: true }).state).toEqual({
+    expect(
+      workGroupRecordStep({ held: null, known: undefined, patch: null, failed: false }, { kind: "render", stored: NO_SERIES, focused: true }).state,
+    ).toEqual({
       held: NO_SERIES,
       known: NO_SERIES,
+      patch: null,
       failed: false,
     });
   });
 
   test("R2 then R6: a choice made while storage was unreadable is written on the next focused render", () => {
-    let s: WorkGroupRecordState = { held: AREAS, known: undefined, failed: true };
+    let s: WorkGroupRecordState = { held: AREAS, known: undefined, patch: AREAS, failed: true };
     s = workGroupRecordStep(s, { kind: "render", stored: null, focused: true }).state;
     const r = workGroupRecordStep(s, { kind: "render", stored: null, focused: true });
     expect(r.write).toEqual({ value: AREAS });
   });
 
   test("R3: stored ≠ known — another tab wrote and this tab missed it: adopted, never overwritten", () => {
-    const s = { held: AREAS, known: AREAS, failed: false };
+    const s = { held: AREAS, known: AREAS, patch: null, failed: false };
     expect(workGroupRecordStep(s, { kind: "render", stored: THREADS, focused: true })).toEqual({
-      state: { held: THREADS, known: THREADS, failed: false },
+      state: { held: THREADS, known: THREADS, patch: null, failed: false },
       write: false,
       repaint: false,
     });
   });
 
   test("R3 drops a change that only lived in memory after a refused write (accepted: the other tab's write is newer)", () => {
-    const s = { held: AREAS, known: null, failed: true };
-    expect(workGroupRecordStep(s, { kind: "render", stored: THREADS, focused: true }).state).toEqual({ held: THREADS, known: THREADS, failed: false });
+    const s = { held: AREAS, known: null, patch: AREAS, failed: true };
+    expect(workGroupRecordStep(s, { kind: "render", stored: THREADS, focused: true }).state).toEqual({
+      held: THREADS,
+      known: THREADS,
+      patch: null,
+      failed: false,
+    });
   });
 
   test("R4: stored = known, no focus — nothing is written", () => {
-    const s = { held: AREAS, known: null, failed: true };
+    const s = { held: AREAS, known: null, patch: AREAS, failed: true };
     expect(workGroupRecordStep(s, { kind: "render", stored: null, focused: false })).toEqual({ state: s, write: false, repaint: false });
   });
 
   test("R5: stored = known = held — nothing to write", () => {
-    const s = { held: AREAS, known: AREAS, failed: false };
+    const s = { held: AREAS, known: AREAS, patch: null, failed: false };
     expect(workGroupRecordStep(s, { kind: "render", stored: AREAS, focused: true }).write).toBe(false);
     // No record anywhere: D1 is never written.
     expect(workGroupRecordStep(fresh, { kind: "render", stored: null, focused: true }).write).toBe(false);
   });
 
   test("R6: stored = known, focus, held differs — a refused write is retried; success clears the note", () => {
-    const s = { held: AREAS, known: null, failed: true };
+    const s = { held: AREAS, known: null, patch: AREAS, failed: true };
     const r = workGroupRecordStep(s, { kind: "render", stored: null, focused: true });
     expect(r.write).toEqual({ value: AREAS });
-    expect(workGroupRecordSettle(r.state, AREAS, true)).toEqual({ held: AREAS, known: AREAS, failed: false });
-    expect(workGroupRecordSettle(r.state, AREAS, false)).toEqual({ held: AREAS, known: null, failed: true });
+    expect(workGroupRecordSettle(r.state, AREAS, true)).toEqual({ held: AREAS, known: AREAS, patch: null, failed: false });
+    expect(workGroupRecordSettle(r.state, AREAS, false)).toEqual({ held: AREAS, known: null, patch: AREAS, failed: true });
   });
 
   test("a storage event concerns this wiki's key or a clear(), nothing else", () => {
@@ -269,5 +281,102 @@ describe("many tabs: no write loop, no lost edit", () => {
     for (let round = 0; round < 5; round++) for (let i = 0; i < 3; i++) w.render(i, true);
     expect(w.writes()).toBe(before);
     for (const t of w.tabs) expect(sameWorkGroupRecord(t.held, w.stored())).toBe(true);
+  });
+});
+
+describe("a tab's unpersisted edits (fix round 1: refused writes, first-readable storage)", () => {
+  /** One storage that can refuse reads or writes, shared by tabs that do
+   *  their own IO the way the reader does (`stepWorkGroup`). */
+  function store(initial: WorkGroupRecord | null = null) {
+    const s = { v: initial ? serializeWorkGroupRecord(initial) : (null as string | null), readable: true, writable: true };
+    return {
+      s,
+      read: (): WorkGroupRecord | null | undefined => (s.readable ? readWorkGroupRecord(s.v) : undefined),
+      write: (r: WorkGroupRecord): boolean => {
+        if (!s.writable) return false;
+        s.v = serializeWorkGroupRecord(r);
+        return true;
+      },
+      stored: () => readWorkGroupRecord(s.v),
+    };
+  }
+  function tab(st: ReturnType<typeof store>) {
+    let state = workGroupRecordStep(fresh, { kind: "boot", stored: st.read() }).state;
+    const run = (t: Parameters<typeof workGroupRecordStep>[1]) => {
+      const r = workGroupRecordStep(state, t);
+      state = r.write ? workGroupRecordSettle(r.state, r.write.value, st.write(r.write.value)) : r.state;
+      return r;
+    };
+    return {
+      state: () => state,
+      shown: () => workGroupPrefsOf(state.held),
+      click: (edit: Parameters<typeof applyWorkGroupEdit>[1]) => run({ kind: "click", stored: st.read(), edit }),
+      render: (focused = true) => run({ kind: "render", stored: st.read(), focused }),
+      event: () => run({ kind: "storage", stored: st.read(), booted: true }),
+    };
+  }
+
+  test("C2 then C2: a second refused edit keeps the first (finding 1)", () => {
+    const st = store();
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ evidence: "series", value: false });
+    a.render(true);
+    a.click({ evidence: "related", value: false });
+    a.render(true);
+    expect(a.shown().evidence).toEqual({ series: false, related: false, issue: true });
+    expect(a.state().failed).toBe(true);
+  });
+
+  test("C2 then C1: the written edit carries the earlier refused one (finding 1)", () => {
+    const st = store();
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ evidence: "series", value: false });
+    st.s.writable = true;
+    a.click({ stop: "areas" });
+    expect(st.stored()).toEqual(rec({ stop: "areas", evidence: { series: false } }));
+    expect(a.state().failed).toBe(false);
+  });
+
+  test("R2 then R6: a choice made while unreadable is merged onto the stored record, not written whole (finding 2)", () => {
+    const st = store(NO_SERIES);
+    st.s.readable = false;
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ stop: "areas" });
+    st.s.readable = true;
+    st.s.writable = true;
+    a.render(true);
+    // R2 shows the other tab's field at once, with this tab's choice on top.
+    expect(a.shown()).toMatchObject({ stop: "areas", evidence: { series: false } });
+    a.render(true);
+    expect(st.stored()).toEqual(rec({ stop: "areas", evidence: { series: false } }));
+    expect(a.state().failed).toBe(false);
+  });
+
+  test("C1 after another tab's newer record: the patch goes (R3's rule), the new edit is merged onto that record", () => {
+    const st = store();
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ evidence: "series", value: false });
+    // Another tab writes; this tab's event is not delivered before the click.
+    st.s.v = serializeWorkGroupRecord(THREADS);
+    st.s.writable = true;
+    a.click({ evidence: "issue", value: false });
+    expect(st.stored()).toEqual(rec({ stop: "threads", evidence: { issue: false } }));
+  });
+
+  test("E1–E4: an event that clears «this tab only» repaints even when the record is unchanged (finding 3)", () => {
+    const st = store();
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ stop: "areas" });
+    expect(a.state().failed).toBe(true);
+    // Another tab writes exactly this tab's record.
+    st.s.v = serializeWorkGroupRecord(AREAS);
+    const r = a.event();
+    expect(r.state.failed).toBe(false);
+    expect(r.repaint).toBe(true);
   });
 });

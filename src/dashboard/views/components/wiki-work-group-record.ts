@@ -118,16 +118,31 @@ export function applyWorkGroupEdit(base: WorkGroupRecord | null, edit: WorkGroup
   return out;
 }
 
+/** `base` with a tab's unpersisted fields (`patch`) laid on top: each field
+ *  the patch holds wins, evidence box by box; every other field of `base` is
+ *  kept. No patch: `base` itself. */
+export function mergeWorkGroupPatch(base: WorkGroupRecord | null, patch: WorkGroupRecord | null): WorkGroupRecord | null {
+  if (!patch) return base;
+  const out: WorkGroupRecord = { ...(base ?? {}), ...patch, version: WORK_GROUP_PREFS_VERSION };
+  if (patch.evidence) out.evidence = { ...(base?.evidence ?? {}), ...patch.evidence };
+  return out;
+}
+
 /**
  * One tab's view of the record. `held` is what the rail renders from (null:
  * no record, D1). `known` is the record this tab last READ from storage or
  * WROTE successfully — `undefined` while storage has never been readable.
- * `failed` is set while the held record lives in this tab only (its write was
- * refused), so the menu says so.
+ * `patch` holds the fields this tab's clicks set that storage does not hold
+ * yet (null: none), so `held` is `known` (or the read record) with `patch` on
+ * top; every write is the record as read with `patch` on top, and only a
+ * successful write or another tab's newer record (R3, a `storage` event)
+ * clears it. `failed` is set while the held record lives in this tab only
+ * (its write was refused), so the menu says so.
  */
 export interface WorkGroupRecordState {
   held: WorkGroupRecord | null;
   known: WorkGroupRecord | null | undefined;
+  patch: WorkGroupRecord | null;
   failed: boolean;
 }
 
@@ -155,49 +170,64 @@ export interface WorkGroupRecordStep {
  */
 export function workGroupRecordStep(state: WorkGroupRecordState, t: WorkGroupRecordTrigger): WorkGroupRecordStep {
   const none = (s: WorkGroupRecordState): WorkGroupRecordStep => ({ state: s, write: false, repaint: false });
+  const adopt = (stored: WorkGroupRecord | null): WorkGroupRecordState => ({ held: stored, known: stored, patch: null, failed: false });
   switch (t.kind) {
     case "boot":
       // B1, B2.
-      return none(t.stored === undefined ? { held: null, known: undefined, failed: false } : { held: t.stored, known: t.stored, failed: false });
+      return none(t.stored === undefined ? { held: null, known: undefined, patch: null, failed: false } : adopt(t.stored));
     case "storage": {
       // E5: unreadable — nothing to adopt.
       if (t.stored === undefined) return none(state);
-      // E1–E4: adopt, never write; repaint once rendered and only on a change.
+      // E1–E4: adopt (another tab's write is the newer choice, so this tab's
+      // patch goes), never write; repaint once rendered, on a change of the
+      // record or of the «this tab only» note.
       return {
-        state: { held: t.stored, known: t.stored, failed: false },
+        state: adopt(t.stored),
         write: false,
-        repaint: t.booted && !sameWorkGroupRecord(t.stored, state.held),
+        repaint: t.booted && (state.failed || !sameWorkGroupRecord(t.stored, state.held)),
       };
     }
     case "click": {
-      // C1–C3: the reader's edit merged onto the record as read NOW (this
-      // tab's own when storage is unreadable), written whatever storage holds.
+      // C1–C3: the edit joins this tab's patch, and the patch is merged onto
+      // the record as read NOW (this tab's own when storage is unreadable),
+      // written whatever storage holds. A read that differs from `known` is
+      // another tab's newer record, so the patch goes first (R3's rule).
       // `known` becomes that read, so a refused write is retried by R6 rather
       // than dropped by R3 for a record storage already holds.
-      const base = t.stored === undefined ? state.held : t.stored;
-      const held = applyWorkGroupEdit(base, t.edit);
-      return { state: { held, known: t.stored, failed: state.failed }, write: { value: held }, repaint: false };
+      if (t.stored === undefined) {
+        const patch = applyWorkGroupEdit(state.patch, t.edit);
+        const held = applyWorkGroupEdit(state.held, t.edit);
+        return { state: { held, known: undefined, patch, failed: state.failed }, write: { value: held }, repaint: false };
+      }
+      const kept = state.known === undefined || sameWorkGroupRecord(t.stored, state.known) ? state.patch : null;
+      const patch = applyWorkGroupEdit(kept, t.edit);
+      const held = mergeWorkGroupPatch(t.stored, patch)!;
+      return { state: { held, known: t.stored, patch, failed: state.failed }, write: { value: held }, repaint: false };
     }
     case "render": {
       // R1: unreadable — no compare is possible.
       if (t.stored === undefined) return none(state);
       // R2: readable for the first time — what it holds is known; this tab's
-      // own record (a click whose write failed) stays, written by a later R6.
-      if (state.known === undefined) return none({ held: state.held ?? t.stored, known: t.stored, failed: state.failed });
+      // patch (a click whose write failed) is laid on top, written by R6.
+      if (state.known === undefined) {
+        return none({ held: mergeWorkGroupPatch(t.stored, state.patch), known: t.stored, patch: state.patch, failed: state.failed });
+      }
       // R3: another tab wrote and this tab never heard — adopt it. A change
       // that lived only in memory after a refused write is dropped here.
-      if (!sameWorkGroupRecord(t.stored, state.known)) return none({ held: t.stored, known: t.stored, failed: false });
-      // R4/R5: no focus, or nothing to write.
-      if (!t.focused || state.held === null || sameWorkGroupRecord(state.held, t.stored)) return none(state);
-      // R6: storage still holds `known` and this tab holds another record.
+      if (!sameWorkGroupRecord(t.stored, state.known)) return none(adopt(t.stored));
+      // R4/R5: no focus, or nothing to write. Here `held` is `known` (= the
+      // read) with `patch` on top: every row that sets `known` keeps that.
+      if (!t.focused || state.patch === null || state.held === null || sameWorkGroupRecord(state.held, t.stored)) return none(state);
+      // R6: storage still holds `known` and this tab holds a patch on it.
       return { state, write: { value: state.held }, repaint: false };
     }
   }
 }
 
-/** After the write a step asked for: storage holds `value` only when it took. */
+/** After the write a step asked for: storage holds `value` only when it took,
+ *  and then the patch is in storage. */
 export function workGroupRecordSettle(state: WorkGroupRecordState, value: WorkGroupRecord, ok: boolean): WorkGroupRecordState {
-  return ok ? { held: state.held, known: value, failed: false } : { ...state, failed: true };
+  return ok ? { held: state.held, known: value, patch: null, failed: false } : { ...state, failed: true };
 }
 
 /** The stored spelling of a record: plain JSON, field order as written.

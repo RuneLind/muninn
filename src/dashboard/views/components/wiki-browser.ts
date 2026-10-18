@@ -1407,7 +1407,7 @@ function stepThreadPin(t: ThreadPinTrigger): boolean {
  *  wrote) and whether the held record lives in this tab only. Every change
  *  goes through `stepWorkGroup`, the record's state table. */
 let workGroupRec: WorkGroupRecordState = workGroupRecordStep(
-  { held: null, known: undefined, failed: false },
+  { held: null, known: undefined, patch: null, failed: false },
   { kind: "boot", stored: readWorkGroup(WIKI) },
 ).state;
 

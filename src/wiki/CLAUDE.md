@@ -1683,21 +1683,21 @@ Acceptance: `wiki-rail-input.test.ts` (order, pin, fold keys, facet drop, the ex
 
 **The pin's table at the group level** (no new trigger: the rows above hold; these are the placements). G1 a pin held by a group's child → the group first, that child marked (`pinned`, its 📌 pressed) and the group's 📌 pressed; G2 that child past the first three → it shows anyway, `+ N more` counts the rest; G3 a pin held by a lone thread → today's card first; G4 the holding group past the cap → moved first, so drawn (the pin applies after grouping, before the cap); G5 the holding child's rows all filtered → the child drops, the group keeps its place and its pinned look (rank never reads facets); G6 a pin no thread holds (A2) → no group pinned, the held pin stays; G7 the group's 📌 unpressed → writes the anchor child's `pinAnchor` (a C row), pressed → clears the pin, whichever child held it; G8 a stop change → the pin follows its page at every stop (`threadHoldsPin` over the threads; PR 4 runs it over the threads after splits).
 
-**The grouping record's state table** (D17; `workGroupRecordStep`, `wiki-work-group-record.ts`; key `muninn.wiki.workGroup.v1:<wiki>`). The record is sparse: only the fields a reader set, so D1 is computed at read time and never held or written, and a fresh wiki stores nothing until the first explicit edit. Records compare by a canonical serialization (sorted keys and arrays); a malformed or other-version value reads as none. A tab holds `held` (null = D1), `known` (a record, none, or unknown while storage was never readable) and `failed` (the menu's «this tab only»).
+**The grouping record's state table** (D17; `workGroupRecordStep`, `wiki-work-group-record.ts`; key `muninn.wiki.workGroup.v1:<wiki>`). The record is sparse: only the fields a reader set, so D1 is computed at read time and never held or written, and a fresh wiki stores nothing until the first explicit edit. Records compare by a canonical serialization (sorted keys and arrays); a malformed or other-version value reads as none. A tab holds `held` (null = D1), `known` (a record, none, or unknown while storage was never readable), `patch` (the fields this tab's clicks set that storage does not hold yet; `held` is `known` with `patch` on top, and every write is the record as read with `patch` on top) and `failed` (the menu's «this tab only»).
 
 | Row | Trigger and state | Held | Writes |
 |---|---|---|---|
 | B1 / B2 | boot, readable / unreadable | stored (known = stored) / none (known unknown) | no |
-| E1–E4 | `storage` event (another tab's write or `clear()`) | stored (known = stored, failed cleared); repaints once rendered and only on a change, with no render step | no |
+| E1–E4 | `storage` event (another tab's write or `clear()`) | stored (known = stored, patch and failed cleared); repaints once rendered, on a change of the record or of «this tab only», with no render step | no |
 | E5 | `storage` event, unreadable | unchanged | no |
-| C1 | menu edit | the edit merged onto the record as read NOW (known = that read) | yes |
-| C2 | menu edit, write refused | kept; failed set (this tab only) | the attempt |
-| C3 | menu edit, unreadable | the edit merged onto this tab's own record | yes (refused) |
+| C1 | menu edit | the edit joins the patch, merged onto the record as read NOW (known = that read); a read ≠ known drops the patch first (R3's rule); a write that takes clears the patch | yes |
+| C2 | menu edit, write refused | kept, patch kept; failed set (this tab only) | the attempt |
+| C3 | menu edit, unreadable | the edit merged onto this tab's own record and its patch | yes (refused) |
 | R1 | render, unreadable | unchanged | no |
-| R2 | render, readable for the first time | held if set, else stored (known = stored) | no |
-| R3 | render, stored ≠ known | stored (an in-memory change after a refused write is dropped: the other tab's write is newer) | no |
-| R4 / R5 | render, stored = known, no focus / nothing to write | unchanged | no |
-| R6 | render, stored = known, focus, held ≠ stored | unchanged | yes, the retry of a refused write |
+| R2 | render, readable for the first time | stored with the patch on top (known = stored) | no |
+| R3 | render, stored ≠ known | stored, patch cleared (an in-memory change after a refused write is dropped: the other tab's write is newer) | no |
+| R4 / R5 | render, stored = known, no focus / no patch, or held = stored | unchanged | no |
+| R6 | render, stored = known, focus, a patch, held ≠ stored | unchanged | yes (stored with the patch on top), the retry of a refused write |
 
 No write loop, for the pin's reason: only a click or a focused render this tab caused writes, and a `storage` event writes nothing.
 
