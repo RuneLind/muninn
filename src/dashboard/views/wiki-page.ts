@@ -957,10 +957,17 @@ export async function renderWikiPage(opts?: {
     /* The open card's body: every row in the threads section (a focus row and
        any attachment child under it) and the touched line sit inside the
        card's accent outline, square-cornered, the last one closing it. */
-    .wiki-list-item[data-section="threads"], .wiki-thread-touched {
+    .wiki-list-item[data-section="threads"], .wiki-thread-touched, .wiki-thread-inline {
       border-radius: 0; box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent);
     }
-    .wiki-list-item[data-section="threads"]:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched)),
+    /* PR 4's lines inside an open card (a split session's title, an
+       \`also in:\` line, \`▸ split into N sessions\`): the same outline, and
+       the last one closes the card like the touched line. */
+    .wiki-thread-inline:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched, + .wiki-thread-inline)) {
+      border-radius: 0 0 8px 8px; margin-bottom: 8px;
+      box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent), inset 0 -1px var(--accent);
+    }
+    .wiki-list-item[data-section="threads"]:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched, + .wiki-thread-inline)),
     .wiki-thread-touched {
       border-radius: 0 0 8px 8px; margin-bottom: 8px;
       box-shadow: inset 1px 0 var(--accent), inset -1px 0 var(--accent), inset 0 -1px var(--accent);
@@ -979,7 +986,7 @@ export async function renderWikiPage(opts?: {
        reduced-motion \`animation: none\` above stays the whole answer. */
     @media (prefers-reduced-motion: no-preference) {
       .wiki-list-item[data-section="threads"].reveal-flash { animation-name: wiki-reveal-flash-thread; }
-      .wiki-list-item[data-section="threads"]:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched)).reveal-flash {
+      .wiki-list-item[data-section="threads"]:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched, + .wiki-thread-inline)).reveal-flash {
         animation-name: wiki-reveal-flash-thread-last;
       }
     }
@@ -994,10 +1001,57 @@ export async function renderWikiPage(opts?: {
     /* On the row that closes the card, the straight rule stops above the
        rounded corner, which the inset shadow draws (not in forced colours,
        which drop the shadow: there the rule runs to the bottom, below). */
-    .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 8px; }
+    .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched, + .wiki-thread-inline))::before { bottom: 8px; }
     /* A card's newest series plan: its dot is centred ON the card's edge. */
     .wiki-list-item.latest.thread-row:not(.wiki-series-cont)::after { left: -3.5px; }
     .wiki-thread-touched { padding: 1px 10px 6px 32px; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
+    .wiki-thread-inline { padding: 1px 10px 4px 32px; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
+    .wiki-thread-session { padding-top: 4px; color: var(--text-secondary); font-weight: 600; }
+    .wiki-thread-session-span { font-weight: 400; color: var(--text-muted); }
+    .wiki-thread-split { padding-left: 26px; }
+    .wiki-thread-split-btn {
+      font: inherit; font-weight: 600; color: var(--accent-light); background: none; border: 0;
+      padding: 2px 4px; min-height: 24px; cursor: pointer;
+    }
+    .wiki-thread-split-btn[aria-disabled="true"] { color: var(--text-muted); cursor: default; }
+    /* The card's ⋯ (PR 4) stacks under the 📌, so the label keeps its width
+       (the width table in src/wiki/CLAUDE.md, Work threads). */
+    .wiki-thread-acts { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; }
+    .wiki-thread-menu {
+      background: none; border: 0; cursor: pointer; color: var(--text-muted);
+      font: inherit; font-size: 13px; line-height: 16px; padding: 2px 9px 4px 4px; min-width: 24px; min-height: 24px;
+    }
+    .wiki-thread-menu:hover, .wiki-thread-menu:focus-visible, .wiki-thread-menu[aria-expanded="true"] { color: var(--text-primary); }
+    .wiki-thread-chip-own { border-color: var(--text-muted); color: var(--text-secondary); margin-left: 0; }
+    .wiki-work-pop { width: min(300px, calc(100vw - 16px)); padding: 6px; }
+    .wiki-work-pop-item {
+      display: flex; gap: 8px; width: 100%; text-align: left; font: inherit; color: inherit;
+      background: none; border: 0; border-radius: 5px; padding: 5px 6px; cursor: pointer;
+    }
+    .wiki-work-pop-item:hover, .wiki-work-pop-item:focus-visible { background: var(--bg-hover); }
+    .wiki-work-pop-item.off { color: var(--text-tertiary); cursor: default; }
+    .wiki-work-pop-item.off:hover { background: none; }
+    .wiki-work-pop .wiki-work-note, .wiki-work-pop .wiki-work-opt-text small { color: var(--text-tertiary); }
+    .wiki-work-series { display: flex; flex-direction: column; gap: 5px; padding: 2px 4px; max-height: 60vh; overflow-y: auto; }
+    .wiki-work-series-head { font-weight: 600; }
+    .wiki-work-series-key { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; }
+    .wiki-work-series-input {
+      padding: 3px 6px; border-radius: 4px; border: 1px solid var(--border-primary);
+      background: var(--bg-inset); color: var(--text-primary); font: inherit;
+    }
+    .wiki-work-series-child { border-top: 1px solid var(--border-primary); padding-top: 4px; }
+    .wiki-work-series-name { font-weight: 600; font-size: 11.5px; }
+    .wiki-work-series-list { font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-work-series-list.s { color: var(--text-tertiary); }
+    .wiki-work-series-h { color: var(--text-tertiary); }
+    .wiki-work-series-go-row { display: flex; gap: 6px; padding-top: 4px; }
+    .wiki-work-series-go, .wiki-work-series-cancel {
+      padding: 3px 8px; border-radius: 4px; cursor: pointer; font: inherit;
+      border: 1px solid var(--border-primary); background: var(--bg-inset); color: var(--text-primary);
+    }
+    .wiki-work-series-msg { font-size: 11px; color: var(--text-tertiary); }
+    .wiki-work-series-msg.bad { color: var(--wiki-series-bad); }
+    .wiki-work-def { padding-left: 26px; }
     .wiki-thread-link { color: var(--accent-light); text-decoration: none; }
     .wiki-thread-link:hover, .wiki-thread-link:focus-visible { text-decoration: underline; }
     .wiki-thread-sep { color: var(--text-muted); }
@@ -1085,7 +1139,7 @@ export async function renderWikiPage(opts?: {
     @media (forced-colors: active) {
       .wiki-list-item.thread-row::before { background: CanvasText; }
       .wiki-thread-card.open { border-width: 2px; border-bottom-width: 1px; }
-      .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 0; }
+      .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched, + .wiki-thread-inline))::before { bottom: 0; }
       /* The group's two shadows, drawn by an ::after so neither costs layout:
          an open body's sides and bottom, as wide as its open header's sides
          (no top: the header closes it); a closed group's stack, a second edge

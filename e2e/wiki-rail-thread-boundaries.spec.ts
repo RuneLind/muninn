@@ -1,0 +1,477 @@
+/**
+ * /wiki rail — the reader's own **work-thread boundaries** (plan
+ * `muninn-wiki-work-thread-grouping`, PR 4): Make own thread and Return to its
+ * thread, Keep separate and Allow grouping, the Sessions stop (D19) and
+ * `▸ split into N sessions`, Save as series with a write that lands and one
+ * the route refuses (`k of N written`), the reverse through today's series
+ * menu, a read-only wiki's row ⋯, two tabs, Reset, refused storage, reload
+ * persistence, incomplete contributions and independent wiki settings.
+ *
+ * ONE muninn, FOUR temp wikis, ONE fake `node:http` claude-usage:
+ *
+ *  - `wsbound` — thread T: `t-key` (b1, b2), `t-split` (b0, b1), `t-rest`
+ *    (b2), one thread through the shared sessions; the RELATED pair
+ *    `live-a` ↔ `live-b` (one session each, `related:`); a lone note.
+ *  - `wsboundro` — the same files under `WIKI_READONLY_ROOTS`.
+ *  - `wsbseries`, `wsbrefuse` — the related pair and the note only, for the
+ *    two Save as series cases (each writes its own temp files).
+ *
+ * Synthetic names only (D11: no NAV data). No model calls; the only wiki
+ * writes are Save as series on the two synthetic series wikis.
+ *
+ * SPAWN ENV: `e2eEnv()` blanks `CLAUDE_USAGE_URL`, so it is set AFTER it.
+ */
+
+import { test, expect, type Page } from "@playwright/test";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createServer, type Server } from "node:http";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
+import { workGroupKey } from "../src/dashboard/views/components/wiki-work-group-record.ts";
+
+const PORT = e2ePort("wiki-rail-thread-boundaries");
+const LEDGER_PORT = e2ePort("wiki-rail-thread-boundaries/ledger");
+const BASE = `http://127.0.0.1:${PORT}`;
+const LEDGER_BASE = `http://127.0.0.1:${LEDGER_PORT}`;
+const REPO_ROOT = path.resolve(import.meta.dirname, "..");
+
+const B = "wsbound";
+const BRO = "wsboundro";
+const S = "wsbseries";
+const R = "wsbrefuse";
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+const NOW = Date.now();
+
+const TKEY = "plans/t-key.md";
+const TSPLIT = "plans/t-split.md";
+const TREST = "plans/t-rest.md";
+const LA = "plans/live-a.md";
+const LB = "plans/live-b.md";
+const LONE = "notes/lone.md";
+
+/** Per wiki: each session's focus pages, newest session first (b0 is 1 h ago). */
+const SESSIONS: Record<string, string[][]> = {
+  [B]: [[TSPLIT], [TKEY, TSPLIT], [TREST, TKEY], [LA], [LB], [LONE]],
+  [BRO]: [[TSPLIT], [TKEY, TSPLIT], [TREST, TKEY], [LA], [LB], [LONE]],
+  [S]: [[LA], [LB], [LONE]],
+  [R]: [[LA], [LB], [LONE]],
+};
+
+const roots: Record<string, string> = {};
+let server: ChildProcess | undefined;
+let ledger: Server | undefined;
+
+function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
+  const root = url.searchParams.get("root") ?? "";
+  const wiki = Object.keys(roots).find((k) => roots[k] === root);
+  const json = (body: unknown, status = 200) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+  const spec = (wiki && SESSIONS[wiki]) || [];
+  if (url.searchParams.get("sessions") === "1") {
+    if (!spec.length) return json({ error: "not found" }, 404);
+    const sessions = spec.map((focus, i) => {
+      const at = NOW - (i + 1) * HOUR;
+      return {
+        id: `b${i}`,
+        provider: "claude",
+        title: `session b${i}`,
+        first: at - 30 * 60_000,
+        last: at,
+        bulk: false,
+        text: { from: "prompt", paths: focus, links: [], files: [] },
+        files: focus.map((p) => ({ p, edits: 5, firstMs: at - 30 * 60_000, lastMs: at })),
+      };
+    });
+    const since = Number(url.searchParams.get("since"));
+    const until = url.searchParams.has("until") ? Number(url.searchParams.get("until")) : Date.now();
+    return json({ form: "sessions", root, since, until, limit: 200, truncated: false, sessions });
+  }
+  const until = url.searchParams.get("until");
+  if (until) return json({ root, pages: [], pageCount: 0, bulk: 10, limit: 5000, truncated: false, until: Number(until) });
+  const pages = [...new Set(spec.flat())].map((p, i) => ({ p, w: NOW - (i + 1) * HOUR, s: 1 }));
+  json({ root, pages, pageCount: pages.length, bulk: 10, limit: 5000, truncated: false });
+}
+
+function startLedger(): Promise<Server> {
+  const srv = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    if (url.pathname !== "/api/files") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unexpected path" }));
+      return;
+    }
+    ledgerAnswer(res, url);
+  });
+  return new Promise((resolve) => srv.listen(LEDGER_PORT, "127.0.0.1", () => resolve(srv)));
+}
+
+async function makeRoot(name: string, withTask: boolean): Promise<void> {
+  const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-bounds-${name}-`));
+  roots[name] = root;
+  await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ activity: { agePenalty: 0, hubPenalty: 0, planBoost: 0, rows: 8 } }), "utf8");
+  const write = async (rel: string, fm: string[], ago: number) => {
+    const abs = path.join(root, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, ["---", ...fm, "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
+    const stamp = new Date(NOW - ago);
+    await utimes(abs, stamp, stamp);
+  };
+  if (withTask) {
+    await write(TKEY, ["title: Task key"], 2 * HOUR);
+    await write(TSPLIT, ["title: Task split"], HOUR);
+    await write(TREST, ["title: Task rest"], 3 * HOUR);
+  }
+  await write(LA, ["title: Living facts", "plan_status: active", "status_date: 2026-10-14"], 4 * HOUR);
+  await write(LB, ["title: Reader lenses", "plan_status: active", "status_date: 2026-10-10", 'related: ["[[plans/live-a]]"]'], 5 * HOUR);
+  await write(LONE, ["title: Lone note", "type: note"], 6 * HOUR);
+  for (let i = 1; i <= 3; i++) await write(`notes/old-${i}.md`, [`title: Old ${i}`], (10 + i) * DAY);
+}
+
+const card = (page: Page, rel: string) => page.locator(`#wikiList .wiki-thread-card[data-thread="thread:${rel}"]`);
+const groupCard = (page: Page, key: string) => page.locator(`#wikiList .wiki-thread-card[data-thread-group="${key}"]`);
+const threadRow = (page: Page, rel: string) => page.locator(`#wikiList .wiki-list-item.thread-row[data-relpath="${rel}"]`);
+const groupBtn = (page: Page) => page.locator("[data-work-group-menu]");
+const stored = (page: Page, wiki = B) => page.evaluate((k) => localStorage.getItem(k), workGroupKey(wiki));
+const record = async (page: Page, wiki = B) => JSON.parse((await stored(page, wiki)) ?? "null");
+const topKeys = (page: Page) =>
+  page.locator("#wikiList > .wiki-thread-card").evaluateAll((els) => els.map((e) => e.getAttribute("data-thread-group") ?? e.getAttribute("data-thread")));
+
+async function openReader(page: Page, wiki: string = B): Promise<void> {
+  await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`);
+  const listing = page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes(`wiki=${wiki}`) && r.ok());
+  await page.goto(`${BASE}/wiki?wiki=${wiki}`);
+  await listing;
+  await expect(page.locator('.wiki-list-sec[data-section="activity"]')).toHaveCount(1);
+}
+
+/** Open a focus row's ⋯ (the series opener on a writable wiki, the row's own
+ *  opener on a read-only one), revealed by the row's hover. */
+async function rowMenu(page: Page, rel: string): Promise<void> {
+  await threadRow(page, rel).hover();
+  await threadRow(page, rel).locator("[data-series-menu], [data-thread-row-menu]").click();
+}
+
+/** Click a ⋯ opener once it is still in view. Its popover closes on any
+ *  scroll (the series editor's rule), and Playwright's own scroll-into-view
+ *  fires its scroll event after the click otherwise. */
+async function openMenu(loc: ReturnType<Page["locator"]>): Promise<void> {
+  await loc.scrollIntoViewIfNeeded();
+  await loc.page().waitForTimeout(150);
+  await loc.click();
+  await expect(loc.page().locator("#wikiWorkPop")).toHaveCount(1);
+}
+
+async function stop(page: Page, s: string): Promise<void> {
+  await groupBtn(page).click();
+  await page.locator(`[data-work-stop="${s}"]`).click();
+  await expect(groupBtn(page)).toContainText(s[0]!.toUpperCase() + s.slice(1));
+}
+
+test.beforeAll(async () => {
+  await makeRoot(B, true);
+  await makeRoot(BRO, true);
+  await makeRoot(S, false);
+  await makeRoot(R, false);
+  ledger = await startLedger();
+  server = spawn("bun", ["run", "src/index.ts"], {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      ...e2eEnv(),
+      DASHBOARD_PORT: String(PORT),
+      DASHBOARD_HOST: "127.0.0.1",
+      SCHEDULER_ENABLED: "false",
+      WIKI_EXTRA: Object.entries(roots)
+        .map(([name, root]) => `${name}=${root}`)
+        .join(","),
+      WIKI_READONLY_ROOTS: roots[BRO]!,
+      CLAUDE_USAGE_URL: LEDGER_BASE,
+    },
+    stdio: "ignore",
+  });
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      if ((await fetch(`${BASE}/api/wiki/pages?wiki=${B}`)).ok) break;
+    } catch {
+      /* not up yet */
+    }
+    if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3 };
+  for (const wiki of Object.keys(want)) {
+    const warm = Date.now() + 20_000;
+    for (;;) {
+      const b = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`)).json()) as { work?: { threads: unknown[]; evidence?: unknown } };
+      if (b.work?.threads.length === want[wiki]! && b.work?.evidence) break;
+      if (Date.now() > warm) throw new Error(`the work-sessions memo never warmed for ${wiki}: ${JSON.stringify(b.work?.threads)}`);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+});
+
+test.afterAll(async () => {
+  server?.kill("SIGTERM");
+  await new Promise<void>((resolve) => (ledger ? ledger.close(() => resolve()) : resolve()));
+  for (const root of Object.values(roots)) await rm(root, { recursive: true, force: true });
+});
+
+test.describe("Wiki rail: work-thread boundaries", () => {
+  test("the fixture: one task thread of three pages, a RELATED pair, a lone note", async ({ page }) => {
+    await openReader(page);
+    expect(await topKeys(page)).toEqual([`thread:${TKEY}`, `group:anchor:${LA}`, `thread:${LONE}`]);
+    await expect(card(page, TKEY).locator(".wiki-thread-meta")).toContainText("3 sessions");
+  });
+
+  test("Make own thread: the page gets its own card with exactly its sessions; reload keeps it; Return to its thread restores the thread", async ({ page }) => {
+    await openReader(page);
+    await rowMenu(page, TSPLIT);
+    const item = page.locator("#wikiSeriesMenu [data-thread-split]");
+    await expect(item).toContainText("Make own thread");
+    // The opener is a page menu now that it holds both.
+    await expect(threadRow(page, TSPLIT).locator("[data-series-menu]")).toHaveAttribute("aria-label", "Page menu");
+    await item.click();
+    await expect(card(page, TSPLIT)).toHaveCount(1);
+    await expect(card(page, TSPLIT).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+    await expect(card(page, TSPLIT).locator(".wiki-thread-meta")).toContainText("2 sessions");
+    // The remainder keeps its key (t-key is still its earliest page), two sessions.
+    await expect(card(page, TKEY).locator(".wiki-thread-meta")).toContainText("2 sessions");
+    const rec = await record(page);
+    expect(rec.splits).toHaveLength(1);
+    expect(rec.splits[0]).toMatchObject({ page: TSPLIT });
+    expect(rec.splits[0].id).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+    // One home: t-split is a row in its own card only.
+    await card(page, TSPLIT).locator(".wiki-thread-fold").click();
+    await expect(threadRow(page, TSPLIT)).toHaveCount(1);
+    await page.reload();
+    await expect(card(page, TSPLIT).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+    // Return from the card's ⋯ (Related).
+    await openMenu(card(page, TSPLIT).locator("[data-work-card-menu]"));
+    await page.locator("#wikiWorkPop [data-work-return]").click();
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+    await expect(card(page, TKEY).locator(".wiki-thread-meta")).toContainText("3 sessions");
+    expect((await record(page)).splits).toEqual([]);
+  });
+
+  test("splitting the thread's key page: the remainder takes the next earliest page as its key (a new fold key)", async ({ page }) => {
+    await openReader(page);
+    await rowMenu(page, TKEY);
+    await page.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect(card(page, TKEY).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+    await expect(card(page, TKEY).locator(".wiki-thread-meta")).toContainText("2 sessions");
+    // b2's t-rest event is the remainder's earliest.
+    await expect(card(page, TREST)).toHaveCount(1);
+    await expect(card(page, TREST).locator(".wiki-thread-meta")).toContainText("3 sessions");
+  });
+
+  test("Keep separate dissolves a group and persists; Allow grouping lets it form again", async ({ page }) => {
+    await openReader(page);
+    await groupCard(page, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    const lb = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"]`);
+    await openMenu(lb.locator("[data-work-card-menu]"));
+    await page.locator("#wikiWorkPop [data-work-keep]").click();
+    await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(0);
+    await expect(card(page, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    expect((await record(page)).keptApart).toEqual([LB]);
+    await page.reload();
+    await expect(card(page, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    await openMenu(card(page, LB).locator("[data-work-card-menu]"));
+    await page.locator("#wikiWorkPop [data-work-allow]").click();
+    await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(1);
+    expect((await record(page)).keptApart).toEqual([]);
+  });
+
+  test("the Sessions stop (D19): one card per session, newest first; a page two sessions focused is one row and one also in: link", async ({ page }) => {
+    await openReader(page);
+    await stop(page, "sessions");
+    const cards = page.locator("#wikiList > .wiki-thread-card");
+    await expect(cards).toHaveCount(5);
+    await expect(cards.first()).toHaveAttribute("data-thread", "session:claude-code:b0");
+    await expect(cards.first().locator(".wiki-thread-name")).toHaveText("session b0");
+    await expect(cards.first().locator(".wiki-thread-pin")).toHaveCount(0);
+    // b1 focused t-key and t-split; b0 (newer) owns t-split.
+    await page.locator('#wikiList .wiki-thread-card[data-thread="session:claude-code:b1"] .wiki-thread-fold').click();
+    await expect(threadRow(page, TSPLIT)).toHaveCount(1);
+    await expect(threadRow(page, TKEY)).toHaveCount(1);
+    await expect(page.locator('.wiki-thread-also-in[data-thread="session:claude-code:b1"] .wiki-thread-link')).toHaveText(["Task split"]);
+    // No Make own thread on a session card's row.
+    await rowMenu(page, TKEY);
+    await expect(page.locator("#wikiSeriesMenu [data-thread-split]")).toHaveCount(0);
+    expect((await record(page)).stop).toBe("sessions");
+  });
+
+  test("▸ split into N sessions shows the thread's rows under each session without changing the stop", async ({ page }) => {
+    await openReader(page);
+    const btn = page.locator(`[data-thread-sessions="thread:${TKEY}"]`);
+    await expect(btn).toContainText("split into 3 sessions");
+    await expect(btn).toHaveAttribute("aria-expanded", "false");
+    await btn.click();
+    await expect(page.locator(".wiki-thread-session")).toHaveCount(3);
+    await expect(btn).toHaveAttribute("aria-expanded", "true");
+    for (const rel of [TKEY, TSPLIT, TREST]) await expect(threadRow(page, rel)).toHaveCount(1);
+    await expect(groupBtn(page)).toContainText("Related");
+    await btn.click();
+    await expect(page.locator(".wiki-thread-session")).toHaveCount(0);
+  });
+
+  test("a read-only wiki: the row ⋯ is its own opener holding Make own thread only, the split works, and no group offers Save as series", async ({ page }) => {
+    await openReader(page, BRO);
+    await expect(threadRow(page, TSPLIT).locator("[data-series-menu]")).toHaveCount(0);
+    await expect(threadRow(page, TSPLIT).locator("[data-thread-row-menu]")).toHaveCount(1);
+    await rowMenu(page, TSPLIT);
+    await expect(page.locator("#wikiWorkPop [role=menuitem]")).toHaveCount(1);
+    await page.locator("#wikiWorkPop [data-thread-split]").click();
+    await expect(card(page, TSPLIT).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+    expect((await record(page, BRO)).splits).toHaveLength(1);
+    await expect(groupCard(page, `group:anchor:${LA}`).locator("> .wiki-thread-acts [data-work-card-menu]")).toHaveCount(0);
+    // Independent wiki settings: the writable copy holds nothing.
+    expect(await stored(page, B)).toBeNull();
+  });
+
+  test("two tabs: a split in one and a kept-apart thread in the other both stay", async ({ context }) => {
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await openReader(a);
+    await openReader(b);
+    await rowMenu(a, TSPLIT);
+    await a.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect(card(b, TSPLIT)).toHaveCount(1);
+    await groupCard(b, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    await openMenu(b.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`));
+    await b.locator("#wikiWorkPop [data-work-keep]").click();
+    await expect(card(a, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    const rec = await record(a);
+    expect(rec.splits.map((x: { page: string }) => x.page)).toEqual([TSPLIT]);
+    expect(rec.keptApart).toEqual([LB]);
+  });
+
+  test("Reset your splits and groups (N) lists what does not apply and restores D1", async ({ page }) => {
+    await page.addInitScript(([k]) => {
+      if (localStorage.getItem("__seeded")) return;
+      localStorage.setItem("__seeded", "1");
+      localStorage.setItem(k!, JSON.stringify({ version: 1, stop: "threads", splits: [{ id: "a1", page: "plans/t-split.md" }, { id: "a2", page: "plans/gone.md" }], keptApart: ["notes/lone.md"] }));
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    await expect(card(page, TSPLIT)).toHaveCount(1);
+    await groupBtn(page).click();
+    const reset = page.locator("[data-work-reset]");
+    await expect(reset).toContainText("Reset your splits and groups (3)");
+    await expect(page.locator(".wiki-work-def")).toHaveText(["Own thread: plans/gone.md — the page is gone"]);
+    await reset.click();
+    await expect(page.locator(".wiki-work-menu")).toHaveCount(0);
+    expect(await record(page)).toEqual({ version: 1 });
+    await expect(groupBtn(page)).toContainText("Related");
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+  });
+
+  test("storage refuses the write: the split lives in this tab only and says so; a reload is back on the server's thread", async ({ page }) => {
+    await page.addInitScript(([k]) => {
+      const set = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key === k) throw new DOMException("quota", "QuotaExceededError");
+        return set.call(this, key, value);
+      };
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    await rowMenu(page, TSPLIT);
+    await page.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect(card(page, TSPLIT)).toHaveCount(1);
+    await expect(page.locator(".wiki-work-local")).toHaveText("this tab only");
+    await page.reload();
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+  });
+
+  test("contributions incomplete: Make own thread, ▸ split into N sessions and the Sessions stop are unavailable with the reason", async ({ page }) => {
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === B,
+      async (route) => {
+        const res = await route.fetch();
+        const json = (await res.json()) as { work?: { evidence?: { contributions: unknown } } };
+        if (json.work?.evidence) json.work.evidence.contributions = { complete: false, reasons: ["ledger-truncated"], cut: [], rows: [] };
+        await route.fulfill({ response: res, json });
+      },
+    );
+    await openReader(page);
+    await rowMenu(page, TSPLIT);
+    const item = page.locator("#wikiSeriesMenu [data-thread-split]");
+    await expect(item).toHaveAttribute("aria-disabled", "true");
+    await expect(item).toHaveAccessibleDescription("Unavailable: the session ledger was cut short");
+    await page.keyboard.press("Escape");
+    await expect(page.locator(`[data-thread-sessions="thread:${TKEY}"]`)).toHaveAttribute("aria-disabled", "true");
+    await groupBtn(page).click();
+    await expect(page.locator('[data-work-stop="sessions"]')).toHaveAttribute("title", "Unavailable: the session ledger was cut short");
+  });
+
+  test("Save as series: writes series: on both pages, the group re-forms by the series after the refresh, and today's series menu takes it back", async ({ page }) => {
+    await openReader(page, S);
+    const g = groupCard(page, `group:anchor:${LA}`);
+    await expect(g).toHaveAttribute("class", /open/);
+    await openMenu(g.locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    const key = page.locator("#wikiWorkPop [data-work-series-key]");
+    await expect(key).toHaveValue("live-a");
+    await expect(page.locator("#wikiWorkPop .wiki-work-series-child")).toHaveCount(2);
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    const sg = groupCard(page, "group:series:live-a");
+    await expect(sg).toHaveCount(1);
+    await expect(sg.locator(".wiki-thread-kind")).toHaveText("series");
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+    // The open state moved onto the new fold key.
+    await expect(sg).toHaveAttribute("class", /open/);
+    for (const rel of [LA, LB]) expect(await readFile(path.join(roots[S]!, rel), "utf8")).toContain("series: live-a");
+    // A series-named group offers no Save as series.
+    await expect(sg.locator("[data-work-card-menu]")).toHaveCount(0);
+    // The reverse is today's series menu, page by page.
+    for (const rel of [LA, LB]) {
+      const child = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${rel}"]`);
+      if ((await child.count()) && !(await child.getAttribute("class"))!.includes("open")) await child.locator(".wiki-thread-fold").click();
+      if (!(await threadRow(page, rel).count())) await card(page, rel).locator(".wiki-thread-fold").click();
+      await rowMenu(page, rel);
+      const listing = page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes("refresh=1"));
+      await page.locator('#wikiSeriesMenu [data-series-cmd="remove"]').click();
+      await listing;
+    }
+    await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(1);
+    for (const rel of [LA, LB]) expect(await readFile(path.join(roots[S]!, rel), "utf8")).not.toContain("series:");
+  });
+
+  test("Save as series, refused on the second page: 1 of 2 written, the written page stays written, and the next offer joins that series", async ({ page }) => {
+    let calls = 0;
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      async (route) => {
+        calls++;
+        if (calls === 2) return route.fulfill({ status: 409, json: { error: "the page changed (test)" } });
+        return route.continue();
+      },
+    );
+    await openReader(page, R);
+    const g = groupCard(page, `group:anchor:${LA}`);
+    await openMenu(g.locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    const msg = page.locator("#wikiWorkPop .wiki-work-series-msg");
+    await expect(msg).toContainText("1 of 2 written");
+    await expect(msg).toContainText(`Not written: ${LB}`);
+    expect(await readFile(path.join(roots[R]!, LA), "utf8")).toContain("series: live-a");
+    expect(await readFile(path.join(roots[R]!, LB), "utf8")).not.toContain("series:");
+    await page.keyboard.press("Escape");
+    // One series among the pages now: the action joins it.
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await expect(page.locator("#wikiWorkPop [data-work-save-series]")).toContainText("Save as series «live-a»");
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    await expect(page.locator("#wikiWorkPop .wiki-work-series-key")).toContainText("Join the series «live-a»");
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await expect(groupCard(page, "group:series:live-a")).toHaveCount(1);
+    expect(await readFile(path.join(roots[R]!, LB), "utf8")).toContain("series: live-a");
+  });
+});
+

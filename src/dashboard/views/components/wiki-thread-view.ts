@@ -10,8 +10,18 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, localDay, type WikiListing } from "./wiki-filter.ts";
-import { isRailGroupCard, type RailGroupCard, type RailThreadCard, type RailWorkCard, type RailWorkControl } from "./wiki-recents.ts";
+import {
+  isRailGroupCard,
+  type RailGroupCard,
+  type RailSplitSession,
+  type RailThreadCard,
+  type RailThreadMenu,
+  type RailWorkCard,
+  type RailWorkControl,
+} from "./wiki-recents.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
+import type { RowBoundaryAction } from "./wiki-work-boundaries.ts";
+import type { SaveSeriesPlan, SaveSeriesSkip } from "./wiki-work-series.ts";
 
 /** One instant as a card shows it, in the viewer's zone: `today 08:01`,
  *  `yesterday 21:26`, else `mon 12.10 15:04`. */
@@ -163,7 +173,7 @@ export function threadCardHeaderHtml(
         hover: threadHover(card, now),
         what: "this work thread",
         tally: threadTallyParts(card, showMoves),
-        line: card.child ? threadChildLineHtml(card.child) : "",
+        line: card.child ? threadChildLineHtml(card.child, card.boundary) : card.boundary ? threadBoundaryLineHtml(card.boundary) : "",
         disclose: threadDiscloseLabel(folded, pages ?? card.focus.length),
         pinLabel: "Pin this work thread first",
       };
@@ -177,8 +187,22 @@ export function threadCardHeaderHtml(
   // name reads "Unpin …, pressed", a double negation). Its title is the
   // visible hover, so it says the state and what a click does.
   const pinTitle = card.pinned ? "Pinned first. Click to unpin" : k.pinLabel;
+  // PR 4: a Sessions-stop card has no 📌 (a pin follows a thread's page); a
+  // card with a ⋯ stacks it under the 📌, so the label keeps its width.
+  const session = !isRailGroupCard(card) && !!card.session;
+  const hasMenu = isRailGroupCard(card) ? !!card.series : !!card.menu;
+  const pin =
+    `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +
+    ` data-thread-pinned="${card.pinned ? "1" : "0"}" aria-pressed="${card.pinned}"` +
+    ` aria-label="${esc(k.pinLabel)}" title="${esc(pinTitle)}">📌</button>`;
+  const what = isRailGroupCard(card) ? `group ${card.name}` : `thread ${card.name}`;
+  const menu = hasMenu
+    ? `<button type="button" class="wiki-thread-menu" data-work-card-menu="${esc(card.foldKey)}" aria-haspopup="menu" aria-expanded="false"` +
+      ` aria-label="${esc(`More for the ${what}`)}" title="More">⋯</button>`
+    : "";
+  const ends = session ? "" : hasMenu ? `<div class="wiki-thread-acts">${pin}${menu}</div>` : pin;
   return (
-    `<div class="wiki-thread-card${k.kind}${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" ${k.attr}="${esc(card.foldKey)}">` +
+    `<div class="wiki-thread-card${k.kind}${folded ? "" : " open"}${card.pinned ? " pinned" : ""}${session ? " wiki-thread-session-card" : ""}" data-section="threads" ${k.attr}="${esc(card.foldKey)}">` +
     `<button type="button" class="wiki-thread-fold${folded ? " folded" : ""}"` +
     ` data-fold-key="${esc(card.toggleKey)}" aria-expanded="${folded ? "false" : "true"}"` +
     ` title="${esc(k.hover + "\n" + why)}">` +
@@ -190,11 +214,26 @@ export function threadCardHeaderHtml(
     `${esc(k.disclose)}</span>` +
     `</span>` +
     `</button>` +
-    `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +
-    ` data-thread-pinned="${card.pinned ? "1" : "0"}" aria-pressed="${card.pinned}"` +
-    ` aria-label="${esc(k.pinLabel)}" title="${esc(pinTitle)}">📌</button>` +
+    ends +
     `</div>`
   );
+}
+
+/** The boundary chips (PR 4): what the reader made of this thread. */
+const BOUNDARY_TEXT: Record<"split" | "keptApart", { label: string; title: string }> = {
+  split: { label: "own thread", title: "You made this page its own thread" },
+  keptApart: { label: "kept separate", title: "You keep this thread out of groups" },
+};
+
+function boundaryChipHtml(boundary: "split" | "keptApart" | undefined): string {
+  if (!boundary) return "";
+  const t = BOUNDARY_TEXT[boundary];
+  return ` <span class="wiki-thread-chip wiki-thread-chip-own" title="${esc(t.title)}">${esc(t.label)}</span>`;
+}
+
+/** A lone card's third line when it carries a boundary: the chip alone. */
+function threadBoundaryLineHtml(boundary: "split" | "keptApart"): string {
+  return `${SR_SEP} <span class="wiki-thread-line wiki-thread-why">${boundaryChipHtml(boundary).trim()}</span>`;
 }
 
 /** An open card's `touched:` line — links, not rows, so they claim nothing and
@@ -212,6 +251,65 @@ export function threadTouchedHtml(foldKey: string, pages: readonly WikiListing[]
   return (
     `<div class="wiki-thread-touched" data-section="threads" data-thread="${esc(foldKey)}">` +
     `<span class="wiki-thread-touched-label">touched:</span> ${links}</div>`
+  );
+}
+
+/** The ⋯ on a work thread's focus row where no series menu applies (a
+ *  read-only wiki, an `.html` row, a reserved stem): it holds Make own thread
+ *  only. Its own attribute — never the series opener's, which the read-only
+ *  capture blocker refuses — and the series opener's look and reveal rule. */
+export function threadRowMenuBtnHtml(relPath: string): string {
+  return (
+    `<button type="button" class="wiki-series-menu-btn wiki-thread-row-menu" data-thread-row-menu="${esc(relPath)}"` +
+    ` tabindex="-1" title="Page menu" aria-label="Page menu" aria-haspopup="menu">⋯</button>`
+  );
+}
+
+/** The `also in:` line (D19): focus pages a newer session's card owns —
+ *  links like the `touched:` line, never rows. */
+export function threadAlsoInHtml(foldKey: string, pages: readonly WikiListing[], hrefFor: (relPath: string) => string): string {
+  if (!pages.length) return "";
+  const links = pages
+    .map(
+      (p) =>
+        `<a class="wiki-thread-link" href="${esc(hrefFor(p.relPath))}" data-page="${esc(p.name)}"` +
+        ` data-relpath="${esc(p.relPath)}" title="${esc(displayTitleOf(p))}">${esc(displayTitleOf(p))}</a>`,
+    )
+    .join(`<span class="wiki-thread-sep" aria-hidden="true"> · </span>`);
+  return (
+    `<div class="wiki-thread-inline wiki-thread-also-in" data-section="threads" data-thread="${esc(foldKey)}">` +
+    `<span class="wiki-thread-touched-label">also in:</span> ${links}</div>`
+  );
+}
+
+/** An open card's `▸ split into N sessions` (D19): the same rows under each
+ *  session, without changing the stop. Unavailable (the thread's session
+ *  data does not ship whole) it stays in the tab order, `aria-disabled`, with
+ *  the reason in its title and description. */
+export function threadSessionsToggleHtml(card: RailThreadCard): string {
+  const sp = card.sessionSplit;
+  if (!sp) return "";
+  const label = `split into ${sp.count} sessions`;
+  const why = sp.available ? "" : `Unavailable: ${workReasonLabel(sp.reason ?? "")}`;
+  return (
+    `<div class="wiki-thread-inline wiki-thread-split" data-section="threads" data-thread="${esc(card.foldKey)}">` +
+    `<button type="button" class="wiki-thread-split-btn" data-thread-sessions="${esc(card.foldKey)}"` +
+    ` aria-expanded="${sp.open ? "true" : "false"}"` +
+    (sp.available ? ` title="Show this thread's pages under each session that worked on them"` : ` aria-disabled="true" title="${esc(why)}"`) +
+    `><span aria-hidden="true">${sp.open ? "▾" : "▸"} </span>${esc(label)}` +
+    `<span class="wiki-sr-only"> in ${esc(card.name)}${why ? `. ${esc(why)}` : ""}</span></button></div>`
+  );
+}
+
+/** One session's line inside a split thread: its title and span; its rows
+ *  follow. Not a control. */
+export function threadSessionLineHtml(foldKey: string, s: RailSplitSession, now: number): string {
+  const span = threadSpanLabel({ sessions: [{ id: s.ref, provider: "", first: s.first, last: s.last, title: s.title }] }, now, true);
+  return (
+    `<div class="wiki-thread-inline wiki-thread-session" data-section="threads" data-thread="${esc(foldKey)}" data-session="${esc(s.ref)}" title="${esc(s.title)}">` +
+    `<span class="wiki-thread-session-title">${esc(s.title)}</span>` +
+    (span ? ` <span class="wiki-thread-session-span">${esc(span)}</span>` : "") +
+    `</div>`
   );
 }
 
@@ -247,7 +345,7 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** A child card's third meta line: why it joined (`↔ 5 links · series`) or
  *  `anchor`, then the `also <series>` chip. The hover lists the witnesses. */
-function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>): string {
+function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>, boundary?: "split" | "keptApart"): string {
   // The chip names the first series, cut to fit one line of the 260 px rail
   // (width table, src/wiki/CLAUDE.md); the hover names them all in full.
   // Counted and cut by grapheme cluster, so a flag, a skin-toned or ZWJ emoji
@@ -258,7 +356,8 @@ function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>): strin
     ? ` <span class="wiki-thread-chip" title="${esc("Some of its pages are also in: " + child.also.join(", "))}">` +
       `also ${esc(label)}${child.also.length > 1 ? ` +${child.also.length - 1}` : ""}</span>`
     : "";
-  if (!child.why && !also) return "";
+  const own = boundaryChipHtml(boundary);
+  if (!child.why && !also && !own) return "";
   const title = child.witnesses.length ? ` title="${esc("Joined by:\n" + child.witnesses.join("\n"))}"` : "";
   return (
     `${SR_SEP} <span class="wiki-thread-line wiki-thread-why"${title}>` +
@@ -268,6 +367,7 @@ function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>): strin
       .filter(Boolean)
       .map((part, i) => `${i ? " " : ""}<span class="wiki-thread-why-part">${i ? "· " : ""}${esc(part)}</span>`)
       .join("") +
+    own +
     also +
     `</span>`
   );
@@ -460,6 +560,20 @@ export function workGroupMenuHtml(control: RailWorkControl, local: boolean): str
   ].join("");
   // Each set is a labelled `group` (allowed inside `menu`), so the radios and
   // the boxes are announced with their heading.
+  const reset = control.reset
+    ? `<div class="wiki-work-hr" role="separator"></div>` +
+      `<button type="button" role="menuitem" class="wiki-work-opt wiki-work-reset" data-work-reset="1"` +
+      ` title="Clear your stop, connection boxes, page splits and kept-apart threads on this wiki">` +
+      `<span class="wiki-work-dot" aria-hidden="true">↺</span>` +
+      `<span class="wiki-work-opt-text">Reset your splits and groups (${control.reset.count})</span></button>` +
+      control.reset.entries
+        .map(
+          (e) =>
+            `<div class="wiki-work-note wiki-work-def" role="presentation">` +
+            `${esc(e.kind === "split" ? "Own thread" : "Kept separate")}: ${esc(e.title)} — ${esc(BOUNDARY_STATE_TEXT[e.state] ?? e.state)}</div>`,
+        )
+        .join("")
+    : "";
   return (
     `<div class="wiki-work-menu" id="wikiWorkMenu" role="menu" aria-label="Group work threads">` +
     `<div role="group" aria-labelledby="wikiWorkMenuStops"><div class="wiki-work-h" id="wikiWorkMenuStops" role="presentation" aria-hidden="true">Group work by</div>${stops}</div>` +
@@ -467,6 +581,133 @@ export function workGroupMenuHtml(control: RailWorkControl, local: boolean): str
     `<div role="group" aria-labelledby="wikiWorkMenuBoxes"><div class="wiki-work-h" id="wikiWorkMenuBoxes" role="presentation" aria-hidden="true">Connect threads by</div>${boxes}</div>` +
     notes +
     (local ? `<div class="wiki-work-note wiki-work-local-note" role="presentation">This tab only: storage refused the change.</div>` : "") +
+    reset +
+    `</div>`
+  );
+}
+
+/** Where a stored split or kept-apart thread stands, in words (the reset
+ *  area lists the ones that do not apply). */
+const BOUNDARY_STATE_TEXT: Record<string, string> = {
+  dormant: "no recent work on it",
+  missing: "the page is gone",
+  ambiguous: "several pages carry that name",
+  conflict: "two splits name this page",
+  incomplete: "its session data is incomplete",
+  unattributed: "no session's focus on it is on record",
+};
+
+// ── PR 4: the ⋯ menus (plan `muninn-wiki-work-thread-grouping`) ─────────────
+
+/** The work popover's root id — one node, so one ⋯ menu is open at a time. */
+export const WORK_POP_ID = "wikiWorkPop";
+/** The id a disabled item's reason carries (`aria-describedby`). */
+const WORK_POP_WHY_ID = "wikiWorkPopWhy";
+
+function popItem(attrs: string, glyph: string, label: string, small: string): string {
+  return (
+    `<button type="button" role="menuitem" class="wiki-work-pop-item" ${attrs}>` +
+    `<span class="wiki-work-dot" aria-hidden="true">${glyph}</span>` +
+    `<span class="wiki-work-opt-text">${esc(label)}<small>${esc(small)}</small></span></button>`
+  );
+}
+
+function popDisabled(attrs: string, glyph: string, label: string, why: string): string {
+  return (
+    `<button type="button" role="menuitem" class="wiki-work-pop-item off" ${attrs} aria-disabled="true" aria-describedby="${WORK_POP_WHY_ID}">` +
+    `<span class="wiki-work-dot" aria-hidden="true">${glyph}</span>` +
+    `<span class="wiki-work-opt-text">${esc(label)}</span></button>` +
+    `<div class="wiki-work-note" id="${WORK_POP_WHY_ID}" role="presentation">${esc(why)}</div>`
+  );
+}
+
+/** Why Make own thread is not offered, in words. */
+const SPLIT_REASON_TEXT: Record<string, string> = { unattributed: "no session's focus on this page is on record" };
+
+/** A focus row's boundary item (Make own thread, or Return to its thread),
+ *  the whole of the row ⋯ where no series menu applies, and the head of it
+ *  where one does. */
+export function threadRowMenuHtml(relPath: string, action: RowBoundaryAction): string {
+  if (action.kind === "return") {
+    return popItem(`data-work-return="${esc(action.id)}" data-work-return-page="${esc(relPath)}"`, "↩", "Return to its thread", "Let current grouping take the page back");
+  }
+  if (!action.available) {
+    const why = SPLIT_REASON_TEXT[action.reason] ?? workReasonLabel(action.reason);
+    return popDisabled(`data-thread-split="${esc(relPath)}"`, "✂", "Make own thread", `Unavailable: ${why}`);
+  }
+  return popItem(`data-thread-split="${esc(relPath)}"`, "✂", "Make own thread", "Its own card, with the sessions that worked on it");
+}
+
+/** A thread card's ⋯ (Related and Areas): Keep separate, Allow grouping, or
+ *  Return to its thread. */
+export function threadCardMenuHtml(menu: RailThreadMenu): string {
+  switch (menu.action) {
+    case "keep":
+      return popItem(`data-work-keep="${esc(menu.anchor)}"`, "⊘", "Keep separate", "Never group this thread with others");
+    case "allow":
+      return popItem(`data-work-allow="${esc(JSON.stringify(menu.anchors))}"`, "⊕", "Allow grouping", "Let it join a group again");
+    case "return":
+      return popItem(`data-work-return="${esc(menu.id)}" data-work-return-page="${esc(menu.page)}"`, "↩", "Return to its thread", "Let current grouping take the page back");
+  }
+}
+
+/** Why Save as series is not offered, in words (D14). */
+export function saveSeriesBlockText(plan: SaveSeriesPlan): string {
+  const b = plan.block;
+  if (!b) return "";
+  if (b.kind === "several-series") return `Its pages are in several series (${b.labels.join(", ")}); merging series is an editorial decision`;
+  if (b.kind === "uncovered") return `No page that can join a series in: ${b.children.join(", ")}`;
+  return "Every page that can join is in it already";
+}
+
+/** A group card's ⋯: Save as series, or why not. */
+export function groupCardMenuHtml(card: RailGroupCard): string {
+  const plan = card.series;
+  if (!plan) return "";
+  const label = plan.mode === "join" ? `Save as series «${plan.label ?? plan.key}»` : "Save as series…";
+  if (!plan.available) return popDisabled(`data-work-save-series="${esc(card.foldKey)}"`, "☰", label, `Unavailable: ${saveSeriesBlockText(plan)}`);
+  const n = plan.writes.length;
+  return popItem(`data-work-save-series="${esc(card.foldKey)}"`, "☰", label, `Writes series: on ${n} ${n === 1 ? "page" : "pages"}, so they group in every browser`);
+}
+
+const SKIP_TEXT: Record<SaveSeriesSkip, string> = {
+  "other-series": "in another series",
+  "not-counted": "its series does not count it",
+  retired: "retired",
+  "not-editable": "cannot carry a series",
+  "not-narrative": "a reference page",
+};
+
+/** The confirm view (D14): the key, then per child the pages it writes, the
+ *  ones already in, and the ones it skips with why; then Write and Cancel. A
+ *  new key is editable; the reader confirms it. */
+export function saveSeriesConfirmHtml(card: RailGroupCard, plan: SaveSeriesPlan): string {
+  const list = (cls: string, head: string, items: string[]) =>
+    items.length ? `<div class="wiki-work-series-list ${cls}"><span class="wiki-work-series-h">${esc(head)}</span> ${items.map(esc).join(" · ")}</div>` : "";
+  const children = plan.children
+    .map(
+      (c) =>
+        `<div class="wiki-work-series-child"><div class="wiki-work-series-name">${esc(c.name)}</div>` +
+        list("w", "writes:", c.write.map((p) => p.title)) +
+        list("j", "already in:", c.joined.map((p) => p.title)) +
+        list("s", "skips:", c.skipped.map((p) => `${p.title} (${p.series ? `in ${p.series}` : SKIP_TEXT[p.why]})`)) +
+        `</div>`,
+    )
+    .join("");
+  const key =
+    plan.mode === "join"
+      ? `<div class="wiki-work-series-key">Join the series «${esc(plan.label ?? plan.key)}»</div>`
+      : `<label class="wiki-work-series-key">New series key <input type="text" class="wiki-work-series-input" data-work-series-key="1" value="${esc(plan.key)}" maxlength="200" aria-label="New series key"></label>`;
+  const n = plan.writes.length;
+  return (
+    `<div class="wiki-work-series" data-work-series-for="${esc(card.foldKey)}">` +
+    `<div class="wiki-work-series-head">Save «${esc(card.name)}» as a series</div>` +
+    key +
+    children +
+    `<div class="wiki-work-series-go-row">` +
+    `<button type="button" class="wiki-work-series-go" data-work-series-go="1">Write ${n} ${n === 1 ? "page" : "pages"}</button>` +
+    `<button type="button" class="wiki-work-series-cancel" data-work-series-cancel="1">Cancel</button></div>` +
+    `<div class="wiki-work-series-msg" role="status"></div>` +
     `</div>`
   );
 }

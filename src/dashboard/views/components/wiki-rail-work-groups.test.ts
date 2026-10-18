@@ -235,7 +235,9 @@ describe("openWorkCards: Related", () => {
   test("Areas: the control reports each stop and its uncapped card count", () => {
     const { control } = cardsAt("areas");
     expect(control).toMatchObject({ requested: "areas", stop: "areas", evidenceApplies: true });
+    // Sessions (PR 4): the fixture ships no contribution rows, so no card.
     expect(control.stops.map((x) => [x.stop, x.available, x.cards])).toEqual([
+      ["sessions", true, 0],
       ["threads", true, 8],
       ["related", true, 6],
       ["areas", true, 6],

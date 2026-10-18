@@ -3,8 +3,9 @@
  * `muninn-wiki-work-thread-grouping`, «Manual boundaries and persistence»):
  * one versioned record per wiki holding the stop, the three evidence
  * booleans, page splits and kept-apart anchors. This module only PARSES and
- * VALIDATES it; storage and the record state machine are the reader's (PR 3),
- * and applying splits and anchors to membership is PR 4's.
+ * VALIDATES it; storage and the record state machine are the reader's
+ * (`wiki-work-group-record.ts`), and applying splits and anchors to
+ * membership is `wiki-work-boundaries.ts`'.
  *
  * D1's defaults (Related, every box checked) apply at read time: wholesale by
  * {@link resolveWorkGroupPrefs} when no record of this version exists, and

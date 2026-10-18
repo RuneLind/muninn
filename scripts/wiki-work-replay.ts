@@ -59,7 +59,9 @@
  * five-card cap: `--group-stop <sessions|threads|related|areas>` (default
  * `related`) and `--group-evidence <series,related,issue|none>` (default all
  * three, D1). Then the matrix the plan measured: cards · threads in the
- * largest card, per stop and evidence set.
+ * largest card, per stop and evidence set. `--split <relPath>` (repeatable,
+ * PR 4) applies Make own thread to that page before grouping and prints each
+ * split's own sessions and its remainder's key and sessions.
  *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
  * written anywhere but the temp clone, which is removed on exit.
@@ -76,7 +78,7 @@ import { parseWorkedPages } from "../src/wiki/worked-ledger.ts";
 import { threadScore, WORK_WINDOW_MS, workSessionRef, type WorkEvidence, type WorkThread } from "../src/wiki/work-focus.ts";
 import { claudeUsageHttpStatus, claudeUsageJson } from "../src/utils/claude-usage-fetch.ts";
 import { projectCounts, toListing } from "../src/dashboard/routes/wiki-routes.ts";
-import { railInputFor } from "../src/dashboard/views/components/wiki-rail-input.ts";
+import { railInputFor, workBoundariesOf } from "../src/dashboard/views/components/wiki-rail-input.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   pageWorkTerm,
@@ -220,10 +222,11 @@ function printThreadsSection(input: RailInput, at: number): void {
  *  check: cards drawn, threads they hold, and the first card's shape. */
 function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number): void {
   const { stop, toggles } = groupFlags();
+  const splits = process.argv.flatMap((a, i) => (process.argv[i - 1] === "--split" ? [{ id: `replay${i}`, page: a }] : []));
   const filters: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "", status: "", followups: "", waiting: "", project: "", jira: "" };
   const input = railInputFor(
     { allPages: listing, projects: projectCounts(index.pages), activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: null, work: index.work ?? null },
-    { mode: "updated", now: at, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [], threadPin: null, workGroup: { stop, evidence: toggles } },
+    { mode: "updated", now: at, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [], threadPin: null, workGroup: { stop, evidence: toggles, splits } },
   );
   // Activity's weights and gate never move the cards, so the defaults serve.
   const ctl = input.workControl;
@@ -238,7 +241,7 @@ function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number):
     } else if (e.kind === "thread") {
       const c = e.card;
       const pad = c.child ? "      " : "  ";
-      console.log(`${pad}${e.folded ? "▸" : "▾"} ${c.name}${c.pinned ? "  📌" : ""}  — ${threadMetaLine(c, at, true)}${c.child ? `  · ${c.child.why}${c.child.also.length ? `  [also ${c.child.also.join(", ")}]` : ""}` : ""}`);
+      console.log(`${pad}${e.folded ? "▸" : "▾"} ${c.name}${c.pinned ? "  📌" : ""}${c.boundary ? `  [${c.boundary === "split" ? "own thread" : "kept separate"}]` : ""}  — ${threadMetaLine(c, at, true)}${c.child ? `  · ${c.child.why}${c.child.also.length ? `  [also ${c.child.also.join(", ")}]` : ""}` : ""}`);
     } else if (e.kind === "row") {
       console.log(`           ${e.page.relPath}`);
     } else if (e.kind === "thread-group-end") {
@@ -258,6 +261,20 @@ function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number):
       ? `${first.label} group «${first.name}», ${first.threads} children, ${first.children.length} drawn, ${new Set(groupWorkThreads({ work: index.work ?? null, allPages: listing, now: at, stop, toggles }).groups[0]?.children.flatMap((c) => c.owned.map((p) => p.relPath)) ?? []).size} focus pages`
       : `thread «${first.name}», ${first.focus.length} focus pages`;
   console.log(`  five-card check: ${cards.length} cards hold ${held} of ${total} threads; first card: ${firstShape}`);
+  if (!splits.length) return;
+  // PR 4: each --split page's own thread and its source's remainder (D15).
+  const b = workBoundariesOf(index.work ?? null, listing, { splits, keptApart: [] });
+  const ids = (t: { sessions: { id: string }[] }) => t.sessions.map((x) => x.id.slice(0, 8)).join(",");
+  for (const d of b.definitions) {
+    const own = b.threads.find((x) => x.split?.id === d.id);
+    if (!own) {
+      console.log(`  split ${d.stored}: ${d.state}`);
+      continue;
+    }
+    const rem = b.threads.find((x) => x.source.key === own.source.key && x.sub === 0);
+    console.log(`  split ${d.stored}: own thread, ${own.thread.sessions.length} sessions (${ids(own.thread)}); source ${own.source.key} had ${own.source.pages.length} pages, ${own.source.sessions.length} sessions`);
+    console.log(rem ? `    remainder key ${rem.thread.key}, ${rem.thread.pages.length} pages, ${rem.thread.sessions.length} sessions (${ids(rem.thread)})` : `    remainder: none (the source emptied)`);
+  }
 }
 
 /** Every series that holds a ghost after the lift, and why each ghost is one —

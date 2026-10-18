@@ -120,6 +120,23 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
         files: files.map(([f, edits]) => ({ p: f, edits, firstMs: at - 30 * 60_000, lastMs: at })),
       };
     });
+    // PR 4's focus rows: a second session on the focus wiki's first lone
+    // thread, so that card offers `▸ split into 2 sessions`. One edit, 7.5
+    // days old (named in its prompt, so a focus): it adds 0.07 raw, which
+    // leaves the card order as it was.
+    if (wiki === FOCUSW) {
+      const at = NOW - 180 * HOUR;
+      sessions.push({
+        id: "gx",
+        provider: "claude",
+        title: "session gx",
+        first: at - 30 * 60_000,
+        last: at,
+        bulk: false,
+        text: { from: "prompt", paths: [FLONE[0]!], links: [], files: [] },
+        files: [{ p: FLONE[0]!, edits: 1, firstMs: at - 30 * 60_000, lastMs: at }],
+      });
+    }
     const since = Number(url.searchParams.get("since"));
     const until = url.searchParams.has("until") ? Number(url.searchParams.get("until")) : Date.now();
     return json({ form: "sessions", root, since, until, limit: 200, truncated: false, sessions });
@@ -545,7 +562,8 @@ test.describe("Wiki rail: grouped work threads", () => {
   test("a11y: the menu's two sets are labelled groups; a disabled box is described by its reason", async ({ page }) => {
     await openReader(page);
     await groupBtn(page).click();
-    await expect(menu(page).getByRole("group", { name: "Group work by" }).getByRole("menuitemradio")).toHaveCount(3);
+    // Four stops since PR 4 (Sessions first).
+    await expect(menu(page).getByRole("group", { name: "Group work by" }).getByRole("menuitemradio")).toHaveCount(4);
     await expect(menu(page).getByRole("group", { name: "Connect threads by" }).getByRole("menuitemcheckbox")).toHaveCount(3);
     // Each heading is the group's name only, not also a line inside it.
     for (const name of ["Group work by", "Connect threads by"])
@@ -752,9 +770,12 @@ test.describe("Wiki rail: grouped work threads", () => {
     await page.keyboard.press("Escape");
     await expect(menu(page)).toHaveCount(0);
     expect(await page.evaluate(() => document.activeElement?.hasAttribute("data-work-group-menu"))).toBe(true);
-    // ArrowDown on the button opens; Home is the first stop; Enter picks Threads.
+    // ArrowDown on the button opens; Home is the first stop (Sessions, PR 4);
+    // one down is Threads; Enter picks it.
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Home");
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("data-work-stop"))).toBe("sessions");
+    await page.keyboard.press("ArrowDown");
     expect(await page.evaluate(() => document.activeElement?.getAttribute("data-work-stop"))).toBe("threads");
     await page.keyboard.press("Enter");
     await expect(menu(page)).toHaveCount(0);
@@ -1182,6 +1203,8 @@ test.describe("Wiki rail: grouped work threads", () => {
  */
 test.describe("Wiki rail: focus after a repaint", () => {
   const QGROUP = `group:series:${FSERIES}`;
+  /** A kept-apart anchor no thread holds: the record has a Reset item and no card moves. */
+  const FDORMANT = "notes/none.md";
   /** A CSS string literal: JSON's escapes are CSS's for `"` and `\`. */
   const lit = (v: string) => JSON.stringify(v);
   const qCard = (p: Page) => p.locator(`#wikiList > .wiki-thread-card[data-thread-group=${lit(QGROUP)}]`);
@@ -1200,6 +1223,12 @@ test.describe("Wiki rail: focus after a repaint", () => {
     { name: "child 📌", loc: (p) => qBody(p).locator(".wiki-thread-card").nth(1).locator(".wiki-thread-pin") },
     { name: "thread 📌", loc: (p) => loneCard(p, FLONE[0]!).locator(".wiki-thread-pin") },
     { name: "+ N more threads", loc: (p) => qBody(p).locator(".wiki-thread-more") },
+    // PR 4: a child's ⋯, a lone card's ⋯, `▸ split into N sessions` and the
+    // Group menu's Reset item (the seeded record holds a dormant anchor).
+    { name: "child ⋯", loc: (p) => qBody(p).locator(".wiki-thread-card").nth(1).locator("[data-work-card-menu]") },
+    { name: "thread ⋯", loc: (p) => loneCard(p, FLONE[0]!).locator("[data-work-card-menu]") },
+    { name: "split into sessions", loc: (p) => p.locator(`#wikiList [data-thread-sessions=${lit(`thread:${FLONE[0]}`)}]`) },
+    { name: "Reset item", menu: true, loc: (p) => p.locator("#wikiList [data-work-reset]") },
     { name: "shared context +N", loc: (p) => qBody(p).locator(".wiki-thread-ctx-more") },
     { name: "Activity series fold", loc: (p) => p.locator("#wikiList .wiki-list-group.series .wiki-group-fold").first() },
     { name: "Bookkeeping fold", loc: (p) => p.locator("#wikiList .wiki-sec-fold").first() },
@@ -1219,6 +1248,9 @@ test.describe("Wiki rail: focus after a repaint", () => {
         ["data-work-evidence", "evidence"],
         ["data-thread-more", "more"],
         ["data-thread-ctx-more", "ctx"],
+        ["data-work-card-menu", "cardmenu"],
+        ["data-thread-sessions", "split"],
+        ["data-work-reset", "reset"],
       ] as const) {
         if (a(attr) !== null) return `${kind}:${a(attr)}`;
       }
@@ -1319,7 +1351,7 @@ test.describe("Wiki rail: focus after a repaint", () => {
   const CAUSES: Cause[] = [
     {
       name: "storage: another tab's grouping edit",
-      fire: (p, i) => storageEvent(p, workGroupKey(FOCUSW), JSON.stringify({ version: 1, evidence: { issue: i % 2 === 1 } })),
+      fire: (p, i) => storageEvent(p, workGroupKey(FOCUSW), JSON.stringify({ version: 1, evidence: { issue: i % 2 === 1 }, keptApart: [FDORMANT] })),
     },
     {
       name: "storage: another tab's pin reorders the cards",
@@ -1378,11 +1410,12 @@ test.describe("Wiki rail: focus after a repaint", () => {
   for (const cause of CAUSES) {
     test(`focus table: ${cause.name}`, async ({ page }) => {
       test.setTimeout(120_000);
-      await page.addInitScript(([k, v]) => {
+      await page.addInitScript(([k, v, gk, gv]) => {
         if (localStorage.getItem("__seeded")) return;
         localStorage.setItem("__seeded", "1");
         localStorage.setItem(k!, v!);
-      }, [foldsKey(FOCUSW), JSON.stringify([QGROUP])] as const);
+        localStorage.setItem(gk!, gv!);
+      }, [foldsKey(FOCUSW), JSON.stringify([QGROUP, `thread:${FLONE[0]}`]), workGroupKey(FOCUSW), JSON.stringify({ version: 1, keptApart: [FDORMANT] })] as const);
       if (cause.clock) await page.clock.install();
       await cause.setup?.(page);
       await openReader(page, FOCUSW);

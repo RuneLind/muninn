@@ -22,12 +22,14 @@
  * moment. Pure and DOM-free; the reader does the storage IO.
  */
 
+import { normalizeRel } from "./wiki-nav.ts";
 import {
   parseWorkGroupPrefs,
   resolveWorkGroupPrefs,
   WORK_GROUP_PREFS_VERSION,
   type WorkGroupEvidenceToggles,
   type WorkGroupPrefs,
+  type WorkGroupSplit,
   type WorkGroupStop,
 } from "./wiki-work-group-prefs.ts";
 
@@ -118,32 +120,142 @@ export function sameWorkGroupRecord(a: WorkGroupRecord | null | undefined, b: Wo
   return canonicalWorkGroupRecord(a) === canonicalWorkGroupRecord(b);
 }
 
-/** One explicit edit from the Group menu. PR 4 adds splits and anchors. */
-export type WorkGroupEdit = { stop: WorkGroupStop } | { evidence: keyof WorkGroupEvidenceToggles; value: boolean };
+/**
+ * One explicit edit: a stop or a box from the Group menu, or (PR 4) a
+ * boundary from a ⋯ menu — a page split added or removed, a thread kept apart
+ * or allowed to group again, the kept-apart anchors moved (a render's
+ * re-anchor), or Reset, which clears the stop, the boxes, the splits and the
+ * anchors (D1) and keeps every field this build does not understand.
+ */
+export type WorkGroupEdit =
+  | { stop: WorkGroupStop }
+  | { evidence: keyof WorkGroupEvidenceToggles; value: boolean }
+  | { split: WorkGroupSplit }
+  | { unsplit: { id: string; page: string } }
+  | { keepApart: string }
+  | { allowGrouping: readonly string[] }
+  | { reanchor: readonly (readonly [string, string])[] }
+  | { reset: true };
+
+/**
+ * A list edit as the patch holds it: an OPERATION by id or page, never the
+ * list as this tab last saw it. Every write lays the operations, in order, on
+ * the list as read at that moment, so two tabs that add different splits keep
+ * both, and an entry this build does not understand is never touched.
+ */
+export type WorkGroupListOp =
+  | { op: "addSplit"; split: WorkGroupSplit }
+  | { op: "removeSplit"; id: string; page: string }
+  | { op: "addAnchor"; page: string }
+  | { op: "removeAnchors"; pages: string[] }
+  | { op: "moveAnchors"; moves: [string, string][] }
+  | { op: "reset" };
+
+/** The patch's list operations, under a key no stored record carries: the
+ *  merge reads it and never copies it into a record. */
+export const WORK_GROUP_PATCH_OPS = "listOps";
 
 /** A record's evidence object, or none when it holds no object there. */
 const evidenceOf = (r: WorkGroupRecord | null | undefined): Record<string, unknown> => (r && isRecord(r.evidence) ? r.evidence : {});
 
+const listOf = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+
+/** The list ops an edit is, or null for a stop or a box. */
+function listOpOf(edit: WorkGroupEdit): WorkGroupListOp | null {
+  if ("split" in edit) return { op: "addSplit", split: { id: edit.split.id, page: normalizeRel(edit.split.page) } };
+  if ("unsplit" in edit) return { op: "removeSplit", id: edit.unsplit.id, page: normalizeRel(edit.unsplit.page) };
+  if ("keepApart" in edit) return { op: "addAnchor", page: normalizeRel(edit.keepApart) };
+  if ("allowGrouping" in edit) return { op: "removeAnchors", pages: edit.allowGrouping.map(normalizeRel) };
+  if ("reanchor" in edit) return { op: "moveAnchors", moves: edit.reanchor.map(([a, b]) => [normalizeRel(a), normalizeRel(b)]) };
+  if ("reset" in edit) return { op: "reset" };
+  return null;
+}
+
+/** `rec` (a record of this version, mutated) with one list op applied.
+ *  Entries are matched by id or by normalized page; anything else is kept. */
+function applyListOp(rec: WorkGroupRecord, op: WorkGroupListOp): void {
+  const splitPage = (x: unknown) => (isRecord(x) && typeof x.page === "string" ? normalizeRel(x.page) : null);
+  const anchor = (x: unknown) => (typeof x === "string" ? normalizeRel(x) : null);
+  switch (op.op) {
+    case "addSplit": {
+      const cur = listOf(rec.splits);
+      // Idempotent: another tab's split of the same page (or id) stands.
+      if (cur.some((x) => (isRecord(x) && x.id === op.split.id) || splitPage(x) === op.split.page)) return;
+      rec.splits = [...cur, { id: op.split.id, page: op.split.page }];
+      return;
+    }
+    case "removeSplit":
+      rec.splits = listOf(rec.splits).filter((x) => !((isRecord(x) && x.id === op.id) || splitPage(x) === op.page));
+      return;
+    case "addAnchor": {
+      const cur = listOf(rec.keptApart);
+      if (!cur.some((x) => anchor(x) === op.page)) rec.keptApart = [...cur, op.page];
+      return;
+    }
+    case "removeAnchors":
+      rec.keptApart = listOf(rec.keptApart).filter((x) => !op.pages.includes(anchor(x) ?? "\u0000"));
+      return;
+    case "moveAnchors": {
+      // Two anchors moved onto one page collapse to one entry.
+      let cur = listOf(rec.keptApart);
+      for (const [from, to] of op.moves) {
+        if (!cur.some((x) => anchor(x) === from)) continue;
+        cur = cur.filter((x) => anchor(x) !== from);
+        if (!cur.some((x) => anchor(x) === to)) cur.push(to);
+      }
+      rec.keptApart = cur;
+      return;
+    }
+    case "reset":
+      delete rec.stop;
+      delete rec.evidence;
+      delete rec.splits;
+      delete rec.keptApart;
+      return;
+  }
+}
+
 /** `base` with `edit` applied; every other field of `base` is kept verbatim,
- *  unknown evidence keys included. A later build's record is no base: the
- *  edit starts a record of this version. */
+ *  unknown evidence keys and list entries included. A later build's record is
+ *  no base: the edit starts a record of this version. */
 export function applyWorkGroupEdit(base: WorkGroupRecord | null, edit: WorkGroupEdit): WorkGroupRecord {
   const own = foreignWorkGroupRecord(base) ? null : base;
   const out: WorkGroupRecord = { ...(own ?? {}), version: WORK_GROUP_PREFS_VERSION };
-  if ("stop" in edit) out.stop = edit.stop;
-  else out.evidence = { ...evidenceOf(own), [edit.evidence]: edit.value };
+  const op = listOpOf(edit);
+  if (op) applyListOp(out, op);
+  else if ("stop" in edit) out.stop = edit.stop;
+  else if ("evidence" in edit) out.evidence = { ...evidenceOf(own), [edit.evidence]: edit.value };
   return out;
 }
 
-/** `base` with a tab's unpersisted fields (`patch`) laid on top: each field
- *  the patch holds wins, evidence box by box; every other field of `base` is
- *  kept verbatim. A later build's record is no base (the patch alone). No
- *  patch: `base` itself. */
+/** A tab's patch with one more edit: a stop or a box as the field itself, a
+ *  list edit as one more operation. Reset supersedes everything the patch
+ *  held before it. */
+export function patchWorkGroupEdit(patch: WorkGroupRecord | null, edit: WorkGroupEdit): WorkGroupRecord {
+  const op = listOpOf(edit);
+  if (!op) return applyWorkGroupEdit(patch, edit);
+  if (op.op === "reset") return { version: WORK_GROUP_PREFS_VERSION, [WORK_GROUP_PATCH_OPS]: [op] };
+  const ops = listOf(patch?.[WORK_GROUP_PATCH_OPS]) as WorkGroupListOp[];
+  return { ...(patch ?? {}), version: WORK_GROUP_PREFS_VERSION, [WORK_GROUP_PATCH_OPS]: [...ops, op] };
+}
+
+/** `base` with a tab's unpersisted fields (`patch`) laid on top: a reset in
+ *  the patch first, then each field the patch holds wins (evidence box by
+ *  box), then its list operations in order on the lists as `base` holds
+ *  them; every other field of `base` is kept verbatim. A later build's record
+ *  is no base (the patch alone). No patch: `base` itself. */
 export function mergeWorkGroupPatch(base: WorkGroupRecord | null, patch: WorkGroupRecord | null): WorkGroupRecord | null {
   if (!patch) return base;
   const own = foreignWorkGroupRecord(base) ? null : base;
-  const out: WorkGroupRecord = { ...(own ?? {}), ...patch, version: WORK_GROUP_PREFS_VERSION };
-  if (isRecord(patch.evidence)) out.evidence = { ...evidenceOf(own), ...patch.evidence };
+  const ops = listOf(patch[WORK_GROUP_PATCH_OPS]) as WorkGroupListOp[];
+  const out: WorkGroupRecord = { ...(own ?? {}), version: WORK_GROUP_PREFS_VERSION };
+  if (ops[0]?.op === "reset") applyListOp(out, ops[0]);
+  const baseEvidence = evidenceOf(out);
+  const fields: WorkGroupRecord = { ...patch };
+  delete fields[WORK_GROUP_PATCH_OPS];
+  Object.assign(out, fields, { version: WORK_GROUP_PREFS_VERSION });
+  if (isRecord(patch.evidence)) out.evidence = { ...baseEvidence, ...patch.evidence };
+  for (const op of ops) if (op.op !== "reset") applyListOp(out, op);
   return out;
 }
 
@@ -173,7 +285,14 @@ export type WorkGroupRecordTrigger =
   | { kind: "boot"; stored: WorkGroupRecord | null | undefined }
   | { kind: "storage"; stored: WorkGroupRecord | null | undefined; booted: boolean }
   | { kind: "click"; stored: WorkGroupRecord | null | undefined; edit: WorkGroupEdit }
-  | { kind: "render"; stored: WorkGroupRecord | null | undefined; focused: boolean };
+  | {
+      kind: "render";
+      stored: WorkGroupRecord | null | undefined;
+      focused: boolean;
+      /** PR 4: the kept-apart anchors this render re-anchors
+       *  (`applyWorkBoundaries`' `reanchor`, over `held`). */
+      reanchor?: readonly (readonly [string, string])[];
+    };
 
 export interface WorkGroupRecordStep {
   state: WorkGroupRecordState;
@@ -216,14 +335,14 @@ export function workGroupRecordStep(state: WorkGroupRecordState, t: WorkGroupRec
       // `known` becomes that read, so a refused write is retried by R6 rather
       // than dropped by R3 for a record storage already holds.
       if (t.stored === undefined) {
-        const patch = applyWorkGroupEdit(state.patch, t.edit);
+        const patch = patchWorkGroupEdit(state.patch, t.edit);
         const held = applyWorkGroupEdit(state.held, t.edit);
         // C4: storage last held a later build's record — never written over.
         if (foreignWorkGroupRecord(state.known)) return none({ held, known: state.known, patch, failed: true });
         return { state: { held, known: undefined, patch, failed: state.failed }, write: { value: held }, repaint: false };
       }
       const kept = state.known === undefined || sameWorkGroupRecord(t.stored, state.known) ? state.patch : null;
-      const patch = applyWorkGroupEdit(kept, t.edit);
+      const patch = patchWorkGroupEdit(kept, t.edit);
       const held = mergeWorkGroupPatch(t.stored, patch)!;
       // C4: storage holds a later build's record. Never written over: the
       // edit lives in this tab (D1 plus the patch), «this tab only».
@@ -244,6 +363,19 @@ export function workGroupRecordStep(state: WorkGroupRecordState, t: WorkGroupRec
       // R3: another tab wrote and this tab never heard — adopt it. A change
       // that lived only in memory after a refused write is dropped here.
       if (!sameWorkGroupRecord(t.stored, state.known)) return none(adopt(t.stored));
+      // A1–A3: a kept-apart anchor moved to its thread's newest focus page.
+      // The move joins the patch like an edit (a list operation, so another
+      // tab's anchors are never touched) and is written by R6 below while this
+      // tab has focus; without focus it lives in memory (R4).
+      if (t.reanchor?.length && !foreignWorkGroupRecord(t.stored)) {
+        const edit: WorkGroupEdit = { reanchor: t.reanchor };
+        const held = applyWorkGroupEdit(state.held, edit);
+        if (!sameWorkGroupRecord(held, state.held)) {
+          const moved = { held, known: state.known, patch: patchWorkGroupEdit(state.patch, edit), failed: state.failed };
+          if (!t.focused) return none(moved);
+          return { state: moved, write: { value: held }, repaint: false };
+        }
+      }
       // R5: storage already holds `held` (the refused write was of a record
       // storage held already): the patch is persisted, so it and the note clear.
       if (sameWorkGroupRecord(state.held, t.stored)) return none(state.patch === null && !state.failed ? state : adopt(t.stored));

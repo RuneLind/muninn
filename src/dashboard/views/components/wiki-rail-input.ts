@@ -38,19 +38,27 @@ import {
   type RailGroupCard,
   type RailInput,
   type RailThreadCard,
+  type RailSessionSplit,
   type RailWorkCard,
   type RailWorkControl,
 } from "./wiki-recents.ts";
 import {
   groupWorkThreads,
+  projectSessionCards,
   projectWorkGroups,
+  readWorkEvidence,
+  threadSessionsAvailability,
+  workSessionCards,
   type WorkGroupChild,
   type WorkGroupChildView,
   type WorkWitness,
 } from "./wiki-work-groups.ts";
-import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
+import { WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupSplit, type WorkGroupStop } from "./wiki-work-group-prefs.ts";
+import { applyWorkBoundaries, type BoundedThread, type WorkBoundaries } from "./wiki-work-boundaries.ts";
+import { saveAsSeriesPlan } from "./wiki-work-series.ts";
+import { pageAddedMs } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
-import { workSessionRef, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
+import { WORK_WINDOW_MS, workSessionRef, type IndexWork, type WorkThread, type WorkThreadSession } from "../../../wiki/work-focus.ts";
 import {
   claimOwnedFocus,
   newestFocusPage,
@@ -103,6 +111,26 @@ export interface RailWorkGroupView {
   evidence: WorkGroupEvidenceToggles;
   /** Group fold keys whose `+ N more threads` the reader pressed (this tab). */
   moreOpen?: readonly string[];
+  /** PR 4: the reader's page splits and kept-apart anchors (D5). */
+  splits?: readonly WorkGroupSplit[];
+  keptApart?: readonly string[];
+  /** PR 4: thread fold keys whose `▸ split into N sessions` is open (this tab). */
+  sessionsOpen?: readonly string[];
+  /** PR 4: Save as series may write this wiki (absent on a read-only one, D14). */
+  seriesWritable?: boolean;
+  /** PR 4: the boundaries already applied this render (`workBoundariesOf`
+   *  over `splits` and `keptApart`), so the reader computes them once. */
+  boundaries?: WorkBoundaries;
+}
+
+/** The reader's boundaries over this listing's threads — the one call the
+ *  rail, the pin's anchor and the row ⋯ all read (`wiki-work-boundaries.ts`). */
+export function workBoundariesOf(
+  work: RailWikiFacts["work"],
+  allPages: readonly WikiListing[],
+  view: Pick<RailWorkGroupView, "splits" | "keptApart"> | null | undefined,
+): WorkBoundaries {
+  return applyWorkBoundaries({ work, allPages, splits: view?.splits ?? [], keptApart: view?.keptApart ?? [] });
 }
 
 
@@ -136,8 +164,9 @@ export function openThreadCards(
   now: number,
   allPages: readonly WikiListing[] = pages,
   asOfMs?: number,
+  rank?: WorkBoundaries["rank"],
 ): RailThreadCard[] {
-  const cards = threadCardBodies(threads, pages, filters, pin, now, allPages, asOfMs, THREAD_CARDS_MAX);
+  const cards = threadCardBodies(threads, pages, filters, pin, now, allPages, asOfMs, THREAD_CARDS_MAX, rank);
   return cards.map((c, i) => {
     const stored = groupFoldState(foldState, c.foldKey);
     const defaultOpen = i === 0;
@@ -160,19 +189,27 @@ function threadCardBodies(
   allPages: readonly WikiListing[],
   asOfMs: number | undefined,
   cap: number,
+  rank?: WorkBoundaries["rank"],
 ): Omit<RailThreadCard, "open" | "toggleKey">[] {
   if (!railSectionsVisible(filters)) return [];
-  const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs);
+  const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs, rank);
   if (!ranked.length) return [];
   const byRel = new Map<string, WikiListing>();
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const visible = new Set(filterPages(pages as WikiListing[], filters).map((p) => normalizeRel(p.relPath)));
   const cards: Omit<RailThreadCard, "open" | "toggleKey">[] = [];
+  // A split page's card rides with its source's drawn card past the cap
+  // (`splitRides`), so Make own thread never moves a page off the section.
+  let counted = 0;
+  const drawnSources = new Set<string>();
   for (const { t, score, pinned, owned } of ranked) {
-    if (cards.length >= cap) break;
+    const rides = splitRides(rank, t.key, drawnSources);
+    if (counted >= cap && !rides) continue;
     // The created window stays on the reader's `now`.
     const rows = threadCardRows(owned, t.touched, visible, byRel, now);
     if (!rows.focus.length) continue;
+    if (!rides) counted++;
+    drawnSources.add(rank?.get(t.key)?.rank.key ?? t.key);
     cards.push({
       key: t.key,
       foldKey: threadFoldKey(t.key),
@@ -190,6 +227,15 @@ function threadCardBodies(
     });
   }
   return cards;
+}
+
+/** Does the card of thread `key` ride past the five-card cap? Only a split
+ *  page's (`sub` > 0) whose source already has a drawn card: the split
+ *  follows its source (D16), and without this a source at the cap would push
+ *  the page the reader just split off the section (measured on a live wiki). */
+function splitRides(rank: WorkBoundaries["rank"] | undefined, key: string, drawnSources: ReadonlySet<string>): boolean {
+  const r = rank?.get(key);
+  return !!r && r.sub > 0 && drawnSources.has(r.rank.key);
 }
 
 /** One thread as the Threads stop ranks it: its score, whether it holds the
@@ -215,6 +261,10 @@ export function rankThreadCards(
   pin: string | null,
   now: number,
   asOfMs?: number,
+  /** PR 4: what a split page and its remainder rank by (`WorkBoundaries.rank`):
+   *  the source thread as shipped, then `sub`, so a split follows its source.
+   *  Absent, or a thread not in it: the thread itself (today's order). */
+  rank?: WorkBoundaries["rank"],
 ): RankedThread[] {
   const usable = usableThreads(threads);
   if (!usable.length) return [];
@@ -227,7 +277,14 @@ export function rankThreadCards(
   const ranked = usable
     .map((t) => ({
       t,
-      score: threadRankScore(t, byRel, at),
+      by: rank?.get(t.key)?.rank ?? t,
+      sub: rank?.get(t.key)?.sub ?? 0,
+    }))
+    .map(({ t, by, sub }) => ({
+      t,
+      by,
+      sub,
+      score: threadRankScore(by, byRel, at),
       holdsPin: !!pinKey && threadHoldsPin(t, byRel, pinKey),
     }))
     .map((x) => {
@@ -241,15 +298,16 @@ export function rankThreadCards(
       (a, b) =>
         Number(b.pinned) - Number(a.pinned) ||
         b.score - a.score ||
-        (a.t.key < b.t.key ? -1 : a.t.key > b.t.key ? 1 : 0),
+        (a.by.key < b.by.key ? -1 : a.by.key > b.by.key ? 1 : 0) ||
+        a.sub - b.sub,
     );
   const taken = new Set<string>();
   const order = workTermOrder(at);
   return ranked.map(({ t, score, pinned }) => ({ t, score, pinned, owned: claimOwnedFocus(t.pages, byRel, taken, order) }));
 }
 
-/** The stops PR 3 draws, finest first. Sessions is PR 4's. */
-const DRAWN_STOPS: readonly WorkGroupStop[] = ["threads", "related", "areas"];
+/** The stops drawn, finest first (Sessions since PR 4). */
+const DRAWN_STOPS: readonly WorkGroupStop[] = WORK_GROUP_STOPS;
 
 /** A page's title for a witness line. */
 function witnessTitle(rel: string, byRel: ReadonlyMap<string, WikiListing>): string {
@@ -310,16 +368,21 @@ export function openWorkCards(
   now: number,
   allPages: readonly WikiListing[],
   view: RailWorkGroupView,
+  boundaries: WorkBoundaries = view.boundaries ?? workBoundariesOf(work, allPages, view),
 ): { cards: RailWorkCard[]; control: RailWorkControl } {
-  // PR 3 draws no Sessions stop; a record a later build wrote reads as Threads.
-  const requested: WorkGroupStop = view.stop === "sessions" ? "threads" : view.stop;
-  const grouping = groupWorkThreads({ work, allPages, now, stop: requested, toggles: view.evidence, pin });
+  const requested = view.stop;
+  // Page assignments first (D5): the model groups the units after the splits.
+  const units = boundaries.units;
+  const grouping = groupWorkThreads({ work, allPages, now, stop: requested, toggles: view.evidence, pin, units });
+  const at = workGroupingInstant(now, work?.asOfMs);
   // Uncapped card counts. Threads counts the cards `openThreadCards` draws (its
   // own order and ownership, which a score tie can tell apart from the model's).
   const visibleAt = (stop: WorkGroupStop) =>
     stop === "threads"
-      ? threadCardBodies(work?.threads, pool, filters, pin, now, allPages, work?.asOfMs, Infinity).length
-      : projectWorkGroups(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin }), pool, filters, now, Infinity).length;
+      ? threadCardBodies(boundaries.derived, pool, filters, pin, now, allPages, work?.asOfMs, Infinity, boundaries.rank).length
+      : stop === "sessions"
+        ? projectSessionCards(stop === requested ? grouping.sessions : workSessionCards(work, allPages, at), pool, filters, Infinity).length
+        : projectWorkGroups(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin, units }), pool, filters, now, Infinity).length;
   const sections = railSectionsVisible(filters);
   const control: RailWorkControl = {
     requested,
@@ -330,35 +393,105 @@ export function openWorkCards(
       const a = grouping.availability[stop];
       return { stop, available: a.available, reasons: [...a.reasons], cards: sections && a.available ? visibleAt(stop) : 0 };
     }),
+    ...resetArea(boundaries, view, allPages),
   };
-  if (grouping.stop === "threads" || !sections) {
-    return { cards: openThreadCards(work?.threads, pool, filters, foldState, pin, now, allPages, work?.asOfMs), control };
-  }
-
   const byRel = new Map<string, WikiListing>();
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
-  const more = new Set((view.moreOpen ?? []).map(normalizeFoldKey));
-  const views = projectWorkGroups(grouping, pool, filters, now).slice(0, THREAD_CARDS_MAX);
   const fold = (foldKey: string, defaultOpen: boolean) => {
     const stored = groupFoldState(foldState, foldKey);
     return { open: stored ? stored === "open" : defaultOpen, toggleKey: defaultOpen ? closedFoldKey(foldKey) : foldKey };
   };
-  const threadCard = (cv: WorkGroupChildView, defaultOpen: boolean, child?: RailThreadCard["child"]): RailThreadCard => ({
-    key: cv.child.key,
-    foldKey: cv.child.foldKey,
-    ...fold(cv.child.foldKey, defaultOpen),
-    name: cv.child.name,
-    pinned: cv.child.pinned,
-    pinAnchor: cv.child.pinAnchor,
-    focus: cv.focus,
-    created: cv.created,
-    // A child's touched pages are the group's shared context, listed once.
-    touched: child ? [] : cv.touched,
-    sessions: cv.child.unit.thread.sessions,
-    movesYou: cv.movesYou,
-    score: cv.child.score,
-    ...(child ? { child } : {}),
-  });
+
+  // The Sessions stop (D19): one card per session, the newest session owning
+  // a page, later ones linking it on `also in:`. No splits, no kept-apart, no 📌.
+  if (grouping.stop === "sessions") {
+    if (!sections) return { cards: [], control };
+    const window = now - WORK_WINDOW_MS;
+    const cards = projectSessionCards(grouping.sessions, pool, filters)
+      .slice(0, THREAD_CARDS_MAX)
+      .map(({ card: sc, rows, alsoIn, touched }, i): RailThreadCard => ({
+        key: sc.ref,
+        foldKey: sc.foldKey,
+        ...fold(sc.foldKey, i === 0),
+        // The ledger's session title, never a derived name.
+        name: sc.title || sc.id,
+        pinned: false,
+        pinAnchor: "",
+        focus: rows,
+        created: rows.filter((p) => pageAddedMs(p, now) >= window).map((p) => normalizeRel(p.relPath)),
+        touched,
+        sessions: [{ id: sc.id, provider: sc.provider, first: sc.first, last: sc.last, title: sc.title }],
+        movesYou: rows.reduce((n, p) => n + (p.movesYou ?? 0), 0),
+        score: 0,
+        session: { ref: sc.ref },
+        alsoIn,
+      }));
+    return { cards, control };
+  }
+
+  const evidence = readWorkEvidence(work?.evidence, work?.threads);
+  const bounded = new Map<string, BoundedThread>(boundaries.threads.map((b) => [b.thread.key, b] as const));
+  const sessionsOpen = new Set((view.sessionsOpen ?? []).map(normalizeFoldKey));
+  /** The reader's boundary on a card, its ⋯ (Related and Areas), and its
+   *  `▸ split into N sessions` (every stop but Sessions). */
+  const decorate = (card: RailThreadCard, menus: boolean): RailThreadCard => {
+    const b = bounded.get(card.key);
+    if (!b) return card;
+    const out: RailThreadCard = { ...card };
+    if (b.split) out.boundary = "split";
+    else if (b.keptApart) out.boundary = "keptApart";
+    if (menus) {
+      out.menu = b.split
+        ? { action: "return", id: b.split.id, page: b.split.page }
+        : b.keptApart
+          ? { action: "allow", anchors: [...b.keptApart] }
+          : { action: "keep", anchor: card.pinAnchor };
+    }
+    const split = sessionSplitOf(b, card, work, allPages, at, evidence, sessionsOpen.has(normalizeFoldKey(card.foldKey)));
+    if (split) out.sessionSplit = split;
+    return out;
+  };
+
+  if (grouping.stop === "threads" || !sections) {
+    const cards = openThreadCards(boundaries.derived, pool, filters, foldState, pin, now, allPages, work?.asOfMs, boundaries.rank);
+    return { cards: cards.map((c) => decorate(c, false)), control };
+  }
+
+  const more = new Set((view.moreOpen ?? []).map(normalizeFoldKey));
+  // At most `THREAD_CARDS_MAX` cards, a split page's card riding with its
+  // source's drawn card past the cap (`splitRides`).
+  const views: ReturnType<typeof projectWorkGroups> = [];
+  {
+    let counted = 0;
+    const drawnSources = new Set<string>();
+    for (const gv of projectWorkGroups(grouping, pool, filters, now, Infinity)) {
+      const rides = gv.group.kind === "thread" && splitRides(boundaries.rank, gv.children[0]!.child.key, drawnSources);
+      if (counted >= THREAD_CARDS_MAX && !rides) continue;
+      if (!rides) counted++;
+      views.push(gv);
+      for (const cv of gv.children) drawnSources.add(cv.child.unit.rank.key);
+    }
+  }
+  const threadCard = (cv: WorkGroupChildView, defaultOpen: boolean, child?: RailThreadCard["child"]): RailThreadCard =>
+    decorate(
+      {
+        key: cv.child.key,
+        foldKey: cv.child.foldKey,
+        ...fold(cv.child.foldKey, defaultOpen),
+        name: cv.child.name,
+        pinned: cv.child.pinned,
+        pinAnchor: cv.child.pinAnchor,
+        focus: cv.focus,
+        created: cv.created,
+        // A child's touched pages are the group's shared context, listed once.
+        touched: child ? [] : cv.touched,
+        sessions: cv.child.unit.thread.sessions,
+        movesYou: cv.movesYou,
+        score: cv.child.score,
+        ...(child ? { child } : {}),
+      },
+      true,
+    );
   const cards = views.map((gv, i): RailWorkCard => {
     const g = gv.group;
     if (g.kind === "thread") return threadCard(gv.children[0]!, i === 0);
@@ -388,8 +521,14 @@ export function openWorkCards(
         seen.add(k);
         context.push(p);
       }
+    // Sessions deduplicated by `workSessionRef` after the projection: a
+    // session a split shares with its remainder counts once here.
     const sessions = new Map<string, WorkThreadSession>();
     for (const cv of gv.children) for (const s of cv.child.unit.thread.sessions) if (!sessions.has(workSessionRef(s))) sessions.set(workSessionRef(s), s);
+    // Save as series (D8, D14): on a wiki this instance may write, on a group
+    // whose children share no series.
+    const plan = view.seriesWritable && g.label !== "series" ? saveAsSeriesPlan(g, allPages) : undefined;
+    const shared = plan && plan.mode === "join" && plan.children.every((c) => c.joined.length > 0);
     const card: RailGroupCard = {
       group: true,
       key: g.anchorKey,
@@ -408,10 +547,61 @@ export function openWorkCards(
       context,
       witnesses: g.witnesses.map((w) => witnessLine(w, byRel)),
       score: anchor.score,
+      ...(plan && !shared ? { series: plan } : {}),
     };
     return card;
   });
   return { cards, control };
+}
+
+/** `▸ split into N sessions` for one drawn thread card (D19): the sessions
+ *  with a kept focus on its pages, from the contribution rows of its SOURCE
+ *  thread restricted to its pages, so a split page and its remainder each
+ *  split into their own. Offered from two sessions; unavailable, with the
+ *  reason, when the thread's contributions do not ship whole. The sessions'
+ *  rows are the card's own drawn rows, so the split moves no page. */
+function sessionSplitOf(
+  b: BoundedThread,
+  card: RailThreadCard,
+  work: RailWikiFacts["work"],
+  allPages: readonly WikiListing[],
+  at: number,
+  evidence: ReturnType<typeof readWorkEvidence>,
+  open: boolean,
+): RailSessionSplit | undefined {
+  const avail = threadSessionsAvailability(evidence.evidence, b.source.key, evidence.reason);
+  if (!avail.available) {
+    if (b.thread.sessions.length < 2) return undefined;
+    return { count: b.thread.sessions.length, available: false, reason: avail.reasons[0], open: false, sessions: [] };
+  }
+  const own = workSessionCards(work, allPages, at, b.source.key, new Set(b.thread.pages.map(normalizeRel)));
+  if (own.length < 2) return undefined;
+  const drawn = new Set(card.focus.map((p) => normalizeRel(p.relPath)));
+  const mine = (ps: readonly WikiListing[]) => ps.filter((p) => drawn.has(normalizeRel(p.relPath)));
+  return {
+    count: own.length,
+    available: true,
+    open,
+    sessions: open
+      ? own.map((sc) => ({ ref: sc.ref, title: sc.title || sc.id, first: sc.first, last: sc.last, rows: mine(sc.rows), alsoIn: mine(sc.alsoIn) }))
+      : [],
+  };
+}
+
+/** The Group menu's reset area: the record's splits and kept-apart anchors,
+ *  and every one that does not apply now, named for repair. */
+function resetArea(b: WorkBoundaries, view: RailWorkGroupView, allPages: readonly WikiListing[]): Pick<RailWorkControl, "reset"> {
+  const count = (view.splits?.length ?? 0) + (view.keptApart?.length ?? 0);
+  if (!count) return {};
+  const byRel = new Map<string, WikiListing>();
+  for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
+  const entries = b.definitions
+    .filter((d) => d.state !== "active")
+    .map((d) => {
+      const p = d.page ? byRel.get(d.page) : undefined;
+      return { kind: d.kind, title: p ? displayTitleOf(p) : d.stored, state: d.state };
+    });
+  return { reset: { count, entries } };
 }
 
 export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput {

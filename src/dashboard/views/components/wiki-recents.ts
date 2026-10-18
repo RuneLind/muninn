@@ -36,6 +36,7 @@ import {
 import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
 import type { WorkThreadSession } from "../../../wiki/work-focus.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
+import type { SaveSeriesPlan } from "./wiki-work-series.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -66,6 +67,8 @@ export const THREAD_FOLD_PREFIX = "thread:";
  *  `group:project:…`, `group:anchor:…`), a namespace apart from `thread:`, so
  *  a group and its child fold separately. */
 export const GROUP_FOLD_PREFIX = "group:";
+/** A Sessions-stop card's fold key prefix (`session:<provider:id>`, PR 4). */
+export const SESSION_FOLD_PREFIX = "session:";
 /** At most this many work-thread cards render (D6), a group card counting once. */
 export const THREAD_CARDS_MAX = 5;
 /** A group card shows this many children; `+ N more threads` shows the rest. */
@@ -276,7 +279,10 @@ export function isModeFoldKey(key: string): boolean {
 /** Is this a work-thread card's fold key, in either spelling? */
 export function isThreadFoldKey(key: string): boolean {
   const v = normalizeFoldKey(key);
-  return v.startsWith(THREAD_FOLD_PREFIX) || v.startsWith(CLOSED_FOLD_PREFIX + THREAD_FOLD_PREFIX);
+  const bare = v.startsWith(CLOSED_FOLD_PREFIX) ? v.slice(CLOSED_FOLD_PREFIX.length) : v;
+  // A Sessions-stop card (`session:<ref>`, PR 4) folds in the same bounded
+  // class: its key is as short-lived as a thread's.
+  return bare.startsWith(THREAD_FOLD_PREFIX) || bare.startsWith(SESSION_FOLD_PREFIX);
 }
 
 /** Is this a work-thread GROUP card's fold key, in either spelling? */
@@ -771,6 +777,49 @@ export interface RailThreadCard {
    *  every card of the Threads stop and on a lone thread, which render as
    *  today. A child's `touched` is empty: the group lists it once. */
   child?: RailThreadChild;
+  /** PR 4: the reader's own boundary on this thread — a page split off
+   *  (`own thread`) or a thread kept apart (`kept separate`). The chip. */
+  boundary?: "split" | "keptApart";
+  /** PR 4: the card's ⋯ (Related and Areas only): Keep separate, Allow
+   *  grouping, or Return to its thread. */
+  menu?: RailThreadMenu;
+  /** PR 4: `▸ split into N sessions` inside the open card (D19). */
+  sessionSplit?: RailSessionSplit;
+  /** PR 4, the Sessions stop: the session this card is (no 📌, no ⋯). */
+  session?: { ref: string };
+  /** PR 4, the Sessions stop: focus pages a newer session's card owns — the
+   *  non-claiming `also in:` line (D19). */
+  alsoIn?: WikiListing[];
+}
+
+/** What a thread card's ⋯ offers. */
+export type RailThreadMenu =
+  | { action: "keep"; anchor: string }
+  | { action: "allow"; anchors: string[] }
+  | { action: "return"; id: string; page: string };
+
+/** One session inside `▸ split into N sessions`: its focus rows in this
+ *  thread (a page in the first session holding it, D19) and its `also in:`. */
+export interface RailSplitSession {
+  ref: string;
+  title: string;
+  first: number;
+  last: number;
+  rows: WikiListing[];
+  alsoIn: WikiListing[];
+}
+
+/** The `▸ split into N sessions` control of one thread card. */
+export interface RailSessionSplit {
+  /** Sessions with a kept focus on this thread's pages. */
+  count: number;
+  available: boolean;
+  /** Why not (`workReasonLabel`'s keys). */
+  reason?: string;
+  /** Drawn split (per tab, never stored). */
+  open: boolean;
+  /** The sessions, newest first; filled when open. */
+  sessions: RailSplitSession[];
 }
 
 /** What a child card says about its place in the group. */
@@ -825,6 +874,9 @@ export interface RailGroupCard {
   /** One line per distinct witness, for the group header's hover. */
   witnesses: string[];
   score: number;
+  /** PR 4: Save as series, on a group the children share no series in, on a
+   *  wiki this instance may write (D8, D14). */
+  series?: SaveSeriesPlan;
 }
 
 /** A card in the Work threads section: a thread, or a group of threads. */
@@ -864,9 +916,13 @@ export interface RailWorkControl {
   /** The boxes apply at the drawn stop (Related, Areas); elsewhere they show
    *  disabled and keep their values. */
   evidenceApplies: boolean;
-  /** Threads, Related, Areas (Sessions is PR 4's): available, why not, and
-   *  the cards it would draw under the current facets, uncapped. */
+  /** The four stops: available, why not, and the cards each would draw under
+   *  the current facets, uncapped. */
   stops: { stop: WorkGroupStop; available: boolean; reasons: string[]; cards: number }[];
+  /** PR 4: the reset area — how many splits and kept-apart threads the record
+   *  holds, and every one that does not apply now (dormant, unresolved, in
+   *  conflict), named for repair. Absent with none. */
+  reset?: { count: number; entries: { kind: "split" | "keptApart"; title: string; state: string }[] };
 }
 
 export type RailEntry =
@@ -930,8 +986,9 @@ export type RailEntry =
        *  indent. */
       member?: { label: string; kind: RailGroupKind };
       /** Set on a focus row drawn inside an OPEN work-thread card: the card's
-       *  name, for the painter's hover and the card's left rule. */
-      thread?: { name: string };
+       *  name, for the painter's hover and the card's left rule; `session` on
+       *  a row of a Sessions-stop card, whose ⋯ holds no Make own thread. */
+      thread?: { name: string; session?: true };
       /** Set on a work-thread focus row whose page was created inside the
        *  work window: the painter draws the NEW tag. */
       created?: true;
@@ -1010,6 +1067,28 @@ export type RailEntry =
       name: string;
       hidden: number;
       context: WikiListing[];
+    }
+  | {
+      /** A Sessions-stop card's (or a split session's) `also in:` line: focus
+       *  pages a newer session's card owns — links, never rows (D19). */
+      kind: "also-in";
+      section: RailSection;
+      foldKey: string;
+      pages: WikiListing[];
+    }
+  | {
+      /** An open thread card's `▸ split into N sessions` control. */
+      kind: "thread-sessions";
+      section: RailSection;
+      card: RailThreadCard;
+    }
+  | {
+      /** One session's line inside a thread split into its sessions; its
+       *  rows follow it. */
+      kind: "thread-session";
+      section: RailSection;
+      foldKey: string;
+      session: RailSplitSession;
     }
   | {
       /** An open card's one `touched:` line — links, not rows, so `shown`
@@ -1536,6 +1615,8 @@ export function buildRail(input: RailInput): RailModel {
       inGroup?: RailGroup;
       /** Set only by the work-thread block: the open card's name. */
       thread?: string;
+      /** The open card is a Sessions-stop card (no Make own thread on its rows). */
+      session?: boolean;
       created?: boolean;
     } = {},
   ): void => {
@@ -1571,7 +1652,7 @@ export function buildRail(input: RailInput): RailModel {
         ? { member: { label: extra.inGroup.label, kind: extra.inGroup.kind } }
         : {}),
       ...(latestRels.has(key) ? { latest: true as const } : {}),
-      ...(extra.thread !== undefined ? { thread: { name: extra.thread } } : {}),
+      ...(extra.thread !== undefined ? { thread: { name: extra.thread, ...(extra.session ? { session: true as const } : {}) } } : {}),
       ...(extra.created ? { created: true as const } : {}),
     });
     if (mine.length && !folded) {
@@ -1916,12 +1997,27 @@ export function buildRail(input: RailInput): RailModel {
       }
       for (const [k, owner] of threadLifted) if (owner === c) heldAbove.add(k);
       const fresh = created(c);
-      for (const p of c.focus) {
+      const drawn = new Set<string>();
+      const row = (p: WikiListing) => {
         const k = normalizeRel(p.relPath);
-        if (threadLifted.get(k) !== c || claimed.has(k)) continue;
-        emitRow(p, "threads", { thread: c.name, created: fresh.has(k) });
+        if (drawn.has(k) || threadLifted.get(k) !== c || claimed.has(k)) return;
+        drawn.add(k);
+        emitRow(p, "threads", { thread: c.name, created: fresh.has(k), session: !!c.session });
         header.pages++;
+      };
+      // `▸ split into N sessions` (D19): the same rows, under each session
+      // that owns them (the newest session holding a page), each with its
+      // `also in:` links; a row no session holds closes the list.
+      if (c.sessionSplit?.open) {
+        for (const s of c.sessionSplit.sessions) {
+          entries.push({ kind: "thread-session", section: "threads", foldKey: c.foldKey, session: s });
+          for (const p of s.rows) row(p);
+          if (s.alsoIn.length) entries.push({ kind: "also-in", section: "threads", foldKey: c.foldKey, pages: s.alsoIn });
+        }
       }
+      for (const p of c.focus) row(p);
+      if (c.alsoIn?.length) entries.push({ kind: "also-in", section: "threads", foldKey: c.foldKey, pages: c.alsoIn });
+      if (c.sessionSplit) entries.push({ kind: "thread-sessions", section: "threads", card: c });
       if (c.touched.length) entries.push({ kind: "touched", section: "threads", foldKey: c.foldKey, pages: c.touched });
     };
     for (const top of cards) {
