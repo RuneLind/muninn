@@ -1053,6 +1053,7 @@ export async function renderWikiPage(opts?: {
     .wiki-work-series-msg.bad { color: var(--wiki-series-bad); }
     .wiki-work-series-status { left: 16px; bottom: 16px; padding: 6px 10px; cursor: pointer; overflow-wrap: anywhere; }
     .wiki-work-series-status.bad { color: var(--wiki-series-bad); }
+    .wiki-work-boundary-status { bottom: 56px; }
     .wiki-work-series-go:disabled, .wiki-work-series-cancel:disabled { opacity: 0.5; cursor: default; }
     .wiki-work-def { padding-left: 26px; }
     .wiki-thread-link { color: var(--accent-light); text-decoration: none; }

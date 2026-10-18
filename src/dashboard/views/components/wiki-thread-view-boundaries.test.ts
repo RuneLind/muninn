@@ -105,10 +105,10 @@ describe("row ⋯ and the menus", () => {
   test("at the bounds: Make own thread and Keep separate disabled, saying what to free first (fix round 1, batch 3)", () => {
     const split = threadRowMenuHtml("plans/p.md", { kind: "split", available: false, reason: "full" });
     expect(split).toContain('aria-disabled="true" aria-describedby="wikiWorkPopWhy"');
-    expect(split).toContain("Unavailable: you have 100 splits; return some to their threads first");
+    expect(split).toContain("Unavailable: you have 100 splits; return some to their threads or forget some under Reset your splits and groups in the Work threads ▾ menu");
     const keep = threadCardMenuHtml({ action: "keep", anchor: "a.md", full: true });
     expect(keep).toContain('data-work-keep="a.md" aria-disabled="true" aria-describedby="wikiWorkPopWhy"');
-    expect(keep).toContain("Unavailable: you keep 50 threads separate; allow grouping on some first");
+    expect(keep).toContain("Unavailable: you keep 50 threads separate; allow grouping on some or forget some under Reset your splits and groups in the Work threads ▾ menu");
   });
 
   test("a group's ⋯: Save as series, its disabled reason, and the confirm view per child", () => {
@@ -169,12 +169,21 @@ describe("split into sessions, also in:, the Group menu", () => {
         { stop: "related", available: true, reasons: [], cards: 3 },
         { stop: "areas", available: true, reasons: [], cards: 2 },
       ],
-      reset: { count: 2, entries: [{ kind: "split", title: "Old page", state: "dormant" }] },
+      reset: {
+        count: 2,
+        entries: [
+          { kind: "split", title: "Old page", state: "dormant", forget: "s1" },
+          { kind: "keptApart", title: "gone/k.md", state: "missing", forget: "gone/k.md" },
+        ],
+      },
     };
     const html = workGroupMenuHtml(control, false);
     expect(html.indexOf('data-work-stop="sessions"')).toBeLessThan(html.indexOf('data-work-stop="threads"'));
     expect(html).toContain("Unavailable: the contribution rows hit their limit");
     expect(html).toContain("Reset your splits and groups (2)");
     expect(html).toContain("Own thread: Old page — no recent work on it");
+    // Each one that does not apply has its own Forget (fix round 2, batch 3).
+    expect(html).toContain('<button type="button" role="menuitem" class="wiki-work-opt wiki-work-forget" data-work-forget-split="s1" aria-label="Forget Own thread: Old page">');
+    expect(html).toContain('data-work-forget-anchor="gone/k.md" aria-label="Forget Kept separate: gone/k.md"');
   });
 });

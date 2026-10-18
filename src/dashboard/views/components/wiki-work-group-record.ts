@@ -127,44 +127,26 @@ export function sameWorkGroupRecord(a: WorkGroupRecord | null | undefined, b: Wo
 /**
  * One explicit edit: a stop or a box from the Group menu, or (PR 4) a
  * boundary from a ⋯ menu — a page split added or removed, a thread kept apart
- * or allowed to group again (every anchor naming one of `allowGrouping`'s
- * pages goes: `keptApartPagesOf`), the kept-apart anchors moved (a render's
- * re-anchor), or Reset. Reset clears the stop, the three boxes, and the splits
- * and anchors the clicking tab's view held (plus any anchor naming one of
- * `threadPages`, its kept-apart threads' pages), so an entry another tab
- * added unseen survives; it keeps every field, evidence key and list entry
- * this build does not read.
+ * or allowed to group again (`allowGrouping`: the anchors the clicking tab's
+ * view held for that thread), the kept-apart anchors moved (a render's
+ * re-anchor), one definition forgotten from the reset area (`forgetSplit` by
+ * its id; an anchor is an `allowGrouping` of that one anchor), or Reset.
+ * Reset clears the stop, the three boxes, and the splits and anchors the
+ * clicking tab's view held. A removal takes only entries the clicking tab
+ * saw, so an entry another tab added since its last read survives (an anchor
+ * another tab moved since stays too). Every edit keeps each field, evidence
+ * key and list entry this build does not read.
  */
 export type WorkGroupEdit =
   | { stop: WorkGroupStop }
   | { evidence: keyof WorkGroupEvidenceToggles; value: boolean }
   | { split: WorkGroupSplit }
   | { unsplit: { id: string; page: string } }
+  | { forgetSplit: string }
   | { keepApart: string }
   | { allowGrouping: readonly string[] }
   | { reanchor: readonly (readonly [string, string])[] }
-  | { reset: true; threadPages?: readonly string[] };
-
-/**
- * The pages an Allow grouping (`anchors`: the thread's) or a Reset (`null`:
- * every kept-apart thread) removes anchors on: the anchors themselves and
- * every page of the threads holding them, as this tab's boundaries draw them.
- * A thread's anchor another tab re-anchored onto one of its pages goes too;
- * a page this tab's listing does not hold yet cannot be named.
- */
-export function keptApartPagesOf(
-  threads: readonly { thread: { pages: readonly string[] }; keptApart?: readonly string[] }[],
-  anchors: readonly string[] | null,
-): string[] {
-  const out = new Set<string>(anchors ?? []);
-  for (const t of threads) {
-    if (!t.keptApart?.length) continue;
-    if (anchors && !t.keptApart.some((k) => anchors.includes(k))) continue;
-    for (const k of t.keptApart) out.add(k);
-    for (const p of t.thread.pages) out.add(p);
-  }
-  return [...out];
-}
+  | { reset: true };
 
 /**
  * A list edit as the patch holds it: an OPERATION by id or page, never the
@@ -225,13 +207,13 @@ function listOpOf(edit: WorkGroupEdit, view?: WorkGroupRecord | null, now: WorkG
     if (view === undefined) return { op: "removeSplit", id, page };
     return { op: "removeSplit", id, page, ids: [...new Set(both().filter((s) => s.id === id || s.page === page).map((s) => s.id))] };
   }
+  if ("forgetSplit" in edit) return { op: "removeSplit", id: edit.forgetSplit, page: "", ids: [edit.forgetSplit] };
   if ("keepApart" in edit) return { op: "addAnchor", page: opPage(edit.keepApart) };
   if ("allowGrouping" in edit) return { op: "removeAnchors", pages: edit.allowGrouping.map(opPage) };
   if ("reanchor" in edit) return { op: "moveAnchors", moves: edit.reanchor.map(([a, b]) => [opPage(a), opPage(b)]) };
   if ("reset" in edit) {
     const own = foreignWorkGroupRecord(view) ? null : (view ?? null);
-    const anchors = new Set([...listOf(own?.keptApart).flatMap((x) => readWorkGroupAnchor(x) ?? []), ...(edit.threadPages ?? []).map(opPage)]);
-    anchors.delete("");
+    const anchors = new Set(listOf(own?.keptApart).flatMap((x) => readWorkGroupAnchor(x) ?? []));
     const pages = new Set(viewSplits(own).map((s) => s.page));
     const splitIds = [...new Set(both().filter((s) => pages.has(s.page)).map((s) => s.id))];
     return { op: "reset", scalars: true, splitIds, anchors: [...anchors] };
@@ -244,6 +226,15 @@ function listOpOf(edit: WorkGroupEdit, view?: WorkGroupRecord | null, now: WorkG
 function setList(rec: WorkGroupRecord, field: "splits" | "keptApart", list: unknown[]): void {
   if (list.length) rec[field] = list;
   else delete rec[field];
+}
+
+/** Remove the entries `drop` names from a list field. A removal that finds
+ *  nothing leaves the field untouched (absent, a value this build cannot read
+ *  as a list, or `[]`), so a no-op stays a no-op (`listOpsOfPatch`). */
+function removeFrom(rec: WorkGroupRecord, field: "splits" | "keptApart", drop: (x: unknown) => boolean): void {
+  const list = listOf(rec[field]);
+  const kept = list.filter((x) => !drop(x));
+  if (kept.length !== list.length) setList(rec, field, kept);
 }
 
 /** Reset's scalar part: the stop and this build's three boxes; an evidence key
@@ -283,10 +274,10 @@ function applyListOp(rec: WorkGroupRecord, op: WorkGroupListOp): void {
       // Every readable entry on the id or page the clicking tab saw, a
       // shadowed duplicate included, so a Return never leaves another
       // definition of the page behind it — nor takes one it never saw.
-      rec.splits = listOf(rec.splits).filter((x) => {
+      removeFrom(rec, "splits", (x) => {
         const s = readWorkGroupSplit(x);
-        if (!s) return true;
-        return op.ids ? !op.ids.includes(s.id) : !(s.id === op.id || s.page === op.page);
+        if (!s) return false;
+        return op.ids ? op.ids.includes(s.id) : s.id === op.id || s.page === op.page;
       });
       return;
     case "addAnchor": {
@@ -296,17 +287,20 @@ function applyListOp(rec: WorkGroupRecord, op: WorkGroupListOp): void {
       return;
     }
     case "removeAnchors":
-      rec.keptApart = listOf(rec.keptApart).filter((x) => !op.pages.includes(anchor(x) ?? "\u0000"));
+      removeFrom(rec, "keptApart", (x) => op.pages.includes(anchor(x) ?? "\u0000"));
       return;
     case "moveAnchors": {
-      // Two anchors moved onto one page collapse to one entry.
+      // Two anchors moved onto one page collapse to one entry. A move whose
+      // anchor is gone (another tab moved or removed it) does nothing.
       let cur = listOf(rec.keptApart);
+      let moved = false;
       for (const [from, to] of op.moves) {
         if (!from || !to || !cur.some((x) => anchor(x) === from)) continue;
         cur = cur.filter((x) => anchor(x) !== from);
         if (!cur.some((x) => anchor(x) === to)) cur.push(to);
+        moved = true;
       }
-      rec.keptApart = cur;
+      if (moved) rec.keptApart = cur;
       return;
     }
     case "reset": {
@@ -382,9 +376,10 @@ export function patchWorkGroupEdit(
  *  arrived): its list operations, which commute with the other tab's, laid
  *  again on the adopted record; its stop and boxes go (the other tab's write
  *  is the newer choice), and so does a Reset's scalar part. An op that changes
- *  nothing on `stored` goes too: the other tab's record already holds its
- *  effect, so a later edit there is never undone by it. Null when no list op
- *  is left. */
+ *  nothing on `stored` goes too — an add the record already holds, a removal
+ *  or move whose entry is already gone (`removeFrom`) — so a later edit there
+ *  is never undone by it, and nothing is left this tab's only. Null when no
+ *  list op is left. */
 export function listOpsOfPatch(patch: WorkGroupRecord | null, stored: WorkGroupRecord | null): WorkGroupRecord | null {
   const ops = listOf(patch?.[WORK_GROUP_PATCH_OPS]) as WorkGroupListOp[];
   const run: WorkGroupRecord = { ...(foreignWorkGroupRecord(stored) ? {} : (stored ?? {})), version: WORK_GROUP_PREFS_VERSION };

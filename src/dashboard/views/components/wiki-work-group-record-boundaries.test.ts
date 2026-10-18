@@ -22,7 +22,6 @@ import {
   type WorkGroupRecord,
   type WorkGroupRecordState,
 } from "./wiki-work-group-record.ts";
-import * as Rec from "./wiki-work-group-record.ts";
 
 const rec = (r: Omit<WorkGroupRecord, "version">): WorkGroupRecord => ({ version: 1, ...r });
 const fresh: WorkGroupRecordState = { held: null, known: null, patch: null, failed: false };
@@ -405,18 +404,18 @@ describe("Reset and adoption keep what another tab or build holds (fix round 1, 
     expect(a.shown().splits).toEqual([again]);
   });
 
-  test("B4-2 P6 Allow grouping in a stale tab removes the anchor another tab re-anchored on the same thread", () => {
-    const threads = [{ thread: { pages: ["a.md", "c.md"] }, keptApart: ["a.md"] }, { thread: { pages: ["b.md"] }, keptApart: ["b.md"] }, { thread: { pages: ["e.md"] } }];
-    expect(Rec.keptApartPagesOf(threads, ["a.md"]).sort()).toEqual(["a.md", "c.md"]);
-    expect(Rec.keptApartPagesOf(threads, null).sort()).toEqual(["a.md", "b.md", "c.md"]);
+  test("B4-2 P6 (round 2 batch 3) Allow grouping in a stale tab removes only the anchor it saw: one another tab moved since stays", () => {
     const st = store(rec({ keptApart: ["a.md", "b.md"] }));
     const a = tab(st);
     const b = tab(st);
     // B's listing grew: c.md is now the thread's newest focus page.
     b.render(true, [["a.md", "c.md"]]);
-    a.click({ allowGrouping: Rec.keptApartPagesOf(threads, ["a.md"]) });
-    expect(workGroupPrefsOf(st.stored()).keptApart).toEqual(["b.md"]);
-    // A's older listing has nothing left to move back.
+    a.click({ allowGrouping: ["a.md"] });
+    // A never saw c.md: the thread stays kept apart, and A now shows it so.
+    expect(workGroupPrefsOf(st.stored()).keptApart).toEqual(["b.md", "c.md"]);
+    expect(a.shown().keptApart).toEqual(["b.md", "c.md"]);
+    expect(a.state().patch).toBeNull();
+    // A's older listing moves nothing back.
     expect(a.render(true, []).write).toBe(false);
   });
 
@@ -436,13 +435,13 @@ describe("Reset and adoption keep what another tab or build holds (fix round 1, 
     expect(st.stored()).toEqual(rec({}));
   });
 
-  test("B4-3 a stale Reset follows a kept-apart thread another tab re-anchored", () => {
+  test("B4-3 (round 2 batch 3) a stale Reset leaves an anchor another tab moved since its last read", () => {
     const st = store(rec({ keptApart: ["a.md"] }));
     const a = tab(st);
     const b = tab(st);
     b.render(true, [["a.md", "c.md"]]);
-    a.click({ reset: true, threadPages: ["a.md", "c.md"] });
-    expect(st.stored()).toEqual(rec({}));
+    a.click({ reset: true });
+    expect(st.stored()).toEqual(rec({ keptApart: ["c.md"] }));
   });
 
   test("B4-3 a pending Reset keeps its list part across adoption and drops its scalar part", () => {
@@ -519,5 +518,145 @@ describe("split removals resolve to ids at the click (fix round 1, batch 4)", ()
     a.event();
     a.render(true);
     expect(st.stored()).toEqual(rec({ keptApart: ["k.md"] }));
+  });
+});
+
+describe("fix round 2, batch 3: a removal takes only what the tab saw, and a no-op is no op", () => {
+  const S1 = { id: "s1", page: "p1.md" };
+
+  test("R2B3-1 a stale tab's Allow grouping removes the anchor it saw; another tab's newer anchor on the thread's page survives", () => {
+    const st = store(rec({ keptApart: ["p2.md"] }));
+    const a = tab(st);
+    const b = tab(st);
+    // B makes p1 its own thread and keeps that piece separate; A never hears.
+    b.click({ split: S1 });
+    b.click({ keepApart: "p1.md" });
+    // A draws T = {p1, p2} kept apart by p2: the anchors its view held.
+    a.click({ allowGrouping: ["p2.md"] });
+    expect(st.stored()).toEqual(rec({ splits: [S1], keptApart: ["p1.md"] }));
+  });
+
+  test("R2B3-1 a stale tab's Reset leaves the anchor another tab added since its last read", () => {
+    const st = store(rec({ keptApart: ["p2.md"] }));
+    const a = tab(st);
+    const b = tab(st);
+    b.click({ split: S1 });
+    b.click({ keepApart: "p1.md" });
+    a.click({ reset: true });
+    expect(st.stored()).toEqual(rec({ splits: [S1], keptApart: ["p1.md"] }));
+  });
+
+  test("R2B3-2 H1: a refused Return of a split another tab's Reset removed is dropped on the event: no «this tab only», no empty list written", () => {
+    const st = store(rec({ splits: [SX] }));
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ unsplit: SX });
+    expect(a.state().failed).toBe(true);
+    st.s.writable = true;
+    b.click({ reset: true });
+    expect(st.s.v).toBe('{"version":1}');
+    a.event();
+    expect(a.state().patch).toBeNull();
+    expect(a.state().failed).toBe(false);
+    const writes = st.s.writes;
+    a.render(true);
+    expect(st.s.writes).toBe(writes);
+    expect(st.s.v).toBe('{"version":1}');
+  });
+
+  test("R2B3-2 H2: a pending unfocused re-anchor after another tab's Reset is dropped, and no empty list is written", () => {
+    const st = store(rec({ keptApart: ["a.md"] }));
+    const a = tab(st);
+    const b = tab(st);
+    a.render(false, [["a.md", "c.md"]]);
+    b.click({ reset: true });
+    a.event();
+    expect(a.state().patch).toBeNull();
+    a.render(true);
+    expect(st.s.v).toBe('{"version":1}');
+  });
+
+  test("R2B3-2 a refused add then Return, adopted onto another tab's record, leaves nothing this tab's only (pins the adoption same-check)", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ split: SX });
+    a.click({ unsplit: SX });
+    st.s.writable = true;
+    b.click({ stop: "threads" });
+    a.event();
+    expect(a.state().patch).toBeNull();
+    expect(a.state().failed).toBe(false);
+    a.render(true);
+    expect(st.stored()).toEqual(rec({ stop: "threads" }));
+  });
+
+  test("R2B3-2 a removal or move that finds nothing changes nothing; one that empties a list drops the field", () => {
+    expect(applyWorkGroupEdit(rec({}), { unsplit: SX })).toEqual(rec({}));
+    expect(applyWorkGroupEdit(rec({}), { allowGrouping: ["a.md"] })).toEqual(rec({}));
+    expect(applyWorkGroupEdit(rec({}), { reanchor: [["a.md", "c.md"]] })).toEqual(rec({}));
+    // A value this build cannot read as a list is never replaced by a removal.
+    expect(applyWorkGroupEdit(rec({ splits: "junk", keptApart: "junk" }), { unsplit: SX })).toEqual(rec({ splits: "junk", keptApart: "junk" }));
+    expect(applyWorkGroupEdit(rec({ keptApart: "junk" }), { reanchor: [["a.md", "c.md"]] })).toEqual(rec({ keptApart: "junk" }));
+    expect(applyWorkGroupEdit(rec({ splits: [SX], keptApart: ["a.md"] }), { unsplit: SX })).toEqual(rec({ keptApart: ["a.md"] }));
+    expect(applyWorkGroupEdit(rec({ splits: [SX], keptApart: ["a.md"] }), { allowGrouping: ["a.md"] })).toEqual(rec({ splits: [SX] }));
+  });
+
+  test("R2B3-3 Forget removes one split by its id, never another definition on the same page", () => {
+    const dup = { id: "sx2", page: SX.page };
+    const st = store(rec({ splits: [SX, dup, SY] }));
+    tab(st).click({ forgetSplit: "sx2" });
+    expect(st.stored()).toEqual(rec({ splits: [SX, SY] }));
+    // A stale tab's Forget of one entry leaves another tab's newer entries alone.
+    const st2 = store(rec({ splits: [SX] }));
+    const a = tab(st2);
+    const b = tab(st2);
+    b.click({ split: SY });
+    a.click({ forgetSplit: SX.id });
+    expect(st2.stored()).toEqual(rec({ splits: [SY] }));
+  });
+});
+
+describe("fix round 2, batch 3: pins for the record's surviving mutants", () => {
+  test("an op's page is canonical: a spelled path matches the stored entry and is stored canonical (opPage)", () => {
+    expect(workGroupPrefsOf(applyWorkGroupEdit(rec({ keptApart: ["a.md", "b.md"] }), { allowGrouping: [" a.md "] })).keptApart).toEqual(["b.md"]);
+    expect(applyWorkGroupEdit(rec({}), { split: { id: "sx", page: " x.md " } }).splits).toEqual([{ id: "sx", page: "x.md" }]);
+    expect(applyWorkGroupEdit(rec({}), { keepApart: " k.md " }).keptApart).toEqual(["k.md"]);
+    expect(workGroupPrefsOf(applyWorkGroupEdit(rec({ splits: [SX, SY] }), { unsplit: { id: "zz", page: " plans/x.md " } })).splits).toEqual([SY]);
+  });
+
+  test("Keep separate at the bound is no refusal when the page is already held", () => {
+    const fifty = Array.from({ length: 50 }, (_, i) => `k/${i}.md`);
+    expect(workGroupAddRefused(rec({ keptApart: fifty }), { keepApart: "k/3.md" })).toBeNull();
+    expect(workGroupAddRefused(rec({ keptApart: fifty }), { keepApart: "k/new.md" })).toBe("keptApart");
+  });
+
+  test("the bound counts entries in force: duplicates of a page are counted once", () => {
+    const splits = [...Array.from({ length: 99 }, (_, i) => ({ id: `s${i}`, page: `p/${i}.md` })), { id: "sdup", page: "p/0.md" }];
+    expect(workGroupPrefsOf(applyWorkGroupEdit(rec({ splits }), { split: { id: "snew", page: "q/new.md" } })).splits).toHaveLength(100);
+    const keptApart = [...Array.from({ length: 49 }, (_, i) => `k/${i}.md`), "k/0.md"];
+    expect(workGroupPrefsOf(applyWorkGroupEdit(rec({ keptApart }), { keepApart: "z/new.md" })).keptApart).toHaveLength(50);
+  });
+
+  test("a move to or from a path no entry can hold is skipped", () => {
+    expect(applyWorkGroupEdit(rec({ keptApart: ["a.md"] }), { reanchor: [["a.md", "../c.md"]] })).toEqual(rec({ keptApart: ["a.md"] }));
+    expect(applyWorkGroupEdit(rec({ keptApart: ["a.md"] }), { reanchor: [["", "c.md"]] })).toEqual(rec({ keptApart: ["a.md"] }));
+  });
+
+  test("a Reset keeps a Return still pending before it", () => {
+    const st = store(rec({ stop: "areas", splits: [SX] }));
+    const a = tab(st);
+    st.s.writable = false;
+    a.click({ unsplit: SX });
+    a.click({ reset: true });
+    st.s.writable = true;
+    a.render(true);
+    expect(st.stored()).toEqual(rec({}));
+  });
+
+  test("Reset drops an evidence value that is not an object", () => {
+    expect(applyWorkGroupEdit(rec({ evidence: "junk", stop: "areas" }), { reset: true })).toEqual(rec({}));
   });
 });

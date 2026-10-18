@@ -145,7 +145,7 @@ describe("Make own thread across the stops (D5, D15)", () => {
     const fx = fixture({ cut: true });
     const { cards, control } = at("threads", { splits: [P] }, fx);
     expect(cards.map((c) => c.key)).toEqual(["plans/k.md", "plans/a.md", "plans/b.md", "notes/l.md"]);
-    expect(control.reset).toEqual({ count: 1, entries: [{ kind: "split", title: "T plans/p.md", state: "incomplete" }] });
+    expect(control.reset).toEqual({ count: 1, entries: [{ kind: "split", title: "T plans/p.md", state: "incomplete", forget: "sp" }] });
     // And the Sessions stop is unavailable with the reason.
     expect(control.stops.find((x) => x.stop === "sessions")).toMatchObject({ available: false, reasons: ["contributions-cap"] });
   });

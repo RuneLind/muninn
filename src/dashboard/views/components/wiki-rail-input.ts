@@ -683,7 +683,7 @@ function resetArea(b: WorkBoundaries, view: RailWorkGroupView, allPages: readonl
     .filter((d) => d.state !== "active")
     .map((d) => {
       const p = d.page ? byRel.get(d.page) : undefined;
-      return { kind: d.kind, title: p ? displayTitleOf(p) : d.stored, state: d.state };
+      return { kind: d.kind, title: p ? displayTitleOf(p) : d.stored, state: d.state, forget: d.kind === "split" ? (d.id ?? "") : d.stored };
     });
   return { reset: { count, entries } };
 }

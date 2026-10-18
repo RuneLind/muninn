@@ -216,7 +216,6 @@ import {
   WORK_POP_ID,
 } from "./wiki-thread-view.ts";
 import {
-  keptApartPagesOf,
   storageEventTouchesWorkGroup,
   workGroupAddRefused,
   workGroupPrefsOf,
@@ -5351,8 +5350,9 @@ function applyBoundaryEdit(edit: WorkGroupEdit, focus: { page: string; prefer: "
   closeSeriesMenu({ focus: false });
   editWorkGroup(edit);
   // Another tab filled the list after this menu opened: say so, not nothing.
+  // An edit that lands clears the note.
   const full = workGroupAddRefused(workGroupRec.held, edit);
-  if (full) showWorkSeriesStatus(`${"split" in edit ? "Make own thread" : "Keep separate"} did nothing: ${WORK_GROUP_FULL_TEXT[full]}`, true);
+  showWorkBoundaryStatus(full ? `${"split" in edit ? "Make own thread" : "Keep separate"} did nothing: ${WORK_GROUP_FULL_TEXT[full]}` : null);
   renderList();
   const card = workCardControlSel(focus.page, focus.prefer);
   focusFirstRailControl(focus.first === "opener" ? [focus.sel, openerSel, card] : [focus.sel, card, openerSel]);
@@ -5392,9 +5392,9 @@ function boundaryItemClick(target: HTMLElement): boolean {
     } catch {
       /* a malformed attribute: nothing to remove */
     }
-    // Every page of the thread, not only the anchor drawn: another tab may
-    // have re-anchored it onto another of its pages since this render.
-    applyBoundaryEdit({ allowGrouping: keptApartPagesOf(workBounds?.threads ?? [], anchors) }, { page: anchors[0] ?? "", prefer: "menu", first: "opener" });
+    // The anchors this tab drew on the thread, and only those: an anchor
+    // another tab added (or moved) since this tab last read stays.
+    applyBoundaryEdit({ allowGrouping: anchors }, { page: anchors[0] ?? "", prefer: "menu", first: "opener" });
     return true;
   }
   return false;
@@ -5434,6 +5434,26 @@ function showWorkSeriesStatus(text: string, bad: boolean): void {
   }
   el.textContent = text;
   el.classList.toggle("bad", bad);
+}
+
+/** A boundary click that did nothing says why in its own note (never Save as
+ *  series' report line), above that one; `null` clears it. */
+function showWorkBoundaryStatus(text: string | null): void {
+  let el = document.getElementById("wikiWorkBoundaryStatus");
+  if (text === null) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "wikiWorkBoundaryStatus";
+    el.className = "wiki-series-menu wiki-work-series-status wiki-work-boundary-status bad";
+    el.setAttribute("role", "status");
+    el.title = "Click to dismiss";
+    el.addEventListener("click", () => el!.remove());
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
 }
 
 /** Lock or unlock the confirm view's buttons and key while a write runs. */
@@ -5697,11 +5717,24 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   }
   // PR 4: Reset your splits and groups — clears the record's four
   // preferences as this tab shows them (D1), through the state table like
-  // any edit; a kept-apart thread's anchor goes on any of its pages.
+  // any edit; an entry another tab added unseen stays.
   if (target.closest("[data-work-reset]")) {
     e.preventDefault();
-    editWorkGroup({ reset: true, threadPages: keptApartPagesOf(workBounds?.threads ?? [], null) });
+    editWorkGroup({ reset: true });
+    showWorkBoundaryStatus(null);
     setWorkMenu(false, true);
+    return;
+  }
+  // Forget one definition the reset area lists (it has no Return or Allow
+  // grouping item); the menu stays open on the next one.
+  const forget = target.closest<HTMLElement>("[data-work-forget-split], [data-work-forget-anchor]");
+  if (forget) {
+    e.preventDefault();
+    const id = forget.getAttribute("data-work-forget-split");
+    editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
+    showWorkBoundaryStatus(null);
+    renderList();
+    focusWorkMenuItem("[data-work-forget-split], [data-work-forget-anchor], [data-work-reset]");
     return;
   }
   // PR 4: a card's ⋯ and a focus row's ⋯ (the one with no series menu).

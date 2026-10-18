@@ -347,7 +347,7 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await page.locator("#wikiWorkPop [data-work-return]").click();
     await expect(card(page, TSPLIT)).toHaveCount(0);
     await expect(card(page, TKEY).locator(".wiki-thread-meta")).toContainText("3 sessions");
-    expect((await record(page)).splits).toEqual([]);
+    expect((await record(page)).splits).toBeUndefined();
   });
 
   test("splitting the thread's key page: the remainder takes the next earliest page as its key (a new fold key)", async ({ page }) => {
@@ -375,7 +375,7 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await openMenu(card(page, LB).locator("[data-work-card-menu]"));
     await page.locator("#wikiWorkPop [data-work-allow]").click();
     await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(1);
-    expect((await record(page)).keptApart).toEqual([]);
+    expect((await record(page)).keptApart).toBeUndefined();
   });
 
   test("Keep separate on a child of the FIFTH card: the thread stays drawn in that card's place with its chip, and Allow grouping is reachable (D20)", async ({ page }) => {
@@ -392,7 +392,7 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await openMenu(card(page, LB).locator("[data-work-card-menu]"));
     await page.locator("#wikiWorkPop [data-work-allow]").click();
     await expect.poll(() => topKeys(page)).toEqual([...busy, `group:anchor:${LA}`]);
-    expect((await record(page, C)).keptApart).toEqual([]);
+    expect((await record(page, C)).keptApart).toBeUndefined();
   });
 
   test("Make own thread on both visible pages of the fifth card, a facet hiding the rest of its thread: both stay drawn in that card's place (D20)", async ({ page }) => {
@@ -585,7 +585,7 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await rowMenu(page, TSPLIT);
     const split = page.locator("#wikiSeriesMenu [data-thread-split]");
     await expect(split).toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator("#wikiSeriesMenu #wikiWorkPopWhy")).toHaveText("Unavailable: you have 100 splits; return some to their threads first");
+    await expect(page.locator("#wikiSeriesMenu #wikiWorkPopWhy")).toHaveText("Unavailable: you have 100 splits; return some to their threads or forget some under Reset your splits and groups in the Work threads ▾ menu");
     await split.click({ force: true });
     await expect(card(page, TSPLIT)).toHaveCount(0);
     await page.keyboard.press("Escape");
@@ -594,7 +594,7 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await openMenu(lb.locator("[data-work-card-menu]"));
     const keep = page.locator("#wikiWorkPop [data-work-keep]");
     await expect(keep).toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator("#wikiWorkPop #wikiWorkPopWhy")).toHaveText("Unavailable: you keep 50 threads separate; allow grouping on some first");
+    await expect(page.locator("#wikiWorkPop #wikiWorkPopWhy")).toHaveText("Unavailable: you keep 50 threads separate; allow grouping on some or forget some under Reset your splits and groups in the Work threads ▾ menu");
     await keep.click({ force: true });
     await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(1);
     expect(await stored(page)).toBe(before);
@@ -618,9 +618,75 @@ test.describe("Wiki rail: work-thread boundaries", () => {
       localStorage.setItem(k, JSON.stringify(r));
     }, workGroupKey(B));
     await split.click();
-    await expect(page.locator("#wikiWorkSeriesStatus")).toHaveText("Make own thread did nothing: you have 100 splits; return some to their threads first");
+    // Its own note, never Save as series' report line.
+    const note = page.locator("#wikiWorkBoundaryStatus");
+    await expect(note).toHaveText("Make own thread did nothing: you have 100 splits; return some to their threads or forget some under Reset your splits and groups in the Work threads ▾ menu");
+    await expect(page.locator("#wikiWorkSeriesStatus")).toHaveCount(0);
     await expect(card(page, TSPLIT)).toHaveCount(0);
     expect((await record(page)).splits).toHaveLength(100);
+    // The next boundary edit that lands clears the note (fix round 2, batch 3).
+    await groupCard(page, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    await openMenu(page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`));
+    await page.locator("#wikiWorkPop [data-work-keep]").click();
+    await expect(card(page, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    await expect(note).toHaveCount(0);
+  });
+
+  test("a stale tab's Allow grouping removes only the anchor it showed: another tab's newer anchor on the thread's page stays (fix round 2, batch 3)", async ({ page }) => {
+    await page.addInitScript(([k]) => {
+      if (localStorage.getItem("__seeded")) return;
+      localStorage.setItem("__seeded", "1");
+      localStorage.setItem(k!, JSON.stringify({ version: 1, keptApart: ["plans/t-split.md"] }));
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    await expect(card(page, TKEY).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    await openMenu(card(page, TKEY).locator("[data-work-card-menu]"));
+    // Another tab made t-key its own thread and kept it separate; a same-page
+    // setItem fires no storage event here, so this tab still draws T whole.
+    await page.evaluate((k) => {
+      localStorage.setItem(k, JSON.stringify({ version: 1, keptApart: ["plans/t-split.md", "plans/t-key.md"], splits: [{ id: "s1", page: "plans/t-key.md" }] }));
+    }, workGroupKey(B));
+    await page.locator("#wikiWorkPop [data-work-allow]").click();
+    expect(await record(page)).toEqual({ version: 1, keptApart: [TKEY], splits: [{ id: "s1", page: TKEY }] });
+    await expect(card(page, TKEY).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+  });
+
+  test("a stale tab's Reset removes only the anchor it showed: another tab's newer anchor and split stay (fix round 2, batch 3)", async ({ page }) => {
+    await page.addInitScript(([k]) => {
+      if (localStorage.getItem("__seeded")) return;
+      localStorage.setItem("__seeded", "1");
+      localStorage.setItem(k!, JSON.stringify({ version: 1, keptApart: ["plans/t-split.md"] }));
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    await expect(card(page, TKEY).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    await groupBtn(page).click();
+    await page.evaluate((k) => {
+      localStorage.setItem(k, JSON.stringify({ version: 1, keptApart: ["plans/t-split.md", "plans/t-key.md"], splits: [{ id: "s1", page: "plans/t-key.md" }] }));
+    }, workGroupKey(B));
+    await page.locator("[data-work-reset]").click();
+    expect(await record(page)).toEqual({ version: 1, keptApart: [TKEY], splits: [{ id: "s1", page: TKEY }] });
+  });
+
+  test("Forget in the reset area removes that one definition, keeps the menu open, and keeps the rest (fix round 2, batch 3)", async ({ page }) => {
+    await page.addInitScript(([k]) => {
+      if (localStorage.getItem("__seeded")) return;
+      localStorage.setItem("__seeded", "1");
+      localStorage.setItem(
+        k!,
+        JSON.stringify({ version: 1, splits: [{ id: "a1", page: "plans/t-split.md" }, { id: "a2", page: "plans/gone.md" }], keptApart: ["notes/gone-k.md"] }),
+      );
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    await groupBtn(page).click();
+    await expect(page.locator(".wiki-work-def")).toHaveText(["Own thread: plans/gone.md — the page is gone", "Kept separate: notes/gone-k.md — the page is gone"]);
+    await page.locator('[data-work-forget-split="a2"]').click();
+    expect(await record(page)).toEqual({ version: 1, splits: [{ id: "a1", page: TSPLIT }], keptApart: ["notes/gone-k.md"] });
+    await expect(page.locator(".wiki-work-def")).toHaveText(["Kept separate: notes/gone-k.md — the page is gone"]);
+    await expect(page.locator("[data-work-reset]")).toContainText("Reset your splits and groups (2)");
+    await page.locator('[data-work-forget-anchor="notes/gone-k.md"]').click();
+    expect(await record(page)).toEqual({ version: 1, splits: [{ id: "a1", page: TSPLIT }] });
+    await expect(page.locator(".wiki-work-def")).toHaveCount(0);
+    await expect(card(page, TSPLIT)).toHaveCount(1);
   });
 
   test("storage refuses the write: the split lives in this tab only and says so; a reload is back on the server's thread", async ({ page }) => {

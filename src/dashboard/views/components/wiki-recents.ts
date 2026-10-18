@@ -923,8 +923,9 @@ export interface RailWorkControl {
   stops: { stop: WorkGroupStop; available: boolean; reasons: string[]; cards: number }[];
   /** PR 4: the reset area — how many splits and kept-apart threads the record
    *  holds, and every one that does not apply now (dormant, unresolved, in
-   *  conflict), named for repair. Absent with none. */
-  reset?: { count: number; entries: { kind: "split" | "keptApart"; title: string; state: string }[] };
+   *  conflict), named for repair. `forget` is what its Forget button removes:
+   *  a split's id, an anchor as stored. Absent with none. */
+  reset?: { count: number; entries: { kind: "split" | "keptApart"; title: string; state: string; forget: string }[] };
 }
 
 export type RailEntry =

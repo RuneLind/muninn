@@ -581,9 +581,16 @@ export function workGroupMenuHtml(control: RailWorkControl, local: boolean): str
       `<span class="wiki-work-opt-text">Reset your splits and groups (${control.reset.count})</span></button>` +
       control.reset.entries
         .map(
-          (e) =>
-            `<div class="wiki-work-note wiki-work-def" role="presentation">` +
-            `${esc(e.kind === "split" ? "Own thread" : "Kept separate")}: ${esc(e.title)} — ${esc(BOUNDARY_STATE_TEXT[e.state] ?? e.state)}</div>`,
+          (e) => {
+            const what = `${e.kind === "split" ? "Own thread" : "Kept separate"}: ${e.title}`;
+            // It has no Return or Allow grouping item: Forget removes this one.
+            const attr = e.kind === "split" ? "data-work-forget-split" : "data-work-forget-anchor";
+            return (
+              `<div class="wiki-work-note wiki-work-def" role="presentation">${esc(what)} — ${esc(BOUNDARY_STATE_TEXT[e.state] ?? e.state)}</div>` +
+              `<button type="button" role="menuitem" class="wiki-work-opt wiki-work-forget" ${attr}="${esc(e.forget)}" aria-label="${esc(`Forget ${what}`)}">` +
+              `<span class="wiki-work-dot" aria-hidden="true">✕</span><span class="wiki-work-opt-text">Forget</span></button>`
+            );
+          },
         )
         .join("")
     : "";
@@ -635,10 +642,11 @@ function popDisabled(attrs: string, glyph: string, label: string, why: string): 
 }
 
 /** Why an add is refused at a list's bound, in words (the menu item's reason,
- *  and the note a click shows when another tab filled the list first). */
+ *  and the note a click shows when another tab filled the list first). The
+ *  bound counts definitions that do not apply too, which only Forget clears. */
 export const WORK_GROUP_FULL_TEXT = {
-  splits: `you have ${WORK_GROUP_SPLITS_MAX} splits; return some to their threads first`,
-  keptApart: `you keep ${WORK_GROUP_KEPT_APART_MAX} threads separate; allow grouping on some first`,
+  splits: `you have ${WORK_GROUP_SPLITS_MAX} splits; return some to their threads or forget some under Reset your splits and groups in the Work threads ▾ menu`,
+  keptApart: `you keep ${WORK_GROUP_KEPT_APART_MAX} threads separate; allow grouping on some or forget some under Reset your splits and groups in the Work threads ▾ menu`,
 } as const;
 
 /** Why Make own thread is not offered, in words. */
