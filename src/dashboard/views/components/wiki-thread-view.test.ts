@@ -424,7 +424,7 @@ describe("the Group control and menu", () => {
 
 // ── PR #704 fix round 1, batch 5 ──────────────────────────────────────────────
 
-describe("the also chip cuts by code points", () => {
+describe("the also chip cuts by grapheme cluster", () => {
   const chip = (label: string) => {
     const html = threadCardHeaderHtml(card({ child: { anchor: false, why: "", witnesses: [], also: [label] } }), true, NOW, true);
     return /<span class="wiki-thread-chip"[^>]*>also (.*?)<\/span>/.exec(html)![1]!;
@@ -439,6 +439,21 @@ describe("the also chip cuts by code points", () => {
     expect(chip("abcdefghijklmnopqrstuvw😀")).toBe("abcdefghijklmnopqrstuvw😀");
     expect(chip("abcdefghijklmnopqrstuvwx")).toBe("abcdefghijklmnopqrstuvwx");
     expect(chip("abcdefghijklmnopqrstuvwxy")).toBe("abcdefghijklmnopqrstuvw…");
+  });
+  // Fix round 2, finding 2: 22 letters, then a cluster of several code
+  // points as the 23rd character, then more — the cut keeps the cluster whole.
+  const head = "abcdefghijklmnopqrstuv";
+  test.each([
+    ["a flag (two regional indicators)", "🇳🇴"],
+    ["an emoji with a skin tone", "👍🏽"],
+    ["a ZWJ family", "👨\u200d👩\u200d👧"],
+    ["an NFD letter with a combining accent", "e\u0301"],
+  ])("a cut never splits %s", (_, cluster) => {
+    expect(chip(head + cluster + "xyz")).toBe(head + cluster + "…");
+  });
+  test("the budget counts grapheme clusters: 23 letters and a flag fit whole", () => {
+    expect(chip(head + "w🇳🇴")).toBe(head + "w🇳🇴");
+    expect(chip(head + "w👨\u200d👩\u200d👧")).toBe(head + "w👨\u200d👩\u200d👧");
   });
 });
 

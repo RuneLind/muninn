@@ -748,3 +748,74 @@ describe("«anchor outside the filters» means a facet hid it (fix round 1, find
     expect(projectWorkGroups(g, pages, { ...INERT, folder: "notes" }, NOW)[0]!.anchorVisible).toBe(false);
   });
 });
+
+describe("a pin never renames a group (fix round 2, finding 1)", () => {
+  // Every group's name, keyed by its anchor, with no pin.
+  const namesByAnchor = (g: WorkGrouping) => g.groups.map((x) => [x.anchorKey, x.label, x.name]).sort((a, b) => (a[0]! < b[0]! ? -1 : 1));
+
+  /** Pins every child's 📌 page in turn; each group keeps its unpinned name. */
+  function expectPinStable(w: IndexWork, pages: WikiListing[]) {
+    const plain = run(w, pages);
+    const before = namesByAnchor(plain);
+    const anchors = plain.groups.flatMap((x) => x.children.map((c) => c.pinAnchor));
+    expect(anchors.length).toBeGreaterThan(0);
+    for (const pin of anchors) expect([pin, namesByAnchor(run(w, pages, { pin }))]).toEqual([pin, before]);
+  }
+
+  // hubClaimed with hub.md a work hub (> 25 backlinks), so only `h` — a
+  // thread of hubs only — holds a pin on it.
+  function hubPinned() {
+    const pages = [
+      page("p/a.md", { edits: 90, series: "s" }),
+      page("p/c.md", { edits: 5, series: "s" }),
+      page("p/hub.md", { edits: 40, title: "Hub page", backlinkCount: 30 }),
+      page("p/k.md", { edits: 20, title: "K page" }),
+    ];
+    const threads = [thread("A", ["p/a.md"]), thread("C", ["p/c.md", "p/hub.md"]), thread("h", ["p/hub.md"]), thread("k", ["p/k.md"])];
+    return { pages, w: work(pages, threads, { related: [["p/hub.md", "p/k.md"]] }) };
+  }
+
+  test("pinning the group whose anchor owns nothing keeps its name", () => {
+    const { pages, w } = hubPinned();
+    const plain = run(w, pages);
+    expect(childKeys(plain)).toEqual([["A", "C"], ["h", "k"]]);
+    expect(plain.groups[1]!.name).toBe("K page");
+    const pinned = run(w, pages, { pin: plain.groups[1]!.children[0]!.pinAnchor });
+    expect(childKeys(pinned)).toEqual([["h", "k"], ["A", "C"]]);
+    expect(pinned.groups[0]!.name).toBe("K page");
+    expectPinStable(w, pages);
+  });
+
+  // Two non-owning children (h, h2: C claims hub and hub2), then two owning
+  // ones (k1, k2). The name is k1's: the FIRST owning child, not the second
+  // child and not the last owning one.
+  function twoOwners() {
+    const pages = [
+      page("p/a.md", { edits: 90, series: "s" }),
+      page("p/c.md", { edits: 5, series: "s" }),
+      page("p/hub.md", { edits: 40, title: "Hub page" }),
+      page("p/hub2.md", { edits: 30, title: "Hub2 page" }),
+      page("p/k1.md", { edits: 20, title: "K1 page" }),
+      page("p/k2.md", { edits: 10, title: "K2 page" }),
+    ];
+    const threads = [
+      thread("A", ["p/a.md"]),
+      thread("C", ["p/c.md", "p/hub.md", "p/hub2.md"]),
+      thread("h", ["p/hub.md"]),
+      thread("h2", ["p/hub2.md"]),
+      thread("k1", ["p/k1.md"]),
+      thread("k2", ["p/k2.md"]),
+    ];
+    const related: [string, string][] = [["p/hub.md", "p/hub2.md"], ["p/hub.md", "p/k1.md"], ["p/hub.md", "p/k2.md"]];
+    return { pages, w: work(pages, threads, { related }) };
+  }
+
+  test("the first child that owns a page names the group, before and after a pin", () => {
+    const { pages, w } = twoOwners();
+    const plain = run(w, pages);
+    expect(childKeys(plain)).toEqual([["A", "C"], ["h", "h2", "k1", "k2"]]);
+    expect(plain.groups[1]!.children.map((c) => c.owned.length)).toEqual([0, 0, 1, 1]);
+    expect(plain.groups[1]!.name).toBe("K1 page");
+    expectPinStable(w, pages);
+  });
+});

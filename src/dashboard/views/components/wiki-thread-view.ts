@@ -10,7 +10,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { displayTitleOf, localDay, type WikiListing } from "./wiki-filter.ts";
-import type { RailGroupCard, RailThreadCard, RailWorkControl } from "./wiki-recents.ts";
+import { isRailGroupCard, type RailGroupCard, type RailThreadCard, type RailWorkCard, type RailWorkControl } from "./wiki-recents.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 
 /** One instant as a card shows it, in the viewer's zone: `today 08:01`,
@@ -136,14 +136,13 @@ const THREAD_GLYPH =
  *  anchor's line, `Show N threads`, and a 📌 that pins its anchor child;
  *  `pages` does not apply to it. */
 export function threadCardHeaderHtml(
-  card: RailThreadCard | RailGroupCard,
+  card: RailWorkCard,
   folded: boolean,
   now: number,
   showMoves: boolean,
   pages?: number,
 ): string {
-  const group = "group" in card;
-  const k = group
+  const k = isRailGroupCard(card)
     ? {
         kind: " wiki-thread-group",
         attr: "data-thread-group",
@@ -242,16 +241,18 @@ export function railGhostHtml(relPath: string, title: string, reason: "pinned" |
 
 // ── Grouped Work threads (plan `muninn-wiki-work-thread-grouping`, PR 3) ─────
 
-/** The `also` chip's label budget, in characters. */
+/** The `also` chip's label budget, in grapheme clusters. */
 const ALSO_LABEL_MAX = 24;
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** A child card's third meta line: why it joined (`↔ 5 links · series`) or
  *  `anchor`, then the `also <series>` chip. The hover lists the witnesses. */
 function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>): string {
   // The chip names the first series, cut to fit one line of the 260 px rail
   // (width table, src/wiki/CLAUDE.md); the hover names them all in full.
-  // Counted and cut by code point, so an emoji is one character and never split.
-  const first = [...(child.also[0] ?? "")];
+  // Counted and cut by grapheme cluster, so a flag, a skin-toned or ZWJ emoji
+  // and a letter with a combining accent are one character, never split.
+  const first = [...graphemes.segment(child.also[0] ?? "")].map((g) => g.segment);
   const label = first.length > ALSO_LABEL_MAX ? first.slice(0, ALSO_LABEL_MAX - 1).join("") + "…" : first.join("");
   const also = child.also.length
     ? ` <span class="wiki-thread-chip" title="${esc("Some of its pages are also in: " + child.also.join(", "))}">` +

@@ -774,28 +774,70 @@ test.describe("Wiki rail: grouped work threads", () => {
     expect(await stored(page, GROUPS)).toBeNull();
   });
 
-  test("forced colours drop the shadows: an open group's body and a closed group's stack keep a real border", async ({ page }) => {
-    await page.emulateMedia({ forcedColors: "active" });
-    await openReader(page);
-    const edges = (sel: string) =>
-      page.locator(sel).evaluate((e) => {
-        const s = getComputedStyle(e);
-        const side = (k: "Left" | "Right" | "Bottom") => `${s.getPropertyValue(`border-${k.toLowerCase()}-style`)} ${s.getPropertyValue(`border-${k.toLowerCase()}-width`)}`;
-        return { shadow: s.boxShadow, left: side("Left"), right: side("Right"), bottom: side("Bottom") };
-      });
-    // The open series group: its body's outline was a box shadow, gone here.
-    const gbody = await edges(`.wiki-thread-gbody[data-thread-group-body="group:series:alpha"]`);
+  test("forced colours drop the shadows: an open group's body and a closed group's stack keep an edge that costs no layout", async ({ page }) => {
+    const stackSel = `#wikiList > .wiki-thread-card[data-thread-group="group:anchor:${REL1}"]`;
+    const gbodySel = `.wiki-thread-gbody[data-thread-group-body="group:series:alpha"]`;
+    /** Widths and heights the forced-colours edges must leave alone. */
+    const layout = () =>
+      page.evaluate(
+        ([stackSel, gbodySel]) => {
+          const box = (sel: string) => {
+            const r = document.querySelector(sel)!.getBoundingClientRect();
+            return { w: r.width, h: r.height };
+          };
+          const rows = Array.from(document.querySelectorAll(`${gbodySel} .wiki-list-item.thread-row`)).map((e) => e.getBoundingClientRect().width);
+          return { rows, stackLabel: box(`${stackSel} .wiki-thread-label`), stack: box(stackSel) };
+        },
+        [stackSel, gbodySel] as const,
+      );
+    const edges = (sel: string, pseudo: string | null) =>
+      page.locator(sel).evaluate((e, pseudo) => {
+        const s = getComputedStyle(e, pseudo);
+        const side = (k: string) => `${s.getPropertyValue(`border-${k}-style`)} ${s.getPropertyValue(`border-${k}-width`)}`;
+        return { content: s.content, position: s.position, shadow: s.boxShadow, top: side("top"), left: side("left"), right: side("right"), bottom: side("bottom") };
+      }, pseudo);
+    for (const rail of [260, 200]) {
+      await page.emulateMedia({ forcedColors: "none" });
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, rail] as const);
+      await page.setViewportSize({ width: rail === 200 ? 445 : 1400, height: 900 });
+      await openReader(page);
+      await expect(groupCard(page, `group:anchor:${REL1}`)).not.toHaveClass(/\bopen\b/);
+      const normal = await layout();
+      expect(normal.rows.length).toBeGreaterThan(0);
+      await page.emulateMedia({ forcedColors: "active" });
+      // The rows inside the body keep today's width, and the closed stack's
+      // label and height are unchanged (no header grows a line).
+      expect.soft(await layout(), `rail ${rail}`).toEqual(normal);
+    }
+    // The open series group: its body's outline was a box shadow, gone here;
+    // an ::after draws its sides and bottom, never its top (the open header
+    // closes it there), and the body itself takes no border.
+    const gbody = await edges(gbodySel, null);
     expect.soft(gbody.shadow).toBe("none");
-    for (const side of [gbody.left, gbody.right, gbody.bottom]) expect.soft(side).toBe("solid 2px");
-    // The closed related group: its stack was a box shadow; a double edge stands in.
-    await expect(groupCard(page, `group:anchor:${REL1}`)).not.toHaveClass(/\bopen\b/);
-    const stack = await edges(`#wikiList > .wiki-thread-card[data-thread-group="group:anchor:${REL1}"]`);
+    // The ::after is laid over the body's own box, and the stack's over its card's.
+    expect.soft(gbody.position).toBe("relative");
+    for (const side of [gbody.top, gbody.left, gbody.right, gbody.bottom]) expect.soft(side).toMatch(/ 0px$/);
+    const gedge = await edges(gbodySel, "::after");
+    for (const side of [gedge.left, gedge.right, gedge.bottom]) expect.soft(side).toBe("solid 2px");
+    expect.soft(gedge.top).toMatch(/ 0px$/);
+    // The closed related group: its stack was a box shadow; a second edge
+    // stands in, drawn by an ::after, so its own border stays 1 px.
+    const stack = await edges(stackSel, null);
     expect.soft(stack.shadow).toBe("none");
-    expect.soft(stack.right).toBe("double 3px");
-    expect.soft(stack.bottom).toBe("double 3px");
+    expect.soft(stack.position).toBe("relative");
+    expect.soft(stack.right).toBe("solid 1px");
+    expect.soft(stack.bottom).toBe("solid 1px");
+    const sedge = await edges(stackSel, "::after");
+    expect.soft(sedge.right).toBe("solid 1px");
+    expect.soft(sedge.bottom).toBe("solid 1px");
+    expect.soft(sedge.top).toMatch(/ 0px$/);
+    expect.soft(sedge.left).toMatch(/ 0px$/);
+    // The open group's header is not a stack: no second edge.
+    expect.soft((await edges(`#wikiList > .wiki-thread-card[data-thread-group="group:series:alpha"]`, "::after")).content).toBe("none");
     // A closed thread card is not stacked.
-    const solo = await edges(`#wikiList > .wiki-thread-card[data-thread="thread:${SOLO[0]}"]`);
+    const solo = await edges(`#wikiList > .wiki-thread-card[data-thread="thread:${SOLO[0]}"]`, null);
     expect.soft(solo.right).toBe("solid 1px");
+    expect.soft((await edges(`#wikiList > .wiki-thread-card[data-thread="thread:${SOLO[0]}"]`, "::after")).content).toBe("none");
   });
 
   test("facets apply before the cap and never rename a group; a hidden anchor says so", async ({ page }) => {
@@ -984,22 +1026,28 @@ test.describe("Wiki rail: grouped work threads", () => {
     expect(after).toContain("closed:group:series:alpha");
   });
 
-  test("the group and child headers' width table: every row fits at 260 and 300 px in both themes, nothing cut", async ({ page }) => {
+  test("the group and child headers' width table: every row fits at 260 and 300 px in both themes and forced colours, nothing cut", async ({ page }) => {
     test.setTimeout(240_000);
     const groups = groupRows();
     const kids = childRows();
     const font = process.env.PW_TEST_CONNECT_WS_ENDPOINT ? "remote" : process.platform;
     const failures: string[] = [];
     const widest = new Map<string, number>();
+    /** The narrowest label per kind and rail, normal vs forced colours. */
+    const labels = new Map<string, number>();
     const passes = [
       { rail: 260, win: 1400, scheme: "light" },
       { rail: 260, win: 1400, scheme: "dark" },
       { rail: 300, win: 1400, scheme: "light" },
       { rail: 300, win: 1400, scheme: "dark" },
       { rail: 200, win: 445, scheme: "light" },
+      // Forced colours: the group's edges are drawn without layout, so the table holds there too.
+      { rail: 260, win: 1400, scheme: "light", forced: true },
+      { rail: 200, win: 445, scheme: "light", forced: true },
     ] as const;
     for (const p of passes) {
-      await page.emulateMedia({ colorScheme: p.scheme });
+      const forced = "forced" in p;
+      await page.emulateMedia({ colorScheme: p.scheme, forcedColors: forced ? "active" : "none" });
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, p.rail] as const);
       await page.setViewportSize({ width: p.win, height: 900 });
       await openReader(page);
@@ -1016,7 +1064,7 @@ test.describe("Wiki rail: grouped work threads", () => {
       const list = await page.locator("#wikiList").evaluate((e) => e.scrollWidth - e.clientWidth);
       if (list > 0) failures.push(`${p.rail}/${p.scheme}: #wikiList scrolls ${list} px sideways`);
       for (const m of measured) {
-        const at = `${font} ${p.rail}/${p.scheme} [${m.id}]`;
+        const at = `${font} ${p.rail}/${p.scheme}${forced ? "/forced" : ""} [${m.id}]`;
         for (const issue of m.fit.issues) failures.push(`${at}: ${issue}`);
         // Tally and span: one line each at 260 and 300; two below.
         const maxLines = p.rail >= 260 ? 1 : 2;
@@ -1029,7 +1077,11 @@ test.describe("Wiki rail: grouped work threads", () => {
         for (const q of m.fit.partLines)
           if (q.lines > 1 && (p.rail >= 260 || !String(q.text).startsWith("also "))) failures.push(`${at}: "${q.text}" breaks inside itself`);
         if (m.fit.nameLines > 2) failures.push(`${at}: the name takes ${m.fit.nameLines} lines`);
-        if (p.rail >= 260 && p.scheme === "light") {
+        if (p.scheme === "light" && p.rail !== 300) {
+          const lk = `${m.kind} @${p.rail}${forced ? " forced" : ""}`;
+          labels.set(lk, Math.min(labels.get(lk) ?? Infinity, m.fit.label));
+        }
+        if (p.rail >= 260 && p.scheme === "light" && !forced) {
           const lk = `${m.kind} label @${p.rail}`;
           widest.set(lk, Math.min(widest.get(lk) ?? Infinity, m.fit.label));
           for (const part of m.fit.parts) if (!NAMES.includes(part.text)) widest.set(part.text, Math.max(widest.get(part.text) ?? 0, part.width));
@@ -1040,6 +1092,8 @@ test.describe("Wiki rail: grouped work threads", () => {
       }
     }
     console.log(`[group width table, ${font}] ` + JSON.stringify(Object.fromEntries([...widest].map(([k, v]) => [k, Math.round(v * 10) / 10]))));
+    // Forced colours cost no label width: the same narrowest label as normal.
+    for (const kind of ["group", "child"]) for (const rail of [260, 200]) expect.soft(labels.get(`${kind} @${rail} forced`), `${kind} @${rail}`).toBe(labels.get(`${kind} @${rail}`)!);
     const kinds = new Map<string, number>();
     for (const f of failures) {
       const k = f.replace(/\[[^\]]*\]/, "").replace(/"[^"]*"/, "…");

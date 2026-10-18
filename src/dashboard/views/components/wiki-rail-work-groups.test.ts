@@ -540,3 +540,32 @@ describe("the Group menu's Threads count is the Threads stop's drawn cards (fix 
     expect(cardsAt("threads", {}, fx).cards.length).toBe(5);
   });
 });
+
+describe("only the first card's child defaults open (fix round 2 pin)", () => {
+  // e and f share series `beta`: a second group, drawn after the alpha group.
+  function twoGroups() {
+    const fx = fixture();
+    const pages = fx.pages.map((p) => (p.relPath === "plans/e.md" || p.relPath === "plans/f.md" ? ({ ...p, series: "beta" } as WikiListing) : p));
+    const work: IndexWork = { ...fx.work, evidence: evidence(pages, fx.threads, { related: [["plans/c.md", "plans/a.md"]] }) };
+    return { ...fx, pages, work };
+  }
+
+  test("a second group, closed or opened, opens none of its children by default", () => {
+    const fx = twoGroups();
+    for (const folds of [[], ["group:series:beta"]]) {
+      const { cards } = cardsAt("related", { folds }, fx);
+      expect(keysOf(cards).slice(0, 3)).toEqual([
+        ["group:series:alpha", ["plans/a.md", "plans/b.md", "plans/c.md"]],
+        "thread:notes/d.md",
+        ["group:series:beta", ["plans/e.md", "plans/f.md"]],
+      ]);
+      expect(groupAt(cards, 0).children.map((c) => c.open)).toEqual([true, false, false]);
+      const beta = groupAt(cards, 2);
+      expect(beta.open).toBe(folds.length > 0);
+      expect(beta.children.map((c) => [c.open, c.toggleKey])).toEqual([
+        [false, "thread:plans/e.md"],
+        [false, "thread:plans/f.md"],
+      ]);
+    }
+  });
+});

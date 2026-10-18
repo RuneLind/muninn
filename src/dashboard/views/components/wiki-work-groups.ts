@@ -494,11 +494,15 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
   }
 
   // Names and fold keys, in grouping order (before the pin, so a pin never
-  // moves a name key between two same-named groups).
+  // moves a name key between two same-named groups or renames a group).
+  const byTerm = workTermOrder(at);
   const namedKeys = new Set<string>();
+  const freeTaken = new Set<string>();
   const named = drafts.map((d) => {
     const anchor = d.members[0]!.unit;
-    if (d.members.length === 1) return { label: "thread" as const, foldKey: threadFoldKey(anchor.key) };
+    // Ownership in this pin-free order, for the RELATED name only.
+    const freeOwned = d.members.map((m) => claimOwnedFocus(m.unit.thread.pages, byRel, freeTaken, byTerm));
+    if (d.members.length === 1) return { label: "thread" as const, foldKey: threadFoldKey(anchor.key), title: "" };
     const fs = d.members.map((m) => facts.get(m.unit)!);
     const af = facts.get(anchor)!;
     const pick = (vals: (f: UnitFacts) => string[], top: string | undefined, labelOf: (k: string) => string) => {
@@ -526,7 +530,12 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
         foldKey = nk;
       }
     }
-    return { label, nameKey, foldKey };
+    // RELATED: the anchor's title — unless the anchor owns no page (an
+    // earlier card's child claimed them all, D16), when that title is another
+    // card's row; then the first child that owns one names it.
+    const at0 = freeOwned.findIndex((o) => o.length > 0);
+    const title = childName(d.members[Math.max(at0, 0)]!.unit, freeOwned[Math.max(at0, 0)]!, byRel);
+    return { label, nameKey, foldKey, title };
   });
 
   // The pin, after grouping: the first unit in order holding the pinned page
@@ -543,14 +552,12 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
   // Ownership over the full listing in the drawn order: a page an earlier
   // child owns is neither a row nor the name of a later one.
   const taken = new Set<string>();
-  const byTerm = workTermOrder(at);
   const groups: WorkGroup[] = order.map((i) => {
     const d = drafts[i]!;
     const n = named[i]!;
     const nameSeries = n.label === "series" ? n.nameKey : undefined;
     const children: WorkGroupChild[] = d.members.map((m) => {
       const owned = claimOwnedFocus(m.unit.thread.pages, byRel, taken, byTerm);
-      const top = owned[0] ?? byRel.get(normalizeRel(m.unit.thread.pages[0] ?? ""));
       const also =
         d.members.length > 1
           ? facts
@@ -563,7 +570,7 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
         unit: m.unit,
         key: m.unit.key,
         foldKey: threadFoldKey(m.unit.key),
-        name: top ? threadName(displayTitleOf(top)) : m.unit.key,
+        name: childName(m.unit, owned, byRel),
         score: m.score,
         pinned: m.unit === pinnedUnit,
         pinAnchor: newestFocusPage(m.unit.thread, byRel),
@@ -576,13 +583,9 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
     });
     const witnesses = uniqueWitnesses(children.flatMap((c) => c.witnesses));
     const anchor = children[0]!;
-    // RELATED: the anchor's title — unless the anchor owns no page (an
-    // earlier card's child claimed them all, D16), when that title is another
-    // card's row; then the first child that owns one names it. The fold key
-    // stays the anchor's.
-    const namer = anchor.owned.length ? anchor : (children.find((c) => c.owned.length) ?? anchor);
+    // The fold key stays the anchor's whichever child names a RELATED group.
     const name =
-      n.label === "series" ? ix.seriesLabel(n.nameKey!) : n.label === "project" ? n.nameKey! : namer.name;
+      n.label === "series" ? ix.seriesLabel(n.nameKey!) : n.label === "project" ? n.nameKey! : n.label === "related" ? n.title : anchor.name;
     return {
       kind: d.members.length > 1 ? "group" : "thread",
       label: n.label,
@@ -596,6 +599,12 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
     };
   });
   return { ...base, groups, sessions: [] };
+}
+
+/** A child's name: the top page it owns, else its first focus page, cut at ` — `. */
+function childName(u: WorkUnit, owned: readonly WikiListing[], byRel: ReadonlyMap<string, WikiListing>): string {
+  const top = owned[0] ?? byRel.get(normalizeRel(u.thread.pages[0] ?? ""));
+  return top ? threadName(displayTitleOf(top)) : u.key;
 }
 
 // ── Sessions (D19) ──────────────────────────────────────────────────────────

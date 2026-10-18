@@ -1086,10 +1086,16 @@ export async function renderWikiPage(opts?: {
       .wiki-list-item.thread-row::before { background: CanvasText; }
       .wiki-thread-card.open { border-width: 2px; border-bottom-width: 1px; }
       .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 0; }
-      /* The group's two shadows: an open body takes a real border, as wide as
-         its open header's sides; a closed group's stack becomes a double edge. */
-      .wiki-thread-gbody { border: 2px solid CanvasText; border-top: 0; }
-      .wiki-thread-card.wiki-thread-group:not(.open) { border-right: 3px double CanvasText; border-bottom: 3px double CanvasText; }
+      /* The group's two shadows, drawn by an ::after so neither costs layout:
+         an open body's sides and bottom, as wide as its open header's sides
+         (no top: the header closes it); a closed group's stack, a second edge
+         in the margin its shadow used. ::after paints over the rows' Canvas. */
+      .wiki-thread-gbody, .wiki-thread-card.wiki-thread-group:not(.open) { position: relative; }
+      .wiki-thread-gbody::after, .wiki-thread-card.wiki-thread-group:not(.open)::after {
+        content: ""; position: absolute; pointer-events: none; border: 0 solid CanvasText;
+      }
+      .wiki-thread-gbody::after { inset: 0; border-width: 0 2px 2px; border-radius: inherit; }
+      .wiki-thread-card.wiki-thread-group:not(.open)::after { inset: 2px -4px -4px 2px; border-width: 0 1px 1px 0; border-radius: 8px; }
     }
     /* \`+N more\` under a closed series in Activity: opens the same fold as the
        series row above it. Indented to the member rows' depth. */
