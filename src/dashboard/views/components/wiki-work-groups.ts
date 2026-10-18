@@ -176,6 +176,10 @@ export interface WorkUnit {
   thread: WorkThread;
   /** Never joins a group and is never joined (a split page, a kept-apart thread). */
   isolated: boolean;
+  /** PR 4: the Make own thread definition this unit is (`wiki-work-boundaries.ts`). */
+  split?: { id: string; page: string };
+  /** PR 4: the kept-apart anchors that isolate this unit, as stored. */
+  keptApart?: string[];
 }
 
 /** One unit per usable thread, in the server's order — today's membership. */
@@ -410,6 +414,13 @@ export interface WorkGroupingInput {
   pin?: string | null;
   /** PR 4: units after page assignments. Default {@link workUnitsFromThreads}. */
   units?: readonly WorkUnit[];
+  /** D20: the only pages (normalized) a child may own — one base card's
+   *  pages, when `openWorkCards` regroups that card's units after the
+   *  reader's boundaries, so no boundary moves a page to another card. */
+  ownable?: ReadonlySet<string>;
+  /** D20: fold keys other cards already hold; a named group whose key is
+   *  here takes the anchor form instead. */
+  foldKeysTaken?: Iterable<string>;
 }
 
 const OK: WorkStopAvailability = { available: true, reasons: [] };
@@ -496,12 +507,14 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
   // Names and fold keys, in grouping order (before the pin, so a pin never
   // moves a name key between two same-named groups or renames a group).
   const byTerm = workTermOrder(at);
-  const namedKeys = new Set<string>();
+  const ownable = input.ownable;
+  const ownPages = (u: WorkUnit) => (ownable ? u.thread.pages.filter((p) => ownable.has(normalizeRel(p))) : u.thread.pages);
+  const namedKeys = new Set<string>(input.foldKeysTaken ?? []);
   const freeTaken = new Set<string>();
   const named = drafts.map((d) => {
     const anchor = d.members[0]!.unit;
     // Ownership in this pin-free order, for the RELATED name only.
-    const freeOwned = d.members.map((m) => claimOwnedFocus(m.unit.thread.pages, byRel, freeTaken, byTerm));
+    const freeOwned = d.members.map((m) => claimOwnedFocus(ownPages(m.unit), byRel, freeTaken, byTerm));
     if (d.members.length === 1) return { label: "thread" as const, foldKey: threadFoldKey(anchor.key), title: "" };
     const fs = d.members.map((m) => facts.get(m.unit)!);
     const af = facts.get(anchor)!;
@@ -557,7 +570,7 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
     const n = named[i]!;
     const nameSeries = n.label === "series" ? n.nameKey : undefined;
     const children: WorkGroupChild[] = d.members.map((m) => {
-      const owned = claimOwnedFocus(m.unit.thread.pages, byRel, taken, byTerm);
+      const owned = claimOwnedFocus(ownPages(m.unit), byRel, taken, byTerm);
       const also =
         d.members.length > 1
           ? facts
@@ -578,7 +591,9 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
         joinedBy: kindsOf(m.witnesses),
         witnesses: m.witnesses,
         also,
-        sessions: threadSessionsAvailability(evidence, m.unit.thread.key, reason),
+        // The contribution rows name the SOURCE thread (a split's remainder
+        // and pages rank by it, `unit.rank`).
+        sessions: threadSessionsAvailability(evidence, m.unit.rank.key, reason),
       };
     });
     const witnesses = uniqueWitnesses(children.flatMap((c) => c.witnesses));
@@ -622,6 +637,8 @@ export function workSessionCards(
   allPages: readonly WikiListing[],
   now: number,
   threadKey?: string,
+  /** Only these focus pages (normalized): a split's remainder or page. */
+  pages?: ReadonlySet<string>,
 ): WorkSessionCard[] {
   const contributions = readWorkEvidence(work?.evidence, work?.threads).evidence?.contributions;
   if (!contributions) return [];
@@ -634,6 +651,7 @@ export function workSessionCards(
   const acc = new Map<string, Acc>();
   for (const [ref, page, thread, kind] of contributions.rows) {
     if (threadKey !== undefined && thread !== threadKey) continue;
+    if (pages && kind === "focus" && !pages.has(normalizeRel(page))) continue;
     let a = acc.get(ref);
     if (!a) acc.set(ref, (a = { thread, focus: new Set(), touch: new Set() }));
     (kind === "focus" ? a.focus : a.touch).add(normalizeRel(page));
@@ -684,6 +702,9 @@ export interface WorkGroupView {
   /** `N threads · M sessions · ✋ K`: sessions deduplicated by
    *  `workSessionRef` across the visible children. */
   counts: { threads: number; sessions: number; movesYou: number };
+  /** D20: set on each piece of a base group the reader's boundaries broke —
+   *  that base card's fold key, whose `+ N more` the piece reads too. */
+  baseFoldKey?: string;
 }
 
 function visibleSet(pages: readonly WikiListing[], filters: WikiFilters): Set<string> {

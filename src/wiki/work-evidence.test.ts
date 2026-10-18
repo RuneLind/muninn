@@ -30,13 +30,27 @@ describe("relations", () => {
     const pages = [
       meta("p/a.mdx", { series: "Alpha ", project: "muninn" }),
       meta("p/b.mdx", { series: "alpha", project: "huginn" }),
-      meta("p/a-prototype.html", { series: "alpha", parent: "p/a.mdx", pairedBy: "suffix" }),
+      meta("p/a-prototype.html", { series: "zeta", parent: "p/a.mdx", pairedBy: "suffix" }),
       meta("p/c.mdx", { series: "alpha" }),
     ];
     const e = build(pages, [thread("p/a.mdx", ["p/a.mdx", "p/a-prototype.html"]), thread("p/b.mdx", ["p/b.mdx"])]);
-    // An attachment child is no series member; p/c is no focus page.
-    expect(e.relations.series).toEqual({ "p/a.mdx": "alpha", "p/b.mdx": "alpha" });
+    // An attachment child counts in its parent's series, never its own key;
+    // p/c is no focus page.
+    expect(e.relations.series).toEqual({ "p/a.mdx": "alpha", "p/a-prototype.html": "alpha", "p/b.mdx": "alpha" });
     expect(e.relations.projects).toEqual({ "p/a.mdx": "muninn", "p/b.mdx": "huginn" });
+  });
+
+  test("an attachment focus page counts as a member of its markdown parent's series (Save as series writes the parent); its own key does not, and a retired child's parent is no stand-in", () => {
+    const pages = [
+      meta("p/a.md", { series: "Alpha" }),
+      meta("p/a.html", { parent: "p/a.md", pairedBy: "stem" }),
+      meta("p/b.md"),
+      meta("p/b-prototype.html", { series: "beta", parent: "p/b.md", pairedBy: "suffix" }),
+      meta("p/c.md", { series: "gamma" }),
+      meta("p/old.md", { parent: "p/c.md", pairedBy: "superseded" }),
+    ];
+    const e = build(pages, [thread("p/a.html", ["p/a.html"]), thread("p/b-prototype.html", ["p/b-prototype.html"]), thread("p/old.md", ["p/old.md"])]);
+    expect(e.relations.series).toEqual({ "p/a.html": "alpha" });
   });
 
   test("related: authored pairs between focus pages, either thread, hubs included; skips are summed", () => {

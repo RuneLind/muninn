@@ -139,6 +139,7 @@ import {
   foldChipLabelClass,
   foldChipLabel,
   isFoldOpen,
+  isRailGroupCard,
   normalizeFoldKey,
   isPinnedRelPath,
   pairedByWhy,
@@ -147,6 +148,9 @@ import {
   threadPinSettle,
   threadPinStep,
   type RailEntry,
+  type RailGroupCard,
+  type RailThreadCard,
+  type RailWorkCard,
   type ThreadPinState,
   type ThreadPinTrigger,
   type RelatedOrder,
@@ -162,7 +166,10 @@ import {
   seriesStripOrder,
   workedShownDay,
 } from "./wiki-groups.ts";
-import { railInputFor, threadPinAnchor } from "./wiki-rail-input.ts";
+import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
+import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
+import { loadSeriesBaseMap, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
@@ -190,16 +197,27 @@ import {
   writeWorkGroup,
 } from "./wiki-recents-store.ts";
 import {
+  groupCardMenuHtml,
   railGhostHtml,
+  saveSeriesConfirmHtml,
+  threadAlsoInHtml,
   threadCardHeaderHtml,
+  threadCardMenuHtml,
   threadGroupBodyStartHtml,
   threadGroupEndHtml,
   threadGroupHeaderHtml,
+  threadRowMenuBtnHtml,
+  threadRowMenuHtml,
+  threadSessionLineHtml,
+  threadSessionsToggleHtml,
   threadTouchedHtml,
   workSectionHeaderHtml,
+  WORK_GROUP_FULL_TEXT,
+  WORK_POP_ID,
 } from "./wiki-thread-view.ts";
 import {
   storageEventTouchesWorkGroup,
+  workGroupAddRefused,
   workGroupPrefsOf,
   workGroupRecordSettle,
   workGroupRecordStep,
@@ -1426,6 +1444,14 @@ let workMenuOpen = false;
 const workMoreOpen = new Set<string>();
 /** Group fold keys whose shared-context `+N` this tab pressed. Never stored. */
 const workContextOpen = new Set<string>();
+/** Thread fold keys whose `▸ split into N sessions` this tab opened. Never
+ *  stored: the split shows the same rows, it changes no stop (D7, D19). */
+const workSessionsOpen = new Set<string>();
+/** The boundaries the last render applied (`workBoundariesOf`): the row ⋯
+ *  reads them, so its item matches the rail on screen. */
+let workBounds: WorkBoundaries | null = null;
+/** The Work threads cards the last render drew: the card ⋯ reads them. */
+let workCardsDrawn: readonly RailWorkCard[] = [];
 
 /** Document focus: the only state in which a render may write the pin. */
 function tabHasFocus(): boolean {
@@ -1644,36 +1670,54 @@ function renderList(cause: "storage" | "local" = "local"): void {
   // pin survives the thread's oldest pages leaving the window
   // (`threadPinAnchor`); the state table decides whether that is written.
   if (cause === "local") {
+    // D17: the grouping record runs the pin's table — adopt another tab's
+    // record, or retry a refused write while this tab has focus (R6).
+    stepWorkGroup({ kind: "render", stored: readWorkGroup(WIKI), focused: tabHasFocus() });
+    // PR 4: a kept-apart anchor follows its thread's newest focus page, the
+    // way the pin does (A1–A3), over the record as just adopted.
+    const reanchor = workBoundariesOf(workFacts, allPages, workGroupPrefsOf(workGroupRec.held)).reanchor;
+    if (reanchor.length) stepWorkGroup({ kind: "render", stored: readWorkGroup(WIKI), focused: tabHasFocus(), reanchor });
+    // The pin re-anchors over the threads AFTER the reader's splits, never
+    // the server's raw threads: a split page that becomes its source's newest
+    // focus page must not pull the pin out of the remainder (S3).
     stepThreadPin({
       kind: "render",
       stored: readThreadPin(WIKI),
       focused: tabHasFocus(),
-      anchor: threadPinAnchor(workFacts?.threads, allPages, threadPin.held),
+      anchor: threadPinAnchor(workBoundariesOf(workFacts, allPages, workGroupPrefsOf(workGroupRec.held)).derived, allPages, threadPin.held),
     });
-    // D17: the grouping record runs the pin's table — adopt another tab's
-    // record, or retry a refused write while this tab has focus (R6).
-    stepWorkGroup({ kind: "render", stored: readWorkGroup(WIKI), focused: tabHasFocus() });
   }
   const groupPrefs = workGroupPrefsOf(workGroupRec.held);
+  const bounds = workBoundariesOf(workFacts, allPages, groupPrefs);
+  workBounds = bounds;
   // The input assembly is `railInputFor` (`wiki-rail-input.ts`), shared with the
   // work replay.
-  const rail = buildRail(
-    railInputFor(
-      { allPages, projects, activityWeights, workedGate, work: workFacts },
-      {
-        mode,
-        now,
-        filters,
-        showRetired: showRetired(),
-        familiesOn: familiesOn(),
-        pins,
-        openFolds,
-        openRelPath: currentRelPath || undefined,
-        threadPin: threadPin.held,
-        workGroup: { stop: groupPrefs.stop, evidence: groupPrefs.evidence, moreOpen: [...workMoreOpen] },
+  const railInput = railInputFor(
+    { allPages, projects, activityWeights, workedGate, work: workFacts },
+    {
+      mode,
+      now,
+      filters,
+      showRetired: showRetired(),
+      familiesOn: familiesOn(),
+      pins,
+      openFolds,
+      openRelPath: currentRelPath || undefined,
+      threadPin: threadPin.held,
+      workGroup: {
+        stop: groupPrefs.stop,
+        evidence: groupPrefs.evidence,
+        moreOpen: [...workMoreOpen],
+        splits: groupPrefs.splits,
+        keptApart: groupPrefs.keptApart,
+        sessionsOpen: [...workSessionsOpen],
+        seriesWritable: seriesEditable(),
+        boundaries: bounds,
       },
-    ),
+    },
   );
+  workCardsDrawn = railInput.threads ?? [];
+  const rail = buildRail(railInput);
   // The open page's sessions used to be a section at the head of this rail. They
   // are now rows in the chain under the page title, which is where they have
   // room; `railListHtml` below still owns the empty state, because the rule that
@@ -1690,6 +1734,20 @@ function renderList(cause: "storage" | "local" = "local"): void {
     }
     if (entry.kind === "touched") {
       html += threadTouchedHtml(entry.foldKey, entry.pages, pageUrlByRelPath);
+      return;
+    }
+    // PR 4: the Sessions stop's `also in:` line, a split thread's session
+    // lines, and `▸ split into N sessions` (D19).
+    if (entry.kind === "also-in") {
+      html += threadAlsoInHtml(entry.foldKey, entry.pages, pageUrlByRelPath);
+      return;
+    }
+    if (entry.kind === "thread-session") {
+      html += threadSessionLineHtml(entry.foldKey, entry.session, now);
+      return;
+    }
+    if (entry.kind === "thread-sessions") {
+      html += threadSessionsToggleHtml(entry.card);
       return;
     }
     // A GROUP card (plan `muninn-wiki-work-thread-grouping`): its header, and
@@ -2027,7 +2085,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
       // family's own depth it would read as a sibling of the page it belongs to.
       // A SERIES member (and its attachment child) also carries
       // `wiki-series-cont`, which runs the series' accent rail through the row.
-      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}${entry.thread ? " thread-row" : ""}${entry.latest ? " latest" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
+      `<div class="wiki-list-item${active ? " active" : ""}${p.culled ? " culled" : ""}${entry.child && !entry.lifted ? " child" : ""}${entry.member ? " member" : ""}${entry.member?.kind === "series" ? " wiki-series-cont" : ""}${entry.thread ? " thread-row" : ""}${entry.thread?.session ? " session-row" : ""}${entry.latest ? " latest" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}"` +
       // The derivation on the ROW, and again on the title element below:
       // the child's own `title=` wins the hover over most of the row's width.
       (rowTitle ? ` title="${esc(rowTitle)}"` : "") +
@@ -2067,9 +2125,17 @@ function renderList(cause: "storage" | "local" = "local"): void {
       // Absent entirely on a read-only instance or root, and on a page no
       // series may claim (`canEditSeriesPage`: an `.html` attachment, an
       // `index.md`), where the only thing a click could produce is a refusal.
-      (canEditSeries && canEditSeriesPage(p.relPath)
-        ? seriesMenuBtnHtml(p.relPath, !!p.series)
-        : "") +
+      // On a work thread's focus row (PR 4) the ⋯ is a PAGE menu holding Make
+      // own thread above the series items; where no series opener applies it
+      // still renders, on its own attribute, holding Make own thread only. A
+      // Sessions-stop card's rows are not a thread's: today's opener.
+      (entry.thread && !entry.thread.session && rowBoundaryAction(bounds, workFacts, p.relPath)
+        ? canEditSeries && canEditSeriesPage(p.relPath)
+          ? seriesMenuBtnHtml(p.relPath, !!p.series, true)
+          : threadRowMenuBtnHtml(p.relPath)
+        : canEditSeries && canEditSeriesPage(p.relPath)
+          ? seriesMenuBtnHtml(p.relPath, !!p.series)
+          : "") +
       pinBtnHtml(entry.pinned) +
       // The full date on the META element, never on the row — same reason the
       // derivation is repeated onto `.wiki-list-title` above. It carries the
@@ -3673,6 +3739,9 @@ interface SeriesMenuState {
   /** The control that opened it — focus goes back there on every close, because
    *  a keyboard reader who dismisses a menu must not be returned to `<body>`. */
   opener: HTMLElement | null;
+  /** The opener as a selector by its key, taken at open time (a repaint
+   *  detaches the node); see `seriesOpenerSel`. */
+  openerSel: string | null;
   /** relPath → the page's content hash as of OPEN time. A target missing from
    *  this map is one whose read failed; its write is refused rather than sent
    *  with no base. */
@@ -3694,18 +3763,74 @@ function seriesMenuEl(): HTMLElement | null {
   return document.getElementById(SERIES_MENU_ID);
 }
 
-/** Close the popover, returning focus to whatever opened it.
- *
- *  `focus: false` is for the close that IMMEDIATELY precedes opening another
- *  menu (the toggle path) — the new popover takes focus itself, and returning
- *  it to the old opener in between fights that. `preventScroll` because the
- *  opener may have been scrolled out of view by the reader in the meantime. */
-function closeSeriesMenu(opts: { focus?: boolean } = {}): void {
-  const opener = seriesMenu?.opener ?? null;
-  seriesMenuEl()?.remove();
-  seriesMenu = null;
-  if (opts.focus === false) return;
+// ── Where focus goes when a body-level popover closes ─────────────────
+//
+// Both popovers — `#wikiSeriesMenu` (every series menu, a thread row's page
+// menu included) and `#wikiWorkPop` (a card's or a read-only row's ⋯) — close
+// through ONE function each, `closeSeriesMenu(cause)` / `closeWorkPop(cause)`,
+// and the cause alone decides focus (`popCloseReturnsFocus`):
+//
+//   cause     when                                         focus
+//   key       Escape; Tab (work popover)                   the opener (*)
+//   toggle    its own opener clicked or pressed again      the opener (*)
+//   done      Cancel; a series write that closed the menu  the opener (*) if focus
+//                                                          was in the popover or on <body>
+//   edit      a boundary item (Make own thread, Return,    none here: applyBoundaryEdit's
+//             Keep separate, Allow grouping)               per-edit table
+//   replace   another popover opening                      none: the new one takes it
+//   outside   a click anywhere else                        none: where the click put it
+//   viewport  a scroll that moves the opener; a resize     none, unless focus was IN the
+//                                                          popover: then the opener (*)
+//
+// (*) the opener node while connected; after a repaint, its replacement by
+// key (`openerSel`); then the card holding the page; then the Group button.
+// A repaint while a popover is open closes nothing: the popover is
+// body-level and keeps its own focus.
+
+/** Why a ⋯ popover closes — the one input to where focus goes. */
+type PopCloseCause = "key" | "toggle" | "done" | "edit" | "replace" | "outside" | "viewport";
+
+/** Whether `cause` returns focus to the opener, judged BEFORE `el` is removed
+ *  (removing a node that holds focus drops it to `<body>`). */
+function popCloseReturnsFocus(cause: PopCloseCause, el: HTMLElement | null): boolean {
+  const a = document.activeElement;
+  const inside = !!el && !!a && el.contains(a);
+  if (cause === "key" || cause === "toggle") return true;
+  if (cause === "done") return inside || !a || a === document.body;
+  if (cause === "viewport") return inside;
+  return false;
+}
+
+/** Focus a closed popover's opener: the node, its replacement by key, the
+ *  card holding `page`, the Group button. */
+function focusPopOpener(opener: HTMLElement | null, openerSel: string | null, page: string): void {
   if (opener?.isConnected) opener.focus({ preventScroll: true });
+  else focusFirstRailControl([openerSel, workCardControlSel(page, "menu")]);
+}
+
+/** A series opener as a selector by its key, for a repaint that replaces it:
+ *  the rail's own selector for a rail control, else the opener's attribute
+ *  and page inside its nearest container with an id (a plain rail row, the
+ *  Related work block, the article header). */
+function seriesOpenerSel(anchor: HTMLElement): string | null {
+  const rail = railControlSelector(anchor);
+  if (rail) return rail;
+  const attr = anchor.hasAttribute(SERIES_EDIT_ATTR) ? SERIES_EDIT_ATTR : anchor.hasAttribute(SERIES_MENU_ATTR) ? SERIES_MENU_ATTR : null;
+  if (!attr) return null;
+  const box = anchor.parentElement?.closest<HTMLElement>("[id]");
+  const scope = box?.id === "wikiList" ? "#wikiList .wiki-list-item:not(.thread-row)" : box ? `#${CSS.escape(box.id)}` : "";
+  return `${scope} [${attr}="${CSS.escape(anchor.getAttribute(attr) ?? "")}"]`.trim();
+}
+
+/** Close the series popover; focus per the table above. `preventScroll`
+ *  because the opener may have been scrolled out of view in the meantime. */
+function closeSeriesMenu(cause: PopCloseCause): void {
+  const was = seriesMenu;
+  const el = seriesMenuEl();
+  const refocus = popCloseReturnsFocus(cause, el);
+  el?.remove();
+  seriesMenu = null;
+  if (refocus && was?.opener) focusPopOpener(was.opener, was.openerSel, was.model.relPath);
 }
 
 /** The popover node, positioned under `anchor`. Shared by the real menu and by
@@ -3732,7 +3857,9 @@ function paintSeriesMenuEl(anchor: HTMLElement, html: string): HTMLElement {
 
 /** Open the popover for `relPath`, anchored under `anchor`. */
 function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): void {
-  closeSeriesMenu({ focus: false });
+  // A Save as series write in flight keeps its popover, the one ⋯ open.
+  if (workPopBusy()) return;
+  closeSeriesMenu("replace");
   if (!seriesEditable()) return;
   const model = buildSeriesMenu(allPages, relPath, recencyNow());
   if (!model) {
@@ -3745,12 +3872,20 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
     );
     return;
   }
-  const el = paintSeriesMenuEl(anchor, seriesMenuHtml(model, edit));
+  // On a work thread's focus row the ⋯ is a page menu (PR 4): Make own
+  // thread (or Return to its thread) above today's series items.
+  const row = !edit ? anchor.closest<HTMLElement>(".wiki-list-item.thread-row:not(.session-row)") : null;
+  const boundary = row ? rowMenuItemHtml(relPath) : "";
+  const el = paintSeriesMenuEl(anchor, (boundary ? boundary + `<div class="wiki-work-hr" role="separator"></div>` : "") + seriesMenuHtml(model, edit));
+  // The page menu takes the arrow keys (the keydown delegate by the work
+  // popover's); the other series menus open on their field and keep base keys.
+  if (row) el.setAttribute("data-page-menu", "");
   const state: SeriesMenuState = {
     model,
     edit,
     busy: false,
     opener: anchor,
+    openerSel: seriesOpenerSel(anchor),
     bases: new Map(),
     basesReady: Promise.resolve(),
     staleBases: false,
@@ -3761,7 +3896,9 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
   // is taller than the viewport scrolls the PAGE to reach it — and a page
   // scroll is what this menu closes on, so the menu dismissed itself the moment
   // it opened (measured on a short viewport, where 70vh really binds).
-  el.querySelector<HTMLInputElement>("[data-series-input]")?.focus({ preventScroll: true });
+  // A page menu opens on its first item, the boundary item (the Group menu's
+  // rule); a series menu on its field.
+  (el.querySelector<HTMLElement>("[data-thread-split], [data-work-return]") ?? el.querySelector<HTMLInputElement>("[data-series-input]"))?.focus({ preventScroll: true });
 }
 
 /**
@@ -3826,6 +3963,19 @@ async function seriesBaseHash(relPath: string): Promise<string | null> {
   }
 }
 
+/** `POST /api/wiki/series` for one page. The wiki rides the BODY, not the
+ *  query — the Stamp route's contract, and the reason the route reads one
+ *  place: a write must name its target in the payload it is validated
+ *  against, never in a string the client happened to append. */
+async function postSeriesWrite(write: SeriesWrite & { baseHash: string }): Promise<SeriesPostAnswer> {
+  const res = await fetch("/api/wiki/series", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ wiki: WIKI, ...write }),
+  });
+  return { ok: res.ok, status: res.status, body: (await res.json().catch(() => null)) as SeriesPostAnswer["body"] };
+}
+
 /**
  * Run the editor's writes, in order, stopping at the first failure.
  *
@@ -3863,73 +4013,36 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
   }
   state.busy = true;
   setSeriesMenuNote(state, "Saving…", false);
-  /** The series this sequence left without a label — the route reports it when
-   *  a MOVE took the page's own `series_label:` with it, since a label names a
-   *  series rather than a page. */
-  let cleared: { series: string } | null = null;
-  /** Whether any answer in the sequence reported bytes moved. */
-  let wrote = false;
   try {
     await state.basesReady;
-    for (const write of writes) {
-      const baseHash = state.bases.get(write.relPath);
-      if (!baseHash) {
-        setSeriesMenuNote(state, `Could not read ${write.relPath}`, true);
-        await refreshAfterSeriesWrite();
-        return;
-      }
-      // The wiki rides the BODY, not the query — the Stamp route's contract,
-      // and the reason the route reads one place: a write must name its target
-      // in the payload it is validated against, never in a string the client
-      // happened to append.
-      const res = await fetch("/api/wiki/series", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wiki: WIKI, ...write, baseHash }),
-      });
-      const body = (await res.json().catch(() => null)) as
-        | {
-            error?: string;
-            hash?: string;
-            stale?: boolean;
-            written?: boolean;
-            clearedLabel?: { series?: string; label?: string };
-          }
-        | null;
-      if (!res.ok) {
-        if (res.status === 409) {
-          // The base this menu has held since it opened describes a file
-          // somebody else has moved on from. Every base it holds is suspect
-          // now, so the menu stops writing and says which page it was.
-          state.staleBases = true;
-          state.bases.clear();
-          setSeriesMenuNote(
-            state,
-            `${write.relPath} changed since this menu opened — close and reopen it`,
-            true,
-          );
-        } else {
-          setSeriesMenuNote(state, body?.error || `Write refused (${res.status})`, true);
-        }
-        await refreshAfterSeriesWrite();
-        return;
-      }
-      // The page the reader has open keeps a CURRENT hash rather than a stale
-      // one: this write is the reason it moved, and the answer says where to.
-      if (
-        typeof body?.hash === "string" &&
-        currentRelPath &&
-        normalizeRel(currentRelPath) === normalizeRel(write.relPath)
-      ) {
-        currentPageHash = body.hash;
-      }
-      const dropped = body?.clearedLabel?.series;
-      if (typeof dropped === "string" && dropped) cleared = { series: dropped };
-      // An answer with no `written` at all is treated as a write — the older
-      // shape, and the direction that reports rather than the one that stays
-      // quiet.
-      if (body?.written !== false) wrote = true;
+    // The loop itself is `runSeriesWrites` (`wiki-series-write.ts`), shared
+    // with the Work threads' Save as series.
+    const run = await runSeriesWrites(writes, state.bases, postSeriesWrite);
+    // The page the reader has open keeps a CURRENT hash rather than a stale
+    // one: this write is the reason it moved, and the answer says where to.
+    for (const [rel, hash] of run.hashes) {
+      if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
     }
+    if (run.failure) {
+      if (run.failure.status === 409) {
+        // The base this menu has held since it opened describes a file
+        // somebody else has moved on from. Every base it holds is suspect
+        // now, so the menu stops writing and says which page it was.
+        state.staleBases = true;
+        state.bases.clear();
+        setSeriesMenuNote(state, `${run.failure.write.relPath} changed since this menu opened — close and reopen it`, true);
+      } else {
+        setSeriesMenuNote(state, run.failure.error, true);
+      }
+      await refreshAfterSeriesWrite();
+      return;
+    }
+    /** The series this sequence left without a label — the route reports it
+     *  when a MOVE took the page's own `series_label:` with it, since a label
+     *  names a series rather than a page. */
+    const cleared = run.cleared ? { series: run.cleared } : null;
+    /** Whether any answer in the sequence reported bytes moved. */
+    const wrote = run.wrote;
     const outcome = await refreshAfterSeriesWrite();
     const notes: string[] = [];
     if (cleared) {
@@ -3955,7 +4068,7 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
     // Keyed to THIS sequence's menu, as the note setter is: the reader can
     // have dismissed this popover and opened another while the write was in
     // flight, and that one is theirs to keep.
-    if (seriesMenu === state) closeSeriesMenu({ focus: false });
+    if (seriesMenu === state) closeSeriesMenu("done");
   } finally {
     state.busy = false;
   }
@@ -4009,7 +4122,7 @@ function repaintSeriesHead(): void {
 }
 
 document.addEventListener("keydown", (e) => {
-  if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu();
+  if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu("key");
 });
 // Closed rather than re-anchored — see the block comment above. `capture` so a
 // scroll inside the RAIL (which does not bubble) is seen too; the popover's own
@@ -4021,11 +4134,11 @@ window.addEventListener(
     const el = seriesMenuEl();
     const target = e.target as Node | null;
     if (el && target && (target === el || el.contains(target))) return;
-    closeSeriesMenu({ focus: false });
+    closeSeriesMenu("viewport");
   },
   true,
 );
-window.addEventListener("resize", () => closeSeriesMenu({ focus: false }));
+window.addEventListener("resize", () => closeSeriesMenu("viewport"));
 
 /** The popover's own delegate, on its node, so the shell's document listeners
  *  carry no branch for it and a click inside it never reaches the rail's
@@ -4035,6 +4148,10 @@ document.addEventListener("click", (e) => {
   if (!target?.closest) return;
   const menuEl = seriesMenuEl();
   if (menuEl && menuEl.contains(target)) {
+    if (boundaryItemClick(target)) {
+      e.preventDefault();
+      return;
+    }
     const cmd = target.closest<HTMLElement>("[data-series-cmd]");
     if (!cmd || !seriesMenu) return;
     e.preventDefault();
@@ -4063,12 +4180,12 @@ document.addEventListener("click", (e) => {
     const edit = opener.hasAttribute(SERIES_EDIT_ATTR);
     const rel = opener.getAttribute(edit ? SERIES_EDIT_ATTR : SERIES_MENU_ATTR) || "";
     const wasOpen = !!seriesMenu && seriesMenu.model.relPath === rel && seriesMenu.edit === edit;
-    closeSeriesMenu({ focus: false });
+    closeSeriesMenu(wasOpen ? "toggle" : "replace");
     if (!wasOpen && rel) openSeriesMenu(opener, rel, edit);
     return;
   }
-  // Any other click dismisses.
-  if (menuEl) closeSeriesMenu();
+  // Any other click dismisses, and leaves focus where the click put it.
+  if (menuEl) closeSeriesMenu("outside");
 });
 
 document.addEventListener("submit", (e) => {
@@ -4870,6 +4987,9 @@ document.body.addEventListener("click", (e) => {
   if (target.closest && target.closest("[data-pin]")) return;
   // The work thread's 📌 is the list's own listener's business too.
   if (target.closest && target.closest("[data-thread-pin]")) return;
+  // And the work thread ⋯ menus (PR 4): a focus row's own ⋯ sits inside a
+  // `[data-relpath]` row, and the popover is appended to `document.body`.
+  if (target.closest && target.closest(`[data-thread-row-menu], [data-work-card-menu], #${WORK_POP_ID}`)) return;
   // Same rule for the group chip and the section fold: both live inside a
   // `[data-relpath]` row, both belong to the list's own listener, and a click on
   // either means "show me what is folded here", never "open this page".
@@ -5094,7 +5214,18 @@ function refocusRailControl(selector: string, pressed: Element): void {
 function railControlSelector(el: Element | null): string | null {
   if (!(el instanceof HTMLElement) || !el.closest("#wikiList")) return null;
   const at = (attr: string, v: string) => `#wikiList [${attr}="${CSS.escape(v)}"]`;
-  for (const attr of ["data-work-stop", "data-work-evidence", "data-thread-more", "data-thread-ctx-more"]) {
+  for (const attr of [
+    "data-work-stop",
+    "data-work-evidence",
+    "data-thread-more",
+    "data-thread-ctx-more",
+    // PR 4: a card's ⋯ (by its card's fold key), `▸ split into N sessions`
+    // (by its card's fold key), a focus row's own ⋯ (by its page) and Reset.
+    "data-work-card-menu",
+    "data-thread-sessions",
+    "data-thread-row-menu",
+    "data-work-reset",
+  ]) {
     const v = el.getAttribute(attr);
     if (v !== null) return at(attr, v);
   }
@@ -5103,6 +5234,11 @@ function railControlSelector(el: Element | null): string | null {
     // Either spelling, as the fold's own click handler looks for.
     const base = fold.startsWith(CLOSED_FOLD_PREFIX) ? fold.slice(CLOSED_FOLD_PREFIX.length) : fold;
     return `${at("data-fold-key", base)}, ${at("data-fold-key", CLOSED_FOLD_PREFIX + base)}`;
+  }
+  // A thread row's page menu (a tab stop, unlike a plain row's ⋯), by page.
+  const seriesRow = el.getAttribute("data-series-menu");
+  if (seriesRow !== null && el.closest(".wiki-list-item.thread-row")) {
+    return `#wikiList .wiki-list-item.thread-row [data-series-menu="${CSS.escape(seriesRow)}"]`;
   }
   if (el.hasAttribute("data-thread-pin")) {
     const cardEl = el.closest(".wiki-thread-card");
@@ -5119,6 +5255,14 @@ function focusWorkMenuItem(selector?: string): void {
   const items = menu ? Array.from(menu.querySelectorAll<HTMLElement>("[role^='menuitem']")) : [];
   const pick = (selector ? menu?.querySelector<HTMLElement>(selector) : null) ?? items.find((el) => el.getAttribute("aria-checked") === "true") ?? items[0];
   pick?.focus({ preventScroll: true });
+}
+
+const WORK_FORGET_SEL = "[data-work-forget-split], [data-work-forget-anchor]";
+
+/** A reset-area Forget's stable selector: its kind and its split id or page. */
+function workForgetKey(el: HTMLElement): string {
+  const attr = el.hasAttribute("data-work-forget-split") ? "data-work-forget-split" : "data-work-forget-anchor";
+  return `[${attr}="${CSS.escape(el.getAttribute(attr) ?? "")}"]`;
 }
 
 function focusWorkMenuButton(): void {
@@ -5140,6 +5284,509 @@ function editWorkGroup(edit: WorkGroupEdit): void {
   stepWorkGroup({ kind: "click", stored: readWorkGroup(WIKI), edit });
 }
 
+// ── PR 4: the ⋯ menus — boundaries and Save as series ─────────────────────
+// (plan `muninn-wiki-work-thread-grouping`, D5, D8, D14). One popover at a
+// time, `#wikiWorkPop`, painted like the series editor's and closed by the
+// same events. A boundary edit goes through the record's state table like a
+// Group menu edit (D17); Save as series is the only action that writes the
+// wiki, and on a read-only wiki its item is absent.
+
+/** The open work popover: what opened it, and for Save as series, the plan. */
+interface WorkPopState {
+  opener: HTMLElement;
+  /** The opener as a rail selector by its key, taken at open time: a repaint
+   *  while the popover is open detaches the opener node itself. */
+  openerSel: string | null;
+  /** A page of the thread the popover acts on: where focus goes when the
+   *  opener is gone from the rail. */
+  page: string;
+  key: string;
+  /** The opener's viewport position when the popover was placed: a scroll
+   *  that leaves it there is not one the reader made (see the scroll handler). */
+  at: { top: number; left: number };
+  /** Save as series' confirm view: `busy` while its write runs, `done` once
+   *  it has reported a spent plan (Write stays off until the popover reopens). */
+  series?: { card: RailGroupCard; busy: boolean; done?: boolean };
+}
+let workPop: WorkPopState | null = null;
+
+function workPopEl(): HTMLElement | null {
+  return document.getElementById(WORK_POP_ID);
+}
+
+/** A Save as series write is in flight: the popover holds its report. */
+function workPopBusy(): boolean {
+  return !!workPop?.series?.busy;
+}
+
+/** Close the work popover; focus per the table at `PopCloseCause`. Refused
+ *  while a Save as series write is in flight (its report lands in this
+ *  popover). */
+function closeWorkPop(cause: PopCloseCause): void {
+  if (workPopBusy()) return;
+  const was = workPop;
+  const el = workPopEl();
+  const refocus = popCloseReturnsFocus(cause, el);
+  el?.remove();
+  workPop = null;
+  if (!was) return;
+  was.opener.setAttribute("aria-expanded", "false");
+  if (refocus) focusPopOpener(was.opener, was.openerSel, was.page);
+}
+
+/** Focus the first selector that finds a rail control, else the Group button.
+ *  A wiki with no work threads has no Group button, and focus then stays on
+ *  `<body>`. */
+function focusFirstRailControl(selectors: readonly (string | null | undefined)[]): void {
+  for (const sel of selectors) {
+    const el = sel ? document.querySelector<HTMLElement>(sel) : null;
+    if (el) {
+      el.focus({ preventScroll: true });
+      return;
+    }
+  }
+  focusWorkMenuButton();
+}
+
+/** The drawn work card holding `page` as a selector for its ⋯ (`menu`) or its
+ *  fold: a child card when it is drawn, else the group around it. */
+function workCardControlSel(page: string | undefined, prefer: "menu" | "fold"): string | null {
+  if (!page) return null;
+  const k = normalizeRel(page);
+  const holds = (c: RailThreadCard) => normalizeRel(c.key) === k || c.focus.some((p) => normalizeRel(p.relPath) === k);
+  const sel = (attr: string, fk: string) => {
+    const at = `#wikiList .wiki-thread-card[${attr}="${CSS.escape(fk)}"] > `;
+    const menu = `#wikiList [data-work-card-menu="${CSS.escape(fk)}"]`;
+    const fold = `${at}.wiki-thread-fold`;
+    return prefer === "menu" ? (document.querySelector(menu) ? menu : fold) : fold;
+  };
+  for (const c of workCardsDrawn) {
+    if (!isRailGroupCard(c)) {
+      if (holds(c)) return sel("data-thread", c.foldKey);
+      continue;
+    }
+    const child = c.children.find(holds);
+    if (!child && normalizeRel(c.key) !== k) continue;
+    if (child && document.querySelector(`#wikiList .wiki-thread-card[data-thread="${CSS.escape(child.foldKey)}"]`)) return sel("data-thread", child.foldKey);
+    return sel("data-thread-group", c.foldKey);
+  }
+  return null;
+}
+
+/** Paint the popover under `anchor` with `html`, focus its first item.
+ *  Refused while a Save as series write runs: the one guard for every ⋯. */
+function openWorkPop(anchor: HTMLElement, key: string, html: string, label: string, page: string): HTMLElement | null {
+  if (workPopBusy()) return null;
+  closeWorkPop("replace");
+  closeSeriesMenu("replace");
+  const el = document.createElement("div");
+  el.id = WORK_POP_ID;
+  el.className = "wiki-series-menu wiki-work-pop";
+  el.setAttribute("role", "menu");
+  el.setAttribute("aria-label", label);
+  el.innerHTML = html;
+  document.body.appendChild(el);
+  const rect = anchor.getBoundingClientRect();
+  const width = el.offsetWidth || 260;
+  const height = el.offsetHeight || 120;
+  el.style.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)))}px`;
+  const below = rect.bottom + 6;
+  el.style.top = `${Math.round(below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below)}px`;
+  anchor.setAttribute("aria-expanded", "true");
+  workPop = { opener: anchor, openerSel: railControlSelector(anchor), page, key, at: { top: rect.top, left: rect.left } };
+  el.querySelector<HTMLElement>("input, button")?.focus({ preventScroll: true });
+  return el;
+}
+
+/** The drawn card whose fold key is `foldKey` (a child included). */
+function drawnWorkCard(foldKey: string): RailWorkCard | undefined {
+  const k = normalizeFoldKey(foldKey);
+  for (const c of workCardsDrawn) {
+    if (normalizeFoldKey(c.foldKey) === k) return c;
+    if (isRailGroupCard(c)) for (const ch of c.children) if (normalizeFoldKey(ch.foldKey) === k) return ch;
+  }
+  return undefined;
+}
+
+/** A Make own thread definition's stable id: random, never the path. */
+function newSplitId(): string {
+  const bytes = new Uint8Array(9);
+  crypto.getRandomValues(bytes);
+  return "s" + Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 15);
+}
+
+/** Apply one boundary edit from a ⋯ item and repaint. Focus goes to the
+ *  control `focus` names first — a selector, or `{ page, prefer }` for the
+ *  drawn card holding that page — then to the opener by its key (taken
+ *  BEFORE the render detaches it), then to the Group button. */
+function applyBoundaryEdit(edit: WorkGroupEdit, focus: { page: string; prefer: "menu" | "fold"; first?: "card" | "opener"; sel?: string }): void {
+  const openerSel = workPop?.openerSel ?? railControlSelector(seriesMenu?.opener ?? null);
+  closeWorkPop("edit");
+  closeSeriesMenu("edit");
+  editWorkGroup(edit);
+  // Another tab filled the list after this menu opened: say so, not nothing.
+  // An edit that lands clears the note.
+  const full = workGroupAddRefused(workGroupRec.held, edit);
+  showWorkBoundaryStatus(full ? `${"split" in edit ? "Make own thread" : "Keep separate"} did nothing: ${WORK_GROUP_FULL_TEXT[full]}` : null);
+  renderList();
+  const card = workCardControlSel(focus.page, focus.prefer);
+  focusFirstRailControl(focus.first === "opener" ? [focus.sel, openerSel, card] : [focus.sel, card, openerSel]);
+}
+
+/** A ⋯ item click inside either popover (the work popover, or the series
+ *  editor holding a thread row's boundary item). Answers whether it was one. */
+function boundaryItemClick(target: HTMLElement): boolean {
+  const item = target.closest<HTMLElement>("[data-thread-split], [data-work-return], [data-work-keep], [data-work-allow]");
+  if (!item) return false;
+  if (item.getAttribute("aria-disabled") === "true") return true;
+  const split = item.getAttribute("data-thread-split");
+  if (split) {
+    // The split card's fold; the card holding the page when it is not drawn.
+    const fold = `#wikiList .wiki-thread-card[data-thread="${CSS.escape(normalizeFoldKey(`thread:${split}`))}"] > .wiki-thread-fold`;
+    applyBoundaryEdit({ split: { id: newSplitId(), page: split } }, { sel: fold, page: split, prefer: "fold", first: "opener" });
+    return true;
+  }
+  const ret = item.getAttribute("data-work-return");
+  if (ret) {
+    // The card that took the page back: its fold.
+    const page = item.getAttribute("data-work-return-page") ?? "";
+    applyBoundaryEdit({ unsplit: { id: ret, page } }, { page, prefer: "fold" });
+    return true;
+  }
+  const keep = item.getAttribute("data-work-keep");
+  if (keep) {
+    applyBoundaryEdit({ keepApart: keep }, { page: keep, prefer: "menu", first: "opener" });
+    return true;
+  }
+  const allow = item.getAttribute("data-work-allow");
+  if (allow) {
+    let anchors: string[] = [];
+    try {
+      const v = JSON.parse(allow) as unknown;
+      if (Array.isArray(v)) anchors = v.filter((x): x is string => typeof x === "string");
+    } catch {
+      /* a malformed attribute: nothing to remove */
+    }
+    // The anchors this tab drew on the thread, and only those: an anchor
+    // another tab added (or moved) since this tab last read stays.
+    applyBoundaryEdit({ allowGrouping: anchors }, { page: anchors[0] ?? "", prefer: "menu", first: "opener" });
+    return true;
+  }
+  return false;
+}
+
+/** The row ⋯'s boundary item for `rel`, from the boundaries on screen. */
+function rowMenuItemHtml(rel: string): string {
+  const action = workBounds ? rowBoundaryAction(workBounds, workFacts, rel) : null;
+  return action ? threadRowMenuHtml(rel, action) : "";
+}
+
+/** Save as series' message line, in the confirm view of `state`'s popover.
+ *  When that popover is gone, the line goes to a status note on the page, so
+ *  a write's report is never painted into nothing. */
+function setWorkSeriesMsg(state: WorkPopState, text: string, bad: boolean): void {
+  const msg = workPop === state ? workPopEl()?.querySelector<HTMLElement>(".wiki-work-series-msg") : null;
+  if (!msg) {
+    showWorkSeriesStatus(text, bad);
+    return;
+  }
+  msg.textContent = text;
+  msg.classList.toggle("bad", bad);
+}
+
+/** The fallback for a report whose popover is gone: one status note, fixed at
+ *  the foot of the page, dismissed by a click on it. */
+function showWorkSeriesStatus(text: string, bad: boolean): void {
+  let el = document.getElementById("wikiWorkSeriesStatus");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "wikiWorkSeriesStatus";
+    el.className = "wiki-series-menu wiki-work-series-status";
+    el.setAttribute("role", "status");
+    el.title = "Click to dismiss";
+    el.addEventListener("click", () => el!.remove());
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.toggle("bad", bad);
+}
+
+/** A boundary click that did nothing says why in its own note (never Save as
+ *  series' report line), above that one; `null` clears it. */
+function showWorkBoundaryStatus(text: string | null): void {
+  let el = document.getElementById("wikiWorkBoundaryStatus");
+  if (text === null) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "wikiWorkBoundaryStatus";
+    el.className = "wiki-series-menu wiki-work-series-status wiki-work-boundary-status bad";
+    el.setAttribute("role", "status");
+    el.title = "Click to dismiss";
+    el.addEventListener("click", () => el!.remove());
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+}
+
+/** Lock or unlock the confirm view's buttons and key while a write runs. */
+function setWorkSeriesLocked(state: WorkPopState, locked: boolean, goToo = locked): void {
+  if (workPop !== state) return;
+  const el = workPopEl();
+  if (!el) return;
+  for (const b of Array.from(el.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-work-series-cancel], [data-work-series-key]"))) b.disabled = locked;
+  const go = el.querySelector<HTMLButtonElement>("[data-work-series-go]");
+  if (go) go.disabled = goToo;
+}
+
+/** The listing as the server has it NOW (`?refresh=1` rescans), read without
+ *  applying it; `null` when it cannot be read. */
+async function freshListing(): Promise<WikiListing[] | null> {
+  try {
+    const res = await fetch(withWiki("/api/wiki/pages?refresh=1"));
+    if (!res.ok) return null;
+    const data = (await res.json()) as { pages?: unknown };
+    return Array.isArray(data.pages) ? (data.pages as WikiListing[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save as series, confirmed (D14): every page's CAS base first, then the plan
+ * re-checked against a listing read after them (`recheckSaveAsSeries`: a page
+ * another writer put into a series since the click is left alone), then one
+ * write per page through the series editor's loop, stopping at the first
+ * failure. Either ending refreshes the listing, so the group forms from the
+ * series on disk rather than from local state; a failure reports `k of N
+ * written` with the pages left, and written pages stay written. While the
+ * write runs the popover cannot be dismissed, so the report has a place to
+ * land. After a landed write the old group's open state moves onto the fold
+ * key of the group that now holds its anchor thread.
+ */
+async function runSaveAsSeries(): Promise<void> {
+  const state = workPop;
+  const st = state?.series;
+  if (!state || !st || st.busy || st.done) return;
+  const card = st.card;
+  const plan = card.series;
+  if (!plan?.available) return;
+  let key = plan.key;
+  if (plan.mode === "coin") {
+    const typed = workPopEl()?.querySelector<HTMLInputElement>("[data-work-series-key]")?.value ?? "";
+    const checked = checkNewSeriesKey(plan, typed);
+    if ("error" in checked) {
+      setWorkSeriesMsg(state, checked.error, true);
+      return;
+    }
+    key = checked.key;
+  }
+  st.busy = true;
+  setWorkSeriesLocked(state, true);
+  // Set ⇒ the confirm view stays open with this line. `retry` ⇒ nothing was
+  // written and the reader can resolve it in place (another key, another
+  // try), so Write stays on; otherwise the plan is spent and Write stays off.
+  let report: { text: string; bad: boolean; retry?: boolean } | null = null;
+  const wasOpen = card.open;
+  const anchorKey = card.key;
+  try {
+    const planned = plan.writes.map((w) => w.relPath);
+    setWorkSeriesMsg(state, `Reading ${planned.length} ${planned.length === 1 ? "page" : "pages"}…`, false);
+    const { bases, missing } = await loadSeriesBaseMap(planned, (rel) =>
+      currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel) && currentPageHash ? Promise.resolve(currentPageHash) : seriesBaseHash(rel),
+    );
+    const fresh = await freshListing();
+    if (!fresh) {
+      report = { text: "Could not re-read the wiki listing — nothing written", bad: true, retry: true };
+      return;
+    }
+    const checked = recheckSaveAsSeries(plan, key, fresh);
+    if (checked.error) {
+      report = { text: checked.error, bad: true, retry: checked.retry };
+      await refreshAfterSeriesWrite();
+      return;
+    }
+    const writes = checked.writes.map((w) => ({ relPath: w.relPath, series: key }));
+    const stillMissing = missing.filter((rel) => writes.some((w) => w.relPath === rel));
+    if (stillMissing.length) {
+      report = { text: `Could not read ${stillMissing.join(", ")} — nothing written`, bad: true };
+      return;
+    }
+    const skipped = checked.moved.length
+      ? `Skipped — joined another series since this menu opened: ${checked.moved.map((m) => `${m.title} (in «${m.series}»)`).join(", ")}`
+      : "";
+    setWorkSeriesMsg(state, "Saving…", false);
+    const run = await runSeriesWrites(writes, bases, postSeriesWrite);
+    for (const [rel, hash] of run.hashes) if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
+    const outcome = await refreshAfterSeriesWrite();
+    const notes: string[] = [];
+    if (run.failure) {
+      const at = writes.findIndex((w) => w.relPath === run.failure!.write.relPath);
+      const left = writes.slice(at).map((w) => w.relPath);
+      notes.push(`${run.written} of ${run.total} written — stopped at ${run.failure.write.relPath}: ${run.failure.error}. Not written: ${left.join(", ")}`);
+    }
+    if (skipped) notes.push(skipped);
+    if (run.cleared) notes.push(`A page was the head of "${run.cleared}" — that series has no label now`);
+    if (run.written && outcome !== "apply") notes.push("Saved — reload to see the updated list");
+    if (notes.length) {
+      report = { text: notes.join(" · "), bad: !!run.failure || !!run.cleared };
+      return;
+    }
+    st.busy = false;
+    if (workPop === state) closeWorkPop("done");
+    carryGroupFold(anchorKey, wasOpen);
+  } catch (err) {
+    // Anything unforeseen still unlocks and reports; what landed is unknown.
+    report = { text: `Save as series stopped: ${err instanceof Error ? err.message : String(err)} — reload to see what was written`, bad: true };
+  } finally {
+    st.busy = false;
+    if (report) {
+      if (!report.retry) st.done = true;
+      setWorkSeriesLocked(state, false, !report.retry);
+      setWorkSeriesMsg(state, report.text, report.bad);
+    }
+  }
+}
+
+/** After a Save as series refresh: the group holding `anchorKey`'s thread now
+ *  folds under another key (`group:series:`, or an anchor key the duplicate
+ *  rule kept); give it the open state the old group had. */
+function carryGroupFold(anchorKey: string, wasOpen: boolean): void {
+  const holder = workCardsDrawn.find((c) => isRailGroupCard(c) && c.children.some((ch) => ch.key === anchorKey)) as RailGroupCard | undefined;
+  if (holder && holder.open !== wasOpen) {
+    openFolds = toggleFolded(WIKI, holder.toggleKey);
+    renderList();
+  }
+  const sel = holder ? `#wikiList [data-work-card-menu="${CSS.escape(holder.foldKey)}"], #wikiList [data-thread-group="${CSS.escape(holder.foldKey)}"] .wiki-thread-fold` : null;
+  if (sel) document.querySelector<HTMLElement>(sel)?.focus({ preventScroll: true });
+}
+
+/** Open a card's ⋯: a thread card's boundary item, or a group's Save as series. */
+function openWorkCardMenu(btn: HTMLElement): void {
+  const key = btn.getAttribute("data-work-card-menu") ?? "";
+  if (workPop?.key === `card:${key}`) {
+    closeWorkPop("toggle");
+    return;
+  }
+  const card = drawnWorkCard(key);
+  if (!card) return;
+  const html = isRailGroupCard(card) ? groupCardMenuHtml(card) : card.menu ? threadCardMenuHtml(card.menu) : "";
+  if (!html) return;
+  openWorkPop(btn, `card:${key}`, html, btn.getAttribute("aria-label") ?? "More", card.key);
+}
+
+/** Open a focus row's ⋯ where no series menu applies: Make own thread only. */
+function openThreadRowMenu(btn: HTMLElement): void {
+  const rel = btn.getAttribute("data-thread-row-menu") ?? "";
+  if (workPop?.key === `row:${rel}`) {
+    closeWorkPop("toggle");
+    return;
+  }
+  const html = rowMenuItemHtml(rel);
+  const page = allPages.find((p) => normalizeRel(p.relPath) === normalizeRel(rel));
+  if (html) openWorkPop(btn, `row:${rel}`, html, `Page menu for ${page ? displayTitleOf(page) : rel}`, rel);
+}
+
+document.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  if (!target?.closest) return;
+  const el = workPopEl();
+  if (el && el.contains(target)) {
+    if (boundaryItemClick(target)) return e.preventDefault();
+    const save = target.closest<HTMLElement>("[data-work-save-series]");
+    if (save && workPop) {
+      e.preventDefault();
+      if (save.getAttribute("aria-disabled") === "true") return;
+      const card = drawnWorkCard(save.getAttribute("data-work-save-series") ?? "");
+      if (!card || !isRailGroupCard(card) || !card.series) return;
+      el.innerHTML = saveSeriesConfirmHtml(card, card.series);
+      // A textbox and plain buttons: a dialog, not a menu (whose reading mode
+      // skips anything that is not a menu item). Non-modal: the rail stays live.
+      el.setAttribute("role", "dialog");
+      el.setAttribute("aria-modal", "false");
+      el.setAttribute("aria-label", `Save «${card.name}» as a series`);
+      workPop.series = { card, busy: false };
+      el.querySelector<HTMLElement>("[data-work-series-key], [data-work-series-go]")?.focus({ preventScroll: true });
+      return;
+    }
+    if (target.closest("[data-work-series-go]")) {
+      e.preventDefault();
+      void runSaveAsSeries();
+      return;
+    }
+    if (target.closest("[data-work-series-cancel]")) {
+      e.preventDefault();
+      closeWorkPop("done");
+    }
+    return;
+  }
+  // Refused while a write runs (`closeWorkPop`): its report lands here.
+  if (el && !target.closest("[data-work-card-menu], [data-thread-row-menu]")) closeWorkPop("outside");
+});
+document.addEventListener("keydown", (e) => {
+  if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop("key");
+});
+// The arrows, Home and End move between the items of two body-level menus —
+// the ⋯ work popover and a thread row's page menu (`#wikiSeriesMenu` opened
+// from a thread row, marked `data-page-menu`) — the Group menu's keys. A plain
+// row's, Related work's and the header's series menus are not served: they open
+// on their field. Tab closes the work popover back to its opener, as Tab closes
+// the Group menu; the page menu holds text fields, so Tab stays the browser's
+// there. Inside a text field every key is the field's: an item can move focus
+// INTO the field (End, a wrap), never out of it.
+document.addEventListener("keydown", (e) => {
+  const t = e.target as HTMLElement | null;
+  if (!t?.closest || e.defaultPrevented) return;
+  const work = t.closest<HTMLElement>(`#${WORK_POP_ID}`);
+  const el = work ?? t.closest<HTMLElement>(`#${SERIES_MENU_ID}[data-page-menu]`);
+  if (!el || el.getAttribute("role") !== "menu") return;
+  if (work && e.key === "Tab") {
+    e.preventDefault();
+    closeWorkPop("key");
+    return;
+  }
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+  const items = Array.from(el.querySelectorAll<HTMLElement>("[role^='menuitem'], [data-series-input]")).filter(
+    (x) => x.tabIndex >= 0 && !(x as HTMLButtonElement).disabled,
+  );
+  if (!items.length) return;
+  const at = items.findIndex((x) => x === t || x.contains(t));
+  const move = (i: number) => {
+    const item = items[(i + items.length) % items.length]!;
+    // `preventScroll`: a page scroll closes the popover; its own list scrolls.
+    item.focus({ preventScroll: true });
+    if (item.offsetTop < el.scrollTop) el.scrollTop = item.offsetTop;
+    else if (item.offsetTop + item.offsetHeight > el.scrollTop + el.clientHeight) el.scrollTop = item.offsetTop + item.offsetHeight - el.clientHeight;
+  };
+  if (e.key === "ArrowDown") move(at + 1);
+  else if (e.key === "ArrowUp") move(at < 0 ? -1 : at - 1);
+  else if (e.key === "Home") move(0);
+  else if (e.key === "End") move(items.length - 1);
+  else return;
+  e.preventDefault();
+});
+// Closed on a scroll that MOVES the opener from where the popover was placed.
+// Scroll events arrive a frame late, so the click that opened the popover can
+// deliver its own (a focus or scroll-into-view moving the rail just before the
+// open): measured on a real wiki, that click closed the popover it opened.
+window.addEventListener(
+  "scroll",
+  (e) => {
+    const el = workPopEl();
+    const t = e.target as Node | null;
+    if (!el || !workPop || (t && (t === el || el.contains(t)))) return;
+    const { opener, openerSel, at } = workPop;
+    const anchor = opener.isConnected ? opener : openerSel ? document.querySelector(openerSel) : null;
+    const r = anchor?.getBoundingClientRect();
+    if (r && Math.abs(r.top - at.top) < 1 && Math.abs(r.left - at.left) < 1) return;
+    closeWorkPop("viewport");
+  },
+  true,
+);
+window.addEventListener("resize", () => closeWorkPop("viewport"));
+
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
@@ -5152,6 +5799,62 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   if (target.closest("[data-work-group-menu]")) {
     e.preventDefault();
     setWorkMenu(!workMenuOpen, true);
+    return;
+  }
+  // PR 4: Reset your splits and groups — clears the record's four
+  // preferences as this tab shows them (D1), through the state table like
+  // any edit; an entry another tab added unseen stays. The menu closes and
+  // focus returns to the Group button, which reopens it.
+  if (target.closest("[data-work-reset]")) {
+    e.preventDefault();
+    editWorkGroup({ reset: true });
+    showWorkBoundaryStatus(null);
+    setWorkMenu(false, true);
+    return;
+  }
+  // Forget one definition the reset area lists (it has no Return or Allow
+  // grouping item); the menu stays open. Focus, by key, after the repaint:
+  // the Forget now at the forgotten one's place (the next), else the previous,
+  // else the menu's default item (its checked stop) — never Reset, which sits
+  // above every entry, so a second Enter never wipes the record.
+  const forget = target.closest<HTMLElement>(WORK_FORGET_SEL);
+  if (forget) {
+    e.preventDefault();
+    const keys = Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-work-menu :is(${WORK_FORGET_SEL})`), workForgetKey);
+    const at = keys.indexOf(workForgetKey(forget));
+    const next = at < 0 ? [] : [...keys.slice(at + 1), ...keys.slice(0, at).reverse()];
+    const id = forget.getAttribute("data-work-forget-split");
+    editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
+    showWorkBoundaryStatus(null);
+    renderList();
+    focusWorkMenuItem(next.find((sel) => document.querySelector(`#wikiList .wiki-work-menu ${sel}`)));
+    return;
+  }
+  // PR 4: a card's ⋯ and a focus row's ⋯ (the one with no series menu).
+  const cardMenuBtn = target.closest<HTMLElement>("[data-work-card-menu]");
+  if (cardMenuBtn) {
+    e.preventDefault();
+    openWorkCardMenu(cardMenuBtn);
+    return;
+  }
+  const rowMenuBtn = target.closest<HTMLElement>("[data-thread-row-menu]");
+  if (rowMenuBtn) {
+    e.preventDefault();
+    openThreadRowMenu(rowMenuBtn);
+    return;
+  }
+  // PR 4: `▸ split into N sessions` — per tab, never stored.
+  const splitBtn = target.closest<HTMLElement>("[data-thread-sessions]");
+  if (splitBtn) {
+    e.preventDefault();
+    if (splitBtn.getAttribute("aria-disabled") === "true") return;
+    const key = normalizeFoldKey(splitBtn.getAttribute("data-thread-sessions") ?? "");
+    if (!key) return;
+    const hadFocus = document.activeElement === splitBtn;
+    if (workSessionsOpen.has(key)) workSessionsOpen.delete(key);
+    else workSessionsOpen.add(key);
+    renderList();
+    if (hadFocus) document.querySelector<HTMLElement>(`#wikiList [data-thread-sessions="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
     return;
   }
   const stopBtn = target.closest("[data-work-stop]");

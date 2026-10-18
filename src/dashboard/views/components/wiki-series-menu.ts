@@ -254,11 +254,15 @@ export const SERIES_MENU_ATTR = "data-series-menu";
 export const SERIES_EDIT_ATTR = "data-series-edit";
 
 /** The `⋯` opener rendered on a rail row and on a `Related work` row. */
-export function seriesMenuBtnHtml(relPath: string, inSeries: boolean): string {
-  const label = inSeries ? "Edit this page's series" : "Add this page to a series";
+export function seriesMenuBtnHtml(relPath: string, inSeries: boolean, page = false): string {
+  // On a work thread's focus row the menu also holds Make own thread (plan
+  // `muninn-wiki-work-thread-grouping`, PR 4): a page menu, not a series one.
+  // A page menu is a tab stop (a thread's few rows; the only keyboard path to
+  // Make own thread); a plain row's ⋯ stays out of the order, as the ★ does.
+  const label = page ? "Page menu" : inSeries ? "Edit this page's series" : "Add this page to a series";
   return (
     `<button type="button" class="wiki-series-menu-btn" ${SERIES_MENU_ATTR}="${esc(relPath)}"` +
-    ` tabindex="-1" title="${esc(label)}" aria-label="${esc(label)}" aria-haspopup="menu">⋯</button>`
+    `${page ? "" : ` tabindex="-1"`} title="${esc(label)}" aria-label="${esc(label)}" aria-haspopup="menu">⋯</button>`
   );
 }
 

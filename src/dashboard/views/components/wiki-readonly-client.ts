@@ -55,6 +55,11 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // dim it on the read-only INSTANCE for the wrong reason).
   "[data-series-menu]",
   "[data-series-edit]",
+  // Save as series (the Work threads' group ⋯, plan
+  // `muninn-wiki-work-thread-grouping`): absent on a read-only wiki, listed as
+  // the same backstop. NOT the focus row's own ⋯ (`data-thread-row-menu`) or a
+  // card's ⋯: splits and kept-apart threads are browser-local and write nothing.
+  "[data-work-save-series]",
   // Connections' Link and Link all — absent wherever `stampable` is false, which
   // both read-only mechanisms make it; listed as the same backstop.
   "[data-issue-link]",

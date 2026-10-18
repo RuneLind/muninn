@@ -46,6 +46,7 @@ import {
   SERIES_TERMINAL_STATUSES,
 } from "../dashboard/views/components/wiki-groups.ts";
 import { isBookkeeping } from "./related.ts";
+import { coinSeriesKey, isNarrativePage } from "./series-rules.ts";
 import {
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
@@ -88,45 +89,11 @@ export const SERIES_CLUSTER_MAX = 12;
  */
 export const SERIES_CLUSTER_MIN_PLANS = 2;
 
-/** `type:` values that are narrative by declaration, whatever folder they sit
- *  in — a wiki with a `.wiki-reader.json` ontology names its own. */
-const NARRATIVE_TYPES = new Set(["blog", "plan", "archive", "report", "handover", "postmortem"]);
-
-/** Top-level folders that are narrative by convention — mimir's three, the ones
- *  the dry run scanned. */
-const NARRATIVE_FOLDERS = new Set(["plans", "blogs", "archive"]);
-
-/**
- * Is this page a piece of WORK-IN-TIME — something a series can be a series OF?
- *
- * The four cuts in `buildCandidates` answer "is this page a piece of work", and
- * 8.1 needs nothing more: a missing link between two pages that landed the same
- * two PRs is worth reporting wherever they live. A SERIES is a stronger claim —
- * it says these pages are episodes of one effort with a head you can continue
- * at — and applying it to reference material is how one Accept ends up writing
- * `series:` onto a wiki's `overview.md`. Measured on a mimir clone before this
- * predicate existed: the largest cluster ran to 68 pages, glued by
- * `projects/muninn/tracing.md` (21 backlinks, under the 25-backlink hub cut),
- * and 8 of the 12 rows of another were permanent reference pages.
- *
- * A page qualifies when it declares a lifecycle (`plan_status`), declares WHEN
- * its state was last affirmed (`status_date`), declares a narrative `type:`, or
- * sits in one of the three narrative folders. Exported because it is a
- * clarification of the plan's own scan scope, not an internal detail — a wiki
- * whose narrative lives elsewhere reads this predicate to find out why its
- * pages are not clustering.
- *
- * 8.1 keeps its own, wider candidate set.
- */
-export function isNarrativePage(
-  page: Pick<WikiPageMeta, "relPath" | "type" | "plan_status" | "status_date">,
-): boolean {
-  if (page.plan_status) return true;
-  if (page.status_date) return true;
-  if (NARRATIVE_TYPES.has((page.type || "").toLowerCase())) return true;
-  const slash = page.relPath.indexOf("/");
-  return slash > 0 && NARRATIVE_FOLDERS.has(page.relPath.slice(0, slash).toLowerCase());
-}
+// `isNarrativePage`, `coinSeriesKey` and the stem helper live in the IO-free
+// `series-rules.ts`, which the reader's Save as series imports too (a browser
+// bundle cannot import this module: it pulls `store.ts`). Re-exported here so
+// the linter's callers keep one import.
+export { coinSeriesKey, isNarrativePage, NARRATIVE_FOLDERS, NARRATIVE_TYPES, seriesPageStem } from "./series-rules.ts";
 
 /** An OPEN plan: the exact filter `newestSeriesPlan` picks a head with, so "the
  *  cluster has two open plans" and "the cluster has a head to continue at" are
@@ -438,26 +405,6 @@ function capCluster(members: WikiPageMeta[]): { kept: WikiPageMeta[]; cut: WikiP
 function headOf(members: WikiPageMeta[]): WikiPageMeta {
   const ordered = newestFirst(members);
   return newestSeriesPlan(ordered) ?? ordered[0]!;
-}
-
-/**
- * A NEW series key that no existing series owns, under the rail's own fold
- * (`seriesCensusKey`: trimmed, case-insensitive).
- *
- * A coined key is a page stem, and a stem is exactly the kind of name a reader
- * has already typed somewhere else — coining it twice would merge two unrelated
- * pieces of work into one rail fold the moment the second fix applied, with no
- * signal anywhere that it happened. `-2`, `-3`, … is the disambiguation the
- * reader can rename later with one `series_label:` edit.
- *
- * `taken` is MUTATED, so two clusters of one pass cannot coin the same key
- * either.
- */
-function coinSeriesKey(stem: string, taken: Set<string>): string {
-  let key = stem;
-  for (let n = 2; taken.has(seriesCensusKey(key)); n++) key = `${stem}-${n}`;
-  taken.add(seriesCensusKey(key));
-  return key;
 }
 
 /**

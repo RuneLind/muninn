@@ -3,8 +3,9 @@
  * `muninn-wiki-work-thread-grouping`, «Manual boundaries and persistence»):
  * one versioned record per wiki holding the stop, the three evidence
  * booleans, page splits and kept-apart anchors. This module only PARSES and
- * VALIDATES it; storage and the record state machine are the reader's (PR 3),
- * and applying splits and anchors to membership is PR 4's.
+ * VALIDATES it; storage and the record state machine are the reader's
+ * (`wiki-work-group-record.ts`), and applying splits and anchors to
+ * membership is `wiki-work-boundaries.ts`'.
  *
  * D1's defaults (Related, every box checked) apply at read time: wholesale by
  * {@link resolveWorkGroupPrefs} when no record of this version exists, and
@@ -16,7 +17,8 @@
 import { normalizeRel } from "./wiki-nav.ts";
 
 export const WORK_GROUP_PREFS_VERSION = 1;
-/** Bounds on the stored arrays, applied on read: entries past them are dropped. */
+/** Bounds on the stored arrays: applied on read (entries past them are
+ *  dropped) and on write (an add past them is refused). */
 export const WORK_GROUP_SPLITS_MAX = 100;
 export const WORK_GROUP_KEPT_APART_MAX = 50;
 const PAGE_PATH_MAX = 512;
@@ -58,14 +60,26 @@ export const WORK_GROUP_DEFAULTS: Readonly<Pick<WorkGroupPrefs, "stop" | "eviden
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** A canonical page path, or null: a relative, non-empty path with no `..`
- *  segment, normalized the way pins are (`normalizeRel`). */
-function pagePath(v: unknown): string | null {
+ *  segment, trimmed and normalized the way pins are (`normalizeRel`). The
+ *  parser and the record's list operations both match pages by it. */
+export function workGroupPagePath(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const rel = normalizeRel(v.trim());
   if (!rel || rel.length > PAGE_PATH_MAX || rel.startsWith("/")) return null;
   if (rel.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return null;
   return rel;
 }
+
+/** One stored split as this build reads it (its page canonical), or null for
+ *  an entry it cannot read. Duplicates and the bound are the parser's. */
+export function readWorkGroupSplit(s: unknown): WorkGroupSplit | null {
+  if (!isRecord(s) || typeof s.id !== "string" || !SPLIT_ID_RE.test(s.id)) return null;
+  const page = workGroupPagePath(s.page);
+  return page ? { id: s.id, page } : null;
+}
+
+/** One stored kept-apart anchor as this build reads it, or null. */
+export const readWorkGroupAnchor = workGroupPagePath;
 
 /**
  * A stored record read back, or null when there is no valid preference: an
@@ -99,19 +113,18 @@ export function parseWorkGroupPrefs(raw: unknown): WorkGroupPrefs | null {
   const splits: WorkGroupSplit[] = [];
   const splitPages = new Set<string>();
   const splitIds = new Set<string>();
-  for (const s of list(v.splits)) {
+  for (const entry of list(v.splits)) {
     if (splits.length >= WORK_GROUP_SPLITS_MAX) break;
-    if (!isRecord(s) || typeof s.id !== "string" || !SPLIT_ID_RE.test(s.id)) continue;
-    const page = pagePath(s.page);
-    if (!page || splitPages.has(page) || splitIds.has(s.id)) continue;
-    splitPages.add(page);
+    const s = readWorkGroupSplit(entry);
+    if (!s || splitPages.has(s.page) || splitIds.has(s.id)) continue;
+    splitPages.add(s.page);
     splitIds.add(s.id);
-    splits.push({ id: s.id, page });
+    splits.push(s);
   }
   const keptApart: string[] = [];
   for (const a of list(v.keptApart)) {
     if (keptApart.length >= WORK_GROUP_KEPT_APART_MAX) break;
-    const page = pagePath(a);
+    const page = readWorkGroupAnchor(a);
     if (page && !keptApart.includes(page)) keptApart.push(page);
   }
   return { version: WORK_GROUP_PREFS_VERSION, stop, evidence, splits, keptApart };
