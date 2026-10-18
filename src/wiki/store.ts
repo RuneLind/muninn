@@ -3492,7 +3492,8 @@ export async function buildWikiIndex(
         ...readCull(fm.signal, fm["signal-reason"]),
       };
       // `owns:` and `related:` (D18), parsed with ONE YAML pass; the reader
-      // skips the parse itself on a page carrying neither key.
+      // skips the parse on a page whose frontmatter names neither key and
+      // carries no backslash (an escape can spell either).
       const lists = readFrontmatterLists(content);
       if (lists.owns.keys.length) meta.owns = lists.owns.keys;
       if (lists.related.entries.length) rawRelated.set(relPath, lists.related.entries);
