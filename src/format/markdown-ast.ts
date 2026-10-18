@@ -1533,7 +1533,7 @@ function parseBlocksInner(
  */
 /** A block tag as the author check sees it: a `Lane` says whether it is a lane
  *  of a `NextMoves` block (its body's direct child), the only place its `kind`
- *  picks a lane's look and count. */
+ *  picks a lane's look. */
 function observedBlockTag(name: ComponentName, rawAttrs: string, nm: NextMovesNesting): ObservedComponentTag {
   return name === "Lane" && nm === 1 ? { name, rawAttrs, inline: false, inNextMoves: true } : { name, rawAttrs, inline: false };
 }

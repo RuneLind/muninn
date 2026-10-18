@@ -13,8 +13,8 @@
  * Not reported: an unknown tag name (it renders as visible escaped text), the
  * `parseString` attributes, the other attributes of a component whose
  * `required` attribute is unusable (they render nothing), and a `Lane` `kind`
- * that changes nothing on the page (a lane outside a `NextMoves` block with a
- * `who` and no role: its label line reads no kind).
+ * that changes nothing on the page (a lane that is not a direct lane of a
+ * `NextMoves` block, with a `who` and no role: its label line reads no kind).
  *
  * **The renderer decides which tags count.** The page is rendered through the
  * reader's own `renderWikiHtml` under `observeComponentTags`, which reports
@@ -141,7 +141,8 @@ function acceptedText(name: ComponentName, attr: string, spec: AttrSpec): string
 
 /** What a rejected `raw` does, from `component-docs.ts`. A value that names
  *  another enum value in another case or with padding says which one it is
- *  not (`Verdict value="NO" renders as yes, not no`). */
+ *  not (`Verdict value="NO" renders as yes, not no`); one that names the
+ *  default is no fallback (`readEnum`). */
 function fallbackPhrase(name: ComponentName, attr: string, spec: AttrSpec, raw: string, known: Readonly<Record<string, string>>): string {
   const doc = attrDoc(name, attr);
   const when = doc?.onFallbackWhen;
@@ -153,15 +154,16 @@ function fallbackPhrase(name: ComponentName, attr: string, spec: AttrSpec, raw: 
   if (doc?.onFallback) return doc.onFallback.replace("{default}", String(spec.default));
   const shown = String(spec.parse(undefined).value);
   const folded = raw.trim().toLowerCase();
-  const meant = spec.enum?.includes(folded) && folded !== shown ? `, not ${folded}` : "";
+  const meant = spec.enum?.includes(folded) ? `, not ${folded}` : "";
   return `renders as ${shown}${meant}`;
 }
 
 /**
  * The phrase for a rejected Lane `kind`, or null when the kind changes nothing.
- * In a `NextMoves` block the lane takes a waiting lane's look, label and count.
- * A lane outside one renders only its label line, which reads the kind only
- * when the label is derived (a role, or no `who`): `laneFromAttrs`.
+ * A direct lane of a `NextMoves` block takes a waiting lane's look; whether it
+ * counts depends on where the block sits, so the message does not say. Any
+ * other lane renders only its label line, which reads the kind only when the
+ * label is derived (a role, or a blank `who`): `laneFromAttrs`.
  */
 function laneKindPhrase(tag: Tag, known: Readonly<Record<string, string>>): string | null | undefined {
   if (tag.name !== "Lane" || tag.inNextMoves) return undefined;

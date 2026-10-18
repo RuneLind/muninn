@@ -31,8 +31,8 @@ export interface AttrDoc {
   onFallback?: string;
   /** The phrasing instead of `onFallback` when `attr` holds an accepted value. */
   onFallbackWhen?: { attr: string; message: string };
-  /** Lane `kind` only: the phrasing for a lane outside a `NextMoves` block whose
-   *  label the kind decides. */
+  /** Lane `kind` only: the phrasing for a lane that is not a direct lane of a
+   *  `NextMoves` block, whose label the kind decides. */
   onFallbackStray?: string;
 }
 
@@ -110,8 +110,8 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     attrs: {
       kind: {
         suggest: { next: "waiting" },
-        onFallback: "is not a lane kind; the lane renders and counts as a waiting lane",
-        onFallbackStray: "is not a lane kind; this lane is outside a NextMoves block, so only its label is a waiting lane's",
+        onFallback: "is not a lane kind; the lane renders as a waiting lane",
+        onFallbackStray: "is not a lane kind; its label is a waiting lane's",
       },
       since: {
         doc: "ISO or DD.MM.YYYY date; the reader shows its age",

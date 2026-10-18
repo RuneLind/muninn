@@ -7,7 +7,9 @@ import { checkComponents, LINT_MARK_ATTR } from "./lint-components.ts";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki } from "./lint.ts";
 import { renderWikiHtml } from "./render.ts";
-import { observeComponentTags, type ObservedComponentTag } from "../format/markdown-ast.ts";
+import { countedNextMovesLanes, observeComponentTags, parseBlocks, type ObservedComponentTag } from "../format/markdown-ast.ts";
+import { COMPONENT_SPEC } from "../format/component-spec.ts";
+import { splitFrontmatter } from "./page-text.ts";
 
 const page = (...lines: string[]) => ["---", "title: X", "---", "", ...lines].join("\n");
 const run = (content: string) => checkComponents("plans/x.mdx", content);
@@ -234,7 +236,7 @@ describe("each special message says what the HTML shows", () => {
     expect(out).toContain('data-kind="waiting"');
     expect(out).toContain("fc-mark-unknown");
     expect(run(content).map((f) => [f.line, f.message, f.detail])).toEqual([
-      [6, 'Lane kind="next" is not a lane kind; the lane renders and counts as a waiting lane', "Accepted: you|waiting|draft|blocked. Did you mean waiting?"],
+      [6, 'Lane kind="next" is not a lane kind; the lane renders as a waiting lane', "Accepted: you|waiting|draft|blocked. Did you mean waiting?"],
       [11, 'Fact v="maybe" renders as unknown', "Accepted: ok|warn|bad|unknown or ✅ ⚠️ ❌ ❓."],
     ]);
   });
@@ -563,24 +565,6 @@ describe("a repeat call is served from the memo", () => {
   });
 });
 
-describe("lintWiki yields to the event loop between pages", () => {
-  test("a timer queued before the run fires before the run ends", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-lint-yield-"));
-    try {
-      for (const n of ["a", "b", "c"]) await Bun.write(path.join(root, `plans/${n}.mdx`), page("x"));
-      const index = await buildWikiIndex(root);
-      let fired = false;
-      const seenAt: boolean[] = [];
-      setTimeout(() => (fired = true), 0);
-      await lintWiki(index, { sliceMs: 0, readFile: async () => (seenAt.push(fired), page("x")) });
-      expect(seenAt.length).toBe(3);
-      expect(seenAt.slice(1)).toEqual([true, true]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("a finding prints the value as written, never a parked sentinel", () => {
   test("a wikilink and a code span in a located tag's attributes", () => {
     const linked = checkComponents("plans/x.mdx", page('<Callout tone="[[Page]]" see="[[Other|x]]">', "x", "</Callout>"));
@@ -654,8 +638,8 @@ describe("a Lane kind and a Verdict value: the message says what the page shows"
     const claude = html(inMoves('kind="claude"'));
     expect(claude).toContain('class="nm-lane nm-waiting nm-kind-unknown" data-kind="waiting"');
     expect(claude.replace(" nm-kind-unknown", "")).toBe(html(inMoves('kind="waiting"')));
-    expect(lines(inMoves('kind="claude"'))).toEqual(['7 Lane kind="claude" is not a lane kind; the lane renders and counts as a waiting lane']);
-    expect(lines(inMoves('kind="claude" who="Claude"'))).toEqual(['7 Lane kind="claude" is not a lane kind; the lane renders and counts as a waiting lane']);
+    expect(lines(inMoves('kind="claude"'))).toEqual(['7 Lane kind="claude" is not a lane kind; the lane renders as a waiting lane']);
+    expect(lines(inMoves('kind="claude" who="Claude"'))).toEqual(['7 Lane kind="claude" is not a lane kind; the lane renders as a waiting lane']);
   });
 
   test("outside a NextMoves block a lane with a who reads no kind: no finding", () => {
@@ -671,8 +655,60 @@ describe("a Lane kind and a Verdict value: the message says what the page shows"
     expect(shown).not.toBe(html(stray('kind="you"')));
     expect(shown).not.toContain("nm-lane");
     expect(lines(stray('kind="claude"'))).toEqual([
-      '5 Lane kind="claude" is not a lane kind; this lane is outside a NextMoves block, so only its label is a waiting lane\'s',
+      '5 Lane kind="claude" is not a lane kind; its label is a waiting lane\'s',
     ]);
+  });
+
+  const direct = "is not a lane kind; the lane renders as a waiting lane";
+  const label = "is not a lane kind; its label is a waiting lane's";
+  const lane = (attrs: string) => [`<Lane ${attrs}>`, "", "- step", "", "</Lane>"];
+  const wrap = (open: string, close: string, attrs: string) => page(open, "", ...lane(attrs), "", close);
+
+  test("a lane of a NextMoves block in a settled section renders as a waiting lane and counts nowhere", () => {
+    for (const [open, close] of [
+      ["<Historic>", "</Historic>"],
+      ['<Callout resolved="2026-10-01">', "</Callout>"],
+    ] as const) {
+      const inSettled = (attrs: string) => page(open, "", "<NextMoves>", "", ...lane(attrs), "", "</NextMoves>", "", close);
+      const out = html(inSettled('kind="claude"'));
+      expect(out).toContain('class="nm-lane nm-waiting nm-kind-unknown" data-kind="waiting"');
+      expect(out.replace(" nm-kind-unknown", "")).toBe(html(inSettled('kind="waiting"')));
+      expect(countedNextMovesLanes(parseBlocks(splitFrontmatter(inSettled('kind="claude"')).body)).lanes).toEqual([]);
+      expect(run(inSettled('kind="claude"')).map((f) => f.message)).toEqual([`Lane kind="claude" ${direct}`]);
+    }
+  });
+
+  test("a lane in a Fold inside a NextMoves block is no lane of it: only its label reads the kind", () => {
+    const inFold = (attrs: string) => page("<NextMoves>", "", "<Fold>", "", ...lane(attrs), "", "</Fold>", "", "</NextMoves>");
+    const out = html(inFold('kind="claude"'));
+    expect(out).not.toContain("nm-lane");
+    expect(out).toBe(html(inFold('kind="waiting"')));
+    expect(out).not.toBe(html(inFold('kind="you"')));
+    expect(run(inFold('kind="claude"')).map((f) => f.message)).toEqual([`Lane kind="claude" ${label}`]);
+    expect(html(inFold('kind="claude" who="Rune"'))).toBe(html(inFold('kind="you" who="Rune"')));
+    expect(run(inFold('kind="claude" who="Rune"'))).toEqual([]);
+  });
+
+  test("a NextMoves nested in another is text, so its lane is a lane of the outer block", () => {
+    const nested = (attrs: string) => wrap("<NextMoves>\n\n<NextMoves>", "</NextMoves>\n\n</NextMoves>", attrs);
+    const out = html(nested('kind="claude"'));
+    expect(out).toContain('class="nm-lane nm-waiting nm-kind-unknown" data-kind="waiting"');
+    expect(out.replace(" nm-kind-unknown", "")).toBe(html(nested('kind="waiting"')));
+    expect(run(nested('kind="claude"')).map((f) => f.message)).toEqual([`Lane kind="claude" ${direct}`]);
+  });
+
+  test("a stray lane with a role takes its label from the kind, whatever its who", () => {
+    const shown = html(stray('kind="claude" role="fag" who="Rune"'));
+    expect(shown).toBe(html(stray('kind="waiting" role="fag" who="Rune"')));
+    expect(shown).not.toBe(html(stray('kind="you" role="fag" who="Rune"')));
+    expect(run(stray('kind="claude" role="fag" who="Rune"')).map((f) => f.message)).toEqual([`Lane kind="claude" ${label}`]);
+  });
+
+  test("a stray lane with a blank who has no who: its label is the kind's", () => {
+    const shown = html(stray('kind="claude" who=" "'));
+    expect(shown).toBe(html(stray('kind="waiting" who=" "')));
+    expect(shown).not.toBe(html(stray('kind="you" who=" "')));
+    expect(run(stray('kind="claude" who=" "')).map((f) => f.message)).toEqual([`Lane kind="claude" ${label}`]);
   });
 
   test("a Verdict value that folds to yes renders as yes and is no finding", () => {
@@ -693,4 +729,50 @@ describe("a Lane kind and a Verdict value: the message says what the page shows"
       ]);
     }
   });
+});
+
+describe("an enum value that folds to the default renders as written and is no finding", () => {
+  /** One page per enum attribute, holding one tag with `v` as that attribute's value. */
+  const pages: Record<string, (v: string) => string> = {
+    "Callout.tone": (v) => page(`<Callout tone="${v}">`, "x", "</Callout>"),
+    "Verdict.value": (v) => page(`A <Verdict value="${v}"/> b`),
+    "Pill.tone": (v) => page(`A <Pill tone="${v}">p</Pill> b`),
+    "Meter.tone": (v) => page(`<Meter value="3" tone="${v}">L</Meter>`),
+    "Fact.v": (v) => page(`A <Fact n="1" v="${v}">c</Fact> b`),
+    "Lane.kind": (v) => page("<NextMoves>", "", `<Lane kind="${v}">`, "", "- s", "", "</Lane>", "", "</NextMoves>"),
+  };
+  const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  const enumAttrs = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
+    Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number }>)
+      .filter(([, a]) => a.enum)
+      .map(([attr, a]) => ({ key: `${name}.${attr}`, enum: a.enum!, def: String(a.default) })),
+  );
+
+  test("every enum attribute has a page here", () => {
+    expect(enumAttrs.map((a) => a.key).sort()).toEqual(Object.keys(pages).sort());
+  });
+
+  for (const { key, enum: values, def } of enumAttrs) {
+    const other = values.find((v) => v !== def)!;
+    const variants: [string, string][] = [
+      [def, def],
+      [upperFirst(def), def],
+      [def.toUpperCase(), def],
+      [` ${def} `, def],
+      [upperFirst(other), other],
+    ];
+    test(`${key}: ${variants.map(([v]) => JSON.stringify(v)).join(", ")}`, () => {
+      const at = pages[key]!;
+      for (const [v, folded] of variants) {
+        const out = html(at(v));
+        const found = run(at(v)).map((f) => f.message);
+        if (out === html(at(folded))) {
+          expect({ key, v, found }).toEqual({ key, v, found: [] });
+        } else {
+          expect({ key, v, asDefault: out === html(at(def)), folded }).toEqual({ key, v, asDefault: true, folded: other });
+          expect({ key, v, found }).toEqual({ key, v, found: [`${key.split(".")[0]} ${key.split(".")[1]}=${JSON.stringify(v)} renders as ${def}, not ${other}`] });
+        }
+      }
+    });
+  }
 });

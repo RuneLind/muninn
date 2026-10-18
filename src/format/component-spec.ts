@@ -16,7 +16,9 @@
  * `fellBack` is true only for a PRESENT value the renderer does not accept; a
  * missing attribute takes its default and never falls back. An empty or
  * whitespace-only value renders exactly like a missing one, so every reader
- * treats it as missing (`tone=""` is the default, not a fallback).
+ * treats it as missing (`tone=""` is the default, not a fallback). A rejected
+ * enum value that trims and lower-cases to the default (`tone=" Info "`) renders
+ * exactly like the default, so it is no fallback either (`readEnum`).
  */
 
 import { isCalendarDay } from "./calendar-day.ts";
@@ -67,7 +69,8 @@ function readEnum<const V extends readonly string[]>(
 ): AttrRead<V[number]> {
   const raw = present(input);
   const ok = raw !== undefined && (values as readonly string[]).includes(raw);
-  return { value: ok ? (raw as V[number]) : fallback, fellBack: raw !== undefined && !ok };
+  const asDefault = raw !== undefined && raw.trim().toLowerCase() === fallback;
+  return { value: ok ? (raw as V[number]) : fallback, fellBack: raw !== undefined && !ok && !asDefault };
 }
 
 // ── Callout ─────────────────────────────────────────────────────────────────
@@ -116,12 +119,9 @@ export function normalizePillTone(tone: string | undefined): "default" | "rec" |
 
 const VERDICT_VALUES = ["yes", "no"] as const;
 
-/** A `Verdict value=`. Only an exact `no` renders no; anything else renders
- *  yes, so a value that folds to `yes` (`Yes`, ` yes `) renders exactly like
- *  `yes` and is no fallback, while `NO` or ` no ` is one. */
+/** A `Verdict value=`. Only an exact `no` renders no; anything else renders yes. */
 export function readVerdictValue(raw: string | undefined): AttrRead<(typeof VERDICT_VALUES)[number]> {
-  const read = readEnum(VERDICT_VALUES, "yes", raw);
-  return read.fellBack && raw!.trim().toLowerCase() === "yes" ? { value: "yes", fellBack: false } : read;
+  return readEnum(VERDICT_VALUES, "yes", raw);
 }
 
 /** Normalize an untrusted `value` attr for Verdict. */
