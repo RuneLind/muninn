@@ -14,10 +14,45 @@
  */
 
 import { lineCodeSpanRanges } from "./code-spans.ts";
-import { isCalendarDay } from "./calendar-day.ts";
+import {
+  COMPONENT_ATTRS,
+  COMPONENT_NAMES,
+  INLINE_COMPONENT_NAMES,
+  LANE_KINDS,
+  SELF_CLOSING_ALLOWED,
+  normalizeCalloutTone,
+  normalizeFactVerdict,
+  normalizeLaneKind,
+  normalizeMeterTone,
+  normalizePillTone,
+  normalizeVerdictValue,
+  parseLaneSince,
+  parseMeterAttrs,
+  parseResolvedDate,
+  type ComponentName,
+  type FactVerdict,
+  type InlineComponentName,
+  type LaneKind,
+} from "./component-spec.ts";
 import { ordinals } from "./block-renderer.ts";
 import { laneDefaultLabel, normalizeRoleKey, roleLaneLabel } from "./lane-roles.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
+
+export {
+  COMPONENT_NAMES,
+  INLINE_COMPONENT_NAMES,
+  LANE_KINDS,
+  normalizeCalloutTone,
+  normalizeFactVerdict,
+  normalizeLaneKind,
+  normalizeMeterTone,
+  normalizePillTone,
+  normalizeVerdictValue,
+  parseLaneSince,
+  parseMeterAttrs,
+  parseResolvedDate,
+};
+export type { ComponentName, FactVerdict, InlineComponentName, LaneKind };
 
 export type Block =
   | CodeBlock
@@ -91,132 +126,10 @@ export type ListChild = ListBlock | CodeBlock | ListParagraph;
 // whitelist are NOT components — they fall through to `text` and get escaped by
 // the platform renderer, exactly as before this variant existed.
 
-export const COMPONENT_NAMES = [
-  "Callout",
-  "Verdict",
-  "Pill",
-  "Figure",
-  "FileRef",
-  "ComparisonTable",
-  "Meter",
-  "Diff",
-  "FileTree",
-  "Checklist",
-  "AnnotatedCode",
-  "CodeTabs",
-  "Tab",
-  "Fact",
-  "FactCheck",
-  "Embed",
-  "Fold",
-  "Historic",
-  "NextMoves",
-  "Lane",
-  "Query",
-  "CaseBoard",
-  "DeltaTable",
-  "Tldr",
-  "Timeline",
-  "DecisionLog",
-  "RunChecklist",
-  "Question",
-  "More",
-  "StatusRows",
-] as const;
-export type ComponentName = (typeof COMPONENT_NAMES)[number];
-
+// The vocabulary itself — names, attributes, which may self-close or appear
+// inline, and each attribute's parser — is `COMPONENT_SPEC` in
+// `component-spec.ts`, which derives the constants this file reads from it.
 const COMPONENT_NAME_SET: ReadonlySet<string> = new Set(COMPONENT_NAMES);
-
-/** Components allowed to appear self-closing (`<Name …/>`). */
-const SELF_CLOSING_ALLOWED: ReadonlySet<ComponentName> = new Set<ComponentName>([
-  "FileRef",
-  "Verdict",
-  "Pill",
-  "Fact",
-  "Embed",
-  // A result-only query has no body.
-  "Query",
-  // Both read a file beside the page; a DeltaTable may instead carry a pipe table.
-  "CaseBoard",
-  "DeltaTable",
-]);
-
-/** Attribute whitelist per component; any other attribute is dropped. */
-const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
-  // `resolved="YYYY-MM-DD"` turns the callout into a closed-issue row (see
-  // `parseResolvedDate`); any other value is ignored and it renders as usual.
-  Callout: ["tone", "title", "resolved"],
-  Verdict: ["value"],
-  Pill: ["tone"],
-  Figure: ["caption"],
-  FileRef: ["path"],
-  ComparisonTable: [],
-  Meter: ["value", "max", "tone"],
-  Diff: [],
-  FileTree: [],
-  Checklist: [],
-  AnnotatedCode: ["file", "lang"],
-  CodeTabs: [],
-  Tab: ["label"],
-  // Fact-check annotation pair. `Fact` wraps the checked passage inline and
-  // carries its claim number + verdict (`v`: ok | warn | bad | unknown); the
-  // verdict is DENORMALIZED onto the tag on purpose — a streaming block renderer
-  // cannot look ahead to the `FactCheck` appendix to colour a chip, and one write
-  // emits both sides so they cannot drift.
-  Fact: ["n", "v"],
-  // `unknown` counts the ❓ claims — the ones nothing verified. It exists so a
-  // deadline-truncated fact check cannot render as a clean ✓/⚠/✗ page: those
-  // claims get NO `<Fact>` wrapper and NO appendix section, so without a count
-  // they would vanish from the page entirely.
-  FactCheck: ["date", "ok", "warn", "bad", "unknown"],
-  // A markdown page embedding a standalone `.html` explainer in its body
-  // (`src/format/embed.ts` owns the gate on these values).
-  Embed: ["src", "height", "title"],
-  // A collapsible section — the wiki plan-page convention's fold. `open="true"`
-  // (double-quoted, like every attribute this grammar parses) renders it
-  // expanded; a bare `open` is not a component tag at all and the section
-  // degrades to visible escaped text.
-  // `summary` is a one-line teaser shown beside the title, closed or open.
-  // `for` names who the fold is for (`dev`, `agent`): the reader's Overview
-  // lens hides those two. The text renderers print every fold in full.
-  Fold: ["title", "open", "summary", "for"],
-  // A wrapper marking sections the page keeps as history: `since` names what
-  // superseded them (free text, e.g. `melosys-console#270`), `note` says how.
-  // Wiki-only: not in `COMPONENT_VOCABULARY_RULES`.
-  Historic: ["since", "note"],
-  // Who has the next move: a `NextMoves` block holding `Lane` blocks, each a
-  // markdown list. `kind` is you | waiting | draft | blocked (see
-  // `normalizeLaneKind`), `who` the lane's label, `role` a `WIKI_ANSWER_GROUPS`
-  // key the label is derived from (beats `who`; `normalizeRoleKey`), `since` a
-  // `YYYY-MM-DD` the reader ages client-side. Wiki-only, like `Historic`.
-  NextMoves: [],
-  Lane: ["kind", "who", "role", "since"],
-  // One prod query: `csv`/`sql` name files beside the page, `uses` is a
-  // comma-separated list. Wiki-only; see `src/format/query-block.ts`.
-  Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
-  // Tracked cases from a YAML list beside the page; `labels` names each
-  // status in the wiki's words (`hold:holdt ute,wait:venter`). Wiki-only; see
-  // `src/format/case-board.ts`.
-  CaseBoard: ["src", "labels"],
-  // Run-to-run numbers from a CSV beside the page or a pipe-table body, with a
-  // computed delta column. Wiki-only; see `src/format/delta-table.ts`.
-  DeltaTable: ["src", "better", "decimal"],
-  // Four wrappers over markdown lists, read by `src/format/genre-lists.ts`.
-  // Wiki-only. `label` is the lead box's heading (default `TL;DR`).
-  Tldr: ["label"],
-  Timeline: [],
-  DecisionLog: [],
-  RunChecklist: [],
-  // An open question as an answer card: `id` names its DecisionLog item (the
-  // one place its status lives), `choices` and `to` are `|`-separated. Wiki-only;
-  // see `src/format/question.ts`.
-  Question: ["id", "choices", "to"],
-  // The top of a report page (`src/format/report-top.ts`). `More` is the
-  // closed «Mer om saken» part of a `Tldr`, labelled by the wiki's
-  // `language`; `StatusRows` a list of `**Label:** value` rows. Wiki-only.
-  More: [],
-  StatusRows: [],
-};
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
  *  current depth is below this; at the cap, inner tags degrade to plain text.
@@ -327,21 +240,6 @@ function componentTagSource(attrTail: string, names: readonly string[] = COMPONE
   return `</?(?:${names.join("|")})\\b${attrTail}>`;
 }
 
-/** Normalize an untrusted `tone` attr for Callout to the four known tones. */
-export function normalizeCalloutTone(tone: string | undefined): "info" | "warn" | "good" | "bad" {
-  return tone === "warn" || tone === "good" || tone === "bad" ? tone : "info";
-}
-
-/**
- * A `Callout resolved=` date, or null. Strict `YYYY-MM-DD` that names a real
- * calendar day: anything else is ignored, so a typo renders the callout as an
- * ordinary open one rather than as closed.
- */
-export function parseResolvedDate(value: string | undefined): string | null {
-  const raw = value?.trim() ?? "";
-  return isCalendarDay(raw) ? raw : null;
-}
-
 /** The `✓ <date> · <title>` line a resolved `Callout` gets on the surfaces with
  *  no `<details>` (Slack, Telegram, email). The title is trimmed, and a blank one
  *  drops the separator. `formatTitle` receives the trimmed title and returns it
@@ -366,9 +264,6 @@ export function historicLeadText(attrs: Record<string, string>): string {
 
 // ── NextMoves / Lane ────────────────────────────────────────────────────────
 
-export const LANE_KINDS = ["you", "waiting", "draft", "blocked"] as const;
-export type LaneKind = (typeof LANE_KINDS)[number];
-
 /** The label a lane shows when it carries neither `role` nor `who`, on every
  *  surface that knows no wiki (chat, Slack, Telegram, email) and on an English
  *  wiki. The reader words it in a Norwegian wiki's language
@@ -379,16 +274,6 @@ export const LANE_DEFAULT_LABEL: Record<LaneKind, string> = {
   draft: "Draft, not sent",
   blocked: "Blocked",
 };
-
-/** A `Lane kind=` value. An unknown or missing kind reads as `waiting` (the move
- *  is someone else's until the page says it is yours); `known: false` lets the
- *  web renderer mark it. */
-export function normalizeLaneKind(kind: string | undefined): { kind: LaneKind; known: boolean } {
-  const k = kind?.trim().toLowerCase() ?? "";
-  return (LANE_KINDS as readonly string[]).includes(k)
-    ? { kind: k as LaneKind, known: true }
-    : { kind: "waiting", known: false };
-}
 
 /** One lane of a `NextMoves` block, as every surface reads it. */
 export interface NextMovesLane {
@@ -418,18 +303,6 @@ export interface NextMovesLane {
    *  and neither is an empty item. */
   items: string[];
   children: Block[];
-}
-
-/**
- * A `Lane since=` value: an ISO `YYYY-MM-DD` or the kode-wiki's house
- * `DD.MM.YYYY` (one or two digits for day and month), as an ISO calendar day.
- * Null for anything else, a day the calendar does not have included.
- */
-export function parseLaneSince(value: string | undefined): string | null {
-  const raw = value?.trim() ?? "";
-  const nb = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(raw);
-  const iso = nb ? `${nb[3]}-${nb[2]!.padStart(2, "0")}-${nb[1]!.padStart(2, "0")}` : raw;
-  return isCalendarDay(iso) ? iso : null;
 }
 
 /** The open steps of a lane's body (see `NextMovesLane.items`). */
@@ -545,36 +418,6 @@ export function laneLeadText(
 ): string {
   const since = lane.since ?? lane.sinceRaw;
   return `${formatLabel(lane.label)}${since ? ` — since ${escapeText(since)}` : ""}`;
-}
-
-/** Normalize an untrusted `tone` attr for Pill. */
-export function normalizePillTone(tone: string | undefined): "default" | "rec" | "warn" {
-  return tone === "rec" || tone === "warn" ? tone : "default";
-}
-
-/** Normalize an untrusted `value` attr for Verdict. */
-export function normalizeVerdictValue(value: string | undefined): "yes" | "no" {
-  return value === "no" ? "no" : "yes";
-}
-
-/**
- * Fact-check verdict vocabulary, normalized from an untrusted `v` attr.
- *
- * `unknown` is the fallback rather than `ok`: a malformed or absent verdict must
- * never render as a green "confirmed" chip on a passage nothing actually
- * confirmed. The emoji the verify prompt emits (✅/⚠️/❌/❓, with or without the
- * optional VS16) are accepted alongside the words, since the writer derives `v`
- * from those blocks and a stray emoji is more likely than a typo'd word.
- */
-export type FactVerdict = "ok" | "warn" | "bad" | "unknown";
-
-export function normalizeFactVerdict(value: string | undefined): FactVerdict {
-  if (!value) return "unknown";
-  const v = value.replace(/\uFE0F/g, "").trim().toLowerCase();
-  if (v === "ok" || v === "✅") return "ok";
-  if (v === "warn" || v === "⚠") return "warn";
-  if (v === "bad" || v === "❌") return "bad";
-  return "unknown";
 }
 
 /** Display vocabulary for a {@link FactVerdict} — the chip glyph and the word
@@ -814,34 +657,6 @@ export function factClaimIndex(value: string | undefined): number | null {
 export function factClaimNumberFromHeading(content: string): number | null {
   const m = content.match(/\bClaim\s+(\d+)\s*(?:\/\s*\d+)?/i);
   return m ? factClaimIndex(m[1]) : null;
-}
-
-/** Normalize an untrusted `tone` attr for Meter (good/warn/bad → green/amber/red). */
-export function normalizeMeterTone(tone: string | undefined): "default" | "good" | "warn" | "bad" {
-  return tone === "good" || tone === "warn" || tone === "bad" ? tone : "default";
-}
-
-/**
- * Parse + clamp + default the Meter component's attrs, shared by every platform
- * so the value/max/tone logic lives in exactly one place. Returns `null` when
- * `value` is missing or non-numeric — the identical-degrade contract: every
- * platform then renders the children (the label) as plain text. Out-of-range
- * `value` is clamped into `[0, max]`; a missing/non-positive/non-numeric `max`
- * falls back to the default of 5.
- */
-export function parseMeterAttrs(
-  attrs: Record<string, string>,
-): { value: number; max: number; tone: "default" | "good" | "warn" | "bad" } | null {
-  const raw = attrs.value;
-  if (raw === undefined || raw.trim() === "") return null;
-  const value = Number(raw);
-  if (!Number.isFinite(value)) return null;
-
-  let max = Number(attrs.max);
-  if (!Number.isFinite(max) || max <= 0) max = 5;
-
-  const clamped = Math.min(Math.max(value, 0), max);
-  return { value: clamped, max, tone: normalizeMeterTone(attrs.tone) };
 }
 
 /**
@@ -1813,9 +1628,6 @@ function tryParseComponent(
 // mid-text occurrences ever reach a `renderInline` string and take this path.
 // Unclosed / malformed tags stay literal text — the same degradation contract as
 // blocks (the platform renderer then escapes them).
-
-export const INLINE_COMPONENT_NAMES = ["Verdict", "Pill", "Fact"] as const;
-export type InlineComponentName = (typeof INLINE_COMPONENT_NAMES)[number];
 
 export type InlineSegment =
   | { kind: "text"; text: string }

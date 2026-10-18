@@ -89,7 +89,7 @@ export function fenceLanguage(code: Element): string {
  * first `.code-tabs` alone, so `<AnnotatedCode>` and `<FileTree>` pages —
  * which exist in mimir today — rendered a doubled bar; then those three, so a
  * standalone `<Tab>` still did. As a `Record<ComponentName, …>` a component
- * added to `COMPONENT_NAMES` is a COMPILE error here until someone classifies
+ * added to `COMPONENT_SPEC` is a COMPILE error here until someone classifies
  * it, which is the repo's default-deny idiom (`zones.ts`, `route-groups.ts`).
  *
  * `null` means "owns no chrome, so a fence inside it is an ordinary fence" —
