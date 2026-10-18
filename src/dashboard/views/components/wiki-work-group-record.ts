@@ -191,7 +191,7 @@ export type WorkGroupListOp =
 
 /** The patch's list operations, under a key no stored record carries: the
  *  merge reads it and never copies it into a record. */
-export const WORK_GROUP_PATCH_OPS = "listOps";
+const WORK_GROUP_PATCH_OPS = "listOps";
 
 /** A record's evidence object, or none when it holds no object there. */
 const evidenceOf = (r: WorkGroupRecord | null | undefined): Record<string, unknown> => (r && isRecord(r.evidence) ? r.evidence : {});

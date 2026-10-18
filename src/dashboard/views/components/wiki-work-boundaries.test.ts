@@ -105,6 +105,40 @@ describe("applyWorkBoundaries: splits (D5, D15)", () => {
     expect(b.definitions).toEqual([{ kind: "split", id: "a1", stored: "p.md", page: "p.md", state: "active" }]);
   });
 
+  test("a session that only TOUCHED the split page is not the split's; the remainder keeps it by its focus elsewhere (fix round 1, batch 6)", () => {
+    // s3 focused q.md and touched p.md: the server emits a touch row on T's focus page p.md.
+    const f = fixture();
+    const rows = [...f.rows, row("s3", "p.md", "k.md", NOW - 6 * H, "touch")];
+    const b = applyWorkBoundaries({ work: work([f.T, f.U], rows), allPages: f.pages, splits: [{ id: "a1", page: "p.md" }], keptApart: [] });
+    expect(ids(b.threads[1]!.thread)).toEqual(["s2", "s1"]);
+    expect(ids(b.threads[0]!.thread)).toEqual(["s1", "s3"]);
+  });
+
+  test("a piece's touched pages are the source's pages its sessions touched, minus its own focus pages, both ways (fix round 1, batch 6)", () => {
+    // s3 (remainder only) touched the split page p.md; s2 (split only) touched q.md, a page left;
+    // s1 (both) touched q.md, the remainder's own page, which stays a focus page there.
+    const f = fixture();
+    const rows = [
+      ...f.rows,
+      row("s3", "p.md", "k.md", NOW - 6 * H, "touch"),
+      row("s2", "q.md", "k.md", NOW - 2 * H, "touch"),
+      row("s1", "q.md", "k.md", NOW - 4 * H, "touch"),
+    ];
+    const b = applyWorkBoundaries({ work: work([f.T, f.U], rows), allPages: f.pages, splits: [{ id: "a1", page: "p.md" }], keptApart: [] });
+    const [rem, split] = b.threads;
+    // Source order: its focus pages, then its touched pages.
+    expect(rem!.thread.touched).toEqual(["p.md", "other.md"]);
+    expect(split!.thread.touched).toEqual(["q.md", "ctx.md"]);
+    // A touch on a page outside the source's pages is not the piece's.
+    const stray = applyWorkBoundaries({
+      work: work([f.T, f.U], [...f.rows, row("s2", "u.md", "k.md", NOW - 2 * H, "touch")]),
+      allPages: f.pages,
+      splits: [{ id: "a1", page: "p.md" }],
+      keptApart: [],
+    });
+    expect(stray.threads[1]!.thread.touched).toEqual(["ctx.md"]);
+  });
+
   test("the remainder's key follows the server's rule when the split page was the key: the earliest focus left", () => {
     const f = fixture();
     const b = applyWorkBoundaries({ work: f.work, allPages: f.pages, splits: [{ id: "a1", page: "k.md" }], keptApart: [] });

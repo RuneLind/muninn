@@ -68,7 +68,7 @@ export const THREAD_FOLD_PREFIX = "thread:";
  *  a group and its child fold separately. */
 export const GROUP_FOLD_PREFIX = "group:";
 /** A Sessions-stop card's fold key prefix (`session:<provider:id>`, PR 4). */
-export const SESSION_FOLD_PREFIX = "session:";
+const SESSION_FOLD_PREFIX = "session:";
 /** At most this many work-thread cards render (D6), a group card counting once. */
 export const THREAD_CARDS_MAX = 5;
 /** A group card shows this many children; `+ N more threads` shows the rest. */

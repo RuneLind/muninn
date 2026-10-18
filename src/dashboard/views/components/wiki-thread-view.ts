@@ -173,7 +173,9 @@ export function threadCardHeaderHtml(
         hover: threadHover(card, now),
         what: "this work thread",
         tally: threadTallyParts(card, showMoves),
-        line: card.child ? threadChildLineHtml(card.child, card.boundary) : card.boundary ? threadBoundaryLineHtml(card.boundary) : "",
+        // A child never carries a boundary chip: an isolated unit (a split
+        // page, a kept-apart thread) never joins or anchors a group.
+        line: card.child ? threadChildLineHtml(card.child) : card.boundary ? threadBoundaryLineHtml(card.boundary) : "",
         disclose: threadDiscloseLabel(folded, pages ?? card.focus.length),
         pinLabel: "Pin this work thread first",
       };
@@ -225,8 +227,7 @@ const BOUNDARY_TEXT: Record<"split" | "keptApart", { label: string; title: strin
   keptApart: { label: "kept separate", title: "You keep this thread out of groups" },
 };
 
-function boundaryChipHtml(boundary: "split" | "keptApart" | undefined): string {
-  if (!boundary) return "";
+function boundaryChipHtml(boundary: "split" | "keptApart"): string {
   const t = BOUNDARY_TEXT[boundary];
   return ` <span class="wiki-thread-chip wiki-thread-chip-own" title="${esc(t.title)}">${esc(t.label)}</span>`;
 }
@@ -359,7 +360,7 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** A child card's third meta line: why it joined (`↔ 5 links · series`) or
  *  `anchor`, then the `also <series>` chip. The hover lists the witnesses. */
-function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>, boundary?: "split" | "keptApart"): string {
+function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>): string {
   // The chip names the first series, cut to fit one line of the 260 px rail
   // (width table, src/wiki/CLAUDE.md); the hover names them all in full.
   // Counted and cut by grapheme cluster, so a flag, a skin-toned or ZWJ emoji
@@ -370,8 +371,7 @@ function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>, bounda
     ? ` <span class="wiki-thread-chip" title="${esc("Some of its pages are also in: " + child.also.join(", "))}">` +
       `also ${esc(label)}${child.also.length > 1 ? ` +${child.also.length - 1}` : ""}</span>`
     : "";
-  const own = boundaryChipHtml(boundary);
-  if (!child.why && !also && !own) return "";
+  if (!child.why && !also) return "";
   const title = child.witnesses.length ? ` title="${esc("Joined by:\n" + child.witnesses.join("\n"))}"` : "";
   return (
     `${SR_SEP} <span class="wiki-thread-line wiki-thread-why"${title}>` +
@@ -381,7 +381,6 @@ function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>, bounda
       .filter(Boolean)
       .map((part, i) => `${i ? " " : ""}<span class="wiki-thread-why-part">${i ? "· " : ""}${esc(part)}</span>`)
       .join("") +
-    own +
     also +
     `</span>`
   );
@@ -678,7 +677,7 @@ export function threadCardMenuHtml(menu: RailThreadMenu): string {
 }
 
 /** Why Save as series is not offered, in words (D14). */
-export function saveSeriesBlockText(plan: SaveSeriesPlan): string {
+function saveSeriesBlockText(plan: SaveSeriesPlan): string {
   const b = plan.block;
   if (!b) return "";
   if (b.kind === "several-series") return `Its pages are in several series (${b.labels.join(", ")}); merging series is an editorial decision`;

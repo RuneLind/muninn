@@ -15,6 +15,10 @@
  *    row on a page left, its touched pages those its sessions touched. It
  *    stays one thread even when the page that bridged it left. An emptied
  *    source thread disappears.
+ *  - Touched pages, for a split page and a remainder alike: the source's
+ *    pages (focus or touched) one of its sessions has a TOUCH row on, less the
+ *    piece's own pages. So a remainder session that touched the split page
+ *    lists it, and the reverse. A touch row never makes a session a member.
  *  - A kept-apart anchor isolates the thread that holds it AFTER the splits
  *    (`threadHoldsPin`, the pin's own match), so a split-off anchor isolates
  *    the split page and the remainder groups again. Each anchor re-anchors on
@@ -159,7 +163,8 @@ function remainderKey(pages: readonly string[], rows: readonly WorkContribution[
 
 /** A thread over `pages` of `source`, attributed from `rows` (the source's own
  *  contribution rows): the sessions with a focus row on one of the pages, and
- *  the source's touched pages one of those sessions touched. */
+ *  as touched pages the source's pages (focus, then touched) one of those
+ *  sessions has a touch row on, less `pages`. A touch row never adds a session. */
 function attributed(source: WorkThread, key: string, pages: readonly string[], rows: readonly WorkContribution[]): WorkThread {
   const mine = new Set(pages.map(normalizeRel));
   const refs = new Set<string>();
@@ -170,7 +175,7 @@ function attributed(source: WorkThread, key: string, pages: readonly string[], r
   return {
     key,
     pages: [...pages],
-    touched: source.touched.filter((p) => touchedBy.has(normalizeRel(p)) && !mine.has(normalizeRel(p))),
+    touched: [...source.pages, ...source.touched].filter((p) => touchedBy.has(normalizeRel(p)) && !mine.has(normalizeRel(p))),
     // A remainder whose pages carry no focus row breaks the evidence contract;
     // it keeps the source's sessions rather than vanish as an unusable thread.
     sessions: sessions.length ? sessions : source.sessions,

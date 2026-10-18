@@ -9,8 +9,8 @@
  *
  * ONE muninn, TWELVE temp wikis, ONE fake `node:http` claude-usage:
  *
- *  - `wsbound` — thread T: `t-key` (b1, b2), `t-split` (b0, b1), `t-rest`
- *    (b2), one thread through the shared sessions; the RELATED pair
+ *  - `wsbound` — thread T: `t-key` (b1, b2), `t-split` (b0, b1; b2 only
+ *    touched it), `t-rest` (b2), one thread through the shared sessions; the RELATED pair
  *    `live-a` ↔ `live-b` (one session each, `related:`); a lone note.
  *  - `wsboundro` — the same files under `WIKI_READONLY_ROOTS`.
  *  - `wsbseries`, `wsbrefuse` — the related pair and the note only, for the
@@ -98,6 +98,14 @@ const SESSIONS: Record<string, string[][]> = {
   [CL]: [[LA], [LB], [LONE]],
 };
 
+/** Per wiki: pages a session only TOUCHED (one edit, unnamed), by session
+ *  index. b2 touches t-split after b0 and b1 first worked on it, so the touch
+ *  is not the page's earliest edit (the created rule) and stays a touch row on
+ *  T's focus page: a split of t-split must not count b2 (fix round 1, batch 6). */
+const TOUCHES: Record<string, Record<number, string[]>> = {
+  [B]: { 2: [TSPLIT] },
+};
+
 const roots: Record<string, string> = {};
 let server: ChildProcess | undefined;
 let ledger: Server | undefined;
@@ -122,7 +130,10 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
         last: at,
         bulk: false,
         text: { from: "prompt", paths: focus, links: [], files: [] },
-        files: focus.map((p) => ({ p, edits: 5, firstMs: at - 30 * 60_000, lastMs: at })),
+        files: [
+          ...focus.map((p) => ({ p, edits: 5, firstMs: at - 30 * 60_000, lastMs: at })),
+          ...(TOUCHES[wiki!]?.[i] ?? []).map((p) => ({ p, edits: 1, firstMs: NOW - 20 * 60_000, lastMs: NOW - 10 * 60_000 })),
+        ],
       };
     });
     const since = Number(url.searchParams.get("since"));
