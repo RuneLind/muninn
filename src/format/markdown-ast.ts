@@ -518,7 +518,7 @@ function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[])
  * but stays here: `markdown-ast.ts` is the import-safe module every platform
  * formatter and the bundled reader client already depend on.
  */
-function factProtectedRegions(body: string): ProtectedRegion[] {
+export function factProtectedRegions(body: string): ProtectedRegion[] {
   const fm = FRONTMATTER_BLOCK_RE.exec(body);
   const fmEnd = fm && fm.index === 0 ? fm[0].length : 0;
   const regions: ProtectedRegion[] = fmEnd > 0 ? [{ start: 0, end: fmEnd }] : [];
@@ -1667,6 +1667,28 @@ export function scanInlineComponents(text: string): InlineSegment[] {
   if (segments.length === 0) return [{ kind: "text", text }];
   if (last < text.length) segments.push({ kind: "text", text: text.slice(last) });
   return segments;
+}
+
+/** One inline-component tag as the source spells it: the name, the RAW attribute
+ *  string (before {@link parseAttrs} drops unlisted attributes) and the offset
+ *  of its `<`. The match is {@link scanInlineComponents}' own, so the wiki
+ *  linter reads exactly the tags that function renders. */
+export interface InlineComponentTag {
+  name: InlineComponentName;
+  attrs: string;
+  index: number;
+}
+
+/** Every inline-component tag {@link scanInlineComponents} would claim in `text`. */
+export function scanInlineComponentTags(text: string): InlineComponentTag[] {
+  if (text.indexOf("<") === -1) return [];
+  const out: InlineComponentTag[] = [];
+  INLINE_COMPONENT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INLINE_COMPONENT_RE.exec(text)) !== null) {
+    out.push({ name: m[1] as InlineComponentName, attrs: m[2] ?? "", index: m.index });
+  }
+  return out;
 }
 
 /** Extract whitelisted double-quoted attributes for `name`; drop the rest. */

@@ -1986,6 +1986,10 @@ The rules every part reads:
 
 The owner map is built over every page the loop reads, so the checks run after it. Known, not fixed: dated history prose outside `<Timeline>`, a resolved `<Callout>` and inline «…» quotes are linted. Acceptance: `lint-state.test.ts` (the block-form table, each rule above as accepted and rejected rows), `src/format/state-phrases.test.ts`.
 
+### Lint check 15 — component values and attributes (`lint-components.ts`)
+
+Two warnings on `.mdx` pages, report-only: `component-value` (an attribute whose `COMPONENT_SPEC` `parse` reports `fellBack`, or a `<Meter>` with no `value`) and `component-attr` (an attribute `COMPONENT_ATTRS` does not list, which `parseAttrs` drops). `message` says what the renderer does (`Callout tone="success" renders as info`); `detail` lists the accepted values and the `component-docs.ts` hint. A block tag is one `parseBlocks` built, re-read from its `line` with `COMPONENT_OPEN_RE` + `ATTR_RE`; an inline tag is one `scanInlineComponentTags` finds on a body line; tags in frontmatter, fences and code spans are skipped. Not reported: an unknown tag name, an empty value (it renders as a missing one), the `parseString` attributes, and a Meter's `tone`/`max` when its value is unusable. `bun --no-env-file scripts/wiki-check.ts <absolute path>` runs it alone, no index, one JSON line per finding. Acceptance: `lint-components.test.ts`, `scripts/wiki-check.test.ts`.
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,
