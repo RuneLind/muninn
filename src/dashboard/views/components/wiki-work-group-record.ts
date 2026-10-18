@@ -10,8 +10,9 @@
  *
  * It is also held VERBATIM: a field, evidence key or list entry this build
  * does not understand is kept and written back untouched, so an old tab and a
- * new tab never erase each other's data, and a record of another version is
- * never written over (`foreignWorkGroupRecord`).
+ * new tab never erase each other's data, and a record of a later version (an
+ * integer above 1) is never written over (`foreignWorkGroupRecord`); a
+ * malformed version reads as none and the first click replaces it.
  *
  * The table is the thread pin's (`threadPinStep`, `wiki-recents.ts`) over the
  * whole record: records compare by a canonical serialization, a `storage`

@@ -1702,7 +1702,7 @@ Acceptance: `wiki-rail-input.test.ts` (order, pin, fold keys, facet drop, the ex
 | R5 | render, stored = known = held (a refused write storage already holds) | patch and failed cleared, focus or not | no |
 | R4 | render, stored = known, held ≠ stored, no focus or no patch | unchanged | no |
 | R6 | render, stored = known, focus, a patch, held ≠ stored | unchanged | yes (stored with the patch on top), the retry of a refused write |
-| R7 | R6's case with stored another version | unchanged | no |
+| R7 | R6's case with stored a later version | unchanged | no |
 
 No write loop, for the pin's reason: only a click or a focused render this tab caused writes, and a `storage` event writes nothing.
 

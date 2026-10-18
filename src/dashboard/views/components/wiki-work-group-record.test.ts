@@ -491,6 +491,17 @@ describe("fix round 2: the note clears once storage holds the record; malformed 
     expect(a.state()).toEqual({ held: AREAS, known: AREAS, patch: null, failed: false });
   });
 
+  test("R5 clears «this tab only» in a tab without focus too", () => {
+    const st = store();
+    const a = tab(st);
+    a.click({ stop: "areas" });
+    st.s.writable = false;
+    a.click({ stop: "areas" });
+    st.s.writable = true;
+    expect(a.render(false).write).toBe(false);
+    expect(a.state()).toEqual({ held: AREAS, known: AREAS, patch: null, failed: false });
+  });
+
   test("R2: a choice made while unreadable that storage already holds clears the note on the first readable render, no write needed (finding 1)", () => {
     const st = store(AREAS);
     st.s.readable = false;
