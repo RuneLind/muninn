@@ -12,7 +12,8 @@
  *    not floated over the breadcrumb, whose right end is where Share/Discuss
  *    live (a floated pill sat exactly on Share; measured in review).
  *
- * Keys: `]` right pane, `F` focus, `Escape` leaves focus. The Explain pill's own
+ * Keys: `]` right pane, `F` focus, `Escape` leaves focus — none of them from
+ * inside a dialog or a menu, whose keys are their own. The Explain pill's own
  * Escape handler runs too; both are "dismiss", so they do not conflict.
  *
  * `]` is inert while the pane is not on screen — in focus mode, on the start
@@ -140,7 +141,9 @@ export function initPaneToggles(): void {
       repeat: e.repeat,
       targetTag: t?.tagName,
       targetEditable: !!t?.isContentEditable,
-      targetInDialog: !!t?.closest?.("dialog, [role='dialog']"),
+      // A menu's keys are the menu's: the rail's Group menu and the reader's
+      // ⋯ popovers (`#wikiSeriesMenu`, `#wikiWorkPop`) are all `role="menu"`.
+      targetInDialog: !!t?.closest?.("dialog, [role='dialog'], [role='menu']"),
     });
     if (!action) return;
     if (action === "toggle-right") {

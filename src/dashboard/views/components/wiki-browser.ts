@@ -3739,6 +3739,9 @@ interface SeriesMenuState {
   /** The control that opened it — focus goes back there on every close, because
    *  a keyboard reader who dismisses a menu must not be returned to `<body>`. */
   opener: HTMLElement | null;
+  /** The opener as a rail selector by its key, taken at open time (a repaint
+   *  detaches the node); null for an opener outside the rail. */
+  openerSel: string | null;
   /** relPath → the page's content hash as of OPEN time. A target missing from
    *  this map is one whose read failed; its write is refused rather than sent
    *  with no base. */
@@ -3767,11 +3770,14 @@ function seriesMenuEl(): HTMLElement | null {
  *  it to the old opener in between fights that. `preventScroll` because the
  *  opener may have been scrolled out of view by the reader in the meantime. */
 function closeSeriesMenu(opts: { focus?: boolean } = {}): void {
-  const opener = seriesMenu?.opener ?? null;
+  const was = seriesMenu;
   seriesMenuEl()?.remove();
   seriesMenu = null;
-  if (opts.focus === false) return;
-  if (opener?.isConnected) opener.focus({ preventScroll: true });
+  if (opts.focus === false || !was?.opener) return;
+  if (was.opener.isConnected) was.opener.focus({ preventScroll: true });
+  // A rail opener a repaint replaced: the new one by its key, then the card
+  // holding the page, as the work popover does.
+  else if (was.openerSel) focusFirstRailControl([was.openerSel, workCardControlSel(was.model.relPath, "menu")]);
 }
 
 /** The popover node, positioned under `anchor`. Shared by the real menu and by
@@ -3818,11 +3824,15 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
   const row = !edit ? anchor.closest<HTMLElement>(".wiki-list-item.thread-row:not(.session-row)") : null;
   const boundary = row ? rowMenuItemHtml(relPath) : "";
   const el = paintSeriesMenuEl(anchor, (boundary ? boundary + `<div class="wiki-work-hr" role="separator"></div>` : "") + seriesMenuHtml(model, edit));
+  // The page menu takes the arrow keys (the keydown delegate by the work
+  // popover's); the other series menus open on their field and keep base keys.
+  if (row) el.setAttribute("data-page-menu", "");
   const state: SeriesMenuState = {
     model,
     edit,
     busy: false,
     opener: anchor,
+    openerSel: railControlSelector(anchor),
     bases: new Map(),
     basesReady: Promise.resolve(),
     staleBases: false,
@@ -5230,6 +5240,9 @@ interface WorkPopState {
    *  opener is gone from the rail. */
   page: string;
   key: string;
+  /** The opener's viewport position when the popover was placed: a scroll
+   *  that leaves it there is not one the reader made (see the scroll handler). */
+  at: { top: number; left: number };
   /** Save as series' confirm view: `busy` while its write runs, `done` once
    *  it has reported a spent plan (Write stays off until the popover reopens). */
   series?: { card: RailGroupCard; busy: boolean; done?: boolean };
@@ -5318,7 +5331,7 @@ function openWorkPop(anchor: HTMLElement, key: string, html: string, label: stri
   const below = rect.bottom + 6;
   el.style.top = `${Math.round(below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below)}px`;
   anchor.setAttribute("aria-expanded", "true");
-  workPop = { opener: anchor, openerSel: railControlSelector(anchor), page, key };
+  workPop = { opener: anchor, openerSel: railControlSelector(anchor), page, key, at: { top: rect.top, left: rect.left } };
   el.querySelector<HTMLElement>("input, button")?.focus({ preventScroll: true });
   return el;
 }
@@ -5653,23 +5666,26 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop();
 });
-// The arrows, Home and End move between a body-level popover menu's items —
-// the ⋯ work popover and the series editor (a thread row's page menu) — the
-// Group menu's keys. Tab closes the work popover back to its opener, as Tab
-// closes the Group menu; the series editor holds text fields, so Tab stays
-// the browser's there, and Home and End stay the field's own while typing.
+// The arrows, Home and End move between the items of two body-level menus —
+// the ⋯ work popover and a thread row's page menu (`#wikiSeriesMenu` opened
+// from a thread row, marked `data-page-menu`) — the Group menu's keys. A plain
+// row's, Related work's and the header's series menus are not served: they open
+// on their field. Tab closes the work popover back to its opener, as Tab closes
+// the Group menu; the page menu holds text fields, so Tab stays the browser's
+// there. Inside a text field every key is the field's: an item can move focus
+// INTO the field (End, a wrap), never out of it.
 document.addEventListener("keydown", (e) => {
   const t = e.target as HTMLElement | null;
   if (!t?.closest || e.defaultPrevented) return;
   const work = t.closest<HTMLElement>(`#${WORK_POP_ID}`);
-  const el = work ?? t.closest<HTMLElement>(`#${SERIES_MENU_ID}`);
+  const el = work ?? t.closest<HTMLElement>(`#${SERIES_MENU_ID}[data-page-menu]`);
   if (!el || el.getAttribute("role") !== "menu") return;
   if (work && e.key === "Tab") {
     e.preventDefault();
     closeWorkPop();
     return;
   }
-  const typing = t instanceof HTMLInputElement;
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
   const items = Array.from(el.querySelectorAll<HTMLElement>("[role^='menuitem'], [data-series-input]")).filter(
     (x) => x.tabIndex >= 0 && !(x as HTMLButtonElement).disabled,
   );
@@ -5684,17 +5700,25 @@ document.addEventListener("keydown", (e) => {
   };
   if (e.key === "ArrowDown") move(at + 1);
   else if (e.key === "ArrowUp") move(at < 0 ? -1 : at - 1);
-  else if (e.key === "Home" && !typing) move(0);
-  else if (e.key === "End" && !typing) move(items.length - 1);
+  else if (e.key === "Home") move(0);
+  else if (e.key === "End") move(items.length - 1);
   else return;
   e.preventDefault();
 });
+// Closed on a scroll that MOVES the opener from where the popover was placed.
+// Scroll events arrive a frame late, so the click that opened the popover can
+// deliver its own (a focus or scroll-into-view moving the rail just before the
+// open): measured on a real wiki, that click closed the popover it opened.
 window.addEventListener(
   "scroll",
   (e) => {
     const el = workPopEl();
     const t = e.target as Node | null;
-    if (!el || (t && (t === el || el.contains(t)))) return;
+    if (!el || !workPop || (t && (t === el || el.contains(t)))) return;
+    const { opener, openerSel, at } = workPop;
+    const anchor = opener.isConnected ? opener : openerSel ? document.querySelector(openerSel) : null;
+    const r = anchor?.getBoundingClientRect();
+    if (r && Math.abs(r.top - at.top) < 1 && Math.abs(r.left - at.left) < 1) return;
     closeWorkPop(false);
   },
   true,

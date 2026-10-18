@@ -242,9 +242,9 @@ async function rowMenu(page: Page, rel: string): Promise<void> {
   await threadRow(page, rel).locator("[data-series-menu], [data-thread-row-menu]").click();
 }
 
-/** Click a ⋯ opener once it is still in view. Its popover closes on any
- *  scroll (the series editor's rule), and Playwright's own scroll-into-view
- *  fires its scroll event after the click otherwise. */
+/** Click a ⋯ opener once it is still in view. Its popover closes on a scroll
+ *  that moves the opener; settling the scroll first keeps the click's own
+ *  scroll out of the way. */
 async function openMenu(loc: ReturnType<Page["locator"]>): Promise<void> {
   await loc.scrollIntoViewIfNeeded();
   await loc.page().waitForTimeout(150);
@@ -1158,14 +1158,16 @@ test.describe("Wiki rail: boundary controls by keyboard", () => {
     await page.keyboard.press("ArrowDown");
     await expect(split).not.toBeFocused();
     expect(await menuEl.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+    await split.focus();
+    // ArrowUp on the first item wraps to the last, the new-key field, whose
+    // keys are its own from there (fix round 2, batch 4).
+    const field = menuEl.locator("[data-series-input]");
     await page.keyboard.press("ArrowUp");
-    await expect(split).toBeFocused();
-    // End: the last item, the new-key field (Home and End are the field's own
-    // there); ArrowDown wraps to the first.
+    await expect(field).toBeFocused();
+    // End from an item: the last item.
+    await split.focus();
     await page.keyboard.press("End");
-    await expect(menuEl.locator("[data-series-input]")).toBeFocused();
-    await page.keyboard.press("ArrowDown");
-    await expect(split).toBeFocused();
+    await expect(field).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(menuEl).toHaveCount(0);
     await expect(opener).toBeFocused();
@@ -1246,5 +1248,157 @@ test.describe("Wiki rail: boundary controls by keyboard", () => {
     expect(by).toBeTruthy();
     await expect(page.locator(`[id="${by}"]`)).toHaveText("Unavailable: the session ledger was cut short");
     await expect(btn).toHaveAccessibleDescription("Unavailable: the session ledger was cut short");
+  });
+
+  /** Another tab's edit that moves no card: the rail repaints in place. Answers
+   *  whether the node `sel` found before is gone after. */
+  const repaint = (page: Page, sel: string) =>
+    page.evaluate(
+      ([k, s]) => {
+        const r = JSON.parse(localStorage.getItem(k!) ?? "{}");
+        r.evidence = { issue: !(r.evidence?.issue ?? false) };
+        const v = JSON.stringify(r);
+        localStorage.setItem(k!, v);
+        const before = document.querySelector(s!);
+        window.dispatchEvent(new StorageEvent("storage", { key: k!, newValue: v, storageArea: localStorage }));
+        return !!before && !before.isConnected;
+      },
+      [workGroupKey(B), sel] as const,
+    );
+
+  /** Split t-split and draw its card open, so its row and the row's ⋯ show. */
+  async function splitAndOpen(page: Page): Promise<void> {
+    await openReader(page);
+    await rowMenu(page, TSPLIT);
+    await page.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect(card(page, TSPLIT)).toHaveCount(1);
+    const sf = card(page, TSPLIT).locator(":scope > .wiki-thread-fold");
+    if ((await sf.getAttribute("aria-expanded")) !== "true") await sf.click();
+    await expect(threadRow(page, TSPLIT)).toHaveCount(1);
+  }
+
+  test("a repaint with focus on a thread row's page menu keeps it there, by its page (fix round 2, batch 4)", async ({ page }) => {
+    await splitAndOpen(page);
+    const opener = threadRow(page, TSPLIT).locator("[data-series-menu]");
+    await opener.focus();
+    expect(await repaint(page, `#wikiList .wiki-list-item.thread-row[data-relpath="${TSPLIT}"] [data-series-menu]`)).toBe(true);
+    await expect(opener).toBeFocused();
+  });
+
+  test("Escape in a thread row's page menu after a repaint returns to the row's ⋯ by its page, never <body> (fix round 2, batch 4)", async ({ page }) => {
+    await splitAndOpen(page);
+    const opener = threadRow(page, TSPLIT).locator("[data-series-menu]");
+    await opener.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#wikiSeriesMenu [data-work-return]")).toBeFocused();
+    expect(await repaint(page, `#wikiList .wiki-list-item.thread-row[data-relpath="${TSPLIT}"] [data-series-menu]`)).toBe(true);
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+    await expect(opener).toBeFocused();
+  });
+
+  test("Return from a row's page menu focuses the card that took the page back, not the row's ⋯ (fix round 2, batch 4)", async ({ page }) => {
+    await splitAndOpen(page);
+    const parentFold = card(page, TKEY).locator(":scope > .wiki-thread-fold");
+    if ((await parentFold.getAttribute("aria-expanded")) !== "true") await parentFold.click();
+    await rowMenu(page, TSPLIT);
+    await page.locator("#wikiSeriesMenu [data-work-return]").click();
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+    // The returned row is drawn in the open parent card, ⋯ and all: the fold
+    // wins over that opener.
+    await expect(threadRow(page, TSPLIT).locator("[data-series-menu]")).toHaveCount(1);
+    await expect(parentFold).toBeFocused();
+  });
+
+  test("keys inside a ⋯ menu stay the menu's: f and ] leave the layout alone, Escape closes the menu without leaving focus mode (fix round 2, batch 4)", async ({ page }) => {
+    await openReader(page);
+    const layout = page.locator(".wiki-layout");
+    const opener = threadRow(page, TSPLIT).locator("[data-series-menu]");
+    await opener.focus();
+    await page.keyboard.press("Enter");
+    const split = page.locator("#wikiSeriesMenu [data-thread-split]");
+    await expect(split).toBeFocused();
+    await page.keyboard.press("f");
+    await page.keyboard.press("]");
+    await expect(layout).not.toHaveClass(/focus-mode/);
+    await expect(layout).not.toHaveClass(/right-collapsed/);
+    await expect(split).toBeFocused();
+    // Focus mode entered with the menu open (its rail hidden, the body-level
+    // menu still up): Escape is the menu's.
+    await layout.evaluate((el) => el.classList.add("focus-mode"));
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+    await expect(layout).toHaveClass(/focus-mode/);
+    // The work popover the same, on a read-only wiki.
+    await openReader(page, BRO);
+    await threadRow(page, TSPLIT).locator("[data-thread-row-menu]").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#wikiWorkPop [data-thread-split]")).toBeFocused();
+    await page.keyboard.press("f");
+    await expect(layout).not.toHaveClass(/focus-mode/);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(1);
+  });
+
+  test("the arrows never leave the page menu's new-key field (fix round 2, batch 4)", async ({ page }) => {
+    await openReader(page);
+    await threadRow(page, TSPLIT).locator("[data-series-menu]").focus();
+    await page.keyboard.press("Enter");
+    const field = page.locator("#wikiSeriesMenu [data-series-input]");
+    await page.keyboard.press("End");
+    await expect(field).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(field).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(field).toBeFocused();
+  });
+
+  test("the arrows are not a plain row's series menu's: they stay in its field (fix round 2, batch 4)", async ({ page }) => {
+    // A plain row's series menu opens on its field, beside a join item.
+    await openReader(page, ST);
+    const row = page.locator(`#wikiList .wiki-list-item:not(.thread-row)[data-relpath="notes/old-1.md"]`);
+    await row.hover();
+    await row.locator("[data-series-menu]").click();
+    const plain = page.locator("#wikiSeriesMenu [data-series-input]");
+    await expect(plain).toBeFocused();
+    await expect(page.locator("#wikiSeriesMenu [role^='menuitem']").first()).toHaveCount(1);
+    await page.keyboard.press("ArrowDown");
+    await expect(plain).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(plain).toBeFocused();
+    // Its items do not take them either: only the page menu and the work
+    // popover do.
+    const join = page.locator("#wikiSeriesMenu [role^='menuitem']").first();
+    await join.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(join).toBeFocused();
+  });
+
+  test("a ⋯ click whose own scroll lands after the popover opens keeps it open; a later scroll of the rail closes it (fix round 2, batch 4)", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 420 });
+    await openReader(page);
+    await groupCard(page, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    const opener = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`);
+    await opener.scrollIntoViewIfNeeded();
+    // The click scrolls the rail itself (as a focus or scroll-into-view does):
+    // the rail moves before the popover opens, its scroll event after.
+    await page.waitForTimeout(150);
+    const room = await page.evaluate(() => {
+      const list = document.getElementById("wikiList")!;
+      document.addEventListener("click", () => (list.scrollTop += list.scrollTop >= 20 ? -20 : 20), { capture: true, once: true });
+      return list.scrollHeight - list.clientHeight;
+    });
+    expect(room).toBeGreaterThanOrEqual(20);
+    const top = () => page.evaluate(() => document.getElementById("wikiList")!.scrollTop);
+    const before = await top();
+    await opener.click();
+    await page.waitForTimeout(250);
+    expect(await top()).not.toBe(before);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(1);
+    await expect(page.locator("#wikiWorkPop [data-work-keep]")).toBeFocused();
+    // The reader scrolls the rail with the popover up: it closes.
+    await page.evaluate(() => (document.getElementById("wikiList")!.scrollTop += document.getElementById("wikiList")!.scrollTop >= 20 ? -20 : 20));
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
   });
 });
