@@ -45,7 +45,7 @@ export { stripFrontmatter } from "./store.ts";
  *  was VISIBLE: a dangling `[[` from a truncated index one-liner paired with the
  *  NEXT line's `]]`, so five index.md entries rendered as one merged
  *  `wiki-link-missing` span that ate the following entry's real link. */
-const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
+export const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
 
 /**
  * Drop the two marker LINES of every live fact-check block, leaving the block

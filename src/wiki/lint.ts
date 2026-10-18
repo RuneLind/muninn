@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Twenty-four check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Twenty-seven check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -78,6 +78,12 @@
  *                      a key another page `owns:` (D10), and an `owns:` entry
  *                      that names no key. Off unless `.wiki-reader.json`
  *                      declares `statePhrases`. Rules: `lint-state.ts`.
+ * 15. component-value / component-attr — on `.mdx` pages, a component
+ *                      attribute the renderer falls back on (a value its spec
+ *                      `parse` rejects, or a missing `required` one) or drops
+ *                      (an attribute `COMPONENT_ATTRS` does not list, or an
+ *                      earlier spelling of a repeated one). Not culled. Rules:
+ *                      `lint-components.ts`; `scripts/wiki-check.ts` runs it alone.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -110,6 +116,7 @@ import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts"
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { checkOwnsEntries, checkState, isStateScopePage, STATE_LINT_CHECKS, stateOwners, type OwnerPage, type StatePage } from "./lint-state.ts";
+import { checkComponents, COMPONENT_LINT_CHECKS } from "./lint-components.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -141,6 +148,7 @@ export const LINT_CHECKS = [
   ...DRIFT_LINT_CHECKS,
   ...REPORT_TOP_LINT_CHECKS,
   ...STATE_LINT_CHECKS,
+  ...COMPONENT_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -940,6 +948,8 @@ export async function lintWiki(
     findings.push(...checkCaseBoardLabels(page, content));
     // Check 11 — every page with a DecisionLog or StatusRows.
     findings.push(...checkReportTop(page, content));
+    // Check 15 — `.mdx` pages that are not culled.
+    if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.

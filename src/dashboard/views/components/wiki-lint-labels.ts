@@ -36,6 +36,8 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "state-outside-home": "PR, release or Jira state written outside its home",
   "state-not-owner": "State of a key another page owns",
   "state-owns-unread": "owns: entries that name no key",
+  "component-value": "Component values the renderer falls back on",
+  "component-attr": "Component attributes the renderer drops",
 };
 
 /** A group's heading: its label, plus `(info)` when every finding in it carries

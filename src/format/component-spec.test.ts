@@ -3,6 +3,7 @@ import {
   COMPONENT_ATTRS,
   COMPONENT_NAMES,
   COMPONENT_SPEC,
+  FACT_VERDICT_GLYPHS,
   INLINE_COMPONENT_NAMES,
   LANE_KINDS,
   SELF_CLOSING_ALLOWED,
@@ -117,6 +118,21 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
     }
   });
 
+  test("every attribute spec: an empty or whitespace value reads exactly as a missing one", () => {
+    for (const name of COMPONENT_NAMES) {
+      for (const [attr, spec] of Object.entries(
+        COMPONENT_SPEC[name].attrs as Record<string, { parse: (r?: string) => { value: unknown; fellBack: boolean } }>,
+      )) {
+        const missing = spec.parse(undefined);
+        // parseString keeps the raw text; every checked reader answers as if missing.
+        if (spec.parse("x").fellBack === false && spec.parse("x").value === "x") continue;
+        for (const blank of ["", " ", "\t", "  \n "]) {
+          expect({ name, attr, blank, ...spec.parse(blank) }).toEqual({ name, attr, blank, ...missing });
+        }
+      }
+    }
+  });
+
   test("enum attributes accept every listed value and fall back to the default", () => {
     for (const name of COMPONENT_NAMES) {
       for (const [attr, spec] of Object.entries(
@@ -132,6 +148,12 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
 
   test("Verdict maybe renders yes and is a fallback", () => {
     expect(readVerdictValue("maybe")).toEqual({ value: "yes", fellBack: true });
+  });
+
+  test("Verdict: a value that folds to yes is no fallback; one that folds to no still is", () => {
+    for (const raw of ["Yes", " yes ", "YES"]) expect({ raw, ...readVerdictValue(raw) }).toEqual({ raw, value: "yes", fellBack: false });
+    for (const raw of ["NO", " No ", " no "]) expect({ raw, ...readVerdictValue(raw) }).toEqual({ raw, value: "yes", fellBack: true });
+    expect(readVerdictValue("no")).toEqual({ value: "no", fellBack: false });
   });
 
   test("Callout tone", () => {
@@ -154,6 +176,26 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
     expect(readFactVerdict("yes")).toEqual({ value: "unknown", fellBack: true });
   });
 
+  test("Fact v: every listed glyph parses, with and without VS16, to the value it names", () => {
+    expect(COMPONENT_SPEC.Fact.attrs.v.aliases).toBe(FACT_VERDICT_GLYPHS);
+    for (const [glyph, value] of Object.entries(FACT_VERDICT_GLYPHS)) {
+      for (const raw of [glyph, glyph.replace(/\uFE0F/g, ""), `${glyph.replace(/\uFE0F/g, "")}\uFE0F`]) {
+        expect({ raw, ...readFactVerdict(raw) }).toEqual({ raw, value, fellBack: false });
+      }
+    }
+  });
+
+  test("Fact v: every code point the reader accepts is a word or a listed glyph", () => {
+    const listed = new Set(Object.keys(FACT_VERDICT_GLYPHS).map((g) => g.replace(/\uFE0F/g, "")));
+    const accepted: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      if (!readFactVerdict(ch).fellBack && ch.trim() !== "" && ch !== "\uFE0F") accepted.push(ch);
+    }
+    expect(accepted.sort()).toEqual([...listed].sort());
+  });
+
   test("dates", () => {
     expect(readResolvedDate("2026-10-18")).toEqual({ value: "2026-10-18", fellBack: false });
     expect(readResolvedDate("2026-02-30")).toEqual({ value: null, fellBack: true });
@@ -164,10 +206,12 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
 
   test("Meter value is required; clamping is not a fallback", () => {
     expect(COMPONENT_SPEC.Meter.attrs.value.required).toBe(true);
-    expect(readMeterValue("")).toEqual({ value: null, fellBack: true });
+    expect(readMeterValue("")).toEqual({ value: null, fellBack: false });
+    expect(readMeterValue(" ")).toEqual({ value: null, fellBack: false });
     expect(readMeterValue("abc")).toEqual({ value: null, fellBack: true });
     expect(readMeterValue("9")).toEqual({ value: 9, fellBack: false });
     expect(readMeterMax("0")).toEqual({ value: 5, fellBack: true });
+    expect(readMeterMax("")).toEqual({ value: 5, fellBack: false });
     expect(readMeterMax("10")).toEqual({ value: 10, fellBack: false });
     expect(parseMeterAttrs({ value: "9", max: "4" })).toEqual({ value: 4, max: 4, tone: "default" });
     expect(parseMeterAttrs({ value: "x" })).toBeNull();

@@ -1,3 +1,4 @@
+import { observeComponentScope } from "./component-observer.ts";
 import type { Block, ComponentName, InlineComponentName, ListBlock, ListChild } from "./markdown-ast.ts";
 
 /** What sits under one list item: a child list one `depth` deeper or a fenced
@@ -96,7 +97,12 @@ function renderBlock(block: Block, r: BlockRenderer): string {
     case "table":
       return r.table(block.headers, block.rows);
     case "component":
-      return r.component(block.name, block.attrs, renderBlocks(block.children, r), block.children);
+      // A component may emit the walked body or render it again: the observer
+      // gets each tag once either way.
+      return observeComponentScope(
+        () => renderBlocks(block.children, r),
+        (rendered) => r.component(block.name, block.attrs, rendered, block.children),
+      );
     case "text":
       return r.text(block.lines);
     default: {
