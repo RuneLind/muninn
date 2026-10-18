@@ -33,7 +33,7 @@
 import type { WikiListing } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
 import { newestFocusPage, threadHoldsPin, usableThreads } from "./wiki-thread-core.ts";
-import type { WorkGroupSplit } from "./wiki-work-group-prefs.ts";
+import { WORK_GROUP_SPLITS_MAX, type WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { readWorkEvidence, threadSessionsAvailability, type WorkGroupUnavailableReason, type WorkUnit } from "./wiki-work-groups.ts";
 import { isWorkHub, workSessionRef, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
 
@@ -299,7 +299,7 @@ export type RowBoundaryAction =
   | { kind: "return"; id: string }
   /** Make own thread, or why not. */
   | { kind: "split"; available: true }
-  | { kind: "split"; available: false; reason: WorkGroupUnavailableReason | "unattributed" | "conflict" };
+  | { kind: "split"; available: false; reason: WorkGroupUnavailableReason | "unattributed" | "conflict" | "full" };
 
 /**
  * The boundary item a focus row's ⋯ holds for `rel`: Return to its thread on
@@ -307,8 +307,9 @@ export type RowBoundaryAction =
  * whole and a kept focus on the page is on record (otherwise the item shows
  * disabled with the reason). A page two split definitions land on is a
  * conflict: a click would add a definition the record already holds, so the
- * item shows disabled and points at the reset area. Null when no thread holds
- * the page.
+ * item shows disabled and points at the reset area. At `WORK_GROUP_SPLITS_MAX`
+ * splits the item shows disabled as full: the record refuses the add. Null
+ * when no thread holds the page.
  */
 export function rowBoundaryAction(
   b: WorkBoundaries,
@@ -320,6 +321,7 @@ export function rowBoundaryAction(
   if (!holder) return null;
   if (holder.split) return { kind: "return", id: holder.split.id };
   if (b.definitions.some((d) => d.state === "conflict" && d.page === k)) return { kind: "split", available: false, reason: "conflict" };
+  if (b.definitions.filter((d) => d.kind === "split").length >= WORK_GROUP_SPLITS_MAX) return { kind: "split", available: false, reason: "full" };
   const { evidence, reason } = readWorkEvidence(work?.evidence, work?.threads);
   const avail = threadSessionsAvailability(evidence, holder.source.key, reason);
   if (!avail.available) return { kind: "split", available: false, reason: avail.reasons[0]! };

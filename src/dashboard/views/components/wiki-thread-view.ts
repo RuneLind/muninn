@@ -19,7 +19,7 @@ import {
   type RailWorkCard,
   type RailWorkControl,
 } from "./wiki-recents.ts";
-import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
+import { WORK_GROUP_KEPT_APART_MAX, WORK_GROUP_SPLITS_MAX, type WorkGroupEvidenceToggles, type WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import type { RowBoundaryAction } from "./wiki-work-boundaries.ts";
 import type { SaveSeriesPlan, SaveSeriesSkip } from "./wiki-work-series.ts";
 
@@ -621,10 +621,18 @@ function popDisabled(attrs: string, glyph: string, label: string, why: string): 
   );
 }
 
+/** Why an add is refused at a list's bound, in words (the menu item's reason,
+ *  and the note a click shows when another tab filled the list first). */
+export const WORK_GROUP_FULL_TEXT = {
+  splits: `you have ${WORK_GROUP_SPLITS_MAX} splits; return some to their threads first`,
+  keptApart: `you keep ${WORK_GROUP_KEPT_APART_MAX} threads separate; allow grouping on some first`,
+} as const;
+
 /** Why Make own thread is not offered, in words. */
 const SPLIT_REASON_TEXT: Record<string, string> = {
   unattributed: "no session's focus on this page is on record",
   conflict: "two of your splits name this page; repair them under Reset your splits and groups in the Work threads ▾ menu",
+  full: WORK_GROUP_FULL_TEXT.splits,
 };
 
 /** A focus row's boundary item (Make own thread, or Return to its thread),
@@ -646,6 +654,7 @@ export function threadRowMenuHtml(relPath: string, action: RowBoundaryAction): s
 export function threadCardMenuHtml(menu: RailThreadMenu): string {
   switch (menu.action) {
     case "keep":
+      if (menu.full) return popDisabled(`data-work-keep="${esc(menu.anchor)}"`, "⊘", "Keep separate", `Unavailable: ${WORK_GROUP_FULL_TEXT.keptApart}`);
       return popItem(`data-work-keep="${esc(menu.anchor)}"`, "⊘", "Keep separate", "Never group this thread with others");
     case "allow":
       return popItem(`data-work-allow="${esc(JSON.stringify(menu.anchors))}"`, "⊕", "Allow grouping", "Let it join a group again");

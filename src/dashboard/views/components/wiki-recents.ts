@@ -794,7 +794,9 @@ export interface RailThreadCard {
 
 /** What a thread card's ⋯ offers. */
 export type RailThreadMenu =
-  | { action: "keep"; anchor: string }
+  /** `full`: the record holds `WORK_GROUP_KEPT_APART_MAX` anchors, so the
+   *  item shows disabled (the record refuses the add). */
+  | { action: "keep"; anchor: string; full?: true }
   | { action: "allow"; anchors: string[] }
   | { action: "return"; id: string; page: string };
 

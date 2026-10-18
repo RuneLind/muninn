@@ -480,6 +480,58 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await expect(card(page, TSPLIT)).toHaveCount(0);
   });
 
+  test("at 100 splits and 50 kept-apart threads, Make own thread and Keep separate show unavailable with the reason, and a click writes nothing", async ({ page }) => {
+    // Fix round 1, batch 3: the bounds are refused at write, so the menu says so.
+    await page.addInitScript(([k]) => {
+      if (localStorage.getItem("__seeded")) return;
+      localStorage.setItem("__seeded", "1");
+      const splits = Array.from({ length: 100 }, (_, i) => ({ id: `g${i}`, page: `gone/s-${i}.md` }));
+      const keptApart = Array.from({ length: 50 }, (_, i) => `gone/k-${i}.md`);
+      localStorage.setItem(k!, JSON.stringify({ version: 1, splits, keptApart }));
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    const before = await stored(page);
+    await rowMenu(page, TSPLIT);
+    const split = page.locator("#wikiSeriesMenu [data-thread-split]");
+    await expect(split).toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#wikiSeriesMenu #wikiWorkPopWhy")).toHaveText("Unavailable: you have 100 splits; return some to their threads first");
+    await split.click({ force: true });
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await groupCard(page, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    const lb = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"]`);
+    await openMenu(lb.locator("[data-work-card-menu]"));
+    const keep = page.locator("#wikiWorkPop [data-work-keep]");
+    await expect(keep).toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#wikiWorkPop #wikiWorkPopWhy")).toHaveText("Unavailable: you keep 50 threads separate; allow grouping on some first");
+    await keep.click({ force: true });
+    await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(1);
+    expect(await stored(page)).toBe(before);
+  });
+
+  test("Make own thread offered at 99 splits, then another tab takes the 100th: the click says why it did nothing", async ({ page }) => {
+    await page.addInitScript(([k]) => {
+      if (localStorage.getItem("__seeded")) return;
+      localStorage.setItem("__seeded", "1");
+      const splits = Array.from({ length: 99 }, (_, i) => ({ id: `g${i}`, page: `gone/s-${i}.md` }));
+      localStorage.setItem(k!, JSON.stringify({ version: 1, splits }));
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    await rowMenu(page, TSPLIT);
+    const split = page.locator("#wikiSeriesMenu [data-thread-split]");
+    await expect(split).not.toHaveAttribute("aria-disabled", "true");
+    // Another tab's write: a same-page setItem fires no storage event here.
+    await page.evaluate((k) => {
+      const r = JSON.parse(localStorage.getItem(k)!);
+      r.splits.push({ id: "other", page: "gone/other.md" });
+      localStorage.setItem(k, JSON.stringify(r));
+    }, workGroupKey(B));
+    await split.click();
+    await expect(page.locator("#wikiWorkSeriesStatus")).toHaveText("Make own thread did nothing: you have 100 splits; return some to their threads first");
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+    expect((await record(page)).splits).toHaveLength(100);
+  });
+
   test("storage refuses the write: the split lives in this tab only and says so; a reload is back on the server's thread", async ({ page }) => {
     await page.addInitScript(([k]) => {
       const set = Storage.prototype.setItem;

@@ -22,11 +22,15 @@
  * moment. Pure and DOM-free; the reader does the storage IO.
  */
 
-import { normalizeRel } from "./wiki-nav.ts";
 import {
   parseWorkGroupPrefs,
+  readWorkGroupAnchor,
+  readWorkGroupSplit,
   resolveWorkGroupPrefs,
+  WORK_GROUP_KEPT_APART_MAX,
   WORK_GROUP_PREFS_VERSION,
+  WORK_GROUP_SPLITS_MAX,
+  workGroupPagePath,
   type WorkGroupEvidenceToggles,
   type WorkGroupPrefs,
   type WorkGroupSplit,
@@ -142,6 +146,10 @@ export type WorkGroupEdit =
  * list as this tab last saw it. Every write lays the operations, in order, on
  * the list as read at that moment, so two tabs that add different splits keep
  * both, and an entry this build does not understand is never touched.
+ * Operations read entries as the parser does (`readWorkGroupSplit`,
+ * `readWorkGroupAnchor`: pages trimmed and canonical), and an add past
+ * `WORK_GROUP_SPLITS_MAX` / `WORK_GROUP_KEPT_APART_MAX` is refused, so the
+ * stored lists stay bounded and no entry hides past the bound.
  */
 export type WorkGroupListOp =
   | { op: "addSplit"; split: WorkGroupSplit }
@@ -160,36 +168,52 @@ const evidenceOf = (r: WorkGroupRecord | null | undefined): Record<string, unkno
 
 const listOf = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
+/** A page as the ops carry it: canonical (`workGroupPagePath`), or "" for a
+ *  path no entry can hold, which matches nothing and adds nothing. */
+const opPage = (p: string): string => workGroupPagePath(p) ?? "";
+
 /** The list ops an edit is, or null for a stop or a box. */
 function listOpOf(edit: WorkGroupEdit): WorkGroupListOp | null {
-  if ("split" in edit) return { op: "addSplit", split: { id: edit.split.id, page: normalizeRel(edit.split.page) } };
-  if ("unsplit" in edit) return { op: "removeSplit", id: edit.unsplit.id, page: normalizeRel(edit.unsplit.page) };
-  if ("keepApart" in edit) return { op: "addAnchor", page: normalizeRel(edit.keepApart) };
-  if ("allowGrouping" in edit) return { op: "removeAnchors", pages: edit.allowGrouping.map(normalizeRel) };
-  if ("reanchor" in edit) return { op: "moveAnchors", moves: edit.reanchor.map(([a, b]) => [normalizeRel(a), normalizeRel(b)]) };
+  if ("split" in edit) return { op: "addSplit", split: { id: edit.split.id, page: opPage(edit.split.page) } };
+  if ("unsplit" in edit) return { op: "removeSplit", id: edit.unsplit.id, page: opPage(edit.unsplit.page) };
+  if ("keepApart" in edit) return { op: "addAnchor", page: opPage(edit.keepApart) };
+  if ("allowGrouping" in edit) return { op: "removeAnchors", pages: edit.allowGrouping.map(opPage) };
+  if ("reanchor" in edit) return { op: "moveAnchors", moves: edit.reanchor.map(([a, b]) => [opPage(a), opPage(b)]) };
   if ("reset" in edit) return { op: "reset" };
   return null;
 }
 
-/** `rec` (a record of this version, mutated) with one list op applied.
- *  Entries are matched by id or by normalized page; anything else is kept. */
+/** `rec` (a record of this version, mutated) with one list op applied. Only
+ *  entries this build reads are matched (by id or canonical page) or counted
+ *  against the bound; an entry it cannot read is kept where it is. */
 function applyListOp(rec: WorkGroupRecord, op: WorkGroupListOp): void {
-  const splitPage = (x: unknown) => (isRecord(x) && typeof x.page === "string" ? normalizeRel(x.page) : null);
-  const anchor = (x: unknown) => (typeof x === "string" ? normalizeRel(x) : null);
+  const anchor = readWorkGroupAnchor;
+  /** The lists in force: the parser's, deduplicated and bounded. */
+  const inForce = () => parseWorkGroupPrefs({ version: WORK_GROUP_PREFS_VERSION, splits: rec.splits, keptApart: rec.keptApart })!;
   switch (op.op) {
     case "addSplit": {
-      const cur = listOf(rec.splits);
+      const split = readWorkGroupSplit(op.split);
+      if (!split) return;
+      const read = inForce().splits;
       // Idempotent: another tab's split of the same page (or id) stands.
-      if (cur.some((x) => (isRecord(x) && x.id === op.split.id) || splitPage(x) === op.split.page)) return;
-      rec.splits = [...cur, { id: op.split.id, page: op.split.page }];
+      if (read.some((x) => x.id === split.id || x.page === split.page)) return;
+      // Full: refused, never stored past the bound (the row ⋯ says why).
+      if (read.length >= WORK_GROUP_SPLITS_MAX) return;
+      rec.splits = [...listOf(rec.splits), split];
       return;
     }
     case "removeSplit":
-      rec.splits = listOf(rec.splits).filter((x) => !((isRecord(x) && x.id === op.id) || splitPage(x) === op.page));
+      // Every readable entry on the id or page, a shadowed duplicate included,
+      // so a Return never leaves another definition of the page behind.
+      rec.splits = listOf(rec.splits).filter((x) => {
+        const s = readWorkGroupSplit(x);
+        return !s || !(s.id === op.id || s.page === op.page);
+      });
       return;
     case "addAnchor": {
-      const cur = listOf(rec.keptApart);
-      if (!cur.some((x) => anchor(x) === op.page)) rec.keptApart = [...cur, op.page];
+      const read = inForce().keptApart;
+      if (!op.page || read.includes(op.page) || read.length >= WORK_GROUP_KEPT_APART_MAX) return;
+      rec.keptApart = [...listOf(rec.keptApart), op.page];
       return;
     }
     case "removeAnchors":
@@ -199,7 +223,7 @@ function applyListOp(rec: WorkGroupRecord, op: WorkGroupListOp): void {
       // Two anchors moved onto one page collapse to one entry.
       let cur = listOf(rec.keptApart);
       for (const [from, to] of op.moves) {
-        if (!cur.some((x) => anchor(x) === from)) continue;
+        if (!from || !to || !cur.some((x) => anchor(x) === from)) continue;
         cur = cur.filter((x) => anchor(x) !== from);
         if (!cur.some((x) => anchor(x) === to)) cur.push(to);
       }
@@ -213,6 +237,23 @@ function applyListOp(rec: WorkGroupRecord, op: WorkGroupListOp): void {
       delete rec.keptApart;
       return;
   }
+}
+
+/** Which bound refused `edit` on `record` (the record a click left held):
+ *  a Make own thread or Keep separate it does not hold while that list is
+ *  full. A tab whose menu offered the add before another tab filled the list
+ *  says so instead of a click that does nothing. */
+export function workGroupAddRefused(record: WorkGroupRecord | null, edit: WorkGroupEdit): "splits" | "keptApart" | null {
+  const prefs = workGroupPrefsOf(record);
+  if ("split" in edit) {
+    const page = opPage(edit.split.page);
+    return prefs.splits.length >= WORK_GROUP_SPLITS_MAX && !prefs.splits.some((s) => s.page === page) ? "splits" : null;
+  }
+  if ("keepApart" in edit) {
+    const page = opPage(edit.keepApart);
+    return prefs.keptApart.length >= WORK_GROUP_KEPT_APART_MAX && !prefs.keptApart.includes(page) ? "keptApart" : null;
+  }
+  return null;
 }
 
 /** `base` with `edit` applied; every other field of `base` is kept verbatim,

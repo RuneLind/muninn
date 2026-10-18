@@ -56,7 +56,7 @@ import {
   type WorkUnit,
   type WorkWitness,
 } from "./wiki-work-groups.ts";
-import { WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupSplit, type WorkGroupStop } from "./wiki-work-group-prefs.ts";
+import { WORK_GROUP_KEPT_APART_MAX, WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupSplit, type WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import { applyWorkBoundaries, type BoundedThread, type WorkBoundaries } from "./wiki-work-boundaries.ts";
 import { saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { pageAddedMs } from "./wiki-filter.ts";
@@ -445,6 +445,7 @@ export function openWorkCards(
   const evidence = readWorkEvidence(work?.evidence, work?.threads);
   const bounded = new Map<string, BoundedThread>(boundaries.threads.map((b) => [b.thread.key, b] as const));
   const sessionsOpen = new Set((view.sessionsOpen ?? []).map(normalizeFoldKey));
+  const keptApartFull = boundaries.definitions.filter((d) => d.kind === "keptApart").length >= WORK_GROUP_KEPT_APART_MAX;
   /** The reader's boundary chip on a card (every stop but Sessions), its ⋯
    *  (`menus`: Related and Areas only), and its `▸ split into N sessions`
    *  (Threads, Related and Areas: D7, inside any open thread). */
@@ -459,7 +460,7 @@ export function openWorkCards(
         ? { action: "return", id: b.split.id, page: b.split.page }
         : b.keptApart
           ? { action: "allow", anchors: [...b.keptApart] }
-          : { action: "keep", anchor: card.pinAnchor };
+          : { action: "keep", anchor: card.pinAnchor, ...(keptApartFull ? { full: true as const } : {}) };
     }
     const split = sessionSplitOf(b, card, work, allPages, at, evidence, sessionsOpen.has(normalizeFoldKey(card.foldKey)));
     if (split) out.sessionSplit = split;

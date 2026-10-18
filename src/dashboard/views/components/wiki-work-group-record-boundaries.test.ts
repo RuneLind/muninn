@@ -14,6 +14,7 @@ import {
   patchWorkGroupEdit,
   readWorkGroupRecord,
   serializeWorkGroupRecord,
+  workGroupAddRefused,
   workGroupPrefsOf,
   workGroupRecordSettle,
   workGroupRecordStep,
@@ -186,5 +187,98 @@ describe("the anchor rows (A1–A3)", () => {
     const st2 = store();
     st2.s.v = JSON.stringify({ version: 2, keptApart: ["old.md"] });
     expect(tab(st2).render(true, [["old.md", "new.md"]]).write).toBe(false);
+  });
+});
+
+describe("list ops read the lists as the parser does (fix round 1, batch 3)", () => {
+  const hundred = Array.from({ length: 100 }, (_, i) => ({ id: `s${String(i).padStart(3, "0")}`, page: `p/${i}.md` }));
+  const fifty = Array.from({ length: 50 }, (_, i) => `k/${i}.md`);
+
+  test("F1 an add past the bound is refused at write: the record stays at 100 splits and 50 anchors", () => {
+    const st = store(rec({ splits: hundred, keptApart: fifty }));
+    const a = tab(st);
+    a.click({ split: { id: "snew", page: "q/new.md" } });
+    a.click({ keepApart: "z/new.md" });
+    const raw = JSON.parse(st.s.v!) as { splits: unknown[]; keptApart: unknown[] };
+    expect(raw.splits).toHaveLength(100);
+    expect(raw.keptApart).toHaveLength(50);
+    // Returning one of the first 100 never wakes a hidden 101st.
+    a.click({ unsplit: { id: "s000", page: "p/0.md" } });
+    a.click({ allowGrouping: ["k/0.md"] });
+    expect(workGroupPrefsOf(st.stored()).splits.some((s) => s.page === "q/new.md")).toBe(false);
+    expect(workGroupPrefsOf(st.stored()).keptApart).not.toContain("z/new.md");
+    // Below the bound the add goes through.
+    a.click({ split: { id: "snew", page: "q/new.md" } });
+    a.click({ keepApart: "z/new.md" });
+    expect(workGroupPrefsOf(st.stored()).splits.some((s) => s.page === "q/new.md")).toBe(true);
+    expect(workGroupPrefsOf(st.stored()).keptApart).toContain("z/new.md");
+  });
+
+  test("F1 a tab whose menu offered the add before another tab filled the list learns the bound refused it", () => {
+    const st = store(rec({ splits: hundred.slice(0, 99), keptApart: fifty.slice(0, 49) }));
+    const a = tab(st);
+    const b = tab(st);
+    a.click({ split: { id: "sa", page: "a/new.md" } });
+    a.click({ keepApart: "a/kept.md" });
+    // B never heard: its click reads the full lists and the add is refused.
+    const add = { split: { id: "sb", page: "b/new.md" } };
+    b.click(add);
+    expect(workGroupAddRefused(b.state().held, add)).toBe("splits");
+    b.click({ keepApart: "b/kept.md" });
+    expect(workGroupAddRefused(b.state().held, { keepApart: "b/kept.md" })).toBe("keptApart");
+    expect(JSON.parse(st.s.v!).splits).toHaveLength(100);
+    // An add that landed, an add of a page already held, and any other edit are not refusals.
+    expect(workGroupAddRefused(a.state().held, { split: { id: "sa", page: "a/new.md" } })).toBeNull();
+    expect(workGroupAddRefused(b.state().held, { split: { id: "zz", page: "A/New.md" } })).toBeNull();
+    expect(workGroupAddRefused(b.state().held, { unsplit: { id: "s000", page: "p/0.md" } })).toBeNull();
+    expect(workGroupAddRefused(rec({ splits: hundred.slice(0, 99) }), add)).toBeNull();
+    expect(workGroupAddRefused(rec({ keptApart: fifty.slice(0, 49) }), { keepApart: "b/kept.md" })).toBeNull();
+  });
+
+  test("F1 the bound counts the entries the parser reads, not unreadable ones", () => {
+    const base = rec({ splits: [...hundred.slice(0, 99), { id: "BAD ID!", page: "b.md" }], keptApart: [...fifty.slice(0, 49), 7] });
+    expect(workGroupPrefsOf(applyWorkGroupEdit(base, { split: { id: "snew", page: "q/new.md" } })).splits).toHaveLength(100);
+    expect(workGroupPrefsOf(applyWorkGroupEdit(base, { keepApart: "z/new.md" })).keptApart).toHaveLength(50);
+  });
+
+  test("F2 a stored page with surrounding whitespace matches its canonical spelling in every op", () => {
+    const base = rec({ keptApart: [" a.md"], splits: [{ id: "sx", page: " x.md" }] });
+    expect(workGroupPrefsOf(base).keptApart).toEqual(["a.md"]);
+    expect(workGroupPrefsOf(applyWorkGroupEdit(base, { allowGrouping: ["a.md"] })).keptApart).toEqual([]);
+    expect(workGroupPrefsOf(applyWorkGroupEdit(base, { reanchor: [["a.md", "c.md"]] })).keptApart).toEqual(["c.md"]);
+    expect(applyWorkGroupEdit(base, { split: { id: "sy", page: "x.md" } }).splits).toEqual(base.splits);
+    expect(applyWorkGroupEdit(base, { keepApart: "a.md" }).keptApart).toEqual(base.keptApart);
+    expect(workGroupPrefsOf(applyWorkGroupEdit(base, { unsplit: { id: "zz", page: "x.md" } })).splits).toEqual([]);
+  });
+
+  test("F2 two tabs: the re-anchor moves a whitespace-spelled anchor once, then stays put", () => {
+    const st = store();
+    st.s.v = JSON.stringify({ version: 1, keptApart: [" a.md"] });
+    const a = tab(st);
+    a.render(true, [["a.md", "c.md"]]);
+    expect(workGroupPrefsOf(st.stored()).keptApart).toEqual(["c.md"]);
+    const writes = st.s.writes;
+    a.render(true, []);
+    expect(st.s.writes).toBe(writes);
+  });
+
+  test("F3 an unreadable split on the page never blocks Make own thread; the add appends a readable one", () => {
+    const st = store();
+    st.s.v = JSON.stringify({ version: 1, splits: [{ id: "BAD ID!", page: "x.md" }] });
+    const a = tab(st);
+    a.click({ split: { id: "sgood", page: "x.md" } });
+    expect(workGroupPrefsOf(st.stored()).splits).toEqual([{ id: "sgood", page: "x.md" }]);
+    expect((st.stored()!.splits as unknown[])[0]).toEqual({ id: "BAD ID!", page: "x.md" });
+  });
+
+  test("F3 Return never deletes an entry this build cannot read", () => {
+    const st = store();
+    const bad = { id: "BAD ID!", page: "x.md", future: true };
+    st.s.v = JSON.stringify({ version: 1, splits: [{ id: "sx", page: "x.md" }, bad] });
+    tab(st).click({ unsplit: { id: "sx", page: "x.md" } });
+    expect(st.stored()!.splits).toEqual([bad]);
+    expect(workGroupPrefsOf(st.stored()).splits).toEqual([]);
+    // Allow grouping likewise keeps an anchor it cannot read.
+    expect(applyWorkGroupEdit(rec({ keptApart: ["a.md", "../a.md", 7] }), { allowGrouping: ["a.md"] }).keptApart).toEqual(["../a.md", 7]);
   });
 });

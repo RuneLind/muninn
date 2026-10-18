@@ -95,6 +95,15 @@ describe("row ⋯ and the menus", () => {
     expect(threadCardMenuHtml({ action: "return", id: "x", page: "p.md" })).toContain("Return to its thread");
   });
 
+  test("at the bounds: Make own thread and Keep separate disabled, saying what to free first (fix round 1, batch 3)", () => {
+    const split = threadRowMenuHtml("plans/p.md", { kind: "split", available: false, reason: "full" });
+    expect(split).toContain('aria-disabled="true" aria-describedby="wikiWorkPopWhy"');
+    expect(split).toContain("Unavailable: you have 100 splits; return some to their threads first");
+    const keep = threadCardMenuHtml({ action: "keep", anchor: "a.md", full: true });
+    expect(keep).toContain('data-work-keep="a.md" aria-disabled="true" aria-describedby="wikiWorkPopWhy"');
+    expect(keep).toContain("Unavailable: you keep 50 threads separate; allow grouping on some first");
+  });
+
   test("a group's ⋯: Save as series, its disabled reason, and the confirm view per child", () => {
     const plan: SaveSeriesPlan = {
       available: true,

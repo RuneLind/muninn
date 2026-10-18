@@ -269,6 +269,18 @@ describe("rowBoundaryAction", () => {
     });
   });
 
+  test("at 100 splits Make own thread is disabled with the full reason (fix round 1, batch 3)", () => {
+    const f = fixture();
+    const gone = Array.from({ length: 100 }, (_, i) => ({ id: `g${i}`, page: `gone/${i}.md` }));
+    const full = applyWorkBoundaries({ work: f.work, allPages: f.pages, splits: gone, keptApart: [] });
+    expect(rowBoundaryAction(full, f.work, "q.md")).toEqual({ kind: "split", available: false, reason: "full" });
+    // A split page still offers Return, and one split fewer offers Make own thread again.
+    const split = applyWorkBoundaries({ work: f.work, allPages: f.pages, splits: [...gone.slice(0, 99), { id: "a1", page: "p.md" }], keptApart: [] });
+    expect(rowBoundaryAction(split, f.work, "p.md")).toEqual({ kind: "return", id: "a1" });
+    const room = applyWorkBoundaries({ work: f.work, allPages: f.pages, splits: gone.slice(0, 99), keptApart: [] });
+    expect(rowBoundaryAction(room, f.work, "q.md")).toEqual({ kind: "split", available: true });
+  });
+
   test("a page two split definitions land on (a conflict) offers Make own thread disabled, pointing at the repair area", () => {
     // The click would send `addSplit` for a page the record already holds: nothing would change.
     const f = fixture();

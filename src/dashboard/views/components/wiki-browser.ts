@@ -212,10 +212,12 @@ import {
   threadSessionsToggleHtml,
   threadTouchedHtml,
   workSectionHeaderHtml,
+  WORK_GROUP_FULL_TEXT,
   WORK_POP_ID,
 } from "./wiki-thread-view.ts";
 import {
   storageEventTouchesWorkGroup,
+  workGroupAddRefused,
   workGroupPrefsOf,
   workGroupRecordSettle,
   workGroupRecordStep,
@@ -5295,6 +5297,9 @@ function applyBoundaryEdit(edit: WorkGroupEdit, focusFold?: string): void {
   closeWorkPop(false);
   closeSeriesMenu({ focus: false });
   editWorkGroup(edit);
+  // Another tab filled the list after this menu opened: say so, not nothing.
+  const full = workGroupAddRefused(workGroupRec.held, edit);
+  if (full) showWorkSeriesStatus(`${"split" in edit ? "Make own thread" : "Keep separate"} did nothing: ${WORK_GROUP_FULL_TEXT[full]}`, true);
   renderList();
   const fold = focusFold ? document.querySelector<HTMLElement>(`#wikiList [data-thread="${CSS.escape(normalizeFoldKey(focusFold))}"] .wiki-thread-fold`) : null;
   if (fold) fold.focus({ preventScroll: true });
