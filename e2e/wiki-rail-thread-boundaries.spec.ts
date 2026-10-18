@@ -15,6 +15,8 @@
  *  - `wsboundro` — the same files under `WIKI_READONLY_ROOTS`.
  *  - `wsbseries`, `wsbrefuse` — the related pair and the note only, for the
  *    two Save as series cases (each writes its own temp files).
+ *  - `wsbcap` — four newer lone notes ahead of the related pair, so the pair
+ *    is the fifth card (the D20 cap riders).
  *
  * Synthetic names only (D11: no NAV data). No model calls; the only wiki
  * writes are Save as series on the two synthetic series wikis.
@@ -42,6 +44,7 @@ const B = "wsbound";
 const BRO = "wsboundro";
 const S = "wsbseries";
 const R = "wsbrefuse";
+const C = "wsbcap";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -53,6 +56,7 @@ const TREST = "plans/t-rest.md";
 const LA = "plans/live-a.md";
 const LB = "plans/live-b.md";
 const LONE = "notes/lone.md";
+const BUSY = [1, 2, 3, 4].map((i) => `notes/busy-${i}.md`);
 
 /** Per wiki: each session's focus pages, newest session first (b0 is 1 h ago). */
 const SESSIONS: Record<string, string[][]> = {
@@ -60,6 +64,7 @@ const SESSIONS: Record<string, string[][]> = {
   [BRO]: [[TSPLIT], [TKEY, TSPLIT], [TREST, TKEY], [LA], [LB], [LONE]],
   [S]: [[LA], [LB], [LONE]],
   [R]: [[LA], [LB], [LONE]],
+  [C]: [...BUSY.map((p) => [p]), [LA], [LB]],
 };
 
 const roots: Record<string, string> = {};
@@ -112,7 +117,7 @@ function startLedger(): Promise<Server> {
   return new Promise((resolve) => srv.listen(LEDGER_PORT, "127.0.0.1", () => resolve(srv)));
 }
 
-async function makeRoot(name: string, withTask: boolean): Promise<void> {
+async function makeRoot(name: string, withTask: boolean, busy = false): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-bounds-${name}-`));
   roots[name] = root;
   await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ activity: { agePenalty: 0, hubPenalty: 0, planBoost: 0, rows: 8 } }), "utf8");
@@ -132,6 +137,7 @@ async function makeRoot(name: string, withTask: boolean): Promise<void> {
   await write(LB, ["title: Reader lenses", "plan_status: active", "status_date: 2026-10-10", 'related: ["[[plans/live-a]]"]'], 5 * HOUR);
   await write(LONE, ["title: Lone note", "type: note"], 6 * HOUR);
   for (let i = 1; i <= 3; i++) await write(`notes/old-${i}.md`, [`title: Old ${i}`], (10 + i) * DAY);
+  if (busy) for (const [i, rel] of BUSY.entries()) await write(rel, [`title: Busy ${i + 1}`, "type: note"], (i + 1) * 60_000);
 }
 
 const card = (page: Page, rel: string) => page.locator(`#wikiList .wiki-thread-card[data-thread="thread:${rel}"]`);
@@ -179,6 +185,7 @@ test.beforeAll(async () => {
   await makeRoot(BRO, true);
   await makeRoot(S, false);
   await makeRoot(R, false);
+  await makeRoot(C, false, true);
   ledger = await startLedger();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -206,7 +213,7 @@ test.beforeAll(async () => {
     if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
     await new Promise((r) => setTimeout(r, 400));
   }
-  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3 };
+  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3, [C]: 6 };
   for (const wiki of Object.keys(want)) {
     const warm = Date.now() + 20_000;
     for (;;) {
@@ -287,6 +294,23 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await page.locator("#wikiWorkPop [data-work-allow]").click();
     await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(1);
     expect((await record(page)).keptApart).toEqual([]);
+  });
+
+  test("Keep separate on a child of the FIFTH card: the thread stays drawn past the cap with its chip, and Allow grouping is reachable (D20)", async ({ page }) => {
+    await openReader(page, C);
+    const busy = BUSY.map((rel) => `thread:${rel}`);
+    await expect.poll(() => topKeys(page)).toEqual([...busy, `group:anchor:${LA}`]);
+    await groupCard(page, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    await openMenu(page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`));
+    await page.locator("#wikiWorkPop [data-work-keep]").click();
+    // The group dissolved; the kept-apart thread rides with the card it came from.
+    await expect.poll(() => topKeys(page)).toEqual([...busy, `thread:${LA}`, `thread:${LB}`]);
+    await expect(card(page, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    expect((await record(page, C)).keptApart).toEqual([LB]);
+    await openMenu(card(page, LB).locator("[data-work-card-menu]"));
+    await page.locator("#wikiWorkPop [data-work-allow]").click();
+    await expect.poll(() => topKeys(page)).toEqual([...busy, `group:anchor:${LA}`]);
+    expect((await record(page, C)).keptApart).toEqual([]);
   });
 
   test("the Sessions stop (D19): one card per session, newest first; a page two sessions focused is one row and one also in: link", async ({ page }) => {

@@ -172,6 +172,105 @@ describe("a split card rides past the five-card cap with its source", () => {
   });
 });
 
+/** `n` busier lone note threads ahead of everything in the fixture. */
+function withBusy(n: number, fx = fixture()) {
+  for (let i = 1; i <= n; i++) {
+    const rel = `notes/busy-${i}.md`;
+    fx.pages.push(page(rel, { edits: 500 + i, type: "note" }));
+    fx.work.threads.unshift({ key: rel, pages: [rel], touched: [], sessions: [sess(`z${i}`, 1)] });
+    fx.work.evidence!.contributions.rows.push(row(`z${i}`, rel, rel, 2));
+  }
+  fx.work.evidence!.threads = { candidates: fx.work.threads.length, shipped: fx.work.threads.length };
+  return fx;
+}
+const topKeys = (cards: readonly RailWorkCard[]) => cards.map((c) => c.key);
+const BUSY = (n: number) => Array.from({ length: n }, (_, i) => `notes/busy-${n - i}.md`);
+
+describe("D20: a card a manual boundary made rides past the cap with the card it came from", () => {
+  const Q: WorkGroupSplit = { id: "sq", page: "plans/q.md" };
+  const K: WorkGroupSplit = { id: "sk", page: "plans/k.md" };
+
+  test("a split rides on its source's REMAINDER, never on a sibling split: a pinned split drawn first with the remainder past the cap", () => {
+    // T ranks fifth among the unpinned; the pin on p.md draws p's split first,
+    // so the remainder (k.md) is sixth and cut — and q's split, which came from
+    // that remainder, is cut with it.
+    for (const stop of ["threads", "related", "areas"] as const) {
+      const cards = at(stop, { splits: [P, Q] }, withBusy(4), "plans/p.md").cards;
+      expect([stop, topKeys(cards)]).toEqual([stop, ["plans/p.md", ...BUSY(4)]]);
+    }
+  });
+
+  test("a split rides on its remainder's card, not on the group its source sat in (Related, Areas)", () => {
+    // q.md relates to busy-4, so the boundary-free grouping puts T in busy-4's
+    // group. Split off, q leaves the remainder (k.md) unrelated; a facet hides
+    // k.md, so the remainder draws no card, and q is sixth and cut, though
+    // busy-4's card (its source's old group) is drawn. Unfiltered, the
+    // remainder rides with busy-4 (the split pulled it out of that group), q
+    // with the remainder, and the fifth slot goes to the alpha group.
+    const fx = withBusy(4);
+    fx.work.evidence!.relations.related = [["plans/q.md", "notes/busy-4.md"]];
+    fx.pages = fx.pages.map((p) => (p.relPath === "plans/k.md" ? { ...p, domain: "life" as const } : p));
+    const ai: WikiFilters = { ...INERT, domain: "ai" };
+    for (const stop of ["related", "areas"] as const) {
+      const cards = openWorkCards(fx.work, fx.pages, ai, [], null, NOW, fx.pages, { stop, evidence: ALL, splits: [P, Q] }).cards;
+      expect([stop, topKeys(cards)]).toEqual([stop, [...BUSY(4), "plans/p.md"]]);
+      expect([stop, topKeys(at(stop, { splits: [P, Q] }, fx).cards)]).toEqual([stop, [...BUSY(4), "plans/k.md", "plans/p.md", "plans/q.md", "plans/a.md"]]);
+    }
+  });
+
+  test("a split whose remainder is drawn rides with it (the remainder fifth)", () => {
+    for (const stop of ["threads", "related", "areas"] as const) {
+      const cards = at(stop, { splits: [P, Q] }, withBusy(4)).cards;
+      expect([stop, topKeys(cards)]).toEqual([stop, [...BUSY(4), "plans/k.md", "plans/p.md", "plans/q.md"]]);
+    }
+  });
+
+  test("every page of a source split (no remainder): the family's first drawn card counts, the rest ride; a family past the cap stays cut", () => {
+    for (const stop of ["threads", "related", "areas"] as const) {
+      const fifth = at(stop, { splits: [K, P, Q] }, withBusy(4)).cards;
+      expect([stop, topKeys(fifth)]).toEqual([stop, [...BUSY(4), "plans/k.md", "plans/p.md", "plans/q.md"]]);
+      const sixth = at(stop, { splits: [K, P, Q] }, withBusy(5)).cards;
+      expect([stop, topKeys(sixth)]).toEqual([stop, BUSY(5)]);
+    }
+  });
+
+  test("Keep separate on a child of the FIFTH card: the kept-apart thread stays drawn with its chip and its Allow grouping (Related, Areas)", () => {
+    // Three busy notes and T ahead: the alpha group (a.md anchor, b.md) is the fifth card.
+    const fx = withBusy(3);
+    for (const stop of ["related", "areas"] as const) {
+      expect(topKeys(at(stop, {}, fx).cards)).toEqual([...BUSY(3), "plans/k.md", "plans/a.md"]);
+      const cards = at(stop, { keptApart: ["plans/b.md"] }, fx).cards;
+      expect([stop, topKeys(cards)]).toEqual([stop, [...BUSY(3), "plans/k.md", "plans/a.md", "plans/b.md"]]);
+      expect(byKey(cards, "plans/b.md")).toMatchObject({ boundary: "keptApart", menu: { action: "allow", anchors: ["plans/b.md"] } });
+      // Kept apart on the ANCHOR: the child left behind rides with it.
+      const anchor = at(stop, { keptApart: ["plans/a.md"] }, fx).cards;
+      expect([stop, topKeys(anchor)]).toEqual([stop, [...BUSY(3), "plans/k.md", "plans/a.md", "plans/b.md"]]);
+    }
+  });
+
+  test("Keep separate on a child of the fifth card plus Make own thread on the other: both stay (Related, Areas)", () => {
+    const fx = withBusy(3);
+    for (const stop of ["related", "areas"] as const) {
+      const cards = at(stop, { keptApart: ["plans/b.md"], splits: [{ id: "sa", page: "plans/a.md" }] }, fx).cards;
+      expect([stop, topKeys(cards).sort()]).toEqual([stop, [...BUSY(3), "plans/k.md", "plans/a.md", "plans/b.md"].sort()]);
+    }
+  });
+
+  test("Threads: Keep separate changes nothing — no group to leave, so no card rides", () => {
+    const fx = withBusy(3);
+    const plain = topKeys(at("threads", {}, fx).cards);
+    expect(plain).toEqual([...BUSY(3), "plans/k.md", "plans/a.md"]);
+    expect(topKeys(at("threads", { keptApart: ["plans/b.md"] }, fx).cards)).toEqual(plain);
+  });
+
+  test("the pin's own split, its remainder far past the cap: the pinned card is drawn", () => {
+    for (const stop of ["threads", "related", "areas"] as const) {
+      const cards = at(stop, { splits: [P] }, withBusy(6), "plans/p.md").cards;
+      expect([stop, topKeys(cards)]).toEqual([stop, ["plans/p.md", ...BUSY(6).slice(0, 4)]]);
+    }
+  });
+});
+
 describe("the pin after splits (S rows)", () => {
   const derived = (splits: WorkGroupSplit[], fx = fixture()) => workBoundariesOf(fx.work, fx.pages, { splits, keptApart: [] }).derived;
   const pinnedKey = (cards: readonly RailWorkCard[]) => flat(cards).find((c) => c.pinned)?.key;
@@ -264,6 +363,27 @@ describe("the Sessions stop (D19) and ▸ split into N sessions", () => {
       open: false,
       sessions: [],
     });
+  });
+
+  test("▸ split into N sessions follows the facets: a session with no visible row and no also in: link is not a line, and the count is what shows", () => {
+    const fx = fixture();
+    fx.pages = fx.pages.map((p) => (p.relPath === "plans/q.md" ? { ...p, domain: "life" as const } : p));
+    const ai: WikiFilters = { ...INERT, domain: "ai" };
+    const cards = (open: boolean) =>
+      openWorkCards(fx.work, fx.pages, ai, [], null, NOW, fx.pages, { stop: "threads", evidence: ALL, ...(open ? { sessionsOpen: ["thread:plans/k.md"] } : {}) }).cards;
+    expect(byKey(cards(false), "plans/k.md").sessionSplit).toEqual({ count: 2, available: true, open: false, sessions: [] });
+    const open = byKey(cards(true), "plans/k.md").sessionSplit!;
+    expect(open.count).toBe(2);
+    expect(open.sessions.map((s) => [s.ref, s.rows.map((p) => p.relPath), s.alsoIn.map((p) => p.relPath)])).toEqual([
+      ["claude-code:s2", ["plans/p.md"], []],
+      ["claude-code:s1", ["plans/k.md"], ["plans/p.md"]],
+    ]);
+    // Filtered down to one session's pages: nothing left to split.
+    const one = fx.pages.map((p) => (p.relPath === "plans/k.md" ? { ...p, domain: "life" as const } : p));
+    const solo = openWorkCards(fx.work, one, ai, [], null, NOW, one, { stop: "threads", evidence: ALL }).cards;
+    expect(byKey(solo, "plans/k.md").focus.map((p) => p.relPath)).toEqual(["plans/p.md"]);
+    // s2 owns p.md; s1 shows p.md only on its also in: line, so it still shows.
+    expect(byKey(solo, "plans/k.md").sessionSplit).toMatchObject({ count: 2 });
   });
 
   test("buildRail draws a split thread as session lines, each followed by its rows, then the also in: line; every row once", () => {

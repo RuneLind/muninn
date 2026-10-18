@@ -303,13 +303,16 @@ export type RowBoundaryAction =
   | { kind: "return"; id: string }
   /** Make own thread, or why not. */
   | { kind: "split"; available: true }
-  | { kind: "split"; available: false; reason: WorkGroupUnavailableReason | "unattributed" };
+  | { kind: "split"; available: false; reason: WorkGroupUnavailableReason | "unattributed" | "conflict" };
 
 /**
  * The boundary item a focus row's ⋯ holds for `rel`: Return to its thread on
  * a split page, else Make own thread when its thread's contributions ship
  * whole and a kept focus on the page is on record (otherwise the item shows
- * disabled with the reason). Null when no thread holds the page.
+ * disabled with the reason). A page two split definitions land on is a
+ * conflict: a click would add a definition the record already holds, so the
+ * item shows disabled and points at the reset area. Null when no thread holds
+ * the page.
  */
 export function rowBoundaryAction(
   b: WorkBoundaries,
@@ -320,6 +323,7 @@ export function rowBoundaryAction(
   const holder = b.threads.find((x) => x.thread.pages.some((p) => normalizeRel(p) === k));
   if (!holder) return null;
   if (holder.split) return { kind: "return", id: holder.split.id };
+  if (b.definitions.some((d) => d.state === "conflict" && d.page === k)) return { kind: "split", available: false, reason: "conflict" };
   const { evidence, reason } = readWorkEvidence(work?.evidence, work?.threads);
   const avail = threadSessionsAvailability(evidence, holder.source.key, reason);
   if (!avail.available) return { kind: "split", available: false, reason: avail.reasons[0]! };

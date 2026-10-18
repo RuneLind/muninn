@@ -83,6 +83,12 @@ describe("row ⋯ and the menus", () => {
     expect(threadRowMenuHtml("plans/p.md", { kind: "return", id: "sp" })).toContain('data-work-return="sp" data-work-return-page="plans/p.md"');
   });
 
+  test("a conflict page: Make own thread disabled, its reason naming the Group menu's reset area", () => {
+    const off = threadRowMenuHtml("plans/p.md", { kind: "split", available: false, reason: "conflict" });
+    expect(off).toContain('aria-disabled="true" aria-describedby="wikiWorkPopWhy"');
+    expect(off).toContain("Unavailable: two of your splits name this page; repair them under Reset your splits and groups in the Work threads ▾ menu");
+  });
+
   test("a card's ⋯: Keep separate, Allow grouping (all its anchors), Return to its thread", () => {
     expect(threadCardMenuHtml({ action: "keep", anchor: "a.md" })).toContain('data-work-keep="a.md"');
     expect(threadCardMenuHtml({ action: "allow", anchors: ["a.md", "b.md"] })).toContain('data-work-allow="[&quot;a.md&quot;,&quot;b.md&quot;]"');

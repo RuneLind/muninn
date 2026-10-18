@@ -268,4 +268,15 @@ describe("rowBoundaryAction", () => {
       reason: "unattributed",
     });
   });
+
+  test("a page two split definitions land on (a conflict) offers Make own thread disabled, pointing at the repair area", () => {
+    // The click would send `addSplit` for a page the record already holds: nothing would change.
+    const f = fixture();
+    const pages = f.pages.map((p) => (p.relPath === "p.md" ? { ...p, aliases: ["was-p"] } : p));
+    const b = applyWorkBoundaries({ work: f.work, allPages: pages, splits: [{ id: "x", page: "was-p.md" }, { id: "y", page: "p.md" }], keptApart: [] });
+    expect(b.definitions.map((d) => d.state)).toEqual(["conflict", "conflict"]);
+    expect(rowBoundaryAction(b, f.work, "p.md")).toEqual({ kind: "split", available: false, reason: "conflict" });
+    // The thread's other pages are not in the conflict.
+    expect(rowBoundaryAction(b, f.work, "q.md")).toEqual({ kind: "split", available: true });
+  });
 });

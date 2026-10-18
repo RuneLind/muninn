@@ -622,7 +622,10 @@ function popDisabled(attrs: string, glyph: string, label: string, why: string): 
 }
 
 /** Why Make own thread is not offered, in words. */
-const SPLIT_REASON_TEXT: Record<string, string> = { unattributed: "no session's focus on this page is on record" };
+const SPLIT_REASON_TEXT: Record<string, string> = {
+  unattributed: "no session's focus on this page is on record",
+  conflict: "two of your splits name this page; repair them under Reset your splits and groups in the Work threads ▾ menu",
+};
 
 /** A focus row's boundary item (Make own thread, or Return to its thread),
  *  the whole of the row ⋯ where no series menu applies, and the head of it

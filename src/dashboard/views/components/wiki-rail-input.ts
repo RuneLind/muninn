@@ -164,9 +164,9 @@ export function openThreadCards(
   now: number,
   allPages: readonly WikiListing[] = pages,
   asOfMs?: number,
-  rank?: WorkBoundaries["rank"],
+  boundaries?: WorkBoundaries,
 ): RailThreadCard[] {
-  const cards = threadCardBodies(threads, pages, filters, pin, now, allPages, asOfMs, THREAD_CARDS_MAX, rank);
+  const cards = threadCardBodies(threads, pages, filters, pin, now, allPages, asOfMs, THREAD_CARDS_MAX, boundaries);
   return cards.map((c, i) => {
     const stored = groupFoldState(foldState, c.foldKey);
     const defaultOpen = i === 0;
@@ -189,27 +189,19 @@ function threadCardBodies(
   allPages: readonly WikiListing[],
   asOfMs: number | undefined,
   cap: number,
-  rank?: WorkBoundaries["rank"],
+  boundaries?: WorkBoundaries,
 ): Omit<RailThreadCard, "open" | "toggleKey">[] {
   if (!railSectionsVisible(filters)) return [];
-  const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs, rank);
+  const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs, boundaries?.rank);
   if (!ranked.length) return [];
   const byRel = new Map<string, WikiListing>();
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const visible = new Set(filterPages(pages as WikiListing[], filters).map((p) => normalizeRel(p.relPath)));
   const cards: Omit<RailThreadCard, "open" | "toggleKey">[] = [];
-  // A split page's card rides with its source's drawn card past the cap
-  // (`splitRides`), so Make own thread never moves a page off the section.
-  let counted = 0;
-  const drawnSources = new Set<string>();
   for (const { t, score, pinned, owned } of ranked) {
-    const rides = splitRides(rank, t.key, drawnSources);
-    if (counted >= cap && !rides) continue;
     // The created window stays on the reader's `now`.
     const rows = threadCardRows(owned, t.touched, visible, byRel, now);
     if (!rows.focus.length) continue;
-    if (!rides) counted++;
-    drawnSources.add(rank?.get(t.key)?.rank.key ?? t.key);
     cards.push({
       key: t.key,
       foldKey: threadFoldKey(t.key),
@@ -226,16 +218,88 @@ function threadCardBodies(
       score,
     });
   }
-  return cards;
+  if (cards.length <= cap) return cards;
+  // At Threads a card's family is its source thread: no group to leave.
+  const bounded = new Map((boundaries?.threads ?? []).map((b) => [b.thread.key, b] as const));
+  const capCards = cards.map((c) => {
+    const b = bounded.get(c.key);
+    return [{ key: c.key, source: b?.source.key ?? c.key, split: !!b?.split }];
+  });
+  return capWithBoundaryRiders(cards, boundaryRidesOn(capCards, remainderBySource(boundaries), (source) => source), cap);
 }
 
-/** Does the card of thread `key` ride past the five-card cap? Only a split
- *  page's (`sub` > 0) whose source already has a drawn card: the split
- *  follows its source (D16), and without this a source at the cap would push
- *  the page the reader just split off the section (measured on a live wiki). */
-function splitRides(rank: WorkBoundaries["rank"] | undefined, key: string, drawnSources: ReadonlySet<string>): boolean {
-  const r = rank?.get(key);
-  return !!r && r.sub > 0 && drawnSources.has(r.rank.key);
+/** One unit of a card, as the cap reads it. */
+interface CapUnit {
+  key: string;
+  /** The server's thread it came from (`WorkUnit.rank`). */
+  source: string;
+  /** A Make own thread page. */
+  split: boolean;
+}
+
+/** source thread key → its remainder's key, for every source a split left pages in. */
+function remainderBySource(b: Pick<WorkBoundaries, "threads"> | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const t of b?.threads ?? []) if (t.remainder) out.set(t.source.key, t.thread.key);
+  return out;
+}
+
+/**
+ * For each card, the cards whose being drawn lets it ride past the cap (D20:
+ * a card a manual boundary made is drawn with the card it came from):
+ *
+ *  - A split whose source kept a remainder rides on the remainder's card only,
+ *    never on a sibling split (a pinned split drawn first must not carry its
+ *    siblings when the remainder is cut).
+ *  - Every other card rides on the other cards of its FAMILY (`familyOf` its
+ *    units' sources): the cards one server thread (Threads) or one boundary-
+ *    free group (Related, Areas) became. A family the boundaries left whole is
+ *    one card and never rides; a dissolved one draws its first card against
+ *    the cap and the rest with it — a thread split whole, a group a thread was
+ *    kept out of (that thread, and the children left behind when it was the
+ *    anchor).
+ */
+function boundaryRidesOn(cards: readonly (readonly CapUnit[])[], remainderOf: ReadonlyMap<string, string>, familyOf: (source: string) => string): number[][] {
+  const cardOfUnit = new Map<string, number>();
+  const families = new Map<string, Set<number>>();
+  cards.forEach((units, i) => {
+    for (const u of units) {
+      cardOfUnit.set(u.key, i);
+      const f = familyOf(u.source);
+      (families.get(f) ?? families.set(f, new Set()).get(f)!).add(i);
+    }
+  });
+  const onRemainder = (units: readonly CapUnit[]) => (units.length === 1 && units[0]!.split ? remainderOf.get(units[0]!.source) : undefined);
+  return cards.map((units, i) => {
+    const rem = onRemainder(units);
+    if (rem !== undefined) {
+      const r = cardOfUnit.get(rem);
+      return r === undefined ? [] : [r];
+    }
+    const on = new Set<number>();
+    for (const u of units) for (const j of families.get(familyOf(u.source)) ?? []) if (j !== i && onRemainder(cards[j]!) === undefined) on.add(j);
+    return [...on];
+  });
+}
+
+/** At most `cap` cards in rank order, plus every card one of whose `ridesOn`
+ *  cards is drawn before it (`boundaryRidesOn`); a rider takes no slot, so the
+ *  section holds at most `cap` + the manual cards. A card a rider rides on
+ *  ranks before it: a split follows its remainder (same source, higher
+ *  `sub`) unless the split holds the pin, and then it takes the first slot;
+ *  a family's riding is symmetric, so its first card in order is the one
+ *  that counts. */
+function capWithBoundaryRiders<C>(cards: readonly C[], ridesOn: readonly (readonly number[])[], cap: number): C[] {
+  const drawn = new Set<number>();
+  let counted = 0;
+  cards.forEach((_, i) => {
+    if (ridesOn[i]!.some((j) => drawn.has(j))) drawn.add(i);
+    else if (counted < cap) {
+      counted++;
+      drawn.add(i);
+    }
+  });
+  return cards.filter((_, i) => drawn.has(i));
 }
 
 /** One thread as the Threads stop ranks it: its score, whether it holds the
@@ -379,7 +443,7 @@ export function openWorkCards(
   // own order and ownership, which a score tie can tell apart from the model's).
   const visibleAt = (stop: WorkGroupStop) =>
     stop === "threads"
-      ? threadCardBodies(boundaries.derived, pool, filters, pin, now, allPages, work?.asOfMs, Infinity, boundaries.rank).length
+      ? threadCardBodies(boundaries.derived, pool, filters, pin, now, allPages, work?.asOfMs, Infinity, boundaries).length
       : stop === "sessions"
         ? projectSessionCards(stop === requested ? grouping.sessions : workSessionCards(work, allPages, at), pool, filters, Infinity).length
         : projectWorkGroups(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin, units }), pool, filters, now, Infinity).length;
@@ -432,8 +496,9 @@ export function openWorkCards(
   const evidence = readWorkEvidence(work?.evidence, work?.threads);
   const bounded = new Map<string, BoundedThread>(boundaries.threads.map((b) => [b.thread.key, b] as const));
   const sessionsOpen = new Set((view.sessionsOpen ?? []).map(normalizeFoldKey));
-  /** The reader's boundary on a card, its ⋯ (Related and Areas), and its
-   *  `▸ split into N sessions` (every stop but Sessions). */
+  /** The reader's boundary chip on a card (every stop but Sessions), its ⋯
+   *  (`menus`: Related and Areas only), and its `▸ split into N sessions`
+   *  (Threads, Related and Areas: D7, inside any open thread). */
   const decorate = (card: RailThreadCard, menus: boolean): RailThreadCard => {
     const b = bounded.get(card.key);
     if (!b) return card;
@@ -453,24 +518,22 @@ export function openWorkCards(
   };
 
   if (grouping.stop === "threads" || !sections) {
-    const cards = openThreadCards(boundaries.derived, pool, filters, foldState, pin, now, allPages, work?.asOfMs, boundaries.rank);
+    const cards = openThreadCards(boundaries.derived, pool, filters, foldState, pin, now, allPages, work?.asOfMs, boundaries);
     return { cards: cards.map((c) => decorate(c, false)), control };
   }
 
   const more = new Set((view.moreOpen ?? []).map(normalizeFoldKey));
-  // At most `THREAD_CARDS_MAX` cards, a split page's card riding with its
-  // source's drawn card past the cap (`splitRides`).
-  const views: ReturnType<typeof projectWorkGroups> = [];
-  {
-    let counted = 0;
-    const drawnSources = new Set<string>();
-    for (const gv of projectWorkGroups(grouping, pool, filters, now, Infinity)) {
-      const rides = gv.group.kind === "thread" && splitRides(boundaries.rank, gv.children[0]!.child.key, drawnSources);
-      if (counted >= THREAD_CARDS_MAX && !rides) continue;
-      if (!rides) counted++;
-      views.push(gv);
-      for (const cv of gv.children) drawnSources.add(cv.child.unit.rank.key);
-    }
+  // At most `THREAD_CARDS_MAX` cards, a card a manual boundary made riding
+  // past the cap with the card it came from (D20, `boundaryRidesOn`). A
+  // family is a group of the boundary-free grouping at this stop.
+  const projected = projectWorkGroups(grouping, pool, filters, now, Infinity);
+  let views = projected;
+  if (projected.length > THREAD_CARDS_MAX) {
+    const familyOf = boundaries.units.some((u) => u.split || u.keptApart)
+      ? baseFamilies(groupWorkThreads({ work, allPages, now, stop: grouping.stop, toggles: view.evidence, pin }))
+      : (source: string) => source;
+    const capCards = projected.map((gv) => gv.children.map((cv) => ({ key: cv.child.key, source: cv.child.unit.rank.key, split: !!cv.child.unit.split })));
+    views = capWithBoundaryRiders(projected, boundaryRidesOn(capCards, remainderBySource(boundaries), familyOf), THREAD_CARDS_MAX);
   }
   const threadCard = (cv: WorkGroupChildView, defaultOpen: boolean, child?: RailThreadCard["child"]): RailThreadCard =>
     decorate(
@@ -554,12 +617,22 @@ export function openWorkCards(
   return { cards, control };
 }
 
+/** source thread key → the anchor of its group in a boundary-free grouping. */
+function baseFamilies(base: ReturnType<typeof groupWorkThreads>): (source: string) => string {
+  const of = new Map<string, string>();
+  for (const g of base.groups) for (const c of g.children) of.set(c.unit.rank.key, g.anchorKey);
+  return (source) => of.get(source) ?? source;
+}
+
 /** `▸ split into N sessions` for one drawn thread card (D19): the sessions
  *  with a kept focus on its pages, from the contribution rows of its SOURCE
  *  thread restricted to its pages, so a split page and its remainder each
- *  split into their own. Offered from two sessions; unavailable, with the
- *  reason, when the thread's contributions do not ship whole. The sessions'
- *  rows are the card's own drawn rows, so the split moves no page. */
+ *  split into their own. Ownership (which session's line a page is a row of)
+ *  is decided facet-free; the lines are then the card's own drawn rows, so
+ *  the split moves no page, and a session with neither a drawn row nor an
+ *  `also in:` link is no line (`projectSessionCards`' rule). Offered from two
+ *  lines; unavailable, with the reason, when the thread's contributions do
+ *  not ship whole. */
 function sessionSplitOf(
   b: BoundedThread,
   card: RailThreadCard,
@@ -574,18 +647,13 @@ function sessionSplitOf(
     if (b.thread.sessions.length < 2) return undefined;
     return { count: b.thread.sessions.length, available: false, reason: avail.reasons[0], open: false, sessions: [] };
   }
-  const own = workSessionCards(work, allPages, at, b.source.key, new Set(b.thread.pages.map(normalizeRel)));
-  if (own.length < 2) return undefined;
   const drawn = new Set(card.focus.map((p) => normalizeRel(p.relPath)));
   const mine = (ps: readonly WikiListing[]) => ps.filter((p) => drawn.has(normalizeRel(p.relPath)));
-  return {
-    count: own.length,
-    available: true,
-    open,
-    sessions: open
-      ? own.map((sc) => ({ ref: sc.ref, title: sc.title || sc.id, first: sc.first, last: sc.last, rows: mine(sc.rows), alsoIn: mine(sc.alsoIn) }))
-      : [],
-  };
+  const shown = workSessionCards(work, allPages, at, b.source.key, new Set(b.thread.pages.map(normalizeRel)))
+    .map((sc) => ({ ref: sc.ref, title: sc.title || sc.id, first: sc.first, last: sc.last, rows: mine(sc.rows), alsoIn: mine(sc.alsoIn) }))
+    .filter((s) => s.rows.length || s.alsoIn.length);
+  if (shown.length < 2) return undefined;
+  return { count: shown.length, available: true, open, sessions: open ? shown : [] };
 }
 
 /** The Group menu's reset area: the record's splits and kept-apart anchors,
