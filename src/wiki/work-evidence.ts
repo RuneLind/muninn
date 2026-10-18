@@ -53,8 +53,21 @@ export function buildWorkEvidence(input: WorkEvidenceInput): WorkEvidence {
   const inFocus = new Set(focus);
 
   const series: Record<string, string> = {};
+  const foldOf = new Map<string, string>();
   for (const [fold, members] of seriesMembersByFoldKey(input.pages)) {
-    for (const m of members) if (inFocus.has(m.relPath)) series[m.relPath] = fold;
+    for (const m of members) {
+      foldOf.set(m.relPath, fold);
+      if (inFocus.has(m.relPath)) series[m.relPath] = fold;
+    }
+  }
+  // An attachment (rules 1–3, part of its page) counts in its markdown
+  // parent's series, the page Save as series writes for it; its own `series:`
+  // counts nowhere (the census skips it), and a retired (rule-4) child is its
+  // own page.
+  for (const rel of focus) {
+    const p = byRel.get(rel);
+    const fold = p?.parent && p.pairedBy !== "superseded" ? foldOf.get(p.parent) : undefined;
+    if (fold) series[rel] = fold;
   }
   const projects: Record<string, string> = {};
   for (const rel of focus) {

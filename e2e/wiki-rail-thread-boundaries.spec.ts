@@ -7,7 +7,7 @@
  * menu, a read-only wiki's row ⋯, two tabs, Reset, refused storage, reload
  * persistence, incomplete contributions and independent wiki settings.
  *
- * ONE muninn, FOUR temp wikis, ONE fake `node:http` claude-usage:
+ * ONE muninn, TWELVE temp wikis, ONE fake `node:http` claude-usage:
  *
  *  - `wsbound` — thread T: `t-key` (b1, b2), `t-split` (b0, b1), `t-rest`
  *    (b2), one thread through the shared sessions; the RELATED pair
@@ -17,9 +17,12 @@
  *    two Save as series cases (each writes its own temp files).
  *  - `wsbcap` — four newer lone notes ahead of the related pair, so the pair
  *    is the fifth card (the D20 cap riders).
+ *  - `wsbtwin` — the pair with an `.html` twin of `live-a` as its focus page;
+ *    `wsbstale`, `wsbslow`, `wsbslowfail`, `wsbnorefresh`, `wsbgone`,
+ *    `wsbcleared` — the pair again, one per Save as series lifecycle case.
  *
  * Synthetic names only (D11: no NAV data). No model calls; the only wiki
- * writes are Save as series on the two synthetic series wikis.
+ * writes are Save as series on the synthetic series wikis.
  *
  * SPAWN ENV: `e2eEnv()` blanks `CLAUDE_USAGE_URL`, so it is set AFTER it.
  */
@@ -45,6 +48,15 @@ const BRO = "wsboundro";
 const S = "wsbseries";
 const R = "wsbrefuse";
 const C = "wsbcap";
+/** Fix round 1 batch 2: an `.html`-twin child, a concurrent series writer,
+ *  and the popover's lifecycle during a write. One wiki per writing test. */
+const TW = "wsbtwin";
+const ST = "wsbstale";
+const SL = "wsbslow";
+const SF = "wsbslowfail";
+const NR = "wsbnorefresh";
+const NG = "wsbgone";
+const CL = "wsbcleared";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -56,6 +68,8 @@ const TREST = "plans/t-rest.md";
 const LA = "plans/live-a.md";
 const LB = "plans/live-b.md";
 const LONE = "notes/lone.md";
+const LAH = "plans/live-a.html";
+const OTHER = "notes/other.md";
 const BUSY = [1, 2, 3, 4].map((i) => `notes/busy-${i}.md`);
 
 /** Per wiki: each session's focus pages, newest session first (b0 is 1 h ago). */
@@ -65,6 +79,13 @@ const SESSIONS: Record<string, string[][]> = {
   [S]: [[LA], [LB], [LONE]],
   [R]: [[LA], [LB], [LONE]],
   [C]: [...BUSY.map((p) => [p]), [LA], [LB]],
+  [TW]: [[LAH], [LB], [LONE]],
+  [ST]: [[LA], [LB], [LONE]],
+  [SL]: [[LA], [LB], [LONE]],
+  [SF]: [[LA], [LB], [LONE]],
+  [NR]: [[LA], [LB], [LONE]],
+  [NG]: [[LA], [LB], [LONE]],
+  [CL]: [[LA], [LB], [LONE]],
 };
 
 const roots: Record<string, string> = {};
@@ -117,7 +138,7 @@ function startLedger(): Promise<Server> {
   return new Promise((resolve) => srv.listen(LEDGER_PORT, "127.0.0.1", () => resolve(srv)));
 }
 
-async function makeRoot(name: string, withTask: boolean, busy = false): Promise<void> {
+async function makeRoot(name: string, withTask: boolean, busy = false, twin = false): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-bounds-${name}-`));
   roots[name] = root;
   await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ activity: { agePenalty: 0, hubPenalty: 0, planBoost: 0, rows: 8 } }), "utf8");
@@ -134,7 +155,9 @@ async function makeRoot(name: string, withTask: boolean, busy = false): Promise<
     await write(TREST, ["title: Task rest"], 3 * HOUR);
   }
   await write(LA, ["title: Living facts", "plan_status: active", "status_date: 2026-10-14"], 4 * HOUR);
-  await write(LB, ["title: Reader lenses", "plan_status: active", "status_date: 2026-10-10", 'related: ["[[plans/live-a]]"]'], 5 * HOUR);
+  await write(LB, ["title: Reader lenses", "plan_status: active", "status_date: 2026-10-10", `related: ["[[${twin ? "plans/live-a.html" : "plans/live-a"}]]"]`], 5 * HOUR);
+  if (twin) await writeFile(path.join(root, LAH), "<!doctype html><title>Living facts page</title><p>Twin.</p>\n", "utf8");
+  if (name === ST) await write(OTHER, ["title: Other note", "series: other"], 7 * HOUR);
   await write(LONE, ["title: Lone note", "type: note"], 6 * HOUR);
   for (let i = 1; i <= 3; i++) await write(`notes/old-${i}.md`, [`title: Old ${i}`], (10 + i) * DAY);
   if (busy) for (const [i, rel] of BUSY.entries()) await write(rel, [`title: Busy ${i + 1}`, "type: note"], (i + 1) * 60_000);
@@ -186,6 +209,8 @@ test.beforeAll(async () => {
   await makeRoot(S, false);
   await makeRoot(R, false);
   await makeRoot(C, false, true);
+  await makeRoot(TW, false, false, true);
+  for (const w of [ST, SL, SF, NR, NG, CL]) await makeRoot(w, false);
   ledger = await startLedger();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -213,7 +238,7 @@ test.beforeAll(async () => {
     if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
     await new Promise((r) => setTimeout(r, 400));
   }
-  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3, [C]: 6 };
+  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3, [C]: 6, [TW]: 3, [ST]: 3, [SL]: 3, [SF]: 3, [NR]: 3, [NG]: 3, [CL]: 3 };
   for (const wiki of Object.keys(want)) {
     const warm = Date.now() + 20_000;
     for (;;) {
@@ -496,6 +521,181 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await page.locator("#wikiWorkPop [data-work-series-go]").click();
     await expect(groupCard(page, "group:series:live-a")).toHaveCount(1);
     expect(await readFile(path.join(roots[R]!, LB), "utf8")).toContain("series: live-a");
+  });
+  test("Save as series on a group whose child is an .html twin: its markdown parent is written, the refresh names the group by the series and the action leaves its menu", async ({ page }) => {
+    await openReader(page, TW);
+    const g = groupCard(page, `group:anchor:${LAH}`);
+    await expect(g).toHaveCount(1);
+    await openMenu(g.locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    await expect(page.locator("#wikiWorkPop [data-work-series-key]")).toHaveValue("live-a");
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    const sg = groupCard(page, "group:series:live-a");
+    await expect(sg).toHaveCount(1);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+    await expect(groupCard(page, `group:anchor:${LAH}`)).toHaveCount(0);
+    await expect(sg.locator("[data-work-card-menu]")).toHaveCount(0);
+    for (const rel of [LA, LB]) expect(await readFile(path.join(roots[TW]!, rel), "utf8")).toContain("series: live-a");
+    expect(await readFile(path.join(roots[TW]!, LAH), "utf8")).not.toContain("series");
+    // And after a reload, from the server's evidence alone.
+    await openReader(page, TW);
+    await expect(groupCard(page, "group:series:live-a")).toHaveCount(1);
+  });
+
+  test("Save as series re-checks the plan after the bases: a page another writer put into a series since the click is left alone, its label kept, and nothing is written", async ({ page }) => {
+    await openReader(page, ST);
+    const g = groupCard(page, `group:anchor:${LA}`);
+    await openMenu(g.locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    await expect(page.locator("#wikiWorkPop .wiki-work-series-list.w")).toHaveCount(2);
+    // The concurrent writer: Reader lenses becomes the labelled head of "other".
+    const lb = path.join(roots[ST]!, LB);
+    await writeFile(lb, ["---", "title: Reader lenses", "plan_status: active", "status_date: 2026-10-10", 'related: ["[[plans/live-a]]"]', "series: other", "series_label: Other work", "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
+    // The first rescan after the click: past any write the old snapshot made.
+    const rescan = page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes("refresh=1"));
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await rescan;
+    const msg = page.locator("#wikiWorkPop .wiki-work-series-msg");
+    const after = await readFile(lb, "utf8");
+    expect(after).toContain("series: other");
+    expect(after).toContain("series_label: Other work");
+    expect(await readFile(path.join(roots[ST]!, LA), "utf8")).not.toContain("series:");
+    await expect(msg).toHaveText("Nothing written — joined another series since this menu opened: Reader lenses (in «Other work»)");
+    await expect(page.locator("#wikiWorkPop [data-work-series-go]")).toBeDisabled();
+  });
+
+  test("while a Save as series write runs, Escape, an outside click, Cancel and the ⋯ cannot close its popover; the landed write closes it", async ({ page }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      async (route) => {
+        await gate;
+        return route.continue();
+      },
+    );
+    await openReader(page, SL);
+    const g = groupCard(page, `group:anchor:${LA}`);
+    const child = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LA}"]`);
+    if (!(await child.getAttribute("class"))!.includes("open")) await child.locator(".wiki-thread-fold").click();
+    await expect(threadRow(page, LA)).toHaveCount(1);
+    const opener = g.locator("[data-work-card-menu]").first();
+    await openMenu(opener);
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    const posted = page.waitForRequest((r) => new URL(r.url()).pathname === "/api/wiki/series");
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await posted;
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(1);
+    await page.mouse.click(5, 5);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(1);
+    await opener.click();
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(1);
+    // A row's series ⋯ opens nothing beside it. Dispatched: a pointer click
+    // here can land under the popover.
+    await threadRow(page, LA).locator("[data-series-menu]").dispatchEvent("click");
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(1);
+    await expect(page.locator("#wikiWorkPop [data-work-series-cancel]")).toBeDisabled();
+    await expect(page.locator("#wikiWorkPop .wiki-work-series-msg")).toHaveText("Saving…");
+    release();
+    await expect(groupCard(page, "group:series:live-a")).toHaveCount(1);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+  });
+
+  test("Escape during a write that stops on the second page: the popover stays and shows 1 of 2 written", async ({ page }) => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      async (route) => {
+        calls++;
+        await gate;
+        if (calls === 2) return route.fulfill({ status: 409, json: { error: "the page changed (test)" } });
+        return route.continue();
+      },
+    );
+    await openReader(page, SF);
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    const posted = page.waitForRequest((r) => new URL(r.url()).pathname === "/api/wiki/series");
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await posted;
+    await page.keyboard.press("Escape");
+    release();
+    const msg = page.locator("#wikiWorkPop .wiki-work-series-msg");
+    await expect(msg).toContainText("1 of 2 written");
+    await expect(msg).toContainText(`Not written: ${LB}`);
+    await expect(page.locator("#wikiWorkPop [data-work-series-go]")).toBeDisabled();
+    // Reported, the popover is the reader's to close again.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+  });
+
+  test("a refresh that fails after the write says Saved — reload, and the popover stays to say it", async ({ page }) => {
+    let posted = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      async (route) => {
+        posted = true;
+        await gate;
+        return route.continue();
+      },
+    );
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("refresh") === "1",
+      (route) => (posted ? route.fulfill({ status: 500, body: "boom" }) : route.continue()),
+    );
+    await openReader(page, NR);
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    const req = page.waitForRequest((r) => new URL(r.url()).pathname === "/api/wiki/series");
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await req;
+    release();
+    await expect(page.locator("#wikiWorkPop .wiki-work-series-msg")).toHaveText("Saved — reload to see the updated list");
+    await expect(page.locator("#wikiWorkPop [data-work-series-go]")).toBeDisabled();
+    for (const rel of [LA, LB]) expect(await readFile(path.join(roots[NR]!, rel), "utf8")).toContain("series: live-a");
+  });
+
+  test("a write that moved a series' labelled head anyway says that series has no label now", async ({ page }) => {
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      (route) => route.fulfill({ status: 200, json: { hash: "h", written: true, clearedLabel: { series: "other" } } }),
+    );
+    await openReader(page, CL);
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await expect(page.locator("#wikiWorkPop .wiki-work-series-msg")).toContainText('A page was the head of "other" — that series has no label now');
+  });
+
+  test("a write whose popover is gone by its end reports in a status note instead", async ({ page }) => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      async (route) => {
+        calls++;
+        await gate;
+        if (calls === 2) return route.fulfill({ status: 409, json: { error: "the page changed (test)" } });
+        return route.continue();
+      },
+    );
+    await openReader(page, NG);
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    const req = page.waitForRequest((r) => new URL(r.url()).pathname === "/api/wiki/series");
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await req;
+    // Something outside the reader's controls removes the popover mid-write.
+    await page.evaluate(() => document.getElementById("wikiWorkPop")?.remove());
+    release();
+    await expect(page.locator("#wikiWorkSeriesStatus")).toContainText("1 of 2 written");
   });
 });
 

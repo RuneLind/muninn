@@ -171,3 +171,61 @@ export function checkNewSeriesKey(plan: Pick<SaveSeriesPlan, "taken">, typed: st
   if (plan.taken.includes(seriesCensusKey(key))) return { error: `"${key}" is already a series here — pick another key` };
   return { key };
 }
+
+export interface SaveSeriesRecheck {
+  /** The planned writes still to send, in plan order. */
+  writes: SaveSeriesPage[];
+  /** Planned pages another writer put into a different series since. */
+  moved: (SaveSeriesPage & { series: string })[];
+  /** Set ⇒ write nothing, and say this. */
+  error?: string;
+}
+
+/**
+ * The plan against a listing read AFTER the CAS bases (D14): the plan is a
+ * snapshot from when the item was clicked, the route moves a page from any
+ * series, and moving a series' labelled head drops that series' label. A
+ * planned page now in another series is left alone; one already under `key`
+ * is not rewritten. When that leaves a child with no page in the series, or a
+ * new key has become a series since, nothing is written.
+ */
+export function recheckSaveAsSeries(
+  plan: Pick<SaveSeriesPlan, "mode" | "children" | "writes">,
+  key: string,
+  fresh: readonly WikiListing[],
+): SaveSeriesRecheck {
+  const byRel = new Map<string, WikiListing>();
+  for (const p of fresh) byRel.set(normalizeRel(p.relPath), p);
+  const target = seriesCensusKey(key);
+  const foldNow = (rel: string): string | undefined => {
+    const p = byRel.get(normalizeRel(rel));
+    const k = p ? seriesKeyOf(p) : "";
+    return k ? seriesCensusKey(k) : undefined;
+  };
+  const planned = new Set(plan.writes.map((w) => normalizeRel(w.relPath)));
+  if (plan.mode === "coin") {
+    const clash = fresh.some((p) => !planned.has(normalizeRel(p.relPath)) && seriesKeyOf(p) && seriesCensusKey(seriesKeyOf(p)) === target);
+    if (clash) return { writes: [], moved: [], error: `"${key}" became a series here since this menu opened — nothing written; pick another key` };
+  }
+  const census = seriesMembersByFoldKey(fresh);
+  const labelOf = (fold: string) => {
+    const head = seriesHead(census.get(fold) ?? []);
+    return head?.seriesLabel || (head ? seriesKeyOf(head) : "") || fold;
+  };
+  const moved: SaveSeriesRecheck["moved"] = [];
+  const movedRel = new Set<string>();
+  const inAlready = new Set<string>();
+  for (const w of plan.writes) {
+    const fold = foldNow(w.relPath);
+    if (!fold) continue;
+    if (fold === target) inAlready.add(normalizeRel(w.relPath));
+    else moved.push({ ...w, series: labelOf(fold) }), movedRel.add(normalizeRel(w.relPath));
+  }
+  const covered = (ch: SaveSeriesChild) =>
+    ch.write.some((w) => !movedRel.has(normalizeRel(w.relPath))) || ch.joined.some((j) => (foldNow(j.relPath) ?? target) === target);
+  if (moved.length && !plan.children.every(covered)) {
+    return { writes: [], moved, error: `Nothing written — joined another series since this menu opened: ${moved.map((m) => `${m.title} (in «${m.series}»)`).join(", ")}` };
+  }
+  const writes = plan.writes.filter((w) => !movedRel.has(normalizeRel(w.relPath)) && !inAlready.has(normalizeRel(w.relPath)));
+  return { writes, moved };
+}

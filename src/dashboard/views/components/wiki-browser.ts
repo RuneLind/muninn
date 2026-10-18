@@ -169,7 +169,7 @@ import {
 import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
 import { loadSeriesBaseMap, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
-import { checkNewSeriesKey } from "./wiki-work-series.ts";
+import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
   formatRailAge,
@@ -3796,6 +3796,8 @@ function paintSeriesMenuEl(anchor: HTMLElement, html: string): HTMLElement {
 
 /** Open the popover for `relPath`, anchored under `anchor`. */
 function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): void {
+  // A Save as series write in flight keeps its popover, the one ⋯ open.
+  if (workPopBusy()) return;
   closeSeriesMenu({ focus: false });
   if (!seriesEditable()) return;
   const model = buildSeriesMenu(allPages, relPath, recencyNow());
@@ -5210,15 +5212,29 @@ function editWorkGroup(edit: WorkGroupEdit): void {
 // wiki, and on a read-only wiki its item is absent.
 
 /** The open work popover: what opened it, and for Save as series, the plan. */
-let workPop: { opener: HTMLElement; key: string; series?: { card: RailGroupCard; busy: boolean } } | null = null;
+interface WorkPopState {
+  opener: HTMLElement;
+  key: string;
+  /** Save as series' confirm view: `busy` while its write runs, `done` once
+   *  it has reported (Write stays off until the popover reopens). */
+  series?: { card: RailGroupCard; busy: boolean; done?: boolean };
+}
+let workPop: WorkPopState | null = null;
 
 function workPopEl(): HTMLElement | null {
   return document.getElementById(WORK_POP_ID);
 }
 
+/** A Save as series write is in flight: the popover holds its report. */
+function workPopBusy(): boolean {
+  return !!workPop?.series?.busy;
+}
+
 /** Close the work popover; `focus` returns focus to its opener (by key, the
- *  opener may have been repainted). */
-function closeWorkPop(focus = true): void {
+ *  opener may have been repainted). Refused while a Save as series write is in
+ *  flight (its report lands in this popover); `force` is the write's own close. */
+function closeWorkPop(focus = true, force = false): void {
+  if (workPopBusy() && !force) return;
   const was = workPop;
   workPopEl()?.remove();
   workPop = null;
@@ -5233,7 +5249,8 @@ function closeWorkPop(focus = true): void {
 }
 
 /** Paint the popover under `anchor` with `html`, focus its first item. */
-function openWorkPop(anchor: HTMLElement, key: string, html: string): HTMLElement {
+function openWorkPop(anchor: HTMLElement, key: string, html: string): HTMLElement | null {
+  if (workPopBusy()) return null;
   closeWorkPop(false);
   closeSeriesMenu({ focus: false });
   const el = document.createElement("div");
@@ -5329,26 +5346,75 @@ function rowMenuItemHtml(rel: string): string {
   return action ? threadRowMenuHtml(rel, action) : "";
 }
 
-/** Save as series' message line, in the confirm view. */
-function setWorkSeriesMsg(text: string, bad: boolean): void {
-  const msg = workPopEl()?.querySelector<HTMLElement>(".wiki-work-series-msg");
-  if (!msg) return;
+/** Save as series' message line, in the confirm view of `state`'s popover.
+ *  When that popover is gone, the line goes to a status note on the page, so
+ *  a write's report is never painted into nothing. */
+function setWorkSeriesMsg(state: WorkPopState, text: string, bad: boolean): void {
+  const msg = workPop === state ? workPopEl()?.querySelector<HTMLElement>(".wiki-work-series-msg") : null;
+  if (!msg) {
+    showWorkSeriesStatus(text, bad);
+    return;
+  }
   msg.textContent = text;
   msg.classList.toggle("bad", bad);
 }
 
+/** The fallback for a report whose popover is gone: one status note, fixed at
+ *  the foot of the page, dismissed by a click on it. */
+function showWorkSeriesStatus(text: string, bad: boolean): void {
+  let el = document.getElementById("wikiWorkSeriesStatus");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "wikiWorkSeriesStatus";
+    el.className = "wiki-series-menu wiki-work-series-status";
+    el.setAttribute("role", "status");
+    el.title = "Click to dismiss";
+    el.addEventListener("click", () => el!.remove());
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.toggle("bad", bad);
+}
+
+/** Lock or unlock the confirm view's buttons and key while a write runs. */
+function setWorkSeriesLocked(state: WorkPopState, locked: boolean, goToo = locked): void {
+  if (workPop !== state) return;
+  const el = workPopEl();
+  if (!el) return;
+  for (const b of Array.from(el.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-work-series-cancel], [data-work-series-key]"))) b.disabled = locked;
+  const go = el.querySelector<HTMLButtonElement>("[data-work-series-go]");
+  if (go) go.disabled = goToo;
+}
+
+/** The listing as the server has it NOW (`?refresh=1` rescans), read without
+ *  applying it; `null` when it cannot be read. */
+async function freshListing(): Promise<WikiListing[] | null> {
+  try {
+    const res = await fetch(withWiki("/api/wiki/pages?refresh=1"));
+    if (!res.ok) return null;
+    const data = (await res.json()) as { pages?: unknown };
+    return Array.isArray(data.pages) ? (data.pages as WikiListing[]) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Save as series, confirmed (D14): every page's CAS base first, then one
+ * Save as series, confirmed (D14): every page's CAS base first, then the plan
+ * re-checked against a listing read after them (`recheckSaveAsSeries`: a page
+ * another writer put into a series since the click is left alone), then one
  * write per page through the series editor's loop, stopping at the first
  * failure. Either ending refreshes the listing, so the group forms from the
  * series on disk rather than from local state; a failure reports `k of N
- * written` with the pages left, and written pages stay written. After a
- * landed write the old group's open state moves onto the fold key of the
- * group that now holds its anchor thread.
+ * written` with the pages left, and written pages stay written. While the
+ * write runs the popover cannot be dismissed, so the report has a place to
+ * land. After a landed write the old group's open state moves onto the fold
+ * key of the group that now holds its anchor thread.
  */
 async function runSaveAsSeries(): Promise<void> {
-  const st = workPop?.series;
-  if (!workPop || !st || st.busy) return;
+  const state = workPop;
+  const st = state?.series;
+  if (!state || !st || st.busy || st.done) return;
   const card = st.card;
   const plan = card.series;
   if (!plan?.available) return;
@@ -5357,39 +5423,71 @@ async function runSaveAsSeries(): Promise<void> {
     const typed = workPopEl()?.querySelector<HTMLInputElement>("[data-work-series-key]")?.value ?? "";
     const checked = checkNewSeriesKey(plan, typed);
     if ("error" in checked) {
-      setWorkSeriesMsg(checked.error, true);
+      setWorkSeriesMsg(state, checked.error, true);
       return;
     }
     key = checked.key;
   }
   st.busy = true;
-  const writes = plan.writes.map((w) => ({ relPath: w.relPath, series: key }));
+  setWorkSeriesLocked(state, true);
+  // Set ⇒ the confirm view stays open with this line and Write stays off.
+  let report: { text: string; bad: boolean } | null = null;
+  const wasOpen = card.open;
+  const anchorKey = card.key;
   try {
-    setWorkSeriesMsg(`Reading ${writes.length} ${writes.length === 1 ? "page" : "pages"}…`, false);
-    const { bases, missing } = await loadSeriesBaseMap(
-      writes.map((w) => w.relPath),
-      (rel) => (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel) && currentPageHash ? Promise.resolve(currentPageHash) : seriesBaseHash(rel)),
+    const planned = plan.writes.map((w) => w.relPath);
+    setWorkSeriesMsg(state, `Reading ${planned.length} ${planned.length === 1 ? "page" : "pages"}…`, false);
+    const { bases, missing } = await loadSeriesBaseMap(planned, (rel) =>
+      currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel) && currentPageHash ? Promise.resolve(currentPageHash) : seriesBaseHash(rel),
     );
-    if (missing.length) {
-      setWorkSeriesMsg(`Could not read ${missing.join(", ")} — nothing written`, true);
+    const fresh = await freshListing();
+    if (!fresh) {
+      report = { text: "Could not re-read the wiki listing — nothing written", bad: true };
       return;
     }
-    setWorkSeriesMsg("Saving…", false);
+    const checked = recheckSaveAsSeries(plan, key, fresh);
+    if (checked.error) {
+      report = { text: checked.error, bad: true };
+      await refreshAfterSeriesWrite();
+      return;
+    }
+    const writes = checked.writes.map((w) => ({ relPath: w.relPath, series: key }));
+    const stillMissing = missing.filter((rel) => writes.some((w) => w.relPath === rel));
+    if (stillMissing.length) {
+      report = { text: `Could not read ${stillMissing.join(", ")} — nothing written`, bad: true };
+      return;
+    }
+    const skipped = checked.moved.length
+      ? `Skipped — joined another series since this menu opened: ${checked.moved.map((m) => `${m.title} (in «${m.series}»)`).join(", ")}`
+      : "";
+    setWorkSeriesMsg(state, "Saving…", false);
     const run = await runSeriesWrites(writes, bases, postSeriesWrite);
     for (const [rel, hash] of run.hashes) if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
-    const wasOpen = card.open;
-    const anchorKey = card.key;
-    await refreshAfterSeriesWrite();
+    const outcome = await refreshAfterSeriesWrite();
+    const notes: string[] = [];
     if (run.failure) {
       const at = writes.findIndex((w) => w.relPath === run.failure!.write.relPath);
       const left = writes.slice(at).map((w) => w.relPath);
-      setWorkSeriesMsg(`${run.written} of ${run.total} written — stopped at ${run.failure.write.relPath}: ${run.failure.error}. Not written: ${left.join(", ")}`, true);
+      notes.push(`${run.written} of ${run.total} written — stopped at ${run.failure.write.relPath}: ${run.failure.error}. Not written: ${left.join(", ")}`);
+    }
+    if (skipped) notes.push(skipped);
+    if (run.cleared) notes.push(`A page was the head of "${run.cleared}" — that series has no label now`);
+    if (run.written && outcome !== "apply") notes.push("Saved — reload to see the updated list");
+    if (notes.length) {
+      report = { text: notes.join(" · "), bad: !!run.failure || !!run.cleared };
       return;
     }
-    closeWorkPop(false);
+    st.busy = false;
+    if (workPop === state) closeWorkPop(false);
     carryGroupFold(anchorKey, wasOpen);
   } finally {
     st.busy = false;
+    if (report) {
+      // The plan this view shows is spent: Write stays off until it reopens.
+      st.done = true;
+      setWorkSeriesLocked(state, false, true);
+      setWorkSeriesMsg(state, report.text, report.bad);
+    }
   }
 }
 
@@ -5409,6 +5507,7 @@ function carryGroupFold(anchorKey: string, wasOpen: boolean): void {
 /** Open a card's ⋯: a thread card's boundary item, or a group's Save as series. */
 function openWorkCardMenu(btn: HTMLElement): void {
   const key = btn.getAttribute("data-work-card-menu") ?? "";
+  if (workPopBusy()) return;
   if (workPop?.key === `card:${key}`) {
     closeWorkPop();
     return;
@@ -5423,6 +5522,7 @@ function openWorkCardMenu(btn: HTMLElement): void {
 /** Open a focus row's ⋯ where no series menu applies: Make own thread only. */
 function openThreadRowMenu(btn: HTMLElement): void {
   const rel = btn.getAttribute("data-thread-row-menu") ?? "";
+  if (workPopBusy()) return;
   if (workPop?.key === `row:${rel}`) {
     closeWorkPop();
     return;
@@ -5459,6 +5559,7 @@ document.addEventListener("click", (e) => {
     }
     return;
   }
+  // Refused while a write runs (`closeWorkPop`): its report lands here.
   if (el && !target.closest("[data-work-card-menu], [data-thread-row-menu]")) closeWorkPop(false);
 });
 document.addEventListener("keydown", (e) => {
@@ -5470,14 +5571,11 @@ window.addEventListener(
     const el = workPopEl();
     const t = e.target as Node | null;
     if (!el || (t && (t === el || el.contains(t)))) return;
-    if (workPop?.series?.busy) return;
     closeWorkPop(false);
   },
   true,
 );
-window.addEventListener("resize", () => {
-  if (!workPop?.series?.busy) closeWorkPop(false);
-});
+window.addEventListener("resize", () => closeWorkPop(false));
 
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;

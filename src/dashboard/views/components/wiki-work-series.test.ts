@@ -4,7 +4,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { checkNewSeriesKey, saveAsSeriesPlan } from "./wiki-work-series.ts";
+import { checkNewSeriesKey, recheckSaveAsSeries, saveAsSeriesPlan } from "./wiki-work-series.ts";
+import { buildWorkEvidence } from "../../../wiki/work-evidence.ts";
+import type { WikiPageMeta } from "../../../wiki/store.ts";
 import { loadSeriesBaseMap, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupChild } from "./wiki-work-groups.ts";
@@ -87,6 +89,96 @@ describe("saveAsSeriesPlan", () => {
     expect(p.children[1]!.skipped.map((s) => [s.relPath, s.why])).toEqual([["plans/gone.md", "not-counted"]]);
     const other = plan([child("plans/a.md", ["plans/a.md"]), child("plans/b.md", ["plans/b.md"])], [page("plans/a.md", { series: "alpha" }), page("plans/b.md")]);
     expect(other.available).toBe(true);
+  });
+});
+
+describe("an .html-twin child: the plan and the rail's membership agree", () => {
+  test("after the plan's writes land on the parent, the evidence counts the twin focus page in the series, so the plan reads it as joined", () => {
+    const before = [
+      page("plans/a.md", { plan_status: "active", status_date: "2026-10-14" }),
+      page("plans/a.html", { parent: "plans/a.md", pairedBy: "stem" }),
+      page("plans/b.md", { plan_status: "active", status_date: "2026-10-10" }),
+    ];
+    const kids = [child("plans/a.html", ["plans/a.html"]), child("plans/b.md", ["plans/b.md"])];
+    const p = plan(kids, before);
+    expect(p).toMatchObject({ available: true, mode: "coin", key: "a" });
+    expect(p.writes.map((w) => w.relPath)).toEqual(["plans/a.md", "plans/b.md"]);
+    // The writes land: series: on both markdown pages, none on the twin.
+    const after = before.map((x) => (x.relPath.endsWith(".md") ? { ...x, series: p.key } : x));
+    const e = buildWorkEvidence({
+      threads: kids.map((k) => k.unit.thread),
+      candidates: 2,
+      contributions: [],
+      ledgerTruncated: false,
+      pages: after as unknown as WikiPageMeta[],
+    });
+    // Every child's focus page is in the series the plan joined.
+    expect(e.relations.series).toEqual({ "plans/a.html": "a", "plans/b.md": "a" });
+    const again = plan(kids, after);
+    expect(again.children.map((c) => c.joined.length)).toEqual([1, 1]);
+  });
+});
+
+describe("recheckSaveAsSeries: the plan against a listing read after the bases", () => {
+  const two = () => [
+    page("plans/a.md", { plan_status: "active", status_date: "2026-10-14" }),
+    page("plans/b.md", { plan_status: "active", status_date: "2026-10-10" }),
+    page("plans/b2.md", { plan_status: "active", status_date: "2026-10-09" }),
+    page("notes/s1.md", { series: "other" }),
+  ];
+  const kids = [child("plans/a.md", ["plans/a.md"]), child("plans/b.md", ["plans/b.md", "plans/b2.md"])];
+  test("nothing moved: every planned write stays", () => {
+    const p = plan(kids, two());
+    const r = recheckSaveAsSeries(p, p.key, two());
+    expect(r.error).toBeUndefined();
+    expect(r.writes.map((w) => w.relPath)).toEqual(["plans/a.md", "plans/b.md", "plans/b2.md"]);
+    expect(r.moved).toEqual([]);
+  });
+  test("a page put into another series since the menu opened is skipped and named; its child still has a page, so the rest is written", () => {
+    const p = plan(kids, two());
+    const fresh = two().map((x) => (x.relPath === "plans/b.md" ? { ...x, series: "other", seriesLabel: "Other work" } : x));
+    const r = recheckSaveAsSeries(p, p.key, fresh);
+    expect(r.error).toBeUndefined();
+    expect(r.writes.map((w) => w.relPath)).toEqual(["plans/a.md", "plans/b2.md"]);
+    expect(r.moved).toEqual([{ relPath: "plans/b.md", title: "T plans/b.md", series: "Other work" }]);
+  });
+  test("a child left with no page writes nothing at all (a half series would name no group)", () => {
+    const k1 = [child("plans/a.md", ["plans/a.md"]), child("plans/b.md", ["plans/b.md"])];
+    const p = plan(k1, two());
+    const fresh = two().map((x) => (x.relPath === "plans/b.md" ? { ...x, series: "other", seriesLabel: "Other work" } : x));
+    const r = recheckSaveAsSeries(p, p.key, fresh);
+    expect(r.writes).toEqual([]);
+    expect(r.error).toBe("Nothing written — joined another series since this menu opened: T plans/b.md (in «Other work»)");
+  });
+  test("a page that reached the planned key itself since is already in: not rewritten, still covers its child", () => {
+    const p = plan(kids, two());
+    const fresh = two().map((x) => (x.relPath === "plans/b.md" ? { ...x, series: p.key } : x));
+    const r = recheckSaveAsSeries(p, p.key, fresh);
+    expect(r.error).toBeUndefined();
+    expect(r.writes.map((w) => w.relPath)).toEqual(["plans/a.md", "plans/b2.md"]);
+  });
+  test("join: a child covered by its already-joined page keeps the write going; that page leaving the series since leaves it uncovered", () => {
+    const base = () => two().map((x) => (x.relPath === "plans/a.md" ? { ...x, series: "alpha", seriesLabel: "Alpha" } : x));
+    const p = plan(kids, base());
+    expect(p).toMatchObject({ mode: "join", key: "alpha" });
+    const moved = base().map((x) => (x.relPath === "plans/b.md" ? { ...x, series: "other" } : x));
+    const r = recheckSaveAsSeries(p, p.key, moved);
+    expect(r.error).toBeUndefined();
+    expect(r.writes.map((w) => w.relPath)).toEqual(["plans/b2.md"]);
+    const left = moved.map((x) => (x.relPath === "plans/a.md" ? { ...x, series: "other" } : x));
+    expect(recheckSaveAsSeries(p, p.key, left).error).toMatch(/^Nothing written/);
+  });
+  test("a new key that became a series elsewhere since the menu opened is refused, nothing written", () => {
+    const p = plan(kids, two());
+    expect(p.mode).toBe("coin");
+    const fresh = [...two(), page("notes/late.md", { series: "Fresh" })];
+    const r = recheckSaveAsSeries(p, "fresh", fresh);
+    expect(r.writes).toEqual([]);
+    expect(r.error).toBe('"fresh" became a series here since this menu opened — nothing written; pick another key');
+    // A joined series' own members are no collision.
+    const j = plan(kids, [...two(), page("plans/x.md", { series: "alpha" })].map((x) => (x.relPath === "plans/a.md" ? { ...x, series: "alpha" } : x)));
+    expect(j.mode).toBe("join");
+    expect(recheckSaveAsSeries(j, j.key, [...two(), page("plans/x.md", { series: "alpha" })].map((x) => (x.relPath === "plans/a.md" ? { ...x, series: "alpha" } : x))).error).toBeUndefined();
   });
 });
 
