@@ -54,6 +54,13 @@
  * counts) and the `related:` census over every page. The sections come
  * from `railInputFor` + `buildRail`, never a re-assembly (D20).
  *
+ * GROUPS (plan `muninn-wiki-work-thread-grouping`). Last, the work-thread
+ * grouping model's cards over the full listing, before facets and the
+ * five-card cap: `--group-stop <sessions|threads|related|areas>` (default
+ * `related`) and `--group-evidence <series,related,issue|none>` (default all
+ * three, D1). Then the matrix the plan measured: cards · threads in the
+ * largest card, per stop and evidence set.
+ *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
  * written anywhere but the temp clone, which is removed on exit.
  */
@@ -90,6 +97,8 @@ import {
 } from "../src/dashboard/views/components/wiki-filter.ts";
 import { buildRail, type RailInput } from "../src/dashboard/views/components/wiki-recents.ts";
 import { railGhostNote, threadMetaLine } from "../src/dashboard/views/components/wiki-thread-view.ts";
+import { groupWorkThreads, type WorkWitness } from "../src/dashboard/views/components/wiki-work-groups.ts";
+import { WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupStop } from "../src/dashboard/views/components/wiki-work-group-prefs.ts";
 
 /** A failure the script explains in one stderr line instead of a stack. */
 class ReplayError extends Error {}
@@ -335,6 +344,72 @@ function printRelatedCensus(index: WikiIndex): void {
   console.log(`  owns: ${index.pages.filter((p) => p.owns).length} pages own ${new Set(index.pages.flatMap((p) => p.owns ?? [])).size} keys`);
 }
 
+/** The `--group-stop` and `--group-evidence` flags (D1 defaults). */
+function groupFlags(): { stop: WorkGroupStop; toggles: WorkGroupEvidenceToggles } {
+  const stop = (arg("group-stop") ?? "related") as WorkGroupStop;
+  if (!WORK_GROUP_STOPS.includes(stop)) throw new ReplayError(`--group-stop must be one of ${WORK_GROUP_STOPS.join(", ")}`);
+  const raw = arg("group-evidence") ?? "series,related,issue";
+  const kinds = raw === "none" ? [] : raw.split(",").map((k) => k.trim());
+  for (const k of kinds) if (!["series", "related", "issue"].includes(k)) throw new ReplayError(`--group-evidence: unknown kind ${k}`);
+  return { stop, toggles: { series: kinds.includes("series"), related: kinds.includes("related"), issue: kinds.includes("issue") } };
+}
+
+function witnessLine(w: WorkWitness): string {
+  if (w.kind === "series") return `series ${w.label}`;
+  if (w.kind === "project") return `project ${w.key}`;
+  if (w.kind === "related") return `related ${w.from} → ${w.to}`;
+  return `issue ${w.key}: owner ${w.owner} ← ${w.referrer}`;
+}
+
+/** The grouping model's cards at the chosen stop, then the measured matrix. */
+function printGroups(index: WikiIndex, listing: WikiListing[], at: number): void {
+  const { stop, toggles } = groupFlags();
+  const run = (s: WorkGroupStop, t: WorkGroupEvidenceToggles) =>
+    groupWorkThreads({ work: index.work ?? null, allPages: listing, now: at, stop: s, toggles: t });
+  const g = run(stop, toggles);
+  const on = (Object.keys(toggles) as (keyof WorkGroupEvidenceToggles)[]).filter((k) => toggles[k]);
+  console.log(`\nWork-thread groups (stop ${g.stop}${g.stop !== g.requested ? `, asked ${g.requested}` : ""}; evidence ${on.join("+") || "none"}):`);
+  for (const [k, a] of Object.entries(g.availability)) if (!a.available) console.log(`  ${k} unavailable: ${a.reasons.join(", ")}`);
+  if (g.stop === "sessions") {
+    g.sessions.forEach((c, i) => {
+      console.log(`  ${i + 1}. session ${c.ref} «${c.title}» last ${new Date(c.last).toISOString().slice(0, 16)} (thread ${c.threadKey})`);
+      for (const p of c.rows) console.log(`       ${p.relPath}`);
+      if (c.alsoIn.length) console.log(`       also in: ${c.alsoIn.map((p) => p.relPath).join(" · ")}`);
+    });
+    console.log(`  ${g.sessions.length} session cards`);
+    return;
+  }
+  const threads = g.groups.reduce((n, x) => n + x.children.length, 0);
+  g.groups.forEach((x, i) => {
+    const focus = x.children.reduce((n, c) => n + c.owned.length, 0);
+    console.log(`  ${i + 1}. [${x.label}] ${x.name}  — ${x.children.length} threads, ${focus} focus pages  fold=${x.foldKey}`);
+    for (const c of x.children) {
+      const why = c.joinedBy.length ? `  via ${c.joinedBy.join("+")}` : "";
+      const also = c.also.length ? `  also ${c.also.map((a) => a.label).join(", ")}` : "";
+      console.log(`       - ${c.name} [${c.score.toFixed(2)}] (${c.owned.length} pages)${why}${also}`);
+    }
+    if (x.kind === "group") for (const w of x.witnesses) console.log(`         · ${witnessLine(w)}`);
+  });
+  console.log(`  ${g.groups.length} cards hold ${threads}/${index.work?.threads.length ?? 0} threads`);
+
+  const all = { series: true, related: true, issue: true };
+  const none = { series: false, related: false, issue: false };
+  const matrix: [string, WorkGroupStop, WorkGroupEvidenceToggles][] = [
+    ["Threads", "threads", all],
+    ["Related · related link", "related", { ...none, related: true }],
+    ["Related · link + owned issue", "related", { ...none, related: true, issue: true }],
+    ["Related · link + issue + series (D1)", "related", all],
+    ["Related · no evidence", "related", none],
+    ["Areas · D1 + project", "areas", all],
+  ];
+  console.log(`\nGrouping matrix (cards · threads in the largest card, before facets and the cap):`);
+  for (const [label, s, t] of matrix) {
+    const r = run(s, t);
+    const largest = Math.max(0, ...r.groups.map((x) => x.children.length));
+    console.log(`  ${label.padEnd(38)} ${r.groups.length} · ${largest}${r.stop !== s ? ` (drawn as ${r.stop})` : ""}`);
+  }
+}
+
 /** The frozen ledger answers, or null when the flags are absent. */
 async function frozenAnswers(sinceMs: number): Promise<{ sessions: unknown; pre: unknown; summary: unknown | null } | null> {
   const sessionsPath = arg("sessions-json");
@@ -470,6 +545,7 @@ async function main(): Promise<void> {
     printWorkedOn(rail.input, at);
     printEvidence(index, index.work?.evidence);
     printRelatedCensus(index);
+    printGroups(index, listing, at);
   } finally {
     await cleanup();
   }
