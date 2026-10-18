@@ -438,3 +438,171 @@ describe("Save as series on a group card (D14)", () => {
     expect(series.series).toBeUndefined();
   });
 });
+
+/**
+ * A small world for the fix-round cases: each thread one session, a focus row
+ * per page `ago` hours back in the order given (the first page the thread's
+ * key, its earliest event), plus the `related:` links and series named.
+ */
+function miniWorld(threads: { pages: string[]; edits: number[] }[], o: { related?: [string, string][]; series?: Record<string, string>; hubs?: string[] } = {}) {
+  const pages: WikiListing[] = [];
+  const ts: WorkThread[] = [];
+  const rows: WorkContribution[] = [];
+  threads.forEach((t, i) => {
+    t.pages.forEach((p, j) => {
+      const pg = page(p, { edits: t.edits[j]!, focusAgo: 1 + j, ...(o.series?.[p] ? { series: o.series[p] } : {}) });
+      pages.push(o.hubs?.includes(p) ? { ...pg, backlinkCount: 30 } : pg);
+      rows.push(row(`m${i}`, p, t.pages[0]!, 20 - j));
+    });
+    ts.push({ key: t.pages[0]!, pages: [...t.pages].sort(), touched: [], sessions: [sess(`m${i}`, 1)] });
+  });
+  const work: IndexWork = {
+    asOfMs: NOW - H,
+    sinceMs: NOW - 8 * DAY,
+    threads: ts,
+    evidence: {
+      version: WORK_EVIDENCE_VERSION,
+      threads: { candidates: ts.length, shipped: ts.length },
+      relations: { complete: true, reasons: [], series: o.series ?? {}, projects: {}, related: o.related ?? [], issues: [], ambiguousIssues: [], relatedSkipped: { skipped: 0, ambiguous: 0 } },
+      contributions: { complete: true, reasons: [], cut: [], rows },
+    },
+  };
+  return { pages, work };
+}
+
+describe("D20 fix round 2: fold keys, the pin and + N more across broken base cards", () => {
+  const groupKeys = (cards: readonly RailWorkCard[]) => cards.filter(isRailGroupCard).map((c) => c.foldKey);
+
+  test("two base cards each break into two groups named by one series: the series key goes to the first, the second takes its anchor key (Related, Areas)", () => {
+    // Base card A: xa.md linked to a1..a4 by related:, a1↔a2 and a3↔a4 too;
+    // a3, a4 in series S. Base card B the same with b's. Series joining off.
+    // Keep separate on xa.md and xb.md: each card's rest regroups into
+    // (1 2) and (3 4), and (3 4) is named by S in both.
+    const side = (x: string, top: number) => [
+      { pages: [`${x}/x${x}.md`], edits: [top] },
+      ...[1, 2, 3, 4].map((n) => ({ pages: [`${x}/${x}${n}.md`], edits: [top - n] })),
+    ];
+    const links = (x: string): [string, string][] => [
+      ...[1, 2, 3, 4].map((n): [string, string] => [`${x}/x${x}.md`, `${x}/${x}${n}.md`]),
+      [`${x}/${x}1.md`, `${x}/${x}2.md`],
+      [`${x}/${x}3.md`, `${x}/${x}4.md`],
+    ];
+    const fx = miniWorld([...side("a", 90), ...side("b", 60)], {
+      related: [...links("a"), ...links("b")],
+      series: { "a/a3.md": "S", "a/a4.md": "S", "b/b3.md": "S", "b/b4.md": "S" },
+    });
+    for (const stop of ["related", "areas"] as const) {
+      const draw = (keptApart: string[]) => openWorkCards(fx.work, fx.pages, INERT, [], null, NOW, fx.pages, { stop, evidence: { series: false, related: true, issue: true }, keptApart }).cards;
+      expect([stop, groupKeys(draw([]))]).toEqual([stop, ["group:anchor:a/xa.md", "group:anchor:b/xb.md"]]);
+      const keys = groupKeys(draw(["a/xa.md", "b/xb.md"]));
+      expect([stop, keys.filter((k, j) => keys.indexOf(k) !== j)]).toEqual([stop, []]);
+      // The first broken card's heir keeps its base key (finding 3's rule).
+      expect([stop, keys]).toEqual([stop, ["group:anchor:a/xa.md", "group:series:s", "group:anchor:b/xb.md", "group:anchor:b/b3.md"]]);
+    }
+  });
+
+  test("S1 on a hub: Make own thread on a pinned hub page pins its own card, first in its base card's place (Threads, Related, Areas)", () => {
+    // Reviewer repro, fuzz seed 605051321: the pin is h.md, a hub inside k.md's
+    // thread, so no base card holds it (a hub pin needs a thread of hubs).
+    // Split off, h.md is a thread of hubs only: it holds the pin.
+    const fx = miniWorld(
+      [
+        { pages: ["notes/busy.md"], edits: [500] },
+        { pages: ["plans/k.md", "plans/h.md"], edits: [50, 40] },
+      ],
+      { hubs: ["plans/h.md"] },
+    );
+    const H_: WorkGroupSplit = { id: "sh", page: "plans/h.md" };
+    for (const stop of ["threads", "related", "areas"] as const) {
+      const draw = (splits: WorkGroupSplit[]) => openWorkCards(fx.work, fx.pages, INERT, [], "plans/h.md", NOW, fx.pages, { stop, evidence: ALL, splits }).cards;
+      expect([stop, flat(draw([])).filter((c) => c.pinned).map((c) => c.key)]).toEqual([stop, []]);
+      const after = draw([H_]);
+      expect(threadPinAnchor(workBoundariesOf(fx.work, fx.pages, { splits: [H_], keptApart: [] }).derived, fx.pages, "plans/h.md")).toBe("plans/h.md");
+      expect([stop, flat(after).filter((c) => c.pinned).map((c) => c.key)]).toEqual([stop, ["plans/h.md"]]);
+      // The base order stays boundary-free (busy first); in k.md's place the pinned piece leads.
+      expect([stop, topKeys(after)]).toEqual([stop, ["notes/busy.md", "plans/h.md", "plans/k.md"]]);
+    }
+  });
+
+  test("an expanded group keeps + N more through Make own thread on its anchor's key page (fuzz seed 220300156, Related, Areas)", () => {
+    // T (k.md key, p.md, q.md) anchors a related group of four more threads
+    // linked from p.md. Splitting k.md renames the remainder (D15); the group
+    // keeps its fold key, so `+ N more` stays pressed.
+    const fx = miniWorld(
+      [
+        { pages: ["plans/k.md", "plans/p.md", "plans/q.md"], edits: [90, 80, 70] },
+        { pages: ["c/c1.md"], edits: [9] },
+        { pages: ["c/c2.md"], edits: [8] },
+        { pages: ["c/c3.md"], edits: [7] },
+        { pages: ["c/c4.md"], edits: [6] },
+      ],
+      { related: [["plans/p.md", "c/c1.md"], ["plans/p.md", "c/c2.md"], ["plans/p.md", "c/c3.md"], ["plans/p.md", "c/c4.md"]] },
+    );
+    for (const stop of ["related", "areas"] as const) {
+      const draw = (splits: WorkGroupSplit[], moreOpen: string[]) => openWorkCards(fx.work, fx.pages, INERT, [], null, NOW, fx.pages, { stop, evidence: ALL, splits, moreOpen }).cards;
+      const before = draw([], ["group:anchor:plans/k.md"]);
+      const g = before.find(isRailGroupCard) as RailGroupCard;
+      expect([stop, g.foldKey, g.hidden, g.children.length]).toEqual([stop, "group:anchor:plans/k.md", 0, 5]);
+      const after = draw([K_SPLIT], ["group:anchor:plans/k.md"]);
+      const ga = after.find(isRailGroupCard) as RailGroupCard;
+      expect([stop, ga.foldKey, ga.hidden]).toEqual([stop, "group:anchor:plans/k.md", 0]);
+      expect([stop, drawnPages(after)]).toEqual([stop, drawnPages(before)]);
+    }
+  });
+
+  test("Keep separate on an expanded group's anchor that leaves two groups: both keep + N more, the second through its base card's key (Related, Areas)", () => {
+    // x.md linked to m1..m8; m1 m3 m5 m7 and m2 m4 m6 m8 linked among
+    // themselves. Kept apart, x.md leaves two groups of four children.
+    const ms = [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `m/m${n}.md`);
+    const related: [string, string][] = ms.map((m): [string, string] => ["m/x.md", m]);
+    ms.forEach((m, j) => {
+      for (let k = j + 2; k < ms.length; k += 2) related.push([m, ms[k]!]);
+    });
+    const fx = miniWorld([{ pages: ["m/x.md"], edits: [90] }, ...ms.map((m, j) => ({ pages: [m], edits: [80 - j] }))], { related });
+    for (const stop of ["related", "areas"] as const) {
+      const draw = (keptApart: string[]) => openWorkCards(fx.work, fx.pages, INERT, [], null, NOW, fx.pages, { stop, evidence: ALL, keptApart, moreOpen: ["group:anchor:m/x.md"] }).cards;
+      const before = draw([]);
+      expect([stop, before.filter(isRailGroupCard).map((c) => [c.foldKey, c.hidden])]).toEqual([stop, [["group:anchor:m/x.md", 0]]]);
+      const after = draw(["m/x.md"]);
+      expect([stop, after.filter(isRailGroupCard).map((c) => [c.foldKey, c.children.length, c.hidden])]).toEqual([
+        stop,
+        [
+          ["group:anchor:m/x.md", 4, 0],
+          ["group:anchor:m/m2.md", 4, 0],
+        ],
+      ]);
+      expect([stop, drawnPages(after)]).toEqual([stop, drawnPages(before)]);
+      // A pin in the second group draws it first; the base key stays where it formed.
+      const pinned = openWorkCards(fx.work, fx.pages, INERT, [], "m/m4.md", NOW, fx.pages, { stop, evidence: ALL, keptApart: ["m/x.md"] }).cards;
+      expect([stop, pinned.filter(isRailGroupCard).map((c) => [c.foldKey, c.pinned])]).toEqual([
+        stop,
+        [
+          ["group:anchor:m/m2.md", true],
+          ["group:anchor:m/x.md", false],
+        ],
+      ]);
+    }
+  });
+
+  test("the base key goes to the group holding the base anchor's remainder, not to a pinned group drawn ahead of it (Related, Areas)", () => {
+    // Thread X (x.md key, y.md): x.md linked to m2 m4 m6, y.md to m1 m3 m5,
+    // and m2↔m4↔m6 among themselves. Make own thread on x.md: the remainder
+    // (y.md) keeps m1 m3 m5; m2 m4 m6 form their own group, pinned on m4.md.
+    const ms = [1, 2, 3, 4, 5, 6].map((n) => `m/m${n}.md`);
+    const related: [string, string][] = ms.map((m, j): [string, string] => [j % 2 ? "m/x.md" : "m/y.md", m]);
+    related.push(["m/m2.md", "m/m4.md"], ["m/m2.md", "m/m6.md"]);
+    const fx = miniWorld([{ pages: ["m/x.md", "m/y.md"], edits: [90, 85] }, ...ms.map((m, j) => ({ pages: [m], edits: [80 - j] }))], { related });
+    for (const stop of ["related", "areas"] as const) {
+      const after = openWorkCards(fx.work, fx.pages, INERT, [], "m/m4.md", NOW, fx.pages, { stop, evidence: ALL, splits: [{ id: "sx", page: "m/x.md" }] }).cards;
+      const groups = after.filter(isRailGroupCard).map((c) => [c.foldKey, c.pinned, c.children.map((t) => t.key).join(" ")]);
+      expect([stop, groups]).toEqual([
+        stop,
+        [
+          ["group:anchor:m/m2.md", true, "m/m2.md m/m4.md m/m6.md"],
+          ["group:anchor:m/x.md", false, "m/y.md m/m1.md m/m3.md"],
+        ],
+      ]);
+    }
+  });
+});
+const K_SPLIT: WorkGroupSplit = { id: "sk2", page: "plans/k.md" };

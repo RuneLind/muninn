@@ -6,8 +6,7 @@
  *
  *  (i)   The cards break down into BASE cards — the cards the stop draws with
  *        no manual boundary — exactly the boundary-free top five, in order,
- *        each base card's pieces contiguous and holding exactly its pages; a
- *        drawn pinned piece is the first card.
+ *        each base card's pieces contiguous and holding exactly its pages.
  *  (ii)  Any one boundary click on what is drawn (Make own thread or Return on
  *        a focus row, Keep separate or Allow grouping on a card) leaves the
  *        set of focus pages the section draws unchanged.
@@ -15,16 +14,24 @@
  *  (iv)  With no boundaries, the cards are origin/main's (97faaeec) byte for
  *        byte, PR 4's boundary fields aside: `wiki-rail-work-cap.fixture.json`
  *        holds that build's digests (`scripts/wiki-work-cap-freeze.ts`).
+ *  (v)   No fold key is drawn twice.
+ *  (vi)  The pin follows its page: the drawn piece holding the pinned page's
+ *        thread after the boundaries is the one pinned piece, first in its
+ *        block, and its block is first when its base card held the pin (S1).
+ *  (vii) With `+ N more` pressed on the groups drawn (and no other), one
+ *        click hides no row an expanded group showed.
  *
- * The 5,100-case run reads the cap's two placement functions, every click on
- * every case; a 900-case run reads `openWorkCards` itself, one click a case.
+ * The 5,100-case run reads the cap's two placement functions, up to four
+ * clicks a case, (i), (iii), (v) and (vi) before and after each; a 900-case
+ * run reads `openWorkCards` itself, one click a case.
  */
 
 import { describe, expect, test } from "bun:test";
-import { groupCardPieces, openThreadCards, openWorkCards, threadCardPieces, workBoundariesOf } from "./wiki-rail-input.ts";
+import { groupCardPieces, openThreadCards, openWorkCards, rankThreadCards, threadCardPieces, workBoundariesOf } from "./wiki-rail-input.ts";
 import { isRailGroupCard, normalizeFoldKey, THREAD_CARDS_MAX, type RailThreadCard, type RailWorkCard } from "./wiki-recents.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
 import { groupWorkThreads } from "./wiki-work-groups.ts";
+import { threadHoldsPin, usableThreads } from "./wiki-thread-core.ts";
 import type { WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { CAP_FIXTURE_SCENARIOS, CAP_FIXTURE_START, CAP_NOW, CAP_STOPS, CapRandom, capCardsDigest, nextCapScenario, type CapScenario } from "./wiki-rail-work-cap-gen.ts";
 import fixture from "./wiki-rail-work-cap.fixture.json";
@@ -38,6 +45,8 @@ interface Bounds {
 interface Piece {
   pages: string[];
   pinned: boolean;
+  /** Every fold key it draws: a group's, then each of its thread cards'. */
+  keys: string[];
   /** Its thread cards: key, rows, and the card ⋯ `openWorkCards` gives it. */
   threads: { key: string; rows: string[]; menu?: { keep: string } | { allow: string[] } }[];
 }
@@ -61,7 +70,7 @@ function place(s: CapScenario, stop: Stop, b: Bounds): Piece[][] {
     return threadCardPieces(work.threads, pages, s.filters, s.pin, CAP_NOW, pages, work.asOfMs, THREAD_CARDS_MAX, bounds).map((block) =>
       block.map((c) => {
         const rows = c.focus.map((p) => p.relPath);
-        return { pages: rows, pinned: c.pinned, threads: [{ key: c.key, rows }] };
+        return { pages: rows, pinned: c.pinned, keys: [c.foldKey], threads: [{ key: c.key, rows }] };
       }),
     );
   }
@@ -78,7 +87,8 @@ function place(s: CapScenario, stop: Stop, b: Bounds): Piece[][] {
         // `openWorkCards`' card ⋯ rule (`decorate`): Return on a split, Allow on a kept-apart thread, else Keep.
         return { key: u.key, rows, ...(u.split ? {} : { menu: u.keptApart ? { allow: u.keptApart } : { keep: cv.child.pinAnchor } }) };
       });
-      return { pages: threads.flatMap((t) => t.rows), pinned: v.children.some((cv) => cv.child.pinned), threads };
+      const keys = v.children.map((cv) => cv.child.foldKey);
+      return { pages: threads.flatMap((t) => t.rows), pinned: v.children.some((cv) => cv.child.pinned), keys: v.group.kind === "group" ? [v.group.foldKey, ...keys] : keys, threads };
     }),
   );
 }
@@ -99,8 +109,16 @@ function clicksOn(s: CapScenario, bounds: WorkBoundaries, threads: Piece["thread
   return out;
 }
 
-/** (i) and (iii) over drawn pieces against the base cards; failures as text. */
-function baseCardFailures(base: readonly string[][], drawn: readonly Piece[][], blocksOf: (pages: string[]) => number[]): string[] {
+/** The derived thread holding the pin after the boundaries (`threadHoldsPin`), or null. */
+function pinHolder(s: CapScenario, bounds: WorkBoundaries): string | null {
+  if (!s.pin) return null;
+  const byRel = new Map(s.world.pages.map((p) => [p.relPath, p] as const));
+  return usableThreads(bounds.derived).find((t) => threadHoldsPin(t, byRel, s.pin!))?.key ?? null;
+}
+
+/** (i), (iii), (v) and (vi) over drawn pieces against the base cards
+ *  (`basePinned`: each base card's pin flag); failures as text. */
+function baseCardFailures(base: readonly string[][], drawn: readonly Piece[][], blocksOf: (pages: string[]) => number[], basePinned: readonly boolean[], holder: string | null): string[] {
   const out: string[] = [];
   const pieces = drawn.flat();
   const pages = pieces.flatMap((p) => p.pages);
@@ -110,7 +128,18 @@ function baseCardFailures(base: readonly string[][], drawn: readonly Piece[][], 
   const contiguous = flatSeq.every((v, j) => v >= 0 && (j === 0 ? v === 0 : v === flatSeq[j - 1] || v === flatSeq[j - 1]! + 1)) && (base.length ? flatSeq.at(-1) === base.length - 1 : !flatSeq.length);
   if (!contiguous) out.push(`(i) the pieces are not the ${base.length} base cards in order: ${JSON.stringify(flatSeq)}`);
   if (sorted(pages).join() !== sorted(base.flat()).join()) out.push("(i) the pages drawn are not the base cards' pages");
-  if (pieces.findIndex((p) => p.pinned) > 0) out.push("(i) a drawn pinned piece is not the first card");
+  const keys = pieces.flatMap((p) => p.keys);
+  if (new Set(keys).size !== keys.length) out.push(`(v) a fold key drawn twice: ${keys.filter((k, j) => keys.indexOf(k) !== j).join(" ")}`);
+  const pinned = pieces.flatMap((p, j) => (p.pinned ? [j] : []));
+  const holding = pieces.findIndex((p) => p.threads.some((t) => t.key === holder));
+  if (pinned.length > 1) out.push("(vi) two pinned pieces");
+  if ((pinned[0] ?? -1) !== holding) out.push(`(vi) the pinned piece ${pinned[0] ?? "none"} is not the piece holding the pin ${holding}`);
+  if (contiguous && pinned.length === 1) {
+    const j = pinned[0]!;
+    const block = flatSeq[j]!;
+    if (j > 0 && flatSeq[j - 1] === block) out.push("(vi) the pinned piece is not first in its block");
+    if (basePinned[block] && j !== 0) out.push("(vi) the pinned base card's pinned piece is not the first card");
+  }
   return out;
 }
 
@@ -132,11 +161,15 @@ describe("D20: the five-card cap counts base cards", () => {
     const base = free.map((block) => block.flatMap((p) => p.pages));
     const b: Bounds = { splits: s.splits, keptApart: s.keptApart };
     const drawn = place(s, stop, b);
-    for (const f of baseCardFailures(base, drawn, baseIndex(base))) fail(f);
+    const basePinned = free.map((block) => block[0]!.pinned);
+    for (const f of baseCardFailures(base, drawn, baseIndex(base), basePinned, pinHolder(s, boundsOf(s, b)))) fail(f);
     const before = sorted(drawn.flat().flatMap((p) => p.pages)).join();
     for (const ck of pick(clicksOn(s, boundsOf(s, b), drawn.flat().flatMap((p) => p.threads), b))) {
       tally.clicks++;
-      const after = sorted(place(s, stop, ck.after).flat().flatMap((p) => p.pages)).join();
+      const placed = place(s, stop, ck.after);
+      // The state after the click is a state too: (i), (iii), (v) and (vi) hold there.
+      for (const f of baseCardFailures(base, placed, baseIndex(base), basePinned, pinHolder(s, boundsOf(s, ck.after)))) fail(`after ${ck.label}: ${f}`);
+      const after = sorted(placed.flat().flatMap((p) => p.pages)).join();
       if (after !== before) fail(`(ii) ${ck.label} changed the pages drawn${ck.page && !after.split(",").includes(ck.page) ? " and lost the clicked page" : ""}`);
     }
   }
@@ -202,11 +235,16 @@ describe("D20: the five-card cap counts base cards", () => {
             rows: t.focus.map((p) => p.relPath),
             ...(t.menu?.action === "keep" ? { menu: { keep: t.menu.anchor } } : t.menu?.action === "allow" ? { menu: { allow: t.menu.anchors } } : {}),
           }));
-          return { pages: threads.flatMap((t) => t.rows), pinned: c.pinned, threads };
+          const keys = ts.map((t) => t.foldKey);
+          // The pinned THREAD card: a group keeps its 📌 when a facet hides its
+          // pinned child (origin's rule, frozen by (iv)), so (vi) reads the child.
+          return { pages: threads.flatMap((t) => t.rows), pinned: ts.some((t) => t.pinned), keys: isRailGroupCard(c) ? [c.foldKey, ...keys] : keys, threads };
         };
-        const base = draw(NONE).map((c) => asPiece(c).pages);
+        const freeCards = draw(NONE);
+        const base = freeCards.map((c) => asPiece(c).pages);
         const drawn = draw(b).map(asPiece);
-        for (const f of baseCardFailures(base, [drawn], baseIndex(base))) if (failures.length < 8) failures.push(`seed ${s.seed} ${stop}: ${f}`);
+        for (const f of baseCardFailures(base, [drawn], baseIndex(base), freeCards.map((c) => asPiece(c).pinned), pinHolder(s, boundsOf(s, b))))
+          if (failures.length < 8) failures.push(`seed ${s.seed} ${stop}: ${f}`);
         const options = clicksOn(s, boundsOf(s, b), drawn.flatMap((p) => p.threads), b);
         if (!options.length) return;
         clicks++;
@@ -217,6 +255,87 @@ describe("D20: the five-card cap counts base cards", () => {
       });
     }
     expect(clicks).toBeGreaterThan(600);
+    expect(failures).toEqual([]);
+  }, 60_000);
+
+  test("(v) under name pressure: two stars of threads, each breaking into two groups, one named by a series both share — no fold key twice (Related)", () => {
+    // The generator's names rarely collide across two broken base cards, so
+    // each scenario's threads are rewired: the top two by rank anchor a star
+    // each (the rest alternate between them), each star's members form two
+    // cliques by `related:`, and the second clique of both is in series sx.
+    // Keep separate on both anchors breaks each star into its two cliques.
+    const r = new CapRandom(CAP_FIXTURE_START);
+    const failures: string[] = [];
+    let cases = 0;
+    let named = 0;
+    const toggles = { series: false, related: true, issue: true };
+    for (let i = 0; i < CAP_FIXTURE_SCENARIOS; i++) {
+      const s = nextCapScenario(r);
+      const { pages, work: w0 } = s.world;
+      const order = rankThreadCards(w0.threads, pages, null, CAP_NOW, w0.asOfMs).map((x) => x.t.key);
+      if (order.length < 6) continue;
+      const [a, b, ...rest] = order;
+      const related: [string, string][] = [];
+      const series: Record<string, string> = {};
+      [a!, b!].forEach((anchor, side) => {
+        const mine = rest.filter((_, j) => j % 2 === side);
+        mine.forEach((m, j) => {
+          related.push([anchor, m]);
+          for (let k = j + 2; k < mine.length; k += 2) related.push([m, mine[k]!]);
+        });
+        for (const t of w0.threads) if (mine.indexOf(t.key) % 2 === 1) for (const p of t.pages) series[p] = "sx";
+      });
+      const work = { ...w0, evidence: { ...w0.evidence!, relations: { ...w0.evidence!.relations, related, series } } };
+      cases++;
+      const cards = openWorkCards(work, pages, s.filters, [], s.pin, CAP_NOW, pages, { stop: "related", evidence: toggles, keptApart: [a!, b!] }).cards;
+      const keys = cards.flatMap((c) => (isRailGroupCard(c) ? [c.foldKey, ...c.children.map((t) => t.foldKey)] : [c.foldKey]));
+      if (keys.includes("group:series:sx")) named++;
+      const twice = keys.filter((k, j) => keys.indexOf(k) !== j);
+      if (twice.length && failures.length < 8) failures.push(`seed ${s.seed}: ${twice.join(" ")}`);
+    }
+    expect(cases).toBeGreaterThan(800);
+    expect(named).toBeGreaterThan(150);
+    expect(failures).toEqual([]);
+  }, 60_000);
+
+  test("(vii) + N more pressed on the groups drawn: 500 scenarios at Related and Areas, one click of each kind offered, hide no row an expanded group showed", () => {
+    const r = new CapRandom(CAP_FIXTURE_START);
+    const failures: string[] = [];
+    let clicks = 0;
+    let broken = 0;
+    for (let i = 0; i < 500; i++) {
+      const s = nextCapScenario(r);
+      const { work, pages } = s.world;
+      const b: Bounds = { splits: s.splits, keptApart: s.keptApart };
+      const pick = new CapRandom(s.seed ^ 0x2545f491);
+      CAP_STOPS.forEach((stop, k) => {
+        if (stop === "threads") return;
+        const draw = (x: Bounds, moreOpen: string[]) => openWorkCards(work, pages, s.filters, [], s.pin, CAP_NOW, pages, { stop, evidence: s.evidence[k]!, ...x, moreOpen }).cards;
+        const shown = (cards: readonly RailWorkCard[], groupsOnly: boolean) =>
+          new Set(cards.flatMap((c) => (isRailGroupCard(c) ? c.children : groupsOnly ? [] : [c])).flatMap((t) => t.focus.map((p) => p.relPath)));
+        // The reader pressed `+ N more` on every group drawn, and on no other key.
+        const pressed = draw(b, []).filter(isRailGroupCard).map((c) => c.foldKey);
+        const before = draw(b, pressed);
+        const expanded = shown(before, true);
+        const options = clicksOn(s, boundsOf(s, b), before.flatMap((c) => (isRailGroupCard(c) ? c.children : [c])).map((t) => ({
+          key: t.key,
+          rows: t.focus.map((p) => p.relPath),
+          ...(t.menu?.action === "keep" ? { menu: { keep: t.menu.anchor } } : t.menu?.action === "allow" ? { menu: { allow: t.menu.anchors } } : {}),
+        })), b);
+        const kinds = new Map<string, Click>();
+        for (const c of [...options].sort(() => pick.next() - 0.5)) if (!kinds.has(c.label.split(" ")[0]!)) kinds.set(c.label.split(" ")[0]!, c);
+        for (const ck of kinds.values()) {
+          clicks++;
+          const after = draw(ck.after, pressed);
+          if (after.length > before.length) broken++;
+          const visible = shown(after, false);
+          const lost = [...expanded].filter((p) => !visible.has(p));
+          if (lost.length && failures.length < 8) failures.push(`seed ${s.seed} ${stop}: ${ck.label} hid ${lost.join(" ")}`);
+        }
+      });
+    }
+    expect(clicks).toBeGreaterThan(2000);
+    expect(broken).toBeGreaterThan(100);
     expect(failures).toEqual([]);
   }, 60_000);
 

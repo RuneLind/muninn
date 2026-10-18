@@ -51,6 +51,7 @@ import {
   workSessionCards,
   type WorkGroupChild,
   type WorkGroupChildView,
+  type WorkGroup,
   type WorkGroupView,
   type WorkGrouping,
   type WorkUnit,
@@ -190,8 +191,9 @@ type ThreadCardBody = Omit<RailThreadCard, "open" | "toggleKey">;
  * the first `cap` cards the server's threads draw with no manual boundary,
  * after the facets, the pinned one first — exactly today's cards. A base card
  * whose thread the reader's splits broke draws all of its pieces in its
- * place: the remainder and each split page, the piece holding the pin first,
- * then in the source's order. A piece owns only pages its base card owned,
+ * place: the remainder and each split page, the piece holding the pin first
+ * (and marked, even when its base card did not hold it), then in the
+ * source's order. A piece owns only pages its base card owned,
  * so a boundary click never adds a page to the section or removes one, and
  * the section holds at most the pieces of `cap` base cards. `cap` Infinity
  * is the Group menu's Threads count.
@@ -249,7 +251,9 @@ export function threadCardPieces(
       continue;
     }
     const ownable = new Set(owned.map((p) => normalizeRel(p.relPath)));
-    const pinPiece = pinned && pinKey ? parts.find((b) => threadHoldsPin(b.thread, byRel, pinKey)) : undefined;
+    // The piece holding the pin after the splits, whether or not its base card
+    // held it: a hub pin is held only by a thread of hubs (S1 on a hub).
+    const pinPiece = pinKey ? parts.find((b) => threadHoldsPin(b.thread, byRel, pinKey)) : undefined;
     const taken = new Set<string>();
     const cards: ThreadCardBody[] = [];
     for (const b of pinPiece ? [pinPiece, ...parts.filter((x) => x !== pinPiece)] : parts) {
@@ -498,7 +502,8 @@ export function openWorkCards(
     const g = gv.group;
     if (g.kind === "thread") return threadCard(gv.children[0]!, i === 0);
     const anchor = g.children[0]!;
-    const drawnAll = more.has(normalizeFoldKey(g.foldKey));
+    // A piece of a broken base group also reads the base card's `+ N more`.
+    const drawnAll = more.has(normalizeFoldKey(g.foldKey)) || (!!gv.baseFoldKey && more.has(normalizeFoldKey(gv.baseFoldKey)));
     const shownViews = gv.children.filter((cv, j) => drawnAll || j < GROUP_CHILDREN_SHOWN || cv.child.pinned);
     // The default-open child of the first card: the pinned one when the group
     // holds the pin (as the Threads stop opens the pinned thread), else the first.
@@ -562,11 +567,11 @@ export function openWorkCards(
  * first — after the pool and the facets, exactly today's cards. A base card
  * holding a unit the reader's boundaries changed (a split page, a remainder,
  * a kept-apart thread) is regrouped from its own units after the boundaries,
- * and draws every card that makes, in its place: the pinned one first, then
- * in rank order. Those cards own only the pages the base card owned and take
- * no fold key another base card holds, so a boundary click never adds a page
- * to the section or removes one, and the section holds at most the pieces of
- * `cap` base cards.
+ * and draws every card that makes, in its place: the pinned one first (marked
+ * even when the base card held no pin), then in rank order. Those cards own
+ * only the pages the base card owned and take no fold key another card of the
+ * section holds, so a boundary click never adds a page to the section or
+ * removes one, and the section holds at most the pieces of `cap` base cards.
  */
 export function groupCardPieces(
   base: WorkGrouping,
@@ -585,6 +590,9 @@ export function groupCardPieces(
   for (const u of boundaries.units) (unitsOf.get(u.rank.key) ?? unitsOf.set(u.rank.key, []).get(u.rank.key)!).push(u);
   const changed = new Set(boundaries.units.filter((u) => u.isolated || u.thread !== u.rank).map((u) => u.rank.key));
   if (!changed.size) return views.map((v) => [v]);
+  // Every fold key the section holds so far: the base cards', then each
+  // regrouped card's as it is drawn, so no two cards share one.
+  const taken = new Set(base.groups.map((g) => g.foldKey));
   return views.map((v) => {
     const sources = v.group.children.map((c) => c.unit.rank.key);
     if (!sources.some((k) => changed.has(k))) return [v];
@@ -594,13 +602,42 @@ export function groupCardPieces(
       now,
       stop: base.stop,
       toggles: base.toggles,
-      pin: v.group.pinned ? pin : null,
+      // Always: a piece can hold the pin its base card did not (S1 on a hub).
+      pin,
       units: sources.flatMap((k) => unitsOf.get(k) ?? []),
       ownable: new Set(v.group.children.flatMap((c) => c.owned.map((p) => normalizeRel(p.relPath)))),
-      foldKeysTaken: base.groups.filter((g) => g !== v.group).map((g) => g.foldKey),
+      foldKeysTaken: [...taken].filter((k) => k !== v.group.foldKey),
     });
-    return projectWorkGroups(local, pool, filters, now, Infinity);
+    const pieces = inheritFoldKey(v.group, projectWorkGroups(local, pool, filters, now, Infinity));
+    for (const piece of pieces) taken.add(piece.group.foldKey);
+    return pieces;
   });
+}
+
+/**
+ * A broken base GROUP's fold key stays on one of its pieces, so the reader's
+ * fold and `+ N more` survive a boundary click that renames its anchor (D15)
+ * or dissolves it: the piece that took the key itself, else the group piece
+ * holding the base anchor's source, else the first group piece in grouping
+ * order (pin-free, so a pin never moves the key). Every other piece of the
+ * block reads the base key's `+ N more` too (`baseFoldKey`).
+ */
+function inheritFoldKey(baseGroup: WorkGroup, pieces: WorkGroupView[]): WorkGroupView[] {
+  if (baseGroup.kind !== "group") return pieces;
+  const key = baseGroup.foldKey;
+  const groups = pieces.filter((p) => p.group.kind === "group");
+  const anchorSource = baseGroup.children[0]!.unit.rank.key;
+  // `orderWorkUnits`' order on the anchors: the order groups form in.
+  const formed = (a: WorkGroupView, b: WorkGroupView) => {
+    const x = a.group.children[0]!;
+    const y = b.group.children[0]!;
+    return y.score - x.score || x.unit.index - y.unit.index || x.unit.sub - y.unit.sub || (x.key < y.key ? -1 : x.key > y.key ? 1 : 0);
+  };
+  const heir =
+    groups.find((p) => p.group.foldKey === key) ??
+    groups.find((p) => p.group.children.some((c) => c.unit.rank.key === anchorSource)) ??
+    [...groups].sort(formed)[0];
+  return pieces.map((p) => ({ ...p, ...(p === heir ? { group: { ...p.group, foldKey: key } } : {}), baseFoldKey: key }));
 }
 
 /** `▸ split into N sessions` for one drawn thread card (D19): the sessions

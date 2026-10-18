@@ -702,6 +702,9 @@ export interface WorkGroupView {
   /** `N threads · M sessions · ✋ K`: sessions deduplicated by
    *  `workSessionRef` across the visible children. */
   counts: { threads: number; sessions: number; movesYou: number };
+  /** D20: set on each piece of a base group the reader's boundaries broke —
+   *  that base card's fold key, whose `+ N more` the piece reads too. */
+  baseFoldKey?: string;
 }
 
 function visibleSet(pages: readonly WikiListing[], filters: WikiFilters): Set<string> {
