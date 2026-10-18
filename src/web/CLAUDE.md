@@ -335,7 +335,8 @@ Five rules it lives by, each a defect it prevents:
    `<AnnotatedCode>`/`<FileTree>` pages in mimir grew a doubled bar), then
    those three (so a standalone `<Tab>` still did). It is a
    `Record<ComponentName, string | null>` now, so a component added to
-   `COMPONENT_NAMES` is a COMPILE error until classified — the `zones.ts` /
+   `COMPONENT_SPEC` (`src/format/component-spec.ts`, which `ComponentName` and
+   `COMPONENT_NAMES` derive from) is a COMPILE error until classified — the `zones.ts` /
    `route-groups.ts` default-deny idiom. `null` means "a fence in here is an
    ordinary fence" (a `<Callout>` holding code wants the bar).
 4. **An empty fence gets no button.** `navigator.clipboard.writeText("")`

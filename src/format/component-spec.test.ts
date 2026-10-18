@@ -17,7 +17,6 @@ import {
   readPillTone,
   readResolvedDate,
   readVerdictValue,
-  type ComponentName,
 } from "./component-spec.ts";
 import * as ast from "./markdown-ast.ts";
 import { isCalendarDay } from "./calendar-day.ts";
@@ -75,7 +74,8 @@ describe("derived vocabulary equals the frozen literals", () => {
     expect(COMPONENT_ATTRS as Record<string, readonly string[]>).toEqual(FROZEN_ATTRS);
     expect(Object.keys(COMPONENT_ATTRS)).toEqual(FROZEN_NAMES);
   });
-  test("SELF_CLOSING_ALLOWED", () => {
+  // Membership only, not order: the parser reads it with `.has` alone.
+  test("SELF_CLOSING_ALLOWED, membership", () => {
     expect(([...SELF_CLOSING_ALLOWED] as string[]).sort()).toEqual([...FROZEN_SELF_CLOSING].sort());
   });
   test("INLINE_COMPONENT_NAMES, in order", () => {
@@ -202,17 +202,73 @@ describe("the wrappers keep their old answers", () => {
       for (const r of raws) expect({ r, v: now(r) }).toEqual({ r, v: fn(r) });
     });
   }
-  test("parseLaneSince", () => {
-    expect(ast.parseLaneSince("02.01.2026")).toBe("2026-01-02");
-    expect(ast.parseLaneSince("x")).toBeNull();
-    expect(ast.parseLaneSince(undefined)).toBeNull();
-  });
-});
 
-test("every ComponentName has a spec entry", () => {
-  const n: ComponentName = "Callout";
-  expect(COMPONENT_SPEC[n]).toBeDefined();
-  expect(COMPONENT_NAMES.length).toBe(30);
+  // The pre-move bodies of the three with a different shape, verbatim.
+  const OLD_LANE_KINDS = ["you", "waiting", "draft", "blocked"] as const;
+  type OldLaneKind = (typeof OLD_LANE_KINDS)[number];
+  function oldNormalizeLaneKind(kind: string | undefined): { kind: OldLaneKind; known: boolean } {
+    const k = kind?.trim().toLowerCase() ?? "";
+    return (OLD_LANE_KINDS as readonly string[]).includes(k)
+      ? { kind: k as OldLaneKind, known: true }
+      : { kind: "waiting", known: false };
+  }
+  function oldParseLaneSince(value: string | undefined): string | null {
+    const raw = value?.trim() ?? "";
+    const nb = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(raw);
+    const iso = nb ? `${nb[3]}-${nb[2]!.padStart(2, "0")}-${nb[1]!.padStart(2, "0")}` : raw;
+    return isCalendarDay(iso) ? iso : null;
+  }
+  function oldParseMeterAttrs(
+    attrs: Record<string, string>,
+  ): { value: number; max: number; tone: "default" | "good" | "warn" | "bad" } | null {
+    const raw = attrs.value;
+    if (raw === undefined || raw.trim() === "") return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+
+    let max = Number(attrs.max);
+    if (!Number.isFinite(max) || max <= 0) max = 5;
+
+    const clamped = Math.min(Math.max(value, 0), max);
+    return { value: clamped, max, tone: old.normalizeMeterTone(attrs.tone) };
+  }
+
+  test("normalizeLaneKind", () => {
+    for (const r of [...raws, "draft", " BLOCKED ", "Waiting", "next"]) {
+      expect({ r, v: ast.normalizeLaneKind(r) }).toEqual({ r, v: oldNormalizeLaneKind(r) });
+    }
+  });
+
+  test("parseLaneSince", () => {
+    const dates = [...raws, "1.2.2026", "29.02.2024", "29.02.2025", "2026-1-2", "02.01.26", " 18.10.2026 ", "2026-13-01"];
+    for (const r of dates) expect({ r, v: ast.parseLaneSince(r) }).toEqual({ r, v: oldParseLaneSince(r) });
+  });
+
+  test("parseMeterAttrs, value × max × tone", () => {
+    const nums = ["", " ", "abc", "-0", "1e400", "NaN", "0", "5", "7", "-3", " 4 ", undefined];
+    const tones = [undefined, "good", "warn", "bad", "default", "rec", ""];
+    const same = (a: unknown, b: unknown) => (typeof a === "number" && typeof b === "number" ? Object.is(a, b) : a === b);
+    let n = 0;
+    for (const value of nums) {
+      for (const max of nums) {
+        for (const tone of tones) {
+          const attrs: Record<string, string> = {};
+          if (value !== undefined) attrs.value = value;
+          if (max !== undefined) attrs.max = max;
+          if (tone !== undefined) attrs.tone = tone;
+          const now = ast.parseMeterAttrs(attrs);
+          const was = oldParseMeterAttrs(attrs);
+          const ok =
+            now === null || was === null
+              ? now === was
+              : same(now.value, was.value) && same(now.max, was.max) && now.tone === was.tone;
+          expect({ attrs, now, was, ok }).toEqual({ attrs, now, was, ok: true });
+          n++;
+        }
+      }
+    }
+    expect(n).toBe(nums.length * nums.length * tones.length);
+  });
 });
 
 test("a VS16 in a regex is written as the \\uFE0F escape, not the invisible character", async () => {

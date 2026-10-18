@@ -29,7 +29,7 @@ export interface AttrSpec {
   parse: (raw: string | undefined) => AttrRead<unknown>;
   /** The accepted values, for an enumerated attribute. */
   enum?: readonly string[];
-  /** What a missing (or rejected) value renders as. */
+  /** What a missing (or rejected) value renders as, when present. */
   default?: string | number;
   /** Missing is itself a fallback (Meter `value`: the label renders as plain text). */
   required?: true;
@@ -41,7 +41,11 @@ export interface ComponentSpec {
   inline?: true;
 }
 
-/** Free text, or a value no renderer check reads (D9). Never falls back. */
+/**
+ * An attribute the spec does not check: free text, a value checked elsewhere or
+ * one that fails visibly, or one the pipeline writes. Fold `open`/`for` stay
+ * here on purpose, though the renderer reads both. Never falls back.
+ */
 export function parseString(raw: string | undefined): AttrRead<string | undefined> {
   return { value: raw, fellBack: false };
 }
@@ -111,6 +115,9 @@ export function normalizeVerdictValue(value: string | undefined): "yes" | "no" {
 
 // ── Fact ────────────────────────────────────────────────────────────────────
 
+const FACT_VERDICTS = ["ok", "warn", "bad", "unknown"] as const;
+export type FactVerdict = (typeof FACT_VERDICTS)[number];
+
 /**
  * Fact-check verdict vocabulary, normalized from an untrusted `v` attr.
  *
@@ -120,9 +127,6 @@ export function normalizeVerdictValue(value: string | undefined): "yes" | "no" {
  * optional VS16) are accepted alongside the words, since the writer derives `v`
  * from those blocks and a stray emoji is more likely than a typo'd word.
  */
-const FACT_VERDICTS = ["ok", "warn", "bad", "unknown"] as const;
-export type FactVerdict = (typeof FACT_VERDICTS)[number];
-
 export function readFactVerdict(raw: string | undefined): AttrRead<FactVerdict> {
   if (raw === undefined) return { value: "unknown", fellBack: false };
   const v = raw.replace(/\uFE0F/g, "").trim().toLowerCase();
@@ -271,7 +275,7 @@ export const COMPONENT_SPEC = {
   // carries its claim number + verdict; the verdict is DENORMALIZED onto the tag
   // on purpose — a streaming block renderer cannot look ahead to the `FactCheck`
   // appendix to colour a chip, and one write emits both sides so they cannot
-  // drift. `n` is written by the pipeline and not checked (D9).
+  // drift. `n` is written by the pipeline and not checked.
   Fact: {
     attrs: { n: text, v: { parse: readFactVerdict, enum: FACT_VERDICTS, default: "unknown" } },
     selfClosing: true,
