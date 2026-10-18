@@ -837,9 +837,16 @@ test.describe("Wiki rail: grouped work threads", () => {
       const normal = await layout();
       expect(normal.rows.length).toBeGreaterThan(0);
       await page.emulateMedia({ forcedColors: "active" });
-      // The rows inside the body keep today's width, and the closed stack's
-      // label and height are unchanged (no header grows a line).
-      expect.soft(await layout(), `rail ${rail}`).toEqual(normal);
+      // The rows inside the body keep today's width, the closed stack keeps
+      // its height (no header grows a line), and its label loses no room. The
+      // label can GAIN room: on Linux forced colours draw the 📌 as a narrower
+      // text glyph (CI measured 188 against 185), so it is a floor, not equal.
+      const forced = await layout();
+      expect.soft(forced.rows, `rail ${rail} rows`).toEqual(normal.rows);
+      expect.soft(forced.stack.h, `rail ${rail} stack height`).toBe(normal.stack.h);
+      expect.soft(forced.stack.w, `rail ${rail} stack width`).toBe(normal.stack.w);
+      expect.soft(forced.stackLabel.h, `rail ${rail} label height`).toBe(normal.stackLabel.h);
+      expect.soft(forced.stackLabel.w, `rail ${rail} label width`).toBeGreaterThanOrEqual(normal.stackLabel.w);
     }
     // The open series group: its body's outline was a box shadow, gone here;
     // an ::after draws its sides and bottom, never its top (the open header
@@ -1124,8 +1131,9 @@ test.describe("Wiki rail: grouped work threads", () => {
       }
     }
     console.log(`[group width table, ${font}] ` + JSON.stringify(Object.fromEntries([...widest].map(([k, v]) => [k, Math.round(v * 10) / 10]))));
-    // Forced colours cost no label width: the same narrowest label as normal.
-    for (const kind of ["group", "child"]) for (const rail of [260, 200]) expect.soft(labels.get(`${kind} @${rail} forced`), `${kind} @${rail}`).toBe(labels.get(`${kind} @${rail}`)!);
+    // Forced colours cost no label width: the narrowest label is never below
+    // normal's (it can be wider where the 📌 renders as a text glyph).
+    for (const kind of ["group", "child"]) for (const rail of [260, 200]) expect.soft(labels.get(`${kind} @${rail} forced`), `${kind} @${rail}`).toBeGreaterThanOrEqual(labels.get(`${kind} @${rail}`)!);
     const kinds = new Map<string, number>();
     for (const f of failures) {
       const k = f.replace(/\[[^\]]*\]/, "").replace(/"[^"]*"/, "…");
