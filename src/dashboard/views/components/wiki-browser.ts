@@ -5232,7 +5232,7 @@ interface WorkPopState {
   page: string;
   key: string;
   /** Save as series' confirm view: `busy` while its write runs, `done` once
-   *  it has reported (Write stays off until the popover reopens). */
+   *  it has reported a spent plan (Write stays off until the popover reopens). */
   series?: { card: RailGroupCard; busy: boolean; done?: boolean };
 }
 let workPop: WorkPopState | null = null;
@@ -5248,9 +5248,9 @@ function workPopBusy(): boolean {
 
 /** Close the work popover; `focus` returns focus to its opener (by key, the
  *  opener may have been repainted). Refused while a Save as series write is in
- *  flight (its report lands in this popover); `force` is the write's own close. */
-function closeWorkPop(focus = true, force = false): void {
-  if (workPopBusy() && !force) return;
+ *  flight (its report lands in this popover). */
+function closeWorkPop(focus = true): void {
+  if (workPopBusy()) return;
   const was = workPop;
   workPopEl()?.remove();
   workPop = null;
@@ -5299,7 +5299,8 @@ function workCardControlSel(page: string | undefined, prefer: "menu" | "fold"): 
   return null;
 }
 
-/** Paint the popover under `anchor` with `html`, focus its first item. */
+/** Paint the popover under `anchor` with `html`, focus its first item.
+ *  Refused while a Save as series write runs: the one guard for every ⋯. */
 function openWorkPop(anchor: HTMLElement, key: string, html: string, label: string, page: string): HTMLElement | null {
   if (workPopBusy()) return null;
   closeWorkPop(false);
@@ -5489,8 +5490,10 @@ async function runSaveAsSeries(): Promise<void> {
   }
   st.busy = true;
   setWorkSeriesLocked(state, true);
-  // Set ⇒ the confirm view stays open with this line and Write stays off.
-  let report: { text: string; bad: boolean } | null = null;
+  // Set ⇒ the confirm view stays open with this line. `retry` ⇒ nothing was
+  // written and the reader can resolve it in place (another key, another
+  // try), so Write stays on; otherwise the plan is spent and Write stays off.
+  let report: { text: string; bad: boolean; retry?: boolean } | null = null;
   const wasOpen = card.open;
   const anchorKey = card.key;
   try {
@@ -5501,12 +5504,12 @@ async function runSaveAsSeries(): Promise<void> {
     );
     const fresh = await freshListing();
     if (!fresh) {
-      report = { text: "Could not re-read the wiki listing — nothing written", bad: true };
+      report = { text: "Could not re-read the wiki listing — nothing written", bad: true, retry: true };
       return;
     }
     const checked = recheckSaveAsSeries(plan, key, fresh);
     if (checked.error) {
-      report = { text: checked.error, bad: true };
+      report = { text: checked.error, bad: true, retry: checked.retry };
       await refreshAfterSeriesWrite();
       return;
     }
@@ -5539,12 +5542,14 @@ async function runSaveAsSeries(): Promise<void> {
     st.busy = false;
     if (workPop === state) closeWorkPop(false);
     carryGroupFold(anchorKey, wasOpen);
+  } catch (err) {
+    // Anything unforeseen still unlocks and reports; what landed is unknown.
+    report = { text: `Save as series stopped: ${err instanceof Error ? err.message : String(err)} — reload to see what was written`, bad: true };
   } finally {
     st.busy = false;
     if (report) {
-      // The plan this view shows is spent: Write stays off until it reopens.
-      st.done = true;
-      setWorkSeriesLocked(state, false, true);
+      if (!report.retry) st.done = true;
+      setWorkSeriesLocked(state, false, !report.retry);
       setWorkSeriesMsg(state, report.text, report.bad);
     }
   }
@@ -5566,7 +5571,6 @@ function carryGroupFold(anchorKey: string, wasOpen: boolean): void {
 /** Open a card's ⋯: a thread card's boundary item, or a group's Save as series. */
 function openWorkCardMenu(btn: HTMLElement): void {
   const key = btn.getAttribute("data-work-card-menu") ?? "";
-  if (workPopBusy()) return;
   if (workPop?.key === `card:${key}`) {
     closeWorkPop();
     return;
@@ -5581,7 +5585,6 @@ function openWorkCardMenu(btn: HTMLElement): void {
 /** Open a focus row's ⋯ where no series menu applies: Make own thread only. */
 function openThreadRowMenu(btn: HTMLElement): void {
   const rel = btn.getAttribute("data-thread-row-menu") ?? "";
-  if (workPopBusy()) return;
   if (workPop?.key === `row:${rel}`) {
     closeWorkPop();
     return;

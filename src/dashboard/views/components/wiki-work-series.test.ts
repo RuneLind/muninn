@@ -182,7 +182,75 @@ describe("recheckSaveAsSeries: the plan against a listing read after the bases",
   });
 });
 
+describe("recheckSaveAsSeries: an already-joined page drifting since the click (fix round 2)", () => {
+  // The head a.md is the joined page; b.md is the only planned write.
+  const base = () => [
+    page("plans/a.md", { plan_status: "active", status_date: "2026-10-14", series: "alpha", seriesLabel: "Alpha work" }),
+    page("plans/b.md", { plan_status: "active", status_date: "2026-10-10" }),
+    page("notes/o.md", { series: "other", seriesLabel: "Other" }),
+  ];
+  const kids = [child("plans/a.md", ["plans/a.md"]), child("plans/b.md", ["plans/b.md"])];
+  const with_ = (o: Partial<WikiListing>) => base().map((x) => (x.relPath === "plans/a.md" ? { ...x, ...o } : x));
+  test("the joined page moved to another series: nothing written, the page and its series named", () => {
+    const p = plan(kids, base());
+    expect(p).toMatchObject({ available: true, mode: "join", key: "alpha" });
+    expect(p.writes.map((w) => w.relPath)).toEqual(["plans/b.md"]);
+    const r = recheckSaveAsSeries(p, p.key, with_({ series: "other", seriesLabel: undefined }));
+    expect(r.writes).toEqual([]);
+    expect(r.error).toBe("Nothing written — left «Alpha work» since this menu opened: T plans/a.md (now in «Other»)");
+    expect(r.retry).toBeUndefined();
+  });
+  test("the joined page's series: cleared: nothing written", () => {
+    const p = plan(kids, base());
+    const r = recheckSaveAsSeries(p, p.key, with_({ series: undefined }));
+    expect(r.writes).toEqual([]);
+    expect(r.error).toBe("Nothing written — left «Alpha work» since this menu opened: T plans/a.md (now in no series)");
+  });
+  test("a joined page that left, even with its child still covered by a write: nothing written (the group would span two series)", () => {
+    const pages = () => [...base(), page("plans/a2.md", { plan_status: "active", status_date: "2026-10-12" })];
+    const k2 = [child("plans/a.md", ["plans/a.md", "plans/a2.md"]), child("plans/b.md", ["plans/b.md"])];
+    const p = plan(k2, pages());
+    expect(p.writes.map((w) => w.relPath)).toEqual(["plans/a2.md", "plans/b.md"]);
+    const r = recheckSaveAsSeries(p, p.key, pages().map((x) => (x.relPath === "plans/a.md" ? { ...x, series: "other" } : x)));
+    expect(r.writes).toEqual([]);
+    expect(r.error).toMatch(/^Nothing written — left «Alpha work»/);
+  });
+  test("the joined page still in the series under another spelling of the key: the write goes ahead", () => {
+    const p = plan(kids, base());
+    const r = recheckSaveAsSeries(p, p.key, with_({ series: "Alpha" }));
+    expect(r.error).toBeUndefined();
+    expect(r.writes.map((w) => w.relPath)).toEqual(["plans/b.md"]);
+  });
+});
+
+describe("recheckSaveAsSeries: which refusals the reader can resolve in place", () => {
+  const two = () => [page("plans/a.md", { plan_status: "active", status_date: "2026-10-14" }), page("plans/b.md", { plan_status: "active", status_date: "2026-10-10" })];
+  const kids = [child("plans/a.md", ["plans/a.md"]), child("plans/b.md", ["plans/b.md"])];
+  test("a key clash is retryable (pick another key); a page that moved is not", () => {
+    const p = plan(kids, two());
+    expect(recheckSaveAsSeries(p, "k", [...two(), page("notes/late.md", { series: "k" })])).toMatchObject({ retry: true });
+    const moved = recheckSaveAsSeries(p, p.key, two().map((x) => (x.relPath === "plans/b.md" ? { ...x, series: "zz" } : x)));
+    expect(moved.error).toMatch(/^Nothing written/);
+    expect(moved.retry).toBeUndefined();
+  });
+});
+
 describe("runSeriesWrites: one page per call, stop at the first failure", () => {
+  test("a poster that rejects (network error) stops the sequence as a failed write, never a throw", async () => {
+    const posted: string[] = [];
+    const r = await runSeriesWrites(
+      [{ relPath: "a.md", series: "k" }, { relPath: "b.md", series: "k" }, { relPath: "c.md", series: "k" }],
+      new Map([["a.md", "h"], ["b.md", "h"], ["c.md", "h"]]),
+      async (b) => {
+        posted.push(b.relPath);
+        if (b.relPath === "b.md") throw new TypeError("Failed to fetch");
+        return { ok: true, status: 200, body: { hash: "x", written: true } };
+      },
+    );
+    expect(posted).toEqual(["a.md", "b.md"]);
+    expect(r).toMatchObject({ written: 1, total: 3, wrote: true, failure: { write: { relPath: "b.md" }, status: 0, error: "Network error: Failed to fetch" } });
+  });
+
   const ok = (hash: string): SeriesPostAnswer => ({ ok: true, status: 200, body: { hash, written: true } });
   test("all land: written N of N, hashes recorded", async () => {
     const posted: string[] = [];

@@ -179,18 +179,23 @@ export interface SaveSeriesRecheck {
   moved: (SaveSeriesPage & { series: string })[];
   /** Set ⇒ write nothing, and say this. */
   error?: string;
+  /** The refusal is the reader's to resolve in place (another key): the
+   *  confirm view keeps Write on. Unset ⇒ the plan itself is stale. */
+  retry?: boolean;
 }
 
 /**
  * The plan against a listing read AFTER the CAS bases (D14): the plan is a
  * snapshot from when the item was clicked, the route moves a page from any
  * series, and moving a series' labelled head drops that series' label. A
- * planned page now in another series is left alone; one already under `key`
- * is not rewritten. When that leaves a child with no page in the series, or a
- * new key has become a series since, nothing is written.
+ * planned write now in another series is left alone; one already under `key`
+ * is not rewritten. Nothing is written when an already-joined page is no
+ * longer under `key` (the group would no longer be named by it), when a child
+ * is left with no page in the series, or when a new key has become a series
+ * since (`retry`: the reader picks another).
  */
 export function recheckSaveAsSeries(
-  plan: Pick<SaveSeriesPlan, "mode" | "children" | "writes">,
+  plan: Pick<SaveSeriesPlan, "mode" | "children" | "writes" | "label">,
   key: string,
   fresh: readonly WikiListing[],
 ): SaveSeriesRecheck {
@@ -205,13 +210,22 @@ export function recheckSaveAsSeries(
   const planned = new Set(plan.writes.map((w) => normalizeRel(w.relPath)));
   if (plan.mode === "coin") {
     const clash = fresh.some((p) => !planned.has(normalizeRel(p.relPath)) && seriesKeyOf(p) && seriesCensusKey(seriesKeyOf(p)) === target);
-    if (clash) return { writes: [], moved: [], error: `"${key}" became a series here since this menu opened — nothing written; pick another key` };
+    if (clash) return { writes: [], moved: [], retry: true, error: `"${key}" became a series here since this menu opened — nothing written; pick another key` };
   }
   const census = seriesMembersByFoldKey(fresh);
   const labelOf = (fold: string) => {
     const head = seriesHead(census.get(fold) ?? []);
     return head?.seriesLabel || (head ? seriesKeyOf(head) : "") || fold;
   };
+  // The key, re-derived: every page the plan counted as joined is still under it.
+  const left = plan.children.flatMap((ch) => ch.joined).filter((j) => foldNow(j.relPath) !== target);
+  if (left.length) {
+    const now = (j: SaveSeriesPage) => {
+      const f = foldNow(j.relPath);
+      return f ? `now in «${labelOf(f)}»` : "now in no series";
+    };
+    return { writes: [], moved: [], error: `Nothing written — left «${plan.label ?? key}» since this menu opened: ${left.map((j) => `${j.title} (${now(j)})`).join(", ")}` };
+  }
   const moved: SaveSeriesRecheck["moved"] = [];
   const movedRel = new Set<string>();
   const inAlready = new Set<string>();
@@ -221,9 +235,9 @@ export function recheckSaveAsSeries(
     if (fold === target) inAlready.add(normalizeRel(w.relPath));
     else moved.push({ ...w, series: labelOf(fold) }), movedRel.add(normalizeRel(w.relPath));
   }
-  const covered = (ch: SaveSeriesChild) =>
-    ch.write.some((w) => !movedRel.has(normalizeRel(w.relPath))) || ch.joined.some((j) => (foldNow(j.relPath) ?? target) === target);
-  if (moved.length && !plan.children.every(covered)) {
+  // A joined page covers its child (all are still under the key, above).
+  const covered = (ch: SaveSeriesChild) => ch.joined.length > 0 || ch.write.some((w) => !movedRel.has(normalizeRel(w.relPath)));
+  if (!plan.children.every(covered)) {
     return { writes: [], moved, error: `Nothing written — joined another series since this menu opened: ${moved.map((m) => `${m.title} (in «${m.series}»)`).join(", ")}` };
   }
   const writes = plan.writes.filter((w) => !movedRel.has(normalizeRel(w.relPath)) && !inAlready.has(normalizeRel(w.relPath)));

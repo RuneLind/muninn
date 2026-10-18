@@ -37,7 +37,8 @@ export interface SeriesWriteOutcome {
   cleared: string | null;
   /** The page hash each landed write answered, by relPath as sent. */
   hashes: Map<string, string>;
-  /** The write that stopped the sequence: no base (`status` 0), or refused. */
+  /** The write that stopped the sequence: no base or a network error
+   *  (`status` 0), or refused. */
   failure?: { write: SeriesWrite; status: number; error: string };
 }
 
@@ -51,7 +52,14 @@ export async function runSeriesWrites(writes: readonly SeriesWrite[], bases: Rea
       out.failure = { write, status: 0, error: `Could not read ${write.relPath}` };
       return out;
     }
-    const res = await post({ ...write, baseHash });
+    let res: SeriesPostAnswer;
+    try {
+      res = await post({ ...write, baseHash });
+    } catch (err) {
+      // A rejected fetch (network down, connection reset) is a failed write.
+      out.failure = { write, status: 0, error: `Network error: ${err instanceof Error ? err.message : String(err)}` };
+      return out;
+    }
     if (!res.ok) {
       out.failure = { write, status: res.status, error: res.body?.error || `Write refused (${res.status})` };
       return out;

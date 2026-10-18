@@ -22,7 +22,9 @@
  *    fifth card showing two rows, `t-split` and `t-more`.
  *  - `wsbtwin` — the pair with an `.html` twin of `live-a` as its focus page;
  *    `wsbstale`, `wsbslow`, `wsbslowfail`, `wsbnorefresh`, `wsbgone`,
- *    `wsbcleared` — the pair again, one per Save as series lifecycle case.
+ *    `wsbcleared`, `wsbabort`, `wsbretry`, `wsbthrow` — the pair again, one per Save as
+ *    series lifecycle case; `wsbtwinslow` — the `.html`-twin pair again, its
+ *    twin row carrying the row's own ⋯.
  *
  * Synthetic names only (D11: no NAV data). No model calls; the only wiki
  * writes are Save as series on the synthetic series wikis.
@@ -61,6 +63,12 @@ const SF = "wsbslowfail";
 const NR = "wsbnorefresh";
 const NG = "wsbgone";
 const CL = "wsbcleared";
+/** Fix round 2 batch 2: a network error mid-write, refusals the reader
+ *  resolves in place, and other ⋯ openers during a held write. */
+const AB = "wsbabort";
+const RT = "wsbretry";
+const TWS = "wsbtwinslow";
+const TH = "wsbthrow";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -96,6 +104,10 @@ const SESSIONS: Record<string, string[][]> = {
   [NR]: [[LA], [LB], [LONE]],
   [NG]: [[LA], [LB], [LONE]],
   [CL]: [[LA], [LB], [LONE]],
+  [AB]: [[LA], [LB], [LONE]],
+  [RT]: [[LA], [LB], [LONE]],
+  [TH]: [[LA], [LB], [LONE]],
+  [TWS]: [[LAH], [LB], [LONE]],
 };
 
 /** Per wiki: pages a session only TOUCHED (one edit, unnamed), by session
@@ -254,7 +266,8 @@ test.beforeAll(async () => {
   await makeRoot(C, false, true);
   await makeFolderCapRoot();
   await makeRoot(TW, false, false, true);
-  for (const w of [ST, SL, SF, NR, NG, CL]) await makeRoot(w, false);
+  await makeRoot(TWS, false, false, true);
+  for (const w of [ST, SL, SF, NR, NG, CL, AB, RT, TH]) await makeRoot(w, false);
   ledger = await startLedger();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -282,7 +295,7 @@ test.beforeAll(async () => {
     if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
     await new Promise((r) => setTimeout(r, 400));
   }
-  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3, [C]: 6, [CF]: 7, [TW]: 3, [ST]: 3, [SL]: 3, [SF]: 3, [NR]: 3, [NG]: 3, [CL]: 3 };
+  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3, [C]: 6, [CF]: 7, [TW]: 3, [ST]: 3, [SL]: 3, [SF]: 3, [NR]: 3, [NG]: 3, [CL]: 3, [AB]: 3, [RT]: 3, [TH]: 3, [TWS]: 3 };
   for (const wiki of Object.keys(want)) {
     const warm = Date.now() + 20_000;
     for (;;) {
@@ -887,6 +900,128 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await page.evaluate(() => document.getElementById("wikiWorkPop")?.remove());
     release();
     await expect(page.locator("#wikiWorkSeriesStatus")).toContainText("1 of 2 written");
+  });
+});
+
+/** Fix round 2, batch 2: a network error mid-write, in-place retries, and
+ *  the other ⋯ openers while a write runs. */
+test.describe("Wiki rail: Save as series, network errors and retries", () => {
+  test("the network drops the second write: 1 of 2 written with the error and the page left, the listing refreshed, the popover unlocked, no page error", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    let calls = 0;
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      (route) => (++calls === 2 ? route.abort("connectionreset") : route.continue()),
+    );
+    await openReader(page, AB);
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    // The refresh after the writes, not the re-check's rescan before them.
+    const refreshed = page.waitForRequest((r) => r.url().includes("/api/wiki/pages") && r.url().includes("refresh=1") && calls >= 2);
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    const msg = page.locator("#wikiWorkPop .wiki-work-series-msg");
+    await expect(msg).toContainText(`1 of 2 written — stopped at ${LB}: Network error:`);
+    await expect(msg).toContainText(`Not written: ${LB}`);
+    await refreshed;
+    await expect(page.locator("#wikiWorkPop [data-work-series-cancel]")).toBeEnabled();
+    await expect(page.locator("#wikiWorkPop [data-work-series-go]")).toBeDisabled();
+    expect(await readFile(path.join(roots[AB]!, LA), "utf8")).toContain("series: live-a");
+    expect(await readFile(path.join(roots[AB]!, LB), "utf8")).not.toContain("series:");
+    expect(errors).toEqual([]);
+    await page.locator("#wikiWorkPop [data-work-series-cancel]").click();
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+  });
+
+  test("a refusal the reader can resolve in place keeps Write on: a failed re-read, then a key another writer took since; a new key then writes", async ({ page }) => {
+    await openReader(page, RT);
+    let failRescan = true;
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("refresh") === "1",
+      (route) => {
+        if (!failRescan) return route.continue();
+        failRescan = false;
+        return route.fulfill({ status: 500, body: "boom" });
+      },
+    );
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    const key = page.locator("#wikiWorkPop [data-work-series-key]");
+    const go = page.locator("#wikiWorkPop [data-work-series-go]");
+    const msg = page.locator("#wikiWorkPop .wiki-work-series-msg");
+    await expect(key).toHaveValue("live-a");
+    await go.click();
+    await expect(msg).toHaveText("Could not re-read the wiki listing — nothing written");
+    await expect(go).toBeEnabled();
+    await expect(key).toBeEnabled();
+    // Another writer takes the key before the retry.
+    await writeFile(path.join(roots[RT]!, "notes/late.md"), ["---", "title: Late note", "series: live-a", "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
+    await go.click();
+    await expect(msg).toHaveText('"live-a" became a series here since this menu opened — nothing written; pick another key');
+    await expect(go).toBeEnabled();
+    await expect(key).toBeEnabled();
+    for (const rel of [LA, LB]) expect(await readFile(path.join(roots[RT]!, rel), "utf8")).not.toContain("series:");
+    await key.fill("fresh-key");
+    await go.click();
+    await expect(groupCard(page, "group:series:fresh-key")).toHaveCount(1);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+    for (const rel of [LA, LB]) expect(await readFile(path.join(roots[RT]!, rel), "utf8")).toContain("series: fresh-key");
+  });
+
+  test("anything unforeseen mid-run (a malformed re-read listing) still unlocks the popover and reports, with no page error", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await openReader(page, TH);
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("refresh") === "1",
+      (route) => route.fulfill({ status: 200, json: { pages: [null] } }),
+    );
+    await openMenu(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    const msg = page.locator("#wikiWorkPop .wiki-work-series-msg");
+    await expect(msg).toContainText("Save as series stopped:");
+    await expect(msg).toContainText("— reload to see what was written");
+    await expect(page.locator("#wikiWorkPop [data-work-series-cancel]")).toBeEnabled();
+    await expect(page.locator("#wikiWorkPop [data-work-series-go]")).toBeDisabled();
+    expect(errors).toEqual([]);
+    for (const rel of [LA, LB]) expect(await readFile(path.join(roots[TH]!, rel), "utf8")).not.toContain("series:");
+  });
+
+  test("while a write runs, ANOTHER card's ⋯ and a row's own ⋯ open nothing beside its popover", async ({ page }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route(
+      (u) => u.pathname === "/api/wiki/series",
+      async (route) => {
+        await gate;
+        return route.continue();
+      },
+    );
+    await openReader(page, TWS);
+    const g = groupCard(page, `group:anchor:${LAH}`);
+    const child = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LAH}"]`);
+    if (!(await child.getAttribute("class"))!.includes("open")) await child.locator(".wiki-thread-fold").click();
+    const rowOpener = threadRow(page, LAH).locator("[data-thread-row-menu]");
+    const otherCard = page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`);
+    await expect(rowOpener).toHaveCount(1);
+    await expect(otherCard).toHaveCount(1);
+    await openMenu(g.locator("[data-work-card-menu]").first());
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    const posted = page.waitForRequest((r) => new URL(r.url()).pathname === "/api/wiki/series");
+    await page.locator("#wikiWorkPop [data-work-series-go]").click();
+    await posted;
+    const pop = page.locator("#wikiWorkPop");
+    // Dispatched: a pointer click here can land under the popover.
+    for (const opener of [otherCard, rowOpener]) {
+      await opener.dispatchEvent("click");
+      await expect(pop).toHaveCount(1);
+      await expect(pop).toHaveAttribute("role", "dialog");
+      await expect(page.locator("#wikiWorkPop .wiki-work-series-msg")).toHaveText("Saving…");
+    }
+    release();
+    await expect(groupCard(page, "group:series:live-a")).toHaveCount(1);
+    await expect(pop).toHaveCount(0);
   });
 });
 
