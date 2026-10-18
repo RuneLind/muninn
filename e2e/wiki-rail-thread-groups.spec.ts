@@ -795,14 +795,39 @@ test.describe("Wiki rail: grouped work threads", () => {
     expect(await stored(page)).toBeNull();
   });
 
-  test("a malformed or other-version record reads as D1, and the first edit replaces it", async ({ page }) => {
-    for (const raw of ["{", JSON.stringify({ version: 9, stop: "threads" }), JSON.stringify({ version: 1, stop: "nope", evidence: { series: "x" } })]) {
-      await page.evaluate(([k, v]) => localStorage.setItem(k as string, v as string), [workGroupKey(GROUPS), raw] as const).catch(() => {});
-      await page.addInitScript(([k, v]) => localStorage.setItem(k as string, v as string), [workGroupKey(GROUPS), raw] as const);
+  test("a malformed record reads as D1, and the first edit replaces it", async ({ page }) => {
+    await openReader(page);
+    const raws = ["{", ...[null, "1", 0, 1.5].map((version) => JSON.stringify({ version, stop: "threads" }))];
+    for (const raw of raws) {
+      await page.evaluate(([k, v]) => localStorage.setItem(k as string, v as string), [workGroupKey(GROUPS), raw] as const);
       await openReader(page);
       await expect(groupBtn(page), raw).toContainText("Related");
       await expect(groupCard(page, "group:series:alpha"), raw).toHaveCount(1);
+      await groupBtn(page).click();
+      await page.locator('[data-work-stop="areas"]').click();
+      await expect(groupBtn(page), raw).toContainText("Areas");
+      await expect(page.locator(".wiki-work-local"), raw).toHaveCount(0);
+      expect(JSON.parse((await stored(page))!), raw).toEqual({ version: 1, stop: "areas" });
     }
+    // A version-1 record is held, whatever its fields: an invalid field reads as its D1 default.
+    const invalid = JSON.stringify({ version: 1, stop: "nope", evidence: { series: "x" } });
+    await page.evaluate(([k, v]) => localStorage.setItem(k as string, v as string), [workGroupKey(GROUPS), invalid] as const);
+    await openReader(page);
+    await expect(groupBtn(page)).toContainText("Related");
+    await expect(groupCard(page, "group:series:alpha")).toHaveCount(1);
+  });
+
+  test("a later build's record reads as D1 and is never written over: an edit stays in this tab and says so (C4)", async ({ page }) => {
+    const later = JSON.stringify({ version: 9, stop: "threads", newThing: 1 });
+    await openReader(page);
+    await page.evaluate(([k, v]) => localStorage.setItem(k as string, v as string), [workGroupKey(GROUPS), later] as const);
+    await openReader(page);
+    await expect(groupBtn(page)).toContainText("Related");
+    await groupBtn(page).click();
+    await page.locator('[data-work-stop="areas"]').click();
+    await expect(groupBtn(page)).toContainText("Areas");
+    await expect(page.locator(".wiki-work-local")).toHaveText("this tab only");
+    expect(await stored(page)).toBe(later);
   });
 
   test("relations incomplete: Related draws Threads with the reason and keeps the choice", async ({ page }) => {

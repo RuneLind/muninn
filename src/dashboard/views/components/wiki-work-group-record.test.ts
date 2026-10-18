@@ -447,3 +447,148 @@ describe("a mixed-build pair of tabs: a write keeps what this build does not und
     expect(click(JSON.stringify({ stop: "areas" }), { stop: "threads" }).write).toEqual({ value: rec({ stop: "threads" }) });
   });
 });
+
+describe("fix round 2: the note clears once storage holds the record; malformed versions; pinned branches", () => {
+  function store(initial: WorkGroupRecord | string | null = null) {
+    const s = { v: typeof initial === "string" ? initial : initial ? serializeWorkGroupRecord(initial) : (null as string | null), readable: true, writable: true };
+    return {
+      s,
+      read: (): WorkGroupRecord | null | undefined => (s.readable ? readWorkGroupRecord(s.v) : undefined),
+      write: (r: WorkGroupRecord): boolean => {
+        if (!s.writable) return false;
+        s.v = serializeWorkGroupRecord(r);
+        return true;
+      },
+      stored: () => readWorkGroupRecord(s.v),
+    };
+  }
+  function tab(st: ReturnType<typeof store>) {
+    let state = workGroupRecordStep(fresh, { kind: "boot", stored: st.read() }).state;
+    const run = (t: Parameters<typeof workGroupRecordStep>[1]) => {
+      const r = workGroupRecordStep(state, t);
+      state = r.write ? workGroupRecordSettle(r.state, r.write.value, st.write(r.write.value)) : r.state;
+      return r;
+    };
+    return {
+      state: () => state,
+      shown: () => workGroupPrefsOf(state.held),
+      click: (edit: Parameters<typeof applyWorkGroupEdit>[1]) => run({ kind: "click", stored: st.read(), edit }),
+      render: (focused = true) => run({ kind: "render", stored: st.read(), focused }),
+      event: () => run({ kind: "storage", stored: st.read(), booted: true }),
+    };
+  }
+
+  test("R5: a refused write of a record storage already holds clears «this tab only» with no write (finding 1)", () => {
+    const st = store();
+    const a = tab(st);
+    a.click({ stop: "areas" });
+    st.s.writable = false;
+    a.click({ stop: "areas" });
+    expect(a.state().failed).toBe(true);
+    st.s.writable = true;
+    const r = a.render(true);
+    expect(r.write).toBe(false);
+    expect(a.state()).toEqual({ held: AREAS, known: AREAS, patch: null, failed: false });
+  });
+
+  test("R2: a choice made while unreadable that storage already holds clears the note on the first readable render, no write needed (finding 1)", () => {
+    const st = store(AREAS);
+    st.s.readable = false;
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ stop: "areas" });
+    expect(a.state().failed).toBe(true);
+    st.s.readable = true;
+    const r = a.render(true);
+    expect(r.write).toBe(false);
+    expect(a.state()).toEqual({ held: AREAS, known: AREAS, patch: null, failed: false });
+  });
+
+  test("a malformed version reads as none and the first click replaces it; only an integer above 1 is a later build's (finding 2)", () => {
+    for (const version of [null, "1", 0, -3, 1.5, true, {}, [2], "2"]) {
+      const raw = JSON.stringify({ version, stop: "threads", extra: 1 });
+      const st = store(raw);
+      const a = tab(st);
+      const r = a.click({ stop: "areas" });
+      expect(r.write, raw).toEqual({ value: AREAS });
+      expect(a.state().failed, raw).toBe(false);
+      expect(st.stored(), raw).toEqual(AREAS);
+      expect(readWorkGroupRecord(raw), raw).toBeNull();
+    }
+    for (const version of [2, 9]) {
+      const raw = JSON.stringify({ version, stop: "threads" });
+      expect(readWorkGroupRecord(raw)).toEqual({ version, stop: "threads" });
+      expect(tab(store(raw)).click({ stop: "areas" }).write).toBe(false);
+    }
+  });
+
+  test("evidence merges box by box: a click keeps a box another tab unchecked (pins M8, round 1 batch 1)", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    a.click({ evidence: "series", value: false });
+    b.click({ evidence: "related", value: false });
+    expect(st.stored()).toEqual(rec({ evidence: { series: false, related: false } }));
+  });
+
+  test("C3 then C1 with known still unknown: the edits made while unreadable are kept (pins M5, round 1 batch 1)", () => {
+    const st = store();
+    st.s.readable = false;
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ stop: "areas" });
+    st.s.readable = true;
+    a.click({ evidence: "series", value: false });
+    expect(a.shown()).toMatchObject({ stop: "areas", evidence: { series: false } });
+    expect(a.state().patch).toEqual(rec({ stop: "areas", evidence: { series: false } }));
+  });
+
+  test("C3 then C3: the patch accumulates, so R2 then R6 writes both edits (pins M9, round 1 batch 1)", () => {
+    const st = store();
+    st.s.readable = false;
+    st.s.writable = false;
+    const a = tab(st);
+    a.click({ stop: "areas" });
+    a.click({ evidence: "series", value: false });
+    st.s.readable = true;
+    st.s.writable = true;
+    a.render(true);
+    a.render(true);
+    expect(st.stored()).toEqual(rec({ stop: "areas", evidence: { series: false } }));
+  });
+
+  test("a storage event drops this tab's refused patch, so a later click never overwrites the other tab's choice (pins M10, round 1 batch 1)", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    b.click({ stop: "threads" });
+    st.s.writable = true;
+    a.click({ stop: "areas" });
+    expect(b.event().state.patch).toBeNull();
+    b.click({ evidence: "series", value: false });
+    expect(st.stored()).toEqual(rec({ stop: "areas", evidence: { series: false } }));
+  });
+
+  test("C4 while unreadable: storage last held a later build's record — nothing is written, the edit stays in this tab (pins M4 and M6, round 1 batch 2)", () => {
+    const v9 = JSON.stringify({ version: 9, stop: "threads", newThing: 1 });
+    const st = store(v9);
+    const a = tab(st);
+    st.s.readable = false;
+    const r = a.click({ evidence: "series", value: false });
+    expect(r.write).toBe(false);
+    expect(st.s.v).toBe(v9);
+    expect(a.state().failed).toBe(true);
+    // The later build's fields are no base for this build's record.
+    expect(a.state().held).toEqual(NO_SERIES);
+    expect(applyWorkGroupEdit({ version: 9, stop: "threads", newThing: 1 }, { evidence: "series", value: false })).toEqual(NO_SERIES);
+  });
+
+  test("junk in the evidence field is no base: a click writes the box alone (pins M8, round 1 batch 2)", () => {
+    for (const evidence of ["x", ["x"], 3]) {
+      const st = store(JSON.stringify({ version: 1, evidence }));
+      tab(st).click({ evidence: "series", value: false });
+      expect(st.stored(), JSON.stringify(evidence)).toEqual(NO_SERIES);
+    }
+  });
+});

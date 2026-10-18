@@ -45,8 +45,8 @@ export function storageEventTouchesWorkGroup(key: string | null, wiki: string): 
 /** The stored record as stored: the fields a reader set, valid or not, and
  *  any field a later build added. `workGroupPrefsOf` validates on read. */
 export interface WorkGroupRecord {
-  /** `WORK_GROUP_PREFS_VERSION` for a record this build writes; any other
-   *  value is a later build's record (`foreignWorkGroupRecord`). */
+  /** `WORK_GROUP_PREFS_VERSION` for a record this build writes; an integer
+   *  above it is a later build's record (`foreignWorkGroupRecord`). */
   version: unknown;
   /** A `WorkGroupStop`, `Partial<WorkGroupEvidenceToggles>`, `WorkGroupSplit[]`
    *  and `string[]` when valid; read only through `workGroupPrefsOf`. */
@@ -61,9 +61,10 @@ const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v =
 
 /**
  * A stored value read back verbatim, or null for none: absent, unparseable,
- * not an object, or an object with no `version` (malformed: D1 applies and a
- * click replaces it). An object with a `version` is kept whole, whatever that
- * version is; `workGroupPrefsOf` validates it (another version reads as D1, an
+ * not an object, or an object whose `version` is neither this build's nor a
+ * later build's (missing, `null`, a string, 0, a fraction…: malformed, D1
+ * applies and a click replaces it). A record of this or a later version is
+ * kept whole; `workGroupPrefsOf` validates it (a later version reads as D1, an
  * invalid field as its default), so a default is never mistaken for a choice
  * and nothing this build does not understand is lost on a write.
  */
@@ -75,13 +76,16 @@ export function readWorkGroupRecord(raw: string | null | undefined): WorkGroupRe
   } catch {
     return null;
   }
-  if (!isRecord(v) || !("version" in v)) return null;
+  if (!isRecord(v) || (v.version !== WORK_GROUP_PREFS_VERSION && !laterVersion(v.version))) return null;
   return v as WorkGroupRecord;
 }
 
-/** A later build's record (another version): read as D1, never written over. */
+/** A version only a later build writes: an integer above this build's. */
+const laterVersion = (v: unknown): boolean => Number.isInteger(v) && (v as number) > WORK_GROUP_PREFS_VERSION;
+
+/** A later build's record: read as D1, never written over. */
 export function foreignWorkGroupRecord(record: WorkGroupRecord | null | undefined): boolean {
-  return !!record && record.version !== WORK_GROUP_PREFS_VERSION;
+  return !!record && laterVersion(record.version);
 }
 
 /** The settings a record puts in force: its valid fields, D1 for the rest. */
@@ -148,10 +152,12 @@ export function mergeWorkGroupPatch(base: WorkGroupRecord | null, patch: WorkGro
  * WROTE successfully — `undefined` while storage has never been readable.
  * `patch` holds the fields this tab's clicks set that storage does not hold
  * yet (null: none), so `held` is `known` (or the read record) with `patch` on
- * top; every write is the record as read with `patch` on top, and only a
- * successful write or another tab's newer record (R3, a `storage` event)
- * clears it. `failed` is set while the held record lives in this tab only
- * (its write was refused), so the menu says so.
+ * top; every write is the record as read with `patch` on top. It clears on a
+ * successful write, on a render that finds storage already holding `held`
+ * (R2, R5), and when another tab's newer record arrives (R3, a `storage`
+ * event, or a click whose read differs from `known`). `failed` is set while
+ * the held record lives in this tab only (its write was refused), so the menu
+ * says so.
  */
 export interface WorkGroupRecordState {
   held: WorkGroupRecord | null;
@@ -229,14 +235,20 @@ export function workGroupRecordStep(state: WorkGroupRecordState, t: WorkGroupRec
       // R2: readable for the first time — what it holds is known; this tab's
       // patch (a click whose write failed) is laid on top, written by R6.
       if (state.known === undefined) {
-        return none({ held: mergeWorkGroupPatch(t.stored, state.patch), known: t.stored, patch: state.patch, failed: state.failed });
+        const held = mergeWorkGroupPatch(t.stored, state.patch);
+        // Storage already holds what this tab holds: nothing is this tab's only.
+        if (sameWorkGroupRecord(held, t.stored)) return none(adopt(t.stored));
+        return none({ held, known: t.stored, patch: state.patch, failed: state.failed });
       }
       // R3: another tab wrote and this tab never heard — adopt it. A change
       // that lived only in memory after a refused write is dropped here.
       if (!sameWorkGroupRecord(t.stored, state.known)) return none(adopt(t.stored));
-      // R4/R5: no focus, or nothing to write. Here `held` is `known` (= the
-      // read) with `patch` on top: every row that sets `known` keeps that.
-      if (!t.focused || state.patch === null || state.held === null || sameWorkGroupRecord(state.held, t.stored)) return none(state);
+      // R5: storage already holds `held` (the refused write was of a record
+      // storage held already): the patch is persisted, so it and the note clear.
+      if (sameWorkGroupRecord(state.held, t.stored)) return none(state.patch === null && !state.failed ? state : adopt(t.stored));
+      // R4: no focus, or nothing to write. Here `held` is `known` (= the read)
+      // with `patch` on top: every row that sets `known` keeps that.
+      if (!t.focused || state.patch === null || state.held === null) return none(state);
       // R7: storage holds a later build's record — no retry over it (C4).
       if (foreignWorkGroupRecord(t.stored)) return none(state);
       // R6: storage still holds `known` and this tab holds a patch on it.

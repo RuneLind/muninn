@@ -155,9 +155,9 @@ export function writeThreadPin(wiki: string, relPath: string | null): boolean {
   }
 }
 
-/** The work-thread grouping record (D17): the record, null for none (an
- *  absent, malformed or other-version value — D1 applies), or `undefined`
- *  when storage cannot be read. */
+/** The work-thread grouping record (D17): the record as stored (a later
+ *  build's version included, which reads as D1), null for none (an absent or
+ *  malformed value — D1 applies), or `undefined` when storage cannot be read. */
 export function readWorkGroup(wiki: string): WorkGroupRecord | null | undefined {
   try {
     return readWorkGroupRecord(localStorage.getItem(workGroupKey(wiki)));
