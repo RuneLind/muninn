@@ -1086,6 +1086,10 @@ export async function renderWikiPage(opts?: {
       .wiki-list-item.thread-row::before { background: CanvasText; }
       .wiki-thread-card.open { border-width: 2px; border-bottom-width: 1px; }
       .wiki-list-item.thread-row:not(:has(+ .wiki-list-item[data-section="threads"], + .wiki-thread-touched))::before { bottom: 0; }
+      /* The group's two shadows: an open body takes a real border, as wide as
+         its open header's sides; a closed group's stack becomes a double edge. */
+      .wiki-thread-gbody { border: 2px solid CanvasText; border-top: 0; }
+      .wiki-thread-card.wiki-thread-group:not(.open) { border-right: 3px double CanvasText; border-bottom: 3px double CanvasText; }
     }
     /* \`+N more\` under a closed series in Activity: opens the same fold as the
        series row above it. Indented to the member rows' depth. */

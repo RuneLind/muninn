@@ -52,13 +52,11 @@ export function threadSpanLabel(card: Pick<RailThreadCard, "sessions">, now: num
   return from ? `${from} → ${to}` : "";
 }
 
-/** The meta line's parts, in the meta's compact date form; `from`/`to` and
- *  `moves` are "" when absent. */
-function threadMetaParts(card: RailThreadCard, now: number, showMoves: boolean): { count: string; from: string; to: string; moves: string } {
+/** A thread card's tally parts: `N sessions`, then `✋ M`. */
+function threadTallyParts(card: RailThreadCard, showMoves: boolean): HeaderTally {
   const n = card.sessions.length;
   return {
-    count: `${n} ${n === 1 ? "session" : "sessions"}`,
-    ...threadSpanEnds(card, now, true),
+    counts: [`${n} ${n === 1 ? "session" : "sessions"}`],
     moves: showMoves && card.movesYou > 0 ? `✋ ${card.movesYou}` : "",
   };
 }
@@ -66,8 +64,9 @@ function threadMetaParts(card: RailThreadCard, now: number, showMoves: boolean):
 /** The meta as one plain line, `N sessions · first → last · ✋ M` (the replay
  *  script's form; the card draws it on two lines). */
 export function threadMetaLine(card: RailThreadCard, now: number, showMoves: boolean): string {
-  const { count, from, to, moves } = threadMetaParts(card, now, showMoves);
-  return [count, from && `${from} → ${to}`, moves].filter(Boolean).join(" · ");
+  const { counts, moves } = threadTallyParts(card, showMoves);
+  const { from, to } = threadSpanEnds(card, now, true);
+  return [...counts, from && `${from} → ${to}`, moves].filter(Boolean).join(" · ");
 }
 
 /** A visually hidden ` · ` for the fold's accessible name, which is its
@@ -81,17 +80,24 @@ const SR_SEP = `<span class="wiki-sr-only"> · </span>`;
  *  so nothing is cut. Each part is an inline block, so a rail narrower than
  *  260 (the viewport bound) breaks a line between parts, at ` · ` or ` → `,
  *  and only wraps inside a part when the part alone is wider than the rail. */
-function threadMetaHtml(card: RailThreadCard, now: number, showMoves: boolean): string {
-  const { count, from, to, moves } = threadMetaParts(card, now, showMoves);
+function threadMetaHtml(tally: HeaderTally, from: string, to: string): string {
   return (
-    `<span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">${esc(count)}</span>` +
-    (moves ? ` <span class="wiki-thread-moves">· ${esc(moves)}</span>` : "") +
+    `<span class="wiki-thread-line wiki-thread-tally">` +
+    tally.counts.map((c, i) => `${i ? " " : ""}<span class="wiki-thread-count">${i ? "· " : ""}${esc(c)}</span>`).join("") +
+    (tally.moves ? ` <span class="wiki-thread-moves">· ${esc(tally.moves)}</span>` : "") +
     `</span>` +
     (from
       ? `${SR_SEP} <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">${esc(from)}</span>` +
         ` <span class="wiki-thread-to">→ ${esc(to)}</span></span>`
       : "")
   );
+}
+
+/** A header's tally line: its counts (`N sessions`, or `N threads`, `M
+ *  sessions`), then `✋ K`, which is "" when it does not show. */
+interface HeaderTally {
+  counts: string[];
+  moves: string;
 }
 
 /** The header's hover: the name, then one line per session (newest first). */
@@ -124,16 +130,46 @@ const THREAD_GLYPH =
 /** The card header: a fold button and the 📌 beside it (two sibling buttons —
  *  a button may not hold one). The fold writes `toggleKey`, so the generic
  *  `[data-fold-key]` handler toggles a card like any group. `pages` is the
- *  rail entry's count (`buildRail`); it defaults to the card's focus pages. */
+ *  rail entry's count (`buildRail`); it defaults to the card's focus pages.
+ *  A GROUP card (`threadGroupHeaderHtml`) takes the same shell: its glyph, a
+ *  kind label before the name, `N threads · M sessions · ✋ K`, a hidden
+ *  anchor's line, `Show N threads`, and a 📌 that pins its anchor child;
+ *  `pages` does not apply to it. */
 export function threadCardHeaderHtml(
-  card: RailThreadCard,
+  card: RailThreadCard | RailGroupCard,
   folded: boolean,
   now: number,
   showMoves: boolean,
-  pages: number = card.focus.length,
+  pages?: number,
 ): string {
-  const hover = threadHover(card, now);
-  const why = folded ? "Show this work thread" : "Hide this work thread";
+  const group = "group" in card;
+  const k = group
+    ? {
+        kind: " wiki-thread-group",
+        attr: "data-thread-group",
+        glyph: GROUP_GLYPH,
+        name: `<span class="wiki-thread-kind">${esc(card.label)}</span> ${esc(card.name)}`,
+        hover: [card.name + (card.pinned ? " (pinned first)" : ""), ...card.witnesses].join("\n"),
+        what: "this group of work threads",
+        tally: threadGroupTallyParts(card, showMoves),
+        line: card.anchorVisible ? "" : `${SR_SEP} <span class="wiki-thread-line wiki-thread-why">anchor outside the filters</span>`,
+        disclose: threadGroupDiscloseLabel(folded, card.threads),
+        pinLabel: "Pin this work group first",
+      }
+    : {
+        kind: card.child ? " wiki-thread-child" : "",
+        attr: "data-thread",
+        glyph: THREAD_GLYPH,
+        name: esc(card.name),
+        hover: threadHover(card, now),
+        what: "this work thread",
+        tally: threadTallyParts(card, showMoves),
+        line: card.child ? threadChildLineHtml(card.child) : "",
+        disclose: threadDiscloseLabel(folded, pages ?? card.focus.length),
+        pinLabel: "Pin this work thread first",
+      };
+  const { from, to } = threadSpanEnds(card, now, true);
+  const why = `${folded ? "Show" : "Hide"} ${k.what}`;
   // No aria-label on the fold: its name is its content (name + meta) and
   // aria-expanded carries the state. Its title, the accessible description,
   // leaves the meta out so a screen reader hears it once; the session lines
@@ -141,24 +177,23 @@ export function threadCardHeaderHtml(
   // The 📌's NAME is fixed and aria-pressed carries the state (a flipping
   // name reads "Unpin …, pressed", a double negation). Its title is the
   // visible hover, so it says the state and what a click does.
-  const pinLabel = "Pin this work thread first";
-  const pinTitle = card.pinned ? "Pinned first. Click to unpin" : pinLabel;
+  const pinTitle = card.pinned ? "Pinned first. Click to unpin" : k.pinLabel;
   return (
-    `<div class="wiki-thread-card${card.child ? " wiki-thread-child" : ""}${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" data-thread="${esc(card.foldKey)}">` +
+    `<div class="wiki-thread-card${k.kind}${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" ${k.attr}="${esc(card.foldKey)}">` +
     `<button type="button" class="wiki-thread-fold${folded ? " folded" : ""}"` +
     ` data-fold-key="${esc(card.toggleKey)}" aria-expanded="${folded ? "false" : "true"}"` +
-    ` title="${esc(hover + "\n" + why)}">` +
-    THREAD_GLYPH +
+    ` title="${esc(k.hover + "\n" + why)}">` +
+    k.glyph +
     `<span class="wiki-thread-label">` +
-    `<span class="wiki-thread-name">${esc(card.name)}</span>${SR_SEP}` +
-    `<small class="wiki-thread-meta">${threadMetaHtml(card, now, showMoves)}${card.child ? threadChildLineHtml(card.child) : ""}</small>${SR_SEP}` +
+    `<span class="wiki-thread-name">${k.name}</span>${SR_SEP}` +
+    `<small class="wiki-thread-meta">${threadMetaHtml(k.tally, from, to)}${k.line}</small>${SR_SEP}` +
     `<span class="wiki-thread-disclose"><span aria-hidden="true">${folded ? "▸" : "▾"} </span>` +
-    `${esc(threadDiscloseLabel(folded, pages))}</span>` +
+    `${esc(k.disclose)}</span>` +
     `</span>` +
     `</button>` +
     `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +
     ` data-thread-pinned="${card.pinned ? "1" : "0"}" aria-pressed="${card.pinned}"` +
-    ` aria-label="${esc(pinLabel)}" title="${esc(pinTitle)}">📌</button>` +
+    ` aria-label="${esc(k.pinLabel)}" title="${esc(pinTitle)}">📌</button>` +
     `</div>`
   );
 }
@@ -215,8 +250,9 @@ const ALSO_LABEL_MAX = 24;
 function threadChildLineHtml(child: NonNullable<RailThreadCard["child"]>): string {
   // The chip names the first series, cut to fit one line of the 260 px rail
   // (width table, src/wiki/CLAUDE.md); the hover names them all in full.
-  const first = child.also[0] ?? "";
-  const label = first.length > ALSO_LABEL_MAX ? first.slice(0, ALSO_LABEL_MAX - 1) + "…" : first;
+  // Counted and cut by code point, so an emoji is one character and never split.
+  const first = [...(child.also[0] ?? "")];
+  const label = first.length > ALSO_LABEL_MAX ? first.slice(0, ALSO_LABEL_MAX - 1).join("") + "…" : first.join("");
   const also = child.also.length
     ? ` <span class="wiki-thread-chip" title="${esc("Some of its pages are also in: " + child.also.join(", "))}">` +
       `also ${esc(label)}${child.also.length > 1 ? ` +${child.also.length - 1}` : ""}</span>`
@@ -247,60 +283,29 @@ export function threadGroupDiscloseLabel(folded: boolean, threads: number): stri
   return `${folded ? "Show" : "Hide"} ${threads} ${threads === 1 ? "thread" : "threads"}`;
 }
 
-/** A group header's tally: `N threads · M sessions · ✋ K`. */
-export function threadGroupTally(card: Pick<RailGroupCard, "threads" | "sessions" | "movesYou">, showMoves: boolean): string {
+/** A group header's tally parts: `N threads`, `M sessions`, then `✋ K`. */
+function threadGroupTallyParts(card: Pick<RailGroupCard, "threads" | "sessions" | "movesYou">, showMoves: boolean): HeaderTally {
   const s = card.sessions.length;
-  return [
-    `${card.threads} ${card.threads === 1 ? "thread" : "threads"}`,
-    `${s} ${s === 1 ? "session" : "sessions"}`,
-    showMoves && card.movesYou > 0 ? `✋ ${card.movesYou}` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  return {
+    counts: [`${card.threads} ${card.threads === 1 ? "thread" : "threads"}`, `${s} ${s === 1 ? "session" : "sessions"}`],
+    moves: showMoves && card.movesYou > 0 ? `✋ ${card.movesYou}` : "",
+  };
+}
+
+/** A group header's tally as one line, `N threads · M sessions · ✋ K` (the
+ *  replay script's form; the header draws the same parts). */
+export function threadGroupTally(card: Pick<RailGroupCard, "threads" | "sessions" | "movesYou">, showMoves: boolean): string {
+  const { counts, moves } = threadGroupTallyParts(card, showMoves);
+  return [...counts, moves].filter(Boolean).join(" · ");
 }
 
 /**
- * A GROUP card's header (D10): today's card shell, stacked, with the group
- * glyph, a kind label (`SERIES`, `RELATED`, `PROJECT`) before the name,
- * `N threads · M sessions · ✋ K` over the span, and `▸ Show N threads`. Its
- * 📌 is a separate button that pins the anchor child (or clears the pin when a
- * child holds it). The hover lists the witnesses that joined the group.
+ * A GROUP card's header (D10): `threadCardHeaderHtml`'s shell, stacked by
+ * CSS. Its 📌 pins the anchor child (or clears the pin when a child holds
+ * it); the hover lists the witnesses that joined the group.
  */
 export function threadGroupHeaderHtml(card: RailGroupCard, folded: boolean, now: number, showMoves: boolean): string {
-  const s = card.sessions.length;
-  const span = threadSpanEnds(card, now, true);
-  const hover = [card.name + (card.pinned ? " (pinned first)" : ""), ...card.witnesses].join("\n");
-  const why = folded ? "Show this group of work threads" : "Hide this group of work threads";
-  const pinLabel = "Pin this work group first";
-  const pinTitle = card.pinned ? "Pinned first. Click to unpin" : pinLabel;
-  return (
-    `<div class="wiki-thread-card wiki-thread-group${folded ? "" : " open"}${card.pinned ? " pinned" : ""}" data-section="threads" data-thread-group="${esc(card.foldKey)}">` +
-    `<button type="button" class="wiki-thread-fold${folded ? " folded" : ""}"` +
-    ` data-fold-key="${esc(card.toggleKey)}" aria-expanded="${folded ? "false" : "true"}"` +
-    ` title="${esc(hover + "\n" + why)}">` +
-    GROUP_GLYPH +
-    `<span class="wiki-thread-label">` +
-    `<span class="wiki-thread-name"><span class="wiki-thread-kind">${esc(card.label)}</span> ${esc(card.name)}</span>${SR_SEP}` +
-    `<small class="wiki-thread-meta">` +
-    `<span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">${esc(`${card.threads} ${card.threads === 1 ? "thread" : "threads"}`)}</span>` +
-    ` <span class="wiki-thread-count">· ${esc(`${s} ${s === 1 ? "session" : "sessions"}`)}</span>` +
-    (showMoves && card.movesYou > 0 ? ` <span class="wiki-thread-moves">· ${esc(`✋ ${card.movesYou}`)}</span>` : "") +
-    `</span>` +
-    (span.from
-      ? `${SR_SEP} <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">${esc(span.from)}</span>` +
-        ` <span class="wiki-thread-to">→ ${esc(span.to)}</span></span>`
-      : "") +
-    (card.anchorVisible ? "" : `${SR_SEP} <span class="wiki-thread-line wiki-thread-why">anchor outside the filters</span>`) +
-    `</small>${SR_SEP}` +
-    `<span class="wiki-thread-disclose"><span aria-hidden="true">${folded ? "▸" : "▾"} </span>` +
-    `${esc(threadGroupDiscloseLabel(folded, card.threads))}</span>` +
-    `</span>` +
-    `</button>` +
-    `<button type="button" class="wiki-thread-pin${card.pinned ? " on" : ""}" data-thread-pin="${esc(card.pinAnchor)}"` +
-    ` data-thread-pinned="${card.pinned ? "1" : "0"}" aria-pressed="${card.pinned}"` +
-    ` aria-label="${esc(pinLabel)}" title="${esc(pinTitle)}">📌</button>` +
-    `</div>`
-  );
+  return threadCardHeaderHtml(card, folded, now, showMoves);
 }
 
 /** An open group's body opens here; `threadGroupEndHtml` closes it. */

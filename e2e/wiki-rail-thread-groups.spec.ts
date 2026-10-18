@@ -660,6 +660,30 @@ test.describe("Wiki rail: grouped work threads", () => {
     expect(await stored(page, GROUPS)).toBeNull();
   });
 
+  test("forced colours drop the shadows: an open group's body and a closed group's stack keep a real border", async ({ page }) => {
+    await page.emulateMedia({ forcedColors: "active" });
+    await openReader(page);
+    const edges = (sel: string) =>
+      page.locator(sel).evaluate((e) => {
+        const s = getComputedStyle(e);
+        const side = (k: "Left" | "Right" | "Bottom") => `${s.getPropertyValue(`border-${k.toLowerCase()}-style`)} ${s.getPropertyValue(`border-${k.toLowerCase()}-width`)}`;
+        return { shadow: s.boxShadow, left: side("Left"), right: side("Right"), bottom: side("Bottom") };
+      });
+    // The open series group: its body's outline was a box shadow, gone here.
+    const gbody = await edges(`.wiki-thread-gbody[data-thread-group-body="group:series:alpha"]`);
+    expect.soft(gbody.shadow).toBe("none");
+    for (const side of [gbody.left, gbody.right, gbody.bottom]) expect.soft(side).toBe("solid 2px");
+    // The closed related group: its stack was a box shadow; a double edge stands in.
+    await expect(groupCard(page, `group:anchor:${REL1}`)).not.toHaveClass(/\bopen\b/);
+    const stack = await edges(`#wikiList > .wiki-thread-card[data-thread-group="group:anchor:${REL1}"]`);
+    expect.soft(stack.shadow).toBe("none");
+    expect.soft(stack.right).toBe("double 3px");
+    expect.soft(stack.bottom).toBe("double 3px");
+    // A closed thread card is not stacked.
+    const solo = await edges(`#wikiList > .wiki-thread-card[data-thread="thread:${SOLO[0]}"]`);
+    expect.soft(solo.right).toBe("solid 1px");
+  });
+
   test("facets apply before the cap and never rename a group; a hidden anchor says so", async ({ page }) => {
     await openReader(page);
     // folder=notes: the alpha group and rel-1 (the anchor, in misc/) are out.

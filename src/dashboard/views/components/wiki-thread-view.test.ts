@@ -421,3 +421,73 @@ describe("the Group control and menu", () => {
     expect(html).not.toContain("undefined");
   });
 });
+
+// ── PR #704 fix round 1, batch 5 ──────────────────────────────────────────────
+
+describe("the also chip cuts by code points", () => {
+  const chip = (label: string) => {
+    const html = threadCardHeaderHtml(card({ child: { anchor: false, why: "", witnesses: [], also: [label] } }), true, NOW, true);
+    return /<span class="wiki-thread-chip"[^>]*>also (.*?)<\/span>/.exec(html)![1]!;
+  };
+  test("a cut never splits a surrogate pair", () => {
+    const text = chip("abcdefghijklmnopqrstuv😀xyz");
+    expect(text).toBe("abcdefghijklmnopqrstuv😀…");
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)).toBe(false);
+  });
+  test("the 24-character budget counts characters, not UTF-16 code units", () => {
+    // 23 letters and one emoji: 24 characters, 25 code units, so it fits whole.
+    expect(chip("abcdefghijklmnopqrstuvw😀")).toBe("abcdefghijklmnopqrstuvw😀");
+    expect(chip("abcdefghijklmnopqrstuvwx")).toBe("abcdefghijklmnopqrstuvwx");
+    expect(chip("abcdefghijklmnopqrstuvwxy")).toBe("abcdefghijklmnopqrstuvw…");
+  });
+});
+
+describe("one shell for the thread card and the group card", () => {
+  test("today's thread card is byte-identical to the markup before the shared shell", () => {
+    // Rendered at 5e17530d: 768 cards over folded × pinned × ✋ × sessions ×
+    // child line × pages × movesYou, hashed, plus one card in full.
+    const SESS = [card().sessions, [], [card().sessions[0]!]];
+    const CHILD: RailThreadCard["child"][] = [
+      undefined,
+      { anchor: true, why: "anchor", witnesses: [], also: [] },
+      { anchor: false, why: "↔ 5 links · ABC-1 · series", witnesses: ["A ↔ B"], also: ["Beta <b>", "Gamma"] },
+      { anchor: false, why: "", witnesses: [], also: ["A long series label that names a whole piece of work"] },
+    ];
+    const out: string[] = [];
+    for (const folded of [true, false])
+      for (const pinned of [true, false])
+        for (const showMoves of [true, false])
+          for (const sessions of SESS)
+            for (const child of CHILD)
+              for (const pages of [undefined, 0, 1, 3])
+                for (const movesYou of [0, 18])
+                  out.push(threadCardHeaderHtml(card({ pinned, sessions, child, movesYou }), folded, NOW, showMoves, pages));
+    expect(out.length).toBe(768);
+    expect(new Bun.CryptoHasher("sha256").update(out.join("\n")).digest("hex")).toBe(
+      "b89ecc0329bb6714af42b26c51f66cc53fb4426dd7d6f3210450b1218cd1853a",
+    );
+    expect(threadCardHeaderHtml(card({ pinned: true }), false, NOW, true, 2)).toBe(
+      `<div class="wiki-thread-card open pinned" data-section="threads" data-thread="thread:plans/a.mdx"><button type="button" class="wiki-thread-fold" data-fold-key="closed:thread:plans/a.mdx" aria-expanded="true" title="Alpha &lt;work&gt; (pinned first)\n• Second (claude), yesterday 20:00 → yesterday 21:26\n• s1 (opencode), mon 12.10 15:04 → mon 12.10 16:00\nHide this work thread"><svg class="wiki-thread-glyph" viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3.5 1.5v11"/><circle cx="3.5" cy="3" r="1.6" fill="currentColor"/><circle cx="3.5" cy="7" r="1.6" fill="currentColor"/><circle cx="3.5" cy="11" r="1.6" fill="currentColor"/><path d="M7 3h5.5M7 7h4M7 11h5"/></svg><span class="wiki-thread-label"><span class="wiki-thread-name">Alpha &lt;work&gt;</span><span class="wiki-sr-only"> · </span><small class="wiki-thread-meta"><span class="wiki-thread-line wiki-thread-tally"><span class="wiki-thread-count">2 sessions</span> <span class="wiki-thread-moves">· ✋ 18</span></span><span class="wiki-sr-only"> · </span> <span class="wiki-thread-line wiki-thread-span"><span class="wiki-thread-from">12.10 15:04</span> <span class="wiki-thread-to">→ yesterday 21:26</span></span></small><span class="wiki-sr-only"> · </span><span class="wiki-thread-disclose"><span aria-hidden="true">▾ </span>Hide 2 pages</span></span></button><button type="button" class="wiki-thread-pin on" data-thread-pin="plans/a.mdx" data-thread-pinned="1" aria-pressed="true" aria-label="Pin this work thread first" title="Pinned first. Click to unpin">📌</button></div>`,
+    );
+  });
+
+  test("the group header is threadCardHeaderHtml given a group card", () => {
+    for (const folded of [true, false])
+      for (const showMoves of [true, false])
+        for (const over of [{}, { pinned: true }, { anchorVisible: false }, { threads: 1, movesYou: 0 }, { sessions: [] }] as Partial<RailGroupCard>[]) {
+          const g = groupCard(over);
+          expect(threadCardHeaderHtml(g, folded, NOW, showMoves, g.threads)).toBe(threadGroupHeaderHtml(g, folded, NOW, showMoves));
+        }
+  });
+
+  test("the rendered tally is threadGroupTally's, for every input", () => {
+    const text = (html: string) => /<span class="wiki-thread-line wiki-thread-tally">(.*?)<\/span><\/span>(?:<span class="wiki-sr-only">|<\/small>)/.exec(html)![1]!.replace(/<[^>]+>/g, "");
+    for (const threads of [0, 1, 2, 12])
+      for (const sessions of [[], groupCard().sessions.slice(0, 1), groupCard().sessions])
+        for (const movesYou of [0, 1, 26])
+          for (const showMoves of [true, false]) {
+            const g = groupCard({ threads, sessions, movesYou });
+            expect(text(threadGroupHeaderHtml(g, true, NOW, showMoves))).toBe(threadGroupTally(g, showMoves));
+          }
+  });
+});
