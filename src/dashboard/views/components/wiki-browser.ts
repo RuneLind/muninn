@@ -3739,8 +3739,8 @@ interface SeriesMenuState {
   /** The control that opened it — focus goes back there on every close, because
    *  a keyboard reader who dismisses a menu must not be returned to `<body>`. */
   opener: HTMLElement | null;
-  /** The opener as a rail selector by its key, taken at open time (a repaint
-   *  detaches the node); null for an opener outside the rail. */
+  /** The opener as a selector by its key, taken at open time (a repaint
+   *  detaches the node); see `seriesOpenerSel`. */
   openerSel: string | null;
   /** relPath → the page's content hash as of OPEN time. A target missing from
    *  this map is one whose read failed; its write is refused rather than sent
@@ -3763,21 +3763,74 @@ function seriesMenuEl(): HTMLElement | null {
   return document.getElementById(SERIES_MENU_ID);
 }
 
-/** Close the popover, returning focus to whatever opened it.
- *
- *  `focus: false` is for the close that IMMEDIATELY precedes opening another
- *  menu (the toggle path) — the new popover takes focus itself, and returning
- *  it to the old opener in between fights that. `preventScroll` because the
- *  opener may have been scrolled out of view by the reader in the meantime. */
-function closeSeriesMenu(opts: { focus?: boolean } = {}): void {
+// ── Where focus goes when a body-level popover closes ─────────────────
+//
+// Both popovers — `#wikiSeriesMenu` (every series menu, a thread row's page
+// menu included) and `#wikiWorkPop` (a card's or a read-only row's ⋯) — close
+// through ONE function each, `closeSeriesMenu(cause)` / `closeWorkPop(cause)`,
+// and the cause alone decides focus (`popCloseReturnsFocus`):
+//
+//   cause     when                                         focus
+//   key       Escape; Tab (work popover)                   the opener (*)
+//   toggle    its own opener clicked or pressed again      the opener (*)
+//   done      Cancel; a series write that closed the menu  the opener (*) if focus
+//                                                          was in the popover or on <body>
+//   edit      a boundary item (Make own thread, Return,    none here: applyBoundaryEdit's
+//             Keep separate, Allow grouping)               per-edit table
+//   replace   another popover opening                      none: the new one takes it
+//   outside   a click anywhere else                        none: where the click put it
+//   viewport  a scroll that moves the opener; a resize     none, unless focus was IN the
+//                                                          popover: then the opener (*)
+//
+// (*) the opener node while connected; after a repaint, its replacement by
+// key (`openerSel`); then the card holding the page; then the Group button.
+// A repaint while a popover is open closes nothing: the popover is
+// body-level and keeps its own focus.
+
+/** Why a ⋯ popover closes — the one input to where focus goes. */
+type PopCloseCause = "key" | "toggle" | "done" | "edit" | "replace" | "outside" | "viewport";
+
+/** Whether `cause` returns focus to the opener, judged BEFORE `el` is removed
+ *  (removing a node that holds focus drops it to `<body>`). */
+function popCloseReturnsFocus(cause: PopCloseCause, el: HTMLElement | null): boolean {
+  const a = document.activeElement;
+  const inside = !!el && !!a && el.contains(a);
+  if (cause === "key" || cause === "toggle") return true;
+  if (cause === "done") return inside || !a || a === document.body;
+  if (cause === "viewport") return inside;
+  return false;
+}
+
+/** Focus a closed popover's opener: the node, its replacement by key, the
+ *  card holding `page`, the Group button. */
+function focusPopOpener(opener: HTMLElement | null, openerSel: string | null, page: string): void {
+  if (opener?.isConnected) opener.focus({ preventScroll: true });
+  else focusFirstRailControl([openerSel, workCardControlSel(page, "menu")]);
+}
+
+/** A series opener as a selector by its key, for a repaint that replaces it:
+ *  the rail's own selector for a rail control, else the opener's attribute
+ *  and page inside its nearest container with an id (a plain rail row, the
+ *  Related work block, the article header). */
+function seriesOpenerSel(anchor: HTMLElement): string | null {
+  const rail = railControlSelector(anchor);
+  if (rail) return rail;
+  const attr = anchor.hasAttribute(SERIES_EDIT_ATTR) ? SERIES_EDIT_ATTR : anchor.hasAttribute(SERIES_MENU_ATTR) ? SERIES_MENU_ATTR : null;
+  if (!attr) return null;
+  const box = anchor.parentElement?.closest<HTMLElement>("[id]");
+  const scope = box?.id === "wikiList" ? "#wikiList .wiki-list-item:not(.thread-row)" : box ? `#${CSS.escape(box.id)}` : "";
+  return `${scope} [${attr}="${CSS.escape(anchor.getAttribute(attr) ?? "")}"]`.trim();
+}
+
+/** Close the series popover; focus per the table above. `preventScroll`
+ *  because the opener may have been scrolled out of view in the meantime. */
+function closeSeriesMenu(cause: PopCloseCause): void {
   const was = seriesMenu;
-  seriesMenuEl()?.remove();
+  const el = seriesMenuEl();
+  const refocus = popCloseReturnsFocus(cause, el);
+  el?.remove();
   seriesMenu = null;
-  if (opts.focus === false || !was?.opener) return;
-  if (was.opener.isConnected) was.opener.focus({ preventScroll: true });
-  // A rail opener a repaint replaced: the new one by its key, then the card
-  // holding the page, as the work popover does.
-  else if (was.openerSel) focusFirstRailControl([was.openerSel, workCardControlSel(was.model.relPath, "menu")]);
+  if (refocus && was?.opener) focusPopOpener(was.opener, was.openerSel, was.model.relPath);
 }
 
 /** The popover node, positioned under `anchor`. Shared by the real menu and by
@@ -3806,7 +3859,7 @@ function paintSeriesMenuEl(anchor: HTMLElement, html: string): HTMLElement {
 function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): void {
   // A Save as series write in flight keeps its popover, the one ⋯ open.
   if (workPopBusy()) return;
-  closeSeriesMenu({ focus: false });
+  closeSeriesMenu("replace");
   if (!seriesEditable()) return;
   const model = buildSeriesMenu(allPages, relPath, recencyNow());
   if (!model) {
@@ -3832,7 +3885,7 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
     edit,
     busy: false,
     opener: anchor,
-    openerSel: railControlSelector(anchor),
+    openerSel: seriesOpenerSel(anchor),
     bases: new Map(),
     basesReady: Promise.resolve(),
     staleBases: false,
@@ -4015,7 +4068,7 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
     // Keyed to THIS sequence's menu, as the note setter is: the reader can
     // have dismissed this popover and opened another while the write was in
     // flight, and that one is theirs to keep.
-    if (seriesMenu === state) closeSeriesMenu({ focus: false });
+    if (seriesMenu === state) closeSeriesMenu("done");
   } finally {
     state.busy = false;
   }
@@ -4069,7 +4122,7 @@ function repaintSeriesHead(): void {
 }
 
 document.addEventListener("keydown", (e) => {
-  if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu();
+  if ((e as KeyboardEvent).key === "Escape" && seriesMenuEl()) closeSeriesMenu("key");
 });
 // Closed rather than re-anchored — see the block comment above. `capture` so a
 // scroll inside the RAIL (which does not bubble) is seen too; the popover's own
@@ -4081,11 +4134,11 @@ window.addEventListener(
     const el = seriesMenuEl();
     const target = e.target as Node | null;
     if (el && target && (target === el || el.contains(target))) return;
-    closeSeriesMenu({ focus: false });
+    closeSeriesMenu("viewport");
   },
   true,
 );
-window.addEventListener("resize", () => closeSeriesMenu({ focus: false }));
+window.addEventListener("resize", () => closeSeriesMenu("viewport"));
 
 /** The popover's own delegate, on its node, so the shell's document listeners
  *  carry no branch for it and a click inside it never reaches the rail's
@@ -4127,12 +4180,12 @@ document.addEventListener("click", (e) => {
     const edit = opener.hasAttribute(SERIES_EDIT_ATTR);
     const rel = opener.getAttribute(edit ? SERIES_EDIT_ATTR : SERIES_MENU_ATTR) || "";
     const wasOpen = !!seriesMenu && seriesMenu.model.relPath === rel && seriesMenu.edit === edit;
-    closeSeriesMenu({ focus: false });
+    closeSeriesMenu(wasOpen ? "toggle" : "replace");
     if (!wasOpen && rel) openSeriesMenu(opener, rel, edit);
     return;
   }
-  // Any other click dismisses.
-  if (menuEl) closeSeriesMenu();
+  // Any other click dismisses, and leaves focus where the click put it.
+  if (menuEl) closeSeriesMenu("outside");
 });
 
 document.addEventListener("submit", (e) => {
@@ -5266,19 +5319,19 @@ function workPopBusy(): boolean {
   return !!workPop?.series?.busy;
 }
 
-/** Close the work popover; `focus` returns focus to its opener (by key, the
- *  opener may have been repainted). Refused while a Save as series write is in
- *  flight (its report lands in this popover). */
-function closeWorkPop(focus = true): void {
+/** Close the work popover; focus per the table at `PopCloseCause`. Refused
+ *  while a Save as series write is in flight (its report lands in this
+ *  popover). */
+function closeWorkPop(cause: PopCloseCause): void {
   if (workPopBusy()) return;
   const was = workPop;
-  workPopEl()?.remove();
+  const el = workPopEl();
+  const refocus = popCloseReturnsFocus(cause, el);
+  el?.remove();
   workPop = null;
   if (!was) return;
   was.opener.setAttribute("aria-expanded", "false");
-  if (!focus) return;
-  if (was.opener.isConnected) was.opener.focus({ preventScroll: true });
-  else focusFirstRailControl([was.openerSel, workCardControlSel(was.page, "menu")]);
+  if (refocus) focusPopOpener(was.opener, was.openerSel, was.page);
 }
 
 /** Focus the first selector that finds a rail control; the Group button when
@@ -5323,8 +5376,8 @@ function workCardControlSel(page: string | undefined, prefer: "menu" | "fold"): 
  *  Refused while a Save as series write runs: the one guard for every ⋯. */
 function openWorkPop(anchor: HTMLElement, key: string, html: string, label: string, page: string): HTMLElement | null {
   if (workPopBusy()) return null;
-  closeWorkPop(false);
-  closeSeriesMenu({ focus: false });
+  closeWorkPop("replace");
+  closeSeriesMenu("replace");
   const el = document.createElement("div");
   el.id = WORK_POP_ID;
   el.className = "wiki-series-menu wiki-work-pop";
@@ -5367,8 +5420,8 @@ function newSplitId(): string {
  *  BEFORE the render detaches it), then to the Group button. */
 function applyBoundaryEdit(edit: WorkGroupEdit, focus: { page: string; prefer: "menu" | "fold"; first?: "card" | "opener"; sel?: string }): void {
   const openerSel = workPop?.openerSel ?? railControlSelector(seriesMenu?.opener ?? null);
-  closeWorkPop(false);
-  closeSeriesMenu({ focus: false });
+  closeWorkPop("edit");
+  closeSeriesMenu("edit");
   editWorkGroup(edit);
   // Another tab filled the list after this menu opened: say so, not nothing.
   // An edit that lands clears the note.
@@ -5581,7 +5634,7 @@ async function runSaveAsSeries(): Promise<void> {
       return;
     }
     st.busy = false;
-    if (workPop === state) closeWorkPop(false);
+    if (workPop === state) closeWorkPop("done");
     carryGroupFold(anchorKey, wasOpen);
   } catch (err) {
     // Anything unforeseen still unlocks and reports; what landed is unknown.
@@ -5613,7 +5666,7 @@ function carryGroupFold(anchorKey: string, wasOpen: boolean): void {
 function openWorkCardMenu(btn: HTMLElement): void {
   const key = btn.getAttribute("data-work-card-menu") ?? "";
   if (workPop?.key === `card:${key}`) {
-    closeWorkPop();
+    closeWorkPop("toggle");
     return;
   }
   const card = drawnWorkCard(key);
@@ -5627,7 +5680,7 @@ function openWorkCardMenu(btn: HTMLElement): void {
 function openThreadRowMenu(btn: HTMLElement): void {
   const rel = btn.getAttribute("data-thread-row-menu") ?? "";
   if (workPop?.key === `row:${rel}`) {
-    closeWorkPop();
+    closeWorkPop("toggle");
     return;
   }
   const html = rowMenuItemHtml(rel);
@@ -5664,15 +5717,15 @@ document.addEventListener("click", (e) => {
     }
     if (target.closest("[data-work-series-cancel]")) {
       e.preventDefault();
-      closeWorkPop();
+      closeWorkPop("done");
     }
     return;
   }
   // Refused while a write runs (`closeWorkPop`): its report lands here.
-  if (el && !target.closest("[data-work-card-menu], [data-thread-row-menu]")) closeWorkPop(false);
+  if (el && !target.closest("[data-work-card-menu], [data-thread-row-menu]")) closeWorkPop("outside");
 });
 document.addEventListener("keydown", (e) => {
-  if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop();
+  if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop("key");
 });
 // The arrows, Home and End move between the items of two body-level menus —
 // the ⋯ work popover and a thread row's page menu (`#wikiSeriesMenu` opened
@@ -5690,7 +5743,7 @@ document.addEventListener("keydown", (e) => {
   if (!el || el.getAttribute("role") !== "menu") return;
   if (work && e.key === "Tab") {
     e.preventDefault();
-    closeWorkPop();
+    closeWorkPop("key");
     return;
   }
   if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
@@ -5727,11 +5780,11 @@ window.addEventListener(
     const anchor = opener.isConnected ? opener : openerSel ? document.querySelector(openerSel) : null;
     const r = anchor?.getBoundingClientRect();
     if (r && Math.abs(r.top - at.top) < 1 && Math.abs(r.left - at.left) < 1) return;
-    closeWorkPop(false);
+    closeWorkPop("viewport");
   },
   true,
 );
-window.addEventListener("resize", () => closeWorkPop(false));
+window.addEventListener("resize", () => closeWorkPop("viewport"));
 
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;

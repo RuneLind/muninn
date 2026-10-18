@@ -1506,3 +1506,234 @@ test.describe("Wiki rail: reset-area focus (class check)", () => {
     });
   }
 });
+
+/**
+ * Class check (round 3): where focus goes when a ⋯ popover closes. One row per
+ * reachable cell of cause × opener state × popover; the table itself is the
+ * comment at `PopCloseCause` in `wiki-browser.ts`. A key close returns focus
+ * to the opener (re-found by key after a repaint); a click elsewhere never
+ * moves it; a scroll or resize moves it only out of the removed popover.
+ */
+test.describe("Wiki rail: popover close focus (class check)", () => {
+  type Pop = "page menu" | "work popover";
+  const MENU = { "page menu": "#wikiSeriesMenu", "work popover": "#wikiWorkPop" } as const;
+  const pageOpener = (page: Page) => threadRow(page, TSPLIT).locator("[data-series-menu]");
+  const workOpener = (page: Page) => card(page, TKEY).locator("> .wiki-thread-acts [data-work-card-menu]");
+  const opener = (page: Page, pop: Pop) => (pop === "page menu" ? pageOpener(page) : workOpener(page));
+  const search = (page: Page) => page.locator("#wikiSearch");
+  const loneFold = (page: Page) => card(page, LONE).locator(":scope > .wiki-thread-fold");
+  const rail = (page: Page) => page.locator("#wikiList");
+
+  /** Another tab's edit that moves no card: the rail repaints in place. True
+   *  when the opener node was replaced. */
+  const repaint = (page: Page, pop: Pop) =>
+    page.evaluate(
+      ([k, s]) => {
+        const r = JSON.parse(localStorage.getItem(k!) ?? '{"version":1}');
+        r.evidence = { issue: !(r.evidence?.issue ?? false) };
+        const v = JSON.stringify(r);
+        localStorage.setItem(k!, v);
+        const before = document.querySelector(s!);
+        window.dispatchEvent(new StorageEvent("storage", { key: k!, newValue: v, storageArea: localStorage }));
+        return !!before && !before.isConnected;
+      },
+      [workGroupKey(B), pop === "page menu" ? `#wikiList .wiki-list-item.thread-row[data-relpath="${TSPLIT}"] [data-series-menu]` : `#wikiList [data-work-card-menu="thread:${TKEY}"]`] as const,
+    );
+
+  /** Scroll the rail by 20 px, the opener with it. */
+  const scrollRail = (page: Page) =>
+    rail(page).evaluate((list) => {
+      list.scrollTop += list.scrollTop >= 20 ? -20 : 20;
+    });
+
+  /** Open `pop` from its opener by keyboard; focus lands on its first item. */
+  async function open(page: Page, pop: Pop): Promise<void> {
+    const o = opener(page, pop);
+    await o.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(150);
+    await o.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(MENU[pop])).toHaveCount(1);
+    await expect(page.locator(`${MENU[pop]} [role="menuitem"]`).first()).toBeFocused();
+  }
+
+  type Row = { name: string; pop: Pop; act: (page: Page) => Promise<unknown>; focus: (page: Page) => ReturnType<Page["locator"]> | "body"; open?: boolean };
+  const both = (f: (pop: Pop) => Row[]): Row[] => [...f("page menu"), ...f("work popover")];
+  const rows: Row[] = [
+    ...both((pop) => [
+      { name: "Escape", pop, act: (p) => p.keyboard.press("Escape"), focus: (p) => opener(p, pop) },
+      {
+        name: "Escape after a repaint: the opener by its key",
+        pop,
+        act: async (p) => {
+          expect(await repaint(p, pop)).toBe(true);
+          await expect(p.locator(MENU[pop])).toHaveCount(1);
+          await p.keyboard.press("Escape");
+        },
+        focus: (p) => opener(p, pop),
+      },
+      {
+        name: "its opener clicked again",
+        pop,
+        act: async (p) => {
+          // The row's ⋯ shows on hover; with focus in the menu it is hidden.
+          if (pop === "page menu") await threadRow(p, TSPLIT).hover();
+          await opener(p, pop).click();
+        },
+        focus: (p) => opener(p, pop),
+      },
+      { name: "outside click on another card's fold: that fold", pop, act: (p) => loneFold(p).click(), focus: loneFold },
+      {
+        name: "outside click on another card's fold after a repaint: that fold",
+        pop,
+        act: async (p) => {
+          expect(await repaint(p, pop)).toBe(true);
+          await loneFold(p).click();
+        },
+        focus: loneFold,
+      },
+      { name: "outside click into the search box", pop, act: (p) => search(p).click(), focus: search },
+      {
+        name: "outside click into the search box after a repaint",
+        pop,
+        act: async (p) => {
+          expect(await repaint(p, pop)).toBe(true);
+          await search(p).click();
+        },
+        focus: search,
+      },
+      { name: "outside click on the page body", pop, act: (p) => p.mouse.click(1000, 300), focus: () => "body" },
+      { name: "a rail scroll with focus in the popover: the opener", pop, act: scrollRail, focus: (p) => opener(p, pop) },
+      {
+        name: "a rail scroll with focus outside the popover: focus stays",
+        pop,
+        act: async (p) => {
+          await search(p).focus();
+          await expect(p.locator(MENU[pop])).toHaveCount(1);
+          await scrollRail(p);
+        },
+        focus: search,
+      },
+      {
+        name: "a rail scroll after a repaint with focus in the popover: the opener by its key",
+        pop,
+        act: async (p) => {
+          expect(await repaint(p, pop)).toBe(true);
+          await scrollRail(p);
+        },
+        focus: (p) => opener(p, pop),
+      },
+      { name: "a resize with focus in the popover: the opener", pop, act: (p) => p.setViewportSize({ width: 1200, height: 400 }), focus: (p) => opener(p, pop) },
+      {
+        name: "a resize with focus outside the popover: focus stays",
+        pop,
+        act: async (p) => {
+          await search(p).focus();
+          await p.setViewportSize({ width: 1200, height: 400 });
+        },
+        focus: search,
+      },
+      {
+        name: "a repaint closes nothing and keeps the popover's own focus",
+        pop,
+        act: async (p) => expect(await repaint(p, pop)).toBe(true),
+        focus: (p) => p.locator(`${MENU[pop]} [role="menuitem"]`).first(),
+        open: true,
+      },
+    ]),
+    { name: "Tab: the opener", pop: "work popover", act: (p) => p.keyboard.press("Tab"), focus: workOpener },
+    { name: "Shift+Tab: the opener", pop: "work popover", act: (p) => p.keyboard.press("Shift+Tab"), focus: workOpener },
+    {
+      name: "Tab after a repaint: the opener by its key",
+      pop: "work popover",
+      act: async (p) => {
+        expect(await repaint(p, "work popover")).toBe(true);
+        await p.keyboard.press("Tab");
+      },
+      focus: workOpener,
+    },
+    {
+      // The verify pass's survivor: the scroll handler measures the opener
+      // the repaint put in place, not the detached node.
+      name: "a repaint, then a scroll that does not move the opener: the popover stays",
+      pop: "work popover",
+      act: async (p) => {
+        expect(await repaint(p, "work popover")).toBe(true);
+        await p.evaluate(() => document.dispatchEvent(new Event("scroll")));
+        await p.waitForTimeout(100);
+      },
+      focus: (p) => p.locator("#wikiWorkPop [data-work-keep]"),
+      open: true,
+    },
+    { name: "Make own thread: the split card's fold", pop: "page menu", act: (p) => p.keyboard.press("Enter"), focus: (p) => card(p, TSPLIT).locator(":scope > .wiki-thread-fold") },
+    { name: "Keep separate: the kept-apart card's ⋯", pop: "work popover", act: (p) => p.keyboard.press("Enter"), focus: workOpener },
+  ];
+
+  for (const row of rows) {
+    test(`${row.pop}: ${row.name}`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 420 });
+      await openReader(page);
+      const room = await rail(page).evaluate((l) => l.scrollHeight - l.clientHeight);
+      expect(room).toBeGreaterThanOrEqual(20);
+      await open(page, row.pop);
+      await row.act(page);
+      await expect(page.locator(MENU[row.pop])).toHaveCount(row.open ? 1 : 0);
+      const want = row.focus(page);
+      if (want === "body") {
+        expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+      } else {
+        await expect(want).toBeFocused();
+      }
+    });
+  }
+
+  // The probe scenarios, from a split card's row (its page menu's opener
+  // sits in a card a fold click repaints).
+  async function splitAndOpenRow(page: Page): Promise<void> {
+    await openReader(page);
+    await rowMenu(page, TSPLIT);
+    await page.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect(card(page, TSPLIT)).toHaveCount(1);
+    const sf = card(page, TSPLIT).locator(":scope > .wiki-thread-fold");
+    if ((await sf.getAttribute("aria-expanded")) !== "true") await sf.click();
+    await expect(threadRow(page, TSPLIT)).toHaveCount(1);
+    await rowMenu(page, TSPLIT);
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(1);
+  }
+
+  test("probe 1: another card's fold clicked with a split row's page menu open keeps focus on that fold", async ({ page }) => {
+    await splitAndOpenRow(page);
+    const other = card(page, TKEY).locator(":scope > .wiki-thread-fold");
+    await other.click();
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+    await expect(other).toBeFocused();
+  });
+
+  test("probe 2: a click into the search box after a repaint with the page menu open keeps focus in the search box", async ({ page }) => {
+    await splitAndOpenRow(page);
+    expect(await repaint(page, "page menu")).toBe(true);
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(1);
+    await search(page).click();
+    await expect(page.locator("#wikiSeriesMenu")).toHaveCount(0);
+    await expect(search(page)).toBeFocused();
+    await page.keyboard.type("zz");
+    await expect(search(page)).toHaveValue("zz");
+  });
+
+  // The verify pass's survivor: Home in the arrow-key delegate. A page menu
+  // with an item between its boundary item and its field: the series wiki's
+  // `other` join item.
+  test("Home in a page menu moves to its first item", async ({ page }) => {
+    await openReader(page, ST);
+    const row = page.locator(`#wikiList .wiki-list-item.thread-row[data-relpath="${LA}"]`);
+    await row.locator("[data-series-menu]").focus();
+    await page.keyboard.press("Enter");
+    const items = page.locator("#wikiSeriesMenu [role^='menuitem']");
+    await expect(items.first()).toBeFocused();
+    expect(await items.count()).toBeGreaterThanOrEqual(2);
+    await page.keyboard.press("ArrowDown");
+    await expect(items.nth(1)).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(items.first()).toBeFocused();
+  });
+});
