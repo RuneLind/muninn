@@ -185,7 +185,7 @@ describe("the wrappers keep their old answers", () => {
     normalizeMeterTone: (t?: string) => (t === "good" || t === "warn" || t === "bad" ? t : "default"),
     normalizeFactVerdict: (value?: string) => {
       if (!value) return "unknown";
-      const v = value.replace(/️/g, "").trim().toLowerCase();
+      const v = value.replace(/\uFE0F/g, "").trim().toLowerCase();
       if (v === "ok" || v === "✅") return "ok";
       if (v === "warn" || v === "⚠") return "warn";
       if (v === "bad" || v === "❌") return "bad";
@@ -213,4 +213,12 @@ test("every ComponentName has a spec entry", () => {
   const n: ComponentName = "Callout";
   expect(COMPONENT_SPEC[n]).toBeDefined();
   expect(COMPONENT_NAMES.length).toBe(30);
+});
+
+test("a VS16 in a regex is written as the \\uFE0F escape, not the invisible character", async () => {
+  for (const file of ["component-spec.ts", "component-spec.test.ts"]) {
+    const src = await Bun.file(`${import.meta.dir}/${file}`).text();
+    expect({ file, raw: /\.replace\(\/[^/\n]*\uFE0F/.test(src) }).toEqual({ file, raw: false });
+    expect({ file, escaped: src.includes(".replace(/\\uFE0F/g") }).toEqual({ file, escaped: true });
+  }
 });

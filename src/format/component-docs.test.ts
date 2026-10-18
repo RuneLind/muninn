@@ -1,21 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { COMPONENT_DOCS, attrTeach, type ComponentDoc } from "./component-docs.ts";
+import { COMPONENT_DOCS, attrAliasFor, attrTeach, hintFor, suggestFor, type ComponentDoc } from "./component-docs.ts";
 import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName } from "./component-spec.ts";
 import { COMPONENT_VOCABULARY_RULES } from "../research/answer.ts";
 
 const docs = COMPONENT_DOCS as Record<ComponentName, ComponentDoc>;
 const attrSpec = (name: ComponentName, attr: string) => (COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>)[attr]!;
 
-test("loads first in a fresh process without a ReferenceError", () => {
-  // A fresh `bun` process, so the import order is this file's alone and no
-  // other test file has loaded component-spec.ts first.
-  const proc = Bun.spawnSync(
-    ["bun", "-e", `const d = await import(${JSON.stringify(`${import.meta.dir}/component-docs.ts`)}); console.log(Object.keys(d.COMPONENT_DOCS).length);`],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  expect(proc.stderr.toString()).toBe("");
-  expect(proc.exitCode).toBe(0);
-  expect(proc.stdout.toString().trim()).toBe("30");
+const runtimeImports = async (file: string) =>
+  new Bun.Transpiler({ loader: "ts" }).scanImports(await Bun.file(`${import.meta.dir}/${file}`).text()).map((i) => i.path).sort();
+
+// component-spec.ts is bundled for the browser and imported by markdown-ast.ts,
+// so a runtime import back into the renderer would be a cycle. Type-only
+// imports are erased and `scanImports` leaves them out.
+test("component-spec.ts imports only calendar-day.ts at runtime", async () => {
+  expect(await runtimeImports("component-spec.ts")).toEqual(["./calendar-day.ts"]);
+  expect(await runtimeImports("calendar-day.ts")).toEqual([]);
+});
+
+test("component-docs.ts imports nothing at runtime but component-spec.ts", async () => {
+  for (const path of await runtimeImports("component-docs.ts")) expect(path).toBe("./component-spec.ts");
 });
 
 test("documents every component, and only spec attributes", () => {
@@ -68,5 +71,16 @@ describe("hints", () => {
     expect(docs.Lane.attrs!.kind!.suggest).toEqual({ next: "waiting" });
     expect(docs.Verdict.attrs!.value!.hint!.maybe).toContain("warn Callout");
     expect(docs.Verdict.attrs!.value!.suggest).toBeUndefined();
+  });
+
+  test("a raw value that names an Object.prototype member finds nothing", () => {
+    expect(suggestFor("Callout", "tone", "caution")).toBe("warn");
+    expect(hintFor("Verdict", "value", "maybe")).toContain("warn Callout");
+    expect(attrAliasFor("Callout", "type")).toBe("tone");
+    for (const raw of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+      expect({ raw, at: suggestFor("Callout", "tone", raw) }).toEqual({ raw, at: undefined });
+      expect({ raw, at: hintFor("Verdict", "value", raw) }).toEqual({ raw, at: undefined });
+      expect({ raw, at: attrAliasFor("Callout", raw) }).toEqual({ raw, at: undefined });
+    }
   });
 });

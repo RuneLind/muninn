@@ -125,7 +125,7 @@ export type FactVerdict = (typeof FACT_VERDICTS)[number];
 
 export function readFactVerdict(raw: string | undefined): AttrRead<FactVerdict> {
   if (raw === undefined) return { value: "unknown", fellBack: false };
-  const v = raw.replace(/️/g, "").trim().toLowerCase();
+  const v = raw.replace(/\uFE0F/g, "").trim().toLowerCase();
   if (v === "ok" || v === "✅") return { value: "ok", fellBack: false };
   if (v === "warn" || v === "⚠") return { value: "warn", fellBack: false };
   if (v === "bad" || v === "❌") return { value: "bad", fellBack: false };

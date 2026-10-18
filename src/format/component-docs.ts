@@ -92,8 +92,35 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
   StatusRows: { doc: "A list of `**Label:** value` status rows.", teach: WIKI },
 };
 
+/**
+ * `map[key]` when `key` is the map's own key. The keys below come from page
+ * text, and a plain index would hand back `Object.prototype` members for
+ * `constructor`, `toString` or `__proto__`.
+ */
+function ownLookup<V>(map: Readonly<Record<string, V>> | undefined, key: string): V | undefined {
+  return map !== undefined && Object.hasOwn(map, key) ? map[key] : undefined;
+}
+
+function attrDoc(name: ComponentName, attr: string): AttrDoc | undefined {
+  return ownLookup((COMPONENT_DOCS[name] as ComponentDoc).attrs as Record<string, AttrDoc> | undefined, attr);
+}
+
 /** Where an attribute is taught: its own `teach`, else its component's. */
 export function attrTeach(name: ComponentName, attr: string): readonly TeachTarget[] {
-  const doc = COMPONENT_DOCS[name] as ComponentDoc;
-  return doc.attrs?.[attr]?.teach ?? doc.teach;
+  return attrDoc(name, attr)?.teach ?? COMPONENT_DOCS[name].teach;
+}
+
+/** The accepted value an off-vocabulary `raw` most likely meant, if one is known. */
+export function suggestFor(name: ComponentName, attr: string, raw: string): string | undefined {
+  return ownLookup(attrDoc(name, attr)?.suggest, raw);
+}
+
+/** What to write instead of an off-vocabulary `raw` with no accepted counterpart. */
+export function hintFor(name: ComponentName, attr: string, raw: string): string | undefined {
+  return ownLookup(attrDoc(name, attr)?.hint, raw);
+}
+
+/** The attribute a wrong attribute name most likely meant. */
+export function attrAliasFor(name: ComponentName, attr: string): string | undefined {
+  return ownLookup((COMPONENT_DOCS[name] as ComponentDoc).attrAliases, attr);
 }
