@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
-import { componentLine, componentReference, runComponentReference } from "./component-reference.ts";
-import { COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName } from "../src/format/component-spec.ts";
+import { attrSignature, componentLine, componentReference, runComponentReference } from "./component-reference.ts";
+import { COMPONENT_NAMES, COMPONENT_SPEC, FACT_VERDICT_GLYPHS, type AttrSpec, type AttrType, type ComponentName } from "../src/format/component-spec.ts";
 
 const SCRIPT = path.join(import.meta.dir, "component-reference.ts");
 const namesIn = (lines: string[]) => lines.filter((l) => /^[A-Z]/.test(l)).map((l) => l.slice(0, l.indexOf("(")));
@@ -44,6 +44,48 @@ test("every enum value and default the reference prints parses with fellBack fal
       for (const v of values) expect({ name, v, fellBack: spec.parse(v).fellBack }).toEqual({ name, v, fellBack: false });
     }
   }
+});
+
+// Samples per printed type: each `ok` must parse with fellBack false, each `off` must fall back.
+const TYPE_SAMPLES: Record<AttrType, { ok: string[]; off: string[] }> = {
+  "iso-date": { ok: ["2026-10-01"], off: ["abc", "01.10.2026"] },
+  date: { ok: ["2026-10-01", "01.10.2026"], off: ["abc"] },
+  number: { ok: ["-2", "3.5"], off: ["abc"] },
+  "positive-number": { ok: ["0.5", "10"], off: ["abc", "0"] },
+};
+
+test("every spec default parses, and every typed attribute's parser agrees with its type", () => {
+  let defaults = 0;
+  let typed = 0;
+  for (const name of COMPONENT_NAMES) {
+    for (const [attr, a] of Object.entries(COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>)) {
+      if (a.default !== undefined) {
+        const v = String(a.default);
+        expect({ name, attr, v, fellBack: a.parse(v).fellBack }).toEqual({ name, attr, v, fellBack: false });
+        defaults++;
+      }
+      if (a.type === undefined) continue;
+      typed++;
+      const { ok, off } = TYPE_SAMPLES[a.type];
+      for (const v of ok) expect({ name, attr, v, fellBack: a.parse(v).fellBack }).toEqual({ name, attr, v, fellBack: false });
+      for (const v of off) expect({ name, attr, v, fellBack: a.parse(v).fellBack }).toEqual({ name, attr, v, fellBack: true });
+    }
+  }
+  expect(defaults).toBeGreaterThanOrEqual(7);
+  expect(typed).toBeGreaterThanOrEqual(4);
+});
+
+test("the self-closing group prints its heading", () => {
+  expect(componentReference("wiki")).toContain("# Block, may also self-close: <Name … /> on a line of its own.");
+});
+
+// Fact is taught to no target, so only a direct call reaches the alsoAccepts branch.
+test("an enum attribute prints its alsoAccepts values after the enum", () => {
+  const line = attrSignature("Fact", "v", COMPONENT_SPEC.Fact.attrs.v);
+  const glyphs = Object.keys(FACT_VERDICT_GLYPHS);
+  expect(glyphs.length).toBeGreaterThan(0);
+  for (const g of glyphs) expect(line).toContain(`"${g}"`);
+  expect(line).toEndWith(`|${glyphs.map((g) => `"${g}"`).join("|")} = "unknown"`);
 });
 
 test("a missing or unknown --teach is a usage error", () => {

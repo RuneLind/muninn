@@ -29,7 +29,7 @@ const TYPE_TEXT: Record<AttrType, string> = {
 const spec = (name: ComponentName): ComponentSpec => COMPONENT_SPEC[name];
 
 /** One attribute as `name?: type = default`. */
-function attrSignature(name: ComponentName, attr: string, a: AttrSpec): string {
+export function attrSignature(name: ComponentName, attr: string, a: AttrSpec): string {
   const doc = attrDoc(name, attr);
   const values = a.enum ? [...a.enum, ...(doc?.alsoAccepts ?? [])].map((v) => `"${v}"`).join("|") : undefined;
   const type = values ?? (a.type ? TYPE_TEXT[a.type] : (doc?.printType ?? "string"));

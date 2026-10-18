@@ -6,6 +6,35 @@ import { COMPONENT_VOCABULARY_RULES } from "../research/answer.ts";
 const docs = COMPONENT_DOCS as Record<ComponentName, ComponentDoc>;
 const attrSpec = (name: ComponentName, attr: string) => (COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>)[attr]!;
 
+type ShownAttr = { name: string; attr: string; value: string };
+
+/**
+ * Every `attr="value"` a hand-written prompt shows on a component tag. The tag
+ * scan skips over quoted values, so `title="a > b"` does not end the tag, and
+ * an attribute name starts after whitespace, so `aria-label=` reads whole.
+ */
+function shownAttrs(text: string): ShownAttr[] {
+  const out: ShownAttr[] = [];
+  for (const tag of text.matchAll(/<([A-Z][A-Za-z]*)((?:[^>"]|"[^"]*")*)>/g)) {
+    for (const a of tag[2]!.matchAll(/(?<=\s)([A-Za-z][\w-]*)="([^"]*)"/g)) out.push({ name: tag[1]!, attr: a[1]!, value: a[2]! });
+  }
+  return out;
+}
+
+/** Each shown value that is no spec attribute or falls back, as a labelled row. */
+function valueProblems(text: string): (ShownAttr & { problem: string })[] {
+  const problems: (ShownAttr & { problem: string })[] = [];
+  for (const { name, attr, value } of shownAttrs(text)) {
+    const attrs = (COMPONENT_NAMES as readonly string[]).includes(name) ? (COMPONENT_SPEC[name as ComponentName].attrs as Record<string, AttrSpec>) : {};
+    if (!Object.hasOwn(attrs, attr)) {
+      problems.push({ name, attr, value, problem: "not a spec attribute" });
+      continue;
+    }
+    for (const v of value.split("|")) if (attrs[attr]!.parse(v).fellBack) problems.push({ name, attr, value: v, problem: "falls back" });
+  }
+  return problems;
+}
+
 const runtimeImports = async (file: string) =>
   new Bun.Transpiler({ loader: "ts" }).scanImports(await Bun.file(`${import.meta.dir}/${file}`).text()).map((i) => i.path).sort();
 
@@ -38,10 +67,7 @@ test("chat teach set is exactly what COMPONENT_VOCABULARY_RULES names", () => {
   const chat = COMPONENT_NAMES.filter((n) => docs[n].teach.includes("chat"));
   expect((chat as string[]).sort()).toEqual([...taughtNames].sort());
   // Attributes: every `attr="` the rules show on a tag, per component.
-  const taughtAttrs = new Set<string>();
-  for (const m of COMPONENT_VOCABULARY_RULES.matchAll(/<([A-Z][A-Za-z]*)([^>]*)>/g)) {
-    for (const a of m[2]!.matchAll(/([a-z]+)="/g)) taughtAttrs.add(`${m[1]}.${a[1]}`);
-  }
+  const taughtAttrs = new Set(shownAttrs(COMPONENT_VOCABULARY_RULES).map((a) => `${a.name}.${a.attr}`));
   const chatAttrs = chat.flatMap((n) => COMPONENT_ATTRS[n].filter((a) => attrTeach(n, a).includes("chat")).map((a) => `${n}.${a}`));
   expect(chatAttrs.sort()).toEqual([...taughtAttrs].sort());
 });
@@ -49,17 +75,18 @@ test("chat teach set is exactly what COMPONENT_VOCABULARY_RULES names", () => {
 // The prompt string is hand-written (it is not generated from the spec), so this
 // pins every value it shows: a tone renamed in the spec turns this red.
 test("every value COMPONENT_VOCABULARY_RULES shows parses with fellBack false", () => {
-  const shown: { name: string; attr: string; value: string }[] = [];
-  for (const m of COMPONENT_VOCABULARY_RULES.matchAll(/<([A-Z][A-Za-z]*)([^>]*)>/g)) {
-    for (const a of m[2]!.matchAll(/([a-z]+)="([^"]*)"/g)) {
-      for (const value of a[2]!.split("|")) shown.push({ name: m[1]!, attr: a[1]!, value });
-    }
-  }
-  expect(shown.length).toBeGreaterThanOrEqual(10);
-  for (const { name, attr, value } of shown) {
-    const fellBack = attrSpec(name as ComponentName, attr).parse(value).fellBack;
-    expect({ name, attr, value, fellBack }).toEqual({ name, attr, value, fellBack: false });
-  }
+  expect(shownAttrs(COMPONENT_VOCABULARY_RULES).flatMap((a) => a.value.split("|")).length).toBeGreaterThanOrEqual(10);
+  expect(valueProblems(COMPONENT_VOCABULARY_RULES)).toEqual([]);
+});
+
+test("the prompt scan reads a quoted `>` and a hyphenated name whole, and labels an unknown attribute", () => {
+  const variant = '<Callout tone="warn" aria-label="x" title="a > b">body</Callout>';
+  expect(shownAttrs(variant)).toEqual([
+    { name: "Callout", attr: "tone", value: "warn" },
+    { name: "Callout", attr: "aria-label", value: "x" },
+    { name: "Callout", attr: "title", value: "a > b" },
+  ]);
+  expect(valueProblems(variant)).toEqual([{ name: "Callout", attr: "aria-label", value: "x", problem: "not a spec attribute" }]);
 });
 
 describe("hints", () => {
