@@ -904,17 +904,24 @@ function checkCaseBoardLabels(page: WikiPageMeta, rawContent: string): LintFindi
   return findings;
 }
 
+/** How long `lintWiki` runs pages before it yields to the event loop. Its
+ *  callers include `GET /api/wiki/linter-findings`, on every gardener page load. */
+export const LINT_SLICE_MS = 25;
+
 /**
  * Run every hygiene check over a built wiki index. Returns findings + per-check
  * counts + a timestamp. Report-only: nothing is written. `deps.readFile` is
- * injectable for tests; it defaults to reading the file off disk.
+ * injectable for tests; it defaults to reading the file off disk. `deps.sliceMs`
+ * overrides {@link LINT_SLICE_MS}.
  */
 export async function lintWiki(
   index: WikiIndex,
-  deps?: { readFile?: (absPath: string) => Promise<string | null>; now?: () => number },
+  deps?: { readFile?: (absPath: string) => Promise<string | null>; now?: () => number; sliceMs?: number },
 ): Promise<LintReport> {
   const readFile = deps?.readFile ?? defaultReadFile;
   const now = deps?.now ?? (() => Date.now());
+  const sliceMs = deps?.sliceMs ?? LINT_SLICE_MS;
+  let sliceStart = performance.now();
   const nowMs = now();
   const findings: LintFinding[] = [];
   const drift = driftContext(nowMs, index.readerConfig?.language);
@@ -925,6 +932,11 @@ export async function lintWiki(
   const statePages: StatePage[] = [];
 
   for (const page of index.pages) {
+    // The checks are synchronous; give the event loop a turn once a slice has run.
+    if (performance.now() - sliceStart >= sliceMs) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      sliceStart = performance.now();
+    }
     if (page.type === "explainer") continue; // no frontmatter, no links
     const content = await readFile(path.join(index.root, page.relPath));
     if (content === null) continue; // unreadable — skip, keep linting the rest

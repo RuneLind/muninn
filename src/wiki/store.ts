@@ -2772,6 +2772,65 @@ function pipelineSourceSiblingHtml(relPath: string): string | null {
   return [...segs.slice(0, segs.length - 2), stemHtml].join("/");
 }
 
+/**
+ * Every `.md`/`.mdx`/`.html` path under `root` the index scans, sorted: dot
+ * segments and `node_modules` out, and, when `include` names globs, only paths
+ * one of them matches. Exported for `scripts/wiki-check.ts`, which must check
+ * the pages `lintWiki` checks.
+ */
+export async function scanWikiRelPaths(root: string, includePatterns: readonly string[]): Promise<string[]> {
+  const includeGlobs = includePatterns.map((p) => new Bun.Glob(p));
+
+  const glob = new Bun.Glob("**/*.{md,mdx,html}");
+  const relPaths: string[] = [];
+  for await (const p of glob.scan({ cwd: root, dot: false })) {
+    // Bun.Glob's dot:false skips dot FILES but still descends dot DIRS on some
+    // versions — filter path segments explicitly. node_modules can appear inside
+    // a wiki root (e.g. mimir's scripts/mdx-explainer/) and would flood the index
+    // with dependency READMEs/CHANGELOGs.
+    if (p.split("/").some((seg) => seg.startsWith(".") || seg === "node_modules")) continue;
+    // Optional per-wiki allow-list: ANY-match, so several subtrees can be named.
+    // Empty ⇒ no filtering at all, which is every wiki that ships no `include`.
+    if (includeGlobs.length > 0 && !includeGlobs.some((g) => g.match(p))) continue;
+    relPaths.push(p);
+  }
+  relPaths.sort();
+  return relPaths;
+}
+
+/** `relPaths` without the compile-pipeline sources (`pipelineSourceSiblingHtml`)
+ *  whose compiled sibling is among them and carries the generated marker. */
+export async function dropPipelineSources(root: string, relPaths: readonly string[]): Promise<string[]> {
+  const scannedSet = new Set(relPaths.map((p) => p.toLowerCase()));
+  const isPipelineSource = await Promise.all(
+    relPaths.map(async (relPath) => {
+      const siblingHtml = pipelineSourceSiblingHtml(relPath);
+      if (!siblingHtml || !scannedSet.has(siblingHtml.toLowerCase())) return false;
+      try {
+        const head = await Bun.file(path.join(root, siblingHtml))
+          .slice(0, GENERATED_MARKER_SNIFF_BYTES)
+          .text();
+        if (!head.includes(GENERATED_HTML_MARKER)) return false;
+      } catch {
+        return false; // unreadable sibling — treat the .mdx as a normal page
+      }
+      log.debug("wiki compile-pipeline source {relPath} excluded (compiled sibling {sibling})", {
+        relPath,
+        sibling: siblingHtml,
+      });
+      return true;
+    }),
+  );
+  return relPaths.filter((_, i) => !isPipelineSource[i]);
+}
+
+/** The paths `buildWikiIndex` starts from: the reader config's `include`, the
+ *  scan and the pipeline-source drop, with no index built. */
+export async function wikiPageRelPaths(root: string): Promise<string[]> {
+  const include = (await readWikiReaderConfig(root))?.include ?? [];
+  return dropPipelineSources(root, await scanWikiRelPaths(root, include));
+}
+
 /** Every `<meta …>` tag in a prefix. Tolerates attribute order — attributes are
  *  read out of the matched tag by name, not by position. `[^>]*` naturally caps
  *  a tag with an unclosed quote at the next `>` so its attrs fail to parse (the
@@ -3263,28 +3322,13 @@ export async function buildWikiIndex(
       },
     );
   }
-  const includeGlobs = includePatterns.map((p) => new Bun.Glob(p));
-
-  const glob = new Bun.Glob("**/*.{md,mdx,html}");
-  let relPaths: string[] = [];
-  for await (const p of glob.scan({ cwd: root, dot: false })) {
-    // Bun.Glob's dot:false skips dot FILES but still descends dot DIRS on some
-    // versions — filter path segments explicitly. node_modules can appear inside
-    // a wiki root (e.g. mimir's scripts/mdx-explainer/) and would flood the index
-    // with dependency READMEs/CHANGELOGs.
-    if (p.split("/").some((seg) => seg.startsWith(".") || seg === "node_modules")) continue;
-    // Optional per-wiki allow-list: ANY-match, so several subtrees can be named.
-    // Empty ⇒ no filtering at all, which is every wiki that ships no `include`.
-    if (includeGlobs.length > 0 && !includeGlobs.some((g) => g.match(p))) continue;
-    relPaths.push(p);
-  }
-  relPaths.sort();
+  let relPaths = await scanWikiRelPaths(root, includePatterns);
   // A configured `include` that matches NOTHING yields a wiki with zero pages —
   // which renders as an empty reader and is indistinguishable from a missing
   // directory. The globs are hand-written against a layout muninn does not own,
   // so a leading-slash or an off-by-one-segment pattern is the likely cause and
   // the file that produced it is what a reader needs named.
-  if (includeGlobs.length > 0 && relPaths.length === 0) {
+  if (includePatterns.length > 0 && relPaths.length === 0) {
     log.warn(
       "{file} at {root}: `include` matched no files ({patterns}) — this wiki will render as empty",
       { file: WIKI_READER_CONFIG_FILE, root, patterns: includePatterns.join(", ") },
@@ -3299,27 +3343,7 @@ export async function buildWikiIndex(
   // from pages/byKey/byRelPath and stripping all its backlinks. Skip the source so
   // the explainer survives. This is expected pipeline shape, not an authoring
   // mistake, so it's logged at debug (unlike the same-dir precedence warn below).
-  const scannedSet = new Set(relPaths.map((p) => p.toLowerCase()));
-  const isPipelineSource = await Promise.all(
-    relPaths.map(async (relPath) => {
-      const siblingHtml = pipelineSourceSiblingHtml(relPath);
-      if (!siblingHtml || !scannedSet.has(siblingHtml.toLowerCase())) return false;
-      try {
-        const head = await Bun.file(path.join(root, siblingHtml))
-          .slice(0, GENERATED_MARKER_SNIFF_BYTES)
-          .text();
-        if (!head.includes(GENERATED_HTML_MARKER)) return false;
-      } catch {
-        return false; // unreadable sibling — treat the .mdx as a normal page
-      }
-      log.debug("wiki compile-pipeline source {relPath} excluded (compiled sibling {sibling})", {
-        relPath,
-        sibling: siblingHtml,
-      });
-      return true;
-    }),
-  );
-  relPaths = relPaths.filter((_, i) => !isPipelineSource[i]);
+  relPaths = await dropPipelineSources(root, relPaths);
 
   // (`readerConfig` — the per-wiki type ontology + `include` scope — was read at
   // the top of this function, before the scan it now scopes. The project rule

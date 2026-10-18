@@ -28,6 +28,10 @@
  * are used only when they equal the plain render's, tag for tag; otherwise the
  * plain render's findings are returned without a line.
  *
+ * A page with no tag the check could judge is not rendered, and results are
+ * memoized on relPath + content (`checkComponents`). A finding judges the value
+ * the renderer read and prints the source text (`shownValues`).
+ *
  * Imports nothing that reads the environment: `scripts/wiki-check.ts` runs it
  * with no `.env`.
  */
@@ -48,12 +52,44 @@ export const LINT_MARK_ATTR = "muninnlintmark";
 const MARK_RE = new RegExp(`^\\s+${LINT_MARK_ATTR}="(\\d+)"`);
 const NAME_RE = new RegExp(`<(${COMPONENT_NAMES.join("|")})(?=[\\s/>])`, "g");
 
-/** One observed tag, with the 1-based line and offset of its `<` when known. */
+/** One observed tag, with the 1-based line and offset of its `<` when known.
+ *  `sourceAttrs` is the attribute run as written at that offset. */
 interface Tag {
   name: ComponentName;
   attrs: string;
+  sourceAttrs?: string;
   line?: number;
   offset?: number;
+}
+
+/** A parked wikilink or code span (`\u0000WIKIPAGELINK0\u0000`, `\u0000INLINE0\u0000`). */
+const SENTINEL_RE = /\u0000[A-Z]+\d+\u0000/g;
+
+const attrList = (attrs: string): [string, string][] => {
+  const out: [string, string][] = [];
+  ATTR_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ATTR_RE.exec(attrs)) !== null) out.push([m[1]!, m[2]!]);
+  return out;
+};
+
+/**
+ * What a finding prints for each attribute value. The renderer reads a value
+ * after parking its wikilinks and code spans, so the judged value can hold a
+ * sentinel. A located tag prints the value as written in the source, when its
+ * source attributes line up with the renderer's key for key; otherwise each
+ * sentinel prints as `…`.
+ */
+function shownValues(tag: Tag): Map<string, string> {
+  const read = attrList(tag.attrs);
+  const written = tag.sourceAttrs === undefined ? [] : attrList(tag.sourceAttrs);
+  const aligned = written.length === read.length && written.every(([k], i) => k === read[i]![0]);
+  const shown = new Map<string, string>();
+  read.forEach(([key, value], i) => {
+    if (!value.includes("\u0000")) shown.set(key, value);
+    else shown.set(key, aligned ? written[i]![1] : value.replace(SENTINEL_RE, "…").replaceAll("\u0000", ""));
+  });
+  return shown;
 }
 
 const isBlank = (raw: string | undefined) => raw === undefined || raw.trim() === "";
@@ -96,39 +132,40 @@ function valueDetail(name: ComponentName, attr: string, raw: string, spec: AttrS
   return parts.join(" ");
 }
 
-function attrDetail(name: ComponentName, attr: string, raw: string): string {
+/** `raw` is the value the renderer read; `shown` the one the finding prints. */
+function attrDetail(name: ComponentName, attr: string, raw: string, shown: string): string {
   const listed = COMPONENT_ATTRS[name];
   const parts = [listed.length > 0 ? `${name} takes ${listed.join(", ")}.` : `${name} takes no attributes.`];
   const alias = attrAliasFor(name, attr);
   if (alias !== undefined) {
     const spec = SPEC[name].attrs[alias];
-    const v = spec ? (spec.parse(raw).fellBack ? suggestion(name, alias, raw, spec) : raw) : undefined;
+    const v = spec ? (spec.parse(raw).fellBack ? suggestion(name, alias, shown, spec) : shown) : undefined;
     parts.push(v !== undefined ? `Did you mean ${alias}=${JSON.stringify(v)}?` : `Did you mean ${alias}?`);
   }
   return parts.join(" ");
 }
 
 /** The findings for one tag. The last spelling of a repeated attribute is the
- *  one `parseAttrs` keeps, so it is the one judged. */
+ *  one `parseAttrs` keeps, so it is the one judged. Judging reads the value the
+ *  renderer read; the message prints {@link shownValues}. */
 function checkTag(relPath: string, tag: Tag): LintFinding[] {
   const out: LintFinding[] = [];
   const at = tag.line === undefined ? { relPath } : { relPath, line: tag.line };
   const listed = COMPONENT_ATTRS[tag.name];
   const known: Record<string, string> = {};
   const unknown = new Map<string, string>();
-  ATTR_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = ATTR_RE.exec(tag.attrs)) !== null) {
-    const [, key, value] = m as unknown as [string, string, string];
+  for (const [key, value] of attrList(tag.attrs)) {
     if (listed.includes(key)) known[key] = value;
     else unknown.set(key, value);
   }
+  const shownMap = shownValues(tag);
+  const shown = (key: string) => shownMap.get(key)!;
   for (const [key, value] of unknown) {
     out.push({
       check: "component-attr",
       ...at,
-      message: `${tag.name} ${key}=${JSON.stringify(value)} is not a ${tag.name} attribute; the renderer drops it`,
-      detail: attrDetail(tag.name, key, value),
+      message: `${tag.name} ${key}=${JSON.stringify(shown(key))} is not a ${tag.name} attribute; the renderer drops it`,
+      detail: attrDetail(tag.name, key, value, shown(key)),
     });
   }
   const attrs = Object.entries(SPEC[tag.name].attrs);
@@ -151,8 +188,8 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
       out.push({
         check: "component-value",
         ...at,
-        message: `${tag.name} ${attr}=${JSON.stringify(raw)} ${fallbackPhrase(tag.name, attr, spec, known)}`,
-        detail: valueDetail(tag.name, attr, raw!, spec),
+        message: `${tag.name} ${attr}=${JSON.stringify(shown(attr))} ${fallbackPhrase(tag.name, attr, spec, known)}`,
+        detail: valueDetail(tag.name, attr, shown(attr), spec),
       });
       return out;
     }
@@ -163,8 +200,8 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
     out.push({
       check: "component-value",
       ...at,
-      message: `${tag.name} ${attr}=${JSON.stringify(raw)} ${fallbackPhrase(tag.name, attr, spec, known)}`,
-      detail: valueDetail(tag.name, attr, raw, spec),
+      message: `${tag.name} ${attr}=${JSON.stringify(shown(attr))} ${fallbackPhrase(tag.name, attr, spec, known)}`,
+      detail: valueDetail(tag.name, attr, shown(attr), spec),
     });
   }
   return out;
@@ -184,6 +221,8 @@ function observe(render: PageRender, content: string): ObservedComponentTag[] {
 /** The attribute run the parser and the inline scanner read after a tag name,
  *  and whether a `>` or `/>` closes it (`COMPONENT_OPEN_RE`, `INLINE_COMPONENT_RE`). */
 const OPENER_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*(?=\s*\/?>)/y;
+/** The attribute run after a tag name in the source, closed or not. */
+const SOURCE_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*/y;
 
 /**
  * `content` with a marker after every `<Name` in the body, and each marker's
@@ -232,7 +271,9 @@ function locate(render: PageRender, content: string, plain: readonly ObservedCom
     if (offset === undefined) return null;
     const attrs = t.rawAttrs.slice(mark[0].length);
     keys.push(tagKey({ ...t, rawAttrs: attrs }));
-    tags.push({ name: t.name, attrs, offset, line: lineAt(content, offset) });
+    SOURCE_RUN_RE.lastIndex = offset + 1 + t.name.length;
+    const sourceAttrs = SOURCE_RUN_RE.exec(content)?.[0] ?? "";
+    tags.push({ name: t.name, attrs, sourceAttrs, offset, line: lineAt(content, offset) });
   }
   const want = plain.map(tagKey).sort();
   keys.sort();
@@ -246,15 +287,44 @@ function lineAt(content: string, offset: number): number {
   return line;
 }
 
+/** Components with a `required` attribute: a bare `<Meter>` is a finding. */
+const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required));
+/**
+ * A tag this check could judge: a component name followed by an attribute, or
+ * a component with a required attribute in any form. A page with neither has
+ * no finding, so it is not rendered.
+ */
+const JUDGEABLE_RE = new RegExp(
+  `<(?:${COMPONENT_NAMES.join("|")})\\s+[^\\s/>]` + (REQUIRED_NAMES.length > 0 ? `|<(?:${REQUIRED_NAMES.join("|")})(?=[\\s/>])` : ""),
+);
+
+/** Results per render seam, keyed on relPath and a content hash. A lint run
+ *  repeats on every `/wiki/gardener` load over pages that rarely change. */
+export const COMPONENT_MEMO_MAX = 2000;
+const memos = new WeakMap<PageRender, Map<string, LintFinding[]>>();
+
 /**
  * Every component finding on one page, located ones in source order, then the
  * unlocated. Pure apart from the render; `lintWiki` calls it on `.mdx` pages
  * and `scripts/wiki-check.ts` on the files it walks. The observer reports each
  * tag the emitted render reads once (`component-observer.ts`); a located tag is
- * also keyed on its source offset, so one tag is never two findings.
+ * also keyed on its source offset, so one tag is never two findings. Results
+ * are memoized per render seam (`COMPONENT_MEMO_MAX` entries, oldest evicted).
  */
 export function checkComponents(relPath: string, content: string, render: PageRender = readerRender): LintFinding[] {
-  if (!content.includes("<")) return [];
+  if (!JUDGEABLE_RE.test(content)) return [];
+  let memo = memos.get(render);
+  if (memo === undefined) memos.set(render, (memo = new Map()));
+  const key = `${relPath}\u0000${content.length}\u0000${Bun.hash(content)}`;
+  let found = memo.get(key);
+  if (found !== undefined) memo.delete(key);
+  else found = findComponents(relPath, content, render);
+  memo.set(key, found);
+  if (memo.size > COMPONENT_MEMO_MAX) memo.delete(memo.keys().next().value!);
+  return found.map((f) => ({ ...f }));
+}
+
+function findComponents(relPath: string, content: string, render: PageRender): LintFinding[] {
   const plain = observe(render, content);
   const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs }));
   if (unlocated.length === 0) return [];

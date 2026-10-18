@@ -6,19 +6,32 @@
  *   bun --no-env-file scripts/wiki-check.ts <absolute page or directory path>
  *
  * Prints one JSON line per finding (`{check, relPath, line, message, detail}`)
- * and nothing else. A page must be an `.mdx` file. A directory runs every `.mdx`
- * under it except under `blogs/src/`, `node_modules` and dot directories.
- * `relPath` is relative to the nearest ancestor holding `.wiki-reader.json`,
- * else to the given directory (or the page's own folder). Exits 0 whether or
- * not there are findings; 2 on a usage error or an unreadable path.
+ * on stdout. A page must be an `.mdx` file and is checked as given. A directory
+ * checks the `.mdx` pages under it that `lintWiki` checks: the store's own scan
+ * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
+ * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
+ * sibling exists), minus a page a same-stem `.md` shadows and a culled page
+ * (`signal: none`). The wiki root is the nearest ancestor holding
+ * `.wiki-reader.json`, else the given directory (or the page's own folder);
+ * `relPath` is relative to it.
+ *
+ * Exit codes: 0 when the check ran, with or without findings. 2 on a usage
+ * error or a path that cannot be read or listed. 3 when a directory holds
+ * `.mdx` pages to check and none of them could be read. An unreadable page in
+ * a directory is one stderr line and is skipped; a directory with no page to
+ * check is one stderr note.
  */
 
 import path from "node:path";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { checkComponents } from "../src/wiki/lint-components.ts";
+import { extRank, parseFrontmatter, readCull, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
 import type { LintFinding } from "../src/wiki/lint.ts";
 
 const USAGE = "usage: bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory path>";
+
+/** Exit code when a directory has pages to check and none could be read. */
+export const EXIT_NOTHING_READ = 3;
 
 /** The nearest directory at or above `dir` holding `.wiki-reader.json`. */
 export function wikiRootFor(dir: string): string | null {
@@ -28,37 +41,62 @@ export function wikiRootFor(dir: string): string | null {
   }
 }
 
-/** Every `.mdx` under `dir`, sorted, outside `blogs/src/`, `node_modules` and dot directories. */
-export function mdxFilesUnder(dir: string): string[] {
-  const out: string[] = [];
-  const walk = (d: string) => {
-    for (const e of readdirSync(d, { withFileTypes: true })) {
-      if (e.name.startsWith(".")) continue;
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) {
-        if (e.name === "node_modules") continue;
-        if (e.name === "src" && path.basename(d) === "blogs") continue;
-        walk(p);
-      } else if (e.isFile() && e.name.endsWith(".mdx")) {
-        out.push(p);
-      }
-    }
-  };
-  walk(dir);
-  return out.sort();
+/**
+ * The `.mdx` pages `buildWikiIndex` keeps under `dir`, relative to `root`,
+ * sorted: its scan and pipeline-source drop, then its stem rule, under which a
+ * `.md` anywhere in the wiki drops a same-stem `.mdx`.
+ */
+export async function mdxPagesUnder(root: string, dir: string): Promise<string[]> {
+  const all = await wikiPageRelPaths(root);
+  const mdStems = new Set(all.filter((p) => extRank(p) === 0).map((p) => stemKey(wikiPageStem(p))));
+  const sub = path.relative(root, dir).split(path.sep).join("/");
+  const prefix = sub === "" ? "" : `${sub}/`;
+  return all.filter((p) => extRank(p) === 1 && p.startsWith(prefix) && !mdStems.has(stemKey(wikiPageStem(p))));
 }
 
-/** The findings for an absolute `.mdx` page or directory path. Throws on an
- *  unreadable path. */
-export async function wikiCheck(target: string): Promise<LintFinding[]> {
-  const isDir = statSync(target).isDirectory();
-  const base = isDir ? target : path.dirname(target);
-  const root = wikiRootFor(base) ?? base;
-  const files = isDir ? mdxFilesUnder(target) : [target];
-  const out: LintFinding[] = [];
-  for (const file of files) {
-    const rel = path.relative(root, file).split(path.sep).join("/");
-    out.push(...checkComponents(rel, await Bun.file(file).text()));
+/** A culled page, as the index reads it: frontmatter `signal: none`. */
+const isCulled = (content: string) => {
+  const fm = parseFrontmatter(content);
+  return readCull(fm.signal, fm["signal-reason"]).culled === true;
+};
+
+export interface WikiCheckResult {
+  findings: LintFinding[];
+  /** Pages read and checked (a culled page is read, not checked). */
+  checked: number;
+  /** Pages selected for the check. */
+  selected: number;
+  /** One line per page that could not be read. */
+  unreadable: string[];
+}
+
+const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code ?? String(e);
+
+/** The findings for an absolute `.mdx` page or directory path. Throws when the
+ *  page, or the directory's listing, cannot be read. */
+export async function wikiCheck(target: string): Promise<WikiCheckResult> {
+  if (!statSync(target).isDirectory()) {
+    const base = path.dirname(target);
+    const root = wikiRootFor(base) ?? base;
+    const rel = path.relative(root, target).split(path.sep).join("/");
+    const findings = checkComponents(rel, await Bun.file(target).text());
+    return { findings, checked: 1, selected: 1, unreadable: [] };
+  }
+  const root = wikiRootFor(target) ?? target;
+  const pages = await mdxPagesUnder(root, target);
+  const out: WikiCheckResult = { findings: [], checked: 0, selected: pages.length, unreadable: [] };
+  for (const rel of pages) {
+    const file = path.join(root, rel);
+    let content: string;
+    try {
+      content = await Bun.file(file).text();
+    } catch (e) {
+      out.unreadable.push(`wiki-check: cannot read ${file}: ${errCode(e)}`);
+      continue;
+    }
+    if (isCulled(content)) continue;
+    out.checked += 1;
+    out.findings.push(...checkComponents(rel, content));
   }
   return out;
 }
@@ -66,20 +104,26 @@ export async function wikiCheck(target: string): Promise<LintFinding[]> {
 /** The exit code and the lines to print for one invocation. */
 export async function runWikiCheck(args: readonly string[]): Promise<{ code: number; out: string[]; err: string[] }> {
   const target = args[0];
-  if (args.length !== 1 || !target || !path.isAbsolute(target)) return { code: 2, out: [], err: [USAGE] };
+  if (args.length !== 1 || !target) return { code: 2, out: [], err: [USAGE] };
+  if (!path.isAbsolute(target)) return { code: 2, out: [], err: [`wiki-check: the path must be absolute: ${target}`, USAGE] };
   let isDir: boolean;
   try {
     isDir = statSync(target).isDirectory();
   } catch (e) {
-    return { code: 2, out: [], err: [`wiki-check: cannot read ${target}: ${(e as NodeJS.ErrnoException).code ?? String(e)}`] };
+    return { code: 2, out: [], err: [`wiki-check: cannot read ${target}: ${errCode(e)}`] };
   }
   if (!isDir && !target.endsWith(".mdx")) return { code: 2, out: [], err: [`wiki-check: not an .mdx page: ${target}`, USAGE] };
+  let result: WikiCheckResult;
   try {
-    return { code: 0, out: (await wikiCheck(target)).map((f) => JSON.stringify(f)), err: [] };
+    result = await wikiCheck(target);
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
     return { code: 2, out: [], err: [`wiki-check: cannot read ${err.path ?? target}: ${err.code ?? err.message}`] };
   }
+  const out = result.findings.map((f) => JSON.stringify(f));
+  if (result.selected === 0) return { code: 0, out, err: [`wiki-check: no .mdx pages under ${target}`] };
+  const code = result.checked === 0 && result.unreadable.length === result.selected ? EXIT_NOTHING_READ : 0;
+  return { code, out, err: result.unreadable };
 }
 
 if (import.meta.main) {

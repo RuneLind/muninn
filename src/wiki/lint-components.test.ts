@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import * as lintComponents from "./lint-components.ts";
 import { checkComponents, LINT_MARK_ATTR } from "./lint-components.ts";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki } from "./lint.ts";
@@ -486,5 +487,99 @@ describe("lintWiki runs the check on .mdx pages that are not culled", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+/** A render seam that counts its calls and renders like the reader. */
+const counting = () => {
+  const seam = Object.assign((content: string) => (seam.calls++, html(content)), { calls: 0 });
+  return seam;
+};
+
+describe("a page with no tag the check could judge is not rendered", () => {
+  test("tags without attributes, prose and a closed tag render nothing; an attribute or a bare Meter does", () => {
+    const seam = counting();
+    for (const content of [
+      page("<Callout>", "x", "</Callout>"),
+      page("<Verdict>x</Verdict> and a < b, <Pill/> and <Fold >"),
+      page("no tags at all"),
+    ]) {
+      expect(checkComponents("plans/x.mdx", content, seam)).toEqual([]);
+    }
+    expect(seam.calls).toBe(0);
+    expect(checkComponents("plans/x.mdx", page("<Meter>", "Coverage", "</Meter>"), seam).map((f) => f.message)).toEqual(["Meter has no value; its label renders as plain text"]);
+    expect(seam.calls).toBeGreaterThan(0);
+    const before = seam.calls;
+    expect(checkComponents("plans/x.mdx", page('<Fold\n  title="x">', "y", "</Fold>"), seam)).toEqual([]);
+    expect(seam.calls).toBeGreaterThan(before);
+  });
+});
+
+describe("a repeat call is served from the memo", () => {
+  test("the same relPath and content render once; another content or relPath renders again", () => {
+    const seam = counting();
+    const content = page('<Callout tone="success">', "x", "</Callout>");
+    const first = checkComponents("plans/x.mdx", content, seam);
+    const calls = seam.calls;
+    expect(calls).toBe(2);
+    first[0]!.message = "changed by the caller";
+    const second = checkComponents("plans/x.mdx", content, seam);
+    expect(seam.calls).toBe(calls);
+    expect(second.map((f) => [f.line, f.message])).toEqual([[5, 'Callout tone="success" renders as info']]);
+    checkComponents("plans/x.mdx", content.replace("x\n</Callout>", "y\n</Callout>"), seam);
+    expect(seam.calls).toBe(calls + 2);
+    expect(checkComponents("plans/y.mdx", content, seam).map((f) => f.relPath)).toEqual(["plans/y.mdx"]);
+    expect(seam.calls).toBe(calls + 4);
+  });
+
+  test("past the cap the oldest entry is evicted", () => {
+    const max = lintComponents.COMPONENT_MEMO_MAX;
+    expect(max).toBe(2000);
+    let calls = 0;
+    const seam = () => void calls++;
+    const nth = (i: number) => page(`<Pill tone="t${i}">p</Pill>`);
+    for (let i = 0; i <= max; i++) checkComponents("plans/x.mdx", nth(i), seam);
+    expect(calls).toBe(max + 1);
+    checkComponents("plans/x.mdx", nth(max), seam);
+    expect(calls).toBe(max + 1);
+    checkComponents("plans/x.mdx", nth(0), seam);
+    expect(calls).toBe(max + 2);
+  });
+});
+
+describe("lintWiki yields to the event loop between pages", () => {
+  test("a timer queued before the run fires before the run ends", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-lint-yield-"));
+    try {
+      for (const n of ["a", "b", "c"]) await Bun.write(path.join(root, `plans/${n}.mdx`), page("x"));
+      const index = await buildWikiIndex(root);
+      let fired = false;
+      const seenAt: boolean[] = [];
+      setTimeout(() => (fired = true), 0);
+      await lintWiki(index, { sliceMs: 0, readFile: async () => (seenAt.push(fired), page("x")) });
+      expect(seenAt.length).toBe(3);
+      expect(seenAt.slice(1)).toEqual([true, true]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a finding prints the value as written, never a parked sentinel", () => {
+  test("a wikilink and a code span in a located tag's attributes", () => {
+    const linked = checkComponents("plans/x.mdx", page('<Callout tone="[[Page]]" see="[[Other|x]]">', "x", "</Callout>"));
+    expect(linked.map((f) => [f.line, f.message])).toEqual([
+      [5, 'Callout see="[[Other|x]]" is not a Callout attribute; the renderer drops it'],
+      [5, 'Callout tone="[[Page]]" renders as info'],
+    ]);
+    const coded = checkComponents("plans/x.mdx", page('Text <Pill tone="`bad`">x</Pill>'));
+    expect(coded.map((f) => [f.line, f.message])).toEqual([[5, 'Pill tone="`bad`" renders as default']]);
+    expect(JSON.stringify([...linked, ...coded])).not.toContain("\\u0000");
+  });
+
+  test("an unlocated tag prints … for a parked part", () => {
+    const found = checkComponents("plans/x.mdx", page('<Callout tone="[[Page]] x">', "x", "</Callout>"), disagreeing);
+    expect(found.map((f) => [f.line, f.message])).toEqual([[undefined, 'Callout tone="… x" renders as info']]);
+    expect(JSON.stringify(found)).not.toContain("\\u0000");
   });
 });
