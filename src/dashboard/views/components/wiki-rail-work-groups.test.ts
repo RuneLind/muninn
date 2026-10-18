@@ -309,6 +309,13 @@ describe("openWorkCards: a broad group", () => {
   });
 });
 
+function broadPinFx() {
+  const pages = ["a", "b", "c", "d", "e"].map((k, i) => page(`plans/${k}.md`, { edits: 50 - i * 5, series: "big" }));
+  const threads = pages.map((p) => thread(p.relPath, [p.relPath]));
+  const work: IndexWork = { asOfMs: NOW - HOUR, sinceMs: NOW - 8 * DAY, threads, evidence: evidence(pages, threads) };
+  return { pages, threads, work };
+}
+
 describe("openWorkCards: the pin", () => {
   test("a pin on a later group's child moves the group first; the child is the pinned one", () => {
     const fx = fixture();
@@ -345,6 +352,28 @@ describe("openWorkCards: the pin", () => {
     expect(keysOf(cardsAt("threads", { pin: "plans/f.md" }, fx).cards)[0]).toBe("thread:plans/f.md");
     expect(keysOf(cardsAt("related", { pin: "plans/f.md" }, fx).cards)[0]).toBe("thread:plans/f.md");
     expect(keysOf(cardsAt("areas", { pin: "plans/b.md" }, fx).cards)[0]).toEqual(["group:series:alpha", ["plans/a.md", "plans/b.md", "plans/c.md"]]);
+  });
+
+  // Fix round 1 batch 3 (F2): pinning a non-anchor child opens THAT child, as
+  // the Threads stop opens the pinned thread, so its rows leave Activity.
+  test("G1/G2: the pinned child of the first group opens by default, not the anchor; a stored fold still wins", () => {
+    const pins = (pin: string, folds: string[] = [], stop: "related" | "areas" = "related") =>
+      groupAt(cardsAt(stop, { pin, folds }, broadPinFx()).cards, 0).children.map((c) => [c.key, c.open, c.toggleKey]);
+    expect(pins("plans/e.md")).toEqual([
+      ["plans/a.md", false, "thread:plans/a.md"],
+      ["plans/b.md", false, "thread:plans/b.md"],
+      ["plans/c.md", false, "thread:plans/c.md"],
+      ["plans/e.md", true, "closed:thread:plans/e.md"],
+    ]);
+    expect(pins("plans/b.md", [], "areas").map((c) => c[1])).toEqual([false, true, false]);
+    expect(pins("plans/e.md", ["closed:thread:plans/e.md", "thread:plans/a.md"]).map((c) => c[1])).toEqual([true, false, false, false]);
+  });
+
+  test("G1: the pinned child's rows leave Activity; the anchor's stay", () => {
+    const fx = broadPinFx();
+    const act = (railInputFor(facts(fx.pages, fx.work), viewer({ threadPin: "plans/e.md" })).activity ?? []).map((r) => r.page.relPath);
+    expect(act).not.toContain("plans/e.md");
+    expect(act).toContain("plans/a.md");
   });
 
   test("a pin that matches no thread keeps the order (the held pin stays, nothing marked)", () => {

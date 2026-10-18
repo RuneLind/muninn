@@ -2076,7 +2076,16 @@ function renderList(cause: "storage" | "local" = "local"): void {
   const scroll = listEl.scrollTop;
   // Retired pages held back under these facets: the empty rail offers them.
   const heldBack = retiredHeldBack();
+  const focusedEl = document.activeElement;
+  const keptWorkFocus = workControlSelector(focusedEl);
   listEl.innerHTML = railListHtml(html, retiredRevealHtml(heldBack));
+  // A repaint no key or click asked for (another tab's write, a focus refetch)
+  // swaps out the Group control or menu item under the reader's focus: put it
+  // back on the same item, else on the Group button, so the menu's keys still work.
+  if (keptWorkFocus && (!document.activeElement || document.activeElement === document.body)) {
+    const item = `#wikiList ${keptWorkFocus}`;
+    refocusRailControl(document.querySelector(item) ? item : "#wikiList [data-work-group-menu]", focusedEl!);
+  }
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
   // is shorter the browser clamps to the new maximum and re-assigning the saved
@@ -5061,6 +5070,17 @@ function refocusRailControl(selector: string, pressed: Element): void {
   pick?.focus({ preventScroll: true });
 }
 
+/** The Group button or menu item `el` is, as a selector by its own data
+ *  attribute (stable across a repaint), or null for anything else. */
+function workControlSelector(el: Element | null): string | null {
+  if (!(el instanceof HTMLElement) || !el.closest("#wikiList")) return null;
+  for (const attr of ["data-work-stop", "data-work-evidence"]) {
+    const v = el.getAttribute(attr);
+    if (v !== null) return `[${attr}="${CSS.escape(v)}"]`;
+  }
+  return el.hasAttribute("data-work-group-menu") ? "[data-work-group-menu]" : null;
+}
+
 /** Focus the Group menu's item for `selector`, else its first item. */
 function focusWorkMenuItem(selector?: string): void {
   const menu = document.querySelector<HTMLElement>("#wikiList .wiki-work-menu");
@@ -5122,13 +5142,17 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     const key = moreBtn.getAttribute("data-thread-more");
     if (!key) return;
     const hadFocus = document.activeElement === moreBtn;
-    const before = document.querySelectorAll(`#wikiList [data-thread-group-body="${CSS.escape(key)}"] .wiki-thread-card`).length;
+    const childCards = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList [data-thread-group-body="${CSS.escape(key)}"] .wiki-thread-card[data-thread]`));
+    // By key, not by count: a pinned child past the first three is drawn
+    // before the press and moves to its own place after it.
+    const before = new Set(childCards().map((c) => c.getAttribute("data-thread")));
     workMoreOpen.add(key);
     renderList();
     // Focus the first child the press revealed.
     if (hadFocus) {
-      const shown = document.querySelectorAll<HTMLElement>(`#wikiList [data-thread-group-body="${CSS.escape(key)}"] .wiki-thread-card .wiki-thread-fold`);
-      (shown[before] ?? shown[shown.length - 1])?.focus({ preventScroll: true });
+      const after = childCards();
+      const card = after.find((c) => !before.has(c.getAttribute("data-thread"))) ?? after[after.length - 1];
+      card?.querySelector<HTMLElement>(".wiki-thread-fold")?.focus({ preventScroll: true });
     }
     return;
   }
@@ -8591,6 +8615,16 @@ document.getElementById("wikiList")!.addEventListener("keydown", (e) => {
   else if (e.key === "Escape" || e.key === "Tab") setWorkMenu(false, true);
   else return;
   e.preventDefault();
+});
+
+// Escape closes the open Group menu wherever focus is (the list's handler above
+// takes it first inside the menu); focus goes to the Group button only when it
+// was lost to the page, never away from a control the reader is on.
+document.addEventListener("keydown", (e) => {
+  if (!workMenuOpen || e.key !== "Escape" || e.defaultPrevented) return;
+  const lost = !document.activeElement || document.activeElement === document.body;
+  setWorkMenu(false, lost);
+  if (lost) e.preventDefault();
 });
 
 // A click outside the open Group menu closes it.

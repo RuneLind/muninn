@@ -298,8 +298,8 @@ export function childWhyLine(child: Pick<WorkGroupChild, "witnesses">, anchor: b
  *    children and groups dropped), then at most `THREAD_CARDS_MAX` cards. A
  *    one-thread card is today's card. A group shows `GROUP_CHILDREN_SHOWN`
  *    children (plus the pinned one past them) until `+ N more threads`.
- *  - The first card defaults open and, if it is a group, its first drawn
- *    child too; both offer the `closed:` spelling.
+ *  - The first card defaults open and, if it is a group, its pinned child
+ *    (else its first drawn child) too; both offer the `closed:` spelling.
  */
 export function openWorkCards(
   work: RailWikiFacts["work"],
@@ -365,8 +365,11 @@ export function openWorkCards(
     const anchor = g.children[0]!;
     const drawnAll = more.has(normalizeFoldKey(g.foldKey));
     const shownViews = gv.children.filter((cv, j) => drawnAll || j < GROUP_CHILDREN_SHOWN || cv.child.pinned);
+    // The default-open child of the first card: the pinned one when the group
+    // holds the pin (as the Threads stop opens the pinned thread), else the first.
+    const openAt = Math.max(0, shownViews.findIndex((cv) => cv.child.pinned));
     const children = shownViews.map((cv, j) =>
-      threadCard(cv, i === 0 && j === 0, {
+      threadCard(cv, i === 0 && j === openAt, {
         anchor: cv.child === anchor,
         why: childWhyLine(cv.child, cv.child === anchor),
         witnesses: cv.child.witnesses.map((w) => witnessLine(w, byRel)),

@@ -21,6 +21,8 @@
  *    `plans/ctx.md` (the shared context line).
  *  - `wsgroupsro` — the same files under `WIKI_READONLY_ROOTS`.
  *  - `wsgplain` — the ledger 404s the sessions form: no section (D11).
+ *  - `wsgbroad` — five threads in one series `big` (`big-1`…`big-5`): a group
+ *    whose pinned fifth child shows past the first three beside `+ 1 more`.
  *
  * Synthetic names only (D11 of the plan: no NAV data). No model calls, and the
  * only writes are the reader's own localStorage.
@@ -44,6 +46,7 @@ import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-widt
 import { foldsKey, threadPinKey, type RailGroupCard, type RailThreadCard } from "../src/dashboard/views/components/wiki-recents.ts";
 import { threadCardHeaderHtml, threadGroupHeaderHtml } from "../src/dashboard/views/components/wiki-thread-view.ts";
 import { workGroupKey } from "../src/dashboard/views/components/wiki-work-group-record.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-rail-thread-groups");
 const LEDGER_PORT = e2ePort("wiki-rail-thread-groups/ledger");
@@ -54,6 +57,7 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 const GROUPS = "wsgroups";
 const RO = "wsgroupsro";
 const PLAIN = "wsgplain";
+const BROAD = "wsgbroad";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -66,6 +70,9 @@ const SOLO = ["notes/solo-1.md", "notes/solo-2.md", "notes/solo-3.md", "notes/so
 const CTX = "plans/ctx.md";
 /** One session per focus page, newest first: the order of the threads. */
 const FOCUS = [...A, REL1, REL2, ...SOLO];
+const BIG = [1, 2, 3, 4, 5].map((i) => `plans/big-${i}.md`);
+/** The focus pages a wiki's ledger serves, newest first. */
+const focusOf = (wiki: string | undefined) => (wiki === GROUPS || wiki === RO ? FOCUS : wiki === BROAD ? BIG : []);
 
 const roots: Record<string, string> = {};
 let server: ChildProcess | undefined;
@@ -79,12 +86,13 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
     res.end(JSON.stringify(body));
   };
   const live = wiki === GROUPS || wiki === RO;
+  const focus = focusOf(wiki);
   if (url.searchParams.get("sessions") === "1") {
-    if (!live) return json({ error: "not found" }, 404);
-    const sessions = FOCUS.map((p, i) => {
+    if (!focus.length) return json({ error: "not found" }, 404);
+    const sessions = focus.map((p, i) => {
       const at = NOW - (i + 1) * HOUR;
       const files: [string, number][] = [[p, 5]];
-      if (i < 2) files.push([CTX, 1]);
+      if (live && i < 2) files.push([CTX, 1]);
       return {
         id: `g${i}`,
         provider: "claude",
@@ -106,7 +114,7 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
     const pre = live ? [{ p: CTX, w: NOW - 20 * DAY, s: 1 }] : [];
     return json({ root, pages: pre, pageCount: pre.length, bulk: 10, limit: 5000, truncated: false, until: Number(until) });
   }
-  const pages = live ? FOCUS.map((p, i) => ({ p, w: NOW - (i + 1) * HOUR, s: 1 })) : [];
+  const pages = focus.map((p, i) => ({ p, w: NOW - (i + 1) * HOUR, s: 1 }));
   json({ root, pages, pageCount: pages.length, bulk: 10, limit: 5000, truncated: false });
 }
 
@@ -147,6 +155,19 @@ async function makeRoot(name: string): Promise<void> {
   for (const [i, rel] of SOLO.entries()) await write(rel, [`title: Solo ${i + 1}`, ...(i < 2 ? ["project: proj-b"] : [])], (7 + i) * HOUR);
   await write(CTX, ["title: Shared context page"], 20 * DAY);
   for (let i = 1; i <= 4; i++) await write(`notes/old-${i}.md`, [`title: Old ${i}`], (10 + i) * DAY);
+}
+
+async function makeBroadRoot(): Promise<void> {
+  const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-groups-${BROAD}-`));
+  roots[BROAD] = root;
+  await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ activity: { agePenalty: 0, hubPenalty: 0, planBoost: 0, rows: 8 } }), "utf8");
+  for (const [i, rel] of BIG.entries()) {
+    const abs = path.join(root, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, ["---", `title: Big ${i + 1}`, "series: big", "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
+    const stamp = new Date(NOW - (i + 1) * HOUR);
+    await utimes(abs, stamp, stamp);
+  }
 }
 
 const cards = (page: Page) => page.locator("#wikiList > .wiki-thread-card");
@@ -277,6 +298,7 @@ test.beforeAll(async () => {
   await makeRoot(GROUPS);
   await makeRoot(RO);
   await makeRoot(PLAIN);
+  await makeBroadRoot();
   ledger = await startLedger();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -304,11 +326,11 @@ test.beforeAll(async () => {
     if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
     await new Promise((r) => setTimeout(r, 400));
   }
-  for (const wiki of [GROUPS, RO]) {
+  for (const wiki of [GROUPS, RO, BROAD]) {
     const warm = Date.now() + 20_000;
     for (;;) {
       const b = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`)).json()) as { work?: { threads: unknown[]; evidence?: unknown } };
-      if (b.work?.threads.length === FOCUS.length && b.work.evidence) break;
+      if (b.work?.threads.length === focusOf(wiki).length && b.work.evidence) break;
       if (Date.now() > warm) throw new Error("the work-sessions memo never warmed for " + wiki);
       await new Promise((r) => setTimeout(r, 300));
     }
@@ -402,6 +424,84 @@ test.describe("Wiki rail: grouped work threads", () => {
     await expect(body(page, "group:series:alpha").locator(".wiki-thread-more")).toHaveCount(0);
     const focused = await page.evaluate(() => document.activeElement?.closest(".wiki-thread-card")?.getAttribute("data-thread"));
     expect(focused).toBe(`thread:${A[3]}`);
+  });
+
+  // Fix round 1 batch 3 (F1): the pinned fifth child is drawn before the press
+  // and moves to its own place after it; focus goes to big-4, the one revealed.
+  test("+ N more threads with a pinned child past the first three: focus lands on the child the press revealed", async ({ page }) => {
+    await page.addInitScript(([k, v]) => localStorage.setItem(k as string, v as string), [threadPinKey(BROAD), BIG[4]!] as const);
+    await openReader(page, BROAD);
+    const kids = body(page, "group:series:big").locator(".wiki-thread-card");
+    await expect(kids).toHaveCount(4);
+    expect(await kids.evaluateAll((els) => els.map((e) => e.getAttribute("data-thread")))).toEqual([BIG[0], BIG[1], BIG[2], BIG[4]].map((r) => `thread:${r}`));
+    const more = body(page, "group:series:big").locator(".wiki-thread-more");
+    await more.focus();
+    await page.keyboard.press("Enter");
+    await expect(kids).toHaveCount(5);
+    const focused = await page.evaluate(() => document.activeElement?.closest(".wiki-thread-card")?.getAttribute("data-thread"));
+    expect(focused).toBe(`thread:${BIG[3]}`);
+  });
+
+  // Fix round 1 batch 3 (focus loss): a repaint nobody in this tab asked for
+  // keeps focus on the open menu's item, and Escape still closes the menu.
+  const menuFocus = (p: Page) => p.evaluate(() => document.activeElement?.getAttribute("data-work-evidence") ?? document.activeElement?.tagName ?? null);
+  async function openMenuOnSeries(p: Page): Promise<void> {
+    await groupBtn(p).focus();
+    await p.keyboard.press("Enter");
+    await p.keyboard.press("End");
+    expect(await menuFocus(p)).toBe("series");
+  }
+  async function escapeReturnsToButton(p: Page): Promise<void> {
+    await p.keyboard.press("Escape");
+    await expect(menu(p)).toHaveCount(0);
+    expect(await p.evaluate(() => document.activeElement?.hasAttribute("data-work-group-menu"))).toBe(true);
+  }
+
+  test("focus: another tab's write repaints this tab's open menu with focus kept on its item; Escape still closes it", async ({ context }) => {
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await openReader(a);
+    await openReader(b);
+    await openMenuOnSeries(b);
+    await groupBtn(a).click();
+    await a.locator('[data-work-evidence="issue"]').click();
+    await expect(b.locator('[data-work-evidence="issue"]')).toHaveAttribute("aria-checked", "false");
+    await expect(menu(b)).toBeVisible();
+    expect(await menuFocus(b)).toBe("series");
+    await escapeReturnsToButton(b);
+  });
+
+  test("focus: Escape closes the open menu even when focus has fallen to the page", async ({ page }) => {
+    await openReader(page);
+    await openMenuOnSeries(page);
+    await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+    expect(await menuFocus(page)).toBe("BODY");
+    await escapeReturnsToButton(page);
+  });
+
+  test("focus: a window-focus refetch that repaints keeps focus on the open menu's item; Escape still closes it", async ({ page }) => {
+    let renamed = false;
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === GROUPS,
+      async (route) => {
+        const res = await route.fetch();
+        const json = (await res.json()) as { pages: { relPath: string; title: string }[] };
+        if (renamed) for (const p of json.pages) if (p.relPath === "notes/old-1.md") p.title = "Old 1, renamed";
+        await route.fulfill({ response: res, json });
+      },
+    );
+    await page.clock.install();
+    await openReader(page);
+    await openMenuOnSeries(page);
+    renamed = true;
+    const refetched = page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes(`wiki=${GROUPS}`) && r.url().includes("refresh=1"));
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refetched;
+    await expect(page.locator('.wiki-list-item[data-relpath="notes/old-1.md"]')).toContainText("Old 1, renamed");
+    await expect(menu(page)).toBeVisible();
+    expect(await menuFocus(page)).toBe("series");
+    await escapeReturnsToButton(page);
   });
 
   test("keyboard: the Group menu opens, moves, toggles a box in place, picks a stop and closes back on its button", async ({ page }) => {
