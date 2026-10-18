@@ -51,15 +51,19 @@ export function normalizeLabel(label: string): string {
   return stripEmphasis(label).replace(/`/g, "").trim().normalize("NFC").toLowerCase();
 }
 
+/** The `better` directions, and the `decimal` values, this accepts. */
+export const DELTA_DIRECTIONS: ReadonlySet<string> = new Set(["lower", "higher"]);
+export const DELTA_DECIMALS: ReadonlySet<string> = new Set(["comma", "dot"]);
+
 const direction = (v: string): "lower" | "higher" | null => {
   const d = v.trim().toLowerCase();
-  return d === "lower" || d === "higher" ? d : null;
+  return DELTA_DIRECTIONS.has(d) ? (d as "lower" | "higher") : null;
 };
 
 export function parseDeltaAttrs(attrs: Record<string, string>): DeltaAttrs {
   const raw = (attrs.decimal ?? "").trim();
   const d = raw.toLowerCase();
-  const decimal: DeltaDecimal = d === "comma" || d === "dot" ? d : "";
+  const decimal: DeltaDecimal = DELTA_DECIMALS.has(d) ? (d as DeltaDecimal) : "";
   const decimalWarning = raw && !decimal ? `Unknown decimal value: ${raw} — use comma or dot` : "";
   return { ...parseBetter(attrs), decimal, decimalWarning };
 }

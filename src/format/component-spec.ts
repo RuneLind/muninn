@@ -8,8 +8,8 @@
  * A LEAF, and in the browser bundle (`web-format-browser.ts` → `web-format.ts` →
  * `markdown-ast.ts` → here): it imports only `calendar-day.ts`, never
  * `markdown-ast.ts`. Descriptions, teach targets and hints live in
- * `component-docs.ts`, which only the linter imports (PR 3's reference generator
- * will read it too).
+ * `component-docs.ts`, which only the linter and `scripts/component-reference.ts`
+ * import.
  *
  * Each attribute's `parse` is the renderer's own function (for Lane `kind`, a
  * two-line adapter over it), never a copy. It returns `{ value, fellBack }`:
@@ -40,7 +40,14 @@ export interface AttrSpec {
   required?: true;
   /** Values accepted beside the `enum`, each with the enum value it reads as. */
   aliases?: Readonly<Record<string, string>>;
+  /** The value's shape, for a typed attribute with no `enum`; absent means a
+   *  string. Read by `scripts/component-reference.ts`, never by a renderer. */
+  type?: AttrType;
 }
+
+/** `iso-date`: YYYY-MM-DD; `date`: that or DD.MM.YYYY; `number`: any finite
+ *  number; `positive-number`: one above 0. */
+export type AttrType = "iso-date" | "date" | "number" | "positive-number";
 
 export interface ComponentSpec {
   attrs: Readonly<Record<string, AttrSpec>>;
@@ -268,7 +275,7 @@ export const COMPONENT_SPEC = {
       title: text,
       // `resolved="YYYY-MM-DD"` turns the callout into a closed-issue row; any
       // other value is ignored and it renders as usual.
-      resolved: { parse: readResolvedDate },
+      resolved: { parse: readResolvedDate, type: "iso-date" },
     },
   },
   Verdict: {
@@ -286,8 +293,8 @@ export const COMPONENT_SPEC = {
   ComparisonTable: { attrs: {} },
   Meter: {
     attrs: {
-      value: { parse: readMeterValue, required: true },
-      max: { parse: readMeterMax, default: METER_DEFAULT_MAX },
+      value: { parse: readMeterValue, type: "number", required: true },
+      max: { parse: readMeterMax, type: "positive-number", default: METER_DEFAULT_MAX },
       tone: { parse: readMeterTone, enum: METER_TONES, default: "default" },
     },
   },
@@ -334,7 +341,7 @@ export const COMPONENT_SPEC = {
       kind: { parse: readLaneKind, enum: LANE_KIND_VALUES, default: "waiting" },
       who: text,
       role: text,
-      since: { parse: readLaneSince },
+      since: { parse: readLaneSince, type: "date" },
     },
   },
   // One prod query: `csv`/`sql` name files beside the page, `uses` is a

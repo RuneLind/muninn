@@ -2,9 +2,46 @@ import { describe, expect, test } from "bun:test";
 import { COMPONENT_DOCS, attrAliasFor, attrTeach, hintFor, suggestFor, type ComponentDoc } from "./component-docs.ts";
 import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName } from "./component-spec.ts";
 import { COMPONENT_VOCABULARY_RULES } from "../research/answer.ts";
+import { ATTR_RE, COMPONENT_OPEN_RE } from "./markdown-ast.ts";
 
 const docs = COMPONENT_DOCS as Record<ComponentName, ComponentDoc>;
 const attrSpec = (name: ComponentName, attr: string) => (COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>)[attr]!;
+
+type ShownAttr = { name: string; attr: string; value: string };
+
+/** Every component tag a hand-written prompt shows. The scan skips over quoted
+ *  values, so `title="a > b"` does not end the tag. */
+const promptTags = (text: string) => [...text.matchAll(/<([A-Z][A-Za-z]*)((?:[^>"]|"[^"]*")*)>/g)];
+
+/**
+ * Every `attr="value"` a hand-written prompt shows on a component tag, read
+ * with the parser's own `ATTR_RE`, whose `[\w-]*` name reads `aria-label=` whole.
+ */
+function shownAttrs(text: string): ShownAttr[] {
+  const out: ShownAttr[] = [];
+  for (const tag of promptTags(text)) {
+    for (const a of tag[2]!.matchAll(ATTR_RE)) out.push({ name: tag[1]!, attr: a[1]!, value: a[2]! });
+  }
+  return out;
+}
+
+/** Each prompt tag the parser's `COMPONENT_OPEN_RE` rejects, so it would render
+ *  as visible text: a single-quoted or spaced `=` value, or no space between two. */
+const malformedTags = (text: string) => promptTags(text).map((t) => t[0]).filter((t) => !COMPONENT_OPEN_RE.test(t));
+
+/** Each shown value that is no spec attribute or falls back, as a labelled row. */
+function valueProblems(text: string): (ShownAttr & { problem: string })[] {
+  const problems: (ShownAttr & { problem: string })[] = [];
+  for (const { name, attr, value } of shownAttrs(text)) {
+    const attrs = (COMPONENT_NAMES as readonly string[]).includes(name) ? (COMPONENT_SPEC[name as ComponentName].attrs as Record<string, AttrSpec>) : {};
+    if (!Object.hasOwn(attrs, attr)) {
+      problems.push({ name, attr, value, problem: "not a spec attribute" });
+      continue;
+    }
+    for (const v of value.split("|")) if (attrs[attr]!.parse(v).fellBack) problems.push({ name, attr, value: v, problem: "falls back" });
+  }
+  return problems;
+}
 
 const runtimeImports = async (file: string) =>
   new Bun.Transpiler({ loader: "ts" }).scanImports(await Bun.file(`${import.meta.dir}/${file}`).text()).map((i) => i.path).sort();
@@ -38,12 +75,37 @@ test("chat teach set is exactly what COMPONENT_VOCABULARY_RULES names", () => {
   const chat = COMPONENT_NAMES.filter((n) => docs[n].teach.includes("chat"));
   expect((chat as string[]).sort()).toEqual([...taughtNames].sort());
   // Attributes: every `attr="` the rules show on a tag, per component.
-  const taughtAttrs = new Set<string>();
-  for (const m of COMPONENT_VOCABULARY_RULES.matchAll(/<([A-Z][A-Za-z]*)([^>]*)>/g)) {
-    for (const a of m[2]!.matchAll(/([a-z]+)="/g)) taughtAttrs.add(`${m[1]}.${a[1]}`);
-  }
+  const taughtAttrs = new Set(shownAttrs(COMPONENT_VOCABULARY_RULES).map((a) => `${a.name}.${a.attr}`));
   const chatAttrs = chat.flatMap((n) => COMPONENT_ATTRS[n].filter((a) => attrTeach(n, a).includes("chat")).map((a) => `${n}.${a}`));
   expect(chatAttrs.sort()).toEqual([...taughtAttrs].sort());
+});
+
+// The prompt string is hand-written (it is not generated from the spec), so this
+// pins every value it shows: a tone renamed in the spec turns this red.
+test("every value COMPONENT_VOCABULARY_RULES shows parses with fellBack false", () => {
+  expect(shownAttrs(COMPONENT_VOCABULARY_RULES).flatMap((a) => a.value.split("|")).length).toBeGreaterThanOrEqual(10);
+  expect(valueProblems(COMPONENT_VOCABULARY_RULES)).toEqual([]);
+  expect(malformedTags(COMPONENT_VOCABULARY_RULES)).toEqual([]);
+});
+
+test("a prompt tag the parser would render as text is caught", () => {
+  const good = '<Figure caption="...">';
+  expect(COMPONENT_VOCABULARY_RULES).toContain(good);
+  for (const bad of ['<Figure caption="..."tone="nope">', "<Figure caption=\"...\" tone='nope'>", '<Figure caption="..." tone = "nope">']) {
+    expect({ bad, malformed: malformedTags(COMPONENT_VOCABULARY_RULES.replace(good, bad)) }).toEqual({ bad, malformed: [bad] });
+  }
+  // With no space, the name still reads whole, so the value check sees it too.
+  expect(valueProblems('<Figure caption="..."tone="nope">')).toEqual([{ name: "Figure", attr: "tone", value: "nope", problem: "not a spec attribute" }]);
+});
+
+test("the prompt scan reads a quoted `>` and a hyphenated name whole, and labels an unknown attribute", () => {
+  const variant = '<Callout tone="warn" aria-label="x" title="a > b">body</Callout>';
+  expect(shownAttrs(variant)).toEqual([
+    { name: "Callout", attr: "tone", value: "warn" },
+    { name: "Callout", attr: "aria-label", value: "x" },
+    { name: "Callout", attr: "title", value: "a > b" },
+  ]);
+  expect(valueProblems(variant)).toEqual([{ name: "Callout", attr: "aria-label", value: "x", problem: "not a spec attribute" }]);
 });
 
 describe("hints", () => {
@@ -111,6 +173,16 @@ describe("the accepted-value and fallback text", () => {
         }
         if (d?.onFallback?.includes("{default}")) expect(spec.default).toBeDefined();
         if (d?.onFallbackWhen) expect(COMPONENT_ATTRS[name]).toContain(d.onFallbackWhen.attr);
+      }
+    }
+  });
+
+  // The reference generator prints `type`, not `accepts`; an attribute with
+  // only `accepts` would print as a bare string.
+  test("an attribute with accepts has a type", () => {
+    for (const name of COMPONENT_NAMES) {
+      for (const [attr, d] of Object.entries(docs[name].attrs ?? {})) {
+        if (d?.accepts !== undefined) expect({ name, attr, type: attrSpec(name, attr).type !== undefined }).toEqual({ name, attr, type: true });
       }
     }
   });
