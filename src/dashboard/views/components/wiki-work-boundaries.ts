@@ -97,8 +97,6 @@ export interface WorkBoundaries {
   units: WorkUnit[];
   /** The membership the pin and the Threads stop read. */
   derived: WorkThread[];
-  /** thread key → what it ranks by (`rankThreadCards`). */
-  rank: Map<string, { rank: WorkThread; sub: number }>;
   /** Every stored definition, with where it stands. */
   definitions: BoundaryDefinition[];
   /** Kept-apart anchors to move: `[stored, newest focus page of its thread]`. */
@@ -194,7 +192,6 @@ export function applyWorkBoundaries(input: WorkBoundariesInput): WorkBoundaries 
       threads,
       units: threads.map((b) => ({ key: b.thread.key, index: b.index, sub: 0, rank: b.source, thread: b.thread, isolated: false })),
       derived: raw,
-      rank: new Map(threads.map((b) => [b.thread.key, { rank: b.source, sub: 0 }] as const)),
       definitions: [],
       reanchor: [],
     };
@@ -293,8 +290,7 @@ export function applyWorkBoundaries(input: WorkBoundariesInput): WorkBoundaries 
     ...(b.split ? { split: b.split } : {}),
     ...(b.keptApart ? { keptApart: b.keptApart } : {}),
   }));
-  const rank = new Map(threads.map((b) => [b.thread.key, { rank: b.source, sub: b.sub }] as const));
-  return { threads, units, derived: threads.map((b) => b.thread), rank, definitions, reanchor };
+  return { threads, units, derived: threads.map((b) => b.thread), definitions, reanchor };
 }
 
 /** What a focus row's ⋯ offers for its page. */

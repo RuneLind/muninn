@@ -16,7 +16,10 @@
  *  - `wsbseries`, `wsbrefuse` — the related pair and the note only, for the
  *    two Save as series cases (each writes its own temp files).
  *  - `wsbcap` — four newer lone notes ahead of the related pair, so the pair
- *    is the fifth card (the D20 cap riders).
+ *    is the fifth card (D20: the cap counts base cards).
+ *  - `wsbcapf` — four busier lone plans ahead of a task thread whose key and
+ *    rest pages sit in `drafts/`, so under `folder=plans` the thread is the
+ *    fifth card showing two rows, `t-split` and `t-more`.
  *  - `wsbtwin` — the pair with an `.html` twin of `live-a` as its focus page;
  *    `wsbstale`, `wsbslow`, `wsbslowfail`, `wsbnorefresh`, `wsbgone`,
  *    `wsbcleared` — the pair again, one per Save as series lifecycle case.
@@ -48,6 +51,7 @@ const BRO = "wsboundro";
 const S = "wsbseries";
 const R = "wsbrefuse";
 const C = "wsbcap";
+const CF = "wsbcapf";
 /** Fix round 1 batch 2: an `.html`-twin child, a concurrent series writer,
  *  and the popover's lifecycle during a write. One wiki per writing test. */
 const TW = "wsbtwin";
@@ -71,6 +75,10 @@ const LONE = "notes/lone.md";
 const LAH = "plans/live-a.html";
 const OTHER = "notes/other.md";
 const BUSY = [1, 2, 3, 4].map((i) => `notes/busy-${i}.md`);
+const BUSYP = [1, 2, 3, 4].map((i) => `plans/busy-${i}.md`);
+const FKEY = "drafts/t-key.md";
+const FREST = "drafts/t-rest.md";
+const FMORE = "plans/t-more.md";
 
 /** Per wiki: each session's focus pages, newest session first (b0 is 1 h ago). */
 const SESSIONS: Record<string, string[][]> = {
@@ -79,6 +87,8 @@ const SESSIONS: Record<string, string[][]> = {
   [S]: [[LA], [LB], [LONE]],
   [R]: [[LA], [LB], [LONE]],
   [C]: [...BUSY.map((p) => [p]), [LA], [LB]],
+  // Four sessions on each busy plan (newest), then the task thread, then the pair.
+  [CF]: [...[1, 2, 3, 4].flatMap(() => BUSYP.map((p) => [p])), [TSPLIT], [FKEY, TSPLIT], [FREST, FKEY], [FMORE, FREST], [LA], [LB]],
   [TW]: [[LAH], [LB], [LONE]],
   [ST]: [[LA], [LB], [LONE]],
   [SL]: [[LA], [LB], [LONE]],
@@ -163,6 +173,28 @@ async function makeRoot(name: string, withTask: boolean, busy = false, twin = fa
   if (busy) for (const [i, rel] of BUSY.entries()) await write(rel, [`title: Busy ${i + 1}`, "type: note"], (i + 1) * 60_000);
 }
 
+/** `wsbcapf`: the busy plans, the task thread with its key and rest in
+ *  `drafts/`, the related pair. */
+async function makeFolderCapRoot(): Promise<void> {
+  const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-bounds-${CF}-`));
+  roots[CF] = root;
+  await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ activity: { agePenalty: 0, hubPenalty: 0, planBoost: 0, rows: 8 } }), "utf8");
+  const write = async (rel: string, fm: string[], ago: number) => {
+    const abs = path.join(root, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, ["---", ...fm, "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
+    const stamp = new Date(NOW - ago);
+    await utimes(abs, stamp, stamp);
+  };
+  await write(FKEY, ["title: Task key"], 2 * HOUR);
+  await write(TSPLIT, ["title: Task split"], HOUR);
+  await write(FREST, ["title: Task rest"], 3 * HOUR);
+  await write(FMORE, ["title: Task more"], 3 * HOUR);
+  await write(LA, ["title: Living facts"], 4 * HOUR);
+  await write(LB, ["title: Reader lenses", `related: ["[[plans/live-a]]"]`], 5 * HOUR);
+  for (const [i, rel] of BUSYP.entries()) await write(rel, [`title: Busy ${i + 1}`], (i + 1) * 60_000);
+}
+
 const card = (page: Page, rel: string) => page.locator(`#wikiList .wiki-thread-card[data-thread="thread:${rel}"]`);
 const groupCard = (page: Page, key: string) => page.locator(`#wikiList .wiki-thread-card[data-thread-group="${key}"]`);
 const threadRow = (page: Page, rel: string) => page.locator(`#wikiList .wiki-list-item.thread-row[data-relpath="${rel}"]`);
@@ -209,6 +241,7 @@ test.beforeAll(async () => {
   await makeRoot(S, false);
   await makeRoot(R, false);
   await makeRoot(C, false, true);
+  await makeFolderCapRoot();
   await makeRoot(TW, false, false, true);
   for (const w of [ST, SL, SF, NR, NG, CL]) await makeRoot(w, false);
   ledger = await startLedger();
@@ -238,7 +271,7 @@ test.beforeAll(async () => {
     if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
     await new Promise((r) => setTimeout(r, 400));
   }
-  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3, [C]: 6, [TW]: 3, [ST]: 3, [SL]: 3, [SF]: 3, [NR]: 3, [NG]: 3, [CL]: 3 };
+  const want: Record<string, number> = { [B]: 4, [BRO]: 4, [S]: 3, [R]: 3, [C]: 6, [CF]: 7, [TW]: 3, [ST]: 3, [SL]: 3, [SF]: 3, [NR]: 3, [NG]: 3, [CL]: 3 };
   for (const wiki of Object.keys(want)) {
     const warm = Date.now() + 20_000;
     for (;;) {
@@ -321,14 +354,14 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     expect((await record(page)).keptApart).toEqual([]);
   });
 
-  test("Keep separate on a child of the FIFTH card: the thread stays drawn past the cap with its chip, and Allow grouping is reachable (D20)", async ({ page }) => {
+  test("Keep separate on a child of the FIFTH card: the thread stays drawn in that card's place with its chip, and Allow grouping is reachable (D20)", async ({ page }) => {
     await openReader(page, C);
     const busy = BUSY.map((rel) => `thread:${rel}`);
     await expect.poll(() => topKeys(page)).toEqual([...busy, `group:anchor:${LA}`]);
     await groupCard(page, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
     await openMenu(page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`));
     await page.locator("#wikiWorkPop [data-work-keep]").click();
-    // The group dissolved; the kept-apart thread rides with the card it came from.
+    // The group dissolved; the kept-apart thread draws in the fifth card's place.
     await expect.poll(() => topKeys(page)).toEqual([...busy, `thread:${LA}`, `thread:${LB}`]);
     await expect(card(page, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
     expect((await record(page, C)).keptApart).toEqual([LB]);
@@ -336,6 +369,32 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await page.locator("#wikiWorkPop [data-work-allow]").click();
     await expect.poll(() => topKeys(page)).toEqual([...busy, `group:anchor:${LA}`]);
     expect((await record(page, C)).keptApart).toEqual([]);
+  });
+
+  test("Make own thread on both visible pages of the fifth card, a facet hiding the rest of its thread: both stay drawn in that card's place (D20)", async ({ page }) => {
+    await openReader(page, CF);
+    // The thread's key is t-rest: its earliest focus event, in the oldest session.
+    await page.locator("#wikiFilters").evaluate((el) => ((el as HTMLDetailsElement).open = true));
+    await page.selectOption("#wikiFolder", "plans");
+    const busy = BUSYP.map((rel) => `thread:${rel}`);
+    await expect.poll(() => topKeys(page)).toEqual([...busy, `thread:${FREST}`]);
+    await card(page, FREST).locator(".wiki-thread-fold").click();
+    await rowMenu(page, TSPLIT);
+    await page.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect.poll(() => topKeys(page)).toEqual([...busy, `thread:${FREST}`, `thread:${TSPLIT}`]);
+    // The second split leaves the remainder (key and rest, both in drafts/)
+    // no row under the facet: both split pages hold the fifth card's place,
+    // and the related pair stays cut.
+    await rowMenu(page, FMORE);
+    await page.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect.poll(() => topKeys(page)).toEqual([...busy, `thread:${TSPLIT}`, `thread:${FMORE}`]);
+    await expect(card(page, FMORE).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+    await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(0);
+    expect((await record(page, CF)).splits.map((x: { page: string }) => x.page)).toEqual([TSPLIT, FMORE]);
+    // Return to its thread from the card's ⋯: the page is back in the remainder, in the same place.
+    await openMenu(card(page, FMORE).locator("[data-work-card-menu]"));
+    await page.locator("#wikiWorkPop [data-work-return]").click();
+    await expect.poll(() => topKeys(page)).toEqual([...busy, `thread:${FREST}`, `thread:${TSPLIT}`]);
   });
 
   test("the Sessions stop (D19): one card per session, newest first; a page two sessions focused is one row and one also in: link", async ({ page }) => {

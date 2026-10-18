@@ -224,10 +224,12 @@ function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number):
   const { stop, toggles } = groupFlags();
   const splits = process.argv.flatMap((a, i) => (process.argv[i - 1] === "--split" ? [{ id: `replay${i}`, page: a }] : []));
   const filters: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "", status: "", followups: "", waiting: "", project: "", jira: "" };
-  const input = railInputFor(
-    { allPages: listing, projects: projectCounts(index.pages), activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: null, work: index.work ?? null },
-    { mode: "updated", now: at, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [], threadPin: null, workGroup: { stop, evidence: toggles, splits } },
-  );
+  const inputWith = (moreOpen: string[]) =>
+    railInputFor(
+      { allPages: listing, projects: projectCounts(index.pages), activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: null, work: index.work ?? null },
+      { mode: "updated", now: at, filters, showRetired: false, familiesOn: false, pins: [], openFolds: [], threadPin: null, workGroup: { stop, evidence: toggles, splits, moreOpen } },
+    );
+  const input = inputWith([]);
   // Activity's weights and gate never move the cards, so the defaults serve.
   const ctl = input.workControl;
   console.log(`\nGrouped rail (buildRail, stop ${stop}, evidence ${Object.entries(toggles).filter(([, v]) => v).map(([k]) => k).join("+") || "none"}):`);
@@ -252,18 +254,24 @@ function printGroupedRail(index: WikiIndex, listing: WikiListing[], at: number):
     }
   }
   const cards = input.threads ?? [];
+  // The same cards with every group's `+ N more threads` pressed, so hidden
+  // children count. Threads held are the SERVER's threads the cards' pages
+  // came from: a split and its remainder are one thread.
+  const all = inputWith(cards.filter(isRailGroupCard).map((c) => c.foldKey)).threads ?? [];
+  const b = workBoundariesOf(index.work ?? null, listing, { splits, keptApart: [] });
+  const sourceOf = new Map(b.threads.map((t) => [t.thread.key, t.source.key] as const));
+  const childrenOf = (c: (typeof all)[number]) => (isRailGroupCard(c) ? c.children : [c]);
   const total = index.work?.threads.length ?? 0;
-  const held = cards.reduce((n, c) => n + (isRailGroupCard(c) ? c.threads : 1), 0);
-  const first = cards[0];
+  const held = new Set(all.flatMap((c) => childrenOf(c).map((t) => sourceOf.get(t.key) ?? t.key))).size;
+  const first = all[0];
   const firstShape = !first
     ? "none"
     : isRailGroupCard(first)
-      ? `${first.label} group «${first.name}», ${first.threads} children, ${first.children.length} drawn, ${new Set(groupWorkThreads({ work: index.work ?? null, allPages: listing, now: at, stop, toggles }).groups[0]?.children.flatMap((c) => c.owned.map((p) => p.relPath)) ?? []).size} focus pages`
+      ? `${first.label} group «${first.name}», ${first.threads} children, ${childrenOf(cards[0]!).length} drawn, ${first.children.reduce((n, t) => n + t.focus.length, 0)} focus pages`
       : `thread «${first.name}», ${first.focus.length} focus pages`;
   console.log(`  five-card check: ${cards.length} cards hold ${held} of ${total} threads; first card: ${firstShape}`);
   if (!splits.length) return;
   // PR 4: each --split page's own thread and its source's remainder (D15).
-  const b = workBoundariesOf(index.work ?? null, listing, { splits, keptApart: [] });
   const ids = (t: { sessions: { id: string }[] }) => t.sessions.map((x) => x.id.slice(0, 8)).join(",");
   for (const d of b.definitions) {
     const own = b.threads.find((x) => x.split?.id === d.id);

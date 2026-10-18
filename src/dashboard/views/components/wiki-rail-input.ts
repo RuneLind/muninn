@@ -51,6 +51,9 @@ import {
   workSessionCards,
   type WorkGroupChild,
   type WorkGroupChildView,
+  type WorkGroupView,
+  type WorkGrouping,
+  type WorkUnit,
   type WorkWitness,
 } from "./wiki-work-groups.ts";
 import { WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupSplit, type WorkGroupStop } from "./wiki-work-group-prefs.ts";
@@ -154,6 +157,8 @@ export function workBoundariesOf(
  *  - Focus rows are ordered by work term; a page an earlier thread already
  *    owns is neither a row of a later card nor its name (a hub has one owner,
  *    D16).
+ *  - PR 4: `threads` are the server's; `boundaries` breaks each card into the
+ *    pieces the reader's splits made, in its place (`threadCardPieces`, D20).
  */
 export function openThreadCards(
   threads: readonly WorkThread[] | null | undefined,
@@ -166,7 +171,7 @@ export function openThreadCards(
   asOfMs?: number,
   boundaries?: WorkBoundaries,
 ): RailThreadCard[] {
-  const cards = threadCardBodies(threads, pages, filters, pin, now, allPages, asOfMs, THREAD_CARDS_MAX, boundaries);
+  const cards = threadCardPieces(threads, pages, filters, pin, now, allPages, asOfMs, THREAD_CARDS_MAX, boundaries).flat();
   return cards.map((c, i) => {
     const stored = groupFoldState(foldState, c.foldKey);
     const defaultOpen = i === 0;
@@ -178,9 +183,20 @@ export function openThreadCards(
   });
 }
 
-/** `openThreadCards` before the folds, at most `cap` cards: the one path both
- *  the drawn Threads cards and the Group menu's Threads count (uncapped) take. */
-function threadCardBodies(
+type ThreadCardBody = Omit<RailThreadCard, "open" | "toggleKey">;
+
+/**
+ * The Threads stop's cards before the folds, one list per BASE card (D20):
+ * the first `cap` cards the server's threads draw with no manual boundary,
+ * after the facets, the pinned one first — exactly today's cards. A base card
+ * whose thread the reader's splits broke draws all of its pieces in its
+ * place: the remainder and each split page, the piece holding the pin first,
+ * then in the source's order. A piece owns only pages its base card owned,
+ * so a boundary click never adds a page to the section or removes one, and
+ * the section holds at most the pieces of `cap` base cards. `cap` Infinity
+ * is the Group menu's Threads count.
+ */
+export function threadCardPieces(
   threads: readonly WorkThread[] | null | undefined,
   pages: readonly WikiListing[],
   filters: WikiFilters,
@@ -190,19 +206,23 @@ function threadCardBodies(
   asOfMs: number | undefined,
   cap: number,
   boundaries?: WorkBoundaries,
-): Omit<RailThreadCard, "open" | "toggleKey">[] {
+): ThreadCardBody[][] {
   if (!railSectionsVisible(filters)) return [];
-  const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs, boundaries?.rank);
+  const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs);
   if (!ranked.length) return [];
   const byRel = new Map<string, WikiListing>();
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const visible = new Set(filterPages(pages as WikiListing[], filters).map((p) => normalizeRel(p.relPath)));
-  const cards: Omit<RailThreadCard, "open" | "toggleKey">[] = [];
-  for (const { t, score, pinned, owned } of ranked) {
+  /** source thread key → its pieces, for every thread a split broke. */
+  const piecesOf = new Map<string, BoundedThread[]>();
+  for (const b of boundaries?.threads ?? []) if (b.split || b.remainder) (piecesOf.get(b.source.key) ?? piecesOf.set(b.source.key, []).get(b.source.key)!).push(b);
+  const pinKey = pin ? normalizeRel(pin) : null;
+  const order = workTermOrder(workGroupingInstant(now, asOfMs));
+  const body = (t: WorkThread, owned: WikiListing[], pinned: boolean, score: number): ThreadCardBody | null => {
     // The created window stays on the reader's `now`.
     const rows = threadCardRows(owned, t.touched, visible, byRel, now);
-    if (!rows.focus.length) continue;
-    cards.push({
+    if (!rows.focus.length) return null;
+    return {
       key: t.key,
       foldKey: threadFoldKey(t.key),
       // Named by the top page the thread OWNS in the whole listing, so neither
@@ -216,90 +236,30 @@ function threadCardBodies(
       sessions: t.sessions,
       movesYou: rows.movesYou,
       score,
-    });
+    };
+  };
+  const out: ThreadCardBody[][] = [];
+  for (const { t, score, pinned, owned } of ranked) {
+    if (out.length >= cap) break;
+    const whole = body(t, owned, pinned, score);
+    if (!whole) continue;
+    const parts = piecesOf.get(t.key);
+    if (!parts) {
+      out.push([whole]);
+      continue;
+    }
+    const ownable = new Set(owned.map((p) => normalizeRel(p.relPath)));
+    const pinPiece = pinned && pinKey ? parts.find((b) => threadHoldsPin(b.thread, byRel, pinKey)) : undefined;
+    const taken = new Set<string>();
+    const cards: ThreadCardBody[] = [];
+    for (const b of pinPiece ? [pinPiece, ...parts.filter((x) => x !== pinPiece)] : parts) {
+      const mine = claimOwnedFocus(b.thread.pages.filter((p) => ownable.has(normalizeRel(p))), byRel, taken, order);
+      const card = body(b.thread, mine, b === pinPiece, score);
+      if (card) cards.push(card);
+    }
+    out.push(cards);
   }
-  if (cards.length <= cap) return cards;
-  // At Threads a card's family is its source thread: no group to leave.
-  const bounded = new Map((boundaries?.threads ?? []).map((b) => [b.thread.key, b] as const));
-  const capCards = cards.map((c) => {
-    const b = bounded.get(c.key);
-    return [{ key: c.key, source: b?.source.key ?? c.key, split: !!b?.split }];
-  });
-  return capWithBoundaryRiders(cards, boundaryRidesOn(capCards, remainderBySource(boundaries), (source) => source), cap);
-}
-
-/** One unit of a card, as the cap reads it. */
-interface CapUnit {
-  key: string;
-  /** The server's thread it came from (`WorkUnit.rank`). */
-  source: string;
-  /** A Make own thread page. */
-  split: boolean;
-}
-
-/** source thread key → its remainder's key, for every source a split left pages in. */
-function remainderBySource(b: Pick<WorkBoundaries, "threads"> | undefined): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const t of b?.threads ?? []) if (t.remainder) out.set(t.source.key, t.thread.key);
   return out;
-}
-
-/**
- * For each card, the cards whose being drawn lets it ride past the cap (D20:
- * a card a manual boundary made is drawn with the card it came from):
- *
- *  - A split whose source kept a remainder rides on the remainder's card only,
- *    never on a sibling split (a pinned split drawn first must not carry its
- *    siblings when the remainder is cut).
- *  - Every other card rides on the other cards of its FAMILY (`familyOf` its
- *    units' sources): the cards one server thread (Threads) or one boundary-
- *    free group (Related, Areas) became. A family the boundaries left whole is
- *    one card and never rides; a dissolved one draws its first card against
- *    the cap and the rest with it — a thread split whole, a group a thread was
- *    kept out of (that thread, and the children left behind when it was the
- *    anchor).
- */
-function boundaryRidesOn(cards: readonly (readonly CapUnit[])[], remainderOf: ReadonlyMap<string, string>, familyOf: (source: string) => string): number[][] {
-  const cardOfUnit = new Map<string, number>();
-  const families = new Map<string, Set<number>>();
-  cards.forEach((units, i) => {
-    for (const u of units) {
-      cardOfUnit.set(u.key, i);
-      const f = familyOf(u.source);
-      (families.get(f) ?? families.set(f, new Set()).get(f)!).add(i);
-    }
-  });
-  const onRemainder = (units: readonly CapUnit[]) => (units.length === 1 && units[0]!.split ? remainderOf.get(units[0]!.source) : undefined);
-  return cards.map((units, i) => {
-    const rem = onRemainder(units);
-    if (rem !== undefined) {
-      const r = cardOfUnit.get(rem);
-      return r === undefined ? [] : [r];
-    }
-    const on = new Set<number>();
-    for (const u of units) for (const j of families.get(familyOf(u.source)) ?? []) if (j !== i && onRemainder(cards[j]!) === undefined) on.add(j);
-    return [...on];
-  });
-}
-
-/** At most `cap` cards in rank order, plus every card one of whose `ridesOn`
- *  cards is drawn before it (`boundaryRidesOn`); a rider takes no slot, so the
- *  section holds at most `cap` + the manual cards. A card a rider rides on
- *  ranks before it: a split follows its remainder (same source, higher
- *  `sub`) unless the split holds the pin, and then it takes the first slot;
- *  a family's riding is symmetric, so its first card in order is the one
- *  that counts. */
-function capWithBoundaryRiders<C>(cards: readonly C[], ridesOn: readonly (readonly number[])[], cap: number): C[] {
-  const drawn = new Set<number>();
-  let counted = 0;
-  cards.forEach((_, i) => {
-    if (ridesOn[i]!.some((j) => drawn.has(j))) drawn.add(i);
-    else if (counted < cap) {
-      counted++;
-      drawn.add(i);
-    }
-  });
-  return cards.filter((_, i) => drawn.has(i));
 }
 
 /** One thread as the Threads stop ranks it: its score, whether it holds the
@@ -325,10 +285,6 @@ export function rankThreadCards(
   pin: string | null,
   now: number,
   asOfMs?: number,
-  /** PR 4: what a split page and its remainder rank by (`WorkBoundaries.rank`):
-   *  the source thread as shipped, then `sub`, so a split follows its source.
-   *  Absent, or a thread not in it: the thread itself (today's order). */
-  rank?: WorkBoundaries["rank"],
 ): RankedThread[] {
   const usable = usableThreads(threads);
   if (!usable.length) return [];
@@ -341,14 +297,7 @@ export function rankThreadCards(
   const ranked = usable
     .map((t) => ({
       t,
-      by: rank?.get(t.key)?.rank ?? t,
-      sub: rank?.get(t.key)?.sub ?? 0,
-    }))
-    .map(({ t, by, sub }) => ({
-      t,
-      by,
-      sub,
-      score: threadRankScore(by, byRel, at),
+      score: threadRankScore(t, byRel, at),
       holdsPin: !!pinKey && threadHoldsPin(t, byRel, pinKey),
     }))
     .map((x) => {
@@ -362,8 +311,7 @@ export function rankThreadCards(
       (a, b) =>
         Number(b.pinned) - Number(a.pinned) ||
         b.score - a.score ||
-        (a.by.key < b.by.key ? -1 : a.by.key > b.by.key ? 1 : 0) ||
-        a.sub - b.sub,
+        (a.t.key < b.t.key ? -1 : a.t.key > b.t.key ? 1 : 0),
     );
   const taken = new Set<string>();
   const order = workTermOrder(at);
@@ -417,8 +365,9 @@ export function childWhyLine(child: Pick<WorkGroupChild, "witnesses">, anchor: b
  *  - Related, Areas: the grouping model over the FULL listing
  *    (`groupWorkThreads`: membership, names, fold keys, ownership and the pin),
  *    then the pool and facets on the child rows (`projectWorkGroups`: empty
- *    children and groups dropped), then at most `THREAD_CARDS_MAX` cards. A
- *    one-thread card is today's card. A group shows `GROUP_CHILDREN_SHOWN`
+ *    children and groups dropped), then at most `THREAD_CARDS_MAX` cards —
+ *    each of which the reader's boundaries may break into several, in its
+ *    place (`groupCardPieces`, D20). A one-thread card is today's card. A group shows `GROUP_CHILDREN_SHOWN`
  *    children (plus the pinned one past them) until `+ N more threads`.
  *  - The first card defaults open and, if it is a group, its pinned child
  *    (else its first drawn child) too; both offer the `closed:` spelling.
@@ -435,18 +384,18 @@ export function openWorkCards(
   boundaries: WorkBoundaries = view.boundaries ?? workBoundariesOf(work, allPages, view),
 ): { cards: RailWorkCard[]; control: RailWorkControl } {
   const requested = view.stop;
-  // Page assignments first (D5): the model groups the units after the splits.
-  const units = boundaries.units;
-  const grouping = groupWorkThreads({ work, allPages, now, stop: requested, toggles: view.evidence, pin, units });
+  // The BASE grouping: no manual boundary (D20). The boundaries apply inside
+  // each of its cards (`groupCardPieces`).
+  const grouping = groupWorkThreads({ work, allPages, now, stop: requested, toggles: view.evidence, pin });
   const at = workGroupingInstant(now, work?.asOfMs);
   // Uncapped card counts. Threads counts the cards `openThreadCards` draws (its
   // own order and ownership, which a score tie can tell apart from the model's).
   const visibleAt = (stop: WorkGroupStop) =>
     stop === "threads"
-      ? threadCardBodies(boundaries.derived, pool, filters, pin, now, allPages, work?.asOfMs, Infinity, boundaries).length
+      ? threadCardPieces(work?.threads, pool, filters, pin, now, allPages, work?.asOfMs, Infinity, boundaries).flat().length
       : stop === "sessions"
         ? projectSessionCards(stop === requested ? grouping.sessions : workSessionCards(work, allPages, at), pool, filters, Infinity).length
-        : projectWorkGroups(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin, units }), pool, filters, now, Infinity).length;
+        : groupCardPieces(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin }), work, pool, filters, pin, now, allPages, boundaries, Infinity).flat().length;
   const sections = railSectionsVisible(filters);
   const control: RailWorkControl = {
     requested,
@@ -518,23 +467,12 @@ export function openWorkCards(
   };
 
   if (grouping.stop === "threads" || !sections) {
-    const cards = openThreadCards(boundaries.derived, pool, filters, foldState, pin, now, allPages, work?.asOfMs, boundaries);
+    const cards = openThreadCards(work?.threads, pool, filters, foldState, pin, now, allPages, work?.asOfMs, boundaries);
     return { cards: cards.map((c) => decorate(c, false)), control };
   }
 
   const more = new Set((view.moreOpen ?? []).map(normalizeFoldKey));
-  // At most `THREAD_CARDS_MAX` cards, a card a manual boundary made riding
-  // past the cap with the card it came from (D20, `boundaryRidesOn`). A
-  // family is a group of the boundary-free grouping at this stop.
-  const projected = projectWorkGroups(grouping, pool, filters, now, Infinity);
-  let views = projected;
-  if (projected.length > THREAD_CARDS_MAX) {
-    const familyOf = boundaries.units.some((u) => u.split || u.keptApart)
-      ? baseFamilies(groupWorkThreads({ work, allPages, now, stop: grouping.stop, toggles: view.evidence, pin }))
-      : (source: string) => source;
-    const capCards = projected.map((gv) => gv.children.map((cv) => ({ key: cv.child.key, source: cv.child.unit.rank.key, split: !!cv.child.unit.split })));
-    views = capWithBoundaryRiders(projected, boundaryRidesOn(capCards, remainderBySource(boundaries), familyOf), THREAD_CARDS_MAX);
-  }
+  const views = groupCardPieces(grouping, work, pool, filters, pin, now, allPages, boundaries, THREAD_CARDS_MAX).flat();
   const threadCard = (cv: WorkGroupChildView, defaultOpen: boolean, child?: RailThreadCard["child"]): RailThreadCard =>
     decorate(
       {
@@ -617,11 +555,51 @@ export function openWorkCards(
   return { cards, control };
 }
 
-/** source thread key → the anchor of its group in a boundary-free grouping. */
-function baseFamilies(base: ReturnType<typeof groupWorkThreads>): (source: string) => string {
-  const of = new Map<string, string>();
-  for (const g of base.groups) for (const c of g.children) of.set(c.unit.rank.key, g.anchorKey);
-  return (source) => of.get(source) ?? source;
+/**
+ * The Related and Areas cards, one list per BASE card (D20): the first `cap`
+ * cards of `base` — the grouping with no manual boundary, the pinned card
+ * first — after the pool and the facets, exactly today's cards. A base card
+ * holding a unit the reader's boundaries changed (a split page, a remainder,
+ * a kept-apart thread) is regrouped from its own units after the boundaries,
+ * and draws every card that makes, in its place: the pinned one first, then
+ * in rank order. Those cards own only the pages the base card owned and take
+ * no fold key another base card holds, so a boundary click never adds a page
+ * to the section or removes one, and the section holds at most the pieces of
+ * `cap` base cards.
+ */
+export function groupCardPieces(
+  base: WorkGrouping,
+  work: RailWikiFacts["work"],
+  pool: readonly WikiListing[],
+  filters: WikiFilters,
+  pin: string | null,
+  now: number,
+  allPages: readonly WikiListing[],
+  boundaries: WorkBoundaries,
+  cap: number,
+): WorkGroupView[][] {
+  const views = projectWorkGroups(base, pool, filters, now, cap);
+  /** source thread key → its units after the boundaries, for every source a boundary changed. */
+  const unitsOf = new Map<string, WorkUnit[]>();
+  for (const u of boundaries.units) (unitsOf.get(u.rank.key) ?? unitsOf.set(u.rank.key, []).get(u.rank.key)!).push(u);
+  const changed = new Set(boundaries.units.filter((u) => u.isolated || u.thread !== u.rank).map((u) => u.rank.key));
+  if (!changed.size) return views.map((v) => [v]);
+  return views.map((v) => {
+    const sources = v.group.children.map((c) => c.unit.rank.key);
+    if (!sources.some((k) => changed.has(k))) return [v];
+    const local = groupWorkThreads({
+      work,
+      allPages,
+      now,
+      stop: base.stop,
+      toggles: base.toggles,
+      pin: v.group.pinned ? pin : null,
+      units: sources.flatMap((k) => unitsOf.get(k) ?? []),
+      ownable: new Set(v.group.children.flatMap((c) => c.owned.map((p) => normalizeRel(p.relPath)))),
+      foldKeysTaken: base.groups.filter((g) => g !== v.group).map((g) => g.foldKey),
+    });
+    return projectWorkGroups(local, pool, filters, now, Infinity);
+  });
 }
 
 /** `▸ split into N sessions` for one drawn thread card (D19): the sessions
