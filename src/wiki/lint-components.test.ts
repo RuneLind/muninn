@@ -298,6 +298,13 @@ describe("a component name inside another tag's quoted value", () => {
     expect(lines(content)).toEqual(['7 Callout tone="success" renders as info']);
   });
 
+  test("a quoted value that runs over lines claims nothing: the tags after it keep their lines", () => {
+    const pill = page('Prose <Pill title="x', "", "<Meter>", "body", "</Meter>", "", 'y">z</Pill>');
+    expect(lines(pill)).toEqual(["7 Meter has no value; its label renders as plain text"]);
+    const fold = page('<Fold x="a', "", "<Meter>", "body", "</Meter>", "", 'b">', "c", "</Fold>");
+    expect(lines(fold)).toEqual(["7 Meter has no value; its label renders as plain text"]);
+  });
+
   test("an opener no grammar closes is marked as usual: the tag the scanner reads keeps its line", () => {
     const content = page('<Callout tone="success" title="use <Pill tone="bad">a</Pill> here">', "", "body", "", "</Callout>");
     expect(html(content)).toContain('&lt;Callout tone=&quot;success&quot;');
@@ -584,6 +591,15 @@ describe("a finding prints the value as written, never a parked sentinel", () =>
     const coded = checkComponents("plans/x.mdx", page('Text <Pill tone="`bad`">x</Pill>'));
     expect(coded.map((f) => [f.line, f.message])).toEqual([[5, 'Pill tone="`bad`" renders as default']]);
     expect(JSON.stringify([...linked, ...coded])).not.toContain("\\u0000");
+  });
+
+  test("a parked span holding a quote ends the source value early: the finding prints … instead", () => {
+    const linked = checkComponents("plans/x.mdx", page('<Callout tone="[[a"b]]">', "x", "</Callout>"));
+    expect(linked.map((f) => [f.line, f.message])).toEqual([[5, 'Callout tone="…" renders as info']]);
+    const coded = checkComponents("plans/x.mdx", page('Text <Pill tone="`a"b`">p</Pill>'));
+    expect(coded.map((f) => [f.line, f.message])).toEqual([[5, 'Pill tone="…" renders as default']]);
+    const normal = checkComponents("plans/x.mdx", page('<Callout tone="[[Page]] and `x`">', "x", "</Callout>"));
+    expect(normal.map((f) => [f.line, f.message])).toEqual([[5, 'Callout tone="[[Page]] and `x`" renders as info']]);
   });
 
   test("an unlocated tag prints … for a parked part", () => {

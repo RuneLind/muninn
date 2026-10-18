@@ -10,7 +10,7 @@
  * checks the `.mdx` pages under it that `lintWiki` checks: the store's own scan
  * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
  * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
- * sibling exists), minus a page a same-stem `.md` shadows and a culled page
+ * sibling exists), minus a page a readable same-stem `.md` shadows and a culled page
  * (`signal: none`). The wiki root is the nearest ancestor holding
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
  * `relPath` is relative to it.
@@ -44,14 +44,22 @@ export function wikiRootFor(dir: string): string | null {
 /**
  * The `.mdx` pages `buildWikiIndex` keeps under `dir`, relative to `root`,
  * sorted: its scan and pipeline-source drop, then its stem rule, under which a
- * `.md` anywhere in the wiki drops a same-stem `.mdx`.
+ * `.md` anywhere in the wiki drops a same-stem `.mdx`. A `.md` the index could
+ * not read is no page there, so it shadows nothing here either.
  */
 export async function mdxPagesUnder(root: string, dir: string): Promise<string[]> {
   const all = await wikiPageRelPaths(root);
-  const mdStems = new Set(all.filter((p) => extRank(p) === 0).map((p) => stemKey(wikiPageStem(p))));
   const sub = path.relative(root, dir).split(path.sep).join("/");
   const prefix = sub === "" ? "" : `${sub}/`;
-  return all.filter((p) => extRank(p) === 1 && p.startsWith(prefix) && !mdStems.has(stemKey(wikiPageStem(p))));
+  const candidates = all.filter((p) => extRank(p) === 1 && p.startsWith(prefix));
+  const wanted = new Set(candidates.map((p) => stemKey(wikiPageStem(p))));
+  const mdStems = new Set<string>();
+  for (const p of all) {
+    const key = stemKey(wikiPageStem(p));
+    if (extRank(p) !== 0 || mdStems.has(key) || !wanted.has(key)) continue;
+    if (await Bun.file(path.join(root, p)).text().then(() => true, () => false)) mdStems.add(key);
+  }
+  return candidates.filter((p) => !mdStems.has(stemKey(wikiPageStem(p))));
 }
 
 /** A culled page, as the index reads it: frontmatter `signal: none`. */

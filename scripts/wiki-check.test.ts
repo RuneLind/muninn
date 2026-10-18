@@ -69,6 +69,21 @@ describe("wiki-check walks the pages lintWiki checks", () => {
     expect(found).not.toContain("blogs/src/s.mdx");
   });
 
+  test.skipIf(asRoot)("an unreadable same-stem .md is no page, so it shadows nothing: the same findings as lintWiki", async () => {
+    const root = path.join(tmp, "unreadable-shadow");
+    await Bun.write(path.join(root, ".wiki-reader.json"), "{}");
+    await Bun.write(path.join(root, "plans/q.mdx"), BAD);
+    await Bun.write(path.join(root, "notes/q.md"), BAD);
+    await chmod(path.join(root, "notes/q.md"), 0o000);
+    try {
+      const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.check.startsWith("component-"));
+      expect(lint.map((f) => f.relPath)).toEqual(["plans/q.mdx"]);
+      expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
+    } finally {
+      await chmod(path.join(root, "notes/q.md"), 0o644);
+    }
+  });
+
   test("a .wiki-reader.json include scopes the walk", async () => {
     expect(await relPaths(path.join(tmp, "scoped"))).toEqual(["plans/in.mdx"]);
   });

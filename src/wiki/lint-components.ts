@@ -43,7 +43,8 @@ import { ATTR_RE, observeComponentTags, type ObservedComponentTag } from "../for
 import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName, type ComponentSpec } from "../format/component-spec.ts";
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
-import { renderWikiHtml } from "./render.ts";
+import { lineCodeSpanRanges } from "../format/code-spans.ts";
+import { WIKILINK_WITH_LABEL_RE, renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { LintFinding } from "./lint.ts";
 
@@ -86,21 +87,46 @@ interface Spelling {
   shown: string;
 }
 
+/** `value` with each wikilink and code-span sentinel's index dropped. */
+const sentinelShape = (value: string) => value.replace(/\u0000(WIKIPAGELINK|INLINE)\d+\u0000/g, "\u0000$1\u0000");
+
+/** `written` parked the way the renderer parks it: wikilinks (the whole body,
+ *  first), then, with `code`, code spans (`renderInline`, over the parked text). */
+function parkedShape(written: string, code: boolean): string {
+  const linked = written.replace(new RegExp(WIKILINK_WITH_LABEL_RE.source, "g"), "\u0000WIKIPAGELINK\u0000");
+  if (!code) return linked;
+  let out = "";
+  let cursor = 0;
+  for (const r of lineCodeSpanRanges(linked)) {
+    out += `${linked.slice(cursor, r.start)}\u0000INLINE\u0000`;
+    cursor = r.end;
+  }
+  return out + linked.slice(cursor);
+}
+
 /**
  * Every attribute spelling of a tag, in source order, repeats included. The
  * renderer reads a value after parking its wikilinks and code spans, so the
  * judged value can hold a sentinel. A located tag prints the value as written
- * in the source, when its source attributes line up with the renderer's key for
- * key; otherwise each sentinel prints as `…`.
+ * in the source only when its source attributes line up with the renderer's key
+ * for key AND that value, parked the renderer's way, gives the renderer's value.
+ * A parked span holding a `"` ends the source value early (`tone="[[a"b]]"`
+ * reads `[[a`); parking a prefix of a value never gives the whole value's
+ * spans, so the check refuses it. Otherwise each sentinel prints as `…`.
  */
 function spellings(tag: Tag): Spelling[] {
   const read = attrList(tag.attrs);
   const written = tag.sourceAttrs === undefined ? [] : attrList(tag.sourceAttrs);
   const aligned = written.length === read.length && written.every(([k], i) => k === read[i]![0]);
+  const reproduces = (i: number) => {
+    const want = sentinelShape(read[i]![1]);
+    const src = written[i]![1];
+    return parkedShape(src, false) === want || parkedShape(src, true) === want;
+  };
   return read.map(([key, value], i) => ({
     key,
     value,
-    shown: !value.includes("\u0000") ? value : aligned ? written[i]![1] : value.replace(SENTINEL_RE, "…").replaceAll("\u0000", ""),
+    shown: !value.includes("\u0000") ? value : aligned && reproduces(i) ? written[i]![1] : value.replace(SENTINEL_RE, "…").replaceAll("\u0000", ""),
   }));
 }
 
@@ -264,12 +290,11 @@ function observe(render: PageRender, content: string): ObservedComponentTag[] {
 }
 
 /** An attribute run in the parser's attribute shape after a tag name, followed
- *  by a `>` or `/>`. Unlike `COMPONENT_OPEN_RE`, which reads one line, it
- *  crosses line breaks (`\s` and `[^"]` match a newline), so a run that closes
- *  only on a later line also counts as an opener here. */
-const OPENER_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*(?=\s*\/?>)/y;
-/** The attribute run after a tag name in the source, closed or not. */
-const SOURCE_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*/y;
+ *  by a `>` or `/>`, on one line: `COMPONENT_OPEN_RE` and the inline scanner
+ *  each read one line, so a run that closes only on a later line is no opener. */
+const OPENER_RUN_RE = /(?:[^\S\n]+[A-Za-z][\w-]*="[^"\n]*")*(?=[^\S\n]*\/?>)/y;
+/** The attribute run after a tag name in the source, closed or not, on one line. */
+const SOURCE_RUN_RE = /(?:[^\S\n]+[A-Za-z][\w-]*="[^"\n]*")*/y;
 
 /**
  * `content` with a marker after every `<Name` in the body, and each marker's
