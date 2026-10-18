@@ -3834,7 +3834,9 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
   // is taller than the viewport scrolls the PAGE to reach it — and a page
   // scroll is what this menu closes on, so the menu dismissed itself the moment
   // it opened (measured on a short viewport, where 70vh really binds).
-  el.querySelector<HTMLInputElement>("[data-series-input]")?.focus({ preventScroll: true });
+  // A page menu opens on its first item, the boundary item (the Group menu's
+  // rule); a series menu on its field.
+  (el.querySelector<HTMLElement>("[data-thread-split], [data-work-return]") ?? el.querySelector<HTMLInputElement>("[data-series-input]"))?.focus({ preventScroll: true });
 }
 
 /**
@@ -5171,6 +5173,11 @@ function railControlSelector(el: Element | null): string | null {
     const base = fold.startsWith(CLOSED_FOLD_PREFIX) ? fold.slice(CLOSED_FOLD_PREFIX.length) : fold;
     return `${at("data-fold-key", base)}, ${at("data-fold-key", CLOSED_FOLD_PREFIX + base)}`;
   }
+  // A thread row's page menu (a tab stop, unlike a plain row's ⋯), by page.
+  const seriesRow = el.getAttribute("data-series-menu");
+  if (seriesRow !== null && el.closest(".wiki-list-item.thread-row")) {
+    return `#wikiList .wiki-list-item.thread-row [data-series-menu="${CSS.escape(seriesRow)}"]`;
+  }
   if (el.hasAttribute("data-thread-pin")) {
     const cardEl = el.closest(".wiki-thread-card");
     const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
@@ -5217,6 +5224,12 @@ function editWorkGroup(edit: WorkGroupEdit): void {
 /** The open work popover: what opened it, and for Save as series, the plan. */
 interface WorkPopState {
   opener: HTMLElement;
+  /** The opener as a rail selector by its key, taken at open time: a repaint
+   *  while the popover is open detaches the opener node itself. */
+  openerSel: string | null;
+  /** A page of the thread the popover acts on: where focus goes when the
+   *  opener is gone from the rail. */
+  page: string;
   key: string;
   /** Save as series' confirm view: `busy` while its write runs, `done` once
    *  it has reported (Write stays off until the popover reopens). */
@@ -5245,14 +5258,49 @@ function closeWorkPop(focus = true, force = false): void {
   was.opener.setAttribute("aria-expanded", "false");
   if (!focus) return;
   if (was.opener.isConnected) was.opener.focus({ preventScroll: true });
-  else {
-    const sel = railControlSelector(was.opener);
-    if (sel) document.querySelector<HTMLElement>(sel)?.focus({ preventScroll: true });
+  else focusFirstRailControl([was.openerSel, workCardControlSel(was.page, "menu")]);
+}
+
+/** Focus the first selector that finds a rail control; the Group button when
+ *  none does, so focus never falls to `<body>`. */
+function focusFirstRailControl(selectors: readonly (string | null | undefined)[]): void {
+  for (const sel of selectors) {
+    const el = sel ? document.querySelector<HTMLElement>(sel) : null;
+    if (el) {
+      el.focus({ preventScroll: true });
+      return;
+    }
   }
+  focusWorkMenuButton();
+}
+
+/** The drawn work card holding `page` as a selector for its ⋯ (`menu`) or its
+ *  fold: a child card when it is drawn, else the group around it. */
+function workCardControlSel(page: string | undefined, prefer: "menu" | "fold"): string | null {
+  if (!page) return null;
+  const k = normalizeRel(page);
+  const holds = (c: RailThreadCard) => normalizeRel(c.key) === k || c.focus.some((p) => normalizeRel(p.relPath) === k);
+  const sel = (attr: string, fk: string) => {
+    const at = `#wikiList .wiki-thread-card[${attr}="${CSS.escape(fk)}"] > `;
+    const menu = `#wikiList [data-work-card-menu="${CSS.escape(fk)}"]`;
+    const fold = `${at}.wiki-thread-fold`;
+    return prefer === "menu" ? (document.querySelector(menu) ? menu : fold) : fold;
+  };
+  for (const c of workCardsDrawn) {
+    if (!isRailGroupCard(c)) {
+      if (holds(c)) return sel("data-thread", c.foldKey);
+      continue;
+    }
+    const child = c.children.find(holds);
+    if (!child && normalizeRel(c.key) !== k) continue;
+    if (child && document.querySelector(`#wikiList .wiki-thread-card[data-thread="${CSS.escape(child.foldKey)}"]`)) return sel("data-thread", child.foldKey);
+    return sel("data-thread-group", c.foldKey);
+  }
+  return null;
 }
 
 /** Paint the popover under `anchor` with `html`, focus its first item. */
-function openWorkPop(anchor: HTMLElement, key: string, html: string): HTMLElement | null {
+function openWorkPop(anchor: HTMLElement, key: string, html: string, label: string, page: string): HTMLElement | null {
   if (workPopBusy()) return null;
   closeWorkPop(false);
   closeSeriesMenu({ focus: false });
@@ -5260,6 +5308,7 @@ function openWorkPop(anchor: HTMLElement, key: string, html: string): HTMLElemen
   el.id = WORK_POP_ID;
   el.className = "wiki-series-menu wiki-work-pop";
   el.setAttribute("role", "menu");
+  el.setAttribute("aria-label", label);
   el.innerHTML = html;
   document.body.appendChild(el);
   const rect = anchor.getBoundingClientRect();
@@ -5269,7 +5318,7 @@ function openWorkPop(anchor: HTMLElement, key: string, html: string): HTMLElemen
   const below = rect.bottom + 6;
   el.style.top = `${Math.round(below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below)}px`;
   anchor.setAttribute("aria-expanded", "true");
-  workPop = { opener: anchor, key };
+  workPop = { opener: anchor, openerSel: railControlSelector(anchor), page, key };
   el.querySelector<HTMLElement>("input, button")?.focus({ preventScroll: true });
   return el;
 }
@@ -5291,10 +5340,12 @@ function newSplitId(): string {
   return "s" + Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, 15);
 }
 
-/** Apply one boundary edit from a ⋯ item and repaint; focus goes to the
- *  card the edit produced or kept (`focusFold`), else back to the opener. */
-function applyBoundaryEdit(edit: WorkGroupEdit, focusFold?: string): void {
-  const opener = workPop?.opener ?? seriesMenu?.opener ?? null;
+/** Apply one boundary edit from a ⋯ item and repaint. Focus goes to the
+ *  control `focus` names first — a selector, or `{ page, prefer }` for the
+ *  drawn card holding that page — then to the opener by its key (taken
+ *  BEFORE the render detaches it), then to the Group button. */
+function applyBoundaryEdit(edit: WorkGroupEdit, focus: { page: string; prefer: "menu" | "fold"; first?: "card" | "opener"; sel?: string }): void {
+  const openerSel = workPop?.openerSel ?? railControlSelector(seriesMenu?.opener ?? null);
   closeWorkPop(false);
   closeSeriesMenu({ focus: false });
   editWorkGroup(edit);
@@ -5302,12 +5353,8 @@ function applyBoundaryEdit(edit: WorkGroupEdit, focusFold?: string): void {
   const full = workGroupAddRefused(workGroupRec.held, edit);
   if (full) showWorkSeriesStatus(`${"split" in edit ? "Make own thread" : "Keep separate"} did nothing: ${WORK_GROUP_FULL_TEXT[full]}`, true);
   renderList();
-  const fold = focusFold ? document.querySelector<HTMLElement>(`#wikiList [data-thread="${CSS.escape(normalizeFoldKey(focusFold))}"] .wiki-thread-fold`) : null;
-  if (fold) fold.focus({ preventScroll: true });
-  else if (opener) {
-    const sel = railControlSelector(opener);
-    if (sel) document.querySelector<HTMLElement>(sel)?.focus({ preventScroll: true });
-  }
+  const card = workCardControlSel(focus.page, focus.prefer);
+  focusFirstRailControl(focus.first === "opener" ? [focus.sel, openerSel, card] : [focus.sel, card, openerSel]);
 }
 
 /** A ⋯ item click inside either popover (the work popover, or the series
@@ -5318,17 +5365,21 @@ function boundaryItemClick(target: HTMLElement): boolean {
   if (item.getAttribute("aria-disabled") === "true") return true;
   const split = item.getAttribute("data-thread-split");
   if (split) {
-    applyBoundaryEdit({ split: { id: newSplitId(), page: split } }, `thread:${split}`);
+    // The split card's fold; the card holding the page when it is not drawn.
+    const fold = `#wikiList .wiki-thread-card[data-thread="${CSS.escape(normalizeFoldKey(`thread:${split}`))}"] > .wiki-thread-fold`;
+    applyBoundaryEdit({ split: { id: newSplitId(), page: split } }, { sel: fold, page: split, prefer: "fold", first: "opener" });
     return true;
   }
   const ret = item.getAttribute("data-work-return");
   if (ret) {
-    applyBoundaryEdit({ unsplit: { id: ret, page: item.getAttribute("data-work-return-page") ?? "" } });
+    // The card that took the page back: its fold.
+    const page = item.getAttribute("data-work-return-page") ?? "";
+    applyBoundaryEdit({ unsplit: { id: ret, page } }, { page, prefer: "fold" });
     return true;
   }
   const keep = item.getAttribute("data-work-keep");
   if (keep) {
-    applyBoundaryEdit({ keepApart: keep });
+    applyBoundaryEdit({ keepApart: keep }, { page: keep, prefer: "menu", first: "opener" });
     return true;
   }
   const allow = item.getAttribute("data-work-allow");
@@ -5342,7 +5393,7 @@ function boundaryItemClick(target: HTMLElement): boolean {
     }
     // Every page of the thread, not only the anchor drawn: another tab may
     // have re-anchored it onto another of its pages since this render.
-    applyBoundaryEdit({ allowGrouping: keptApartPagesOf(workBounds?.threads ?? [], anchors) });
+    applyBoundaryEdit({ allowGrouping: keptApartPagesOf(workBounds?.threads ?? [], anchors) }, { page: anchors[0] ?? "", prefer: "menu", first: "opener" });
     return true;
   }
   return false;
@@ -5524,7 +5575,7 @@ function openWorkCardMenu(btn: HTMLElement): void {
   if (!card) return;
   const html = isRailGroupCard(card) ? groupCardMenuHtml(card) : card.menu ? threadCardMenuHtml(card.menu) : "";
   if (!html) return;
-  openWorkPop(btn, `card:${key}`, html);
+  openWorkPop(btn, `card:${key}`, html, btn.getAttribute("aria-label") ?? "More", card.key);
 }
 
 /** Open a focus row's ⋯ where no series menu applies: Make own thread only. */
@@ -5536,7 +5587,8 @@ function openThreadRowMenu(btn: HTMLElement): void {
     return;
   }
   const html = rowMenuItemHtml(rel);
-  if (html) openWorkPop(btn, `row:${rel}`, html);
+  const page = allPages.find((p) => normalizeRel(p.relPath) === normalizeRel(rel));
+  if (html) openWorkPop(btn, `row:${rel}`, html, `Page menu for ${page ? displayTitleOf(page) : rel}`, rel);
 }
 
 document.addEventListener("click", (e) => {
@@ -5552,6 +5604,11 @@ document.addEventListener("click", (e) => {
       const card = drawnWorkCard(save.getAttribute("data-work-save-series") ?? "");
       if (!card || !isRailGroupCard(card) || !card.series) return;
       el.innerHTML = saveSeriesConfirmHtml(card, card.series);
+      // A textbox and plain buttons: a dialog, not a menu (whose reading mode
+      // skips anything that is not a menu item). Non-modal: the rail stays live.
+      el.setAttribute("role", "dialog");
+      el.setAttribute("aria-modal", "false");
+      el.setAttribute("aria-label", `Save «${card.name}» as a series`);
       workPop.series = { card, busy: false };
       el.querySelector<HTMLElement>("[data-work-series-key], [data-work-series-go]")?.focus({ preventScroll: true });
       return;
@@ -5572,6 +5629,42 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Escape" && workPopEl()) closeWorkPop();
+});
+// The arrows, Home and End move between a body-level popover menu's items —
+// the ⋯ work popover and the series editor (a thread row's page menu) — the
+// Group menu's keys. Tab closes the work popover back to its opener, as Tab
+// closes the Group menu; the series editor holds text fields, so Tab stays
+// the browser's there, and Home and End stay the field's own while typing.
+document.addEventListener("keydown", (e) => {
+  const t = e.target as HTMLElement | null;
+  if (!t?.closest || e.defaultPrevented) return;
+  const work = t.closest<HTMLElement>(`#${WORK_POP_ID}`);
+  const el = work ?? t.closest<HTMLElement>(`#${SERIES_MENU_ID}`);
+  if (!el || el.getAttribute("role") !== "menu") return;
+  if (work && e.key === "Tab") {
+    e.preventDefault();
+    closeWorkPop();
+    return;
+  }
+  const typing = t instanceof HTMLInputElement;
+  const items = Array.from(el.querySelectorAll<HTMLElement>("[role^='menuitem'], [data-series-input]")).filter(
+    (x) => x.tabIndex >= 0 && !(x as HTMLButtonElement).disabled,
+  );
+  if (!items.length) return;
+  const at = items.findIndex((x) => x === t || x.contains(t));
+  const move = (i: number) => {
+    const item = items[(i + items.length) % items.length]!;
+    // `preventScroll`: a page scroll closes the popover; its own list scrolls.
+    item.focus({ preventScroll: true });
+    if (item.offsetTop < el.scrollTop) el.scrollTop = item.offsetTop;
+    else if (item.offsetTop + item.offsetHeight > el.scrollTop + el.clientHeight) el.scrollTop = item.offsetTop + item.offsetHeight - el.clientHeight;
+  };
+  if (e.key === "ArrowDown") move(at + 1);
+  else if (e.key === "ArrowUp") move(at < 0 ? -1 : at - 1);
+  else if (e.key === "Home" && !typing) move(0);
+  else if (e.key === "End" && !typing) move(items.length - 1);
+  else return;
+  e.preventDefault();
 });
 window.addEventListener(
   "scroll",

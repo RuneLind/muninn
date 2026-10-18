@@ -21,6 +21,7 @@ import type { RailGroupCard, RailThreadCard, RailWorkControl } from "./wiki-rece
 import type { WikiListing } from "./wiki-filter.ts";
 import type { SaveSeriesPlan } from "./wiki-work-series.ts";
 import { WIKI_READONLY_BLOCKED_SELECTOR } from "./wiki-readonly-client.ts";
+import { seriesMenuBtnHtml } from "./wiki-series-menu.ts";
 
 const NOW = Date.UTC(2026, 9, 17, 20, 0);
 const card = (o: Partial<RailThreadCard> = {}): RailThreadCard => ({
@@ -73,6 +74,12 @@ describe("row ⋯ and the menus", () => {
     expect(WIKI_READONLY_BLOCKED_SELECTOR.split(",").some((sel) => sel.trim() === "[data-thread-row-menu]")).toBe(false);
     expect(WIKI_READONLY_BLOCKED_SELECTOR).toContain("[data-work-save-series]");
     expect(host).toContain('aria-label="Page menu"');
+  });
+
+  test("a thread row's ⋯ is a tab stop (the keyboard path to Make own thread); a plain row's series ⋯ is not", () => {
+    expect(threadRowMenuBtnHtml("plans/a.md")).not.toContain("tabindex");
+    expect(seriesMenuBtnHtml("plans/a.md", false, true)).not.toContain("tabindex");
+    expect(seriesMenuBtnHtml("plans/a.md", false)).toContain('tabindex="-1"');
   });
 
   test("Make own thread, its disabled form with a described reason, and Return to its thread", () => {
@@ -135,6 +142,12 @@ describe("split into sessions, also in:, the Group menu", () => {
     expect(on).toContain("split into 3 sessions");
     const off = threadSessionsToggleHtml(card({ sessionSplit: { count: 3, available: false, reason: "contributions-cap", open: false, sessions: [] } }));
     expect(off).toContain('aria-disabled="true" title="Unavailable: the contribution rows hit their limit"');
+    // The reason is the description, by id, on a hidden node; the name is the label alone.
+    const id = /aria-describedby="([^"]+)"/.exec(off)?.[1];
+    expect(id).toBe("wikiSplitWhy-thread_3a_plans_2f_a_2e_md");
+    expect(off).toContain(`<span id="${id}" hidden>Unavailable: the contribution rows hit their limit</span>`);
+    expect(off).toContain('<span class="wiki-sr-only"> in Alpha</span></button>');
+    expect(on).not.toContain("aria-describedby");
   });
 
   test("also in: links, never rows", () => {

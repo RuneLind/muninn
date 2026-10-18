@@ -1259,6 +1259,9 @@ export async function renderWikiPage(opts?: {
       }
       .wiki-list-item:hover > .wiki-list-end > .wiki-series-menu-btn { opacity: 1; pointer-events: auto; }
       .wiki-list-item:hover > .wiki-list-end:has(> .wiki-series-menu-btn) > .wiki-list-meta { visibility: hidden; }
+      /* A thread row's page menu is a tab stop: focus reveals it as hover does. */
+      .wiki-list-end > .wiki-series-menu-btn:focus { opacity: 1; pointer-events: auto; }
+      .wiki-list-end:has(> .wiki-series-menu-btn:focus) > .wiki-list-meta { visibility: hidden; }
       .wiki-conn-item > .wiki-series-menu-btn { opacity: 0; pointer-events: none; }
       .wiki-conn-item:hover > .wiki-series-menu-btn { opacity: 1; pointer-events: auto; }
     }

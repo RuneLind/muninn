@@ -809,6 +809,8 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     // Reported, the popover is the reader's to close again.
     await page.keyboard.press("Escape");
     await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+    // The refresh repainted the opener; Escape finds it again by its key.
+    await expect(groupCard(page, `group:anchor:${LA}`).locator("[data-work-card-menu]").first()).toBeFocused();
   });
 
   test("a refresh that fails after the write says Saved — reload, and the popover stays to say it", async ({ page }) => {
@@ -877,3 +879,160 @@ test.describe("Wiki rail: work-thread boundaries", () => {
   });
 });
 
+/** Fix round 1, batch 5: focus after an edit, keyboard reach, ARIA. */
+test.describe("Wiki rail: boundary controls by keyboard", () => {
+  /** Tab from the focused element until `target` has focus; false after `max` presses. */
+  async function tabTo(page: Page, target: ReturnType<Page["locator"]>, max = 20): Promise<boolean> {
+    for (let i = 0; i < max; i++) {
+      await page.keyboard.press("Tab");
+      if (await target.evaluate((el) => el === document.activeElement).catch(() => false)) return true;
+    }
+    return false;
+  }
+
+  test("focus after each boundary edit lands on the card it acted on, never <body>", async ({ page }) => {
+    await openReader(page);
+    await groupCard(page, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    // Keep separate: the kept-apart card's ⋯.
+    await openMenu(page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`));
+    await page.locator("#wikiWorkPop [data-work-keep]").click();
+    await expect(card(page, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    await expect(card(page, LB).locator("[data-work-card-menu]")).toBeFocused();
+    // Allow grouping: the same thread's ⋯, now a child of the re-formed group.
+    await openMenu(card(page, LB).locator("[data-work-card-menu]"));
+    await page.locator("#wikiWorkPop [data-work-allow]").click();
+    await expect(groupCard(page, `group:anchor:${LA}`)).toHaveCount(1);
+    await expect(page.locator(`#wikiList [data-work-card-menu="thread:${LB}"]`)).toBeFocused();
+    // Make own thread: the split card's fold.
+    await rowMenu(page, TSPLIT);
+    await page.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect(card(page, TSPLIT).locator(".wiki-thread-fold")).toBeFocused();
+    // Escape after a repaint while the popover is open: its opener, by key.
+    await openMenu(card(page, TSPLIT).locator("[data-work-card-menu]"));
+    // Another tab's edit that moves no card: the rail repaints under the popover.
+    const repainted = await page.evaluate((k) => {
+      const r = JSON.parse(localStorage.getItem(k)!);
+      r.evidence = { issue: false };
+      const v = JSON.stringify(r);
+      localStorage.setItem(k, v);
+      const before = document.querySelector("#wikiList [data-work-card-menu]");
+      window.dispatchEvent(new StorageEvent("storage", { key: k, newValue: v, storageArea: localStorage }));
+      return !!before && !before.isConnected;
+    }, workGroupKey(B));
+    expect(repainted).toBe(true);
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+    await expect(card(page, TSPLIT).locator("[data-work-card-menu]")).toBeFocused();
+    // Return to its thread: the card that took the page back.
+    await openMenu(card(page, TSPLIT).locator("[data-work-card-menu]"));
+    await page.locator("#wikiWorkPop [data-work-return]").click();
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+    await expect(card(page, TKEY).locator(".wiki-thread-fold")).toBeFocused();
+  });
+
+  test("keyboard: Tab reaches a focus row's page menu; Enter opens it on Make own thread; the arrows and End move; Enter splits", async ({ page }) => {
+    await openReader(page);
+    const opener = threadRow(page, TSPLIT).locator("[data-series-menu]");
+    await card(page, TKEY).locator(".wiki-thread-fold").focus();
+    expect(await tabTo(page, opener)).toBe(true);
+    // Shown while it has focus, not only on hover.
+    await expect.poll(() => opener.evaluate((el) => getComputedStyle(el).opacity)).toBe("1");
+    await page.keyboard.press("Enter");
+    const menuEl = page.locator("#wikiSeriesMenu");
+    await expect(menuEl).toHaveCount(1);
+    const split = menuEl.locator("[data-thread-split]");
+    await expect(split).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(split).not.toBeFocused();
+    expect(await menuEl.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press("ArrowUp");
+    await expect(split).toBeFocused();
+    // End: the last item, the new-key field (Home and End are the field's own
+    // there); ArrowDown wraps to the first.
+    await page.keyboard.press("End");
+    await expect(menuEl.locator("[data-series-input]")).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(split).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menuEl).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(split).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(card(page, TSPLIT).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+    await expect(card(page, TSPLIT).locator(".wiki-thread-fold")).toBeFocused();
+    // The card's ⋯ by keyboard: Enter opens on Return; Tab closes back to it.
+    const cardMenu = card(page, TSPLIT).locator("[data-work-card-menu]");
+    await cardMenu.focus();
+    await page.keyboard.press("Enter");
+    const ret = page.locator("#wikiWorkPop [data-work-return]");
+    await expect(ret).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(ret).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+    await expect(cardMenu).toBeFocused();
+    await expect(cardMenu).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("keyboard on a read-only wiki: Tab reaches the row's own ⋯ and Enter opens Make own thread; Escape returns to it", async ({ page }) => {
+    await openReader(page, BRO);
+    const opener = threadRow(page, TSPLIT).locator("[data-thread-row-menu]");
+    await card(page, TKEY).locator(".wiki-thread-fold").focus();
+    expect(await tabTo(page, opener)).toBe(true);
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#wikiWorkPop [data-thread-split]")).toBeFocused();
+    await expect(page.locator("#wikiWorkPop")).toHaveAccessibleName("Page menu for Task split");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+
+  test("a11y: the ⋯ popover is named for its card; Save as series' confirm view is a labelled non-modal dialog", async ({ page }) => {
+    await openReader(page, C);
+    const g = groupCard(page, `group:anchor:${LA}`);
+    await g.locator(".wiki-thread-fold").click();
+    await openMenu(page.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`));
+    const pop = page.locator("#wikiWorkPop");
+    await expect(pop).toHaveAttribute("role", "menu");
+    await expect(pop).toHaveAccessibleName("More for the thread Reader lenses");
+    await page.keyboard.press("Escape");
+    const opener = g.locator("> .wiki-thread-acts [data-work-card-menu]");
+    await openMenu(opener);
+    await expect(pop).toHaveAccessibleName("More for the group Living facts");
+    await page.locator("#wikiWorkPop [data-work-save-series]").click();
+    await expect(pop).toHaveAttribute("role", "dialog");
+    await expect(pop).toHaveAttribute("aria-modal", "false");
+    await expect(pop).toHaveAccessibleName("Save «Living facts» as a series");
+    await expect(pop).toMatchAriaSnapshot(`
+      - dialog "Save «Living facts» as a series":
+        - textbox "New series key"
+        - button "Write 2 pages"
+        - button "Cancel"
+    `);
+    await page.locator("#wikiWorkPop [data-work-series-cancel]").click();
+    await expect(pop).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+
+  test("a11y: a disabled ▸ split into N sessions is named by its label and described by its reason", async ({ page }) => {
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === B,
+      async (route) => {
+        const res = await route.fetch();
+        const json = (await res.json()) as { work?: { evidence?: { contributions: unknown } } };
+        if (json.work?.evidence) json.work.evidence.contributions = { complete: false, reasons: ["ledger-truncated"], cut: [], rows: [] };
+        await route.fulfill({ response: res, json });
+      },
+    );
+    await openReader(page);
+    const btn = page.locator(`[data-thread-sessions="thread:${TKEY}"]`);
+    await expect(btn).toHaveAttribute("aria-disabled", "true");
+    await expect(btn).toHaveAccessibleName("split into 3 sessions in Task split");
+    const by = await btn.getAttribute("aria-describedby");
+    expect(by).toBeTruthy();
+    await expect(page.locator(`[id="${by}"]`)).toHaveText("Unavailable: the session ledger was cut short");
+    await expect(btn).toHaveAccessibleDescription("Unavailable: the session ledger was cut short");
+  });
+});

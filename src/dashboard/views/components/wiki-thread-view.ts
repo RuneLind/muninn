@@ -257,11 +257,13 @@ export function threadTouchedHtml(foldKey: string, pages: readonly WikiListing[]
 /** The ⋯ on a work thread's focus row where no series menu applies (a
  *  read-only wiki, an `.html` row, a reserved stem): it holds Make own thread
  *  only. Its own attribute — never the series opener's, which the read-only
- *  capture blocker refuses — and the series opener's look and reveal rule. */
+ *  capture blocker refuses — and the series opener's look and reveal rule.
+ *  A tab stop, unlike a plain row's ⋯: a thread's rows are few, and this is
+ *  the only keyboard path to Make own thread and Return to its thread. */
 export function threadRowMenuBtnHtml(relPath: string): string {
   return (
     `<button type="button" class="wiki-series-menu-btn wiki-thread-row-menu" data-thread-row-menu="${esc(relPath)}"` +
-    ` tabindex="-1" title="Page menu" aria-label="Page menu" aria-haspopup="menu">⋯</button>`
+    ` title="Page menu" aria-label="Page menu" aria-haspopup="menu">⋯</button>`
   );
 }
 
@@ -282,22 +284,34 @@ export function threadAlsoInHtml(foldKey: string, pages: readonly WikiListing[],
   );
 }
 
+/** An id for `key` that no other key maps to (every character outside
+ *  `[A-Za-z0-9-]` is spelled as `_<hex>_`). */
+function idFor(prefix: string, key: string): string {
+  return prefix + key.replace(/[^A-Za-z0-9-]/g, (c) => `_${c.charCodeAt(0).toString(16)}_`);
+}
+
 /** An open card's `▸ split into N sessions` (D19): the same rows under each
  *  session, without changing the stop. Unavailable (the thread's session
  *  data does not ship whole) it stays in the tab order, `aria-disabled`, with
- *  the reason in its title and description. */
+ *  the reason in its title and, for a screen reader, in `aria-describedby`
+ *  (a hidden node, so it is not read twice). */
 export function threadSessionsToggleHtml(card: RailThreadCard): string {
   const sp = card.sessionSplit;
   if (!sp) return "";
   const label = `split into ${sp.count} sessions`;
   const why = sp.available ? "" : `Unavailable: ${workReasonLabel(sp.reason ?? "")}`;
+  const whyId = idFor("wikiSplitWhy-", card.foldKey);
   return (
     `<div class="wiki-thread-inline wiki-thread-split" data-section="threads" data-thread="${esc(card.foldKey)}">` +
     `<button type="button" class="wiki-thread-split-btn" data-thread-sessions="${esc(card.foldKey)}"` +
     ` aria-expanded="${sp.open ? "true" : "false"}"` +
-    (sp.available ? ` title="Show this thread's pages under each session that worked on them"` : ` aria-disabled="true" title="${esc(why)}"`) +
+    (sp.available
+      ? ` title="Show this thread's pages under each session that worked on them"`
+      : ` aria-disabled="true" title="${esc(why)}" aria-describedby="${esc(whyId)}"`) +
     `><span aria-hidden="true">${sp.open ? "▾" : "▸"} </span>${esc(label)}` +
-    `<span class="wiki-sr-only"> in ${esc(card.name)}${why ? `. ${esc(why)}` : ""}</span></button></div>`
+    `<span class="wiki-sr-only"> in ${esc(card.name)}</span></button>` +
+    (why ? `<span id="${esc(whyId)}" hidden>${esc(why)}</span>` : "") +
+    `</div>`
   );
 }
 
