@@ -1424,6 +1424,8 @@ let workMenuOpen = false;
 /** Group fold keys whose `+ N more threads` this tab pressed. Never stored: a
  *  broad group opens on three children again after a reload. */
 const workMoreOpen = new Set<string>();
+/** Group fold keys whose shared-context `+N` this tab pressed. Never stored. */
+const workContextOpen = new Set<string>();
 
 /** Document focus: the only state in which a render may write the pin. */
 function tabHasFocus(): boolean {
@@ -1688,7 +1690,7 @@ function renderList(cause: "storage" | "local" = "local"): void {
       return;
     }
     if (entry.kind === "thread-group-end") {
-      html += threadGroupEndHtml(entry.foldKey, entry.hidden, entry.context, pageUrlByRelPath);
+      html += threadGroupEndHtml(entry.foldKey, entry.hidden, entry.context, pageUrlByRelPath, entry.name, workContextOpen.has(entry.foldKey));
       return;
     }
     if (entry.kind === "header" && entry.control) {
@@ -5111,6 +5113,10 @@ function editWorkGroup(edit: WorkGroupEdit): void {
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
+  // A click outside the open Group menu closes it in the pressed control's own
+  // render, which also refocuses that control; the document handler below
+  // repaints only when no render here removed the menu.
+  if (workMenuOpen && !target.closest(".wiki-work-menu, [data-work-group-menu]")) workMenuOpen = false;
   // The Group control and its menu (plan `muninn-wiki-work-thread-grouping`).
   // Menu items are buttons, so a keyboard Enter or Space lands here too.
   if (target.closest("[data-work-group-menu]")) {
@@ -5154,6 +5160,21 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
       const card = after.find((c) => !before.has(c.getAttribute("data-thread"))) ?? after[after.length - 1];
       card?.querySelector<HTMLElement>(".wiki-thread-fold")?.focus({ preventScroll: true });
     }
+    return;
+  }
+  // The shared context's `+N`: the full list in place, focus on the first link
+  // the press revealed.
+  const ctxBtn = target.closest("[data-thread-ctx-more]");
+  if (ctxBtn) {
+    e.preventDefault();
+    const key = ctxBtn.getAttribute("data-thread-ctx-more");
+    if (!key) return;
+    const hadFocus = document.activeElement === ctxBtn;
+    const links = () => Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-thread-context[data-thread-group="${CSS.escape(key)}"] .wiki-thread-link`));
+    const shown = links().length;
+    workContextOpen.add(key);
+    renderList();
+    if (hadFocus) links()[shown]?.focus({ preventScroll: true });
     return;
   }
   // The group chip and the section fold — the rail's second control, on the same
@@ -8627,9 +8648,13 @@ document.addEventListener("keydown", (e) => {
   if (lost) e.preventDefault();
 });
 
-// A click outside the open Group menu closes it.
+// A click outside the open Group menu closes it, unless a rail control's own
+// render (the list handler above) already did.
 document.addEventListener("click", (e) => {
-  if (!workMenuOpen) return;
+  if (!document.querySelector("#wikiList .wiki-work-menu")) {
+    workMenuOpen = false;
+    return;
+  }
   const target = e.target as HTMLElement;
   if (target.closest?.(".wiki-work-menu, [data-work-group-menu]")) return;
   setWorkMenu(false, false);

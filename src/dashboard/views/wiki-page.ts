@@ -1071,8 +1071,12 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-thread-more {
       font-family: inherit; font-size: 11px; font-weight: 600; color: var(--accent-light);
-      background: none; border: 0; padding: 2px 10px 4px; min-height: 24px; cursor: pointer;
+      background: none; border: 0; padding: 2px 10px 4px; min-height: 24px; cursor: pointer; position: relative;
     }
+    .wiki-thread-ctx-more {
+      font: inherit; color: var(--accent-light); background: none; border: 0; padding: 0; cursor: pointer; position: relative;
+    }
+    .wiki-thread-ctx-more:hover, .wiki-thread-ctx-more:focus-visible { text-decoration: underline; }
     .wiki-thread-context { padding: 2px 10px 0; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
     /* Forced colours paint fills as Canvas and drop shadows: the header keeps
        its real border (2 px when open, so open still differs from closed) and

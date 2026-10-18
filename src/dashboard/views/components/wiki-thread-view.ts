@@ -312,21 +312,28 @@ export function threadGroupBodyStartHtml(foldKey: string): string {
 const CONTEXT_SHOWN = 3;
 
 /** The end of an open group's body: `+ N more threads`, then the shared
- *  context line (links, not rows), then the body's close. */
+ *  context line (links, not rows), then the body's close. Both overflow
+ *  controls are buttons whose accessible name adds the group's `name`
+ *  (screen-reader-only), so two groups' buttons are told apart while the
+ *  visible text still starts the name. `contextOpen` draws every context link. */
 export function threadGroupEndHtml(
   foldKey: string,
   hidden: number,
   context: readonly WikiListing[],
   hrefFor: (relPath: string) => string,
+  name: string,
+  contextOpen = false,
 ): string {
+  const inGroup = `<span class="wiki-sr-only"> in ${esc(name)}</span>`;
   const more =
     hidden > 0
-      ? `<button type="button" class="wiki-thread-more" data-thread-more="${esc(foldKey)}">+ ${hidden} more ${hidden === 1 ? "thread" : "threads"}</button>`
+      ? `<button type="button" class="wiki-thread-more" data-thread-more="${esc(foldKey)}">+ ${hidden} more ${hidden === 1 ? "thread" : "threads"}${inGroup}</button>`
       : "";
   let ctx = "";
   if (context.length) {
-    const shown = context.slice(0, CONTEXT_SHOWN);
-    const rest = context.slice(CONTEXT_SHOWN);
+    const cut = contextOpen ? context.length : CONTEXT_SHOWN;
+    const shown = context.slice(0, cut);
+    const rest = context.slice(cut);
     const links = shown
       .map(
         (p) =>
@@ -335,7 +342,8 @@ export function threadGroupEndHtml(
       )
       .join(`<span class="wiki-thread-sep" aria-hidden="true"> · </span>`);
     const tail = rest.length
-      ? `<span class="wiki-thread-sep" aria-hidden="true"> · </span><span class="wiki-thread-ctx-more" title="${esc(rest.map(displayTitleOf).join("\n"))}">+${rest.length}</span>`
+      ? `<span class="wiki-thread-sep" aria-hidden="true"> · </span><button type="button" class="wiki-thread-ctx-more" data-thread-ctx-more="${esc(foldKey)}"` +
+        ` title="${esc(rest.map(displayTitleOf).join("\n"))}">+${rest.length}<span class="wiki-sr-only"> more shared ${rest.length === 1 ? "page" : "pages"} in ${esc(name)}</span></button>`
       : "";
     ctx =
       `<div class="wiki-thread-context" data-section="threads" data-thread-group="${esc(foldKey)}">` +
@@ -403,6 +411,9 @@ export function workSectionHeaderHtml(label: string, control: RailWorkControl, m
   );
 }
 
+/** The disabled evidence boxes' reason; one menu exists at a time. */
+const WORK_MENU_WHY_ID = "wikiWorkMenuWhy";
+
 /** The Group menu (D10): the stops with their card counts, then the evidence
  *  boxes, disabled where they do not apply (they keep their values). Menu
  *  items are buttons, so Enter and Space work as clicks; the reader's key
@@ -421,27 +432,34 @@ export function workGroupMenuHtml(control: RailWorkControl, local: boolean): str
       );
     })
     .join("");
+  // A disabled box names its reason through `aria-describedby`: arrow keys in a
+  // menu never reach a note, so the description is the only way it is heard.
+  const disabled = control.evidenceApplies ? "" : ` aria-disabled="true" aria-describedby="${WORK_MENU_WHY_ID}"`;
   const boxes = EVIDENCE_TEXT.map(([k, name]) => {
     const on = control.evidence[k];
     return (
       `<button type="button" role="menuitemcheckbox" class="wiki-work-opt wiki-work-box${control.evidenceApplies ? "" : " off"}" data-work-evidence="${k}"` +
-      ` aria-checked="${on ? "true" : "false"}"${control.evidenceApplies ? "" : ` aria-disabled="true"`}>` +
+      ` aria-checked="${on ? "true" : "false"}"${disabled}>` +
       `<span class="wiki-work-dot" aria-hidden="true">${on ? "☑" : "☐"}</span>` +
       `<span class="wiki-work-opt-text">${esc(name)}</span></button>`
     );
   }).join("");
   const fellBack = control.stop !== control.requested;
-  const note = fellBack
-    ? `${workStopName(control.requested)} is unavailable, so this shows ${workStopName(control.stop)}. Your choice is kept.`
-    : control.evidenceApplies
-      ? "A thread joins a group through a direct connection to its first thread."
-      : "Applies to Related and Areas.";
+  // The disabled boxes' reason is its own note, shown after a fallback note too.
+  const notes = [
+    fellBack ? `<div class="wiki-work-note" role="presentation">${esc(`${workStopName(control.requested)} is unavailable, so this shows ${workStopName(control.stop)}. Your choice is kept.`)}</div>` : "",
+    control.evidenceApplies
+      ? fellBack ? "" : `<div class="wiki-work-note" role="presentation">A thread joins a group through a direct connection to its first thread.</div>`
+      : `<div class="wiki-work-note" id="${WORK_MENU_WHY_ID}" role="presentation">Applies to Related and Areas.</div>`,
+  ].join("");
+  // Each set is a labelled `group` (allowed inside `menu`), so the radios and
+  // the boxes are announced with their heading.
   return (
     `<div class="wiki-work-menu" id="wikiWorkMenu" role="menu" aria-label="Group work threads">` +
-    `<div class="wiki-work-h" role="presentation">Group work by</div>${stops}` +
+    `<div role="group" aria-labelledby="wikiWorkMenuStops"><div class="wiki-work-h" id="wikiWorkMenuStops" role="presentation">Group work by</div>${stops}</div>` +
     `<div class="wiki-work-hr" role="separator"></div>` +
-    `<div class="wiki-work-h" role="presentation">Connect threads by</div>${boxes}` +
-    `<div class="wiki-work-note" role="presentation">${esc(note)}</div>` +
+    `<div role="group" aria-labelledby="wikiWorkMenuBoxes"><div class="wiki-work-h" id="wikiWorkMenuBoxes" role="presentation">Connect threads by</div>${boxes}</div>` +
+    notes +
     (local ? `<div class="wiki-work-note wiki-work-local-note" role="presentation">This tab only: storage refused the change.</div>` : "") +
     `</div>`
   );

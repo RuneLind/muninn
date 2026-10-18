@@ -322,16 +322,29 @@ describe("the child card", () => {
 
 describe("the group's end", () => {
   const p = (rel: string, title: string) => ({ relPath: rel, name: rel, title }) as WikiListing;
-  test("+ N more threads, then three shared-context links and +N", () => {
-    const html = threadGroupEndHtml("group:series:alpha", 2, [p("a.md", "A"), p("b.md", "B"), p("c.md", "C"), p("d.md", "D <d>")], (r) => `/wiki?relPath=${r}`);
-    expect(html).toContain(`<button type="button" class="wiki-thread-more" data-thread-more="group:series:alpha">+ 2 more threads</button>`);
+  const four = [p("a.md", "A"), p("b.md", "B"), p("c.md", "C"), p("d.md", "D <d>")];
+  test("+ N more threads, named for its group; then three shared-context links and a +N button", () => {
+    const html = threadGroupEndHtml("group:series:alpha", 2, four, (r) => `/wiki?relPath=${r}`, "Alpha <a>");
+    // The visible text starts the accessible name (WCAG 2.5.3); the group tells two groups' buttons apart.
+    expect(html).toContain(
+      `<button type="button" class="wiki-thread-more" data-thread-more="group:series:alpha">+ 2 more threads<span class="wiki-sr-only"> in Alpha &lt;a&gt;</span></button>`,
+    );
     expect(html).toContain(`Shared context:</span> <a class="wiki-thread-link"`);
     expect((html.match(/wiki-thread-link/g) ?? []).length).toBe(3);
-    expect(html).toContain(`title="D &lt;d&gt;">+1</span>`);
+    // The overflow is a button, reachable by keyboard, touch and screen reader.
+    expect(html).toContain(
+      `<button type="button" class="wiki-thread-ctx-more" data-thread-ctx-more="group:series:alpha" title="D &lt;d&gt;">+1<span class="wiki-sr-only"> more shared page in Alpha &lt;a&gt;</span></button>`,
+    );
     expect(html.endsWith("</div></div>")).toBe(true);
   });
+  test("the shared context, opened: every link and no +N", () => {
+    const html = threadGroupEndHtml("group:series:alpha", 0, four, (r) => `/wiki?relPath=${r}`, "Alpha", true);
+    expect((html.match(/wiki-thread-link/g) ?? []).length).toBe(4);
+    expect(html).toContain(`>D &lt;d&gt;</a>`);
+    expect(html).not.toContain("wiki-thread-ctx-more");
+  });
   test("nothing hidden and no context: only the body's close", () => {
-    expect(threadGroupEndHtml("g", 0, [], (r) => r)).toBe("</div>");
+    expect(threadGroupEndHtml("g", 0, [], (r) => r, "G")).toBe("</div>");
   });
 });
 
@@ -365,6 +378,39 @@ describe("the Group control and menu", () => {
     expect(html).toContain(`data-work-evidence="related" aria-checked="false" aria-disabled="true"`);
     expect(html).toContain(`data-work-evidence="series" aria-checked="true" aria-disabled="true"`);
     expect(html).toContain("Applies to Related and Areas.");
+  });
+
+  /** The text of the element with id `id` in `html` (flat text, no child tags). */
+  const textOfId = (html: string, id: string) => html.match(new RegExp(`id="${id}"[^>]*>([^<]*)<`))?.[1] ?? null;
+  const describedBy = (html: string, key: string) => html.match(new RegExp(`data-work-evidence="${key}"[^>]*aria-describedby="([^"]+)"`))?.[1] ?? null;
+
+  test("a disabled box is described by its reason, at Threads and when Related falls back to Threads", () => {
+    const at = workGroupMenuHtml(control({ requested: "threads", stop: "threads", evidenceApplies: false }), false);
+    const fell = workGroupMenuHtml(
+      control({ stop: "threads", evidenceApplies: false, stops: [{ stop: "threads", available: true, reasons: [], cards: 17 }, { stop: "related", available: false, reasons: ["relations-cap"], cards: 0 }] }),
+      false,
+    );
+    for (const html of [at, fell])
+      for (const k of ["related", "issue", "series"]) {
+        const id = describedBy(html, k);
+        expect(id).not.toBeNull();
+        expect(textOfId(html, id!)).toBe("Applies to Related and Areas.");
+      }
+    // Enabled boxes carry no description.
+    expect(workGroupMenuHtml(control(), false)).not.toContain("aria-describedby");
+  });
+
+  test("the stops and the boxes are two labelled groups inside the menu", () => {
+    const html = workGroupMenuHtml(control(), false);
+    const label = (id: string) => textOfId(html, id);
+    const stops = html.match(/<div role="group" aria-labelledby="([^"]+)">((?:(?!role="group").)*)/)!;
+    expect(label(stops[1]!)).toBe("Group work by");
+    expect((stops[2]!.match(/role="menuitemradio"/g) ?? []).length).toBe(control().stops.length);
+    expect(stops[2]).not.toContain("menuitemcheckbox");
+    const boxes = html.slice(html.lastIndexOf(`role="group"`)).match(/^role="group" aria-labelledby="([^"]+)">(.*)$/s)!;
+    expect(label(boxes[1]!)).toBe("Connect threads by");
+    expect((boxes[2]!.match(/role="menuitemcheckbox"/g) ?? []).length).toBe(3);
+    expect((html.match(/role="group"/g) ?? []).length).toBe(2);
   });
 
   test("an unknown reason is named, never undefined", () => {

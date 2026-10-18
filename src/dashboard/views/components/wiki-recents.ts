@@ -1006,6 +1006,8 @@ export type RailEntry =
       kind: "thread-group-end";
       section: RailSection;
       foldKey: string;
+      /** The group's name, for the end's controls' accessible names. */
+      name: string;
       hidden: number;
       context: WikiListing[];
     }
@@ -1935,6 +1937,7 @@ export function buildRail(input: RailInput): RailModel {
         kind: "thread-group-end",
         section: "threads",
         foldKey: top.foldKey,
+        name: top.name,
         hidden: top.hidden,
         // A page drawn as a focus row (in this group or another) is left out.
         context: top.context.filter((p) => !threadLifted.has(normalizeRel(p.relPath))),

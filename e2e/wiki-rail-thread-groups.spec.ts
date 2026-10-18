@@ -71,6 +71,8 @@ const CTX = "plans/ctx.md";
 /** One session per focus page, newest first: the order of the threads. */
 const FOCUS = [...A, REL1, REL2, ...SOLO];
 const BIG = [1, 2, 3, 4, 5].map((i) => `plans/big-${i}.md`);
+/** Five pages the first two `big` sessions only touch: a shared context past three. */
+const BCTX = [1, 2, 3, 4, 5].map((i) => `notes/bctx-${i}.md`);
 /** The focus pages a wiki's ledger serves, newest first. */
 const focusOf = (wiki: string | undefined) => (wiki === GROUPS || wiki === RO ? FOCUS : wiki === BROAD ? BIG : []);
 
@@ -93,6 +95,7 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
       const at = NOW - (i + 1) * HOUR;
       const files: [string, number][] = [[p, 5]];
       if (live && i < 2) files.push([CTX, 1]);
+      if (wiki === BROAD && i < 2) for (const c of BCTX) files.push([c, 1]);
       return {
         id: `g${i}`,
         provider: "claude",
@@ -111,7 +114,7 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
   const until = url.searchParams.get("until");
   if (until) {
     // ctx.md had a write before the window, so the sessions only TOUCH it.
-    const pre = live ? [{ p: CTX, w: NOW - 20 * DAY, s: 1 }] : [];
+    const pre = live ? [{ p: CTX, w: NOW - 20 * DAY, s: 1 }] : wiki === BROAD ? BCTX.map((p) => ({ p, w: NOW - 20 * DAY, s: 1 })) : [];
     return json({ root, pages: pre, pageCount: pre.length, bulk: 10, limit: 5000, truncated: false, until: Number(until) });
   }
   const pages = focus.map((p, i) => ({ p, w: NOW - (i + 1) * HOUR, s: 1 }));
@@ -166,6 +169,13 @@ async function makeBroadRoot(): Promise<void> {
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, ["---", `title: Big ${i + 1}`, "series: big", "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
     const stamp = new Date(NOW - (i + 1) * HOUR);
+    await utimes(abs, stamp, stamp);
+  }
+  for (const [i, rel] of BCTX.entries()) {
+    const abs = path.join(root, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, ["---", `title: Broad context ${i + 1}`, "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
+    const stamp = new Date(NOW - 20 * DAY);
     await utimes(abs, stamp, stamp);
   }
 }
@@ -370,7 +380,8 @@ test.describe("Wiki rail: grouped work threads", () => {
     await expect(kids.nth(1).locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", "false");
     await expect(kids.nth(0).locator(".wiki-thread-why")).toHaveText("anchor");
     await expect(kids.nth(1).locator(".wiki-thread-why")).toContainText("↔ series");
-    await expect(body(page, "group:series:alpha").locator(".wiki-thread-more")).toHaveText("+ 1 more thread");
+    // Its text, then a screen-reader-only group name (the a11y case below).
+    await expect(body(page, "group:series:alpha").locator(".wiki-thread-more")).toHaveText("+ 1 more thread in Alpha series");
     // Shared context: the touched page, once, not per child.
     await expect(body(page, "group:series:alpha").locator(".wiki-thread-context .wiki-thread-link")).toHaveText(["Shared context page"]);
     await expect(page.locator(".wiki-thread-touched")).toHaveCount(0);
@@ -440,6 +451,76 @@ test.describe("Wiki rail: grouped work threads", () => {
     await expect(kids).toHaveCount(5);
     const focused = await page.evaluate(() => document.activeElement?.closest(".wiki-thread-card")?.getAttribute("data-thread"));
     expect(focused).toBe(`thread:${BIG[3]}`);
+  });
+
+  // Fix round 1 batch 4 (F3): each group's `+ N more threads` names its group,
+  // and the shared context past three is a button that opens the full list.
+  test("a11y: + N more threads names its group; the shared context's +N opens the rest in place, focus on the first it revealed", async ({ page }) => {
+    await openReader(page);
+    await expect(body(page, "group:series:alpha").locator(".wiki-thread-more")).toHaveAccessibleName("+ 1 more thread in Alpha series");
+    await openReader(page, BROAD);
+    const ctx = body(page, "group:series:big").locator(".wiki-thread-context");
+    await expect(ctx.locator(".wiki-thread-link")).toHaveCount(3);
+    const plus = ctx.getByRole("button", { name: /^\+2 more shared pages in / });
+    await expect(plus).toHaveCount(1);
+    await plus.focus();
+    await page.keyboard.press("Enter");
+    await expect(ctx.locator(".wiki-thread-link")).toHaveCount(5);
+    await expect(ctx.locator(".wiki-thread-ctx-more")).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement?.textContent)).toBe("Broad context 4");
+  });
+
+  // Fix round 1 batch 4 (F1): a rail control clicked while the menu is open
+  // closes the menu in its own render and keeps its focus.
+  test("menu open: a click on a child's fold or a 📌 closes the menu in ONE render and keeps focus on what was pressed", async ({ page }) => {
+    await openReader(page);
+    const countRenders = () =>
+      page.evaluate(() => {
+        const w = window as unknown as { __renders: number; __obs?: MutationObserver };
+        w.__obs?.disconnect();
+        w.__renders = 0;
+        w.__obs = new MutationObserver((rs) => {
+          for (const r of rs) if (r.addedNodes.length || r.removedNodes.length) w.__renders++;
+        });
+        w.__obs.observe(document.getElementById("wikiList")!, { childList: true });
+      });
+    const renders = () => page.evaluate(() => (window as unknown as { __renders: number }).__renders);
+    // Cards below the open menu (the menu covers the first ones).
+    const solo = `thread:${SOLO[2]}`;
+    const card = page.locator(`#wikiList > .wiki-thread-card[data-thread="${solo}"]`);
+    await groupBtn(page).click();
+    await expect(menu(page)).toBeVisible();
+    const was = await card.locator(".wiki-thread-fold").getAttribute("aria-expanded");
+    await countRenders();
+    await card.locator(".wiki-thread-fold").click();
+    await expect(menu(page)).toHaveCount(0);
+    await expect(card.locator(".wiki-thread-fold")).toHaveAttribute("aria-expanded", was === "true" ? "false" : "true");
+    expect(await renders()).toBe(1);
+    expect(await page.evaluate(() => document.activeElement?.closest(".wiki-thread-card")?.getAttribute("data-thread"))).toBe(solo);
+    expect(await page.evaluate(() => document.activeElement?.classList.contains("wiki-thread-fold"))).toBe(true);
+    // The 📌 the same way: the card moves first, focus follows it.
+    await groupBtn(page).click();
+    await expect(menu(page)).toBeVisible();
+    await countRenders();
+    await card.locator(".wiki-thread-pin").click();
+    await expect(menu(page)).toHaveCount(0);
+    expect(await renders()).toBe(1);
+    expect(await page.evaluate(() => document.activeElement?.closest(".wiki-thread-card")?.getAttribute("data-thread"))).toBe(solo);
+    expect(await page.evaluate(() => document.activeElement?.hasAttribute("data-thread-pin"))).toBe(true);
+  });
+
+  // Fix round 1 batch 4 (F2): the disabled boxes say why, and the two sets are named groups.
+  test("a11y: the menu's two sets are labelled groups; a disabled box is described by its reason", async ({ page }) => {
+    await openReader(page);
+    await groupBtn(page).click();
+    await expect(menu(page).getByRole("group", { name: "Group work by" }).getByRole("menuitemradio")).toHaveCount(3);
+    await expect(menu(page).getByRole("group", { name: "Connect threads by" }).getByRole("menuitemcheckbox")).toHaveCount(3);
+    await expect(page.locator('[data-work-evidence="series"]')).toHaveAccessibleDescription("");
+    await page.locator('[data-work-stop="threads"]').click();
+    await groupBtn(page).click();
+    for (const k of ["related", "issue", "series"])
+      await expect(page.locator(`[data-work-evidence="${k}"]`)).toHaveAccessibleDescription("Applies to Related and Areas.");
+    await expect(menu(page).getByRole("menuitemcheckbox", { name: "Same series" })).toHaveAttribute("aria-disabled", "true");
   });
 
   // Fix round 1 batch 3 (focus loss): a repaint nobody in this tab asked for
