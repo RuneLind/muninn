@@ -234,7 +234,7 @@ describe("each special message says what the HTML shows", () => {
     expect(out).toContain('data-kind="waiting"');
     expect(out).toContain("fc-mark-unknown");
     expect(run(content).map((f) => [f.line, f.message, f.detail])).toEqual([
-      [6, 'Lane kind="next" renders as waiting', "Accepted: you|waiting|draft|blocked. Did you mean waiting?"],
+      [6, 'Lane kind="next" is not a lane kind; the lane renders and counts as a waiting lane', "Accepted: you|waiting|draft|blocked. Did you mean waiting?"],
       [11, 'Fact v="maybe" renders as unknown', "Accepted: ok|warn|bad|unknown or ✅ ⚠️ ❌ ❓."],
     ]);
   });
@@ -371,9 +371,18 @@ describe("checkComponents — the other rules", () => {
     expect(run(page('<Callout tone="Good">', "x", "</Callout>"))[0]!.detail).toBe("Accepted: info|warn|good|bad. Did you mean good?");
   });
 
-  test("the last spelling of a repeated attribute is the one judged", () => {
-    expect(run(page('<Callout tone="success" tone="good">', "x", "</Callout>"))).toEqual([]);
-    expect(run(page('<Callout tone="good" tone="success">', "x", "</Callout>")).length).toBe(1);
+  test("the last spelling of a repeated attribute is the one judged; the earlier one is reported as dropped", () => {
+    const good = page('<Callout tone="success" tone="good">', "x", "</Callout>");
+    expect(html(good)).toContain('<div class="callout callout-good">');
+    expect(run(good).map((f) => [f.check, f.message])).toEqual([
+      ["component-attr", 'Callout tone="success" is given twice; the last one, tone="good", wins'],
+    ]);
+    const bad = page('<Callout tone="good" tone="success">', "x", "</Callout>");
+    expect(html(bad)).toContain('<div class="callout callout-info">');
+    expect(run(bad).map((f) => [f.check, f.message])).toEqual([
+      ["component-attr", 'Callout tone="good" is given twice; the last one, tone="success", wins'],
+      ["component-value", 'Callout tone="success" renders as info'],
+    ]);
   });
 
   test("a single-line nested block is read on its own line", () => {
@@ -461,10 +470,10 @@ describe("the observer", () => {
     expect({ outer, inner }).toEqual({ outer: ["Pill"], inner: ["Verdict"] });
   });
 
-  test("reports block tags with their parser line and raw attributes", () => {
+  test("reports block tags with their raw attributes", () => {
     const seen: ObservedComponentTag[] = [];
     observeComponentTags((t) => seen.push(t), () => renderWikiHtml(["", '<Callout tone="x" bogus="y">', "z", "</Callout>"].join("\n"), () => undefined));
-    expect(seen).toEqual([{ name: "Callout", rawAttrs: ' tone="x" bogus="y"', inline: false, line: 1 }]);
+    expect(seen).toEqual([{ name: "Callout", rawAttrs: ' tone="x" bogus="y"', inline: false }]);
   });
 });
 
@@ -581,5 +590,91 @@ describe("a finding prints the value as written, never a parked sentinel", () =>
     const found = checkComponents("plans/x.mdx", page('<Callout tone="[[Page]] x">', "x", "</Callout>"), disagreeing);
     expect(found.map((f) => [f.line, f.message])).toEqual([[undefined, 'Callout tone="… x" renders as info']]);
     expect(JSON.stringify(found)).not.toContain("\\u0000");
+  });
+});
+
+describe("a repeated attribute: every dropped spelling is a finding", () => {
+  test("a listed attribute given twice: the earlier spelling, on its line", () => {
+    const content = page('A <Pill tone="bad" tone="warn">p</Pill>');
+    expect(html(content)).toContain('<span class="pill pill-warn">p</span>');
+    expect(run(content).map((f) => [f.check, f.line, f.message, f.detail])).toEqual([
+      ["component-attr", 5, 'Pill tone="bad" is given twice; the last one, tone="warn", wins', "Write tone once."],
+    ]);
+  });
+
+  test("a listed attribute given three times: both earlier spellings", () => {
+    const content = page('<Callout tone="good" tone="bad" tone="warn">', "x", "</Callout>");
+    expect(html(content)).toContain('<div class="callout callout-warn">');
+    expect(lines(content)).toEqual([
+      '5 Callout tone="good" is given 3 times; the last one, tone="warn", wins',
+      '5 Callout tone="bad" is given 3 times; the last one, tone="warn", wins',
+    ]);
+  });
+
+  test("an unlisted attribute given twice: both spellings are dropped, both reported", () => {
+    const content = page('A <Pill foo="1" foo="2">p</Pill>');
+    expect(html(content)).toBe(html(page('A <Pill>p</Pill>')));
+    expect(lines(content)).toEqual([
+      '5 Pill foo="1" is not a Pill attribute; the renderer drops it',
+      '5 Pill foo="2" is not a Pill attribute; the renderer drops it',
+    ]);
+  });
+
+  test("the unlocated path reports the same spellings", () => {
+    const content = page('A <Pill tone="bad" tone="warn">p</Pill> <Pill foo="1" foo="2">q</Pill>');
+    expect(checkComponents("plans/x.mdx", content, disagreeing).map((f) => [f.line, f.message])).toEqual([
+      [undefined, 'Pill tone="bad" is given twice; the last one, tone="warn", wins'],
+      [undefined, 'Pill foo="1" is not a Pill attribute; the renderer drops it'],
+      [undefined, 'Pill foo="2" is not a Pill attribute; the renderer drops it'],
+    ]);
+  });
+});
+
+describe("a Lane kind and a Verdict value: the message says what the page shows", () => {
+  const inMoves = (attrs: string) => page("<NextMoves>", "", `<Lane ${attrs}>`, "", "- step", "", "</Lane>", "", "</NextMoves>");
+  const stray = (attrs: string) => page(`<Lane ${attrs}>`, "", "- step", "", "</Lane>");
+
+  test("in a NextMoves block an unknown kind renders and counts exactly as a waiting lane", () => {
+    const claude = html(inMoves('kind="claude"'));
+    expect(claude).toContain('class="nm-lane nm-waiting nm-kind-unknown" data-kind="waiting"');
+    expect(claude.replace(" nm-kind-unknown", "")).toBe(html(inMoves('kind="waiting"')));
+    expect(lines(inMoves('kind="claude"'))).toEqual(['7 Lane kind="claude" is not a lane kind; the lane renders and counts as a waiting lane']);
+    expect(lines(inMoves('kind="claude" who="Claude"'))).toEqual(['7 Lane kind="claude" is not a lane kind; the lane renders and counts as a waiting lane']);
+  });
+
+  test("outside a NextMoves block a lane with a who reads no kind: no finding", () => {
+    const shown = html(stray('kind="claude" who="Rune"'));
+    expect(shown).toBe(html(stray('kind="you" who="Rune"')));
+    expect(shown).toBe(html(stray('who="Rune"')));
+    expect(run(stray('kind="claude" who="Rune"'))).toEqual([]);
+  });
+
+  test("outside a NextMoves block a lane with no who takes a waiting lane's label", () => {
+    const shown = html(stray('kind="claude"'));
+    expect(shown).toBe(html(stray('kind="waiting"')));
+    expect(shown).not.toBe(html(stray('kind="you"')));
+    expect(shown).not.toContain("nm-lane");
+    expect(lines(stray('kind="claude"'))).toEqual([
+      '5 Lane kind="claude" is not a lane kind; this lane is outside a NextMoves block, so only its label is a waiting lane\'s',
+    ]);
+  });
+
+  test("a Verdict value that folds to yes renders as yes and is no finding", () => {
+    for (const v of ["Yes", " yes ", "YES"]) {
+      const content = page(`A <Verdict value="${v}"/> b`);
+      expect({ v, html: html(content) }).toEqual({ v, html: html(page('A <Verdict value="yes"/> b')) });
+      expect({ v, found: run(content) }).toEqual({ v, found: [] });
+    }
+  });
+
+  test("a Verdict value that folds to no renders as yes, and the message says it is not no", () => {
+    for (const v of ["NO", " No "]) {
+      const content = page(`A <Verdict value="${v}"/> b`);
+      expect(html(content)).toBe(html(page('A <Verdict value="yes"/> b')));
+      expect(html(content)).not.toBe(html(page('A <Verdict value="no"/> b')));
+      expect(run(content).map((f) => [f.message, f.detail])).toEqual([
+        [`Verdict value=${JSON.stringify(v)} renders as yes, not no`, "Accepted: yes|no. Did you mean no?"],
+      ]);
+    }
   });
 });

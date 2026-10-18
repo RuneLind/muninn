@@ -8,7 +8,8 @@
  * A LEAF, and in the browser bundle (`web-format-browser.ts` → `web-format.ts` →
  * `markdown-ast.ts` → here): it imports only `calendar-day.ts`, never
  * `markdown-ast.ts`. Descriptions, teach targets and hints live in
- * `component-docs.ts`, which only the linter and the reference generator import.
+ * `component-docs.ts`, which only the linter imports (PR 3's reference generator
+ * will read it too).
  *
  * Each attribute's `parse` is the renderer's own function (for Lane `kind`, a
  * two-line adapter over it), never a copy. It returns `{ value, fellBack }`:
@@ -35,6 +36,8 @@ export interface AttrSpec {
   default?: string | number;
   /** Missing is itself a fallback (Meter `value`: the label renders as plain text). */
   required?: true;
+  /** Values accepted beside the `enum`, each with the enum value it reads as. */
+  aliases?: Readonly<Record<string, string>>;
 }
 
 export interface ComponentSpec {
@@ -113,8 +116,12 @@ export function normalizePillTone(tone: string | undefined): "default" | "rec" |
 
 const VERDICT_VALUES = ["yes", "no"] as const;
 
+/** A `Verdict value=`. Only an exact `no` renders no; anything else renders
+ *  yes, so a value that folds to `yes` (`Yes`, ` yes `) renders exactly like
+ *  `yes` and is no fallback, while `NO` or ` no ` is one. */
 export function readVerdictValue(raw: string | undefined): AttrRead<(typeof VERDICT_VALUES)[number]> {
-  return readEnum(VERDICT_VALUES, "yes", raw);
+  const read = readEnum(VERDICT_VALUES, "yes", raw);
+  return read.fellBack && raw!.trim().toLowerCase() === "yes" ? { value: "yes", fellBack: false } : read;
 }
 
 /** Normalize an untrusted `value` attr for Verdict. */
@@ -136,14 +143,19 @@ export type FactVerdict = (typeof FACT_VERDICTS)[number];
  * optional VS16) are accepted alongside the words, since the writer derives `v`
  * from those blocks and a stray emoji is more likely than a typo'd word.
  */
+/** The glyphs `Fact v=` accepts beside the words, as the verify prompt writes
+ *  them; read with or without the VS16 (U+FE0F). */
+export const FACT_VERDICT_GLYPHS: Readonly<Record<string, FactVerdict>> = { "✅": "ok", "⚠️": "warn", "❌": "bad", "❓": "unknown" };
+
+const stripVs16 = (s: string) => s.replace(/\uFE0F/g, "");
+const FACT_GLYPH_READ = new Map(Object.entries(FACT_VERDICT_GLYPHS).map(([g, v]) => [stripVs16(g), v]));
+
 export function readFactVerdict(input: string | undefined): AttrRead<FactVerdict> {
   const raw = present(input);
   if (raw === undefined) return { value: "unknown", fellBack: false };
-  const v = raw.replace(/\uFE0F/g, "").trim().toLowerCase();
-  if (v === "ok" || v === "✅") return { value: "ok", fellBack: false };
-  if (v === "warn" || v === "⚠") return { value: "warn", fellBack: false };
-  if (v === "bad" || v === "❌") return { value: "bad", fellBack: false };
-  return { value: "unknown", fellBack: v !== "unknown" && v !== "❓" };
+  const v = stripVs16(raw).trim().toLowerCase();
+  const value = (FACT_VERDICTS as readonly string[]).includes(v) ? (v as FactVerdict) : FACT_GLYPH_READ.get(v);
+  return value === undefined ? { value: "unknown", fellBack: true } : { value, fellBack: false };
 }
 
 export function normalizeFactVerdict(value: string | undefined): FactVerdict {
@@ -291,7 +303,7 @@ export const COMPONENT_SPEC = {
   // appendix to colour a chip, and one write emits both sides so they cannot
   // drift. `n` is written by the pipeline and not checked.
   Fact: {
-    attrs: { n: text, v: { parse: readFactVerdict, enum: FACT_VERDICTS, default: "unknown" } },
+    attrs: { n: text, v: { parse: readFactVerdict, enum: FACT_VERDICTS, default: "unknown", aliases: FACT_VERDICT_GLYPHS } },
     selfClosing: true,
     inline: true,
   },

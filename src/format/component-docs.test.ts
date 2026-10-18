@@ -115,6 +115,10 @@ describe("the accepted-value and fallback text", () => {
     }
   });
 
+  test("Fact v's alsoAccepts is the spec's glyph list, in its order", () => {
+    expect(docs.Fact.attrs!.v!.alsoAccepts).toEqual(Object.keys(COMPONENT_SPEC.Fact.attrs.v.aliases));
+  });
+
   test("a component with a required attribute says what it renders without it, and only then", () => {
     for (const name of COMPONENT_NAMES) {
       const required = Object.values(COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>).some((s) => s.required);

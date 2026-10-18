@@ -20,14 +20,14 @@ import type { ComponentName } from "./component-spec.ts";
 
 /**
  * One component tag the parser or the inline scanner actually read: the name,
- * the RAW attribute string before `parseAttrs` drops unlisted attributes,
- * and, for a block tag, its 0-based line in the text `parseBlocks` was given.
+ * the RAW attribute string before `parseAttrs` drops unlisted attributes, and,
+ * on a `Lane`, whether it is a lane of a `NextMoves` block.
  */
 export interface ObservedComponentTag {
   name: ComponentName;
   rawAttrs: string;
   inline: boolean;
-  line?: number;
+  inNextMoves?: true;
 }
 
 type Observer = (tag: ObservedComponentTag) => void;
@@ -71,7 +71,7 @@ export function withoutComponentTags<T>(fn: () => T): T {
   return current === null ? fn() : withObserver(null, fn);
 }
 
-const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.line ?? ""}\u0000${t.rawAttrs}`;
+const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.inNextMoves ?? ""}\u0000${t.rawAttrs}`;
 
 /**
  * A component block's render: `children` is the walker's render of its body,

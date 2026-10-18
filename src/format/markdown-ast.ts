@@ -35,7 +35,7 @@ import {
   type LaneKind,
 } from "./component-spec.ts";
 import { ordinals } from "./block-renderer.ts";
-import { observingComponentTags, reportComponentTag } from "./component-observer.ts";
+import { observingComponentTags, reportComponentTag, type ObservedComponentTag } from "./component-observer.ts";
 import { laneDefaultLabel, normalizeRoleKey, roleLaneLabel } from "./lane-roles.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 
@@ -1531,6 +1531,13 @@ function parseBlocksInner(
  * not a clean, whitelisted, closed component (in which case the caller lets it
  * fall through to normal block/text handling — today's behavior for `<foo>`).
  */
+/** A block tag as the author check sees it: a `Lane` says whether it is a lane
+ *  of a `NextMoves` block (its body's direct child), the only place its `kind`
+ *  picks a lane's look and count. */
+function observedBlockTag(name: ComponentName, rawAttrs: string, nm: NextMovesNesting): ObservedComponentTag {
+  return name === "Lane" && nm === 1 ? { name, rawAttrs, inline: false, inNextMoves: true } : { name, rawAttrs, inline: false };
+}
+
 function tryParseComponent(
   lines: string[],
   i: number,
@@ -1560,7 +1567,7 @@ function tryParseComponent(
   if (selfClosing) {
     // Only a subset may self-close, and the tag must own the whole line.
     if (!SELF_CLOSING_ALLOWED.has(cname) || rest.trim() !== "") return null;
-    if (observingComponentTags()) reportComponentTag({ name: cname, rawAttrs: m[2]!, inline: false, line });
+    if (observingComponentTags()) reportComponentTag(observedBlockTag(cname, m[2]!, nm));
     return { block: { type: "component", name: cname, attrs, children: [], line }, next: i + 1 };
   }
 
@@ -1569,7 +1576,7 @@ function tryParseComponent(
   if (inlineClose !== -1) {
     if (rest.slice(inlineClose + closeTag.length).trim() !== "") return null; // trailing junk
     // Reported before the children are parsed, so a nested tag follows its parent.
-    if (observingComponentTags()) reportComponentTag({ name: cname, rawAttrs: m[2]!, inline: false, line });
+    if (observingComponentTags()) reportComponentTag(observedBlockTag(cname, m[2]!, nm));
     const content = rest.slice(0, inlineClose);
     const inner = childNesting(cname, depth, nm);
     const children = parseBlocksInner(content, store, inner.depth, inner.nm, base + i);
@@ -1613,7 +1620,7 @@ function tryParseComponent(
     return null; // unclosed → fall through as text
   }
 
-  if (observingComponentTags()) reportComponentTag({ name: cname, rawAttrs: m[2]!, inline: false, line });
+  if (observingComponentTags()) reportComponentTag(observedBlockTag(cname, m[2]!, nm));
   const inner = childNesting(cname, depth, nm);
   const children = parseBlocksInner(body.join("\n"), store, inner.depth, inner.nm, base + i + 1);
   return { block: { type: "component", name: cname, attrs, children, line }, next: j + 1 };

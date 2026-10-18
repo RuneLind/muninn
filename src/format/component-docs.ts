@@ -5,10 +5,11 @@
  * and hints that map an off-vocabulary value to an accepted one.
  *
  * Kept out of `component-spec.ts` so none of these strings reach the browser
- * bundle: only the wiki linter and the reference generator import this file.
+ * bundle: only the wiki linter imports this file (PR 3's reference generator
+ * will read it too).
  */
 
-import type { ComponentAttrName, ComponentName } from "./component-spec.ts";
+import { COMPONENT_SPEC, type ComponentAttrName, type ComponentName } from "./component-spec.ts";
 
 export type TeachTarget = "wiki" | "chat";
 
@@ -22,13 +23,17 @@ export interface AttrDoc {
   hint?: Readonly<Record<string, string>>;
   /** The accepted values in words, for an attribute with no `enum`. */
   accepts?: string;
-  /** Values accepted beside the `enum` (Fact `v`'s glyphs). */
+  /** Values accepted beside the `enum` (Fact `v`'s glyphs), read off the spec's
+   *  `aliases` so the two lists cannot drift. */
   alsoAccepts?: readonly string[];
   /** What a rejected value does, after `Name attr="value"`; `{default}` is the
    *  spec's default. Absent ⇒ `renders as <the value a missing attribute takes>`. */
   onFallback?: string;
   /** The phrasing instead of `onFallback` when `attr` holds an accepted value. */
   onFallbackWhen?: { attr: string; message: string };
+  /** Lane `kind` only: the phrasing for a lane outside a `NextMoves` block whose
+   *  label the kind decides. */
+  onFallbackStray?: string;
 }
 
 export interface ComponentDoc<A extends string = string> {
@@ -92,7 +97,7 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
   Fact: {
     doc: "Fact-check mark on a passage; written by the fact-check pipeline.",
     teach: [],
-    attrs: { v: { alsoAccepts: ["✅", "⚠️", "❌", "❓"] } },
+    attrs: { v: { alsoAccepts: Object.keys(COMPONENT_SPEC.Fact.attrs.v.aliases) } },
   },
   FactCheck: { doc: "Fact-check appendix; written by the fact-check pipeline.", teach: [] },
   Embed: { doc: "Embeds a standalone .html explainer beside the page.", teach: WIKI },
@@ -103,7 +108,11 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     doc: "One lane of a `NextMoves`; its body is a list of open steps.",
     teach: WIKI,
     attrs: {
-      kind: { suggest: { next: "waiting" } },
+      kind: {
+        suggest: { next: "waiting" },
+        onFallback: "is not a lane kind; the lane renders and counts as a waiting lane",
+        onFallbackStray: "is not a lane kind; this lane is outside a NextMoves block, so only its label is a waiting lane's",
+      },
       since: {
         doc: "ISO or DD.MM.YYYY date; the reader shows its age",
         accepts: "an ISO date, YYYY-MM-DD, or DD.MM.YYYY",

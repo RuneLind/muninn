@@ -7,11 +7,14 @@
  *    `required` attribute (Meter `value`). An empty value reads as a missing
  *    one there, so it is reported only where missing is itself a fallback.
  *  - `component-attr` — an attribute `COMPONENT_ATTRS` does not list, which
- *    `parseAttrs` drops before any renderer sees it.
+ *    `parseAttrs` drops before any renderer sees it, or an earlier spelling of
+ *    a repeated attribute, which it drops for the last one.
  *
  * Not reported: an unknown tag name (it renders as visible escaped text), the
- * `parseString` attributes, and the other attributes of a component whose
- * `required` attribute is unusable (they render nothing).
+ * `parseString` attributes, the other attributes of a component whose
+ * `required` attribute is unusable (they render nothing), and a `Lane` `kind`
+ * that changes nothing on the page (a lane outside a `NextMoves` block with a
+ * `who` and no role: its label line reads no kind).
  *
  * **The renderer decides which tags count.** The page is rendered through the
  * reader's own `renderWikiHtml` under `observeComponentTags`, which reports
@@ -39,6 +42,7 @@
 import { ATTR_RE, observeComponentTags, type ObservedComponentTag } from "../format/markdown-ast.ts";
 import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName, type ComponentSpec } from "../format/component-spec.ts";
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
+import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { LintFinding } from "./lint.ts";
@@ -57,6 +61,7 @@ const NAME_RE = new RegExp(`<(${COMPONENT_NAMES.join("|")})(?=[\\s/>])`, "g");
 interface Tag {
   name: ComponentName;
   attrs: string;
+  inNextMoves?: true;
   sourceAttrs?: string;
   line?: number;
   offset?: number;
@@ -73,23 +78,30 @@ const attrList = (attrs: string): [string, string][] => {
   return out;
 };
 
+/** One attribute spelling: its key, the value the renderer read, and the
+ *  value a finding prints. */
+interface Spelling {
+  key: string;
+  value: string;
+  shown: string;
+}
+
 /**
- * What a finding prints for each attribute value. The renderer reads a value
- * after parking its wikilinks and code spans, so the judged value can hold a
- * sentinel. A located tag prints the value as written in the source, when its
- * source attributes line up with the renderer's key for key; otherwise each
- * sentinel prints as `…`.
+ * Every attribute spelling of a tag, in source order, repeats included. The
+ * renderer reads a value after parking its wikilinks and code spans, so the
+ * judged value can hold a sentinel. A located tag prints the value as written
+ * in the source, when its source attributes line up with the renderer's key for
+ * key; otherwise each sentinel prints as `…`.
  */
-function shownValues(tag: Tag): Map<string, string> {
+function spellings(tag: Tag): Spelling[] {
   const read = attrList(tag.attrs);
   const written = tag.sourceAttrs === undefined ? [] : attrList(tag.sourceAttrs);
   const aligned = written.length === read.length && written.every(([k], i) => k === read[i]![0]);
-  const shown = new Map<string, string>();
-  read.forEach(([key, value], i) => {
-    if (!value.includes("\u0000")) shown.set(key, value);
-    else shown.set(key, aligned ? written[i]![1] : value.replace(SENTINEL_RE, "…").replaceAll("\u0000", ""));
-  });
-  return shown;
+  return read.map(([key, value], i) => ({
+    key,
+    value,
+    shown: !value.includes("\u0000") ? value : aligned ? written[i]![1] : value.replace(SENTINEL_RE, "…").replaceAll("\u0000", ""),
+  }));
 }
 
 const isBlank = (raw: string | undefined) => raw === undefined || raw.trim() === "";
@@ -101,17 +113,34 @@ function acceptedText(name: ComponentName, attr: string, spec: AttrSpec): string
   return doc?.accepts ?? "see the component reference";
 }
 
-/** What a rejected value does, from `component-docs.ts`. */
-function fallbackPhrase(name: ComponentName, attr: string, spec: AttrSpec, known: Readonly<Record<string, string>>): string {
+/** What a rejected `raw` does, from `component-docs.ts`. A value that names
+ *  another enum value in another case or with padding says which one it is
+ *  not (`Verdict value="NO" renders as yes, not no`). */
+function fallbackPhrase(name: ComponentName, attr: string, spec: AttrSpec, raw: string, known: Readonly<Record<string, string>>): string {
   const doc = attrDoc(name, attr);
   const when = doc?.onFallbackWhen;
   if (when) {
     const other = SPEC[name].attrs[when.attr];
-    const raw = known[when.attr];
-    if (other && !isBlank(raw) && !other.parse(raw).fellBack) return when.message;
+    const value = known[when.attr];
+    if (other && !isBlank(value) && !other.parse(value).fellBack) return when.message;
   }
   if (doc?.onFallback) return doc.onFallback.replace("{default}", String(spec.default));
-  return `renders as ${spec.parse(undefined).value}`;
+  const shown = String(spec.parse(undefined).value);
+  const folded = raw.trim().toLowerCase();
+  const meant = spec.enum?.includes(folded) && folded !== shown ? `, not ${folded}` : "";
+  return `renders as ${shown}${meant}`;
+}
+
+/**
+ * The phrase for a rejected Lane `kind`, or null when the kind changes nothing.
+ * In a `NextMoves` block the lane takes a waiting lane's look, label and count.
+ * A lane outside one renders only its label line, which reads the kind only
+ * when the label is derived (a role, or no `who`): `laneFromAttrs`.
+ */
+function laneKindPhrase(tag: Tag, known: Readonly<Record<string, string>>): string | null | undefined {
+  if (tag.name !== "Lane" || tag.inNextMoves) return undefined;
+  if (normalizeRoleKey(known.role) === null && !isBlank(known.who)) return null;
+  return attrDoc("Lane", "kind")?.onFallbackStray;
 }
 
 /** The accepted value `raw` most likely meant: the docs' suggestion, else the
@@ -145,31 +174,55 @@ function attrDetail(name: ComponentName, attr: string, raw: string, shown: strin
   return parts.join(" ");
 }
 
-/** The findings for one tag. The last spelling of a repeated attribute is the
- *  one `parseAttrs` keeps, so it is the one judged. Judging reads the value the
- *  renderer read; the message prints {@link shownValues}. */
+/** The findings for one tag. `parseAttrs` keeps the last spelling of a
+ *  repeated attribute, so that one is judged and each earlier one is reported
+ *  as dropped. Judging reads the value the renderer read; the message prints
+ *  the source text ({@link spellings}). */
 function checkTag(relPath: string, tag: Tag): LintFinding[] {
   const out: LintFinding[] = [];
   const at = tag.line === undefined ? { relPath } : { relPath, line: tag.line };
   const listed = COMPONENT_ATTRS[tag.name];
-  const known: Record<string, string> = {};
-  const unknown = new Map<string, string>();
-  for (const [key, value] of attrList(tag.attrs)) {
-    if (listed.includes(key)) known[key] = value;
-    else unknown.set(key, value);
+  const all = spellings(tag);
+  const last = new Map<string, Spelling>();
+  const times = new Map<string, number>();
+  for (const sp of all) {
+    last.set(sp.key, sp);
+    times.set(sp.key, (times.get(sp.key) ?? 0) + 1);
   }
-  const shownMap = shownValues(tag);
-  const shown = (key: string) => shownMap.get(key)!;
-  for (const [key, value] of unknown) {
-    out.push({
-      check: "component-attr",
-      ...at,
-      message: `${tag.name} ${key}=${JSON.stringify(shown(key))} is not a ${tag.name} attribute; the renderer drops it`,
-      detail: attrDetail(tag.name, key, value, shown(key)),
-    });
+  const known: Record<string, string> = {};
+  const shownOf: Record<string, string> = {};
+  for (const sp of last.values()) {
+    if (!listed.includes(sp.key)) continue;
+    known[sp.key] = sp.value;
+    shownOf[sp.key] = sp.shown;
+  }
+  for (const sp of all) {
+    const { key, value, shown } = sp;
+    if (!listed.includes(key)) {
+      out.push({
+        check: "component-attr",
+        ...at,
+        message: `${tag.name} ${key}=${JSON.stringify(shown)} is not a ${tag.name} attribute; the renderer drops it`,
+        detail: attrDetail(tag.name, key, value, shown),
+      });
+    } else if (last.get(key) !== sp) {
+      const n = times.get(key)!;
+      out.push({
+        check: "component-attr",
+        ...at,
+        message: `${tag.name} ${key}=${JSON.stringify(shown)} is given ${n === 2 ? "twice" : `${n} times`}; the last one, ${key}=${JSON.stringify(last.get(key)!.shown)}, wins`,
+        detail: `Write ${key} once.`,
+      });
+    }
   }
   const attrs = Object.entries(SPEC[tag.name].attrs);
   const doc = COMPONENT_DOCS[tag.name] as ComponentDoc;
+  const valueFinding = (attr: string, spec: AttrSpec, phrase: string): LintFinding => ({
+    check: "component-value",
+    ...at,
+    message: `${tag.name} ${attr}=${JSON.stringify(shownOf[attr])} ${phrase}`,
+    detail: valueDetail(tag.name, attr, shownOf[attr]!, spec),
+  });
   // A required attribute that is missing or rejected: the component renders
   // without the others, so that finding is the only true one.
   for (const [attr, spec] of attrs) {
@@ -179,30 +232,22 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
       out.push({
         check: "component-value",
         ...at,
-        message: `${tag.name} has no ${attr}; ${doc.onMissingRequired ?? fallbackPhrase(tag.name, attr, spec, known)}`,
+        message: `${tag.name} has no ${attr}; ${doc.onMissingRequired ?? fallbackPhrase(tag.name, attr, spec, "", known)}`,
         detail: `Accepted: ${acceptedText(tag.name, attr, spec)}.`,
       });
       return out;
     }
     if (spec.parse(raw).fellBack) {
-      out.push({
-        check: "component-value",
-        ...at,
-        message: `${tag.name} ${attr}=${JSON.stringify(shown(attr))} ${fallbackPhrase(tag.name, attr, spec, known)}`,
-        detail: valueDetail(tag.name, attr, shown(attr), spec),
-      });
+      out.push(valueFinding(attr, spec, fallbackPhrase(tag.name, attr, spec, raw!, known)));
       return out;
     }
   }
   for (const [attr, spec] of attrs) {
     const raw = known[attr];
     if (raw === undefined || !spec.parse(raw).fellBack) continue;
-    out.push({
-      check: "component-value",
-      ...at,
-      message: `${tag.name} ${attr}=${JSON.stringify(shown(attr))} ${fallbackPhrase(tag.name, attr, spec, known)}`,
-      detail: valueDetail(tag.name, attr, shown(attr), spec),
-    });
+    const lane = attr === "kind" ? laneKindPhrase(tag, known) : undefined;
+    if (lane === null) continue;
+    out.push(valueFinding(attr, spec, lane ?? fallbackPhrase(tag.name, attr, spec, raw, known)));
   }
   return out;
 }
@@ -218,8 +263,10 @@ function observe(render: PageRender, content: string): ObservedComponentTag[] {
   return seen;
 }
 
-/** The attribute run the parser and the inline scanner read after a tag name,
- *  and whether a `>` or `/>` closes it (`COMPONENT_OPEN_RE`, `INLINE_COMPONENT_RE`). */
+/** An attribute run in the parser's attribute shape after a tag name, followed
+ *  by a `>` or `/>`. Unlike `COMPONENT_OPEN_RE`, which reads one line, it
+ *  crosses line breaks (`\s` and `[^"]` match a newline), so a run that closes
+ *  only on a later line also counts as an opener here. */
 const OPENER_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*(?=\s*\/?>)/y;
 /** The attribute run after a tag name in the source, closed or not. */
 const SOURCE_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*/y;
@@ -229,8 +276,9 @@ const SOURCE_RUN_RE = /(?:\s+[A-Za-z][\w-]*="[^"]*")*/y;
  * offset in `content`. Frontmatter is left byte for byte. A `<Name` inside the
  * quoted attribute value of a well-formed opener gets no marker: the marker's
  * quotes would close that value early and change the opener's shape. A tag
- * there carries no attribute (the value holds no `"`), so it has no finding; a
- * render that still reads it reports it with no marker.
+ * there carries no attribute (the value holds no `"`), so its only possible
+ * finding is a missing required attribute (a bare `<Meter>`); a render that
+ * still reads it reports it with no marker, and that finding has no line.
  */
 function markBody(content: string): { marked: string; offsets: number[] } {
   const bodyAt = content.length - splitFrontmatter(content).body.length;
@@ -252,7 +300,8 @@ function markBody(content: string): { marked: string; offsets: number[] } {
   return { marked: content.slice(0, bodyAt) + out + body.slice(last), offsets };
 }
 
-const tagKey = (t: { name: string; inline: boolean; rawAttrs: string }) => `${t.name}\u0000${t.inline}\u0000${t.rawAttrs}`;
+const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.inNextMoves ?? ""}\u0000${t.rawAttrs}`;
+const nmOf = (t: ObservedComponentTag): { inNextMoves?: true } => (t.inNextMoves ? { inNextMoves: true } : {});
 
 /** The marked render's tags with their source offsets, or null when they are
  *  not, tag for tag, the plain render's. A tag read with no marker has none. */
@@ -264,7 +313,7 @@ function locate(render: PageRender, content: string, plain: readonly ObservedCom
     const mark = MARK_RE.exec(t.rawAttrs);
     if (mark === null) {
       keys.push(tagKey(t));
-      tags.push({ name: t.name, attrs: t.rawAttrs });
+      tags.push({ name: t.name, attrs: t.rawAttrs, ...nmOf(t) });
       continue;
     }
     const offset = offsets[Number(mark[1])];
@@ -273,7 +322,7 @@ function locate(render: PageRender, content: string, plain: readonly ObservedCom
     keys.push(tagKey({ ...t, rawAttrs: attrs }));
     SOURCE_RUN_RE.lastIndex = offset + 1 + t.name.length;
     const sourceAttrs = SOURCE_RUN_RE.exec(content)?.[0] ?? "";
-    tags.push({ name: t.name, attrs, sourceAttrs, offset, line: lineAt(content, offset) });
+    tags.push({ name: t.name, attrs, ...nmOf(t), sourceAttrs, offset, line: lineAt(content, offset) });
   }
   const want = plain.map(tagKey).sort();
   keys.sort();
@@ -326,7 +375,7 @@ export function checkComponents(relPath: string, content: string, render: PageRe
 
 function findComponents(relPath: string, content: string, render: PageRender): LintFinding[] {
   const plain = observe(render, content);
-  const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs }));
+  const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs, ...nmOf(t) }));
   if (unlocated.length === 0) return [];
   const tags = locate(render, content, plain);
   if (tags === null) return unlocated;
