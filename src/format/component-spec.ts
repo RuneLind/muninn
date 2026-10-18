@@ -13,7 +13,9 @@
  * Each attribute's `parse` is the renderer's own function (for Lane `kind`, a
  * two-line adapter over it), never a copy. It returns `{ value, fellBack }`:
  * `fellBack` is true only for a PRESENT value the renderer does not accept; a
- * missing attribute takes its default and never falls back.
+ * missing attribute takes its default and never falls back. An empty or
+ * whitespace-only value renders exactly like a missing one, so every reader
+ * treats it as missing (`tone=""` is the default, not a fallback).
  */
 
 import { isCalendarDay } from "./calendar-day.ts";
@@ -50,11 +52,17 @@ export function parseString(raw: string | undefined): AttrRead<string | undefine
   return { value: raw, fellBack: false };
 }
 
+/** `raw`, or undefined when it is missing, empty or only white space. */
+function present(raw: string | undefined): string | undefined {
+  return raw === undefined || raw.trim() === "" ? undefined : raw;
+}
+
 function readEnum<const V extends readonly string[]>(
   values: V,
   fallback: V[number],
-  raw: string | undefined,
+  input: string | undefined,
 ): AttrRead<V[number]> {
+  const raw = present(input);
   const ok = raw !== undefined && (values as readonly string[]).includes(raw);
   return { value: ok ? (raw as V[number]) : fallback, fellBack: raw !== undefined && !ok };
 }
@@ -78,7 +86,8 @@ export function normalizeCalloutTone(tone: string | undefined): CalloutTone {
  * day: anything else is ignored, so a typo renders the callout as an ordinary
  * open one rather than as closed.
  */
-export function readResolvedDate(raw: string | undefined): AttrRead<string | null> {
+export function readResolvedDate(input: string | undefined): AttrRead<string | null> {
+  const raw = present(input);
   const v = raw?.trim() ?? "";
   const value = isCalendarDay(v) ? v : null;
   return { value, fellBack: raw !== undefined && value === null };
@@ -127,7 +136,8 @@ export type FactVerdict = (typeof FACT_VERDICTS)[number];
  * optional VS16) are accepted alongside the words, since the writer derives `v`
  * from those blocks and a stray emoji is more likely than a typo'd word.
  */
-export function readFactVerdict(raw: string | undefined): AttrRead<FactVerdict> {
+export function readFactVerdict(input: string | undefined): AttrRead<FactVerdict> {
+  const raw = present(input);
   if (raw === undefined) return { value: "unknown", fellBack: false };
   const v = raw.replace(/\uFE0F/g, "").trim().toLowerCase();
   if (v === "ok" || v === "✅") return { value: "ok", fellBack: false };
@@ -157,14 +167,16 @@ export function normalizeMeterTone(tone: string | undefined): MeterTone {
 
 /** A Meter `value`: a finite number, unclamped. Null when missing, empty or
  *  non-numeric — then the Meter renders its label as plain text. */
-export function readMeterValue(raw: string | undefined): AttrRead<number | null> {
+export function readMeterValue(input: string | undefined): AttrRead<number | null> {
+  const raw = present(input);
   if (raw === undefined) return { value: null, fellBack: false };
-  const value = raw.trim() === "" ? NaN : Number(raw);
+  const value = Number(raw);
   return Number.isFinite(value) ? { value, fellBack: false } : { value: null, fellBack: true };
 }
 
 /** A Meter `max`: a positive number, else the default of 5. */
-export function readMeterMax(raw: string | undefined): AttrRead<number> {
+export function readMeterMax(input: string | undefined): AttrRead<number> {
+  const raw = present(input);
   const max = Number(raw);
   if (Number.isFinite(max) && max > 0) return { value: max, fellBack: false };
   return { value: METER_DEFAULT_MAX, fellBack: raw !== undefined };
@@ -202,7 +214,8 @@ export function normalizeLaneKind(kind: string | undefined): { kind: LaneKind; k
     : { kind: "waiting", known: false };
 }
 
-function readLaneKind(raw: string | undefined): AttrRead<LaneKind> {
+function readLaneKind(input: string | undefined): AttrRead<LaneKind> {
+  const raw = present(input);
   const { kind, known } = normalizeLaneKind(raw);
   return { value: kind, fellBack: raw !== undefined && !known };
 }
@@ -213,7 +226,8 @@ function readLaneKind(raw: string | undefined): AttrRead<LaneKind> {
  * Null for anything else, a day the calendar does not have included. A rejected
  * value is shown as written and only loses its age.
  */
-export function readLaneSince(raw: string | undefined): AttrRead<string | null> {
+export function readLaneSince(input: string | undefined): AttrRead<string | null> {
+  const raw = present(input);
   const v = raw?.trim() ?? "";
   const nb = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(v);
   const iso = nb ? `${nb[3]}-${nb[2]!.padStart(2, "0")}-${nb[1]!.padStart(2, "0")}` : v;

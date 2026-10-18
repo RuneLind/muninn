@@ -84,3 +84,41 @@ describe("hints", () => {
     }
   });
 });
+
+describe("the accepted-value and fallback text", () => {
+  const checked = COMPONENT_NAMES.flatMap((name) =>
+    Object.entries(COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>)
+      .filter(([, spec]) => spec.parse("\u0001not-a-value").fellBack)
+      .map(([attr, spec]) => ({ name, attr, spec })),
+  );
+
+  test("every attribute that can fall back names what it accepts", () => {
+    expect(checked.length).toBeGreaterThan(0);
+    for (const { name, attr, spec } of checked) {
+      const d = docs[name].attrs?.[attr as never] as { accepts?: string } | undefined;
+      expect({ name, attr, named: spec.enum !== undefined || d?.accepts !== undefined }).toEqual({ name, attr, named: true });
+    }
+  });
+
+  test("accepts is only for non-enum attributes, alsoAccepts only beside an enum", () => {
+    for (const name of COMPONENT_NAMES) {
+      for (const [attr, d] of Object.entries(docs[name].attrs ?? {})) {
+        const spec = attrSpec(name, attr);
+        if (d?.accepts !== undefined) expect({ name, attr, enum: spec.enum }).toEqual({ name, attr, enum: undefined });
+        if (d?.alsoAccepts !== undefined) {
+          expect(spec.enum).toBeDefined();
+          for (const v of d.alsoAccepts) expect({ name, attr, v, fellBack: spec.parse(v).fellBack }).toEqual({ name, attr, v, fellBack: false });
+        }
+        if (d?.onFallback?.includes("{default}")) expect(spec.default).toBeDefined();
+        if (d?.onFallbackWhen) expect(COMPONENT_ATTRS[name]).toContain(d.onFallbackWhen.attr);
+      }
+    }
+  });
+
+  test("a component with a required attribute says what it renders without it, and only then", () => {
+    for (const name of COMPONENT_NAMES) {
+      const required = Object.values(COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>).some((s) => s.required);
+      expect({ name, has: docs[name].onMissingRequired !== undefined }).toEqual({ name, has: required });
+    }
+  });
+});

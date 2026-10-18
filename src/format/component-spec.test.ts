@@ -117,6 +117,21 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
     }
   });
 
+  test("every attribute spec: an empty or whitespace value reads exactly as a missing one", () => {
+    for (const name of COMPONENT_NAMES) {
+      for (const [attr, spec] of Object.entries(
+        COMPONENT_SPEC[name].attrs as Record<string, { parse: (r?: string) => { value: unknown; fellBack: boolean } }>,
+      )) {
+        const missing = spec.parse(undefined);
+        // parseString keeps the raw text; every checked reader answers as if missing.
+        if (spec.parse("x").fellBack === false && spec.parse("x").value === "x") continue;
+        for (const blank of ["", " ", "\t", "  \n "]) {
+          expect({ name, attr, blank, ...spec.parse(blank) }).toEqual({ name, attr, blank, ...missing });
+        }
+      }
+    }
+  });
+
   test("enum attributes accept every listed value and fall back to the default", () => {
     for (const name of COMPONENT_NAMES) {
       for (const [attr, spec] of Object.entries(
@@ -164,10 +179,12 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
 
   test("Meter value is required; clamping is not a fallback", () => {
     expect(COMPONENT_SPEC.Meter.attrs.value.required).toBe(true);
-    expect(readMeterValue("")).toEqual({ value: null, fellBack: true });
+    expect(readMeterValue("")).toEqual({ value: null, fellBack: false });
+    expect(readMeterValue(" ")).toEqual({ value: null, fellBack: false });
     expect(readMeterValue("abc")).toEqual({ value: null, fellBack: true });
     expect(readMeterValue("9")).toEqual({ value: 9, fellBack: false });
     expect(readMeterMax("0")).toEqual({ value: 5, fellBack: true });
+    expect(readMeterMax("")).toEqual({ value: 5, fellBack: false });
     expect(readMeterMax("10")).toEqual({ value: 10, fellBack: false });
     expect(parseMeterAttrs({ value: "9", max: "4" })).toEqual({ value: 4, max: 4, tone: "default" });
     expect(parseMeterAttrs({ value: "x" })).toBeNull();

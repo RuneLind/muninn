@@ -1986,6 +1986,14 @@ The rules every part reads:
 
 The owner map is built over every page the loop reads, so the checks run after it. Known, not fixed: dated history prose outside `<Timeline>`, a resolved `<Callout>` and inline «…» quotes are linted. Acceptance: `lint-state.test.ts` (the block-form table, each rule above as accepted and rejected rows), `src/format/state-phrases.test.ts`.
 
+### Lint check 15 — component values and attributes (`lint-components.ts`)
+
+Two warnings on `.mdx` pages that are not culled, report-only: `component-value` (an attribute whose `COMPONENT_SPEC` `parse` reports `fellBack`, or a missing `required` attribute, Meter `value`) and `component-attr` (an attribute `COMPONENT_ATTRS` does not list, which `parseAttrs` drops). `message` says what the renderer does (`Callout tone="success" renders as info`); `detail` lists the accepted values and the hint. The words come from `component-docs.ts` (`accepts`, `alsoAccepts`, `onFallback`, `onFallbackWhen`, `onMissingRequired`), which the reference generator reads too. An empty value reads as a missing one in the spec readers, so it is reported only where missing is itself a fallback.
+
+**The renderer decides which tags count.** `checkComponents` runs `renderWikiHtml` under `observeComponentTags` (`markdown-ast.ts`): `tryParseComponent` reports each block tag it accepts and `scanInlineComponents` each inline tag it matches, both with the raw attribute string. Frontmatter, fences, code spans, table cells and the depth cap are the renderer's own; the check masks nothing. A tag's line comes from a second render with `muninnlintmark="N"` inserted after every `<Name` in the body: a valid, unlisted attribute, so it changes no tag shape and `parseAttrs` drops it. That render's tags are used only when they equal the plain render's, tag for tag; otherwise the findings carry no line. A tag read twice (a fold body is rendered twice) is one finding, deduped on (line, name, attribute, value). Not reported: an unknown tag name, the `parseString` attributes, and the other attributes of a component whose required attribute is unusable. Known: a child the parser reads but the renderer never emits (a non-fence child of `<Diff>`, a stray child of `<CodeTabs>`) is reported, with the inline tags inside it.
+
+`bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory>` runs it alone, no index, one JSON line per finding. Acceptance: `lint-components.test.ts`, `scripts/wiki-check.test.ts`.
+
 ## Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 
 The Connections panel's first section: the pages one hop from the open page,
