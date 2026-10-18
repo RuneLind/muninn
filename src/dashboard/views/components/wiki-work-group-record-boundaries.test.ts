@@ -22,6 +22,7 @@ import {
   type WorkGroupRecord,
   type WorkGroupRecordState,
 } from "./wiki-work-group-record.ts";
+import * as Rec from "./wiki-work-group-record.ts";
 
 const rec = (r: Omit<WorkGroupRecord, "version">): WorkGroupRecord => ({ version: 1, ...r });
 const fresh: WorkGroupRecordState = { held: null, known: null, patch: null, failed: false };
@@ -77,13 +78,14 @@ describe("list edits are operations, applied by id or page", () => {
     expect(mergeWorkGroupPatch(rec({ splits: [SY] }), p)).toEqual(rec({ stop: "areas", splits: [SY, SX] }));
   });
 
-  test("Reset clears the four preferences, keeps an unknown field, and supersedes what the patch held before it", () => {
+  test("Reset clears the four preferences, keeps an unknown field and evidence key, and clears what the patch held before it", () => {
     const base = rec({ stop: "areas", evidence: { series: false, future: 1 }, splits: [SX], keptApart: ["a.md"], extra: "kept" });
-    expect(applyWorkGroupEdit(base, { reset: true })).toEqual(rec({ extra: "kept" }));
+    expect(applyWorkGroupEdit(base, { reset: true })).toEqual(rec({ evidence: { future: 1 }, extra: "kept" }));
     let p = patchWorkGroupEdit(null, { split: SY });
-    p = patchWorkGroupEdit(p, { reset: true });
+    // Reset clears what the tab's view holds: the record with the patch on top.
+    p = patchWorkGroupEdit(p, { reset: true }, mergeWorkGroupPatch(base, p));
     p = patchWorkGroupEdit(p, { evidence: "issue", value: false });
-    expect(mergeWorkGroupPatch(base, p)).toEqual(rec({ extra: "kept", evidence: { issue: false } }));
+    expect(mergeWorkGroupPatch(base, p)).toEqual(rec({ extra: "kept", evidence: { future: 1, issue: false } }));
   });
 });
 
@@ -280,5 +282,242 @@ describe("list ops read the lists as the parser does (fix round 1, batch 3)", ()
     expect(workGroupPrefsOf(st.stored()).splits).toEqual([]);
     // Allow grouping likewise keeps an anchor it cannot read.
     expect(applyWorkGroupEdit(rec({ keptApart: ["a.md", "../a.md", 7] }), { allowGrouping: ["a.md"] }).keptApart).toEqual(["../a.md", 7]);
+  });
+});
+
+describe("Reset and adoption keep what another tab or build holds (fix round 1, batch 4)", () => {
+  test("B4-1 Reset removes only what this build reads: unknown evidence keys and unreadable list entries stay verbatim", () => {
+    const unread = [{ weird: true }, { id: "BAD ID!", page: "x.md" }];
+    const base = rec({ stop: "areas", evidence: { series: false, issue: true, future: 1 }, splits: [SX, ...unread], keptApart: ["a.md", 7, "../a.md"], extra: "kept" });
+    const out = applyWorkGroupEdit(base, { reset: true });
+    expect(out).toEqual(rec({ evidence: { future: 1 }, splits: unread, keptApart: [7, "../a.md"], extra: "kept" }));
+    expect(workGroupPrefsOf(out)).toEqual(workGroupPrefsOf(null));
+    // Nothing unknown: the bare version, no empty field left behind.
+    expect(applyWorkGroupEdit(rec({ stop: "areas", evidence: { series: false }, splits: [SX], keptApart: ["a.md"] }), { reset: true })).toEqual(rec({}));
+  });
+
+  test("B4-1 the Reset a click writes keeps them too", () => {
+    const st = store();
+    st.s.v = JSON.stringify({ version: 1, stop: "areas", evidence: { related: false, future: 1 }, splits: [SX, { weird: true }], keptApart: ["a.md", 7] });
+    tab(st).click({ reset: true });
+    expect(JSON.parse(st.s.v!)).toEqual({ version: 1, evidence: { future: 1 }, splits: [{ weird: true }], keptApart: [7] });
+  });
+
+  test("B4-2 T4 two tabs, event heard: a refused split survives the other tab's write and lands on its list at the next focused render", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ split: SX });
+    st.s.writable = true;
+    b.click({ split: SY });
+    a.event();
+    expect(a.shown().splits).toEqual([SY, SX]);
+    expect(a.state().failed).toBe(true);
+    a.render(true);
+    expect(workGroupPrefsOf(st.stored()).splits).toEqual([SY, SX]);
+    expect(a.state().failed).toBe(false);
+    b.event();
+    expect(b.shown().splits).toEqual([SY, SX]);
+  });
+
+  test("B4-2 T4 two tabs, event missed: R3 adopts the other tab's record with the refused split on top, and the next focused render writes it", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ split: SX });
+    st.s.writable = true;
+    b.click({ split: SY });
+    expect(a.render(true).write).toBe(false);
+    expect(a.shown().splits).toEqual([SY, SX]);
+    a.render(true);
+    expect(workGroupPrefsOf(st.stored()).splits).toEqual([SY, SX]);
+  });
+
+  test("B4-2 a click after another tab's write keeps this tab's pending list ops", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ split: SX });
+    st.s.writable = true;
+    b.click({ split: SY });
+    a.click({ keepApart: "k.md" });
+    expect(workGroupPrefsOf(st.stored()).splits).toEqual([SY, SX]);
+    expect(workGroupPrefsOf(st.stored()).keptApart).toEqual(["k.md"]);
+  });
+
+  test("B4-2 adoption still drops this tab's scalar fields: another tab's write is the newer choice", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ stop: "areas" });
+    a.click({ split: SX });
+    st.s.writable = true;
+    b.click({ stop: "threads" });
+    a.event();
+    expect(a.shown().stop).toBe("threads");
+    expect(a.shown().splits).toEqual([SX]);
+    a.render(true);
+    expect(st.stored()).toEqual(rec({ stop: "threads", splits: [SX] }));
+    // A scalar-only patch goes whole: nothing is this tab's only.
+    const st2 = store();
+    const c = tab(st2);
+    const d = tab(st2);
+    st2.s.writable = false;
+    c.click({ stop: "areas" });
+    st2.s.writable = true;
+    d.click({ split: SY });
+    c.event();
+    expect(c.state().patch).toBeNull();
+    expect(c.state().failed).toBe(false);
+  });
+
+  test("B4-2 a pending re-anchor survives adoption only while the anchor it moves is still stored", () => {
+    const st = store(rec({ keptApart: ["a.md"] }));
+    const a = tab(st);
+    const b = tab(st);
+    a.render(false, [["a.md", "c.md"]]);
+    b.render(true, [["a.md", "d.md"]]);
+    a.event();
+    expect(a.shown().keptApart).toEqual(["d.md"]);
+    expect(a.state().patch).toBeNull();
+    const writes = st.s.writes;
+    a.render(true);
+    expect(st.s.writes).toBe(writes);
+  });
+
+  test("B4-2 a pending Return kept across adoption never takes a split another tab made on the page since", () => {
+    const st = store(rec({ splits: [SX] }));
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ unsplit: SX });
+    st.s.writable = true;
+    b.click({ unsplit: SX });
+    const again = { id: "sx2", page: SX.page };
+    b.click({ split: again });
+    a.event();
+    a.render(true);
+    expect(workGroupPrefsOf(st.stored()).splits).toEqual([again]);
+    expect(a.shown().splits).toEqual([again]);
+  });
+
+  test("B4-2 P6 Allow grouping in a stale tab removes the anchor another tab re-anchored on the same thread", () => {
+    const threads = [{ thread: { pages: ["a.md", "c.md"] }, keptApart: ["a.md"] }, { thread: { pages: ["b.md"] }, keptApart: ["b.md"] }, { thread: { pages: ["e.md"] } }];
+    expect(Rec.keptApartPagesOf(threads, ["a.md"]).sort()).toEqual(["a.md", "c.md"]);
+    expect(Rec.keptApartPagesOf(threads, null).sort()).toEqual(["a.md", "b.md", "c.md"]);
+    const st = store(rec({ keptApart: ["a.md", "b.md"] }));
+    const a = tab(st);
+    const b = tab(st);
+    // B's listing grew: c.md is now the thread's newest focus page.
+    b.render(true, [["a.md", "c.md"]]);
+    a.click({ allowGrouping: Rec.keptApartPagesOf(threads, ["a.md"]) });
+    expect(workGroupPrefsOf(st.stored()).keptApart).toEqual(["b.md"]);
+    // A's older listing has nothing left to move back.
+    expect(a.render(true, []).write).toBe(false);
+  });
+
+  test("B4-3 Reset in a stale tab clears only what that tab's view held: another tab's newer entries survive", () => {
+    const st = store(rec({ stop: "areas", splits: [SY], keptApart: ["b.md"] }));
+    const a = tab(st);
+    const b = tab(st);
+    a.click({ split: SX });
+    a.click({ keepApart: "k.md" });
+    // B never heard of SX or k.md.
+    b.click({ reset: true });
+    expect(st.stored()).toEqual(rec({ splits: [SX], keptApart: ["k.md"] }));
+    expect(b.shown().splits).toEqual([SX]);
+    // A current tab's Reset restores D1.
+    a.event();
+    a.click({ reset: true });
+    expect(st.stored()).toEqual(rec({}));
+  });
+
+  test("B4-3 a stale Reset follows a kept-apart thread another tab re-anchored", () => {
+    const st = store(rec({ keptApart: ["a.md"] }));
+    const a = tab(st);
+    const b = tab(st);
+    b.render(true, [["a.md", "c.md"]]);
+    a.click({ reset: true, threadPages: ["a.md", "c.md"] });
+    expect(st.stored()).toEqual(rec({}));
+  });
+
+  test("B4-3 a pending Reset keeps its list part across adoption and drops its scalar part", () => {
+    const st = store(rec({ stop: "areas", splits: [SY] }));
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ reset: true });
+    st.s.writable = true;
+    b.click({ stop: "threads" });
+    b.click({ split: SX });
+    a.event();
+    expect(a.shown().stop).toBe("threads");
+    expect(a.shown().splits).toEqual([SX]);
+    a.render(true);
+    expect(st.stored()).toEqual(rec({ stop: "threads", splits: [SX] }));
+  });
+});
+
+describe("adoption drops a pending op the other tab's record already holds (fix round 1, batch 4)", () => {
+  test("a refused split the other tab also made is dropped on adoption, so that tab's later Reset stands", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ split: SX });
+    st.s.writable = true;
+    b.click({ split: { id: "sx-b", page: SX.page } });
+    a.event();
+    expect(a.state().patch).toBeNull();
+    expect(a.state().failed).toBe(false);
+    b.click({ reset: true });
+    a.event();
+    a.render(true);
+    expect(st.stored()).toEqual(rec({}));
+  });
+});
+
+describe("split removals resolve to ids at the click (fix round 1, batch 4)", () => {
+  test("a stale Return takes the split another tab made on the page before the click", () => {
+    const st = store(rec({ splits: [SX] }));
+    const a = tab(st);
+    const b = tab(st);
+    b.click({ unsplit: SX });
+    b.click({ split: { id: "sx2", page: SX.page } });
+    // A still shows SX's id: its Return is for the page it saw split.
+    a.click({ unsplit: SX });
+    expect(workGroupPrefsOf(st.stored()).splits).toEqual([]);
+  });
+
+  test("a stale Reset takes the split another tab made on a page it showed split", () => {
+    const st = store(rec({ splits: [SX] }));
+    const a = tab(st);
+    const b = tab(st);
+    b.click({ unsplit: SX });
+    b.click({ split: { id: "sx2", page: SX.page } });
+    b.click({ split: SY });
+    a.click({ reset: true });
+    // SY's page A never showed split: it stays.
+    expect(st.stored()).toEqual(rec({ splits: [SY] }));
+  });
+
+  test("a pending op the adopted record already holds is dropped while the others stay", () => {
+    const st = store();
+    const a = tab(st);
+    const b = tab(st);
+    st.s.writable = false;
+    a.click({ split: SX });
+    a.click({ keepApart: "k.md" });
+    st.s.writable = true;
+    b.click({ split: { id: "sx-b", page: SX.page } });
+    a.event();
+    b.click({ reset: true });
+    a.event();
+    a.render(true);
+    expect(st.stored()).toEqual(rec({ keptApart: ["k.md"] }));
   });
 });

@@ -461,6 +461,44 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     expect(rec.keptApart).toEqual([LB]);
   });
 
+  test("two tabs: a split one tab could not store survives the other tab's write and lands on its list once storage takes it (T4)", async ({ context }) => {
+    const a = await context.newPage();
+    const b = await context.newPage();
+    // A's storage refuses the record until the test lets it through; A counts
+    // as focused, so its next render may retry (R6).
+    await a.addInitScript(([k]) => {
+      const w = window as unknown as { __refuse: boolean };
+      w.__refuse = true;
+      document.hasFocus = () => true;
+      const set = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key === k && w.__refuse) throw new DOMException("quota", "QuotaExceededError");
+        return set.call(this, key, value);
+      };
+    }, [workGroupKey(B)] as const);
+    await openReader(a);
+    await openReader(b);
+    await rowMenu(a, TSPLIT);
+    await a.locator("#wikiSeriesMenu [data-thread-split]").click();
+    await expect(a.locator(".wiki-work-local")).toHaveText("this tab only");
+    await groupCard(b, `group:anchor:${LA}`).locator(".wiki-thread-fold").click();
+    await openMenu(b.locator(`.wiki-thread-gbody .wiki-thread-card[data-thread="thread:${LB}"] [data-work-card-menu]`));
+    await b.locator("#wikiWorkPop [data-work-keep]").click();
+    // A heard B's write: it shows B's kept-apart thread AND its own split.
+    await expect(card(a, LB).locator(".wiki-thread-chip-own")).toHaveText("kept separate");
+    await expect(card(a, TSPLIT).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+    await expect(a.locator(".wiki-work-local")).toHaveText("this tab only");
+    await a.evaluate(() => ((window as unknown as { __refuse: boolean }).__refuse = false));
+    // Any focused render retries: open and close the Group menu.
+    await groupBtn(a).click();
+    await a.keyboard.press("Escape");
+    await expect(a.locator(".wiki-work-local")).toHaveCount(0);
+    const rec = await record(b);
+    expect(rec.splits.map((x: { page: string }) => x.page)).toEqual([TSPLIT]);
+    expect(rec.keptApart).toEqual([LB]);
+    await expect(card(b, TSPLIT).locator(".wiki-thread-chip-own")).toHaveText("own thread");
+  });
+
   test("Reset your splits and groups (N) lists what does not apply and restores D1", async ({ page }) => {
     await page.addInitScript(([k]) => {
       if (localStorage.getItem("__seeded")) return;
@@ -476,6 +514,35 @@ test.describe("Wiki rail: work-thread boundaries", () => {
     await reset.click();
     await expect(page.locator(".wiki-work-menu")).toHaveCount(0);
     expect(await record(page)).toEqual({ version: 1 });
+    await expect(groupBtn(page)).toContainText("Related");
+    await expect(card(page, TSPLIT)).toHaveCount(0);
+  });
+
+  test("Reset keeps what this build does not read and a split another tab wrote since the menu opened", async ({ page }) => {
+    await page.addInitScript(([k]) => {
+      if (localStorage.getItem("__seeded")) return;
+      localStorage.setItem("__seeded", "1");
+      const record = {
+        version: 1,
+        stop: "threads",
+        evidence: { series: false, future: 1 },
+        splits: [{ id: "a1", page: "plans/t-split.md" }, { weird: true }],
+        keptApart: ["notes/lone.md", 7],
+        extra: "kept",
+      };
+      localStorage.setItem(k!, JSON.stringify(record));
+    }, [workGroupKey(B)] as const);
+    await openReader(page);
+    await expect(card(page, TSPLIT)).toHaveCount(1);
+    await groupBtn(page).click();
+    // Another tab's write: a same-page setItem fires no storage event here.
+    await page.evaluate((k) => {
+      const r = JSON.parse(localStorage.getItem(k)!);
+      r.splits.push({ id: "other", page: "gone/other.md" });
+      localStorage.setItem(k, JSON.stringify(r));
+    }, workGroupKey(B));
+    await page.locator("[data-work-reset]").click();
+    expect(await record(page)).toEqual({ version: 1, evidence: { future: 1 }, splits: [{ weird: true }, { id: "other", page: "gone/other.md" }], keptApart: [7], extra: "kept" });
     await expect(groupBtn(page)).toContainText("Related");
     await expect(card(page, TSPLIT)).toHaveCount(0);
   });

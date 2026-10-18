@@ -216,6 +216,7 @@ import {
   WORK_POP_ID,
 } from "./wiki-thread-view.ts";
 import {
+  keptApartPagesOf,
   storageEventTouchesWorkGroup,
   workGroupAddRefused,
   workGroupPrefsOf,
@@ -5339,7 +5340,9 @@ function boundaryItemClick(target: HTMLElement): boolean {
     } catch {
       /* a malformed attribute: nothing to remove */
     }
-    applyBoundaryEdit({ allowGrouping: anchors });
+    // Every page of the thread, not only the anchor drawn: another tab may
+    // have re-anchored it onto another of its pages since this render.
+    applyBoundaryEdit({ allowGrouping: keptApartPagesOf(workBounds?.threads ?? [], anchors) });
     return true;
   }
   return false;
@@ -5597,10 +5600,11 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     return;
   }
   // PR 4: Reset your splits and groups — clears the record's four
-  // preferences (D1), through the state table like any edit.
+  // preferences as this tab shows them (D1), through the state table like
+  // any edit; a kept-apart thread's anchor goes on any of its pages.
   if (target.closest("[data-work-reset]")) {
     e.preventDefault();
-    editWorkGroup({ reset: true });
+    editWorkGroup({ reset: true, threadPages: keptApartPagesOf(workBounds?.threads ?? [], null) });
     setWorkMenu(false, true);
     return;
   }
