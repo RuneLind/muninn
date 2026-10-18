@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 /**
  * The component reference: one signature line per component taught to a
- * target, read off `COMPONENT_SPEC` and `COMPONENT_DOCS`, so the reference a
- * writer reads cannot drift from what the renderer accepts.
+ * target, read off `COMPONENT_SPEC` and `COMPONENT_DOCS`. Enums, types,
+ * defaults and required marks come from the spec the renderer parses with, so
+ * they cannot drift. `printType` (Fold `open`/`for`, DeltaTable
+ * `better`/`decimal`, Embed `height`) is hand-written in `COMPONENT_DOCS`, and
+ * `component-reference.test.ts` pins each one to the renderer code that reads it.
  *
  *   bun --no-env-file scripts/component-reference.ts --teach wiki|chat
  *

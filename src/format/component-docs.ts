@@ -32,7 +32,8 @@ export interface AttrDoc {
   /** The phrasing instead of `onFallback` when `attr` holds an accepted value. */
   onFallbackWhen?: { attr: string; message: string };
   /** The type the reference prints for an attribute the spec leaves unchecked
-   *  (D9), in place of `string`. Display only: the linter never reads it. */
+   *  (D9), in place of `string`. Display only: the linter never reads it.
+   *  `scripts/component-reference.test.ts` pins each value to the renderer. */
   printType?: string;
   /** Print the attribute as required though the spec does not mark it so,
    *  because a missing value fails visibly instead of raising a lint finding. */

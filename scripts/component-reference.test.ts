@@ -1,7 +1,11 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import path from "node:path";
 import { attrSignature, componentLine, componentReference, runComponentReference } from "./component-reference.ts";
 import { COMPONENT_NAMES, COMPONENT_SPEC, FACT_VERDICT_GLYPHS, type AttrSpec, type AttrType, type ComponentName } from "../src/format/component-spec.ts";
+import { COMPONENT_DOCS } from "../src/format/component-docs.ts";
+import { DELTA_DECIMALS, DELTA_DIRECTIONS, parseDeltaAttrs } from "../src/format/delta-table.ts";
+import { parseEmbedAttrs } from "../src/format/embed.ts";
+import { FOLD_FOR_CLASSES, formatWebHtml } from "../src/web/web-format.ts";
 
 const SCRIPT = path.join(import.meta.dir, "component-reference.ts");
 const namesIn = (lines: string[]) => lines.filter((l) => /^[A-Z]/.test(l)).map((l) => l.slice(0, l.indexOf("(")));
@@ -121,4 +125,57 @@ test("chat prints no inline group: its prompt teaches all six as block-only", ()
   expect(lines.some((l) => l.startsWith("# Inline"))).toBe(false);
   expect(lines.filter((l) => l.startsWith("# ")).every((l) => l.startsWith("# Block"))).toBe(true);
   expect(namesIn(lines).sort()).toEqual(["Callout", "ComparisonTable", "Figure", "FileRef", "Pill", "Verdict"]);
+});
+
+// `printType` is hand-written display text the spec does not check (D9); these
+// pin each one to the renderer code that decides the attribute.
+describe("every printType names what the renderer accepts", () => {
+  const printType = (name: "Fold" | "DeltaTable" | "Embed", attr: string) =>
+    (COMPONENT_DOCS[name].attrs as Record<string, { printType?: string }>)[attr]!.printType!;
+  const quoted = (t: string) => [...t.matchAll(/"([^"]*)"/g)].map((m) => m[1]!);
+  const sorted = (xs: Iterable<string>) => [...xs].sort();
+
+  test("Fold for: FOLD_FOR_CLASSES", () => {
+    expect(sorted(quoted(printType("Fold", "for")))).toEqual(sorted(FOLD_FOR_CLASSES));
+  });
+
+  test("Fold open: the printed values expand the fold, and nothing else does", () => {
+    const opened = (v: string) => formatWebHtml(`<Fold title="T" open="${v}">\n\nx\n\n</Fold>`).includes('<details class="fold" open>');
+    const printed = quoted(printType("Fold", "open"));
+    expect(printed.length).toBeGreaterThan(0);
+    for (const v of printed) expect({ v, opened: opened(v) }).toEqual({ v, opened: true });
+    for (const v of ["TRUE", "1", "yes", "open", ""]) expect({ v, opened: opened(v) }).toEqual({ v, opened: false });
+  });
+
+  test("DeltaTable decimal: DELTA_DECIMALS, each read without a warning", () => {
+    const printed = quoted(printType("DeltaTable", "decimal"));
+    expect(sorted(printed)).toEqual(sorted(DELTA_DECIMALS));
+    for (const v of printed) expect(parseDeltaAttrs({ decimal: v })).toMatchObject({ decimal: v, decimalWarning: "" });
+    expect(parseDeltaAttrs({ decimal: "point" }).decimalWarning).not.toBe("");
+  });
+
+  test("DeltaTable better: DELTA_DIRECTIONS, alone or per row", () => {
+    const printed = quoted(printType("DeltaTable", "better"));
+    const plain = printed.filter((v) => !v.includes("="));
+    const perRow = printed.filter((v) => v.includes("="));
+    expect(sorted(plain)).toEqual(sorted(DELTA_DIRECTIONS));
+    for (const v of plain) expect(parseDeltaAttrs({ better: v })).toMatchObject({ better: v, warning: "" });
+    expect(perRow).toEqual(["<row>=lower|higher;…"]);
+    const rowDirections = perRow[0]!.slice(perRow[0]!.indexOf("=") + 1).replace(/;…$/, "").split("|");
+    expect(sorted(rowDirections)).toEqual(sorted(DELTA_DIRECTIONS));
+    const rows = parseDeltaAttrs({ better: rowDirections.map((d, i) => `Row ${i}=${d}`).join("; ") });
+    expect({ warning: rows.warning, rows: rows.rows?.size }).toEqual({ warning: "", rows: rowDirections.length });
+    expect(parseDeltaAttrs({ better: "up" }).warning).not.toBe("");
+  });
+
+  test("Embed height: parseEmbedAttrs accepts exactly the printed digit counts", () => {
+    const m = printType("Embed", "height").match(/(\d+)–(\d+) digits/);
+    expect(m).not.toBeNull();
+    const [min, max] = [Number(m![1]), Number(m![2])];
+    for (let n = Math.max(1, min - 1); n <= max + 1; n++) {
+      const accepted = parseEmbedAttrs({ src: "x.html", height: "9".repeat(n) }) !== null;
+      expect({ n, accepted }).toEqual({ n, accepted: n >= min && n <= max });
+    }
+    for (const v of ["-1", "1.5", "abc"]) expect({ v, accepted: parseEmbedAttrs({ src: "x.html", height: v }) !== null }).toEqual({ v, accepted: false });
+  });
 });

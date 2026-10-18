@@ -827,7 +827,7 @@ function codeFenceHtml(lang: string, code: string): string {
 }
 
 /** The `for=` values a fold class is made for: the ones the Overview lens hides. */
-const FOLD_FOR_CLASSES: ReadonlySet<string> = new Set(["dev", "agent"]);
+export const FOLD_FOR_CLASSES: ReadonlySet<string> = new Set(["dev", "agent"]);
 
 /** A `<Fold>`'s classes. On the reader path only: `fold-for-dev` and
  *  `fold-for-agent` for those `for=` values, and `fold-agent-context` for a
