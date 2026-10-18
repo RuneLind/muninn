@@ -1402,3 +1402,107 @@ test.describe("Wiki rail: boundary controls by keyboard", () => {
     await expect(page.locator("#wikiWorkPop")).toHaveCount(0);
   });
 });
+
+/**
+ * Class check (round 3): focus after each reset-area action. Reset renders
+ * above every entry, so a Forget whose focus fell to the first match of a
+ * combined selector landed on Reset, and a second Enter wiped the record.
+ * Each row: the record seeded, the key pressed on one control, the control
+ * that must hold focus after the write and the repaint.
+ */
+test.describe("Wiki rail: reset-area focus (class check)", () => {
+  const G = (i: number) => ({ id: `g${i}`, page: `gone/s-${i}.md` });
+  const ANCHOR = "notes/gone-k.md";
+  const FULL = { version: 1, stop: "areas", splits: [G(1), G(2), G(3)], keptApart: [ANCHOR] };
+  const split = (id: string) => `[data-work-forget-split="${id}"]`;
+  const anchor = (p: string) => `[data-work-forget-anchor="${p}"]`;
+  const CHECKED_STOP = '[data-work-stop][aria-checked="true"]';
+
+  async function seedAndOpen(page: Page, rec: unknown): Promise<void> {
+    await page.addInitScript(
+      ([k, v]) => {
+        if (localStorage.getItem("__seeded")) return;
+        localStorage.setItem("__seeded", "1");
+        localStorage.setItem(k!, v!);
+      },
+      [workGroupKey(B), JSON.stringify(rec)] as const,
+    );
+    await openReader(page);
+    await groupBtn(page).click();
+    await expect(page.locator(".wiki-work-menu")).toHaveCount(1);
+  }
+
+  const forgets = (page: Page) =>
+    page.locator("#wikiList .wiki-work-menu [data-work-forget-split], #wikiList .wiki-work-menu [data-work-forget-anchor]").evaluateAll((els) =>
+      els.map((e) => e.getAttribute("data-work-forget-split") ?? `anchor:${e.getAttribute("data-work-forget-anchor")}`),
+    );
+
+  const rows: { name: string; rec: unknown; on: string; key: string; focus: string; left: string[] }[] = [
+    { name: "Forget the first entry (Enter): the next entry's Forget", rec: FULL, on: split("g1"), key: "Enter", focus: split("g2"), left: ["g2", "g3", `anchor:${ANCHOR}`] },
+    { name: "Forget a middle entry (Enter): the next entry's Forget", rec: FULL, on: split("g2"), key: "Enter", focus: split("g3"), left: ["g1", "g3", `anchor:${ANCHOR}`] },
+    { name: "Forget a middle entry (Space): the next entry's Forget", rec: FULL, on: split("g2"), key: " ", focus: split("g3"), left: ["g1", "g3", `anchor:${ANCHOR}`] },
+    { name: "Forget the last entry (an anchor): the previous entry's Forget", rec: FULL, on: anchor(ANCHOR), key: "Enter", focus: split("g3"), left: ["g1", "g2", "g3"] },
+    // An active split (t-split) and an active anchor (live-b) keep Reset in the
+    // menu with no entry left under it, so the fallback must skip it.
+    { name: "Forget the only entry (a split): the menu's checked stop, the menu open", rec: { version: 1, stop: "areas", splits: [{ id: "a1", page: TSPLIT }, G(1)] }, on: split("g1"), key: "Enter", focus: CHECKED_STOP, left: [] },
+    { name: "Forget the only entry (an anchor): the menu's checked stop", rec: { version: 1, keptApart: [LB, ANCHOR] }, on: anchor(ANCHOR), key: "Enter", focus: CHECKED_STOP, left: [] },
+  ];
+
+  for (const row of rows) {
+    test(`keyboard: ${row.name}`, async ({ page }) => {
+      await seedAndOpen(page, row.rec);
+      await page.locator(`#wikiList .wiki-work-menu ${row.on}`).focus();
+      await page.keyboard.press(row.key === " " ? "Space" : row.key);
+      await expect(page.locator(".wiki-work-menu")).toHaveCount(1);
+      expect(await forgets(page)).toEqual(row.left);
+      await expect(page.locator(`#wikiList .wiki-work-menu ${row.focus}`)).toBeFocused();
+      await expect(page.locator("[data-work-reset]")).toHaveCount(1);
+      await expect(page.locator("[data-work-reset]:focus")).toHaveCount(0);
+    });
+  }
+
+  test("keyboard: Reset closes the menu and focuses the Group button", async ({ page }) => {
+    await seedAndOpen(page, FULL);
+    await page.locator("[data-work-reset]").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".wiki-work-menu")).toHaveCount(0);
+    await expect(groupBtn(page)).toBeFocused();
+    expect(await record(page)).toEqual({ version: 1 });
+  });
+
+  test("mouse: Forget a middle entry follows the same rule", async ({ page }) => {
+    await seedAndOpen(page, FULL);
+    await page.locator(split("g2")).click();
+    await expect(page.locator(split("g3"))).toBeFocused();
+  });
+
+  test("the repro: Enter on Forget, then Enter again forgets the next entry and never resets", async ({ page }) => {
+    await seedAndOpen(page, FULL);
+    await page.locator(split("g2")).focus();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    expect(await record(page)).toEqual({ version: 1, stop: "areas", splits: [G(1)], keptApart: [ANCHOR] });
+    await expect(page.locator(".wiki-work-menu")).toHaveCount(1);
+    await expect(page.locator(anchor(ANCHOR))).toBeFocused();
+  });
+
+  // The verify pass's survivors E4 and E5: both actions clear a standing
+  // boundary note (one stands in, by id, as the note the click handlers find).
+  for (const [what, act] of [
+    ["Reset", (page: Page) => page.locator("[data-work-reset]").click()],
+    ["Forget", (page: Page) => page.locator(split("g1")).click()],
+  ] as const) {
+    test(`${what} clears the boundary status note`, async ({ page }) => {
+      await seedAndOpen(page, FULL);
+      await page.evaluate(() => {
+        const el = document.createElement("div");
+        el.id = "wikiWorkBoundaryStatus";
+        el.textContent = "Make own thread did nothing";
+        document.body.appendChild(el);
+      });
+      await expect(page.locator("#wikiWorkBoundaryStatus")).toHaveCount(1);
+      await act(page);
+      await expect(page.locator("#wikiWorkBoundaryStatus")).toHaveCount(0);
+    });
+  }
+});

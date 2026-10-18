@@ -5204,6 +5204,14 @@ function focusWorkMenuItem(selector?: string): void {
   pick?.focus({ preventScroll: true });
 }
 
+const WORK_FORGET_SEL = "[data-work-forget-split], [data-work-forget-anchor]";
+
+/** A reset-area Forget's stable selector: its kind and its split id or page. */
+function workForgetKey(el: HTMLElement): string {
+  const attr = el.hasAttribute("data-work-forget-split") ? "data-work-forget-split" : "data-work-forget-anchor";
+  return `[${attr}="${CSS.escape(el.getAttribute(attr) ?? "")}"]`;
+}
+
 function focusWorkMenuButton(): void {
   document.querySelector<HTMLElement>("#wikiList [data-work-group-menu]")?.focus({ preventScroll: true });
 }
@@ -5741,7 +5749,8 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   }
   // PR 4: Reset your splits and groups — clears the record's four
   // preferences as this tab shows them (D1), through the state table like
-  // any edit; an entry another tab added unseen stays.
+  // any edit; an entry another tab added unseen stays. The menu closes and
+  // focus returns to the Group button, which reopens it.
   if (target.closest("[data-work-reset]")) {
     e.preventDefault();
     editWorkGroup({ reset: true });
@@ -5750,15 +5759,21 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
     return;
   }
   // Forget one definition the reset area lists (it has no Return or Allow
-  // grouping item); the menu stays open on the next one.
-  const forget = target.closest<HTMLElement>("[data-work-forget-split], [data-work-forget-anchor]");
+  // grouping item); the menu stays open. Focus, by key, after the repaint:
+  // the Forget now at the forgotten one's place (the next), else the previous,
+  // else the menu's default item (its checked stop) — never Reset, which sits
+  // above every entry, so a second Enter never wipes the record.
+  const forget = target.closest<HTMLElement>(WORK_FORGET_SEL);
   if (forget) {
     e.preventDefault();
+    const keys = Array.from(document.querySelectorAll<HTMLElement>(`#wikiList .wiki-work-menu :is(${WORK_FORGET_SEL})`), workForgetKey);
+    const at = keys.indexOf(workForgetKey(forget));
+    const next = at < 0 ? [] : [...keys.slice(at + 1), ...keys.slice(0, at).reverse()];
     const id = forget.getAttribute("data-work-forget-split");
     editWorkGroup(id !== null ? { forgetSplit: id } : { allowGrouping: [forget.getAttribute("data-work-forget-anchor") ?? ""] });
     showWorkBoundaryStatus(null);
     renderList();
-    focusWorkMenuItem("[data-work-forget-split], [data-work-forget-anchor], [data-work-reset]");
+    focusWorkMenuItem(next.find((sel) => document.querySelector(`#wikiList .wiki-work-menu ${sel}`)));
     return;
   }
   // PR 4: a card's ⋯ and a focus row's ⋯ (the one with no series menu).
