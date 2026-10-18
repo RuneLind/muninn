@@ -1391,7 +1391,7 @@ function tabHasFocus(): boolean {
  *  cold sessions memo, or a wiki with no sessions — no section (D11). Not the
  *  "keep the last known value" degrade: stale threads would lift pages the
  *  listing on screen no longer works on. */
-let workFacts: Pick<IndexWork, "threads"> | null = null;
+let workFacts: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs">>) | null = null;
 
 /** Is the reader grouping this wiki's rail into families and months? OFF by
  *  default: the finder-rail retro found the rail is scanned more than browsed,

@@ -26,7 +26,14 @@ import { displayTitleOf, filterPages, pageAddedMs, type WikiFilters, type WikiLi
 import { seriesHead, seriesKeyOf, seriesMembersByFoldKey } from "./wiki-groups.ts";
 import { normalizeRel } from "./wiki-nav.ts";
 import { normalizeFoldKey, railSectionsVisible, THREAD_CARDS_MAX, threadFoldKey } from "./wiki-recents.ts";
-import { newestFocusPage, threadHoldsPin, threadName, threadRankScore, usableThreads } from "./wiki-thread-core.ts";
+import {
+  newestFocusPage,
+  threadHoldsPin,
+  threadName,
+  threadRankScore,
+  usableThreads,
+  workGroupingInstant,
+} from "./wiki-thread-core.ts";
 import type { WorkGroupEvidenceToggles, WorkGroupStop } from "./wiki-work-group-prefs.ts";
 import {
   WORK_EVIDENCE_VERSION,
@@ -176,11 +183,7 @@ export function workUnitsFromThreads(threads: unknown): WorkUnit[] {
 
 const cmpStr = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** The instant the grouping scores at: never before `asOfMs`, where an
- *  event's age would clamp at 0 (`eventRaw`) and could reorder threads. */
-export function workGroupingInstant(now: number, asOfMs: number | undefined): number {
-  return typeof asOfMs === "number" && Number.isFinite(asOfMs) ? Math.max(now, asOfMs) : now;
-}
+export { workGroupingInstant };
 
 /** Units in grouping order (D16): `threadRankScore` descending, then the
  *  server's index, then `sub`, then key. No pin step. */
@@ -287,7 +290,20 @@ function witnessesBetween(
     }
   }
   if (areas) for (const k of a.projects) if (b.projects.includes(k)) out.push({ kind: "project", key: k });
-  return out;
+  return uniqueWitnesses(out);
+}
+
+/** Witnesses without repeats, first spelling kept. A related pair is
+ *  unordered: `[a, b]` and `[b, a]` are one witness. */
+function uniqueWitnesses(ws: readonly WorkWitness[]): WorkWitness[] {
+  const seen = new Set<string>();
+  return ws.filter((w) => {
+    const k =
+      w.kind === "related"
+        ? JSON.stringify(["related", ...[normalizeRel(w.from), normalizeRel(w.to)].sort()])
+        : JSON.stringify(w);
+    return seen.has(k) ? false : (seen.add(k), true);
+  });
 }
 
 const kindsOf = (ws: readonly WorkWitness[]): WorkEvidenceKind[] => WORK_EVIDENCE_KINDS.filter((k) => ws.some((w) => w.kind === k));
@@ -561,11 +577,7 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
         sessions: threadSessionsAvailability(evidence, m.unit.thread.key, reason),
       };
     });
-    const seen = new Set<string>();
-    const witnesses = children.flatMap((c) => c.witnesses).filter((w) => {
-      const k = JSON.stringify(w);
-      return seen.has(k) ? false : (seen.add(k), true);
-    });
+    const witnesses = uniqueWitnesses(children.flatMap((c) => c.witnesses));
     const anchor = children[0]!;
     const name =
       n.label === "series" ? ix.seriesLabel(n.nameKey!) : n.label === "project" ? n.nameKey! : anchor.name;
@@ -588,7 +600,8 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
 
 /**
  * One card per session with a kept focus contribution, from the contribution
- * rows (never from timestamps): newest `last` first, then the session ref.
+ * rows (never from timestamps): newest `last` first, then the session id (the
+ * server's `thread.sessions` order), then the full ref.
  * Each focus page is a row of the first card holding it and an `also in:`
  * link on every later one. With `threadKey`, only that thread's rows — the
  * `▸ split into N sessions` view. Splits and kept-apart threads do not apply.
@@ -624,7 +637,7 @@ export function workSessionCards(
       const s = meta.get(ref)!;
       return { ref, id: s.id, provider: s.provider, title: s.title, first: s.first, last: s.last, threadKey: a.thread, acc: a };
     })
-    .sort((x, y) => y.last - x.last || cmpStr(x.ref, y.ref));
+    .sort((x, y) => y.last - x.last || cmpStr(x.id, y.id) || cmpStr(x.ref, y.ref));
   const taken = new Set<string>();
   return cards.map(({ acc: a, ...c }) => {
     const focus = listed(a.focus).sort(byTerm);

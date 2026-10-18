@@ -18,7 +18,9 @@ import {
   type WorkGroupingInput,
 } from "./wiki-work-groups.ts";
 import type { WorkGroupEvidenceToggles } from "./wiki-work-group-prefs.ts";
-import { openThreadCards } from "./wiki-rail-input.ts";
+import { openThreadCards, railInputFor } from "./wiki-rail-input.ts";
+import { DEFAULT_ACTIVITY_WEIGHTS } from "./wiki-activity-rank.ts";
+import { threadScore } from "../../../wiki/work-focus.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 import { WORK_EVIDENCE_VERSION, type IndexWork, type WorkContribution, type WorkEvidence, type WorkThread } from "../../../wiki/work-focus.ts";
 
@@ -37,10 +39,13 @@ interface PageSpec {
   backlinkCount?: number;
   movesYou?: number;
   title?: string;
+  /** When the page's one focus event happened. Default `NOW - 2h`. */
+  atMs?: number;
 }
 
 function page(relPath: string, s: PageSpec = {}): WikiListing {
   const edits = s.edits ?? 3;
+  const at = s.atMs ?? NOW - 2 * HOUR;
   return {
     relPath,
     name: relPath.slice(relPath.lastIndexOf("/") + 1).replace(/\.[^.]+$/, ""),
@@ -56,7 +61,7 @@ function page(relPath: string, s: PageSpec = {}): WikiListing {
     ...(s.seriesLabel ? { seriesLabel: s.seriesLabel } : {}),
     ...(s.project ? { project: s.project } : {}),
     ...(s.movesYou ? { movesYou: s.movesYou } : {}),
-    work: { sinceMs: NOW - 8 * 24 * HOUR, state: "F", focusMs: NOW - 2 * HOUR, events: [[NOW - 2 * HOUR, edits, "focus"]] },
+    work: { sinceMs: NOW - 8 * 24 * HOUR, state: "F", focusMs: at, events: [[at, edits, "focus"]] },
   } as WikiListing;
 }
 
@@ -166,6 +171,15 @@ describe("evidence kinds", () => {
     expect(g.groups[0]!.witnesses.map((x) => x.kind)).toEqual(["series", "related", "issue"]);
   });
 
+  test("a reciprocal related: pair is one witness, on the child and on the group", () => {
+    const { pages, threads } = kinds();
+    const w = work(pages, threads, { related: [["plans/a.md", "plans/c.md"], ["plans/c.md", "plans/a.md"]] });
+    const g = run(w, pages, { toggles: { ...NONE, related: true } });
+    expect(childKeys(g)[0]).toEqual(["plans/a.md", "plans/c.md"]);
+    expect(g.groups[0]!.children[1]!.witnesses).toEqual([{ kind: "related", from: "plans/a.md", to: "plans/c.md" }]);
+    expect(g.groups[0]!.witnesses).toEqual([{ kind: "related", from: "plans/a.md", to: "plans/c.md" }]);
+  });
+
   test("a related: entry counts in either direction", () => {
     const { pages, threads } = kinds();
     const w = work(pages, threads, { related: [["plans/a.md", "plans/c.md"]] });
@@ -250,6 +264,35 @@ describe("order (D16)", () => {
     const today = openThreadCards(w.threads, pages, INERT, [], "plans/d.md", NOW).map((c) => c.key);
     const g = run(w, pages, { stop: "threads", pin: "plans/d.md" });
     expect(g.groups.map((x) => x.anchorKey)).toEqual(today);
+  });
+  test("a client clock behind asOfMs: the rail and the model score at asOfMs, in the server's order", () => {
+    // At NOW, a's event (NOW+9h) clamps to age 0 and b's larger one wins; at
+    // asOfMs, a is 1h old and b 10h, so a wins — the server's order.
+    const asOf = NOW + 10 * HOUR;
+    const pages = [
+      page("p/a.md", { edits: 3, atMs: NOW + 9 * HOUR }),
+      page("p/b.md", { edits: 3.3, atMs: NOW }),
+      page("p/c1.md", { edits: 1, atMs: NOW + 9 * HOUR, title: "C one" }),
+      page("p/c2.md", { edits: 1.1, atMs: NOW, title: "C two" }),
+    ];
+    const threads = [thread("p/a.md", ["p/a.md"]), thread("p/b.md", ["p/b.md"]), thread("p/c1.md", ["p/c1.md", "p/c2.md"])];
+    const workOf = (rel: string) => pages.find((p) => p.relPath === rel)?.work;
+    const scores = (at: number) => threads.map((t) => threadScore(t, workOf, at));
+    expect(scores(asOf)[0]!).toBeGreaterThan(scores(asOf)[1]!);
+    expect(scores(NOW)[0]!).toBeLessThan(scores(NOW)[1]!);
+    const w: IndexWork = { ...work(pages, threads), asOfMs: asOf };
+    const input = railInputFor(
+      { allPages: pages, projects: {}, activityWeights: DEFAULT_ACTIVITY_WEIGHTS, workedGate: null, work: w },
+      { mode: "updated", now: NOW, filters: INERT, showRetired: false, familiesOn: false, pins: [], openFolds: [] },
+    );
+    const rail = input.threads!.map((c) => [c.key, c.name, c.focus.map((p) => p.relPath)]);
+    expect(rail).toEqual([
+      ["p/a.md", "p/a.md", ["p/a.md"]],
+      ["p/b.md", "p/b.md", ["p/b.md"]],
+      ["p/c1.md", "C one", ["p/c1.md", "p/c2.md"]],
+    ]);
+    const g = run(w, pages, { stop: "threads" });
+    expect(g.groups.map((x) => [x.anchorKey, x.name, x.children[0]!.owned.map((p) => p.relPath)])).toEqual(rail);
   });
 });
 
@@ -487,17 +530,33 @@ describe("Sessions (D19)", () => {
     return { pages, w: work(pages, threads, { rows }) };
   }
 
-  test("newest session first, then ref; a page is a row of the first card holding it and an also-in link after", () => {
+  test("newest session first, then id; a page is a row of the first card holding it and an also-in link after", () => {
     const { pages, w } = sessionFixture();
     const g = run(w, pages, { stop: "sessions" });
     expect(g.stop).toBe("sessions");
     expect(g.groups).toEqual([]);
     expect(g.sessions.map((c) => [c.ref, c.title, c.rows.map((p) => p.relPath), c.alsoIn.map((p) => p.relPath), c.touched.map((p) => p.relPath)])).toEqual([
-      ["claude-code:new", "Newer session", ["p/a.md"], [], ["p/t.md"]],
       ["opencode:aaa", "Tied session", ["p/b.md"], [], []],
+      ["claude-code:new", "Newer session", ["p/a.md"], [], ["p/t.md"]],
       ["claude-code:old", "Older session", [], ["p/a.md", "p/b.md"], []],
     ]);
-    expect(g.sessions[0]!.foldKey).toBe("session:claude-code:new");
+    expect(g.sessions[1]!.foldKey).toBe("session:claude-code:new");
+  });
+
+  test("sessions tied on last activity order by id, not by the provider-prefixed ref", () => {
+    const pages = [page("p/x.md")];
+    const sa = { id: "a", provider: "opencode", first: NOW - 6 * HOUR, last: NOW - 2 * HOUR, title: "Session a" };
+    const sb = { id: "b", provider: "claude", first: NOW - 6 * HOUR, last: NOW - 2 * HOUR, title: "Session b" };
+    const threads = [thread("p/x.md", ["p/x.md"], { sessions: [sa, sb] })];
+    const rows: WorkContribution[] = [
+      ["claude-code:b", "p/x.md", "p/x.md", "focus", 3, NOW - 6 * HOUR, NOW - 2 * HOUR],
+      ["opencode:a", "p/x.md", "p/x.md", "focus", 3, NOW - 6 * HOUR, NOW - 2 * HOUR],
+    ];
+    const cards = workSessionCards(work(pages, threads, { rows }), pages, NOW);
+    expect(cards.map((c) => [c.ref, c.rows.map((p) => p.relPath), c.alsoIn.map((p) => p.relPath)])).toEqual([
+      ["opencode:a", ["p/x.md"], []],
+      ["claude-code:b", [], ["p/x.md"]],
+    ]);
   });
 
   test("a card holding only also-in links stays; the projection drops what the facets empty", () => {

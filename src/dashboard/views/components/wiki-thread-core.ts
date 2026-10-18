@@ -107,6 +107,13 @@ export function threadPinAnchor(
   return t ? newestFocusPage(t, byRel) : null;
 }
 
+/** The instant the work threads rank at: never before `asOfMs`, where an
+ *  event's age would clamp at 0 (`eventRaw`) and could reorder threads away
+ *  from the server's order. The rail and the grouping model both use it. */
+export function workGroupingInstant(now: number, asOfMs: number | undefined): number {
+  return typeof asOfMs === "number" && Number.isFinite(asOfMs) ? Math.max(now, asOfMs) : now;
+}
+
 /** A thread's order score at `now` over the full listing's work — the score
  *  `openThreadCards` orders its cards by and the grouping model orders its
  *  units by (D16). `byRel` is keyed on `normalizeRel`. */

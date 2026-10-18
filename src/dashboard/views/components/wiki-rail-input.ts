@@ -38,7 +38,14 @@ import {
 } from "./wiki-recents.ts";
 import { normalizeRel } from "./wiki-nav.ts";
 import { WORK_WINDOW_MS, type IndexWork, type WorkThread } from "../../../wiki/work-focus.ts";
-import { newestFocusPage, threadHoldsPin, threadName, threadRankScore, usableThreads } from "./wiki-thread-core.ts";
+import {
+  newestFocusPage,
+  threadHoldsPin,
+  threadName,
+  threadRankScore,
+  usableThreads,
+  workGroupingInstant,
+} from "./wiki-thread-core.ts";
 
 export { threadName, threadPinAnchor, usableThreads } from "./wiki-thread-core.ts";
 
@@ -51,7 +58,7 @@ export interface RailWikiFacts {
   workedGate: WorkedGate | null;
   /** The work threads (`/api/wiki/pages`' `work`); absent or null with no
    *  sessions memo, which renders no section (D11). */
-  work?: Pick<IndexWork, "threads"> | null;
+  work?: (Pick<IndexWork, "threads"> & Partial<Pick<IndexWork, "asOfMs">>) | null;
 }
 
 /** What this viewer has chosen. */
@@ -81,7 +88,8 @@ export interface RailViewer {
  *    dropped. A query renders no section at all.
  *  - Order (D6), name and page OWNERSHIP are decided over `allPages`, the full
  *    listing, so neither Show retired nor a facet moves or renames a card.
- *    Order is `threadScore` at the anchored `now` — except the PINNED thread
+ *    Order is `threadScore` at `workGroupingInstant(now, asOfMs)` — the
+ *    grouping model's instant, so the order is the server's — except the PINNED thread
  *    (the one holding `pin`, `threadHoldsPin`, D7), which renders first. At most
  *    `THREAD_CARDS_MAX` cards, cut after the drops.
  *  - The first card defaults OPEN, so it offers the `closed:` spelling (as the
@@ -99,6 +107,7 @@ export function openThreadCards(
   pin: string | null,
   now: number,
   allPages: readonly WikiListing[] = pages,
+  asOfMs?: number,
 ): RailThreadCard[] {
   const usable = usableThreads(threads);
   if (!usable.length || !railSectionsVisible(filters)) return [];
@@ -106,14 +115,17 @@ export function openThreadCards(
   for (const p of allPages) byRel.set(normalizeRel(p.relPath), p);
   const visible = new Set(filterPages(pages as WikiListing[], filters).map((p) => normalizeRel(p.relPath)));
   const pinKey = pin ? normalizeRel(pin) : null;
-  const term = (p: WikiListing) => pageWorkTerm(p, now);
+  // Score, ownership and names at the grouping model's instant; the created
+  // window stays on the reader's `now`.
+  const at = workGroupingInstant(now, asOfMs);
+  const term = (p: WikiListing) => pageWorkTerm(p, at);
   const byTerm = (a: WikiListing, b: WikiListing) =>
     term(b) - term(a) || (normalizeRel(a.relPath) < normalizeRel(b.relPath) ? -1 : 1);
   let pinTaken = false;
   const ranked = usable
     .map((t) => ({
       t,
-      score: threadRankScore(t, byRel, now),
+      score: threadRankScore(t, byRel, at),
       holdsPin: !!pinKey && threadHoldsPin(t, byRel, pinKey),
     }))
     .map((x) => {
@@ -215,7 +227,7 @@ export function railInputFor(wiki: RailWikiFacts, viewer: RailViewer): RailInput
   // The work-thread cards (D19): decided ONCE, here, so the pages an OPEN card
   // lifts are exactly the ones Activity ranks without. No sessions memo ⇒ no
   // cards ⇒ an empty exclude set ⇒ today's ranking (D11).
-  const threads = openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages);
+  const threads = openThreadCards(wiki.work?.threads, pool, filters, viewer.openFolds, viewer.threadPin ?? null, now, wiki.allPages, wiki.work?.asOfMs);
   const exclude = new Set<string>();
   for (const c of threads) if (c.open) for (const p of c.focus) exclude.add(normalizeRel(p.relPath));
   return {
