@@ -605,6 +605,8 @@ describe("a malformed evidence part", () => {
     ["complete: not a boolean", (ev: Record<string, any>) => (ev.relations.complete = "yes")],
     ["incomplete with no reason", (ev: Record<string, any>) => (ev.relations.complete = false)],
     ["relations: not an object", (ev: Record<string, any>) => (ev.relations = [])],
+    ["related: a three-entry tuple", (ev: Record<string, any>) => ev.relations.related.push(["plans/a.md", "plans/b.md", "plans/c.md"])],
+    ["reasons: a non-string reason", (ev: Record<string, any>) => Object.assign(ev.relations, { complete: false, reasons: [3] })],
   ])("relations %s: Threads with evidence-unreadable, Sessions untouched", (_, edit) => {
     const { pages, w } = edited(edit);
     const g = run(w, pages, { toggles: { ...ALL, series: false } });
@@ -629,6 +631,9 @@ describe("a malformed evidence part", () => {
     ["a row of a cut thread", (ev: Record<string, any>) => Object.assign(ev.contributions, { complete: false, reasons: ["contributions-cap"], cut: ["plans/a.md"] })],
     ["a cut without the cap reason", (ev: Record<string, any>) => (ev.contributions.cut = ["plans/b.md"])],
     ["contributions: absent", (ev: Record<string, any>) => delete ev.contributions],
+    ["a row with a numeric page", (ev: Record<string, any>) => (ev.contributions.rows[0][1] = 3)],
+    ["a row with non-numeric edits", (ev: Record<string, any>) => (ev.contributions.rows[0][4] = "many")],
+    ["cut: a non-string entry", (ev: Record<string, any>) => Object.assign(ev.contributions, { complete: false, reasons: ["contributions-cap"], cut: [3] })],
   ])("contributions %s: grouping stays, Sessions and every split unavailable", (_, edit) => {
     const { pages, w } = edited(edit);
     const g = run(w, pages);
