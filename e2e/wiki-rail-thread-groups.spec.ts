@@ -10,7 +10,7 @@
  * read-only wiki, and the two new headers' width table at the 260 and 300 px
  * rails in both themes.
  *
- * ONE muninn, THREE temp wikis, ONE fake `node:http` claude-usage:
+ * ONE muninn, FIVE temp wikis, ONE fake `node:http` claude-usage:
  *
  *  - `wsgroups` — eleven sessions, one focus page each, so eleven threads.
  *    `alpha-1`…`alpha-4` share `series: alpha` (a SERIES group of four, the
@@ -23,6 +23,8 @@
  *  - `wsgplain` — the ledger 404s the sessions form: no section (D11).
  *  - `wsgbroad` — five threads in one series `big` (`big-1`…`big-5`): a group
  *    whose pinned fifth child shows past the first three beside `+ 1 more`.
+ *  - `wsgfocus` — the focus table's wiki: a series and a thread whose keys
+ *    carry a `"` (see the last describe block).
  *
  * Synthetic names only (D11 of the plan: no NAV data). No model calls, and the
  * only writes are the reader's own localStorage.
@@ -73,8 +75,19 @@ const FOCUS = [...A, REL1, REL2, ...SOLO];
 const BIG = [1, 2, 3, 4, 5].map((i) => `plans/big-${i}.md`);
 /** Five pages the first two `big` sessions only touch: a shared context past three. */
 const BCTX = [1, 2, 3, 4, 5].map((i) => `notes/bctx-${i}.md`);
+/** `wsgfocus` (the focus-restore table): a series whose name and a lone
+ *  thread whose path carry a `"`, so every key the restore looks up needs
+ *  `CSS.escape`. Five series threads (`+ 2 more`), three lone ones. */
+const FOCUSW = "wsgfocus";
+const FSERIES = 'q"t';
+const FQ = [1, 2, 3, 4, 5].map((i) => `plans/fq-${i}.md`);
+const FLONE = ['notes/l"one.md', "notes/lone-2.md", "notes/lone-3.md"];
+const FFOCUS = [...FQ, ...FLONE];
 /** The focus pages a wiki's ledger serves, newest first. */
-const focusOf = (wiki: string | undefined) => (wiki === GROUPS || wiki === RO ? FOCUS : wiki === BROAD ? BIG : []);
+const focusOf = (wiki: string | undefined) =>
+  wiki === GROUPS || wiki === RO ? FOCUS : wiki === BROAD ? BIG : wiki === FOCUSW ? FFOCUS : [];
+/** Pages the first two sessions only touch (a shared context past three). */
+const ctxOf = (wiki: string | undefined) => (wiki === BROAD || wiki === FOCUSW ? BCTX : []);
 
 const roots: Record<string, string> = {};
 let server: ChildProcess | undefined;
@@ -95,7 +108,7 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
       const at = NOW - (i + 1) * HOUR;
       const files: [string, number][] = [[p, 5]];
       if (live && i < 2) files.push([CTX, 1]);
-      if (wiki === BROAD && i < 2) for (const c of BCTX) files.push([c, 1]);
+      if (i < 2) for (const c of ctxOf(wiki)) files.push([c, 1]);
       return {
         id: `g${i}`,
         provider: "claude",
@@ -114,7 +127,7 @@ function ledgerAnswer(res: import("node:http").ServerResponse, url: URL): void {
   const until = url.searchParams.get("until");
   if (until) {
     // ctx.md had a write before the window, so the sessions only TOUCH it.
-    const pre = live ? [{ p: CTX, w: NOW - 20 * DAY, s: 1 }] : wiki === BROAD ? BCTX.map((p) => ({ p, w: NOW - 20 * DAY, s: 1 })) : [];
+    const pre = live ? [{ p: CTX, w: NOW - 20 * DAY, s: 1 }] : ctxOf(wiki).map((p) => ({ p, w: NOW - 20 * DAY, s: 1 }));
     return json({ root, pages: pre, pageCount: pre.length, bulk: 10, limit: 5000, truncated: false, until: Number(until) });
   }
   const pages = focus.map((p, i) => ({ p, w: NOW - (i + 1) * HOUR, s: 1 }));
@@ -178,6 +191,24 @@ async function makeBroadRoot(): Promise<void> {
     const stamp = new Date(NOW - 20 * DAY);
     await utimes(abs, stamp, stamp);
   }
+}
+
+async function makeFocusRoot(): Promise<void> {
+  const root = await mkdtemp(path.join(tmpdir(), `muninn-e2e-groups-${FOCUSW}-`));
+  roots[FOCUSW] = root;
+  await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ activity: { agePenalty: 0, hubPenalty: 0, planBoost: 0, rows: 8 } }), "utf8");
+  const write = async (rel: string, fm: string[], ago: number) => {
+    const abs = path.join(root, rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, ["---", ...fm, "created: 2025-01-01", "---", "", "Body.", ""].join("\n"), "utf8");
+    const stamp = new Date(NOW - ago);
+    await utimes(abs, stamp, stamp);
+  };
+  for (const [i, rel] of FQ.entries()) await write(rel, [`title: Quote ${i + 1}`, `series: '${FSERIES}'`], (i + 1) * HOUR);
+  for (const [i, rel] of FLONE.entries()) await write(rel, [`title: Lone ${i + 1}`], (6 + i) * HOUR);
+  for (const [i, rel] of BCTX.entries()) await write(rel, [`title: Focus context ${i + 1}`], 20 * DAY);
+  // Bookkeeping pages: the rail's foldable section header.
+  for (const rel of ["index.md", "log.md"]) await write(rel, [`title: ${rel}`], 30 * DAY);
 }
 
 const cards = (page: Page) => page.locator("#wikiList > .wiki-thread-card");
@@ -309,6 +340,7 @@ test.beforeAll(async () => {
   await makeRoot(RO);
   await makeRoot(PLAIN);
   await makeBroadRoot();
+  await makeFocusRoot();
   ledger = await startLedger();
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -336,7 +368,7 @@ test.beforeAll(async () => {
     if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
     await new Promise((r) => setTimeout(r, 400));
   }
-  for (const wiki of [GROUPS, RO, BROAD]) {
+  for (const wiki of [GROUPS, RO, BROAD, FOCUSW]) {
     const warm = Date.now() + 20_000;
     for (;;) {
       const b = (await (await fetch(`${BASE}/api/wiki/pages?wiki=${wiki}&refresh=1`)).json()) as { work?: { threads: unknown[]; evidence?: unknown } };
@@ -1122,4 +1154,268 @@ test.describe("Wiki rail: grouped work threads", () => {
         if (dir) await pane.screenshot({ path: path.join(dir, `groups-menu-${rail}-${scheme}.png`) });
       }
   });
+});
+
+
+/**
+ * Keep focus after updates, by enumeration (fix round 3, the class check). The
+ * invariant: a `#wikiList` repaint never moves focus by itself; when the swap
+ * dropped focus from a rail control, the same control, found again by its own
+ * key, gets it back. One row per repaint cause × control; a row passes when
+ * focus ends on the control it started on (or, for the Group menu's own edit,
+ * on the item that handler focuses) and an options pane opened without moving
+ * focus is still open. Clicks are JS `.click()`s, which move no focus — Safari's
+ * click on a button.
+ *
+ * The wiki is `wsgfocus`: its series name and one thread's path carry a `"`,
+ * so every lookup needs `CSS.escape`. The series group is stored open, so it
+ * stays open when a pin moves another card first; that move also flips its
+ * fold key between `closed:group:…` and `group:…`.
+ */
+test.describe("Wiki rail: focus after a repaint", () => {
+  const QGROUP = `group:series:${FSERIES}`;
+  /** A CSS string literal: JSON's escapes are CSS's for `"` and `\`. */
+  const lit = (v: string) => JSON.stringify(v);
+  const qCard = (p: Page) => p.locator(`#wikiList > .wiki-thread-card[data-thread-group=${lit(QGROUP)}]`);
+  const qBody = (p: Page) => p.locator(`.wiki-thread-gbody[data-thread-group-body=${lit(QGROUP)}]`);
+  const loneCard = (p: Page, rel: string) => p.locator(`#wikiList > .wiki-thread-card[data-thread=${lit(`thread:${rel}`)}]`);
+
+  type Control = { name: string; menu?: boolean; loc: (p: Page) => ReturnType<Page["locator"]> };
+  const CONTROLS: Control[] = [
+    { name: "Group button", loc: (p) => groupBtn(p) },
+    { name: "stop item", menu: true, loc: (p) => p.locator('#wikiList [data-work-stop="areas"]') },
+    { name: "evidence item", menu: true, loc: (p) => p.locator('#wikiList [data-work-evidence="series"]') },
+    { name: "group fold", loc: (p) => qCard(p).locator(".wiki-thread-fold").first() },
+    { name: "child fold", loc: (p) => qBody(p).locator(".wiki-thread-card").nth(1).locator(".wiki-thread-fold") },
+    { name: "thread fold", loc: (p) => loneCard(p, FLONE[0]!).locator(".wiki-thread-fold") },
+    { name: "group 📌", loc: (p) => qCard(p).locator(".wiki-thread-pin").first() },
+    { name: "child 📌", loc: (p) => qBody(p).locator(".wiki-thread-card").nth(1).locator(".wiki-thread-pin") },
+    { name: "thread 📌", loc: (p) => loneCard(p, FLONE[0]!).locator(".wiki-thread-pin") },
+    { name: "+ N more threads", loc: (p) => qBody(p).locator(".wiki-thread-more") },
+    { name: "shared context +N", loc: (p) => qBody(p).locator(".wiki-thread-ctx-more") },
+    { name: "Activity series fold", loc: (p) => p.locator("#wikiList .wiki-list-group.series .wiki-group-fold").first() },
+    { name: "Bookkeeping fold", loc: (p) => p.locator("#wikiList .wiki-sec-fold").first() },
+    { name: "search box (outside)", loc: (p) => p.locator("#wikiSearch") },
+    { name: "options button (outside)", loc: (p) => p.locator("#wikiOptionsBtn") },
+  ];
+
+  /** The focused element as `kind:key`, a fold under either spelling. */
+  const focusKey = (p: Page) =>
+    p.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body) return "BODY";
+      if (el.id) return `#${el.id}`;
+      const a = (n: string) => el.getAttribute(n);
+      for (const [attr, kind] of [
+        ["data-work-stop", "stop"],
+        ["data-work-evidence", "evidence"],
+        ["data-thread-more", "more"],
+        ["data-thread-ctx-more", "ctx"],
+      ] as const) {
+        if (a(attr) !== null) return `${kind}:${a(attr)}`;
+      }
+      if (a("data-fold-key") !== null) return `fold:${a("data-fold-key")!.replace(/^closed:/, "")}`;
+      if (el.hasAttribute("data-thread-pin")) {
+        const c = el.closest(".wiki-thread-card")!;
+        return c.hasAttribute("data-thread-group") ? `pin:${c.getAttribute("data-thread-group")}` : `pin:${c.getAttribute("data-thread")}`;
+      }
+      if (el.hasAttribute("data-work-group-menu")) return "group-button";
+      return `${el.tagName}.${el.className}`;
+    });
+  const optionsOpen = (p: Page) => p.evaluate(() => !(document.getElementById("wikiOptions") as HTMLElement).hidden);
+  const jsClick = (p: Page, sel: string) => p.evaluate((s) => (document.querySelector(s) as HTMLElement).click(), sel);
+  const foldKeyOf = (p: Page) => qCard(p).locator(".wiki-thread-fold").first().getAttribute("data-fold-key");
+  const firstCard = (p: Page) => cards(p).first().evaluate((e) => e.getAttribute("data-thread-group") ?? e.getAttribute("data-thread"));
+
+  async function setMenu(p: Page, open: boolean): Promise<void> {
+    if ((await menu(p).count()) === (open ? 1 : 0)) return;
+    await jsClick(p, "#wikiList [data-work-group-menu]");
+    await expect(menu(p)).toHaveCount(open ? 1 : 0);
+  }
+  const armRepaint = (p: Page) =>
+    p.evaluate(() => {
+      const w = window as unknown as { __rp: boolean; __rpObs?: MutationObserver };
+      w.__rpObs?.disconnect();
+      w.__rp = false;
+      w.__rpObs = new MutationObserver(() => (w.__rp = true));
+      w.__rpObs.observe(document.getElementById("wikiList")!, { childList: true });
+    });
+  const repaintSeen = (p: Page) => p.evaluate(() => (window as unknown as { __rp: boolean }).__rp);
+  /** Wait for a repaint, then until the rail has been still for 300 ms. */
+  async function settle(p: Page, needRepaint: boolean): Promise<boolean> {
+    let seen = !needRepaint;
+    for (let t = Date.now(); !seen && Date.now() - t < 10_000; ) {
+      seen = await repaintSeen(p);
+      if (!seen) await new Promise((r) => setTimeout(r, 50));
+    }
+    for (let quiet = false; !quiet; ) {
+      await armRepaint(p);
+      await new Promise((r) => setTimeout(r, 300));
+      quiet = !(await repaintSeen(p));
+    }
+    return seen;
+  }
+
+  type Cause = {
+    name: string;
+    /** The control the handler itself focuses after its render; it wins. */
+    explicit?: string;
+    /** The cause is a click outside the open menu, which closes it: menu items are n/a. */
+    closesMenu?: boolean;
+    /** No options pane for this cause (the handler's own focus move closes it, by design). */
+    noPane?: boolean;
+    /** Checked after the cause: it really reordered the cards and flipped the group's fold key. */
+    reorders?: boolean;
+    clock?: boolean;
+    setup?: (p: Page) => Promise<void>;
+    prep?: (p: Page, i: number) => Promise<void>;
+    fire: (p: Page, i: number) => Promise<void>;
+  };
+
+  const storageEvent = (p: Page, key: string, value: string | null) =>
+    p.evaluate(
+      ([k, v]) => {
+        if (v === null) localStorage.removeItem(k!);
+        else localStorage.setItem(k!, v);
+        window.dispatchEvent(new StorageEvent("storage", { key: k, newValue: v, storageArea: localStorage }));
+      },
+      [key, value] as const,
+    );
+  /** A held `/api/wiki/page` load: `entered` once the request is in, `release()` lets it through. */
+  type Gate = { entered: Promise<void>; enter: () => void; wait: Promise<void>; release: () => void; fail: boolean };
+  let gate: Gate | null = null;
+  const holdPageLoads = (p: Page) =>
+    p.route(
+      (u) => u.pathname === "/api/wiki/page",
+      async (route) => {
+        const g = gate;
+        if (!g) return route.continue();
+        g.enter();
+        await g.wait;
+        return g.fail ? route.fulfill({ json: { error: "Page not found (test)" } }) : route.continue();
+      },
+    );
+  function newGate(fail: boolean): void {
+    const g = { fail } as Gate;
+    g.entered = new Promise<void>((r) => (g.enter = r));
+    g.wait = new Promise<void>((r) => (g.release = r));
+    gate = g;
+  }
+  async function heldLoad(p: Page, i: number, fail: boolean): Promise<void> {
+    newGate(fail);
+    await jsClick(p, `#wikiList .wiki-list-item[data-relpath=${lit(BCTX[1 + (i % 2)]!)}]`);
+    await gate!.entered;
+  }
+
+  let renamed = 0;
+  const CAUSES: Cause[] = [
+    {
+      name: "storage: another tab's grouping edit",
+      fire: (p, i) => storageEvent(p, workGroupKey(FOCUSW), JSON.stringify({ version: 1, evidence: { issue: i % 2 === 1 } })),
+    },
+    {
+      name: "storage: another tab's pin reorders the cards",
+      reorders: true,
+      fire: (p, i) => storageEvent(p, threadPinKey(FOCUSW), i % 2 === 0 ? FLONE[2]! : null),
+    },
+    {
+      name: "window-focus refetch",
+      clock: true,
+      setup: (p) =>
+        p.route(
+          (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === FOCUSW,
+          async (route) => {
+            const res = await route.fetch();
+            const json = (await res.json()) as { pages: { relPath: string; title: string }[] };
+            for (const pg of json.pages) if (pg.relPath === BCTX[4]) pg.title = `Focus context 5 (${renamed})`;
+            await route.fulfill({ response: res, json });
+          },
+        ),
+      fire: async (p) => {
+        renamed++;
+        await p.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+        await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+      },
+    },
+    {
+      name: "popstate: Back from a page",
+      prep: async (p) => {
+        await jsClick(p, `#wikiList .wiki-list-item[data-relpath=${lit(BCTX[0]!)}]`);
+        await expect(p.locator("#articleWrap .wiki-article")).toHaveCount(1);
+        await settle(p, false);
+      },
+      fire: (p) => p.evaluate(() => history.back()),
+    },
+    { name: "a slow page load lands", setup: holdPageLoads, prep: (p, i) => heldLoad(p, i, false), fire: async () => gate!.release() },
+    { name: "a slow page load fails", setup: holdPageLoads, prep: (p, i) => heldLoad(p, i, true), fire: async () => gate!.release() },
+    {
+      name: "the Group menu's own edit",
+      explicit: 'evidence:issue',
+      noPane: true,
+      prep: (p) => setMenu(p, true),
+      fire: (p) => jsClick(p, '#wikiList [data-work-evidence="issue"]'),
+    },
+    { name: "a click on another fold", closesMenu: true, fire: (p) => jsClick(p, `#wikiList [data-thread=${lit(`thread:${FLONE[1]}`)}] .wiki-thread-fold`) },
+    {
+      name: "a click on another 📌 reorders the cards",
+      closesMenu: true,
+      reorders: true,
+      fire: (p) => jsClick(p, `#wikiList [data-thread=${lit(`thread:${FLONE[2]}`)}] .wiki-thread-pin`),
+    },
+  ];
+
+  type Row = { cause: string; control: string; before: string; after: string; pane: boolean | null; ok: boolean; note: string };
+  const tableDir = process.env.WIKI_FOCUS_TABLE;
+
+  for (const cause of CAUSES) {
+    test(`focus table: ${cause.name}`, async ({ page }) => {
+      test.setTimeout(120_000);
+      await page.addInitScript(([k, v]) => {
+        if (localStorage.getItem("__seeded")) return;
+        localStorage.setItem("__seeded", "1");
+        localStorage.setItem(k!, v!);
+      }, [foldsKey(FOCUSW), JSON.stringify([QGROUP])] as const);
+      if (cause.clock) await page.clock.install();
+      await cause.setup?.(page);
+      await openReader(page, FOCUSW);
+      expect(await foldKeyOf(page)).toBe(`closed:${QGROUP}`);
+      const rows: Row[] = [];
+      for (const [i, control] of CONTROLS.entries()) {
+        const base = { cause: cause.name, control: control.name };
+        if (control.menu && cause.closesMenu) {
+          rows.push({ ...base, before: "-", after: "-", pane: null, ok: true, note: "n/a: the click closes the menu" });
+          continue;
+        }
+        await cause.prep?.(page, i);
+        await setMenu(page, !!control.menu || cause.explicit !== undefined);
+        await control.loc(page).focus();
+        // A click on the options button closes an open Group menu, so a menu item never sits beside an open pane.
+        const pane = !cause.noPane && !control.menu;
+        if (pane) await jsClick(page, "#wikiOptionsBtn");
+        const before = await focusKey(page);
+        expect(before, `${control.name} took focus`).not.toBe("BODY");
+        if (pane) expect(await optionsOpen(page)).toBe(true);
+        const orderBefore = [await firstCard(page), await foldKeyOf(page)];
+        await armRepaint(page);
+        await cause.fire(page, i);
+        const seen = await settle(page, true);
+        const after = await focusKey(page);
+        const paneAfter = pane ? await optionsOpen(page) : null;
+        const notes: string[] = [];
+        if (!seen) notes.push("no repaint");
+        if (cause.reorders) {
+          const orderAfter = [await firstCard(page), await foldKeyOf(page)];
+          if (orderAfter[0] === orderBefore[0] || orderAfter[1] === orderBefore[1]) notes.push(`no reorder ${JSON.stringify(orderAfter)}`);
+        }
+        const want = cause.explicit ?? before;
+        if (after !== want) notes.push(`focus on ${after}, want ${want}`);
+        if (pane && !paneAfter) notes.push("pane closed");
+        rows.push({ ...base, before, after, pane: paneAfter, ok: notes.length === 0, note: notes.join("; ") });
+        if (paneAfter) await jsClick(page, "#wikiOptionsBtn");
+        await setMenu(page, false);
+      }
+      if (tableDir) await writeFile(path.join(tableDir, `${cause.name.replace(/[^a-z0-9]+/gi, "-")}.json`), JSON.stringify(rows, null, 1));
+      expect(rows.filter((r) => !r.ok).map((r) => `${r.control}: ${r.note}`)).toEqual([]);
+    });
+  }
 });

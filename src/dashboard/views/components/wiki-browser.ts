@@ -1620,15 +1620,19 @@ function forcedOpenWhy(what: "group" | "section"): string {
   return filters.jira ? "the Jira filter shows every matching page" : `the open page is in this ${what}`;
 }
 
-/** True while `renderList` puts focus back after a background repaint. */
+/** True while `renderList` puts focus back on the rail control its repaint replaced. */
 let restoringRailFocus = false;
 
 /** `cause: "storage"` is a repaint after another tab changed the pin: it runs
  *  no pin step, so it never writes (the no-loop rule, `threadPinStep`).
- *  `background` is a repaint no key or click in this tab asked for (a storage
- *  event, a listing refetch): only it puts focus back on the rail control it
- *  replaced. */
-function renderList(cause: "storage" | "local" = "local", background = cause === "storage"): void {
+ *
+ *  Focus (spec "Keep focus after updates"): a repaint never moves focus by
+ *  itself. When the swap below drops focus from a rail control, the same
+ *  control, found again by its own key, gets it back; otherwise focus is left
+ *  alone. No cause gate: every caller (listed in `src/wiki/CLAUDE.md`, Work
+ *  threads) can land while a rail control holds focus. A handler that focuses
+ *  something after its own render still wins. */
+function renderList(cause: "storage" | "local" = "local"): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -2085,15 +2089,11 @@ function renderList(cause: "storage" | "local" = "local", background = cause ===
   // Retired pages held back under these facets: the empty rail offers them.
   const heldBack = retiredHeldBack();
   const focusedEl = document.activeElement;
-  const keptFocus = background ? railControlSelector(focusedEl) : null;
+  const keptFocus = railControlSelector(focusedEl);
   listEl.innerHTML = railListHtml(html, retiredRevealHtml(heldBack));
-  // A background repaint swaps out the rail control under the reader's focus:
-  // put it back on the same control. Not for a key's or click's own repaint —
-  // in Safari a click focuses nothing, so a restore there moved focus away from
-  // what the reader clicked.
   if (keptFocus && (!document.activeElement || document.activeElement === document.body)) {
-    // The same control as before the repaint: a popover that closes on focus
-    // leaving it (the options pane) must not read this as the reader moving.
+    // The control focus was already on: a popover that closes on focus leaving
+    // it (the options pane) must not read this as the reader moving.
     restoringRailFocus = true;
     try {
       refocusRailControl(keptFocus, focusedEl!);
@@ -5085,9 +5085,12 @@ function refocusRailControl(selector: string, pressed: Element): void {
   pick?.focus({ preventScroll: true });
 }
 
-/** The work-thread control `el` is (the Group button, a menu item, `+ N more
- *  threads`, the shared context's `+N`, a fold, a 📌), as a selector by its own
- *  key so it finds the control again after a repaint; null for anything else. */
+/** The rail control `el` is, as a selector by its own key that finds it again
+ *  after a repaint; null for anything else (a page row, a link). Covers the
+ *  Group button and its menu items, `+ N more threads`, the shared context's
+ *  `+N`, a 📌 (by its card's key, never by position), and every
+ *  `[data-fold-key]` fold in the rail: thread, group and child cards, series
+ *  and folder groups, Bookkeeping, under either spelling. */
 function railControlSelector(el: Element | null): string | null {
   if (!(el instanceof HTMLElement) || !el.closest("#wikiList")) return null;
   const at = (attr: string, v: string) => `#wikiList [${attr}="${CSS.escape(v)}"]`;
@@ -8443,7 +8446,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
  *  non-event as any name the listing doesn't carry. */
 function adoptPagesAndRender(applied: PendingPages): void {
   adoptPagesDataAndFacets(applied);
-  renderList("local", true);
+  renderList();
   refreshStartBody();
 }
 
