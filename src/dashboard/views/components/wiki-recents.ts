@@ -807,7 +807,8 @@ export interface RailGroupCard {
   pinned: boolean;
   /** What the group's 📌 stores: the anchor child's `pinAnchor`. */
   pinAnchor: string;
-  /** False when the facets hid the anchor and another child is visible. */
+  /** False only when an active facet hid the anchor's rows and another child
+   *  is visible (`WorkGroupView.anchorVisible`). */
   anchorVisible: boolean;
   /** Visible children (`N threads`). */
   threads: number;

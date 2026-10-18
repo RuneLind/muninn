@@ -8,6 +8,11 @@
  * defaults are computed at read time (`resolveWorkGroupPrefs`) and are never
  * held or written. A record exists only after an explicit edit.
  *
+ * It is also held VERBATIM: a field, evidence key or list entry this build
+ * does not understand is kept and written back untouched, so an old tab and a
+ * new tab never erase each other's data, and a record of another version is
+ * never written over (`foreignWorkGroupRecord`).
+ *
  * The table is the thread pin's (`threadPinStep`, `wiki-recents.ts`) over the
  * whole record: records compare by a canonical serialization, a `storage`
  * event adopts without writing, a render adopts a record it did not last read
@@ -22,7 +27,6 @@ import {
   WORK_GROUP_PREFS_VERSION,
   type WorkGroupEvidenceToggles,
   type WorkGroupPrefs,
-  type WorkGroupSplit,
   type WorkGroupStop,
 } from "./wiki-work-group-prefs.ts";
 
@@ -38,23 +42,30 @@ export function storageEventTouchesWorkGroup(key: string | null, wiki: string): 
   return key === null || key === workGroupKey(wiki);
 }
 
-/** The stored record: only the fields a reader set, each valid. */
+/** The stored record as stored: the fields a reader set, valid or not, and
+ *  any field a later build added. `workGroupPrefsOf` validates on read. */
 export interface WorkGroupRecord {
-  version: typeof WORK_GROUP_PREFS_VERSION;
-  stop?: WorkGroupStop;
-  evidence?: Partial<WorkGroupEvidenceToggles>;
-  splits?: WorkGroupSplit[];
-  keptApart?: string[];
+  /** `WORK_GROUP_PREFS_VERSION` for a record this build writes; any other
+   *  value is a later build's record (`foreignWorkGroupRecord`). */
+  version: unknown;
+  /** A `WorkGroupStop`, `Partial<WorkGroupEvidenceToggles>`, `WorkGroupSplit[]`
+   *  and `string[]` when valid; read only through `workGroupPrefsOf`. */
+  stop?: unknown;
+  evidence?: unknown;
+  splits?: unknown;
+  keptApart?: unknown;
+  [field: string]: unknown;
 }
 
-const EVIDENCE_KEYS = ["series", "related", "issue"] as const;
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /**
- * A stored value read back as a sparse record, or null for none: absent,
- * unparseable, not an object, or another version (D1 applies). Each field is
- * validated by `parseWorkGroupPrefs`, and only the fields PRESENT and valid
- * in the stored value are kept, so a default is never mistaken for a choice.
+ * A stored value read back verbatim, or null for none: absent, unparseable,
+ * not an object, or an object with no `version` (malformed: D1 applies and a
+ * click replaces it). An object with a `version` is kept whole, whatever that
+ * version is; `workGroupPrefsOf` validates it (another version reads as D1, an
+ * invalid field as its default), so a default is never mistaken for a choice
+ * and nothing this build does not understand is lost on a write.
  */
 export function readWorkGroupRecord(raw: string | null | undefined): WorkGroupRecord | null {
   if (typeof raw !== "string") return null;
@@ -64,21 +75,16 @@ export function readWorkGroupRecord(raw: string | null | undefined): WorkGroupRe
   } catch {
     return null;
   }
-  const full = parseWorkGroupPrefs(v);
-  if (!full || !isRecord(v)) return null;
-  const out: WorkGroupRecord = { version: WORK_GROUP_PREFS_VERSION };
-  if (v.stop === full.stop) out.stop = full.stop;
-  if (isRecord(v.evidence)) {
-    const ev: Partial<WorkGroupEvidenceToggles> = {};
-    for (const k of EVIDENCE_KEYS) if (typeof v.evidence[k] === "boolean") ev[k] = v.evidence[k] as boolean;
-    if (Object.keys(ev).length) out.evidence = ev;
-  }
-  if (Array.isArray(v.splits)) out.splits = full.splits;
-  if (Array.isArray(v.keptApart)) out.keptApart = full.keptApart;
-  return out;
+  if (!isRecord(v) || !("version" in v)) return null;
+  return v as WorkGroupRecord;
 }
 
-/** The settings a record puts in force: its fields, D1 for the rest. */
+/** A later build's record (another version): read as D1, never written over. */
+export function foreignWorkGroupRecord(record: WorkGroupRecord | null | undefined): boolean {
+  return !!record && record.version !== WORK_GROUP_PREFS_VERSION;
+}
+
+/** The settings a record puts in force: its valid fields, D1 for the rest. */
 export function workGroupPrefsOf(record: WorkGroupRecord | null): Omit<WorkGroupPrefs, "version"> {
   return resolveWorkGroupPrefs(record ? parseWorkGroupPrefs(record) : null);
 }
@@ -110,21 +116,29 @@ export function sameWorkGroupRecord(a: WorkGroupRecord | null | undefined, b: Wo
 /** One explicit edit from the Group menu. PR 4 adds splits and anchors. */
 export type WorkGroupEdit = { stop: WorkGroupStop } | { evidence: keyof WorkGroupEvidenceToggles; value: boolean };
 
-/** `base` with `edit` applied; every other field of `base` is kept. */
+/** A record's evidence object, or none when it holds no object there. */
+const evidenceOf = (r: WorkGroupRecord | null | undefined): Record<string, unknown> => (r && isRecord(r.evidence) ? r.evidence : {});
+
+/** `base` with `edit` applied; every other field of `base` is kept verbatim,
+ *  unknown evidence keys included. A later build's record is no base: the
+ *  edit starts a record of this version. */
 export function applyWorkGroupEdit(base: WorkGroupRecord | null, edit: WorkGroupEdit): WorkGroupRecord {
-  const out: WorkGroupRecord = { ...(base ?? {}), version: WORK_GROUP_PREFS_VERSION };
+  const own = foreignWorkGroupRecord(base) ? null : base;
+  const out: WorkGroupRecord = { ...(own ?? {}), version: WORK_GROUP_PREFS_VERSION };
   if ("stop" in edit) out.stop = edit.stop;
-  else out.evidence = { ...(base?.evidence ?? {}), [edit.evidence]: edit.value };
+  else out.evidence = { ...evidenceOf(own), [edit.evidence]: edit.value };
   return out;
 }
 
 /** `base` with a tab's unpersisted fields (`patch`) laid on top: each field
  *  the patch holds wins, evidence box by box; every other field of `base` is
- *  kept. No patch: `base` itself. */
+ *  kept verbatim. A later build's record is no base (the patch alone). No
+ *  patch: `base` itself. */
 export function mergeWorkGroupPatch(base: WorkGroupRecord | null, patch: WorkGroupRecord | null): WorkGroupRecord | null {
   if (!patch) return base;
-  const out: WorkGroupRecord = { ...(base ?? {}), ...patch, version: WORK_GROUP_PREFS_VERSION };
-  if (patch.evidence) out.evidence = { ...(base?.evidence ?? {}), ...patch.evidence };
+  const own = foreignWorkGroupRecord(base) ? null : base;
+  const out: WorkGroupRecord = { ...(own ?? {}), ...patch, version: WORK_GROUP_PREFS_VERSION };
+  if (isRecord(patch.evidence)) out.evidence = { ...evidenceOf(own), ...patch.evidence };
   return out;
 }
 
@@ -197,11 +211,16 @@ export function workGroupRecordStep(state: WorkGroupRecordState, t: WorkGroupRec
       if (t.stored === undefined) {
         const patch = applyWorkGroupEdit(state.patch, t.edit);
         const held = applyWorkGroupEdit(state.held, t.edit);
+        // C4: storage last held a later build's record — never written over.
+        if (foreignWorkGroupRecord(state.known)) return none({ held, known: state.known, patch, failed: true });
         return { state: { held, known: undefined, patch, failed: state.failed }, write: { value: held }, repaint: false };
       }
       const kept = state.known === undefined || sameWorkGroupRecord(t.stored, state.known) ? state.patch : null;
       const patch = applyWorkGroupEdit(kept, t.edit);
       const held = mergeWorkGroupPatch(t.stored, patch)!;
+      // C4: storage holds a later build's record. Never written over: the
+      // edit lives in this tab (D1 plus the patch), «this tab only».
+      if (foreignWorkGroupRecord(t.stored)) return none({ held, known: t.stored, patch, failed: true });
       return { state: { held, known: t.stored, patch, failed: state.failed }, write: { value: held }, repaint: false };
     }
     case "render": {
@@ -218,6 +237,8 @@ export function workGroupRecordStep(state: WorkGroupRecordState, t: WorkGroupRec
       // R4/R5: no focus, or nothing to write. Here `held` is `known` (= the
       // read) with `patch` on top: every row that sets `known` keeps that.
       if (!t.focused || state.patch === null || state.held === null || sameWorkGroupRecord(state.held, t.stored)) return none(state);
+      // R7: storage holds a later build's record — no retry over it (C4).
+      if (foreignWorkGroupRecord(t.stored)) return none(state);
       // R6: storage still holds `known` and this tab holds a patch on it.
       return { state, write: { value: state.held }, repaint: false };
     }

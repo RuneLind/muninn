@@ -576,8 +576,13 @@ export function groupWorkThreads(input: WorkGroupingInput): WorkGrouping {
     });
     const witnesses = uniqueWitnesses(children.flatMap((c) => c.witnesses));
     const anchor = children[0]!;
+    // RELATED: the anchor's title — unless the anchor owns no page (an
+    // earlier card's child claimed them all, D16), when that title is another
+    // card's row; then the first child that owns one names it. The fold key
+    // stays the anchor's.
+    const namer = anchor.owned.length ? anchor : (children.find((c) => c.owned.length) ?? anchor);
     const name =
-      n.label === "series" ? ix.seriesLabel(n.nameKey!) : n.label === "project" ? n.nameKey! : anchor.name;
+      n.label === "series" ? ix.seriesLabel(n.nameKey!) : n.label === "project" ? n.nameKey! : namer.name;
     return {
       kind: d.members.length > 1 ? "group" : "thread",
       label: n.label,
@@ -661,8 +666,11 @@ export interface WorkGroupChildView {
 export interface WorkGroupView {
   group: WorkGroup;
   children: WorkGroupChildView[];
-  /** False when the facets hid the anchor and a child is still visible: the
-   *  name stays, and the card says the anchor is outside the filters. */
+  /** False only when an active facet hid every row the anchor owns in the
+   *  pool and a child is still visible: the name stays, and the card says the
+   *  anchor is outside the filters. An anchor with no row even unfiltered
+   *  (it owns no page, or Show retired is off and its pages are retired) is
+   *  not outside the filters: no label. */
   anchorVisible: boolean;
   /** `N threads · M sessions · ✋ K`: sessions deduplicated by
    *  `workSessionRef` across the visible children. */
@@ -687,6 +695,7 @@ export function projectWorkGroups(
 ): WorkGroupView[] {
   if (!railSectionsVisible(filters)) return [];
   const visible = visibleSet(pool, filters);
+  const unfiltered = new Set(pool.map((p) => normalizeRel(p.relPath)));
   const byRel = new Map(pool.map((p) => [normalizeRel(p.relPath), p] as const));
   const out: WorkGroupView[] = [];
   for (const group of grouping.groups) {
@@ -704,7 +713,7 @@ export function projectWorkGroups(
     out.push({
       group,
       children,
-      anchorVisible: children[0]!.child === group.children[0],
+      anchorVisible: children[0]!.child === group.children[0] || !group.children[0]!.owned.some((p) => unfiltered.has(normalizeRel(p.relPath))),
       counts: { threads: children.length, sessions: sessions.size, movesYou: children.reduce((n, c) => n + c.movesYou, 0) },
     });
   }

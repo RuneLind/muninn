@@ -137,6 +137,30 @@ export function openThreadCards(
   allPages: readonly WikiListing[] = pages,
   asOfMs?: number,
 ): RailThreadCard[] {
+  const cards = threadCardBodies(threads, pages, filters, pin, now, allPages, asOfMs, THREAD_CARDS_MAX);
+  return cards.map((c, i) => {
+    const stored = groupFoldState(foldState, c.foldKey);
+    const defaultOpen = i === 0;
+    return {
+      ...c,
+      open: stored ? stored === "open" : defaultOpen,
+      toggleKey: defaultOpen ? closedFoldKey(c.foldKey) : c.foldKey,
+    };
+  });
+}
+
+/** `openThreadCards` before the folds, at most `cap` cards: the one path both
+ *  the drawn Threads cards and the Group menu's Threads count (uncapped) take. */
+function threadCardBodies(
+  threads: readonly WorkThread[] | null | undefined,
+  pages: readonly WikiListing[],
+  filters: WikiFilters,
+  pin: string | null,
+  now: number,
+  allPages: readonly WikiListing[],
+  asOfMs: number | undefined,
+  cap: number,
+): Omit<RailThreadCard, "open" | "toggleKey">[] {
   if (!railSectionsVisible(filters)) return [];
   const ranked = rankThreadCards(threads, allPages, pin, now, asOfMs);
   if (!ranked.length) return [];
@@ -145,7 +169,7 @@ export function openThreadCards(
   const visible = new Set(filterPages(pages as WikiListing[], filters).map((p) => normalizeRel(p.relPath)));
   const cards: Omit<RailThreadCard, "open" | "toggleKey">[] = [];
   for (const { t, score, pinned, owned } of ranked) {
-    if (cards.length >= THREAD_CARDS_MAX) break;
+    if (cards.length >= cap) break;
     // The created window stays on the reader's `now`.
     const rows = threadCardRows(owned, t.touched, visible, byRel, now);
     if (!rows.focus.length) continue;
@@ -165,15 +189,7 @@ export function openThreadCards(
       score,
     });
   }
-  return cards.map((c, i) => {
-    const stored = groupFoldState(foldState, c.foldKey);
-    const defaultOpen = i === 0;
-    return {
-      ...c,
-      open: stored ? stored === "open" : defaultOpen,
-      toggleKey: defaultOpen ? closedFoldKey(c.foldKey) : c.foldKey,
-    };
-  });
+  return cards;
 }
 
 /** One thread as the Threads stop ranks it: its score, whether it holds the
@@ -298,8 +314,12 @@ export function openWorkCards(
   // PR 3 draws no Sessions stop; a record a later build wrote reads as Threads.
   const requested: WorkGroupStop = view.stop === "sessions" ? "threads" : view.stop;
   const grouping = groupWorkThreads({ work, allPages, now, stop: requested, toggles: view.evidence, pin });
+  // Uncapped card counts. Threads counts the cards `openThreadCards` draws (its
+  // own order and ownership, which a score tie can tell apart from the model's).
   const visibleAt = (stop: WorkGroupStop) =>
-    projectWorkGroups(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin }), pool, filters, now, Infinity);
+    stop === "threads"
+      ? threadCardBodies(work?.threads, pool, filters, pin, now, allPages, work?.asOfMs, Infinity).length
+      : projectWorkGroups(stop === requested ? grouping : groupWorkThreads({ work, allPages, now, stop, toggles: view.evidence, pin }), pool, filters, now, Infinity).length;
   const sections = railSectionsVisible(filters);
   const control: RailWorkControl = {
     requested,
@@ -308,7 +328,7 @@ export function openWorkCards(
     evidenceApplies: grouping.togglesApply,
     stops: DRAWN_STOPS.map((stop) => {
       const a = grouping.availability[stop];
-      return { stop, available: a.available, reasons: [...a.reasons], cards: sections && a.available ? visibleAt(stop).length : 0 };
+      return { stop, available: a.available, reasons: [...a.reasons], cards: sections && a.available ? visibleAt(stop) : 0 };
     }),
   };
   if (grouping.stop === "threads" || !sections) {

@@ -481,3 +481,33 @@ describe("capFolds: the group namespace", () => {
 
 // Type-level use, so an unused import cannot hide a broken export.
 export type _Cards = RailThreadCard;
+
+describe("the Group menu's Threads count is the Threads stop's drawn cards (fix round 1, finding 2)", () => {
+  // Two threads hold one page and tie on score. The model and the cards break
+  // the tie differently (server index vs key), so counting through the model
+  // said `Threads 2` over the one card `y` (owning a and b) draws.
+  function tie() {
+    const pages = [page("plans/a.md", { edits: 3 }), page("plans/b.md")];
+    delete (pages[1] as { work?: unknown }).work;
+    const threads = [thread("z", ["plans/a.md"]), thread("y", ["plans/a.md", "plans/b.md"])];
+    const work: IndexWork = { asOfMs: NOW - HOUR, sinceMs: NOW - 8 * DAY, threads, evidence: evidence(pages, threads) };
+    return { pages, threads, work };
+  }
+
+  test("on a score tie the Threads count equals the cards the Threads stop draws", () => {
+    const fx = tie();
+    const atThreads = cardsAt("threads", {}, fx);
+    expect(atThreads.cards.map((c) => c.key)).toEqual(["y"]);
+    const count = (r: ReturnType<typeof cardsAt>) => r.control.stops.find((s) => s.stop === "threads")!.cards;
+    expect(count(atThreads)).toBe(1);
+    // The same count whichever stop the reader is on.
+    expect(count(cardsAt("related", {}, fx))).toBe(1);
+  });
+
+  test("the Threads count is uncapped, as the other stops' counts are", () => {
+    const fx = fixture();
+    const n = cardsAt("related", {}, fx).control.stops.find((s) => s.stop === "threads")!.cards;
+    expect(n).toBe(8);
+    expect(cardsAt("threads", {}, fx).cards.length).toBe(5);
+  });
+});

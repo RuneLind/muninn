@@ -27,19 +27,21 @@ const NO_SERIES = rec({ evidence: { series: false } });
 const THREADS = rec({ stop: "threads" });
 const fresh: WorkGroupRecordState = { held: null, known: null, patch: null, failed: false };
 
-describe("readWorkGroupRecord: the sparse record", () => {
-  test("none for absent, unparseable, non-object and other-version values", () => {
+describe("readWorkGroupRecord: the sparse record, held verbatim", () => {
+  test("none for absent, unparseable, non-object and versionless values; another version is held but reads as D1", () => {
     expect(readWorkGroupRecord(null)).toBeNull();
     expect(readWorkGroupRecord(undefined)).toBeNull();
     expect(readWorkGroupRecord("{")).toBeNull();
     expect(readWorkGroupRecord("[]")).toBeNull();
     expect(readWorkGroupRecord('"related"')).toBeNull();
-    expect(readWorkGroupRecord(JSON.stringify({ version: 2, stop: "areas" }))).toBeNull();
+    const v2 = readWorkGroupRecord(JSON.stringify({ version: 2, stop: "areas" }));
+    expect(v2).toEqual({ version: 2, stop: "areas" });
+    expect(workGroupPrefsOf(v2)).toEqual(workGroupPrefsOf(null));
   });
 
-  test("keeps only the fields present and valid; a saved false stays false", () => {
+  test("an invalid field is held but reads as its default; a saved false stays false", () => {
     const r = readWorkGroupRecord(JSON.stringify({ version: 1, stop: "sideways", evidence: { series: false, related: "yes" } }));
-    expect(r).toEqual({ version: 1, evidence: { series: false } });
+    expect(r).toEqual({ version: 1, stop: "sideways", evidence: { series: false, related: "yes" } });
     // D1 fills the rest at read time and is never stored.
     expect(workGroupPrefsOf(r)).toEqual({
       stop: "related",
@@ -49,11 +51,11 @@ describe("readWorkGroupRecord: the sparse record", () => {
     });
   });
 
-  test("keeps a later build's split and anchor lists through the parser's bounds", () => {
-    const r = readWorkGroupRecord(
-      JSON.stringify({ version: 1, splits: [{ id: "s1", page: "Plans/A.md" }, { id: "bad id", page: "x.md" }], keptApart: ["b.md", "b.md"], extra: 1 }),
-    );
-    expect(r).toEqual({ version: 1, splits: [{ id: "s1", page: "plans/a.md" }], keptApart: ["b.md"] });
+  test("reads a later build's split and anchor lists through the parser's bounds, and holds them whole", () => {
+    const stored = { version: 1, splits: [{ id: "s1", page: "Plans/A.md" }, { id: "bad id", page: "x.md" }], keptApart: ["b.md", "b.md"], extra: 1 };
+    const r = readWorkGroupRecord(JSON.stringify(stored));
+    expect(r).toEqual(stored);
+    expect(workGroupPrefsOf(r)).toMatchObject({ splits: [{ id: "s1", page: "plans/a.md" }], keptApart: ["b.md"] });
   });
 
   test("no record ⇒ D1: Related with every box checked", () => {
@@ -378,5 +380,70 @@ describe("a tab's unpersisted edits (fix round 1: refused writes, first-readable
     const r = a.event();
     expect(r.state.failed).toBe(false);
     expect(r.repaint).toBe(true);
+  });
+});
+
+describe("a mixed-build pair of tabs: a write keeps what this build does not understand (fix round 1, finding 1)", () => {
+  const click = (raw: string, edit: Parameters<typeof applyWorkGroupEdit>[1]) => {
+    const stored = readWorkGroupRecord(raw);
+    const booted = workGroupRecordStep(fresh, { kind: "boot", stored }).state;
+    return workGroupRecordStep(booted, { kind: "click", stored: readWorkGroupRecord(raw), edit });
+  };
+
+  test("an evidence click keeps unknown fields, unknown evidence keys and every stored split and anchor verbatim", () => {
+    const later = {
+      version: 1,
+      stop: "sessions",
+      evidence: { series: false, project: false },
+      splits: [{ id: "a", page: "x/y.md", label: "L" }, { id: "bad id", page: "z.md" }, { id: "a", page: "x/y.md" }],
+      keptApart: ["a.md", "A.md"],
+      groups: [["a", "b"]],
+    };
+    const r = click(JSON.stringify(later), { evidence: "issue", value: false });
+    expect(r.write).not.toBe(false);
+    const written = JSON.parse(serializeWorkGroupRecord((r.write as { value: WorkGroupRecord }).value));
+    expect(written).toEqual({ ...later, evidence: { series: false, project: false, issue: false } });
+    // This build still reads only what it understands from it.
+    expect(workGroupPrefsOf(readWorkGroupRecord(JSON.stringify(written)))).toEqual({
+      stop: "sessions",
+      evidence: { series: false, related: true, issue: false },
+      splits: [{ id: "a", page: "x/y.md" }],
+      keptApart: ["a.md"],
+    });
+  });
+
+  test("a stop click keeps an unknown top-level field", () => {
+    const r = click(JSON.stringify({ version: 1, evidence: { related: false }, newThing: { n: 1 } }), { stop: "areas" });
+    expect((r.write as { value: WorkGroupRecord }).value).toEqual({ version: 1, stop: "areas", evidence: { related: false }, newThing: { n: 1 } });
+  });
+
+  test("the canonical compare sees the preserved fields: a record differing only in one is another record", () => {
+    const a = readWorkGroupRecord(JSON.stringify({ version: 1, stop: "areas", groups: [["a", "b"]] }));
+    const b = readWorkGroupRecord(JSON.stringify({ groups: [["a", "b"]], stop: "areas", version: 1 }));
+    const c = readWorkGroupRecord(JSON.stringify({ version: 1, stop: "areas", groups: [["a", "c"]] }));
+    expect(sameWorkGroupRecord(a, b)).toBe(true);
+    expect(sameWorkGroupRecord(a, c)).toBe(false);
+  });
+
+  test("a record of another version is never written over: the click stays in this tab, D1 plus the edit", () => {
+    const v2 = JSON.stringify({ version: 2, stop: "areas", newThing: 1 });
+    expect(workGroupPrefsOf(readWorkGroupRecord(v2))).toEqual(workGroupPrefsOf(null));
+    const r = click(v2, { evidence: "series", value: false });
+    expect(r.write).toBe(false);
+    expect(r.state.failed).toBe(true);
+    expect(workGroupPrefsOf(r.state.held)).toEqual({ ...workGroupPrefsOf(null), evidence: { series: false, related: true, issue: true } });
+    // A focused render later still does not write it (R6 is the retry path).
+    const later = workGroupRecordStep(r.state, { kind: "render", stored: readWorkGroupRecord(v2), focused: true });
+    expect(later.write).toBe(false);
+    expect(workGroupPrefsOf(later.state.held).evidence.series).toBe(false);
+    // Another tab's write of this version is adopted, and then clicks write again.
+    const adopted = workGroupRecordStep(later.state, { kind: "storage", stored: rec({ stop: "threads" }), booted: true }).state;
+    const next = workGroupRecordStep(adopted, { kind: "click", stored: rec({ stop: "threads" }), edit: { stop: "areas" } });
+    expect(next.write).toEqual({ value: rec({ stop: "areas" }) });
+  });
+
+  test("a versionless object is malformed, not another version: it reads as none and a click replaces it", () => {
+    expect(readWorkGroupRecord(JSON.stringify({ stop: "areas" }))).toBeNull();
+    expect(click(JSON.stringify({ stop: "areas" }), { stop: "threads" }).write).toEqual({ value: rec({ stop: "threads" }) });
   });
 });

@@ -701,3 +701,50 @@ describe("split availability", () => {
     expect(splits(g).every((s) => s.available)).toBe(true);
   });
 });
+
+describe("«anchor outside the filters» means a facet hid it (fix round 1, finding 3)", () => {
+  // A (series s) anchors C (series s), and C also holds hub.md. h holds only
+  // hub.md and anchors k through a related: entry hub ↔ k. Drawn first, C
+  // claims hub.md, so h owns nothing.
+  function hubClaimed() {
+    const pages = [
+      page("p/a.md", { edits: 90, series: "s" }),
+      page("p/c.md", { edits: 5, series: "s" }),
+      page("p/hub.md", { edits: 40, title: "Hub page" }),
+      page("p/k.md", { edits: 20, title: "K page" }),
+    ];
+    const threads = [thread("A", ["p/a.md"]), thread("C", ["p/c.md", "p/hub.md"]), thread("h", ["p/hub.md"]), thread("k", ["p/k.md"])];
+    return { pages, w: work(pages, threads, { related: [["p/hub.md", "p/k.md"]] }) };
+  }
+
+  test("an anchor that owns no page shows no label with no facet active", () => {
+    const { pages, w } = hubClaimed();
+    const g = run(w, pages);
+    expect(childKeys(g)).toEqual([["A", "C"], ["h", "k"]]);
+    expect(g.groups[1]!.children[0]!.owned).toEqual([]);
+    const views = projectWorkGroups(g, pages, INERT, NOW);
+    expect(views[1]!.children.map((c) => c.child.key)).toEqual(["k"]);
+    expect(views[1]!.anchorVisible).toBe(true);
+  });
+
+  test("a group whose anchor owns no page is named by its first child that owns one, never by another card's row", () => {
+    const { pages, w } = hubClaimed();
+    const g = run(w, pages);
+    expect(g.groups[1]!.label).toBe("related");
+    expect(g.groups[1]!.name).toBe("K page");
+    // Its fold key still follows the anchor, so the name does not move it.
+    expect(g.groups[1]!.foldKey).toBe("group:anchor:h");
+  });
+
+  test("an anchor out of the pool (Show retired off) shows no label with no facet active", () => {
+    const pages = [page("plans/a.md", { edits: 20, series: "s" }), page("notes/b.md", { edits: 9, series: "s" })];
+    const threads = [thread("plans/a.md", ["plans/a.md"]), thread("notes/b.md", ["notes/b.md"])];
+    const g = run(work(pages, threads), pages);
+    const pool = pages.filter((p) => p.relPath !== "plans/a.md");
+    const views = projectWorkGroups(g, pool, INERT, NOW);
+    expect(views[0]!.children.map((c) => c.child.key)).toEqual(["notes/b.md"]);
+    expect(views[0]!.anchorVisible).toBe(true);
+    // A facet that hides it says so.
+    expect(projectWorkGroups(g, pages, { ...INERT, folder: "notes" }, NOW)[0]!.anchorVisible).toBe(false);
+  });
+});
