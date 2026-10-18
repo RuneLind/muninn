@@ -1620,9 +1620,15 @@ function forcedOpenWhy(what: "group" | "section"): string {
   return filters.jira ? "the Jira filter shows every matching page" : `the open page is in this ${what}`;
 }
 
+/** True while `renderList` puts focus back after a background repaint. */
+let restoringRailFocus = false;
+
 /** `cause: "storage"` is a repaint after another tab changed the pin: it runs
- *  no pin step, so it never writes (the no-loop rule, `threadPinStep`). */
-function renderList(cause: "storage" | "local" = "local"): void {
+ *  no pin step, so it never writes (the no-loop rule, `threadPinStep`).
+ *  `background` is a repaint no key or click in this tab asked for (a storage
+ *  event, a listing refetch): only it puts focus back on the rail control it
+ *  replaced. */
+function renderList(cause: "storage" | "local" = "local", background = cause === "storage"): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -2079,14 +2085,21 @@ function renderList(cause: "storage" | "local" = "local"): void {
   // Retired pages held back under these facets: the empty rail offers them.
   const heldBack = retiredHeldBack();
   const focusedEl = document.activeElement;
-  const keptWorkFocus = workControlSelector(focusedEl);
+  const keptFocus = background ? railControlSelector(focusedEl) : null;
   listEl.innerHTML = railListHtml(html, retiredRevealHtml(heldBack));
-  // A repaint no key or click asked for (another tab's write, a focus refetch)
-  // swaps out the Group control or menu item under the reader's focus: put it
-  // back on the same item, else on the Group button, so the menu's keys still work.
-  if (keptWorkFocus && (!document.activeElement || document.activeElement === document.body)) {
-    const item = `#wikiList ${keptWorkFocus}`;
-    refocusRailControl(document.querySelector(item) ? item : "#wikiList [data-work-group-menu]", focusedEl!);
+  // A background repaint swaps out the rail control under the reader's focus:
+  // put it back on the same control. Not for a key's or click's own repaint —
+  // in Safari a click focuses nothing, so a restore there moved focus away from
+  // what the reader clicked.
+  if (keptFocus && (!document.activeElement || document.activeElement === document.body)) {
+    // The same control as before the repaint: a popover that closes on focus
+    // leaving it (the options pane) must not read this as the reader moving.
+    restoringRailFocus = true;
+    try {
+      refocusRailControl(keptFocus, focusedEl!);
+    } finally {
+      restoringRailFocus = false;
+    }
   }
   // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
   // `scrollTop` when the new content is at least as tall (300 → 300), and when it
@@ -5072,15 +5085,29 @@ function refocusRailControl(selector: string, pressed: Element): void {
   pick?.focus({ preventScroll: true });
 }
 
-/** The Group button or menu item `el` is, as a selector by its own data
- *  attribute (stable across a repaint), or null for anything else. */
-function workControlSelector(el: Element | null): string | null {
+/** The work-thread control `el` is (the Group button, a menu item, `+ N more
+ *  threads`, the shared context's `+N`, a fold, a 📌), as a selector by its own
+ *  key so it finds the control again after a repaint; null for anything else. */
+function railControlSelector(el: Element | null): string | null {
   if (!(el instanceof HTMLElement) || !el.closest("#wikiList")) return null;
-  for (const attr of ["data-work-stop", "data-work-evidence"]) {
+  const at = (attr: string, v: string) => `#wikiList [${attr}="${CSS.escape(v)}"]`;
+  for (const attr of ["data-work-stop", "data-work-evidence", "data-thread-more", "data-thread-ctx-more"]) {
     const v = el.getAttribute(attr);
-    if (v !== null) return `[${attr}="${CSS.escape(v)}"]`;
+    if (v !== null) return at(attr, v);
   }
-  return el.hasAttribute("data-work-group-menu") ? "[data-work-group-menu]" : null;
+  const fold = el.getAttribute("data-fold-key");
+  if (fold !== null) {
+    // Either spelling, as the fold's own click handler looks for.
+    const base = fold.startsWith(CLOSED_FOLD_PREFIX) ? fold.slice(CLOSED_FOLD_PREFIX.length) : fold;
+    return `${at("data-fold-key", base)}, ${at("data-fold-key", CLOSED_FOLD_PREFIX + base)}`;
+  }
+  if (el.hasAttribute("data-thread-pin")) {
+    const cardEl = el.closest(".wiki-thread-card");
+    const attr = cardEl?.hasAttribute("data-thread-group") ? "data-thread-group" : "data-thread";
+    const card = cardEl?.getAttribute(attr);
+    return card ? `#wikiList .wiki-thread-card[${attr}="${CSS.escape(card)}"] [data-thread-pin]` : null;
+  }
+  return el.hasAttribute("data-work-group-menu") ? "#wikiList [data-work-group-menu]" : null;
 }
 
 /** Focus the Group menu's item for `selector`, else its first item. */
@@ -5430,7 +5457,7 @@ if (optionsBtn && optionsPane) {
     if (!optionsPane.hidden && !inOptions(e.target)) setOptionsOpen(false);
   });
   document.addEventListener("focusin", (e) => {
-    if (!optionsPane.hidden && !inOptions(e.target)) setOptionsOpen(false);
+    if (!optionsPane.hidden && !inOptions(e.target) && !restoringRailFocus) setOptionsOpen(false);
   });
   // Capture phase. Escape closes the pane and stops, so it neither leaves focus
   // mode nor closes a graph card (whose own capture listener, registered
@@ -8416,7 +8443,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
  *  non-event as any name the listing doesn't carry. */
 function adoptPagesAndRender(applied: PendingPages): void {
   adoptPagesDataAndFacets(applied);
-  renderList();
+  renderList("local", true);
   refreshStartBody();
 }
 

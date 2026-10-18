@@ -515,6 +515,9 @@ test.describe("Wiki rail: grouped work threads", () => {
     await groupBtn(page).click();
     await expect(menu(page).getByRole("group", { name: "Group work by" }).getByRole("menuitemradio")).toHaveCount(3);
     await expect(menu(page).getByRole("group", { name: "Connect threads by" }).getByRole("menuitemcheckbox")).toHaveCount(3);
+    // Each heading is the group's name only, not also a line inside it.
+    for (const name of ["Group work by", "Connect threads by"])
+      expect(await menu(page).getByRole("group", { name }).ariaSnapshot()).not.toMatch(new RegExp(`^\\s*- text: ${name}`, "m"));
     await expect(page.locator('[data-work-evidence="series"]')).toHaveAccessibleDescription("");
     await page.locator('[data-work-stop="threads"]').click();
     await groupBtn(page).click();
@@ -583,6 +586,117 @@ test.describe("Wiki rail: grouped work threads", () => {
     await expect(menu(page)).toBeVisible();
     expect(await menuFocus(page)).toBe("series");
     await escapeReturnsToButton(page);
+  });
+
+  // Fix round 2 batch 2. Safari does not focus a clicked button, so a JS
+  // `.click()` stands in for its click on the options button.
+  const optionsOpen = (p: Page) => p.evaluate(() => !(document.getElementById("wikiOptions") as HTMLElement).hidden);
+  const clickOptionsWithoutFocus = (p: Page) => p.evaluate(() => document.getElementById("wikiOptionsBtn")!.click());
+  /** Arm a flag that the next rail repaint sets. */
+  const armRepaint = (p: Page) =>
+    p.evaluate(() => {
+      const w = window as unknown as { __repainted: boolean; __repaintObs?: MutationObserver };
+      w.__repaintObs?.disconnect();
+      w.__repainted = false;
+      w.__repaintObs = new MutationObserver(() => (w.__repainted = true));
+      w.__repaintObs.observe(document.getElementById("wikiList")!, { childList: true });
+    });
+  const repainted = (p: Page) => expect.poll(() => p.evaluate(() => (window as unknown as { __repainted: boolean }).__repainted)).toBe(true);
+  /** Another tab flips Same issue; `b` repaints from the storage event. */
+  async function writeInOtherTab(a: Page, b: Page): Promise<void> {
+    await armRepaint(b);
+    await groupBtn(a).click();
+    await a.locator('[data-work-evidence="issue"]').click();
+    await groupBtn(a).click();
+    await repainted(b);
+  }
+  const activeAttr = (p: Page, attr: string) => p.evaluate((a) => document.activeElement?.getAttribute(a) ?? null, attr);
+
+  test("focus: with the menu open, a click on the options button that moves no focus opens the pane and keeps it open", async ({ page }) => {
+    await openReader(page);
+    await openMenuOnSeries(page);
+    await clickOptionsWithoutFocus(page);
+    await expect(menu(page)).toHaveCount(0);
+    expect(await optionsOpen(page)).toBe(true);
+    expect(await page.evaluate(() => document.activeElement?.hasAttribute("data-work-group-menu"))).toBe(false);
+  });
+
+  test("focus: another tab's write keeps focus on the Group button and leaves an options pane it did not open standing", async ({ context }) => {
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await openReader(a);
+    await openReader(b);
+    await groupBtn(b).focus();
+    await clickOptionsWithoutFocus(b);
+    expect(await optionsOpen(b)).toBe(true);
+    await writeInOtherTab(a, b);
+    expect(await b.evaluate(() => document.activeElement?.hasAttribute("data-work-group-menu"))).toBe(true);
+    expect(await optionsOpen(b)).toBe(true);
+  });
+
+  test("focus: another tab's write keeps focus on the shared context's +N, a group's 📌 and a child's fold", async ({ context }) => {
+    const a = await context.newPage();
+    const b = await context.newPage();
+    await openReader(a, BROAD);
+    await openReader(b, BROAD);
+    await body(b, "group:series:big").locator(".wiki-thread-ctx-more").focus();
+    await writeInOtherTab(a, b);
+    expect(await activeAttr(b, "data-thread-ctx-more")).toBe("group:series:big");
+    await groupCard(b, "group:series:big").locator(".wiki-thread-pin").first().focus();
+    await writeInOtherTab(a, b);
+    expect(await b.evaluate(() => document.activeElement?.closest(".wiki-thread-card")?.getAttribute("data-thread-group"))).toBe("group:series:big");
+    expect(await b.evaluate(() => document.activeElement?.hasAttribute("data-thread-pin"))).toBe(true);
+    const childFold = body(b, "group:series:big").locator(".wiki-thread-card").nth(1).locator(".wiki-thread-fold");
+    const foldKey = await childFold.getAttribute("data-fold-key");
+    await childFold.focus();
+    await writeInOtherTab(a, b);
+    expect(foldKey).toBeTruthy();
+    expect(await activeAttr(b, "data-fold-key")).toBe(foldKey);
+  });
+
+  test("focus: a window-focus refetch that repaints keeps focus on + N more threads", async ({ page }) => {
+    let renamed = false;
+    await page.route(
+      (u) => u.pathname === "/api/wiki/pages" && u.searchParams.get("wiki") === GROUPS,
+      async (route) => {
+        const res = await route.fetch();
+        const json = (await res.json()) as { pages: { relPath: string; title: string }[] };
+        if (renamed) for (const p of json.pages) if (p.relPath === "notes/old-1.md") p.title = "Old 1, renamed";
+        await route.fulfill({ response: res, json });
+      },
+    );
+    await page.clock.install();
+    await openReader(page);
+    await body(page, "group:series:alpha").locator(".wiki-thread-more").focus();
+    renamed = true;
+    const refetched = page.waitForResponse((r) => r.url().includes("/api/wiki/pages") && r.url().includes(`wiki=${GROUPS}`) && r.url().includes("refresh=1"));
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refetched;
+    await expect(page.locator('.wiki-list-item[data-relpath="notes/old-1.md"]')).toContainText("Old 1, renamed");
+    expect(await activeAttr(page, "data-thread-more")).toBe("group:series:alpha");
+  });
+
+  test("focus: in focus mode one Escape leaves focus mode and leaves the hidden menu open", async ({ page }) => {
+    await openReader(page);
+    await groupBtn(page).click();
+    await expect(menu(page)).toBeVisible();
+    await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+    await page.locator("body").press("f");
+    await expect(page.locator(".wiki-layout")).toHaveClass(/focus-mode/);
+    await page.locator("body").press("Escape");
+    await expect(page.locator(".wiki-layout")).not.toHaveClass(/focus-mode/);
+    await expect(menu(page)).toBeVisible();
+  });
+
+  test("focus: Escape from the search box closes the menu and leaves focus in the search box", async ({ page }) => {
+    await openReader(page);
+    await groupBtn(page).click();
+    await expect(menu(page)).toBeVisible();
+    await page.locator("#wikiSearch").focus();
+    await page.keyboard.press("Escape");
+    await expect(menu(page)).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("wikiSearch");
   });
 
   test("keyboard: the Group menu opens, moves, toggles a box in place, picks a stop and closes back on its button", async ({ page }) => {

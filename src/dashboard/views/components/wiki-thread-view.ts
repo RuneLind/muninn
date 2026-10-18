@@ -461,9 +461,9 @@ export function workGroupMenuHtml(control: RailWorkControl, local: boolean): str
   // the boxes are announced with their heading.
   return (
     `<div class="wiki-work-menu" id="wikiWorkMenu" role="menu" aria-label="Group work threads">` +
-    `<div role="group" aria-labelledby="wikiWorkMenuStops"><div class="wiki-work-h" id="wikiWorkMenuStops" role="presentation">Group work by</div>${stops}</div>` +
+    `<div role="group" aria-labelledby="wikiWorkMenuStops"><div class="wiki-work-h" id="wikiWorkMenuStops" role="presentation" aria-hidden="true">Group work by</div>${stops}</div>` +
     `<div class="wiki-work-hr" role="separator"></div>` +
-    `<div role="group" aria-labelledby="wikiWorkMenuBoxes"><div class="wiki-work-h" id="wikiWorkMenuBoxes" role="presentation">Connect threads by</div>${boxes}</div>` +
+    `<div role="group" aria-labelledby="wikiWorkMenuBoxes"><div class="wiki-work-h" id="wikiWorkMenuBoxes" role="presentation" aria-hidden="true">Connect threads by</div>${boxes}</div>` +
     notes +
     (local ? `<div class="wiki-work-note wiki-work-local-note" role="presentation">This tab only: storage refused the change.</div>` : "") +
     `</div>`
