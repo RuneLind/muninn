@@ -145,10 +145,9 @@ export function ownerCensus(
 
 // ── related: ───────────────────────────────────────────────────────────────
 
-/** One `related:` entry before resolution: a wikilink target (from the scanner
- *  or from a string that is a wikilink), any other string, or an item that
- *  names no page — a number, a map, or what lies past the walk's bounds — which
- *  is counted as skipped. */
+/** One `related:` entry before resolution: a wikilink target, any other
+ *  string, or an item that names no page — a number, a map, or what lies past
+ *  the walk's bounds — which is counted as skipped. */
 export type RelatedEntry = { kind: "link"; target: string } | { kind: "text"; value: string } | { kind: "unread" };
 
 export interface RelatedRead {
@@ -158,37 +157,57 @@ export interface RelatedRead {
 
 const NO_RELATED: RelatedRead = { present: false, entries: [] };
 
-/** How deep and how many nodes the YAML value is walked. `Bun.YAML` shares an
- *  alias by reference, so an alias chain costs fanout^depth to walk in full
- *  while its text stays a few hundred bytes. Past either bound the rest is one
- *  `unread` entry. */
+/** How deep the walk reads nested lists (no list a page writes runs deeper);
+ *  what lies deeper is skipped and counted, once, as one `unread`. */
 const RELATED_WALK_DEPTH_MAX = 8;
-const RELATED_WALK_NODES_MAX = 1000;
+/** The walk's work budget, per character of the parsed text: a step per node
+ *  and per character of a string or a map key. Without aliases a value
+ *  costs at most about one step per character, so it is read whole; `Bun.YAML`
+ *  shares an alias by reference, so an aliased value can be exponentially
+ *  larger than its text, and past the budget the walk stops (one `unread`). */
+const RELATED_WALK_STEPS_PER_CHAR = 4;
+
+const HAS_WIKILINK_RE = new RegExp(WIKILINK_RE.source);
+/** A `:` after a span, past any whitespace: the span is a map key. */
+const KEY_AFTER_RE = /\s*:/y;
+
+/** A `[[…]]` the wikilink scanner finds: `start`–`end` covers its `[[inner]]`
+ *  (a `[[[a]]]` span's extra `[` excluded), `inner` what lies between. */
+interface Span {
+  start: number;
+  end: number;
+  inner: string;
+}
+
+function scanSpans(text: string): Span[] {
+  return [...text.matchAll(new RegExp(WIKILINK_RE.source, "g"))].map((m) => {
+    const inner = m[0].slice(2, -2).replace(/^\[+/, "");
+    const end = m.index + m[0].length;
+    return { start: end - inner.length - 4, end, inner };
+  });
+}
 
 /**
  * A page's `related:` entries, read from the raw entry text (D18): the
  * `related:` line and its continuation lines up to the next top-level key.
  *
- * 1. Every `[[…]]` the wikilink scanner (`WIKILINK_RE`) finds there and that
- *    is not inside a YAML comment is a link entry, `|label` and `#fragment`
- *    stripped (and the leading `[` of a `[[[a]]]` span). A comment is a `#` at
- *    a line's start or after whitespace, to the line's end, outside a quoted
- *    scalar and outside a `[[…]]` span (a span holds no comment, so a `#`, a
- *    quote or a bracket inside one is inert). A quote opens a scalar only
- *    where YAML starts one — a line's start or after `:`, `-`, `[`, `{` or
- *    `,` — and only when it closes later in the entry (`''` and `\"` are
- *    escapes); a quoted scalar may span lines.
- * 2. Then the value a YAML parse yields — of the whole frontmatter, else of
- *    the entry alone — walked with nested lists flattened: a string holding a
- *    wikilink yields its links, any other string is a text entry. YAML reads an
- *    unquoted `[[a]]` as a nested list (`[["a"]]`) and refuses `[[a]], [[b]]`;
- *    a list equal to a scanned span's own YAML reading adds nothing, so
- *    `[[1.10]]` stays the link `1.10` and `[[Foo, Bar]]` one link, not two
- *    typed or split items. A null names nothing; any other non-string item is
- *    one `unread` entry, and so is whatever lies past the walk's bounds.
+ * When YAML parses the frontmatter (else the entry alone), YAML decides:
+ * 1. A `[[…]]` the wikilink scanner finds there that YAML reads as a sequence
+ *    node (an unquoted `[[a]]` is `[["a"]]`) is a link, its target the span's
+ *    own text: `[[1.10]]` stays `1.10` and `[[Foo, Bar]]` one link
+ *    ({@link markedValue} tells which spans are nodes).
+ * 2. The value is walked, nested lists flattened: a string holding a wikilink
+ *    yields its links, as YAML spells them (`'[[O''Brien]]'` is `O'Brien`),
+ *    any other string is a text entry, a null names nothing, and any other
+ *    item is one `unread` entry. A map is one `unread` entry and is read for
+ *    links only, keys and values. A span in a comment, or one YAML reads as
+ *    part of a string, adds nothing of its own.
+ * When neither parses, every span outside a YAML comment, as
+ * {@link uncommentedSpans} judges it, is a link.
  *
  * A scalar is a one-entry list and `[]` is none. Link targets dedupe
- * case-insensitively and text exactly, so each target is read once.
+ * case-insensitively and text exactly, so each target is read once; links come
+ * first.
  */
 export function readRelated(content: string): RelatedRead {
   const fm = Frontmatter.of(content);
@@ -197,92 +216,144 @@ export function readRelated(content: string): RelatedRead {
 
 function relatedFrom(fm: Frontmatter): RelatedRead {
   const { at, lines: entry } = fm.entry(RELATED_LINE_RE);
+  const entryText = entry.join("\n");
+  // The text YAML parsed, the value it read, and where the entry starts in it.
+  let parsed: { text: string; offset: number; value: unknown } | undefined;
   const whole = fm.whole();
-  let value: unknown;
   if (whole) {
     if (!Object.hasOwn(whole, "related")) return NO_RELATED;
-    value = whole.related;
+    const offset = at < 0 ? 0 : fm.lines.slice(0, at).join("\n").length + (at > 0 ? 1 : 0);
+    parsed = { text: fm.lines.join("\n"), offset, value: whole.related };
   } else {
     if (at < 0) return NO_RELATED;
-    value = yamlMap(entry.join("\n"))?.related;
+    const part = yamlMap(entryText);
+    if (part) parsed = { text: entryText, offset: 0, value: part.related };
   }
-  const out: RelatedEntry[] = [];
+  const spans = scanSpans(entryText);
+  const links: string[] = [];
+  const rest: RelatedEntry[] = [];
   const seen = new Set<string>();
   const link = (target: string) => {
     const t = cleanLinkTarget(target);
     if (!t || seen.has(`l\u0000${t.toLowerCase()}`)) return;
     seen.add(`l\u0000${t.toLowerCase()}`);
-    out.push({ kind: "link", target: t });
+    links.push(t);
   };
+  if (!parsed) {
+    for (const s of uncommentedSpans(entryText, spans)) link(s.inner);
+    return { present: true, entries: links.map((target) => ({ kind: "link", target })) };
+  }
   const text = (v: string) => {
     const t = v.trim();
     if (!t || seen.has(`t\u0000${t}`)) return;
     seen.add(`t\u0000${t}`);
-    out.push({ kind: "text", value: t });
+    rest.push({ kind: "text", value: t });
   };
-  let overrun = false;
-  const unread = () => out.push({ kind: "unread" });
+  const linksOf = (v: string) => {
+    if (!HAS_WIKILINK_RE.test(v)) return false;
+    for (const t of extractWikilinks(v)) link(t);
+    return true;
+  };
 
-  const spans = uncommentedSpans(entry.join("\n"));
-  for (const s of spans) link(s.inner);
-
-  // YAML's reading of each scanned span, parsed only once a list is met.
-  let readings: unknown[] | undefined;
-  const isReading = (v: unknown) => {
-    readings ??= spans.flatMap((s) => {
-      try {
-        return [Bun.YAML.parse(`[[${s.inner}]]`)];
-      } catch {
-        return [];
+  const marked = markedValue(parsed, spans);
+  let steps = RELATED_WALK_STEPS_PER_CHAR * parsed.text.length;
+  let skipped = false;
+  let stopped = false;
+  const skip = () => {
+    if (!skipped) rest.push({ kind: "unread" });
+    skipped = true;
+  };
+  const spend = (n: number) => {
+    steps -= n;
+    if (steps < 0) stopped = true;
+    if (stopped) skip();
+    return !stopped;
+  };
+  // A map's links are the same however often an alias repeats it.
+  const mapsRead = new Set<object>();
+  const walk = (v: unknown, m: unknown, depth: number, inList: boolean): void => {
+    if (stopped || !spend(1)) return;
+    if (depth > RELATED_WALK_DEPTH_MAX) return skip();
+    if (Array.isArray(v)) {
+      const span = markedSpan(v, m, spans);
+      if (span) return link(span.inner);
+      const ms = Array.isArray(m) ? m : undefined;
+      for (let i = 0; i < v.length && !stopped; i++) walk(v[i], ms?.[i], depth + 1, inList);
+    } else if (typeof v === "string") {
+      if (spend(v.length) && !linksOf(v) && inList) text(v);
+    } else if (v !== null && typeof v === "object") {
+      if (inList) rest.push({ kind: "unread" });
+      if (mapsRead.has(v)) return;
+      mapsRead.add(v);
+      const o = v as Record<string, unknown>;
+      const mo = m !== null && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : undefined;
+      const keys = Object.keys(o);
+      // A key holding a marked span is renamed by its mark (`"x [[a]]"` to
+      // `"x [0]"`): the renamed keys pair up in order.
+      const renamed = mo ? Object.keys(mo).filter((k) => !Object.hasOwn(o, k)) : [];
+      for (let i = 0, r = 0; i < keys.length && !stopped; i++) {
+        const k = keys[i]!;
+        if (spend(k.length)) linksOf(k);
+        const mk = mo && Object.hasOwn(mo, k) ? k : renamed[r++];
+        walk(o[k], mo && mk !== undefined ? mo[mk] : undefined, depth + 1, false);
       }
-    });
-    return readings.some((r) => yamlEqual(r, v));
+    } else if (v !== null && v !== undefined && inList) rest.push({ kind: "unread" });
   };
-  let nodes = 0;
-  const walk = (v: unknown, depth: number) => {
-    if (++nodes > RELATED_WALK_NODES_MAX || depth > RELATED_WALK_DEPTH_MAX) {
-      if (!overrun) unread();
-      overrun = true;
-      return;
-    }
-    if (v === null || v === undefined) return;
-    if (typeof v === "string") {
-      if (new RegExp(WIKILINK_RE.source).test(v)) for (const t of extractWikilinks(v)) link(t);
-      else text(v);
-    } else if (Array.isArray(v)) {
-      if (isReading(v)) return;
-      for (const item of v) walk(item, depth + 1);
-    } else unread();
-  };
-  walk(value, 0);
-  return { present: true, entries: out };
+  walk(parsed.value, marked, 0, true);
+  return { present: true, entries: [...links.map((target): RelatedEntry => ({ kind: "link", target })), ...rest] };
 }
 
-/** Structural equality, walked over `reading` (a small parse of one span), so
- *  comparing it to a shared alias chain costs the reading's size, not the
- *  chain's. */
-function yamlEqual(reading: unknown, v: unknown): boolean {
-  if (Array.isArray(reading)) {
-    return Array.isArray(v) && v.length === reading.length && reading.every((r, i) => yamlEqual(r, v[i]));
-  }
-  if (reading !== null && typeof reading === "object") {
-    if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
-    const rk = Object.keys(reading);
-    const r = reading as Record<string, unknown>;
-    const o = v as Record<string, unknown>;
-    return rk.length === Object.keys(o).length && rk.every((k) => Object.hasOwn(o, k) && yamlEqual(r[k], o[k]));
-  }
-  return Object.is(reading, v);
+/**
+ * The `related` value of `parsed.text` re-parsed with every span YAML reads
+ * alone as a sequence overwritten by a mark: its index in the span's own
+ * brackets (`[[a]]` to `[7]`), so the mark sits wherever the span sat, flow
+ * context included, and starts no comment. Where the value held the span's
+ * `[[…]]` and this holds `[7]`, span 7 was that node; a span in a comment or
+ * inside a string changes no node. Left as written: a span YAML cannot read
+ * alone (an unclosed quote, a ` #`), which is no node and whose overwrite
+ * could move a quote or a comment, and a span a `:` follows, a map key and no
+ * node — so a key a mark renames still holds a `[`, as before, and both keys
+ * keep their place in insertion order. Undefined when no span is overwritten
+ * or the text does not re-parse.
+ */
+function markedValue(parsed: { text: string; offset: number }, spans: readonly Span[]): unknown {
+  const parts: string[] = [];
+  let from = 0;
+  spans.forEach((s, i) => {
+    KEY_AFTER_RE.lastIndex = parsed.offset + s.end;
+    if (KEY_AFTER_RE.test(parsed.text) || !readsAlone(s.inner)) return;
+    parts.push(parsed.text.slice(from, parsed.offset + s.start), `[${i}]`);
+    from = parsed.offset + s.end;
+  });
+  return parts.length ? yamlMap(parts.join("") + parsed.text.slice(from))?.related : undefined;
 }
 
-/** The `[[…]]` spans of `text` outside its YAML comments, each with its inner
- *  text (between the brackets, a `[[[a]]]` span's extra `[` dropped). */
-function uncommentedSpans(text: string): { inner: string }[] {
-  const spans = [...text.matchAll(new RegExp(WIKILINK_RE.source, "g"))].map((m) => ({
-    start: m.index,
-    end: m.index + m[0].length,
-    inner: m[0].slice(2, -2).replace(/^\[+/, ""),
-  }));
+/** The span `v` is: the marked value holds a mark (`[n]`) where the value
+ *  holds a list of a list. An unmarked list reads alike in both values, so a
+ *  number first in it here is a number there too. */
+function markedSpan(v: readonly unknown[], m: unknown, spans: readonly Span[]): Span | undefined {
+  return Array.isArray(m) && typeof m[0] === "number" && Array.isArray(v[0]) ? spans[m[0]] : undefined;
+}
+
+/** Whether YAML reads `[[inner]]` alone as a flow sequence. */
+function readsAlone(inner: string): boolean {
+  try {
+    Bun.YAML.parse(`[[${inner}]]`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The spans of `text` outside its YAML comments — the reader's own judgement,
+ *  used only where YAML refuses the entry. A comment is a `#` at a line's
+ *  start or after whitespace, to the line's end, outside a quoted scalar and
+ *  outside a `[[…]]` span (a span holds no comment, so a `#`, a quote or a
+ *  bracket inside one is inert). A quote opens a scalar only where YAML starts
+ *  one — a line's start or after `:`, `-`, `[`, `{` or `,` — and only when it
+ *  closes later in the entry (`''` and `\"` are escapes); a quoted scalar may
+ *  span lines. */
+function uncommentedSpans(text: string, spans: readonly Span[]): Span[] {
   // Spans masked to a neutral character: nothing inside one opens a quote or a comment.
   let masked = text;
   if (spans.length) {
@@ -298,7 +369,8 @@ function uncommentedSpans(text: string): { inner: string }[] {
       prev = "";
       continue;
     }
-    if (ch === "#" && (i === 0 || /\s/.test(masked[i - 1]!))) {
+    // The entry starts with `related:`, so a `#` always has a character before it.
+    if (ch === "#" && /\s/.test(masked[i - 1]!)) {
       const end = masked.indexOf("\n", i);
       comments.push([i, end < 0 ? masked.length : end]);
       i = end < 0 ? masked.length : end - 1;
@@ -325,7 +397,8 @@ function uncommentedSpans(text: string): { inner: string }[] {
 
 /** The index of the quote that closes the scalar `quote` opens at `open`, or
  *  -1: `''` is an escaped quote in a single-quoted scalar, `\` escapes the next
- *  character in a double-quoted one. */
+ *  character in a double-quoted one. A scan that fails leaves every later quote
+ *  of its kind paired, so at most one fails per kind: linear overall. */
 function closingQuote(text: string, open: number, quote: "'" | '"'): number {
   for (let i = open + 1; i < text.length; i++) {
     const ch = text[i];
@@ -378,7 +451,6 @@ function listsFrontmatter(content: string): Frontmatter | null {
       if (!fm.some((l) => LISTS_KEY_RE.test(l))) return null;
       return new Frontmatter(fm.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l)));
     }
-    if (lines.length < LISTS_GATE_PREFIX_LINES) return null;
   }
   return null;
 }
@@ -432,10 +504,10 @@ const PAGE_EXT_RE = /\.(?:mdx?|html)$/i;
  *  3. a filesystem-absolute path counts when it is under a root; a `/…` path
  *     that is not goes on to step 4;
  *  4. otherwise a path resolves root-relative with the extension implied; a
- *     bare name resolves in the page's own folder, then at the root — each as
- *     spelled, then by its stem, the extension implied
- *     (`resolveSupersededBy`'s pattern) — then by stem, title or alias, only
- *     when that names one page, else it is ambiguous;
+ *     bare name resolves in the page's own folder as spelled, then by its stem
+ *     (`foo.html` → `foo`), then at the root the same two ways — `.md`, then
+ *     `.mdx` implied where the name spells no page extension — then by stem,
+ *     title or alias, only when that names one page, else it is ambiguous;
  *  5. anything else is skipped.
  */
 export function resolveRelatedEntries(entries: readonly RelatedEntry[], ctx: RelatedResolveContext): RelatedResolved {
@@ -478,13 +550,9 @@ export function resolveRelatedEntries(entries: readonly RelatedEntry[], ctx: Rel
         // spelled, then by its stem — then a stem, title or alias.
         const stem = v.replace(PAGE_EXT_RE, "");
         const inDir = (name: string) => (dir === "." ? name : `${dir}/${name}`);
-        hit =
-          byPathImplied(inDir(v)) ??
-          (stem !== v ? byPathImplied(inDir(stem)) : undefined) ??
-          byPathImplied(v) ??
-          (stem !== v ? byPathImplied(stem) : undefined);
+        hit = byPathImplied(inDir(v)) ?? byPathImplied(inDir(stem)) ?? byPathImplied(v) ?? byPathImplied(stem);
         if (!hit) {
-          const named = new Set([...ctx.byName(v.toLowerCase()), ...(stem !== v ? ctx.byName(stem.toLowerCase()) : [])]);
+          const named = new Set([...ctx.byName(v.toLowerCase()), ...ctx.byName(stem.toLowerCase())]);
           if (named.size === 1) hit = [...named][0];
           else if (named.size > 1) isAmbiguous = true;
         }
