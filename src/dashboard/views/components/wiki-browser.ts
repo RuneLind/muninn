@@ -5334,8 +5334,9 @@ function closeWorkPop(cause: PopCloseCause): void {
   if (refocus) focusPopOpener(was.opener, was.openerSel, was.page);
 }
 
-/** Focus the first selector that finds a rail control; the Group button when
- *  none does, so focus never falls to `<body>`. */
+/** Focus the first selector that finds a rail control, else the Group button.
+ *  A wiki with no work threads has no Group button, and focus then stays on
+ *  `<body>`. */
 function focusFirstRailControl(selectors: readonly (string | null | undefined)[]): void {
   for (const sel of selectors) {
     const el = sel ? document.querySelector<HTMLElement>(sel) : null;
