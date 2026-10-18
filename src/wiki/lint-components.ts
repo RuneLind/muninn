@@ -306,9 +306,8 @@ const SOURCE_RUN_RE = /(?:[^\S\n]+[A-Za-z][\w-]*="[^"\n]*")*/y;
  * offset in `content`. Frontmatter is left byte for byte. A `<Name` inside the
  * quoted attribute value of a well-formed opener gets no marker: the marker's
  * quotes would close that value early and change the opener's shape. A tag
- * there carries no attribute (the value holds no `"`), so its only possible
- * finding is a missing required attribute (a bare `<Meter>`); a render that
- * still reads it reports it with no marker, and that finding has no line.
+ * there carries no attribute (the value holds no `"`) and never starts a line
+ * (the value holds no newline), so it has no possible finding.
  */
 function markBody(content: string): { marked: string; offsets: number[] } {
   const bodyAt = content.length - splitFrontmatter(content).body.length;
