@@ -322,6 +322,51 @@ describe("a guard render the page never emits reports nothing", () => {
   });
 });
 
+describe("each DecisionLog guard render reports nothing, on an unlocated page", () => {
+  // Unlocated findings are not deduped, so a guard render that leaked a report
+  // would show here as a second finding for the one Pill.
+  const unlocated = (item: string) =>
+    checkComponents("plans/x.mdx", page("<DecisionLog>", "", item, "", "</DecisionLog>"), disagreeing).map((f) => [f.line, f.message]);
+  const one = [[undefined, 'Pill tone="bad" renders as default']];
+
+  test("the date-tail cut's guard (decisionTailCut)", () => {
+    const item = '- **D1** — Use the <Pill tone="bad">x</Pill> chip here. Fag, 07.10.';
+    expect(html(page("<DecisionLog>", "", item, "", "</DecisionLog>"))).toContain('<span class="dl-tail">Fag, 07.10.</span>');
+    expect(unlocated(item)).toEqual(one);
+  });
+
+  test("the first-sentence split's guard (splitDecisionText)", () => {
+    const item = '- **D2** — First <Pill tone="bad">a</Pill> sentence here. Second sentence follows.';
+    expect(html(page("<DecisionLog>", "", item, "", "</DecisionLog>"))).toContain('<span class="dl-first">First');
+    expect(unlocated(item)).toEqual(one);
+  });
+
+  test("the struck lead's guard (decisionParts)", () => {
+    const item = '- **D3** — ~~Old <Pill tone="bad">a</Pill> claim here.~~ New claim here. More text follows.';
+    expect(html(page("<DecisionLog>", "", item, "", "</DecisionLog>"))).toContain('<span class="dl-first">New claim here.</span>');
+    expect(unlocated(item)).toEqual(one);
+  });
+});
+
+describe("finding order: located in source order, then unlocated in observed order", () => {
+  test("a block tag the parser reads before an earlier inline tag still sorts after it", () => {
+    // The render reads the appended blocks in both renders, unmarked, so the
+    // locate succeeds and those two tags are its unlocated ones.
+    const extra = ["", '<Callout tone="u1">', "a", "</Callout>", "", '<Callout tone="u2">', "b", "</Callout>"].join("\n");
+    const appending = (content: string) => renderWikiHtml(`${content}\n${extra}`, () => undefined);
+    const content = page('Prose <Pill tone="bad">a</Pill> here.', "", '<Callout tone="success">', "x", "</Callout>");
+    const seen: ObservedComponentTag[] = [];
+    observeComponentTags((t) => seen.push(t), () => html(content));
+    expect(seen.map((t) => t.name)).toEqual(["Callout", "Pill"]);
+    expect(checkComponents("plans/x.mdx", content, appending).map((f) => [f.line, f.message])).toEqual([
+      [5, 'Pill tone="bad" renders as default'],
+      [7, 'Callout tone="success" renders as info'],
+      [undefined, 'Callout tone="u1" renders as info'],
+      [undefined, 'Callout tone="u2" renders as info'],
+    ]);
+  });
+});
+
 describe("checkComponents — what the renderer does not claim is not checked", () => {
   test("an unclosed block tag renders as text and is not checked", () => {
     expect(run(page('<Callout tone="success">', "never closed"))).toEqual([]);
@@ -562,6 +607,46 @@ describe("a repeat call is served from the memo", () => {
     expect(calls).toBe(max + 1);
     checkComponents("plans/x.mdx", nth(0), seam);
     expect(calls).toBe(max + 2);
+  });
+});
+
+describe("the memo: least recently used, 2000 entries", () => {
+  const nth = (i: number) => page(`<Pill tone="t${i}">p</Pill>`);
+  const counter = () => {
+    const seam = Object.assign(() => void seam.calls++, { calls: 0 });
+    return seam;
+  };
+  const fill = (seam: () => void, from: number, to: number) => {
+    for (let i = from; i < to; i++) checkComponents("plans/x.mdx", nth(i), seam);
+  };
+
+  test("2000 distinct entries all stay cached", () => {
+    const seam = counter();
+    fill(seam, 0, 2000);
+    expect(seam.calls).toBe(2000);
+    checkComponents("plans/x.mdx", nth(0), seam);
+    expect(seam.calls).toBe(2000);
+  });
+
+  test("the 2001st distinct entry evicts the oldest and only it", () => {
+    const seam = counter();
+    fill(seam, 0, 2001);
+    checkComponents("plans/x.mdx", nth(1), seam);
+    expect(seam.calls).toBe(2001);
+    checkComponents("plans/x.mdx", nth(0), seam);
+    expect(seam.calls).toBe(2002);
+  });
+
+  test("a hit makes its entry the newest, so it survives the next eviction", () => {
+    const seam = counter();
+    fill(seam, 0, 2000);
+    checkComponents("plans/x.mdx", nth(0), seam);
+    fill(seam, 2000, 2001);
+    expect(seam.calls).toBe(2001);
+    checkComponents("plans/x.mdx", nth(0), seam);
+    expect(seam.calls).toBe(2001);
+    checkComponents("plans/x.mdx", nth(1), seam);
+    expect(seam.calls).toBe(2002);
   });
 });
 

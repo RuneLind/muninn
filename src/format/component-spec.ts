@@ -134,6 +134,13 @@ export function normalizeVerdictValue(value: string | undefined): "yes" | "no" {
 const FACT_VERDICTS = ["ok", "warn", "bad", "unknown"] as const;
 export type FactVerdict = (typeof FACT_VERDICTS)[number];
 
+/** The glyphs `Fact v=` accepts beside the words, as the verify prompt writes
+ *  them; read with or without the VS16 (U+FE0F). */
+export const FACT_VERDICT_GLYPHS: Readonly<Record<string, FactVerdict>> = { "✅": "ok", "⚠️": "warn", "❌": "bad", "❓": "unknown" };
+
+const stripVs16 = (s: string) => s.replace(/\uFE0F/g, "");
+const FACT_GLYPH_READ = new Map(Object.entries(FACT_VERDICT_GLYPHS).map(([g, v]) => [stripVs16(g), v]));
+
 /**
  * Fact-check verdict vocabulary, normalized from an untrusted `v` attr.
  *
@@ -143,13 +150,6 @@ export type FactVerdict = (typeof FACT_VERDICTS)[number];
  * optional VS16) are accepted alongside the words, since the writer derives `v`
  * from those blocks and a stray emoji is more likely than a typo'd word.
  */
-/** The glyphs `Fact v=` accepts beside the words, as the verify prompt writes
- *  them; read with or without the VS16 (U+FE0F). */
-export const FACT_VERDICT_GLYPHS: Readonly<Record<string, FactVerdict>> = { "✅": "ok", "⚠️": "warn", "❌": "bad", "❓": "unknown" };
-
-const stripVs16 = (s: string) => s.replace(/\uFE0F/g, "");
-const FACT_GLYPH_READ = new Map(Object.entries(FACT_VERDICT_GLYPHS).map(([g, v]) => [stripVs16(g), v]));
-
 export function readFactVerdict(input: string | undefined): AttrRead<FactVerdict> {
   const raw = present(input);
   if (raw === undefined) return { value: "unknown", fellBack: false };

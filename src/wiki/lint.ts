@@ -81,7 +81,8 @@
  * 15. component-value / component-attr — on `.mdx` pages, a component
  *                      attribute the renderer falls back on (a value its spec
  *                      `parse` rejects, or a missing `required` one) or drops
- *                      (an attribute `COMPONENT_ATTRS` does not list). Rules:
+ *                      (an attribute `COMPONENT_ATTRS` does not list, or an
+ *                      earlier spelling of a repeated one). Not culled. Rules:
  *                      `lint-components.ts`; `scripts/wiki-check.ts` runs it alone.
  *
  * The store's index builder silently drops unresolved link targets

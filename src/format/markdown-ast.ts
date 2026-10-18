@@ -1525,12 +1525,6 @@ function parseBlocksInner(
   return blocks;
 }
 
-/**
- * Attempt to parse a component block starting at `lines[i]`. Returns the parsed
- * block plus the index of the first unconsumed line, or `null` when the line is
- * not a clean, whitelisted, closed component (in which case the caller lets it
- * fall through to normal block/text handling — today's behavior for `<foo>`).
- */
 /** A block tag as the author check sees it: a `Lane` says whether it is a lane
  *  of a `NextMoves` block (its body's direct child), the only place its `kind`
  *  picks a lane's look. */
@@ -1538,6 +1532,12 @@ function observedBlockTag(name: ComponentName, rawAttrs: string, nm: NextMovesNe
   return name === "Lane" && nm === 1 ? { name, rawAttrs, inline: false, inNextMoves: true } : { name, rawAttrs, inline: false };
 }
 
+/**
+ * Attempt to parse a component block starting at `lines[i]`. Returns the parsed
+ * block plus the index of the first unconsumed line, or `null` when the line is
+ * not a clean, whitelisted, closed component (in which case the caller lets it
+ * fall through to normal block/text handling — today's behavior for `<foo>`).
+ */
 function tryParseComponent(
   lines: string[],
   i: number,

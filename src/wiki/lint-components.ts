@@ -29,11 +29,13 @@
  * the scanner tests, and `parseAttrs` drops it. The marked render's reports
  * carry the marker, so each finding names the exact source offset. Its reports
  * are used only when they equal the plain render's, tag for tag; otherwise the
- * plain render's findings are returned without a line.
+ * plain render's findings are returned without a line, and none is deduped.
  *
  * A page with no tag the check could judge is not rendered, and results are
- * memoized on relPath + content (`checkComponents`). A finding judges the value
- * the renderer read and prints the source text (`shownValues`).
+ * memoized per render seam on relPath + content hash (`checkComponents`). A
+ * finding judges the value the renderer read; it prints the source text only
+ * for a located tag whose source reproduces that value, else `…` for each
+ * parked part ({@link spellings}).
  *
  * Imports nothing that reads the environment: `scripts/wiki-check.ts` runs it
  * with no `.env`.
@@ -204,8 +206,9 @@ function attrDetail(name: ComponentName, attr: string, raw: string, shown: strin
 
 /** The findings for one tag. `parseAttrs` keeps the last spelling of a
  *  repeated attribute, so that one is judged and each earlier one is reported
- *  as dropped. Judging reads the value the renderer read; the message prints
- *  the source text ({@link spellings}). */
+ *  as dropped: one finding per earlier spelling, identical spellings included.
+ *  Judging reads the value the renderer read; the message prints the value
+ *  {@link spellings} shows. */
 function checkTag(relPath: string, tag: Tag): LintFinding[] {
   const out: LintFinding[] = [];
   const at = tag.line === undefined ? { relPath } : { relPath, line: tag.line };
@@ -374,8 +377,9 @@ const JUDGEABLE_RE = new RegExp(
   `<(?:${COMPONENT_NAMES.join("|")})\\s+[^\\s/>]` + (REQUIRED_NAMES.length > 0 ? `|<(?:${REQUIRED_NAMES.join("|")})(?=[\\s/>])` : ""),
 );
 
-/** Results per render seam, keyed on relPath and a content hash. A lint run
- *  repeats on every `/wiki/gardener` load over pages that rarely change. */
+/** Results per render seam, keyed on relPath, content length and a content
+ *  hash, least recently used evicted past the cap. A lint run repeats on every
+ *  `/wiki/gardener` load over pages that rarely change. */
 export const COMPONENT_MEMO_MAX = 2000;
 const memos = new WeakMap<PageRender, Map<string, LintFinding[]>>();
 
@@ -383,9 +387,10 @@ const memos = new WeakMap<PageRender, Map<string, LintFinding[]>>();
  * Every component finding on one page, located ones in source order, then the
  * unlocated. Pure apart from the render; `lintWiki` calls it on `.mdx` pages
  * and `scripts/wiki-check.ts` on the files it walks. The observer reports each
- * tag the emitted render reads once (`component-observer.ts`); a located tag is
- * also keyed on its source offset, so one tag is never two findings. Results
- * are memoized per render seam (`COMPONENT_MEMO_MAX` entries, oldest evicted).
+ * tag the emitted render reads once (`component-observer.ts`); located tags are
+ * also deduped on their exact source offset, unlocated ones are not deduped.
+ * Results are memoized per render seam (`COMPONENT_MEMO_MAX` entries; a hit
+ * makes its entry the newest, and past the cap the least recently used goes).
  */
 export function checkComponents(relPath: string, content: string, render: PageRender = readerRender): LintFinding[] {
   if (!JUDGEABLE_RE.test(content)) return [];
