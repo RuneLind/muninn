@@ -27,6 +27,7 @@
 
 import { isMetaStem } from "../dashboard/views/components/wiki-filter.ts";
 import { normalizeRelPath } from "./rel-path.ts";
+import { mapLedgerProvider } from "./provenance.ts";
 
 // ── Wire shapes ─────────────────────────────────────────────────────────────
 
@@ -97,7 +98,83 @@ export interface IndexWork {
   asOfMs: number;
   sinceMs: number;
   threads: WorkThread[];
+  /** The grouping layer's input (`work-evidence.ts`), versioned. Absent from an
+   *  older server; a client that does not read it sees today's payload. */
+  evidence?: WorkEvidence;
 }
+
+export const WORK_EVIDENCE_VERSION = 1;
+
+/** Why a block of the evidence is incomplete. */
+export type WorkEvidenceReason =
+  /** The relation lists hit their bound (`WORK_EVIDENCE_RELATIONS_MAX`). */
+  | "relations-cap"
+  /** claude-usage clipped the sessions answer: the oldest sessions are missing. */
+  | "ledger-truncated"
+  /** The contribution rows hit their bound (`WORK_EVIDENCE_CONTRIBUTIONS_MAX`). */
+  | "contributions-cap";
+
+/**
+ * The grouping layer's evidence over the SHIPPED threads' focus pages
+ * (`work-evidence.ts`; plan `muninn-wiki-work-thread-grouping`, «Evidence and
+ * payload»). Page-level, so a client can regroup or split threads without a
+ * request: every witness names focus pages, never threads.
+ */
+export interface WorkEvidence {
+  version: typeof WORK_EVIDENCE_VERSION;
+  /** Threads before and after the {@link WORK_THREADS_MAX} cut. The blocks
+   *  below cover the shipped ones only, so a cut is not incompleteness. */
+  threads: { candidates: number; shipped: number };
+  relations: {
+    complete: boolean;
+    reasons: WorkEvidenceReason[];
+    /** Focus page → its series' census key (`seriesCensusKey`), for series
+     *  members (`seriesMembersByFoldKey`). */
+    series: Record<string, string>;
+    /** Focus page → its listing project. */
+    projects: Record<string, string>;
+    /** A resolved authored `related:` entry between two focus pages, as written
+     *  (from → to). */
+    related: [from: string, to: string][];
+    /** An issue's unique owning focus page (`owns:`) and a focus page that
+     *  names it by a ref that counts (`facetJiraKeys`). */
+    issues: [key: string, owner: string, referrer: string][];
+    /** An issue some focus page owns or names, with more than one owner in the
+     *  wiki: no edge. */
+    ambiguousIssues: { key: string; owners: string[] }[];
+    /** `related:` entries on focus pages that resolved to no page (prose, Jira
+     *  keys, outside the root) or to more than one. Counts, never incompleteness. */
+    relatedSkipped: { skipped: number; ambiguous: number };
+  };
+  contributions: {
+    complete: boolean;
+    reasons: WorkEvidenceReason[];
+    /** Keys of shipped threads whose rows were left out WHOLE by
+     *  `WORK_EVIDENCE_CONTRIBUTIONS_MAX` (in thread order); every other
+     *  thread's rows ship whole. Non-empty exactly when `reasons` holds
+     *  `contributions-cap`. A thread's rows are complete when its key is not
+     *  here and `reasons` does not hold `ledger-truncated`. */
+    cut: string[];
+    rows: WorkContribution[];
+  };
+}
+
+/** One session's kept work on one page of a shipped thread:
+ *  `[provider:id, owner page, thread key, kind, rolled-up edits, firstMs, lastMs]`.
+ *  The session is `workSessionRef`'s spelling (`claude-code:<id>`), so a row
+ *  joins a `WorkThreadSession` through `workSessionRef(session)`, not through
+ *  its raw `provider`.
+ *  `kind` is the kind the THREAD kept — a hub focus that `buildThreads` moved to
+ *  another thread is a `touch` here. Pass events never appear. */
+export type WorkContribution = [
+  session: string,
+  page: string,
+  thread: string,
+  kind: "focus" | "touch",
+  edits: number,
+  firstMs: number,
+  lastMs: number,
+];
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -153,6 +230,11 @@ export interface WorkFocusInput {
 export interface WorkFocusResult {
   pages: Map<string, PageWork>;
   threads: WorkThread[];
+  /** Threads before the {@link WORK_THREADS_MAX} cut. */
+  candidates: number;
+  /** Every non-pass event of a shipped thread's sessions, in thread order —
+   *  a projection that changes neither `pages` nor `threads`. */
+  contributions: WorkContribution[];
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -455,7 +537,45 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
     pageRaw.set(rec, rawWork(shipped, asOfMs));
   }
 
-  return { pages, threads: buildThreads(events, pageRaw, asOfMs) };
+  const built = buildThreads(events, pageRaw, asOfMs);
+  return {
+    pages,
+    threads: built.threads,
+    candidates: built.candidates,
+    contributions: projectContributions(events, built.kept),
+  };
+}
+
+/** The `provider:id` a contribution names a session by: the ledger's
+ *  provider through `mapLedgerProvider`, the one mapping the page `sessions:`
+ *  frontmatter and `providerGlyph` use (`claude` → `claude-code`). A client
+ *  joins a row to a thread's session by `workSessionRef(threadSession)`, since
+ *  `WorkThreadSession.provider` keeps the ledger's spelling. */
+export function workSessionRef(s: { provider: string; id: string }): string {
+  return `${mapLedgerProvider(s.provider) ?? s.provider}:${s.id}`;
+}
+
+/**
+ * The contributions of the shipped threads, read off the same events
+ * `buildThreads` grouped — never rebuilt from timestamps. Pass events and
+ * sessions outside a shipped thread (touch-only, a dropped hub-only group,
+ * past the cap) contribute nothing. Order: thread order, then newest
+ * `lastMs`, then session ref, then page.
+ */
+function projectContributions(events: readonly SessionEvent[], kept: readonly KeptThread[]): WorkContribution[] {
+  const out: WorkContribution[] = [];
+  const order = (a: WorkContribution, b: WorkContribution) =>
+    b[6] - a[6] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0);
+  for (const t of kept) {
+    const rows: WorkContribution[] = [];
+    for (const e of events) {
+      if (e.kind === "pass" || !t.sessions.has(e.session)) continue;
+      const kind = e.kind === "focus" && t.focus.has(e.page) ? "focus" : "touch";
+      rows.push([workSessionRef(e.session), e.page.relPath, t.key, kind, e.edits, e.firstMs, e.lastMs]);
+    }
+    out.push(...rows.sort(order));
+  }
+  return out;
 }
 
 function maxDefined(vals: (number | undefined)[]): number | undefined {
@@ -466,7 +586,19 @@ function maxDefined(vals: (number | undefined)[]): number | undefined {
 
 // ── Threads (D6, D16) ───────────────────────────────────────────────────────
 
-function buildThreads(events: readonly SessionEvent[], pageRaw: ReadonlyMap<PageRec, number>, asOfMs: number): WorkThread[] {
+/** A shipped thread's membership, which `buildThreads` returns beside it: its
+ *  sessions and the focus pages it KEPT (after the D16 hub moves). */
+interface KeptThread {
+  key: string;
+  sessions: ReadonlySet<WorkSession>;
+  focus: ReadonlySet<PageRec>;
+}
+
+function buildThreads(
+  events: readonly SessionEvent[],
+  pageRaw: ReadonlyMap<PageRec, number>,
+  asOfMs: number,
+): { threads: WorkThread[]; candidates: number; kept: KeptThread[] } {
   const work = events.filter((e) => e.kind !== "pass");
   const focusSessions = new Set(work.filter((e) => e.kind === "focus").map((e) => e.session));
 
@@ -545,7 +677,7 @@ function buildThreads(events: readonly SessionEvent[], pageRaw: ReadonlyMap<Page
 
   const rawOf = (p: PageRec) => pageRaw.get(p) ?? 0;
   const byRaw = (a: PageRec, b: PageRec) => rawOf(b) - rawOf(a) || (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0);
-  const out: { thread: WorkThread; score: number }[] = [];
+  const out: { thread: WorkThread; score: number; group: Group }[] = [];
   for (const g of groups.values()) {
     if (g.focus.size === 0) continue;
     const focusPages = [...g.focus.keys()].sort(byRaw);
@@ -562,6 +694,7 @@ function buildThreads(events: readonly SessionEvent[], pageRaw: ReadonlyMap<Page
     const score = rawOf(focusPages[0]!) + 0.3 * focusPages.slice(1).reduce((sum, p) => sum + rawOf(p), 0);
     out.push({
       score,
+      group: g,
       thread: {
         key: key!.relPath,
         pages: focusPages.map((p) => p.relPath),
@@ -573,7 +706,12 @@ function buildThreads(events: readonly SessionEvent[], pageRaw: ReadonlyMap<Page
     });
   }
   out.sort((a, b) => b.score - a.score || (a.thread.key < b.thread.key ? -1 : a.thread.key > b.thread.key ? 1 : 0));
-  return out.slice(0, WORK_THREADS_MAX).map((t) => t.thread);
+  const shipped = out.slice(0, WORK_THREADS_MAX);
+  return {
+    threads: shipped.map((t) => t.thread),
+    candidates: out.length,
+    kept: shipped.map((t) => ({ key: t.thread.key, sessions: t.group.sessions, focus: new Set(t.group.focus.keys()) })),
+  };
 }
 
 /** The thread order score at `now` from the shipped per-page events — the

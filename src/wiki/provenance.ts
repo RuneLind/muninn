@@ -117,7 +117,8 @@ export function parseSessionRef(raw: string): SessionRef {
 /**
  * The ledger's `provider` → the `provider:` prefix the stamper writes.
  *
- * ONE mapping, applied in {@link enrichSessions} and nowhere else, so a bare
+ * ONE mapping, applied through {@link mapLedgerProvider} (by {@link enrichSessions}
+ * and by work-focus's `workSessionRef`), so a bare
  * stamped ref, a ghost row and a Stamp ref all agree about which provider a
  * session belongs to. The ledger spells Claude Code `claude`; the frontmatter
  * spells it `claude-code`, which is what `providerGlyph` knows and what

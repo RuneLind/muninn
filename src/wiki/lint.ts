@@ -110,6 +110,7 @@ import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts"
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { checkOwnsEntries, checkState, isStateScopePage, STATE_LINT_CHECKS, stateOwners, type OwnerPage, type StatePage } from "./lint-state.ts";
+import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
   closeNearMisses,
@@ -174,26 +175,13 @@ export interface LintReport {
 }
 
 /**
- * Reserved wiki-infrastructure basenames — never real content pages. Matches the
- * gardener's `FORBIDDEN_BASENAMES` (`src/gardener/draft.ts`). Skipped as orphan
- * subjects, discounted as orphan sole-linkers (an index-of-contents that links
- * everything must not mask a page that nothing else references), and skipped by
- * the stale-updated + missing-sources checks.
+ * Reserved wiki-infrastructure pages (`isReservedBasename`, `frontmatter-lists.ts`)
+ * are never real content pages: skipped as orphan subjects, discounted as orphan
+ * sole-linkers (an index-of-contents that links everything must not mask a page
+ * that nothing else references), and skipped by the stale-updated +
+ * missing-sources checks.
  */
-const RESERVED_BASENAMES = new Set([
-  "log.md",
-  "index.md",
-  "claude.md",
-  // `.mdx` twins — the source-page drafter writes native `.mdx`, so the gardener's
-  // `FORBIDDEN_BASENAMES` reserves both extensions; mirror that here.
-  "log.mdx",
-  "index.mdx",
-  "claude.mdx",
-]);
-
-function reservedBasename(relPathOrKey: string): boolean {
-  return RESERVED_BASENAMES.has(path.posix.basename(relPathOrKey).toLowerCase());
-}
+const reservedBasename = isReservedBasename;
 
 async function defaultReadFile(absPath: string): Promise<string | null> {
   try {

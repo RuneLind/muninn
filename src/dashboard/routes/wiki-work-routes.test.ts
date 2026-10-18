@@ -121,3 +121,96 @@ describe("work facts on the listing and the page", () => {
     for (const row of [...page.outgoing, ...page.backlinks, ...(page.related ?? [])]) expect(row.work).toBeUndefined();
   });
 });
+
+describe("grouping evidence on the listing", () => {
+  let root = "";
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeAll(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-evidence-"));
+    await mkdir(path.join(root, "plans"));
+    // Two threads, one session each: `a` owns ABC-1 and names `c` in related:
+    // (unquoted, so YAML alone would not read it); `c` names ABC-1 by its
+    // stamped jira: line; both carry one series.
+    await writeFile(
+      path.join(root, "plans/a.mdx"),
+      "---\ntitle: A\nseries: Work\nowns: [ABC-1]\nrelated: [[c]], [[nowhere]]\n---\n\nBody.\n",
+    );
+    await writeFile(path.join(root, "plans/c.mdx"), "---\ntitle: C\nseries: work\njira: [ABC-1]\n---\n\nBody.\n");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `evwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetWorkSessionsForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+    const registered = getWikiRegistry().find((e) => e.name === "evwiki")!.root;
+    const t = NOW - 3_600_000;
+    const s = (id: string, p: string, at: number) => ({
+      id,
+      provider: "claude",
+      title: `Work on ${p}`,
+      first: at,
+      last: at + 60_000,
+      bulk: false,
+      text: { from: "prompt", paths: [], links: [], files: [] },
+      files: [{ p, edits: 6, firstMs: at, lastMs: at + 60_000 }],
+    });
+    await refreshWorkSessions(registered, {
+      urlConfigured: true,
+      baseUrl: "http://ledger.test",
+      now: () => NOW,
+      registry: async () => [{ name: "evwiki", root: registered }],
+      fetchSessions: async () => ({ form: "sessions", truncated: false, sessions: [s("s1", "plans/a.mdx", t), s("s2", "plans/c.mdx", t - 600_000)] }),
+      fetchPreWindow: async (_root, until) => ({ until, truncated: false, pages: [] }),
+    });
+    __resetWikiCacheForTest();
+  });
+
+  afterAll(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetWorkSessionsForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("the versioned block rides IndexWork beside the unchanged thread array; pages carry no index-only fields", async () => {
+    const res = await app.request("/api/wiki/pages?wiki=evwiki");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      pages: Record<string, unknown>[];
+      work: { threads: { key: string; pages: string[] }[]; evidence: Record<string, unknown> };
+    };
+    expect(body.work.threads.map((t) => t.pages)).toEqual([["plans/a.mdx"], ["plans/c.mdx"]]);
+    expect(body.work.evidence).toEqual({
+      version: 1,
+      threads: { candidates: 2, shipped: 2 },
+      relations: {
+        complete: true,
+        reasons: [],
+        series: { "plans/a.mdx": "work", "plans/c.mdx": "work" },
+        projects: {},
+        related: [["plans/a.mdx", "plans/c.mdx"]],
+        issues: [["ABC-1", "plans/a.mdx", "plans/c.mdx"]],
+        ambiguousIssues: [],
+        relatedSkipped: { skipped: 1, ambiguous: 0 },
+      },
+      contributions: {
+        complete: true,
+        reasons: [],
+        cut: [],
+        rows: [
+          ["claude-code:s1", "plans/a.mdx", "plans/a.mdx", "focus", 6, NOW - 3_600_000, NOW - 3_540_000],
+          ["claude-code:s2", "plans/c.mdx", "plans/c.mdx", "focus", 6, NOW - 4_200_000, NOW - 4_140_000],
+        ],
+      },
+    });
+    for (const p of body.pages) for (const k of ["owns", "related", "relatedSkipped", "relatedAmbiguous"]) expect(p).not.toHaveProperty(k);
+    const page = (await (await app.request("/api/wiki/page?wiki=evwiki&relPath=plans%2Fa.mdx")).json()) as { meta: Record<string, unknown> };
+    for (const k of ["owns", "related", "relatedSkipped", "relatedAmbiguous"]) expect(page.meta).not.toHaveProperty(k);
+  });
+});

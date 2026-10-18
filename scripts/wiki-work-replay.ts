@@ -4,6 +4,7 @@
  * `muninn-wiki-work-threads`, D17):
  *
  *   bun scripts/wiki-work-replay.ts --wiki <name> --at <iso> [--pos <relPath>]…
+ *     [--sessions-json <path> --pre-json <path> [--summary-json <path>]]
  *
  * Builds the index on a `git clone --shared` of the wiki's repo checked out at
  * the newest first-parent commit authored at or before `at` — content, series,
@@ -35,10 +36,22 @@
  * prompt-to-file attribution (`text`) is not cut at `at`. Opencode titles are
  * latest-wins upstream, so `named` reads today's title.
  *
+ * FROZEN ANSWERS. `--sessions-json` (the sessions form) and `--pre-json` (the
+ * summary form at the window start) read captured ledger answers from files
+ * instead of calling claude-usage, so a reaped session cannot change the
+ * outcome; both or neither. `--summary-json` (the summary form at `until = at`)
+ * is optional: without it the worked ledger is not loaded, and the Activity and
+ * Worked-on sections run without worked dates (the threads do not read them).
+ * A pre-window answer captured for a slightly different window start is
+ * re-stamped to this replay's start, and the script says by how much and how
+ * many of its rows land inside that gap. `CLAUDE_USAGE_URL` is not read.
+ *
  * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
  * row's derivation), the rendered Work threads section (cards, open state,
  * rows), the post-lift Activity section, every series the lift left ghosts in,
- * and the Worked-on top 10 (sort instant, state, shown date). The sections come
+ * and the Worked-on top 10 (sort instant, state, shown date), then the grouping
+ * evidence (`IndexWork.evidence`: edges by kind, completeness, contribution
+ * counts) and the `related:` census over every page. The sections come
  * from `railInputFor` + `buildRail`, never a re-assembly (D20).
  *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
@@ -53,7 +66,7 @@ import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
 import { clipSessionsAt, parsePreWindow, parseWorkSessions, refreshWorkSessions } from "../src/wiki/work-sessions.ts";
 import { parseWorkedPages } from "../src/wiki/worked-ledger.ts";
-import { threadScore, WORK_WINDOW_MS, type WorkThread } from "../src/wiki/work-focus.ts";
+import { threadScore, WORK_WINDOW_MS, workSessionRef, type WorkEvidence, type WorkThread } from "../src/wiki/work-focus.ts";
 import { claudeUsageHttpStatus, claudeUsageJson } from "../src/utils/claude-usage-fetch.ts";
 import { projectCounts, toListing } from "../src/dashboard/routes/wiki-routes.ts";
 import { railInputFor } from "../src/dashboard/views/components/wiki-rail-input.ts";
@@ -257,6 +270,97 @@ function printThreads(index: WikiIndex, threads: WorkThread[], at: number): void
   });
 }
 
+/** The grouping evidence: completeness, edges by kind (page pairs), the
+ *  ambiguous issues and the contributions per thread. */
+function printEvidence(index: WikiIndex, evidence: WorkEvidence | undefined): void {
+  console.log(`\nGrouping evidence:`);
+  if (!evidence) {
+    console.log("  absent (no evidence block on this build)");
+    return;
+  }
+  const r = evidence.relations;
+  const c = evidence.contributions;
+  const why = (complete: boolean, reasons: readonly string[]) => (complete ? "complete" : `INCOMPLETE (${reasons.join(", ")})`);
+  console.log(`  version ${evidence.version}; threads ${evidence.threads.shipped} shipped of ${evidence.threads.candidates} candidates`);
+  console.log(`  relations: ${why(r.complete, r.reasons)}; contributions: ${why(c.complete, c.reasons)}${c.cut.length ? `, ${c.cut.length} threads cut whole` : ""}`);
+  const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+  const { evidence: _e, ...bare } = index.work!;
+  console.log(
+    `  bytes: IndexWork ${bytes(index.work)} with evidence, ${bytes(bare)} without; evidence ${bytes(evidence)} ` +
+      `(relations ${bytes(r)}, contributions ${bytes(c)}); ${r.related.length + r.issues.length + r.ambiguousIssues.length} relation entries, ${c.rows.length} rows`,
+  );
+  const threadOf = new Map<string, number>();
+  (index.work?.threads ?? []).forEach((t, i) => t.pages.forEach((p) => threadOf.has(p) || threadOf.set(p, i + 1)));
+  const at = (p: string) => `${p} [t${threadOf.get(p) ?? "?"}]`;
+  const seriesKeys = new Map<string, string[]>();
+  for (const [p, k] of Object.entries(r.series)) seriesKeys.set(k, [...(seriesKeys.get(k) ?? []), p]);
+  const projectKeys = new Map<string, string[]>();
+  for (const [p, k] of Object.entries(r.projects)) projectKeys.set(k, [...(projectKeys.get(k) ?? []), p]);
+  const cross = (pages: string[]) => new Set(pages.map((p) => threadOf.get(p))).size > 1;
+  console.log(`  series: ${Object.keys(r.series).length} focus pages in ${seriesKeys.size} series (${[...seriesKeys.values()].filter(cross).length} spanning more than one thread)`);
+  for (const [k, ps] of [...seriesKeys].sort()) console.log(`    ${k}: ${ps.map(at).join(", ")}`);
+  console.log(`  projects: ${Object.keys(r.projects).length} focus pages in ${projectKeys.size} projects (${[...projectKeys.values()].filter(cross).length} spanning more than one thread)`);
+  for (const [k, ps] of [...projectKeys].sort()) console.log(`    ${k}: ${ps.map(at).join(", ")}`);
+  const relCross = r.related.filter(([a, b]) => threadOf.get(a) !== threadOf.get(b)).length;
+  console.log(`  related: ${r.related.length} edges (${relCross} across threads); skipped ${r.relatedSkipped.skipped}, ambiguous ${r.relatedSkipped.ambiguous} on focus pages`);
+  for (const [a, b] of r.related) console.log(`    ${at(a)} → ${at(b)}`);
+  const issueCross = r.issues.filter(([, o, ref]) => threadOf.get(o) !== threadOf.get(ref)).length;
+  console.log(`  owned issues: ${r.issues.length} edges (${issueCross} across threads); ${r.ambiguousIssues.length} ambiguous`);
+  for (const [k, o, ref] of r.issues) console.log(`    ${k}: owner ${at(o)} ← ${at(ref)}`);
+  for (const a of r.ambiguousIssues) console.log(`    ${a.key}: ambiguous, owners ${a.owners.join(", ")}`);
+  const perThread = new Map<string, { rows: number; focus: number; sessions: Set<string> }>();
+  for (const [s, , t, kind] of c.rows) {
+    const e = perThread.get(t) ?? { rows: 0, focus: 0, sessions: new Set<string>() };
+    e.rows++;
+    if (kind === "focus") e.focus++;
+    e.sessions.add(s);
+    perThread.set(t, e);
+  }
+  console.log(`  contributions: ${c.rows.length} rows (${c.rows.filter((x) => x[3] === "focus").length} focus) over ${new Set(c.rows.map((x) => x[0])).size} sessions`);
+  (index.work?.threads ?? []).forEach((t, i) => {
+    const e = perThread.get(t.key);
+    const joined = t.sessions.filter((x) => e?.sessions.has(workSessionRef(x))).length;
+    const cut = c.cut.includes(t.key) ? " (cut)" : "";
+    console.log(`    t${i + 1}: ${e?.rows ?? 0} rows, ${e?.focus ?? 0} focus, ${joined}/${t.sessions.length} sessions joined${cut}`);
+  });
+}
+
+/** The `related:` and `owns:` census over EVERY page of the build, as the
+ *  shipped readers see them. */
+function printRelatedCensus(index: WikiIndex): void {
+  const withRelated = index.pages.filter((p) => p.related || p.relatedSkipped || p.relatedAmbiguous);
+  const sum = (f: (p: (typeof index.pages)[number]) => number) => index.pages.reduce((n, p) => n + f(p), 0);
+  console.log(`\nrelated:/owns: census (all pages):`);
+  console.log(`  related: ${withRelated.length} pages with entries; ${sum((p) => p.related?.length ?? 0)} resolved targets, ${sum((p) => p.relatedSkipped ?? 0)} skipped, ${sum((p) => p.relatedAmbiguous ?? 0)} ambiguous`);
+  console.log(`  owns: ${index.pages.filter((p) => p.owns).length} pages own ${new Set(index.pages.flatMap((p) => p.owns ?? [])).size} keys`);
+}
+
+/** The frozen ledger answers, or null when the flags are absent. */
+async function frozenAnswers(sinceMs: number): Promise<{ sessions: unknown; pre: unknown; summary: unknown | null } | null> {
+  const sessionsPath = arg("sessions-json");
+  const prePath = arg("pre-json");
+  const summaryPath = arg("summary-json");
+  if (!sessionsPath && !prePath && !summaryPath) return null;
+  if (!sessionsPath || !prePath) throw new ReplayError("--sessions-json and --pre-json go together (--summary-json is optional)");
+  const read = async (p: string): Promise<unknown> => {
+    try {
+      return JSON.parse(await Bun.file(p).text());
+    } catch (err) {
+      throw new ReplayError(`${p}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  const [sessions, preRaw, summary] = await Promise.all([read(sessionsPath), read(prePath), summaryPath ? read(summaryPath) : null]);
+  const pre = preRaw as { until?: unknown; pages?: { w?: number; b?: number }[] };
+  if (typeof pre?.until === "number" && pre.until !== sinceMs) {
+    const late = (pre.pages ?? []).filter((r) => Math.max(r.w ?? 0, r.b ?? 0) > sinceMs).length;
+    console.log(
+      `frozen pre-window answer: until ${new Date(pre.until).toISOString()} re-stamped to ${new Date(sinceMs).toISOString()} ` +
+        `(Δ ${((pre.until - sinceMs) / 1000).toFixed(1)} s; ${late} row(s) written inside the gap)`,
+    );
+  }
+  return { sessions, pre: { ...(pre as object), until: sinceMs }, summary };
+}
+
 async function main(): Promise<void> {
   const wikiName = arg("wiki");
   const atIso = arg("at");
@@ -274,7 +378,8 @@ async function main(): Promise<void> {
       `no registered wiki named ${wikiName} (registered: ${names}). A wiki registers through WIKI_EXTRA or a bot's wikiDir under MUNINN_BOTS_DIR; set them when the checkout has no .env`,
     );
   }
-  const baseUrl = (process.env.CLAUDE_USAGE_URL ?? "").trim().replace(/\/+$/, "");
+  const frozen = await frozenAnswers(sinceMs);
+  const baseUrl = frozen ? "frozen" : (process.env.CLAUDE_USAGE_URL ?? "").trim().replace(/\/+$/, "");
   if (!baseUrl) throw new ReplayError("CLAUDE_USAGE_URL is not set");
   const registeredRoot = path.resolve(entry.root);
 
@@ -289,15 +394,17 @@ async function main(): Promise<void> {
       throw new ReplayError(`${baseUrl}${route}: ${why}`);
     }
   };
-  const [summaryAt, preWindow, sessionsBody] = await Promise.all([
-    q(`summary=1&until=${at}`),
-    q(`summary=1&until=${sinceMs}`),
-    q(`sessions=1&since=${sinceMs}&until=${at}`),
-  ]);
+  const [summaryAt, preWindow, sessionsBody] = frozen
+    ? [frozen.summary, frozen.pre, frozen.sessions]
+    : await Promise.all([
+        q(`summary=1&until=${at}`),
+        q(`summary=1&until=${sinceMs}`),
+        q(`sessions=1&since=${sinceMs}&until=${at}`),
+      ]);
   // Parsed here, so a bad answer names its reason: the memos' own warns go to
   // LogTape, which this script does not configure.
   const checks = [
-    ["summary at --at", parseWorkedPages(summaryAt)],
+    ...(summaryAt === null ? [] : [["summary at --at", parseWorkedPages(summaryAt)] as const]),
     ["summary at window start", parsePreWindow(preWindow, sinceMs)],
     ["sessions", parseWorkSessions(sessionsBody)],
   ] as const;
@@ -322,7 +429,9 @@ async function main(): Promise<void> {
     const cloneRoot = path.join(repo, sub);
 
     const now = () => at;
-    await refreshWorkedLedger(cloneRoot, { urlConfigured: true, baseUrl, now, fetchPages: async () => summaryAt });
+    if (summaryAt !== null) {
+      await refreshWorkedLedger(cloneRoot, { urlConfigured: true, baseUrl, now, fetchPages: async () => summaryAt });
+    }
     const memo = await refreshWorkSessions(
       cloneRoot,
       {
@@ -344,6 +453,9 @@ async function main(): Promise<void> {
     console.log(`wiki ${entry.name} at ${new Date(at).toISOString()}`);
     console.log(`commit ${commit.sha.slice(0, 10)} (${new Date(commit.at * 1000).toISOString()}), ${index.pages.length} pages, ${stamped} mtimes set`);
     console.log(`sessions: ${kept.length} kept, ${clipped} clipped (span --at); window from ${new Date(sinceMs).toISOString()}`);
+    if (frozen) {
+      console.log(`ledger answers: frozen (files)${summaryAt === null ? "; worked ledger not loaded (no --summary-json)" : ""}`);
+    }
     printThreads(index, index.work?.threads ?? [], at);
 
     // The rail input the shipped viewer defaults produce — PR 4 prints
@@ -356,6 +468,8 @@ async function main(): Promise<void> {
     printActivitySection(rail.input);
     printSeriesGhosts(rail.input);
     printWorkedOn(rail.input, at);
+    printEvidence(index, index.work?.evidence);
+    printRelatedCensus(index);
   } finally {
     await cleanup();
   }

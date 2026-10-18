@@ -11,7 +11,9 @@ import {
   rawWork,
   threadScore,
   WORK_HUB_BACKLINKS,
+  WORK_THREADS_MAX,
   WORK_TITLE_MAX,
+  workSessionRef,
   type WorkFocusInput,
   type WorkPageInput,
   type WorkSession,
@@ -409,5 +411,120 @@ describe("the hub threshold", () => {
     expect(isWorkHub(25)).toBe(false);
     expect(isWorkHub(26)).toBe(true);
     expect(isWorkHub(0)).toBe(false);
+  });
+});
+
+describe("contributions (grouping evidence)", () => {
+  const rows = (r: ReturnType<typeof run>) => r.contributions.map(([s, p, t, k, e]) => [s, p, t, k, e]);
+
+  test("each kept event names the thread that kept it; threads and page events are unchanged", () => {
+    const sessions = [
+      sess("s1", [f("p/a.mdx", 5, T(40)), f("p/b.mdx", 1, T(40))]),
+      sess("s2", [f("p/a.mdx", 5, T(10)), f("p/c.mdx", 5, T(10))]),
+      sess("s3", [f("p/x.mdx", 4, T(5))]),
+    ];
+    const pages = [pg("p/a.mdx"), pg("p/b.mdx"), pg("p/c.mdx"), pg("p/x.mdx")];
+    const r = run(sessions, pages);
+    expect(r.candidates).toBe(2);
+    expect(rows(r).filter((c) => c[2] === "p/a.mdx")).toEqual([
+      ["claude-code:s2", "p/a.mdx", "p/a.mdx", "focus", 5],
+      ["claude-code:s2", "p/c.mdx", "p/a.mdx", "focus", 5],
+      ["claude-code:s1", "p/a.mdx", "p/a.mdx", "focus", 5],
+      ["claude-code:s1", "p/b.mdx", "p/a.mdx", "touch", 1],
+    ]);
+    expect(rows(r).filter((c) => c[2] === "p/x.mdx")).toEqual([["claude-code:s3", "p/x.mdx", "p/x.mdx", "focus", 4]]);
+    // Every session of a thread contributes, and every focus page has a focus row.
+    for (const t of r.threads) {
+      const mine = r.contributions.filter((c) => c[2] === t.key);
+      expect(new Set(mine.map((c) => c[0]))).toEqual(new Set(t.sessions.map(workSessionRef)));
+      for (const p of t.pages) expect(mine.some((c) => c[1] === p && c[3] === "focus")).toBe(true);
+    }
+    // The first and last event times are the rolled-up row's.
+    expect(r.contributions.find((c) => c[0] === "claude-code:s3")!.slice(5)).toEqual([T(5), T(5) + 10 * 60_000]);
+  });
+
+  test("a hub the D16 rule moved to another thread is a touch in the thread that lost it", () => {
+    const hub = pg("flows/hub.mdx", { backlinks: 30 });
+    const r = run(
+      [
+        sess("s1", [f("p/a.mdx", 6, T(30)), f("flows/hub.mdx", 6, T(30))]),
+        sess("s2", [f("p/b.mdx", 4, T(5)), f("flows/hub.mdx", 3, T(5))]),
+      ],
+      [hub, pg("p/a.mdx"), pg("p/b.mdx")],
+    );
+    const owner = r.threads.find((t) => t.pages.includes("flows/hub.mdx"))!;
+    const other = r.threads.find((t) => t !== owner)!;
+    const hubRow = (key: string) => r.contributions.find((c) => c[2] === key && c[1] === "flows/hub.mdx")![3];
+    expect(hubRow(owner.key)).toBe("focus");
+    expect(hubRow(other.key)).toBe("touch");
+  });
+
+  test("passes, touch-only sessions and a dropped hub-only thread contribute nothing", () => {
+    const hub = pg("flows/hub.mdx", { backlinks: 30 });
+    const r = run(
+      [
+        sess("s1", [f("p/a.mdx", 6, T(30)), f("flows/hub.mdx", 9, T(5))]),
+        sess("s2", [f("flows/hub.mdx", 3, T(50))]),
+        sess("s3", [f("p/z.mdx", 1, T(2)), f("p/y.mdx", 1, T(2))]),
+        sess("bulk", [f("p/a.mdx", 9, T(1))], { bulk: true }),
+      ],
+      [hub, pg("p/a.mdx"), pg("p/y.mdx"), pg("p/z.mdx")],
+    );
+    expect(new Set(r.contributions.map((c) => c[0]))).toEqual(new Set(["claude-code:s1"]));
+  });
+
+  test("fork dedupe: the fork's repeated rows are not credited to it", () => {
+    const row = f("p/a.mdx", 5, T(10));
+    // A fork starts after its original and carries the original's rows.
+    const r = run([sess("orig", [row]), sess("fork", [row, f("p/b.mdx", 4, T(3))], { first: T(9) })], [pg("p/a.mdx"), pg("p/b.mdx")]);
+    expect(r.contributions.filter((c) => c[1] === "p/a.mdx").map((c) => c[0])).toEqual(["claude-code:orig"]);
+    expect(r.contributions.filter((c) => c[0] === "claude-code:fork").map((c) => c[1])).toEqual(["p/b.mdx"]);
+  });
+
+  test("attachments and aliases: a contribution names the canonical owner page", () => {
+    const r = run(
+      [sess("a", [f("data/q.csv", 6, T(10)), f("p/old.mdx", 4, T(9))])],
+      [pg("p/report.mdx", { refs: ["data/q.csv"] }), pg("p/new.mdx", { aliasPaths: ["p/old.mdx"] })],
+    );
+    expect(rows(r).map((c) => [c[1], c[4]]).sort()).toEqual([
+      ["p/new.mdx", 4],
+      ["p/report.mdx", 3],
+    ]);
+  });
+
+  test("past the thread cap, candidates count every thread and contributions cover the shipped ones only", () => {
+    const n = WORK_THREADS_MAX + 3;
+    const sessions = Array.from({ length: n }, (_, i) => sess(`s${i}`, [f(`p/t${i}.mdx`, 3 + i, T(1 + i))]));
+    const r = run(
+      sessions,
+      Array.from({ length: n }, (_, i) => pg(`p/t${i}.mdx`)),
+    );
+    expect(r.threads).toHaveLength(WORK_THREADS_MAX);
+    expect(r.candidates).toBe(n);
+    const shipped = new Set(r.threads.map((t) => t.key));
+    expect(new Set(r.contributions.map((c) => c[2]))).toEqual(shipped);
+  });
+});
+
+describe("fix round 1 batch 3 — I: a contribution names its session the way the repo does", () => {
+  test("refs go through the provenance mapping, and a thread session joins its rows through workSessionRef", () => {
+    const r = run(
+      [
+        sess("s1", [f("p/a.mdx", 5, T(30))]),
+        { ...sess("o1", [f("p/a.mdx", 4, T(20))]), provider: "opencode" },
+        { ...sess("x1", [f("p/a.mdx", 3, T(10))]), provider: "codex" },
+      ],
+      [pg("p/a.mdx")],
+    );
+    // `claude` is the ledger's spelling; `claude-code` is the frontmatter's, the
+    // stamper's and `providerGlyph`'s. An unknown provider passes through.
+    expect(new Set(r.contributions.map((c) => c[0]))).toEqual(new Set(["claude-code:s1", "opencode:o1", "codex:x1"]));
+    const t = r.threads[0]!;
+    expect(t.sessions.find((s) => s.id === "s1")!.provider).toBe("claude");
+    expect(new Set(t.sessions.map(workSessionRef))).toEqual(new Set(r.contributions.map((c) => c[0])));
+  });
+
+  test("a provider the mapping does not name keeps its own spelling", () => {
+    expect(workSessionRef({ provider: "", id: "x" })).toBe(":x");
   });
 });
