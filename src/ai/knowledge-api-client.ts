@@ -16,6 +16,10 @@ export class KnowledgeApiError extends Error {
     /** The upstream error body's `detail` string (FastAPI's shape), when it
      *  had one — which of several same-status refusals huginn meant. */
     public readonly upstreamDetail?: string,
+    /** True when the request never reached the API: the connection was
+     *  refused or the host did not resolve, so no byte was sent. False for a
+     *  timeout or a reset, where the API may have the request. */
+    public readonly neverConnected = false,
   ) {
     super(message);
     this.name = "KnowledgeApiError";
@@ -31,6 +35,17 @@ interface KnowledgeApiOptions {
    *  signal so a caller that went away frees the upstream connection. The
    *  upstream may still finish its work (huginn's sync routes do). */
   signal?: AbortSignal;
+}
+
+/** Transport error codes that fail before a request is sent. Bun reports a
+ *  refused connection and an unresolvable host both as `ConnectionRefused`;
+ *  the rest are the Node/undici spellings, read from `err.cause` too. */
+const NEVER_CONNECTED_CODES = new Set(["ConnectionRefused", "ECONNREFUSED", "FailedToOpenSocket", "ENOTFOUND", "EAI_AGAIN"]);
+
+function neverConnected(err: unknown): boolean {
+  const code = (e: unknown) => (e && typeof e === "object" ? (e as { code?: unknown }).code : undefined);
+  const c = code(err) ?? code((err as { cause?: unknown } | null)?.cause);
+  return typeof c === "string" && NEVER_CONNECTED_CODES.has(c);
 }
 
 /** A FastAPI error body's `detail` string, or `undefined` for any other body. */
@@ -74,7 +89,13 @@ async function fetchKnowledgeApiRes(
     if (options?.body) fetchOptions.body = options.body;
     if (options?.headers) fetchOptions.headers = options.headers;
 
-    const res = await fetch(`${baseUrl}${path}`, fetchOptions);
+    let res: Response;
+    try {
+      res = await fetch(`${baseUrl}${path}`, fetchOptions);
+    } catch (err) {
+      clearTimeout(timeout);
+      throw new KnowledgeApiError("Knowledge API unreachable", 503, undefined, undefined, neverConnected(err));
+    }
     if (!res.ok) {
       // Read under the timeout: a stalled error body aborts like the request.
       const detail = await readErrorDetail(res);

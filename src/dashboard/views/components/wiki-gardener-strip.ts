@@ -278,8 +278,9 @@ export function backlogDeleteNotice(warning: unknown, caveats: string[]): Backlo
 
 /**
  * What a REFUSED `backlog-doc-delete` leaves: the notice (the route's `error`,
- * plus its `warning` when one rides a 404 — drafts of a gone doc that are still
- * approvable) and whether the gate must re-list, which it must when the
+ * plus its `warning` when one rides a 404 — either drafts of a gone doc that
+ * are still approvable, or drafts kept because huginn did not confirm the doc
+ * is gone) and whether the gate must re-list, which it must when the
  * source-gone 404's cleanup removed drafts its cards still show.
  */
 export function backlogDeleteFailure(

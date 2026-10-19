@@ -113,6 +113,36 @@ describe("the request half both share", () => {
     }
   });
 
+  test("only a connection that never opened is flagged neverConnected", async () => {
+    // A refused connection or an unresolvable host sent nothing, so a caller
+    // may treat it as "huginn did nothing". A timeout, an HTTP answer and an
+    // unreadable body all reached huginn.
+    for (const call of [fetchKnowledgeApi, fetchKnowledgeApiText]) {
+      for (const host of ["http://127.0.0.1:1", "http://no-such-host.invalid"]) {
+        const err = await call(host, "/json").then(
+          () => null,
+          (e: unknown) => e as KnowledgeApiError,
+        );
+        expect([host, err!.statusCode, err!.neverConnected]).toEqual([host, 503, true]);
+      }
+      const timedOut = await call(base, "/slow", { timeoutMs: 20 }).then(
+        () => null,
+        (e: unknown) => e as KnowledgeApiError,
+      );
+      expect([timedOut!.statusCode, timedOut!.neverConnected]).toEqual([503, false]);
+      const answered = await call(base, "/broken").then(
+        () => null,
+        (e: unknown) => e as KnowledgeApiError,
+      );
+      expect(answered!.neverConnected).toBe(false);
+    }
+    const unreadable = await fetchKnowledgeApi(base, "/notjson").then(
+      () => null,
+      (e: unknown) => e as KnowledgeApiError,
+    );
+    expect([unreadable!.statusCode, unreadable!.neverConnected]).toEqual([503, false]);
+  });
+
   test("the timeout aborts and reports 503; both fetchers agree", async () => {
     for (const call of [fetchKnowledgeApi, fetchKnowledgeApiText]) {
       const err = await call(base, "/slow", { timeoutMs: 20 }).then(

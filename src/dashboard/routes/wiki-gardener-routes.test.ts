@@ -1870,6 +1870,21 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     }
   });
 
+  test("only the drafts-left-on-the-gate warning carries the gate code", async () => {
+    // The /summaries client links the review gate on `warningCode`, so the
+    // not-gone 404's warning (drafts kept, still valid) must not carry it.
+    deleteResponse = huginnGone404;
+    proposalDeleteThrows = new Error("connection terminated unexpectedly");
+    const gone = (await (await del({ collection: "youtube-summaries", id: "junk.md" })).json()) as Record<string, unknown>;
+    expect(gone.warningCode).toBe("drafts_on_gate");
+
+    proposalDeleteThrows = null;
+    deleteResponse = () => Response.json({ detail: "Not Found" }, { status: 404 });
+    const kept = (await (await del({ collection: "youtube-summaries", id: "junk.md" })).json()) as Record<string, unknown>;
+    expect(kept.warning).toContain("did not confirm");
+    expect(kept.warningCode).toBeUndefined();
+  });
+
   test("huginn 404 (id not in that collection) → 404, and neither snapshot set is touched", async () => {
     deleteResponse = () => new Response("not found", { status: 404 });
     const res = await del({ collection: "youtube-summaries", id: "junk.md" });

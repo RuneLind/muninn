@@ -937,12 +937,14 @@ const MAX_DISMISS_KEYS = 2000;
 const DELETE_TIMEOUT_MS = 20_000;
 
 /** How long a delete holds the summary save claim when it cannot release it:
- *  huginn's DELETE timed out, failed in transport or answered a 5xx that may
- *  follow the move, so the move may have landed or may still land. huginn's handler is a stat, one index read and a file move, done in
- *  milliseconds; a request past the 20 s client timeout is queued in its
- *  worker pool or on a stalled disk. 5 min (15x the client timeout) keeps
- *  re-runs out until such a move has landed; every definite answer releases
- *  long before. */
+ *  huginn's DELETE timed out, failed in transport after connecting or answered
+ *  a 5xx that may follow the move, so the move may have landed or may still
+ *  land. huginn's handler (`delete_document`) is local file work: it stats the
+ *  source, reads its index, creates the trash directory chain, moves the file
+ *  and reads every collection's `manifest.json` to find the ones sharing the
+ *  source. A request past the 20 s client timeout is queued in its worker pool
+ *  or on a stalled disk. 5 min (15x the client timeout) keeps re-runs out
+ *  until such a move has landed; every definite answer releases long before. */
 const DELETE_CLAIM_BUDGET_MS = 5 * 60_000;
 
 /** huginn's DELETE 404 when the source file is not on disk — the one 404 that
@@ -2128,8 +2130,9 @@ export function registerWikiGardenerRoutes(
     // taking it moves the key's generation, so a re-run whose claim lapsed can
     // no longer re-take it and save. How it lets go depends on what huginn said:
     // a move → `release` (the generation moves on); the gardener mutex, a 4xx or
-    // a pre-move 500 (`huginnDeleteMovedNothing`) → `abandon` (nothing was
-    // deleted, so a lapsed re-run may still save); no answer or any other 5xx →
+    // a pre-move 500 (`huginnDeleteMovedNothing`) or a connection that never
+    // opened (`neverConnected`) → `abandon` (nothing was deleted, so a lapsed
+    // re-run may still save); no answer or any other 5xx →
     // neither, because the move may have landed or may still land, and the
     // claim keeps re-runs out until it lapses at DELETE_CLAIM_BUDGET_MS.
     const sourceId = SUMMARY_SOURCES.find((s) => s.collection === collection)!.id;
@@ -2157,8 +2160,8 @@ export function registerWikiGardenerRoutes(
         const err = done.refused;
         const movedNothing =
           err instanceof KnowledgeApiError &&
-          err.upstreamStatus !== undefined &&
-          huginnDeleteMovedNothing(err.upstreamStatus, err.upstreamDetail);
+          (err.neverConnected ||
+            (err.upstreamStatus !== undefined && huginnDeleteMovedNothing(err.upstreamStatus, err.upstreamDetail)));
         letGo = movedNothing ? "abandon" : "keep";
       }
     } finally {
@@ -2200,10 +2203,22 @@ export function registerWikiGardenerRoutes(
               ? {
                   warning:
                     "muninn could not remove the wiki drafts written from this document (failed: source proposals delete) — reject them on /wiki/gardener.",
+                  // The one warning whose remedy is the review gate; the
+                  // /summaries client links the gate on this code alone.
+                  warningCode: "drafts_on_gate",
                 }
               : {}),
           },
           404,
+        );
+      }
+      if (err instanceof KnowledgeApiError && err.neverConnected) {
+        return c.json(
+          {
+            error: `huginn is unreachable (${message}); nothing was deleted. Try again once huginn is running.`,
+            code: "huginn_unreachable",
+          },
+          503,
         );
       }
       if (upstream === undefined) {

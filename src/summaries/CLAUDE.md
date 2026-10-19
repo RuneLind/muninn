@@ -222,20 +222,25 @@ deleted document back (`summary-save-delete-race-db.test.ts`). It abandons
 only when nothing was moved: the gardener mutex, any huginn 4xx (huginn raises
 every one before the move), or a 500 whose `detail` is one of huginn's
 pre-move errors (the manifest read, the index-mapping read, `Could not move
-source file:`; `huginnDeleteMovedNothing`). Any other 5xx — huginn's own
+source file:`; `huginnDeleteMovedNothing`), or a connection that never opened
+(`KnowledgeApiError.neverConnected`: refused, or the host did not resolve), which
+answers **503 `huginn_unreachable`** saying nothing was deleted. Any other 5xx — huginn's own
 `Internal Server Error` for an exception after the move, a proxy 502/504 while
 huginn may still be working — and NO answer at all (the 20 s client timeout, a
-transport failure) let go of nothing: the move may have landed or may still
+transport failure after connecting) let go of nothing: the move may have landed or may still
 land, and a re-run claimed right after would read the still-present file and
 write the deleted document back. Abandoning there restored a lapsed re-run's
 generation, and that run then wrote the deleted document back. The claim
-lapses at the 5-minute budget instead (15x the client timeout; huginn's move is
-a stat, an index read and a file rename), and the 502 says the delete may have
-completed. A huginn 404 re-runs the proposal cleanup only when its
+lapses at the 5-minute budget instead (15x the client timeout; huginn's handler
+is local file work — a stat, an index read, the trash directory chain, the move
+and a read of every collection's `manifest.json`), and the 502 says the delete
+may have completed. A huginn 404 re-runs the proposal cleanup only when its
 `detail` is the source-file-gone one (`Source file for document '…' not found in
 collection '…'`): the membership gate's 404 (the file exists, the index lags), an
 unknown collection and a huginn without the route all name a document that may
-still exist, so its drafts are kept and the 404 says so in `warning`.
+still exist, so its drafts are kept and the 404 says so in `warning`. Only the
+source-gone 404 whose cleanup failed adds `warningCode: "drafts_on_gate"`, and
+the `/summaries` client shows the review-gate link on that code alone.
 
 "Settles" is the connector's promise and not this module's, though: `runRerunJob`
 awaits `deps.oneShot`, and a call that never settles pinned the document at 409
