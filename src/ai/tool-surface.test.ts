@@ -9,6 +9,7 @@ import {
   fencedCanUseTool,
   fencedSettings,
   installedClaudeCliVersion,
+  isFetchableWebUrl,
   isInsideDirs,
   refuseFencedSurface,
   toolSurfaceTestSeam,
@@ -150,6 +151,44 @@ describe("fencedCanUseTool", () => {
     expect((await can("WebSearch", { query: "q" }, opts))!.behavior).toBe("allow");
   });
 
+  // Each range: an address inside it is denied, and the addresses just outside it are allowed.
+  const pin = (denied: string[], allowed: string[]) => {
+    for (const url of denied) expect([url, isFetchableWebUrl(url)]).toEqual([url, false]);
+    for (const url of allowed) expect([url, isFetchableWebUrl(url)]).toEqual([url, true]);
+  };
+
+  test("224.0.0.0/3 (multicast and reserved) is blocked; 223.255.255.255 is not", () => {
+    pin(["https://224.0.0.1/", "https://239.255.255.250/", "https://240.0.0.1/", "https://255.255.255.255/"],
+      ["https://223.255.255.255/"]);
+  });
+
+  test("192.0.0.0/24 and 192.0.2.0/24 are blocked; the rest of 192.0/16 is not", () => {
+    pin(["https://192.0.0.1/", "https://192.0.0.255/", "https://192.0.2.1/", "https://192.0.2.255/"],
+      ["https://192.0.1.1/", "https://192.0.3.1/", "https://192.0.32.10/", "https://192.0.255.1/"]);
+  });
+
+  test("198.18.0.0/15 is blocked; 198.17.255.255 and 198.20.0.1 are not", () => {
+    pin(["https://198.18.0.1/", "https://198.19.255.255/"], ["https://198.17.255.255/", "https://198.20.0.1/"]);
+  });
+
+  test("NAT64 64:ff9b::/96 is judged by its embedded IPv4", () => {
+    pin(["https://[64:ff9b::127.0.0.1]/", "https://[64:ff9b::a00:1]/", "https://[64:ff9b::c0a8:101]/"],
+      ["https://[64:ff9b::8.8.8.8]/", "https://[64:ff9b::808:808]/"]);
+  });
+
+  test("6to4 2002::/16 is judged by its embedded IPv4", () => {
+    pin(["https://[2002:7f00:1::]/", "https://[2002:a00:1::1]/", "https://[2002:a9fe:a9fe::]/"],
+      ["https://[2002:808:808::1]/"]);
+  });
+
+  test("IPv6 multicast ff00::/8 is blocked", () => {
+    pin(["https://[ff02::1]/", "https://[ff05::1:3]/", "https://[ffff::1]/"], ["https://[2606:4700::1111]/"]);
+  });
+
+  test("the documentation ranges the denylist leaves out pass, as documented", () => {
+    pin([], ["https://198.51.100.1/", "https://203.0.113.1/", "https://[2001:db8::1]/", "https://[100::1]/", "https://[2001::1]/"]);
+  });
+
   test("isInsideDirs treats the dir itself as inside and a prefix-sharing sibling as outside", () => {
     expect(isInsideDirs(framesDir, [framesDir])).toBe(true);
     expect(isInsideDirs(`${framesDir}2/a`, [framesDir])).toBe(false);
@@ -169,15 +208,17 @@ describe("isInsideDirs fails closed", () => {
     symlinkSync(join(root, "gone.txt"), join(framesDir, "dangling.txt"));
   });
 
-  test("a trailing slash through a file symlink (ENOTDIR) is outside", async () => {
+  test("a trailing slash on a file symlink is outside: realpath refuses it (ENOTDIR), and the walk would too", async () => {
     expect(isInsideDirs(`${fileLink}/`, [framesDir])).toBe(false);
     const can = fencedCanUseTool({ read: [framesDir] });
     const opts = { signal: new AbortController().signal } as never;
     expect((await can("Read", { file_path: `${fileLink}/` }, opts))!.behavior).toBe("deny");
   });
 
-  test("a path too long to resolve (ENAMETOOLONG) through an escaping symlink is outside", () => {
-    expect(isInsideDirs(`${dl}/${"./".repeat(600)}real.txt`, [framesDir])).toBe(false);
+  test("a path too long to resolve (ENAMETOOLONG) is outside, even when it names a new file inside", () => {
+    // Over PATH_MAX on macOS (1024) and Linux (4096). Without the `./` runs the
+    // walk would resolve <frames>/new.jpg as inside: only the realpath error refuses it.
+    expect(isInsideDirs(`${framesDir}/${"./".repeat(2100)}new.jpg`, [framesDir])).toBe(false);
   });
 
   test("a missing file under an escaping dir symlink is outside", () => {
@@ -212,6 +253,22 @@ describe("isInsideDirs fails closed", () => {
     } finally {
       process.chdir(saved);
     }
+  });
+
+  test("a root that does not resolve contains nothing: a file used as a dir (ENOTDIR)", () => {
+    expect(isInsideDirs(join(framesDir, "x.jpg"), [`${join(root, "real.txt")}/`])).toBe(false);
+    expect(isInsideDirs(join(framesDir, "x.jpg"), [join(root, "real.txt", "sub")])).toBe(false);
+  });
+
+  test("a root that does not resolve contains nothing: a dangling symlink", () => {
+    expect(isInsideDirs(join(framesDir, "x.jpg"), [join(framesDir, "dangling.txt")])).toBe(false);
+  });
+
+  test("a root that does not resolve contains nothing: a symlink loop (ELOOP)", () => {
+    const loop = join(root, "loop");
+    symlinkSync(loop, loop);
+    expect(isInsideDirs(join(framesDir, "x.jpg"), [loop])).toBe(false);
+    expect(isInsideDirs(join(framesDir, "x.jpg"), [join(loop, "sub")])).toBe(false);
   });
 
   test('a root of "/" or with a trailing separator contains its files', () => {

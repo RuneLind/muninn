@@ -141,9 +141,13 @@ export function isInsideDirs(path: string, dirs: string[]): boolean {
 /**
  * Whether WebFetch on a `{ web }` run may reach `url`: http or https (the CLI
  * upgrades http), and a host that is neither a local-only name (`localhost`,
- * `*.localhost`, `*.internal`, `*.local`) nor an IP literal in a loopback,
- * private, link-local, CGNAT, unique-local, multicast or reserved range,
- * IPv4-mapped and other IPv4-embedding IPv6 forms included. The URL parser
+ * `*.localhost`, `*.internal`, `*.local`) nor an IP literal in a blocked range.
+ * IPv4: 0/8, 10/8, 127/8, 100.64/10, 169.254/16, 172.16/12, 192.168/16,
+ * 192.0.0/24, 192.0.2/24, 198.18/15 and 224/3. IPv6: fc00::/7, fe80::/10,
+ * fec0::/10, ff00::/8, and the IPv4 embedded in ::/96, ::ffff:0:0/96,
+ * 64:ff9b::/96 and 2002::/16 checked against the IPv4 list. No other range is
+ * blocked: 198.51.100/24, 203.0.113/24, 2001:db8::/32, 100::/64 and Teredo
+ * 2001::/32 pass. The URL parser
  * normalizes `2130706433` and `0x7f.1` to `127.0.0.1` first. A name that
  * RESOLVES to a private address passes: this checks the URL, not DNS.
  */
@@ -177,14 +181,14 @@ function testSeamAllowsHost(url: string): boolean {
   }
 }
 
-function isPublicIpv4([a, b]: number[]): boolean {
+function isPublicIpv4([a, b, c]: number[]): boolean {
   if (a === undefined || b === undefined) return false;
   if (a === 0 || a === 10 || a === 127 || a >= 224) return false; // this-network, private, loopback, multicast + reserved
   if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT 100.64/10
   if (a === 169 && b === 254) return false; // link-local
   if (a === 172 && b >= 16 && b <= 31) return false; // private 172.16/12
   if (a === 192 && b === 168) return false; // private
-  if (a === 192 && b === 0) return false; // 192.0.0/24 IETF protocol assignments (and 192.0.2/24 docs)
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false; // 192.0.0/24 IETF protocol assignments, 192.0.2/24 TEST-NET-1
   if (a === 198 && (b === 18 || b === 19)) return false; // benchmarking 198.18/15
   return true;
 }
