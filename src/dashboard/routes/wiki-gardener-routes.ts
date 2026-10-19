@@ -937,8 +937,8 @@ const MAX_DISMISS_KEYS = 2000;
 const DELETE_TIMEOUT_MS = 20_000;
 
 /** How long a delete holds the summary save claim when it cannot release it:
- *  huginn's DELETE timed out or failed in transport, so the move may still
- *  land. huginn's handler is a stat, one index read and a file move, done in
+ *  huginn's DELETE timed out, failed in transport or answered a 5xx that may
+ *  follow the move, so the move may have landed or may still land. huginn's handler is a stat, one index read and a file move, done in
  *  milliseconds; a request past the 20 s client timeout is queued in its
  *  worker pool or on a stalled disk. 5 min (15x the client timeout) keeps
  *  re-runs out until such a move has landed; every definite answer releases
@@ -951,6 +951,23 @@ const DELETE_CLAIM_BUDGET_MS = 5 * 60_000;
  *  unknown collection, a huginn without the route — name a document that may
  *  still exist. */
 const HUGINN_SOURCE_GONE = /^Source file for document '.*' not found in collection '/s;
+
+/** huginn's DELETE 500s raised BEFORE the source file left `reader.basePath`
+ *  (`delete_document`, huginn `main/routes/collections.py`): the manifest read,
+ *  the index-mapping read, and the move itself (an `OSError` from
+ *  `shutil.move` leaves the source in place). Any other 5xx — huginn's own
+ *  "Internal Server Error" for an exception after the move, a proxy 502/504
+ *  while huginn may still be working — may follow a move. */
+const HUGINN_DELETE_PRE_MOVE_500 =
+  /^(Could not read the manifest for collection '|Could not read the index mapping for collection '|Could not move source file: )/;
+
+/** Did huginn's answer prove the source file was NOT moved? A 4xx always
+ *  does (huginn raises every one before the move); a 5xx only with a
+ *  {@link HUGINN_DELETE_PRE_MOVE_500} detail. */
+export function huginnDeleteMovedNothing(upstreamStatus: number, upstreamDetail: string | undefined): boolean {
+  if (upstreamStatus >= 400 && upstreamStatus < 500) return true;
+  return upstreamStatus === 500 && HUGINN_DELETE_PRE_MOVE_500.test(upstreamDetail ?? "");
+}
 
 /**
  * Per-bot backlog cache. The backlog (wiki URL sweep + 4 collection listings +
@@ -2110,10 +2127,11 @@ export function registerWikiGardenerRoutes(
     // 409, since a re-run in flight would write the deleted document back; and
     // taking it moves the key's generation, so a re-run whose claim lapsed can
     // no longer re-take it and save. How it lets go depends on what huginn said:
-    // a move → `release` (the generation moves on); a definite refusal, or the
-    // gardener mutex → `abandon` (nothing was deleted, so a lapsed re-run may
-    // still save); no answer → neither, because the move may still land, and
-    // the claim keeps re-runs out until it lapses at DELETE_CLAIM_BUDGET_MS.
+    // a move → `release` (the generation moves on); the gardener mutex, a 4xx or
+    // a pre-move 500 (`huginnDeleteMovedNothing`) → `abandon` (nothing was
+    // deleted, so a lapsed re-run may still save); no answer or any other 5xx →
+    // neither, because the move may have landed or may still land, and the
+    // claim keeps re-runs out until it lapses at DELETE_CLAIM_BUDGET_MS.
     const sourceId = SUMMARY_SOURCES.find((s) => s.collection === collection)!.id;
     const claim = summarySaveClaims.claim(sourceId, id, DELETE_CLAIM_BUDGET_MS);
     if (!claim) {
@@ -2136,8 +2154,12 @@ export function registerWikiGardenerRoutes(
       }
       done = await run;
       if ("refused" in done) {
-        const answered = done.refused instanceof KnowledgeApiError && done.refused.upstreamStatus !== undefined;
-        letGo = answered ? "abandon" : "keep";
+        const err = done.refused;
+        const movedNothing =
+          err instanceof KnowledgeApiError &&
+          err.upstreamStatus !== undefined &&
+          huginnDeleteMovedNothing(err.upstreamStatus, err.upstreamDetail);
+        letGo = movedNothing ? "abandon" : "keep";
       }
     } finally {
       if (letGo === "release") summarySaveClaims.release(claim);
@@ -2188,6 +2210,14 @@ export function registerWikiGardenerRoutes(
         return c.json(
           {
             error: `huginn did not answer the delete (${message}). The delete may still complete; reload in a few minutes before retrying.`,
+          },
+          502,
+        );
+      }
+      if (letGo === "keep") {
+        return c.json(
+          {
+            error: `huginn answered the delete with an error (${message}). The delete may have completed; reload in a few minutes before retrying.`,
           },
           502,
         );

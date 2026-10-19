@@ -69,9 +69,10 @@ const BOT = { name: "racebot", dir: "/nowhere", connector: "claude-cli" } as unk
 /** huginn, faked: the file, the DELETE count, and the ingest POSTs. */
 let docRaw: string | null;
 let deleteCalls: number;
-/** How the fake huginn answers a DELETE: move the file, a definite 500, or a
- *  transport failure (the request may or may not have reached huginn). */
-let deleteMode: "move" | "500" | "transport";
+/** How the fake huginn answers a DELETE: move the file, a pre-move 500, a
+ *  transport failure (the request may or may not have reached huginn), or a
+ *  move followed by a 5xx (an exception after `shutil.move`, a proxy 504). */
+let deleteMode: "move" | "500" | "transport" | "move-then-500" | "move-then-504";
 let ingests: Array<Record<string, unknown>>;
 /** Releases the gated model call. */
 let releaseModel: () => void;
@@ -181,6 +182,8 @@ beforeEach(async () => {
       }
       deleteCalls++;
       docRaw = null;
+      if (deleteMode === "move-then-500") return new Response("Internal Server Error", { status: 500 });
+      if (deleteMode === "move-then-504") return new Response("Gateway Timeout", { status: 504 });
       return Response.json({ status: "deleted", movedTo: "/tmp/deleted/x.md", reindex: { [COLLECTION]: "started" } });
     }
     void input;
@@ -365,6 +368,24 @@ describe("summary re-run vs Delete", () => {
     expect(ingests).toHaveLength(0);
     expect(String(failed.json.error)).toContain("may still complete");
   });
+
+  for (const mode of ["move-then-500", "move-then-504"] as const) {
+    test(`a delete that moved the file and then answered ${mode.slice(-3)} refuses a lapsed re-run's save`, async () => {
+      // A 5xx that is not one of huginn's pre-move errors may follow the move;
+      // abandoning there handed the key back to the lapsed run, which wrote
+      // the deleted document back.
+      await lapsedRun();
+      deleteMode = mode;
+      const failed = await del();
+      expect(failed.status).toBe(502);
+      expect(docRaw).toBeNull();
+
+      releaseModel();
+      await settle();
+      expect(ingests).toHaveLength(0);
+      expect(String(failed.json.error)).toContain("may have completed");
+    });
+  }
 
   test("a transport-failed delete still refuses a lapsed re-run's save (the delete may have happened)", async () => {
     await lapsedRun();

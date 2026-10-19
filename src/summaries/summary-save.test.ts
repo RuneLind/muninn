@@ -611,6 +611,112 @@ describe("a lapsed claim after a whole rival write", () => {
     claims.clear();
   });
 
+  test("a rival that LAPSED and then abandons without saving leaves the earlier lapsed claim free to save", async () => {
+    // Two re-runs both outlive their budget; the second one's model call then
+    // fails and its job `finally` abandons a claim that already lapsed.
+    const claims = new SummarySaveClaims();
+    const a = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const b = claims.claim("article", DOC_ID, 20)!;
+    await Bun.sleep(40);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.abandon(b);
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A's summary",
+      claim: a!,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest: async () => ({ ok: true, status: 200, data: { file_path: DOC_ID } }),
+    });
+    expect(res.ok ? "ok" : res.code).toBe("ok");
+    claims.clear();
+  });
+
+  test("abandoning a lapsed claim restores nothing once the key moved on, or once it was pinned", async () => {
+    // `pinForWrite` is the probe: "pinned" means that claim could still save.
+    const lapsedPair = async (claims: SummarySaveClaims) => {
+      const a = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      return a;
+    };
+
+    // A lapses, B claims and lapses unpinned, then A abandons: B owns the
+    // generation, so A's abandon is a no-op and B may still re-take the key.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      claims.abandon(a);
+      expect(claims.pinForWrite(b)).toBe("pinned");
+      claims.clear();
+    }
+    // A lapses, B claims and HOLDS, A abandons: B stays the holder.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 1_000)!;
+      claims.abandon(a);
+      expect(claims.holds(b)).toBe(true);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
+    // B lapses, is released, then abandoned: the release dropped the
+    // generation for good, so A stays refused.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      claims.release(b);
+      claims.abandon(b);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
+    // B lapses, is abandoned, then released: the release is a no-op, so A saves.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      claims.abandon(b);
+      claims.abandon(b);
+      claims.release(b);
+      expect(claims.pinForWrite(a)).toBe("pinned");
+      claims.clear();
+    }
+    // B pins for a write, lapses at the unpin, then abandons: its POST may have
+    // landed, so this is a release and A stays refused.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      expect(claims.pinForWrite(b)).toBe("pinned");
+      await Bun.sleep(40);
+      claims.unpinAfterWrite(b);
+      expect(claims.isHeld("article", DOC_ID)).toBe(false);
+      claims.abandon(b);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
+    // B writes and lapses at the unpin, then C claims and abandons: C restores
+    // B's generation, not A's, so A stays refused.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      expect(claims.pinForWrite(b)).toBe("pinned");
+      await Bun.sleep(40);
+      claims.unpinAfterWrite(b);
+      const c = claims.claim("article", DOC_ID, 1_000)!;
+      claims.abandon(c);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
+  });
+
   test("a lapsed claim the caller released does not save", async () => {
     const claims = new SummarySaveClaims();
     const calls: string[] = [];

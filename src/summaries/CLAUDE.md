@@ -203,9 +203,11 @@ between the read and the claim, and the run wrote it back.
 that wrote (or deleted) the document: the key's generation is dropped, so a
 claim that lapsed before it can no longer save. `abandon` is for one that wrote
 NOTHING — every re-run refusal above, a job whose model call failed before the
-save, a Delete refused by the gardener mutex or by a definite huginn answer: the
-generation goes back to what it was before the claim, so a re-run whose claim
-lapsed still saves and its model spend is not lost. A claim that was ever
+save, a Delete refused by the gardener mutex or by a huginn answer proving
+nothing moved: the generation goes back to what it was before the claim, so a re-run whose claim
+lapsed still saves and its model spend is not lost. That holds for an
+abandoning claim that itself LAPSED too, as long as no claim was taken on the
+key since (its `lapse` keeps the generation it replaced). A claim that was ever
 pinned for a write may have landed its POST, so `abandon` on it is a `release`
 — which is why the re-run job's `finally` can call `abandon` on every path.
 
@@ -216,14 +218,20 @@ claims for `DELETE_CLAIM_BUDGET_MS` (5 min), and answers **409 `in_flight`**
 while a re-run, fact-check save or earlier delete holds the document. On a move
 it releases before the client's reindex poll, and the moved generation means a
 re-run whose claim lapsed during the model call cannot re-take it and write the
-deleted document back (`summary-save-delete-race-db.test.ts`). On a definite
-refusal (huginn 4xx/5xx, the gardener mutex) it abandons. When huginn's DELETE
-gets NO answer — the 20 s client timeout or a transport failure — it lets go
-of nothing: huginn may still finish the move, and a re-run claimed right after
-would read the still-present file and write the deleted document back. The
-claim lapses at the 5-minute budget instead (15x the client timeout; huginn's
-move is a stat, an index read and a file rename), and the 502 says the delete
-may still complete. A huginn 404 re-runs the proposal cleanup only when its
+deleted document back (`summary-save-delete-race-db.test.ts`). It abandons
+only when nothing was moved: the gardener mutex, any huginn 4xx (huginn raises
+every one before the move), or a 500 whose `detail` is one of huginn's
+pre-move errors (the manifest read, the index-mapping read, `Could not move
+source file:`; `huginnDeleteMovedNothing`). Any other 5xx — huginn's own
+`Internal Server Error` for an exception after the move, a proxy 502/504 while
+huginn may still be working — and NO answer at all (the 20 s client timeout, a
+transport failure) let go of nothing: the move may have landed or may still
+land, and a re-run claimed right after would read the still-present file and
+write the deleted document back. Abandoning there restored a lapsed re-run's
+generation, and that run then wrote the deleted document back. The claim
+lapses at the 5-minute budget instead (15x the client timeout; huginn's move is
+a stat, an index read and a file rename), and the 502 says the delete may have
+completed. A huginn 404 re-runs the proposal cleanup only when its
 `detail` is the source-file-gone one (`Source file for document '…' not found in
 collection '…'`): the membership gate's 404 (the file exists, the index lags), an
 unknown collection and a huginn without the route all name a document that may

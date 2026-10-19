@@ -1545,6 +1545,8 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
 
   afterEach(async () => {
     globalThis.fetch = origFetch;
+    // A 5xx that may follow the move keeps the delete's claim for 5 minutes.
+    summarySaveClaims.clear();
     __setBotsForTest(null);
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();
@@ -1880,7 +1882,40 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     deleteResponse = () => new Response("boom", { status: 500 });
     const res = await del({ collection: "youtube-summaries", id: "junk.md" });
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error?: string }).error).toContain("huginn refused the delete");
+    expect(((await res.json()) as { error?: string }).error).toContain("may have completed");
+    summarySaveClaims.clear();
+    deleteResponse = () => Response.json({ detail: "Could not move source file: EIO" }, { status: 500 });
+    const refused = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(refused.status).toBe(502);
+    expect(((await refused.json()) as { error?: string }).error).toContain("huginn refused the delete");
+  });
+
+  test("the delete lets go of its claim only when huginn's answer proves nothing moved", async () => {
+    // A held claim keeps re-runs out; a let-go one frees the key. Every 4xx and
+    // huginn's three pre-move 500s let go; any other 5xx may follow the move.
+    const detail = (d: string, status = 500) => () => Response.json({ detail: d }, { status });
+    const cases: Array<[string, () => Response, boolean]> = [
+      ["400 basePath refusal", detail("Collection 'youtube-summaries' has no reader.basePath", 400), false],
+      ["404 membership gate", detail("Document 'junk.md' is not indexed in collection 'youtube-summaries'", 404), false],
+      ["500 manifest read", detail("Could not read the manifest for collection 'youtube-summaries'"), false],
+      ["500 index mapping read", detail("Could not read the index mapping for collection 'youtube-summaries'"), false],
+      ["500 move failed", detail("Could not move source file: [Errno 5] EIO"), false],
+      ["500 after the move", () => new Response("Internal Server Error", { status: 500 }), true],
+      ["500 other detail", detail("Could not write ledger: disk full"), true],
+      ["502 proxy", () => new Response("Bad Gateway", { status: 502 }), true],
+      // huginn raises its pre-move details only as a 500.
+      ["502 with a pre-move detail", detail("Could not move source file: EIO", 502), true],
+      ["503 proxy", () => new Response("Service Unavailable", { status: 503 }), true],
+      ["504 proxy", () => new Response("Gateway Timeout", { status: 504 }), true],
+    ];
+    const seen: Array<[string, boolean]> = [];
+    for (const [name, response] of cases) {
+      summarySaveClaims.clear();
+      deleteResponse = response;
+      await del({ collection: "youtube-summaries", id: "junk.md" });
+      seen.push([name, summarySaveClaims.isHeld("youtube", "junk.md")]);
+    }
+    expect(seen).toEqual(cases.map(([name, , held]) => [name, held]));
   });
 
   test("a bad body / unknown collection is a 400 before any huginn call", async () => {

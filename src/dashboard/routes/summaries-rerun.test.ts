@@ -750,6 +750,28 @@ describe("the shared save path", () => {
     }
   });
 
+  test("a read that THROWS abandons the claim, so an earlier lapsed run may still save", async () => {
+    // `prepare()` throwing wrote nothing: the claim must go back with
+    // `abandon`, not `release` (which refuses the lapsed run) or nothing
+    // (which keeps the key held).
+    const claims = new SummarySaveClaims();
+    const lapsed = claims.claim("youtube", DOC_ID, 20)!;
+    await Bun.sleep(40);
+    const { deps, rec } = makeDeps(youtubeDoc(), { claims, framesRoot: tempFramesRoot() });
+    deps.fetchRawDoc = async () =>
+      ({
+        get raw(): string {
+          throw new Error("unreadable body");
+        },
+      }) as RerunDocument;
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(500);
+    expect(rec.prompts).toHaveLength(0);
+    expect(claims.isHeld("youtube", DOC_ID)).toBe(false);
+    expect(claims.pinForWrite(lapsed)).toBe("pinned");
+    claims.clear();
+  });
+
   test("more kept frames than FRAME_BUDGET_MAX is 422, not a truncated list", async () => {
     // A cut list would make the tail strip the quotes of every frame left out.
     const root = tempFramesRoot();
