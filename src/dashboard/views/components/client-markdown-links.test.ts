@@ -59,6 +59,17 @@ const ENTITY_UNSAFE: [string, string][] = [
   ["hex tab", "[x](java&#x09;script:x)"],
   ["leading space reference", "[x](&#32;javascript:alert(1))"],
   ["reference definition", "[x][r]\n\n[r]: &#106;avascript:alert(1)"],
+  ["named newline", "[x](java&NewLine;script:alert(1))"],
+  ["uppercase X hex reference", "[x](&#X6a;avascript:alert(1))"],
+];
+
+/** References the decoder deliberately leaves as text, and what each renders:
+ *  `&#0;` decodes to U+FFFD (not NUL, which the control-character refusal would
+ *  catch), so the scheme is gone and the link stays a harmless relative one; an
+ *  8-digit numeric reference is past `\d{1,7}` and stays literal, escaped. */
+const PINNED: [string, string, string[]][] = [
+  ["NUL reference", "[x](&#0;javascript:alert(1))", ["%EF%BF%BDjavascript:alert(1)"]],
+  ["8-digit numeric reference", "[x](&#00000106;avascript:alert(1))", ["&#00000106;avascript:alert(1)"]],
 ];
 
 /** No semicolon, so CommonMark keeps it literal, but a browser decodes it in an
@@ -99,6 +110,9 @@ const SAFE: [string, string, string][] = [
   ["angle autolink", "<https://example.com/a>", "https://example.com/a"],
   ["email autolink", "<a@b.c>", "mailto:a@b.c"],
   ["space in destination", "[s](</a b>)", "/a%20b"],
+  ["percent-encoded space", "[p](https://example.com/a%20b)", "https://example.com/a%20b"],
+  ["encoded percent in a query", "[q](https://example.com/s?pct=100%25&x=1)", "https://example.com/s?pct=100%25&x=1"],
+  ["surrogate reference", "[s](https://example.com/&#xD800;)", "https://example.com/%EF%BF%BD"],
 ];
 
 function assertCases(render: Render) {
@@ -113,6 +127,11 @@ function assertCases(render: Render) {
     expect(html).not.toContain("<a");
   }
   expect(decodedHrefs(render(SEMICOLONLESS))).toEqual(["&#106avascript:alert(1)"]);
+  for (const [, md, hrefs] of PINNED) {
+    expect(decodedHrefs(render(md))).toEqual(hrefs);
+  }
+  // A lone surrogate makes encodeURI throw: the link renders as its text.
+  expect(render("[x](https://x/\uD800) and more")).toBe("<p>x and more</p>\n");
   for (const [, md, href] of SAFE) {
     expect(decodedHrefs(render(md))).toEqual([href]);
   }
@@ -155,7 +174,11 @@ describe("client renderMarkdown: unsafe link schemes render as text", () => {
 
 describe("client renderMarkdown: a character-reference scheme never reaches the browser live", () => {
   const copies = [["doc panel", docPanelRender], ["job card", jobCardRender]] as const;
-  const cases: [string, string][] = [...ENTITY_UNSAFE, ["semicolon-less reference", SEMICOLONLESS]];
+  const cases: [string, string][] = [
+    ...ENTITY_UNSAFE,
+    ["semicolon-less reference", SEMICOLONLESS],
+    ...PINNED.map(([label, md]): [string, string] => [label, md]),
+  ];
   for (const [copy, makeRender] of copies) {
     for (const [label, md] of cases) {
       test(`${copy}: ${label}`, () => {
