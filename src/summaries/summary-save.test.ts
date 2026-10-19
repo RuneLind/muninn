@@ -419,6 +419,56 @@ describe("the descriptor table", () => {
     expect(Object.keys(CAPTURE_FILES).sort()).toEqual(SUMMARY_SAVE_DESCRIPTORS.map((d) => d.id).sort());
   });
 
+  // The descriptor is the RE-SEND list: a key the capture writes and a save
+  // leaves off is erased by the save. So every key a capture's ingest body
+  // sends must be in its descriptor, or be one of the fields every save builds
+  // itself. YouTube spreads a `videoFields` object and is not scanned here.
+  const SAVE_BUILT_FIELDS = new Set(["title", "summary", "category", "transcript_markdown"]);
+  const BODY_FILES: Array<[string, string[]]> = [
+    ["src/video/short-video.ts", ["tiktok", "x-article"]],
+    ["src/x-article/summarizer.ts", ["x-article"]],
+    ["src/vimeo/summarizer.ts", ["vimeo"]],
+    ["src/article/summarizer.ts", ["article"]],
+  ];
+  /** The keys of the `body: { … }` literal inside `ingestSummary({ … })`. */
+  function ingestBodyKeys(source: string): string[] {
+    const at = source.indexOf("ingestSummary({");
+    const open = source.indexOf("body: {", at);
+    expect(at).toBeGreaterThan(-1);
+    expect(open).toBeGreaterThan(at);
+    let depth = 0;
+    let end = open + "body: ".length;
+    for (; end < source.length; end++) {
+      if (source[end] === "{") depth++;
+      else if (source[end] === "}" && --depth === 0) break;
+    }
+    const keys: string[] = [];
+    for (const line of source.slice(open + "body: {".length, end).split("\n")) {
+      const t = line.trim();
+      if (t === "" || t.startsWith("//")) continue;
+      const m = /^\.\.\.\(.*\?\s*\{\s*([a-z_]+)\s*[:,}]/.exec(t) ?? /^([a-z_]+)\s*[:,]?/.exec(t);
+      expect({ line: t, parsed: Boolean(m) }).toEqual({ line: t, parsed: true });
+      keys.push(m![1]!);
+    }
+    return keys;
+  }
+
+  for (const [file, ids] of BODY_FILES) {
+    test(`${file}: every ingest body key is re-sent by the ${ids.join(" and ")} save`, () => {
+      const keys = ingestBodyKeys(readFileSync(join(repoRoot, file), "utf8"));
+      expect(keys).toContain("summary");
+      for (const id of ids) {
+        const resent = new Set(requireSaveDescriptor(id).frontmatterFields);
+        expect({ id, missing: keys.filter((k) => !resent.has(k) && !SAVE_BUILT_FIELDS.has(k)) }).toEqual({ id, missing: [] });
+      }
+    });
+  }
+
+  test("anthropic re-sends no author, and no save re-sends a field huginn derives", () => {
+    expect(requireSaveDescriptor("anthropic").frontmatterFields).not.toContain("author");
+    for (const d of SUMMARY_SAVE_DESCRIPTORS) expect(d.frontmatterFields).not.toContain("vimeo_video_id");
+  });
+
   for (const d of SUMMARY_SAVE_DESCRIPTORS) {
     test(`${d.id}: the capture posts to the descriptor's ingest path and no other`, () => {
       for (const file of CAPTURE_FILES[d.id] ?? []) {

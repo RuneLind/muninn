@@ -138,7 +138,9 @@ live and `frame.path` IS the destination. `copyKeptFrame`
 (`src/summaries/frames.ts`) skips the copy when the two RESOLVE to one path —
 `copyFile(p, p)` is measured harmless on macOS/Bun and is unproven on Linux,
 where the plausible failure is a truncate-then-write that destroys the only copy
-of the frame. It is its own exported function with an injectable copy BECAUSE the
+of the frame. The skip holds only for a source that EXISTS: a missing one is a
+copy failure, so a frame a Delete removed under a running re-run loses its
+quote instead of being reported kept. It is its own exported function with an injectable copy BECAUSE the
 guard is invisible from the filesystem here: without the seam, a test of the
 same-path case passes whether the guard is there or not.
 
@@ -188,16 +190,34 @@ per-`(source, docId)` claim registry answers **409 `in_flight`** to a second
 POST, or to any other write route holding the document. Two concurrent runs
 would spend two model calls and then race each other's ingest for one FILE —
 huginn rewrites the whole document from the request body, so the loser's summary
-is simply gone and which one loses is decided by the network. The claim is taken
-after every other refusal (a 409 has to mean a run is under way) and released in
-a `finally` on the job.
+is simply gone and which one loses is decided by the network. **The claim is
+taken BEFORE the document is read** — after the body-only refusals (415, 400s,
+501) and the bot lookup, before any huginn read — and every refusal after it
+(`not_found`, `no_transcript`, `bad_kind`, the preflight, `too_many_frames`,
+`frames_unsupported`) releases it; a run releases it in a `finally` on the job.
+Claiming after the read left a window in which a Delete removed the document
+between the read and the claim, and the run wrote it back.
+
+**The `/summaries` Delete is a writer too** (`backlog-doc-delete`,
+`wiki-gardener-routes.ts`): it maps the collection to its SHELF id through
+`SUMMARY_SOURCES` (`x-article` for X video, never the spec id `x-video`),
+claims for `DELETE_CLAIM_BUDGET_MS` (huginn's 20 s DELETE plus 10 s), answers
+**409 `in_flight`** while a re-run or fact-check save holds the document, and
+releases before the client's reindex poll. Its claim also moves the key's
+generation, so a re-run whose claim lapsed during the model call cannot re-take
+it and write the deleted document back (`summary-save-delete-race-db.test.ts`).
 
 "Settles" is the connector's promise and not this module's, though: `runRerunJob`
 awaits `deps.oneShot`, and a call that never settles pinned the document at 409
 for the life of the PROCESS, with no way back but a restart. Each claim therefore
-carries a timer sized to the budget that run actually sends —
-`rerunLatchBudgetMs` = `max(summarizeTimeoutFor(frames), bot.timeoutMs)` plus a
-2-minute slack — and the expiry warns. **An expiry frees the key for OTHER
+carries a timer, and the expiry warns. The frame count is not known before the
+read and a deadline cannot be extended, so the budget is the WORST case:
+`rerunLatchBudgetMs(FRAME_BUDGET_MAX, bot)` =
+`max(summarizeTimeoutFor(60), bot.timeoutMs)` plus a 2-minute slack — 1,440 s
+where a sized claim for up to 30 frames was 720 s, so a hung re-run blocks
+Delete about twice as long. A document that keeps more than `FRAME_BUDGET_MAX`
+frames is **422 `too_many_frames`**, not a truncated list (the frames listing
+hazard above). **An expiry frees the key for OTHER
 writers; it does not cancel the claim.** Work after the model call (the
 closing-takeaway check, frame copies) and a connector's retry loop can outlast
 the budget inside their own timeouts, so at save time `pinForWrite` re-takes a
@@ -383,7 +403,9 @@ article mode, unchanged prompts) over the summary and saves the result in
   stream and `html` on `/result`, so the client bundle (~12 KB) carries no
   markdown renderer.
 - **Badges** (`/badges`) are one query over the table; the client patches the
-  Latest rail rows and re-reads after every completed check.
+  Latest rail rows and re-reads after every completed check. A failed lookup
+  is 200 `{badges: [], error}`; the client keeps the badges it has on an
+  `error` and clears them only on an empty list without one.
 - **Transcript check** (`POST /api/summaries/factcheck/transcript`,
   `src/dashboard/routes/summaries-factcheck-transcript.ts`; pure half
   `transcript-check.ts`). Its input is the saved row's web claims (index,
@@ -533,7 +555,9 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   `src/gardener/factcheck-carry.test.ts`. Staleness is
   `summaryFactcheckStale` (`factcheck-body.ts`, shared with `/result` and
   export): Share says the summary "still states" the claims only when the
-  check matches the source file, else "may"; Ask reads no file and always says
+  check matches the source file, else "may"; the source drafter's rider follows
+  the same rule over the same raw file (`readSourceText`, read only for a row
+  with a ❌/⚠️ claim); Ask reads no file and always says
   "may". Ask: both "Ask a follow-up" setters add
   `factcheck=<source>:<docId>` for a registered source, `/research` sends it on
   every ask until ＋ New conversation clears it, and `/api/research/ask` adds

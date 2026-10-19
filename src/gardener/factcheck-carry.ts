@@ -196,16 +196,29 @@ export function factcheckFindingLines(
  * no row), so {@link buildSourceDraftPrompt} stays byte-identical. The findings
  * are web-derived model text and summary quotes, so they sit between markers and
  * are framed as data; the two rules sit outside them.
+ *
+ * `stale` is Share's rule (`summaryFactcheckStale` against the raw source
+ * file): only `false` — the check matches the summary — says the summary
+ * "still states" the claims; `true` or `null` (unknown) says it may.
  */
-export function buildFactcheckRider(saved: SummaryFactcheck | null, collection: string, url?: string | null): string {
+export function buildFactcheckRider(
+  saved: SummaryFactcheck | null,
+  collection: string,
+  url: string | null | undefined,
+  stale: boolean | null,
+): string {
   if (!saved) return "";
   const claims = correctableClaims(saved);
   if (claims.length === 0) return "";
   const noun = sourceKindNoun(collection, url || saved.url);
   const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const lines = factcheckFindingLines(claims, noun, FACTCHECK_RIDER_MAX);
+  const states =
+    stale === false
+      ? `The summary reports what ${noun} said, so it still states them.`
+      : "The summary may have changed since the check, so it may still state some of them.";
 
-  return `FACT-CHECK FINDINGS: a fact check of this summary (${todayOslo(saved.createdAt)}) found the claims below wrong (❌) or only partly right (⚠️). The summary reports what ${noun} said, so it still states them. On the page:
+  return `FACT-CHECK FINDINGS: a fact check of this summary (${todayOslo(saved.createdAt)}) found the claims below wrong (❌) or only partly right (⚠️). ${states} On the page:
 - Never state one of these claims as fact. Attribute it to ${noun} and give what sources say, worded like: ${Noun} claims X; sources say Y.
 - Do not state a listed claim as fact anywhere, including in a list of ${noun}'s points: attribute it every time.
 - Every other claim in the summary was NOT checked. Report each one exactly as the summary states it, attributed to ${noun}, and pass no verdict on it: no words such as unsupported, unproven, not established or no evidence, and no remark on whether ${noun} cites studies.

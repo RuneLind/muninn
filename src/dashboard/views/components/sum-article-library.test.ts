@@ -800,6 +800,20 @@ describe("deleteSummaryDoc — a 200 carrying `warning`", () => {
     expect(h.notice.children[0]?.attrs.href).toBe("/wiki/gardener?wiki=jarvis");
   });
 
+  test("a 409 while a re-run writes the document shows the route's reason, in the error tone", async () => {
+    const h = loadDelete();
+    const reason = "A re-run or fact-check save is writing this document. Wait for it to finish, then delete.";
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json({ error: reason, code: "in_flight" }, { status: 409 });
+    try {
+      await h.run();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+    expect(h.notice.classes.has("err")).toBe(true);
+    expect(h.notice.textContent).toBe(`Delete failed: ${reason}`);
+  });
+
   test("a clean delete stays in the ok tone with no link", async () => {
     const h = loadDelete();
     await withResponse({ ok: true, polling: [], skipped: [], proposals: { deleted: [], kept: [] } }, h.run);

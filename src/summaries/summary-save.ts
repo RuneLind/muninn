@@ -119,14 +119,18 @@ export const SUMMARY_SAVE_DESCRIPTORS: readonly SummarySaveDescriptor[] = [
   {
     id: "tiktok",
     ingestPath: "/api/tiktok/ingest",
-    frontmatterFields: ["date", "url", "author"],
+    // `summary_kind`: the short-video capture always sends it; huginn's model
+    // drops it until it declares the field, and then a save that omits it would
+    // erase it. Re-sending an absent key is a no-op.
+    frontmatterFields: ["date", "url", "author", "summary_kind"],
     acceptsTags: true,
     transcriptCarrier: "summary",
   },
   {
     id: "x-article",
     ingestPath: "/api/x-articles/ingest",
-    frontmatterFields: ["date", "url", "author"],
+    // `summary_kind`: as tiktok — the X-video capture sends it on this shelf.
+    frontmatterFields: ["date", "url", "author", "summary_kind"],
     acceptsTags: true,
     transcriptCarrier: "summary",
   },
@@ -365,8 +369,8 @@ export interface SummarySaveClaim {
  * predates someone else's whole claim → write → release is refused, since its
  * body would overwrite the newer write. That guarantee covers only reads made
  * AFTER {@link claim}: a caller must claim before it reads the document it will
- * rebuild (re-run reads first, which is safe only because it regenerates the
- * summary from the transcript). The claim is a TOKEN, so a stalled
+ * rebuild. The `/summaries` Delete claims too, so a delete is a newer write as
+ * far as a lapsed claim is concerned. The claim is a TOKEN, so a stalled
  * writer that settles after someone else claimed releases nothing and writes
  * nothing.
  *

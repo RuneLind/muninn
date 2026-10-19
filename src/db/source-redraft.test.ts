@@ -114,6 +114,7 @@ describe("redraftSourceProposal — the four outcomes", () => {
     const old = await seedOld();
     const prompts: string[] = [];
     const out = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc,
       callDrafter: async (prompt) => {
         prompts.push(prompt);
@@ -139,6 +140,7 @@ describe("redraftSourceProposal — the four outcomes", () => {
       const old = await seedOld();
       const before = await attempt();
       const out = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
         fetchDoc,
         callDrafter: async () => {
           await getDb()`UPDATE wiki_proposals SET status = ${meanwhile} WHERE id = ${old.id}`;
@@ -158,6 +160,7 @@ describe("redraftSourceProposal — the four outcomes", () => {
     const before = await attempt();
     let competitor = "";
     const out = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc,
       callDrafter: async () => {
         const row = await insertWikiProposal({
@@ -187,6 +190,7 @@ describe("redraftSourceProposal — the four outcomes", () => {
     const old = await seedOld();
     const before = await attempt();
     const failed = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc,
       callDrafter: async () => {
         throw new Error("model timed out");
@@ -194,11 +198,13 @@ describe("redraftSourceProposal — the four outcomes", () => {
     });
     expect(failed).toEqual({ outcome: "error", reason: "model timed out" });
     const skipped = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc,
       callDrafter: async () => "File created successfully.",
     });
     expect(skipped.outcome).toBe("skipped");
     const fetchFailed = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc: async () => {
         throw new Error("huginn down");
       },
@@ -217,6 +223,7 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
   test("a URL-less doc is redrafted the way the capture drafted it, with the pending callout", async () => {
     const old = await seedOld(undefined, { url: "", draft: page("Old Title").replace(/^url: .*\n/m, "").replace(/^sources: .*\n/m, "") });
     const out = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc: async () => ({ text: BODY, metadata: {} }) as never,
       callDrafter: async () => page("Old Title").replace(/^url: .*\n/m, "").replace(/^sources: .*\n/m, ""),
     });
@@ -236,6 +243,7 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
     __resetWikiCacheForTest();
     const prompts: string[] = [];
     const out = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc,
       callDrafter: async (prompt) => {
         prompts.push(prompt);
@@ -251,7 +259,7 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
   // (which stored the old PAGE title when no capture title was known).
   test("the new row's source title is the doc's own title", async () => {
     const old = await seedOld(undefined, { sourceTitle: "Old Title" });
-    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page("Old Title") });
+    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, readSourceText: async () => null, callDrafter: async () => page("Old Title") });
     const fresh = (await getWikiProposalById((out as { proposalId: string }).proposalId))!;
     expect(fresh.sourceDocs[0]!.title).toBe("5 Powerful Words");
   });
@@ -259,7 +267,7 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
   // Item 1: the replacement records the check it carries.
   test("the replacement carries the digest of the saved check's answer", async () => {
     const old = await seedOld();
-    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page("Old Title") });
+    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, readSourceText: async () => null, callDrafter: async () => page("Old Title") });
     const fresh = (await getWikiProposalById((out as { proposalId: string }).proposalId))!;
     expect(fresh.sourceDocs[0]!.factcheckSha256).toBe(sha256(ANSWER));
   });
@@ -268,7 +276,7 @@ describe("redraftSourceProposal — what the replacement is built from", () => {
   // transaction, one now(), so its resolved_at IS the new row's created_at.
   test("redraftReplacements links the staled row to its replacement", async () => {
     const old = await seedOld();
-    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, callDrafter: async () => page("Old Title") });
+    const out = await redraftSourceProposal(bot, wikiDir, old, { fetchDoc, readSourceText: async () => null, callDrafter: async () => page("Old Title") });
     const all = await listAllWikiProposals(BOT);
     const links = sourceRedraft.redraftReplacements(all);
     expect(links.get(old.id)).toBe((out as { proposalId: string }).proposalId);
@@ -338,6 +346,7 @@ describe("redraft pre-model checks ignore only the replaced row", () => {
     });
     let called = false;
     const out = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc,
       callDrafter: async () => {
         called = true;
@@ -355,6 +364,7 @@ describe("redraft pre-model checks ignore only the replaced row", () => {
     __resetWikiCacheForTest();
     let called = false;
     const out = await redraftSourceProposal(bot, wikiDir, old, {
+      readSourceText: async () => null,
       fetchDoc,
       callDrafter: async () => {
         called = true;
@@ -369,6 +379,7 @@ describe("redraft pre-model checks ignore only the replaced row", () => {
     const old = await seedOld();
     for (const p of [{ ...old, status: "approved" as const }, { ...old, mode: "update" as const }, { ...old, kind: "concept" as const }]) {
       const out = await redraftSourceProposal(bot, wikiDir, p, {
+      readSourceText: async () => null,
         fetchDoc: async () => {
           throw new Error("must not fetch");
         },

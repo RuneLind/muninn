@@ -53,6 +53,7 @@ import { lintFindingPathOf } from "../../gardener/lint-markers.ts";
 import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
 import { notifySummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
+import { summarySaveClaims } from "../../summaries/summary-save.ts";
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
 import { collectWikiRefs, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
@@ -934,6 +935,10 @@ const MAX_DISMISS_KEYS = 2000;
 
 /** Timeout for huginn's DELETE (it moves a file + enqueues reindexes, then returns). */
 const DELETE_TIMEOUT_MS = 20_000;
+
+/** How long a delete holds the summary save claim: huginn's DELETE plus slack
+ *  for the DB bookkeeping after it. */
+const DELETE_CLAIM_BUDGET_MS = DELETE_TIMEOUT_MS + 10_000;
 
 /**
  * Per-bot backlog cache. The backlog (wiki URL sweep + 4 collection listings +
@@ -1995,21 +2000,7 @@ export function registerWikiGardenerRoutes(
     }
 
     const key = `${collection}/${id}`;
-    const run = runExclusive(target.bot.name, async () => {
-      // huginn's DELETE owns the 404/502 answers — and ONLY it. Everything after a
-      // confirmed move is muninn's own bookkeeping, reported separately below: the
-      // document is gone whatever a DB write then does.
-      let res: Record<string, unknown>;
-      try {
-        res = (await fetchKnowledgeApi(
-          KNOWLEDGE_API_URL,
-          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-          { method: "DELETE", timeoutMs: DELETE_TIMEOUT_MS },
-        )) as Record<string, unknown>;
-      } catch (err) {
-        return { refused: err };
-      }
-
+    const work = async () => {
       // Each step is guarded on its own, so one failure skips none of the others
       // (a failed snapshot prune must not leave the stats cache stale).
       const failures: string[] = [];
@@ -2019,7 +2010,7 @@ export function registerWikiGardenerRoutes(
         } catch (err) {
           // The raw error (driver text, host:port, a DB user) goes to the log only;
           // the response names the step, because the client DISPLAYS `warning`.
-          log.warn("Backlog delete of {key} for {bot}: huginn deleted it, but {step} failed: {error}", {
+          log.warn("Backlog delete of {key} for {bot}: {step} failed: {error}", {
             bot: target.bot.name,
             key,
             collection,
@@ -2031,6 +2022,38 @@ export function registerWikiGardenerRoutes(
           return fallback;
         }
       };
+      // The draft the source drafter wrote FROM the doc: a review-gate card whose
+      // source no longer exists is not reviewable, and approving it would write a
+      // wiki page from a document that is gone. Applied rows are kept and reported
+      // (their wiki page still exists). Under the mutex — pinned by the route test,
+      // whose seam asserts the mutex is HELD when it runs — so a drain cannot
+      // re-draft the doc between huginn's move and this DELETE.
+      const deleteProposals = () =>
+        step(
+          PROPOSALS_DELETE_STEP,
+          () => backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id),
+          { deleted: [] as DeletedSourceProposal[], kept: [] as DeletedSourceProposal[] },
+        );
+
+      // huginn's DELETE owns the 404/502 answers — and ONLY it. Everything after a
+      // confirmed move is muninn's own bookkeeping, reported separately below: the
+      // document is gone whatever a DB write then does.
+      let res: Record<string, unknown>;
+      try {
+        res = (await fetchKnowledgeApi(
+          KNOWLEDGE_API_URL,
+          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+          { method: "DELETE", timeoutMs: DELETE_TIMEOUT_MS },
+        )) as Record<string, unknown>;
+      } catch (err) {
+        // A 404 is also what a SECOND delete gets after the first one's proposal
+        // step failed, so the (idempotent) proposal cleanup runs again here. The
+        // snapshot prunes do not: a 404 can name an id that was never listed.
+        if (err instanceof KnowledgeApiError && err.upstreamStatus === 404) {
+          return { refused: err, proposals: await deleteProposals(), failures };
+        }
+        return { refused: err };
+      }
 
       // Prune the key from both live sets — the doc is gone, so an entry naming it
       // would linger forever (the sets are never garbage-collected against a listing).
@@ -2048,25 +2071,39 @@ export function registerWikiGardenerRoutes(
       // Same rule for the attempt ledger: the doc is gone, and a re-capture under the
       // same id must not inherit a months-old skip reason.
       await step("source-draft attempt delete", () => deleteSourceDraftAttempt(target.bot.name, collection, id), undefined);
-      // And the draft the source drafter wrote FROM it: a review-gate card whose
-      // source no longer exists is not reviewable, and approving it would write a
-      // wiki page from a document that is gone. Applied rows are kept and reported
-      // (their wiki page still exists). Under the mutex — pinned by the route test,
-      // whose seam asserts the mutex is HELD when it runs — so a drain cannot
-      // re-draft the doc between huginn's move and this DELETE.
-      const proposals = await step(
-        PROPOSALS_DELETE_STEP,
-        () => backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id),
-        { deleted: [] as DeletedSourceProposal[], kept: [] as DeletedSourceProposal[] },
-      );
+      const proposals = await deleteProposals();
       // The pending set the stats coverage reads just changed; a cached payload
       // would report the old pending/consumed split for its full 5-min TTL.
       await step("summaries stats cache invalidation", () => invalidateSummariesStatsCache(), undefined);
       return { res, proposals, failures };
-    });
-    if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
+    };
 
-    const done = await run;
+    // The delete is a WRITER of the summary document: it takes the claim the
+    // re-run and the fact-check write-back take, keyed the same way (the SHELF
+    // id, `x-article` for X video). While another writer holds it the answer is
+    // 409, since a re-run in flight would write the deleted document back; and
+    // taking it moves the key's generation, so a re-run whose claim lapsed can
+    // no longer re-take it and save. Released before the client's reindex poll.
+    const sourceId = SUMMARY_SOURCES.find((s) => s.collection === collection)!.id;
+    const claim = summarySaveClaims.claim(sourceId, id, DELETE_CLAIM_BUDGET_MS);
+    if (!claim) {
+      return c.json(
+        {
+          error: "A re-run or fact-check save is writing this document. Wait for it to finish, then delete.",
+          code: "in_flight",
+        },
+        409,
+      );
+    }
+    let done: Awaited<ReturnType<typeof work>>;
+    try {
+      const run = runExclusive(target.bot.name, work);
+      if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
+      done = await run;
+    } finally {
+      summarySaveClaims.release(claim);
+    }
+
     if ("refused" in done) {
       // huginn 404 = the id isn't a member of that collection (its membership gate);
       // anything else is an upstream/transport failure. Never a muninn 5xx.
@@ -2078,7 +2115,25 @@ export function registerWikiGardenerRoutes(
         key,
         error: message,
       });
-      if (upstream === 404) return c.json({ error: "that doc is not in that collection" }, 404);
+      if (upstream === 404) {
+        const removed = done.proposals?.deleted.length ?? 0;
+        return c.json(
+          {
+            error:
+              removed > 0
+                ? `that doc is not in that collection; removed ${removed} unapplied draft${removed === 1 ? "" : "s"} written from it`
+                : "that doc is not in that collection",
+            ...(done.proposals ? { proposals: done.proposals } : {}),
+            ...(done.failures && done.failures.length > 0
+              ? {
+                  warning:
+                    "muninn could not remove the wiki drafts written from this document (failed: source proposals delete) — reject them on /wiki/gardener.",
+                }
+              : {}),
+          },
+          404,
+        );
+      }
       return c.json({ error: `huginn refused the delete: ${message}` }, 502);
     }
     const { res, proposals, failures } = done;
