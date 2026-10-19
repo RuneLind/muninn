@@ -158,9 +158,11 @@ export type LintCheck = (typeof LINT_CHECKS)[number];
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
  *  through {@link checkPageText}, and `scripts/wiki-check.ts` runs the same
- *  function with no index. Not here: `stale-updated` and the drift checks,
- *  which also read the clock; `missing-sources`, which reads the type the
- *  reader config resolves; and the checks that read the whole wiki. */
+ *  function with no index. Not here: `stale-updated` and check 9 (drift):
+ *  `stale-updated` and `draft-lane-stale` read the clock, and `checkDrift`
+ *  runs `loose-sql`, `case-table` and `long-page-no-fold`, which do not, in the
+ *  same pass. Nor `missing-sources`, which reads the type the reader config
+ *  resolves, nor the checks that read the whole wiki. */
 export const PAGE_TEXT_LINT_CHECKS = [
   "index-truncation",
   "nested-annotation",
@@ -943,8 +945,8 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
  * page's own business), 12 on a page with a role lane or a role-shaped
  * question target, 13 on a page with a labelled CaseBoard, 11's first half on a
  * page with a DecisionLog or StatusRows, 15 on an `.mdx` page that is not
- * culled, and 11's Tldr half on a live report page or an `.mdx` reference page
- * that is not reserved or culled.
+ * culled, and 11's Tldr half on an `.mdx` page that is a live report page or a
+ * reference page and is not reserved or culled.
  */
 export function checkPageText(page: PageTextRef, content: string, roleKeys: readonly string[]): LintFinding[] {
   const findings = [

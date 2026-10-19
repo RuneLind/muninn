@@ -18,7 +18,9 @@
  * directory, a culled page (`signal: none`) gets every check but the Tldr and
  * component checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
- * `relPath` is relative to it.
+ * `relPath` is relative to it. With no `.wiki-reader.json`, the root is a guess,
+ * so missing-tldr and tldr-no-more, which read the page's folder, are skipped
+ * and one stderr line says so.
  *
  * Exit codes: 0 when the check ran, with or without findings. 2 on a usage
  * error or a path that cannot be read or listed. 3 when a directory holds
@@ -77,7 +79,18 @@ export interface WikiCheckResult {
   selected: number;
   /** One line per page that could not be read. */
   unreadable: string[];
+  /** The directory the root was guessed from, when no `.wiki-reader.json`
+   *  names it; the folder checks were skipped. */
+  guessedRoot?: string;
 }
+
+/** The checks that read the page's folder under the wiki root (`isTldrScope`),
+ *  so they need the root, not a guess. */
+const FOLDER_CHECKS: ReadonlySet<string> = new Set(["missing-tldr", "tldr-no-more"]);
+
+/** The stderr line for a run whose wiki root is a guess. */
+export const noRootNote = (dir: string) =>
+  `wiki-check: no .wiki-reader.json at or above ${dir}: missing-tldr and tldr-no-more need the wiki root and were skipped`;
 
 const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code ?? String(e);
 
@@ -89,17 +102,20 @@ const roleKeysAt = async (root: string) => (await readWikiReaderConfig(root))?.r
 export async function wikiCheck(target: string): Promise<WikiCheckResult> {
   if (!statSync(target).isDirectory()) {
     const base = path.dirname(target);
-    const root = wikiRootFor(base) ?? base;
+    const found = wikiRootFor(base);
+    const root = found ?? base;
     const rel = path.relative(root, target).split(path.sep).join("/");
     const content = await Bun.file(target).text();
     const plan_status = readPlanStatus(parseFrontmatter(content));
     const findings = checkPageText({ relPath: rel, plan_status }, content, await roleKeysAt(root));
-    return { findings, checked: 1, selected: 1, unreadable: [] };
+    if (found) return { findings, checked: 1, selected: 1, unreadable: [] };
+    return { findings: findings.filter((f) => !FOLDER_CHECKS.has(f.check)), checked: 1, selected: 1, unreadable: [], guessedRoot: base };
   }
-  const root = wikiRootFor(target) ?? target;
+  const found = wikiRootFor(target);
+  const root = found ?? target;
   const roleKeys = await roleKeysAt(root);
   const pages = await mdxPagesUnder(root, target);
-  const out: WikiCheckResult = { findings: [], checked: 0, selected: pages.length, unreadable: [] };
+  const out: WikiCheckResult = { findings: [], checked: 0, selected: pages.length, unreadable: [], ...(found ? {} : { guessedRoot: target }) };
   for (const rel of pages) {
     const file = path.join(root, rel);
     let content: string;
@@ -111,7 +127,8 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     }
     out.checked += 1;
     const fm = parseFrontmatter(content);
-    out.findings.push(...checkPageText({ relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) }, content, roleKeys));
+    const findings = checkPageText({ relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) }, content, roleKeys);
+    out.findings.push(...(found ? findings : findings.filter((f) => !FOLDER_CHECKS.has(f.check))));
   }
   return out;
 }
@@ -138,7 +155,8 @@ export async function runWikiCheck(args: readonly string[]): Promise<{ code: num
   const out = result.findings.map((f) => JSON.stringify(f));
   if (result.selected === 0) return { code: 0, out, err: [`wiki-check: no .mdx pages under ${target}`] };
   const code = result.checked === 0 && result.unreadable.length === result.selected ? EXIT_NOTHING_READ : 0;
-  return { code, out, err: result.unreadable };
+  const note = result.guessedRoot === undefined ? [] : [noRootNote(result.guessedRoot)];
+  return { code, out, err: [...note, ...result.unreadable] };
 }
 
 if (import.meta.main) {
