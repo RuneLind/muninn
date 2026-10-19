@@ -562,8 +562,9 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
  * code does not block, and the function's doc comment lists the same ranges.
  * Each row pins the first and last address (denied) and the address just
  * below and just above (allowed); `null` means the range touches the end of
- * the address space, and a neighbour that falls in another blocked range is
- * replaced by the nearest allowed one, named in `note`.
+ * the address space or, for 64:ff9b::/96, sits inside a blocked range on that
+ * side, and a neighbour that falls in another blocked range is replaced by the
+ * nearest allowed one, named in `note`.
  */
 describe("the IP denylist, enumerated: these tables are everything isFetchableWebUrl blocks by address", () => {
   type V4Row = { range: string; first: string; last: string; below: string | null; above: string | null; embedded: string; otherFirstOctet?: string[] };
@@ -585,8 +586,9 @@ describe("the IP denylist, enumerated: these tables are everything isFetchableWe
   ];
 
   type V6Row = { range: string; first: string; last: string; below: string | null; above: string | null; note?: string; alsoDenied?: string[]; alsoAllowed?: string[] };
-  // `alsoAllowed` on an embedding prefix holds one address per prefix byte that differs from the prefix in that byte
-  // alone and embeds 127.0.0.1, so dropping any one byte's comparison denies it.
+  // `alsoAllowed` on an embedding prefix holds addresses that embed 127.0.0.1 and differ from the prefix in one byte
+  // alone, for some of its bytes, not all: ::/96 bytes 1, 9, 10 and 11; ::ffff:0:0/96 bytes 9, 10 and 11; 64:ff9b::/96
+  // bytes 0-3 (its bytes 4, 5 and 11 are in the 64:ff9b::/32 row's alsoDenied); 2002::/16 bytes 0 and 1.
   const V6_BLOCKED: V6Row[] = [
     {
       range: "::/96 (unspecified, loopback, IPv4-compatible), judged by its IPv4", first: "::", last: "::ffff:ffff",
@@ -599,12 +601,20 @@ describe("the IP denylist, enumerated: these tables are everything isFetchableWe
     },
     {
       range: "64:ff9b::/96 (NAT64), judged by its IPv4", first: "64:ff9b::", last: "64:ff9b::ffff:ffff",
-      below: "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff", above: "64:ff9b::1:0:0",
-      note: "the rest of 64:ff9b::/32 is plain IPv6 and passes, the local-use 64:ff9b:1::/48 included",
-      alsoAllowed: [
-        "164:ff9b::7f00:1", "65:ff9b::7f00:1", "64:fe9b::7f00:1", "64:ff9a::7f00:1",
-        "64:ff9b:100::7f00:1", "64:ff9b:1::7f00:1", "64:ff9b::1:7f00:1",
+      below: "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff", above: null,
+      note: "the address above, 64:ff9b::1:0:0, is blocked (the rest of 64:ff9b::/32); 64:ff9b::808:808 is the /96 judged by a public IPv4",
+      alsoAllowed: ["164:ff9b::7f00:1", "65:ff9b::7f00:1", "64:fe9b::7f00:1", "64:ff9a::7f00:1", "64:ff9b::808:808"],
+    },
+    {
+      range: "64:ff9b::/32 outside the /96, denied outright (RFC 8215 local-use 64:ff9b:1::/48 maps private IPv4 at any length)",
+      first: "64:ff9b::", last: "64:ff9b:ffff:ffff:ffff:ffff:ffff:ffff",
+      below: "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff", above: "64:ff9c::",
+      // Public 8.8.8.8 behind a nonzero byte 4, 5 or 11, so a branch judging them by their IPv4 lets them through.
+      alsoDenied: [
+        "64:ff9b::1:0:0", "64:ff9b:100::808:808", "64:ff9b:1::808:808", "64:ff9b::1:808:808", "64:ff9b:8000::808:808",
+        "64:ff9b:1::10.0.0.1", "64:ff9b:1::7f00:1", "64:ff9b:1:a00:0:1::", "64:ff9b:1:c0a8:1:1::", "64:ff9b:1:7f00:1::",
       ],
+      alsoAllowed: ["64:ff9a::808:808", "64:ff9c::808:808", "64:ff9a:ffff::7f00:1", "64:ff9c::7f00:1"],
     },
     {
       range: "2002::/16 (6to4), judged by the IPv4 in bytes 2-5", first: "2002::", last: "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
@@ -635,7 +645,6 @@ describe("the IP denylist, enumerated: these tables are everything isFetchableWe
   // Ranges that are reserved or documentation-only but deliberately not blocked.
   const PASSING = [
     "https://198.51.100.1/", "https://203.0.113.1/", "https://[2001:db8::1]/", "https://[100::1]/", "https://[2001::1]/",
-    "https://[64:ff9b:1::7f00:1]/",
   ];
 
   const octets = (ip: string) => ip.split(".").map(Number);
