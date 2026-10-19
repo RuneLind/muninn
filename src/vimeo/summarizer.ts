@@ -612,6 +612,7 @@ export async function summarizeVimeo(
     };
 
     const result = await runCaptureOneShot({
+      toolSurface: "bot",
       source: "vimeo",
       jobId,
       title: meta.title,

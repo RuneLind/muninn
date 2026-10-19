@@ -238,3 +238,32 @@ describe("executePrompt — toolsDisabled", () => {
     expect(sentTools).toEqual([true, false]);
   }, 20_000);
 });
+
+describe("the declared tool surface, driven from runCaptureOneShot", () => {
+  test('"bot" sends the bot\'s tools, "none" sends none, and the fenced shapes send no request', async () => {
+    const { driveCapture } = await import("../../test/one-shot-drive.ts");
+    const dir = mkdtempSync(join(tmpdir(), "muninn-oc-surface-"));
+    const mcp = (sub: string) => JSON.stringify(Bun.resolveSync(`@modelcontextprotocol/sdk/${sub}`, import.meta.dir));
+    writeFileSync(join(dir, "server.ts"), [
+      `import { McpServer } from ${mcp("server/mcp.js")};`,
+      `import { StdioServerTransport } from ${mcp("server/stdio.js")};`,
+      `const s = new McpServer({ name: "t", version: "1" });`,
+      `s.tool("ping", async () => ({ content: [{ type: "text", text: "pong" }] }));`,
+      `await s.connect(new StdioServerTransport());`,
+    ].join("\n"));
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: { t: { command: process.execPath, args: [join(dir, "server.ts")] } },
+    }));
+    mode = "ok";
+
+    await driveCapture(bot({ dir }), "bot");
+    await driveCapture(bot({ dir }), "none");
+    expect(sentTools).toEqual([true, false]);
+
+    await expect(driveCapture(bot({ dir }), { read: [dir] })).rejects.toThrow(/cannot run a \{ read \}/);
+    await expect(driveCapture(bot({ dir }), { web: true })).rejects.toThrow(/cannot run a \{ web \}/);
+    await expect(executePrompt("p", config, { ...bot({ dir }), toolSurface: { web: true } }))
+      .rejects.toThrow(/openai-compat: the \{ web \} tool surface is not supported/);
+    expect(seen).toHaveLength(2);
+  }, 20_000);
+});
