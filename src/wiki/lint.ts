@@ -84,7 +84,7 @@
  *                      (an attribute `COMPONENT_ATTRS` does not list, or an
  *                      earlier spelling of a repeated one). Not culled. Rules:
  *                      `lint-components.ts`. `scripts/wiki-check.ts` runs it with checks
- *                      10, 11's first half, 12 and 13 (`checkPageText`).
+ *                      5, 6, 6b, 10, 11's first half, 12 and 13 (`checkPageText`).
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -153,11 +153,16 @@ export const LINT_CHECKS = [
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
-/** The checks that read nothing but a page's own text and the reader config's
- *  `roleKeys` (checks 10, 11's first half, 12, 13 and 15). `lintWiki` runs them
- *  per page through {@link checkPageText}, and `scripts/wiki-check.ts` runs the
- *  same function with no index. */
+/** The checks that read nothing but a page's own text, its relPath and the
+ *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11's first half, 12, 13
+ *  and 15). `lintWiki` runs them per page through {@link checkPageText}, and
+ *  `scripts/wiki-check.ts` runs the same function with no index. Not here:
+ *  `stale-updated`, which also reads the clock, and the checks that read the
+ *  index or a page's indexed metadata. */
 export const PAGE_TEXT_LINT_CHECKS = [
+  "index-truncation",
+  "nested-annotation",
+  "unrendered-fact-mark",
   "question-block",
   "decision-first-sentence",
   "status-row-long",
@@ -327,7 +332,7 @@ function maskJsxArrayOpeners(line: string): string {
  * The excerpt is quoted from the RAW line — quoting the code-span-stripped text
  * produced a string that appears in no file, so the finding could not be grepped.
  */
-function checkIndexTruncation(page: WikiPageMeta, rawContent: string): LintFinding[] {
+function checkIndexTruncation(page: PageRef, rawContent: string): LintFinding[] {
   const out: LintFinding[] = [];
   const lines = rawContent.split("\n");
   const fenced = fencedLineMask(lines);
@@ -391,7 +396,7 @@ function checkIndexTruncation(page: WikiPageMeta, rawContent: string): LintFindi
  * ```markdown fence, two in inline code spans — and a check that fires on its own
  * plan document is a check nobody reads. Full rule: `src/web/CLAUDE.md`.
  */
-function checkNestedAnnotation(page: WikiPageMeta, rawContent: string): LintFinding[] {
+function checkNestedAnnotation(page: PageRef, rawContent: string): LintFinding[] {
   const out: LintFinding[] = [];
   const lines = rawContent.split("\n");
   const fenced = fencedLineMask(lines);
@@ -421,7 +426,7 @@ const RENDERED_FACT_MARK_RE = /class="fc-mark\b/g;
  * row's pipes, which nothing on disk was checked for — or a zone the strip and the
  * renderer disagree about. Pages with no counted mark are skipped.
  */
-function checkUnrenderedFactMarks(page: WikiPageMeta, rawContent: string): LintFinding[] {
+function checkUnrenderedFactMarks(page: PageRef, rawContent: string): LintFinding[] {
   const counted = countFactWrappers(rawContent);
   if (counted === 0) return [];
   const lines = rawContent.split("\n");
@@ -924,13 +929,18 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
 
 /**
  * The {@link PAGE_TEXT_LINT_CHECKS} over one page, in `lintWiki`'s order.
- * Check 10 runs on every page (a card's state is the page's own business), 12
- * on a page with a role lane or a role-shaped question target, 13 on a page
- * with a labelled CaseBoard, 11 on a page with a DecisionLog or StatusRows, and
- * 15 on an `.mdx` page that is not culled.
+ * Checks 5, 6 and 6b run on every page, reserved infra included: index.md is
+ * where the truncated one-liners land, and log.md and index.md carry
+ * [[links]] like any page. Check 10 runs on every page (a card's state is the
+ * page's own business), 12 on a page with a role lane or a role-shaped
+ * question target, 13 on a page with a labelled CaseBoard, 11 on a page with a
+ * DecisionLog or StatusRows, and 15 on an `.mdx` page that is not culled.
  */
 export function checkPageText(page: PageRef & { culled?: boolean }, content: string, roleKeys: readonly string[]): LintFinding[] {
   const findings = [
+    ...checkIndexTruncation(page, content),
+    ...checkNestedAnnotation(page, content),
+    ...checkUnrenderedFactMarks(page, content),
     ...checkQuestions(page, content),
     ...checkRoleKeys(page, content, roleKeys),
     ...checkCaseBoardLabels(page, content),
@@ -968,13 +978,6 @@ export async function lintWiki(
     // Broken links apply to every markdown page (a dead link in index.md is
     // still a dead link); the frontmatter-shaped checks skip reserved infra.
     findings.push(...checkBrokenLinks(page, content, index));
-    // Reserved infra is IN scope: index.md is exactly where the truncated
-    // one-liners land, and a dangling `[[` there hides a real catalog entry.
-    findings.push(...checkIndexTruncation(page, content));
-    // Reserved infra too, and for the same reason: the shape is a dead link
-    // wherever it lands, and log.md/index.md carry [[links]] like any page.
-    findings.push(...checkNestedAnnotation(page, content));
-    findings.push(...checkUnrenderedFactMarks(page, content));
     findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? []));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it

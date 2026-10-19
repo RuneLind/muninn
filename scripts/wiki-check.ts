@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 /**
  * The lint checks that read only a page's own text (`checkPageText`,
- * `src/wiki/lint.ts`: question-block, decision-first-sentence, status-row-long,
- * role-key, case-board-labels and the component checks) over a page or a
+ * `src/wiki/lint.ts`: index-truncation, nested-annotation, unrendered-fact-mark,
+ * question-block, decision-first-sentence, status-row-long, role-key,
+ * case-board-labels and the component checks) over a page or a
  * directory, with no wiki index, no database and no `.env`. `roleKeys` comes
  * from the wiki root's `.wiki-reader.json`:
  *

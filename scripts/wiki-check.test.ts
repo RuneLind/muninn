@@ -49,6 +49,20 @@ const REPORT_TOP = [
   "</DecisionLog>",
   "",
 ].join("\n");
+const TEXT_SHAPES = [
+  "---",
+  "title: S",
+  "---",
+  "See [[broken link here",
+  "",
+  '[[<Fact n="4" v="ok">Page</Fact>]]',
+  "",
+  "| Drink | Effect |",
+  "|---|---|",
+  '| <Fact n="1" v="ok">Coffee | Lower risk</Fact> |',
+  "",
+].join("\n");
+const UNKNOWN_ATTR = ["---", "title: A", "---", '<Callout tone="info" bogus="x">', "x", "</Callout>", ""].join("\n");
 const CULLED_LOOSE_CLOSE = LOOSE_CLOSE.replace("title: Q", "title: Q\nsignal: none\nsignal-reason: retired");
 const COMPILED = "<!-- generated from blogs/src/s.mdx -->\n<html></html>\n";
 
@@ -91,6 +105,8 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/k.mdx"), KNOWN_ROLE);
   await Bun.write(path.join(tmp, "page-checks/plans/t.mdx"), REPORT_TOP);
   await Bun.write(path.join(tmp, "page-checks/plans/r.mdx"), CULLED_LOOSE_CLOSE);
+  await Bun.write(path.join(tmp, "page-checks/plans/s.mdx"), TEXT_SHAPES);
+  await Bun.write(path.join(tmp, "page-checks/plans/a.mdx"), UNKNOWN_ATTR);
 });
 afterAll(async () => {
   for (const f of ["locked/i.mdx", "mixed/j.mdx"]) await chmod(path.join(tmp, f), 0o644).catch(() => {});
@@ -161,6 +177,11 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
     expect((await wikiCheck(path.join(tmp, "page-checks/plans/k.mdx"))).findings).toEqual([]);
   });
 
+  test("an unclosed [[, markup inside a wikilink and a <Fact> that renders as text are findings", async () => {
+    const { findings } = await wikiCheck(path.join(tmp, "page-checks/plans/s.mdx"));
+    expect(new Set(findings.map((f) => f.check))).toEqual(new Set(["index-truncation", "nested-annotation", "unrendered-fact-mark"]));
+  });
+
   test("a culled page in a directory still gets the page-text checks lintWiki runs on it", async () => {
     const found = (await runWikiCheck([path.join(tmp, "page-checks")])).out.map((l) => JSON.parse(l) as { check: string; relPath: string });
     expect(found).toContainEqual(expect.objectContaining({ check: "question-block", relPath: "plans/r.mdx" }));
@@ -170,7 +191,18 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
     const root = path.join(tmp, "page-checks");
     const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => PAGE_TEXT.has(f.check));
     expect(new Set(lint.map((f) => f.check))).toEqual(
-      new Set(["question-block", "role-key", "component-value", "decision-first-sentence", "status-row-long", "case-board-labels"]),
+      new Set([
+        "question-block",
+        "role-key",
+        "component-value",
+        "component-attr",
+        "decision-first-sentence",
+        "status-row-long",
+        "case-board-labels",
+        "index-truncation",
+        "nested-annotation",
+        "unrendered-fact-mark",
+      ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
   });
