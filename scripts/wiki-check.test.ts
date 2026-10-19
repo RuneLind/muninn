@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { runWikiCheck, wikiCheck, wikiRootFor } from "./wiki-check.ts";
 import { buildWikiIndex } from "../src/wiki/store.ts";
-import { lintWiki } from "../src/wiki/lint.ts";
+import { lintWiki, PAGE_TEXT_LINT_CHECKS } from "../src/wiki/lint.ts";
 
 const SCRIPT = path.join(import.meta.dir, "wiki-check.ts");
 const BAD = ["---", "title: X", "---", '<Callout tone="success">', "x", "</Callout>", ""].join("\n");
@@ -28,6 +28,8 @@ const LOOSE_CLOSE = [
   "",
 ].join("\n");
 const UNKNOWN_ROLE = ["---", "title: L", "---", "<NextMoves>", "", '<Lane kind="you" role="jurist">', "", "1. x", "", "</Lane>", "", "</NextMoves>", ""].join("\n");
+const KNOWN_ROLE = ["---", "title: K", "---", "<NextMoves>", "", '<Lane kind="you" role="fag">', "", "1. x", "", "</Lane>", "", "</NextMoves>", ""].join("\n");
+const CULLED_LOOSE_CLOSE = LOOSE_CLOSE.replace("title: Q", "title: Q\nsignal: none\nsignal-reason: retired");
 const COMPILED = "<!-- generated from blogs/src/s.mdx -->\n<html></html>\n";
 
 let tmp: string;
@@ -66,6 +68,8 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/q.mdx"), LOOSE_CLOSE);
   await Bun.write(path.join(tmp, "page-checks/plans/l.mdx"), UNKNOWN_ROLE);
   await Bun.write(path.join(tmp, "page-checks/plans/c.mdx"), BAD);
+  await Bun.write(path.join(tmp, "page-checks/plans/k.mdx"), KNOWN_ROLE);
+  await Bun.write(path.join(tmp, "page-checks/plans/r.mdx"), CULLED_LOOSE_CLOSE);
 });
 afterAll(async () => {
   for (const f of ["locked/i.mdx", "mixed/j.mdx"]) await chmod(path.join(tmp, f), 0o644).catch(() => {});
@@ -120,7 +124,7 @@ describe("wiki-check walks the pages lintWiki checks", () => {
 });
 
 describe("wiki-check runs the checks lintWiki runs on a page's own text", () => {
-  const PAGE_TEXT = new Set(["question-block", "decision-first-sentence", "status-row-long", "role-key", "case-board-labels", "component-value", "component-attr"]);
+  const PAGE_TEXT = new Set<string>(PAGE_TEXT_LINT_CHECKS);
 
   test("a question closed without a decision id is a question-block finding", async () => {
     const { findings } = await wikiCheck(path.join(tmp, "page-checks/plans/q.mdx"));
@@ -130,6 +134,15 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
   test("a lane role the reader config does not list is a role-key finding", async () => {
     const { findings } = await wikiCheck(path.join(tmp, "page-checks/plans/l.mdx"));
     expect(findings.map((f) => f.check)).toContain("role-key");
+  });
+
+  test("a lane role the reader config lists is no finding", async () => {
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/k.mdx"))).findings).toEqual([]);
+  });
+
+  test("a culled page in a directory still gets the page-text checks lintWiki runs on it", async () => {
+    const found = (await runWikiCheck([path.join(tmp, "page-checks")])).out.map((l) => JSON.parse(l) as { check: string; relPath: string });
+    expect(found).toContainEqual(expect.objectContaining({ check: "question-block", relPath: "plans/r.mdx" }));
   });
 
   test("the same page-text findings as lintWiki, over a directory", async () => {
