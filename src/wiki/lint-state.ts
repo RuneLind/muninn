@@ -40,6 +40,7 @@
 import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, parseBlocks, type Block } from "../format/markdown-ast.ts";
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
+import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
@@ -112,9 +113,6 @@ const DATE_QUALIFIER_RE = /(?<![\p{L}\p{N}])per\s+\d{1,2}\.\d{1,2}(?:\.\d{4})?(?
  * `**Status 12.10.2026**` — after an optional list marker. `**Statusen**` is not.
  */
 const STATUS_PARA_RE = /^(?:[-*+]\s+|\d+[.)]\s+)?\*\*Status(?:\s+\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\.?)?[:.]?\*\*/;
-/** A ledger label's own text, once heading marks, `**` and a trailing `:`/`.`
- *  are gone: the label alone, or with a short parenthetical. */
-const LEDGER_LABEL_RE = /^(?:PR[ -]ledger|PR-oversikt)(?:\s*\([^()]{1,40}\))?$/i;
 /** A blockquote line. `- > x` is a list item: the reader shows its `>`. */
 const QUOTE_RE = /^>/;
 const INLINE_TAG_RE = new RegExp(`^<(?:${INLINE_COMPONENT_NAMES.join("|")})(?=[\\s>/])`);
@@ -260,18 +258,6 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
     if (j > i) i = j - 1;
   }
   return out;
-}
-
-/** Does this label line name the PR ledger and nothing else? */
-function isLedgerLabel(line: string): boolean {
-  const label = line
-    .trim()
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^\*\*(.*)\*\*$/, "$1")
-    .replace(/[:.]$/, "")
-    .replace(/^\*\*(.*)\*\*$/, "$1")
-    .trim();
-  return LEDGER_LABEL_RE.test(label);
 }
 
 /** A line that starts a new block, ending a paragraph. An inline component

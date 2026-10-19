@@ -116,7 +116,7 @@ const LOG_ID_TABLE: readonly { re: RegExp; struck: boolean }[] = [
   { re: new RegExp(`^~~\\*\\*(${LOG_ID})\\*\\*~~`), struck: true },
 ];
 /** A later decision named as the replacement, anywhere in the item. */
-const SUPERSEDED_RE = new RegExp(`(?:^|[^\\p{L}\\p{N}])(?:superseded by|erstattet av)[ \\t]+${LOG_ID}(?![\\p{L}\\p{N}])`, "iu");
+const SUPERSEDED_RE = new RegExp(`(?:^|[^\\p{L}\\p{N}])(?:superseded by|erstattet av)[ \\t]+(${LOG_ID})(?![\\p{L}\\p{N}])`, "iu");
 
 export interface LogItem {
   /** The id as written (`D1`); null when the item does not start with one. */
@@ -151,6 +151,12 @@ export function parseLogItem(item: string): LogItem {
     return { id: m[1]!, text, sep, dim: struck || inner !== null || wholeStrike(rest) !== null || superseded };
   }
   return { id: null, text: item, sep: "", dim: inner !== null || superseded };
+}
+
+/** The id an item names as its replacement (`superseded by D12`,
+ *  `erstattet av D12`), outside code spans; null when it names none. */
+export function supersededById(item: string): string | null {
+  return SUPERSEDED_RE.exec(withoutCodeSpans(item))?.[1] ?? null;
 }
 
 /** A decision item's trailing «<who>, DD.MM[.YYYY] (runde N).» (D41). */

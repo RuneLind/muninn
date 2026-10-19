@@ -32,6 +32,7 @@ import {
   CB_MORE_CLASS,
   CB_NONEMORE_CLASS,
   CB_OKMORE_CLASS,
+  DC_VIEW_CLASS,
   DL_ALL_CLASS,
   DL_MORE_CLASS,
   DL_ORDER_ATTR,
@@ -314,6 +315,23 @@ function decodeHash(href: string): string | null {
   }
 }
 
+/** What a peek copy drops: the reader's compact-list controls and parts (D6,
+ *  D41, D42) and the decision views — a peek shows its target whole, as
+ *  written, and never the chain or the strip. */
+export const PEEK_STRIP_SELECTOR = [
+  DL_MORE_CLASS,
+  DL_QSTATE_CLASS,
+  DL_ALL_CLASS,
+  CB_MORE_CLASS,
+  CB_OKMORE_CLASS,
+  CB_NONEMORE_CLASS,
+  DL_WHEN_CLASS,
+  CB_LINE_CLASS,
+  DC_VIEW_CLASS,
+]
+  .map((c) => `.${c}`)
+  .join(", ");
+
 /** A copy safe to show twice on the page: no ids, no flash, no frames
  *  reloading, no live checkboxes, and none of the reader's compact-list
  *  chrome (the «mer» toggle, the «lukket» badge): a peek shows a decision
@@ -322,11 +340,7 @@ function decodeHash(href: string): string | null {
 function cloneBare<T extends Node>(n: T): T {
   const c = n.cloneNode(true) as T;
   if (c instanceof Element) {
-    // The reader's compact-list controls and parts (D6, D41, D42):
-    // a peek shows its target whole, as written.
-    c.querySelectorAll(
-      `.${DL_MORE_CLASS}, .${DL_QSTATE_CLASS}, .${DL_ALL_CLASS}, .${CB_MORE_CLASS}, .${CB_OKMORE_CLASS}, .${CB_NONEMORE_CLASS}, .${DL_WHEN_CLASS}, .${CB_LINE_CLASS}`,
-    ).forEach((b) => b.remove());
+    c.querySelectorAll(PEEK_STRIP_SELECTOR).forEach((b) => b.remove());
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;
       const items = Array.from(list.children);
@@ -344,8 +358,9 @@ function cloneBare<T extends Node>(n: T): T {
   return c;
 }
 
-/** Blocks a peek does not copy: big, live or a section of their own. */
-const PEEK_SKIP = "details, iframe, section.query, .caseboard";
+/** Blocks a peek does not copy: big, live or a section of their own (a
+ *  decision view standing after a heading included). */
+export const PEEK_SKIP = `details, iframe, section.query, .caseboard, .${DC_VIEW_CLASS}`;
 
 const PEEK_CHARS = 400;
 const isHeading = (n: Node) => n.nodeType === 1 && /^H[1-6]$/.test((n as Element).tagName);

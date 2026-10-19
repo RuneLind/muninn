@@ -93,6 +93,9 @@ export function renderWikiHtml(
     /** The render day (`YYYY-MM-DD`) item dates are read against (D49).
      *  Absent ⇒ today in Europe/Oslo. For tests and sweeps. */
     today?: string;
+    /** The reader's page render: the decision chain view and the PR strip.
+     *  Set by `GET /api/wiki/page` alone. */
+    views?: boolean;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -147,6 +150,7 @@ export function renderWikiHtml(
       wikiLinkTexts: linkTexts,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
+      ...(opts?.views ? { views: true, proposedPlan: parseFrontmatter(markdown).plan_status === "proposed" } : {}),
     }),
     literal,
   );

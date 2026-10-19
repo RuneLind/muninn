@@ -475,6 +475,10 @@ Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`). A `<NextMoves>` hol
 
 `e2e/wiki-next-moves.spec.ts` pins the reader's compact block (title, count line, one closed line per lane, no overflow at 390 in focus mode), the pills, the ages under a fixed clock and timezone, settled (Historic and resolved Callout), nested and prose-only lanes, the pill = `movesYou` = board badge agreement, task marks, the superseded/abandoned board cards, and the contrast of every lane text and pill in both themes.
 
+## Decision chain and PR strip (`views`, the reader's page render only)
+
+`formatWebHtml(…, { views: true })` — set by `renderWikiHtml` on `GET /api/wiki/page` alone — reads the whole page first (`pageDecisionData`, `src/format/decision-views.ts`) and inserts up to two reader-only sections after the first top-level `<NextMoves>`, else after the first `<StatusRows>`; a page with neither gets none. The chain view (`dc-chain`) draws at `CHAIN_VIEW_MIN` (3) chains, one row per decision, newest first: question → decision → PRs, a reversal struck with «Snudd»/"Reversed". The strip (`dc-strip`) draws at `STRIP_VIEW_MIN` (4) rows over the ledgers that draw (a State/Status/Tilstand column and ≥ 75 % of rows parsed), one square per row grouped by the first decision the row cites. Edges and row states are the rules in `src/format/decision-chain.ts` and `src/format/pr-ledger.ts` (header comments). The view HTML carries no `id` (the anchor passes would rename a DecisionLog item); each node's link is retargeted to its item's final anchor (`DC_GO_RE`). Without `views`, or when both views are empty, the render is the one `renderBlocks` call, byte for byte — chat, Telegram, Slack, email, the gardener preview and the digest card never see the classes. Lenses: Overview and All show the views, Agent hides them with the article; `cloneBare` and `PEEK_SKIP` keep them out of every peek.
+
 ## `<Query>` — one prod query as a card
 
 Block-only, wiki-only (not in `COMPONENT_VOCABULARY_RULES`). `<Query id question answer csv sql run uses>` wraps the reading (any markdown). Pure helpers: `src/format/query-block.ts`; CSV parser: `src/format/csv.ts`.

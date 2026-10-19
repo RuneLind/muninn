@@ -259,6 +259,7 @@ describe("the wiki read slice in the user zone", () => {
     // The second hop's read is one of them, so a table that lost it fails here.
     expect(wikiRouteTable("read", "nais").some((r) => r.method === "GET" && r.path === "/api/wiki/related")).toBe(true);
     expect(asSliceUser("/api/wiki/related")).toEqual({ allowed: true, zone: "user", reason: "wiki read slice" });
+    expect(asSliceUser("/api/wiki/decision-chain")).toEqual({ allowed: true, zone: "user", reason: "wiki read slice" });
     for (const r of wikiRouteTable("read", "nais")) {
       const d = asSliceUser(r.path, r.method);
       expect(`${r.method} ${r.path} → ${d.allowed ? d.zone : d.reason}`).toBe(`${r.method} ${r.path} → user`);
@@ -344,7 +345,7 @@ describe("the wiki read slice in the user zone", () => {
 
   test("the user zone itself carries no wiki path, and the slice entries are exact", () => {
     expect(USER_ZONE_PATHS.filter((p) => p.startsWith("/api/wiki") || p.startsWith("/wiki"))).toEqual([]);
-    for (const path of ["/api/wiki/pages/x", "/wiki/issues", "/wiki/gardener", "/api/wiki/page/provenance/x", "/api/wiki/related/x", "/wiki/"]) {
+    for (const path of ["/api/wiki/pages/x", "/wiki/issues", "/wiki/gardener", "/api/wiki/page/provenance/x", "/api/wiki/related/x", "/api/wiki/decision-chain/x", "/wiki/"]) {
       expect(asSliceUser(path).allowed, path).toBe(false);
     }
   });
