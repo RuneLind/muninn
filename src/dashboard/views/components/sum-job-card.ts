@@ -3,7 +3,7 @@
  * routed to the active job's source (SOURCES[source].apiBase). */
 
 import { factcheckCalloutScript } from "../../../summaries/factcheck-callout.ts";
-import { markdownContentStyles } from "./doc-panel.ts";
+import { markdownContentStyles, sanitizedMarkedInstallScript } from "./doc-panel.ts";
 
 export function sumJobCardStyles(): string {
   return `
@@ -398,10 +398,7 @@ export function sumJobCardScript(): string {
 
     function renderMarkdown(text) {
       if (typeof marked === 'undefined') return '<pre>' + esc(text) + '</pre>';
-      if (typeof marked.use === 'function' && !marked.__sanitized) {
-        marked.use({ renderer: { html: function(token) { return esc(token.raw || token.text || ''); } } });
-        marked.__sanitized = true;
-      }
+      ${sanitizedMarkedInstallScript()}
       // A summary's fact-check block: sentinel lines out, callout styled.
       return styleFactcheckCallouts(marked.parse(dropFactcheckSentinelLines(text)));
     }

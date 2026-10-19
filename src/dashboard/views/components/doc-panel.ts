@@ -2,6 +2,7 @@
 
 import { factcheckCalloutScript, factcheckCalloutStyles } from "../../../summaries/factcheck-callout.ts";
 import { SUMMARY_SOURCES } from "../../../summaries/sources.ts";
+import { isSafeLinkHref } from "../../../format/safe-link-href.ts";
 
 /** CSS for markdown-rendered content. Used by both the overlay panel and the standalone document page. */
 export function markdownContentStyles(prefix: string): string {
@@ -379,16 +380,35 @@ export function docPanelHtml(
   </div>`;
 }
 
+/**
+ * The overrides every client `renderMarkdown` installs on the page's ONE global
+ * marked: raw HTML escaped, and a link whose href fails `isSafeLinkHref`
+ * (javascript:, data:, …) reduced to its text. A safe link returns `false`, so
+ * marked's own renderer writes it exactly as before. The doc panel and the
+ * summaries job card share the `__sanitized` flag, so both must install this
+ * same snippet — whichever runs first decides for the page.
+ */
+export function sanitizedMarkedInstallScript(): string {
+  return `if (typeof marked.use === 'function' && !marked.__sanitized) {
+        var isSafeLinkHref = ${isSafeLinkHref.toString()};
+        marked.use({ renderer: {
+          html: function(token) { return esc(token.raw || token.text || ''); },
+          link: function(token) {
+            if (isSafeLinkHref(String(token.href || ''))) return false;
+            return this.parser.parseInline(token.tokens);
+          }
+        } });
+        marked.__sanitized = true;
+      }`;
+}
+
 /** Inline JS for opening/closing the doc panel. Requires esc() and marked.js to be available. */
 export function docPanelScript(): string {
   return `
     function renderMarkdown(text) {
       if (typeof marked === 'undefined') return '<pre>' + esc(text) + '</pre>';
-      // Configure marked to escape HTML in source (prevent XSS from untrusted markdown)
-      if (typeof marked.use === 'function' && !marked.__sanitized) {
-        marked.use({ renderer: { html: function(token) { return esc(token.raw || token.text || ''); } } });
-        marked.__sanitized = true;
-      }
+      // Escape raw HTML and drop unsafe link schemes (untrusted markdown, no CSP).
+      ${sanitizedMarkedInstallScript()}
       // A summary's fact-check block: sentinel lines out, callout styled.
       return styleFactcheckCallouts(marked.parse(dropFactcheckSentinelLines(text)));
     }

@@ -30,6 +30,7 @@
 
 import { Marked, type Tokens } from "marked";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { isSafeLinkHref } from "../format/safe-link-href.ts";
 import { inProtectedRegion, markdownCodeRegions } from "../format/markdown-ast.ts";
 import { markdownContentStyles } from "../dashboard/views/components/doc-panel.ts";
 import { themeTokenStyles } from "../dashboard/views/shared-styles.ts";
@@ -166,38 +167,8 @@ export function linkVimeoTimestamps(markdown: string, videoUrl: string | undefin
   );
 }
 
-/**
- * A link target the exported page may carry. The page leaves this machine and
- * opens from `file://`, where a `javascript:`/`data:`/`vbscript:` href is
- * script execution on the reader's disk — measured through a real click.
- * marked has no sanitizer of its own; the source is model output over
- * third-party material.
- *
- * After the control-character refusal (browsers strip tab/CR/LF before
- * parsing the scheme, so `java<TAB>script:` is `javascript:` to a click and
- * "no scheme" to a naive regex — measured; other C0 controls are
- * percent-encoded, refused here for the same conservatism) and a trim, an
- * href is exactly ONE of three things, and the rule is written over that
- * enumeration rather than as a list of prefixes:
- *
- *  1. It has a scheme — allowed only for `http`, `https`, `mailto`.
- *  2. It has no scheme and opens with TWO slash-class characters — the
- *     network-path shape, refused: `//host` and `/\host` navigate to
- *     `file://host` (the WHATWG parser treats `\` as `/` on a special base —
- *     the second verify pass clicked `/\evil.example/p` into
- *     `file://evil.example/p`). `///path` has an EMPTY host and is refused
- *     with them: a link no reader needs, over-refused rather than carved out.
- *  3. Anything else — a fragment, a relative path resolved inside the folder,
- *     or an absolute path resolved against the local filesystem root (no
- *     host, no network; measured `/local/p` → `file:///local/p`).
- */
-export function isSafeLinkHref(href: string): boolean {
-  if (/[\u0000-\u001f\u007f]/.test(href)) return false;
-  const trimmed = href.trim();
-  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(trimmed)?.[1]?.toLowerCase();
-  if (scheme !== undefined) return scheme === "http" || scheme === "https" || scheme === "mailto";
-  return !/^[/\\]{2}/.test(trimmed);
-}
+/** The link rule lives in `../format/safe-link-href.ts`, shared with the dashboard's client markdown. */
+export { isSafeLinkHref };
 
 /** The only image the page may load: a packaged frame. Anything else — a
  *  remote pixel, a served address the rewrite did not claim — would phone home
