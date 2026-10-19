@@ -151,44 +151,6 @@ describe("fencedCanUseTool", () => {
     expect((await can("WebSearch", { query: "q" }, opts))!.behavior).toBe("allow");
   });
 
-  // Each range: an address inside it is denied, and the addresses just outside it are allowed.
-  const pin = (denied: string[], allowed: string[]) => {
-    for (const url of denied) expect([url, isFetchableWebUrl(url)]).toEqual([url, false]);
-    for (const url of allowed) expect([url, isFetchableWebUrl(url)]).toEqual([url, true]);
-  };
-
-  test("224.0.0.0/3 (multicast and reserved) is blocked; 223.255.255.255 is not", () => {
-    pin(["https://224.0.0.1/", "https://239.255.255.250/", "https://240.0.0.1/", "https://255.255.255.255/"],
-      ["https://223.255.255.255/"]);
-  });
-
-  test("192.0.0.0/24 and 192.0.2.0/24 are blocked; the rest of 192.0/16 is not", () => {
-    pin(["https://192.0.0.1/", "https://192.0.0.255/", "https://192.0.2.1/", "https://192.0.2.255/"],
-      ["https://192.0.1.1/", "https://192.0.3.1/", "https://192.0.32.10/", "https://192.0.255.1/"]);
-  });
-
-  test("198.18.0.0/15 is blocked; 198.17.255.255 and 198.20.0.1 are not", () => {
-    pin(["https://198.18.0.1/", "https://198.19.255.255/"], ["https://198.17.255.255/", "https://198.20.0.1/"]);
-  });
-
-  test("NAT64 64:ff9b::/96 is judged by its embedded IPv4", () => {
-    pin(["https://[64:ff9b::127.0.0.1]/", "https://[64:ff9b::a00:1]/", "https://[64:ff9b::c0a8:101]/"],
-      ["https://[64:ff9b::8.8.8.8]/", "https://[64:ff9b::808:808]/"]);
-  });
-
-  test("6to4 2002::/16 is judged by its embedded IPv4", () => {
-    pin(["https://[2002:7f00:1::]/", "https://[2002:a00:1::1]/", "https://[2002:a9fe:a9fe::]/"],
-      ["https://[2002:808:808::1]/"]);
-  });
-
-  test("IPv6 multicast ff00::/8 is blocked", () => {
-    pin(["https://[ff02::1]/", "https://[ff05::1:3]/", "https://[ffff::1]/"], ["https://[2606:4700::1111]/"]);
-  });
-
-  test("the documentation ranges the denylist leaves out pass, as documented", () => {
-    pin([], ["https://198.51.100.1/", "https://203.0.113.1/", "https://[2001:db8::1]/", "https://[100::1]/", "https://[2001::1]/"]);
-  });
-
   test("isInsideDirs treats the dir itself as inside and a prefix-sharing sibling as outside", () => {
     expect(isInsideDirs(framesDir, [framesDir])).toBe(true);
     expect(isInsideDirs(`${framesDir}2/a`, [framesDir])).toBe(false);
@@ -591,5 +553,155 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
       driveCapture(driveBot(botDir, { connector: "claude-cli" }), { read: [framesDir] }, { extraDirs: [root] }),
     ).rejects.toThrow(/only allowed with toolSurface "bot"/);
     expect(spawned).toHaveLength(0);
+  });
+});
+
+/**
+ * The IP denylist, enumerated. V4_BLOCKED and V6_BLOCKED are the full list of
+ * what `isFetchableWebUrl` blocks by address: a range missing here is one the
+ * code does not block, and the function's doc comment lists the same ranges.
+ * Each row pins the first and last address (denied) and the address just
+ * below and just above (allowed); `null` means the range touches the end of
+ * the address space, and a neighbour that falls in another blocked range is
+ * replaced by the nearest allowed one, named in `note`.
+ */
+describe("the IP denylist, enumerated: these tables are everything isFetchableWebUrl blocks by address", () => {
+  type V4Row = { range: string; first: string; last: string; below: string | null; above: string | null; embedded: string; otherFirstOctet?: string[] };
+  // `otherFirstOctet`: on a range narrower than /8, its first and last address with the first octet moved by one pass.
+  // `embedded` is a private address chosen so that its bytes read at a wrong offset form a public address where they can
+  // (see the offset test below); the IPv6 forms of each row embed it.
+  const V4_BLOCKED: V4Row[] = [
+    { range: "0.0.0.0/8", first: "0.0.0.0", last: "0.255.255.255", below: null, above: "1.0.0.0", embedded: "0.1.1.1" },
+    { range: "10.0.0.0/8", first: "10.0.0.0", last: "10.255.255.255", below: "9.255.255.255", above: "11.0.0.0", embedded: "10.1.1.1" },
+    { range: "100.64.0.0/10", first: "100.64.0.0", last: "100.127.255.255", below: "100.63.255.255", above: "100.128.0.0", embedded: "100.64.1.1", otherFirstOctet: ["99.64.0.0", "101.127.255.255"] },
+    { range: "127.0.0.0/8", first: "127.0.0.0", last: "127.255.255.255", below: "126.255.255.255", above: "128.0.0.0", embedded: "127.1.1.1" },
+    { range: "169.254.0.0/16", first: "169.254.0.0", last: "169.254.255.255", below: "169.253.255.255", above: "169.255.0.0", embedded: "169.254.1.1", otherFirstOctet: ["168.254.0.0", "170.254.255.255"] },
+    { range: "172.16.0.0/12", first: "172.16.0.0", last: "172.31.255.255", below: "172.15.255.255", above: "172.32.0.0", embedded: "172.16.1.1", otherFirstOctet: ["171.16.0.0", "173.31.255.255"] },
+    { range: "192.0.0.0/24", first: "192.0.0.0", last: "192.0.0.255", below: "191.255.255.255", above: "192.0.1.0", embedded: "192.0.0.1", otherFirstOctet: ["191.0.0.0", "193.0.0.255"] },
+    { range: "192.0.2.0/24", first: "192.0.2.0", last: "192.0.2.255", below: "192.0.1.255", above: "192.0.3.0", embedded: "192.0.2.1", otherFirstOctet: ["191.0.2.0", "193.0.2.255"] },
+    { range: "192.168.0.0/16", first: "192.168.0.0", last: "192.168.255.255", below: "192.167.255.255", above: "192.169.0.0", embedded: "192.168.1.1", otherFirstOctet: ["191.168.0.0", "193.168.255.255"] },
+    { range: "198.18.0.0/15", first: "198.18.0.0", last: "198.19.255.255", below: "198.17.255.255", above: "198.20.0.0", embedded: "198.18.1.1", otherFirstOctet: ["197.18.0.0", "199.19.255.255"] },
+    { range: "224.0.0.0/3", first: "224.0.0.0", last: "255.255.255.255", below: "223.255.255.255", above: null, embedded: "224.1.1.1" },
+  ];
+
+  type V6Row = { range: string; first: string; last: string; below: string | null; above: string | null; note?: string; alsoDenied?: string[]; alsoAllowed?: string[] };
+  // `alsoAllowed` on an embedding prefix holds one address per prefix byte that differs from the prefix in that byte
+  // alone and embeds 127.0.0.1, so dropping any one byte's comparison denies it.
+  const V6_BLOCKED: V6Row[] = [
+    {
+      range: "::/96 (unspecified, loopback, IPv4-compatible), judged by its IPv4", first: "::", last: "::ffff:ffff",
+      below: null, above: "::1:0:0", alsoDenied: ["::1"],
+      alsoAllowed: ["1::7f00:1", "0:0:0:0:1:0:7f00:1", "::100:7f00:1", "::1:7f00:1"],
+    },
+    {
+      range: "::ffff:0:0/96 (IPv4-mapped), judged by its IPv4", first: "::ffff:0:0", last: "::ffff:ffff:ffff",
+      below: "::fffe:ffff:ffff", above: "::1:0:0:0", alsoAllowed: ["::feff:7f00:1", "::fffe:7f00:1", "0:0:0:0:1:ffff:7f00:1"],
+    },
+    {
+      range: "64:ff9b::/96 (NAT64), judged by its IPv4", first: "64:ff9b::", last: "64:ff9b::ffff:ffff",
+      below: "64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff", above: "64:ff9b::1:0:0",
+      note: "the rest of 64:ff9b::/32 is plain IPv6 and passes, the local-use 64:ff9b:1::/48 included",
+      alsoAllowed: [
+        "164:ff9b::7f00:1", "65:ff9b::7f00:1", "64:fe9b::7f00:1", "64:ff9a::7f00:1",
+        "64:ff9b:100::7f00:1", "64:ff9b:1::7f00:1", "64:ff9b::1:7f00:1",
+      ],
+    },
+    {
+      range: "2002::/16 (6to4), judged by the IPv4 in bytes 2-5", first: "2002::", last: "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+      below: "2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff", above: "2003::", alsoAllowed: ["3002:7f00:1::", "2:7f00:1::", "2003:7f00:1::"],
+    },
+    {
+      range: "fc00::/7 (unique local)", first: "fc00::", last: "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+      below: "fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", above: "fe00::",
+    },
+    {
+      range: "fe80::/10 (link-local)", first: "fe80::", last: "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+      below: "fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff", above: null,
+      note: "the address above, fec0::, is blocked (fec0::/10), and so is everything after it",
+    },
+    {
+      range: "fec0::/10 (site-local)", first: "fec0::", last: "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+      below: "fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff", above: null,
+      note: "the address below, febf:ffff:…, is blocked (fe80::/10): fe7f:ffff:… is the nearest allowed; ff00:: above is blocked (ff00::/8)",
+    },
+    {
+      range: "ff00::/8 (multicast)", first: "ff00::", last: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+      below: "fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff", above: null,
+      note: "the address below, feff:ffff:…, is blocked (fec0::/10): fe7f:ffff:… is the nearest allowed; fbff::1 pins the prefix to /8, not f000::/4",
+      alsoAllowed: ["fbff::1"],
+    },
+  ];
+
+  // Ranges that are reserved or documentation-only but deliberately not blocked.
+  const PASSING = [
+    "https://198.51.100.1/", "https://203.0.113.1/", "https://[2001:db8::1]/", "https://[100::1]/", "https://[2001::1]/",
+    "https://[64:ff9b:1::7f00:1]/",
+  ];
+
+  const octets = (ip: string) => ip.split(".").map(Number);
+  const hex16 = (hi: number, lo: number) => ((hi << 8) | lo).toString(16);
+  // Each IPv6 form that embeds an IPv4, with where the code reads it and the wrong offsets a mutant could read instead.
+  const FORMS = [
+    { form: "IPv4-compatible ::/96", url: (ip: string) => `https://[::${ip}]/`, bytes: (ip: string) => [...Array(12).fill(0), ...octets(ip)], wrong: [10, 11, 13] },
+    { form: "IPv4-mapped ::ffff:0:0/96", url: (ip: string) => `https://[::ffff:${ip}]/`, bytes: (ip: string) => [...Array(10).fill(0), 0xff, 0xff, ...octets(ip)], wrong: [10, 11, 13] },
+    { form: "NAT64 64:ff9b::/96", url: (ip: string) => `https://[64:ff9b::${ip}]/`, bytes: (ip: string) => [0, 0x64, 0xff, 0x9b, ...Array(8).fill(0), ...octets(ip)], wrong: [10, 11, 13] },
+    {
+      form: "6to4 2002::/16",
+      url: (ip: string) => { const [a, b, c, d] = octets(ip) as [number, number, number, number]; return `https://[2002:${hex16(a, b)}:${hex16(c, d)}::]/`; },
+      bytes: (ip: string) => [0x20, 0x02, ...octets(ip), ...Array(10).fill(0)], wrong: [0, 1, 3, 4],
+    },
+  ];
+  // A public IPv4 whose bytes at every wrong offset above land in a blocked range, so it catches a mutant reading there.
+  const OFFSET_PROBE = "8.10.10.1";
+
+  const expectFetchable = (urls: string[], want: boolean) => {
+    for (const url of urls) expect([url, isFetchableWebUrl(url)]).toEqual([url, want]);
+  };
+  const v4url = (ip: string) => `https://${ip}/`;
+  const v6url = (ip: string) => `https://[${ip}]/`;
+  const present = (xs: (string | null)[]) => xs.filter((x): x is string => x !== null);
+
+  test.each(V4_BLOCKED)("IPv4 $range: edges, and the private and public IPv4 in every IPv6 form", (row) => {
+    expectFetchable([row.first, row.last].map(v4url), false);
+    expectFetchable([...present([row.below, row.above]), ...(row.otherFirstOctet ?? [])].map(v4url), true);
+    const publicNeighbour = (row.above ?? row.below)!;
+    for (const { url } of FORMS) {
+      expectFetchable([url(row.embedded), url(row.first), url(row.last)], false);
+      expectFetchable([url(publicNeighbour), url(OFFSET_PROBE)], true);
+    }
+  });
+
+  test.each(V6_BLOCKED)("IPv6 $range: edges", (row) => {
+    expectFetchable([row.first, row.last, ...(row.alsoDenied ?? [])].map(v6url), false);
+    expectFetchable([...present([row.below, row.above]), ...(row.alsoAllowed ?? [])].map(v6url), true);
+  });
+
+  test("the reserved and documentation ranges the denylist leaves out pass", () => {
+    expectFetchable(PASSING, true);
+  });
+
+  // Checks the fixtures, not the code: an independent CIDR reading of V4_BLOCKED.
+  test("the fixtures are what they claim: in-range, out-of-range, and offset-discriminating", () => {
+    const toInt = (b: number[]) => (((b[0] ?? 0) << 24) | ((b[1] ?? 0) << 16) | ((b[2] ?? 0) << 8) | (b[3] ?? 0)) >>> 0;
+    const inCidr = (b: number[], cidr: string) => {
+      const [base, len] = cidr.split("/") as [string, string];
+      const mask = Number(len) === 0 ? 0 : (0xffffffff << (32 - Number(len))) >>> 0;
+      return ((toInt(b) & mask) >>> 0) === ((toInt(octets(base)) & mask) >>> 0);
+    };
+    const blocked = (b: number[]) => V4_BLOCKED.some((r) => inCidr(b, r.range));
+    for (const r of V4_BLOCKED) {
+      for (const ip of [r.first, r.last, r.embedded]) expect([r.range, ip, inCidr(octets(ip), r.range)]).toEqual([r.range, ip, true]);
+      for (const ip of [...present([r.below, r.above]), ...(r.otherFirstOctet ?? [])]) expect([r.range, ip, blocked(octets(ip))]).toEqual([r.range, ip, false]);
+    }
+    expect(blocked(octets(OFFSET_PROBE))).toBe(false);
+    // A mutant reading the IPv4 at a wrong offset is caught when the public probe reads blocked there or every
+    // private fixture reads public there (6to4 offsets 0 and 1 read the 2002 prefix, which the probe cannot steer).
+    for (const f of FORMS) {
+      for (const o of f.wrong) {
+        const probeCatches = blocked(f.bytes(OFFSET_PROBE).slice(o, o + 4));
+        const fixturesCatch = V4_BLOCKED.every((r) => !blocked(f.bytes(r.embedded).slice(o, o + 4)));
+        expect([f.form, o, probeCatches || fixturesCatch]).toEqual([f.form, o, true]);
+      }
+    }
   });
 });

@@ -144,12 +144,15 @@ export function isInsideDirs(path: string, dirs: string[]): boolean {
  * Whether WebFetch on a `{ web }` run may reach `url`: http or https (the CLI
  * upgrades http), and a host that is neither a local-only name (`localhost`,
  * `*.localhost`, `*.internal`, `*.local`) nor an IP literal in a blocked range.
- * IPv4: 0/8, 10/8, 127/8, 100.64/10, 169.254/16, 172.16/12, 192.168/16,
- * 192.0.0/24, 192.0.2/24, 198.18/15 and 224/3. IPv6: fc00::/7, fe80::/10,
- * fec0::/10, ff00::/8, and the IPv4 embedded in ::/96, ::ffff:0:0/96,
- * 64:ff9b::/96 and 2002::/16 checked against the IPv4 list. No other range is
- * blocked: 198.51.100/24, 203.0.113/24, 2001:db8::/32, 100::/64 and Teredo
- * 2001::/32 pass. The URL parser
+ * IPv4: 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24,
+ * 192.0.2/24, 192.168/16, 198.18/15 and 224/3. IPv6: fc00::/7, fe80::/10,
+ * fec0::/10 and ff00::/8, plus four prefixes judged by the IPv4 they embed,
+ * checked against the IPv4 list: ::/96 (so `::` and `::1` are blocked as
+ * 0.0.0.0 and 0.0.0.1), ::ffff:0:0/96, 64:ff9b::/96 (last 4 bytes) and
+ * 2002::/16 (bytes 2–5). No other range is blocked: 198.51.100/24,
+ * 203.0.113/24, 2001:db8::/32, 100::/64, Teredo 2001::/32 and the rest of
+ * 64:ff9b::/32 (the local-use 64:ff9b:1::/48 included) pass. The denylist
+ * table in tool-surface.test.ts is this list. The URL parser
  * normalizes `2130706433` and `0x7f.1` to `127.0.0.1` first. A name that
  * RESOLVES to a private address passes: this checks the URL, not DNS.
  */
@@ -220,7 +223,10 @@ function isPublicIpv6(b: number[]): boolean {
   if (zeroUpTo(10) && ((b[10] === 0 && b[11] === 0) || (b[10] === 0xff && b[11] === 0xff))) {
     return isPublicIpv4(b.slice(12));
   }
-  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) return isPublicIpv4(b.slice(12)); // NAT64 64:ff9b::/96
+  // NAT64 64:ff9b::/96 only; the rest of 64:ff9b::/32 is judged as plain IPv6.
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && b.slice(4, 12).every((x) => x === 0)) {
+    return isPublicIpv4(b.slice(12));
+  }
   if (b[0] === 0x20 && b[1] === 0x02) return isPublicIpv4(b.slice(2, 6)); // 6to4 2002::/16
   if ((b[0]! & 0xfe) === 0xfc) return false; // unique-local fc00::/7
   if (b[0] === 0xfe && (b[1]! & 0x80) === 0x80) return false; // link-local fe80::/10 and site-local fec0::/10
