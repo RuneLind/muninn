@@ -944,7 +944,8 @@ const DELETE_TIMEOUT_MS = 20_000;
  *  and reads every collection's `manifest.json` to find the ones sharing the
  *  source. A request past the 20 s client timeout is queued in its worker pool
  *  or on a stalled disk. 5 min (15x the client timeout) keeps re-runs out
- *  until such a move has landed; every definite answer releases long before. */
+ *  until such a move has landed. A confirmed move, a 4xx, a pre-move 500 and a
+ *  refused connection let go at once. */
 const DELETE_CLAIM_BUDGET_MS = 5 * 60_000;
 
 /** huginn's DELETE 404 when the source file is not on disk — the one 404 that
