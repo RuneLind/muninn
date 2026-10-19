@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { runWikiCheck, wikiCheck, wikiRootFor } from "./wiki-check.ts";
+import { runWikiCheck, wikiCheck, wikiRootFor, type WikiCheckResult } from "./wiki-check.ts";
 import { buildWikiIndex } from "../src/wiki/store.ts";
 import { lintWiki, PAGE_TEXT_LINT_CHECKS } from "../src/wiki/lint.ts";
 
@@ -62,6 +62,11 @@ const TEXT_SHAPES = [
   '| <Fact n="1" v="ok">Coffee | Lower risk</Fact> |',
   "",
 ].join("\n");
+const CULLED_TEXT_SHAPES = TEXT_SHAPES.replace("title: S", "title: RS\nsignal: none\nsignal-reason: retired");
+const ORDERED = LOOSE_CLOSE.replace("title: Q\n---\n", "title: O\n---\nSee [[dangling\n\n");
+const TLDR_NO_MORE = ["---", "title: M", "plan_status: in-flight", "---", "# M", "", "<Tldr>", "", "Short.", "", "</Tldr>", "", "Body.", ""].join("\n");
+const SHIPPED = ["---", "title: D", "plan_status: shipped", "---", "# D", "", "Body.", ""].join("\n");
+const REFERENCE = ["---", "title: Ref", "---", "# Ref", "", "Body.", ""].join("\n");
 const UNKNOWN_ATTR = ["---", "title: A", "---", '<Callout tone="info" bogus="x">', "x", "</Callout>", ""].join("\n");
 const CULLED_LOOSE_CLOSE = LOOSE_CLOSE.replace("title: Q", "title: Q\nsignal: none\nsignal-reason: retired");
 const COMPILED = "<!-- generated from blogs/src/s.mdx -->\n<html></html>\n";
@@ -107,6 +112,12 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/r.mdx"), CULLED_LOOSE_CLOSE);
   await Bun.write(path.join(tmp, "page-checks/plans/s.mdx"), TEXT_SHAPES);
   await Bun.write(path.join(tmp, "page-checks/plans/a.mdx"), UNKNOWN_ATTR);
+  await Bun.write(path.join(tmp, "page-checks/plans/rs.mdx"), CULLED_TEXT_SHAPES);
+  await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
+  await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
+  await Bun.write(path.join(tmp, "page-checks/plans/d.mdx"), SHIPPED);
+  await Bun.write(path.join(tmp, "page-checks/plans/index.mdx"), SHIPPED.replace("plan_status: shipped\n", ""));
+  await Bun.write(path.join(tmp, "page-checks/concepts/ref.mdx"), REFERENCE);
 });
 afterAll(async () => {
   for (const f of ["locked/i.mdx", "mixed/j.mdx"]) await chmod(path.join(tmp, f), 0o644).catch(() => {});
@@ -120,7 +131,9 @@ const spawn = (...args: string[]) => {
   const p = Bun.spawnSync([process.execPath, "--no-env-file", SCRIPT, ...args], { cwd: tmp, env: { PATH: process.env.PATH ?? "" } });
   return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
 };
-const relPaths = async (target: string) => (await runWikiCheck([target])).out.map((l) => (JSON.parse(l) as { relPath: string }).relPath);
+const relPaths = async (target: string) => [...new Set((await runWikiCheck([target])).out.map((l) => (JSON.parse(l) as { relPath: string }).relPath))];
+
+const PAGE_TEXT = new Set<string>(PAGE_TEXT_LINT_CHECKS);
 
 describe("wiki-check walks the pages lintWiki checks", () => {
   test("a culled page, a page a same-stem .md shadows, and a compiled source are skipped", async () => {
@@ -141,8 +154,8 @@ describe("wiki-check walks the pages lintWiki checks", () => {
     await Bun.write(path.join(root, "notes/q.md"), BAD);
     await chmod(path.join(root, "notes/q.md"), 0o000);
     try {
-      const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.check.startsWith("component-"));
-      expect(lint.map((f) => f.relPath)).toEqual(["plans/q.mdx"]);
+      const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => PAGE_TEXT.has(f.check));
+      expect([...new Set(lint.map((f) => f.relPath))]).toEqual(["plans/q.mdx"]);
       expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
     } finally {
       await chmod(path.join(root, "notes/q.md"), 0o644);
@@ -155,14 +168,12 @@ describe("wiki-check walks the pages lintWiki checks", () => {
 
   test("the same pages, and the same findings, as lintWiki", async () => {
     const root = path.join(tmp, "wiki");
-    const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.check.startsWith("component-"));
+    const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => PAGE_TEXT.has(f.check));
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
   });
 });
 
 describe("wiki-check runs the checks lintWiki runs on a page's own text", () => {
-  const PAGE_TEXT = new Set<string>(PAGE_TEXT_LINT_CHECKS);
-
   test("a question closed without a decision id is a question-block finding", async () => {
     const { findings } = await wikiCheck(path.join(tmp, "page-checks/plans/q.mdx"));
     expect(findings.map((f) => f.check)).toContain("question-block");
@@ -174,12 +185,36 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
   });
 
   test("a lane role the reader config lists is no finding", async () => {
-    expect((await wikiCheck(path.join(tmp, "page-checks/plans/k.mdx"))).findings).toEqual([]);
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/k.mdx"))).findings.filter((f) => f.check === "role-key")).toEqual([]);
   });
 
   test("an unclosed [[, markup inside a wikilink and a <Fact> that renders as text are findings", async () => {
     const { findings } = await wikiCheck(path.join(tmp, "page-checks/plans/s.mdx"));
-    expect(new Set(findings.map((f) => f.check))).toEqual(new Set(["index-truncation", "nested-annotation", "unrendered-fact-mark"]));
+    expect(new Set(findings.map((f) => f.check))).toEqual(new Set(["index-truncation", "nested-annotation", "unrendered-fact-mark", "missing-tldr"]));
+  });
+
+  test("a live plan with no <Tldr> first is a missing-tldr finding, and one whose box holds no <More> a tldr-no-more", async () => {
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/k.mdx"))).findings.map((f) => f.check)).toContain("missing-tldr");
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/m.mdx"))).findings.map((f) => f.check)).toEqual(["tldr-no-more"]);
+    expect((await wikiCheck(path.join(tmp, "page-checks/concepts/ref.mdx"))).findings.map((f) => f.check)).toEqual(["missing-tldr"]);
+  });
+
+  test("a shipped plan and a reserved page need no <Tldr>", async () => {
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/d.mdx"))).findings).toEqual([]);
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/index.mdx"))).findings).toEqual([]);
+  });
+
+  test("a culled page in a directory gets checks 5, 6 and 6b but no Tldr or component checks", async () => {
+    const found = (await runWikiCheck([path.join(tmp, "page-checks")])).out.map((l) => JSON.parse(l) as { check: string; relPath: string });
+    expect(new Set(found.filter((f) => f.relPath === "plans/rs.mdx").map((f) => f.check))).toEqual(
+      new Set(["index-truncation", "nested-annotation", "unrendered-fact-mark"]),
+    );
+  });
+
+  test("lintWiki reports a page's page-text findings in checkPageText's order", async () => {
+    const root = path.join(tmp, "page-checks");
+    const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.relPath === "plans/o.mdx" && PAGE_TEXT.has(f.check));
+    expect(lint.map((f) => f.check)).toEqual(["index-truncation", "question-block", "missing-tldr"]);
   });
 
   test("a culled page in a directory still gets the page-text checks lintWiki runs on it", async () => {
@@ -202,6 +237,8 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "index-truncation",
         "nested-annotation",
         "unrendered-fact-mark",
+        "missing-tldr",
+        "tldr-no-more",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
@@ -211,9 +248,10 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
 describe("wiki-check", () => {
   test("relPath is relative to the nearest .wiki-reader.json, else to the argument", async () => {
     expect(wikiRootFor(path.join(tmp, "wiki/plans/deep"))).toBe(path.join(tmp, "wiki"));
-    expect((await wikiCheck(path.join(tmp, "wiki/plans"))).findings.map((f) => f.relPath)).toEqual(["plans/deep/a.mdx"]);
+    const component = (r: WikiCheckResult) => r.findings.filter((f) => f.check === "component-value");
+    expect(component(await wikiCheck(path.join(tmp, "wiki/plans"))).map((f) => f.relPath)).toEqual(["plans/deep/a.mdx"]);
     const one = await wikiCheck(path.join(tmp, "wiki/plans/deep/a.mdx"));
-    expect(one.findings.map((f) => [f.relPath, f.line])).toEqual([["plans/deep/a.mdx", 4]]);
+    expect(component(one).map((f) => [f.relPath, f.line])).toEqual([["plans/deep/a.mdx", 4]]);
     expect((await wikiCheck(path.join(tmp, "loose"))).findings.map((f) => f.relPath)).toEqual(["sub/g.mdx"]);
     expect((await wikiCheck(path.join(tmp, "loose/sub/g.mdx"))).findings.map((f) => f.relPath)).toEqual(["g.mdx"]);
   });
@@ -224,6 +262,7 @@ describe("wiki-check", () => {
     expect(found.err).toBe("");
     expect(found.out.trimEnd().split("\n").map((l) => JSON.parse(l))).toEqual([
       expect.objectContaining({ check: "component-value", relPath: "plans/deep/a.mdx", line: 4 }),
+      expect.objectContaining({ check: "missing-tldr", relPath: "plans/deep/a.mdx" }),
     ]);
     expect(spawn(path.join(tmp, "clean"))).toEqual({ code: 0, out: "", err: "" });
   });

@@ -3,7 +3,7 @@
  * The lint checks that read only a page's own text (`checkPageText`,
  * `src/wiki/lint.ts`: index-truncation, nested-annotation, unrendered-fact-mark,
  * question-block, decision-first-sentence, status-row-long, role-key,
- * case-board-labels and the component checks) over a page or a
+ * case-board-labels, missing-tldr, tldr-no-more and the component checks) over a page or a
  * directory, with no wiki index, no database and no `.env`. `roleKeys` comes
  * from the wiki root's `.wiki-reader.json`:
  *
@@ -15,8 +15,8 @@
  * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
  * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
  * sibling exists), minus a page a readable same-stem `.md` shadows. In a
- * directory, a culled page (`signal: none`) gets every check but the component
- * checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
+ * directory, a culled page (`signal: none`) gets every check but the Tldr and
+ * component checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
  * `relPath` is relative to it.
  *
@@ -29,7 +29,7 @@
 
 import path from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { extRank, parseFrontmatter, readCull, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
+import { extRank, parseFrontmatter, readCull, readPlanStatus, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
 import { checkPageText, type LintFinding } from "../src/wiki/lint.ts";
 
 const USAGE = "usage: bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory path>";
@@ -67,10 +67,7 @@ export async function mdxPagesUnder(root: string, dir: string): Promise<string[]
 }
 
 /** A culled page, as the index reads it: frontmatter `signal: none`. */
-const isCulled = (content: string) => {
-  const fm = parseFrontmatter(content);
-  return readCull(fm.signal, fm["signal-reason"]).culled === true;
-};
+const isCulled = (fm: Record<string, string | string[]>) => readCull(fm.signal, fm["signal-reason"]).culled === true;
 
 export interface WikiCheckResult {
   findings: LintFinding[];
@@ -94,7 +91,9 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     const base = path.dirname(target);
     const root = wikiRootFor(base) ?? base;
     const rel = path.relative(root, target).split(path.sep).join("/");
-    const findings = checkPageText({ relPath: rel }, await Bun.file(target).text(), await roleKeysAt(root));
+    const content = await Bun.file(target).text();
+    const plan_status = readPlanStatus(parseFrontmatter(content));
+    const findings = checkPageText({ relPath: rel, plan_status }, content, await roleKeysAt(root));
     return { findings, checked: 1, selected: 1, unreadable: [] };
   }
   const root = wikiRootFor(target) ?? target;
@@ -111,7 +110,8 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
       continue;
     }
     out.checked += 1;
-    out.findings.push(...checkPageText({ relPath: rel, culled: isCulled(content) }, content, roleKeys));
+    const fm = parseFrontmatter(content);
+    out.findings.push(...checkPageText({ relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) }, content, roleKeys));
   }
   return out;
 }

@@ -84,7 +84,7 @@
  *                      (an attribute `COMPONENT_ATTRS` does not list, or an
  *                      earlier spelling of a repeated one). Not culled. Rules:
  *                      `lint-components.ts`. `scripts/wiki-check.ts` runs it with checks
- *                      5, 6, 6b, 10, 11's first half, 12 and 13 (`checkPageText`).
+ *                      5, 6, 6b, 10, 11, 12 and 13 (`checkPageText`).
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -154,11 +154,13 @@ export const LINT_CHECKS = [
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 /** The checks that read nothing but a page's own text, its relPath and the
- *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11's first half, 12, 13
- *  and 15). `lintWiki` runs them per page through {@link checkPageText}, and
- *  `scripts/wiki-check.ts` runs the same function with no index. Not here:
- *  `stale-updated`, which also reads the clock, and the checks that read the
- *  index or a page's indexed metadata. */
+ *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13 and 15). Check
+ *  11's Tldr half reads `plan_status`, which the index parses from the page's
+ *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
+ *  through {@link checkPageText}, and `scripts/wiki-check.ts` runs the same
+ *  function with no index. Not here: `stale-updated` and the drift checks,
+ *  which also read the clock; `missing-sources`, which reads the type the
+ *  reader config resolves; and the checks that read the whole wiki. */
 export const PAGE_TEXT_LINT_CHECKS = [
   "index-truncation",
   "nested-annotation",
@@ -168,11 +170,17 @@ export const PAGE_TEXT_LINT_CHECKS = [
   "status-row-long",
   "role-key",
   "case-board-labels",
+  "missing-tldr",
+  "tldr-no-more",
   ...COMPONENT_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
 type PageRef = Pick<WikiPageMeta, "relPath">;
+
+/** What {@link checkPageText} reads of a page: its relPath, whether it is
+ *  culled, and its validated `plan_status`. */
+export type PageTextRef = PageRef & Pick<WikiPageMeta, "plan_status"> & { culled?: boolean };
 
 export interface LintFinding {
   check: LintCheck;
@@ -933,10 +941,12 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
  * where the truncated one-liners land, and log.md and index.md carry
  * [[links]] like any page. Check 10 runs on every page (a card's state is the
  * page's own business), 12 on a page with a role lane or a role-shaped
- * question target, 13 on a page with a labelled CaseBoard, 11 on a page with a
- * DecisionLog or StatusRows, and 15 on an `.mdx` page that is not culled.
+ * question target, 13 on a page with a labelled CaseBoard, 11's first half on a
+ * page with a DecisionLog or StatusRows, 15 on an `.mdx` page that is not
+ * culled, and 11's Tldr half on a live report page or an `.mdx` reference page
+ * that is not reserved or culled.
  */
-export function checkPageText(page: PageRef & { culled?: boolean }, content: string, roleKeys: readonly string[]): LintFinding[] {
+export function checkPageText(page: PageTextRef, content: string, roleKeys: readonly string[]): LintFinding[] {
   const findings = [
     ...checkIndexTruncation(page, content),
     ...checkNestedAnnotation(page, content),
@@ -947,6 +957,7 @@ export function checkPageText(page: PageRef & { culled?: boolean }, content: str
     ...checkReportTop(page, content),
   ];
   if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content));
+  if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content));
   return findings;
 }
 
@@ -990,8 +1001,6 @@ export async function lintWiki(
       if (sources) findings.push(sources);
       // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
-      // Check 11's Tldr half — live report pages and `.mdx` reference pages.
-      findings.push(...checkTldr(page, content));
     }
     // Reserved and culled pages own nothing and are linted for nothing.
     if (statePhrases && !reservedBasename(page.relPath) && !page.culled) {
