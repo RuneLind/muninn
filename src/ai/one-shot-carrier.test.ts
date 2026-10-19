@@ -18,7 +18,13 @@
  * Bun.spawn([BIN, …])`, `spawn(BIN, …)`, `process.env.CLAUDE_PATH ?? "claude"`,
  * Bun.$`${bin}`), a call through a library it does not name (`execa("claude")`)
  * or a member call `cp.exec("claude …")` (left out because `RegExp#exec` has the
- * same name) passes unseen. Review is the gate for those.
+ * same name) passes unseen. So do a template-literal module specifier
+ * (import(`@anthropic-ai/claude-agent-sdk`)), a string-name import member
+ * (`import { "query" as q } …`), `exec ("claude")` with a space before the
+ * parenthesis, a `/*` inside a string literal (the comment stripper reads it as
+ * a comment opener and can hide the code after it), and any file outside the
+ * scanned extensions (`.cjs`, `.cts`, `.mts`, `.jsx`). Review is the gate for
+ * those; a scan over parsed imports would close the import forms.
  */
 
 import { expect, test } from "bun:test";
