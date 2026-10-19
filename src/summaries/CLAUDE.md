@@ -139,8 +139,9 @@ live and `frame.path` IS the destination. `copyKeptFrame`
 `copyFile(p, p)` is measured harmless on macOS/Bun and is unproven on Linux,
 where the plausible failure is a truncate-then-write that destroys the only copy
 of the frame. The skip holds only for a source that EXISTS: a missing one is a
-copy failure, so a frame a Delete removed under a running re-run loses its
-quote instead of being reported kept. It is its own exported function with an injectable copy BECAUSE the
+copy failure, so a frame removed after the re-run listed it (a delete's frame
+cleanup still running after its claim was released) loses its quote instead of
+being reported kept. It is its own exported function with an injectable copy BECAUSE the
 guard is invisible from the filesystem here: without the seam, a test of the
 same-path case passes whether the guard is there or not.
 

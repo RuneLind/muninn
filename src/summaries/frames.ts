@@ -585,9 +585,10 @@ export async function copyKeptFrame(
   copy: (from: string, to: string) => Promise<void> = copyFile,
 ): Promise<void> {
   if (samePath(src, dest)) {
-    // "Already in place" holds only for a frame that EXISTS. A missing one at
-    // the destination is a frame a Delete removed under a running re-run; its
-    // reference must be dropped, so it fails like any other copy.
+    // "Already in place" holds only for a frame that EXISTS. A missing one was
+    // removed after the re-run listed it (a delete's frame cleanup still running
+    // after its claim was released, or a frame removal); its reference must be
+    // dropped, so it fails like any other copy.
     await stat(src);
     return;
   }

@@ -1994,8 +1994,13 @@ export function registerWikiGardenerRoutes(
    * On success the key is pruned from BOTH snapshot sets (a deleted doc must not
    * leave a dangling offered/dismissed entry that outlives it).
    *
-   * Only huginn's DELETE can answer 404/502. A muninn DB step failing after it is
-   * a 200 with a `warning`: the document IS gone, so the delete signal still fires.
+   * Refusals: 409 `in_flight` when a re-run, fact-check save or earlier delete
+   * holds the document's save claim, and 409 while a gardener run holds the
+   * mutex; 404 when huginn says the id is not in the collection (a source-gone
+   * 404 re-runs the proposal cleanup and may carry `proposals` and a
+   * `warning`); 502 when huginn refuses or does not answer. A muninn DB step
+   * failing after huginn's move is a 200 with a `warning`: the document IS
+   * gone, so the delete signal still fires.
    */
   app.post("/api/wiki/gardener/backlog-doc-delete", async (c) => {
     const target = await resolvePruneTarget(c);
