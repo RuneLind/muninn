@@ -20,7 +20,7 @@ let lastPrompt = "";
 // that is what the legacy-JSON parser fallback produces, and it is the value every
 // pre-existing test in this file runs under — the liveness predicate must stay inert
 // for them.
-let nextToolCalls: { name: string }[] | undefined;
+let nextToolCalls: { name: string; isError?: boolean }[] | undefined;
 // Per-ATTEMPT scripting for the retry tests. When non-empty each entry is consumed
 // by one spawn, so a test can say "attempt 1 fails the predicate, attempt 2 reaches
 // Gmail". Empty ⇒ every spawn answers from `nextToolCalls` (the pre-retry behavior
@@ -28,11 +28,11 @@ let nextToolCalls: { name: string }[] | undefined;
 // `delayMs` makes the mocked spawn take measurable time. Without it every spawn
 // resolves in <1ms, and no assertion can tell a check-ENTRY anchor from a
 // check-END one — the gap the review found in the first cut of that test.
-type SpawnScript = { toolCalls?: { name: string }[]; result?: string; throws?: string; delayMs?: number };
+type SpawnScript = { toolCalls?: { name: string; isError?: boolean }[]; result?: string; throws?: string; delayMs?: number };
 let spawnScript: SpawnScript[] = [];
 // One entry per spawn actually made — the attempt COUNT is the thing under test, so
 // it has to be observable rather than inferred from the return value.
-let spawnOpts: { timeoutMs?: number }[] = [];
+let spawnOpts: { timeoutMs?: number; toolSurface?: string; botDir?: string }[] = [];
 // NB: mock.module leaks across the watcher test files in a shared process (see the
 // same note in x.test.ts).
 /**
@@ -64,9 +64,9 @@ mock.module("../scheduler/executor.ts", () => ({
   trackUsage: () => {},
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
-  spawnHaiku: async (prompt: string, opts: { timeoutMs?: number }) => {
+  spawnHaiku: async (prompt: string, opts: { timeoutMs?: number; toolSurface?: string; botDir?: string }) => {
     lastPrompt = prompt;
-    spawnOpts.push({ timeoutMs: opts?.timeoutMs });
+    spawnOpts.push({ timeoutMs: opts?.timeoutMs, toolSurface: opts?.toolSurface, botDir: opts?.botDir });
     const step = spawnScript.shift();
     if (step?.delayMs) await new Promise((r) => setTimeout(r, step.delayMs));
     if (step?.throws) throw new Error(step.throws);
@@ -552,6 +552,29 @@ describe("checkEmail Gmail liveness predicate", () => {
     // bug, turning a parser degradation into a watcher outage.
     nextToolCalls = undefined;
     expect((await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).alerts).toEqual([]);
+  });
+
+  test("the spawn opts into the gmail-read surface with the bot's own dir", async () => {
+    nextToolCalls = [{ name: "mcp__gmail__search_emails" }];
+    await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    expect(spawnOpts[0]).toMatchObject({ toolSurface: "gmail-read", botDir: gmailBotDir });
+  });
+
+  test("an ERRORED Gmail call is not reached: a dontAsk denial must not read as a quiet inbox", async () => {
+    // `dontAsk` denies a read the settings do not allow, the denial comes back as an
+    // `is_error` tool_result, and the model answers `[]`. Counting that call as
+    // reached would claim coverage of mail nothing read.
+    nextToolCalls = [{ name: "ToolSearch" }, { name: "mcp__gmail__search_emails", isError: true }];
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(
+      /no Gmail tool call that succeeded.*mcp__gmail__search_emails \(error\)/,
+    );
+  });
+
+  test("one successful Gmail call beside an errored one is reached", async () => {
+    nextToolCalls = [{ name: "mcp__gmail__read_email", isError: true }, { name: "mcp__gmail__search_emails" }];
+    const res = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    expect(res.alerts).toEqual([]);
+    expect(res.coveredFrom).not.toBeNull();
   });
 
   test("a non-string tool name degrades to the diagnostic, not a TypeError", async () => {

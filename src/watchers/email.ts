@@ -1,7 +1,7 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, HAIKU_TIMEOUT_MS, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
-import { loadRawMcpServers } from "../ai/mcp-config-utils.ts";
+import { gmailServerKeys, loadRawMcpServers } from "../ai/mcp-config-utils.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { computeWatcherTimeoutMs, TICK_TIMEOUT_MS } from "./timeout.ts";
@@ -139,8 +139,12 @@ If nothing worth notifying, return: []`;
  * `botDir` is the bot folder whose `.mcp.json` declares the Gmail server. It used
  * to be the spawn's cwd (MCP by auto-discovery); it is now handed to the CLI as
  * `--mcp-config` so the run itself happens outside the repo. This is the ONLY
- * spawnHaiku caller that still needs bot MCP — every other one is a tool-less
- * prompt and runs `--strict-mcp-config`.
+ * spawnHaiku caller that opts into tools (`toolSurface: "gmail-read"`: the bot's
+ * Gmail server, its three read tools, `dontAsk`) — every other one is tool-less.
+ *
+ * Email bodies cannot be content-fenced: they reach the model as Gmail tool
+ * results inside the CLI, and this prompt holds only the query, the criteria and
+ * the interest profile. The tool fence is this path's only defense.
  */
 export async function checkEmail(
   watcher: Watcher,
@@ -230,6 +234,7 @@ export async function checkEmail(
         source: "watcher-email",
         entrypoint: "jarvis-watcher",
         botDir,
+        toolSurface: "gmail-read",
         botName,
         model: config.model,
         timeoutMs: attemptTimeoutMs,
@@ -413,18 +418,22 @@ export function shouldStartEmailAttempt(attempt: number, remainingMs: number): b
  * the day — which is why the distinction only becomes load-bearing now.
  */
 export function gmailLiveness(
-  toolCalls: { name: string }[] | undefined,
+  toolCalls: { name: string; isError?: boolean }[] | undefined,
   botDir: string | undefined,
 ): { failure: string | null; reached: boolean } {
   const prefixes = toolCalls ? gmailToolPrefixes(botDir) : null;
+  // An ERRORED Gmail call is not "reached": a read denied by `dontAsk` or a failed
+  // MCP call came back `is_error`, the model then answers `[]`, and counting it as
+  // reached would claim coverage of mail nothing read. Same rule as the probe's
+  // `gmailError` (`scripts/probe-toolsearch-deferral.ts`).
   const reachedGmail = toolCalls?.some(
-    (t) => typeof t.name === "string" && prefixes?.some((p) => t.name.startsWith(p)),
+    (t) => typeof t.name === "string" && t.isError !== true && prefixes?.some((p) => t.name.startsWith(p)),
   );
   return { failure: livenessFailureMessage(toolCalls, prefixes, reachedGmail), reached: reachedGmail === true };
 }
 
 function livenessFailureMessage(
-  toolCalls: { name: string }[] | undefined,
+  toolCalls: { name: string; isError?: boolean }[] | undefined,
   prefixes: string[] | null,
   reachedGmail: boolean | undefined,
 ): string | null {
@@ -435,9 +444,9 @@ function livenessFailureMessage(
   // Gmail server that we simply cannot name, and hard-failing every healthy tick
   // there would be the very trap this derivation was written to remove.
   if (!toolCalls || !prefixes || reachedGmail) return null;
-  const called = [...new Set(toolCalls.map((t) => String(t.name)))].join(", ") || "none";
+  const called = [...new Set(toolCalls.map((t) => `${String(t.name)}${t.isError ? " (error)" : ""}`))].join(", ") || "none";
   return (
-    `Email check made no Gmail tool call (${toolCalls.length} tool call(s): ${called}) — ` +
+    `Email check made no Gmail tool call that succeeded (${toolCalls.length} tool call(s): ${called}) — ` +
     `the empty result is not a quiet inbox`
   );
 }
@@ -478,7 +487,7 @@ export function gmailToolPrefixes(botDir?: string): string[] | null {
   if (!botDir) return null;
   const servers = loadRawMcpServers(botDir);
   if (!servers) return null;
-  const keys = Object.keys(servers).filter((k) => k.toLowerCase().includes("gmail"));
+  const keys = gmailServerKeys(servers);
   if (keys.length === 0) {
     warnNoGmailServerOnce(botDir, Object.keys(servers));
     return null;

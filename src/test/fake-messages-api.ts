@@ -45,7 +45,8 @@ const TINY_JPEG_B64 =
  */
 const RECORDING_MCP_SERVER = `
 import { appendFileSync, writeFileSync } from "node:fs";
-const [startedPath, callsPath] = process.argv.slice(2);
+const [startedPath, callsPath, toolsJson] = process.argv.slice(2);
+const toolNames = toolsJson ? JSON.parse(toolsJson) : ["record"];
 writeFileSync(startedPath, String(process.pid));
 let buf = "";
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\\n");
@@ -66,14 +67,14 @@ process.stdin.on("data", (chunk) => {
         serverInfo: { name: "stub", version: "1.0.0" },
       } });
     } else if (req.method === "tools/list") {
-      send({ jsonrpc: "2.0", id: req.id, result: { tools: [{
-        name: "record",
+      send({ jsonrpc: "2.0", id: req.id, result: { tools: toolNames.map((name) => ({
+        name,
         description: "Records that it was called.",
         inputSchema: { type: "object", properties: { note: { type: "string" } } },
-      }] } });
+      })) } });
     } else if (req.method === "tools/call") {
       appendFileSync(callsPath, JSON.stringify(req.params ?? {}) + "\\n");
-      send({ jsonrpc: "2.0", id: req.id, result: { content: [{ type: "text", text: "STUB-RECORDED" }] } });
+      send({ jsonrpc: "2.0", id: req.id, result: { content: [{ type: "text", text: "STUB-RECORDED " + (req.params?.name ?? "") }] } });
     } else if (req.method === "ping") {
       send({ jsonrpc: "2.0", id: req.id, result: {} });
     } else {
@@ -150,11 +151,18 @@ export interface FakeMessagesApi {
   toolResults(): ObservedToolResult[];
   /** Set the tool_use blocks the next probe turn answers with. */
   setPlan(plan: ScriptedToolUse[]): void;
+  /**
+   * Script several tool turns: turn N answers the probe request that carries N
+   * earlier assistant messages. `toolResults()` then lists every turn's calls in
+   * order. For a tool that loads only through `ToolSearch`, the first turn loads
+   * it and a later turn calls it.
+   */
+  setTurns(turns: ScriptedToolUse[][]): void;
   stop(): void;
 }
 
 export function startFakeMessagesApi(): FakeMessagesApi {
-  let plan: ScriptedToolUse[] = [];
+  let turns: ScriptedToolUse[][] = [[]];
   let planned: Array<{ id: string; name: string }> = [];
   const requests: Array<{ path: string; body: any }> = [];
   const results = new Map<string, ObservedToolResult>();
@@ -176,12 +184,8 @@ export function startFakeMessagesApi(): FakeMessagesApi {
 
       let blocks: Block[];
       let stop: "end_turn" | "tool_use" = "end_turn";
-      if (isProbe && !messages.some((m) => m.role === "assistant")) {
-        planned = plan.map((t, i) => ({ id: `toolu_probe_${i}_${Math.random().toString(36).slice(2, 8)}`, name: t.name }));
-        blocks = plan.map((t, i) => ({ type: "tool_use", id: planned[i]!.id, name: t.name, input: t.input }));
-        stop = blocks.length > 0 ? "tool_use" : "end_turn";
-        if (blocks.length === 0) blocks = [{ type: "text", text: "PROBE-DONE" }];
-      } else if (isProbe) {
+      const turn = messages.filter((m) => m.role === "assistant").length;
+      if (isProbe) {
         for (const m of messages) {
           if (m.role !== "user" || !Array.isArray(m.content)) continue;
           for (const b of m.content as Array<{ type?: string; tool_use_id?: string; is_error?: boolean; content?: unknown }>) {
@@ -195,7 +199,16 @@ export function startFakeMessagesApi(): FakeMessagesApi {
             });
           }
         }
-        blocks = [{ type: "text", text: "PROBE-DONE" }];
+        const step = turns[turn] ?? [];
+        if (turn === 0) planned = [];
+        if (step.length > 0) {
+          const ids = step.map((t, i) => ({ id: `toolu_probe_${turn}_${i}_${Math.random().toString(36).slice(2, 8)}`, name: t.name }));
+          planned.push(...ids);
+          blocks = step.map((t, i) => ({ type: "tool_use", id: ids[i]!.id, name: t.name, input: t.input }));
+          stop = "tool_use";
+        } else {
+          blocks = [{ type: "text", text: "PROBE-DONE" }];
+        }
       } else {
         blocks = [{ type: "text", text: "PAGE-SUMMARY: fetched." }];
       }
@@ -214,11 +227,44 @@ export function startFakeMessagesApi(): FakeMessagesApi {
     requests,
     toolResults: () => planned.map((p) => results.get(p.id) ?? { id: p.id, name: p.name, isError: true, text: "(no tool_result sent)" }),
     setPlan(next) {
-      plan = next;
+      turns = [next];
+      planned = [];
+      results.clear();
+    },
+    setTurns(next) {
+      turns = next;
       planned = [];
       results.clear();
     },
     stop: () => server.stop(true),
+  };
+}
+
+export interface RecordingMcpServer {
+  /** The `.mcp.json` entry that starts it. */
+  entry: { command: string; args: string[] };
+  started(): boolean;
+  /** The tool name of every `tools/call` it served, in order. */
+  calls(): string[];
+}
+
+/**
+ * Write a recording stdio MCP server into `dir` that serves `tools` (every
+ * call answers `STUB-RECORDED <tool>`) and records each call's tool name.
+ */
+export function writeRecordingMcpServer(dir: string, label: string, tools: string[]): RecordingMcpServer {
+  mkdirSync(dir, { recursive: true });
+  const script = join(dir, "recording-server.mjs");
+  if (!existsSync(script)) writeFileSync(script, RECORDING_MCP_SERVER);
+  const startedPath = join(dir, `${label}.started`);
+  const callsPath = join(dir, `${label}.calls`);
+  return {
+    entry: { command: process.execPath, args: [script, startedPath, callsPath, JSON.stringify(tools)] },
+    started: () => existsSync(startedPath),
+    calls: () =>
+      existsSync(callsPath)
+        ? readFileSync(callsPath, "utf8").split("\n").filter(Boolean).map((l) => String(JSON.parse(l).name))
+        : [],
   };
 }
 

@@ -55,6 +55,15 @@
  *   # A/B two binaries (e.g. a pinned CLI against the installed one):
  *   PROBE_ARMS="installed=claude,pinned=/tmp/cli228/node_modules/.bin/claude" \
  *     N=16 bun run scripts/probe-toolsearch-deferral.ts
+ *   # A/B two argv shapes on one binary, interleaved:
+ *   PROBE_ARGV=main,fenced N=16 bun run scripts/probe-toolsearch-deferral.ts
+ *
+ * `PROBE_ARGV` arms: `fenced` (the default) is the shipped `buildHaikuArgs` with
+ * the email watcher's `gmail-read` surface: `--tools ToolSearch`, the Gmail
+ * server only, the read-only allow-list, `dontAsk`. `main` rebuilds the argv the
+ * watcher used before that fence: every built-in tool, every bot server, the
+ * bot's full merged settings. With both PROBE_ARMS and PROBE_ARGV set, the arms
+ * are their cross product.
  *
  * NB: every run performs a REAL Gmail search against the configured account. It is
  * read-only, but it is not free — N=16 across two arms is 32 Haiku spawns.
@@ -62,10 +71,17 @@
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { buildHaikuArgs, HAIKU_TIMEOUT_MS, DEFAULT_MODEL } from "../src/scheduler/executor.ts";
+import { buildInlineMcpConfig, buildInlineSettings } from "../src/ai/mcp-config-utils.ts";
 import { DEFAULT_EMAIL_PROMPT, buildGmailQuery, buildEmailPrompt } from "../src/watchers/email.ts";
 import { resolveAgentCwd } from "../src/ai/agent-cwd.ts";
 
 const REPO = resolve(__dirname, "..");
+/**
+ * Where bot folders are read from. `PROBE_BOTS_DIR` points a probe run from a
+ * worktree at the main checkout's (gitignored, so absent from the worktree)
+ * bot folders, whose relative MCP paths resolve there. Read only.
+ */
+const BOTS_DIR = process.env.PROBE_BOTS_DIR ? resolve(process.env.PROBE_BOTS_DIR) : resolve(REPO, "bots");
 
 /** Positive integer or bust — `N=abc` used to print a confident `CLEAN 0/0`. */
 
@@ -80,8 +96,30 @@ const RUN_TIMEOUT_MS = HAIKU_TIMEOUT_MS;
 /** Grace after SIGTERM before SIGKILL — a child ignoring TERM used to hang the probe. */
 const KILL_GRACE_MS = 5_000;
 
+type ArgvShape = "main" | "fenced";
+
+/**
+ * The email spawn's argv before the gmail-read fence, rebuilt from the same
+ * helpers it used: settings first, then the fence, then the full config last.
+ */
+function mainArgv(prompt: string, model: string, botDir: string): string[] {
+  const args = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--model", model];
+  const settings = buildInlineSettings(botDir);
+  if (settings) args.push("--settings", settings);
+  args.push("--strict-mcp-config");
+  const mcp = buildInlineMcpConfig(botDir);
+  if (mcp) args.push("--mcp-config", mcp);
+  return args;
+}
+
+const ARGV_SHAPES: ArgvShape[] = (process.env.PROBE_ARGV ?? "fenced").split(",").map((s) => {
+  const t = s.trim();
+  if (t !== "main" && t !== "fenced") throw new Error(`bad PROBE_ARGV entry "${s}" (want main or fenced)`);
+  return t;
+});
+
 /** `label=binary` pairs. Default: whatever `claude` resolves to on PATH. */
-const ARMS: Array<{ label: string; bin: string }> = (process.env.PROBE_ARMS
+const BIN_ARMS: Array<{ label: string; bin: string }> = (process.env.PROBE_ARMS
   ? process.env.PROBE_ARMS.split(",")
   : ["current=claude"]
 ).map((entry) => {
@@ -94,6 +132,13 @@ const ARMS: Array<{ label: string; bin: string }> = (process.env.PROBE_ARMS
   if (!label || !bin) throw new Error(`bad PROBE_ARMS entry: "${entry}" (want label=binary)`);
   return { label, bin };
 });
+const ARMS: Array<{ label: string; bin: string; argv: ArgvShape }> = BIN_ARMS.flatMap(({ label, bin }) =>
+  ARGV_SHAPES.map((argv) => ({
+    label: process.env.PROBE_ARGV ? (BIN_ARMS.length > 1 ? `${label}/${argv}` : argv) : label,
+    bin,
+    argv,
+  })),
+);
 {
   const seen = new Set<string>();
   for (const { label } of ARMS) {
@@ -152,7 +197,7 @@ async function loadLiveTask(): Promise<{
   source: string;
 }> {
   const fallback = () => {
-    const dir = resolve(REPO, "bots/jarvis");
+    const dir = resolve(BOTS_DIR, "jarvis");
     if (!existsSync(dir)) {
       console.error(`[probe] shipped defaults need ${dir}, which does not exist — nothing to probe`);
       process.exit(1);
@@ -191,7 +236,7 @@ async function loadLiveTask(): Promise<{
     // and `--settings` come from it, so a row belonging to another bot would send
     // that bot's criteria through this one's mailbox and permission set — and be
     // reported as the production shape.
-    const botDir = resolve(REPO, "bots", String(row.bot_name));
+    const botDir = resolve(BOTS_DIR, String(row.bot_name));
     if (!existsSync(botDir)) {
       console.error(`[probe] watcher row belongs to bot "${row.bot_name}" but ${botDir} does not exist — run with PROBE_NO_DB=1 to probe the shipped defaults instead`);
       process.exit(1);
@@ -288,16 +333,19 @@ function classify(tools: string[], gmail: boolean): Outcome {
   return "OTHER";
 }
 
-async function once(arm: string, bin: string, i: number): Promise<Run> {
+async function once(arm: string, bin: string, argv: ArgvShape, i: number): Promise<Run> {
   const t0 = performance.now();
   const base: Omit<Run, "outcome" | "calledGmail" | "gmailError" | "toolSearches" | "tools" | "exitCode" | "ms"> =
     { arm, i };
   try {
-    const args = buildHaikuArgs({
-      prompt: TASK.prompt,
-      model: TASK.model,
-      botDir: TASK.botDir,
-    });
+    const args = argv === "main"
+      ? mainArgv(TASK.prompt, TASK.model, TASK.botDir)
+      : buildHaikuArgs({
+        prompt: TASK.prompt,
+        model: TASK.model,
+        botDir: TASK.botDir,
+        toolSurface: "gmail-read",
+      });
     // The arm swap assumes the binary is argv[0]. Assert it rather than trusting
     // it: if a wrapper is ever prepended, a silent overwrite of a FLAG would make
     // the arms stop meaning what they say with no error anywhere.
@@ -433,12 +481,12 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
 // drifts hard run-to-run (an identical arm measured 3/8 and then 7/8 twenty minutes
 // apart — larger than any between-arm difference observed), so whichever arm runs
 // first inherits that window's luck. Pairing them inside a batch cancels the drift.
-const jobs: Array<{ arm: string; bin: string; i: number }> = [];
+const jobs: Array<{ arm: string; bin: string; argv: ArgvShape; i: number }> = [];
 for (let i = 1; i <= N; i++) {
-  for (const { label, bin } of ARMS) jobs.push({ arm: label, bin, i });
+  for (const { label, bin, argv } of ARMS) jobs.push({ arm: label, bin, argv, i });
 }
 
-console.log(`[probe] arms: ${ARMS.map((a) => `${a.label} (${a.bin})`).join(", ")}`);
+console.log(`[probe] arms: ${ARMS.map((a) => `${a.label} (${a.bin}, ${a.argv} argv)`).join(", ")}`);
 console.log(`[probe] N=${N} per arm, timeout ${RUN_TIMEOUT_MS}ms (production per-attempt), model ${TASK.model}`);
 console.log(`[probe] task: ${TASK.source}, query: ${TASK.query}`);
 console.log(`[probe] prompt: ${TASK.prompt.length} chars\n`);
@@ -446,7 +494,7 @@ console.log(`[probe] prompt: ${TASK.prompt.length} chars\n`);
 const results: Run[] = [];
 for (let k = 0; k < jobs.length; k += CONCURRENCY) {
   const done = await Promise.all(
-    jobs.slice(k, k + CONCURRENCY).map((j) => once(j.arm, j.bin, j.i)),
+    jobs.slice(k, k + CONCURRENCY).map((j) => once(j.arm, j.bin, j.argv, j.i)),
   );
   for (const r of done) {
     results.push(r);

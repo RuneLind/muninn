@@ -46,6 +46,15 @@ export function loadRawMcpServers(botDir: string): Record<string, RawMcpServerEn
 }
 
 /**
+ * The `.mcp.json` server keys that are Gmail: any key containing "gmail",
+ * case-insensitive. One rule for the email spawn's server filter and the email
+ * watcher's liveness predicate, so the two cannot judge different servers.
+ */
+export function gmailServerKeys(servers: Record<string, RawMcpServerEntry> | null): string[] {
+  return servers ? Object.keys(servers).filter((k) => k.toLowerCase().includes("gmail")) : [];
+}
+
+/**
  * A bot's `.mcp.json` re-expressed as a **location-independent** JSON string,
  * suitable for `claude --mcp-config <string>` (the CLI accepts a literal JSON
  * document, not just a path — verified against CLI 2.1.228).
@@ -61,8 +70,10 @@ export function loadRawMcpServers(botDir: string): Record<string, RawMcpServerEn
  * convention (root CLAUDE.md, "Config Sync") is that env blocks are read
  * literally, so rewriting them would change meaning, not preserve it.
  *
+ * `onlyKeys` keeps just those server keys (the email spawn passes its Gmail keys).
+ *
  * Returns `null` when the bot has no readable `.mcp.json`, or when it declares
- * no servers — in both cases there is nothing to pass and the caller should
+ * no servers (after `onlyKeys`) — in both cases there is nothing to pass and the caller should
  * omit the flag entirely rather than hand the CLI an empty server set.
  *
  * **Known limit:** only `./`- and `../`-prefixed tokens are rewritten, in `args`
@@ -73,8 +84,11 @@ export function loadRawMcpServers(botDir: string): Record<string, RawMcpServerEn
  * would find its server failing to start from the agent home. Prefer an absolute
  * path or an explicit `./` in `.mcp.json`.
  */
-export function buildInlineMcpConfig(botDir: string): string | null {
-  const servers = loadRawMcpServers(botDir);
+export function buildInlineMcpConfig(botDir: string, onlyKeys?: readonly string[]): string | null {
+  const all = loadRawMcpServers(botDir);
+  const servers = all && onlyKeys
+    ? Object.fromEntries(Object.entries(all).filter(([k]) => onlyKeys.includes(k)))
+    : all;
   if (!servers || Object.keys(servers).length === 0) return null;
 
   const relocate = (token: string): string =>

@@ -86,6 +86,12 @@ export interface ToolCall {
    * (404, timeout, network) — see {@link fetchHuginnTrace}.
    */
   searchTraceFetch?: Promise<unknown | null>;
+  /**
+   * The tool result came back `is_error` (a denied permission, a failed MCP call,
+   * an unknown tool). Set by the claude-cli `StreamParser`; absent elsewhere. The
+   * email watcher's Gmail liveness predicate counts such a call as not reached.
+   */
+  isError?: boolean;
 }
 
 export interface ClaudeResult {

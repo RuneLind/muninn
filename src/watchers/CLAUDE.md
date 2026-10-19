@@ -559,6 +559,17 @@ direction with no watermark to trust. Consequence worth knowing: a row failing
 EVERY tick never records a success, so it keeps the full-day query — the growth
 this bounds is preserved on exactly the row already failing.
 
+### Tool fence (2026-10, arch-review A1)
+
+The email spawn opts into `toolSurface: "gmail-read"` (`buildHaikuArgs`,
+`src/scheduler/executor.ts`): the Gmail server only, `ToolSearch` plus the three
+Gmail reads, `dontAsk`, the known writes disallowed. Every other watcher spawn is
+tool-less (`--tools ""`). The liveness predicate counts a Gmail call whose
+`tool_result` came back `is_error` (`ToolCall.isError`, set by `StreamParser`) as
+NOT reached: under `dontAsk` a denied read is exactly that, and the model then
+answers `[]`. Email bodies are not content-fenced; the model reads them through a
+tool result.
+
 ### Bounded retry (2026-08-13)
 
 **The check spawns up to TWICE.** The #434 liveness predicate made a broken run

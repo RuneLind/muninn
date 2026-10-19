@@ -120,6 +120,28 @@ describe("StreamParser", () => {
     expect(result.toolCalls![1]!.output).toBe("doc body\n part two");
   });
 
+  test("a tool_result with is_error marks its call isError, and only that call", () => {
+    // The email watcher's liveness predicate reads this: a Gmail read denied by
+    // `dontAsk` comes back is_error and must not count as reaching Gmail.
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_A", name: "mcp__gmail__search_emails", input: {} },
+      { type: "tool_use", id: "toolu_B", name: "mcp__gmail__read_email", input: {} },
+    ])), 100);
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_A", content: "Permission to use mcp__gmail__search_emails has been denied", is_error: true },
+      { type: "tool_result", tool_use_id: "toolu_B", content: "an email", is_error: false },
+    ])), 200);
+    parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), 300);
+
+    const calls = parser.getResult().toolCalls!;
+    expect(calls.map((c) => [c.name, c.isError])).toEqual([
+      ["mcp__gmail__search_emails", true],
+      ["mcp__gmail__read_email", undefined],
+    ]);
+  });
+
   test("tool output is undefined when user event lacks matching tool_result", () => {
     const parser = new StreamParser(0);
     parser.parseLine(JSON.stringify(systemEvent), 0);

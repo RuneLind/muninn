@@ -309,11 +309,66 @@ describe("tool child spans under watcher:<type>", () => {
 describe("buildHaikuArgs", () => {
   const base = { prompt: "hi", model: "claude-haiku-4-5-20251001" };
 
-  test("a tool-less call is fenced off from every ambient MCP source", () => {
+  /** A bot dir shaped like jarvis's: three servers, an allow-list that grants writes too. */
+  function jarvisLike(root: string): string {
+    const botDir = join(root, "jarvis");
+    mkdirSync(join(botDir, ".claude"), { recursive: true });
+    writeFileSync(
+      join(botDir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          knowledge: { type: "stdio", command: "uv", args: ["--directory", "../../../huginn", "run", "x.py"] },
+          gmail: { type: "stdio", command: "npx", args: ["-y", "@gongrzhe/server-gmail-autoauth-mcp"] },
+          "google-calendar": { type: "stdio", command: "bash", args: ["-c", "exec npx -y cal"] },
+        },
+      }),
+    );
+    writeFileSync(
+      join(botDir, ".claude", "settings.json"),
+      JSON.stringify({
+        permissions: {
+          allow: [
+            "mcp__gmail__search_emails", "mcp__gmail__read_email", "mcp__gmail__send_email",
+            "mcp__gmail__create_filter", "mcp__gmail__list_email_labels",
+            "mcp__google-calendar__create-event", "WebFetch", "Read",
+          ],
+        },
+        enableAllProjectMcpServers: true,
+      }),
+    );
+    // The file Claude Code itself writes when a permission is approved in place.
+    writeFileSync(
+      join(botDir, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["mcp__jetbrains__execute_terminal_command"] } }),
+    );
+    return botDir;
+  }
+
+  const flag = (args: string[], name: string) => {
+    const i = args.indexOf(name);
+    return i === -1 ? undefined : args[i + 1];
+  };
+
+  test("fails closed: no surface means no built-in tool and no MCP source", () => {
     const args = buildHaikuArgs(base);
+    expect(flag(args, "--tools")).toBe("");
     expect(args).toContain("--strict-mcp-config");
     expect(args).not.toContain("--mcp-config");
+    expect(args).not.toContain("--settings");
+    expect(args).not.toContain("--permission-mode");
     expect(args).not.toContain("--system-prompt");
+  });
+
+  test("a botDir without the gmail-read opt-in is still tool-less", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      const args = buildHaikuArgs({ ...base, botDir: jarvisLike(root) });
+      expect(flag(args, "--tools")).toBe("");
+      expect(args).not.toContain("--mcp-config");
+      expect(args).not.toContain("--settings");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("persona rides --system-prompt, adjacent to its value", () => {
@@ -321,83 +376,75 @@ describe("buildHaikuArgs", () => {
     expect(args[args.indexOf("--system-prompt") + 1]).toBe("You are Jarvis.");
   });
 
-  test("a bot dir with real servers becomes an inline --mcp-config, and drops the fence", () => {
+  test("gmail-read: the Gmail server only, the three read tools, dontAsk, the writes removed", () => {
     const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
-      const botDir = join(root, "jarvis");
-      mkdirSync(botDir, { recursive: true });
-      writeFileSync(
-        join(botDir, ".mcp.json"),
-        JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "npx" } } }),
-      );
+      const args = buildHaikuArgs({ ...base, botDir: jarvisLike(root), toolSurface: "gmail-read" });
 
-      const args = buildHaikuArgs({ ...base, botDir });
-      expect(args).not.toContain("--settings"); // no settings file in this bot dir
-      const idx = args.indexOf("--mcp-config");
-      expect(idx).toBeGreaterThan(-1);
-      expect(JSON.parse(args[idx + 1]!).mcpServers.gmail.command).toBe("npx");
-      // --mcp-config is variadic: it stops at the next `-`-prefixed token, so a
-      // following FLAG is safe — but a bare positional would be swallowed as a
-      // second config. Last position is the cheap way to never have to check.
-      expect(idx + 1).toBe(args.length - 1);
-      // The fence applies HERE TOO. Without it the CLI also merges the developer's
-      // user-scope ~/.claude.json servers — measured 9 servers / 112 mcp__ tools
-      // instead of the bot's own, including a `claude.ai Gmail` pointing at a
-      // different mailbox that the bot's allow-list does not cover.
+      // ToolSearch only: the Gmail tools are deferred and load through it, and
+      // no Bash/Read/WebSearch exists for a user-scope pre-approval to reach.
+      expect(flag(args, "--tools")).toBe("ToolSearch");
+      expect(flag(args, "--permission-mode")).toBe("dontAsk");
+
+      const mcp = JSON.parse(flag(args, "--mcp-config")!);
+      expect(Object.keys(mcp.mcpServers)).toEqual(["gmail"]);
+      expect(mcp.mcpServers.gmail.command).toBe("npx");
+      // --mcp-config is variadic: last position means a bare positional can never
+      // be swallowed as a second config.
+      expect(args.indexOf("--mcp-config")).toBe(args.length - 2);
       expect(args).toContain("--strict-mcp-config");
+
+      const settings = JSON.parse(flag(args, "--settings")!);
+      // Only the bot's own grants that are reads; send/filter/calendar/local grants stay out.
+      expect(settings).toEqual({
+        permissions: {
+          allow: ["ToolSearch", "mcp__gmail__search_emails", "mcp__gmail__read_email", "mcp__gmail__list_email_labels"],
+          defaultMode: "dontAsk",
+        },
+      });
+
+      const disallowed = flag(args, "--disallowedTools")!.split(",");
+      expect(disallowed).toContain("mcp__gmail__send_email");
+      expect(disallowed).toContain("mcp__gmail__create_filter");
+      expect(disallowed).not.toContain("mcp__gmail__search_emails");
+      expect(args).not.toContain("--allowedTools");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("a bot dir with no readable .mcp.json falls back to the fence, not an empty config", () => {
+  test("gmail-read keeps a read the bot does not allow out of the allow list", () => {
     const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
-      const args = buildHaikuArgs({ ...base, botDir: root });
-      expect(args).toContain("--strict-mcp-config");
-      expect(args).not.toContain("--mcp-config");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-
-  test("the bot's tool permissions ride --settings, or the MCP call is denied", () => {
-    // Regression guard for the defect this PR introduced and then measured: with
-    // the cwd moved out of the bot folder, `.claude/settings.json` stops being
-    // discovered and `mcp__gmail__*` comes back "permission not granted" — which
-    // the email checker reports as an ordinary empty inbox.
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
-    try {
-      const botDir = join(root, "jarvis");
+      const botDir = join(root, "b");
       mkdirSync(join(botDir, ".claude"), { recursive: true });
-      writeFileSync(
-        join(botDir, ".mcp.json"),
-        JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "npx" } } }),
-      );
-      writeFileSync(
-        join(botDir, ".claude", "settings.json"),
-        JSON.stringify({ permissions: { allow: ["mcp__gmail__search_emails"] } }),
-      );
-      // The file Claude Code itself writes when a permission is approved in place.
-      writeFileSync(
-        join(botDir, ".claude", "settings.local.json"),
-        JSON.stringify({ permissions: { allow: ["mcp__jetbrains__execute_terminal_command"] } }),
-      );
+      writeFileSync(join(botDir, ".mcp.json"), JSON.stringify({ mcpServers: { "Gmail-Work": { command: "npx" } } }));
+      writeFileSync(join(botDir, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["mcp__Gmail-Work__search_emails"] } }));
+      let settings = JSON.parse(flag(buildHaikuArgs({ ...base, botDir, toolSurface: "gmail-read" }), "--settings")!);
+      expect(settings.permissions.allow).toEqual(["ToolSearch", "mcp__Gmail-Work__search_emails"]);
 
-      const args = buildHaikuArgs({ ...base, botDir });
-      // A JSON document, not the path — `--settings` is not repeatable, and the
-      // bot's per-machine `settings.local.json` has to be merged into it.
-      const passed = JSON.parse(args[args.indexOf("--settings") + 1]!);
-      expect(passed.permissions.allow).toContain("mcp__gmail__search_emails");
-      expect(passed.permissions.allow).toContain("mcp__jetbrains__execute_terminal_command");
+      // A server-wide grant covers the three reads, and only them.
+      writeFileSync(join(botDir, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["mcp__Gmail-Work"] } }));
+      settings = JSON.parse(flag(buildHaikuArgs({ ...base, botDir, toolSurface: "gmail-read" }), "--settings")!);
+      expect(settings.permissions.allow).toEqual([
+        "ToolSearch", "mcp__Gmail-Work__search_emails", "mcp__Gmail-Work__read_email", "mcp__Gmail-Work__list_email_labels",
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("a tool-less call carries no --settings (nothing to permit)", () => {
-    expect(buildHaikuArgs(base)).not.toContain("--settings");
+  test("gmail-read on a bot with no Gmail server falls back to the tool-less spawn", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { knowledge: { command: "uv" } } }));
+      const args = buildHaikuArgs({ ...base, botDir: root, toolSurface: "gmail-read" });
+      expect(flag(args, "--tools")).toBe("");
+      expect(args).not.toContain("--mcp-config");
+      expect(args).not.toContain("--permission-mode");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("keeps the stream-json contract the parser depends on", () => {
@@ -437,6 +484,7 @@ describe("spawnHaiku cwd", () => {
         source: "cwd-test",
         botName: "jarvis",
         botDir: join(REPO_ROOT, "bots", "jarvis"),
+        toolSurface: "gmail-read",
       }).catch(() => {});
     } finally {
       (Bun as any).spawn = realSpawn;
@@ -535,19 +583,21 @@ describe("spawnHaiku degrade warnings", () => {
     try {
       // A bot dir with neither file — the shape a typo'd path or a broken JSON
       // edit produces.
-      buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
-      expect(records.filter((r) => r.includes("No usable .mcp.json"))).toHaveLength(1);
+      const gmailRead = { prompt: "x", model: "m", toolSurface: "gmail-read" } as const;
+      buildHaikuArgs({ ...gmailRead, botDir: root });
+      expect(records.filter((r) => r.includes("No Gmail server in a usable .mcp.json"))).toHaveLength(1);
       expect(records.filter((r) => r.includes("will be DENIED"))).toHaveLength(1);
 
       // Throttled: these run at watcher-tick rate, so a permanent condition must
       // not produce a permanent log flood.
-      buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
-      buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
-      expect(records.filter((r) => r.includes("No usable .mcp.json"))).toHaveLength(1);
+      buildHaikuArgs({ ...gmailRead, botDir: root });
+      buildHaikuArgs({ ...gmailRead, botDir: root });
+      expect(records.filter((r) => r.includes("No Gmail server in a usable .mcp.json"))).toHaveLength(1);
 
-      // A tool-less call asked for nothing and must say nothing.
+      // A tool-less call asked for nothing and must say nothing — with or without a botDir.
       records.length = 0;
       buildHaikuArgs({ prompt: "x", model: "m" });
+      buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
       expect(records).toHaveLength(0);
 
       // The case the two checks above structurally CANNOT see: a corrupt
@@ -560,7 +610,7 @@ describe("spawnHaiku degrade warnings", () => {
       writeFileSync(join(capraish, ".claude", "settings.json"), '{"permissions":{"allow":["mcp__gmail__x"],}}');
       writeFileSync(join(capraish, ".claude", "settings.local.json"), JSON.stringify({ permissions: { allow: ["other"] } }));
 
-      const args = buildHaikuArgs({ prompt: "x", model: "m", botDir: capraish });
+      const args = buildHaikuArgs({ ...gmailRead, botDir: capraish });
       expect(args).toContain("--settings"); // the healthy local file still merges
       expect(records.filter((r) => r.includes("Unparseable bot config"))).toHaveLength(1);
       // ...and it must NOT be reported as mere absence, which reads as intentional.

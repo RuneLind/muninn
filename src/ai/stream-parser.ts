@@ -65,6 +65,8 @@ interface PendingToolCall {
    * window even for sessions that run for many minutes.
    */
   searchTraceFetch?: Promise<unknown | null>;
+  /** The matching `tool_result` carried `is_error: true`. */
+  isError?: boolean;
 }
 
 export class StreamParser {
@@ -223,6 +225,7 @@ export class StreamParser {
       const idx = this.pendingTools.findIndex((p) => p.id === useId);
       if (idx === -1) continue;
       const pending = this.pendingTools[idx]!;
+      if (block.is_error === true) pending.isError = true;
       // Peel the Huginn trace channel BEFORE truncateOutput — the trailing
       // fence (or pointer line) sits at end-of-string and would otherwise
       // fall past the 16 KB cap. processMcpToolResult also kicks off
@@ -285,6 +288,7 @@ export class StreamParser {
       searchTrace: pending.searchTrace,
       searchTracePointer: pending.searchTracePointer,
       searchTraceFetch: pending.searchTraceFetch,
+      ...(pending.isError ? { isError: true } : {}),
     });
     this.onProgress?.({
       type: "tool_end",
