@@ -83,7 +83,8 @@
  *                      `parse` rejects, or a missing `required` one) or drops
  *                      (an attribute `COMPONENT_ATTRS` does not list, or an
  *                      earlier spelling of a repeated one). Not culled. Rules:
- *                      `lint-components.ts`; `scripts/wiki-check.ts` runs it alone.
+ *                      `lint-components.ts`. `scripts/wiki-check.ts` runs it with checks
+ *                      10, 11's first half, 12 and 13 (`checkPageText`).
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -151,6 +152,22 @@ export const LINT_CHECKS = [
   ...COMPONENT_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
+
+/** The checks that read nothing but a page's own text and the reader config's
+ *  `roleKeys` (checks 10, 11's first half, 12, 13 and 15). `lintWiki` runs them
+ *  per page through {@link checkPageText}, and `scripts/wiki-check.ts` runs the
+ *  same function with no index. */
+export const PAGE_TEXT_LINT_CHECKS = [
+  "question-block",
+  "decision-first-sentence",
+  "status-row-long",
+  "role-key",
+  "case-board-labels",
+  ...COMPONENT_LINT_CHECKS,
+] as const satisfies readonly LintCheck[];
+
+/** What the page-text checks read of a page. */
+type PageRef = Pick<WikiPageMeta, "relPath">;
 
 export interface LintFinding {
   check: LintCheck;
@@ -532,7 +549,7 @@ function nearMissConsequence(id: string, quoted: string, state: QuestionState | 
  * (`parseQuestionPage`), so the finding and the card agree. A page that never
  * spells `<Question` is skipped before any parse.
  */
-function checkQuestions(page: WikiPageMeta, rawContent: string): LintFinding[] {
+function checkQuestions(page: PageRef, rawContent: string): LintFinding[] {
   if (!rawContent.includes("<Question")) return [];
   const parsed = parseQuestionPage(parseBlocks(stripFrontmatter(rawContent)));
   const { questions, entries, states } = parsed;
@@ -806,7 +823,7 @@ function checkStemCollisions(index: WikiIndex): LintFinding[] {
  * a viewer's lanes and asks a group by the groups themselves, so a finding
  * says the key is missing from the list, not that something stops working.
  */
-function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonly string[]): LintFinding[] {
+function checkRoleKeys(page: PageRef, rawContent: string, roleKeys: readonly string[]): LintFinding[] {
   const hasLane = rawContent.includes("<Lane");
   const hasQuestion = rawContent.includes("<Question");
   const declared = roleKeys.length > 0;
@@ -876,7 +893,7 @@ function checkRoleKeys(page: WikiPageMeta, rawContent: string, roleKeys: readonl
  * ignores it and shows the status itself, so the finding names the entry and
  * the keys it may use. The line is the board's own tag line, off the parser.
  */
-function checkCaseBoardLabels(page: WikiPageMeta, rawContent: string): LintFinding[] {
+function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] {
   if (!rawContent.includes("<CaseBoard") || !rawContent.includes("labels=")) return [];
   const body = stripFrontmatter(rawContent);
   const bodyAt = rawContent.slice(0, rawContent.length - body.length).split("\n").length - 1;
@@ -902,6 +919,24 @@ function checkCaseBoardLabels(page: WikiPageMeta, rawContent: string): LintFindi
     }
   };
   walk(parseBlocks(body));
+  return findings;
+}
+
+/**
+ * The {@link PAGE_TEXT_LINT_CHECKS} over one page, in `lintWiki`'s order.
+ * Check 10 runs on every page (a card's state is the page's own business), 12
+ * on a page with a role lane or a role-shaped question target, 13 on a page
+ * with a labelled CaseBoard, 11 on a page with a DecisionLog or StatusRows, and
+ * 15 on an `.mdx` page that is not culled.
+ */
+export function checkPageText(page: PageRef & { culled?: boolean }, content: string, roleKeys: readonly string[]): LintFinding[] {
+  const findings = [
+    ...checkQuestions(page, content),
+    ...checkRoleKeys(page, content, roleKeys),
+    ...checkCaseBoardLabels(page, content),
+    ...checkReportTop(page, content),
+  ];
+  if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content));
   return findings;
 }
 
@@ -940,16 +975,7 @@ export async function lintWiki(
     // wherever it lands, and log.md/index.md carry [[links]] like any page.
     findings.push(...checkNestedAnnotation(page, content));
     findings.push(...checkUnrenderedFactMarks(page, content));
-    // Check 10 — every page: a card's state is the page's own business.
-    findings.push(...checkQuestions(page, content));
-    // Check 12 — every page with a role lane or a role-shaped question target.
-    findings.push(...checkRoleKeys(page, content, index.readerConfig?.roleKeys ?? []));
-    // Check 13 — every page with a labelled CaseBoard.
-    findings.push(...checkCaseBoardLabels(page, content));
-    // Check 11 — every page with a DecisionLog or StatusRows.
-    findings.push(...checkReportTop(page, content));
-    // Check 15 — `.mdx` pages that are not culled.
-    if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content));
+    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? []));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.

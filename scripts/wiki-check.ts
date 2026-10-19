@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
 /**
- * The component author check (`src/wiki/lint-components.ts`) over a page or a
- * directory, with no wiki index, no database and no `.env`:
+ * The lint checks that read only a page's own text (`checkPageText`,
+ * `src/wiki/lint.ts`: question-block, decision-first-sentence, status-row-long,
+ * role-key, case-board-labels and the component checks) over a page or a
+ * directory, with no wiki index, no database and no `.env`. `roleKeys` comes
+ * from the wiki root's `.wiki-reader.json`:
  *
  *   bun --no-env-file scripts/wiki-check.ts <absolute page or directory path>
  *
@@ -24,9 +27,8 @@
 
 import path from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { checkComponents } from "../src/wiki/lint-components.ts";
-import { extRank, parseFrontmatter, readCull, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
-import type { LintFinding } from "../src/wiki/lint.ts";
+import { extRank, parseFrontmatter, readCull, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
+import { checkPageText, type LintFinding } from "../src/wiki/lint.ts";
 
 const USAGE = "usage: bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory path>";
 
@@ -80,6 +82,9 @@ export interface WikiCheckResult {
 
 const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code ?? String(e);
 
+/** The wiki's `roleKeys`, as `lintWiki` reads them; none without a reader config. */
+const roleKeysAt = async (root: string) => (await readWikiReaderConfig(root))?.roleKeys ?? [];
+
 /** The findings for an absolute `.mdx` page or directory path. Throws when the
  *  page, or the directory's listing, cannot be read. */
 export async function wikiCheck(target: string): Promise<WikiCheckResult> {
@@ -87,10 +92,11 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     const base = path.dirname(target);
     const root = wikiRootFor(base) ?? base;
     const rel = path.relative(root, target).split(path.sep).join("/");
-    const findings = checkComponents(rel, await Bun.file(target).text());
+    const findings = checkPageText({ relPath: rel }, await Bun.file(target).text(), await roleKeysAt(root));
     return { findings, checked: 1, selected: 1, unreadable: [] };
   }
   const root = wikiRootFor(target) ?? target;
+  const roleKeys = await roleKeysAt(root);
   const pages = await mdxPagesUnder(root, target);
   const out: WikiCheckResult = { findings: [], checked: 0, selected: pages.length, unreadable: [] };
   for (const rel of pages) {
@@ -104,7 +110,7 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     }
     if (isCulled(content)) continue;
     out.checked += 1;
-    out.findings.push(...checkComponents(rel, content));
+    out.findings.push(...checkPageText({ relPath: rel }, content, roleKeys));
   }
   return out;
 }

@@ -53,7 +53,7 @@ function findLine(lines: readonly string[], fenced: readonly boolean[], from: nu
   return undefined;
 }
 
-export function checkReportTop(page: WikiPageMeta, rawContent: string): LintFinding[] {
+export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
   const hasLog = rawContent.includes("<DecisionLog");
   const hasRows = rawContent.includes("<StatusRows");
   if (!hasLog && !hasRows) return [];

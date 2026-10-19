@@ -1938,7 +1938,7 @@ function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
  * offline, the same philosophy as bot-config validation. Read once per index
  * build, so it inherits the index's 5-min TTL.
  */
-async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | null> {
+export async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | null> {
   const abs = path.join(root, WIKI_READER_CONFIG_FILE);
   let text: string;
   try {
