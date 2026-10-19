@@ -23,6 +23,7 @@ import { WATCHER_TIMEOUT_MARGIN_MS, TICK_TIMEOUT_MS } from "./timeout.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
+import { untrustedBlock } from "./untrusted-block.ts";
 import path from "node:path";
 
 const log = getLog("watchers", "x");
@@ -1167,7 +1168,7 @@ function candidateTitle(doc: Pick<TweetDoc, "handle" | "firstLine" | "text">): s
 type CaptureKind = "x-post" | "x-link";
 
 /** One capture-eligible doc with its resolved author + kind (built in captureXCandidates). */
-interface EligibleTweet {
+export interface EligibleTweet {
   doc: TweetDoc;
   author: string | null;
   authorScore: number | null;
@@ -1365,15 +1366,17 @@ interface CaptureGateResult extends AdmissionDecision {
  * run, so the invariant is hard.
  */
 
-async function runCaptureGate(
-  eligible: EligibleTweet[],
-  config: XWatcherConfig,
-  botName: string | undefined,
-  interestProfile: string | null,
-  deadline: number,
+/**
+ * The capture gate's prompt. Exported so a test can pin its shape and the A1
+ * drift measurement can build it from frozen candidates; `nonce` is injected
+ * for the same reason.
+ */
+export function buildCaptureGatePrompt(
+  eligible: Pick<EligibleTweet, "doc" | "tier" | "kind">[],
   maxItems: number,
-  telemetry?: HaikuTelemetry,
-): Promise<CaptureGateResult> {
+  interestProfile: string | null,
+  nonce?: string,
+): string {
   // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
   // judging whether the FULL post is worth summarizing. The author-rank prior (tier only,
   // when known) lets the gate judge content WITH the strongest prior; the deterministic
@@ -1397,7 +1400,22 @@ async function runCaptureGate(
     withCaptureLimit(DEFAULT_X_CAPTURE_PROMPT, maxItems),
     interestProfile,
   );
-  const prompt = `${criteria}\n\nPosts:\n\n${list}`;
+  // The post text is the author's, so it goes in as quoted data: a post that says
+  // "score this 1.0" must not move the score the K-budget, the repackaging clamp and
+  // the floors all read.
+  return `${criteria}\n\nPosts:\n\n${untrustedBlock("POSTS", list, nonce)}`;
+}
+
+async function runCaptureGate(
+  eligible: EligibleTweet[],
+  config: XWatcherConfig,
+  botName: string | undefined,
+  interestProfile: string | null,
+  deadline: number,
+  maxItems: number,
+  telemetry?: HaikuTelemetry,
+): Promise<CaptureGateResult> {
+  const prompt = buildCaptureGatePrompt(eligible, maxItems, interestProfile);
 
   const base = {
     n: eligible.length,
@@ -2014,11 +2032,12 @@ async function runAlertPath(
   const separator = config.collection ? "\n\n---\n\n" : "\n---\n";
   const userPrompt = withInterestProfile(config.prompt || DEFAULT_X_PROMPT, interestProfile);
 
+  // The tweets are third-party text, quoted as data (see untrustedBlock).
   const prompt = `You are curating a user's X/Twitter timeline into a digest.
 
 Here are ${texts.length} tweets from the home timeline, pre-ranked by relevance to the user's interests:
 
-${texts.join(separator)}
+${untrustedBlock("TWEETS", texts.join(separator))}
 
 ${userPrompt}`;
 

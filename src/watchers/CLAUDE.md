@@ -559,7 +559,7 @@ direction with no watermark to trust. Consequence worth knowing: a row failing
 EVERY tick never records a success, so it keeps the full-day query — the growth
 this bounds is preserved on exactly the row already failing.
 
-### Tool fence (2026-10, arch-review A1)
+### Tool fence and quoted content (2026-10, arch-review A1)
 
 The email spawn opts into `toolSurface: "gmail-read"` (`buildHaikuArgs`,
 `src/scheduler/executor.ts`): the Gmail server only, `ToolSearch` plus the three
@@ -569,6 +569,12 @@ tool-less (`--tools ""`). The liveness predicate counts a Gmail call whose
 NOT reached: under `dontAsk` a denied read is exactly that, and the model then
 answers `[]`. Email bodies are not content-fenced; the model reads them through a
 tool result.
+
+Third-party text the x and anthropic gates and digests read goes into a
+nonce-marked block (`untrustedBlock`, `untrusted-block.ts`, the shape the source
+drafter uses): the capture gate's post list (`buildCaptureGatePrompt`), the X
+digest's tweets, the anthropic gate's candidate list (`buildAnthropicGatePrompt`)
+and the anthropic digest's items. The legacy `fetchFromPython` path is unchanged.
 
 ### Bounded retry (2026-08-13)
 
