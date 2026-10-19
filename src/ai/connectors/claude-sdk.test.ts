@@ -535,6 +535,8 @@ describe("claude-sdk executePrompt", () => {
       const fenced = queryCalls[1]!.options as Record<string, unknown>;
       expect("mcpServers" in fenced).toBe(false);
       expect(fenced.tools).toEqual([]);
+      expect(fenced.strictMcpConfig).toBe(true);
+      expect("strictMcpConfig" in plain).toBe(false);
     } finally {
       rmSync(dir, { recursive: true });
     }

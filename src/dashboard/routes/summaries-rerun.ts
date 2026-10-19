@@ -609,6 +609,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
 
     store.updateStatus(jobId, "summarizing");
     const result = await deps.oneShot({
+      toolSurface: "bot",
       // The CAPTURE's own trace source, not the `/summaries` source id — the two
       // differ for X video (`capture:x-video` vs the `x-article` shelf), and
       // this attribute exists to be compared with the capture it re-runs.

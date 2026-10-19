@@ -4,6 +4,7 @@ import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
+import type { ToolSurface } from "../ai/tool-surface.ts";
 import type { GardenerConfig } from "../gardener/types.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
@@ -198,6 +199,13 @@ export interface BotConfig {
    * the fence in `src/core/fenced-one-shot.ts`, never in config.json.
    */
   toolsDisabled?: boolean;
+  /**
+   * The one-shot's declared tool surface. Set per-call by `executeOneShot`
+   * from its required `toolSurface` option, never in config.json. The
+   * claude-cli and claude-sdk connectors fence `{ read }` and `{ web }`; the
+   * other connectors refuse them. See `src/ai/tool-surface.ts`.
+   */
+  toolSurface?: ToolSurface;
   /** Hivemind peer-to-peer integration config — parsed from `hivemind` block in config.json */
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */

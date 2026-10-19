@@ -672,6 +672,7 @@ export async function summarizeVideo(
             updateStatus(jobId, "selecting_frames");
             const startedAt = Date.now();
             const picked = await runCaptureOneShot({
+              toolSurface: "bot",
               source: "youtube",
               jobId,
               title,
@@ -924,6 +925,7 @@ export async function summarizeVideo(
     };
 
     const result = await runCaptureOneShot({
+      toolSurface: "bot",
       source: "youtube",
       jobId,
       title,

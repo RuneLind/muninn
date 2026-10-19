@@ -216,6 +216,7 @@ export async function streamResearchAnswer(
     // tokens + tool child spans) is owned by the shared seam; this orchestration
     // keeps only the trace-root finish (in the finally/catch below).
     const claude = await tracedOneShot(tracer, "claude", userPrompt, config, botConfig, {
+      toolSurface: "bot",
       systemPrompt: opts.systemPrompt ?? SYNTHESIS_SYSTEM_PROMPT,
       onProgress,
       startAttrs: { sources: citations.length, historyTurns: history.length },
