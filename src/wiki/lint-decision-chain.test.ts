@@ -56,4 +56,13 @@ describe("lint: ledger-row-state / chain-close-conflict", () => {
     expect(checks).toContain("ledger-row-state");
     expect(checks).toContain("chain-close-conflict");
   });
+
+  // Fix round 1, batch 4 (F10): a wikilink in a row reads as its label, so its
+  // `|` does not split the cell, and the row is still found on its line.
+  test("a row whose label is a wikilink is read and located", () => {
+    const linked = PAGE.replace("| 2 — b | se notatet |", "| 2 — [[plans/b|b]] | se notatet |");
+    const f = checkDecisionChain({ relPath: "plans/p.mdx" }, linked).filter((x) => x.check === "ledger-row-state");
+    expect(f.map((x) => [x.line, x.message.slice(0, 40)])).toEqual([[17, "PR ledger row PR 2: no state the strip c"]]);
+    expect(f[0]!.message).toContain('("se notatet")');
+  });
 });

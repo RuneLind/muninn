@@ -115,11 +115,57 @@ describe("renderWikiHtml passes views through", () => {
     expect(renderWikiHtml(PAGE, resolve, { views: true })).toContain(DC_VIEW_CLASS);
   });
 
-  test("the glance slate draws only on a proposed plan with no ledger", () => {
+  test("the glance slate draws only when the caller says the plan is proposed", () => {
     const glance = ["### At a glance", "", "| PR | What |", "|---|---|", "| 1 | a |", "| 2 | b |", "| 3 | c |", "| 4 | d |", ""].join("\n");
     const page = (status: string) => ["---", `plan_status: ${status}`, "---", "# Plan", "", NEXT, glance].join("\n");
-    expect(renderWikiHtml(page("proposed"), resolve, { views: true })).toContain("dc-strip");
+    expect(renderWikiHtml(page("proposed"), resolve, { views: true, proposedPlan: true })).toContain("dc-strip");
     expect(renderWikiHtml(page("shipped"), resolve, { views: true })).not.toContain(DC_VIEW_CLASS);
+    // F12: the route reads `plan_status` off the index (comment-stripped); the
+    // renderer no longer re-reads the frontmatter for it.
+    expect(renderWikiHtml(page("shipped"), resolve, { views: true, proposedPlan: true })).toContain("dc-strip");
+    expect(renderWikiHtml(page("proposed"), resolve, { views: true })).not.toContain(DC_VIEW_CLASS);
+  });
+});
+
+// Fix round 1, batch 4 (F10): with no `decisionText`, the views read each
+// wikilink sentinel as its `wikiLinkTexts` text, so an edge inside a label counts.
+describe("F10: the views read a sentinel as its link text", () => {
+  test("a PR named inside a link label is an edge", () => {
+    const log = LOG.replace("- **D1** — Use the flat file.", "- **D1** — Use the \x00WIKIPAGELINK0\x00 shape.");
+    const html = formatWebHtml(["# Plan", "", NEXT, log].join("\n"), { reader: true, views: true, wikiLinkTexts: ["PR 7 plan"] });
+    expect([...html.matchAll(/<span class="dc-out [^"]*"[^>]*>([^<]*)<\/span>/g)].map((m) => m[1])).toEqual(["PR 7"]);
+  });
+});
+
+// Fix round 1, batch 4 (F11). Synthetic rows only.
+describe("F11: tooltips and accessible names are plain text and carry the state", () => {
+  const ledger = [
+    "**PR ledger.**",
+    "",
+    "| PR | State | Decisions |",
+    "|---|---|---|",
+    "| 1 — A — api [#11](https://example.test/pull/11) | merged | D1 |",
+    "| 2 — **rows** and `code` | dropped | D2 |",
+    "| 3 — [[plans/foo|the store]] | open | D3 |",
+    "| 4 — _docs_ | planned | D3 |",
+    "",
+  ].join("\n");
+  const html = renderWikiHtml(["# Plan", "", NEXT, LOG, ledger].join("\n"), () => undefined, { views: true });
+
+  test("a strip square's title and aria-label read links as their text and drop markers", () => {
+    const squares = [...html.matchAll(/<span class="dc-pr [^"]*" role="img" title="([^"]*)" aria-label="([^"]*)">/g)];
+    expect(squares.map((m) => m[1])).toEqual([
+      "PR 1 · merged · A — api #11",
+      "PR 2 · dropped · rows and code",
+      "PR 3 · open · the store",
+      "PR 4 · planned · docs",
+    ]);
+    expect(squares.map((m) => m[2])).toEqual(squares.map((m) => m[1]));
+  });
+
+  test("a chain output names its state in its accessible name, not by colour alone", () => {
+    const outs = [...html.matchAll(/<span class="dc-out [^"]*"([^>]*)>([^<]*)<\/span>/g)].map((m) => `${m[2]}|${m[1]!.match(/aria-label="([^"]*)"/)?.[1]}|${/role="img"/.test(m[1]!)}`);
+    expect(outs).toEqual(["PR 3|PR 3 · open|true", "PR 4|PR 4 · planned|true", "PR 2|PR 2 · dropped|true", "PR 1|PR 1 · merged|true"]);
   });
 });
 

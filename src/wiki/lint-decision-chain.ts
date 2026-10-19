@@ -10,15 +10,14 @@
  * | `chain-close-conflict` | a decision says «Lukker Sn» / «Closes On» while On's own item closes |
  * |                        | it with another decision; the chain view keeps the question's close  |
  *
- * Both read the page through the renderer's own parser and the same
- * `pageDecisionData` pass the reader draws from, so a finding and the view agree.
+ * Both read the page through `pageDecisionDataOf` (`decision-text.ts`), the
+ * text and pass the reader draws from, so a finding and the view agree.
  */
 
-import { parseBlocks } from "../format/markdown-ast.ts";
-import { pageDecisionData } from "../format/decision-views.ts";
+import { pageDecisionDataOf, wikiLinksAsText } from "./decision-text.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
-import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
 export const DECISION_CHAIN_LINT_CHECKS = ["ledger-row-state", "chain-close-conflict"] as const;
@@ -46,8 +45,10 @@ export function checkDecisionChain(page: Pick<WikiPageMeta, "relPath">, rawConte
   const hasCloses = rawContent.includes("<DecisionLog") && /[Ll]ukker|[Cc]loses/.test(rawContent);
   if (!hasLedger && !hasCloses) return [];
   // Glance tables are never linted, so the `proposed` gate does not matter here.
-  const { ledgers, analysis } = pageDecisionData(parseBlocks(stripFrontmatter(rawContent)));
-  const lines = rawContent.split("\n");
+  const { ledgers, analysis } = pageDecisionDataOf(rawContent, false);
+  // Rows are matched on the text the analysis read: a wikilink as its label.
+  // Wikilinks hold no newline, so the line numbers are the file's.
+  const lines = wikiLinksAsText(rawContent).split("\n");
   const fenced = fencedLineMask(lines);
   const body = frontmatterEndLine(lines);
   const findings: LintFinding[] = [];

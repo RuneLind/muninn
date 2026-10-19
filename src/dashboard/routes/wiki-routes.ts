@@ -4,9 +4,8 @@ import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
-import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, stripFrontmatter, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
-import { parseBlocks } from "../../format/markdown-ast.ts";
-import { pageDecisionData } from "../../format/decision-views.ts";
+import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { pageDecisionDataOf } from "../../wiki/decision-text.ts";
 import { DECISION_CHAIN_LINES_MAX, lineageLine } from "../../format/decision-chain.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
 import { issueRowsFor } from "../../wiki/trackers/rows.ts";
@@ -1677,7 +1676,9 @@ export function registerWikiReadRoutes(
         idLabels: index.readerConfig?.idLabels,
         language: index.readerConfig?.language,
         // The decision chain view and the PR strip: the reader's page render only.
+        // `plan_status` as the index keeps it (comment-stripped).
         views: true,
+        proposedPlan: meta.plan_status === "proposed",
       }),
       // The lens switch's inputs: language, id nouns, the page's default lens
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
@@ -1775,17 +1776,15 @@ export function registerWikiReadRoutes(
   // lines (`O13 → D20 → PR 21 (dropped)`), newest decision first, at most
   // `DECISION_CHAIN_LINES_MAX`; `total` is the count before the cut. The
   // reader draws the same analysis as a view; this is the agent's text form.
-  // Same resolution and 400/404/503 ladder as `/api/wiki/page`; ids only, so
-  // wikilinks are not resolved.
+  // Same resolution and 400/404/503 ladder as `/api/wiki/page`; a wikilink
+  // reads as its label, from the same `decisionText` the view reads.
   app.get("/api/wiki/decision-chain", async (c) => {
     const resolved = await resolvePageRequest(c);
     if (!resolved.ok) return resolved.res;
     const { index, meta } = resolved;
     const markdown = await readWikiPage(index, meta);
     if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
-    const { analysis } = pageDecisionData(parseBlocks(stripFrontmatter(markdown)), {
-      proposed: parseFrontmatter(markdown).plan_status === "proposed",
-    });
+    const { analysis } = pageDecisionDataOf(markdown, meta.plan_status === "proposed");
     return c.json({
       chains: analysis.chains.slice(0, DECISION_CHAIN_LINES_MAX).map(lineageLine),
       total: analysis.chains.length,

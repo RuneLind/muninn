@@ -17,6 +17,7 @@ import type { QuestionLanguage } from "./question-labels.ts";
 import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
 import { analyzeDecisionChains, CHAIN_LABELS, type ChainAnalysis, type DecisionChain } from "./decision-chain.ts";
 import { firstRowPerPr, pageLedgers, type Ledger, type LedgerRow, type PrState } from "./pr-ledger.ts";
+import { visibleText } from "./report-top.ts";
 
 /** The chain view draws at this many chains (plan O2). */
 export const CHAIN_VIEW_MIN = 3;
@@ -100,7 +101,9 @@ function chainRow(c: DecisionChain, language: QuestionLanguage): string {
       const state = o.state ?? "unknown";
       const word = prStateWord(state, language);
       const name = `${o.noun} ${o.number}`;
-      return `<span class="dc-out dc-s-${state}${o.source === "prose" ? " dc-prose" : ""}" title="${escapeHtml(`${name} · ${word}`)}">${escapeHtml(name)}</span>`;
+      // The state is a colour; the accessible name says it too (as `.dc-pr`).
+      const title = escapeHtml(`${name} · ${word}`);
+      return `<span class="dc-out dc-s-${state}${o.source === "prose" ? " dc-prose" : ""}" role="img" title="${title}" aria-label="${title}">${escapeHtml(name)}</span>`;
     })
     .join("");
   return (
@@ -126,7 +129,10 @@ export function chainViewHtml(analysis: ChainAnalysis, language: QuestionLanguag
 
 function square(r: LedgerRow, language: QuestionLanguage): string {
   const word = prStateWord(r.state, language);
-  const title = `PR ${r.pr} · ${word}${r.label ? ` · ${r.label}` : ""}`;
+  // The row label is cell markdown; a tooltip and an accessible name are
+  // plain text, so links read as their text and markers drop.
+  const label = visibleText(r.label);
+  const title = `PR ${r.pr} · ${word}${label ? ` · ${label}` : ""}`;
   return `<span class="dc-pr dc-s-${r.state}" role="img" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${r.pr}</span>`;
 }
 

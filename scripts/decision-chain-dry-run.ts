@@ -13,10 +13,10 @@
 
 import path from "node:path";
 import { Glob } from "bun";
-import { parseBlocks } from "../src/format/markdown-ast.ts";
-import { pageDecisionData, CHAIN_VIEW_MIN, STRIP_VIEW_MIN } from "../src/format/decision-views.ts";
+import { CHAIN_VIEW_MIN, STRIP_VIEW_MIN } from "../src/format/decision-views.ts";
 import { lineageLine } from "../src/format/decision-chain.ts";
-import { parseFrontmatter, stripFrontmatter } from "../src/wiki/store.ts";
+import { parseFrontmatter, readPlanStatus } from "../src/wiki/store.ts";
+import { pageDecisionDataOf } from "../src/wiki/decision-text.ts";
 
 const median = (xs: number[]): number => {
   if (!xs.length) return NaN;
@@ -46,9 +46,7 @@ async function dryRun(root: string): Promise<string[]> {
   let conflicts = 0;
   for (const rel of files) {
     const md = await Bun.file(path.join(root, rel)).text();
-    const { ledgers: ls, analysis } = pageDecisionData(parseBlocks(stripFrontmatter(md)), {
-      proposed: parseFrontmatter(md).plan_status === "proposed",
-    });
+    const { ledgers: ls, analysis } = pageDecisionDataOf(md, readPlanStatus(parseFrontmatter(md)) === "proposed");
     const hasLog = md.includes("<DecisionLog");
     if (!hasLog && ls.length === 0) continue;
     if (hasLog) pagesWithLog++;

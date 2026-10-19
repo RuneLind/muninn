@@ -27,7 +27,7 @@ import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
-import { findLiveSentinelBlocks } from "./factcheck-context.ts";
+import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
@@ -40,34 +40,7 @@ import { pageDefaultLens, type IdLabels, type StoredLens, type WikiDefaultLens }
 // gardener consumers that import it from render.ts keep working unchanged.
 export { stripFrontmatter } from "./store.ts";
 
-/** A `[[wikilink]]` with an optional `|label`, target and label both NEWLINE-FREE
- *  — `WIKILINK_RE`'s exclusion (`store.ts`), and the reader is where its absence
- *  was VISIBLE: a dangling `[[` from a truncated index one-liner paired with the
- *  NEXT line's `]]`, so five index.md entries rendered as one merged
- *  `wiki-link-missing` span that ate the following entry's real link. */
-export const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
-
-/**
- * Drop the two marker LINES of every live fact-check block, leaving the block
- * between them (real content) to render. The blocks come from the writers' own
- * walker (`findLiveSentinelBlocks`), so what the reader hides is by construction
- * what the splice replaces and the strip removes: a marker mid-sentence, inside a
- * fence, indented as code, blockquoted, in the frontmatter or unpaired is content
- * and renders as written. Runs on the whole page, frontmatter included, because
- * the walker skips the frontmatter itself.
- */
-function stripSentinelLines(markdown: string): string {
-  const owned = new Set<number>();
-  for (const span of findLiveSentinelBlocks(markdown)) {
-    owned.add(span.startLine);
-    owned.add(span.endLine);
-  }
-  if (owned.size === 0) return markdown;
-  return markdown
-    .split("\n")
-    .filter((_, i) => !owned.has(i))
-    .join("\n");
-}
+export { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
 
 export function renderWikiHtml(
   markdown: string,
@@ -96,6 +69,9 @@ export function renderWikiHtml(
     /** The reader's page render: the decision chain view and the PR strip.
      *  Set by `GET /api/wiki/page` alone. */
     views?: boolean;
+    /** With `views`: the index's `plan_status` is `proposed`, so a page with
+     *  no ledger draws its at-a-glance slate (`pageLedgers`). */
+    proposedPlan?: boolean;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -123,7 +99,7 @@ export function renderWikiHtml(
   const linkTexts: string[] = [];
   const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);
-    const text = (label ?? target).trim() || target.trim();
+    const text = wikiLinkText(target, label);
     linkTexts.push(text);
     const meta = resolve(target);
     const html = meta
@@ -150,7 +126,7 @@ export function renderWikiHtml(
       wikiLinkTexts: linkTexts,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
-      ...(opts?.views ? { views: true, proposedPlan: parseFrontmatter(markdown).plan_status === "proposed" } : {}),
+      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown) } : {}),
     }),
     literal,
   );

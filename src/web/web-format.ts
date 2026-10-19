@@ -258,6 +258,11 @@ export function formatWebHtml(
     /** With `views`: the page is a `proposed` plan, so a page with no ledger
      *  draws its at-a-glance slate as planned (`pageLedgers`). */
     proposedPlan?: boolean;
+    /** With `views`: the text the views read — `renderWikiHtml` passes the
+     *  shared `decisionText` (`src/wiki/decision-text.ts`), which the
+     *  decision-chain route and the lint read too. Absent ⇒ `text` with each
+     *  wikilink sentinel replaced by its `wikiLinkTexts` text. */
+    decisionText?: string;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -295,11 +300,11 @@ export function formatWebHtml(
     if (slot < 0) {
       rendered = renderBlocks(blocks, webRenderer);
     } else {
+      // The analysis reads link labels, not sentinels, so an edge written
+      // inside a label (`[[plans/x|PR 7]]`) counts as the route counts it.
       const linkTexts = opts?.wikiLinkTexts;
-      const data = pageDecisionData(blocks, {
-        ...(linkTexts ? { linkText: (i: number) => linkTexts[i] ?? "" } : {}),
-        proposed: opts?.proposedPlan === true,
-      });
+      const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
+      const data = pageDecisionData(analysed === text ? blocks : parseBlocks(analysed), { proposed: opts?.proposedPlan === true });
       const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis);
       rendered = view
         ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
