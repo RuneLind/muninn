@@ -283,3 +283,77 @@ describe("F4: the label anywhere in the paragraph above; a qualified state heade
     expect(parseLedgerTable(["PR", "Statusnotat"], [["1", "merged"]]).stateColumn).toBe(-1);
   });
 });
+
+// Fix round 2, batch 1. Synthetic rows only.
+describe("G1: the ledger regexes run in linear time", () => {
+  const H = ["PR", "State", "Landed"];
+  const timed = (state: string, landed: string): { ms: number; state: string } => {
+    const t = performance.now();
+    const r = parseLedgerTable(H, [["1", state, landed]]).rows[0]!;
+    return { ms: performance.now() - t, state: r.state };
+  };
+  const KB50 = (unit: string): string => unit.repeat(Math.ceil(50_000 / unit.length));
+
+  test("a short Landed cell of dates or dotted numbers after a link", () => {
+    expect(timed("see notes", `[#5](${U}/5)${" 2026-10-19".repeat(14)} x`)).toMatchObject({ state: "unknown" });
+    expect(timed("see notes", `[#5](${U}/5)${" 2026-10-19".repeat(14)} x`).ms).toBeLessThan(50);
+    expect(timed("see notes", `[#5](${U}/5)${" 1.2.3".repeat(24)} x`).ms).toBeLessThan(50);
+  });
+
+  test("a 50 KB State cell finishes in under 50 ms", () => {
+    expect(timed(`merged ${KB50("a_")}`, "").ms).toBeLessThan(50);
+    expect(timed(`see ${KB50("[#1](u")}`, "").ms).toBeLessThan(50);
+  });
+
+  test("a 50 KB Landed cell finishes in under 50 ms", () => {
+    expect(timed("see notes", `[#5](${U}/5)${KB50(" 2026-10-19")} x`).ms).toBeLessThan(50);
+    expect(timed("see notes", `[#5](${U}/5)${KB50(" 1.2.3")} x`).ms).toBeLessThan(50);
+    expect(timed("see notes", `[#5](${U}/5)${KB50(" [#6](u)")} x`).ms).toBeLessThan(50);
+  });
+});
+
+describe("G2: rule 3 reads a Landed cell of links and landing metadata only", () => {
+  const one = (landed: string) => parseLedgerTable(["PR", "State", "Landed"], [["1", "see notes", landed]]).rows[0]!;
+
+  test.each([["reverted #5"], ["draft #5"], ["pending #5"], [`[#5](${U}/5) (reverted)`], [`[#5](${U}/5) (closed unmerged)`]])(
+    "%s is prose, not a landed link",
+    (landed) => {
+      expect(one(landed)).toMatchObject({ state: "unknown", rule: 0 });
+    },
+  );
+
+  test.each([
+    [`[#5](${U}/5 "the title")`],
+    [`[#5](${U}/5) and [#6](${U}/6)`],
+    [`[#5](${U}/5) og [#6](${U}/6)`],
+    [`[#5](${U}/5) (v34)`],
+    [`[#5](${U}/5) (2026-10-19)`],
+    ["muninn #552 (`b6e693ff`)"],
+  ])("%s reads merged", (landed) => {
+    expect(one(landed)).toMatchObject({ state: "merged", rule: 3 });
+  });
+});
+
+describe("G3: a PR link is a PR URL or a PR-shaped text; a bare ref is `PR #n` or a lowercase repo", () => {
+  const one = (landed: string) => parseLedgerTable(["PR", "State", "Landed"], [["1", "see notes", landed]]).rows[0]!;
+
+  test("an issue link or an anchor link is no PR link", () => {
+    expect(one("[Issue #12](https://example.test/acme/tool/issues/12)")).toMatchObject({ link: null, state: "unknown" });
+    expect(one("[step #3](#step-3)")).toMatchObject({ link: null, state: "unknown" });
+    expect(one("[#12](https://example.test/acme/tool/issues/12)")).toMatchObject({ link: null, state: "unknown" });
+  });
+
+  test("a link whose URL is a pull request is a PR link, whatever its text", () => {
+    expect(one("[the fix](https://example.test/acme/tool/pull/77)")).toMatchObject({ link: 77, state: "merged", rule: 3 });
+    expect(one("[!12](https://example.test/acme/tool/-/merge_requests/12)")).toMatchObject({ link: 12, state: "merged", rule: 3 });
+  });
+
+  test("a capitalised word before `#n` numbers something else", () => {
+    const l = parseLedgerTable(["Fase", "State"], [["Sprint #3 — x", "open"], ["Week #3", "open"], ["Bug #12", "open"], ["Attempt #2", "open"], ["y — PR #9", "open"]]);
+    expect(l.rows.map((r) => r.pr)).toEqual([9]);
+  });
+
+  test("`dropped Sprint #4` is no rule-1 state", () => {
+    expect(one("dropped Sprint #4")).toMatchObject({ state: "unknown", rule: 0 });
+  });
+});

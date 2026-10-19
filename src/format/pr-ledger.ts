@@ -76,37 +76,121 @@ const STATE_WORDS: readonly [string, Exclude<PrState, "unknown">][] = [
 
 const STATE_ALT = STATE_WORDS.map(([w]) => w.replace(/ /g, "\\s+")).join("|");
 
-/** Words that number something other than a PR: `step #3` is no PR link. */
-const NOT_A_REPO = [
+/** Words that number something other than a PR (`step #3`), and state or
+ *  status words (`closed #5`, `reverted #5`): no repo slug. */
+const NOT_A_REPO = new Set([
   "step", "steg", "phase", "fase", "item", "punkt", "task", "oppgave", "row", "rad", "round", "runde",
   "batch", "slice", "part", "del", "issue", "issues", "sak", "saker", "no", "nr", "number", "nummer",
   "case", "line", "linje", "version", "versjon", "comment", "kommentar", "ticket", "card", "kort",
   "finding", "funn", "check", "sjekk", "option", "page", "side", "test", "run", "question", "decision",
-].join("|");
-/** A PR link: `[#641](…)`, `[muninn#641](…)`, `[PR #641](…)`, the text in backticks allowed. */
-const LINK_REF = "\\[`?" + String.raw`(?:[A-Za-z][\w./-]*[ ]?)?#(\d{1,6})` + "`?" + String.raw`\]\([^)\s]*\)`;
-/** A bare `repo #641` / `owner/repo#641` / `PR #641` (PR in any case). */
-const BARE_REF = String.raw`(?<![\p{L}\p{N}/#\[\].-])(?!(?:${NOT_A_REPO})[ ]?#)[A-Za-z](?:[\w.-]*[A-Za-z0-9])?(?:/[\w.-]*[A-Za-z0-9])?[ ]?#(\d{1,6})(?![\p{L}\p{N}])`;
-/** A commit sha: 7–40 hex in backticks, or bare with both a digit and a letter a–f. */
-const SHA = "`[0-9a-f]{7,40}`|" + String.raw`(?<![\p{L}\p{N}])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![\p{L}\p{N}])`;
+  ...STATE_WORDS.flatMap(([w]) => w.split(" ")),
+  "reverted", "revert", "draft", "pending", "wip", "superseded", "abandoned",
+]);
 
-/** Rule 1: a state word, then (after optional emphasis and space) a PR link,
- *  a bare `repo #n` or a commit sha. */
-const WORD_THEN_REF_RE = new RegExp(
-  `(?<![\\p{L}\\p{N}])(${STATE_ALT})(?![\\p{L}\\p{N}])[*_]*[ \\t]+(?:(?:in|i)[ \\t]+)?[*_]*(?:${LINK_REF}|${BARE_REF}|${SHA})`,
-  "iu",
-);
+/** A markdown link, an optional `"title"` after the URL. Every part stops at
+ *  the next bracket, parenthesis or quote, so a scan is linear. */
+const MD_LINK_RE = /\[([^[\]\n]*)\]\(([^()\s]*)(?:[ \t]+"[^"\n]*")?\)/g;
+/** A PR-shaped text: `#n`, `PR #n`, `repo #n`, `owner/repo#n`. */
+const PR_TEXT_RE = /^(?:#(\d{1,6})|[Pp][Rr] ?#(\d{1,6})|(?:[A-Za-z0-9][\w.-]*\/)?([a-z][a-z0-9._-]*) ?#(\d{1,6}))$/;
+const PR_URL_RE = /\/(?:pulls?|merge_requests)\/(\d{1,6})(?!\d)/;
+/** A bare `PR #n`, `repo #n` or `owner/repo#n`. A run of word characters
+ *  starts it only at its first character, so a scan is linear. */
+const BARE_REF_RE = /(?<![\p{L}\p{N}_/#[\].-])(?:([Pp][Rr])|(?:[A-Za-z0-9][\w.-]*\/)?([a-z][a-z0-9._-]*))[ ]?#(\d{1,6})(?![\p{L}\p{N}])/gu;
+/** A commit sha at a position: 7–40 hex in backticks, or bare with both a digit and a letter a–f. */
+const SHA_AT_RE = /`[0-9a-f]{7,40}`|(?=[0-9a-f]{0,39}\d)(?=[0-9a-f]{0,39}[a-f])[0-9a-f]{7,40}(?![\p{L}\p{N}])/uy;
+
+interface Ref {
+  n: number;
+  start: number;
+  end: number;
+}
+
+/** The number of a markdown link that is a PR link: its URL is a pull or
+ *  merge request, or its text is PR-shaped and its URL no issue or anchor. */
+function linkNumber(text: string, url: string): number | null {
+  const byUrl = PR_URL_RE.exec(url);
+  if (byUrl) return Number(byUrl[1]);
+  if (url.startsWith("#") || /\/issues\//.test(url)) return null;
+  const m = PR_TEXT_RE.exec(text.trim().replace(/^`|`$/g, ""));
+  if (!m || (m[3] !== undefined && NOT_A_REPO.has(m[3]))) return null;
+  return Number(m[1] ?? m[2] ?? m[4]);
+}
+
+/** Every PR link and bare ref in a text, in order, and whether the text holds
+ *  a link that is no PR link. A bare ref inside a link's text is no ref. */
+function scanRefs(text: string): { refs: Ref[]; otherLink: boolean } {
+  const refs: Ref[] = [];
+  let otherLink = false;
+  let masked = "";
+  let last = 0;
+  for (const m of text.matchAll(MD_LINK_RE)) {
+    const n = linkNumber(m[1]!, m[2]!);
+    if (n === null) otherLink = true;
+    else refs.push({ n, start: m.index, end: m.index + m[0].length });
+    masked += text.slice(last, m.index) + " ".repeat(m[0].length);
+    last = m.index + m[0].length;
+  }
+  masked += text.slice(last);
+  for (const m of masked.matchAll(BARE_REF_RE)) {
+    if (m[2] !== undefined && NOT_A_REPO.has(m[2])) continue;
+    refs.push({ n: Number(m[3]), start: m.index, end: m.index + m[0].length });
+  }
+  return { refs: refs.sort((a, b) => a.start - b.start), otherLink };
+}
+
+/** Rule 1 in one cell: a state word, then (after optional emphasis, space
+ *  and `in`/`i`) a PR link, a bare ref or a commit sha. */
+const STATE_WORD_RE = new RegExp(`(?<![\\p{L}\\p{N}])(${STATE_ALT})(?![\\p{L}\\p{N}])`, "giu");
+const GAP_RE = /[*_]*[ \t]+[*_]*/y;
+const IN_RE = /(?:in|i)[ \t]+[*_]*/iy;
+function wordThenRef(cell: string): Exclude<PrState, "unknown"> | null {
+  let starts: Set<number> | null = null;
+  for (const m of cell.matchAll(STATE_WORD_RE)) {
+    GAP_RE.lastIndex = m.index + m[0].length;
+    if (!GAP_RE.exec(cell)) continue;
+    const at = [GAP_RE.lastIndex];
+    IN_RE.lastIndex = GAP_RE.lastIndex;
+    if (IN_RE.exec(cell)) at.push(IN_RE.lastIndex);
+    starts ??= new Set(scanRefs(cell).refs.map((r) => r.start));
+    for (const p of at) {
+      SHA_AT_RE.lastIndex = p;
+      if (starts.has(p) || SHA_AT_RE.test(cell)) return stateWord(m[1]!);
+    }
+  }
+  return null;
+}
+
 /** Rule 2: a state word at the very start of the state cell. */
 const WORD_AT_START_RE = new RegExp(`^(${STATE_ALT})(?![\\p{L}\\p{N}-])`, "iu");
-/** Rule 3: a Landed cell holding PR links and no prose: a date, a sha in
- *  backticks or a parenthetical may follow (`[#5](…), 2026-09-13`). */
-const LANDED_META = String.raw`\d{1,4}[-.]\d{1,2}(?:[-.]\d{1,4})?|` + "`[0-9a-f]{7,40}`" + String.raw`|\([^()]*\)`;
-const LANDED_LINKS_RE = new RegExp(
-  `^(?:${LINK_REF}|${BARE_REF})(?:\\s*[,+&/]?\\s*(?:${LINK_REF}|${BARE_REF}))*(?:\\s*,?\\s*(?:${LANDED_META}))*$`,
-  "iu",
-);
-/** The first PR link in a text: group 1 a link, group 2 a bare ref. */
-const PR_REF_RE = new RegExp(`${LINK_REF}|${BARE_REF}`, "iu");
+
+/** Rule 3: a Landed cell of PR links and landing metadata only — separators,
+ *  dates, shas in backticks, and parentheticals with no word of letters alone
+ *  (`(v34)`, `(2026-10-19)`; not `(reverted)`). */
+const LANDED_SEPARATORS = new Set([",", "+", "&", "/", "and", "og"]);
+const DATE_TOKEN_RE = /^\d{1,4}[-.]\d{1,2}(?:[-.]\d{1,4})?$/;
+const SHA_TOKEN_RE = /^`[0-9a-f]{7,40}`$/;
+function landedLinksOnly(cell: string): boolean {
+  const { refs, otherLink } = scanRefs(cell);
+  if (otherLink || !refs.length) return false;
+  let rest = "";
+  let last = 0;
+  for (const r of refs) {
+    rest += cell.slice(last, r.start) + " ";
+    last = r.end;
+  }
+  rest += cell.slice(last);
+  let prose = false;
+  rest = rest.replace(/\(([^()]*)\)/g, (_, inner: string) => {
+    for (const t of inner.split(/[\s,;]+/)) {
+      if (/\p{L}/u.test(t) && !/\d/.test(t) && !SHA_TOKEN_RE.test(t)) prose = true;
+    }
+    return " ";
+  });
+  if (prose) return false;
+  return rest
+    .split(/\s+|(?=,)|(?<=,)/)
+    .every((t) => t === "" || LANDED_SEPARATORS.has(t.toLowerCase()) || DATE_TOKEN_RE.test(t) || SHA_TOKEN_RE.test(t));
+}
 
 /** A qualifier in parentheses may follow: `Status (10-19)`, `State (as of …)`. */
 const STATE_HEADER_RE = /^(?:state|status|tilstand)(?:\s*\([^()]*\))?$/i;
@@ -167,8 +251,7 @@ function headerIndex(headers: string[], re: RegExp): number {
 
 /** The number of the first PR link in a text, else null. */
 function prRefOf(text: string): number | null {
-  const m = PR_REF_RE.exec(text);
-  return m ? Number(m[1] ?? m[2]) : null;
+  return scanRefs(text).refs[0]?.n ?? null;
 }
 
 /** The slate number of a slate column's cell (`**12** — x`, `PR 12`,
@@ -176,7 +259,14 @@ function prRefOf(text: string): number | null {
 function slateOf(cell: string, slateColumn: boolean): { slate: number | null; label: string } {
   const t = plain(cell).replace(/^[-–—\s]+/, "");
   if (!slateColumn) return { slate: null, label: t };
-  const body = t.replace(new RegExp(`^(?:(?:${LINK_REF})\\s*)+`, "iu"), "").replace(/^PR\s*#?\s*/i, "");
+  // Leading PR links go first: `[#351](…) 1 — y`.
+  let cut = 0;
+  for (const r of scanRefs(t).refs) {
+    if (r.start !== cut || t[cut] !== "[") break;
+    cut = r.end;
+    while (/\s/.test(t[cut] ?? "")) cut++;
+  }
+  const body = t.slice(cut).replace(/^PR\s*#?\s*/i, "");
   const m = /^(\d{1,4})(?![\p{L}\p{N}])(?![-.:/]\d)\s*(?:[-–—:.)]\s*)?(.*)$/u.exec(body);
   if (!m) return { slate: null, label: t };
   return { slate: Number(m[1]), label: m[2]!.trim() };
@@ -201,8 +291,8 @@ function stateWord(word: string): Exclude<PrState, "unknown"> {
 function rowState(raw: string[], stateCol: number, landedCol: number): { state: PrState; rule: 0 | 1 | 2 | 3 } {
   const cells = raw.map(unstruck);
   const rule1 = (i: number): { state: PrState; rule: 1 } | null => {
-    const m = WORD_THEN_REF_RE.exec(cells[i] ?? "");
-    return m ? { state: stateWord(m[1]!), rule: 1 } : null;
+    const s = wordThenRef(cells[i] ?? "");
+    return s ? { state: s, rule: 1 } : null;
   };
   // The state and Landed cells first: prose in another cell never beats them.
   for (const i of [stateCol, landedCol]) {
@@ -219,7 +309,7 @@ function rowState(raw: string[], stateCol: number, landedCol: number): { state: 
     const r = rule1(i);
     if (r) return r;
   }
-  if (landedCol >= 0 && LANDED_LINKS_RE.test(plain(cells[landedCol] ?? ""))) return { state: "merged", rule: 3 };
+  if (landedCol >= 0 && landedLinksOnly(plain(cells[landedCol] ?? ""))) return { state: "merged", rule: 3 };
   return { state: "unknown", rule: 0 };
 }
 
