@@ -59,6 +59,8 @@ export const toolSurfaceTestSeam: {
   allowWebHosts?: string[];
   /** Overrides {@link CLI_VERSION_PROBE_TIMEOUT_MS}. */
   cliProbeTimeoutMs?: number;
+  /** Overrides {@link CLI_VERSION_PROBE_KILL_GRACE_MS}. */
+  cliProbeKillGraceMs?: number;
 } = {};
 
 /**
@@ -282,6 +284,27 @@ export function compareVersions(a: string, b: string): number {
 /** How long `claude --version` may take before the probe reads it as absent. */
 export const CLI_VERSION_PROBE_TIMEOUT_MS = 5_000;
 
+/** How long a timed-out probe gets to exit on SIGTERM before it is sent SIGKILL. */
+export const CLI_VERSION_PROBE_KILL_GRACE_MS = 1_000;
+
+/** Resolves true when `proc` exits within `ms`, false otherwise. */
+function exitsWithin(proc: ReturnType<typeof Bun.spawn>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  return Promise.race([proc.exited.then(() => true as const), late]).finally(() => clearTimeout(timer));
+}
+
+/** SIGTERM, then SIGKILL after a grace period, so a probe that ignores SIGTERM does not outlive the call. */
+async function stopProbe(proc: ReturnType<typeof Bun.spawn>): Promise<void> {
+  const grace = toolSurfaceTestSeam.cliProbeKillGraceMs ?? CLI_VERSION_PROBE_KILL_GRACE_MS;
+  proc.kill("SIGTERM");
+  if (await exitsWithin(proc, grace)) return;
+  proc.kill("SIGKILL");
+  await exitsWithin(proc, grace);
+}
+
 /** A version that passed the gate: the only thing cached, so a failed or old read is retried next call. */
 let cliVersion: string | undefined;
 let pinnedVersion: { version: string | null } | undefined;
@@ -298,8 +321,7 @@ async function probeCliVersion(): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
-      proc.kill();
-      resolve(null);
+      void stopProbe(proc).then(() => resolve(null));
     }, toolSurfaceTestSeam.cliProbeTimeoutMs ?? CLI_VERSION_PROBE_TIMEOUT_MS);
   });
   const read = (async () => {

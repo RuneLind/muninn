@@ -315,18 +315,30 @@ describe("the CLI version probe", () => {
   let spawnSpy: ReturnType<typeof spyOn>;
   let syncSpy: ReturnType<typeof spyOn>;
   const setFake = (mode: string) => writeFileSync(`${fake}.mode`, mode);
+  /** Every `claude` process the probe spawned, in order. */
+  let probes: ReturnType<typeof Bun.spawn>[];
 
   beforeEach(() => {
     fake = join(root, "fake-claude");
     writeFileSync(
       fake,
-      '#!/bin/sh\nmode=$(cat "$0.mode")\ncase "$mode" in fail) exit 1;; hang) exec sleep 4;; *) echo "$mode (Claude Code)";; esac\n',
+      '#!/bin/sh\nmode=$(cat "$0.mode")\ncase "$mode" in fail) exit 1;; hang) exec sleep 4;; ' +
+        // Ignores SIGTERM; only SIGKILL ends it.
+        "deaf) trap '' TERM; exec sleep 4;; " +
+        // Dies on SIGTERM, but a background child keeps stdout open for 3 s.
+        "orphan) sleep 3 & exec sleep 4;; " +
+        'slow) sleep 0.3; echo "2.1.400 (Claude Code)";; *) echo "$mode (Claude Code)";; esac\n',
       { mode: 0o755 },
     );
     const realSpawn = Bun.spawn;
     const realSync = Bun.spawnSync;
     const redirect = (cmd: string[]) => (cmd[0] === "claude" ? [fake, ...cmd.slice(1)] : cmd);
-    spawnSpy = spyOn(Bun, "spawn").mockImplementation(((cmd: string[], o: never) => realSpawn(redirect(cmd), o)) as never);
+    probes = [];
+    spawnSpy = spyOn(Bun, "spawn").mockImplementation(((cmd: string[], o: never) => {
+      const proc = realSpawn(redirect(cmd), o);
+      if (cmd[0] === "claude") probes.push(proc);
+      return proc;
+    }) as never);
     syncSpy = spyOn(Bun, "spawnSync").mockImplementation(((cmd: string[], o: never) => realSync(redirect(cmd), o)) as never);
     __setClaudeCliVersionForTest(undefined);
   });
@@ -335,6 +347,8 @@ describe("the CLI version probe", () => {
     spawnSpy.mockRestore();
     syncSpy.mockRestore();
     delete toolSurfaceTestSeam.cliProbeTimeoutMs;
+    delete toolSurfaceTestSeam.cliProbeKillGraceMs;
+    for (const p of probes) p.kill("SIGKILL");
     __setClaudeCliVersionForTest(undefined);
   });
 
@@ -365,6 +379,41 @@ describe("the CLI version probe", () => {
     expect(version).toBeNull();
     expect(performance.now() - start).toBeLessThan(2000);
     expect(ticked).toBe(true);
+  }, 10_000);
+
+  test("a timed-out probe is sent SIGTERM first, and returns once it has exited", async () => {
+    setFake("hang");
+    toolSurfaceTestSeam.cliProbeTimeoutMs = 200;
+    toolSurfaceTestSeam.cliProbeKillGraceMs = 1_000;
+    expect(await installedClaudeCliVersion()).toBeNull();
+    expect(probes.length).toBe(1);
+    expect(probes[0]!.signalCode).toBe("SIGTERM");
+  }, 10_000);
+
+  test("a probe that ignores SIGTERM is killed with SIGKILL before the call returns", async () => {
+    setFake("deaf");
+    toolSurfaceTestSeam.cliProbeTimeoutMs = 200;
+    toolSurfaceTestSeam.cliProbeKillGraceMs = 300;
+    expect(await installedClaudeCliVersion()).toBeNull();
+    expect(probes.length).toBe(1);
+    expect(probes[0]!.signalCode).toBe("SIGKILL");
+  }, 10_000);
+
+  test("the timeout does not wait for stdout to close: a child holding the pipe does not hold the call", async () => {
+    setFake("orphan");
+    toolSurfaceTestSeam.cliProbeTimeoutMs = 200;
+    toolSurfaceTestSeam.cliProbeKillGraceMs = 300;
+    const start = performance.now();
+    expect(await installedClaudeCliVersion()).toBeNull();
+    // The background `sleep 3` keeps stdout open; reading it to the end takes ~3 s.
+    expect(performance.now() - start).toBeLessThan(1_500);
+  }, 10_000);
+
+  test("concurrent callers share one probe", async () => {
+    setFake("slow");
+    const versions = await Promise.all(Array.from({ length: 5 }, () => installedClaudeCliVersion()));
+    expect(versions).toEqual(Array(5).fill("2.1.400"));
+    expect(probes.length).toBe(1);
   }, 10_000);
 });
 
