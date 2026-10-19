@@ -13,8 +13,9 @@
  * checks the `.mdx` pages under it that `lintWiki` checks: the store's own scan
  * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
  * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
- * sibling exists), minus a page a readable same-stem `.md` shadows. A culled page
- * (`signal: none`) gets every check but the component checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
+ * sibling exists), minus a page a readable same-stem `.md` shadows. In a
+ * directory, a culled page (`signal: none`) gets every check but the component
+ * checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
  * `relPath` is relative to it.
  *

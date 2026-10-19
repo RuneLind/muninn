@@ -29,6 +29,26 @@ const LOOSE_CLOSE = [
 ].join("\n");
 const UNKNOWN_ROLE = ["---", "title: L", "---", "<NextMoves>", "", '<Lane kind="you" role="jurist">', "", "1. x", "", "</Lane>", "", "</NextMoves>", ""].join("\n");
 const KNOWN_ROLE = ["---", "title: K", "---", "<NextMoves>", "", '<Lane kind="you" role="fag">', "", "1. x", "", "</Lane>", "", "</NextMoves>", ""].join("\n");
+const LONG = "This decision sentence runs on and on well past the limit the overview lens shows, so the reader sees a cut-off clause instead of the decision it was meant to state in one line";
+const REPORT_TOP = [
+  "---",
+  "title: T",
+  "---",
+  "<StatusRows>",
+  "",
+  `- **Status:** ${LONG}`,
+  "",
+  "</StatusRows>",
+  "",
+  '<CaseBoard src="saker.yaml" labels="bogus:Foo" />',
+  "",
+  "<DecisionLog>",
+  "",
+  `- **D1** \u2014 ${LONG}.`,
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
 const CULLED_LOOSE_CLOSE = LOOSE_CLOSE.replace("title: Q", "title: Q\nsignal: none\nsignal-reason: retired");
 const COMPILED = "<!-- generated from blogs/src/s.mdx -->\n<html></html>\n";
 
@@ -69,6 +89,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/l.mdx"), UNKNOWN_ROLE);
   await Bun.write(path.join(tmp, "page-checks/plans/c.mdx"), BAD);
   await Bun.write(path.join(tmp, "page-checks/plans/k.mdx"), KNOWN_ROLE);
+  await Bun.write(path.join(tmp, "page-checks/plans/t.mdx"), REPORT_TOP);
   await Bun.write(path.join(tmp, "page-checks/plans/r.mdx"), CULLED_LOOSE_CLOSE);
 });
 afterAll(async () => {
@@ -148,7 +169,9 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
   test("the same page-text findings as lintWiki, over a directory", async () => {
     const root = path.join(tmp, "page-checks");
     const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => PAGE_TEXT.has(f.check));
-    expect(new Set(lint.map((f) => f.check))).toEqual(new Set(["question-block", "role-key", "component-value"]));
+    expect(new Set(lint.map((f) => f.check))).toEqual(
+      new Set(["question-block", "role-key", "component-value", "decision-first-sentence", "status-row-long", "case-board-labels"]),
+    );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
   });
 });
