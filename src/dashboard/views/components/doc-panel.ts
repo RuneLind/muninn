@@ -387,7 +387,8 @@ export function docPanelHtml(
  * unescaped, so `&#106;avascript:` passed a scheme check and the browser
  * decoded it into a live link. The override decodes first, checks the result
  * with `isSafeLinkHref` (failing links become their text), then writes the
- * href HTML-escaped, so the attribute decodes to exactly the checked string.
+ * href HTML-escaped, so the attribute decodes to the `encodeURI` form of the
+ * checked string, with the same scheme.
  * `encodeURI` + `%25` → `%` is marked's own `cleanUrl`. The doc panel and the
  * summaries job card share the `__sanitized` flag, so both must install this
  * same snippet — whichever runs first decides for the page.
