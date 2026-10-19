@@ -293,6 +293,14 @@ export const PLAN_STATUS_VALUES = [
 ] as const;
 export type PlanStatus = (typeof PLAN_STATUS_VALUES)[number];
 
+/** A page's `plan_status:` as the index keeps it: the comment-stripped,
+ *  trimmed scalar when it is a {@link PLAN_STATUS_VALUES} entry, else none. */
+export function readPlanStatus(fm: Record<string, string | string[]>): PlanStatus | undefined {
+  const v = fm.plan_status;
+  const raw = typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
+  return (PLAN_STATUS_VALUES as readonly string[]).includes(raw) ? (raw as PlanStatus) : undefined;
+}
+
 /** Whether a plan has open follow-ups. Absent ⇒ treated as `none` by consumers. */
 export const PLAN_FOLLOWUPS_VALUES = ["open", "none"] as const;
 export type PlanFollowups = (typeof PLAN_FOLLOWUPS_VALUES)[number];
@@ -499,12 +507,8 @@ function parsePlanFields(
   const scalar = (v: string | string[] | undefined) =>
     typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
 
-  let plan_status: PlanStatus | undefined;
-  if (fm.plan_status !== undefined) {
-    const raw = scalar(fm.plan_status);
-    if ((PLAN_STATUS_VALUES as readonly string[]).includes(raw)) plan_status = raw as PlanStatus;
-    else drop("planStatus");
-  }
+  const plan_status = readPlanStatus(fm);
+  if (fm.plan_status !== undefined && plan_status === undefined) drop("planStatus");
 
   let status_date: string | undefined;
   if (fm.status_date !== undefined) {
@@ -1938,7 +1942,7 @@ function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
  * offline, the same philosophy as bot-config validation. Read once per index
  * build, so it inherits the index's 5-min TTL.
  */
-async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | null> {
+export async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | null> {
   const abs = path.join(root, WIKI_READER_CONFIG_FILE);
   let text: string;
   try {

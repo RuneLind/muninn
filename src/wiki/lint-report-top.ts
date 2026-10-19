@@ -53,7 +53,7 @@ function findLine(lines: readonly string[], fenced: readonly boolean[], from: nu
   return undefined;
 }
 
-export function checkReportTop(page: WikiPageMeta, rawContent: string): LintFinding[] {
+export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
   const hasLog = rawContent.includes("<DecisionLog");
   const hasRows = rawContent.includes("<StatusRows");
   if (!hasLog && !hasRows) return [];
@@ -124,7 +124,7 @@ function hasMore(blocks: readonly Block[]): boolean {
  * `<Tldr>`, and that box should hold a `<More>`. The line named is the first
  * non-blank body line after the H1, where the box goes.
  */
-export function checkTldr(page: WikiPageMeta, rawContent: string): LintFinding[] {
+export function checkTldr(page: Pick<WikiPageMeta, "relPath" | "plan_status">, rawContent: string): LintFinding[] {
   if (!isTldrScope(page.relPath, parseFrontmatter(rawContent), page.plan_status)) return [];
   const blocks = parseBlocks(stripFrontmatter(rawContent)).filter((b) => !isBlank(b));
   const h1 = blocks[0]?.type === "heading" && blocks[0].level === 1;

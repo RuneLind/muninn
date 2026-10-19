@@ -1,7 +1,11 @@
 #!/usr/bin/env bun
 /**
- * The component author check (`src/wiki/lint-components.ts`) over a page or a
- * directory, with no wiki index, no database and no `.env`:
+ * The lint checks that read only a page's own text (`checkPageText`,
+ * `src/wiki/lint.ts`: index-truncation, nested-annotation, unrendered-fact-mark,
+ * question-block, decision-first-sentence, status-row-long, role-key,
+ * case-board-labels, missing-tldr, tldr-no-more and the component checks) over a page or a
+ * directory, with no wiki index, no database and no `.env`. `roleKeys` comes
+ * from the wiki root's `.wiki-reader.json`:
  *
  *   bun --no-env-file scripts/wiki-check.ts <absolute page or directory path>
  *
@@ -10,10 +14,13 @@
  * checks the `.mdx` pages under it that `lintWiki` checks: the store's own scan
  * of the wiki root (`.wiki-reader.json` `include`, no dot directories or
  * `node_modules`, a `blogs/src/` source dropped only when its compiled `.html`
- * sibling exists), minus a page a readable same-stem `.md` shadows and a culled page
- * (`signal: none`). The wiki root is the nearest ancestor holding
+ * sibling exists), minus a page a readable same-stem `.md` shadows. In a
+ * directory, a culled page (`signal: none`) gets every check but the Tldr and
+ * component checks, as in `lintWiki`. The wiki root is the nearest ancestor holding
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
- * `relPath` is relative to it.
+ * `relPath` is relative to it. With no `.wiki-reader.json`, the root is a guess,
+ * so missing-tldr and tldr-no-more, which read the page's folder, are skipped
+ * and one stderr line says so.
  *
  * Exit codes: 0 when the check ran, with or without findings. 2 on a usage
  * error or a path that cannot be read or listed. 3 when a directory holds
@@ -24,9 +31,8 @@
 
 import path from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { checkComponents } from "../src/wiki/lint-components.ts";
-import { extRank, parseFrontmatter, readCull, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
-import type { LintFinding } from "../src/wiki/lint.ts";
+import { extRank, parseFrontmatter, readCull, readPlanStatus, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
+import { checkPageText, type LintFinding } from "../src/wiki/lint.ts";
 
 const USAGE = "usage: bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory path>";
 
@@ -63,36 +69,53 @@ export async function mdxPagesUnder(root: string, dir: string): Promise<string[]
 }
 
 /** A culled page, as the index reads it: frontmatter `signal: none`. */
-const isCulled = (content: string) => {
-  const fm = parseFrontmatter(content);
-  return readCull(fm.signal, fm["signal-reason"]).culled === true;
-};
+const isCulled = (fm: Record<string, string | string[]>) => readCull(fm.signal, fm["signal-reason"]).culled === true;
 
 export interface WikiCheckResult {
   findings: LintFinding[];
-  /** Pages read and checked (a culled page is read, not checked). */
+  /** Pages read and checked. */
   checked: number;
   /** Pages selected for the check. */
   selected: number;
   /** One line per page that could not be read. */
   unreadable: string[];
+  /** The directory the root was guessed from, when no `.wiki-reader.json`
+   *  names it; the folder checks were skipped. */
+  guessedRoot?: string;
 }
 
+/** The checks that read the page's folder under the wiki root (`isTldrScope`),
+ *  so they need the root, not a guess. */
+const FOLDER_CHECKS: ReadonlySet<string> = new Set(["missing-tldr", "tldr-no-more"]);
+
+/** The stderr line for a run whose wiki root is a guess. */
+export const noRootNote = (dir: string) =>
+  `wiki-check: no .wiki-reader.json at or above ${dir}: missing-tldr and tldr-no-more need the wiki root and were skipped`;
+
 const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code ?? String(e);
+
+/** The wiki's `roleKeys`, as `lintWiki` reads them; none without a reader config. */
+const roleKeysAt = async (root: string) => (await readWikiReaderConfig(root))?.roleKeys ?? [];
 
 /** The findings for an absolute `.mdx` page or directory path. Throws when the
  *  page, or the directory's listing, cannot be read. */
 export async function wikiCheck(target: string): Promise<WikiCheckResult> {
   if (!statSync(target).isDirectory()) {
     const base = path.dirname(target);
-    const root = wikiRootFor(base) ?? base;
+    const found = wikiRootFor(base);
+    const root = found ?? base;
     const rel = path.relative(root, target).split(path.sep).join("/");
-    const findings = checkComponents(rel, await Bun.file(target).text());
-    return { findings, checked: 1, selected: 1, unreadable: [] };
+    const content = await Bun.file(target).text();
+    const plan_status = readPlanStatus(parseFrontmatter(content));
+    const findings = checkPageText({ relPath: rel, plan_status }, content, await roleKeysAt(root));
+    if (found) return { findings, checked: 1, selected: 1, unreadable: [] };
+    return { findings: findings.filter((f) => !FOLDER_CHECKS.has(f.check)), checked: 1, selected: 1, unreadable: [], guessedRoot: base };
   }
-  const root = wikiRootFor(target) ?? target;
+  const found = wikiRootFor(target);
+  const root = found ?? target;
+  const roleKeys = await roleKeysAt(root);
   const pages = await mdxPagesUnder(root, target);
-  const out: WikiCheckResult = { findings: [], checked: 0, selected: pages.length, unreadable: [] };
+  const out: WikiCheckResult = { findings: [], checked: 0, selected: pages.length, unreadable: [], ...(found ? {} : { guessedRoot: target }) };
   for (const rel of pages) {
     const file = path.join(root, rel);
     let content: string;
@@ -102,9 +125,10 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
       out.unreadable.push(`wiki-check: cannot read ${file}: ${errCode(e)}`);
       continue;
     }
-    if (isCulled(content)) continue;
     out.checked += 1;
-    out.findings.push(...checkComponents(rel, content));
+    const fm = parseFrontmatter(content);
+    const findings = checkPageText({ relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) }, content, roleKeys);
+    out.findings.push(...(found ? findings : findings.filter((f) => !FOLDER_CHECKS.has(f.check))));
   }
   return out;
 }
@@ -131,7 +155,8 @@ export async function runWikiCheck(args: readonly string[]): Promise<{ code: num
   const out = result.findings.map((f) => JSON.stringify(f));
   if (result.selected === 0) return { code: 0, out, err: [`wiki-check: no .mdx pages under ${target}`] };
   const code = result.checked === 0 && result.unreadable.length === result.selected ? EXIT_NOTHING_READ : 0;
-  return { code, out, err: result.unreadable };
+  const note = result.guessedRoot === undefined ? [] : [noRootNote(result.guessedRoot)];
+  return { code, out, err: [...note, ...result.unreadable] };
 }
 
 if (import.meta.main) {
