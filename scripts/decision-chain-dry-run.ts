@@ -6,17 +6,20 @@
  *   bun --no-env-file scripts/decision-chain-dry-run.ts <wiki root> [<wiki root> …]
  *
  * Per page (`.md` and `.mdx` under `plans/`): chain count, orphan questions,
- * close conflicts, unknown PR states, edges from prose, and per ledger its
- * source, rows, share parsed to a known state and whether it draws. Then the
- * aggregates per wiki. Prints to stdout; writes nothing.
+ * close conflicts, unknown PR states, edges from prose, the views the reader
+ * renders (`views=`; `noSlot=` names a view that would draw on a page with no
+ * top-level NextMoves or StatusRows), and per ledger its source, rows, share
+ * parsed to a known state and whether it draws. Then the aggregates per wiki.
+ * Prints to stdout; writes nothing.
  */
 
 import path from "node:path";
 import { Glob } from "bun";
-import { CHAIN_VIEW_MIN, STRIP_VIEW_MIN } from "../src/format/decision-views.ts";
+import { chainViewHtml, pageDecisionData, prStripHtml, viewSlot } from "../src/format/decision-views.ts";
 import { lineageLine } from "../src/format/decision-chain.ts";
+import { parseBlocks } from "../src/format/markdown-ast.ts";
 import { parseFrontmatter, readPlanStatus } from "../src/wiki/store.ts";
-import { pageDecisionDataOf } from "../src/wiki/decision-text.ts";
+import { decisionText } from "../src/wiki/decision-text.ts";
 
 const median = (xs: number[]): number => {
   if (!xs.length) return NaN;
@@ -39,6 +42,7 @@ async function dryRun(root: string): Promise<string[]> {
   let draws = 0;
   let stripViews = 0;
   let chainViews = 0;
+  let unslotted = 0;
   let pagesWithLog = 0;
   let unknownRows = 0;
   let proseEdges = 0;
@@ -46,23 +50,31 @@ async function dryRun(root: string): Promise<string[]> {
   let conflicts = 0;
   for (const rel of files) {
     const md = await Bun.file(path.join(root, rel)).text();
-    const { ledgers: ls, analysis } = pageDecisionDataOf(md, readPlanStatus(parseFrontmatter(md)) === "proposed");
+    const blocks = parseBlocks(decisionText(md));
+    const { ledgers: ls, analysis } = pageDecisionData(blocks, { proposed: readPlanStatus(parseFrontmatter(md)) === "proposed" });
     const hasLog = md.includes("<DecisionLog");
     if (!hasLog && ls.length === 0) continue;
     if (hasLog) pagesWithLog++;
     chainCounts.push(analysis.chains.length);
-    if (analysis.chains.length >= CHAIN_VIEW_MIN) chainViews++;
     proseEdges += analysis.proseEdges;
     orphans += analysis.orphans.length;
     conflicts += analysis.conflicts.length;
     const unknown = ls.flatMap((l) => l.rows.filter((r) => r.state === "unknown").map((r) => r.pr));
     unknownRows += ls.filter((l) => l.source === "ledger" && l.stateColumn >= 0).flatMap((l) => l.rows.filter((r) => r.state === "unknown")).length;
-    const stripRows = ls.filter((l) => l.draws).reduce((n, l) => n + l.rows.length, 0);
-    if (stripRows >= STRIP_VIEW_MIN) stripViews++;
+    // The renderer's own view functions and slot rule (`formatWebHtml`).
+    const drawn = [
+      chainViewHtml(analysis, "en") ? "chain" : "",
+      prStripHtml(ls, "en", analysis) ? "strip" : "",
+    ].filter(Boolean);
+    const slotted = viewSlot(blocks) >= 0;
+    if (slotted && drawn.includes("chain")) chainViews++;
+    if (slotted && drawn.includes("strip")) stripViews++;
+    if (!slotted && drawn.length) unslotted++;
+    const views = `views=${(slotted && drawn.join(",")) || "-"}${!slotted && drawn.length ? ` noSlot=${drawn.join(",")}` : ""}`;
     out.push(
       `${rel}: chains=${analysis.chains.length} orphans=${analysis.orphans.map((o) => `${o.question}->${o.decision}`).join(",") || "-"} ` +
         `conflicts=${analysis.conflicts.map((c) => `${c.claimant}>${c.question}(${c.closedBy})`).join(",") || "-"} ` +
-        `unknownPRs=${unknown.join(",") || "-"} proseEdges=${analysis.proseEdges}`,
+        `unknownPRs=${unknown.join(",") || "-"} proseEdges=${analysis.proseEdges} ${views}`,
     );
     for (const l of ls) {
       if (l.source === "ledger") {
@@ -88,7 +100,7 @@ async function dryRun(root: string): Promise<string[]> {
       `ledgers=${ledgers} glance tables=${glances} drawing=${draws} (strip view on ${stripViews} pages) ` +
       `parse share median=${pct(median(shares))} min=${pct(shares.length ? Math.min(...shares) : NaN)} ` +
       `(${stateShares.length} with a state column: median=${pct(median(stateShares))} min=${pct(stateShares.length ? Math.min(...stateShares) : NaN)}) ` +
-      `chain view on ${chainViews} pages, chains per page {${["0", "1-2", "3-5", "6-10", "11+"].map((b) => `${b}: ${dist.get(b) ?? 0}`).join(", ")}} ` +
+      `chain view on ${chainViews} pages, ${unslotted} pages would draw with no slot, chains per page {${["0", "1-2", "3-5", "6-10", "11+"].map((b) => `${b}: ${dist.get(b) ?? 0}`).join(", ")}} ` +
       `unknown ledger rows=${unknownRows} prose edges=${proseEdges} orphans=${orphans} conflicts=${conflicts}`,
   );
   return out;

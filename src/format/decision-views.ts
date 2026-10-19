@@ -1,7 +1,7 @@
 /**
  * The reader's two decision visuals: the chain view (question → decision →
- * PRs, one row per decision) and the PR strip (one square per ledger row,
- * grouped by the decision the row cites).
+ * PRs, one row per decision) and the PR strip (one square per PR over the
+ * drawing ledgers, grouped by the decision its row cites).
  *
  * Pure and server-free: `formatWebHtml` calls it with `views: true` only, and
  * the chat bundle carries this module without ever calling it. The HTML has
@@ -21,7 +21,8 @@ import { visibleText } from "./report-top.ts";
 
 /** The chain view draws at this many chains (plan O2). */
 export const CHAIN_VIEW_MIN = 3;
-/** The strip draws at this many rows over the drawing ledgers (plan O2). */
+/** The strip draws at this many squares (one per PR) over the drawing
+ *  ledgers (plan O2). */
 export const STRIP_VIEW_MIN = 4;
 
 /** A node's go-to link, as the caller retargets it after the anchor passes. */

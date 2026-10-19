@@ -11,7 +11,7 @@
  *  2. decision → PR: every ledger row citing the decision. «PR n» /
  *     «oppgave n» in the decision's prose adds an edge only when no ledger row
  *     for that number cites a decision, and not right after a context word
- *     («after PR 4», «som PR 20», «from the PR 2 review»). Every ledger numbers
+ *     («after PR 6», «som PR 9», «from the PR 2 review»). Every ledger numbers
  *     PRs; only a ledger whose first header is Oppgave numbers oppgaver.
  *  3. «via»: the `Q-n` ids a question item names.
  */
@@ -40,7 +40,7 @@ const CLOSES_RE =
 const PROSE_PR_RE =
   /(?<![\p{L}\p{N}_[])(PR|[Oo]ppgave)[ \t ]+(\d{1,4})((?:[ \t ]*(?:,|og|and|&|\/|–|-)[ \t ]*\d{1,4}(?![\p{L}\p{N}#]))*)(?![\p{L}\p{N}\]])/gu;
 /** A prose PR mention right after one of these words is context, not an
- *  output: «starting after PR 4», «as PR 20 charges», «from the PR 2 review». */
+ *  output: «once after PR 6», «as PR 9 indexes», «from the PR 2 review». */
 const CONTEXT_BEFORE_RE =
   /(?<![\p{L}\p{N}])(?:after|before|since|until|than|as|like|from|etter|før|siden|inntil|enn|som|fra)(?:[ \t ]+(?:the|den|det))?[ \t ]+$/iu;
 const VIA_RE = /(?<![\p{L}\p{N}_])Q-\d{1,4}(?![\p{L}\p{N}])/gu;

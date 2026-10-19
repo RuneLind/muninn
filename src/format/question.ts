@@ -484,8 +484,9 @@ export function itemQuestionState(text: string, dim: boolean, decisions: Readonl
 
 /** The item's last canonical close or reopen phrase (the close rule's own
  *  parse), or null when it carries none. The decision chain reads it: a
- *  decision's «Lukker Sn» adds an edge only when Sn's item says nothing
- *  canonical itself, and a close naming a D the log lacks is an orphan. */
+ *  decision's «Lukker Sn» adds an edge only when Sn's item has no close as
+ *  its last phrase (none, or a reopen), and a close naming a D the log lacks
+ *  is an orphan. */
 export function lastCanonicalPhrase(text: string): { kind: "close" | "reopen"; decision?: string } | null {
   const phrases = canonicalPhrases(phraseText(text));
   const last = phrases[phrases.length - 1];

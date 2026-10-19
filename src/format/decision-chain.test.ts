@@ -77,7 +77,7 @@ describe("decision → PR", () => {
   });
 
   test("a row citing one decision in «What it gives» and another in State gets both edges", () => {
-    const md = LOG + ledger(["PR", "What it gives", "State"], [["4 — x", "the cache D1 asked for", "open — D2 ruled"]]);
+    const md = LOG + ledger(["PR", "Scope", "State"], [["4 — x", "the cache D1 asked for", "open — D2 ruled"]]);
     expect(lines(md)).toEqual(["D2 → PR 4 (open)", "D1 → PR 4 (open)"]);
   });
 
@@ -86,13 +86,13 @@ describe("decision → PR", () => {
   });
 
   test("a decision that names another PR as context makes no prose edge", () => {
-    const md = log("**D1** — Use the cache.", "**D2** — Charge it as PR 1 charges its own.") + ledger(["PR", "State"], [["1 — cache", "open — per D1"]]);
+    const md = log("**D1** — Use the cache.", "**D2** — Index it as PR 1 indexes its own.") + ledger(["PR", "State"], [["1 — cache", "open — per D1"]]);
     expect(lines(md)).toEqual(["D1 → PR 1 (open)"]);
   });
 
   test("a PR named after a context word makes no prose edge, either language", () => {
-    expect(lines(log("**D1** — Run it nightly, starting after PR 4."))).toEqual([]);
-    expect(lines(log("**D1** — Charge Hard as PR 20 charges Medium."))).toEqual([]);
+    expect(lines(log("**D1** — Index it once, after PR 6."))).toEqual([]);
+    expect(lines(log("**D1** — Index it as PR 9 indexes the archive."))).toEqual([]);
     expect(lines(log("**D1** — Keep the rule. Orchestrator, from the PR 2 review."))).toEqual([]);
     expect(lines(log("**D1** — Kjør etter PR 3, på samme måte som den PR 1."))).toEqual([]);
     expect(lines(log("**D1** — Run PR 3 after PR 1."))).toEqual(["D1 → PR 3"]);

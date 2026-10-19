@@ -3,9 +3,10 @@
  * views (`renderWikiHtml`), `GET /api/wiki/decision-chain`, lint check 16 and
  * the dry run, so the four cannot disagree on what a page says.
  *
- * The text is the page body as the reader renders it — frontmatter and the
- * live fact-check marker lines gone — with each `[[target|label]]` read as the
- * text the reader shows for it: the label, else the target.
+ * The text is the page markdown with the frontmatter and the live fact-check
+ * marker lines dropped and every `[[target|label]]` replaced by its label,
+ * else its target. It is not the reader's text: the H1 stays (the reader may
+ * strip it), and a wikilink inside a code span or fence is replaced too.
  */
 
 import { pageDecisionData, type PageDecisionData } from "../format/decision-views.ts";

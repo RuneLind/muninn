@@ -3,8 +3,9 @@
  * driven through the real route over a temp wiki.
  *
  * What a unit test of `analyzeDecisionChains` cannot see: the page resolution
- * and its 400/404 ladder, the frontmatter strip before parsing, and the
- * `DECISION_CHAIN_LINES_MAX` cut with `total` counted before it.
+ * and its 400/404 ladder, the frontmatter strip before parsing (a DecisionLog
+ * inside the frontmatter is not read), and the `DECISION_CHAIN_LINES_MAX` cut
+ * with `total` counted before it.
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
@@ -94,6 +95,27 @@ const COMMENTED = [
   "",
 ].join("\n");
 
+/** A DecisionLog inside a frontmatter block scalar parses as one when the
+ *  frontmatter is left in; the route strips it first. */
+const FRONTMATTER_LOG = [
+  "---",
+  "title: Frontmatter",
+  "note: |",
+  "  <DecisionLog>",
+  "",
+  "  - **D9** — Ship PR 9.",
+  "",
+  "  </DecisionLog>",
+  "---",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D1** — Ship PR 1.",
+  "",
+  "</DecisionLog>",
+  "",
+].join("\n");
+
 /** The chain view's rows, read back off the HTML as lineage lines. */
 function viewLines(html: string): string[] {
   const out: string[] = [];
@@ -128,6 +150,7 @@ describe("GET /api/wiki/decision-chain", () => {
       ["plans/wide.md", page("Wide", wide)],
       ["plans/linked.md", LINKED],
       ["plans/commented.md", COMMENTED],
+      ["plans/frontmatter.md", FRONTMATTER_LOG],
     ];
     for (const [rel, body] of files) {
       await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
@@ -178,6 +201,10 @@ describe("GET /api/wiki/decision-chain", () => {
     expect((await app.request("/api/wiki/decision-chain?wiki=chainwiki")).status).toBe(400);
     expect((await app.request("/api/wiki/decision-chain?wiki=chainwiki&relPath=plans/nope.md")).status).toBe(404);
     expect((await app.request("/api/wiki/decision-chain?wiki=nosuch&relPath=plans/plan.md")).status).toBe(404);
+  });
+
+  test("a DecisionLog in the frontmatter is not read", async () => {
+    expect((await chains("plans/frontmatter.md")).chains).toEqual(["D1 → PR 1"]);
   });
 
   // `[[t|l]]` reads as `l`: D1's PR 7 and D3's «Lukker S1» sit inside labels.

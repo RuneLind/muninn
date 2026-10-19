@@ -125,7 +125,8 @@ export interface LedgerRow {
   /** The slate number: the leading integer of the first cell, when the first
    *  column is a slate column (PR, #, Task …, not Fase or Date). */
   slate: number | null;
-  /** The number of the first PR link in the row. */
+  /** The number of the row's PR link, read from the first cell, then the
+   *  PR, State and Landed cells, then the rest in order (`linkOf`). */
   link: number | null;
   /** The number the strip shows: slate, else link. */
   pr: number | null;
