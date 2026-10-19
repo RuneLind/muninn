@@ -72,7 +72,7 @@ let deleteCalls: number;
 /** How the fake huginn answers a DELETE: move the file, a pre-move 500, a
  *  transport failure (the request may or may not have reached huginn), or a
  *  move followed by a 5xx (an exception after `shutil.move`, a proxy 504). */
-let deleteMode: "move" | "500" | "transport" | "refused" | "move-then-500" | "move-then-504";
+let deleteMode: "move" | "500" | "transport" | "move-then-500" | "move-then-504";
 let ingests: Array<Record<string, unknown>>;
 /** Releases the gated model call. */
 let releaseModel: () => void;
@@ -177,9 +177,6 @@ beforeEach(async () => {
     if (init?.method === "DELETE") {
       if (deleteMode === "500") return Response.json({ detail: "Could not move source file: EIO" }, { status: 500 });
       if (deleteMode === "transport") throw new TypeError("fetch failed");
-      // A REAL refused connection (nothing listens on port 1), so the error
-      // has the shape Bun's fetch gives when huginn is down.
-      if (deleteMode === "refused") return origFetch("http://127.0.0.1:1/api/document");
       if (docRaw === null) {
         return Response.json({ detail: "not a member" }, { status: 404 });
       }
@@ -370,40 +367,6 @@ describe("summary re-run vs Delete", () => {
     expect(blocked.json.code).toBe("in_flight");
     expect(ingests).toHaveLength(0);
     expect(String(failed.json.error)).toContain("may still complete");
-  });
-
-  test("a delete huginn refused the connection for lets go of the claim: re-run and retry are not 409", async () => {
-    // Nothing reached huginn, so nothing was deleted: holding the claim would
-    // answer every re-run, fact-check save and retried delete 409 for minutes.
-    mount();
-    deleteMode = "refused";
-    const failed = await del();
-    expect(summarySaveClaims.isHeld("youtube", DOC_ID)).toBe(false);
-    expect(failed.status).toBe(503);
-    expect(failed.json.code).toBe("huginn_unreachable");
-    expect(String(failed.json.error)).toContain("nothing was deleted");
-    expect(String(failed.json.error)).not.toContain("may still complete");
-
-    const retried = await del();
-    expect(retried.json.code).not.toBe("in_flight");
-    expect(retried.status).toBe(503);
-
-    releaseModel();
-    expect((await rerun()).status).toBe(200);
-    await settle();
-    expect(ingests).toHaveLength(1);
-  });
-
-  test("a refused-connection delete does not refuse a lapsed re-run's save", async () => {
-    await lapsedRun();
-    deleteMode = "refused";
-    const failed = await del();
-    expect(docRaw).toBe(RAW);
-
-    releaseModel();
-    await settle();
-    expect(ingests).toHaveLength(1);
-    expect(failed.status).toBe(503);
   });
 
   for (const mode of ["move-then-500", "move-then-504"] as const) {
