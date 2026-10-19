@@ -4,7 +4,8 @@ import path from "node:path";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
 import { parseBlocks } from "./markdown-ast.ts";
-import { CHAIN_VIEW_MIN, STRIP_VIEW_MIN, viewSlot } from "./decision-views.ts";
+import { CHAIN_VIEW_MIN, STATE_LOOKS, STRIP_VIEW_MIN, viewSlot } from "./decision-views.ts";
+import { decisionViewsCss } from "./component-styles.ts";
 import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
 import { PEEK_SKIP, PEEK_STRIP_SELECTOR } from "../dashboard/views/components/wiki-ref-links.ts";
 
@@ -237,5 +238,65 @@ describe("F6: the strip groups as the chain does; an absent decision is plain te
     for (const m of html.matchAll(/<a class="dc-go" href="#([^"]+)" data-dc-ref="([^"]+)">/g)) {
       expect(`${m[2]} → ${html.includes(`id="${m[1]}"`)}`).toBe(`${m[2]} → true`);
     }
+  });
+});
+
+// Fix round 1, batch 5 (F13–F15). Synthetic rows only; the layout itself is
+// measured in a browser by e2e/wiki-decision-views.spec.ts.
+describe("F13/F14: chain rows sit on one shared grid and read as a unit when narrow", () => {
+  const css = decisionViewsCss(".s");
+  /** The declarations of the first rule whose selector is exactly `sel`. */
+  const rule = (sel: string, from = css) => from.match(new RegExp(`\\${sel.replace(/ /g, "\\s+")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+
+  test("a row leaves out the cells it has nothing for: no empty question cell or arrow", () => {
+    const log = ["<DecisionLog>", "", "- **O1** — Which? Closed 2026-10-01 (D1).", "- **D1** — One in PR 3.", "- **D2** — ~~Two.~~ Reversed.", "- **D3** — Ship the reader in PR 7.", "", "</DecisionLog>", ""].join("\n");
+    const html = formatWebHtml(["# Plan", "", NEXT, "## Decisions", "", log].join("\n"), { reader: true, views: true });
+    expect(html.match(/<div class="dc-row[ "]/g)?.length).toBe(3);
+    expect(html).not.toMatch(/<span class="dc-arrow[^"]*" aria-hidden="true"><\/span>/);
+    expect(html).not.toContain('<span class="dc-qs"></span>');
+    expect(html).not.toContain('<span class="dc-outs"></span>');
+    // D3: no question ⇒ the row opens on its decision; D2: neither questions
+    // nor outputs ⇒ the decision cell alone.
+    expect(html).toContain('<div class="dc-row"><span class="dc-dec"><details class="dc-node dc-d"><summary>D3</summary>');
+    expect(html).toMatch(/<div class="dc-row dc-reversed"><span class="dc-dec">[\s\S]*?<span class="dc-snudd">Reversed<\/span><\/span><\/div>/);
+  });
+
+  test("rows are subgrids of one grid and each cell has a fixed column", () => {
+    expect(rule(".s .dc-row")).toMatch(/grid-template-columns:\s*subgrid/);
+    expect(rule(".s .dc-rows")).toMatch(/display:\s*grid/);
+    expect(rule(".s .dc-rows")).toMatch(/grid-template-columns:/);
+    expect([".s .dc-qs", ".s .dc-a-q", ".s .dc-dec", ".s .dc-a-out", ".s .dc-outs"].map((s) => rule(s).match(/grid-column:\s*(\d)/)?.[1])).toEqual(["1", "2", "3", "4", "5"]);
+  });
+
+  test("the popover is out of flow, anchored to the rows box", () => {
+    expect(rule(".s .dc-pop")).toMatch(/position:\s*absolute/);
+    expect(rule(".s .dc-rows")).toMatch(/position:\s*relative/);
+    expect(rule(".s .dc-node")).not.toMatch(/position:/);
+  });
+
+  test("the narrow form reads the view's width, not the viewport's, and keeps the arrows", () => {
+    expect(css).not.toContain("@media");
+    expect(rule(".s .dc-view")).toMatch(/container:\s*dc-view\s*\/\s*inline-size/);
+    const narrow = css.slice(css.indexOf("@container dc-view (max-width: 30rem)"));
+    expect(narrow.length).toBeLessThan(css.length);
+    expect(rule(".s .dc-row", narrow)).toMatch(/border:\s*1px solid var\(--border-secondary\)/);
+    expect(narrow).toMatch(/\.s \.dc-qs, \.s \.dc-dec, \.s \.dc-outs \{ display: contents; \}/);
+    expect(narrow).not.toMatch(/dc-arrow[^{]*\{[^}]*display:\s*none/);
+  });
+});
+
+describe("F15: the strip legend lists each look once", () => {
+  const css = decisionViewsCss(".s");
+
+  test("the CSS draws exactly the STATE_LOOKS groups alike", () => {
+    const stateRules = [...css.matchAll(/((?:\.s \.dc-s-[a-z-]+(?:, )?)+)\s*\{/g)].map((m) => [...m[1]!.matchAll(/dc-s-([a-z-]+)/g)].map((x) => x[1]).sort().join(","));
+    expect(stateRules.sort()).toEqual(STATE_LOOKS.map((l) => [...l].sort().join(",")).sort());
+  });
+
+  test("look-alike states share one entry; only present states are named", () => {
+    const ledger = ["**PR ledger.**", "", "| PR | State | Decisions |", "|---|---|---|", "| 1 — a | merged | D1 |", "| 2 — b | closed | D2 |", "| 3 — c | dropped | D2 |", "| 4 — d | planned | D3 |", "| 5 — e | optional | D3 |", "| 6 — f | open | D3 |", ""].join("\n");
+    const html = formatWebHtml(["# Plan", "", NEXT, LOG, ledger].join("\n"), { reader: true, views: true });
+    const keys = [...html.matchAll(/<span class="dc-key"><span class="dc-sw dc-s-([a-z-]+)" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]}=${m[2]}`);
+    expect(keys).toEqual(["merged=merged", "closed=closed / dropped", "planned=planned / optional", "open=open"]);
   });
 });

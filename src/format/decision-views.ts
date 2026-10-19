@@ -72,6 +72,17 @@ const STATE_WORDS: Record<QuestionLanguage, Record<PrState, string>> = {
   },
 };
 
+/** The states `decisionViewsCss` draws alike, one group per look; the strip's
+ *  legend lists each look once. A unit test holds the CSS to these groups. */
+export const STATE_LOOKS: readonly (readonly PrState[])[] = [
+  ["merged"],
+  ["open", "measurement"],
+  ["planned", "not-started", "optional"],
+  ["blocked"],
+  ["dropped", "closed"],
+  ["unknown"],
+];
+
 const NO_DECISION: Record<QuestionLanguage, string> = { en: "No decision", no: "Uten beslutning" };
 const GO_TO: Record<QuestionLanguage, string> = { en: "Go to", no: "Gå til" };
 
@@ -106,13 +117,14 @@ function chainRow(c: DecisionChain, language: QuestionLanguage): string {
       return `<span class="dc-out dc-s-${state}${o.source === "prose" ? " dc-prose" : ""}" role="img" title="${title}" aria-label="${title}">${escapeHtml(name)}</span>`;
     })
     .join("");
+  // Every cell sits on a fixed column of the shared grid (`decisionViewsCss`),
+  // so a row leaves out the cells it has nothing for instead of drawing them empty.
   return (
     `<div class="dc-row${c.reversed ? " dc-reversed" : ""}">` +
-    `<span class="dc-qs">${qs}</span>` +
-    `<span class="dc-arrow" aria-hidden="true">${qs ? "→" : ""}</span>` +
+    (qs ? `<span class="dc-qs">${qs}</span><span class="dc-arrow dc-a-q" aria-hidden="true">→</span>` : "") +
     `<span class="dc-dec">${node(c.decision, "d", c.label, language, c.reversed !== null)}${reversed}</span>` +
-    `<span class="dc-arrow" aria-hidden="true">${outs ? "→" : ""}</span>` +
-    `<span class="dc-outs">${outs}</span></div>`
+    (outs ? `<span class="dc-arrow dc-a-out" aria-hidden="true">→</span><span class="dc-outs">${outs}</span>` : "") +
+    `</div>`
   );
 }
 
@@ -163,10 +175,19 @@ export function prStripHtml(ledgers: Ledger[], language: QuestionLanguage, analy
       return `<div class="dc-phase"><div class="dc-ph">${head}</div><div class="dc-prs">${rs.map((r) => square(r, language)).join("")}</div></div>`;
     })
     .join("");
-  const seen: PrState[] = [];
-  for (const r of rows) if (!seen.includes(r.state)) seen.push(r.state);
-  const legend = seen
-    .map((s) => `<span class="dc-key"><span class="dc-sw dc-s-${s}" aria-hidden="true"></span>${escapeHtml(prStateWord(s, language))}</span>`)
+  // One legend entry per look, naming the present states that share it.
+  const looks = new Map<readonly PrState[], PrState[]>();
+  for (const r of rows) {
+    const look = STATE_LOOKS.find((l) => l.includes(r.state))!;
+    const present = looks.get(look);
+    if (!present) looks.set(look, [r.state]);
+    else if (!present.includes(r.state)) present.push(r.state);
+  }
+  const legend = [...looks.values()]
+    .map((ss) => {
+      const words = ss.map((s) => prStateWord(s, language)).join(" / ");
+      return `<span class="dc-key"><span class="dc-sw dc-s-${ss[0]}" aria-hidden="true"></span>${escapeHtml(words)}</span>`;
+    })
     .join("");
   const title = CHAIN_LABELS[language].strip;
   return (

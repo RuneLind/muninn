@@ -1065,23 +1065,34 @@ export function factcheckReaderCss(scope: string): string {
 /**
  * Reader-only: the decision chain view and the PR strip (`decision-views.ts`).
  * Only the wiki reader renders them (`views: true`), so chat and `/research`
- * never ship these rules. Theme tokens only; one column under 640px.
+ * never ship these rules. Theme tokens only. Each view is its own size
+ * container (`dc-view`): the rail and chat panes narrow the article, not the
+ * viewport, so the one-block-per-chain form follows the view's own width.
  */
 export function decisionViewsCss(scope: string): string {
   return `
     ${scope} .dc-view {
       margin: 0.8rem 0 1rem; padding: 0.6rem 0.8rem; border-radius: 8px; max-width: 100%;
       box-sizing: border-box; background: var(--bg-panel); border: 1px solid var(--border-primary);
+      container: dc-view / inline-size;
     }
     ${scope} .dc-title { font-size: 0.8em; font-weight: 600; color: var(--text-soft); margin-bottom: 0.4rem; }
-    ${scope} .dc-rows { display: grid; gap: 0.35rem; }
-    ${scope} .dc-row {
-      display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.4fr) auto minmax(0, 1.4fr);
-      align-items: start; gap: 0.3rem 0.4rem; font-size: 0.85em;
+    /* One grid over every row (rows are subgrids) with each cell on a fixed
+       column, so all decisions start at one x whether or not a row has
+       questions or outputs. The rows box anchors every popover. */
+    ${scope} .dc-rows {
+      position: relative; display: grid; gap: 0.35rem 0.4rem; font-size: 0.85em;
+      grid-template-columns: minmax(0, max-content) auto minmax(0, max-content) auto minmax(8rem, 1fr);
     }
+    ${scope} .dc-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: start; }
+    ${scope} .dc-qs { grid-column: 1; }
+    ${scope} .dc-a-q { grid-column: 2; }
+    ${scope} .dc-dec { grid-column: 3; }
+    ${scope} .dc-a-out { grid-column: 4; }
+    ${scope} .dc-outs { grid-column: 5; }
     ${scope} .dc-qs, ${scope} .dc-outs, ${scope} .dc-dec { display: flex; flex-wrap: wrap; gap: 0.25rem; min-width: 0; }
     ${scope} .dc-arrow { color: var(--text-soft); }
-    ${scope} .dc-node { position: relative; display: inline-block; }
+    ${scope} .dc-node { display: inline-block; }
     ${scope} .dc-node > summary {
       list-style: none; cursor: pointer; padding: 0 0.45rem; border-radius: 999px;
       color: var(--text-primary); background: var(--tint-neutral); border: 1px solid var(--border-secondary);
@@ -1090,9 +1101,13 @@ export function decisionViewsCss(scope: string): string {
     ${scope} .dc-node.dc-d > summary { background: var(--tint-info); border-color: var(--status-info); font-weight: 600; }
     ${scope} .dc-node.dc-struck > summary { text-decoration: line-through; background: transparent; }
     ${scope} .dc-node > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    /* Out of flow: the chip keeps its size and the rows do not move. Left edge
+       and width come from the rows box, so it never runs past the view; the
+       top stays where the summary ends. */
     ${scope} .dc-pop {
-      margin-top: 0.25rem; padding: 0.4rem 0.6rem; border-radius: 6px; max-width: min(28rem, 80vw);
-      background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border-secondary);
+      position: absolute; left: 0; z-index: 3; box-sizing: border-box; width: min(32rem, 100%);
+      margin-top: 0.25rem; padding: 0.4rem 0.6rem; border-radius: 6px;
+      background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border-primary);
       overflow-wrap: anywhere;
     }
     ${scope} .dc-go { display: inline-block; margin-left: 0.3rem; color: var(--accent); }
@@ -1120,9 +1135,15 @@ export function decisionViewsCss(scope: string): string {
     ${scope} .dc-legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; margin-top: 0.5rem; font-size: 0.8em; color: var(--text-soft); }
     ${scope} .dc-key { display: inline-flex; align-items: center; gap: 0.3rem; }
     ${scope} .dc-sw { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 3px; border: 1px solid var(--border-secondary); }
-    @media (max-width: 640px) {
-      ${scope} .dc-row { grid-template-columns: minmax(0, 1fr); }
-      ${scope} .dc-arrow { display: none; }
+    /* Narrow: each chain is one bordered block, its chips wrapping inline in
+       order (questions → decision → outputs) with the arrows kept. */
+    @container dc-view (max-width: 30rem) {
+      ${scope} .dc-rows { display: flex; flex-direction: column; gap: 0.45rem; }
+      ${scope} .dc-row {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.3rem;
+        padding: 0.3rem 0.45rem; border: 1px solid var(--border-secondary); border-radius: 6px;
+      }
+      ${scope} .dc-qs, ${scope} .dc-dec, ${scope} .dc-outs { display: contents; }
     }
   `;
 }
