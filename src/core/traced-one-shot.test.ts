@@ -73,6 +73,7 @@ describe("tracedOneShot", () => {
   test("stamps connector + requestedModel + merged startAttrs on the START span", async () => {
     const { tracer, starts } = recordingTracer();
     await tracedOneShot(tracer, "claude", "prompt", config, botConfig, {
+      toolSurface: "bot",
       oneShot: async () => makeResult(),
       startAttrs: { source: "capture", title: "hi" },
     });
@@ -92,8 +93,8 @@ describe("tracedOneShot", () => {
       seen.push(o);
       return makeResult();
     }) as never;
-    await tracedOneShot(recordingTracer().tracer, "claude", "prompt", config, botConfig, { oneShot, effort: "low" });
-    await tracedOneShot(recordingTracer().tracer, "claude", "prompt", config, botConfig, { oneShot });
+    await tracedOneShot(recordingTracer().tracer, "claude", "prompt", config, botConfig, { oneShot, effort: "low", toolSurface: "bot" });
+    await tracedOneShot(recordingTracer().tracer, "claude", "prompt", config, botConfig, { oneShot, toolSurface: "bot" });
     expect(seen[0]!.effort).toBe("low");
     expect(seen[1]!).not.toHaveProperty("effort");
   });
@@ -101,6 +102,7 @@ describe("tracedOneShot", () => {
   test("defaults connector to claude-cli when botConfig omits it", async () => {
     const { tracer, starts } = recordingTracer();
     await tracedOneShot(tracer, "claude", "prompt", config, { model: "sonnet" } as BotConfig, {
+      toolSurface: "bot",
       oneShot: async () => makeResult(),
     });
     expect(starts[0]!.attributes).toMatchObject({ connector: "claude-cli", requestedModel: "sonnet" });
@@ -109,6 +111,7 @@ describe("tracedOneShot", () => {
   test("stamps the connector-reported metrics on the success END span", async () => {
     const { tracer, ends } = recordingTracer();
     const result = await tracedOneShot(tracer, "claude", "prompt", config, botConfig, {
+      toolSurface: "bot",
       oneShot: async () => makeResult({ toolCalls: [makeToolCall(), makeToolCall({ id: "toolu_02" })] }),
     });
     expect(result.result).toBe("the answer");
@@ -128,6 +131,7 @@ describe("tracedOneShot", () => {
   test("uses the label as the span key (indexed fan-out labels are honored)", async () => {
     const { tracer, starts, ends } = recordingTracer();
     await tracedOneShot(tracer, "claude:claim-3", "prompt", config, botConfig, {
+      toolSurface: "bot",
       oneShot: async () => makeResult(),
     });
     expect(starts[0]!.label).toBe("claude:claim-3");
@@ -138,6 +142,7 @@ describe("tracedOneShot", () => {
     const { tracer, ends } = recordingTracer();
     await expect(
       tracedOneShot(tracer, "claude", "prompt", config, botConfig, {
+        toolSurface: "bot",
         oneShot: async () => {
           throw new Error("connector exploded");
         },
@@ -154,6 +159,7 @@ describe("tracedOneShot", () => {
     // re-ended (a second end would throw `No active mark` and mask the result).
     const { tracer, ends } = recordingTracer({ throwOnChildSpan: true });
     const result = await tracedOneShot(tracer, "claude", "prompt", config, botConfig, {
+      toolSurface: "bot",
       oneShot: async () => makeResult({ toolCalls: [makeToolCall()] }),
     });
     // Caller still gets the real result.

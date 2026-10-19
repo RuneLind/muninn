@@ -111,7 +111,8 @@ describe("runFencedOneShot — onProgress passthrough", () => {
     });
     expect(seen).toHaveLength(1);
     for (const tool of FENCED_EXCLUDED_TOOLS) expect(bot!.excludedTools).toContain(tool);
-    expect(bot!.toolsDisabled).toBe(true);
+    // The tool-less surface is declared, and executeOneShot applies it.
+    expect(seen[0]!.toolSurface).toBe("none");
   });
 
   test("the deny-list covers 2.1.281's escapes", () => {

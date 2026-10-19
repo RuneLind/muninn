@@ -265,6 +265,7 @@ export async function summarizeShortVideo(
     };
 
     const result = await runCaptureOneShot({
+      toolSurface: "bot",
       source: spec.id,
       jobId,
       title: ingestTitle,

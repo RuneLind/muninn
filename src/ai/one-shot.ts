@@ -16,7 +16,9 @@ import type { BotConfig, ConnectorType, EffortLevel } from "../bots/config.ts";
 import type { ClaudeExecResult } from "./executor.ts";
 import type { StreamProgressCallback } from "./stream-parser.ts";
 import { resolveConnector } from "./connector.ts";
+import { isReadSurface, type ToolSurface } from "./tool-surface.ts";
 import { getLog } from "../logging.ts";
+import { isAbsolute, resolve } from "node:path";
 
 const log = getLog("ai", "one-shot");
 
@@ -76,9 +78,51 @@ export interface OneShotOptions {
    * Extra directories the run may read from (Claude CLI `--add-dir`). Used by
    * the TikTok summarizer so the CLI can Read frame JPEGs in a tmp dir. Only
    * connectors whose {@link ConnectorCapabilities.supportsExtraDirs} is true
-   * accept these — passing them to any other connector throws.
+   * accept these — passing them to any other connector throws. Only with
+   * `toolSurface: "bot"`: on `{ read }` the dirs come from the surface.
    */
   extraDirs?: string[];
+  /**
+   * The tools this run may reach. Required, so typecheck fails on a caller
+   * that does not state it. See `src/ai/tool-surface.ts`.
+   */
+  toolSurface: ToolSurface;
+}
+
+/**
+ * Apply a declared tool surface to a per-call `BotConfig` clone. The single
+ * place a surface turns into connector fields: `"none"` sets `toolsDisabled`,
+ * the fenced shapes ride on `toolSurface` for the connector to map, and a
+ * connector that cannot express a fenced shape is refused before it runs.
+ */
+export function applyToolSurface(
+  botConfig: BotConfig,
+  surface: ToolSurface,
+  extraDirs: string[] | undefined,
+): BotConfig {
+  const connector: ConnectorType = botConfig.connector ?? "claude-cli";
+  if (surface !== "bot" && extraDirs && extraDirs.length > 0) {
+    throw new Error(
+      `executeOneShot: extraDirs is only allowed with toolSurface "bot" — a { read } surface names its own dirs.`,
+    );
+  }
+  if (surface === "bot") return { ...botConfig, toolSurface: "bot" };
+  if (surface === "none") return { ...botConfig, toolSurface: "none", toolsDisabled: true };
+
+  const caps = connectorCapabilities(botConfig);
+  if (isReadSurface(surface)) {
+    if (!caps.supportsExtraDirs) {
+      throw new Error(`Connector "${connector}" cannot run a { read } tool surface — only claude-cli and claude-sdk can.`);
+    }
+    if (surface.read.length === 0 || surface.read.some((d) => !isAbsolute(d))) {
+      throw new Error("executeOneShot: a { read } tool surface needs at least one directory, every one absolute.");
+    }
+    return { ...botConfig, toolSurface: { read: surface.read.map((d) => resolve(d)) } };
+  }
+  if (!caps.supportsWebTools) {
+    throw new Error(`Connector "${connector}" cannot run a { web } tool surface — only claude-cli and claude-sdk can.`);
+  }
+  return { ...botConfig, toolSurface: { web: true } };
 }
 
 /**
@@ -99,22 +143,22 @@ export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabiliti
 /**
  * Run a single prompt through the bot's connector and return its result.
  *
- * A thin adapter over {@link resolveConnector}: it folds `timeoutMs` and
- * `extraDirs` into a per-call botConfig clone (the caller's config is never
- * mutated), then dispatches. `extraDirs` on a connector that can't express them
+ * A thin adapter over {@link resolveConnector}: it folds the tool surface
+ * ({@link applyToolSurface}), `timeoutMs` and `extraDirs` into a per-call
+ * botConfig clone (the caller's config is never mutated), then dispatches. `extraDirs` on a connector that can't express them
  * throws before the connector runs so callers fail fast with a clear message.
  */
 export async function executeOneShot(
   prompt: string,
   config: Config,
   botConfig: BotConfig,
-  opts: OneShotOptions = {},
+  opts: OneShotOptions,
 ): Promise<ClaudeExecResult> {
-  const { systemPrompt, timeoutMs, thinkingMaxTokens, effort, onProgress, extraDirs } = opts;
+  const { systemPrompt, timeoutMs, thinkingMaxTokens, effort, onProgress, extraDirs, toolSurface } = opts;
 
   checkPromptResolved(prompt);
 
-  let effective = botConfig;
+  let effective = applyToolSurface(botConfig, toolSurface, extraDirs);
 
   if (timeoutMs !== undefined) {
     effective = { ...effective, timeoutMs };

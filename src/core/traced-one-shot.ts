@@ -37,6 +37,7 @@ import type { BotConfig, EffortLevel } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
+import type { ToolSurface } from "../ai/tool-surface.ts";
 import type { Tracer } from "../tracing/tracer.ts";
 import { attachToolSpans } from "./tool-spans.ts";
 import { getLog } from "../logging.ts";
@@ -56,6 +57,8 @@ export interface TracedOneShotOptions {
   onProgress?: StreamProgressCallback;
   /** Extra read dirs (claude-cli `--add-dir` / claude-sdk `additionalDirectories`). */
   extraDirs?: string[];
+  /** The tools the run may reach — required, forwarded to `executeOneShot`. */
+  toolSurface: ToolSurface;
   /**
    * Extra attributes stamped on the span at START, alongside the seam's own
    * `connector` + `requestedModel` — vertical-specific context (capture's
@@ -89,7 +92,7 @@ export async function tracedOneShot(
   prompt: string,
   config: Config,
   botConfig: BotConfig,
-  opts: TracedOneShotOptions = {},
+  opts: TracedOneShotOptions,
 ): Promise<ClaudeExecResult> {
   const oneShot = opts.oneShot ?? executeOneShot;
   const spanLabel = label || "claude";
@@ -108,6 +111,7 @@ export async function tracedOneShot(
       ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
+      toolSurface: opts.toolSurface,
     });
 
     tracer.end(spanLabel, {

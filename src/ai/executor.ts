@@ -7,6 +7,15 @@ import { StreamParser, type StreamProgressCallback } from "./stream-parser.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
 import { preflightMcpForRequest } from "./mcp-status.ts";
 import { logTraceFlagsOnce } from "./huginn-trace.ts";
+import { resolveAgentCwd } from "./agent-cwd.ts";
+import {
+  FENCED_AGENT_CWD_BUCKET,
+  assertRestrictedCliAvailable,
+  fencedSettings,
+  fencedSurface,
+  fencedTools,
+  isReadSurface,
+} from "./tool-surface.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("ai", "executor");
@@ -27,6 +36,8 @@ export async function executeClaudePrompt(
 
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
+  const fence = fencedSurface(botConfig.toolSurface);
+  if (fence) assertRestrictedCliAvailable(fence);
 
   const args = [
     "claude",
@@ -39,14 +50,29 @@ export async function executeClaudePrompt(
 
   // Effort is the thinking control on adaptive-thinking models (Opus/Sonnet 4.6+,
   // the 5.5 models included); Claude Code ignores MAX_THINKING_TOKENS there.
+  // `--restricted` drops the user settings' `effortLevel`, so a fenced run
+  // states one.
   if (botConfig.effort) {
     args.push("--effort", botConfig.effort);
+  } else if (fence) {
+    args.push("--effort", "high");
   }
 
   // The CLI also discovers .mcp.json from its cwd; passing it explicitly is
   // what the MCP preflight below pairs with.
   const mcpConfigPath = join(botConfig.dir, ".mcp.json");
-  if (botConfig.toolsDisabled) {
+  if (fence) {
+    // `--restricted` ignores the user, project and local settings files, confines
+    // the file tools to the working dirs and refuses bypass; `--tools` names the
+    // whole built-in set and `--strict-mcp-config` with no `--mcp-config` loads
+    // no MCP server. One `--settings` only: the last flag wins.
+    args.push("--restricted", "--tools", fencedTools(fence).join(","), "--strict-mcp-config");
+    if (isReadSurface(fence)) {
+      for (const dir of fence.read) args.push("--add-dir", dir);
+    }
+    const settings = fencedSettings(fence);
+    if (settings) args.push("--settings", JSON.stringify(settings));
+  } else if (botConfig.toolsDisabled) {
     // `--tools ""` removes every built-in; --strict-mcp-config with no
     // --mcp-config removes every MCP server, including the user-global ones
     // (IDE, peer messaging, claude.ai connectors) the CLI discovers on its own.
@@ -93,7 +119,9 @@ export async function executeClaudePrompt(
   const proc = Bun.spawn(
     args,
     {
-      cwd: botConfig.dir,
+      // A fenced run's cwd is an empty agent home: the working dir is readable
+      // without approval, so the bot folder would expose its config files.
+      cwd: fence ? resolveAgentCwd(FENCED_AGENT_CWD_BUCKET) : botConfig.dir,
       env,
       stdout: "pipe",
       stderr: "pipe",

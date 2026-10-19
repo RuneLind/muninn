@@ -22,6 +22,16 @@ import { parseMcpConfig } from "./claude-sdk-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { currentActiveTurn } from "../../hivemind/active-turn.ts";
+import { resolveAgentCwd } from "../agent-cwd.ts";
+import {
+  FENCED_AGENT_CWD_BUCKET,
+  fencedCanUseTool,
+  fencedSettings,
+  fencedSurface,
+  fencedTools,
+  isReadSurface,
+  type FencedToolSurface,
+} from "../tool-surface.ts";
 
 const log = getLog("ai", "claude-sdk");
 
@@ -44,6 +54,29 @@ export function resolveThinking(maxTokens: number | undefined): ThinkingConfig |
   if (maxTokens === undefined) return undefined;
   if (maxTokens === 0) return { type: "disabled" };
   return { type: "enabled", budgetTokens: maxTokens };
+}
+
+/**
+ * The SDK options for a fenced surface (`{ read }` / `{ web }`): the fixed tool
+ * list, no MCP server from any source, no settings files, `default` permission
+ * mode (`bypassPermissions` never consults `canUseTool`) and a handler that
+ * allows Read only under the dirs and the web tools only on `{ web }`. The cwd
+ * is an empty agent home: in `default` mode a Read inside the working dir skips
+ * `canUseTool`, so the bot folder as cwd would leave its config readable.
+ */
+export function fencedSdkOptions(fence: FencedToolSurface): Partial<Options> {
+  const settings = fencedSettings(fence);
+  return {
+    cwd: resolveAgentCwd(FENCED_AGENT_CWD_BUCKET),
+    permissionMode: "default",
+    tools: fencedTools(fence),
+    mcpServers: {},
+    strictMcpConfig: true,
+    settingSources: [],
+    ...(isReadSurface(fence) ? { additionalDirectories: fence.read } : {}),
+    canUseTool: fencedCanUseTool(fence),
+    ...(settings ? { settings } : {}),
+  };
 }
 
 /**
@@ -99,7 +132,8 @@ export async function executePrompt(
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
-  const mcpServers = botConfig.toolsDisabled ? {} : parseMcpConfig(botConfig.dir);
+  const fence = fencedSurface(botConfig.toolSurface);
+  const mcpServers = fence || botConfig.toolsDisabled ? {} : parseMcpConfig(botConfig.dir);
   const hasMcp = Object.keys(mcpServers).length > 0;
   const thinking = resolveThinking(botConfig.thinkingMaxTokens);
 
@@ -135,10 +169,12 @@ export async function executePrompt(
 
   const options: Options = {
     abortController,
-    cwd: botConfig.dir,
     model,
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
+    ...(fence ? fencedSdkOptions(fence) : {
+      cwd: botConfig.dir,
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    }),
     // Stream per-token text deltas to the web chat. Without this the SDK only
     // emits the completed `assistant` message at the end of each turn, so the
     // user waits for the whole response before seeing anything.
@@ -150,16 +186,19 @@ export async function executePrompt(
     ...(thinking ? { thinking } : {}),
     ...(botConfig.effort ? { effort: botConfig.effort } : {}),
     ...(hasMcp ? { mcpServers } : {}),
-    ...(botConfig.extraDirs?.length ? { additionalDirectories: botConfig.extraDirs } : {}),
+    ...(!fence && botConfig.extraDirs?.length ? { additionalDirectories: botConfig.extraDirs } : {}),
     // Under bypassPermissions the SDK's `allowedTools` option only suppresses
     // permission prompts — it cannot restrict the surface ("To restrict which
     // tools are available, use the `tools` option instead", sdk.d.ts). So the
     // allow-list maps to `tools` (the built-in base set; MCP tools are fenced
     // via excludedTools → disallowedTools). Empty/unset ⇒ full surface.
-    // toolsDisabled is the one way to say `tools: []` (no built-ins at all).
-    ...(botConfig.toolsDisabled
-      ? { tools: [] }
-      : botConfig.allowedTools?.length ? { tools: botConfig.allowedTools } : {}),
+    // toolsDisabled is the one way to say `tools: []` (no built-ins at all);
+    // strictMcpConfig keeps a project `.mcp.json` from loading beside it.
+    ...(fence
+      ? {}
+      : botConfig.toolsDisabled
+        ? { tools: [], strictMcpConfig: true }
+        : botConfig.allowedTools?.length ? { tools: botConfig.allowedTools } : {}),
     ...(botConfig.excludedTools?.length ? { disallowedTools: botConfig.excludedTools } : {}),
   };
 

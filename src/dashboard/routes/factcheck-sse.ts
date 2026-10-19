@@ -1141,6 +1141,7 @@ async function runFactcheck(
         // `model` only on a resolved end, an errored claim carries NO `model` attr
         // and so can no longer flip the /traces row to `model='mixed'`.
         const claude = await tracedOneShot(tracer, label, userPrompt, config, botConfig, {
+          toolSurface: "bot",
           systemPrompt,
           onProgress,
           timeoutMs: FACTCHECK_CLAIM_TIMEOUT_MS,
@@ -1253,6 +1254,7 @@ async function runFactcheck(
         // tool excursion just burns the COMPOSE_BUDGET_MS window and degrades to the
         // neutral header below (we deliberately don't hard-disable tools here).
         const compose = await tracedOneShot(tracer, "compose", composePrompts.userPrompt, config, botConfig, {
+          toolSurface: "bot",
           systemPrompt: composePrompts.systemPrompt,
           thinkingMaxTokens: 0,
           effort: "low",
