@@ -259,3 +259,27 @@ describe("F3: the slate is read from a slate column only", () => {
     }
   });
 });
+
+// Fix round 1, batch 2. Synthetic rows only.
+describe("F4: the label anywhere in the paragraph above; a qualified state header", () => {
+  const T = table(["PR", "State"], [["1 — a", "merged"], ["2 — b", "open"]]);
+
+  test("label line followed by prose on the next line, no blank between", () => {
+    const md = ["Intro paragraph.", "", "**PR ledger.**", "Merged rows first.", "", T, ""].join("\n");
+    expect(findLedgers(parseBlocks(md)).map((l) => l.rows.length)).toEqual([2]);
+    expect(findLedgers(parseBlocks(["**PR-oversikt.**", "Merget først.", "Resten etter.", "", T, ""].join("\n")))).toHaveLength(1);
+  });
+
+  test("a label in an earlier paragraph, or mid-line, is no ledger label", () => {
+    expect(findLedgers(parseBlocks(["**PR ledger.**", "", "Another paragraph.", "", T, ""].join("\n")))).toEqual([]);
+    expect(findLedgers(parseBlocks(["See the **PR ledger.** below.", "", T, ""].join("\n")))).toEqual([]);
+  });
+
+  test("a state header with a parenthetical qualifier is the state column", () => {
+    for (const h of ["Status (10-19)", "State (as of 2026-10-19)", "**Tilstand (per i dag)**"]) {
+      const l = parseLedgerTable(["PR", h], [["1", "merged"], ["2", "open"]]);
+      expect(`${h}: ${l.stateColumn} ${l.draws}`).toBe(`${h}: 1 true`);
+    }
+    expect(parseLedgerTable(["PR", "Statusnotat"], [["1", "merged"]]).stateColumn).toBe(-1);
+  });
+});

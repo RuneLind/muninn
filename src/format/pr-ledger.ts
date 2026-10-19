@@ -16,7 +16,7 @@
  * A row matching none is `unknown`. Struck text (`~~…~~`) is removed first.
  *
  * The strip draws a ledger only when its header names a state column
- * (State/Status/Tilstand) and at least {@link LEDGER_PARSED_MIN} of its rows
+ * (State/Status/Tilstand, a parenthetical qualifier allowed) and at least {@link LEDGER_PARSED_MIN} of its rows
  * parse to a known state.
  */
 
@@ -108,7 +108,8 @@ const LANDED_LINKS_RE = new RegExp(
 /** The first PR link in a text: group 1 a link, group 2 a bare ref. */
 const PR_REF_RE = new RegExp(`${LINK_REF}|${BARE_REF}`, "iu");
 
-const STATE_HEADER_RE = /^(?:state|status|tilstand)$/i;
+/** A qualifier in parentheses may follow: `Status (10-19)`, `State (as of …)`. */
+const STATE_HEADER_RE = /^(?:state|status|tilstand)(?:\s*\([^()]*\))?$/i;
 const LANDED_HEADER_RE = /^(?:landed|landet)$/i;
 const DECISIONS_HEADER_RE = /^(?:decisions?|beslutning(?:er)?)$/i;
 const PR_HEADER_RE = /^PR$/i;
@@ -264,19 +265,23 @@ export function opensWithLedgerLabel(line: string): boolean {
   return m !== null && isLedgerLabel(`**${m[1]}**`);
 }
 
-/** The label line right above block `i`: the last non-blank line of a text
- *  block, or a heading, skipping blank text blocks and a `<Meter>` (a ledger's
- *  progress bar stands between its label and its table). */
-function labelAbove(blocks: Block[], i: number): string | null {
+/** The label candidates right above block `i`: every line of the paragraph
+ *  that ends a text block (`**PR ledger.**` then prose on the next line), or a
+ *  heading, skipping blank text blocks and a `<Meter>` (a ledger's progress bar
+ *  stands between its label and its table). */
+function linesAbove(blocks: Block[], i: number): string[] {
   for (let j = i - 1; j >= 0; j--) {
     const b = blocks[j]!;
     if (b.type === "component" && b.name === "Meter") continue;
-    if (b.type === "heading") return b.content;
-    if (b.type !== "text") return null;
-    const lines = b.lines.filter((l) => l.trim() !== "");
-    if (lines.length) return lines[lines.length - 1]!;
+    if (b.type === "heading") return [b.content];
+    if (b.type !== "text") return [];
+    const lines = [...b.lines];
+    while (lines.length && lines[lines.length - 1]!.trim() === "") lines.pop();
+    if (!lines.length) continue;
+    const blank = lines.findLastIndex((l) => l.trim() === "");
+    return lines.slice(blank + 1);
   }
-  return null;
+  return [];
 }
 
 /** Every PR ledger on the page, in source order, inside component bodies
@@ -287,8 +292,7 @@ export function findLedgers(blocks: Block[]): Ledger[] {
     bs.forEach((b, i) => {
       if (b.type === "component") walk(b.children);
       else if (b.type === "table") {
-        const label = labelAbove(bs, i);
-        if (label !== null && opensWithLedgerLabel(label)) out.push(parseLedgerTable(b.headers, b.rows));
+        if (linesAbove(bs, i).some(opensWithLedgerLabel)) out.push(parseLedgerTable(b.headers, b.rows));
       }
     });
   };
@@ -325,9 +329,22 @@ export function pageLedgers(blocks: Block[], proposed = false): Ledger[] {
   return glance ? [glance] : [];
 }
 
+/** One row per PR over the given ledgers, in source order: when two ledgers
+ *  repeat a PR, the first row wins. */
+export function firstRowPerPr(ledgers: Ledger[]): LedgerRow[] {
+  const seen = new Set<number>();
+  const out: LedgerRow[] = [];
+  for (const l of ledgers) {
+    for (const r of l.rows) {
+      if (r.pr === null || seen.has(r.pr)) continue;
+      seen.add(r.pr);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
 /** PR number → state over the given ledgers; the first row naming a PR wins. */
 export function prStateMap(ledgers: Ledger[]): Map<number, PrState> {
-  const out = new Map<number, PrState>();
-  for (const l of ledgers) for (const r of l.rows) if (r.pr !== null && !out.has(r.pr)) out.set(r.pr, r.state);
-  return out;
+  return new Map(firstRowPerPr(ledgers).map((r) => [r.pr!, r.state]));
 }

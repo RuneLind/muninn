@@ -300,7 +300,7 @@ export function formatWebHtml(
         ...(linkTexts ? { linkText: (i: number) => linkTexts[i] ?? "" } : {}),
         proposed: opts?.proposedPlan === true,
       });
-      const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage);
+      const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis);
       rendered = view
         ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
             .filter((part) => part !== "")

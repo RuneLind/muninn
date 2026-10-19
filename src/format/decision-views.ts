@@ -16,7 +16,7 @@ import { anchorSlug } from "./query-block.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
 import { analyzeDecisionChains, CHAIN_LABELS, type ChainAnalysis, type DecisionChain } from "./decision-chain.ts";
-import { pageLedgers, type Ledger, type LedgerRow, type PrState } from "./pr-ledger.ts";
+import { firstRowPerPr, pageLedgers, type Ledger, type LedgerRow, type PrState } from "./pr-ledger.ts";
 
 /** The chain view draws at this many chains (plan O2). */
 export const CHAIN_VIEW_MIN = 3;
@@ -130,24 +130,30 @@ function square(r: LedgerRow, language: QuestionLanguage): string {
   return `<span class="dc-pr dc-s-${r.state}" role="img" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${r.pr}</span>`;
 }
 
-/** The PR strip: one square per drawing-ledger row, grouped by the first
- *  decision the row cites, in order of first appearance; "" under
- *  `STRIP_VIEW_MIN` rows. */
-export function prStripHtml(ledgers: Ledger[], language: QuestionLanguage): string {
-  const rows = ledgers.filter((l) => l.draws).flatMap((l) => l.rows.filter((r) => r.pr !== null));
+/** The PR strip: one square per PR over the drawing ledgers (the first row
+ *  wins), grouped by the first decision the row cites, else by the oldest
+ *  decision whose chain names that PR, in order of first appearance; "" under
+ *  `STRIP_VIEW_MIN` squares. A group whose decision the log lacks shows its
+ *  id unlinked. */
+export function prStripHtml(ledgers: Ledger[], language: QuestionLanguage, analysis: ChainAnalysis): string {
+  const rows = firstRowPerPr(ledgers.filter((l) => l.draws));
   if (rows.length < STRIP_VIEW_MIN) return "";
+  // Chains come newest first: walking them backwards leaves the oldest.
+  const chainOfPr = new Map<number, string>();
+  for (const c of [...analysis.chains].reverse()) for (const o of c.outputs) if (!chainOfPr.has(o.number)) chainOfPr.set(o.number, c.decision);
+  const inLog = new Set(analysis.chains.map((c) => c.decision));
   const groups = new Map<string, LedgerRow[]>();
   for (const r of rows) {
-    const key = r.decisions[0] ?? "";
+    const key = r.decisions[0] ?? chainOfPr.get(r.pr!) ?? "";
     let g = groups.get(key);
     if (!g) groups.set(key, (g = []));
     g.push(r);
   }
   const phases = [...groups]
     .map(([d, rs]) => {
-      const head = d
+      const head = d && inLog.has(d)
         ? `<a class="dc-go" href="#${anchorSlug(d)}" data-dc-ref="${escapeHtml(d)}">${escapeHtml(d)}</a>`
-        : escapeHtml(NO_DECISION[language]);
+        : escapeHtml(d || NO_DECISION[language]);
       return `<div class="dc-phase"><div class="dc-ph">${head}</div><div class="dc-prs">${rs.map((r) => square(r, language)).join("")}</div></div>`;
     })
     .join("");
