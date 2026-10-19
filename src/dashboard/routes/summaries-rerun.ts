@@ -984,7 +984,8 @@ export function registerSummariesRerunRoutes(
     // claim, and the run then wrote the document back. The frame count that
     // sized the budget needs the read and a deadline cannot be extended, so the
     // budget is the worst case, FRAME_BUDGET_MAX frames; a document over it is
-    // refused below. Every refusal after this point releases the claim.
+    // refused below. Every refusal after this point ABANDONS the claim: it wrote
+    // nothing, so a re-run whose claim lapsed before this one may still save.
     const claim = claims.claim(target.vertical.id, docId, deps.latchBudgetMs ?? rerunLatchBudgetMs(FRAME_BUDGET_MAX, bot));
     if (!claim) {
       return c.json(
@@ -1073,18 +1074,20 @@ export function registerSummariesRerunRoutes(
       prepared = await prepare();
     } catch (err) {
       // Nothing is running, so the slot must not stay held.
-      claims.release(claim);
+      claims.abandon(claim);
       throw err;
     }
     if (!prepared.ok) {
-      claims.release(claim);
+      claims.abandon(claim);
       return c.json({ error: prepared.error, code: prepared.code }, prepared.status);
     }
     const { vertical, stored, preset, url, category, title, videoId, frames, visualDetail, jobId } = prepared;
 
     // Fire and forget: the job streams over the vertical's own SSE seam, and the
     // route answers with the id the client attaches to. `runRerunJob` catches its
-    // own failures, so the `finally` runs on every path.
+    // own failures, so the `finally` runs on every path. `abandon`, not
+    // `release`: a job that failed before its save wrote nothing, and one that
+    // reached the save was pinned, which `abandon` treats as a release.
     void runRerunJob({
       vertical,
       jobId,
@@ -1102,7 +1105,7 @@ export function registerSummariesRerunRoutes(
       deps,
       claim,
     }).finally(() => {
-      claims.release(claim);
+      claims.abandon(claim);
     });
 
     log.info("Re-run started for {docId} as {kind} (job {jobId})", { docId, kind: preset.id, jobId });

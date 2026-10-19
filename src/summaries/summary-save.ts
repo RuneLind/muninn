@@ -390,11 +390,17 @@ export class SummarySaveClaims {
       timer: ReturnType<typeof setTimeout> | null;
       /** A POST is in flight on this claim ({@link pinForWrite}). */
       writing: boolean;
+      /** This claim was ever pinned for a write, so a POST may have landed. */
+      pinned: boolean;
+      /** The key's generation before this claim took it — what
+       *  {@link abandon} restores. */
+      prevGeneration: number | undefined;
     }
   >();
   /** Per key, the generation of the newest successful {@link claim}, drawn
    *  from one registry-wide counter. At most one number per key; deleted when a
-   *  HELD claim is released, kept when a lapsed claim is (bounded growth). */
+   *  HELD claim is released, put back to the previous one when a held claim is
+   *  abandoned, kept when a lapsed claim is (bounded growth). */
   private readonly latestGeneration = new Map<string, number>();
   private nextGeneration = 1;
   /** The claims that lapsed before anyone released them, with what a
@@ -447,6 +453,7 @@ export class SummarySaveClaims {
     if (this.held.has(key)) return null;
     const claim: SummarySaveClaim = { sourceId, docId, token: Symbol(key), registry: this };
     const generation = this.nextGeneration++;
+    const prevGeneration = this.latestGeneration.get(key);
     this.latestGeneration.set(key, generation);
     this.held.set(key, {
       token: claim.token,
@@ -455,6 +462,8 @@ export class SummarySaveClaims {
       deadline: Date.now() + budgetMs,
       timer: null,
       writing: false,
+      pinned: false,
+      prevGeneration,
     });
     this.arm(key, claim);
     return claim;
@@ -486,6 +495,7 @@ export class SummarySaveClaims {
       if (held.timer) clearTimeout(held.timer);
       held.timer = null;
       held.writing = true;
+      held.pinned = true;
       return "pinned";
     }
     const lapsed = this.lapsed.get(claim);
@@ -497,7 +507,7 @@ export class SummarySaveClaims {
       return "taken";
     }
     this.lapsed.delete(claim);
-    this.held.set(key, { token: claim.token, ...lapsed, timer: null, writing: true });
+    this.held.set(key, { token: claim.token, ...lapsed, timer: null, writing: true, pinned: true, prevGeneration: undefined });
     log.info("The save claim on {docId} ({sourceId}) had lapsed with no other writer — re-taken for the write", {
       docId: claim.docId,
       sourceId: claim.sourceId,
@@ -516,7 +526,9 @@ export class SummarySaveClaims {
     this.arm(key, claim);
   }
 
-  /** Release a claim; a no-op when it expired and someone else holds the key. */
+  /** Release a claim that wrote, or may have written, the document: the key's
+   *  generation is dropped, so a claim that lapsed before this one can no
+   *  longer re-take it. A no-op when it expired and someone else holds the key. */
   release(claim: SummarySaveClaim): void {
     this.lapsed.delete(claim);
     const key = this.key(claim.sourceId, claim.docId);
@@ -525,6 +537,29 @@ export class SummarySaveClaims {
     if (held.timer) clearTimeout(held.timer);
     this.held.delete(key);
     this.latestGeneration.delete(key);
+  }
+
+  /**
+   * Release a claim that wrote NOTHING — a refusal after the claim, a model
+   * call that failed before the save. The key's generation goes back to what it
+   * was before this claim took it, so a claim that lapsed before this one may
+   * still re-take the key and save: nothing newer than its read was written.
+   * A claim that was ever pinned for a write may have landed its POST, so for
+   * it this is a plain {@link release}.
+   */
+  abandon(claim: SummarySaveClaim): void {
+    this.lapsed.delete(claim);
+    const key = this.key(claim.sourceId, claim.docId);
+    const held = this.held.get(key);
+    if (!held || held.token !== claim.token) return;
+    if (held.pinned) {
+      this.release(claim);
+      return;
+    }
+    if (held.timer) clearTimeout(held.timer);
+    this.held.delete(key);
+    if (held.prevGeneration === undefined) this.latestGeneration.delete(key);
+    else this.latestGeneration.set(key, held.prevGeneration);
   }
 
   /** Drop every claim and its timer. Tests only. */

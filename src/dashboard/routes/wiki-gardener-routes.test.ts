@@ -1553,6 +1553,13 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  /** huginn's DELETE 404 when the source file is no longer on disk. */
+  const huginnGone404 = () =>
+    Response.json(
+      { detail: "Source file for document 'junk.md' not found in collection 'youtube-summaries'" },
+      { status: 404 },
+    );
+
   const del = async (body: unknown): Promise<Response> =>
     await app.request("/api/wiki/gardener/backlog-doc-delete?wiki=delbot", {
       method: "POST",
@@ -1799,7 +1806,9 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     // The degraded first delete: huginn moved the doc but the proposal step
     // failed. Pressing Delete again gets huginn's 404 — which must still clear
     // the drafts, or they stay approvable with no route left to remove them.
-    deleteResponse = () => new Response("not found", { status: 404 });
+    // huginn's own body for a source file that is no longer there — the one
+    // 404 that says the document is gone.
+    deleteResponse = huginnGone404;
     const before = JSON.stringify([...snapshots]);
     const res = await del({ collection: "youtube-summaries", id: "junk.md" });
     expect(res.status).toBe(404);
@@ -1821,6 +1830,32 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     expect(again.status).toBe(404);
     const againBody = (await again.json()) as { warning?: string };
     expect(againBody.warning).toContain("source proposals delete");
+  });
+
+  test("a huginn 404 that does not say the document is gone keeps the drafts written from it", async () => {
+    // The membership gate (the file exists, the index lags) and a huginn with
+    // no DELETE route both answer 404 for a document that still exists.
+    for (const res404 of [
+      () =>
+        Response.json(
+          {
+            detail:
+              "Document 'junk.md' is not indexed in collection 'youtube-summaries' (the file may exist under reader.basePath but be excluded from the collection); refusing to move it",
+          },
+          { status: 404 },
+        ),
+      () => Response.json({ detail: "Not Found" }, { status: 404 }),
+      () => new Response("not found", { status: 404 }),
+    ]) {
+      proposalCalls = [];
+      deleteResponse = res404;
+      const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(res.status).toBe(404);
+      expect(proposalCalls).toEqual([]);
+      const body = (await res.json()) as { proposals?: unknown; warning?: string };
+      expect(body.proposals).toBeUndefined();
+      expect(body.warning).toContain("did not confirm");
+    }
   });
 
   test("huginn 404 (id not in that collection) → 404, and neither snapshot set is touched", async () => {

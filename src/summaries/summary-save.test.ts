@@ -514,6 +514,55 @@ describe("a lapsed claim after a whole rival write", () => {
     claims.clear();
   });
 
+  test("a rival that saved and then ABANDONS still refuses the stale save: a pinned claim may have written", async () => {
+    // The re-run job lets go with `abandon` on every path; a job that reached
+    // its save must still move the generation on.
+    const claims = new SummarySaveClaims();
+    const disk: string[] = [];
+    const save = (claim: ReturnType<SummarySaveClaims["claim"]>, summary: string) =>
+      saveSummaryBody({
+        descriptor: requireSaveDescriptor("article"),
+        stored: readStoredCapture(ARTICLE),
+        docId: DOC_ID,
+        summary,
+        claim: claim!,
+        knowledgeApiUrl: "http://127.0.0.1:1",
+        ingest: async (o) => {
+          disk.push(String(o.body.summary));
+          return { ok: true, status: 200, data: { file_path: DOC_ID } };
+        },
+      });
+    const a = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const b = claims.claim("article", DOC_ID, 1_000);
+    expect((await save(b, "B's summary")).ok).toBe(true);
+    claims.abandon(b!);
+    const stale = await save(a, "A's stale summary");
+    expect(stale.ok ? "ok" : stale.code).toBe("in_flight");
+    expect(disk.map((d) => d.trim())).toEqual(["B's summary"]);
+    claims.clear();
+  });
+
+  test("a rival that abandons WITHOUT saving leaves the lapsed claim free to save", async () => {
+    const claims = new SummarySaveClaims();
+    const a = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const b = claims.claim("article", DOC_ID, 1_000)!;
+    claims.abandon(b);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A's summary",
+      claim: a!,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest: async () => ({ ok: true, status: 200, data: { file_path: DOC_ID } }),
+    });
+    expect(res.ok).toBe(true);
+    claims.clear();
+  });
+
   test("a lapsed claim the caller released does not save", async () => {
     const claims = new SummarySaveClaims();
     const calls: string[] = [];

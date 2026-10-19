@@ -936,9 +936,21 @@ const MAX_DISMISS_KEYS = 2000;
 /** Timeout for huginn's DELETE (it moves a file + enqueues reindexes, then returns). */
 const DELETE_TIMEOUT_MS = 20_000;
 
-/** How long a delete holds the summary save claim: huginn's DELETE plus slack
- *  for the DB bookkeeping after it. */
-const DELETE_CLAIM_BUDGET_MS = DELETE_TIMEOUT_MS + 10_000;
+/** How long a delete holds the summary save claim when it cannot release it:
+ *  huginn's DELETE timed out or failed in transport, so the move may still
+ *  land. huginn's handler is a stat, one index read and a file move, done in
+ *  milliseconds; a request past the 20 s client timeout is queued in its
+ *  worker pool or on a stalled disk. 5 min (15x the client timeout) keeps
+ *  re-runs out until such a move has landed; every definite answer releases
+ *  long before. */
+const DELETE_CLAIM_BUDGET_MS = 5 * 60_000;
+
+/** huginn's DELETE 404 when the source file is not on disk — the one 404 that
+ *  says the document is gone (`delete_document`, huginn
+ *  `main/routes/collections.py`). Its other 404s — the membership gate, an
+ *  unknown collection, a huginn without the route — name a document that may
+ *  still exist. */
+const HUGINN_SOURCE_GONE = /^Source file for document '.*' not found in collection '/s;
 
 /**
  * Per-bot backlog cache. The backlog (wiki URL sweep + 4 collection listings +
@@ -2046,10 +2058,16 @@ export function registerWikiGardenerRoutes(
           { method: "DELETE", timeoutMs: DELETE_TIMEOUT_MS },
         )) as Record<string, unknown>;
       } catch (err) {
-        // A 404 is also what a SECOND delete gets after the first one's proposal
-        // step failed, so the (idempotent) proposal cleanup runs again here. The
-        // snapshot prunes do not: a 404 can name an id that was never listed.
-        if (err instanceof KnowledgeApiError && err.upstreamStatus === 404) {
+        // A source-gone 404 is also what a SECOND delete gets after the first
+        // one's proposal step failed, so the (idempotent) proposal cleanup runs
+        // again here — only on that 404, since every other one may name a live
+        // document whose drafts are still wanted. The snapshot prunes never run
+        // here: a 404 can name an id that was never listed.
+        if (
+          err instanceof KnowledgeApiError &&
+          err.upstreamStatus === 404 &&
+          HUGINN_SOURCE_GONE.test(err.upstreamDetail ?? "")
+        ) {
           return { refused: err, proposals: await deleteProposals(), failures };
         }
         return { refused: err };
@@ -2083,25 +2101,39 @@ export function registerWikiGardenerRoutes(
     // id, `x-article` for X video). While another writer holds it the answer is
     // 409, since a re-run in flight would write the deleted document back; and
     // taking it moves the key's generation, so a re-run whose claim lapsed can
-    // no longer re-take it and save. Released before the client's reindex poll.
+    // no longer re-take it and save. How it lets go depends on what huginn said:
+    // a move → `release` (the generation moves on); a definite refusal, or the
+    // gardener mutex → `abandon` (nothing was deleted, so a lapsed re-run may
+    // still save); no answer → neither, because the move may still land, and
+    // the claim keeps re-runs out until it lapses at DELETE_CLAIM_BUDGET_MS.
     const sourceId = SUMMARY_SOURCES.find((s) => s.collection === collection)!.id;
     const claim = summarySaveClaims.claim(sourceId, id, DELETE_CLAIM_BUDGET_MS);
     if (!claim) {
       return c.json(
         {
-          error: "A re-run or fact-check save is writing this document. Wait for it to finish, then delete.",
+          error:
+            "A re-run, fact-check save or earlier delete is still in flight on this document. Wait for it to finish, then delete.",
           code: "in_flight",
         },
         409,
       );
     }
     let done: Awaited<ReturnType<typeof work>>;
+    let letGo: "release" | "abandon" | "keep" = "release";
     try {
       const run = runExclusive(target.bot.name, work);
-      if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
+      if (run === null) {
+        letGo = "abandon";
+        return c.json({ error: "a gardener run is in flight" }, 409);
+      }
       done = await run;
+      if ("refused" in done) {
+        const answered = done.refused instanceof KnowledgeApiError && done.refused.upstreamStatus !== undefined;
+        letGo = answered ? "abandon" : "keep";
+      }
     } finally {
-      summarySaveClaims.release(claim);
+      if (letGo === "release") summarySaveClaims.release(claim);
+      else if (letGo === "abandon") summarySaveClaims.abandon(claim);
     }
 
     if ("refused" in done) {
@@ -2115,6 +2147,16 @@ export function registerWikiGardenerRoutes(
         key,
         error: message,
       });
+      if (upstream === 404 && !done.proposals) {
+        return c.json(
+          {
+            error: "that doc is not in that collection",
+            warning:
+              "Any wiki drafts written from this document were kept: huginn did not confirm the document is gone.",
+          },
+          404,
+        );
+      }
       if (upstream === 404) {
         const removed = done.proposals?.deleted.length ?? 0;
         return c.json(
@@ -2132,6 +2174,14 @@ export function registerWikiGardenerRoutes(
               : {}),
           },
           404,
+        );
+      }
+      if (upstream === undefined) {
+        return c.json(
+          {
+            error: `huginn did not answer the delete (${message}). The delete may still complete; reload in a few minutes before retrying.`,
+          },
+          502,
         );
       }
       return c.json({ error: `huginn refused the delete: ${message}` }, 502);

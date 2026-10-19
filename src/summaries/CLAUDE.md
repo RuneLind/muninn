@@ -194,18 +194,39 @@ is simply gone and which one loses is decided by the network. **The claim is
 taken BEFORE the document is read** — after the body-only refusals (415, 400s,
 501) and the bot lookup, before any huginn read — and every refusal after it
 (`not_found`, `no_transcript`, `bad_kind`, the preflight, `too_many_frames`,
-`frames_unsupported`) releases it; a run releases it in a `finally` on the job.
+`frames_unsupported`) lets it go; a run lets it go in a `finally` on the job.
 Claiming after the read left a window in which a Delete removed the document
 between the read and the claim, and the run wrote it back.
+
+**Two ways to let go: `release` and `abandon`.** `release` is for a claimant
+that wrote (or deleted) the document: the key's generation is dropped, so a
+claim that lapsed before it can no longer save. `abandon` is for one that wrote
+NOTHING — every re-run refusal above, a job whose model call failed before the
+save, a Delete refused by the gardener mutex or by a definite huginn answer: the
+generation goes back to what it was before the claim, so a re-run whose claim
+lapsed still saves and its model spend is not lost. A claim that was ever
+pinned for a write may have landed its POST, so `abandon` on it is a `release`
+— which is why the re-run job's `finally` can call `abandon` on every path.
 
 **The `/summaries` Delete is a writer too** (`backlog-doc-delete`,
 `wiki-gardener-routes.ts`): it maps the collection to its SHELF id through
 `SUMMARY_SOURCES` (`x-article` for X video, never the spec id `x-video`),
-claims for `DELETE_CLAIM_BUDGET_MS` (huginn's 20 s DELETE plus 10 s), answers
-**409 `in_flight`** while a re-run or fact-check save holds the document, and
-releases before the client's reindex poll. Its claim also moves the key's
-generation, so a re-run whose claim lapsed during the model call cannot re-take
-it and write the deleted document back (`summary-save-delete-race-db.test.ts`).
+claims for `DELETE_CLAIM_BUDGET_MS` (5 min), and answers **409 `in_flight`**
+while a re-run, fact-check save or earlier delete holds the document. On a move
+it releases before the client's reindex poll, and the moved generation means a
+re-run whose claim lapsed during the model call cannot re-take it and write the
+deleted document back (`summary-save-delete-race-db.test.ts`). On a definite
+refusal (huginn 4xx/5xx, the gardener mutex) it abandons. When huginn's DELETE
+gets NO answer — the 20 s client timeout or a transport failure — it lets go
+of nothing: huginn may still finish the move, and a re-run claimed right after
+would read the still-present file and write the deleted document back. The
+claim lapses at the 5-minute budget instead (15x the client timeout; huginn's
+move is a stat, an index read and a file rename), and the 502 says the delete
+may still complete. A huginn 404 re-runs the proposal cleanup only when its
+`detail` is the source-file-gone one (`Source file for document '…' not found in
+collection '…'`): the membership gate's 404 (the file exists, the index lags), an
+unknown collection and a huginn without the route all name a document that may
+still exist, so its drafts are kept and the 404 says so in `warning`.
 
 "Settles" is the connector's promise and not this module's, though: `runRerunJob`
 awaits `deps.oneShot`, and a call that never settles pinned the document at 409

@@ -36,7 +36,7 @@ import {
   __setBotsForTest,
 } from "./wiki-gardener-routes.ts";
 import { defaultSummariesFactcheckDeps, registerSummariesFactcheckRoutes } from "./summaries-factcheck.ts";
-import { __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
+import { __resetGardenerMutexForTest, runExclusive } from "../../gardener/backlog.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import type { BotConfig } from "../../bots/config.ts";
@@ -69,6 +69,9 @@ const BOT = { name: "racebot", dir: "/nowhere", connector: "claude-cli" } as unk
 /** huginn, faked: the file, the DELETE count, and the ingest POSTs. */
 let docRaw: string | null;
 let deleteCalls: number;
+/** How the fake huginn answers a DELETE: move the file, a definite 500, or a
+ *  transport failure (the request may or may not have reached huginn). */
+let deleteMode: "move" | "500" | "transport";
 let ingests: Array<Record<string, unknown>>;
 /** Releases the gated model call. */
 let releaseModel: () => void;
@@ -121,11 +124,11 @@ function mount(over: Partial<SummariesRerunDeps> = {}): void {
   });
 }
 
-async function rerun(): Promise<{ status: number; json: Record<string, unknown> }> {
+async function rerun(extra: Record<string, unknown> = {}): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await app.request("/api/summaries/rerun", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ source: "youtube", docId: DOC_ID }),
+    body: JSON.stringify({ source: "youtube", docId: DOC_ID, ...extra }),
   });
   return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> };
 }
@@ -158,6 +161,7 @@ beforeEach(async () => {
   await Bun.write(path.join(root, "notes.md"), "# Notes\n");
   docRaw = RAW;
   deleteCalls = 0;
+  deleteMode = "move";
   ingests = [];
   onRead = null;
   modelGate = new Promise<void>((resolve) => {
@@ -170,6 +174,8 @@ beforeEach(async () => {
   // empty listing.
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === "DELETE") {
+      if (deleteMode === "500") return Response.json({ detail: "Could not move source file: EIO" }, { status: 500 });
+      if (deleteMode === "transport") throw new TypeError("fetch failed");
       if (docRaw === null) {
         return Response.json({ detail: "not a member" }, { status: 404 });
       }
@@ -269,5 +275,104 @@ describe("summary re-run vs Delete", () => {
     expect(started.status).toBe(200);
     expect(deleteCalls).toBe(0);
     expect(docRaw).toBe(RAW);
+  });
+
+  // A claimant that wrote NOTHING must leave the key's generation as it found
+  // it: otherwise a lapsed re-run that nobody wrote over is refused at its save
+  // and its model spend is lost. Each test is: a 30 ms re-run lapses, a second
+  // claimant is refused or fails without writing, then the first run's save.
+  async function lapsedRun(): Promise<void> {
+    mount({ latchBudgetMs: 30 });
+    expect((await rerun()).status).toBe(200);
+    await Bun.sleep(60);
+    expect(summarySaveClaims.isHeld("youtube", DOC_ID)).toBe(false);
+  }
+
+  test("a delete refused by the gardener mutex does not refuse a lapsed re-run's save", async () => {
+    await lapsedRun();
+    let releaseMutex!: () => void;
+    const holder = runExclusive("racebot", () => new Promise<void>((r) => (releaseMutex = r)));
+    expect(holder).not.toBeNull();
+    const refused = await del();
+    expect(refused.status).toBe(409);
+    expect(deleteCalls).toBe(0);
+    releaseMutex();
+    await holder;
+
+    releaseModel();
+    await settle();
+    expect(ingests).toHaveLength(1);
+  });
+
+  test("a delete huginn answered with a 500 (nothing moved) does not refuse a lapsed re-run's save", async () => {
+    await lapsedRun();
+    deleteMode = "500";
+    const refused = await del();
+    expect(refused.status).toBe(502);
+    expect(docRaw).toBe(RAW);
+
+    releaseModel();
+    await settle();
+    expect(ingests).toHaveLength(1);
+  });
+
+  test("a second re-run refused after its claim (bad_kind) does not refuse the lapsed run's save", async () => {
+    await lapsedRun();
+    const refused = await rerun({ kind: "no-such-kind" });
+    expect(refused.status).toBe(400);
+    expect(refused.json.code).toBe("bad_kind");
+
+    releaseModel();
+    await settle();
+    expect(ingests).toHaveLength(1);
+  });
+
+  test("a second re-run whose model call fails before any write does not refuse the lapsed run's save", async () => {
+    let calls = 0;
+    mount({
+      latchBudgetMs: 30,
+      oneShot: (async () => {
+        calls++;
+        if (calls > 1) throw new Error("model down");
+        await modelGate;
+        return { result: "CATEGORY: ai/general\n\nSUMMARY:\n\nA fresh summary.", outputTokens: 1 };
+      }) as unknown as SummariesRerunDeps["oneShot"],
+    });
+    expect((await rerun()).status).toBe(200);
+    await Bun.sleep(60);
+    expect((await rerun()).status).toBe(200);
+    await settle();
+    expect(calls).toBe(2);
+    expect(summarySaveClaims.isHeld("youtube", DOC_ID)).toBe(false);
+
+    releaseModel();
+    await settle();
+    expect(ingests).toHaveLength(1);
+  });
+
+  test("a delete whose huginn call failed in transport keeps the claim: a re-run right after is 409", async () => {
+    // The DELETE may still land on huginn's side; a re-run that read the
+    // still-present file would write the deleted document back.
+    mount();
+    deleteMode = "transport";
+    const failed = await del();
+    expect(failed.status).toBe(502);
+    expect(summarySaveClaims.isHeld("youtube", DOC_ID)).toBe(true);
+
+    const blocked = await rerun();
+    expect(blocked.status).toBe(409);
+    expect(blocked.json.code).toBe("in_flight");
+    expect(ingests).toHaveLength(0);
+    expect(String(failed.json.error)).toContain("may still complete");
+  });
+
+  test("a transport-failed delete still refuses a lapsed re-run's save (the delete may have happened)", async () => {
+    await lapsedRun();
+    deleteMode = "transport";
+    expect((await del()).status).toBe(502);
+
+    releaseModel();
+    await settle();
+    expect(ingests).toHaveLength(0);
   });
 });
