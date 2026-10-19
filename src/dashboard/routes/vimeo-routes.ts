@@ -449,8 +449,8 @@ export function registerVimeoRoutes(
     // Slides (PR 4): a BOOLEAN, absent ⇒ off (the plan's default). Validated
     // like kind/lang — before oEmbed, a 400 with a code the card renders — and
     // then PRE-FLIGHTED against the summarizer's connector: frames are read by
-    // the model through `extraDirs`, which only the Claude connectors can
-    // express, so a bot that cannot read files answers 503 `frames_unsupported`
+    // the model through a fenced Read (`{ read: [workDir] }`), which only the
+    // Claude connectors can express, so a bot that cannot read files answers 503 `frames_unsupported`
     // BEFORE a job exists (the TikTok precedent) rather than silently
     // summarizing without the slides the reader ticked.
     if (body.frames !== undefined && typeof body.frames !== "boolean") {

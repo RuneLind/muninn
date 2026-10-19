@@ -106,6 +106,7 @@ interface Recorded {
   prompts: Array<{
     system: string;
     user: string;
+    toolSurface: unknown;
     extraDirs?: string[];
     url: string;
     title: string;
@@ -146,6 +147,7 @@ function makeDeps(
       rec.prompts.push({
         system: o.systemPrompt as string,
         user: o.prompt as string,
+        toolSurface: o.toolSurface,
         ...(o.extraDirs ? { extraDirs: o.extraDirs as string[] } : {}),
         url: o.url as string,
         title: o.title as string,
@@ -350,6 +352,8 @@ describe("the ingest body", () => {
     expect(body.summary).toBe("A fresh summary.");
     // The stored language wins: a re-run never re-resolves `talk`.
     expect(rec.prompts[0]!.system).toContain("bokm");
+    // No kept frames: the replay runs with no tools at all.
+    expect(rec.prompts[0]!.toolSurface).toBe("none");
   });
   test("a QUOTED value that looks numeric is re-sent as a STRING, not a number", async () => {
     // The double-decode trap: the reader decodes once for the fields the route
@@ -791,7 +795,9 @@ describe("the frames listing", () => {
     // Both frames were offered to the model…
     expect(rec.prompts[0]!.user).toContain(join(dir, "30.jpg"));
     expect(rec.prompts[0]!.user).toContain(join(dir, "60.jpg"));
-    expect(rec.prompts[0]!.extraDirs).toEqual([dir]);
+    // …through a Read fenced to the kept frames dir, never the bot's surface.
+    expect(rec.prompts[0]!.toolSurface).toEqual({ read: [dir] });
+    expect(rec.prompts[0]!.extraDirs).toBeUndefined();
     // …the quote of the one it used survived the tail…
     expect(String(rec.ingests[0]!.body.summary)).toContain(quote);
     // …and NOTHING was pruned: the unquoted frame is still there, and the
@@ -1575,6 +1581,7 @@ describe("the single-flight claim is bounded", () => {
         rec.prompts.push({
           system: o.systemPrompt as string,
           user: o.prompt as string,
+          toolSurface: o.toolSurface,
           url: o.url as string,
           title: o.title as string,
           source: o.source as string,

@@ -367,6 +367,12 @@ export function __setClaudeCliVersionForTest(version: string | null | undefined)
   cliVersion = undefined;
 }
 
+/** Whether the installed CLI has `--restricted`. */
+export async function restrictedCliAvailable(): Promise<boolean> {
+  const version = await installedClaudeCliVersion();
+  return version !== null && compareVersions(version, MIN_RESTRICTED_CLI_VERSION) >= 0;
+}
+
 /** Throw unless the installed CLI has `--restricted`, which a fenced surface needs. */
 export async function assertRestrictedCliAvailable(surface: FencedToolSurface): Promise<void> {
   const version = await installedClaudeCliVersion();

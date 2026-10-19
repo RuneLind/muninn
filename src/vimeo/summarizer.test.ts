@@ -38,6 +38,7 @@ mock.module("../ai/one-shot.ts", () => ({
       systemPrompt?: string;
       thinkingMaxTokens?: number;
       extraDirs?: string[];
+      toolSurface?: unknown;
       timeoutMs?: number;
       onProgress?: (e: { type: string; text: string }) => void;
     },
@@ -47,6 +48,7 @@ mock.module("../ai/one-shot.ts", () => ({
     lastRunModel = b.model;
     lastThinking = opts?.thinkingMaxTokens;
     lastExtraDirs = opts?.extraDirs;
+    lastToolSurface = opts?.toolSurface;
     lastTimeoutMs = opts?.timeoutMs;
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
@@ -58,6 +60,7 @@ mock.module("../ai/one-shot.ts", () => ({
 let lastRunModel: string | undefined;
 let lastThinking: number | undefined;
 let lastExtraDirs: string[] | undefined;
+let lastToolSurface: unknown;
 let lastTimeoutMs: number | undefined;
 let sourceDraftCalls: Array<Record<string, unknown>> = [];
 let sourceDraftThrows: Error | null = null;
@@ -218,6 +221,7 @@ beforeEach(() => {
   lastRunModel = undefined;
   lastThinking = undefined;
   lastExtraDirs = undefined;
+  lastToolSurface = undefined;
   lastTimeoutMs = undefined;
   manifestFetches = [];
   extractCalls = [];
@@ -989,7 +993,7 @@ let lastHarvestOpts: { awaitManifestMs?: number; awaitManifestNoCaptionsMs?: num
 let extractCalls: Array<{ workDir: string; durationSec: number; manifestUrl: string }> = [];
 let framesRoot = "";
 
-test("frames ON: extracting_frames runs between harvest and summarize, the frame list rides the USER prompt, extraDirs is the work dir", async () => {
+test("frames ON: extracting_frames runs between harvest and summarize, the frame list rides the USER prompt, the work dir is the one Read dir", async () => {
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   const statuses: string[] = [];
   subscribe(jobId, (e) => { if (e.type === "status") statuses.push(e.status); });
@@ -1016,7 +1020,8 @@ test("frames ON: extracting_frames runs between harvest and summarize, the frame
   expect(lastPrompt).not.toContain("## Visual reference");
   // The SYSTEM prompt says nothing about frames — a frames-off capture's prompt is unchanged.
   expect(lastSystemPrompt).not.toContain("Slide");
-  expect(lastExtraDirs).toEqual([extractCalls[0]!.workDir]);
+  expect(lastToolSurface).toEqual({ read: [extractCalls[0]!.workDir] });
+  expect(lastExtraDirs).toBeUndefined();
   expect(lastTimeoutMs).toBe(600_000); // 3 frames: the floor
   // The harvest is told to WAIT for the manifest: measured on the first live
   // frames capture, the captions arrive before the player asks for its
@@ -1024,13 +1029,14 @@ test("frames ON: extracting_frames runs between harvest and summarize, the frame
   expect(lastHarvestOpts?.awaitManifestMs).toBe(10_000);
 });
 
-test("frames OFF: no manifest fetch, no extraction, no extraDirs, prompt byte-identical to before", async () => {
+test("frames OFF: no manifest fetch, no extraction, no tools, prompt byte-identical to before", async () => {
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId, { ...FRAMES_META, frames: false }, config, bot, framesDeps());
   expect(lastHarvestOpts?.awaitManifestMs).toBe(0); // frames off: close on the captions
   expect(manifestFetches).toEqual([]);
   expect(extractCalls).toEqual([]);
   expect(lastExtraDirs).toBeUndefined();
+  expect(lastToolSurface).toBe("none");
   expect(lastPrompt).not.toContain("Slide frames");
 });
 
@@ -1068,6 +1074,7 @@ test("frames requested but the harvest saw no manifest: transcript-only, one war
   expect(getJob(jobId)!.status).toBe("complete");
   expect(warns.some((w) => /frames requested but the player requested no manifest/.test(String(w.message)))).toBe(true);
   expect(lastExtraDirs).toBeUndefined();
+  expect(lastToolSurface).toBe("none");
 });
 
 test("frame extraction failing degrades to transcript-only with a warn, never an error job", async () => {
@@ -1078,6 +1085,7 @@ test("frame extraction failing degrades to transcript-only with a warn, never an
   expect(getJob(jobId)!.status).toBe("complete");
   expect(warns.some((w) => /frame extraction failed — transcript only/.test(String(w.message)))).toBe(true);
   expect(lastExtraDirs).toBeUndefined();
+  expect(lastToolSurface).toBe("none");
   expect(lastPrompt).not.toContain("Slide frames");
 });
 

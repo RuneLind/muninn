@@ -149,7 +149,7 @@ export interface VimeoJobMeta {
   readonly lang: CaptureLang;
   /**
    * Slides on: pull one 720p frame per cadence tick through the media seam,
-   * hand them to the model via `extraDirs`, and let the summary quote them
+   * let the model Read them (`toolSurface: { read: [workDir] }`), and let the summary quote them
    * inline (v2 PR 4). The route pre-flights the connector's
    * `supportsExtraDirs` and 503s BEFORE a job exists, so a job that gets here
    * with `frames: true` runs on a connector that can read files.
@@ -612,7 +612,8 @@ export async function summarizeVimeo(
     };
 
     const result = await runCaptureOneShot({
-      toolSurface: "bot",
+      // Read on the frame dir when there are frames; no tools at all otherwise.
+      toolSurface: frames.length > 0 ? { read: [workDir] } : "none",
       source: "vimeo",
       jobId,
       title: meta.title,
@@ -627,9 +628,6 @@ export async function summarizeVimeo(
       botConfig: runBot,
       attachRun,
       onProgress,
-      // `--add-dir` only when there is something to read: an empty extraDirs
-      // would still flip the connector's file-access mode for nothing.
-      ...(frames.length > 0 ? { extraDirs: [workDir] } : {}),
       timeoutMs: summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
       ...(captureThinkingFor(meta.preset) === null ? { thinkingMaxTokens: null } : {}),
       extraTraceAttrs: {

@@ -66,6 +66,7 @@ let lastOpts:
       systemPrompt?: string;
       timeoutMs?: number;
       extraDirs?: string[];
+      toolSurface?: unknown;
       thinkingMaxTokens?: number | null;
     }
   | undefined;
@@ -144,6 +145,7 @@ mock.module("../ai/one-shot.ts", () => ({
       systemPrompt?: string;
       timeoutMs?: number;
       extraDirs?: string[];
+      toolSurface?: unknown;
       thinkingMaxTokens?: number | null;
       onProgress?: (e: { type: string; text: string }) => void;
     },
@@ -592,13 +594,22 @@ for (const v of VERTICALS) {
       expect(extractOpts?.frameTimeoutMs).toBe(v.maxDurationSeconds * 500);
     });
 
-    test("passes the work dir as extraDirs and raises the timeout to >=600s", async () => {
+    test("a capture whose frame extraction failed declares no tools at all", async () => {
+      extractShouldThrow = true;
+      await capture(v.title, v.canonicalUrl);
+      expect(lastOpts!.toolSurface).toBe("none");
+      expect(lastOpts!.extraDirs).toBeUndefined();
+    });
+
+    test("declares a Read fence on the work dir and raises the timeout to >=600s", async () => {
       const jobId = await capture(v.title, v.canonicalUrl);
 
       expect(lastOpts).toBeDefined();
-      // The tmp work dir is handed to executeOneShot as extraDirs (→ CLI --add-dir).
+      // The tmp work dir is the one directory the model may Read (→ CLI
+      // --restricted --tools Read --add-dir), never the bot's own surface.
       const workDir = join(tmpdir(), `${v.workDirPrefix}${jobId}`);
-      expect(lastOpts!.extraDirs).toEqual([workDir]);
+      expect(lastOpts!.toolSurface).toEqual({ read: [workDir] });
+      expect(lastOpts!.extraDirs).toBeUndefined();
       expect(downloadCalls[0]!.workDir).toBe(workDir);
       expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
       // The summarize budget is computed from the REAL frame count (2 here), not

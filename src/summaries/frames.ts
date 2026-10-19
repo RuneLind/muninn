@@ -46,7 +46,7 @@
  * budget, where a raised ceiling stayed inert behind a second literal.
  *
  * Where frames live: extraction writes into the job's WORK dir (which the model
- * reads via `extraDirs`); after the summary is written, only the frames the
+ * reads through a `{ read: [workDir] }` tool surface); after the summary is written, only the frames the
  * summary REFERENCES are copied to `~/.muninn/frames/<source>/<id>/<sec>.jpg`
  * ({@link keepReferencedFrames}) — that is what `GET /api/frames/...` serves
  * (`src/dashboard/routes/frames-routes.ts`) — and the work dir is deleted with

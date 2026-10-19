@@ -425,11 +425,12 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
   test('"none": no built-ins, no MCP server at all', async () => {
     await driveCapture(driveBot(botDir, { connector: "claude-cli" }), "none");
     const { args, cwd } = spawned[0]!;
-    expect(cwd).toBe(botDir);
+    // No tools, and on a CLI with --restricted no user hooks or CLAUDE.md either.
+    expect(cwd).toBe(join(agentRoot, ".fenced"));
     expect(flagValues(args, "--tools")).toEqual([""]);
     expect(args).toContain("--strict-mcp-config");
     expect(args).not.toContain("--mcp-config");
-    expect(args).not.toContain("--restricted");
+    expect(args).toContain("--restricted");
   });
 
   test("{ read }: --restricted, Read only, the dirs added, an empty agent home as cwd", async () => {
@@ -539,9 +540,11 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
       await expect(driveCapture(driveBot(botDir, { connector: "claude-cli" }), { read: [framesDir] })).rejects.toThrow(/agent home/);
       await expect(driveCapture(driveBot(botDir, { connector: "claude-cli" }), { web: true })).rejects.toThrow(/agent home/);
       expect(spawned).toHaveLength(0);
-      // An unfenced run keeps running in the bot folder.
+      // A tool-less run has nothing to expose, so it falls back to the bot folder.
       await driveCapture(driveBot(botDir, { connector: "claude-cli" }), "none");
       expect(spawned).toHaveLength(1);
+      expect(spawned[0]!.cwd).toBe(botDir);
+      expect(spawned[0]!.args).not.toContain("--restricted");
     } finally {
       chmodSync(readOnly, 0o700);
       process.env.MUNINN_AGENT_CWD = agentRoot;

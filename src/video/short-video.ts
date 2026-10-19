@@ -228,13 +228,11 @@ export async function summarizeShortVideo(
       return;
     }
 
-    // 4. Summarize with Claude. Via executeOneShot's opts we (a) grant Read
-    //    access to the tmp frame dir via `extraDirs` → CLI `--add-dir`
-    //    (non-interactive claude auto-denies paths outside the bot dir
-    //    otherwise), and (b) raise the timeout — the multi-turn frame-reading
-    //    session easily outruns the default 120s. `extraDirs` is CLI-only; both
-    //    routes pre-flight the connector's supportsExtraDirs capability before
-    //    kicking this expensive job.
+    // 4. Summarize with Claude. The tool surface grants Read on the tmp frame
+    //    dir and nothing else (no Bash, no bot folder, no MCP), and the timeout
+    //    is raised — the multi-turn frame-reading session easily outruns the
+    //    default 120s. `{ read }` needs supportsExtraDirs; both routes
+    //    pre-flight that before kicking this expensive job.
     updateStatus(jobId, "summarizing");
 
     const ingestTitle = title !== url ? title : dl.title || canonicalUrl;
@@ -265,7 +263,8 @@ export async function summarizeShortVideo(
     };
 
     const result = await runCaptureOneShot({
-      toolSurface: "bot",
+      // Read on the frame dir when there are frames; no tools at all otherwise.
+      toolSurface: frames.length > 0 ? { read: [workDir] } : "none",
       source: spec.id,
       jobId,
       title: ingestTitle,
@@ -278,7 +277,6 @@ export async function summarizeShortVideo(
       botConfig: captureBotConfigFor(botConfig, preset),
       attachRun,
       onProgress,
-      extraDirs: [workDir],
       timeoutMs: summarizeTimeoutFor(frames.length, botConfig.timeoutMs ?? config.claudeTimeoutMs),
       // The bot's OWN thinking budget, on every kind — this vertical's answer
       // since before the picker existed, and unchanged by it.

@@ -251,7 +251,7 @@ class TwoPassBudgetError extends Error {
 export interface SummarizeVideoOptions {
   /**
    * Slides on: probe, download a ≤720p video-only rendition, pull one frame per
-   * cadence tick and hand them to the model via `extraDirs` (v2 PR 2). Off by
+   * cadence tick and let the model Read them (`toolSurface: { read: [workDir] }`). Off by
    * default, so every existing caller is byte-identical. The ROUTE pre-flights
    * the connector's `supportsExtraDirs` and 503s before a job exists, so a job
    * arriving here with `frames: true` runs on a connector that can read files —
@@ -337,10 +337,10 @@ export async function summarizeVideo(
   // TWO roots, and the split is what keeps a 90 MB mp4 and 350 scan thumbnails
   // out of the model's reach.
   //
-  // `workDir` is what the SUMMARY call is handed as `--add-dir`: the re-grabbed
+  // `workDir` is the one dir the SUMMARY call may Read: the re-grabbed
   // (or cadence) frames, nothing else. `mediaDir` is the downloaded video, the
   // scan's intermediates and the contact sheets — one subdirectory of it goes to
-  // the selection pass and the root itself is named in no `extraDirs` — the
+  // the selection pass and the root itself is in no Read surface — the
   // video used to live in the dir the turn could read, which is why it had to be
   // unlinked the instant ffmpeg was done with it. On the dense path it cannot
   // be: the re-grab happens AFTER a model call, so the file has to survive one.
@@ -353,12 +353,12 @@ export async function summarizeVideo(
   /**
    * The contact sheets, and the ONLY thing the selection pass is given.
    *
-   * Under `mediaDir`, so that `workDir` — the dir the SUMMARY call is handed as
-   * `--add-dir` — holds the frames and nothing else. A sheet dir inside it would
+   * Under `mediaDir`, so that `workDir` — the dir the SUMMARY call may Read —
+   * holds the frames and nothing else. A sheet dir inside it would
    * put ten contact sheets of a scan in front of the second pass, and in front
    * of a CADENCE fallback that was never told about a scan at all. `mediaDir`
-   * itself is still named in no `extraDirs`; this one subdirectory of it is
-   * handed to the selection pass alone.
+   * itself is in no Read surface; this one subdirectory of it is the selection
+   * pass's `{ read }` dir alone.
    */
   const selectDir = join(mediaDir, "select");
   // The ONE url this capture states, built from the id the route validated.
@@ -672,7 +672,12 @@ export async function summarizeVideo(
             updateStatus(jobId, "selecting_frames");
             const startedAt = Date.now();
             const picked = await runCaptureOneShot({
-              toolSurface: "bot",
+              // Read on the sheets and NOTHING else. The re-grabbed frames do
+              // not exist yet, and the video sits BESIDE this directory rather
+              // than inside it (`mediaDir/<file>.mp4` against
+              // `mediaDir/select/`), so this is the one call in the job that can
+              // reach neither.
+              toolSurface: { read: [selectDir] },
               source: "youtube",
               jobId,
               title,
@@ -696,12 +701,6 @@ export async function summarizeVideo(
               // No `onProgress`: this pass answers with JSON, and streaming it
               // into the job's text would put a manifest on the reader's card.
               // The status is the whole progress signal it has.
-              //
-              // The sheets and NOTHING else. The re-grabbed frames do not exist
-              // yet, and the video sits BESIDE this directory rather than inside
-              // it (`mediaDir/<file>.mp4` against `mediaDir/select/`), so this is
-              // the one call in the job that can reach neither.
-              extraDirs: [selectDir],
               timeoutMs: selectionTimeoutFor(prepared.sheets.length),
               // ⚠️ Only the THINKING budget is capped here. The MODEL is the
               // kind's — `runBot`, so `deep` runs this pass on opus too, which is
@@ -925,7 +924,9 @@ export async function summarizeVideo(
     };
 
     const result = await runCaptureOneShot({
-      toolSurface: "bot",
+      // Read on the frame dir when there are frames; no tools at all otherwise.
+      // Without Read on that dir the slides vanish from the summary silently.
+      toolSurface: frames.length > 0 ? { read: [workDir] } : "none",
       source: "youtube",
       jobId,
       title,
@@ -941,9 +942,6 @@ export async function summarizeVideo(
       botConfig: runBot,
       attachRun,
       onProgress,
-      // `--add-dir` only when there is something to read: an empty extraDirs
-      // would still flip the connector's file-access mode for nothing.
-      ...(frames.length > 0 ? { extraDirs: [workDir] } : {}),
       // On the dense path this is what is LEFT of the whole two-pass budget the
       // job announced; everywhere else it is the single call's own budget, as
       // before.

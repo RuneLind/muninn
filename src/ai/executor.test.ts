@@ -21,6 +21,7 @@ mock.module("./result-parser.ts", () => ({
 }));
 
 const { executeClaudePrompt } = await import("./executor.ts");
+const { __setClaudeCliVersionForTest } = await import("./tool-surface.ts");
 
 describe("executeClaudePrompt", () => {
   test("constructs correct CLI arguments", async () => {
@@ -256,10 +257,11 @@ describe("executeClaudePrompt", () => {
     } as any);
 
     try {
+      __setClaudeCliVersionForTest("2.1.304");
       const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
       await executeClaudePrompt("test", config, { name: "testbot", dir, toolsDisabled: true } as any);
 
-      const [args] = spawnSpy.mock.calls[0]! as unknown as [string[]];
+      const [args, opts] = spawnSpy.mock.calls[0]! as unknown as [string[], { cwd: string }];
       expect(args).toContain("--strict-mcp-config");
       expect(args).not.toContain("--mcp-config");
       const i = args.indexOf("--tools");
@@ -267,7 +269,39 @@ describe("executeClaudePrompt", () => {
       // `--tools ""` is the CLI's own spelling of "no built-in tools".
       expect(args[i + 1]).toBe("");
       expect(i).toBeLessThan(args.indexOf("--"));
+      // --restricted keeps the user's hooks and CLAUDE.md out; the empty agent
+      // home keeps the bot folder's CLAUDE.md out.
+      expect(args).toContain("--restricted");
+      expect(args.indexOf("--restricted")).toBeLessThan(args.indexOf("--"));
+      expect(opts.cwd).not.toBe(dir);
+      expect(opts.cwd.endsWith(".fenced")).toBe(true);
     } finally {
+      __setClaudeCliVersionForTest(undefined);
+      spawnSpy.mockRestore();
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("toolsDisabled on a CLI without --restricted keeps the plain argv in the bot dir", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "executor-fence-old-"));
+    const spawnSpy = spyOn(Bun, "spawn");
+    spawnSpy.mockReturnValueOnce({
+      pid: 123,
+      stdout: new Response(JSON.stringify({ result: "ok" })).body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+      kill: mock(),
+    } as any);
+    try {
+      __setClaudeCliVersionForTest("2.1.200");
+      const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
+      await executeClaudePrompt("test", config, { name: "testbot", dir, toolsDisabled: true } as any);
+      const [args, opts] = spawnSpy.mock.calls[0]! as unknown as [string[], { cwd: string }];
+      expect(args[args.indexOf("--tools") + 1]).toBe("");
+      expect(args).not.toContain("--restricted");
+      expect(opts.cwd).toBe(dir);
+    } finally {
+      __setClaudeCliVersionForTest(undefined);
       spawnSpy.mockRestore();
       rmSync(dir, { recursive: true });
     }

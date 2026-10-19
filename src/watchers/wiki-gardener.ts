@@ -252,7 +252,8 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
       // `effort` carries the cap on adaptive-thinking models, which ignore the budget.
       const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS, effort: "low" as const };
       const startedAt = performance.now();
-      const exec = await oneShot(prompt, config, draftBotConfig, { timeoutMs, toolSurface: "bot" });
+      // The draft is written from the summaries inlined in the prompt; no tools.
+      const exec = await oneShot(prompt, config, draftBotConfig, { timeoutMs, toolSurface: "none" });
       const durationMs = performance.now() - startedAt;
       // executeOneShot / one-shot.ts never calls trackUsage (many callers —
       // summarizers/research — where blanket usage rows would be scope creep), so
