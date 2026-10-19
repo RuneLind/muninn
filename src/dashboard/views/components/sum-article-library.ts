@@ -981,7 +981,10 @@ export function sumArticleLibraryScript(): string {
         body = await res.json().catch(function() { return {}; });
         if (!res.ok) {
           closeDocPanel();
-          showDeleteNotice('Delete failed: ' + (body.error || ('HTTP ' + res.status)), 'err');
+          // A 404 can carry a warning (drafts of a gone doc still on the review
+          // gate); the warning tone adds the gate link that is its remedy.
+          var failWarning = typeof body.warning === 'string' ? body.warning : '';
+          showDeleteNotice('Delete failed: ' + (body.error || ('HTTP ' + res.status)) + (failWarning ? '. ' + failWarning : ''), failWarning ? 'warn' : 'err');
           return;
         }
       } catch (err) {

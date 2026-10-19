@@ -814,6 +814,27 @@ describe("deleteSummaryDoc — a 200 carrying `warning`", () => {
     expect(h.notice.textContent).toBe(`Delete failed: ${reason}`);
   });
 
+  test("a 404 carrying `warning` shows it beside the error, in the warning tone, with the gate link", async () => {
+    // A second Delete after a degraded first one: huginn says the doc is gone,
+    // and the cleanup of its drafts failed again — still approvable on the gate.
+    const h = loadDelete();
+    const warning =
+      "muninn could not remove the wiki drafts written from this document (failed: source proposals delete) — reject them on /wiki/gardener.";
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () =>
+      Response.json({ error: "that doc is not in that collection", proposals: { deleted: [], kept: [] }, warning }, { status: 404 });
+    try {
+      await h.run();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+    expect(h.notice.classes.has("warn")).toBe(true);
+    expect(h.notice.classes.has("err")).toBe(false);
+    expect(h.notice.textContent).toContain("Delete failed: that doc is not in that collection");
+    expect(h.notice.textContent).toContain(warning);
+    expect(h.notice.children[0]?.attrs.href).toBe("/wiki/gardener?wiki=jarvis");
+  });
+
   test("a clean delete stays in the ok tone with no link", async () => {
     const h = loadDelete();
     await withResponse({ ok: true, polling: [], skipped: [], proposals: { deleted: [], kept: [] } }, h.run);

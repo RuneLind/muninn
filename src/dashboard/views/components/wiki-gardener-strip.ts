@@ -277,6 +277,25 @@ export function backlogDeleteNotice(warning: unknown, caveats: string[]): Backlo
 }
 
 /**
+ * What a REFUSED `backlog-doc-delete` leaves: the notice (the route's `error`,
+ * plus its `warning` when one rides a 404 — drafts of a gone doc that are still
+ * approvable) and whether the gate must re-list, which it must when the
+ * source-gone 404's cleanup removed drafts its cards still show.
+ */
+export function backlogDeleteFailure(
+  status: number,
+  body: { error?: unknown; warning?: unknown; proposals?: { deleted?: unknown } },
+): { notice: BacklogInspectorNotice; relist: boolean } {
+  const error = typeof body.error === "string" && body.error ? body.error : `delete failed (${status})`;
+  const warning = typeof body.warning === "string" ? body.warning : "";
+  const deleted = body.proposals?.deleted;
+  return {
+    notice: { text: warning ? `${error}. ${warning}` : error, kind: "err" },
+    relist: Array.isArray(deleted) && deleted.length > 0,
+  };
+}
+
+/**
  * The inspector panel's module-level state. Lives OUTSIDE the strip's DOM (the
  * drain poller replaces the strip's innerHTML every 3s, which would otherwise
  * slam the panel shut — the same footgun the tail `<details>` open-state guards

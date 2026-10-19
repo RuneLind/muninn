@@ -2068,7 +2068,10 @@ export function registerWikiGardenerRoutes(
           err.upstreamStatus === 404 &&
           HUGINN_SOURCE_GONE.test(err.upstreamDetail ?? "")
         ) {
-          return { refused: err, proposals: await deleteProposals(), failures };
+          const proposals = await deleteProposals();
+          // Same reason as the 200 path: the cleanup changed the pending set.
+          await step("summaries stats cache invalidation", () => invalidateSummariesStatsCache(), undefined);
+          return { refused: err, proposals, failures };
         }
         return { refused: err };
       }
@@ -2166,7 +2169,7 @@ export function registerWikiGardenerRoutes(
                 ? `that doc is not in that collection; removed ${removed} unapplied draft${removed === 1 ? "" : "s"} written from it`
                 : "that doc is not in that collection",
             ...(done.proposals ? { proposals: done.proposals } : {}),
-            ...(done.failures && done.failures.length > 0
+            ...(done.failures?.includes(PROPOSALS_DELETE_STEP)
               ? {
                   warning:
                     "muninn could not remove the wiki drafts written from this document (failed: source proposals delete) — reject them on /wiki/gardener.",

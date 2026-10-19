@@ -1832,6 +1832,16 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     expect(againBody.warning).toContain("source proposals delete");
   });
 
+  test("a source-gone 404 whose cleanup ran drops the summaries stats cache", async () => {
+    // The cleanup changed the pending set the stats coverage reads, exactly as
+    // the 200 path's proposal delete does.
+    __setSummariesStatsCacheForTest("jarvis", STATS_FIXTURE);
+    deleteResponse = huginnGone404;
+    expect((await del({ collection: "youtube-summaries", id: "junk.md" })).status).toBe(404);
+    expect(proposalCalls).toEqual(["delbot:youtube-summaries/junk.md"]);
+    expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
+  });
+
   test("a huginn 404 that does not say the document is gone keeps the drafts written from it", async () => {
     // The membership gate (the file exists, the index lags) and a huginn with
     // no DELETE route both answer 404 for a document that still exists.

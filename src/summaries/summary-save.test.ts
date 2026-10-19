@@ -16,6 +16,7 @@ import {
   SummarySaveClaims,
 } from "./summary-save.ts";
 import { postSummaryIngest, type SummaryIngest, type SummaryIngestResponse } from "./summarizer-shared.ts";
+import { youtubeVideoFields } from "../youtube/metadata.ts";
 
 function doc(front: string[], body: string): string {
   return ["---", ...front, "---", "", body].join("\n");
@@ -422,40 +423,77 @@ describe("the descriptor table", () => {
   // The descriptor is the RE-SEND list: a key the capture writes and a save
   // leaves off is erased by the save. So every key a capture's ingest body
   // sends must be in its descriptor, or be one of the fields every save builds
-  // itself. YouTube spreads a `videoFields` object and is not scanned here.
+  // itself. Every ingest body in a file is read, not only the first.
   const SAVE_BUILT_FIELDS = new Set(["title", "summary", "category", "transcript_markdown"]);
-  const BODY_FILES: Array<[string, string[]]> = [
-    ["src/video/short-video.ts", ["tiktok", "x-article"]],
-    ["src/x-article/summarizer.ts", ["x-article"]],
-    ["src/vimeo/summarizer.ts", ["vimeo"]],
-    ["src/article/summarizer.ts", ["article"]],
+  /** Where a file's ingest bodies open: `ingestSummary({ … body: {`, or a raw
+   *  `fetch` whose `JSON.stringify({` follows the ingest path literal. */
+  type BodyAnchor = { call: RegExp; open: string };
+  const VIA_INGEST_SUMMARY: BodyAnchor = { call: /ingestSummary\(\{/g, open: "body: {" };
+  const BODY_FILES: Array<[string, string[], BodyAnchor]> = [
+    ["src/youtube/summarizer.ts", ["youtube"], VIA_INGEST_SUMMARY],
+    ["src/video/short-video.ts", ["tiktok", "x-article"], VIA_INGEST_SUMMARY],
+    ["src/x-article/summarizer.ts", ["x-article"], VIA_INGEST_SUMMARY],
+    ["src/vimeo/summarizer.ts", ["vimeo"], VIA_INGEST_SUMMARY],
+    ["src/article/summarizer.ts", ["article"], VIA_INGEST_SUMMARY],
+    ["src/anthropic/summarizer.ts", ["anthropic"], { call: /\/api\/anthropic-summaries\/ingest/g, open: "JSON.stringify({" }],
   ];
-  /** The keys of the `body: { … }` literal inside `ingestSummary({ … })`. */
-  function ingestBodyKeys(source: string): string[] {
-    const at = source.indexOf("ingestSummary({");
-    const open = source.indexOf("body: {", at);
+  /** A spread inside a body, resolved to the keys it can carry. */
+  const SPREADS: Record<string, () => string[]> = {
+    // Every key the declared type allows, plus every key a fully-populated call
+    // emits — a field added to either reaches the body.
+    videoFields: () => [
+      ...interfaceKeys(readFileSync(join(repoRoot, "src/youtube/metadata.ts"), "utf8"), "YouTubeVideoFields"),
+      ...Object.keys(
+        youtubeVideoFields({ id: "v", title: "t", duration: 61.4, uploader: "U", uploadDate: "20260101" }, "O"),
+      ),
+    ],
+  };
+  function interfaceKeys(source: string, name: string): string[] {
+    const at = source.indexOf(`export interface ${name} {`);
     expect(at).toBeGreaterThan(-1);
-    expect(open).toBeGreaterThan(at);
-    let depth = 0;
-    let end = open + "body: ".length;
-    for (; end < source.length; end++) {
-      if (source[end] === "{") depth++;
-      else if (source[end] === "}" && --depth === 0) break;
-    }
+    const body = source.slice(at, source.indexOf("\n}", at));
+    return [...body.matchAll(/^\s+([a-z_]+)\??:/gm)].map((m) => m[1]!);
+  }
+  /** The keys of every ingest body literal in `source`. */
+  function ingestBodyKeys(source: string, anchor: BodyAnchor): string[] {
+    const calls = [...source.matchAll(anchor.call)].map((m) => m.index!);
+    expect(calls.length).toBeGreaterThan(0);
     const keys: string[] = [];
-    for (const line of source.slice(open + "body: {".length, end).split("\n")) {
-      const t = line.trim();
-      if (t === "" || t.startsWith("//")) continue;
-      const m = /^\.\.\.\(.*\?\s*\{\s*([a-z_]+)\s*[:,}]/.exec(t) ?? /^([a-z_]+)\s*[:,]?/.exec(t);
-      expect({ line: t, parsed: Boolean(m) }).toEqual({ line: t, parsed: true });
-      keys.push(m![1]!);
+    for (const at of calls) {
+      const open = source.indexOf(anchor.open, at);
+      expect(open).toBeGreaterThan(at);
+      let depth = 0;
+      let end = open + anchor.open.length - 1;
+      for (; end < source.length; end++) {
+        if (source[end] === "{") depth++;
+        else if (source[end] === "}" && --depth === 0) break;
+      }
+      for (const line of source.slice(open + anchor.open.length, end).split("\n")) {
+        const t = line.trim();
+        if (t === "" || t.startsWith("//")) continue;
+        const spread = /^\.\.\.([A-Za-z_]+),?$/.exec(t);
+        if (spread) {
+          const resolve = SPREADS[spread[1]!];
+          expect({ line: t, resolvable: Boolean(resolve) }).toEqual({ line: t, resolvable: true });
+          keys.push(...resolve!());
+          continue;
+        }
+        const m = /^\.\.\.\(.*\?\s*\{\s*([a-z_]+)\s*[:,}]/.exec(t) ?? /^([a-z_]+)\s*[:,]?/.exec(t);
+        expect({ line: t, parsed: Boolean(m) }).toEqual({ line: t, parsed: true });
+        keys.push(m![1]!);
+      }
     }
-    return keys;
+    return [...new Set(keys)];
   }
 
-  for (const [file, ids] of BODY_FILES) {
+  test("every capture file's ingest bodies are scanned", () => {
+    const scanned = new Set(BODY_FILES.flatMap(([, ids]) => ids));
+    expect([...scanned].sort()).toEqual(SUMMARY_SAVE_DESCRIPTORS.map((d) => d.id).sort());
+  });
+
+  for (const [file, ids, anchor] of BODY_FILES) {
     test(`${file}: every ingest body key is re-sent by the ${ids.join(" and ")} save`, () => {
-      const keys = ingestBodyKeys(readFileSync(join(repoRoot, file), "utf8"));
+      const keys = ingestBodyKeys(readFileSync(join(repoRoot, file), "utf8"), anchor);
       expect(keys).toContain("summary");
       for (const id of ids) {
         const resent = new Set(requireSaveDescriptor(id).frontmatterFields);
@@ -463,6 +501,16 @@ describe("the descriptor table", () => {
       }
     });
   }
+
+  test("the body scan sees a second ingest call and a spread field", () => {
+    const one = "await ingestSummary({\n  body: {\n    title,\n    summary,\n  },\n});\n";
+    const two = one + "await ingestSummary({\n  body: {\n    summary,\n    speaker: s,\n  },\n});\n";
+    expect(ingestBodyKeys(two, VIA_INGEST_SUMMARY)).toContain("speaker");
+    const spread = "await ingestSummary({\n  body: {\n    summary,\n    ...videoFields,\n  },\n});\n";
+    expect(ingestBodyKeys(spread, VIA_INGEST_SUMMARY)).toEqual(
+      expect.arrayContaining(["summary", "author", "upload_date", "duration_sec"]),
+    );
+  });
 
   test("anthropic re-sends no author, and no save re-sends a field huginn derives", () => {
     expect(requireSaveDescriptor("anthropic").frontmatterFields).not.toContain("author");
