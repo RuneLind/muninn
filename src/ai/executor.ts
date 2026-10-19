@@ -7,9 +7,8 @@ import { StreamParser, type StreamProgressCallback } from "./stream-parser.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
 import { preflightMcpForRequest } from "./mcp-status.ts";
 import { logTraceFlagsOnce } from "./huginn-trace.ts";
-import { resolveAgentCwd } from "./agent-cwd.ts";
+import { resolveFencedAgentCwd } from "./agent-cwd.ts";
 import {
-  FENCED_AGENT_CWD_BUCKET,
   assertRestrictedCliAvailable,
   fencedSettings,
   fencedSurface,
@@ -38,7 +37,7 @@ export async function executeClaudePrompt(
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
   const fence = fencedSurface(botConfig.toolSurface);
   if (fence) {
-    assertRestrictedCliAvailable(fence);
+    await assertRestrictedCliAvailable(fence);
     // spawnArgs land after the fence flags, and a later --settings or
     // --mcp-config wins, so they could undo it.
     if (botConfig.spawnArgs && botConfig.spawnArgs.length > 0) {
@@ -47,6 +46,7 @@ export async function executeClaudePrompt(
       );
     }
   }
+  const fencedCwd = fence ? resolveFencedAgentCwd() : undefined;
 
   const args = [
     "claude",
@@ -130,7 +130,7 @@ export async function executeClaudePrompt(
     {
       // A fenced run's cwd is an empty agent home: the working dir is readable
       // without approval, so the bot folder would expose its config files.
-      cwd: fence ? resolveAgentCwd(FENCED_AGENT_CWD_BUCKET) : botConfig.dir,
+      cwd: fencedCwd ?? botConfig.dir,
       env,
       stdout: "pipe",
       stderr: "pipe",

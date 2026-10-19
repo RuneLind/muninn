@@ -61,7 +61,7 @@ function sdkBinaryAvailable(): boolean {
   });
 }
 
-const cliVersion = installedClaudeCliVersion();
+const cliVersion = await installedClaudeCliVersion();
 const cliReady = hasOpenssl() && cliVersion !== null && compareVersions(cliVersion, MIN_RESTRICTED_CLI_VERSION) >= 0;
 const sdkReady = hasOpenssl() && sdkBinaryAvailable();
 
@@ -163,12 +163,28 @@ for (const connector of ["claude-cli", "claude-sdk"] as const) {
     }, 120_000);
 
     test("{ web }: only WebFetch runs, with no permission prompt", async () => {
-      const o = await probe(connector, { web: true });
+      // The page is on 127.0.0.1, which claude-sdk's handler refuses (next test).
+      if (connector === "claude-sdk") toolSurfaceTestSeam.allowWebHosts = ["127.0.0.1"];
+      let o: Outcome;
+      try {
+        o = await probe(connector, { web: true });
+      } finally {
+        delete toolSurfaceTestSeam.allowWebHosts;
+      }
       expectHostileRefused(o);
       expect(o.results[5]).toMatchObject({ name: "Read", isError: true });
       expect(o.results[6]).toMatchObject({ name: "WebFetch", isError: false });
       expect(o.results[6]!.text).toContain("PAGE-SUMMARY");
       expect(o.pageHits).toBe(1);
+    }, 120_000);
+
+    // claude-sdk's handler refuses an IP-literal private host. claude-cli has
+    // no such rule: it fetches the same page (the test above), the residual
+    // the PR records.
+    test.skipIf(connector !== "claude-sdk")("{ web }: WebFetch to a loopback IP literal is refused", async () => {
+      const o = await probe(connector, { web: true }, [webFetchPlan(f)]);
+      expect(o.results[0]).toMatchObject({ name: "WebFetch", isError: true });
+      expect(o.pageHits).toBe(0);
     }, 120_000);
 
     test('"bot" (control): the stub records a call, so the zeros above are the fence', async () => {

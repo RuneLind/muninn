@@ -22,11 +22,10 @@ import { parseMcpConfig } from "./claude-sdk-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { currentActiveTurn } from "../../hivemind/active-turn.ts";
-import { resolveAgentCwd } from "../agent-cwd.ts";
+import { resolveFencedAgentCwd } from "../agent-cwd.ts";
 import {
-  FENCED_AGENT_CWD_BUCKET,
   fencedCanUseTool,
-  fencedSettings,
+  fencedSdkSettings,
   fencedSurface,
   fencedTools,
   isReadSurface,
@@ -60,14 +59,14 @@ export function resolveThinking(maxTokens: number | undefined): ThinkingConfig |
  * The SDK options for a fenced surface (`{ read }` / `{ web }`): the fixed tool
  * list, no MCP server from any source, no settings files, `default` permission
  * mode (`bypassPermissions` never consults `canUseTool`) and a handler that
- * allows Read only under the dirs and the web tools only on `{ web }`. The cwd
+ * allows Read only under the dirs and the web tools only on `{ web }` (no allow rule, so WebFetch reaches the handler). The cwd
  * is an empty agent home: in `default` mode a Read inside the working dir skips
  * `canUseTool`, so the bot folder as cwd would leave its config readable.
  */
 export function fencedSdkOptions(fence: FencedToolSurface): Partial<Options> {
-  const settings = fencedSettings(fence);
+  const settings = fencedSdkSettings();
   return {
-    cwd: resolveAgentCwd(FENCED_AGENT_CWD_BUCKET),
+    cwd: resolveFencedAgentCwd(),
     permissionMode: "default",
     tools: fencedTools(fence),
     mcpServers: {},
@@ -133,6 +132,8 @@ export async function executePrompt(
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
   const fence = fencedSurface(botConfig.toolSurface);
+  // Before the timeout timer: it throws when the agent home is degraded.
+  const fencedOptions = fence ? fencedSdkOptions(fence) : undefined;
   const mcpServers = fence || botConfig.toolsDisabled ? {} : parseMcpConfig(botConfig.dir);
   const hasMcp = Object.keys(mcpServers).length > 0;
   const thinking = resolveThinking(botConfig.thinkingMaxTokens);
@@ -170,7 +171,7 @@ export async function executePrompt(
   const options: Options = {
     abortController,
     model,
-    ...(fence ? fencedSdkOptions(fence) : {
+    ...(fencedOptions ?? {
       cwd: botConfig.dir,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,

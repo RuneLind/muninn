@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -98,7 +98,7 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect(o.mcpServers).toEqual({});
     expect(o.strictMcpConfig).toBe(true);
     expect(o.settingSources).toEqual([]);
-    expect(o.cwd).toBe(join(agentRoot, "capture"));
+    expect(o.cwd).toBe(join(agentRoot, ".fenced"));
     expect(o.additionalDirectories).toEqual([framesDir]);
     expect(o.permissionMode).toBe("default");
     expect("allowDangerouslySkipPermissions" in o).toBe(false);
@@ -110,7 +110,7 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect((await ask(o, "WebFetch", { url: "https://x" })).behavior).toBe("deny");
   });
 
-  test("{ web }: the web tools only, the allow rule in settings, no MCP, default mode", async () => {
+  test("{ web }: the web tools only, no allow rule (canUseTool decides), no MCP, default mode", async () => {
     toolSurfaceTestSeam.extraSettings = { skipWebFetchPreflight: true };
     await driveCapture(sdkBot(), { web: true });
     const o = queryCalls[0]!.options;
@@ -118,15 +118,35 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect(o.mcpServers).toEqual({});
     expect(o.strictMcpConfig).toBe(true);
     expect(o.permissionMode).toBe("default");
-    expect(o.cwd).toBe(join(agentRoot, "capture"));
+    expect(o.cwd).toBe(join(agentRoot, ".fenced"));
     expect("additionalDirectories" in o).toBe(false);
-    expect(o.settings).toEqual({ permissions: { allow: ["WebFetch", "WebSearch"] }, skipWebFetchPreflight: true });
+    // No allow rule: it would approve WebFetch before canUseTool is asked.
+    expect(o.settings).toEqual({ skipWebFetchPreflight: true });
     expect((await ask(o, "WebFetch", { url: "https://x" })).behavior).toBe("allow");
+    expect((await ask(o, "WebFetch", { url: "https://127.0.0.1:8443/page" })).behavior).toBe("deny");
     expect((await ask(o, "Read", { file_path: join(framesDir, "x.jpg") })).behavior).toBe("deny");
   });
 
   test("{ read } with extraDirs beside it never reaches the SDK", async () => {
     await expect(driveCapture(sdkBot(), { read: [framesDir] }, { extraDirs: [root] })).rejects.toThrow(/only allowed/);
     expect(queryCalls).toHaveLength(0);
+  });
+
+  test("a degraded agent home refuses a fenced run before query()", async () => {
+    // mkdir in a read-only root fails (EACCES), so the agent home degrades to $TMPDIR.
+    const readOnly = join(root, "read-only-home");
+    mkdirSync(readOnly);
+    chmodSync(readOnly, 0o500);
+    process.env.MUNINN_AGENT_CWD = readOnly;
+    try {
+      await expect(driveCapture(sdkBot(), { read: [framesDir] })).rejects.toThrow(/agent home/);
+      await expect(driveCapture(sdkBot(), { web: true })).rejects.toThrow(/agent home/);
+      expect(queryCalls).toHaveLength(0);
+      await driveCapture(sdkBot(), "none");
+      expect(queryCalls).toHaveLength(1);
+    } finally {
+      chmodSync(readOnly, 0o700);
+      process.env.MUNINN_AGENT_CWD = agentRoot;
+    }
   });
 });

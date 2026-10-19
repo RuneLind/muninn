@@ -41,13 +41,6 @@ export function fencedTools(surface: FencedToolSurface): string[] {
   return "read" in surface ? ["Read"] : ["WebFetch", "WebSearch"];
 }
 
-/**
- * Agent-home bucket for a fenced run's cwd (`resolveAgentCwd`). An empty dir
- * outside the bot folder: a Read inside the working dir needs no approval, so
- * the bot folder as cwd would leave `config.json` and `.mcp.json` readable.
- */
-export const FENCED_AGENT_CWD_BUCKET = "capture";
-
 /** Oldest Claude CLI with `--restricted` (it confines the file tools and drops
  *  the settings files that pre-approve WebFetch and Bash). */
 export const MIN_RESTRICTED_CLI_VERSION = "2.1.303";
@@ -60,7 +53,13 @@ export const MIN_RESTRICTED_CLI_VERSION = "2.1.303";
  * one value and the last flag wins, so a second flag would drop the allow
  * rule; this seam is the only way to add a key. Production never sets it.
  */
-export const toolSurfaceTestSeam: { extraSettings?: Record<string, unknown> } = {};
+export const toolSurfaceTestSeam: {
+  extraSettings?: Record<string, unknown>;
+  /** Hosts `fencedCanUseTool` lets WebFetch reach despite {@link isFetchableWebUrl}: the fake-API page on 127.0.0.1. */
+  allowWebHosts?: string[];
+  /** Overrides {@link CLI_VERSION_PROBE_TIMEOUT_MS}. */
+  cliProbeTimeoutMs?: number;
+} = {};
 
 /**
  * The settings object a fenced run passes, or `undefined` when it needs none.
@@ -73,6 +72,17 @@ export function fencedSettings(surface: FencedToolSurface): Record<string, unkno
   const extra = toolSurfaceTestSeam.extraSettings;
   if (!base && !extra) return undefined;
   return { ...(base ?? {}), ...(extra ?? {}) };
+}
+
+/**
+ * The settings object a fenced claude-sdk run passes: the test seam only. The
+ * SDK approves through `fencedCanUseTool`, and an allow rule for WebFetch would
+ * approve it before the handler is asked (measured: the fake-API WebFetch to
+ * 127.0.0.1 ran despite a deny from the handler while the rule was present).
+ */
+export function fencedSdkSettings(): Record<string, unknown> | undefined {
+  const extra = toolSurfaceTestSeam.extraSettings;
+  return extra ? { ...extra } : undefined;
 }
 
 /**
@@ -127,8 +137,93 @@ export function isInsideDirs(path: string, dirs: string[]): boolean {
 }
 
 /**
+ * Whether WebFetch on a `{ web }` run may reach `url`: http or https (the CLI
+ * upgrades http), and a host that is neither a local-only name (`localhost`,
+ * `*.localhost`, `*.internal`, `*.local`) nor an IP literal in a loopback,
+ * private, link-local, CGNAT, unique-local, multicast or reserved range,
+ * IPv4-mapped and other IPv4-embedding IPv6 forms included. The URL parser
+ * normalizes `2130706433` and `0x7f.1` to `127.0.0.1` first. A name that
+ * RESOLVES to a private address passes: this checks the URL, not DNS.
+ */
+export function isFetchableWebUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "" || host === "localhost") return false;
+  if (/\.(localhost|internal|local)$/.test(host)) return false;
+  if (host.startsWith("[")) {
+    const bytes = ipv6Bytes(host.slice(1, -1));
+    return bytes !== null && isPublicIpv6(bytes);
+  }
+  const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) return isPublicIpv4(v4.slice(1).map(Number));
+  return true;
+}
+
+function testSeamAllowsHost(url: string): boolean {
+  const hosts = toolSurfaceTestSeam.allowWebHosts;
+  if (!hosts) return false;
+  try {
+    return hosts.includes(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isPublicIpv4([a, b]: number[]): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false; // this-network, private, loopback, multicast + reserved
+  if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT 100.64/10
+  if (a === 169 && b === 254) return false; // link-local
+  if (a === 172 && b >= 16 && b <= 31) return false; // private 172.16/12
+  if (a === 192 && b === 168) return false; // private
+  if (a === 192 && b === 0) return false; // 192.0.0/24 IETF protocol assignments (and 192.0.2/24 docs)
+  if (a === 198 && (b === 18 || b === 19)) return false; // benchmarking 198.18/15
+  return true;
+}
+
+/** The 16 bytes of a URL-normalized IPv6 literal (hex groups, at most one `::`), or `null`. */
+function ipv6Bytes(literal: string): number[] | null {
+  const halves = literal.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string) => (part === "" ? [] : part.split(":"));
+  const head = groups(halves[0]!);
+  const tail = halves.length === 2 ? groups(halves[1]!) : [];
+  const fill = 8 - head.length - tail.length;
+  if (fill < 0 || (halves.length === 1 && fill !== 0)) return null;
+  const all = [...head, ...Array<string>(fill).fill("0"), ...tail];
+  const bytes: number[] = [];
+  for (const g of all) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    const n = Number.parseInt(g, 16);
+    bytes.push(n >> 8, n & 0xff);
+  }
+  return bytes;
+}
+
+function isPublicIpv6(b: number[]): boolean {
+  const zeroUpTo = (n: number) => b.slice(0, n).every((x) => x === 0);
+  // ::/96 (unspecified, loopback, IPv4-compatible) and ::ffff:0:0/96 (IPv4-mapped).
+  if (zeroUpTo(10) && ((b[10] === 0 && b[11] === 0) || (b[10] === 0xff && b[11] === 0xff))) {
+    return isPublicIpv4(b.slice(12));
+  }
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) return isPublicIpv4(b.slice(12)); // NAT64 64:ff9b::/96
+  if (b[0] === 0x20 && b[1] === 0x02) return isPublicIpv4(b.slice(2, 6)); // 6to4 2002::/16
+  if ((b[0]! & 0xfe) === 0xfc) return false; // unique-local fc00::/7
+  if (b[0] === 0xfe && (b[1]! & 0x80) === 0x80) return false; // link-local fe80::/10 and site-local fec0::/10
+  if (b[0] === 0xff) return false; // multicast
+  return true;
+}
+
+/**
  * The claude-sdk permission handler for a fenced run: Read only under the
- * `{ read }` dirs, the web tools only on `{ web }`, everything else denied.
+ * `{ read }` dirs, WebSearch and {@link isFetchableWebUrl} WebFetch only on
+ * `{ web }`, everything else denied.
  * In `default` mode a Read inside the working dirs never reaches this handler;
  * every other call does.
  */
@@ -141,8 +236,15 @@ export function fencedCanUseTool(surface: FencedToolSurface): CanUseTool {
       }
       return { behavior: "deny", message: "Read is limited to the directories this run was given." };
     }
-    if ("web" in surface && (toolName === "WebFetch" || toolName === "WebSearch")) {
+    if ("web" in surface && toolName === "WebSearch") {
       return { behavior: "allow", updatedInput: input };
+    }
+    if ("web" in surface && toolName === "WebFetch") {
+      const url = input.url;
+      if (typeof url === "string" && (isFetchableWebUrl(url) || testSeamAllowsHost(url))) {
+        return { behavior: "allow", updatedInput: input };
+      }
+      return { behavior: "deny", message: "WebFetch is limited to public https hosts." };
     }
     return { behavior: "deny", message: `${toolName} is not available to this run.` };
   };
@@ -171,29 +273,67 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-let cliVersion: string | null | undefined;
+/** How long `claude --version` may take before the probe reads it as absent. */
+export const CLI_VERSION_PROBE_TIMEOUT_MS = 5_000;
 
-/** The installed `claude` CLI version, read once per process; `null` when unreadable. */
-export function installedClaudeCliVersion(): string | null {
-  if (cliVersion !== undefined) return cliVersion;
+/** A version that passed the gate: the only thing cached, so a failed or old read is retried next call. */
+let cliVersion: string | undefined;
+let pinnedVersion: { version: string | null } | undefined;
+let inFlight: Promise<string | null> | undefined;
+
+async function probeCliVersion(): Promise<string | null> {
+  let proc: ReturnType<typeof Bun.spawn>;
   try {
-    const out = Bun.spawnSync(["claude", "--version"], { stdout: "pipe", stderr: "ignore" });
-    const match = out.stdout.toString().match(/(\d+\.\d+\.\d+)/);
-    cliVersion = out.exitCode === 0 && match ? match[1]! : null;
+    proc = Bun.spawn(["claude", "--version"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
   } catch {
-    cliVersion = null;
+    return null;
   }
-  return cliVersion;
+  const stdout = proc.stdout as ReadableStream<Uint8Array>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      proc.kill();
+      resolve(null);
+    }, toolSurfaceTestSeam.cliProbeTimeoutMs ?? CLI_VERSION_PROBE_TIMEOUT_MS);
+  });
+  const read = (async () => {
+    const out = await new Response(stdout).text();
+    const match = out.match(/(\d+\.\d+\.\d+)/);
+    return (await proc.exited) === 0 && match ? match[1]! : null;
+  })().catch(() => null);
+  try {
+    return await Promise.race([read, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-/** Test seam: pin the version {@link installedClaudeCliVersion} reports (`undefined` re-reads). */
+/**
+ * The installed `claude` CLI version, `null` when unreadable. Read off the
+ * event loop with a timeout; only a version new enough for `--restricted` is
+ * cached, so a transient failure (an auto-update mid-flight) or an upgrade
+ * after an old read is picked up by the next fenced call without a restart.
+ */
+export async function installedClaudeCliVersion(): Promise<string | null> {
+  if (pinnedVersion) return pinnedVersion.version;
+  if (cliVersion !== undefined) return cliVersion;
+  inFlight ??= probeCliVersion().finally(() => {
+    inFlight = undefined;
+  });
+  const version = await inFlight;
+  if (version !== null && compareVersions(version, MIN_RESTRICTED_CLI_VERSION) >= 0) cliVersion = version;
+  return version;
+}
+
+/** Test seam: pin the version {@link installedClaudeCliVersion} reports (`undefined` unpins and clears the cache). */
 export function __setClaudeCliVersionForTest(version: string | null | undefined): void {
-  cliVersion = version;
+  pinnedVersion = version === undefined ? undefined : { version };
+  cliVersion = undefined;
 }
 
 /** Throw unless the installed CLI has `--restricted`, which a fenced surface needs. */
-export function assertRestrictedCliAvailable(surface: FencedToolSurface): void {
-  const version = installedClaudeCliVersion();
+export async function assertRestrictedCliAvailable(surface: FencedToolSurface): Promise<void> {
+  const version = await installedClaudeCliVersion();
   if (version === null || compareVersions(version, MIN_RESTRICTED_CLI_VERSION) < 0) {
     const kind = "read" in surface ? "{ read }" : "{ web }";
     throw new Error(

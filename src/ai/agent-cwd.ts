@@ -226,3 +226,29 @@ export function resolveAgentCwd(name?: string): string {
     return degradedCwd();
   }
 }
+
+/**
+ * Bucket for fenced one-shots (`{ read }` / `{ web }`). A leading `.` is a
+ * name {@link bucket} never returns, so no bot folder or caller label shares
+ * it — `spawnHaiku` for a bot named `capture` used to.
+ */
+export const FENCED_AGENT_CWD_BUCKET = ".fenced";
+
+/**
+ * The cwd of a fenced one-shot: an empty dir outside the bot folder, because a
+ * Read inside the working dir needs no approval. Unlike {@link resolveAgentCwd}
+ * it never degrades: the shared temp dir would put other jobs' files inside
+ * the working dir, so a failed mkdir refuses the run instead.
+ */
+export function resolveFencedAgentCwd(): string {
+  const dir = join(agentCwdRoot(), FENCED_AGENT_CWD_BUCKET);
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new Error(
+      `fenced tool surface: cannot create its agent home ${dir} (${err instanceof Error ? err.message : String(err)}) — ` +
+        "refusing to run in the shared temp dir, where a Read needs no approval.",
+    );
+  }
+  return dir;
+}

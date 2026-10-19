@@ -1,17 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   __setClaudeCliVersionForTest,
+  assertRestrictedCliAvailable,
   compareVersions,
   fencedCanUseTool,
   fencedSettings,
+  installedClaudeCliVersion,
   isInsideDirs,
   refuseFencedSurface,
   toolSurfaceTestSeam,
 } from "./tool-surface.ts";
 import { applyToolSurface, executeOneShot } from "./one-shot.ts";
+import { resolveAgentCwd } from "./agent-cwd.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { driveBot, driveCapture, driveConfig, silentTracer } from "../test/one-shot-drive.ts";
 
@@ -120,6 +123,32 @@ describe("fencedCanUseTool", () => {
     expect((await can("Bash", { command: "ls" }, opts))!.behavior).toBe("deny");
   });
 
+  test("{ web } refuses WebFetch to loopback, private and local-only hosts", async () => {
+    const can = fencedCanUseTool({ web: true });
+    const opts = { signal: new AbortController().signal } as never;
+    const denied = [
+      "https://127.0.0.1:8443/page", "http://127.0.0.1/", "https://2130706433/", "https://0x7f.1/",
+      "https://10.1.2.3/", "https://172.16.0.1/", "https://172.31.255.255/", "https://192.168.1.1/",
+      "https://169.254.169.254/latest/meta-data/", "https://100.64.0.1/", "https://100.127.255.254/", "https://0.0.0.0/",
+      "https://[::1]/", "https://[::]/", "https://[fe80::1]/", "https://[fd00::1]/", "https://[fc00::1]/",
+      "https://[::ffff:127.0.0.1]/", "https://[::ffff:10.0.0.1]/", "https://[::ffff:169.254.169.254]/",
+      "https://localhost/", "https://LOCALHOST./", "https://api.localhost/", "https://metadata.google.internal/",
+      "https://printer.local/", "ftp://example.com/", "file:///etc/passwd", "not a url",
+    ];
+    for (const url of denied) {
+      expect([url, (await can("WebFetch", { url, prompt: "p" }, opts))!.behavior]).toEqual([url, "deny"]);
+    }
+    expect((await can("WebFetch", { prompt: "p" }, opts))!.behavior).toBe("deny");
+    const allowed = [
+      "https://example.com/a", "http://example.com/", "https://8.8.8.8/", "https://172.32.0.1/",
+      "https://100.128.0.1/", "https://[2606:4700::1111]/", "https://localhost.example.com/",
+    ];
+    for (const url of allowed) {
+      expect([url, (await can("WebFetch", { url, prompt: "p" }, opts))!.behavior]).toEqual([url, "allow"]);
+    }
+    expect((await can("WebSearch", { query: "q" }, opts))!.behavior).toBe("allow");
+  });
+
   test("isInsideDirs treats the dir itself as inside and a prefix-sharing sibling as outside", () => {
     expect(isInsideDirs(framesDir, [framesDir])).toBe(true);
     expect(isInsideDirs(`${framesDir}2/a`, [framesDir])).toBe(false);
@@ -220,6 +249,66 @@ describe("fencedSettings and the test seam", () => {
   });
 });
 
+describe("the CLI version probe", () => {
+  // A fake `claude` on the real spawn path: both spawn calls are redirected to
+  // it, so the probe's caching and timeout run against a real process.
+  let fake: string;
+  let spawnSpy: ReturnType<typeof spyOn>;
+  let syncSpy: ReturnType<typeof spyOn>;
+  const setFake = (mode: string) => writeFileSync(`${fake}.mode`, mode);
+
+  beforeEach(() => {
+    fake = join(root, "fake-claude");
+    writeFileSync(
+      fake,
+      '#!/bin/sh\nmode=$(cat "$0.mode")\ncase "$mode" in fail) exit 1;; hang) exec sleep 4;; *) echo "$mode (Claude Code)";; esac\n',
+      { mode: 0o755 },
+    );
+    const realSpawn = Bun.spawn;
+    const realSync = Bun.spawnSync;
+    const redirect = (cmd: string[]) => (cmd[0] === "claude" ? [fake, ...cmd.slice(1)] : cmd);
+    spawnSpy = spyOn(Bun, "spawn").mockImplementation(((cmd: string[], o: never) => realSpawn(redirect(cmd), o)) as never);
+    syncSpy = spyOn(Bun, "spawnSync").mockImplementation(((cmd: string[], o: never) => realSync(redirect(cmd), o)) as never);
+    __setClaudeCliVersionForTest(undefined);
+  });
+
+  afterEach(() => {
+    spawnSpy.mockRestore();
+    syncSpy.mockRestore();
+    delete toolSurfaceTestSeam.cliProbeTimeoutMs;
+    __setClaudeCliVersionForTest(undefined);
+  });
+
+  test("a failed read is not cached: the next fenced call reads again", async () => {
+    setFake("fail");
+    expect(await installedClaudeCliVersion()).toBeNull();
+    setFake("2.1.400");
+    expect(await installedClaudeCliVersion()).toBe("2.1.400");
+    // A good version is cached: a later failure does not unseat it.
+    setFake("fail");
+    expect(await installedClaudeCliVersion()).toBe("2.1.400");
+  });
+
+  test("an old version is not cached: an upgrade is picked up without a restart", async () => {
+    setFake("2.1.302");
+    await expect((async () => assertRestrictedCliAvailable({ web: true }))()).rejects.toThrow(/2\.1\.303.*found 2\.1\.302/);
+    setFake("2.1.303");
+    await expect((async () => assertRestrictedCliAvailable({ web: true }))()).resolves.toBeUndefined();
+  });
+
+  test("a hanging `claude --version` times out without blocking the event loop", async () => {
+    setFake("hang");
+    toolSurfaceTestSeam.cliProbeTimeoutMs = 300;
+    let ticked = false;
+    setTimeout(() => { ticked = true; }, 50);
+    const start = performance.now();
+    const version = await installedClaudeCliVersion();
+    expect(version).toBeNull();
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(ticked).toBe(true);
+  }, 10_000);
+});
+
 describe("claude-cli argv, driven from runCaptureOneShot", () => {
   type Spawned = { args: string[]; cwd: string };
   let spawned: Spawned[];
@@ -276,7 +365,7 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
   test("{ read }: --restricted, Read only, the dirs added, an empty agent home as cwd", async () => {
     await driveCapture(driveBot(botDir, { connector: "claude-cli" }), { read: [framesDir] });
     const { args, cwd } = spawned[0]!;
-    expect(cwd).toBe(join(agentRoot, "capture"));
+    expect(cwd).toBe(join(agentRoot, ".fenced"));
     expect(args).toContain("--restricted");
     expect(flagValues(args, "--tools")).toEqual(["Read"]);
     expect(args).toContain("--strict-mcp-config");
@@ -290,7 +379,7 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
   test("{ web }: --restricted, the web tools only, ONE --settings carrying the allow rule", async () => {
     await driveCapture(driveBot(botDir, { connector: "claude-cli" }), { web: true });
     const { args, cwd } = spawned[0]!;
-    expect(cwd).toBe(join(agentRoot, "capture"));
+    expect(cwd).toBe(join(agentRoot, ".fenced"));
     expect(args).toContain("--restricted");
     expect(flagValues(args, "--tools")).toEqual(["WebFetch,WebSearch"]);
     expect(args).toContain("--strict-mcp-config");
@@ -360,6 +449,33 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
     await driveCapture(withArgs, "none");
     expect(spawned).toHaveLength(2);
     for (const { args } of spawned) expect(flagValues(args, "--settings")).toEqual(["{}"]);
+  });
+
+  test("a fenced run's agent home is a bucket no caller name maps to", async () => {
+    await driveCapture(driveBot(botDir, { connector: "claude-cli" }), { read: [framesDir] });
+    const { cwd } = spawned[0]!;
+    for (const name of ["capture", "fenced", ".fenced", "shared", undefined]) {
+      expect(resolveAgentCwd(name)).not.toBe(cwd);
+    }
+  });
+
+  test("a degraded agent home refuses a fenced run before spawning", async () => {
+    // mkdir in a read-only root fails (EACCES), so the agent home degrades to $TMPDIR.
+    const readOnly = join(root, "read-only-home");
+    mkdirSync(readOnly);
+    chmodSync(readOnly, 0o500);
+    process.env.MUNINN_AGENT_CWD = readOnly;
+    try {
+      await expect(driveCapture(driveBot(botDir, { connector: "claude-cli" }), { read: [framesDir] })).rejects.toThrow(/agent home/);
+      await expect(driveCapture(driveBot(botDir, { connector: "claude-cli" }), { web: true })).rejects.toThrow(/agent home/);
+      expect(spawned).toHaveLength(0);
+      // An unfenced run keeps running in the bot folder.
+      await driveCapture(driveBot(botDir, { connector: "claude-cli" }), "none");
+      expect(spawned).toHaveLength(1);
+    } finally {
+      chmodSync(readOnly, 0o700);
+      process.env.MUNINN_AGENT_CWD = agentRoot;
+    }
   });
 
   test("{ read } with extraDirs beside it is refused before spawning", async () => {
