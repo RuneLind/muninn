@@ -15,8 +15,8 @@
  * copilot-sdk and openai-compat refuse them.
  */
 
-import { realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { isAbsolute, join, sep } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 
 export type ToolSurface = "none" | "bot" | { read: string[] } | { web: true };
@@ -75,20 +75,54 @@ export function fencedSettings(surface: FencedToolSurface): Record<string, unkno
   return { ...(base ?? {}), ...(extra ?? {}) };
 }
 
-function realOrResolved(path: string): string {
+/**
+ * `path` with every symlink resolved the way the OS would, or `null` when that
+ * cannot be known. A relative path is `null`: it would resolve against
+ * muninn's cwd, not the run's. A path with a `..` segment is `null`: Bun's
+ * `realpathSync` applies `..` lexically before following symlinks, so
+ * `<dir>/link/../x` resolves to `<dir>/x` while the OS reads `<link target>/../x`.
+ * A path that does not exist yet resolves through its deepest existing
+ * ancestor, but only when the first missing component is genuinely absent
+ * (ENOENT on `lstat`, so not a dangling symlink). Any other error (ENOTDIR,
+ * ENAMETOOLONG, ELOOP) is `null`.
+ */
+function canonicalPath(path: string): string | null {
+  if (!isAbsolute(path) || path.split(sep).includes("..")) return null;
   try {
     return realpathSync(path);
-  } catch {
-    return resolve(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
   }
+  const segments = path.split(sep).filter((s) => s !== "" && s !== ".");
+  for (let i = segments.length - 1; i >= 0; i--) {
+    let real: string;
+    try {
+      real = realpathSync(sep + segments.slice(0, i).join(sep));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return null;
+    }
+    const rest = segments.slice(i);
+    try {
+      lstatSync(join(real, rest[0]!));
+      return null; // it exists (a dangling symlink), yet the full path did not resolve
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
+    }
+    return join(real, ...rest);
+  }
+  return null;
 }
 
-/** Whether `path`, symlinks and `..` resolved, lies inside one of `dirs`. */
+/** Whether `path`, symlinks and `..` resolved, lies inside one of `dirs`. Fails closed. */
 export function isInsideDirs(path: string, dirs: string[]): boolean {
-  const target = realOrResolved(path);
+  const target = canonicalPath(path);
+  if (target === null) return false;
   return dirs.some((dir) => {
-    const root = realOrResolved(dir);
-    return target === root || target.startsWith(root + sep);
+    const root = canonicalPath(dir);
+    if (root === null) return false;
+    const prefix = root.endsWith(sep) ? root : root + sep;
+    return target === root || target.startsWith(prefix);
   });
 }
 

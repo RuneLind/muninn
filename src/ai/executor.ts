@@ -37,7 +37,16 @@ export async function executeClaudePrompt(
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
   const fence = fencedSurface(botConfig.toolSurface);
-  if (fence) assertRestrictedCliAvailable(fence);
+  if (fence) {
+    assertRestrictedCliAvailable(fence);
+    // spawnArgs land after the fence flags, and a later --settings or
+    // --mcp-config wins, so they could undo it.
+    if (botConfig.spawnArgs && botConfig.spawnArgs.length > 0) {
+      throw new Error(
+        `claude-cli: a fenced tool surface refuses spawnArgs (${botConfig.spawnArgs.join(" ")}) — a later flag would undo the fence.`,
+      );
+    }
+  }
 
   const args = [
     "claude",

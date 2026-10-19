@@ -108,6 +108,16 @@ export function applyToolSurface(
   }
   if (surface === "bot") return { ...botConfig, toolSurface: "bot" };
   if (surface === "none") return { ...botConfig, toolSurface: "none", toolsDisabled: true };
+  // Anything but the four declared shapes is refused, never read as { web }.
+  const shape = surface as unknown;
+  const isRead = typeof shape === "object" && shape !== null && "read" in shape && Array.isArray(shape.read);
+  const isWeb = typeof shape === "object" && shape !== null && "web" in shape && shape.web === true;
+  if (!isRead && !isWeb) {
+    throw new Error(
+      `executeOneShot: unknown toolSurface ${String(JSON.stringify(shape))} — ` +
+        `expected "none", "bot", { read: [dirs] } or { web: true }.`,
+    );
+  }
 
   const caps = connectorCapabilities(botConfig);
   if (isReadSurface(surface)) {

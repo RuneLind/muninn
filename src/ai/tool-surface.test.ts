@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -123,6 +123,74 @@ describe("fencedCanUseTool", () => {
   test("isInsideDirs treats the dir itself as inside and a prefix-sharing sibling as outside", () => {
     expect(isInsideDirs(framesDir, [framesDir])).toBe(true);
     expect(isInsideDirs(`${framesDir}2/a`, [framesDir])).toBe(false);
+  });
+});
+
+describe("isInsideDirs fails closed", () => {
+  // `dl` points at `root`, outside `framesDir`; `filelink.txt` at a file outside it.
+  let dl: string;
+  let fileLink: string;
+  beforeAll(() => {
+    writeFileSync(join(root, "real.txt"), "secret");
+    dl = join(framesDir, "dl");
+    symlinkSync(root, dl);
+    fileLink = join(framesDir, "filelink.txt");
+    symlinkSync(join(root, "real.txt"), fileLink);
+    symlinkSync(join(root, "gone.txt"), join(framesDir, "dangling.txt"));
+  });
+
+  test("a trailing slash through a file symlink (ENOTDIR) is outside", async () => {
+    expect(isInsideDirs(`${fileLink}/`, [framesDir])).toBe(false);
+    const can = fencedCanUseTool({ read: [framesDir] });
+    const opts = { signal: new AbortController().signal } as never;
+    expect((await can("Read", { file_path: `${fileLink}/` }, opts))!.behavior).toBe("deny");
+  });
+
+  test("a path too long to resolve (ENAMETOOLONG) through an escaping symlink is outside", () => {
+    expect(isInsideDirs(`${dl}/${"./".repeat(600)}real.txt`, [framesDir])).toBe(false);
+  });
+
+  test("a missing file under an escaping dir symlink is outside", () => {
+    expect(isInsideDirs(`${dl}/nope.txt`, [framesDir])).toBe(false);
+    expect(isInsideDirs(`${dl}/nope/deeper.txt`, [framesDir])).toBe(false);
+  });
+
+  test("a `..` segment is outside: Bun's realpath applies it before following symlinks", () => {
+    // deep -> <root>/b/c, so the OS reads <frames>/deep/../x.jpg as <root>/b/x.jpg,
+    // while a lexical `..` lands on <frames>/x.jpg, which exists.
+    mkdirSync(join(root, "b", "c"), { recursive: true });
+    writeFileSync(join(root, "b", "x.jpg"), "secret");
+    symlinkSync(join(root, "b", "c"), join(framesDir, "deep"));
+    expect(readFileSync(`${framesDir}/deep/../x.jpg`, "utf8")).toBe("secret");
+    expect(isInsideDirs(`${framesDir}/deep/../x.jpg`, [framesDir])).toBe(false);
+    expect(isInsideDirs(`${framesDir}/nope/../x.jpg`, [framesDir])).toBe(false);
+  });
+
+  test("a dangling symlink is outside: its target is not a component that does not exist", () => {
+    expect(isInsideDirs(join(framesDir, "dangling.txt"), [framesDir])).toBe(false);
+  });
+
+  test("a relative path is outside, whatever muninn's own cwd is", async () => {
+    const saved = process.cwd();
+    process.chdir(framesDir);
+    try {
+      expect(isInsideDirs("x.jpg", [framesDir])).toBe(false);
+      const can = fencedCanUseTool({ read: [framesDir] });
+      const opts = { signal: new AbortController().signal } as never;
+      expect((await can("Read", { file_path: "x.jpg" }, opts))!.behavior).toBe("deny");
+    } finally {
+      process.chdir(saved);
+    }
+  });
+
+  test('a root of "/" or with a trailing separator contains its files', () => {
+    expect(isInsideDirs(join(framesDir, "x.jpg"), ["/"])).toBe(true);
+    expect(isInsideDirs(join(framesDir, "x.jpg"), [`${framesDir}/`])).toBe(true);
+  });
+
+  test("a file not yet created under a real dir stays inside", () => {
+    expect(isInsideDirs(join(framesDir, "new.jpg"), [framesDir])).toBe(true);
+    expect(isInsideDirs(join(framesDir, "sub", "new.jpg"), [framesDir])).toBe(true);
   });
 });
 
@@ -266,6 +334,32 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
     // The unfenced shapes do not depend on the version.
     await driveCapture(driveBot(botDir, { connector: "claude-cli" }), "none");
     expect(spawned).toHaveLength(1);
+  });
+
+  test("a malformed surface is refused before spawning, never read as { web }", async () => {
+    for (const bad of [undefined, null, {}, { web: false }, { web: "yes" }, { read: "/tmp" }]) {
+      await expect(
+        driveCapture(driveBot(botDir, { connector: "claude-cli" }), bad as never),
+      ).rejects.toThrow(/unknown toolSurface/);
+    }
+    for (const bad of [undefined, null, {}, { web: false }]) {
+      expect(() => applyToolSurface(driveBot(botDir, { connector: "claude-sdk" }), bad as never, undefined)).toThrow(
+        /unknown toolSurface/,
+      );
+    }
+    expect(spawned).toHaveLength(0);
+  });
+
+  test("a fenced surface refuses the bot's spawnArgs, which could re-add --settings or --mcp-config", async () => {
+    const withArgs = driveBot(botDir, { connector: "claude-cli", spawnArgs: ["--settings", "{}"] });
+    await expect(driveCapture(withArgs, { web: true })).rejects.toThrow(/spawnArgs/);
+    await expect(driveCapture(withArgs, { read: [framesDir] })).rejects.toThrow(/spawnArgs/);
+    expect(spawned).toHaveLength(0);
+    // The unfenced shapes keep appending them (the benchmark scratch bot).
+    await driveCapture(withArgs, "bot");
+    await driveCapture(withArgs, "none");
+    expect(spawned).toHaveLength(2);
+    for (const { args } of spawned) expect(flagValues(args, "--settings")).toEqual(["{}"]);
   });
 
   test("{ read } with extraDirs beside it is refused before spawning", async () => {
