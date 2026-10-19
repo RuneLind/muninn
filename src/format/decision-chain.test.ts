@@ -33,6 +33,23 @@ describe("question → decision", () => {
     expect(a.conflicts).toEqual([{ question: "S1", closedBy: "D1", claimant: "D2" }]);
   });
 
+  test("«Lukker Sn» after the question was reopened: the reopen is no close, so the edge stands", () => {
+    const a = analyze(log("**S1** — Hva? Gjenåpnet 03.10.2026.", "**D2** — B. Lukker S1."));
+    expect(a.chains.map(lineageLine)).toEqual(["S1 → D2"]);
+    expect(a.chains[0]!.questions[0]!.source).toBe("closes");
+    expect(a.conflicts).toEqual([]);
+    const reopened = analyze(log("**O1** — What? Closed 2026-10-01 (D1). Reopened 2026-10-03.", "**D1** — A.", "**D2** — B. Closes O1."));
+    expect(reopened.chains.map(lineageLine)).toEqual(["O1 → D2"]);
+    expect(reopened.conflicts).toEqual([]);
+  });
+
+  test("«Lukker Sn» naming the decision the question's own close names: one edge, no conflict", () => {
+    const a = analyze(log("**S1** — Hva? Lukket 01.10.2026 (D1).", "**D1** — A. Lukker S1."));
+    expect(a.chains.map(lineageLine)).toEqual(["S1 → D1"]);
+    expect(a.chains[0]!.questions).toEqual([{ id: "S1", label: "Hva? Lukket 01.10.2026 (D1).", source: "close" }]);
+    expect(a.conflicts).toEqual([]);
+  });
+
   test("«Lukket S1 og S2» past tense, then a reopen: no edge, no conflict", () => {
     const a = analyze(log("**S1** — Hva? Gjenåpnet 03.10.2026.", "**S2** — Hvor?", "**D4** — C. Lukket S1 og S2 i forrige runde."));
     expect(a.chains).toEqual([]);
@@ -81,6 +98,33 @@ describe("decision → PR", () => {
     expect(lines(log("**D1** — Run PR 3 after PR 1."))).toEqual(["D1 → PR 3"]);
   });
 
+  test("«PR n» and «oppgave n» with one number are two outputs", () => {
+    expect(lines(log("**D1** — Ship PR 3 and oppgave 3."))).toEqual(["D1 → PR 3, oppgave 3"]);
+  });
+
+  test("a ledger row citing a decision gates «PR n»; «oppgave n» only under an Oppgave ledger", () => {
+    const LOG2 = log("**D1** — Do PR 3 and oppgave 3.", "**D2** — Other.");
+    expect(lines(LOG2 + ledger(["PR", "State"], [["3 — x", "open — per D2"]]))).toEqual(["D2 → PR 3 (open)", "D1 → oppgave 3"]);
+    expect(lines(LOG2 + ledger(["Oppgave", "State"], [["3 — x", "open — per D2"]]))).toEqual(["D2 → PR 3 (open)"]);
+  });
+
+  test("an oppgave takes a state only from an Oppgave ledger", () => {
+    expect(lines(log("**D1** — Do oppgave 3.") + ledger(["PR", "State"], [["3 — x", "open"]]))).toEqual(["D1 → oppgave 3"]);
+    expect(lines(log("**D1** — Do oppgave 3.") + ledger(["Oppgave", "State"], [["3 — x", "open"]]))).toEqual(["D1 → oppgave 3 (open)"]);
+  });
+
+  test("a range expands like a list; a range over 10 keeps its ends", () => {
+    expect(lines(log("**D1** — Ship PR 4–6."))).toEqual(["D1 → PR 4, PR 5, PR 6"]);
+    expect(lines(log("**D1** — Ship PR 4-6."))).toEqual(["D1 → PR 4, PR 5, PR 6"]);
+    expect(lines(log("**D1** — Ship PR 4, 5 og 6."))).toEqual(["D1 → PR 4, PR 5, PR 6"]);
+    expect(lines(log("**D1** — Gjør oppgave 1–2 og 4."))).toEqual(["D1 → oppgave 1, oppgave 2, oppgave 4"]);
+    expect(lines(log("**D1** — Ship PR 4–30."))).toEqual(["D1 → PR 4, PR 30"]);
+  });
+
+  test("«pr n» in lower case is no slate number (Norwegian «pr.» reads «per»)", () => {
+    expect(lines(log("**D1** — Én kjøring pr 4 uker."))).toEqual([]);
+  });
+
   test("a `#` PR reference is evidence, never a slate edge", () => {
     expect(lines(log("**D1** — See [PR #3497](https://example.test/pull/3497) and PR #12."))).toEqual([]);
   });
@@ -97,6 +141,20 @@ describe("reversals and order", () => {
 
   test("a struck lead with no reversal word is no reversal", () => {
     expect(analyze(log("**D3** — ~~Typo~~ Fixed wording.")).chains).toEqual([]);
+  });
+
+  test("the reversal word is read in any case, Snudd, Reversed, superseded or erstattet", () => {
+    expect(lines(log("**D1** — ~~Bruk X.~~ Erstattet av ny løsning."))).toEqual(["D1 (reversed)"]);
+    expect(lines(log("**D1** — ~~Use X.~~ Superseded: see D2.", "**D2** — Y."))).toEqual(["D1 (reversed)"]);
+    expect(lines(log("**D1** — ~~Bruk X.~~ SNUDD 03.10."))).toEqual(["D1 (reversed)"]);
+    expect(lines(log("**D1** — ~~Use X.~~ — reversed in round 2."))).toEqual(["D1 (reversed)"]);
+  });
+
+  test("a reversal needs the whole first sentence struck and the word right after it", () => {
+    expect(lines(log("**D1** — ~~Use~~ the cache; this is not reversed."))).toEqual([]);
+    expect(lines(log("**D1** — ~~Use X.~~ Kept, and never reversed."))).toEqual([]);
+    expect(lines(log("**D1** — ~~Use X~~ and Y. Snudd."))).toEqual([]);
+    expect(lines(log("**D1** — ~~Old~~ reversed order is the default now."))).toEqual([]);
   });
 
   test("newest decision first", () => {

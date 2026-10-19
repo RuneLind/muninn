@@ -5,13 +5,14 @@
  * Pure and server-free (web-format ships in the chat bundle). Edges, in order:
  *  1. question → decision: the question item's close rule
  *     (`itemQuestionState`). A decision's present-tense «Lukker Sn» /
- *     «Closes On» adds the edge only when Sn's own item carries no canonical
- *     phrase; when Sn's close names another decision, the question wins and
- *     the pair is a conflict (lint reports it).
+ *     «Closes On» adds the edge only when the last canonical phrase of Sn's
+ *     own item is no close (none, or a reopen); when Sn's close names another
+ *     decision, the question wins and the pair is a conflict (lint reports it).
  *  2. decision → PR: every ledger row citing the decision. «PR n» /
  *     «oppgave n» in the decision's prose adds an edge only when no ledger row
  *     for that number cites a decision, and not right after a context word
- *     («after PR 4», «som PR 20», «from the PR 2 review»).
+ *     («after PR 4», «som PR 20», «from the PR 2 review»). Every ledger numbers
+ *     PRs; only a ledger whose first header is Oppgave numbers oppgaver.
  *  3. «via»: the `Q-n` ids a question item names.
  */
 
@@ -26,17 +27,18 @@ import {
   type DecisionLogEntry,
 } from "./question.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
-import { splitFirstSentence, visibleText } from "./report-top.ts";
+import { sentenceBreaks, splitFirstSentence, visibleText } from "./report-top.ts";
 import { prStateMap, type Ledger, type PrState } from "./pr-ledger.ts";
 
 /** «Lukker S3», «Closes O2, O4 and O5»: present tense only. */
 const CLOSES_RE =
   /(?<![\p{L}\p{N}_])(?:[Ll]ukker|[Cc]loses)[ \t ]+([SO]\d{1,4}(?:[ \t ]*(?:,|og|and|&)[ \t ]*[SO]\d{1,4})*)(?![\p{L}\p{N}])/gu;
-/** «PR 7», «oppgave 1 og 2», «PR 22/23»: a slate number in plain prose. A
+/** «PR 7», «oppgave 1 og 2», «PR 22/23», «PR 4–6»: a slate number in plain
+ *  prose, `PR` in capitals only (Norwegian «pr 4» reads «per 4»). A
  *  `#` form (`PR #3497`, `[PR #3497](…)`) names a pull request on GitHub,
  *  usually as evidence, and is never a slate output. */
 const PROSE_PR_RE =
-  /(?<![\p{L}\p{N}_[])(PR|[Oo]ppgave)[ \t ]+(\d{1,4})((?:[ \t ]*(?:,|og|and|&|\/)[ \t ]*\d{1,4}(?![\p{L}\p{N}#]))*)(?![\p{L}\p{N}\]])/gu;
+  /(?<![\p{L}\p{N}_[])(PR|[Oo]ppgave)[ \t ]+(\d{1,4})((?:[ \t ]*(?:,|og|and|&|\/|–|-)[ \t ]*\d{1,4}(?![\p{L}\p{N}#]))*)(?![\p{L}\p{N}\]])/gu;
 /** A prose PR mention right after one of these words is context, not an
  *  output: «starting after PR 4», «as PR 20 charges», «from the PR 2 review». */
 const CONTEXT_BEFORE_RE =
@@ -100,26 +102,44 @@ function labelOf(markdown: string, opts: ChainOptions): string {
   return clip(text.replace(/\s+/g, " ").trim());
 }
 
-/** «Snudd», «Reversed», «superseded by», «erstattet av» after a struck lead. */
-const REVERSAL_WORD_RE = /(?<![\p{L}\p{N}])(?:[Ss]nudd|[Rr]eversed|superseded by|erstattet av)(?![\p{L}\p{N}])/u;
+/** «Snudd», «Reversed», «Superseded», «Erstattet» in any case, opening the
+ *  text after a struck first sentence (punctuation or a dash may come first). */
+const REVERSAL_LEAD_RE = /^[\s.,:;!?()*_—–-]*(?:snudd|reversed|superseded|erstattet)(?![\p{L}\p{N}_])/iu;
 
-/** A reversed decision: dimmed by the log (struck whole, or superseded), or a
- *  struck first sentence followed by «Snudd» / «superseded by». The label is
- *  the struck sentence. */
+/** A reversed decision: dimmed by the log (struck whole, or «superseded by
+ *  Dn» anywhere, `parseLogItem`), or a struck first sentence directly followed
+ *  by a reversal word. The label is the struck sentence. */
 function reversalOf(e: DecisionLogEntry): { struck: string | null; reversed: boolean } {
   const whole = wholeStrike(e.itemText);
   if (whole !== null) return { struck: whole, reversed: true };
-  const lead = /^~~([^~\n][\s\S]*?)~~([\s\S]*)$/.exec(e.itemText);
-  if (lead && REVERSAL_WORD_RE.test(lead[2]!)) return { struck: lead[1]!, reversed: true };
+  const cut = sentenceBreaks(e.itemText, 1)[0];
+  const lead = cut === undefined ? null : wholeStrike(e.itemText.slice(0, cut).trimEnd());
+  if (lead !== null && REVERSAL_LEAD_RE.test(e.itemText.slice(cut))) return { struck: lead, reversed: true };
   return { struck: null, reversed: e.dim };
+}
+
+/** A ledger whose first column numbers oppgaver rather than PRs. */
+function numbersOppgaver(l: Ledger): boolean {
+  return /^(?:(?:planned|planlagt)\s+)?oppgave$/i.test((l.headers[0] ?? "").replace(/\*\*|__|~~/g, "").trim());
 }
 
 function idsIn(list: string): string[] {
   return list.match(/[SO]\d{1,4}/g) ?? [];
 }
 
+/** A range expands to its numbers up to this many; a longer one keeps its ends. */
+const RANGE_MAX = 10;
+
+/** The numbers a prose mention names: a list as written, `4–6` as 4, 5, 6. */
 function numbersIn(first: string, tail: string): number[] {
-  return [Number(first), ...(tail.match(/\d{1,4}/g) ?? []).map(Number)];
+  const out = [Number(first)];
+  for (const m of tail.matchAll(/(,|og|and|&|\/|–|-)[ \t\u00a0]*(\d{1,4})/g)) {
+    const n = Number(m[2]);
+    const from = out[out.length - 1]!;
+    if ((m[1] === "–" || m[1] === "-") && n > from && n - from < RANGE_MAX) for (let k = from + 1; k < n; k++) out.push(k);
+    out.push(n);
+  }
+  return out;
 }
 
 /**
@@ -135,10 +155,16 @@ export function analyzeDecisionChains(blocks: Block[], ledgers: Ledger[], opts: 
   const decisions = [...firstEntry.values()].filter((e) => DECISION_ID_RE.test(e.id));
   const questions = [...firstEntry.values()].filter((e) => QUESTION_ID_RE.test(e.id) || questionIds.has(e.id));
   const chainOf = new Map<string, DecisionChain>();
+  const reversals = new Map<string, ReturnType<typeof reversalOf>>();
+  const reversal = (e: DecisionLogEntry) => {
+    let r = reversals.get(e.id);
+    if (!r) reversals.set(e.id, (r = reversalOf(e)));
+    return r;
+  };
   const chain = (e: DecisionLogEntry): DecisionChain => {
     let c = chainOf.get(e.id);
     if (!c) {
-      const rev = reversalOf(e);
+      const rev = reversal(e);
       c = {
         decision: e.id,
         label: labelOf(rev.struck ?? e.itemText, opts),
@@ -181,10 +207,10 @@ export function analyzeDecisionChains(blocks: Block[], ledgers: Ledger[], opts: 
         const q = questionEntry.get(qid);
         if (!q) continue;
         const phrase = lastCanonicalPhrase(q.text);
-        if (phrase === null) {
+        if (phrase?.kind !== "close") {
           const c = chain(d);
           if (!c.questions.some((x) => x.id === qid)) c.questions.push({ id: qid, label: labelOf(q.itemText, opts), source: "closes" });
-        } else if (phrase.kind === "close" && phrase.decision && phrase.decision !== d.id) {
+        } else if (phrase.decision && phrase.decision !== d.id) {
           if (!conflicts.some((x) => x.question === qid && x.claimant === d.id))
             conflicts.push({ question: qid, closedBy: phrase.decision, claimant: d.id });
         }
@@ -193,12 +219,13 @@ export function analyzeDecisionChains(blocks: Block[], ledgers: Ledger[], opts: 
   }
 
   // 2. decision → PR, from the ledgers.
-  const states = prStateMap(ledgers);
-  const citedPrs = new Set<number>();
+  const states = { PR: prStateMap(ledgers), oppgave: prStateMap(ledgers.filter(numbersOppgaver)) };
+  const cited = { PR: new Set<number>(), oppgave: new Set<number>() };
   for (const l of ledgers) {
     for (const r of l.rows) {
       if (r.pr === null || r.decisions.length === 0) continue;
-      citedPrs.add(r.pr);
+      cited.PR.add(r.pr);
+      if (numbersOppgaver(l)) cited.oppgave.add(r.pr);
       for (const did of r.decisions) {
         const d = firstEntry.get(did);
         if (!d) continue;
@@ -215,12 +242,12 @@ export function analyzeDecisionChains(blocks: Block[], ledgers: Ledger[], opts: 
     const masked = maskCodeSpans(d.text);
     for (const m of masked.matchAll(PROSE_PR_RE)) {
       if (CONTEXT_BEFORE_RE.test(masked.slice(Math.max(0, m.index! - 24), m.index!))) continue;
-      const noun = m[1]!.toLowerCase() === "pr" ? "PR" : "oppgave";
+      const noun: ChainOutput["noun"] = m[1] === "PR" ? "PR" : "oppgave";
       for (const n of numbersIn(m[2]!, m[3] ?? "")) {
-        if (citedPrs.has(n)) continue;
+        if (cited[noun].has(n)) continue;
         const c = chain(d);
-        if (c.outputs.some((o) => o.number === n)) continue;
-        c.outputs.push({ noun, number: n, state: states.get(n) ?? null, source: "prose" });
+        if (c.outputs.some((o) => o.number === n && o.noun === noun)) continue;
+        c.outputs.push({ noun, number: n, state: states[noun].get(n) ?? null, source: "prose" });
         proseEdges++;
       }
     }
@@ -228,7 +255,7 @@ export function analyzeDecisionChains(blocks: Block[], ledgers: Ledger[], opts: 
 
   // A reversal is a chain of its own even with no edge: it is the row that
   // says the decision was turned.
-  for (const d of decisions) if (reversalOf(d).reversed) chain(d);
+  for (const d of decisions) if (reversal(d).reversed) chain(d);
 
   for (const c of chainOf.values()) c.outputs.sort((a, b) => a.number - b.number);
   const chains = [...chainOf.values()]
