@@ -28,7 +28,7 @@ env:
 
 jobs:
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -94,7 +94,7 @@ jobs:
   # `--ignore=GHSA-gcfj-64vw-6mp9` exits 0, `--ignore=CVE-2026-67320` — the same
   # advisory — exits 1. The GHSA id is in this step's own output.
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -104,7 +104,7 @@ jobs:
       - run: bun audit --audit-level=high
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       # `src/test/setup-db.ts` hardcodes `…@127.0.0.1:5435/muninn_test`, so the
       # host port has to be 5435 — it is not configurable from here. pgvector,
@@ -160,7 +160,7 @@ jobs:
   # TWO builds, not three: the default image is built once with a plain log the
   # bots/ assertion reads, and every image-content check runs against it.
   docker-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The claude.ai installer and the Debian mirrors are on this job's critical
     # path, so a hung mirror must not hold a PR open for six hours.
     timeout-minutes: 25
@@ -262,7 +262,7 @@ jobs:
   # `e2e/shard-timings.json`; `--shard=i/n` balances by test count and left one
   # shard with half the suite's time.
   e2e-shard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # Every shard reports, so one red does not hide another.
       fail-fast: false
@@ -369,7 +369,7 @@ jobs:
   e2e:
     needs: e2e-shard
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CI: "true"
     steps:

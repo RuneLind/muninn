@@ -499,6 +499,11 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   previews — the `/search` chunk cards, the `/summaries` Similar snippet, the
   wiki Similar snippet — run `plainFactcheckText` instead; the share body strips
   the block (`stripSummaryFactcheckBlock` before `prepareSummaryDocBody`).
+  Both `renderMarkdown`s also interpolate `sanitizedMarkedInstallScript()`
+  (`doc-panel.ts`): the raw-HTML escape plus a `link` override that decodes
+  character references, refuses what `isSafeLinkHref` refuses (rendered as
+  text) and writes the href HTML-escaped. Both install that same snippet on the
+  page's one marked under `marked.__sanitized`, so whichever runs first wins.
 - **The client.** `/result` reports `blockAdded` (the document carries THIS
   check's block), which replaces ➕ Add with "Fact check section added". The
   proposal and message belong to one web result (`createdAt`) and drop when it
