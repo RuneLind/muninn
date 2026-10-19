@@ -157,6 +157,40 @@ describe("reversals and order", () => {
     expect(lines(log("**D1** — ~~Old~~ reversed order is the default now."))).toEqual([]);
   });
 
+  test("a struck lead with no sentence break inside the strike is still a reversal, labelled by the strike", () => {
+    for (const item of [
+      "~~Bruk X~~ Snudd 03.10.",
+      "~~Bruk X~~ — snudd i runde 6. Ny regel.",
+      "~~Bruk X…~~ Snudd.",
+      "~~Bruk X.~~Snudd 03.10.",
+    ]) {
+      const a = analyze(log(`**D1** — ${item}`));
+      expect(a.chains.map(lineageLine)).toEqual(["D1 (reversed)"]);
+      expect(a.chains[0]!.label).toBe(item.slice(2, item.indexOf("~~", 2)));
+    }
+  });
+
+  test("a dimmed «superseded by» item with a struck lead is labelled by the strike", () => {
+    const a = analyze(log("**D1** — ~~Use X.~~ Now superseded by D2.", "**D2** — Y."));
+    expect(a.chains.map(lineageLine)).toEqual(["D1 (reversed by D2)"]);
+    expect(a.chains[0]!.label).toBe("Use X.");
+  });
+
+  test("an emphasised reversal word counts, in italics as in bold", () => {
+    expect(lines(log("**D1** — ~~Use X.~~ _Snudd_ 03.10."))).toEqual(["D1 (reversed)"]);
+    expect(lines(log("**D1** — ~~Use X.~~ **Snudd** 03.10."))).toEqual(["D1 (reversed)"]);
+  });
+
+  test("an unclosed strike or bold marker on a long item stays linear", () => {
+    for (const open of ["~~", "**"]) {
+      const md = log(`**D1** — ${open}${"a. ".repeat(20_000)}`);
+      analyze(md);
+      const t0 = performance.now();
+      analyze(md);
+      expect(performance.now() - t0).toBeLessThan(20);
+    }
+  });
+
   test("newest decision first", () => {
     const md = log("**O1** — A? Closed 2026-10-01 (D2).", "**O2** — B? Closed 2026-10-01 (D10).", "**D2** — Two.", "**D10** — Ten.");
     expect(lines(md)).toEqual(["O2 → D10", "O1 → D2"]);

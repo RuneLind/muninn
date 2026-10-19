@@ -27,7 +27,7 @@ import {
   type DecisionLogEntry,
 } from "./question.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
-import { sentenceBreaks, splitFirstSentence, visibleText } from "./report-top.ts";
+import { splitFirstSentence, visibleText } from "./report-top.ts";
 import { prStateMap, type Ledger, type PrState } from "./pr-ledger.ts";
 
 /** «Lukker S3», «Closes O2, O4 and O5»: present tense only. */
@@ -103,19 +103,29 @@ function labelOf(markdown: string, opts: ChainOptions): string {
 }
 
 /** «Snudd», «Reversed», «Superseded», «Erstattet» in any case, opening the
- *  text after a struck first sentence (punctuation or a dash may come first). */
-const REVERSAL_LEAD_RE = /^[\s.,:;!?()*_—–-]*(?:snudd|reversed|superseded|erstattet)(?![\p{L}\p{N}_])/iu;
+ *  text after the struck lead (punctuation, dashes or `*`/`_` may come first). */
+const REVERSAL_LEAD_RE = /^[\s.,:;!?()*_—–-]*(?:snudd|reversed|superseded|erstattet)(?![\p{L}\p{N}])/iu;
+
+/** The item's leading `~~…~~` span when it reads as a sentence (two words or
+ *  more, or closing punctuation): `~~Use~~ the cache` is an edit, not a lead.
+ *  One `indexOf`, so an unclosed `~~` costs one scan. */
+function struckLead(text: string): { struck: string; end: number } | null {
+  if (!text.startsWith("~~")) return null;
+  const close = text.indexOf("~~", 2);
+  if (close < 0) return null;
+  const struck = text.slice(2, close);
+  return /\S\s+\S|[.!?…]\s*$/u.test(struck) ? { struck, end: close + 2 } : null;
+}
 
 /** A reversed decision: dimmed by the log (struck whole, or «superseded by
- *  Dn» anywhere, `parseLogItem`), or a struck first sentence directly followed
- *  by a reversal word. The label is the struck sentence. */
+ *  Dn» anywhere, `parseLogItem`), or a struck lead directly followed by a
+ *  reversal word. The label of a reversed item is its struck lead. */
 function reversalOf(e: DecisionLogEntry): { struck: string | null; reversed: boolean } {
   const whole = wholeStrike(e.itemText);
   if (whole !== null) return { struck: whole, reversed: true };
-  const cut = sentenceBreaks(e.itemText, 1)[0];
-  const lead = cut === undefined ? null : wholeStrike(e.itemText.slice(0, cut).trimEnd());
-  if (lead !== null && REVERSAL_LEAD_RE.test(e.itemText.slice(cut))) return { struck: lead, reversed: true };
-  return { struck: null, reversed: e.dim };
+  const lead = struckLead(e.itemText);
+  const reversed = e.dim || (lead !== null && REVERSAL_LEAD_RE.test(e.itemText.slice(lead.end)));
+  return { struck: reversed ? (lead?.struck ?? null) : null, reversed };
 }
 
 /** A ledger whose first column numbers oppgaver rather than PRs. */
