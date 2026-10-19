@@ -562,8 +562,8 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
  * code does not block, and the function's doc comment lists the same ranges.
  * Each row pins the first and last address (denied) and the address just
  * below and just above (allowed); `null` means the range touches the end of
- * the address space or, for 64:ff9b::/96, sits inside a blocked range on that
- * side, and a neighbour that falls in another blocked range is replaced by the
+ * the address space or the next address on that side is blocked too (fe80::/10
+ * and fec0::/10 above, 64:ff9b::/96 inside the /32), and a neighbour that falls in another blocked range is replaced by the
  * nearest allowed one, named in `note`.
  */
 describe("the IP denylist, enumerated: these tables are everything isFetchableWebUrl blocks by address", () => {
