@@ -522,7 +522,7 @@ Who writes it, and when, is load-bearing — three review rounds landed here:
 - **The checker decides coverage; the runner writes it.** `gmailLiveness` returns
   `{failure, reached}`: `failure` drives the retry (unchanged), `reached` is the
   stricter question. They differ on the *unjudgeable* cases — `toolCalls`
-  undefined, and "no MCP server key contains gmail" — where there is no evidence
+  undefined, or no botDir to name the server from — where there is no evidence
   the run broke and equally none that it worked. An unparseable answer is also
   not coverage. Coverage rides out on `checkEmail`'s **return value**
   (`WatcherCheckResult.coveredFrom`), never an out-param: as an optional out-param
@@ -564,10 +564,12 @@ this bounds is preserved on exactly the row already failing.
 The email spawn opts into `toolSurface: "gmail-read"` (`buildHaikuArgs`,
 `src/scheduler/executor.ts`): the Gmail server only, `ToolSearch` plus the three
 Gmail reads, `dontAsk`, the known writes disallowed. Every other watcher spawn is
-tool-less (`--tools ""`). The liveness predicate counts a Gmail call whose
-`tool_result` came back `is_error` (`ToolCall.isError`, set by `StreamParser`) as
-NOT reached: under `dontAsk` a denied read is exactly that, and the model then
-answers `[]`. Email bodies are not content-fenced; the model reads them through a
+tool-less (`--tools ""`). A run counts as reached only on a `search_emails`
+call whose `tool_result` did not come back `is_error` (`ToolCall.isError`, set by
+`StreamParser`): under `dontAsk` a denied read is exactly that, and a successful
+`list_email_labels` beside a failed search covers no window. A bot whose
+`.mcp.json` has no key containing "gmail" fails the check before the spawn
+(`missingGmailServerMessage`) instead of answering `[]` from a tool-less spawn. Email bodies are not content-fenced; the model reads them through a
 tool result.
 
 ### Bounded retry (2026-08-13)

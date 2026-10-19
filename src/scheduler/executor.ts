@@ -310,7 +310,7 @@ function gmailReadSurface(botDir: string): { mcpConfig: string; settings: string
   if (!mcpConfig) {
     warnOnce(`mcp:${botDir}`,
       "No Gmail server in a usable .mcp.json under {botDir} — this spawn asked for Gmail and will run with NO " +
-        "tools. A tool-using checker (the email watcher) degrades to an empty result that looks like a quiet run.",
+        "tools. The email watcher fails such a bot before spawning (missingGmailServerMessage, src/watchers/email.ts).",
       { botDir });
   }
   if (!botSettings) {
