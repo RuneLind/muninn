@@ -70,10 +70,11 @@ describe("applyToolSurface", () => {
     expect(() => applyToolSurface(bot(), { read: ["frames"] }, undefined)).toThrow(/absolute/);
   });
 
-  test("extraDirs ride only on \"bot\": a { read } surface names its own dirs", () => {
+  test("extraDirs ride only on \"bot\", and the error names the surface", () => {
     expect(() => applyToolSurface(bot(), { read: ["/tmp/f"] }, ["/tmp/g"])).toThrow(/only allowed with toolSurface "bot"/);
     expect(() => applyToolSurface(bot(), "none", ["/tmp/g"])).toThrow(/only allowed/);
     expect(() => applyToolSurface(bot(), { web: true }, ["/tmp/g"])).toThrow(/only allowed/);
+    expect(() => applyToolSurface(bot(), "none", ["/tmp/g"])).toThrow(/^executeOneShot: extraDirs is only allowed with toolSurface "bot", not "none"\.$/);
     expect(applyToolSurface(bot(), "bot", ["/tmp/g"]).toolSurface).toBe("bot");
     expect(applyToolSurface(bot(), { read: ["/tmp/f"] }, []).toolSurface).toEqual({ read: ["/tmp/f"] });
   });
@@ -185,8 +186,9 @@ describe("isInsideDirs fails closed", () => {
   });
 
   test("a `..` segment is outside: Bun's realpath applies it before following symlinks", () => {
-    // deep -> <root>/b/c, so the OS reads <frames>/deep/../x.jpg as <root>/b/x.jpg,
-    // while a lexical `..` lands on <frames>/x.jpg, which exists.
+    // Defense in depth: the Read tool normalizes `..` before opening, so this gap is
+    // unreachable through the CLI or SDK today. deep -> <root>/b/c, so a raw open of
+    // <frames>/deep/../x.jpg reads <root>/b/x.jpg, while a lexical `..` lands on <frames>/x.jpg.
     mkdirSync(join(root, "b", "c"), { recursive: true });
     writeFileSync(join(root, "b", "x.jpg"), "secret");
     symlinkSync(join(root, "b", "c"), join(framesDir, "deep"));

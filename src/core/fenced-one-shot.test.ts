@@ -13,7 +13,7 @@
  * (`tracer`, `oneShot`), so nothing here touches the DB or a model.
  */
 
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, spyOn } from "bun:test";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
@@ -113,6 +113,42 @@ describe("runFencedOneShot — onProgress passthrough", () => {
     for (const tool of FENCED_EXCLUDED_TOOLS) expect(bot!.excludedTools).toContain(tool);
     // The tool-less surface is declared, and executeOneShot applies it.
     expect(seen[0]!.toolSurface).toBe("none");
+  });
+
+  test("the real claude-cli argv is tool-less: no built-ins, no MCP server", async () => {
+    // No `oneShot` seam: the declared "none" goes through the real executeOneShot
+    // and applyToolSurface to the spawned argv, so a dropped or wrong surface fails here.
+    const spawned: string[][] = [];
+    const resultLine = JSON.stringify({
+      type: "result", subtype: "success", is_error: false, result: "ok",
+      duration_ms: 5, duration_api_ms: 4, num_turns: 1, total_cost_usd: 0,
+      usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    });
+    const spawnSpy = spyOn(Bun, "spawn").mockImplementation(((args: string[]) => {
+      spawned.push(args);
+      return {
+        pid: 1,
+        stdout: new Response(resultLine + "\n").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(0),
+        kill: () => {},
+      };
+    }) as never);
+    try {
+      await runFencedOneShot({
+        ...base,
+        config: { ...config, claudeModel: "claude-sonnet-4-5", claudeTimeoutMs: 30_000 } as Config,
+        botConfig: { ...botConfig, connector: "claude-cli" },
+        tracer: fakeTracer(),
+      });
+    } finally {
+      spawnSpy.mockRestore();
+    }
+    expect(spawned).toHaveLength(1);
+    const args = spawned[0]!;
+    expect(args.flatMap((a, i) => (a === "--tools" ? [args[i + 1]] : []))).toEqual([""]);
+    expect(args).toContain("--strict-mcp-config");
+    expect(args).not.toContain("--mcp-config");
   });
 
   test("the deny-list covers 2.1.281's escapes", () => {

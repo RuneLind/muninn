@@ -103,7 +103,7 @@ export function applyToolSurface(
   const connector: ConnectorType = botConfig.connector ?? "claude-cli";
   if (surface !== "bot" && extraDirs && extraDirs.length > 0) {
     throw new Error(
-      `executeOneShot: extraDirs is only allowed with toolSurface "bot" — a { read } surface names its own dirs.`,
+      `executeOneShot: extraDirs is only allowed with toolSurface "bot", not ${String(JSON.stringify(surface))}.`,
     );
   }
   if (surface === "bot") return { ...botConfig, toolSurface: "bot" };
@@ -155,8 +155,9 @@ export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabiliti
  *
  * A thin adapter over {@link resolveConnector}: it folds the tool surface
  * ({@link applyToolSurface}), `timeoutMs` and `extraDirs` into a per-call
- * botConfig clone (the caller's config is never mutated), then dispatches. `extraDirs` on a connector that can't express them
- * throws before the connector runs so callers fail fast with a clear message.
+ * botConfig clone (the caller's config is never mutated), then dispatches.
+ * `extraDirs` on a connector that can't express them throws before the
+ * connector runs so callers fail fast with a clear message.
  */
 export async function executeOneShot(
   prompt: string,

@@ -21,10 +21,11 @@
  * request what they actually needed from the bot folder explicitly instead:
  * `--mcp-config` via `SpawnHaikuOptions.botDir`, persona via `.system`.
  *
- * NOT used by the chat connector (`src/ai/executor.ts`) or `claude-sdk`, which
- * still run in `botConfig.dir` — a chat turn's tool surface genuinely wants the
- * bot folder, and its prompt is large enough that the CLAUDE.md load is a smaller
- * relative share. Out of scope here, deliberately.
+ * The chat connector (`src/ai/executor.ts`) and `claude-sdk` use it only for a
+ * fenced tool surface (`{ read }`/`{ web }`), through `resolveFencedAgentCwd`.
+ * Every other run of theirs still runs in `botConfig.dir`: a chat turn's tool
+ * surface genuinely wants the bot folder, and its prompt is large enough that the
+ * CLAUDE.md load is a smaller relative share.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";

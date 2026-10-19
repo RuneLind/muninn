@@ -18,7 +18,13 @@
  *
  * Its own `bun test` link: it rewrites `process.env` for the subprocesses and
  * sets the tool-surface test seam. Each arm skips when its binary is absent
- * (no `claude` 2.1.303+ on PATH, no bundled SDK binary, no `openssl`).
+ * (no `claude` 2.1.303+ on PATH, no bundled SDK binary, no `openssl`), and its
+ * describe name says so: on CI the CLI arm skips.
+ *
+ * It needs no database, but a tool result reaches `loadConfig()` in-process
+ * (`recordToolSpan` → `huginn-trace-pointer.ts`), which throws without
+ * `DATABASE_URL`, so the run sets a placeholder when none is set. Nothing
+ * connects to it.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -87,6 +93,7 @@ beforeAll(() => {
   Object.assign(process.env, f.env, {
     CLAUDE_CONFIG_DIR: configDir,
     MUNINN_AGENT_CWD: join(f.root, "agent-home"),
+    DATABASE_URL: process.env.DATABASE_URL || "postgresql://unused@127.0.0.1:1/unused_test",
   });
   toolSurfaceTestSeam.extraSettings = { skipWebFetchPreflight: true };
 });
@@ -143,7 +150,10 @@ function expectHostileRefused(o: Outcome) {
 
 for (const connector of ["claude-cli", "claude-sdk"] as const) {
   const ready = connector === "claude-cli" ? cliReady : sdkReady;
-  describe.skipIf(!ready)(`${connector} against the fake Messages API`, () => {
+  const needs = connector === "claude-cli"
+    ? `claude CLI ≥${MIN_RESTRICTED_CLI_VERSION} and openssl`
+    : "the bundled SDK binary and openssl";
+  describe.skipIf(!ready)(`${connector} against the fake Messages API (skips without ${needs})`, () => {
     test('"none": nothing runs, not even the allowed Read or WebFetch', async () => {
       const o = await probe(connector, "none");
       expectHostileRefused(o);

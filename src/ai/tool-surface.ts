@@ -88,9 +88,11 @@ export function fencedSdkSettings(): Record<string, unknown> | undefined {
 /**
  * `path` with every symlink resolved the way the OS would, or `null` when that
  * cannot be known. A relative path is `null`: it would resolve against
- * muninn's cwd, not the run's. A path with a `..` segment is `null`: Bun's
- * `realpathSync` applies `..` lexically before following symlinks, so
- * `<dir>/link/../x` resolves to `<dir>/x` while the OS reads `<link target>/../x`.
+ * muninn's cwd, not the run's. A path with a `..` segment is `null`, as
+ * defense in depth: Bun's `realpathSync` applies `..` lexically before following
+ * symlinks, so `<dir>/link/../x` resolves to `<dir>/x` while a raw `open` reads
+ * `<link target>/../x`. The CLI and SDK Read tool normalize `..` before opening,
+ * so neither reaches that gap today.
  * A path that does not exist yet resolves through its deepest existing
  * ancestor, but only when the first missing component is genuinely absent
  * (ENOENT on `lstat`, so not a dangling symlink). Any other error (ENOTDIR,
