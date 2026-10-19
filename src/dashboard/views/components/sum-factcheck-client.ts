@@ -422,7 +422,11 @@ export async function sumFactcheckLoadBadges(): Promise<void> {
   try {
     const res = await fetch("/api/summaries/factcheck/badges", { cache: "no-store" });
     if (!res.ok) return;
-    const data = (await res.json()) as { badges?: Array<{ source: string; docId: string } & Badge> };
+    const data = (await res.json()) as { badges?: Array<{ source: string; docId: string } & Badge>; error?: string };
+    // The route answers a failed lookup 200 `{badges: [], error}`: keep the
+    // badges already drawn rather than wipe every ❌ mark on a DB hiccup. An
+    // empty list WITHOUT an error is real (a deleted check) and still clears.
+    if (data.error) return;
     badges = new Map((data.badges || []).map((b) => [keyOf(b.source, b.docId), { bad: b.bad, total: b.total }]));
   } catch {
     return;

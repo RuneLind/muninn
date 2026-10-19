@@ -25,6 +25,7 @@ import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
 const countCorrectableClaims = (claims: unknown) => factchecks.countCorrectableClaims(claims);
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
 import { sha256 } from "./util.ts";
+import { factcheckBodySha256 } from "../summaries/factcheck-body.ts";
 
 const URL = "https://www.tiktok.com/@coach/video/7550000000000000000";
 const CHECKED_AT = Date.UTC(2026, 9, 6, 10, 0, 0);
@@ -184,7 +185,7 @@ describe("correctableClaims", () => {
 
   test("a ❌ heading the saved claims lack does not count", () => {
     expect(correctableClaims(saved({ claims: [] }))).toEqual([]);
-    expect(buildFactcheckRider(saved({ claims: [] }), "tiktok-summaries")).toBe("");
+    expect(buildFactcheckRider(saved({ claims: [] }), "tiktok-summaries", undefined, false)).toBe("");
   });
 
   test("the rider and the gate count with one predicate", () => {
@@ -208,12 +209,12 @@ describe("correctableClaims", () => {
 
 describe("buildFactcheckRider", () => {
   test("no row, or a ✅/❓-only check, is no rider", () => {
-    expect(buildFactcheckRider(null, "tiktok-summaries")).toBe("");
-    expect(buildFactcheckRider(okOnly(), "tiktok-summaries")).toBe("");
+    expect(buildFactcheckRider(null, "tiktok-summaries", undefined, false)).toBe("");
+    expect(buildFactcheckRider(okOnly(), "tiktok-summaries", undefined, false)).toBe("");
   });
 
   test("attributes each ❌/⚠️ claim to the source kind and states the two rules", () => {
-    const rider = buildFactcheckRider(saved(), "tiktok-summaries");
+    const rider = buildFactcheckRider(saved(), "tiktok-summaries", undefined, false);
     expect(rider).toContain("the video claims “Saying these words raises your cortisol and wakes you up”. Sources say: Studies of self-affirmation find it LOWERS cortisol");
     expect(rider).toContain("the video claims “It takes 21 days to form a habit”.");
     expect(rider).toContain("Never state one of these claims as fact");
@@ -222,7 +223,7 @@ describe("buildFactcheckRider", () => {
     expect(rider).toContain("2026-10-06");
     // The ✅ claim is not a finding.
     expect(rider).not.toContain("Sleep supports memory");
-    expect(buildFactcheckRider(saved({ url: null }), "vimeo-summaries")).toContain("the talk claims");
+    expect(buildFactcheckRider(saved({ url: null }), "vimeo-summaries", undefined, false)).toContain("the talk claims");
   });
 
   // Item 14: from six real drafter runs — 3/6 listed the ⚠️ claim as a bare
@@ -231,7 +232,7 @@ describe("buildFactcheckRider", () => {
   // inert (3/3 real runs still judged unlisted claims); this wording measured
   // 0/3 clear (1 borderline) on the same TikTok doc.
   test("states the attribute-every-time and the unlisted-claims-were-not-checked rules", () => {
-    const rider = buildFactcheckRider(saved(), "tiktok-summaries");
+    const rider = buildFactcheckRider(saved(), "tiktok-summaries", undefined, false);
     expect(rider).toContain(
       "Do not state a listed claim as fact anywhere, including in a list of the video's points: attribute it every time.",
     );
@@ -245,14 +246,14 @@ describe("buildFactcheckRider", () => {
     const quoted = saved({
       claims: [{ index: 1, title: "t", quote: 'He said "five words" fix stress.', verdict: "❌", outcome: "verified", sources: [] }],
     });
-    const rider = buildFactcheckRider(quoted, "tiktok-summaries");
+    const rider = buildFactcheckRider(quoted, "tiktok-summaries", undefined, false);
     const line = rider.split("\n").find((l) => l.startsWith("- Claim 1"))!;
     expect(line).toContain("the video claims “He said ‘five words’ fix stress”. Sources say:");
     expect(rider).not.toMatch(/[.!?]["”]\./);
     expect(rider).not.toContain('"');
   });
   test("the URL host picks the noun in the rider", () => {
-    const rider = buildFactcheckRider(saved({ collection: "article-summaries", url: "https://vimeo.com/1" }), "article-summaries");
+    const rider = buildFactcheckRider(saved({ collection: "article-summaries", url: "https://vimeo.com/1" }), "article-summaries", undefined, false);
     expect(rider).toContain("the talk claims");
   });
 
@@ -269,7 +270,7 @@ describe("buildFactcheckRider", () => {
       outcome: "verified",
       sources: [],
     }));
-    const rider = buildFactcheckRider(saved({ answer, claims }), "tiktok-summaries");
+    const rider = buildFactcheckRider(saved({ answer, claims }), "tiktok-summaries", undefined, false);
     const findings = rider.split("--- BEGIN FACT-CHECK FINDINGS ---\n")[1]!.split("\n--- END")[0]!;
     const listed = findings.split("\n").filter((l) => l.startsWith("- Claim "));
     expect(listed.length).toBeGreaterThan(0);
@@ -307,6 +308,61 @@ describe("buildSourceDraftPrompt — no saved row", () => {
   });
 });
 
+describe("draftSourcePage — a saved check against the CURRENT summary (finding 27)", () => {
+  // The raw source file the check is compared with; its hash is what a fresh
+  // row stores (an Integrate apply re-stamps it to the written text).
+  const SOURCE = `${BODY}\n\n## Transcript\n\nWords.\n`;
+  const FRESH = "The summary reports what the video said, so it still states them.";
+  const MAY = "The summary may have changed since the check, so it may still state some of them.";
+
+  async function riderSentence(over: Partial<DraftSourcePageDeps>, row: SummaryFactcheck): Promise<string> {
+    const prompts: string[] = [];
+    const out = await draftSourcePage(deps({ prompts, getFactcheck: async () => row, ...over }));
+    expect(out.outcome).toBe("drafted");
+    return prompts[0]!.includes(FRESH) ? "fresh" : prompts[0]!.includes(MAY) ? "may" : "neither";
+  }
+
+  test("a row that matches the source file says the summary still states the claims", async () => {
+    const asked: string[] = [];
+    const row = saved({ bodySha256: factcheckBodySha256(SOURCE) });
+    const readSourceText = async (collection: string, docId: string) => {
+      asked.push(`${collection}/${docId}`);
+      return SOURCE;
+    };
+    expect(await riderSentence({ readSourceText }, row)).toBe("fresh");
+    expect(asked).toEqual(["tiktok-summaries/health/5 Powerful Words.md"]);
+    // An applied row was re-stamped to the text it wrote: still fresh.
+    expect(await riderSentence({ readSourceText }, saved({ bodySha256: factcheckBodySha256(SOURCE), appliedAt: CHECKED_AT }))).toBe("fresh");
+  });
+
+  test("a stale row, a null read, a failed read or no reader says it MAY still state them", async () => {
+    const row = saved({ bodySha256: factcheckBodySha256(SOURCE) });
+    const rerun = `The summary was re-run and says something else entirely now.\n\n## Transcript\n\nWords.\n`;
+    expect(await riderSentence({ readSourceText: async () => rerun }, row)).toBe("may");
+    expect(await riderSentence({ readSourceText: async () => null }, row)).toBe("may");
+    expect(await riderSentence({ readSourceText: async () => Promise.reject(new Error("huginn down")) }, row)).toBe("may");
+    expect(await riderSentence({}, row)).toBe("may");
+  });
+
+  test("no row and a ✅-only row never read the source file, and keep the unchecked prompt", async () => {
+    for (const getFactcheck of [async () => null, async () => okOnly()]) {
+      const prompts: string[] = [];
+      let reads = 0;
+      const d = deps({
+        prompts,
+        getFactcheck,
+        readSourceText: async () => {
+          reads++;
+          return SOURCE;
+        },
+      });
+      await draftSourcePage(d);
+      expect(prompts[0]).toBe(buildSourceDraftPrompt({ input: d.input, today: d.today, existingPages: [] }));
+      expect(reads).toBe(0);
+    }
+  });
+});
+
 describe("draftSourcePage with a saved check (stub drafter)", () => {
   test("keys the lookup by the input's collection + docId, rides the rider, appends the block", async () => {
     const prompts: string[] = [];
@@ -324,7 +380,7 @@ describe("draftSourcePage with a saved check (stub drafter)", () => {
     );
     expect(out.outcome).toBe("drafted");
     expect(asked).toEqual(["tiktok-summaries/health/5 Powerful Words.md"]);
-    expect(prompts[0]).toContain(buildFactcheckRider(saved(), "tiktok-summaries"));
+    expect(prompts[0]).toContain(buildFactcheckRider(saved(), "tiktok-summaries", undefined, null));
     // The rider sits ABOVE the untrusted summary fence.
     expect(prompts[0]!.indexOf("FACT-CHECK FINDINGS")).toBeLessThan(prompts[0]!.indexOf("--- BEGIN SOURCE SUMMARY ---"));
     const draft = inserted[0]!.draft;
@@ -707,6 +763,6 @@ describe("buildFactcheckRider — byte pin", () => {
   const PINNED = "af61814c8d1e59945533a9a3c348ae2aca36ea24007bdee80fe2ecd3ffd2a8dc";
 
   test("is byte-identical to origin/main's rider", () => {
-    expect(sha256(buildFactcheckRider(row, "vimeo-summaries", null))).toBe(PINNED);
+    expect(sha256(buildFactcheckRider(row, "vimeo-summaries", null, false))).toBe(PINNED);
   });
 });

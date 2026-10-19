@@ -23,6 +23,7 @@ import {
   sourceDraftResultHtml,
   backlogInspectorHtml,
   backlogDeleteNotice,
+  backlogDeleteFailure,
   backlogDocKey,
   filterBacklogDocs,
   initialInspectorState,
@@ -1309,11 +1310,14 @@ async function deleteBacklogDoc(collection: string, id: string, label: string): 
       polling?: string[];
       skipped?: string[];
       warning?: string;
+      proposals?: { deleted?: unknown };
     };
     if (!res.ok) {
-      setInspectorNotice(body.error || `delete failed (${res.status})`, "err");
+      const failure = backlogDeleteFailure(res.status, body);
+      inspector.notice = failure.notice;
       inspector.removing = inspector.removing.filter((k) => k !== key);
       rerenderStrip();
+      if (failure.relist) loadProposals();
       return;
     }
     polling = Array.isArray(body.polling) ? body.polling : [];

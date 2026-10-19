@@ -45,9 +45,11 @@ import { categoryToDomain } from "../summaries/domain.ts";
 import { sha256 } from "./util.ts";
 import { missingCodeBlocks } from "./code-block-retention.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
+import { summaryFactcheckStale } from "../summaries/factcheck-body.ts";
 import {
   appendFactcheckBlock,
   buildFactcheckRider,
+  correctableClaims,
   factcheckAnswerSha256,
   stripReproducedFactcheck,
 } from "./factcheck-carry.ts";
@@ -714,6 +716,12 @@ export interface DraftSourcePageDeps {
    * that throws (e.g. the table is missing), means "not checked".
    */
   getFactcheck?: (collection: string, docId: string) => Promise<SummaryFactcheck | null>;
+  /**
+   * The doc's RAW source file (`readSummarySourceText`), which the saved check
+   * is compared with (`summaryFactcheckStale`) — not huginn's cleaned body.
+   * Absent, `null` or throwing ⇒ staleness unknown ⇒ the rider says "may".
+   */
+  readSourceText?: (collection: string, docId: string) => Promise<string | null>;
 }
 
 /**
@@ -776,7 +784,15 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       }
     }
 
-    const factcheckRider = factcheck ? buildFactcheckRider(factcheck, input.collection, input.url) : "";
+    // A re-run since the check may have dropped the claims it lists, so the
+    // rider says the summary "still states" them only when the check matches
+    // the source file now (Share's rule).
+    let factcheckStale: boolean | null = null;
+    if (factcheck && deps.readSourceText && correctableClaims(factcheck).length > 0) {
+      const sourceText = await deps.readSourceText(input.collection, input.docId).catch(() => null);
+      factcheckStale = summaryFactcheckStale(factcheck, sourceText);
+    }
+    const factcheckRider = factcheck ? buildFactcheckRider(factcheck, input.collection, input.url, factcheckStale) : "";
     const basePrompt = update
       ? buildSourceRevisePrompt({
           input,

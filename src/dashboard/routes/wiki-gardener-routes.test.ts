@@ -24,6 +24,7 @@ import {
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
+import { summarySaveClaims } from "../../summaries/summary-save.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import {
   __setSummariesStatsCacheForTest,
@@ -1544,6 +1545,8 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
 
   afterEach(async () => {
     globalThis.fetch = origFetch;
+    // A 5xx that may follow the move keeps the delete's claim for 5 minutes.
+    summarySaveClaims.clear();
     __setBotsForTest(null);
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();
@@ -1551,6 +1554,13 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     __resetGardenerMutexForTest();
     await rm(root, { recursive: true, force: true });
   });
+
+  /** huginn's DELETE 404 when the source file is no longer on disk. */
+  const huginnGone404 = () =>
+    Response.json(
+      { detail: "Source file for document 'junk.md' not found in collection 'youtube-summaries'" },
+      { status: 404 },
+    );
 
   const del = async (body: unknown): Promise<Response> =>
     await app.request("/api/wiki/gardener/backlog-doc-delete?wiki=delbot", {
@@ -1749,7 +1759,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     expect("warning" in body).toBe(false);
   });
 
-  test("huginn 404 and 502 never notify, never run bookkeeping, never warn", async () => {
+  test("huginn 404 and 502 never notify, never prune snapshots, never touch the stats cache", async () => {
     __setSummariesStatsCacheForTest("jarvis", STATS_FIXTURE);
     const heard: Array<{ collection: string; id: string }> = [];
     const off = onSummaryDocumentDeleted((e) => heard.push(e));
@@ -1762,7 +1772,6 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       expect(r502.status).toBe(502);
       expect("warning" in ((await r502.json()) as object)).toBe(false);
       expect(heard).toEqual([]);
-      expect(proposalCalls).toEqual([]);
       expect((snapshots.get("backlog:offered") as string[]).length).toBe(2);
       expect(__peekSummariesStatsCacheForTest("jarvis")).toBeDefined();
     } finally {
@@ -1770,12 +1779,110 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     }
   });
 
-  test("huginn refusing the delete leaves the proposals alone", async () => {
-    deleteResponse = () => new Response("not found", { status: 404 });
-    expect((await del({ collection: "youtube-summaries", id: "junk.md" })).status).toBe(404);
+  test("the claim key is the SHELF id: an X-video save on `x-article` blocks a delete in `x-articles`", async () => {
+    // X video traces as `x-video` but saves under the `x-article` shelf id; a
+    // delete keyed on anything else would never meet the re-run's claim.
+    const held = summarySaveClaims.claim("x-article", "ai/An X Post.md", 60_000);
+    expect(held).not.toBeNull();
+    try {
+      const res = await del({ collection: "x-articles", id: "ai/An X Post.md" });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { code?: string }).code).toBe("in_flight");
+      expect(deleteCalls).toEqual([]);
+      expect(proposalCalls).toEqual([]);
+    } finally {
+      summarySaveClaims.release(held!);
+    }
+    // Released: the next delete goes through, and leaves the key free.
+    expect((await del({ collection: "x-articles", id: "ai/An X Post.md" })).status).toBe(200);
+    expect(summarySaveClaims.isHeld("x-article", "ai/An X Post.md")).toBe(false);
+  });
+
+  test("huginn 502 leaves the proposals alone", async () => {
     deleteResponse = () => new Response("boom", { status: 500 });
     expect((await del({ collection: "youtube-summaries", id: "junk.md" })).status).toBe(502);
     expect(proposalCalls).toEqual([]);
+  });
+
+  test("a second delete (huginn 404) re-runs the proposal cleanup under the mutex, and only that", async () => {
+    // The degraded first delete: huginn moved the doc but the proposal step
+    // failed. Pressing Delete again gets huginn's 404 — which must still clear
+    // the drafts, or they stay approvable with no route left to remove them.
+    // huginn's own body for a source file that is no longer there — the one
+    // 404 that says the document is gone.
+    deleteResponse = huginnGone404;
+    const before = JSON.stringify([...snapshots]);
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string; proposals?: unknown; warning?: string };
+    expect(proposalCalls).toEqual(["delbot:youtube-summaries/junk.md"]);
+    expect(mutexHeldDuringProposalDelete).toBe(true);
+    expect(body.proposals).toEqual({
+      deleted: [{ id: "p1", targetPath: "sources/junk.mdx", status: "draft" }],
+      kept: [{ id: "p2", targetPath: "sources/junk-applied.mdx", status: "applied" }],
+    });
+    expect(body.error).toBe("that doc is not in that collection; removed 1 unapplied draft written from it");
+    expect(body.warning).toBeUndefined();
+    // The snapshot prunes are not idempotent-safe for an id never listed: untouched.
+    expect(JSON.stringify([...snapshots])).toBe(before);
+
+    // A failing cleanup on the 404 path is a warning, never a muninn 5xx.
+    proposalDeleteThrows = new Error("connection terminated unexpectedly");
+    const again = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(again.status).toBe(404);
+    const againBody = (await again.json()) as { warning?: string };
+    expect(againBody.warning).toContain("source proposals delete");
+  });
+
+  test("a source-gone 404 whose cleanup ran drops the summaries stats cache", async () => {
+    // The cleanup changed the pending set the stats coverage reads, exactly as
+    // the 200 path's proposal delete does.
+    __setSummariesStatsCacheForTest("jarvis", STATS_FIXTURE);
+    deleteResponse = huginnGone404;
+    expect((await del({ collection: "youtube-summaries", id: "junk.md" })).status).toBe(404);
+    expect(proposalCalls).toEqual(["delbot:youtube-summaries/junk.md"]);
+    expect(__peekSummariesStatsCacheForTest("jarvis")).toBeUndefined();
+  });
+
+  test("a huginn 404 that does not say the document is gone keeps the drafts written from it", async () => {
+    // The membership gate (the file exists, the index lags) and a huginn with
+    // no DELETE route both answer 404 for a document that still exists.
+    for (const res404 of [
+      () =>
+        Response.json(
+          {
+            detail:
+              "Document 'junk.md' is not indexed in collection 'youtube-summaries' (the file may exist under reader.basePath but be excluded from the collection); refusing to move it",
+          },
+          { status: 404 },
+        ),
+      () => Response.json({ detail: "Not Found" }, { status: 404 }),
+      () => new Response("not found", { status: 404 }),
+    ]) {
+      proposalCalls = [];
+      deleteResponse = res404;
+      const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+      expect(res.status).toBe(404);
+      expect(proposalCalls).toEqual([]);
+      const body = (await res.json()) as { proposals?: unknown; warning?: string };
+      expect(body.proposals).toBeUndefined();
+      expect(body.warning).toContain("did not confirm");
+    }
+  });
+
+  test("only the drafts-left-on-the-gate warning carries the gate code", async () => {
+    // The /summaries client links the review gate on `warningCode`, so the
+    // not-gone 404's warning (drafts kept, still valid) must not carry it.
+    deleteResponse = huginnGone404;
+    proposalDeleteThrows = new Error("connection terminated unexpectedly");
+    const gone = (await (await del({ collection: "youtube-summaries", id: "junk.md" })).json()) as Record<string, unknown>;
+    expect(gone.warningCode).toBe("drafts_on_gate");
+
+    proposalDeleteThrows = null;
+    deleteResponse = () => Response.json({ detail: "Not Found" }, { status: 404 });
+    const kept = (await (await del({ collection: "youtube-summaries", id: "junk.md" })).json()) as Record<string, unknown>;
+    expect(kept.warning).toContain("did not confirm");
+    expect(kept.warningCode).toBeUndefined();
   });
 
   test("huginn 404 (id not in that collection) → 404, and neither snapshot set is touched", async () => {
@@ -1790,7 +1897,40 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     deleteResponse = () => new Response("boom", { status: 500 });
     const res = await del({ collection: "youtube-summaries", id: "junk.md" });
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error?: string }).error).toContain("huginn refused the delete");
+    expect(((await res.json()) as { error?: string }).error).toContain("may have completed");
+    summarySaveClaims.clear();
+    deleteResponse = () => Response.json({ detail: "Could not move source file: EIO" }, { status: 500 });
+    const refused = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(refused.status).toBe(502);
+    expect(((await refused.json()) as { error?: string }).error).toContain("huginn refused the delete");
+  });
+
+  test("the delete lets go of its claim only when huginn's answer proves nothing moved", async () => {
+    // A held claim keeps re-runs out; a let-go one frees the key. Every 4xx and
+    // huginn's three pre-move 500s let go; any other 5xx may follow the move.
+    const detail = (d: string, status = 500) => () => Response.json({ detail: d }, { status });
+    const cases: Array<[string, () => Response, boolean]> = [
+      ["400 basePath refusal", detail("Collection 'youtube-summaries' has no reader.basePath", 400), false],
+      ["404 membership gate", detail("Document 'junk.md' is not indexed in collection 'youtube-summaries'", 404), false],
+      ["500 manifest read", detail("Could not read the manifest for collection 'youtube-summaries'"), false],
+      ["500 index mapping read", detail("Could not read the index mapping for collection 'youtube-summaries'"), false],
+      ["500 move failed", detail("Could not move source file: [Errno 5] EIO"), false],
+      ["500 after the move", () => new Response("Internal Server Error", { status: 500 }), true],
+      ["500 other detail", detail("Could not write ledger: disk full"), true],
+      ["502 proxy", () => new Response("Bad Gateway", { status: 502 }), true],
+      // huginn raises its pre-move details only as a 500.
+      ["502 with a pre-move detail", detail("Could not move source file: EIO", 502), true],
+      ["503 proxy", () => new Response("Service Unavailable", { status: 503 }), true],
+      ["504 proxy", () => new Response("Gateway Timeout", { status: 504 }), true],
+    ];
+    const seen: Array<[string, boolean]> = [];
+    for (const [name, response] of cases) {
+      summarySaveClaims.clear();
+      deleteResponse = response;
+      await del({ collection: "youtube-summaries", id: "junk.md" });
+      seen.push([name, summarySaveClaims.isHeld("youtube", "junk.md")]);
+    }
+    expect(seen).toEqual(cases.map(([name, , held]) => [name, held]));
   });
 
   test("a bad body / unknown collection is a 400 before any huginn call", async () => {

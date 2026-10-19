@@ -119,14 +119,18 @@ export const SUMMARY_SAVE_DESCRIPTORS: readonly SummarySaveDescriptor[] = [
   {
     id: "tiktok",
     ingestPath: "/api/tiktok/ingest",
-    frontmatterFields: ["date", "url", "author"],
+    // `summary_kind`: the short-video capture always sends it; huginn's model
+    // drops it until it declares the field, and then a save that omits it would
+    // erase it. Re-sending an absent key is a no-op.
+    frontmatterFields: ["date", "url", "author", "summary_kind"],
     acceptsTags: true,
     transcriptCarrier: "summary",
   },
   {
     id: "x-article",
     ingestPath: "/api/x-articles/ingest",
-    frontmatterFields: ["date", "url", "author"],
+    // `summary_kind`: as tiktok — the X-video capture sends it on this shelf.
+    frontmatterFields: ["date", "url", "author", "summary_kind"],
     acceptsTags: true,
     transcriptCarrier: "summary",
   },
@@ -365,8 +369,8 @@ export interface SummarySaveClaim {
  * predates someone else's whole claim → write → release is refused, since its
  * body would overwrite the newer write. That guarantee covers only reads made
  * AFTER {@link claim}: a caller must claim before it reads the document it will
- * rebuild (re-run reads first, which is safe only because it regenerates the
- * summary from the transcript). The claim is a TOKEN, so a stalled
+ * rebuild. The `/summaries` Delete claims too, so a delete is a newer write as
+ * far as a lapsed claim is concerned. The claim is a TOKEN, so a stalled
  * writer that settles after someone else claimed releases nothing and writes
  * nothing.
  *
@@ -386,16 +390,26 @@ export class SummarySaveClaims {
       timer: ReturnType<typeof setTimeout> | null;
       /** A POST is in flight on this claim ({@link pinForWrite}). */
       writing: boolean;
+      /** This claim was ever pinned for a write, so a POST may have landed. */
+      pinned: boolean;
+      /** The key's generation before this claim took it — what
+       *  {@link abandon} restores. */
+      prevGeneration: number | undefined;
     }
   >();
   /** Per key, the generation of the newest successful {@link claim}, drawn
    *  from one registry-wide counter. At most one number per key; deleted when a
-   *  HELD claim is released, kept when a lapsed claim is (bounded growth). */
+   *  HELD claim is released, put back to the previous one when a claim that
+   *  never pinned is abandoned and is still the newest, kept otherwise
+   *  (bounded growth). */
   private readonly latestGeneration = new Map<string, number>();
   private nextGeneration = 1;
   /** The claims that lapsed before anyone released them, with what a
-   *  re-take needs. */
-  private readonly lapsed = new WeakMap<SummarySaveClaim, { generation: number; budgetMs: number; deadline: number }>();
+   *  re-take needs and what {@link abandon} restores. */
+  private readonly lapsed = new WeakMap<
+    SummarySaveClaim,
+    { generation: number; budgetMs: number; deadline: number; pinned: boolean; prevGeneration: number | undefined }
+  >();
 
   /** `JSON.stringify` over the pair: injective with no separator guess. */
   private key(sourceId: string, docId: string): string {
@@ -406,9 +420,9 @@ export class SummarySaveClaims {
   private lapse(key: string, claim: SummarySaveClaim): void {
     const held = this.held.get(key);
     if (!held || held.token !== claim.token) return;
-    const { generation, budgetMs, deadline } = held;
+    const { generation, budgetMs, deadline, pinned, prevGeneration } = held;
     this.held.delete(key);
-    this.lapsed.set(claim, { generation, budgetMs, deadline });
+    this.lapsed.set(claim, { generation, budgetMs, deadline, pinned, prevGeneration });
     log.warn("The save claim on {docId} ({sourceId}) was not released within {budgetMs} ms — releasing it", {
       docId: claim.docId,
       sourceId: claim.sourceId,
@@ -443,6 +457,7 @@ export class SummarySaveClaims {
     if (this.held.has(key)) return null;
     const claim: SummarySaveClaim = { sourceId, docId, token: Symbol(key), registry: this };
     const generation = this.nextGeneration++;
+    const prevGeneration = this.latestGeneration.get(key);
     this.latestGeneration.set(key, generation);
     this.held.set(key, {
       token: claim.token,
@@ -451,6 +466,8 @@ export class SummarySaveClaims {
       deadline: Date.now() + budgetMs,
       timer: null,
       writing: false,
+      pinned: false,
+      prevGeneration,
     });
     this.arm(key, claim);
     return claim;
@@ -482,6 +499,7 @@ export class SummarySaveClaims {
       if (held.timer) clearTimeout(held.timer);
       held.timer = null;
       held.writing = true;
+      held.pinned = true;
       return "pinned";
     }
     const lapsed = this.lapsed.get(claim);
@@ -493,7 +511,17 @@ export class SummarySaveClaims {
       return "taken";
     }
     this.lapsed.delete(claim);
-    this.held.set(key, { token: claim.token, ...lapsed, timer: null, writing: true });
+    const { budgetMs, deadline } = lapsed;
+    this.held.set(key, {
+      token: claim.token,
+      generation: lapsed.generation,
+      budgetMs,
+      deadline,
+      timer: null,
+      writing: true,
+      pinned: true,
+      prevGeneration: undefined,
+    });
     log.info("The save claim on {docId} ({sourceId}) had lapsed with no other writer — re-taken for the write", {
       docId: claim.docId,
       sourceId: claim.sourceId,
@@ -512,7 +540,9 @@ export class SummarySaveClaims {
     this.arm(key, claim);
   }
 
-  /** Release a claim; a no-op when it expired and someone else holds the key. */
+  /** Release a claim that wrote, or may have written, the document: the key's
+   *  generation is dropped, so a claim that lapsed before this one can no
+   *  longer re-take it. A no-op when it expired and someone else holds the key. */
   release(claim: SummarySaveClaim): void {
     this.lapsed.delete(claim);
     const key = this.key(claim.sourceId, claim.docId);
@@ -521,6 +551,38 @@ export class SummarySaveClaims {
     if (held.timer) clearTimeout(held.timer);
     this.held.delete(key);
     this.latestGeneration.delete(key);
+  }
+
+  /**
+   * Release a claim that wrote NOTHING — a refusal after the claim, a model
+   * call that failed before the save. The key's generation goes back to what it
+   * was before this claim took it, so a claim that lapsed before this one may
+   * still re-take the key and save: nothing newer than its read was written.
+   * A claim that was ever pinned for a write may have landed its POST, so for
+   * it this is a plain {@link release}. A claim that LAPSED restores the same
+   * way while no claim was taken on the key since; otherwise the newer claim
+   * owns the generation and this is a no-op.
+   */
+  abandon(claim: SummarySaveClaim): void {
+    const key = this.key(claim.sourceId, claim.docId);
+    const lapsed = this.lapsed.get(claim);
+    this.lapsed.delete(claim);
+    if (lapsed !== undefined) {
+      if (lapsed.pinned || this.latestGeneration.get(key) !== lapsed.generation) return;
+      if (lapsed.prevGeneration === undefined) this.latestGeneration.delete(key);
+      else this.latestGeneration.set(key, lapsed.prevGeneration);
+      return;
+    }
+    const held = this.held.get(key);
+    if (!held || held.token !== claim.token) return;
+    if (held.pinned) {
+      this.release(claim);
+      return;
+    }
+    if (held.timer) clearTimeout(held.timer);
+    this.held.delete(key);
+    if (held.prevGeneration === undefined) this.latestGeneration.delete(key);
+    else this.latestGeneration.set(key, held.prevGeneration);
   }
 
   /** Drop every claim and its timer. Tests only. */

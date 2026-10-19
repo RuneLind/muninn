@@ -981,7 +981,13 @@ export function sumArticleLibraryScript(): string {
         body = await res.json().catch(function() { return {}; });
         if (!res.ok) {
           closeDocPanel();
-          showDeleteNotice('Delete failed: ' + (body.error || ('HTTP ' + res.status)), 'err');
+          // A 404 can carry a warning. Only 'drafts_on_gate' (drafts of a gone
+          // doc still on the review gate) takes the warning tone and its gate
+          // link; the not-gone 404's warning says the drafts were kept, so it
+          // stays plain text in the error tone.
+          var failWarning = typeof body.warning === 'string' ? body.warning : '';
+          var onGate = body.warningCode === 'drafts_on_gate';
+          showDeleteNotice('Delete failed: ' + (body.error || ('HTTP ' + res.status)) + (failWarning ? '. ' + failWarning : ''), onGate ? 'warn' : 'err');
           return;
         }
       } catch (err) {
