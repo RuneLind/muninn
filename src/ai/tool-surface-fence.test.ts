@@ -22,9 +22,10 @@
  * describe name says so: on CI the CLI arm skips.
  *
  * It needs no database, but a tool result reaches `loadConfig()` in-process
- * (`recordToolSpan` → `huginn-trace-pointer.ts`), which throws without
- * `DATABASE_URL`, so the run sets a placeholder when none is set. Nothing
- * connects to it.
+ * through `processMcpToolResult` (`huginn-trace-pointer.ts`): from
+ * `StreamParser` on the claude-cli arms, from `recordToolSpan` on the
+ * claude-sdk arms. `loadConfig()` throws without `DATABASE_URL`, so the run
+ * sets a placeholder when none is set. Nothing connects to it.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
