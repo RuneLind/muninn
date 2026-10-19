@@ -155,3 +155,107 @@ describe("which ledgers draw", () => {
     expect(prStateMap([a, b]).get(1)).toBe("open");
   });
 });
+
+// Fix round 1, batch 1. Synthetic rows only.
+const U = "https://example.test/pull";
+
+describe("F1: a state word counts only where the rules say", () => {
+  const one = (row: string[], header = ["PR", "State", "Landed"]) => parseLedgerTable(header, [row]).rows[0]!;
+
+  test("a sha needs backticks, or both a digit and a letter a–f", () => {
+    expect(one(["1", "see notes", "merged defaced"])).toMatchObject({ state: "unknown", rule: 0 });
+    expect(one(["1", "see notes", "open 20261019"])).toMatchObject({ state: "unknown", rule: 0 });
+    expect(one(["1", "see notes", "merged e44793fb1e"])).toMatchObject({ state: "merged", rule: 1 });
+    expect(one(["1", "see notes", "merget `deadbeef`"])).toMatchObject({ state: "merged", rule: 1 });
+  });
+
+  test("the state cell wins over a state word mid-prose in another cell", () => {
+    const H = ["PR", "Notes", "State"];
+    expect(one(["1", `was open [#3](${U}/3) before`, `merged [#4](${U}/4)`], H)).toMatchObject({ state: "merged", rule: 1 });
+    expect(one(["1", `was open [#3](${U}/3) before`, "merged"], H)).toMatchObject({ state: "merged", rule: 2 });
+  });
+
+  test("struck text is gone before matching", () => {
+    expect(one(["1", "~~merged~~ dropped", ""])).toMatchObject({ state: "dropped", rule: 2 });
+    expect(one(["1", `~~merged [#3](${U}/3)~~ dropped`, ""])).toMatchObject({ state: "dropped", rule: 2 });
+  });
+
+  test("a hyphen ends no state word", () => {
+    expect(one(["1", "open-ended question", ""])).toMatchObject({ state: "unknown", rule: 0 });
+  });
+});
+
+describe("F2: one PR-link reader", () => {
+  const one = (row: string[], header = ["PR", "State", "Landed"]) => parseLedgerTable(header, [row]).rows[0]!;
+
+  test.each([
+    ["merged muninn #5"],
+    [`merged [muninn#5](${U}/5)`],
+    [`merged [PR #5](${U}/5)`],
+    ["merged PR #5"],
+    ["merged pr #5"],
+  ])("rule 1 reads %s", (landed) => {
+    expect(one(["1", "see notes", landed])).toMatchObject({ state: "merged", rule: 1 });
+  });
+
+  test("rule 3: a repo link alone reads merged; a link with prose after it does not", () => {
+    expect(one(["1", "see notes", `[muninn#5](${U}/5)`])).toMatchObject({ state: "merged", rule: 3 });
+    expect(one(["1", "see notes", `[#5](${U}/5) reverted`])).toMatchObject({ state: "unknown", rule: 0 });
+    expect(one(["1", "see notes", `[#5](${U}/5), open`])).toMatchObject({ state: "unknown", rule: 0 });
+  });
+
+  test("rule 3: a date, a sha in backticks or a parenthetical after the link is no prose", () => {
+    for (const landed of [`[#5](${U}/5), 2026-09-13`, `[#5](${U}/5) 09-24`, `[muninn #5](${U}/5) \`c59ce4f\` (v2)`]) {
+      expect(`${landed}: ${one(["1", "see notes", landed]).state}`).toBe(`${landed}: merged`);
+    }
+  });
+
+  test("link text in backticks, with an owner", () => {
+    expect(parseLedgerTable(["PR", "State"], [["2a — [`acme/tool#4`](https://example.test/pull/4)", "open"]]).rows[0]).toMatchObject({ slate: null, link: 4, pr: 4 });
+    expect(parseLedgerTable(["PR", "State"], [["x — acme/tool#4", "open"]]).rows[0]).toMatchObject({ link: 4 });
+    const one = (landed: string) => parseLedgerTable(["PR", "State", "Landed"], [["1", "see notes", landed]]).rows[0]!;
+    expect(one("[`acme/tool#4`](https://example.test/pull/4)")).toMatchObject({ state: "merged", rule: 3 });
+    expect(one("merged [`acme/tool#4`](https://example.test/pull/4)")).toMatchObject({ state: "merged", rule: 1 });
+  });
+
+  test("`step #3` is no PR; `PR #7` is", () => {
+    const l = parseLedgerTable(["PR", "State"], [["step #3 — x", "open"], ["fix, see PR #7", "open"]]);
+    expect(l.rows.map((r) => r.link)).toEqual([7]);
+  });
+
+  test("identity prefers the PR, state and Landed cells over a Review cell", () => {
+    const r = parseLedgerTable(["PR", "Review", "State", "Landed"], [["fix x", "melosys-api#3540", "merged", `[#12](${U}/12)`]]).rows[0]!;
+    expect(r).toMatchObject({ link: 12, pr: 12 });
+  });
+});
+
+describe("F3: the slate is read from a slate column only", () => {
+  test("a leading `PR` or link before the number", () => {
+    const l = parseLedgerTable(["PR", "State"], [["PR 12 — x", "open"], [`[#351](${U}/351) 1 — y`, "open"]]);
+    expect(l.rows.map((r) => [r.slate, r.link, r.pr, r.label])).toEqual([
+      [12, null, 12, "x"],
+      [1, 351, 1, "y"],
+    ]);
+  });
+
+  test("a date or a decimal is no slate", () => {
+    const l = parseLedgerTable(["PR", "State"], [["2026-10-19", `merged [#5](${U}/5)`], ["1.5 — x", `merged [#6](${U}/6)`]]);
+    expect(l.rows.map((r) => [r.slate, r.pr])).toEqual([
+      [null, 5],
+      [null, 6],
+    ]);
+  });
+
+  test("a Fase / Phase / Date column holds no slate", () => {
+    for (const h of ["Fase", "Phase", "Date", "Dato", "When"]) {
+      const l = parseLedgerTable([h, "State"], [["1", `merged [#40](${U}/40)`], ["2", "open"]]);
+      expect(`${h}: ${JSON.stringify(l.rows.map((r) => [r.slate, r.pr]))}`).toBe(`${h}: [[null,40]]`);
+    }
+  });
+
+  test("a slate column by another name still holds the slate", () => {
+    for (const h of ["#", "Oppgave", "Task", "Steg", "Step", "Planned PR", "Slice"]) {
+      expect(`${h}: ${parseLedgerTable([h, "State"], [["3 — x", "open"]]).rows[0]?.slate}`).toBe(`${h}: 3`);
+    }
+  });
+});

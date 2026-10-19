@@ -7,11 +7,13 @@
  * helpers from here, so a ledger is one shape for both.
  *
  * A row's state, in order (a state word in prose never counts):
- *  1. a state word followed by a PR link or a commit sha, anywhere in the row;
+ *  1. a state word followed by a PR link or a commit sha, in the state cell,
+ *     then the Landed cell;
  *  2. else a state word at the start of the state cell, emphasis or a link
  *     bracket around it allowed (`[merget](…)`);
+ *  1b. else rule 1 in any other cell, so prose there never beats the state cell;
  *  3. else a merged-PR link alone in a «Landed»/«Landet» cell reads as merged.
- * A row matching none is `unknown`.
+ * A row matching none is `unknown`. Struck text (`~~…~~`) is removed first.
  *
  * The strip draws a ledger only when its header names a state column
  * (State/Status/Tilstand) and at least {@link LEDGER_PARSED_MIN} of its rows
@@ -73,31 +75,54 @@ const STATE_WORDS: readonly [string, Exclude<PrState, "unknown">][] = [
 ];
 
 const STATE_ALT = STATE_WORDS.map(([w]) => w.replace(/ /g, "\\s+")).join("|");
-/** Rule 1: a state word, then (after optional emphasis and space) a PR link
- *  `[#n](…)`, a `repo #n`, or a 7–40 hex commit sha. */
+
+/** Words that number something other than a PR: `step #3` is no PR link. */
+const NOT_A_REPO = [
+  "step", "steg", "phase", "fase", "item", "punkt", "task", "oppgave", "row", "rad", "round", "runde",
+  "batch", "slice", "part", "del", "issue", "issues", "sak", "saker", "no", "nr", "number", "nummer",
+  "case", "line", "linje", "version", "versjon", "comment", "kommentar", "ticket", "card", "kort",
+  "finding", "funn", "check", "sjekk", "option", "page", "side", "test", "run", "question", "decision",
+].join("|");
+/** A PR link: `[#641](…)`, `[muninn#641](…)`, `[PR #641](…)`, the text in backticks allowed. */
+const LINK_REF = "\\[`?" + String.raw`(?:[A-Za-z][\w./-]*[ ]?)?#(\d{1,6})` + "`?" + String.raw`\]\([^)\s]*\)`;
+/** A bare `repo #641` / `owner/repo#641` / `PR #641` (PR in any case). */
+const BARE_REF = String.raw`(?<![\p{L}\p{N}/#\[\].-])(?!(?:${NOT_A_REPO})[ ]?#)[A-Za-z](?:[\w.-]*[A-Za-z0-9])?(?:/[\w.-]*[A-Za-z0-9])?[ ]?#(\d{1,6})(?![\p{L}\p{N}])`;
+/** A commit sha: 7–40 hex in backticks, or bare with both a digit and a letter a–f. */
+const SHA = "`[0-9a-f]{7,40}`|" + String.raw`(?<![\p{L}\p{N}])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![\p{L}\p{N}])`;
+
+/** Rule 1: a state word, then (after optional emphasis and space) a PR link,
+ *  a bare `repo #n` or a commit sha. */
 const WORD_THEN_REF_RE = new RegExp(
-  `(?<![\\p{L}\\p{N}])(${STATE_ALT})(?![\\p{L}\\p{N}])[*_~]*[ \\t]+(?:in[ \\t]+|i[ \\t]+)?[*_]*(?:\\[#\\d+\\]\\(|\`?[0-9a-f]{7,40}\`?(?![\\p{L}\\p{N}]))`,
+  `(?<![\\p{L}\\p{N}])(${STATE_ALT})(?![\\p{L}\\p{N}])[*_]*[ \\t]+(?:(?:in|i)[ \\t]+)?[*_]*(?:${LINK_REF}|${BARE_REF}|${SHA})`,
   "iu",
 );
 /** Rule 2: a state word at the very start of the state cell. */
-const WORD_AT_START_RE = new RegExp(`^(${STATE_ALT})(?![\\p{L}\\p{N}])`, "iu");
-/** Rule 3: a Landed cell that opens with a PR link. */
-const LANDED_LINK_RE = /^\[#\d+\]\(/;
+const WORD_AT_START_RE = new RegExp(`^(${STATE_ALT})(?![\\p{L}\\p{N}-])`, "iu");
+/** Rule 3: a Landed cell holding PR links and no prose: a date, a sha in
+ *  backticks or a parenthetical may follow (`[#5](…), 2026-09-13`). */
+const LANDED_META = String.raw`\d{1,4}[-.]\d{1,2}(?:[-.]\d{1,4})?|` + "`[0-9a-f]{7,40}`" + String.raw`|\([^()]*\)`;
+const LANDED_LINKS_RE = new RegExp(
+  `^(?:${LINK_REF}|${BARE_REF})(?:\\s*[,+&/]?\\s*(?:${LINK_REF}|${BARE_REF}))*(?:\\s*,?\\s*(?:${LANDED_META}))*$`,
+  "iu",
+);
+/** The first PR link in a text: group 1 a link, group 2 a bare ref. */
+const PR_REF_RE = new RegExp(`${LINK_REF}|${BARE_REF}`, "iu");
 
 const STATE_HEADER_RE = /^(?:state|status|tilstand)$/i;
 const LANDED_HEADER_RE = /^(?:landed|landet)$/i;
 const DECISIONS_HEADER_RE = /^(?:decisions?|beslutning(?:er)?)$/i;
 const PR_HEADER_RE = /^PR$/i;
+/** A first column that numbers the slate (not Fase/Phase/Date/When). */
+const SLATE_HEADER_RE = /^(?:(?:planned|planlagt)\s+)?(?:PR|#|nr\.?|oppgave|task|steg|step|slice|part|del)$/i;
 
-/** A PR link `[#641](…)` or `repo #641` / `repo#641`. */
-const PR_LINK_RE = /\[#(\d{1,6})\]\(|(?<![\p{L}\p{N}/])[a-z][a-z0-9._-]*[ ]?#(\d{1,6})(?![\p{L}\p{N}])/u;
 const DECISION_ID_GLOBAL = /(?<![\p{L}\p{N}])D(\d{1,4})(?![\p{L}\p{N}])/gu;
 
 /** The share of a ledger's rows that must parse for the strip to draw. */
 export const LEDGER_PARSED_MIN = 0.75;
 
 export interface LedgerRow {
-  /** The slate number: the leading integer of the first cell. */
+  /** The slate number: the leading integer of the first cell, when the first
+   *  column is a slate column (PR, #, Task …, not Fase or Date). */
   slate: number | null;
   /** The number of the first PR link in the row. */
   link: number | null;
@@ -129,22 +154,39 @@ function plain(cell: string): string {
   return cell.replace(/\*\*|__|~~/g, "").trim();
 }
 
+/** A cell with its struck text (`~~merged~~`) removed, for state matching. */
+function unstruck(cell: string): string {
+  return cell.replace(/~~[^~]*~~/g, "");
+}
+
 function headerIndex(headers: string[], re: RegExp): number {
   return headers.findIndex((h) => re.test(plain(h)));
 }
 
-/** Leading integer of the first cell, after bold and dashes (`**12** — x`). */
-function slateOf(cell: string): { slate: number | null; label: string } {
+/** The number of the first PR link in a text, else null. */
+function prRefOf(text: string): number | null {
+  const m = PR_REF_RE.exec(text);
+  return m ? Number(m[1] ?? m[2]) : null;
+}
+
+/** The slate number of a slate column's cell (`**12** — x`, `PR 12`,
+ *  `[#351](…) 1 — x`); a date or a decimal is none. */
+function slateOf(cell: string, slateColumn: boolean): { slate: number | null; label: string } {
   const t = plain(cell).replace(/^[-–—\s]+/, "");
-  const m = /^(\d{1,4})(?![\p{L}\p{N}])\s*(?:[-–—:.)]\s*)?(.*)$/u.exec(t);
+  if (!slateColumn) return { slate: null, label: t };
+  const body = t.replace(new RegExp(`^(?:(?:${LINK_REF})\\s*)+`, "iu"), "").replace(/^PR\s*#?\s*/i, "");
+  const m = /^(\d{1,4})(?![\p{L}\p{N}])(?![-.:/]\d)\s*(?:[-–—:.)]\s*)?(.*)$/u.exec(body);
   if (!m) return { slate: null, label: t };
   return { slate: Number(m[1]), label: m[2]!.trim() };
 }
 
-function linkOf(cells: string[]): number | null {
-  for (const c of cells) {
-    const m = PR_LINK_RE.exec(c);
-    if (m) return Number(m[1] ?? m[2]);
+/** The row's PR link: the first cell, the PR, state and Landed cells first,
+ *  then the rest in order. */
+function linkOf(cells: string[], preferred: number[]): number | null {
+  const order = [...new Set([0, ...preferred.filter((i) => i >= 0), ...cells.keys()])];
+  for (const i of order) {
+    const n = prRefOf(cells[i] ?? "");
+    if (n !== null) return n;
   }
   return null;
 }
@@ -154,17 +196,28 @@ function stateWord(word: string): Exclude<PrState, "unknown"> {
   return STATE_WORDS.find(([s]) => s === w)![1];
 }
 
-function rowState(cells: string[], stateCol: number, landedCol: number): { state: PrState; rule: 0 | 1 | 2 | 3 } {
-  for (const c of cells) {
-    const m = WORD_THEN_REF_RE.exec(c);
-    if (m) return { state: stateWord(m[1]!), rule: 1 };
+function rowState(raw: string[], stateCol: number, landedCol: number): { state: PrState; rule: 0 | 1 | 2 | 3 } {
+  const cells = raw.map(unstruck);
+  const rule1 = (i: number): { state: PrState; rule: 1 } | null => {
+    const m = WORD_THEN_REF_RE.exec(cells[i] ?? "");
+    return m ? { state: stateWord(m[1]!), rule: 1 } : null;
+  };
+  // The state and Landed cells first: prose in another cell never beats them.
+  for (const i of [stateCol, landedCol]) {
+    const r = i >= 0 ? rule1(i) : null;
+    if (r) return r;
   }
   if (stateCol >= 0) {
     // Emphasis or a link bracket may open the cell: `_åpen_`, `[merget](…)`.
     const m = WORD_AT_START_RE.exec(plain(cells[stateCol] ?? "").replace(/^[_*[]+/, ""));
     if (m) return { state: stateWord(m[1]!), rule: 2 };
   }
-  if (landedCol >= 0 && LANDED_LINK_RE.test(plain(cells[landedCol] ?? ""))) return { state: "merged", rule: 3 };
+  for (let i = 0; i < cells.length; i++) {
+    if (i === stateCol || i === landedCol) continue;
+    const r = rule1(i);
+    if (r) return r;
+  }
+  if (landedCol >= 0 && LANDED_LINKS_RE.test(plain(cells[landedCol] ?? ""))) return { state: "merged", rule: 3 };
   return { state: "unknown", rule: 0 };
 }
 
@@ -185,10 +238,12 @@ export function parseLedgerTable(headers: string[], rows: string[][], source: Le
   const stateColumn = headerIndex(headers, STATE_HEADER_RE);
   const landedCol = headerIndex(headers, LANDED_HEADER_RE);
   const decisionsCol = headerIndex(headers, DECISIONS_HEADER_RE);
+  const prCol = headerIndex(headers, PR_HEADER_RE);
+  const slateColumn = SLATE_HEADER_RE.test(plain(headers[0] ?? ""));
   const out: LedgerRow[] = [];
   for (const cells of rows) {
-    const { slate, label } = slateOf(cells[0] ?? "");
-    const link = linkOf(cells);
+    const { slate, label } = slateOf(cells[0] ?? "", slateColumn);
+    const link = linkOf(cells, [prCol, stateColumn, landedCol]);
     const pr = slate ?? link;
     if (pr === null) continue;
     const { state, rule } = source === "glance" ? { state: "planned" as const, rule: 0 as const } : rowState(cells, stateColumn, landedCol);
