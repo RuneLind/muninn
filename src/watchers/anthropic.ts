@@ -17,7 +17,6 @@ import { autoPromoteCandidate } from "../anthropic/summarizer.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
-import { untrustedBlock } from "./untrusted-block.ts";
 
 const log = getLog("watchers", "anthropic");
 
@@ -1187,22 +1186,6 @@ async function callAnthropicModel(
 }
 
 /**
- * The gate's prompt. Titles and excerpts are commit messages, release notes and
- * doc text written by third parties, so the list goes in as quoted data: the gate
- * auto-promotes at 0.9 unattended. Exported so a test can pin its shape and the
- * A1 drift measurement can build it from frozen candidates.
- */
-export function buildAnthropicGatePrompt(
-  candidates: Candidate[],
-  config: Pick<AnthropicConfig, "prompt">,
-  interestProfile: string | null,
-  nonce?: string,
-): string {
-  const criteria = withInterestProfile(config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT, interestProfile);
-  return `${criteria}\n\nCandidates:\n\n${untrustedBlock("CANDIDATES", formatCandidateList(candidates, { withExcerpt: true }), nonce)}`;
-}
-
-/**
  * Score the candidate batch with one Haiku call. Returns the parsed
  * `{n, score, why}` array (model omits routine churn), or "SKIP_ALL" when
  * quietMode is on and the model replied with the literal "SKIP". Throws on a
@@ -1215,7 +1198,8 @@ async function runGate(
   interestProfile: string | null,
   telemetry?: HaikuTelemetry,
 ): Promise<GateScore[] | "SKIP_ALL"> {
-  const prompt = buildAnthropicGatePrompt(candidates, config, interestProfile);
+  const criteria = withInterestProfile(config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT, interestProfile);
+  const prompt = `${criteria}\n\nCandidates:\n\n${formatCandidateList(candidates, { withExcerpt: true })}`;
 
   const model = config.model || DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
@@ -1455,7 +1439,7 @@ async function runDigest(
   const ids = digestList.map((c) => c.id);
 
   const criteria = withInterestProfile(config.prompt || DEFAULT_ANTHROPIC_DAILY_PROMPT, interestProfile);
-  const prompt = `${criteria}\n\nItems:\n\n${untrustedBlock("ITEMS", formatCandidateList(digestList))}`;
+  const prompt = `${criteria}\n\nItems:\n\n${formatCandidateList(digestList)}`;
 
   const model = config.model || DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
