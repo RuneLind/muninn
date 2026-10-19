@@ -2,7 +2,7 @@
 
 import { factcheckCalloutScript, factcheckCalloutStyles } from "../../../summaries/factcheck-callout.ts";
 import { SUMMARY_SOURCES } from "../../../summaries/sources.ts";
-import { isSafeLinkHref } from "../../../format/safe-link-href.ts";
+import { decodeBasicCharRefs, isSafeLinkHref } from "../../../format/safe-link-href.ts";
 
 /** CSS for markdown-rendered content. Used by both the overlay panel and the standalone document page. */
 export function markdownContentStyles(prefix: string): string {
@@ -382,20 +382,29 @@ export function docPanelHtml(
 
 /**
  * The overrides every client `renderMarkdown` installs on the page's ONE global
- * marked: raw HTML escaped, and a link whose href fails `isSafeLinkHref`
- * (javascript:, data:, …) reduced to its text. A safe link returns `false`, so
- * marked's own renderer writes it exactly as before. The doc panel and the
+ * marked: raw HTML escaped, and links written here rather than by marked.
+ * marked leaves character references in `token.href` and writes it with `&`
+ * unescaped, so `&#106;avascript:` passed a scheme check and the browser
+ * decoded it into a live link. The override decodes first, checks the result
+ * with `isSafeLinkHref` (failing links become their text), then writes the
+ * href HTML-escaped, so the attribute decodes to exactly the checked string.
+ * `encodeURI` + `%25` → `%` is marked's own `cleanUrl`. The doc panel and the
  * summaries job card share the `__sanitized` flag, so both must install this
  * same snippet — whichever runs first decides for the page.
  */
 export function sanitizedMarkedInstallScript(): string {
   return `if (typeof marked.use === 'function' && !marked.__sanitized) {
         var isSafeLinkHref = ${isSafeLinkHref.toString()};
+        var decodeBasicCharRefs = ${decodeBasicCharRefs.toString()};
         marked.use({ renderer: {
           html: function(token) { return esc(token.raw || token.text || ''); },
           link: function(token) {
-            if (isSafeLinkHref(String(token.href || ''))) return false;
-            return this.parser.parseInline(token.tokens);
+            var text = this.parser.parseInline(token.tokens);
+            var href = decodeBasicCharRefs(String(token.href || ''));
+            if (!isSafeLinkHref(href)) return text;
+            try { href = encodeURI(href).replace(/%25/g, '%'); } catch (e) { return text; }
+            var title = token.title ? ' title="' + esc(decodeBasicCharRefs(String(token.title))) + '"' : '';
+            return '<a href="' + esc(href) + '"' + title + '>' + text + '</a>';
           }
         } });
         marked.__sanitized = true;

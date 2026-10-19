@@ -34,3 +34,22 @@ export function isSafeLinkHref(href: string): boolean {
   if (scheme !== undefined) return scheme === "http" || scheme === "https" || scheme === "mailto";
   return !/^[/\\]{2}/.test(trimmed);
 }
+
+/**
+ * Decodes numeric character references, the five XML named ones and the named
+ * forms of `:`, tab and newline, so the client renderer checks the destination
+ * CommonMark means (`&amp;` is `&`, `java&Tab;script:` is refused). Other named
+ * references stay literal: the renderer escapes `&` on output, so the browser
+ * reads them as text, never as a scheme character.
+ * Dependency-free: the client copies inject it by `.toString()`.
+ */
+export function decodeBasicCharRefs(s: string): string {
+  const named: Record<string, string> = {
+    amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", colon: ":", Tab: "\t", NewLine: "\n",
+  };
+  return s.replace(/&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|(amp|lt|gt|quot|apos|colon|Tab|NewLine));/g, (m, dec, hex, name) => {
+    if (name) return named[name]!;
+    const cp = dec !== undefined ? parseInt(dec, 10) : parseInt(hex, 16);
+    return cp > 0 && cp <= 0x10ffff && (cp < 0xd800 || cp > 0xdfff) ? String.fromCodePoint(cp) : "\uFFFD";
+  });
+}
