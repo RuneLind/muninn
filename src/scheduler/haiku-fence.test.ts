@@ -5,7 +5,8 @@
  * `mcp__gmail__create_filter`, a Gmail write the deny-list does not name
  * (`forward_email`) and a calendar write.
  *
- * Three spawns, each through the real `buildHaikuArgs`:
+ * Three spawn shapes, each through the real `buildHaikuArgs`, plus a fourth run
+ * of the email shape that pins the residual below:
  * - the email watcher's (`toolSurface: "gmail-read"`) against a fixture bot
  *   folder shaped like jarvis's: Gmail, calendar and knowledge servers, all
  *   recording stubs, and a bot allow-list that grants the writes too;

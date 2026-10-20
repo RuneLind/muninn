@@ -130,9 +130,10 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
   source: string;
   entrypoint?: string;
   /**
-   * Bot folder this call needs TOOLS from. Its `.mcp.json` is passed as
-   * `--mcp-config` and its `.claude/settings*.json` as `--settings` — it is NOT
-   * the process cwd.
+   * Bot folder this call needs TOOLS from. Its `.mcp.json`'s Gmail server is
+   * passed as `--mcp-config`, and the Gmail reads its `.claude/settings*.json`
+   * allow (minus what they deny) as a filtered `--settings` — it is NOT the
+   * process cwd.
    *
    * Callers used to hand `bots/<name>/` in as the cwd, which bought THREE things
    * from the CLI implicitly: MCP server discovery, tool permissions, and the bot's
@@ -144,7 +145,8 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
    * things are now requested by name — MCP + permissions via this field, persona
    * via {@link system} — and the spawn runs in the agent home like every other
    * muninn-spawned agent. Same shape, same prompt, measured on the argv this
-   * function emits: 8 577 cache_creation, $0.0199.
+   * function emitted before the tool fence (all three servers, the bot's full
+   * settings): 8 577 cache_creation, $0.0199. Not re-measured on the fenced argv.
    *
    * Read ONLY together with `toolSurface: "gmail-read"` (today: the email
    * watcher). Without that opt-in the spawn is tool-less whatever this says.
@@ -265,9 +267,10 @@ export function buildHaikuArgs(opts: {
   // The email surface. Gmail's server runs through an unpinned `npx -y`, so it can
   // gain tools; `dontAsk` denies every tool the filtered settings do not allow,
   // instead of handing it to the user-scope `defaultMode: auto` classifier. The
-  // user-scope allow entries (`Bash`, `Read(...)`, `WebSearch`) still pre-approve
-  // under `dontAsk` — harmless only because `--tools ToolSearch` removes those
-  // built-ins, so the two flags ship together. `ToolSearch` stays because the
+  // user-scope allow entries (`Bash`, `Read(...)`, `WebSearch`,
+  // `WebFetch(domain:…)`, `mcp__serena__*`) still pre-approve under `dontAsk` —
+  // harmless only because `--tools ToolSearch` removes those built-ins and
+  // `--strict-mcp-config` keeps other servers off, so the flags ship together. `ToolSearch` stays because the
   // Gmail tools are deferred and load through it.
   args.push("--tools", "ToolSearch", "--permission-mode", "dontAsk", "--settings", gmail.settings);
   // Second line: the write tools known today, removed from the surface outright.
