@@ -193,6 +193,13 @@ export interface OriginDecisionInput {
    * for the rebinding reason recorded on `allowedOrigins` above.
    */
   readonly host?: string | undefined;
+  /**
+   * The `X-Forwarded-Proto` request header, verbatim — read by the `off` Host
+   * arm ONLY. When it names `http` or `https`, the `Origin`'s scheme must equal
+   * it. It can only NARROW the arm: a client that sets it on a direct request
+   * refuses its own request, never admits another.
+   */
+  readonly forwardedProto?: string | undefined;
   /** Omitted ⇒ `"authenticating"`, the stricter rule. */
   readonly mode?: OriginPolicyMode;
 }
@@ -273,6 +280,21 @@ export function originMatchesHost(origin: string, host: string | undefined): boo
   }
 }
 
+/**
+ * True unless `X-Forwarded-Proto` names a scheme (`http`/`https`, first hop of
+ * a comma list, case-folded) that differs from the `Origin`'s. An absent or
+ * unrecognised value constrains nothing: plain-http LAN use sends none.
+ */
+export function originSchemeMatchesForwarded(origin: string, forwardedProto: string | undefined): boolean {
+  const proto = forwardedProto?.split(",")[0]?.trim().toLowerCase();
+  if (proto !== "http" && proto !== "https") return true;
+  try {
+    return new URL(origin.trim()).protocol === `${proto}:`;
+  } catch {
+    return false;
+  }
+}
+
 export interface OriginDecision {
   readonly allowed: boolean;
   /** Short, log-shaped. Never echoed to the client — a refusal that explains
@@ -324,7 +346,15 @@ export function decideOrigin(input: OriginDecisionInput): OriginDecision {
       // requests that carry none (a plain-http page, a WS handshake). A
       // cross-site http page on the name an https proxy forwards as Host
       // would otherwise match it.
-      if ((!site || site === "none") && originMatchesHost(origin, input.host)) {
+      //
+      // The proxy's scheme, when it states one, is the scheme the request was
+      // served on: an http page on :80 of the name `tailscale serve` publishes
+      // on 443 sends a matching Host and no Sec-Fetch-Site on a WS handshake.
+      if (
+        (!site || site === "none") &&
+        originMatchesHost(origin, input.host) &&
+        originSchemeMatchesForwarded(origin, input.forwardedProto)
+      ) {
         return { allowed: true, reason: "origin matches host" };
       }
       if (site === "same-origin") return { allowed: true, reason: "sec-fetch-site same-origin" };
@@ -373,6 +403,7 @@ export function createOriginMiddleware(
       origin: c.req.header("origin"),
       secFetchSite: c.req.header("sec-fetch-site"),
       host: c.req.header("host"),
+      forwardedProto: c.req.header("x-forwarded-proto"),
       allowedOrigins: accepted,
       mode,
     });

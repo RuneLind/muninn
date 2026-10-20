@@ -310,13 +310,16 @@ laptop or mini keeps working:
   **skipped when `Sec-Fetch-Site` is `cross-site` or `same-site`**: Fetch
   Metadata, when present, is authoritative. Without that, an http page on :80
   of the name serve publishes sends a matching `Origin` with `cross-site` and
-  passed (measured). **Open residual:** the same page's `new WebSocket` still
-  passes, because a handshake carries no `Sec-Fetch-Site` and the arm takes the
-  Host side's scheme from the `Origin` (measured: 101 and a chat snapshot). It
-  needs hostile http content on :80 of muninn's own tailnet name; the remedy
-  is to take that scheme from `X-Forwarded-Proto`, which serve sets. Browsers
-  that send no Fetch Metadata (Safari < 16.4, Firefox < 90) keep the HTTP half
-  of the same gap.
+  passed (measured). The same page's `new WebSocket` carries no
+  `Sec-Fetch-Site`, so the arm also requires **the `Origin`'s scheme to equal
+  `X-Forwarded-Proto`** when that header names `http` or `https` (first hop of
+  a list; `originSchemeMatchesForwarded`). serve sets it, so an http page on
+  :80 of the tailnet name no longer opens the https socket (it got a 101 and a
+  chat snapshot before). An absent or unrecognised value constrains nothing,
+  so plain-http LAN use keeps working; the header can only narrow the arm,
+  never admit a request. Both `createOriginMiddleware` and the WS upgrade pass
+  it. A same-host proxy that terminates https and does NOT set the header
+  leaves the gap open.
 - **`Sec-Fetch-Site: same-origin`**, a second path for an https proxy that
   rewrites `Host`, so the arm above does not match.
 
