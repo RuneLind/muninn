@@ -50,7 +50,7 @@ import { fellesPublishPayloadField } from "../../wiki/felles-publish.ts";
 import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
-import { findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
+import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
@@ -1462,6 +1462,7 @@ export function registerWikiReadRoutes(
     const servedRoot = readonlyCandidateRoot(entry, unknownWiki);
     const readonlyWiki = servedRoot !== null && isReadonlyWikiRoot(servedRoot);
     const findSelf = findSelfWikiName(registry, entry, servedRoot);
+    const findRows = findRowsWikiName(registry, entry, servedRoot);
     // Resolved synthesis bot for the Ask tab's "Answered by …" line — same
     // owner-routing the ask/digest handlers use, computed at render time so
     // the tab can say who will answer before a question is asked. Skipped on a
@@ -1505,6 +1506,7 @@ export function registerWikiReadRoutes(
         wikiRoot: servedRoot,
         tools,
         findSelf,
+        findRows,
         role: sessionRole(c),
       }),
     );

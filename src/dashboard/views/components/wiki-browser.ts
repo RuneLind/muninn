@@ -105,7 +105,7 @@ import {
   startReindex,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
-import { readActiveWikiName, readActiveWikiRoot, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
+import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
   START_VIEW_PARAM,
@@ -611,8 +611,12 @@ const WIKI = readActiveWikiName();
  *  no servable root. Only the breadcrumb's ⧉ Copy path reads it, and like `WIKI`
  *  it is a boot-time fact: switching wiki is a full navigation. */
 const WIKI_ROOT = readActiveWikiRoot();
-/** This wiki's registry name, as the find palette's Everywhere rows spell it. */
+/** This wiki's registry name — the requested one, which the answer, new-since
+ *  and Agent consumers send as `wiki`. */
 const FIND_SELF_WIKI = readFindSelfWiki();
+/** The name Everywhere rows carry for this wiki's root (the first registry
+ *  entry on it). Only the palette reads it; never send it as `wiki`. */
+const FIND_ROWS_WIKI = readFindRowsWiki();
 /** Append the active `wiki` param to a URL so every /api/wiki/* fetch stays on-wiki. */
 function withWiki(url: string): string {
   return withWikiParam(url, WIKI);
@@ -8741,9 +8745,9 @@ initFindPalette({
   openPage: (relPath) => loadPageByRelPath(relPath),
   hrefFor: (relPath) => pageUrlByRelPath(relPath),
   onOpen: () => hideRefPeek(),
-  // Everywhere rows name their wiki by registry name; under the WIKI_DIR
-  // override `WIKI` is "" while the served root may be a registered wiki.
-  selfWiki: () => FIND_SELF_WIKI,
+  // Everywhere rows name a root by its FIRST registry entry; on aliased roots
+  // that is not the requested name, and under the WIKI_DIR override `WIKI` is "".
+  selfWiki: () => FIND_ROWS_WIKI,
   // The read slice (nais) does not register the Everywhere route.
   everywhere: () => wikiToolsFlag(),
 });

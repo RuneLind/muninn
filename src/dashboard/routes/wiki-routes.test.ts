@@ -4503,3 +4503,43 @@ describe("the culled bit — listing and page payloads", () => {
     expect(data.related.map((r) => r.relPath)).not.toContain("archive/old.md");
   });
 });
+
+// arch-review 2026-10 #60: on aliased roots the page injects TWO names. The
+// requested one (`__WIKI_FIND_SELF__`) is what the answer cards, the answer
+// export, new-since and the Agent lens send as `wiki`, so answers stored under
+// `b` and `WIKI_ANSWER_WIKIS=b` keep working on `?wiki=b`. The first entry on the
+// root (`__WIKI_FIND_ROWS__`) is what Everywhere rows carry, so only the palette
+// reads it.
+describe("GET /wiki — aliased roots inject the requested name and the rows name apart", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-alias-route-"));
+    await Bun.write(path.join(root, "p.md"), "# P\n\nBody.\n");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `aliasfirst=${root},aliassecond=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("?wiki=aliassecond keeps its own name for the consumers that key state, the first entry's for the rows", async () => {
+    const html = await (await app.request("/wiki?wiki=aliassecond")).text();
+    expect(html).toContain('window.__WIKI_FIND_SELF__ = "aliassecond"');
+    expect(html).toContain('window.__WIKI_FIND_ROWS__ = "aliasfirst"');
+    const first = await (await app.request("/wiki?wiki=aliasfirst")).text();
+    expect(first).toContain('window.__WIKI_FIND_SELF__ = "aliasfirst"');
+    expect(first).toContain('window.__WIKI_FIND_ROWS__ = "aliasfirst"');
+  });
+});

@@ -2519,7 +2519,7 @@ and wraps the spans itself.
 
 **Bounds, in order.** The wiki indexes load FIRST, all in parallel under one
 `INDEX_TIMEOUT_MS` (2.5 s). The route lists a root once (`uniqueWikiRoots`:
-the first entry's name wins — `findSelfWikiName`'s rule — and the collections
+the first entry's name wins — `findRowsWikiName`'s rule — and the collections
 are the union of every entry's), so an aliased root is not searched twice and
 a hit in the second entry's collection still resolves. A wiki that misses the bound answers from its **last-good
 index** (kept per root in `find-everywhere.ts`) and is named in
@@ -2601,12 +2601,14 @@ drops to `<body>` and Enter never opens a different row, and
 already shown locally (wiki label, reason chips `text #n`, `huginn #n`,
 `session <8-char id> #n` with the session title as tooltip, `leg #1` on a
 head), and gives a LOCAL row the same chips in place. "This wiki" is the
-REGISTRY name the page injects as `__WIKI_FIND_SELF__` (`findSelfWikiName`):
-under the `WIKI_DIR` override the page's own wiki name is "", while its root
-may still be a registered wiki whose rows must dedupe and open in place. It
-resolves by ROOT first, so on aliased roots (`a=/w,b=/w`) `?wiki=b` names `a`,
-the name the route's rows carry; without a served root it falls back to the
-requested entry's name. The
+name the page injects as `__WIKI_FIND_ROWS__` (`findRowsWikiName`): the FIRST
+registry entry on the served root, the name the route's rows carry, so on
+aliased roots (`a=/w,b=/w`) `?wiki=b` dedupes against `a`; under the
+`WIKI_DIR` override (page name "") it is the registered root's name. Only the
+palette reads it. `__WIKI_FIND_SELF__` (`findSelfWikiName`) stays the
+REQUESTED name (`b`), because the answer cards, the answer export, new-since
+and the Agent lens send it as `wiki`: answer rows and new-since baselines are
+keyed by it and `WIKI_ANSWER_WIKIS` is checked against it. The
 degrade line names every failed, unconfigured or skipped leg with its label
 (a too-short query is not news), every skipped or stale index and a cut
 query. The section paints alone — the local rows are never re-rendered when

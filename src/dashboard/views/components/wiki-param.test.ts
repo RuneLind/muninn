@@ -1,5 +1,5 @@
 import { afterEach, test, expect, describe } from "bun:test";
-import { readActiveWikiRoot, withWikiParam } from "./wiki-param.ts";
+import { readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 
 /**
  * `readActiveWikiRoot` degrades to `null` for every shape that is not a usable
@@ -40,5 +40,37 @@ describe("withWikiParam", () => {
     expect(withWikiParam("/api/wiki/page?relPath=a", "mimir")).toBe(
       "/api/wiki/page?relPath=a&wiki=mimir",
     );
+  });
+});
+
+// arch-review 2026-10 #60: two names on aliased roots. The requested name keys
+// answers, new-since baselines and the Agent lens; the rows name only dedupes
+// and opens Everywhere rows in place.
+describe("readFindRowsWiki / readFindSelfWiki", () => {
+  const g = globalThis as unknown as { __WIKI_FIND_SELF__?: unknown; __WIKI_FIND_ROWS__?: unknown };
+  afterEach(() => {
+    delete g.__WIKI_FIND_SELF__;
+    delete g.__WIKI_FIND_ROWS__;
+  });
+
+  test("each reads its own global", () => {
+    g.__WIKI_FIND_SELF__ = "b";
+    g.__WIKI_FIND_ROWS__ = "a";
+    expect(readFindSelfWiki()).toBe("b");
+    expect(readFindRowsWiki()).toBe("a");
+  });
+
+  test("the rows name falls back to the self name on a page that injects none", () => {
+    g.__WIKI_FIND_SELF__ = "b";
+    expect(readFindRowsWiki()).toBe("b");
+  });
+
+  test("the reader wires the rows name to the palette only, the self name to every consumer that sends `wiki`", async () => {
+    const src = await Bun.file(new URL("./wiki-browser.ts", import.meta.url)).text();
+    expect(src).toContain("selfWiki: () => FIND_ROWS_WIKI,");
+    // Agent lens, new-since, answer cards, answer export.
+    expect(src.match(/wiki: FIND_SELF_WIKI \|\| WIKI,/g)?.length).toBe(4);
+    // Nothing else reads the rows name: one declaration, one palette use.
+    expect(src.match(/\bFIND_ROWS_WIKI\b/g)?.length).toBe(2);
   });
 });
