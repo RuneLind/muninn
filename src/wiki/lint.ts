@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Twenty-nine check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Thirty-two check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -88,12 +88,17 @@
  *                      (an attribute `COMPONENT_ATTRS` does not list, or an
  *                      earlier spelling of a repeated one). Not culled. Rules:
  *                      `lint-components.ts`. `scripts/wiki-check.ts` runs it with checks
- *                      5, 6, 6b, 10, 11, 12, 13 and 16 (`checkPageText`).
+ *                      5, 6, 6b, 10, 11, 12, 13, 16 and 17 (`checkPageText`).
  * 16. ledger-row-state / chain-close-conflict — what the decision views
  *                      cannot draw: a PR ledger row whose state no rule reads
  *                      (the strip shows `unknown`), and a decision's «Lukker
  *                      Sn» that the question's own close contradicts. Info,
  *                      report-only. Rules: `lint-decision-chain.ts`.
+ * 17. chart-table — on `.mdx` pages that are not culled, what a `<Chart>`
+ *                      cannot draw from its table (a warning: the reader shows
+ *                      the table instead) or draws with a note (info: a gap
+ *                      cell that differs from target − value). Rules:
+ *                      `lint-chart.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -129,6 +134,7 @@ import { checkOwnsEntries, checkState, isStateScopePage, STATE_LINT_CHECKS, stat
 import { checkComponents, COMPONENT_LINT_CHECKS, type LoadedPageFiles } from "./lint-components.ts";
 import { loadPageFiles } from "./page-files.ts";
 import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-chain.ts";
+import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -162,11 +168,12 @@ export const LINT_CHECKS = [
   ...STATE_LINT_CHECKS,
   ...COMPONENT_LINT_CHECKS,
   ...DECISION_CHAIN_LINT_CHECKS,
+  ...CHART_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 /** The checks that read nothing but a page's own text, its relPath and the
- *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15 and 16). Check
+ *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16 and 17). Check
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
  *  through {@link checkPageText}, and `scripts/wiki-check.ts` runs the same
@@ -190,6 +197,7 @@ export const PAGE_TEXT_LINT_CHECKS = [
   "tldr-no-more",
   ...COMPONENT_LINT_CHECKS,
   ...DECISION_CHAIN_LINT_CHECKS,
+  ...CHART_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
@@ -979,7 +987,7 @@ export function checkPageText(
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content));
   return findings;
 }

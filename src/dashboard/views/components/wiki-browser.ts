@@ -464,6 +464,7 @@ import {
   linkAllKeys,
   type IssueRowState,
 } from "./wiki-issue-rows.ts";
+import { initWikiVisuals } from "./wiki-visuals.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
 const LENS_PARAM = "lens";
@@ -945,6 +946,7 @@ function relPathToName(relPath: string): string | null {
 }
 
 initStartCards({ withWiki, resolvePageName: relPathToName });
+initWikiVisuals();
 initRailResize();
 initPaneToggles();
 

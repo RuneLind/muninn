@@ -51,6 +51,14 @@ export function normalizeLabel(label: string): string {
   return stripEmphasis(label).replace(/`/g, "").trim().normalize("NFC").toLowerCase();
 }
 
+/** A table header as a column key (`<Chart>` attributes name columns by
+ *  header): {@link normalizeLabel}, with every dash (`–`, `—`, `‐`, `‑`) read
+ *  as `-` and every white-space run, NBSP included, as one space. */
+export function headerKey(header: string): string {
+  return normalizeLabel(header.replace(/[\s  ]+/g, " "))
+    .replace(/[‐‑–—]/g, "-");
+}
+
 /** The `better` directions, and the `decimal` values, this accepts. */
 export const DELTA_DIRECTIONS: ReadonlySet<string> = new Set(["lower", "higher"]);
 export const DELTA_DECIMALS: ReadonlySet<string> = new Set(["comma", "dot"]);

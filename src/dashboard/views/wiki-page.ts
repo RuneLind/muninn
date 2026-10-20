@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { compactPartsHiddenCss, componentBlockCss, decisionViewsCss, factcheckReaderCss, questionReaderCss, statusTilesCss } from "../../format/component-styles.ts";
+import { chartViewCss, compactPartsHiddenCss, componentBlockCss, decisionViewsCss, factcheckReaderCss, questionReaderCss, statusTilesCss } from "../../format/component-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -2389,6 +2389,8 @@ export async function renderWikiPage(opts?: {
     ${decisionViewsCss(".wiki-article")}
     /* Reader-only: StatusRows view="tiles" (statusRowsHtml, views: true). */
     ${statusTilesCss(".wiki-article")}
+    /* Reader-only: the <Chart> view (chart-view.ts, views: true). */
+    ${chartViewCss(".wiki-article")}
 
     /* Blog-type article chrome (native .mdx pages with type: blog):
        explainer-style h2 underline for stronger section separation. The accent

@@ -4,7 +4,7 @@
  *
  *  - `component-value` — an attribute whose spec `parse` reports `fellBack`
  *    (`COMPONENT_SPEC`, `src/format/component-spec.ts`), or a missing
- *    `required` attribute (Meter `value`). An empty value reads as a missing
+ *    `required` attribute (Meter `value`, Chart `kind`). An empty value reads as a missing
  *    one there, so it is reported only where missing is itself a fallback.
  *  - `component-attr` — an attribute `COMPONENT_ATTRS` does not list, which
  *    `parseAttrs` drops before any renderer sees it, or an earlier spelling of
@@ -402,7 +402,7 @@ function lineAt(content: string, offset: number): number {
   return line;
 }
 
-/** Components with a `required` attribute: a bare `<Meter>` is a finding. */
+/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or `<Chart>` is a finding. */
 const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required));
 /**
  * A tag this check could judge: a component name followed by an attribute, or

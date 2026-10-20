@@ -288,17 +288,64 @@ function prRefOf(text: string): number | null {
 function slateOf(cell: string, slateColumn: boolean): { slate: number | null; label: string } {
   const t = plain(cell).replace(/^[-–—\s]+/, "");
   if (!slateColumn) return { slate: null, label: t };
-  // Leading PR links go first: `[#351](…) 1 — y`.
+  const m = SLATE_RE.exec(slateBody(t).body);
+  if (!m) return { slate: null, label: t };
+  return { slate: Number(m[1]), label: m[3]!.trim() };
+}
+
+/** A slate number, then an optional separator (group 2) and the label (3). */
+const SLATE_RE = /^(\d{1,4})(?![\p{L}\p{N}])(?![-.:/]\d)\s*([-–—:.)]\s*)?(.*)$/u;
+
+/** A cell past its leading PR links (`[#351](…) 1 — y`) and a `PR #` prefix;
+ *  `link` is the first of those links, `prefixed` whether the prefix was there. */
+function slateBody(t: string): { body: string; link: number | null; prefixed: boolean } {
   let cut = 0;
+  let link: number | null = null;
   for (const r of scanRefs(t).refs) {
     if (r.start !== cut || t[cut] !== "[") break;
+    link ??= r.n;
     cut = r.end;
     while (/\s/.test(t[cut] ?? "")) cut++;
   }
-  const body = t.slice(cut).replace(/^PR\s*#?\s*/i, "");
-  const m = /^(\d{1,4})(?![\p{L}\p{N}])(?![-.:/]\d)\s*(?:[-–—:.)]\s*)?(.*)$/u.exec(body);
-  if (!m) return { slate: null, label: t };
-  return { slate: Number(m[1]), label: m[2]!.trim() };
+  const rest = t.slice(cut);
+  const body = rest.replace(/^PR\s*#?\s*/i, "");
+  return { body, link, prefixed: body.length !== rest.length };
+}
+
+/** A gate row's PR identity: a slate and the first cell's PR link. */
+export interface GatePr {
+  slate: number | null;
+  link: number | null;
+}
+
+/** The PR a non-ledger table row names in its first cell: the slate (`7`,
+ *  `PR 7`, `**7** — x`) and the cell's first PR link, struck text not read
+ *  for either. Unlike a ledger row's, the slate is read under any header and
+ *  skips struck text (`~~8~~ 12` is gate slate 12, ledger slate 8). It is
+ *  also stricter: a number followed by more text counts only after a
+ *  separator or a `PR` prefix, and only when that text does not open with a
+ *  digit, so `3 runs`, `12–40`, `21a` and a date name no PR. Null when the
+ *  cell names neither. */
+export function gateRowPr(cell: string): GatePr | null {
+  const t = plain(unstruck(cell)).replace(/^[-–—\s]+/, "");
+  const { body, prefixed } = slateBody(t);
+  const m = SLATE_RE.exec(body);
+  const label = m?.[3]!.trim();
+  const slate = m && (label === "" || ((m[2] !== undefined || prefixed) && !/^\d/.test(label!))) ? Number(m[1]) : null;
+  const link = prRefOf(unstruck(cell));
+  return slate === null && link === null ? null : { slate, link };
+}
+
+/** The ledger state of a gate row's PR, first match wins: (1) the row whose
+ *  slate is the gate's slate; (2) the row whose link is the gate's own link;
+ *  (3) a slate-less row whose link is the gate's slate (its PR is its link);
+ *  (4) none. */
+export function gateRowState(pr: GatePr, rows: readonly LedgerRow[]): PrState | undefined {
+  const row =
+    (pr.slate !== null ? rows.find((r) => r.slate === pr.slate) : undefined) ??
+    (pr.link !== null ? rows.find((r) => r.link === pr.link) : undefined) ??
+    (pr.slate !== null ? rows.find((r) => r.slate === null && r.link === pr.slate) : undefined);
+  return row?.state;
 }
 
 /** The row's PR link: the first cell, the PR, state and Landed cells first,
