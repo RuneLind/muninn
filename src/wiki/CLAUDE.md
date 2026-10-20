@@ -153,15 +153,49 @@ Acceptance: `e2e/wiki-copy-path.spec.ts` (two temp wikis in ONE process, the sec
 
 A breadcrumb button on a wiki named in `FELLES_WIKI_PUBLISH_WIKIS` that runs the operator's own `publiser-felles-wiki.ts` (`FELLES_WIKI_PUBLISH_BIN`, in `muninn-nais`) on the open page: **Dry run**, **Publish**, a `--tillat-ident` checkbox (default on, the 2026-10-01 decision), **⧉ Copy command** for the same line in a terminal, and **Remove…**, which deletes the page's object from the bucket. The dialog (`views/components/wiki-felles-publish.ts`) shows the script's output and one line per exit code and action (0 ok, 1 refused by the scanner, 2 usage/environment, 3 upload or delete failed).
 
-- **Remove is two runs in the dialog.** **Remove…** runs the script's own `--fjern --dry-run`, which prints the object name a remove targets; only then does **Confirm remove** appear, and only that click sends the real delete. The script's dry run never asks the bucket, so it names the object without proving it exists — a never-published page fails at the confirm with exit 3. Any other run hides the confirm row again. The two-step rule is the DIALOG's: the route itself accepts `{action: "remove", dryRun: false}` behind the same-origin gate alone, as it accepts a publish.
+- **Remove is two runs in the dialog.** **Remove…** runs the script's own `--fjern --dry-run`, which prints the object name a remove targets; only then does **Confirm remove** appear, and only that click sends the real delete. The script's dry run never asks the bucket, so it names the object without proving it exists — a never-published page answers the confirm with exit 3, which the dialog reads as «was not in the bucket». Any other run hides the confirm row again. The two-step rule is the DIALOG's: the route itself accepts `{action: "remove", dryRun: false}` behind the same-origin gate alone, as it accepts a publish.
 - **Remove sends the relPath in NFC**, because the script uploads `normalize("NFC")` and deletes the name it is given, while readdir returns an NFD path as written.
-- **Remove takes the page's data files too** (`felles-remove.ts`, architecture review 2026-10 finding 11). Publish uploads the `.csv`/`.sql`/`.yaml` files a page reads, and `--fjern` deletes only the objects it is given, so the route also deletes every data file the page reads (the reader's `pageFileRefKinds` rule, resolved from the page's folder, sent in NFC) that exists locally and that no OTHER index page reads. Three rules:
-  - **A data file counts only when publish uploads it** (`publishUploadsDataFile`): publish's own test, `lstat` on the page's spelling of the path (not the NFC object name), with no symlinked folder below the root and a regular file at the end. `lstat` is case- and normalization-insensitive on macOS APFS and byte for byte on Linux, so `Data.CSV` finds `data.csv` on macOS only, and an NFC ref misses an NFD-stored file on Linux only — exactly as publish does. The object sent is still the NFC name. The scanner and the size cap are not mirrored: a file they refused is targeted and fails the data-file run with exit 3. Tests simulate each filesystem through the `lstat` seam.
-  - **A name the script's `sjekkStiform` refuses is left out** (`fellesObjectPathRefusal`, a mirror of that rule: `[ ] * ?`, a trailing `#<digits>`, control or direction characters, a segment over 211 bytes), because one such name makes `--fjern` delete nothing at all. The answer lists it in `keptRefused`.
-  - **A real remove is two runs**: the page alone, then, only when that exits 0, the data files. `--fjern` deletes in argv order and exits 3 on any object the bucket lacks, so one run reported a removed page as failed when a local data file was never uploaded. The page run's exit code is `exitCode`; the second run's is `dataFilesExitCode` (null when it threw or timed out), and the dialog's line names the case: exit 3 a delete that failed (the file may never have been uploaded), null a run that timed out or could not start, any other code by number. The dry run never asks the bucket and stays one run.
-  - **Retry data files** (`dataFilesOnly: true`, a real remove only, else a 400): the route runs the data-file delete alone over the same list, since the page is gone from the bucket and a page run would exit 3 before reaching them; a page with no data files is a 400. The answer carries `dataFilesOnly: true` and `removes` without the page. The dialog offers it after a remove whose data-file run did not exit 0, after a retry that did not, and after a page run that exited 3 on a page with data files — that one may be a page an earlier remove already deleted, so its text says not to retry while the page is still published (`fellesDataRetryOffered`).
+- **Remove takes the page's data files too** (`felles-remove.ts`, architecture review 2026-10 finding 11, class check on PR #725). Publish uploads the `.csv`/`.sql`/`.yaml` files a page reads, and `--fjern` deletes only the objects it is given. The rule: **remove targets exactly the object names publish would upload for the page as it stands, minus a file another local page reads (`keptShared`)**. Where remove cannot mirror publish, a targeted object that publish never uploaded must be harmless, so the route reads «not in the bucket» as success (`fellesFjernVerdict`, below).
 
-  The answer adds `removes` (page first), `keptShared` and `keptRefused`, and the dry run's confirm row lists all three. The route claims the run slot before this pre-read, so the 409 answers before any file is read. A data file only the bucket's copy of another page names is not seen, the residual the status's `muligensForeldreløse` covers.
+  **Target set**, per data file the page names (`publishDataFileCheck` + the collision pass; tests: `felles-remove.test.ts`, the `FsProbe` seam simulates APFS and ext4):
+
+  | Publish's outcome for the file | Targeted | Why |
+  |---|---|---|
+  | uploaded (regular file, readable, ≤ 1 MiB, name accepted) | yes, as its NFC name | publish uploads `normalize("NFC")` |
+  | missing (`lstat` finds nothing) | no | publish skips it |
+  | a symlinked folder in the path (`relUnder`) | no | publish refuses it |
+  | the file is a symlink, a folder, a FIFO, or unreadable (`O_NOFOLLOW` open fails, `fstat` not a file) | no | publish refuses it |
+  | over 1 MiB (`MAKS_DATA_BYTES`) | no | publish refuses it |
+  | a name `sjekkStiform` refuses | no, listed in `keptRefused` | one such name makes `--fjern` delete nothing |
+  | two different names, one key (lowercase + NFC), both found locally | no, neither | publish refuses both (`kollisjonsnøkkel`) |
+  | two spellings of one NFC name | once, NFC | one object; uploaded when either spelling passes, in either order (finding V3) |
+  | case variant: `Data.CSV` names `data.csv` | APFS: yes, as `Data.CSV`; ext4: no | follows `lstat`, as publish does |
+  | refused by the scanner or the encoding check | yes (not mirrored) | its delete answers «not in the bucket» = success |
+  | changed locally since the publish (now over the cap, renamed) | no (not mirrored) | its object stays: the status's `muligensForeldreløse` covers it |
+
+  **Outcomes**, read by `fellesFjernVerdict` from the script's lines: `deleted` (exit 0); `missing` (exit 3, and every `Feil: sletting av <url> feilet (exit N): <detail>` line has the detail equal to the URL — gcloud's `matched no objects or files` prints the URL last; the summary must add up); `failed` (exit 3 otherwise: a logged-out gcloud, a network error, a masked detail, lines that do not add up); `error` (exit 1 or 2 or any other code); `timeout` (no result). A real remove runs the page alone first; the data-file run follows only when the page run is `deleted` or `missing`.
+
+  | Page run | Data-file run | Status line | Next |
+  |---|---|---|---|
+  | `deleted` | none (no data files) | Removed. | — |
+  | `deleted` / `missing` | `deleted` or `missing` | page removed (or «was not in the bucket»), data files gone | — |
+  | `deleted` / `missing` | `failed` | a data-file delete failed with an error muninn does not read as «not in the bucket» | **Retry data files** |
+  | `deleted` / `missing` | `timeout` | timed out or could not start | **Retry data files** |
+  | `deleted` / `missing` | `error` (exit 1, 2, other) | exited with code N | the data files' `--fjern` command |
+  | `missing` | none | «was not in the bucket», nothing deleted | — |
+  | `failed` (exit 3, not only «not in the bucket») | not run | the page may still be published; nothing else deleted | the page + data files' `--fjern` command |
+  | `error` (exit 1, 2, other) | not run | refused / environment / code N; page may still be published | the same command |
+  | `timeout` (504) | not run | page may or may not be deleted; data files left alone; run Remove… again | — |
+
+  | Retry data files | Status line | Next |
+  |---|---|---|
+  | `deleted` / `missing` | the data files are gone | — |
+  | `failed` | a delete failed with an error muninn does not read as «not in the bucket» | **Retry data files** |
+  | `timeout` (504) | did not return | **Retry data files** |
+  | `error` | exited with code N | the data files' `--fjern` command |
+  | 409 `page-not-gone` | no recent record the page is gone; run Remove… again | — |
+
+  Retry is offered only with evidence the page object is gone, never after an unexplained exit 3, and it cannot loop on a file that is already gone (that is `missing`, success). The ROUTE enforces the same rule: a page run that reads `deleted` or `missing` records the page (wiki + NFC relPath) in an in-process map; any other page outcome, a real publish or a sync drops it, and it expires after `FELLES_GONE_TTL_MS` (15 min, a re-publish this process cannot see). `dataFilesOnly` without a fresh record is a 409, before any spawn. A reopened dialog on a page already gone needs no retry: Remove… again reads the page as `missing` and deletes the data files. The dry run never asks the bucket and stays one run naming every object; the route claims the run slot before the pre-read, so the 409 answers before any file is read. Tests: `routes/wiki-felles-publish.test.ts` (one row per cell, over `src/test/felles-fjern-fake.ts`, whose lines match the real script's), `views/components/wiki-felles-publish.test.ts` (`fellesRemoveView`, one row per cell).
 - **Known limit: one bucket for every allowlisted wiki.** Each wiki maps its relPath straight onto the bucket root, so with two wikis in `FELLES_WIKI_PUBLISH_WIKIS` sharing a relPath, publish overwrites and remove deletes the other wiki's object. Today the list has one wiki.
 
 - **muninn uploads nothing.** The script's scanner is the only guard against personal data on a page the whole team reads; a second uploader here would be a second, weaker guard.

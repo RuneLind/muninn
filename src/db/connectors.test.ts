@@ -12,6 +12,7 @@ import {
 } from "./connectors.ts";
 import { createThread } from "./threads.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { holdUncommittedConnector } from "../test/connector-race.ts";
 
 setupTestDb();
 
@@ -335,6 +336,30 @@ describe("connectors", () => {
       // A user can still add an effort variant by hand.
       await createConnector({ name: "copilot low", connectorType: "copilot-sdk", model: "claude-sonnet-5.5", effort: "low" });
       expect((await listConnectors()).filter((c) => c.connectorType === "copilot-sdk")).toHaveLength(2);
+    });
+
+    // The NOT EXISTS cannot see a row another boot has inserted and not yet
+    // committed, so every seed waits on the unique index; ON CONFLICT is what
+    // turns that wait into DO NOTHING instead of a unique violation.
+    test("eight boots seeding at once over a populated table leave one copilot row and none throws", async () => {
+      await createConnector({ name: "Existing CLI", connectorType: "claude-cli" });
+      const held = await holdUncommittedConnector("copilot-sdk", "claude-sonnet-5.5", null);
+      try {
+        const seeds = Array.from({ length: 8 }, () => seedConnectorsFromBotConfigs([]).then(() => "ok", (e: unknown) => String(e)));
+        await held.waitForBlocked(5); // the pool holds 5 connections; the rest queue for one
+        await held.commit();
+        expect(await Promise.all(seeds)).toEqual(Array(8).fill("ok"));
+      } finally {
+        await held.end();
+      }
+      expect((await listConnectors()).filter((c) => c.connectorType === "copilot-sdk")).toHaveLength(1);
+    });
+
+    test("a copilot row at another base URL does not stand in for the default one", async () => {
+      await createConnector({ name: "proxy", connectorType: "copilot-sdk", model: "claude-sonnet-5.5", baseUrl: "http://proxy:1" });
+      await seedConnectorsFromBotConfigs([]);
+      const copilot = (await listConnectors()).filter((c) => c.connectorType === "copilot-sdk");
+      expect(copilot.map((c) => c.baseUrl ?? null).sort()).toEqual(["http://proxy:1", null]);
     });
   });
 });

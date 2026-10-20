@@ -52,18 +52,6 @@ test("each exit code has its own line", () => {
   for (const code of [1, 2, 3, 9]) expect(fellesOutcomeLine(code, false).ok).toBe(false);
 });
 
-test("remove has its own line per exit code", () => {
-  // The script's dry run never asks the bucket, so the line must not claim the object exists.
-  expect(fellesOutcomeLine(0, true, "remove").text).toMatch(/does not check/);
-  expect(fellesOutcomeLine(1, false, "remove").text).toMatch(/nothing was removed/);
-  expect(fellesOutcomeLine(1, false, "remove").text).not.toMatch(/may/);
-  expect(fellesOutcomeLine(3, false, "remove").text).toMatch(/gcloud needs a login/);
-  expect(fellesOutcomeLine(0, false, "remove").text).toMatch(/^Removed/);
-  for (const code of [1, 2, 3, 9]) expect(fellesOutcomeLine(code, false, "remove").ok).toBe(false);
-  // Publish copy must never describe a delete.
-  for (const code of [0, 1, 2, 3]) expect(fellesOutcomeLine(code, false, "remove").text).not.toMatch(/upload|Published/);
-});
-
 test("the dialog's remove confirmation starts hidden", () => {
   const html = fellesDialogHtml("plans/a.mdx");
   expect(html).toContain('data-felles="remove"');
@@ -93,56 +81,99 @@ test("the confirm row names the data files kept because the script refuses their
   expect(html).toContain("Delete it from the bucket?");
 });
 
-test("a page that went with a data file that did not is not a failed remove", () => {
-  // The route deletes the page first, alone; the data-file run's exit code rides beside it.
-  const partial = fellesOutcomeLine(0, false, "remove", 3);
-  expect(partial.ok).toBe(true);
-  expect(partial.text).toMatch(/^Removed the page/);
-  expect(partial.text).toMatch(/never have been uploaded/);
-  expect(fellesOutcomeLine(0, false, "remove", null).text).toMatch(/^Removed the page/);
-  // Every data file went: the ordinary line.
-  expect(fellesOutcomeLine(0, false, "remove", 0).text).toMatch(/^Removed\. /);
-  // The page run's own failure stays the verdict.
-  expect(fellesOutcomeLine(3, false, "remove", undefined).ok).toBe(false);
+// The decision table's OUTCOMES (src/wiki/CLAUDE.md, felles remove): one row
+// per cell. `row` is what the confirm row offers; a retry row never names the
+// page, and only a page proven gone offers it.
+describe("fellesRemoveView: one row per outcome cell", () => {
+  const PAGE = "plans/case.mdx";
+  const DATA = ["plans/case.yaml", "plans/runs.csv"];
+  const cmd = { bin: "/n/publiser.ts", relPath: PAGE };
+  type Want = { text: RegExp; ok: boolean; row: "hidden" | "confirm" | "retry" | "none"; has?: string[]; lacks?: string[] };
+  const real = (over: Record<string, unknown>) => ({ exitCode: 0, removes: [PAGE, ...DATA], dataFiles: DATA, retryDataFiles: false, ...over });
+  const retry = (over: Record<string, unknown>) => ({ exitCode: 0, removes: DATA, dataFiles: DATA, dataFilesOnly: true, retryDataFiles: false, ...over });
+  const ROWS: [string, "remove" | "remove-data", boolean, number, Record<string, unknown> | null, Want][] = [
+    // Dry runs never ask the bucket.
+    ["D1 dry run exit 0: the confirm row lists every object", "remove", true, 200, { exitCode: 0, removes: [PAGE, ...DATA], keptShared: [], keptRefused: [] }, { text: /does not check/, ok: true, row: "confirm", has: DATA }],
+    ["D2 dry run exit 3", "remove", true, 200, { exitCode: 3 }, { text: /^Delete failed in a dry run/, ok: false, row: "hidden" }],
+    ["D3 dry run exit 1", "remove", true, 200, { exitCode: 1 }, { text: /dry run deletes nothing/, ok: false, row: "hidden" }],
+    ["D4 dry run exit 2", "remove", true, 200, { exitCode: 2 }, { text: /^Usage or environment error/, ok: false, row: "hidden" }],
+    ["D5 dry run another code", "remove", true, 200, { exitCode: 9 }, { text: /exited with code 9/, ok: false, row: "hidden" }],
+    // Page run deleted the page.
+    ["P1 page deleted, no data files", "remove", false, 200, real({ pageRun: "deleted", dataFiles: [], removes: [PAGE] }), { text: /^Removed\. The pod drops the page/, ok: true, row: "hidden" }],
+    ["P2 page deleted, data deleted", "remove", false, 200, real({ pageRun: "deleted", dataRun: "deleted", dataFilesExitCode: 0 }), { text: /^Removed the page and its data files/, ok: true, row: "hidden" }],
+    ["P3 page deleted, data not-found only", "remove", false, 200, real({ pageRun: "deleted", dataRun: "missing", dataFilesExitCode: 3 }), { text: /^Removed the page\. Its data files are gone from the bucket too/, ok: true, row: "hidden" }],
+    ["P4 page deleted, data exit 3 other", "remove", false, 200, real({ pageRun: "deleted", dataRun: "failed", dataFilesExitCode: 3, retryDataFiles: true }), { text: /^Removed the page\. At least one data-file delete failed with an error muninn does not read/, ok: false, row: "retry", has: DATA, lacks: [PAGE] }],
+    ["P5 page deleted, data other code", "remove", false, 200, real({ pageRun: "deleted", dataRun: "error", dataFilesExitCode: 2 }), { text: /^Removed the page\. The data-file delete exited with code 2/, ok: false, row: "none", has: [`--fjern -- ${DATA.join(" ")}`], lacks: [PAGE] }],
+    ["P6 page deleted, data timeout", "remove", false, 200, real({ pageRun: "deleted", dataRun: "timeout", dataFilesExitCode: null, retryDataFiles: true }), { text: /^Removed the page\. The data-file delete timed out/, ok: false, row: "retry", has: DATA, lacks: [PAGE] }],
+    // Page run proved the page not in the bucket: as good as deleted.
+    ["P7 page not found, no data files", "remove", false, 200, real({ exitCode: 3, pageRun: "missing", dataFiles: [], removes: [PAGE] }), { text: /^The page was not in the bucket .*Nothing was deleted/, ok: true, row: "hidden" }],
+    ["P8 page not found, data deleted", "remove", false, 200, real({ exitCode: 3, pageRun: "missing", dataRun: "deleted", dataFilesExitCode: 0 }), { text: /^The page was not in the bucket .*Removed its data files/, ok: true, row: "hidden" }],
+    ["P9 page not found, data not-found only", "remove", false, 200, real({ exitCode: 3, pageRun: "missing", dataRun: "missing", dataFilesExitCode: 3 }), { text: /gone from the bucket too/, ok: true, row: "hidden" }],
+    ["P10 page not found, data exit 3 other", "remove", false, 200, real({ exitCode: 3, pageRun: "missing", dataRun: "failed", dataFilesExitCode: 3, retryDataFiles: true }), { text: /^The page was not in the bucket .*failed/, ok: false, row: "retry", has: DATA, lacks: [PAGE] }],
+    ["P11 page not found, data other code", "remove", false, 200, real({ exitCode: 3, pageRun: "missing", dataRun: "error", dataFilesExitCode: 1 }), { text: /exited with code 1/, ok: false, row: "none", lacks: [PAGE] }],
+    ["P12 page not found, data timeout", "remove", false, 200, real({ exitCode: 3, pageRun: "missing", dataRun: "timeout", dataFilesExitCode: null, retryDataFiles: true }), { text: /timed out/, ok: false, row: "retry", lacks: [PAGE] }],
+    // Page run left the page possibly published: no retry, ever, whatever the answer claims.
+    ["P13 page exit 3 other (logged out)", "remove", false, 200, real({ exitCode: 3, pageRun: "failed", dataRun: "failed", retryDataFiles: true }), { text: /^The page delete failed .*may still be published/, ok: false, row: "none", has: [`--fjern -- ${PAGE} ${DATA.join(" ")}`] }],
+    ["P14 page exit 1", "remove", false, 200, real({ exitCode: 1, pageRun: "error" }), { text: /refused the path or failed \(exit 1\)/, ok: false, row: "none", has: ["--fjern --"] }],
+    ["P15 page exit 2", "remove", false, 200, real({ exitCode: 2, pageRun: "error" }), { text: /^Usage or environment error \(exit 2\)/, ok: false, row: "none" }],
+    ["P16 page another code", "remove", false, 200, real({ exitCode: 9, pageRun: "error" }), { text: /exited with code 9\. The page may still be published/, ok: false, row: "none" }],
+    ["P18 an answer that claims a retry without the page gone is not trusted", "remove", false, 504, { error: "The script did not return in time and was stopped.", pageRun: "timeout", dataRun: "timeout", retryDataFiles: true, dataFiles: DATA }, { text: /did not return in time/, ok: false, row: "hidden" }],
+    ["P17 page run timed out (504)", "remove", false, 504, { error: "The script did not return in time and was stopped.", reason: "timeout", pageRun: "timeout", retryDataFiles: false, dataFiles: DATA }, { text: /did not return in time/, ok: false, row: "hidden" }],
+    // Retry data files.
+    ["T1 retry deleted all", "remove-data", false, 200, retry({ dataRun: "deleted", dataFilesExitCode: 0 }), { text: /^Removed the data files/, ok: true, row: "hidden" }],
+    ["T2 retry not-found only", "remove-data", false, 200, retry({ exitCode: 3, dataRun: "missing", dataFilesExitCode: 3 }), { text: /^The data files are gone from the bucket/, ok: true, row: "hidden" }],
+    ["T3 retry exit 3 other", "remove-data", false, 200, retry({ exitCode: 3, dataRun: "failed", dataFilesExitCode: 3, retryDataFiles: true }), { text: /^At least one data-file delete failed with an error muninn does not read/, ok: false, row: "retry", has: DATA, lacks: [PAGE, "others were deleted"] }],
+    ["T4 retry other code", "remove-data", false, 200, retry({ exitCode: 2, dataRun: "error", dataFilesExitCode: 2 }), { text: /exited with code 2/, ok: false, row: "none", has: [`--fjern -- ${DATA.join(" ")}`], lacks: [PAGE] }],
+    ["T5 retry timed out (504)", "remove-data", false, 504, { error: "The data-file delete did not return in time", reason: "timeout", dataFilesOnly: true, dataRun: "timeout", retryDataFiles: true, dataFiles: DATA }, { text: /did not return in time/, ok: false, row: "retry", lacks: [PAGE] }],
+    ["T6 retry refused, page not proven gone (409)", "remove-data", false, 409, { error: "This instance has no recent record that the page is gone", reason: "page-not-gone" }, { text: /no recent record/, ok: false, row: "hidden" }],
+    ["T7 a retry answer the route marks not retryable", "remove-data", false, 200, retry({ exitCode: 3, dataRun: "failed", retryDataFiles: false }), { text: /failed/, ok: false, row: "hidden" }],
+    ["E1 no JSON", "remove", false, 500, null, { text: /^Request failed \(HTTP 500\)/, ok: false, row: "hidden" }],
+  ];
+  test.each(ROWS)("%s", (_name, action, dryRun, status, data, want) => {
+    const view = felles.fellesRemoveView(action, dryRun, status, data as never, cmd);
+    expect(view.text).toMatch(want.text);
+    expect(view.ok).toBe(want.ok);
+    expect(view.row.hidden ? "hidden" : (view.row as { button: string }).button).toBe(want.row);
+    const html = view.row.hidden ? "" : (view.row as { html: string }).html;
+    for (const s of want.has ?? []) expect(html).toContain(s);
+    for (const s of want.lacks ?? []) expect(html).not.toContain(s);
+  });
 });
 
-// A data-file run that threw or timed out is not a file that was never uploaded.
-test("each data-file outcome has its own line", () => {
-  const timedOut = fellesOutcomeLine(0, false, "remove", null);
-  expect(timedOut.text).not.toMatch(/never have been uploaded/);
-  expect(timedOut.text).toMatch(/timed out or could not start/);
-  expect(timedOut.ok).toBe(false);
-  const other = fellesOutcomeLine(0, false, "remove", 2);
-  expect(other.text).toMatch(/exited with code 2/);
-  expect(other.ok).toBe(false);
-  expect(fellesOutcomeLine(0, false, "remove", 3).text).toMatch(/Retry data files/);
-  // The retry alone.
-  expect(fellesOutcomeLine(0, false, "remove-data")).toEqual({ text: expect.stringMatching(/^Removed the data files/), ok: true });
-  expect(fellesOutcomeLine(3, false, "remove-data").text).toMatch(/may already be gone/);
-  expect(fellesOutcomeLine(3, false, "remove-data").ok).toBe(false);
-});
+describe("the retry's request and the confirm row's paint", () => {
+  test("Retry data files posts a real remove with dataFilesOnly, never a remove-data action", () => {
+    const page = { wiki: "kode", relPath: "plans/case.mdx" };
+    expect(felles.fellesRunBody(page, "remove-data", false, true)).toEqual({ ...page, dryRun: false, allowIdent: true, action: "remove", dataFilesOnly: true });
+    expect(felles.fellesRunBody(page, "remove", false, true)).toEqual({ ...page, dryRun: false, allowIdent: true, action: "remove" });
+    expect(felles.fellesRunBody(page, "publish", true, false)).toEqual({ ...page, dryRun: true, allowIdent: false, action: "publish" });
+  });
 
-test("Retry data files is offered exactly when data files may be left behind", () => {
-  const offered = felles.fellesDataRetryOffered;
-  const removes = ["plans/case.mdx", "plans/runs.csv"];
-  expect(offered("remove", false, { exitCode: 0, removes, dataFilesExitCode: 3 })).toBe(true);
-  expect(offered("remove", false, { exitCode: 0, removes, dataFilesExitCode: null })).toBe(true);
-  expect(offered("remove", false, { exitCode: 0, removes, dataFilesExitCode: 0 })).toBe(false);
-  expect(offered("remove", false, { exitCode: 0, removes: ["plans/case.mdx"] })).toBe(false);
-  // The page run failed: the page may be gone already, from an earlier remove.
-  expect(offered("remove", false, { exitCode: 3, removes })).toBe(true);
-  expect(offered("remove", false, { exitCode: 3, removes: ["plans/a.mdx"] })).toBe(false);
-  expect(offered("remove", false, { exitCode: 1, removes })).toBe(false);
-  expect(offered("remove", true, { exitCode: 3, removes })).toBe(false);
-  expect(offered("remove-data", false, { exitCode: 3, removes: ["plans/runs.csv"] })).toBe(true);
-  expect(offered("remove-data", false, { exitCode: 0, removes: ["plans/runs.csv"] })).toBe(false);
-  expect(offered("publish", false, { exitCode: 3, removes })).toBe(false);
-});
+  test("a retry row shows the row and the retry button only; a hidden row hides the row", () => {
+    const els = () => ({ row: { hidden: true }, text: { innerHTML: "" }, confirm: { hidden: false }, retry: { hidden: true } });
+    const a = els();
+    felles.paintConfirmRow({ hidden: false, button: "retry", html: "R" }, a);
+    expect(a).toEqual({ row: { hidden: false }, text: { innerHTML: "R" }, confirm: { hidden: true }, retry: { hidden: false } });
+    const b = els();
+    felles.paintConfirmRow({ hidden: false, button: "confirm", html: "C" }, b);
+    expect([b.row.hidden, b.confirm.hidden, b.retry.hidden]).toEqual([false, false, true]);
+    const c = els();
+    felles.paintConfirmRow({ hidden: false, button: "none", html: "N" }, c);
+    expect([c.row.hidden, c.confirm.hidden, c.retry.hidden]).toEqual([false, true, true]);
+    const d = { ...els(), row: { hidden: false } };
+    felles.paintConfirmRow({ hidden: true }, d);
+    expect(d.row.hidden).toBe(true);
+  });
 
-test("the dialog carries a hidden Retry data files button, and its text warns after a failed page run", () => {
-  expect(fellesDialogHtml("plans/a.mdx")).toContain('<button type="button" class="danger" data-felles="remove-data" hidden>Retry data files</button>');
-  expect(felles.fellesDataRetryHtml(["plans/<x>.csv"], false)).toContain("<code>plans/&lt;x&gt;.csv</code>");
-  expect(felles.fellesDataRetryHtml(["plans/x.csv"], true)).toMatch(/not while the page is still published/);
+  test("the retry text lists the data files and says a gone file counts as deleted", () => {
+    expect(fellesDialogHtml("plans/a.mdx")).toContain('<button type="button" class="danger" data-felles="remove-data" hidden>Retry data files</button>');
+    const html = felles.fellesDataRetryHtml(["plans/<x>.csv"]);
+    expect(html).toContain("<code>plans/&lt;x&gt;.csv</code>");
+    expect(html).toMatch(/already gone counts as deleted/);
+  });
+
+  test("the terminal command can name the data files after the page", () => {
+    expect(felles.fellesRemoveCommand({ bin: "/b.ts", relPath: "p/a.mdx", alsoRemove: ["p/x y.csv"] })).toBe("bun --no-env-file /b.ts --fjern -- p/a.mdx 'p/x y.csv'");
+  });
 });
 
 test("exit 1 claims nothing the code cannot know", () => {

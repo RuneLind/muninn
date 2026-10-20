@@ -8,13 +8,17 @@
  *
  * POST body: `{ wiki, relPath, dryRun, allowIdent, action? }`. `action` is
  * `publish` (the default), `remove`, which runs the script's `--fjern` on the
- * page's object and the data files only it reads (`felles-remove.ts`; the answer
- * adds `removes`, `keptShared` and `keptRefused`; a real remove deletes the page
- * in one run and its data files in a second, whose exit code is
- * `dataFilesExitCode`, null when it did not return; `dataFilesOnly: true` on a
- * real remove runs the data-file delete alone, the retry after it failed, and
- * answers with `dataFilesOnly: true`), or `sync`, which runs `--synk` on the whole wiki and takes no
- * relPath; `allowIdent` is required for publish and sync. Answers 200
+ * page's object and the data files publish uploads for it (`felles-remove.ts`;
+ * the answer adds `removes`, `dataFiles`, `keptShared` and `keptRefused`), or
+ * `sync`, which runs `--synk` on the whole wiki and takes no relPath;
+ * `allowIdent` is required for publish and sync. A real remove deletes the page
+ * in one run (`pageRun`, read by `fellesFjernVerdict`) and the data files in a
+ * second (`dataRun`, `dataFilesExitCode`) only when the page run proved the page
+ * gone (`deleted`, or `missing`: «not in the bucket»); `retryDataFiles` says
+ * whether Retry data files may follow. `dataFilesOnly: true` is that retry: the
+ * data-file run alone, admitted only on this process's own record that a page
+ * run proved the page gone within `FELLES_GONE_TTL_MS` (else 409
+ * `page-not-gone`). The decision table is in `src/wiki/CLAUDE.md`. Answers 200
  * `{ exitCode, dryRun, output }` whenever the script ran — its exit code is the
  * verdict (0 ok, 1 a file refused, 2 usage/environment, 3 an upload or delete
  * failed) and its output is already masked by the script. Refusals before any spawn:
@@ -61,7 +65,7 @@ import {
   type FellesPublishConfig,
 } from "../../wiki/felles-publish.ts";
 import { parseFellesStatus, type FellesStatus } from "../../wiki/felles-status.ts";
-import { fellesRemoveDataFiles } from "../../wiki/felles-remove.ts";
+import { fellesFjernVerdict, fellesRemoveDataFiles, type FellesFjernVerdict } from "../../wiki/felles-remove.ts";
 import { decideStampRequest, originMatchesHost } from "./wiki-stamp.ts";
 import { ProcTimeoutError, runProc } from "../../utils/run-proc.ts";
 import { getLog } from "../../logging.ts";
@@ -76,6 +80,12 @@ export const FELLES_PUBLISH_TIMEOUT_MS = 120_000;
  *  changed pages measured. 10 minutes gives each of ~50 uploads about 10 s (a
  *  cold gcloud start alone takes several) plus the bucket listing and scan. */
 export const FELLES_SYNC_TIMEOUT_MS = 600_000;
+
+/** How long a page run's evidence that the page is gone from the bucket
+ *  admits Retry data files. A publish or sync on this process drops it at
+ *  once; the TTL bounds a re-publish this process cannot see (the CLI, the
+ *  other machine). */
+export const FELLES_GONE_TTL_MS = 15 * 60_000;
 
 /** One bucket listing plus a scan of the wiki's published pages. */
 export const FELLES_STATUS_TIMEOUT_MS = 60_000;
@@ -98,6 +108,7 @@ export interface FellesPublishRouteDeps {
   syncTimeoutMs?: number;
   statusTimeoutMs?: number;
   statusTtlMs?: number;
+  goneTtlMs?: number;
   now?: () => number;
   /** The interpreter argv before the script. Default: the running Bun with
    *  `--no-env-file`, without which Bun loads muninn's own `.env` from the
@@ -145,6 +156,10 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
   // when a run that could have changed the bucket ends (spawned, not a dry run),
   // so a status spawned before that is neither cached nor joined by a later
   // request: it may have seen the bucket before the run changed it.
+  // wiki + page (NFC) → when a real page run here last proved the page gone
+  // from the bucket (`fellesFjernVerdict` `deleted` or `missing`). Retry data
+  // files needs it, so the retry cannot delete a published page's data files.
+  const goneEvidence = new Map<string, number>();
   let generation = 0;
   const statusCache = new Map<string, { at: number; gen: number; answer: StatusAnswer }>();
   const statusPending = new Map<string, { gen: number; promise: Promise<StatusAnswer> }>();
@@ -316,9 +331,27 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       // object the confirm deletes and every one it keeps.
       const removeFiles =
         action === "remove" && pageRel ? await fellesRemoveDataFiles(entry.root, pageRel, pageRelPaths) : undefined;
-      if (dataFilesOnly && !removeFiles?.dataFiles.length) {
-        return c.json({ error: "This page has no data files to remove." }, 400);
+      const dataFiles = removeFiles?.dataFiles ?? [];
+      const goneKey = `${entry.name.toLowerCase()}\u0000${(pageRel ?? "").normalize("NFC")}`;
+      if (dataFilesOnly) {
+        if (dataFiles.length === 0) return c.json({ error: "This page has no data files to remove." }, 400);
+        // The retry deletes data files a published page may still show, so it
+        // runs only on this process's own evidence that the page is gone.
+        const seen = goneEvidence.get(goneKey);
+        if (seen === undefined || now() - seen > (deps.goneTtlMs ?? FELLES_GONE_TTL_MS)) {
+          goneEvidence.delete(goneKey);
+          return c.json(
+            {
+              error:
+                "This instance has no recent record that the page is gone from the bucket, so it will not delete its data files alone. Run Remove… again: a page that is already gone then counts as removed, and its data files are deleted.",
+              reason: "page-not-gone",
+            },
+            409,
+          );
+        }
       }
+      // A real publish or sync can put any page back.
+      if (!dryRun && action !== "remove") goneEvidence.clear();
       if (action === "sync") {
         // A sync can outlast the server's idleTimeout (255 s). Bun 1.3.10 measured
         // not cutting a pending handler at it; this keeps that true if it changes.
@@ -337,55 +370,88 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
           "felles-publish",
           { env: fellesPublishChildEnv(), processGroup: true },
         );
+      const [firstData, ...restData] = dataFiles;
       // A real remove deletes the page in a run of its own, then the data files
-      // in a second: `--fjern` deletes in argv order and exits 3 on any object
-      // the bucket lacks, so one run reported a page that went as failed when a
-      // local data file was never uploaded. The dry run never asks the bucket,
-      // so it stays one run that names every object.
-      const twoRuns = action === "remove" && !dryRun && (removeFiles?.dataFiles.length ?? 0) > 0;
+      // in a second, and only when the page is gone (`fellesFjernVerdict`
+      // `deleted` or `missing`): after any other page outcome the page may
+      // still be published, and its data files must stay. The dry run never
+      // asks the bucket, so it stays one run that names every object.
+      const realRemove = action === "remove" && !dryRun;
+      const pageRunReal = realRemove && !dataFilesOnly;
       let proc;
       try {
         proc = dataFilesOnly
-          ? await run(removeFiles!.dataFiles[0], removeFiles!.dataFiles.slice(1))
-          : await run(pageRel, twoRuns ? undefined : removeFiles?.dataFiles);
+          ? await run(firstData, restData)
+          : await run(pageRel, action === "remove" && dryRun ? dataFiles : undefined);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        if (err instanceof ProcTimeoutError) {
+        const timedOut = err instanceof ProcTimeoutError;
+        // The page run's outcome is unknown, so it is no evidence the page is gone.
+        if (pageRunReal) goneEvidence.delete(goneKey);
+        if (dataFilesOnly) {
+          // The page is still gone, so the retry is offered again.
+          log.warn("felles-publish data-file retry did not finish: {error}", { error: message });
+          if (timedOut) invalidateStatus();
+          return c.json(
+            {
+              error: timedOut
+                ? "The data-file delete did not return in time and was stopped. Some data files may already be gone; Retry data files runs it again."
+                : `The data-file delete could not start: ${message}. Retry data files runs it again.`,
+              reason: timedOut ? "timeout" : "spawn",
+              dataFilesOnly: true,
+              dataRun: "timeout",
+              retryDataFiles: true,
+              dataFiles,
+            },
+            timedOut ? 504 : 502,
+          );
+        }
+        if (timedOut) {
           log.warn("felles-publish did not return: {error}", { error: message });
           // The whole process group is signalled, gcloud included, but a request
           // gcloud had already sent can have gone through before it stopped.
           if (!dryRun) invalidateStatus();
           const error =
             action === "remove"
-              ? "The script did not return in time and was stopped. The delete may already have gone through — check the page on the pod in about 2 minutes."
+              ? "The script did not return in time and was stopped. The page may or may not be deleted, and its data files were left alone. Run Remove… again: a page that is already gone then counts as removed, and its data files are deleted."
               : action === "sync"
                 ? "The sync did not return in time and was stopped. Pages uploaded before that are published — refresh the status before running it again."
                 : "The publish script did not return in time and was stopped. An upload may already have finished — run a dry run to check.";
-          return c.json({ error, reason: "timeout" }, 504);
+          return c.json({ error, reason: "timeout", ...(pageRunReal ? { pageRun: "timeout", retryDataFiles: false, dataFiles } : {}) }, 504);
         }
         // Bun.spawn threw: nothing ran, so the bucket is as the cache saw it.
         log.warn("felles-publish could not be spawned: {error}", { error: message });
         return c.json({ error: message }, 502);
       }
       const outputs = [proc.stdout.trimEnd(), proc.stderr.trimEnd()];
-      // The page run's exit code stays the answer's verdict; the data-file run
-      // only adds `dataFilesExitCode` (null when it threw or timed out).
+      let pageRun: FellesFjernVerdict | undefined;
+      let dataRun: FellesFjernVerdict | undefined;
       let dataFilesExitCode: number | null | undefined;
-      if (twoRuns && !dataFilesOnly && proc.exitCode === 0 && removeFiles) {
-        const [first, ...rest] = removeFiles.dataFiles;
-        try {
-          const dataProc = await run(first, rest);
-          dataFilesExitCode = dataProc.exitCode;
-          outputs.push(dataProc.stdout.trimEnd(), dataProc.stderr.trimEnd());
-        } catch (err) {
-          dataFilesExitCode = null;
-          const message = err instanceof Error ? err.message : String(err);
-          log.warn("felles-publish data-file remove failed: {error}", { error: message });
-          outputs.push(
-            err instanceof ProcTimeoutError
-              ? "The data-file delete did not return in time and was stopped. Some data files may already be gone."
-              : `The data-file delete could not run: ${message}`,
-          );
+      if (dataFilesOnly) {
+        dataRun = fellesFjernVerdict(proc, dataFiles.length);
+        dataFilesExitCode = proc.exitCode;
+      } else if (pageRunReal) {
+        pageRun = fellesFjernVerdict(proc, 1);
+        const gone = pageRun === "deleted" || pageRun === "missing";
+        if (gone) goneEvidence.set(goneKey, now());
+        else goneEvidence.delete(goneKey);
+        if (gone && firstData !== undefined) {
+          try {
+            const dataProc = await run(firstData, restData);
+            dataFilesExitCode = dataProc.exitCode;
+            dataRun = fellesFjernVerdict(dataProc, dataFiles.length);
+            outputs.push(dataProc.stdout.trimEnd(), dataProc.stderr.trimEnd());
+          } catch (err) {
+            dataFilesExitCode = null;
+            dataRun = "timeout";
+            const message = err instanceof Error ? err.message : String(err);
+            log.warn("felles-publish data-file remove failed: {error}", { error: message });
+            outputs.push(
+              err instanceof ProcTimeoutError
+                ? "The data-file delete did not return in time and was stopped. Some data files may already be gone."
+                : `The data-file delete could not run: ${message}`,
+            );
+          }
         }
       }
       // Only a run that could have changed the bucket drops the status cache: a
@@ -402,14 +468,20 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       });
       const output = outputs.filter(Boolean).join("\n");
       if (removeFiles && pageRel) {
+        // An exit other than 0 and 3 (a refused name, no gcloud) would fail the
+        // same way again, so it gets the terminal command, not a retry.
+        const retryDataFiles = dataRun === "failed" || dataRun === "timeout";
         return c.json({
           exitCode: proc.exitCode,
           dryRun,
           output,
-          removes: [...(dataFilesOnly ? [] : [pageRel]), ...removeFiles.dataFiles].map((r) => r.normalize("NFC")),
+          removes: [...(dataFilesOnly ? [] : [pageRel]), ...dataFiles].map((r) => r.normalize("NFC")),
           keptShared: removeFiles.shared,
           keptRefused: removeFiles.refused,
-          ...(dataFilesExitCode !== undefined ? { dataFilesExitCode } : {}),
+          dataFiles,
+          ...(pageRun !== undefined ? { pageRun } : {}),
+          ...(dataRun !== undefined ? { dataRun, dataFilesExitCode } : {}),
+          ...(realRemove ? { retryDataFiles } : {}),
           ...(dataFilesOnly ? { dataFilesOnly: true } : {}),
         });
       }

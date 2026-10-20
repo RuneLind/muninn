@@ -16,6 +16,7 @@ import { registerWikiFellesPublishRoute, type FellesPublishRouteDeps } from "./w
 import { ProcTimeoutError } from "../../utils/run-proc.ts";
 import type { FellesPublishConfig } from "../../wiki/felles-publish.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { fakeFjernRun, fakeGcloudRm, GCLOUD_LOGGED_OUT, GCLOUD_NETWORK } from "../../test/felles-fjern-fake.ts";
 
 let root = "";
 let bin = "";
@@ -135,7 +136,7 @@ describe("the spawn", () => {
     });
     const res = await post(app, { ...ok, action: "remove" });
     expect(res.status).toBe(504);
-    expect(((await res.json()) as { error: string }).error).toMatch(/was stopped.*The delete may already have gone through/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/was stopped\. The page may or may not be deleted, and its data files were left alone/);
   });
 
   test("a real Bun child does not load the .env in its working directory", async () => {
@@ -256,97 +257,185 @@ describe("remove takes the page's data files", () => {
     expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(4, -1)).toEqual(["plans/a.mdx"]);
   });
 
-  // A data file added locally after the publish, or one the publish refused, is
-  // not in the bucket. `--fjern` deletes in argv order and exits 3 on any miss,
-  // so one run of page + data files deleted the page and still failed.
-  test("a data file the bucket never held does not fail a remove whose page went", async () => {
-    // The script's own rule: delete every named object it can, exit 3 if one is missing.
-    const bucket = new Set(["plans/case.mdx", "plans/case.yaml", "plans/runs.csv"]);
-    const runs: string[][] = [];
+});
+
+// The decision table's OUTCOMES, route half (src/wiki/CLAUDE.md, felles
+// remove): the stub prints the real script's `--fjern` lines over an in-memory
+// bucket (`felles-fjern-fake.ts`, compared byte for byte with the script in
+// the empirical pass), so the route reads the outcome as it would in use.
+describe("remove outcomes: one row per cell", () => {
+  const PAGE = "plans/case.mdx";
+  const DATA = ["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"];
+  type Fail = (o: string) => string | null;
+  type Step = { bucket: string[]; fail?: Fail; throwAt?: number; exit?: { code: number; stdout?: string; stderr?: string } };
+
+  /** An app whose script deletes from `state.bucket`; `state.step` may make a
+   *  run throw a timeout or answer a fixed exit. */
+  function harness(over: FellesPublishRouteDeps = {}) {
+    const state = { bucket: new Set<string>(), fail: undefined as Fail | undefined, runs: [] as string[][], timeoutRun: 0, fixed: undefined as Step["exit"] | undefined, fixedRun: 0, clock: 1_000_000 };
     const app = appWith({
+      now: () => state.clock,
       runProc: async (argv) => {
         const objects = argv.slice(argv.indexOf("--") + 1);
-        runs.push(objects);
-        let missed = 0;
-        for (const o of objects) if (!bucket.delete(o)) missed++;
-        return { stdout: "", stderr: missed ? "Feil: sletting feilet" : "", exitCode: missed ? 3 : 0 };
+        state.runs.push(objects);
+        const n = state.runs.length;
+        if (n === state.timeoutRun) throw new ProcTimeoutError("felles-publish", 5);
+        if (n === state.fixedRun && state.fixed) return { stdout: state.fixed.stdout ?? "", stderr: state.fixed.stderr ?? "", exitCode: state.fixed.code };
+        if (argv.includes("--fjern")) return fakeFjernRun(objects, fakeGcloudRm(state.bucket, state.fail));
+        return { stdout: "", stderr: "", exitCode: 0 };
       },
+      ...over,
     });
-    const res = await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" });
-    const body = (await res.json()) as { exitCode: number; dataFilesExitCode?: number | null };
-    expect(body.exitCode).toBe(0);
-    expect(body.dataFilesExitCode).toBe(3);
-    expect(bucket.size).toBe(0);
-    // The page goes in a run of its own, first.
-    expect(runs[0]).toEqual(["plans/case.mdx"]);
-    expect(runs[1]).toEqual(["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
+    return { app, state };
+  }
+  const remove = (app: Hono, extra: Record<string, unknown> = {}) =>
+    post(app, { wiki: "kode", relPath: PAGE, dryRun: false, action: "remove", ...extra });
+  type Answer = { exitCode?: number; pageRun?: string; dataRun?: string; dataFilesExitCode?: number | null; retryDataFiles?: boolean; dataFiles?: string[]; reason?: string; dataFilesOnly?: boolean; removes?: string[] };
+  const loggedOut: Fail = () => GCLOUD_LOGGED_OUT;
+  const dataLoggedOut: Fail = (o) => (o === PAGE ? null : GCLOUD_LOGGED_OUT);
+
+  // [name, bucket before, gcloud failures, run that times out, run with a fixed exit, status, answer subset, runs, bucket after]
+  const REMOVE: [string, string[], Fail | undefined, number, { run: number; code: number } | null, number, Answer, string[][], string[]][] = [
+    ["R1 page and data deleted", [PAGE, ...DATA], undefined, 0, null, 200, { exitCode: 0, pageRun: "deleted", dataRun: "deleted", dataFilesExitCode: 0, retryDataFiles: false }, [[PAGE], DATA], []],
+    ["R2 page deleted, a data file never uploaded", [PAGE, DATA[0]!], undefined, 0, null, 200, { exitCode: 0, pageRun: "deleted", dataRun: "missing", dataFilesExitCode: 3, retryDataFiles: false }, [[PAGE], DATA], []],
+    ["R3 page deleted, data run logged out", [PAGE, ...DATA], dataLoggedOut, 0, null, 200, { exitCode: 0, pageRun: "deleted", dataRun: "failed", dataFilesExitCode: 3, retryDataFiles: true }, [[PAGE], DATA], DATA],
+    ["R4 page deleted, data run exit 2", [PAGE, ...DATA], undefined, 0, { run: 2, code: 2 }, 200, { exitCode: 0, pageRun: "deleted", dataRun: "error", dataFilesExitCode: 2, retryDataFiles: false }, [[PAGE], DATA], DATA],
+    ["R5 page deleted, data run timed out", [PAGE, ...DATA], undefined, 2, null, 200, { exitCode: 0, pageRun: "deleted", dataRun: "timeout", dataFilesExitCode: null, retryDataFiles: true }, [[PAGE], DATA], DATA],
+    ["R6 page not in the bucket (already removed), data still there", [...DATA], undefined, 0, null, 200, { exitCode: 3, pageRun: "missing", dataRun: "deleted", dataFilesExitCode: 0, retryDataFiles: false }, [[PAGE], DATA], []],
+    ["R7 page run logged out: no data run, page kept", [PAGE, ...DATA], loggedOut, 0, null, 200, { exitCode: 3, pageRun: "failed", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
+    ["R8 page run network error", [PAGE, ...DATA], () => GCLOUD_NETWORK, 0, null, 200, { exitCode: 3, pageRun: "failed", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
+    ["R9 page run exit 1", [PAGE, ...DATA], undefined, 0, { run: 1, code: 1 }, 200, { exitCode: 1, pageRun: "error", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
+    ["R10 page run exit 2", [PAGE, ...DATA], undefined, 0, { run: 1, code: 2 }, 200, { exitCode: 2, pageRun: "error", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
+    ["R11 page run timed out", [PAGE, ...DATA], undefined, 1, null, 504, { reason: "timeout", pageRun: "timeout", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
+    ["R12 page run exit 3 the route cannot read", [PAGE, ...DATA], undefined, 0, { run: 1, code: 3 }, 200, { exitCode: 3, pageRun: "failed", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
+  ];
+  test.each(REMOVE)("%s", async (_n, before, fail, timeoutRun, fixed, status, want, runs, after) => {
+    const { app, state } = harness();
+    before.forEach((o) => state.bucket.add(o));
+    state.fail = fail;
+    state.timeoutRun = timeoutRun;
+    if (fixed) [state.fixedRun, state.fixed] = [fixed.run, { code: fixed.code }];
+    const res = await remove(app);
+    expect(res.status).toBe(status);
+    const body = (await res.json()) as Answer;
+    expect(body).toMatchObject(want);
+    if (!("dataRun" in want)) expect(body.dataRun).toBeUndefined();
+    expect(body.dataFiles).toEqual(DATA);
+    expect(state.runs).toEqual(runs);
+    expect([...state.bucket].sort()).toEqual([...after].sort());
   });
 
-  test("a page delete that fails is the answer, and no data file is touched", async () => {
-    const runs: string[][] = [];
-    const app = appWith({
-      runProc: async (argv) => {
-        runs.push(argv.slice(argv.indexOf("--") + 1));
-        return { stdout: "", stderr: "", exitCode: 3 };
-      },
-    });
-    const body = (await (await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" })).json()) as {
-      exitCode: number;
-      dataFilesExitCode?: number | null;
-    };
-    expect(body.exitCode).toBe(3);
-    expect(body.dataFilesExitCode).toBeUndefined();
-    expect(runs).toEqual([["plans/case.mdx"]]);
+  test("R13 a page with no data files that is not in the bucket counts as removed", async () => {
+    const { app, state } = harness();
+    const res = await post(app, { wiki: "kode", relPath: "plans/a.mdx", dryRun: false, action: "remove" });
+    const body = (await res.json()) as Answer;
+    expect(body).toMatchObject({ exitCode: 3, pageRun: "missing", retryDataFiles: false, dataFiles: [] });
+    expect(body.dataRun).toBeUndefined();
+    expect(state.runs).toEqual([["plans/a.mdx"]]);
   });
 
-  // After the page went and the data-file run failed, a page run can never
-  // reach the data files again: the page is gone, so it exits 3 first.
-  test("dataFilesOnly retries the data-file run alone, after the page is gone", async () => {
-    const bucket = new Set(["plans/case.mdx", "plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
-    let gcloudDown = true;
-    const runs: string[][] = [];
-    const app = appWith({
-      runProc: async (argv) => {
-        const objects = argv.slice(argv.indexOf("--") + 1);
-        runs.push(objects);
-        let missed = 0;
-        for (const o of objects) {
-          if (gcloudDown && o !== "plans/case.mdx") missed++;
-          else if (!bucket.delete(o)) missed++;
-        }
-        return { stdout: "", stderr: "", exitCode: missed ? 3 : 0 };
-      },
-    });
-    const first = (await (await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" })).json()) as {
-      exitCode: number;
-      dataFilesExitCode?: number | null;
-    };
-    expect([first.exitCode, first.dataFilesExitCode]).toEqual([0, 3]);
-    expect([...bucket]).toEqual(["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
-    // A second plain remove stops at the page, which is gone.
-    const again = (await (await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" })).json()) as {
-      exitCode: number;
-    };
-    expect(again.exitCode).toBe(3);
-    expect(bucket.size).toBe(3);
+  // Retry data files: the route runs it only on its own evidence the page is gone.
+  async function afterR3() {
+    const h = harness();
+    [PAGE, ...DATA].forEach((o) => h.state.bucket.add(o));
+    h.state.fail = dataLoggedOut;
+    expect(((await (await remove(h.app)).json()) as Answer).retryDataFiles).toBe(true);
+    h.state.fail = undefined;
+    h.state.runs.length = 0;
+    return h;
+  }
 
-    gcloudDown = false;
-    runs.length = 0;
-    const res = await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove", dataFilesOnly: true });
+  test("T1 the retry deletes the data files alone, and a file already gone is success", async () => {
+    const { app, state } = await afterR3();
+    state.bucket.delete(DATA[1]!);
+    const res = await remove(app, { dataFilesOnly: true });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { exitCode: number; removes?: string[]; dataFilesOnly?: boolean; dataFilesExitCode?: number | null };
-    expect(body.exitCode).toBe(0);
-    expect(body.dataFilesOnly).toBe(true);
-    expect(body.dataFilesExitCode).toBeUndefined();
-    expect(body.removes).toEqual(["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
-    expect(runs).toEqual([["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]]);
-    expect(bucket.size).toBe(0);
+    expect(await res.json()).toMatchObject({ exitCode: 3, dataFilesOnly: true, dataRun: "missing", retryDataFiles: false, removes: DATA, dataFiles: DATA });
+    expect(state.runs).toEqual([DATA]);
+    expect(state.bucket.size).toBe(0);
+  });
+
+  test("T2 no evidence the page is gone: 409, no spawn", async () => {
+    const { app, state } = harness();
+    state.bucket.add(PAGE);
+    const res = await remove(app, { dataFilesOnly: true });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as Answer).reason).toBe("page-not-gone");
+    expect(state.runs).toEqual([]);
+  });
+
+  test("T3 evidence older than the TTL: 409", async () => {
+    const { app, state } = await afterR3();
+    state.clock += 15 * 60_000 + 1;
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(409);
+    expect(state.runs).toEqual([]);
+  });
+
+  test("T3b evidence at the TTL still admits the retry", async () => {
+    const { app, state } = await afterR3();
+    state.clock += 15 * 60_000;
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(200);
+  });
+
+  test("T4 a real publish drops the evidence; a dry run does not", async () => {
+    const { app, state } = await afterR3();
+    await post(app, { ...ok, relPath: "plans/a.mdx", dryRun: true });
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(200);
+    const h2 = await afterR3();
+    await post(h2.app, { ...ok, relPath: "plans/a.mdx", dryRun: false });
+    expect((await remove(h2.app, { dataFilesOnly: true })).status).toBe(409);
+    expect(state.runs.length).toBe(2);
+  });
+
+  test("T5 a page run that fails after the evidence drops it", async () => {
+    const { app, state } = await afterR3();
+    state.bucket.add(PAGE);
+    state.fail = loggedOut;
+    expect(((await (await remove(app)).json()) as Answer).pageRun).toBe("failed");
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(409);
+  });
+
+  test("T6 a page run that times out after the evidence drops it", async () => {
+    const { app, state } = await afterR3();
+    state.timeoutRun = 1;
+    expect((await remove(app)).status).toBe(504);
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(409);
+  });
+
+  test("T7 a retry that times out is a 504 that offers the retry again, and keeps the evidence", async () => {
+    const { app, state } = await afterR3();
+    state.timeoutRun = 1;
+    const res = await remove(app, { dataFilesOnly: true });
+    expect(res.status).toBe(504);
+    expect(await res.json()).toMatchObject({ reason: "timeout", dataFilesOnly: true, dataRun: "timeout", retryDataFiles: true, dataFiles: DATA });
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(200);
+  });
+
+  test("T8 a retry still logged out is failed and offered again", async () => {
+    const { app, state } = await afterR3();
+    state.fail = loggedOut;
+    expect(await (await remove(app, { dataFilesOnly: true })).json()).toMatchObject({ exitCode: 3, dataRun: "failed", retryDataFiles: true });
+  });
+
+  test("T9 a retry that exits 2 is not offered again", async () => {
+    const { app, state } = await afterR3();
+    [state.fixedRun, state.fixed] = [1, { code: 2 }];
+    expect(await (await remove(app, { dataFilesOnly: true })).json()).toMatchObject({ exitCode: 2, dataRun: "error", dataFilesExitCode: 2, retryDataFiles: false });
+  });
+
+  test("T10 a page proven gone by «not in the bucket» admits the retry too", async () => {
+    const { app, state } = harness();
+    DATA.forEach((o) => state.bucket.add(o));
+    state.fail = dataLoggedOut;
+    expect(await (await remove(app)).json()).toMatchObject({ pageRun: "missing", dataRun: "failed", retryDataFiles: true });
+    state.fail = undefined;
+    expect(await (await remove(app, { dataFilesOnly: true })).json()).toMatchObject({ dataRun: "deleted", retryDataFiles: false });
   });
 
   test("dataFilesOnly is refused before any spawn unless it is true on a real remove of a page with data files", async () => {
     let spawned = 0;
     const app = appWith({ runProc: async () => (spawned++, { stdout: "", stderr: "", exitCode: 0 }) });
-    const base = { wiki: "kode", relPath: "plans/case.mdx", action: "remove", dryRun: false };
+    const base = { wiki: "kode", relPath: PAGE, action: "remove", dryRun: false };
     for (const body of [
       { ...base, dataFilesOnly: false },
       { ...base, dataFilesOnly: "yes" },
@@ -357,22 +446,6 @@ describe("remove takes the page's data files", () => {
       expect((await post(app, body)).status).toBe(400);
     }
     expect(spawned).toBe(0);
-  });
-
-  test("a data-file run that does not return still answers that the page went", async () => {
-    let calls = 0;
-    const app = appWith({
-      runProc: async () => {
-        if (++calls === 2) throw new ProcTimeoutError("felles-publish", 5);
-        return { stdout: "slettet", stderr: "", exitCode: 0 };
-      },
-    });
-    const res = await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { exitCode: number; dataFilesExitCode?: number | null; output: string };
-    expect(body.exitCode).toBe(0);
-    expect(body.dataFilesExitCode).toBeNull();
-    expect(body.output).toMatch(/did not return in time/);
   });
 });
 

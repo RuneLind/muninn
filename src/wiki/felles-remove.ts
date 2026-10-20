@@ -1,54 +1,48 @@
 /**
- * What a felles **Remove** deletes besides the page: the data files the page
- * reads (`<Query csv=/sql=>`, `<CaseBoard src=>`, `<DeltaTable src=>`).
+ * What a felles **Remove** deletes besides the page, and how a `--fjern` run's
+ * output reads. The decision table these implement is in `src/wiki/CLAUDE.md`
+ * (felles remove section); each cell has a test row.
  *
- * Publish uploads those files beside the page, and the script's `--fjern`
- * deletes only the objects it is given, so a remove that names the page alone
- * left every data file in the bucket and on each pod's mirror (architecture
- * review 2026-10, finding 11).
- *
- * The refs are found by the reader's own rule (`pageFileRefKinds` over the
- * parsed body, so a tag in a code fence names nothing), resolved relative to the
- * page's folder as `loadPageFiles` resolves them, and sent in NFC, the name the
- * script uploads. Three refs are left out:
- *  - one publish does not upload: {@link publishUploadsDataFile} is the
- *    script's own test, `lstat` on the page's spelling of the path, so it
- *    answers as publish does on every filesystem (case- and
- *    normalization-insensitive on macOS APFS, byte for byte on Linux);
- *  - one whose object name the script's `sjekkStiform` refuses: one such name
- *    makes `--fjern` delete nothing at all. Returned as `refused`;
- *  - one another local page also reads: removing this page must not take a
- *    file a page that stays published still shows. Returned as `shared`.
+ * Target set: exactly the data files `publiser-felles-wiki.ts` uploads for the
+ * page as it stands. The refs come from the reader's own rule
+ * (`pageFileRefKinds`), resolved from the page's folder; then each spelling
+ * gets publish's per-file checks ({@link publishDataFileCheck}: `relUnder`,
+ * `lstat`, `sjekkSti`, the `O_NOFOLLOW` open, `isFile`, the 1 MiB cap) and
+ * publish's in-run collision rule (small letters + NFC). Two spellings of one
+ * NFC name are one object, uploaded when either passes. Not mirrored: the
+ * scanner, the encoding check and collisions with other bucket objects — a
+ * file they refused is targeted, and its delete answers «not in the bucket»,
+ * which {@link fellesFjernVerdict} reads as success.
  */
-import { lstatSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync } from "node:fs";
 import path from "node:path";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
 import { checkPageFileRef, PAGE_FILE_COMPONENTS, pageFileRefKinds } from "../format/query-block.ts";
 import { splitFrontmatter } from "./page-text.ts";
 
-/** The data files a page's markdown reads, in source order: the page's own
- *  spelling (what publish `lstat`s) and the NFC object name (what it uploads). */
-function pageDataFiles(pageRelPath: string, markdown: string): { spelling: string; object: string }[] {
+/** The data-file refs a page's markdown reads, resolved to wiki-relative
+ *  paths in the page's own spelling, in source order, each spelling once. */
+function pageDataFileSpellings(pageRelPath: string, markdown: string): string[] {
   if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return [];
-  const out: { spelling: string; object: string }[] = [];
+  const out: string[] = [];
   for (const [ref, kinds] of pageFileRefKinds(parseBlocks(splitFrontmatter(markdown).body))) {
     if (checkPageFileRef(ref, kinds) !== "ok") continue;
     const rel = resolveEmbedRelPath(pageRelPath.replace(/\\/g, "/"), ref);
-    if (rel === null) continue;
-    const object = rel.normalize("NFC");
-    if (!out.some((d) => d.object === object)) out.push({ spelling: rel, object });
+    if (rel !== null && !out.includes(rel)) out.push(rel);
   }
   return out;
 }
 
 /** The wiki-relative data files a page's markdown reads, NFC, in source order. */
 export function pageDataFileRelPaths(pageRelPath: string, markdown: string): string[] {
-  return pageDataFiles(pageRelPath, markdown).map((d) => d.object);
+  return [...new Set(pageDataFileSpellings(pageRelPath, markdown).map((r) => r.normalize("NFC")))];
 }
 
 /** The script's `MAKS_SEGMENT_BYTES`: the longest object-name segment it sends. */
 export const FELLES_SEGMENT_MAX_BYTES = 211;
+/** The script's `MAKS_DATA_BYTES`: publish refuses a larger data file. */
+export const FELLES_DATA_MAX_BYTES = 1024 * 1024;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 const WILDCARDS = /[[\]*?]/;
 
@@ -69,35 +63,72 @@ export function fellesObjectPathRefusal(rel: string): string | null {
   return null;
 }
 
-/** What `lstat` says about a path, or null when it fails. */
-export type Lstat = (abs: string) => { isFile(): boolean; isSymbolicLink(): boolean } | null;
+/** The filesystem calls publish's per-file decision makes, as a seam so tests
+ *  can play macOS APFS (case- and normalization-insensitive) and Linux ext4. */
+export interface FsProbe {
+  /** `lstat`: what the path itself is, or null when it fails. */
+  lstat(abs: string): "file" | "dir" | "symlink" | "other" | null;
+  /** The script's `openSync(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` + `fstat`:
+   *  the open's error code, or what the descriptor is. */
+  open(abs: string): { error: string } | { isFile: boolean; size: number };
+}
 
-const realLstat: Lstat = (abs) => {
-  try {
-    return lstatSync(abs);
-  } catch {
-    return null;
-  }
+export const realFsProbe: FsProbe = {
+  lstat(abs) {
+    try {
+      const st = lstatSync(abs);
+      return st.isSymbolicLink() ? "symlink" : st.isFile() ? "file" : st.isDirectory() ? "dir" : "other";
+    } catch {
+      return null;
+    }
+  },
+  open(abs) {
+    let fd: number;
+    try {
+      fd = openSync(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    } catch (e) {
+      return { error: (e as NodeJS.ErrnoException).code ?? "unknown" };
+    }
+    try {
+      const st = fstatSync(fd);
+      return { isFile: st.isFile(), size: st.size };
+    } catch (e) {
+      return { error: (e as NodeJS.ErrnoException).code ?? "unknown" };
+    } finally {
+      closeSync(fd);
+    }
+  },
 };
 
 /**
- * Whether publish uploads the data file `rel` (the page's spelling): the
- * script's `relUnder` (no symlinked folder below the root) and `lstat`, plus
- * its `O_NOFOLLOW` open and `isFile` check, which refuse a symlink or a
- * non-file. The scanner and the size cap are not mirrored.
+ * Publish's decision for one data-file spelling, before its collision rule:
+ * - `missing`: `lstat` fails, so publish skips it without a verdict and it
+ *   takes no part in the collision rule;
+ * - `refused`: publish names it and refuses it (a symlinked folder, a path
+ *   `sjekkSti` refuses, an open that fails, a non-file, over the cap) — it
+ *   still takes part in the collision rule;
+ * - `uploads`: publish uploads it unless the scanner or a collision refuses it.
  */
-export function publishUploadsDataFile(root: string, rel: string, lstat: Lstat = realLstat): boolean {
+export function publishDataFileCheck(root: string, rel: string, probe: FsProbe = realFsProbe): "missing" | "refused" | "uploads" {
   const segments = rel.split("/");
   let dir = root;
   for (const segment of segments.slice(0, -1)) {
     dir = path.join(dir, segment);
-    const st = lstat(dir);
-    if (st === null) break;
-    if (st.isSymbolicLink()) return false;
+    const kind = probe.lstat(dir);
+    if (kind === null) break;
+    if (kind === "symlink") return "refused";
   }
-  const st = lstat(path.join(root, ...segments));
-  return st !== null && st.isFile();
+  const abs = path.join(root, ...segments);
+  if (probe.lstat(abs) === null) return "missing";
+  const nfc = rel.normalize("NFC");
+  if (fellesObjectPathRefusal(rel) !== null || nfc.split("/").some((d) => d.startsWith("."))) return "refused";
+  const opened = probe.open(abs);
+  if ("error" in opened || !opened.isFile || opened.size > FELLES_DATA_MAX_BYTES) return "refused";
+  return "uploads";
 }
+
+/** The script's `kollisjonsnøkkel`: the name the mirror compares on. */
+const collisionKey = (name: string) => name.normalize("NFC").toLowerCase();
 
 const readText = async (abs: string): Promise<string | null> => {
   try {
@@ -108,39 +139,102 @@ const readText = async (abs: string): Promise<string | null> => {
 };
 
 /**
- * The data files to delete with `pageRelPath` (NFC object names), the ones
- * kept because another page in `pageRelPaths` (the local index) also reads
- * them, and the ones kept because the script refuses their name.
+ * The data files to delete with `pageRelPath` (NFC object names): the ones
+ * publish uploads for the page as it stands, minus the ones another page in
+ * `pageRelPaths` (the local index) also reads (`shared`). `refused` lists the
+ * names the script's `sjekkStiform` refuses — never uploaded, and one such
+ * name in a `--fjern` argv makes it delete nothing.
  */
 export async function fellesRemoveDataFiles(
   root: string,
   pageRelPath: string,
   pageRelPaths: readonly string[],
   read: (abs: string) => Promise<string | null> = readText,
-  lstat: Lstat = realLstat,
+  probe: FsProbe = realFsProbe,
 ): Promise<{ dataFiles: string[]; shared: string[]; refused: string[] }> {
   const markdown = await read(path.join(root, pageRelPath));
   if (markdown === null) return { dataFiles: [], shared: [], refused: [] };
-  const candidates: string[] = [];
+  const page = pageRelPath.normalize("NFC");
+  const named: { object: string; verdict: "refused" | "uploads" }[] = [];
   const refused: string[] = [];
-  for (const { spelling, object } of pageDataFiles(pageRelPath, markdown)) {
-    if (!publishUploadsDataFile(root, spelling, lstat)) continue;
-    if (fellesObjectPathRefusal(object) === null) candidates.push(object);
-    else refused.push(object);
+  for (const spelling of pageDataFileSpellings(pageRelPath, markdown)) {
+    const verdict = publishDataFileCheck(root, spelling, probe);
+    if (verdict === "missing") continue;
+    const object = spelling.normalize("NFC");
+    named.push({ object, verdict });
+    if (fellesObjectPathRefusal(object) !== null && !refused.includes(object)) refused.push(object);
+  }
+  // Publish's in-run collision rule: two DIFFERENT names with one key refuse
+  // each other; two spellings of one NFC name are one object, not a collision.
+  const namesPerKey = new Map<string, Set<string>>();
+  for (const object of [page, ...named.map((n) => n.object)]) {
+    const key = collisionKey(object);
+    namesPerKey.set(key, (namesPerKey.get(key) ?? new Set()).add(object));
+  }
+  const candidates: string[] = [];
+  for (const { object, verdict } of named) {
+    if (verdict !== "uploads" || namesPerKey.get(collisionKey(object))!.size > 1) continue;
+    if (!candidates.includes(object)) candidates.push(object);
   }
   if (candidates.length === 0) return { dataFiles: [], shared: [], refused };
 
-  const self = pageRelPath.normalize("NFC");
-  const named = new Set<string>();
+  const others = new Set<string>();
   for (const other of pageRelPaths) {
-    if (other.normalize("NFC") === self || !/\.mdx?$/i.test(other)) continue;
+    if (other.normalize("NFC") === page || !/\.mdx?$/i.test(other)) continue;
     const text = await read(path.join(root, other));
     if (text === null) continue;
-    for (const rel of pageDataFileRelPaths(other, text)) named.add(rel);
+    for (const rel of pageDataFileRelPaths(other, text)) others.add(rel);
   }
   return {
-    dataFiles: candidates.filter((rel) => !named.has(rel)),
-    shared: candidates.filter((rel) => named.has(rel)),
+    dataFiles: candidates.filter((rel) => !others.has(rel)),
+    shared: candidates.filter((rel) => others.has(rel)),
     refused,
   };
+}
+
+/**
+ * What one `--fjern --ja` run did, read from its exit code and its lines:
+ * - `deleted`: exit 0, every object deleted;
+ * - `missing`: exit 3, and every failed object failed as «not in the bucket»
+ *   — the rest were deleted, so nothing named is left;
+ * - `failed`: exit 3 with any other failure, or lines that do not add up;
+ * - `error`: any other exit code (1 a path refused or a crash, 2 usage or no gcloud);
+ * - `timeout`: the run threw or did not return.
+ *
+ * «Not in the bucket» is gcloud's `The following URLs matched no objects or
+ * files:` with the URL on the next line (gcloud 589 `name_expansion.py`). The
+ * script prints only the last stderr line, masked the same way as its own
+ * name, so the line reads `Feil: sletting av gs://B/X feilet (exit N): gs://B/X`
+ * — the detail IS the URL. Any other detail, a masked one included, is `failed`.
+ */
+export type FellesFjernVerdict = "deleted" | "missing" | "failed" | "error" | "timeout";
+
+export function fellesFjernVerdict(
+  run: { exitCode: number; stdout: string; stderr: string } | null,
+  targets: number,
+): FellesFjernVerdict {
+  if (run === null) return "timeout";
+  if (run.exitCode === 0) return "deleted";
+  if (run.exitCode !== 3) return "error";
+  const summary = /^Oppsummering: (\d+) slettet, (\d+) feilet\./m.exec(run.stdout);
+  if (!summary) return "failed";
+  const deleted = Number(summary[1]);
+  const failed = Number(summary[2]);
+  const failures = run.stderr.split("\n").filter((l) => l.startsWith(FAILURE_PREFIX));
+  if (failed === 0 || deleted + failed !== targets || failures.length !== failed) return "failed";
+  return failures.every(isNotInBucketLine) ? "missing" : "failed";
+}
+
+const FAILURE_PREFIX = "Feil: sletting av ";
+const FAILURE_MID = " feilet (exit ";
+
+/** `Feil: sletting av <url> feilet (exit N): <url>`, the same `<url>` twice. */
+function isNotInBucketLine(line: string): boolean {
+  const rest = line.slice(FAILURE_PREFIX.length);
+  for (let i = rest.indexOf(FAILURE_MID); i > 0; i = rest.indexOf(FAILURE_MID, i + 1)) {
+    const url = rest.slice(0, i);
+    const tail = /^\d+\): (.*)$/.exec(rest.slice(i + FAILURE_MID.length));
+    if (url.startsWith("gs://") && tail && tail[1] === url) return true;
+  }
+  return false;
 }
