@@ -259,8 +259,11 @@ describe("the sync status", () => {
       });
     });
 
+    /** The dry run's own summary, as `publiser-felles-wiki.ts` prints it last. */
+    const drySummary = (refused: number) => `OK      c0.md\n\nOppsummering: 2 klar(e), ${refused} avvist, 0 mangler lokalt.`;
+
     test("a dry run's exit 1 with refused pages says what would be published", () => {
-      expect(fellesSyncRunOutcome(1, true, after(2, 2))).toEqual({
+      expect(fellesSyncRunOutcome(1, true, after(2, 2), null, drySummary(2))).toEqual({
         text: "Dry run: all changed pages would be published. 2 refused page(s) would not — see Refused. Nothing was uploaded.",
         ok: true,
       });
@@ -276,6 +279,20 @@ describe("the sync status", () => {
       expect(fellesSyncRunOutcome(1, false, null)).toEqual(fellesSyncOutcomeLine(1, false));
       for (const code of [2, 3, 9]) expect(fellesSyncRunOutcome(code, false, after(0, 1)).ok).toBe(false);
       expect(fellesSyncRunOutcome(0, false, after(0, 1))).toEqual(fellesSyncOutcomeLine(0, false));
+    });
+
+    // Fix round 1: the real wiki keeps a refused page, so the status before and
+    // after a crashed dry run both hold one. Only the run's own summary, which a
+    // crash never prints, says the refusal is what exited 1.
+    test("a dry run's exit 1 reads ok only when its summary reports a refusal", () => {
+      const crash = "error: Cannot read properties of undefined\n    at publiser (publiser-felles-wiki.ts:1500:3)";
+      expect(fellesSyncRunOutcome(1, true, after(2, 1), after(2, 1), crash)).toEqual(fellesSyncOutcomeLine(1, true));
+      expect(fellesSyncRunOutcome(1, true, after(2, 1), after(2, 1))).toEqual(fellesSyncOutcomeLine(1, true));
+      // A summary that reports no refusal does not explain the 1 either.
+      expect(fellesSyncRunOutcome(1, true, after(2, 1), after(2, 1), drySummary(0))).toEqual(fellesSyncOutcomeLine(1, true));
+      // The status-only form of the summary (nothing changed) counts too.
+      expect(fellesSyncRunOutcome(1, true, after(0, 1), null, "\nOppsummering: 0 klar(e), 1 avvist, 0 mangler lokalt.").ok).toBe(true);
+      expect(fellesSyncRunOutcome(1, true, after(2, 1), after(2, 1), drySummary(1)).ok).toBe(true);
     });
 
     // Finding 79: a failed real run claims pages were published only when the

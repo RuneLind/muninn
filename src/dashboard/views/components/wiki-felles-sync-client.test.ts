@@ -14,7 +14,7 @@
  * process with the rest of the directory.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { FELLES_SYNC_SLOT_ID, initFellesSync, type FellesSync, type FellesSyncStatus } from "./wiki-felles-publish.ts";
+import { FELLES_SYNC_BTN_ID, FELLES_SYNC_SLOT_ID, initFellesSync, type FellesSync, type FellesSyncStatus } from "./wiki-felles-publish.ts";
 
 type Listener = (e: unknown) => void;
 
@@ -28,13 +28,20 @@ class FakeEl {
   id = "";
   attributes: { name: string; value: string }[] = [];
   content = { firstElementChild: null as FakeEl | null };
+  /** How many times `innerHTML` was assigned: a re-render swaps every node. */
+  htmlSets = 0;
   private html = "";
   private sel = new Map<string, FakeEl>();
   private listeners = new Map<string, Listener[]>();
   set innerHTML(v: string) {
     this.html = v;
+    this.htmlSets++;
     this.sel.clear();
-    if (v.startsWith("<button")) this.content.firstElementChild = new FakeEl();
+    if (v.startsWith("<button")) {
+      // The chip template: its text is what `paint` copies onto the button.
+      this.content.firstElementChild = new FakeEl();
+      this.content.firstElementChild.textContent = v.replace(/<[^>]*>/g, "");
+    }
   }
   get innerHTML(): string {
     return this.html;
@@ -92,6 +99,9 @@ interface Harness {
   holdPost: () => void;
   settlePost: (body: unknown) => Promise<void>;
   postBody: unknown;
+  /** The sync POST's HTTP status (200 unless a test sets it). */
+  postStatus: number;
+  onStatusCalls: () => number;
   slot: FakeEl;
   dialog: () => FakeEl | null;
 }
@@ -105,12 +115,14 @@ beforeEach(() => {
   const slot = new FakeEl();
   let dialog: FakeEl | null = null;
   let statusCalls = 0;
+  let onStatusCalls = 0;
   let held: ((r: Response) => void) | null = null;
   let hold = false;
   const harness = {
     answers: [status()],
     postBody: { exitCode: 0, output: "" } as unknown,
-  } as Partial<Harness> & { answers: FellesSyncStatus[]; postBody: unknown };
+    postStatus: 200,
+  } as Partial<Harness> & { answers: FellesSyncStatus[]; postBody: unknown; postStatus: number };
   globalThis.document = {
     getElementById: (id: string) => (id === FELLES_SYNC_SLOT_ID ? slot : null),
     createElement: (tag: string) => {
@@ -131,15 +143,23 @@ beforeEach(() => {
         hold = false;
         return new Promise<Response>((r) => (held = r));
       }
-      return new Response(JSON.stringify(harness.postBody), { status: 200 });
+      return new Response(JSON.stringify(harness.postBody), { status: harness.postStatus });
     }
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
-  const sync = initFellesSync({ wiki: "kode", hrefFor: (r) => `/wiki?relPath=${r}`, openPage: () => {}, onStatus: () => {} });
+  const sync = initFellesSync({
+    wiki: "kode",
+    hrefFor: (r) => `/wiki?relPath=${r}`,
+    openPage: () => {},
+    onStatus: () => {
+      onStatusCalls++;
+    },
+  });
   h = Object.assign(harness, {
     sync,
     slot,
     statusCalls: () => statusCalls,
+    onStatusCalls: () => onStatusCalls,
     dialog: () => dialog,
     holdPost: () => {
       hold = true;
@@ -247,5 +267,93 @@ describe("finding 79 — a dry run is judged on a fresh status", () => {
     const line = h.dialog()!.querySelector(".wiki-felles-status");
     expect(line.textContent).not.toContain("would be published");
     expect(line.className).toContain("err");
+  });
+});
+
+/** The dialog's lists element, as `openDialog` looked it up. */
+const lists = () => h.dialog()!.querySelector(".wiki-felles-lists");
+/** The chip button, as `paint` updates it in place. */
+const chip = () => h.slot.querySelector(`#${FELLES_SYNC_BTN_ID}`);
+
+describe("fix round 1 — the chip click's fresh read", () => {
+  // The fresh read that lands while the user (or a spec) points at a link
+  // must not swap the lists' nodes when nothing changed: the e2e specs
+  // «links read at 4.5:1» and «links do nothing while a sync runs» lost
+  // their link to exactly that swap on CI.
+  test("an identical fresh status leaves the dialog's lists alone", async () => {
+    const s = status({ changed: 1, pages: [changedPage(1)] });
+    h.answers = [s];
+    await h.sync.load();
+    clickChip();
+    await settle();
+    expect(h.statusCalls()).toBe(2);
+    expect(lists().htmlSets).toBe(0);
+  });
+
+  test("a fresh status that differs re-renders the lists", async () => {
+    h.answers = [status({ changed: 1, pages: [changedPage(1)] })];
+    await h.sync.load();
+    h.answers = [status({ changed: 2, pages: [changedPage(1), changedPage(2)] })];
+    clickChip();
+    await settle();
+    expect(lists().htmlSets).toBe(1);
+    expect(lists().innerHTML).toContain("plans/c2.mdx");
+  });
+
+  test("the fresh read updates the chip and the page markers, in one request", async () => {
+    await h.sync.load();
+    expect(chip().textContent).toBe("Felles: 0 changed");
+    const onStatusBefore = h.onStatusCalls();
+    h.answers = [status({ changed: 3, pages: [changedPage(1), changedPage(2), changedPage(3)] })];
+    clickChip();
+    await settle();
+    expect(h.statusCalls()).toBe(2);
+    expect(chip().textContent).toBe("Felles: 3 changed");
+    expect(h.sync.markFor("plans/c1.mdx")).toBe("stale");
+    expect(h.onStatusCalls()).toBe(onStatusBefore + 1);
+  });
+
+  test("a run the route refused before spawning starts no status request", async () => {
+    h.answers = [status({ changed: 1, pages: [changedPage(1)] })];
+    await h.sync.load();
+    clickChip();
+    await settle();
+    const afterOpen = h.statusCalls();
+    expect(afterOpen).toBe(2);
+    h.postStatus = 409;
+    h.postBody = { error: "A publish, remove or sync is already running.", reason: "running" };
+    clickDialog("sync");
+    await settle();
+    expect(h.statusCalls()).toBe(afterOpen);
+  });
+});
+
+describe("fix round 1 — a crashed dry run with a refused page reads red", () => {
+  test("exit 1 without the script's summary is a crash, though the status holds a refused page", async () => {
+    const s = status({ changed: 1, pages: [refusedPage, changedPage(1)] });
+    h.answers = [s];
+    await h.sync.load();
+    clickChip();
+    await settle();
+    h.postBody = { exitCode: 1, output: "error: Cannot read properties of undefined\n    at publiser (publiser-felles-wiki.ts:1500:3)" };
+    clickDialog("sync-dry");
+    await settle();
+    const line = h.dialog()!.querySelector(".wiki-felles-status");
+    expect(line.textContent).not.toContain("would be published");
+    expect(line.className).toContain("err");
+  });
+
+  test("exit 1 whose summary reports the refusal reads ok", async () => {
+    const s = status({ changed: 1, pages: [refusedPage, changedPage(1)] });
+    h.answers = [s];
+    await h.sync.load();
+    clickChip();
+    await settle();
+    h.postBody = { exitCode: 1, output: "OK      plans/c1.mdx\n\nOppsummering: 1 klar(e), 1 avvist, 0 mangler lokalt." };
+    clickDialog("sync-dry");
+    await settle();
+    const line = h.dialog()!.querySelector(".wiki-felles-status");
+    expect(line.textContent).toContain("would be published");
+    expect(line.className).toContain("ok");
   });
 });

@@ -649,18 +649,23 @@ export function fellesSyncOutcomeLine(exitCode: number, dryRun: boolean): { text
  *  included: the status the dialog opened with can be minutes old, and a
  *  refused page in it says nothing about why this run exited 1 (architecture
  *  review 2026-10, finding 79). `before` is the view the run started from; a
- *  failed real run says pages were published only when `changed` dropped. */
+ *  failed real run says pages were published only when `changed` dropped.
+ *  A dry run reads ok only when its own `output` reports a refusal: a crash
+ *  also exits 1, and the status before and after it both hold the wiki's
+ *  permanently refused page, so no status comparison can tell the two apart. */
 export function fellesSyncRunOutcome(
   exitCode: number,
   dryRun: boolean,
   after: FellesSyncStatus | null,
   before: FellesSyncStatus | null = null,
+  output = "",
 ): { text: string; ok: boolean } {
   if (exitCode === 1 && after) {
     const refused = after.pages.filter((p) => p.state === "refused").length;
     // A dry run uploads nothing, so the status after it still counts the
     // changed pages it would have published.
-    if (refused > 0 && (dryRun || after.changed === 0)) {
+    const explained = dryRun ? (fellesDrySummaryRefusals(output) ?? 0) > 0 : after.changed === 0;
+    if (refused > 0 && explained) {
       return dryRun
         ? {
             text: `Dry run: all changed pages would be published. ${refused} refused page(s) would not — see Refused. Nothing was uploaded.`,
@@ -676,6 +681,14 @@ export function fellesSyncRunOutcome(
     }
   }
   return fellesSyncOutcomeLine(exitCode, dryRun);
+}
+
+/** The refused count in a `--synk --dry-run` summary line
+ *  (`Oppsummering: N klar(e), M avvist…`, `publiser-felles-wiki.ts`), which
+ *  the script prints last on every run that finished. Null without one. */
+export function fellesDrySummaryRefusals(output: string): number | null {
+  const m = /^Oppsummering: \d+ klar\(e\), (\d+) avvist\b/m.exec(output);
+  return m ? Number(m[1]) : null;
 }
 
 export interface FellesSyncOptions {
@@ -832,6 +845,7 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     // false from the moment the flag or the bucket may have moved until a
     // status for it arrives; Publish changed stays off meanwhile.
     let view = initial;
+    let listsHtml = fellesSyncListHtml(initial, opts.hrefFor, removeCommandFor);
     let viewReady = true;
     let viewSeq = 0;
     const syncEnabled = () => {
@@ -844,7 +858,9 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       syncEnabled();
       const allowIdent = ident.checked;
       let r: StatusResult;
-      if (afterRun && allowIdent) r = await load({ afterRun: true });
+      // With the default flag the view IS the chip's status: one request
+      // updates the chip, the page markers and the view together.
+      if (allowIdent) r = await load(afterRun ? { afterRun: true } : { quiet: true });
       else {
         // After a run the chip refreshes too, with its own default flag.
         if (afterRun) void load({ afterRun: true });
@@ -854,7 +870,10 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       if (r.ok) {
         view = r.status;
         viewReady = true;
-        lists.innerHTML = fellesSyncListHtml(view, opts.hrefFor, removeCommandFor);
+        // An unchanged answer keeps the nodes: a swap would pull a link out
+        // from under a pointer that is on it.
+        const html = fellesSyncListHtml(view, opts.hrefFor, removeCommandFor);
+        if (html !== listsHtml) lists.innerHTML = listsHtml = html;
         syncBtn.textContent = `Publish changed (${view.changed})`;
         setRefresh("");
       } else {
@@ -879,45 +898,50 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       out.hidden = true;
       let exitCode: number | null = null;
       let httpStatus: number | null = null;
+      let output = "";
       try {
-        const res = await fetch("/api/wiki/felles-publish", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ wiki: opts.wiki, action: "sync", dryRun, allowIdent: ident.checked }),
-        });
-        const data = (await res.json().catch(() => null)) as { exitCode?: number; output?: string; error?: string } | null;
-        httpStatus = res.status;
-        if (res.ok && data && typeof data.exitCode === "number") {
-          exitCode = data.exitCode;
-          if (data.output) {
-            out.innerHTML = fellesOutputHtml(data.output);
-            out.hidden = false;
+        try {
+          const res = await fetch("/api/wiki/felles-publish", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ wiki: opts.wiki, action: "sync", dryRun, allowIdent: ident.checked }),
+          });
+          const data = (await res.json().catch(() => null)) as { exitCode?: number; output?: string; error?: string } | null;
+          httpStatus = res.status;
+          if (res.ok && data && typeof data.exitCode === "number") {
+            exitCode = data.exitCode;
+            output = data.output ?? "";
+            if (data.output) {
+              out.innerHTML = fellesOutputHtml(data.output);
+              out.hidden = false;
+            }
+            setStatus(dryRun ? "Dry run finished." : "Checking the status after the run…", "");
+          } else {
+            setStatus(data?.error ?? `Request failed (HTTP ${res.status}).`, "err");
           }
-          setStatus(dryRun ? "Dry run finished." : "Checking the status after the run…", "");
-        } else {
-          setStatus(data?.error ?? `Request failed (HTTP ${res.status}).`, "err");
+        } catch (err) {
+          setStatus(`Request failed: ${err instanceof Error ? err.message : String(err)}`, "err");
         }
-      } catch (err) {
-        setStatus(`Request failed: ${err instanceof Error ? err.message : String(err)}`, "err");
+        // A dry run that answered is judged on a status read after it too
+        // (finding 79); with the default flag that read also refreshes the chip.
+        const after = fellesRunCouldChangeBucket(dryRun, httpStatus)
+          ? await reloadView(true)
+          : dryRun && exitCode !== null
+            ? await reloadView(false)
+            : viewReady
+              ? view
+              : null;
+        if (exitCode !== null) {
+          const line = fellesSyncRunOutcome(exitCode, dryRun, after, before, output);
+          setStatus(line.text, line.ok ? "ok" : "err");
+        }
+      } finally {
+        running = false;
+        runInFlight = false;
+        lists.inert = false;
+        holdDuringRun.forEach((b) => (b.disabled = false));
+        syncEnabled();
       }
-      // A dry run that answered is judged on a status read after it too
-      // (finding 79); it changed nothing, so the chip is left alone.
-      const after = fellesRunCouldChangeBucket(dryRun, httpStatus)
-        ? await reloadView(true)
-        : dryRun && exitCode !== null
-          ? await reloadView(false)
-          : viewReady
-            ? view
-            : null;
-      if (exitCode !== null) {
-        const line = fellesSyncRunOutcome(exitCode, dryRun, after, before);
-        setStatus(line.text, line.ok ? "ok" : "err");
-      }
-      running = false;
-      runInFlight = false;
-      lists.inert = false;
-      holdDuringRun.forEach((b) => (b.disabled = false));
-      syncEnabled();
     }
 
     dialog.addEventListener("click", (e) => {

@@ -15,7 +15,8 @@
  * the sync flow can be driven end to end. Without `--tillat-ident` the status
  * calls `REL` `avvist`. Files in `ctl` steer it: `status-delay` and `run-delay`
  * (ms, default 700), `status-fail` (`--status` exits 2), `synk-refuse`
- * (`--synk` exits 1, as the real script does with a refused page).
+ * (`--synk` prints the real script's summary with 2 refused and exits 1, as
+ * the real script does with a refused page).
  */
 
 import { test, expect, type Page, type Route } from "@playwright/test";
@@ -111,7 +112,11 @@ test.beforeAll(async () => {
       `if (real && (argv.includes('--synk') || argv.includes(${JSON.stringify("./" + REL)}))) await Bun.write(ctl + '/synced', '1');\n` +
       'console.log("ARGS " + JSON.stringify(argv));\n' +
       'console.log("  https://example.test/wiki?wiki=melosys-felles&relPath=x");\n' +
-      "if (argv.includes('--synk') && (await has('synk-refuse'))) process.exit(1);\n" +
+      // The real script's last line on a run that finished; a crash prints none.
+      "if (argv.includes('--synk') && (await has('synk-refuse'))) {\n" +
+      "  console.log(real ? '\\nOppsummering: 1 lastet opp, 2 avvist, 0 feilet, 0 mangler lokalt.' : '\\nOppsummering: 1 klar(e), 2 avvist, 0 mangler lokalt.');\n" +
+      "  process.exit(1);\n" +
+      "}\n" +
       `if (argv.includes(${JSON.stringify(FAIL_REL)}) || argv.includes(${JSON.stringify("./" + FAIL_REL)})) process.exit(3);\n`,
     "utf8",
   );
@@ -606,10 +611,14 @@ test.describe("Wiki reader: Felles sync status", () => {
     await expect(page.locator(CHIP)).toHaveText("Felles: 1 changed");
     await page.locator(CHIP).click();
     const dialog = page.locator("dialog.wiki-felles-sync-dialog");
+    // The click reads the status once more (finding 67); Publish changed is
+    // enabled only once that answer is in, so the count is settled here.
+    await expect(dialog.getByRole("button", { name: "Publish changed (1)" })).toBeEnabled();
+    expect(traffic.started()).toBe(2);
     await dialog.getByRole("button", { name: "Publish changed (1)" }).click();
     await expect(dialog.locator(".wiki-felles-status")).toHaveText(/already running/);
     await page.waitForTimeout(500);
-    expect(traffic.started()).toBe(1);
+    expect(traffic.started()).toBe(2);
     await expect(dialog.getByRole("button", { name: "Publish changed (1)" })).toBeEnabled();
   });
 
