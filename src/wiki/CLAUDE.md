@@ -3950,16 +3950,26 @@ finding 23). muninn deletes a stale lock only while it holds
 and only after re-statting the lock inside the mutex: same dev, inode and mtime
 as the stale file it measured, and still older than the stale window. A lock that
 changed is re-measured; a mutex someone else holds is waited on like a held lock;
-a mutex older than `WIKI_TAKEOVER_MUTEX_STALE_MS` (1 s — it is held for one stat
-and one unlink) is a crash leftover and is removed. The rename-aside design this
+a mutex older than `WIKI_TAKEOVER_MUTEX_STALE_MS` is a crash leftover and is
+removed. That bound IS the lock's stale window (10 s): a holder can stall between
+its check and its unlink (SIGSTOP, a VM freeze), and at the 1 s bound round 1
+shipped, a stalled taker's mutex was removed, a second taker cleared the lock, a
+third created a fresh one and the first deleted it on waking (measured 10/10
+rounds with an overlap at n=3 and n=4). The cost: a mutex left by a crash blocks
+takeovers for up to 10 s, as a crashed lock already does, so writers time out
+with `locked` meanwhile. The mutex carries no contents (a failed write into it
+made `takeWikiWriteLock` reject), and its release is identity-checked (same dev
+and inode), so a taker whose mutex was removed never deletes another's. The rename-aside design this
 replaced left `.wiki-write.lock` ABSENT until it linked the file back, and an
 absent lock is free: measured with 3–6 processes racing one stale lock, it let
 two holders run together and left orphan locks every writer timed out on. The
 mutex is a write artifact (`isWikiWriteArtifact`), so the sweeper, the sync
 loop's `listDirtyEntries` and the badge skip it; mimir's `.gitignore` does not
-name it yet. Residuals: `wiki-stamp`'s own takeover is still a blind unlink, and
-a lock released and re-created between the in-mutex stat and the unlink (two
-adjacent syscalls, needs a stale-but-alive holder) is deleted.
+name it yet. Residuals: `wiki-stamp`'s own takeover is still a blind unlink; a
+taker stalled longer than the stale window between its in-mutex check and its
+unlink has its mutex removed and can then delete a lock another process created
+meanwhile; and a lock released by a stale-but-alive holder and re-created by
+another process between the in-mutex stat and the unlink is deleted.
 
 **On acquire muninn writes ONE JSON line into the file** — `{pid, host, op, at}`.
 For an operator it answers "who is holding this, and since when" from a file that

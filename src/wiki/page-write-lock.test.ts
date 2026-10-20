@@ -18,6 +18,8 @@ import {
   WIKI_LOCK_BASENAME,
   WIKI_LOCK_STALE_MS,
   WIKI_LOCK_WAIT_MS,
+  WIKI_TAKEOVER_MUTEX_BASENAME,
+  WIKI_TAKEOVER_MUTEX_STALE_MS,
 } from "./lockfile.ts";
 import { writeWikiPage, type PageWriteOptions } from "./page-write.ts";
 import { __resetWikiWriteQueueForTest } from "./queue.ts";
@@ -199,13 +201,135 @@ describe("takeWikiWriteLock", () => {
     await utimes(lockPath, old, old);
     const mutex = path.join(root, ".wiki-write.lock.takeover");
     await writeFile(mutex, "");
-    const crashed = new Date(Date.now() - 5_000);
+    const crashed = new Date(Date.now() - WIKI_TAKEOVER_MUTEX_STALE_MS - 5_000);
     await utimes(mutex, crashed, crashed);
     const res = await takeWikiWriteLock(root, { waitMs: 200 });
     expect(res.ok).toBe(true);
     expect(fs.readdirSync(root)).toEqual([WIKI_LOCK_BASENAME]);
     if (res.ok) res.lock?.release();
     expect(fs.readdirSync(root)).toEqual([]);
+  });
+
+  /**
+   * Fix round 2, finding 1. A taker can stall between its in-mutex check and
+   * its unlink (SIGSTOP, a VM freeze). With a 1 s abandoned bound a stalled
+   * taker's mutex was removed, a second taker cleared the lock, a third created
+   * a fresh one, and the first deleted it on waking: two writers. The mutex now
+   * trusts a stall as long as the lock does.
+   */
+  test("a takeover mutex younger than the lock's stale window is not removed", async () => {
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const mutex = path.join(root, WIKI_TAKEOVER_MUTEX_BASENAME);
+    await writeFile(mutex, "");
+    const stalled = new Date(Date.now() - 5_000);
+    await utimes(mutex, stalled, stalled);
+    const res = await takeWikiWriteLock(root, { waitMs: 60 });
+    expect(res.ok).toBe(false);
+    expect((await stat(lockPath)).mtimeMs).toBe(old.getTime());
+    expect((await stat(mutex)).mtimeMs).toBe(stalled.getTime());
+    expect(WIKI_TAKEOVER_MUTEX_STALE_MS).toBe(WIKI_LOCK_STALE_MS);
+  });
+
+  /**
+   * Fix round 2, finding 1. A taker whose mutex was removed as abandoned while
+   * it stalled must not delete the mutex another taker created since. The spy
+   * replaces the mutex at the in-mutex re-stat of the lock.
+   */
+  test("a taker never removes a takeover mutex it did not create", async () => {
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const mutex = path.join(root, WIKI_TAKEOVER_MUTEX_BASENAME);
+    const realStat = fs.statSync;
+    let replaced = false;
+    const spy = spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      if (!replaced && String(p) === lockPath && fs.existsSync(mutex)) {
+        replaced = true;
+        fs.unlinkSync(mutex);
+        fs.writeFileSync(mutex, "another taker");
+      }
+      return (realStat as (...a: unknown[]) => fs.Stats)(p, ...rest);
+    }) as typeof fs.statSync);
+    let res: Awaited<ReturnType<typeof takeWikiWriteLock>>;
+    try {
+      res = await takeWikiWriteLock(root, { waitMs: 200 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(mutex, "utf8")).toBe("another taker");
+    if (res.ok) res.lock?.release();
+  });
+
+  /**
+   * Fix round 2, finding 2. The takeover used to write `{pid, host}` into the
+   * mutex, and an ENOSPC there made `takeWikiWriteLock` REJECT, so
+   * `writeWikiPage` threw instead of returning an outcome. Nothing reads the
+   * mutex's contents, so nothing is written into it.
+   */
+  test("a write failure on the takeover mutex never rejects the lock", async () => {
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const realOpen = fs.openSync;
+    const realWrite = fs.writeSync;
+    const realClose = fs.closeSync;
+    const mutexFds = new Set<number>();
+    let opened = 0;
+    let thrown = 0;
+    const openSpy = spyOn(fs, "openSync").mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (realOpen as (...a: unknown[]) => number)(p, ...rest);
+      if (String(p).endsWith(WIKI_TAKEOVER_MUTEX_BASENAME)) {
+        mutexFds.add(fd);
+        opened += 1;
+      }
+      return fd;
+    }) as typeof fs.openSync);
+    // A closed descriptor number is reused by the lock's own open.
+    const closeSpy = spyOn(fs, "closeSync").mockImplementation(((fd: number) => {
+      mutexFds.delete(fd);
+      return (realClose as (fd: number) => void)(fd);
+    }) as typeof fs.closeSync);
+    const writeSpy = spyOn(fs, "writeSync").mockImplementation(((fd: number, ...rest: unknown[]) => {
+      if (mutexFds.has(fd)) {
+        thrown += 1;
+        throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+      }
+      return (realWrite as (...a: unknown[]) => number)(fd, ...rest);
+    }) as typeof fs.writeSync);
+    let res: Awaited<ReturnType<typeof takeWikiWriteLock>>;
+    try {
+      res = await takeWikiWriteLock(root, { waitMs: 200 });
+    } finally {
+      openSpy.mockRestore();
+      writeSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
+    expect(opened).toBe(1);
+    expect(thrown).toBe(0);
+    expect(res.ok).toBe(true);
+    expect(res.ok && res.lock).not.toBeNull();
+    expect(fs.readdirSync(root)).toEqual([WIKI_LOCK_BASENAME]);
+    if (res.ok) res.lock?.release();
+  });
+
+  test("an fstat failure on the takeover mutex refuses without throwing or leaving the mutex", async () => {
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const spy = spyOn(fs, "fstatSync").mockImplementation((() => {
+      throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+    }) as typeof fs.fstatSync);
+    let res: Awaited<ReturnType<typeof takeWikiWriteLock>>;
+    try {
+      res = await takeWikiWriteLock(root, { waitMs: 60 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(res.ok).toBe(false);
+    expect(fs.readdirSync(root)).toEqual([WIKI_LOCK_BASENAME]);
   });
 
   test("a lock released mid-wait is acquired without waiting the full budget", async () => {

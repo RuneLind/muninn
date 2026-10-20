@@ -27,8 +27,8 @@
  * exclusion — atomic on every filesystem either wiki lives on, no daemon, no
  * cleanup on the happy path. The lock is taken on EVERY registered wiki root a
  * writer touches, so each of those roots has to ignore `.wiki-write.lock`,
- * `.wiki-write.lock.takeover` (muninn's stale-takeover mutex, held for two
- * syscalls) and `.wiki-stamp.*.tmp`; mimir's `.gitignore` names the first and
+ * `.wiki-write.lock.takeover` (muninn's stale-takeover mutex, held while one
+ * stale lock is checked and cleared) and `.wiki-stamp.*.tmp`; mimir's `.gitignore` names the first and
  * the last, and the sweeper
  * (`src/watchers/wiki-committer.ts`) skips them by basename for the roots that
  * do not — see `listWikiSubtreeDirty`.
@@ -67,6 +67,7 @@ import {
   openSync,
   closeSync,
   writeSync,
+  fstatSync,
   statSync,
   unlinkSync,
   readFileSync,
@@ -304,23 +305,36 @@ export async function takeWikiWriteLock(
  * create the lock and be deleted as "the moved one", and left orphan locks that
  * every writer timed out on. The mutex never moves the lock: its holder stats
  * the lock again and unlinks it only while it is the SAME inode, with the same
- * mtime, and still stale. Two muninn takers can no longer both delete — the
- * second one re-stats inside the mutex and finds the first one's fresh lock.
+ * mtime, and still stale. A second taker that enters after the first re-stats
+ * inside the mutex and finds the first one's fresh lock.
  *
- * Residuals, both narrow: the stamper's own takeover is still a blind unlink
- * (claude-usage follow-up); and a lock RELEASED and re-created by another
- * process between our in-mutex stat and our unlink is deleted (two adjacent
- * sync calls, needs a stale-but-alive holder).
+ * The mutex trusts a stalled holder exactly as long as the lock does
+ * ({@link WIKI_TAKEOVER_MUTEX_STALE_MS} = {@link WIKI_LOCK_STALE_MS}), and its
+ * release is identity-checked, so a taker whose mutex was removed never
+ * deletes another's.
+ *
+ * Residuals: the stamper's own takeover is still a blind unlink (claude-usage
+ * follow-up); a taker stalled longer than the stale window between its
+ * in-mutex check and its unlink has its mutex removed, and can then delete a
+ * lock another process created meanwhile (the trust the lock itself extends to
+ * a stalled holder); and a lock RELEASED by a stale-but-alive holder and
+ * re-created by another process between our in-mutex stat and our unlink is
+ * deleted.
  */
 export const WIKI_TAKEOVER_MUTEX_BASENAME = `${WIKI_LOCK_BASENAME}.takeover`;
 
 /**
- * A takeover mutex older than this is a crash leftover and is removed. The
- * mutex is held for one stat and one unlink, so any age in milliseconds means
- * its holder died; the bound only has to stay under {@link WIKI_LOCK_WAIT_MS}
- * so the writers queued behind a dead one still get their turn.
+ * A takeover mutex older than this is treated as a crash leftover and removed.
+ * Its holder runs a few syscalls and a log line, but a process can stall
+ * anywhere in that (SIGSTOP, a VM freeze, swap): removing a stalled
+ * holder's mutex lets a second taker clear the lock and a third create a fresh
+ * one, which the first then deletes on waking. So the bound is the lock's own
+ * stale window: a stall is trusted as long as the lock trusts one. Cost: a
+ * mutex left by a crash blocks takeovers for up to 10 s, as a crashed lock
+ * already does, and a writer waiting {@link WIKI_LOCK_WAIT_MS} behind it times
+ * out with `locked`.
  */
-export const WIKI_TAKEOVER_MUTEX_STALE_MS = 1_000;
+export const WIKI_TAKEOVER_MUTEX_STALE_MS = WIKI_LOCK_STALE_MS;
 
 type TakeoverResult =
   /** The stale lock is gone (we deleted it, or its holder released it). */
@@ -334,6 +348,9 @@ type TakeoverResult =
 
 function takeOverStaleLock(lockPath: string, measured: Stats, nowMs: number): TakeoverResult {
   const mutexPath = path.join(path.dirname(lockPath), WIKI_TAKEOVER_MUTEX_BASENAME);
+  // Nothing reads the mutex's contents, so nothing is written into it: a write
+  // that failed (ENOSPC, EIO) made `takeWikiWriteLock` reject instead of
+  // returning an outcome. Every fs call below is caught for the same reason.
   let fd: number;
   try {
     fd = openSync(mutexPath, "wx");
@@ -353,12 +370,24 @@ function takeOverStaleLock(lockPath: string, measured: Stats, nowMs: number): Ta
     }
     return "busy";
   }
+  let ours: Stats;
   try {
+    ours = fstatSync(fd);
+  } catch {
     try {
-      writeSync(fd, `${JSON.stringify({ pid: process.pid, host: os.hostname() })}\n`);
-    } finally {
-      closeSync(fd);
+      unlinkSync(mutexPath);
+    } catch {
+      /* nothing more to clean up */
     }
+    return "refused";
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* the descriptor is released either way */
+    }
+  }
+  try {
     let current: Stats;
     try {
       current = statSync(lockPath);
@@ -386,11 +415,22 @@ function takeOverStaleLock(lockPath: string, measured: Stats, nowMs: number): Ta
     });
     return "removed";
   } finally {
-    try {
-      unlinkSync(mutexPath);
-    } catch {
-      // Already removed as abandoned by another process; nothing of ours left.
-    }
+    releaseMutexIfOurs(mutexPath, ours);
+  }
+}
+
+/**
+ * Remove the takeover mutex only while it is still the file this taker created
+ * (same dev and inode). A mutex removed as abandoned during a stall may since
+ * have been re-created by another taker, and that one is not ours to delete.
+ */
+function releaseMutexIfOurs(mutexPath: string, ours: Stats): void {
+  try {
+    const now = statSync(mutexPath);
+    if (now.dev !== ours.dev || now.ino !== ours.ino) return;
+    unlinkSync(mutexPath);
+  } catch {
+    // Already gone: removed as abandoned by another process.
   }
 }
 
