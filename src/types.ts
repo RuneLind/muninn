@@ -48,11 +48,11 @@ export interface ToolCall {
   startOffsetMs: number; // offset from Claude CLI start (for waterfall positioning)
   input?: string;      // abbreviated JSON, max 500 chars
   /**
-   * True when the call never got its result — i.e. a `tool_start` with no
-   * `tool_end`. Set by consumers that rebuild tool calls from the progress channel
+   * True when the call never got its result. Set by consumers that rebuild tool calls from the progress channel
    * (the fact-check claim fan-out's timeout path) and by the claude-cli
    * `StreamParser` for a `tool_use` with no matching `tool_result` at end of
-   * stream. `durationMs` on such a call runs to the failure (or stream-end)
+   * stream (which still emits a `tool_end` progress event for it, so a
+   * progress-channel consumer sees it as finished). `durationMs` on such a call runs to the failure (or stream-end)
    * instant, not to a real result, and `output` is necessarily undefined.
    */
   unterminated?: boolean;
