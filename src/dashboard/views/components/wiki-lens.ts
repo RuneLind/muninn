@@ -96,6 +96,7 @@ export const OVERVIEW_HIDDEN: readonly string[] = [
   "section.query > :not(.query-head)",
   "section.query .query-meta",
   '.cb-group[data-status="none"]',
+  '.cb-dots-group[data-status="none"]',
   "details.fold.fold-for-dev",
   "details.fold.fold-for-agent",
   "details.fold.fold-agent-context",

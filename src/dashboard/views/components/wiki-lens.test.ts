@@ -59,6 +59,8 @@ describe("lensCss: the compact lists are the same in every lens (D45)", () => {
 
   test("Overview alone hides the none group whole and shows its count line", () => {
     expect(rulesWith('.cb-group[data-status="none"]').some((r) => r.startsWith(".wiki-article.lens-overview :is("))).toBe(true);
+    // The squares' none group goes with its rows, so squares and rows agree.
+    expect(rulesWith('.cb-dots-group[data-status="none"]').some((r) => r.startsWith(".wiki-article.lens-overview :is("))).toBe(true);
     expect(rulesWith(".cb-lens-note { display: none; }")).toEqual([".wiki-article:not(.lens-overview) .cb-lens-note { display: none; }"]);
   });
 

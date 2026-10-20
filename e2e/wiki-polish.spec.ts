@@ -281,6 +281,42 @@ test.describe("Wiki reader: polish", () => {
     await expect(all.nth(1)).not.toBeFocused();
   });
 
+  test("a clicked square takes the tab stop, so Tab out and back lands on it", async ({ page }) => {
+    await open(page, 1280);
+    const all = dots(page).locator("button.cb-dot");
+    const fourth = all.nth(3);
+    await fourth.click();
+    await expect(fourth).toHaveAttribute("tabindex", "0");
+    await expect(dots(page).locator('button.cb-dot[tabindex="0"]')).toHaveCount(1);
+    await page.keyboard.press("Tab");
+    await expect(fourth).not.toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(fourth).toBeFocused();
+  });
+
+  test("Overview hides the none squares with the none rows; the arrows skip them", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}&lens=overview`);
+    await expect(page.locator(".wiki-article.lens-overview")).toHaveCount(1);
+    const d = dots(page);
+    await expect(d.locator('.cb-dots-group[data-status="none"]')).toBeHidden();
+    await expect(page.locator('.wiki-article .cb-group[data-status="none"]')).toBeHidden();
+    await expect(d.locator('.cb-dots-group[data-status="ok"]')).toBeVisible();
+    const wrong = d.getByRole("button", { name: "LIB-104: wrong" });
+    await wrong.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(d.getByRole("button", { name: /^LIB-106: / })).toBeFocused();
+    await expect(d.locator('button.cb-dot[tabindex="0"]')).toHaveCount(1);
+    await page.locator(".wiki-lens-switch button[data-lens='all']").click();
+    await expect(d.locator('.cb-dots-group[data-status="none"]')).toBeVisible();
+    // A none square pressed in All holds the tab stop; back in Overview an arrow takes it away.
+    await d.getByRole("button", { name: /^LIB-105: / }).click();
+    await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
+    await wrong.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(d.locator('button.cb-dot[tabindex="0"]')).toHaveCount(1);
+  });
+
   test("a definition shows on focus and Escape hides it", async ({ page }) => {
     await open(page, 1280);
     const mark = page.locator(".wiki-article .gl-mark").first();

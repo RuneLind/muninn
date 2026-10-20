@@ -144,7 +144,10 @@ function applyCaseDot(target: Element | null): boolean {
   const dots = dot?.closest<HTMLElement>(".cb-dots");
   if (!dot || !dots || dots.closest(".wiki-ref-peek")) return false;
   const on = dot.getAttribute("aria-pressed") !== "true";
-  dots.querySelectorAll<HTMLElement>("button.cb-dot").forEach((b) => b.setAttribute("aria-pressed", String(on && b === dot)));
+  dots.querySelectorAll<HTMLElement>("button.cb-dot").forEach((b) => {
+    b.setAttribute("aria-pressed", String(on && b === dot));
+    b.setAttribute("tabindex", b === dot ? "0" : "-1");
+  });
   const say = dots.querySelector<HTMLElement>(".cb-dots-say");
   if (say) say.textContent = on ? (dot.dataset.cbSay ?? "") : "";
   return true;
@@ -159,12 +162,13 @@ function moveCaseDot(e: KeyboardEvent): void {
   const dot = e.target.closest<HTMLElement>("button.cb-dot");
   const dots = dot?.closest(".cb-dots");
   if (!dot || !dots) return;
-  const all = Array.from(dots.querySelectorAll<HTMLElement>("button.cb-dot"));
+  // A square a lens hides (Overview's none group) is skipped.
+  const all = Array.from(dots.querySelectorAll<HTMLElement>("button.cb-dot")).filter((b) => b === dot || b.getClientRects().length > 0);
   const i = all.indexOf(dot);
   const forward = e.key === "ArrowRight" || e.key === "ArrowDown";
   const next = e.key === "Home" ? 0 : e.key === "End" ? all.length - 1 : forward ? Math.min(i + 1, all.length - 1) : Math.max(i - 1, 0);
   e.preventDefault();
-  all.forEach((b, k) => b.setAttribute("tabindex", k === next ? "0" : "-1"));
+  dots.querySelectorAll<HTMLElement>("button.cb-dot").forEach((b) => b.setAttribute("tabindex", b === all[next] ? "0" : "-1"));
   all[next]?.focus();
 }
 
