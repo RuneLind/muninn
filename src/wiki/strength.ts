@@ -36,6 +36,7 @@ import {
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
   RELATED_HUB_OUTLINKS,
+  RELATED_INDEX_WORDS_PER_LINK,
   RELATED_SHARED_PRS_MIN,
   STRENGTH_SESSION_DIGEST,
   strengthParts,
@@ -67,15 +68,21 @@ export function isBookkeeping(relPath: string): boolean {
   return isMetaStem(pageStemOf(relPath));
 }
 
-/**
- * Is the page at this normalized key a hub? Symmetric in degree: cited by more
- * than `RELATED_HUB_BACKLINKS` pages, or citing more than `RELATED_HUB_OUTLINKS`.
- */
+/** Is the page at this normalized key a hub: cited by more than `RELATED_HUB_BACKLINKS` pages? */
 function isHub(index: WikiIndex, key: string): boolean {
-  return (
-    (index.backlinks.get(key)?.length ?? 0) > RELATED_HUB_BACKLINKS ||
-    (index.outgoing.get(key)?.length ?? 0) > RELATED_HUB_OUTLINKS
-  );
+  return (index.backlinks.get(key)?.length ?? 0) > RELATED_HUB_BACKLINKS;
+}
+
+/**
+ * Is the page at this normalized key INDEX-SHAPED: more than
+ * `RELATED_HUB_OUTLINKS` outlinks and under `RELATED_INDEX_WORDS_PER_LINK` words
+ * of its own per link? A page without a word count (a hand-built index) is not.
+ */
+export function isIndexShaped(index: WikiIndex, key: string): boolean {
+  const out = index.outgoing.get(key)?.length ?? 0;
+  if (out <= RELATED_HUB_OUTLINKS) return false;
+  const words = index.proseWords?.get(key);
+  return words !== undefined && words < out * RELATED_INDEX_WORDS_PER_LINK;
 }
 
 /** Which signals tie a neighbour to the page, each in the OPEN page's terms. */
@@ -143,7 +150,7 @@ function sharingMaps(index: WikiIndex): SharingMaps {
 
 /**
  * The pages one hop from `relPath`, each with its score and signals. `[]` for an
- * unknown relPath, a bookkeeping page and a hub. Order is unspecified — every
+ * unknown relPath, a bookkeeping page, a hub and an index-shaped page. Order is unspecified — every
  * reader sorts.
  */
 export function neighbours(index: WikiIndex, relPath: string): Neighbour[] {
@@ -151,7 +158,7 @@ export function neighbours(index: WikiIndex, relPath: string): Neighbour[] {
   if (!self) return [];
   const selfKey = normalizeRelPath(self.relPath);
   if (isBookkeeping(self.relPath)) return [];
-  if (isHub(index, selfKey)) return [];
+  if (isHub(index, selfKey) || isIndexShaped(index, selfKey)) return [];
 
   const found = new Map<string, { meta: WikiPageMeta; signals: NeighbourSignals }>();
   /** The candidate's entry, or null when a cut removes it. */
@@ -170,7 +177,7 @@ export function neighbours(index: WikiIndex, relPath: string): Neighbour[] {
     // explainer belonging to some other page is an ordinary candidate.
     if (meta.parent !== undefined && normalizeRelPath(meta.parent) === selfKey) return null;
     // The hub cut applies to EVERY signal, link included.
-    if (isHub(index, candidateKey)) return null;
+    if (isHub(index, candidateKey) || isIndexShaped(index, candidateKey)) return null;
     const made = { meta, signals: { cites: false, citedBy: false, prs: [], sessions: [] } };
     found.set(candidateKey, made);
     return made;

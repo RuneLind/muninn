@@ -50,6 +50,7 @@ import {
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
   RELATED_HUB_OUTLINKS,
+  RELATED_INDEX_WORDS_PER_LINK,
   STRENGTH_LINK_BOTH_WAYS,
   STRENGTH_LINK_ONE_WAY,
   STRENGTH_MAX,
@@ -287,6 +288,7 @@ const relatedRows = (page: Page) => page.locator(".wiki-conn-item.wiki-conn-rela
 test("the thresholds are the measured values — moving one means re-measuring", () => {
   expect(RELATED_HUB_BACKLINKS).toBe(25);
   expect(RELATED_HUB_OUTLINKS).toBe(25);
+  expect(RELATED_INDEX_WORDS_PER_LINK).toBe(32);
   expect(RELATED_DIGEST_PRS).toBe(15);
 });
 

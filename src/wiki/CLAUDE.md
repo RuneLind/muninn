@@ -2128,9 +2128,10 @@ response), `plans/index.md` 246, `log.md` 189, and `flows/how-we-build.mdx` — 
 as a candidate at 27 backlinks — 36. Symmetric, the largest block was **33**
 rows (`overview.md`) on the 547-page clone, 2026-09-20 — a past measurement of
 the link graph's own bound; live mimir on 2026-10-04 (585 pages) gave 58
-(`archive/mimir/2026-09-27-plan-backlog-triage.mdx`) — a page the outlink hub
-cut below now removes; with it, live mimir (617 pages, 2026-10-20) tops out at
-24 rows and the memory wiki at 25 (189 before). There is no `RELATED_MAX` cap,
+(`archive/mimir/2026-09-27-plan-backlog-triage.mdx`), still the largest on
+2026-10-20 (617 pages): it links 59 pages with 40 words each, which the
+index-shape cut below reads as a report, not an index. The memory wiki tops out
+at 25 rows (189 before that cut). There is no `RELATED_MAX` cap,
 because a cap drops rows from a page that really does have that many
 neighbours. A FOURTH cut arrived with the session signal: a session stamped on
 more than `STRENGTH_SESSION_DIGEST` (12) pages is a sweep and pairs nothing (see
@@ -2142,14 +2143,19 @@ after the provenance backfill.
   dropped, from EVERY source. A page cited by the whole wiki is not related work
   because this page cites it too. Measured on mimir, exactly two pages exceed it:
   `flows/how-we-build.mdx` (27) and `projects/muninn/dashboard.md` (26).
-  The cut is symmetric in DEGREE too: a page linking to more than
-  `RELATED_HUB_OUTLINKS` (25) pages is a hub, since an index-shaped page (a
-  memory wiki's `MEMORY.md`) cites every page it lists and otherwise leads all
-  their blocks. Measured 2026-10-20: mimir (617 pages) has a gap from 18 to 26
-  outlinks and two pages over 25 the backlink cut missed (the backlog-triage
-  archive at 59, `overview.md` at 35); the memory wiki's three largest
-  `MEMORY.md` link 189, 66 and 48 pages. Lint check 8 keeps the backlink cut
-  alone.
+  An INDEX-SHAPED page is cut the same way, at both ends (`isIndexShaped`): more
+  than `RELATED_HUB_OUTLINKS` (25) outlinks and fewer than
+  `RELATED_INDEX_WORDS_PER_LINK` (32) words of its own per link
+  (`WikiIndex.proseWords`, the body outside links and frontmatter). An index
+  cites every page it lists and otherwise leads all their blocks (the memory
+  wiki's muninn `MEMORY.md`: listed on 189 pages, row #1 on 156). The count
+  alone cut content pages too — kode `concepts/arsavregning.md` (33 outlinks)
+  lost its whole block and its place in 41 others. Measured 2026-10-20 over
+  mimir, jarvis, kode and memory: index pages have 6–28.5 words per link,
+  content pages 36–80. Cut: the three `MEMORY.md`, kode `archive/INDEX.md`,
+  jarvis `Sources — RAG`/`Sources — Coding`, mimir `overview.md`, and one
+  content page with a 33-link "See also" under 430 words (`life/sources/
+  Filmmaking in the AI Era.md`, 13). Lint check 8 keeps the backlink cut alone.
 - **Digests**: a page naming more than `RELATED_DIGEST_PRS` (15) refs is cut from
   the PR-sharing source — it names half the month by construction. It still
   appears through a real link, with the link as its reason. The cut is applied to
@@ -2344,8 +2350,8 @@ A pair is a neighbour iff a signal counts, so every neighbour scores ≥ 1.0;
 (an open page that is either gets nothing), the PR digest on both ends of the
 PR signal, the session digest on the session (counted over every index page
 stamping it), culled and the open page's own attachments on the candidate only;
-a hub is either test, more than 25 backlinks or more than
-`RELATED_HUB_OUTLINKS` (25) outlinks.
+an index-shaped page (more than `RELATED_HUB_OUTLINKS` (25) outlinks, under
+`RELATED_INDEX_WORDS_PER_LINK` (32) words per link) is cut like a hub.
 Sessions are keyed on the bare id (`claude-code:<id>` and `<id>` pair),
 deduplicated per page and shape-checked — the helpers live in the leaf
 `session-refs.ts`, which imports only `provenance.ts`, so nothing browser-side

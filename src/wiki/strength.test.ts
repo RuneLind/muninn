@@ -14,11 +14,12 @@ import { test, expect, describe } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { buildWikiIndex, proseWordCount, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import {
   hopOne,
   hopTwo,
   isBookkeeping,
+  isIndexShaped,
   nearScores,
   neighbours,
   strengthOf,
@@ -31,6 +32,7 @@ import {
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
   RELATED_HUB_OUTLINKS,
+  RELATED_INDEX_WORDS_PER_LINK,
   STRENGTH_LINK_BOTH_WAYS,
   STRENGTH_LINK_ONE_WAY,
   STRENGTH_MAX,
@@ -303,27 +305,59 @@ describe("neighbours — the cuts and their sides", () => {
     );
   });
 
-  test("outlink hub: a page citing more than RELATED_HUB_OUTLINKS pages is cut at both ends; at the constant it is not", async () => {
-    const listed = (n: number): Array<[string, string]> =>
-      Array.from({ length: n }, (_, i) => [`mem/p${i}.md`, page(`P ${i}`, [], "A memory.")]);
+  // arch-review 2026-10 #59, fix round 1: the outlink cut takes INDEX-SHAPED
+  // pages only — many links and few words of their own per link.
+  const listed = (n: number): Array<[string, string]> =>
+    Array.from({ length: n }, (_, i) => [`mem/p${i}.md`, page(`P ${i}`, [], "A memory.")]);
+  const links = (n: number): string => Array.from({ length: n }, (_, i) => `[[p${i}]]`).join(" ");
+  const prose = (words: number): string => Array.from({ length: words }, () => "word").join(" ");
+
+  test("index-shaped: a catalog citing more than RELATED_HUB_OUTLINKS pages is cut at both ends; at the constant it is not", async () => {
     const catalog = (n: number): string =>
       page("Catalog", [], Array.from({ length: n }, (_, i) => `- [[p${i}]]`).join("\n"));
-    // One over the cut: MEMORY.md-shaped, few backlinks, links out to everything.
     await indexOver(
       [["mem/MEMORY.md", catalog(RELATED_HUB_OUTLINKS + 1)], ...listed(RELATED_HUB_OUTLINKS + 1)],
       (index) => {
         expect(index.backlinks.get("mem/memory.md") ?? []).toEqual([]);
+        expect(isIndexShaped(index, "mem/memory.md")).toBe(true);
         expect(neighbours(index, "mem/p0.md")).toEqual([]);
         expect(neighbours(index, "mem/MEMORY.md")).toEqual([]);
         expect(nearScores(index, "mem/p0.md")).toEqual({});
       },
     );
-    // At the constant: still an ordinary page, both directions.
     await indexOver(
       [["mem/MEMORY.md", catalog(RELATED_HUB_OUTLINKS)], ...listed(RELATED_HUB_OUTLINKS)],
       (index) => {
         expect(neighbours(index, "mem/p0.md").map((n) => n.relPath)).toEqual(["mem/MEMORY.md"]);
         expect(neighbours(index, "mem/MEMORY.md")).toHaveLength(RELATED_HUB_OUTLINKS);
+      },
+    );
+  });
+
+  test("proseWordCount counts body words outside links and frontmatter", () => {
+    expect(proseWordCount("---\ntitle: Many words in a title\n---\n\nTwo words [[a link|with label]] [md link](x.md) ![img](y.png) end.")).toBe(3);
+    expect(proseWordCount("- [[p0]]\n- [[p1]]")).toBe(2);
+    expect(proseWordCount("")).toBe(0);
+  });
+
+  test("a content page with as many links but RELATED_INDEX_WORDS_PER_LINK words per link is not cut", async () => {
+    const n = RELATED_HUB_OUTLINKS + 1;
+    // kode-wiki concepts/arsavregning.md: 33 outlinks, ~36 words per link.
+    await indexOver(
+      [["mem/concept.md", page("Concept", [], `${links(n)}\n\n${prose(n * RELATED_INDEX_WORDS_PER_LINK)}`)], ...listed(n)],
+      (index) => {
+        expect(index.proseWords?.get("mem/concept.md")).toBe(n * RELATED_INDEX_WORDS_PER_LINK);
+        expect(isIndexShaped(index, "mem/concept.md")).toBe(false);
+        expect(neighbours(index, "mem/p0.md").map((x) => x.relPath)).toEqual(["mem/concept.md"]);
+        expect(neighbours(index, "mem/concept.md")).toHaveLength(n);
+      },
+    );
+    // One word fewer and it reads as an index.
+    await indexOver(
+      [["mem/concept.md", page("Concept", [], `${links(n)}\n\n${prose(n * RELATED_INDEX_WORDS_PER_LINK - 1)}`)], ...listed(n)],
+      (index) => {
+        expect(isIndexShaped(index, "mem/concept.md")).toBe(true);
+        expect(neighbours(index, "mem/p0.md")).toEqual([]);
       },
     );
   });
