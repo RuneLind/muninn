@@ -160,15 +160,30 @@ const CLAUSE_END_RES: Record<QuestionLanguage, RegExp> = {
   en: /[,;:]|(?<![\p{L}\p{N}])but(?![\p{L}\p{N}])/giu,
 };
 const NEGATION_RES: Record<QuestionLanguage, RegExp> = {
-  no: /(?<![\p{L}\p{N}])(?:ikke|aldri|ingen)(?![\p{L}\p{N}-])/iu,
-  en: /(?<![\p{L}\p{N}])(?:not|never|no|cannot)(?![\p{L}\p{N}-])|\p{L}n['’]t(?![\p{L}\p{N}])/iu,
+  no: /(?<![\p{L}\p{N}])(?:ikke|aldri|ingen)(?![\p{L}\p{N}-])/giu,
+  en: /(?<![\p{L}\p{N}])(?:not|never|no|cannot)(?![\p{L}\p{N}-])|\p{L}n['’]t(?![\p{L}\p{N}])/giu,
 };
 
-/** Whether the clause `before` ends in (the text up to a phrase) holds a negation. */
-function negatedInClause(before: string, lang: QuestionLanguage): boolean {
-  let start = 0;
-  for (const m of before.matchAll(CLAUSE_END_RES[lang])) start = m.index + m[0].length;
-  return NEGATION_RES[lang].test(before.slice(start));
+/**
+ * Whether the clause holding position `at` of `stream` holds a negation before
+ * it. Built once per stream and asked in increasing `at` order, so a row is
+ * scanned once rather than once per phrase (a 55 KB row took 2.8 s to render
+ * when every phrase re-matched its whole prefix). No clause end or negation
+ * can touch `at` itself — a phrase starts after a non-letter and both end in
+ * a letter or a mark — so a match over the whole stream that ends at or
+ * before `at` is exactly a match over the prefix.
+ */
+function clauseNegation(stream: string, lang: QuestionLanguage): (at: number) => boolean {
+  const ends = [...stream.matchAll(CLAUSE_END_RES[lang])].map((m) => m.index + m[0].length);
+  const negs = [...stream.matchAll(NEGATION_RES[lang])].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+  let e = 0;
+  let n = 0;
+  return (at) => {
+    while (e < ends.length && ends[e]! <= at) e++;
+    while (n < negs.length && negs[n]!.end <= at) n++;
+    const clauseStart = e > 0 ? ends[e - 1]! : 0;
+    return n > 0 && negs[n - 1]!.start >= clauseStart;
+  };
 }
 
 function toneOf(lang: QuestionLanguage, phrase: string): StatusTone {
@@ -192,7 +207,7 @@ const VOID_TAG_RE = /^<(br|img|hr|input|wbr)\b|\/>$/i;
  * phrase is coloured piecewise, one span per text run, in the tone of the
  * whole. Never matched: text inside `<code>`, `<a>`, a `.pill` or a chip
  * button. A good phrase with a negation earlier in its clause
- * (`negatedInClause`) is muted instead.
+ * (`clauseNegation`) is muted instead.
  */
 export function markStatePhrases(html: string, lang: QuestionLanguage): string {
   const parts = html.split(/(<[^>]*>)/);
@@ -230,9 +245,10 @@ export function markStatePhrases(html: string, lang: QuestionLanguage): string {
   const re = STATE_RES[lang];
   re.lastIndex = 0;
   const ranges = new Map<number, { start: number; end: number; tone: StatusTone }[]>();
+  const negatedAt = clauseNegation(stream, lang);
   for (const m of stream.matchAll(re)) {
     let tone = toneOf(lang, m[0]);
-    if (tone === "good" && negatedInClause(stream.slice(0, m.index), lang)) tone = "muted";
+    if (tone === "good" && negatedAt(m.index)) tone = "muted";
     // One range per text run the phrase covers.
     for (let i = m.index; i < m.index + m[0].length; ) {
       const { part } = owner[i]!;
@@ -346,13 +362,24 @@ export function sentenceBreaks(text: string, limit = Infinity): number[] {
     from = t.end;
   }
   at.push(text.length);
+  // Candidates come in increasing order, so the Fact depth and the `**`/`~~`
+  // counts are carried forward rather than recounted over each prefix: an
+  // item of many dots took O(n²) (a 51 KB DecisionLog item rendered in 0.95 s).
+  let tagAt = 0;
+  let factDepth = 0;
   const insideFact = (pos: number) => {
-    let depth = 0;
-    for (const t of tags) if (t.end <= pos) depth += t.depth;
-    return depth > 0;
+    for (; tagAt < tags.length && tags[tagAt]!.end <= pos; tagAt++) factDepth += tags[tagAt]!.depth;
+    return factDepth > 0;
   };
 
   const masked = maskSpans(plain, PROTECTED_RES);
+  // `**` and `~~` as a left-to-right scan of the whole text pairs them, which
+  // is how a scan of any prefix pairs the ones it holds whole.
+  const pairEnds = (re: RegExp) => [...masked.matchAll(re)].map((m) => m.index + m[0].length);
+  const boldEnds = pairEnds(/\*\*/g);
+  const strikeEnds = pairEnds(/~~/g);
+  let bold = 0;
+  let strike = 0;
   const out: number[] = [];
   for (let i = 0; i < masked.length && out.length < limit; i++) {
     const c = masked[i]!;
@@ -361,21 +388,45 @@ export function sentenceBreaks(text: string, limit = Infinity): number[] {
     let j = i + 1;
     while (j < masked.length && CLOSERS.has(masked[j]!)) j++;
     if (j >= masked.length || !/\s/.test(masked[j]!)) continue;
-    const next = /\S/.exec(masked.slice(j));
-    if (!next) continue;
+    let k = j;
+    while (k < masked.length && /\s/.test(masked[k]!)) k++;
+    if (k >= masked.length) continue;
+    const next = masked[k]!;
     // A number then a lower-case word is an ordinal (`1. januar`), not an end.
-    if (c === "." && /\d$/.test(plain.slice(0, i)) && /\p{Ll}/u.test(next[0])) continue;
+    if (c === "." && /\d/.test(plain[i - 1] ?? "") && /\p{Ll}/u.test(next)) continue;
     if (c === ".") {
-      const word = /([\p{L}.]+)$/u.exec(plain.slice(0, i))?.[1];
-      if (word && isAbbreviation(word, plain.slice(j))) continue;
+      const word = wordBefore(plain, i);
+      if (word && isAbbreviation(word, plain.slice(j, j + ABBREVIATION_LOOKAHEAD))) continue;
     }
-    const prefix = masked.slice(0, j);
-    if ((prefix.match(/\*\*/g) ?? []).length % 2 || (prefix.match(/~~/g) ?? []).length % 2) continue;
+    while (bold < boldEnds.length && boldEnds[bold]! <= j) bold++;
+    while (strike < strikeEnds.length && strikeEnds[strike]! <= j) strike++;
+    if (bold % 2 || strike % 2) continue;
     const cut = at[j]!;
     if (insideFact(cut)) continue;
     out.push(cut);
   }
   return out;
+}
+
+/** No abbreviation is longer than this; a longer letter-and-dot run is none. */
+const ABBREVIATION_MAX = 40;
+/** How far past a `.` `isAbbreviation` looks for the next letter or digit. */
+const ABBREVIATION_LOOKAHEAD = 64;
+
+/** The run of letters and dots that ends at `end` (`/([\p{L}.]+)$/` on the
+ *  prefix), read backwards at most ABBREVIATION_MAX chars; a longer run is
+ *  undefined, as no abbreviation is that long. */
+function wordBefore(text: string, end: number): string | undefined {
+  let start = end;
+  while (start > 0 && end - start <= ABBREVIATION_MAX) {
+    const ch = text[start - 1]!;
+    // A low surrogate: read the whole code point.
+    const cp = start > 1 && /[\uDC00-\uDFFF]/.test(ch) ? text.slice(start - 2, start) : ch;
+    if (cp !== "." && !/^\p{L}$/u.test(cp)) break;
+    start -= cp.length;
+  }
+  if (start === end || end - start > ABBREVIATION_MAX) return undefined;
+  return text.slice(start, end);
 }
 
 /**

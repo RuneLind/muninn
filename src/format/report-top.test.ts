@@ -4,6 +4,7 @@ import {
   SENTENCE_CANDIDATES_MAX,
   markStatePhrases,
   parseStatusRow,
+  sentenceBreaks,
   splitFirstSentence,
   statusSegments,
   visibleText,
@@ -521,5 +522,37 @@ describe("first sentence: pins (class check round)", () => {
   }
   test("the gate reads the first letter or digit after the dot: `U.S. (Then` splits", () => {
     expect(splitFirstSentence("The product launched in the U.S. (Then it spread.) Rest.")?.first).toBe("The product launched in the U.S.");
+  });
+});
+
+describe("long items stay linear (arch-review 2026-10 #14)", () => {
+  const ms = (f: () => unknown) => {
+    const t = performance.now();
+    f();
+    return performance.now() - t;
+  };
+
+  test("a 110 KB status row marks its phrases in well under a second", () => {
+    const row = "kjørt i prod, ".repeat(8000);
+    let html = "";
+    expect(ms(() => (html = markStatePhrases(row, "no")))).toBeLessThan(1000);
+    expect(html.match(/sr-good/g)?.length).toBe(8000);
+    const neg = "ikke kjørt i prod; ".repeat(6000);
+    expect(ms(() => (html = markStatePhrases(neg, "no")))).toBeLessThan(1000);
+    expect(html.match(/sr-muted/g)?.length).toBe(6000);
+  });
+
+  test("a break inside an open ** or ~~ is none, also after earlier pairs", () => {
+    const t = "**A.** Én. **B. C.** D. ~~E. F.~~ G. H.";
+    const firsts = sentenceBreaks(t).map((c) => t.slice(0, c));
+    expect(firsts).toEqual(["**A.**", "**A.** Én.", "**A.** Én. **B. C.**", "**A.** Én. **B. C.** D.", "**A.** Én. **B. C.** D. ~~E. F.~~", "**A.** Én. **B. C.** D. ~~E. F.~~ G."]);
+  });
+
+  test("an item of 100 KB of abbreviations finds its breaks in well under a second", () => {
+    const item = "Se f.eks. dette. ".repeat(6000);
+    let cuts: number[] = [];
+    expect(ms(() => (cuts = sentenceBreaks(item)))).toBeLessThan(1000);
+    expect(cuts.length).toBe(5999);
+    expect(item.slice(0, cuts[0])).toBe("Se f.eks. dette.");
   });
 });
