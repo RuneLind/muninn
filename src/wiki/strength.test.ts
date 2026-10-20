@@ -30,6 +30,7 @@ import {
   NEAR_MAX,
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
+  RELATED_HUB_OUTLINKS,
   STRENGTH_LINK_BOTH_WAYS,
   STRENGTH_LINK_ONE_WAY,
   STRENGTH_MAX,
@@ -302,6 +303,31 @@ describe("neighbours — the cuts and their sides", () => {
     );
   });
 
+  test("outlink hub: a page citing more than RELATED_HUB_OUTLINKS pages is cut at both ends; at the constant it is not", async () => {
+    const listed = (n: number): Array<[string, string]> =>
+      Array.from({ length: n }, (_, i) => [`mem/p${i}.md`, page(`P ${i}`, [], "A memory.")]);
+    const catalog = (n: number): string =>
+      page("Catalog", [], Array.from({ length: n }, (_, i) => `- [[p${i}]]`).join("\n"));
+    // One over the cut: MEMORY.md-shaped, few backlinks, links out to everything.
+    await indexOver(
+      [["mem/MEMORY.md", catalog(RELATED_HUB_OUTLINKS + 1)], ...listed(RELATED_HUB_OUTLINKS + 1)],
+      (index) => {
+        expect(index.backlinks.get("mem/memory.md") ?? []).toEqual([]);
+        expect(neighbours(index, "mem/p0.md")).toEqual([]);
+        expect(neighbours(index, "mem/MEMORY.md")).toEqual([]);
+        expect(nearScores(index, "mem/p0.md")).toEqual({});
+      },
+    );
+    // At the constant: still an ordinary page, both directions.
+    await indexOver(
+      [["mem/MEMORY.md", catalog(RELATED_HUB_OUTLINKS)], ...listed(RELATED_HUB_OUTLINKS)],
+      (index) => {
+        expect(neighbours(index, "mem/p0.md").map((n) => n.relPath)).toEqual(["mem/MEMORY.md"]);
+        expect(neighbours(index, "mem/MEMORY.md")).toHaveLength(RELATED_HUB_OUTLINKS);
+      },
+    );
+  });
+
   test("culled: cut as a candidate, but a culled OPEN page keeps its neighbours", async () => {
     await indexOver(
       [
@@ -445,11 +471,13 @@ describe("nearScores", () => {
       backlinks.set(to, [...(backlinks.get(to) ?? []), from]);
     };
     add("open.md");
-    for (let i = 0; i < 30; i++) {
+    // RELATED_HUB_OUTLINKS mids keeps open.md under the outlink hub cut;
+    // 12 fars each still puts well over NEAR_MAX pages two hops out.
+    for (let i = 0; i < RELATED_HUB_OUTLINKS; i++) {
       const mid = `mid/m${i}.md`;
       add(mid);
       link("open.md", mid);
-      for (let j = 0; j < 10; j++) {
+      for (let j = 0; j < 12; j++) {
         const far = `far/f${i}-${j}.md`;
         add(far);
         link(mid, far);
@@ -464,6 +492,6 @@ describe("nearScores", () => {
     const near = nearScores(index, "open.md");
     expect(Object.keys(near).length).toBe(NEAR_MAX);
     // Every first-hop page survives the cut: they are the strongest.
-    for (let i = 0; i < 30; i++) expect(near[`mid/m${i}.md`]).toBe(0.5);
+    for (let i = 0; i < RELATED_HUB_OUTLINKS; i++) expect(near[`mid/m${i}.md`]).toBe(0.5);
   });
 });

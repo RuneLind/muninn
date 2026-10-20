@@ -38,6 +38,17 @@
 export const RELATED_HUB_BACKLINKS = 25;
 
 /**
+ * A page LINKING to more pages than this is a hub too, cut exactly like a
+ * backlink hub: an index-shaped page (a memory wiki's `MEMORY.md`) otherwise
+ * cites every page it lists and leads all their Related blocks. Measured
+ * 2026-10-20: mimir (617 pages) has a gap from 18 to 26 outlinks, and only
+ * two pages over 25 not already cut (the backlog-triage archive at 59,
+ * `overview.md` at 35); the memory wiki's three largest `MEMORY.md` have 189,
+ * 66 and 48.
+ */
+export const RELATED_HUB_OUTLINKS = 25;
+
+/**
  * A page naming more PR references than this is a DIGEST — a review report, a
  * month's blog, an index — and shared PR numbers say nothing about it: it names
  * half the month by construction. Cut from the PR-sharing source only; a digest

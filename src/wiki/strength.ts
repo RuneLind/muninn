@@ -35,6 +35,7 @@ import {
   NEAR_MAX,
   RELATED_DIGEST_PRS,
   RELATED_HUB_BACKLINKS,
+  RELATED_HUB_OUTLINKS,
   RELATED_SHARED_PRS_MIN,
   STRENGTH_SESSION_DIGEST,
   strengthParts,
@@ -66,14 +67,15 @@ export function isBookkeeping(relPath: string): boolean {
   return isMetaStem(pageStemOf(relPath));
 }
 
-/** How many pages link to this one. The hub test's one reader. */
-function backlinkCount(index: WikiIndex, key: string): number {
-  return index.backlinks.get(key)?.length ?? 0;
-}
-
-/** Is the page at this normalized key a hub? */
+/**
+ * Is the page at this normalized key a hub? Symmetric in degree: cited by more
+ * than `RELATED_HUB_BACKLINKS` pages, or citing more than `RELATED_HUB_OUTLINKS`.
+ */
 function isHub(index: WikiIndex, key: string): boolean {
-  return backlinkCount(index, key) > RELATED_HUB_BACKLINKS;
+  return (
+    (index.backlinks.get(key)?.length ?? 0) > RELATED_HUB_BACKLINKS ||
+    (index.outgoing.get(key)?.length ?? 0) > RELATED_HUB_OUTLINKS
+  );
 }
 
 /** Which signals tie a neighbour to the page, each in the OPEN page's terms. */
