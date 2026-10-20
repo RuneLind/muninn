@@ -162,8 +162,8 @@ let groupHooksInstalled = false;
  * exit, and one without gets the default death re-raised, which a listener
  * would otherwise have cancelled. The hook goes first in the listener list,
  * because a `once` listener ahead of it is removed before the hook runs.
- * A process that inherited the signal as ignored is not detectable from here:
- * the re-raise kills it.
+ * A process with no listener that inherited the signal as ignored still dies
+ * on it: the hook does not read the inherited disposition before it re-raises.
  */
 function installGroupHooks(): void {
   if (groupHooksInstalled) return;
