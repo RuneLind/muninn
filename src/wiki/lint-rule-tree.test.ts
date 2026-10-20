@@ -93,6 +93,24 @@ describe("lint check 18 (rule-tree)", () => {
     expect(checkRuleTrees(page, text).map((f) => f.line)).toEqual([3, 5]);
   });
 
+  test("on a page with a CaseBoard, a leaf's grammar ids count beside an id the lint cannot see", () => {
+    const tree = ['<RuleTree title="T" outcomes="Renew=good">', "", "- *A:* → Renew — LIB-101, loan-7", "- *B:* → Renew — LIB-101, loan-7", "", "</RuleTree>"];
+    const cases = (text: string) => checkRuleTrees(page, text).map((f) => f.message).filter((m) => m.includes(" is on "));
+    expect(cases(['<CaseBoard src="cases.yaml" />', "", ...tree].join("\n"))).toEqual([
+      '<RuleTree title="T"> case LIB-101 is on 2 leaves that do not each name a different year: «A: → Renew — LIB-101, loan-7», «B: → Renew — LIB-101, loan-7»',
+    ]);
+    // With no board on the page, loan-7 is text and the leaf names no cases.
+    expect(cases(tree.join("\n"))).toEqual([]);
+    // A board quoted in a fence is no board.
+    expect(cases(["```", '<CaseBoard src="cases.yaml" />', "```", "", ...tree].join("\n"))).toEqual([]);
+  });
+
+  test.each(["*→ Renew*", "_→ Renew_", "→ [Renew](http://x)"])("%s reads the outcome Renew", (leaf) => {
+    const text = (outcomes: string) => [`<RuleTree title="T" outcomes="${outcomes}">`, "", `- ${leaf} — LIB-1`, "", "</RuleTree>"].join("\n");
+    expect(checkRuleTrees(page, text("Renew=good"))).toEqual([]);
+    expect(checkRuleTrees(page, text("Return=good")).map((f) => f.message)).toContain('<RuleTree title="T"> outcome "Renew" has no tone in outcomes, first at leaf «→ Renew — LIB-1»');
+  });
+
   test("checkPageText runs it on an .mdx page that is not culled", () => {
     const text = ['<RuleTree title="T">', "", "- → Return", "", "</RuleTree>"].join("\n");
     const ruleTree = (fs: { check: string }[]) => fs.filter((f) => f.check === "rule-tree");

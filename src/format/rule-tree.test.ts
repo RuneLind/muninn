@@ -78,6 +78,17 @@ describe("readRuleTree — the leaf text", () => {
     ["→ Renew — see the notes", "Renew", []],
     ["→ Renew — LIB-1, ~~LIB-2~~", "Renew", ["LIB-1"]],
     ["→ Renew — LIB-1, LIB-1", "Renew", ["LIB-1"]],
+    // A link reads as its text; a ( or , in its destination cuts nothing.
+    ["→ [Renew](http://x) — LIB-1", "Renew", ["LIB-1"]],
+    ["→ [Renew](http://x) (D2) — LIB-1", "Renew", ["LIB-1"]],
+    ["→ Renew, see [the rule](http://x) — LIB-1", "Renew, see the rule", ["LIB-1"]],
+    ["→ Renew — [LIB-1](http://x/?a=1,2), LIB-2", "Renew", ["LIB-1", "LIB-2"]],
+    // An emphasis run around the arrow closes before the cases.
+    ["*→ Renew*", "Renew", []],
+    ["*→ Renew* — LIB-1", "Renew", ["LIB-1"]],
+    ["_→ Renew_ — LIB-1", "Renew", ["LIB-1"]],
+    ["*→ Renew*, later", "Renew", []],
+    ["_→ Renew user_id_", "Renew user_id", []],
   ])("%s", (item, outcome, cases) => {
     const { leaf } = one(item);
     expect(leaf?.cases).toEqual(cases);
@@ -94,6 +105,12 @@ describe("readRuleTree — the leaf text", () => {
     expect(leaf?.outcome).toBe("");
     expect(r.findings.map((f) => [f.level, f.message])).toEqual([["warning", "leaf «→ — LIB-1» names no outcome after →"]]);
     expect(r.findings[0]?.node).toBe(r.nodes[0]);
+  });
+
+  test.each(["→ [Renew](http://x) — LIB-1", "*→ Renew* — LIB-1", "_→ Renew_ — LIB-1"])("%s takes its tone", (item) => {
+    const { r, leaf } = one(item);
+    expect(leaf?.tone).toBe("good");
+    expect(r.findings).toEqual([]);
   });
 
   test("a wikilinked outcome reads as its link text", () => {
@@ -123,6 +140,17 @@ describe("the case-id grammar", () => {
     const item = "- → Renew — loan-7, LIB-1";
     expect(read(tree("Renew=good", item)).nodes[0]?.leaf?.cases).toEqual([]);
     expect(read(tree("Renew=good", item), new Set(["loan-7"])).nodes[0]?.leaf?.cases).toEqual(["loan-7", "LIB-1"]);
+  });
+
+  test("with a board it did not read, a leaf's grammar ids count and the others are left out", () => {
+    const leafOf = (item: string) => {
+      const [block] = componentBlocks(parseBlocks(tree("Renew=good", item)), "RuleTree");
+      return readRuleTree(block?.children ?? [], block?.attrs ?? {}, { text: visibleText, boardUnread: true }).nodes[0]?.leaf;
+    };
+    expect(leafOf("- → Renew in 2024 — loan-7, LIB-1")?.cases).toEqual(["LIB-1"]);
+    expect(leafOf("- → Renew in 2024 — loan-7, LIB-1")?.caseSplit?.body).toBe("→ Renew in 2024");
+    expect(leafOf("- → Renew — loan-7")?.cases).toEqual([]);
+    expect(leafOf("- → Renew — loan-7")?.caseSplit).toBeNull();
   });
 });
 

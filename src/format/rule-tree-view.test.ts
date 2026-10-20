@@ -168,8 +168,8 @@ describe("off the reader a <RuleTree> is its list", () => {
 });
 
 /** The rendered leaves of `md`'s trees: toned, and carrying cases. */
-function renderedLeaves(md: string): { toned: number; cased: number; leaves: number } {
-  const lis = [...reader(md).matchAll(/<li class="(rt-node rt-leaf[^"]*)"([^>]*)>/g)];
+function renderedLeaves(md: string, files?: Record<string, PageFileResult>): { toned: number; cased: number; leaves: number } {
+  const lis = [...reader(md, files ? { files } : {}).matchAll(/<li class="(rt-node rt-leaf[^"]*)"([^>]*)>/g)];
   return { leaves: lis.length, toned: lis.filter((m) => m[1]?.includes("rt-tone-")).length, cased: lis.filter((m) => m[2]?.includes("data-rt-cases")).length };
 }
 
@@ -179,30 +179,47 @@ describe("the reader and the lint read one tree", () => {
   // Each item twice, as two leaves: the lint's untoned and shared-case
   // warnings fire exactly when the reader draws no tone and draws cases.
   test.each([
-    ["a wikilinked outcome", "→ [[renew-page|Renew]] — LIB-1"],
-    ["a bare wikilink outcome", "→ [[Renew]] — LIB-1"],
-    ["a wikilinked edge label", "*[[yes-page|Yes]]:* → Renew — LIB-1"],
-    ["a wikilinked case id", "→ Renew — [[lib-page|LIB-1]]"],
-    ["a code outcome", "→ `Renew` — LIB-1"],
-    ["a code case id", "→ Renew — `LIB-1`"],
-    ["an emphasised outcome", "→ **Renew** — LIB-1"],
-    ["an emphasised arrow run", "**→ Renew** — LIB-1"],
-    ["NBSP around the dash", "→ Renew — LIB-1"],
-    ["an en dash", "→ Renew – LIB-1"],
-    ["a hyphen", "→ Renew - LIB-1"],
-    ["a dash inside code", "→ Renew `a — b`"],
-    ["a struck outcome word", "→ ~~Return~~ Renew — LIB-1"],
-    ["a struck case id", "→ Renew — ~~LIB-1~~"],
-    ["an outcome outcomes= does not name", "→ Extend — LIB-1"],
-    ["a decision ref before the dash", "→ Renew (D6) — LIB-1"],
-    ["text after the cases", "→ Renew — see the desk"],
-  ])("%s", (_name, item) => {
-    const md = tree(`- ${item}\n- ${item}`, 'title="T" outcomes="Renew=good"');
-    const r = renderedLeaves(md);
+    ["a wikilinked outcome", "→ [[renew-page|Renew]] — LIB-1", false],
+    ["a bare wikilink outcome", "→ [[Renew]] — LIB-1", false],
+    ["a wikilinked edge label", "*[[yes-page|Yes]]:* → Renew — LIB-1", false],
+    ["a wikilinked case id", "→ Renew — [[lib-page|LIB-1]]", false],
+    ["a code outcome", "→ `Renew` — LIB-1", false],
+    ["a code case id", "→ Renew — `LIB-1`", false],
+    ["an emphasised outcome", "→ **Renew** — LIB-1", false],
+    ["an emphasised arrow run", "**→ Renew** — LIB-1", false],
+    ["NBSP around the dash", "→ Renew — LIB-1", false],
+    ["an en dash", "→ Renew – LIB-1", false],
+    ["a hyphen", "→ Renew - LIB-1", false],
+    ["a dash inside code", "→ Renew `a — b`", false],
+    ["a struck outcome word", "→ ~~Return~~ Renew — LIB-1", false],
+    ["a struck case id", "→ Renew — ~~LIB-1~~", false],
+    ["an outcome outcomes= does not name", "→ Extend — LIB-1", false],
+    ["a decision ref before the dash", "→ Renew (D6) — LIB-1", false],
+    ["text after the cases", "→ Renew — see the desk", false],
+    ["a linked outcome", "→ [Renew](http://x) — LIB-1", false],
+    ["a link in the outcome text", "→ Renew, see [the rule](http://x) — LIB-1", false],
+    ["a decision ref after a linked outcome", "→ [Renew](http://x) (D2) — LIB-1", false],
+    ["a comma in a linked case id's URL", "→ Renew — [LIB-1](http://x/?a=1,2)", false],
+    ["an italic arrow run", "*→ Renew* — LIB-1", false],
+    ["an underscore arrow run", "_→ Renew_ — LIB-1", false],
+    ["a board id beside a grammar id, no board", "→ Renew — LIB-1, loan-7", false],
+    ["a board id beside a grammar id, on the board", "→ Renew — LIB-1, loan-7", true],
+  ] as [string, string, boolean][])("%s", (_name, item, onBoard) => {
+    const board = onBoard ? '<CaseBoard src="cases.yaml" />\n\n' : "";
+    const md = board + tree(`- ${item}\n- ${item}`, 'title="T" outcomes="Renew=good"');
+    const r = renderedLeaves(md, onBoard ? { "cases.yaml": { ok: true, text: "- id: loan-7\n  status: ok" } } : undefined);
     const fs = lintOf(md).map((f) => f.message);
     expect(r.leaves).toBe(2);
     expect(r.toned === 0).toBe(fs.some((m) => m.includes("has no tone")));
     expect(r.cased > 0).toBe(fs.some((m) => / is on 2 leaves /.test(m)));
+  });
+
+  test("the one stated divergence: on a board page, an id the board lacks beside a grammar id", () => {
+    // The lint reads no board file, so it takes LIB-1x as a possible board id
+    // and counts LIB-1; the reader, whose board lacks LIB-1x, draws no cases.
+    const md = '<CaseBoard src="cases.yaml" />\n\n' + tree("- → Renew — LIB-1, LIB-1x\n- → Renew — LIB-1, LIB-1x", 'title="T" outcomes="Renew=good"');
+    expect(renderedLeaves(md, { "cases.yaml": { ok: true, text: "- id: loan-7\n  status: ok" } }).cased).toBe(0);
+    expect(lintOf(md).some((f) => / is on 2 leaves /.test(f.message))).toBe(true);
   });
 
   test.each([

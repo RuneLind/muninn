@@ -10,7 +10,10 @@
  * - info: an `outcomes=` label that names no leaf outcome, or names one twice.
  *
  * The lint reads no CaseBoard file, so a case id counts here only by its
- * grammar (`CASE_ID_RE`); the reader also takes a board id.
+ * grammar (`CASE_ID_RE`); the reader also takes a board id. On a page with a
+ * CaseBoard, a leaf's other ids may be board ids, so its grammar ids count
+ * whatever the rest are; where the board lacks one of those others, the lint
+ * counts a case the reader does not draw.
  */
 
 import { componentBlocks, parseBlocks } from "../format/markdown-ast.ts";
@@ -38,8 +41,11 @@ export function checkRuleTrees(page: Pick<WikiPageMeta, "relPath">, rawContent: 
   const lines = parked.split("\n");
   const fenced = fencedLineMask(lines);
   const findings: LintFinding[] = [];
-  for (const block of componentBlocks(parseBlocks(parked), "RuleTree")) {
-    const read = readRuleTree(block.children, block.attrs, { text });
+  const blocks = parseBlocks(parked);
+  // A board the lint does not read may hold an id outside the grammar.
+  const boardUnread = componentBlocks(blocks, "CaseBoard").length > 0;
+  for (const block of componentBlocks(blocks, "RuleTree")) {
+    const read = readRuleTree(block.children, block.attrs, { text, boardUnread });
     const tagLine = block.line === undefined ? undefined : block.line + 1;
     // Each item's line, found in source order from the tag down.
     const nodeLine = new Map<RuleNode, number>();

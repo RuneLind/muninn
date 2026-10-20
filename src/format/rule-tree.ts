@@ -38,8 +38,14 @@ const YEAR_RE = /(?<![\p{L}\p{N}])(?:19|20)\d{2}(?![\p{L}\p{N}])/gu;
 /** The italic lead: `*label*` or `_label_`, an optional `:` after it. */
 const LEAD_RES = [/^\*(?![\s*→])([^*\n]+?)\*(?![*\p{L}\p{N}_])(:?)/u, /^_(?![\s_→])([^_\n]+?)_(?![_\p{L}\p{N}])(:?)/u];
 
-/** A leaf's arrow, after at most one opening emphasis run. */
-const ARROW_RE = /^\s*(?:\*\*|__|\*|_)?\s*→/;
+/** A leaf's arrow, after at most one opening emphasis run (captured). */
+const ARROW_RE = /^\s*(\*\*|__|\*|_)?\s*→/;
+
+/** The run that closes an opening emphasis run: after a non-space, not before a letter or digit. */
+const closerRe = (run: string) => new RegExp(`(?<=\\S)${run.replace(/\*/g, "\\*")}(?![\\p{L}\\p{N}])`, "u");
+
+/** A markdown link's `(destination)`, as `visibleText` reads a link. */
+const LINK_DEST_RE = /(!?\[[^\]\n]*\])(\([^)\n]*\))/g;
 
 /** A stand-in for each code-span character, so a delimiter inside code is not found. */
 const CODE_MASK = "";
@@ -99,6 +105,10 @@ export interface RuleTreeReadOptions {
   text: (raw: string) => string;
   /** The page's CaseBoard ids; the lint reads no board file and passes none. */
   boardIds?: ReadonlySet<string>;
+  /** The page holds a CaseBoard the caller did not read (the lint): an id
+   *  outside the grammar may be on it, so a leaf whose other ids pass the
+   *  grammar takes those as its cases and leaves the unknown ones out. */
+  boardUnread?: boolean;
 }
 
 /** `s` with each inline code span's characters replaced, length kept. */
@@ -129,14 +139,17 @@ function readLead(raw: string, text: (raw: string) => string): RuleNode["lead"] 
 }
 
 function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLeaf | null {
-  const masked = maskCode(rest);
+  // Code spans and link destinations masked, so a `(`, `,` or dash in either is no delimiter.
+  const masked = maskCode(rest).replace(LINK_DEST_RE, (_m, text: string, dest: string) => text + CODE_MASK.repeat(dest.length));
   const arrow = ARROW_RE.exec(masked);
   if (!arrow) return null;
   const from = arrow[0].length;
   let dash: RegExpExecArray | null = null;
   for (const m of masked.matchAll(/\s—\s/g)) if (m.index >= from) dash = m as RegExpExecArray;
   const paren = masked.indexOf("(", from);
-  const end = Math.min(paren < 0 ? masked.length : paren, dash ? dash.index : masked.length);
+  const run = arrow[1];
+  const closer = run ? closerRe(run).exec(masked.slice(from)) : null;
+  const end = Math.min(paren < 0 ? masked.length : paren, dash ? dash.index : masked.length, closer ? from + closer.index : masked.length);
   const outcome = opts.text(unstruck(rest.slice(from, end))).replace(/[\s.,;:]+$/, "").trim();
   let caseSplit: RuleLeaf["caseSplit"] = null;
   let cases: string[] = [];
@@ -150,9 +163,10 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
     }
     pieces.push(rest.slice(at));
     const ids = pieces.map((p) => opts.text(unstruck(p)).trim()).filter(Boolean);
-    if (ids.length && ids.every((id) => CASE_ID_RE.test(id) || opts.boardIds?.has(id) === true)) {
+    const known = ids.filter((id) => CASE_ID_RE.test(id) || opts.boardIds?.has(id) === true);
+    if (known.length && (known.length === ids.length || opts.boardUnread === true)) {
       caseSplit = { body: rest.slice(0, dash.index), dash: rest.slice(dash.index, tail), pieces };
-      cases = [...new Set(ids)];
+      cases = [...new Set(known)];
     }
   }
   const named = opts.text(unstruck(lead + (caseSplit ? caseSplit.body : rest)));
