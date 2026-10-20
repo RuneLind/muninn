@@ -6,10 +6,10 @@
  * DOM-free.
  *
  * A drifted row keeps an ENABLED Approve: the apply's CAS refuses it and marks
- * the row `stale`, which is the way out. A live `draft` row holds its topic key
- * (the partial unique index), and Reject puts the topic into the
- * recently-rejected suppression, so a card with only Reject left could never be
- * re-drafted.
+ * the row `stale`, which frees its topic key at once. Reject frees the key too,
+ * but the drafters skip a recently rejected topic for the suppression window
+ * (`GARDENER_DEFAULTS.rejectedSkipDays`), so a card with only Reject left
+ * delays the re-draft by that window.
  */
 
 /** The note above a drifted single card's diff. */
@@ -32,4 +32,13 @@ export function approveButtonHtml(opts: { factcheckLocked: boolean; drifted: boo
     return `<button class="gard-btn gard-approve" data-action="approve" data-drifted title="The page changed since this was drafted — Approve writes nothing and marks it stale">Approve</button>`;
   }
   return `<button class="gard-btn gard-approve" data-action="approve">Approve</button>`;
+}
+
+/** The single card's Approve, from the row as the listing sends it: locked by
+ *  the fact-check alone, never by drift. */
+export function approveButtonFor(p: {
+  factcheck?: { needsRedraft?: boolean } | null;
+  drifted?: string | null;
+}): string {
+  return approveButtonHtml({ factcheckLocked: !!p.factcheck?.needsRedraft, drifted: !!p.drifted });
 }

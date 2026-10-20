@@ -36,7 +36,7 @@ import {
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
 import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
-import { approveButtonHtml, singleDriftNote } from "./wiki-gardener-drift.ts";
+import { approveButtonFor, singleDriftNote } from "./wiki-gardener-drift.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -210,7 +210,7 @@ function cardHtml(p: ProposalView): string {
   if (isDraft) {
     const locked = !!p.factcheck?.needsRedraft;
     html += '<div class="gard-actions">';
-    html += approveButtonHtml({ factcheckLocked: locked, drifted: !!p.drifted });
+    html += approveButtonFor(p);
     if (locked) html += `<button class="gard-btn gard-redraft" data-action="redraft">Redraft</button>`;
     html += `<button class="gard-btn gard-reject" data-action="reject">Reject</button>`;
     html += '<span class="gard-outcome"></span>';

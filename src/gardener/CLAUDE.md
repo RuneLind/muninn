@@ -185,12 +185,16 @@ the 8.2 series HEAD carrying `series_label`, a second Accept writes `series:` on
 the other members without the label.
 
 **The gate flags drift before the click.** The `/api/wiki/proposals` listing
-sets `drifted` on a reviewable update row whose page no longer matches its base
-hash (`listingDrift` over `updateBaseDrift`, the apply's own CAS). A page that
-already IS the draft is not drift, because the apply passes it. A drifted single
-card keeps an ENABLED Approve and says that it writes nothing and marks the row
-`stale`: a live `draft` row holds its topic key in the partial unique index and
-Reject suppresses the topic, so disabling Approve left no way to free it. A
+sets `drifted` on a reviewable update row that Approve would refuse as `stale`.
+`listingDrift` runs the apply's own containment (`containForWrite`) and disk
+check (`judgeAgainstDisk`) on the listing's index, so the flag says what the
+apply does on that index: a page equal to the CONTAINED draft is a no-op, not drift, and
+a page equal only to the raw draft (a body link whose target was deleted since
+drafting) is drift. A drifted single card keeps an ENABLED Approve and says that
+it writes nothing and marks the row `stale`, which frees its topic key at once.
+Reject frees the key too, but the drafters skip a recently rejected topic for
+`GARDENER_DEFAULTS.rejectedSkipDays` (7 days), so Reject delays the re-draft by
+that window. A
 group card says what Accept does (`groupDriftNote`): the preflight stops on ONE
 blocked row, the route marks only that row `stale` and returns the rest to
 `draft`, so N drifted pages take N Accepts, and one more writes the clean pages.

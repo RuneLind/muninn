@@ -259,10 +259,12 @@ interface ProposalView {
   factcheck: ProposalFactcheckFlag | null;
   /** A `stale` row Redraft replaced: the replacement's id (`redraftReplacements`). */
   replacedBy: string | null;
-  /** A reviewable update row whose page no longer matches its base hash: the
-   *  reason Approve would be refused (`listingDrift`), else null — a page that
-   *  already IS the draft is not drift, since the apply passes it. The diff
-   *  is against the page as it is now, not the page the draft was written on. */
+  /** A reviewable update row Approve would refuse as `stale`: the reason
+   *  (`listingDrift`, the apply's own containment and CAS on the listing's
+   *  index), else null. A page equal to the CONTAINED draft is not drift — the
+   *  apply no-ops it — but a page equal only to the raw draft is, when
+   *  containment now changes the draft. The diff is against the page as it is
+   *  now, not the page the draft was written on. */
   drifted: string | null;
 }
 
@@ -1360,9 +1362,9 @@ export function registerWikiGardenerRoutes(
         let drifted: string | null = null;
         if (reviewable && p.mode === "update" && root) {
           const current = await readFileOrNull(path.join(root, p.targetPath));
-          // Judged on the raw bytes, the same CAS the apply step refuses on;
-          // a page that already IS the draft passes there as a no-op.
-          drifted = listingDrift(p, current);
+          // The apply's own containment + CAS, on this listing's index, so the
+          // flag says exactly what Approve will do.
+          drifted = listingDrift(p, current, index);
           // A lint diff is one frontmatter line on a page the reviewer can open
           // in the reader, and the gate ships one per touched page — so its
           // context is TRIMMED. `lineDiff`'s full context is right for a drafted

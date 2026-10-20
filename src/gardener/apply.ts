@@ -150,20 +150,17 @@ export function updateBaseDrift(baseHash: string | null | undefined, current: st
 }
 
 /**
- * The gate listing's drift flag for an update row: `updateBaseDrift`, except a
- * page that already IS the draft is not drift — step 2a applies it as a no-op
- * and the group preflight passes it. The listing runs no containment pass, so
- * "is the draft" means the raw draft, or (non-lint kinds) its one-trailing-
- * newline form; a page equal only to the contained draft still reads as drift.
+ * The gate listing's drift flag for an update row: the reason the apply's CAS
+ * (step 2b) would refuse it, else null. It runs the apply's own containment
+ * (`containForWrite`) and disk check (`judgeAgainstDisk`), so the two agree: a
+ * page equal to the CONTAINED draft is a no-op in both, and a page equal only
+ * to the raw draft (a body link whose target was deleted since drafting) is
+ * drift in both. `index` is the listing's index; null skips containment, as
+ * the apply does.
  */
-export function listingDrift(
-  row: Pick<WikiProposal, "draft" | "kind" | "baseHash">,
-  current: string | null,
-): string | null {
-  if (current !== null && (current === row.draft || (row.kind !== "lint" && current === withTrailingNewline(row.draft)))) {
-    return null;
-  }
-  return updateBaseDrift(row.baseHash, current);
+export function listingDrift(row: WikiProposal, current: string | null, index: WikiIndex | null): string | null {
+  const judged = judgeAgainstDisk(row, containForWrite(row, index).finalContent, current);
+  return judged.step === "refuse" ? judged.outcome.reason : null;
 }
 
 export function commitMessageFor(proposal: WikiProposal): string {
@@ -594,6 +591,94 @@ type PreWrite =
   | { step: "noop"; absTarget: string }
   | { step: "write"; absTarget: string; finalContent: string };
 
+/** What `containForWrite` makes of a draft: the bytes the apply writes, and
+ *  what it took out on the way (for the apply's log lines). */
+interface ContainedForWrite {
+  finalContent: string;
+  stripped: string[];
+  delinked: string[];
+}
+
+/**
+ * Steps 1c, 1d and the trailing-newline normalization: the bytes the apply
+ * would write for `proposal`, judged against `index`. Pure; the apply and the
+ * gate listing (`listingDrift`) both run it, so they agree on what "the page
+ * already is the draft" means.
+ */
+function containForWrite(proposal: WikiProposal, index: WikiIndex | null): ContainedForWrite {
+  // 1c. Alias-hijack re-strip against the in-queue index (defense in depth — the
+  //     runner stripped at persist time, but a canonical page created while the
+  //     proposal awaited review must still win its aliases). The target path
+  //     itself is always "self": on a create re-run after a crash-after-write,
+  //     the target's own first write is indexed and must not strip the draft's
+  //     aliases (a FOREIGN file at the target is caught by the stale check).
+  //
+  //     ⚠️ SKIPPED for a `lint` row, with 1d and the trailing-newline normalization
+  //     below. Both passes exist to CONTAIN MODEL OUTPUT: an alias a drafter
+  //     invented, a `[[link]]` to a page that does not exist. A lint draft is the
+  //     page's own bytes with one mechanical edit applied — so on that kind the
+  //     two passes only ever rewrite what a human wrote, and containment would
+  //     silently de-link every pre-existing dangling wikilink on a page whose
+  //     card promised one `See also` line and nothing else.
+  //
+  //     The self path is the target path: in update mode it IS the indexed
+  //     page's relPath (step 1a found it by equality).
+  const mechanical = proposal.kind === "lint";
+  const dealiased = mechanical
+    ? { draft: proposal.draft, stripped: [] as string[] }
+    : stripOwnedAliases(proposal.draft, { index, selfRelPath: proposal.targetPath });
+
+  // 1d. Body-link containment re-run against the in-queue index (TOCTOU symmetry with
+  //     the alias re-strip): a page linked in the body that was deleted between
+  //     draft and approve must not ship as a dangling wikilink. Null index ⇒ skip
+  //     (can't tell resolvable from phantom; don't de-link a whole page on an index
+  //     outage). This mutates finalContent, which drives the re-run-safe early
+  //     return below — an accepted, benign corner (a page deleted between draft and
+  //     approve, a crash after the page write, then a re-approve makes finalContent
+  //     no longer match disk, so the early return is skipped and create-mode falls
+  //     to `stale`; the row re-drafts next weekly cycle). When the index is
+  //     unchanged, containment is a no-op and idempotent recovery still holds.
+  let containedDraft = dealiased.draft;
+  let delinked: string[] = [];
+  if (index && !mechanical) {
+    const contained = containDraftBodyLinks(dealiased.draft, {
+      resolve: index.resolve,
+      selfTitle: draftTitle(proposal),
+    });
+    containedDraft = contained.draft;
+    delinked = contained.delinked;
+  }
+
+  // `withTrailingNewline` COLLAPSES a run of trailing newlines, which on a lint
+  // row is a second change the diff the reviewer approved did not show.
+  const finalContent = mechanical ? containedDraft : withTrailingNewline(containedDraft);
+  return { finalContent, stripped: dealiased.stripped, delinked };
+}
+
+/**
+ * Steps 2a and 2b: what the page on disk says about writing `finalContent`.
+ * Pure; the apply and the gate listing (`listingDrift`) both run it.
+ */
+function judgeAgainstDisk(
+  proposal: Pick<WikiProposal, "mode" | "baseHash">,
+  finalContent: string,
+  current: string | null,
+): { step: "noop" } | { step: "refuse"; outcome: Extract<ApplyOutcome, { outcome: "stale" }> } | { step: "proceed" } {
+  // 2a. Re-run safety: the target already IS the draft — a crash after the file
+  //     write (before the terminal CAS) or a double-approve. Report applied
+  //     without rewriting; the log.md entry from the first pass stands.
+  if (current !== null && current === finalContent) return { step: "noop" };
+
+  // 2b. Staleness — the target must be exactly as it was at draft time.
+  if (proposal.mode === "update") {
+    const drift = updateBaseDrift(proposal.baseHash, current);
+    if (drift) return { step: "refuse", outcome: { outcome: "stale", reason: drift } };
+  } else if (current !== null) {
+    return { step: "refuse", outcome: { outcome: "stale", reason: "target path already exists" } };
+  }
+  return { step: "proceed" };
+}
+
 /**
  * Every check `applyInner` runs before it writes (steps 1a–2c), as ONE function
  * the group preflight runs too, so the two cannot drift: a row this refuses is
@@ -659,83 +744,35 @@ async function checkBeforeWrite(
     };
   }
 
-  // 1c. Alias-hijack re-strip against the in-queue index (defense in depth — the
-  //     runner stripped at persist time, but a canonical page created while the
-  //     proposal awaited review must still win its aliases). The target path
-  //     itself is always "self": on a create re-run after a crash-after-write,
-  //     the target's own first write is indexed and must not strip the draft's
-  //     aliases (a FOREIGN file at the target is caught by the stale check).
-  //
-  //     ⚠️ SKIPPED for a `lint` row, with 1d and the trailing-newline normalization
-  //     below. Both passes exist to CONTAIN MODEL OUTPUT: an alias a drafter
-  //     invented, a `[[link]]` to a page that does not exist. A lint draft is the
-  //     page's own bytes with one mechanical edit applied — so on that kind the
-  //     two passes only ever rewrite what a human wrote, and containment would
-  //     silently de-link every pre-existing dangling wikilink on a page whose
-  //     card promised one `See also` line and nothing else.
-  const mechanical = proposal.kind === "lint";
-  const dealiased = mechanical
-    ? { draft: proposal.draft, stripped: [] as string[] }
-    : stripOwnedAliases(proposal.draft, {
-        index,
-        selfRelPath: existingRelPath ?? proposal.targetPath,
-      });
-  if (opts.log && dealiased.stripped.length > 0) {
+  // 1c, 1d and the trailing-newline normalization — see `containForWrite`.
+  const contained = containForWrite(proposal, index);
+  if (opts.log && contained.stripped.length > 0) {
     log.warn("Apply: stripped alias(es) owned by other pages from proposal {id}: {aliases}", {
       id: proposal.id,
-      aliases: dealiased.stripped.join(", "),
+      aliases: contained.stripped.join(", "),
     });
   }
-
-  // 1d. Body-link containment re-run against the in-queue index (TOCTOU symmetry with
-  //     the alias re-strip): a page linked in the body that was deleted between
-  //     draft and approve must not ship as a dangling wikilink. Null index ⇒ skip
-  //     (can't tell resolvable from phantom; don't de-link a whole page on an index
-  //     outage). This mutates finalContent, which drives the re-run-safe early
-  //     return below — an accepted, benign corner (a page deleted between draft and
-  //     approve, a crash after the page write, then a re-approve makes finalContent
-  //     no longer match disk, so the early return is skipped and create-mode falls
-  //     to `stale`; the row re-drafts next weekly cycle). When the index is
-  //     unchanged, containment is a no-op and idempotent recovery still holds.
-  let containedDraft = dealiased.draft;
-  if (index && !mechanical) {
-    const contained = containDraftBodyLinks(dealiased.draft, {
-      resolve: index.resolve,
-      selfTitle: draftTitle(proposal),
+  if (opts.log && contained.delinked.length > 0) {
+    log.warn("Apply: de-linked unresolvable body link(s) from proposal {id}: {links}", {
+      id: proposal.id,
+      links: contained.delinked.join(", "),
     });
-    containedDraft = contained.draft;
-    if (opts.log && contained.delinked.length > 0) {
-      log.warn("Apply: de-linked unresolvable body link(s) from proposal {id}: {links}", {
-        id: proposal.id,
-        links: contained.delinked.join(", "),
-      });
-    }
   }
 
   const absTarget = path.join(deps.wikiDir, proposal.targetPath);
-  // `withTrailingNewline` COLLAPSES a run of trailing newlines, which on a lint
-  // row is a second change the diff the reviewer approved did not show.
-  const finalContent = mechanical ? containedDraft : withTrailingNewline(containedDraft);
+  const { finalContent } = contained;
   const current = await deps.readFile(absTarget);
 
-  // 2a. Re-run safety: the target already IS the draft — a crash after the file
-  //     write (before the terminal CAS) or a double-approve. Report applied
-  //     without rewriting; the log.md entry from the first pass stands.
-  if (current !== null && current === finalContent) {
+  // 2a and 2b — see `judgeAgainstDisk`.
+  const judged = judgeAgainstDisk(proposal, finalContent, current);
+  if (judged.step === "refuse") return judged;
+  if (judged.step === "noop") {
     if (opts.log) {
       log.info("Wiki-gardener apply: target already matches draft for {path} — treating as applied", {
         path: proposal.targetPath,
       });
     }
     return { step: "noop", absTarget };
-  }
-
-  // 2b. Staleness — the target must be exactly as it was at draft time.
-  if (proposal.mode === "update") {
-    const drift = updateBaseDrift(proposal.baseHash, current);
-    if (drift) return { step: "refuse", outcome: { outcome: "stale", reason: drift } };
-  } else if (current !== null) {
-    return { step: "refuse", outcome: { outcome: "stale", reason: "target path already exists" } };
   }
 
   // 2c. Stem collision, re-checked INSIDE the write queue. The approve route
