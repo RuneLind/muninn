@@ -25,6 +25,7 @@ let docDate: string | undefined;
 let claudeResult = "CATEGORY: ai/claude-code\n\nSUMMARY:\n### Heading\n- point";
 let lastPrompt = "";
 let lastSystemPrompt = "";
+let lastToolSurface: unknown;
 // Paths the summarizer asked the knowledge API for (source-content resolution).
 let docFetchPaths: string[] = [];
 
@@ -43,9 +44,10 @@ let statusCalls: Array<{ id: string; status: string; docId: string | null }> = [
 let throwOnStatus: string | null = null;
 
 mock.module("../ai/one-shot.ts", () => ({
-  executeOneShot: async (prompt: string, _c: unknown, _b: unknown, opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void }) => {
+  executeOneShot: async (prompt: string, _c: unknown, _b: unknown, opts?: { systemPrompt?: string; toolSurface?: unknown; onProgress?: (e: { type: string; text: string }) => void }) => {
     lastPrompt = prompt;
     lastSystemPrompt = opts?.systemPrompt ?? "";
+    lastToolSurface = opts?.toolSurface;
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
@@ -171,6 +173,7 @@ beforeEach(() => {
   claudeResult = "CATEGORY: ai/claude-code\n\nSUMMARY:\n### Heading\n- point";
   lastPrompt = "";
   lastSystemPrompt = "";
+  lastToolSurface = undefined;
   docFetchPaths = [];
   directOk = true;
   directText = "raw fetched markdown body";
@@ -205,6 +208,13 @@ test("happy path: resolves via documents listing, summarizes, ingests, flips can
 
   expect(statusCalls).toHaveLength(1);
   expect(statusCalls[0]).toEqual({ id: "cand-1", status: "summarized", docId: SUMMARY_DOC_ID });
+});
+
+test("the summary call declares no tools: fetched page content is untrusted input", async () => {
+  const jobId = createJob("cand-1", "Update claude-api skill", CAND_URL);
+  await summarizeCandidate(jobId, "cand-1", "Update claude-api skill", CAND_URL, config, bot);
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(lastToolSurface).toBe("none");
 });
 
 test("fires the source-draft trigger with the collection-relative docId, category, and url", async () => {

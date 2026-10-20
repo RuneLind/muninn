@@ -13,16 +13,18 @@ let ingestPayload: Record<string, unknown> | undefined;
 /** What the run actually sent — the builder pin at the bottom compares against these. */
 let lastPrompt = "";
 let lastSystemPrompt = "";
+let lastToolSurface: unknown;
 
 mock.module("../ai/one-shot.ts", () => ({
   executeOneShot: async (
     prompt: string,
     _c: unknown,
     _b: unknown,
-    opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void },
+    opts?: { systemPrompt?: string; toolSurface?: unknown; onProgress?: (e: { type: string; text: string }) => void },
   ) => {
     lastPrompt = prompt;
     lastSystemPrompt = opts?.systemPrompt ?? "";
+    lastToolSurface = opts?.toolSurface;
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
@@ -76,6 +78,7 @@ beforeEach(() => {
   ingestPayload = undefined;
   lastPrompt = "";
   lastSystemPrompt = "";
+  lastToolSurface = undefined;
   sourceDraftCalls = [];
   installFetchMock();
 });
@@ -121,6 +124,12 @@ test("URL-less pasted article still triggers when a file_path exists — url is 
     docId: "ai/general/No URL Article.md",
     url: "",
   });
+});
+
+test("the summary call declares no tools: a pasted body is untrusted input", async () => {
+  const jobId = createJob("Pasted Article", ART_URL, "Someone");
+  await summarizeArticle(jobId, "Pasted Article", ART_URL, "Someone", "a long pasted article body", config, bot);
+  expect(lastToolSurface).toBe("none");
 });
 
 /**

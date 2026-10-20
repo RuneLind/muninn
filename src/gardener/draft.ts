@@ -2,7 +2,7 @@
  * Draft stage — build the drafting prompt for one cluster and shape-gate the
  * model's output before it can be persisted.
  *
- * The gardener is connector-agnostic and injection-minimal: no extraDirs, no
+ * The gardener is connector-agnostic and injection-minimal: no tools, no
  * agentic file access. Everything the model needs (conventions, summaries,
  * current page body for updates) is inlined into the prompt, and summaries are
  * delimited as untrusted source material.

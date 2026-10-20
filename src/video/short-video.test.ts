@@ -5,7 +5,7 @@
  * It is the merge of `src/tiktok/summarizer.test.ts` and
  * `src/x-article/video.test.ts`, which were twins of the twins they tested. What
  * the two suites AGREED on is a loop over both specs below (the happy path, the
- * degrade paths, the builders, the extraDirs/timeout pass-through); what they
+ * degrade paths, the builders, the surface/timeout pass-through); what they
  * DISAGREED on stays per-vertical, because those disagreements are the whole
  * content of a spec: the duration cap, the canonical url, the ingest endpoint
  * and collection, the work-dir name.
@@ -47,6 +47,8 @@ let downloadCalls: Array<{
 let extractCalls = 0;
 let summarizeTimeoutArgs: { frameCount: number; floorMs: number } | undefined;
 let extractOpts: { durationSeconds?: number; frameTimeoutMs?: number } | undefined;
+/** The dir the job asked `extractKeyframes` to fill with the kept frames. */
+let extractDir: string | undefined;
 let transcribeCalls: Array<{ opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number } }> = [];
 // yt-dlp-reported duration, mutable so a long-form upload can be simulated.
 let videoDuration = 45;
@@ -65,7 +67,7 @@ let lastOpts:
   | {
       systemPrompt?: string;
       timeoutMs?: number;
-      extraDirs?: string[];
+      toolSurface?: unknown;
       thinkingMaxTokens?: number | null;
     }
   | undefined;
@@ -121,6 +123,7 @@ mock.module("./media.ts", () => ({
   ) => {
     extractCalls++;
     extractOpts = opts;
+    extractDir = workDir;
     if (extractShouldThrow) throw new Error("ffmpeg keyframe extraction failed");
     return framesResult.map((f) => ({ ...f, path: join(workDir, f.path) }));
   },
@@ -143,7 +146,7 @@ mock.module("../ai/one-shot.ts", () => ({
     opts?: {
       systemPrompt?: string;
       timeoutMs?: number;
-      extraDirs?: string[];
+      toolSurface?: unknown;
       thinkingMaxTokens?: number | null;
       onProgress?: (e: { type: string; text: string }) => void;
     },
@@ -166,7 +169,7 @@ mock.module("../ai/one-shot.ts", () => ({
 
 /**
  * The capture seam, DELEGATING — the real `runCaptureOneShot` still runs, so the
- * thinking-cap gate, the `extraDirs` pass-through and the trace root are the
+ * thinking-cap gate, the `toolSurface` pass-through and the trace root are the
  * shipped ones; the wrapper only records the options it was handed.
  *
  * It exists for ONE field: `source`, which is what stamps `capture:<id>` on the
@@ -337,6 +340,7 @@ beforeEach(async () => {
   extractCalls = 0;
   summarizeTimeoutArgs = undefined;
   extractOpts = undefined;
+  extractDir = undefined;
   transcribeCalls = [];
   videoDuration = 45;
   dlCanonicalUrl = TT_CANONICAL_URL;
@@ -592,13 +596,24 @@ for (const v of VERTICALS) {
       expect(extractOpts?.frameTimeoutMs).toBe(v.maxDurationSeconds * 500);
     });
 
-    test("passes the work dir as extraDirs and raises the timeout to >=600s", async () => {
+    test("a capture whose frame extraction failed declares no tools at all", async () => {
+      extractShouldThrow = true;
+      await capture(v.title, v.canonicalUrl);
+      expect(lastOpts!.toolSurface).toBe("none");
+    });
+
+    test("declares a Read fence on the frames dir alone and raises the timeout to >=600s", async () => {
       const jobId = await capture(v.title, v.canonicalUrl);
 
       expect(lastOpts).toBeDefined();
-      // The tmp work dir is handed to executeOneShot as extraDirs (→ CLI --add-dir).
+      // The kept frames' dir is the one directory the model may Read (→ CLI
+      // --restricted --tools Read --add-dir): not the work dir, which also
+      // holds the downloaded video and the audio, and never the bot's surface.
       const workDir = join(tmpdir(), `${v.workDirPrefix}${jobId}`);
-      expect(lastOpts!.extraDirs).toEqual([workDir]);
+      const framesDir = join(workDir, "frames");
+      expect(lastOpts!.toolSurface).toEqual({ read: [framesDir] });
+      expect(extractDir).toBe(framesDir);
+      for (const f of framesResult) expect(lastPrompt).toContain(join(framesDir, f.path));
       expect(downloadCalls[0]!.workDir).toBe(workDir);
       expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
       // The summarize budget is computed from the REAL frame count (2 here), not
@@ -684,7 +699,7 @@ for (const v of VERTICALS) {
       await capture();
 
       const workDir = downloadCalls[0]!.workDir;
-      const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+      const frames = framesResult.map((f) => ({ path: join(workDir, "frames", f.path), tSeconds: f.tSeconds }));
       expect(lastSystemPrompt).toBe(
         buildShortVideoSystemPrompt(v.spec, {
           preset: STANDARD,
@@ -743,7 +758,7 @@ for (const v of VERTICALS) {
       await capture();
 
       const workDir = downloadCalls[0]!.workDir;
-      const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+      const frames = framesResult.map((f) => ({ path: join(workDir, "frames", f.path), tSeconds: f.tSeconds }));
       expect(lastPrompt).toBe(buildShortVideoUserPrompt({ transcript: "", frames }));
       expect(lastPrompt).toContain("No speech detected — summarize from the frames.");
     });

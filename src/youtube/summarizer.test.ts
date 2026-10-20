@@ -32,7 +32,7 @@ const WATCH_URL = `https://www.youtube.com/watch?v=${VIDEO_ID}`;
 let claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point";
 let lastPrompt: string | undefined;
 let lastSystemPrompt: string | undefined;
-let lastExtraDirs: string[] | undefined;
+let lastToolSurface: unknown;
 let lastThinking: number | undefined;
 /** The bot config the model call ran with — the KIND may have swapped its model. */
 let lastBotConfig: { model?: string; thinkingMaxTokens?: number } | undefined;
@@ -48,7 +48,7 @@ mock.module("../ai/one-shot.ts", () => ({
     opts?: {
       systemPrompt?: string;
       thinkingMaxTokens?: number;
-      extraDirs?: string[];
+      toolSurface?: unknown;
       timeoutMs?: number;
       onProgress?: (e: { type: string; text: string }) => void;
     },
@@ -62,7 +62,7 @@ mock.module("../ai/one-shot.ts", () => ({
       pass: isSelection ? "select" : "summary",
       prompt,
       systemPrompt: opts?.systemPrompt,
-      extraDirs: opts?.extraDirs,
+      toolSurface: opts?.toolSurface,
       timeoutMs: opts?.timeoutMs,
       thinkingMaxTokens: opts?.thinkingMaxTokens,
       hasProgress: opts?.onProgress !== undefined,
@@ -83,7 +83,7 @@ mock.module("../ai/one-shot.ts", () => ({
     lastPrompt = prompt;
     lastBotConfig = botConfig;
     lastSystemPrompt = opts?.systemPrompt;
-    lastExtraDirs = opts?.extraDirs;
+    lastToolSurface = opts?.toolSurface;
     lastThinking = opts?.thinkingMaxTokens;
     lastTimeoutMs = opts?.timeoutMs;
     atModelCall?.();
@@ -112,7 +112,7 @@ let oneShotCalls: Array<{
   pass: "select" | "summary";
   prompt: string;
   systemPrompt?: string;
-  extraDirs?: string[];
+  toolSurface?: unknown;
   timeoutMs?: number;
   thinkingMaxTokens?: number;
   hasProgress: boolean;
@@ -456,7 +456,7 @@ beforeEach(() => {
   claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point";
   lastPrompt = undefined;
   lastSystemPrompt = undefined;
-  lastExtraDirs = undefined;
+  lastToolSurface = undefined;
   lastThinking = undefined;
   lastBotConfig = undefined;
   lastTimeoutMs = undefined;
@@ -601,7 +601,7 @@ describe("frames off — the capture that shipped before this PR", () => {
     // absent, so the prompt pair is what it always was.
     expect(lastPrompt).toBe(transcriptBody.transcript);
     expect(lastSystemPrompt).not.toContain("### [HH:MM:SS]");
-    expect(lastExtraDirs).toBeUndefined();
+    expect(lastToolSurface).toBe("none");
     expect(getJob(jobId)?.status).toBe("complete");
   });
 
@@ -694,7 +694,7 @@ describe("frames on", () => {
   test("the work dir EXISTS by the time the download is handed it", async () => {
     // yt-dlp creates the `-o` directory itself, so this is not load-bearing for
     // the download — it is for everything after: the extractor writes into
-    // `<workDir>/frames` and the model is handed `workDir` as `--add-dir`. The
+    // `<workDir>/frames`, which is the model's one Read dir. The
     // sibling verticals all mkdir first.
     let existed: boolean | null = null as boolean | null;
     atDownload = (workDir) => { existed = existsSync(workDir); };
@@ -702,7 +702,7 @@ describe("frames on", () => {
     expect(existed).toBe(true);
   });
 
-  test("the video file is gone BEFORE the model call, and the work dir is the extraDir", async () => {
+  test("the video file is gone BEFORE the model call, and the frames dir is the one Read dir", async () => {
     // `boolean | null` rather than an inferred `null`: the whole point is the
     // assignment inside the callback, and a `null`-typed binding makes
     // `toBe(false)` a compile error rather than a check.
@@ -712,9 +712,9 @@ describe("frames on", () => {
     };
     const jobId = await run({ frames: true });
     // It must not sit through a ten-minute turn — and it was never inside the
-    // directory the model is handed as `--add-dir` in the first place.
+    // directory the model may Read in the first place.
     expect(existedAtModelCall).toBe(false);
-    expect(lastExtraDirs).toEqual([workDirFor(jobId)]);
+    expect(lastToolSurface).toEqual({ read: [join(workDirFor(jobId), "frames")] });
   });
 
   test("the frame list is on the prompt and the thinking cap is lifted", async () => {
@@ -819,7 +819,7 @@ describe("every frames failure degrades to a transcript-only capture", () => {
     const jobId = await run({ frames: true });
     expect(getJob(jobId)?.status).toBe("complete");
     expect(logged("warning", "frames failed")).toBe(true);
-    expect(lastExtraDirs).toBeUndefined();
+    expect(lastToolSurface).toBe("none");
     expect(lastThinking).toBe(8000);
   });
 
@@ -867,7 +867,7 @@ describe("what is WINDOWED is what huginn ANSWERED, not what we asked for", () =
     );
     // Everything else about the capture is unchanged: frames still ran.
     expect(downloadCalls).toHaveLength(1);
-    expect(lastExtraDirs).toEqual([workDirFor(jobId)]);
+    expect(lastToolSurface).toEqual({ read: [join(workDirFor(jobId), "frames")] });
     expect(getJob(jobId)?.status).toBe("complete");
   });
 
@@ -1204,7 +1204,7 @@ describe("the summary KIND", () => {
     await run({ preset: deep, frames: true });
     expect(lastBotConfig?.model).toBe(CAPTURE_DEEP_MODEL);
     expect(lastThinking).toBeUndefined();
-    expect(lastExtraDirs).toHaveLength(1);
+    expect((lastToolSurface as { read: string[] }).read).toHaveLength(1);
   });
 
   test("a FAILED frame pass resets neither the model nor the budget", async () => {
@@ -1219,7 +1219,7 @@ describe("the summary KIND", () => {
     expect(getJob(jobId)?.status).toBe("complete");
     expect(lastBotConfig?.model).toBe(CAPTURE_DEEP_MODEL);
     expect(lastThinking).toBeUndefined();
-    expect(lastExtraDirs).toBeUndefined();
+    expect(lastToolSurface).toBe("none");
   });
 
   test("deep with slides SKIPPED (too short) keeps the model and the budget", async () => {
@@ -1379,10 +1379,10 @@ describe("the dense scan path", () => {
     // The sheet dir and nothing else: the frames do not exist yet and the video
     // lives in `mediaDir`, so this is the one call that can reach neither.
     // Under `mediaDir`, NOT `workDir`: the sheets are for this pass alone, and
-    // leaving them in the dir the summary call reads as `--add-dir` hands the
+    // leaving them in the dir the summary call reads hands the
     // second pass 10 contact sheets of a scan it is not being asked about —
     // and hands a CADENCE fallback the abandoned sheets of a dense attempt.
-    expect(select.extraDirs).toEqual([join(mediaDirFor(jobId), "select")]);
+    expect(select.toolSurface).toEqual({ read: [join(mediaDirFor(jobId), "select")] });
     // No text streams during it — a JSON manifest must not reach the job card.
     expect(select.hasProgress).toBe(false);
     // Capped EVEN ON `deep`, whose full thinking budget is for the summary.

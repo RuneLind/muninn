@@ -39,7 +39,7 @@ beforeEach(() => {
   connectorArgs = undefined;
 });
 
-test("connectorCapabilities: claude-cli and claude-sdk (and the unset default) support extraDirs", () => {
+test("connectorCapabilities: claude-cli and claude-sdk (and the unset default) can run a { read } surface", () => {
   expect(connectorCapabilities(stubBot()).supportsExtraDirs).toBe(true); // unset ⇒ claude-cli
   expect(connectorCapabilities(stubBot({ connector: "claude-cli" })).supportsExtraDirs).toBe(true);
   expect(connectorCapabilities(stubBot({ connector: "claude-sdk" })).supportsExtraDirs).toBe(true);
@@ -85,37 +85,6 @@ test("effort is folded into a botConfig clone and overrides the bot's own", asyn
 
   expect(connectorArgs?.botConfig.effort).toBe("low");
   expect(bot.effort).toBe("high"); // original untouched
-});
-
-test("extraDirs append --add-dir spawnArgs for the CLI connector (preserving existing args)", async () => {
-  const bot = stubBot({ connector: "claude-cli", spawnArgs: ["--strict-mcp-config"] });
-  await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"], toolSurface: "bot" });
-
-  expect(connectorArgs?.botConfig.spawnArgs).toEqual(["--strict-mcp-config", "--add-dir", "/tmp/frames"]);
-  expect(bot.spawnArgs).toEqual(["--strict-mcp-config"]); // original untouched
-});
-
-test("extraDirs are passed through as botConfig.extraDirs for the claude-sdk connector", async () => {
-  const bot = stubBot({ connector: "claude-sdk" });
-  await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"], toolSurface: "bot" });
-
-  expect(connectorArgs?.botConfig.extraDirs).toEqual(["/tmp/frames"]);
-  expect(connectorArgs?.botConfig.spawnArgs).toBeUndefined(); // SDK path, no --add-dir args
-  expect(bot.extraDirs).toBeUndefined(); // original untouched
-});
-
-test("extraDirs on a connector without the capability throws before the connector runs", async () => {
-  const bot = stubBot({ connector: "copilot-sdk" });
-  await expect(
-    executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"], toolSurface: "bot" }),
-  ).rejects.toThrow(/does not support extraDirs/);
-  expect(connectorArgs).toBeUndefined(); // never dispatched
-});
-
-test("empty extraDirs is a no-op (no spawnArgs added, no throw) on any connector", async () => {
-  const bot = stubBot({ connector: "copilot-sdk" });
-  await executeOneShot("p", config, bot, { extraDirs: [], toolSurface: "bot" });
-  expect(connectorArgs?.botConfig.spawnArgs).toBeUndefined();
 });
 
 test("empty prompt throws before the connector runs (unresolved template variable)", async () => {

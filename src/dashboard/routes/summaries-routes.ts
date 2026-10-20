@@ -6,7 +6,7 @@ import { renderSummariesPromptsPage } from "../views/summaries-prompts-page.ts";
 import { buildPromptMatrix } from "../../summaries/prompt-matrix.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { capturePresetOptions, resolveCapturePresets } from "../../summaries/presets.ts";
-import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { framesBlock } from "./frames-block.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { docDateMs } from "../../gardener/harvest.ts";
@@ -149,9 +149,11 @@ export function registerSummariesRoutes(
     const captureKinds = capturePresetOptions(
       resolveCapturePresets(summarizerBot?.prompts, summarizerBot?.connector),
     );
-    // The Slides checkbox is live only where the Vimeo route would not 503 it.
-    const framesSupported = summarizerBot ? connectorCapabilities(summarizerBot).supportsExtraDirs : false;
-    return c.html(await renderSummariesPage({ captureKinds, framesSupported }));
+    // The Slides checkbox is live only where the Vimeo route would not 503 it:
+    // a connector that cannot read files, or a claude-cli too old for the
+    // slide pass's fenced Read.
+    const block = summarizerBot ? await framesBlock(summarizerBot) : "frames_unsupported";
+    return c.html(await renderSummariesPage({ captureKinds, framesSupported: block === null, framesBlock: block }));
   });
 
   /**

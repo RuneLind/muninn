@@ -9,6 +9,7 @@ import { fetchVimeoOembed, isNotPublic } from "../../vimeo/oembed.ts";
 import { speakerFromTitle } from "../../vimeo/metadata.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { restrictedCliBlocker } from "../../ai/tool-surface.ts";
 import { VIMEO_FRAME_SOURCE, removeKeptFramesForDocument } from "../../summaries/frames.ts";
 import { findCapturePreset, resolveCapturePresets } from "../../summaries/presets.ts";
 import { DEFAULT_CAPTURE_LANG, isCaptureLang } from "../../summaries/language.ts";
@@ -449,8 +450,10 @@ export function registerVimeoRoutes(
     // Slides (PR 4): a BOOLEAN, absent ⇒ off (the plan's default). Validated
     // like kind/lang — before oEmbed, a 400 with a code the card renders — and
     // then PRE-FLIGHTED against the summarizer's connector: frames are read by
-    // the model through `extraDirs`, which only the Claude connectors can
-    // express, so a bot that cannot read files answers 503 `frames_unsupported`
+    // the model through a fenced Read (`{ read: [framesDir] }`), which only the
+    // Claude connectors can express (claude-cli from 2.1.303), so a bot that
+    // cannot read files answers 503 `frames_unsupported` (`cli_too_old` on an
+    // older claude-cli)
     // BEFORE a job exists (the TikTok precedent) rather than silently
     // summarizing without the slides the reader ticked.
     if (body.frames !== undefined && typeof body.frames !== "boolean") {
@@ -466,6 +469,17 @@ export function registerVimeoRoutes(
             `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector ?? "claude-cli"}", ` +
             `which cannot read the extracted slide frames (no extra-dirs support). Untick Slides, or set ` +
             `SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
+        },
+        503,
+      );
+    }
+    const cliBlocked = frames ? await restrictedCliBlocker(summarizerBot.connector, "read") : null;
+    if (cliBlocked !== null) {
+      return c.json(
+        {
+          error: "cli_too_old",
+          code: "cli_too_old",
+          detail: `Summarizer bot "${summarizerBot.name}": ${cliBlocked} Untick Slides, or upgrade the CLI.`,
         },
         503,
       );

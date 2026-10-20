@@ -16,16 +16,18 @@ let ingestPayload: Record<string, unknown> | undefined;
 /** What the run actually sent — the builder pin at the bottom compares against these. */
 let lastPrompt = "";
 let lastSystemPrompt = "";
+let lastToolSurface: unknown;
 
 mock.module("../ai/one-shot.ts", () => ({
   executeOneShot: async (
     prompt: string,
     _c: unknown,
     _b: unknown,
-    opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void },
+    opts?: { systemPrompt?: string; toolSurface?: unknown; onProgress?: (e: { type: string; text: string }) => void },
   ) => {
     lastPrompt = prompt;
     lastSystemPrompt = opts?.systemPrompt ?? "";
+    lastToolSurface = opts?.toolSurface;
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
@@ -77,6 +79,7 @@ beforeEach(() => {
   ingestPayload = undefined;
   lastPrompt = "";
   lastSystemPrompt = "";
+  lastToolSurface = undefined;
   sourceDraftCalls = [];
   installFetchMock();
 });
@@ -93,6 +96,12 @@ test("happy path completes the job and ingests the parsed summary", async () => 
   expect(job.status).toBe("complete");
   expect(job.category).toBe("ai/rag");
   expect(ingestPayload!.url).toBe(ARTICLE_URL);
+});
+
+test("the summary call declares no tools: a pasted thread is untrusted input", async () => {
+  const jobId = createJob(ARTICLE_ID, "A Thread on RAG", ARTICLE_URL, "karpathy");
+  await summarizeArticle(jobId, ARTICLE_ID, "A Thread on RAG", ARTICLE_URL, "karpathy", "long article body", config, bot);
+  expect(lastToolSurface).toBe("none");
 });
 
 test("fires the source-draft trigger with the huginn file_path docId, category, and url", async () => {

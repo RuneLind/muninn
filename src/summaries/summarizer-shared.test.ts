@@ -586,10 +586,9 @@ describe("runCaptureOneShot", () => {
     expect(h.calls.some((c) => c.op === "finish:ok")).toBe(true);
   });
 
-  test("passes extraDirs and a timeout through to the connector (TikTok frames)", async () => {
-    const h = harness({ extraDirs: ["/tmp/frames"], timeoutMs: 600_000 });
+  test("passes a timeout through to the connector", async () => {
+    const h = harness({ timeoutMs: 600_000 });
     await runCaptureOneShot(h.opts);
-    expect(h.seen[0]!.extraDirs).toEqual(["/tmp/frames"]);
     expect(h.seen[0]!.timeoutMs).toBe(600_000);
   });
 

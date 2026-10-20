@@ -173,6 +173,9 @@ export async function summarizeShortVideo(
   const framesEnabled = opts.frames !== false;
   const { preset } = opts;
   const workDir = join(tmpdir(), `${spec.workDirPrefix}${jobId}`);
+  // The kept keyframes and nothing else: the summary call's one Read dir. The
+  // video, the audio and the frames thinning dropped stay outside it.
+  const framesDir = join(workDir, "frames");
 
   try {
     await mkdir(workDir, { recursive: true });
@@ -205,7 +208,7 @@ export async function summarizeShortVideo(
     if (framesEnabled) {
       updateStatus(jobId, "extracting_frames");
       try {
-        frames = await extractKeyframes(dl.videoPath, workDir, {
+        frames = await extractKeyframes(dl.videoPath, framesDir, {
           durationSeconds: dl.duration,
           frameTimeoutMs: Math.max(60_000, Math.round(dl.duration * 500)),
         });
@@ -228,13 +231,11 @@ export async function summarizeShortVideo(
       return;
     }
 
-    // 4. Summarize with Claude. Via executeOneShot's opts we (a) grant Read
-    //    access to the tmp frame dir via `extraDirs` → CLI `--add-dir`
-    //    (non-interactive claude auto-denies paths outside the bot dir
-    //    otherwise), and (b) raise the timeout — the multi-turn frame-reading
-    //    session easily outruns the default 120s. `extraDirs` is CLI-only; both
-    //    routes pre-flight the connector's supportsExtraDirs capability before
-    //    kicking this expensive job.
+    // 4. Summarize with Claude. The tool surface grants Read on the kept
+    //    frames' dir and nothing else (no video, no audio, no Bash, no bot
+    //    folder, no MCP), and the timeout is raised — the multi-turn
+    //    frame-reading session easily outruns the default 120s. Both routes
+    //    pre-flight the fenced Read before kicking this expensive job.
     updateStatus(jobId, "summarizing");
 
     const ingestTitle = title !== url ? title : dl.title || canonicalUrl;
@@ -265,7 +266,8 @@ export async function summarizeShortVideo(
     };
 
     const result = await runCaptureOneShot({
-      toolSurface: "bot",
+      // Read on the frame dir when there are frames; no tools at all otherwise.
+      toolSurface: frames.length > 0 ? { read: [framesDir] } : "none",
       source: spec.id,
       jobId,
       title: ingestTitle,
@@ -278,7 +280,6 @@ export async function summarizeShortVideo(
       botConfig: captureBotConfigFor(botConfig, preset),
       attachRun,
       onProgress,
-      extraDirs: [workDir],
       timeoutMs: summarizeTimeoutFor(frames.length, botConfig.timeoutMs ?? config.claudeTimeoutMs),
       // The bot's OWN thinking budget, on every kind — this vertical's answer
       // since before the picker existed, and unchanged by it.

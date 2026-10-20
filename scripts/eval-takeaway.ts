@@ -143,7 +143,7 @@ for (let n = 1; n <= runs; n++) {
   const t0 = performance.now();
   const result = await executeOneShot(stored.transcript, loaded, runBot, {
     systemPrompt,
-    toolSurface: "bot",
+    toolSurface: "none",
     timeoutMs: 900_000,
     // `null` from captureThinkingFor means the bot's own budget (deep); the
     // seam's default is the capture cap, plus the low effort production sends with it.

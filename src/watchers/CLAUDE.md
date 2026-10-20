@@ -1103,7 +1103,7 @@ target-resolve → **map (pass-1)** → draft → shape-gate → persist → not
   weekly `maxProposalsPerRun` (3) is the binding constraint on which mapped docs
   actually draft; the backlog drain's higher cap (8) keeps more.
 - **Draft** (`draft.ts`): one `executeOneShot` per cluster on the bot's connector
-  (explicit `timeoutMs: 300000`, no extraDirs). Summaries are inlined as
+  (explicit `timeoutMs: 300000`, `toolSurface: "none"` — no tools, no MCP). Summaries are inlined as
   **untrusted** delimited data. The **shape-gate** rejects a draft unless the
   frontmatter parses with required keys, `type` matches the cluster kind, the body
   is non-empty, and `target_path` is **path-confined** (relative, `..`-free,

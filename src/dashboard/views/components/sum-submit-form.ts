@@ -178,11 +178,20 @@ export function captureUrlFormHtml(picker: {
    * hand — tests).
    */
   framesSupported?: boolean;
+  /**
+   * Why Slides is unavailable, when it is: the refusal code the capture POST
+   * would answer (`framesBlock` in `routes/frames-block.ts`). `cli_too_old`
+   * names the upgrade, since the bot already runs claude-cli; anything else
+   * names the connector switch.
+   */
+  framesBlock?: "frames_unsupported" | "cli_too_old" | null;
 }): string {
   const framesSupported = picker.framesSupported ?? true;
   const framesTitle = framesSupported
     ? "Pull one slide frame every ~40 s of the talk and let the summary quote slides inline (off by default; remembered)"
-    : "The summarizer bot's connector cannot read frame files (no extra-dirs support) — set SUMMARIZER_BOT to a claude-cli or claude-sdk bot";
+    : picker.framesBlock === "cli_too_old"
+      ? "The summarizer bot's Claude CLI is too old to read frame files (the slide pass needs --restricted) — upgrade the Claude CLI"
+      : "The summarizer bot's connector cannot read frame files (no extra-dirs support) — set SUMMARIZER_BOT to a claude-cli or claude-sdk bot";
   return `
     <div class="capture-url-form">
       <input type="url" id="captureUrl" aria-label="Vimeo URL" placeholder="Paste a Vimeo URL…" autocomplete="off" spellcheck="false" />

@@ -147,6 +147,10 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
+      # The runner image has no ffmpeg, and the real-ffmpeg tests skip without it:
+      # `extractKeyframes` (src/video/media.test.ts), the TikTok frame pass in
+      # src/ai/caller-fence.test.ts and the dense scan (scan-run.test.ts).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       # Creates `muninn_test`, applies `db/init.sql` and baselines the migrations.
       # The `src/db/` links of the test chain connect to it directly.
       - run: bun run db:setup:test

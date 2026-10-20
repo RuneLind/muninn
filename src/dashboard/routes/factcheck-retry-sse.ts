@@ -336,7 +336,8 @@ async function runClaimRetry(
     });
 
     const claude = await tracedOneShot(tracer, label, userPrompt, config, botConfig, {
-      toolSurface: "bot",
+      // WebFetch + WebSearch and nothing else, as on the article run.
+      toolSurface: { web: true },
       systemPrompt,
       onProgress,
       timeoutMs: FACTCHECK_RETRY_TIMEOUT_MS,

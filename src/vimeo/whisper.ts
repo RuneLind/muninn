@@ -236,8 +236,8 @@ export async function transcribeOpusRendition(
     "whisper-cli",
   );
   // The audio is spent the moment whisper has exited, whatever it exited with:
-  // a 3 h talk is ~137 MB of Opus plus ~345 MB of WAV, and with Slides on the
-  // work dir is what the model is handed as --add-dir.
+  // a 3 h talk is ~137 MB of Opus plus ~345 MB of WAV. (The model's Read
+  // surface is `<workDir>/frames`, which never holds them.)
   await Promise.all([unlink(audioPath).catch(() => {}), unlink(wavPath).catch(() => {})]);
   if (whisper.exitCode !== 0) {
     throw new VimeoTranscriptionError(`whisper-cli failed (exit ${whisper.exitCode}): ${whisper.stderr.slice(-500)}`);

@@ -1141,7 +1141,8 @@ async function runFactcheck(
         // `model` only on a resolved end, an errored claim carries NO `model` attr
         // and so can no longer flip the /traces row to `model='mixed'`.
         const claude = await tracedOneShot(tracer, label, userPrompt, config, botConfig, {
-          toolSurface: "bot",
+          // WebFetch + WebSearch and nothing else: no Bash, no file reads, no MCP.
+          toolSurface: { web: true },
           systemPrompt,
           onProgress,
           timeoutMs: FACTCHECK_CLAIM_TIMEOUT_MS,
@@ -1248,13 +1249,11 @@ async function runFactcheck(
         // The shared seam owns the `compose` span (connector + requestedModel at
         // start, model/tokens at end, `{ error }` on throw). It's named `compose`
         // (never "claude"), so it too falls through to the walk aggregate alongside
-        // the claim spans. Only thinking is turned down — `effort: "low"` on
-        // adaptive-thinking models, where `thinkingMaxTokens: 0` is ignored; tools
-        // stay available — the compose prompt steers away from tool use, but a stray
-        // tool excursion just burns the COMPOSE_BUDGET_MS window and degrades to the
-        // neutral header below (we deliberately don't hard-disable tools here).
+        // the claim spans. Thinking is turned down — `effort: "low"` on
+        // adaptive-thinking models, where `thinkingMaxTokens: 0` is ignored — and
+        // the call runs with no tools: it composes from the verdict blocks it is given.
         const compose = await tracedOneShot(tracer, "compose", composePrompts.userPrompt, config, botConfig, {
-          toolSurface: "bot",
+          toolSurface: "none",
           systemPrompt: composePrompts.systemPrompt,
           thinkingMaxTokens: 0,
           effort: "low",
