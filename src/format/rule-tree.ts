@@ -41,8 +41,8 @@ const BARE_URL_RE = /(?:\b[a-z][a-z\d+.-]*:\/\/|\bwww\.)[^\s<>]*/giu;
 /** A case id by grammar inside text, a `-` either side allowed: no year inside it is one. */
 const CASE_ID_IN_TEXT_RE = /(?<![\p{L}\p{N}])[A-Z]+-\d+(?![\p{L}\p{N}])/gu;
 
-/** A `-`-joined word, the shape a board id has. */
-const JOINED_WORD_RE = /[\p{L}\p{N}_]+(?:-[\p{L}\p{N}_]+)+/gu;
+/** A word, `-`-joined parts kept together: the shape a board id has. */
+const ID_WORD_RE = /[\p{L}\p{N}_]+(?:-[\p{L}\p{N}_]+)*/gu;
 
 /** The italic lead: `*label*` or `_label_`, an optional `:` after it. */
 const LEAD_RES = [/^\*(?![\s*→])([^*\n]+?)\*(?![*\p{L}\p{N}_])(:?)/u, /^_(?![\s_→])([^_\n]+?)_(?![_\p{L}\p{N}])(:?)/u];
@@ -152,7 +152,7 @@ function yearsIn(raw: string, opts: RuleTreeReadOptions): string[] {
     .text(unstruck(raw))
     .replace(BARE_URL_RE, " ")
     .replace(CASE_ID_IN_TEXT_RE, " ")
-    .replace(JOINED_WORD_RE, (w) => (opts.boardIds?.has(w) ? " " : w));
+    .replace(ID_WORD_RE, (w) => (opts.boardIds?.has(w) ? " " : w));
   return [...new Set(text.match(YEAR_RE) ?? [])];
 }
 

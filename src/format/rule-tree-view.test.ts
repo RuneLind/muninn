@@ -288,6 +288,7 @@ describe("the reader and the lint read one tree", () => {
     ["a bold edge label and an ASCII arrow", "**Yes:** -> Renew — LIB-1"],
     ["a bold edge label with the colon outside", "**Yes**: → Renew — LIB-1"],
     ["an underscore bold edge label", "__Yes:__ → Renew — LIB-1"],
+    ["a bold lead with an arrow in a code span", "**`a->b`:** → Renew — LIB-1"],
     ["an arrow inside the text", "Loan → reservation → return", false],
     ["an arrow after text that follows an edge label", "*Yes:* the loan → a return", false],
     ["an arrow after text that follows a bold lead", "**Note:** a loan → a return", false],
@@ -320,6 +321,7 @@ describe("the reader and the lint read one tree", () => {
     ["a year in a link destination", ["- See [rule](loans/2024)", "  - → Renew — LIB-1", "- See [rule](loans/2025)", "  - → Renew — LIB-1"], true],
     ["a year inside a case id", ["- See LIB-2024", "  - → Renew — LIB-1", "- See LIB-2025", "  - → Renew — LIB-1"], true],
     ["a year inside a bare URL", ["- See http://x/2024/a", "  - → Renew — LIB-1", "- See http://x/2025/a", "  - → Renew — LIB-1"], true],
+    ["a node with no year between a year parent and a leaf", ["- *2024:*", "  - Is it reserved?", "    - → Renew — LIB-1", "- *2025:*", "  - Is it reserved?", "    - → Renew — LIB-1"], false],
     ["a year inside an autolink", ["- See <http://x/2024/a>", "  - → Renew — LIB-1", "- See <http://x/2025/a>", "  - → Renew — LIB-1"], true],
   ] as [string, string[], boolean][])("years: %s", (_name, body, warns) => {
     const md = tree(body.join("\n"), 'title="T" outcomes="Renew=good"');

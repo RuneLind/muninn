@@ -251,6 +251,26 @@ describe("a case on two leaves", () => {
     expect(caseFindings(twoLeaves(a, b))).toHaveLength(n);
   });
 
+  test("a year-naming node's years pass through a node that names none", () => {
+    const body = ["- *2024:*", "  - Is it reserved?", "    - → Renew — LIB-1", "- *2025:*", "  - Is it reserved?", "    - → Return — LIB-1"];
+    const r = read(tree("Renew=good;Return=muted", body.join("\n")));
+    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2024"], ["2025"]]);
+    expect(caseFindings(r)).toEqual([]);
+  });
+
+  test("an id in the case tail is no year, also one a board the lint did not read may hold", () => {
+    const [block] = componentBlocks(parseBlocks(tree("Renew=good;Return=muted", "- → Renew — LIB-1, loan_2024\n- → Return — LIB-1, loan_2025")), "RuleTree");
+    const r = readRuleTree(block?.children ?? [], block?.attrs ?? {}, { text: visibleText, boardUnread: true });
+    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([[], []]);
+    expect(caseFindings(r)).toHaveLength(1);
+  });
+
+  test("a board id with no hyphen in the text is no year", () => {
+    const md = tree("Renew=good;Return=muted", ["- See loan_2024", "  - → Renew — LIB-1", "- See loan_2025", "  - → Return — LIB-1"].join("\n"));
+    expect(caseFindings(read(md, new Set(["loan_2024", "loan_2025"])))).toHaveLength(1);
+    expect(caseFindings(read(md))).toEqual([]);
+  });
+
   test("a board id in the text is no year", () => {
     const md = tree("Renew=good;Return=muted", ["- See loan-2024", "  - → Renew — LIB-1", "- See loan-2025", "  - → Return — LIB-1"].join("\n"));
     expect(caseFindings(read(md, new Set(["loan-2024", "loan-2025"])))).toHaveLength(1);
@@ -296,6 +316,7 @@ describe("what drops silently is named", () => {
     ["a bold italic arrow run", "***→ Yes***", 'the "***" before → is not read (write →, *→ or **→)'],
     ["an ASCII arrow in a bold run", "**-> Yes**", ARROW],
     ["a lead with * in a code span", "*`a*b`:* → Yes", "the text before → is not read as an edge label"],
+    ["a bold lead with an arrow in a code span", "**`a->b`:** → Yes", ITALICS],
   ])("an item that starts like a leaf but is not one: %s", (_name, item, remedy) => {
     const r = read(tree("Yes=good;Renew=good", `- ${item}`));
     expect(leaves(r.nodes)).toEqual([]);
