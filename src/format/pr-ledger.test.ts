@@ -334,9 +334,12 @@ describe("G2: rule 3 reads a Landed cell of links and landing metadata only", ()
     [`[#5](${U}/5) og [#6](${U}/6)`],
     [`[#5](${U}/5) (v34)`],
     [`[#5](${U}/5) (2026-10-19)`],
-    ["muninn #552 (`b6e693ff`)"],
   ])("%s reads merged", (landed) => {
     expect(one(landed)).toMatchObject({ state: "merged", rule: 3 });
+  });
+
+  test("a bare ref is no link: rule 3 needs a markdown PR link", () => {
+    expect(one("muninn #552 (`b6e693ff`)")).toMatchObject({ link: 552, state: "unknown", rule: 0 });
   });
 });
 
@@ -375,5 +378,171 @@ describe("G3: a PR link is a PR URL or a PR-shaped text; a bare ref is `PR #n` o
 
   test("`dropped Sprint #4` is no rule-1 state", () => {
     expect(one("dropped Sprint #4")).toMatchObject({ state: "unknown", rule: 0 });
+  });
+});
+
+// Class check (fix round 3): the ref rules as the spec states them, over the
+// state space of token kinds × the cells a token can sit in. Synthetic rows only.
+describe("C: PR refs, the token kinds × the cells they sit in", () => {
+  const P = "https://example.test/acme/tool";
+  /** A token kind: the ref number it gives (null: no ref), whether it is a
+   *  markdown PR link (R-a i), and whether prose stands beside the ref. */
+  interface Kind {
+    name: string;
+    tok: string;
+    n: number | null;
+    link: boolean;
+    prose?: boolean;
+  }
+  const kinds: Kind[] = [
+    // R-a (i): a markdown link, by its URL or its exact text.
+    { name: "md link, pull URL", tok: `[the fix](${P}/pull/77)`, n: 77, link: true },
+    { name: "md link, pulls URL", tok: `[x](${P}/pulls/78)`, n: 78, link: true },
+    { name: "md link, merge request URL", tok: `[!12](${P}/-/merge_requests/12)`, n: 12, link: true },
+    { name: "md link, URL number wins over text", tok: `[#3](${P}/pull/79)`, n: 79, link: true },
+    { name: "md link #n", tok: "[#5](notes.md)", n: 5, link: true },
+    { name: "md link #n in backticks", tok: "[`#5`](notes.md)", n: 5, link: true },
+    { name: "md link PR #n", tok: "[PR #5](notes.md)", n: 5, link: true },
+    { name: "md link repo#n", tok: "[muninn#5](notes.md)", n: 5, link: true },
+    { name: "md link repo #n", tok: "[muninn #5](notes.md)", n: 5, link: true },
+    { name: "md link owner/repo#n", tok: "[acme/tool#5](notes.md)", n: 5, link: true },
+    { name: "md link owner/stopword-repo#n", tok: "[acme/test#5](notes.md)", n: 5, link: true },
+    { name: "md link issues URL", tok: `[#5](${P}/issues/5)`, n: null, link: false },
+    { name: "md link #anchor", tok: "[#5](#step-5)", n: null, link: false },
+    { name: "md link stopword text", tok: "[step #3](notes.md)", n: null, link: false },
+    // Any lowercase slug off the stoplist is a repo, in link text as bare.
+    { name: "md link word #n text", tok: "[see #3](notes.md)", n: 3, link: true },
+    { name: "md link two-word text", tok: "[see muninn #3](notes.md)", n: null, link: false },
+    // R-a (ii): owner/repo#n, no space; the stoplist does not apply.
+    { name: "owner/repo#n", tok: "acme/tool#5", n: 5, link: false },
+    { name: "owner/stopword-repo#n", tok: "acme/test#5", n: 5, link: false },
+    { name: "Owner/stopword-repo#n", tok: "RuneLind/check#5", n: 5, link: false },
+    { name: "owner/repo #n (space)", tok: "acme/tool #5", n: null, link: false },
+    { name: "owner/repo- #n", tok: "acme/tool-#5", n: null, link: false },
+    // R-a (iii): repo #n / repo#n, a lowercase slug starting and ending [a-z0-9].
+    { name: "repo #n", tok: "muninn #5", n: 5, link: false },
+    { name: "repo#n", tok: "muninn#5", n: 5, link: false },
+    { name: "dotted repo #n", tok: "melosys-api.v2 #5", n: 5, link: false },
+    { name: "digit-led repo #n", tok: "1password #5", n: 5, link: false },
+    { name: "date #n (no letter)", tok: "2026-03-12 #4", n: null, link: false },
+    { name: "owner/digits#n (no letter)", tok: "acme/2026#4", n: null, link: false },
+    { name: "slug starting .", tok: ".muninn #5", n: null, link: false },
+    { name: "slug starting _", tok: "_muninn #5", n: null, link: false },
+    { name: "slug ending -", tok: "step-#3", n: null, link: false },
+    { name: "slug ending - (post)", tok: "post-#252", n: null, link: false },
+    { name: "slug ending - (pre)", tok: "pre-#431", n: null, link: false },
+    { name: "slug ending .", tok: "nr. #5", n: null, link: false },
+    { name: "slug ending . (e.g.)", tok: "e.g. #5", n: null, link: false },
+    { name: "slug ending . (incl.)", tok: "incl. #139", n: null, link: false },
+    { name: "slug ending _", tok: "issue_#12", n: null, link: false },
+    { name: "stopword #n", tok: "step #3", n: null, link: false },
+    { name: "stopword #n (no)", tok: "fase #2", n: null, link: false },
+    { name: "stopword #n (issue)", tok: "issue #12", n: null, link: false },
+    { name: "Word #n", tok: "Sprint #3", n: null, link: false },
+    { name: "Word #n (Bug)", tok: "Bug #12", n: null, link: false },
+    // R-a (iv): PR #n, any case.
+    { name: "PR #n", tok: "PR #5", n: 5, link: false },
+    { name: "pr #n", tok: "pr #5", n: 5, link: false },
+    { name: "Pr#n", tok: "Pr#5", n: 5, link: false },
+    // Prose before a ref: the ref stands, the prose blocks rule 3. A lowercase
+    // word right before `#n` is itself the ref's repo (`reversert #5`), so it
+    // follows a state word as a ref does.
+    { name: "EN prose, md link", tok: "after [#5](notes.md)", n: 5, link: true, prose: true },
+    { name: "EN prose, md link (skipped)", tok: `skipped [#5](${P}/pull/5)`, n: 5, link: true, prose: true },
+    { name: "NO prose, md link", tok: `reversert [#5](${P}/pull/5)`, n: 5, link: true, prose: true },
+    { name: "NO prose, md link (utkast)", tok: "utkast [#5](notes.md)", n: 5, link: true, prose: true },
+    { name: "EN prose, bare word #n", tok: "deferred #5", n: 5, link: false },
+    { name: "NO prose, bare word #n", tok: "reversert #5", n: 5, link: false },
+    { name: "NO prose, bare word #n (venter)", tok: "venter #5", n: 5, link: false },
+    { name: "EN prose, repo ref", tok: "after muninn #5", n: 5, link: false, prose: true },
+  ];
+
+  type Want = { pr: number | null; link: number | null; state: string; rule: number } | "no row";
+  /** The contexts, each with the spec's expected reading of a kind there. */
+  const contexts: { name: string; header: string[]; row: (t: string) => string[]; want: (k: Kind) => Want }[] = [
+    {
+      // Identity from a PR ref in the first cell; no slate, no state word.
+      name: "first cell",
+      header: ["PR", "State", "Landed"],
+      row: (t) => [`a — ${t}`, "see notes", ""],
+      want: (k) => (k.n === null ? "no row" : { pr: k.n, link: k.n, state: "unknown", rule: 0 }),
+    },
+    {
+      // Identity from a PR ref in any cell; rule 2 on the state cell.
+      name: "PR column",
+      header: ["Item", "PR", "State"],
+      row: (t) => ["x", t, "open"],
+      want: (k) => (k.n === null ? "no row" : { pr: k.n, link: k.n, state: "open", rule: 2 }),
+    },
+    {
+      // Rule 1 when the ref follows the word, else rule 2 (word at the start).
+      name: "state cell after a state word",
+      header: ["PR", "State", "Landed"],
+      row: (t) => ["1", `merged ${t}`, ""],
+      want: (k) => ({ pr: 1, link: k.n, state: "merged", rule: k.n !== null && !k.prose ? 1 : 2 }),
+    },
+    {
+      // Rule 3: a PR link alone; a bare ref never fires it.
+      name: "Landed alone",
+      header: ["PR", "State", "Landed"],
+      row: (t) => ["1", "see notes", t],
+      want: (k) => (k.link && !k.prose ? { pr: 1, link: k.n, state: "merged", rule: 3 } : { pr: 1, link: k.n, state: "unknown", rule: 0 }),
+    },
+    ...[", 2026-10-19", " `c59ce4f`", " (v34)"].map((suffix) => ({
+      name: `Landed + ${suffix.trim()}`,
+      header: ["PR", "State", "Landed"],
+      row: (t: string) => ["1", "see notes", `${t}${suffix}`],
+      want: (k: Kind): Want =>
+        k.link && !k.prose ? { pr: 1, link: k.n, state: "merged", rule: 3 } : { pr: 1, link: k.n, state: "unknown", rule: 0 },
+    })),
+    {
+      // Prose after the ref: never rule 3.
+      name: "Landed + prose",
+      header: ["PR", "State", "Landed"],
+      row: (t) => ["1", "see notes", `${t} reverted`],
+      want: (k) => ({ pr: 1, link: k.n, state: "unknown", rule: 0 }),
+    },
+  ];
+
+  const cells = kinds.flatMap((k) => contexts.map((c) => ({ k, c })));
+  test(`${cells.length} cells`, () => {
+    const red: string[] = [];
+    for (const { k, c } of cells) {
+      const r = parseLedgerTable(c.header, [c.row(k.tok)]).rows[0];
+      const got: Want = r ? { pr: r.pr, link: r.link, state: r.state, rule: r.rule } : "no row";
+      const want = c.want(k);
+      if (JSON.stringify(got) !== JSON.stringify(want)) red.push(`${k.name} | ${c.name} | ${k.tok} | want ${JSON.stringify(want)} got ${JSON.stringify(got)}`);
+    }
+    console.log(`class-check table: ${cells.length} cells, ${red.length} red`);
+    if (red.length) console.log(red.join("\n"));
+    expect(red).toEqual([]);
+  });
+
+  // Round-2 branches the table does not reach.
+  test("the first ref by position is the row's link", () => {
+    expect(parseLedgerTable(["PR", "State"], [["muninn #3 [#5](notes.md)", "open"]]).rows[0]).toMatchObject({ link: 3, pr: 3 });
+  });
+
+  test("a leading bare `PR #5` is the slate, not a link to skip", () => {
+    expect(parseLedgerTable(["PR", "State"], [["PR #5 1 — y", "open"]]).rows[0]).toMatchObject({ slate: 5, link: 5, pr: 5 });
+  });
+
+  test("a 1 MB cell of near-refs finishes in under 1 s", () => {
+    const MB = (unit: string): string => unit.repeat(Math.ceil(1_000_000 / unit.length));
+    for (const cell of [
+      `merged ${MB("a")} #5`,
+      `merged ${MB("a-")}#5`,
+      `merged ${MB("a.")} #5`,
+      `merged ${MB("a/")}#5`,
+      `merged ${MB("A")}/b#5`,
+      `merged x/${MB("a-")}#5`,
+      MB("muninn #5 "),
+      MB("[#5](u) "),
+      MB("pr #"),
+    ]) {
+      const t = performance.now();
+      parseLedgerTable(["PR", "State", "Landed"], [[cell, cell, cell]]);
+      expect(performance.now() - t).toBeLessThan(1000);
+    }
   });
 });

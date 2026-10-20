@@ -12,8 +12,11 @@
  *  2. else a state word at the start of the state cell, emphasis or a link
  *     bracket around it allowed (`[merget](…)`);
  *  1b. else rule 1 in any other cell, so prose there never beats the state cell;
- *  3. else a merged-PR link alone in a «Landed»/«Landet» cell reads as merged.
+ *  3. else a merged-PR link alone in a «Landed»/«Landet» cell reads as merged:
+ *     a markdown PR link, never a bare `repo #n`.
  * A row matching none is `unknown`. Struck text (`~~…~~`) is removed first.
+ * A PR ref is a markdown PR link (`linkNumber`) or a bare `PR #n`,
+ * `owner/repo#n`, `repo #n` (`bareNumber`).
  *
  * The strip draws a ledger only when its header names a state column
  * (State/Status/Tilstand, a parenthetical qualifier allowed) and at least {@link LEDGER_PARSED_MIN} of its rows
@@ -76,26 +79,29 @@ const STATE_WORDS: readonly [string, Exclude<PrState, "unknown">][] = [
 
 const STATE_ALT = STATE_WORDS.map(([w]) => w.replace(/ /g, "\\s+")).join("|");
 
-/** Words that number something other than a PR (`step #3`), and state or
- *  status words (`closed #5`, `reverted #5`): no repo slug. */
-const NOT_A_REPO = new Set([
+/** Words that number something other than a PR (`step #3`): no repo slug.
+ *  A state or prose word before a ref (`reverted #5`) stays a ref; rule 3
+ *  reads links only, so it never reads that prose as merged. */
+const NUMBERING_WORDS = new Set([
   "step", "steg", "phase", "fase", "item", "punkt", "task", "oppgave", "row", "rad", "round", "runde",
   "batch", "slice", "part", "del", "issue", "issues", "sak", "saker", "no", "nr", "number", "nummer",
   "case", "line", "linje", "version", "versjon", "comment", "kommentar", "ticket", "card", "kort",
   "finding", "funn", "check", "sjekk", "option", "page", "side", "test", "run", "question", "decision",
-  ...STATE_WORDS.flatMap(([w]) => w.split(" ")),
-  "reverted", "revert", "draft", "pending", "wip", "superseded", "abandoned",
 ]);
 
 /** A markdown link, an optional `"title"` after the URL. Every part stops at
  *  the next bracket, parenthesis or quote, so a scan is linear. */
 const MD_LINK_RE = /\[([^[\]\n]*)\]\(([^()\s]*)(?:[ \t]+"[^"\n]*")?\)/g;
-/** A PR-shaped text: `#n`, `PR #n`, `repo #n`, `owner/repo#n`. */
-const PR_TEXT_RE = /^(?:#(\d{1,6})|[Pp][Rr] ?#(\d{1,6})|(?:[A-Za-z0-9][\w.-]*\/)?([a-z][a-z0-9._-]*) ?#(\d{1,6}))$/;
 const PR_URL_RE = /\/(?:pulls?|merge_requests)\/(\d{1,6})(?!\d)/;
-/** A bare `PR #n`, `repo #n` or `owner/repo#n`. A run of word characters
- *  starts it only at its first character, so a scan is linear. */
-const BARE_REF_RE = /(?<![\p{L}\p{N}_/#[\].-])(?:([Pp][Rr])|(?:[A-Za-z0-9][\w.-]*\/)?([a-z][a-z0-9._-]*))[ ]?#(\d{1,6})(?![\p{L}\p{N}])/gu;
+/** A bare ref: `PR #n` (any case), `owner/repo#n`, `repo #n` or `repo#n`.
+ *  Groups: 1 PR, 2 owner, 3 its repo, 4 a repo alone, 5 the number. The slug
+ *  rules are checked in {@link bareNumber}. */
+const BARE_SRC = String.raw`(?:([Pp][Rr]) ?|([A-Za-z0-9][\w.-]*)\/([a-z0-9._-]+)|([a-z0-9._-]+) ?)#(\d{1,6})`;
+/** A bare ref in running text. It starts only after a character no slug or
+ *  owner holds, so a run of slug characters has one start and a scan is linear. */
+const BARE_REF_RE = new RegExp(String.raw`(?<![\p{L}\p{N}_/#[\].-])${BARE_SRC}(?![\p{L}\p{N}])`, "gu");
+/** A link text that is exactly one ref: `#n`, or a bare ref. */
+const LINK_TEXT_RE = new RegExp(String.raw`^(?:#(\d{1,6})|${BARE_SRC})$`, "u");
 /** A commit sha at a position: 7–40 hex in backticks, or bare with both a digit and a letter a–f. */
 const SHA_AT_RE = /`[0-9a-f]{7,40}`|(?=[0-9a-f]{0,39}\d)(?=[0-9a-f]{0,39}[a-f])[0-9a-f]{7,40}(?![\p{L}\p{N}])/uy;
 
@@ -103,17 +109,35 @@ interface Ref {
   n: number;
   start: number;
   end: number;
+  /** A markdown PR link (rule 3 reads these), not a bare ref. */
+  link: boolean;
+}
+
+/** A repo slug starts and ends with `[a-z0-9]` (`step-#3`, `nr. #5` are none)
+ *  and holds a letter (`2026-03-12 #4` is a date). */
+function slugOk(slug: string): boolean {
+  return /^[a-z0-9]/.test(slug) && /[a-z0-9]$/.test(slug) && /[a-z]/.test(slug);
+}
+
+/** The number of a bare-ref match ({@link BARE_SRC}'s groups from `g`), or
+ *  null when its slug breaks the rules. An owner skips the stoplist. */
+function bareNumber(m: RegExpExecArray | RegExpMatchArray, g: number): number | null {
+  const n = Number(m[g + 4]);
+  if (m[g] !== undefined) return n;
+  if (m[g + 2] !== undefined) return slugOk(m[g + 2]!) ? n : null;
+  const repo = m[g + 3]!;
+  return slugOk(repo) && !NUMBERING_WORDS.has(repo) ? n : null;
 }
 
 /** The number of a markdown link that is a PR link: its URL is a pull or
- *  merge request, or its text is PR-shaped and its URL no issue or anchor. */
+ *  merge request, or its text is exactly one ref and its URL no issue or anchor. */
 function linkNumber(text: string, url: string): number | null {
   const byUrl = PR_URL_RE.exec(url);
   if (byUrl) return Number(byUrl[1]);
   if (url.startsWith("#") || /\/issues\//.test(url)) return null;
-  const m = PR_TEXT_RE.exec(text.trim().replace(/^`|`$/g, ""));
-  if (!m || (m[3] !== undefined && NOT_A_REPO.has(m[3]))) return null;
-  return Number(m[1] ?? m[2] ?? m[4]);
+  const m = LINK_TEXT_RE.exec(text.trim().replace(/^`|`$/g, ""));
+  if (!m) return null;
+  return m[1] !== undefined ? Number(m[1]) : bareNumber(m, 2);
 }
 
 /** Every PR link and bare ref in a text, in order, and whether the text holds
@@ -126,14 +150,14 @@ function scanRefs(text: string): { refs: Ref[]; otherLink: boolean } {
   for (const m of text.matchAll(MD_LINK_RE)) {
     const n = linkNumber(m[1]!, m[2]!);
     if (n === null) otherLink = true;
-    else refs.push({ n, start: m.index, end: m.index + m[0].length });
+    else refs.push({ n, start: m.index, end: m.index + m[0].length, link: true });
     masked += text.slice(last, m.index) + " ".repeat(m[0].length);
     last = m.index + m[0].length;
   }
   masked += text.slice(last);
   for (const m of masked.matchAll(BARE_REF_RE)) {
-    if (m[2] !== undefined && NOT_A_REPO.has(m[2])) continue;
-    refs.push({ n: Number(m[3]), start: m.index, end: m.index + m[0].length });
+    const n = bareNumber(m, 1);
+    if (n !== null) refs.push({ n, start: m.index, end: m.index + m[0].length, link: false });
   }
   return { refs: refs.sort((a, b) => a.start - b.start), otherLink };
 }
@@ -163,15 +187,16 @@ function wordThenRef(cell: string): Exclude<PrState, "unknown"> | null {
 /** Rule 2: a state word at the very start of the state cell. */
 const WORD_AT_START_RE = new RegExp(`^(${STATE_ALT})(?![\\p{L}\\p{N}-])`, "iu");
 
-/** Rule 3: a Landed cell of PR links and landing metadata only — separators,
- *  dates, shas in backticks, and parentheticals with no word of letters alone
- *  (`(v34)`, `(2026-10-19)`; not `(reverted)`). */
+/** Rule 3: a Landed cell of markdown PR links and landing metadata only —
+ *  separators, dates, shas in backticks, and parentheticals with no word of
+ *  letters alone (`(v34)`, `(2026-10-19)`; not `(reverted)`). A bare ref
+ *  (`muninn #5`) is no link, so a word before it is never read as merged. */
 const LANDED_SEPARATORS = new Set([",", "+", "&", "/", "and", "og"]);
 const DATE_TOKEN_RE = /^\d{1,4}[-.]\d{1,2}(?:[-.]\d{1,4})?$/;
 const SHA_TOKEN_RE = /^`[0-9a-f]{7,40}`$/;
 function landedLinksOnly(cell: string): boolean {
   const { refs, otherLink } = scanRefs(cell);
-  if (otherLink || !refs.length) return false;
+  if (otherLink || !refs.length || refs.some((r) => !r.link)) return false;
   let rest = "";
   let last = 0;
   for (const r of refs) {
