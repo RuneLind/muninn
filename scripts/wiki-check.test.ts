@@ -96,6 +96,21 @@ const CHART = [
   "</Chart>",
   "",
 ].join("\n");
+/** A rule tree with one warning (an outcome with no tone) and one info finding
+ *  (an `outcomes=` label that names no leaf). */
+const RULE_TREE = [
+  "---",
+  "title: R",
+  "plan_status: shipped",
+  "---",
+  '<RuleTree title="Can the book be renewed?" outcomes="Renew=good;Lapse=muted">',
+  "",
+  "- *Yes:* → Renew — LIB-1",
+  "- *No:* → Return",
+  "",
+  "</RuleTree>",
+  "",
+].join("\n");
 const TEXT_SHAPES = [
   "---",
   "title: S",
@@ -163,6 +178,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/rs.mdx"), CULLED_TEXT_SHAPES);
   await Bun.write(path.join(tmp, "page-checks/plans/dc.mdx"), DECISION_CHAIN);
   await Bun.write(path.join(tmp, "page-checks/plans/ch.mdx"), CHART);
+  await Bun.write(path.join(tmp, "page-checks/plans/rt.mdx"), RULE_TREE);
   await Bun.write(path.join(tmp, "page-checks/plans/st.mdx"), STATUS_TILES);
   await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
   await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
@@ -321,6 +337,7 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "ledger-row-state",
         "chain-close-conflict",
         "chart-table",
+        "rule-tree",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));

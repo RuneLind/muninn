@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { componentBlocks, parseBlocks } from "./markdown-ast.ts";
 import { visibleText } from "./report-top.ts";
-import { CASE_ID_RE, readRuleTree, ruleTreeNodes, type RuleNode } from "./rule-tree.ts";
+import { RULE_TREE_CASE_ID_RE, readRuleTree, ruleTreeNodes, type RuleNode } from "./rule-tree.ts";
 
 /** Read the first `<RuleTree>` in `md`, the way the lint reads it. */
 function read(md: string, boardIds?: ReadonlySet<string>) {
@@ -75,6 +75,9 @@ describe("readRuleTree — the leaf text", () => {
     ["→ Renew - LIB-1", "Renew - LIB-1", []],
     ["→ Renew — `LIB-1`", "Renew", ["LIB-1"]],
     ["→ Renew `a — b` — LIB-1", "Renew `a — b`", ["LIB-1"]],
+    // A dash inside a code span cuts no outcome and starts no case tail.
+    ["→ Renew `a — b`", "Renew `a — b`", []],
+    ["*Yes:* → Renew `x — LIB-1`", "Renew `x — LIB-1`", []],
     ["→ Renew — see the notes", "Renew", []],
     ["→ Renew — LIB-1, ~~LIB-2~~", "Renew", ["LIB-1"]],
     ["→ Renew — LIB-1, LIB-1", "Renew", ["LIB-1"]],
@@ -135,7 +138,7 @@ describe("the case-id grammar", () => {
     ["-101", false],
     ["LIB-10-1", false],
   ])("%s → %p", (id, ok) => {
-    expect(CASE_ID_RE.test(id)).toBe(ok);
+    expect(RULE_TREE_CASE_ID_RE.test(id)).toBe(ok);
   });
 
   test("an id outside the grammar counts when the page's CaseBoard holds it", () => {

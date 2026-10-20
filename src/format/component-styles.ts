@@ -1318,7 +1318,8 @@ export function chartViewCss(scope: string): string {
 }
 
 /** The reader's `<RuleTree>` view (`src/format/rule-tree-view.ts`): theme
- *  tokens only. The picker shows once `wiki-visuals.ts` has put `rt-js` on the
+ *  tokens, except the picked chip's `#fff` on `--accent-hover` (the theme has
+ *  no ink token for the accent fill; Chart's pressed button does the same). The picker shows once `wiki-visuals.ts` has put `rt-js` on the
  *  document root; a picked case dims every row off its path with a muted ink
  *  and a dashed border, never with opacity alone. */
 export function ruleTreeCss(scope: string): string {

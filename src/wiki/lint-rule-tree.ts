@@ -14,7 +14,7 @@
  *   where an unknown id may be a board id).
  *
  * The lint reads no CaseBoard file, so a case id counts here only by its
- * grammar (`CASE_ID_RE`); the reader also takes a board id. On a page with a
+ * grammar (`RULE_TREE_CASE_ID_RE`); the reader also takes a board id. On a page with a
  * CaseBoard, a leaf's other ids may be board ids, so its grammar ids count
  * whatever the rest are; where the board lacks one of those others, the lint
  * counts a case the reader does not draw.

@@ -30,7 +30,7 @@ const readOutcomeTone = (v: string): StatusTone | null => {
 };
 
 /** A case id by grammar; any other id counts only when a CaseBoard on the page holds it. */
-export const CASE_ID_RE = /^[A-Z]+-\d+$/;
+export const RULE_TREE_CASE_ID_RE = /^[A-Z]+-\d+$/;
 
 /** A year a leaf names: 19xx or 20xx, not inside a longer word or number. */
 const YEAR_RE = /(?<![\p{L}\p{N}])(?:19|20)\d{2}(?![\p{L}\p{N}])/gu;
@@ -158,7 +158,8 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
   if (!arrow) return null;
   const from = arrow[0].length;
   let dash: RegExpExecArray | null = null;
-  for (const m of masked.matchAll(/\s—\s/g)) if (m.index >= from) dash = m as RegExpExecArray;
+  // The arrow's run holds no `—`, so every ` — ` lies after it.
+  for (const m of masked.matchAll(/\s—\s/g)) dash = m as RegExpExecArray;
   const paren = masked.indexOf("(", from);
   const run = arrow[1];
   const closer = run ? closerRe(run).exec(masked.slice(from)) : null;
@@ -177,7 +178,7 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
     }
     pieces.push(rest.slice(at));
     const ids = pieces.map((p) => opts.text(unstruck(p)).trim()).filter(Boolean);
-    const known = ids.filter((id) => CASE_ID_RE.test(id) || opts.boardIds?.has(id) === true);
+    const known = ids.filter((id) => RULE_TREE_CASE_ID_RE.test(id) || opts.boardIds?.has(id) === true);
     if (known.length && (known.length === ids.length || opts.boardUnread === true)) {
       caseSplit = { body: rest.slice(0, dash.index), dash: rest.slice(dash.index, tail), pieces };
       cases = [...new Set(known)];
