@@ -106,6 +106,45 @@ test("a page that went with a data file that did not is not a failed remove", ()
   expect(fellesOutcomeLine(3, false, "remove", undefined).ok).toBe(false);
 });
 
+// A data-file run that threw or timed out is not a file that was never uploaded.
+test("each data-file outcome has its own line", () => {
+  const timedOut = fellesOutcomeLine(0, false, "remove", null);
+  expect(timedOut.text).not.toMatch(/never have been uploaded/);
+  expect(timedOut.text).toMatch(/timed out or could not start/);
+  expect(timedOut.ok).toBe(false);
+  const other = fellesOutcomeLine(0, false, "remove", 2);
+  expect(other.text).toMatch(/exited with code 2/);
+  expect(other.ok).toBe(false);
+  expect(fellesOutcomeLine(0, false, "remove", 3).text).toMatch(/Retry data files/);
+  // The retry alone.
+  expect(fellesOutcomeLine(0, false, "remove-data")).toEqual({ text: expect.stringMatching(/^Removed the data files/), ok: true });
+  expect(fellesOutcomeLine(3, false, "remove-data").text).toMatch(/may already be gone/);
+  expect(fellesOutcomeLine(3, false, "remove-data").ok).toBe(false);
+});
+
+test("Retry data files is offered exactly when data files may be left behind", () => {
+  const offered = felles.fellesDataRetryOffered;
+  const removes = ["plans/case.mdx", "plans/runs.csv"];
+  expect(offered("remove", false, { exitCode: 0, removes, dataFilesExitCode: 3 })).toBe(true);
+  expect(offered("remove", false, { exitCode: 0, removes, dataFilesExitCode: null })).toBe(true);
+  expect(offered("remove", false, { exitCode: 0, removes, dataFilesExitCode: 0 })).toBe(false);
+  expect(offered("remove", false, { exitCode: 0, removes: ["plans/case.mdx"] })).toBe(false);
+  // The page run failed: the page may be gone already, from an earlier remove.
+  expect(offered("remove", false, { exitCode: 3, removes })).toBe(true);
+  expect(offered("remove", false, { exitCode: 3, removes: ["plans/a.mdx"] })).toBe(false);
+  expect(offered("remove", false, { exitCode: 1, removes })).toBe(false);
+  expect(offered("remove", true, { exitCode: 3, removes })).toBe(false);
+  expect(offered("remove-data", false, { exitCode: 3, removes: ["plans/runs.csv"] })).toBe(true);
+  expect(offered("remove-data", false, { exitCode: 0, removes: ["plans/runs.csv"] })).toBe(false);
+  expect(offered("publish", false, { exitCode: 3, removes })).toBe(false);
+});
+
+test("the dialog carries a hidden Retry data files button, and its text warns after a failed page run", () => {
+  expect(fellesDialogHtml("plans/a.mdx")).toContain('<button type="button" class="danger" data-felles="remove-data" hidden>Retry data files</button>');
+  expect(felles.fellesDataRetryHtml(["plans/<x>.csv"], false)).toContain("<code>plans/&lt;x&gt;.csv</code>");
+  expect(felles.fellesDataRetryHtml(["plans/x.csv"], true)).toMatch(/not while the page is still published/);
+});
+
 test("exit 1 claims nothing the code cannot know", () => {
   // Exit 1 is the scanner's refusal AND any crash of the script (an uncaught
   // exception, a missing module), which can land after an upload succeeded.

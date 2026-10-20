@@ -299,6 +299,66 @@ describe("remove takes the page's data files", () => {
     expect(runs).toEqual([["plans/case.mdx"]]);
   });
 
+  // After the page went and the data-file run failed, a page run can never
+  // reach the data files again: the page is gone, so it exits 3 first.
+  test("dataFilesOnly retries the data-file run alone, after the page is gone", async () => {
+    const bucket = new Set(["plans/case.mdx", "plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
+    let gcloudDown = true;
+    const runs: string[][] = [];
+    const app = appWith({
+      runProc: async (argv) => {
+        const objects = argv.slice(argv.indexOf("--") + 1);
+        runs.push(objects);
+        let missed = 0;
+        for (const o of objects) {
+          if (gcloudDown && o !== "plans/case.mdx") missed++;
+          else if (!bucket.delete(o)) missed++;
+        }
+        return { stdout: "", stderr: "", exitCode: missed ? 3 : 0 };
+      },
+    });
+    const first = (await (await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" })).json()) as {
+      exitCode: number;
+      dataFilesExitCode?: number | null;
+    };
+    expect([first.exitCode, first.dataFilesExitCode]).toEqual([0, 3]);
+    expect([...bucket]).toEqual(["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
+    // A second plain remove stops at the page, which is gone.
+    const again = (await (await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove" })).json()) as {
+      exitCode: number;
+    };
+    expect(again.exitCode).toBe(3);
+    expect(bucket.size).toBe(3);
+
+    gcloudDown = false;
+    runs.length = 0;
+    const res = await post(app, { wiki: "kode", relPath: "plans/case.mdx", dryRun: false, action: "remove", dataFilesOnly: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { exitCode: number; removes?: string[]; dataFilesOnly?: boolean; dataFilesExitCode?: number | null };
+    expect(body.exitCode).toBe(0);
+    expect(body.dataFilesOnly).toBe(true);
+    expect(body.dataFilesExitCode).toBeUndefined();
+    expect(body.removes).toEqual(["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
+    expect(runs).toEqual([["plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]]);
+    expect(bucket.size).toBe(0);
+  });
+
+  test("dataFilesOnly is refused before any spawn unless it is true on a real remove of a page with data files", async () => {
+    let spawned = 0;
+    const app = appWith({ runProc: async () => (spawned++, { stdout: "", stderr: "", exitCode: 0 }) });
+    const base = { wiki: "kode", relPath: "plans/case.mdx", action: "remove", dryRun: false };
+    for (const body of [
+      { ...base, dataFilesOnly: false },
+      { ...base, dataFilesOnly: "yes" },
+      { ...base, dryRun: true, dataFilesOnly: true },
+      { ...base, action: "publish", allowIdent: true, dataFilesOnly: true },
+      { ...base, relPath: "plans/a.mdx", dataFilesOnly: true },
+    ]) {
+      expect((await post(app, body)).status).toBe(400);
+    }
+    expect(spawned).toBe(0);
+  });
+
   test("a data-file run that does not return still answers that the page went", async () => {
     let calls = 0;
     const app = appWith({

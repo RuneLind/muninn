@@ -64,7 +64,9 @@ export function fellesRemoveCommand(opts: { bin: string; relPath: string; bucket
   ].join(" ");
 }
 
-export type FellesAction = "publish" | "remove";
+/** `remove-data` is the retry of a remove's data-file run alone
+ *  (`dataFilesOnly` on the route), for a page already gone from the bucket. */
+export type FellesAction = "publish" | "remove" | "remove-data";
 
 /** One line for the script's exit code (`publiser-felles-wiki.ts` header). */
 export function fellesOutcomeLine(
@@ -73,13 +75,23 @@ export function fellesOutcomeLine(
   action: FellesAction = "publish",
   dataFilesExitCode?: number | null,
 ): { text: string; ok: boolean } {
+  if (action === "remove-data") return fellesDataRetryOutcomeLine(exitCode);
   if (action === "remove") {
     // A real remove deletes the page alone, then its data files in a second
     // run; a data file never uploaded fails only that second run.
     if (exitCode === 0 && !dryRun && dataFilesExitCode !== undefined && dataFilesExitCode !== 0) {
+      if (dataFilesExitCode === 3) {
+        return {
+          text: "Removed the page. At least one data file was not deleted — it may never have been uploaded, or gcloud needs a login. See the output; Retry data files deletes the rest.",
+          ok: true,
+        };
+      }
       return {
-        text: "Removed the page. At least one data file was not deleted — it may never have been uploaded. See the output.",
-        ok: true,
+        text:
+          dataFilesExitCode === null
+            ? "Removed the page. The data-file delete timed out or could not start, so data files may still be in the bucket. Retry data files to finish."
+            : `Removed the page. The data-file delete exited with code ${dataFilesExitCode}, so data files may still be in the bucket. See the output, then retry data files.`,
+        ok: false,
       };
     }
     return fellesRemoveOutcomeLine(exitCode, dryRun);
@@ -122,6 +134,48 @@ function fellesRemoveOutcomeLine(exitCode: number, dryRun: boolean): { text: str
     default:
       return { text: `The script exited with code ${exitCode}.`, ok: false };
   }
+}
+
+/** The retry of the data-file run alone. `--fjern` deletes every object it
+ *  can and exits 3 if one is missing, so a file the first run already deleted
+ *  fails the retry while the rest still go. */
+function fellesDataRetryOutcomeLine(exitCode: number): { text: string; ok: boolean } {
+  switch (exitCode) {
+    case 0:
+      return { text: "Removed the data files. The pod drops them within about 2 minutes.", ok: true };
+    case 3:
+      return {
+        text: "At least one data file was not deleted — it may already be gone or never have been uploaded, or gcloud needs a login. The others were deleted. See the output.",
+        ok: false,
+      };
+    default:
+      return fellesRemoveOutcomeLine(exitCode, false);
+  }
+}
+
+/** Whether a remove's answer leaves data files in the bucket that only a
+ *  data-file run can reach: the page went and its data-file run did not exit 0,
+ *  a retry did not exit 0, or the page run itself exited 3 — the page may
+ *  already be gone, from an earlier remove whose data-file run failed. */
+export function fellesDataRetryOffered(
+  action: FellesAction,
+  dryRun: boolean,
+  answer: { exitCode: number; removes?: readonly string[]; dataFilesExitCode?: number | null },
+): boolean {
+  if (dryRun || action === "publish") return false;
+  if (action === "remove-data") return answer.exitCode !== 0;
+  if ((answer.removes?.length ?? 0) <= 1) return false;
+  if (answer.exitCode === 0) return answer.dataFilesExitCode !== undefined && answer.dataFilesExitCode !== 0;
+  return answer.exitCode === 3;
+}
+
+/** The confirm row's text when it offers Retry data files. After a page run
+ *  that failed, the page may still be published, so the reader decides. */
+export function fellesDataRetryHtml(dataFiles: readonly string[], pageRunFailed: boolean): string {
+  const list = dataFiles.map((r) => `<code>${esc(r)}</code>`).join(", ");
+  return pageRunFailed
+    ? `If an earlier remove already deleted the page, its data files may still be in the bucket: ${list}. Retry data files deletes them — not while the page is still published, which would lose them.`
+    : `Delete the data files again? ${list}. A file already gone fails the run; the others are deleted.`;
 }
 
 const REMOVE_QUESTION = "Delete it from the bucket? The bucket keeps no copy; your local page stays.";
@@ -202,6 +256,7 @@ export function fellesDialogHtml(relPath: string): string {
     `<div class="wiki-felles-confirm" hidden>` +
     `<span class="wiki-felles-confirm-text">${REMOVE_QUESTION}</span>` +
     `<button type="button" class="danger" data-felles="remove-confirm">Confirm remove</button>` +
+    `<button type="button" class="danger" data-felles="remove-data" hidden>Retry data files</button>` +
     `<button type="button" data-felles="remove-cancel">Cancel</button>` +
     `</div>` +
     `<div class="wiki-felles-status" role="status"></div>` +
@@ -339,6 +394,8 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
   const out = q<HTMLElement>(".wiki-felles-out");
   const confirmRow = q<HTMLElement>(".wiki-felles-confirm");
   const confirmText = q<HTMLElement>(".wiki-felles-confirm-text");
+  const confirmBtn = q<HTMLButtonElement>('[data-felles="remove-confirm"]');
+  const retryBtn = q<HTMLButtonElement>('[data-felles="remove-data"]');
   // ✕ is disabled with the run buttons: closing mid-run would drop the result
   // and let a re-opened dialog start a second upload beside the first.
   const runButtons = [
@@ -346,6 +403,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     q<HTMLButtonElement>('[data-felles="publish"]'),
     q<HTMLButtonElement>('[data-felles="remove"]'),
     q<HTMLButtonElement>('[data-felles="remove-confirm"]'),
+    q<HTMLButtonElement>('[data-felles="remove-data"]'),
     q<HTMLButtonElement>('[data-felles="remove-cancel"]'),
     q<HTMLButtonElement>('[data-felles="close"]'),
   ];
@@ -367,14 +425,21 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     running = true;
     runButtons.forEach((b) => (b.disabled = true));
     confirmRow.hidden = true;
-    const verb = action === "remove" ? "Removing…" : "Publishing…";
+    const verb = action === "publish" ? "Publishing…" : "Removing…";
     setStatus(dryRun ? "Running dry run…" : verb, "");
     out.hidden = true;
     try {
       const res = await fetch("/api/wiki/felles-publish", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wiki: opts.wiki, relPath: opts.relPath, dryRun, allowIdent: ident.checked, action }),
+        body: JSON.stringify({
+          wiki: opts.wiki,
+          relPath: opts.relPath,
+          dryRun,
+          allowIdent: ident.checked,
+          action: action === "remove-data" ? "remove" : action,
+          ...(action === "remove-data" ? { dataFilesOnly: true } : {}),
+        }),
       });
       const data = (await res.json().catch(() => null)) as
         | {
@@ -397,6 +462,16 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
             data.keptShared ?? [],
             data.keptRefused ?? [],
           );
+          confirmBtn.hidden = false;
+          retryBtn.hidden = true;
+          confirmRow.hidden = false;
+        } else if (fellesDataRetryOffered(action, dryRun, { ...data, exitCode: data.exitCode })) {
+          // The data files are the answer's removes after the page (a retry's
+          // answer holds no page).
+          const dataFiles = action === "remove-data" ? (data.removes ?? []) : (data.removes ?? []).slice(1);
+          confirmText.innerHTML = fellesDataRetryHtml(dataFiles, action === "remove" && data.exitCode !== 0);
+          confirmBtn.hidden = true;
+          retryBtn.hidden = false;
           confirmRow.hidden = false;
         }
         if (data.output) {
@@ -425,6 +500,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     else if (action === "publish") void run("publish", false);
     else if (action === "remove") void run("remove", true);
     else if (action === "remove-confirm") void run("remove", false);
+    else if (action === "remove-data") void run("remove-data", false);
     else if (action === "remove-cancel") {
       confirmRow.hidden = true;
       setStatus("", "");

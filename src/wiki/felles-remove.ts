@@ -11,35 +11,40 @@
  * parsed body, so a tag in a code fence names nothing), resolved relative to the
  * page's folder as `loadPageFiles` resolves them, and sent in NFC, the name the
  * script uploads. Three refs are left out:
- *  - one with no local file: publish uploaded nothing for it. The file is found
- *    by a per-segment readdir walk that also matches the other normalization
- *    form ({@link localSpelling}, the script's `lokalSti`): Linux compares names
- *    byte for byte, so a NFC ref misses a file stored NFD there;
+ *  - one publish does not upload: {@link publishUploadsDataFile} is the
+ *    script's own test, `lstat` on the page's spelling of the path, so it
+ *    answers as publish does on every filesystem (case- and
+ *    normalization-insensitive on macOS APFS, byte for byte on Linux);
  *  - one whose object name the script's `sjekkStiform` refuses: one such name
  *    makes `--fjern` delete nothing at all. Returned as `refused`;
  *  - one another local page also reads: removing this page must not take a
  *    file a page that stays published still shows. Returned as `shared`.
  */
-import { readdir } from "node:fs/promises";
+import { lstatSync } from "node:fs";
 import path from "node:path";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
 import { checkPageFileRef, PAGE_FILE_COMPONENTS, pageFileRefKinds } from "../format/query-block.ts";
-import { resolveContainedFile } from "./page-files.ts";
 import { splitFrontmatter } from "./page-text.ts";
 
-/** The wiki-relative data files a page's markdown reads, NFC, in source order. */
-export function pageDataFileRelPaths(pageRelPath: string, markdown: string): string[] {
+/** The data files a page's markdown reads, in source order: the page's own
+ *  spelling (what publish `lstat`s) and the NFC object name (what it uploads). */
+function pageDataFiles(pageRelPath: string, markdown: string): { spelling: string; object: string }[] {
   if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return [];
-  const out: string[] = [];
+  const out: { spelling: string; object: string }[] = [];
   for (const [ref, kinds] of pageFileRefKinds(parseBlocks(splitFrontmatter(markdown).body))) {
     if (checkPageFileRef(ref, kinds) !== "ok") continue;
     const rel = resolveEmbedRelPath(pageRelPath.replace(/\\/g, "/"), ref);
     if (rel === null) continue;
-    const nfc = rel.normalize("NFC");
-    if (!out.includes(nfc)) out.push(nfc);
+    const object = rel.normalize("NFC");
+    if (!out.some((d) => d.object === object)) out.push({ spelling: rel, object });
   }
   return out;
+}
+
+/** The wiki-relative data files a page's markdown reads, NFC, in source order. */
+export function pageDataFileRelPaths(pageRelPath: string, markdown: string): string[] {
+  return pageDataFiles(pageRelPath, markdown).map((d) => d.object);
 }
 
 /** The script's `MAKS_SEGMENT_BYTES`: the longest object-name segment it sends. */
@@ -64,33 +69,34 @@ export function fellesObjectPathRefusal(rel: string): string | null {
   return null;
 }
 
-export type ListDir = (absDir: string) => Promise<string[] | null>;
+/** What `lstat` says about a path, or null when it fails. */
+export type Lstat = (abs: string) => { isFile(): boolean; isSymbolicLink(): boolean } | null;
 
-const realListDir: ListDir = async (abs) => {
+const realLstat: Lstat = (abs) => {
   try {
-    return await readdir(abs);
+    return lstatSync(abs);
   } catch {
     return null;
   }
 };
 
 /**
- * `rel`'s spelling on disk under `root`, or null when a segment is missing.
- * Each segment takes the exact name when the folder holds it, else the one that
- * is equal after NFC.
+ * Whether publish uploads the data file `rel` (the page's spelling): the
+ * script's `relUnder` (no symlinked folder below the root) and `lstat`, plus
+ * its `O_NOFOLLOW` open and `isFile` check, which refuse a symlink or a
+ * non-file. The scanner and the size cap are not mirrored.
  */
-export async function localSpelling(root: string, rel: string, listDir: ListDir = realListDir): Promise<string | null> {
+export function publishUploadsDataFile(root: string, rel: string, lstat: Lstat = realLstat): boolean {
+  const segments = rel.split("/");
   let dir = root;
-  const found: string[] = [];
-  for (const segment of rel.split("/")) {
-    const entries = await listDir(dir);
-    const nfc = segment.normalize("NFC");
-    const hit = entries?.includes(segment) ? segment : entries?.find((e) => e.normalize("NFC") === nfc);
-    if (hit === undefined) return null;
-    found.push(hit);
-    dir = path.join(dir, hit);
+  for (const segment of segments.slice(0, -1)) {
+    dir = path.join(dir, segment);
+    const st = lstat(dir);
+    if (st === null) break;
+    if (st.isSymbolicLink()) return false;
   }
-  return found.join("/");
+  const st = lstat(path.join(root, ...segments));
+  return st !== null && st.isFile();
 }
 
 const readText = async (abs: string): Promise<string | null> => {
@@ -111,16 +117,16 @@ export async function fellesRemoveDataFiles(
   pageRelPath: string,
   pageRelPaths: readonly string[],
   read: (abs: string) => Promise<string | null> = readText,
+  lstat: Lstat = realLstat,
 ): Promise<{ dataFiles: string[]; shared: string[]; refused: string[] }> {
   const markdown = await read(path.join(root, pageRelPath));
   if (markdown === null) return { dataFiles: [], shared: [], refused: [] };
   const candidates: string[] = [];
   const refused: string[] = [];
-  for (const rel of pageDataFileRelPaths(pageRelPath, markdown)) {
-    const onDisk = await localSpelling(root, rel);
-    if (onDisk === null || !(await resolveContainedFile(root, onDisk)).ok) continue;
-    if (fellesObjectPathRefusal(rel) === null) candidates.push(rel);
-    else refused.push(rel);
+  for (const { spelling, object } of pageDataFiles(pageRelPath, markdown)) {
+    if (!publishUploadsDataFile(root, spelling, lstat)) continue;
+    if (fellesObjectPathRefusal(object) === null) candidates.push(object);
+    else refused.push(object);
   }
   if (candidates.length === 0) return { dataFiles: [], shared: [], refused };
 

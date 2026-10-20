@@ -221,10 +221,18 @@ async function seedOne(
   return 1;
 }
 
+/** Seeds the copilot-sdk connector unless one with its type, model and base
+ *  URL exists at ANY effort: the unique key includes effort, so a conflict
+ *  target alone re-seeded a NULL-effort twin beside a row the user set to
+ *  `high`. The ON CONFLICT covers two boots racing. */
 async function ensureCopilotConnector(tx: Sql): Promise<void> {
   const [row] = await tx`
     INSERT INTO connectors (name, description, connector_type, model)
-    VALUES ('copilot-sdk claude-sonnet-5.5', 'Auto-seeded', 'copilot-sdk', 'claude-sonnet-5.5')
+    SELECT 'copilot-sdk claude-sonnet-5.5', 'Auto-seeded', 'copilot-sdk', 'claude-sonnet-5.5'
+    WHERE NOT EXISTS (
+      SELECT 1 FROM connectors
+      WHERE connector_type = 'copilot-sdk' AND model = 'claude-sonnet-5.5' AND COALESCE(base_url, '') = ''
+    )
     ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, ''), COALESCE(effort, '')) DO NOTHING
     RETURNING id
   `;

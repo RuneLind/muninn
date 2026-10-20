@@ -128,7 +128,7 @@ Test files are co-located: `messages.test.ts`, `memories.test.ts`, `threads.test
 | `scheduled_tasks` | user_id, bot_name, schedule_hour/minute/days/interval_ms | Cron or interval scheduling |
 | `watchers` | user_id, bot_name, interval_ms, last_notified_ids | Background monitors with dedup |
 | `traces` | id, parent_id, name, attributes (JSONB) | Span hierarchy for request tracing |
-| `connectors` | id, name, connector_type, model, base_url, effort | Named AI connector configurations, unique on (type, model, base_url, effort) with NULLs as `''`. `effort` (migration 084) overrides the bot's on a thread pinned to the connector; `thinking_max_tokens` is ignored on adaptive-thinking models |
+| `connectors` | id, name, connector_type, model, base_url, effort | Named AI connector configurations, unique on (type, model, base_url, effort) with NULLs as `''`. The boot seed (`ensureCopilotConnector`) and `scripts/seed-connectors.ts` insert only `WHERE NOT EXISTS` a row with the same type, model and base_url at ANY effort, so a user's effort on a seeded row does not grow a NULL-effort twin; a user can still create effort variants. `effort` (migration 084) overrides the bot's on a thread pinned to the connector; `thinking_max_tokens` is ignored on adaptive-thinking models |
 
 ## Common Pitfalls
 

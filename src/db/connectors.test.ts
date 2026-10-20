@@ -321,5 +321,20 @@ describe("connectors", () => {
       const copilot = all.find((c) => c.connectorType === "copilot-sdk");
       expect(copilot).toBeDefined();
     });
+
+    // The unique key includes effort, so a conflict target alone re-seeded a
+    // NULL-effort twin of the row a user had set to `high`.
+    test("a boot seed after the user set effort on the seeded copilot connector creates no twin", async () => {
+      await seedConnectorsFromBotConfigs([]);
+      const [seeded] = (await listConnectors()).filter((c) => c.connectorType === "copilot-sdk");
+      await updateConnector(seeded!.id, { effort: "high" });
+      await seedConnectorsFromBotConfigs([]);
+      await seedConnectorsFromBotConfigs([]);
+      const copilot = (await listConnectors()).filter((c) => c.connectorType === "copilot-sdk");
+      expect(copilot.map((c) => `${c.model}|${c.effort ?? null}`)).toEqual(["claude-sonnet-5.5|high"]);
+      // A user can still add an effort variant by hand.
+      await createConnector({ name: "copilot low", connectorType: "copilot-sdk", model: "claude-sonnet-5.5", effort: "low" });
+      expect((await listConnectors()).filter((c) => c.connectorType === "copilot-sdk")).toHaveLength(2);
+    });
   });
 });

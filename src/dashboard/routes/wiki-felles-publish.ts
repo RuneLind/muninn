@@ -11,7 +11,9 @@
  * page's object and the data files only it reads (`felles-remove.ts`; the answer
  * adds `removes`, `keptShared` and `keptRefused`; a real remove deletes the page
  * in one run and its data files in a second, whose exit code is
- * `dataFilesExitCode`, null when it did not return), or `sync`, which runs `--synk` on the whole wiki and takes no
+ * `dataFilesExitCode`, null when it did not return; `dataFilesOnly: true` on a
+ * real remove runs the data-file delete alone, the retry after it failed, and
+ * answers with `dataFilesOnly: true`), or `sync`, which runs `--synk` on the whole wiki and takes no
  * relPath; `allowIdent` is required for publish and sync. Answers 200
  * `{ exitCode, dryRun, output }` whenever the script ran — its exit code is the
  * verdict (0 ok, 1 a file refused, 2 usage/environment, 3 an upload or delete
@@ -280,6 +282,12 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     }
     const dryRun = body.dryRun;
     const allowIdent = body.allowIdent === true;
+    // The retry after a failed data-file run: the page is already gone from the
+    // bucket, so a page run would exit 3 and never reach the data files.
+    if (body.dataFilesOnly !== undefined && (body.dataFilesOnly !== true || action !== "remove" || dryRun)) {
+      return c.json({ error: "dataFilesOnly must be true, and only on a real remove" }, 400);
+    }
+    const dataFilesOnly = body.dataFilesOnly === true;
 
     const target = resolveTarget(wiki);
     if (target.refusal) return c.json(target.refusal.body, target.refusal.status);
@@ -308,6 +316,9 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       // object the confirm deletes and every one it keeps.
       const removeFiles =
         action === "remove" && pageRel ? await fellesRemoveDataFiles(entry.root, pageRel, pageRelPaths) : undefined;
+      if (dataFilesOnly && !removeFiles?.dataFiles.length) {
+        return c.json({ error: "This page has no data files to remove." }, 400);
+      }
       if (action === "sync") {
         // A sync can outlast the server's idleTimeout (255 s). Bun 1.3.10 measured
         // not cutting a pending handler at it; this keeps that true if it changes.
@@ -334,7 +345,9 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       const twoRuns = action === "remove" && !dryRun && (removeFiles?.dataFiles.length ?? 0) > 0;
       let proc;
       try {
-        proc = await run(pageRel, twoRuns ? undefined : removeFiles?.dataFiles);
+        proc = dataFilesOnly
+          ? await run(removeFiles!.dataFiles[0], removeFiles!.dataFiles.slice(1))
+          : await run(pageRel, twoRuns ? undefined : removeFiles?.dataFiles);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof ProcTimeoutError) {
@@ -358,7 +371,7 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       // The page run's exit code stays the answer's verdict; the data-file run
       // only adds `dataFilesExitCode` (null when it threw or timed out).
       let dataFilesExitCode: number | null | undefined;
-      if (twoRuns && proc.exitCode === 0 && removeFiles) {
+      if (twoRuns && !dataFilesOnly && proc.exitCode === 0 && removeFiles) {
         const [first, ...rest] = removeFiles.dataFiles;
         try {
           const dataProc = await run(first, rest);
@@ -393,10 +406,11 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
           exitCode: proc.exitCode,
           dryRun,
           output,
-          removes: [pageRel, ...removeFiles.dataFiles].map((r) => r.normalize("NFC")),
+          removes: [...(dataFilesOnly ? [] : [pageRel]), ...removeFiles.dataFiles].map((r) => r.normalize("NFC")),
           keptShared: removeFiles.shared,
           keptRefused: removeFiles.refused,
           ...(dataFilesExitCode !== undefined ? { dataFilesExitCode } : {}),
+          ...(dataFilesOnly ? { dataFilesOnly: true } : {}),
         });
       }
       return c.json({ exitCode: proc.exitCode, dryRun, output });
