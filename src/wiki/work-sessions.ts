@@ -33,7 +33,7 @@ import { claudeUsageHttpStatus, claudeUsageJson, claudeUsageWarnOnce } from "../
 import { isReadonlyWikiRoot, sameWikiRoot } from "./readonly.ts";
 import { parseWorkedPages, workedLedgerFor } from "./worked-ledger.ts";
 import { WORK_WINDOW_MS, type WorkSession, type WorkSessionFile } from "./work-focus.ts";
-import { ledgerHeldPast } from "../dashboard/views/components/wiki-filter.ts";
+import { ledgerInstant } from "../dashboard/views/components/wiki-filter.ts";
 
 const log = getLog("wiki", "work-sessions");
 
@@ -221,12 +221,15 @@ export function parsePreWindow(
 }
 
 /**
- * How long a memo is held through failed refreshes before it reads as absent
- * (arch review 2026-10, finding 69). A failure keeps the last good memo, so a
- * claude-usage outage would otherwise show week-old Work threads as current.
- * Measured from the FIRST failure after the memo's answer, so one transient
- * failure (the next refresh is a TTL away) never hides it, and an old memo
- * nobody asked about since (an idle reader) is not a held one. An hour, the
+ * The age past which a memo reads as absent once a refresh has failed since its
+ * answer (arch review 2026-10, finding 69). A failure keeps the last good memo,
+ * so a claude-usage outage would otherwise show week-old Work threads as
+ * current. The bound is the memo's AGE (`now − asOfMs`), not how long the
+ * failures have run: a fresh memo outlives one transient failure (the next
+ * refresh is a TTL away) for up to this long, and an old memo is gone at the
+ * first failure. A memo with no failure since its answer stands at any age —
+ * the idle reader's case, where the build that serves it has just kicked the
+ * refresh that will either replace it or record that failure. An hour, the
  * worked ledger's own `WORKED_EMPTY_RELEASE_MS`.
  */
 export const WORK_MEMO_HOLD_MS = 60 * 60_000;
@@ -238,15 +241,26 @@ const lastFailureAt = new Map<string, number>();
 const failingSince = new Map<string, number>();
 const fetchedAt = new Map<string, number>();
 
-/** The warm memo for a root, or null — null too once the memo has been held
- *  through {@link WORK_MEMO_HOLD_MS} of failed refreshes. The memo itself is
- *  kept: the next good answer replaces it. */
+/** The warm memo for a root, or null — null too once a refresh has failed
+ *  since its answer and the memo is {@link WORK_MEMO_HOLD_MS} old. The memo
+ *  itself is kept: the next good answer replaces it. Its age reads the answer
+ *  instant through `ledgerInstant`, the rule the worked chip's
+ *  `ledgerReadDayFor` reads its ledger answer with. */
 export function workSessionsFor(root: string, now: number = Date.now()): WorkSessionsMemo | null {
   const memo = memos.get(root);
   if (!memo) return null;
   const since = failingSince.get(root);
-  if (since !== undefined && since >= memo.asOfMs && ledgerHeldPast(since, now, WORK_MEMO_HOLD_MS)) return null;
-  return memo;
+  if (since === undefined || since < memo.asOfMs) return memo;
+  const asOf = ledgerInstant(memo.asOfMs, now);
+  return asOf !== undefined && now - asOf < WORK_MEMO_HOLD_MS ? memo : null;
+}
+
+/** The identity of the last good memo for a root, whatever its age or failures
+ *  since: the index build resolves `related:` absolute paths against these
+ *  roots, which say where the wiki lives and do not go stale the way the work
+ *  data does. Null when no refresh has ever succeeded. */
+export function workSessionsIdentityFor(root: string): WorkSessionsMemo["identity"] | null {
+  return memos.get(root)?.identity ?? null;
 }
 
 /**

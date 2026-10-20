@@ -866,22 +866,14 @@ export interface WikiHeaderDates {
 export const WORKED_INGEST_SLACK_MS = 10 * 60_000;
 
 /**
- * A claude-usage instant (an answer's `asOfMs`, a failure streak's start),
- * clamped to `now`; undefined when it is not a usable instant. The one
- * staleness rule both held ledger memos read: the worked chip below
- * (`ledgerReadDayFor`) and the work-sessions memo's hold bound
- * (`ledgerHeldPast`, `work-sessions.ts`).
+ * A claude-usage answer's instant (`asOfMs`), clamped to `now`; undefined when
+ * it is not a usable instant. The one staleness rule both held ledger memos
+ * read their answer time with: the worked chip below (`ledgerReadDayFor`) and
+ * the work-sessions memo's age bound (`workSessionsFor`, `work-sessions.ts`).
  */
 export function ledgerInstant(ms: number | undefined, now: number): number | undefined {
   if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return undefined;
   return Math.min(ms, now);
-}
-
-/** True once `limitMs` have passed since the instant `sinceMs` (see
- *  {@link ledgerInstant}); false for no usable instant. */
-export function ledgerHeldPast(sinceMs: number | undefined, now: number, limitMs: number): boolean {
-  const since = ledgerInstant(sinceMs, now);
-  return since !== undefined && now - since >= limitMs;
 }
 
 /**

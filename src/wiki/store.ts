@@ -61,7 +61,7 @@ import {
   normalizeWorkedPath,
   workedLedgerFor,
 } from "./worked-ledger.ts";
-import { kickWorkSessionsRefresh, workSessionsFor } from "./work-sessions.ts";
+import { kickWorkSessionsRefresh, workSessionsFor, workSessionsIdentityFor } from "./work-sessions.ts";
 import { computeWorkFocus, type IndexWork, type PageWork, type WorkPageInput } from "./work-focus.ts";
 import { buildWorkEvidence } from "./work-evidence.ts";
 
@@ -4017,7 +4017,7 @@ export async function buildWikiIndex(
   // it names ONE page: `resolve` is first-registration-wins, so `reach` (filled
   // by `register` itself) is what tells a unique name from an ambiguous one.
   if (rawRelated.size) {
-    const roots = [root, ...(workSessionsFor(root)?.identity.roots ?? [])];
+    const roots = [root, ...(workSessionsIdentityFor(root)?.roots ?? [])];
     for (const meta of pages) {
       const entries = rawRelated.get(meta.relPath);
       if (!entries) continue;

@@ -5,7 +5,7 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
-import { rm, writeFile, mkdir } from "node:fs/promises";
+import { rm, writeFile, mkdir, realpath, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -198,26 +198,41 @@ describe("refreshWorkSessions", () => {
   });
 });
 
-// Arch review 2026-10, finding 69: a memo held through an outage stops
-// reading as current once the outage has lasted `WORK_MEMO_HOLD_MS`.
+// Arch review 2026-10, finding 69: once a refresh has failed since the memo's
+// answer, a memo `WORK_MEMO_HOLD_MS` old reads as absent. The bound is the
+// memo's age, not how long the failures have run.
 describe("the age bound on a held memo", () => {
   const H = 3_600_000;
-  test("held through failures for the hold limit, the memo reads as absent; a success brings it back", async () => {
+  const DAY = 24 * H;
+  test("a fresh memo survives a failure until its age reaches the limit; a success brings it back", async () => {
     const good = await refreshWorkSessions("/w", deps({}));
     const failAt = NOW + 10 * 60_000;
     expect(await refreshWorkSessions("/w", deps({ sessions: new Error("down") }, { now: () => failAt }))).toBe(good);
-    // A single failure is not the bound: the memo still stands inside the hour.
-    expect(workSessionsFor("/w", failAt + WORK_MEMO_HOLD_MS - 1)).toBe(good);
-    // Later failures do not restart the clock.
-    await refreshWorkSessions("/w", deps({ sessions: new Error("down") }, { now: () => failAt + 30 * 60_000 }));
-    expect(workSessionsFor("/w", failAt + WORK_MEMO_HOLD_MS)).toBeNull();
-    // The memo is held, not blanked: the next good answer replaces it.
-    const back = await refreshWorkSessions("/w", deps({}, { now: () => failAt + 2 * H }));
-    expect(workSessionsFor("/w", failAt + 2 * H)).toBe(back);
+    // One failure does not hide a fresh memo.
+    expect(workSessionsFor("/w", NOW + WORK_MEMO_HOLD_MS - 1)).toBe(good);
+    // Absent at the memo's age, though the failures have run only 50 minutes.
+    expect(workSessionsFor("/w", NOW + WORK_MEMO_HOLD_MS)).toBeNull();
+    // The memo is held, not blanked: the next good answer replaces it, and a
+    // memo with no failure since its answer stands.
+    const back = await refreshWorkSessions("/w", deps({}, { now: () => NOW + 2 * H }));
+    expect(back).not.toBe(good);
+    expect(workSessionsFor("/w", NOW + 2 * H)).toBe(back);
+    expect(workSessionsFor("/w", NOW + 2 * H + WORK_MEMO_HOLD_MS + 1)).toBe(back);
   });
-  test("an old memo nobody refreshed (no failure since) still stands", async () => {
+  test("an old idle memo stands while its refresh is in flight and is absent at that refresh's first failure", async () => {
     const good = await refreshWorkSessions("/w", deps({}));
-    expect(workSessionsFor("/w", NOW + 48 * H)).toBe(good);
+    const at = NOW + 7 * DAY;
+    // No failure yet: the build that serves the idle memo kicked this refresh.
+    expect(workSessionsFor("/w", at)).toBe(good);
+    let fail!: (e: Error) => void;
+    const pending = new Promise<unknown>((_, reject) => (fail = reject));
+    const refresh = refreshWorkSessions("/w", deps({}, { now: () => at, fetchSessions: () => pending }));
+    expect(workSessionsFor("/w", at)).toBe(good);
+    fail(new Error("down"));
+    expect(await refresh).toBe(good);
+    // The first failure, not an hour of them, drops a 7-day-old memo.
+    expect(workSessionsFor("/w", at)).toBeNull();
+    expect(workSessionsFor("/w", at + 59 * 60_000)).toBeNull();
   });
   test("the index build drops the work field once the hold has expired", async () => {
     const root = await testTempDir(path.join(tmpdir(), "work-sessions-held-"));
@@ -234,6 +249,34 @@ describe("the age bound on a held memo", () => {
       expect(JSON.stringify(held.pages)).not.toContain('"work"');
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+  // `related:` is not work data: the hold must not change what it resolves to.
+  test("a held-back memo still lends its identity roots to related: resolution", async () => {
+    const base = await testTempDir(path.join(tmpdir(), "work-sessions-related-"));
+    try {
+      const real = path.join(base, "real");
+      await mkdir(path.join(real, "plans"), { recursive: true });
+      const root = path.join(base, "link");
+      await symlink(real, root);
+      const realRoot = await realpath(real);
+      await writeFile(path.join(real, "plans/b.mdx"), "# B\n");
+      // An absolute entry spelled under the root's realpath, not its registered spelling.
+      await writeFile(path.join(real, "plans/a.mdx"), `---\nrelated:\n  - ${realRoot}/plans/b.mdx\n---\n# A\n`);
+      const relatedOf = async () => (await buildWikiIndex(root)).pages.find((p) => p.relPath === "plans/a.mdx")!.related;
+      // Cold: the realpath spelling names no root this wiki answers to.
+      expect(await relatedOf()).toBeUndefined();
+      const registry = async () => [{ name: "t", root }];
+      await refreshWorkSessions(root, deps({}, { registry }));
+      expect(await relatedOf()).toEqual(["plans/b.mdx"]);
+      // A failure on a memo days old: the work data is held back…
+      await refreshWorkSessions(root, deps({ sessions: new Error("down") }, { registry, now: () => NOW + 60_000 }));
+      const held = await buildWikiIndex(root);
+      expect(held.work).toBeUndefined();
+      // …and `related:` resolves as before.
+      expect(held.pages.find((p) => p.relPath === "plans/a.mdx")!.related).toEqual(["plans/b.mdx"]);
+    } finally {
+      await rm(base, { recursive: true, force: true });
     }
   });
 });
