@@ -161,6 +161,8 @@ describe("the case-id grammar", () => {
     };
     expect(leafOf("- → Renew in 2024 — loan-7, LIB-1")?.cases).toEqual(["LIB-1"]);
     expect(leafOf("- → Renew in 2024 — loan-7, LIB-1")?.caseSplit?.body).toBe("→ Renew in 2024");
+    // Each piece carries the id it reads as; the unknown one and a struck one read as none.
+    expect(leafOf("- → Renew — loan-7, LIB-1, ~~LIB-2~~, _LIB-7_ <!-- LIB-1 -->")?.caseSplit?.ids).toEqual([null, "LIB-1", null, "LIB-7"]);
     expect(leafOf("- → Renew — loan-7")?.cases).toEqual([]);
     expect(leafOf("- → Renew — loan-7")?.caseSplit).toBeNull();
   });

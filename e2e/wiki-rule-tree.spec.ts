@@ -245,7 +245,7 @@ test.describe("Wiki reader: RuleTree", () => {
       expect(await t.evaluate((e) => e.scrollWidth - e.clientWidth)).toBeLessThanOrEqual(0);
       await t.screenshot({ path: shots(`700-${scheme}-unpicked`) });
       await t.locator(".rt-select").selectOption("LIB-101");
-      await expect(t.locator('[data-rt-kort="LIB-101"]')).toHaveText(/^(Loan )?LIB-101 · Two loans open$/);
+      await expect(t.locator('[data-rt-kort="LIB-101"]')).toHaveText("Loan LIB-101 · Two loans open");
       await t.screenshot({ path: shots(`700-${scheme}-picked`) });
     });
 
@@ -300,7 +300,7 @@ test.describe("Wiki reader: RuleTree", () => {
     const current = t.locator('li.rt-leaf[aria-current="true"]');
     await expect(current).toHaveCount(1);
     await expect(current).toHaveAttribute("data-rt-cases", /LIB-101/);
-    await expect(live).toHaveText(/^LIB-101: 1 leaf — Return\. (Loan )?LIB-101 · Two loans open$/);
+    await expect(live).toHaveText("LIB-101: 1 leaf — Return. Loan LIB-101 · Two loans open");
     // Read by a screen reader, never seen: one pixel, clipped.
     expect(await live.evaluate((e) => e.getBoundingClientRect().width)).toBeLessThanOrEqual(1);
     await select.selectOption("LIB-104");
@@ -341,10 +341,10 @@ test.describe("Wiki reader: RuleTree", () => {
     await open(page, 1280);
     const t = loanTree(page);
     await t.scrollIntoViewIfNeeded();
-    // Every row, chip and chip link: weight, ink, fill and all four borders.
+    // Every row, edge label, chip and chip link: weight, ink, fill and all four borders.
     const look = () =>
       t.evaluate((s) =>
-        Array.from(s.querySelectorAll(".rt-row, .rt-case, .rt-case a")).map((e) => {
+        Array.from(s.querySelectorAll(".rt-row, .rt-edge, .rt-case, .rt-case a")).map((e) => {
           const c = getComputedStyle(e);
           const sides = ["top", "right", "bottom", "left"].flatMap((k) =>
             ["style", "color", "width"].map((p) => c.getPropertyValue(`border-${k}-${p}`)),
@@ -404,8 +404,9 @@ test.describe("Wiki reader: RuleTree", () => {
     const peek = page.locator(".wiki-ref-peek");
     await expect(peek).toBeVisible();
     await expect(peek.locator("li").first()).toContainText("Is the book reserved by someone else?");
-    // The reader's idLabels noun rides into the peek copy with the chip's link.
-    await expect(peek).toContainText(/Return \(D2\) — (Loan )?LIB-101, LIB-102/);
+    // The reader's idLabels noun rides into the peek copy with the chip's link
+    // (pinned as it is today; a peek dropping it is a follow-up).
+    await expect(peek).toContainText("Return (D2) — Loan LIB-101, LIB-102");
     await expect(peek.locator("select, .rt-head, [class*='rt-'], [data-rt-cases], [data-rt-case], [data-rt-kort], [role='figure'], [aria-current], [aria-live], [data-rt-live], [data-rt-say]")).toHaveCount(0);
   });
 

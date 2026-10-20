@@ -66,8 +66,10 @@ export interface RuleLeaf {
   /** The case ids, each once, in source order. */
   cases: string[];
   /** `rest` cut where the cases start: `body + dash + pieces.join(",")` is `rest`.
-   *  Null when the leaf names no cases. */
-  caseSplit: { body: string; dash: string; pieces: string[] } | null;
+   *  `ids[k]` is the case id piece k reads as, null for a piece that reads as
+   *  none (struck out, empty, unknown on a board-unread page). Null when the
+   *  leaf names no cases. */
+  caseSplit: { body: string; dash: string; pieces: string[]; ids: (string | null)[] } | null;
   /** The years of the deepest node on the leaf's path that names any: the
    *  leaf's own edge label and text before its cases, else its nearest such
    *  ancestor's own text (nested lists aside). */
@@ -216,10 +218,13 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
       at = tail + m.index + 1;
     }
     pieces.push(rest.slice(at));
-    const ids = pieces.map((p) => opts.text(unstruck(p)).trim()).filter(Boolean);
-    const known = ids.filter((id) => RULE_TREE_CASE_ID_RE.test(id) || opts.boardIds?.has(id) === true);
+    const read = pieces.map((p) => opts.text(unstruck(p)).trim());
+    const ids = read.filter(Boolean);
+    const isKnown = (id: string) => RULE_TREE_CASE_ID_RE.test(id) || opts.boardIds?.has(id) === true;
+    const known = ids.filter(isKnown);
     if (known.length && (known.length === ids.length || opts.boardUnread === true)) {
-      caseSplit = { body: rest.slice(0, dash.index), dash: rest.slice(dash.index, tail), pieces };
+      const pieceIds = read.map((id) => (id && isKnown(id) ? id : null));
+      caseSplit = { body: rest.slice(0, dash.index), dash: rest.slice(dash.index, tail), pieces, ids: pieceIds };
       cases = [...new Set(known)];
     }
     // On a page with a board the lint did not read, an unknown id may be a board id.
