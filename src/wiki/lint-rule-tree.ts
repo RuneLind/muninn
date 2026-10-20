@@ -6,14 +6,13 @@
  *
  * - warning: the block holds no list (it renders as written), an `outcomes=`
  *   entry it cannot read, a leaf with no outcome after `→`, an outcome with no
- *   tone, a case on two leaves that do not each name a different year on
- *   their paths (the deepest node naming a year sets a leaf's years; the
- *   title does not count);
+ *   tone, a case on two leaves unless each names a different year (a leaf
+ *   names the years of the deepest edge label on its path that names any;
+ *   prose and the title never count);
  * - info: an `outcomes=` label that names no leaf outcome, or names one twice;
- *   an item whose `→` (or `->`) opens its text after a lead, not read as a
- *   leaf; a leaf whose
- *   text after the last ` — ` reads as no case ids (not on a CaseBoard page,
- *   where an unknown id may be a board id).
+ *   an item whose `→` (or `->`) opens its text, after an optional lead, not
+ *   read as a leaf; a leaf whose text after the last ` — ` reads as no case
+ *   ids (not on a CaseBoard page, where an unknown id may be a board id).
  *
  * The lint reads no CaseBoard file, so a case id counts here only by its
  * grammar (`RULE_TREE_CASE_ID_RE`); the reader also takes a board id. On a page with a

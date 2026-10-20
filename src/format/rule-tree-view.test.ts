@@ -335,7 +335,8 @@ describe("the reader and the lint read one tree", () => {
   });
 
   // Two leaves of one case on a year-shaped path: the reader draws both with
-  // their cases, and the lint warns exactly when no year keeps them apart.
+  // their cases, and the lint warns unless the deepest year-naming edge label
+  // on each path names a different year.
   test.each([
     ["a year split under a parent naming both years", ["- Rule changed between 2024 and 2025", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Renew — LIB-1"], false],
     ["a year split under a parent naming an earlier year", ["- Applied after 2023?", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Renew — LIB-1"], false],
@@ -346,6 +347,11 @@ describe("the reader and the lint read one tree", () => {
     ["a year inside a bare URL", ["- See http://x/2024/a", "  - → Renew — LIB-1", "- See http://x/2025/a", "  - → Renew — LIB-1"], true],
     ["a node with no year between a year parent and a leaf", ["- *2024:*", "  - Is it reserved?", "    - → Renew — LIB-1", "- *2025:*", "  - Is it reserved?", "    - → Renew — LIB-1"], false],
     ["a year inside an autolink", ["- See <http://x/2024/a>", "  - → Renew — LIB-1", "- See <http://x/2025/a>", "  - → Renew — LIB-1"], true],
+    ["a prose year in a leaf under one year parent", ["- *2025:*", "  - → Renew (rule since 2019) — LIB-1", "  - → Renew — LIB-1"], true],
+    ["a prose year below a year split", ["- *2024:*", "  - Applies since 2019?", "    - → Renew — LIB-1", "- *2025:*", "  - Applies since 2019?", "    - → Renew — LIB-1"], false],
+    ["a year only in an ancestor's prose", ["- Loans from 2024", "  - → Renew — LIB-1", "- Loans from 2025", "  - → Renew — LIB-1"], true],
+    ["a parent edge label naming an earlier year", ["- *From 2024:*", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Renew — LIB-1"], false],
+    ["an incidental year in a leaf's edge label", ["- *2025:*", "  - *Yes (since 2019):* → Renew — LIB-1", "  - *No:* → Renew — LIB-1"], false],
   ] as [string, string[], boolean][])("years: %s", (_name, body, warns) => {
     const md = tree(body.join("\n"), 'title="T" outcomes="Renew=good"');
     expect(renderedLeaves(md)).toEqual({ leaves: 2, toned: 2, cased: 2 });

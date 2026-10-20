@@ -32,7 +32,7 @@ const readOutcomeTone = (v: string): StatusTone | null => {
 /** A case id by grammar; any other id counts only when a CaseBoard on the page holds it. */
 export const RULE_TREE_CASE_ID_RE = /^[A-Z]+-\d+$/;
 
-/** A year a leaf names: 19xx or 20xx, not inside a longer word or number. */
+/** A year an edge label names: 19xx or 20xx, not inside a longer word or number. */
 const YEAR_RE = /(?<![\p{L}\p{N}])(?:19|20)\d{2}(?![\p{L}\p{N}])/gu;
 
 /** A bare URL: no year inside it is one. */
@@ -40,9 +40,6 @@ const BARE_URL_RE = /(?:\b[a-z][a-z\d+.-]*:\/\/|\bwww\.)[^\s<>]*/giu;
 
 /** A case id by grammar inside text, a `-` either side allowed: no year inside it is one. */
 const CASE_ID_IN_TEXT_RE = /(?<![\p{L}\p{N}])[A-Z]+-\d+(?![\p{L}\p{N}])/gu;
-
-/** A word, `-`-joined parts kept together: the shape a board id has. */
-const ID_WORD_RE = /[\p{L}\p{N}_]+(?:-[\p{L}\p{N}_]+)*/gu;
 
 /** The italic lead: `*label*` or `_label_`, an optional `:` after it. */
 const LEAD_RES = [/^\*(?![\s*→])([^*\n]+?)\*(?![*\p{L}\p{N}_])(:?)/u, /^_(?![\s_→])([^_\n]+?)_(?![_\p{L}\p{N}])(:?)/u];
@@ -70,9 +67,8 @@ export interface RuleLeaf {
    *  none (struck out, empty, unknown on a board-unread page). Null when the
    *  leaf names no cases. */
   caseSplit: { body: string; dash: string; pieces: string[]; ids: (string | null)[] } | null;
-  /** The years of the deepest node on the leaf's path that names any: the
-   *  leaf's own edge label and text before its cases, else its nearest such
-   *  ancestor's own text (nested lists aside). */
+  /** The years of the deepest edge label on the leaf's path that names any:
+   *  the leaf's own, else its parent's, and so on up. Prose never counts. */
   years: string[];
   /** The leaf has a ` — ` tail that reads as no case ids (a typo, a full stop
    *  after the id): lint names it, since the reader draws it as text. */
@@ -148,13 +144,9 @@ const unstruck = (s: string) => s.replace(/~~[\s\S]*?~~/g, "");
 /** `s` with code spans and link destinations masked, length kept. */
 const maskInline = (s: string) => maskCode(s).replace(LINK_DEST_RE, (_m, text: string, dest: string) => text + CODE_MASK.repeat(dest.length));
 
-/** The years `raw`'s visible text names, struck text, bare URLs, case ids and board ids aside. */
-function yearsIn(raw: string, opts: RuleTreeReadOptions): string[] {
-  const text = opts
-    .text(unstruck(raw))
-    .replace(BARE_URL_RE, " ")
-    .replace(CASE_ID_IN_TEXT_RE, " ")
-    .replace(ID_WORD_RE, (w) => (opts.boardIds?.has(w) ? " " : w));
+/** The years an edge label's visible text names, struck text, bare URLs and case ids aside. */
+function edgeYears(lead: string, opts: RuleTreeReadOptions): string[] {
+  const text = opts.text(unstruck(lead)).replace(BARE_URL_RE, " ").replace(CASE_ID_IN_TEXT_RE, " ");
   return [...new Set(text.match(YEAR_RE) ?? [])];
 }
 
@@ -191,7 +183,7 @@ function readLead(raw: string, text: (raw: string) => string): RuleNode["lead"] 
   return null;
 }
 
-function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLeaf | null {
+function readLeaf(rest: string, opts: RuleTreeReadOptions): RuleLeaf | null {
   // Code spans and link destinations masked, so a `(`, `,` or dash in either is no delimiter.
   const masked = maskInline(rest);
   const arrow = ARROW_RE.exec(masked);
@@ -230,18 +222,18 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
     // On a page with a board the lint did not read, an unknown id may be a board id.
     unreadTail = ids.length > 0 && !caseSplit && opts.boardUnread !== true;
   }
-  return { outcome, tone: null, cases, caseSplit, years: yearsIn(lead + (caseSplit ? caseSplit.body : rest), opts), unreadTail };
+  // `readNodes` sets the years: they come from the path's edge labels.
+  return { outcome, tone: null, cases, caseSplit, years: [], unreadTail };
 }
 
-/** `pathYears`: the years of the nearest ancestor whose own text names any. */
+/** `pathYears`: the years of the deepest edge label above `list` that names any. */
 function readNodes(list: ListBlock, opts: RuleTreeReadOptions, pathYears: readonly string[] = []): RuleNode[] {
   return list.items.map((raw, k) => {
     const lead = readLead(raw, opts.text);
     const rest = raw.slice(lead?.raw.length ?? 0);
-    const leaf = readLeaf(lead?.raw ?? "", rest, opts);
-    // The deepest node on the path that names a year sets the years: a split
-    // below a parent that names both years reads the split's.
-    const own = leaf ? leaf.years : yearsIn(raw, opts);
+    const leaf = readLeaf(rest, opts);
+    // The deepest edge label on the path that names a year sets the years.
+    const own = lead ? edgeYears(lead.raw, opts) : [];
     const years = own.length ? own : [...pathYears];
     if (leaf) leaf.years = years;
     const under: RuleUnder[] = (list.nested?.[k] ?? []).map((c) =>

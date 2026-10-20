@@ -169,35 +169,42 @@ describe("the case-id grammar", () => {
 });
 
 describe("a case on two leaves", () => {
-  const twoLeaves = (a: string, b: string) => read(tree("Renew=good;Return=muted", [`- *Yes:* ${a}`, `- *No:* ${b}`].join("\n")));
   const caseFindings = (r: ReturnType<typeof read>) => r.findings.filter((f) => f.message.startsWith("case "));
+  const warnsOn = (lines: readonly string[], title?: string) => caseFindings(read(tree("Renew=good;Return=muted", lines.join("\n"), title))).length > 0;
+  /** Two root leaves sharing LIB-1, `a` and `b` their edge labels. */
+  const twoLeaves = (a: string, b: string) => read(tree("Renew=good;Return=muted", [`- *${a}:* → Renew — LIB-1`, `- *${b}:* → Return — LIB-1`].join("\n")));
 
   test("warns, on the second leaf, when neither names a year", () => {
-    const r = twoLeaves("→ Renew — LIB-1", "→ Return — LIB-1");
+    const r = twoLeaves("Yes", "No");
     const [f] = caseFindings(r);
     expect(f?.level).toBe("warning");
     expect(f?.message).toBe("case LIB-1 is on 2 leaves that do not each name a different year: «Yes: → Renew — LIB-1», «No: → Return — LIB-1»");
     expect(f?.node).toBe(r.nodes[1]);
   });
 
+  // The year grammar, read from an edge label's visible text.
   test.each([
-    ["each names a different year", "→ Renew in 2023 — LIB-1", "→ Return in 2024 — LIB-1", 0],
-    ["the year sits in the edge label", "→ Renew — LIB-1", "→ Return — LIB-1", 1],
-    ["both name the same year", "→ Renew in 2024 — LIB-1", "→ Return in 2024 — LIB-1", 1],
-    ["only one names a year", "→ Renew in 2024 — LIB-1", "→ Return — LIB-1", 1],
-    ["a year in a longer number is no year", "→ Renew 12024 — LIB-1", "→ Return 12023 — LIB-1", 1],
-    ["a year glued to a word is no year", "→ Renew FY2023 — LIB-1", "→ Return FY2024 — LIB-1", 1],
-    ["1899 and 2100 are no years", "→ Renew 1899 — LIB-1", "→ Return 2100 — LIB-1", 1],
-    ["1900 and 2099 are years", "→ Renew 1900 — LIB-1", "→ Return 2099 — LIB-1", 0],
-    ["a year before a hyphen counts", "→ Renew 2023-24 — LIB-1", "→ Return 2025 — LIB-1", 0],
-    ["a struck year is no year", "→ Renew ~~2023~~ — LIB-1", "→ Return 2024 — LIB-1", 1],
-  ])("%s", (_name, a, b, n) => {
+    ["each names a different year", "In 2023", "In 2024", 0],
+    ["no edge label names a year", "Yes", "No", 1],
+    ["both name the same year", "In 2024", "In 2024", 1],
+    ["only one names a year", "In 2024", "No", 1],
+    ["a year in a longer number is no year", "Code 12024", "Code 12023", 1],
+    ["a year glued to a word is no year", "FY2023", "FY2024", 1],
+    ["1899 and 2100 are no years", "In 1899", "In 2100", 1],
+    ["1900 and 2099 are years", "In 1900", "In 2099", 0],
+    ["a year before a hyphen counts", "2023-24", "2025", 0],
+    ["a lowercase id is no case id, so its year counts", "fy-2024", "fy-2025", 0],
+    ["a year inside a case id is no year", "See FY-2024", "See FY-2025", 1],
+    ["a year beside a case id counts", "In 2024, see LIB-9", "In 2025, see LIB-9", 0],
+    ["a struck year is no year", "~~2023~~", "2024", 1],
+    ["a struck year beside a kept one", "~~2024~~ 2025", "2024", 0],
+    ["a year in a code span counts", "In `2024`", "In `2025`", 0],
+    ["a year in a link destination is no year", "See [rule](loans/2024)", "See [rule](loans/2025)", 1],
+    ["a year in link text counts", "See [rule 2024](loans)", "See [rule 2025](loans)", 0],
+    ["a year inside a bare URL is no year", "See http://x/2024/a", "See http://x/2025/a", 1],
+    ["a year inside a www URL is no year", "See www.x.no/2024/a", "See www.x.no/2025/a", 1],
+  ])("edge labels: %s", (_name, a, b, n) => {
     expect(caseFindings(twoLeaves(a, b))).toHaveLength(n);
-  });
-
-  test("a year in the edge label counts", () => {
-    const r = read(tree("Renew=good;Return=muted", ["- *In 2023:* → Renew — LIB-1", "- *In 2024:* → Return — LIB-1"].join("\n")));
-    expect(caseFindings(r)).toEqual([]);
   });
 
   test("a year on the leaf's path counts: a tree that splits on the year above its leaves", () => {
@@ -206,54 +213,13 @@ describe("a case on two leaves", () => {
     expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2024"], ["2025"]]);
   });
 
-  test("a year in an ancestor's item text before its child list counts", () => {
-    const r = read(tree("Renew=good;Return=muted", ["- Loans from 2024", "  - → Renew — LIB-1", "- Loans from 2025", "  - → Return — LIB-1"].join("\n")));
-    expect(caseFindings(r)).toEqual([]);
-  });
-
-  test("a leaf's own year wins over its parent's", () => {
+  test("a leaf's own edge label wins over its parent's", () => {
     const r = read(tree("Renew=good;Return=muted", ["- *2024:*", "  - *In 2025:* → Renew — LIB-1", "- *2025:*", "  - → Return — LIB-1"].join("\n")));
     expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2025"], ["2025"]]);
     expect(caseFindings(r)).toHaveLength(1);
   });
 
-  test.each([
-    ["a shared parent names both years", ["- Rule changed between 2024 and 2025", "  - *2024:* → Yes — LIB-1", "  - *2025:* → No — LIB-1"]],
-    ["a shared parent names an earlier year", ["- Applied after 2023?", "  - *2024:* → Yes — LIB-1", "  - *2025:* → No — LIB-1"]],
-    ["the split sits one level below the year parent", ["- Changed in 2024 and 2025", "  - *2024:*", "    - → Yes — LIB-1", "  - *2025:*", "    - → No — LIB-1"]],
-  ])("the deepest year on the path counts: %s", (_name, body) => {
-    const r = read(tree("Yes=good;No=muted", body.join("\n")));
-    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2024"], ["2025"]]);
-    expect(caseFindings(r)).toEqual([]);
-  });
-
-  test("an ancestor's years come from its visible text, not a link destination", () => {
-    const r = read(tree("Renew=good;Return=muted", ["- See [rule](loans/2024)", "  - → Renew — LIB-1", "- See [rule](loans/2025)", "  - → Return — LIB-1"].join("\n")));
-    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([[], []]);
-    expect(caseFindings(r)).toHaveLength(1);
-  });
-
-  test.each([
-    ["a case id on the ancestors", "See LIB-2024", "See LIB-2025"],
-    ["a case id after a hyphen on the ancestors", "See ref-LIB-2024", "See ref-LIB-2025"],
-    ["a bare URL on the ancestors", "See http://x/2024/a", "See http://x/2025/a"],
-    ["a www URL on the ancestors", "See www.x.no/2024/a", "See www.x.no/2025/a"],
-    ["an autolink on the ancestors", "See <http://x/2024/a>", "See <http://x/2025/a>"],
-  ])("a year inside %s is no year", (_name, a, b) => {
-    const r = read(tree("Renew=good;Return=muted", [`- ${a}`, "  - → Renew — LIB-1", `- ${b}`, "  - → Return — LIB-1"].join("\n")));
-    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([[], []]);
-    expect(caseFindings(r)).toHaveLength(1);
-  });
-
-  test.each([
-    ["a case id in the leaf text", "→ Renew, see LIB-2024 — LIB-1", "→ Return, see LIB-2025 — LIB-1", 1],
-    ["a bare URL in the leaf text", "→ Renew, see http://x/2024 — LIB-1", "→ Return, see http://x/2025 — LIB-1", 1],
-    ["a year beside a case id still counts", "→ Renew in 2024, see LIB-9 — LIB-1", "→ Return in 2025, see LIB-9 — LIB-1", 0],
-  ])("on the leaf: %s", (_name, a, b, n) => {
-    expect(caseFindings(twoLeaves(a, b))).toHaveLength(n);
-  });
-
-  test("a year-naming node's years pass through a node that names none", () => {
+  test("a year-naming edge label's years pass through a node that names none", () => {
     const body = ["- *2024:*", "  - Is it reserved?", "    - → Renew — LIB-1", "- *2025:*", "  - Is it reserved?", "    - → Return — LIB-1"];
     const r = read(tree("Renew=good;Return=muted", body.join("\n")));
     expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2024"], ["2025"]]);
@@ -264,23 +230,6 @@ describe("a case on two leaves", () => {
     const [block] = componentBlocks(parseBlocks(tree("Renew=good;Return=muted", "- → Renew — LIB-1, loan_2024\n- → Return — LIB-1, loan_2025")), "RuleTree");
     const r = readRuleTree(block?.children ?? [], block?.attrs ?? {}, { text: visibleText, boardUnread: true });
     expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([[], []]);
-    expect(caseFindings(r)).toHaveLength(1);
-  });
-
-  test("a board id with no hyphen in the text is no year", () => {
-    const md = tree("Renew=good;Return=muted", ["- See loan_2024", "  - → Renew — LIB-1", "- See loan_2025", "  - → Return — LIB-1"].join("\n"));
-    expect(caseFindings(read(md, new Set(["loan_2024", "loan_2025"])))).toHaveLength(1);
-    expect(caseFindings(read(md))).toEqual([]);
-  });
-
-  test("a board id in the text is no year", () => {
-    const md = tree("Renew=good;Return=muted", ["- See loan-2024", "  - → Renew — LIB-1", "- See loan-2025", "  - → Return — LIB-1"].join("\n"));
-    expect(caseFindings(read(md, new Set(["loan-2024", "loan-2025"])))).toHaveLength(1);
-    expect(caseFindings(read(md))).toEqual([]);
-  });
-
-  test("a year only in the title is not on any path", () => {
-    const r = read(tree("Renew=good;Return=muted", ["- *Yes:* → Renew — LIB-1", "- *No:* → Return — LIB-1"].join("\n"), "Renewals in 2024"));
     expect(caseFindings(r)).toHaveLength(1);
   });
 
@@ -295,9 +244,101 @@ describe("a case on two leaves", () => {
     expect(caseFindings(r)).toHaveLength(1);
   });
 
+  // Named regressions: each tree is one a reader may write, its verdict the rule's.
+  test.each([
+    // An incidental year in a leaf's prose does not replace its parent's edge label.
+    ["a prose year in a leaf under one year parent", ["- *2025:*", "  - → Renew (rule since 2019) — LIB-1", "  - → Return — LIB-1"], true],
+    // An incidental year in prose below the split does not hide the split.
+    ["a prose year below a year split", ["- *2024:*", "  - Applies since 2019?", "    - → Renew — LIB-1", "- *2025:*", "  - Applies since 2019?", "    - → Return — LIB-1"], false],
+    ["a parent's prose names both years", ["- Rule changed between 2024 and 2025", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Return — LIB-1"], false],
+    ["a parent's edge label names an earlier year: the deepest wins", ["- *From 2024:*", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Return — LIB-1"], false],
+    // The rule's accepted cost: an edge label's incidental year counts.
+    ["an incidental year in a leaf's edge label", ["- *2025:*", "  - *Yes (since 2019):* → Renew — LIB-1", "  - *No:* → Return — LIB-1"], false],
+    ["a year only in an ancestor's prose", ["- Loans from 2024", "  - → Renew — LIB-1", "- Loans from 2025", "  - → Return — LIB-1"], true],
+    ["a year only in the leaves' prose", ["- → Renew in 2023 — LIB-1", "- → Return in 2024 — LIB-1"], true],
+    ["a case id in prose", ["- See FY-2024", "  - → Renew — LIB-1", "- See FY-2025", "  - → Return — LIB-1"], true],
+    ["a lowercase id in prose", ["- See fy-2024", "  - → Renew — LIB-1", "- See fy-2025", "  - → Return — LIB-1"], true],
+  ] as [string, string[], boolean][])("%s", (_name, lines, warns) => {
+    expect(warnsOn(lines)).toBe(warns);
+  });
+
+  test("a year only in the title is on no path", () => {
+    expect(warnsOn(["- *Yes:* → Renew — LIB-1", "- *No:* → Return — LIB-1"], "Renewals in 2024")).toBe(true);
+  });
+
   test("two leaves under one year parent share that year", () => {
     const r = read(tree("Renew=good;Return=muted", ["- *2024:*", "  - *Yes:* → Renew — LIB-1", "  - *No:* → Return — LIB-1"].join("\n")));
     expect(caseFindings(r)).toHaveLength(1);
+  });
+});
+
+// The rule, enumerated: leaves A and B share LIB-1, each three levels deep
+// (grandparent, parent, leaf), every node carrying an edge label. A year sits in
+// up to two places on each path; the title may hold one too. The oracle below
+// states the rule on its own: a leaf names the years of the deepest edge label on
+// its path that names any, and two leaves sharing a case warn unless both name
+// years and none of A's is one of B's.
+describe("a case on two leaves, every year placement", () => {
+  const PLACES = ["leafEdge", "leafProse", "parentEdge", "parentProse", "gpEdge", "gpProse"] as const;
+  type Place = (typeof PLACES)[number];
+  type Spec = Partial<Record<Place, string>>;
+  const YEARS = ["2024", "2025"];
+
+  const specs: Spec[] = [{}];
+  for (const p of PLACES) for (const y of YEARS) specs.push({ [p]: y });
+  for (let i = 0; i < PLACES.length; i++) {
+    for (let j = i + 1; j < PLACES.length; j++) {
+      for (const y of YEARS) for (const z of YEARS) specs.push({ [PLACES[i] as Place]: y, [PLACES[j] as Place]: z });
+    }
+  }
+
+  const edge = (name: string, y: string | undefined) => `*${name}${y ? ` ${y}` : ""}:*`;
+  const gp = (s: Spec, name: string) => `- ${edge(name, s.gpEdge)} Is it a loan${s.gpProse ? ` since ${s.gpProse}` : ""}?`;
+  const parent = (s: Spec, name: string) => `  - ${edge(name, s.parentEdge)} Is it reserved${s.parentProse ? ` since ${s.parentProse}` : ""}?`;
+  const leaf = (s: Spec, name: string, outcome: string) =>
+    `    - ${edge(name, s.leafEdge)} → ${outcome}${s.leafProse ? ` (rule since ${s.leafProse})` : ""} — LIB-1`;
+
+  type Topology = "apart" | "shared grandparent" | "shared parent";
+  const same = (a: Spec, b: Spec, ps: readonly Place[]) => ps.every((p) => a[p] === b[p]);
+  function build(t: Topology, a: Spec, b: Spec): string[] | null {
+    if (t === "apart") return [gp(a, "GA"), parent(a, "PA"), leaf(a, "LA", "Renew"), gp(b, "GB"), parent(b, "PB"), leaf(b, "LB", "Return")];
+    if (!same(a, b, ["gpEdge", "gpProse"])) return null;
+    if (t === "shared grandparent") return [gp(a, "G"), parent(a, "PA"), leaf(a, "LA", "Renew"), parent(b, "PB"), leaf(b, "LB", "Return")];
+    if (!same(a, b, ["parentEdge", "parentProse"])) return null;
+    return [gp(a, "G"), parent(a, "P"), leaf(a, "LA", "Renew"), leaf(b, "LB", "Return")];
+  }
+
+  // The oracle: THE RULE in a few lines, sharing nothing with the reader.
+  const named = (s: Spec) => s.leafEdge ?? s.parentEdge ?? s.gpEdge;
+  const oracleWarns = (a: Spec, b: Spec) => {
+    const ya = named(a);
+    const yb = named(b);
+    return !(ya && yb && ya !== yb);
+  };
+
+  const caseFindingsOf = (r: ReturnType<typeof read>) => r.findings.filter((f) => f.message.startsWith("case "));
+  // 73 specs a leaf; two titles. Apart: 2·73². Shared: only pairs that agree on the shared nodes.
+  const TABLE_SIZE: Record<Topology, number> = { apart: 10658, "shared grandparent": 2834, "shared parent": 610 };
+
+  const describeSpec = (s: Spec) => PLACES.filter((p) => s[p]).map((p) => `${p}=${s[p]}`).join("+") || "none";
+
+  test.each(["apart", "shared grandparent", "shared parent"] as Topology[])("%s", (t) => {
+    const wrong: string[] = [];
+    let n = 0;
+    for (const title of ["Can the book be renewed?", "Renewals in 2024"]) {
+      for (const a of specs) {
+        for (const b of specs) {
+          const lines = build(t, a, b);
+          if (!lines) continue;
+          n++;
+          const got = caseFindingsOf(read(tree("Renew=good;Return=muted", lines.join("\n"), title))).length > 0;
+          const want = oracleWarns(a, b);
+          if (got !== want) wrong.push(`A ${describeSpec(a)} | B ${describeSpec(b)} | title ${title.includes("2024") ? "2024" : "none"}: want ${want ? "warn" : "none"}`);
+        }
+      }
+    }
+    expect({ wrong: wrong.slice(0, 40), wrongCount: wrong.length }).toEqual({ wrong: [], wrongCount: 0 });
+    expect(n).toBe(TABLE_SIZE[t]);
   });
 });
 
