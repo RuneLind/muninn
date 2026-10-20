@@ -8,7 +8,8 @@
  * `item-dates.ts`: a log item and a query read exactly as the reader's
  * `data-item-date` stamps do (`itemDate`: the latest date not after the render
  * day), a Timeline item by the date it leads with (`parseTimelineItem`), read
- * by `itemDates`, so a planned step after today keeps its place.
+ * by `itemDates`, so a planned step after today keeps its place. A year-less
+ * Timeline date is undated here.
  */
 
 import { parseLogItem, parseTimelineItem } from "./genre-lists.ts";
@@ -41,9 +42,9 @@ const LABEL_MAX = 48;
 
 const LANE_ORDER: readonly LaneKind[] = ["decisions", "queries", "timeline"];
 
-const WORDS: Record<QuestionLanguage, { title: string; lanes: Record<LaneKind, string>; dated: (n: number) => string }> = {
-  en: { title: "Dates on this page", lanes: { decisions: "Decisions", queries: "Queries", timeline: "Timeline" }, dated: (n) => `${n} dated` },
-  no: { title: "Datoer på siden", lanes: { decisions: "Beslutninger", queries: "Spørringer", timeline: "Tidslinje" }, dated: (n) => `${n} datert` },
+const WORDS: Record<QuestionLanguage, { title: string; lanes: Record<LaneKind, string>; query: string; dated: (n: number) => string }> = {
+  en: { title: "Dates on this page", lanes: { decisions: "Decisions", queries: "Queries", timeline: "Timeline" }, query: "Query", dated: (n) => `${n} dated` },
+  no: { title: "Datoer på siden", lanes: { decisions: "Beslutninger", queries: "Spørringer", timeline: "Tidslinje" }, query: "Spørring", dated: (n) => `${n} datert` },
 };
 
 /** The days an item date is read with, as `formatWebHtml`'s `itemDates`. */
@@ -84,12 +85,15 @@ export function pageTimelineLanes(blocks: readonly Block[], days: LaneDays, show
       } else if (b.name === "Query") {
         const q = parseQueryAttrs(b.attrs);
         const day = q.run ? itemDate(shown(q.run), days.ref, days.today) : null;
-        if (day) lanes.queries.push({ day, label: q.id || cut(shown(q.question)) });
+        // "" when the Query has neither: the renderer names it by the word for a query.
+        if (day) lanes.queries.push({ day, label: cut(shown(q.id)) || cut(shown(q.question)) });
         walk(b.children);
       } else if (b.name === "Timeline") {
         for (const { text } of bodyItems(b.children)) {
           const t = parseTimelineItem(text);
-          const day = t.date ? itemDates(t.date, days.ref)[0] : undefined;
+          // A year-less date is undated here: the nearest-year guess can land
+          // a year off and out of written order, stretching the axis.
+          const day = t.date && /\d{4}/.test(t.date) ? itemDates(t.date, days.ref)[0] : undefined;
           if (day) lanes.timeline.push({ day, label: cut(shown(t.text)) });
         }
       } else {
@@ -127,7 +131,7 @@ export const timelineLanesHtml: TimelineLanesRenderer = (blocks, days, language,
     .map((lane) => {
       const byDay = new Map<string, string[]>();
       for (const i of [...lane.items].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))) {
-        byDay.set(i.day, [...(byDay.get(i.day) ?? []), i.label]);
+        byDay.set(i.day, [...(byDay.get(i.day) ?? []), i.label || (lane.kind === "queries" ? w.query : "")]);
       }
       const marks = [...byDay]
         .map(([day, labels]) => {

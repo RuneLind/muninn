@@ -114,7 +114,7 @@ describe("dates", () => {
       "status_date: 2026-09-20",
       "---",
       "",
-      page(status, log("**D1** — A. 07.09", "**D2** — B. 08.09.2026"), timeline("**2026-09-09 14:05** — X", "**10.09** — Y")),
+      page(status, log("**D1** — A. 07.09", "**D2** — B. 08.09.2026"), timeline("**2026-09-09 14:05** — X", "**10.09.2026** — Y")),
     ].join("\n");
     expect(marks(reader(md)).map(([k, m]) => [k, (m as string[]).map((x) => x.split(" ")[1])])).toEqual([
       ["decisions", ["2026-09-07:", "2026-09-08:"]],
@@ -185,5 +185,38 @@ describe("placement and surfaces", () => {
     for (const out of [formatWebHtml(FULL), formatWebHtml(FULL, { views: true }), formatTelegramHtml(FULL), formatSlackMrkdwn(FULL), formatEmailHtml(FULL)]) {
       expect(out).not.toContain("tll-");
     }
+  });
+});
+
+describe("labels", () => {
+  test("a wikilink Query id reads as its link text: no link inside the lanes, the title holds the text", () => {
+    const md = page(
+      status,
+      [`<Query id="[[plans/q|Q-9]]" question="How many holds?" run="2026-09-04" />`, ""],
+      query("Q-2", "2026-09-06"),
+      timeline("**2026-09-01** — X", "**2026-09-10** — Y"),
+    );
+    const resolving = (target: string) => ({ name: target, title: target, relPath: `${target}.md` }) as unknown as NonNullable<ReturnType<Parameters<typeof renderWikiHtml>[1]>>;
+    const lanes = lanesOf(renderWikiHtml(md, resolving, { views: true, today: TODAY }));
+    expect(lanes).not.toBe("");
+    expect(lanes).not.toContain("<a");
+    expect(lanes).toContain('title="2026-09-04: Q-9"');
+  });
+
+  test("a Query with neither id nor question is named by the word for a query", () => {
+    const md = page(status, [`<Query run="2026-09-04" />`, ""], query("Q-2", "2026-09-06"), timeline("**2026-09-01** — X", "**2026-09-10** — Y"));
+    expect(lanesOf(reader(md))).toContain('title="2026-09-04: Query"');
+    const no = renderWikiHtml(md, () => undefined, { views: true, today: TODAY, language: "no" } as Parameters<typeof renderWikiHtml>[2]);
+    expect(lanesOf(no)).toContain('title="04.09.2026: Spørring"');
+  });
+});
+
+describe("year-less Timeline dates", () => {
+  test("a Timeline date without a year is undated for the lanes, not moved to the nearest year", () => {
+    const md = page(status, log("**D1** — A. 2026-09-01", "**D2** — B. 2026-09-20"), timeline("**2026-09-02** — X", "**15.03** — Spring", "**2026-09-10** — Y"));
+    expect(marks(reader(md))).toEqual([
+      ["decisions", ["0 2026-09-01: D1", "100 2026-09-20: D2"]],
+      ["timeline", ["5.3 2026-09-02: X", "47.4 2026-09-10: Y"]],
+    ]);
   });
 });
