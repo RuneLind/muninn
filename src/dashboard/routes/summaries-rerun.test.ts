@@ -22,7 +22,13 @@
  * Every fixture is invented. This repo is public.
  */
 
-import { test, expect, describe, beforeEach, afterAll } from "bun:test";
+import { test, expect, describe, beforeEach, beforeAll, afterAll } from "bun:test";
+import { __setClaudeCliVersionForTest } from "../../ai/tool-surface.ts";
+
+// The frames pre-flights read the installed Claude CLI version; pin one new
+// enough for `--restricted`, so a runner without `claude` gets the same answer.
+beforeAll(() => __setClaudeCliVersionForTest("2.1.304"));
+afterAll(() => __setClaudeCliVersionForTest(undefined));
 import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from "node:fs";
@@ -106,7 +112,7 @@ interface Recorded {
   prompts: Array<{
     system: string;
     user: string;
-    extraDirs?: string[];
+    toolSurface: unknown;
     url: string;
     title: string;
     source: string;
@@ -146,7 +152,7 @@ function makeDeps(
       rec.prompts.push({
         system: o.systemPrompt as string,
         user: o.prompt as string,
-        ...(o.extraDirs ? { extraDirs: o.extraDirs as string[] } : {}),
+        toolSurface: o.toolSurface,
         url: o.url as string,
         title: o.title as string,
         source: o.source as string,
@@ -350,6 +356,8 @@ describe("the ingest body", () => {
     expect(body.summary).toBe("A fresh summary.");
     // The stored language wins: a re-run never re-resolves `talk`.
     expect(rec.prompts[0]!.system).toContain("bokm");
+    // No kept frames: the replay runs with no tools at all.
+    expect(rec.prompts[0]!.toolSurface).toBe("none");
   });
   test("a QUOTED value that looks numeric is re-sent as a STRING, not a number", async () => {
     // The double-decode trap: the reader decodes once for the fields the route
@@ -547,6 +555,65 @@ describe("refusals", () => {
     // quotes the tail then stripped, i.e. pictures gone with no error anywhere.
     expect(rec.prompts.length).toBe(0);
     expect(rec.ingests.length).toBe(0);
+  });
+
+  test("kept frames on a claude-cli older than --restricted is 503, before a job", async () => {
+    const root = tempFramesRoot();
+    const dir = join(root, "youtube", VIDEO_ID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "x");
+    const cli = { ...BOT, connector: "claude-cli" } as unknown as BotConfig;
+    const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, bot: cli });
+    __setClaudeCliVersionForTest("2.1.200");
+    try {
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      expect(res.status).toBe(503);
+      expect(res.json.code).toBe("cli_too_old");
+      expect(String(res.json.error)).toContain("needs Claude CLI 2.1.303 or newer");
+      await settle();
+      expect(rec.prompts.length).toBe(0);
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
+  });
+
+  test("a text-only re-run (no kept frames) on a claude-cli older than --restricted still runs, tool-less", async () => {
+    // No frames ⇒ the run declares `"none"`, which every CLI runs: the version
+    // pre-flight applies to the slide pass only.
+    const root = tempFramesRoot();
+    const cli = { ...BOT, connector: "claude-cli" } as unknown as BotConfig;
+    const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, bot: cli });
+    __setClaudeCliVersionForTest("2.1.200");
+    try {
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      expect(res.status).toBe(200);
+      await settle();
+      expect(rec.prompts.length).toBe(1);
+      expect(rec.prompts[0]!.toolSurface).toBe("none");
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
+  });
+
+  test("kept frames on a claude-sdk bot re-run whatever the installed CLI reports: only claude-cli is version-gated", async () => {
+    const root = tempFramesRoot();
+    const dir = join(root, "youtube", VIDEO_ID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "x");
+    const sdk = { ...BOT, connector: "claude-sdk" } as unknown as BotConfig;
+    for (const version of ["2.1.200", null]) {
+      const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, bot: sdk });
+      __setClaudeCliVersionForTest(version);
+      try {
+        const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+        expect(res.status).toBe(200);
+        await settle();
+        expect(rec.prompts.length).toBe(1);
+        expect(rec.prompts[0]!.toolSurface).toEqual({ read: [dir] });
+      } finally {
+        __setClaudeCliVersionForTest("2.1.304");
+      }
+    }
   });
 });
 
@@ -874,7 +941,8 @@ describe("the frames listing", () => {
     // Both frames were offered to the model…
     expect(rec.prompts[0]!.user).toContain(join(dir, "30.jpg"));
     expect(rec.prompts[0]!.user).toContain(join(dir, "60.jpg"));
-    expect(rec.prompts[0]!.extraDirs).toEqual([dir]);
+    // …through a Read fenced to the kept frames dir, never the bot's surface.
+    expect(rec.prompts[0]!.toolSurface).toEqual({ read: [dir] });
     // …the quote of the one it used survived the tail…
     expect(String(rec.ingests[0]!.body.summary)).toContain(quote);
     // …and NOTHING was pruned: the unquoted frame is still there, and the
@@ -1677,6 +1745,7 @@ describe("the single-flight claim is bounded", () => {
         rec.prompts.push({
           system: o.systemPrompt as string,
           user: o.prompt as string,
+          toolSurface: o.toolSurface,
           url: o.url as string,
           title: o.title as string,
           source: o.source as string,

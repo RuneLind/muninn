@@ -228,5 +228,6 @@ Refusals carry a prose `error` and a machine `code` the popup renders as-is:
 | 400 `bad_visual_detail` | `visual_detail` was present and was not `selected` or `detailed` — a blank string included |
 | 415 `bad_content_type` | the POST was not `application/json` (the extension always sends it) |
 | 503 `frames_unsupported` | the summarizer bot's connector cannot read the frames |
+| 503 `cli_too_old` | the summarizer bot runs claude-cli older than 2.1.303 (or its version cannot be read), which cannot fence the frame read |
 | 200 `duplicate` | already captured — the body carries the existing document |
 | 200 `in_flight` | already being captured — the body carries the running job's id |

@@ -201,6 +201,15 @@ describe("sum-job-card: the Vimeo sentence map", () => {
     expect(h.vimeoSentence("no_speech")).toBe("This video has no caption track, and no speech was found in its audio");
   });
 
+  test("names the two Slides refusals apart: a CLI too old for the slide pass is told to upgrade, not to switch connectors", () => {
+    expect(h.vimeoSentence("frames_unsupported")).toContain("set SUMMARIZER_BOT to a claude-cli or claude-sdk bot");
+    const old = h.vimeoSentence("cli_too_old");
+    expect(old).toContain("Claude CLI is too old");
+    expect(old).toContain("upgrade");
+    // The bot already runs claude-cli: telling the reader to switch to it is the defect.
+    expect(old).not.toContain("SUMMARIZER_BOT");
+  });
+
   test("too_long carries the measurement the route reported", () => {
     expect(h.vimeoSentence("too_long", { durationSec: 20000 })).toBe(
       "Longer than the 3h cap (5h 33m)",

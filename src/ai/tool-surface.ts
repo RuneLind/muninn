@@ -18,6 +18,7 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, join, sep } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import type { ConnectorType } from "../bots/config.ts";
 
 export type ToolSurface = "none" | "bot" | { read: string[] } | { web: true };
 
@@ -367,14 +368,33 @@ export function __setClaudeCliVersionForTest(version: string | null | undefined)
   cliVersion = undefined;
 }
 
+/** Why the installed CLI cannot run a fenced `kind` surface, or null when it can. */
+async function restrictedCliShortfall(kind: "read" | "web"): Promise<string | null> {
+  const version = await installedClaudeCliVersion();
+  if (version !== null && compareVersions(version, MIN_RESTRICTED_CLI_VERSION) >= 0) return null;
+  return (
+    `claude-cli: the { ${kind} } tool surface needs Claude CLI ${MIN_RESTRICTED_CLI_VERSION} or newer ` +
+    `(--restricted); found ${version ?? "no readable version"}.`
+  );
+}
+
 /** Throw unless the installed CLI has `--restricted`, which a fenced surface needs. */
 export async function assertRestrictedCliAvailable(surface: FencedToolSurface): Promise<void> {
-  const version = await installedClaudeCliVersion();
-  if (version === null || compareVersions(version, MIN_RESTRICTED_CLI_VERSION) < 0) {
-    const kind = "read" in surface ? "{ read }" : "{ web }";
-    throw new Error(
-      `claude-cli: the ${kind} tool surface needs Claude CLI ${MIN_RESTRICTED_CLI_VERSION} or newer ` +
-        `(--restricted); found ${version ?? "no readable version"}.`,
-    );
-  }
+  const shortfall = await restrictedCliShortfall("read" in surface ? "read" : "web");
+  if (shortfall !== null) throw new Error(shortfall);
+}
+
+/**
+ * A route pre-flight's answer to "can this connector run a fenced `kind`
+ * surface on this machine": the sentence the run would fail with, or null.
+ * Only claude-cli depends on the installed CLI; every other connector is null
+ * here, because whether it can express the surface at all is the capability
+ * table's question (`supportsExtraDirs` / `supportsWebTools`).
+ */
+export async function restrictedCliBlocker(
+  connector: ConnectorType | undefined,
+  kind: "read" | "web",
+): Promise<string | null> {
+  if ((connector ?? "claude-cli") !== "claude-cli") return null;
+  return restrictedCliShortfall(kind);
 }

@@ -369,6 +369,18 @@ describe("claim retry — a failed retry changes nothing", () => {
   });
 });
 
+describe("claim retry — the declared tool surface", () => {
+  test("the retry runs on { web: true }: WebFetch and WebSearch, nothing else", async () => {
+    const surfaces: unknown[] = [];
+    const play = scriptedSuccess(VERDICT_BLOCK);
+    await runRetry(async (p: string, c: unknown, b: unknown, opts: { toolSurface?: unknown; onProgress?: (e: never) => void }) => {
+      surfaces.push(opts.toolSurface);
+      return play(p, c, b, opts);
+    });
+    expect(surfaces).toEqual([{ web: true }]);
+  });
+});
+
 describe("retryTimeoutReason", () => {
   test("names the budget the MESSAGE carried", () => {
     expect(retryTimeoutReason({ isTimeout: true, ms: 180_000, msRejected: false })).toContain(

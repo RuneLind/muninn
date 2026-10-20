@@ -128,19 +128,19 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
    * CORS *simple* request — a `GET` with no custom headers — so no preflight is
    * needed and none is registered.
    *
-   * `capture.supported` is the POST's own 503 pre-flight, asked ahead of time
-   * and carrying the same sentence — the honest field, because that pre-flight
-   * does not depend on `frames` (see `shortVideoCaptureBlocker`).
+   * `capture.supported` is the POST's own 503 pre-flight for the default
+   * capture (frames on), asked ahead of time and carrying the same sentence. A
+   * POST with `frames: false` is never blocked (see `shortVideoCaptureBlocker`).
    * `frames.supported` is the same answer under its older name, kept so an
    * already-installed extension keeps reading the field it knows.
    */
-  app.get("/api/tiktok/options", (c) => {
+  app.get("/api/tiktok/options", async (c) => {
     applyCors(c);
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
     if (!summarizerBot) {
       return c.json({ error: "No bots configured", code: "no_bot" }, 500);
     }
-    const blocker = shortVideoCaptureBlocker(summarizerBot, TT_FRAME_NOUN);
+    const blocker = await shortVideoCaptureBlocker(summarizerBot, TT_FRAME_NOUN, { frames: true });
     return c.json({
       kinds: capturePresetOptions(shortVideoCaptureKinds(summarizerBot)),
       // The id a client sends when the reader picks nothing. Named rather than
@@ -252,11 +252,10 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
     // the TOP of /summaries with a "running" /agents card. The bot itself is
     // resolved further up now, because the kind check needs it.
     //
-    // Fail fast if the summarizer bot's connector can't grant --add-dir access:
-    // the multi-turn flow Reads frame JPEGs from a tmp dir, which only the
-    // Claude CLI connector can express. Reject here, before the expensive
-    // download + whisper pre-work.
-    const blocker = shortVideoCaptureBlocker(summarizerBot, TT_FRAME_NOUN);
+    // Fail fast if the summarizer bot cannot run the frames' fenced Read (a
+    // connector without one, or a claude-cli older than `--restricted`). Reject
+    // here, before the expensive download + whisper pre-work.
+    const blocker = await shortVideoCaptureBlocker(summarizerBot, TT_FRAME_NOUN, { frames: frames !== false });
     if (blocker !== null) {
       return c.json({ error: blocker }, 503);
     }

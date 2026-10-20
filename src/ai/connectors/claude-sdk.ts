@@ -187,7 +187,6 @@ export async function executePrompt(
     ...(thinking ? { thinking } : {}),
     ...(botConfig.effort ? { effort: botConfig.effort } : {}),
     ...(hasMcp ? { mcpServers } : {}),
-    ...(!fence && botConfig.extraDirs?.length ? { additionalDirectories: botConfig.extraDirs } : {}),
     // Under bypassPermissions the SDK's `allowedTools` option only suppresses
     // permission prompts — it cannot restrict the surface ("To restrict which
     // tools are available, use the `tools` option instead", sdk.d.ts). So the

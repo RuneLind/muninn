@@ -55,8 +55,6 @@ export interface TracedOneShotOptions {
   effort?: EffortLevel;
   /** Streaming progress callback (text deltas, tool events). */
   onProgress?: StreamProgressCallback;
-  /** Extra read dirs (claude-cli `--add-dir` / claude-sdk `additionalDirectories`). */
-  extraDirs?: string[];
   /** The tools the run may reach — required, forwarded to `executeOneShot`. */
   toolSurface: ToolSurface;
   /**
@@ -110,7 +108,6 @@ export async function tracedOneShot(
       ...(opts.thinkingMaxTokens !== undefined ? { thinkingMaxTokens: opts.thinkingMaxTokens } : {}),
       ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
-      ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
       toolSurface: opts.toolSurface,
     });
 

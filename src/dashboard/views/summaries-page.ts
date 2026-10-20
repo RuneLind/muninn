@@ -79,6 +79,8 @@ export interface SummariesPageOptions {
    * Default true, for the same no-bot render the kinds default covers.
    */
   framesSupported?: boolean;
+  /** Why Slides is unavailable, when it is — picks the tick's reason (see `captureUrlFormHtml`). */
+  framesBlock?: "frames_unsupported" | "cli_too_old" | null;
 }
 
 export async function renderSummariesPage(opts: SummariesPageOptions = {}): Promise<string> {
@@ -243,7 +245,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     <!-- Capture by URL — always visible, because Vimeo has no Chrome extension
          and a link is its whole input. Sits between the head row (which carries
          the "+ Paste article" toggle) and the collapsed paste form below. -->
-    ${captureUrlFormHtml({ kinds: captureKinds, langs: CAPTURE_LANGS, framesSupported: opts.framesSupported ?? true })}
+    ${captureUrlFormHtml({ kinds: captureKinds, langs: CAPTURE_LANGS, framesSupported: opts.framesSupported ?? true, framesBlock: opts.framesBlock ?? null })}
 
     <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome
          extension) — collapsed behind the toggle above so the inbox leads. -->

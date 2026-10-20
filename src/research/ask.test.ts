@@ -20,6 +20,7 @@ let lastResearchOpts: Record<string, unknown> | null = null;
 let claudeAnswer = "";
 let lastUserPrompt = "";
 let lastSystemPrompt = "";
+let lastToolSurface: unknown;
 
 function makeHit(over: Partial<ResearchHit> = {}): ResearchHit {
   return {
@@ -52,10 +53,11 @@ mock.module("../ai/one-shot.ts", () => ({
     prompt: string,
     _c: unknown,
     _b: unknown,
-    opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void },
+    opts?: { systemPrompt?: string; toolSurface?: unknown; onProgress?: (e: { type: string; text: string }) => void },
   ) => {
     lastUserPrompt = prompt;
     lastSystemPrompt = opts?.systemPrompt ?? "";
+    lastToolSurface = opts?.toolSurface;
     opts?.onProgress?.({ type: "text_delta", text: claudeAnswer });
     return { result: claudeAnswer, outputTokens: 30, inputTokens: 12, wallClockMs: 4 };
   },
@@ -109,6 +111,7 @@ beforeEach(() => {
   claudeAnswer = "Claude Code is an agentic CLI [1]. It supports MCP servers [2].";
   lastUserPrompt = "";
   lastSystemPrompt = "";
+  lastToolSurface = undefined;
 });
 
 test("happy path: emits phase → sources → deltas → done with cited indices", async () => {
@@ -158,6 +161,12 @@ test("synthesis prompt carries the question and numbered sources, with the groun
   expect(lastUserPrompt).toContain("[1] (Claude)");
   expect(lastUserPrompt).toContain("[2] (Wiki)");
   expect(lastSystemPrompt).toContain("ONLY the numbered sources");
+});
+
+test("the synthesis call declares no tools: the sources ride in the prompt", async () => {
+  await collect("What is Claude Code?");
+  expect(lastUserPrompt).not.toBe("");
+  expect(lastToolSurface).toBe("none");
 });
 
 test("empty history: retrieval uses the raw question and the prompt has no conversation block", async () => {

@@ -57,8 +57,8 @@ describe("applyToolSurface", () => {
 
   test('"bot" keeps the bot\'s surface and "none" sets toolsDisabled, never mutating the caller', () => {
     const original = bot();
-    expect(applyToolSurface(original, "bot", undefined).toolsDisabled).toBeUndefined();
-    const none = applyToolSurface(original, "none", undefined);
+    expect(applyToolSurface(original, "bot").toolsDisabled).toBeUndefined();
+    const none = applyToolSurface(original, "none");
     expect(none.toolsDisabled).toBe(true);
     expect(none.toolSurface).toBe("none");
     expect(original.toolsDisabled).toBeUndefined();
@@ -66,27 +66,18 @@ describe("applyToolSurface", () => {
   });
 
   test("{ read } carries its dirs; relative or empty dirs are refused", () => {
-    expect(applyToolSurface(bot(), { read: ["/tmp/f/"] }, undefined).toolSurface).toEqual({ read: ["/tmp/f"] });
-    expect(() => applyToolSurface(bot(), { read: [] }, undefined)).toThrow(/at least one directory/);
-    expect(() => applyToolSurface(bot(), { read: ["frames"] }, undefined)).toThrow(/absolute/);
-  });
-
-  test("extraDirs ride only on \"bot\", and the error names the surface", () => {
-    expect(() => applyToolSurface(bot(), { read: ["/tmp/f"] }, ["/tmp/g"])).toThrow(/only allowed with toolSurface "bot"/);
-    expect(() => applyToolSurface(bot(), "none", ["/tmp/g"])).toThrow(/only allowed/);
-    expect(() => applyToolSurface(bot(), { web: true }, ["/tmp/g"])).toThrow(/only allowed/);
-    expect(() => applyToolSurface(bot(), "none", ["/tmp/g"])).toThrow(/^executeOneShot: extraDirs is only allowed with toolSurface "bot", not "none"\.$/);
-    expect(applyToolSurface(bot(), "bot", ["/tmp/g"]).toolSurface).toBe("bot");
-    expect(applyToolSurface(bot(), { read: ["/tmp/f"] }, []).toolSurface).toEqual({ read: ["/tmp/f"] });
+    expect(applyToolSurface(bot(), { read: ["/tmp/f/"] }).toolSurface).toEqual({ read: ["/tmp/f"] });
+    expect(() => applyToolSurface(bot(), { read: [] })).toThrow(/at least one directory/);
+    expect(() => applyToolSurface(bot(), { read: ["frames"] })).toThrow(/absolute/);
   });
 
   test("copilot-sdk and openai-compat refuse the fenced shapes by capability", () => {
     for (const connector of ["copilot-sdk", "openai-compat"] as const) {
       const b = driveBot("/tmp/b", { connector });
-      expect(() => applyToolSurface(b, { read: ["/tmp/f"] }, undefined)).toThrow(/cannot run a \{ read \}/);
-      expect(() => applyToolSurface(b, { web: true }, undefined)).toThrow(/cannot run a \{ web \}/);
-      expect(applyToolSurface(b, "none", undefined).toolsDisabled).toBe(true);
-      expect(applyToolSurface(b, "bot", undefined).toolSurface).toBe("bot");
+      expect(() => applyToolSurface(b, { read: ["/tmp/f"] })).toThrow(/cannot run a \{ read \}/);
+      expect(() => applyToolSurface(b, { web: true })).toThrow(/cannot run a \{ web \}/);
+      expect(applyToolSurface(b, "none").toolsDisabled).toBe(true);
+      expect(applyToolSurface(b, "bot").toolSurface).toBe("bot");
     }
   });
 
@@ -502,7 +493,7 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
       ).rejects.toThrow(/unknown toolSurface/);
     }
     for (const bad of [undefined, null, {}, { web: false }]) {
-      expect(() => applyToolSurface(driveBot(botDir, { connector: "claude-sdk" }), bad as never, undefined)).toThrow(
+      expect(() => applyToolSurface(driveBot(botDir, { connector: "claude-sdk" }), bad as never)).toThrow(
         /unknown toolSurface/,
       );
     }
@@ -548,12 +539,6 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
     }
   });
 
-  test("{ read } with extraDirs beside it is refused before spawning", async () => {
-    await expect(
-      driveCapture(driveBot(botDir, { connector: "claude-cli" }), { read: [framesDir] }, { extraDirs: [root] }),
-    ).rejects.toThrow(/only allowed with toolSurface "bot"/);
-    expect(spawned).toHaveLength(0);
-  });
 });
 
 /**

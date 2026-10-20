@@ -184,13 +184,13 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
    * `applyCors` and no preflight, for the reasons the TikTok twin states — and
    * `capture` beside `frames` for the reason it states too.
    */
-  app.get("/api/x-articles/video-options", (c) => {
+  app.get("/api/x-articles/video-options", async (c) => {
     applyCors(c);
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
     if (!summarizerBot) {
       return c.json({ error: "No bots configured", code: "no_bot" }, 500);
     }
-    const blocker = shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN);
+    const blocker = await shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN, { frames: true });
     return c.json({
       kinds: capturePresetOptions(shortVideoCaptureKinds(summarizerBot)),
       default_kind: DEFAULT_CAPTURE_KIND,
@@ -282,10 +282,9 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
       });
     }
 
-    // Same pre-flight as TikTok: the frame-reading flow needs --add-dir, which
-    // only the claude-cli/claude-sdk connectors express. Reject before the
-    // expensive download + whisper work.
-    const blocker = shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN);
+    // Same pre-flight as TikTok: frames on needs a fenced Read the bot can run.
+    // Reject before the expensive download + whisper work.
+    const blocker = await shortVideoCaptureBlocker(summarizerBot, XV_FRAME_NOUN, { frames: frames !== false });
     if (blocker !== null) {
       return c.json({ error: blocker }, 503);
     }

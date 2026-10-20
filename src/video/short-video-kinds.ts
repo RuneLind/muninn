@@ -1,5 +1,6 @@
 import type { BotPrompts, ConnectorType } from "../bots/config.ts";
 import { capabilitiesForConnectorType } from "../ai/connector-capabilities.ts";
+import { restrictedCliBlocker } from "../ai/tool-surface.ts";
 import {
   CAPTURE_THINKING_MAX_TOKENS,
   resolveCapturePresets,
@@ -35,38 +36,39 @@ export const SHORT_VIDEO_RUN_OVERRIDE: Pick<CaptureRunOptions, "thinking"> = {
 };
 
 /**
- * Why this summarizer bot cannot run a short-video capture AT ALL, or null when
- * it can — the sentence both options endpoints report and both POSTs 503 with.
+ * Why this summarizer bot cannot run this short-video capture, or null when it
+ * can — the sentence both options endpoints report and both POSTs 503 with.
  *
- * One function, because the two must not disagree. The options endpoints used to
- * answer `frames: { supported: false }` and nothing else, which reads as "no
- * keyframes, but a capture" — and the POST then 503'd whatever `frames` was set
- * to. The pre-flight is unconditional for a reason rather than by oversight: the
- * job hands the tmp work dir to `executeOneShot` as `extraDirs` on EVERY path,
- * frames or not, and that throws on a connector which cannot express
- * `--add-dir`. A frames-off short-video capture is not something this vertical
- * does, so the payload says the capture is unsupported rather than only the
- * keyframes.
+ * One function, because the two must not disagree. A capture with frames on
+ * (the default) declares `{ read: [framesDir] }`, so it needs a connector with a
+ * fenced Read and, on claude-cli, a CLI new enough for `--restricted`: without
+ * this check a TikTok downloads, transcribes and extracts frames, and only then
+ * fails. A capture with `frames: false` declares `"none"`, which every
+ * connector runs, so it is never blocked here.
  *
- * (`src/youtube/summarizer.ts` and `src/vimeo/summarizer.ts` pass `extraDirs`
- * only when a frame came out, which is why `youtube-routes.ts` can gate its own
- * pre-flight on `frames` and these two cannot. Giving the short-video job that
- * shape would open a capture path on connectors nothing has run it on; it is
- * filed as a follow-up rather than done here.)
+ * The options endpoints ask about the default capture (frames on), which is
+ * what a client sends unless the reader turns frames off.
  *
  * `frameNoun` is each vertical's own wording, kept because both 503 bodies
  * already shipped with it.
  */
-export function shortVideoCaptureBlocker(
+export async function shortVideoCaptureBlocker(
   summarizerBot: { name: string; connector?: ConnectorType },
   frameNoun: string,
-): string | null {
+  opts: { frames: boolean },
+): Promise<string | null> {
+  if (!opts.frames) return null;
   const connector = summarizerBot.connector ?? "claude-cli";
-  if (capabilitiesForConnectorType(connector).supportsExtraDirs) return null;
-  return (
-    `Summarizer bot "${summarizerBot.name}" uses connector "${connector}", which cannot read the ` +
-    `extracted ${frameNoun} (no extra-dirs support). Set SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`
-  );
+  if (!capabilitiesForConnectorType(connector).supportsExtraDirs) {
+    return (
+      `Summarizer bot "${summarizerBot.name}" uses connector "${connector}", which cannot read the ` +
+      `extracted ${frameNoun} (no extra-dirs support). Set SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`
+    );
+  }
+  const cli = await restrictedCliBlocker(connector, "read");
+  return cli === null
+    ? null
+    : `Summarizer bot "${summarizerBot.name}" cannot read the extracted ${frameNoun}: ${cli}`;
 }
 
 /**

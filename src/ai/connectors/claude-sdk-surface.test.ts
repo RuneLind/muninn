@@ -127,11 +127,6 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect((await ask(o, "Read", { file_path: join(framesDir, "x.jpg") })).behavior).toBe("deny");
   });
 
-  test("{ read } with extraDirs beside it never reaches the SDK", async () => {
-    await expect(driveCapture(sdkBot(), { read: [framesDir] }, { extraDirs: [root] })).rejects.toThrow(/only allowed/);
-    expect(queryCalls).toHaveLength(0);
-  });
-
   test("a degraded agent home refuses a fenced run before query()", async () => {
     // mkdir in a read-only root fails (EACCES), so the agent home degrades to $TMPDIR.
     const readOnly = join(root, "read-only-home");

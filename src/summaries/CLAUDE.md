@@ -128,9 +128,12 @@ kept-frames directory (`~/.muninn/frames/<source>/<id>/`, seconds from the file
 names, `note: ""` — no selection notes survive a capture), and that same list
 goes to the user-prompt builder and to the tail. The write is UNION-ONLY: nothing
 in this path prunes or overwrites that directory, since `removeKeptFrames` is
-document-delete's. A connector that cannot read files is refused with **503
-`frames_unsupported`** before a job exists (the TikTok/YouTube precedent) rather
-than producing a re-run whose slides quietly vanish.
+document-delete's. A re-run with kept frames is refused before a job exists
+rather than producing one whose slides quietly vanish: a connector without
+`supportsExtraDirs` gets **503 `frames_unsupported`**, and a claude-cli older
+than 2.1.303 (no `--restricted`, checked by `restrictedCliBlocker` in
+`src/ai/tool-surface.ts`) gets **503 `cli_too_old`** (the YouTube/Vimeo
+precedent).
 
 **The same-path copy guard.** On a capture the frames live in a dying work dir,
 so source and destination always differ; on a re-run `framesRoot` IS where they
@@ -195,7 +198,7 @@ is simply gone and which one loses is decided by the network. **The claim is
 taken BEFORE the document is read** — after the body-only refusals (415, 400s,
 501) and the bot lookup, before any huginn read — and every refusal after it
 (`not_found`, `no_transcript`, `bad_kind`, the preflight, `too_many_frames`,
-`frames_unsupported`) lets it go; a run lets it go in a `finally` on the job.
+`frames_unsupported`, `cli_too_old`) lets it go; a run lets it go in a `finally` on the job.
 Claiming after the read left a window in which a Delete removed the document
 between the read and the claim, and the run wrote it back.
 

@@ -46,7 +46,7 @@ export async function summarizeArticle(
     };
 
     const result = await runCaptureOneShot({
-      toolSurface: "bot",
+      toolSurface: "none",
       source: "article",
       jobId,
       title,

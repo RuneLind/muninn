@@ -61,6 +61,7 @@ import type { BotConfig } from "../../bots/config.ts";
 import { getLog } from "../../logging.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { restrictedCliBlocker } from "../../ai/tool-surface.ts";
 import { fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { getSummaryFactcheck } from "../../db/summary-factchecks.ts";
 import { findLiveSentinelBlocks } from "../../wiki/factcheck-context.ts";
@@ -608,8 +609,12 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
     const thinking = vertical.thinking(preset);
 
     store.updateStatus(jobId, "summarizing");
+    // Read on the kept frames when there are any; no tools at all otherwise.
+    const keptFramesDir = frames.length > 0 && vertical.frameSource
+      ? frameDirFor(vertical.frameSource, videoId, deps.framesRoot)
+      : undefined;
     const result = await deps.oneShot({
-      toolSurface: "bot",
+      toolSurface: keptFramesDir ? { read: [keptFramesDir] } : "none",
       // The CAPTURE's own trace source, not the `/summaries` source id — the two
       // differ for X video (`capture:x-video` vs the `x-article` shelf), and
       // this attribute exists to be compared with the capture it re-runs.
@@ -628,9 +633,6 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
       onProgress: (event) => {
         if (event.type === "text_delta") store.appendText(jobId, event.text);
       },
-      ...(frames.length > 0 && vertical.frameSource
-        ? { extraDirs: [frameDirFor(vertical.frameSource, videoId, deps.framesRoot)] }
-        : {}),
       timeoutMs: summarizeTimeoutFor(frames.length, CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS),
       ...(thinking === null ? { thinkingMaxTokens: null } : {}),
       extraTraceAttrs: {
@@ -1044,17 +1046,26 @@ export function registerSummariesRerunRoutes(
           code: "too_many_frames",
         } satisfies Refusal;
       }
-      // The frames are handed to the model as `--add-dir`, so a connector that
-      // cannot read files would produce a summary with no slides while the tail
+      // The frames are the model's fenced Read surface, so a connector that
+      // cannot run one (or a claude-cli older than 2.1.303) would produce a summary with no slides while the tail
       // stripped every quote it could not serve — a re-run that silently loses
       // pictures. Refused instead, the TikTok/YouTube `frames_unsupported`
-      // precedent, before a job exists.
+      // precedent (`cli_too_old` for the old CLI), before a job exists.
       if (frames.length > 0 && !connectorCapabilities(bot).supportsExtraDirs) {
         return {
           ok: false,
           status: 503,
           error: `Summarizer bot "${bot.name}" cannot read the kept slides, so a re-run would drop them.`,
           code: "frames_unsupported",
+        } satisfies Refusal;
+      }
+      const cliBlocked = frames.length > 0 ? await restrictedCliBlocker(bot.connector, "read") : null;
+      if (cliBlocked !== null) {
+        return {
+          ok: false,
+          status: 503,
+          error: `Summarizer bot "${bot.name}" cannot read the kept slides: ${cliBlocked}`,
+          code: "cli_too_old",
         } satisfies Refusal;
       }
 

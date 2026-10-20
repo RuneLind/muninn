@@ -440,7 +440,7 @@ export async function summarizeCandidate(
     };
 
     const result = await runCaptureOneShot({
-      toolSurface: "bot",
+      toolSurface: "none",
       // The `anthropic` capture covers both the Anthropic firehose and X-post
       // candidates (`sourceDocId` set) — one shelf, one vertical.
       source: "anthropic",

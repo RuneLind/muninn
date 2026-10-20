@@ -21,6 +21,7 @@ mock.module("./result-parser.ts", () => ({
 }));
 
 const { executeClaudePrompt } = await import("./executor.ts");
+const { __setClaudeCliVersionForTest } = await import("./tool-surface.ts");
 
 describe("executeClaudePrompt", () => {
   test("constructs correct CLI arguments", async () => {
@@ -268,6 +269,38 @@ describe("executeClaudePrompt", () => {
       expect(args[i + 1]).toBe("");
       expect(i).toBeLessThan(args.indexOf("--"));
     } finally {
+      spawnSpy.mockRestore();
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("toolsDisabled keeps the user settings: no --restricted, the bot dir as cwd, no forced effort", async () => {
+    // `--restricted` ignores the user settings file (OTEL env, alwaysThinkingEnabled,
+    // hooks), so a tool-less run must not take it even on a CLI that has it.
+    const dir = mkdtempSync(join(tmpdir(), "executor-none-"));
+    const spawnSpy = spyOn(Bun, "spawn");
+    const ok = () => ({
+      pid: 123,
+      stdout: new Response(JSON.stringify({ result: "ok" })).body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(0),
+      kill: mock(),
+    }) as any;
+    spawnSpy.mockReturnValueOnce(ok()).mockReturnValueOnce(ok());
+    try {
+      __setClaudeCliVersionForTest("2.1.304");
+      const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
+      await executeClaudePrompt("test", config, { name: "testbot", dir, toolsDisabled: true } as any);
+      await executeClaudePrompt("test", config, { name: "testbot", dir, toolsDisabled: true, effort: "low" } as any);
+      expect(spawnSpy).toHaveBeenCalledTimes(2);
+      const [args, opts] = spawnSpy.mock.calls[0]! as unknown as [string[], { cwd: string }];
+      expect(args).not.toContain("--restricted");
+      expect(args).not.toContain("--effort");
+      expect(opts.cwd).toBe(dir);
+      const [configured] = spawnSpy.mock.calls[1]! as unknown as [string[]];
+      expect(configured[configured.indexOf("--effort") + 1]).toBe("low");
+    } finally {
+      __setClaudeCliVersionForTest(undefined);
       spawnSpy.mockRestore();
       rmSync(dir, { recursive: true });
     }

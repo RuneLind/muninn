@@ -46,7 +46,7 @@ export function driveBot(dir: string, over: Partial<BotConfig> = {}): BotConfig 
 export function driveCapture(
   botConfig: BotConfig,
   toolSurface: ToolSurface,
-  over: { extraDirs?: string[]; prompt?: string } = {},
+  over: { prompt?: string } = {},
 ): Promise<ClaudeExecResult> {
   return runCaptureOneShot({
     source: "youtube",
@@ -61,6 +61,5 @@ export function driveCapture(
     tracer: silentTracer(),
     takeawayCheck: false,
     toolSurface,
-    ...(over.extraDirs ? { extraDirs: over.extraDirs } : {}),
   });
 }

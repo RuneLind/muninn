@@ -19,10 +19,17 @@ import type { ConnectorType } from "../bots/config.ts";
 
 export interface ConnectorCapabilities {
   /**
-   * Whether the connector can grant read access to directories outside the bot
-   * folder. `claude-cli` expresses this via `--add-dir`; `claude-sdk` via the
-   * Agent SDK's `additionalDirectories`. The Copilot / OpenAI-compat connectors
-   * have no equivalent knob.
+   * Whether the connector can run a `{ read: [dirs] }` tool surface: the model
+   * gets Read and nothing else, confined to those directories. That surface is
+   * the only way a directory outside the bot folder (a capture's frames dir)
+   * reaches the model. `claude-cli` runs it as `--restricted --tools Read
+   * --add-dir <dir>` (`src/ai/executor.ts`), and `claude-sdk` as
+   * `additionalDirectories` plus a `canUseTool` handler that allows Read only
+   * under those dirs (`src/ai/connectors/claude-sdk.ts`). The Copilot and
+   * OpenAI-compat connectors cannot fence Read, so they are false.
+   *
+   * True is not sufficient on claude-cli: `--restricted` needs CLI 2.1.303 or
+   * later, which `restrictedCliBlocker` (`src/ai/tool-surface.ts`) checks.
    */
   supportsExtraDirs: boolean;
   /**
