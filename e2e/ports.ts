@@ -187,6 +187,8 @@ export const E2E_PORTS = {
   "wiki-status-tiles": 3158,
   // <Chart> views: ONE muninn over a synthetic plan wiki.
   "wiki-chart": 3159,
+  // <RuleTree> view: ONE muninn over a synthetic plan wiki.
+  "wiki-rule-tree": 3160,
   // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.
