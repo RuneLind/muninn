@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseBlocks } from "./markdown-ast.ts";
 import { analyzeDecisionChains, lineageLine, type ChainAnalysis } from "./decision-chain.ts";
 import { pageLedgers } from "./pr-ledger.ts";
+import { splitFirstSentence, visibleText } from "./report-top.ts";
 
 // Synthetic DecisionLogs and ledgers in the plan pages' shape. One fixture per
 // edge phrase, in both languages; no text is copied from a real page.
@@ -188,17 +189,23 @@ describe("reversals and order", () => {
     expect(lines(log("**D1** — ~~Old~~ reversed order is the default now."))).toEqual([]);
   });
 
-  test("a struck lead with no sentence break inside the strike is still a reversal, labelled by the strike", () => {
-    for (const item of [
-      "~~Bruk X~~ Snudd 03.10.",
-      "~~Bruk X~~ — snudd i runde 6. Ny regel.",
-      "~~Bruk X…~~ Snudd.",
-      "~~Bruk X.~~Snudd 03.10.",
-    ]) {
+  test("a struck lead with no sentence end inside the strike is no reversal lead", () => {
+    // The spec's lead is a struck first SENTENCE; every reversal in both wikis
+    // strikes it with its closing punctuation (`.~~ Snudd`).
+    for (const item of ["~~Bruk X~~ Snudd 03.10.", "~~Bruk X~~ — snudd i runde 6. Ny regel.", "~~Old sort~~ reversed order is the default now."])
+      expect(lines(log(`**D1** — ${item}`))).toEqual([]);
+    for (const item of ["~~Bruk X…~~ Snudd.", "~~Bruk X.~~Snudd 03.10.", "~~Bruk X.~~ [Snudd](https://example.test/x)", "~~Use X.~~ «Snudd»", '~~Use X.~~ "Reversed" 03.10.']) {
       const a = analyze(log(`**D1** — ${item}`));
       expect(a.chains.map(lineageLine)).toEqual(["D1 (reversed)"]);
       expect(a.chains[0]!.label).toBe(item.slice(2, item.indexOf("~~", 2)));
     }
+  });
+
+  test("a dimmed item whose strike is no sentence keeps its first-sentence label", () => {
+    const a = analyze(log("**D1** — ~~Use the old cache~~ Use the new cache. Superseded by D2.", "**D2** — Y."));
+    expect(a.chains.map(lineageLine)).toEqual(["D1 (reversed by D2)"]);
+    expect(a.chains[0]!.label).toBe("Use the old cache Use the new cache.");
+    expect(analyze(log("**D1** — ~~Use X~~ and Y. Superseded by D2.", "**D2** — Y.")).chains[0]!.label).toBe("Use X and Y. Superseded by D2."); // too short to split
   });
 
   test("a dimmed «superseded by» item with a struck lead is labelled by the strike", () => {
@@ -214,11 +221,12 @@ describe("reversals and order", () => {
 
   test("an unclosed strike or bold marker on a long item stays linear", () => {
     for (const open of ["~~", "**"]) {
-      const md = log(`**D1** — ${open}${"a. ".repeat(20_000)}`);
+      const md = log(`**D1** — ${open}${"a. ".repeat(20_000)}`); // 60 KB
       analyze(md);
       const t0 = performance.now();
       analyze(md);
-      expect(performance.now() - t0).toBeLessThan(20);
+      // Generous: the quadratic version took ~1.2 s here; 20 ms was CI-fragile.
+      expect(performance.now() - t0).toBeLessThan(200);
     }
   });
 
@@ -230,5 +238,81 @@ describe("reversals and order", () => {
   test("a label resolves wikilink sentinels through the link texts", () => {
     const a = analyze(log("**O1** — A? Closed 2026-10-01 (D1).", "**D1** — Follow \u0000WIKIPAGELINK0\u0000 here."), (i) => ["the guide"][i]!);
     expect(a.chains[0]!.label).toBe("Follow the guide here.");
+  });
+});
+
+// The reversal grammar's whole state space, LEAD × FOLLOWER × dim. Each cell's
+// expectation comes from the rules, never from running the code:
+//  - a lead qualifies when it is a `~~…~~` span opening the item that ends in
+//    sentence punctuation (`.`, `!`, `?`, `…`, optionally then a closer);
+//  - a follower is a reversal stem as a whole word, after skippable dashes,
+//    punctuation, emphasis markers and opening brackets or quotes;
+//  - reversed = whole-item strike OR dim OR (qualifying lead AND stem);
+//  - the label is the struck lead when reversed and the lead qualifies, the
+//    whole strike's inside for a whole-item strike, else the item's first
+//    sentence as the label logic gives it.
+describe("reversal grammar, enumerated", () => {
+  const firstSentence = (md: string): string => {
+    const split = splitFirstSentence(md);
+    return visibleText(split ? split.first : md);
+  };
+  type Lead = { name: string; open: string; close: string; qualifies: boolean; whole?: boolean };
+  const LEADS: Lead[] = [
+    { name: "no strike", open: "", close: "Use the cache.", qualifies: false },
+    { name: "strike .", open: "~~", close: "Use the cache.~~", qualifies: true },
+    { name: "strike !", open: "~~", close: "Use the cache!~~", qualifies: true },
+    { name: "strike ?", open: "~~", close: "Use the cache?~~", qualifies: true },
+    { name: "strike …", open: "~~", close: "Use the cache…~~", qualifies: true },
+    { name: "strike .»", open: "~~", close: "Use «the cache.»~~", qualifies: true },
+    { name: "strike, 1 word", open: "~~", close: "Cache~~", qualifies: false },
+    { name: "strike, 2+ words", open: "~~", close: "Use the cache~~", qualifies: false },
+    { name: "whole-item strike", open: "~~", close: "Use the cache.", qualifies: false, whole: true },
+    { name: "unclosed ~~", open: "~~", close: "Use the cache.", qualifies: false },
+  ];
+  const STEMS = ["snudd", "reversed", "superseded", "erstattet"];
+  const cap = (w: string) => w[0]!.toUpperCase() + w.slice(1);
+  const FOLLOWERS: { text: string; stem: boolean }[] = [
+    { text: "", stem: false },
+    ...STEMS.flatMap((w) => [w, cap(w), w.toUpperCase()].map((t) => ({ text: ` ${t}`, stem: true }))),
+    ...[" *Snudd*", " _Snudd_", " **Snudd**", " [Snudd](https://example.test/x)", " «Snudd»", ' "Reversed"', " “Reversed”", " (snudd)", " __Erstattet__"].map((text) => ({ text, stem: true })),
+    { text: " Reversed because the load moved", stem: true },
+    { text: " Kept as it was", stem: false },
+    { text: " reversedly", stem: false },
+    { text: " Snuddet", stem: false },
+    { text: " Supersededness", stem: false },
+    ...[" — snudd", " - Reversed", " – erstattet", ": Superseded"].map((text) => ({ text, stem: true })),
+  ];
+  const DIM = " Superseded by D9.";
+  const REST = " Ny tekst her.";
+
+  const cells: { item: string; reversed: boolean; by: string | null; label: string }[] = [];
+  for (const lead of LEADS)
+    for (const f of FOLLOWERS)
+      for (const dim of [false, true]) {
+        if (lead.whole) {
+          // The whole item is one strike; dim's phrase sits inside it.
+          const inner = `${lead.close}${f.text}${REST}${dim ? DIM : ""}`;
+          cells.push({ item: `~~${inner}~~`, reversed: true, by: dim ? "D9" : null, label: firstSentence(inner) });
+          continue;
+        }
+        const leadText = `${lead.open}${lead.close}`;
+        const item = `${leadText}${f.text}${REST}${dim ? DIM : ""}`;
+        const reversed = dim || (lead.qualifies && f.stem);
+        const label = reversed && lead.qualifies ? firstSentence(leadText.slice(2, -2)) : firstSentence(item);
+        cells.push({ item, reversed, by: dim ? "D9" : null, label });
+      }
+
+  test(`every cell reads by the rules (${LEADS.length} leads × ${FOLLOWERS.length} followers × 2 dim = ${LEADS.length * FOLLOWERS.length * 2} cells)`, () => {
+    console.log(`reversal grammar cells: ${cells.length}`);
+    const failed: string[] = [];
+    for (const c of cells) {
+      // A question closed by D1 keeps a non-reversed D1 in the chains.
+      const chain = analyze(log("**O1** — Which? Closed 2026-10-01 (D1).", `**D1** — ${c.item}`)).chains.find((x) => x.decision === "D1");
+      const got = { reversed: chain?.reversed !== null && chain !== undefined, by: chain?.reversed?.by ?? null, label: chain?.label };
+      if (got.reversed !== c.reversed || got.by !== c.by || got.label !== c.label)
+        failed.push(`${JSON.stringify(c.item)}: want ${JSON.stringify({ reversed: c.reversed, by: c.by, label: c.label })} got ${JSON.stringify(got)}`);
+    }
+    if (failed.length) console.log(`FAILED CELLS ${failed.length}/${cells.length}\n${failed.join("\n")}`);
+    expect(failed).toEqual([]);
   });
 });

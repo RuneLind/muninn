@@ -104,30 +104,36 @@ function labelOf(markdown: string, opts: ChainOptions): string {
   return clip(text.replace(/\s+/g, " ").trim());
 }
 
-/** «Snudd», «Reversed», «Superseded», «Erstattet» in any case, opening the
- *  text after the struck lead (punctuation, dashes or `*`/`_` may come first). */
-const REVERSAL_LEAD_RE = /^[\s.,:;!?()*_—–-]*(?:snudd|reversed|superseded|erstattet)(?![\p{L}\p{N}])/iu;
+/** A reversal word right after the struck lead: snudd, reversed, superseded
+ *  or erstattet in any case, as a whole word. Whitespace, dashes, `.,:;!?()`,
+ *  `*`/`_` and an opening `[`, `«`, `"` or `“` may come first. */
+const REVERSAL_FOLLOWER_RE = /^[\s\-–—.,:;!?()*_[«"“]*(?:snudd|reversed|superseded|erstattet)(?![\p{L}\p{N}])/iu;
+/** A struck first sentence ends in `.`, `!`, `?` or `…`, perhaps then one
+ *  closing quote or bracket. */
+const SENTENCE_END_RE = /[.!?…][»"”’')\]]?$/u;
 
-/** The item's leading `~~…~~` span when it reads as a sentence (two words or
- *  more, or closing punctuation): `~~Use~~ the cache` is an edit, not a lead.
- *  One `indexOf`, so an unclosed `~~` costs one scan. */
+/** The item's leading `~~…~~` span when it is a struck first sentence. The
+ *  first `~~` after the opener closes it, found with one `indexOf` so an
+ *  unclosed `~~` costs one scan; a `~~` inside a code span closes it too (an
+ *  accepted limitation). */
 function struckLead(text: string): { struck: string; end: number } | null {
   if (!text.startsWith("~~")) return null;
   const close = text.indexOf("~~", 2);
   if (close < 0) return null;
   const struck = text.slice(2, close);
-  return /\S\s+\S|[.!?…]\s*$/u.test(struck) ? { struck, end: close + 2 } : null;
+  return SENTENCE_END_RE.test(struck.trimEnd()) ? { struck, end: close + 2 } : null;
 }
 
-/** A reversed decision: dimmed by the log (struck whole, or «superseded by
- *  Dn» anywhere, `parseLogItem`), or a struck lead directly followed by a
- *  reversal word. The label of a reversed item is its struck lead. */
+/** A reversed decision: struck whole, dimmed by the log («superseded by Dn»,
+ *  `parseLogItem`), or a struck first sentence followed by a reversal word.
+ *  `struck` is the label source: the strike's inside for a whole strike, the
+ *  struck sentence for a reversed item, else null (the item's first sentence). */
 function reversalOf(e: DecisionLogEntry): { struck: string | null; reversed: boolean } {
   const whole = wholeStrike(e.itemText);
   if (whole !== null) return { struck: whole, reversed: true };
   const lead = struckLead(e.itemText);
-  const reversed = e.dim || (lead !== null && REVERSAL_LEAD_RE.test(e.itemText.slice(lead.end)));
-  return { struck: reversed ? (lead?.struck ?? null) : null, reversed };
+  const reversed = e.dim || (lead !== null && REVERSAL_FOLLOWER_RE.test(e.itemText.slice(lead.end)));
+  return { struck: reversed && lead ? lead.struck : null, reversed };
 }
 
 /** A ledger whose first column numbers oppgaver rather than PRs. */
