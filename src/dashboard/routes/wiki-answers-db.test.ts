@@ -1353,3 +1353,35 @@ describe("arch-10 D fix round 1: a carried draft from a swept answer beside anot
     expect((await post(app, answer({ answerId: first, baseVersion: 1, carriedFrom: first, carryToken: "x" }))).status).toBe(400);
   });
 });
+
+describe("fix round 1 batch 2: a store read that throws before the write", () => {
+  const throwing = (over: Partial<WikiAnswerStore>): WikiAnswerStore => ({
+    insert: insertWikiAnswerVersion,
+    getLatest: getLatestWikiAnswerVersion,
+    listLatest: listLatestWikiAnswers,
+    listVersions: listWikiAnswerVersions,
+    ...over,
+  });
+  const boom = async (): Promise<never> => {
+    throw new Error("connection reset");
+  };
+
+  test("the one-live-answer lookup failing is the route's JSON 500 store_failed, and nothing is stored", async () => {
+    const before = (await getDb()`SELECT count(*)::int AS n FROM wiki_answers`)[0]!.n;
+    const res = await post(appFor({ store: throwing({ findLive: boom }) }), answer({ body: "new" }));
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type") ?? "").toContain("application/json");
+    expect(await res.json()).toMatchObject({ code: "store_failed" });
+    expect((await getDb()`SELECT count(*)::int AS n FROM wiki_answers`)[0]!.n).toBe(before);
+  });
+
+  test("an edit whose latest-version read fails is the same JSON 500 store_failed", async () => {
+    const first = await (await post(appFor(), answer({ body: "v1" }))).json();
+    const res = await post(
+      appFor({ store: throwing({ getLatest: boom }) }),
+      answer({ body: "edited", answerId: first.answerId, baseVersion: 1 }),
+    );
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ code: "store_failed" });
+  });
+});

@@ -592,54 +592,64 @@ export function registerWikiAnswerRoutes(
     let id: string;
     let version: number;
     let besideLive = false;
-    if (answerId !== undefined) {
-      const latest = isValidUuid(answerId) ? await store.getLatest(answerId) : null;
-      if (
-        !latest ||
-        latest.wiki !== page.entry.name ||
-        latest.relPath !== page.meta.relPath ||
-        latest.questionId !== questionId
-      ) {
-        return err(c, 404, "unknown_answer", "no such answer to this question");
+    // The reads before the write fail like the write does: a JSON store_failed, logged.
+    try {
+      if (answerId !== undefined) {
+        const latest = isValidUuid(answerId) ? await store.getLatest(answerId) : null;
+        if (
+          !latest ||
+          latest.wiki !== page.entry.name ||
+          latest.relPath !== page.meta.relPath ||
+          latest.questionId !== questionId
+        ) {
+          return err(c, 404, "unknown_answer", "no such answer to this question");
+        }
+        // No admin passthrough: only the author adds a version (D3).
+        if (!isMine(c, latest)) return err(c, 403, "not_author", "only the answer's author may edit it");
+        // A fast answer only: the insert re-checks under the per-answer lock,
+        // which is what closes the race with a concurrent redact.
+        if (latest.redactedAt !== null) return answerRedacted(c);
+        if (baseVersion !== latest.version) return versionConflict(c);
+        // Exactly base + 1: a writer that read the same base and got there first
+        // holds this (answer_id, version), and the primary key refuses the second.
+        id = answerId;
+        version = (baseVersion as number) + 1;
+      } else {
+        // One live answer per author and question. The author is the session's
+        // (or the owner with auth off), never the body's, and an admin gets no
+        // passthrough. A fast answer only: the insert re-checks under a lock. An
+        // answer swept or redacted under its editor is no live answer, so the
+        // card's carried draft still posts.
+        const where = { wiki: page.entry.name, relPath: page.meta.relPath, questionId, author };
+        const live = await (store.findLive ?? findLiveWikiAnswerByAuthor)(where);
+        id = randomUUID();
+        version = 1;
+        if (live) {
+          // The one exemption: a draft carried from this author's answer to this
+          // question that the sweep deleted under its editor (the card lets an
+          // author hold several answers from before this rule). The GET's token
+          // proves the id was theirs; no rows proves it is gone. Stored under
+          // that id, so a replayed token finds it live and is refused.
+          const from = typeof b.carriedFrom === "string" ? b.carriedFrom : null;
+          const token = typeof b.carryToken === "string" ? b.carryToken : null;
+          const carried =
+            from !== null &&
+            token !== null &&
+            isValidUuid(from) &&
+            carryTokenValid(token, from, page.entry.name, page.meta.relPath, questionId, author) &&
+            (await store.getLatest(from)) === null;
+          if (!carried) return alreadyAnswered(c, live);
+          id = from.toLowerCase();
+          besideLive = true;
+        }
       }
-      // No admin passthrough: only the author adds a version (D3).
-      if (!isMine(c, latest)) return err(c, 403, "not_author", "only the answer's author may edit it");
-      // A fast answer only: the insert re-checks under the per-answer lock,
-      // which is what closes the race with a concurrent redact.
-      if (latest.redactedAt !== null) return answerRedacted(c);
-      if (baseVersion !== latest.version) return versionConflict(c);
-      // Exactly base + 1: a writer that read the same base and got there first
-      // holds this (answer_id, version), and the primary key refuses the second.
-      id = answerId;
-      version = (baseVersion as number) + 1;
-    } else {
-      // One live answer per author and question. The author is the session's
-      // (or the owner with auth off), never the body's, and an admin gets no
-      // passthrough. A fast answer only: the insert re-checks under a lock. An
-      // answer swept or redacted under its editor is no live answer, so the
-      // card's carried draft still posts.
-      const where = { wiki: page.entry.name, relPath: page.meta.relPath, questionId, author };
-      const live = await (store.findLive ?? findLiveWikiAnswerByAuthor)(where);
-      id = randomUUID();
-      version = 1;
-      if (live) {
-        // The one exemption: a draft carried from this author's answer to this
-        // question that the sweep deleted under its editor (the card lets an
-        // author hold several answers from before this rule). The GET's token
-        // proves the id was theirs; no rows proves it is gone. Stored under
-        // that id, so a replayed token finds it live and is refused.
-        const from = typeof b.carriedFrom === "string" ? b.carriedFrom : null;
-        const token = typeof b.carryToken === "string" ? b.carryToken : null;
-        const carried =
-          from !== null &&
-          token !== null &&
-          isValidUuid(from) &&
-          carryTokenValid(token, from, page.entry.name, page.meta.relPath, questionId, author) &&
-          (await store.getLatest(from)) === null;
-        if (!carried) return alreadyAnswered(c, live);
-        id = from.toLowerCase();
-        besideLive = true;
-      }
+    } catch (e) {
+      log.error("answer read before write failed for {wiki}/{relPath}: {error}", {
+        wiki,
+        relPath,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return c.json({ error: "answer not saved", code: "store_failed" }, 500);
     }
 
     // D16: the body is scanned before it is stored — after every refusal that
