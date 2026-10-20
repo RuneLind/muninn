@@ -536,7 +536,7 @@ it cannot drift from what a capture sends; it calls no model and writes nothing.
 **YouTube:**
 - `POST /api/youtube/summarize` — Submit video (returns `job_id`)
 - `GET /api/youtube/stream/:jobId` — SSE stream of summarization progress
-- `GET /api/youtube/documents` — Browse summarized articles
+- `GET /api/summaries/documents` — Browse summarized documents from every capture source, YouTube included
 
 **Search / Research:**
 - `GET /api/search/collections` — List knowledge collections
@@ -732,7 +732,7 @@ Send a voice message and the bot will transcribe it (whisper-cli), process it th
 
 ### Tracing & Tool Tracking
 
-Every request creates a trace — a tree of timed spans (prompt build, Claude execution, DB saves, send). MCP tool calls (Gmail, Calendar, etc.) are captured from the stream events. Each tool call becomes a child span with its own timing, visible in the traces dashboard waterfall. See [`docs/tracing-and-tool-tracking.md`](docs/tracing-and-tool-tracking.md) for details.
+Every request creates a trace — a tree of timed spans (prompt build, Claude execution, DB saves, send). MCP tool calls (Gmail, Calendar, etc.) are captured from the stream events. Each tool call becomes a child span with its own timing, visible in the traces dashboard waterfall.
 
 ### Prompt Assembly
 
