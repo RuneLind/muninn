@@ -1363,6 +1363,8 @@ export function ruleTreeCss(scope: string): string {
     ${s} .rt-picked .rt-on > .rt-row { font-weight: 600; border-block-color: var(--accent); border-inline-end-color: var(--accent); }
     ${s} .rt-picked .rt-on:not(.rt-leaf) > .rt-row { border-inline-start-color: var(--accent); }
     ${s} .rt-case.rt-hit { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+    /* A case id the reader links to its board row keeps the chip's ink. */
+    ${s} .rt-case.rt-hit a { color: inherit; }
     @container rt (max-width: 26rem) {
       ${s} .rt-list .rt-list { margin-inline-start: 0.3rem; padding-inline-start: 0.6rem; }
       ${s} .rt-list .rt-list > .rt-node::before { inset-inline-start: -0.6rem; width: 0.45rem; }
