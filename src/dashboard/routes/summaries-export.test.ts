@@ -63,7 +63,10 @@ beforeAll(() => {
   docs.set("x-video.md", { url: "https://x.com/a/status/2", text: "Summary.\n\n## Transcript\n\nwords" });
   docs.set("x-post.md", { url: "https://x.com/a/status/1", text: "Summary of a pasted post." });
 });
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(join(root, "..", `muninn-export-outside-${process.pid}`), { recursive: true, force: true });
+});
 
 describe("GET /api/summaries/export", () => {
   test("a Vimeo doc: page + the frames on disk, relative paths, a named attachment", async () => {

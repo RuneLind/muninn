@@ -10,10 +10,10 @@
  * `src/vimeo/` directory: the directory glob would sweep this file into the
  * first chunk.
  */
-import { test, expect, beforeEach, beforeAll, afterEach, mock } from "bun:test";
+import { test, expect, beforeEach, beforeAll, afterAll, afterEach, mock } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
 import { mkdtemp } from "node:fs/promises";
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
@@ -236,6 +236,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   delete process.env.VIMEO_HARVEST_STUB;
   delete process.env.MUNINN_PROFILE;
+  rmSync(framesRoot, { recursive: true, force: true });
 });
 
 test("the happy path walks harvesting_captions → summarizing → ingesting → complete", async () => {
@@ -829,6 +830,7 @@ let memoDir = "";
 beforeAll(async () => {
   memoDir = await mkdtemp(join(tmpdir(), "muninn-vimeo-memo-"));
 });
+afterAll(() => rmSync(memoDir, { recursive: true, force: true }));
 
 /** The same VTT shape as the fixture, with a caller-chosen marker line. */
 function markerVtt(marker: string): string {

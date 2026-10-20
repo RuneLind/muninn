@@ -21,7 +21,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync, mkdtempSync } from "node:fs";
+import { existsSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -137,6 +137,7 @@ function pythonAnswers(): string[] | null {
     stdout: "pipe",
     stderr: "pipe",
   });
+  rmSync(dir, { recursive: true, force: true });
   if (proc.exitCode !== 0) {
     throw new Error(`huginn's interpreter failed: ${proc.stderr.toString()}`);
   }
