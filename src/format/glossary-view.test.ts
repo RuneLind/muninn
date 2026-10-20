@@ -75,6 +75,13 @@ describe("which words a term matches", () => {
     const g = glossary("- **Hold & Renew:** both at once");
     expect(marked("Ask for Hold & Renew at the desk.\n" + g)).toEqual([["hold &amp; Renew", "Hold &amp; Renew"]]);
   });
+
+  test("a numeric entity no code point can hold reads as U+FFFD, a non-word character", () => {
+    const entries: GlossaryEntry[] = [{ term: "Hold", ...glossaryKey("Hold"), definition: "kept back", codeSpelled: false, at: 0 }];
+    for (const ent of ["&#99999999;", "&#x110000;", "&#xD800;", "&#0;"]) {
+      expect(marks(markGlossaryTerms(`<p>Ask ${ent}Hold${ent} now.</p>`, entries))).toEqual([["hold", "Hold"]]);
+    }
+  });
 });
 
 describe("where a term is never marked", () => {
@@ -219,7 +226,7 @@ describe("the mark", () => {
   });
 
   test("the definition is escaped text", () => {
-    expect(html).toContain('<b class="gl-tip-term">Renewal</b> a new &amp; "quick" loan</span>');
+    expect(html).toContain('<b class="gl-tip-term">Renewal</b> a new &amp; &quot;quick&quot; loan</span>');
   });
 
   test("unwrapping the marks gives back the source's bytes", () => {

@@ -31,6 +31,7 @@
  */
 
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
+import { escapeHtml } from "./markdown-core.ts";
 import { isMarkableTerm, type GlossaryEntry } from "./glossary.ts";
 
 export const GLOSSARY_CHROME_CLASSES = ["glossary", "gl-mark", "gl-term", "gl-tip", "gl-tip-term"] as const;
@@ -66,12 +67,18 @@ interface Unit {
 const ENTITY_RE = /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/iy;
 const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
+/** A numeric entity's character; one no scalar value holds (0, a surrogate,
+ *  past U+10FFFF) is U+FFFD, as the HTML parser reads it. */
+function codePointText(n: number): string {
+  return n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : "\uFFFD";
+}
+
 /** The entity at `raw[i]` (an `&`): its decoded text and raw length, or null. */
 function entityAt(raw: string, i: number): { text: string; len: number } | null {
   ENTITY_RE.lastIndex = i;
   const m = ENTITY_RE.exec(raw);
   if (!m) return null;
-  const text = m[1] ? String.fromCodePoint(Number(m[1])) : m[2] ? String.fromCodePoint(parseInt(m[2], 16)) : NAMED[m[3]!.toLowerCase()];
+  const text = m[1] ? codePointText(Number(m[1])) : m[2] ? codePointText(parseInt(m[2], 16)) : NAMED[m[3]!.toLowerCase()];
   return text === undefined ? null : { text, len: m[0].length };
 }
 
@@ -185,8 +192,6 @@ function skips(tag: string, name: string): boolean {
   return cls !== undefined && cls.split(/\s+/).some((c) => SKIP_CLASSES.has(c));
 }
 
-const escapeAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const escapeText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /**
  * `html` with the first use of each markable term per section wrapped in a
@@ -289,9 +294,9 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
       const id = `gl-tip-${tip}`;
       piece +=
         t.slice(raw, rawOf(f, k)) +
-        `<span class="gl-mark"><span class="gl-term" tabindex="0" aria-describedby="${id}" data-gl-key="${escapeAttr(hit.key)}">` +
+        `<span class="gl-mark"><span class="gl-term" tabindex="0" aria-describedby="${id}" data-gl-key="${escapeHtml(hit.key)}">` +
         t.slice(rawOf(f, k), rawOf(f, endChunk)) +
-        `</span><span class="gl-tip" id="${id}" role="tooltip" ${READER_ONLY_ATTR}><b class="gl-tip-term">${escapeText(hit.term)}</b> ${escapeText(hit.definition)}</span></span>`;
+        `</span><span class="gl-tip" id="${id}" role="tooltip" ${READER_ONLY_ATTR}><b class="gl-tip-term">${escapeHtml(hit.term)}</b> ${escapeHtml(hit.definition)}</span></span>`;
       raw = rawOf(f, endChunk);
     }
     out += raw === 0 ? t : piece + t.slice(raw);
