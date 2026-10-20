@@ -142,6 +142,9 @@ export interface WikiSeriesRouteDeps {
 const SERIES_KEY = "series";
 const SERIES_LABEL_KEY = "series_label";
 
+/** How many pages rule 4's in-section census reads at once. */
+const CENSUS_READ_BATCH = 32;
+
 /**
  * A page a series member may be — {@link canEditSeriesPage}, the SAME predicate
  * the rail and the `Related work` block render their openers from.
@@ -155,9 +158,6 @@ const SERIES_LABEL_KEY = "series_label";
  * ordinary `.md` page `explainer`, and the extension test is what excludes a
  * real HTML one.
  */
-/** How many pages rule 4's in-section census reads at once. */
-const CENSUS_READ_BATCH = 32;
-
 function isMarkdownPage(meta: WikiPageMeta): boolean {
   return canEditSeriesPage(meta.relPath);
 }
