@@ -139,9 +139,8 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
   },
   Query: { doc: "One prod query with its SQL, CSV result and answer.", teach: WIKI },
   CaseBoard: {
-    doc: "Tracked cases from a YAML file beside the page.",
+    doc: 'Tracked cases from a YAML file beside the page; `view="dots"` adds one square per case, by status, above the rows on the wiki reader.',
     teach: WIKI,
-    attrs: { view: { doc: "`dots`: one square per case, by status, above the rows on the wiki reader" } },
   },
   DeltaTable: {
     doc: "Run-to-run numbers with a computed delta column.",
