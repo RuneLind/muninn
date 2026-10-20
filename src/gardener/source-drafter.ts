@@ -46,6 +46,7 @@ import { sha256 } from "./util.ts";
 import { missingCodeBlocks } from "./code-block-retention.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
 import { summaryFactcheckStale } from "../summaries/factcheck-body.ts";
+import { stripFactcheckBlock } from "../wiki/factcheck-context.ts";
 import {
   appendFactcheckBlock,
   buildFactcheckRider,
@@ -95,7 +96,9 @@ export function sourceRelatedPages(
   const seen = new Set<string>();
   const primary: WikiProposalRelatedPage[] = [];
   const fallback: WikiProposalRelatedPage[] = [];
-  for (const { target, label } of bodyWikilinks(stripFrontmatter(draft))) {
+  // A fact-check block's links are web-derived and never choose a host; an
+  // update-mode page keeps its existing block verbatim (finding 64).
+  for (const { target, label } of bodyWikilinks(stripFactcheckBlock(stripFrontmatter(draft)))) {
     const page = index.resolve(target);
     if (!page || page.domain !== domain) continue;
     const key = normalizeRelPath(page.relPath);

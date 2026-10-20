@@ -1493,6 +1493,19 @@ describe("draftSourcePage — See-also seeding (relatedPages)", () => {
     expect((await seeded({}, "Unlike [[Claude Opus 4.7|Opus 4.6]].", [opus])).relatedPages).toEqual([]);
   });
 
+  test("a link inside an existing fact-check block never picks the See-also host (finding 64)", () => {
+    const pages = [
+      page({ title: "Other Talk", name: "Other Talk", type: "source", relPath: "sources/Other Talk.mdx" }),
+      concept("Habits"),
+    ];
+    const current = mdxDraft({
+      body: "Body cites [[Other Talk]].\n\n<!-- factcheck:start -->\n## Fact check\n\nSee [[Habits]].\n<!-- factcheck:end -->",
+    });
+    expect(sourceRelatedPages(current, fakeIndex(pages), "sources/X.mdx")).toEqual([
+      { title: "Other Talk", relPath: "sources/Other Talk.mdx" },
+    ]);
+  });
+
   test("no index → no related pages", () => {
     expect(sourceRelatedPages(mdxDraft(), null, "sources/X.mdx")).toEqual([]);
   });
