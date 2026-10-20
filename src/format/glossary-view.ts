@@ -30,7 +30,7 @@ import { isMarkableTerm, type GlossaryEntry } from "./glossary.ts";
 export const GLOSSARY_CHROME_CLASSES = ["glossary", "gl-mark", "gl-term", "gl-tip", "gl-tip-term"] as const;
 
 const SKIP_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "a", "code", "pre", "kbd", "samp", "button", "summary", "script", "style", "svg", "textarea", "select", "option", "title"]);
-const SKIP_CLASSES = new Set(["glossary", "fc-mark", "fc-mark-block", "wiki-link-missing", "callout-title", "tldr-label", "vc", "query-result", "gl-mark"]);
+const SKIP_CLASSES = new Set(["glossary", "fc-mark", "fc-mark-block", "wiki-link-missing", "callout-title", "tldr-label", "vc", "query-result", "gl-mark", "cb-strip", "cb-pill"]);
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);
 const SECTION_TAGS = new Set(["h2", "h3"]);
@@ -114,6 +114,13 @@ function tagName(tag: string): string {
   return /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(tag)![1]!.toLowerCase();
 }
 
+/** True for a tag words run through (`**Hold**s` is one word). A span with a
+ *  class is renderer chrome that sets its text apart (a Timeline item's date
+ *  cell, then its text), so it starts a new word. */
+function joinsWords(tag: string, name: string): boolean {
+  return INLINE_TAGS.has(name) && !(name === "span" && /^<span\s[^>]*\bclass="/.test(tag));
+}
+
 function skips(tag: string, name: string): boolean {
   if (SKIP_TAGS.has(name)) return true;
   if (new RegExp(`\\s${READER_ONLY_ATTR}(?:[\\s=>/]|$)`).test(tag)) return true;
@@ -141,7 +148,7 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
     nextChar[i] = carry;
     const t = tokens[i]!;
     if (t.startsWith("<!--")) continue;
-    if (t.startsWith("<") && t.length > 1) carry = INLINE_TAGS.has(tagName(t)) ? carry : " ";
+    if (t.startsWith("<") && t.length > 1) carry = joinsWords(t, tagName(t)) ? carry : " ";
     else carry = fold(t).text[0] ?? carry;
   }
   const stack: OpenTag[] = [];
@@ -159,7 +166,7 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
     if (t.startsWith("<")) {
       out += t;
       const name = tagName(t);
-      if (!INLINE_TAGS.has(name)) prev = " ";
+      if (!joinsWords(t, name)) prev = " ";
       if (t.startsWith("</")) {
         const at = stack.map((o) => o.name).lastIndexOf(name);
         if (at >= 0) for (const o of stack.splice(at)) if (o.skip) skipDepth--;

@@ -41,6 +41,7 @@ describe("which words a term matches", () => {
     ["inside a longer word", "Withhold it.", []],
     ["bold run on into a word", "The **Hold**s lapse.", []],
     ["a digit after", "Hold2 is a code.", []],
+    ["after a Timeline item's date", "<Timeline>\n\n- **2026-09-01** — Hold opened\n\n</Timeline>", [["hold", "Hold"]]],
   ])("%s", (_name, prose, want) => {
     expect(marked(prose + "\n" + HOLD)).toEqual(want);
   });
@@ -97,6 +98,26 @@ describe("where a term is never marked", () => {
     const html = reader('<Callout tone="info" title="Hold">\n\nNo term here.\n\n</Callout>\n' + HOLD);
     expect(html).toContain('<strong class="callout-title">Hold</strong>');
     expect(marks(html)).toEqual([]);
+  });
+
+  test("a CaseBoard's count strip and status pills are never marked; its note is prose", () => {
+    const files = new Map([["c.yaml", { ok: true as const, text: "- {id: LIB-1, status: hold, note: Asked for a Hold}\n" }]]);
+    const html = renderWikiHtml('<CaseBoard src="c.yaml" />\n' + HOLD, () => undefined, { views: true, files });
+    expect(html).toContain('<span class="cb-pill cb-hold">hold</span>');
+    expect(marks(html)).toEqual([["hold", "Hold"]]);
+    expect(html.indexOf('class="gl-mark"')).toBeGreaterThan(html.indexOf('class="cb-note'));
+  });
+
+  test("the derived timeline lanes are never marked", () => {
+    const md = [
+      "<StatusRows>\n\n- **Desk:** open\n\n</StatusRows>\n",
+      "<DecisionLog>\n\n- **D1** — A. 2026-09-01\n- **D2** — B. 2026-09-02\n\n</DecisionLog>\n",
+      "<Timeline>\n\n- **2026-09-01** — Hold opened\n- **2026-09-02** — Closed\n\n</Timeline>\n",
+    ].join("\n");
+    const html = renderWikiHtml(md + HOLD, () => undefined, { views: true, today: "2026-10-01" });
+    expect(html).toContain("tl-lanes");
+    expect(marks(html)).toEqual([["hold", "Hold"]]);
+    expect(html.indexOf('class="gl-mark"')).toBeGreaterThan(html.indexOf('class="gtl'));
   });
 
   test("a table cell is prose and is marked", () => {

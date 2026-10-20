@@ -174,8 +174,9 @@ export function refTargets(root: Element): { ids: Map<string, Element>; titles: 
   return { ids: unique(idDefs), titles };
 }
 
+// `.tl-lanes`: its item labels sit in visually hidden text, where a link would be an unseen tab stop.
 const SKIP =
-  "a, code, pre, summary, h1, h2, h3, h4, h5, h6, button, textarea, input, select, svg, script, style, .mermaid, .query-result";
+  "a, code, pre, summary, h1, h2, h3, h4, h5, h6, button, textarea, input, select, svg, script, style, .mermaid, .query-result, .tl-lanes";
 
 /** What may stand between two ids of one run: a list or range separator. */
 const RUN_GAP_RE = /^\s*(?:[,/&–—-]|og|and|eller|or|til|to)?\s*$/u;

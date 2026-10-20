@@ -1429,10 +1429,10 @@ export function glossaryCss(scope: string): string {
 export function caseDotsCss(scope: string): string {
   const s = scope;
   return `
-    ${s} .cb-dots { display: none; margin-block: 0.5rem 0.75rem; }
+    ${s} .cb-dots { display: none; margin-block: 0.5rem 0.75rem; container: cb-dots / inline-size; }
     .rt-js ${s} .cb-dots { display: block; }
-    ${s} .cb-dots-group { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.5rem; margin-block-end: 0.35rem; }
-    ${s} .cb-dots-label { font-size: 0.8rem; color: var(--text-soft); min-inline-size: 7rem; }
+    ${s} .cb-dots-group { display: grid; grid-template-columns: minmax(5rem, 8rem) minmax(0, 1fr); align-items: start; column-gap: 0.5rem; margin-block-end: 0.35rem; }
+    ${s} .cb-dots-label { font-size: 0.8rem; color: var(--text-soft); line-height: 1.6rem; overflow-wrap: anywhere; }
     ${s} .cb-dots-row { display: flex; flex-wrap: wrap; gap: 0.25rem; min-inline-size: 0; }
     ${s} .cb-dot {
       inline-size: 1.6rem; block-size: 1.6rem; padding: 0; border-radius: 4px; cursor: pointer;
@@ -1447,6 +1447,9 @@ export function caseDotsCss(scope: string): string {
     ${s} .cb-dot-unknown { background: var(--bg-surface); color: var(--text-secondary); border-style: dashed; }
     ${s} .cb-dot:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 2px; }
     ${s} .cb-dot[aria-pressed="true"] { border-width: 2px; box-shadow: 0 0 0 2px var(--text-primary); }
+    @container cb-dots (max-width: 26rem) {
+      ${s} .cb-dots-group { grid-template-columns: minmax(0, 1fr); }
+    }
     ${s} .cb-dots-say { margin: 0.25rem 0 0; min-block-size: 1.2em; font-size: 0.85rem; color: var(--text-primary); overflow-wrap: anywhere; }
     @media print {
       ${s} .cb-dots, .rt-js ${s} .cb-dots { display: none; }
@@ -1484,7 +1487,7 @@ export function timelineLanesCss(scope: string): string {
       ${s} .tll-dot { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
     }
     @media (forced-colors: active) {
-      ${s} .tll-dot { forced-color-adjust: none; background: CanvasText; border-color: Canvas; }
+      ${s} .tll-lane .tll-dot { forced-color-adjust: none; background: CanvasText; border-color: Canvas; }
       ${s} .tll-track { border-block-end-color: CanvasText; }
     }
   `;
