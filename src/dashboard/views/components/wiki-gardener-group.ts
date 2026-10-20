@@ -49,3 +49,14 @@ export function groupChipTone(statuses: readonly string[]): string {
   // renders as itself rather than silently borrowing `draft`'s colour.
   return statuses[0] ?? "draft";
 }
+
+/**
+ * The group card's drift line, or null when no draft row drifted. Accept stays
+ * enabled: the apply refuses the whole group and marks only the drifted rows
+ * stale, which is the outcome the reviewer needs to see.
+ */
+export function groupDriftNote(rows: readonly { status: string; drifted?: string | null }[]): string | null {
+  const n = rows.filter((r) => r.status === "draft" && r.drifted).length;
+  if (n === 0) return null;
+  return `${n} page${n === 1 ? "" : "s"} changed since drafting — Accept will apply nothing and mark ${n === 1 ? "it" : "them"} stale.`;
+}

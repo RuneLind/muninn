@@ -10,6 +10,7 @@ import {
   draftTitle,
   commitMessageFor,
   logWriterFor,
+  updateBaseDrift,
   type ApplyDeps,
 } from "./apply.ts";
 import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
@@ -1160,5 +1161,23 @@ describe("applyWikiProposalGroup", () => {
 
     expect(res.results[0]!.outcome.outcome).toBe("applied");
     expect(await readFile(path.join(wikiDir, "plans/c.mdx"), "utf8")).toBe(expected);
+  });
+});
+
+// Finding 63: the gate's listing and the apply step must agree on "this page
+// changed since the draft". One predicate, read by both.
+describe("updateBaseDrift", () => {
+  const page = "---\ntitle: A\n---\n\nBody.\n";
+  test("the page as drafted is not drift", () => {
+    expect(updateBaseDrift(sha256(page), page)).toBeNull();
+  });
+  test("a page edited since the draft is drift", () => {
+    expect(updateBaseDrift(sha256(page), page + "More.\n")).toBe("target file changed since drafting");
+  });
+  test("a vanished page is drift", () => {
+    expect(updateBaseDrift(sha256(page), null)).toBe("target file no longer exists");
+  });
+  test("a row with no base hash cannot prove anything, so it is drift", () => {
+    expect(updateBaseDrift(null, page)).toBe("target file changed since drafting");
   });
 });

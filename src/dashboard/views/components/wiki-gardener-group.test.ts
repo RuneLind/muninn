@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { groupStatusSummary, groupChipTone } from "./wiki-gardener-group.ts";
+import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
 
 describe("groupStatusSummary", () => {
   test("counts each status once, in the rows' own order of first appearance", () => {
@@ -73,5 +73,19 @@ describe("groupChipTone", () => {
     expect(groupChipTone(["error", "applied"])).toBe("error");
     expect(groupChipTone(["something-new"])).toBe("something-new");
     expect(groupChipTone([])).toBe("draft");
+  });
+});
+
+describe("groupDriftNote", () => {
+  test("no drifted draft row means no note", () => {
+    expect(groupDriftNote([{ status: "draft", drifted: null }, { status: "stale", drifted: "x" }])).toBeNull();
+  });
+  test("counts only drifted DRAFT rows, with the right number", () => {
+    expect(groupDriftNote([{ status: "draft", drifted: "x" }, { status: "draft" }])).toBe(
+      "1 page changed since drafting — Accept will apply nothing and mark it stale.",
+    );
+    expect(groupDriftNote([{ status: "draft", drifted: "x" }, { status: "draft", drifted: "y" }])).toBe(
+      "2 pages changed since drafting — Accept will apply nothing and mark them stale.",
+    );
   });
 });

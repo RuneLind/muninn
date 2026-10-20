@@ -137,6 +137,18 @@ export interface ApplyDeps {
  * `[source-drafter] draft: …`; consolidation-gardener synthesis pages are
  * `[consolidation] apply: …`.
  */
+/**
+ * Why an update-mode row can no longer apply, or null when the page on disk is
+ * still the one it was drafted against. The apply step refuses on it, and the
+ * gate's listing flags the row with it, so a reviewer sees the refusal before
+ * clicking. A row with no base hash proves nothing and counts as drift.
+ */
+export function updateBaseDrift(baseHash: string | null | undefined, current: string | null): string | null {
+  if (current === null) return "target file no longer exists";
+  if (!baseHash || sha256(current) !== baseHash) return "target file changed since drafting";
+  return null;
+}
+
 export function commitMessageFor(proposal: WikiProposal): string {
   if (proposal.kind === "synthesis") return `[consolidation] apply: ${proposal.targetPath}`;
   if (proposal.kind === "lint") return `[lint] fix: ${proposal.targetPath}`;
@@ -535,10 +547,8 @@ async function preflightGroupRows(
       continue;
     }
     if (row.mode === "update") {
-      if (current === null) return blocked({ outcome: "stale", reason: "target file no longer exists" });
-      if (!row.baseHash || sha256(current) !== row.baseHash) {
-        return blocked({ outcome: "stale", reason: "target file changed since drafting" });
-      }
+      const drift = updateBaseDrift(row.baseHash, current);
+      if (drift) return blocked({ outcome: "stale", reason: drift });
     } else if (current !== null) {
       return blocked({ outcome: "stale", reason: "target path already exists" });
     }
@@ -722,12 +732,8 @@ async function applyInner(
 
   // 2b. Staleness — the target must be exactly as it was at draft time.
   if (proposal.mode === "update") {
-    if (current === null) {
-      return { outcome: "stale", reason: "target file no longer exists" };
-    }
-    if (!proposal.baseHash || sha256(current) !== proposal.baseHash) {
-      return { outcome: "stale", reason: "target file changed since drafting" };
-    }
+    const drift = updateBaseDrift(proposal.baseHash, current);
+    if (drift) return { outcome: "stale", reason: drift };
   } else if (current !== null) {
     return { outcome: "stale", reason: "target path already exists" };
   }
