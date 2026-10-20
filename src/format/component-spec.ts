@@ -435,6 +435,9 @@ export const COMPONENT_SPEC = {
       outcomes: text,
     },
   },
+  // A «Words on the page» list (`glossary.ts`); the reader marks each term's
+  // first use per `##` section.
+  Glossary: { attrs: {} },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

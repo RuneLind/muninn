@@ -26,6 +26,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",
   "chart-table": "<Chart> tables the chart cannot draw, or draws with a note",
   "rule-tree": "<RuleTree> lists the tree cannot read: untoned outcomes, cases on two leaves",
+  glossary: "<Glossary> lists with no term, a term twice, or a term the page never uses",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Thirty-three check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Thirty-four check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -110,6 +110,11 @@
  *                      `->` opens it, after an optional lead) not read as
  *                      one, a case tail that reads as no ids (info). Rules:
  *                      `lint-rule-tree.ts`.
+ * 19. glossary — on `.mdx` pages that are not culled, what a `<Glossary>`
+ *                      cannot do: no term, or a term defined twice
+ *                      (warnings); an item with no term, a term the page
+ *                      never uses outside the list (info). Rules:
+ *                      `lint-glossary.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -146,6 +151,7 @@ import { checkComponents, COMPONENT_LINT_CHECKS } from "./lint-components.ts";
 import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-chain.ts";
 import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
 import { checkRuleTrees, RULE_TREE_LINT_CHECKS } from "./lint-rule-tree.ts";
+import { checkGlossaries, GLOSSARY_LINT_CHECKS } from "./lint-glossary.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -181,11 +187,12 @@ export const LINT_CHECKS = [
   ...DECISION_CHAIN_LINT_CHECKS,
   ...CHART_LINT_CHECKS,
   ...RULE_TREE_LINT_CHECKS,
+  ...GLOSSARY_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 /** The checks that read nothing but a page's own text, its relPath and the
- *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17 and 18). Check
+ *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18 and 19). Check
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
  *  through {@link checkPageText}, and `scripts/wiki-check.ts` runs the same
@@ -211,6 +218,7 @@ export const PAGE_TEXT_LINT_CHECKS = [
   ...DECISION_CHAIN_LINT_CHECKS,
   ...CHART_LINT_CHECKS,
   ...RULE_TREE_LINT_CHECKS,
+  ...GLOSSARY_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
@@ -995,7 +1003,7 @@ export function checkPageText(page: PageTextRef, content: string, roleKeys: read
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content), ...checkCharts(page, content), ...checkRuleTrees(page, content));
+  if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content));
   return findings;
 }

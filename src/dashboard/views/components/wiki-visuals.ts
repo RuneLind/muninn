@@ -1,5 +1,6 @@
 /**
- * The reader's `<Chart>` toggles and `<RuleTree>` case picker. The server
+ * The reader's `<Chart>` toggles, `<RuleTree>` case picker and `<Glossary>`
+ * term definitions. The server
  * draws every chart variant (`src/format/chart-view.ts`); this file only shows
  * one: Chart or Table, and the variant (points or % of target, the bar as
  * decided or after). A picked case marks the tree's rows on its path
@@ -91,6 +92,50 @@ function ruleTreeSays(live: HTMLElement): Record<string, string> {
   }
 }
 
+/** Keep a glossary definition inside the viewport: shift it back left by
+ *  what it would overflow on the right. */
+function placeGlossaryTip(mark: Element): void {
+  const tip = mark.querySelector<HTMLElement>(":scope > .gl-tip");
+  if (!tip) return;
+  tip.style.insetInlineStart = "";
+  const view = mark.ownerDocument.documentElement.clientWidth;
+  const r = tip.getBoundingClientRect();
+  if (r.width === 0) return;
+  const over = r.right - (view - 8);
+  if (over > 0) tip.style.insetInlineStart = `${-Math.min(over, Math.max(0, r.left - 8))}px`;
+}
+
+/** A definition shown by hover or focus: place it; Escape hides it until the
+ *  pointer or focus leaves the term. */
+function wireGlossary(doc: Document): void {
+  const markOf = (t: EventTarget | null) => (t instanceof Element ? t.closest(".gl-mark") : null);
+  doc.addEventListener("mouseover", (e) => {
+    const m = markOf(e.target);
+    if (m) placeGlossaryTip(m);
+  });
+  doc.addEventListener("focusin", (e) => {
+    const m = markOf(e.target);
+    if (m) placeGlossaryTip(m);
+  });
+  doc.addEventListener("mouseout", (e) => {
+    const m = markOf(e.target);
+    if (m && !(e.relatedTarget instanceof Node && m.contains(e.relatedTarget))) m.classList.remove("gl-dismissed");
+  });
+  doc.addEventListener("focusout", (e) => markOf(e.target)?.classList.remove("gl-dismissed"));
+  doc.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape") return;
+      const m = markOf(doc.activeElement) ?? doc.querySelector(".gl-mark:hover:not(.gl-dismissed)");
+      if (!m || m.classList.contains("gl-dismissed")) return;
+      m.classList.add("gl-dismissed");
+      // The open definition takes this Escape; the reader's own keys get the next one.
+      e.stopPropagation();
+    },
+    true,
+  );
+}
+
 let installed = false;
 
 /** Install the delegated listeners; later calls do nothing. */
@@ -103,6 +148,7 @@ export function initWikiVisuals(doc: Document = document): void {
   doc.addEventListener("change", (e) => {
     applyRuleTreePick(e.target instanceof Element ? e.target : null);
   });
+  wireGlossary(doc);
   // The rule tree picker shows only once its listener is in place.
   doc.documentElement.classList.add("rt-js");
 }

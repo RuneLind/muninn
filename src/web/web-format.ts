@@ -2267,6 +2267,10 @@ const webRenderer: BlockRenderer = {
         return chartBlockHtml(attrs, rawChildren, children);
       case "RuleTree":
         return ruleTreeBlockHtml(attrs, rawChildren, children);
+      case "Glossary":
+        // The list as written. The reader's page render wraps it so the term
+        // marks (`glossary-view.ts`) leave the list itself alone.
+        return currentViews ? `<div class="glossary">${children}</div>` : children;
       case "StatusRows":
         // Tiles on the reader's page render only; every other surface prints rows.
         return statusRowsHtml(

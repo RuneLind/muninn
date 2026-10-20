@@ -189,6 +189,10 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
       },
     },
   },
+  Glossary: {
+    doc: "A «Words on the page» list of `**Term:** definition` items; the wiki reader marks each term's first use per `##` section with its definition, every other surface prints the list.",
+    teach: WIKI,
+  },
 };
 
 /**

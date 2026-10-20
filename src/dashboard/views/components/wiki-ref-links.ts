@@ -353,6 +353,23 @@ function bareRuleTree(tree: Element): void {
   tree.removeAttribute("aria-label");
 }
 
+/** A `<Glossary>`'s reader chrome (`GLOSSARY_CHROME_CLASSES` in
+ *  glossary-view.ts, pinned equal by a test). */
+export const PEEK_GLOSSARY_CHROME = ["glossary", "gl-mark", "gl-term", "gl-tip", "gl-tip-term"] as const;
+
+/** A peeked glossary mark is the term's own text again; the list loses its
+ *  wrapper class. Runs after the strip took the definitions. */
+function bareGlossary(c: Element): void {
+  for (const m of Array.from(c.querySelectorAll(".gl-mark"))) {
+    m.replaceWith(m.ownerDocument.createTextNode(m.textContent ?? ""));
+  }
+  for (const g of [c, ...Array.from(c.querySelectorAll(".glossary"))]) {
+    if (!g.matches(".glossary")) continue;
+    g.classList.remove("glossary");
+    if (g.classList.length === 0) g.removeAttribute("class");
+  }
+}
+
 /** What a peek copy drops: the reader's compact-list controls and parts (D6,
  *  D41, D42) and the decision views — a peek shows its target whole, as
  *  written, and never the chain or the strip. */
@@ -368,6 +385,7 @@ export const PEEK_STRIP_SELECTOR = [
   DC_VIEW_CLASS,
   ...PEEK_CHART_CHROME,
   ...PEEK_RULE_TREE_CHROME,
+  "gl-tip",
 ]
   .map((c) => `.${c}`)
   .join(", ");
@@ -383,6 +401,7 @@ function cloneBare<T extends Node>(n: T): T {
     c.querySelectorAll(PEEK_STRIP_SELECTOR).forEach((b) => b.remove());
     for (const chart of [c, ...Array.from(c.querySelectorAll("section.vc"))]) if (chart.matches("section.vc")) bareChart(chart);
     for (const tree of [c, ...Array.from(c.querySelectorAll("section.rt"))]) if (tree.matches("section.rt")) bareRuleTree(tree);
+    bareGlossary(c);
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;
       const items = Array.from(list.children);

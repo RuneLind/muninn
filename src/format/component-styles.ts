@@ -1388,3 +1388,36 @@ export function ruleTreeCss(scope: string): string {
     }
   `;
 }
+
+/** `<Glossary>` term marks on the wiki reader (`glossary-view.ts`). The
+ *  definition shows on hover and on keyboard focus; Escape hides it
+ *  (`gl-dismissed`, `wiki-visuals.ts`), which also keeps it inside the viewport. */
+export function glossaryCss(scope: string): string {
+  const s = scope;
+  return `
+    ${s} .gl-mark { position: relative; }
+    ${s} .gl-term {
+      text-decoration: underline dotted var(--text-secondary); text-decoration-thickness: 1px; text-underline-offset: 0.2em;
+      cursor: help; border-radius: 3px;
+    }
+    ${s} .gl-term:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
+    ${s} .gl-tip {
+      display: none; position: absolute; z-index: 20; inset-block-start: calc(100% + 0.25rem); inset-inline-start: 0;
+      width: max-content; max-width: min(22rem, calc(100vw - 2rem)); box-sizing: border-box; padding: 0.4rem 0.6rem;
+      border-radius: 6px; border: 1px solid var(--text-muted); background: var(--bg-surface); color: var(--text-primary);
+      font-size: 0.85rem; font-weight: 400; font-style: normal; line-height: 1.4; white-space: normal; overflow-wrap: anywhere;
+      text-align: start; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    }
+    ${s} .gl-tip-term { font-weight: 600; }
+    ${s} .gl-mark:not(.gl-dismissed):hover > .gl-tip,
+    ${s} .gl-mark:not(.gl-dismissed):focus-within > .gl-tip { display: block; }
+    @media print {
+      ${s} .gl-tip, ${s} .gl-mark:hover > .gl-tip, ${s} .gl-mark:focus-within > .gl-tip { display: none; }
+      ${s} .gl-term { text-decoration: none; }
+    }
+    @media (forced-colors: active) {
+      ${s} .gl-term { text-decoration-color: CanvasText; }
+      ${s} .gl-tip { border-color: CanvasText; }
+    }
+  `;
+}

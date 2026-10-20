@@ -111,6 +111,24 @@ const RULE_TREE = [
   "</RuleTree>",
   "",
 ].join("\n");
+/** A glossary with one warning (a term twice) and one info finding (a term
+ *  the page never uses outside the list). */
+const GLOSSARY = [
+  "---",
+  "title: G",
+  "plan_status: shipped",
+  "---",
+  "A Hold keeps the book on the shelf.",
+  "",
+  "<Glossary>",
+  "",
+  "- **Hold:** a book kept back for one reader",
+  "- **Renewal:** a new loan period",
+  "- **Hold:** said twice",
+  "",
+  "</Glossary>",
+  "",
+].join("\n");
 const TEXT_SHAPES = [
   "---",
   "title: S",
@@ -179,6 +197,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/dc.mdx"), DECISION_CHAIN);
   await Bun.write(path.join(tmp, "page-checks/plans/ch.mdx"), CHART);
   await Bun.write(path.join(tmp, "page-checks/plans/rt.mdx"), RULE_TREE);
+  await Bun.write(path.join(tmp, "page-checks/plans/gl.mdx"), GLOSSARY);
   await Bun.write(path.join(tmp, "page-checks/plans/st.mdx"), STATUS_TILES);
   await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
   await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
@@ -338,6 +357,7 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "chain-close-conflict",
         "chart-table",
         "rule-tree",
+        "glossary",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
