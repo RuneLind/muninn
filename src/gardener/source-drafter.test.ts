@@ -7,6 +7,7 @@ import {
   labelNamesHost,
   buildSourceDraftPrompt,
   buildSourceRevisePrompt,
+  keepCurrentFrontmatter,
   VERBATIM_MATERIAL_RULE,
   MIN_SOURCE_BODY_CHARS,
   COLLISION_SKIP_SENTINEL,
@@ -1220,11 +1221,60 @@ describe("draftSourcePage — update mode", () => {
     expect("reason" in out && out.reason).toContain("no frontmatter title");
   });
 
+  test("keeps the current page's frontmatter, apart from `updated:` (architecture review 2026-10, finding 62)", async () => {
+    // The prompt asks the reviser to keep frontmatter; nothing enforced it. A
+    // revise that empties aliases/tags and drops an unnamed key was persisted.
+    const current = mdxDraft({
+      body: "# Retrieval-Augmented Generation\n\nThe page as a reviewer approved it.",
+    })
+      .replace("tags: [rag]", "tags: [rag, infra]")
+      .replace("updated: 2026-07-19\n", "updated: 2026-07-19\nreconstructed: 2026-08-01 from the capture\n");
+    const revised = mdxDraft({
+      body: "# Retrieval-Augmented Generation\n\nThe page as a reviewer approved it.\n\n```yaml\nk: v\n```",
+    })
+      .replace("aliases: [RAG]", "aliases: []")
+      .replace("tags: [rag]", "tags: []")
+      .replace("updated: 2026-07-19", "updated: 2026-10-20");
+    let captured: InsertWikiProposalParams | null = null;
+    const out = await draftSourcePage(
+      updateDeps({
+        update: { relPath: RELPATH, currentText: current },
+        callDrafter: async () => revised,
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    const fm = (t: string) => t.split("---\n")[1]!;
+    expect(fm(captured!.draft)).toBe(fm(current).replace("updated: 2026-07-19", "updated: 2026-10-20"));
+    // The body is still the reviser's.
+    expect(captured!.draft).toContain("```yaml\nk: v\n```");
+  });
+
   test("a live proposal for the doc still blocks — a pending draft is a real duplicate", async () => {
     const out = await draftSourcePage(
       updateDeps({ liveTopicKeys: async () => [sourceTopicKey("youtube-summaries", "abc12345678")] }),
     );
     expect(out.outcome).toBe("covered");
+  });
+});
+
+describe("keepCurrentFrontmatter", () => {
+  test("appends the draft's updated: when the page has none", () => {
+    expect(keepCurrentFrontmatter("---\ntitle: A\n---\nold\n", "---\ntitle: B\nupdated: 2\n---\nnew\n")).toBe(
+      "---\ntitle: A\nupdated: 2\n---\nnew\n",
+    );
+  });
+  test("replaces the page's updated: in place, keeping a $ in it literal", () => {
+    expect(
+      keepCurrentFrontmatter("---\ntitle: A\nupdated: 1\ntags: [x]\n---\nold\n", "---\ntitle: B\nupdated: $&2\n---\nnew\n"),
+    ).toBe("---\ntitle: A\nupdated: $&2\ntags: [x]\n---\nnew\n");
+  });
+  test("leaves the draft alone when either side has no fence", () => {
+    expect(keepCurrentFrontmatter("no fence", "---\ntitle: B\n---\nnew\n")).toBe("---\ntitle: B\n---\nnew\n");
+    expect(keepCurrentFrontmatter("---\ntitle: A\n---\n", "no fence")).toBe("no fence");
   });
 });
 
