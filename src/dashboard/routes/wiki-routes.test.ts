@@ -4517,7 +4517,7 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-alias-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-alias-route-"));
     await Bun.write(path.join(root, "p.md"), "# P\n\nBody.\n");
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `aliasfirst=${root},aliassecond=${root}`;

@@ -203,7 +203,7 @@ describe("the Jira facet over stamped and inferred", () => {
 describe("every indexed issue key round-trips through parseKey", () => {
   let odd: WikiIndex;
   beforeAll(async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "tracker-oddkeys-"));
+    const root = await testTempDir(path.join(tmpdir(), "tracker-oddkeys-"));
     roots.push(root);
     await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(TRACKERS));
     await writeFile(
