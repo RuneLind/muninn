@@ -294,8 +294,11 @@ export function readChart(kind: ChartKind | null, attrs: Readonly<Record<string,
       const refRow = refName ? table.rows.findIndex((row) => normalizeLabel(cell(row, xi)) === normalizeLabel(refName)) : -1;
       if (refName && refRow < 0) fatal(`${quoteAttr("ref", refName)} names no row in ${table.headers[xi]}`);
       if (findings.some((f) => f.fatal)) return { model: null, findings, ctx };
-      const stepRows = refRow < 0 ? table.rows : table.rows.slice(0, refRow);
-      const extraRows = refRow < 0 ? [] : table.rows.slice(refRow + 1);
+      // Rows above the ref row are the steps and rows below it extra reference
+      // rows; a ref row that opens the table is the first step, the baseline.
+      const refFirst = refRow <= 0;
+      const stepRows = refFirst ? table.rows : table.rows.slice(0, refRow);
+      const extraRows = refFirst ? [] : table.rows.slice(refRow + 1);
       const cols = table.headers.map((_, i) => i).filter((i) => i !== xi);
       const read = (row: string[], i: number, r: number) => num(row, i, r, true) ?? null;
       const series: StepsSeries[] = cols.map((i) => ({
@@ -307,7 +310,7 @@ export function readChart(kind: ChartKind | null, attrs: Readonly<Record<string,
       if (normalize) {
         for (const s of series) if (!s.ref || s.ref.n === 0) fatal(`${s.name} has no non-zero value in the ${refName} row to measure against`, refRow);
       }
-      if (stepRows.length === 0) fatal(`has no step rows before the ${refName} row`);
+      if (stepRows.length === 0) fatal("has no step rows");
       if (findings.some((f) => f.fatal)) return { model: null, findings, ctx };
       return {
         model: {

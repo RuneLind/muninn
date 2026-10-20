@@ -112,6 +112,14 @@ describe("readChart per kind", () => {
     const zero = readChart("steps", { x: "Step", ref: "Base", normalize: "ref" }, t(["Step", "A"], ["s1", "10"], ["Base", "0"]));
     expect(zero.model).toBeNull();
   });
+
+  test("steps: a ref row that opens the table is the first step, the baseline", () => {
+    const r = readChart("steps", { x: "Step", ref: "Base", normalize: "ref" }, t(["Step", "A"], ["Base", "10"], ["s1", "12"], ["s2", "15"]));
+    expect(r.findings).toEqual([]);
+    const m = r.model as { steps: string[]; extras: unknown[] } | null;
+    expect(m?.steps).toEqual(["Base", "s1", "s2"]);
+    expect(m?.extras).toEqual([]);
+  });
   test("funnel: a row larger than its parent is fatal; Av names the parent column too", () => {
     const big = readChart("funnel", {}, t(["Stage", "Count", "Of"], ["All", "10", ""], ["Some", "12", "10"]));
     expect(big.model).toBeNull();
