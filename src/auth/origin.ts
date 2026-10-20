@@ -128,6 +128,27 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // request. The route also requires its own header, which a cross-origin page
   // cannot send without a preflight; this entry is the instance-wide rule.
   "/api/wiki/felles-status",
+  // Search, similarity and embedding amplifiers: each GET carries caller text
+  // or a collection to a huginn search or graph computation, or to a local
+  // embedding plus a pgvector query. Exact paths; the pages fetch them
+  // same-origin, and the cheap siblings (`/api/graph/collections`,
+  // `/api/search/health`) stay unlisted. `side-effecting-gets.test.ts` holds
+  // the criterion and classifies every other GET.
+  "/api/search/search",
+  "/api/memsearch",
+  "/api/graph/similarity",
+  "/api/graph/author",
+  "/api/research/similar",
+  "/api/summaries/same-story",
+  "/api/anthropic/similar",
+  "/api/articles/similar",
+  "/api/youtube/similar",
+  "/api/x-articles/similar",
+  "/api/tiktok/similar",
+  "/api/vimeo/similar",
+  "/api/wiki/similar",
+  // `?semantic=1` builds one huginn similarity graph per backing collection.
+  "/api/wiki/atlas",
   // On a missing or stale cache it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
   // it — so an `<img>` on any page could start local processes. The chat page
   // calls it with a same-origin `fetch`, which passes.

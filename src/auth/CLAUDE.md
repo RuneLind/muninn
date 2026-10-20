@@ -349,9 +349,16 @@ passes through the Host / same-origin arms instead — known, not fixed.
 Scoped to **side effects, not to methods**. `SIDE_EFFECTING_GETS` (`origin.ts`)
 is the enumerated exception list — the pending consume (and its `/simulator/`
 alias), the research synthesis GET, the wiki ask/digest/explain/fact-check
-model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the MCP-status
-probe and the
-two WS upgrade paths. Three examples: `GET /chat/pending/:threadId` is a one-time *consume*
+model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the
+search/similarity/embedding amplifiers (`/api/search/search`, `/api/memsearch`,
+the `*/similar` proxies, `/api/graph/{similarity,author}`, same-story, the
+atlas), the MCP-status probe and the two WS upgrade paths.
+**`side-effecting-gets.test.ts` is the carrier**: it walks every registered GET
+and requires each on this list or on its `READ_ONLY_GETS` allowlist with a
+reason, so a new GET starts red. The criterion is written in its header: a
+model call, a spawn, a consume, a search/similarity/embedding computation the
+caller drives, or a fan-out the data sizes is listed; a fixed set of listings
+or one bounded sibling read is not. Three examples: `GET /chat/pending/:threadId` is a one-time *consume*
 (a cross-site `<img>` destroys the victim's pending message without reading a
 response) and `GET /api/research/ask` spends a retrieval + synthesis turn;
 `GET /chat/mcp-status/:bot` spawns every stdio MCP server in the bot's
