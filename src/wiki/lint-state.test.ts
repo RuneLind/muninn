@@ -948,3 +948,54 @@ describe("check 14 Status homes inside a component, below a fence (fix round 3)"
     expect(await flaggedBody([...lead, "- a", "", "  **Status:** DEMO-1 is merged", "  DEMO-2 is merged.", "</Callout>", "DEMO-3 is merged."])).toEqual([11]);
   });
 });
+
+// ── Batch L fix round 3, class check B: the count anchor's grammar ──
+
+describe("check 14 count anchor grammar (fix round 3)", () => {
+  // The spec, one row per case: COUNT SEP WORD, where COUNT is 1–3 ASCII digits
+  // or a range of two such numbers joined by `-` or `–`, its left neighbour is
+  // none of a letter, a digit of any script, `_ . , # : / - –`, SEP is one
+  // space, tab or no-break space, and WORD is a listed task word followed by
+  // none of a letter, a digit, `_`, `/` or `.`+letter-or-digit.
+  const rows: [string, boolean, string][] = [
+    ["3 PRs are merged.", true, "one digit"],
+    ["10 PRs are merged.", true, "two digits"],
+    ["999 PRs are merged.", true, "three digits"],
+    ["1000 PRs are merged.", false, "four digits is no count"],
+    ["2026 PRs are merged.", false, "a year is no count"],
+    ["1-3 PRs are merged.", true, "range with -"],
+    ["1–3 PRs are merged.", true, "range with –"],
+    ["10-12 PRs are merged.", true, "multi-digit range start, -"],
+    ["10–12 PRs are merged.", true, "multi-digit range start, –"],
+    ["2026-10 PR is merged.", false, "ISO year-month"],
+    ["1-2-3 PRs are merged.", false, "three-part run"],
+    ["1–2–3 PRs are merged.", false, "three-part run, –"],
+    ["14:30–16 PR is merged.", false, "time range"],
+    ["1.5–3 PRs are merged.", false, "decimal range start"],
+    ["6/10–12 PRs are merged.", false, "date range"],
+    ["v1–3 PRs are merged.", false, "version range"],
+    ["#1–3 PRs are merged.", false, "hash range"],
+    ["1,5–3 PRs are merged.", false, "decimal-comma range, –"],
+    ["1,5-3 PRs are merged.", false, "decimal-comma range, -"],
+    ["x,3 PRs are merged.", false, "comma on the left"],
+    ["_3 PRs are merged.", false, "underscore on the left"],
+    ["(3 PRs are merged.)", true, "a bracket on the left"],
+    ["²-3 PRs are merged.", false, "superscript range start"],
+    ["Ⅻ-3 PRs are merged.", false, "roman-numeral range start"],
+    ["３-3 PRs are merged.", false, "fullwidth range start"],
+    ["３ PRs are merged.", false, "fullwidth digit"],
+    ["٣ PRs are merged.", false, "Arabic-Indic digit"],
+    ["²3 PRs are merged.", false, "a digit of another script on the left"],
+    ["3PRs are merged.", false, "no separator"],
+    ["3  PRs are merged.", false, "two spaces"],
+    ["3 PRs are merged.", true, "no-break space"],
+    ["3 PRs/tasks are merged.", false, "slash on the right"],
+    ["3 PR_x is merged.", false, "underscore on the right"],
+    ["3 PR-en is merged.", true, "a hyphen on the right continues the word"],
+  ];
+  for (const [line, flags, why] of rows) {
+    test(`${why}: ${JSON.stringify(line)} ${flags ? "counts" : "does not count"}`, async () => {
+      expect(await flaggedBody([line])).toEqual(flags ? [0] : []);
+    });
+  }
+});

@@ -134,24 +134,36 @@ function wordsRe(words: readonly string[]): RegExp | null {
 /**
  * Task words. A word with an upper-case letter (`PR`, `PR-er`) matches as
  * written, so `e2e-pr.yml` is no PR; an all-lower-case word (`oppgave`) matches
- * any case. Neither may touch a `.`/`/` path neighbour or a letter, but a
- * hyphen is fine on the left (`api-PR 2`). A task word anchors only next to a
- * number: one after it names a piece of work (`PR 1`, `PR 1–4`, `oppgave #3`),
- * one before it counts pieces of work (`8 PR-er`, `7 av 8 PR-er`). A bare one
- * (`når PR-en er merget`, a `| Service-PR |` column) is generic prose about no
- * piece of work. The count's number, or range (`1-3 PR`, `1–3 PR`), stands
- * alone: not the end of a version, date, time or decimal (`1.2 PR`, `06.10 PR`,
- * `6/10 PR`, `14:30 PR`, `1,5 PR`), a key (`DEMO-8 PR`) or a word (`v2 PR`).
- * A plural the wiki does not list (`3 oppgaver` for `oppgave`) is no count.
+ * any case. A task word anchors only next to a number: one after it names a
+ * piece of work (`PR 1`, `PR 1–4`, `oppgave #3`), one before it counts pieces
+ * of work (`8 PR-er`, `7 av 8 PR-er`). A bare one (`når PR-en er merget`, a
+ * `| Service-PR |` column) is generic prose about no piece of work. A plural
+ * the wiki does not list (`3 oppgaver` for `oppgave`) is no count.
+ *
+ * The count form, `COUNT SEP WORD`:
+ *
+ * | part   | rule                                                                        |
+ * |--------|-----------------------------------------------------------------------------|
+ * | COUNT  | 1–3 ASCII digits (`3`, `10`, `999`), or a range of two such numbers joined   |
+ * |        | by `-` or `–` (`1-3`, `10–12`). Four digits are a year (`2026`), and         |
+ * |        | `2026-10` a year-month                                                      |
+ * | left   | before COUNT: the start, or none of a letter, a digit of any script, `_`,   |
+ * |        | `.`, `,`, `#`, `:`, `/`, `-`, `–`. So the end of a version, decimal, time,  |
+ * |        | date, key or word (`v2`, `1.2`, `1,5`, `14:30`, `6/10`, `DEMO-8`, `#3`) is  |
+ * |        | no count, and neither is a range that is (`1.5–3`, `14:30–16`, `1-2-3`)     |
+ * | SEP    | exactly one space, tab or no-break space (`3PRs`, `3  PRs` are no count)     |
+ * | WORD   | a listed task word, followed by none of a letter, a digit, `_`, `/`, or a   |
+ * |        | `.` with a letter or digit after it. A hyphen may follow: `3 PR-en` counts   |
+ * |        | as `3 PR`                                                                   |
  */
+/** COUNT with its left edge, as the table above spells it. */
+const COUNT_SOURCE = "(?<![\\p{L}\\p{N}_.,#:/\\-–])(?:[0-9]{1,3}[-–])?[0-9]{1,3}";
+
 function taskWordsRes(words: readonly string[]): { re: RegExp; count: boolean }[] {
   const named = (alt: string, flags: string) =>
     new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?=[ \\t\\u00a0]?#?\\d)`, flags);
   const counted = (alt: string, flags: string) =>
-    new RegExp(
-      `(?<=(?<![\\p{L}\\p{N}_.#:/-])(?<!\\p{N},)(?:\\p{N}+[-–])?\\p{N}+[ \\t\\u00a0])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`,
-      flags,
-    );
+    new RegExp(`(?<=${COUNT_SOURCE}[ \\t\\u00a0])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`, flags);
   const alt = (ws: string[]) => ws.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
   const cased = words.filter((w) => /\p{Lu}/u.test(w));
   const folded = words.filter((w) => !/\p{Lu}/u.test(w));
