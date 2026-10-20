@@ -28,8 +28,10 @@ import { DECISION_ID_RE, QUESTION_ID_RE } from "./question.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
 
-/** The section's class; `cloneBare` strips it, so a peek shows the table only. */
-export const CHART_CLASS = "vc";
+/** The section's class. The client matches it as `section.vc` by hand
+ *  (`cloneBare` in wiki-ref-links.ts, wiki-visuals.ts): this module stays out
+ *  of the client bundles. */
+const CHART_CLASS = "vc";
 
 /** The chrome a peek drops (`PEEK_STRIP_SELECTOR`). */
 export const CHART_CHROME_CLASSES = ["vc-head", "vc-plot", "vc-legend", "vc-notes"] as const;
@@ -232,7 +234,7 @@ const track = `<rect class="vc-track" x="0" y="1" width="100" height="10" vector
 /** A value cell as shown: the number as written, its `± n`, and its ids; an id
  *  of the decision or question shape links to its log item when the page's
  *  DecisionLog has one (`logIds`), else stays text, so no link goes nowhere. */
-export function valueHtml(v: ChartValue, logIds: ReadonlySet<string>): string {
+function valueHtml(v: ChartValue, logIds: ReadonlySet<string>): string {
   const linked = (id: string) => (DECISION_ID_RE.test(id) || QUESTION_ID_RE.test(id)) && logIds.has(id);
   const ids = v.ids.length
     ? ` (${v.ids.map((id) => (linked(id) ? dcGoLink(id, escapeHtml(id)) : escapeHtml(id))).join(", ")})`
@@ -316,7 +318,7 @@ function gateRows(rows: GateRow[], after: boolean, input: ChartViewInput, w: Cha
 // ── steps ───────────────────────────────────────────────────────────────────
 
 /** Series looks: a token colour and a dash, so a series reads beyond hue. */
-export const STEPS_SERIES_LOOKS = 6;
+const STEPS_SERIES_LOOKS = 6;
 
 /** At most this many x labels; the rest are thinned, each kept in a title. */
 export const STEPS_X_LABELS_MAX = 8;

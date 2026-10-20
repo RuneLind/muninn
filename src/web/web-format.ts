@@ -293,8 +293,9 @@ export function formatWebHtml(
   const prevLedgerRows = currentLedgerRows;
   const prevLogIds = currentLogIds;
   currentViews = opts?.views === true;
-  const charted = currentViews && opts?.chartView !== undefined && text.includes("<Chart");
-  currentChartView = charted ? opts!.chartView! : null;
+  const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
+  const charted = chartView !== undefined;
+  currentChartView = chartView ?? null;
   currentLedgerRows = null;
   currentLogIds = NO_LOG_IDS;
   currentPageFiles = opts?.files;
@@ -792,9 +793,6 @@ function deltaTableHtml(
   );
 }
 
-/** A `<DeltaTable>`: from its `src=` CSV, else from the first pipe table
- *  that is a direct child of its body. The rest of the body renders above the
- *  table. */
 /** A `<Chart>`: on the reader's page render with a chart view, the view over
  *  its table (the table under its findings when it fails its kind); else, or
  *  with no kind or no table, the body as written. Cells are read as the lint reads them (`visibleText`), wikilink
@@ -817,6 +815,9 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
   });
 }
 
+/** A `<DeltaTable>`: from its `src=` CSV, else from the first pipe table
+ *  that is a direct child of its body. The rest of the body renders above the
+ *  table. */
 function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): string {
   const d = parseDeltaAttrs(attrs);
   const bClass = d.better ? ` dt-better-${d.better}` : "";

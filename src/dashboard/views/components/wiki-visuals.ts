@@ -15,7 +15,7 @@ function pressOne(btn: HTMLElement): void {
 }
 
 /** Apply one toggle click; false when `target` is not a chart toggle. */
-export function applyChartToggle(target: Element | null): boolean {
+function applyChartToggle(target: Element | null): boolean {
   const btn = target?.closest?.<HTMLElement>("button[data-vc-mode], button[data-vc-variant]");
   const chart = btn?.closest<HTMLElement>("section.vc");
   if (!btn || !chart || chart.closest(".wiki-ref-peek")) return false;

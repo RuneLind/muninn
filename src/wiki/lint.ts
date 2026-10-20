@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Thirty check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Thirty-two check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).

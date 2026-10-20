@@ -84,19 +84,19 @@ export function readValueCell(cell: string, ctx: NumberContext): ChartValue | nu
 }
 
 /** An empty cell, a NULL spelling or a lone dash: no value. */
-export function isBlankValue(cell: string): boolean {
+function isBlankValue(cell: string): boolean {
   return isEmptyCell(cell) || /^[-–—]$/.test(cell.trim());
 }
 
 /** `row` is the 0-based data row. A `fatal` finding stops the chart and the
  *  reader shows the table; the others are notes beside a drawn chart. */
-export interface ChartFinding {
+interface ChartFinding {
   message: string;
   row?: number;
   fatal: boolean;
 }
 
-export interface GapRow {
+interface GapRow {
   label: string;
   value: ChartValue;
   target: ChartValue;
@@ -115,7 +115,7 @@ export interface GateRow {
   hold: ChartValue | null;
 }
 
-export interface StepsSeries {
+interface StepsSeries {
   name: string;
   /** Per step: the plotted number (an empty cell carries the last one
    *  forward), null before the first value. */
@@ -124,7 +124,7 @@ export interface StepsSeries {
   ref: number | null;
 }
 
-export interface FunnelRow {
+interface FunnelRow {
   label: string;
   value: ChartValue;
   /** The parent row's count, null for a root row. */
