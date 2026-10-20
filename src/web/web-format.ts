@@ -58,6 +58,7 @@ import {
   type RunEntry,
 } from "../format/genre-lists.ts";
 import {
+  decisionLogEntries,
   DECISION_ID_RE,
   isOpenQuestion,
   parseQuestionAttrs,
@@ -290,10 +291,12 @@ export function formatWebHtml(
   const prevViews = currentViews;
   const prevChartView = currentChartView;
   const prevLedgerRows = currentLedgerRows;
+  const prevLogIds = currentLogIds;
   currentViews = opts?.views === true;
   const charted = currentViews && opts?.chartView !== undefined && text.includes("<Chart");
   currentChartView = charted ? opts!.chartView! : null;
   currentLedgerRows = null;
+  currentLogIds = NO_LOG_IDS;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
@@ -316,11 +319,14 @@ export function formatWebHtml(
     // without it the walk is the one `renderBlocks` call, byte for byte.
     const slot = opts?.views ? viewSlot(blocks) : -1;
     if (charted) {
-      // A gate row's pill reads the page's own ledgers, as the PR strip does.
+      // A gate row's pill reads the page's own ledgers, as the PR strip does;
+      // a value cell's id links only when the page's DecisionLog has its item.
       const linkTexts = opts?.wikiLinkTexts;
       const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
-      const ledgers = pageLedgers(analysed === text ? blocks : parseBlocks(analysed), opts?.proposedPlan === true);
+      const analysedBlocks = analysed === text ? blocks : parseBlocks(analysed);
+      const ledgers = pageLedgers(analysedBlocks, opts?.proposedPlan === true);
       currentLedgerRows = ledgers.length ? firstRowPerPr(ledgers) : null;
+      currentLogIds = new Set(decisionLogEntries(analysedBlocks).map((e) => e.id));
     }
     let rendered: string;
     if (slot < 0) {
@@ -360,6 +366,7 @@ export function formatWebHtml(
     currentViews = prevViews;
     currentChartView = prevChartView;
     currentLedgerRows = prevLedgerRows;
+    currentLogIds = prevLogIds;
   }
 }
 
@@ -422,6 +429,9 @@ let currentChartView: ChartViewRenderer | null = null;
 
 /** The page's ledger rows, for a gate chart's pills; read once per call. */
 let currentLedgerRows: readonly LedgerRow[] | null = null;
+const NO_LOG_IDS: ReadonlySet<string> = new Set();
+/** The ids the page's DecisionLog has items for, while a chart page renders. */
+let currentLogIds: ReadonlySet<string> = NO_LOG_IDS;
 
 /** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
 let currentLanguage: QuestionLanguage = "en";
@@ -803,6 +813,7 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
     afterHtml: renderBlocks(body.after, webRenderer),
     language: currentLanguage,
     ledgerRows: currentLedgerRows,
+    logIds: currentLogIds,
   });
 }
 

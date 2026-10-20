@@ -1259,6 +1259,7 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc-xlab { position: absolute; top: 0.15em; transform: translateX(-50%); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
     ${scope} .vc-xfirst { transform: none; text-align: start; }
     ${scope} .vc-xlast { transform: translateX(-100%); text-align: end; }
+    ${scope} .vc-xcap { grid-column: 2; font-size: 0.75em; color: var(--text-soft); text-align: center; overflow-wrap: break-word; }
     ${scope} .vc-line { fill: none; stroke-width: 2px; stroke-linejoin: round; }
     ${scope} .vc-ref { stroke: var(--text-secondary); stroke-width: 1px; stroke-dasharray: 4 3; }
     ${scope} .vc-s0 .vc-line { stroke: var(--accent); }

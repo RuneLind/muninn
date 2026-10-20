@@ -74,7 +74,7 @@ const PAGE = [
   "| Slice | Bar | Bar after | Pass | Hold |",
   "|---|---|---|---|---|",
   "| PR 31 — rows | 5 (D3) | 7 | 6.5 | 5.5 |",
-  "| PR 32 — cells | 5 | 4 | 4.5 | — |",
+  "| PR 32 — cells | 5 (D9) | 4 | 4.5 | — |",
   "",
   "</Chart>",
   "",
@@ -134,6 +134,14 @@ const PAGE = [
   "| Under | 4 | 12 | 8 |",
   "",
   "</Chart>",
+  "",
+  "## Decisions",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D3** — Rows ship first.",
+  "",
+  "</DecisionLog>",
   "",
 ].join("\n");
 
@@ -309,6 +317,11 @@ test.describe("Wiki reader: Chart", () => {
     await expect(visiblePlot(c).locator(".vc-pill.dc-s-merged")).toHaveCount(1);
     await expect(visiblePlot(c).locator(".vc-pill.dc-s-dropped")).toHaveCount(1);
     await expect(visiblePlot(c).locator('a.dc-go[data-dc-ref="D3"]')).toHaveCount(1);
+    // D9 is not in the page's log: plain text, not a link that goes nowhere.
+    await expect(visiblePlot(c).locator('a.dc-go[data-dc-ref="D9"]')).toHaveCount(0);
+    await expect(visiblePlot(c).locator(".vc-num").nth(1)).toContainText("5 (D9)");
+    const target = await visiblePlot(c).locator('a.dc-go[data-dc-ref="D3"]').getAttribute("href");
+    await expect(page.locator(`.wiki-article li.dl-item${target}`)).toHaveCount(1);
     const after = c.locator('button[data-vc-variant="after"]');
     await after.focus();
     await page.keyboard.press("Enter");
@@ -501,6 +514,34 @@ test.describe("Wiki reader: Chart", () => {
         expect(b.x).toBeGreaterThanOrEqual(area.x - 1);
         expect(b.x + b.width).toBeLessThanOrEqual(area.x + area.width + 1);
       }
+    });
+  }
+});
+
+test.describe("Wiki reader: Chart steps labels", () => {
+  for (const width of [1280, 390]) {
+    test(`${width} px: 25 long step names show what tells them apart, centred under their points`, async ({ page }) => {
+      await open(page, width, width < 500);
+      const long = chart(page, "steps", "Long steps");
+      await long.scrollIntoViewIfNeeded();
+      const area = (await long.locator(".vc-area").boundingBox())!;
+      const labs = await long.locator(".vc-xlab").all();
+      expect(labs.length).toBeGreaterThan(2);
+      const shown: string[] = [];
+      for (const [k, l] of labs.entries()) {
+        const [text, clipped, left] = await l.evaluate((e) => [e.textContent ?? "", e.scrollWidth > e.clientWidth, parseFloat((e as HTMLElement).style.left)] as const);
+        expect(clipped, text).toBe(false); // the whole label is visible, no ellipsis
+        const b = (await l.boundingBox())!;
+        expect(b.height).toBeLessThan(20); // one line
+        const x = area.x + (left / 100) * area.width;
+        if (k === 0) expect(Math.abs(b.x - x)).toBeLessThan(2);
+        else if (k === labs.length - 1) expect(Math.abs(b.x + b.width - x)).toBeLessThan(2);
+        else expect(Math.abs(b.x + b.width / 2 - x)).toBeLessThan(2);
+        shown.push(text);
+      }
+      expect(new Set(shown).size).toBe(shown.length);
+      await expect(long.locator(".vc-xcap")).toHaveText("step number … with a long name");
+      expect(await overflowsSection(long)).toBeLessThanOrEqual(0);
     });
   }
 });

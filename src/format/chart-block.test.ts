@@ -200,6 +200,9 @@ describe("gateRowPr", () => {
     ["3 runs", null],
     ["7 — 3 runs", null],
     ["rows", null],
+    ["~~8~~ 12", { slate: 12, link: null }],
+    ["~~8~~ PR 12 rows", { slate: 12, link: null }],
+    ["~~8~~", null],
   ])("%p → %p", (cell, pr) => {
     expect(gateRowPr(cell)).toEqual(pr);
   });

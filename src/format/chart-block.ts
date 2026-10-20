@@ -459,6 +459,8 @@ export interface ChartViewInput {
   language: QuestionLanguage;
   /** The page's ledger rows (`firstRowPerPr`), for a gate row's pill; null without a ledger. */
   ledgerRows: readonly LedgerRow[] | null;
+  /** The ids the page's DecisionLog has items for: a value cell links only these. */
+  logIds: ReadonlySet<string>;
 }
 
 export type ChartViewRenderer = (input: ChartViewInput) => string;

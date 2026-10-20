@@ -323,9 +323,10 @@ export interface GatePr {
  *  first PR link. The slate is stricter than a ledger's: a number followed by
  *  more text counts only after a separator or a `PR` prefix, and only when
  *  that text does not open with a digit, so `3 runs`, `12–40`, `21a` and a
- *  date name no PR. Null when the cell names neither. */
+ *  date name no PR. Struck text is not read (`~~8~~ 12` is slate 12), as
+ *  for the link. Null when the cell names neither. */
 export function gateRowPr(cell: string): GatePr | null {
-  const t = plain(cell).replace(/^[-–—\s]+/, "");
+  const t = plain(unstruck(cell)).replace(/^[-–—\s]+/, "");
   const { body, prefixed } = slateBody(t);
   const m = SLATE_RE.exec(body);
   const label = m?.[3]!.trim();

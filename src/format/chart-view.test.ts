@@ -88,14 +88,26 @@ describe("the section", () => {
 });
 
 describe("value cell ids", () => {
+  const log = (ids: string[]) => ["<DecisionLog>", "", ...ids.map((id) => `- **${id}** — Decided.`), "", "</DecisionLog>", ""];
+
   test("only decision and question ids link, in gap and gate alike", () => {
-    const g = reader(gate(["| a | 2 | 3 (D7, X12) | 2 (S4) |"]));
+    const g = reader([...log(["D7", "S4"]), gate(["| a | 2 | 3 (D7, X12) | 2 (S4) |"])].join("\n"));
     expect(g).toContain('3 (<a class="dc-go" href="#d7" data-dc-ref="D7">D7</a>, X12)');
     expect(g).toContain('2 (<a class="dc-go" href="#s4" data-dc-ref="S4">S4</a>)');
     const gap = reader(
-      chart('<Chart kind="gap" value="Now" target="Goal" gap="Gap">', ["| I | Now | Goal | Gap |", "|---|---|---|---|", "| a | 1 (D3) | 4 | 3 |"]),
+      [...log(["D3"]), chart('<Chart kind="gap" value="Now" target="Goal" gap="Gap">', ["| I | Now | Goal | Gap |", "|---|---|---|---|", "| a | 1 (D3) | 4 | 3 |"])].join("\n"),
     );
     expect(gap).toContain('1 (<a class="dc-go" href="#d3" data-dc-ref="D3">D3</a>)');
+  });
+
+  test("an id the page's DecisionLog does not have stays plain text", () => {
+    const g = reader([...log(["D7"]), gate(["| a | 2 | 3 (D7, D9) | 2 (S4) |"])].join("\n"));
+    expect(g).toContain('3 (<a class="dc-go" href="#d7" data-dc-ref="D7">D7</a>, D9)');
+    expect(g).toContain("2 (S4)");
+    const noLog = reader(chart('<Chart kind="funnel">', ["| Step | Count | Of |", "|---|---|---|", "| all | 40 (D2) | |", "| kept | 10 (S1) | 40 |"]));
+    expect(noLog).toContain("40 (D2)");
+    expect(noLog).toContain("10 (S1)");
+    expect(noLog).not.toContain('class="dc-go"');
   });
 
   test("a link points at its DecisionLog item's final anchor", () => {
@@ -175,10 +187,32 @@ describe("steps x labels", () => {
     const labels = [...out.matchAll(/class="vc-xlab[^"]*" style="left:([\d.]+)%[^"]*" title="([^"]*)"/g)];
     expect(labels.map((m) => m[2])).toEqual(idx.map((i) => `step number ${i} with a long name`));
     expect(labels.map((m) => Number(m[1]))).toEqual(idx.map((i) => Math.round((i / 24) * 10000) / 100));
+    // The words every step shares show once under the axis; each label shows what tells it apart.
+    expect(texts(out, "vc-xlab")).toEqual(idx.map(String));
+    expect(texts(out, "vc-xcap")).toEqual(["step number … with a long name"]);
     // An edge label grows one way, so it gets half a middle label's width.
     const widths = [...out.matchAll(/class="vc-xlab[^"]*" style="[^"]*max-width:([\d.]+)%/g)].map((m) => Number(m[1]));
     expect(widths[0]).toBeCloseTo(widths[1]! / 2, 1);
     expect(widths[widths.length - 1]).toBeCloseTo(widths[1]! / 2, 1);
+  });
+
+  test("a shared part is cut only at a word edge and only when every label keeps some text", () => {
+    const steps = (names: string[]) =>
+      reader(chart('<Chart kind="steps" x="Step">', ["| Step | A |", "|---|---|", ...names.map((n, i) => `| ${n} | ${i + 1} |`)]));
+    const none = steps(["alpha", "beta", "gamma"]);
+    expect(texts(none, "vc-xlab")).toEqual(["alpha", "beta", "gamma"]);
+    expect(none).not.toContain("vc-xcap");
+    // «run» is a whole label and «base» a shared word start: neither is cut.
+    expect(texts(steps(["run", "run 2", "run 3"]), "vc-xlab")).toEqual(["run", "run 2", "run 3"]);
+    expect(texts(steps(["baseline", "basement"]), "vc-xlab")).toEqual(["baseline", "basement"]);
+    const tail = steps(["Q1 2030", "Q2 2030", "Q3 2030"]);
+    expect(texts(tail, "vc-xlab")).toEqual(["Q1", "Q2", "Q3"]);
+    expect(texts(tail, "vc-xcap")).toEqual(["… 2030"]);
+    const head = steps(["phase-one", "phase-two"]);
+    expect(texts(head, "vc-xlab")).toEqual(["one", "two"]);
+    expect(texts(head, "vc-xcap")).toEqual(["phase …"]);
+    // One step has nothing to share.
+    expect(texts(steps(["only step"]), "vc-xlab")).toEqual(["only step"]);
   });
 
   test("a small step count labels every step", () => {
@@ -223,6 +257,11 @@ describe("gate pills", () => {
   test("a slate matches only the ledger row with that slate; a link no ledger row carries gets no pill", () => {
     const out = reader([...ledger, gate(["| 16 — a | 2 | 3 | 3 |", "| [#9](https://example.test/o/r/pull/9) | 2 | 3 | 3 |", "| 20 — c | 2 | 3 | 3 |", "| 3 — [#16](https://example.test/o/r/pull/16) | 2 | 3 | 3 |"])].join("\n"));
     expect(pills(out)).toEqual([["merged", "PR 16 · merged"], ["open", "PR 3 · open"]]);
+  });
+
+  test("struck text in the first cell is not read for the slate", () => {
+    const md = ["## PR ledger", "", "| PR | What | State |", "|---|---|---|", "| 8 | a | open |", "| 12 | b | merged |", "", gate(["| ~~8~~ 12 — b | 2 | 3 | 3 |"])].join("\n");
+    expect(pills(reader(md))).toEqual([["merged", "PR 12 · merged"]]);
   });
 
   test("no ledger, no pill", () => {

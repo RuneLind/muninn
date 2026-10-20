@@ -165,8 +165,8 @@ function plotFor(
 ): { toggle: "scale" | "barToggle"; variants: Variant[]; legend: string } {
   switch (model.kind) {
     case "gap": {
-      const variants: Variant[] = [{ id: "pts", label: w.points, html: gapRows(model, false, w, comma) }];
-      if (model.rows.every((r) => r.target.n > 0)) variants.push({ id: "pct", label: w.pctOfTarget, html: gapRows(model, true, w, comma) });
+      const variants: Variant[] = [{ id: "pts", label: w.points, html: gapRows(model, false, w, comma, input.logIds) }];
+      if (model.rows.every((r) => r.target.n > 0)) variants.push({ id: "pct", label: w.pctOfTarget, html: gapRows(model, true, w, comma, input.logIds) });
       const keys: [string, string][] = [
         ["vc-k-value", model.valueName],
         ["vc-k-band", w.gap],
@@ -188,7 +188,7 @@ function plotFor(
     case "steps":
       return { toggle: "scale", variants: [{ id: "lines", label: "", html: stepsPlot(model, comma, input.captionText.trim() || w.kinds.steps) }], legend: stepsLegend(model) };
     case "funnel":
-      return { toggle: "scale", variants: [{ id: "bars", label: "", html: funnelRows(model, w, comma) }], legend: "" };
+      return { toggle: "scale", variants: [{ id: "bars", label: "", html: funnelRows(model, w, comma, input.logIds) }], legend: "" };
   }
 }
 
@@ -230,10 +230,12 @@ function vline(cls: string, x: number, y1 = 0, y2 = 12): string {
 const track = `<rect class="vc-track" x="0" y="1" width="100" height="10" vector-effect="non-scaling-stroke"/>`;
 
 /** A value cell as shown: the number as written, its `± n`, and its ids; an id
- *  of the page's decision or question shape links to its log item. */
-export function valueHtml(v: ChartValue): string {
+ *  of the decision or question shape links to its log item when the page's
+ *  DecisionLog has one (`logIds`), else stays text, so no link goes nowhere. */
+export function valueHtml(v: ChartValue, logIds: ReadonlySet<string>): string {
+  const linked = (id: string) => (DECISION_ID_RE.test(id) || QUESTION_ID_RE.test(id)) && logIds.has(id);
   const ids = v.ids.length
-    ? ` (${v.ids.map((id) => (DECISION_ID_RE.test(id) || QUESTION_ID_RE.test(id) ? dcGoLink(id, escapeHtml(id)) : escapeHtml(id))).join(", ")})`
+    ? ` (${v.ids.map((id) => (linked(id) ? dcGoLink(id, escapeHtml(id)) : escapeHtml(id))).join(", ")})`
     : "";
   return `${escapeHtml(v.text)}${v.pm ? ` ± ${escapeHtml(v.pm)}` : ""}${ids}`;
 }
@@ -244,7 +246,8 @@ function rowHtml(label: string, svg: string, nums: string): string {
 
 // ── gap ─────────────────────────────────────────────────────────────────────
 
-function gapRows(model: Extract<ChartModel, { kind: "gap" }>, pct: boolean, w: ChartWords, comma: boolean): string {
+function gapRows(model: Extract<ChartModel, { kind: "gap" }>, pct: boolean, w: ChartWords, comma: boolean, logIds: ReadonlySet<string>): string {
+  const value = (v: ChartValue) => valueHtml(v, logIds);
   const val = (v: number, target: number) => (pct ? (v / target) * 100 : v);
   const sc = scale(model.rows.flatMap((r) => [val(r.value.n, r.target.n), val(r.target.n, r.target.n), ...(r.mark ? [val(r.mark.n, r.target.n)] : [])]));
   const rows = model.rows.map((r) => {
@@ -265,8 +268,8 @@ function gapRows(model: Extract<ChartModel, { kind: "gap" }>, pct: boolean, w: C
       vline("vc-target", t) +
       `</svg>`;
     const nums = pct
-      ? `${formatChartPercent((r.value.n / r.target.n) * 100, comma)} ${escapeHtml(w.of)} ${valueHtml(r.target)}`
-      : `${valueHtml(r.value)} → ${valueHtml(r.target)}` +
+      ? `${formatChartPercent((r.value.n / r.target.n) * 100, comma)} ${escapeHtml(w.of)} ${value(r.target)}`
+      : `${value(r.value)} → ${value(r.target)}` +
         (r.gapText ? ` <span class="vc-gap">${escapeHtml(w.gap)} ${escapeHtml(r.gapText)}</span>` : "");
     return rowHtml(escapeHtml(r.label), svg, nums);
   });
@@ -278,6 +281,7 @@ function gapRows(model: Extract<ChartModel, { kind: "gap" }>, pct: boolean, w: C
 function gateRows(rows: GateRow[], after: boolean, input: ChartViewInput, w: ChartWords): string {
   const barOf = (r: GateRow) => (after && r.barAfter ? r.barAfter : r.bar);
   const sc = scale(rows.flatMap((r) => [r.pass.n, ...(r.hold ? [r.hold.n] : []), barOf(r).n]));
+  const value = (v: ChartValue) => valueHtml(v, input.logIds);
   const html = rows.map((r) => {
     const bar = barOf(r);
     const verdict = chartGateVerdict(r.pass, r.hold, bar);
@@ -302,7 +306,7 @@ function gateRows(rows: GateRow[], after: boolean, input: ChartViewInput, w: Cha
       ? ` <span class="dc-pr dc-s-${state} vc-pill" role="img" title="PR ${n} · ${escapeHtml(word)}" aria-label="PR ${n} · ${escapeHtml(word)}">${escapeHtml(word)}</span>`
       : "";
     const nums =
-      `${valueHtml(r.pass)} · ${r.hold ? valueHtml(r.hold) : "—"} · ${escapeHtml(w.bar)} ${valueHtml(bar)}` +
+      `${value(r.pass)} · ${r.hold ? value(r.hold) : "—"} · ${escapeHtml(w.bar)} ${value(bar)}` +
       `<span class="vc-verdict ${verdict.pass ? "vc-ok" : "vc-miss"}">${escapeHtml(verdictText)}</span>`;
     return rowHtml(`${escapeHtml(r.label)}${pill}`, svg, nums);
   });
@@ -335,6 +339,36 @@ export function stepsLabelIndexes(n: number): number[] {
   if (n - 1 - out[out.length - 1]! < k / 2) out.pop();
   out.push(n - 1);
   return out;
+}
+
+const LABEL_SEP = /[\s\-–—_/:·,]/u;
+
+/** The step names split for the x axis: the words every name shares at its
+ *  start (`head`) and end (`tail`), cut only at a separator and only when
+ *  every name keeps some text, and each name without them (`parts`). Long
+ *  names that differ in the middle otherwise all ellipsize to the same text. */
+function stepsLabelParts(names: readonly string[]): { head: string; tail: string; parts: string[] } {
+  const cps = names.map((n) => [...n]);
+  if (cps.length < 2) return { head: "", tail: "", parts: [...names] };
+  const shared = (at: (c: string[], k: number) => string | undefined) => {
+    let k = 0;
+    while (cps.every((c) => k < c.length && at(c, k) === at(cps[0]!, k))) k++;
+    return k;
+  };
+  const keeps = (p: number, t: number) => cps.every((c) => c.slice(p, c.length - t).join("").trim() !== "");
+  // The head ends on a separator, the tail starts on one.
+  let p = shared((c, k) => c[k]);
+  while (p > 0 && !LABEL_SEP.test(cps[0]![p - 1]!)) p--;
+  if (!keeps(p, 0)) p = 0;
+  let t = shared((c, k) => (c.length - 1 - k >= p ? c[c.length - 1 - k] : undefined));
+  while (t > 0 && !LABEL_SEP.test(cps[0]![cps[0]!.length - t]!)) t--;
+  if (!keeps(p, t)) t = 0;
+  const trim = (x: string) => x.replace(/^[\s\-–—_/:·,]+|[\s\-–—_/:·,]+$/gu, "");
+  return {
+    head: trim(cps[0]!.slice(0, p).join("")),
+    tail: trim(cps[0]!.slice(cps[0]!.length - t).join("")),
+    parts: cps.map((c) => c.slice(p, c.length - t).join("").trim()),
+  };
 }
 
 function stepsPlot(model: Extract<ChartModel, { kind: "steps" }>, comma: boolean, title: string): string {
@@ -373,19 +407,22 @@ function stepsPlot(model: Extract<ChartModel, { kind: "steps" }>, comma: boolean
   const yLabel = (v: number) =>
     `<span class="vc-ylab" style="top:${round2((yAt(v) / H) * 100)}%">${formatChartNumber(v, d, comma)}${unit}</span>`;
   const shown = stepsLabelIndexes(n);
+  const names = stepsLabelParts(model.steps);
   const xLabels = shown
     .map((i) => {
       const edge = n > 1 && i === 0 ? " vc-xfirst" : n > 1 && i === n - 1 ? " vc-xlast" : "";
       // An edge label grows one way only: half the width keeps it off its neighbour.
       const width = (edge ? 50 : 100) / shown.length;
-      return `<span class="vc-xlab${edge}" style="left:${round2(xPct(i))}%;max-width:${round2(width)}%" title="${escapeHtml(model.steps[i]!)}">${escapeHtml(model.steps[i]!)}</span>`;
+      return `<span class="vc-xlab${edge}" style="left:${round2(xPct(i))}%;max-width:${round2(width)}%" title="${escapeHtml(model.steps[i]!)}">${escapeHtml(names.parts[i]!)}</span>`;
     })
     .join("");
+  const shared = names.head || names.tail ? [names.head, "…", names.tail].filter(Boolean).join(" ") : "";
   return (
     `<div class="vc-steps">` +
     `<div class="vc-yaxis">${yLabel(hi)}${lo === hi ? "" : yLabel(lo)}</div>` +
     `<div class="vc-area"><svg class="vc-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title>${refLine}${lines.join("")}</svg></div>` +
     `<div class="vc-xaxis">${xLabels}</div>` +
+    (shared ? `<div class="vc-xcap">${escapeHtml(shared)}</div>` : "") +
     `</div>`
   );
 }
@@ -407,12 +444,13 @@ function stepsLegend(model: Extract<ChartModel, { kind: "steps" }>): string {
 
 // ── funnel ──────────────────────────────────────────────────────────────────
 
-function funnelRows(model: Extract<ChartModel, { kind: "funnel" }>, w: ChartWords, comma: boolean): string {
+function funnelRows(model: Extract<ChartModel, { kind: "funnel" }>, w: ChartWords, comma: boolean, logIds: ReadonlySet<string>): string {
+  const value = (v: ChartValue) => valueHtml(v, logIds);
   const rows = model.rows.map((r) => {
     const width = r.of === null ? 100 : r.share === null ? 0 : Math.max(0, Math.min(100, r.share));
     const pct = r.of === null ? "" : r.share === null ? "—" : formatChartPercent(r.share, comma);
     const svg = svgOpen(r.of === null ? `${r.label}: ${r.value.text}` : `${r.label}: ${r.value.text} ${w.of} ${r.of.text} (${pct})`) + track + rect("vc-value", 0, width, 2, 8) + `</svg>`;
-    const nums = r.of === null ? valueHtml(r.value) : `${valueHtml(r.value)} ${escapeHtml(w.of)} ${escapeHtml(r.of.text)} <span class="vc-pct">(${pct})</span>`;
+    const nums = r.of === null ? value(r.value) : `${value(r.value)} ${escapeHtml(w.of)} ${escapeHtml(r.of.text)} <span class="vc-pct">(${pct})</span>`;
     return rowHtml(`<span class="vc-d${Math.min(r.depth, 4)}">${escapeHtml(r.label)}</span>`, svg, nums);
   });
   return `<div class="vc-rows">${rows.join("")}</div>`;
