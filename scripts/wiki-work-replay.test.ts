@@ -90,8 +90,11 @@ async function writeFrozen(f: Fixture, over: Frozen = {}): Promise<string[]> {
   return args;
 }
 
-function spawnReplay(f: Fixture, frozenArgs: string[], env: Record<string, string> = {}) {
+/** `detached` puts the script in its own process group, so a test can kill
+ *  it and anything it left behind in one call. */
+function spawnReplay(f: Fixture, frozenArgs: string[], env: Record<string, string> = {}, detached = false) {
   return Bun.spawn(["bun", SCRIPT, "--wiki", "fx", "--at", new Date(AT).toISOString(), ...frozenArgs], {
+    detached,
     cwd: path.join(f.base, "cwd"),
     stdout: "pipe",
     stderr: "pipe",
@@ -180,46 +183,78 @@ describe("mtime stamping", () => {
   }, 30_000);
 });
 
+/** True while `pid` is running; false once it has exited (or never existed). */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe("a signal mid-run", () => {
-  const sleepers: number[] = [];
+  /** The replay processes and hook sleepers a test started, killed after it
+   *  only when an assertion failed first and left them running. */
+  const started: number[] = [];
   afterEach(() => {
-    for (const pid of sleepers.splice(0)) {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // already gone
+    for (const pid of started.splice(0)) {
+      for (const target of [-pid, pid]) {
+        try {
+          process.kill(target, "SIGKILL");
+        } catch {
+          // not a group leader, or already gone
+        }
       }
     }
   });
 
+  /** A fixture whose post-checkout hook writes its pid to the returned marker,
+   *  then holds the checkout for 20 s: the signal lands between the clone and
+   *  the build. `ignoreTerm` makes the hook and its sleep ignore SIGTERM. */
+  async function heldCheckout(ignoreTerm = false): Promise<{ f: Fixture; hooks: string; marker: string }> {
+    const f = await fixture();
+    await writeFile(path.join(f.repo, "a.md"), page("A"));
+    await commit(f.repo, "a", AT - 2 * H, AT - 2 * H);
+    const hooks = path.join(f.base, "hooks");
+    const marker = path.join(f.base, "checkout-running");
+    await mkdir(hooks);
+    await writeFile(path.join(hooks, "post-checkout"), `#!/bin/sh\necho $$ > "${marker}"\n${ignoreTerm ? "trap '' TERM\nsleep 20" : "exec sleep 20"}\n`);
+    await chmod(path.join(hooks, "post-checkout"), 0o755);
+    return { f, hooks, marker };
+  }
+
+  /** Spawn the replay (its own process group, so a failed test can kill it
+   *  all) and wait for the hook; returns the process and the hook's pid. */
+  async function startHeld(f: Fixture, hooks: string, marker: string, env: Record<string, string> = {}) {
+    const hookEnv = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: hooks };
+    const proc = spawnReplay(f, await writeFrozen(f), { ...hookEnv, ...env }, true);
+    started.push(proc.pid);
+    const deadline = Date.now() + 20_000;
+    while (!existsSync(marker) || !(await Bun.file(marker).text()).trim()) {
+      if (Date.now() > deadline) throw new Error("the checkout hook never ran");
+      await Bun.sleep(50);
+    }
+    const sleeper = Number((await Bun.file(marker).text()).trim());
+    started.push(sleeper);
+    expect(await clonesIn(f.scriptTmp)).toHaveLength(1);
+    return { proc, sleeper };
+  }
+
+  /** Waits up to 2 s for `pid` to be reaped after its group is killed. */
+  async function goneSoon(pid: number): Promise<boolean> {
+    for (const until = Date.now() + 2_000; Date.now() < until; await Bun.sleep(50)) if (!alive(pid)) return true;
+    return !alive(pid);
+  }
+
   for (const [signal, code] of [
     ["SIGTERM", 143],
     ["SIGHUP", 129],
+    ["SIGINT", 130],
   ] as const) {
-    test(`${signal} removes the temp clone`, async () => {
-      const f = await fixture();
-      await writeFile(path.join(f.repo, "a.md"), page("A"));
-      await commit(f.repo, "a", AT - 2 * H, AT - 2 * H);
-      // A post-checkout hook that says it is running, then holds the checkout:
-      // the script is between its clone and its build when the signal lands.
-      const hooks = path.join(f.base, "hooks");
-      const marker = path.join(f.base, "checkout-running");
-      await mkdir(hooks);
-      await writeFile(path.join(hooks, "post-checkout"), `#!/bin/sh\necho $$ > "${marker}"\nexec sleep 20\n`);
-      await chmod(path.join(hooks, "post-checkout"), 0o755);
-
-      const proc = spawnReplay(f, await writeFrozen(f), {
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: "core.hooksPath",
-        GIT_CONFIG_VALUE_0: hooks,
-      });
-      const deadline = Date.now() + 20_000;
-      while (!existsSync(marker) || !(await Bun.file(marker).text()).trim()) {
-        if (Date.now() > deadline) throw new Error("the checkout hook never ran");
-        await Bun.sleep(50);
-      }
-      sleepers.push(Number((await Bun.file(marker).text()).trim()));
-      expect(await clonesIn(f.scriptTmp)).toHaveLength(1);
+    test(`${signal} removes the temp clone and stops the hook git started`, async () => {
+      const { f, hooks, marker } = await heldCheckout();
+      const { proc, sleeper } = await startHeld(f, hooks, marker);
 
       const sent = Date.now();
       proc.kill(signal);
@@ -227,8 +262,66 @@ describe("a signal mid-run", () => {
       // The handler stops the git child instead of waiting out its 20 s hook.
       expect(Date.now() - sent).toBeLessThan(10_000);
       expect(await clonesIn(f.scriptTmp)).toEqual([]);
+      // ...and the hook with it: killing git alone leaves `sleep` reparented.
+      expect(await goneSoon(sleeper)).toBe(true);
     }, 40_000);
   }
+
+  test("a git child and hook that ignore SIGTERM do not hold the exit", async () => {
+    const { f, hooks, marker } = await heldCheckout(true);
+    // A `git` on PATH that ignores SIGTERM and runs the real one under it.
+    const realGit = Bun.which("git");
+    if (!realGit) throw new Error("no git on PATH");
+    const bin = path.join(f.base, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "git"), `#!/bin/sh\ntrap '' TERM\n"${realGit}" "$@"\n`);
+    await chmod(path.join(bin, "git"), 0o755);
+    const { proc, sleeper } = await startHeld(f, hooks, marker, { PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+    const sent = Date.now();
+    proc.kill("SIGTERM");
+    // A second signal, as a user would send on a stuck exit.
+    const second = setTimeout(() => proc.kill("SIGINT"), 2_000);
+    const exited = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => "hung" as const)]);
+    clearTimeout(second);
+    expect(exited).not.toBe("hung");
+    expect(Date.now() - sent).toBeLessThan(10_000);
+    expect(await goneSoon(sleeper)).toBe(true);
+  }, 40_000);
+});
+
+describe("signalHandler", () => {
+  const signalHandler = async (...a: Parameters<typeof import("./wiki-work-replay-git.ts").signalHandler>) =>
+    (await import("./wiki-work-replay-git.ts")).signalHandler(...a);
+  test("the first signal exits with its code once cleanup is done", async () => {
+    const exits: number[] = [];
+    let done!: () => void;
+    const onSignal = await signalHandler(() => new Promise<void>((r) => (done = r)), (c) => void exits.push(c));
+    onSignal(143);
+    await Bun.sleep(20);
+    expect(exits).toEqual([]);
+    done();
+    await Bun.sleep(20);
+    expect(exits).toEqual([143]);
+  });
+
+  test("a cleanup that rejects still exits with the signal's code", async () => {
+    const exits: number[] = [];
+    const onSignal = await signalHandler(() => Promise.reject(new Error("EACCES")), (c) => void exits.push(c));
+    onSignal(129);
+    await Bun.sleep(20);
+    expect(exits).toEqual([129]);
+  });
+
+  test("a second signal during a stalled cleanup exits at once with its own code", async () => {
+    const exits: number[] = [];
+    const onSignal = await signalHandler(() => new Promise<void>(() => {}), (c) => void exits.push(c));
+    onSignal(143);
+    await Bun.sleep(20);
+    expect(exits).toEqual([]);
+    onSignal(130);
+    expect(exits).toEqual([130]);
+  });
 });
 
 describe("frozen captures", () => {

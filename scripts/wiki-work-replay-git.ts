@@ -17,7 +17,11 @@ export class ReplayError extends Error {}
 export const gitChildren = new Set<Subprocess>();
 
 export async function git(cwd: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn(["git", "-C", cwd, "-c", "core.quotePath=false", ...args], { stdout: "pipe", stderr: "pipe" });
+  // `detached` makes each git the leader of its own process group, so a signal
+  // can kill what it spawned too (a hook, an lfs smudge), as `runGit` does in
+  // `src/wiki/commit.ts`. Not `runGit` itself: it detaches only timed calls and
+  // hands back no process to kill on a signal.
+  const proc = Bun.spawn(["git", "-C", cwd, "-c", "core.quotePath=false", ...args], { stdout: "pipe", stderr: "pipe", detached: true });
   gitChildren.add(proc);
   try {
     const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
@@ -26,6 +30,46 @@ export async function git(cwd: string, args: string[]): Promise<string> {
   } finally {
     gitChildren.delete(proc);
   }
+}
+
+/** SIGKILL each running git child's process group, so nothing it spawned
+ *  writes into the clone after it is removed. Returns the children killed. */
+export function killGitChildren(): Subprocess[] {
+  const running = [...gitChildren];
+  for (const c of running) {
+    try {
+      process.kill(-c.pid, "SIGKILL");
+    } catch {
+      try {
+        c.kill("SIGKILL");
+      } catch {
+        // already exited
+      }
+    }
+  }
+  return running;
+}
+
+/**
+ * The script's signal handler, called with the signal's exit code (128 + n).
+ * The first signal kills the git children's groups, waits for them, runs
+ * `cleanup` and exits with its own code, also when `cleanup` rejects. A signal
+ * that arrives while that is in flight exits at once with ITS code, without
+ * waiting, so a second Ctrl-C quits a stalled removal (the clone may remain).
+ */
+export function signalHandler(cleanup: () => Promise<void>, exit: (code: number) => void = process.exit): (code: number) => void {
+  let stopping = false;
+  return (code) => {
+    if (stopping) return exit(code);
+    stopping = true;
+    const running = killGitChildren();
+    void Promise.all(running.map((c) => c.exited))
+      .then(cleanup)
+      .then(
+        () => exit(code),
+        () => exit(code),
+      );
+  };
 }
 
 /** The newest first-parent commit committed at or before `atSec`. */

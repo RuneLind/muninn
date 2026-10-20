@@ -77,7 +77,7 @@
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { commitAt, git, gitChildren, ReplayError, stampMtimes } from "./wiki-work-replay-git.ts";
+import { commitAt, git, ReplayError, signalHandler, stampMtimes } from "./wiki-work-replay-git.ts";
 import { getWikiRegistry } from "../src/wiki/registry-memo.ts";
 import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
@@ -559,19 +559,11 @@ async function main(): Promise<void> {
   const tmp = await mkdtemp(path.join(tmpdir(), "wiki-work-replay-"));
   let removing: Promise<void> | undefined;
   const cleanup = () => (removing ??= rm(tmp, { recursive: true, force: true }));
-  // A signal stops the running git child first, so it is not writing into the
-  // clone while it is removed; `main` failing on the killed child then waits
-  // for this exit instead of reporting it (`signalled`).
-  const onSignal = async (code: number) => {
-    signalled = true;
-    const running = [...gitChildren];
-    for (const c of running) c.kill();
-    await Promise.all(running.map((c) => c.exited));
-    await cleanup();
-    process.exit(code);
-  };
+  // A signal stops the git children first, so nothing writes into the clone
+  // while it is removed; see `signalHandler` for the exit code.
+  const onSignal = signalHandler(cleanup);
   for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
-    process.on(sig, () => void onSignal(code));
+    process.on(sig, () => onSignal(code));
   }
   try {
     const repo = path.join(tmp, "repo");
@@ -631,14 +623,9 @@ async function main(): Promise<void> {
   }
 }
 
-/** Set by a signal handler, which owns the exit from then on. */
-let signalled = false;
-
 try {
   await main();
 } catch (err) {
-  // The signal handler is removing the clone and exits with the signal's code.
-  if (signalled) await new Promise(() => {});
   if (!(err instanceof ReplayError)) throw err;
   console.error(`wiki-work-replay: ${err.message}`);
   process.exit(1);
