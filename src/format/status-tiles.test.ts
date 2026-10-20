@@ -225,7 +225,8 @@ describe("lint: tones outside tile view", () => {
       "<StatusRows> tones names no row: Nope",
     ]);
   });
-  test("no tones, no finding", () => {
+  test("no tones, or an empty one, no finding", () => {
     expect(lint(block(""))).toEqual([]);
+    expect(lint(block(' tones=" "'))).toEqual([]);
   });
 });
