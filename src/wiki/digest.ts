@@ -386,6 +386,7 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
   let result: ClaudeExecResult;
   try {
     result = await tracedOneShot(tracer, "claude", userPrompt, config, botConfig, {
+      toolSurface: "bot",
       systemPrompt: DIGEST_SYSTEM_PROMPT,
       timeoutMs,
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),

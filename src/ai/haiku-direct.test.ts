@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
+import { resolveAgentCwd } from "./agent-cwd.ts";
 
 // Mock DB so trackUsage doesn't try to talk to Postgres.
 //
@@ -120,7 +121,13 @@ let copilotSessionThrow: Error | null = null;
 let copilotDeleteSessionCount = 0;
 let copilotCatalog: string[] | Error = ["claude-haiku-4.5", "claude-sonnet-5.5"];
 
+// The REAL `copilotSessionTools`, captured before the mock replaces the module:
+// `callHaikuViaCopilot` builds its tool fence with it, so the assertion below
+// reads the shipped exclusion list rather than a copy of it.
+const { copilotSessionTools: realCopilotSessionTools } = await import("./connectors/copilot-sdk.ts");
+
 mock.module("./connectors/copilot-sdk.ts", () => ({
+  copilotSessionTools: realCopilotSessionTools,
   getCopilotClient: async () => ({
     listModels: async () => {
       if (copilotCatalog instanceof Error) throw copilotCatalog;
@@ -585,7 +592,21 @@ describe("callHaikuViaCopilot", () => {
     const { sessionConfig } = copilotCalls[0]!;
     expect((sessionConfig as { streaming?: boolean }).streaming).toBe(false);
     expect((sessionConfig as { mcpServers?: unknown }).mcpServers).toBeUndefined();
-    expect((sessionConfig as { workingDirectory?: string }).workingDirectory).toBeUndefined();
+  });
+
+  test("runs tool-less in the agent home: every tool source excluded, no MCP, no custom agents", async () => {
+    await callHaikuViaCopilot("hi", { source: "test", botName: "melosys" });
+    const cfg = copilotCalls[0]!.sessionConfig as {
+      excludedTools?: string[];
+      mcpServers?: unknown;
+      customAgents?: unknown;
+      workingDirectory?: string;
+    };
+    expect(cfg.excludedTools).toEqual(["builtin:*", "mcp:*", "custom:*"]);
+    expect(cfg.mcpServers).toBeUndefined();
+    expect(cfg.customAgents).toBeUndefined();
+    expect(cfg.workingDirectory).toBe(resolveAgentCwd("melosys"));
+    expect(cfg.workingDirectory!.startsWith(process.cwd())).toBe(false);
   });
 
   test("deletes the session even when sendAndWait throws", async () => {

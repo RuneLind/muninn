@@ -113,7 +113,7 @@ import {
   CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS,
   type SummaryIngest,
 } from "../../summaries/summarizer-shared.ts";
-import { summarizeTimeoutFor } from "../../video/media.ts";
+import { FRAME_BUDGET_MAX, summarizeTimeoutFor } from "../../video/media.ts";
 import { youtubeWatchUrl } from "../../youtube/frames.ts";
 import { buildYouTubeSystemPrompt, buildYouTubeUserPrompt } from "../../youtube/prompt.ts";
 import { finishYouTubeSummary } from "../../youtube/finish.ts";
@@ -164,8 +164,8 @@ export interface SummariesRerunDeps {
   framesRoot?: string;
   /**
    * How long a single-flight claim may be held, ms — default
-   * {@link rerunLatchBudgetMs} over the run's own model-call budget, which is
-   * twelve minutes at the floor. A seam so a test can drive the EXPIRY without
+   * {@link rerunLatchBudgetMs} at `FRAME_BUDGET_MAX` frames (24 minutes with a
+   * bot that sets no longer timeout). A seam so a test can drive the EXPIRY without
    * waiting for it; nothing in production passes one.
    */
   latchBudgetMs?: number;
@@ -609,6 +609,7 @@ async function runRerunJob(input: RerunJobInput): Promise<void> {
 
     store.updateStatus(jobId, "summarizing");
     const result = await deps.oneShot({
+      toolSurface: "bot",
       // The CAPTURE's own trace source, not the `/summaries` source id — the two
       // differ for X video (`capture:x-video` vs the `x-article` shelf), and
       // this attribute exists to be compared with the capture it re-runs.
@@ -809,13 +810,32 @@ export function registerSummariesRerunRoutes(
    * body, so the loser's summary is simply gone. The second POST is
    * `409 in_flight` instead.
    *
-   * Claimed before the model call and released in a `finally` on the job,
-   * which is the only place that can know it is over — `runRerunJob` catches
-   * its own failures. The claim's timer is sized to the budget that run
-   * actually sends ({@link rerunLatchBudgetMs}), so a call that never settles
-   * does not pin the document until a restart.
+   * Claimed before the document is READ and released in a `finally` on the
+   * job, which is the only place that can know it is over — `runRerunJob`
+   * catches its own failures. The claim's timer is sized to the worst-case
+   * budget a run may send ({@link rerunLatchBudgetMs} at `FRAME_BUDGET_MAX`),
+   * so a call that never settles does not pin the document until a restart.
    */
   const claims = deps.claims ?? summarySaveClaims;
+
+  /** The vertical and collection a request names, with no read — what a
+   *  writer needs to CLAIM before it reads. */
+  function resolveTarget(
+    sourceId: string,
+    docId: string,
+  ):
+    | { ok: true; vertical: RerunVertical; collection: string }
+    | { ok: false; status: 400; error: string; code: string } {
+    const source = getSummarySource(sourceId);
+    const vertical = verticalFor(sourceId);
+    if (!source || !vertical) {
+      return { ok: false, status: 400, error: `Re-run is not available for source "${sourceId}".`, code: "bad_source" };
+    }
+    if (!isSafeDocId(docId)) {
+      return { ok: false, status: 400, error: "docId is not a document path.", code: "bad_doc_id" };
+    }
+    return { ok: true, vertical, collection: source.collection };
+  }
 
   /** Read + split one document, or the JSON error the caller gets. */
   async function loadStored(
@@ -825,14 +845,10 @@ export function registerSummariesRerunRoutes(
     | { ok: true; vertical: RerunVertical; collection: string; stored: StoredCapture; raw: string }
     | { ok: false; status: 400 | 404 | 502 | 503; error: string; code: string }
   > {
-    const source = getSummarySource(sourceId);
-    const vertical = verticalFor(sourceId);
-    if (!source || !vertical) {
-      return { ok: false, status: 400, error: `Re-run is not available for source "${sourceId}".`, code: "bad_source" };
-    }
-    if (!isSafeDocId(docId)) {
-      return { ok: false, status: 400, error: "docId is not a document path.", code: "bad_doc_id" };
-    }
+    const target = resolveTarget(sourceId, docId);
+    if (!target.ok) return target;
+    const { vertical } = target;
+    const source = { collection: target.collection };
     let doc: RerunDocument | null;
     try {
       doc = await deps.fetchRawDoc(source.collection, docId);
@@ -957,96 +973,122 @@ export function registerSummariesRerunRoutes(
       return c.json({ error: "Unknown visual detail.", code: "bad_visual_detail" }, 400);
     }
 
-    // Read + split SYNCHRONOUSLY, before the job exists: a document with no
-    // appendix is a refusal the caller can act on, and a failed job that says
-    // so is a card the reader has to go and read.
-    const loaded = await loadStored(sourceId, docId);
-    if (!loaded.ok) return c.json({ error: loaded.error, code: loaded.code }, loaded.status);
-    const { vertical, stored } = loaded;
-    if (stored.transcript === null) {
-      return c.json(
-        {
-          error: "This summary has no stored transcript, so it cannot be re-run without downloading the source again.",
-          code: "no_transcript",
-        },
-        400,
-      );
-    }
+    const target = resolveTarget(sourceId, docId);
+    if (!target.ok) return c.json({ error: target.error, code: target.code }, target.status);
 
     const bot = resolveSummarizerBot(deps.bots());
     if (!bot) return c.json({ error: "No bots configured", code: "no_bot" }, 500);
 
-    const kinds = vertical.kinds(bot);
-    const wantedKind = typeof body.kind === "string" ? body.kind : stored.frontmatter.summary_kind;
-    const preset = findCapturePreset(kinds, wantedKind);
-    if (!preset) {
-      return c.json({ error: `Unknown summary kind: ${wantedKind}`, code: "bad_kind" }, 400);
-    }
-
-    // Before any model spend: the shared save's fork refusals (`no_url`,
-    // `no_category`, `title_not_round_trippable`) — each a document the ingest
-    // would DUPLICATE rather than replace.
-    const pre = preflightSummarySave(stored, docId);
-    if (!pre.ok) return c.json({ error: pre.error, code: pre.code }, pre.status);
-    const { url, category, title } = pre;
-    const videoId = vertical.videoId(url) ?? "";
-
-    const frames =
-      vertical.frameSource && videoId
-        ? await listKeptFrames(vertical.frameSource, videoId, deps.framesRoot)
-        : [];
-    // The frames are handed to the model as `--add-dir`, so a connector that
-    // cannot read files would produce a summary with no slides while the tail
-    // stripped every quote it could not serve — a re-run that silently loses
-    // pictures. Refused instead, the TikTok/YouTube `frames_unsupported`
-    // precedent, before a job exists.
-    if (frames.length > 0 && !connectorCapabilities(bot).supportsExtraDirs) {
-      return c.json(
-        {
-          error: `Summarizer bot "${bot.name}" cannot read the kept slides, so a re-run would drop them.`,
-          code: "frames_unsupported",
-        },
-        503,
-      );
-    }
-
-    const visualDetail: VisualDetail = isVisualDetail(body.visual_detail)
-      ? body.visual_detail
-      : DEFAULT_VISUAL_DETAIL;
-
-    // The claim is taken LAST, after every refusal above: a 409 has to mean "a
-    // run is under way", and claiming earlier would let a request that then 400s
-    // hold the slot until its own return path released it.
-    const claim = claims.claim(vertical.id, docId, deps.latchBudgetMs ?? rerunLatchBudgetMs(frames.length, bot));
+    // CLAIM FIRST, then read — the registry's rule: a lapsed claim saves only
+    // when nobody claimed the key since, which covers only reads made after
+    // the claim. Reading first let a Delete land between the read and the
+    // claim, and the run then wrote the document back. The frame count that
+    // sized the budget needs the read and a deadline cannot be extended, so the
+    // budget is the worst case, FRAME_BUDGET_MAX frames; a document over it is
+    // refused below. Every refusal after this point ABANDONS the claim: it wrote
+    // nothing, so a re-run whose claim lapsed before this one may still save.
+    const claim = claims.claim(target.vertical.id, docId, deps.latchBudgetMs ?? rerunLatchBudgetMs(FRAME_BUDGET_MAX, bot));
     if (!claim) {
       return c.json(
         {
-          error: "This document is being re-run or saved already. Wait for that to finish.",
+          error: "This document is being re-run, saved or deleted already. Wait for that to finish.",
           code: "in_flight",
         },
         409,
       );
     }
 
-    let jobId: string;
-    try {
-      jobId = vertical.createJob({
+    type Refusal = { ok: false; status: 400 | 404 | 409 | 422 | 502 | 503; error: string; code: string };
+    const prepare = async () => {
+      // Read + split SYNCHRONOUSLY, before the job exists: a document with no
+      // appendix is a refusal the caller can act on, and a failed job that says
+      // so is a card the reader has to go and read.
+      const loaded = await loadStored(sourceId, docId);
+      if (!loaded.ok) return loaded satisfies Refusal;
+      const { vertical, stored } = loaded;
+      if (stored.transcript === null) {
+        return {
+          ok: false,
+          status: 400,
+          error: "This summary has no stored transcript, so it cannot be re-run without downloading the source again.",
+          code: "no_transcript",
+        } satisfies Refusal;
+      }
+
+      const wantedKind = typeof body.kind === "string" ? body.kind : stored.frontmatter.summary_kind;
+      const preset = findCapturePreset(vertical.kinds(bot), wantedKind);
+      if (!preset) {
+        return { ok: false, status: 400, error: `Unknown summary kind: ${wantedKind}`, code: "bad_kind" } satisfies Refusal;
+      }
+
+      // Before any model spend: the shared save's fork refusals (`no_url`,
+      // `no_category`, `title_not_round_trippable`) — each a document the ingest
+      // would DUPLICATE rather than replace.
+      const pre = preflightSummarySave(stored, docId);
+      if (!pre.ok) return { ok: false, status: pre.status, error: pre.error, code: pre.code } satisfies Refusal;
+      const { url, category, title } = pre;
+      const videoId = vertical.videoId(url) ?? "";
+
+      const frames =
+        vertical.frameSource && videoId
+          ? await listKeptFrames(vertical.frameSource, videoId, deps.framesRoot)
+          : [];
+      // Past the cap the claim was sized for. Refused, not truncated: the tail
+      // strips every quote of a frame missing from its list (the frames listing
+      // hazard), so a cut list would silently drop slides.
+      if (frames.length > FRAME_BUDGET_MAX) {
+        return {
+          ok: false,
+          status: 422,
+          error: `This summary keeps ${frames.length} slides, more than a re-run can hand the model (${FRAME_BUDGET_MAX}).`,
+          code: "too_many_frames",
+        } satisfies Refusal;
+      }
+      // The frames are handed to the model as `--add-dir`, so a connector that
+      // cannot read files would produce a summary with no slides while the tail
+      // stripped every quote it could not serve — a re-run that silently loses
+      // pictures. Refused instead, the TikTok/YouTube `frames_unsupported`
+      // precedent, before a job exists.
+      if (frames.length > 0 && !connectorCapabilities(bot).supportsExtraDirs) {
+        return {
+          ok: false,
+          status: 503,
+          error: `Summarizer bot "${bot.name}" cannot read the kept slides, so a re-run would drop them.`,
+          code: "frames_unsupported",
+        } satisfies Refusal;
+      }
+
+      const visualDetail: VisualDetail = isVisualDetail(body.visual_detail)
+        ? body.visual_detail
+        : DEFAULT_VISUAL_DETAIL;
+      const jobId = vertical.createJob({
         videoId,
         title,
         url,
         author: stored.frontmatter.author ?? "unknown",
       });
+      return { ok: true as const, vertical, stored, preset, url, category, title, videoId, frames, visualDetail, jobId };
+    };
+
+    let prepared: Awaited<ReturnType<typeof prepare>>;
+    try {
+      prepared = await prepare();
     } catch (err) {
-      // Nothing is running, so the slot must not stay held. `createJob` does not
-      // throw today; a claim released only on the happy path is how it comes to
-      // matter later.
-      claims.release(claim);
+      // Nothing is running, so the slot must not stay held.
+      claims.abandon(claim);
       throw err;
     }
+    if (!prepared.ok) {
+      claims.abandon(claim);
+      return c.json({ error: prepared.error, code: prepared.code }, prepared.status);
+    }
+    const { vertical, stored, preset, url, category, title, videoId, frames, visualDetail, jobId } = prepared;
 
     // Fire and forget: the job streams over the vertical's own SSE seam, and the
     // route answers with the id the client attaches to. `runRerunJob` catches its
-    // own failures, so the `finally` runs on every path.
+    // own failures, so the `finally` runs on every path. `abandon`, not
+    // `release`: a job that failed before its save wrote nothing, and one that
+    // reached the save was pinned, which `abandon` treats as a release.
     void runRerunJob({
       vertical,
       jobId,
@@ -1064,7 +1106,7 @@ export function registerSummariesRerunRoutes(
       deps,
       claim,
     }).finally(() => {
-      claims.release(claim);
+      claims.abandon(claim);
     });
 
     log.info("Re-run started for {docId} as {kind} (job {jobId})", { docId, kind: preset.id, jobId });

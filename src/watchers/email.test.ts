@@ -20,7 +20,7 @@ let lastPrompt = "";
 // that is what the legacy-JSON parser fallback produces, and it is the value every
 // pre-existing test in this file runs under — the liveness predicate must stay inert
 // for them.
-let nextToolCalls: { name: string }[] | undefined;
+let nextToolCalls: { name: string; isError?: boolean; output?: string }[] | undefined;
 // Per-ATTEMPT scripting for the retry tests. When non-empty each entry is consumed
 // by one spawn, so a test can say "attempt 1 fails the predicate, attempt 2 reaches
 // Gmail". Empty ⇒ every spawn answers from `nextToolCalls` (the pre-retry behavior
@@ -28,11 +28,11 @@ let nextToolCalls: { name: string }[] | undefined;
 // `delayMs` makes the mocked spawn take measurable time. Without it every spawn
 // resolves in <1ms, and no assertion can tell a check-ENTRY anchor from a
 // check-END one — the gap the review found in the first cut of that test.
-type SpawnScript = { toolCalls?: { name: string }[]; result?: string; throws?: string; delayMs?: number };
+type SpawnScript = { toolCalls?: { name: string; isError?: boolean; output?: string }[]; result?: string; throws?: string; delayMs?: number };
 let spawnScript: SpawnScript[] = [];
 // One entry per spawn actually made — the attempt COUNT is the thing under test, so
 // it has to be observable rather than inferred from the return value.
-let spawnOpts: { timeoutMs?: number }[] = [];
+let spawnOpts: { timeoutMs?: number; toolSurface?: string; botDir?: string }[] = [];
 // NB: mock.module leaks across the watcher test files in a shared process (see the
 // same note in x.test.ts).
 /**
@@ -64,9 +64,9 @@ mock.module("../scheduler/executor.ts", () => ({
   trackUsage: () => {},
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
-  spawnHaiku: async (prompt: string, opts: { timeoutMs?: number }) => {
+  spawnHaiku: async (prompt: string, opts: { timeoutMs?: number; toolSurface?: string; botDir?: string }) => {
     lastPrompt = prompt;
-    spawnOpts.push({ timeoutMs: opts?.timeoutMs });
+    spawnOpts.push({ timeoutMs: opts?.timeoutMs, toolSurface: opts?.toolSurface, botDir: opts?.botDir });
     const step = spawnScript.shift();
     if (step?.delayMs) await new Promise((r) => setTimeout(r, step.delayMs));
     if (step?.throws) throw new Error(step.throws);
@@ -101,6 +101,7 @@ const {
   buildEmailPrompt,
   DEFAULT_EMAIL_PROMPT,
   checkEmail,
+  gmailLiveness,
   gmailToolPrefixes,
   emailRetryBudgetMs,
   emailAttemptTimeoutMs,
@@ -369,14 +370,135 @@ describe("checkEmail coverage reporting", () => {
     expect(r.coveredFrom).toBeNull();
   });
 
-  test("does NOT claim coverage when no MCP server key looks like Gmail", async () => {
-    // The predicate is DISABLED for such a bot by design. If that state also
-    // claimed coverage, the row would step forward an hour per tick while reading
-    // no mail at all — and never recover, because the mail stays unread.
-    spawnScript = [{ toolCalls: [{ name: "mcp__google-mail__search" }], result: "[]" }];
-    const r = await checkEmail(baseWatcher(), botDirNoGmail, "jarvis");
+  test("a bot with no Gmail server FAILS before the spawn instead of reporting a quiet inbox", async () => {
+    // The gmail-read surface takes only Gmail servers, so this bot's spawn would
+    // have no tools and answer `[]` every tick. The throw is the runner's failure
+    // path (log.error, errored span, run-health escalation).
+    spawnScript = [{ toolCalls: [{ name: "mcp__google-mail__search_emails" }], result: "[]" }];
+    await expect(checkEmail(baseWatcher(), botDirNoGmail, "capra")).rejects.toThrow(
+      /bot capra: no Gmail MCP server in .*\.mcp\.json \(servers: google-mail\)/,
+    );
+    expect(spawnOpts).toHaveLength(0);
+  });
 
-    expect(r.coveredFrom).toBeNull();
+  test("a bot with no readable .mcp.json fails the same way", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-cov-nomcp-"));
+    try {
+      await expect(checkEmail(baseWatcher(), dir, "capra")).rejects.toThrow(
+        /bot capra: no Gmail MCP server .*servers: no readable \.mcp\.json/,
+      );
+      expect(spawnOpts).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does NOT claim coverage when only list_email_labels succeeded and the search errored", async () => {
+    // Labels succeeding proves the server answered, not that the window was read.
+    // Claiming coverage here advances the watermark over mail no search returned.
+    const labelsOkSearchErr = [
+      { name: "mcp__gmail__list_email_labels" },
+      { name: "mcp__gmail__search_emails", isError: true },
+    ];
+    spawnScript = [
+      { toolCalls: labelsOkSearchErr, result: "[]" },
+      { toolCalls: labelsOkSearchErr, result: "[]" },
+    ];
+    await expect(checkEmail(baseWatcher(), botDirWithGmail, "jarvis")).rejects.toThrow(
+      /no successful Gmail search_emails call/,
+    );
+  });
+
+  test("gmailLiveness: a successful non-search Gmail call is not reached", () => {
+    expect(gmailLiveness([{ name: "mcp__gmail__list_email_labels" }], botDirWithGmail).reached).toBe(false);
+    expect(gmailLiveness([{ name: "mcp__gmail__read_email" }], botDirWithGmail).reached).toBe(false);
+    expect(
+      gmailLiveness([{ name: "mcp__gmail__list_email_labels" }, { name: "mcp__gmail__search_emails", isError: true }], botDirWithGmail),
+    ).toMatchObject({ reached: false, failure: expect.stringContaining("no successful Gmail search_emails call") });
+    expect(gmailLiveness([{ name: "mcp__gmail__search_emails" }], botDirWithGmail)).toEqual({ reached: true, failure: null });
+  });
+
+  test("gmailLiveness: a search_emails the stream ended on before its tool_result is not reached", async () => {
+    // Through the real parser, so the flag gmailLiveness reads is the one the
+    // parser sets — not a hand-written fixture of it.
+    const { StreamParser } = await import("../ai/stream-parser.ts");
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify({ type: "system", subtype: "init", session_id: "s", tools: [] }), 0);
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "toolu_S", name: "mcp__gmail__search_emails", input: {} }], model: "m" },
+      parent_tool_use_id: null,
+    }), 100);
+    parser.parseLine(JSON.stringify({
+      type: "result", subtype: "success", session_id: "s", is_error: false, num_turns: 1, result: "[]",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }), 200);
+
+    expect(gmailLiveness(parser.getResult().toolCalls, botDirWithGmail)).toMatchObject({
+      reached: false,
+      failure: expect.stringContaining("mcp__gmail__search_emails (no result)"),
+    });
+  });
+
+  // What the bot's Gmail server (`@gongrzhe/server-gmail-autoauth-mcp` 1.1.11)
+  // returned over stdio for `tools/call search_emails {}`, verbatim: a normal
+  // result, no `isError`. A Gmail 429 or an expired token takes the same path.
+  const GMAIL_ERROR_TEXT =
+    'Error: [\n  {\n    "code": "invalid_type",\n    "expected": "string",\n    "received": "undefined",\n    "path": [\n      "query"\n    ],\n    "message": "Required"\n  }\n]';
+
+  async function parsedSearch(content: unknown) {
+    const { StreamParser } = await import("../ai/stream-parser.ts");
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify({ type: "system", subtype: "init", session_id: "s", tools: [] }), 0);
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "toolu_E", name: "mcp__gmail__search_emails", input: {} }], model: "m" },
+      parent_tool_use_id: null,
+    }), 100);
+    parser.parseLine(JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_E", content }] },
+      parent_tool_use_id: null,
+    }), 150);
+    parser.parseLine(JSON.stringify({
+      type: "result", subtype: "success", session_id: "s", is_error: false, num_turns: 1, result: "[]",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }), 200);
+    return parser.getResult().toolCalls;
+  }
+
+  test("gmailLiveness: a search_emails whose result text is the server's `Error:` is not reached", async () => {
+    // MCP array, plain string, leading whitespace, and the CLI's `{"result": …}` envelope.
+    const shapes = [
+      [{ type: "text", text: GMAIL_ERROR_TEXT }],
+      GMAIL_ERROR_TEXT,
+      `\n  ${GMAIL_ERROR_TEXT}`,
+      JSON.stringify({ result: GMAIL_ERROR_TEXT }),
+    ];
+    for (const content of shapes) {
+      const toolCalls = await parsedSearch(content);
+      expect(toolCalls?.[0]?.isError).toBeUndefined();
+      expect(gmailLiveness(toolCalls, botDirWithGmail)).toEqual({
+        reached: false,
+        failure: expect.stringContaining("mcp__gmail__search_emails (Error: result text)"),
+      });
+    }
+    // The same parse with a real result text is reached: the prefix, not the parse, decides.
+    expect(gmailLiveness(await parsedSearch([{ type: "text", text: "ID: 1\nSubject: Error: build failed" }]), botDirWithGmail))
+      .toEqual({ reached: true, failure: null });
+  });
+
+  test("does NOT claim coverage when every search_emails returned the server's `Error:` text", async () => {
+    const errText = [{ name: "mcp__gmail__search_emails", output: GMAIL_ERROR_TEXT }];
+    spawnScript = [{ toolCalls: errText, result: "[]" }, { toolCalls: errText, result: "[]" }];
+    await expect(checkEmail(baseWatcher(), botDirWithGmail, "jarvis")).rejects.toThrow(/no successful Gmail search_emails call/);
+    expect(spawnOpts).toHaveLength(2);
+  });
+
+  test("gmailLiveness: only the bot's Gmail server key and the exact search tool name count", () => {
+    expect(gmailLiveness([{ name: "mcp__otherserver__search_emails" }], botDirWithGmail).reached).toBe(false);
+    expect(gmailLiveness([{ name: "mcp__gmail__search_emails_v2" }], botDirWithGmail).reached).toBe(false);
+    expect(gmailLiveness([{ name: "mcp__gmail__search_emails_draft" }], botDirWithGmail).reached).toBe(false);
   });
 
   test("does NOT claim coverage when the liveness predicate fails on every attempt", async () => {
@@ -531,7 +653,7 @@ describe("checkEmail Gmail liveness predicate", () => {
     // through Bash, and answers `[]`. Pre-fix that reached the runner as an ordinary
     // empty inbox; the whole point of the predicate is that it must not.
     nextToolCalls = [{ name: "ToolSearch" }, { name: "Bash" }, { name: "Bash" }];
-    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no successful Gmail search_emails call/);
   });
 
   test("zero tool calls throws — the model answered without reaching any tool", async () => {
@@ -543,7 +665,7 @@ describe("checkEmail Gmail liveness predicate", () => {
     // the run'") pins that normalization at the real seam; THIS test passes against
     // the broken build too, so it does not stand alone.
     nextToolCalls = [];
-    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no successful Gmail search_emails call/);
   });
 
   test("UNDEFINED toolCalls does NOT throw — the legacy parser can't tell", async () => {
@@ -554,9 +676,32 @@ describe("checkEmail Gmail liveness predicate", () => {
     expect((await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).alerts).toEqual([]);
   });
 
+  test("the spawn opts into the gmail-read surface with the bot's own dir", async () => {
+    nextToolCalls = [{ name: "mcp__gmail__search_emails" }];
+    await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    expect(spawnOpts[0]).toMatchObject({ toolSurface: "gmail-read", botDir: gmailBotDir });
+  });
+
+  test("an ERRORED Gmail call is not reached: a dontAsk denial must not read as a quiet inbox", async () => {
+    // `dontAsk` denies a read the settings do not allow, the denial comes back as an
+    // `is_error` tool_result, and the model answers `[]`. Counting that call as
+    // reached would claim coverage of mail nothing read.
+    nextToolCalls = [{ name: "ToolSearch" }, { name: "mcp__gmail__search_emails", isError: true }];
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(
+      /no successful Gmail search_emails call.*mcp__gmail__search_emails \(error\)/,
+    );
+  });
+
+  test("one successful Gmail call beside an errored one is reached", async () => {
+    nextToolCalls = [{ name: "mcp__gmail__read_email", isError: true }, { name: "mcp__gmail__search_emails" }];
+    const res = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    expect(res.alerts).toEqual([]);
+    expect(res.coveredFrom).not.toBeNull();
+  });
+
   test("a non-string tool name degrades to the diagnostic, not a TypeError", async () => {
     nextToolCalls = [{ name: undefined as unknown as string }];
-    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no successful Gmail search_emails call/);
   });
 
   test("a RENAMED gmail server key still counts as reaching Gmail", async () => {
@@ -574,18 +719,15 @@ describe("checkEmail Gmail liveness predicate", () => {
     }
   });
 
-  test("no identifiable gmail server ⇒ null ⇒ the predicate stands DOWN", async () => {
-    // Deliberately NOT a fallback to `mcp__gmail__`. A bot that renamed the key to
-    // something without "gmail" in it has a WORKING server we merely cannot name;
-    // guessing would hard-fail every healthy tick — the trap this derivation
-    // removes. Failing closed on no evidence is the one thing not allowed here.
+  test("no identifiable gmail server ⇒ null prefixes, and the check fails before the spawn", async () => {
+    // Since the A1 fence such a bot's spawn has no Gmail server on its surface, so
+    // nothing it returns can be a read of mail.
     const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
     try {
       writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "google-mail": { type: "stdio", command: "x" } } }));
       expect(gmailToolPrefixes(dir)).toBeNull();
-      // …and a run that called only that server is therefore trusted, not thrown on.
       nextToolCalls = [{ name: "mcp__google-mail__search_emails" }];
-      expect((await checkEmail(baseWatcher(), dir, "jarvis")).alerts).toEqual([]);
+      await expect(checkEmail(baseWatcher(), dir, "jarvis")).rejects.toThrow(/no Gmail MCP server/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

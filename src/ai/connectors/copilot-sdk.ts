@@ -13,6 +13,7 @@ import { getLog } from "../../logging.ts";
 import { resolve } from "node:path";
 import { discoverSerenaConfigs } from "../../serena/config.ts";
 import { currentActiveTurn } from "../../hivemind/active-turn.ts";
+import { refuseFencedSurface } from "../tool-surface.ts";
 
 const log = getLog("ai", "copilot-sdk");
 
@@ -111,6 +112,7 @@ export async function executePrompt(
   systemPrompt?: string,
   onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
+  refuseFencedSurface("copilot-sdk", botConfig.toolSurface);
   // The turn this call belongs to, CAPTURED HERE rather than read at the point
   // of use. This line runs inside the turn's own async chain, so it is exact;
   // a read from inside a tool-result handler is not, on any connector with a

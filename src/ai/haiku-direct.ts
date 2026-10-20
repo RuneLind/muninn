@@ -15,6 +15,7 @@ import { getRoleOverride } from "../db/role-overrides.ts";
 import type { HaikuCliFallback } from "./haiku-cli-unavailable.ts";
 import { callHaikuViaVertex, resolveVertexHaikuTarget } from "./haiku-vertex.ts";
 import { resolveCopilotModelId } from "./connectors/copilot-model-id.ts";
+import { resolveAgentCwd } from "./agent-cwd.ts";
 
 // The refusal every path here ends at, re-exported so a caller catching it does
 // not have to know that `spawnHaiku` — not this router — is what throws it.
@@ -349,14 +350,30 @@ export async function callHaikuViaCopilot(
   opts: SpawnHaikuOptions,
 ): Promise<HaikuResult> {
   // Lazy import: avoids pulling @github/copilot-sdk into bots that never use it.
-  const { getCopilotClient } = await import("./connectors/copilot-sdk.ts");
+  const { getCopilotClient, copilotSessionTools } = await import("./connectors/copilot-sdk.ts");
   const cl = await getCopilotClient();
   const model = opts.model ? await copilotCatalogId(cl, opts.model) : COPILOT_HAIKU_MODEL;
   const timeoutMs = opts.timeoutMs ?? HAIKU_TIMEOUT_MS;
+  // Tool-less, the way the fenced one-shots are on copilot-sdk: the
+  // `builtin:*`/`mcp:*`/`custom:*` exclusions, no MCP server, no custom agent.
+  // `copilotSessionTools` reads only `toolsDisabled` and `excludedTools` on that
+  // branch, so a stub carries them. The working directory is the agent home, so
+  // Copilot never starts in the process cwd (the muninn checkout).
+  const workingDirectory = resolveAgentCwd(opts.botName);
+  const toolFence = copilotSessionTools({
+    name: opts.botName ?? "haiku",
+    dir: workingDirectory,
+    persona: "",
+    telegramAllowedUserIds: [],
+    slackAllowedUserIds: [],
+    toolsDisabled: true,
+  });
 
   const session = await cl.createSession({
     model,
     streaming: false,
+    workingDirectory,
+    ...toolFence,
     // Persona/system prompt for prose paths — mirrors the chat connector's
     // `systemMessage: { mode: "replace", ... }`. The prose callers (goal + task
     // reminders) pass `system` to restore the bot voice the CLI path gets free

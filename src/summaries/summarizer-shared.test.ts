@@ -478,7 +478,7 @@ describe("runCaptureOneShot", () => {
       botConfig,
       tracer,
       attachRun: (_id: string, meta: RunMeta) => { attached.push(meta); },
-      oneShot: async (_p: string, _c: Config, _b: BotConfig, o: OneShotOptions = {}) => {
+      oneShot: async (_p: string, _c: Config, _b: BotConfig, o: OneShotOptions = { toolSurface: "bot" }) => {
         seen.push(o);
         return fakeResult();
       },

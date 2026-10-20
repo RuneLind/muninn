@@ -336,6 +336,7 @@ async function runClaimRetry(
     });
 
     const claude = await tracedOneShot(tracer, label, userPrompt, config, botConfig, {
+      toolSurface: "bot",
       systemPrompt,
       onProgress,
       timeoutMs: FACTCHECK_RETRY_TIMEOUT_MS,

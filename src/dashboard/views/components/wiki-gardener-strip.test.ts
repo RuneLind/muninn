@@ -27,6 +27,7 @@ import {
   type SourceBacklogResult,
   type WeeklyGardenerRun,
   backlogDeleteNotice,
+  backlogDeleteFailure,
 } from "./wiki-gardener-strip.ts";
 
 /**
@@ -1403,6 +1404,23 @@ describe("prune verbs — dismissed bucket + inspector actions (PR 2)", () => {
     // Absent by default and rendered nowhere.
     expect(initialInspectorState().notice).toBeNull();
     expect(backlogInspectorHtml(openPanel(), sources, {})).not.toContain("bk-inspector-notice");
+  });
+
+  test("a refused delete shows the route's `warning` and re-lists the gate when its cleanup removed drafts", () => {
+    const warning = "muninn could not remove the wiki drafts written from this document — reject them on /wiki/gardener.";
+    const withWarning = backlogDeleteFailure(404, { error: "that doc is not in that collection", warning });
+    expect(withWarning.notice).toEqual({ text: `that doc is not in that collection. ${warning}`, kind: "err" });
+    expect(withWarning.relist).toBe(false);
+    // The source-gone 404 removed a draft: its card is now a 404 behind Approve.
+    const removed = backlogDeleteFailure(404, {
+      error: "that doc is not in that collection; removed 1 unapplied draft written from it",
+      proposals: { deleted: [{ id: "p1" }] },
+    });
+    expect(removed.relist).toBe(true);
+    expect(removed.notice.text).toBe("that doc is not in that collection; removed 1 unapplied draft written from it");
+    // Nothing removed, or no body: no re-list, and the status stands in for the error.
+    expect(backlogDeleteFailure(404, { error: "x", proposals: { deleted: [] } }).relist).toBe(false);
+    expect(backlogDeleteFailure(502, {})).toEqual({ notice: { text: "delete failed (502)", kind: "err" }, relist: false });
   });
 
   test("a delete's `warning` becomes a warn notice that a reindex caveat cannot replace", () => {

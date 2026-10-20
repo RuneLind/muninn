@@ -800,6 +800,63 @@ describe("deleteSummaryDoc — a 200 carrying `warning`", () => {
     expect(h.notice.children[0]?.attrs.href).toBe("/wiki/gardener?wiki=jarvis");
   });
 
+  test("a 409 while a re-run writes the document shows the route's reason, in the error tone", async () => {
+    const h = loadDelete();
+    const reason = "A re-run or fact-check save is writing this document. Wait for it to finish, then delete.";
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => Response.json({ error: reason, code: "in_flight" }, { status: 409 });
+    try {
+      await h.run();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+    expect(h.notice.classes.has("err")).toBe(true);
+    expect(h.notice.textContent).toBe(`Delete failed: ${reason}`);
+  });
+
+  test("a 404 carrying `warning` shows it beside the error, in the warning tone, with the gate link", async () => {
+    // A second Delete after a degraded first one: huginn says the doc is gone,
+    // and the cleanup of its drafts failed again — still approvable on the gate.
+    const h = loadDelete();
+    const warning =
+      "muninn could not remove the wiki drafts written from this document (failed: source proposals delete) — reject them on /wiki/gardener.";
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () =>
+      Response.json(
+        { error: "that doc is not in that collection", proposals: { deleted: [], kept: [] }, warning, warningCode: "drafts_on_gate" },
+        { status: 404 },
+      );
+    try {
+      await h.run();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+    expect(h.notice.classes.has("warn")).toBe(true);
+    expect(h.notice.classes.has("err")).toBe(false);
+    expect(h.notice.textContent).toContain("Delete failed: that doc is not in that collection");
+    expect(h.notice.textContent).toContain(warning);
+    expect(h.notice.children[0]?.attrs.href).toBe("/wiki/gardener?wiki=jarvis");
+  });
+
+  test("a 404 whose warning says the drafts were kept stays in the error tone, as text, with no gate link", async () => {
+    // huginn did not confirm the document is gone: its drafts are still valid,
+    // so a link to the gate would point the reader at rejecting them.
+    const h = loadDelete();
+    const warning = "Any wiki drafts written from this document were kept: huginn did not confirm the document is gone.";
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () =>
+      Response.json({ error: "that doc is not in that collection", warning }, { status: 404 });
+    try {
+      await h.run();
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+    expect(h.notice.classes.has("err")).toBe(true);
+    expect(h.notice.classes.has("warn")).toBe(false);
+    expect(h.notice.textContent).toBe(`Delete failed: that doc is not in that collection. ${warning}`);
+    expect(h.notice.children).toHaveLength(0);
+  });
+
   test("a clean delete stays in the ok tone with no link", async () => {
     const h = loadDelete();
     await withResponse({ ok: true, polling: [], skipped: [], proposals: { deleted: [], kept: [] } }, h.run);

@@ -13,6 +13,9 @@ export class KnowledgeApiError extends Error {
      *  transport error) — lets callers distinguish e.g. a 409 CAS conflict from a
      *  generic 502. Undefined when the API was unreachable. */
     public readonly upstreamStatus?: number,
+    /** The upstream error body's `detail` string (FastAPI's shape), when it
+     *  had one — which of several same-status refusals huginn meant. */
+    public readonly upstreamDetail?: string,
   ) {
     super(message);
     this.name = "KnowledgeApiError";
@@ -28,6 +31,17 @@ interface KnowledgeApiOptions {
    *  signal so a caller that went away frees the upstream connection. The
    *  upstream may still finish its work (huginn's sync routes do). */
   signal?: AbortSignal;
+}
+
+/** A FastAPI error body's `detail` string, or `undefined` for any other body. */
+async function readErrorDetail(res: Response): Promise<string | undefined> {
+  try {
+    const parsed: unknown = JSON.parse(await res.text());
+    const detail = (parsed as { detail?: unknown } | null)?.detail;
+    return typeof detail === "string" ? detail : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -61,10 +75,13 @@ async function fetchKnowledgeApiRes(
     if (options?.headers) fetchOptions.headers = options.headers;
 
     const res = await fetch(`${baseUrl}${path}`, fetchOptions);
-    clearTimeout(timeout);
     if (!res.ok) {
-      throw new KnowledgeApiError("API returned " + res.status, 502, res.status);
+      // Read under the timeout: a stalled error body aborts like the request.
+      const detail = await readErrorDetail(res);
+      clearTimeout(timeout);
+      throw new KnowledgeApiError("API returned " + res.status, 502, res.status, detail);
     }
+    clearTimeout(timeout);
     return await readBody(res);
   } catch (err) {
     clearTimeout(timeout);

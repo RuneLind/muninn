@@ -40,6 +40,7 @@ import { todayOslo } from "./util.ts";
 import {
   categoryFromDocId,
   DEFAULT_API_URL,
+  readDocSourceText,
   DOC_FETCH_TIMEOUT_MS,
   errMsg,
   firstHttpUrl,
@@ -60,6 +61,8 @@ export type RedraftOutcome =
 
 export interface RedraftSeams {
   fetchDoc?: (collection: string, docId: string) => Promise<RawFetchedDoc | null>;
+  /** The raw source file the saved fact check is compared with. */
+  readSourceText?: (collection: string, docId: string) => Promise<string | null>;
   callDrafter?: (prompt: string, title: string) => Promise<string>;
   replace?: typeof replaceDraftProposal;
   now?: () => number;
@@ -153,6 +156,7 @@ export async function redraftSourceProposal(
     liveTopicKeys: () => getLiveTopicKeys(bot.name, old.id),
     liveSourceDocUrls: () => getLiveSourceDocUrls(bot.name, old.id),
     getFactcheck: getSummaryFactcheck,
+    readSourceText: seams.readSourceText ?? readDocSourceText,
     insertProposal: async (params) => {
       const fm = parseFrontmatter(params.draft);
       const title = (Array.isArray(fm.title) ? fm.title[0] : fm.title) ?? null;

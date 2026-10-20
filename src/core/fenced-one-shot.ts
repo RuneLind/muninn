@@ -6,7 +6,7 @@
  * Two verticals had ~75 verbatim-identical lines of this: the source-page drafter
  * (`src/gardener/drafter-oneshot.ts`) and the fact-check integrate proposer
  * (`src/wiki/integrate-oneshot.ts`). Both mint their own trace ROOT, register a
- * lightweight `/agents` run, clone the bot config with `toolsDisabled` set and
+ * lightweight `/agents` run, declare `toolSurface: "none"` with
  * {@link FENCED_EXCLUDED_TOOLS} unioned onto its `excludedTools`, cap thinking, delegate the model call to
  * `tracedOneShot` (which owns the `claude` CHILD span, never the root), and finish
  * both root and run in try/catch so a throw can't leak an unfinished trace or a run
@@ -55,7 +55,7 @@ export const FENCED_EFFORT = "low" as const;
  * muninn repo itself. On the integrate path the same reach would bypass the human
  * preview, the CAS and the per-wiki write queue all at once.
  *
- * So a fenced run gets NO tools: the clone sets `toolsDisabled`, which removes
+ * So a fenced run gets NO tools: `toolSurface: "none"` sets `toolsDisabled`, which removes
  * every built-in, every MCP server and every custom agent on all four connectors
  * (claude-sdk `tools: []`; claude-cli `--tools ""` + `--strict-mcp-config`;
  * copilot-sdk `builtin:*`/`mcp:*`/`custom:*` excluded; openai-compat loads no
@@ -179,14 +179,16 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
 
     // A fresh object, never a mutation — `botConfig` is the shared discovered
     // config, and every other field (name / connector / model) is carried over so
-    // the trace and the run still report the bot's own identity.
+    // the trace and the run still report the bot's own identity. The tool-less
+    // surface itself (`toolsDisabled`) is applied by `executeOneShot` from
+    // `toolSurface: "none"` below.
     const fencedBotConfig: BotConfig = {
       ...botConfig,
       excludedTools: [...new Set([...(botConfig.excludedTools ?? []), ...FENCED_EXCLUDED_TOOLS])],
-      toolsDisabled: true,
     };
 
     const result = await tracedOneShot(tracer, "claude", opts.prompt, config, fencedBotConfig, {
+      toolSurface: "none",
       ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),

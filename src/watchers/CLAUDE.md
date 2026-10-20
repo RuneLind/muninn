@@ -522,7 +522,7 @@ Who writes it, and when, is load-bearing — three review rounds landed here:
 - **The checker decides coverage; the runner writes it.** `gmailLiveness` returns
   `{failure, reached}`: `failure` drives the retry (unchanged), `reached` is the
   stricter question. They differ on the *unjudgeable* cases — `toolCalls`
-  undefined, and "no MCP server key contains gmail" — where there is no evidence
+  undefined, or no botDir to name the server from — where there is no evidence
   the run broke and equally none that it worked. An unparseable answer is also
   not coverage. Coverage rides out on `checkEmail`'s **return value**
   (`WatcherCheckResult.coveredFrom`), never an out-param: as an optional out-param
@@ -558,6 +558,28 @@ that has never succeeded) falls back to `buildGmailQueryByDate`. Broad is the sa
 direction with no watermark to trust. Consequence worth knowing: a row failing
 EVERY tick never records a success, so it keeps the full-day query — the growth
 this bounds is preserved on exactly the row already failing.
+
+### Tool fence (2026-10, arch-review A1)
+
+The email spawn opts into `toolSurface: "gmail-read"` (`buildHaikuArgs`,
+`src/scheduler/executor.ts`): the Gmail server only, `ToolSearch` plus the three
+Gmail reads, `dontAsk`, the known writes disallowed. Every other watcher spawn is
+tool-less (`--tools ""`). A run counts as reached only on a `search_emails`
+call on the bot's Gmail server key (exact tool name) whose `tool_result` arrived
+and is not an error. An error arrives two ways. `is_error` (`ToolCall.isError`)
+comes from the CLI side only: a `dontAsk` denial, a disallowed or unknown tool, an
+MCP transport failure. The Gmail server (`@gongrzhe/server-gmail-autoauth-mcp`
+1.1.11) never sets `isError`: it returns every handler error, including a Gmail
+429 or 5xx and an expired token, as a normal text result starting `Error:`, so
+`gmailLiveness` reads `ToolCall.output` for that prefix. The CLI's placeholder for
+an oversized MCP result also starts `Error:`, so a search too large for
+`MAX_MCP_OUTPUT_TOKENS` fails the run loudly (a known gap, not a silent skip). A
+search with zero matches returns empty text and counts as reached. A call the stream ended on
+before its result is `unterminated`. A successful `list_email_labels` beside a
+failed search covers no window. A bot whose
+`.mcp.json` has no key containing "gmail" fails the check before the spawn
+(`missingGmailServerMessage`) instead of answering `[]` from a tool-less spawn. Email bodies are not content-fenced; the model reads them through a
+tool result.
 
 ### Bounded retry (2026-08-13)
 

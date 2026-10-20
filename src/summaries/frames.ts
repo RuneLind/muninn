@@ -571,6 +571,10 @@ export async function keepReferencedFrames(
  * throws for a path that does not exist, and a `dest` that does not exist yet
  * is the ordinary capture case, where the two are different files anyway.
  *
+ * **A missing `src` is a copy failure, never "already in place"**: the
+ * lexical fallback judges a missing file equal to itself, which kept the
+ * reference of a frame a Delete had removed.
+ *
  * Its own exported function, with the copy injectable, because the guard is
  * INVISIBLE from the filesystem on the platform this is developed on: without a
  * seam, a test of the same-path case passes whether the guard is there or not.
@@ -580,7 +584,14 @@ export async function copyKeptFrame(
   dest: string,
   copy: (from: string, to: string) => Promise<void> = copyFile,
 ): Promise<void> {
-  if (samePath(src, dest)) return;
+  if (samePath(src, dest)) {
+    // "Already in place" holds only for a frame that EXISTS. A missing one was
+    // removed after the re-run listed it (a delete's frame cleanup still running
+    // after its claim was released, or a frame removal); its reference must be
+    // dropped, so it fails like any other copy.
+    await stat(src);
+    return;
+  }
   await copy(src, dest);
 }
 

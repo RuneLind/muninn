@@ -60,7 +60,7 @@ test("connectorCapabilities: only claude-cli / claude-sdk expose web tools", () 
 test("dispatches through resolveConnector, forwarding prompt/config/systemPrompt/onProgress", async () => {
   const bot = stubBot({ connector: "copilot-sdk" });
   const onProgress = () => {};
-  const res = await executeOneShot("hello", config, bot, { systemPrompt: "sys", onProgress });
+  const res = await executeOneShot("hello", config, bot, { systemPrompt: "sys", onProgress, toolSurface: "bot" });
 
   expect(res.result).toBe("ok");
   expect(resolvedWith?.connector).toBe("copilot-sdk"); // routed by the bot's connector
@@ -72,7 +72,7 @@ test("dispatches through resolveConnector, forwarding prompt/config/systemPrompt
 
 test("timeoutMs is folded into a botConfig clone, never mutating the caller's config", async () => {
   const bot = stubBot();
-  await executeOneShot("p", config, bot, { timeoutMs: 600_000 });
+  await executeOneShot("p", config, bot, { timeoutMs: 600_000, toolSurface: "bot" });
 
   expect(connectorArgs?.botConfig.timeoutMs).toBe(600_000);
   expect(connectorArgs?.botConfig).not.toBe(bot); // cloned
@@ -81,7 +81,7 @@ test("timeoutMs is folded into a botConfig clone, never mutating the caller's co
 
 test("effort is folded into a botConfig clone and overrides the bot's own", async () => {
   const bot = stubBot({ effort: "high" });
-  await executeOneShot("p", config, bot, { effort: "low" });
+  await executeOneShot("p", config, bot, { effort: "low", toolSurface: "bot" });
 
   expect(connectorArgs?.botConfig.effort).toBe("low");
   expect(bot.effort).toBe("high"); // original untouched
@@ -89,7 +89,7 @@ test("effort is folded into a botConfig clone and overrides the bot's own", asyn
 
 test("extraDirs append --add-dir spawnArgs for the CLI connector (preserving existing args)", async () => {
   const bot = stubBot({ connector: "claude-cli", spawnArgs: ["--strict-mcp-config"] });
-  await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"] });
+  await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"], toolSurface: "bot" });
 
   expect(connectorArgs?.botConfig.spawnArgs).toEqual(["--strict-mcp-config", "--add-dir", "/tmp/frames"]);
   expect(bot.spawnArgs).toEqual(["--strict-mcp-config"]); // original untouched
@@ -97,7 +97,7 @@ test("extraDirs append --add-dir spawnArgs for the CLI connector (preserving exi
 
 test("extraDirs are passed through as botConfig.extraDirs for the claude-sdk connector", async () => {
   const bot = stubBot({ connector: "claude-sdk" });
-  await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"] });
+  await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"], toolSurface: "bot" });
 
   expect(connectorArgs?.botConfig.extraDirs).toEqual(["/tmp/frames"]);
   expect(connectorArgs?.botConfig.spawnArgs).toBeUndefined(); // SDK path, no --add-dir args
@@ -107,25 +107,25 @@ test("extraDirs are passed through as botConfig.extraDirs for the claude-sdk con
 test("extraDirs on a connector without the capability throws before the connector runs", async () => {
   const bot = stubBot({ connector: "copilot-sdk" });
   await expect(
-    executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"] }),
+    executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"], toolSurface: "bot" }),
   ).rejects.toThrow(/does not support extraDirs/);
   expect(connectorArgs).toBeUndefined(); // never dispatched
 });
 
 test("empty extraDirs is a no-op (no spawnArgs added, no throw) on any connector", async () => {
   const bot = stubBot({ connector: "copilot-sdk" });
-  await executeOneShot("p", config, bot, { extraDirs: [] });
+  await executeOneShot("p", config, bot, { extraDirs: [], toolSurface: "bot" });
   expect(connectorArgs?.botConfig.spawnArgs).toBeUndefined();
 });
 
 test("empty prompt throws before the connector runs (unresolved template variable)", async () => {
   const bot = stubBot({ connector: "claude-cli" });
-  await expect(executeOneShot("   ", config, bot)).rejects.toThrow(/empty prompt/);
+  await expect(executeOneShot("   ", config, bot, { toolSurface: "bot" })).rejects.toThrow(/empty prompt/);
   expect(connectorArgs).toBeUndefined(); // never dispatched
 });
 
 test("prompt with an unresolved-looking path marker still dispatches (warn-only)", async () => {
   const bot = stubBot({ connector: "claude-cli" });
-  await executeOneShot("Read the file undefined/secret.txt and reply.", config, bot);
+  await executeOneShot("Read the file undefined/secret.txt and reply.", config, bot, { toolSurface: "bot" });
   expect(connectorArgs?.prompt).toContain("undefined/secret.txt"); // warned, not rejected
 });

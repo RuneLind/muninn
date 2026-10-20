@@ -19,12 +19,15 @@
  * classifier) sat INSIDE the repo, so the parent-directory walk loaded muninn's
  * own CLAUDE.md on every call — 33 900 cache_creation tokens, measured. They now
  * request what they actually needed from the bot folder explicitly instead:
- * `--mcp-config` via `SpawnHaikuOptions.botDir`, persona via `.system`.
+ * `--mcp-config` via `SpawnHaikuOptions.botDir` together with
+ * `toolSurface: "gmail-read"` (the email watcher; every other spawn is
+ * tool-less), persona via `.system`.
  *
- * NOT used by the chat connector (`src/ai/executor.ts`) or `claude-sdk`, which
- * still run in `botConfig.dir` — a chat turn's tool surface genuinely wants the
- * bot folder, and its prompt is large enough that the CLAUDE.md load is a smaller
- * relative share. Out of scope here, deliberately.
+ * The chat connector (`src/ai/executor.ts`) and `claude-sdk` use it only for a
+ * fenced tool surface (`{ read }`/`{ web }`), through `resolveFencedAgentCwd`.
+ * Every other run of theirs still runs in `botConfig.dir`: a chat turn's tool
+ * surface genuinely wants the bot folder, and its prompt is large enough that the
+ * CLAUDE.md load is a smaller relative share.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
@@ -225,4 +228,30 @@ export function resolveAgentCwd(name?: string): string {
     );
     return degradedCwd();
   }
+}
+
+/**
+ * Bucket for fenced one-shots (`{ read }` / `{ web }`). A leading `.` is a
+ * name {@link bucket} never returns, so no bot folder or caller label shares
+ * it — `spawnHaiku` for a bot named `capture` used to.
+ */
+export const FENCED_AGENT_CWD_BUCKET = ".fenced";
+
+/**
+ * The cwd of a fenced one-shot: an empty dir outside the bot folder, because a
+ * Read inside the working dir needs no approval. Unlike {@link resolveAgentCwd}
+ * it never degrades: the shared temp dir would put other jobs' files inside
+ * the working dir, so a failed mkdir refuses the run instead.
+ */
+export function resolveFencedAgentCwd(): string {
+  const dir = join(agentCwdRoot(), FENCED_AGENT_CWD_BUCKET);
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new Error(
+      `fenced tool surface: cannot create its agent home ${dir} (${err instanceof Error ? err.message : String(err)}) — ` +
+        "refusing to run in the shared temp dir, where a Read needs no approval.",
+    );
+  }
+  return dir;
 }

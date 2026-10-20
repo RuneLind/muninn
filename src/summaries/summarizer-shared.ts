@@ -4,6 +4,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
+import type { ToolSurface } from "../ai/tool-surface.ts";
 import { Tracer } from "../tracing/tracer.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
@@ -64,6 +65,8 @@ export interface CaptureOneShotOptions {
   onProgress?: StreamProgressCallback;
   timeoutMs?: number;
   extraDirs?: string[];
+  /** The tools the pass may reach — required, forwarded to `tracedOneShot`. */
+  toolSurface: ToolSurface;
   /**
    * Thinking budget. Defaults to {@link CAPTURE_THINKING_MAX_TOKENS}; pass
    * `null` to inherit the bot's own budget, which is what the `deep` KIND asks
@@ -210,6 +213,7 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
+      toolSurface: opts.toolSurface,
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
       ...(effort ? { effort } : {}),
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
