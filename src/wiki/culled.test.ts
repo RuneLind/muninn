@@ -306,6 +306,14 @@ describe("aliasWorkedPaths", () => {
     expect(aliasWorkedPaths("archive/x.md", dirs)).toEqual(["archive/x.md"]);
     expect(aliasWorkedPaths("x.html", dirs)).toEqual(["x.html"]);
   });
+
+  // Arch review 2026-10, batch K fix round 1, finding F.
+  test("a plain alias keeps # and | as text; only a [[…]] wikilink drops its anchor and label", () => {
+    expect(aliasWorkedPaths("archive/a#b", dirs)).toEqual(["archive/a#b.md", "archive/a#b.mdx"]);
+    expect(aliasWorkedPaths("archive/a|b", dirs)).toEqual(["archive/a|b.md", "archive/a|b.mdx"]);
+    expect(aliasWorkedPaths("[[archive/a#b]]", dirs)).toEqual(["archive/a.md", "archive/a.mdx"]);
+    expect(aliasWorkedPaths("[[old-plan.md]]", dirs)).toEqual(["old-plan.md"]);
+  });
 });
 
 describe("Activity drops culled pages — through the store's effective value", () => {

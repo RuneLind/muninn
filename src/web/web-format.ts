@@ -23,6 +23,7 @@ import {
   runChecklistBody,
   runChecklistSteps,
   taskListRows,
+  componentBlocks,
 } from "../format/markdown-ast.ts";
 import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
 import { withoutComponentTags } from "../format/component-observer.ts";
@@ -58,6 +59,7 @@ import {
   type RunEntry,
 } from "../format/genre-lists.ts";
 import {
+  decisionLogEntries,
   DECISION_ID_RE,
   isOpenQuestion,
   parseQuestionAttrs,
@@ -81,8 +83,12 @@ import {
   statusRows,
   statusTileTone,
   type StatusTones,
+  visibleText,
 } from "../format/report-top.ts";
-import { readStatusRowsView } from "../format/component-spec.ts";
+import { readChartKind, readStatusRowsView } from "../format/component-spec.ts";
+import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
+import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
+import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
 import {
@@ -268,6 +274,14 @@ export function formatWebHtml(
      *  decision-chain route and the lint read too. Absent ⇒ `text` with each
      *  wikilink sentinel replaced by its `wikiLinkTexts` text. */
     decisionText?: string;
+    /** With `views`: the `<Chart>` view (`renderWikiHtml` passes
+     *  `chartViewHtml`). Passed in so the chat bundle never carries it.
+     *  Absent ⇒ a chart prints its table as written. */
+    chartView?: ChartViewRenderer;
+    /** With `views`: the `<RuleTree>` view (`renderWikiHtml` passes
+     *  `ruleTreeViewHtml`), passed in like `chartView`. Absent ⇒ a rule tree
+     *  prints its list as written. */
+    ruleTreeView?: RuleTreeViewRenderer;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -281,7 +295,19 @@ export function formatWebHtml(
   const prevLinkTexts = currentLinkTexts;
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
+  const prevChartView = currentChartView;
+  const prevLedgerRows = currentLedgerRows;
+  const prevLogIds = currentLogIds;
+  const prevRuleTreeView = currentRuleTreeView;
+  const prevCaseKorts = currentCaseKorts;
   currentViews = opts?.views === true;
+  currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
+  currentCaseKorts = NO_CASE_KORTS;
+  const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
+  const charted = chartView !== undefined;
+  currentChartView = chartView ?? null;
+  currentLedgerRows = null;
+  currentLogIds = NO_LOG_IDS;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
@@ -303,6 +329,20 @@ export function formatWebHtml(
     // The views' whole-page pre-pass runs only on the reader's page render;
     // without it the walk is the one `renderBlocks` call, byte for byte.
     const slot = opts?.views ? viewSlot(blocks) : -1;
+    // A tree's case ids join the page's CaseBoard rows, whichever comes first.
+    if (currentRuleTreeView && text.includes("<CaseBoard")) currentCaseKorts = pageCaseKorts(blocks);
+    if (charted) {
+      // A gate row's pill reads the page's own ledgers, as the PR strip does;
+      // a value cell's id links only when the page's DecisionLog has its item.
+      const linkTexts = opts?.wikiLinkTexts;
+      const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
+      const analysedBlocks = analysed === text ? blocks : parseBlocks(analysed);
+      const ledgers = pageLedgers(analysedBlocks, opts?.proposedPlan === true);
+      currentLedgerRows = ledgers.length ? firstRowPerPr(ledgers) : null;
+      // Read off the blocks the log renders from: an item whose id is a
+      // wikilink renders no anchor, so its id links nowhere.
+      currentLogIds = new Set(decisionLogEntries(blocks).map((e) => e.id));
+    }
     let rendered: string;
     if (slot < 0) {
       rendered = renderBlocks(blocks, webRenderer);
@@ -323,7 +363,7 @@ export function formatWebHtml(
     // DecisionLog item yields to both.
     const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
-    const linked = slot >= 0 ? retargetViewLinks(questionLinked) : questionLinked;
+    const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
     // exactly: the item's state (D8) and the id's noun (D12). The parse is the
     // one the answer cards use, run on the reader path when the page has a
@@ -339,6 +379,11 @@ export function formatWebHtml(
     currentLinkTexts = prevLinkTexts;
     currentItemDates = prevItemDates;
     currentViews = prevViews;
+    currentChartView = prevChartView;
+    currentLedgerRows = prevLedgerRows;
+    currentLogIds = prevLogIds;
+    currentRuleTreeView = prevRuleTreeView;
+    currentCaseKorts = prevCaseKorts;
   }
 }
 
@@ -395,6 +440,22 @@ let currentReader = false;
 
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
 let currentViews = false;
+
+/** `opts.chartView` for the call in progress; null ⇒ a `<Chart>` is its table. */
+let currentChartView: ChartViewRenderer | null = null;
+
+/** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
+let currentRuleTreeView: RuleTreeViewRenderer | null = null;
+
+const NO_CASE_KORTS: ReadonlyMap<string, string> = new Map();
+/** The page's CaseBoard case ids → their `kort:`, while a rule tree page renders. */
+let currentCaseKorts: ReadonlyMap<string, string> = NO_CASE_KORTS;
+
+/** The page's ledger rows, for a gate chart's pills; read once per call. */
+let currentLedgerRows: readonly LedgerRow[] | null = null;
+const NO_LOG_IDS: ReadonlySet<string> = new Set();
+/** The ids the page's DecisionLog has items for, while a chart page renders. */
+let currentLogIds: ReadonlySet<string> = NO_LOG_IDS;
 
 /** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
 let currentLanguage: QuestionLanguage = "en";
@@ -753,6 +814,65 @@ function deltaTableHtml(
   return (
     `${labelWarnings}<div class="dt-wrap"><table class="dt-table"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table></div>${note}`
   );
+}
+
+/** A `<Chart>`: on the reader's page render with a chart view, the view over
+ *  its table (the table under its findings when it fails its kind); else, or
+ *  with no kind or no table, the body as written. Cells are read as the lint reads them (`visibleText`), wikilink
+ *  sentinels as their link text first. */
+function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
+  if (!currentChartView) return children;
+  const kind = readChartKind(attrs.kind).value;
+  const body = chartBody(rawChildren);
+  if (!kind || !body.table) return children;
+  return currentChartView({
+    read: readChart(kind, attrs, chartTable(body.table, (c) => visibleText(peekText(c)))),
+    caption: attrs.caption ?? "",
+    captionText: peekText(attrs.caption ?? ""),
+    tableHtml: renderBlocks([body.table], webRenderer),
+    beforeHtml: renderBlocks(body.before, webRenderer),
+    afterHtml: renderBlocks(body.after, webRenderer),
+    language: currentLanguage,
+    ledgerRows: currentLedgerRows,
+    logIds: currentLogIds,
+  });
+}
+
+/** Every case id the page's CaseBoards hold, first board first, with its
+ *  `kort:` (`caseKort`, the row's compact line); a board whose file does not
+ *  load adds nothing. */
+function pageCaseKorts(blocks: readonly Block[]): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  for (const b of componentBlocks(blocks, "CaseBoard")) {
+    const file = lookupPageFile(currentPageFiles, (b.attrs.src ?? "").trim(), "yaml");
+    const board = file.ok ? parseCaseBoard(file.text) : null;
+    if (board?.ok) for (const c of board.cases) if (!out.has(c.id)) out.set(c.id, caseKort(c));
+  }
+  return out;
+}
+
+/** A `<RuleTree>`: on the reader's page render with a tree view, its list as a
+ *  tree; else, or with no list, the body as written. Items are read as the
+ *  lint reads them (`visibleText`), wikilink sentinels as their link text. */
+function ruleTreeBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
+  if (!currentRuleTreeView) return children;
+  const read = readRuleTree(rawChildren, attrs, {
+    text: (raw) => visibleText(peekText(raw)),
+    boardIds: new Set(currentCaseKorts.keys()),
+  });
+  if (!read.list) return children;
+  const korts = new Map([...currentCaseKorts].filter(([, k]) => k).map(([id, k]) => [id, renderInline(k)] as const));
+  return currentRuleTreeView({
+    read: { ...read, list: read.list },
+    title: attrs.title ?? "",
+    titleText: visibleText(peekText(attrs.title ?? "")),
+    inline: itemHtml,
+    same: (pieces, whole) => rendersAs(pieces, flatHtml(probeItemHtml([whole]))),
+    child: listChildHtml,
+    blocks: (bs) => renderBlocks(bs, webRenderer),
+    korts,
+    language: currentLanguage,
+  });
 }
 
 /** A `<DeltaTable>`: from its `src=` CSV, else from the first pipe table
@@ -2143,6 +2263,10 @@ const webRenderer: BlockRenderer = {
         // Only a `<Tldr>` gives it a closed part; anywhere else its body
         // renders in place.
         return children;
+      case "Chart":
+        return chartBlockHtml(attrs, rawChildren, children);
+      case "RuleTree":
+        return ruleTreeBlockHtml(attrs, rawChildren, children);
       case "StatusRows":
         // Tiles on the reader's page render only; every other surface prints rows.
         return statusRowsHtml(

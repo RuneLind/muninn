@@ -4,7 +4,7 @@
  *
  *  - `component-value` — an attribute whose spec `parse` reports `fellBack`
  *    (`COMPONENT_SPEC`, `src/format/component-spec.ts`), or a missing
- *    `required` attribute (Meter `value`). An empty value reads as a missing
+ *    `required` attribute (Meter `value`, Chart `kind`). An empty value reads as a missing
  *    one there, so it is reported only where missing is itself a fallback.
  *  - `component-attr` — an attribute `COMPONENT_ATTRS` does not list, which
  *    `parseAttrs` drops before any renderer sees it, or an earlier spelling of
@@ -21,6 +21,17 @@
  * every tag the block parser accepts and every tag the inline scanner matches,
  * with its raw attributes. Frontmatter, fences, code spans, table cells and the
  * depth cap are therefore the renderer's own; this file masks nothing.
+ *
+ * **A page's data files are judged too.** The reader runs a `<CaseBoard>`
+ * case's `note` and `kort` through the inline renderer, so a tag there is a
+ * component on the page. The caller passes what `loadPageFiles` read (every
+ * `<Query>`, `<CaseBoard>` and `<DeltaTable>` file the page names). Refs that
+ * resolve to one path are one file, named by the first ref. For each file whose
+ * text holds a component name, the page is rendered with that file as its only
+ * file (every ref to it mapped to it); the tags that render reads beyond the
+ * render with no files are judged, each distinct tag once per file. A file
+ * with no component name is not rendered. Their findings have no line and say
+ * `In <ref>: ` first.
  *
  * **Where a tag is** comes from a second render of the same page with a marker
  * attribute (`muninnlintmark="N"`) inserted after every `<Name` of a component
@@ -46,8 +57,10 @@ import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type C
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { lineCodeSpanRanges } from "../format/code-spans.ts";
+import { resolveEmbedRelPath } from "../format/embed.ts";
 import { WIKILINK_WITH_LABEL_RE, renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import type { PageFileResult, PageFiles } from "../format/query-block.ts";
 import type { LintFinding } from "./lint.ts";
 
 export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr"] as const;
@@ -283,15 +296,60 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
   return out;
 }
 
-/** Renders a page the way the reader does. A seam, so a test can make the two
- *  renders disagree. */
-export type PageRender = (content: string) => unknown;
-const readerRender: PageRender = (content) => renderWikiHtml(content, () => undefined);
+/** Renders a page the way the reader does, with the files it reads beside
+ *  itself when given. A seam, so a test can make the two renders disagree. */
+export type PageRender = (content: string, files?: PageFiles) => unknown;
+const readerRender: PageRender = (content, files) => renderWikiHtml(content, () => undefined, files ? { files } : undefined);
 
-function observe(render: PageRender, content: string): ObservedComponentTag[] {
+function observe(render: PageRender, content: string, files?: PageFiles): ObservedComponentTag[] {
   const seen: ObservedComponentTag[] = [];
-  observeComponentTags((t) => seen.push(t), () => render(content));
+  observeComponentTags((t) => seen.push(t), () => render(content, files));
   return seen;
+}
+
+/** What `loadPageFiles` read for a page: each ref as written → its result. */
+export type LoadedPageFiles = ReadonlyMap<string, PageFileResult>;
+
+/**
+ * The tags each read file adds to the page: the render with that file alone,
+ * minus the render with none, tag for tag. The reader runs a `<CaseBoard>`
+ * case's `note` and `kort` through the inline renderer, so a tag there is a
+ * component on the page. Only those tags come from a file; a tag in a file has
+ * no page line. Refs that resolve to one path (`c.yaml`, `./c.yaml`, two
+ * boards on one file) are one file: rendered once with all of them, each
+ * distinct tag judged once, named by the first ref in source order.
+ */
+function fileTags(render: PageRender, relPath: string, content: string, files: LoadedPageFiles, plain: readonly ObservedComponentTag[]): [string, Tag[]][] {
+  const byPath = new Map<string, [string, PageFileResult][]>();
+  for (const [ref, result] of files) {
+    if (!result.ok) continue;
+    const key = resolveEmbedRelPath(relPath.replace(/\\/g, "/"), ref) ?? ref;
+    const group = byPath.get(key);
+    if (group === undefined) byPath.set(key, [[ref, result]]);
+    else group.push([ref, result]);
+  }
+  const out: [string, Tag[]][] = [];
+  for (const group of byPath.values()) {
+    const [name, first] = group[0]!;
+    // A file with no component name in it adds no tag: no render.
+    NAME_RE.lastIndex = 0;
+    if (!first.ok || !NAME_RE.test(first.text)) continue;
+    const left = new Map<string, number>();
+    for (const t of plain) left.set(tagKey(t), (left.get(tagKey(t)) ?? 0) + 1);
+    const seen = new Set<string>();
+    const added: Tag[] = [];
+    for (const t of observe(render, content, new Map(group))) {
+      const key = tagKey(t);
+      const n = left.get(key) ?? 0;
+      if (n > 0) left.set(key, n - 1);
+      else if (!seen.has(key)) {
+        seen.add(key);
+        added.push({ name: t.name, attrs: t.rawAttrs, ...nmOf(t) });
+      }
+    }
+    if (added.length > 0) out.push([name, added]);
+  }
+  return out;
 }
 
 /** An attribute run in the parser's attribute shape after a tag name, followed
@@ -365,7 +423,7 @@ function lineAt(content: string, offset: number): number {
   return line;
 }
 
-/** Components with a `required` attribute: a bare `<Meter>` is a finding. */
+/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or `<Chart>` is a finding. */
 const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required));
 /**
  * A tag this check could judge: a component name followed by an attribute, or
@@ -391,21 +449,35 @@ const memos = new WeakMap<PageRender, Map<string, LintFinding[]>>();
  * Results are memoized per render seam (`COMPONENT_MEMO_MAX` entries; a hit
  * makes its entry the newest, and past the cap the least recently used goes).
  */
-export function checkComponents(relPath: string, content: string, render: PageRender = readerRender): LintFinding[] {
+export function checkComponents(
+  relPath: string,
+  content: string,
+  render: PageRender = readerRender,
+  files: LoadedPageFiles = new Map(),
+): LintFinding[] {
   if (!JUDGEABLE_RE.test(content)) return [];
   let memo = memos.get(render);
   if (memo === undefined) memos.set(render, (memo = new Map()));
-  const key = `${relPath}\u0000${content.length}\u0000${Bun.hash(content)}`;
+  const read = [...files].filter((e): e is [string, { ok: true; text: string }] => e[1].ok);
+  const filesKey = read.map(([ref, r]) => `${ref}\u0000${r.text.length}\u0000${Bun.hash(r.text)}`).join("\u0000");
+  const key = `${relPath}\u0000${content.length}\u0000${Bun.hash(content)}\u0000${filesKey}`;
   let found = memo.get(key);
   if (found !== undefined) memo.delete(key);
-  else found = findComponents(relPath, content, render);
+  else found = findComponents(relPath, content, render, new Map(read));
   memo.set(key, found);
   if (memo.size > COMPONENT_MEMO_MAX) memo.delete(memo.keys().next().value!);
   return found.map((f) => ({ ...f }));
 }
 
-function findComponents(relPath: string, content: string, render: PageRender): LintFinding[] {
+function findComponents(relPath: string, content: string, render: PageRender, files: LoadedPageFiles): LintFinding[] {
   const plain = observe(render, content);
+  const fromFiles = fileTags(render, relPath, content, files, plain).flatMap(([ref, tags]) =>
+    tags.flatMap((t) => checkTag(relPath, t)).map((f) => ({ ...f, message: `In ${ref}: ${f.message}` })),
+  );
+  return [...pageFindings(relPath, content, render, plain), ...fromFiles];
+}
+
+function pageFindings(relPath: string, content: string, render: PageRender, plain: readonly ObservedComponentTag[]): LintFinding[] {
   const unlocated = plain.flatMap((t) => checkTag(relPath, { name: t.name, attrs: t.rawAttrs, ...nmOf(t) }));
   if (unlocated.length === 0) return [];
   const tags = locate(render, content, plain);

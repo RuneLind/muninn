@@ -81,6 +81,7 @@ describe("parseBlocks", () => {
     expect(parseBlocks(input)).toEqual([
       {
         type: "table",
+        line: 0,
         headers: ["Name", "Age"],
         rows: [
           ["Alice", "30"],
@@ -88,6 +89,13 @@ describe("parseBlocks", () => {
         ],
       },
     ]);
+  });
+
+  test("a table carries the line its header row is on", () => {
+    const blocks = parseBlocks("```\nx\n```\ntext\n| A | B |\n|---|---|\n| 1 | 2 |");
+    expect(blocks.find((b) => b.type === "table")).toMatchObject({ type: "table", line: 4 });
+    const inner = parseBlocks("<ComparisonTable>\n| A | B |\n|---|---|\n| 1 | 2 |\n</ComparisonTable>");
+    expect((inner[0] as any).children[0]).toMatchObject({ type: "table", line: 1 });
   });
 
   test("rejects table with no separator row (passes through as text)", () => {
@@ -258,7 +266,7 @@ describe("parseBlocks — component blocks", () => {
         type: "component", line: 0,
         name: "ComparisonTable",
         attrs: {},
-        children: [{ type: "table", headers: ["A", "B"], rows: [["1", "2"]] }],
+        children: [{ type: "table", line: 1, headers: ["A", "B"], rows: [["1", "2"]] }],
       },
     ]);
   });

@@ -56,7 +56,7 @@ describe("lint: state-outside-home", () => {
         [
           "See PR #31 — merged on Monday.",
           "",
-          "The second task is not merged.",
+          "Task 2 is not merged.",
           "",
           "So 120 can go in prod now.",
           "",
@@ -612,9 +612,10 @@ describe("check 14 exempt text", () => {
   test("HTML and JSX comments are visible text in this reader, for both checks", async () => {
     // renderWikiHtml escapes `<!-- -->` and `{/* */}` and shows them, so they are prose.
     await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
-    const body = ["<!-- DEMO-1 merged -->", "{/* DEMO-2 merged */}", "<!--", "DEMO-3 merged", "-->", "**Status:** waits {/* DEMO-1 merged */}", "", "DEMO-4 merged."];
-    expect(await flaggedBody(body)).toEqual([0, 1, 3, 7]);
-    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx").map((f) => f.line)).toEqual([bodyLine(5)]);
+    // The blank line makes the Status line open its own paragraph (fix round 3).
+    const body = ["<!-- DEMO-1 merged -->", "{/* DEMO-2 merged */}", "<!--", "DEMO-3 merged", "-->", "", "**Status:** waits {/* DEMO-1 merged */}", "", "DEMO-4 merged."];
+    expect(await flaggedBody(body)).toEqual([0, 1, 3, 8]);
+    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx").map((f) => f.line)).toEqual([bodyLine(6)]);
   });
 
   test("a comment marker inside inline code hides nothing", async () => {
@@ -622,7 +623,7 @@ describe("check 14 exempt text", () => {
   });
 
   test("a task word PR does not match a lowercase pr inside a file name", async () => {
-    expect(await flaggedBody(["Runs in e2e-pr.yml and is merged.", "The e2e-pr job merged.", "The api-PR-en is merged."])).toEqual([2]);
+    expect(await flaggedBody(["Runs in e2e-pr.yml and is merged.", "The e2e-pr 3 job merged.", "The api-PR 2 is merged."])).toEqual([2]);
   });
 });
 
@@ -685,7 +686,9 @@ describe("check 14 pinned edges", () => {
   });
 
   test("a task word does not touch a `.` on its left or a `.x` on its right, in either case class", async () => {
-    const body = ["The config.PR merged.", "The PR.yml merged.", "The PR merged.", "The config.task merged.", "The task.yml merged.", "The task merged.", "We merged the PR."];
+    // The right-edge rows use the count form (`3 PR.yml`): the named form needs a
+    // number after the word, so without the count a `.x` row passes for any reason.
+    const body = ["The config.PR 1 merged.", "The 3 PR.yml merged.", "The PR 1 merged.", "The config.task 1 merged.", "The 3 task.yml merged.", "The task 1 merged.", "We merged PR 1."];
     expect(await flaggedBody(body)).toEqual([2, 5, 6]);
   });
 
@@ -702,4 +705,297 @@ describe("check 14 pinned edges", () => {
     const f = await notOwner();
     expect(f.map((x) => [x.relPath, x.line])).toEqual([["plans/other.mdx", bodyLine(4)]]);
   });
+});
+
+// ── Architecture review 2026-10, batch L (findings 77, 78) ───────────────────
+
+describe("check 14 table header rows (finding 77)", () => {
+  test("the row above a table's delimiter row is a header, not state; the body rows are linted", async () => {
+    const body = ["| Fix for DEMO-1 | Merged |", "|---|---|", "| DEMO-2 | merged |"];
+    expect(await flaggedBody(body)).toEqual([2]);
+  });
+
+  test("a header with no body row under it is text the reader shows, so it is linted", async () => {
+    // A header and a delimiter row only: the parser's table needs three rows, so it renders as text.
+    expect(await flaggedBody(["| Fix for DEMO-1 | Merged |", "|---|---|"])).toEqual([0]);
+  });
+});
+
+describe("check 14 task words anchor only with a number (finding 77)", () => {
+  test("a bare task word is generic prose; a numbered one names a piece of work", async () => {
+    const body = [
+      "The second task is not merged.",
+      "Task 2 is not merged.",
+      "Wait until the api-PR-en is merged.",
+      "PR 1 is merged.",
+      "PRs 1–4 are merged.",
+      "The PRs merged through the queue.",
+      "Task #3 is merged.",
+    ];
+    expect(await flaggedBody(body)).toEqual([1, 3, 4, 6]);
+  });
+});
+
+describe("check 14 uses the reader's fence rule (finding 78)", () => {
+  test("a tilde block is prose to the reader, so its lines are linted; a backtick fence is not", async () => {
+    const body = ["~~~", "DEMO-1 is merged.", "~~~", "", "```", "DEMO-2 is merged.", "```"];
+    expect(await flaggedBody(body)).toEqual([1]);
+  });
+
+  test("an unclosed backtick opener stays prose, and so does every line after it", async () => {
+    expect(await flaggedBody(["```", "DEMO-1 is merged.", "", "DEMO-2 is merged."])).toEqual([1, 3]);
+  });
+});
+
+// ── Batch L fix round 1: the reader's paragraph and table rules, count anchors ──
+
+describe("check 14 Status paragraph ends where the reader's does (fix round 1)", () => {
+  test("a tilde line or an unclosed backtick opener stays inside the paragraph", async () => {
+    expect(await flaggedBody(["**Status:** DEMO-1 is merged", "~~~", "DEMO-2 is merged.", "~~~"])).toEqual([]);
+    expect(await flaggedBody(["**Status:** DEMO-1 is merged", "```", "DEMO-2 is merged."])).toEqual([]);
+  });
+
+  test("a paired backtick fence ends the paragraph: the line after it is linted", async () => {
+    expect(await flaggedBody(["**Status:** DEMO-1 is merged", "```", "x", "```", "DEMO-2 is merged."])).toEqual([4]);
+  });
+});
+
+describe("check 14 table header is the parser's own header row (fix round 1)", () => {
+  test("a pipe line above the header is text; the header under it is skipped", async () => {
+    const table = ["| Fix for DEMO-1 | Merged |", "|---|---|", "| DEMO-2 | merged |"];
+    expect(await flaggedBody(["| Note on DEMO-9 merged |", ...table])).toEqual([0, 3]);
+    expect(await flaggedBody(["|junk DEMO-5 merged", ...table])).toEqual([0, 3]);
+  });
+
+  test("three or more pipe rows with no delimiter row are text, so every row is linted", async () => {
+    expect(await flaggedBody(["| Fix for DEMO-1 | Merged |", "| DEMO-3 | merged |", "| DEMO-2 | merged |"])).toEqual([0, 1, 2]);
+  });
+
+  test("the header is found at its own line after a fence and inside a component", async () => {
+    const table = ["| Fix for DEMO-1 | Merged |", "|---|---|", "| DEMO-2 | merged |"];
+    expect(await flaggedBody(["```", "x", "```", ...table])).toEqual([5]);
+    expect(await flaggedBody(["<ComparisonTable>", ...table, "</ComparisonTable>"])).toEqual([3]);
+  });
+});
+
+describe("check 14 a counted task word anchors a state phrase (fix round 1)", () => {
+  test("a number before the task word anchors a state phrase, not a date alone", async () => {
+    const body = [
+      "Per 06.10, 7 of 8 PRs are merged.",
+      "2 PRs are merged.",
+      "| fdea6907 (11.09) | 3 PRs in console | about $140 |",
+      "The PRs are merged.",
+      "Version 1.2 PRs are merged.",
+      "The v2 PR is merged.",
+    ];
+    expect(await flaggedBody(body)).toEqual([0, 1]);
+    const f = await outside();
+    expect(f[0]!.message).toContain("beside «PRs»");
+  });
+});
+
+// ── Batch L fix round 2: a Status list item is the parser's item, no more ──
+
+describe("check 14 a Status list item ends where the reader's item does (fix round 2)", () => {
+  test("a fence-shaped line after the item is outside it: the line after is linted", async () => {
+    expect(await flaggedBody(["- **Status:** DEMO-1 is merged", "~~~", "DEMO-2 is merged."])).toEqual([2]);
+    expect(await flaggedBody(["- **Status:** DEMO-1 is merged", "```", "DEMO-2 is merged."])).toEqual([2]);
+    expect(await flaggedBody(["1. **Status:** DEMO-1 is merged", "```js", "x", "more DEMO-3 merged"])).toEqual([3]);
+  });
+
+  test("an unindented line after the item is its own paragraph; an indented one continues the item", async () => {
+    expect(await flaggedBody(["- **Status:** DEMO-3 merged", "DEMO-4 is merged."])).toEqual([1]);
+    expect(await flaggedBody(["- **Status:** DEMO-3 merged", "  DEMO-4 is merged."])).toEqual([]);
+    expect(await flaggedBody(["- a", "- **Status:** DEMO-3 merged", "  DEMO-4 is merged.", "- DEMO-5 merged"])).toEqual([3]);
+    expect(await flaggedBody(["- a", "  - **Status:** DEMO-3 merged", "    DEMO-4 is merged."])).toEqual([]);
+    expect(await flaggedBody(["- a", "  - **Status:** DEMO-3 merged", "DEMO-4 is merged."])).toEqual([2]);
+  });
+
+  test("a list-marker line the parser keeps in a text Status paragraph stays in it", async () => {
+    expect(await flaggedBody(["**Status:** waits", "  - DEMO-4 is merged"])).toEqual([]);
+    expect(await flaggedBody(["**Status:** waits", "1) DEMO-4 is merged"])).toEqual([]);
+    expect(await flaggedBody(["**Status:** waits", "- DEMO-4 is merged"])).toEqual([1]);
+  });
+});
+
+// ── Batch L fix round 2 batch 2: the count anchor's edges ──
+
+describe("check 14 count anchor edges (fix round 2 batch 2)", () => {
+  // [line, flags]: one row per edge of the count form. A count anchors a state
+  // phrase in its own clause only, and its number stands alone.
+  const rows: [string, boolean][] = [
+    ["#3 PRs are merged.", false],
+    ["The run-8 PRs are merged.", false],
+    ["v12 PRs are merged.", false],
+    ["3 PRx is merged.", false],
+    ["3 Task is merged.", true],
+    ["Per 06.10 3 PRs in total; the fix is merged.", false],
+    ["3 PRs remain; the fix is merged.", false],
+    ["3\tPRs are merged.", true],
+    ["3 PRs are merged.", true],
+    ["1-3 PRs are merged.", true],
+    ["1–3 PRs are merged.", true],
+    ["At 14:30 PR is merged.", false],
+    ["On 6/10 PR is merged.", false],
+    ["About 1,5 PR is merged.", false],
+    ["3 tasks are merged.", false],
+  ];
+  for (const [line, flags] of rows) {
+    test(`${JSON.stringify(line)} ${flags ? "flags" : "does not flag"}`, async () => {
+      expect(await flaggedBody([line])).toEqual(flags ? [0] : []);
+    });
+  }
+});
+
+// ── Batch L fix round 3, class check A: a Status home is the parser's block ──
+
+describe("check 14 Status paragraph extent: every line-start class (fix round 3)", () => {
+  // [line after `**Status:** waits`, does the reader keep the paragraph going].
+  // The probe line under it states DEMO-3's state: linted (flagged) when the
+  // paragraph ended, a home when it did not. Verdicts are the reader's
+  // (`parseBlocks` + `paragraphGaps`), checked against the rendered HTML.
+  const rows: [string, string[], boolean][] = [
+    ["plain text", ["more"], true],
+    ["indented text (2)", ["  more"], true],
+    ["indented text (4)", ["    more"], true],
+    ["a line of spaces", ["   "], true],
+    ["empty line", [""], false],
+    ["break ---", ["---"], false],
+    ["break ----", ["----"], false],
+    ["break * * *", ["* * *"], false],
+    ["break - - -", ["- - -"], false],
+    ["*** (no list marker space)", ["***"], true],
+    ["___", ["___"], true],
+    ["_ _ _", ["_ _ _"], true],
+    ["indented *** ", [" ***"], true],
+    ["indented ---", ["   ---"], true],
+    ["--- with a trailing space", ["--- "], true],
+    ["setext ===", ["==="], true],
+    ["ATX #", ["# Heading"], false],
+    ["ATX ######", ["###### Heading"], false],
+    ["seven #", ["####### x"], true],
+    ["# without a space", ["#x"], true],
+    ["indented ATX", ["   # x"], true],
+    ["paired ``` fence", ["```", "c", "```"], false],
+    ["indented paired ``` fence", ["  ```", "c", "  ```"], false],
+    ["unclosed ``` opener", ["```x"], true],
+    ["paired ~~~", ["~~~", "c", "~~~"], true],
+    ["quote at column 0", ["> x"], false],
+    ["quote, 1 space", [" > x"], true],
+    ["quote, 2 spaces", ["  > x"], true],
+    ["quote, 3 spaces", ["   > x"], true],
+    ["quote, 4 spaces", ["    > x"], true],
+    ["- item", ["- x"], false],
+    ["* item", ["* x"], false],
+    ["1. item", ["1. x"], false],
+    ["+ (never opens a list)", ["+ x"], true],
+    ["1) (never opens a list)", ["1) x"], true],
+    ["indented - mid-paragraph", ["  - x"], true],
+    ["-x (no space)", ["-x"], true],
+    ["html block", ["<div>x</div>"], true],
+    ["html comment", ["<!-- x -->"], true],
+    ["one pipe row", ["| x | b |"], true],
+    ["a pipe table", ["| x | b |", "|---|---|", "| c | d |"], false],
+    ["closed component", ["<Callout>", "x", "</Callout>"], false],
+    ["unclosed component tag", ["<Callout> x"], true],
+    ["stray close tag", ["</Callout>"], true],
+    ["inline component", ['<Pill tone="good">p</Pill> x'], true],
+  ];
+  for (const [form, lines, continues] of rows) {
+    test(`${form}: ${continues ? "continues" : "ends"} the paragraph`, async () => {
+      // A line the paragraph keeps carries a state too: it must be a home.
+      const kept = continues ? lines.map((l) => l.replace(/\bx\b/, "DEMO-2 is merged")) : lines;
+      const body = ["**Status:** waits", ...kept, "DEMO-3 is merged."];
+      expect(await flaggedBody(body)).toEqual(continues ? [] : [body.length - 1]);
+    });
+  }
+});
+
+describe("check 14 an indented quote line inside a Status paragraph is home text (fix round 3)", () => {
+  test("check 2 reads it: the reader shows `  > x` as part of the paragraph", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    await write("plans/p.mdx", page(["**Status:** waits", "  > DEMO-1 is merged", "", "> DEMO-1 is merged"]));
+    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx").map((f) => f.line)).toEqual([bodyLine(1)]);
+  });
+});
+
+describe("check 14 Status home starts where the reader's block starts (fix round 3)", () => {
+  test("the label must open the paragraph or the parser's list item", async () => {
+    // `+` and `1)` open no list here, so the label is not at the paragraph's start.
+    expect(await flaggedBody(["+ **Status:** DEMO-1 is merged"])).toEqual([0]);
+    expect(await flaggedBody(["1) **Status:** DEMO-1 is merged"])).toEqual([0]);
+    // An indented marker after text continues that text: no item.
+    expect(await flaggedBody(["intro", "  - **Status:** DEMO-1 is merged"])).toEqual([1]);
+    // A label mid-paragraph opens nothing.
+    expect(await flaggedBody(["intro", "**Status:** DEMO-1 is merged"])).toEqual([1]);
+    // An item paragraph opening with the label is a home to its own end.
+    expect(await flaggedBody(["- a", "", "  **Status:** DEMO-1 is merged", "  DEMO-2 is merged.", "", "  DEMO-3 is merged."])).toEqual([5]);
+  });
+});
+
+describe("check 14 Status homes inside a component, below a fence (fix round 3)", () => {
+  // The fence before the component makes the parser's line index and the
+  // page's line differ, so a home read off the wrong line misses.
+  const lead = ["```", "x", "y", "```", "", "<Callout>"];
+  test("a Status list item and its continuation", async () => {
+    expect(await flaggedBody([...lead, "- **Status:** DEMO-1 is merged", "  DEMO-2 is merged.", "- DEMO-3 is merged", "</Callout>"])).toEqual([8]);
+  });
+  test("a nested Status list item and its continuation", async () => {
+    expect(await flaggedBody([...lead, "- a", "  - **Status:** DEMO-1 is merged", "    DEMO-2 is merged.", "- DEMO-3 is merged", "</Callout>"])).toEqual([9]);
+  });
+  test("a Status paragraph and an item paragraph", async () => {
+    expect(await flaggedBody([...lead, "**Status:** DEMO-1 is merged", "DEMO-2 is merged.", "", "DEMO-3 is merged.", "</Callout>"])).toEqual([9]);
+    expect(await flaggedBody([...lead, "- a", "", "  **Status:** DEMO-1 is merged", "  DEMO-2 is merged.", "</Callout>", "DEMO-3 is merged."])).toEqual([11]);
+  });
+});
+
+// ── Batch L fix round 3, class check B: the count anchor's grammar ──
+
+describe("check 14 count anchor grammar (fix round 3)", () => {
+  // The spec, one row per case: COUNT SEP WORD, where COUNT is 1–3 ASCII digits
+  // or a range of two such numbers joined by `-` or `–`, its left neighbour is
+  // none of a letter, a digit of any script, `_ . , # : / - –`, SEP is one
+  // space, tab or no-break space, and WORD is a listed task word followed by
+  // none of a letter, a digit, `_`, `/` or `.`+letter-or-digit.
+  const rows: [string, boolean, string][] = [
+    ["3 PRs are merged.", true, "one digit"],
+    ["10 PRs are merged.", true, "two digits"],
+    ["999 PRs are merged.", true, "three digits"],
+    ["1000 PRs are merged.", false, "four digits is no count"],
+    ["2026 PRs are merged.", false, "a year is no count"],
+    ["1-3 PRs are merged.", true, "range with -"],
+    ["1–3 PRs are merged.", true, "range with –"],
+    ["10-12 PRs are merged.", true, "multi-digit range start, -"],
+    ["10–12 PRs are merged.", true, "multi-digit range start, –"],
+    ["2026-10 PR is merged.", false, "ISO year-month"],
+    ["1-2-3 PRs are merged.", false, "three-part run"],
+    ["1–2–3 PRs are merged.", false, "three-part run, –"],
+    ["14:30–16 PR is merged.", false, "time range"],
+    ["1.5–3 PRs are merged.", false, "decimal range start"],
+    ["6/10–12 PRs are merged.", false, "date range"],
+    ["v1–3 PRs are merged.", false, "version range"],
+    ["#1–3 PRs are merged.", false, "hash range"],
+    ["1,5–3 PRs are merged.", false, "decimal-comma range, –"],
+    ["1,5-3 PRs are merged.", false, "decimal-comma range, -"],
+    ["x,3 PRs are merged.", false, "comma on the left"],
+    ["_3 PRs are merged.", false, "underscore on the left"],
+    ["(3 PRs are merged.)", true, "a bracket on the left"],
+    ["²-3 PRs are merged.", false, "superscript range start"],
+    ["Ⅻ-3 PRs are merged.", false, "roman-numeral range start"],
+    ["３-3 PRs are merged.", false, "fullwidth range start"],
+    ["３ PRs are merged.", false, "fullwidth digit"],
+    ["٣ PRs are merged.", false, "Arabic-Indic digit"],
+    ["²3 PRs are merged.", false, "a digit of another script on the left"],
+    ["3PRs are merged.", false, "no separator"],
+    ["3  PRs are merged.", false, "two spaces"],
+    ["3 PRs are merged.", true, "no-break space"],
+    ["3 PRs/tasks are merged.", false, "slash on the right"],
+    ["3 PR_x is merged.", false, "underscore on the right"],
+    ["3 PR-en is merged.", true, "a hyphen on the right continues the word"],
+  ];
+  for (const [line, flags, why] of rows) {
+    test(`${why}: ${JSON.stringify(line)} ${flags ? "counts" : "does not count"}`, async () => {
+      expect(await flaggedBody([line])).toEqual(flags ? [0] : []);
+    });
+  }
 });

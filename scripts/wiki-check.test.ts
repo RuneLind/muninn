@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { noRootNote, runWikiCheck, wikiCheck, wikiRootFor, type WikiCheckResult } from "./wiki-check.ts";
+import { noRootNote, runWikiCheck, unreadFilesNote, wikiCheck, wikiRootFor, type WikiCheckResult } from "./wiki-check.ts";
 import { buildWikiIndex } from "../src/wiki/store.ts";
 import { lintWiki, PAGE_TEXT_LINT_CHECKS } from "../src/wiki/lint.ts";
 import { testTempDir } from "../src/test/temp-dir.ts";
@@ -81,6 +81,36 @@ const DECISION_CHAIN = [
   "| 2 \u2014 rows | somewhere |",
   "",
 ].join("\n");
+const CHART = [
+  "---",
+  "title: C",
+  "plan_status: shipped",
+  "---",
+  '<Chart kind="funnel">',
+  "",
+  "| Step | Count | Of |",
+  "|---|---|---|",
+  "| All | 40 | |",
+  "| Kept | many | 40 |",
+  "",
+  "</Chart>",
+  "",
+].join("\n");
+/** A rule tree with one warning (an outcome with no tone) and one info finding
+ *  (an `outcomes=` label that names no leaf). */
+const RULE_TREE = [
+  "---",
+  "title: R",
+  "plan_status: shipped",
+  "---",
+  '<RuleTree title="Can the book be renewed?" outcomes="Renew=good;Lapse=muted">',
+  "",
+  "- *Yes:* → Renew — LIB-1",
+  "- *No:* → Return",
+  "",
+  "</RuleTree>",
+  "",
+].join("\n");
 const TEXT_SHAPES = [
   "---",
   "title: S",
@@ -147,6 +177,8 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/a.mdx"), UNKNOWN_ATTR);
   await Bun.write(path.join(tmp, "page-checks/plans/rs.mdx"), CULLED_TEXT_SHAPES);
   await Bun.write(path.join(tmp, "page-checks/plans/dc.mdx"), DECISION_CHAIN);
+  await Bun.write(path.join(tmp, "page-checks/plans/ch.mdx"), CHART);
+  await Bun.write(path.join(tmp, "page-checks/plans/rt.mdx"), RULE_TREE);
   await Bun.write(path.join(tmp, "page-checks/plans/st.mdx"), STATUS_TILES);
   await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
   await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
@@ -304,6 +336,8 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "tldr-no-more",
         "ledger-row-state",
         "chain-close-conflict",
+        "chart-table",
+        "rule-tree",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
@@ -391,5 +425,71 @@ describe("wiki-check", () => {
     const r = await runWikiCheck([path.join(tmp, "locked")]);
     expect(r.code).toBe(3);
     expect(r.err).toEqual([noRootNote(path.join(tmp, "locked")), expect.stringMatching(/^wiki-check: cannot read .*i\.mdx: EACCES$/)]);
+  });
+});
+
+describe("wiki-check reads a CaseBoard's data file as lintWiki does (architecture review 2026-10 finding 76)", () => {
+  const BOARD = ["---", "title: B", "---", '<CaseBoard src="c.yaml" />', ""].join("\n");
+  const YAML = ["- id: A-1", "  status: ok", '  note: Fixed <Pill tone="sucess">x</Pill> today', ""].join("\n");
+  let dir = "";
+  let root = "";
+  beforeAll(async () => {
+    dir = await testTempDir(path.join(tmpdir(), "wiki-check-data-"));
+    root = path.join(dir, "wiki");
+    await Bun.write(path.join(root, ".wiki-reader.json"), "{}");
+    await Bun.write(path.join(root, "concepts/b.mdx"), BOARD);
+    await Bun.write(path.join(root, "concepts/c.yaml"), YAML);
+    // A board whose file sits outside the wiki root reads nothing.
+    await Bun.write(path.join(root, "concepts/out.mdx"), BOARD.replace("c.yaml", "../../outside.yaml"));
+    await Bun.write(path.join(dir, "outside.yaml"), YAML);
+  });
+  afterAll(() => rm(dir, { recursive: true, force: true }));
+
+  test("a single page: the tag in the file is a finding naming the file", async () => {
+    const { findings } = await wikiCheck(path.join(root, "concepts/b.mdx"));
+    expect(findings.filter((f) => f.check.startsWith("component-")).map((f) => f.message)).toEqual(['In c.yaml: Pill tone="sucess" renders as default']);
+  });
+
+  test("a directory: the same findings as lintWiki, and nothing read from outside the root", async () => {
+    const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => PAGE_TEXT.has(f.check));
+    expect(lint.filter((f) => f.check.startsWith("component-")).map((f) => f.relPath)).toEqual(["concepts/b.mdx"]);
+    expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
+  });
+
+  test("with a guessed root, a data file above the page's folder is named on stderr as not read", async () => {
+    const noconf = path.join(dir, "noconf");
+    await Bun.write(path.join(noconf, "pages/b.mdx"), BOARD.replace("c.yaml", "../data/c.yaml"));
+    await Bun.write(path.join(noconf, "pages/in.mdx"), BOARD);
+    await Bun.write(path.join(noconf, "pages/c.yaml"), YAML);
+    await Bun.write(path.join(noconf, "data/c.yaml"), YAML);
+    const page = path.join(noconf, "pages/b.mdx");
+    const single = await runWikiCheck([page]);
+    expect(single.out).toEqual([]);
+    expect(single.err).toEqual([noRootNote(path.dirname(page)), unreadFilesNote(["b.mdx: ../data/c.yaml (unavailable)"])]);
+    // The directory run guesses the same root and says the same of the same ref.
+    const tree = await runWikiCheck([path.join(noconf, "pages")]);
+    expect(tree.out.map((l) => (JSON.parse(l) as { relPath: string }).relPath)).toEqual(["in.mdx"]);
+    expect(tree.err).toEqual([noRootNote(path.join(noconf, "pages")), unreadFilesNote(["b.mdx: ../data/c.yaml (unavailable)"])]);
+    // A file the guessed root holds is read, and nothing is said about it.
+    expect((await runWikiCheck([path.join(noconf, "pages/in.mdx")])).err).toEqual([noRootNote(path.join(noconf, "pages"))]);
+    // The same tree checked from its real root reads the file.
+    await Bun.write(path.join(noconf, ".wiki-reader.json"), "{}");
+    const rooted = await runWikiCheck([page]);
+    expect(rooted.err).toEqual([]);
+    expect(rooted.out.map((l) => (JSON.parse(l) as { message: string }).message)).toEqual(['In ../data/c.yaml: Pill tone="sucess" renders as default']);
+  });
+});
+
+describe("wiki-check names only CaseBoard files above the guessed root (fix round 2)", () => {
+  test("a failing Query ref, a typo'd CaseBoard ref and one refused before the root is asked are not named", async () => {
+    const dir = await testTempDir(path.join(tmpdir(), "wiki-check-unread-"));
+    try {
+      const page = path.join(dir, "pages/b.mdx");
+      const body = ["---", "title: B", "---", '<Query sql="q.yml" />', "", '<Query csv="../x.csv" />', "", '<CaseBoard src="missing.yaml" />', "", '<CaseBoard src="../.d/c.yaml" />', ""];
+      await Bun.write(page, body.join("\n"));
+      expect((await runWikiCheck([page])).err).toEqual([noRootNote(path.dirname(page))]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

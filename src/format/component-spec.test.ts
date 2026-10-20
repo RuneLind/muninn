@@ -29,7 +29,8 @@ const FROZEN_NAMES = [
   "Callout", "Verdict", "Pill", "Figure", "FileRef", "ComparisonTable", "Meter", "Diff",
   "FileTree", "Checklist", "AnnotatedCode", "CodeTabs", "Tab", "Fact", "FactCheck", "Embed",
   "Fold", "Historic", "NextMoves", "Lane", "Query", "CaseBoard", "DeltaTable", "Tldr",
-  "Timeline", "DecisionLog", "RunChecklist", "Question", "More", "StatusRows",
+  "Timeline", "DecisionLog", "RunChecklist", "Question", "More", "StatusRows", "Chart",
+  "RuleTree",
 ];
 const FROZEN_SELF_CLOSING = ["FileRef", "Verdict", "Pill", "Fact", "Embed", "Query", "CaseBoard", "DeltaTable"];
 const FROZEN_ATTRS: Record<string, string[]> = {
@@ -63,6 +64,8 @@ const FROZEN_ATTRS: Record<string, string[]> = {
   Question: ["id", "choices", "to"],
   More: [],
   StatusRows: ["view", "tones"],
+  Chart: ["kind", "caption", "value", "target", "gap", "mark", "x", "ref", "normalize", "bar", "pass", "hold"],
+  RuleTree: ["title", "outcomes"],
 };
 const FROZEN_INLINE = ["Verdict", "Pill", "Fact"];
 const FROZEN_LANE_KINDS = ["you", "waiting", "draft", "blocked"];
@@ -136,12 +139,16 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
   test("enum attributes accept every listed value and fall back to the default", () => {
     for (const name of COMPONENT_NAMES) {
       for (const [attr, spec] of Object.entries(
-        COMPONENT_SPEC[name].attrs as Record<string, { parse: (r?: string) => { value: unknown; fellBack: boolean }; enum?: readonly string[]; default?: unknown }>,
+        COMPONENT_SPEC[name].attrs as Record<
+          string,
+          { parse: (r?: string) => { value: unknown; fellBack: boolean }; enum?: readonly string[]; default?: unknown; required?: true }
+        >,
       )) {
         if (!spec.enum) continue;
         for (const v of spec.enum) expect({ attr, v, ...spec.parse(v) }).toEqual({ attr, v, value: v, fellBack: false });
-        expect(spec.parse("zzz")).toEqual({ value: spec.default, fellBack: true });
-        expect(spec.parse(undefined)).toEqual({ value: spec.default, fellBack: false });
+        // A required enum has no default: an unknown value reads as none (null).
+        expect(spec.parse("zzz")).toEqual({ value: spec.required ? null : spec.default, fellBack: true });
+        expect(spec.parse(undefined)).toEqual({ value: spec.required ? null : spec.default, fellBack: false });
       }
     }
   });

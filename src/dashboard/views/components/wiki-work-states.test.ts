@@ -107,7 +107,7 @@ function build(fx: Fixture): WikiListing {
     sinceMs: SINCE,
     asOfMs: NOW,
     pages: [input, { relPath: "other/busy.md", backlinks: 0 }],
-    identity: { roots: ["/w/kode"], name: "kode" },
+    identity: { roots: ["/w/kode"], names: ["kode"] },
     otherRoots: [],
   });
   const work = r.pages.get(fx.rel);

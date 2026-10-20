@@ -554,6 +554,69 @@ describe("lintWiki runs the check on .mdx pages that are not culled", () => {
   });
 });
 
+describe("a CaseBoard data file's note and kort are judged (architecture review 2026-10 finding 76)", () => {
+  // The reader runs a case's `note` and `kort` through `renderInline`, so a tag
+  // there is a component on the page. The check reads the file the way the
+  // reader does: through `loadPageFiles`.
+  const BOARD = page("Cases:", "", '<CaseBoard src="c.yaml" />');
+  const YAML = ["- id: A-1", "  status: ok", '  note: Fixed <Pill tone="sucess">x</Pill> today', "- id: A-2", "  status: wait", '  kort: Waits <Pill hue="red">y</Pill>', ""].join("\n");
+  // In the order the board renders them: the `wait` group before the `ok` one.
+  const DATA_FINDINGS = [
+    { check: "component-attr", relPath: "plans/x.mdx", message: 'In c.yaml: Pill hue="red" is not a Pill attribute; the renderer drops it' },
+    { check: "component-value", relPath: "plans/x.mdx", message: 'In c.yaml: Pill tone="sucess" renders as default' },
+  ];
+  const shape = (fs: { check: string; relPath: string; message: string; line?: number }[]) =>
+    fs.map(({ check, relPath, message, line }) => ({ check, relPath, message, ...(line === undefined ? {} : { line }) }));
+
+  test("checkComponents judges the tags in the file the page reads, with the file named and no line", () => {
+    const files = new Map([["c.yaml", { ok: true as const, text: YAML }]]);
+    expect(shape(checkComponents("plans/x.mdx", BOARD, undefined, files))).toEqual(DATA_FINDINGS);
+    // Without the file the board renders nothing from it.
+    expect(checkComponents("plans/x.mdx", BOARD)).toEqual([]);
+  });
+
+  test("lintWiki reads the file beside the page", async () => {
+    const root = await testTempDir(path.join(tmpdir(), "wiki-lint-components-files-"));
+    try {
+      await Bun.write(path.join(root, "plans/x.mdx"), BOARD);
+      await Bun.write(path.join(root, "plans/c.yaml"), YAML);
+      const report = await lintWiki(await buildWikiIndex(root));
+      expect(shape(report.findings.filter((f) => f.check.startsWith("component-")))).toEqual(DATA_FINDINGS);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a tag the page itself holds is judged once, on its line, never again as the file's", () => {
+    const content = page('<Pill tone="sucess">p</Pill>', "", '<CaseBoard src="c.yaml" />');
+    const yaml = ["- id: A-1", "  status: wait", '  kort: Waits <Pill hue="red">y</Pill>', ""].join("\n");
+    const files = new Map([["c.yaml", { ok: true as const, text: yaml }]]);
+    expect(shape(checkComponents("plans/x.mdx", content, undefined, files))).toEqual([
+      { check: "component-value", relPath: "plans/x.mdx", message: 'Pill tone="sucess" renders as default', line: 5 },
+      DATA_FINDINGS[0]!,
+    ]);
+  });
+
+  test("one file read by several boards, under several spellings, is judged once and named by its first spelling", () => {
+    const content = page('<CaseBoard src="c.yaml" />', "", '<CaseBoard src="./c.yaml" />', "", '<CaseBoard src="c.yaml" />', "", '<CaseBoard src="../plans/c.yaml" />');
+    const read = { ok: true as const, text: YAML };
+    const files = new Map([["c.yaml", read], ["./c.yaml", read], ["../plans/c.yaml", read]]);
+    expect(shape(checkComponents("plans/x.mdx", content, undefined, files))).toEqual(DATA_FINDINGS);
+  });
+
+  test("lintWiki: two boards on one file give each finding once", async () => {
+    const root = await testTempDir(path.join(tmpdir(), "wiki-lint-components-files-dup-"));
+    try {
+      await Bun.write(path.join(root, "plans/x.mdx"), page('<CaseBoard src="c.yaml" />', "", '<CaseBoard src="./c.yaml" />', "", '<CaseBoard src="c.yaml" />'));
+      await Bun.write(path.join(root, "plans/c.yaml"), YAML);
+      const report = await lintWiki(await buildWikiIndex(root));
+      expect(shape(report.findings.filter((f) => f.check.startsWith("component-")))).toEqual(DATA_FINDINGS);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 /** A render seam that counts its calls and renders like the reader. */
 const counting = () => {
   const seam = Object.assign((content: string) => (seam.calls++, html(content)), { calls: 0 });
@@ -827,18 +890,24 @@ describe("an enum value that folds to the default renders as written and is no f
     "Fact.v": (v) => page(`A <Fact n="1" v="${v}">c</Fact> b`),
     "Lane.kind": (v) => page("<NextMoves>", "", `<Lane kind="${v}">`, "", "- s", "", "</Lane>", "", "</NextMoves>"),
     "StatusRows.view": (v) => page(`<StatusRows view="${v}">`, "", "- **A:** 1 · b", "", "</StatusRows>"),
+    "Chart.normalize": (v) =>
+      page(`<Chart kind="steps" x="Step" ref="A" normalize="${v}">`, "", "| Step | S |", "|---|---|", "| A | 10 |", "| B | 20 |", "", "</Chart>"),
   };
   const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
   // The reader's page render: `StatusRows view` draws only there.
   const readerHtml = (content: string) => renderWikiHtml(content, () => undefined, { views: true });
-  const enumAttrs = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
-    Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number }>)
+  const allEnums = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
+    Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number; required?: true }>)
       .filter(([, a]) => a.enum)
-      .map(([attr, a]) => ({ key: `${name}.${attr}`, enum: a.enum!, def: String(a.default) })),
+      .map(([attr, a]) => ({ key: `${name}.${attr}`, enum: a.enum!, def: String(a.default), required: a.required === true })),
   );
+  // A required enum has no default to fold to: a missing or unknown value is
+  // its own fallback (Chart kind renders the table), pinned in its own tests.
+  const enumAttrs = allEnums.filter((a) => !a.required);
 
-  test("every enum attribute has a page here", () => {
+  test("every enum attribute has a page here, and only required ones are exempt", () => {
     expect(enumAttrs.map((a) => a.key).sort()).toEqual(Object.keys(pages).sort());
+    expect(allEnums.filter((a) => a.required).map((a) => a.key)).toEqual(["Chart.kind"]);
   });
 
   for (const { key, enum: values, def } of enumAttrs) {
