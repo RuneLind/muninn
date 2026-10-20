@@ -211,6 +211,13 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
     const readonly = readonlyRefusal(c, log);
     if (readonly) return readonly;
 
+    /** Set once a `batch: "last"` request has resolved its wiki root: the
+     *  `finally` below refreshes that root's index unless the write already
+     *  did. The batch's one refresh is owed on EVERY ending of its last call —
+     *  a noop, a 409, a 404 — or the deferred writes before it stay out of the
+     *  index for up to the cache TTL (fix round 1 of arch review 2026-10, 75). */
+    let lastBatchRoot: string | null = null;
+    let indexRefreshed = false;
     try {
       const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
       if (body === null || typeof body !== "object") {
@@ -234,6 +241,14 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       if (!wantedSeries.ok) return c.json({ error: wantedSeries.error }, 400);
       const wantedLabel = readScalar(body.seriesLabel, "seriesLabel");
       if (!wantedLabel.ok) return c.json({ error: wantedLabel.error }, 400);
+      // A multi-page save (Save as series) marks each write `defer` and its
+      // last `last`: the batch then refreshes the index once, after the last
+      // write, instead of before and after every page (arch review 2026-10,
+      // finding 75). The client read a fresh listing just before the batch.
+      if (body.batch !== undefined && body.batch !== "defer" && body.batch !== "last") {
+        return c.json({ error: 'batch must be "defer" or "last"' }, 400);
+      }
+      const batch = body.batch as "defer" | "last" | undefined;
 
       // The same resolution every other `/api/wiki/*` route makes, `WIKI_DIR`
       // env-override shape included (`resolveWikiRequest` returns no entry there).
@@ -246,13 +261,16 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
       const root = entry?.root ?? (envOverride ? resolveWikiRoot(undefined) : null);
       if (!root) return c.json({ error: "no wiki configured for that name" }, 404);
+      if (batch === "last") lastBatchRoot = root;
 
       // `refresh: true`, the gardener approve-guard's rule: the normalization
       // below and the two-headed check are DECISIONS made off this index, and
       // the cached one is up to five minutes old — long enough for the previous
       // write of this very editor's own head move to be invisible to the next.
       // One rebuild per human click, and the write refreshes it again anyway.
-      const index = await getWikiIndex({ root, refresh: true });
+      // A batched write reads the cached index: the batch refreshes once, at
+      // its last write.
+      const index = await getWikiIndex({ root, refresh: batch === undefined });
       if (!index) return c.json({ error: "wiki directory not found" }, 503);
       const meta = index.resolveRelPath(relPath);
       if (!meta) return c.json({ error: `no wiki page for relPath "${relPath}"` }, 404);
@@ -428,6 +446,13 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
           return current;
         },
         ...defaultPageWriteIo(root),
+        refreshIndex:
+          batch === "defer"
+            ? async () => {}
+            : async () => {
+                indexRefreshed = true;
+                await getWikiIndex({ root, refresh: true });
+              },
         readFile: inSectionRead,
         // Unreachable in no-log mode (`writeWikiPage` skips the fan-out), and
         // required by the type — stated rather than relied on.
@@ -522,6 +547,14 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
         error: err instanceof Error ? err.message : String(err),
       });
       return c.json({ error: "internal error" }, 500);
+    } finally {
+      if (lastBatchRoot && !indexRefreshed) {
+        await getWikiIndex({ root: lastBatchRoot, refresh: true }).catch((err) => {
+          log.warn("wiki series: batch-end index refresh failed: {error}", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
     }
   });
 }
