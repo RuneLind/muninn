@@ -1408,6 +1408,7 @@ export function glossaryCss(scope: string): string {
       border-radius: 6px; border: 1px solid var(--text-muted); background: var(--bg-surface); color: var(--text-primary);
       font-size: 0.85rem; font-weight: 400; font-style: normal; line-height: 1.4; white-space: normal; overflow-wrap: anywhere;
       text-align: start; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      -webkit-user-select: none; user-select: none; /* an open definition stays out of a selection and a copy */
     }
     /* The gap is part of the tip, so the pointer crosses it without leaving the mark (WCAG 1.4.13). */
     ${s} .gl-tip::before { content: ""; position: absolute; inset-inline: -1px; inset-block-end: 100%; block-size: calc(0.25rem + 2px); }
@@ -1476,7 +1477,8 @@ export function timelineLanesCss(scope: string): string {
     ${s} .tll-lane { display: grid; grid-template-columns: var(--tll-label) minmax(0, 1fr); align-items: center; column-gap: 0.75rem; min-block-size: 1.6rem; }
     ${s} .tll-label { font-size: 0.8rem; color: var(--text-secondary); overflow-wrap: anywhere; }
     ${s} .tll-track { position: relative; list-style: none; margin: 0; margin-inline: 0.5rem; padding: 0; block-size: 1.4rem; border-block-end: 1px dashed var(--border-secondary); }
-    ${s} .tll-mark { position: absolute; inset-block-start: 50%; display: inline-flex; align-items: center; gap: 0.15rem; transform: translate(-50%, -50%); margin: 0; }
+    /* A zero-width box at the day, its content centred and overflowing both ways: centred in ltr and rtl alike. */
+    ${s} .tll-mark { position: absolute; inset-block-start: 50%; inline-size: 0; display: flex; justify-content: center; align-items: center; gap: 0.15rem; transform: translateY(-50%); margin: 0; }
     ${s} .tll-dot { display: inline-block; inline-size: 0.7rem; block-size: 0.7rem; border: 1px solid var(--bg-panel); }
     ${s} .tll-decisions .tll-dot { border-radius: 50%; background: var(--accent-light); }
     ${s} .tll-queries .tll-dot { border-radius: 1px; background: var(--tone-info); }

@@ -427,6 +427,104 @@ test.describe("Wiki reader: polish", () => {
     await expect(tip).toBeVisible();
   });
 
+  for (const width of [1280, 700, 390] as const) {
+    test(`${width} px, dir=rtl: every definition, a left-edge one too, stays inside the box that clips it`, async ({ page }) => {
+      await open(page, width, width === 390);
+      // A copy of the first term at the end of an end-aligned line: under rtl, the column's left edge.
+      await page.evaluate(() => {
+        document.documentElement.dir = "rtl";
+        const mark = document.querySelector(".wiki-article .gl-mark")!;
+        const line = document.createElement("div");
+        line.style.textAlign = "end";
+        line.append(mark.cloneNode(true));
+        mark.after(line);
+      });
+      const marks = await page.locator(".wiki-article .gl-mark").all();
+      expect(marks.length).toBe(5);
+      for (const [i, mark] of marks.entries()) {
+        await mark.scrollIntoViewIfNeeded();
+        await mark.locator(".gl-term").focus();
+        const tip = mark.locator(".gl-tip");
+        await expect(tip).toBeVisible();
+        const { t, c } = await tip.evaluate(clipBoxOf);
+        expect(t.left, `term ${i} left`).toBeGreaterThanOrEqual(c.left - 0.5);
+        expect(t.right, `term ${i} right`).toBeLessThanOrEqual(c.right + 0.5);
+        await mark.locator(".gl-term").blur();
+      }
+    });
+  }
+
+  test("dir=rtl: each lane's mark is centred on its day, mirrored from ltr", async ({ page }) => {
+    await open(page, 1280);
+    const offsets = (dir: string) =>
+      lanes(page).evaluate((el, d) => {
+        document.documentElement.dir = d;
+        return Array.from(el.querySelectorAll(".tll-track")).flatMap((track) => {
+          const tr = track.getBoundingClientRect();
+          return Array.from(track.querySelectorAll<HTMLElement>(".tll-mark")).map((m) => {
+            const r = m.getBoundingClientRect();
+            const centre = r.left + r.width / 2;
+            // Distance from the track's inline start, against the day's percent.
+            const fromStart = d === "rtl" ? tr.right - centre : centre - tr.left;
+            return { got: fromStart, want: (parseFloat(m.style.insetInlineStart) / 100) * tr.width };
+          });
+        });
+      }, dir);
+    for (const dir of ["ltr", "rtl"]) {
+      const all = await offsets(dir);
+      expect(all.length).toBeGreaterThan(0);
+      for (const [i, o] of all.entries()) expect(Math.abs(o.got - o.want), `${dir} mark ${i}`).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test("dir=rtl: ArrowLeft moves to the next square and ArrowRight to the previous; Up, Down, Home and End do not flip", async ({ page }) => {
+    await open(page, 1280);
+    await page.evaluate(() => (document.documentElement.dir = "rtl"));
+    const all = dots(page).locator("button.cb-dot");
+    await all.first().focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(all.nth(1)).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await expect(all.nth(2)).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(all.nth(1)).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(all.nth(2)).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(all.nth(1)).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(all.last()).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(all.first()).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(all.first()).toBeFocused();
+  });
+
+  test("an open definition enters neither the selection's text nor a copy", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await open(page, 1280);
+    const mark = page.locator(".wiki-article .gl-mark").first();
+    await mark.locator(".gl-term").focus();
+    await expect(mark.locator(".gl-tip")).toBeVisible();
+    const selected = await mark.evaluate((m) => {
+      const range = document.createRange();
+      range.setStartBefore(m.previousSibling!);
+      range.setEndAfter(m.nextSibling!);
+      const sel = getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return sel.toString();
+    });
+    await expect(mark.locator(".gl-tip")).toBeVisible();
+    expect(selected).toContain("A Hold stops a");
+    expect(selected).not.toContain("loan kept back");
+    await page.evaluate(() => navigator.clipboard.writeText(""));
+    await page.keyboard.press("ControlOrMeta+c");
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toContain("A Hold stops a");
+    expect(copied).not.toContain("loan kept back");
+  });
+
   test("forced colours: a pressed square is Highlight, the lanes' dots are CanvasText", async ({ page }) => {
     await page.emulateMedia({ forcedColors: "active" });
     await open(page, 1280);

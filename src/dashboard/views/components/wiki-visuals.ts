@@ -198,7 +198,9 @@ function moveCaseDot(e: KeyboardEvent): void {
   // A square a lens hides (Overview's none group) is skipped.
   const all = Array.from(dots.querySelectorAll<HTMLElement>("button.cb-dot")).filter((b) => b === dot || b.getClientRects().length > 0);
   const i = all.indexOf(dot);
-  const forward = e.key === "ArrowRight" || e.key === "ArrowDown";
+  // Right means the previous square under rtl; Up, Down, Home and End do not flip.
+  const ahead = getComputedStyle(dot).direction === "rtl" ? "ArrowLeft" : "ArrowRight";
+  const forward = e.key === ahead || e.key === "ArrowDown";
   const next = e.key === "Home" ? 0 : e.key === "End" ? all.length - 1 : forward ? Math.min(i + 1, all.length - 1) : Math.max(i - 1, 0);
   e.preventDefault();
   dots.querySelectorAll<HTMLElement>("button.cb-dot").forEach((b) => b.setAttribute("tabindex", b === all[next] ? "0" : "-1"));
