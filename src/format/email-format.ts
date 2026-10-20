@@ -233,6 +233,7 @@ const emailRenderer: BlockRenderer = {
         return `<div style="${S.dim}margin:0 0 12px;">Embedded page: ${escapeHtml(parseEmbedAttrs(attrs)?.src ?? "invalid embed")}</div>`;
       case "FileRef":
         return `<code style="${S.code}">${children.trim() || escapeHtml(attrs.path ?? "")}</code>`;
+      case "Chart":
       case "ComparisonTable":
         return children;
       case "Meter": {

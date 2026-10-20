@@ -45,6 +45,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "case-board-labels": { one: "unusable CaseBoard label", many: "unusable CaseBoard labels" },
   "ledger-row-state": { one: "PR ledger row with no readable state", many: "PR ledger rows with no readable state" },
   "chain-close-conflict": { one: "contradicted «Lukker» close", many: "contradicted «Lukker» closes" },
+  "chart-table": { one: "unreadable chart table", many: "unreadable chart tables" },
   "same-work-no-link": { one: "unlinked pair", many: "unlinked pairs" },
   "series-unnamed": { one: "unnamed series", many: "unnamed series" },
   "series-inconsistent": { one: "inconsistent series", many: "inconsistent series" },

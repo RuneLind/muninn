@@ -94,6 +94,7 @@ const telegramRenderer: BlockRenderer = {
         return `Embedded page: ${escapeHtml(parseEmbedAttrs(attrs)?.src ?? "invalid embed")}`;
       case "FileRef":
         return children.trim() || escapeHtml(attrs.path ?? "");
+      case "Chart":
       case "ComparisonTable":
         return children;
       case "Meter": {

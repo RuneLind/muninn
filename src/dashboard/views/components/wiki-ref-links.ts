@@ -26,6 +26,7 @@
  *   the article, so the next page render takes them away.
  */
 
+import { CHART_CHROME_CLASSES } from "../../../format/chart-view.ts";
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
 import {
   CB_LINE_CLASS,
@@ -328,6 +329,8 @@ export const PEEK_STRIP_SELECTOR = [
   DL_WHEN_CLASS,
   CB_LINE_CLASS,
   DC_VIEW_CLASS,
+  // A `<Chart>`'s chrome (MDX visual components PR 3): a peek shows its table only.
+  ...CHART_CHROME_CLASSES,
 ]
   .map((c) => `.${c}`)
   .join(", ");

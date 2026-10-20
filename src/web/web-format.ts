@@ -29,7 +29,10 @@ import { withoutComponentTags } from "../format/component-observer.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
-import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
+import { chainViewHtml, DC_GO_RE, pageDecisionData, prStateWord, prStripHtml, viewSlot } from "../format/decision-views.ts";
+import { pageLedgers, prStateMap, type PrState } from "../format/pr-ledger.ts";
+import { chartTableIndex, readChart, type ChartTable } from "../format/chart-block.ts";
+import { chartViewHtml } from "../format/chart-view.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
@@ -71,6 +74,7 @@ import { laneCountText, laneSumPhrase, laneUnit, laneWords, type LaneCount } fro
 import { leadSentence } from "../format/lead-sentence.ts";
 import {
   isMoreBlock,
+  visibleText,
   markStatePhrases,
   MORE_LABELS,
   splitFirstSentence,
@@ -82,7 +86,7 @@ import {
   statusTileTone,
   type StatusTones,
 } from "../format/report-top.ts";
-import { readStatusRowsView } from "../format/component-spec.ts";
+import { readChartKind, readStatusRowsView } from "../format/component-spec.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
 import {
@@ -281,6 +285,7 @@ export function formatWebHtml(
   const prevLinkTexts = currentLinkTexts;
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
+  const prevPrStates = currentPrStates;
   currentViews = opts?.views === true;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
@@ -303,15 +308,23 @@ export function formatWebHtml(
     // The views' whole-page pre-pass runs only on the reader's page render;
     // without it the walk is the one `renderBlocks` call, byte for byte.
     const slot = opts?.views ? viewSlot(blocks) : -1;
+    // The analysis reads link labels, not sentinels, so an edge written
+    // inside a label (`[[plans/x|PR 7]]`) counts as the route counts it.
+    let analysedBlocks: Block[] | undefined;
+    const analysed = (): Block[] => {
+      if (analysedBlocks) return analysedBlocks;
+      const linkTexts = opts?.wikiLinkTexts;
+      const t = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
+      return (analysedBlocks = t === text ? blocks : parseBlocks(t));
+    };
+    // A gate `<Chart>` shows each PR's ledger state beside its verdict.
+    const charted = opts?.views === true && text.includes("<Chart");
+    currentPrStates = charted ? prStateMap(pageLedgers(analysed(), opts?.proposedPlan === true)) : null;
     let rendered: string;
     if (slot < 0) {
       rendered = renderBlocks(blocks, webRenderer);
     } else {
-      // The analysis reads link labels, not sentinels, so an edge written
-      // inside a label (`[[plans/x|PR 7]]`) counts as the route counts it.
-      const linkTexts = opts?.wikiLinkTexts;
-      const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
-      const data = pageDecisionData(analysed === text ? blocks : parseBlocks(analysed), { proposed: opts?.proposedPlan === true });
+      const data = pageDecisionData(analysed(), { proposed: opts?.proposedPlan === true });
       const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis);
       rendered = view
         ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
@@ -323,7 +336,7 @@ export function formatWebHtml(
     // DecisionLog item yields to both.
     const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
-    const linked = slot >= 0 ? retargetViewLinks(questionLinked) : questionLinked;
+    const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
     // exactly: the item's state (D8) and the id's noun (D12). The parse is the
     // one the answer cards use, run on the reader path when the page has a
@@ -339,6 +352,7 @@ export function formatWebHtml(
     currentLinkTexts = prevLinkTexts;
     currentItemDates = prevItemDates;
     currentViews = prevViews;
+    currentPrStates = prevPrStates;
   }
 }
 
@@ -395,6 +409,10 @@ let currentReader = false;
 
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
 let currentViews = false;
+
+/** With `views`, on a page holding a `<Chart>`: PR number → ledger state, for
+ *  the gate kind. Null without a ledger. */
+let currentPrStates: ReadonlyMap<number, PrState> | null = null;
 
 /** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
 let currentLanguage: QuestionLanguage = "en";
@@ -780,6 +798,29 @@ function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): st
     table = blockNote("dt-unavailable", "DeltaTable without src or a table");
   }
   return `<section class="delta-table${bClass}">${intro}${warn}${table}</section>`;
+}
+
+/** A `<Chart>` on the reader's page render: the body's first pipe table read
+ *  for its kind and drawn (`chart-view.ts`), the table kept beside it. Cells
+ *  are read as their visible text — a wikilink sentinel as its link text —
+ *  which is what the lint reads (`src/wiki/lint-chart.ts`). */
+function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): string {
+  const k = chartTableIndex(rawChildren);
+  const rest = k === -1 ? rawChildren : [...rawChildren.slice(0, k), ...rawChildren.slice(k + 1)];
+  const t = k === -1 ? undefined : (rawChildren[k] as Extract<Block, { type: "table" }>);
+  const cell = (c: string) => visibleText(peekText(c)).trim();
+  const table: ChartTable | null = t ? { headers: t.headers.map(cell), rows: t.rows.map((r) => r.map(cell)) } : null;
+  const kind = readChartKind(attrs.kind);
+  return chartViewHtml({
+    read: readChart(kind.value, attrs, table),
+    caption: attrs.caption ?? "",
+    kindKnown: kind.value !== null,
+    tableHtml: t ? webRenderer.table(t.headers, t.rows) : "",
+    introHtml: rest.some((b) => !isBlankTextBlock(b)) ? renderBlocks(rest, webRenderer) : "",
+    language: currentLanguage,
+    prStates: currentPrStates,
+    stateWord: prStateWord,
+  });
 }
 
 /** A `csv=`/`src=` file read for a table: the parsed rows, at most
@@ -2194,6 +2235,9 @@ const webRenderer: BlockRenderer = {
         }
         return questionCardHtml(attrs, children);
       }
+      case "Chart":
+        // Off the reader's page render every caller prints the table as written.
+        return currentViews ? chartBlockHtml(attrs, rawChildren) : children;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;

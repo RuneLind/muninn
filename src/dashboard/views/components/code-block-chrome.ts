@@ -138,6 +138,8 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   // The report-page top: prose and rows, no chrome.
   More: null,
   StatusRows: null,
+  // A chart's body is its pipe table.
+  Chart: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

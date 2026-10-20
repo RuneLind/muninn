@@ -159,6 +159,25 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
       tones: { doc: "Tile colour per row label", printType: '"<row>=good|warn|info|muted;…"' },
     },
   },
+  Chart: {
+    doc: "A chart over the pipe table it wraps; the wiki reader draws it, every other surface prints the table.",
+    teach: WIKI,
+    attrs: {
+      kind: { doc: "Which chart the table is read as", onFallback: "is not a chart kind; it renders as its table" },
+      caption: { doc: "A line over the chart" },
+      value: { doc: "gap: the column of values; funnel: the count column (default: the second)", printType: '"<column>"' },
+      target: { doc: "gap: the column of targets", printType: '"<column>"' },
+      gap: { doc: "gap: the column of written gaps", printType: '"<column>"' },
+      mark: { doc: "gap: a column drawn as a tick", printType: '"<column>"' },
+      x: { doc: "steps: the column of steps", printType: '"<column>"' },
+      ref: { doc: "steps: the row the series are measured against", printType: '"<row>"' },
+      normalize: { doc: "steps: `ref` plots each series as % of the ref row" },
+      bar: { doc: "gate: the column of bars", printType: '"<column>"' },
+      pass: { doc: "gate: the column that must reach the bar", printType: '"<column>"' },
+      hold: { doc: "gate: the second column that must reach the bar", printType: '"<column>"' },
+    },
+    onMissingRequired: "it renders as its table",
+  },
 };
 
 /**

@@ -60,6 +60,20 @@ const STATUS_TILES = [
   "</StatusRows>",
   "",
 ].join("\n");
+const CHART = [
+  "---",
+  "title: CH",
+  "---",
+  '<Chart kind="funnel">',
+  "",
+  "| Stage | Count | Of |",
+  "|---|---|---|",
+  "| All | 10 | |",
+  "| Some | 12 | 10 |",
+  "",
+  "</Chart>",
+  "",
+].join("\n");
 const DECISION_CHAIN = [
   "---",
   "title: DC",
@@ -147,6 +161,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/rs.mdx"), CULLED_TEXT_SHAPES);
   await Bun.write(path.join(tmp, "page-checks/plans/dc.mdx"), DECISION_CHAIN);
   await Bun.write(path.join(tmp, "page-checks/plans/st.mdx"), STATUS_TILES);
+  await Bun.write(path.join(tmp, "page-checks/plans/ch.mdx"), CHART);
   await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
   await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
   await Bun.write(path.join(tmp, "page-checks/plans/d.mdx"), SHIPPED);
@@ -303,6 +318,7 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "tldr-no-more",
         "ledger-row-state",
         "chain-close-conflict",
+        "chart-table",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));

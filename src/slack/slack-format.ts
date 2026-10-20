@@ -99,6 +99,7 @@ const slackRenderer: BlockRenderer = {
         return `Embedded page: ${parseEmbedAttrs(attrs)?.src ?? "invalid embed"}`;
       case "FileRef":
         return children.trim() || renderInline(attrs.path ?? "");
+      case "Chart":
       case "ComparisonTable":
         return children;
       case "Meter": {

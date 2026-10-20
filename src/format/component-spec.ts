@@ -270,6 +270,27 @@ export function readStatusRowsView(raw: string | undefined): AttrRead<StatusRows
   return readEnum(STATUS_ROWS_VIEWS, "rows", raw);
 }
 
+// ── Chart ───────────────────────────────────────────────────────────────────
+
+export const CHART_KINDS = ["gap", "steps", "gate", "funnel"] as const;
+export type ChartKind = (typeof CHART_KINDS)[number];
+
+/** A `Chart kind=`: one of the four, case-insensitive. Null when missing (a
+ *  required attribute) or unknown; either way the block renders as its table. */
+export function readChartKind(input: string | undefined): AttrRead<ChartKind | null> {
+  const raw = present(input);
+  if (raw === undefined) return { value: null, fellBack: false };
+  const k = raw.trim().toLowerCase();
+  return (CHART_KINDS as readonly string[]).includes(k) ? { value: k as ChartKind, fellBack: false } : { value: null, fellBack: true };
+}
+
+const CHART_NORMALIZE = ["none", "ref"] as const;
+
+/** A `Chart normalize=`: `ref` plots each `steps` series as % of its `ref` row. */
+export function readChartNormalize(raw: string | undefined): AttrRead<(typeof CHART_NORMALIZE)[number]> {
+  return readEnum(CHART_NORMALIZE, "none", raw);
+}
+
 // ── The table ───────────────────────────────────────────────────────────────
 
 const text: AttrSpec = { parse: parseString };
@@ -386,6 +407,24 @@ export const COMPONENT_SPEC = {
     attrs: {
       view: { parse: readStatusRowsView, enum: STATUS_ROWS_VIEWS, default: "rows" },
       tones: text,
+    },
+  },
+  // A chart over the pipe table it wraps (the reader draws it under `views`;
+  // every other surface prints the table). `value`…`hold` name columns, `ref` a row.
+  Chart: {
+    attrs: {
+      kind: { parse: readChartKind, enum: CHART_KINDS, required: true },
+      caption: text,
+      value: text,
+      target: text,
+      gap: text,
+      mark: text,
+      x: text,
+      ref: text,
+      normalize: { parse: readChartNormalize, enum: CHART_NORMALIZE, default: "none" },
+      bar: text,
+      pass: text,
+      hold: text,
     },
   },
 } as const satisfies Record<string, ComponentSpec>;
