@@ -157,7 +157,7 @@ Two traps regardless of how the page is driven:
 - MCP tool tracking: tool calls extracted from stream events (stream-json for CLI, session events for SDK), per-tool timing, displayed as child spans in traces waterfall
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
 - Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`
-- Watcher email checking: Haiku spawned in muninn's agent home with the bot's `.mcp.json` + `.claude/settings.json` passed explicitly (`--mcp-config` / `--settings`) for Gmail MCP access — see the `MUNINN_AGENT_CWD` row
+- Watcher email checking: Haiku spawned in muninn's agent home on the `gmail-read` tool surface — the bot's Gmail server only, the three Gmail reads allowed, `dontAsk`, the known write tools disallowed; every other `spawnHaiku` is tool-less — see the `MUNINN_AGENT_CWD` row
 - Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)
 - All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript
 

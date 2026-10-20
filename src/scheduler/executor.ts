@@ -4,7 +4,7 @@ import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
 import { resolveAgentCwd } from "../ai/agent-cwd.ts";
 import { assertHaikuCliAvailable, type HaikuCliFallback } from "../ai/haiku-cli-unavailable.ts";
-import { buildInlineMcpConfig, buildInlineSettings, unreadableBotConfigs } from "../ai/mcp-config-utils.ts";
+import { buildInlineMcpConfig, gmailServerKeys, loadRawMcpServers, mergedBotSettings, unreadableBotConfigs } from "../ai/mcp-config-utils.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -90,6 +90,9 @@ export interface HaikuUsage {
   costUsd?: number;
 }
 
+/** What a Haiku spawn may call: nothing, or the email watcher's read-only Gmail. */
+export type HaikuToolSurface = "none" | "gmail-read";
+
 export const HAIKU_TIMEOUT_MS = 60_000;
 
 export const DEFAULT_MODEL = "claude-haiku-5-5";
@@ -127,9 +130,10 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
   source: string;
   entrypoint?: string;
   /**
-   * Bot folder this call needs TOOLS from. Its `.mcp.json` is passed as
-   * `--mcp-config` and its `.claude/settings*.json` as `--settings` — it is NOT
-   * the process cwd.
+   * Bot folder this call needs TOOLS from. Its `.mcp.json`'s Gmail server is
+   * passed as `--mcp-config`, and the Gmail reads its `.claude/settings*.json`
+   * allow (minus what they deny) as a filtered `--settings` — it is NOT the
+   * process cwd.
    *
    * Callers used to hand `bots/<name>/` in as the cwd, which bought THREE things
    * from the CLI implicitly: MCP server discovery, tool permissions, and the bot's
@@ -141,14 +145,19 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
    * things are now requested by name — MCP + permissions via this field, persona
    * via {@link system} — and the spawn runs in the agent home like every other
    * muninn-spawned agent. Same shape, same prompt, measured on the argv this
-   * function emits: 8 577 cache_creation, $0.0199.
+   * function emitted before the tool fence (all three servers, the bot's full
+   * settings): 8 577 cache_creation, $0.0199. Not re-measured on the fenced argv.
    *
-   * Set it ONLY for a call that actually uses MCP tools (today: the email
-   * watcher's Gmail). `--strict-mcp-config` is applied EITHER WAY, so what this
-   * field changes is which servers exist, never whether the developer's ambient
-   * `~/.claude.json` ones leak in.
+   * Read ONLY together with `toolSurface: "gmail-read"` (today: the email
+   * watcher). Without that opt-in the spawn is tool-less whatever this says.
    */
   botDir?: string;
+  /**
+   * The tools this spawn may use. Absent means `"none"`: `--tools ""` and no
+   * MCP server, so a prompt carrying third-party text has nothing to call.
+   * `"gmail-read"` is the email watcher's surface — see {@link buildHaikuArgs}.
+   */
+  toolSurface?: HaikuToolSurface;
   botName?: string;
   timeoutMs?: number;
   model?: string;
@@ -207,13 +216,19 @@ export function _resetSpawnWarningsForTests(): void {
  * pinned by a test rather than only by the shape of a live subprocess — the four
  * decisions here (persona delivery, MCP surface, tool permissions, MCP fencing)
  * are each invisible from the outside until a watcher quietly stops working or a
- * bill arrives. The permissions one already did exactly that, once, in this PR.
+ * bill arrives.
+ *
+ * It fails closed: without `toolSurface: "gmail-read"` the spawn gets `--tools ""`
+ * and no MCP server. The Gmail surface still needs `--settings`: without an allow
+ * entry an `mcp__*` call is denied (measured: `list_email_labels` returned "77"
+ * with the bot's settings and "Permission needed" without them).
  */
 export function buildHaikuArgs(opts: {
   prompt: string;
   model: string;
   system?: string;
   botDir?: string;
+  toolSurface?: HaikuToolSurface;
 }): string[] {
   // `stream-json` + `--verbose` (required together with `-p`) makes the CLI emit
   // NDJSON tool_use / tool_result events, so `StreamParser` can surface the
@@ -234,72 +249,114 @@ export function buildHaikuArgs(opts: {
   // The persona the bot-dir cwd used to supply implicitly via CLAUDE.md.
   if (opts.system) args.push("--system-prompt", opts.system);
 
-  // The bot's tool PERMISSIONS. Load-bearing and easy to miss: the bot-dir cwd
-  // was quietly supplying three things, not two, and this is the third. With the
-  // cwd moved, `bots/<name>/.claude/settings.json` stops being discovered, and
-  // MCP tool calls are then DENIED — measured two ways on the same argv:
-  // `mcp__gmail__list_email_labels` returns "77" WITH `--settings` and
-  // "Permission needed for mcp__gmail__list_email_labels" without it. The
-  // checker would have surfaced that as a routine empty inbox.
-  //
-  // (`src/ai/CLAUDE.md` long claimed this file was dead config. That was concluded
-  // from a probe of Bash + Write — both already allowed by the user-scope
-  // `~/.claude/settings.json`, so the probe could not tell the two scopes apart.
-  // For `mcp__*` tools, which no user-scope rule covers, it is decisive.)
-  const settings = opts.botDir ? buildInlineSettings(opts.botDir) : null;
-  if (settings) args.push("--settings", settings);
-
-  // The bot's MCP servers, re-expressed location-independently — the spawn no
-  // longer runs inside the bot folder, so a `.mcp.json` carrying relative paths
-  // would otherwise resolve them against the agent home.
-  const mcpConfig = opts.botDir ? buildInlineMcpConfig(opts.botDir) : null;
-
-  // A botDir that yields NEITHER is almost always a typo or a broken JSON edit
-  // rather than an intent — and every downstream symptom of it (no tools, no
-  // permissions) reads as a quiet, empty, successful run. Say so once per path.
-  if (opts.botDir && !mcpConfig) {
-    warnOnce(`mcp:${opts.botDir}`,
-      "No usable .mcp.json under {botDir} — this spawn asked for bot MCP tools and will run with NONE. " +
-        "A tool-using checker (the email watcher) degrades to an empty result that looks like a quiet run.",
-      { botDir: opts.botDir });
-  }
-  if (opts.botDir && !settings) {
-    warnOnce(`settings:${opts.botDir}`,
-      "No readable .claude/settings.json or settings.local.json under {botDir} — this spawn's MCP tool " +
-        "calls will be DENIED (the denial is reported to the model, not thrown, so the caller sees an " +
-        "empty result).",
-      { botDir: opts.botDir });
-  }
-  // Corruption, reported separately from absence. Absence can be intentional (a
-  // tool-less bot has no .mcp.json); a file that exists and does not parse never
-  // is. It also catches what the two checks above structurally cannot: a broken
-  // `settings.json` next to a healthy `settings.local.json` still yields a
-  // non-null merge, so `!settings` is false while every Gmail call gets denied.
-  if (opts.botDir) {
-    const broken = unreadableBotConfigs(opts.botDir);
-    if (broken.length > 0) {
-      warnOnce(`broken:${broken.join(",")}`,
-        "Unparseable bot config under {botDir}: {files} — it is being IGNORED, so this spawn silently " +
-          "loses the MCP servers or tool permissions that file was carrying.",
-        { botDir: opts.botDir, files: broken.join(", ") });
-    }
+  const gmail = opts.toolSurface === "gmail-read" && opts.botDir ? gmailReadSurface(opts.botDir) : null;
+  if (opts.toolSurface === "gmail-read" && !opts.botDir) {
+    warnOnce("gmail-read:no-botDir",
+      "toolSurface \"gmail-read\" without a botDir — this spawn runs with NO tools, and a Gmail check " +
+        "answers from nothing.",
+      {});
   }
 
-  // ALWAYS fence the spawn to the servers we passed (none, when we passed none).
-  // Without this the CLI also merges the developer's user-scope `~/.claude.json`
-  // servers: measured on the as-shipped jarvis argv, 9 servers / 112 `mcp__` tools
-  // instead of the bot's 3 — including a `claude.ai Gmail` the bot's allow-list
-  // does not cover, which the gate could reach for and be silently denied on, and
-  // a jetbrains server exposing `execute_terminal_command`. Fencing costs one
-  // token and saves 1 764 cache_creation on the email shape (10 347 → 8 583).
+  if (!gmail) {
+    // Fail closed: no built-in tool and no MCP server. `--strict-mcp-config` with
+    // no `--mcp-config` also keeps the developer's `~/.claude.json` servers out.
+    args.push("--tools", "", "--strict-mcp-config");
+    return args;
+  }
+
+  // The email surface. Gmail's server runs through an unpinned `npx -y`, so it can
+  // gain tools; `dontAsk` denies every tool the filtered settings do not allow,
+  // instead of handing it to the user-scope `defaultMode: auto` classifier. The
+  // user-scope allow entries (`Bash`, `Read(...)`, `WebSearch`,
+  // `WebFetch(domain:…)`, `mcp__serena__*`) still pre-approve under `dontAsk` —
+  // harmless only because `--tools ToolSearch` removes those built-ins and
+  // `--strict-mcp-config` keeps other servers off, so the flags ship together. `ToolSearch` stays because the
+  // Gmail tools are deferred and load through it.
+  args.push("--tools", "ToolSearch", "--permission-mode", "dontAsk", "--settings", gmail.settings);
+  // Second line: the write tools known today, removed from the surface outright.
+  args.push("--disallowedTools", gmail.disallowed.join(","));
   args.push("--strict-mcp-config");
-
   // `--mcp-config` is variadic: it stops at the next `-`-prefixed token, so a
   // following FLAG is safe, but a bare positional would be swallowed as a second
   // config. Keeping it last means nobody has to re-derive that.
-  if (mcpConfig) args.push("--mcp-config", mcpConfig);
-
+  args.push("--mcp-config", gmail.mcpConfig);
   return args;
+}
+
+/** The read-only Gmail tools the email watcher's spawn may call. */
+export const GMAIL_READ_TOOLS = ["search_emails", "read_email", "list_email_labels"] as const;
+
+/**
+ * Gmail tools that write, send or delete, as named by
+ * `@gongrzhe/server-gmail-autoauth-mcp` today. `--disallowedTools` removes them
+ * from the surface; a tool the server adds later is denied by `dontAsk` instead.
+ */
+export const GMAIL_WRITE_TOOLS = [
+  "send_email", "draft_email", "modify_email", "delete_email",
+  "batch_modify_emails", "batch_delete_emails",
+  "create_label", "update_label", "delete_label", "get_or_create_label",
+  "create_filter", "delete_filter", "create_filter_from_template",
+  "download_attachment",
+] as const;
+
+/**
+ * The bot's Gmail servers only (`.mcp.json` keys containing "gmail", the same
+ * rule the liveness predicate uses), and settings that allow only the read tools
+ * the bot itself allows and does not deny, plus `ToolSearch`, and keep the bot's
+ * deny rules for those servers. `null` when the bot has no Gmail
+ * server, so the caller falls back to the tool-less spawn.
+ */
+function gmailReadSurface(botDir: string): { mcpConfig: string; settings: string; disallowed: string[] } | null {
+  const keys = gmailServerKeys(loadRawMcpServers(botDir));
+  const mcpConfig = keys.length > 0 ? buildInlineMcpConfig(botDir, keys) : null;
+  const botSettings = mergedBotSettings(botDir);
+
+  if (!mcpConfig) {
+    warnOnce(`mcp:${botDir}`,
+      "No Gmail server in a usable .mcp.json under {botDir} — this spawn asked for Gmail and will run with NO " +
+        "tools. The email watcher fails such a bot before spawning (missingGmailServerMessage, src/watchers/email.ts).",
+      { botDir });
+  }
+  if (!botSettings) {
+    warnOnce(`settings:${botDir}`,
+      "No readable .claude/settings.json or settings.local.json under {botDir} — this spawn's Gmail calls " +
+        "will be DENIED (the denial is reported to the model, not thrown, so the caller sees an empty result).",
+      { botDir });
+  }
+  // Corruption, reported separately from absence: a broken `settings.json` next to
+  // a healthy `settings.local.json` still yields a non-null merge.
+  const broken = unreadableBotConfigs(botDir);
+  if (broken.length > 0) {
+    warnOnce(`broken:${broken.join(",")}`,
+      "Unparseable bot config under {botDir}: {files} — it is being IGNORED, so this spawn silently " +
+        "loses the MCP servers or tool permissions that file was carrying.",
+      { botDir, files: broken.join(", ") });
+  }
+  if (!mcpConfig) return null;
+
+  const perms = botSettings?.permissions as { allow?: unknown; deny?: unknown } | undefined;
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  const botAllow = new Set(list(perms?.allow));
+  const botDeny = new Set(list(perms?.deny));
+  const covers = (rules: Set<string>, key: string, name: string) =>
+    rules.has(name) || rules.has(`mcp__${key}`) || rules.has(`mcp__${key}__*`);
+  const allow = ["ToolSearch"];
+  for (const key of keys) {
+    for (const tool of GMAIL_READ_TOOLS) {
+      const name = `mcp__${key}__${tool}`;
+      // A bot's deny beats its allow, as it did when the spawn ran in the bot dir.
+      if (covers(botAllow, key, name) && !covers(botDeny, key, name)) allow.push(name);
+    }
+  }
+  // Carried too, because deny wins across scopes: a user-scope allow naming the
+  // server must not re-grant a read the bot itself denies.
+  const deny = [...botDeny].filter((rule) => keys.some((key) => rule === `mcp__${key}` || rule.startsWith(`mcp__${key}__`)));
+  const disallowed = keys.flatMap((key) => GMAIL_WRITE_TOOLS.map((tool) => `mcp__${key}__${tool}`));
+  return {
+    mcpConfig,
+    settings: JSON.stringify({ permissions: { allow, ...(deny.length > 0 ? { deny } : {}), defaultMode: "dontAsk" } }),
+    disallowed,
+  };
 }
 
 /**
@@ -318,6 +375,7 @@ export async function spawnHaiku(
     source,
     entrypoint = "jarvis-scheduler",
     botDir,
+    toolSurface,
     botName,
     timeoutMs = HAIKU_TIMEOUT_MS,
     model,
@@ -337,7 +395,7 @@ export async function spawnHaiku(
   const wallStart = performance.now();
 
   const proc = Bun.spawn(
-    buildHaikuArgs({ prompt, model: effectiveModel, system, botDir }),
+    buildHaikuArgs({ prompt, model: effectiveModel, system, botDir, toolSurface }),
     {
       // Always muninn's own agent home: never a bot folder, never the inherited
       // repo root. See SpawnHaikuOptions.botDir.

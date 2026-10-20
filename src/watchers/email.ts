@@ -1,7 +1,7 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, HAIKU_TIMEOUT_MS, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
-import { loadRawMcpServers } from "../ai/mcp-config-utils.ts";
+import { gmailServerKeys, loadRawMcpServers } from "../ai/mcp-config-utils.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { computeWatcherTimeoutMs, TICK_TIMEOUT_MS } from "./timeout.ts";
@@ -139,8 +139,12 @@ If nothing worth notifying, return: []`;
  * `botDir` is the bot folder whose `.mcp.json` declares the Gmail server. It used
  * to be the spawn's cwd (MCP by auto-discovery); it is now handed to the CLI as
  * `--mcp-config` so the run itself happens outside the repo. This is the ONLY
- * spawnHaiku caller that still needs bot MCP — every other one is a tool-less
- * prompt and runs `--strict-mcp-config`.
+ * spawnHaiku caller that opts into tools (`toolSurface: "gmail-read"`: the bot's
+ * Gmail server, its three read tools, `dontAsk`) — every other one is tool-less.
+ *
+ * Email bodies cannot be content-fenced: they reach the model as Gmail tool
+ * results inside the CLI, and this prompt holds only the query, the criteria and
+ * the interest profile. The tool fence is this path's only defense.
  */
 export async function checkEmail(
   watcher: Watcher,
@@ -204,6 +208,11 @@ export async function checkEmail(
   // of answering `[]`; the 08-13 17:04 transcript shows `search_emails` called at the
   // 10s mark and then stalling 49s), and because some 60s "timeouts" are legitimately
   // slow healthy runs: the slowest SUCCESSFUL tick measured 56.5s.
+  // A bot with no Gmail server gets a tool-less spawn, whose `[]` would read as a
+  // quiet inbox every tick. Fail through the runner's failure path instead.
+  const missing = botDir ? missingGmailServerMessage(botDir, botName ?? watcher.botName) : null;
+  if (missing) throw new Error(missing);
+
   const budgetMs = emailRetryBudgetMs(watcher);
   const deadline = startedAt + budgetMs;
   let lastError: Error | undefined;
@@ -230,6 +239,7 @@ export async function checkEmail(
         source: "watcher-email",
         entrypoint: "jarvis-watcher",
         botDir,
+        toolSurface: "gmail-read",
         botName,
         model: config.model,
         timeoutMs: attemptTimeoutMs,
@@ -358,6 +368,8 @@ export function shouldStartEmailAttempt(attempt: number, remainingMs: number): b
   return attempt === 1 || remainingMs >= EMAIL_MIN_ATTEMPT_MS;
 }
 
+type LivenessToolCall = { name: string; isError?: boolean; unterminated?: boolean; output?: string };
+
 /**
  * The liveness predicate, as a message describing HOW the run failed — or `null`
  * when the run is trustworthy (reached Gmail) or unjudgeable (see below).
@@ -398,47 +410,84 @@ export function shouldStartEmailAttempt(attempt: number, remainingMs: number): b
  * Read TWO ways, because the retry and the query watermark ask different
  * questions of the same evidence.
  *
- * `failure` is the predicate above, unchanged, and drives the retry. `reached`
- * is STRICTER: did this run *demonstrably* touch Gmail? They differ exactly on
- * the unjudgeable cases — `toolCalls` undefined, and "no MCP server key looks
- * like Gmail" — where `failure` is `null` ("no evidence it broke, so don't fail
- * it") but `reached` is `false` ("no evidence it worked either").
+ * `failure` is the predicate above and drives the retry. `reached` is STRICTER:
+ * did this run *demonstrably* search Gmail? They differ on the unjudgeable cases
+ * — `toolCalls` undefined, or no botDir to name the Gmail server from — where
+ * `failure` is `null` ("no evidence it broke") but `reached` is `false` ("no
+ * evidence it worked either"). Claiming coverage there would march the watermark
+ * forward an hour per tick over mail nothing read.
  *
- * Collapsing the two is a data-loss bug, not a style choice. A bot whose
- * `.mcp.json` names the server `google-mail` has the predicate DISABLED by
- * design (see {@link gmailToolPrefixes}); if that state also claimed coverage,
- * the row would march its watermark forward an hour per tick while never
- * reading a single message, and because the mail stays unread nothing would ever
- * re-offer it. Under the date-only query this cost nothing — every tick re-swept
- * the day — which is why the distinction only becomes load-bearing now.
+ * A bot whose `.mcp.json` has no Gmail server never gets here:
+ * {@link missingGmailServerMessage} fails the check before the spawn.
  */
 export function gmailLiveness(
-  toolCalls: { name: string }[] | undefined,
+  toolCalls: LivenessToolCall[] | undefined,
   botDir: string | undefined,
 ): { failure: string | null; reached: boolean } {
   const prefixes = toolCalls ? gmailToolPrefixes(botDir) : null;
+  // Reached means a `search_emails` call on the bot's Gmail server whose result
+  // arrived and is not an error. A successful `list_email_labels` or `read_email`
+  // beside a failed search covers no window: the search is the only call that reads
+  // the window the watermark claims. Two error shapes exist. `is_error` comes from
+  // the CLI side only: a `dontAsk` denial, a disallowed or unknown tool, an MCP
+  // transport failure. The Gmail server (`@gongrzhe/server-gmail-autoauth-mcp`
+  // 1.1.11) never sets `isError`: its catch-all returns every handler error — a
+  // Gmail 429 or 5xx, an expired token, bad arguments — as a normal text result
+  // `Error: …`, so that text is its only signal. Known gap: the CLI's own
+  // placeholder for an oversized MCP result (over `MAX_MCP_OUTPUT_TOKENS`, see
+  // `CLAUDE_CLI_OVERSIZED_RE` in huginn-trace.ts) also starts `Error:` with no
+  // `is_error`, so a very large successful search reads as unreached and the run
+  // fails loudly instead of advancing the watermark. An `unterminated` call is not
+  // reached either: the stream ended before its result arrived.
+  // The probe's `gmailError` (`scripts/probe-toolsearch-deferral.ts`) asks another
+  // question: it flags a run when ANY Gmail call errored.
   const reachedGmail = toolCalls?.some(
-    (t) => typeof t.name === "string" && prefixes?.some((p) => t.name.startsWith(p)),
+    (t) => typeof t.name === "string" && t.isError !== true && t.unterminated !== true &&
+      !isGmailErrorText(t.output) &&
+      prefixes?.some((p) => t.name === `${p}${GMAIL_SEARCH_TOOL}`),
   );
   return { failure: livenessFailureMessage(toolCalls, prefixes, reachedGmail), reached: reachedGmail === true };
 }
 
+/** A text result that starts `Error:`: the Gmail server's in-band error, or the
+ *  CLI's oversized-result placeholder (counted as an error too, see above). */
+function isGmailErrorText(output: string | undefined): boolean {
+  return typeof output === "string" && output.trimStart().startsWith("Error:");
+}
+
 function livenessFailureMessage(
-  toolCalls: { name: string }[] | undefined,
+  toolCalls: LivenessToolCall[] | undefined,
   prefixes: string[] | null,
   reachedGmail: boolean | undefined,
 ): string | null {
-  // `prefixes === null` means we could not identify which server IS Gmail — same
-  // "can't tell" stance as an undefined toolCalls, and for the same reason: the
-  // alternative is failing closed on no evidence. A bot that renamed the key to
-  // something without "gmail" in it (google-mail, workspace-mail) has a WORKING
-  // Gmail server that we simply cannot name, and hard-failing every healthy tick
-  // there would be the very trap this derivation was written to remove.
+  // `prefixes === null` here means no botDir: `checkEmail` fails a bot with no
+  // Gmail server before the spawn, so this is the botDir-less caller only.
   if (!toolCalls || !prefixes || reachedGmail) return null;
-  const called = [...new Set(toolCalls.map((t) => String(t.name)))].join(", ") || "none";
+  const called = [...new Set(toolCalls.map((t) => `${String(t.name)}${
+    t.isError ? " (error)" : t.unterminated ? " (no result)" : isGmailErrorText(t.output) ? " (Error: result text)" : ""
+  }`))].join(", ") || "none";
   return (
-    `Email check made no Gmail tool call (${toolCalls.length} tool call(s): ${called}) — ` +
+    `Email check made no successful Gmail ${GMAIL_SEARCH_TOOL} call (${toolCalls.length} tool call(s): ${called}) — ` +
     `the empty result is not a quiet inbox`
+  );
+}
+
+/** The Gmail read whose success is the evidence a run covered its window. */
+export const GMAIL_SEARCH_TOOL = "search_emails";
+
+/**
+ * The failure message for a bot whose `.mcp.json` has no Gmail server (no key
+ * containing "gmail", or no readable `.mcp.json`), else `null`. The
+ * `gmail-read` surface takes only Gmail servers, so such a bot's spawn has no
+ * tools and can never read mail.
+ */
+export function missingGmailServerMessage(botDir: string, botName: string): string | null {
+  const servers = loadRawMcpServers(botDir);
+  if (gmailServerKeys(servers).length > 0) return null;
+  const present = servers ? Object.keys(servers).join(", ") || "none" : "no readable .mcp.json";
+  return (
+    `Email check for bot ${botName}: no Gmail MCP server in ${botDir}/.mcp.json (servers: ${present}). ` +
+    `The email watcher needs a server whose key contains "gmail"; without one it cannot read mail.`
   );
 }
 
@@ -464,11 +513,9 @@ function livenessFailureMessage(
  *    narrow false-PASS, versus the false-FAIL of the hardcode it replaces, which
  *    broke on every rename; the false-fail was the live-fire risk.
  *
- * When no key matches we return `null` rather than guessing, because the failure is
- * asymmetric: a bot that renamed the key to `google-mail` has a WORKING server we
- * merely cannot name, and throwing on every healthy tick there is the exact trap this
- * derivation exists to remove. Warns once per botDir so the misconfiguration is
- * legible in the log instead of inferred from a thrown message.
+ * When no key matches we return `null` rather than guessing. Since the A1 tool
+ * fence such a bot's spawn has no Gmail server at all, and `checkEmail` fails it
+ * before the spawn ({@link missingGmailServerMessage}).
  *
  * NB: this reads the SAME `botDir` that `spawnHaiku` hands to `buildInlineMcpConfig`
  * / `buildInlineSettings` (`runner.ts` passes `botConfig.dir` to both). A refactor
@@ -478,7 +525,7 @@ export function gmailToolPrefixes(botDir?: string): string[] | null {
   if (!botDir) return null;
   const servers = loadRawMcpServers(botDir);
   if (!servers) return null;
-  const keys = Object.keys(servers).filter((k) => k.toLowerCase().includes("gmail"));
+  const keys = gmailServerKeys(servers);
   if (keys.length === 0) {
     warnNoGmailServerOnce(botDir, Object.keys(servers));
     return null;
@@ -492,9 +539,7 @@ function warnNoGmailServerOnce(botDir: string, present: string[]): void {
   warnedNoGmailServer.add(botDir);
   log.warn(
     "No gmail-like MCP server key in {botDir} (servers: {present}) — the email " +
-      "checker cannot tell which server is Gmail, so its liveness predicate is " +
-      "DISABLED for this bot and an empty result is trusted as a quiet inbox again. " +
-      "Rename the server key to contain \"gmail\", or disable the watcher.",
+      "check fails for this bot until a server key contains \"gmail\", or the watcher is disabled.",
     { botDir, present: present.join(", ") || "none" },
   );
 }
