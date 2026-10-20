@@ -28,6 +28,23 @@ const WORDS: Record<QuestionLanguage, { tree: string; caseLabel: string; all: st
 
 const RO = `${READER_ONLY_ATTR}=""`;
 
+/** The case id a chip's source names: the longest of the leaf's ids that
+ *  stands as a whole token in it, struck text and link destinations aside.
+ *  The picker matches chips on this, never on their text, which the reader
+ *  extends (an `idLabels` noun). */
+function chipCase(core: string, ids: readonly string[]): string | undefined {
+  const text = core.replace(/~~[\s\S]*?~~/g, "").replace(/\]\([^)\n]*\)/g, "]");
+  const token = (id: string) => {
+    for (let at = text.indexOf(id); at >= 0; at = text.indexOf(id, at + 1)) {
+      const before = text[at - 1] ?? " ";
+      const after = text[at + id.length] ?? " ";
+      if (!/[\p{L}\p{N}_-]/u.test(before) && !/[\p{L}\p{N}_-]/u.test(after)) return true;
+    }
+    return false;
+  };
+  return [...ids].sort((a, b) => b.length - a.length).find(token);
+}
+
 /** One item's own text: lead and case ids wrapped when the pieces render as
  *  the whole item does, else the item as one run. */
 function rowHtml(n: RuleNode, input: RuleTreeViewInput): string {
@@ -37,15 +54,20 @@ function rowHtml(n: RuleNode, input: RuleTreeViewInput): string {
   const caseParts = split ? [split.dash, ...split.pieces.flatMap((p, i) => (i ? [",", p] : [p]))] : [];
   if (!input.same([n.lead?.raw ?? "", body, ...caseParts], n.raw)) return input.inline(n.raw);
   const lead = n.lead ? `<span class="rt-edge">${input.inline(n.lead.raw)}</span>` : "";
+  const ids = n.leaf?.cases ?? [];
+  const chips = split ? split.pieces.filter((p) => p.replace(/~~[\s\S]*?~~/g, "").trim()).length : 0;
+  let k = 0;
   const cases = split
     ? input.inline(split.dash) +
       split.pieces
         .map((p) => {
           const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(p);
           const core = m?.[2] ?? p;
-          return core.replace(/~~[\s\S]*?~~/g, "").trim()
-            ? `${m?.[1] ?? ""}<span class="rt-case">${input.inline(core)}</span>${m?.[3] ?? ""}`
-            : input.inline(p);
+          if (!core.replace(/~~[\s\S]*?~~/g, "").trim()) return input.inline(p);
+          const id = chipCase(core, ids) ?? (chips === ids.length ? ids[k] : undefined);
+          k++;
+          const attr = id === undefined ? "" : ` data-rt-case="${escapeHtml(id)}"`;
+          return `${m?.[1] ?? ""}<span class="rt-case"${attr}>${input.inline(core)}</span>${m?.[3] ?? ""}`;
         })
         .join(",")
     : "";

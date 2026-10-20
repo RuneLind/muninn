@@ -69,7 +69,7 @@ describe("the reader's tree", () => {
     const html = reader(LOANS);
     expect(html).toContain('<li class="rt-node rt-leaf rt-tone-muted" data-rt-cases="[&quot;LIB-101&quot;,&quot;LIB-102&quot;]">');
     expect(html).toContain('<li class="rt-node rt-leaf rt-tone-good" data-rt-cases="[&quot;LIB-104&quot;]">');
-    expect(html).toContain('<span class="rt-edge"><em>Yes:</em></span> → Return (D2) — <span class="rt-case">LIB-101</span>, <span class="rt-case">LIB-102</span>');
+    expect(html).toContain('<span class="rt-edge"><em>Yes:</em></span> → Return (D2) — <span class="rt-case" data-rt-case="LIB-101">LIB-101</span>, <span class="rt-case" data-rt-case="LIB-102">LIB-102</span>');
   });
 
   test("it renders where it stands, between the text around it", () => {
@@ -90,7 +90,13 @@ describe("the reader's tree", () => {
   test("the cases follow the LAST dash; an earlier one stays in the leaf text", () => {
     const html = reader(tree("- → Renew — online only — LIB-7"));
     expect(html).toContain('data-rt-cases="[&quot;LIB-7&quot;]"');
-    expect(html).toContain("→ Renew — online only — <span class=\"rt-case\">LIB-7</span>");
+    expect(html).toContain("→ Renew — online only — <span class=\"rt-case\" data-rt-case=\"LIB-7\">LIB-7</span>");
+  });
+
+  test("each chip names its case id in data-rt-case, read past a link or emphasis", () => {
+    const html = reader(tree("- → Renew — [LIB-9](https://example.test/LIB-8), **LIB-10**, ~~LIB-11~~ LIB-12"));
+    expect(html).toContain('data-rt-cases="[&quot;LIB-9&quot;,&quot;LIB-10&quot;,&quot;LIB-12&quot;]"');
+    expect([...html.matchAll(/data-rt-case="([^"]*)"/g)].map((m) => m[1])).toEqual(["LIB-9", "LIB-10", "LIB-12"]);
   });
 
   test("a body with no list renders as written", () => {

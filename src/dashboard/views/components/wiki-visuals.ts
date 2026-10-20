@@ -64,7 +64,8 @@ function applyRuleTreePick(target: Element | null): boolean {
     li.classList.toggle("rt-on", id !== "" && on.has(li));
     li.classList.toggle("rt-off", id !== "" && !on.has(li));
   }
-  tree.querySelectorAll(".rt-case").forEach((c) => c.classList.toggle("rt-hit", id !== "" && c.textContent?.trim() === id));
+  // On the server's id, never the chip's text: the reader adds an idLabels noun to it.
+  tree.querySelectorAll<HTMLElement>(".rt-case").forEach((c) => c.classList.toggle("rt-hit", id !== "" && c.dataset.rtCase === id));
   tree.querySelectorAll<HTMLElement>("[data-rt-kort]").forEach((k) => {
     k.hidden = k.dataset.rtKort !== id;
   });

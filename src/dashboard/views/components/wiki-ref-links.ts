@@ -342,9 +342,10 @@ export const PEEK_RULE_TREE_CHROME = ["rt-head"] as const;
 /** A peeked rule tree is its list as written: no tree classes, no picker
  *  wiring, no figure role. */
 function bareRuleTree(tree: Element): void {
-  for (const x of [tree, ...Array.from(tree.querySelectorAll("[class], [data-rt-cases]"))]) {
+  for (const x of [tree, ...Array.from(tree.querySelectorAll("[class], [data-rt-cases], [data-rt-case]"))]) {
     if (x === tree || Array.from(x.classList).some((k) => k.startsWith("rt-"))) x.removeAttribute("class");
     x.removeAttribute("data-rt-cases");
+    x.removeAttribute("data-rt-case");
   }
   tree.removeAttribute("role");
   tree.removeAttribute("aria-label");

@@ -103,6 +103,8 @@ const CASES = [
   "  kort: Renewed three times",
 ].join("\n");
 
+const ID_LABELS = { LIB: { one: "Loan", other: "loans" } };
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -111,6 +113,8 @@ test.beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
   await writeFile(path.join(root, "plans/cases.yaml"), CASES, "utf8");
+  // The reader names a linked LIB id with a noun before it, inside the chip.
+  await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ idLabels: ID_LABELS }), "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -209,7 +213,8 @@ test.describe("Wiki reader: RuleTree", () => {
       await expect(t).toHaveClass(/rt-picked/);
       await expect(t.locator("li.rt-on")).toHaveCount(3);
       await expect(t.locator("li.rt-off")).toHaveCount(2);
-      await expect(t.locator(".rt-case.rt-hit")).toHaveText(["LIB-103"]);
+      await expect(t.locator(".rt-case.rt-hit")).toHaveCount(1);
+      await expect(t.locator(".rt-case.rt-hit")).toHaveAttribute("data-rt-case", "LIB-103");
       // LIB-103 is a board id, so the reader links it to its row: the ink that
       // shows is the link's, read against the chip's fill.
       const hit = t.locator(".rt-case.rt-hit");
@@ -240,7 +245,7 @@ test.describe("Wiki reader: RuleTree", () => {
       expect(await t.evaluate((e) => e.scrollWidth - e.clientWidth)).toBeLessThanOrEqual(0);
       await t.screenshot({ path: shots(`700-${scheme}-unpicked`) });
       await t.locator(".rt-select").selectOption("LIB-101");
-      await expect(t.locator('[data-rt-kort="LIB-101"]')).toHaveText("LIB-101 · Two loans open");
+      await expect(t.locator('[data-rt-kort="LIB-101"]')).toHaveText(/^(Loan )?LIB-101 · Two loans open$/);
       await t.screenshot({ path: shots(`700-${scheme}-picked`) });
     });
 
@@ -291,15 +296,49 @@ test.describe("Wiki reader: RuleTree", () => {
     for (const c of await t.locator(".rt-case").all()) await expect(c).toBeVisible();
   });
 
-  test("print shows the tree and hides the picker and the kort lines", async ({ page }) => {
+  test("a case the wiki names with an idLabels noun still lights its chip", async ({ page }) => {
     await open(page, 1280);
     const t = loanTree(page);
-    await t.locator(".rt-select").selectOption("LIB-103");
+    // The fixture's precondition: the reader put the noun inside the chip.
+    await expect(t.locator(".rt-case", { hasText: "LIB-101" }).locator(".id-noun")).toHaveText("Loan");
+    await t.locator(".rt-select").selectOption("LIB-101");
+    const hit = t.locator(".rt-case.rt-hit");
+    await expect(hit).toHaveCount(1);
+    await expect(hit).toHaveAttribute("data-rt-case", "LIB-101");
+    await expect(hit).toContainText("LIB-101");
+  });
+
+  test("print shows the tree as unpicked: no picker, no kort lines, no pick", async ({ page }) => {
+    await open(page, 1280);
+    const t = loanTree(page);
+    await t.scrollIntoViewIfNeeded();
+    // Every row, chip and chip link: weight, ink, fill and all four borders.
+    const look = () =>
+      t.evaluate((s) =>
+        Array.from(s.querySelectorAll(".rt-row, .rt-case, .rt-case a")).map((e) => {
+          const c = getComputedStyle(e);
+          const sides = ["top", "right", "bottom", "left"].flatMap((k) =>
+            ["style", "color", "width"].map((p) => c.getPropertyValue(`border-${k}-${p}`)),
+          );
+          return [e.tagName, c.fontWeight, c.color, c.backgroundColor, ...sides].join(" | ");
+        }),
+      );
     await page.emulateMedia({ media: "print" });
+    const unpicked = await look();
+    await t.screenshot({ path: shots("print-unpicked") });
+    await page.emulateMedia({ media: "screen" });
+    await t.locator(".rt-select").selectOption("LIB-103");
+    await expect(t).toHaveClass(/rt-picked/);
+    await page.emulateMedia({ media: "print" });
+    await t.screenshot({ path: shots("print-picked") });
+    await page.pdf({ path: test.info().outputPath("print-picked.pdf") });
     await expect(t.locator(".rt-pick")).toBeHidden();
     await expect(t.locator(".rt-korts")).toBeHidden();
     await expect(t.locator(".rt-list").first()).toBeVisible();
-    expect(await css(row(t, "Return").locator(":scope > .rt-row"), "border-top-style")).toBe("solid");
+    expect(await look()).toEqual(unpicked);
+    for (const e of await t.locator(".rt-edge").all()) {
+      for (const side of ["top", "right", "bottom", "left"]) expect(await css(e, `border-${side}-style`)).toBe("none");
+    }
   });
 
   test("forced colours mark the path in system colours and the rest by a dashed GrayText border", async ({ page }) => {
@@ -333,8 +372,9 @@ test.describe("Wiki reader: RuleTree", () => {
     const peek = page.locator(".wiki-ref-peek");
     await expect(peek).toBeVisible();
     await expect(peek.locator("li").first()).toContainText("Is the book reserved by someone else?");
-    await expect(peek).toContainText("Return (D2) — LIB-101, LIB-102");
-    await expect(peek.locator("select, .rt-head, [class*='rt-'], [data-rt-cases], [data-rt-kort], [role='figure']")).toHaveCount(0);
+    // The reader's idLabels noun rides into the peek copy with the chip's link.
+    await expect(peek).toContainText(/Return \(D2\) — (Loan )?LIB-101, LIB-102/);
+    await expect(peek.locator("select, .rt-head, [class*='rt-'], [data-rt-cases], [data-rt-case], [data-rt-kort], [role='figure']")).toHaveCount(0);
   });
 
   test("an Explain selection across a tree locates in the page source", async ({ page }) => {

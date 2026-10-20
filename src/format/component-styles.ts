@@ -1358,20 +1358,22 @@ export function ruleTreeCss(scope: string): string {
     ${s} .rt-tone-info > .rt-row { border-inline-start-color: var(--tone-info); background: var(--tint-info); }
     ${s} .rt-tone-muted > .rt-row { border-inline-start-color: var(--text-soft); background: var(--tint-neutral); }
     ${s} .rt-case { display: inline-block; max-width: 100%; padding: 0 0.3rem; border: 1px solid var(--text-muted); border-radius: 4px; font-size: 0.85em; }
-    ${s} .rt-picked .rt-off > .rt-row { color: var(--text-soft); border-style: dashed; background: none; }
-    ${s} .rt-picked .rt-off > .rt-row .rt-edge { color: var(--text-soft); }
-    ${s} .rt-picked .rt-on > .rt-row { font-weight: 600; border-block-color: var(--accent); border-inline-end-color: var(--accent); }
-    ${s} .rt-picked .rt-on:not(.rt-leaf) > .rt-row { border-inline-start-color: var(--accent); }
-    ${s} .rt-case.rt-hit { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
-    /* A case id the reader links to its board row keeps the chip's ink. */
-    ${s} .rt-case.rt-hit a { color: inherit; }
+    /* The pick is screen-only: print shows the tree unpicked, as it hides the picker. */
+    @media not print {
+      ${s} .rt-picked .rt-off > .rt-row { color: var(--text-soft); border-style: dashed; background: none; }
+      ${s} .rt-picked .rt-off > .rt-row .rt-edge { color: var(--text-soft); }
+      ${s} .rt-picked .rt-on > .rt-row { font-weight: 600; border-block-color: var(--accent); border-inline-end-color: var(--accent); }
+      ${s} .rt-picked .rt-on:not(.rt-leaf) > .rt-row { border-inline-start-color: var(--accent); }
+      ${s} .rt-case.rt-hit { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+      /* A case id the reader links to its board row keeps the chip's ink. */
+      ${s} .rt-case.rt-hit a { color: inherit; }
+    }
     @container rt (max-width: 26rem) {
       ${s} .rt-list .rt-list { margin-inline-start: 0.3rem; padding-inline-start: 0.6rem; }
       ${s} .rt-list .rt-list > .rt-node::before { inset-inline-start: -0.6rem; width: 0.45rem; }
     }
     @media print {
       ${s} .rt-pick, .rt-js ${s} .rt-pick, ${s} .rt-korts { display: none; }
-      ${s} .rt-picked .rt-off > .rt-row, ${s} .rt-picked .rt-off > .rt-row .rt-edge { color: var(--text-primary); border-style: solid; }
     }
     @media (forced-colors: active) {
       ${s} .rt-leaf > .rt-row, ${s} .rt-case { border-color: CanvasText; }
