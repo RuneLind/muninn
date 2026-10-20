@@ -23,6 +23,7 @@
 
 import type { ListingTracker, WikiListing } from "./wiki-filter.ts";
 import type { IndexWork } from "../../../wiki/work-focus.ts";
+import type { ListingMirrorStatus } from "./wiki-mirror-status.ts";
 
 /** The `/api/wiki/pages` payload (mirrors `src/dashboard/routes/wiki-routes.ts`).
  *  It lives here rather than in `wiki-browser.ts` so this module can name it
@@ -71,6 +72,9 @@ export interface WikiPagesResponse {
   work?: IndexWork;
   /** The publish script's path on a wiki that offers ⇪ Felles; absent elsewhere. */
   fellesPublish?: { bin: string; bucket?: string };
+  /** A bucket-mirrored wiki's health while it is not up to date; absent
+   *  otherwise (`src/wiki/bucket-mirror-status.ts`). */
+  mirror?: ListingMirrorStatus;
   error?: string;
 }
 

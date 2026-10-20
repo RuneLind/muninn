@@ -8,6 +8,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
+import { mirrorStatusStyles } from "./components/wiki-mirror-status.ts";
 import {
   RAIL_CHIP_COMPACT,
   RAIL_CHIP_COMPACT_NARROW,
@@ -3059,6 +3060,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${shareDialogStyles()}
     ${findPaletteStyles()}
     ${fellesPublishStyles()}
+    ${mirrorStatusStyles()}
     ${wikiReadonlyStyles()}
     ${wikiReadSliceStyles()}
   </style>
@@ -3131,6 +3133,9 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
         <!-- «Felles: N changed» — painted by the client on a wiki that offers
              ⇪ Felles, after the page has rendered (wiki-felles-publish.ts). -->
         <div class="wiki-felles-sync" id="wikiFellesSync" aria-live="polite" hidden></div>
+        <!-- A bucket-mirrored wiki whose copy is stale — painted from the
+             listing's \`mirror\` field (wiki-mirror-status.ts). -->
+        <p class="wiki-mirror-status" id="wikiMirrorStatus" role="status" hidden></p>
         <details class="wiki-filters" id="wikiFilters">
           <summary class="wiki-filters-summary">Filters</summary>
           <div class="wiki-filters-body">

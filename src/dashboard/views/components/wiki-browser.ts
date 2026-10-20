@@ -81,6 +81,7 @@ import {
   setFellesBtnMark,
   type FellesSync,
 } from "./wiki-felles-publish.ts";
+import { paintMirrorStatus } from "./wiki-mirror-status.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
 import {
@@ -9060,6 +9061,7 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // future-date guard on every frontmatter-dated page in the wiki at once.
   scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
   applyWorkedSortOption(data.workedCoverage);
+  paintMirrorStatus(data.mirror, Date.now());
   // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
   // Absent/empty (older server / degraded) keeps the built-in constants so
   // standard types still render — the belt-and-suspenders unions in the chip/hub

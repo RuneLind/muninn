@@ -4244,6 +4244,17 @@ Invariants:
 A failed poll backs off, doubling, capped at the larger of the interval and
 5 min. `stop()` aborts the in-flight poll and releases the lock.
 
+**Health** (`bucket-mirror-status.ts`, architecture review 2026-10 finding 32):
+each mirror reports `starting`, `ok`, `degraded` (the poll listed the bucket
+but a download, the index rebuild or the mass-delete guard left the copy
+behind), `failing` (the listing or the ownership check throws) or `refused`,
+with the time of the last poll that brought every object in. `/api/wiki/pages`
+carries it as `mirror` on a mirrored root only while it is not `ok`, so a
+healthy listing is unchanged; the reader shows one rail line under the felles
+chip (`views/components/wiki-mirror-status.ts`). Counts and a timestamp only:
+no object name, path or error text. The backoff is unchanged: a degraded poll
+still counts as a poll that answered.
+
 Acceptance: `bucket-mirror.test.ts`, `bucket-mirror-hardening.test.ts`,
 `bucket-mirror-round2.test.ts`, `store-mirror-contract.test.ts` and
 `e2e/wiki-bucket-mirror.spec.ts`. The round-2 file branches on a filesystem

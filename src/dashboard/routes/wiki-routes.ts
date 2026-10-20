@@ -1,4 +1,5 @@
 import type { Context, Hono } from "hono";
+import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
 import { compress } from "hono/compress";
 import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config } from "../../config.ts";
 import { viewerMayUseAnswers } from "./wiki-answers.ts";
@@ -1596,6 +1597,9 @@ export function registerWikiReadRoutes(
       // The ⇪ Felles control's gate, present only on a wiki that offers it. The
       // route re-checks; this only decides whether the button renders.
       ...fellesPublishPayloadField(entry?.name, entry?.root),
+      // A bucket-mirrored root's health, present only while the mirror is not
+      // up to date (finding 32): no object names, paths or error text.
+      ...bucketMirrorPayloadField(resolveWikiRoot(root)),
     });
   });
 
