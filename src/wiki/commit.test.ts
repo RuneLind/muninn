@@ -604,9 +604,11 @@ describe("the wiki write lock is never swept, staged or counted", () => {
     await rm(base, { recursive: true, force: true });
   });
 
-  test("isWikiWriteArtifact names exactly the two transient files", () => {
+  test("isWikiWriteArtifact names exactly the three transient files", () => {
     expect(isWikiWriteArtifact(WIKI_LOCK_BASENAME)).toBe(true);
     expect(isWikiWriteArtifact(".wiki-stamp.a1b2.tmp")).toBe(true);
+    // muninn's stale-takeover mutex, created beside the lock.
+    expect(isWikiWriteArtifact(".wiki-write.lock.takeover")).toBe(true);
     // Not an artifact: a real page, and near-misses that are content.
     expect(isWikiWriteArtifact("plan.md")).toBe(false);
     expect(isWikiWriteArtifact(".wiki-write.lock.md")).toBe(false);
@@ -637,6 +639,8 @@ describe("the wiki write lock is never swept, staged or counted", () => {
   test("listDirtyEntries skips them too — the sync loop holds one across its own status", async () => {
     const { wikiDir } = await makeRepo(base);
     await writeFile(path.join(wikiDir, WIKI_LOCK_BASENAME), "");
+    // The takeover mutex sits beside the lock while a stale lock is cleared.
+    await writeFile(path.join(wikiDir, ".wiki-write.lock.takeover"), "");
     await writeFile(path.join(wikiDir, "concepts", "Real.md"), "# Real\n");
     const top = await gitToplevel(wikiDir);
     const entries = await listDirtyEntries(top!, wikiDir);

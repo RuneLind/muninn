@@ -135,6 +135,79 @@ describe("takeWikiWriteLock", () => {
     expect(fs.readdirSync(root)).toEqual([WIKI_LOCK_BASENAME]); // no takeover leftovers
   });
 
+  /**
+   * Fix round 1 of finding 23. While a takeover decides, the lock path must
+   * never be free: an absent `.wiki-write.lock` is a lock anyone can create, and
+   * the rename-aside takeover left it absent until it linked the file back. The
+   * spy lands in that window the same way as above — the measured lock is
+   * replaced by a live one — and then, on every later `statSync`, a third
+   * process tries its own `O_EXCL` create.
+   */
+  test("a takeover never leaves the lock path free while a live lock may be there", async () => {
+    const OTHER = `${JSON.stringify({ pid: 999998, host: "other", op: "takeover", at: "now" })}\n`;
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const realStat = fs.statSync;
+    let swapped = false;
+    let thirdCreated = false;
+    const spy = spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      if (swapped && !thirdCreated) {
+        try {
+          fs.closeSync(fs.openSync(lockPath, "wx"));
+          thirdCreated = true;
+        } catch {
+          /* EEXIST: the lock path is taken, as it must be */
+        }
+      }
+      const st = (realStat as (...a: unknown[]) => fs.Stats)(p, ...rest);
+      if (!swapped && String(p) === lockPath) {
+        swapped = true;
+        fs.unlinkSync(lockPath);
+        fs.writeFileSync(lockPath, OTHER);
+      }
+      return st;
+    }) as typeof fs.statSync);
+    let res: Awaited<ReturnType<typeof takeWikiWriteLock>>;
+    try {
+      res = await takeWikiWriteLock(root, { waitMs: 60 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    expect(thirdCreated).toBe(false);
+    expect(fs.readFileSync(lockPath, "utf8")).toBe(OTHER);
+    expect(res.ok).toBe(false);
+  });
+
+  test("a stale lock is not taken over while another process holds the takeover mutex", async () => {
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const mutex = path.join(root, ".wiki-write.lock.takeover");
+    await writeFile(mutex, "");
+    const res = await takeWikiWriteLock(root, { waitMs: 60 });
+    expect(res.ok).toBe(false);
+    // The stale lock is the mutex holder's to clear: still the measured file.
+    expect((await stat(lockPath)).mtimeMs).toBe(old.getTime());
+    expect(existsSync(mutex)).toBe(true);
+  });
+
+  test("an abandoned takeover mutex is removed and the stale lock is taken over", async () => {
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const mutex = path.join(root, ".wiki-write.lock.takeover");
+    await writeFile(mutex, "");
+    const crashed = new Date(Date.now() - 5_000);
+    await utimes(mutex, crashed, crashed);
+    const res = await takeWikiWriteLock(root, { waitMs: 200 });
+    expect(res.ok).toBe(true);
+    expect(fs.readdirSync(root)).toEqual([WIKI_LOCK_BASENAME]);
+    if (res.ok) res.lock?.release();
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
   test("a lock released mid-wait is acquired without waiting the full budget", async () => {
     await writeFile(lockPath, "");
     setTimeout(() => rm(lockPath, { force: true }), 20);

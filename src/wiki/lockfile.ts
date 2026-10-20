@@ -26,8 +26,10 @@
  * `openSync(path, "wx")` (`O_CREAT|O_EXCL`) is the whole of the mutual
  * exclusion — atomic on every filesystem either wiki lives on, no daemon, no
  * cleanup on the happy path. The lock is taken on EVERY registered wiki root a
- * writer touches, so each of those roots has to ignore `.wiki-write.lock` and
- * `.wiki-stamp.*.tmp`; mimir's `.gitignore` names both, and the sweeper
+ * writer touches, so each of those roots has to ignore `.wiki-write.lock`,
+ * `.wiki-write.lock.takeover` (muninn's stale-takeover mutex, held for two
+ * syscalls) and `.wiki-stamp.*.tmp`; mimir's `.gitignore` names the first and
+ * the last, and the sweeper
  * (`src/watchers/wiki-committer.ts`) skips them by basename for the roots that
  * do not — see `listWikiSubtreeDirty`.
  *
@@ -68,11 +70,8 @@ import {
   statSync,
   unlinkSync,
   readFileSync,
-  renameSync,
-  linkSync,
   type Stats,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { getLog } from "../logging.ts";
@@ -90,14 +89,16 @@ export const WIKI_STAMP_TMP_PREFIX = ".wiki-stamp.";
 /**
  * Is this basename one of the files the write interlock leaves in a wiki?
  *
- * Both are transient by construction and neither is content, so nothing that
+ * All three (the lock, the takeover mutex beside it, the stamper's temp file)
+ * are transient by construction and neither is content, so nothing that
  * enumerates a wiki's dirty files may treat them as work: the daily
  * `wiki-committer` sweeper would COMMIT a live lockfile (and then delete it on
  * the next sweep, twice a day, forever), the Index card's badge would report a
  * wiki as having uncommitted changes for the two seconds a write holds the lock,
  * and the repo-sync loop would stage it.
  *
- * mimir's `.gitignore` already names both, so on that root this is inert. The
+ * mimir's `.gitignore` names the lock and the temp file, so on that root this
+ * is inert for those two. The
  * jarvis wiki's repo (`huginn-jarvis`, which is its OWN git repo — the outer
  * `huginn` checkout's `huginn-` directory rule ignores a different repo and
  * answers a different question) ignores NEITHER, and muninn does not edit that
@@ -108,7 +109,7 @@ export const WIKI_STAMP_TMP_PREFIX = ".wiki-stamp.";
 export function isWikiWriteArtifact(basename: string): boolean {
   return (
     basename === WIKI_LOCK_BASENAME ||
-    basename.startsWith(`${WIKI_LOCK_BASENAME}.takeover.`) ||
+    basename === WIKI_TAKEOVER_MUTEX_BASENAME ||
     (basename.startsWith(WIKI_STAMP_TMP_PREFIX) && basename.endsWith(".tmp"))
   );
 }
@@ -275,12 +276,16 @@ export async function takeWikiWriteLock(
         continue;
       }
       if (stale) {
-        const takeover = takeOverStaleLock(lockPath, measured);
+        const takeover = takeOverStaleLock(lockPath, measured, now());
         if (takeover === "refused") return lockTimeout(lockPath, waitMs);
-        if (now() >= until) return lockTimeout(lockPath, waitMs);
-        // A live lock (another process's fresh takeover) stays put: wait for it.
-        if (takeover === "live") await sleep(POLL_MS);
-        continue;
+        // `removed` and `live` retry at once, as the takeover always has: the
+        // next pass creates the lock or measures the one now there. `busy` is a
+        // lock someone else is taking over — held, so it falls through to the
+        // ordinary poll below rather than spinning on the mutex.
+        if (takeover !== "busy") {
+          if (now() >= until) return lockTimeout(lockPath, waitMs);
+          continue;
+        }
       }
       if (now() >= until) return lockTimeout(lockPath, waitMs);
       await sleep(POLL_MS);
@@ -288,67 +293,105 @@ export async function takeWikiWriteLock(
   }
 }
 
-/** Basename infix of the file a stale takeover moves the old lock aside to. */
-const TAKEOVER_INFIX = ".takeover.";
+/**
+ * The takeover mutex — `<root>/.wiki-write.lock.takeover`, created `O_EXCL`
+ * beside the lock. Only its holder may delete a stale lock (arch review
+ * 2026-10, finding 23).
+ *
+ * Why a second file rather than renaming the stale lock aside: a rename leaves
+ * `.wiki-write.lock` ABSENT until it is linked back, and an absent lock is free.
+ * Measured with n processes racing one stale lock, that gap let a third process
+ * create the lock and be deleted as "the moved one", and left orphan locks that
+ * every writer timed out on. The mutex never moves the lock: its holder stats
+ * the lock again and unlinks it only while it is the SAME inode, with the same
+ * mtime, and still stale. Two muninn takers can no longer both delete — the
+ * second one re-stats inside the mutex and finds the first one's fresh lock.
+ *
+ * Residuals, both narrow: the stamper's own takeover is still a blind unlink
+ * (claude-usage follow-up); and a lock RELEASED and re-created by another
+ * process between our in-mutex stat and our unlink is deleted (two adjacent
+ * sync calls, needs a stale-but-alive holder).
+ */
+export const WIKI_TAKEOVER_MUTEX_BASENAME = `${WIKI_LOCK_BASENAME}.takeover`;
 
 /**
- * Remove a stale lockfile — but only the one that was MEASURED stale (arch
- * review 2026-10, finding 23). Another process can delete the abandoned lock
- * and create its own between our stat and our delete; a blind unlink then
- * deletes that live lock. So the file is renamed aside first (atomic, keeps the
- * inode), its dev:ino:mtime compared with the measurement, and only a match is
- * deleted. A mismatch is linked back (`linkSync` never overwrites a lock created
- * meanwhile) and reported `live`. Narrows the race on muninn's side only: the
- * stamper still unlinks blindly (claude-usage follow-up).
+ * A takeover mutex older than this is a crash leftover and is removed. The
+ * mutex is held for one stat and one unlink, so any age in milliseconds means
+ * its holder died; the bound only has to stay under {@link WIKI_LOCK_WAIT_MS}
+ * so the writers queued behind a dead one still get their turn.
  */
-function takeOverStaleLock(lockPath: string, measured: Stats): "removed" | "live" | "refused" {
-  const aside = `${lockPath}${TAKEOVER_INFIX}${process.pid}.${randomBytes(4).toString("hex")}`;
+export const WIKI_TAKEOVER_MUTEX_STALE_MS = 1_000;
+
+type TakeoverResult =
+  /** The stale lock is gone (we deleted it, or its holder released it). */
+  | "removed"
+  /** The lock is no longer the stale one we measured: re-measure it. */
+  | "live"
+  /** Another process holds the takeover mutex: wait as for a held lock. */
+  | "busy"
+  /** We cannot clear it at all. */
+  | "refused";
+
+function takeOverStaleLock(lockPath: string, measured: Stats, nowMs: number): TakeoverResult {
+  const mutexPath = path.join(path.dirname(lockPath), WIKI_TAKEOVER_MUTEX_BASENAME);
+  let fd: number;
   try {
-    renameSync(lockPath, aside);
+    fd = openSync(mutexPath, "wx");
   } catch (err) {
-    // ENOENT: the holder released it first, which is the outcome we wanted;
-    // anything else means we cannot clear it, so stop waiting.
-    return errnoOf(err) === "ENOENT" ? "removed" : "refused";
-  }
-  let moved: Stats | null = null;
-  try {
-    moved = statSync(aside);
-  } catch {
-    // Gone from under us: nothing of ours to restore.
-  }
-  if (
-    moved &&
-    moved.dev === measured.dev &&
-    moved.ino === measured.ino &&
-    moved.mtimeMs === measured.mtimeMs
-  ) {
+    if (errnoOf(err) !== "EEXIST") return "refused";
     try {
-      unlinkSync(aside);
+      if (nowMs - statSync(mutexPath).mtimeMs > WIKI_TAKEOVER_MUTEX_STALE_MS) {
+        unlinkSync(mutexPath);
+        log.warn("Wiki write lock takeover mutex at {path} was abandoned — removed", {
+          path: mutexPath,
+        });
+        return "live";
+      }
     } catch {
-      // Best effort; the name is a write artifact every sweeper skips.
+      // Released between the open and the stat: try again on the next pass.
+      return "live";
+    }
+    return "busy";
+  }
+  try {
+    try {
+      writeSync(fd, `${JSON.stringify({ pid: process.pid, host: os.hostname() })}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    let current: Stats;
+    try {
+      current = statSync(lockPath);
+    } catch (err) {
+      return errnoOf(err) === "ENOENT" ? "removed" : "refused";
+    }
+    if (
+      current.dev !== measured.dev ||
+      current.ino !== measured.ino ||
+      current.mtimeMs !== measured.mtimeMs ||
+      nowMs - current.mtimeMs <= WIKI_LOCK_STALE_MS
+    ) {
+      return "live";
+    }
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      // ENOENT means the holder released it first, which is the outcome we
+      // wanted; anything else means we cannot clear it, so stop waiting.
+      return errnoOf(err) === "ENOENT" ? "removed" : "refused";
     }
     log.warn("Wiki write lock at {path} was stale (> {staleMs} ms) — taken over", {
       path: lockPath,
       staleMs: WIKI_LOCK_STALE_MS,
     });
     return "removed";
-  }
-  if (moved) {
+  } finally {
     try {
-      linkSync(aside, lockPath);
-    } catch (err) {
-      log.warn("Wiki write lock at {path}: could not restore a live lock moved aside ({code})", {
-        path: lockPath,
-        code: errnoOf(err),
-      });
-    }
-    try {
-      unlinkSync(aside);
+      unlinkSync(mutexPath);
     } catch {
-      // Best effort, as above.
+      // Already removed as abandoned by another process; nothing of ours left.
     }
   }
-  return "live";
 }
 
 /** The lockfile's current contents, or null when it is unreadable/gone. */

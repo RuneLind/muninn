@@ -3920,8 +3920,8 @@ named ones — so every root has to tolerate the file. mimir's `.gitignore` name
 both it and `.wiki-stamp.*.tmp`; the jarvis wiki's own repo (`huginn-jarvis`,
 which is a repo of its own — the outer `huginn` checkout's directory rule is a
 different repo answering a different question) ignores NEITHER, and muninn does
-not edit that repo. So `isWikiWriteArtifact` (`lockfile.ts`) skips both by
-BASENAME at the three places that enumerate a wiki's dirty files —
+not edit that repo. So `isWikiWriteArtifact` (`lockfile.ts`) skips both, and
+the takeover mutex below, by BASENAME at the three places that enumerate a wiki's dirty files —
 `listWikiSubtreeDirty` (the daily `wiki-committer` sweeper, which would otherwise
 commit a LIVE lockfile and delete it again on the next sweep, forever),
 `listDirtyEntries` (the repo-sync loop, which holds the lock across its own
@@ -3941,6 +3941,23 @@ lines — and because a hook is synchronous on a tool call while a human clickin
 can wait. The stale window is the same on both sides: shorter here and muninn
 seizes a lock the stamper still holds; longer and muninn waits behind an
 interrupted stamp longer than the stamper would wait for itself.
+
+**A stale takeover goes through a mutex, never a rename** (arch review 2026-10,
+finding 23). muninn deletes a stale lock only while it holds
+`<root>/.wiki-write.lock.takeover` (`WIKI_TAKEOVER_MUTEX_BASENAME`, `O_EXCL`),
+and only after re-statting the lock inside the mutex: same dev, inode and mtime
+as the stale file it measured, and still older than the stale window. A lock that
+changed is re-measured; a mutex someone else holds is waited on like a held lock;
+a mutex older than `WIKI_TAKEOVER_MUTEX_STALE_MS` (1 s — it is held for one stat
+and one unlink) is a crash leftover and is removed. The rename-aside design this
+replaced left `.wiki-write.lock` ABSENT until it linked the file back, and an
+absent lock is free: measured with 3–6 processes racing one stale lock, it let
+two holders run together and left orphan locks every writer timed out on. The
+mutex is a write artifact (`isWikiWriteArtifact`), so the sweeper, the sync
+loop's `listDirtyEntries` and the badge skip it; mimir's `.gitignore` does not
+name it yet. Residuals: `wiki-stamp`'s own takeover is still a blind unlink, and
+a lock released and re-created between the in-mutex stat and the unlink (two
+adjacent syscalls, needs a stale-but-alive holder) is deleted.
 
 **On acquire muninn writes ONE JSON line into the file** — `{pid, host, op, at}`.
 For an operator it answers "who is holding this, and since when" from a file that
