@@ -8,7 +8,7 @@ import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { PEEK_GLOSSARY_CHROME } from "../dashboard/views/components/wiki-ref-links.ts";
-import { GLOSSARY_CHROME_CLASSES, markGlossaryTerms } from "./glossary-view.ts";
+import { GLOSSARY_CHROME_CLASSES, markGlossaryTerms, termPattern, termScanner } from "./glossary-view.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
 import { glossaryKey, type GlossaryEntry } from "./glossary.ts";
 
@@ -345,5 +345,69 @@ describe("a term's case, whitespace and longer terms around it", () => {
     ["a double space", "The due  date is set.", "due  date"],
   ])("white space inside a term matches %s, and the mark wraps it as written", (_name, prose, wraps) => {
     expect(marked(prose + "\n" + glossary("- **Due date:** the day a book goes back"))).toEqual([["due date", wraps]]);
+  });
+});
+
+describe("text that holds a character outside the BMP", () => {
+  const g = glossary("- **Hold queue:** the readers waiting", "- **Data:** the catalogue's records");
+  test.each([
+    ["an emoji-led list item", "- 📄 Data"],
+    ["an emoji-led table cell", "| Kind |\n| --- |\n| 📄 Raw Data |"],
+  ])("a term after %s is marked", (_name, md) => {
+    expect(marked(md + "\n" + g)).toEqual([["data", "Data"]]);
+  });
+
+  test("the scanner finds every place a term's own pattern matches, in random text with astral characters", () => {
+    let seed = 0x5eed;
+    const rand = (n: number) => ((seed = (seed * 1103515245 + 12345) >>> 0) >>> 8) % n;
+    const pick = <T,>(xs: readonly T[]) => xs[rand(xs.length)]!;
+    const alphabet = ["a", "d", "t", "h", "o", "l", "D", "H", " ", " ", "\u00a0", "é", "📄", "📚", "𝔸", "-", "."];
+    const words = ["data", "hold", "hold queue", "dat", "a data", "Ho", "LIB-101", "📄 data", "olé"];
+    let checked = 0;
+    for (let round = 0; round < 400; round++) {
+      const terms = [...new Set(Array.from({ length: 1 + rand(4) }, () => pick(words)))]
+        .sort((a, b) => [...b].length - [...a].length)
+        .map((term) => termPattern({ term, ...glossaryKey(term), definition: "", codeSpelled: false, at: 0 }));
+      const scan = termScanner(terms);
+      for (let n = 0; n < 5; n++) {
+        const text = Array.from({ length: 3 + rand(20) }, () => (rand(3) === 0 ? pick(words) : pick(alphabet))).join("");
+        const subject = scan.subject(text);
+        const found = new Set<number>();
+        for (let at = scan.next(subject, 0); at >= 0; at = scan.next(subject, at + 1)) found.add(at);
+        for (let at = 0; at < text.length; at++) {
+          const first = terms.findIndex((re) => ((re.lastIndex = at), re.test(text)));
+          if (first < 0) continue;
+          checked++;
+          expect({ text, at, found: found.has(at) }).toEqual({ text, at, found: true });
+          const which = scan.which(subject, at);
+          expect({ text, at, ok: which >= 0 && which <= first }).toEqual({ text, at, ok: true });
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(500);
+  });
+
+  test("a multi-word term after an emoji is marked too", () => {
+    expect(marked("- 📄 Ask for the hold queue\n" + g)).toEqual([["hold queue", "hold queue"]]);
+  });
+});
+
+describe("the word before a term, as the composed text reads it", () => {
+  test("a skipped run ending in a mark that composes to a non-word character lets the next word start a term", () => {
+    const entries: GlossaryEntry[] = [{ term: "Renewal", ...glossaryKey("Renewal"), definition: "another loan period", codeSpelled: false, at: 0 }];
+    // `=` + U+0338 composes to `≠`, not a word character; the raw last unit is the mark.
+    for (const tail of ["≠", "=&#x338;"]) {
+      expect(marks(markGlossaryTerms(`<p><mark class="fc-mark">a ${tail}</mark>renewal</p>`, entries))).toEqual([["renewal", "renewal"]]);
+    }
+    expect(marks(markGlossaryTerms(`<p><mark class="fc-mark">a é</mark>renewal</p>`, entries))).toEqual([]);
+  });
+});
+
+describe("a first letter whose lower case is two characters", () => {
+  test.each([
+    ["an exact-case term", "İSTANBUL", "The İSTANBUL branch opens.", [["i̇STANBUL", "İSTANBUL"]]],
+    ["a case-free term", "İzmir", "The İzmir branch opens.", [["i̇zmir", "İzmir"]]],
+  ])("%s matches its own spelling", (_name, term, prose, want) => {
+    expect(marked(prose + "\n" + glossary(`- **${term}:** a branch library`))).toEqual(want);
   });
 });

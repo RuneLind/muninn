@@ -102,16 +102,19 @@ function units(raw: string): Unit[] {
   return out;
 }
 
-/** A text token's first and last decoded code unit: all a word-boundary test
- *  reads of a token it does not otherwise scan. NFC never changes whether
- *  either is a word character. */
+/** A text token's first decoded code unit: all a word-boundary test reads
+ *  after a token. NFC never changes whether it is a word character. */
 function firstUnit(raw: string): string {
   return raw[0] === "&" ? (entityAt(raw, 0)?.text[0] ?? "&") : raw[0]!;
 }
+/** A token's last code unit in NFC: all a word-boundary test reads before the
+ *  next token. A trailing mark may compose into a character that is not a word
+ *  one (`=` + U+0338 is `≠`), so a token ending in one is folded. */
 function lastUnit(raw: string): string {
   const amp = raw.lastIndexOf("&");
   const e = amp >= 0 ? entityAt(raw, amp) : null;
-  return e && amp + e.len === raw.length ? e.text.at(-1)! : raw.at(-1)!;
+  const last = e && amp + e.len === raw.length ? e.text.at(-1)! : raw.at(-1)!;
+  return MARK_RE.test(last) ? fold(raw).text.at(-1)! : last;
 }
 
 interface Folded {
@@ -205,10 +208,7 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
     .sort((a, b) => [...b.key].length - [...a.key].length)
     .map((e) => ({ e, re: termPattern(e) }));
   if (terms.length === 0) return html;
-  // Where any term may start, case aside; at such a place, group g of `whichTerm`
-  // is the first term, longest first, that does (groups cost the scan ~40 %).
-  const anyTerm = new RegExp(terms.map((t) => `(?:${t.re.source})`).join("|"), "giu");
-  const whichTerm = new RegExp(terms.map((t) => `(${t.re.source})`).join("|"), "iuy");
+  const scan = termScanner(terms.map((t) => t.re));
   const tokens = html.match(TOKEN_RE) ?? [];
   // Per tag token its name and whether words run through it (null: not a tag);
   // per token the first visible character after it, read across inline tags.
@@ -263,11 +263,10 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
     const text = f.text;
     let raw = 0;
     let piece = "";
+    const subject = scan.subject(text);
     for (let pos = 0; pos < text.length; ) {
-      anyTerm.lastIndex = pos;
-      const m = anyTerm.exec(text);
-      if (!m) break;
-      const at = m.index;
+      const at = scan.next(subject, pos);
+      if (at < 0) break;
       const k = chunkAt(f, at);
       if (k < 0) {
         pos = at + 1;
@@ -276,13 +275,11 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
       pos = startOf(f, k + 1);
       const before = at === 0 ? prev : text[at - 1]!;
       if (WORD_CHAR_RE.test(before)) continue;
-      whichTerm.lastIndex = at;
-      const w = whichTerm.exec(text)!;
-      let g = 1;
-      while (w[g] === undefined) g++;
+      const first = scan.which(subject, at);
+      if (first < 0) continue;
       let end = -1;
       let found: (typeof terms)[number] | undefined;
-      for (let j = g - 1; j < terms.length && !found; j++) if ((end = matchEnd(f, k, terms[j]!.re, nextChar[i]!)) >= 0) found = terms[j];
+      for (let j = first; j < terms.length && !found; j++) if ((end = matchEnd(f, k, terms[j]!.re, nextChar[i]!)) >= 0) found = terms[j];
       if (!found) continue;
       const endChunk = chunkAt(f, end);
       if (urlToken(text, at)) continue;
@@ -306,15 +303,73 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
   return out;
 }
 
+const SURROGATE_RE = /[\uD800-\uDFFF]/;
+const SURROGATE_G = /[\uD800-\uDFFF]/g;
+
+export interface TermScanner {
+  /** The string `next` and `which` search for `text`: the same offsets. */
+  subject(text: string): string;
+  /** The first offset from `pos` where some pattern matches, or -1. */
+  next(subject: string, pos: number): number;
+  /** The first pattern, in order, that matches at `at`; -1 for none. */
+  which(subject: string, at: number): number;
+}
+
+/**
+ * Where any of `patterns` (sticky, `u`) starts, through one `giu` alternation
+ * and one sticky `iuy` one rather than a pattern per place. Under `u`, Bun
+ * 1.3.10's alternation misses some matches in a subject that holds a character
+ * outside the BMP (`/(?:hold\s+queue)|(?:data)/giu` finds nothing in «📄 Data»), so `subject` swaps each surrogate for U+FFFF, which no pattern
+ * without one can match; a pattern that holds one is scanned per pattern.
+ */
+export function termScanner(patterns: readonly RegExp[]): TermScanner {
+  const at1 = (subject: string, at: number) =>
+    patterns.findIndex((re) => {
+      re.lastIndex = at;
+      return re.test(subject);
+    });
+  if (patterns.some((re) => /[\uD800-\uDFFF\uFFFF]/.test(re.source))) {
+    return {
+      subject: (text) => text,
+      next(subject, pos) {
+        for (let at = pos; at < subject.length; at++) if (at1(subject, at) >= 0) return at;
+        return -1;
+      },
+      which: at1,
+    };
+  }
+  // Group g of `whichTerm` is the first pattern that matches (groups cost the scan ~40 %).
+  const anyTerm = new RegExp(patterns.map((re) => `(?:${re.source})`).join("|"), "giu");
+  const whichTerm = new RegExp(patterns.map((re) => `(${re.source})`).join("|"), "iuy");
+  return {
+    subject: (text) => (SURROGATE_RE.test(text) ? text.replace(SURROGATE_G, "\uFFFF") : text),
+    next(subject, pos) {
+      anyTerm.lastIndex = pos;
+      return anyTerm.exec(subject)?.index ?? -1;
+    },
+    which(subject, at) {
+      whichTerm.lastIndex = at;
+      const w = whichTerm.exec(subject);
+      if (!w) return -1;
+      let g = 1;
+      while (w[g] === undefined) g++;
+      return g - 1;
+    },
+  };
+}
+
 /** A sticky pattern for `e`: a space matches any white space run (a no-break
  *  space, a soft line break); the first letter's case is free, and the rest
- *  matches exactly when `e.exactCase`. */
-function termPattern(e: GlossaryEntry): RegExp {
+ *  matches exactly when `e.exactCase`. Built from the term as written, not its
+ *  key: a letter may lower-case to two (`İ` to `i` + U+0307). */
+export function termPattern(e: GlossaryEntry): RegExp {
   const esc = (c: string) => (c === " " ? "\\s+" : c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const [first = "", ...rest] = e.key;
-  if (!e.exactCase) return new RegExp([...e.key].map(esc).join(""), "iuy");
-  const head = first === first.toUpperCase() ? esc(first) : `(?:${esc(first)}|${esc(first.toUpperCase())})`;
-  return new RegExp(head + rest.map(esc).join(""), "uy");
+  const [first = "", ...rest] = e.term.normalize("NFC").replace(/\s+/gu, " ");
+  // Under `i` a letter matches its other case, unless that case is longer.
+  const cases = e.exactCase ? [first, first.toLowerCase(), first.toUpperCase()] : [first, ...[first.toLowerCase()].filter((c) => c.length > first.length)];
+  const firsts = [...new Set(cases)].map((f) => [...f].map(esc).join(""));
+  const head = firsts.length === 1 ? firsts[0]! : `(?:${firsts.join("|")})`;
+  return new RegExp(head + rest.map(esc).join(""), e.exactCase ? "uy" : "iuy");
 }
 
 /** The end offset in `f.text` of a match of `re` at chunk `k` that ends on a
