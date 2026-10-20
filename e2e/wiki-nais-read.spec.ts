@@ -445,6 +445,7 @@ async function apiLinksOutsideSlice(page: Page): Promise<string[]> {
       "/api/wiki/page",
       "/api/wiki/page/provenance",
       "/api/wiki/related",
+      "/api/wiki/decision-chain",
       "/api/wiki/html",
       "/api/wiki/graph",
     ];
@@ -675,13 +676,14 @@ const VIA_PROXY = { "x-forwarded-for": "203.0.113.9", "x-muninn-token": SECRET }
 const ZONE_REFUSAL = { error: "forbidden", reason: "admin-only route" };
 const Q = `wiki=${WIKI}`;
 
-/** All seven read-slice paths, each with parameters that make it answer 200. */
+/** All eight read-slice paths, each with parameters that make it answer 200. */
 const READS = [
   `/wiki?${Q}`,
   `/api/wiki/pages?${Q}`,
   `/api/wiki/page?${Q}&relPath=${encodeURIComponent(PAGE_REL)}`,
   `/api/wiki/page/provenance?${Q}&relPath=${encodeURIComponent(PAGE_REL)}`,
   `/api/wiki/related?${Q}&relPath=annen-side.md&exclude=${encodeURIComponent(PAGE_REL)}`,
+  `/api/wiki/decision-chain?${Q}&relPath=${encodeURIComponent(PAGE_REL)}`,
   `/api/wiki/html?${Q}&relPath=plans/testside.html`,
   `/api/wiki/graph?${Q}&scope=wiki&level=1&depth=0`,
 ];
@@ -726,7 +728,7 @@ test.describe("zone rows under nais — role `user`", () => {
     expect(r.text).not.toContain("<nav");
   });
 
-  test("all seven read-slice paths pass the zone and answer 200", async () => {
+  test("all eight read-slice paths pass the zone and answer 200", async () => {
     for (const p of READS) {
       expect(`${p} → ${(await probe(BASE, p)).status}`).toBe(`${p} → 200`);
     }
@@ -763,7 +765,7 @@ test.describe("zone rows under nais — role `user`", () => {
 });
 
 test.describe("zone rows under nais — role `admin`", () => {
-  test("all seven read-slice paths answer 200", async () => {
+  test("all eight read-slice paths answer 200", async () => {
     for (const p of READS) {
       expect(`${p} → ${(await probe(ADMIN_BASE, p)).status}`).toBe(`${p} → 200`);
     }

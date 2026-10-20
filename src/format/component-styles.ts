@@ -1061,3 +1061,98 @@ export function factcheckReaderCss(scope: string): string {
     ${scope} .fc-card-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   `;
 }
+
+/**
+ * Reader-only: the decision chain view and the PR strip (`decision-views.ts`).
+ * Only the wiki reader renders them (`views: true`), so chat and `/research`
+ * never ship these rules. Theme tokens only. Each view is its own size
+ * container (`dc-view`): the rail and chat panes narrow the article, not the
+ * viewport, so the one-block-per-chain form follows the view's own width.
+ */
+export function decisionViewsCss(scope: string): string {
+  return `
+    ${scope} .dc-view {
+      margin: 0.8rem 0 1rem; padding: 0.6rem 0.8rem; border-radius: 8px; max-width: 100%;
+      box-sizing: border-box; background: var(--bg-panel); border: 1px solid var(--border-primary);
+      container: dc-view / inline-size;
+    }
+    ${scope} .dc-title { font-size: 0.8em; font-weight: 600; color: var(--text-soft); margin-bottom: 0.4rem; }
+    /* One grid over every row (rows are subgrids) with each cell on a fixed
+       column, so all decisions start at one x whether or not a row has
+       questions or outputs. The questions and decision columns are capped and
+       wrap, so one long row does not push every other row's chips right. */
+    ${scope} .dc-rows {
+      display: grid; gap: 0.35rem 0.4rem; font-size: 0.85em;
+      grid-template-columns: fit-content(min(30%, 12rem)) auto fit-content(30%) auto minmax(8rem, 1fr);
+    }
+    ${scope} .dc-row {
+      display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: start;
+      position: relative; --dc-pop-h: calc(4lh + 0.8rem + 2px);
+    }
+    /* A row with an open node reserves a band under its chips for the
+       popover, so later rows move down instead of being covered. */
+    ${scope} .dc-row:has(.dc-node[open]) { padding-bottom: calc(var(--dc-pop-h) + 0.3rem); }
+    ${scope} .dc-qs { grid-column: 1; }
+    ${scope} .dc-a-q { grid-column: 2; }
+    ${scope} .dc-dec { grid-column: 3; }
+    ${scope} .dc-a-out { grid-column: 4; }
+    ${scope} .dc-outs { grid-column: 5; }
+    ${scope} .dc-qs, ${scope} .dc-outs, ${scope} .dc-dec { display: flex; flex-wrap: wrap; gap: 0.25rem; min-width: 0; }
+    ${scope} .dc-arrow { color: var(--text-soft); }
+    ${scope} .dc-node { display: inline-block; }
+    ${scope} .dc-node > summary {
+      list-style: none; cursor: pointer; padding: 0 0.45rem; border-radius: 999px;
+      color: var(--text-primary); background: var(--tint-neutral); border: 1px solid var(--border-secondary);
+    }
+    ${scope} .dc-node > summary::-webkit-details-marker { display: none; }
+    ${scope} .dc-node.dc-d > summary { background: var(--tint-info); border-color: var(--status-info); font-weight: 600; }
+    ${scope} .dc-node.dc-struck > summary { text-decoration: line-through; background: transparent; }
+    ${scope} .dc-node > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    /* In its row's band: the chip keeps its size and place, and the row's
+       width bounds the popover. A longer text scrolls inside the band. */
+    ${scope} .dc-pop {
+      position: absolute; left: 0; bottom: 0; box-sizing: border-box; width: min(32rem, 100%);
+      height: var(--dc-pop-h); overflow-y: auto; padding: 0.4rem 0.6rem; border-radius: 6px;
+      background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border-primary);
+      overflow-wrap: anywhere;
+    }
+    ${scope} .dc-go { display: inline-block; margin-left: 0.3rem; color: var(--accent); }
+    ${scope} .dc-snudd {
+      padding: 0 0.4rem; border-radius: 4px; font-size: 0.85em; color: var(--text-primary);
+      background: var(--tint-warning); border: 1px solid var(--status-warning);
+    }
+    ${scope} .dc-by { font-size: 0.85em; color: var(--text-soft); }
+    ${scope} .dc-out, ${scope} .dc-pr {
+      display: inline-block; padding: 0 0.4rem; border-radius: 4px; color: var(--text-primary);
+      border: 1px solid var(--border-secondary); background: var(--tint-neutral); white-space: nowrap;
+    }
+    ${scope} .dc-out.dc-prose { border-style: dashed; }
+    /* Before the state rules: a swatch takes its state's fill and border as a square does. */
+    ${scope} .dc-sw { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 3px; border: 1px solid var(--border-secondary); }
+    ${scope} .dc-s-merged { background: var(--tint-success); border-color: var(--status-success); }
+    ${scope} .dc-s-open, ${scope} .dc-s-measurement { background: var(--tint-info); border-color: var(--status-info); }
+    ${scope} .dc-s-planned, ${scope} .dc-s-not-started, ${scope} .dc-s-optional { background: transparent; border-style: dashed; }
+    ${scope} .dc-s-blocked { background: var(--tint-warning); border-color: var(--status-warning); }
+    ${scope} .dc-s-dropped, ${scope} .dc-s-closed { background: var(--tint-error); border-color: var(--status-error); text-decoration: line-through; }
+    ${scope} .dc-s-unknown { background: transparent; border-style: dotted; color: var(--text-soft); }
+    ${scope} .dc-track { display: flex; flex-wrap: wrap; gap: 0.5rem 0.9rem; }
+    ${scope} .dc-phase { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+    ${scope} .dc-ph { font-size: 0.8em; color: var(--text-soft); }
+    ${scope} .dc-prs { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    ${scope} .dc-pr { font-size: 0.8em; min-width: 1.6rem; text-align: center; }
+    ${scope} .dc-legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; margin-top: 0.5rem; font-size: 0.8em; color: var(--text-soft); }
+    ${scope} .dc-key { display: inline-flex; align-items: center; gap: 0.3rem; }
+    /* Narrow: each chain is one bordered block, its chips wrapping inline in
+       order (questions → decision → outputs) with the arrows kept. */
+    @container dc-view (max-width: 30rem) {
+      ${scope} .dc-rows { display: flex; flex-direction: column; gap: 0.45rem; }
+      ${scope} .dc-row {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.3rem;
+        padding: 0.3rem 0.45rem; border: 1px solid var(--border-secondary); border-radius: 6px;
+      }
+      ${scope} .dc-qs, ${scope} .dc-dec, ${scope} .dc-outs { display: contents; }
+      ${scope} .dc-row:has(.dc-node[open]) { padding-bottom: calc(var(--dc-pop-h) + 0.6rem); }
+      ${scope} .dc-pop { left: 0.3rem; bottom: 0.3rem; width: min(32rem, calc(100% - 0.6rem)); }
+    }
+  `;
+}

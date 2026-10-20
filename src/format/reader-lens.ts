@@ -147,6 +147,9 @@ export const DL_DECISION_CLASS = "dl-decision";
 export const DL_WHEN_CLASS = "dl-when";
 export const DL_TAIL_CLASS = "dl-tail";
 export const CB_LINE_CLASS = "cb-line";
+/** The root class of the decision chain view and the PR strip (`decision-views.ts`):
+ *  a peek copy leaves them out. */
+export const DC_VIEW_CLASS = "dc-view";
 /** On each item of a DecisionLog list, set by the reader: its authored
  *  position in the list, which the reader's newest-first order moves away from. */
 export const DL_ORDER_ATTR = "data-dl-order";

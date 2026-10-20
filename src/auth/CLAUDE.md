@@ -978,7 +978,7 @@ is the one surface the user zone is written around.
    `/api/search/` reads were already owner-guarded, so this is enumeration
    rather than new protection. **Plus, under `MUNINN_PROFILE=nais` only, the
    wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki` and
-   `/api/wiki/{pages,page,page/provenance,related,html,graph}`, GET/HEAD only),
+   `/api/wiki/{pages,page,page/provenance,related,decision-chain,html,graph}`, GET/HEAD only),
    plus the slice's one write: GET/HEAD and POST on the exact path
    `/api/wiki/answers` (`WIKI_READ_SLICE_METHOD_ENTRIES` — rows of `{methods,
    path}`, the deny list's shape read the other way; answer cards PR 5). The

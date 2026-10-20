@@ -181,6 +181,8 @@ export const E2E_PORTS = {
   // ONE muninn over writable and read-only synthetic wikis, ONE fake claude-usage.
   "wiki-rail-thread-boundaries": 3155,
   "wiki-rail-thread-boundaries/ledger": 3156,
+  // The decision chain view and PR strip: ONE muninn over a synthetic plan wiki.
+  "wiki-decision-views": 3157,
   // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.
