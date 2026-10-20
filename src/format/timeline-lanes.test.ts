@@ -209,6 +209,12 @@ describe("labels", () => {
     const no = renderWikiHtml(md, () => undefined, { views: true, today: TODAY, language: "no" } as Parameters<typeof renderWikiHtml>[2]);
     expect(lanesOf(no)).toContain('title="04.09.2026: Spørring"');
   });
+
+  test("the word for a query never names an item of another lane", () => {
+    const md = page(status, ["<DecisionLog>", "", "- ", "  - Renewal 2026-09-03", "- **D2** — B. 2026-09-05", "", "</DecisionLog>", ""], timeline("**2026-09-01** — X", "**2026-09-10** — Y"));
+    expect(lanesOf(reader(md))).toContain('title="2026-09-05: D2"');
+    expect(lanesOf(reader(md))).not.toContain("Query");
+  });
 });
 
 describe("year-less Timeline dates", () => {
