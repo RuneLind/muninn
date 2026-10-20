@@ -237,6 +237,24 @@ async function openRowMenu(page: Page, rel: string): Promise<void> {
 }
 
 /**
+ * Open the row's ⋯ and wait until the menu has READ `rel`'s base.
+ *
+ * The menu paints first and reads its bases after (`loadSeriesBases`), so an
+ * out-of-band write made the moment the menu is visible can land before that
+ * read, which then takes the moved bytes as its base and the write succeeds.
+ * The listener is installed before the click; the server has hashed the file
+ * once the response arrives.
+ */
+async function openRowMenuAfterBaseRead(page: Page, rel: string): Promise<void> {
+  const baseRead = page.waitForResponse((r) => {
+    const url = new URL(r.url());
+    return url.pathname === "/api/wiki/page" && url.searchParams.get("relPath") === rel;
+  });
+  await openRowMenu(page, rel);
+  await baseRead;
+}
+
+/**
  * Open the Series fold.
  *
  * Load-bearing, not setup noise: a CLOSED fold renders none of its member rows
@@ -435,7 +453,7 @@ test.describe("read-only", () => {
 test.describe("the base the menu holds", () => {
   test("an edit made while the menu is open is refused, not overwritten", async ({ page }) => {
     await openRail(page);
-    await openRowMenu(page, JOINER);
+    await openRowMenuAfterBaseRead(page, JOINER);
     // Behind the server AND behind the reader: the menu is already painted.
     const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
     await writeFile(path.join(root, JOINER), edited, "utf8");
@@ -644,7 +662,7 @@ test.describe("the menu between clicks", () => {
       if (req.method() === "POST" && req.url().includes("/api/wiki/series")) posts++;
     });
     await openRail(page);
-    await openRowMenu(page, JOINER);
+    await openRowMenuAfterBaseRead(page, JOINER);
     const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
     await writeFile(path.join(root, JOINER), edited, "utf8");
     await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
