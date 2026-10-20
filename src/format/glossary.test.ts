@@ -86,6 +86,7 @@ describe("the paragraph shape", () => {
   test.each([
     ["a copula", "A **Hold** is a book kept back.", "Hold", "is a book kept back."],
     ["a Norwegian copula", "Et **Lån** er en avtale.", "Lån", "er en avtale."],
+    ["Den and a copula", "Den **Fornyelsen** er et nytt lån.", "Fornyelsen", "er et nytt lån."],
     ["a plural copula", "The *Renewals* are new loans.", "Renewals", "are new loans."],
     ["a colon", "A **Hold**: a book kept back.", "Hold", "a book kept back."],
     ["an em dash", "The *Renewal* — a new loan.", "Renewal", "a new loan."],
