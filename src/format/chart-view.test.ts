@@ -199,8 +199,8 @@ describe("gate pills", () => {
   });
 
   // A ledger whose slate and GitHub numbers differ: slate 16 is merged, the
-  // row linking GitHub PR 16 is slate 3 and open.
-  const ledger = ["## PR ledger", "", "| PR | What | State |", "|---|---|---|", "| 16 | a | merged |", "| 3 — [#16](https://example.test/o/r/pull/16) | b | open |", ""];
+  // row linking GitHub PR 16 is slate 3 and open; GitHub PR 20 is slate 5.
+  const ledger = ["## PR ledger", "", "| PR | What | State |", "|---|---|---|", "| 16 | a | merged |", "| 3 — [#16](https://example.test/o/r/pull/16) | b | open |", "| 5 — [#20](https://example.test/o/r/pull/20) | c | open |", ""];
   const pills = (out: string) => [...out.matchAll(/<span class="dc-pr dc-s-([a-z-]+) vc-pill"[^>]*aria-label="([^"]*)"/g)].map((m) => [m[1], m[2]]);
 
   test("a link-only first cell matches the ledger row with that link, not the slate with that number", () => {
@@ -213,8 +213,8 @@ describe("gate pills", () => {
     expect(pills(out).map((p) => p[0])).toEqual(["open", "open"]);
   });
 
-  test("a slate matches the ledger row with that slate; a link no ledger row carries gets no pill", () => {
-    const out = reader([...ledger, gate(["| 16 — a | 2 | 3 | 3 |", "| [#9](https://example.test/o/r/pull/9) | 2 | 3 | 3 |", "| 3 — [#16](https://example.test/o/r/pull/16) | 2 | 3 | 3 |"])].join("\n"));
+  test("a slate matches only the ledger row with that slate; a link no ledger row carries gets no pill", () => {
+    const out = reader([...ledger, gate(["| 16 — a | 2 | 3 | 3 |", "| [#9](https://example.test/o/r/pull/9) | 2 | 3 | 3 |", "| 20 — c | 2 | 3 | 3 |", "| 3 — [#16](https://example.test/o/r/pull/16) | 2 | 3 | 3 |"])].join("\n"));
     expect(pills(out)).toEqual([["merged", "PR 16 · merged"], ["open", "PR 3 · open"]]);
   });
 
