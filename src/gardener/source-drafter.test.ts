@@ -7,6 +7,7 @@ import {
   labelNamesHost,
   buildSourceDraftPrompt,
   buildSourceRevisePrompt,
+  keepCurrentFrontmatter,
   VERBATIM_MATERIAL_RULE,
   MIN_SOURCE_BODY_CHARS,
   COLLISION_SKIP_SENTINEL,
@@ -1220,11 +1221,60 @@ describe("draftSourcePage — update mode", () => {
     expect("reason" in out && out.reason).toContain("no frontmatter title");
   });
 
+  test("keeps the current page's frontmatter, apart from `updated:` (architecture review 2026-10, finding 62)", async () => {
+    // The prompt asks the reviser to keep frontmatter; nothing enforced it. A
+    // revise that empties aliases/tags and drops an unnamed key was persisted.
+    const current = mdxDraft({
+      body: "# Retrieval-Augmented Generation\n\nThe page as a reviewer approved it.",
+    })
+      .replace("tags: [rag]", "tags: [rag, infra]")
+      .replace("updated: 2026-07-19\n", "updated: 2026-07-19\nreconstructed: 2026-08-01 from the capture\n");
+    const revised = mdxDraft({
+      body: "# Retrieval-Augmented Generation\n\nThe page as a reviewer approved it.\n\n```yaml\nk: v\n```",
+    })
+      .replace("aliases: [RAG]", "aliases: []")
+      .replace("tags: [rag]", "tags: []")
+      .replace("updated: 2026-07-19", "updated: 2026-10-20");
+    let captured: InsertWikiProposalParams | null = null;
+    const out = await draftSourcePage(
+      updateDeps({
+        update: { relPath: RELPATH, currentText: current },
+        callDrafter: async () => revised,
+        insertProposal: async (params) => {
+          captured = params;
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    const fm = (t: string) => t.split("---\n")[1]!;
+    expect(fm(captured!.draft)).toBe(fm(current).replace("updated: 2026-07-19", "updated: 2026-10-20"));
+    // The body is still the reviser's.
+    expect(captured!.draft).toContain("```yaml\nk: v\n```");
+  });
+
   test("a live proposal for the doc still blocks — a pending draft is a real duplicate", async () => {
     const out = await draftSourcePage(
       updateDeps({ liveTopicKeys: async () => [sourceTopicKey("youtube-summaries", "abc12345678")] }),
     );
     expect(out.outcome).toBe("covered");
+  });
+});
+
+describe("keepCurrentFrontmatter", () => {
+  test("appends the draft's updated: when the page has none", () => {
+    expect(keepCurrentFrontmatter("---\ntitle: A\n---\nold\n", "---\ntitle: B\nupdated: 2\n---\nnew\n")).toBe(
+      "---\ntitle: A\nupdated: 2\n---\nnew\n",
+    );
+  });
+  test("replaces the page's updated: in place, keeping a $ in it literal", () => {
+    expect(
+      keepCurrentFrontmatter("---\ntitle: A\nupdated: 1\ntags: [x]\n---\nold\n", "---\ntitle: B\nupdated: $&2\n---\nnew\n"),
+    ).toBe("---\ntitle: A\nupdated: $&2\ntags: [x]\n---\nnew\n");
+  });
+  test("leaves the draft alone when either side has no fence", () => {
+    expect(keepCurrentFrontmatter("no fence", "---\ntitle: B\n---\nnew\n")).toBe("---\ntitle: B\n---\nnew\n");
+    expect(keepCurrentFrontmatter("---\ntitle: A\n---\n", "no fence")).toBe("no fence");
   });
 });
 
@@ -1491,6 +1541,19 @@ describe("draftSourcePage — See-also seeding (relatedPages)", () => {
   test("a label naming a different version of the host is refused", async () => {
     const opus = page({ title: "Claude Opus 4.7", name: "Claude Opus 4.7", type: "entity", relPath: "entities/Claude Opus 4.7.md", aliases: ["Opus 4.7"] });
     expect((await seeded({}, "Unlike [[Claude Opus 4.7|Opus 4.6]].", [opus])).relatedPages).toEqual([]);
+  });
+
+  test("a link inside an existing fact-check block never picks the See-also host (finding 64)", () => {
+    const pages = [
+      page({ title: "Other Talk", name: "Other Talk", type: "source", relPath: "sources/Other Talk.mdx" }),
+      concept("Habits"),
+    ];
+    const current = mdxDraft({
+      body: "Body cites [[Other Talk]].\n\n<!-- factcheck:start -->\n## Fact check\n\nSee [[Habits]].\n<!-- factcheck:end -->",
+    });
+    expect(sourceRelatedPages(current, fakeIndex(pages), "sources/X.mdx")).toEqual([
+      { title: "Other Talk", relPath: "sources/Other Talk.mdx" },
+    ]);
   });
 
   test("no index → no related pages", () => {

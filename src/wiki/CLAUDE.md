@@ -732,7 +732,10 @@ quoted or not, with a trailing `# comment` (`readCull`). In code the bit is
   read `seriesHead`/`newestSeriesPlan`; check 8.3(b) reads `seriesHead`, and
   8.3(a)/(c) read `headOf` (no label rung) — both count culled members. The
   editor's one-label check (`otherLabelledMember`) scans raw pages, not the
-  census, as on main (known gap, see the PR's known limits). So 8.3(a) normalises LIVE
+  census, re-reading every indexed markdown page's frontmatter INSIDE the write
+  section (batches of 32; ~12 ms on mimir's 513 pages, ~30 ms on jarvis's 1,480),
+  so a label another writer added since the index was built counts — including on
+  a page that joined the series after it. So 8.3(a) normalises LIVE
   members to a culled head's spelling, 8.3(b) removes a live member's label when
   a culled head carries the newer one, 8.3(c) joins under the head's spelling,
   and a finding whose head is culled is filed against the newest edited page.
@@ -3951,6 +3954,9 @@ lines — and because a hook is synchronous on a tool call while a human clickin
 can wait. The stale window is the same on both sides: shorter here and muninn
 seizes a lock the stamper still holds; longer and muninn waits behind an
 interrupted stamp longer than the stamper would wait for itself.
+Known gap: the stale takeover can delete a lock it did not measure (a lock
+another process re-created between the stale check and the unlink) — finding 23
+of arch review 2026-10, deferred to a follow-up by the #720 class check.
 
 **On acquire muninn writes ONE JSON line into the file** — `{pid, host, op, at}`.
 For an operator it answers "who is holding this, and since when" from a file that
