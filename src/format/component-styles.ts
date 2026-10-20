@@ -1089,7 +1089,7 @@ export function statusTilesCss(scope: string): string {
     }
     ${scope} .sr-tiles .sr-big + .sr-sep { font-size: 0; }
     /* A pill in the big value wraps inside its tile instead of running under the next one. */
-    ${scope} .sr-tiles .sr-big .sr-state { display: inline-block; max-width: 100%; white-space: normal; }
+    ${scope} .sr-tiles .sr-big .sr-state { display: inline-block; max-width: 100%; white-space: normal; border-radius: 0.5em; }
     /* On a tinted tile the pill's own tint can match it: outline it in its ink. */
     ${scope} .sr-tiles [class*="sr-tone-"] .sr-state { border-color: currentColor; }
     ${scope} .sr-tiles .sr-tone-good { background: var(--tint-success); }
