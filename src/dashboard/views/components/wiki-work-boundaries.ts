@@ -36,7 +36,7 @@
 
 import type { WikiListing } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
-import { unwrapAliasRef } from "../../../wiki/alias-ref.ts";
+import { classifyAliasRef } from "../../../wiki/alias-ref.ts";
 import { newestFocusPage, threadHoldsPin, usableThreads } from "./wiki-thread-core.ts";
 import { WORK_GROUP_SPLITS_MAX, type WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { readWorkEvidence, threadSessionsAvailability, type WorkGroupUnavailableReason, type WorkUnit } from "./wiki-work-groups.ts";
@@ -116,13 +116,20 @@ export interface WorkBoundariesInput {
 }
 
 /** The page a stored path names: itself when the listing holds it; else the
- *  ONE page carrying it as a path alias (`aliases: [plans/old]`, wikilink form
- *  included); else the ONE page in the stored path's folder carrying its stem
- *  as a bare alias. A stem in another folder names nothing, so a boundary on a
- *  deleted page never moves to an unrelated page (arch review 2026-10, 74/85). */
+ *  ONE page carrying it as a path alias (`aliases: [plans/old]`, `old.md`,
+ *  wikilink form included); else the ONE page in the stored path's folder
+ *  carrying its stem as a bare alias. A stem in another folder names nothing,
+ *  so a boundary on a deleted page never moves to an unrelated page (arch
+ *  review 2026-10, 74/85). An alias is read by `classifyAliasRef`, the
+ *  server's own reading; the top-level folders are the listing's first path
+ *  segments. */
 function resolverFor(allPages: readonly WikiListing[]): (stored: string) => { page?: string; state?: "missing" | "ambiguous" } {
   const byRel = new Set(allPages.map((p) => normalizeRel(p.relPath)));
-  /** Path-shaped alias key → pages; `folder\0stem` of a bare alias → pages. */
+  /** Path alias → pages: one spelling an extension names that path alone
+   *  (`byPathExact`); one without stands for its `.md` and `.mdx` (`byPath`,
+   *  keyed extensionless), as on the server. `folder\0stem` of a bare alias →
+   *  pages. */
+  let byPathExact: Map<string, Set<string>> | null = null;
   let byPath: Map<string, Set<string>> | null = null;
   let byStem: Map<string, Set<string>> | null = null;
   const key = (v: string) => normalizeRel(v.trim()).replace(/\.mdx?$/i, "");
@@ -137,23 +144,26 @@ function resolverFor(allPages: readonly WikiListing[]): (stored: string) => { pa
   return (stored) => {
     const rel = normalizeRel(stored);
     if (byRel.has(rel)) return { page: rel };
-    if (!byPath || !byStem) {
+    if (!byPathExact || !byPath || !byStem) {
+      byPathExact = new Map();
       byPath = new Map();
       byStem = new Map();
+      const topDirs = new Set<string>();
+      for (const r of byRel) if (r.includes("/")) topDirs.add(r.slice(0, r.indexOf("/")));
       for (const p of allPages) {
         const own = normalizeRel(p.relPath);
         for (const a of p.aliases ?? []) {
           if (typeof a !== "string") continue;
-          const v = unwrapAliasRef(a);
-          if (!v) continue;
-          if (v.includes("/")) add(byPath, key(v), own);
-          else add(byStem, `${folderOf(own)}\0${key(v)}`, own);
+          const ref = classifyAliasRef(a, topDirs);
+          if (ref.kind === "path") add(ref.ext ? byPathExact : byPath, normalizeRel(ref.path), own);
+          else if (ref.kind === "stem") add(byStem, `${folderOf(own)}\0${key(ref.stem)}`, own);
         }
       }
     }
     const k = key(stored);
+    const pathHits = new Set([...(byPathExact.get(rel) ?? []), ...(k !== rel ? (byPath.get(k) ?? []) : [])]);
     return (
-      answer(byPath.get(k)) ??
+      answer(pathHits.size ? pathHits : undefined) ??
       answer(byStem.get(`${folderOf(k)}\0${k.split("/").pop() ?? ""}`)) ?? { state: "missing" as const }
     );
   };

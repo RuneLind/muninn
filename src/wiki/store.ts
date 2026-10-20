@@ -44,7 +44,7 @@ import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { normalizeRelPath } from "./rel-path.ts";
-import { unwrapAliasRef } from "./alias-ref.ts";
+import { classifyAliasRef } from "./alias-ref.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { readFrontmatterLists, resolveRelatedEntries, type RelatedEntry } from "./frontmatter-lists.ts";
 import { extractNextMoves } from "./next-moves.ts";
@@ -3082,23 +3082,19 @@ function lastAtOrBefore(times: readonly number[] | undefined, limit: number): nu
 
 /**
  * The worked-ledger keys an `aliases:` entry can stand for — the page's OLD
- * path, when it was moved. An alias is a PATH only when it is path-shaped for
- * THIS wiki: its first segment is a directory under the wiki root (`topDirs`,
- * lower-cased), so a title alias that happens to hold a slash
- * (`claude.ai/design`, `coleam00/Archon`, `/ultrareview`) folds nothing. Such a
- * path (`archive/old-plan`, `[[archive/old-plan]]`) tries `.md` then `.mdx`; a
- * spelled `.md`/`.mdx`/`.html` extension is used as written, and is the only
- * way a root-level move (`old-plan.md`) names itself. A bare name is a title
- * alias and answers nothing.
+ * path, when it was moved. Read through `classifyAliasRef` (`alias-ref.ts`),
+ * the reading the boundary resolver shares: a path-shaped alias (a `/` alias
+ * whose first segment is a directory under the wiki root — `topDirs`,
+ * lower-cased — or a name spelling `.md`/`.mdx`/`.html`, the only way a
+ * root-level move names itself) is a path; anything else answers nothing. An
+ * extensionless path tries `.md` then `.mdx`; a spelled extension is used as
+ * written.
  */
 export function aliasWorkedPaths(alias: string, topDirs: ReadonlySet<string>): string[] {
-  const v = unwrapAliasRef(alias);
-  if (!v) return [];
-  const slash = v.indexOf("/");
-  if (slash !== -1 && !topDirs.has(v.slice(0, slash).toLowerCase())) return [];
-  if (/\.(?:mdx?|html)$/i.test(v)) return [normalizeWorkedPath(v)];
-  if (slash === -1) return [];
-  return [normalizeWorkedPath(`${v}.md`), normalizeWorkedPath(`${v}.mdx`)];
+  const ref = classifyAliasRef(alias, topDirs);
+  if (ref.kind !== "path") return [];
+  if (ref.ext) return [normalizeWorkedPath(ref.path)];
+  return [normalizeWorkedPath(`${ref.path}.md`), normalizeWorkedPath(`${ref.path}.mdx`)];
 }
 
 /**

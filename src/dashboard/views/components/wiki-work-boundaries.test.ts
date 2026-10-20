@@ -11,6 +11,8 @@ import { describe, expect, test } from "bun:test";
 import { applyWorkBoundaries, rowBoundaryAction } from "./wiki-work-boundaries.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import { WORK_EVIDENCE_VERSION, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
+import { aliasWorkedPaths } from "../../../wiki/store.ts";
+import { normalizeWorkedPath } from "../../../wiki/rel-path.ts";
 
 const NOW = Date.UTC(2026, 9, 17, 20, 0);
 const H = 3_600_000;
@@ -291,6 +293,64 @@ describe("applyWorkBoundaries: definitions that do not apply", () => {
     const none = applyWorkBoundaries({ work: work([f.T, f.U], f.rows.filter((r) => r[1] !== "q.md")), allPages: f.pages, splits: [{ id: "a1", page: "q.md" }], keptApart: [] });
     expect(none.definitions[0]!.state).toBe("unattributed");
     expect(none.derived).toEqual([f.T, f.U]);
+  });
+});
+
+// Arch review 2026-10, batch K fix round 1: findings A, F and G. The server
+// (`aliasWorkedPaths`) and this resolver read an alias through one classifier.
+describe("applyWorkBoundaries: an alias is read as the server reads it", () => {
+  const resolveAll = (pages: WikiListing[], stored: string[]) =>
+    applyWorkBoundaries({ work: fixture().work, allPages: pages, splits: stored.map((page, i) => ({ id: `s${i}`, page })), keptApart: [] })
+      .definitions.map((d) => [d.page ?? d.state]);
+
+  test("a root-level move spelled with its extension resolves, plain or wikilink (A)", () => {
+    const f = fixture();
+    for (const alias of ["old-plan.md", "[[old-plan.md]]"]) {
+      const pages = [...f.pages, page("plans/new.md", { aliases: [alias] })];
+      expect(resolveAll(pages, ["old-plan.md"])).toEqual([["plans/new.md"]]);
+    }
+  });
+
+  test("a plain title alias keeps its # and |: its first word names nothing (F)", () => {
+    const f = fixture();
+    const pages = [...f.pages, page("sources/the single instruction method.md", { aliases: ["The #1 Mistake That Makes Children Disrespectful", "A | B"] })];
+    expect(resolveAll(pages, ["sources/The.md", "sources/A .md", "sources/The #1 Mistake That Makes Children Disrespectful.md"])).toEqual([
+      ["missing"],
+      ["missing"],
+      ["sources/the single instruction method.md"],
+    ]);
+  });
+
+  test("a / title whose first segment is no folder of the listing names nothing, as a path or a stem (G)", () => {
+    const f = fixture();
+    const pages = [...f.pages, page("concepts/x.md", { aliases: ["/goal", "openai/math Repository", "ω ≤ 9/4", "/ultrareview"] })];
+    expect(resolveAll(pages, ["/goal.md", "openai/math Repository.md", "ω ≤ 9/4.md", "concepts/goal.md", "concepts/4.md", "/ultrareview.md"])).toEqual(
+      Array.from({ length: 6 }, () => ["missing"]),
+    );
+  });
+
+  test("the server and the resolver agree on every alias: a stored path resolves to the alias's page iff the server folds it", () => {
+    const aliases = [
+      "old-plan.md", "[[old-plan.md]]", "Old.MDX", "x.html", "plans/old", "[[plans/old|label]]", "[[plans/c#history]]",
+      "Plans/Mixed", "plans/a#b", "plans/a|b", "archive/z.md", "/goal", "openai/math Repository", "ω ≤ 9/4",
+      "The #1 Mistake", "claude.ai/design", "openai/x.md",
+    ];
+    const f = fixture();
+    const base = [...f.pages, page("plans/live.md"), page("archive/live.md")];
+    const topDirs = new Set(["plans", "archive", "entities"]);
+    for (const alias of aliases) {
+      const pages = [...base, page("entities/owner.md", { aliases: [alias] })];
+      const folded = new Set(aliasWorkedPaths(alias, topDirs));
+      const plain = alias.replace(/^\[\[|\]\]$/g, "");
+      const cut = plain.split("|")[0]!.split("#")[0]!;
+      const candidates = new Set<string>();
+      for (const v of [alias, plain, cut]) for (const ext of ["", ".md", ".mdx", ".html"]) candidates.add(`${v}${ext}`.replace(/^\/+/, ""));
+      for (const c of candidates) {
+        if (c.toLowerCase().startsWith("entities/") || !c) continue;
+        const d = applyWorkBoundaries({ work: f.work, allPages: pages, splits: [{ id: "x", page: c }], keptApart: [] }).definitions[0]!;
+        expect([alias, c, d.page === "entities/owner.md"]).toEqual([alias, c, folded.has(normalizeWorkedPath(c))]);
+      }
+    }
   });
 });
 
