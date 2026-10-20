@@ -84,6 +84,21 @@ describe("the squares", () => {
     ]);
   });
 
+  test("a board is named by its src as written, so two files sharing a name read apart and the ordinal counts per path", () => {
+    const names = (h: string) => [...h.matchAll(/class="cb-dots" [^>]*aria-label="([^"]*)"/g)].map((m) => m[1]);
+    const nested = new Map<string, PageFileResult>([
+      ["a/x.yaml", { ok: true, text: YAML }],
+      ["b/x.yaml", { ok: true, text: YAML }],
+    ]);
+    const board = (src: string) => `<CaseBoard src="${src}" view="dots" />`;
+    const page = [board("a/x.yaml"), board("b/x.yaml"), board("a/x.yaml")].join("\n\n") + "\n";
+    expect(names(renderWikiHtml(page, () => undefined, { views: true, files: nested }))).toEqual([
+      "Cases by status: a/x.yaml",
+      "Cases by status: b/x.yaml",
+      "Cases by status: a/x.yaml (2)",
+    ]);
+  });
+
   test("the ordinal counts the boards the page shows: a block rendered twice, or drawing no squares, takes none", () => {
     const names = (h: string) => [...h.matchAll(/class="cb-dots" [^>]*aria-label="([^"]*)"/g)].map((m) => m[1]);
     const lane = (inner: string) => `<NextMoves>\n\n<Lane kind="you">\n\n${inner}\n</Lane>\n\n</NextMoves>\n`;

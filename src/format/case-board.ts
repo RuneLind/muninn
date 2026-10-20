@@ -282,8 +282,8 @@ export function caseKort(c: Pick<BoardCase, "kort" | "note">): string {
 
 export type CaseLabels = Partial<Record<CaseStatus, string>>;
 
-/** Which board a dots view draws: the wiki's language, the board's file
- *  name, and how many boards on the page have drawn that name (1 for the first). */
+/** Which board a dots view draws: the wiki's language, the board's `src` as
+ *  written, and how many boards on the page have drawn that src (1 for the first). */
 export interface CaseDotsBoard {
   language: QuestionLanguage;
   file: string;

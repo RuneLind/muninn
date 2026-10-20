@@ -465,7 +465,7 @@ let currentCaseDotsPending: Array<(nth: number) => { file: string; html: string 
 const CASE_DOTS_SENTINEL = /\x00CASEDOTS(\d+)\x00/g;
 
 /** Draw each dots view left in `html`, in page order: the second board drawn
- *  from one file name is «(2)», and a board drawing no squares takes no number. */
+ *  from one src is «(2)», and a board drawing no squares takes no number. */
 function fillCaseDots(html: string, pending: typeof currentCaseDotsPending): string {
   if (!pending.length) return html;
   const seen = new Map<string, number>();
@@ -782,7 +782,8 @@ function caseBoardHtml(src: string, labelsAttr: string | undefined, view: CaseBo
   let dots = "";
   if (view === "dots" && currentCaseDotsView) {
     const view = currentCaseDotsView;
-    const file = pageFileName(src);
+    // The src as written, not its basename: `a/x.yaml` and `b/x.yaml` are two files.
+    const file = src;
     const language = currentLanguage;
     dots = `\x00CASEDOTS${currentCaseDotsPending.length}\x00`;
     currentCaseDotsPending.push((nth) => ({ file, html: view(board.cases, labels, { language, file, nth }) }));

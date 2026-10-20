@@ -16,7 +16,7 @@ import { visibleText } from "./report-top.ts";
 /** A glyph per status, so a square never rests on its colour alone. */
 const GLYPH: Record<CaseStatus | "unknown", string> = { hold: "‖", wait: "…", wrong: "✕", none: "–", ok: "✓", unknown: "?" };
 
-/** The group's name, in the wiki's language; the file and an ordinal tell two boards apart. */
+/** The group's name, in the wiki's language; the board's `src` and an ordinal tell two boards apart. */
 const GROUP_NAME: Record<CaseDotsBoard["language"], string> = { en: "Cases by status", no: "Saker etter status" };
 
 export function caseDotsViewHtml(cases: readonly BoardCase[], labels: CaseLabels, board: CaseDotsBoard): string {
