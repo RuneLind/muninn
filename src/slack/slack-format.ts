@@ -151,10 +151,12 @@ const slackRenderer: BlockRenderer = {
         // No card and no file read: lead lines, the body, then the result's
         // name. Attribute text is the author's plain text (`slackLiteral`).
         // A code span keeps its backticks; inside one only `&<>` are escaped,
-        // since Slack formats nothing there.
+        // since Slack formats nothing there, and a backtick becomes U+02CB
+        // (mrkdwn has no double-backtick span), as in `renderInline`.
         const q = parseQueryAttrs(attrs);
         const { head, answer } = queryLead(q);
-        const inline = (s: string) => renderCodeSpans(s, slackLiteral, (c) => `\`${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}\``);
+        const inline = (s: string) =>
+          renderCodeSpans(s, slackLiteral, (c) => `\`${c.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/`/g, "\u02CB")}\``);
         const result = queryResultLine(q);
         return [head ? `*${inline(head)}*` : "", inline(answer), children, result ? slackFileLine(result) : ""]
           .filter(Boolean)

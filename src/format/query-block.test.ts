@@ -479,5 +479,6 @@ describe("inline code spans pair by the shared exact-N rule on every surface", (
     const q = '<Query id="Q-1" question="Hvorfor ``a ` b``?">\nbody\n</Query>';
     expect(formatTelegramHtml(q)).toContain("<code>a ` b</code>");
     expect(formatEmailHtml(q)).toContain(">a ` b</code>");
+    expect(formatSlackMrkdwn(q)).toBe("*Q-1 — Hvorfor `a \u02CB b`?*\nbody");
   });
 });
