@@ -91,7 +91,7 @@ describe("value cell ids", () => {
   const log = (ids: string[]) => ["<DecisionLog>", "", ...ids.map((id) => `- **${id}** — Decided.`), "", "</DecisionLog>", ""];
 
   test("only decision and question ids link, in gap and gate alike", () => {
-    const g = reader([...log(["D7", "S4"]), gate(["| a | 2 | 3 (D7, X12) | 2 (S4) |"])].join("\n"));
+    const g = reader([...log(["D7", "S4", "X12"]), gate(["| a | 2 | 3 (D7, X12) | 2 (S4) |"])].join("\n"));
     expect(g).toContain('3 (<a class="dc-go" href="#d7" data-dc-ref="D7">D7</a>, X12)');
     expect(g).toContain('2 (<a class="dc-go" href="#s4" data-dc-ref="S4">S4</a>)');
     const gap = reader(
