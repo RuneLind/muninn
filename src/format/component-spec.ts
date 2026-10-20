@@ -428,6 +428,13 @@ export const COMPONENT_SPEC = {
       hold: text,
     },
   },
+  // A rule written as a nested list, read as a tree (`rule-tree.ts`).
+  RuleTree: {
+    attrs: {
+      title: text,
+      outcomes: text,
+    },
+  },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

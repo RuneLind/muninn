@@ -1,5 +1,5 @@
 /**
- * The line search the page-text lint checks share (11, 16, 17): a finding is
+ * The line search the page-text lint checks share (11, 16, 17, 18): a finding is
  * placed on the first line outside a code fence that its test accepts.
  */
 
