@@ -65,7 +65,15 @@ export type Block =
   | OlBlock
   | TableBlock
   | ComponentBlock
-  | { type: "text"; lines: string[] };
+  | TextBlock;
+
+/** A run of lines no other block claimed, blank lines included. The reader
+ *  prints its lines joined by `\n`, so a blank line inside it ends one visible
+ *  paragraph and starts the next. */
+export interface TextBlock {
+  type: "text";
+  lines: string[];
+}
 
 /** `line` is the 0-based line of the header row in the text `parseBlocks` was
  *  given, as {@link ComponentBlock}'s is: a line linter skips the header row the
@@ -141,6 +149,24 @@ const LIST_ITEM_LINES = new WeakMap<ListBlock, number[][]>();
  *  undefined for a list `parseBlocks` did not make. */
 export function listItemLines(list: ListBlock): readonly (readonly number[])[] | undefined {
   return LIST_ITEM_LINES.get(list);
+}
+
+/** The source lines of a text block or an item paragraph, by the same
+ *  convention as {@link LIST_ITEM_LINES}: `[k]` is the line `lines[k]` (a text
+ *  block) or the `k`th line of `text` (an item paragraph) came from. */
+const PARAGRAPH_LINES = new WeakMap<TextBlock | ListParagraph, number[]>();
+
+/** The source lines of a text block or an item paragraph `parseBlocks` made
+ *  ({@link PARAGRAPH_LINES}), or undefined for one it did not make. */
+export function paragraphLines(block: TextBlock | ListParagraph): readonly number[] | undefined {
+  return PARAGRAPH_LINES.get(block);
+}
+
+function noteParagraphLine(block: TextBlock | ListParagraph, line: number | undefined): void {
+  if (line === undefined) return;
+  const all = PARAGRAPH_LINES.get(block) ?? [];
+  PARAGRAPH_LINES.set(block, all);
+  all.push(line);
 }
 
 function noteItemLine(list: ListBlock, line: number | undefined): void {
@@ -1118,9 +1144,12 @@ function parseList(
             : step.level - 1;
       stack[at]!.block.loose = true;
     }
-    if (step.kind === "text" && para) para.text += "\n" + step.text;
-    else {
+    if (step.kind === "text" && para) {
+      para.text += "\n" + step.text;
+      noteParagraphLine(para, store.srcLine[base + k]);
+    } else {
       para = applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
+      if (para) noteParagraphLine(para, store.srcLine[base + k]);
       if (step.kind === "child" || step.kind === "item" || step.kind === "sublist" || step.kind === "text") {
         noteItemLine(stack[stack.length - 1]!.block, store.srcLine[base + k]);
       }
@@ -1465,6 +1494,8 @@ function parseBlocksInner(
   const lines = protectedText.split("\n");
   const blocks: Block[] = [];
   let textBuffer: string[] = [];
+  /** `textBuffer[k]`'s source line, for {@link PARAGRAPH_LINES}. */
+  let textSrc: (number | undefined)[] = [];
   let i = 0;
 
   // Per-parse memo of scan futility: once a multi-line scan for `<Name>` runs to
@@ -1478,8 +1509,11 @@ function parseBlocksInner(
 
   function flushText() {
     if (textBuffer.length > 0) {
-      blocks.push({ type: "text", lines: textBuffer });
+      const block: TextBlock = { type: "text", lines: textBuffer };
+      for (const l of textSrc) noteParagraphLine(block, l);
+      blocks.push(block);
       textBuffer = [];
+      textSrc = [];
     }
   }
 
@@ -1579,6 +1613,7 @@ function parseBlocksInner(
     }
 
     textBuffer.push(line);
+    textSrc.push(store.srcLine[base + i]);
     i++;
   }
   flushText();

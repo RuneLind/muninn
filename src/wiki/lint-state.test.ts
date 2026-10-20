@@ -612,9 +612,10 @@ describe("check 14 exempt text", () => {
   test("HTML and JSX comments are visible text in this reader, for both checks", async () => {
     // renderWikiHtml escapes `<!-- -->` and `{/* */}` and shows them, so they are prose.
     await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
-    const body = ["<!-- DEMO-1 merged -->", "{/* DEMO-2 merged */}", "<!--", "DEMO-3 merged", "-->", "**Status:** waits {/* DEMO-1 merged */}", "", "DEMO-4 merged."];
-    expect(await flaggedBody(body)).toEqual([0, 1, 3, 7]);
-    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx").map((f) => f.line)).toEqual([bodyLine(5)]);
+    // The blank line makes the Status line open its own paragraph (fix round 3).
+    const body = ["<!-- DEMO-1 merged -->", "{/* DEMO-2 merged */}", "<!--", "DEMO-3 merged", "-->", "", "**Status:** waits {/* DEMO-1 merged */}", "", "DEMO-4 merged."];
+    expect(await flaggedBody(body)).toEqual([0, 1, 3, 8]);
+    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx").map((f) => f.line)).toEqual([bodyLine(6)]);
   });
 
   test("a comment marker inside inline code hides nothing", async () => {
@@ -844,4 +845,106 @@ describe("check 14 count anchor edges (fix round 2 batch 2)", () => {
       expect(await flaggedBody([line])).toEqual(flags ? [0] : []);
     });
   }
+});
+
+// ── Batch L fix round 3, class check A: a Status home is the parser's block ──
+
+describe("check 14 Status paragraph extent: every line-start class (fix round 3)", () => {
+  // [line after `**Status:** waits`, does the reader keep the paragraph going].
+  // The probe line under it states DEMO-3's state: linted (flagged) when the
+  // paragraph ended, a home when it did not. Verdicts are the reader's
+  // (`parseBlocks` + `paragraphGaps`), checked against the rendered HTML.
+  const rows: [string, string[], boolean][] = [
+    ["plain text", ["more"], true],
+    ["indented text (2)", ["  more"], true],
+    ["indented text (4)", ["    more"], true],
+    ["a line of spaces", ["   "], true],
+    ["empty line", [""], false],
+    ["break ---", ["---"], false],
+    ["break ----", ["----"], false],
+    ["break * * *", ["* * *"], false],
+    ["break - - -", ["- - -"], false],
+    ["*** (no list marker space)", ["***"], true],
+    ["___", ["___"], true],
+    ["_ _ _", ["_ _ _"], true],
+    ["indented *** ", [" ***"], true],
+    ["indented ---", ["   ---"], true],
+    ["--- with a trailing space", ["--- "], true],
+    ["setext ===", ["==="], true],
+    ["ATX #", ["# Heading"], false],
+    ["ATX ######", ["###### Heading"], false],
+    ["seven #", ["####### x"], true],
+    ["# without a space", ["#x"], true],
+    ["indented ATX", ["   # x"], true],
+    ["paired ``` fence", ["```", "c", "```"], false],
+    ["indented paired ``` fence", ["  ```", "c", "  ```"], false],
+    ["unclosed ``` opener", ["```x"], true],
+    ["paired ~~~", ["~~~", "c", "~~~"], true],
+    ["quote at column 0", ["> x"], false],
+    ["quote, 1 space", [" > x"], true],
+    ["quote, 2 spaces", ["  > x"], true],
+    ["quote, 3 spaces", ["   > x"], true],
+    ["quote, 4 spaces", ["    > x"], true],
+    ["- item", ["- x"], false],
+    ["* item", ["* x"], false],
+    ["1. item", ["1. x"], false],
+    ["+ (never opens a list)", ["+ x"], true],
+    ["1) (never opens a list)", ["1) x"], true],
+    ["indented - mid-paragraph", ["  - x"], true],
+    ["-x (no space)", ["-x"], true],
+    ["html block", ["<div>x</div>"], true],
+    ["html comment", ["<!-- x -->"], true],
+    ["one pipe row", ["| x | b |"], true],
+    ["a pipe table", ["| x | b |", "|---|---|", "| c | d |"], false],
+    ["closed component", ["<Callout>", "x", "</Callout>"], false],
+    ["unclosed component tag", ["<Callout> x"], true],
+    ["stray close tag", ["</Callout>"], true],
+    ["inline component", ['<Pill tone="good">p</Pill> x'], true],
+  ];
+  for (const [form, lines, continues] of rows) {
+    test(`${form}: ${continues ? "continues" : "ends"} the paragraph`, async () => {
+      // A line the paragraph keeps carries a state too: it must be a home.
+      const kept = continues ? lines.map((l) => l.replace(/\bx\b/, "DEMO-2 is merged")) : lines;
+      const body = ["**Status:** waits", ...kept, "DEMO-3 is merged."];
+      expect(await flaggedBody(body)).toEqual(continues ? [] : [body.length - 1]);
+    });
+  }
+});
+
+describe("check 14 an indented quote line inside a Status paragraph is home text (fix round 3)", () => {
+  test("check 2 reads it: the reader shows `  > x` as part of the paragraph", async () => {
+    await write("plans/owner.mdx", page(["Body."], ["owns: [DEMO-1]"]));
+    await write("plans/p.mdx", page(["**Status:** waits", "  > DEMO-1 is merged", "", "> DEMO-1 is merged"]));
+    expect((await notOwner()).filter((f) => f.relPath === "plans/p.mdx").map((f) => f.line)).toEqual([bodyLine(1)]);
+  });
+});
+
+describe("check 14 Status home starts where the reader's block starts (fix round 3)", () => {
+  test("the label must open the paragraph or the parser's list item", async () => {
+    // `+` and `1)` open no list here, so the label is not at the paragraph's start.
+    expect(await flaggedBody(["+ **Status:** DEMO-1 is merged"])).toEqual([0]);
+    expect(await flaggedBody(["1) **Status:** DEMO-1 is merged"])).toEqual([0]);
+    // An indented marker after text continues that text: no item.
+    expect(await flaggedBody(["intro", "  - **Status:** DEMO-1 is merged"])).toEqual([1]);
+    // A label mid-paragraph opens nothing.
+    expect(await flaggedBody(["intro", "**Status:** DEMO-1 is merged"])).toEqual([1]);
+    // An item paragraph opening with the label is a home to its own end.
+    expect(await flaggedBody(["- a", "", "  **Status:** DEMO-1 is merged", "  DEMO-2 is merged.", "", "  DEMO-3 is merged."])).toEqual([5]);
+  });
+});
+
+describe("check 14 Status homes inside a component, below a fence (fix round 3)", () => {
+  // The fence before the component makes the parser's line index and the
+  // page's line differ, so a home read off the wrong line misses.
+  const lead = ["```", "x", "y", "```", "", "<Callout>"];
+  test("a Status list item and its continuation", async () => {
+    expect(await flaggedBody([...lead, "- **Status:** DEMO-1 is merged", "  DEMO-2 is merged.", "- DEMO-3 is merged", "</Callout>"])).toEqual([8]);
+  });
+  test("a nested Status list item and its continuation", async () => {
+    expect(await flaggedBody([...lead, "- a", "  - **Status:** DEMO-1 is merged", "    DEMO-2 is merged.", "- DEMO-3 is merged", "</Callout>"])).toEqual([9]);
+  });
+  test("a Status paragraph and an item paragraph", async () => {
+    expect(await flaggedBody([...lead, "**Status:** DEMO-1 is merged", "DEMO-2 is merged.", "", "DEMO-3 is merged.", "</Callout>"])).toEqual([9]);
+    expect(await flaggedBody([...lead, "- a", "", "  **Status:** DEMO-1 is merged", "  DEMO-2 is merged.", "</Callout>", "DEMO-3 is merged."])).toEqual([11]);
+  });
 });

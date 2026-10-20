@@ -41,7 +41,7 @@
  */
 
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, listItemLines, parseBlocks, readerFencedLines, type Block, type ListChild } from "../format/markdown-ast.ts";
+import { COMPONENT_OPEN_RE, listItemLines, paragraphLines, parseBlocks, readerFencedLines, type Block, type ListChild } from "../format/markdown-ast.ts";
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
@@ -111,14 +111,17 @@ const PR_REF_RE = new RegExp(
 /** A date qualifier: `per 11.10`, `per 11.10.2026`, `(11.10)`. */
 const DATE_QUALIFIER_RE = /(?<![\p{L}\p{N}])per\s+\d{1,2}\.\d{1,2}(?:\.\d{4})?(?![\p{N}])|\(\d{1,2}\.\d{1,2}\)/giu;
 /**
- * A paragraph that is a home: `**Status` with an optional date and an optional
- * `:` or `.`, then `**` — `**Status:**`, `**Status.**`, `**Status 28.09:**`,
- * `**Status 12.10.2026**` — after an optional list marker. `**Statusen**` is not.
+ * The label that makes a paragraph or a list item a home: `**Status` with an
+ * optional date and an optional `:` or `.`, then `**` — `**Status:**`,
+ * `**Status.**`, `**Status 28.09:**`, `**Status 12.10.2026**`. `**Statusen**`
+ * is not. A paragraph's first line (trimmed) starts with it; a list item's
+ * first line starts with it after the item's own marker.
  */
-const STATUS_PARA_RE = /^(?:[-*+]\s+|\d+[.)]\s+)?\*\*Status(?:\s+\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\.?)?[:.]?\*\*/;
+const STATUS_LABEL = "\\*\\*Status(?:\\s+\\d{1,2}\\.\\d{1,2}(?:\\.\\d{2,4})?\\.?)?[:.]?\\*\\*";
+const STATUS_PARA_RE = new RegExp(`^${STATUS_LABEL}`);
+const STATUS_ITEM_RE = new RegExp(`^(?:[-*+]\\s+|\\d+\\.\\s+)${STATUS_LABEL}`);
 /** A blockquote line. `- > x` is a list item: the reader shows its `>`. */
 const QUOTE_RE = /^>/;
-const INLINE_TAG_RE = new RegExp(`^<(?:${INLINE_COMPONENT_NAMES.join("|")})(?=[\\s>/])`);
 
 /** One case-insensitive, word-edged alternation over `words`, longest first so
  *  `ikke opprettet` wins over `opprettet` at the same place. */
@@ -239,33 +242,27 @@ function blockEnd(lines: readonly string[], fenced: readonly boolean[], start: n
   return lines.length - 1;
 }
 
-/** The list items `parseBlocks` makes: the first line of every item, and every
- *  line of an item whose first line is a `**Status**` label. */
-interface ParsedItems {
-  starts: Set<number>;
-  status: Set<number>;
-}
-
 /** Lines inside a tracked block, by `parseBlocks`: a tag the parser renders as
  *  text (a multi-line opener, a close mid-line, trailing prose) opens nothing.
  *  `headers` gets the header row of every table the parser makes: column
- *  labels, not state. `items` gets the parser's list items. */
+ *  labels, not state. `status` gets every line of each Status home the parser
+ *  makes ({@link statusHomeLines}). */
 function trackedLines(
   lines: readonly string[],
   fenced: readonly boolean[],
   body: number,
   headers: Set<number>,
-  items: ParsedItems,
+  status: Set<number>,
 ): Map<number, "home" | "history"> {
   const roles = new Map<number, "home" | "history">();
+  const homeIf = (src: readonly number[] | undefined, re: RegExp) => {
+    if (src?.length && re.test(lines[body + src[0]!]!.trim())) for (const l of src) status.add(body + l);
+  };
   const walkList = (children: readonly ListChild[]) => {
     for (const c of children) {
+      if (c.type === "paragraph") homeIf(paragraphLines(c), STATUS_PARA_RE);
       if (c.type !== "ul" && c.type !== "ol") continue;
-      for (const src of listItemLines(c) ?? []) {
-        const at = src.map((l) => body + l);
-        items.starts.add(at[0]!);
-        if (STATUS_PARA_RE.test(lines[at[0]!]!.trim())) for (const l of at) items.status.add(l);
-      }
+      for (const src of listItemLines(c) ?? []) homeIf(src, STATUS_ITEM_RE);
       for (const n of c.nested ?? []) walkList(n ?? []);
     }
   };
@@ -273,6 +270,21 @@ function trackedLines(
     for (const b of blocks) {
       if (b.type === "table" && b.line !== undefined) headers.add(body + b.line);
       if (b.type === "ul" || b.type === "ol") walkList([b]);
+      if (b.type === "text") {
+        // One visible paragraph per run between empty lines: the reader joins
+        // a text block's lines with `\n` and turns only `\n\n` into a break
+        // (`paragraphGaps`), so a line of spaces stays inside the paragraph.
+        const src = paragraphLines(b) ?? [];
+        let run: number[] = [];
+        for (const l of [...src, -1]) {
+          if (l >= 0 && lines[body + l] !== "") {
+            run.push(l);
+            continue;
+          }
+          homeIf(run, STATUS_PARA_RE);
+          run = [];
+        }
+      }
       if (b.type !== "component") continue;
       if (b.line !== undefined && (b.name === HOME_BLOCK || HISTORY_BLOCKS.includes(b.name))) {
         const start = body + b.line;
@@ -303,16 +315,6 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
     if (j > i) i = j - 1;
   }
   return out;
-}
-
-/** A line that starts a new block, ending a paragraph: a list item the parser
- *  makes (`item`), a heading, a pipe row or a block tag. An inline component
- *  (`<Pill>`) continues the paragraph. A fence line is no case here: a fence the
- *  reader pairs is `fenced` and ends the paragraph before this is asked, and a
- *  `~~~` line or an unclosed opener is prose the reader keeps in it. */
-function startsBlock(t: string, item: boolean): boolean {
-  if (item || /^(?:#{1,6}\s|\|)/.test(t)) return true;
-  return t.startsWith("<") && !INLINE_TAG_RE.test(t);
 }
 
 /**
@@ -351,48 +353,35 @@ export function stateLineRoles(content: string): LineRoles {
   }
 
   const headers = new Set<number>();
-  const items: ParsedItems = { starts: new Set(), status: new Set() };
-  const tracked = trackedLines(lines, fenced, body, headers, items);
+  const status = new Set<number>();
+  const tracked = trackedLines(lines, fenced, body, headers, status);
   const tables = tableRows(lines, fenced, body);
-  let statusPara = false;
   let ledger = false;
-  const reset = () => {
-    statusPara = false;
-    ledger = false;
-  };
   for (let i = body; i < lines.length; i++) {
     if (fenced[i]) {
-      reset();
+      ledger = false;
       continue;
     }
     const role = tracked.get(i);
     if (role) {
-      reset();
+      ledger = false;
       if (role === "home") home.push({ lines: [i] });
       continue;
     }
     const t = lines[i]!.trim();
     if (t === "") {
-      reset();
+      ledger = false;
       continue;
     }
-    // A list item opening with the label is a home to the item's own end.
-    if (items.status.has(i)) {
-      reset();
+    // A Status paragraph or list item, exactly where the parser makes it.
+    if (status.has(i)) {
+      ledger = false;
       home.push({ lines: [i] });
       continue;
     }
     // The reader renders the unprefixed line after a quote as its own text.
     if (QUOTE_RE.test(t)) {
-      reset();
-      continue;
-    }
-
-    // A `**Status**` paragraph runs to the next blank line or block start.
-    if (STATUS_PARA_RE.test(t)) statusPara = true;
-    else if (statusPara && startsBlock(t, items.starts.has(i))) statusPara = false;
-    if (statusPara) {
-      home.push({ lines: [i] });
+      ledger = false;
       continue;
     }
 
