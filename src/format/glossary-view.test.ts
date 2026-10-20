@@ -410,4 +410,11 @@ describe("a first letter whose lower case is two characters", () => {
   ])("%s matches its own spelling", (_name, term, prose, want) => {
     expect(marked(prose + "\n" + glossary(`- **${term}:** a branch library`))).toEqual(want);
   });
+
+  test.each([
+    ["an exact-case term", "İSTANBUL", "The i\u0307STANBUL branch opens.", [["i̇STANBUL", "i\u0307STANBUL"]]],
+    ["a case-free term", "İzmir", "The i\u0307zmir branch opens.", [["i̇zmir", "i\u0307zmir"]]],
+  ])("%s matches its first letter's lower case too", (_name, term, prose, want) => {
+    expect(marked(prose + "\n" + glossary(`- **${term}:** a branch library`))).toEqual(want);
+  });
 });
