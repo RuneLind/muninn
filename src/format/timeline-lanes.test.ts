@@ -150,6 +150,27 @@ describe("placement and surfaces", () => {
     expect(html.indexOf("tl-lanes")).toBeLessThan(html.indexOf("decision-log"));
   });
 
+  test("after the decision chain view, in the same slot", () => {
+    const next = ["<NextMoves>", "", '<Lane kind="you">', "", "1. Shelve the returns.", "", "</Lane>", "", "</NextMoves>", ""];
+    const html = reader(
+      page(
+        next,
+        log(
+          "**O1** — Which shelf? Closed 2026-09-02 (D1).",
+          "**O2** — How long a Hold? Closed 2026-09-04 (D2).",
+          "**O3** — How many Renewals? Closed 2026-09-06 (D3).",
+          "**D1** — The front shelf.",
+          "**D2** — One week.",
+          "**D3** — Two.",
+        ),
+        timeline("**2026-09-01** — Opened", "**2026-09-20** — Renewal rule"),
+      ),
+    );
+    expect(html.indexOf("dc-chain")).toBeGreaterThan(html.indexOf("Shelve the returns."));
+    expect(html.indexOf("tl-lanes")).toBeGreaterThan(html.indexOf("dc-chain"));
+    expect(html.indexOf("decision-log")).toBeGreaterThan(html.indexOf("tl-lanes"));
+  });
+
   test("no view slot, no lanes; views off, no lanes", () => {
     expect(lanesOf(reader(FULL.replace(page(status), "")))).toBe("");
     expect(renderWikiHtml(FULL, () => undefined, { today: TODAY })).not.toContain("tl-lanes");
