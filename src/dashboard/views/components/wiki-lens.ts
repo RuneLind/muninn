@@ -899,6 +899,8 @@ export function lensCss(): string {
     .${ROLE_VIEW_CLASS}[hidden] { display: none; }
 ${agentPaneCss()}
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
+    /* A <Chart>'s table is the authored text its chart replaces on screen. */
+    .${READER_ONLY_OFF_CLASS} .vc-chart > .vc-table { display: block !important; }
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }
     /* The reader's toggles: «mer», «Vis alle», a case's «mer», «+ N til», «+ N ikke kandidat». */
