@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderWikiHtml } from "../wiki/render.ts";
+import { pageGlossaries, renderWikiHtml } from "../wiki/render.ts";
 import { checkPageText } from "../wiki/lint.ts";
 import { locateExcerpt } from "../wiki/explain-context.ts";
 import type { WikiPageMeta } from "../wiki/store.ts";
@@ -258,24 +258,20 @@ describe("off the reader a <Glossary> is its list", () => {
   }
 });
 
-describe("the reader and the lint read one glossary", () => {
-  const never = (md: string) =>
-    checkPageText({ relPath: "plans/g.mdx" }, md, []).filter((f) => f.check === "glossary" && f.message.includes("never uses")).length;
+describe("where the reader marks a term on the page", () => {
   test.each([
-    ["prose", "A Hold lasts a week."],
-    ["a table cell", "| Kind |\n| --- |\n| Hold |"],
-    ["a decision", "<DecisionLog>\n\n- **D1** (2026-01-02): A Hold lasts a week.\n\n</DecisionLog>"],
-    ["a missing wikilink", "See [[Hold]]."],
-    ["a wikilink with a label", "See [[hold-page|Hold]]."],
-    ["inline code", "Set `Hold`."],
-    ["a heading", "## Hold"],
-    ["a plural", "Two Holds."],
-    ["a bare URL", "https://lib.example/Hold"],
-    ["a fact mark", '<Fact n="1" v="ok">A Hold.</Fact>'],
-  ])("%s", (_name, md) => {
-    const page = md + "\n" + HOLD;
-    const drawn = marks(reader(page)).length;
-    expect(never(page)).toBe(drawn === 0 ? 1 : 0);
+    ["prose", "A Hold lasts a week.", 1],
+    ["a table cell", "| Kind |\n| --- |\n| Hold |", 1],
+    ["a decision", "<DecisionLog>\n\n- **D1** (2026-01-02): A Hold lasts a week.\n\n</DecisionLog>", 1],
+    ["a missing wikilink", "See [[Hold]].", 0],
+    ["a wikilink with a label", "See [[hold-page|Hold]].", 0],
+    ["inline code", "Set `Hold`.", 0],
+    ["a heading", "## Hold", 0],
+    ["a plural", "Two Holds.", 0],
+    ["a bare URL", "https://lib.example/Hold", 0],
+    ["a fact mark", '<Fact n="1" v="ok">A Hold.</Fact>', 0],
+  ] as const)("%s", (_name, md, drawn) => {
+    expect(marks(reader(md + "\n" + HOLD)).length).toBe(drawn);
   });
 });
 
@@ -298,7 +294,7 @@ describe("a glossary's shapes, as the reader and the lint read them", () => {
   test("only a paragraph sentence's lead emphasis is a term, not emphasis inside its definition", () => {
     const g = glossary("**Hold** is a book *not* returned.");
     expect(marked("A Hold is not lent.\n" + g)).toEqual([["hold", "Hold"]]);
-    expect(lintGlossary("A Hold lasts a week.\n" + g)).toEqual([]);
+    expect(pageGlossaries(g)[0]!.entries.map((e) => e.term)).toEqual(["Hold"]);
   });
 
   test("a list item whose emphasis has no separator after it is an item with no term", () => {

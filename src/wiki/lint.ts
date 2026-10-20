@@ -112,8 +112,7 @@
  *                      `lint-rule-tree.ts`.
  * 19. glossary — on `.mdx` pages that are not culled, what a `<Glossary>`
  *                      cannot do: no term, or a term defined twice
- *                      (warnings); an item with no term, a term the page
- *                      never uses outside the list (info). Rules:
+ *                      (warnings); an item with no term (info). Rules:
  *                      `lint-glossary.ts`.
  *
  * The store's index builder silently drops unresolved link targets

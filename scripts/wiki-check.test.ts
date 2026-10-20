@@ -111,8 +111,7 @@ const RULE_TREE = [
   "</RuleTree>",
   "",
 ].join("\n");
-/** A glossary with one warning (a term twice) and one info finding (a term
- *  the page never uses outside the list). */
+/** A glossary with one warning (a term twice). */
 const GLOSSARY = [
   "---",
   "title: G",
