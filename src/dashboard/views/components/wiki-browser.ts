@@ -1963,9 +1963,9 @@ function renderList(cause: "storage" | "local" = "local"): void {
     // (`activityRowSource`).
     const source: WorkedSource | null =
       entry.activity && signal !== null
-        ? activityRowSource(datePage, now, signal, dateSignal, entry.activity.kind, !!workedGate?.open)
+        ? activityRowSource(datePage, now, signal, dateSignal, entry.activity.kind, !!workedGate?.open, workedGate?.asOfMs)
         : signal === "worked" && dateSignal
-          ? workedAxisSource(datePage, now, dateSignal)
+          ? workedAxisSource(datePage, now, dateSignal, workedGate?.asOfMs)
           : null;
     const chip = workedChip(source, fullDate, dateSignal?.kind === "added" ? "added" : "updated");
     // A NEW page (its own creation won, not a child's) says so in the date cell:
@@ -2850,6 +2850,8 @@ function toggleProvChain(btn: HTMLButtonElement): void {
 const WORKED_SLOT_TITLE = "The day an agent session last wrote this page (claude-usage's session ledger)";
 const CHANGED_SINCE_TITLE =
   "Changed after the last session by something the ledger does not record: a hand edit, a script, a lint or sync commit";
+const ledgerReadTitle = (day: string) =>
+  `The session ledger was last read ${day}; this page changed after that, so whether a session wrote it is not known yet.`;
 const NO_SESSION_TITLE =
   "No agent session write is recorded for this page (bulk passes are not counted). The date is the file's own.";
 function renderBreadcrumb(m: WikiListing): void {
@@ -2909,7 +2911,11 @@ function renderBreadcrumb(m: WikiListing): void {
   // With the ledger on, a `worked` slot names the day the last agent session wrote
   // the page; `updated` then appears only as a change after that session, or as
   // the fallback on a page no session wrote.
-  const dates = pageHeaderDates(m, recencyNow(), { ledger: workedAxisOn });
+  const dates = pageHeaderDates(m, recencyNow(), { ledger: workedAxisOn, ledgerAsOfMs: workedGate?.asOfMs });
+  // The page changed after the ledger was last read: whether a session wrote
+  // it is not known yet, so the slots say when the ledger was read instead.
+  const noSessionTitle = dates.ledgerReadDay ? ledgerReadTitle(dates.ledgerReadDay) : NO_SESSION_TITLE;
+  const changedTitle = dates.ledgerReadDay ? ledgerReadTitle(dates.ledgerReadDay) : CHANGED_SINCE_TITLE;
   const slots: string[] = [];
   if (dates.created) slots.push("created " + esc(dates.created));
   if (dates.worked) {
@@ -2920,13 +2926,19 @@ function renderBreadcrumb(m: WikiListing): void {
   if (dates.updated) {
     slots.push(
       dates.changedSince
-        ? `<span class="wiki-bc-changed" title="${esc(CHANGED_SINCE_TITLE)}">updated ${esc(dates.updated)}</span>`
+        ? `<span class="wiki-bc-changed" title="${esc(changedTitle)}">updated ${esc(dates.updated)}</span>`
         : dates.noSession
-          ? `<span class="wiki-bc-fallback" title="${esc(NO_SESSION_TITLE)}">updated ${esc(dates.updated)}</span>`
+          ? `<span class="wiki-bc-fallback" title="${esc(noSessionTitle)}">updated ${esc(dates.updated)}</span>`
           : "updated " + esc(dates.updated),
     );
   }
-  if (dates.noSession) slots.push(`<span class="wiki-bc-nosession" title="${esc(NO_SESSION_TITLE)}">no session</span>`);
+  if (dates.noSession) {
+    slots.push(
+      `<span class="wiki-bc-nosession" title="${esc(noSessionTitle)}">` +
+        (dates.ledgerReadDay ? `ledger read ${esc(dates.ledgerReadDay)}` : "no session") +
+        "</span>",
+    );
+  }
   // State T/T0 (D15): the window holds only touches or pass markers for this
   // page, so the dates above are not focused work — the mark names the touch.
   if (dates.touched) {
@@ -3337,6 +3349,7 @@ function relatedViewOpts(): RelatedViewOptions {
   const labels = seriesLabels(allPages);
   return {
     workedAxis: workedAxisOn,
+    ledgerAsOfMs: workedGate?.asOfMs,
     now: recencyNow(),
     order: relatedOrder,
     hops: true,
