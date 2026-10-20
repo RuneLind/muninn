@@ -159,6 +159,8 @@ describe("the reader's tree", () => {
     expect(chipIds(html)).toEqual(["LIB-1", "LIB-9"]);
     // A piece that reads as no id at all carries no data-rt-case.
     expect(chipIds(reader(tree("- → Renew — LIB-1, <!-- a note -->")))).toEqual(["LIB-1"]);
+    // An id-less piece between two ids takes no id by position.
+    expect(chipIds(reader(tree("- → Renew — LIB-1, <!-- x -->, LIB-2")))).toEqual(["LIB-1", "LIB-2"]);
   });
 
   test("a struck piece between two ids is no chip, and the chips after it keep their ids", () => {

@@ -1203,7 +1203,8 @@ export function decisionViewsCss(scope: string): string {
   `;
 }
 
-/** The reader's `<Chart>` view (`src/format/chart-view.ts`): theme tokens only.
+/** The reader's `<Chart>` view (`src/format/chart-view.ts`): theme tokens, except
+ *  the pressed button's white ink (the theme has no ink token for the accent fill).
  *  In chart mode the table is visually hidden, not removed, so a screen
  *  reader and a selection still reach it; a peek card shows it plainly. */
 export function chartViewCss(scope: string): string {
