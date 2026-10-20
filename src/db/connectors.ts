@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import { getDb } from "./client.ts";
-import type { BotConfig, ConnectorType } from "../bots/config.ts";
+import { EFFORT_VALUES, type BotConfig, type ConnectorType, type EffortLevel } from "../bots/config.ts";
 import { getLog } from "../logging.ts";
 
 type Sql = postgres.Sql;
@@ -15,6 +15,9 @@ export interface Connector {
   model?: string;
   baseUrl?: string;
   thinkingMaxTokens?: number;
+  /** The thinking control on adaptive-thinking models (`--effort` / the SDK's
+   *  `effort`); unset falls back to the bot's config.json. */
+  effort?: EffortLevel;
   timeoutMs?: number;
   createdAt: number;
   updatedAt: number;
@@ -29,6 +32,9 @@ function rowToConnector(r: Record<string, unknown>): Connector {
     model: (r.model as string) ?? undefined,
     baseUrl: (r.base_url as string) ?? undefined,
     thinkingMaxTokens: r.thinking_max_tokens != null ? Number(r.thinking_max_tokens) : undefined,
+    // A value outside the enum (hand-edited row) reads as unset rather than
+    // reaching `--effort`, where the CLI would reject the turn.
+    effort: (EFFORT_VALUES as readonly unknown[]).includes(r.effort) ? (r.effort as EffortLevel) : undefined,
     timeoutMs: r.timeout_ms != null ? Number(r.timeout_ms) : undefined,
     createdAt: new Date(r.created_at as string).getTime(),
     updatedAt: new Date(r.updated_at as string).getTime(),
@@ -78,11 +84,12 @@ export async function createConnector(data: {
   model?: string;
   baseUrl?: string;
   thinkingMaxTokens?: number;
+  effort?: EffortLevel;
   timeoutMs?: number;
 }): Promise<Connector> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO connectors (name, description, connector_type, model, base_url, thinking_max_tokens, timeout_ms)
+    INSERT INTO connectors (name, description, connector_type, model, base_url, thinking_max_tokens, effort, timeout_ms)
     VALUES (
       ${data.name},
       ${data.description ?? null},
@@ -90,6 +97,7 @@ export async function createConnector(data: {
       ${data.model ?? null},
       ${data.baseUrl ?? null},
       ${data.thinkingMaxTokens ?? null},
+      ${data.effort ?? null},
       ${data.timeoutMs ?? null}
     )
     RETURNING *
@@ -106,6 +114,7 @@ export async function updateConnector(
     model?: string | null;
     baseUrl?: string | null;
     thinkingMaxTokens?: number | null;
+    effort?: EffortLevel | null;
     timeoutMs?: number | null;
   },
 ): Promise<Connector | null> {
@@ -120,6 +129,7 @@ export async function updateConnector(
   if (data.model !== undefined) { updateObj.model = data.model; cols.push("model"); }
   if (data.baseUrl !== undefined) { updateObj.base_url = data.baseUrl; cols.push("base_url"); }
   if (data.thinkingMaxTokens !== undefined) { updateObj.thinking_max_tokens = data.thinkingMaxTokens; cols.push("thinking_max_tokens"); }
+  if (data.effort !== undefined) { updateObj.effort = data.effort; cols.push("effort"); }
   if (data.timeoutMs !== undefined) { updateObj.timeout_ms = data.timeoutMs; cols.push("timeout_ms"); }
 
   if (cols.length === 0) {

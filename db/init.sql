@@ -46,6 +46,7 @@ CREATE TABLE connectors (
   base_url TEXT,
   thinking_max_tokens INTEGER,
   timeout_ms INTEGER,
+  effort TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );

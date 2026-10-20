@@ -1,5 +1,7 @@
 import { test, expect, describe } from "bun:test";
+import { Hono } from "hono";
 import { setupTestDb } from "../test/setup-db.ts";
+import { registerDataRoutes } from "../dashboard/routes/data-routes.ts";
 import {
   createConnector,
   getConnector,
@@ -112,6 +114,42 @@ describe("connectors", () => {
       expect(connectors[0]!.name).toBe("Alpha");
       expect(connectors[1]!.name).toBe("Middle");
       expect(connectors[2]!.name).toBe("Zebra");
+    });
+  });
+
+  describe("effort", () => {
+    test("is stored, returned, updated and cleared", async () => {
+      const created = await createConnector({ name: "Fast", connectorType: "claude-cli", model: "claude-sonnet-5-5", effort: "low" });
+      expect(created.effort).toBe("low");
+      expect((await getConnector(created.id))!.effort).toBe("low");
+      expect((await updateConnector(created.id, { effort: "high" }))!.effort).toBe("high");
+      // undefined keeps it, null clears it
+      expect((await updateConnector(created.id, { name: "Fast 2" }))!.effort).toBe("high");
+      expect((await updateConnector(created.id, { effort: null }))!.effort).toBeUndefined();
+    });
+
+    test("a connector without one reads back undefined", async () => {
+      expect((await createConnector({ name: "No effort", connectorType: "claude-cli" })).effort).toBeUndefined();
+    });
+
+    test("POST and PUT /api/connectors carry it, and refuse a value outside the enum", async () => {
+      const app = new Hono();
+      registerDataRoutes(app);
+      const send = (method: string, url: string, body: unknown) =>
+        app.request(url, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+      const bad = await send("POST", "/api/connectors", { name: "x", connectorType: "claude-cli", effort: "turbo" });
+      expect(bad.status).toBe(400);
+      expect(((await bad.json()) as { error: string }).error).toContain("Invalid effort");
+
+      const made = await send("POST", "/api/connectors", { name: "Fast", connectorType: "claude-cli", model: "m1", effort: "low" });
+      expect(made.status).toBe(201);
+      const { connector } = (await made.json()) as { connector: { id: string; effort?: string } };
+      expect(connector.effort).toBe("low");
+
+      expect((await send("PUT", `/api/connectors/${connector.id}`, { effort: "max!" })).status).toBe(400);
+      const cleared = await send("PUT", `/api/connectors/${connector.id}`, { effort: null });
+      expect(((await cleared.json()) as { connector: { effort?: string } }).connector.effort).toBeUndefined();
     });
   });
 
