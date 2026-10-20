@@ -3241,7 +3241,7 @@ export function pairAttachments(pages: WikiPageMeta[], inputs: PairingInputs): v
     // relation the rail has no row for, and re-scoping its stem to this folder
     // adopts an unrelated page.
     if (!ref || ref.dir !== dir) continue;
-    const parent = mdByFolderStem.get(dir + " " + stemKey(ref.stem));
+    const parent = mdByFolderStem.get(dir + "\u0000" + stemKey(ref.stem));
     if (!parent || parent === p) continue;
     // A CULLED successor adopts nothing: the rail hides it, and a page folded
     // under a hidden row would vanish with it. The child lists at top level.

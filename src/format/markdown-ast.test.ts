@@ -596,7 +596,7 @@ const NUL = String.fromCharCode(0);
  * Every string anywhere in a parsed block tree.
  *
  * The NUL assertions below read THIS and not `JSON.stringify(blocks)` — that
- * renders U+0000 as the six characters ` `, so a `.toContain(NUL)` over it
+ * renders U+0000 as the six characters `\u0000`, so a `.toContain(NUL)` over it
  * can never match and every leak assertion written that way passes on the
  * unfixed parser. (Written that way first; caught by the red run.)
  */
