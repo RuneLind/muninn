@@ -1429,8 +1429,10 @@ export function registerWikiReadRoutes(
 
   // gzip, because the page inlines the whole client bundle and CSS (~1.2 MB,
   // ~0.29 MB gzipped) and nothing in front of muninn compresses it. Scoped to
-  // this route: the SSE and JSON routes beside it keep their framing.
-  app.get("/wiki", compress({ encoding: "gzip" }), async (c) => {
+  // this route: the SSE and JSON routes beside it keep their framing. Mounted
+  // with `use` so the route table keeps one GET row for /wiki.
+  app.use("/wiki", compress({ encoding: "gzip" }));
+  app.get("/wiki", async (c) => {
     const { registry, wiki: selected, envOverride, entry, unknownWiki } = resolveReadRequest(
       readSliceOnly,
       c.req.query("wiki"),
