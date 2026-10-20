@@ -541,6 +541,9 @@ test.describe("Wiki reader: Chart steps labels", () => {
       }
       expect(new Set(shown).size).toBe(shown.length);
       await expect(long.locator(".vc-xcap")).toHaveText("step number … with a long name");
+      const cap = (await long.locator(".vc-xcap").boundingBox())!;
+      expect(cap.y).toBeGreaterThanOrEqual(area.y + area.height); // under the axis labels
+      expect(Math.abs(cap.x + cap.width / 2 - (area.x + area.width / 2))).toBeLessThan(2); // centred under the plot
       expect(await overflowsSection(long)).toBeLessThanOrEqual(0);
     });
   }

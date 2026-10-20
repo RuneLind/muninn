@@ -205,6 +205,13 @@ describe("steps x labels", () => {
     // «run» is a whole label and «base» a shared word start: neither is cut.
     expect(texts(steps(["run", "run 2", "run 3"]), "vc-xlab")).toEqual(["run", "run 2", "run 3"]);
     expect(texts(steps(["baseline", "basement"]), "vc-xlab")).toEqual(["baseline", "basement"]);
+    // A cut that would leave a label empty is not made.
+    expect(texts(steps(["run-", "run-2"]), "vc-xlab")).toEqual(["run-", "run-2"]);
+    expect(texts(steps(["- kg", "5 - kg"]), "vc-xlab")).toEqual(["- kg", "5 - kg"]);
+    // The shared end starts on a separator: «0 runs» is shared, «runs» is cut.
+    const runs = steps(["10 runs", "20 runs", "30 runs"]);
+    expect(texts(runs, "vc-xlab")).toEqual(["10", "20", "30"]);
+    expect(texts(runs, "vc-xcap")).toEqual(["… runs"]);
     const tail = steps(["Q1 2030", "Q2 2030", "Q3 2030"]);
     expect(texts(tail, "vc-xlab")).toEqual(["Q1", "Q2", "Q3"]);
     expect(texts(tail, "vc-xcap")).toEqual(["… 2030"]);
