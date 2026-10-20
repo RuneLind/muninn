@@ -131,7 +131,11 @@ describe("where a term is never marked", () => {
   });
 
   // Each page's only use of the term is a label the renderer writes around a component's body.
-  const caseFiles = new Map([["c.yaml", { ok: true as const, text: "- {status: hold}\n- {id: LIB-1, status: hold}\n" }]]);
+  const caseFiles = new Map([
+    ["c.yaml", { ok: true as const, text: "- {status: hold}\n- {id: LIB-1, status: hold}\n" }],
+    ["big.yaml", { ok: true as const, text: Array.from({ length: 501 }, (_, k) => `- {id: LIB-${k}, status: ok}`).join("\n") }],
+  ]);
+  const question = { questionsTo: [], language: "en" as const, answerable: true, owner: null };
   test.each([
     ["Query", "a Query without an id", '<Query question="Which desk?">\n\nBody text.\n\n</Query>', "query-warning"],
     ["run", "a Query's run date", '<Query id="Q-1" run="2026-09-01">\n\nBody text.\n\n</Query>', "query-run"],
@@ -144,8 +148,16 @@ describe("where a term is never marked", () => {
     ["page", "an Embed's fallback line", '<Embed src="./x.html" />', "embed-fallback"],
     ["Hold", "a Historic's stamp", '<Historic since="2026-01-01" note="Hold policy">\n\nBody text.\n\n</Historic>', "historic-stamp"],
     ["entry", "a CaseBoard's warning", '<CaseBoard src="c.yaml" />', "cb-warning"],
+    ["showing", "a CaseBoard's row cap", '<CaseBoard src="big.yaml" />', "cb-truncated"],
+    ["without", "a CaseBoard with no src", "<CaseBoard />", "cb-unavailable"],
+    ["value", "a DeltaTable's warning", '<DeltaTable better="sideways">\n\n| Run | a | b |\n|---|---|---|\n| T | 1 | 2 |\n\n</DeltaTable>', "dt-warning"],
+    ["loaded", "a DeltaTable's file note", '<DeltaTable src="r.csv" />', "dt-unavailable"],
+    ["loaded", "a Query's SQL file note", '<Query id="Q-1" sql="q.sql" />', "query-unavailable"],
+    ["Open", "a Question card's state", '<Question id="O1">\n\nWhich desk?\n\n</Question>', "q-state"],
+    ["Team", "a Question card's for line", '<Question id="O1" to="Desk Team">\n\nWhich desk?\n\n</Question>', "q-for"],
+    ["used", "a Question card's duplicate note", '<Question id="O1">\n\nWhich desk?\n\n</Question>\n\n<Question id="O1">\n\nWhich shelf?\n\n</Question>', "q-note q-duplicate"],
   ])("%s in %s", (term, _name, md, cls) => {
-    const html = renderWikiHtml(md + "\n" + glossary(`- **${term}:** a word the renderer writes`), () => undefined, { views: true, files: caseFiles });
+    const html = renderWikiHtml(md + "\n" + glossary(`- **${term}:** a word the renderer writes`), () => undefined, { views: true, files: caseFiles, question });
     expect(html).toContain(`class="${cls}"`);
     expect(marks(html)).toEqual([]);
   });

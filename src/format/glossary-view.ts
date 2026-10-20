@@ -39,9 +39,9 @@ const SKIP_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "a", "code", "pre
 const SKIP_CLASSES = new Set([
   "glossary", "fc-mark", "fc-mark-block", "wiki-link-missing", "callout-title", "tldr-label", "vc", "query-result", "gl-mark", "cb-strip", "cb-pill",
   // Labels and notes the renderer writes around a component's body.
-  "query-warning", "query-meta", "query-unavailable", "query-truncated", "q-label", "q-state", "q-for", "q-duplicate",
+  "query-warning", "query-meta", "query-unavailable", "q-label", "q-state", "q-for", "q-duplicate",
   "dt-delta", "dt-note", "dt-warning", "dt-unavailable", "rc-count", "rc-label", "embed-fallback", "historic-stamp",
-  "cb-warning", "cb-truncated", "cb-unavailable", "nm-sum",
+  "cb-warning", "cb-truncated", "cb-unavailable",
 ]);
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);
