@@ -33,10 +33,11 @@
  * a 5s test.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const EXT_DIR = join(import.meta.dir, "..", "..", "extensions", "youtube");
 const POPUP_JS = join(EXT_DIR, "popup.js");
@@ -301,7 +302,7 @@ async function drivePopup(opts: DriveOptions): Promise<Driven> {
   });
 
   // A fresh module instance per case: Bun caches by resolved path.
-  const dir = mkdtempSync(join(tmpdir(), "muninn-popup-"));
+  const dir = testTempDirSync(join(tmpdir(), "muninn-popup-"));
   popupDirs.push(dir);
   copyFileSync(POPUP_JS, join(dir, "popup.js"));
   copyFileSync(RULES_JS, join(dir, "capture-rules.js"));

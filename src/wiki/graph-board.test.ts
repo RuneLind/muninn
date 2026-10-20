@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetWikiCacheForTest, getWikiIndex, type WikiIndex } from "./store.ts";
@@ -18,6 +18,7 @@ import { GRAPH_NODES_MAX, parseGraphQuery, type GraphIssueNode, type GraphPageNo
 import type { ProvenanceContext } from "./provenance-service.ts";
 import type { IssueFacts, TrackerConfig } from "./trackers/types.ts";
 import { boardNotes } from "../dashboard/views/components/wiki-board-view.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const url = (k: string) => `https://example.invalid/browse/${k}`;
 const CONFIG = {
@@ -48,7 +49,7 @@ const noLedger: GraphLedgerPort = {
 };
 
 beforeAll(async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-board-"));
+  const root = await testTempDir(path.join(tmpdir(), "wiki-graph-board-"));
   roots.push(root);
   for (const [rel, body] of Object.entries(PAGES)) {
     await mkdir(path.dirname(path.join(root, rel)), { recursive: true });
@@ -303,7 +304,7 @@ describe("fix round 1", () => {
   });
 
   test("S2: keyless is cut past GRAPH_NODES_MAX, said on its own flag, and the drawn graph is not called cut", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-board-keyless-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-graph-board-keyless-"));
     roots.push(root);
     await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
     await Promise.all(
@@ -388,7 +389,7 @@ describe("fix round 2", () => {
   }, 2_000);
 
   test("P: exactly GRAPH_NODES_MAX keyless pages is not cut", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-board-keyless-eq-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-graph-board-keyless-eq-"));
     roots.push(root);
     await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
     await Promise.all(

@@ -5,7 +5,7 @@
  * `e2e/wiki-agent-lens.spec.ts`.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -22,6 +22,7 @@ import {
   type RunOutcome,
 } from "./wiki-plan-card.ts";
 import type { PlanCardConfig } from "../../wiki/plan-card.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 let dir = "";
 let root = "";
@@ -56,7 +57,7 @@ async function stub(body: string): Promise<void> {
 const get = (app: Hono, q: string) => app.request(`/api/wiki/plan-card?${q}`);
 
 beforeAll(async () => {
-  dir = await mkdtemp(path.join(tmpdir(), "muninn-plan-card-"));
+  dir = await testTempDir(path.join(tmpdir(), "muninn-plan-card-"));
   root = path.join(dir, "wiki");
   other = path.join(dir, "other");
   bin = path.join(dir, "plan-card-stub.sh");

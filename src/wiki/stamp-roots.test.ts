@@ -14,7 +14,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
+import { mkdirSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "./readonly.ts";
@@ -27,6 +27,7 @@ import {
   WIKI_STAMP_BUN_ENV,
   WIKI_STAMP_ROOTS_ENV,
 } from "./stamp-roots.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 afterEach(() => {
   __setWikiReadonlyForTest();
@@ -80,7 +81,7 @@ describe("isStampRoot", () => {
   });
 
   test("a symlinked spelling of a root matches the root it resolves to", () => {
-    const base = mkdtempSync(path.join(tmpdir(), "muninn-stamp-roots-"));
+    const base = testTempDirSync(path.join(tmpdir(), "muninn-stamp-roots-"));
     try {
       const real = path.join(base, "real");
       mkdirSync(real);

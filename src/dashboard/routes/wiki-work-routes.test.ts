@@ -6,7 +6,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -15,6 +15,7 @@ import { __resetWikiRegistryForTest, getWikiRegistry } from "../../wiki/registry
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __resetWorkSessionsForTest, refreshWorkSessions } from "../../wiki/work-sessions.ts";
 import { WORK_WINDOW_MS } from "../../wiki/work-focus.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const NOW = Date.now();
 const SINCE = NOW - WORK_WINDOW_MS;
@@ -25,7 +26,7 @@ describe("work facts on the listing and the page", () => {
   let prevExtra: string | undefined;
 
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-work-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-work-"));
     await mkdir(path.join(root, "plans"));
     await writeFile(path.join(root, "plans/a.mdx"), "---\ntitle: A — the work\n---\n\nSee [[b]].\n");
     await writeFile(path.join(root, "plans/b.mdx"), "---\ntitle: B\n---\n\nSee [[a]].\n");
@@ -128,7 +129,7 @@ describe("grouping evidence on the listing", () => {
   let prevExtra: string | undefined;
 
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-evidence-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-evidence-"));
     await mkdir(path.join(root, "plans"));
     // Two threads, one session each: `a` owns ABC-1 and names `c` in related:
     // (unquoted, so YAML alone would not read it); `c` names ABC-1 by its

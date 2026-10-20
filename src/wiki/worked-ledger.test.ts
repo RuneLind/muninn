@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -27,6 +27,7 @@ import {
 import { __resetWorkedMatchWarnsForTest, buildWikiIndex, workedMatchWarnDue } from "./store.ts";
 import { __resetClaudeUsageWarnsForTest } from "../utils/claude-usage-fetch.ts";
 import type { getLog } from "../logging.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 type Logger = ReturnType<typeof getLog>;
 
@@ -259,7 +260,7 @@ describe("refreshWorkedLedger", () => {
   });
 
   test("a ZERO-row answer retries the REALPATH, and the retry's answer wins", async () => {
-    const real = await mkdtemp(path.join(tmpdir(), "worked-real-"));
+    const real = await testTempDir(path.join(tmpdir(), "worked-real-"));
     const link = path.join(path.dirname(real), `worked-link-${process.pid}`);
     await symlink(real, link);
     try {
@@ -281,7 +282,7 @@ describe("refreshWorkedLedger", () => {
   });
 
   test("a NON-empty answer is never retried against the realpath", async () => {
-    const real = await mkdtemp(path.join(tmpdir(), "worked-real2-"));
+    const real = await testTempDir(path.join(tmpdir(), "worked-real2-"));
     const link = path.join(path.dirname(real), `worked-link2-${process.pid}`);
     await symlink(real, link);
     try {
@@ -417,7 +418,7 @@ describe("a SUCCESSFUL zero-row answer never blanks a good memo", () => {
   });
 
   test("a retry that THROWS keeps the memo, never falls through to the empty commit", async () => {
-    const real = await mkdtemp(path.join(tmpdir(), "worked-retry-throw-"));
+    const real = await testTempDir(path.join(tmpdir(), "worked-retry-throw-"));
     const link = path.join(path.dirname(real), `worked-retry-link-${process.pid}`);
     await symlink(real, link);
     try {
@@ -458,7 +459,7 @@ describe("the root SPELLING", () => {
   });
 
   test("the spelling that ANSWERED is asked FIRST on the next refresh", async () => {
-    const real = await mkdtemp(path.join(tmpdir(), "worked-hint-"));
+    const real = await testTempDir(path.join(tmpdir(), "worked-hint-"));
     const link = path.join(path.dirname(real), `worked-hint-link-${process.pid}`);
     await symlink(real, link);
     try {
@@ -554,7 +555,7 @@ describe("the degraded-upstream back-off", () => {
 describe("the index fold", () => {
   test("stamps workedMs on matching pages and reports coverage", async () => {
     const { buildWikiIndex } = await import("./store.ts");
-    const root = await mkdtemp(path.join(tmpdir(), "worked-index-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-index-"));
     try {
       await mkdir(path.join(root, "plans"), { recursive: true });
       await writeFile(path.join(root, "plans", "one.mdx"), "---\ntitle: One\n---\n\nbody\n");
@@ -585,7 +586,7 @@ describe("the index fold", () => {
 
   test("the coverage DENOMINATOR is the listing, not the pre-drop page set", async () => {
     const { buildWikiIndex } = await import("./store.ts");
-    const root = await mkdtemp(path.join(tmpdir(), "worked-index-drop-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-index-drop-"));
     try {
       await mkdir(path.join(root, "a"), { recursive: true });
       await mkdir(path.join(root, "b"), { recursive: true });
@@ -605,7 +606,7 @@ describe("the index fold", () => {
 
   test("no memo ⇒ NO coverage field at all — absent is not `matched: 0`", async () => {
     const { buildWikiIndex } = await import("./store.ts");
-    const root = await mkdtemp(path.join(tmpdir(), "worked-index-cold-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-index-cold-"));
     try {
       await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
       const index = await buildWikiIndex(root);
@@ -673,7 +674,7 @@ describe("the empty-answer RELEASE window", () => {
 
   test("after a HELD empty answer the index ships the older answer time", async () => {
     const { buildWikiIndex } = await import("./store.ts");
-    const root = await mkdtemp(path.join(tmpdir(), "worked-index-asof-held-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-index-asof-held-"));
     try {
       await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
       let empty = false;
@@ -694,7 +695,7 @@ describe("the empty-answer RELEASE window", () => {
 
   test("the index ships the pages' answer time as workedCoverage.asOfMs", async () => {
     const { buildWikiIndex } = await import("./store.ts");
-    const root = await mkdtemp(path.join(tmpdir(), "worked-index-asof-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-index-asof-"));
     try {
       await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
       const { d, at } = clocked((r) => ({ root: r, pages: [{ p: "a.md", w: 7 }] }));
@@ -837,7 +838,7 @@ describe("no index build waives the ledger's back-off", () => {
       },
     });
     const prev = process.env.CLAUDE_USAGE_URL;
-    const root = await mkdtemp(path.join(tmpdir(), "worked-nohatch-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-nohatch-"));
     try {
       process.env.CLAUDE_USAGE_URL = `http://127.0.0.1:${server.port}`;
       await writeFile(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
@@ -867,7 +868,7 @@ describe("no index build waives the ledger's back-off", () => {
 
 describe("the worked date follows a page's aliases (a moved page keeps its history)", () => {
   test("a page whose `aliases:` names its OLD path takes the old path's workedMs, newest wins", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-alias-"));
     try {
       await mkdir(path.join(root, "plans"), { recursive: true });
       await mkdir(path.join(root, "archive"), { recursive: true });
@@ -899,7 +900,7 @@ describe("the worked date follows a page's aliases (a moved page keeps its histo
     }
   });
   test("the folder test ignores case: an `Archive/` folder on disk folds an alias spelled `archive/…`", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-case-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-alias-case-"));
     try {
       await mkdir(path.join(root, "Archive"), { recursive: true });
       await mkdir(path.join(root, "plans"), { recursive: true });
@@ -913,7 +914,7 @@ describe("the worked date follows a page's aliases (a moved page keeps its histo
     }
   });
   test("a root-level FILE is no folder: an alias whose first segment names it folds nothing", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-file-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-alias-file-"));
     try {
       await mkdir(path.join(root, "plans"), { recursive: true });
       await writeFile(path.join(root, "old"), "not a folder\n");
@@ -926,7 +927,7 @@ describe("the worked date follows a page's aliases (a moved page keeps its histo
     }
   });
   test("a TITLE alias with a slash (no such folder in this wiki) folds no ledger row", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "worked-alias-title-"));
+    const root = await testTempDir(path.join(tmpdir(), "worked-alias-title-"));
     try {
       await mkdir(path.join(root, "concepts"), { recursive: true });
       await writeFile(path.join(root, "concepts/design.md"), "---\ntitle: Design\naliases: [claude.ai/design]\n---\n\nBody.\n");

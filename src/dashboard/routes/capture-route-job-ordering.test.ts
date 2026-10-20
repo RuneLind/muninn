@@ -38,10 +38,11 @@ beforeAll(() => __setClaudeCliVersionForTest("2.1.304"));
 afterAll(() => __setClaudeCliVersionForTest(undefined));
 import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../../config.ts";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 // --- Mocks: everything the handlers reach for that isn't the ordering itself.
 
@@ -266,7 +267,7 @@ function ytAppAt(now: () => number): Hono {
 const tmpFramesRoots: string[] = [];
 /** EVERY temp directory this file makes goes through here, whatever its prefix, so `afterAll` can remove them all. */
 function trackedTmpDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = testTempDirSync(join(tmpdir(), prefix));
   tmpFramesRoots.push(dir);
   return dir;
 }

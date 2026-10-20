@@ -8,7 +8,7 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, writeFile, stat, utimes } from "node:fs/promises";
+import { rm, writeFile, stat, utimes } from "node:fs/promises";
 import { existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,13 +21,14 @@ import {
 import { writeWikiPage, type PageWriteOptions } from "./page-write.ts";
 import { __resetWikiWriteQueueForTest } from "./queue.ts";
 import { sha256 } from "../gardener/util.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 let root = "";
 let lockPath = "";
 
 beforeEach(async () => {
   __resetWikiWriteQueueForTest();
-  root = await mkdtemp(path.join(tmpdir(), "wiki-lock-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-lock-"));
   lockPath = path.join(root, WIKI_LOCK_BASENAME);
 });
 

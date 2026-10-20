@@ -3,9 +3,9 @@
  * `fetchImpl` against the committed manifest fixture, the two spawns through
  * the `run` seam, and whisper's `.vtt` through `readVtt`.
  */
-import { afterAll, test, expect, describe, beforeAll } from "bun:test";
+import { test, expect, describe, beforeAll } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
-import { readFileSync, mkdtempSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseVimeoManifest, VIMEO_MEDIA_HOST, type VimeoManifest } from "./media.ts";
@@ -22,18 +22,7 @@ import {
   looksSpeechless,
   SPEECH_MIN_WORDS_PER_MINUTE,
 } from "./whisper.ts";
-import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
-
-/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
-const TEMP_DIRS: string[] = [];
-function tempDirSync(prefix: string): string {
-  const dir = makeTempDir(prefix);
-  TEMP_DIRS.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
-});
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const FIXTURE_RAW = JSON.parse(readFileSync(new URL("./fixtures/manifest-placeholder.json", import.meta.url).pathname, "utf8"));
 const MANIFEST_URL = `https://${VIMEO_MEDIA_HOST}/exp=0~acl=placeholder~hmac=placeholder/00000000-0000-4000-8000-000000000000/psid=placeholder/v2/playlist/av/primary/prot/placeholder/playlist.json?omit=av1-hevc&pathsig=placeholder`;
@@ -82,7 +71,7 @@ function fakeRun(answers: { ffmpeg?: { exitCode: number; stderr?: string }; whis
 }
 
 function workDir() {
-  return tempDirSync(join(tmpdir(), "vimeo-whisper-"));
+  return testTempDirSync(join(tmpdir(), "vimeo-whisper-"));
 }
 
 describe("the pure rules", () => {

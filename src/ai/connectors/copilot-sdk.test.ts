@@ -1,12 +1,13 @@
 import { test, expect, describe } from "bun:test";
 import { buildCustomAgents, accumulateInputTokens, resolveCopilotModelId, copilotSessionTools } from "./copilot-sdk.ts";
 import type { BotConfig } from "../../bots/config.ts";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 function makeBotDir(serena?: object[]): { botsDir: string; botDir: string; cleanup: () => void } {
-  const botsDir = mkdtempSync(join(tmpdir(), "bots-test-"));
+  const botsDir = testTempDirSync(join(tmpdir(), "bots-test-"));
   const botDir = join(botsDir, "testbot");
   mkdirSync(botDir);
   if (serena) {
@@ -95,7 +96,7 @@ describe("buildCustomAgents", () => {
   });
 
   test("only includes agents for the matching bot name", () => {
-    const botsDir = mkdtempSync(join(tmpdir(), "bots-test-"));
+    const botsDir = testTempDirSync(join(tmpdir(), "bots-test-"));
     const botDir = join(botsDir, "mybot");
     const otherDir = join(botsDir, "otherbot");
     mkdirSync(botDir);

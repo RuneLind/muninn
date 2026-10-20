@@ -1,22 +1,11 @@
 import { afterAll, beforeAll, afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executePrompt } from "./openai-compat.ts";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
-import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
-
-/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
-const TEMP_DIRS: string[] = [];
-function tempDirSync(prefix: string): string {
-  const dir = makeTempDir(prefix);
-  TEMP_DIRS.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
-});
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 /**
  * The WIRING, driven end to end: a real `executePrompt` against a real HTTP
@@ -61,7 +50,7 @@ const answer = (text: string) => sse({
 });
 
 beforeAll(() => {
-  botDir = tempDirSync(join(tmpdir(), "muninn-oc-test-"));
+  botDir = testTempDirSync(join(tmpdir(), "muninn-oc-test-"));
   server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -231,7 +220,7 @@ describe("executePrompt over a real socket — Vertex credential path", () => {
 describe("executePrompt — toolsDisabled", () => {
   test("sends no tools even when the bot's .mcp.json serves some", async () => {
     // A real stdio MCP server with one tool, so the control arm has something to lose.
-    const dir = tempDirSync(join(tmpdir(), "muninn-oc-mcp-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-oc-mcp-"));
     const mcp = (sub: string) => JSON.stringify(Bun.resolveSync(`@modelcontextprotocol/sdk/${sub}`, import.meta.dir));
     writeFileSync(join(dir, "server.ts"), [
       `import { McpServer } from ${mcp("server/mcp.js")};`,
@@ -254,7 +243,7 @@ describe("executePrompt — toolsDisabled", () => {
 describe("the declared tool surface, driven from runCaptureOneShot", () => {
   test('"bot" sends the bot\'s tools, "none" sends none, and the fenced shapes send no request', async () => {
     const { driveCapture } = await import("../../test/one-shot-drive.ts");
-    const dir = tempDirSync(join(tmpdir(), "muninn-oc-surface-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-oc-surface-"));
     const mcp = (sub: string) => JSON.stringify(Bun.resolveSync(`@modelcontextprotocol/sdk/${sub}`, import.meta.dir));
     writeFileSync(join(dir, "server.ts"), [
       `import { McpServer } from ${mcp("server/mcp.js")};`,

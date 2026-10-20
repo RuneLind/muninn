@@ -8,7 +8,7 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, utimes, readFile, symlink } from "node:fs/promises";
+import { rm, mkdir, writeFile, utimes, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetForTest } from "../wiki/commit.ts";
@@ -28,6 +28,7 @@ import {
 } from "./run.ts";
 import { SYNC_QUIET_MS } from "./decide.ts";
 import type { SyncRepo } from "./config.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 async function git(cwd: string, args: string[]): Promise<{ code: number; out: string }> {
   const proc = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -100,7 +101,7 @@ describe("syncRepo", () => {
     __resetForTest();
     __resetWikiWriteQueueForTest();
     __resetSyncStateForTest();
-    base = await mkdtemp(path.join(tmpdir(), "sync-run-"));
+    base = await testTempDir(path.join(tmpdir(), "sync-run-"));
   });
   afterEach(async () => {
     __resetSyncStateForTest();
@@ -521,7 +522,7 @@ describe("syncRepo", () => {
 
   test("MERGE_HEAD and CHERRY_PICK_HEAD block it too", async () => {
     for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD"]) {
-      const f = await makeFixture(await mkdtemp(path.join(base, "m-")));
+      const f = await makeFixture(await testTempDir(path.join(base, "m-")));
       await writeFile(path.join(f.A, ".git", marker), "deadbeef\n");
       const r = await syncRepo(wikiRepo(f), deps());
       expect(r.state).toBe("blocked");
@@ -1252,7 +1253,7 @@ describe("syncRepo", () => {
   });
 
   test("a non-repo path is an error, never a throw", async () => {
-    const loose = await mkdtemp(path.join(base, "loose-"));
+    const loose = await testTempDir(path.join(base, "loose-"));
     const r = await syncRepo({ name: "nope", path: loose, mode: "plain" }, deps());
     expect(r.state).toBe("error");
     expect(r.reason).toContain("not a git repo");

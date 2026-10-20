@@ -414,9 +414,10 @@ test("ytDlpProbeArgs downloads nothing and asks for one video's metadata", () =>
 // run. `Bun.spawn` resolves the binary against the PATH the process started
 // with, so `downloadVideo` runs in a child `bun` whose PATH leads with the fake.
 
-import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, chmodSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 interface FakeRun {
   /** How many leading runs fail. */
@@ -434,8 +435,8 @@ interface FakeRun {
 }
 
 async function downloadWithFake(run: FakeRun) {
-  const bin = mkdtempSync(joinPath(tmpdir(), "fake-ytdlp-"));
-  const work = mkdtempSync(joinPath(tmpdir(), "dl-work-"));
+  const bin = testTempDirSync(joinPath(tmpdir(), "fake-ytdlp-"));
+  const work = testTempDirSync(joinPath(tmpdir(), "dl-work-"));
   const counter = joinPath(bin, "count");
   const stderrFile = joinPath(bin, "stderr");
   writeFileSync(stderrFile, run.stderr + "\n");
@@ -562,11 +563,11 @@ test("downloadVideo returns the output file, not a stream intermediate a failed 
 // left in it would widen what the model may read. Real ffmpeg (skips without
 // it): 8 one-second colour cuts give 7+ scene frames, thinned to 2.
 test.skipIf(!Bun.which("ffmpeg"))("extractKeyframes leaves only the kept frames in the frames dir", async () => {
-  const { mkdtempSync, mkdirSync, readdirSync, existsSync, rmSync } = await import("node:fs");
+  const { mkdirSync, readdirSync, existsSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { extractKeyframes } = await import("./media.ts");
-  const work = mkdtempSync(join(tmpdir(), "keyframes-dir-"));
+  const work = testTempDirSync(join(tmpdir(), "keyframes-dir-"));
   try {
     const colors = ["red", "blue", "green", "yellow", "white", "black", "magenta", "cyan"];
     const inputs = colors.flatMap((c) => ["-f", "lavfi", "-i", `color=c=${c}:s=160x120:d=1:r=10`]);

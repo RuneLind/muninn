@@ -1,10 +1,11 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetWikiCacheForTest, getWikiIndex } from "./store.ts";
 import { __resetWorkedLedgerForTest } from "./worked-ledger.ts";
 import { __resetWorkSessionsForTest } from "./work-sessions.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * The index build's worked-ledger kick is gated on the wiki tool surface: under
@@ -19,7 +20,7 @@ describe("buildWikiIndex's worked-ledger kick", () => {
   const saved: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-kick-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-kick-"));
     await Bun.write(path.join(root, "A.md"), "# A\n");
     hits = [];
     server = Bun.serve({ port: 0, fetch: (req) => { hits.push(new URL(req.url).pathname + new URL(req.url).search); return Response.json({ rows: [] }); } });

@@ -11,7 +11,7 @@
  */
 
 import { test, expect, describe, afterEach } from "bun:test";
-import { mkdtemp, rm, writeFile, copyFile } from "node:fs/promises";
+import { rm, writeFile, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseFrontmatter, getWikiIndex, __resetWikiCacheForTest } from "./store.ts";
@@ -31,6 +31,7 @@ import {
   type ProvenanceSessionChip,
 } from "./provenance.ts";
 import type { WikiPageMeta } from "./store.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const FIXTURE = path.join(import.meta.dir, "__fixtures__", "wiki-stamp-shape.md");
 
@@ -47,7 +48,7 @@ describe("the shape fixture", () => {
   });
 
   test("the index maps them onto the page meta, sessions in file order", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "prov-fixture-"));
+    const root = await testTempDir(path.join(tmpdir(), "prov-fixture-"));
     try {
       await copyFile(FIXTURE, path.join(root, "shape.md"));
       __resetWikiCacheForTest();
@@ -97,7 +98,7 @@ describe("the store mapping", () => {
   });
 
   async function indexOf(pages: Record<string, string>) {
-    root = await mkdtemp(path.join(tmpdir(), "prov-store-"));
+    root = await testTempDir(path.join(tmpdir(), "prov-store-"));
     for (const [name, body] of Object.entries(pages)) {
       await writeFile(path.join(root, name), body);
     }

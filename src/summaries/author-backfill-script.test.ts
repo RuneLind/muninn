@@ -5,12 +5,13 @@
  * `--no-update`, so nothing leaves the machine.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const SCRIPT = resolve(import.meta.dir, "../../scripts/backfill-youtube-authors.ts");
-const scratch = mkdtempSync(join(tmpdir(), "yt-author-backfill-test-"));
+const scratch = testTempDirSync(join(tmpdir(), "yt-author-backfill-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const DAY = 86_400_000;
@@ -684,7 +685,7 @@ describe("row: the root's canonical path, through a symlink", () => {
     "a state dir under the root's real path is refused when the root is named by a symlink, and a rollback by the real path matches",
     async () => {
       // Built here rather than relying on macOS's /var → /private/var, so Linux CI pins it too.
-      const base = realpathSync(mkdtempSync(join(scratch, "symlink-")));
+      const base = realpathSync(testTempDirSync(join(scratch, "symlink-")));
       const real = join(base, "real");
       const files: Fixture[] = [{ path: "a/Doc.md", id: "SYMLINK0001", ageMs: 1_000 }];
       const fx = setup(relative(scratch, join(real)), files, { SYMLINK0001: { kind: "ok", author: "S" } });

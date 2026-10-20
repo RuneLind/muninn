@@ -1,11 +1,12 @@
 import { test, expect, describe, afterEach, spyOn } from "bun:test";
 import * as fs from "node:fs";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { discoverAllBots, readBotsRoot, resolveBotsDir } from "./config.ts";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { AMBIENT_INSTANCE_ENV } from "../test/ambient-env.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /**
  * `MUNINN_BOTS_DIR` — the seam that lets a TEST give a process a bot roster
@@ -22,7 +23,7 @@ import { AMBIENT_INSTANCE_ENV } from "../test/ambient-env.ts";
 const created: string[] = [];
 
 function tempBotsRoot(botName: string): string {
-  const root = mkdtempSync(join(tmpdir(), "muninn-bots-dir-test-"));
+  const root = testTempDirSync(join(tmpdir(), "muninn-bots-dir-test-"));
   created.push(root);
   const dir = join(root, botName);
   mkdirSync(dir, { recursive: true });

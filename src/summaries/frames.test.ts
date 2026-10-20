@@ -1,10 +1,9 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { configure, reset as resetLogging, type LogRecord } from "@logtape/logtape";
 import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   symlinkSync,
@@ -43,18 +42,7 @@ import {
   type CaptureFrame,
   type FrameSource,
 } from "./frames.ts";
-import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
-
-/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
-const TEMP_DIRS: string[] = [];
-function tempDirSync(prefix: string): string {
-  const dir = makeTempDir(prefix);
-  TEMP_DIRS.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
-});
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /** Capture muninn's warns for the duration of one test. */
 async function withCapturedLogs(run: (records: LogRecord[]) => Promise<void> | void): Promise<void> {
@@ -74,7 +62,7 @@ async function withCapturedLogs(run: (records: LogRecord[]) => Promise<void> | v
   }
 }
 
-const dir = (prefix = "capture-frames-") => tempDirSync(join(tmpdir(), prefix));
+const dir = (prefix = "capture-frames-") => testTempDirSync(join(tmpdir(), prefix));
 
 /** An id outside BOTH sources' charsets that is also a live regex pattern. */
 const META_ID = "a.b|c(d)+ef"; // 11 chars, so length alone cannot be what refuses it

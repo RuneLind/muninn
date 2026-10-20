@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, setSystemTime, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { describe, expect, setSystemTime, test } from "bun:test";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VIMEO_MEDIA_HOST, VimeoDownloadError } from "./download.ts";
@@ -18,18 +18,7 @@ import {
   segmentIndicesFor,
   type VimeoManifest,
 } from "./media.ts";
-import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
-
-/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
-const TEMP_DIRS: string[] = [];
-function tempDirSync(prefix: string): string {
-  const dir = makeTempDir(prefix);
-  TEMP_DIRS.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
-});
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const FIXTURE_PATH = new URL("./fixtures/manifest-placeholder.json", import.meta.url).pathname;
 const FIXTURE_RAW = JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
@@ -211,7 +200,7 @@ describe("resolveSegmentUrl", () => {
     const rep = rep720(m);
     expect(new URL(resolveSegmentUrl(MANIFEST_URL, m, rep, rep.segments[0]!)).hostname).toBe("evil.example");
     const { impl, urls } = bytesFetch(() => new Uint8Array(new ArrayBuffer(16)));
-    const out = join(tempDirSync(join(tmpdir(), "vimeo-media-")), "x.mp4");
+    const out = join(testTempDirSync(join(tmpdir(), "vimeo-media-")), "x.mp4");
     await expect(downloadRendition(MANIFEST_URL, m, rep, [0], out, { fetchImpl: impl })).rejects.toThrow(
       /only vod-adaptive-ak\.vimeocdn\.com/,
     );
@@ -274,7 +263,7 @@ describe("fetchVimeoManifest", () => {
 });
 
 describe("downloadRendition", () => {
-  const dir = () => tempDirSync(join(tmpdir(), "vimeo-media-"));
+  const dir = () => testTempDirSync(join(tmpdir(), "vimeo-media-"));
 
   /** Each segment's fake body is its `range=` value repeated, so file order is checkable. */
   function segmentBody(url: string): Uint8Array<ArrayBuffer> {
@@ -490,7 +479,7 @@ describe("downloadRendition", () => {
 });
 
 describe("fix round 1 — what the review found", () => {
-  const dir = () => tempDirSync(join(tmpdir(), "vimeo-media-"));
+  const dir = () => testTempDirSync(join(tmpdir(), "vimeo-media-"));
 
   test("the total cap bounds bytes WRITTEN, not only bytes declared", async () => {
     // Declared 50-byte segments answered with 200 000-byte bodies, cap 100:
@@ -563,7 +552,7 @@ describe("fix round 1 — what the review found", () => {
 });
 
 describe("fix round 2 — what the verify pass found", () => {
-  const dir = () => tempDirSync(join(tmpdir(), "vimeo-media-"));
+  const dir = () => testTempDirSync(join(tmpdir(), "vimeo-media-"));
   function rep4(m: VimeoManifest) {
     const r = rep720(m);
     return { ...r, segments: r.segments.map((seg) => ({ ...seg, size: 4 })) };
@@ -645,7 +634,7 @@ describe("v2 PR 4 — the media host is an ALLOWLIST (skyfire.vimeocdn.com serve
     const m = fixture();
     const rep = { ...rep720(m), segments: rep720(m).segments.map((seg) => ({ ...seg, size: 4 })) };
     const { impl, urls } = bytesFetch(() => new Uint8Array(new ArrayBuffer(4)));
-    const out = join(tempDirSync(join(tmpdir(), "vimeo-media-")), "sky.mp4");
+    const out = join(testTempDirSync(join(tmpdir(), "vimeo-media-")), "sky.mp4");
     await downloadRendition(SKYFIRE_URL, m, rep, [0], out, { fetchImpl: impl });
     expect(new URL(urls[0]!).hostname).toBe("skyfire.vimeocdn.com");
     expect(new URL(urls[0]!).pathname).toContain("/v2/range/prot/");
@@ -660,7 +649,7 @@ describe("downloadRendition — the write side is verified (fix round 1 of #524)
       const range = Number(new URL(url).searchParams.get("range"));
       return new Uint8Array(new ArrayBuffer(rep.segments[range]!.size + 1));
     });
-    const out = join(tempDirSync(join(tmpdir(), "vimeo-media-")), "short.mp4");
+    const out = join(testTempDirSync(join(tmpdir(), "vimeo-media-")), "short.mp4");
     // The disk "says" one byte less than was written — the shape a lost
     // background flush produces, at its smallest.
     await expect(

@@ -10,26 +10,15 @@
  * No `mock.module` here, so this file shares a `bun test` process.
  */
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../../config.ts";
 import { registerFramesRoutes } from "./frames-routes.ts";
 import { registerSummariesRoutes } from "./summaries-routes.ts";
-import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
-
-/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
-const TEMP_DIRS: string[] = [];
-function tempDirSync(prefix: string): string {
-  const dir = makeTempDir(prefix);
-  TEMP_DIRS.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
-});
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 const config = { knowledgeApiUrl: "http://127.0.0.1:1" } as unknown as Config;
 
@@ -37,7 +26,7 @@ const VIDEO = "1223358361";
 const YT = "dQw4-9W_gXQ";
 
 function tmp(prefix = "frames-route-"): string {
-  return tempDirSync(join(tmpdir(), prefix));
+  return testTempDirSync(join(tmpdir(), prefix));
 }
 
 /** A root with one kept Vimeo frame and one kept YouTube frame. */

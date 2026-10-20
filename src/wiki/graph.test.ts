@@ -6,7 +6,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetWikiCacheForTest, getWikiIndex, type WikiIndex } from "./store.ts";
@@ -22,6 +22,7 @@ import {
   type GraphPayload,
   type GraphQuery,
 } from "./graph-types.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const url = (k: string) => `https://example.invalid/browse/${k}`;
 const sid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -95,7 +96,7 @@ let idx: WikiIndex;
 let plain: WikiIndex;
 
 async function build(config: object | null): Promise<WikiIndex> {
-  const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-"));
+  const root = await testTempDir(path.join(tmpdir(), "wiki-graph-"));
   roots.push(root);
   for (const [rel, body] of Object.entries(PAGES)) {
     await mkdir(path.dirname(path.join(root, rel)), { recursive: true });
@@ -493,7 +494,7 @@ describe("fix round 1: the merges leg's own state", () => {
 
 describe("fix round 1: the edge cap", () => {
   test("S3: past GRAPH_EDGES_MAX edges the answer is truncated by edges, at exactly the cap", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-wide-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-graph-wide-"));
     roots.push(root);
     const keys = Array.from({ length: 70 }, (_, i) => `demo-${200 + i}`);
     for (let i = 0; i < 100; i++) {
@@ -535,7 +536,7 @@ describe("fix round 1: issue roots", () => {
 
 describe("fix round 2", () => {
   test("D1: past the edge cap no node is drawn without the edge that reached it, and the walk stays deterministic", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-orphan-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-graph-orphan-"));
     roots.push(root);
     // A hub with 70 keys, 100 pages carrying all 70 plus one key of their own:
     // hop 1 exhausts the edge budget, hop 2 reaches 100 new issues.
@@ -621,7 +622,7 @@ describe("fix round 2", () => {
 
 describe("buildGraph — a culled page", () => {
   test("stays in the graph, marked culled, and leaves only the key's plan coverage", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-culled-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-graph-culled-"));
     roots.push(root);
     await mkdir(path.join(root, "notes"), { recursive: true });
     await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");

@@ -9,7 +9,7 @@
  * in the `test` and `test:db` chains.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -32,6 +32,7 @@ import { registerWikiReadRoutes } from "./wiki-routes.ts";
 import { QUESTION_ANSWER_MAX, QUESTION_NOT_SURE } from "../../format/question.ts";
 import { __resetAnswerScannerForTest } from "../../wiki/answer-scanner.ts";
 import { sha256 } from "../../gardener/util.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 setupTestDb();
 
@@ -235,7 +236,7 @@ const getAnswers = async (app: Hono, extra = ""): Promise<any> => {
 };
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "muninn-answers-"));
+  root = await testTempDir(path.join(tmpdir(), "muninn-answers-"));
   await Bun.write(path.join(root, REL), PAGE);
   await Bun.write(path.join(root, ASKED_REL), ASKED_PAGE);
   await Bun.write(path.join(root, OWNER_REL), OWNER_PAGE);
@@ -746,7 +747,7 @@ describe("answer cards PR 5: the scanner hook (D16)", () => {
   let refuses = "";
 
   beforeAll(async () => {
-    dir = await mkdtemp(path.join(tmpdir(), "muninn-answer-scanners-"));
+    dir = await testTempDir(path.join(tmpdir(), "muninn-answer-scanners-"));
     refuses = await mod(
       "refuses.ts",
       `export function scanAnswer(text) { return text.includes("${MARKER}") ? [{ reason: "synthetic marker found" }, { reason: "second reason" }] : []; }`,

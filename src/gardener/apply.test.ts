@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
+import { rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -17,6 +17,7 @@ import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../wiki/que
 import { sha256 } from "./util.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const DRAFT_BODY = `---
 type: concept
@@ -171,7 +172,7 @@ describe("applyWikiProposal", () => {
   }
 
   beforeEach(async () => {
-    wikiDir = await mkdtemp(path.join(tmpdir(), "gardener-apply-"));
+    wikiDir = await testTempDir(path.join(tmpdir(), "gardener-apply-"));
     reindexed = [];
     refreshed = 0;
   });
@@ -743,7 +744,7 @@ describe("applyWikiProposal → commit seam (acceptance)", () => {
 
   beforeEach(async () => {
     resetCommitQueue();
-    repo = await mkdtemp(path.join(tmpdir(), "gardener-commit-"));
+    repo = await testTempDir(path.join(tmpdir(), "gardener-commit-"));
     wikiDir = path.join(repo, "data", "wiki");
     await mkdir(wikiDir, { recursive: true });
     await git(["init", "-b", "main"]);
@@ -898,7 +899,7 @@ describe("applyWikiProposalGroup", () => {
   }
 
   beforeEach(async () => {
-    wikiDir = await mkdtemp(path.join(tmpdir(), "gardener-group-"));
+    wikiDir = await testTempDir(path.join(tmpdir(), "gardener-group-"));
     __resetWikiWriteQueueForTest();
     await mkdir(path.join(wikiDir, "plans"), { recursive: true });
     await writeFile(path.join(wikiDir, PAGE_A), pageBody("A"));

@@ -1,9 +1,10 @@
 import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 /**
  * The two `[[wikilink]]` containment seams that live in the ROUTE rather than in the
@@ -60,7 +61,7 @@ describe("integrate routes — wikilink containment", () => {
     createHash("sha256").update(await Bun.file(path.join(root, rel)).text()).digest("hex");
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-nesting-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-nesting-"));
     await Bun.write(path.join(root, "router.md"), MD_PAGE);
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `nestwiki=${root}`;

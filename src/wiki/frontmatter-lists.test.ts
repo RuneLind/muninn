@@ -5,7 +5,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -20,6 +20,7 @@ import { frontmatterEndLine } from "../dashboard/views/components/wiki-integrate
 import { buildWikiIndex } from "./store.ts";
 import { extractWikilinks, WIKILINK_RE } from "./wikilinks.ts";
 import { toListing } from "../dashboard/routes/wiki-routes.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const page = (fm: string) => `---\ntitle: X\n${fm}\nstatus: open\n---\n\nBody [[not-related]].\n`;
 const entries = (fm: string) => readRelated(page(fm)).entries;
@@ -146,7 +147,7 @@ describe("resolveRelatedEntries — the five steps", () => {
 describe("the index read pass", () => {
   let root = "";
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-fm-lists-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-fm-lists-"));
     await mkdir(path.join(root, "plans"));
     await mkdir(path.join(root, "notes"));
     await writeFile(path.join(root, "plans/one.md"), "---\ntitle: One\nowns: [ABC-12]\nrelated: [[two]], [[Twin]]\n---\n\nBody.\n");
@@ -268,7 +269,7 @@ describe("fix round 1 batch 2 — leading slash and the name census", () => {
 
   let root = "";
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-fm-census-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-fm-census-"));
     await mkdir(path.join(root, "plans"));
     await writeFile(path.join(root, "plans/a.md"), "---\ntitle: A\n---\n");
     await writeFile(path.join(root, "c.md"), "---\ntitle: Gamma Doc\n---\n");
@@ -298,7 +299,7 @@ describe("fix round 1 batch 3 — N: the index and the reader share one frontmat
   const DASHED = "---\ntitle: N\nnote: x\n----\nowns: [ABC-7]\nrelated: [[n-target]]\n---\n\nBody.\n";
   let root = "";
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-fm-boundary-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-fm-boundary-"));
     await writeFile(path.join(root, "n.md"), DASHED);
     await writeFile(path.join(root, "n-target.md"), "---\ntitle: Target\n---\n");
   });
@@ -445,7 +446,7 @@ describe("fix round 2 batch 2 — the bare-name root step, the gate's key spelli
   describe("1: a bare name tries the page's folder, then the root, before a name", () => {
     let root = "";
     beforeAll(async () => {
-      root = await mkdtemp(path.join(tmpdir(), "wiki-fm-bare-"));
+      root = await testTempDir(path.join(tmpdir(), "wiki-fm-bare-"));
       await mkdir(path.join(root, "plans/x"), { recursive: true });
       await mkdir(path.join(root, "notes"));
       await writeFile(path.join(root, "foo.md"), "---\ntitle: Foo root\n---\n");

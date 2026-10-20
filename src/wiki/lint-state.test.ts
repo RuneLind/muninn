@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, type LintFinding } from "./lint.ts";
 import { checkOwnsEntries, stateClauses, stateOwners } from "./lint-state.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 // Lint check 14 — state outside its home and state of a key another page owns
 // (living-facts D10). Synthetic fixtures: an English phrase list and DEMO keys.
@@ -17,7 +18,7 @@ let root: string;
 const write = (rel: string, content: string) => Bun.write(path.join(root, rel), content);
 
 beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "wiki-state-lint-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-state-lint-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
   await mkdir(path.join(root, "archive"), { recursive: true });
   await write(".wiki-reader.json", JSON.stringify({ statePhrases: BLOCK }));

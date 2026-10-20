@@ -9,7 +9,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -19,6 +19,7 @@ import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import { checkDecisionChain } from "../../wiki/lint-decision-chain.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 function page(title: string, body: string[]): string {
   return ["---", `title: ${title}`, "---", "", ...body, ""].join("\n");
@@ -139,7 +140,7 @@ describe("GET /api/wiki/decision-chain", () => {
   let prevExtra: string | undefined;
 
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-chain-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-chain-route-"));
     const wide = ["<DecisionLog>", ""];
     for (let i = 1; i <= 25; i++) wide.push(`- **O${i}** — Question ${i}? Closed 2026-10-01 (D${i}).`);
     for (let i = 1; i <= 25; i++) wide.push(`- **D${i}** — Decision ${i}.`);

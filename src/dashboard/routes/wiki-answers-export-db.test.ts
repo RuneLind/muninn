@@ -11,7 +11,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -32,6 +32,7 @@ import {
   markWikiAnswersExported,
   markWikiOrphanAnswersExported,
 } from "../../db/wiki-answers.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 setupTestDb();
 
@@ -187,7 +188,7 @@ const confirm = (app: Hono, rows: unknown, contentType = "application/json", pag
 const NO_AGAIN = { block: "", rows: [], count: 0 };
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "muninn-answer-export-"));
+  root = await testTempDir(path.join(tmpdir(), "muninn-answer-export-"));
   await Bun.write(path.join(root, REL), PAGE);
   await Bun.write(path.join(root, GROUP_REL), GROUP_PAGE);
   __setWikiRegistryForTest([

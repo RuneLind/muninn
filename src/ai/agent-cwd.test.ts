@@ -1,8 +1,9 @@
 import { test, expect, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { agentCwdRoot, resolveAgentCwd } from "./agent-cwd.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const ORIGINAL = process.env.MUNINN_AGENT_CWD;
@@ -14,7 +15,7 @@ const DEGRADE_PREFIX = join(tmpdir(), "muninn-agent-");
 
 /** A fresh root per test — fixed `$TMPDIR` names race when `test` and `test:unit` run concurrently. */
 function scratchRoot(): string {
-  const dir = mkdtempSync(SCRATCH_PREFIX);
+  const dir = testTempDirSync(SCRATCH_PREFIX);
   scratch.push(dir);
   process.env.MUNINN_AGENT_CWD = dir;
   return dir;

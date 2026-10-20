@@ -5,7 +5,7 @@
  * query. The model and huginn are stubbed; the wiki is a temp dir.
  */
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setupTestDb } from "../test/setup-db.ts";
@@ -27,6 +27,7 @@ import { sourceTopicKey } from "../gardener/source-drafter.ts";
 import { __resetWikiCacheForTest } from "../wiki/store.ts";
 import { FACTCHECK_SENTINEL_START } from "../wiki/factcheck-context.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 setupTestDb();
 
@@ -100,7 +101,7 @@ async function attempt() {
 const fetchDoc = async () => ({ text: BODY, metadata: { url: URL } }) as never;
 
 beforeEach(async () => {
-  wikiDir = await mkdtemp(path.join(tmpdir(), "muninn-redraft-"));
+  wikiDir = await testTempDir(path.join(tmpdir(), "muninn-redraft-"));
   await writeFile(path.join(wikiDir, "index.md"), "# Index\n");
   __resetWikiCacheForTest();
   bot = { name: BOT, dir: wikiDir, wikiDir } as unknown as BotConfig;

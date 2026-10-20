@@ -18,7 +18,7 @@
  * as a pass.
  */
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderLabelStrip, toPgm } from "./label.ts";
@@ -37,6 +37,7 @@ import {
   regrabFrames,
   runDenseScan,
 } from "./scan-run.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 // BOTH binaries: `probeSize` below shells out to ffprobe, so a host with ffmpeg
 // and no ffprobe would run the ffmpeg-gated cases and fail inside one of them.
@@ -52,7 +53,7 @@ if (!media) {
 
 const roots: string[] = [];
 function tmpRoot(): string {
-  const d = mkdtempSync(join(tmpdir(), "yt-scan-run-"));
+  const d = testTempDirSync(join(tmpdir(), "yt-scan-run-"));
   roots.push(d);
   return d;
 }
@@ -134,7 +135,7 @@ async function meanLuma(file: string): Promise<number> {
  * without either side knowing that transform.
  */
 async function lumaBySecond(file: string, seconds: number): Promise<number[]> {
-  const dir = mkdtempSync(join(tmpdir(), "yt-clock-ref-"));
+  const dir = testTempDirSync(join(tmpdir(), "yt-clock-ref-"));
   roots.push(dir);
   const table: number[] = [];
   for (let t = 0; t < seconds; t++) {

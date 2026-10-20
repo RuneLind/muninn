@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
   RUN_PROC_MAX_OUTPUT_BYTES,
   RUN_PROC_TRUNCATED_MARKER,
 } from "./run-proc.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 describe("runProc", () => {
   test("captures stdout, stderr and the exit code", async () => {
@@ -168,7 +169,7 @@ describe("runProc: the timeout's kill", () => {
   const pidAt = (file: string) => Number(readFileSync(file, "utf8").trim());
 
   test("a child that traps SIGTERM gets SIGKILL after the grace, and the rejection waits for its exit", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-kill-"));
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-kill-"));
     const pidFile = path.join(dir, "pid");
     try {
       const t0 = performance.now();
@@ -199,7 +200,7 @@ describe("runProc: the timeout's kill", () => {
   });
 
   test("processGroup: the timeout reaches what the child started", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-group-"));
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-group-"));
     const pidFile = path.join(dir, "pid");
     try {
       const err = await runProc(["/bin/bash", "-c", `sleep 30 & echo $! > ${pidFile}; wait`], 150, "group", {
@@ -218,7 +219,7 @@ describe("runProc: the timeout's kill", () => {
   });
 
   test("processGroup: a member that traps SIGTERM dies once its leader died on it, without the grace", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-member-"));
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-member-"));
     const pidFile = path.join(dir, "pid");
     try {
       const t0 = performance.now();
@@ -246,7 +247,7 @@ describe("runProc: the timeout's kill", () => {
   });
 
   test("cwd: the child runs where it is told", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "run-proc-cwd-"));
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-cwd-"));
     try {
       const r = await runProc(["/bin/bash", "-c", "pwd -P"], 5_000, "cwd", { cwd: dir });
       expect(r.stdout.trim()).toBe(realpathSync(dir));

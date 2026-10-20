@@ -13,7 +13,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { chmodSync, existsSync, writeFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { GCS_DEFAULT_BASE, resolveWikiBucketMirrorConfig } from "../config.ts";
@@ -26,6 +26,7 @@ import {
   startWikiBucketMirrors,
   type TokenSource,
 } from "./bucket-mirror.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 interface FakeObject { generation: number; body: string | Uint8Array; size?: number }
 
@@ -75,7 +76,7 @@ let foldsCase = false;
 let foldsFull = false;
 
 beforeAll(async () => {
-  const probe = await mkdtemp(path.join(tmpdir(), "bm-probe-"));
+  const probe = await testTempDir(path.join(tmpdir(), "bm-probe-"));
   writeFileSync(path.join(probe, "Aa"), "");
   writeFileSync(path.join(probe, "ass"), "");
   foldsCase = existsSync(path.join(probe, "aa"));
@@ -89,7 +90,7 @@ beforeEach(async () => {
   projectNumber = "123";
   listOverride = null;
   streamedBytes = 0;
-  base = await mkdtemp(path.join(tmpdir(), "bm-r2-"));
+  base = await testTempDir(path.join(tmpdir(), "bm-r2-"));
   root = path.join(base, "wikis", "felles");
   __setReadonlyWikiRootsForTest([root]);
 });

@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { noRootNote, runWikiCheck, wikiCheck, wikiRootFor, type WikiCheckResult } from "./wiki-check.ts";
 import { buildWikiIndex } from "../src/wiki/store.ts";
 import { lintWiki, PAGE_TEXT_LINT_CHECKS } from "../src/wiki/lint.ts";
+import { testTempDir } from "../src/test/temp-dir.ts";
 
 const SCRIPT = path.join(import.meta.dir, "wiki-check.ts");
 const BAD = ["---", "title: X", "---", '<Callout tone="success">', "x", "</Callout>", ""].join("\n");
@@ -94,7 +95,7 @@ const COMPILED = "<!-- generated from blogs/src/s.mdx -->\n<html></html>\n";
 
 let tmp: string;
 beforeAll(async () => {
-  tmp = await mkdtemp(path.join(tmpdir(), "wiki-check-"));
+  tmp = await testTempDir(path.join(tmpdir(), "wiki-check-"));
   // A wiki with a reader config, a page two folders down, and every place the store skips.
   await Bun.write(path.join(tmp, "wiki/.wiki-reader.json"), "{}");
   await Bun.write(path.join(tmp, "wiki/plans/deep/a.mdx"), BAD);

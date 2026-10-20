@@ -8,7 +8,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -53,6 +53,7 @@ import {
   freeText,
   parseFindQuery,
 } from "../dashboard/views/components/wiki-find.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const S1 = "11111111-1111-4111-8111-111111111111";
 const S2 = "22222222-2222-4222-8222-222222222222";
@@ -72,7 +73,7 @@ afterEach(async () => {
 });
 
 async function wiki(pages: Record<string, string>): Promise<{ root: string; index: WikiIndex }> {
-  const root = await mkdtemp(path.join(tmpdir(), "find-everywhere-"));
+  const root = await testTempDir(path.join(tmpdir(), "find-everywhere-"));
   dirs.push(root);
   for (const [rel, body] of Object.entries(pages)) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });

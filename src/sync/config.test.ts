@@ -1,9 +1,10 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import path from "node:path";
 import { parseSyncRepos, syncCoversToplevel, type SyncRepo } from "./config.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../");
 
@@ -49,7 +50,7 @@ describe("parseSyncRepos", () => {
   });
 
   test("wiki mode matches through a trailing slash and a symlinked prefix", async () => {
-    const base = await mkdtemp(path.join(tmpdir(), "sync-cfg-"));
+    const base = await testTempDir(path.join(tmpdir(), "sync-cfg-"));
     try {
       const root = path.join(base, "vault");
       await mkdir(root, { recursive: true });
@@ -104,7 +105,7 @@ describe("parseSyncRepos", () => {
   test("two entries on ONE repo are refused — different names, same git toplevel", async () => {
     // The in-flight guard and the ledger are keyed by NAME, so two entries for
     // one repo pass every later check and then race each other's rebase.
-    const base = await mkdtemp(path.join(tmpdir(), "sync-dedupe-"));
+    const base = await testTempDir(path.join(tmpdir(), "sync-dedupe-"));
     try {
       const repo = path.join(base, "repo");
       const nested = path.join(repo, "data", "wiki");
@@ -128,7 +129,7 @@ describe("parseSyncRepos", () => {
     // The wiki-mode error message actively steers people here ("or use mode
     // plain"), and a plain-mode rebase rewrites the working tree under a
     // gardener write with no wiki lock held.
-    const base = await mkdtemp(path.join(tmpdir(), "sync-plain-wiki-"));
+    const base = await testTempDir(path.join(tmpdir(), "sync-plain-wiki-"));
     try {
       const repo = path.join(base, "repo");
       const nested = path.join(repo, "data", "wiki");
@@ -153,7 +154,7 @@ describe("parseSyncRepos", () => {
 describe("syncCoversToplevel (sweeper subsumption)", () => {
   let base: string;
   beforeEach(async () => {
-    base = await mkdtemp(path.join(tmpdir(), "sync-subsume-"));
+    base = await testTempDir(path.join(tmpdir(), "sync-subsume-"));
   });
   afterEach(async () => {
     await rm(base, { recursive: true, force: true });

@@ -8,7 +8,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -16,6 +16,7 @@ import { registerWikiRoutes } from "./wiki-routes.ts";
 import { RELATED_HOP_LIMIT_DEFAULT, RELATED_HOP_LIMIT_MAX } from "../../wiki/related-constants.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 function page(title: string, body: string): string {
   return ["---", `title: ${title}`, "---", "", body, ""].join("\n");
@@ -34,7 +35,7 @@ describe("GET /api/wiki/related", () => {
   let prevExtra: string | undefined;
 
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-related-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-related-route-"));
     const files: Array<[string, string]> = [
       // The open page, with its own attachment (`<stem>-prototype.html`).
       ["plans/Open.md", page("Open", "Reads [[hop]].")],
@@ -179,7 +180,7 @@ describe("GET /api/wiki/related — what `exclude` resolves", () => {
   ];
 
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-related-exclude-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-related-exclude-"));
     const html = (t: string) => `<html><head><title>${t}</title></head><body>x</body></html>`;
     const files: Array<[string, string]> = [
       ["hub.md", page("Hub", ALL.map((rel, i) => `[l${i}](${rel})`).join(" "))],

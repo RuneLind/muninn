@@ -9,7 +9,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { sha256 } from "../gardener/util.ts";
@@ -17,11 +17,12 @@ import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import { parseQueueYaml, serializeQueue } from "./queue.ts";
 import { writePlanQueue } from "./write.ts";
 import { QUEUE_REL_PATH } from "./constants.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const roots: string[] = [];
 
 async function makeRoot(queue?: string): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "muninn-queue-write-"));
+  const root = await testTempDir(path.join(tmpdir(), "muninn-queue-write-"));
   roots.push(root);
   await mkdir(path.join(root, "plans"), { recursive: true });
   if (queue !== undefined) await writeFile(path.join(root, QUEUE_REL_PATH), queue);

@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
   type SeriesCommitterWiki,
 } from "./series-committer.ts";
 import type { SyncRepo } from "../sync/config.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const wiki = (over: Partial<SeriesCommitterWiki> = {}): SeriesCommitterWiki => ({
   name: "mimir",
@@ -67,7 +68,7 @@ describe("seriesCommitterWarning", () => {
   test("a root reached through a symlink is still covered", async () => {
     // `SyncRepo.path` is stored realpath'd; the registry keeps the configured
     // spelling. A lexical miss would now COMMIT a repo the sync loop owns.
-    const base = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-link-")));
+    const base = await realpath(await testTempDir(path.join(tmpdir(), "muninn-series-link-")));
     try {
       const real = path.join(base, "mimir");
       const link = path.join(base, "linked");
@@ -103,7 +104,7 @@ describe("seriesSelfCommitBlocker", () => {
   }
 
   async function withTemp(fn: (dir: string) => Promise<void>): Promise<void> {
-    const dir = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-blocker-")));
+    const dir = await realpath(await testTempDir(path.join(tmpdir(), "muninn-series-blocker-")));
     try {
       await fn(dir);
     } finally {

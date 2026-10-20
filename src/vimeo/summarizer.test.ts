@@ -12,8 +12,7 @@
  */
 import { test, expect, beforeEach, beforeAll, afterAll, afterEach, mock } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
-import { mkdtemp } from "node:fs/promises";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
@@ -21,6 +20,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { VimeoCaptions } from "./captions.ts";
 import { CAPTURE_DEEP_MODEL, SHIPPED_CAPTURE_PRESETS } from "../summaries/presets.ts";
 import { windowedTranscriptRider } from "../summaries/summarizer-shared.ts";
+import { testTempDir, testTempDirSync } from "../test/temp-dir.ts";
 
 const VIDEO_ID = "1223358361";
 const CANONICAL = "https://vimeo.com/1223358361";
@@ -222,7 +222,7 @@ beforeEach(() => {
   manifestFetches = [];
   extractCalls = [];
   lastHarvestOpts = undefined;
-  framesRoot = mkdtempSync(join(tmpdir(), "vimeo-frames-root-"));
+  framesRoot = testTempDirSync(join(tmpdir(), "vimeo-frames-root-"));
   ingestPayload = undefined;
   sourceDraftCalls = [];
   sourceDraftThrows = null;
@@ -828,7 +828,7 @@ test("EVERY stubbed capture warns, naming the fixture and the job", async () => 
 /** A temp dir, so a path can carry a SPACE without editing the repo. */
 let memoDir = "";
 beforeAll(async () => {
-  memoDir = await mkdtemp(join(tmpdir(), "muninn-vimeo-memo-"));
+  memoDir = await testTempDir(join(tmpdir(), "muninn-vimeo-memo-"));
 });
 afterAll(() => rmSync(memoDir, { recursive: true, force: true }));
 

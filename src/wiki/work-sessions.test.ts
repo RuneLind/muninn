@@ -5,7 +5,7 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -23,6 +23,7 @@ import { __resetClaudeUsageWarnsForTest } from "../utils/claude-usage-fetch.ts";
 import { __resetWorkedLedgerForTest } from "./worked-ledger.ts";
 import { buildWikiIndex } from "./store.ts";
 import type { getLog } from "../logging.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 type Logger = ReturnType<typeof getLog>;
 
@@ -176,7 +177,7 @@ describe("refreshWorkSessions", () => {
 
 describe("the index post-pass", () => {
   test("no memo ⇒ no work field anywhere; a memo ⇒ work on the written page and the threads", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "work-sessions-"));
+    const root = await testTempDir(path.join(tmpdir(), "work-sessions-"));
     try {
       await mkdir(path.join(root, "plans"));
       await writeFile(path.join(root, "plans/a.mdx"), "# A\n");

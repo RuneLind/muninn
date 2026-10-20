@@ -8,25 +8,14 @@
  * `src/summaries/frames.test.ts`.
  */
 
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseVimeoManifest, VIMEO_MEDIA_HOST, type VimeoManifest } from "./media.ts";
 import { cadenceTimes } from "../summaries/frames.ts";
 import { VIMEO_FRAME_HEIGHT, extractCadenceFrames } from "./frames.ts";
-import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
-
-/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
-const TEMP_DIRS: string[] = [];
-function tempDirSync(prefix: string): string {
-  const dir = makeTempDir(prefix);
-  TEMP_DIRS.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
-});
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const FIXTURE_RAW = JSON.parse(
   readFileSync(new URL("./fixtures/manifest-placeholder.json", import.meta.url).pathname, "utf8"),
@@ -49,7 +38,7 @@ function smallFixture(): VimeoManifest {
     video: m.video.map((r) => (r.height === 720 ? { ...r, segments: r.segments.map((seg) => ({ ...seg, size: 7 })) } : r)),
   };
 }
-const dir = () => tempDirSync(join(tmpdir(), "vimeo-frames-"));
+const dir = () => testTempDirSync(join(tmpdir(), "vimeo-frames-"));
 
 describe("extractCadenceFrames", () => {
   /** Every segment fetch answers 8 bytes; the grab writes a marker file naming its inputs. */

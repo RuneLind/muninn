@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -39,6 +39,7 @@ import {
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 /** The gated gardener POSTs take application/json (a 415 otherwise — `json-request.ts`). */
 const JSON_POST: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
@@ -66,7 +67,7 @@ describe("GET /api/wiki/linter-findings — standalone wikis + resolution errors
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-linter-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-linter-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
     // A STANDALONE wiki (source !== "bot"), owned by no bot and backed by no
@@ -795,7 +796,7 @@ describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
   };
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-inspector-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-inspector-route-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\nNothing cited here.\n");
     origFetch = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -904,7 +905,7 @@ describe("ingest-backlog pipeline + cache", () => {
   }
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-backlog-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-backlog-"));
     // A wiki page that cites y1 (with a timestamp — normalization must collapse
     // it) and x1. anthropic/tiktok are cited nowhere.
     await Bun.write(
@@ -1059,7 +1060,7 @@ describe("ingest-backlog cache — invalidation generation fencing", () => {
   }
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-backlog-gen-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-backlog-gen-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\nnothing cited here.\n");
     fetchCalls = [];
     gates = [];
@@ -1216,7 +1217,7 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
   });
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-prune-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-prune-route-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
     origFetch = globalThis.fetch;
     globalThis.fetch = (async (_input: RequestInfo | URL) =>
@@ -1449,7 +1450,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
   let snapshotReadThrowsFor: string | null;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-delete-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-delete-route-"));
     proposalDeleteThrows = null;
     snapshotReadThrowsFor = null;
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
@@ -1998,7 +1999,7 @@ describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
   let gardenerEnabled: boolean;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-draft-doc-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-draft-doc-route-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
     gardenerEnabled = true;
     __setBotsForTest([
@@ -2114,7 +2115,7 @@ describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () =>
   let releaseListing: () => void = () => {};
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-draft-run-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-draft-run-route-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
     __setBotsForTest([
       {
@@ -2230,7 +2231,7 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
   let origFetch: typeof fetch;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-draft-run-throw-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-draft-run-throw-"));
     await Bun.write(path.join(root, "notes.md"), "# Notes\n");
     __setBotsForTest([
       {
@@ -2384,7 +2385,7 @@ describe("approve — stem-collision refusal (the apply path had no check at all
 
   beforeEach(async () => {
     approved = [];
-    root = await mkdtemp(path.join(tmpdir(), "wiki-stem-collide-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-stem-collide-"));
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `stemwiki=${root}`;
     __resetWikiRegistryForTest();
@@ -2686,7 +2687,7 @@ describe("approve — the in-queue collision refusal returns the row to draft", 
 
   beforeEach(async () => {
     reverted = [];
-    root = await mkdtemp(path.join(tmpdir(), "wiki-stem-inqueue-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-stem-inqueue-"));
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `inqueuewiki=${root}`;
     __resetWikiRegistryForTest();
@@ -2897,7 +2898,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     }) as unknown as Parameters<typeof registerWikiGardenerRoutes>[1];
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-lint-group-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-lint-group-"));
     await Bun.write(path.join(root, PAGE_A), body("A"));
     await Bun.write(path.join(root, PAGE_B), body("B"));
     prevExtra = process.env.WIKI_EXTRA;
@@ -3269,7 +3270,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     // Pin the registry to this block's own temp wiki: `defaultWikiEntry` prefers
     // jarvis, and whether jarvis is discovered is a fact about the machine — so
     // without this the bare case could pass for the wrong reason.
-    const emptyBots = await mkdtemp(path.join(tmpdir(), "wiki-lint-nobots-"));
+    const emptyBots = await testTempDir(path.join(tmpdir(), "wiki-lint-nobots-"));
     const prevBotsDir = process.env.MUNINN_BOTS_DIR;
     process.env.MUNINN_BOTS_DIR = emptyBots;
     __resetWikiRegistryForTest();
@@ -3334,7 +3335,7 @@ describe("lint proposals — seeding and the group verbs", () => {
     // (`isGardenerWiki`) and the two selection states are distinguishable.
     __setWikiRegistryForTest([{ name: "lintwiki", root, source: "extra", collections: ["wiki"] }]);
     registerWikiGardenerRoutes(app, deps({}));
-    const other = await mkdtemp(path.join(tmpdir(), "wiki-lint-elsewhere-"));
+    const other = await testTempDir(path.join(tmpdir(), "wiki-lint-elsewhere-"));
     try {
       process.env.WIKI_DIR = root; // the `lintwiki` entry's own root; restored by afterEach
       const html = await (await app.request("/wiki/gardener")).text();
@@ -3449,7 +3450,7 @@ describe("gardener backlog + source-draft POSTs — 415 before any side effect",
   let calls: string[];
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-gardener-415-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-gardener-415-"));
     __setBotsForTest([
       {
         name: "draftbot",
@@ -3541,7 +3542,7 @@ describe("GET /api/wiki/linter-findings — check 9 drift over a git wiki", () =
   const plan = (body: string) => `---\ntitle: P\nplan_status: in-flight\nstatus_date: 2026-01-10\n---\n\n${body}\n`;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-linter-drift-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-linter-drift-"));
     git(["init", "-q"]);
     await Bun.write(path.join(root, "plans", "drift.md"), plan("First."));
     commit("2026-01-10T09:00:00Z");
@@ -3606,7 +3607,7 @@ describe("POST /api/wiki/proposals/:id/redraft — a disabled gardener", () => {
   let fetches: number;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-redraft-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-redraft-route-"));
     await Bun.write(path.join(root, "index.md"), "# Index\n");
     __setBotsForTest([
       {

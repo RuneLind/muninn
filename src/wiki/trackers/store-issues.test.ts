@@ -9,7 +9,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetWikiCacheForTest, getWikiIndex, type WikiIndex } from "../store.ts";
@@ -23,6 +23,7 @@ import {
   type WikiFilters,
   type WikiListing,
 } from "../../dashboard/views/components/wiki-filter.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const url = (k: string) => `https://example.invalid/browse/${k}`;
 
@@ -76,7 +77,7 @@ let plain: WikiIndex;
 const roots: string[] = [];
 
 async function build(withTrackers: boolean): Promise<WikiIndex> {
-  const root = await mkdtemp(path.join(tmpdir(), "tracker-store-"));
+  const root = await testTempDir(path.join(tmpdir(), "tracker-store-"));
   roots.push(root);
   for (const [rel, body] of Object.entries(PAGES)) {
     await mkdir(path.dirname(path.join(root, rel)), { recursive: true });

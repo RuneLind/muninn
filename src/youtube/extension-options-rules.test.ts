@@ -22,7 +22,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -38,6 +38,7 @@ import {
   type CaptureOptions,
 } from "./extension-options-rules.ts";
 import { EXTENSION_RULES_OUTPUT, buildExtensionRules } from "./extension-build.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /** An instance from BEFORE the visual-detail axis: kinds and frames, nothing else. */
 const SERVER_PAYLOAD = {
@@ -321,7 +322,7 @@ describe("buildSummarizeBody", () => {
 
 describe("the checked-in extension copy", () => {
   test("`bun run build:extension` reproduces extensions/youtube/capture-rules.js byte for byte", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "muninn-ext-build-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-ext-build-"));
     try {
       // The SHIPPED emitter, not a re-typed `bun build`: one emitter, one
       // output, so the command in package.json cannot drift from this check.
@@ -340,7 +341,7 @@ describe("the checked-in extension copy", () => {
     // — so without normalization the same source emits three different files
     // from the repo root, from `src/`, and from `/tmp`, and the gate's remedy
     // ("a bun bump changed the codegen") names the wrong cause.
-    const dir = mkdtempSync(join(tmpdir(), "muninn-ext-cwd-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-ext-cwd-"));
     const originalCwd = process.cwd();
     // Not `process.cwd()`: the point of the case is that the answer must not
     // depend on it, so the reference build is taken from a directory this file

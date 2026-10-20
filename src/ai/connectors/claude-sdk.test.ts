@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -33,6 +33,7 @@ mock.module("../mcp-status.ts", () => ({
 import { executePrompt, assertHaveAuth, resolveThinking } from "./claude-sdk.ts";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 // Single shared temp dir for the whole file — no per-test bot config changes
 // are persisted to disk, so a fresh dir per test is wasted I/O.
@@ -46,7 +47,7 @@ const baseBot = (): BotConfig => ({
 });
 
 beforeAll(() => {
-  sharedBotDir = mkdtempSync(join(tmpdir(), "claude-sdk-test-"));
+  sharedBotDir = testTempDirSync(join(tmpdir(), "claude-sdk-test-"));
   writeFileSync(join(sharedBotDir, "CLAUDE.md"), "test persona");
 });
 
@@ -513,7 +514,7 @@ describe("claude-sdk executePrompt", () => {
 
   test("toolsDisabled passes tools: [] and no mcpServers even when the bot has a .mcp.json", async () => {
     fakeEvents = successOnly;
-    const dir = mkdtempSync(join(tmpdir(), "claude-sdk-fence-"));
+    const dir = testTempDirSync(join(tmpdir(), "claude-sdk-fence-"));
     writeFileSync(
       join(dir, ".mcp.json"),
       JSON.stringify({ mcpServers: { gmail: { command: "node", args: ["gmail.js"] } } }),

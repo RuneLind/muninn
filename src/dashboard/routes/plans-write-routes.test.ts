@@ -8,7 +8,7 @@
  */
 
 import { afterAll, afterEach, describe, expect, setSystemTime, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -20,6 +20,7 @@ import { __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import { sha256 } from "../../gardener/util.ts";
 import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const CONFIG = { claudeUsageUrl: null } as unknown as Config;
 
@@ -29,7 +30,7 @@ const plan = (slug: string, status = "proposed") =>
 const roots: string[] = [];
 
 async function makeWiki(slugs = ["alpha-plan", "beta-plan"]): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "muninn-plans-write-"));
+  const root = await testTempDir(path.join(tmpdir(), "muninn-plans-write-"));
   roots.push(root);
   await mkdir(path.join(root, "plans"), { recursive: true });
   for (const slug of slugs) {

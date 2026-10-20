@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as lintComponents from "./lint-components.ts";
@@ -10,6 +10,7 @@ import { renderWikiHtml } from "./render.ts";
 import { countedNextMovesLanes, observeComponentTags, parseBlocks, type ObservedComponentTag } from "../format/markdown-ast.ts";
 import { COMPONENT_SPEC } from "../format/component-spec.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const page = (...lines: string[]) => ["---", "title: X", "---", "", ...lines].join("\n");
 const run = (content: string) => checkComponents("plans/x.mdx", content);
@@ -533,7 +534,7 @@ describe("the observer", () => {
 
 describe("lintWiki runs the check on .mdx pages that are not culled", () => {
   test("an .mdx page reports; the same tag on an .md page or a culled .mdx does not", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-lint-components-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-lint-components-"));
     try {
       const body = page('<Callout tone="success">', "x", "</Callout>");
       await Bun.write(path.join(root, "plans/a.mdx"), body);

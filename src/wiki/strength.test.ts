@@ -11,7 +11,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
@@ -39,6 +39,7 @@ import {
   STRENGTH_SESSION_DIGEST,
   STRENGTH_SESSION_WEIGHT,
 } from "./related-constants.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 function page(title: string, fm: string[], body: string): string {
   return ["---", `title: ${title}`, ...fm, "---", "", body, ""].join("\n");
@@ -48,7 +49,7 @@ async function indexOver(
   pages: Array<[string, string]>,
   fn: (index: WikiIndex) => void | Promise<void>,
 ): Promise<void> {
-  const dir = await mkdtemp(path.join(tmpdir(), "wiki-strength-"));
+  const dir = await testTempDir(path.join(tmpdir(), "wiki-strength-"));
   try {
     for (const [rel, body] of pages) {
       await mkdir(path.join(dir, path.dirname(rel)), { recursive: true });

@@ -10,7 +10,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -25,6 +25,7 @@ import { SESSION_ID_MAX_CHARS } from "../../wiki/session-ledger.ts";
 import { registerWikiRoutes } from "./wiki-routes.ts";
 import type { ProvenanceContext } from "../../wiki/provenance-service.ts";
 import type { Config } from "../../config.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const ID_A = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
 const SESSION_A = `claude-code:${ID_A}`;
@@ -63,8 +64,8 @@ function testCtx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
 }
 
 beforeAll(async () => {
-  mimir = await mkdtemp(path.join(tmpdir(), "prov-mimir-"));
-  kode = await mkdtemp(path.join(tmpdir(), "prov-kode-"));
+  mimir = await testTempDir(path.join(tmpdir(), "prov-mimir-"));
+  kode = await testTempDir(path.join(tmpdir(), "prov-kode-"));
 
   await writeFile(
     path.join(mimir, "plan.md"),
@@ -235,7 +236,7 @@ describe("the listing and the page route", () => {
   });
 
   test("a wiki nothing stamped answers `{}` — which is how the client renders no facet at all", async () => {
-    const empty = await mkdtemp(path.join(tmpdir(), "prov-empty-"));
+    const empty = await testTempDir(path.join(tmpdir(), "prov-empty-"));
     try {
       await writeFile(path.join(empty, "a.md"), "---\ntitle: A\n---\n\nbody\n");
       __setWikiRegistryForTest([
@@ -343,7 +344,7 @@ describe("the answer is BOUNDED — the caller picks its size", () => {
   let bigApp: Hono;
 
   beforeAll(async () => {
-    big = await mkdtemp(path.join(tmpdir(), "prov-big-"));
+    big = await testTempDir(path.join(tmpdir(), "prov-big-"));
     // Three pages × 400 distinct session refs each. Unbounded, one GET walks the
     // whole registry and fans out into ⌈1200/200⌉ = 6 claude-usage calls.
     for (let p = 0; p < 3; p += 1) {

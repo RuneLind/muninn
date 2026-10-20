@@ -6,9 +6,10 @@
  * it degrades to a warning (non-fatal) — the commit is what we verify here.
  */
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 const SCRIPT = path.join(REPO_ROOT, "scripts", "backfill-wiki-pubdates.ts");
@@ -41,10 +42,10 @@ describe("backfill-wiki-pubdates --commit", () => {
   let transcripts: string;
 
   beforeEach(async () => {
-    base = await mkdtemp(path.join(tmpdir(), "backfill-script-"));
-    repo = await mkdtemp(path.join(base, "repo-"));
+    base = await testTempDir(path.join(tmpdir(), "backfill-script-"));
+    repo = await testTempDir(path.join(base, "repo-"));
     wikiDir = path.join(repo, "data", "wiki");
-    transcripts = await mkdtemp(path.join(base, "transcripts-")); // empty
+    transcripts = await testTempDir(path.join(base, "transcripts-")); // empty
     await mkdir(path.join(wikiDir, "sources"), { recursive: true });
     // A source page with an in-page `Date:` line but no parseable `Source:` line —
     // Case A folds the URL:/Date: block into one canonical `Source:` line.
