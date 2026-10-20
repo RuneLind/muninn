@@ -202,6 +202,7 @@ describe("the reader and the lint read one tree", () => {
     ["a comma in a linked case id's URL", "→ Renew — [LIB-1](http://x/?a=1,2)", false],
     ["an italic arrow run", "*→ Renew* — LIB-1", false],
     ["an underscore arrow run", "_→ Renew_ — LIB-1", false],
+    ["text after a bold arrow run", "**→ Renew**, later — LIB-1", false],
     ["a board id beside a grammar id, no board", "→ Renew — LIB-1, loan-7", false],
     ["a board id beside a grammar id, on the board", "→ Renew — LIB-1, loan-7", true],
   ] as [string, string, boolean][])("%s", (_name, item, onBoard) => {

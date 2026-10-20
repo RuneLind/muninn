@@ -89,6 +89,8 @@ describe("readRuleTree — the leaf text", () => {
     ["_→ Renew_ — LIB-1", "Renew", ["LIB-1"]],
     ["*→ Renew*, later", "Renew", []],
     ["_→ Renew user_id_", "Renew user_id", []],
+    ["*→ 2 * 3* — LIB-1", "2 * 3", ["LIB-1"]],
+    ["**→ Renew**, later", "Renew", []],
   ])("%s", (item, outcome, cases) => {
     const { leaf } = one(item);
     expect(leaf?.cases).toEqual(cases);
