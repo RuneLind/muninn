@@ -1424,8 +1424,9 @@ export function glossaryCss(scope: string): string {
     ${s} .gl-mark:not(.gl-dismissed):hover > .gl-tip,
     ${s} .gl-mark:not(.gl-dismissed):focus-within > .gl-tip { display: block; }
     @media print {
-      ${s} .gl-tip, ${s} .gl-mark:hover > .gl-tip, ${s} .gl-mark:focus-within > .gl-tip { display: none; }
-      ${s} .gl-term { text-decoration: none; }
+      /* !important: an open tip (hover, focus, the top-layer popover) out-specifies any print selector. */
+      ${s} .gl-tip { display: none !important; }
+      ${s} .gl-term, ${s} .gl-term:focus-visible { text-decoration: none; outline: none; }
     }
     @media (forced-colors: active) {
       ${s} .gl-term { text-decoration-color: CanvasText; }

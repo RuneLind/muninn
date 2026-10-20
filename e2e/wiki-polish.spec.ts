@@ -482,6 +482,26 @@ test.describe("Wiki reader: polish", () => {
     await expect(page.locator(".wiki-article .gl-tip a")).toHaveCount(0);
   });
 
+  test("an open definition does not print, whether hovered or focused", async ({ page }) => {
+    await open(page, 1280);
+    const mark = page.locator(".wiki-article .gl-mark").first();
+    const tip = mark.locator(".gl-tip");
+    for (const how of ["hover", "focus"] as const) {
+      await page.emulateMedia({ media: "screen" });
+      if (how === "hover") await mark.locator(".gl-term").hover();
+      else await page.keyboard.press("Tab").then(() => mark.locator(".gl-term").focus());
+      await expect(tip, `${how}: open on screen`).toBeVisible();
+      await page.emulateMedia({ media: "print" });
+      await expect(tip, `${how}: not printed`).toBeHidden();
+      if (how === "focus") expect(await mark.locator(".gl-term").evaluate((t) => getComputedStyle(t).outlineStyle), "no focus ring in print").toBe("none");
+      await page.emulateMedia({ media: "screen" });
+      await expect(tip, `${how}: open again on screen`).toBeVisible();
+      if (how === "hover") await page.mouse.move(0, 0);
+      else await mark.locator(".gl-term").blur();
+      await expect(tip).toBeHidden();
+    }
+  });
+
   for (const width of [1280, 700, 390] as const) {
     test(`${width} px: every definition, a right-edge one too, stays inside the box that clips it`, async ({ page }) => {
       await open(page, width, width === 390);
