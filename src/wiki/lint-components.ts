@@ -26,8 +26,9 @@
  * case's `note` and `kort` through the inline renderer, so a tag there is a
  * component on the page. The caller passes what `loadPageFiles` read; each
  * file that holds a component name is rendered with the page alone, and the
- * tags it adds over the render with no files are judged. Their findings have
- * no line and say `In <ref>: ` first.
+ * tags it adds over the render with no files are judged, each distinct tag
+ * once per file (refs resolving to one path are one file, named by the first
+ * ref). Their findings have no line and say `In <ref>: ` first.
  *
  * **Where a tag is** comes from a second render of the same page with a marker
  * attribute (`muninnlintmark="N"`) inserted after every `<Name` of a component
@@ -53,6 +54,7 @@ import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type C
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { lineCodeSpanRanges } from "../format/code-spans.ts";
+import { resolveEmbedRelPath } from "../format/embed.ts";
 import { WIKILINK_WITH_LABEL_RE, renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { PageFileResult, PageFiles } from "../format/query-block.ts";
@@ -310,23 +312,39 @@ export type LoadedPageFiles = ReadonlyMap<string, PageFileResult>;
  * minus the render with none, tag for tag. The reader runs a `<CaseBoard>`
  * case's `note` and `kort` through the inline renderer, so a tag there is a
  * component on the page. Only those tags come from a file; a tag in a file has
- * no page line.
+ * no page line. Refs that resolve to one path (`c.yaml`, `./c.yaml`, two
+ * boards on one file) are one file: rendered once with all of them, each
+ * distinct tag judged once, named by the first ref in source order.
  */
-function fileTags(render: PageRender, content: string, files: LoadedPageFiles, plain: readonly ObservedComponentTag[]): [string, Tag[]][] {
-  const out: [string, Tag[]][] = [];
+function fileTags(render: PageRender, relPath: string, content: string, files: LoadedPageFiles, plain: readonly ObservedComponentTag[]): [string, Tag[]][] {
+  const byPath = new Map<string, [string, PageFileResult][]>();
   for (const [ref, result] of files) {
+    if (!result.ok) continue;
+    const key = resolveEmbedRelPath(relPath.replace(/\\/g, "/"), ref) ?? ref;
+    const group = byPath.get(key);
+    if (group === undefined) byPath.set(key, [[ref, result]]);
+    else group.push([ref, result]);
+  }
+  const out: [string, Tag[]][] = [];
+  for (const group of byPath.values()) {
+    const [name, first] = group[0]!;
     // A file with no component name in it adds no tag: no render.
     NAME_RE.lastIndex = 0;
-    if (!result.ok || !NAME_RE.test(result.text)) continue;
+    if (!first.ok || !NAME_RE.test(first.text)) continue;
     const left = new Map<string, number>();
     for (const t of plain) left.set(tagKey(t), (left.get(tagKey(t)) ?? 0) + 1);
+    const seen = new Set<string>();
     const added: Tag[] = [];
-    for (const t of observe(render, content, new Map([[ref, result]]))) {
-      const n = left.get(tagKey(t)) ?? 0;
-      if (n > 0) left.set(tagKey(t), n - 1);
-      else added.push({ name: t.name, attrs: t.rawAttrs, ...nmOf(t) });
+    for (const t of observe(render, content, new Map(group))) {
+      const key = tagKey(t);
+      const n = left.get(key) ?? 0;
+      if (n > 0) left.set(key, n - 1);
+      else if (!seen.has(key)) {
+        seen.add(key);
+        added.push({ name: t.name, attrs: t.rawAttrs, ...nmOf(t) });
+      }
     }
-    if (added.length > 0) out.push([ref, added]);
+    if (added.length > 0) out.push([name, added]);
   }
   return out;
 }
@@ -450,7 +468,7 @@ export function checkComponents(
 
 function findComponents(relPath: string, content: string, render: PageRender, files: LoadedPageFiles): LintFinding[] {
   const plain = observe(render, content);
-  const fromFiles = fileTags(render, content, files, plain).flatMap(([ref, tags]) =>
+  const fromFiles = fileTags(render, relPath, content, files, plain).flatMap(([ref, tags]) =>
     tags.flatMap((t) => checkTag(relPath, t)).map((f) => ({ ...f, message: `In ${ref}: ${f.message}` })),
   );
   return [...pageFindings(relPath, content, render, plain), ...fromFiles];

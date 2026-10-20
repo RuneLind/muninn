@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { noRootNote, runWikiCheck, wikiCheck, wikiRootFor, type WikiCheckResult } from "./wiki-check.ts";
+import { noRootNote, runWikiCheck, unreadFilesNote, wikiCheck, wikiRootFor, type WikiCheckResult } from "./wiki-check.ts";
 import { buildWikiIndex } from "../src/wiki/store.ts";
 import { lintWiki, PAGE_TEXT_LINT_CHECKS } from "../src/wiki/lint.ts";
 import { testTempDir } from "../src/test/temp-dir.ts";
@@ -437,5 +437,28 @@ describe("wiki-check reads a CaseBoard's data file as lintWiki does (architectur
     const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => PAGE_TEXT.has(f.check));
     expect(lint.filter((f) => f.check.startsWith("component-")).map((f) => f.relPath)).toEqual(["concepts/b.mdx"]);
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
+  });
+
+  test("with a guessed root, a data file above the page's folder is named on stderr as not read", async () => {
+    const noconf = path.join(dir, "noconf");
+    await Bun.write(path.join(noconf, "pages/b.mdx"), BOARD.replace("c.yaml", "../data/c.yaml"));
+    await Bun.write(path.join(noconf, "pages/in.mdx"), BOARD);
+    await Bun.write(path.join(noconf, "pages/c.yaml"), YAML);
+    await Bun.write(path.join(noconf, "data/c.yaml"), YAML);
+    const page = path.join(noconf, "pages/b.mdx");
+    const single = await runWikiCheck([page]);
+    expect(single.out).toEqual([]);
+    expect(single.err).toEqual([noRootNote(path.dirname(page)), unreadFilesNote(["b.mdx: ../data/c.yaml (unavailable)"])]);
+    // The directory run guesses the same root and says the same of the same ref.
+    const tree = await runWikiCheck([path.join(noconf, "pages")]);
+    expect(tree.out.map((l) => (JSON.parse(l) as { relPath: string }).relPath)).toEqual(["in.mdx"]);
+    expect(tree.err).toEqual([noRootNote(path.join(noconf, "pages")), unreadFilesNote(["b.mdx: ../data/c.yaml (unavailable)"])]);
+    // A file the guessed root holds is read, and nothing is said about it.
+    expect((await runWikiCheck([path.join(noconf, "pages/in.mdx")])).err).toEqual([noRootNote(path.join(noconf, "pages"))]);
+    // The same tree checked from its real root reads the file.
+    await Bun.write(path.join(noconf, ".wiki-reader.json"), "{}");
+    const rooted = await runWikiCheck([page]);
+    expect(rooted.err).toEqual([]);
+    expect(rooted.out.map((l) => (JSON.parse(l) as { message: string }).message)).toEqual(['In ../data/c.yaml: Pill tone="sucess" renders as default']);
   });
 });

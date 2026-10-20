@@ -22,7 +22,9 @@
  * `.wiki-reader.json`, else the given directory (or the page's own folder);
  * `relPath` is relative to it. With no `.wiki-reader.json`, the root is a guess,
  * so missing-tldr and tldr-no-more, which read the page's folder, are skipped
- * and one stderr line says so.
+ * and one stderr line says so. A `<CaseBoard>` data file the guessed root does
+ * not hold (a `../` above it) reads nothing, so check 15 cannot judge it; a
+ * second stderr line names each such ref.
  *
  * Exit codes: 0 when the check ran, with or without findings. 2 on a usage
  * error or a path that cannot be read or listed. 3 when a directory holds
@@ -35,6 +37,8 @@ import path from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { extRank, parseFrontmatter, readCull, readPlanStatus, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
 import { checkPageText, pageTextFiles, type LintFinding } from "../src/wiki/lint.ts";
+import type { LoadedPageFiles } from "../src/wiki/lint-components.ts";
+import { pageFileKind } from "../src/format/query-block.ts";
 
 const USAGE = "usage: bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory path>";
 
@@ -84,6 +88,9 @@ export interface WikiCheckResult {
   /** The directory the root was guessed from, when no `.wiki-reader.json`
    *  names it; the folder checks were skipped. */
   guessedRoot?: string;
+  /** With a guessed root: `<relPath>: <ref> (<reason>)` for each CaseBoard
+   *  data file that read nothing, so check 15 did not judge it. */
+  unreadFiles?: string[];
 }
 
 /** The checks that read the page's folder under the wiki root (`isTldrScope`),
@@ -93,6 +100,14 @@ const FOLDER_CHECKS: ReadonlySet<string> = new Set(["missing-tldr", "tldr-no-mor
 /** The stderr line for a run whose wiki root is a guess. */
 export const noRootNote = (dir: string) =>
   `wiki-check: no .wiki-reader.json at or above ${dir}: missing-tldr and tldr-no-more need the wiki root and were skipped`;
+
+/** The stderr line naming the CaseBoard data files a guessed root did not read. */
+export const unreadFilesNote = (refs: readonly string[]) =>
+  `wiki-check: data files not read under the guessed root, so check 15 did not judge them: ${refs.join(", ")}`;
+
+/** `<relPath>: <ref> (<reason>)` for each CaseBoard data file that read nothing. */
+const unreadCaseFiles = (relPath: string, files: LoadedPageFiles): string[] =>
+  [...files].flatMap(([ref, r]) => (r.ok || pageFileKind(ref) !== "yaml" ? [] : [`${relPath}: ${ref} (${r.reason})`]));
 
 const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code ?? String(e);
 
@@ -110,9 +125,18 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     const content = await Bun.file(target).text();
     const plan_status = readPlanStatus(parseFrontmatter(content));
     const ref = { relPath: rel, plan_status };
-    const findings = checkPageText(ref, content, await roleKeysAt(root), await pageTextFiles(root, ref, content));
+    const files = await pageTextFiles(root, ref, content);
+    const findings = checkPageText(ref, content, await roleKeysAt(root), files);
     if (found) return { findings, checked: 1, selected: 1, unreadable: [] };
-    return { findings: findings.filter((f) => !FOLDER_CHECKS.has(f.check)), checked: 1, selected: 1, unreadable: [], guessedRoot: base };
+    const unreadFiles = unreadCaseFiles(rel, files);
+    return {
+      findings: findings.filter((f) => !FOLDER_CHECKS.has(f.check)),
+      checked: 1,
+      selected: 1,
+      unreadable: [],
+      guessedRoot: base,
+      ...(unreadFiles.length > 0 ? { unreadFiles } : {}),
+    };
   }
   const found = wikiRootFor(target);
   const root = found ?? target;
@@ -131,8 +155,15 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     out.checked += 1;
     const fm = parseFrontmatter(content);
     const ref = { relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) };
-    const findings = checkPageText(ref, content, roleKeys, await pageTextFiles(root, ref, content));
-    out.findings.push(...(found ? findings : findings.filter((f) => !FOLDER_CHECKS.has(f.check))));
+    const files = await pageTextFiles(root, ref, content);
+    const findings = checkPageText(ref, content, roleKeys, files);
+    if (found) {
+      out.findings.push(...findings);
+      continue;
+    }
+    out.findings.push(...findings.filter((f) => !FOLDER_CHECKS.has(f.check)));
+    const unread = unreadCaseFiles(rel, files);
+    if (unread.length > 0) (out.unreadFiles ??= []).push(...unread);
   }
   return out;
 }
@@ -160,6 +191,7 @@ export async function runWikiCheck(args: readonly string[]): Promise<{ code: num
   if (result.selected === 0) return { code: 0, out, err: [`wiki-check: no .mdx pages under ${target}`] };
   const code = result.checked === 0 && result.unreadable.length === result.selected ? EXIT_NOTHING_READ : 0;
   const note = result.guessedRoot === undefined ? [] : [noRootNote(result.guessedRoot)];
+  if (result.unreadFiles !== undefined) note.push(unreadFilesNote(result.unreadFiles));
   return { code, out, err: [...note, ...result.unreadable] };
 }
 
