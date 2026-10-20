@@ -26,6 +26,7 @@
  */
 
 import path from "node:path";
+import { lstat } from "node:fs/promises";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draft.ts";
@@ -255,6 +256,45 @@ export function insertLogEntry(existing: string | null, entry: string): string {
   return [...before, block, "", ...after].join("\n");
 }
 
+/** The read seams answer `null` for ANY failure, which conflates "absent" with
+ *  "unreadable". Only ENOENT (via `lstat`) counts as absent. */
+async function logIsAbsent(logPath: string): Promise<boolean> {
+  try {
+    await lstat(logPath);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+  }
+}
+
+/**
+ * Splice `entry` into the wiki-global `log.md` — the ONE writer every log.md
+ * call site goes through (page writes, single and group gardener applies).
+ * Three read states: present (splice), absent (ENOENT only: create), unreadable
+ * (EACCES, EMFILE, EIO…: skip and warn). Writing `insertLogEntry(null, …)` over
+ * an unreadable log replaced the whole history with one entry (arch review
+ * 2026-10, finding 21). Throws only what the write throws; callers keep their
+ * best-effort catch so a log hiccup never undoes the page write.
+ */
+export async function appendWikiLogEntry(
+  logPath: string,
+  entry: string,
+  io: {
+    readFile: (absPath: string) => Promise<string | null>;
+    writeFile: (absPath: string, content: string) => Promise<void>;
+  },
+): Promise<"written" | "unreadable"> {
+  const existing = await io.readFile(logPath);
+  if (existing === null && !(await logIsAbsent(logPath))) {
+    log.warn("log.md is unreadable; skipping the log entry rather than overwriting it ({path})", {
+      path: logPath,
+    });
+    return "unreadable";
+  }
+  await io.writeFile(logPath, insertLogEntry(existing, entry));
+  return "written";
+}
+
 /** Ensure the written page body ends in exactly one trailing newline. */
 function withTrailingNewline(text: string): string {
   return `${text.replace(/\n+$/, "")}\n`;
@@ -441,12 +481,10 @@ async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps
   const head = rows.find((r) => r.targetPath === findingPath) ?? rows[0]!;
   const paths = rows.map((r) => r.targetPath);
   try {
-    const logPath = path.join(deps.wikiDir, WIKI_LOG_FILE);
-    const existingLog = await deps.readFile(logPath);
     const entry =
       `## [${todayOslo(deps.now())}] ${head.mode} | ${draftTitle(head)}\n` +
       `- via ${logWriterFor({ ...head, lintMeta: meta })}, ${paths.length} page${paths.length === 1 ? "" : "s"}: ${paths.join(", ")}`;
-    await deps.writeFile(logPath, insertLogEntry(existingLog, entry));
+    await appendWikiLogEntry(path.join(deps.wikiDir, WIKI_LOG_FILE), entry, deps);
   } catch (err) {
     log.warn("Wiki-gardener group apply: log.md update failed for {group}: {error}", {
       group: rows[0]?.groupKey ?? "(no group)",
@@ -693,10 +731,8 @@ async function applyInner(
   //    write — the page is the source of truth — so it degrades to a warning.
   //    Skipped for a GROUP apply, which files one entry for every row it wrote.
   if (!opts.skipLog) try {
-    const logPath = path.join(deps.wikiDir, "log.md");
-    const existingLog = await deps.readFile(logPath);
     const entry = `## [${todayOslo(deps.now())}] ${proposal.mode} | ${draftTitle(proposal)}\n- via ${logWriterFor(proposal)}, ${proposal.sourceDocs.length} sources`;
-    await deps.writeFile(logPath, insertLogEntry(existingLog, entry));
+    await appendWikiLogEntry(path.join(deps.wikiDir, WIKI_LOG_FILE), entry, deps);
   } catch (err) {
     log.warn("Wiki-gardener apply: log.md update failed for {path}: {error}", {
       path: proposal.targetPath,

@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -194,6 +194,23 @@ describe("applyWikiProposal", () => {
 
     expect(refreshed).toBe(1);
     expect(reindexed).toEqual(["wiki"]);
+  });
+
+  test("an UNREADABLE log.md is left intact: the page is applied, no entry is written (finding 21)", async () => {
+    const logPath = path.join(wikiDir, "log.md");
+    const original = "# Activity Log\n\n## [2026-01-01] create | Old\n- history that must survive\n";
+    await writeFile(logPath, original);
+    await chmod(logPath, 0o200); // read fails, write would succeed
+    try {
+      const res = await applyWikiProposal(makeProposal(), deps());
+      expect(res.outcome).toBe("applied");
+    } finally {
+      await chmod(logPath, 0o644);
+    }
+    expect(await readFile(logPath, "utf8")).toBe(original);
+    expect(await readFile(path.join(wikiDir, "concepts/Context Compaction.md"), "utf8")).toContain(
+      "# Context Compaction",
+    );
   });
 
   test("wiki-keyed synthesis apply reindexes the injected collections, not wiki/wiki-life", async () => {
@@ -941,6 +958,23 @@ describe("applyWikiProposalGroup", () => {
     expect(order.filter((o) => o === "other-writer")).toHaveLength(1);
     expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
     expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toContain("series: prov");
+  });
+
+  test("an UNREADABLE log.md is left intact by the group entry (finding 21)", async () => {
+    const logPath = path.join(wikiDir, "log.md");
+    const original = "# Activity Log\n\n## [2026-01-01] create | Old\n- history that must survive\n";
+    await writeFile(logPath, original);
+    await chmod(logPath, 0o200);
+    try {
+      const res = await applyWikiProposalGroup(
+        [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))],
+        deps(),
+      );
+      expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+    } finally {
+      await chmod(logPath, 0o644);
+    }
+    expect(await readFile(logPath, "utf8")).toBe(original);
   });
 
   test("stops at a stale row; earlier rows stay written, later rows are never attempted", async () => {
