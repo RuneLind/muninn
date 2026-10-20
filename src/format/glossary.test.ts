@@ -110,8 +110,13 @@ describe("the block", () => {
 describe("the key", () => {
   test.each([
     ["Hold", "hold", false],
-    ["LIB", "LIB", true],
-    ["Due Date", "Due Date", true],
+    ["LIB", "lIB", true],
+    ["Due Date", "due Date", true],
+    // A sentence-case capital alone keeps the term case-free.
+    ["Hold queue", "hold queue", false],
+    ["Soft AND", "soft AND", true],
+    // White space runs read as one space.
+    ["Due\u00a0 date", "due date", false],
     ["Låneår", "låneår", false],
     // NFD in, NFC out.
     ["Låneår", "låneår", false],

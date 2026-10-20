@@ -8,11 +8,15 @@
  *
  * - whole words: no letter, digit, combining mark, `_` or `-` on either side,
  *   read across inline tags (`<strong>Hold</strong>s` is not «Hold»);
- * - case-insensitive, unless the term holds two or more capitals (`ATS`,
- *   `RRF fusion`), which match letter for letter; both sides NFC;
+ * - case-insensitive, unless the term holds a capital past its first letter
+ *   (`ATS`, `Soft AND`), which matches letter for letter after a first letter
+ *   of either case; both sides NFC;
+ * - a space in a term matches any white space run (a no-break space, a soft
+ *   line break, two spaces);
  * - no inflections: «Holds» is not «Hold»;
- * - the longest term wins where two start at one place; matches never overlap
- *   and never cross an element;
+ * - the longest term wins where two start at one place, at every occurrence: a
+ *   shorter term never marks inside a longer one, marked or not; matches
+ *   never overlap and never cross an element;
  * - sections: `<h2>`/`<h3>` (`#`/`##`) start one, `###` does not, and text
  *   before the first heading is one too;
  * - never inside: headings, links (resolved or not), code, `pre`, `kbd`,
@@ -138,7 +142,10 @@ const escapeText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
  * when no term is used.
  */
 export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[]): string {
-  const terms = entries.filter(isMarkableTerm).sort((a, b) => [...b.key].length - [...a.key].length);
+  const terms = entries
+    .filter(isMarkableTerm)
+    .sort((a, b) => [...b.key].length - [...a.key].length)
+    .map((e) => ({ e, re: termPattern(e) }));
   if (terms.length === 0) return html;
   const tokens = html.match(TOKEN_RE) ?? [];
   // The first visible character after each token, read across inline tags.
@@ -190,10 +197,17 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
       const at = f.starts[k]!;
       const before = at === 0 ? prev : f.text[at - 1]!;
       if (WORD_CHAR_RE.test(before)) continue;
-      const hit = terms.find((e) => !used.has(e.key) && matchesAt(f, k, e, nextChar[i]!));
-      if (!hit) continue;
-      const endChunk = f.starts.indexOf(at + hit.key.length, k);
+      let end = -1;
+      const found = terms.find((t) => (end = matchEnd(f, k, t.re, nextChar[i]!)) >= 0);
+      if (!found) continue;
+      const endChunk = f.starts.indexOf(end, k);
       if (urlToken(f.text, at)) continue;
+      const hit = found.e;
+      // A used longer term still covers its words: «hold» in a second «hold queue» stays unmarked.
+      if (used.has(hit.key)) {
+        k = endChunk - 1;
+        continue;
+      }
       used.add(hit.key);
       tip++;
       const id = `gl-tip-${tip}`;
@@ -211,15 +225,27 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
   return out;
 }
 
-/** Term `e` starts at chunk `k` of `f`, ends on a chunk boundary, and has no
- *  word character after it (the next token's first one, at the token's end). */
-function matchesAt(f: Folded, k: number, e: GlossaryEntry, next: string): boolean {
-  const at = f.starts[k]!;
-  const slice = f.text.slice(at, at + e.key.length);
-  if ((e.exactCase ? slice : slice.toLowerCase()) !== e.key) return false;
-  const end = at + e.key.length;
-  if (!f.starts.includes(end, k)) return false;
-  return !WORD_CHAR_RE.test(f.text[end] ?? next);
+/** A sticky pattern for `e`: a space matches any white space run (a no-break
+ *  space, a soft line break); the first letter's case is free, and the rest
+ *  matches exactly when `e.exactCase`. */
+function termPattern(e: GlossaryEntry): RegExp {
+  const esc = (c: string) => (c === " " ? "\\s+" : c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const [first = "", ...rest] = e.key;
+  if (!e.exactCase) return new RegExp([...e.key].map(esc).join(""), "iuy");
+  const head = first === first.toUpperCase() ? esc(first) : `(?:${esc(first)}|${esc(first.toUpperCase())})`;
+  return new RegExp(head + rest.map(esc).join(""), "uy");
+}
+
+/** The end offset in `f.text` of a match of `re` at chunk `k` that ends on a
+ *  chunk boundary with no word character after it (the next token's first
+ *  one, at the token's end); -1 when there is none. */
+function matchEnd(f: Folded, k: number, re: RegExp, next: string): number {
+  re.lastIndex = f.starts[k]!;
+  const m = re.exec(f.text);
+  if (!m) return -1;
+  const end = re.lastIndex;
+  if (!f.starts.includes(end, k)) return -1;
+  return WORD_CHAR_RE.test(f.text[end] ?? next) ? -1 : end;
 }
 
 /** The white-space-delimited run around `at` is a URL. */

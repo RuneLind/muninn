@@ -46,9 +46,9 @@ describe("which words a term matches", () => {
     expect(marked(prose + "\n" + HOLD)).toEqual(want);
   });
 
-  test("a term with two capitals matches letter for letter", () => {
+  test("a term with a capital past its first letter matches letter for letter", () => {
     const g = glossary("- **LIB:** the library's code");
-    expect(marked("The lib desk uses LIB codes.\n" + g)).toEqual([["LIB", "LIB"]]);
+    expect(marked("The lib desk uses LIB codes.\n" + g)).toEqual([["lIB", "LIB"]]);
   });
 
   test("Norwegian letters are word letters, and NFD text matches an NFC term", () => {
@@ -73,7 +73,7 @@ describe("which words a term matches", () => {
 
   test("an entity in the text is read as its character", () => {
     const g = glossary("- **Hold & Renew:** both at once");
-    expect(marked("Ask for Hold & Renew at the desk.\n" + g)).toEqual([["Hold &amp; Renew", "Hold &amp; Renew"]]);
+    expect(marked("Ask for Hold & Renew at the desk.\n" + g)).toEqual([["hold &amp; Renew", "Hold &amp; Renew"]]);
   });
 });
 
@@ -273,5 +273,36 @@ describe("a glossary's shapes, as the reader and the lint read them", () => {
     expect(tips(reader("A Hold lasts.\n" + glossary("A **Hold** keeps a book back. It lasts a week.")))).toEqual([
       "Hold keeps a book back. It lasts a week.",
     ]);
+  });
+});
+
+describe("a term's case, whitespace and longer terms around it", () => {
+  test.each([
+    ["Soft AND", "A soft AND query.", [["soft AND", "soft AND"]]],
+    ["Loan-DB", "The loan-DB is full.", [["loan-DB", "loan-DB"]]],
+    ["Hold B", "Ask for hold B now.", [["hold B", "hold B"]]],
+  ])("a sentence-case capital is free: «%s»", (term, prose, want) => {
+    expect(marked(prose + "\n" + glossary(`- **${term}:** a library word`))).toEqual(want);
+  });
+
+  test("a capital past the first letter matches exactly", () => {
+    const g = glossary("- **RRF:** a ranking");
+    expect(marked("Not rrf, not Rrf, but RRF.\n" + g)).toEqual([["rRF", "RRF"]]);
+  });
+
+  test("a shorter term never marks inside a later occurrence of a longer one", () => {
+    const g = glossary("- **Hold:** kept back", "- **Hold queue:** the readers waiting");
+    expect(marked("The hold queue grows. The hold queue shrinks.\n" + g)).toEqual([["hold queue", "hold queue"]]);
+    const h = glossary("- **Hold:** kept back", "- **Long hold:** a month kept back");
+    expect(marked("A long hold. A long hold ends.\n" + h)).toEqual([["long hold", "long hold"]]);
+  });
+
+  test.each([
+    ["a no-break space", "The due date is set.", "due date"],
+    ["a narrow no-break space", "The due date is set.", "due date"],
+    ["a soft line break", "The due\ndate is set.", "due\ndate"],
+    ["a double space", "The due  date is set.", "due  date"],
+  ])("white space inside a term matches %s, and the mark wraps it as written", (_name, prose, wraps) => {
+    expect(marked(prose + "\n" + glossary("- **Due date:** the day a book goes back"))).toEqual([["due date", wraps]]);
   });
 });

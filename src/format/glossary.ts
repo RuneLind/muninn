@@ -26,9 +26,11 @@ import { visibleText } from "./report-top.ts";
 export interface GlossaryEntry {
   /** The term as the reader sees it. */
   term: string;
-  /** What it is matched on: NFC, and lower-cased unless it holds two capitals. */
+  /** What it is matched on: NFC, white space runs as one space, lower-cased
+   *  (only the first letter when `exactCase`). */
   key: string;
-  /** Matched letter for letter: the term holds two or more capitals (`ATS`). */
+  /** Matched letter for letter past the first: the term holds a capital
+   *  past its first letter (`ATS`, `Soft AND`). */
   exactCase: boolean;
   definition: string;
   /** One code span: listed, never marked. */
@@ -67,9 +69,11 @@ const SENTENCE_END_RE = /(?<=[.!?])\s+(?=\S)/u;
 
 /** The key a term is matched and deduplicated on. */
 export function glossaryKey(term: string): { key: string; exactCase: boolean } {
-  const nfc = term.normalize("NFC");
-  const exactCase = (nfc.match(/\p{Lu}/gu) ?? []).length >= 2;
-  return { key: exactCase ? nfc : nfc.toLowerCase(), exactCase };
+  const nfc = term.normalize("NFC").replace(/\s+/gu, " ");
+  const [first = "", ...rest] = nfc;
+  // A sentence-case capital is free: «Soft AND» matches «soft AND».
+  const exactCase = /\p{Lu}/u.test(rest.join(""));
+  return { key: exactCase ? first.toLowerCase() + rest.join("") : nfc.toLowerCase(), exactCase };
 }
 
 function entry(rawTerm: string, rawDefinition: string, at: number): GlossaryEntry | null {
