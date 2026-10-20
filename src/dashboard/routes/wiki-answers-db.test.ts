@@ -1385,3 +1385,137 @@ describe("fix round 1 batch 2: a store read that throws before the write", () =>
     expect(await res.json()).toMatchObject({ code: "store_failed" });
   });
 });
+
+describe("arch-10 D fix round 2: the carry token after a redact, and its pins", () => {
+  const O1_HASH = sha256("**Keep the export block in Norwegian?**\n\nchoices: A|B");
+  const COPY_REL = "plans/questions-copy.mdx";
+  beforeAll(async () => {
+    // The same questions on a second page: a token's page is part of what it proves.
+    await Bun.write(path.join(root, COPY_REL), PAGE);
+    __resetWikiCacheForTest();
+  });
+  async function legacyAnswer(who: Identity, body: string): Promise<string> {
+    const id = crypto.randomUUID();
+    await getDb()`
+      INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_user_id, author_oid, author_nav_ident, author_name, body, question_hash)
+      VALUES (${id}, 1, 'answers', ${REL}, 'O1', ${who.userId}, ${who.oid}, ${who.navIdent}, ${who.displayName}, ${body}, ${O1_HASH})
+    `;
+    return id;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const listed = async (app: Hono, wiki = "answers", relPath = REL): Promise<any[]> => {
+    const res = await app.request(`/api/wiki/answers?wiki=${wiki}&relPath=${encodeURIComponent(relPath)}`);
+    expect(res.status).toBe(200);
+    return (await res.json()).answers;
+  };
+  const tokenOf = async (app: Hono, answerId: string, wiki?: string, relPath?: string) =>
+    (await listed(app, wiki, relPath)).find((a: { answerId: string }) => a.answerId === answerId)?.carryToken;
+  const sweep = (answerId: string) => getDb()`DELETE FROM wiki_answers WHERE answer_id = ${answerId}`;
+  const rowCount = async () => (await getDb()`SELECT count(*)::int AS n FROM wiki_answers`)[0]!.n;
+  const redact = (app: Hono, answerId: string) =>
+    app.request("/api/wiki/answers/redact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answerId }),
+    });
+  const synneApp = () => appFor({ identity: synne, role: "user" });
+  const adminApp = () => appFor({ identity: ola, role: "admin" });
+
+  test("a token taken while the answer was live is refused once an admin redacts it and the sweep deletes it", async () => {
+    const app = synneApp();
+    const removed = (await (await post(app, answer({ body: "text the admin removes" }))).json()).answerId;
+    await legacyAnswer(synne, "second");
+    const carryToken = await tokenOf(app, removed);
+    expect(typeof carryToken).toBe("string");
+    expect((await redact(adminApp(), removed)).status).toBe(200);
+    await sweep(removed);
+    const before = await rowCount();
+    for (const carriedFrom of [removed, removed.toUpperCase()]) {
+      const res = await post(app, answer({ body: "text the admin removes", carriedFrom, carryToken }));
+      expect(`${res.status} ${(await res.json()).code}`).toBe("409 already_answered");
+    }
+    expect(await rowCount()).toBe(before);
+    expect((await getDb()`SELECT count(*)::int AS n FROM wiki_answers WHERE answer_id = ${removed}`)[0]!.n).toBe(0);
+  });
+
+  test("a redacted answer of the viewer's own carries no carry token", async () => {
+    const app = synneApp();
+    const id = (await (await post(app, answer())).json()).answerId;
+    expect(typeof (await tokenOf(app, id))).toBe("string");
+    await redact(adminApp(), id);
+    const a = (await listed(app)).find((x: { answerId: string }) => x.answerId === id);
+    expect(a).toMatchObject({ redacted: true, mine: true });
+    expect(a.carryToken).toBeUndefined();
+  });
+
+  test("a token is for one page: the same question id on another page, or in another wiki, is 409", async () => {
+    const both = { wikis: new Set(["answers", "cards-only"]), owner: OWNER };
+    const app = appFor({ identity: synne, role: "user", answers: both });
+    await post(app, answer({ body: "live here" }));
+    const onCopy = (await (await post(app, answer({ relPath: COPY_REL, body: "on the copy" }))).json()).answerId;
+    const copyToken = await tokenOf(app, onCopy, "answers", COPY_REL);
+    const inOther = (await (await post(app, answer({ wiki: "cards-only", body: "other wiki" }))).json()).answerId;
+    const otherToken = await tokenOf(app, inOther, "cards-only", REL);
+    expect(typeof copyToken).toBe("string");
+    expect(typeof otherToken).toBe("string");
+    await sweep(onCopy);
+    await sweep(inOther);
+    const before = await rowCount();
+    for (const [label, carriedFrom, carryToken] of [
+      ["another page", onCopy, copyToken],
+      ["another wiki", inOther, otherToken],
+    ]) {
+      const res = await post(app, answer({ body: "carried", carriedFrom, carryToken }));
+      expect(`${label} → ${res.status} ${(await res.json()).code}`).toBe(`${label} → 409 already_answered`);
+    }
+    expect(await rowCount()).toBe(before);
+  });
+
+  test("an uppercase carriedFrom is the same answer: saved under the lowercase id", async () => {
+    const inserted: string[] = [];
+    const store: WikiAnswerStore = {
+      insert: async (input) => {
+        inserted.push(input.answerId);
+        return insertWikiAnswerVersion(input);
+      },
+      getLatest: getLatestWikiAnswerVersion,
+      listLatest: listLatestWikiAnswers,
+      listVersions: listWikiAnswerVersions,
+    };
+    const app = appFor({ identity: synne, role: "user", store });
+    const swept = (await (await post(app, answer({ body: "first" }))).json()).answerId;
+    await legacyAnswer(synne, "second");
+    const carryToken = await tokenOf(app, swept);
+    await sweep(swept);
+    inserted.length = 0;
+    const res = await post(app, answer({ body: "carried", carriedFrom: swept.toUpperCase(), carryToken }));
+    expect(res.status).toBe(201);
+    expect((await res.json()).answerId).toBe(swept);
+    expect(inserted).toEqual([swept]);
+  });
+
+  test("the carried draft's gone check failing is JSON 500 store_failed, not a second live answer", async () => {
+    const app = synneApp();
+    const swept = (await (await post(app, answer({ body: "first" }))).json()).answerId;
+    await legacyAnswer(synne, "second");
+    const carryToken = await tokenOf(app, swept);
+    await sweep(swept);
+    const before = await rowCount();
+    const failing = appFor({
+      identity: synne,
+      role: "user",
+      store: {
+        insert: insertWikiAnswerVersion,
+        getLatest: async () => {
+          throw new Error("connection reset");
+        },
+        listLatest: listLatestWikiAnswers,
+        listVersions: listWikiAnswerVersions,
+      },
+    });
+    const res = await post(failing, answer({ body: "carried", carriedFrom: swept, carryToken }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ code: "store_failed" });
+    expect(await rowCount()).toBe(before);
+  });
+});

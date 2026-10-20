@@ -433,5 +433,13 @@ describe("arch-10 D fix round 1", () => {
     remember(tokens, [answer({ answerId: "a1", carryToken: "t1" } as Partial<AnswerWire>), answer({ answerId: "a2" })]);
     expect([...tokens.entries()].sort()).toEqual([["a1", "t1"], ["gone", "tg"]]);
   });
+  test("rememberCarryTokens drops the token of an answer a load lists as redacted", () => {
+    const remember = (cardModel as unknown as {
+      rememberCarryTokens: (into: Map<string, string>, answers: readonly AnswerWire[]) => void;
+    }).rememberCarryTokens;
+    const tokens = new Map([["r1", "tr"], ["gone", "tg"]]);
+    remember(tokens, [answer({ answerId: "r1", redacted: true } as Partial<AnswerWire>)]);
+    expect([...tokens.entries()]).toEqual([["gone", "tg"]]);
+  });
 });
 

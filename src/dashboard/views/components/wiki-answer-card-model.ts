@@ -399,9 +399,13 @@ export function alreadyAnsweredOf(status: number, payload: unknown): { answerId:
 }
 
 /** Keep every carry token a load lists, and the ones it no longer lists: a
- *  token is wanted exactly when its answer is gone. */
+ *  token is wanted exactly when its answer is gone. A redacted answer's token
+ *  is dropped: its draft is the text the admin removed. */
 export function rememberCarryTokens(into: Map<string, string>, answers: readonly AnswerWire[]): void {
-  for (const a of answers) if (typeof a.carryToken === "string") into.set(a.answerId, a.carryToken);
+  for (const a of answers) {
+    if (a.redacted) into.delete(a.answerId);
+    else if (typeof a.carryToken === "string") into.set(a.answerId, a.carryToken);
+  }
 }
 
 /** What a carried draft's POST adds: the swept answer and its token, so the

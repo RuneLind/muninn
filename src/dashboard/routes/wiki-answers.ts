@@ -325,6 +325,13 @@ function hasUnstorableText(s: string): boolean {
  *  carried across one gets the ordinary one-live-answer rule. */
 const CARRY_KEY = randomBytes(32);
 
+/** Answers an admin redacted on this process: a carry token for one of them
+ *  is refused, or the sweep that deletes the redacted rows would let the
+ *  removed text back in under its own id. Process-lifetime like the key, so
+ *  every token that verifies was issued here. A redact on ANOTHER process
+ *  sharing the DB is not seen. */
+const redactedHere = new Set<string>();
+
 /**
  * The carry token for an answer: proof, issued by the GET to the answer's own
  * author, that this id was this author's answer to this question. A draft
@@ -637,6 +644,7 @@ export function registerWikiAnswerRoutes(
             token !== null &&
             isValidUuid(from) &&
             carryTokenValid(token, from, page.entry.name, page.meta.relPath, questionId, author) &&
+            !redactedHere.has(from.toLowerCase()) &&
             (await store.getLatest(from)) === null;
           if (!carried) return alreadyAnswered(c, live);
           id = from.toLowerCase();
@@ -729,6 +737,8 @@ export function registerWikiAnswerRoutes(
       return err(c, 400, "bad_request", "answerId must be an answer's uuid");
     }
     const answerId = rawId.toLowerCase();
+    // Before the write: a redact that commits and then throws still revokes.
+    redactedHere.add(answerId);
     try {
       const done = await (store.redact ?? redactWikiAnswer)(answerId);
       if (!done) return err(c, 404, "unknown_answer", "no such answer");
