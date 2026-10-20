@@ -7,8 +7,9 @@
  * `wiki-stamp` shares (`openSync(path, "wx")` on `<root>/.wiki-write.lock`).
  */
 
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtemp, rm, writeFile, stat, utimes } from "node:fs/promises";
+import * as fs from "node:fs";
 import { existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -96,6 +97,42 @@ describe("takeWikiWriteLock", () => {
     // Taken over means a FRESH file, not the abandoned one.
     expect((await stat(lockPath)).mtimeMs).toBeGreaterThan(old.getTime());
     if (res.ok) res.lock?.release();
+  });
+
+  /**
+   * Finding 23 (arch review 2026-10). The race window is between two
+   * synchronous fs calls, so the test lands in it by wrapping `statSync` on the
+   * `node:fs` namespace (the `bots-dir.test.ts` technique): right after muninn
+   * measures the abandoned lock, another process completes its own takeover.
+   */
+  test("a lock replaced between the stale measure and the delete survives the takeover", async () => {
+    const OTHER = `${JSON.stringify({ pid: 999999, host: "other", op: "wiki-stamp", at: "now" })}\n`;
+    await writeFile(lockPath, "");
+    const old = new Date(Date.now() - WIKI_LOCK_STALE_MS - 5_000);
+    await utimes(lockPath, old, old);
+    const realStat = fs.statSync;
+    let swapped = false;
+    const spy = spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const st = (realStat as (...a: unknown[]) => fs.Stats)(p, ...rest);
+      if (!swapped && String(p) === lockPath) {
+        swapped = true;
+        fs.unlinkSync(lockPath);
+        fs.writeFileSync(lockPath, OTHER);
+      }
+      return st;
+    }) as typeof fs.statSync);
+    let res: Awaited<ReturnType<typeof takeWikiWriteLock>>;
+    try {
+      res = await takeWikiWriteLock(root, { waitMs: 60 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    // The live lock is still there and still the other holder's, and muninn did
+    // not claim it: the write is refused rather than run beside the other writer.
+    expect(fs.readFileSync(lockPath, "utf8")).toBe(OTHER);
+    expect(res.ok).toBe(false);
+    expect(fs.readdirSync(root)).toEqual([WIKI_LOCK_BASENAME]); // no takeover leftovers
   });
 
   test("a lock released mid-wait is acquired without waiting the full budget", async () => {

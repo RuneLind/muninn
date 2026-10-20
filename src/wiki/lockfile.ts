@@ -61,7 +61,18 @@
  * where that failure belongs.
  */
 
-import { openSync, closeSync, writeSync, statSync, unlinkSync, readFileSync } from "node:fs";
+import {
+  openSync,
+  closeSync,
+  writeSync,
+  statSync,
+  unlinkSync,
+  readFileSync,
+  renameSync,
+  linkSync,
+  type Stats,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { getLog } from "../logging.ts";
@@ -77,7 +88,7 @@ export const WIKI_LOCK_BASENAME = ".wiki-write.lock";
 export const WIKI_STAMP_TMP_PREFIX = ".wiki-stamp.";
 
 /**
- * Is this basename one of the two files the write interlock leaves in a wiki?
+ * Is this basename one of the files the write interlock leaves in a wiki?
  *
  * Both are transient by construction and neither is content, so nothing that
  * enumerates a wiki's dirty files may treat them as work: the daily
@@ -97,6 +108,7 @@ export const WIKI_STAMP_TMP_PREFIX = ".wiki-stamp.";
 export function isWikiWriteArtifact(basename: string): boolean {
   return (
     basename === WIKI_LOCK_BASENAME ||
+    basename.startsWith(`${WIKI_LOCK_BASENAME}.takeover.`) ||
     (basename.startsWith(WIKI_STAMP_TMP_PREFIX) && basename.endsWith(".tmp"))
   );
 }
@@ -248,8 +260,10 @@ export async function takeWikiWriteLock(
       }
       // Held. Take it over if it is old enough to be abandoned.
       let stale = false;
+      let measured: Stats;
       try {
-        stale = now() - statSync(lockPath).mtimeMs > WIKI_LOCK_STALE_MS;
+        measured = statSync(lockPath);
+        stale = now() - measured.mtimeMs > WIKI_LOCK_STALE_MS;
       } catch {
         // Vanished between the open and the stat — retry, deadline permitting.
         // SLEEPING first: without it this branch is a hot spin, and the file
@@ -261,24 +275,80 @@ export async function takeWikiWriteLock(
         continue;
       }
       if (stale) {
-        try {
-          unlinkSync(lockPath);
-          log.warn("Wiki write lock at {path} was stale (> {staleMs} ms) — taken over", {
-            path: lockPath,
-            staleMs: WIKI_LOCK_STALE_MS,
-          });
-        } catch (unlinkErr) {
-          // ENOENT means the holder released it first, which is the outcome we
-          // wanted; anything else means we cannot clear it, so stop waiting.
-          if (errnoOf(unlinkErr) !== "ENOENT") return lockTimeout(lockPath, waitMs);
-        }
+        const takeover = takeOverStaleLock(lockPath, measured);
+        if (takeover === "refused") return lockTimeout(lockPath, waitMs);
         if (now() >= until) return lockTimeout(lockPath, waitMs);
+        // A live lock (another process's fresh takeover) stays put: wait for it.
+        if (takeover === "live") await sleep(POLL_MS);
         continue;
       }
       if (now() >= until) return lockTimeout(lockPath, waitMs);
       await sleep(POLL_MS);
     }
   }
+}
+
+/** Basename infix of the file a stale takeover moves the old lock aside to. */
+const TAKEOVER_INFIX = ".takeover.";
+
+/**
+ * Remove a stale lockfile — but only the one that was MEASURED stale (arch
+ * review 2026-10, finding 23). Another process can delete the abandoned lock
+ * and create its own between our stat and our delete; a blind unlink then
+ * deletes that live lock. So the file is renamed aside first (atomic, keeps the
+ * inode), its dev:ino:mtime compared with the measurement, and only a match is
+ * deleted. A mismatch is linked back (`linkSync` never overwrites a lock created
+ * meanwhile) and reported `live`. Narrows the race on muninn's side only: the
+ * stamper still unlinks blindly (claude-usage follow-up).
+ */
+function takeOverStaleLock(lockPath: string, measured: Stats): "removed" | "live" | "refused" {
+  const aside = `${lockPath}${TAKEOVER_INFIX}${process.pid}.${randomBytes(4).toString("hex")}`;
+  try {
+    renameSync(lockPath, aside);
+  } catch (err) {
+    // ENOENT: the holder released it first, which is the outcome we wanted;
+    // anything else means we cannot clear it, so stop waiting.
+    return errnoOf(err) === "ENOENT" ? "removed" : "refused";
+  }
+  let moved: Stats | null = null;
+  try {
+    moved = statSync(aside);
+  } catch {
+    // Gone from under us: nothing of ours to restore.
+  }
+  if (
+    moved &&
+    moved.dev === measured.dev &&
+    moved.ino === measured.ino &&
+    moved.mtimeMs === measured.mtimeMs
+  ) {
+    try {
+      unlinkSync(aside);
+    } catch {
+      // Best effort; the name is a write artifact every sweeper skips.
+    }
+    log.warn("Wiki write lock at {path} was stale (> {staleMs} ms) — taken over", {
+      path: lockPath,
+      staleMs: WIKI_LOCK_STALE_MS,
+    });
+    return "removed";
+  }
+  if (moved) {
+    try {
+      linkSync(aside, lockPath);
+    } catch (err) {
+      log.warn("Wiki write lock at {path}: could not restore a live lock moved aside ({code})", {
+        path: lockPath,
+        code: errnoOf(err),
+      });
+    }
+    try {
+      unlinkSync(aside);
+    } catch {
+      // Best effort, as above.
+    }
+  }
+  return "live";
 }
 
 /** The lockfile's current contents, or null when it is unreadable/gone. */
