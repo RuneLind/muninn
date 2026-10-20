@@ -82,6 +82,26 @@ describe("which words a term matches", () => {
       expect(marks(markGlossaryTerms(`<p>Ask ${ent}Hold${ent} now.</p>`, entries))).toEqual([["hold", "Hold"]]);
     }
   });
+
+  // R2-16: the parse reads a term and its definition through `visibleText`, so an
+  // entity no code point can hold reached `String.fromCodePoint` on render and lint.
+  test.each(["&#99999999;", "&#x110000;"])("%s in a glossary renders and lints", (ent) => {
+    for (const g of [
+      glossary(`- **Hold${ent}:** kept back`),
+      glossary(`- **Hold:** kept ${ent} back`),
+      glossary(`**Hold${ent}** is kept back.`),
+      glossary(`**Hold** is kept ${ent} back.`),
+    ]) {
+      const md = "A Hold lasts a week.\n" + g;
+      expect(() => reader(md)).not.toThrow();
+      expect(() => checkPageText({ relPath: "plans/g.mdx" }, md, [])).not.toThrow();
+    }
+  });
+
+  test("an entity no code point can hold in a DecisionLog item lints", () => {
+    const md = "<DecisionLog>\n\n- **D1** — Keep a Hold &#x110000; for a week. Then renew.\n\n</DecisionLog>\n";
+    expect(() => checkPageText({ relPath: "plans/g.mdx" }, md, [])).not.toThrow();
+  });
 });
 
 describe("where a term is never marked", () => {

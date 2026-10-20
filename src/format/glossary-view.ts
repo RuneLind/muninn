@@ -33,6 +33,7 @@
 
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
 import { escapeHtml } from "./markdown-core.ts";
+import { codePointText } from "./code-point.ts";
 import { isMarkableTerm, type GlossaryEntry } from "./glossary.ts";
 
 export const GLOSSARY_CHROME_CLASSES = ["glossary", "gl-mark", "gl-term", "gl-tip", "gl-tip-term"] as const;
@@ -67,12 +68,6 @@ interface Unit {
 
 const ENTITY_RE = /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/iy;
 const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
-
-/** A numeric entity's character; one no scalar value holds (0, a surrogate,
- *  past U+10FFFF) is U+FFFD, as the HTML parser reads it. */
-function codePointText(n: number): string {
-  return n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : "\uFFFD";
-}
 
 /** The entity at `raw[i]` (an `&`): its decoded text and raw length, or null. */
 function entityAt(raw: string, i: number): { text: string; len: number } | null {
