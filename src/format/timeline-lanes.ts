@@ -14,7 +14,7 @@
 
 import { parseLogItem, parseTimelineItem } from "./genre-lists.ts";
 import { itemDate, itemDates, listChildrenText } from "./item-dates.ts";
-import type { Block } from "./markdown-ast.ts";
+import { type Block, componentBlocks } from "./markdown-ast.ts";
 import { escapeHtml } from "./markdown-core.ts";
 import { parseQueryAttrs } from "./query-block.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
@@ -69,39 +69,32 @@ function bodyItems(children: readonly Block[]): { text: string; nested: string }
   );
 }
 
-/** The page's dated items per lane, in document order. A block inside
- *  another component counts; a fenced fake is a code block and does not. */
+/** The page's dated items per lane, in document order. A block nested in any
+ *  other component counts; a fenced fake is a code block and does not. */
 export function pageTimelineLanes(blocks: readonly Block[], days: LaneDays, shown: (text: string) => string = (t) => t): TimelineLane[] {
   const lanes: Record<LaneKind, LaneItem[]> = { decisions: [], queries: [], timeline: [] };
-  const walk = (bs: readonly Block[]) => {
-    for (const b of bs) {
-      if (b.type !== "component") continue;
-      if (b.name === "DecisionLog") {
-        for (const { text, nested } of bodyItems(b.children)) {
-          const p = parseLogItem(text);
-          const day = itemDate(shown(`${p.text}\n${nested}`), days.ref, days.today);
-          if (day) lanes.decisions.push({ day, label: p.id ?? cut(shown(p.text)) });
-        }
-      } else if (b.name === "Query") {
-        const q = parseQueryAttrs(b.attrs);
-        const day = q.run ? itemDate(shown(q.run), days.ref, days.today) : null;
-        // "" when the Query has neither: the renderer names it by the word for a query.
-        if (day) lanes.queries.push({ day, label: cut(shown(q.id)) || cut(shown(q.question)) });
-        walk(b.children);
-      } else if (b.name === "Timeline") {
-        for (const { text } of bodyItems(b.children)) {
-          const t = parseTimelineItem(text);
-          // A year-less date is undated here: the nearest-year guess can land
-          // a year off and out of written order, stretching the axis.
-          const day = t.date && /\d{4}/.test(t.date) ? itemDates(t.date, days.ref)[0] : undefined;
-          if (day) lanes.timeline.push({ day, label: cut(shown(t.text)) });
-        }
-      } else {
-        walk(b.children);
-      }
+  for (const b of componentBlocks(blocks, "DecisionLog")) {
+    for (const { text, nested } of bodyItems(b.children)) {
+      const p = parseLogItem(text);
+      const day = itemDate(shown(`${p.text}\n${nested}`), days.ref, days.today);
+      if (day) lanes.decisions.push({ day, label: p.id ?? cut(shown(p.text)) });
     }
-  };
-  walk(blocks);
+  }
+  for (const b of componentBlocks(blocks, "Query")) {
+    const q = parseQueryAttrs(b.attrs);
+    const day = q.run ? itemDate(shown(q.run), days.ref, days.today) : null;
+    // "" when the Query has neither: the renderer names it by the word for a query.
+    if (day) lanes.queries.push({ day, label: cut(shown(q.id)) || cut(shown(q.question)) });
+  }
+  for (const b of componentBlocks(blocks, "Timeline")) {
+    for (const { text } of bodyItems(b.children)) {
+      const t = parseTimelineItem(text);
+      // A year-less date is undated here: the nearest-year guess can land
+      // a year off and out of written order, stretching the axis.
+      const day = t.date && /\d{4}/.test(t.date) ? itemDates(t.date, days.ref)[0] : undefined;
+      if (day) lanes.timeline.push({ day, label: cut(shown(t.text)) });
+    }
+  }
   return LANE_ORDER.map((kind) => ({ kind, items: lanes[kind] })).filter((l) => l.items.length > 0);
 }
 

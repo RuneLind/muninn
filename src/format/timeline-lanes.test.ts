@@ -82,6 +82,36 @@ describe("one lane per source, one axis", () => {
       ["timeline", ["2026-09-02: X", "2026-09-03: Y"]],
     ]);
   });
+
+  describe("a block nested in a DecisionLog or Timeline body counts (NextMoves page)", () => {
+    const next = ["<NextMoves>", "", '<Lane kind="you">', "", "1. Shelve the returns.", "", "</Lane>", "", "</NextMoves>", ""];
+    const days = (md: string) => marks(reader(page(next, ...[[md]]))).map(([k, m]) => [k, (m as string[]).map((x) => x.split(" ").slice(1).join(" "))]);
+    const inside = (outer: string[], inner: string[]) => [...outer.slice(0, -2), ...inner, ...outer.slice(-2)];
+
+    test("a Query inside a DecisionLog body", () => {
+      const md = page(inside(log("**D1** — A. 2026-09-01", "**D2** — B. 2026-09-05"), [...query("LIB-101", "2026-09-03"), ...query("LIB-102", "2026-09-04")]));
+      expect(days(md)).toEqual([
+        ["decisions", ["2026-09-01: D1", "2026-09-05: D2"]],
+        ["queries", ["2026-09-03: LIB-101", "2026-09-04: LIB-102"]],
+      ]);
+    });
+
+    test("a Query inside a Timeline body", () => {
+      const md = page(inside(timeline("**2026-09-01** — Opened", "**2026-09-05** — Renewal rule"), [...query("LIB-101", "2026-09-03"), ...query("LIB-102", "2026-09-04")]));
+      expect(days(md)).toEqual([
+        ["queries", ["2026-09-03: LIB-101", "2026-09-04: LIB-102"]],
+        ["timeline", ["2026-09-01: Opened", "2026-09-05: Renewal rule"]],
+      ]);
+    });
+
+    test("a Timeline inside a DecisionLog body", () => {
+      const md = page(inside(log("**D1** — A. 2026-09-01", "**D2** — B. 2026-09-05"), timeline("**2026-09-02** — Hold", "**2026-09-04** — Renewal")));
+      expect(days(md)).toEqual([
+        ["decisions", ["2026-09-01: D1", "2026-09-05: D2"]],
+        ["timeline", ["2026-09-02: Hold", "2026-09-04: Renewal"]],
+      ]);
+    });
+  });
 });
 
 describe("the threshold", () => {
