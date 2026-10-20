@@ -113,6 +113,55 @@ const NONE_PAGE = [
 ].join("\n");
 const NONE_CASES = ["- {id: LIB-301, status: none}", "- {id: LIB-302, status: none}", "- {id: LIB-303, status: ok}", "- {id: LIB-304, status: ok}"].join("\n");
 
+/** Terms inside the wrappers that scroll sideways: a tall table, a 2-row
+ *  table and a one-paragraph Figure. */
+const WRAP_REL = "plans/wraps.mdx";
+const WRAP_PAGE = [
+  "---",
+  "title: Shelf words",
+  "---",
+  "",
+  "# Shelf words",
+  "",
+  "<Glossary>",
+  "",
+  "- **Hold:** a loan kept back until the desk has looked at it, for as long as the desk needs.",
+  "- **Renewal:** another loan period on the same book, asked for before the first one ends.",
+  "- **Fine:** what a late return costs, paid at the desk before the next loan.",
+  "",
+  "</Glossary>",
+  "",
+  "## Tall",
+  "",
+  "<ComparisonTable>",
+  "| Step | Note |",
+  "| --- | --- |",
+  ...Array.from({ length: 14 }, (_, i) => `| ${i + 1} | row ${i + 1} |`),
+  "| 15 | A Hold ends the row |",
+  "</ComparisonTable>",
+  "",
+  "## Short",
+  "",
+  "<ComparisonTable>",
+  "| Step | Note |",
+  "| --- | --- |",
+  "| 1 | A Renewal is asked for |",
+  "| 2 | Done |",
+  "</ComparisonTable>",
+  "",
+  "## Figure",
+  "",
+  '<Figure caption="The desk">',
+  "",
+  "A Fine is paid at the desk.",
+  "",
+  "</Figure>",
+  "",
+  "## After",
+  "",
+  ...Array.from({ length: 40 }, (_, i) => `Line ${i + 1} of the closing notes.\n`),
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -123,6 +172,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "plans/cases.yaml"), CASES, "utf8");
   await writeFile(path.join(root, NONE_REL), NONE_PAGE, "utf8");
   await writeFile(path.join(root, "plans/none-first.yaml"), NONE_CASES, "utf8");
+  await writeFile(path.join(root, WRAP_REL), WRAP_PAGE, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -157,9 +207,17 @@ const lanes = (page: Page) => page.locator(".wiki-article section.tl-lanes");
 const glossary = (page: Page) => page.locator(".wiki-article .glossary");
 
 /** The page at `width`; `focus` drops the rail and the Ask pane (the F key). */
-async function open(page: Page, width: number, focus = false): Promise<void> {
+async function open(page: Page, width: number, focus = false, rel = REL): Promise<void> {
   await page.setViewportSize({ width, height: 900 });
-  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
+  if (rel !== REL) {
+    await expect(page.locator(".wiki-article .gl-mark")).toHaveCount(3);
+    if (focus) {
+      await page.locator("body").press("f");
+      await expect(page.locator("#wikiFocusExit")).toBeVisible();
+    }
+    return;
+  }
   await expect(dots(page)).toHaveCount(1);
   if (focus) {
     await page.locator("body").press("f");
@@ -186,8 +244,8 @@ const css = (l: Locator, prop: string) => l.evaluate((e, p) => getComputedStyle(
 const overflow = (l: Locator) => l.evaluate((e) => e.scrollWidth - e.clientWidth);
 const shots = (name: string) => test.info().outputPath(`${name}.png`);
 
-/** A tip's box and the client box of the nearest ancestor that clips it
- *  (overflow other than visible), cut to the viewport. */
+/** A tip's box and the client box of every ancestor that clips it
+ *  (overflow other than visible), intersected and cut to the viewport. */
 function clipBoxOf(tip: Element) {
   const t = tip.getBoundingClientRect();
   let c = { left: 0, top: 0, right: document.documentElement.clientWidth, bottom: document.documentElement.clientHeight };
@@ -198,9 +256,27 @@ function clipBoxOf(tip: Element) {
     const left = r.left + el.clientLeft;
     const top = r.top + el.clientTop;
     c = { left: Math.max(c.left, left), top: Math.max(c.top, top), right: Math.min(c.right, left + el.clientWidth), bottom: Math.min(c.bottom, top + el.clientHeight) };
-    break;
   }
   return { t: { left: t.left, top: t.top, right: t.right, bottom: t.bottom }, c };
+}
+
+/** A tip's box, the reader pane's client box cut to the viewport, and whether
+ *  each corner of the tip is what the page shows there (not clipped or covered). */
+function paneBoxOf(tip: Element) {
+  const t = tip.getBoundingClientRect();
+  const wrap = document.getElementById("articleWrap")!;
+  const w = wrap.getBoundingClientRect();
+  const root = document.documentElement;
+  const left = Math.max(0, w.left + wrap.clientLeft);
+  const top = Math.max(0, w.top + wrap.clientTop);
+  const c = { left, top, right: Math.min(root.clientWidth, w.left + wrap.clientLeft + wrap.clientWidth), bottom: Math.min(root.clientHeight, w.top + wrap.clientTop + wrap.clientHeight) };
+  const corners = [
+    [t.left + 3, t.top + 3],
+    [t.right - 3, t.top + 3],
+    [t.left + 3, t.bottom - 3],
+    [t.right - 3, t.bottom - 3],
+  ].map(([x, y]) => tip.contains(document.elementFromPoint(x!, y!)));
+  return { t: { left: t.left, top: t.top, right: t.right, bottom: t.bottom }, c, corners };
 }
 
 test.describe("Wiki reader: polish", () => {
@@ -429,6 +505,9 @@ test.describe("Wiki reader: polish", () => {
         expect(t.right, `term ${i} right`).toBeLessThanOrEqual(c.right + 0.5);
         expect(t.top, `term ${i} top`).toBeGreaterThanOrEqual(c.top - 0.5);
         expect(t.bottom, `term ${i} bottom`).toBeLessThanOrEqual(c.bottom + 0.5);
+        // It opens rightwards from the term's left edge, unless the box's right edge stops it.
+        const m = (await mark.locator(".gl-term").boundingBox())!;
+        expect(t.left >= m.x - 0.5 || t.right >= c.right - 8.5, `term ${i} opens rightwards`).toBe(true);
         await mark.locator(".gl-term").blur();
       }
       const edge = marks[1]!;
@@ -460,6 +539,87 @@ test.describe("Wiki reader: polish", () => {
     expect(c.bottom - (m.y + m.height), "the term sits at the pane's foot").toBeLessThan(20);
     expect(t.bottom).toBeLessThanOrEqual(m.y + 0.5);
     expect(t.top).toBeGreaterThanOrEqual(c.top - 0.5);
+  });
+
+  for (const width of [1280, 390] as const) {
+    test(`${width} px: a term in the last row of a tall table, just under the pane's top, shows its whole definition`, async ({ page }) => {
+      await open(page, width, width === 390, WRAP_REL);
+      const mark = page.locator(".wiki-article .tablewrap .gl-mark").first();
+      await expect(mark.locator(".gl-term")).toHaveText("Hold");
+      // Scroll the pane until the term sits 24 px under its top edge: more
+      // room above it than the row leaves below it, and less than the tip needs.
+      await mark.evaluate((m) => {
+        const wrap = document.getElementById("articleWrap")!;
+        const w = wrap.getBoundingClientRect();
+        wrap.scrollTop += m.getBoundingClientRect().top - (w.top + wrap.clientTop + 24);
+      });
+      await mark.locator(".gl-term").evaluate((t) => (t as HTMLElement).focus({ preventScroll: true }));
+      const tip = mark.locator(".gl-tip");
+      await expect(tip).toBeVisible();
+      const { t, c, corners } = await tip.evaluate(paneBoxOf);
+      const m = (await mark.locator(".gl-term").boundingBox())!;
+      expect(m.y - c.top, "the term sits just under the pane's top").toBeLessThan(30);
+      expect(t.top, "top").toBeGreaterThanOrEqual(c.top - 0.5);
+      expect(t.bottom, "bottom").toBeLessThanOrEqual(c.bottom + 0.5);
+      expect(t.left, "left").toBeGreaterThanOrEqual(c.left - 0.5);
+      expect(t.right, "right").toBeLessThanOrEqual(c.right + 0.5);
+      expect(corners, "every corner of the tip is shown").toEqual([true, true, true, true]);
+    });
+
+    for (const [where, sel, word] of [
+      ["a 2-row table", ".tablewrap", "Renewal"],
+      ["a one-paragraph Figure", ".figure-body", "Fine"],
+    ] as const) {
+      test(`${width} px: a term in ${where} shows its whole definition, and the pointer crosses into it`, async ({ page }) => {
+        await open(page, width, width === 390, WRAP_REL);
+        const mark = page.locator(`.wiki-article ${sel} .gl-mark`).filter({ has: page.locator(".gl-term", { hasText: word }) });
+        await expect(mark).toHaveCount(1);
+        // The wrapper in the middle of the pane: room for the tip either way.
+        await mark.evaluate((m) => {
+          const wrap = document.getElementById("articleWrap")!;
+          const w = wrap.getBoundingClientRect();
+          const r = m.getBoundingClientRect();
+          wrap.scrollTop += r.top - (w.top + wrap.clientTop + wrap.clientHeight / 2);
+        });
+        const term = (await mark.locator(".gl-term").boundingBox())!;
+        const x = term.x + Math.min(6, term.width / 2);
+        const y0 = term.y + term.height / 2;
+        await page.mouse.move(x, y0);
+        const tip = mark.locator(".gl-tip");
+        await expect(tip).toBeVisible();
+        const { t, c, corners } = await tip.evaluate(paneBoxOf);
+        expect(t.top, "top").toBeGreaterThanOrEqual(c.top - 0.5);
+        expect(t.bottom, "bottom").toBeLessThanOrEqual(c.bottom + 0.5);
+        expect(t.left, "left").toBeGreaterThanOrEqual(c.left - 0.5);
+        expect(t.right, "right").toBeLessThanOrEqual(c.right + 0.5);
+        expect(corners, "every corner of the tip is shown").toEqual([true, true, true, true]);
+        // The pointer walks from the term into the tip without closing it.
+        const below = t.top >= term.y;
+        const end = below ? t.top + 6 : t.bottom - 6;
+        for (let y = Math.round(y0); below ? y <= end : y >= end; y += below ? 1 : -1) {
+          await page.mouse.move(x, y);
+          expect(await tip.evaluate((e) => getComputedStyle(e).display), `pointer at y=${y}`).not.toBe("none");
+        }
+        await page.mouse.move((t.left + t.right) / 2, (t.top + t.bottom) / 2);
+        await expect(tip).toBeVisible();
+        // Escape still hides it.
+        await page.keyboard.press("Escape");
+        await expect(tip).toBeHidden();
+      });
+    }
+  }
+
+  test("an open definition follows its term when the pane scrolls", async ({ page }) => {
+    await open(page, 1280, false, WRAP_REL);
+    const mark = page.locator(".wiki-article .figure-body .gl-mark");
+    await mark.scrollIntoViewIfNeeded();
+    await mark.locator(".gl-term").focus();
+    const tip = mark.locator(".gl-tip");
+    await expect(tip).toBeVisible();
+    const offset = () => mark.evaluate((m) => m.querySelector(".gl-tip")!.getBoundingClientRect().top - m.getBoundingClientRect().top);
+    const before = await offset();
+    await page.evaluate(() => (document.getElementById("articleWrap")!.scrollTop -= 40));
+    await expect.poll(offset).toBeCloseTo(before, 0);
   });
 
   test("the pointer moved from a term into its definition keeps it open", async ({ page }) => {
@@ -504,6 +664,9 @@ test.describe("Wiki reader: polish", () => {
         const { t, c } = await tip.evaluate(clipBoxOf);
         expect(t.left, `term ${i} left`).toBeGreaterThanOrEqual(c.left - 0.5);
         expect(t.right, `term ${i} right`).toBeLessThanOrEqual(c.right + 0.5);
+        // It opens leftwards from the term's right edge, unless the box's left edge stops it.
+        const m = (await mark.locator(".gl-term").boundingBox())!;
+        expect(t.right <= m.x + m.width + 0.5 || t.left <= c.left + 8.5, `term ${i} opens leftwards`).toBe(true);
         await mark.locator(".gl-term").blur();
       }
     });
@@ -610,6 +773,13 @@ test.describe("Wiki reader: polish", () => {
     // A system colour resolves on the probe's `color`: forced colours repaint a probe's background.
     expect(await css(first, "background-color")).toBe(await resolved(page, "Highlight"));
     expect(await css(lanes(page).locator(".tll-dot").first(), "background-color")).toBe(await resolved(page, "CanvasText"));
+    // An open definition, in the top layer, keeps its CanvasText border.
+    const mark = page.locator(".wiki-article .gl-mark").first();
+    await mark.locator(".gl-term").focus();
+    const tip = mark.locator(".gl-tip");
+    await expect(tip).toBeVisible();
+    expect(await tip.evaluate((e) => e.matches(":popover-open"))).toBe(true);
+    expect(await css(tip, "border-top-color")).toBe(await resolved(page, "CanvasText"));
   });
 
   test("print hides the squares and the definitions; without the script the squares are gone", async ({ page }) => {
