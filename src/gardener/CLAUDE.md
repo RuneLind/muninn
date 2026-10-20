@@ -34,7 +34,7 @@ huginn's JSON `text` removes every fenced block. The capture trigger passes the 
 
 The pages drafted before that rule keep their paraphrase — and the drafter answers `covered` for every one of them, since an applied source page puts the doc's url in the wiki. So `draftSourcePage` takes an optional `update: { relPath, currentText }` (`SourceUpdateTarget`) and `scripts/backfill-summary-code.ts` drives it. Update mode is the gardener runner's update idiom on the source drafter, and it flips five create-mode rules that are each wrong when the page being written is the one the doc already has: the coverage check is skipped (it is the REASON to run), the page at the target path is the update target rather than a collision, `stripOwnedAliases` gets `selfRelPath` (else the page's own aliases read as hijacked and are stripped), the shape gate confines to the page's exact path (so a `life/sources/` page is not moved under `sources/`), and the row is `mode: "update"` + `baseHash` — which the `/wiki/gardener` gate already renders as a current→draft diff and `applyWikiProposal` already CASes.
 
-Two things the mechanism will not do. It does not RENAME: a reviser that returns a different `title:` is skipped (`titleMatchKey`, so typography drift is not a rename), because the page keeps the title it was reviewed under. And it does not re-draft: the prompt is `buildSourceRevisePrompt`, which hands the model the current page plus the blocks it is MISSING — measured by `missingCodeBlocks`, not judged by the model — and tells it to change nothing else. That checklist is load-bearing: the first spelling asked the reviser to find what was missing, and it answered by returning the page with only `updated:` bumped, both config blocks still lost. With the checklist the same page came back 2/2, and a five-page batch went 1/19 blocks kept → 19/19.
+Three things the mechanism will not do. It does not RENAME: a reviser that returns a different `title:` is skipped (`titleMatchKey`, so typography drift is not a rename), because the page keeps the title it was reviewed under. It does not touch the FRONTMATTER: after the title check, `keepCurrentFrontmatter` (`source-drafter.ts`) splices the current page's fence back over the draft's and carries over only the draft's `updated:` line (replaced in place, or appended), before the persist-time alias strip and url pin run. The prompt asks for the same, but `judgeBackfill` reads no frontmatter (`proseText` strips it), so a reviser that emptied `aliases` or `tags`, or dropped a key the prompt does not name, used to pass. It is restored, not refused; a draft or page with no fence passes through unchanged. And it does not re-draft: the prompt is `buildSourceRevisePrompt`, which hands the model the current page plus the blocks it is MISSING — measured by `missingCodeBlocks`, not judged by the model — and tells it to change nothing else. That checklist is load-bearing: the first spelling asked the reviser to find what was missing, and it answered by returning the page with only `updated:` bumped, both config blocks still lost. With the checklist the same page came back 2/2, and a five-page batch went 1/19 blocks kept → 19/19.
 
 Nothing in that path writes to a wiki — it persists proposals a human approves, and it writes no `source_draft_attempts` row either: that ledger is keyed `(bot, collection, doc)` and upserts every column, so a backfill row REPLACES the capture attempt that links the doc to its applied proposal — for a doc that demonstrably has a page. Measured: the batch that proved this mechanism erased five capture rows before the write was removed.
 
@@ -168,11 +168,34 @@ whichever `target_path` sorts first. The commit subject counts PAGES — the
 staged paths minus the wiki-global `log.md` — never the rows the apply reached,
 which on a stopped group said "3 pages" over a commit staging one.
 
-It **checks every row's CAS before the first write** (`preflightGroupRows`,
-inside the same section): a member that is unindexed, gone, edited since
-drafting or (create mode) already present stops the group with NO page written.
-A row that fails after that (a write error) still stops the group; rows written
-before it stay written, since there is no rollback. The route (`POST /api/wiki/proposals/group/:groupKey/approve?wiki=`)
+It **runs every row's pre-write checks before the first write**
+(`preflightGroupRows`, inside the same section). They are the SAME
+`checkBeforeWrite` the per-row `applyInner` runs — unindexed or explainer target,
+path confinement, the alias and containment passes, the base-hash CAS and the
+create-mode stem collision — so a member the apply would refuse stops the group
+with NO page written, and a member whose page already IS its (contained) draft
+passes as a no-op. Every row is judged against the wiki as it was before the
+group, which is enough because a group is lint update rows. A row that fails
+after that (a write error) still stops the group; rows written before it stay
+written, since there is no rollback. Two residuals: the group takes the shared
+in-process write queue but not the cross-process lockfile, so an external write
+between the preflight and row k still stops the group after rows 1..k-1; and
+after a stop the other rows go back to `draft` (below), so if the stopped row is
+the 8.2 series HEAD carrying `series_label`, a second Accept writes `series:` on
+the other members without the label.
+
+**The gate flags drift before the click.** The `/api/wiki/proposals` listing
+sets `drifted` on a reviewable update row whose page no longer matches its base
+hash (`listingDrift` over `updateBaseDrift`, the apply's own CAS). A page that
+already IS the draft is not drift, because the apply passes it. A drifted single
+card keeps an ENABLED Approve and says that it writes nothing and marks the row
+`stale`: a live `draft` row holds its topic key in the partial unique index and
+Reject suppresses the topic, so disabling Approve left no way to free it. A
+group card says what Accept does (`groupDriftNote`): the preflight stops on ONE
+blocked row, the route marks only that row `stale` and returns the rest to
+`draft`, so N drifted pages take N Accepts, and one more writes the clean pages.
+
+The group route (`POST /api/wiki/proposals/group/:groupKey/approve?wiki=`)
 answers 409 `outcome: "stopped"` with `applied[]`, `noop[]` and `stoppedAt`,
 and CASes each reached row through its own terminal verb.
 
