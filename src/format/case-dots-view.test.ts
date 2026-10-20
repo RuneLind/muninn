@@ -84,6 +84,18 @@ describe("the squares", () => {
     ]);
   });
 
+  test("the ordinal counts the boards the page shows: a block rendered twice, or drawing no squares, takes none", () => {
+    const names = (h: string) => [...h.matchAll(/class="cb-dots" [^>]*aria-label="([^"]*)"/g)].map((m) => m[1]);
+    const lane = (inner: string) => `<NextMoves>\n\n<Lane kind="you">\n\n${inner}\n</Lane>\n\n</NextMoves>\n`;
+    const more = (inner: string) => `<Tldr>\n\nIn short.\n\n<More>\n\n${inner}\n</More>\n\n</Tldr>\n`;
+    const withEmpty = new Map<string, PageFileResult>([...files(), ["empty/cases.yaml", { ok: true, text: "[]\n" }]]);
+    const render = (md: string, f = files()) => names(renderWikiHtml(md, () => undefined, { views: true, files: f }));
+    expect(render(lane(DOTS))).toEqual(["Cases by status: cases.yaml"]);
+    expect(render(more(DOTS))).toEqual(["Cases by status: cases.yaml"]);
+    expect(render(`${lane(DOTS)}\n${DOTS}\n`)).toEqual(["Cases by status: cases.yaml", "Cases by status: cases.yaml (2)"]);
+    expect(render(`<CaseBoard src="empty/cases.yaml" view="dots" />\n\n${DOTS}\n`, withEmpty)).toEqual(["Cases by status: cases.yaml"]);
+  });
+
   test("each square and each group label carries its status glyph, not colour alone", () => {
     expect([...html.matchAll(/class="cb-dot [^>]*><span aria-hidden="true">([^<]+)<\/span>/g)].map((m) => m[1])).toEqual(["‖", "‖", "–", "✓", "?"]);
     expect(html).toContain('<span class="cb-dots-label"><span aria-hidden="true">‖ </span>hold · 2</span>');

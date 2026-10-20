@@ -310,8 +310,8 @@ export function formatWebHtml(
   const prevRuleTreeView = currentRuleTreeView;
   const prevCaseKorts = currentCaseKorts;
   const prevCaseDotsView = currentCaseDotsView;
-  const prevCaseDotsSeen = currentCaseDotsSeen;
-  currentCaseDotsSeen = new Map();
+  const prevCaseDotsPending = currentCaseDotsPending;
+  currentCaseDotsPending = [];
   currentViews = opts?.views === true;
   currentCaseDotsView = currentViews && text.includes("<CaseBoard") ? (opts?.caseDotsView ?? null) : null;
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
@@ -373,6 +373,7 @@ export function formatWebHtml(
             .join("\n")
         : renderBlocks(blocks, webRenderer);
     }
+    rendered = fillCaseDots(rendered, currentCaseDotsPending);
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
     const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
@@ -399,7 +400,7 @@ export function formatWebHtml(
     currentRuleTreeView = prevRuleTreeView;
     currentCaseKorts = prevCaseKorts;
     currentCaseDotsView = prevCaseDotsView;
-    currentCaseDotsSeen = prevCaseDotsSeen;
+    currentCaseDotsPending = prevCaseDotsPending;
   }
 }
 
@@ -456,8 +457,28 @@ let currentRuleTreeView: RuleTreeViewRenderer | null = null;
 
 /** `opts.caseDotsView` for the call in progress; null ⇒ a `<CaseBoard>` is its rows. */
 let currentCaseDotsView: CaseDotsViewRenderer | null = null;
-/** Board file name → dots views drawn under it so far, so two boards get distinct names. */
-let currentCaseDotsSeen = new Map<string, number>();
+/** The dots views asked for so far, each left in the output as a
+ *  `\x00CASEDOTS<i>\x00` sentinel and drawn by {@link fillCaseDots} once the
+ *  page is rendered: a `<Lane>` or `<More>` renders its children twice and
+ *  keeps one copy, so only a board in the final output takes an ordinal. */
+let currentCaseDotsPending: Array<(nth: number) => { file: string; html: string }> = [];
+const CASE_DOTS_SENTINEL = /\x00CASEDOTS(\d+)\x00/g;
+
+/** Draw each dots view left in `html`, in page order: the second board drawn
+ *  from one file name is «(2)», and a board drawing no squares takes no number. */
+function fillCaseDots(html: string, pending: typeof currentCaseDotsPending): string {
+  if (!pending.length) return html;
+  const seen = new Map<string, number>();
+  return html.replace(CASE_DOTS_SENTINEL, (_m, i: string) => {
+    const draw = pending[Number(i)];
+    if (!draw) return "";
+    const probe = draw(1);
+    if (!probe.html) return "";
+    const nth = (seen.get(probe.file) ?? 0) + 1;
+    seen.set(probe.file, nth);
+    return nth === 1 ? probe.html : draw(nth).html;
+  });
+}
 
 const NO_CASE_KORTS: ReadonlyMap<string, string> = new Map();
 /** The page's CaseBoard case ids → their `kort:`, while a rule tree page renders. */
@@ -760,10 +781,11 @@ function caseBoardHtml(src: string, labelsAttr: string | undefined, view: CaseBo
     .join("");
   let dots = "";
   if (view === "dots" && currentCaseDotsView) {
+    const view = currentCaseDotsView;
     const file = pageFileName(src);
-    const nth = (currentCaseDotsSeen.get(file) ?? 0) + 1;
-    currentCaseDotsSeen.set(file, nth);
-    dots = currentCaseDotsView(board.cases, labels, { language: currentLanguage, file, nth });
+    const language = currentLanguage;
+    dots = `\x00CASEDOTS${currentCaseDotsPending.length}\x00`;
+    currentCaseDotsPending.push((nth) => ({ file, html: view(board.cases, labels, { language, file, nth }) }));
   }
   return section(`<p class="cb-strip">${strip}</p>${notes}${dots}${groups}`);
 }
