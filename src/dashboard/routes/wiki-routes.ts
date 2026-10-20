@@ -1,4 +1,5 @@
 import type { Context, Hono } from "hono";
+import { compress } from "hono/compress";
 import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config } from "../../config.ts";
 import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
@@ -1425,7 +1426,10 @@ export function registerWikiReadRoutes(
     return true;
   };
 
-  app.get("/wiki", async (c) => {
+  // gzip, because the page inlines the whole client bundle and CSS (~1.2 MB,
+  // ~0.29 MB gzipped) and nothing in front of muninn compresses it. Scoped to
+  // this route: the SSE and JSON routes beside it keep their framing.
+  app.get("/wiki", compress({ encoding: "gzip" }), async (c) => {
     const { registry, wiki: selected, envOverride, entry, unknownWiki } = resolveReadRequest(
       readSliceOnly,
       c.req.query("wiki"),
