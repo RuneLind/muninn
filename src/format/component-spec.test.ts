@@ -62,7 +62,7 @@ const FROZEN_ATTRS: Record<string, string[]> = {
   RunChecklist: [],
   Question: ["id", "choices", "to"],
   More: [],
-  StatusRows: [],
+  StatusRows: ["view", "tones"],
 };
 const FROZEN_INLINE = ["Verdict", "Pill", "Fact"];
 const FROZEN_LANE_KINDS = ["you", "waiting", "draft", "blocked"];

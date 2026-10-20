@@ -8,6 +8,10 @@
  * | `decision-first-sentence` | an id-led `<DecisionLog>` item, not dimmed, whose first sentence (what the |
  * |                           | Overview lens shows, D6) is over `FIRST_SENTENCE_MAX` (160) visible chars  |
  * | `status-row-long`         | a `<StatusRows>` row over `STATUS_ROW_MAX` (160) chars as written (D11)    |
+ * | `status-tones`            | a `<StatusRows tones>` entry that names no row, names a row twice, or is   |
+ * |                           | not `Label=good|warn|info|muted`                                           |
+ * | `status-tile-long`        | in `view="tiles"`, a row whose first ` · ` part (the tile's big value) is  |
+ * |                           | over `STATUS_TILE_FIRST_MAX` (24) visible chars                            |
  * | `missing-tldr`            | an `.mdx` page in {@link isTldrScope} whose first non-blank block after the H1 is |
  * |                           | not `<Tldr>` (the In short / Kort fortalt box)                             |
  * | `tldr-no-more` (info)     | that `<Tldr>` holds no `<More>`                                            |
@@ -24,7 +28,17 @@
 
 import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { decisionLogEntries } from "../format/question.ts";
-import { FIRST_SENTENCE_MAX, STATUS_ROW_MAX, statusRowBlocks, visibleText } from "../format/report-top.ts";
+import {
+  FIRST_SENTENCE_MAX,
+  parseStatusTones,
+  STATUS_ROW_MAX,
+  STATUS_TILE_FIRST_MAX,
+  statusRowBlocks,
+  statusSegments,
+  statusToneWarnings,
+  visibleText,
+} from "../format/report-top.ts";
+import { readStatusRowsView } from "../format/component-spec.ts";
 import { decisionFirstSentence } from "../web/web-format.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
@@ -32,7 +46,14 @@ import { parseFrontmatter, stripFrontmatter, type WikiPageMeta } from "./store.t
 import { isLiveReportPage } from "./lint-drift.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const REPORT_TOP_LINT_CHECKS = ["decision-first-sentence", "status-row-long", "missing-tldr", "tldr-no-more"] as const;
+export const REPORT_TOP_LINT_CHECKS = [
+  "decision-first-sentence",
+  "status-row-long",
+  "status-tones",
+  "status-tile-long",
+  "missing-tldr",
+  "tldr-no-more",
+] as const;
 
 /** Folders whose `.mdx` pages are reference pages and open with the box
  *  (mdx-explainer «Reference page shape», 2026-10-13). */
@@ -85,19 +106,36 @@ export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: 
 
   if (hasRows) {
     let from = body;
-    for (const rows of statusRowBlocks(blocks)) {
+    for (const { attrs, rows } of statusRowBlocks(blocks)) {
       const open = findLine(lines, fenced, from, (l) => l.trim().startsWith("<StatusRows"));
       if (open !== undefined) from = open;
+      // The reader reads tones in tile view only; a wrong entry is wrong either way.
+      if (attrs.tones !== undefined) {
+        for (const warning of statusToneWarnings(parseStatusTones(attrs.tones), rows.map((r) => r.label))) {
+          findings.push({ check: "status-tones", relPath: page.relPath, message: `<StatusRows> ${warning}`, ...(open !== undefined ? { line: open } : {}) });
+        }
+      }
+      const tiles = readStatusRowsView(attrs.view).value === "tiles";
       for (const row of rows) {
         const head = row.text.split("\n")[0]!.slice(0, 40);
         const line = findLine(lines, fenced, from, (l) => l.includes(head));
         if (line !== undefined) from = line;
+        const at = line !== undefined ? { line } : {};
+        const big = tiles ? visibleText(statusSegments(row.value)[0] ?? "") : "";
+        if (big.length > STATUS_TILE_FIRST_MAX) {
+          findings.push({
+            check: "status-tile-long",
+            relPath: page.relPath,
+            message: `<StatusRows view="tiles"> row's first part is ${big.length} chars (max ${STATUS_TILE_FIRST_MAX}) and does not read as a tile; put a number or a short state first and the rest after " · " (${quote(big)})`,
+            ...at,
+          });
+        }
         if (row.text.length <= STATUS_ROW_MAX) continue;
         findings.push({
           check: "status-row-long",
           relPath: page.relPath,
           message: `<StatusRows> row of ${row.text.length} chars (max ${STATUS_ROW_MAX}) — a row reads at a glance; move the detail into the page (${quote(row.text)})`,
-          ...(line !== undefined ? { line } : {}),
+          ...at,
         });
       }
     }

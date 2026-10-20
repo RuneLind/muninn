@@ -259,6 +259,17 @@ export function parseLaneSince(value: string | undefined): string | null {
   return readLaneSince(value).value;
 }
 
+// ── StatusRows ──────────────────────────────────────────────────────────────
+
+const STATUS_ROWS_VIEWS = ["rows", "tiles"] as const;
+export type StatusRowsView = (typeof STATUS_ROWS_VIEWS)[number];
+
+/** A `StatusRows view=` value: `tiles` draws one tile per row on the wiki
+ *  reader's page render; anything else reads as `rows`. */
+export function readStatusRowsView(raw: string | undefined): AttrRead<StatusRowsView> {
+  return readEnum(STATUS_ROWS_VIEWS, "rows", raw);
+}
+
 // ── The table ───────────────────────────────────────────────────────────────
 
 const text: AttrSpec = { parse: parseString };
@@ -367,8 +378,16 @@ export const COMPONENT_SPEC = {
   Question: { attrs: { id: text, choices: text, to: text } },
   // The top of a report page (`src/format/report-top.ts`). `More` is the closed
   // «Mer om saken» part of a `Tldr`; `StatusRows` a list of `**Label:** value` rows.
+  // `view="tiles"` draws a tile per row on the reader; `tones` colours tiles by
+  // row label (`parseStatusTones`, `report-top.ts`; lint check 11 reports an
+  // entry it cannot use).
   More: { attrs: {} },
-  StatusRows: { attrs: {} },
+  StatusRows: {
+    attrs: {
+      view: { parse: readStatusRowsView, enum: STATUS_ROWS_VIEWS, default: "rows" },
+      tones: text,
+    },
+  },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

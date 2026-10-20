@@ -69,18 +69,94 @@ export function statusRows(children: Block[]): StatusRow[] {
   return out;
 }
 
+/** One `<StatusRows>` block: its attributes as parsed and its rows. */
+export interface StatusRowsBlock {
+  attrs: Record<string, string>;
+  rows: StatusRow[];
+}
+
 /** Every `<StatusRows>` block on the page, at any depth, in source order. */
-export function statusRowBlocks(blocks: Block[]): StatusRow[][] {
-  const out: StatusRow[][] = [];
+export function statusRowBlocks(blocks: Block[]): StatusRowsBlock[] {
+  const out: StatusRowsBlock[] = [];
   const walk = (bs: Block[]) => {
     for (const b of bs) {
       if (b.type !== "component") continue;
-      if (b.name === "StatusRows") out.push(statusRows(b.children));
+      if (b.name === "StatusRows") out.push({ attrs: b.attrs, rows: statusRows(b.children) });
       walk(b.children);
     }
   };
   walk(blocks);
   return out;
+}
+
+// ── <StatusRows view="tiles"> ────────────────────────────────────────────────
+
+/** A tile's big value (the first ` · ` part) over this many visible chars
+ *  does not read as a tile; lint check 11 warns. */
+export const STATUS_TILE_FIRST_MAX = 24;
+
+/** The tones a `tones=` entry may name: the state pills' own vocabulary. */
+export const STATUS_TILE_TONES: readonly StatusTone[] = ["good", "warn", "info", "muted"];
+
+/** A `tones=` list read: `Label=tone; Label=tone`. */
+export interface StatusTones {
+  /** Normalized row label → tone; a label given twice keeps its last tone. */
+  rows: Map<string, StatusTone>;
+  /** Each usable entry's label as written, in order, repeats included. */
+  labels: string[];
+  /** The entries this cannot use: no `=`, no label, or an unknown tone. */
+  bad: string[];
+}
+
+/** A row label as `tones=` matches it: trimmed, past one wrapping emphasis,
+ *  backticks dropped, NFC, any case (DeltaTable's `better` rule). */
+export function normalizeTileLabel(label: string): string {
+  const t = label.trim();
+  const m = /^\*\*(.+)\*\*$/s.exec(t) ?? /^__(.+)__$/s.exec(t) ?? /^\*(.+)\*$/s.exec(t) ?? /^_(.+)_$/s.exec(t);
+  return (m ? m[1]! : t).replace(/`/g, "").trim().normalize("NFC").toLowerCase();
+}
+
+/** A `tones=` value. A label cannot hold `;`; it may hold `=`, since the tone
+ *  is read after the last one. */
+export function parseStatusTones(raw: string | undefined): StatusTones {
+  const out: StatusTones = { rows: new Map(), labels: [], bad: [] };
+  for (const part of (raw ?? "").split(";").map((p) => p.trim()).filter(Boolean)) {
+    const eq = part.lastIndexOf("=");
+    const tone = eq > 0 ? part.slice(eq + 1).trim().toLowerCase() : "";
+    const label = eq > 0 ? normalizeTileLabel(part.slice(0, eq)) : "";
+    if (!label || !(STATUS_TILE_TONES as readonly string[]).includes(tone)) {
+      out.bad.push(part);
+      continue;
+    }
+    out.rows.set(label, tone as StatusTone);
+    out.labels.push(part.slice(0, eq).trim());
+  }
+  return out;
+}
+
+/** The tone `tones` gives the row labelled `label`, if any. */
+export function statusTileTone(tones: StatusTones, label: string | null): StatusTone | undefined {
+  return label === null ? undefined : tones.rows.get(normalizeTileLabel(label));
+}
+
+/** The warning lines for a `tones=` list against the block's row labels: an
+ *  entry this cannot use, a label given twice, a label that names no row. */
+export function statusToneWarnings(tones: StatusTones, rowLabels: readonly (string | null)[]): string[] {
+  const present = new Set(rowLabels.filter((l): l is string => l !== null).map(normalizeTileLabel));
+  const seen = new Set<string>();
+  const twice: string[] = [];
+  const missing: string[] = [];
+  for (const label of tones.labels) {
+    const key = normalizeTileLabel(label);
+    if (seen.has(key)) twice.push(label);
+    else if (!present.has(key)) missing.push(label);
+    seen.add(key);
+  }
+  return [
+    tones.bad.length ? `tones entry not read (use "Label=${STATUS_TILE_TONES.join("|")}"): ${tones.bad.join("; ")}` : "",
+    twice.length ? `tones names a row more than once: ${twice.join(", ")}` : "",
+    missing.length ? `tones names no row: ${missing.join(", ")}` : "",
+  ].filter(Boolean);
 }
 
 /** The segment separator in a row's value. */

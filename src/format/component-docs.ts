@@ -151,7 +151,15 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
   RunChecklist: { doc: "Steps to run, with their checked state.", teach: WIKI },
   Question: { doc: "An open question as an answer card.", teach: WIKI },
   More: { doc: "The closed rest of a `Tldr`.", teach: WIKI },
-  StatusRows: { doc: "A list of `**Label:** value` status rows.", teach: WIKI },
+  StatusRows: {
+    doc: "A list of `**Label:** value` status rows.",
+    teach: WIKI,
+    attrs: {
+      view: { doc: "`tiles`: one tile per row on the wiki reader" },
+      // `parseStatusTones` (report-top.ts); lint check 11 reports an entry it cannot use.
+      tones: { doc: "Tile colour per row label", printType: '"<row>=good|warn|info|muted;…"' },
+    },
+  },
 };
 
 /**

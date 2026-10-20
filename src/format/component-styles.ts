@@ -1063,6 +1063,43 @@ export function factcheckReaderCss(scope: string): string {
 }
 
 /**
+ * Reader-only: `<StatusRows view="tiles">` (`statusRowsHtml`, `web-format.ts`),
+ * which only the reader's page render (`views: true`) draws. The rows markup
+ * stays; each `sr-row` becomes a tile — the label, the first segment
+ * (`sr-big`) as the big value, the rest as the note. The separator after the
+ * big value is hidden visually only, so a selection still reads it. Theme
+ * tokens only; tones are the state pills' (`sr-good` …) tint and text pairs.
+ */
+export function statusTilesCss(scope: string): string {
+  return `
+    ${scope} .sr-tiles .sr-grid {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: 0.5rem;
+      padding: 0; border: 0; background: none; align-items: stretch;
+    }
+    ${scope} .sr-tiles .sr-row {
+      display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; overflow-wrap: anywhere;
+      padding: 0.55rem 0.75rem; border: 1px solid var(--border-secondary); border-radius: 9px; background: var(--bg-surface);
+    }
+    ${scope} .sr-tiles .sr-value { font-size: 0.85em; color: var(--text-soft); }
+    ${scope} .sr-tiles .sr-big {
+      display: block; font-size: 1.55rem; line-height: 1.2; font-weight: 650; color: var(--text-primary);
+      font-variant-numeric: tabular-nums;
+    }
+    ${scope} .sr-tiles .sr-big + .sr-sep {
+      position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    }
+    ${scope} .sr-tiles .sr-tone-good { background: var(--tint-success); }
+    ${scope} .sr-tiles .sr-tone-good .sr-big { color: var(--tone-good); }
+    ${scope} .sr-tiles .sr-tone-warn { background: var(--tint-warning); }
+    ${scope} .sr-tiles .sr-tone-warn .sr-big { color: var(--tone-warn); }
+    ${scope} .sr-tiles .sr-tone-info { background: var(--tint-info); }
+    ${scope} .sr-tiles .sr-tone-info .sr-big { color: var(--tone-info); }
+    ${scope} .sr-tiles .sr-tone-muted { background: var(--tint-neutral); }
+    ${scope} .sr-tiles .sr-tone-muted .sr-big { color: var(--text-soft); }
+  `;
+}
+
+/**
  * Reader-only: the decision chain view and the PR strip (`decision-views.ts`).
  * Only the wiki reader renders them (`views: true`), so chat and `/research`
  * never ship these rules. Theme tokens only. Each view is its own size

@@ -54,6 +54,8 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "long-page-no-fold": { one: "long page with no Fold", many: "long pages with no Fold" },
   "decision-first-sentence": { one: "long decision first sentence", many: "long decision first sentences" },
   "status-row-long": { one: "long status row", many: "long status rows" },
+  "status-tones": { one: "status tones entry", many: "status tones entries" },
+  "status-tile-long": { one: "long tile value", many: "long tile values" },
   "missing-tldr": { one: "page with no In short box", many: "pages with no In short box" },
   "tldr-no-more": { one: "In short box with no More", many: "In short boxes with no More" },
   "state-outside-home": { one: "state line outside its home", many: "state lines outside their home" },

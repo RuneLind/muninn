@@ -57,6 +57,9 @@
  *                      a DecisionLog item whose first sentence (what the
  *                      Overview lens shows) runs over 160 chars, and a
  *                      `<StatusRows>` row over 160 chars. Warnings, report-only.
+ *                      Its status-tones / status-tile-long half: a `tones`
+ *                      entry naming no row, and in `view="tiles"` a row whose
+ *                      first ` · ` part is over 24 chars.
  *                      Its missing-tldr / tldr-no-more half (live report pages
  *                      and `.mdx` reference pages): no `<Tldr>` first under the
  *                      title, and (info) a `<Tldr>` with no `<More>`.
@@ -177,6 +180,8 @@ export const PAGE_TEXT_LINT_CHECKS = [
   "question-block",
   "decision-first-sentence",
   "status-row-long",
+  "status-tones",
+  "status-tile-long",
   "role-key",
   "case-board-labels",
   "missing-tldr",
