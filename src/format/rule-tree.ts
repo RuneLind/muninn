@@ -158,8 +158,9 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
   if (!arrow) return null;
   const from = arrow[0].length;
   let dash: RegExpExecArray | null = null;
-  // The arrow's run holds no `—`, so every ` — ` lies after it.
-  for (const m of masked.matchAll(/\s—\s/g)) dash = m as RegExpExecArray;
+  // The arrow's run holds no `—`, so every ` — ` lies after it; one in link text is no case dash.
+  const unlinked = maskCode(rest).replace(LINK_DEST_RE, (m) => CODE_MASK.repeat(m.length));
+  for (const m of unlinked.matchAll(/\s—\s/g)) dash = m as RegExpExecArray;
   const paren = masked.indexOf("(", from);
   const run = arrow[1];
   const closer = run ? closerRe(run).exec(masked.slice(from)) : null;

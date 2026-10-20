@@ -94,6 +94,13 @@ describe("readRuleTree — the leaf text", () => {
     ["_→ Renew user_id_", "Renew user_id", []],
     ["*→ 2 * 3* — LIB-1", "2 * 3", ["LIB-1"]],
     ["**→ Renew**, later", "Renew", []],
+    // The closer is the first one, outside code and link destinations.
+    ["*→ Renew* and *more* — LIB-1", "Renew", ["LIB-1"]],
+    ["*→ Renew `a* b` c* — LIB-1", "Renew `a* b` c", ["LIB-1"]],
+    ["*→ [Renew](http://x/a*,b) c* — LIB-1", "Renew c", ["LIB-1"]],
+    // A dash inside link text cuts no outcome and starts no case tail.
+    ["→ [Renew — LIB-2](http://x)", "Renew — LIB-2", []],
+    ["→ [Renew — more](http://x) — LIB-1", "Renew — more", ["LIB-1"]],
   ])("%s", (item, outcome, cases) => {
     const { leaf } = one(item);
     expect(leaf?.cases).toEqual(cases);

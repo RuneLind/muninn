@@ -255,6 +255,11 @@ describe("the reader and the lint read one tree", () => {
     ["an italic arrow run", "*→ Renew* — LIB-1", false],
     ["an underscore arrow run", "_→ Renew_ — LIB-1", false],
     ["text after a bold arrow run", "**→ Renew**, later — LIB-1", false],
+    ["a later emphasis run after an italic arrow run", "*→ Renew* and *more* — LIB-1", false],
+    ["a * in code inside an italic arrow run", "*→ Renew `a* b` c* — LIB-1", false],
+    ["a * in a link destination inside an italic arrow run", "*→ [Renew](http://x/a*,b) c* — LIB-1", false],
+    ["a dash inside link text", "→ [Renew — LIB-2](http://x)", false],
+    ["a dash inside link text, then cases", "→ [Renew — more](http://x) — LIB-1", false],
     ["a board id beside a grammar id, no board", "→ Renew — LIB-1, loan-7", false],
     ["a board id beside a grammar id, on the board", "→ Renew — LIB-1, loan-7", true],
   ] as [string, string, boolean][])("%s", (_name, item, onBoard) => {
@@ -285,6 +290,7 @@ describe("the reader and the lint read one tree", () => {
     ["ids joined by a word", "→ Renew — LIB-7 og LIB-8"],
     ["a struck case id", "→ Renew — ~~LIB-1~~"],
     ["a dash inside code", "→ Renew `a — b`"],
+    ["a dash inside link text", "→ [Renew — LIB-2](http://x)"],
   ])("%s: what drops is named", (_name, item) => {
     const md = tree(`- ${item}`, 'title="T" outcomes="Renew=good"');
     const r = renderedLeaves(md);
@@ -292,7 +298,7 @@ describe("the reader and the lint read one tree", () => {
     const notLeaf = fs.filter((f) => f.message.includes("is not read as a leaf"));
     const noCases = fs.filter((f) => f.message.includes("reads as no case ids"));
     expect(notLeaf.length).toBe(r.leaves === 0 ? 1 : 0);
-    const tail = item.replace(/~~[^~]*~~/g, "").replace(/`[^`]*`/g, "").split(" — ")[1]?.trim();
+    const tail = item.replace(/~~[^~]*~~/g, "").replace(/`[^`]*`/g, "").replace(/\[[^\]]*\]\([^)]*\)/g, "").split(" — ")[1]?.trim();
     expect(noCases.length).toBe(r.leaves === 1 && r.cased === 0 && Boolean(tail) ? 1 : 0);
     expect([...notLeaf, ...noCases].every((f) => f.severity === "info")).toBe(true);
   });
