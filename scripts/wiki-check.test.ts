@@ -49,6 +49,26 @@ const REPORT_TOP = [
   "</DecisionLog>",
   "",
 ].join("\n");
+const DECISION_CHAIN = [
+  "---",
+  "title: DC",
+  "---",
+  "<DecisionLog>",
+  "",
+  "- **O1** \u2014 Which store? Closed 2026-10-01 (D1).",
+  "- **D1** \u2014 Use the file.",
+  "- **D2** \u2014 Use rows. Closes O1.",
+  "",
+  "</DecisionLog>",
+  "",
+  "**PR ledger.**",
+  "",
+  "| PR | State |",
+  "|---|---|",
+  "| 1 \u2014 store | merged |",
+  "| 2 \u2014 rows | somewhere |",
+  "",
+].join("\n");
 const TEXT_SHAPES = [
   "---",
   "title: S",
@@ -114,6 +134,7 @@ beforeAll(async () => {
   await Bun.write(path.join(tmp, "page-checks/plans/s.mdx"), TEXT_SHAPES);
   await Bun.write(path.join(tmp, "page-checks/plans/a.mdx"), UNKNOWN_ATTR);
   await Bun.write(path.join(tmp, "page-checks/plans/rs.mdx"), CULLED_TEXT_SHAPES);
+  await Bun.write(path.join(tmp, "page-checks/plans/dc.mdx"), DECISION_CHAIN);
   await Bun.write(path.join(tmp, "page-checks/plans/o.mdx"), ORDERED);
   await Bun.write(path.join(tmp, "page-checks/plans/m.mdx"), TLDR_NO_MORE);
   await Bun.write(path.join(tmp, "page-checks/plans/d.mdx"), SHIPPED);
@@ -266,6 +287,8 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "unrendered-fact-mark",
         "missing-tldr",
         "tldr-no-more",
+        "ledger-row-state",
+        "chain-close-conflict",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));

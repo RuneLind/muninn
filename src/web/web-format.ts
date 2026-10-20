@@ -29,6 +29,7 @@ import { withoutComponentTags } from "../format/component-observer.ts";
 import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { highlightCode } from "../format/highlight.ts";
+import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
@@ -250,6 +251,18 @@ export function formatWebHtml(
      *  after which a date is skipped. Set ⇒ DecisionLog items, Query cards and
      *  compact lanes carry their date as `data-item-date`. */
     itemDates?: ItemDateDays;
+    /** The wiki reader's page render (`/api/wiki/page` only): the decision
+     *  chain view and the PR strip, after the page's first `<NextMoves>`, else
+     *  its first `<StatusRows>`. Absent ⇒ no visual and byte-identical output. */
+    views?: boolean;
+    /** With `views`: the page is a `proposed` plan, so a page with no ledger
+     *  draws its at-a-glance slate as planned (`pageLedgers`). */
+    proposedPlan?: boolean;
+    /** With `views`: the text the views read — `renderWikiHtml` passes the
+     *  shared `decisionText` (`src/wiki/decision-text.ts`), which the
+     *  decision-chain route and the lint read too. Absent ⇒ `text` with each
+     *  wikilink sentinel replaced by its `wikiLinkTexts` text. */
+    decisionText?: string;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -280,11 +293,30 @@ export function formatWebHtml(
       currentReader && currentQuestionPage?.options && text.includes("<NextMoves")
         ? laneCardsFor(blocks, currentQuestionPage)
         : undefined;
-    const rendered = renderBlocks(blocks, webRenderer);
+    // The views' whole-page pre-pass runs only on the reader's page render;
+    // without it the walk is the one `renderBlocks` call, byte for byte.
+    const slot = opts?.views ? viewSlot(blocks) : -1;
+    let rendered: string;
+    if (slot < 0) {
+      rendered = renderBlocks(blocks, webRenderer);
+    } else {
+      // The analysis reads link labels, not sentinels, so an edge written
+      // inside a label (`[[plans/x|PR 7]]`) counts as the route counts it.
+      const linkTexts = opts?.wikiLinkTexts;
+      const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
+      const data = pageDecisionData(analysed === text ? blocks : parseBlocks(analysed), { proposed: opts?.proposedPlan === true });
+      const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis);
+      rendered = view
+        ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
+            .filter((part) => part !== "")
+            .join("\n")
+        : renderBlocks(blocks, webRenderer);
+    }
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
     const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
-    const linked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
+    const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
+    const linked = slot >= 0 ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
     // exactly: the item's state (D8) and the id's noun (D12). The parse is the
     // one the answer cards use, run on the reader path when the page has a
@@ -300,6 +332,18 @@ export function formatWebHtml(
     currentLinkTexts = prevLinkTexts;
     currentItemDates = prevItemDates;
   }
+}
+
+/** A view node's go-to link pointed at its DecisionLog item's final anchor
+ *  (`uniqueLogAnchors` renames `d7` to `d7-2` when a Query card holds it). */
+function retargetViewLinks(html: string): string {
+  if (!html.includes('class="dc-go"')) return html;
+  const anchorOf = new Map<string, string>();
+  for (const m of html.matchAll(LOG_ANCHOR_RE)) if (!anchorOf.has(m[2]!)) anchorOf.set(m[2]!, m[1]!);
+  return html.replace(DC_GO_RE, (whole, ref: string) => {
+    const anchor = anchorOf.get(ref);
+    return anchor ? `<a class="dc-go" href="#${anchor}" data-dc-ref="${ref}">` : whole;
+  });
 }
 
 /** The two days an item date is read with (D20/D49). */

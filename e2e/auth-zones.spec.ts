@@ -69,7 +69,7 @@ const servers: ChildProcess[] = [];
 let WIKI_ROOT = "";
 const WIKI_Q = "wiki=zones";
 
-/** The seven read-slice paths, each with parameters that answer 200 for an admin
+/** The eight read-slice paths, each with parameters that answer 200 for an admin
  *  (the wiki carries a `trackers` block, so graph mode answers too). */
 const WIKI_READS = [
   `/wiki?${WIKI_Q}`,
@@ -77,6 +77,7 @@ const WIKI_READS = [
   `/api/wiki/page?${WIKI_Q}&relPath=side.md`,
   `/api/wiki/page/provenance?${WIKI_Q}&relPath=side.md`,
   `/api/wiki/related?${WIKI_Q}&relPath=side.md`,
+  `/api/wiki/decision-chain?${WIKI_Q}&relPath=side.md`,
   `/api/wiki/html?${WIKI_Q}&relPath=side.html`,
   `/api/wiki/graph?${WIKI_Q}&scope=wiki&level=1&depth=0`,
 ];
@@ -266,7 +267,7 @@ test.describe("role `user` — the default", () => {
 test.describe("the wiki on the default profile — role `user`", () => {
   const as = { ...VIA_PROXY, ...TOKEN };
 
-  test("all seven read-slice paths are the zone's 403", async () => {
+  test("all eight read-slice paths are the zone's 403", async () => {
     for (const p of WIKI_READS) {
       const r = await probe(USER_BASE, p, as, "GET");
       expect(`${p} → ${r.status}`).toBe(`${p} → 403`);

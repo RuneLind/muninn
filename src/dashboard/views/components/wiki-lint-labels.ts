@@ -22,6 +22,8 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "question-block": "Question blocks the DecisionLog cannot close",
   "role-key": "Lane roles and question targets outside roleKeys",
   "case-board-labels": "<CaseBoard labels=> entries that name no case status",
+  "ledger-row-state": "PR ledger rows the strip cannot read a state from",
+  "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

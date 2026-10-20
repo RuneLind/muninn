@@ -430,7 +430,7 @@ const ANSWERED_RE = new RegExp(`${WORD_START}(Besvart|Answered)(?![\\p{L}\\p{N}_
 /** A decision id: `D` and one to four digits. */
 export const DECISION_ID_RE = /^D\d{1,4}$/;
 /** The id prefixes the wikis give a question: `S` (spørsmål) and `O` (open). */
-const QUESTION_ID_RE = /^[SO]\d{1,4}$/;
+export const QUESTION_ID_RE = /^[SO]\d{1,4}$/;
 
 /** A date the calendar has: `YYYY-MM-DD`, or `D.M[.YYYY]` checked against a
  *  leap year when it carries no year. */
@@ -480,6 +480,17 @@ export function itemQuestionState(text: string, dim: boolean, decisions: Readonl
     return decisions.has(last.decision!) ? { kind: "decided", decision: last.decision! } : { kind: "closed" };
   }
   return dim ? { kind: "closed" } : { kind: "open" };
+}
+
+/** The item's last canonical close or reopen phrase (the close rule's own
+ *  parse), or null when it carries none. The decision chain reads it: a
+ *  decision's «Lukker Sn» adds an edge only when Sn's item has no close as
+ *  its last phrase (none, or a reopen), and a close naming a D the log lacks
+ *  is an orphan. */
+export function lastCanonicalPhrase(text: string): { kind: "close" | "reopen"; decision?: string } | null {
+  const phrases = canonicalPhrases(phraseText(text));
+  const last = phrases[phrases.length - 1];
+  return last ? { kind: last.kind, ...(last.decision ? { decision: last.decision } : {}) } : null;
 }
 
 /** The last canonical phrase in the item reopens it: the item is open because
