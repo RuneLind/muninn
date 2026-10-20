@@ -129,6 +129,26 @@ describe("where a term is never marked", () => {
     expect(marks(html)).toEqual([]);
     expect(html).toContain('<div class="glossary">');
   });
+
+  // Each page's only use of the term is a label the renderer writes around a component's body.
+  const caseFiles = new Map([["c.yaml", { ok: true as const, text: "- {status: hold}\n- {id: LIB-1, status: hold}\n" }]]);
+  test.each([
+    ["Query", "a Query without an id", '<Query question="Which desk?">\n\nBody text.\n\n</Query>', "query-warning"],
+    ["run", "a Query's run date", '<Query id="Q-1" run="2026-09-01">\n\nBody text.\n\n</Query>', "query-run"],
+    ["uses", "a Query's uses line", '<Query id="Q-1" uses="loans">\n\nBody text.\n\n</Query>', "query-uses"],
+    ["Question", "a Question's label", '<Question id="O1">\n\nWhich desk?\n\n</Question>', "q-label"],
+    ["better", "a DeltaTable's direction", '<DeltaTable better="lower">\n\n| Run | a | b |\n|---|---|---|\n| T | 1 | 2 |\n\n</DeltaTable>', "dt-delta-dir"],
+    ["runs", "a DeltaTable's note", "<DeltaTable>\n\n| Run | a |\n|---|---|\n| T | 1 |\n\n</DeltaTable>", "dt-note"],
+    ["step", "a RunChecklist's count", "<RunChecklist>\n\n- [ ] Renew it\n\n</RunChecklist>", "rc-count"],
+    ["Command", "a RunChecklist's row label", "<RunChecklist>\n\n- [ ] Renew it\n  - Command: `renew`\n\n</RunChecklist>", "rc-label"],
+    ["page", "an Embed's fallback line", '<Embed src="./x.html" />', "embed-fallback"],
+    ["Hold", "a Historic's stamp", '<Historic since="2026-01-01" note="Hold policy">\n\nBody text.\n\n</Historic>', "historic-stamp"],
+    ["entry", "a CaseBoard's warning", '<CaseBoard src="c.yaml" />', "cb-warning"],
+  ])("%s in %s", (term, _name, md, cls) => {
+    const html = renderWikiHtml(md + "\n" + glossary(`- **${term}:** a word the renderer writes`), () => undefined, { views: true, files: caseFiles });
+    expect(html).toContain(`class="${cls}"`);
+    expect(marks(html)).toEqual([]);
+  });
 });
 
 describe("sections", () => {

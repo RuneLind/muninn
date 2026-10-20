@@ -22,8 +22,10 @@
  * - never inside: headings, links (resolved or not), code, `pre`, `kbd`,
  *   `samp`, buttons, `summary`, form controls, `svg`, a fact-check mark,
  *   reader-only text, the `<Glossary>` block itself, a callout or lead-box
- *   title, a chart's table (`section.vc`, visually hidden in chart mode) and a
- *   `<Query>` result (data); a word inside a bare URL is not marked either;
+ *   title, a chart's table (`section.vc`, visually hidden in chart mode), a
+ *   `<Query>` result (data) and the labels and notes the renderer writes around
+ *   a component's body (`Query without id`, `run …`, `lower is better`, a
+ *   step count, a Historic stamp); a word inside a bare URL is not marked either;
  * - attributes are never read or written, and the text a mark wraps is the
  *   source's own bytes.
  */
@@ -34,7 +36,13 @@ import { isMarkableTerm, type GlossaryEntry } from "./glossary.ts";
 export const GLOSSARY_CHROME_CLASSES = ["glossary", "gl-mark", "gl-term", "gl-tip", "gl-tip-term"] as const;
 
 const SKIP_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "a", "code", "pre", "kbd", "samp", "button", "summary", "script", "style", "svg", "textarea", "select", "option", "title"]);
-const SKIP_CLASSES = new Set(["glossary", "fc-mark", "fc-mark-block", "wiki-link-missing", "callout-title", "tldr-label", "vc", "query-result", "gl-mark", "cb-strip", "cb-pill"]);
+const SKIP_CLASSES = new Set([
+  "glossary", "fc-mark", "fc-mark-block", "wiki-link-missing", "callout-title", "tldr-label", "vc", "query-result", "gl-mark", "cb-strip", "cb-pill",
+  // Labels and notes the renderer writes around a component's body.
+  "query-warning", "query-meta", "query-unavailable", "query-truncated", "q-label", "q-state", "q-for", "q-duplicate",
+  "dt-delta", "dt-note", "dt-warning", "dt-unavailable", "rc-count", "rc-label", "embed-fallback", "historic-stamp",
+  "cb-warning", "cb-truncated", "cb-unavailable", "nm-sum",
+]);
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);
 const SECTION_TAGS = new Set(["h2", "h3"]);
