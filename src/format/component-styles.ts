@@ -1175,7 +1175,7 @@ export function chartCss(scope: string): string {
     ${scope} .vc-pct { color: var(--text-soft); }
     ${scope} .vc-d1 { padding-left: 0.8rem; } ${scope} .vc-d2 { padding-left: 1.6rem; }
     ${scope} .vc-d3 { padding-left: 2.4rem; } ${scope} .vc-d4 { padding-left: 3.2rem; }
-    ${scope} .vc-steps { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; gap: 0.2rem 0.4rem; }
+    ${scope} .vc-steps-grid { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; gap: 0.2rem 0.4rem; }
     ${scope} .vc-yaxis {
       display: flex; flex-direction: column; justify-content: space-between; text-align: right;
       font-size: 0.75em; color: var(--text-soft); font-variant-numeric: tabular-nums;

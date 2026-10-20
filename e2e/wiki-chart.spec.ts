@@ -184,6 +184,12 @@ test.describe("Wiki reader: Chart", () => {
         await expect(visiblePlot(c), kind).toBeVisible();
         await expect(c.locator(":scope > .vc-table"), kind).toBeHidden();
         await expect(c.locator('button[data-vc-mode="chart"]'), kind).toHaveAttribute("aria-pressed", "true");
+        // The section stacks: controls above the plot, the plot as wide as the section.
+        const ctl = (await c.locator(":scope > .vc-ctl").boundingBox())!;
+        const plot = (await visiblePlot(c).boundingBox())!;
+        const box = (await c.boundingBox())!;
+        expect(ctl.y + ctl.height, kind).toBeLessThanOrEqual(plot.y + 1);
+        expect(plot.width, kind).toBeGreaterThan(box.width * 0.8);
       }
       const fillOf = (sel: string) => page.locator(sel).first().evaluate((e) => getComputedStyle(e).fill);
       const strokeOf = (sel: string) => page.locator(sel).first().evaluate((e) => getComputedStyle(e).stroke);

@@ -346,7 +346,7 @@ function stepsSvg(model: Extract<ChartModel, { kind: "steps" }>, ctx: NumberCont
   const unit = model.normalize ? "%" : "";
   const axis = `<div class="vc-yaxis"><span>${fmt(hi, ctx)}${unit}</span><span>${fmt(lo, ctx)}${unit}</span></div>`;
   const xs = `<div class="vc-xaxis">${model.steps.map((s) => `<span>${escapeHtml(s)}</span>`).join("")}</div>`;
-  return `<div class="vc-steps">${axis}<div class="vc-area">${svgOpen(`0 0 ${W} ${H}`)}${groups.join("")}</svg></div>${xs}</div>`;
+  return `<div class="vc-steps-grid">${axis}<div class="vc-area">${svgOpen(`0 0 ${W} ${H}`)}${groups.join("")}</svg></div>${xs}</div>`;
 }
 
 function stepsLegend(model: Extract<ChartModel, { kind: "steps" }>, w: Record<string, string>): string {
