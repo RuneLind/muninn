@@ -352,10 +352,18 @@ alias), the research synthesis GET, the wiki ask/digest/explain/fact-check
 model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the
 search/similarity/embedding amplifiers (`/api/search/search`, `/api/memsearch`,
 the `*/similar` proxies, `/api/graph/{similarity,author}`, same-story, the
-atlas), the MCP-status probe and the two WS upgrade paths.
+atlas), the MCP-status probe and the two WS upgrade paths. A second list,
+`REFRESH_SIDE_EFFECTING_GETS`, holds the GETs whose plain read stays open but
+whose `?refresh=1` forces a rebuild — `/api/wiki/pages` and
+`/api/wiki/index-coverage` (a full index build with its git reads),
+`/api/wiki/ingest-backlog` and `/api/summaries/stats` (an uncached recompute
+over every summary collection); those count as side-effecting only when a
+`refresh` value is `"1"`, HEAD included. `/api/wiki/page` reads no `refresh`
+and is on neither list.
 **`side-effecting-gets.test.ts` is the carrier**: it walks every registered GET
 and requires each on this list or on its `READ_ONLY_GETS` allowlist with a
-reason, so a new GET starts red. The criterion is written in its header: a
+reason, so a new GET starts red; it also scans the route sources for every
+`refresh` read, so a GET that grows one starts red until it is classified. The criterion is written in its header: a
 model call, a spawn, a consume, a search/similarity/embedding computation the
 caller drives, or a fan-out the data sizes is listed; a fixed set of listings
 or one bounded sibling read is not. Three examples: `GET /chat/pending/:threadId` is a one-time *consume*

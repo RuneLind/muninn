@@ -167,6 +167,28 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
 ];
 
 /**
+ * GET paths whose plain read is the reader's own and stays open, but whose
+ * `?refresh=1` forces a rebuild: a full wiki index build with its git reads
+ * (`pages`, `index-coverage`), or an uncached recompute over every summary
+ * collection (`ingest-backlog`, `stats`). Exact paths. Each route reads
+ * `c.req.query("refresh") === "1"`; {@link refreshRequested} matches ANY
+ * `refresh` value equal to `"1"`, a superset of whichever one the route reads.
+ * `side-effecting-gets.test.ts` scans the route sources for every `refresh`
+ * read, so a new one starts red until it is classified.
+ */
+export const REFRESH_SIDE_EFFECTING_GETS: readonly string[] = [
+  "/api/wiki/pages",
+  "/api/wiki/index-coverage",
+  "/api/wiki/ingest-backlog",
+  "/api/summaries/stats",
+];
+
+/** Does the query ask for a forced rebuild, as the routes above parse it? */
+export function refreshRequested(search: URLSearchParams | undefined): boolean {
+  return !!search && search.getAll("refresh").includes("1");
+}
+
+/**
  * ⚠️ **HEAD is NOT safe, and treating it as safe is a hole rather than an
  * optimisation.** Hono dispatches `HEAD /x` to the handler registered with
  * `app.get("/x")` and RUNS ITS BODY — so exempting HEAD does not skip a
@@ -178,18 +200,21 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
  * to the GET rule; the two read-only `app.on("HEAD", …)` report/spec routes are
  * not on the list and are unaffected.
  */
-export function isSideEffectingRequest(method: string, path: string): boolean {
+export function isSideEffectingRequest(method: string, path: string, search?: URLSearchParams): boolean {
   const m = method.toUpperCase();
   // OPTIONS only: a CORS preflight has no side effect, and refusing it would
   // break the very preflight `src/auth/cors.ts` answers.
   if (m === "OPTIONS") return false;
   if (m !== "GET" && m !== "HEAD") return true;
-  return SIDE_EFFECTING_GETS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p));
+  if (SIDE_EFFECTING_GETS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p))) return true;
+  return REFRESH_SIDE_EFFECTING_GETS.includes(path) && refreshRequested(search);
 }
 
 export interface OriginDecisionInput {
   readonly method: string;
   readonly path: string;
+  /** The query string, read only for {@link REFRESH_SIDE_EFFECTING_GETS}. */
+  readonly search?: URLSearchParams;
   /** The `Origin` request header, verbatim. */
   readonly origin: string | undefined;
   /** The `Sec-Fetch-Site` request header, verbatim. */
@@ -348,7 +373,7 @@ export function loopbackOrigins(port: number): string[] {
 }
 
 export function decideOrigin(input: OriginDecisionInput): OriginDecision {
-  if (!isSideEffectingRequest(input.method, input.path)) {
+  if (!isSideEffectingRequest(input.method, input.path, input.search)) {
     return { allowed: true, reason: "not side-effecting" };
   }
 
@@ -421,6 +446,7 @@ export function createOriginMiddleware(
     const decision = decideOrigin({
       method: c.req.method,
       path: c.req.path,
+      search: REFRESH_SIDE_EFFECTING_GETS.includes(c.req.path) ? new URL(c.req.url).searchParams : undefined,
       origin: c.req.header("origin"),
       secFetchSite: c.req.header("sec-fetch-site"),
       host: c.req.header("host"),

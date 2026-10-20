@@ -39,7 +39,7 @@ async function seedConnector(c: ConnectorSeed): Promise<boolean> {
     const [row] = await sql`
       INSERT INTO connectors (name, description, connector_type, model, base_url)
       VALUES (${c.name}, ${"Seeded by seed-connectors script"}, ${c.connectorType}, ${c.model}, ${c.baseUrl})
-      ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, '')) DO NOTHING
+      ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, ''), COALESCE(effort, '')) DO NOTHING
       RETURNING id
     `;
     if (row) {

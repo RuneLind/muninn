@@ -3,7 +3,10 @@ import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { createChatRoutes } from "../chat/routes.ts";
 import { createDashboardRoutes } from "../dashboard/routes.ts";
-import { SIDE_EFFECTING_GETS, isSideEffectingRequest } from "./origin.ts";
+import { Glob } from "bun";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { REFRESH_SIDE_EFFECTING_GETS, SIDE_EFFECTING_GETS, isSideEffectingRequest } from "./origin.ts";
 
 /**
  * The GET counterpart of `write-route-json-gate.test.ts`: the mechanical
@@ -31,6 +34,7 @@ const HUGINN_READ = "one keyed fetch, listing or status read at huginn: no searc
 const LISTINGS = "a fixed set of huginn listings over the configured collections (no search), the page's own load";
 const STREAM = "SSE over a job or run the server already started; subscribing starts nothing";
 const LEDGER = "one time- and byte-bounded read of the claude-usage ledger, polled by its own page";
+const REFRESH = "the plain read; its `?refresh=1` rebuild is on REFRESH_SIDE_EFFECTING_GETS";
 
 const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
   ...[
@@ -81,9 +85,11 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/api/wiki/gardener/backlog-doc-delete-status", "/api/indexing/overview",
   ].map((p) => [p, HUGINN_READ] as const),
   ...[
-    "/api/summaries/stats", "/api/summaries/documents", "/api/wiki/index-coverage",
-    "/api/wiki/reindex-status", "/api/wiki/ingest-backlog",
+    "/api/summaries/documents", "/api/wiki/reindex-status",
   ].map((p) => [p, LISTINGS] as const),
+  ...[
+    "/api/wiki/pages", "/api/wiki/index-coverage", "/api/wiki/ingest-backlog", "/api/summaries/stats",
+  ].map((p) => [p, REFRESH] as const),
   ...[
     "/api/events", "/chat/events", "/api/anthropic/stream/:jobId", "/api/articles/stream/:jobId",
     "/api/youtube/stream/:jobId", "/api/x-articles/stream/:jobId", "/api/tiktok/stream/:jobId",
@@ -91,11 +97,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
   ].map((p) => [p, STREAM] as const),
   ["/api/claude-usage/overview", LEDGER],
   ["/api/plans/board", `${LEDGER}, plus the local plans directory`],
-  [
-    "/api/wiki/pages",
-    "the local wiki index; `?refresh=1` rescans this host's disk (no outbound call), rate-limited on nais",
-  ],
-  ["/api/wiki/page", "the local wiki index and page file; `?refresh=1` as `/api/wiki/pages`"],
+  ["/api/wiki/page", "the cached wiki index and one page file; it reads no `refresh` parameter"],
 ]);
 
 /** Paths on the list that no Hono route registers, each with the reason. */
@@ -104,6 +106,33 @@ const NOT_HONO: ReadonlyMap<string, string> = new Map([
   ["/chat/ws", "the WS upgrade, handled in `Bun.serve`'s fetch before `app.fetch`"],
   ["/simulator/ws", "the WS upgrade alias, handled in `Bun.serve`'s fetch"],
 ]);
+
+/** A `refresh` read in a route source: `query("refresh")` or `queries("refresh")`. */
+const REFRESH_READ = /\.quer(?:y|ies)\(\s*["'`]refresh["'`]\s*\)/g;
+/** A GET registration with a literal path. */
+const GET_REGISTRATION = /\.get\(\s*["'`]([^"'`]+)["'`]/g;
+
+/**
+ * Every `refresh` read in the route sources, attributed to the nearest GET
+ * registration above it in the same file (`null` when there is none).
+ */
+function refreshReads(): { file: string; path: string | null }[] {
+  const root = join(import.meta.dir, "..");
+  const out: { file: string; path: string | null }[] = [];
+  for (const dir of ["dashboard", "chat"]) {
+    for (const rel of new Glob("**/*.ts").scanSync(join(root, dir))) {
+      if (rel.endsWith(".test.ts")) continue;
+      const file = join(dir, rel);
+      const text = readFileSync(join(root, file), "utf8");
+      const gets = [...text.matchAll(GET_REGISTRATION)].map((m) => ({ at: m.index!, path: m[1]! }));
+      for (const m of text.matchAll(REFRESH_READ)) {
+        const before = gets.filter((g) => g.at < m.index!);
+        out.push({ file, path: before.length ? before[before.length - 1]!.path : null });
+      }
+    }
+  }
+  return out;
+}
 
 /** `ALL` is what `app.all`/`app.mount` register: a GET reaches it. */
 const READ_METHODS = new Set(["GET", "ALL"]);
@@ -152,6 +181,30 @@ describe("every GET route is classified for the origin guard", () => {
         !probes.some((p) => (entry.endsWith("/") ? p.startsWith(entry) : p === entry)),
     );
     expect(stale).toEqual([]);
+  });
+
+  test("a GET whose `?refresh=1` forces a rebuild is listed for that variant only", () => {
+    for (const path of REFRESH_SIDE_EFFECTING_GETS) {
+      expect({ path, routed: routes.includes(path) }).toEqual({ path, routed: true });
+      for (const method of ["GET", "HEAD"]) {
+        const on = (q: string) => isSideEffectingRequest(method, path, new URLSearchParams(q));
+        expect({ path, method, plain: on(""), zero: on("refresh=0"), one: on("refresh=1"), any: on("refresh=0&refresh=1") })
+          .toEqual({ path, method, plain: false, zero: false, one: true, any: true });
+      }
+    }
+  });
+
+  test("every `refresh` read in a GET route is on a list, and every refresh entry is read", () => {
+    const reads = refreshReads();
+    expect(reads.length).toBeGreaterThan(0);
+    const unclassified = reads.filter(
+      (r) =>
+        r.path === null ||
+        (!REFRESH_SIDE_EFFECTING_GETS.includes(r.path) && !isSideEffectingRequest("GET", concrete(r.path))),
+    );
+    expect(unclassified).toEqual([]);
+    const readPaths = new Set(reads.map((r) => r.path));
+    expect(REFRESH_SIDE_EFFECTING_GETS.filter((p) => !readPaths.has(p))).toEqual([]);
   });
 
   test("the search, similarity and embedding amplifiers are listed (finding 49)", () => {

@@ -128,6 +128,19 @@ describe("connectors", () => {
       expect((await updateConnector(created.id, { effort: null }))!.effort).toBeUndefined();
     });
 
+    test("two connectors differing only in effort can both exist; a same-effort twin still collides", async () => {
+      const base = { connectorType: "claude-cli" as const, model: "claude-opus-5-5", baseUrl: "http://x.example/v1" };
+      const low = await createConnector({ ...base, name: "Opus low", effort: "low" });
+      const high = await createConnector({ ...base, name: "Opus high", effort: "high" });
+      const none = await createConnector({ ...base, name: "Opus default" });
+      expect(new Set([low.id, high.id, none.id]).size).toBe(3);
+      const dupe = await createConnector({ ...base, name: "Opus low again", effort: "low" }).catch((e: { code?: string }) => e.code);
+      expect(dupe).toBe("23505");
+      // The seed path's ON CONFLICT must still name a matching unique index.
+      expect(await seedConnectorsFromBotConfigs([makeBotConfig()])).toBeGreaterThanOrEqual(0);
+      expect(await seedConnectorsFromBotConfigs([makeBotConfig()])).toBe(0);
+    });
+
     test("a connector without one reads back undefined", async () => {
       expect((await createConnector({ name: "No effort", connectorType: "claude-cli" })).effort).toBeUndefined();
     });

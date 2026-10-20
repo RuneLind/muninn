@@ -225,7 +225,7 @@ async function ensureCopilotConnector(tx: Sql): Promise<void> {
   const [row] = await tx`
     INSERT INTO connectors (name, description, connector_type, model)
     VALUES ('copilot-sdk claude-sonnet-5.5', 'Auto-seeded', 'copilot-sdk', 'claude-sonnet-5.5')
-    ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, '')) DO NOTHING
+    ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, ''), COALESCE(effort, '')) DO NOTHING
     RETURNING id
   `;
   if (row) log.info("Seeded missing copilot-sdk connector");
