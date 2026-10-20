@@ -196,6 +196,8 @@ describe("a case on two leaves", () => {
     ["a lowercase id is no case id, so its year counts", "fy-2024", "fy-2025", 0],
     ["a year inside a case id is no year", "See FY-2024", "See FY-2025", 1],
     ["a year beside a case id counts", "In 2024, see LIB-9", "In 2025, see LIB-9", 0],
+    ["two years, one of them the other leaf's", "2024 or 2025", "2025", 1],
+    ["two years, neither the other leaf's", "2023 or 2024", "2025", 0],
     ["a struck year is no year", "~~2023~~", "2024", 1],
     ["a struck year beside a kept one", "~~2024~~ 2025", "2024", 0],
     ["a year in a code span counts", "In `2024`", "In `2025`", 0],
