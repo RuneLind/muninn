@@ -156,9 +156,9 @@ describe("placement and surfaces", () => {
       page(
         next,
         log(
-          "**O1** — Which shelf? Closed 2026-09-02 (D1).",
-          "**O2** — How long a Hold? Closed 2026-09-04 (D2).",
-          "**O3** — How many Renewals? Closed 2026-09-06 (D3).",
+          "**S1** — Which shelf? Closed 2026-09-02 (D1).",
+          "**S2** — How long a Hold? Closed 2026-09-04 (D2).",
+          "**S3** — How many Renewals? Closed 2026-09-06 (D3).",
           "**D1** — The front shelf.",
           "**D2** — One week.",
           "**D3** — Two.",
