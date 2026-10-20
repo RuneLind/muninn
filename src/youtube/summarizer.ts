@@ -253,9 +253,11 @@ export interface SummarizeVideoOptions {
    * Slides on: probe, download a ≤720p video-only rendition, pull one frame per
    * cadence tick and let the model Read them (`toolSurface: { read: [framesDir] }`). Off by
    * default, so every existing caller is byte-identical. The ROUTE pre-flights
-   * the connector's `supportsExtraDirs` and 503s before a job exists, so a job
-   * arriving here with `frames: true` runs on a connector that can read files —
-   * `decideYouTubeFrames` re-checks it anyway, as a second line.
+   * the connector's `supportsExtraDirs` (503 `frames_unsupported`) and, on
+   * claude-cli, the CLI version through `restrictedCliBlocker` (503
+   * `cli_too_old` below 2.1.303), before a job exists, so a job arriving here
+   * with `frames: true` runs on a connector that can run the fenced Read —
+   * `decideYouTubeFrames` re-checks `supportsExtraDirs` anyway, as a second line.
    */
   frames?: boolean;
   /**

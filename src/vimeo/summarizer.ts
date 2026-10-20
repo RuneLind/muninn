@@ -151,8 +151,10 @@ export interface VimeoJobMeta {
    * Slides on: pull one 720p frame per cadence tick through the media seam,
    * let the model Read them (`toolSurface: { read: [framesDir] }`), and let the summary quote them
    * inline (v2 PR 4). The route pre-flights the connector's
-   * `supportsExtraDirs` and 503s BEFORE a job exists, so a job that gets here
-   * with `frames: true` runs on a connector that can read files.
+   * `supportsExtraDirs` (503 `frames_unsupported`) and, on claude-cli, the CLI
+   * version through `restrictedCliBlocker` (503 `cli_too_old` below 2.1.303),
+   * BEFORE a job exists, so a job that gets here with `frames: true` runs on a
+   * connector that can run the fenced Read.
    */
   readonly frames: boolean;
 }
