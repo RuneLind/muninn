@@ -30,6 +30,10 @@ const DOWNLOAD_URLS: Array<[string, string]> = [
   ["https://m.tiktok.com/@u/video/7412345678901234567", "https://www.tiktok.com/@u/video/7412345678901234567"],
   ["https://m.tiktok.com/v/7412345678901234567.html", "https://www.tiktok.com/@/video/7412345678901234567"],
   ["https://m.tiktok.com/v/7412345678901234567.html?_r=1&u_code=x", "https://www.tiktok.com/@/video/7412345678901234567"],
+  // The embed player, where a vm. short link can land.
+  ["https://www.tiktok.com/embed/7412345678901234567", "https://www.tiktok.com/@/video/7412345678901234567"],
+  ["https://www.tiktok.com/embed/v2/7412345678901234567?lang=en", "https://www.tiktok.com/@/video/7412345678901234567"],
+  ["https://tiktok.com/embed/v2/7412345678901234567/", "https://www.tiktok.com/@/video/7412345678901234567"],
 ];
 
 for (const [input, expected] of DOWNLOAD_URLS) {
@@ -40,6 +44,8 @@ for (const [input, expected] of DOWNLOAD_URLS) {
     // pattern and never on `vm.tiktok`'s, which re-follows a chain ungated.
     expect(TIKTOK_IE.test(out)).toBe(true);
     expect(TIKTOK_VM_IE.test(out)).toBe(false);
+    // The short-link route refuses a landing URL with no id here (no_video).
+    expect(tiktokPathVideoId(new URL(out))).toBe("7412345678901234567");
   });
 }
 

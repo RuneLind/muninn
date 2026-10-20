@@ -121,7 +121,8 @@ import {
   NESTED_MARKUP_RE,
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
-import { maskLineCodeSpans } from "../format/code-spans.ts";
+import { lineCodeSpanRanges, maskLineCodeSpans } from "../format/code-spans.ts";
+import { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
@@ -256,9 +257,36 @@ function hasFrontmatterFence(content: string): boolean {
  * (docs about wikilink syntax), not a link, so flagging it is pure noise. The
  * store's extractors deliberately don't do this (the graph tolerates the extra
  * edges); the linter must not report them as broken.
+ *
+ * Inline spans are read the way the reader reads them: every `[[…]]` on a line
+ * is parked whole first (as `renderWikiHtml` does), then spans pair by the
+ * exact-N rule (`lineCodeSpanRanges`), so `` ``[[Ghost]]`` `` is code. A link
+ * whose label holds a backtick stays a link: masking spans before parking
+ * dropped such links on 5 live pages.
  */
 function stripCodeSpans(content: string): string {
-  return content.replace(/```[\s\S]*?(?:```|$)/g, "").replace(/`[^`\n]*`/g, "");
+  return content
+    .replace(/```[\s\S]*?(?:```|$)/g, "")
+    .split("\n")
+    .map(stripLineCodeSpansKeepingLinks)
+    .join("\n");
+}
+
+function stripLineCodeSpansKeepingLinks(line: string): string {
+  if (!line.includes("`")) return line;
+  const parked: string[] = [];
+  const tokens = line.replace(WIKILINK_WITH_LABEL_RE, (whole: string) => {
+    parked.push(whole);
+    return `\uE000${parked.length - 1}\uE001`;
+  });
+  let out = "";
+  let cursor = 0;
+  for (const r of lineCodeSpanRanges(tokens)) {
+    out += tokens.slice(cursor, r.start);
+    cursor = r.end;
+  }
+  out += tokens.slice(cursor);
+  return out.replace(/\uE000(\d+)\uE001/g, (m: string, i: string) => parked[Number(i)] ?? m);
 }
 
 /** Broken [[wikilinks]] + relative .md links on one page, resolved against the index. */

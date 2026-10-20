@@ -8,6 +8,11 @@ import { getLog } from "../logging.ts";
 // graph (yt-dlp, whisper, ffmpeg) to get a spawn.
 import { runProc } from "../utils/run-proc.ts";
 
+/** Every media child runs as its own process group, so a timeout's signals
+ *  reach what it started too: yt-dlp shells out to ffmpeg for the bv*+ba merge
+ *  and the HLS fixup, and that ffmpeg survived a SIGTERM to yt-dlp alone. */
+const PROC_GROUP = { processGroup: true } as const;
+
 const log = getLog("video", "media");
 
 // Per-step process timeouts. yt-dlp does network I/O against an anti-bot-happy
@@ -410,6 +415,7 @@ export async function probeVideoInfo(
       ytDlpProbeArgs(url),
       opts.timeoutMs ?? PROBE_TIMEOUT_MS,
       "yt-dlp probe",
+      PROC_GROUP,
     ));
   } catch (err) {
     log.warn("yt-dlp probe of {url} failed: {error}", {
@@ -450,7 +456,7 @@ export async function downloadVideo(
 
   const deadline = Date.now() + timeoutMs;
 
-  let { stdout, stderr, exitCode } = await runProc(args, timeoutMs, "yt-dlp download");
+  let { stdout, stderr, exitCode } = await runProc(args, timeoutMs, "yt-dlp download", PROC_GROUP);
   const remainingMs = deadline - Date.now() - YTDLP_403_RETRY_DELAY_MS;
   if (
     exitCode !== 0 &&
@@ -463,7 +469,7 @@ export async function downloadVideo(
       stderr: stderr.slice(-300),
     });
     await Bun.sleep(YTDLP_403_RETRY_DELAY_MS);
-    ({ stdout, stderr, exitCode } = await runProc(args, remainingMs, "yt-dlp download"));
+    ({ stdout, stderr, exitCode } = await runProc(args, remainingMs, "yt-dlp download", PROC_GROUP));
   } else if (exitCode !== 0 && YTDLP_TRANSIENT_403.test(stderr)) {
     log.warn("yt-dlp download of {url} got HTTP 403 with {remainingMs}ms of budget left — not retrying", {
       url,
@@ -569,6 +575,7 @@ export async function transcribeVideo(
        "-show_entries", "stream=codec_type", "-of", "csv=p=0", videoPath],
       FFMPEG_AUDIO_TIMEOUT_MS,
       "ffprobe audio probe",
+      PROC_GROUP,
     );
     if (probe.exitCode === 0 && probe.stdout.trim() === "") {
       // Warn, not info: a genuinely silent clip and a format-selection bug that
@@ -581,6 +588,7 @@ export async function transcribeVideo(
          "-show_entries", "stream=codec_name", "-of", "csv=p=0", videoPath],
         FFMPEG_AUDIO_TIMEOUT_MS,
         "ffprobe video codec probe",
+        PROC_GROUP,
       ).then((r) => r.stdout.trim() || "unknown").catch(() => "unknown");
       log.warn(
         "No audio stream in {videoPath} (video codec {vcodec}) — summary will rely on frames",
@@ -599,6 +607,7 @@ export async function transcribeVideo(
     ["ffmpeg", "-i", videoPath, "-ar", "16000", "-ac", "1", "-y", wavPath],
     opts.audioTimeoutMs ?? FFMPEG_AUDIO_TIMEOUT_MS,
     "ffmpeg audio extract",
+    PROC_GROUP,
   );
   if (ffmpeg.exitCode !== 0) {
     // Slice the tail — ffmpeg prints its version banner first, so the head of
@@ -618,6 +627,7 @@ export async function transcribeVideo(
     ],
     opts.whisperTimeoutMs ?? WHISPER_TIMEOUT_MS,
     "whisper-cli",
+    PROC_GROUP,
   );
   if (whisper.exitCode !== 0) {
     throw new Error(
@@ -678,6 +688,7 @@ async function runFrameExtraction(
     ],
     timeoutMs,
     "ffmpeg keyframes",
+    PROC_GROUP,
   );
   if (exitCode !== 0) {
     throw new Error(

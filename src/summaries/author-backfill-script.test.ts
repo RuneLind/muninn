@@ -181,6 +181,84 @@ describe("an interrupted write", () => {
   );
 });
 
+describe("a document saved during the run", () => {
+  const skipLines = (journal: string) =>
+    readFileSync(journal, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { t: string; path?: string; status?: string; reason?: string })
+      .filter((l) => l.t === "done" && l.status === "skipped");
+
+  test(
+    "a save after the run read it, before its turn: skipped, bytes kept",
+    async () => {
+      // Doc 4 already has an author: it is only re-stamped, which goes through no
+      // atomicWrite, so the plan's own check is all that keeps its new mtime.
+      const files: Fixture[] = [1, 2, 3, 4].map((i) => ({
+        path: `s/Doc ${i}.md`,
+        id: `SAV${String(i).padStart(8, "0")}`,
+        ageMs: i * 1_000,
+        ...(i === 4 ? { author: "Has" } : {}),
+      }));
+      const fx = setup("saved-between", files, Object.fromEntries(files.map((f) => [f.id, { kind: "ok", author: `A ${f.id}` }])));
+      const journal = join(fx.state, "journal.jsonl");
+      const proc = Bun.spawn(["bun", SCRIPT, "--root", fx.root, "--state-dir", fx.state, "--no-update"], {
+        env: { ...(process.env as Record<string, string>), BACKFILL_DEBUG_SLEEP_MS: "800" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const written = () => (existsSync(journal) ? readFileSync(journal, "utf8").split('"status":"written"').length - 1 : 0);
+      const deadline = Date.now() + 20_000;
+      while (written() < 1 && Date.now() < deadline) await Bun.sleep(10);
+      const done = new Set(
+        readFileSync(journal, "utf8")
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l) as { t: string; path?: string })
+          .filter((l) => l.t === "done")
+          .map((l) => l.path),
+      );
+      const saved = new Map<string, string>();
+      for (const f of files) {
+        if (done.has(f.path)) continue;
+        const body = doc(f.id, f.author, "saved by a re-capture");
+        writeFileSync(join(fx.root, f.path), body);
+        saved.set(f.path, body);
+      }
+      expect(saved.has("s/Doc 4.md")).toBe(true);
+      expect(await proc.exited).toBe(0);
+      for (const [p, body] of saved) expect(readFileSync(join(fx.root, p), "utf8")).toBe(body);
+      expect(skipLines(journal).map((l) => l.path).sort()).toEqual([...saved.keys()].sort());
+    },
+    30_000,
+  );
+
+  test(
+    "a save between the check and the rename: the re-check skips it, bytes kept, no temp left",
+    async () => {
+      const files: Fixture[] = [{ path: "s/Only.md", id: "SAV00000009", ageMs: 1_000 }];
+      const fx = setup("saved-in-window", files, { SAV00000009: { kind: "ok", author: "A" } });
+      const journal = join(fx.state, "journal.jsonl");
+      const proc = Bun.spawn(["bun", SCRIPT, "--root", fx.root, "--state-dir", fx.state, "--no-update"], {
+        env: { ...(process.env as Record<string, string>), BACKFILL_DEBUG_TEMP_PAUSE_MS: "1500" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const deadline = Date.now() + 20_000;
+      while (tempsUnder(fx.state).filter((p) => !p.startsWith("oembed-cache")).length === 0 && Date.now() < deadline) await Bun.sleep(10);
+      const body = doc("SAV00000009", undefined, "saved inside the window");
+      writeFileSync(join(fx.root, "s/Only.md"), body);
+      const out = await new Response(proc.stdout).text();
+      expect(await proc.exited).toBe(0);
+      expect(readFileSync(join(fx.root, "s/Only.md"), "utf8")).toBe(body);
+      expect(out).toContain("wrote 0,");
+      expect(skipLines(journal).map((l) => [l.path, l.reason])).toEqual([["s/Only.md", "changed since read"]]);
+      expect(tempsUnder(fx.state).filter((p) => !p.startsWith("oembed-cache"))).toEqual([]);
+    },
+    30_000,
+  );
+});
+
 describe("usage errors never write", () => {
   test("an unknown flag or a missing value exits 2 and leaves the tree alone", async () => {
     const fx = setup("usage", [{ path: "a.md", id: "AAAAAAAAAAA", ageMs: 1_000 }], {

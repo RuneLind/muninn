@@ -197,6 +197,48 @@ test("a properly CLOSED fence still hides the headings inside it", () => {
   expect(parseFactcheckClaims(tilde)).toEqual([]);
 });
 
+/** Claim 1 leaves a ```ts open; claim 3 quotes code in a closed ``` pair. The
+ *  stray opener paired with claim 3's opener, masking claims 2 and 3 (arch review
+ *  2026-10, finding 55). */
+const STRAY_OPENER_ANSWER = [
+  "Overall: two of three hold up.",
+  "",
+  "### ⚠️ Claim 1/3 — First",
+  "",
+  "```ts",
+  "const x = 1;",
+  "",
+  "### ✅ Claim 2/3 — Second",
+  "",
+  "Confirmed.",
+  "",
+  "### ❌ Claim 3/3 — Third",
+  "",
+  "```",
+  "npm run build",
+  "```",
+  "",
+  "Wrong flag.",
+].join("\n");
+
+test("an opener left open in one claim does not swallow the later claims", () => {
+  const claims = parseFactcheckClaims(STRAY_OPENER_ANSWER);
+  expect(claims.map((c) => c.index)).toEqual([1, 2, 3]);
+  // Claim 3's own closed fence stays inside its block.
+  expect(claims[2]!.block).toContain("```\nnpm run build\n```");
+});
+
+test("a quoted next-index heading from ANOTHER run stays code", () => {
+  // 2/5 follows 1/3 by index but belongs to a different run (its total differs).
+  const otherRun = ["### ⚠️ Claim 1/3 — First", "", "```", "### ✅ Claim 2/5 — elsewhere", "```", "", "Hedged."].join("\n");
+  expect(parseFactcheckClaims(otherRun).map((c) => c.index)).toEqual([1]);
+});
+
+test("a stray opener before a later claim with an info-string fence is retired too", () => {
+  const infoFence = STRAY_OPENER_ANSWER.replace("```\nnpm run build", "```sh\nnpm run build");
+  expect(parseFactcheckClaims(infoFence).map((c) => c.index)).toEqual([1, 2, 3]);
+});
+
 test("a phantom fence no longer drops the WHOLE quote list", () => {
   // With claims 2 and 3 masked, `known` held one index while three quotes were
   // posted, so the size rule dropped every quote on the run.

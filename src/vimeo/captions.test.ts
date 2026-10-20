@@ -12,6 +12,7 @@ import {
   deHeadlessUserAgent,
   downloadVtt,
   harvestVimeoCaptions,
+  browserProcessOf,
   VIMEO_CAPTIONS_HOST,
   VIMEO_HARVEST_TEARDOWN_MS,
   VIMEO_PLAYER_CONFIG_MAX_BYTES,
@@ -381,6 +382,8 @@ interface FakePageSpec {
   uaProbeHangsUntilClose?: boolean;
   /** `browser.process()` exists and returns a handle whose `kill` is recorded. */
   browserProcess?: boolean;
+  /** No `process()`, but playwright-core's private `_connection.toImpl` path reaches a handle (a real `chromium.launch()` Browser's shape). */
+  privateProcess?: boolean;
 }
 
 interface FakeHarness {
@@ -591,6 +594,25 @@ function fakeHarness(spec: FakePageSpec): FakeHarness {
               return true;
             },
           }),
+        }
+      : {}),
+    ...(spec.privateProcess
+      ? {
+          _connection: {
+            toImpl: () => ({
+              options: {
+                browserProcess: {
+                  process: {
+                    pid: 5151,
+                    kill: (signal: string) => {
+                      kills.push(signal);
+                      return true;
+                    },
+                  },
+                },
+              },
+            }),
+          },
         }
       : {}),
   };
@@ -1267,6 +1289,29 @@ describe("harvestVimeoCaptions — an answer in hand wins over the budget (fix r
     expect(harness.kills).toEqual(["SIGKILL"]);
     expect(warnings().some((w) => w.includes("SIGKILL") && w.includes("4242"))).toBe(true);
   }, 8_000);
+
+  test("(e) a browser.close that never returns, no process(): SIGKILL through the private toImpl handle", async () => {
+    await capture();
+    const harness = fakeHarness({ ...ONE_TRACK, browserCloseHangs: true, privateProcess: true });
+    const outcome = await settledWithin(harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 1_000 }), 5_000);
+    expect((outcome as { tracks: VimeoCaptionTrack[] }).tracks.map((t) => t.lang)).toEqual(["en"]);
+    expect(harness.kills).toEqual(["SIGKILL"]);
+    expect(warnings().some((w) => w.includes("SIGKILL") && w.includes("5151"))).toBe(true);
+    expect(warnings().some((w) => w.includes("may have leaked"))).toBe(false);
+  }, 8_000);
+
+  test("browserProcessOf: public process() first, a throwing step falls through, a throwing private path answers undefined", () => {
+    const kill = () => true;
+    const both = { process: () => ({ pid: 1, kill }), _connection: { toImpl: () => ({ options: { browserProcess: { process: { pid: 2, kill } } } }) } };
+    expect(browserProcessOf(both as never)?.pid).toBe(1);
+    const pubThrows = { process: () => { throw new Error("x"); }, _connection: both._connection };
+    expect(browserProcessOf(pubThrows as never)?.pid).toBe(2);
+    const implThrows = { _connection: { toImpl: () => { throw new Error("gone"); } } };
+    expect(browserProcessOf(implThrows as never)).toBeUndefined();
+    const noKill = { _connection: { toImpl: () => ({ options: { browserProcess: { process: { pid: 3 } } } }) } };
+    expect(browserProcessOf(noKill as never)).toBeUndefined();
+    expect(browserProcessOf({} as never)).toBeUndefined();
+  });
 
   test("(e) a browser.close that never returns and no process handle: a leak warning", async () => {
     await capture();

@@ -232,9 +232,8 @@ function renderInline(text: string): string {
   // Inline code FIRST — park it before the component scan so a complete
   // component tag inside backticks stays literal code instead of being
   // interpreted (the parked sentinel carries no `<`, shielding it from the scan).
-  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
-  );
+  // Spans pair by the shared exact-N rule (`renderCodeSpans`).
+  let result = renderCodeSpans(text, (s) => s, (code) => ph.add("INLINE", `<code>${escapeHtml(code)}</code>`));
 
   // Inline components (Verdict, Pill) on the code-shielded text: substitute each
   // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly

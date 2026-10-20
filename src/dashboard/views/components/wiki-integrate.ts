@@ -385,34 +385,78 @@ export interface ClaimLineScan {
  * to the end of the document, but here that is the runaway-masking failure: one
  * stray opener silently deletes every claim after it from the parse. A real
  * fact-check answer's fences close, so a dangling opener is far more likely prose —
- * it is retired to a literal line and the walk is re-run. Each pass retires exactly
- * one opener, so the loop terminates.
+ * it is retired to a literal line and the walk is re-run. An opener whose fence
+ * would swallow the NEXT claim's heading is retired the same way
+ * ({@link endsFenceAsNextClaim}): otherwise it pairs with a later claim's
+ * well-formed fence and masks every heading in between. Each pass retires
+ * exactly one opener, so the loop terminates.
  */
 export function scanClaimLines(answer: string): ClaimLineScan {
   const lines = (answer || "").split("\n");
+  // Column-0 claim headings by shape, for the next-claim terminator.
+  const shape = lines.map((l) => l.match(CLAIM_HEADING_RE));
   const literalOpeners = new Set<number>();
-  let walk = walkClaimLines(lines, literalOpeners);
-  while (walk.openAtEof !== -1) {
-    literalOpeners.add(walk.openAtEof);
-    walk = walkClaimLines(lines, literalOpeners);
+  let walk = walkClaimLines(lines, shape, literalOpeners);
+  while (walk.retire !== -1) {
+    literalOpeners.add(walk.retire);
+    walk = walkClaimLines(lines, shape, literalOpeners);
   }
   return { lines, claimMatch: walk.claimMatch, blockEnd: walk.blockEnd };
 }
 
+/**
+ * Does the column-0 claim heading at `at` end a fence opened inside claim
+ * `open`'s block, rather than sit inside it as a quote?
+ *
+ * Claim headings are a fixed prompt contract numbered `n/m` in order, so a fenced
+ * line that is the NEXT claim of the same run (`n + 1` of the same `m`), and
+ * whose index no later column-0 heading repeats, is that claim's real heading
+ * (arch review 2026-10, finding 55). A quoted heading stays code: one from
+ * another run (a different `m`, or not the next index), one in the lede (no
+ * claim open), or one whose real heading still follows (the quote-then-real
+ * shape a verify block writes when it restates what it was asked).
+ *
+ * This is the ONE deliberate difference from the reader's fence grammar
+ * (`extractFences`, {@link fencedLineMask}): those render arbitrary markdown and
+ * know nothing of the claim contract.
+ */
+function endsFenceAsNextClaim(
+  shape: readonly (RegExpMatchArray | null)[],
+  at: number,
+  open: RegExpMatchArray | null,
+): boolean {
+  const m = shape[at];
+  if (!m || !open) return false;
+  const n = Number(m[2]);
+  if (n !== Number(open[2]) + 1 || m[3] !== open[3]) return false;
+  for (let j = at + 1; j < shape.length; j++) {
+    if (shape[j] && Number(shape[j]![2]) === n) return false;
+  }
+  return true;
+}
+
 /** One fence-tracking pass. `literalOpeners` names line indexes that must NOT be
- *  treated as openers (the unclosed-fence fallback's retirement list);
- *  `openAtEof` reports the line index of a fence still open at EOF, else -1. */
+ *  treated as openers (the retirement list); `retire` names the opener the next
+ *  pass must retire — a fence still open at EOF, or one a next-claim heading
+ *  ended ({@link endsFenceAsNextClaim}) — else -1. */
 function walkClaimLines(
   lines: string[],
+  shape: readonly (RegExpMatchArray | null)[],
   literalOpeners: ReadonlySet<number>,
-): { claimMatch: (RegExpMatchArray | null)[]; blockEnd: boolean[]; openAtEof: number } {
+): { claimMatch: (RegExpMatchArray | null)[]; blockEnd: boolean[]; retire: number } {
   const claimMatch: (RegExpMatchArray | null)[] = [];
   const blockEnd: boolean[] = [];
   let fence: OpenFence | null = null;
   let fenceLine = -1;
+  // The claim whose block the walk is in, and the one the open fence began in.
+  let claim: RegExpMatchArray | null = null;
+  let fenceClaim: RegExpMatchArray | null = null;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]!;
     if (fence) {
+      if (endsFenceAsNextClaim(shape, i, fenceClaim)) {
+        return { claimMatch, blockEnd, retire: fenceLine };
+      }
       if (isFenceCloser(raw, fence)) {
         fence = null;
         fenceLine = -1;
@@ -425,15 +469,20 @@ function walkClaimLines(
     if (opener) {
       fence = opener;
       fenceLine = i;
+      fenceClaim = claim;
       claimMatch.push(null);
       blockEnd.push(false);
       continue;
     }
     const line = raw.trim();
-    claimMatch.push(line.match(CLAIM_HEADING_RE));
-    blockEnd.push(CLAIM_BLOCK_END_RE.test(line));
+    const m = line.match(CLAIM_HEADING_RE);
+    const end = CLAIM_BLOCK_END_RE.test(line);
+    claimMatch.push(m);
+    blockEnd.push(end);
+    if (m) claim = m;
+    else if (end) claim = null;
   }
-  return { claimMatch, blockEnd, openAtEof: fence ? fenceLine : -1 };
+  return { claimMatch, blockEnd, retire: fence ? fenceLine : -1 };
 }
 
 /** One claim anchor derived SERVER-SIDE from the persisted fact-check answer. */

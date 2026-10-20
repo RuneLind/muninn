@@ -21,6 +21,7 @@
 
 import { test, expect, describe, beforeAll } from "bun:test";
 import { renderSummariesPage } from "./summaries-page.ts";
+import { themeTokenStyles } from "./shared-styles.ts";
 import { DOC_PANEL_SHARE_BTN_ID, DOC_PANEL_DELETE_BTN_ID, DOC_PANEL_EXPORT_LINK_ID } from "./components/doc-panel.ts";
 import { SHARE_DIALOG_ID } from "./components/wiki-share-dialog.ts";
 import { VIMEO_MAX_DURATION_SEC } from "../../vimeo/limits.ts";
@@ -181,3 +182,61 @@ test("mapProseLines and the reader's imports are declared once on the page", () 
     expect(decls.length, name).toBe(1);
   }
 });
+
+/**
+ * The `.duplicate-banner` fill and the `.delete-notice` link, resolved through
+ * each palette the page ships. Both banners share the fill, so the link and the
+ * body text are measured on it in both themes. Before the fix the fill fell
+ * back to a fixed #2a2f3a (`--accent-dim` was defined nowhere) and the light
+ * link measured 2.65:1.
+ */
+describe("banner contrast in both themes", () => {
+  const block = (re: RegExp) => re.exec(themeTokenStyles())?.[1] ?? "";
+  const palettes: Record<string, Map<string, string>> = {
+    dark: tokenMap(block(/:root \{([^}]*)\}/)),
+    light: tokenMap(block(/html\[data-theme="light"\] \{([^}]*)\}/)),
+  };
+  const rule = (selector: string, prop: string) => {
+    const body = new RegExp(`${selector.replace(/[.[\]]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(html)?.[1] ?? "";
+    return new RegExp(`(?:^|[;\\s])${prop}:\\s*([^;]+);`).exec(body)?.[1]?.trim() ?? "";
+  };
+  for (const [theme, tokens] of Object.entries(palettes)) {
+    test(`${theme}: the banner's link and text reach 4.5:1 on its fill`, () => {
+      expect(tokens.size).toBeGreaterThan(10);
+      const fill = resolveColor(rule(".duplicate-banner", "background"), tokens);
+      const link = resolveColor(rule(".delete-notice a", "color"), tokens);
+      const text = resolveColor(rule(".duplicate-banner", "color"), tokens);
+      expect(contrast(link, fill)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(text, fill)).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+});
+
+function tokenMap(css: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of css.matchAll(/(--[\w-]+):\s*([^;]+);/g)) out.set(m[1] ?? "", (m[2] ?? "").trim());
+  return out;
+}
+
+/** `var(--x[, fallback])` resolved against a palette, as a browser would:
+ *  the token when defined, else the fallback. */
+function resolveColor(value: string, tokens: Map<string, string>): string {
+  const m = /^var\((--[\w-]+)(?:,\s*([^)]+))?\)$/.exec(value);
+  if (!m) return value;
+  const v = tokens.get(m[1] ?? "") ?? m[2]?.trim() ?? "";
+  return v.startsWith("var(") ? resolveColor(v, tokens) : v;
+}
+
+function contrast(a: string, b: string): number {
+  const lum = (hex: string) => {
+    const h = hex.replace("#", "");
+    const full = h.length === 3 ? [...h].map((c) => c + c).join("") : h;
+    expect(full).toMatch(/^[0-9a-f]{6}$/i);
+    const [r, g, bl] = [0, 2, 4]
+      .map((i) => parseInt(full.slice(i, i + 2), 16) / 255)
+      .map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (bl ?? 0);
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return ((hi ?? 0) + 0.05) / ((lo ?? 0) + 0.05);
+}

@@ -357,7 +357,13 @@ function mtimeOf(abs: string): number {
  * stamped, then renamed over the target. One temp name is enough: the lock
  * makes this the only run on the state dir.
  */
-function atomicWrite(abs: string, bytes: string | Uint8Array, atime: Date, stampMs: number): void {
+function atomicWrite(
+  abs: string,
+  bytes: string | Uint8Array,
+  atime: Date,
+  stampMs: number,
+  expected: { mtimeMs: number; size: number },
+): boolean {
   const tmp = join(TMP_DIR, "write.tmp");
   const mode = statSync(abs).mode & 0o777;
   const fd = openSync(tmp, "w", mode);
@@ -370,7 +376,15 @@ function atomicWrite(abs: string, bytes: string | Uint8Array, atime: Date, stamp
   chmodSync(tmp, mode);
   utimesSync(tmp, atime, stampMs / 1000);
   if (DEBUG_TEMP_PAUSE_MS > 0) Bun.sleepSync(DEBUG_TEMP_PAUSE_MS);
+  // A save that landed since executePlan's check would be replaced by stale bytes:
+  // re-check right before the rename, narrowing the window to stat→rename.
+  const now = existsSync(abs) ? statSync(abs) : null;
+  if (!now || now.size !== expected.size || mtimeOf(abs) !== expected.mtimeMs) {
+    rmSync(tmp, { force: true });
+    return false;
+  }
   renameSync(tmp, abs);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -660,9 +674,13 @@ async function executePlan(
           appendJournal([{ t: "done", run, path: p.path, status: "skipped", reason: "insert refused" }]);
           continue;
         }
-        atomicWrite(doc.abs, bytes, atime, p.stampMs);
-        changed.push(p.path);
-        event = { t: "done", run, path: p.path, status: doneStatus };
+        if (atomicWrite(doc.abs, bytes, atime, p.stampMs, { mtimeMs: doc.mtimeMs, size: doc.bytes.length })) {
+          changed.push(p.path);
+          event = { t: "done", run, path: p.path, status: doneStatus };
+        } else {
+          skipped.push(`${p.path} (changed since read)`);
+          event = { t: "done", run, path: p.path, status: "skipped", reason: "changed since read" };
+        }
       } else {
         utimesSync(doc.abs, atime, p.stampMs / 1000);
         restamped++;

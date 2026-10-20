@@ -262,7 +262,7 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
     const first = await runOneJudgeAttempt();
     if (first.ok) return first;
     if (first.error.message.startsWith("Judge timed out")) {
-      tracer.end("claude-cli-call", { status: "error", error: first.error.message });
+      tracer.end("claude-cli-call", { error: first.error.message }, "error");
       tracer.error(first.error);
       throw first.error;
     }
@@ -284,7 +284,7 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
       botName: "benchmarks",
       dir: debugDir,
     });
-    tracer.end("claude-cli-call", { status: "error", error: second.error.message });
+    tracer.end("claude-cli-call", { error: second.error.message }, "error");
     tracer.error(second.error);
     throw second.error;
   })();

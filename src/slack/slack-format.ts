@@ -329,9 +329,10 @@ function renderInline(text: string): string {
   // component tag inside backticks stays literal code (backticked) instead of
   // being interpreted. The parked sentinel carries no `<`, shielding the code
   // content from the scan below and from the trailing tag-strip.
-  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `\`${code}\``),
-  );
+  // Spans pair by the shared exact-N rule (`renderCodeSpans`). mrkdwn has no
+  // double-backtick span, so a backtick in the content becomes U+02CB, the
+  // look-alike `slackLiteral` uses, and the span stays one span.
+  let result = renderCodeSpans(text, (s) => s, (code) => ph.add("INLINE", `\`${code.replace(/`/g, "\u02CB")}\``));
 
   // Inline components (Verdict, Pill) on the code-shielded text: substitute each
   // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly

@@ -478,15 +478,42 @@ interface KillableProcess {
 }
 
 /**
+ * The OS process behind a `Browser`, or undefined. A public `process()` wins.
+ * A Browser from `chromium.launch()` has none (playwright-core 1.58 puts it on
+ * `BrowserServer` only), so the fallback is playwright-core's PRIVATE in-process
+ * path: `browser._connection.toImpl(browser)` is the server-side Browser, whose
+ * `options.browserProcess.process` is the launched ChildProcess (measured under
+ * Bun 2026-10-20: a pid and a `kill`). Feature-detected: a missing or throwing
+ * step answers undefined, and the caller logs the leak warning as before.
+ */
+export function browserProcessOf(browser: PwBrowser): KillableProcess | undefined {
+  const b = browser as unknown as {
+    process?: () => KillableProcess | null | undefined;
+    _connection?: { toImpl?: (x: unknown) => { options?: { browserProcess?: { process?: unknown } } } | undefined };
+  };
+  try {
+    const pub = b.process?.();
+    if (pub) return pub;
+  } catch {
+    // fall through to the private path
+  }
+  try {
+    const proc = b._connection?.toImpl?.(browser)?.options?.browserProcess?.process as KillableProcess | undefined;
+    return proc && typeof proc.kill === "function" ? proc : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Close a context or the browser within {@link VIMEO_HARVEST_TEARDOWN_MS} of
  * its own, never the budget's: teardown runs after the budget may be spent.
  * A rejected close is logged at warn and swallowed — the harvest's answer
  * stands. A close that does not return is logged at warn and abandoned; for
- * the browser, the process is then SIGKILLed when the `Browser` exposes one
- * (`process()`), since an abandoned Chromium would outlive the queue slot and
- * the next harvest would launch a second one. A Browser from
- * `chromium.launch()` does NOT expose it (playwright-core 1.58), so in
- * production the abandon path logs that a Chromium may have leaked.
+ * the browser, the process is then SIGKILLed through {@link browserProcessOf},
+ * since an abandoned Chromium would outlive the queue slot and the next harvest
+ * would launch a second one. With no handle it logs that a Chromium may have
+ * leaked.
  */
 async function closeWithin(
   what: "browser" | "context",
@@ -515,12 +542,7 @@ async function closeWithin(
   if (outcome.state === "closed") return;
   log.warn("Vimeo harvest: {what}.close() did not return within {ms}ms; abandoning it", { what, ms: VIMEO_HARVEST_TEARDOWN_MS });
   if (what !== "browser" || !browser) return;
-  let proc: KillableProcess | null | undefined;
-  try {
-    proc = (browser as unknown as { process?: () => KillableProcess | null | undefined }).process?.();
-  } catch {
-    proc = undefined;
-  }
+  const proc = browserProcessOf(browser);
   if (!proc) {
     log.warn("Vimeo harvest: no process handle for the abandoned browser; a Chromium process may have leaked until muninn exits");
     return;

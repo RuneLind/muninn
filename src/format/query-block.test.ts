@@ -7,6 +7,7 @@ import {
   checkPageFileRef,
   parseQueryAttrs,
   pageFileRefs,
+  renderCodeSpans,
   splitQuerySql,
   type PageFileResult,
 } from "./query-block.ts";
@@ -448,5 +449,35 @@ describe("Query on the text surfaces (no file read)", () => {
     expect(formatTelegramHtml(md)).toBe("Svar: Tre.\n\nbody");
     expect(formatSlackMrkdwn(md).startsWith("Svar: Tre.\n")).toBe(true);
     expect(formatEmailHtml(md)).not.toContain("font-weight:600");
+  });
+});
+
+describe("inline code spans pair by the shared exact-N rule on every surface", () => {
+  const md = "Use ``a ` b`` here";
+
+  test("the web renderer is the reference", () => {
+    expect(formatWebHtml(md)).toBe("Use <code>a ` b</code> here");
+  });
+
+  test("renderCodeSpans hands the span content to `code`", () => {
+    expect(renderCodeSpans(md, (s) => s.toUpperCase(), (c) => `[${c}]`)).toBe("USE [a ` b] HERE");
+    expect(renderCodeSpans("a `x` b `` y `` c", (s) => s, (c) => `[${c}]`)).toBe("a [x] b [y] c");
+    expect(renderCodeSpans("one ` stray", (s) => s, (c) => `[${c}]`)).toBe("one ` stray");
+  });
+
+  test("Telegram and email render one code span, as the web does", () => {
+    expect(formatTelegramHtml(md)).toBe("Use <code>a ` b</code> here");
+    expect(formatEmailHtml(md).replace(/ style="[^"]*"/g, "")).toBe("<p>Use <code>a ` b</code> here</p>");
+  });
+
+  test("Slack keeps one span and writes the inner backtick as U+02CB", () => {
+    expect(formatSlackMrkdwn(md)).toBe("Use `a \u02CB b` here");
+    expect(formatSlackMrkdwn("plain `x_y*` span")).toBe("plain `x_y*` span");
+  });
+
+  test("a Query question renders its double-backtick span as one span", () => {
+    const q = '<Query id="Q-1" question="Hvorfor ``a ` b``?">\nbody\n</Query>';
+    expect(formatTelegramHtml(q)).toContain("<code>a ` b</code>");
+    expect(formatEmailHtml(q)).toContain(">a ` b</code>");
   });
 });
