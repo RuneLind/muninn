@@ -90,7 +90,8 @@ import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../for
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
-import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
+import { ITEM_DATE_ATTR, itemDate, listChildrenText } from "../format/item-dates.ts";
+import type { TimelineLanesRenderer } from "../format/timeline-lanes.ts";
 import {
   CB_LINE_CLASS,
   DL_DECISION_CLASS,
@@ -287,6 +288,9 @@ export function formatWebHtml(
      *  passes `caseDotsViewHtml`), passed in like `chartView`. Absent ⇒ the
      *  board's rows alone. */
     caseDotsView?: CaseDotsViewRenderer;
+    /** With `views` and `itemDates`: the timeline lanes after the decision
+     *  views (`renderWikiHtml` passes `timelineLanesHtml`). Absent ⇒ none. */
+    timelineLanes?: TimelineLanesRenderer;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -359,7 +363,8 @@ export function formatWebHtml(
       const linkTexts = opts?.wikiLinkTexts;
       const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
       const data = pageDecisionData(analysed === text ? blocks : parseBlocks(analysed), { proposed: opts?.proposedPlan === true });
-      const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis);
+      const lanes = currentItemDates && opts?.timelineLanes ? opts.timelineLanes(blocks, currentItemDates, currentLanguage, shownLinkText) : "";
+      const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis) + lanes;
       rendered = view
         ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
             .filter((part) => part !== "")
@@ -416,17 +421,9 @@ export interface ItemDateDays {
 /** `opts.itemDates` for the call in progress (reader only). */
 let currentItemDates: ItemDateDays | undefined;
 
-/** The source text of what sits under a list item — nested items and
- *  paragraphs, not code — for its date. */
-function listChildrenText(children: readonly ListChild[] | undefined): string {
-  if (!children) return "";
-  return children
-    .map((c) => {
-      if (c.type === "paragraph") return c.text;
-      if (c.type === "code_block") return "";
-      return c.items.map((t, k) => `${t}\n${listChildrenText(c.nested?.[k])}`).join("\n");
-    })
-    .join("\n");
+/** `text` with each wikilink sentinel read as the text its link shows. */
+function shownLinkText(text: string): string {
+  return text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => ` ${currentLinkTexts?.[Number(i)] ?? ""} `);
 }
 
 /** ` data-item-date="YYYY-MM-DD"` for the latest date in `text` not after the
@@ -434,8 +431,7 @@ function listChildrenText(children: readonly ListChild[] | undefined): string {
  *  wikilink is read as the text it shows, so a label's date counts. */
 function itemDateAttr(text: string | null | undefined): string {
   if (!currentItemDates || !text) return "";
-  const shown = text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => ` ${currentLinkTexts?.[Number(i)] ?? ""} `);
-  const d = itemDate(shown, currentItemDates.ref, currentItemDates.today);
+  const d = itemDate(shownLinkText(text), currentItemDates.ref, currentItemDates.today);
   return d ? ` ${ITEM_DATE_ATTR}="${d}"` : "";
 }
 

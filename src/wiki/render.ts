@@ -28,6 +28,7 @@ import { escapeHtml } from "../format/markdown-core.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
 import { ruleTreeViewHtml } from "../format/rule-tree-view.ts";
 import { caseDotsViewHtml } from "../format/case-dots-view.ts";
+import { timelineLanesHtml } from "../format/timeline-lanes.ts";
 import { glossaryTerms, readGlossaries, type GlossaryBlockRead } from "../format/glossary.ts";
 import { markGlossaryTerms } from "../format/glossary-view.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
@@ -132,7 +133,7 @@ export function renderWikiHtml(
       wikiLinkTexts: linkTexts,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
-      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml } : {}),
+      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml } : {}),
     }),
     literal,
   );

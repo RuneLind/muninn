@@ -1457,3 +1457,35 @@ export function caseDotsCss(scope: string): string {
     }
   `;
 }
+
+/** The reader's timeline lanes (`timeline-lanes.ts`), inside the decision
+ *  views' `.dc-view` box: a label column and one track per lane over a shared
+ *  axis. Each lane's mark has its own shape as well as its colour. */
+export function timelineLanesCss(scope: string): string {
+  const s = `${scope} .tl-lanes`;
+  return `
+    ${s} { --tll-label: 8rem; }
+    ${s} .tll-lane { display: grid; grid-template-columns: var(--tll-label) minmax(0, 1fr); align-items: center; column-gap: 0.75rem; min-block-size: 1.6rem; }
+    ${s} .tll-label { font-size: 0.8rem; color: var(--text-secondary); overflow-wrap: anywhere; }
+    ${s} .tll-track { position: relative; list-style: none; margin: 0; margin-inline: 0.5rem; padding: 0; block-size: 1.4rem; border-block-end: 1px dashed var(--border-secondary); }
+    ${s} .tll-mark { position: absolute; inset-block-start: 50%; display: inline-flex; align-items: center; gap: 0.15rem; transform: translate(-50%, -50%); margin: 0; }
+    ${s} .tll-dot { display: inline-block; inline-size: 0.7rem; block-size: 0.7rem; border: 1px solid var(--bg-panel); }
+    ${s} .tll-decisions .tll-dot { border-radius: 50%; background: var(--accent-light); }
+    ${s} .tll-queries .tll-dot { border-radius: 1px; background: var(--tone-info); }
+    ${s} .tll-timeline .tll-dot { transform: rotate(45deg); background: var(--tone-warn); }
+    ${s} .tll-n { font-size: 0.7rem; color: var(--text-secondary); }
+    ${s} .tll-say { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    ${s} .tll-axis { display: flex; justify-content: space-between; margin-inline-start: calc(var(--tll-label) + 0.75rem); font-size: 0.75rem; color: var(--text-soft); margin-block-start: 0.2rem; }
+    @container dc-view (max-width: 28rem) {
+      ${s} .tll-lane { grid-template-columns: minmax(0, 1fr); }
+      ${s} .tll-axis { margin-inline-start: 0; }
+    }
+    @media print {
+      ${s} .tll-dot { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    }
+    @media (forced-colors: active) {
+      ${s} .tll-dot { forced-color-adjust: none; background: CanvasText; border-color: Canvas; }
+      ${s} .tll-track { border-block-end-color: CanvasText; }
+    }
+  `;
+}
