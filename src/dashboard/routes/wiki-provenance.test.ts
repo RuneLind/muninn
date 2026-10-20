@@ -342,7 +342,7 @@ describe("the listing and the page route", () => {
       }),
     );
     const req = new AbortController();
-    const pending = live.request("/api/wiki/page/provenance?wiki=mimir&relPath=plan.md", { signal: req.signal });
+    const pending = Promise.resolve(live.request("/api/wiki/page/provenance?wiki=mimir&relPath=plan.md", { signal: req.signal }));
     await new Promise((r) => setTimeout(r, 30));
     req.abort();
     await Promise.race([pending.catch(() => null), new Promise((r) => setTimeout(r, 2_000))]);
