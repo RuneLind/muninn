@@ -1561,9 +1561,9 @@ construction and a bare day would claim a worked date an uncovered page never
 got. A STALE ledger says so instead: when the page's update is newer than the
 ledger's answer (`workedCoverage.asOfMs`) minus `WORKED_INGEST_SLACK_MS`
 (`ledgerReadDayFor`, `wiki-filter.ts`), "no session write recorded" becomes
-`ledger last read <day>` on the row's hover, an Activity fallback row and the
-article header's `no session` slot, since that answer could not have seen the
-edit — the memo is held through a claude-usage outage. The suffix goes on the `title=` ONLY: `formatRailAge` reads the label as a
+`ledger last read <day>` on the row's hover and an Activity fallback row's, and
+the article header's `no session` slot becomes `ledger read <day>`, since that
+answer could not have seen the edit — the memo is held through a claude-usage outage. The suffix goes on the `title=` ONLY: `formatRailAge` reads the label as a
 BARE day and would fall back to the stamp's local day for a decorated one,
 shifting a frontmatter date west of UTC.
 

@@ -2518,9 +2518,9 @@ function provenanceUrl(relPath: string): string {
  *  flight. */
 let provLoadSeq = 0;
 
-/** The provenance load in flight. Leaving the page aborts it, which aborts
- *  the server's huginn and claude-usage fan-out with it (the route passes the
- *  request signal into `pageProvenance`). */
+/** The provenance load in flight. Leaving the page aborts it, which cancels
+ *  the server's claude-usage fetches with it (the route passes the request
+ *  signal into `pageProvenance`; its huginn reads are raced, not cancelled). */
 let provLoadAbort: AbortController | null = null;
 
 function abortProvLoad(): void {
