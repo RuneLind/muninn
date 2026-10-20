@@ -310,6 +310,8 @@ export function formatWebHtml(
   const prevRuleTreeView = currentRuleTreeView;
   const prevCaseKorts = currentCaseKorts;
   const prevCaseDotsView = currentCaseDotsView;
+  const prevCaseDotsSeen = currentCaseDotsSeen;
+  currentCaseDotsSeen = new Map();
   currentViews = opts?.views === true;
   currentCaseDotsView = currentViews && text.includes("<CaseBoard") ? (opts?.caseDotsView ?? null) : null;
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
@@ -397,6 +399,7 @@ export function formatWebHtml(
     currentRuleTreeView = prevRuleTreeView;
     currentCaseKorts = prevCaseKorts;
     currentCaseDotsView = prevCaseDotsView;
+    currentCaseDotsSeen = prevCaseDotsSeen;
   }
 }
 
@@ -453,6 +456,8 @@ let currentRuleTreeView: RuleTreeViewRenderer | null = null;
 
 /** `opts.caseDotsView` for the call in progress; null ⇒ a `<CaseBoard>` is its rows. */
 let currentCaseDotsView: CaseDotsViewRenderer | null = null;
+/** Board file name → dots views drawn under it so far, so two boards get distinct names. */
+let currentCaseDotsSeen = new Map<string, number>();
 
 const NO_CASE_KORTS: ReadonlyMap<string, string> = new Map();
 /** The page's CaseBoard case ids → their `kort:`, while a rule tree page renders. */
@@ -753,7 +758,13 @@ function caseBoardHtml(src: string, labelsAttr: string | undefined, view: CaseBo
         `${g.cases.map((c) => caseRowHtml(c, labels)).join("")}</div>`,
     )
     .join("");
-  const dots = view === "dots" && currentCaseDotsView ? currentCaseDotsView(board.cases, labels) : "";
+  let dots = "";
+  if (view === "dots" && currentCaseDotsView) {
+    const file = pageFileName(src);
+    const nth = (currentCaseDotsSeen.get(file) ?? 0) + 1;
+    currentCaseDotsSeen.set(file, nth);
+    dots = currentCaseDotsView(board.cases, labels, { language: currentLanguage, file, nth });
+  }
   return section(`<p class="cb-strip">${strip}</p>${notes}${dots}${groups}`);
 }
 

@@ -62,9 +62,26 @@ describe("the squares", () => {
   });
 
   test("buttons in a named group, one tab stop, a polite live line, reader-only", () => {
-    expect(html).toContain(`<div class="cb-dots" ${READER_ONLY_ATTR} role="group" aria-label="Cases by status">`);
+    expect(html).toContain(`<div class="cb-dots" ${READER_ONLY_ATTR} role="group" aria-label="Cases by status: cases.yaml">`);
     expect([...html.matchAll(/class="cb-dot [^"]*" tabindex="(-?\d)" aria-pressed="false"/g)].map((m) => m[1])).toEqual(["0", "-1", "-1", "-1", "-1"]);
     expect(html).toContain('<p class="cb-dots-say" aria-live="polite"></p>');
+  });
+
+  test("the group is named in the wiki's language, and two boards on a page by their file, then an ordinal", () => {
+    const names = (h: string) => [...h.matchAll(/class="cb-dots" [^>]*aria-label="([^"]*)"/g)].map((m) => m[1]);
+    const two = new Map<string, PageFileResult>([...files(), ["more.yaml", { ok: true, text: YAML }]]);
+    const page = `${DOTS}\n\n<CaseBoard src="more.yaml" view="dots" />\n\n${DOTS}\n`;
+    expect(names(renderWikiHtml(DOTS, () => undefined, { views: true, files: files(), language: "no" }))).toEqual(["Saker etter status: cases.yaml"]);
+    expect(names(renderWikiHtml(page, () => undefined, { views: true, files: two }))).toEqual([
+      "Cases by status: cases.yaml",
+      "Cases by status: more.yaml",
+      "Cases by status: cases.yaml (2)",
+    ]);
+    expect(names(renderWikiHtml(page, () => undefined, { views: true, files: two, language: "no" }))).toEqual([
+      "Saker etter status: cases.yaml",
+      "Saker etter status: more.yaml",
+      "Saker etter status: cases.yaml (2)",
+    ]);
   });
 
   test("each square and each group label carries its status glyph, not colour alone", () => {

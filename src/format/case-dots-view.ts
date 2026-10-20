@@ -8,7 +8,7 @@
  * `wiki-visuals.ts`.
  */
 
-import { caseKort, caseStatusLabel, groupCases, type BoardCase, type CaseLabels, type CaseStatus } from "./case-board.ts";
+import { caseKort, caseStatusLabel, groupCases, type BoardCase, type CaseDotsBoard, type CaseLabels, type CaseStatus } from "./case-board.ts";
 import { escapeHtml } from "./markdown-core.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
 import { visibleText } from "./report-top.ts";
@@ -16,7 +16,10 @@ import { visibleText } from "./report-top.ts";
 /** A glyph per status, so a square never rests on its colour alone. */
 const GLYPH: Record<CaseStatus | "unknown", string> = { hold: "‖", wait: "…", wrong: "✕", none: "–", ok: "✓", unknown: "?" };
 
-export function caseDotsViewHtml(cases: readonly BoardCase[], labels: CaseLabels): string {
+/** The group's name, in the wiki's language; the file and an ordinal tell two boards apart. */
+const GROUP_NAME: Record<CaseDotsBoard["language"], string> = { en: "Cases by status", no: "Saker etter status" };
+
+export function caseDotsViewHtml(cases: readonly BoardCase[], labels: CaseLabels, board: CaseDotsBoard): string {
   if (cases.length === 0) return "";
   let first = true;
   const groups = groupCases([...cases])
@@ -42,5 +45,9 @@ export function caseDotsViewHtml(cases: readonly BoardCase[], labels: CaseLabels
       );
     })
     .join("");
-  return `<div class="cb-dots" ${READER_ONLY_ATTR} role="group" aria-label="Cases by status">${groups}<p class="cb-dots-say" aria-live="polite"></p></div>`;
+  return `<div class="cb-dots" ${READER_ONLY_ATTR} role="group" aria-label="${escapeHtml(groupName(board))}">${groups}<p class="cb-dots-say" aria-live="polite"></p></div>`;
+}
+
+function groupName(board: CaseDotsBoard): string {
+  return `${GROUP_NAME[board.language]}: ${board.file}${board.nth > 1 ? ` (${board.nth})` : ""}`;
 }
