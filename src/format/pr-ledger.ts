@@ -336,16 +336,16 @@ export function gateRowPr(cell: string): GatePr | null {
   return slate === null && link === null ? null : { slate, link };
 }
 
-/** The ledger state of a gate row's PR: the row with the gate's slate, else
- *  the slate-less row whose link is the gate's slate (its PR is its link),
- *  else the row whose link is the gate's link; no match, none. */
+/** The ledger state of a gate row's PR, first match wins: (1) the row whose
+ *  slate is the gate's slate; (2) the row whose link is the gate's own link;
+ *  (3) a slate-less row whose link is the gate's slate (its PR is its link);
+ *  (4) none. */
 export function gateRowState(pr: GatePr, rows: readonly LedgerRow[]): PrState | undefined {
-  if (pr.slate !== null) {
-    const row = rows.find((r) => r.slate === pr.slate) ?? rows.find((r) => r.slate === null && r.link === pr.slate);
-    if (row) return row.state;
-  }
-  if (pr.link === null) return undefined;
-  return rows.find((r) => r.link === pr.link)?.state;
+  const row =
+    (pr.slate !== null ? rows.find((r) => r.slate === pr.slate) : undefined) ??
+    (pr.link !== null ? rows.find((r) => r.link === pr.link) : undefined) ??
+    (pr.slate !== null ? rows.find((r) => r.slate === null && r.link === pr.slate) : undefined);
+  return row?.state;
 }
 
 /** The row's PR link: the first cell, the PR, state and Landed cells first,
