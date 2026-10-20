@@ -9,7 +9,7 @@ import { renderWikiHtml } from "../wiki/render.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import type { PageFileResult } from "./query-block.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
-import { RULE_TREE_CHROME_CLASSES } from "./rule-tree-view.ts";
+import { RULE_TREE_CHROME_CLASSES, ruleTreeViewHtml } from "./rule-tree-view.ts";
 
 const reader = (md: string, opts: { files?: Record<string, PageFileResult>; language?: "en" | "no" } = {}) =>
   renderWikiHtml(md, () => undefined, {
@@ -87,6 +87,12 @@ describe("the reader's tree", () => {
     expect(html.indexOf("Ask at the desk.")).toBeLessThan(html.indexOf("</section>"));
   });
 
+  test("the cases follow the LAST dash; an earlier one stays in the leaf text", () => {
+    const html = reader(tree("- → Renew — online only — LIB-7"));
+    expect(html).toContain('data-rt-cases="[&quot;LIB-7&quot;]"');
+    expect(html).toContain("→ Renew — online only — <span class=\"rt-case\">LIB-7</span>");
+  });
+
   test("a body with no list renders as written", () => {
     const html = reader(tree("Nothing here."));
     expect(html).not.toContain('class="rt');
@@ -124,6 +130,14 @@ describe("CaseBoard kort", () => {
     expect(reader(tree("- → Renew — loan-7"))).not.toContain("data-rt-cases");
   });
 
+  test("with two boards holding one id, the first board's kort wins", () => {
+    const second = ["- id: LIB-101", "  status: ok", "  kort: From the second board"].join("\n");
+    const two = ['<CaseBoard src="cases.yaml" />', "", '<CaseBoard src="more.yaml" />', "", tree("- → Return — LIB-101")].join("\n");
+    const html = reader(two, { files: { ...files, "more.yaml": { ok: true, text: second } as const } });
+    expect(html).toContain("LIB-101 · Two <strong>loans</strong> open");
+    expect(html.slice(html.indexOf("<section class=\"rt\"")).match(/data-rt-kort="LIB-101"[^>]*>[^<]*/)?.[0]).toEndWith("LIB-101 · Two ");
+  });
+
   test("a board whose file does not load joins nothing", () => {
     const html = reader(page("- → Return — LIB-101"), { files: {} });
     expect(html).toContain('data-rt-cases="[&quot;LIB-101&quot;]"');
@@ -142,6 +156,7 @@ describe("off the reader a <RuleTree> is its list", () => {
     ["slack", formatSlackMrkdwn],
     ["email", formatEmailHtml],
   ];
+  surfaces.push(["a tree view handed in without views", (s) => formatWebHtml(s, { ruleTreeView: ruleTreeViewHtml })]);
   for (const [name, fmt] of surfaces) {
     test(`${name} prints the list as written`, () => {
       const out = fmt(treed);
