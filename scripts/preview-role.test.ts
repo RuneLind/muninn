@@ -1,8 +1,20 @@
-import { describe, test, expect } from "bun:test";
+import { afterAll, describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { previewRoleEnv, previewRootProblem, readRoleKeys, type PreviewRoleOptions } from "./preview-role.ts";
+import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
+
+/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
+const TEMP_DIRS: string[] = [];
+function tempDirSync(prefix: string): string {
+  const dir = makeTempDir(prefix);
+  TEMP_DIRS.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
+});
 
 const base: PreviewRoleOptions = {
   role: "fag",
@@ -39,7 +51,7 @@ describe("previewRoleEnv", () => {
 
 describe("readRoleKeys", () => {
   test("a .wiki-reader.json that is not JSON throws, naming the file", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "preview-role-test-"));
+    const root = tempDirSync(path.join(tmpdir(), "preview-role-test-"));
     writeFileSync(path.join(root, ".wiki-reader.json"), "{ roleKeys: [", "utf8");
     expect(() => readRoleKeys(root)).toThrow(/\.wiki-reader\.json is not valid JSON/);
   });

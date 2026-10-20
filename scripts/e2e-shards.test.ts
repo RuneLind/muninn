@@ -1,8 +1,20 @@
-import { describe, test, expect } from "bun:test";
+import { afterAll, describe, test, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { check, flatten, parseExpectedSkips, partition, pinTitle, specFiles, timingsFromReport, untimedSpecWarnings, type JsonReport } from "./e2e-shards.ts";
+import { mkdtempSync as makeTempDir, rmSync as removeTempDir } from "node:fs";
+
+/** Temp dirs this file creates; removed after the file (src/test/temp-dir-leaks.test.ts). */
+const TEMP_DIRS: string[] = [];
+function tempDirSync(prefix: string): string {
+  const dir = makeTempDir(prefix);
+  TEMP_DIRS.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of TEMP_DIRS.splice(0)) removeTempDir(dir, { recursive: true, force: true });
+});
 
 describe("partition", () => {
   test("every file lands in exactly one shard", () => {
@@ -354,7 +366,7 @@ test("parseExpectedSkips drops blank lines and comments", () => {
 });
 
 test("specFiles finds specs in subdirectories too, as testMatch **/*.spec.ts does", async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "e2e-shards-"));
+  const dir = tempDirSync(path.join(tmpdir(), "e2e-shards-"));
   mkdirSync(path.join(dir, "sub"));
   for (const f of ["a.spec.ts", "sub/b.spec.ts", "c.test.ts"]) writeFileSync(path.join(dir, f), "");
   expect(await specFiles(dir)).toEqual(["a.spec.ts", "sub/b.spec.ts"]);
