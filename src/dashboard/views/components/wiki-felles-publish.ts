@@ -82,10 +82,26 @@ function fellesRemoveOutcomeLine(exitCode: number, dryRun: boolean): { text: str
     case 2:
       return { text: "Usage or environment error — nothing was removed. See the output.", ok: false };
     case 3:
-      return { text: "Delete failed — the page may not be in the bucket, or gcloud needs a login. See the output.", ok: false };
+      return {
+        text: "Delete failed for at least one object — it may not be in the bucket, or gcloud needs a login. See the output.",
+        ok: false,
+      };
     default:
       return { text: `The script exited with code ${exitCode}.`, ok: false };
   }
+}
+
+const REMOVE_QUESTION = "Delete it from the bucket? The bucket keeps no copy; your local page stays.";
+
+/** The confirm row's text after a remove dry run: every object the confirm
+ *  deletes (the page and the data files only it reads), and the data files kept
+ *  because another local page reads them. `removes` is the route's answer. */
+export function fellesRemoveConfirmHtml(removes: readonly string[], keptShared: readonly string[]): string {
+  if (removes.length <= 1 && keptShared.length === 0) return REMOVE_QUESTION;
+  const list = (items: readonly string[]) => items.map((r) => `<code>${esc(r)}</code>`).join(", ");
+  let html = `Delete ${removes.length} objects from the bucket? The page and the data files only it reads: ${list(removes)}. The bucket keeps no copy; your local files stay.`;
+  if (keptShared.length > 0) html += ` Kept, since another page reads it: ${list(keptShared)}.`;
+  return html;
 }
 
 /** Escaped output with every `https://` address made a link (the script prints
@@ -142,7 +158,7 @@ export function fellesDialogHtml(relPath: string): string {
     `<button type="button" class="danger" data-felles="remove" title="Delete this page from the melosys-felles bucket">Remove…</button>` +
     `</div>` +
     `<div class="wiki-felles-confirm" hidden>` +
-    `<span>Delete it from the bucket? The bucket keeps no copy; your local page stays.</span>` +
+    `<span class="wiki-felles-confirm-text">${REMOVE_QUESTION}</span>` +
     `<button type="button" class="danger" data-felles="remove-confirm">Confirm remove</button>` +
     `<button type="button" data-felles="remove-cancel">Cancel</button>` +
     `</div>` +
@@ -278,6 +294,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
   const status = q<HTMLElement>(".wiki-felles-status");
   const out = q<HTMLElement>(".wiki-felles-out");
   const confirmRow = q<HTMLElement>(".wiki-felles-confirm");
+  const confirmText = q<HTMLElement>(".wiki-felles-confirm-text");
   // ✕ is disabled with the run buttons: closing mid-run would drop the result
   // and let a re-opened dialog start a second upload beside the first.
   const runButtons = [
@@ -316,13 +333,16 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
         body: JSON.stringify({ wiki: opts.wiki, relPath: opts.relPath, dryRun, allowIdent: ident.checked, action }),
       });
       const data = (await res.json().catch(() => null)) as
-        | { exitCode?: number; output?: string; error?: string }
+        | { exitCode?: number; output?: string; error?: string; removes?: string[]; keptShared?: string[] }
         | null;
       httpStatus = res.status;
       if (res.ok && data && typeof data.exitCode === "number") {
         const line = fellesOutcomeLine(data.exitCode, dryRun, action);
         setStatus(line.text, line.ok ? "ok" : "err");
-        if (action === "remove" && dryRun && data.exitCode === 0) confirmRow.hidden = false;
+        if (action === "remove" && dryRun && data.exitCode === 0) {
+          confirmText.innerHTML = fellesRemoveConfirmHtml(data.removes ?? [opts.relPath], data.keptShared ?? []);
+          confirmRow.hidden = false;
+        }
         if (data.output) {
           out.innerHTML = fellesOutputHtml(data.output);
           out.hidden = false;

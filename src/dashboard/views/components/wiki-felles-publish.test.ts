@@ -70,6 +70,20 @@ test("the dialog's remove confirmation starts hidden", () => {
   expect(html).toMatch(/<div class="wiki-felles-confirm" hidden>/);
 });
 
+// Finding 11: the confirm row names every object the confirm deletes.
+test("the remove confirm row lists the page's data files and the shared ones it keeps", () => {
+  const html = felles.fellesRemoveConfirmHtml(["plans/case.mdx", "plans/case.yaml", "plans/runs.csv"], ["shared/<b>.csv"]);
+  expect(html).toContain("Delete 3 objects from the bucket?");
+  expect(html).toContain("<code>plans/case.yaml</code>");
+  expect(html).toContain("<code>plans/runs.csv</code>");
+  expect(html).toContain("another page reads it");
+  expect(html).toContain("<code>shared/&lt;b&gt;.csv</code>");
+  // A page with no data files keeps the plain question.
+  expect(felles.fellesRemoveConfirmHtml(["plans/a.mdx"], [])).toBe(
+    "Delete it from the bucket? The bucket keeps no copy; your local page stays.",
+  );
+});
+
 test("exit 1 claims nothing the code cannot know", () => {
   // Exit 1 is the scanner's refusal AND any crash of the script (an uncaught
   // exception, a missing module), which can land after an upload succeeded.

@@ -8,7 +8,8 @@
  *
  * POST body: `{ wiki, relPath, dryRun, allowIdent, action? }`. `action` is
  * `publish` (the default), `remove`, which runs the script's `--fjern` on the
- * page's object, or `sync`, which runs `--synk` on the whole wiki and takes no
+ * page's object and the data files only it reads (`felles-remove.ts`; the answer
+ * adds `removes` and `keptShared`), or `sync`, which runs `--synk` on the whole wiki and takes no
  * relPath; `allowIdent` is required for publish and sync. Answers 200
  * `{ exitCode, dryRun, output }` whenever the script ran — its exit code is the
  * verdict (0 ok, 1 a file refused, 2 usage/environment, 3 an upload or delete
@@ -56,6 +57,7 @@ import {
   type FellesPublishConfig,
 } from "../../wiki/felles-publish.ts";
 import { parseFellesStatus, type FellesStatus } from "../../wiki/felles-status.ts";
+import { fellesRemoveDataFiles } from "../../wiki/felles-remove.ts";
 import { decideStampRequest, originMatchesHost } from "./wiki-stamp.ts";
 import { ProcTimeoutError, runProc } from "../../utils/run-proc.ts";
 import { getLog } from "../../logging.ts";
@@ -281,11 +283,18 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     if (target.refusal) return c.json(target.refusal.body, target.refusal.status);
     const { entry, bin } = target;
     let pageRel: string | undefined;
+    // remove: the page's data files go with it, except one another local page
+    // also reads (`felles-remove.ts`). Both lists ride the answer, so the
+    // dialog's confirm row names every object the confirm deletes.
+    let removeFiles: { dataFiles: string[]; shared: string[] } | undefined;
     if (action !== "sync") {
       const index = await getWikiIndex({ root: entry.root });
       const meta = index?.resolveRelPath(relPath);
       if (!meta) return c.json({ error: `no page at "${relPath}"` }, 404);
       pageRel = meta.relPath;
+      if (action === "remove") {
+        removeFiles = await fellesRemoveDataFiles(entry.root, pageRel, index!.pages.map((p) => p.relPath));
+      }
     }
     if (!existsSync(bin)) {
       return c.json({ error: `${FELLES_PUBLISH_BIN_ENV} names a file that does not exist` }, 501);
@@ -294,7 +303,14 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     const argv = [
       ...interpreter(),
       bin,
-      ...fellesScriptArgs({ action: action as FellesAction, dryRun, allowIdent, root: entry.root, relPath: pageRel }),
+      ...fellesScriptArgs({
+        action: action as FellesAction,
+        dryRun,
+        allowIdent,
+        root: entry.root,
+        relPath: pageRel,
+        alsoRemove: removeFiles?.dataFiles,
+      }),
     ];
     if (inFlight) {
       return c.json({ error: "A publish, remove or sync is already running. Wait for it to finish.", reason: "running" }, 409);
@@ -347,6 +363,15 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       dryRun,
     });
     const output = [proc.stdout.trimEnd(), proc.stderr.trimEnd()].filter(Boolean).join("\n");
+    if (removeFiles && pageRel) {
+      return c.json({
+        exitCode: proc.exitCode,
+        dryRun,
+        output,
+        removes: [pageRel, ...removeFiles.dataFiles].map((r) => r.normalize("NFC")),
+        keptShared: removeFiles.shared,
+      });
+    }
     return c.json({ exitCode: proc.exitCode, dryRun, output });
   });
 }

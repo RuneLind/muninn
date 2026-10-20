@@ -207,6 +207,55 @@ test("every spawn leads its own process group, so a timeout reaches gcloud too",
   expect(seen.map((s) => s.label)).toEqual(["felles-publish", "felles-publish", "felles-publish", "status"]);
 });
 
+// Finding 31's sibling, finding 11: publish uploads the data files a page reads,
+// so a remove must take them too, or they stay in the bucket and on every pod.
+describe("remove takes the page's data files", () => {
+  const NFD = "Måling.csv"; // "Måling.csv" as readdir hands it back on macOS
+  beforeAll(async () => {
+    await Bun.write(
+      path.join(root, "plans", "case.mdx"),
+      "---\ntitle: Case\n---\n\n# Case\n\n" +
+        '<CaseBoard src="case.yaml" />\n\n<DeltaTable src="runs.csv" />\n\n' +
+        `<DeltaTable src="${NFD}" />\n\n<DeltaTable src="gone.csv" />\n\n<DeltaTable src="../shared/both.csv" />\n\n` +
+        '<DeltaTable src="../shared/\u00C5re.csv" />\n\n' +
+        "```\n<CaseBoard src=\"fenced.yaml\" />\n```\n",
+    );
+    await Bun.write(path.join(root, "plans", "case.yaml"), "cases: []\n");
+    await Bun.write(path.join(root, "plans", "runs.csv"), "a,b\n1,2\n");
+    await Bun.write(path.join(root, "plans", NFD), "a\n1\n");
+    await Bun.write(path.join(root, "plans", "fenced.yaml"), "x: 1\n");
+    await Bun.write(path.join(root, "shared", "both.csv"), "a\n1\n");
+    await Bun.write(path.join(root, "shared", "\u00C5re.csv"), "a\n1\n");
+    // Another page reads the shared files: removing case.mdx must leave them,
+    // also when it spells one of them in NFD and case.mdx in NFC.
+    await Bun.write(
+      path.join(root, "notes", "other.md"),
+      '# Other\n\n<DeltaTable src="../shared/both.csv" />\n\n<DeltaTable src="../shared/A\u030Are.csv" />\n',
+    );
+    __resetWikiCacheForTest();
+  });
+
+  test("the argv carries the page, then each data file only this page reads, in NFC", async () => {
+    const res = await post(appWith(), { wiki: "kode", relPath: "plans/case.mdx", dryRun: true, action: "remove" });
+    expect(res.status).toBe(200);
+    const lines = (await readFile(argvFile, "utf8")).trim().split("\n");
+    expect(lines.slice(0, 4)).toEqual(["--fjern", "--dry-run", "--ja", "--"]);
+    expect(lines.slice(4, -1)).toEqual(["plans/case.mdx", "plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
+  });
+
+  test("the answer names what goes and what stays, so the confirm row can show it", async () => {
+    const res = await post(appWith(), { wiki: "kode", relPath: "plans/case.mdx", dryRun: true, action: "remove" });
+    const body = (await res.json()) as { removes?: string[]; keptShared?: string[] };
+    expect(body.removes).toEqual(["plans/case.mdx", "plans/case.yaml", "plans/runs.csv", "plans/Måling.csv"]);
+    expect(body.keptShared).toEqual(["shared/both.csv", "shared/\u00C5re.csv"]);
+  });
+
+  test("a page with no data files still removes the page alone", async () => {
+    await post(appWith(), { wiki: "kode", relPath: "plans/a.mdx", dryRun: true, action: "remove" });
+    expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(4, -1)).toEqual(["plans/a.mdx"]);
+  });
+});
+
 describe("refusals before any spawn", () => {
   let spawned = false;
   const watch = (): FellesPublishRouteDeps => ({
