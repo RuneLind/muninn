@@ -126,6 +126,58 @@ export class ProcTimeoutError extends Error {
 }
 
 /**
+ * Process groups started with `processGroup` whose leader has not exited yet.
+ *
+ * A group leader is a session leader (`detached`), so it no longer shares the
+ * parent's process group: Ctrl-C on `bun run dev` (SIGINT to the terminal's
+ * foreground group) does not reach it, and the timeout that would have killed it
+ * dies with the parent — a 3 h whisper then runs on orphaned. So the parent's
+ * exit kills every live group: muninn's `shutdown()` drains this set first, and
+ * the hooks below cover every other way out.
+ */
+const liveGroups = new Set<number>();
+
+/** SIGKILL every live process group, and forget them. Returns how many were
+ *  signalled. Synchronous, so an `exit` hook can run it. */
+export function killLiveProcessGroups(): number {
+  let n = 0;
+  for (const pgid of liveGroups) {
+    try {
+      process.kill(-pgid, "SIGKILL");
+      n++;
+    } catch {
+      /* already gone */
+    }
+  }
+  liveGroups.clear();
+  return n;
+}
+
+let groupHooksInstalled = false;
+
+/**
+ * Kill the live groups on SIGINT, SIGTERM and `exit`, without changing how the
+ * parent itself exits: a process with its own handler for the signal (muninn's
+ * `shutdown()`) keeps it, and one without gets the default death re-raised, which
+ * a listener would otherwise have cancelled.
+ */
+function installGroupHooks(): void {
+  if (groupHooksInstalled) return;
+  groupHooksInstalled = true;
+  process.on("exit", killLiveProcessGroups);
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    const onSignal = () => {
+      killLiveProcessGroups();
+      if (process.listenerCount(sig) === 1) {
+        process.removeListener(sig, onSignal);
+        process.kill(process.pid, sig);
+      }
+    };
+    process.on(sig, onSignal);
+  }
+}
+
+/**
  * Spawn a process, draining stdout AND stderr concurrently with exit (awaiting
  * `exited` first can deadlock if the pipe buffer fills — same fix as stt.ts),
  * and kill it if it runs past `timeoutMs` (mirrors executor.ts's timeout).
@@ -163,8 +215,13 @@ export async function runProc(
     }
   };
   let exited = false;
+  if (opts.processGroup) {
+    installGroupHooks();
+    liveGroups.add(proc.pid);
+  }
   void proc.exited.then(() => {
     exited = true;
+    liveGroups.delete(proc.pid);
   });
 
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined;

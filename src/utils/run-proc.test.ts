@@ -256,3 +256,128 @@ describe("runProc: the timeout's kill", () => {
     }
   });
 });
+
+/** A detached group is out of reach of the terminal's Ctrl-C and of muninn's
+ *  shutdown: the parent's exit has to kill it (arch review 2026-10, finding 24
+ *  fix round 1). */
+describe("runProc: live process groups die with the parent", () => {
+  const RUN_PROC = path.resolve(import.meta.dir, "run-proc.ts");
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const goneWithin = async (pid: number, ms: number) => {
+    const deadline = performance.now() + ms;
+    while (alive(pid) && performance.now() < deadline) await Bun.sleep(20);
+    return !alive(pid);
+  };
+  const waitForPid = async (file: string) => {
+    const deadline = performance.now() + 10_000;
+    for (;;) {
+      try {
+        const pid = Number(readFileSync(file, "utf8").trim());
+        if (pid > 0) return pid;
+      } catch {}
+      if (performance.now() > deadline) throw new Error(`no pid in ${file}`);
+      await Bun.sleep(20);
+    }
+  };
+  const groupCmd = (pidFile: string) => ["/bin/bash", "-c", `sleep 30 & echo $! > ${pidFile}; wait`];
+
+  test("killLiveProcessGroups — the drain shutdown runs — kills a running group", async () => {
+    const { killLiveProcessGroups } = await import("./run-proc.ts");
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-drain-"));
+    const pidFile = path.join(dir, "pid");
+    let member = 0;
+    try {
+      const run = runProc(groupCmd(pidFile), 60_000, "drain", { processGroup: true });
+      member = await waitForPid(pidFile);
+      expect(alive(member)).toBe(true);
+      expect(killLiveProcessGroups()).toBe(1);
+      const r = await run;
+      expect(r.exitCode).not.toBe(0);
+      expect(await goneWithin(member, 2_000)).toBe(true);
+      // The leader exited, so the registry no longer holds it.
+      expect(killLiveProcessGroups()).toBe(0);
+    } finally {
+      try {
+        if (member) process.kill(member, "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** A bun parent that starts a group, then does `tail`. Returns the parent and
+   *  the group member's pid. */
+  async function parentWithGroup(name: string, tail: string) {
+    const dir = testTempDirSync(path.join(tmpdir(), `run-proc-${name}-`));
+    const pidFile = path.join(dir, "pid");
+    const script = path.join(dir, "parent.ts");
+    await Bun.write(
+      script,
+      [
+        `import { runProc } from ${JSON.stringify(RUN_PROC)};`,
+        `void runProc(${JSON.stringify(groupCmd(pidFile))}, 60_000, "parent", { processGroup: true }).catch(() => {});`,
+        tail,
+        `setInterval(() => {}, 1_000);`,
+      ].join("\n"),
+    );
+    const parent = Bun.spawn(["bun", script], { stdout: "ignore", stderr: "pipe" });
+    const member = await waitForPid(pidFile);
+    return { dir, parent, member };
+  }
+
+  test("SIGINT to a parent with no handler of its own: the parent still dies on it, and the group with it", async () => {
+    const { dir, parent, member } = await parentWithGroup("sigint", "");
+    try {
+      expect(alive(member)).toBe(true);
+      parent.kill("SIGINT");
+      await parent.exited;
+      // Its default exit on SIGINT is unchanged.
+      expect(parent.signalCode).toBe("SIGINT");
+      expect(await goneWithin(member, 2_000)).toBe(true);
+    } finally {
+      try {
+        process.kill(member, "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("SIGTERM to a parent that handles it itself, the way muninn's shutdown does: its exit code stands, the group dies", async () => {
+    const { dir, parent, member } = await parentWithGroup(
+      "shutdown",
+      `process.on("SIGTERM", () => { setTimeout(() => process.exit(7), 100); });`,
+    );
+    try {
+      parent.kill("SIGTERM");
+      expect(await parent.exited).toBe(7);
+      expect(await goneWithin(member, 2_000)).toBe(true);
+    } finally {
+      try {
+        process.kill(member, "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("process.exit() with a group running kills the group", async () => {
+    const { dir, parent, member } = await parentWithGroup(
+      "exit",
+      `setTimeout(() => process.exit(0), 300);`,
+    );
+    try {
+      expect(await parent.exited).toBe(0);
+      expect(await goneWithin(member, 2_000)).toBe(true);
+    } finally {
+      try {
+        process.kill(member, "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

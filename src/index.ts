@@ -35,6 +35,7 @@ import { setAuthPolicy } from "./auth/policy.ts";
 import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
+import { killLiveProcessGroups } from "./utils/run-proc.ts";
 
 // `loadConfig()` throws on every fail-closed config condition — a missing
 // DATABASE_URL, an unrecognised MUNINN_PROFILE, a `global` Vertex region. It has
@@ -547,6 +548,9 @@ setTimeout(() => {
 // Graceful shutdown
 async function shutdown() {
   log.info("Shutting down...");
+  // Media children run in their own process groups, out of reach of the
+  // terminal's Ctrl-C: kill them first, before the waits below.
+  killLiveProcessGroups();
   stopScheduler();
   stopStaleHandoffSweep();
   const answerRetentionStopped = stopAnswerRetentionSweep();

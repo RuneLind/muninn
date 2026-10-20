@@ -413,22 +413,18 @@ test("spliceClaimBlock still refuses a block with NO claim heading at all", () =
  *  The heading is masked, so the extent scan runs straight through it and the
  *  splice would replace both claims with one — deleting claim 2 from an answer
  *  ➕/integrate then commit to the wiki page. The pre-adc4063 fence-blind splicer
- *  stopped at the first `###` and kept claim 2.
- *
- *  The masked heading is claim 3 of 3 after claim 1 (claim 2's verify block missed
- *  the heading contract): the NEXT claim's heading now ends such a fence
- *  (`endsFenceAsNextClaim`, finding 55), so only a non-next heading stays masked. */
+ *  stopped at the first `###` and kept claim 2. */
 const MASKED_SIBLING = [
   LEDE,
   "",
-  "### ❓ Claim 1/3 — First",
+  "### ❓ Claim 1/2 — First",
   "",
   "Here is what a verdict looks like:",
   "",
   "```md",
   "some sample",
   "",
-  "### ✅ Claim 3/3 — Third",
+  "### ✅ Claim 2/2 — Second",
   "",
   "ok",
   "```",
@@ -437,18 +433,32 @@ const MASKED_SIBLING = [
 ].join("\n");
 
 test("the invariant guard REFUSES a splice that would delete a masked sibling", () => {
-  // The parse itself cannot see claim 3 (it is inside a fence), which is exactly
+  // The parse itself cannot see claim 2 (it is inside a fence), which is exactly
   // why the guard is a line-SHAPE check and not a parse comparison.
   expect(parseFactcheckClaims(MASKED_SIBLING).map((c) => c.index)).toEqual([1]);
-  expect(spliceClaimBlock(MASKED_SIBLING, 1, "### ✅ Claim 1/3 — First\n\nFresh verdict.")).toBeNull();
+  expect(spliceClaimBlock(MASKED_SIBLING, 1, "### ✅ Claim 1/2 — First\n\nFresh verdict.")).toBeNull();
 });
 
-test("the next claim's heading ends a fence its predecessor left open", () => {
-  // Same shape with the NEXT claim inside the fence: it is the real heading.
-  const nextClaim = MASKED_SIBLING.replace("### ✅ Claim 3/3 — Third", "### ✅ Claim 2/3 — Second");
-  expect(parseFactcheckClaims(nextClaim).map((c) => c.index)).toEqual([1, 2]);
+test("the next claim's heading ends a fence its predecessor left OPEN", () => {
+  // Claim 1's fence never closes before claim 2's heading (it would pair with claim
+  // 2's own closed fence): the next claim's heading is the real one (finding 55).
+  const strayOpen = [
+    LEDE,
+    "",
+    "### ❓ Claim 1/2 — First",
+    "",
+    "```md",
+    "some sample",
+    "",
+    "### ✅ Claim 2/2 — Second",
+    "",
+    "```",
+    "ok",
+    "```",
+  ].join("\n");
+  expect(parseFactcheckClaims(strayOpen).map((c) => c.index)).toEqual([1, 2]);
   // The region still carries the stray ```md, so the guard still refuses claim 1.
-  expect(spliceClaimBlock(nextClaim, 1, "### ✅ Claim 1/3 — First\n\nFresh verdict.")).toBeNull();
+  expect(spliceClaimBlock(strayOpen, 1, "### ✅ Claim 1/2 — First\n\nFresh verdict.")).toBeNull();
 });
 
 test("the guard refuses any region carrying a fence delimiter", () => {

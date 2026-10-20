@@ -405,34 +405,76 @@ export function scanClaimLines(answer: string): ClaimLineScan {
 }
 
 /**
- * Does the column-0 claim heading at `at` end a fence opened inside claim
+ * Does the column-0 claim heading at `at` end `fence`, opened inside claim
  * `open`'s block, rather than sit inside it as a quote?
  *
- * Claim headings are a fixed prompt contract numbered `n/m` in order, so a fenced
- * line that is the NEXT claim of the same run (`n + 1` of the same `m`), and
- * whose index no later column-0 heading repeats, is that claim's real heading
- * (arch review 2026-10, finding 55). A quoted heading stays code: one from
- * another run (a different `m`, or not the next index), one in the lede (no
- * claim open), or one whose real heading still follows (the quote-then-real
- * shape a verify block writes when it restates what it was asked).
+ * Claim headings are a fixed prompt contract numbered `n/m` in order, so only the
+ * NEXT claim of the same run (`n + 1` of the same `m`) is a candidate, and only
+ * when no later UNFENCED heading repeats its index (the quote-then-real shape a
+ * verify block writes when it restates what it was asked). A quote from another
+ * run, or in the lede (no claim open), stays code (arch review 2026-10, finding 55).
+ *
+ * A candidate is then read both ways and the reading that pairs the rest of the
+ * answer's fences cleanly wins: as a QUOTE, the fence runs on to its first closer;
+ * as a REAL heading, the fence is retired and the rest walks fresh. A fence that
+ * genuinely closes inside one claim leaves the quote reading clean and the real
+ * reading with a dangling fence (its closer turns opener); a stray opener does the
+ * reverse. When both read alike, a fence that closes before any other claim
+ * heading is a quote, and one whose closer lies past a claim heading is not.
  *
  * This is the ONE deliberate difference from the reader's fence grammar
  * (`extractFences`, {@link fencedLineMask}): those render arbitrary markdown and
  * know nothing of the claim contract.
  */
 function endsFenceAsNextClaim(
+  lines: readonly string[],
   shape: readonly (RegExpMatchArray | null)[],
+  literalOpeners: ReadonlySet<number>,
   at: number,
+  fence: OpenFence,
   open: RegExpMatchArray | null,
 ): boolean {
   const m = shape[at];
   if (!m || !open) return false;
   const n = Number(m[2]);
   if (n !== Number(open[2]) + 1 || m[3] !== open[3]) return false;
-  for (let j = at + 1; j < shape.length; j++) {
-    if (shape[j] && Number(shape[j]![2]) === n) return false;
+  const asReal = walkFresh(lines, shape, literalOpeners, at + 1);
+  if (asReal.unfencedIndexes.has(n)) return false;
+  let closer = -1;
+  let headingBeforeCloser = false;
+  for (let j = at + 1; j < lines.length; j++) {
+    if (isFenceCloser(lines[j]!, fence)) {
+      closer = j;
+      break;
+    }
+    if (shape[j]) headingBeforeCloser = true;
   }
-  return true;
+  const quoteClean = closer !== -1 && !walkFresh(lines, shape, literalOpeners, closer + 1).dangling;
+  const realClean = !asReal.dangling;
+  if (quoteClean !== realClean) return realClean;
+  return closer === -1 || headingBeforeCloser;
+}
+
+/** A plain fence walk from `from` with no fence open: does a fence dangle at EOF,
+ *  and which claim indexes have a column-0 heading OUTSIDE any fence? */
+function walkFresh(
+  lines: readonly string[],
+  shape: readonly (RegExpMatchArray | null)[],
+  literalOpeners: ReadonlySet<number>,
+  from: number,
+): { dangling: boolean; unfencedIndexes: Set<number> } {
+  const unfencedIndexes = new Set<number>();
+  let fence: OpenFence | null = null;
+  for (let j = from; j < lines.length; j++) {
+    if (fence) {
+      if (isFenceCloser(lines[j]!, fence)) fence = null;
+      continue;
+    }
+    const opener = literalOpeners.has(j) ? null : fenceOpener(lines[j]!);
+    if (opener) fence = opener;
+    else if (shape[j]) unfencedIndexes.add(Number(shape[j]![2]));
+  }
+  return { dangling: fence !== null, unfencedIndexes };
 }
 
 /** One fence-tracking pass. `literalOpeners` names line indexes that must NOT be
@@ -454,7 +496,7 @@ function walkClaimLines(
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]!;
     if (fence) {
-      if (endsFenceAsNextClaim(shape, i, fenceClaim)) {
+      if (endsFenceAsNextClaim(lines, shape, literalOpeners, i, fence, fenceClaim)) {
         return { claimMatch, blockEnd, retire: fenceLine };
       }
       if (isFenceCloser(raw, fence)) {

@@ -239,6 +239,86 @@ test("a stray opener before a later claim with an info-string fence is retired t
   expect(parseFactcheckClaims(infoFence).map((c) => c.index)).toEqual([1, 2, 3]);
 });
 
+// ── finding 55 fix round 1: a CLOSED fence stays code, an unclosed one ends ──
+
+/** `[index, start line]` per claim — the start line is what tells a real heading
+ *  from a quoted one when both carry the same index. */
+function claimLines(answer: string): [number, number][] {
+  const lines = answer.split("\n");
+  return parseFactcheckClaims(answer).map((c) => [c.index, lines.indexOf(c.block.split("\n")[0]!)]);
+}
+
+test("a heading quoted in a CLOSED fence stays code when the real one misses the emoji", () => {
+  // Claim 2's real heading fails the emoji contract, so nothing later repeats 2/3:
+  // the quote must still not become claim 2 (fix round 1, repro A).
+  const answer = [
+    "Overall.",
+    "### ⚠️ Claim 1/3 — First",
+    "Example:",
+    "```",
+    "### ✅ Claim 2/3 — quoted",
+    "```",
+    "Hedged.",
+    "### Claim 2/3 — Second",
+    "### ❌ Claim 3/3 — Third",
+    "```",
+    "npm run build",
+    "```",
+  ].join("\n");
+  expect(claimLines(answer)).toEqual([[1, 1], [3, 8]]);
+});
+
+test("a truncated answer's quoted next heading in a CLOSED fence stays code", () => {
+  const answer = ["### ⚠️ Claim 1/2 — First", "", "```md", "### ✅ Claim 2/2 — quoted", "```", "", "Hedged."].join("\n");
+  expect(parseFactcheckClaims(answer).map((c) => c.index)).toEqual([1]);
+});
+
+test("a later claim quoting the next heading in its own closed fence does not block the terminator", () => {
+  // Stray ```ts in claim 1; claim 3 quotes `### ✅ Claim 2/3` inside a closed fence.
+  // The repeat scan must not count a fenced quote (fix round 1, repro C).
+  const answer = [
+    "Overall.",
+    "### ⚠️ Claim 1/3 — First",
+    "```ts",
+    "const x = 1;",
+    "### ✅ Claim 2/3 — Second",
+    "Confirmed.",
+    "### ❌ Claim 3/3 — Third",
+    "```",
+    "### ✅ Claim 2/3 — quoted",
+    "```",
+    "Wrong.",
+  ].join("\n");
+  expect(claimLines(answer)).toEqual([[1, 1], [2, 4], [3, 6]]);
+});
+
+test("a stray TILDE opener is ended by the next claim heading", () => {
+  const tilde = STRAY_OPENER_ANSWER.replace("```ts", "~~~ts").replace("```\nnpm run build\n```", "~~~\nnpm run build\n~~~");
+  expect(parseFactcheckClaims(tilde).map((c) => c.index)).toEqual([1, 2, 3]);
+});
+
+test("a stray opener paired with the NEXT claim's own fence is ended by that claim's heading", () => {
+  // The first closer after claim 2's heading is claim 2's own opener — no heading
+  // lies between them, so only the fence pairing on the rest of the answer tells.
+  const answer = ["### ⚠️ Claim 1/2 — First", "```md", "sample", "### ✅ Claim 2/2 — Second", "```", "ok", "```"].join("\n");
+  expect(parseFactcheckClaims(answer).map((c) => c.index)).toEqual([1, 2]);
+});
+
+test("a 4-backtick CLOSED fence quoting the next heading and a ``` line stays code", () => {
+  const answer = [
+    "### ⚠️ Claim 1/2 — First",
+    "````md",
+    "```",
+    "### ✅ Claim 2/2 — quoted",
+    "```",
+    "````",
+    "Hedged.",
+  ].join("\n");
+  expect(parseFactcheckClaims(answer).map((c) => c.index)).toEqual([1]);
+  // And a real claim 2 after it is still found once.
+  expect(claimLines(answer + "\n### ✅ Claim 2/2 — Second\nok")).toEqual([[1, 0], [2, 7]]);
+});
+
 test("a phantom fence no longer drops the WHOLE quote list", () => {
   // With claims 2 and 3 masked, `known` held one index while three quotes were
   // posted, so the size rule dropped every quote on the run.
