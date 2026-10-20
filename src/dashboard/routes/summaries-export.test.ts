@@ -6,7 +6,7 @@
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerSummariesExportRoutes, contentDisposition, type SummaryExportDoc } from "./summaries-export.ts";
@@ -15,6 +15,7 @@ import type { SummaryFactcheck } from "../../db/summary-factchecks.ts";
 import { buildSummaryFactcheckBlock, insertSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
 import { factcheckBodySha256 } from "../../summaries/factcheck-body.ts";
 import { EXPORT_FACTCHECK_STALE_NOTE } from "../../summaries/export.ts";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 const config = { knowledgeApiUrl: "http://127.0.0.1:1" } as never;
 
@@ -41,7 +42,7 @@ function app(): Hono {
 }
 
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "muninn-export-"));
+  root = testTempDirSync(join(tmpdir(), "muninn-export-"));
   mkdirSync(join(root, "vimeo", "42"), { recursive: true });
   writeFileSync(join(root, "vimeo", "42", "187.jpg"), new Uint8Array([0xff, 0xd8, 1, 2, 3]));
   docs.set("ai/Talk - Kari.md", {
@@ -63,7 +64,10 @@ beforeAll(() => {
   docs.set("x-video.md", { url: "https://x.com/a/status/2", text: "Summary.\n\n## Transcript\n\nwords" });
   docs.set("x-post.md", { url: "https://x.com/a/status/1", text: "Summary of a pasted post." });
 });
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(join(root, "..", `muninn-export-outside-${process.pid}`), { recursive: true, force: true });
+});
 
 describe("GET /api/summaries/export", () => {
   test("a Vimeo doc: page + the frames on disk, relative paths, a named attachment", async () => {
@@ -74,7 +78,7 @@ describe("GET /api/summaries/export", () => {
     expect(res.headers.get("content-disposition")).toBe(contentDisposition("Talk Kari"));
     expect(calls.at(-1)).toEqual(["vimeo-summaries", "ai/Talk - Kari.md"]);
 
-    const dir = mkdtempSync(join(tmpdir(), "muninn-export-out-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-export-out-"));
     try {
       const path = join(dir, "x.zip");
       writeFileSync(path, new Uint8Array(await res.arrayBuffer()));
@@ -100,7 +104,7 @@ describe("GET /api/summaries/export", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-disposition")).toBe(contentDisposition("plain"));
     expect(calls.at(-1)).toEqual(["article-summaries", "plain.md"]);
-    const dir = mkdtempSync(join(tmpdir(), "muninn-export-out-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-export-out-"));
     try {
       const path = join(dir, "x.zip");
       writeFileSync(path, new Uint8Array(await res.arrayBuffer()));
@@ -120,7 +124,7 @@ describe("GET /api/summaries/export", () => {
   test("only the exporting source's frames are packaged", async () => {
     const res = await app().request("/api/summaries/export?source=article&docId=other-source.md");
     expect(res.status).toBe(200);
-    const dir = mkdtempSync(join(tmpdir(), "muninn-export-out-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-export-out-"));
     try {
       const path = join(dir, "x.zip");
       writeFileSync(path, new Uint8Array(await res.arrayBuffer()));
@@ -135,7 +139,7 @@ describe("GET /api/summaries/export", () => {
     const page = async (docId: string) => {
       const res = await app().request("/api/summaries/export?source=x-article&docId=" + docId);
       expect(res.status).toBe(200);
-      const dir = mkdtempSync(join(tmpdir(), "muninn-export-out-"));
+      const dir = testTempDirSync(join(tmpdir(), "muninn-export-out-"));
       try {
         const path = join(dir, "x.zip");
         writeFileSync(path, new Uint8Array(await res.arrayBuffer()));

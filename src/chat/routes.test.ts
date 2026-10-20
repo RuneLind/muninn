@@ -1,11 +1,12 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import { createChatRoutes, researchStageForPrompt } from "./routes.ts";
 import { chatState } from "./state.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 // The /specs endpoints persist the domain layer of a spec as a first-class
 // artifact (Phase 0). They mirror /reports and share the path-traversal guards.
@@ -14,7 +15,7 @@ import { chatState } from "./state.ts";
 
 const tmpDirs: string[] = [];
 async function appWithBot() {
-  const dir = await mkdtemp(join(tmpdir(), "muninn-spec-test-"));
+  const dir = await testTempDir(join(tmpdir(), "muninn-spec-test-"));
   tmpDirs.push(dir);
   const bot = { name: "testbot", dir } as unknown as BotConfig;
   const app = createChatRoutes([bot], {} as unknown as Config);

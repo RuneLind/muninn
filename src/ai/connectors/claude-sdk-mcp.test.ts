@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import { parseMcpConfig } from "./claude-sdk-mcp.ts";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 describe("claude-sdk parseMcpConfig", () => {
   test("returns empty object when .mcp.json does not exist", () => {
@@ -10,7 +11,7 @@ describe("claude-sdk parseMcpConfig", () => {
   });
 
   test("converts stdio servers to Agent SDK shape with merged env", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-sdk-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-sdk-test-"));
     const mcpJson = {
       mcpServers: {
         gmail: {
@@ -45,7 +46,7 @@ describe("claude-sdk parseMcpConfig", () => {
   });
 
   test("converts http servers to Agent SDK shape", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-sdk-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-sdk-test-"));
     const mcpJson = {
       mcpServers: {
         knowledge: { type: "http", url: "http://127.0.0.1:9120/mcp", headers: { "x-auth": "k" } },
@@ -64,7 +65,7 @@ describe("claude-sdk parseMcpConfig", () => {
   });
 
   test("converts sse servers", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-sdk-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-sdk-test-"));
     writeFileSync(
       join(dir, ".mcp.json"),
       JSON.stringify({ mcpServers: { live: { type: "sse", url: "http://localhost:5000/sse" } } }),
@@ -80,7 +81,7 @@ describe("claude-sdk parseMcpConfig", () => {
   });
 
   test("skips http entries without url and stdio entries without command", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-sdk-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-sdk-test-"));
     writeFileSync(
       join(dir, ".mcp.json"),
       JSON.stringify({
@@ -102,7 +103,7 @@ describe("claude-sdk parseMcpConfig", () => {
   });
 
   test("returns empty object on parse failure", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-sdk-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-sdk-test-"));
     writeFileSync(join(dir, ".mcp.json"), "{ not json");
     try {
       expect(parseMcpConfig(dir)).toEqual({});

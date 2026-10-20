@@ -38,6 +38,30 @@
 export const RELATED_HUB_BACKLINKS = 25;
 
 /**
+ * A page LINKING to more pages than this, with under
+ * `RELATED_INDEX_WORDS_PER_LINK` words of its own per link, is INDEX-SHAPED: a
+ * catalog that cites everything it lists (a memory wiki's `MEMORY.md`, a
+ * `Sources — <topic>` page) and would otherwise lead every listed page's Related
+ * block. It is cut at both ends, like a backlink hub: its own block would only
+ * repeat its links.
+ *
+ * The count alone does not separate an index from a long page that links a lot.
+ * Measured 2026-10-20 over mimir, jarvis, melosys-kode-wiki and the memory wiki,
+ * pages over 25 outlinks and at most `RELATED_HUB_BACKLINKS` backlinks: index
+ * pages have 6–28.5 words per link (`MEMORY.md` ×3, kode `archive/INDEX.md`,
+ * `Sources — RAG`, `Sources — Coding`, mimir `overview.md`); content pages
+ * 36–80 (kode `concepts/arsavregning.md`, the helsesjekk plan, `LLM Wiki
+ * Pattern Explained`, `Gemini 4 Argon…`), and the backlog-triage report 40.
+ * One content page measures 13 (`Filmmaking in the AI Era`, 33 "See also"
+ * links under 430 words) and is cut.
+ */
+export const RELATED_HUB_OUTLINKS = 25;
+
+/** The words-per-outlink ceiling of the index shape (`RELATED_HUB_OUTLINKS`):
+ *  the middle of the measured 28.5–36 gap. */
+export const RELATED_INDEX_WORDS_PER_LINK = 32;
+
+/**
  * A page naming more PR references than this is a DIGEST — a review report, a
  * month's blog, an index — and shared PR numbers say nothing about it: it names
  * half the month by construction. Cut from the PR-sharing source only; a digest

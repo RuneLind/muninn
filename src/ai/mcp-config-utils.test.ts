@@ -1,9 +1,10 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildInlineMcpConfig, buildInlineSettings, loadRawMcpServers, resolveBotCwd, unreadableBotConfigs } from "./mcp-config-utils.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /**
  * A throwaway `<tmp>/bots/jarvis` holding one `.mcp.json`. Every root is recorded
@@ -13,7 +14,7 @@ import { buildInlineMcpConfig, buildInlineSettings, loadRawMcpServers, resolveBo
  */
 const scratchRoots: string[] = [];
 function scratchBot(mcpJson?: unknown): string {
-  const root = mkdtempSync(join(tmpdir(), "muninn-mcp-cfg-"));
+  const root = testTempDirSync(join(tmpdir(), "muninn-mcp-cfg-"));
   scratchRoots.push(root);
   const botDir = join(root, "bots", "jarvis");
   mkdirSync(botDir, { recursive: true });

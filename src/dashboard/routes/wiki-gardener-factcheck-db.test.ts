@@ -14,11 +14,12 @@
  * Its own `bun test` link in the `test` and `test:db` chains.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { setupTestDb } from "../../test/setup-db.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 import { getWikiProposalById, insertWikiProposal, type WikiProposal } from "../../db/wiki-proposals.ts";
 import { upsertSummaryFactcheck } from "../../db/summary-factchecks.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
@@ -44,7 +45,7 @@ const JSON_POST = { method: "POST", headers: { "content-type": "application/json
 let root: string;
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "wiki-fc-gate-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-fc-gate-"));
   __setReadonlyWikiRootsForTest();
   __setWikiRegistryForTest([{ name: BOT, root, source: "bot", collections: ["wiki"] }]);
   __setBotsForTest([{ name: BOT, dir: root, wikiDir: root } as unknown as BotConfig]);

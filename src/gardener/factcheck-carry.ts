@@ -10,9 +10,10 @@
  *  - {@link buildFactcheckRider} — the prompt rider listing ❌/⚠️ claims and their
  *    corrections, capped at {@link FACTCHECK_RIDER_MAX} chars of findings. Empty
  *    when the check found nothing wrong, so the prompt is byte-identical then.
- *  - {@link withFactcheckAppendix} — the drafted page with the `.mdx` fact-check
- *    block appended (`buildFactcheckAppendix`), any block or `Fact check` section
- *    the model reproduced anyway removed first, so a page never carries two.
+ *  - {@link appendFactcheckBlock} — the drafted page with the `.mdx` fact-check
+ *    block appended (`buildFactcheckAppendix`). The drafter first runs
+ *    {@link stripReproducedFactcheck} over the model's page, so a page never
+ *    carries two.
  *
  * The draft records WHICH check it carries — {@link factcheckAnswerSha256} on its
  * source doc — and the gate locks a draft whose record is absent or names an
@@ -295,15 +296,6 @@ export function stripReproducedFactcheck(page: string, opts: { headings?: boolea
 export function appendFactcheckBlock(page: string, saved: SummaryFactcheck): string {
   const block = buildFactcheckAppendix(saved.answer, todayOslo(saved.createdAt));
   return `${page.replace(/\s+$/, "")}\n\n${block}\n`;
-}
-
-/**
- * The drafted page with the saved check's `.mdx` block appended at the end. Any
- * block or `Fact check` section the model wrote anyway is removed first: the
- * appended block is built from the saved row, the model's copy is not.
- */
-export function withFactcheckAppendix(page: string, saved: SummaryFactcheck): string {
-  return appendFactcheckBlock(stripReproducedFactcheck(page), saved);
 }
 
 /** The saved check's date, ❌/⚠️ counts and answer digest — `SummaryFactcheckMark` minus its key. */

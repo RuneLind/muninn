@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetWikiCacheForTest, aliasWorkedPaths, buildWikiIndex, readCull, type WikiIndex } from "./store.ts";
@@ -20,10 +20,11 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "./registry
 import { sha256 } from "../gardener/util.ts";
 import { Hono } from "hono";
 import { lintWiki } from "./lint.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 let root: string;
 beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "wiki-culled-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-culled-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
   await mkdir(path.join(root, "archive"), { recursive: true });
 });

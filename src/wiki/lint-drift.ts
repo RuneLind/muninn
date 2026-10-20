@@ -55,7 +55,6 @@ export const DRIFT_LINT_CHECKS = [
   "case-table",
   "long-page-no-fold",
 ] as const;
-export type DriftLintCheck = (typeof DRIFT_LINT_CHECKS)[number];
 
 /** `sql` fences outside a `<Query>` at or above this count are reported. */
 export const LOOSE_SQL_MIN = 2;

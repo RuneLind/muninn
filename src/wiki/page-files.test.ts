@@ -1,11 +1,12 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { constants as fsc } from "node:fs";
-import { link, mkdir, mkdtemp, open, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, open, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadPageFiles, resolveContainedFile } from "./page-files.ts";
 import { PAGE_FILE_MAX_BYTES, PAGE_FILE_MAX_PER_PAGE, PAGE_FILE_PAGE_BUDGET_BYTES } from "../format/query-block.ts";
 import { renderWikiHtml } from "./render.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 let base = "";
 let root = "";
@@ -31,7 +32,7 @@ async function raceReads(ref: string, ms: number) {
 }
 
 beforeAll(async () => {
-  base = await mkdtemp(path.join(tmpdir(), "muninn-page-files-"));
+  base = await testTempDir(path.join(tmpdir(), "muninn-page-files-"));
   root = path.join(base, "wiki");
   await mkdir(path.join(root, "plans", "res"), { recursive: true });
   await writeFile(path.join(root, "plans", "res", "Q-1.csv"), "A,B\n1,2\n");

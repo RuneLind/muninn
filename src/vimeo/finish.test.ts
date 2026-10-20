@@ -10,11 +10,12 @@
 
 import { test, expect, describe, beforeEach, afterAll } from "bun:test";
 import { configure, reset as resetLogging, type LogRecord } from "@logtape/logtape";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { finishVimeoSummary } from "./finish.ts";
 import type { CaptureFrame } from "../summaries/frames.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const VIDEO_ID = "1223358361";
 const roots: string[] = [];
@@ -43,7 +44,7 @@ function tailLogs(): LogRecord[] {
 }
 
 function tmpRoot(prefix: string): string {
-  const d = mkdtempSync(join(tmpdir(), prefix));
+  const d = testTempDirSync(join(tmpdir(), prefix));
   roots.push(d);
   return d;
 }

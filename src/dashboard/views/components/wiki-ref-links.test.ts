@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { findRefs, headingSlug, nounRuns } from "./wiki-ref-links.ts";
+import { findRefs, headingSlug, isRefId, nounRuns, refTargets } from "./wiki-ref-links.ts";
 import { foldSizeLabel, formatChars, readingMinutes } from "./wiki-lens.ts";
 
 /** The browser half (wrapping, the peek, the jump and Back) is driven in
@@ -52,6 +52,47 @@ describe("findRefs: ids", () => {
 
   test("a case id with a hyphen", () => {
     expect(keys("saken MEL-601780, ikke MEL-60178", ids)).toEqual(["id:MEL-601780"]);
+  });
+});
+
+describe("ref ids that are not ids (arch-review 2026-10 #13)", () => {
+  /** What `refTargets` links: the chip keys `isRefId` keeps. */
+  const linked = (text: string, chips: string[]) => keys(text, chips.filter(isRefId));
+
+  test("a digit-only or one-character key links nothing", () => {
+    for (const k of ["A", "1", "10", "2026", "0123", "Q"]) expect(isRefId(k)).toBe(false);
+    expect(linked("A decision on 07.10.2026 after 10 runs; step 1, version 1.10.", ["A", "1", "10", "2026"])).toEqual([]);
+  });
+
+  test("letter ids link, with or without a digit", () => {
+    for (const k of ["D4", "S1", "Q-14", "MEL-601780", "H1", "MELOSYS-1234", "Q-A", "Q-H", "Case-A"]) {
+      expect(isRefId(k)).toBe(true);
+    }
+    // kode-wiki plans/2026-09-22-vedtaksmetadata-rotaarsak.mdx: query ids Q-A … Q-H.
+    expect(linked("Q-A–Q-H kjørt; 1981 rader (Q-A). SQL-en for Q-F–Q-H.", ["Q-A", "Q-F", "Q-H"])).toEqual([
+      "id:Q-A",
+      "id:Q-H",
+      "id:Q-A",
+      "id:Q-F",
+      "id:Q-H",
+    ]);
+  });
+
+  test("ranges still link both ends, and a sub-step `S1.2` links its step", () => {
+    expect(linked("se Q-1–Q-14.", ["Q-1", "Q-14"])).toEqual(["id:Q-1", "id:Q-14"]);
+    expect(linked("Steg S1.2 og D4.", ["S1", "D4"])).toEqual(["id:S1", "id:D4"]);
+  });
+
+  test("refTargets itself keeps only the chip keys isRefId accepts", () => {
+    // A stub root, since `linked` filters with isRefId on its own: only the id
+    // chips (ID_TARGETS) answer; the sections query finds nothing.
+    const chip = (key: string) => ({ textContent: key, closest: () => ({ id: `case-${key}` }) });
+    const root = {
+      querySelectorAll: (sel: string) =>
+        sel.includes(".dl-id") ? ["A", "10", "Q-A", "q-a", "D4"].map(chip) : [],
+    } as unknown as Element;
+    // A lowercase letter counts as a letter: `q-a` is an id.
+    expect([...refTargets(root).ids.keys()]).toEqual(["Q-A", "q-a", "D4"]);
   });
 });
 

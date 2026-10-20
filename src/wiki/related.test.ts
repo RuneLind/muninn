@@ -9,11 +9,12 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { computeRelated, RELATED_DIGEST_PRS, RELATED_HUB_BACKLINKS } from "./related.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** A plan page: frontmatter lines, then the body. */
 function page(title: string, fm: string[], body: string): string {
@@ -102,7 +103,7 @@ async function writeFillers(n: number): Promise<void> {
 }
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "wiki-related-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-related-"));
   for (const [rel, body] of PAGES) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
     await writeFile(path.join(root, rel), body, "utf8");
@@ -285,7 +286,7 @@ async function indexOver(
   pages: Array<[string, string]>,
   fn: (index: WikiIndex) => void | Promise<void>,
 ): Promise<void> {
-  const dir = await mkdtemp(path.join(tmpdir(), "wiki-related-case-"));
+  const dir = await testTempDir(path.join(tmpdir(), "wiki-related-case-"));
   try {
     for (const [rel, body] of pages) {
       await mkdir(path.join(dir, path.dirname(rel)), { recursive: true });

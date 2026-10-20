@@ -34,9 +34,7 @@ export type Timings = Record<string, number>;
 /** Longest-processing-time packing: deterministic for a given file set and table. */
 export function partition(files: string[], timings: Timings, total: number): string[][] {
   if (!Number.isInteger(total) || total < 1) throw new Error(`shard total must be a positive integer, got ${total}`);
-  const known = files.map((f) => timings[f]).filter((s): s is number => typeof s === "number");
-  const fallback = median(known) ?? 1;
-  const cost = (f: string) => timings[f] ?? fallback;
+  const cost = specCost(files, timings);
   const sorted = [...files].sort((a, b) => cost(b) - cost(a) || a.localeCompare(b));
   const shards = Array.from({ length: total }, () => ({ files: [] as string[], load: 0 }));
   for (const f of sorted) {
@@ -46,6 +44,44 @@ export function partition(files: string[], timings: Timings, total: number): str
     best.load += cost(f);
   }
   return shards.map((s) => s.files.sort());
+}
+
+/** What `partition` charges a spec: its table time, or the median of the known ones when it has none. */
+export function specCost(files: string[], timings: Timings): (f: string) => number {
+  const known = files.map((f) => timings[f]).filter((s): s is number => typeof s === "number");
+  const fallback = median(known) ?? 1;
+  return (f) => timings[f] ?? fallback;
+}
+
+/**
+ * What shard `index` of `total` plans and prints. Every matrix shard runs
+ * `plan`, so only shard 1 prints the warnings: GitHub shows each once. The
+ * per-shard loads use the charge `partition` packed by.
+ */
+export function planShard(files: string[], timings: Timings, index: number, total: number): { mine: string[]; lines: string[] } {
+  const shards = partition(files, timings, total);
+  const mine = shards[index - 1];
+  if (!mine) throw new Error(`shard ${index} is outside 1..${total}`);
+  const cost = specCost(files, timings);
+  const lines = index === 1 ? untimedSpecWarnings(files, timings) : [];
+  shards.forEach((s, k) => {
+    const load = s.reduce((a, f) => a + cost(f), 0);
+    lines.push(`${k + 1 === index ? "→" : " "} shard ${k + 1}/${total}: ${s.length} files, ~${Math.round(load)} s by the table`);
+  });
+  lines.push(...mine.map((f) => `  ${f}`));
+  return { mine, lines };
+}
+
+/**
+ * One `::warning::` line per spec the table has no entry for. A missing entry
+ * costs balance, never coverage, so this warns and never fails the plan: the
+ * three work-thread specs ran at 54, 97 and 17 s while `partition` charged
+ * each the median, and nothing said the table was stale.
+ */
+export function untimedSpecWarnings(files: string[], timings: Timings): string[] {
+  return files
+    .filter((f) => typeof timings[f] !== "number")
+    .map((f) => `::warning::${f} has no entry in e2e/shard-timings.json, so the plan charges it the median; run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` from a green run's e2e-report artifact`);
 }
 
 function median(xs: number[]): number | undefined {
@@ -258,15 +294,10 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === "plan" && rest.length === 3) {
     const [i, n, out] = [Number(rest[0]), Number(rest[1]), rest[2]!];
     const timings = await readTimings();
-    const shards = partition(await specFiles(), timings, n);
-    const mine = shards[i - 1];
-    if (!mine) throw new Error(`shard ${rest[0]} is outside 1..${n}`);
+    const files = await specFiles();
+    const { mine, lines } = planShard(files, timings, i, n);
     await Bun.write(out, mine.join("\n") + "\n");
-    shards.forEach((s, k) => {
-      const load = s.reduce((a, f) => a + (timings[f] ?? 0), 0);
-      console.log(`${k + 1 === i ? "→" : " "} shard ${k + 1}/${n}: ${s.length} files, ~${Math.round(load)} s by the table`);
-    });
-    console.log(mine.map((f) => `  ${f}`).join("\n"));
+    console.log(lines.join("\n"));
     return 0;
   }
   if (cmd === "check" && rest.length === 2) {

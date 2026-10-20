@@ -7,7 +7,7 @@
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { Hono } from "hono";
-import { mkdtemp, rm, mkdir, writeFile, utimes } from "node:fs/promises";
+import { rm, mkdir, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { registerSyncRoutes } from "./sync-routes.ts";
@@ -17,6 +17,7 @@ import { SYNC_QUIET_MS } from "../../sync/decide.ts";
 import { __resetForTest } from "../../wiki/commit.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import type { Config } from "../../config.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const CONFIG = { knowledgeApiUrl: "http://127.0.0.1:1" } as Config;
 
@@ -41,7 +42,7 @@ describe("sync routes", () => {
     __resetWikiWriteQueueForTest();
     __resetSyncStateForTest();
     __resetSyncReposForTest();
-    base = await mkdtemp(path.join(tmpdir(), "sync-routes-"));
+    base = await testTempDir(path.join(tmpdir(), "sync-routes-"));
   });
   afterEach(async () => {
     if (SAVED_SYNC === undefined) delete process.env.SYNC_REPOS;

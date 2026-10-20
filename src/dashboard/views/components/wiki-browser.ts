@@ -106,7 +106,7 @@ import {
   startReindex,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
-import { readActiveWikiName, readActiveWikiRoot, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
+import { readActiveWikiName, readActiveWikiRoot, readFindRowsWiki, readFindSelfWiki, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
   START_VIEW_PARAM,
@@ -612,8 +612,12 @@ const WIKI = readActiveWikiName();
  *  no servable root. Only the breadcrumb's ⧉ Copy path reads it, and like `WIKI`
  *  it is a boot-time fact: switching wiki is a full navigation. */
 const WIKI_ROOT = readActiveWikiRoot();
-/** This wiki's registry name, as the find palette's Everywhere rows spell it. */
+/** This wiki's registry name — the requested one, which the answer, new-since
+ *  and Agent consumers send as `wiki`. */
 const FIND_SELF_WIKI = readFindSelfWiki();
+/** The name Everywhere rows carry for this wiki's root (the first registry
+ *  entry on it). Only the palette reads it; never send it as `wiki`. */
+const FIND_ROWS_WIKI = readFindRowsWiki();
 /** Append the active `wiki` param to a URL so every /api/wiki/* fetch stays on-wiki. */
 function withWiki(url: string): string {
   return withWikiParam(url, WIKI);
@@ -1964,9 +1968,9 @@ function renderList(cause: "storage" | "local" = "local"): void {
     // (`activityRowSource`).
     const source: WorkedSource | null =
       entry.activity && signal !== null
-        ? activityRowSource(datePage, now, signal, dateSignal, entry.activity.kind, !!workedGate?.open)
+        ? activityRowSource(datePage, now, signal, dateSignal, entry.activity.kind, !!workedGate?.open, workedGate?.asOfMs)
         : signal === "worked" && dateSignal
-          ? workedAxisSource(datePage, now, dateSignal)
+          ? workedAxisSource(datePage, now, dateSignal, workedGate?.asOfMs)
           : null;
     const chip = workedChip(source, fullDate, dateSignal?.kind === "added" ? "added" : "updated");
     // A NEW page (its own creation won, not a child's) says so in the date cell:
@@ -2515,6 +2519,16 @@ function provenanceUrl(relPath: string): string {
  *  flight. */
 let provLoadSeq = 0;
 
+/** The provenance load in flight. Leaving the page aborts it, which cancels
+ *  the server's claude-usage fetches with it (the route passes the request
+ *  signal into `pageProvenance`; its huginn reads are raced, not cancelled). */
+let provLoadAbort: AbortController | null = null;
+
+function abortProvLoad(): void {
+  provLoadAbort?.abort();
+  provLoadAbort = null;
+}
+
 /**
  * The ONE writer of the strip. Every writer — a load, the Stamp redraw, the
  * retry — replaces whatever `.wiki-prov-strip` is on the page (the
@@ -2563,10 +2577,13 @@ function writeProvStrip(html: string): void {
  */
 async function loadProvStrip(relPath: string): Promise<void> {
   const seq = ++provLoadSeq;
+  abortProvLoad();
+  const ctl = new AbortController();
+  provLoadAbort = ctl;
   let next: string | null = null;
   let prov: ProvenancePayload | undefined;
   try {
-    const res = await fetch(provenanceUrl(relPath));
+    const res = await fetch(provenanceUrl(relPath), { signal: ctl.signal });
     if (res.ok) {
       const data = (await res.json()) as WikiPageProvenance | null;
       prov = data?.provenance;
@@ -2575,6 +2592,9 @@ async function loadProvStrip(relPath: string): Promise<void> {
   } catch {
     /* falls through to the unavailable line */
   }
+  // An aborted load was retired on purpose: it never writes the failure line.
+  if (ctl.signal.aborted) return;
+  if (provLoadAbort === ctl) provLoadAbort = null;
   if (currentRelPath !== relPath || seq !== provLoadSeq) return;
   // Connections is the fetch's second consumer, under the same guard.
   if (prov) adoptIssueRows(prov);
@@ -2603,6 +2623,7 @@ function retryProvStrip(): void {
  *  the sequence is bumped to retire them. */
 function redrawProvStrip(provenance: ProvenancePayload): void {
   provLoadSeq += 1;
+  abortProvLoad();
   placeProvStrip(provStripHtml(provenance, jiraKeys));
   adoptIssueRows(provenance);
 }
@@ -2851,9 +2872,13 @@ function toggleProvChain(btn: HTMLButtonElement): void {
 const WORKED_SLOT_TITLE = "The day an agent session last wrote this page (claude-usage's session ledger)";
 const CHANGED_SINCE_TITLE =
   "Changed after the last session by something the ledger does not record: a hand edit, a script, a lint or sync commit";
+const ledgerReadTitle = (day: string) =>
+  `The session ledger was last read ${day}; this page changed after that, so whether a session wrote it is not known yet.`;
 const NO_SESSION_TITLE =
   "No agent session write is recorded for this page (bulk passes are not counted). The date is the file's own.";
 function renderBreadcrumb(m: WikiListing): void {
+  // A page render starts over: the previous page's provenance load is not wanted.
+  abortProvLoad();
   const el = document.getElementById("wikiBreadcrumb");
   // Navigating to a DIFFERENT page invalidates an open article popover: it still
   // targets the page the reader just left, and its anchor button has been
@@ -2910,7 +2935,11 @@ function renderBreadcrumb(m: WikiListing): void {
   // With the ledger on, a `worked` slot names the day the last agent session wrote
   // the page; `updated` then appears only as a change after that session, or as
   // the fallback on a page no session wrote.
-  const dates = pageHeaderDates(m, recencyNow(), { ledger: workedAxisOn });
+  const dates = pageHeaderDates(m, recencyNow(), { ledger: workedAxisOn, ledgerAsOfMs: workedGate?.asOfMs });
+  // The page changed after the ledger was last read: whether a session wrote
+  // it is not known yet, so the slots say when the ledger was read instead.
+  const noSessionTitle = dates.ledgerReadDay ? ledgerReadTitle(dates.ledgerReadDay) : NO_SESSION_TITLE;
+  const changedTitle = dates.ledgerReadDay ? ledgerReadTitle(dates.ledgerReadDay) : CHANGED_SINCE_TITLE;
   const slots: string[] = [];
   if (dates.created) slots.push("created " + esc(dates.created));
   if (dates.worked) {
@@ -2921,13 +2950,19 @@ function renderBreadcrumb(m: WikiListing): void {
   if (dates.updated) {
     slots.push(
       dates.changedSince
-        ? `<span class="wiki-bc-changed" title="${esc(CHANGED_SINCE_TITLE)}">updated ${esc(dates.updated)}</span>`
+        ? `<span class="wiki-bc-changed" title="${esc(changedTitle)}">updated ${esc(dates.updated)}</span>`
         : dates.noSession
-          ? `<span class="wiki-bc-fallback" title="${esc(NO_SESSION_TITLE)}">updated ${esc(dates.updated)}</span>`
+          ? `<span class="wiki-bc-fallback" title="${esc(noSessionTitle)}">updated ${esc(dates.updated)}</span>`
           : "updated " + esc(dates.updated),
     );
   }
-  if (dates.noSession) slots.push(`<span class="wiki-bc-nosession" title="${esc(NO_SESSION_TITLE)}">no session</span>`);
+  if (dates.noSession) {
+    slots.push(
+      `<span class="wiki-bc-nosession" title="${esc(noSessionTitle)}">` +
+        (dates.ledgerReadDay ? `ledger read ${esc(dates.ledgerReadDay)}` : "no session") +
+        "</span>",
+    );
+  }
   // State T/T0 (D15): the window holds only touches or pass markers for this
   // page, so the dates above are not focused work — the mark names the touch.
   if (dates.touched) {
@@ -2966,6 +3001,7 @@ function renderBreadcrumb(m: WikiListing): void {
   el.style.display = "flex";
 }
 function hideBreadcrumb(): void {
+  abortProvLoad(); // no page open: its provenance load is not wanted either
   const el = document.getElementById("wikiBreadcrumb");
   if (el) el.style.display = "none";
   unmountAnswerExport(); // an Ask answer, the start view or an issue graph: no page
@@ -3338,6 +3374,7 @@ function relatedViewOpts(): RelatedViewOptions {
   const labels = seriesLabels(allPages);
   return {
     workedAxis: workedAxisOn,
+    ledgerAsOfMs: workedGate?.asOfMs,
     now: recencyNow(),
     order: relatedOrder,
     hops: true,
@@ -8709,9 +8746,9 @@ initFindPalette({
   openPage: (relPath) => loadPageByRelPath(relPath),
   hrefFor: (relPath) => pageUrlByRelPath(relPath),
   onOpen: () => hideRefPeek(),
-  // Everywhere rows name their wiki by registry name; under the WIKI_DIR
-  // override `WIKI` is "" while the served root may be a registered wiki.
-  selfWiki: () => FIND_SELF_WIKI,
+  // Everywhere rows name a root by its FIRST registry entry; on aliased roots
+  // that is not the requested name, and under the WIKI_DIR override `WIKI` is "".
+  selfWiki: () => FIND_ROWS_WIKI,
   // The read slice (nais) does not register the Everywhere route.
   everywhere: () => wikiToolsFlag(),
 });

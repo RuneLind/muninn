@@ -8,7 +8,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -42,6 +42,7 @@ import {
   logLegFailures,
   uniqueWikiRoots,
   usageLegJson,
+  findRowsWikiName,
   findSelfWikiName,
   registerWikiFindEverywhereRoute,
 } from "../dashboard/routes/wiki-find-everywhere.ts";
@@ -53,6 +54,7 @@ import {
   freeText,
   parseFindQuery,
 } from "../dashboard/views/components/wiki-find.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const S1 = "11111111-1111-4111-8111-111111111111";
 const S2 = "22222222-2222-4222-8222-222222222222";
@@ -72,7 +74,7 @@ afterEach(async () => {
 });
 
 async function wiki(pages: Record<string, string>): Promise<{ root: string; index: WikiIndex }> {
-  const root = await mkdtemp(path.join(tmpdir(), "find-everywhere-"));
+  const root = await testTempDir(path.join(tmpdir(), "find-everywhere-"));
   dirs.push(root);
   for (const [rel, body] of Object.entries(pages)) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
@@ -649,11 +651,32 @@ describe("helpers", () => {
       { name: "other", root: "/nowhere" },
       { name: "mine", root: a.root },
     ];
+    // The requested entry wins, also when an earlier entry shares its root (an
+    // alias): the answer and new-since consumers send this name as `wiki`.
+    expect(findSelfWikiName([...registry, { name: "alias", root: a.root }], { name: "alias" }, a.root)).toBe("alias");
     expect(findSelfWikiName(registry, { name: "picked" }, a.root)).toBe("picked");
     expect(findSelfWikiName(registry, undefined, a.root)).toBe("mine");
     expect(findSelfWikiName(registry, undefined, `${a.root}/`)).toBe("mine");
     expect(findSelfWikiName(registry, undefined, "/unregistered")).toBe("");
     expect(findSelfWikiName(registry, undefined, null)).toBe("");
+  });
+
+  test("findRowsWikiName names the served root by its FIRST registry entry, as uniqueWikiRoots labels its rows", async () => {
+    const a = await wiki({ "p.md": page("P") });
+    const registry = [
+      { name: "other", root: "/nowhere" },
+      { name: "mine", root: a.root },
+      { name: "alias", root: a.root },
+    ];
+    // ?wiki=alias on an aliased root: the rows say "mine", so the palette must too.
+    expect(findRowsWikiName(registry, { name: "alias" }, a.root)).toBe("mine");
+    expect(uniqueWikiRoots(registry).find((e) => e.root === a.root)?.name).toBe("mine");
+    // An entry whose root no registry row holds keeps its own name.
+    expect(findRowsWikiName(registry, { name: "picked" }, "/elsewhere")).toBe("picked");
+    // The WIKI_DIR override (no entry) resolves by root, else "".
+    expect(findRowsWikiName(registry, undefined, `${a.root}/`)).toBe("mine");
+    expect(findRowsWikiName(registry, undefined, "/unregistered")).toBe("");
+    expect(findRowsWikiName(registry, undefined, null)).toBe("");
   });
 });
 

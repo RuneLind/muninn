@@ -8,16 +8,17 @@
  *     the cache, while a plain call inside the TTL does not.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, unlink } from "node:fs/promises";
+import { rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getWikiIndex, readWikiPage, __resetWikiCacheForTest } from "./store.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 describe("getWikiIndex — the contract the bucket mirror relies on", () => {
   let root: string;
   beforeEach(async () => {
     __resetWikiCacheForTest();
-    root = await mkdtemp(path.join(tmpdir(), "wiki-mirror-contract-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-mirror-contract-"));
   });
   afterEach(async () => {
     __resetWikiCacheForTest();

@@ -27,10 +27,11 @@
  */
 
 import { test, expect, describe, mock, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const realTraces = await import("../../db/traces.ts");
 mock.module("../../db/traces.ts", () => ({
@@ -282,7 +283,7 @@ describe("POST /api/wiki/share — pre-commit guards", () => {
   const ok = { page: PAGE, preset: "email", lang: "en" };
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-share-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-share-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\n---\n\nBody prose here.");
     await mkdir(path.join(root, "deep", "deeper"), { recursive: true });
     await Bun.write(
@@ -519,7 +520,7 @@ describe("GET /api/wiki/share/presets", () => {
   let app: Hono;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-share-presets-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-share-presets-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\n---\n\nBody.");
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,6 +18,7 @@ import { applyToolSurface, executeOneShot } from "./one-shot.ts";
 import { resolveAgentCwd } from "./agent-cwd.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { driveBot, driveCapture, driveConfig, silentTracer } from "../test/one-shot-drive.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /**
  * The claude-cli half of the declared tool surface, driven from the top layer
@@ -33,7 +34,7 @@ let agentRoot: string;
 const savedAgentCwd = process.env.MUNINN_AGENT_CWD;
 
 beforeAll(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "tool-surface-")));
+  root = realpathSync(testTempDirSync(join(tmpdir(), "tool-surface-")));
   botDir = join(root, "bot");
   framesDir = join(root, "frames");
   agentRoot = join(root, "agent-home");

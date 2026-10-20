@@ -27,10 +27,11 @@
  */
 
 import { test, expect, describe, mock, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 interface RecordedSpan {
   id: string;
@@ -500,7 +501,7 @@ describe("GET /api/wiki/factcheck/claim — route guards", () => {
   const OK_QS = `wiki=retrywiki&page=${encodeURIComponent(PAGE)}&mode=article&index=2&total=5&title=Some%20claim`;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-fcretry-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-fcretry-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\n---\n\nBody.");
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();

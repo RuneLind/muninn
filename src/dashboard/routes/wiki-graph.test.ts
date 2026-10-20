@@ -5,7 +5,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -16,6 +16,7 @@ import type { ProvenanceContext } from "../../wiki/provenance-service.ts";
 import { isSideEffectingRequest } from "../../auth/origin.ts";
 import type { Config } from "../../config.ts";
 import { renderWikiBoardPage } from "../views/wiki-board-page.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const S1 = "00000000-0000-4000-8000-000000000001";
 const CONFIG = { trackers: [{ id: "jira", projects: ["DEMO"], hosts: ["example.invalid"], ledgerProjects: ["DEMO"] }] };
@@ -28,7 +29,7 @@ const signals: (AbortSignal | undefined)[] = [];
 let app: Hono;
 
 async function wiki(config: object | null): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "wiki-graph-route-"));
+  const root = await testTempDir(path.join(tmpdir(), "wiki-graph-route-"));
   roots.push(root);
   await writeFile(path.join(root, "side.md"), PAGE, "utf8");
   if (config) await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(config), "utf8");

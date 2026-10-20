@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadPlanSource, planRecordFromContent } from "./source.ts";
 import { sha256 } from "../gardener/util.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const tmpRoots: string[] = [];
 
@@ -12,7 +13,7 @@ async function makeWiki(
   files: Record<string, string>,
   queue?: string,
 ): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "muninn-plans-"));
+  const root = await testTempDir(path.join(tmpdir(), "muninn-plans-"));
   tmpRoots.push(root);
   await mkdir(path.join(root, "plans"), { recursive: true });
   for (const [name, content] of Object.entries(files)) {
@@ -285,7 +286,7 @@ describe("loadPlanSource", () => {
   });
 
   test("a missing plans/ directory degrades to a warning, not a throw", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "muninn-plans-empty-"));
+    const root = await testTempDir(path.join(tmpdir(), "muninn-plans-empty-"));
     tmpRoots.push(root);
     const res = await loadPlanSource({ root });
     expect(res.plans).toEqual([]);

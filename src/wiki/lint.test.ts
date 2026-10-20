@@ -1,10 +1,11 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, LINT_CHECKS, type LintFinding } from "./lint.ts";
 import { SERIES_LINT_CHECKS } from "./lint-series.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * Lint-engine tests over temp-dir wiki fixtures (modeled on store.test.ts).
@@ -36,7 +37,7 @@ describe("lintWiki", () => {
   }
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-lint-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-lint-"));
     await mkdir(path.join(root, "concepts"), { recursive: true });
     await mkdir(path.join(root, "entities"), { recursive: true });
     await mkdir(path.join(root, "sources"), { recursive: true });
@@ -752,7 +753,7 @@ describe("lintWiki — stem-collision", () => {
   }
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-lint-stem-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-lint-stem-"));
   });
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });

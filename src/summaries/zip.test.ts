@@ -5,10 +5,11 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { writeFileSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildStoredZip, crc32 } from "./zip.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 describe("crc32", () => {
   test("the standard check value", () => {
@@ -21,7 +22,7 @@ describe("crc32", () => {
 
 describe("buildStoredZip", () => {
   test("unzip accepts the archive, lists every entry and returns the bytes verbatim", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "muninn-zip-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-zip-"));
     try {
       const jpg = new Uint8Array(1024);
       for (let i = 0; i < jpg.length; i++) jpg[i] = (i * 7) & 0xff;
@@ -61,7 +62,7 @@ describe("buildStoredZip", () => {
   });
 
   test("an empty archive is still a valid archive", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "muninn-zip-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-zip-"));
     try {
       const path = join(dir, "empty.zip");
       writeFileSync(path, buildStoredZip([]));

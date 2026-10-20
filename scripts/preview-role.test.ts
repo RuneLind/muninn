@@ -1,8 +1,9 @@
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { previewRoleEnv, previewRootProblem, readRoleKeys, type PreviewRoleOptions } from "./preview-role.ts";
+import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 const base: PreviewRoleOptions = {
   role: "fag",
@@ -39,7 +40,7 @@ describe("previewRoleEnv", () => {
 
 describe("readRoleKeys", () => {
   test("a .wiki-reader.json that is not JSON throws, naming the file", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "preview-role-test-"));
+    const root = testTempDirSync(path.join(tmpdir(), "preview-role-test-"));
     writeFileSync(path.join(root, ".wiki-reader.json"), "{ roleKeys: [", "utf8");
     expect(() => readRoleKeys(root)).toThrow(/\.wiki-reader\.json is not valid JSON/);
   });

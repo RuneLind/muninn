@@ -5,7 +5,7 @@
  * GCS on a loopback port and a real `BucketMirror` loop.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -15,6 +15,7 @@ import { registerWikiReadRoutes } from "../dashboard/routes/wiki-routes.ts";
 import { __resetWikiRegistryForTest } from "./registry-memo.ts";
 import { __resetWikiCacheForTest, getWikiIndex } from "./store.ts";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "./readonly.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const objects = new Map<string, { generation: number; body: string }>();
 let listStatus = 200;
@@ -52,7 +53,7 @@ beforeEach(async () => {
   objects.clear();
   listStatus = 200;
   mediaStatus = new Map();
-  base = await mkdtemp(path.join(tmpdir(), "bm-status-"));
+  base = await testTempDir(path.join(tmpdir(), "bm-status-"));
   root = path.join(base, "felles");
 });
 afterEach(async () => {

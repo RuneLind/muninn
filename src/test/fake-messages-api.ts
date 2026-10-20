@@ -16,9 +16,10 @@
  * single-label hosts, so neither plain http nor `localhost` works.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testTempDirSync } from "./temp-dir.ts";
 
 export const PROBE_MARKER = "FENCE-PROBE-7c1e";
 
@@ -306,7 +307,7 @@ export function hasOpenssl(): boolean {
 export function createFenceFixture(): FenceFixture {
   // realpath: macOS tmpdir is a /var → /private/var symlink, and the CLI and
   // canUseTool compare resolved paths.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "fence-fixture-")));
+  const root = realpathSync(testTempDirSync(join(tmpdir(), "fence-fixture-")));
   const botDir = join(root, "bots", "probe");
   const allowedDir = join(root, "frames", "job-1");
   const outside = join(root, "elsewhere");

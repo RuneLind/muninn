@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setupTestDb } from "../test/setup-db.ts";
@@ -26,6 +26,7 @@ import {
 } from "./handoff-interpreter.ts";
 import { parseGithubRunUrl } from "./ci-conclusion.ts";
 import { shortRunId } from "./mcp-server.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 setupTestDb();
 
@@ -186,7 +187,7 @@ describe("setFrontmatterStatus", () => {
 
 describe("flipSpecToVerified", () => {
   let dir: string;
-  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "muninn-spec-")); });
+  beforeEach(async () => { dir = await testTempDir(join(tmpdir(), "muninn-spec-")); });
   afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
   test("rewrites the file's frontmatter status to verified", async () => {
@@ -395,7 +396,7 @@ describe("interpretHandoffReply", () => {
   describe("green gate (CI-confirmed)", () => {
     let dir: string;
     beforeEach(async () => {
-      dir = await mkdtemp(join(tmpdir(), "muninn-bot-"));
+      dir = await testTempDir(join(tmpdir(), "muninn-bot-"));
       await mkdir(join(dir, "specs", "u"), { recursive: true });
     });
     afterEach(async () => { await rm(dir, { recursive: true, force: true }); });

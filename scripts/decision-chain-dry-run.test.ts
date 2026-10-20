@@ -4,9 +4,10 @@
  */
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { testTempDir } from "../src/test/temp-dir.ts";
 
 let root = "";
 let slotRoot = "";
@@ -41,7 +42,7 @@ const SLOT_PAGE = [
 ].join("\n");
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "dc-dry-run-"));
+  root = await testTempDir(path.join(tmpdir(), "dc-dry-run-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
   const page = [
     "---",
@@ -63,7 +64,7 @@ beforeAll(async () => {
     "",
   ].join("\n");
   await writeFile(path.join(root, "plans", "commented.md"), page, "utf8");
-  slotRoot = await mkdtemp(path.join(tmpdir(), "dc-dry-run-slot-"));
+  slotRoot = await testTempDir(path.join(tmpdir(), "dc-dry-run-slot-"));
   await mkdir(path.join(slotRoot, "plans"), { recursive: true });
   await writeFile(path.join(slotRoot, "plans", "a-slotted.md"), SLOT_PAGE, "utf8");
   await writeFile(path.join(slotRoot, "plans", "b-unslotted.md"), SLOT_PAGE.replace(NEXT, ""), "utf8");

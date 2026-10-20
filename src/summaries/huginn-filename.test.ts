@@ -21,7 +21,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync, mkdtempSync } from "node:fs";
+import { existsSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,6 +29,7 @@ import {
   HUGINN_FILENAME_MAX,
   HUGINN_FILENAME_FALLBACK,
 } from "./huginn-filename.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const REPO_ROOT = new URL("../..", import.meta.url).pathname;
 const HUGINN_PY = join(REPO_ROOT, "..", "huginn", ".venv", "bin", "python");
@@ -121,7 +122,7 @@ describe("sanitizeFilenameLikeHuginn", () => {
 /** Run the fixtures through huginn's own module, or `null` when it is absent. */
 function pythonAnswers(): string[] | null {
   if (!existsSync(HUGINN_PY) || !existsSync(HUGINN_FILENAME_PY)) return null;
-  const dir = mkdtempSync(join(tmpdir(), "muninn-huginn-filename-"));
+  const dir = testTempDirSync(join(tmpdir(), "muninn-huginn-filename-"));
   const input = join(dir, "stems.json");
   writeFileSync(input, JSON.stringify(FIXTURES));
   // The module is loaded BY PATH rather than imported as `main.utils.filename`,
@@ -137,6 +138,7 @@ function pythonAnswers(): string[] | null {
     stdout: "pipe",
     stderr: "pipe",
   });
+  rmSync(dir, { recursive: true, force: true });
   if (proc.exitCode !== 0) {
     throw new Error(`huginn's interpreter failed: ${proc.stderr.toString()}`);
   }

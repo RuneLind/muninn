@@ -11,7 +11,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -30,6 +30,7 @@ import {
 import { ProcTimeoutError } from "../../utils/run-proc.ts";
 import type { ProvenanceContext } from "../../wiki/provenance-service.ts";
 import type { StampConfig } from "../../wiki/stamp-roots.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const STAMPED = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
 const NEW_ID = "617e67b3-13d7-4407-a2fe-37ce79df9634";
@@ -105,7 +106,7 @@ const post = (app: Hono, body: unknown, headers: Record<string, string> = {}) =>
 const stamp = (app: Hono) => post(app, { wiki: "w", relPath: REL, ref: NEW_REF });
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "muninn-stamp-"));
+  root = await testTempDir(path.join(tmpdir(), "muninn-stamp-"));
   bin = path.join(root, "..", `fake-wiki-stamp-${process.pid}.sh`);
   argvFile = path.join(root, "..", `fake-wiki-stamp-argv-${process.pid}.txt`);
   await writeFile(path.join(root, REL), PAGE, "utf8");
@@ -178,7 +179,7 @@ describe("the spawn", () => {
   test("a real Bun child does not load the .env in its working directory", async () => {
     // The allowlist above means nothing if Bun refills the environment from the
     // `.env` in its cwd, which is muninn's own repo root in production.
-    const cwd = await mkdtemp(path.join(tmpdir(), "muninn-stamp-cwd-"));
+    const cwd = await testTempDir(path.join(tmpdir(), "muninn-stamp-cwd-"));
     const probe = path.join(cwd, "probe.ts");
     await writeFile(path.join(cwd, ".env"), "STAMP_LEAK_PROBE=leaked\n", "utf8");
     await writeFile(
@@ -694,7 +695,7 @@ describe("realpath containment", () => {
     // `isPathConfined` is lexical, so this page passes it. The CLI would then
     // read the target and rename over the link — destroying the link and copying
     // an outside page in.
-    const outsideDir = await mkdtemp(path.join(tmpdir(), "muninn-stamp-outside-"));
+    const outsideDir = await testTempDir(path.join(tmpdir(), "muninn-stamp-outside-"));
     const outside = path.join(outsideDir, "secret.md");
     await writeFile(outside, "---\ntype: plan\ntitle: Outside\n---\n", "utf8");
     const link = path.join(root, "link.md");
@@ -867,7 +868,7 @@ describe("the { tracker, key } form (Connections' Link)", () => {
     );
 
   beforeAll(async () => {
-    troot = await mkdtemp(path.join(tmpdir(), "muninn-stamp-trk-"));
+    troot = await testTempDir(path.join(tmpdir(), "muninn-stamp-trk-"));
     await mkdir(path.join(troot, "notes"), { recursive: true });
     await writeFile(path.join(troot, TREL), TPAGE, "utf8");
     await writeFile(

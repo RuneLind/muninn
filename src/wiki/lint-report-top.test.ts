@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, type LintFinding } from "./lint.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 // Lint check 11 — a DecisionLog item's long first sentence and a long
 // `<StatusRows>` row. Synthetic fixtures.
@@ -13,7 +14,7 @@ let root: string;
 const write = (rel: string, content: string) => Bun.write(path.join(root, rel), content);
 
 beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "wiki-report-top-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-report-top-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
 });
 afterEach(async () => {

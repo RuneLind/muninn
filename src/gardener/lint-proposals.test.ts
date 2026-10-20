@@ -1,11 +1,12 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildLintProposalRows, seedLintProposals } from "./lint-proposals.ts";
 import { sha256 } from "./util.ts";
 import type { LintFinding } from "../wiki/lint.ts";
 import type { InsertWikiProposalParams, LintGroupRow } from "../db/wiki-proposals.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** The row builder and the seeder, over temp files and injected DB seams. */
 describe("lint proposals", () => {
@@ -34,7 +35,7 @@ describe("lint proposals", () => {
   }
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "lint-proposals-"));
+    root = await testTempDir(path.join(tmpdir(), "lint-proposals-"));
     await Bun.write(path.join(root, "plans/a.mdx"), "---\ntitle: A\n---\n\nBody.\n");
     await Bun.write(path.join(root, "plans/b.mdx"), "---\ntitle: B\n---\n\nBody.\n");
   });

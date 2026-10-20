@@ -251,6 +251,24 @@ export function batchSessionIds(
 /** Test-only: forget which errors have already warned. */
 export { __resetClaudeUsageWarnsForTest as __resetSessionLedgerWarnsForTest } from "../utils/claude-usage-fetch.ts";
 
+/** True when `signal` was aborted by its caller rather than by a deadline: the
+ *  reader left the page, so a rejected call says nothing about claude-usage.
+ *  `AbortSignal.timeout` (and `AbortSignal.any` over it) aborts with a
+ *  `TimeoutError`; a deadline stays a degrade. */
+export function abortedByCaller(signal: AbortSignal | undefined): boolean {
+  if (!signal?.aborted) return false;
+  const reason: unknown = signal.reason;
+  return !(reason instanceof DOMException && reason.name === "TimeoutError");
+}
+
+/** Warns each distinct error once; an error a caller abort caused logs at debug. */
+function reportLegErrors(deps: SessionLedgerDeps, what: string, errors: string[], aborted: ReadonlySet<string>): void {
+  for (const error of new Set(errors)) {
+    if (aborted.has(error)) log.debug("{what} not read: request aborted ({error})", { what, error });
+    else claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what });
+  }
+}
+
 function isFacts(v: unknown): v is LedgerSessionFacts & { missing?: boolean } {
   return (
     typeof v === "object" &&
@@ -280,6 +298,7 @@ export async function fetchSessionsById(
   const unresolved = new Set<string>();
   const invalid = new Set<string>();
   const errors: string[] = [];
+  const aborted = new Set<string>();
   let answered = false;
   let failed = false;
   let truncated = false;
@@ -320,7 +339,9 @@ export async function fetchSessionsById(
     try {
       payload = await deps.fetchSessions(batch, signal);
     } catch (err) {
-      fail(err instanceof Error ? err.message : String(err));
+      const reason = err instanceof Error ? err.message : String(err);
+      if (abortedByCaller(signal)) aborted.add(`claude-usage sessions: ${reason}`);
+      fail(reason);
       continue;
     }
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
@@ -347,9 +368,7 @@ export async function fetchSessionsById(
   // EVERY distinct error warns, not only the first: with several batches the
   // first failure is not in general the only condition, and a warn-once keyed on
   // the message already stops a repeating one from filling the log.
-  for (const error of new Set(errors)) {
-    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "session ledger" });
-  }
+  reportLegErrors(deps, "session ledger", errors, aborted);
 
   return {
     // Unconditionally true HERE, and provably so: the `askable.length === 0`
@@ -485,6 +504,7 @@ export async function fetchMergesForSessions(
 ): Promise<MergeLedgerResult> {
   const merges: LedgerMerge[] = [];
   const errors: string[] = [];
+  const aborted = new Set<string>();
   let answered = false;
   let failed = false;
   let truncated = false;
@@ -506,7 +526,9 @@ export async function fetchMergesForSessions(
     try {
       payload = await deps.fetchMerges(batch, signal);
     } catch (err) {
-      fail(err instanceof Error ? err.message : String(err));
+      const reason = err instanceof Error ? err.message : String(err);
+      if (abortedByCaller(signal)) aborted.add(`claude-usage merges: ${reason}`);
+      fail(reason);
       continue;
     }
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
@@ -537,9 +559,7 @@ export async function fetchMergesForSessions(
     }
   }
 
-  for (const error of new Set(errors)) {
-    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "merge ledger" });
-  }
+  reportLegErrors(deps, "merge ledger", errors, aborted);
 
   return {
     asked: true,
@@ -606,6 +626,7 @@ export async function fetchHandoffs(
 ): Promise<HandoffLedgerResult> {
   const ranBy = new Map<string, HandoffRun[]>();
   const errors: string[] = [];
+  const aborted = new Set<string>();
   const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].filter((id) =>
     isSessionIdShape(id),
   );
@@ -631,7 +652,9 @@ export async function fetchHandoffs(
           answered = true;
           return;
         }
-        errors.push(`claude-usage handoff: ${err instanceof Error ? err.message : String(err)}`);
+        const error = `claude-usage handoff: ${err instanceof Error ? err.message : String(err)}`;
+        if (abortedByCaller(signal)) aborted.add(error);
+        errors.push(error);
         return;
       }
       if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
@@ -648,9 +671,7 @@ export async function fetchHandoffs(
     }),
   );
 
-  for (const error of new Set(errors)) {
-    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "handoff ledger" });
-  }
+  reportLegErrors(deps, "handoff ledger", errors, aborted);
 
   return {
     asked: true,
@@ -702,7 +723,7 @@ export async function fetchMergesForPrs(
     payload = await deps.fetchMergesForPrs([...unique], signal);
   } catch (err) {
     const error = `claude-usage merges?prs: ${err instanceof Error ? err.message : String(err)}`;
-    claudeUsageWarnOnce({ log, baseUrl: deps.baseUrl, key: error, error, what: "pr merge ledger" });
+    reportLegErrors(deps, "pr merge ledger", [error], abortedByCaller(signal) ? new Set([error]) : new Set());
     return { asked: true, reachable: false, merges, unmapped: [], truncated: false, errors: [error] };
   }
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {

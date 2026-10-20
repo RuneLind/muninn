@@ -31,7 +31,7 @@ beforeAll(() => __setClaudeCliVersionForTest("2.1.304"));
 afterAll(() => __setClaudeCliVersionForTest(undefined));
 import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -74,6 +74,7 @@ import { VIMEO_FRAME_SOURCE } from "../../summaries/frames.ts";
 import { YOUTUBE_FRAME_SOURCE, copyKeptFrame } from "../../summaries/frames.ts";
 import { getJob } from "../../youtube/state.ts";
 import type { BotConfig } from "../../bots/config.ts";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 const config = { knowledgeApiUrl: "http://127.0.0.1:1", tracingEnabled: false } as never;
 
@@ -205,7 +206,7 @@ async function settle(): Promise<void> {
 
 const tempRoots: string[] = [];
 function tempFramesRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "rerun-frames-"));
+  const root = testTempDirSync(join(tmpdir(), "rerun-frames-"));
   tempRoots.push(root);
   return root;
 }

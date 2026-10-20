@@ -1,11 +1,12 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, unlink } from "node:fs/promises";
+import { rm, mkdir, writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { wikiDirtyStat, __resetForTest } from "../wiki/commit.ts";
 import type { Watcher } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** Run `git -C <cwd> <args…>` in a fixture repo, returning trimmed stdout. */
 async function git(cwd: string, args: string[]): Promise<{ code: number; out: string }> {
@@ -21,7 +22,7 @@ async function git(cwd: string, args: string[]): Promise<{ code: number; out: st
  * Returns { repo, wikiDir }.
  */
 async function makeRepo(base: string): Promise<{ repo: string; wikiDir: string }> {
-  const repo = await mkdtemp(path.join(base, "repo-"));
+  const repo = await testTempDir(path.join(base, "repo-"));
   const wikiDir = path.join(repo, "data", "wiki");
   await mkdir(path.join(wikiDir, "concepts"), { recursive: true });
   await git(repo, ["init", "-b", "main"]);
@@ -54,7 +55,7 @@ describe("checkWikiCommitter (sweep core)", () => {
 
   beforeEach(async () => {
     __resetForTest();
-    base = await mkdtemp(path.join(tmpdir(), "wiki-committer-"));
+    base = await testTempDir(path.join(tmpdir(), "wiki-committer-"));
   });
   afterEach(async () => {
     __resetForTest();
@@ -149,7 +150,7 @@ describe("checkWikiCommitter (sweep core)", () => {
   });
 
   test("wikiDir outside any git repo → no-op", async () => {
-    const loose = await mkdtemp(path.join(base, "loose-"));
+    const loose = await testTempDir(path.join(base, "loose-"));
     const alerts = await checkWikiCommitter(watcher, botConfig(loose));
     expect(alerts).toHaveLength(0);
   });
@@ -160,7 +161,7 @@ describe("wikiDirtyStat (Index-card badge endpoint logic)", () => {
 
   beforeEach(async () => {
     __resetForTest();
-    base = await mkdtemp(path.join(tmpdir(), "wiki-dirty-"));
+    base = await testTempDir(path.join(tmpdir(), "wiki-dirty-"));
   });
   afterEach(async () => {
     __resetForTest();
@@ -191,7 +192,7 @@ describe("wikiDirtyStat (Index-card badge endpoint logic)", () => {
   });
 
   test("non-repo dir → 0 / null (never throws)", async () => {
-    const loose = await mkdtemp(path.join(base, "loose-"));
+    const loose = await testTempDir(path.join(base, "loose-"));
     const stat = await wikiDirtyStat(loose);
     expect(stat.dirtyCount).toBe(0);
     expect(stat.oldestDirtyMtimeMs).toBeNull();

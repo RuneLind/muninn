@@ -5,6 +5,7 @@ import {
   getAuthorTierThresholds,
   __resetAuthorScoresCacheForTest,
 } from "./author-scores.ts";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -31,6 +32,9 @@ describe("score loader (temp file)", () => {
   const prev = process.env.X_AUTHOR_SCORES_PATH;
 
   afterEach(() => {
+    // A score file a test wrote under tmpdir() goes with the test.
+    const written = process.env.X_AUTHOR_SCORES_PATH;
+    if (written !== prev && written?.startsWith(tmpdir())) rmSync(written, { force: true });
     if (prev === undefined) delete process.env.X_AUTHOR_SCORES_PATH;
     else process.env.X_AUTHOR_SCORES_PATH = prev;
     __resetAuthorScoresCacheForTest();

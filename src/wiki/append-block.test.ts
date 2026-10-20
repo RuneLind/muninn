@@ -1,11 +1,12 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { appendBlockToPage, spliceSentinelBlock, type AppendBlockOptions } from "./append-block.ts";
 import { buildFactcheckBlock, FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 import { commitWikiChange, __resetForTest } from "./commit.ts";
 import { sha256 } from "../gardener/util.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const BLOCK = buildFactcheckBlock("Overall: mostly accurate.\n\n✅ **Claim A**\nReasoning.", "2026-07-22");
 
@@ -133,10 +134,10 @@ test("appendBlockToPage does NOT commit on a stale baseHash (no write, no commit
 
 test("appendBlockToPage produces exactly one [fact-check] commit (page + log.md), tree clean", async () => {
   __resetForTest();
-  const base = await mkdtemp(path.join(tmpdir(), "factcheck-append-"));
+  const base = await testTempDir(path.join(tmpdir(), "factcheck-append-"));
   try {
     // Fixture repo with the wiki nested at data/wiki (huginn-jarvis layout).
-    const repo = await mkdtemp(path.join(base, "repo-"));
+    const repo = await testTempDir(path.join(base, "repo-"));
     const wikiDir = path.join(repo, "data", "wiki");
     await mkdir(path.join(wikiDir, "analyses"), { recursive: true });
     const relPath = "analyses/page.md";

@@ -10,7 +10,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -25,6 +25,7 @@ import { SESSION_ID_MAX_CHARS } from "../../wiki/session-ledger.ts";
 import { registerWikiRoutes } from "./wiki-routes.ts";
 import type { ProvenanceContext } from "../../wiki/provenance-service.ts";
 import type { Config } from "../../config.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const ID_A = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
 const SESSION_A = `claude-code:${ID_A}`;
@@ -63,8 +64,8 @@ function testCtx(over: Partial<ProvenanceContext> = {}): ProvenanceContext {
 }
 
 beforeAll(async () => {
-  mimir = await mkdtemp(path.join(tmpdir(), "prov-mimir-"));
-  kode = await mkdtemp(path.join(tmpdir(), "prov-kode-"));
+  mimir = await testTempDir(path.join(tmpdir(), "prov-mimir-"));
+  kode = await testTempDir(path.join(tmpdir(), "prov-kode-"));
 
   await writeFile(
     path.join(mimir, "plan.md"),
@@ -235,7 +236,7 @@ describe("the listing and the page route", () => {
   });
 
   test("a wiki nothing stamped answers `{}` — which is how the client renders no facet at all", async () => {
-    const empty = await mkdtemp(path.join(tmpdir(), "prov-empty-"));
+    const empty = await testTempDir(path.join(tmpdir(), "prov-empty-"));
     try {
       await writeFile(path.join(empty, "a.md"), "---\ntitle: A\n---\n\nbody\n");
       __setWikiRegistryForTest([
@@ -319,6 +320,37 @@ describe("the listing and the page route", () => {
     expect(body.provenancePending).toBe(true);
   });
 
+  // arch-review 2026-10 #19: the route hands its request signal to the legs.
+  test("/api/wiki/page/provenance aborts its fan-out when the request goes away", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const hang = (signal?: AbortSignal) => {
+      seen.push(signal);
+      return new Promise<never>((_, reject) =>
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+      );
+    };
+    const live = new Hono();
+    registerWikiRoutes(
+      live,
+      { knowledgeApiUrl: "http://localhost:8321", claudeUsageUrl: "http://127.0.0.1:8787", claudeUsagePublicUrl: null } as Config,
+      testCtx({
+        budgetMs: 10_000,
+        sessionLedger: {
+          ...testCtx().sessionLedger,
+          fetchSessions: (_ids, signal) => hang(signal),
+          fetchMerges: (_ids, signal) => hang(signal),
+        },
+      }),
+    );
+    const req = new AbortController();
+    const pending = Promise.resolve(live.request("/api/wiki/page/provenance?wiki=mimir&relPath=plan.md", { signal: req.signal }));
+    await new Promise((r) => setTimeout(r, 30));
+    req.abort();
+    await Promise.race([pending.catch(() => null), new Promise((r) => setTimeout(r, 2_000))]);
+    expect(seen.length).toBeGreaterThan(0);
+    for (const signal of seen) expect(signal?.aborted).toBe(true);
+  });
+
   test("/api/wiki/page/provenance answers {} for an unstamped page and 404 for none", async () => {
     const plain = await pageApp.request("/api/wiki/page/provenance?wiki=mimir&relPath=plain.md");
     expect(plain.status).toBe(200);
@@ -343,7 +375,7 @@ describe("the answer is BOUNDED — the caller picks its size", () => {
   let bigApp: Hono;
 
   beforeAll(async () => {
-    big = await mkdtemp(path.join(tmpdir(), "prov-big-"));
+    big = await testTempDir(path.join(tmpdir(), "prov-big-"));
     // Three pages × 400 distinct session refs each. Unbounded, one GET walks the
     // whole registry and fans out into ⌈1200/200⌉ = 6 claude-usage calls.
     for (let p = 0; p < 3; p += 1) {

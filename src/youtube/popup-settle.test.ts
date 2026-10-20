@@ -32,11 +32,12 @@
  * real timer, so a 5s bound is asserted by the number requested rather than by
  * a 5s test.
  */
-import { afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdtempSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const EXT_DIR = join(import.meta.dir, "..", "..", "extensions", "youtube");
 const POPUP_JS = join(EXT_DIR, "popup.js");
@@ -183,6 +184,13 @@ interface Driven {
 
 const savedGlobals: Array<[string, PropertyDescriptor | undefined]> = [];
 
+// One copy of the popup per case (see drivePopup); removed after the file, not
+// before the import, since a case's module must stay loadable while it runs.
+const popupDirs: string[] = [];
+afterAll(() => {
+  for (const dir of popupDirs) rmSync(dir, { recursive: true, force: true });
+});
+
 function installGlobal(name: string, value: unknown) {
   savedGlobals.push([name, Object.getOwnPropertyDescriptor(globalThis, name)]);
   Object.defineProperty(globalThis, name, {
@@ -294,7 +302,8 @@ async function drivePopup(opts: DriveOptions): Promise<Driven> {
   });
 
   // A fresh module instance per case: Bun caches by resolved path.
-  const dir = mkdtempSync(join(tmpdir(), "muninn-popup-"));
+  const dir = testTempDirSync(join(tmpdir(), "muninn-popup-"));
+  popupDirs.push(dir);
   copyFileSync(POPUP_JS, join(dir, "popup.js"));
   copyFileSync(RULES_JS, join(dir, "capture-rules.js"));
   await import(pathToFileURL(join(dir, "popup.js")).href);

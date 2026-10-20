@@ -499,6 +499,11 @@ test.describe("acceptance 19 — the breaker", () => {
     // Without this a persistent 401 — a Texas outage, an unrefreshable token —
     // is reload → init → 401 → reload from every open tab.
     await open(page, { provider: "entra" });
+    // Armed BEFORE the first refusal, because the reload starts inside that
+    // evaluate. The reloaded page's provider stays null until its own
+    // `/chat/me` answers, and a ws refusal judged against a null provider is
+    // "ignore" — the race `open()` waits out for the first load.
+    const reloadedMe = page.waitForResponse((r) => r.url().includes("/chat/me"));
     const first = await page.evaluate(() =>
       (window as unknown as { __muninnAuthRefusal: (c: string) => string }).__muninnAuthRefusal("ws"));
     expect(first).toBe("reload");
@@ -508,6 +513,7 @@ test.describe("acceptance 19 — the breaker", () => {
     // survives the navigation — which is the whole mechanism.
     await page.waitForLoadState("load");
     await page.waitForFunction(() => typeof (window as { authedFetch?: unknown }).authedFetch === "function");
+    await reloadedMe;
     const second = await page.evaluate(() =>
       (window as unknown as { __muninnAuthRefusal: (c: string) => string }).__muninnAuthRefusal("ws"));
     expect(second).toBe("banner");

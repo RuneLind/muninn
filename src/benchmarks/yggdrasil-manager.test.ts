@@ -13,7 +13,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
+import { writeFile, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, getDb, initDb } from "../db/client.ts";
@@ -24,6 +24,7 @@ import {
   benchmarkYggdrasilManager,
   buildBenchRepoName,
 } from "./yggdrasil-manager.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 describe("buildBenchRepoName", () => {
   test("prefixes with bench-<issue>-<repo>", () => {
@@ -71,7 +72,7 @@ describeIntegration("BenchmarkYggdrasilManager (integration)", () => {
   beforeAll(async () => {
     initDb(loadConfig());
 
-    fixtureDir = await mkdtemp(join(tmpdir(), "ygg-bench-fixture-"));
+    fixtureDir = await testTempDir(join(tmpdir(), "ygg-bench-fixture-"));
     // Minimal Java file so the indexer has something to parse. Yggdrasil's
     // symbol extractor walks java/kotlin/typescript by default.
     const srcDir = join(fixtureDir, "src", "main", "java", "bench");

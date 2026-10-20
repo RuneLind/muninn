@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -14,6 +14,7 @@ import {
   type McpServerStatus,
 } from "./mcp-status.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 function makeBot(dir: string, opts: Partial<BotConfig> = {}): BotConfig {
   return {
@@ -27,7 +28,7 @@ function makeBot(dir: string, opts: Partial<BotConfig> = {}): BotConfig {
 }
 
 function makeBotDir(mcp: object | null): string {
-  const dir = mkdtempSync(join(tmpdir(), "mcp-status-"));
+  const dir = testTempDirSync(join(tmpdir(), "mcp-status-"));
   if (mcp !== null) {
     writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcp));
   }

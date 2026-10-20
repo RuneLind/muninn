@@ -15,7 +15,7 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, utimes } from "node:fs/promises";
+import { rm, mkdir, writeFile, utimes } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -27,6 +27,7 @@ import { sha256 } from "../gardener/util.ts";
 import { syncRepo, syncSubsumesSweeper, __resetSyncStateForTest, type SyncDeps } from "./run.ts";
 import { SYNC_QUIET_MS } from "./decide.ts";
 import type { SyncRepo } from "./config.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 async function git(cwd: string, args: string[]): Promise<{ code: number; out: string }> {
   const proc = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -100,7 +101,7 @@ describe("the sync loop and the wiki write lock", () => {
     __resetForTest();
     __resetWikiWriteQueueForTest();
     __resetSyncStateForTest();
-    base = await mkdtemp(path.join(tmpdir(), "sync-lock-"));
+    base = await testTempDir(path.join(tmpdir(), "sync-lock-"));
   });
   afterEach(async () => {
     __resetSyncStateForTest();

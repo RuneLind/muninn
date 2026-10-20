@@ -1,9 +1,10 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { writeBotConfigField } from "./config-edit.ts";
 import { validateBotConfigField } from "./config.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 let baseDir: string;
 
@@ -20,7 +21,7 @@ function readConfig(name: string): Record<string, unknown> {
 }
 
 beforeEach(() => {
-  baseDir = mkdtempSync(join(tmpdir(), "muninn-cfg-"));
+  baseDir = testTempDirSync(join(tmpdir(), "muninn-cfg-"));
 });
 afterEach(() => {
   delete process.env.MUNINN_BOTS_DIR;
@@ -115,7 +116,7 @@ test.skipIf(isRoot)("with no baseDir it writes into the root discovery READ, not
   // for every bot the same /models page lists. Pinned through the refusal
   // message, which names the base it looked under — the only observable that
   // does not require writing into the checkout's own roster.
-  const locked = mkdtempSync(join(tmpdir(), "muninn-locked-bots-"));
+  const locked = testTempDirSync(join(tmpdir(), "muninn-locked-bots-"));
   chmodSync(locked, 0o000);
   process.env.MUNINN_BOTS_DIR = locked;
   try {

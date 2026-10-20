@@ -19,6 +19,7 @@ import {
   __setClassifyBudgetForTest,
 } from "./git-dates.ts";
 import { setFrontmatterScalar } from "../plans/frontmatter.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** `%at` is seconds; the maps are ms. */
 const at = (iso: string) => Math.floor(Date.parse(iso) / 1000);
@@ -305,10 +306,10 @@ test("buildWikiGitDates: a symlinked root still resolves its subtree pathspec", 
   // walk to null. On macOS every `/tmp` path hits this — including the e2e fixtures'
   // `WIKI_EXTRA` wikis and any mkdtemp root — so it is a shipping path, not a test-only
   // quirk. Uses this repo via its own symlinked temp view to keep the assertion real.
-  const { mkdtemp, symlink, rm } = await import("node:fs/promises");
+  const { symlink, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
-  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-link-"));
+  const dir = await testTempDir(path.join(tmpdir(), "git-dates-link-"));
   const link = path.join(dir, "wiki");
   try {
     await symlink(import.meta.dir, link);
@@ -538,10 +539,10 @@ function page(title: string, series: string, prose: string, extra = "", heading 
  * exercised for real.
  */
 async function metadataOnlyFixture(): Promise<{ wiki: string; dir: string }> {
-  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
-  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-meta-"));
+  const dir = await testTempDir(path.join(tmpdir(), "git-dates-meta-"));
   const wiki = path.join(dir, "wiki");
   await mkdir(wiki, { recursive: true });
   const write = (rel: string, text: string) => writeFile(path.join(wiki, rel), text);
@@ -635,10 +636,10 @@ test("buildWikiGitDates: a metadata-only edit loses the mtime rule, every other 
 async function seededWiki(
   seed: Record<string, string | Uint8Array>,
 ): Promise<{ wiki: string; dir: string; write: (rel: string, body: string | Uint8Array) => Promise<void> }> {
-  const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+  const { mkdir, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
-  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-fix1-"));
+  const dir = await testTempDir(path.join(tmpdir(), "git-dates-fix1-"));
   const wiki = path.join(dir, "wiki");
   await mkdir(wiki, { recursive: true });
   const write = (rel: string, body: string | Uint8Array) =>
@@ -912,10 +913,10 @@ async function commitAt(dir: string, iso: string, message: string): Promise<void
 }
 
 test("buildWikiGitDates: a committed metadata-only change does not move the touch date", async () => {
-  const { mkdtemp, mkdir, writeFile, rename, rm } = await import("node:fs/promises");
+  const { mkdir, writeFile, rename, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
-  const dir = await mkdtemp(path.join(tmpdir(), "git-dates-committed-"));
+  const dir = await testTempDir(path.join(tmpdir(), "git-dates-committed-"));
   const wiki = path.join(dir, "wiki");
   await mkdir(wiki, { recursive: true });
   const write = (rel: string, text: string) => writeFile(path.join(wiki, rel), text);

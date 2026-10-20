@@ -18,7 +18,9 @@
  * the dev server still see the real flags).
  */
 
+import { afterAll } from "bun:test";
 import { AMBIENT_INSTANCE_ENV, AMBIENT_INSTANCE_ENV_PREFIXES } from "./ambient-env.ts";
+import { removeTestTempDirs } from "./temp-dir.ts";
 
 for (const name of AMBIENT_INSTANCE_ENV) {
   delete process.env[name];
@@ -31,3 +33,7 @@ for (const name of Object.keys(process.env)) {
     delete process.env[name];
   }
 }
+
+// Remove the temp dirs `src/test/temp-dir.ts` handed out, once the run ends.
+// An `afterAll` in a preload is scoped to the whole `bun test` run.
+afterAll(removeTestTempDirs);

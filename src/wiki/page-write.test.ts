@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, realpath, symlink, chmod } from "node:fs/promises";
+import { rm, mkdir, writeFile, realpath, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeWikiPage, defaultPageWriteIo, type PageWriteOptions } from "./page-write.ts";
@@ -11,6 +11,7 @@ import { __resetWikiWriteQueueForTest, wikiWriteQueueKey } from "./queue.ts";
 import { applyWikiProposal } from "../gardener/apply.ts";
 import { sha256 } from "../gardener/util.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** In-memory filesystem whose reads/writes yield to the event loop, so an
  *  unqueued read→write pair WOULD interleave and lose a log entry. */
@@ -298,7 +299,7 @@ test("TOCTOU: a gardener apply + an append on one wiki serialize — both log en
 
 test("the queue key is realpath-derived — a symlinked root shares ONE chain", async () => {
   __resetWikiWriteQueueForTest();
-  const base = await mkdtemp(path.join(tmpdir(), "queue-key-"));
+  const base = await testTempDir(path.join(tmpdir(), "queue-key-"));
   try {
     const real = path.join(base, "wiki");
     await mkdir(real, { recursive: true });
@@ -326,11 +327,11 @@ test("the queue key is realpath-derived — a symlinked root shares ONE chain", 
 test("no deadlock when the wiki root IS the git toplevel and the commit is awaited", async () => {
   __resetForTest();
   __resetWikiWriteQueueForTest();
-  const base = await mkdtemp(path.join(tmpdir(), "integrate-apply-"));
+  const base = await testTempDir(path.join(tmpdir(), "integrate-apply-"));
   try {
     // Wiki root == git toplevel: the shape that self-deadlocks if the write queue
     // and the commit queue share one chain map.
-    const wikiDir = await mkdtemp(path.join(base, "wiki-"));
+    const wikiDir = await testTempDir(path.join(base, "wiki-"));
     await mkdir(path.join(wikiDir, "analyses"), { recursive: true });
     const relPath = "analyses/page.md";
     const abs = path.join(wikiDir, relPath);
@@ -460,7 +461,7 @@ test("the logged path is unchanged beside it", async () => {
 
 test("an UNREADABLE log.md is skipped, never overwritten with a fresh log (finding 21)", async () => {
   __resetWikiWriteQueueForTest();
-  const root = await realpath(await mkdtemp(path.join(tmpdir(), "logwipe-")));
+  const root = await realpath(await testTempDir(path.join(tmpdir(), "logwipe-")));
   const logPath = path.join(root, "log.md");
   const pagePath = path.join(root, "analyses", "page.md");
   const original = "# Activity Log\n\n## [2026-01-01] create | Old\n- an entry that must survive\n";
@@ -491,7 +492,7 @@ test("an UNREADABLE log.md is skipped, never overwritten with a fresh log (findi
 
 test("an ABSENT log.md is still created by a page write (finding 21 scope guard)", async () => {
   __resetWikiWriteQueueForTest();
-  const root = await realpath(await mkdtemp(path.join(tmpdir(), "logcreate-")));
+  const root = await realpath(await testTempDir(path.join(tmpdir(), "logcreate-")));
   try {
     await mkdir(path.join(root, "analyses"), { recursive: true });
     await writeFile(path.join(root, "analyses", "page.md"), "# Page\n\nBody.\n");

@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { checkWikiLinter } from "./wiki-linter.ts";
@@ -8,6 +8,7 @@ import { __setReadonlyWikiRootsForTest } from "../wiki/readonly.ts";
 import type { Watcher } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * Checker guards + alert shape. Uses real temp-dir wikis via the store (the
@@ -39,7 +40,7 @@ describe("checkWikiLinter", () => {
 
   beforeEach(async () => {
     __resetWikiCacheForTest();
-    root = await mkdtemp(path.join(tmpdir(), "wiki-linter-check-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-linter-check-"));
     await mkdir(path.join(root, "concepts"), { recursive: true });
   });
 

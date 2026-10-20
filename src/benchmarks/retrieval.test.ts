@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
   type RetrievalQuery,
   type SearchRunners,
 } from "./retrieval.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 describe("computeQueryMetrics", () => {
   const q = (expected: string[], k?: number): Pick<RetrievalQuery, "id" | "target" | "expectedDocIds" | "k"> => ({
@@ -191,7 +192,7 @@ describe("parseRetrievalSet", () => {
 
 describe("discoverRetrievalSets", () => {
   test("globs jsonl files and returns empty when dir missing", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "retrieval-"));
+    const tmp = testTempDirSync(join(tmpdir(), "retrieval-"));
     try {
       // No benchmarks/retrieval dir yet → empty
       expect(await discoverRetrievalSets(join(tmp, "benchmarks"))).toEqual([]);

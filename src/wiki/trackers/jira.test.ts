@@ -191,6 +191,16 @@ describe("mention", () => {
     ].join("\n");
     expect(rels(inferJiraIssues(page({ body }), CONFIG))).toEqual({ "DEMO-130": ["mention"] });
   });
+
+  // arch-review 2026-10 #35: the reader's pairing (`lineCodeSpanRanges`), not the composer's.
+  test("code is what the reader renders as code: an odd run count, a backtick in a double span", () => {
+    const body = [
+      "Run `DEMO-140` here, and a lone ` tick.",
+      "Literal `` a`DEMO-141 `` in a double span.",
+      "After `x` the key DEMO-142 is prose.",
+    ].join("\n");
+    expect(rels(inferJiraIssues(page({ body }), CONFIG))).toEqual({ "DEMO-142": ["mention"] });
+  });
 });
 
 describe("ordering", () => {
@@ -282,6 +292,18 @@ describe("fix round 1: key shapes that are not keys", () => {
       "DEMO-7969": ["stem"],
     });
     expect(stemmed("demo-12x")).toEqual({});
+  });
+
+  // arch-review 2026-10 #17: the stem rule takes the title rule's distance cap.
+  test("stem: a year after a same-width key is no second key, and the base stands", () => {
+    expect(stemmed("2026-09-01-demo-8045-2026-arsavregning")).toEqual({ "DEMO-8045": ["stem"] });
+    expect(stemKeys("demo-8045-2026-arsavregning", CONFIG)).toEqual(["DEMO-8045"]);
+    expect(stemKeys("demo-8045-2026", CONFIG)).toEqual(["DEMO-8045"]);
+    // Within the cap both keys still count, and a date after the key is still none.
+    expect(stemKeys("demo-7588-7969-notes", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969"]);
+    expect(stemKeys("demo-8045-2026-09-25", CONFIG)).toEqual([]);
+    // The title rule is unchanged.
+    expect(titleKeys("DEMO-8045/2026", CONFIG)).toEqual(["DEMO-8045"]);
   });
 
   test("a leading-zero number is not a key in any inferred rule", () => {
@@ -392,6 +414,21 @@ describe("PR 3 fix round 1: the adapter's key seams", () => {
   test("parseLedger: `sessions` that is not an array is null, never a string's length", () => {
     expect(jiraAdapter.parseLedger!({ sessions: "abc", totalCost: 1, costedSessions: 3, truncated: false })).toBeNull();
     expect(jiraAdapter.parseLedger!({ sessions: { length: 3 }, totalCost: 1 })).toBeNull();
+  });
+
+  // arch-review 2026-10 #18: the single-key answer takes the many-key row rules.
+  test("parseLedger: a cost that is no cost, or more costed than counted sessions, is no answer", () => {
+    const ok = { sessions: [{}, {}], totalCost: 1.5, costedSessions: 2, truncated: false };
+    expect(jiraAdapter.parseLedger!(ok)).toEqual({ state: "priced", sessions: 2, totalCost: 1.5, costedSessions: 2, truncated: false });
+    for (const totalCost of ["1.5", null, undefined, Number.NaN, Infinity, 1e308, -1, -0.006]) {
+      expect(jiraAdapter.parseLedger!({ ...ok, totalCost })).toBeNull();
+    }
+    for (const costedSessions of [3, -1, 1.5, "2", null, undefined]) {
+      expect(jiraAdapter.parseLedger!({ ...ok, costedSessions })).toBeNull();
+    }
+    // -0.004 rounds to -0: accepted, as the many-key parser accepts it.
+    expect(JSON.stringify(jiraAdapter.parseLedger!({ ...ok, totalCost: -0.004 })?.totalCost)).toBe("0");
+    expect(jiraAdapter.parseLedger!({ ...ok, totalCost: 0, costedSessions: 0 })).toMatchObject({ costedSessions: 0, totalCost: 0 });
   });
 });
 

@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -9,6 +9,7 @@ import { createChatRoutes } from "../chat/routes.ts";
 import { chatState } from "../chat/state.ts";
 import type { Identity } from "./introspect.ts";
 import type { AuthRole } from "./role.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * Acceptance item 9 - "identity cannot be claimed" - driven through the REAL
@@ -31,7 +32,7 @@ const ISSUE = "MEL-1234";
 
 const tmpDirs: string[] = [];
 async function harness(identity: Identity | null, role: AuthRole | null) {
-  const dir = await mkdtemp(join(tmpdir(), "muninn-prc-test-"));
+  const dir = await testTempDir(join(tmpdir(), "muninn-prc-test-"));
   tmpDirs.push(dir);
   // A report that DOES exist for colleague B, so a 403 cannot be mistaken for
   // the 404 an absent file would produce anyway.

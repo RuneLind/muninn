@@ -22,7 +22,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setupTestDb } from "../../test/setup-db.ts";
@@ -40,6 +40,7 @@ import { __resetGardenerMutexForTest, runExclusive } from "../../gardener/backlo
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import type { BotConfig } from "../../bots/config.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 setupTestDb();
 
@@ -157,8 +158,8 @@ beforeAll(() => {
 });
 
 beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "race-wiki-"));
-  framesRoot = await mkdtemp(path.join(tmpdir(), "race-frames-"));
+  root = await testTempDir(path.join(tmpdir(), "race-wiki-"));
+  framesRoot = await testTempDir(path.join(tmpdir(), "race-frames-"));
   await Bun.write(path.join(root, "notes.md"), "# Notes\n");
   docRaw = RAW;
   deleteCalls = 0;

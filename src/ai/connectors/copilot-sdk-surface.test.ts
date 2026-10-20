@@ -9,9 +9,10 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 const sessions: Array<Record<string, unknown>> = [];
 
@@ -41,7 +42,7 @@ const { executePrompt } = await import("./copilot-sdk.ts");
 let botDir: string;
 
 beforeAll(() => {
-  botDir = mkdtempSync(join(tmpdir(), "copilot-surface-"));
+  botDir = testTempDirSync(join(tmpdir(), "copilot-surface-"));
   writeFileSync(join(botDir, ".mcp.json"), JSON.stringify({ mcpServers: { stub: { command: "true", args: [] } } }));
 });
 

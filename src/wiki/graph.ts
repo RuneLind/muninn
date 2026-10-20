@@ -31,6 +31,7 @@ import {
   type SessionLedgerResult,
 } from "./session-ledger.ts";
 import { pageTimeMs } from "../dashboard/views/components/wiki-filter.ts";
+import { seriesCensusKey } from "../dashboard/views/components/wiki-groups.ts";
 // A bookkeeping page (`index`, `log`, `CLAUDE`) is never a graph node.
 import { isBookkeeping } from "./strength.ts";
 import { trackerAdapter } from "./trackers/index.ts";
@@ -401,10 +402,14 @@ export async function buildGraph(
     rootEcho = `${parsed.tracker}:${key}`;
     roots.push(issueNode(parsed.tracker, key));
   } else if (query.scope === "series") {
+    // The rail's census key (trim + lower-case), so a root in any case finds the
+    // series the rail folds; the stored `series` is never rewritten.
+    const want = seriesCensusKey(query.root);
     const members = index.pages
-      .filter((p) => p.series === query.root && !isBookkeeping(p.relPath))
+      .filter((p) => typeof p.series === "string" && seriesCensusKey(p.series) === want && !isBookkeeping(p.relPath))
       .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
     if (!members.length) return { ok: false, status: 404, error: `no series "${echoQuery(query.root)}" in this wiki` };
+    rootEcho = want;
     for (const p of members) roots.push(pageNode(p));
   } else {
     const keys = [...keyMap.values()]

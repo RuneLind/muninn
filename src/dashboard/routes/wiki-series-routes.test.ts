@@ -8,7 +8,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -25,6 +25,7 @@ import { sha256 } from "../../gardener/util.ts";
 import { registerWikiSeriesRoutes, type WikiSeriesRouteDeps } from "./wiki-series-routes.ts";
 import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
 import { __resetSyncReposForTest } from "../../sync/config.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 const PLAN = "plans/alpha.mdx";
 const SHIPPED = "plans/beta.mdx";
@@ -93,7 +94,7 @@ async function seed(): Promise<void> {
 }
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "muninn-series-route-"));
+  root = await testTempDir(path.join(tmpdir(), "muninn-series-route-"));
   await seed();
   __setWikiRegistryForTest([{ name: "w", root, source: "extra" }]);
 });
@@ -907,7 +908,7 @@ describe("who commits the write", () => {
    * Realpath'd, because `SyncRepo.path` is and macOS `tmpdir()` is a symlink.
    */
   async function gitWiki(opts: { sub?: string; remote?: boolean } = {}): Promise<string> {
-    const top = await realpath(await mkdtemp(path.join(tmpdir(), "muninn-series-git-")));
+    const top = await realpath(await testTempDir(path.join(tmpdir(), "muninn-series-git-")));
     const dir = opts.sub ? path.join(top, opts.sub) : top;
     for (const [rel, body] of PAGES) {
       await mkdir(path.join(dir, path.dirname(rel)), { recursive: true });

@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
@@ -10,10 +10,11 @@ import {
   TYPE_CAP_TOP,
   MONTH_CAP,
 } from "./atlas.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** Write a wiki tree from a {relPath: content} map under a fresh temp dir. */
 async function makeWiki(files: Record<string, string>): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "wiki-atlas-"));
+  const root = await testTempDir(path.join(tmpdir(), "wiki-atlas-"));
   for (const [rel, content] of Object.entries(files)) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
     await Bun.write(path.join(root, rel), content);

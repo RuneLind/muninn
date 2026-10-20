@@ -1,10 +1,11 @@
 import { test, expect, afterEach, spyOn } from "bun:test";
 import * as serenaConfig from "./config.ts";
 import { readBotsRoot } from "../bots/config.ts";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serenaManager } from "./manager.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /**
  * `init()` scans the roster this process DISCOVERED, not a second hardcoded copy
@@ -24,7 +25,7 @@ afterEach(() => {
 });
 
 test("init() discovers Serena instances under MUNINN_BOTS_DIR", () => {
-  const root = mkdtempSync(join(tmpdir(), "muninn-serena-bots-"));
+  const root = testTempDirSync(join(tmpdir(), "muninn-serena-bots-"));
   created.push(root);
   const dir = join(root, "zzserenabot");
   mkdirSync(dir, { recursive: true });
@@ -54,7 +55,7 @@ test.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
     // alone left this second reader unguarded — measured: with a chmod 000
     // `MUNINN_BOTS_DIR`, `discoverAllBots()` fell back to the checkout's roster
     // and `init()` then threw EACCES out of the boot.
-    const root = mkdtempSync(join(tmpdir(), "serena-locked-"));
+    const root = testTempDirSync(join(tmpdir(), "serena-locked-"));
     chmodSync(root, 0o000);
     const prev = process.env.MUNINN_BOTS_DIR;
     process.env.MUNINN_BOTS_DIR = root;
@@ -84,7 +85,7 @@ test.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
   () => {
     // The other half of the same boot path, pinned on its own: the manager
     // hands over a readable root, so this catch is never entered from there.
-    const root = mkdtempSync(join(tmpdir(), "serena-locked-direct-"));
+    const root = testTempDirSync(join(tmpdir(), "serena-locked-direct-"));
     chmodSync(root, 0o000);
     try {
       expect(serenaConfig.discoverSerenaConfigs(root)).toEqual([]);

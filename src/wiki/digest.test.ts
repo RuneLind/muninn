@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Config } from "../config.ts";
@@ -19,6 +19,7 @@ import {
   type LogEntry,
 } from "./digest.ts";
 import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const SAMPLE_LOG = [
   "# Log",
@@ -212,7 +213,7 @@ describe("generateWikiDigest", () => {
   const bot = { name: "jarvis", dir: "/tmp/jarvis" } as BotConfig;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-digest-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-digest-"));
     await Bun.write(path.join(root, "log.md"), SAMPLE_LOG);
     await Bun.write(
       path.join(root, "knowledge-graph.md"),
@@ -226,7 +227,7 @@ describe("generateWikiDigest", () => {
   });
 
   test("returns null when the wiki has no log.md", async () => {
-    const empty = await mkdtemp(path.join(tmpdir(), "wiki-nolog-"));
+    const empty = await testTempDir(path.join(tmpdir(), "wiki-nolog-"));
     try {
       const emptyIndex = await buildWikiIndex(empty);
       const digest = await generateWikiDigest(empty, emptyIndex, config, bot, {
@@ -282,7 +283,7 @@ describe("generateWikiDigest", () => {
 
 describe("readLogMtimeMs", () => {
   test("returns a number for an existing log.md and null when absent", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-mtime-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-mtime-"));
     try {
       expect(await readLogMtimeMs(root)).toBeNull();
       await Bun.write(path.join(root, "log.md"), "# Log");
@@ -295,7 +296,7 @@ describe("readLogMtimeMs", () => {
 
 describe("newestLogEntryDate", () => {
   test("returns the max header date regardless of log ordering", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-newest-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-newest-"));
     try {
       // No log.md yet → null.
       expect(await newestLogEntryDate(root)).toBeNull();
@@ -317,7 +318,7 @@ describe("newestLogEntryDate", () => {
   });
 
   test("ignores invalid calendar dates and returns null with no headers", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-newest2-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-newest2-"));
     try {
       await Bun.write(path.join(root, "log.md"), "# Log\n\nNo entry headers here.");
       expect(await newestLogEntryDate(root)).toBeNull();
@@ -350,7 +351,7 @@ describe("generateWikiDigest — observability", () => {
 
   beforeEach(async () => {
     agentStatus.clearRequest(); // reset the singleton between cases
-    root = await mkdtemp(path.join(tmpdir(), "wiki-digest-obs-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-digest-obs-"));
     await Bun.write(path.join(root, "log.md"), SAMPLE_LOG);
     index = await buildWikiIndex(root);
   });
@@ -402,7 +403,7 @@ describe("generateWikiDigest — observability", () => {
   });
 
   test("a wiki with no log.md registers NO run at all (the model is never called)", async () => {
-    const empty = await mkdtemp(path.join(tmpdir(), "wiki-nolog-obs-"));
+    const empty = await testTempDir(path.join(tmpdir(), "wiki-nolog-obs-"));
     try {
       const emptyIndex = await buildWikiIndex(empty);
       await generateWikiDigest(empty, emptyIndex, config, bot, { oneShot: async () => okResult });

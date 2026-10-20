@@ -1,15 +1,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetAnswerScannerForTest, scanAnswerText, scannerRequired } from "./answer-scanner.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const MARKER = "SYNTHETIC-SECRET-0000";
 let dir = "";
 
 beforeAll(async () => {
-  dir = await mkdtemp(path.join(tmpdir(), "muninn-scanner-unit-"));
+  dir = await testTempDir(path.join(tmpdir(), "muninn-scanner-unit-"));
 });
 afterAll(async () => {
   await rm(dir, { recursive: true, force: true });

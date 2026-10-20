@@ -21,13 +21,16 @@
  * that this file imports `LintFinding` as a TYPE, so the pair is erased at
  * runtime and is not a module cycle.
  *
- * **The four cuts are REUSED, never re-declared** — `isBookkeeping`,
+ * **The four cuts it uses are REUSED, never re-declared** — `isBookkeeping`,
  * `RELATED_HUB_BACKLINKS` (25), `RELATED_DIGEST_PRS` (15) and
  * `RELATED_SHARED_PRS_MIN` (2), the numbers `related-constants.ts` states the
  * measurements for. Both the hub and the bookkeeping cut apply to BOTH ends of
- * every pair, exactly as `computeRelated` applies them to the open page: each
- * one says "this page is not a piece of work", which is as true of one end as of
- * the other.
+ * every pair, as `computeRelated` applies them: each one says "this page is not
+ * a piece of work", which is as true of one end as of the other.
+ * `computeRelated` has a fifth cut this module does NOT apply: the index-shaped
+ * page (`isIndexShaped` in `strength.ts`, over `RELATED_HUB_OUTLINKS`), so an
+ * index-shaped page that passes the other cuts can still be one end of a
+ * series finding.
  *
  * Report-only, like every other check: this module returns findings and writes
  * nothing. The `fix` payload on a finding is what `src/gardener/lint-proposals.ts`
@@ -195,8 +198,8 @@ function wikilinkTargetFor(index: WikiIndex, page: WikiPageMeta): string {
 
 /** The pages check 8 will consider at all: markdown pages that are a piece of
  *  work. Explainers carry no frontmatter and join no link graph; bookkeeping
- *  pages and hubs are the two `related.ts` cuts, applied to every end of every
- *  pair. */
+ *  pages and backlink hubs are the two `related.ts` cuts reused here (not the
+ *  index-shape cut), applied to every end of every pair. */
 function buildCandidates(index: WikiIndex): Candidate[] {
   const out: Candidate[] = [];
   for (const page of index.pages) {
