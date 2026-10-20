@@ -36,25 +36,15 @@
 
 import type { WikiListing } from "./wiki-filter.ts";
 import { aliasTopDirs, aliasWorkedPaths, classifyAliasRef } from "../../../wiki/alias-ref.ts";
-import { normalizeWorkedPath } from "../../../wiki/rel-path.ts";
+import { normalizeRel } from "./wiki-nav.ts";
 import { newestFocusPage, threadHoldsPin, usableThreads } from "./wiki-thread-core.ts";
 import { WORK_GROUP_SPLITS_MAX, type WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { readWorkEvidence, threadSessionsAvailability, type WorkGroupUnavailableReason, type WorkUnit } from "./wiki-work-groups.ts";
 import { isWorkHub, workSessionRef, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
 
-/** `normalizeWorkedPath`, memoized: the grouping model runs this module on
- *  every click, over every page key. Measured on `wiki-rail-work-cap.test.ts`:
- *  12.2 s memoized, 15.4–17.1 s uncached (12.1 s with the old lower-case fold). */
-const normCache = new Map<string, string>();
-function normPath(p: string): string {
-  let v = normCache.get(p);
-  if (v === undefined) {
-    if (normCache.size >= 50_000) normCache.clear();
-    v = normalizeWorkedPath(p);
-    normCache.set(p, v);
-  }
-  return v;
-}
+/** The reader's one page-path spelling (`normalizeRel`, memoized
+ *  `normalizeWorkedPath`), the same one `wiki-thread-core.ts` compares with. */
+const normPath = normalizeRel;
 /** Where a stored definition stands this render. */
 export type BoundaryState =
   /** Applied. */
@@ -134,8 +124,8 @@ export interface WorkBoundariesInput {
  *  carrying its stem as a bare alias. A stem in another folder names nothing,
  *  so a boundary on a deleted page never moves to an unrelated page (arch
  *  review 2026-10, 74/85). A path alias stands for `aliasWorkedPaths`' keys,
- *  the server's own fold, and every path here is `normalizeWorkedPath`'s
- *  spelling, the server's, so the two agree on `plans//old`, `plans/./old`
+ *  the server's own fold, and every path here is `normalizeRel`'s spelling
+ *  (`normalizeWorkedPath`, the server's), so the two agree on `plans//old`, `plans/./old`
  *  and an NFD name alike; the top-level folders are `aliasTopDirs` over the
  *  listing's first path segments. */
 function resolverFor(allPages: readonly WikiListing[]): (stored: string) => { page?: string; state?: "missing" | "ambiguous" } {

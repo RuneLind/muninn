@@ -37,5 +37,8 @@ export function normalizeRelPath(relPath: string): string {
  * never gets work events without its `workedMs` (arch review 2026-10, 83).
  */
 export function normalizeWorkedPath(p: string): string {
+  // Empty stays empty: `posix.normalize("")` is ".", which a caller testing
+  // for "no path" (`findByRelPath`, `workGroupPagePath`) would read as one.
+  if (!p) return "";
   return normalizeRelPath(p.replace(/\\/g, "/")).replace(/^\/+/, "").normalize("NFC");
 }

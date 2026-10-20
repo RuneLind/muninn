@@ -16,6 +16,8 @@
  * until its response lands.
  */
 
+import { normalizeWorkedPath } from "../../../wiki/rel-path.ts";
+
 /** Attribute a row/card/node carries with its exact wiki-relative path. */
 export const NAV_RELPATH_ATTR = "data-relpath";
 
@@ -53,12 +55,22 @@ export interface OpenPageRef {
   relPath: string | null;
 }
 
-/** Normalize a relPath for comparison the way `store.ts`'s `normalizeRelPath`
- *  does for the graph: posix separators, lowercased. No `path` module in the
- *  browser, so the `.`/`..` normalization is deliberately skipped — every relPath
- *  compared here comes from the index, which already emits clean posix paths. */
+/** The reader's ONE spelling of a page path for comparison and for keys:
+ *  `normalizeWorkedPath` (`src/wiki/rel-path.ts` — backslashes to `/`, posix
+ *  normalize, lower case, leading-slash strip, NFC), the spelling the server's
+ *  work facts and alias folds key on. A lower-case-only fold here beside that
+ *  one made an NFD page two keys (class check, work-boundary path spelling).
+ *  Memoized: the grouping model calls it on every page key at every click
+ *  (`wiki-rail-work-cap.test.ts`). */
+const relKeyCache = new Map<string, string>();
 export function normalizeRel(rel: string): string {
-  return rel.replace(/\\/g, "/").toLowerCase();
+  let v = relKeyCache.get(rel);
+  if (v === undefined) {
+    if (relKeyCache.size >= 50_000) relKeyCache.clear();
+    v = normalizeWorkedPath(rel);
+    relKeyCache.set(rel, v);
+  }
+  return v;
 }
 
 /**

@@ -7,7 +7,20 @@ import { describe, expect, test } from "bun:test";
 import { checkNewSeriesKey, recheckSaveAsSeries, saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { buildWorkEvidence } from "../../../wiki/work-evidence.ts";
 import type { WikiPageMeta } from "../../../wiki/store.ts";
-import { loadSeriesBaseMap, openPageChanged, openPageRefusal, runSeriesWrites, writeSeriesUnlessOpenChanged, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { loadSeriesBaseMap, openPageChanged, openPageRefusal, writeSeriesUnlessOpenChanged, type SeriesPostAnswer, type SeriesPoster, type SeriesWriteOutcome } from "./wiki-series-write.ts";
+import type { SeriesWrite } from "./wiki-series-menu.ts";
+
+/** The write loop is module-private: it runs only behind the open-page
+ *  refusal. With no page open the refusal never fires, so this is the loop. */
+async function runSeriesWrites(
+  writes: readonly SeriesWrite[],
+  bases: ReadonlyMap<string, string>,
+  post: SeriesPoster,
+  opts: { batch?: boolean } = {},
+): Promise<SeriesWriteOutcome> {
+  const r = await writeSeriesUnlessOpenChanged({ writes, bases, open: { relPath: null, loadedHash: null }, post, batch: opts.batch });
+  return r.run!;
+}
 // Namespace import for the fix-round-2 batch-2 seams, so each case reports its
 // own failure rather than the whole file failing to link.
 import * as seriesWrite from "./wiki-series-write.ts";

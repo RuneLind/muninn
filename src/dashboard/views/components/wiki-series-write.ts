@@ -49,7 +49,7 @@ export interface SeriesWriteOutcome {
  *  refreshes the index once for the whole sequence (arch review 2026-10,
  *  finding 75); a sequence that stops early leaves the refresh to the caller's
  *  own listing refetch. */
-export async function runSeriesWrites(
+async function runSeriesWrites(
   writes: readonly SeriesWrite[],
   bases: ReadonlyMap<string, string>,
   post: SeriesPoster,
