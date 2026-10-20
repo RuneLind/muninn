@@ -1391,8 +1391,10 @@ export function ruleTreeCss(scope: string): string {
 
 /** `<Glossary>` term marks on the wiki reader (`glossary-view.ts`). The
  *  definition shows on hover and on keyboard focus; Escape hides it
- *  (`gl-dismissed`, `wiki-visuals.ts`), which also keeps it inside the pane
- *  that clips it and opens it above the term (`gl-above`) near the pane's foot. */
+ *  (`gl-dismissed`, `wiki-visuals.ts`). `placeGlossaryTip` in `wiki-visuals.ts`
+ *  keeps it inside the pane that clips it and opens it above the term
+ *  (`gl-above`) near the pane's foot. Theme tokens, except the tip's
+ *  `box-shadow` rgba (the theme has no shadow token). */
 export function glossaryCss(scope: string): string {
   const s = scope;
   return `

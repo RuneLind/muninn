@@ -1,6 +1,7 @@
 /**
  * The reader's glossary marks: the first use of each `<Glossary>` term per
- * `##` section gets a reader-only hover definition. A pass over the page's
+ * section (the text before the first heading, then each `#` and `##` heading)
+ * gets a reader-only hover definition. A pass over the page's
  * FINISHED reader HTML (`renderWikiHtml`, `views` only), so links, code-ref
  * chips and every other renderer have already decided what is code or a link.
  *

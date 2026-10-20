@@ -447,7 +447,8 @@ export const COMPONENT_SPEC = {
     },
   },
   // A «Words on the page» list (`glossary.ts`); the reader marks each term's
-  // first use per `##` section.
+  // first use per section: the text before the first heading, then each `#`
+  // and `##` heading (a `###` does not start one).
   Glossary: { attrs: {} },
 } as const satisfies Record<string, ComponentSpec>;
 

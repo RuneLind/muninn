@@ -21,7 +21,7 @@ import type { QuestionLanguage } from "./question-labels.ts";
 import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
 import { visibleText } from "./report-top.ts";
 
-export type LaneKind = "decisions" | "queries" | "timeline";
+type LaneKind = "decisions" | "queries" | "timeline";
 
 interface LaneItem {
   day: string;
@@ -98,7 +98,7 @@ export function pageTimelineLanes(blocks: readonly Block[], days: LaneDays, show
   return LANE_ORDER.map((kind) => ({ kind, items: lanes[kind] })).filter((l) => l.items.length > 0);
 }
 
-/** True when the lanes view draws: {@link LANES_MIN} lanes with {@link LANE_MIN_ITEMS} dated items each. */
+/** True when the lanes hold enough to draw: {@link LANES_MIN} lanes with {@link LANE_MIN_ITEMS} dated items each (the page also needs a view slot). */
 export function lanesDraw(lanes: readonly TimelineLane[]): boolean {
   return lanes.filter((l) => l.items.length >= LANE_MIN_ITEMS).length >= LANES_MIN;
 }
