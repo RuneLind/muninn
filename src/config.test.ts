@@ -331,6 +331,15 @@ describe("prompt-snapshot retention clamps", () => {
     expect(warning).toBeDefined();
     expect(String(warning!.message.join("") + JSON.stringify(warning!.properties))).toContain("0");
   });
+
+  test("TRACING_RETENTION_DAYS 0 or negative falls back to 7 rather than wiping every trace", () => {
+    for (const v of ["0", "-1"]) {
+      set("TRACING_RETENTION_DAYS", v);
+      expect(config().tracingRetentionDays).toBe(7);
+    }
+    set("TRACING_RETENTION_DAYS", "3");
+    expect(config().tracingRetentionDays).toBe(3);
+  });
 });
 
 /** Answer retention (D17): unset ⇒ off, 0 ⇒ OFF and carried as refused (the

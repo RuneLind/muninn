@@ -9,7 +9,7 @@
  */
 
 import { getDb } from "./client.ts";
-import { deleteInBatches, type BatchedDeleteOption } from "./batched-delete.ts";
+import { assertRetentionWindow, deleteInBatches, type BatchedDeleteOption } from "./batched-delete.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("db", "research-citations");
@@ -196,6 +196,7 @@ export async function getCitationsForThread(threadId: string): Promise<CitationR
  * `cleanupOldTraces`.
  */
 export async function cleanupThreadCitations(retentionDays: number, opts: BatchedDeleteOption = {}): Promise<number> {
+  assertRetentionWindow("cleanupThreadCitations", retentionDays);
   // Batched, oldest first, on `idx_research_citations_cited (cited, created_at)`.
   return deleteInBatches(opts, (sql, limit) => sql`
     DELETE FROM research_citations WHERE id IN (

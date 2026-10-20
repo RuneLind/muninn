@@ -946,7 +946,8 @@ export function loadConfig() {
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
-    tracingRetentionDays: optionalEnvInt("TRACING_RETENTION_DAYS", 7),
+    // `positiveEnvInt`: 0 here deleted every trace and thread citation hourly.
+    tracingRetentionDays: positiveEnvInt("TRACING_RETENTION_DAYS", 7),
     tracingCaptureToolOutputs: optionalEnv("TRACING_CAPTURE_TOOL_OUTPUTS", "true") === "true",
     // `positiveEnvInt`, not `optionalEnvInt`: a retention of 0 or less is a
     // WIPE, not a short window — see the helper.
