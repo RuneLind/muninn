@@ -95,9 +95,10 @@ describe("the paragraph shape", () => {
     expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([[term, definition]]);
   });
 
-  test("an article-led emphasis followed by any other word is definition text", () => {
+  // The decision table (glossary-table.test.ts): real glossaries write «A *thread* holds …».
+  test("an article-led emphasis followed by any other word is a term", () => {
     const [r] = read(block("**Hold** is a state. A *Renewal* adds a week."));
-    expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([["Hold", "is a state. A Renewal adds a week."]]);
+    expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([["Hold", "is a state."], ["Renewal", "adds a week."]]);
   });
 
   test("the Norwegian label is not a term", () => {

@@ -10,24 +10,29 @@
  *   `- **Hold**: …`, `- *Hold* — …` (a trailing `:` inside or after the
  *   emphasis, or a ` — `, ` – ` or ` - ` after it, is the separator; an item
  *   without one has no term);
- * - a paragraph: a sentence led by an emphasised span defines that span. One
- *   led by an article (a, an, the, en, ei, et, den, det, de) and a span does
- *   only when a separator or a copula (is, are, er) follows the span
- *   (`A **Hold** is …`, `Et **Lån**: …`), since `Det *må* fornyes.` and
- *   `A *very* long wait follows.` go on a definition. Emphasis further in is
- *   definition text. Sentences split where `isAbbreviation` (the DecisionLog
- *   split's rule) finds no abbreviation, so `e.g. *paused*` starts none. The
- *   definition is the rest of the sentence plus the sentences after it that
- *   define nothing. A leading «Words on the page» / «Ord på siden» label is
- *   not a term.
+ * - a paragraph: each sentence whose lead is an emphasised span may define
+ *   it, by {@link LEAD_TABLE}. The lead is the span (`*x*`, `_x_`, `**x**`,
+ *   `__x__`, `***x***`, all alike) at the sentence start, or after one word:
+ *   an article (a, an, the, en, ei, et) or a pronoun-article (de, den, det;
+ *   `Det *må* fornyes.`), any case; after any other word there is no lead.
+ *   A separator (`:` inside or after the span, or a spaced dash after it)
+ *   makes a term. Without one, what follows decides: a sentence that ends at
+ *   the span defines nothing, and after a pronoun-article only a copula
+ *   (is, are, was, were, er, var, blir, ble) makes a term. A span that is a
+ *   function word (`A *very* long wait`, `*Ikke* …`) never is one.
+ *   Sentences end where `sentenceBreaks` (report-top's DecisionLog split)
+ *   finds an end, so an abbreviation (`e.g. *paused*`, `kr. **500**`,
+ *   `Dr. **Who**`) starts none, and also not at a number's dot before a
+ *   lower-case word past the emphasis (`1. *januar*`). The definition is the
+ *   rest of the sentence plus the sentences after it that define nothing. A
+ *   leading «Words on the page» / «Ord på siden» label is not a term.
  *
  * A term whose text is one code span (`` **`--arm`:** ``) is code-spelled: it
  * is listed but never marked, since prose that names it is code too.
  */
 
 import { componentBlocks, type Block } from "./markdown-ast.ts";
-import { visibleText } from "./report-top.ts";
-import { isAbbreviation } from "./abbreviations.ts";
+import { sentenceBreaks, visibleText } from "./report-top.ts";
 
 export interface GlossaryEntry {
   /** The term as the reader sees it. */
@@ -68,31 +73,86 @@ const GLOSSARY_TERM_MIN = 2;
 const LABEL_RE = /^(?:\*\*|__)\s*(?:words on the page|ord på siden)\s*[.:]?\s*(?:\*\*|__)\s*[.:]?\s*/iu;
 // Group 3 is the separator; an item needs it or a term ending in `:`.
 const ITEM_LEAD_RE = /^(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}])\s*(?:(:|[—–-](?=\s))\s*)?/u;
-// Group 1 is an article before the span (88 real glossaries: «A», «The», «En»), group 4 the separator.
-const SENTENCE_LEAD_RE = /^((?:an?|the|e[nit]|de[nt]?)\s+)?(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\2(?![\p{L}\p{N}*_])\s*((?::|[—–-](?=\s))\s*)?/iu;
-const COPULA_RE = /^(?:is|are|er)(?![\p{L}\p{N}])/iu;
+// Group 1 is the word before the span, group 2 the delimiter, group 3 the span.
+const SENTENCE_LEAD_RE = /^(?:(\p{L}+)\s+)?(\*{1,3}|_{1,3})(?=\S)(.+?)(?<=\S)\2(?![\p{L}\p{N}*_])/u;
+const SEPARATOR_AFTER_RE = /^\s*(?:(?::|[—–-](?=\s))\s*)?/u;
 const CODE_ONLY_RE = /^`+[^`]+`+$/;
-const SENTENCE_END_RE = /(?<=[.!?])\s+(?=\S)/u;
-const WORD_BEFORE_DOT_RE = /([\p{L}.]+)\.$/u;
 
-/** A paragraph's sentences: split after `.`, `!` or `?` and white space, not
- *  after an abbreviation's dot. */
-function sentencesOf(body: string): string[] {
-  const out: string[] = [];
-  for (const piece of body.split(SENTENCE_END_RE)) {
-    const prev = out.at(-1);
-    const word = prev === undefined ? undefined : WORD_BEFORE_DOT_RE.exec(prev)?.[1];
-    if (prev !== undefined && word && isAbbreviation(word, piece)) out[out.length - 1] = `${prev} ${piece}`;
-    else out.push(piece);
-  }
-  return out;
+/** Column (a), the word before the span. */
+type Lead = "none" | "article" | "pronoun" | "other";
+const ARTICLES: ReadonlySet<string> = new Set(["a", "an", "the", "en", "ei", "et"]);
+/** Articles that are also pronouns: `Det *må* fornyes.` */
+const PRONOUN_ARTICLES: ReadonlySet<string> = new Set(["de", "den", "det"]);
+/** Column (d), what follows: a copula, another word, or the sentence's end. */
+type Follow = "copula" | "word" | "end";
+const COPULAS: ReadonlySet<string> = new Set(["is", "are", "was", "were", "er", "var", "blir", "ble"]);
+/** Closed-class words (degree, negation, frequency, quantity, modals,
+ *  auxiliaries, determiners): emphasised for stress, never a term. */
+const FUNCTION_WORDS: ReadonlySet<string> = new Set([
+  "a", "an", "the", "not", "no", "never", "always", "only", "just", "also", "too", "very", "really", "quite",
+  "rather", "so", "much", "more", "most", "less", "least", "all", "any", "some", "each", "every", "both",
+  "either", "neither", "few", "many", "several", "other", "same", "own", "must", "may", "might", "can",
+  "could", "should", "would", "will", "shall", "do", "does", "did", "has", "have", "had", "is", "are", "was",
+  "were", "be", "been", "it", "this", "that", "these", "those", "still", "yet", "even", "already", "again",
+  "often", "now", "then",
+  "ikke", "aldri", "alltid", "bare", "kun", "også", "svært", "veldig", "mye", "mer", "mest", "mindre", "minst",
+  "alle", "alt", "hver", "hvert", "begge", "noen", "noe", "ingen", "få", "mange", "flere", "fleste", "ene",
+  "andre", "annen", "annet", "samme", "egen", "eget", "egne", "hele", "må", "kan", "skal", "bør", "vil",
+  "kunne", "skulle", "burde", "ville", "måtte", "har", "hadde", "er", "var", "blir", "ble", "være", "det",
+  "den", "de", "denne", "dette", "disse", "fortsatt", "ennå", "allerede", "igjen", "ofte", "nå", "da", "selv", "helt",
+]);
+
+/** The decision table: whether a lead defines its span, by column (a) and,
+ *  when there is a separator (column c), `separator`, else column (d).
+ *  Column (b), the delimiter, does not count; column (e), what precedes,
+ *  is {@link sentencesOf}'s; a function word is never a term. */
+const LEAD_TABLE: Readonly<Record<Lead, Readonly<Record<Follow | "separator", boolean>>>> = {
+  none: { separator: true, copula: true, word: true, end: false },
+  article: { separator: true, copula: true, word: true, end: false },
+  pronoun: { separator: true, copula: true, word: false, end: false },
+  other: { separator: false, copula: false, word: false, end: false },
+};
+
+function leadOf(word: string | undefined): Lead {
+  if (word === undefined) return "none";
+  const w = word.toLowerCase();
+  return ARTICLES.has(w) ? "article" : PRONOUN_ARTICLES.has(w) ? "pronoun" : "other";
 }
 
-/** A sentence's lead term, or null: an article-led span needs a separator or a copula after it. */
-function sentenceLead(sentence: string): RegExpExecArray | null {
-  const lead = SENTENCE_LEAD_RE.exec(sentence);
-  if (lead?.[1] && !lead[4] && !COPULA_RE.test(sentence.slice(lead[0].length))) return null;
-  return lead;
+function followOf(rest: string): Follow {
+  if (!/[\p{L}\p{N}]/u.test(rest)) return "end";
+  const word = /^\p{L}+(?![\p{L}\p{N}])/u.exec(rest)?.[0];
+  return word !== undefined && COPULAS.has(word.toLowerCase()) ? "copula" : "word";
+}
+
+/** A sentence's lead: the span and where its definition starts, or null. */
+function sentenceLead(sentence: string): { span: string; length: number } | null {
+  const m = SENTENCE_LEAD_RE.exec(sentence);
+  if (!m) return null;
+  const span = m[3]!;
+  const after = SEPARATOR_AFTER_RE.exec(sentence.slice(m[0].length))![0];
+  const rest = sentence.slice(m[0].length + after.length);
+  const separator = span.trimEnd().endsWith(":") || after.trim() !== "";
+  if (FUNCTION_WORDS.has(visibleText(span).replace(/\s*:$/, "").toLowerCase())) return null;
+  return LEAD_TABLE[leadOf(m[1])][separator ? "separator" : followOf(rest)] ? { span, length: m[0].length + after.length } : null;
+}
+
+/** A number's dot before a lower-case word past the emphasis (`1. *januar*`):
+ *  `sentenceBreaks` reads only the char after the space, here a `*`. */
+const ORDINAL_BEFORE_RE = /\d\.$/;
+const LOWER_AFTER_RE = /^\s*[*_~]*\p{Ll}/u;
+
+/** A paragraph's sentences, split where `sentenceBreaks` finds an end. */
+function sentencesOf(body: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (const cut of sentenceBreaks(body)) {
+    if (ORDINAL_BEFORE_RE.test(body.slice(0, cut)) && LOWER_AFTER_RE.test(body.slice(cut))) continue;
+    out.push(body.slice(from, cut).trim());
+    from = cut;
+  }
+  out.push(body.slice(from).trim());
+  return out.filter(Boolean);
 }
 
 /** The key a term is matched and deduplicated on. */
@@ -134,9 +194,9 @@ function readParagraph(text: string, out: GlossaryBlockRead): void {
     const at = out.reads.push(sentences[i]!) - 1;
     const lead = leads[i];
     if (!lead) continue;
-    let definition = sentences[i]!.slice(lead[0].length);
+    let definition = sentences[i]!.slice(lead.length);
     for (let j = i + 1; j < sentences.length && !leads[j]; j++) definition += ` ${sentences[j]}`;
-    const e = entry(lead[3]!, definition, at);
+    const e = entry(lead.span, definition, at);
     if (e) out.entries.push(e);
   }
 }

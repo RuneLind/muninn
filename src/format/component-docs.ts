@@ -193,7 +193,7 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     },
   },
   Glossary: {
-    doc: "A «Words on the page» list of `**Term:** definition` items; the wiki reader marks each term's first use per section (the text before the first heading, then each `#` and `##` heading; a `###` does not start one) with its definition (case-free unless the term holds a capital past its first letter), every other surface prints the list.",
+    doc: "A «Words on the page» list of `**Term:** definition` items, or a paragraph of sentences each led by an emphasised term (`A *Hold* is …`; a term needs a separator or a following word, and after Det/Den/De a copula); the wiki reader marks each term's first use per section (the text before the first heading, then each `#` and `##` heading; a `###` does not start one) with its definition (case-free unless the term holds a capital past its first letter), every other surface prints the list.",
     teach: WIKI,
   },
 };
