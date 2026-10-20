@@ -251,6 +251,33 @@ describe("GET /api/wiki/html", () => {
     }
   });
 
+  // arch-review 2026-10 #15: the fallback serves only what the index could list.
+  test("the unlisted-.html fallback refuses dot segments and node_modules, also through a symlink", async () => {
+    await Bun.write(path.join(root, ".private/notes.html"), "<html>PRIVATE</html>");
+    await Bun.write(path.join(root, "node_modules/pkg/readme.html"), "<html>PRIVATE</html>");
+    await Bun.write(path.join(root, ".git/hooks/x.html"), "<html>PRIVATE</html>");
+    await symlink(path.join(root, ".private/notes.html"), path.join(root, "blogs/alias.html"));
+    // …and a dot-named path is refused even when it resolves to an ordinary file.
+    await Bun.write(path.join(root, "blogs/sub/plain.html"), "<html>OK</html>");
+    await symlink(path.join(root, "blogs/sub"), path.join(root, ".mirror"));
+    for (const rel of [
+      ".private/notes.html",
+      "blogs/../.private/notes.html",
+      "node_modules/pkg/readme.html",
+      ".git/hooks/x.html",
+      "blogs/alias.html",
+      ".mirror/plain.html",
+    ]) {
+      const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent(rel));
+      expect(`${rel}: ${res.status}`).toBe(`${rel}: 404`);
+      expect(await res.text()).toBe(`no explainer named "${rel}"`);
+    }
+    // A plain .html in an ordinary folder is still served.
+    const ok = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/sub/plain.html"));
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("OK");
+  });
+
   test("a NUL byte in relPath is a 400, not a thrown 500", async () => {
     const res = await app.request("/api/wiki/html?relPath=" + encodeURIComponent("blogs/p.mdx\u0000.html"));
     expect(res.status).toBe(400);

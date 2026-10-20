@@ -7,6 +7,7 @@ import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { pageDecisionDataOf } from "../../wiki/decision-text.ts";
 import { DECISION_CHAIN_LINES_MAX, lineageLine } from "../../format/decision-chain.ts";
+import { hasExcludedSegment } from "../../format/query-block.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
 import { issueRowsFor } from "../../wiki/trackers/rows.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
@@ -142,6 +143,7 @@ import {
   CLAIM_INDEX_MAX,
   CLAIM_TITLE_MAX,
 } from "./factcheck-retry-sse.ts";
+import path from "node:path";
 import { createHash } from "node:crypto";
 import { mergeWikiTypes } from "../views/components/wiki-filter.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
@@ -1841,9 +1843,14 @@ export function registerWikiReadRoutes(
     // containment check below is what makes that safe.
     if (relPathQ && relPathQ.includes("\u0000")) return c.text("invalid path", 400);
     const shadowed = !meta && !!relPathQ && /\.html$/i.test(relPathQ);
-    if (!shadowed && (!meta || meta.type !== "explainer")) {
-      return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
-    }
+    // The fallback serves only what the index could have listed: no dot
+    // segment and no node_modules, by the rule the index scan and
+    // `readPageFile` apply — on the query here, on the real file below (a
+    // symlink into `.git`). The refusal is the not-found text, so it does not
+    // tell whether the file exists.
+    const noExplainer = () => c.text(`no explainer named "${relPathQ ?? name}"`, 404);
+    if (shadowed && hasExcludedSegment(path.posix.normalize(relPathQ!.replace(/\\/g, "/")))) return noExplainer();
+    if (!shadowed && (!meta || meta.type !== "explainer")) return noExplainer();
     // meta.relPath is the index's own stored path (never user input); the
     // shadowed fallback IS user input. Either way — confirm the resolved file
     // stays under the wiki root, judged on the REAL path of both: `path.resolve`
@@ -1857,6 +1864,9 @@ export function registerWikiReadRoutes(
       if (contained.reason === "outside") return c.text("invalid path", 400);
       if (contained.reason === "missing") return c.text("explainer file not found", 404);
       return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
+    }
+    if (shadowed && hasExcludedSegment(path.relative(contained.rootReal, contained.real).split(path.sep).join("/"))) {
+      return noExplainer();
     }
     const file = Bun.file(contained.real);
     if (!(await file.exists())) return c.text("explainer file not found", 404);
