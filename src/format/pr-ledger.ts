@@ -318,13 +318,14 @@ export interface GatePr {
   link: number | null;
 }
 
-/** The PR a non-ledger table row names in its first cell, read as a ledger
- *  row's first cell is: the slate (`7`, `PR 7`, `**7** — x`) and the cell's
- *  first PR link. The slate is stricter than a ledger's: a number followed by
- *  more text counts only after a separator or a `PR` prefix, and only when
- *  that text does not open with a digit, so `3 runs`, `12–40`, `21a` and a
- *  date name no PR. Struck text is not read (`~~8~~ 12` is slate 12), as
- *  for the link. Null when the cell names neither. */
+/** The PR a non-ledger table row names in its first cell: the slate (`7`,
+ *  `PR 7`, `**7** — x`) and the cell's first PR link, struck text not read
+ *  for either. Unlike a ledger row's, the slate is read under any header and
+ *  skips struck text (`~~8~~ 12` is gate slate 12, ledger slate 8). It is
+ *  also stricter: a number followed by more text counts only after a
+ *  separator or a `PR` prefix, and only when that text does not open with a
+ *  digit, so `3 runs`, `12–40`, `21a` and a date name no PR. Null when the
+ *  cell names neither. */
 export function gateRowPr(cell: string): GatePr | null {
   const t = plain(unstruck(cell)).replace(/^[-–—\s]+/, "");
   const { body, prefixed } = slateBody(t);
@@ -335,10 +336,15 @@ export function gateRowPr(cell: string): GatePr | null {
   return slate === null && link === null ? null : { slate, link };
 }
 
-/** The ledger state of a gate row's PR: a slate matches the row with that
- *  slate, a link-only cell the row whose PR link is that number; no match, none. */
+/** The ledger state of a gate row's PR: the row with the gate's slate, else
+ *  the slate-less row whose link is the gate's slate (its PR is its link),
+ *  else the row whose link is the gate's link; no match, none. */
 export function gateRowState(pr: GatePr, rows: readonly LedgerRow[]): PrState | undefined {
-  if (pr.slate !== null) return rows.find((r) => r.slate === pr.slate)?.state;
+  if (pr.slate !== null) {
+    const row = rows.find((r) => r.slate === pr.slate) ?? rows.find((r) => r.slate === null && r.link === pr.slate);
+    if (row) return row.state;
+  }
+  if (pr.link === null) return undefined;
   return rows.find((r) => r.link === pr.link)?.state;
 }
 

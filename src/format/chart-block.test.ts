@@ -203,6 +203,7 @@ describe("gateRowPr", () => {
     ["~~8~~ 12", { slate: 12, link: null }],
     ["~~8~~ PR 12 rows", { slate: 12, link: null }],
     ["~~8~~", null],
+    ["~~[#8](https://example.test/o/r/pull/8)~~ [#12](https://example.test/o/r/pull/12)", { slate: null, link: 12 }],
   ])("%p → %p", (cell, pr) => {
     expect(gateRowPr(cell)).toEqual(pr);
   });

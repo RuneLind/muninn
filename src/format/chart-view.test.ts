@@ -285,6 +285,59 @@ describe("gate pills", () => {
   test("no ledger, no pill", () => {
     expect(reader(gate(["| PR 31 — a | 2 | 3 | 3 |"]))).not.toContain("vc-pill");
   });
+
+  /**
+   * Every gate first-cell shape against every ledger shape. The rule: a gate
+   * row whose slate equals a ledger row's slate takes that row; else its
+   * slate takes a slate-less ledger row whose link is that number; else its
+   * own link takes the ledger row whose link is that number; else no pill.
+   * The rows are the page's `firstRowPerPr`: when two ledgers name one PR
+   * (slate, else link), the first ledger's row is the only one there.
+   */
+  describe("gate identity matrix", () => {
+    const u = (n: number) => `[#${n}](https://example.test/o/r/pull/${n})`;
+    const shapes: Record<string, string> = {
+      slate: "7",
+      prSlate: "PR 7",
+      boldSlate: "**7** — x",
+      link: u(7),
+      linkLabel: `${u(7)} Retry`,
+      slateAndLink: "PR #7",
+      slateThenLink: `2 — ${u(7)}`,
+      struckSlate: "~~8~~ 12",
+      struckLink: `~~${u(8)}~~ ${u(12)}`,
+      neither: "rows",
+      unknownSlate: "30",
+      unknownLink: u(30),
+    };
+    const ledgerOf = (header: string, rows: string[]) => ["## PR ledger", "", `| ${header} | State |`, "|---|---|---|", ...rows, ""];
+    const ledgers: Record<string, string[]> = {
+      // Slate numbers equal the GitHub numbers.
+      slateIsGithub: ledgerOf("PR | What", [`| 7 — ${u(7)} | a | merged |`, `| 8 — ${u(8)} | b | open |`, `| 12 — ${u(12)} | c | blocked |`, `| 2 — ${u(2)} | d | planned |`]),
+      // Slate numbers differ: slate 7 links 12, slate 12 links 7, slate 9
+      // links 2, slate 4 links nothing.
+      slateNotGithub: ledgerOf("PR | What", [`| 7 — ${u(12)} | a | merged |`, `| 12 — ${u(7)} | b | open |`, `| 9 — ${u(2)} | c | blocked |`, "| 4 | d | dropped |"]),
+      // A period column: no row has a slate; the PR is the link.
+      period: ledgerOf("Phase | PR", [`| 1 | ${u(7)} | merged |`, `| 2 | ${u(12)} | open |`, `| 3 | ${u(2)} | blocked |`]),
+      // A PR column holding links only: no row has a slate.
+      linksOnly: ledgerOf("PR | What", [`| ${u(7)} | a | merged |`, `| ${u(12)} | b | open |`, `| ${u(2)} | c | blocked |`]),
+      // Two ledgers: the period ledger names 7 and 12 first; the slate
+      // ledger's rows 7 and 12 are the same PRs and drop out; slate 4 stays.
+      twoLedgers: [...ledgerOf("Phase | PR", [`| 1 | ${u(7)} | merged |`, `| 2 | ${u(12)} | open |`]), ...ledgerOf("PR | What", ["| 7 | x | blocked |", "| 12 | y | planned |", "| 4 | z | dropped |"])],
+    };
+    const expected: Record<string, Record<string, string | null>> = {
+      slateIsGithub: { slate: "merged", prSlate: "merged", boldSlate: "merged", link: "merged", linkLabel: "merged", slateAndLink: "merged", slateThenLink: "planned", struckSlate: "blocked", struckLink: "blocked", neither: null, unknownSlate: null, unknownLink: null },
+      slateNotGithub: { slate: "merged", prSlate: "merged", boldSlate: "merged", link: "open", linkLabel: "open", slateAndLink: "merged", slateThenLink: "open", struckSlate: "open", struckLink: "merged", neither: null, unknownSlate: null, unknownLink: null },
+      period: { slate: "merged", prSlate: "merged", boldSlate: "merged", link: "merged", linkLabel: "merged", slateAndLink: "merged", slateThenLink: "blocked", struckSlate: "open", struckLink: "open", neither: null, unknownSlate: null, unknownLink: null },
+      linksOnly: { slate: "merged", prSlate: "merged", boldSlate: "merged", link: "merged", linkLabel: "merged", slateAndLink: "merged", slateThenLink: "blocked", struckSlate: "open", struckLink: "open", neither: null, unknownSlate: null, unknownLink: null },
+      twoLedgers: { slate: "merged", prSlate: "merged", boldSlate: "merged", link: "merged", linkLabel: "merged", slateAndLink: "merged", slateThenLink: "merged", struckSlate: "open", struckLink: "open", neither: null, unknownSlate: null, unknownLink: null },
+    };
+    const cases = Object.keys(ledgers).flatMap((l) => Object.keys(shapes).map((s) => [l, s, expected[l]![s]!] as const));
+    test.each(cases)("%s ledger × %s gate → %p", (l, s, state) => {
+      const out = reader([...ledgers[l]!, gate([`| ${shapes[s]} | 2 | 3 | 3 |`])].join("\n"));
+      expect(pills(out).map((p) => p[0])).toEqual(state ? [state] : []);
+    });
+  });
 });
 
 describe("off the reader view", () => {
