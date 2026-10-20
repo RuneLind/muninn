@@ -433,7 +433,11 @@ export function gmailLiveness(
   // transport failure. The Gmail server (`@gongrzhe/server-gmail-autoauth-mcp`
   // 1.1.11) never sets `isError`: its catch-all returns every handler error — a
   // Gmail 429 or 5xx, an expired token, bad arguments — as a normal text result
-  // `Error: …`, so that text is the only signal. An `unterminated` call is not
+  // `Error: …`, so that text is its only signal. Known gap: the CLI's own
+  // placeholder for an oversized MCP result (over `MAX_MCP_OUTPUT_TOKENS`, see
+  // `CLAUDE_CLI_OVERSIZED_RE` in huginn-trace.ts) also starts `Error:` with no
+  // `is_error`, so a very large successful search reads as unreached and the run
+  // fails loudly instead of advancing the watermark. An `unterminated` call is not
   // reached either: the stream ended before its result arrived.
   // The probe's `gmailError` (`scripts/probe-toolsearch-deferral.ts`) asks another
   // question: it flags a run when ANY Gmail call errored.
@@ -445,7 +449,8 @@ export function gmailLiveness(
   return { failure: livenessFailureMessage(toolCalls, prefixes, reachedGmail), reached: reachedGmail === true };
 }
 
-/** The Gmail server's in-band error result: a text that starts `Error:`. */
+/** A text result that starts `Error:`: the Gmail server's in-band error, or the
+ *  CLI's oversized-result placeholder (counted as an error too, see above). */
 function isGmailErrorText(output: string | undefined): boolean {
   return typeof output === "string" && output.trimStart().startsWith("Error:");
 }

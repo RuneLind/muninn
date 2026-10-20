@@ -571,7 +571,10 @@ comes from the CLI side only: a `dontAsk` denial, a disallowed or unknown tool, 
 MCP transport failure. The Gmail server (`@gongrzhe/server-gmail-autoauth-mcp`
 1.1.11) never sets `isError`: it returns every handler error, including a Gmail
 429 or 5xx and an expired token, as a normal text result starting `Error:`, so
-`gmailLiveness` reads `ToolCall.output` for that prefix. A call the stream ended on
+`gmailLiveness` reads `ToolCall.output` for that prefix. The CLI's placeholder for
+an oversized MCP result also starts `Error:`, so a search too large for
+`MAX_MCP_OUTPUT_TOKENS` fails the run loudly (a known gap, not a silent skip). A
+search with zero matches returns empty text and counts as reached. A call the stream ended on
 before its result is `unterminated`. A successful `list_email_labels` beside a
 failed search covers no window. A bot whose
 `.mcp.json` has no key containing "gmail" fails the check before the spawn
