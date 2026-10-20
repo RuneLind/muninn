@@ -2768,9 +2768,16 @@ beside it either unbounded or armed with a second timer — and awaiting that
 function before starting the new leg would make the page open sequential. The
 conditional creation is unchanged: a page with nothing to ask still arms no
 timer. `GET /api/wiki/page/provenance` passes its request signal in, combined
-with the deadline (`AbortSignal.any`), so a reader who navigated away aborts
-the fan-out (the Stamp route's inline call passes none). Only the DEADLINE
-reads as `links.timedOut`.
+with the deadline (`AbortSignal.any`), so a reader who navigated away cancels
+the claude-usage fetches (sessions, merges, handoffs, PR merges, the ghost hop
+and the issue ledger all hand the signal to `fetch`). The two huginn reads (the
+Jira-key corpus and the tracker issue fields) take a timeout, not a signal:
+they are RACED, so the page stops waiting, and the fetch runs on to its own
+bound. The Stamp route's inline call passes no request signal. Only the
+DEADLINE reads as `links.timedOut`, and only the deadline warns: a call that
+the request's abort rejected logs `<leg> not read: request aborted` at debug
+(`abortedByCaller` in `session-ledger.ts`; a deadline aborts with a
+`TimeoutError`, a reader leaving does not).
 
 The other four legs are PR 3's, and they all live in `pageProvenance` for the
 merges leg's reason:

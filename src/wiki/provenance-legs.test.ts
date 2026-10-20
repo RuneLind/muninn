@@ -8,10 +8,11 @@
  * about the sessions the page STAMPED, and a ghost is a link.
  */
 
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { pageProvenance, type ProvenanceContext } from "./provenance-service.ts";
 import { HANDOFF_READS_MAX, PR_READS_MAX } from "./provenance.ts";
-import type { SessionLedgerDeps } from "./session-ledger.ts";
+import { __resetSessionLedgerWarnsForTest, type SessionLedgerDeps } from "./session-ledger.ts";
 import type { WikiPageMeta } from "./store.ts";
 
 const STAMPED = "5a2ee3f0-c7ea-42f4-8082-1b2c3d4e5f60";
@@ -710,5 +711,82 @@ describe("stampable", () => {
   test("false when the predicate says so", async () => {
     const p = await pageProvenance(meta(), ctx({ stampable: () => false }), "/src/mimir");
     expect(p!.stampable).toBe(false);
+  });
+});
+
+// arch-review 2026-10 #19 fix round 1: a reader leaving is not an outage.
+describe("what a stopped fan-out logs", () => {
+  const records: LogRecord[] = [];
+  const ledgerLines = (level: LogRecord["level"]) =>
+    records
+      .filter((r) => r.level === level && r.category.join("/") === "muninn/wiki/session-ledger")
+      .map((r) => r.message.map(String).join(""));
+  beforeEach(async () => {
+    records.length = 0;
+    __resetSessionLedgerWarnsForTest();
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "warning" },
+      ],
+      reset: true,
+    });
+  });
+  afterEach(async () => {
+    await reset();
+  });
+
+  const untilAbort = (signal?: AbortSignal) =>
+    new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+  const legs = (leg: (signal?: AbortSignal) => Promise<never>) =>
+    deps({
+      fetchSessions: (_ids, signal) => leg(signal),
+      fetchMerges: (_ids, signal) => leg(signal),
+      fetchHandoff: (_id, signal) => leg(signal),
+      fetchMergesForPrs: (_prs, signal) => leg(signal),
+    });
+  const WHATS = ["session ledger", "merge ledger", "handoff ledger", "pr merge ledger"];
+
+  test("a request abort logs each leg at debug and warns nothing", async () => {
+    const req = new AbortController();
+    const pending = pageProvenance(
+      meta({ prs: ["acme/widget#553"] }),
+      ctx({ budgetMs: 5_000, sessionLedger: legs(untilAbort) }),
+      undefined,
+      undefined,
+      req.signal,
+    );
+    setTimeout(() => req.abort(), 20);
+    await pending;
+    expect(ledgerLines("warning")).toEqual([]);
+    const debug = ledgerLines("debug").filter((l) => l.includes("request aborted"));
+    expect(WHATS.every((w) => debug.some((l) => l.startsWith(`${w} not read`)))).toBe(true);
+  });
+
+  test("a real upstream failure still warns each leg as degraded", async () => {
+    const p = await pageProvenance(
+      meta({ prs: ["acme/widget#553"] }),
+      ctx({ budgetMs: 5_000, sessionLedger: legs(async () => { throw new Error("http 502"); }) }),
+      undefined,
+      undefined,
+      new AbortController().signal,
+    );
+    expect(p!.links.timedOut).toBe(false);
+    const warns = ledgerLines("warning");
+    for (const w of WHATS) expect(warns.some((l) => l.startsWith(`${w} degraded`))).toBe(true);
+  });
+
+  test("the deadline still warns: a slow claude-usage is a degrade, not a reader leaving", async () => {
+    const p = await pageProvenance(
+      meta({ prs: ["acme/widget#553"] }),
+      ctx({ budgetMs: 25, sessionLedger: legs(untilAbort) }),
+      undefined,
+      undefined,
+      new AbortController().signal,
+    );
+    expect(p!.links.timedOut).toBe(true);
+    const warns = ledgerLines("warning");
+    for (const w of WHATS) expect(warns.some((l) => l.startsWith(`${w} degraded`))).toBe(true);
   });
 });

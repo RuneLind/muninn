@@ -252,8 +252,9 @@ export async function pageProvenance(
   /** The wiki's index: its key map and its resolved tracker config feed the
    *  issue rows. Absent ⇒ no rows (a caller with no index in hand). */
   index?: WikiIndex,
-  /** The HTTP request's own signal: a reader who navigated away aborts the
-   *  fan-out. Only the deadline reads as `links.timedOut`. Absent (the Stamp
+  /** The HTTP request's own signal: a reader who navigated away cancels the
+   *  claude-usage fetches; the two huginn reads take no signal and are only
+   *  raced. Only the deadline reads as `links.timedOut`. Absent (the Stamp
    *  route's inline call) ⇒ the deadline alone. */
   requestSignal?: AbortSignal,
 ): Promise<ProvenancePayload | null> {
