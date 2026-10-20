@@ -439,29 +439,6 @@ test("the invariant guard REFUSES a splice that would delete a masked sibling", 
   expect(spliceClaimBlock(MASKED_SIBLING, 1, "### ✅ Claim 1/2 — First\n\nFresh verdict.")).toBeNull();
 });
 
-test("the guard refuses claim 1 when its stray opener still masks claim 2", () => {
-  // Claim 1's ```md pairs with claim 2's opener. Both readings pair the rest the
-  // same way, so finding 55's terminator leaves it to the plain walk, which masks
-  // claim 2 (a known gap, pinned in wiki-integrate.test.ts).
-  const strayOpen = [
-    LEDE,
-    "",
-    "### ❓ Claim 1/2 — First",
-    "",
-    "```md",
-    "some sample",
-    "",
-    "### ✅ Claim 2/2 — Second",
-    "",
-    "```",
-    "ok",
-    "```",
-  ].join("\n");
-  expect(parseFactcheckClaims(strayOpen).map((c) => c.index)).toEqual([1]);
-  // Claim 1's region carries the stray ```md and claim 2's heading: refused.
-  expect(spliceClaimBlock(strayOpen, 1, "### ✅ Claim 1/2 — First\n\nFresh verdict.")).toBeNull();
-});
-
 test("the guard refuses any region carrying a fence delimiter", () => {
   // A retryable claim's block is a one-line synthetic stub — timed out / skipped /
   // errored — so a fence inside the region means the extent is not trustworthy.

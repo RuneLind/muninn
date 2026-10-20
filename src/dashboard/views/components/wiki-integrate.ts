@@ -387,240 +387,55 @@ export interface ClaimLineScan {
  * to the end of the document, but here that is the runaway-masking failure: one
  * stray opener silently deletes every claim after it from the parse. A real
  * fact-check answer's fences close, so a dangling opener is far more likely prose —
- * it is retired to a literal line and the walk resumes from that line. A fence a
- * later claim's heading ends is retired the same way ({@link endsFenceAsNextClaim}):
- * otherwise a stray opener pairs with a later claim's well-formed fence and masks
- * every heading in between. Each retirement removes one opener, so the walk
- * terminates, and it rewinds only to that opener: the lines before it read the same.
+ * it is retired to a literal line and the walk is re-run. Each pass retires exactly
+ * one opener, so the loop terminates.
  */
 export function scanClaimLines(answer: string): ClaimLineScan {
   const lines = (answer || "").split("\n");
-  const refs = claimRefLines(lines);
   const literalOpeners = new Set<number>();
+  let walk = walkClaimLines(lines, literalOpeners);
+  while (walk.openAtEof !== -1) {
+    literalOpeners.add(walk.openAtEof);
+    walk = walkClaimLines(lines, literalOpeners);
+  }
+  return { lines, claimMatch: walk.claimMatch, blockEnd: walk.blockEnd };
+}
+
+/** One fence-tracking pass. `literalOpeners` names line indexes that must NOT be
+ *  treated as openers (the unclosed-fence fallback's retirement list);
+ *  `openAtEof` reports the line index of a fence still open at EOF, else -1. */
+function walkClaimLines(
+  lines: string[],
+  literalOpeners: ReadonlySet<number>,
+): { claimMatch: (RegExpMatchArray | null)[]; blockEnd: boolean[]; openAtEof: number } {
   const claimMatch: (RegExpMatchArray | null)[] = [];
   const blockEnd: boolean[] = [];
   let fence: OpenFence | null = null;
   let fenceLine = -1;
-  // The last claim heading the walk read, and the one before the open fence.
-  let claim: RegExpMatchArray | null = null;
-  let fenceClaim: RegExpMatchArray | null = null;
-  let i = 0;
-  for (;;) {
-    for (; i < lines.length; i++) {
-      const raw = lines[i]!;
-      if (fence) {
-        if (endsFenceAsNextClaim(lines, raw, i, fenceLine, fenceClaim, refs)) break;
-        if (isFenceCloser(raw, fence)) fence = null;
-        claimMatch.push(null);
-        blockEnd.push(false);
-        continue;
-      }
-      const opener = literalOpeners.has(i) ? null : fenceOpener(raw);
-      if (opener) {
-        fence = opener;
-        fenceLine = i;
-        fenceClaim = claim;
-        claimMatch.push(null);
-        blockEnd.push(false);
-        continue;
-      }
-      const line = raw.trim();
-      const m = line.match(CLAIM_HEADING_RE);
-      const end = CLAIM_BLOCK_END_RE.test(line);
-      claimMatch.push(m);
-      blockEnd.push(end);
-      if (m) claim = m;
-    }
-    if (!fence) break;
-    // Retire the opener and rewind to it: the walk before it is unchanged.
-    literalOpeners.add(fenceLine);
-    claimMatch.length = fenceLine;
-    blockEnd.length = fenceLine;
-    i = fenceLine;
-    fence = null;
-  }
-  return { lines, claimMatch, blockEnd };
-}
-
-/** A `###` line naming `Claim n/m`, verdict emoji optional: what counts as a
- *  restatement of a heading for {@link endsFenceAsNextClaim}. */
-const CLAIM_REF_LINE_RE = new RegExp(
-  "^###\\s*(?:" + CLAIM_VERDICT_SOURCE + "\\s*)?" + CLAIM_REF_SOURCE,
-  "iu",
-);
-
-/** Lines naming a claim, fenced or not: per `n/m` the LAST such line, and per line
- *  the previous one naming the same `n/m` (-1 when none). `pairs` caches the fence
- *  pairing per claim total, built on the first candidate that needs it. */
-interface ClaimRefLines {
-  last: Map<string, number>;
-  prev: Map<number, number>;
-  pairs: Map<number, FencePairs>;
-}
-
-function claimRefLines(lines: readonly string[]): ClaimRefLines {
-  const last = new Map<string, number>();
-  const prev = new Map<number, number>();
-  lines.forEach((l, i) => {
-    const m = l.trim().match(CLAIM_REF_LINE_RE);
-    if (!m) return;
-    const key = `${Number(m[2])}/${Number(m[3])}`;
-    prev.set(i, last.get(key) ?? -1);
-    last.set(key, i);
-  });
-  return { last, prev, pairs: new Map() };
-}
-
-/** A plain fence walk that retires an opener with no closer, as the EOF rule
- *  does. Per opener line: its first closer (-1 when none). Per start line `k`, for
- *  a walk from `k`: the sole headings it masks (`masked`), the openers it retires
- *  (`strays`), the info-string openers it reads as fence content (`swallowed`), and
- *  whether the first fence it meets never closes (`dangles`). Prefix counts over
- *  the lines before `k`: sole headings (`sole`) and info-string openers (`info`). */
-interface FencePairs {
-  closerOf: Int32Array;
-  dangles: Uint8Array;
-  masked: Int32Array;
-  strays: Int32Array;
-  swallowed: Int32Array;
-  sole: Int32Array;
-  info: Int32Array;
-}
-
-/** O(lines + fence-run lengths): one right-to-left sweep keeps, per marker and run
- *  length, the nearest closer below. */
-function fencePairs(lines: readonly string[], refs: ClaimRefLines, total: number): FencePairs {
-  const L = lines.length;
-  const sole = new Int32Array(L + 1);
-  const info = new Int32Array(L + 1);
-  for (let k = 0; k < L; k++) {
-    sole[k + 1] = sole[k]! + (isSoleClaimHeading(lines[k]!, k, refs, total) ? 1 : 0);
-    const o = fenceOpener(lines[k]!);
-    info[k + 1] = info[k]! + (o && !isFenceCloser(lines[k]!, o) ? 1 : 0);
-  }
-  const closerOf = new Int32Array(L).fill(-1);
-  const dangles = new Uint8Array(L + 1);
-  const masked = new Int32Array(L + 1);
-  const strays = new Int32Array(L + 1);
-  const swallowed = new Int32Array(L + 1);
-  const nearest: Record<string, number[]> = { "`": [], "~": [] };
-  for (let k = L - 1; k >= 0; k--) {
-    const line = lines[k]!;
-    const opener = fenceOpener(line);
-    if (opener) closerOf[k] = nearest[opener.marker]![opener.len] ?? -1;
-    const m = line.match(FENCE_SHAPE_RE);
-    if (m && FENCE_CLOSE_TAIL_RE.test(m[2] ?? "")) {
-      const near = nearest[m[1]![0]!]!;
-      for (let r = 3; r <= m[1]!.length; r++) near[r] = k;
-    }
-    const c = closerOf[k]!;
-    if (!opener) {
-      dangles[k] = dangles[k + 1]!;
-      masked[k] = masked[k + 1]!;
-      strays[k] = strays[k + 1]!;
-      swallowed[k] = swallowed[k + 1]!;
-    } else if (c === -1) {
-      dangles[k] = 1;
-      masked[k] = masked[k + 1]!;
-      strays[k] = 1 + strays[k + 1]!;
-      swallowed[k] = swallowed[k + 1]!;
-    } else {
-      dangles[k] = 0;
-      masked[k] = sole[c]! - sole[k + 1]! + masked[c + 1]!;
-      strays[k] = strays[c + 1]!;
-      swallowed[k] = info[c]! - info[k + 1]! + swallowed[c + 1]!;
-    }
-  }
-  return { closerOf, dangles, masked, strays, swallowed, sole, info };
-}
-
-/** A column-0 heading of claim `n/total`, `n <= total`, that is the ONLY line in
- *  the answer naming that claim: no quote restates it, so masking it loses a claim. */
-function isSoleClaimHeading(line: string, k: number, refs: ClaimRefLines, total: number): boolean {
-  const m = line.match(CLAIM_HEADING_RE);
-  if (!m || Number(m[2]) > total) return false;
-  return refs.prev.get(k) === -1 && refs.last.get(`${Number(m[2])}/${total}`) === k;
-}
-
-/** Does a plain fence walk over lines `from`..`to - 1`, starting outside any
- *  fence, end inside one? */
-function endsInsideFence(lines: readonly string[], from: number, to: number): boolean {
-  let fence: OpenFence | null = null;
-  for (let j = from; j < to; j++) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]!;
     if (fence) {
-      if (isFenceCloser(lines[j]!, fence)) fence = null;
-    } else {
-      fence = fenceOpener(lines[j]!);
+      if (isFenceCloser(raw, fence)) {
+        fence = null;
+        fenceLine = -1;
+      }
+      claimMatch.push(null);
+      blockEnd.push(false);
+      continue;
     }
+    const opener = literalOpeners.has(i) ? null : fenceOpener(raw);
+    if (opener) {
+      fence = opener;
+      fenceLine = i;
+      claimMatch.push(null);
+      blockEnd.push(false);
+      continue;
+    }
+    const line = raw.trim();
+    claimMatch.push(line.match(CLAIM_HEADING_RE));
+    blockEnd.push(CLAIM_BLOCK_END_RE.test(line));
   }
-  return fence !== null;
-}
-
-/**
- * Does `raw` (line `at`, inside the fence opened at `fenceLine` after claim heading
- * `open`) END that fence as a later claim's real heading? (arch review 2026-10,
- * finding 55)
- *
- * Claim headings are a fixed prompt contract numbered `n/m` in order, so only a
- * column-0 heading for a LATER claim of the same run qualifies, and only when it
- * is the last line in the answer naming that claim: a verify block that quotes a
- * heading has the real one below it. The fence then gets two readings, both under
- * the EOF rule: as a QUOTE it runs to its closer, as REAL its opener is retired.
- * The heading is real when the fence has no closer (the EOF rule retires the
- * opener anyway), or when retiring the opener leaves the heading outside every
- * fence and either
- * - the real reading masks fewer SOLE headings of the run (claims no other line
- *   names) than the quote reading, and after the heading neither retires more
- *   openers nor reads more info-string openers (```` ```md ````) as fence content
- *   than the quote reading does after its closer, or
- * - it does not mask fewer, does not open a fence that never closes where the
- *   quote reading closes its next one, and an info-string opener lies between the
- *   heading and the closer, which marks that closer as written for it.
- * Anything else stays code. On an exhaustive grammar of answers (stray openers,
- * closed quotes of next/same/missing claims, other runs) this never reads a case
- * worse than the plain walk does, except answers missing two claim headings and
- * quoting both; a stray opener before a heading the answer restates later, or
- * whose pairing reads the same both ways, is not rescued.
- *
- * Cost: one O(lines) table per answer, built on the first candidate, then O(1)
- * per candidate, plus one walk over the fence's own lines when it fires.
- *
- * This is the ONE deliberate difference from the reader's fence grammar
- * (`extractFences`, {@link fencedLineMask}): those render arbitrary markdown and
- * know nothing of the claim contract.
- */
-function endsFenceAsNextClaim(
-  lines: readonly string[],
-  raw: string,
-  at: number,
-  fenceLine: number,
-  open: RegExpMatchArray | null,
-  refs: ClaimRefLines,
-): boolean {
-  if (!open) return false;
-  const m = raw.match(CLAIM_HEADING_RE);
-  if (!m) return false;
-  const n = Number(m[2]);
-  const total = Number(m[3]);
-  if (n <= Number(open[2]) || total !== Number(open[3]) || n > total) return false;
-  if (refs.last.get(`${n}/${total}`) !== at) return false;
-  let pairs = refs.pairs.get(total);
-  if (!pairs) refs.pairs.set(total, (pairs = fencePairs(lines, refs, total)));
-  const closer = pairs.closerOf[fenceLine]!;
-  if (closer === -1) return true;
-  const quoteMasked = pairs.sole[closer]! - pairs.sole[at + 1]! + pairs.masked[closer + 1]!;
-  const realMasked = pairs.masked[at + 1]!;
-  let real: boolean;
-  if (realMasked < quoteMasked) {
-    real =
-      pairs.strays[at + 1]! <= pairs.strays[closer + 1]! &&
-      pairs.swallowed[at + 1]! <= pairs.swallowed[closer + 1]!;
-  } else if (pairs.dangles[at + 1] && !pairs.dangles[closer + 1]) {
-    real = false;
-  } else {
-    real = pairs.info[closer]! - pairs.info[at + 1]! > 0;
-  }
-  return real && !endsInsideFence(lines, fenceLine + 1, at);
+  return { claimMatch, blockEnd, openAtEof: fence ? fenceLine : -1 };
 }
 
 /** One claim anchor derived SERVER-SIDE from the persisted fact-check answer. */
