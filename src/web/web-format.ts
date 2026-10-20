@@ -81,8 +81,11 @@ import {
   statusRows,
   statusTileTone,
   type StatusTones,
+  visibleText,
 } from "../format/report-top.ts";
-import { readStatusRowsView } from "../format/component-spec.ts";
+import { readChartKind, readStatusRowsView } from "../format/component-spec.ts";
+import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
+import { pageLedgers, prStateMap, type PrState } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
 import {
@@ -268,6 +271,10 @@ export function formatWebHtml(
      *  decision-chain route and the lint read too. Absent ⇒ `text` with each
      *  wikilink sentinel replaced by its `wikiLinkTexts` text. */
     decisionText?: string;
+    /** With `views`: the `<Chart>` view (`renderWikiHtml` passes
+     *  `chartViewHtml`). Passed in so the chat bundle never carries it.
+     *  Absent ⇒ a chart prints its table as written. */
+    chartView?: ChartViewRenderer;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -281,7 +288,12 @@ export function formatWebHtml(
   const prevLinkTexts = currentLinkTexts;
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
+  const prevChartView = currentChartView;
+  const prevPrStates = currentPrStates;
   currentViews = opts?.views === true;
+  const charted = currentViews && opts?.chartView !== undefined && text.includes("<Chart");
+  currentChartView = charted ? opts!.chartView! : null;
+  currentPrStates = null;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
@@ -303,6 +315,13 @@ export function formatWebHtml(
     // The views' whole-page pre-pass runs only on the reader's page render;
     // without it the walk is the one `renderBlocks` call, byte for byte.
     const slot = opts?.views ? viewSlot(blocks) : -1;
+    if (charted) {
+      // A gate row's pill reads the page's own ledgers, as the PR strip does.
+      const linkTexts = opts?.wikiLinkTexts;
+      const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
+      const ledgers = pageLedgers(analysed === text ? blocks : parseBlocks(analysed), opts?.proposedPlan === true);
+      currentPrStates = ledgers.length ? prStateMap(ledgers) : null;
+    }
     let rendered: string;
     if (slot < 0) {
       rendered = renderBlocks(blocks, webRenderer);
@@ -323,7 +342,7 @@ export function formatWebHtml(
     // DecisionLog item yields to both.
     const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
-    const linked = slot >= 0 ? retargetViewLinks(questionLinked) : questionLinked;
+    const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
     // exactly: the item's state (D8) and the id's noun (D12). The parse is the
     // one the answer cards use, run on the reader path when the page has a
@@ -339,6 +358,8 @@ export function formatWebHtml(
     currentLinkTexts = prevLinkTexts;
     currentItemDates = prevItemDates;
     currentViews = prevViews;
+    currentChartView = prevChartView;
+    currentPrStates = prevPrStates;
   }
 }
 
@@ -395,6 +416,12 @@ let currentReader = false;
 
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
 let currentViews = false;
+
+/** `opts.chartView` for the call in progress; null ⇒ a `<Chart>` is its table. */
+let currentChartView: ChartViewRenderer | null = null;
+
+/** The page's PR → ledger state, for a gate chart's pills; read once per call. */
+let currentPrStates: ReadonlyMap<number, PrState> | null = null;
 
 /** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
 let currentLanguage: QuestionLanguage = "en";
@@ -758,6 +785,28 @@ function deltaTableHtml(
 /** A `<DeltaTable>`: from its `src=` CSV, else from the first pipe table
  *  that is a direct child of its body. The rest of the body renders above the
  *  table. */
+/** A `<Chart>`: on the reader's page render with a chart view, the view over
+ *  its table; else, or when the table does not read as its kind, the body as
+ *  written. Cells are read as the lint reads them (`visibleText`), wikilink
+ *  sentinels as their link text first. */
+function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
+  if (!currentChartView) return children;
+  const kind = readChartKind(attrs.kind).value;
+  const body = chartBody(rawChildren);
+  if (!kind || !body.table) return children;
+  const read = readChart(kind, attrs, chartTable(body.table, (c) => visibleText(peekText(c))));
+  if (!read.model) return children;
+  return currentChartView({
+    read: { ...read, model: read.model },
+    caption: attrs.caption ?? "",
+    tableHtml: renderBlocks([body.table], webRenderer),
+    beforeHtml: renderBlocks(body.before, webRenderer),
+    afterHtml: renderBlocks(body.after, webRenderer),
+    language: currentLanguage,
+    prStates: currentPrStates,
+  });
+}
+
 function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): string {
   const d = parseDeltaAttrs(attrs);
   const bClass = d.better ? ` dt-better-${d.better}` : "";
@@ -2144,7 +2193,7 @@ const webRenderer: BlockRenderer = {
         // renders in place.
         return children;
       case "Chart":
-        return children;
+        return chartBlockHtml(attrs, rawChildren, children);
       case "StatusRows":
         // Tiles on the reader's page render only; every other surface prints rows.
         return statusRowsHtml(

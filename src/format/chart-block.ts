@@ -14,7 +14,8 @@ import { isEmptyCell, parseCellValue, tableDecimalComma, type NumberContext } fr
 import { readChartNormalize, type ChartKind } from "./component-spec.ts";
 import { headerKey } from "./delta-table.ts";
 import type { Block } from "./markdown-ast.ts";
-import { gateRowPr } from "./pr-ledger.ts";
+import { gateRowPr, type PrState } from "./pr-ledger.ts";
+import type { QuestionLanguage } from "./question-labels.ts";
 
 type TableBlock = Extract<Block, { type: "table" }>;
 
@@ -436,3 +437,20 @@ class Reader {
     return { kind: "funnel", rows };
   }
 }
+
+/** What the reader's view draws from. `formatWebHtml` builds it and calls the
+ *  renderer `renderWikiHtml` passes as `chartView`, so the view's module stays
+ *  out of the chat bundle. */
+export interface ChartViewInput {
+  read: ChartRead & { model: ChartModel };
+  caption: string;
+  /** The table, the blocks before it and the blocks after it, rendered. */
+  tableHtml: string;
+  beforeHtml: string;
+  afterHtml: string;
+  language: QuestionLanguage;
+  /** PR number → ledger state, for a gate row's pill; null without a ledger. */
+  prStates: ReadonlyMap<number, PrState> | null;
+}
+
+export type ChartViewRenderer = (input: ChartViewInput) => string;

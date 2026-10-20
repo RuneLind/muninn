@@ -1202,3 +1202,112 @@ export function decisionViewsCss(scope: string): string {
     }
   `;
 }
+
+/** The reader's `<Chart>` view (`src/format/chart-view.ts`): theme tokens only.
+ *  In chart mode the table is visually hidden, not removed, so a screen
+ *  reader and a selection still reach it; a peek card shows it plainly. */
+export function chartViewCss(scope: string): string {
+  const live = `${scope} .vc:not(.wiki-ref-peek *)`;
+  return `
+    ${scope} .vc {
+      position: relative; margin: 0.8rem 0 1rem; padding: 0.6rem 0.8rem; border-radius: 8px; max-width: 100%;
+      box-sizing: border-box; background: var(--bg-panel); border: 1px solid var(--border-primary);
+      container: vc / inline-size; overflow-wrap: anywhere;
+    }
+    ${scope} .vc-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.8rem; margin-bottom: 0.5rem; }
+    ${scope} .vc-caption { font-weight: 600; color: var(--text-primary); }
+    ${scope} .vc-ctl { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    ${scope} .vc-group { display: inline-flex; }
+    ${scope} .vc-btn {
+      font: inherit; font-size: 0.8em; padding: 0.15rem 0.6rem; cursor: pointer;
+      color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--text-muted); border-radius: 0;
+    }
+    ${scope} .vc-btn + .vc-btn { border-inline-start-width: 0; }
+    ${scope} .vc-btn:first-child { border-start-start-radius: 6px; border-end-start-radius: 6px; }
+    ${scope} .vc-btn:last-child { border-start-end-radius: 6px; border-end-end-radius: 6px; }
+    ${scope} .vc-btn[aria-pressed="true"] { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+    ${scope} .vc-btn:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
+    ${scope} .vc-rows { display: grid; grid-template-columns: minmax(6rem, max-content) minmax(8rem, 1fr) minmax(0, max-content); gap: 0.35rem 0.7rem; align-items: center; }
+    ${scope} .vc-row { display: contents; }
+    ${scope} .vc-lab { color: var(--text-primary); min-width: 0; }
+    ${scope} .vc-bar { display: block; min-width: 0; }
+    ${scope} .vc-num { font-size: 0.85em; color: var(--text-soft); font-variant-numeric: tabular-nums; min-width: 0; }
+    ${scope} .vc-svg { display: block; width: 100%; height: 1.1rem; overflow: visible; }
+    ${scope} .vc-track { fill: none; stroke: var(--text-muted); stroke-width: 1px; }
+    ${scope} .vc-value { fill: var(--accent); }
+    ${scope} .vc-band { fill: var(--tone-warn); }
+    ${scope} .vc-hold { fill: none; stroke: var(--accent); stroke-width: 1.5px; stroke-dasharray: 3 2; }
+    ${scope} .vc-target { stroke: var(--text-primary); stroke-width: 2px; }
+    ${scope} .vc-mark { stroke: var(--status-magenta); stroke-width: 2px; stroke-dasharray: 2 1; }
+    ${scope} .vc-zero { stroke: var(--text-secondary); stroke-width: 1px; }
+    ${scope} .vc-gap { color: var(--tone-warn); }
+    ${scope} .vc-verdict { display: block; font-weight: 600; }
+    ${scope} .vc-ok { color: var(--tone-good); }
+    ${scope} .vc-miss { color: var(--tone-err); }
+    ${scope} .vc-pill { display: inline-block; margin-inline-start: 0.35rem; padding: 0 0.35rem; border: 1px solid; border-radius: 4px; font-size: 0.75em; }
+    ${scope} .vc-d1 { padding-inline-start: 0.8rem; }
+    ${scope} .vc-d2 { padding-inline-start: 1.6rem; }
+    ${scope} .vc-d3 { padding-inline-start: 2.4rem; }
+    ${scope} .vc-d4 { padding-inline-start: 3.2rem; }
+    ${scope} .vc-steps { display: grid; grid-template-columns: max-content minmax(0, 1fr); grid-template-rows: 9rem auto; column-gap: 0.4rem; }
+    ${scope} .vc-yaxis { position: relative; font-size: 0.75em; color: var(--text-soft); min-width: 2.5rem; }
+    ${scope} .vc-ylab { position: absolute; inset-inline-end: 0; transform: translateY(-50%); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    ${scope} .vc-area { min-width: 0; border-inline-start: 1px solid var(--text-muted); border-block-end: 1px solid var(--text-muted); }
+    ${scope} .vc-area .vc-svg { height: 100%; }
+    ${scope} .vc-xaxis { grid-column: 2; position: relative; height: 1.4em; font-size: 0.75em; color: var(--text-soft); }
+    ${scope} .vc-xlab { position: absolute; top: 0.15em; transform: translateX(-50%); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+    ${scope} .vc-xfirst { transform: none; text-align: start; }
+    ${scope} .vc-xlast { transform: translateX(-100%); text-align: end; }
+    ${scope} .vc-line { fill: none; stroke-width: 2px; stroke-linejoin: round; }
+    ${scope} .vc-ref { stroke: var(--text-secondary); stroke-width: 1px; stroke-dasharray: 4 3; }
+    ${scope} .vc-s0 .vc-line { stroke: var(--accent); }
+    ${scope} .vc-s1 .vc-line { stroke: var(--status-magenta); stroke-dasharray: 6 3; }
+    ${scope} .vc-s2 .vc-line { stroke: var(--status-cyan); stroke-dasharray: 2 2; }
+    ${scope} .vc-s3 .vc-line { stroke: var(--tone-warn); stroke-dasharray: 8 3 2 3; }
+    ${scope} .vc-s4 .vc-line { stroke: var(--tone-good); stroke-dasharray: 12 4; }
+    ${scope} .vc-s5 .vc-line { stroke: var(--text-secondary); }
+    ${scope} .vc-legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.9rem; margin-top: 0.5rem; font-size: 0.8em; color: var(--text-soft); }
+    ${scope} .vc-key { display: inline-flex; align-items: center; gap: 0.3rem; }
+    ${scope} .vc-sw { display: inline-block; width: 0.9rem; height: 0.6rem; box-sizing: border-box; }
+    ${scope} .vc-k-value { background: var(--accent); }
+    ${scope} .vc-k-band { background: var(--tone-warn); }
+    ${scope} .vc-k-hold { border: 1.5px dashed var(--accent); }
+    ${scope} .vc-k-target { width: 2px; height: 0.9rem; background: var(--text-primary); }
+    ${scope} .vc-k-mark { width: 2px; height: 0.9rem; background: var(--status-magenta); }
+    ${scope} .vc-k-ref { height: 0; border-top: 1px dashed var(--text-secondary); }
+    ${scope} .vc-sw-line { width: 1.2rem; height: 0.4rem; }
+    ${scope} .vc-sw-line .vc-line { stroke-dasharray: none; }
+    ${scope} .vc-s1 .vc-sw-line .vc-line { stroke-dasharray: 4 2; }
+    ${scope} .vc-s2 .vc-sw-line .vc-line { stroke-dasharray: 2 2; }
+    ${scope} .vc-s3 .vc-sw-line .vc-line, ${scope} .vc-s4 .vc-sw-line .vc-line { stroke-dasharray: 6 2; }
+    ${scope} .vc-notes { margin: 0.5rem 0 0; padding-inline-start: 1.1rem; font-size: 0.8em; color: var(--text-soft); }
+    ${scope} .vc-table table { margin: 0.4rem 0 0; }
+    /* Chart mode: the table is there for a screen reader and a selection only. */
+    ${live}:not(.vc-mode-table) > .vc-table {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+      clip-path: inset(50%); white-space: nowrap; border: 0;
+    }
+    ${live}.vc-mode-table > .vc-plot, ${live}.vc-mode-table > .vc-legend, ${live}.vc-mode-table .vc-variants { display: none; }
+    ${scope} .vc-plot[hidden] { display: none; }
+    @container vc (max-width: 34rem) {
+      ${scope} .vc-rows { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
+      ${scope} .vc-row { display: block; margin-bottom: 0.45rem; }
+      ${scope} .vc-lab, ${scope} .vc-num { display: block; }
+    }
+    @media print {
+      ${scope} .vc > .vc-table { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; white-space: normal; }
+      ${scope} .vc > .vc-plot, ${scope} .vc > .vc-legend, ${scope} .vc-ctl { display: none; }
+    }
+    @media (forced-colors: active) {
+      ${scope} .vc-track, ${scope} .vc-hold { stroke: CanvasText; }
+      ${scope} .vc-value { fill: Highlight; }
+      ${scope} .vc-band { fill: CanvasText; }
+      ${scope} .vc-target, ${scope} .vc-mark, ${scope} .vc-ref, ${scope} .vc-zero, ${scope} .vc-line { stroke: CanvasText; }
+      ${scope} .vc-sw { forced-color-adjust: none; background: CanvasText; }
+      ${scope} .vc-k-value { background: Highlight; }
+      ${scope} .vc-k-hold { background: Canvas; border-color: CanvasText; }
+      ${scope} .vc-k-ref { background: none; border-top-color: CanvasText; }
+      ${scope} .vc-btn[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+    }
+  `;
+}

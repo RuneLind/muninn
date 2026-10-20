@@ -146,7 +146,7 @@ describe("readX: fellBack only for a present, unaccepted value", () => {
         for (const v of spec.enum) expect({ attr, v, ...spec.parse(v) }).toEqual({ attr, v, value: v, fellBack: false });
         // A required enum has no default: an unknown value reads as none (null).
         expect(spec.parse("zzz")).toEqual({ value: spec.required ? null : spec.default, fellBack: true });
-        expect(spec.parse(undefined)).toEqual({ value: spec.default, fellBack: false });
+        expect(spec.parse(undefined)).toEqual({ value: spec.required ? null : spec.default, fellBack: false });
       }
     }
   });

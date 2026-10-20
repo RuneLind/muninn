@@ -25,6 +25,7 @@
 
 import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { chartViewHtml } from "../format/chart-view.ts";
 import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
@@ -126,7 +127,7 @@ export function renderWikiHtml(
       wikiLinkTexts: linkTexts,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
-      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown) } : {}),
+      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml } : {}),
     }),
     literal,
   );
