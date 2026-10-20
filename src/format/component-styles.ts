@@ -1066,8 +1066,10 @@ export function factcheckReaderCss(scope: string): string {
  * Reader-only: `<StatusRows view="tiles">` (`statusRowsHtml`, `web-format.ts`),
  * which only the reader's page render (`views: true`) draws. The rows markup
  * stays; each `sr-row` becomes a tile — the label, the first segment
- * (`sr-big`) as the big value, the rest as the note. The separator after the
- * big value is hidden visually only, so a selection still reads it. Theme
+ * (`sr-big`) as the big value, the rest as the note. The big value is a
+ * full-width inline-block and the separator after it stays in the flow at
+ * font-size 0: a block box or an out-of-flow separator turns a selection's
+ * text into `3 points\n·to …`, which Explain cannot locate in the source. Theme
  * tokens only; tones are the state pills' (`sr-good` …) tint and text pairs.
  */
 export function statusTilesCss(scope: string): string {
@@ -1082,12 +1084,14 @@ export function statusTilesCss(scope: string): string {
     }
     ${scope} .sr-tiles .sr-value { font-size: 0.85em; color: var(--text-soft); }
     ${scope} .sr-tiles .sr-big {
-      display: block; font-size: 1.55rem; line-height: 1.2; font-weight: 650; color: var(--text-primary);
+      display: inline-block; width: 100%; font-size: 1.55rem; line-height: 1.2; font-weight: 650; color: var(--text-primary);
       font-variant-numeric: tabular-nums;
     }
-    ${scope} .sr-tiles .sr-big + .sr-sep {
-      position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
-    }
+    ${scope} .sr-tiles .sr-big + .sr-sep { font-size: 0; }
+    /* A pill in the big value wraps inside its tile instead of running under the next one. */
+    ${scope} .sr-tiles .sr-big .sr-state { display: inline-block; max-width: 100%; white-space: normal; }
+    /* On a tinted tile the pill's own tint can match it: outline it in its ink. */
+    ${scope} .sr-tiles [class*="sr-tone-"] .sr-state { border-color: currentColor; }
     ${scope} .sr-tiles .sr-tone-good { background: var(--tint-success); }
     ${scope} .sr-tiles .sr-tone-good .sr-big { color: var(--tone-good); }
     ${scope} .sr-tiles .sr-tone-warn { background: var(--tint-warning); }

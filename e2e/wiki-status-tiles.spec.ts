@@ -5,8 +5,11 @@
  * What only a laid-out page can answer: that the rows draw as tiles (the big
  * value over its note), that a tile's tone paints the theme's own token in
  * both themes, that the separator after the big value is hidden from sight
- * but kept in the row's text, that a block without `view="tiles"` keeps its
- * rows, and that nothing runs past the page at 390 px.
+ * but kept in the row's text — so a selection across the big value and its
+ * note reads as the source row and Explain finds it — that a state pill in the
+ * big value fits its tile and keeps an outline on a toned tile, that a block
+ * without `view="tiles"` keeps its rows, and that nothing runs past the page at
+ * 390 px.
  *
  * No model calls, no DB rows: one muninn over a temp wiki holding one
  * synthetic plan page.
@@ -19,6 +22,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { EXPLAIN_FULL_BODY_MAX, locateExcerpt } from "../src/wiki/explain-context.ts";
 
 const PORT = e2ePort("wiki-status-tiles");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -34,13 +38,19 @@ const PAGE = [
   "",
   "# Tiles plan",
   "",
-  '<StatusRows view="tiles" tones="Gap=warn;Next=good;Probe=info;Old=muted">',
+  // Filler ahead of the tiles: the page is past Explain's full-body size and
+  // the tiles past the head it falls back to, so only a located selection
+  // brings the row into the excerpt.
+  ...Array.from({ length: 20 }, (_, i) => `Background paragraph ${i + 1}: a synthetic line of prose that only pads the page so Explain has to locate a selection instead of sending the whole body.\n`),
+  '<StatusRows view="tiles" tones="Gap=warn;Next=good;Probe=info;Old=muted;Deploy=warn;Live=info">',
   "",
   "- **Score:** 1 234 · up from 1 100 last week",
   "- **Gap:** 3 points · to the leader, closing",
   "- **Next:** ship the reader · then the writer, which waits on a review that has not been booked yet",
   "- **Probe:** 95 ms · p95 over the last day",
   "- **Old:** retired",
+  "- **Deploy:** merged, not in prod · the train leaves Friday",
+  "- **Live:** in prod · since Monday",
   "",
   "</StatusRows>",
   "",
@@ -91,12 +101,13 @@ test.afterAll(async () => {
 });
 
 const TILES = ".wiki-article .status-rows.sr-tiles";
+const ROWS = 7;
 
 /** The page at `width`; `focus` drops the rail and the Ask pane (the F key). */
 async function open(page: Page, width: number, focus = false): Promise<void> {
   await page.setViewportSize({ width, height: 900 });
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
-  await expect(page.locator(`${TILES} .sr-row`)).toHaveCount(5);
+  await expect(page.locator(`${TILES} .sr-row`)).toHaveCount(ROWS);
   if (focus) {
     await page.locator("body").press("f");
     await expect(page.locator("#wikiFocusExit")).toBeVisible();
@@ -135,7 +146,7 @@ test.describe("Wiki reader: StatusRows tiles", () => {
       // More than one column, each tile a box of its own.
       const xs = new Set((await tiles.evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().x)))));
       expect(xs.size).toBeGreaterThan(1);
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < ROWS; i++) {
         const t = tiles.nth(i);
         expect(await t.evaluate((e) => getComputedStyle(e).display)).toBe("flex");
         const tb = (await t.boundingBox())!;
@@ -177,6 +188,57 @@ test.describe("Wiki reader: StatusRows tiles", () => {
     expect(await row.textContent()).toBe("Score1 234 · up from 1 100 last week");
   });
 
+  test("a selection across the big value and its note reads as the source row", async ({ page }) => {
+    await open(page, 1280);
+    const text = await page
+      .locator(`${TILES} .sr-row`, { has: page.locator(".sr-label", { hasText: "Gap" }) })
+      .locator(".sr-value")
+      .evaluate((v) => {
+        const r = document.createRange();
+        r.selectNodeContents(v);
+        const sel = getSelection()!;
+        sel.removeAllRanges();
+        sel.addRange(r);
+        return sel.toString();
+      });
+    expect(text.replace(/\s+/g, " ").trim()).toBe("3 points · to the leader, closing");
+    // What Explain does with it: a page past the full-body size, the row past the head.
+    expect(PAGE.length).toBeGreaterThan(EXPLAIN_FULL_BODY_MAX);
+    expect(locateExcerpt(PAGE, text)).toContain("**Gap:** 3 points · to the leader, closing");
+  });
+
+  for (const width of [1280, 700]) {
+    test(`${width} px: a state pill in the big value fits its tile`, async ({ page }) => {
+      await open(page, width);
+      const row = page.locator(`${TILES} .sr-row`, { has: page.locator(".sr-label", { hasText: "Deploy" }) });
+      const pill = row.locator(".sr-big .sr-state");
+      await expect(pill).toHaveText("merged, not in prod");
+      const tb = (await row.boundingBox())!;
+      const pb = (await pill.boundingBox())!;
+      expect(pb.x + pb.width).toBeLessThanOrEqual(tb.x + tb.width + 0.5);
+      expect(await row.evaluate((e) => e.scrollWidth - e.clientWidth)).toBeLessThanOrEqual(0);
+    });
+  }
+
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: a state pill on a toned tile keeps an outline in its own ink`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await open(page, 1280);
+      // Deploy: a warn pill on a warn tile (same tint); Live: a good pill on an info tile.
+      for (const [label, ink] of [["Deploy", "--tone-warn"], ["Live", "--tone-good"]] as const) {
+        const row = page.locator(`${TILES} .sr-row`, { has: page.locator(".sr-label", { hasText: label }) });
+        const s = await row.evaluate((e) => {
+          const pill = getComputedStyle(e.querySelector(".sr-state")!);
+          return { tile: getComputedStyle(e).backgroundColor, border: pill.borderTopColor, width: parseFloat(pill.borderTopWidth) };
+        });
+        const want = await token(page, "color", ink);
+        expect({ label, border: s.border }).toEqual({ label, border: want });
+        expect(s.border).not.toBe(s.tile);
+        expect(s.width).toBeGreaterThanOrEqual(1);
+      }
+    });
+  }
+
   test("a block without view=tiles keeps its rows", async ({ page }) => {
     await open(page, 1280);
     const rows = page.locator(".wiki-article .status-rows:not(.sr-tiles)");
@@ -191,7 +253,7 @@ test.describe("Wiki reader: StatusRows tiles", () => {
       await open(page, 390, true);
       const section = (await page.locator(TILES).boundingBox())!;
       const tiles = page.locator(`${TILES} .sr-row`);
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < ROWS; i++) {
         const tb = (await tiles.nth(i).boundingBox())!;
         expect(tb.x).toBeGreaterThanOrEqual(section.x - 0.5);
         expect(tb.x + tb.width).toBeLessThanOrEqual(section.x + section.width + 0.5);
