@@ -4,8 +4,8 @@
  * `src/wiki/lint.ts`: index-truncation, nested-annotation, unrendered-fact-mark,
  * question-block, decision-first-sentence, status-row-long, status-tones,
  * status-tile-long, role-key,
- * case-board-labels, missing-tldr, tldr-no-more, the component checks, ledger-row-state
- * and chain-close-conflict) over a page or a
+ * case-board-labels, missing-tldr, tldr-no-more, the component checks, ledger-row-state,
+ * chain-close-conflict and chart-table) over a page or a
  * directory, with no wiki index, no database and no `.env`. `roleKeys` comes
  * from the wiki root's `.wiki-reader.json`:
  *
