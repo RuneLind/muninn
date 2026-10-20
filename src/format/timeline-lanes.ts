@@ -42,9 +42,9 @@ const LABEL_MAX = 48;
 
 const LANE_ORDER: readonly LaneKind[] = ["decisions", "queries", "timeline"];
 
-const WORDS: Record<QuestionLanguage, { title: string; lanes: Record<LaneKind, string>; query: string; dated: (n: number) => string }> = {
-  en: { title: "Dates on this page", lanes: { decisions: "Decisions", queries: "Queries", timeline: "Timeline" }, query: "Query", dated: (n) => `${n} dated` },
-  no: { title: "Datoer på siden", lanes: { decisions: "Beslutninger", queries: "Spørringer", timeline: "Tidslinje" }, query: "Spørring", dated: (n) => `${n} datert` },
+const WORDS: Record<QuestionLanguage, { title: string; lanes: Record<LaneKind, string>; item: Partial<Record<LaneKind, string>>; dated: (n: number) => string }> = {
+  en: { title: "Dates on this page", lanes: { decisions: "Decisions", queries: "Queries", timeline: "Timeline" }, item: { decisions: "Decision", queries: "Query" }, dated: (n) => `${n} dated` },
+  no: { title: "Datoer på siden", lanes: { decisions: "Beslutninger", queries: "Spørringer", timeline: "Tidslinje" }, item: { decisions: "Beslutning", queries: "Spørring" }, dated: (n) => `${n} datert` },
 };
 
 /** The days an item date is read with, as `formatWebHtml`'s `itemDates`. */
@@ -57,10 +57,17 @@ interface LaneDays {
  *  sentinel as its link text, as the reader's `data-item-date` does. */
 export type TimelineLanesRenderer = (blocks: readonly Block[], days: LaneDays, language: QuestionLanguage, shown: (text: string) => string) => string;
 
-function cut(text: string): string {
-  const t = visibleText(text).replace(/\s+/g, " ").trim();
+function clip(text: string): string {
+  const t = text.replace(/\s+/g, " ").trim();
   return t.length > LABEL_MAX ? `${t.slice(0, LABEL_MAX - 1).trimEnd()}…` : t;
 }
+
+/** Inline markdown read as the text it renders to. */
+const cut = (text: string) => clip(visibleText(text));
+
+/** A Query id as its card prints it: literal, each wikilink as its link text. */
+const literal = (text: string, shown: (text: string) => string) =>
+  clip(text.replace(/\x00WIKIPAGELINK\d+\x00/g, (m) => shown(m).trim()));
 
 /** Every top-level item of every list directly in a block's body. */
 function bodyItems(children: readonly Block[]): { text: string; nested: string }[] {
@@ -77,6 +84,7 @@ export function pageTimelineLanes(blocks: readonly Block[], days: LaneDays, show
     for (const { text, nested } of bodyItems(b.children)) {
       const p = parseLogItem(text);
       const day = itemDate(shown(`${p.text}\n${nested}`), days.ref, days.today);
+      // "" when the item has no text: the renderer names it by the word for a decision.
       if (day) lanes.decisions.push({ day, label: p.id ?? cut(shown(p.text)) });
     }
   }
@@ -84,7 +92,7 @@ export function pageTimelineLanes(blocks: readonly Block[], days: LaneDays, show
     const q = parseQueryAttrs(b.attrs);
     const day = q.run ? itemDate(shown(q.run), days.ref, days.today) : null;
     // "" when the Query has neither: the renderer names it by the word for a query.
-    if (day) lanes.queries.push({ day, label: cut(shown(q.id)) || cut(shown(q.question)) });
+    if (day) lanes.queries.push({ day, label: literal(q.id, shown) || cut(shown(q.question)) });
   }
   for (const b of componentBlocks(blocks, "Timeline")) {
     for (const { text } of bodyItems(b.children)) {
@@ -124,7 +132,7 @@ export const timelineLanesHtml: TimelineLanesRenderer = (blocks, days, language,
     .map((lane) => {
       const byDay = new Map<string, string[]>();
       for (const i of [...lane.items].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))) {
-        byDay.set(i.day, [...(byDay.get(i.day) ?? []), i.label || (lane.kind === "queries" ? w.query : "")]);
+        byDay.set(i.day, [...(byDay.get(i.day) ?? []), i.label || (w.item[lane.kind] ?? "")]);
       }
       const marks = [...byDay]
         .map(([day, labels]) => {

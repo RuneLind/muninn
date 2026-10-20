@@ -254,10 +254,49 @@ describe("labels", () => {
     expect(labels.map((l) => l?.length)).toEqual([48, 48]);
   });
 
-  test("the word for a query never names an item of another lane", () => {
+  test("the word for a query never names an item of another lane; an empty log item is named by the word for a decision", () => {
     const md = page(status, ["<DecisionLog>", "", "- ", "  - Renewal 2026-09-03", "- **D2** — B. 2026-09-05", "", "</DecisionLog>", ""], timeline("**2026-09-01** — X", "**2026-09-10** — Y"));
     expect(lanesOf(reader(md))).toContain('title="2026-09-05: D2"');
     expect(lanesOf(reader(md))).not.toContain("Query");
+    expect(lanesOf(reader(md))).toContain('title="2026-09-03: Decision"');
+    const no = renderWikiHtml(md, () => undefined, { views: true, today: TODAY, language: "no" } as Parameters<typeof renderWikiHtml>[2]);
+    expect(lanesOf(no)).toContain('title="03.09.2026: Beslutning"');
+  });
+
+  test("a log item with text keeps its text, not the word for a decision", () => {
+    const md = page(status, log("Renewal twice. 2026-09-03", "**D2** — B. 2026-09-05"), timeline("**2026-09-01** — X", "**2026-09-10** — Y"));
+    expect(lanesOf(reader(md))).toContain('title="2026-09-03: Renewal twice. 2026-09-03"');
+    expect(lanesOf(reader(md))).not.toContain("Decision\"");
+  });
+
+  // The card's id as the reader shows it: its HTML with link markup dropped and white space run together.
+  const cardId = (html: string) =>
+    html.match(/<(a|span) class="query-id"[^>]*>([\s\S]*?)<\/\1>(?=<span class="query-question">)/)?.[2]?.replace(/<[^>]*>/g, "").replace(/\s+/g, " ");
+  for (const id of ["**Q-9**", "`Q-9`", "Q<9>", "Q &amp; 9", "[[plans/q|Q-9]]", "A [[plans/q|Q]]-9", "Q  9"]) {
+    test(`a Query id ${JSON.stringify(id)} reads in the lane as its card shows it`, () => {
+      const md = page(status, [`<Query id="${id}" question="How many holds?" run="2026-09-04" />`, ""], query("Q-2", "2026-09-06"), timeline("**2026-09-01** — X", "**2026-09-10** — Y"));
+      const resolving = (target: string) => ({ name: target, title: target, relPath: `${target}.md` }) as unknown as NonNullable<ReturnType<Parameters<typeof renderWikiHtml>[1]>>;
+      const html = renderWikiHtml(md, resolving, { views: true, today: TODAY });
+      const shown = cardId(html);
+      expect(shown).toBeTruthy();
+      expect(lanesOf(html).match(/title="2026-09-04: ([^"]*)"/)?.[1]).toBe(shown);
+      expect(lanesOf(html)).not.toContain("<a");
+    });
+  }
+
+  test("an id or question of exactly 48 characters stays whole; 49 is cut", () => {
+    const long = "LIB-101 Renewal of a held book for a whole terms";
+    const md = page(
+      status,
+      [`<Query id="${long}" run="2026-09-04" />`, ""],
+      [`<Query question="${long}" run="2026-09-05" />`, ""],
+      [`<Query id="${long}x" run="2026-09-06" />`, ""],
+      [`<Query question="${long}x" run="2026-09-07" />`, ""],
+      timeline("**2026-09-01** — X", "**2026-09-10** — Y"),
+    );
+    const labels = [...lanesOf(reader(md)).matchAll(/title="2026-09-0[4-7]: ([^"]*)"/g)].map((m) => m[1]);
+    expect(long.length).toBe(48);
+    expect(labels).toEqual([long, long, `${long.slice(0, 47)}…`, `${long.slice(0, 47)}…`]);
   });
 });
 
