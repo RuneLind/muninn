@@ -48,6 +48,7 @@ import { parseFrontmatter, stripFrontmatter, type WikiPageMeta } from "./store.t
 import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
 import type { LintFinding } from "./lint.ts";
+import { findUnfencedLine as findLine } from "./lint-lines.ts";
 
 export const REPORT_TOP_LINT_CHECKS = [
   "decision-first-sentence",
@@ -66,15 +67,6 @@ const TLDR_REFERENCE_DIRS = new Set(["flows", "concepts", "repos", "integrations
 function quote(text: string, n = 50): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return JSON.stringify(flat.length > n ? `${flat.slice(0, n - 1)}…` : flat);
-}
-
-/** The 1-based line of the first unfenced body line at or after `from`
- *  (0-based) that `test` accepts; undefined when none does. */
-function findLine(lines: readonly string[], fenced: readonly boolean[], from: number, test: (line: string) => boolean): number | undefined {
-  for (let i = from; i < lines.length; i++) {
-    if (!fenced[i] && test(lines[i]!)) return i + 1;
-  }
-  return undefined;
 }
 
 /** A `<StatusRows>` row's label as the reader matches it: each wikilink

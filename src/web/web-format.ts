@@ -2143,6 +2143,8 @@ const webRenderer: BlockRenderer = {
         // Only a `<Tldr>` gives it a closed part; anywhere else its body
         // renders in place.
         return children;
+      case "Chart":
+        return children;
       case "StatusRows":
         // Tiles on the reader's page render only; every other surface prints rows.
         return statusRowsHtml(

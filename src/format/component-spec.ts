@@ -270,6 +270,28 @@ export function readStatusRowsView(raw: string | undefined): AttrRead<StatusRows
   return readEnum(STATUS_ROWS_VIEWS, "rows", raw);
 }
 
+// ── Chart ───────────────────────────────────────────────────────────────────
+
+export const CHART_KINDS = ["gap", "steps", "gate", "funnel"] as const;
+export type ChartKind = (typeof CHART_KINDS)[number];
+
+/** A `Chart kind=` value, read case-sensitively like every other enum. No
+ *  default: a missing or unknown kind renders the chart as its table. */
+export function readChartKind(input: string | undefined): AttrRead<ChartKind | null> {
+  const raw = present(input);
+  if (raw === undefined) return { value: null, fellBack: false };
+  const ok = (CHART_KINDS as readonly string[]).includes(raw);
+  return { value: ok ? (raw as ChartKind) : null, fellBack: !ok };
+}
+
+const CHART_NORMALIZE = ["none", "ref"] as const;
+export type ChartNormalize = (typeof CHART_NORMALIZE)[number];
+
+/** A `Chart normalize=` value: `ref` plots a steps chart as % of its `ref=` row. */
+export function readChartNormalize(raw: string | undefined): AttrRead<ChartNormalize> {
+  return readEnum(CHART_NORMALIZE, "none", raw);
+}
+
 // ── The table ───────────────────────────────────────────────────────────────
 
 const text: AttrSpec = { parse: parseString };
@@ -386,6 +408,24 @@ export const COMPONENT_SPEC = {
     attrs: {
       view: { parse: readStatusRowsView, enum: STATUS_ROWS_VIEWS, default: "rows" },
       tones: text,
+    },
+  },
+  // A chart over the pipe table it wraps (`chart-block.ts`); the other
+  // attributes name the table's columns or rows by header text.
+  Chart: {
+    attrs: {
+      kind: { parse: readChartKind, enum: CHART_KINDS, required: true },
+      caption: text,
+      value: text,
+      target: text,
+      gap: text,
+      mark: text,
+      x: text,
+      ref: text,
+      normalize: { parse: readChartNormalize, enum: CHART_NORMALIZE, default: "none" },
+      bar: text,
+      pass: text,
+      hold: text,
     },
   },
 } as const satisfies Record<string, ComponentSpec>;

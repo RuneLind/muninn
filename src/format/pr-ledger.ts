@@ -288,17 +288,43 @@ function prRefOf(text: string): number | null {
 function slateOf(cell: string, slateColumn: boolean): { slate: number | null; label: string } {
   const t = plain(cell).replace(/^[-–—\s]+/, "");
   if (!slateColumn) return { slate: null, label: t };
-  // Leading PR links go first: `[#351](…) 1 — y`.
+  const m = SLATE_RE.exec(slateBody(t).body);
+  if (!m) return { slate: null, label: t };
+  return { slate: Number(m[1]), label: m[3]!.trim() };
+}
+
+/** A slate number, then an optional separator (group 2) and the label (3). */
+const SLATE_RE = /^(\d{1,4})(?![\p{L}\p{N}])(?![-.:/]\d)\s*([-–—:.)]\s*)?(.*)$/u;
+
+/** A cell past its leading PR links (`[#351](…) 1 — y`) and a `PR #` prefix;
+ *  `link` is the first of those links, `prefixed` whether the prefix was there. */
+function slateBody(t: string): { body: string; link: number | null; prefixed: boolean } {
   let cut = 0;
+  let link: number | null = null;
   for (const r of scanRefs(t).refs) {
     if (r.start !== cut || t[cut] !== "[") break;
+    link ??= r.n;
     cut = r.end;
     while (/\s/.test(t[cut] ?? "")) cut++;
   }
-  const body = t.slice(cut).replace(/^PR\s*#?\s*/i, "");
-  const m = /^(\d{1,4})(?![\p{L}\p{N}])(?![-.:/]\d)\s*(?:[-–—:.)]\s*)?(.*)$/u.exec(body);
-  if (!m) return { slate: null, label: t };
-  return { slate: Number(m[1]), label: m[2]!.trim() };
+  const rest = t.slice(cut);
+  const body = rest.replace(/^PR\s*#?\s*/i, "");
+  return { body, link, prefixed: body.length !== rest.length };
+}
+
+/** The PR a non-ledger table row names in its first cell, read as a ledger
+ *  slate is (`7`, `PR 7`, `**7** — x`, a leading PR link), but stricter: a
+ *  number followed by more text counts only after a separator or a `PR`
+ *  prefix, and only when that text does not open with a digit, so `3 runs`,
+ *  `12–40`, `21a` and a date name no PR. A `<Chart kind="gate">` row matches
+ *  a ledger row by this. */
+export function gateRowPr(cell: string): number | null {
+  const { body, link, prefixed } = slateBody(plain(cell).replace(/^[-–—\s]+/, ""));
+  const m = SLATE_RE.exec(body);
+  if (!m) return body.trim() === "" ? link : null;
+  const label = m[3]!.trim();
+  if (label === "" || ((m[2] !== undefined || prefixed) && !/^\d/.test(label))) return Number(m[1]);
+  return null;
 }
 
 /** The row's PR link: the first cell, the PR, state and Landed cells first,
