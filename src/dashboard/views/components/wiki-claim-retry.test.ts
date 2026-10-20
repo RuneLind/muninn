@@ -439,9 +439,10 @@ test("the invariant guard REFUSES a splice that would delete a masked sibling", 
   expect(spliceClaimBlock(MASKED_SIBLING, 1, "### ✅ Claim 1/2 — First\n\nFresh verdict.")).toBeNull();
 });
 
-test("the next claim's heading ends a fence its predecessor left OPEN", () => {
-  // Claim 1's fence never closes before claim 2's heading (it would pair with claim
-  // 2's own closed fence): the next claim's heading is the real one (finding 55).
+test("the guard refuses claim 1 when its stray opener still masks claim 2", () => {
+  // Claim 1's ```md pairs with claim 2's opener. Both readings pair the rest the
+  // same way, so finding 55's terminator leaves it to the plain walk, which masks
+  // claim 2 (a known gap, pinned in wiki-integrate.test.ts).
   const strayOpen = [
     LEDE,
     "",
@@ -456,8 +457,8 @@ test("the next claim's heading ends a fence its predecessor left OPEN", () => {
     "ok",
     "```",
   ].join("\n");
-  expect(parseFactcheckClaims(strayOpen).map((c) => c.index)).toEqual([1, 2]);
-  // The region still carries the stray ```md, so the guard still refuses claim 1.
+  expect(parseFactcheckClaims(strayOpen).map((c) => c.index)).toEqual([1]);
+  // Claim 1's region carries the stray ```md and claim 2's heading: refused.
   expect(spliceClaimBlock(strayOpen, 1, "### ✅ Claim 1/2 — First\n\nFresh verdict.")).toBeNull();
 });
 

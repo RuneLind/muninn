@@ -273,9 +273,12 @@ test("a truncated answer's quoted next heading in a CLOSED fence stays code", ()
   expect(parseFactcheckClaims(answer).map((c) => c.index)).toEqual([1]);
 });
 
-test("a later claim quoting the next heading in its own closed fence does not block the terminator", () => {
-  // Stray ```ts in claim 1; claim 3 quotes `### ✅ Claim 2/3` inside a closed fence.
-  // The repeat scan must not count a fenced quote (fix round 1, repro C).
+test("known gap: a heading the answer restates later is not taken as the terminator", () => {
+  // Stray ```ts in claim 1; claim 3 quotes `### ✅ Claim 2/3` in a closed fence.
+  // The real claim 2 heading is not the LAST line naming 2/3, so the rule leaves
+  // the fence to the plain walk, which reads it as before finding 55. Pinned so a
+  // change here is a decision (fix round 2: the round-1 rule that rescued this
+  // also turned closed quotes into claims).
   const answer = [
     "Overall.",
     "### ⚠️ Claim 1/3 — First",
@@ -289,7 +292,7 @@ test("a later claim quoting the next heading in its own closed fence does not bl
     "```",
     "Wrong.",
   ].join("\n");
-  expect(claimLines(answer)).toEqual([[1, 1], [2, 4], [3, 6]]);
+  expect(claimLines(answer)).toEqual([[1, 1], [2, 8]]);
 });
 
 test("a stray TILDE opener is ended by the next claim heading", () => {
@@ -297,11 +300,75 @@ test("a stray TILDE opener is ended by the next claim heading", () => {
   expect(parseFactcheckClaims(tilde).map((c) => c.index)).toEqual([1, 2, 3]);
 });
 
-test("a stray opener paired with the NEXT claim's own fence is ended by that claim's heading", () => {
-  // The first closer after claim 2's heading is claim 2's own opener — no heading
-  // lies between them, so only the fence pairing on the rest of the answer tells.
+test("known gap: a stray opener whose pairing reads the same both ways is left to the plain walk", () => {
+  // The stray ```md pairs with claim 2's opener and claim 2's closer dangles. Read
+  // as a quote, the EOF rule recovers everything, and no info-string opener sits
+  // before the closer, so the heading stays code, as before finding 55 (fix round
+  // 2: firing on this tie also fired on a closed quote of a missing claim followed
+  // by a stray opener).
   const answer = ["### ⚠️ Claim 1/2 — First", "```md", "sample", "### ✅ Claim 2/2 — Second", "```", "ok", "```"].join("\n");
-  expect(parseFactcheckClaims(answer).map((c) => c.index)).toEqual([1, 2]);
+  expect(parseFactcheckClaims(answer).map((c) => c.index)).toEqual([1]);
+});
+
+// ── finding 55 fix round 2: two readings, never worse than the plain walk ──
+
+/** `<index><verdict>@<start line>` per claim. */
+function claimRefs(lines: string[]): string[] {
+  return parseFactcheckClaims(lines.join("\n")).map(
+    (c) => `${c.index}${c.verdict}@${lines.indexOf(c.block.split("\n")[0]!)}`,
+  );
+}
+
+test("a quote of the next heading in a closed fence stays code when a later claim leaves a fence open", () => {
+  // Round-1 verify repro: the quote became claim 2, carrying the quote's verdict.
+  const lines = [
+    "Overall.",
+    "### ✅ Claim 1/3 — First",
+    "```md",
+    "### ✅ Claim 2/3 — quoted",
+    "```",
+    "ok",
+    "### ❌ Claim 2/3 — Second",
+    "wrong",
+    "### ⚠️ Claim 3/3 — Third",
+    "```",
+    "npm i",
+  ];
+  expect(claimRefs(lines)).toEqual(["1✅@1", "2❌@6", "3⚠️@8"]);
+});
+
+test("a stray opener in claim 1 is ended by claim 2 when later claims carry only closed fences", () => {
+  // Round-1 verify repro: the stray ```ts paired with claim 2's opener and claim
+  // 2's closer with claim 3's opener, masking both headings.
+  const lines = [
+    "Overall.",
+    "### ⚠️ Claim 1/3 — a",
+    "```ts",
+    "c",
+    "### ❌ Claim 2/3 — b",
+    "```",
+    "x",
+    "```",
+    "### ✅ Claim 3/3 — c",
+    "```md",
+    "x",
+    "```",
+  ];
+  expect(claimRefs(lines)).toEqual(["1⚠️@1", "2❌@4", "3✅@8"]);
+});
+
+test("a stray opener whose closer belongs to the next claim's info-string fence is ended by that claim", () => {
+  // Neither reading masks a lone heading; the ```md between the heading and the
+  // closer is the opener that closer was written for.
+  const lines = ["O", "### ⚠️ Claim 1/3 — a", "```ts", "c", "### ❌ Claim 2/3 — b", "```md", "x", "```", "### ✅ Claim 3/3 — c"];
+  expect(claimRefs(lines)).toEqual(["1⚠️@1", "2❌@4", "3✅@8"]);
+});
+
+test("a closed quote of a MISSING claim stays code when a stray opener follows it", () => {
+  // Claim 2's heading is absent; claim 1 quotes it in a closed fence, then leaves a
+  // ``` open. The round-1 rule read the quote as claim 2.
+  const lines = ["O", "### ⚠️ Claim 1/3 — a", "```", "### ✅ Claim 2/3 — q", "```", "```", "const y = 2;", "### ❌ Claim 3/3 — c"];
+  expect(claimRefs(lines)).toEqual(["1⚠️@1", "3❌@7"]);
 });
 
 test("a 4-backtick CLOSED fence quoting the next heading and a ``` line stays code", () => {
@@ -318,6 +385,108 @@ test("a 4-backtick CLOSED fence quoting the next heading and a ``` line stays co
   // And a real claim 2 after it is still found once.
   expect(claimLines(answer + "\n### ✅ Claim 2/2 — Second\nok")).toEqual([[1, 0], [2, 7]]);
 });
+
+/** Answers from the exhaustive grammar the rule was measured on, each pinning one
+ *  condition of {@link scanClaimLines}'s next-claim terminator: the expected value
+ *  is the true reading, `<index>@<start line>` per claim. */
+const TERMINATOR_CASES: [string, string[], string[]][] = [
+  [
+    "a closed quote of a missing claim inside a closed outer fence stays code past a stray opener",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "~~~", "```", "### ✅ Claim 2/3 — q", "```", "~~~", "```", "const y = 2;", "### ✅ Claim 3/3 — T3", "```md", "x = 1", "```"],
+    ["1✅@1", "3✅@9"],
+  ],
+  [
+    "a stray tilde opener is ended by claim 2 when claim 2 quotes claim 3 before it",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "~~~", "y", "### ✅ Claim 2/3 — T2", "```md", "### ✅ Claim 3/3 — quoted", "```", "### ✅ Claim 3/3 — T3", "~~~", "y"],
+    ["1✅@1", "2✅@4", "3✅@8"],
+  ],
+  [
+    "a quoted claim numbered past the run's total is never a lone heading",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```ts", "const y = 2;", "### ✅ Claim 2/3 — T2", "```", "### ✅ Claim 4/3 — quoted", "```", "### ✅ Claim 3/3 — T3", "```md", "x = 1", "```"],
+    ["1✅@1", "2✅@4", "3✅@8"],
+  ],
+  [
+    "a heading the answer quotes again is not a lone heading",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — q", "### ❌ Claim 3/3 — q", "```", "### Claim 2/3 — T2", "```md", "### ✅ Claim 2/3 — quoted", "```", "### ✅ Claim 3/3 — T3", "```", "### ✅ Claim 3/3 — quoted", "```"],
+    ["1✅@1", "3✅@10"],
+  ],
+  [
+    "a quoted heading named again later is not a lone heading",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — quoted", "```", "```", "### ✅ Claim 3/3 — quoted", "```", "### ✅ Claim 3/3 — T3", "```", "const y = 2;"],
+    ["1✅@1", "3✅@8"],
+  ],
+  [
+    "a claim heading without its emoji still counts as naming that claim",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — quoted", "```", "### Claim 2/3 — T2", "```", "const y = 2;", "### ✅ Claim 3/3 — T3", "```md", "x = 1", "```"],
+    ["1✅@1", "3✅@8"],
+  ],
+  [
+    "only a LATER claim's heading can end the fence",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 1/3 — quoted", "```", "### Claim 2/3 — T2", "```", "const y = 2;", "### ✅ Claim 3/3 — T3", "```md", "x = 1", "```"],
+    ["1✅@1", "3✅@8"],
+  ],
+  [
+    "a quote from a run with another total never ends the fence",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — q", "### ❌ Claim 3/3 — q", "```", "### ✅ Claim 2/3 — T2", "```md", "### ✅ Claim 3/4 — quoted", "```", "### ✅ Claim 3/3 — T3", "```", "### ✅ Claim 4/4 — quoted", "```"],
+    ["1✅@1", "2✅@6", "3✅@10"],
+  ],
+  [
+    "a quoted claim numbered past the run's total never ends the fence",
+    ["Overall.", "### ✅ Claim 1/2 — T1", "```", "### ✅ Claim 3/2 — quoted", "```", "```", "const y = 2;", "### ✅ Claim 2/2 — T2", "Some prose.", "```md", "x = 1", "```"],
+    ["1✅@1", "2✅@7"],
+  ],
+  [
+    "a quote of claim 2 stays code when the real claim 2 follows a quote from another run",
+    ["Overall.", "### ✅ Claim 1/2 — T1", "```", "### ✅ Claim 2/2 — quoted", "```", "~~~", "### ✅ Claim 2/3 — quoted", "~~~", "### ✅ Claim 2/2 — T2", "```", "const y = 2;", "~~~", "### ✅ Claim 3/3 — quoted", "~~~"],
+    ["1✅@1", "2✅@8"],
+  ],
+  [
+    "a fence quoting every later claim stays code before an opener that never closes",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — q", "### ❌ Claim 3/3 — q", "```", "```ts", "const y = 2;"],
+    ["1✅@1"],
+  ],
+  [
+    "a fence quoting every later claim stays code before an info-string fence",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — q", "### ❌ Claim 3/3 — q", "```", "```md", "x = 1", "```"],
+    ["1✅@1"],
+  ],
+  [
+    "a fence quoting every later claim stays code before a closed fence and a stray opener",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — q", "### ❌ Claim 3/3 — q", "```", "```", "x = 1", "```", "```ts", "const y = 2;"],
+    ["1✅@1"],
+  ],
+  [
+    "a fence quoting every later claim stays code before a closed fence and an info-string fence",
+    ["Overall.", "### ✅ Claim 1/3 — T1", "```", "### ✅ Claim 2/3 — q", "### ❌ Claim 3/3 — q", "```", "```", "x = 1", "```", "```md", "x = 1", "```"],
+    ["1✅@1"],
+  ],
+];
+
+for (const [name, lines, want] of TERMINATOR_CASES) {
+  test(name, () => expect(claimRefs(lines)).toEqual(want));
+}
+
+/** Guards for three tie-break conditions. The plain walk already reads these
+ *  right, so they pass on the code before fix round 2 too: they pin that the rule
+ *  does not start reading them wrong. */
+const TERMINATOR_GUARDS: [string, string][] = [
+  ["guard: a real reading that opens a fence that never closes loses the tie", "```md"],
+  ["guard: a closer shorter than its opener does not close it", "````"],
+  ["guard: a bare opener between heading and closer is not an info-string opener", "```"],
+];
+
+test("guard: an indented line naming a claim still counts as restating it", () => {
+  const lines = ["Overall.", "### ✅ Claim 1/2 — T1", "```", "### ✅ Claim 2/2 — T2", "~~~md", "  ### ✅ Claim 2/2 — quoted", "~~~", "```"];
+  expect(claimRefs(lines)).toEqual(["1✅@1"]);
+});
+
+for (const [name, opener] of TERMINATOR_GUARDS) {
+  test(name, () => {
+    const closer = opener.startsWith("````") ? "````" : "```";
+    const lines = ["Overall.", "### ✅ Claim 1/2 — T1", "```ts", "const y = 2;", "~~~", "y", "### Claim 2/2 — T2", "~~~", "### ✅ Claim 2/2 — quoted", "~~~", opener, "x = 1", closer];
+    expect(claimRefs(lines)).toEqual(["1✅@1"]);
+  });
+}
 
 test("a phantom fence no longer drops the WHOLE quote list", () => {
   // With claims 2 and 3 masked, `known` held one index while three quotes were
