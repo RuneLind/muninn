@@ -816,3 +816,32 @@ describe("check 14 a Status list item ends where the reader's item does (fix rou
     expect(await flaggedBody(["**Status:** waits", "- DEMO-4 is merged"])).toEqual([1]);
   });
 });
+
+// ── Batch L fix round 2 batch 2: the count anchor's edges ──
+
+describe("check 14 count anchor edges (fix round 2 batch 2)", () => {
+  // [line, flags]: one row per edge of the count form. A count anchors a state
+  // phrase in its own clause only, and its number stands alone.
+  const rows: [string, boolean][] = [
+    ["#3 PRs are merged.", false],
+    ["The run-8 PRs are merged.", false],
+    ["v12 PRs are merged.", false],
+    ["3 PRx is merged.", false],
+    ["3 Task is merged.", true],
+    ["Per 06.10 3 PRs in total; the fix is merged.", false],
+    ["3 PRs remain; the fix is merged.", false],
+    ["3\tPRs are merged.", true],
+    ["3 PRs are merged.", true],
+    ["1-3 PRs are merged.", true],
+    ["1–3 PRs are merged.", true],
+    ["At 14:30 PR is merged.", false],
+    ["On 6/10 PR is merged.", false],
+    ["About 1,5 PR is merged.", false],
+    ["3 tasks are merged.", false],
+  ];
+  for (const [line, flags] of rows) {
+    test(`${JSON.stringify(line)} ${flags ? "flags" : "does not flag"}`, async () => {
+      expect(await flaggedBody([line])).toEqual(flags ? [0] : []);
+    });
+  }
+});

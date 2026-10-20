@@ -136,15 +136,17 @@ function wordsRe(words: readonly string[]): RegExp | null {
  * number: one after it names a piece of work (`PR 1`, `PR 1–4`, `oppgave #3`),
  * one before it counts pieces of work (`8 PR-er`, `7 av 8 PR-er`). A bare one
  * (`når PR-en er merget`, a `| Service-PR |` column) is generic prose about no
- * piece of work. The count's number stands alone: not the end of a version or
- * a date (`1.2 PR`, `06.10 PR`), a key (`DEMO-8 PR`) or a word (`v2 PR`).
+ * piece of work. The count's number, or range (`1-3 PR`, `1–3 PR`), stands
+ * alone: not the end of a version, date, time or decimal (`1.2 PR`, `06.10 PR`,
+ * `6/10 PR`, `14:30 PR`, `1,5 PR`), a key (`DEMO-8 PR`) or a word (`v2 PR`).
+ * A plural the wiki does not list (`3 oppgaver` for `oppgave`) is no count.
  */
 function taskWordsRes(words: readonly string[]): { re: RegExp; count: boolean }[] {
   const named = (alt: string, flags: string) =>
     new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?=[ \\t\\u00a0]?#?\\d)`, flags);
   const counted = (alt: string, flags: string) =>
     new RegExp(
-      `(?<=(?<![\\p{L}\\p{N}_.#-])\\p{N}+[ \\t\\u00a0])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`,
+      `(?<=(?<![\\p{L}\\p{N}_.#:/-])(?<!\\p{N},)(?:\\p{N}+[-–])?\\p{N}+[ \\t\\u00a0])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`,
       flags,
     );
   const alt = (ws: string[]) => ws.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
