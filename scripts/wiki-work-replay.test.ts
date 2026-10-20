@@ -202,19 +202,23 @@ function alive(pid: number): boolean {
 }
 
 describe("a signal mid-run", () => {
-  /** The replay processes and hook sleepers a test started, killed after it
-   *  only when an assertion failed first and left them running. */
-  const started: number[] = [];
+  /** What a test started: the replay, killed with its process group, and the
+   *  hook's sleep. `afterEach` kills only an entry the test did not see exit,
+   *  which happens when an assertion failed first, so a pid already reaped and
+   *  perhaps reused is never signalled. */
+  const started: { pid: number; group: boolean; exited: () => boolean }[] = [];
+  /** Hook pids `goneSoon` saw exit. */
+  const seenGone = new Set<number>();
   afterEach(() => {
-    for (const pid of started.splice(0)) {
-      for (const target of [-pid, pid]) {
-        try {
-          process.kill(target, "SIGKILL");
-        } catch {
-          // not a group leader, or already gone
-        }
+    for (const { pid, group, exited } of started.splice(0)) {
+      if (exited()) continue;
+      try {
+        process.kill(group ? -pid : pid, "SIGKILL");
+      } catch {
+        // exited after the check
       }
     }
+    seenGone.clear();
   });
 
   /** A fixture whose post-checkout hook writes its pid to the returned marker,
@@ -237,22 +241,27 @@ describe("a signal mid-run", () => {
   async function startHeld(f: Fixture, hooks: string, marker: string, env: Record<string, string> = {}) {
     const hookEnv = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: hooks };
     const proc = spawnReplay(f, await writeFrozen(f), { ...hookEnv, ...env }, true);
-    started.push(proc.pid);
+    started.push({ pid: proc.pid, group: true, exited: () => proc.exitCode !== null || proc.signalCode !== null });
     const deadline = Date.now() + 20_000;
     while (!existsSync(marker) || !(await Bun.file(marker).text()).trim()) {
       if (Date.now() > deadline) throw new Error("the checkout hook never ran");
       await Bun.sleep(50);
     }
     const sleeper = Number((await Bun.file(marker).text()).trim());
-    started.push(sleeper);
+    started.push({ pid: sleeper, group: false, exited: () => seenGone.has(sleeper) || !alive(sleeper) });
     expect(await clonesIn(f.scriptTmp)).toHaveLength(1);
     return { proc, sleeper };
   }
 
   /** Waits up to 2 s for `pid` to be reaped after its group is killed. */
   async function goneSoon(pid: number): Promise<boolean> {
-    for (const until = Date.now() + 2_000; Date.now() < until; await Bun.sleep(50)) if (!alive(pid)) return true;
-    return !alive(pid);
+    for (const until = Date.now() + 2_000; Date.now() < until; await Bun.sleep(50)) {
+      if (!alive(pid)) {
+        seenGone.add(pid);
+        return true;
+      }
+    }
+    return false;
   }
 
   for (const [signal, code] of [
@@ -271,6 +280,20 @@ describe("a signal mid-run", () => {
       expect(Date.now() - sent).toBeLessThan(10_000);
       expect(await clonesIn(f.scriptTmp)).toEqual([]);
       // ...and the hook with it: killing git alone leaves `sleep` reparented.
+      expect(await goneSoon(sleeper)).toBe(true);
+    }, 40_000);
+  }
+
+  // A signal the script does not handle, sent to its whole process group as a
+  // terminal (Ctrl-\) or a supervisor would: git and its hook are in that
+  // group, so they die with the script instead of running on reparented.
+  for (const signal of ["SIGQUIT", "SIGKILL"] as const) {
+    test(`a group ${signal} stops the hook git started`, async () => {
+      const { f, hooks, marker } = await heldCheckout();
+      const { proc, sleeper } = await startHeld(f, hooks, marker);
+
+      process.kill(-proc.pid, signal);
+      await proc.exited;
       expect(await goneSoon(sleeper)).toBe(true);
     }, 40_000);
   }
@@ -319,6 +342,23 @@ describe("signalHandler", () => {
     onSignal(129);
     await Bun.sleep(20);
     expect(exits).toEqual([129]);
+  });
+
+  test("cleanup waits until every killed git child has exited", async () => {
+    const order: string[] = [];
+    let gitExit!: () => void;
+    const exited = new Promise<void>((r) => (gitExit = r));
+    const onSignal = await signalHandler(
+      async () => void order.push("cleanup"),
+      (c) => void order.push(`exit ${c}`),
+      () => [{ exited }],
+    );
+    onSignal(130);
+    await Bun.sleep(20);
+    expect(order).toEqual([]);
+    gitExit();
+    await Bun.sleep(20);
+    expect(order).toEqual(["cleanup", "exit 130"]);
   });
 
   test("a second signal during a stalled cleanup exits at once with its own code", async () => {

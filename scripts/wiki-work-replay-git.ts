@@ -17,11 +17,12 @@ export class ReplayError extends Error {}
 export const gitChildren = new Set<Subprocess>();
 
 export async function git(cwd: string, args: string[]): Promise<string> {
-  // `detached` makes each git the leader of its own process group, so a signal
-  // can kill what it spawned too (a hook, an lfs smudge), as `runGit` does in
-  // `src/wiki/commit.ts`. Not `runGit` itself: it detaches only timed calls and
-  // hands back no process to kill on a signal.
-  const proc = Bun.spawn(["git", "-C", cwd, "-c", "core.quotePath=false", ...args], { stdout: "pipe", stderr: "pipe", detached: true });
+  // In the script's own process group, not `detached`: a group signal the
+  // script does not handle (Ctrl-\, Ctrl-Z, a supervisor's group SIGKILL)
+  // then reaches git and its hooks too, which a detached git escapes (the cost
+  // `runGit` documents in `src/wiki/commit.ts`). A handled signal kills the
+  // tree through `killGitChildren`.
+  const proc = Bun.spawn(["git", "-C", cwd, "-c", "core.quotePath=false", ...args], { stdout: "pipe", stderr: "pipe" });
   gitChildren.add(proc);
   try {
     const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
@@ -32,19 +33,40 @@ export async function git(cwd: string, args: string[]): Promise<string> {
   }
 }
 
-/** SIGKILL each running git child's process group, so nothing it spawned
- *  writes into the clone after it is removed. Returns the children killed. */
-export function killGitChildren(): Subprocess[] {
-  const running = [...gitChildren];
-  for (const c of running) {
-    try {
-      process.kill(-c.pid, "SIGKILL");
-    } catch {
+/** `roots` and every process below them, each SIGSTOPped as it is found so
+ *  none can fork a child the walk misses. A stopped parent cannot reap an
+ *  exited child either, so no pid in the tree is reused before the kill. */
+function stopTree(roots: number[]): number[] {
+  const tree = new Set<number>();
+  for (let found = roots; found.length > 0; ) {
+    for (const pid of found) {
+      tree.add(pid);
       try {
-        c.kill("SIGKILL");
+        process.kill(pid, "SIGSTOP");
       } catch {
         // already exited
       }
+    }
+    found = [];
+    for (const line of Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="]).stdout.toString().split("\n")) {
+      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+      if (pid && ppid && tree.has(ppid) && !tree.has(pid)) found.push(pid);
+    }
+  }
+  return [...tree];
+}
+
+/** SIGKILL each running git child and everything below it (a hook, an lfs
+ *  smudge), so nothing writes into the clone after it is removed. A process
+ *  that left the tree (`setsid` and a double fork) is not reached. Returns the
+ *  git children killed. */
+export function killGitChildren(): Subprocess[] {
+  const running = [...gitChildren];
+  for (const pid of stopTree(running.map((c) => c.pid))) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already exited
     }
   }
   return running;
@@ -52,17 +74,22 @@ export function killGitChildren(): Subprocess[] {
 
 /**
  * The script's signal handler, called with the signal's exit code (128 + n).
- * The first signal kills the git children's groups, waits for them, runs
- * `cleanup` and exits with its own code, also when `cleanup` rejects. A signal
- * that arrives while that is in flight exits at once with ITS code, without
- * waiting, so a second Ctrl-C quits a stalled removal (the clone may remain).
+ * The first signal kills the git children's trees (`kill`), waits for them to
+ * exit, runs `cleanup` and exits with its own code, also when `cleanup`
+ * rejects. A signal that arrives while that is in flight exits at once with ITS
+ * code, without waiting, so a second Ctrl-C quits a stalled removal (the clone
+ * may remain).
  */
-export function signalHandler(cleanup: () => Promise<void>, exit: (code: number) => void = process.exit): (code: number) => void {
+export function signalHandler(
+  cleanup: () => Promise<void>,
+  exit: (code: number) => void = process.exit,
+  kill: () => { exited: Promise<unknown> }[] = killGitChildren,
+): (code: number) => void {
   let stopping = false;
   return (code) => {
     if (stopping) return exit(code);
     stopping = true;
-    const running = killGitChildren();
+    const running = kill();
     void Promise.all(running.map((c) => c.exited))
       .then(cleanup)
       .then(
