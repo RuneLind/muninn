@@ -156,10 +156,14 @@ export function killLiveProcessGroups(): number {
 let groupHooksInstalled = false;
 
 /**
- * Kill the live groups on SIGINT, SIGTERM and `exit`, without changing how the
- * parent itself exits: a process with its own handler for the signal (muninn's
- * `shutdown()`) keeps it, and one without gets the default death re-raised, which
- * a listener would otherwise have cancelled.
+ * Kill the live groups on SIGINT, SIGTERM and `exit`, and keep how the parent
+ * itself exits: a process with its own listener for the signal (muninn's
+ * `shutdown()`, `on` or `once`, before or after the first group) keeps its
+ * exit, and one without gets the default death re-raised, which a listener
+ * would otherwise have cancelled. The hook goes first in the listener list,
+ * because a `once` listener ahead of it is removed before the hook runs.
+ * A process that inherited the signal as ignored is not detectable from here:
+ * the re-raise kills it.
  */
 function installGroupHooks(): void {
   if (groupHooksInstalled) return;
@@ -173,7 +177,7 @@ function installGroupHooks(): void {
         process.kill(process.pid, sig);
       }
     };
-    process.on(sig, onSignal);
+    process.prependListener(sig, onSignal);
   }
 }
 

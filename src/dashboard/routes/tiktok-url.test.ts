@@ -54,6 +54,11 @@ const UNMAPPED_EMBED_URLS = [
   "https://www.tiktok.com/player/v2/7412345678901234567",
   "https://www.tiktok.com/PLAYER/v1/7412345678901234567",
   "https://www.tiktok.com/embed/@someone",
+  // The player path is anchored at both ends: a suffix, a prefix or a trailing
+  // segment is another path, not the Embed Player.
+  "https://www.tiktok.com/player/v1/7412345678901234567.html",
+  "https://www.tiktok.com/x/player/v1/7412345678901234567",
+  "https://www.tiktok.com/player/v1/7412345678901234567/extra",
 ];
 
 for (const input of UNMAPPED_EMBED_URLS) {

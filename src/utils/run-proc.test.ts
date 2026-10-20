@@ -301,7 +301,7 @@ describe("runProc: live process groups die with the parent", () => {
       const r = await run;
       expect(r.exitCode).not.toBe(0);
       expect(await goneWithin(member, 2_000)).toBe(true);
-      // The leader exited, so the registry no longer holds it.
+      // The drain emptied the registry (pinned on its own below).
       expect(killLiveProcessGroups()).toBe(0);
     } finally {
       try {
@@ -311,9 +311,60 @@ describe("runProc: live process groups die with the parent", () => {
     }
   });
 
-  /** A bun parent that starts a group, then does `tail`. Returns the parent and
-   *  the group member's pid. */
-  async function parentWithGroup(name: string, tail: string) {
+  /** Records the pgids `fn` sends SIGKILL to, forwarding every call. */
+  const groupKillsDuring = <T>(fn: () => T): { result: T; pgids: number[] } => {
+    const pgids: number[] = [];
+    const realKill = process.kill;
+    process.kill = ((pid: number, sig?: string | number) => {
+      if (pid < 0 && sig === "SIGKILL") pgids.push(-pid);
+      return realKill.call(process, pid, sig);
+    }) as typeof process.kill;
+    try {
+      return { result: fn(), pgids };
+    } finally {
+      process.kill = realKill;
+    }
+  };
+
+  test("a group whose leader exits on its own leaves the registry, so shutdown never signals its pgid", async () => {
+    const { killLiveProcessGroups } = await import("./run-proc.ts");
+    killLiveProcessGroups();
+    const r = await runProc(["/bin/bash", "-c", "exit 0"], 5_000, "self-exit", { processGroup: true });
+    expect(r.exitCode).toBe(0);
+    // The pgid of a finished job may already belong to someone else.
+    const { result, pgids } = groupKillsDuring(() => killLiveProcessGroups());
+    expect(pgids).toEqual([]);
+    expect(result).toBe(0);
+  });
+
+  test("a drain forgets what it signalled: a second drain straight after signals nothing", async () => {
+    const { killLiveProcessGroups } = await import("./run-proc.ts");
+    killLiveProcessGroups();
+    const dir = testTempDirSync(path.join(tmpdir(), "run-proc-redrain-"));
+    const pidFile = path.join(dir, "pid");
+    let member = 0;
+    try {
+      const run = runProc(groupCmd(pidFile), 60_000, "redrain", { processGroup: true });
+      member = await waitForPid(pidFile);
+      const first = groupKillsDuring(() => killLiveProcessGroups());
+      expect(first.pgids.length).toBe(1);
+      // Synchronous, so the leader's exit has not been observed yet: only the
+      // drain itself can have emptied the registry.
+      const second = groupKillsDuring(() => killLiveProcessGroups());
+      expect(second.pgids).toEqual([]);
+      expect(second.result).toBe(0);
+      await run;
+    } finally {
+      try {
+        if (member) process.kill(member, "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** A bun parent that runs `head`, starts a group, then does `tail`. Returns
+   *  the parent and the group member's pid. */
+  async function parentWithGroup(name: string, tail: string, head = "") {
     const dir = testTempDirSync(path.join(tmpdir(), `run-proc-${name}-`));
     const pidFile = path.join(dir, "pid");
     const script = path.join(dir, "parent.ts");
@@ -321,6 +372,7 @@ describe("runProc: live process groups die with the parent", () => {
       script,
       [
         `import { runProc } from ${JSON.stringify(RUN_PROC)};`,
+        head,
         `void runProc(${JSON.stringify(groupCmd(pidFile))}, 60_000, "parent", { processGroup: true }).catch(() => {});`,
         tail,
         `setInterval(() => {}, 1_000);`,
@@ -356,6 +408,26 @@ describe("runProc: live process groups die with the parent", () => {
     try {
       parent.kill("SIGTERM");
       expect(await parent.exited).toBe(7);
+      expect(await goneWithin(member, 2_000)).toBe(true);
+    } finally {
+      try {
+        process.kill(member, "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a process.once handler registered before the first group keeps its own exit", async () => {
+    // EventEmitter removes a once listener before calling it, so a hook that
+    // runs after it would count itself alone and re-raise the default death.
+    const { dir, parent, member } = await parentWithGroup(
+      "once",
+      "",
+      `process.once("SIGINT", () => { setTimeout(() => process.exit(5), 100); });`,
+    );
+    try {
+      parent.kill("SIGINT");
+      expect(await parent.exited).toBe(5);
       expect(await goneWithin(member, 2_000)).toBe(true);
     } finally {
       try {
