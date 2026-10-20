@@ -368,6 +368,8 @@ export function shouldStartEmailAttempt(attempt: number, remainingMs: number): b
   return attempt === 1 || remainingMs >= EMAIL_MIN_ATTEMPT_MS;
 }
 
+type LivenessToolCall = { name: string; isError?: boolean; unterminated?: boolean; output?: string };
+
 /**
  * The liveness predicate, as a message describing HOW the run failed — or `null`
  * when the run is trustworthy (reached Gmail) or unjudgeable (see below).
@@ -419,33 +421,46 @@ export function shouldStartEmailAttempt(attempt: number, remainingMs: number): b
  * {@link missingGmailServerMessage} fails the check before the spawn.
  */
 export function gmailLiveness(
-  toolCalls: { name: string; isError?: boolean; unterminated?: boolean }[] | undefined,
+  toolCalls: LivenessToolCall[] | undefined,
   botDir: string | undefined,
 ): { failure: string | null; reached: boolean } {
   const prefixes = toolCalls ? gmailToolPrefixes(botDir) : null;
-  // Reached means a `search_emails` call that came back without `is_error`. A
-  // successful `list_email_labels` or `read_email` beside a failed search covers no
-  // window: the search is the only call that reads the window the watermark claims.
-  // An errored call (a `dontAsk` denial, an API error, a rate limit) is not reached,
-  // nor is an `unterminated` one: the stream ended before its result arrived.
+  // Reached means a `search_emails` call on the bot's Gmail server whose result
+  // arrived and is not an error. A successful `list_email_labels` or `read_email`
+  // beside a failed search covers no window: the search is the only call that reads
+  // the window the watermark claims. Two error shapes exist. `is_error` comes from
+  // the CLI side only: a `dontAsk` denial, a disallowed or unknown tool, an MCP
+  // transport failure. The Gmail server (`@gongrzhe/server-gmail-autoauth-mcp`
+  // 1.1.11) never sets `isError`: its catch-all returns every handler error — a
+  // Gmail 429 or 5xx, an expired token, bad arguments — as a normal text result
+  // `Error: …`, so that text is the only signal. An `unterminated` call is not
+  // reached either: the stream ended before its result arrived.
   // The probe's `gmailError` (`scripts/probe-toolsearch-deferral.ts`) asks another
   // question: it flags a run when ANY Gmail call errored.
   const reachedGmail = toolCalls?.some(
     (t) => typeof t.name === "string" && t.isError !== true && t.unterminated !== true &&
+      !isGmailErrorText(t.output) &&
       prefixes?.some((p) => t.name === `${p}${GMAIL_SEARCH_TOOL}`),
   );
   return { failure: livenessFailureMessage(toolCalls, prefixes, reachedGmail), reached: reachedGmail === true };
 }
 
+/** The Gmail server's in-band error result: a text that starts `Error:`. */
+function isGmailErrorText(output: string | undefined): boolean {
+  return typeof output === "string" && output.trimStart().startsWith("Error:");
+}
+
 function livenessFailureMessage(
-  toolCalls: { name: string; isError?: boolean; unterminated?: boolean }[] | undefined,
+  toolCalls: LivenessToolCall[] | undefined,
   prefixes: string[] | null,
   reachedGmail: boolean | undefined,
 ): string | null {
   // `prefixes === null` here means no botDir: `checkEmail` fails a bot with no
   // Gmail server before the spawn, so this is the botDir-less caller only.
   if (!toolCalls || !prefixes || reachedGmail) return null;
-  const called = [...new Set(toolCalls.map((t) => `${String(t.name)}${t.isError ? " (error)" : t.unterminated ? " (no result)" : ""}`))].join(", ") || "none";
+  const called = [...new Set(toolCalls.map((t) => `${String(t.name)}${
+    t.isError ? " (error)" : t.unterminated ? " (no result)" : isGmailErrorText(t.output) ? " (Error: result text)" : ""
+  }`))].join(", ") || "none";
   return (
     `Email check made no successful Gmail ${GMAIL_SEARCH_TOOL} call (${toolCalls.length} tool call(s): ${called}) — ` +
     `the empty result is not a quiet inbox`

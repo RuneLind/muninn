@@ -20,7 +20,7 @@ let lastPrompt = "";
 // that is what the legacy-JSON parser fallback produces, and it is the value every
 // pre-existing test in this file runs under — the liveness predicate must stay inert
 // for them.
-let nextToolCalls: { name: string; isError?: boolean }[] | undefined;
+let nextToolCalls: { name: string; isError?: boolean; output?: string }[] | undefined;
 // Per-ATTEMPT scripting for the retry tests. When non-empty each entry is consumed
 // by one spawn, so a test can say "attempt 1 fails the predicate, attempt 2 reaches
 // Gmail". Empty ⇒ every spawn answers from `nextToolCalls` (the pre-retry behavior
@@ -28,7 +28,7 @@ let nextToolCalls: { name: string; isError?: boolean }[] | undefined;
 // `delayMs` makes the mocked spawn take measurable time. Without it every spawn
 // resolves in <1ms, and no assertion can tell a check-ENTRY anchor from a
 // check-END one — the gap the review found in the first cut of that test.
-type SpawnScript = { toolCalls?: { name: string; isError?: boolean }[]; result?: string; throws?: string; delayMs?: number };
+type SpawnScript = { toolCalls?: { name: string; isError?: boolean; output?: string }[]; result?: string; throws?: string; delayMs?: number };
 let spawnScript: SpawnScript[] = [];
 // One entry per spawn actually made — the attempt COUNT is the thing under test, so
 // it has to be observable rather than inferred from the return value.
@@ -438,6 +438,67 @@ describe("checkEmail coverage reporting", () => {
       reached: false,
       failure: expect.stringContaining("mcp__gmail__search_emails (no result)"),
     });
+  });
+
+  // What the bot's Gmail server (`@gongrzhe/server-gmail-autoauth-mcp` 1.1.11)
+  // returned over stdio for `tools/call search_emails {}`, verbatim: a normal
+  // result, no `isError`. A Gmail 429 or an expired token takes the same path.
+  const GMAIL_ERROR_TEXT =
+    'Error: [\n  {\n    "code": "invalid_type",\n    "expected": "string",\n    "received": "undefined",\n    "path": [\n      "query"\n    ],\n    "message": "Required"\n  }\n]';
+
+  async function parsedSearch(content: unknown) {
+    const { StreamParser } = await import("../ai/stream-parser.ts");
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify({ type: "system", subtype: "init", session_id: "s", tools: [] }), 0);
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "toolu_E", name: "mcp__gmail__search_emails", input: {} }], model: "m" },
+      parent_tool_use_id: null,
+    }), 100);
+    parser.parseLine(JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_E", content }] },
+      parent_tool_use_id: null,
+    }), 150);
+    parser.parseLine(JSON.stringify({
+      type: "result", subtype: "success", session_id: "s", is_error: false, num_turns: 1, result: "[]",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }), 200);
+    return parser.getResult().toolCalls;
+  }
+
+  test("gmailLiveness: a search_emails whose result text is the server's `Error:` is not reached", async () => {
+    // MCP array, plain string, leading whitespace, and the CLI's `{"result": …}` envelope.
+    const shapes = [
+      [{ type: "text", text: GMAIL_ERROR_TEXT }],
+      GMAIL_ERROR_TEXT,
+      `\n  ${GMAIL_ERROR_TEXT}`,
+      JSON.stringify({ result: GMAIL_ERROR_TEXT }),
+    ];
+    for (const content of shapes) {
+      const toolCalls = await parsedSearch(content);
+      expect(toolCalls?.[0]?.isError).toBeUndefined();
+      expect(gmailLiveness(toolCalls, botDirWithGmail)).toEqual({
+        reached: false,
+        failure: expect.stringContaining("mcp__gmail__search_emails (Error: result text)"),
+      });
+    }
+    // The same parse with a real result text is reached: the prefix, not the parse, decides.
+    expect(gmailLiveness(await parsedSearch([{ type: "text", text: "ID: 1\nSubject: Error: build failed" }]), botDirWithGmail))
+      .toEqual({ reached: true, failure: null });
+  });
+
+  test("does NOT claim coverage when every search_emails returned the server's `Error:` text", async () => {
+    const errText = [{ name: "mcp__gmail__search_emails", output: GMAIL_ERROR_TEXT }];
+    spawnScript = [{ toolCalls: errText, result: "[]" }, { toolCalls: errText, result: "[]" }];
+    await expect(checkEmail(baseWatcher(), botDirWithGmail, "jarvis")).rejects.toThrow(/no successful Gmail search_emails call/);
+    expect(spawnOpts).toHaveLength(2);
+  });
+
+  test("gmailLiveness: only the bot's Gmail server key and the exact search tool name count", () => {
+    expect(gmailLiveness([{ name: "mcp__otherserver__search_emails" }], botDirWithGmail).reached).toBe(false);
+    expect(gmailLiveness([{ name: "mcp__gmail__search_emails_v2" }], botDirWithGmail).reached).toBe(false);
+    expect(gmailLiveness([{ name: "mcp__gmail__search_emails_draft" }], botDirWithGmail).reached).toBe(false);
   });
 
   test("does NOT claim coverage when the liveness predicate fails on every attempt", async () => {

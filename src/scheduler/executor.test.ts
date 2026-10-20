@@ -478,6 +478,24 @@ describe("buildHaikuArgs", () => {
     }
   });
 
+  test("gmail-read carries a bare server-wide deny (mcp__<key>)", () => {
+    // Without the carry, a user-scope allow naming `mcp__gmail` re-grants the reads.
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
+      mkdirSync(join(root, ".claude"), { recursive: true });
+      writeFileSync(
+        join(root, ".claude", "settings.json"),
+        JSON.stringify({ permissions: { allow: ["mcp__gmail__*"], deny: ["mcp__gmail"] } }),
+      );
+      const settings = JSON.parse(flag(buildHaikuArgs({ ...base, botDir: root, toolSurface: "gmail-read" }), "--settings")!);
+      expect(settings.permissions.allow).toEqual(["ToolSearch"]);
+      expect(settings.permissions.deny).toEqual(["mcp__gmail"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("gmail-read on a bot with no Gmail server falls back to the tool-less spawn", () => {
     const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
