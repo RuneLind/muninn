@@ -327,7 +327,9 @@ export function formatWebHtml(
       const analysedBlocks = analysed === text ? blocks : parseBlocks(analysed);
       const ledgers = pageLedgers(analysedBlocks, opts?.proposedPlan === true);
       currentLedgerRows = ledgers.length ? firstRowPerPr(ledgers) : null;
-      currentLogIds = new Set(decisionLogEntries(analysedBlocks).map((e) => e.id));
+      // Read off the blocks the log renders from: an item whose id is a
+      // wikilink renders no anchor, so its id links nowhere.
+      currentLogIds = new Set(decisionLogEntries(blocks).map((e) => e.id));
     }
     let rendered: string;
     if (slot < 0) {

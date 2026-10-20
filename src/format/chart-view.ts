@@ -343,33 +343,45 @@ export function stepsLabelIndexes(n: number): number[] {
   return out;
 }
 
-const LABEL_SEP = /[\s\-–—_/:·,]/u;
+/** A name's words: runs between white space, where a digit, one space
+ *  (also NBSP or narrow NBSP) and three digits stay one word (`1 000`), as
+ *  `cell-number.ts` reads a grouped number. */
+function labelWords(name: string): { text: string; start: number; end: number }[] {
+  const out: { text: string; start: number; end: number }[] = [];
+  for (const m of name.matchAll(/\S+/gu)) {
+    const last = out[out.length - 1];
+    const gap = last ? name.slice(last.end, m.index) : "";
+    if (last && /\d$/u.test(last.text) && /^[ \u00A0\u202F]$/u.test(gap) && /^\d{3}(?!\d)/u.test(m[0])) {
+      last.end = m.index + m[0].length;
+      last.text = name.slice(last.start, last.end);
+    } else out.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  return out;
+}
 
-/** The step names split for the x axis: the words every name shares at its
- *  start (`head`) and end (`tail`), cut only at a separator and only when
- *  every name keeps some text, and each name without them (`parts`). Long
- *  names that differ in the middle otherwise all ellipsize to the same text. */
-function stepsLabelParts(names: readonly string[]): { head: string; tail: string; parts: string[] } {
-  const cps = names.map((n) => [...n]);
-  if (cps.length < 2) return { head: "", tail: "", parts: [...names] };
-  const shared = (at: (c: string[], k: number) => string | undefined) => {
+/** The step names split for the x axis: the whole words every name shares at
+ *  its start (`head`) and end (`tail`), cut only when every name keeps a word,
+ *  and each name without them (`parts`). Long names that differ in the middle
+ *  otherwise all ellipsize to the same text. */
+export function stepsLabelParts(names: readonly string[]): { head: string; tail: string; parts: string[] } {
+  const words = names.map(labelWords);
+  const shared = (at: (w: (typeof words)[number], k: number) => string | undefined) => {
     let k = 0;
-    while (cps.every((c) => k < c.length && at(c, k) === at(cps[0]!, k))) k++;
+    while (words.every((w) => k < w.length && at(w, k) === at(words[0]!, k))) k++;
     return k;
   };
-  const keeps = (p: number, t: number) => cps.every((c) => c.slice(p, c.length - t).join("").trim() !== "");
-  // The head ends on a separator, the tail starts on one.
-  let p = shared((c, k) => c[k]);
-  while (p > 0 && !LABEL_SEP.test(cps[0]![p - 1]!)) p--;
+  const keeps = (p: number, t: number) => words.every((w) => w.length - t > p);
+  let p = words.length < 2 ? 0 : shared((w, k) => w[k]!.text);
   if (!keeps(p, 0)) p = 0;
-  let t = shared((c, k) => (c.length - 1 - k >= p ? c[c.length - 1 - k] : undefined));
-  while (t > 0 && !LABEL_SEP.test(cps[0]![cps[0]!.length - t]!)) t--;
+  let t = words.length < 2 ? 0 : shared((w, k) => w[w.length - 1 - k]!.text);
   if (!keeps(p, t)) t = 0;
-  const trim = (x: string) => x.replace(/^[\s\-–—_/:·,]+|[\s\-–—_/:·,]+$/gu, "");
+  if (p === 0 && t === 0) return { head: "", tail: "", parts: [...names] };
+  const w0 = words[0]!;
+  const n0 = names[0]!;
   return {
-    head: trim(cps[0]!.slice(0, p).join("")),
-    tail: trim(cps[0]!.slice(cps[0]!.length - t).join("")),
-    parts: cps.map((c) => c.slice(p, c.length - t).join("").trim()),
+    head: p ? n0.slice(w0[0]!.start, w0[p - 1]!.end) : "",
+    tail: t ? n0.slice(w0[w0.length - t]!.start, w0[w0.length - 1]!.end) : "",
+    parts: words.map((w, i) => names[i]!.slice(w[p]!.start, w[w.length - 1 - t]!.end)),
   };
 }
 

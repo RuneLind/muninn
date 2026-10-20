@@ -3,7 +3,7 @@ import { renderWikiHtml } from "../wiki/render.ts";
 import { checkPageText } from "../wiki/lint.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { GATE_BAR_AFTER_HEADERS, FUNNEL_OF_HEADERS } from "./chart-block.ts";
-import { CHART_CHROME_CLASSES, CHART_WORDS, stepsAxisDecimals, stepsLabelIndexes, STEPS_X_LABELS_MAX } from "./chart-view.ts";
+import { CHART_CHROME_CLASSES, CHART_WORDS, chartViewHtml, stepsAxisDecimals, stepsLabelIndexes, stepsLabelParts, STEPS_X_LABELS_MAX } from "./chart-view.ts";
 import { headerKey } from "./delta-table.ts";
 import { PEEK_CHART_CHROME } from "../dashboard/views/components/wiki-ref-links.ts";
 
@@ -108,6 +108,40 @@ describe("value cell ids", () => {
     expect(noLog).toContain("40 (D2)");
     expect(noLog).toContain("10 (S1)");
     expect(noLog).not.toContain('class="dc-go"');
+  });
+
+  test("an id links only when the rendered log carries its anchor", () => {
+    const md = [
+      "<DecisionLog>",
+      "",
+      "- **[[other|D7]]** — Decided.",
+      "- **D3** — Decided.",
+      "",
+      "</DecisionLog>",
+      "",
+      gate(["| a | 2 | 3 (D7) | 2 (D3) |"]),
+    ].join("\n");
+    const out = reader(md);
+    // The D7 item's id is a link to another page, so the log renders no `d7` anchor.
+    expect(out).not.toContain('id="d7"');
+    expect(out).toContain("3 (D7)");
+    expect(out).toContain('2 (<a class="dc-go" href="#d3" data-dc-ref="D3">D3</a>)');
+    const ids = new Set([...out.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]));
+    expect([...out.matchAll(/class="dc-go" href="#([^"]+)"/g)].map((m) => m[1]).filter((a) => !ids.has(a))).toEqual([]);
+  });
+
+  test("a charted call inside a chart leaves the outer page's ids as they were", () => {
+    const md = (ids: string[]) =>
+      [...log(ids), gate(["| a | 2 | 3 (D3) | 2 |"]), gate(["| b | 2 | 3 (D3) | 2 |"])].join("\n");
+    let nested = 0;
+    const chartView: typeof chartViewHtml = (input) => {
+      // The first chart renders a page of its own with no DecisionLog.
+      if (nested++ === 0) formatWebHtml(md([]), { views: true, chartView: chartViewHtml });
+      return chartViewHtml(input);
+    };
+    const out = formatWebHtml(md(["D3"]), { views: true, chartView });
+    expect(nested).toBeGreaterThan(1);
+    expect(out.match(/<a class="dc-go" href="#d3" data-dc-ref="D3">D3<\/a>/g)?.length).toBe(2);
   });
 
   test("a link points at its DecisionLog item's final anchor", () => {
@@ -215,11 +249,92 @@ describe("steps x labels", () => {
     const tail = steps(["Q1 2030", "Q2 2030", "Q3 2030"]);
     expect(texts(tail, "vc-xlab")).toEqual(["Q1", "Q2", "Q3"]);
     expect(texts(tail, "vc-xcap")).toEqual(["… 2030"]);
+    // A cut falls only at white space: «phase-one» is one word.
     const head = steps(["phase-one", "phase-two"]);
-    expect(texts(head, "vc-xlab")).toEqual(["one", "two"]);
-    expect(texts(head, "vc-xcap")).toEqual(["phase …"]);
+    expect(texts(head, "vc-xlab")).toEqual(["phase-one", "phase-two"]);
+    expect(head).not.toContain("vc-xcap");
     // One step has nothing to share.
     expect(texts(steps(["only step"]), "vc-xlab")).toEqual(["only step"]);
+  });
+
+  test("numbers, dates and times show as written; only whole words around them are shared", () => {
+    const steps = (names: string[]) =>
+      reader(chart('<Chart kind="steps" x="Step">', ["| Step | A |", "|---|---|", ...names.map((n, i) => `| ${n} | ${i + 1} |`)]));
+    const long = Array.from({ length: 25 }, (_, i) => `step number ${i} with a long name`);
+    // [names, the labels shown, the caption or null]
+    const cases: [string[], string[], string | null][] = [
+      [["-5", "-3", "-1"], ["-5", "-3", "-1"], null],
+      [["\u22125", "\u22123"], ["\u22125", "\u22123"], null],
+      [["0,5", "1,5", "2,5"], ["0,5", "1,5", "2,5"], null],
+      [["1 000", "2 000"], ["1 000", "2 000"], null],
+      // The reader's cell text turns NBSP and narrow NBSP into a space.
+      [["1\u00a0000", "2\u00a0000"], ["1 000", "2 000"], null],
+      [["1\u202f000", "2\u202f000"], ["1 000", "2 000"], null],
+      [["1 000 runs", "2 000 runs"], ["1 000", "2 000"], "… runs"],
+      [["1,000", "2,000", "3,000"], ["1,000", "2,000", "3,000"], null],
+      [["09:00", "10:00", "11:00"], ["09:00", "10:00", "11:00"], null],
+      [["2030-01-15", "2030-02-15", "2030-03-15"], ["2030-01-15", "2030-02-15", "2030-03-15"], null],
+      [["15/01", "15/02"], ["15/01", "15/02"], null],
+      [["kl. 10:30", "kl. 11:30"], ["10:30", "11:30"], "kl. …"],
+      [["Q1 2030", "Q2 2030"], ["Q1", "Q2"], "… 2030"],
+      [["Phase 1 – setup", "Phase 1 – build"], ["setup", "build"], "Phase 1 – …"],
+      [long, stepsLabelIndexes(25).map(String), "step number … with a long name"],
+      [["only step"], ["only step"], null],
+      [["same name", "same name"], ["same name", "same name"], null],
+      [["[[x|run]] 1", "[[x|run]] 2"], ["1", "2"], "run …"],
+      [["baseline", "basement"], ["baseline", "basement"], null],
+    ];
+    const got = cases.map(([names]) => {
+      const out = steps(names);
+      return { names: names.slice(0, 2), shown: texts(out, "vc-xlab"), cap: texts(out, "vc-xcap") };
+    });
+    expect(got).toEqual(cases.map(([names, shown, cap]) => ({ names: names.slice(0, 2), shown, cap: cap === null ? [] : [cap] })));
+    // Read directly, a grouped number keeps its NBSP or narrow NBSP.
+    for (const sp of ["\u00a0", "\u202f"])
+      expect(stepsLabelParts([`1${sp}000 runs`, `2${sp}000 runs`])).toEqual({ head: "", tail: "runs", parts: [`1${sp}000`, `2${sp}000`] });
+  });
+
+  test("every pair of short names keeps whole words and stays apart", () => {
+    // All trimmed names of 1–5 characters over a letter, a digit, a space and
+    // a hyphen, every ordered pair.
+    const alphabet = ["a", "1", " ", "-"];
+    let level = [""];
+    const names: string[] = [];
+    for (let len = 1; len <= 5; len++) {
+      level = level.flatMap((s) => alphabet.map((c) => s + c));
+      names.push(...level.filter((s) => s.trim() === s));
+    }
+    const NUMBER_SPLIT = /\d[ \u00a0\u202f]\d{3}(?!\d)/;
+    let pairs = 0;
+    let cut = 0;
+    const bad: string[] = [];
+    for (const x of names) {
+      for (const y of names) {
+        pairs++;
+        const { head, tail, parts } = stepsLabelParts([x, y]);
+        if (head || tail) cut++;
+        [x, y].forEach((name, i) => {
+          const part = parts[i]!;
+          let rest = name;
+          let ok = part !== "";
+          if (head) {
+            ok &&= rest.startsWith(head) && /^\s/u.test(rest.slice(head.length)) && !NUMBER_SPLIT.test(rest.slice(head.length - 1, head.length + 5));
+            rest = rest.slice(head.length).trimStart();
+          }
+          if (tail) {
+            ok &&= rest.endsWith(tail) && /\s$/u.test(rest.slice(0, -tail.length)) && !NUMBER_SPLIT.test(rest.slice(rest.length - tail.length - 2, rest.length - tail.length + 4));
+            rest = rest.slice(0, -tail.length).trimEnd();
+          }
+          ok &&= rest === part;
+          if (!ok) bad.push(JSON.stringify([x, y, head, part, tail]));
+        });
+        if (x !== y && parts[0] === parts[1]) bad.push(JSON.stringify([x, y, "same", parts[0]]));
+      }
+    }
+    expect(bad.slice(0, 10)).toEqual([]);
+    expect(pairs).toBe(names.length ** 2);
+    // The enumeration reaches cuts at both ends, not only uncut pairs.
+    expect(cut).toBeGreaterThan(1000);
   });
 
   test("a small step count labels every step", () => {
