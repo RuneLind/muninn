@@ -50,6 +50,12 @@ const TOKEN_RE = /<!--[\s\S]*?-->|<\/?[A-Za-z][^>]*>|[^<]+|</g;
 const WORD_CHAR_RE = /[\p{L}\p{N}\p{M}_-]/u;
 const URL_TOKEN_RE = /^[a-z][a-z0-9+.-]*:\/\/|^www\./i;
 
+const READER_ONLY_RE = new RegExp(`\\s${READER_ONLY_ATTR}(?:[\\s=>/]|$)`);
+/** A text token the fast path cannot take as its own folded text. */
+const SLOW_TEXT_RE = /[&\uD800-\uDFFF]/;
+const MARK_RE = /\p{M}/u;
+const WS_RE = /\s/;
+
 interface Unit {
   /** Raw offset of this unit in the text token. */
   at: number;
@@ -58,25 +64,26 @@ interface Unit {
 }
 
 const ENTITY_RE = /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/iy;
-const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+/** The entity at `raw[i]` (an `&`): its decoded text and raw length, or null. */
+function entityAt(raw: string, i: number): { text: string; len: number } | null {
+  ENTITY_RE.lastIndex = i;
+  const m = ENTITY_RE.exec(raw);
+  if (!m) return null;
+  const text = m[1] ? String.fromCodePoint(Number(m[1])) : m[2] ? String.fromCodePoint(parseInt(m[2], 16)) : NAMED[m[3]!.toLowerCase()];
+  return text === undefined ? null : { text, len: m[0].length };
+}
 
 /** The token's characters, an entity decoded to the character it spells. */
 function units(raw: string): Unit[] {
   const out: Unit[] = [];
   for (let i = 0; i < raw.length; ) {
     if (raw[i] === "&") {
-      ENTITY_RE.lastIndex = i;
-      const m = ENTITY_RE.exec(raw);
-      const decoded = m
-        ? m[1]
-          ? String.fromCodePoint(Number(m[1]))
-          : m[2]
-            ? String.fromCodePoint(parseInt(m[2], 16))
-            : NAMED[m[3]!.toLowerCase()]
-        : undefined;
-      if (m && decoded !== undefined) {
-        out.push({ at: i, text: decoded });
-        i += m[0].length;
+      const e = entityAt(raw, i);
+      if (e) {
+        out.push({ at: i, text: e.text });
+        i += e.len;
         continue;
       }
     }
@@ -87,19 +94,33 @@ function units(raw: string): Unit[] {
   return out;
 }
 
+/** A text token's first and last decoded code unit: all a word-boundary test
+ *  reads of a token it does not otherwise scan. NFC never changes whether
+ *  either is a word character. */
+function firstUnit(raw: string): string {
+  return raw[0] === "&" ? (entityAt(raw, 0)?.text[0] ?? "&") : raw[0]!;
+}
+function lastUnit(raw: string): string {
+  const amp = raw.lastIndexOf("&");
+  const e = amp >= 0 ? entityAt(raw, amp) : null;
+  return e && amp + e.len === raw.length ? e.text.at(-1)! : raw.at(-1)!;
+}
+
 interface Folded {
   /** The decoded text in NFC, one chunk per base character and its marks. */
   text: string;
-  /** `starts[k]` is chunk k's offset in `text`; `raw[k]` its raw offset. */
-  starts: number[];
-  raw: number[];
+  /** `starts[k]` is chunk k's offset in `text`; `raw[k]` its raw offset.
+   *  Both null when every chunk is one code unit the token holds as is. */
+  starts: number[] | null;
+  raw: number[] | null;
 }
 
 /** NFC per base character and the marks after it, with each chunk's raw
  *  offset, so a match on the folded text maps back to the source bytes. */
 function fold(raw: string): Folded {
+  if (!SLOW_TEXT_RE.test(raw) && !MARK_RE.test(raw) && raw.normalize("NFC") === raw) return { text: raw, starts: null, raw: null };
   const us = units(raw);
-  const out: Folded = { text: "", starts: [], raw: [] };
+  const out = { text: "", starts: [] as number[], raw: [] as number[] };
   for (let k = 0; k < us.length; ) {
     let j = k + 1;
     while (j < us.length && /^\p{M}/u.test(us[j]!.text)) j++;
@@ -117,13 +138,35 @@ function fold(raw: string): Folded {
   return out;
 }
 
+const startOf = (f: Folded, k: number) => (f.starts ? f.starts[k]! : k);
+const rawOf = (f: Folded, k: number) => (f.raw ? f.raw[k]! : k);
+
+/** The chunk that starts at `off` in `f.text`, or -1. */
+function chunkAt(f: Folded, off: number): number {
+  const s = f.starts;
+  if (!s) return off;
+  let lo = 0;
+  let hi = s.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (s[mid] === off) return mid;
+    if (s[mid]! < off) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
 interface OpenTag {
   name: string;
   skip: boolean;
 }
 
+/** The lower-cased name of a tag token (`TOKEN_RE` guarantees a letter after `<` or `</`). */
 function tagName(tag: string): string {
-  return /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(tag)![1]!.toLowerCase();
+  const from = tag.charCodeAt(1) === 47 ? 2 : 1;
+  let to = from;
+  for (let c = tag.charCodeAt(to); (c >= 48 && c <= 57) || ((c | 32) >= 97 && (c | 32) <= 122) || c === 45; c = tag.charCodeAt(++to));
+  return tag.slice(from, to).toLowerCase();
 }
 
 /** True for a tag words run through (`**Hold**s` is one word). A span with a
@@ -135,7 +178,8 @@ function joinsWords(tag: string, name: string): boolean {
 
 function skips(tag: string, name: string): boolean {
   if (SKIP_TAGS.has(name)) return true;
-  if (new RegExp(`\\s${READER_ONLY_ATTR}(?:[\\s=>/]|$)`).test(tag)) return true;
+  if (tag.length === name.length + 2) return false;
+  if (READER_ONLY_RE.test(tag)) return true;
   if (/\srole="heading"/.test(tag)) return true;
   const cls = /\sclass="([^"]*)"/.exec(tag)?.[1];
   return cls !== undefined && cls.split(/\s+/).some((c) => SKIP_CLASSES.has(c));
@@ -155,16 +199,26 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
     .sort((a, b) => [...b.key].length - [...a.key].length)
     .map((e) => ({ e, re: termPattern(e) }));
   if (terms.length === 0) return html;
+  // Where any term may start, case aside; at such a place, group g of `whichTerm`
+  // is the first term, longest first, that does (groups cost the scan ~40 %).
+  const anyTerm = new RegExp(terms.map((t) => `(?:${t.re.source})`).join("|"), "giu");
+  const whichTerm = new RegExp(terms.map((t) => `(${t.re.source})`).join("|"), "iuy");
   const tokens = html.match(TOKEN_RE) ?? [];
-  // The first visible character after each token, read across inline tags.
+  // Per tag token its name and whether words run through it (null: not a tag);
+  // per token the first visible character after it, read across inline tags.
+  const names: (string | null)[] = new Array(tokens.length).fill(null);
+  const joins = new Uint8Array(tokens.length);
   const nextChar: string[] = new Array(tokens.length).fill(" ");
   let carry = " ";
   for (let i = tokens.length - 1; i >= 0; i--) {
     nextChar[i] = carry;
     const t = tokens[i]!;
-    if (t.startsWith("<!--")) continue;
-    if (t.startsWith("<") && t.length > 1) carry = joinsWords(t, tagName(t)) ? carry : " ";
-    else carry = fold(t).text[0] ?? carry;
+    if (t.charCodeAt(0) !== 60 || t.length === 1) carry = firstUnit(t);
+    else if (t.length > 1 && t.charCodeAt(1) !== 33) {
+      const name = (names[i] = tagName(t));
+      if (joinsWords(t, name)) joins[i] = 1;
+      else carry = " ";
+    }
   }
   const stack: OpenTag[] = [];
   let skipDepth = 0;
@@ -174,17 +228,18 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
   let out = "";
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
-    if (t.startsWith("<!--") || t === "<") {
-      out += t;
+    const name = names[i] ?? null;
+    if (name === null && t.charCodeAt(0) === 60) {
+      out += t; // a comment or a lone `<`
       continue;
     }
-    if (t.startsWith("<")) {
+    if (name !== null) {
       out += t;
-      const name = tagName(t);
-      if (!joinsWords(t, name)) prev = " ";
-      if (t.startsWith("</")) {
-        const at = stack.map((o) => o.name).lastIndexOf(name);
-        if (at >= 0) for (const o of stack.splice(at)) if (o.skip) skipDepth--;
+      if (!joins[i]) prev = " ";
+      if (t.charCodeAt(1) === 47) {
+        let at = stack.length - 1;
+        while (at >= 0 && stack[at]!.name !== name) at--;
+        if (at >= 0) while (stack.length > at) if (stack.pop()!.skip) skipDepth--;
       } else if (!VOID_TAGS.has(name) && !t.endsWith("/>")) {
         if (SECTION_TAGS.has(name)) used = new Set();
         const skip = skips(t, name);
@@ -193,42 +248,54 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
       }
       continue;
     }
-    const f = fold(t);
-    if (skipDepth > 0 || f.text === "") {
+    if (skipDepth > 0) {
       out += t;
-      prev = f.text.at(-1) ?? prev;
+      prev = lastUnit(t);
       continue;
     }
+    const f = fold(t);
+    const text = f.text;
     let raw = 0;
     let piece = "";
-    for (let k = 0; k < f.starts.length - 1; k++) {
-      const at = f.starts[k]!;
-      const before = at === 0 ? prev : f.text[at - 1]!;
-      if (WORD_CHAR_RE.test(before)) continue;
-      let end = -1;
-      const found = terms.find((t) => (end = matchEnd(f, k, t.re, nextChar[i]!)) >= 0);
-      if (!found) continue;
-      const endChunk = f.starts.indexOf(end, k);
-      if (urlToken(f.text, at)) continue;
-      const hit = found.e;
-      // A used longer term still covers its words: «hold» in a second «hold queue» stays unmarked.
-      if (used.has(hit.key)) {
-        k = endChunk - 1;
+    for (let pos = 0; pos < text.length; ) {
+      anyTerm.lastIndex = pos;
+      const m = anyTerm.exec(text);
+      if (!m) break;
+      const at = m.index;
+      const k = chunkAt(f, at);
+      if (k < 0) {
+        pos = at + 1;
         continue;
       }
+      pos = startOf(f, k + 1);
+      const before = at === 0 ? prev : text[at - 1]!;
+      if (WORD_CHAR_RE.test(before)) continue;
+      whichTerm.lastIndex = at;
+      const w = whichTerm.exec(text)!;
+      let g = 1;
+      while (w[g] === undefined) g++;
+      let end = -1;
+      let found: (typeof terms)[number] | undefined;
+      for (let j = g - 1; j < terms.length && !found; j++) if ((end = matchEnd(f, k, terms[j]!.re, nextChar[i]!)) >= 0) found = terms[j];
+      if (!found) continue;
+      const endChunk = chunkAt(f, end);
+      if (urlToken(text, at)) continue;
+      const hit = found.e;
+      // A used longer term still covers its words: «hold» in a second «hold queue» stays unmarked.
+      pos = end;
+      if (used.has(hit.key)) continue;
       used.add(hit.key);
       tip++;
       const id = `gl-tip-${tip}`;
       piece +=
-        t.slice(raw, f.raw[k]) +
+        t.slice(raw, rawOf(f, k)) +
         `<span class="gl-mark"><span class="gl-term" tabindex="0" aria-describedby="${id}" data-gl-key="${escapeAttr(hit.key)}">` +
-        t.slice(f.raw[k], f.raw[endChunk]) +
+        t.slice(rawOf(f, k), rawOf(f, endChunk)) +
         `</span><span class="gl-tip" id="${id}" role="tooltip" ${READER_ONLY_ATTR}><b class="gl-tip-term">${escapeText(hit.term)}</b> ${escapeText(hit.definition)}</span></span>`;
-      raw = f.raw[endChunk]!;
-      k = endChunk - 1;
+      raw = rawOf(f, endChunk);
     }
     out += raw === 0 ? t : piece + t.slice(raw);
-    prev = f.text.at(-1) ?? prev;
+    prev = text.at(-1) ?? prev;
   }
   return out;
 }
@@ -248,16 +315,17 @@ function termPattern(e: GlossaryEntry): RegExp {
  *  chunk boundary with no word character after it (the next token's first
  *  one, at the token's end); -1 when there is none. */
 function matchEnd(f: Folded, k: number, re: RegExp, next: string): number {
-  re.lastIndex = f.starts[k]!;
+  re.lastIndex = startOf(f, k);
   const m = re.exec(f.text);
   if (!m) return -1;
   const end = re.lastIndex;
-  if (!f.starts.includes(end, k)) return -1;
+  if (chunkAt(f, end) < 0) return -1;
   return WORD_CHAR_RE.test(f.text[end] ?? next) ? -1 : end;
 }
 
 /** The white-space-delimited run around `at` is a URL. */
 function urlToken(text: string, at: number): boolean {
-  const start = text.slice(0, at).search(/\S*$/);
+  let start = at;
+  while (start > 0 && !WS_RE.test(text[start - 1]!)) start--;
   return URL_TOKEN_RE.test(text.slice(start));
 }
