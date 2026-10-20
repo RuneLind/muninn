@@ -91,6 +91,10 @@ describe("the ledger label", () => {
     expect(ledgerLabel({ state: "priced", sessions: 1, totalCost: 0, costedSessions: 1, truncated: false })).toBe(
       "1 session mentions it · $0.00",
     );
+    // arch-review 2026-10 #18: no costed session is no cost, never "$0.00".
+    expect(ledgerLabel({ state: "priced", sessions: 2, totalCost: 0, costedSessions: 0, truncated: false })).toBe(
+      "2 sessions mention it · no costed session",
+    );
     expect(ledgerLabel({ state: "not-tracked" })).toBe("not tracked");
     expect(ledgerLabel({ state: "unpriced", reason: "demoted" })).toBe("");
     expect(ledgerLabel({ state: "unpriced", reason: "not-configured" })).toBe("");

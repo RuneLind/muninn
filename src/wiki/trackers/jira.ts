@@ -340,27 +340,43 @@ function projectOfKey(key: string): string | null {
   return JIRA_KEY_SHAPE.test(key) ? key.slice(0, key.indexOf("-")) : null;
 }
 
-/** `/api/jira?key=`'s answer — `{sessions[], totalCost, costedSessions,
- *  truncated}` — as a priced view, or null when it is not that shape. */
-function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "priced" }> | null {
-  if (!raw || typeof raw !== "object") return null;
-  const r = raw as { sessions?: unknown; totalCost?: unknown; costedSessions?: unknown; truncated?: unknown };
-  if (!Array.isArray(r.sessions)) return null;
-  const total = typeof r.totalCost === "number" && Number.isFinite(r.totalCost) ? r.totalCost : 0;
-  return {
-    state: "priced",
-    sessions: r.sessions.length,
-    totalCost: Math.round(total * 100) / 100,
-    costedSessions: typeof r.costedSessions === "number" ? r.costedSessions : 0,
-    truncated: r.truncated === true,
-  };
-}
-
 /** claude-usage's own cap on `/api/jira/keys`: past it the answer is cut. */
 export const JIRA_KEYS_PER_CALL = 200;
 
 const count = (v: unknown): number | null =>
   typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+
+/**
+ * A ledger row's cost, rounded to cents, or null when it is no cost: not a
+ * number, not finite, or still negative after rounding (`-0.004` rounds to
+ * `-0`, is accepted and serializes as `0`). Rounded BEFORE the finite check:
+ * 1e308 is finite and ×100 is not. Both parsers read it, so one key never
+ * prices "$0.00" in Connections and "—" on the board.
+ */
+function ledgerCost(v: unknown): number | null {
+  const total = typeof v === "number" ? Math.round(v * 100) / 100 : NaN;
+  return Number.isFinite(total) && total >= 0 ? total : null;
+}
+
+/** `/api/jira?key=`'s answer — `{sessions[], totalCost, costedSessions,
+ *  truncated}` — as a priced view, or null when it is not that shape: by the
+ *  many-key parser's row rules, a cost that is no cost or more costed than
+ *  counted sessions is no answer, never a priced "$0". */
+function parseJiraLedger(raw: unknown): Extract<IssueLedgerView, { state: "priced" }> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { sessions?: unknown; totalCost?: unknown; costedSessions?: unknown; truncated?: unknown };
+  if (!Array.isArray(r.sessions)) return null;
+  const cost = ledgerCost(r.totalCost);
+  const costed = count(r.costedSessions);
+  if (cost === null || costed === null || costed > r.sessions.length) return null;
+  return {
+    state: "priced",
+    sessions: r.sessions.length,
+    totalCost: cost,
+    costedSessions: costed,
+    truncated: r.truncated === true,
+  };
+}
 
 /**
  * `/api/jira/keys?keys=`'s answer — `{keys: [{key, tracked, sessionCount,
@@ -380,9 +396,7 @@ export function parseJiraKeysLedger(raw: unknown): Map<string, KeyLedgerRow> | n
     if (typeof row.key !== "string" || typeof row.tracked !== "boolean") continue;
     const sessions = count(row.sessionCount);
     const costed = count(row.costedSessions);
-    // Rounded BEFORE the finite check: 1e308 is finite and ×100 is not.
-    const total = typeof row.totalCost === "number" ? Math.round(row.totalCost * 100) / 100 : NaN;
-    const cost = Number.isFinite(total) && total >= 0 ? total : null;
+    const cost = ledgerCost(row.totalCost);
     if (row.tracked && (sessions === null || costed === null || cost === null || costed > sessions)) continue;
     out.set(row.key.toUpperCase(), {
       tracked: row.tracked,

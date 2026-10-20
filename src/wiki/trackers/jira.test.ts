@@ -405,6 +405,21 @@ describe("PR 3 fix round 1: the adapter's key seams", () => {
     expect(jiraAdapter.parseLedger!({ sessions: "abc", totalCost: 1, costedSessions: 3, truncated: false })).toBeNull();
     expect(jiraAdapter.parseLedger!({ sessions: { length: 3 }, totalCost: 1 })).toBeNull();
   });
+
+  // arch-review 2026-10 #18: the single-key answer takes the many-key row rules.
+  test("parseLedger: a cost that is no cost, or more costed than counted sessions, is no answer", () => {
+    const ok = { sessions: [{}, {}], totalCost: 1.5, costedSessions: 2, truncated: false };
+    expect(jiraAdapter.parseLedger!(ok)).toEqual({ state: "priced", sessions: 2, totalCost: 1.5, costedSessions: 2, truncated: false });
+    for (const totalCost of ["1.5", null, undefined, Number.NaN, Infinity, 1e308, -1, -0.006]) {
+      expect(jiraAdapter.parseLedger!({ ...ok, totalCost })).toBeNull();
+    }
+    for (const costedSessions of [3, -1, 1.5, "2", null, undefined]) {
+      expect(jiraAdapter.parseLedger!({ ...ok, costedSessions })).toBeNull();
+    }
+    // -0.004 rounds to -0: accepted, as the many-key parser accepts it.
+    expect(JSON.stringify(jiraAdapter.parseLedger!({ ...ok, totalCost: -0.004 })?.totalCost)).toBe("0");
+    expect(jiraAdapter.parseLedger!({ ...ok, totalCost: 0, costedSessions: 0 })).toMatchObject({ costedSessions: 0, totalCost: 0 });
+  });
 });
 
 describe("parseJiraKeysLedger", () => {
