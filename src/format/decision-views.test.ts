@@ -271,7 +271,9 @@ describe("F13/F14: chain rows sit on one shared grid and read as a unit when nar
   test("the popover sits in a band its own row reserves, so it covers no other row", () => {
     expect(rule(".s .dc-pop")).toMatch(/position:\s*absolute/);
     expect(rule(".s .dc-pop")).toMatch(/bottom:\s*0/);
-    expect(rule(".s .dc-pop")).toMatch(/height:\s*var\(--dc-pop-h\)/);
+    expect(rule(".s .dc-pop")).toMatch(/(?<![-\w])height:\s*var\(--dc-pop-h\)/);
+    // A long label scrolls inside the band rather than spilling over the next row.
+    expect(rule(".s .dc-pop")).toMatch(/overflow-y:\s*auto/);
     expect(rule(".s .dc-row")).toMatch(/position:\s*relative/);
     expect(rule(".s .dc-node")).not.toMatch(/position:/);
     expect(css).toMatch(/\.s \.dc-row:has\(\.dc-node\[open\]\)\s*\{[^}]*padding-bottom:\s*calc\(var\(--dc-pop-h\)/);

@@ -77,7 +77,7 @@ describe("decision → PR", () => {
     expect(lines(md)).toEqual(["D2 → PR 2 (dropped)", "D1 → PR 1 (merged), PR 2 (dropped)"]);
   });
 
-  test("a row citing one decision in «What it gives» and another in State gets both edges", () => {
+  test("a row citing one decision in a Scope cell and another in its State cell gets both edges", () => {
     const md = LOG + ledger(["PR", "Scope", "State"], [["4 — x", "the cache D1 asked for", "open — D2 ruled"]]);
     expect(lines(md)).toEqual(["D2 → PR 4 (open)", "D1 → PR 4 (open)"]);
   });
@@ -217,6 +217,21 @@ describe("reversals and order", () => {
   test("an emphasised reversal word counts, in italics as in bold", () => {
     expect(lines(log("**D1** — ~~Use X.~~ _Snudd_ 03.10."))).toEqual(["D1 (reversed)"]);
     expect(lines(log("**D1** — ~~Use X.~~ **Snudd** 03.10."))).toEqual(["D1 (reversed)"]);
+  });
+
+  test("the lead's edges: sentence end at the strike's end, closers, trailing space, start of item", () => {
+    // `.` inside the strike is no sentence end unless it ends the strike.
+    expect(lines(log("**D1** — ~~Use v1.2 sort~~ reversed order is the default now."))).toEqual([]);
+    for (const closer of ["»", '"', "”", "’", "'", ")", "]"])
+      expect(lines(log(`**D1** — ~~Use X.${closer}~~ Snudd.`))).toEqual(["D1 (reversed)"]);
+    expect(lines(log("**D1** — ~~Use X. ~~ Snudd."))).toEqual(["D1 (reversed)"]);
+    expect(lines(log("**D1** — Now ~~Use X.~~ Snudd."))).toEqual([]);
+  });
+
+  test("the follower's edges: skipped `(` and `.`, any white space, the stem as the first word", () => {
+    for (const follower of [" (Snudd)", " . Snudd", "\n  Snudd.", "\u00a0Snudd."])
+      expect(lines(log(`**D1** — ~~Use X.~~${follower}`))).toEqual(["D1 (reversed)"]);
+    expect(lines(log("**D1** — ~~Use X.~~ Kept. Snudd later."))).toEqual([]);
   });
 
   test("an unclosed strike or bold marker on a long item stays linear", () => {
