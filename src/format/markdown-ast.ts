@@ -131,6 +131,26 @@ export interface ListParagraph {
 }
 export type ListChild = ListBlock | CodeBlock | ListParagraph;
 
+/** Each list's item source lines: `[k]` holds the 0-based lines, in the text
+ *  `parseBlocks` was given, whose text `items[k]` joins (the item line and its
+ *  continuation lines; nested content is not the item's text). A side table,
+ *  not a field, so the AST and everything that compares it stay as they were. */
+const LIST_ITEM_LINES = new WeakMap<ListBlock, number[][]>();
+
+/** The source lines of each of `list`'s items ({@link LIST_ITEM_LINES}), or
+ *  undefined for a list `parseBlocks` did not make. */
+export function listItemLines(list: ListBlock): readonly (readonly number[])[] | undefined {
+  return LIST_ITEM_LINES.get(list);
+}
+
+function noteItemLine(list: ListBlock, line: number | undefined): void {
+  if (line === undefined) return;
+  const all = LIST_ITEM_LINES.get(list) ?? [];
+  LIST_ITEM_LINES.set(list, all);
+  const k = list.items.length - 1;
+  (all[k] ??= []).push(line);
+}
+
 // ── Component blocks ────────────────────────────────────────────────────────
 // A small, whitelisted vocabulary of presentational block components shared with
 // mimir's MDX explainer set (`scripts/mdx-explainer/components.tsx`). A
@@ -1065,12 +1085,14 @@ function parseList(
   i: number,
   store: FenceStore,
   atBlockStart: boolean,
+  base: number,
 ): { block: ListBlock; next: number } | null {
   const first = matchListLine(lines[i]!);
   if (!first || first.indent > 3 || first.marker === "+") return null;
   if (first.indent > 0 && !atBlockStart) return null;
   const stack: ListLevel[] = [openLevel(first)];
   const root = stack[0]!.block;
+  noteItemLine(root, store.srcLine[base + i]);
   let afterCode = false;
   /** The item paragraph the last line went into, which a lazy line continues. */
   let para: ListParagraph | undefined;
@@ -1097,7 +1119,12 @@ function parseList(
       stack[at]!.block.loose = true;
     }
     if (step.kind === "text" && para) para.text += "\n" + step.text;
-    else para = applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
+    else {
+      para = applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
+      if (step.kind === "child" || step.kind === "item" || step.kind === "sublist" || step.kind === "text") {
+        noteItemLine(stack[stack.length - 1]!.block, store.srcLine[base + k]);
+      }
+    }
     afterCode = step.kind === "code";
     lastItemAt = step.kind === "text" || step.kind === "code" || step.kind === "para" ? undefined : stack[stack.length - 1];
     j = k + 1;
@@ -1523,7 +1550,7 @@ function parseBlocksInner(
     const prev = i > 0 ? lines[i - 1]! : "";
     const atBlockStart =
       i === 0 || prev.trim() === "" || CODE_PLACEHOLDER_RE.test(prev) || HEADING_RE.test(prev);
-    const list = parseList(lines, i, store, atBlockStart);
+    const list = parseList(lines, i, store, atBlockStart, base);
     if (list) {
       flushText();
       blocks.push(list.block);

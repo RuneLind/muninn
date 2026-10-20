@@ -462,3 +462,17 @@ describe("wiki-check reads a CaseBoard's data file as lintWiki does (architectur
     expect(rooted.out.map((l) => (JSON.parse(l) as { message: string }).message)).toEqual(['In ../data/c.yaml: Pill tone="sucess" renders as default']);
   });
 });
+
+describe("wiki-check names only CaseBoard files above the guessed root (fix round 2)", () => {
+  test("a failing Query ref, a typo'd CaseBoard ref and one refused before the root is asked are not named", async () => {
+    const dir = await testTempDir(path.join(tmpdir(), "wiki-check-unread-"));
+    try {
+      const page = path.join(dir, "pages/b.mdx");
+      const body = ["---", "title: B", "---", '<Query sql="q.yml" />', "", '<Query csv="../x.csv" />', "", '<CaseBoard src="missing.yaml" />', "", '<CaseBoard src="../.d/c.yaml" />', ""];
+      await Bun.write(page, body.join("\n"));
+      expect((await runWikiCheck([page])).err).toEqual([noRootNote(path.dirname(page))]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

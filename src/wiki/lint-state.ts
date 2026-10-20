@@ -2,8 +2,8 @@
  * Lint check 14 — volatile state outside its home (living-facts PR 1, D10).
  * Each volatile fact (a PR's state, a prod release, a Jira status) has one
  * home, on one page: the page whose frontmatter `owns:` lists the key. On a
- * page the homes are `<StatusRows>`, a paragraph that starts with a `**Status**`
- * label, a leading-pipe table directly under a `PR ledger` / `PR-oversikt` label
+ * page the homes are `<StatusRows>`, a paragraph or list item that starts with a
+ * `**Status**` label, a leading-pipe table directly under a `PR ledger` / `PR-oversikt` label
  * or heading, and `status_note`. Every other line names the key and leaves the
  * state to the chip.
  *
@@ -41,7 +41,7 @@
  */
 
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, parseBlocks, readerFencedLines, type Block } from "../format/markdown-ast.ts";
+import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, listItemLines, parseBlocks, readerFencedLines, type Block, type ListChild } from "../format/markdown-ast.ts";
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
@@ -237,20 +237,40 @@ function blockEnd(lines: readonly string[], fenced: readonly boolean[], start: n
   return lines.length - 1;
 }
 
+/** The list items `parseBlocks` makes: the first line of every item, and every
+ *  line of an item whose first line is a `**Status**` label. */
+interface ParsedItems {
+  starts: Set<number>;
+  status: Set<number>;
+}
+
 /** Lines inside a tracked block, by `parseBlocks`: a tag the parser renders as
  *  text (a multi-line opener, a close mid-line, trailing prose) opens nothing.
  *  `headers` gets the header row of every table the parser makes: column
- *  labels, not state. */
+ *  labels, not state. `items` gets the parser's list items. */
 function trackedLines(
   lines: readonly string[],
   fenced: readonly boolean[],
   body: number,
   headers: Set<number>,
+  items: ParsedItems,
 ): Map<number, "home" | "history"> {
   const roles = new Map<number, "home" | "history">();
+  const walkList = (children: readonly ListChild[]) => {
+    for (const c of children) {
+      if (c.type !== "ul" && c.type !== "ol") continue;
+      for (const src of listItemLines(c) ?? []) {
+        const at = src.map((l) => body + l);
+        items.starts.add(at[0]!);
+        if (STATUS_PARA_RE.test(lines[at[0]!]!.trim())) for (const l of at) items.status.add(l);
+      }
+      for (const n of c.nested ?? []) walkList(n ?? []);
+    }
+  };
   const walk = (blocks: Block[]) => {
     for (const b of blocks) {
       if (b.type === "table" && b.line !== undefined) headers.add(body + b.line);
+      if (b.type === "ul" || b.type === "ol") walkList([b]);
       if (b.type !== "component") continue;
       if (b.line !== undefined && (b.name === HOME_BLOCK || HISTORY_BLOCKS.includes(b.name))) {
         const start = body + b.line;
@@ -283,12 +303,13 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
   return out;
 }
 
-/** A line that starts a new block, ending a paragraph. An inline component
+/** A line that starts a new block, ending a paragraph: a list item the parser
+ *  makes (`item`), a heading, a pipe row or a block tag. An inline component
  *  (`<Pill>`) continues the paragraph. A fence line is no case here: a fence the
  *  reader pairs is `fenced` and ends the paragraph before this is asked, and a
  *  `~~~` line or an unclosed opener is prose the reader keeps in it. */
-function startsBlock(t: string): boolean {
-  if (/^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\|)/.test(t)) return true;
+function startsBlock(t: string, item: boolean): boolean {
+  if (item || /^(?:#{1,6}\s|\|)/.test(t)) return true;
   return t.startsWith("<") && !INLINE_TAG_RE.test(t);
 }
 
@@ -298,7 +319,7 @@ function startsBlock(t: string): boolean {
  * lines inside a block scalar included), are a linted unit and a home unit;
  * the rest is neither. Body: fences, blockquote lines and the three history
  * blocks are exempt; `<StatusRows>`,
- * a `**Status**` paragraph and a PR-ledger table are homes; every other line
+ * a `**Status**` paragraph or list item and a PR-ledger table are homes; every other line
  * is linted.
  */
 export function stateLineRoles(content: string): LineRoles {
@@ -328,7 +349,8 @@ export function stateLineRoles(content: string): LineRoles {
   }
 
   const headers = new Set<number>();
-  const tracked = trackedLines(lines, fenced, body, headers);
+  const items: ParsedItems = { starts: new Set(), status: new Set() };
+  const tracked = trackedLines(lines, fenced, body, headers, items);
   const tables = tableRows(lines, fenced, body);
   let statusPara = false;
   let ledger = false;
@@ -352,6 +374,12 @@ export function stateLineRoles(content: string): LineRoles {
       reset();
       continue;
     }
+    // A list item opening with the label is a home to the item's own end.
+    if (items.status.has(i)) {
+      reset();
+      home.push({ lines: [i] });
+      continue;
+    }
     // The reader renders the unprefixed line after a quote as its own text.
     if (QUOTE_RE.test(t)) {
       reset();
@@ -360,7 +388,7 @@ export function stateLineRoles(content: string): LineRoles {
 
     // A `**Status**` paragraph runs to the next blank line or block start.
     if (STATUS_PARA_RE.test(t)) statusPara = true;
-    else if (statusPara && startsBlock(t)) statusPara = false;
+    else if (statusPara && startsBlock(t, items.starts.has(i))) statusPara = false;
     if (statusPara) {
       home.push({ lines: [i] });
       continue;

@@ -792,3 +792,27 @@ describe("check 14 a counted task word anchors a state phrase (fix round 1)", ()
     expect(f[0]!.message).toContain("beside «PRs»");
   });
 });
+
+// ── Batch L fix round 2: a Status list item is the parser's item, no more ──
+
+describe("check 14 a Status list item ends where the reader's item does (fix round 2)", () => {
+  test("a fence-shaped line after the item is outside it: the line after is linted", async () => {
+    expect(await flaggedBody(["- **Status:** DEMO-1 is merged", "~~~", "DEMO-2 is merged."])).toEqual([2]);
+    expect(await flaggedBody(["- **Status:** DEMO-1 is merged", "```", "DEMO-2 is merged."])).toEqual([2]);
+    expect(await flaggedBody(["1. **Status:** DEMO-1 is merged", "```js", "x", "more DEMO-3 merged"])).toEqual([3]);
+  });
+
+  test("an unindented line after the item is its own paragraph; an indented one continues the item", async () => {
+    expect(await flaggedBody(["- **Status:** DEMO-3 merged", "DEMO-4 is merged."])).toEqual([1]);
+    expect(await flaggedBody(["- **Status:** DEMO-3 merged", "  DEMO-4 is merged."])).toEqual([]);
+    expect(await flaggedBody(["- a", "- **Status:** DEMO-3 merged", "  DEMO-4 is merged.", "- DEMO-5 merged"])).toEqual([3]);
+    expect(await flaggedBody(["- a", "  - **Status:** DEMO-3 merged", "    DEMO-4 is merged."])).toEqual([]);
+    expect(await flaggedBody(["- a", "  - **Status:** DEMO-3 merged", "DEMO-4 is merged."])).toEqual([2]);
+  });
+
+  test("a list-marker line the parser keeps in a text Status paragraph stays in it", async () => {
+    expect(await flaggedBody(["**Status:** waits", "  - DEMO-4 is merged"])).toEqual([]);
+    expect(await flaggedBody(["**Status:** waits", "1) DEMO-4 is merged"])).toEqual([]);
+    expect(await flaggedBody(["**Status:** waits", "- DEMO-4 is merged"])).toEqual([1]);
+  });
+});
