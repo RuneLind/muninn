@@ -68,7 +68,7 @@ import {
   SHIPPED_CAPTURE_PRESETS,
 } from "../../summaries/presets.ts";
 import { TRANSCRIPT_MAX_BYTES, TRANSCRIPT_TRUNCATION_NOTE } from "../../summaries/transcript-appendix.ts";
-import { summarizeTimeoutFor } from "../../video/media.ts";
+import { FRAME_BUDGET_MAX, summarizeTimeoutFor } from "../../video/media.ts";
 import { CAPTURE_SUMMARIZE_TIMEOUT_FLOOR_MS } from "../../summaries/summarizer-shared.ts";
 import { VIMEO_FRAME_SOURCE } from "../../summaries/frames.ts";
 import { YOUTUBE_FRAME_SOURCE, copyKeptFrame } from "../../summaries/frames.ts";
@@ -737,6 +737,89 @@ describe("the shared save path", () => {
     claims.release(held);
   });
 
+  test("the claim is taken before the read, at the FRAME_BUDGET_MAX budget", async () => {
+    // Claim first, then read (the registry's rule): the budget cannot come from
+    // the frame count, which needs the read, so it is the worst case.
+    const budgets: number[] = [];
+    const heldAtRead: boolean[] = [];
+    class Recording extends SummarySaveClaims {
+      override claim(sourceId: string, docId: string, budgetMs: number) {
+        budgets.push(budgetMs);
+        return super.claim(sourceId, docId, budgetMs);
+      }
+    }
+    const claims = new Recording();
+    const { deps } = makeDeps(youtubeDoc(), { claims, framesRoot: tempFramesRoot() });
+    const read = deps.fetchRawDoc;
+    deps.fetchRawDoc = async (c, d) => {
+      heldAtRead.push(claims.isHeld("youtube", DOC_ID));
+      return read(c, d);
+    };
+    expect((await post(appFor(deps), { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    expect(heldAtRead).toEqual([true]);
+    expect(budgets).toEqual([rerunLatchBudgetMs(FRAME_BUDGET_MAX, BOT)]);
+    await settle();
+    claims.clear();
+  });
+
+  test("every refusal after the claim releases it", async () => {
+    const claims = new SummarySaveClaims();
+    const cases: Array<[string | null, Record<string, unknown>, number, string]> = [
+      [null, {}, 404, "not_found"],
+      [youtubeDoc({ transcript: null }), {}, 400, "no_transcript"],
+      [youtubeDoc(), { kind: "no-such-kind" }, 400, "bad_kind"],
+    ];
+    for (const [raw, extra, status, code] of cases) {
+      const { deps, rec } = makeDeps(raw, { claims, framesRoot: tempFramesRoot() });
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID, ...extra });
+      expect([res.status, res.json.code]).toEqual([status, code]);
+      expect(claims.isHeld("youtube", DOC_ID)).toBe(false);
+      expect(rec.prompts).toHaveLength(0);
+    }
+  });
+
+  test("a read that THROWS abandons the claim, so an earlier lapsed run may still save", async () => {
+    // `prepare()` throwing wrote nothing: the claim must go back with
+    // `abandon`, not `release` (which refuses the lapsed run) or nothing
+    // (which keeps the key held).
+    const claims = new SummarySaveClaims();
+    const lapsed = claims.claim("youtube", DOC_ID, 20)!;
+    await Bun.sleep(40);
+    const { deps, rec } = makeDeps(youtubeDoc(), { claims, framesRoot: tempFramesRoot() });
+    deps.fetchRawDoc = async () =>
+      ({
+        get raw(): string {
+          throw new Error("unreadable body");
+        },
+      }) as RerunDocument;
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(500);
+    expect(rec.prompts).toHaveLength(0);
+    expect(claims.isHeld("youtube", DOC_ID)).toBe(false);
+    expect(claims.pinForWrite(lapsed)).toBe("pinned");
+    claims.clear();
+  });
+
+  test("more kept frames than FRAME_BUDGET_MAX is 422, not a truncated list", async () => {
+    // A cut list would make the tail strip the quotes of every frame left out.
+    const root = tempFramesRoot();
+    const dir = join(root, "youtube", VIDEO_ID);
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i <= FRAME_BUDGET_MAX; i++) writeFileSync(join(dir, `${i * 10}.jpg`), "x");
+    const claims = new SummarySaveClaims();
+    const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, claims });
+    const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+    expect(res.status).toBe(422);
+    expect(res.json.code).toBe("too_many_frames");
+    expect(claims.isHeld("youtube", DOC_ID)).toBe(false);
+    await settle();
+    expect(rec.prompts).toHaveLength(0);
+    // At the cap itself it runs.
+    rmSync(join(dir, "0.jpg"));
+    expect((await post(appFor(deps), { source: "youtube", docId: DOC_ID })).status).toBe(200);
+    await settle();
+  });
+
   test("a failed ingest FAILS the job (write_failed), where it used to only warn", async () => {
     const { deps, rec } = makeDeps(youtubeDoc(), {
       ingestAnswer: { ok: false, status: 422, error: "Ingest returned 422: boom", mayHaveWritten: false },
@@ -834,18 +917,37 @@ describe("copyKeptFrame", () => {
   test("does NOT copy a frame that is already at its destination", async () => {
     // Invisible from the filesystem on macOS, where `copyFile(p, p)` resolves
     // with the file intact — which is why the copy is injectable here.
+    const dir = join(tempFramesRoot(), "b");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "thirty");
     const calls: Array<[string, string]> = [];
-    await copyKeptFrame("/a/b/30.jpg", "/a/b/30.jpg", async (from, to) => {
+    await copyKeptFrame(join(dir, "30.jpg"), join(dir, "30.jpg"), async (from, to) => {
       calls.push([from, to]);
     });
     expect(calls).toEqual([]);
   });
 
   test("compares RESOLVED paths, so a differently-spelled root still matches", async () => {
+    const dir = join(tempFramesRoot(), "b");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "thirty");
     const calls: Array<[string, string]> = [];
-    await copyKeptFrame("/a/b/../b/30.jpg", "/a/b/30.jpg", async (from, to) => {
+    await copyKeptFrame(join(dir, "..", "b", "30.jpg"), join(dir, "30.jpg"), async (from, to) => {
       calls.push([from, to]);
     });
+    expect(calls).toEqual([]);
+  });
+
+  test("a MISSING frame at its own destination is a copy failure, not 'already in place'", async () => {
+    // A Delete under a running re-run removed the frames dir; the lexical
+    // fallback judged the missing file equal to itself and kept its quote.
+    const dir = join(tempFramesRoot(), "gone");
+    const calls: Array<[string, string]> = [];
+    await expect(
+      copyKeptFrame(join(dir, "30.jpg"), join(dir, "30.jpg"), async (from, to) => {
+        calls.push([from, to]);
+      }),
+    ).rejects.toThrow();
     expect(calls).toEqual([]);
   });
 

@@ -53,6 +53,7 @@ import { lintFindingPathOf } from "../../gardener/lint-markers.ts";
 import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
 import { notifySummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
+import { summarySaveClaims } from "../../summaries/summary-save.ts";
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
 import { collectWikiRefs, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
@@ -934,6 +935,43 @@ const MAX_DISMISS_KEYS = 2000;
 
 /** Timeout for huginn's DELETE (it moves a file + enqueues reindexes, then returns). */
 const DELETE_TIMEOUT_MS = 20_000;
+
+/** How long a delete holds the summary save claim when it cannot release it:
+ *  huginn's DELETE timed out, failed in transport or answered a 5xx that may
+ *  follow the move, so the move may have landed or may still land. huginn's
+ *  handler (`delete_document`) is local file work: it reads the collection's
+ *  manifest for its base path, stats the source, checks the index entry,
+ *  creates the trash directory chain and moves the file, then reads the other
+ *  collections' manifests to find the ones sharing the source and enqueues a
+ *  reindex for each. A request past the 20 s client timeout is queued in its worker pool
+ *  or on a stalled disk. 5 min (15x the client timeout) keeps re-runs out
+ *  until such a move has landed. A confirmed move, a 4xx and a pre-move 500 let go
+ *  at once. */
+const DELETE_CLAIM_BUDGET_MS = 5 * 60_000;
+
+/** huginn's DELETE 404 when the source file is not on disk — the one 404 that
+ *  says the document is gone (`delete_document`, huginn
+ *  `main/routes/collections.py`). Its other 404s — the membership gate, an
+ *  unknown collection, a huginn without the route — name a document that may
+ *  still exist. */
+const HUGINN_SOURCE_GONE = /^Source file for document '.*' not found in collection '/s;
+
+/** huginn's DELETE 500s raised BEFORE the source file left `reader.basePath`
+ *  (`delete_document`, huginn `main/routes/collections.py`): the manifest read,
+ *  the index-mapping read, and the move itself (an `OSError` from
+ *  `shutil.move` leaves the source in place). Any other 5xx — huginn's own
+ *  "Internal Server Error" for an exception after the move, a proxy 502/504
+ *  while huginn may still be working — may follow a move. */
+const HUGINN_DELETE_PRE_MOVE_500 =
+  /^(Could not read the manifest for collection '|Could not read the index mapping for collection '|Could not move source file: )/;
+
+/** Did huginn's answer prove the source file was NOT moved? A 4xx always
+ *  does (huginn raises every one before the move); a 5xx only with a
+ *  {@link HUGINN_DELETE_PRE_MOVE_500} detail. */
+export function huginnDeleteMovedNothing(upstreamStatus: number, upstreamDetail: string | undefined): boolean {
+  if (upstreamStatus >= 400 && upstreamStatus < 500) return true;
+  return upstreamStatus === 500 && HUGINN_DELETE_PRE_MOVE_500.test(upstreamDetail ?? "");
+}
 
 /**
  * Per-bot backlog cache. The backlog (wiki URL sweep + 4 collection listings +
@@ -1977,8 +2015,13 @@ export function registerWikiGardenerRoutes(
    * On success the key is pruned from BOTH snapshot sets (a deleted doc must not
    * leave a dangling offered/dismissed entry that outlives it).
    *
-   * Only huginn's DELETE can answer 404/502. A muninn DB step failing after it is
-   * a 200 with a `warning`: the document IS gone, so the delete signal still fires.
+   * Refusals: 409 `in_flight` when a re-run, fact-check save or earlier delete
+   * holds the document's save claim, and 409 while a gardener run holds the
+   * mutex; 404 when huginn says the id is not in the collection (a source-gone
+   * 404 re-runs the proposal cleanup and may carry `proposals` and a
+   * `warning`); 502 when huginn refuses or does not answer. A muninn DB step
+   * failing after huginn's move is a 200 with a `warning`: the document IS
+   * gone, so the delete signal still fires.
    */
   app.post("/api/wiki/gardener/backlog-doc-delete", async (c) => {
     const target = await resolvePruneTarget(c);
@@ -1995,21 +2038,7 @@ export function registerWikiGardenerRoutes(
     }
 
     const key = `${collection}/${id}`;
-    const run = runExclusive(target.bot.name, async () => {
-      // huginn's DELETE owns the 404/502 answers — and ONLY it. Everything after a
-      // confirmed move is muninn's own bookkeeping, reported separately below: the
-      // document is gone whatever a DB write then does.
-      let res: Record<string, unknown>;
-      try {
-        res = (await fetchKnowledgeApi(
-          KNOWLEDGE_API_URL,
-          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-          { method: "DELETE", timeoutMs: DELETE_TIMEOUT_MS },
-        )) as Record<string, unknown>;
-      } catch (err) {
-        return { refused: err };
-      }
-
+    const work = async () => {
       // Each step is guarded on its own, so one failure skips none of the others
       // (a failed snapshot prune must not leave the stats cache stale).
       const failures: string[] = [];
@@ -2019,7 +2048,7 @@ export function registerWikiGardenerRoutes(
         } catch (err) {
           // The raw error (driver text, host:port, a DB user) goes to the log only;
           // the response names the step, because the client DISPLAYS `warning`.
-          log.warn("Backlog delete of {key} for {bot}: huginn deleted it, but {step} failed: {error}", {
+          log.warn("Backlog delete of {key} for {bot}: {step} failed: {error}", {
             bot: target.bot.name,
             key,
             collection,
@@ -2031,6 +2060,47 @@ export function registerWikiGardenerRoutes(
           return fallback;
         }
       };
+      // The draft the source drafter wrote FROM the doc: a review-gate card whose
+      // source no longer exists is not reviewable, and approving it would write a
+      // wiki page from a document that is gone. Applied rows are kept and reported
+      // (their wiki page still exists). Under the mutex — pinned by the route test,
+      // whose seam asserts the mutex is HELD when it runs — so a drain cannot
+      // re-draft the doc between huginn's move and this DELETE.
+      const deleteProposals = () =>
+        step(
+          PROPOSALS_DELETE_STEP,
+          () => backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id),
+          { deleted: [] as DeletedSourceProposal[], kept: [] as DeletedSourceProposal[] },
+        );
+
+      // huginn's DELETE owns the 404/502 answers — and ONLY it. Everything after a
+      // confirmed move is muninn's own bookkeeping, reported separately below: the
+      // document is gone whatever a DB write then does.
+      let res: Record<string, unknown>;
+      try {
+        res = (await fetchKnowledgeApi(
+          KNOWLEDGE_API_URL,
+          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+          { method: "DELETE", timeoutMs: DELETE_TIMEOUT_MS },
+        )) as Record<string, unknown>;
+      } catch (err) {
+        // A source-gone 404 is also what a SECOND delete gets after the first
+        // one's proposal step failed, so the (idempotent) proposal cleanup runs
+        // again here — only on that 404, since every other one may name a live
+        // document whose drafts are still wanted. The snapshot prunes never run
+        // here: a 404 can name an id that was never listed.
+        if (
+          err instanceof KnowledgeApiError &&
+          err.upstreamStatus === 404 &&
+          HUGINN_SOURCE_GONE.test(err.upstreamDetail ?? "")
+        ) {
+          const proposals = await deleteProposals();
+          // Same reason as the 200 path: the cleanup changed the pending set.
+          await step("summaries stats cache invalidation", () => invalidateSummariesStatsCache(), undefined);
+          return { refused: err, proposals, failures };
+        }
+        return { refused: err };
+      }
 
       // Prune the key from both live sets — the doc is gone, so an entry naming it
       // would linger forever (the sets are never garbage-collected against a listing).
@@ -2048,25 +2118,58 @@ export function registerWikiGardenerRoutes(
       // Same rule for the attempt ledger: the doc is gone, and a re-capture under the
       // same id must not inherit a months-old skip reason.
       await step("source-draft attempt delete", () => deleteSourceDraftAttempt(target.bot.name, collection, id), undefined);
-      // And the draft the source drafter wrote FROM it: a review-gate card whose
-      // source no longer exists is not reviewable, and approving it would write a
-      // wiki page from a document that is gone. Applied rows are kept and reported
-      // (their wiki page still exists). Under the mutex — pinned by the route test,
-      // whose seam asserts the mutex is HELD when it runs — so a drain cannot
-      // re-draft the doc between huginn's move and this DELETE.
-      const proposals = await step(
-        PROPOSALS_DELETE_STEP,
-        () => backlogDeps.deleteSourceProposalsForDoc(target.bot.name, collection, id),
-        { deleted: [] as DeletedSourceProposal[], kept: [] as DeletedSourceProposal[] },
-      );
+      const proposals = await deleteProposals();
       // The pending set the stats coverage reads just changed; a cached payload
       // would report the old pending/consumed split for its full 5-min TTL.
       await step("summaries stats cache invalidation", () => invalidateSummariesStatsCache(), undefined);
       return { res, proposals, failures };
-    });
-    if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
+    };
 
-    const done = await run;
+    // The delete is a WRITER of the summary document: it takes the claim the
+    // re-run and the fact-check write-back take, keyed the same way (the SHELF
+    // id, `x-article` for X video). While another writer holds it the answer is
+    // 409, since a re-run in flight would write the deleted document back; and
+    // taking it moves the key's generation, so a re-run whose claim lapsed can
+    // no longer re-take it and save. How it lets go depends on what huginn said:
+    // a move → `release` (the generation moves on); the gardener mutex, a 4xx or
+    // a pre-move 500 (`huginnDeleteMovedNothing`) → `abandon` (nothing was
+    // deleted, so a lapsed re-run may still save); no answer or any other 5xx →
+    // neither, because the move may have landed or may still land, and the
+    // claim keeps re-runs out until it lapses at DELETE_CLAIM_BUDGET_MS.
+    const sourceId = SUMMARY_SOURCES.find((s) => s.collection === collection)!.id;
+    const claim = summarySaveClaims.claim(sourceId, id, DELETE_CLAIM_BUDGET_MS);
+    if (!claim) {
+      return c.json(
+        {
+          error:
+            "A re-run, fact-check save or earlier delete is still in flight on this document. Wait for it to finish, then delete.",
+          code: "in_flight",
+        },
+        409,
+      );
+    }
+    let done: Awaited<ReturnType<typeof work>>;
+    let letGo: "release" | "abandon" | "keep" = "release";
+    try {
+      const run = runExclusive(target.bot.name, work);
+      if (run === null) {
+        letGo = "abandon";
+        return c.json({ error: "a gardener run is in flight" }, 409);
+      }
+      done = await run;
+      if ("refused" in done) {
+        const err = done.refused;
+        const movedNothing =
+          err instanceof KnowledgeApiError &&
+          err.upstreamStatus !== undefined &&
+          huginnDeleteMovedNothing(err.upstreamStatus, err.upstreamDetail);
+        letGo = movedNothing ? "abandon" : "keep";
+      }
+    } finally {
+      if (letGo === "release") summarySaveClaims.release(claim);
+      else if (letGo === "abandon") summarySaveClaims.abandon(claim);
+    }
+
     if ("refused" in done) {
       // huginn 404 = the id isn't a member of that collection (its membership gate);
       // anything else is an upstream/transport failure. Never a muninn 5xx.
@@ -2078,7 +2181,54 @@ export function registerWikiGardenerRoutes(
         key,
         error: message,
       });
-      if (upstream === 404) return c.json({ error: "that doc is not in that collection" }, 404);
+      if (upstream === 404 && !done.proposals) {
+        return c.json(
+          {
+            error: "that doc is not in that collection",
+            warning:
+              "Any wiki drafts written from this document were kept: huginn did not confirm the document is gone.",
+          },
+          404,
+        );
+      }
+      if (upstream === 404) {
+        const removed = done.proposals?.deleted.length ?? 0;
+        return c.json(
+          {
+            error:
+              removed > 0
+                ? `that doc is not in that collection; removed ${removed} unapplied draft${removed === 1 ? "" : "s"} written from it`
+                : "that doc is not in that collection",
+            ...(done.proposals ? { proposals: done.proposals } : {}),
+            ...(done.failures?.includes(PROPOSALS_DELETE_STEP)
+              ? {
+                  warning:
+                    "muninn could not remove the wiki drafts written from this document (failed: source proposals delete) — reject them on /wiki/gardener.",
+                  // The one warning whose remedy is the review gate; the
+                  // /summaries client links the gate on this code alone.
+                  warningCode: "drafts_on_gate",
+                }
+              : {}),
+          },
+          404,
+        );
+      }
+      if (upstream === undefined) {
+        return c.json(
+          {
+            error: `huginn did not answer the delete (${message}). The delete may still complete; reload in a few minutes before retrying.`,
+          },
+          502,
+        );
+      }
+      if (letGo === "keep") {
+        return c.json(
+          {
+            error: `huginn answered the delete with an error (${message}). The delete may have completed; reload in a few minutes before retrying.`,
+          },
+          502,
+        );
+      }
       return c.json({ error: `huginn refused the delete: ${message}` }, 502);
     }
     const { res, proposals, failures } = done;

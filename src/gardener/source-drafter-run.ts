@@ -35,6 +35,8 @@ import {
   type SourceDraftTrigger,
 } from "../db/source-draft-attempts.ts";
 import { getSummaryFactcheck } from "../db/summary-factchecks.ts";
+import { readSummarySourceText } from "../summaries/source-text.ts";
+import { encodeDocIdPath } from "../summaries/sources.ts";
 import { loadConfig } from "../config.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import { docDateMs } from "./harvest.ts";
@@ -52,6 +54,11 @@ const log = getLog("gardener", "source-drafter");
 
 export const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 export const DOC_FETCH_TIMEOUT_MS = 15_000;
+
+/** A doc's raw source file — what the drafter compares a saved fact check with. */
+export function readDocSourceText(collection: string, docId: string): Promise<string | null> {
+  return readSummarySourceText(DEFAULT_API_URL, collection, encodeDocIdPath(docId));
+}
 
 /**
  * Derive a huginn category from a collection-relative doc id (`<category>/<title>.md`,
@@ -120,6 +127,7 @@ export async function runSourceDraftForInput(
     liveSourceDocUrls: () => getLiveSourceDocUrls(botConfig.name),
     insertProposal: (params) => insertWikiProposal(params),
     getFactcheck: getSummaryFactcheck,
+    readSourceText: readDocSourceText,
     callDrafter: oneShotDrafter(botConfig, input.url, config),
   });
 

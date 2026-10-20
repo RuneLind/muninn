@@ -19,7 +19,9 @@
  * classifier) sat INSIDE the repo, so the parent-directory walk loaded muninn's
  * own CLAUDE.md on every call — 33 900 cache_creation tokens, measured. They now
  * request what they actually needed from the bot folder explicitly instead:
- * `--mcp-config` via `SpawnHaikuOptions.botDir`, persona via `.system`.
+ * `--mcp-config` via `SpawnHaikuOptions.botDir` together with
+ * `toolSurface: "gmail-read"` (the email watcher; every other spawn is
+ * tool-less), persona via `.system`.
  *
  * The chat connector (`src/ai/executor.ts`) and `claude-sdk` use it only for a
  * fenced tool surface (`{ read }`/`{ web }`), through `resolveFencedAgentCwd`.

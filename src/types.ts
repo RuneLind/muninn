@@ -48,12 +48,12 @@ export interface ToolCall {
   startOffsetMs: number; // offset from Claude CLI start (for waterfall positioning)
   input?: string;      // abbreviated JSON, max 500 chars
   /**
-   * True when the call was still IN FLIGHT when its parent model call died — i.e.
-   * a `tool_start` that never got its `tool_end`. Only set by consumers that
-   * rebuild tool calls from the progress channel (the fact-check claim fan-out's
-   * timeout path); a connector-returned `ToolCall` always completed, so it is
-   * absent there. `durationMs` on such a call runs to the failure instant, not to
-   * a real result, and `output` is necessarily undefined.
+   * True when the call never got its result. Set by consumers that rebuild tool calls from the progress channel
+   * (the fact-check claim fan-out's timeout path) and by the claude-cli
+   * `StreamParser` for a `tool_use` with no matching `tool_result` at end of
+   * stream (which still emits a `tool_end` progress event for it, so a
+   * progress-channel consumer sees it as finished). `durationMs` on such a call runs to the failure (or stream-end)
+   * instant, not to a real result, and `output` is necessarily undefined.
    */
   unterminated?: boolean;
   /**
@@ -86,6 +86,12 @@ export interface ToolCall {
    * (404, timeout, network) — see {@link fetchHuginnTrace}.
    */
   searchTraceFetch?: Promise<unknown | null>;
+  /**
+   * The tool result came back `is_error` (a denied permission, a failed MCP call,
+   * an unknown tool). Set by the claude-cli `StreamParser`; absent elsewhere. The
+   * email watcher's Gmail liveness predicate counts such a call as not reached.
+   */
+  isError?: boolean;
 }
 
 export interface ClaudeResult {
