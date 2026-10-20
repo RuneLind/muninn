@@ -151,11 +151,11 @@ describe("where a term is never marked", () => {
     ["showing", "a CaseBoard's row cap", '<CaseBoard src="big.yaml" />', "cb-truncated"],
     ["without", "a CaseBoard with no src", "<CaseBoard />", "cb-unavailable"],
     ["value", "a DeltaTable's warning", '<DeltaTable better="sideways">\n\n| Run | a | b |\n|---|---|---|\n| T | 1 | 2 |\n\n</DeltaTable>', "dt-warning"],
-    ["loaded", "a DeltaTable's file note", '<DeltaTable src="r.csv" />', "dt-unavailable"],
-    ["loaded", "a Query's SQL file note", '<Query id="Q-1" sql="q.sql" />', "query-unavailable"],
+    ["available", "a DeltaTable's file note", '<DeltaTable src="r.csv" />', "dt-unavailable"],
+    ["available", "a Query's SQL file note", '<Query id="Q-1" sql="q.sql" />', "query-unavailable"],
     ["Open", "a Question card's state", '<Question id="O1">\n\nWhich desk?\n\n</Question>', "q-state"],
     ["Team", "a Question card's for line", '<Question id="O1" to="Desk Team">\n\nWhich desk?\n\n</Question>', "q-for"],
-    ["used", "a Question card's duplicate note", '<Question id="O1">\n\nWhich desk?\n\n</Question>\n\n<Question id="O1">\n\nWhich shelf?\n\n</Question>', "q-note q-duplicate"],
+    ["Another", "a Question card's duplicate note", '<Question id="O1">\n\nWhich desk?\n\n</Question>\n\n<Question id="O1">\n\nWhich shelf?\n\n</Question>', "q-note q-duplicate"],
   ])("%s in %s", (term, _name, md, cls) => {
     const html = renderWikiHtml(md + "\n" + glossary(`- **${term}:** a word the renderer writes`), () => undefined, { views: true, files: caseFiles, question });
     expect(html).toContain(`class="${cls}"`);
