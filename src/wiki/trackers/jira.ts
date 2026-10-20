@@ -11,7 +11,8 @@
 
 import { JIRA_KEY_SHAPE, normalizeJiraKey } from "../provenance.ts";
 import { extractJiraKeys } from "../../jira/key-scan.ts";
-import { maskFencedCode, maskInlineCode } from "../../jira/markdown-scan.ts";
+import { maskFencedCode } from "../../jira/markdown-scan.ts";
+import { lineCodeSpanRanges } from "../../format/code-spans.ts";
 import { JIRA_TRACKER_ID } from "./jira-id.ts";
 import { loadIssueFields } from "./jira-lookup.ts";
 import {
@@ -244,7 +245,27 @@ const blank = (s: string) => s.replace(/[^\n]/g, " ");
 /** Fenced code, inline code and HTML comments blanked — the text every body
  *  rule reads. A key there is an example or a note to self, not a reference. */
 function maskBody(body: string): string {
-  return maskInlineCode(maskFencedCode(body)).replace(/<!--[\s\S]*?-->/g, blank);
+  return maskCodeSpans(maskFencedCode(body)).replace(/<!--[\s\S]*?-->/g, blank);
+}
+
+/** Inline code blanked by the reader's own pairing (`lineCodeSpanRanges`), per
+ *  line and same-length, so a key the reader renders as code is never a mention
+ *  and `linkHits`' offsets still line up. */
+function maskCodeSpans(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const ranges = lineCodeSpanRanges(line);
+      if (ranges.length === 0) return line;
+      let out = "";
+      let cursor = 0;
+      for (const r of ranges) {
+        out += line.slice(cursor, r.start) + " ".repeat(r.end - r.start);
+        cursor = r.end;
+      }
+      return out + line.slice(cursor);
+    })
+    .join("\n");
 }
 
 function linkHits(maskedBody: string, config: TrackerConfig): LinkHit[] {

@@ -191,6 +191,16 @@ describe("mention", () => {
     ].join("\n");
     expect(rels(inferJiraIssues(page({ body }), CONFIG))).toEqual({ "DEMO-130": ["mention"] });
   });
+
+  // arch-review 2026-10 #35: the reader's pairing (`lineCodeSpanRanges`), not the composer's.
+  test("code is what the reader renders as code: an odd run count, a backtick in a double span", () => {
+    const body = [
+      "Run `DEMO-140` here, and a lone ` tick.",
+      "Literal `` a`DEMO-141 `` in a double span.",
+      "After `x` the key DEMO-142 is prose.",
+    ].join("\n");
+    expect(rels(inferJiraIssues(page({ body }), CONFIG))).toEqual({ "DEMO-142": ["mention"] });
+  });
 });
 
 describe("ordering", () => {
