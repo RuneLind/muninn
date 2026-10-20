@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { check, flatten, parseExpectedSkips, partition, pinTitle, specFiles, timingsFromReport, type JsonReport } from "./e2e-shards.ts";
+import { check, flatten, parseExpectedSkips, partition, pinTitle, specFiles, timingsFromReport, untimedSpecWarnings, type JsonReport } from "./e2e-shards.ts";
 
 describe("partition", () => {
   test("every file lands in exactly one shard", () => {
@@ -67,6 +67,18 @@ function report(...specs: ReturnType<typeof spec>[]): JsonReport {
 
 const pass = [{ status: "passed", duration: 1500 }];
 const skip = [{ status: "skipped", duration: 0 }];
+
+describe("untimedSpecWarnings", () => {
+  test("warns once per spec with no table entry, and only for those", () => {
+    const warnings = untimedSpecWarnings(["a.spec.ts", "new.spec.ts", "b.spec.ts"], { "a.spec.ts": 5, "b.spec.ts": 0 });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toStartWith("::warning::new.spec.ts ");
+  });
+
+  test("a complete table warns about nothing", () => {
+    expect(untimedSpecWarnings(["a.spec.ts"], { "a.spec.ts": 5 })).toEqual([]);
+  });
+});
 
 describe("flatten", () => {
   test("titles carry the file and the describe chain, not the file suite twice", () => {

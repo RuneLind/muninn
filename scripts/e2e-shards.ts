@@ -48,6 +48,18 @@ export function partition(files: string[], timings: Timings, total: number): str
   return shards.map((s) => s.files.sort());
 }
 
+/**
+ * One `::warning::` line per spec the table has no entry for. A missing entry
+ * costs balance, never coverage, so this warns and never fails the plan: the
+ * three work-thread specs ran at 54, 97 and 17 s while `partition` charged
+ * each the median, and nothing said the table was stale.
+ */
+export function untimedSpecWarnings(files: string[], timings: Timings): string[] {
+  return files
+    .filter((f) => typeof timings[f] !== "number")
+    .map((f) => `::warning::${f} has no entry in e2e/shard-timings.json, so the plan charges it the median; run \`bun scripts/e2e-shards.ts refresh e2e-results.json\` from a green run's e2e-report artifact`);
+}
+
 function median(xs: number[]): number | undefined {
   if (xs.length === 0) return undefined;
   const s = [...xs].sort((a, b) => a - b);
@@ -258,7 +270,9 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === "plan" && rest.length === 3) {
     const [i, n, out] = [Number(rest[0]), Number(rest[1]), rest[2]!];
     const timings = await readTimings();
-    const shards = partition(await specFiles(), timings, n);
+    const files = await specFiles();
+    for (const w of untimedSpecWarnings(files, timings)) console.log(w);
+    const shards = partition(files, timings, n);
     const mine = shards[i - 1];
     if (!mine) throw new Error(`shard ${rest[0]} is outside 1..${n}`);
     await Bun.write(out, mine.join("\n") + "\n");
