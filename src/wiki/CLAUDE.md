@@ -485,7 +485,10 @@ A META-stemmed `.html` beside its own meta markdown page (`index.html` +
 `index.md`) is dropped one layer ABOVE the pairing pass and never reaches it, so
 rule 3 cannot pair it however many pages embed it — unchanged from before
 attachments existed, and `/api/wiki/html` still serves the dropped file by path,
-so the embed on the page renders.
+so the embed on the page renders. That by-path fallback serves only what the
+index could have listed: a dot segment or `node_modules` in the requested path,
+or in the real path after symlinks (`hasExcludedSegment`), answers the
+not-found 404.
 
 The child keeps its own row identity — its own `relPath`, page route, pin,
 Activity glyph and backlinks. `parent`/`pairedBy` ride `/api/wiki/pages` (they
@@ -1555,7 +1558,12 @@ the light values of `--status-cyan`/`--status-warning` measure under AA at
 fallback is a sweep-only page's creation date, plus a `changed <day>, no session
 write recorded` line on a changed-since row — all from the pure `workedChip`), because the axis is sparse by
 construction and a bare day would claim a worked date an uncovered page never
-got. The suffix goes on the `title=` ONLY: `formatRailAge` reads the label as a
+got. A STALE ledger says so instead: when the page's update is newer than the
+ledger's answer (`workedCoverage.asOfMs`) minus `WORKED_INGEST_SLACK_MS`
+(`ledgerReadDayFor`, `wiki-filter.ts`), "no session write recorded" becomes
+`ledger last read <day>` on the row's hover, an Activity fallback row and the
+article header's `no session` slot, since that answer could not have seen the
+edit — the memo is held through a claude-usage outage. The suffix goes on the `title=` ONLY: `formatRailAge` reads the label as a
 BARE day and would fall back to the stamp's local day for a decorated one,
 shifting a frontmatter date west of UTC.
 
@@ -2120,7 +2128,9 @@ response), `plans/index.md` 246, `log.md` 189, and `flows/how-we-build.mdx` — 
 as a candidate at 27 backlinks — 36. Symmetric, the largest block was **33**
 rows (`overview.md`) on the 547-page clone, 2026-09-20 — a past measurement of
 the link graph's own bound; live mimir on 2026-10-04 (585 pages) gave 58
-(`archive/mimir/2026-09-27-plan-backlog-triage.mdx`). There is no `RELATED_MAX` cap,
+(`archive/mimir/2026-09-27-plan-backlog-triage.mdx`) — a page the outlink hub
+cut below now removes; with it, live mimir (617 pages, 2026-10-20) tops out at
+24 rows and the memory wiki at 25 (189 before). There is no `RELATED_MAX` cap,
 because a cap drops rows from a page that really does have that many
 neighbours. A FOURTH cut arrived with the session signal: a session stamped on
 more than `STRENGTH_SESSION_DIGEST` (12) pages is a sweep and pairs nothing (see
@@ -2132,6 +2142,14 @@ after the provenance backfill.
   dropped, from EVERY source. A page cited by the whole wiki is not related work
   because this page cites it too. Measured on mimir, exactly two pages exceed it:
   `flows/how-we-build.mdx` (27) and `projects/muninn/dashboard.md` (26).
+  The cut is symmetric in DEGREE too: a page linking to more than
+  `RELATED_HUB_OUTLINKS` (25) pages is a hub, since an index-shaped page (a
+  memory wiki's `MEMORY.md`) cites every page it lists and otherwise leads all
+  their blocks. Measured 2026-10-20: mimir (617 pages) has a gap from 18 to 26
+  outlinks and two pages over 25 the backlink cut missed (the backlog-triage
+  archive at 59, `overview.md` at 35); the memory wiki's three largest
+  `MEMORY.md` link 189, 66 and 48 pages. Lint check 8 keeps the backlink cut
+  alone.
 - **Digests**: a page naming more than `RELATED_DIGEST_PRS` (15) refs is cut from
   the PR-sharing source — it names half the month by construction. It still
   appears through a real link, with the link as its reason. The cut is applied to
@@ -2325,7 +2343,9 @@ A pair is a neighbour iff a signal counts, so every neighbour scores ≥ 1.0;
 `related-constants.ts`. Cuts and their sides: bookkeeping and hub on both ends
 (an open page that is either gets nothing), the PR digest on both ends of the
 PR signal, the session digest on the session (counted over every index page
-stamping it), culled and the open page's own attachments on the candidate only.
+stamping it), culled and the open page's own attachments on the candidate only;
+a hub is either test, more than 25 backlinks or more than
+`RELATED_HUB_OUTLINKS` (25) outlinks.
 Sessions are keyed on the bare id (`claude-code:<id>` and `<id>` pair),
 deduplicated per page and shape-checked — the helpers live in the leaf
 `session-refs.ts`, which imports only `provenance.ts`, so nothing browser-side
@@ -2583,7 +2603,10 @@ already shown locally (wiki label, reason chips `text #n`, `huginn #n`,
 head), and gives a LOCAL row the same chips in place. "This wiki" is the
 REGISTRY name the page injects as `__WIKI_FIND_SELF__` (`findSelfWikiName`):
 under the `WIKI_DIR` override the page's own wiki name is "", while its root
-may still be a registered wiki whose rows must dedupe and open in place. The
+may still be a registered wiki whose rows must dedupe and open in place. It
+resolves by ROOT first, so on aliased roots (`a=/w,b=/w`) `?wiki=b` names `a`,
+the name the route's rows carry; without a served root it falls back to the
+requested entry's name. The
 degrade line names every failed, unconfigured or skipped leg with its label
 (a too-short query is not news), every skipped or stale index and a cut
 query. The section paints alone — the local rows are never re-rendered when
@@ -2736,7 +2759,10 @@ created inside `resolveProvenance` and never returned, which leaves a leg added
 beside it either unbounded or armed with a second timer — and awaiting that
 function before starting the new leg would make the page open sequential. The
 conditional creation is unchanged: a page with nothing to ask still arms no
-timer.
+timer. `GET /api/wiki/page/provenance` passes its request signal in, combined
+with the deadline (`AbortSignal.any`), so a reader who navigated away aborts
+the fan-out (the Stamp route's inline call passes none). Only the DEADLINE
+reads as `links.timedOut`.
 
 The other four legs are PR 3's, and they all live in `pageProvenance` for the
 merges leg's reason:
@@ -2972,7 +2998,10 @@ adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
 - **Relations**, strongest first: `stamped` (the adapter's `frontmatterKey`
   line: an entry that is itself exactly key-shaped is kept whatever its case,
   any other entry is prose and goes through `extractJiraKeys` — uppercase only,
-  denylisted; NOT project-bounded), `declared` (the configured
+  denylisted; NOT project-bounded — but a key the adapter's `parseKey` refuses,
+  `X-1` or `DEMO-0145`, stays on the page's `jira` list and its strip and is
+  never an issue ref, since the graph and the Stamp route could not take it
+  back), `declared` (the configured
   `frontmatterKeys`, project-bounded), `created` ("created here": a `link` after
   a `createdMarkers` word in the same clause), `title` (the authored `title:`
   line only, never the stem fallback; UPPERCASE keys only, so a bot name like
@@ -2992,15 +3021,19 @@ adapter file says tracker / issue / issue ref (`{tracker, key, relations}`);
   a second layer in the scan path; `stampedKeys` requires an exact entry to be ASCII key-shaped BEFORE
   it upper-cases it, since `toUpperCase` maps `ſ` to S and `ı` to I). A chained
   number — a title shorthand or the stem's second key — must have the base
-  number's digit count, no leading zero and end cleanly, and a title shorthand
-  must also sit within 1000 of the base (`DEMO-145/2026 rapport`,
-  `DEMO-8045/2026`, `DEMO-8045 + 2025-kjøringen` each yield the base key
-  alone, while `DEMO-7588/7969 Nullable sats` yields both). Accepted residual:
+  number's digit count, no leading zero and end cleanly, and must sit within
+  1000 of the base, in the title and the stem alike (`DEMO-145/2026 rapport`,
+  `DEMO-8045/2026`, `DEMO-8045 + 2025-kjøringen` and the stem
+  `demo-8045-2026-notes` each yield the base key alone, while
+  `DEMO-7588/7969 Nullable sats` yields both). Accepted residual:
   a same-width count within 1000 still chains (`DEMO-145 + 300 saker` mints
   `DEMO-300`). At most five expansions per base key. The `link` rule carries
   the same right edge (`browse/DEMO-12-3` and `browse/DEMO-77abc` are no link).
 - **Masks.** Every body rule reads the body with fenced code, inline code and
-  HTML comments blanked, same length; `mention` additionally blanks URLs,
+  HTML comments blanked, same length; inline code is paired by the reader's
+  own rule (`lineCodeSpanRanges`, `src/format/code-spans.ts`), so a key the
+  reader renders as code is never a mention, and one it renders as prose is
+  read. `mention` additionally blanks URLs,
   markdown link destinations and wikilink targets.
 - **A clause** ends at a newline, `·`, `;`, a period followed by whitespace or
   the line's end, and — on a table row only — a `|` outside `[...]`/`[[...]]`,
@@ -3107,6 +3140,9 @@ and counts the rest in its footer as `+N issues not drawn`).
   info, a success re-arms the warn). The key is `jiraKeyFromDocId`'s (`src/jira/retrieval.ts`), so the
   strip, Connections and the Jira composer agree on which keys huginn holds
   (measured 2026-09-25: all 2,386 live ids yield the same key both ways). A
+  listing whose ids all fail to parse is a FAILED read here and in
+  `loadJiraKeyIndex`, never "huginn holds none of these keys": it is the empty
+  listing in another form (a renamed doc-id spelling). A
   stamp with an out-of-range component (`2026-13-01`, `+9999`) is unparseable,
   never rolled over. Twin documents: the newest
   PARSED `updated` wins (offsets `+0100`/`+02:00`, a stray `\:` unescaped), an
@@ -3126,7 +3162,12 @@ and counts the rest in its footer as `+N issues not drawn`).
   tracked") renders "not tracked" and is never asked. The lookup and the ledger
   start together, so a slow huginn cannot spend the deadline claude-usage was
   never asked in. The key's project and the answer's shape are the adapter's
-  (`projectOf`, `parseLedger`). Every other unpriced row says why (`cap`,
+  (`projectOf`, `parseLedger`). `parseLedger` checks a row by the board's
+  many-key rules (`ledgerCost`: a cost rounded to cents, finite and not
+  negative; costed sessions a count no larger than the sessions), so one key
+  never prices "$0.00" here and "—" on the board; a row that fails reads
+  `unreachable`, and a priced key with no costed session says "no costed
+  session", never "$0.00". Every other unpriced row says why (`cap`,
   `deadline`, `unreachable`, `not-configured`, `demoted`).
 - **Layout.** Counting keys are rows (dashed unless stamped; the strongest
   relation shown, all of them on hover). Link-only keys go on an "also linked"
@@ -3174,7 +3215,8 @@ no `trackers` block has no toggle, `g` does nothing there, and the route answers
   answers `{scope, root, depth, level, lanes, nodes, edges, truncated?,
   truncatedBy?, ledger}` (`graph-types.ts`, dependency-free, shared
   with the client). `root` is a relPath (`page`), `tracker:KEY` (`issue`), a
-  series key (`series`), and ignored at `wiki` scope, whose roots are every
+  series key (`series`, matched by the rail's `seriesCensusKey` — trim and
+  lower-case — and echoed in that folded form), and ignored at `wiki` scope, whose roots are every
   key with a counting page. 400 names the bad parameter — including an issue
   root that is not `tracker:KEY` shaped (`parseIssueRoot`: a lowercase tracker
   id, one colon, a key with no colon or whitespace) or that the tracker cannot
