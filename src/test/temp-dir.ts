@@ -28,8 +28,33 @@ export async function testTempDir(prefix: string): Promise<string> {
   return dir;
 }
 
-/** Removes every dir the helpers created. The preload's `afterAll` calls it. */
+/** The dirs recorded and not yet removed, in creation order. */
+export function recordedTestTempDirs(): string[] {
+  return [...created];
+}
+
+/**
+ * Removes every dir the helpers created. The preload's `afterAll` calls it.
+ *
+ * Each dir is removed on its own, so one that fails (EACCES, or ENOTEMPTY/EBUSY
+ * from a child still writing past the retries) does not keep the rest. A failed
+ * dir stays recorded, and the call then throws once naming every failure: from
+ * the preload that fails the run, because a dir left behind is the leak this
+ * helper exists to stop.
+ */
 export function removeTestTempDirs(): void {
-  for (const dir of created) rmSync(dir, { recursive: true, force: true });
-  created.clear();
+  const failures: Error[] = [];
+  for (const dir of [...created]) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      created.delete(dir);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failures.push(new Error(`${dir}: ${reason}`, { cause: err }));
+    }
+  }
+  if (failures.length > 0) {
+    const lines = failures.map((e) => `  ${e.message}`).join("\n");
+    throw new AggregateError(failures, `could not remove ${failures.length} test temp dir(s):\n${lines}`);
+  }
 }
