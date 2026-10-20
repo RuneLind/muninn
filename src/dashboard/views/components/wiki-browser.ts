@@ -9328,6 +9328,8 @@ function maybeRefetchPages(refresh: boolean): void {
   if (document.hidden) return;
   if (!shouldRefetch(pagesRefresh, Date.now())) return;
   requestPages({ refresh });
+  // The felles status rides the same triggers and throttle (finding 67).
+  fellesSync?.refresh();
 }
 
 // Another tab pinned, unpinned or cleared storage (D7): adopt what storage now

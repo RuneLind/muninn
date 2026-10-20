@@ -255,6 +255,20 @@ describe("the sync status", () => {
       for (const code of [2, 3, 9]) expect(fellesSyncRunOutcome(code, false, after(0, 1)).ok).toBe(false);
       expect(fellesSyncRunOutcome(0, false, after(0, 1))).toEqual(fellesSyncOutcomeLine(0, false));
     });
+
+    // Finding 79: a failed real run claims pages were published only when the
+    // status after it shows fewer changed pages than the run started from.
+    test("a failed real run says pages went up only when changed dropped", () => {
+      expect(fellesSyncOutcomeLine(1, false).text).not.toContain("published");
+      expect(fellesSyncRunOutcome(1, false, after(2, 1), after(2, 1))).toEqual(fellesSyncOutcomeLine(1, false));
+      expect(fellesSyncRunOutcome(1, false, after(1, 1), null)).toEqual(fellesSyncOutcomeLine(1, false));
+      expect(fellesSyncRunOutcome(1, false, after(1, 1), after(3, 1))).toEqual({
+        text: "A page is refused by the scanner, or the script failed. 2 changed page(s) were published. See the output.",
+        ok: false,
+      });
+      // A dry run uploads nothing, so a drop there is no claim either.
+      expect(fellesSyncRunOutcome(1, true, after(1, 0), after(3, 0))).toEqual(fellesSyncOutcomeLine(1, true));
+    });
   });
 
   test("only a real run the route refused before spawning skips the status refresh", () => {

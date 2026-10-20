@@ -559,7 +559,7 @@ export function fellesSyncOutcomeLine(exitCode: number, dryRun: boolean): { text
     case 1:
       return dryRun
         ? { text: "Dry run: a page is refused by the scanner, or the script failed. Nothing was uploaded. See the output.", ok: false }
-        : { text: "A page is refused by the scanner, or the script failed. The other changed pages were published. See the output.", ok: false };
+        : { text: "A page is refused by the scanner, or the script failed. See the output.", ok: false };
     case 2:
       return { text: "Usage or environment error — nothing was uploaded. See the output.", ok: false };
     case 3:
@@ -575,11 +575,16 @@ export function fellesSyncOutcomeLine(exitCode: number, dryRun: boolean): { text
  *  sync read as a failure. It is not one when the status after it shows
  *  nothing left to publish (for a dry run: nothing would be left) and at least
  *  one refused page — the refusal is the 1. Anything else keeps the
- *  exit-code line, red. */
+ *  exit-code line, red. `after` must be read AFTER the run, a dry run
+ *  included: the status the dialog opened with can be minutes old, and a
+ *  refused page in it says nothing about why this run exited 1 (architecture
+ *  review 2026-10, finding 79). `before` is the view the run started from; a
+ *  failed real run says pages were published only when `changed` dropped. */
 export function fellesSyncRunOutcome(
   exitCode: number,
   dryRun: boolean,
   after: FellesSyncStatus | null,
+  before: FellesSyncStatus | null = null,
 ): { text: string; ok: boolean } {
   if (exitCode === 1 && after) {
     const refused = after.pages.filter((p) => p.state === "refused").length;
@@ -592,6 +597,12 @@ export function fellesSyncRunOutcome(
             ok: true,
           }
         : { text: `All changed pages were published. ${refused} refused page(s) were not — see Refused.`, ok: true };
+    }
+    if (!dryRun && before && after.changed < before.changed) {
+      return {
+        text: `A page is refused by the scanner, or the script failed. ${before.changed - after.changed} changed page(s) were published. See the output.`,
+        ok: false,
+      };
     }
   }
   return fellesSyncOutcomeLine(exitCode, dryRun);
@@ -613,6 +624,11 @@ export interface FellesSync {
    *  could have changed the bucket has just ended, so this call starts its own
    *  request and no answer to an older one is applied after it. */
   load(opts?: { afterRun?: boolean }): Promise<StatusResult>;
+  /** Read the status again on the reader's own refetch triggers (focus,
+   *  visibility, heartbeat), without the chip's "checking…" flash. A no-op
+   *  while a sync dialog run is in flight: that run reloads the status itself
+   *  when it ends, in a newer generation. */
+  refresh(): void;
   /** What the last good status says about this page. Null until one arrived. */
   markFor(relPath: string): FellesMark;
 }
@@ -643,6 +659,8 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
   // returned to its caller but never painted.
   let generation = 0;
   let inflight: { gen: number; promise: Promise<StatusResult> } | null = null;
+  // True while a sync dialog run is in flight; `refresh()` stands down then.
+  let runInFlight = false;
 
   const slot = document.getElementById(FELLES_SYNC_SLOT_ID);
   // The chip is updated IN PLACE, never re-created, so keyboard focus survives
@@ -662,11 +680,12 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     slot.hidden = false;
   };
 
-  function load(o: { afterRun?: boolean } = {}): Promise<StatusResult> {
+  function load(o: { afterRun?: boolean; quiet?: boolean } = {}): Promise<StatusResult> {
     if (o.afterRun) generation++;
     if (inflight && inflight.gen === generation) return inflight.promise;
     const gen = generation;
-    paint({ kind: "loading" });
+    // A background refresh keeps the chip's last answer on screen meanwhile.
+    if (!(o.quiet && status)) paint({ kind: "loading" });
     const promise: Promise<StatusResult> = requestStatus(opts.wiki, true).then((r) => {
       if (inflight?.promise === promise) inflight = null;
       if (gen !== generation) return r;
@@ -689,10 +708,12 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     if (!btn) return;
     const state = btn.getAttribute("data-state");
     if (state === "error") void load();
-    else if (state === "ok" && status) openDialog(status);
+    else if (state === "ok" && status) openDialog(status, true);
   });
 
-  function openDialog(initial: FellesSyncStatus): void {
+  /** `fresh`: read the dialog's view again once it is open, so it never sits
+   *  on an answer older than the click (finding 67). */
+  function openDialog(initial: FellesSyncStatus, fresh = false): void {
     document.getElementById(SYNC_DIALOG_ID)?.remove();
     const dialog = document.createElement("dialog");
     dialog.id = SYNC_DIALOG_ID;
@@ -770,6 +791,8 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     async function run(dryRun: boolean): Promise<void> {
       if (running) return;
       running = true;
+      runInFlight = true;
+      const before = viewReady ? view : null;
       // Links are inert mid-run: a click would navigate behind the modal.
       lists.inert = true;
       holdDuringRun.forEach((b) => (b.disabled = true));
@@ -799,12 +822,21 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       } catch (err) {
         setStatus(`Request failed: ${err instanceof Error ? err.message : String(err)}`, "err");
       }
-      const after = fellesRunCouldChangeBucket(dryRun, httpStatus) ? await reloadView(true) : viewReady ? view : null;
+      // A dry run that answered is judged on a status read after it too
+      // (finding 79); it changed nothing, so the chip is left alone.
+      const after = fellesRunCouldChangeBucket(dryRun, httpStatus)
+        ? await reloadView(true)
+        : dryRun && exitCode !== null
+          ? await reloadView(false)
+          : viewReady
+            ? view
+            : null;
       if (exitCode !== null) {
-        const line = fellesSyncRunOutcome(exitCode, dryRun, after);
+        const line = fellesSyncRunOutcome(exitCode, dryRun, after, before);
         setStatus(line.text, line.ok ? "ok" : "err");
       }
       running = false;
+      runInFlight = false;
       lists.inert = false;
       holdDuringRun.forEach((b) => (b.disabled = false));
       syncEnabled();
@@ -829,10 +861,14 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       else if (action === "sync") void run(false);
     });
     dialog.showModal();
+    if (fresh) void reloadView(false);
   }
 
   return {
     load,
+    refresh: () => {
+      if (!runInFlight) void load({ quiet: true });
+    },
     markFor: (relPath) => {
       const state = states.get(fellesStatusKey(relPath));
       return state === "changed" ? "stale" : state === "refused" ? "refused" : null;
