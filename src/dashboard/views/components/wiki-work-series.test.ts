@@ -8,6 +8,9 @@ import { checkNewSeriesKey, recheckSaveAsSeries, saveAsSeriesPlan } from "./wiki
 import { buildWorkEvidence } from "../../../wiki/work-evidence.ts";
 import type { WikiPageMeta } from "../../../wiki/store.ts";
 import { loadSeriesBaseMap, openPageChanged, openPageRefusal, runSeriesWrites, writeSeriesUnlessOpenChanged, type SeriesPostAnswer } from "./wiki-series-write.ts";
+// Namespace import for the fix-round-2 batch-2 seams, so each case reports its
+// own failure rather than the whole file failing to link.
+import * as seriesWrite from "./wiki-series-write.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupChild } from "./wiki-work-groups.ts";
 import { coinSeriesKey, isNarrativePage, seriesPageStem } from "../../../wiki/series-rules.ts";
@@ -366,5 +369,69 @@ describe("runSeriesWrites batch marks (finding 75)", () => {
     await runSeriesWrites(writes.slice(0, 1), bases, async (b) => (sent.push(b.batch), ok), { batch: true });
     await runSeriesWrites(writes, bases, async (b) => (sent.push(b.batch), ok));
     expect(sent).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});
+
+// Fix round 2 batch 2, finding 1: the reader's OWN write moved the open page's
+// bytes before its answer moved the load-time hash, so a menu opened in that
+// window blamed the reader for the change. A base read now waits for every
+// sequence in flight when it starts, and snapshots the open page after them.
+describe("readSeriesBasesAfterWrites: the reader's own writes settle before a base read", () => {
+  test("a read started while a write is in flight sees the hash that write's answer adopted", async () => {
+    let disk = "h0";
+    let loaded = "h0";
+    let answer!: () => void;
+    const answered = new Promise<void>((r) => (answer = r));
+    // The POST lands on disk at once; its answer, which moves the reader's
+    // load-time hash, arrives later.
+    const write = seriesWrite.trackSeriesWrite(async () => {
+      disk = "h1";
+      await answered;
+      loaded = "h1";
+    });
+    const read = seriesWrite.readSeriesBasesAfterWrites(["plans/open.md"], async () => disk, () => ({ relPath: "plans/open.md", loadedHash: loaded }));
+    answer();
+    await write;
+    const out = await read;
+    expect(out.open.loadedHash).toBe("h1");
+    expect(out.bases.get("plans/open.md")).toBe("h1");
+    expect(openPageChanged(out.open, out.bases)).toBeNull();
+  });
+
+  test("a sequence that failed still releases the read, and its caller still sees the failure", async () => {
+    const write = seriesWrite.trackSeriesWrite(async () => {
+      throw new Error("refused");
+    });
+    const read = seriesWrite.readSeriesBasesAfterWrites(["plans/a.md"], async () => "a1", () => ({ relPath: null, loadedHash: null }));
+    await expect(write).rejects.toThrow("refused");
+    expect((await read).bases.get("plans/a.md")).toBe("a1");
+  });
+
+  test("a read does not wait for a sequence that started after it, so a sequence may await its own earlier read", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const read = seriesWrite.readSeriesBasesAfterWrites(["plans/a.md"], async () => (await gate, "a1"), () => ({ relPath: null, loadedHash: null }));
+    const write = seriesWrite.trackSeriesWrite(async () => (await read).bases.get("plans/a.md"));
+    release();
+    const settled = await Promise.race([write, new Promise((r) => setTimeout(() => r("deadlock"), 500))]);
+    expect(settled).toBe("a1");
+  });
+});
+
+// Fix round 2 batch 2, finding 2: a 409 told the reader to close and reopen
+// the menu even when the page was the OPEN one — whose reopen then refused
+// with "reload it". The step now follows the page.
+describe("seriesConflictCopy: a 409 names the step that clears it", () => {
+  test("the open page: reload, since a reopen compares it with the hash it loaded with", () => {
+    const c = seriesWrite.seriesConflictCopy("plans/open.md", "Plans/Open.md");
+    expect(c.note).toBe("plans/open.md changed since this menu opened — reload it");
+    expect(c.again).toBe("Reload the page — it has changed");
+  });
+  test("any other page, or no page open: close and reopen, which reads its base fresh", () => {
+    for (const open of ["plans/elsewhere.md", null]) {
+      const c = seriesWrite.seriesConflictCopy("plans/a.md", open);
+      expect(c.note).toBe("plans/a.md changed since this menu opened — close and reopen it");
+      expect(c.again).toBe("Close and reopen this menu — the page has changed");
+    }
   });
 });

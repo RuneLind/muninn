@@ -151,3 +151,49 @@ export async function writeSeriesUnlessOpenChanged(input: {
   if (refusal) return { refusal };
   return { refusal: null, run: await runSeriesWrites(input.writes, input.bases, input.post, { batch: input.batch }) };
 }
+
+/** What a 409 on `failedRel` says, and what the next click on the same menu
+ *  says (`again`). The step follows the page: the OPEN page is compared at
+ *  every menu open with the hash it loaded with, so reopening the menu alone
+ *  refuses it again ({@link openPageRefusal}) and reloading is the step; any
+ *  other page's base is read fresh at the next open, so reopening is. */
+export function seriesConflictCopy(failedRel: string, openRel: string | null): { note: string; again: string } {
+  return openRel && normalizeRel(openRel) === normalizeRel(failedRel)
+    ? { note: `${failedRel} changed since this menu opened — reload it`, again: "Reload the page — it has changed" }
+    : { note: `${failedRel} changed since this menu opened — close and reopen it`, again: "Close and reopen this menu — the page has changed" };
+}
+
+/** The series write sequences in flight, each as a promise that settles (never
+ *  rejects) once the caller's sequence has finished. */
+const writesInFlight = new Set<Promise<void>>();
+
+/** Run `fn` — one caller's write sequence, from the click until its answers
+ *  have moved the reader's load-time hash — as a sequence every base read
+ *  started meanwhile waits for ({@link readSeriesBasesAfterWrites}). Returns
+ *  `fn`'s own result or rejection. */
+export function trackSeriesWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const run = fn();
+  const settled: Promise<void> = run.then(
+    () => { writesInFlight.delete(settled); },
+    () => { writesInFlight.delete(settled); },
+  );
+  writesInFlight.add(settled);
+  return run;
+}
+
+/** Read the bases both series writers send, and the open-page snapshot they
+ *  compare with, AFTER every write sequence in flight when the read starts
+ *  (fix round 2, finding 1): the reader's own write moves the open page's bytes
+ *  before its answer moves the load-time hash, so a snapshot taken in between
+ *  blames the reader for their own change. A sequence that starts later is not
+ *  waited for, so a sequence may await a read it started before. */
+export async function readSeriesBasesAfterWrites(
+  relPaths: readonly string[],
+  hashOf: (relPath: string) => Promise<string | null>,
+  openNow: () => OpenPageAtLoad,
+): Promise<{ bases: Map<string, string>; missing: string[]; open: OpenPageAtLoad }> {
+  await Promise.all([...writesInFlight]);
+  const open = openNow();
+  const { bases, missing } = await loadSeriesBaseMap(relPaths, hashOf);
+  return { bases, missing, open };
+}

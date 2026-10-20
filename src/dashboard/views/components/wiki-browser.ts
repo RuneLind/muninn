@@ -168,7 +168,7 @@ import {
 } from "./wiki-groups.ts";
 import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
-import { loadSeriesBaseMap, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { readSeriesBasesAfterWrites, seriesConflictCopy, trackSeriesWrite, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -3788,9 +3788,9 @@ interface SeriesMenuState {
   /** Resolves when every base above has been read (or failed). A click that
    *  beats the fetches waits for it instead of racing them. */
   basesReady: Promise<void>;
-  /** The open page as loaded when this menu opened: a write to it is refused
-   *  before any write when its base read at open differs
-   *  (`writeSeriesUnlessOpenChanged`). */
+  /** The open page as loaded, taken with the bases once the reader's own
+   *  writes in flight have settled: a write to it is refused before any write
+   *  when its base read at open differs (`writeSeriesUnlessOpenChanged`). */
   open: OpenPageAtLoad;
   /** Set when the held bases no longer describe the files on disk — a write
    *  came back 409, or one of this menu's own writes landed and the popover
@@ -3798,6 +3798,9 @@ interface SeriesMenuState {
    *  them, and the reader is told to reopen rather than shown a 409 about a
    *  change they made themselves. */
   staleBases: boolean;
+  /** What the next click says while `staleBases` holds: reload after a 409 on
+   *  the open page, close and reopen otherwise (`seriesConflictCopy`). */
+  staleNote: string;
 }
 
 let seriesMenu: SeriesMenuState | null = null;
@@ -3933,6 +3936,7 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
     basesReady: Promise.resolve(),
     open: openPageAtLoad(),
     staleBases: false,
+    staleNote: "Close and reopen this menu — the page has changed",
   };
   state.basesReady = loadSeriesBases(state);
   seriesMenu = state;
@@ -3951,6 +3955,14 @@ function openPageAtLoad(): OpenPageAtLoad {
   return { relPath: currentRelPath, loadedHash: currentPageHash };
 }
 
+/** The open page keeps a CURRENT hash rather than a stale one when the
+ *  reader's own series write moved it: the answer says where to. */
+function adoptOwnSeriesHashes(hashes: ReadonlyMap<string, string>): void {
+  for (const [rel, hash] of hashes) {
+    if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
+  }
+}
+
 /**
  * Every page this menu's verbs can write, as the CAS bases they will be sent
  * with.
@@ -3965,7 +3977,9 @@ function openPageAtLoad(): OpenPageAtLoad {
  * The open page's base is read FRESH too, by Save as series' rule (arch
  * review 2026-10, finding 66): its load-time hash made every reopen after a
  * 409 send the same stale base. `writeSeriesUnlessOpenChanged` compares it
- * with `state.open` and refuses before writing.
+ * with `state.open` and refuses before writing. Both are taken after the
+ * reader's own writes in flight settle (`readSeriesBasesAfterWrites`), or a
+ * menu opened during one blames the reader for their own change.
  */
 function loadSeriesBases(state: SeriesMenuState): Promise<void> {
   const { model, edit } = state;
@@ -3974,7 +3988,8 @@ function loadSeriesBases(state: SeriesMenuState): Promise<void> {
     if (model.headRel) targets.add(model.headRel);
     for (const m of model.members) targets.add(m.relPath);
   }
-  return loadSeriesBaseMap([...targets], seriesBaseHash).then(({ bases }) => {
+  return readSeriesBasesAfterWrites([...targets], seriesBaseHash, openPageAtLoad).then(({ bases, open }) => {
+    state.open = open;
     for (const [rel, hash] of bases) state.bases.set(rel, hash);
   });
 }
@@ -4057,33 +4072,38 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
   const state = seriesMenu;
   if (!state || state.busy) return;
   if (state.staleBases) {
-    setSeriesMenuNote(state, "Close and reopen this menu — the page has changed", true);
+    setSeriesMenuNote(state, state.staleNote, true);
     return;
   }
   state.busy = true;
   setSeriesMenuNote(state, "Saving…", false);
   try {
-    await state.basesReady;
-    // The refusal and the loop are `wiki-series-write.ts`'s, shared with the
-    // Work threads' Save as series.
-    const { refusal, run } = await writeSeriesUnlessOpenChanged({ writes, bases: state.bases, open: state.open, post: postSeriesWrite });
+    // Tracked from the click until the open page's hash has adopted the
+    // answers, so a menu opened meanwhile reads its bases after it.
+    const { refusal, run } = await trackSeriesWrite(async () => {
+      await state.basesReady;
+      // The refusal and the loop are `wiki-series-write.ts`'s, shared with
+      // the Work threads' Save as series.
+      const out = await writeSeriesUnlessOpenChanged({ writes, bases: state.bases, open: state.open, post: postSeriesWrite });
+      if (out.refusal === null) adoptOwnSeriesHashes(out.run.hashes);
+      return out;
+    });
     if (refusal !== null) {
       setSeriesMenuNote(state, refusal, true);
       return;
-    }
-    // The page the reader has open keeps a CURRENT hash rather than a stale
-    // one: this write is the reason it moved, and the answer says where to.
-    for (const [rel, hash] of run.hashes) {
-      if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
     }
     if (run.failure) {
       if (run.failure.status === 409) {
         // The base this menu has held since it opened describes a file
         // somebody else has moved on from. Every base it holds is suspect
         // now, so the menu stops writing and says which page it was.
+        // The step follows the page: the open one is compared at every open
+        // with the hash it loaded with, so only a reload clears it.
+        const copy = seriesConflictCopy(run.failure.write.relPath, currentRelPath);
         state.staleBases = true;
+        state.staleNote = copy.again;
         state.bases.clear();
-        setSeriesMenuNote(state, `${run.failure.write.relPath} changed since this menu opened — close and reopen it`, true);
+        setSeriesMenuNote(state, copy.note, true);
       } else {
         setSeriesMenuNote(state, run.failure.error, true);
       }
@@ -5647,8 +5667,7 @@ async function runSaveAsSeries(): Promise<void> {
   try {
     const planned = plan.writes.map((w) => w.relPath);
     setWorkSeriesMsg(state, `Reading ${planned.length} ${planned.length === 1 ? "page" : "pages"}…`, false);
-    const open = openPageAtLoad();
-    const { bases, missing } = await loadSeriesBaseMap(planned, seriesBaseHash);
+    const { bases, missing, open } = await readSeriesBasesAfterWrites(planned, seriesBaseHash, openPageAtLoad);
     const fresh = await freshListing();
     if (!fresh) {
       report = { text: "Could not re-read the wiki listing — nothing written", bad: true, retry: true };
@@ -5672,12 +5691,15 @@ async function runSaveAsSeries(): Promise<void> {
     setWorkSeriesMsg(state, "Saving…", false);
     // The open page changed on disk since the reader loaded it: refused before
     // any write rather than 409 on it mid-sequence (arch review 2026-10, 66).
-    const { refusal, run } = await writeSeriesUnlessOpenChanged({ writes, bases, open, post: postSeriesWrite, batch: true });
+    const { refusal, run } = await trackSeriesWrite(async () => {
+      const out = await writeSeriesUnlessOpenChanged({ writes, bases, open, post: postSeriesWrite, batch: true });
+      if (out.refusal === null) adoptOwnSeriesHashes(out.run.hashes);
+      return out;
+    });
     if (refusal !== null) {
       report = { text: refusal, bad: true };
       return;
     }
-    for (const [rel, hash] of run.hashes) if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
     const outcome = await refreshAfterSeriesWrite();
     const notes: string[] = [];
     if (run.failure) {

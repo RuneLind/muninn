@@ -1248,9 +1248,16 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     (`wiki-series-write.ts`), which makes that refusal and then runs the loop,
     so neither can skip it. Every write
     answers the hash it left behind, so the editor's own writes keep the loaded
-    hash current. A 409 stops the menu writing, names the page and refetches the
-    listing, and the reader reopens with fresh bases — the open page's included,
-    so a reopen after a 409 no longer sends the same stale base.
+    hash current. Both callers read their bases and that snapshot through
+    `readSeriesBasesAfterWrites`, which first waits for every write sequence in
+    flight (`trackSeriesWrite`, from the click until the answers moved the
+    loaded hash): the reader's own write moves the open page's bytes before its
+    answer moves the hash, so a menu opened in between used to refuse with
+    "changed since you opened it" over the reader's own change. A 409 stops the
+    menu writing, names the page and refetches the listing, and its copy names
+    the step (`seriesConflictCopy`): on any other page, close and reopen, which
+    reads that page's base fresh; on the OPEN page, reload it, because a reopen
+    compares the fresh base with the hash the page loaded with and refuses.
   - **A head move is TWO calls**, each CAS'd, and the ORDER is the contract: the
     old head's label is cleared FIRST. A failure between them leaves a series
     with no labelled member, which the fold and the reader header render under
