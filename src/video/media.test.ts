@@ -556,3 +556,34 @@ test("downloadVideo returns the output file, not a stream intermediate a failed 
   expect(r.spawns).toBe(2);
   expect(r.videoPath).toBe(joinPath(r.work, "video.mp4"));
 }, 15_000);
+
+// -- extractKeyframes: the frames dir holds the kept frames and nothing else --
+// It is the summary call's one Read dir, so a dropped frame or a scratch file
+// left in it would widen what the model may read. Real ffmpeg (skips without
+// it): 8 one-second colour cuts give 7+ scene frames, thinned to 2.
+test.skipIf(!Bun.which("ffmpeg"))("extractKeyframes leaves only the kept frames in the frames dir", async () => {
+  const { mkdtempSync, mkdirSync, readdirSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { extractKeyframes } = await import("./media.ts");
+  const work = mkdtempSync(join(tmpdir(), "keyframes-dir-"));
+  try {
+    const colors = ["red", "blue", "green", "yellow", "white", "black", "magenta", "cyan"];
+    const inputs = colors.flatMap((c) => ["-f", "lavfi", "-i", `color=c=${c}:s=160x120:d=1:r=10`]);
+    const concat = `${colors.map((_, i) => `[${i}:v]`).join("")}concat=n=${colors.length}:v=1:a=0[v]`;
+    const video = join(work, "video.mp4");
+    const gen = Bun.spawnSync(["ffmpeg", "-y", ...inputs, "-filter_complex", concat, "-map", "[v]", "-pix_fmt", "yuv420p", video], { stderr: "pipe" });
+    expect(gen.exitCode).toBe(0);
+    const framesDir = join(work, "frames");
+    mkdirSync(framesDir);
+    const kept = await extractKeyframes(video, framesDir, { durationSeconds: 8, maxFrames: 2 });
+    expect(kept).toHaveLength(2);
+    expect(kept.every((f) => f.path.startsWith(framesDir + "/"))).toBe(true);
+    expect(readdirSync(framesDir).sort()).toEqual(kept.map((f) => f.path.slice(framesDir.length + 1)).sort());
+    // The scratch dir is gone, and the video beside the frames dir is untouched.
+    expect(readdirSync(work).sort()).toEqual(["frames", "video.mp4"]);
+    expect(existsSync(video)).toBe(true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}, 60_000);

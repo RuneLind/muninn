@@ -701,7 +701,7 @@ describe("frames on", () => {
   test("the work dir EXISTS by the time the download is handed it", async () => {
     // yt-dlp creates the `-o` directory itself, so this is not load-bearing for
     // the download — it is for everything after: the extractor writes into
-    // `<workDir>/frames` and the model is handed `workDir` as `--add-dir`. The
+    // `<workDir>/frames`, which is the model's one Read dir. The
     // sibling verticals all mkdir first.
     let existed: boolean | null = null as boolean | null;
     atDownload = (workDir) => { existed = existsSync(workDir); };
@@ -709,7 +709,7 @@ describe("frames on", () => {
     expect(existed).toBe(true);
   });
 
-  test("the video file is gone BEFORE the model call, and the work dir is the one Read dir", async () => {
+  test("the video file is gone BEFORE the model call, and the frames dir is the one Read dir", async () => {
     // `boolean | null` rather than an inferred `null`: the whole point is the
     // assignment inside the callback, and a `null`-typed binding makes
     // `toBe(false)` a compile error rather than a check.
@@ -719,9 +719,9 @@ describe("frames on", () => {
     };
     const jobId = await run({ frames: true });
     // It must not sit through a ten-minute turn — and it was never inside the
-    // directory the model is handed as `--add-dir` in the first place.
+    // directory the model may Read in the first place.
     expect(existedAtModelCall).toBe(false);
-    expect(lastToolSurface).toEqual({ read: [workDirFor(jobId)] });
+    expect(lastToolSurface).toEqual({ read: [join(workDirFor(jobId), "frames")] });
     expect(lastExtraDirs).toBeUndefined();
   });
 
@@ -876,7 +876,7 @@ describe("what is WINDOWED is what huginn ANSWERED, not what we asked for", () =
     );
     // Everything else about the capture is unchanged: frames still ran.
     expect(downloadCalls).toHaveLength(1);
-    expect(lastToolSurface).toEqual({ read: [workDirFor(jobId)] });
+    expect(lastToolSurface).toEqual({ read: [join(workDirFor(jobId), "frames")] });
     expect(lastExtraDirs).toBeUndefined();
     expect(getJob(jobId)?.status).toBe("complete");
   });

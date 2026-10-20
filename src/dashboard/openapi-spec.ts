@@ -1250,7 +1250,7 @@ export const spec = {
         tags: ["TikTok"],
         summary: "Capture options this instance offers",
         description:
-          "The summary kinds `POST /api/tiktok/summarize` accepts on this instance, and whether that POST can run at all — one resolution, so a client's picker and the POST's 400 and 503 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot; `GET /api/x-articles/video-options` answers the same shape for the X-video half of the same capture job. `capture.supported` is the POST's own 503 pre-flight asked ahead of time, and `capture.reason` is that response's sentence: the job grants the model read access to its tmp frame dir on EVERY path, so a bot whose connector cannot express that runs no short-video capture, `frames: false` included. `frames.supported` is the same verdict under its older name, kept so an already-installed extension keeps reading the field it knows. Read-only, with the same CORS disposition the POST applies, and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker.",
+          "The summary kinds `POST /api/tiktok/summarize` accepts on this instance, and whether that POST can run with frames on — one resolution, so a client's picker and the POST's 400 and 503 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot; `GET /api/x-articles/video-options` answers the same shape for the X-video half of the same capture job. `capture.supported` is the POST's own 503 pre-flight for the default capture (frames on) asked ahead of time, and `capture.reason` is that response's sentence: a frames-on job lets the model read its frames dir and nothing else, so a bot whose connector cannot express that fenced read, or a claude-cli bot on a CLI older than 2.1.303, cannot run it. A POST with `frames: false` runs with no tools and is never refused by this check. `frames.supported` is the same verdict under its older name, kept so an already-installed extension keeps reading the field it knows. Read-only, with the same CORS disposition the POST applies, and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker.",
         operationId: "getTiktokOptions",
         responses: {
           "200": {
@@ -1344,7 +1344,7 @@ export const spec = {
           "503": {
             ...errorResponse,
             description:
-              "The summarizer bot's connector cannot grant read access outside the bot folder (`--add-dir`), which this capture needs on EVERY path — `frames: false` included, since the job hands the model its tmp work dir either way. `GET /api/tiktok/options` answers the same verdict ahead of time as `capture.supported`, with this response's sentence as `capture.reason`.",
+              "Frames are on (the default) and the summarizer bot cannot run the fenced read of the frames dir: its connector cannot express one, or it is a claude-cli bot on a CLI older than 2.1.303. No job is created. `frames: false` is never refused here. `GET /api/tiktok/options` answers the same verdict ahead of time as `capture.supported`, with this response's sentence as `capture.reason`.",
           },
         },
       },

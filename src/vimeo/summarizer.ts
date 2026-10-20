@@ -149,7 +149,7 @@ export interface VimeoJobMeta {
   readonly lang: CaptureLang;
   /**
    * Slides on: pull one 720p frame per cadence tick through the media seam,
-   * let the model Read them (`toolSurface: { read: [workDir] }`), and let the summary quote them
+   * let the model Read them (`toolSurface: { read: [framesDir] }`), and let the summary quote them
    * inline (v2 PR 4). The route pre-flights the connector's
    * `supportsExtraDirs` and 503s BEFORE a job exists, so a job that gets here
    * with `frames: true` runs on a connector that can read files.
@@ -365,6 +365,9 @@ export async function summarizeVimeo(
   // The frames' work dir — created only when frames are on, removed in the
   // `finally` whatever happened, AFTER the kept frames have been copied out.
   const workDir = join(tmpdir(), `muninn-vimeo-${jobId}`);
+  // The cadence frames and nothing else: the summary call's one Read dir. The
+  // whisper path's audio and transcript files stay beside it in `workDir`.
+  const framesDir = join(workDir, "frames");
   let frames: CaptureFrame[] = [];
   try {
     // 0. Resolve the deps INSIDE the try. `resolveServingProfile` throws on an
@@ -544,13 +547,13 @@ export async function summarizeVimeo(
       } else {
         updateStatus(jobId, "extracting_frames");
         try {
-          await mkdir(workDir, { recursive: true });
+          await mkdir(framesDir, { recursive: true });
           const m = await getManifest(captions.manifestUrl);
           frames = await resolved.extractFrames({
             manifestUrl: captions.manifestUrl,
             manifest: m,
             durationSec: meta.durationSec,
-            workDir,
+            workDir: framesDir,
           });
           framesOutcome = "on";
           log.info("Vimeo capture {jobId}: {n} cadence frames extracted", { jobId, n: frames.length });
@@ -613,7 +616,7 @@ export async function summarizeVimeo(
 
     const result = await runCaptureOneShot({
       // Read on the frame dir when there are frames; no tools at all otherwise.
-      toolSurface: frames.length > 0 ? { read: [workDir] } : "none",
+      toolSurface: frames.length > 0 ? { read: [framesDir] } : "none",
       source: "vimeo",
       jobId,
       title: meta.title,

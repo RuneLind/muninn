@@ -251,7 +251,7 @@ class TwoPassBudgetError extends Error {
 export interface SummarizeVideoOptions {
   /**
    * Slides on: probe, download a ≤720p video-only rendition, pull one frame per
-   * cadence tick and let the model Read them (`toolSurface: { read: [workDir] }`). Off by
+   * cadence tick and let the model Read them (`toolSurface: { read: [framesDir] }`). Off by
    * default, so every existing caller is byte-identical. The ROUTE pre-flights
    * the connector's `supportsExtraDirs` and 503s before a job exists, so a job
    * arriving here with `frames: true` runs on a connector that can read files —
@@ -337,8 +337,8 @@ export async function summarizeVideo(
   // TWO roots, and the split is what keeps a 90 MB mp4 and 350 scan thumbnails
   // out of the model's reach.
   //
-  // `workDir` is the one dir the SUMMARY call may Read: the re-grabbed
-  // (or cadence) frames, nothing else. `mediaDir` is the downloaded video, the
+  // `workDir` holds `framesDir`, the one dir the SUMMARY call may Read: the
+  // re-grabbed (or cadence) frames, nothing else. `mediaDir` is the downloaded video, the
   // scan's intermediates and the contact sheets — one subdirectory of it goes to
   // the selection pass and the root itself is in no Read surface — the
   // video used to live in the dir the turn could read, which is why it had to be
@@ -353,7 +353,7 @@ export async function summarizeVideo(
   /**
    * The contact sheets, and the ONLY thing the selection pass is given.
    *
-   * Under `mediaDir`, so that `workDir` — the dir the SUMMARY call may Read —
+   * Under `mediaDir`, so that `framesDir` — the dir the SUMMARY call may Read —
    * holds the frames and nothing else. A sheet dir inside it would
    * put ten contact sheets of a scan in front of the second pass, and in front
    * of a CADENCE fallback that was never told about a scan at all. `mediaDir`
@@ -586,8 +586,8 @@ export async function summarizeVideo(
         const prepared = await framesQueue.run(FRAMES_QUEUE_KEY, async () => {
           updateStatus(jobId, "downloading");
           // The sibling verticals all create the work dir first. yt-dlp would
-          // create its own, but everything after does not: the frames and the
-          // sheets are written under `workDir`, which is what the model reads.
+          // create its own, but everything after does not: the frames are
+          // written under `workDir/frames`, which is what the model reads.
           await mkdir(workDir, { recursive: true });
           await mkdir(mediaDir, { recursive: true });
           const dl = await resolved.downloadVideo(videoUrl, mediaDir, {
@@ -845,7 +845,7 @@ export async function summarizeVideo(
             synthesisTimeoutMs = null;
             // A re-grab that threw may have written some of its frames into the
             // very dir the cadence extractor is about to fill — and that dir is
-            // what the summary call reads as `--add-dir`. A leftover is a frame
+            // the summary call's Read surface. A leftover is a frame
             // in the prompt's directory that no frame list names.
             await rm(framesDir, { recursive: true, force: true }).catch(() => {});
             frames = await cadenceFrames(videoPath!);
@@ -926,7 +926,7 @@ export async function summarizeVideo(
     const result = await runCaptureOneShot({
       // Read on the frame dir when there are frames; no tools at all otherwise.
       // Without Read on that dir the slides vanish from the summary silently.
-      toolSurface: frames.length > 0 ? { read: [workDir] } : "none",
+      toolSurface: frames.length > 0 ? { read: [framesDir] } : "none",
       source: "youtube",
       jobId,
       title,

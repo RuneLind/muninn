@@ -22,7 +22,13 @@
  * Every fixture is invented. This repo is public.
  */
 
-import { test, expect, describe, beforeEach, afterAll } from "bun:test";
+import { test, expect, describe, beforeEach, beforeAll, afterAll } from "bun:test";
+import { __setClaudeCliVersionForTest } from "../../ai/tool-surface.ts";
+
+// The frames pre-flights read the installed Claude CLI version; pin one new
+// enough for `--restricted`, so a runner without `claude` gets the same answer.
+beforeAll(() => __setClaudeCliVersionForTest("2.1.304"));
+afterAll(() => __setClaudeCliVersionForTest(undefined));
 import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync } from "node:fs";
@@ -551,6 +557,26 @@ describe("refusals", () => {
     // quotes the tail then stripped, i.e. pictures gone with no error anywhere.
     expect(rec.prompts.length).toBe(0);
     expect(rec.ingests.length).toBe(0);
+  });
+
+  test("kept frames on a claude-cli older than --restricted is 503, before a job", async () => {
+    const root = tempFramesRoot();
+    const dir = join(root, "youtube", VIDEO_ID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "x");
+    const cli = { ...BOT, connector: "claude-cli" } as unknown as BotConfig;
+    const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, bot: cli });
+    __setClaudeCliVersionForTest("2.1.200");
+    try {
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      expect(res.status).toBe(503);
+      expect(res.json.code).toBe("frames_unsupported");
+      expect(String(res.json.error)).toContain("needs Claude CLI 2.1.303 or newer");
+      await settle();
+      expect(rec.prompts.length).toBe(0);
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
   });
 });
 

@@ -14,22 +14,10 @@ import {
   fencedSurface,
   fencedTools,
   isReadSurface,
-  MIN_RESTRICTED_CLI_VERSION,
-  restrictedCliAvailable,
 } from "./tool-surface.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("ai", "executor");
-
-let warnedNoneUnrestricted = false;
-function warnNoneUnrestrictedOnce(): void {
-  if (warnedNoneUnrestricted) return;
-  warnedNoneUnrestricted = true;
-  log.warn(
-    `claude-cli: a "none" tool surface runs without --restricted (needs Claude CLI ${MIN_RESTRICTED_CLI_VERSION} or newer), ` +
-      "so the user's hooks and CLAUDE.md still load. The tools stay off.",
-  );
-}
 
 export interface ClaudeExecResult extends ClaudeResult {
   wallClockMs: number;
@@ -58,29 +46,7 @@ export async function executeClaudePrompt(
       );
     }
   }
-  // A run with no tools ("none") also takes `--restricted` and the empty agent
-  // home: otherwise it runs the user's shell hooks and loads the user's and the
-  // bot folder's CLAUDE.md into every call. The tools are off either way, so an
-  // older CLI without `--restricted` keeps the plain `--tools ""` argv.
-  // An agent home that cannot be created refuses a fenced run, but not this
-  // one: with no tools there is nothing for the shared temp dir to expose.
-  let fencedCwd = fence ? resolveFencedAgentCwd() : undefined;
-  let restrictNone = false;
-  if (!fence && botConfig.toolsDisabled === true) {
-    if (await restrictedCliAvailable()) {
-      try {
-        fencedCwd = resolveFencedAgentCwd();
-        restrictNone = true;
-      } catch (err) {
-        log.warn("claude-cli: a \"none\" run falls back to the bot folder: {error}", {
-          botName: botConfig.name,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    } else {
-      warnNoneUnrestrictedOnce();
-    }
-  }
+  const fencedCwd = fence ? resolveFencedAgentCwd() : undefined;
 
   const args = [
     "claude",
@@ -97,7 +63,7 @@ export async function executeClaudePrompt(
   // states one.
   if (botConfig.effort) {
     args.push("--effort", botConfig.effort);
-  } else if (fence || restrictNone) {
+  } else if (fence) {
     args.push("--effort", "high");
   }
 
@@ -120,7 +86,6 @@ export async function executeClaudePrompt(
     // --mcp-config removes every MCP server, including the user-global ones
     // (IDE, peer messaging, claude.ai connectors) the CLI discovers on its own.
     args.push("--tools", "", "--strict-mcp-config");
-    if (restrictNone) args.push("--restricted");
   } else if (existsSync(mcpConfigPath)) {
     args.push("--mcp-config", mcpConfigPath);
     // Pre-flight: warn if a *critical* MCP server is down (cached probe).

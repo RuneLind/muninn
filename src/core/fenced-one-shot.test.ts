@@ -17,11 +17,7 @@ import { test, expect, describe, spyOn } from "bun:test";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { runFencedOneShot, FENCED_EXCLUDED_TOOLS } from "./fenced-one-shot.ts";
-import { __setClaudeCliVersionForTest } from "../ai/tool-surface.ts";
 
 /** The slice of `Tracer` the seam + `tracedOneShot` actually touch. */
 function fakeTracer(): Tracer {
@@ -122,20 +118,14 @@ describe("runFencedOneShot — onProgress passthrough", () => {
   test("the real claude-cli argv is tool-less: no built-ins, no MCP server", async () => {
     // No `oneShot` seam: the declared "none" goes through the real executeOneShot
     // and applyToolSurface to the spawned argv, so a dropped or wrong surface fails here.
-    const spawned: { args: string[]; cwd: string }[] = [];
-    // Pin a CLI with `--restricted` (no version probe through the spy) and an
-    // empty agent home, so "none" takes the restricted form.
-    __setClaudeCliVersionForTest("2.1.303");
-    const agentHome = mkdtempSync(join(tmpdir(), "fenced-one-shot-"));
-    const priorAgentCwd = process.env.MUNINN_AGENT_CWD;
-    process.env.MUNINN_AGENT_CWD = agentHome;
+    const spawned: string[][] = [];
     const resultLine = JSON.stringify({
       type: "result", subtype: "success", is_error: false, result: "ok",
       duration_ms: 5, duration_api_ms: 4, num_turns: 1, total_cost_usd: 0,
       usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     });
-    const spawnSpy = spyOn(Bun, "spawn").mockImplementation(((args: string[], opts: { cwd: string }) => {
-      spawned.push({ args, cwd: opts.cwd });
+    const spawnSpy = spyOn(Bun, "spawn").mockImplementation(((args: string[]) => {
+      spawned.push(args);
       return {
         pid: 1,
         stdout: new Response(resultLine + "\n").body!,
@@ -153,18 +143,12 @@ describe("runFencedOneShot — onProgress passthrough", () => {
       });
     } finally {
       spawnSpy.mockRestore();
-      __setClaudeCliVersionForTest(undefined);
-      if (priorAgentCwd === undefined) delete process.env.MUNINN_AGENT_CWD;
-      else process.env.MUNINN_AGENT_CWD = priorAgentCwd;
-      rmSync(agentHome, { recursive: true, force: true });
     }
     expect(spawned).toHaveLength(1);
-    const { args, cwd } = spawned[0]!;
+    const args = spawned[0]!;
     expect(args.flatMap((a, i) => (a === "--tools" ? [args[i + 1]] : []))).toEqual([""]);
     expect(args).toContain("--strict-mcp-config");
     expect(args).not.toContain("--mcp-config");
-    expect(args).toContain("--restricted");
-    expect(cwd).toBe(join(agentHome, ".fenced"));
   });
 
   test("the deny-list covers 2.1.281's escapes", () => {

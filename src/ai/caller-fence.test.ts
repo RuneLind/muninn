@@ -43,6 +43,26 @@ mock.module("./haiku-direct.ts", () => ({
   }),
 }));
 
+// The short-video job has no deps seam: its download and whisper steps are
+// replaced here (no network, no whisper), and the REAL `extractKeyframes` runs
+// ffmpeg over a generated clip, so the frames dir is the one the job builds.
+// `downloadVideo` leaves the video in the work dir, beside the frames dir, plus
+// a TEXT file carrying a secret: Read refuses an .mp4 as binary on its own, so
+// only a readable file there proves the fence (not the file type) refuses it.
+let shortVideoSource = "";
+const realMedia = await import("../video/media.ts");
+mock.module("../video/media.ts", () => ({
+  ...realMedia,
+  downloadVideo: async (_url: string, workDir: string) => {
+    mkdirSync(workDir, { recursive: true });
+    const videoPath = join(workDir, "video.mp4");
+    copyFileSync(shortVideoSource, videoPath);
+    writeFileSync(join(workDir, "video.info.txt"), `${VIDEO_SECRET}\n`);
+    return { videoPath, id: "7523456789", title: "A clip", duration: 8, uploader: "coolcoder", canonicalUrl: "https://www.tiktok.com/@coolcoder/video/7523456789" };
+  },
+  transcribeVideo: async () => `${PROBE_MARKER} a short clip about colours`,
+}));
+
 import type { ConnectorType } from "../bots/config.ts";
 import {
   compareVersions,
@@ -66,6 +86,8 @@ const { findCapturePreset, SHIPPED_CAPTURE_PRESETS } = await import("../summarie
 const { registerSummariesRerunRoutes } = await import("../dashboard/routes/summaries-rerun.ts");
 const { SummarySaveClaims } = await import("../summaries/summary-save.ts");
 const { streamFactcheckSSE } = await import("../dashboard/routes/factcheck-sse.ts");
+const { summarizeTikTok } = await import("../tiktok/summarizer.ts");
+const tiktokState = await import("../tiktok/state.ts");
 
 function sdkBinaryAvailable(): boolean {
   const require = createRequire(import.meta.resolve("@anthropic-ai/claude-agent-sdk"));
@@ -89,6 +111,7 @@ const DOC_ID = "ai/general/A Talk About Things.md";
 const STANDARD = findCapturePreset(SHIPPED_CAPTURE_PRESETS, "standard")!;
 const FRAME_SECRET = "FRAME-TRAVERSAL-SECRET-3b91";
 const KEPT_SECRET = "KEPT-TRAVERSAL-SECRET-77c4";
+const VIDEO_SECRET = "SHORT-VIDEO-WORKDIR-SECRET-5e20";
 
 let f: FenceFixture;
 let tmpRoot: string;
@@ -118,6 +141,19 @@ beforeAll(() => {
   writeFileSync(join(framesRoot, "kept-traversal.txt"), `${KEPT_SECRET}\n`);
   copyFileSync(join(f.allowedDir, "x.jpg"), join(framesRoot, "youtube", VIDEO_ID, "30.jpg"));
   copyFileSync(join(f.allowedDir, "x.jpg"), join(framesRoot, "youtube", VIDEO_ID, "x.jpg"));
+
+  // An 8 s clip of eight colour cuts, so scene detection yields real frames.
+  if (Bun.which("ffmpeg")) {
+    const colors = ["red", "blue", "green", "yellow", "white", "black", "magenta", "cyan"];
+    shortVideoSource = join(f.root, "clip.mp4");
+    const gen = Bun.spawnSync([
+      "ffmpeg", "-y",
+      ...colors.flatMap((c) => ["-f", "lavfi", "-i", `color=c=${c}:s=160x120:d=1:r=10`]),
+      "-filter_complex", `${colors.map((_, i) => `[${i}:v]`).join("")}concat=n=${colors.length}:v=1:a=0[v]`,
+      "-map", "[v]", "-pix_fmt", "yuv420p", shortVideoSource,
+    ], { stderr: "pipe" });
+    if (gen.exitCode !== 0) shortVideoSource = "";
+  }
 
   huginn = Bun.serve({
     port: 0,
@@ -187,7 +223,7 @@ async function probe(plan: ScriptedToolUse[], run: () => Promise<unknown>): Prom
   const calls = f.mcpCalls();
   await run();
   const results = f.api.toolResults();
-  const secrets = [...f.secrets, FRAME_SECRET, KEPT_SECRET];
+  const secrets = [...f.secrets, FRAME_SECRET, KEPT_SECRET, VIDEO_SECRET];
   return {
     results,
     leaked: secrets.filter((s) => results.some((r) => r.text.includes(s))),
@@ -261,6 +297,31 @@ for (const connector of ["claude-cli", "claude-sdk"] as const) {
       expectHostileRefused(o);
       expect(o.results[5]).toMatchObject({ name: "Read", isError: false });
       expect(o.results[5]!.text).toContain('"type":"image"');
+    }, 180_000);
+
+    test.skipIf(!Bun.which("ffmpeg"))("TikTok frame pass: the work dir beside the frames is refused, a frame is read", async () => {
+      const jobId = tiktokState.createJob("7523456789", "A clip", "https://www.tiktok.com/@coolcoder/video/7523456789");
+      const workDir = join(tmpRoot, `muninn-tiktok-${jobId}`);
+      const framesDir = join(workDir, "frames");
+      const o = await probe(
+        [
+          ...hostileFrom(framesDir, "frame-traversal.txt"),
+          { name: "Read", input: { file_path: join(workDir, "video.mp4") } },
+          { name: "Read", input: { file_path: join(workDir, "video.info.txt") } },
+          { name: "Read", input: { file_path: join(framesDir, "frame_001.jpg") } },
+        ],
+        () => summarizeTikTok(jobId, "https://www.tiktok.com/@coolcoder/video/7523456789", "A clip", captureConfig(), bot(connector), {
+          preset: STANDARD,
+        }),
+      );
+      report("tiktok frame pass", connector, o);
+      expectHostileRefused(o);
+      expect(o.results.slice(5, 7).map((r) => [r.name, r.isError])).toEqual([["Read", true], ["Read", true]]);
+      // The .mp4 is refused as binary whatever the surface (measured on the
+      // pre-fix tree too); the text file beside it is what only the fence
+      // refuses, and `leaked` above is its secret staying out.
+      expect(o.results[7]).toMatchObject({ name: "Read", isError: false });
+      expect(o.results[7]!.text).toContain('"type":"image"');
     }, 180_000);
 
     test("YouTube text-only capture: nothing runs", async () => {

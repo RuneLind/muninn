@@ -47,6 +47,8 @@ let downloadCalls: Array<{
 let extractCalls = 0;
 let summarizeTimeoutArgs: { frameCount: number; floorMs: number } | undefined;
 let extractOpts: { durationSeconds?: number; frameTimeoutMs?: number } | undefined;
+/** The dir the job asked `extractKeyframes` to fill with the kept frames. */
+let extractDir: string | undefined;
 let transcribeCalls: Array<{ opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number } }> = [];
 // yt-dlp-reported duration, mutable so a long-form upload can be simulated.
 let videoDuration = 45;
@@ -122,6 +124,7 @@ mock.module("./media.ts", () => ({
   ) => {
     extractCalls++;
     extractOpts = opts;
+    extractDir = workDir;
     if (extractShouldThrow) throw new Error("ffmpeg keyframe extraction failed");
     return framesResult.map((f) => ({ ...f, path: join(workDir, f.path) }));
   },
@@ -339,6 +342,7 @@ beforeEach(async () => {
   extractCalls = 0;
   summarizeTimeoutArgs = undefined;
   extractOpts = undefined;
+  extractDir = undefined;
   transcribeCalls = [];
   videoDuration = 45;
   dlCanonicalUrl = TT_CANONICAL_URL;
@@ -601,14 +605,18 @@ for (const v of VERTICALS) {
       expect(lastOpts!.extraDirs).toBeUndefined();
     });
 
-    test("declares a Read fence on the work dir and raises the timeout to >=600s", async () => {
+    test("declares a Read fence on the frames dir alone and raises the timeout to >=600s", async () => {
       const jobId = await capture(v.title, v.canonicalUrl);
 
       expect(lastOpts).toBeDefined();
-      // The tmp work dir is the one directory the model may Read (→ CLI
-      // --restricted --tools Read --add-dir), never the bot's own surface.
+      // The kept frames' dir is the one directory the model may Read (→ CLI
+      // --restricted --tools Read --add-dir): not the work dir, which also
+      // holds the downloaded video and the audio, and never the bot's surface.
       const workDir = join(tmpdir(), `${v.workDirPrefix}${jobId}`);
-      expect(lastOpts!.toolSurface).toEqual({ read: [workDir] });
+      const framesDir = join(workDir, "frames");
+      expect(lastOpts!.toolSurface).toEqual({ read: [framesDir] });
+      expect(extractDir).toBe(framesDir);
+      for (const f of framesResult) expect(lastPrompt).toContain(join(framesDir, f.path));
       expect(lastOpts!.extraDirs).toBeUndefined();
       expect(downloadCalls[0]!.workDir).toBe(workDir);
       expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
@@ -695,7 +703,7 @@ for (const v of VERTICALS) {
       await capture();
 
       const workDir = downloadCalls[0]!.workDir;
-      const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+      const frames = framesResult.map((f) => ({ path: join(workDir, "frames", f.path), tSeconds: f.tSeconds }));
       expect(lastSystemPrompt).toBe(
         buildShortVideoSystemPrompt(v.spec, {
           preset: STANDARD,
@@ -754,7 +762,7 @@ for (const v of VERTICALS) {
       await capture();
 
       const workDir = downloadCalls[0]!.workDir;
-      const frames = framesResult.map((f) => ({ path: join(workDir, f.path), tSeconds: f.tSeconds }));
+      const frames = framesResult.map((f) => ({ path: join(workDir, "frames", f.path), tSeconds: f.tSeconds }));
       expect(lastPrompt).toBe(buildShortVideoUserPrompt({ transcript: "", frames }));
       expect(lastPrompt).toContain("No speech detected — summarize from the frames.");
     });

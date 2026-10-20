@@ -61,6 +61,7 @@ import type { BotConfig } from "../../bots/config.ts";
 import { getLog } from "../../logging.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { restrictedCliBlocker } from "../../ai/tool-surface.ts";
 import { fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { getSummaryFactcheck } from "../../db/summary-factchecks.ts";
 import { findLiveSentinelBlocks } from "../../wiki/factcheck-context.ts";
@@ -997,8 +998,8 @@ export function registerSummariesRerunRoutes(
       vertical.frameSource && videoId
         ? await listKeptFrames(vertical.frameSource, videoId, deps.framesRoot)
         : [];
-    // The frames are handed to the model as `--add-dir`, so a connector that
-    // cannot read files would produce a summary with no slides while the tail
+    // The frames are the model's fenced Read surface, so a connector that
+    // cannot run one (or a claude-cli older than 2.1.303) would produce a summary with no slides while the tail
     // stripped every quote it could not serve — a re-run that silently loses
     // pictures. Refused instead, the TikTok/YouTube `frames_unsupported`
     // precedent, before a job exists.
@@ -1006,6 +1007,16 @@ export function registerSummariesRerunRoutes(
       return c.json(
         {
           error: `Summarizer bot "${bot.name}" cannot read the kept slides, so a re-run would drop them.`,
+          code: "frames_unsupported",
+        },
+        503,
+      );
+    }
+    const cliBlocked = frames.length > 0 ? await restrictedCliBlocker(bot.connector, "read") : null;
+    if (cliBlocked !== null) {
+      return c.json(
+        {
+          error: `Summarizer bot "${bot.name}" cannot read the kept slides: ${cliBlocked}`,
           code: "frames_unsupported",
         },
         503,

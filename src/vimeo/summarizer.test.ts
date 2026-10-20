@@ -1262,8 +1262,10 @@ test("whisper + frames: ONE manifest fetch serves both, and the statuses run dow
   expect(manifestFetches).toEqual([MANIFEST_URL]);
   expect(extractCalls.length).toBe(1);
   expect(transcribeCalls.length).toBe(1);
-  // Audio and frames share the job's work dir.
-  expect(extractCalls[0]!.workDir).toBe(transcribeCalls[0]!.workDir);
+  // Audio and frames share the job's work dir, but the frames go to their own
+  // subdir: that subdir is the model's one Read dir, and the audio stays out.
+  expect(extractCalls[0]!.workDir).toBe(join(transcribeCalls[0]!.workDir, "frames"));
+  expect(lastToolSurface).toEqual({ read: [extractCalls[0]!.workDir] });
   expect(lastPrompt).toContain("Slide frames");
   expect(ingestPayload!.caption_kind).toBe("whisper");
 });

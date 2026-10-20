@@ -111,8 +111,8 @@ export async function extractCadenceFrames(
     await grab(segmentFile, offset, out, VIMEO_FRAME_HEIGHT);
     frames.push({ path: out, tSeconds: t });
   }
-  // The segments are spent: the work dir is what the model is handed as
-  // --add-dir, and holds only the JPEGs from here on.
+  // The segments are spent: this dir is the summary call's Read surface, and
+  // holds only the JPEGs from here on.
   await Promise.all([...segmentFiles.values()].map((f) => rm(f, { force: true }).catch(() => {})));
   log.info("Extracted {n} cadence frames from {rep} ({segments} segments fetched)", {
     n: frames.length,

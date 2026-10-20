@@ -5,6 +5,7 @@ import { createJob, getJob, getRecentJobs, subscribe } from "../../youtube/state
 import { summarizeVideo } from "../../youtube/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { restrictedCliBlocker } from "../../ai/tool-surface.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
@@ -566,6 +567,19 @@ export function registerYouTubeRoutes(
             `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector ?? "claude-cli"}", ` +
             `which cannot read the extracted slide frames (no extra-dirs support). Untick Slides, or set ` +
             `SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
+        },
+        503,
+      );
+    }
+    // A claude-cli too old for `--restricted` would refuse the frames' fenced
+    // Read only after the download and the scan: refused here instead.
+    const cliBlocked = frames ? await restrictedCliBlocker(summarizerBot.connector, "read") : null;
+    if (cliBlocked !== null) {
+      return c.json(
+        {
+          error: "Slides are not available on this summarizer bot's Claude CLI.",
+          code: "frames_unsupported",
+          detail: `Summarizer bot "${summarizerBot.name}": ${cliBlocked} Untick Slides, or upgrade the CLI.`,
         },
         503,
       );

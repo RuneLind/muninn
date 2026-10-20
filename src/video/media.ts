@@ -1,5 +1,5 @@
 import { join, dirname, basename } from "node:path";
-import { unlink } from "node:fs/promises";
+import { mkdir, rename, rm, unlink } from "node:fs/promises";
 import { Glob } from "bun";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
@@ -710,11 +710,38 @@ async function runFrameExtraction(
  * than 4 frames (single-shot talking head, static slideshow) it falls back to
  * uniform sampling across the clip. The result is thinned evenly to the frame
  * budget for the video's duration.
+ *
+ * `framesDir` ends up holding the kept frames and nothing else, because it is
+ * the one directory the summary call may Read: ffmpeg writes every candidate
+ * into a scratch dir beside it (`<framesDir>-scan`), the kept ones are moved
+ * across, and the scratch dir is removed with the frames thinning dropped.
  */
 export async function extractKeyframes(
   videoPath: string,
-  workDir: string,
+  framesDir: string,
   opts: KeyframeOptions = {},
+): Promise<Keyframe[]> {
+  const scanDir = `${framesDir}-scan`;
+  await mkdir(scanDir, { recursive: true });
+  await mkdir(framesDir, { recursive: true });
+  try {
+    const thinned = await scanKeyframes(videoPath, scanDir, opts);
+    const kept: Keyframe[] = [];
+    for (const frame of thinned) {
+      const path = join(framesDir, basename(frame.path));
+      await rename(frame.path, path);
+      kept.push({ ...frame, path });
+    }
+    return kept;
+  } finally {
+    await rm(scanDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function scanKeyframes(
+  videoPath: string,
+  workDir: string,
+  opts: KeyframeOptions,
 ): Promise<Keyframe[]> {
   // Clamp to [1, FRAME_BUDGET_MAX]: the hard cap the doc promises for maxFrames
   // overrides, and a floor so a 0/negative override can't produce fps=0 (ffmpeg

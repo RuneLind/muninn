@@ -30,6 +30,12 @@
  */
 
 import { test, expect, describe, mock, beforeEach, beforeAll, afterAll } from "bun:test";
+import { __setClaudeCliVersionForTest } from "../../ai/tool-surface.ts";
+
+// The frames pre-flights read the installed Claude CLI version; pin one new
+// enough for `--restricted`, so a runner without `claude` gets the same answer.
+beforeAll(() => __setClaudeCliVersionForTest("2.1.304"));
+afterAll(() => __setClaudeCliVersionForTest(undefined));
 import { configure, type LogRecord } from "@logtape/logtape";
 import { Hono } from "hono";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -581,6 +587,27 @@ describe("YouTube capture POST — a job exists only when a capture will run", (
     expect(String(body.detail)).toContain("melosys");
     expect(ytState.getRecentJobs().length).toBe(before);
     expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a claude-cli older than --restricted 503s on frames and leaves NO job behind", async () => {
+    summarizerBot = cliBot;
+    __setClaudeCliVersionForTest("2.1.200");
+    try {
+      const before = ytState.getRecentJobs().length;
+      const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, frames: true });
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.code).toBe("frames_unsupported");
+      expect(String(body.detail)).toContain("needs Claude CLI 2.1.303 or newer");
+      expect(ytState.getRecentJobs().length).toBe(before);
+      expect(youtubeSummarizeCalls).toBe(0);
+      // Slides off runs no fenced Read, so the same CLI captures normally.
+      const ok = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID });
+      expect(ok.status).toBe(200);
+      expect(youtubeSummarizeCalls).toBe(1);
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
   });
 
   test("the SAME bot without frames captures normally — the 503 is scoped to slides", async () => {
@@ -2227,6 +2254,27 @@ describe("Vimeo: the frames flag (v2 PR 4)", () => {
     // frames:false on the same bot is an ordinary capture.
     const ok = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, frames: false });
     expect(ok.status).toBe(200);
+  });
+
+  test("frames on a claude-cli older than --restricted is a 503 frames_unsupported BEFORE oEmbed and before any job", async () => {
+    summarizerBot = cliBot;
+    __setClaudeCliVersionForTest("2.1.200");
+    try {
+      const before = oembedCalls;
+      const jobsBefore = vmState.getRecentJobs(1000).length;
+      const res = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, frames: true });
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.code).toBe("frames_unsupported");
+      expect(body.detail).toContain("needs Claude CLI 2.1.303 or newer");
+      expect(oembedCalls).toBe(before);
+      expect(vimeoSummarizeCalls).toBe(0);
+      expect(vmState.getRecentJobs(1000).length).toBe(jobsBefore);
+      const ok = await post(vmApp(), "/api/vimeo/summarize", { url: VIMEO_URL, frames: false });
+      expect(ok.status).toBe(200);
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
   });
 });
 

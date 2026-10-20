@@ -23,6 +23,7 @@ import { test, expect, describe, mock, beforeAll, afterAll, beforeEach } from "b
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { resolveCapturePresets } from "../../summaries/presets.ts";
+import { __setClaudeCliVersionForTest } from "../../ai/tool-surface.ts";
 
 let botsResult: Array<Record<string, unknown>> = [];
 let summarizerBot: Record<string, unknown> | null = null;
@@ -116,6 +117,7 @@ beforeAll(() => {
 });
 afterAll(() => {
   (Bun as { which: typeof Bun.which }).which = realWhich;
+  __setClaudeCliVersionForTest(undefined);
 });
 
 /** A bot whose connector CAN grant --add-dir, so the 503 pre-flight passes. */
@@ -151,6 +153,9 @@ const POSTS = [
 ] as const;
 
 beforeEach(() => {
+  // A CLI new enough for the frames' fenced Read, without spawning `claude`
+  // (a CI runner has none); the old-CLI cases pin their own.
+  __setClaudeCliVersionForTest("2.1.304");
   botsResult = [cliBot];
   summarizerBot = cliBot;
   knowledgeApiCalls = [];
@@ -239,19 +244,15 @@ for (const p of POSTS) {
       expect(
         resolveCapturePresets(undefined, "copilot-sdk").map((k) => k.id),
       ).toEqual(["standard", "deep", "talk-notes"]);
-      // …and the capture itself is refused on this bot, frames or no frames.
+      // …and the default capture (frames on) is refused on this bot.
       expect(body.capture.supported).toBe(false);
     });
 
     /**
-     * The payload and the POST agreeing.
-     *
-     * `frames: { supported: false }` reads as "no keyframes, but a capture",
-     * and the POST 503s a connector without `supportsExtraDirs` UNCONDITIONALLY
-     * — `frames: false` included, because the job hands `extraDirs` to
-     * `executeOneShot` either way and that throws on such a connector. So the
-     * payload says `capture: { supported: false }` with the reason, and a client
-     * can grey out the button instead of discovering it at submit time.
+     * The payload and the POST agreeing: the default capture (frames on) is
+     * refused on a connector without a fenced Read, and the payload says so
+     * with the POST's own sentence, so a client can grey out the button
+     * instead of discovering it at submit time.
      */
     test("a connector without extra-dirs says the CAPTURE is unsupported, with the reason", async () => {
       summarizerBot = { name: "olly", connector: "openai-compat", dir: "/tmp/olly" };
@@ -266,6 +267,18 @@ for (const p of POSTS) {
       expect(body.capture.reason).toContain("openai-compat");
       // A sentence a popup can render, not a machine token.
       expect(body.capture.reason).not.toContain("frames_unsupported");
+    });
+
+    test("a claude-cli older than --restricted says the capture is unsupported, naming the version", async () => {
+      __setClaudeCliVersionForTest("2.1.200");
+      const body = (await (await app().request(p.optionsPath)).json()) as {
+        frames: { supported: boolean };
+        capture: { supported: boolean; reason?: string };
+      };
+      expect(body.frames.supported).toBe(false);
+      expect(body.capture.supported).toBe(false);
+      expect(body.capture.reason).toContain("2.1.303");
+      expect(body.capture.reason).toContain("2.1.200");
     });
 
     test("no bots configured is a 500 with a machine token", async () => {
@@ -328,18 +341,35 @@ for (const p of POSTS) {
     });
 
     /**
-     * The other half of the options payload's honesty: the 503 does not depend
-     * on `frames`, which is why the payload names the CAPTURE rather than only
-     * the keyframes.
+     * The other half of the options payload's honesty: frames on 503s on a
+     * connector without a fenced Read, before a job exists; frames off runs
+     * with no tools at all, which every connector can.
      */
-    test("a connector without extra-dirs 503s even with frames off", async () => {
+    test("a connector without extra-dirs 503s with frames on, and runs with frames off", async () => {
       summarizerBot = { name: "olly", connector: "openai-compat", dir: "/tmp/olly" };
       botsResult = [summarizerBot];
-      for (const body of [{ url: p.url }, { url: p.url, frames: false }]) {
-        const res = await post(app(), p.path, body);
-        expect(res.status).toBe(503);
-        expect(p.calls()).toBe(0);
-      }
+      const before = p.jobCount();
+      const refused = await post(app(), p.path, { url: p.url });
+      expect(refused.status).toBe(503);
+      expect(p.calls()).toBe(0);
+      expect(p.jobCount()).toBe(before);
+      const ran = await post(app(), p.path, { url: p.url, frames: false });
+      expect(ran.status).toBe(200);
+      expect(p.calls()).toBe(1);
+      expect(p.opts()?.frames).toBe(false);
+    });
+
+    test("a claude-cli older than --restricted 503s with frames on before a job exists, and runs with frames off", async () => {
+      __setClaudeCliVersionForTest("2.1.200");
+      const before = p.jobCount();
+      const refused = await post(app(), p.path, { url: p.url });
+      expect(refused.status).toBe(503);
+      expect(((await refused.json()) as { error: string }).error).toContain("needs Claude CLI 2.1.303 or newer");
+      expect(p.calls()).toBe(0);
+      expect(p.jobCount()).toBe(before);
+      const ran = await post(app(), p.path, { url: p.url, frames: false });
+      expect(ran.status).toBe(200);
+      expect(p.calls()).toBe(1);
     });
   });
 }
