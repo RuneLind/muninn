@@ -240,6 +240,20 @@ describe("labels", () => {
     expect(lanesOf(no)).toContain('title="04.09.2026: Spørring"');
   });
 
+  test("an id or question longer than 48 characters ends in «…» at 48", () => {
+    const long = "LIB-101 Renewal of a held book for a whole terms";
+    const md = page(
+      status,
+      [`<Query id="${long}x" run="2026-09-04" />`, ""],
+      [`<Query question="${long}?" run="2026-09-06" />`, ""],
+      timeline("**2026-09-01** — X", "**2026-09-10** — Y"),
+    );
+    const labels = [...lanesOf(reader(md)).matchAll(/title="2026-09-0[46]: ([^"]*)"/g)].map((m) => m[1]);
+    expect(long.length).toBe(48);
+    expect(labels).toEqual([`${long.slice(0, 47)}…`, `${long.slice(0, 47)}…`]);
+    expect(labels.map((l) => l?.length)).toEqual([48, 48]);
+  });
+
   test("the word for a query never names an item of another lane", () => {
     const md = page(status, ["<DecisionLog>", "", "- ", "  - Renewal 2026-09-03", "- **D2** — B. 2026-09-05", "", "</DecisionLog>", ""], timeline("**2026-09-01** — X", "**2026-09-10** — Y"));
     expect(lanesOf(reader(md))).toContain('title="2026-09-05: D2"');

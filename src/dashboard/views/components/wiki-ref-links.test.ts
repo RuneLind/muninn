@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { findRefs, headingSlug, isRefId, nounRuns, refTargets } from "./wiki-ref-links.ts";
+import { findRefs, headingSlug, isRefId, linkRefs, nounRuns, refTargets } from "./wiki-ref-links.ts";
 import { foldSizeLabel, formatChars, readingMinutes } from "./wiki-lens.ts";
 
 /** The browser half (wrapping, the peek, the jump and Back) is driven in
@@ -221,5 +221,91 @@ describe("fix round 2: punctuation and block breaks before an id", () => {
     expect(nouns("Noe om beslutning\n\nD7 holder.")).toEqual(["Beslutning:D7"]);
     // One line break is a wrapped line of the same paragraph.
     expect(nouns("Noe om beslutning\nD7 holder.")).toEqual(["-:D7"]);
+  });
+});
+
+/** Just enough DOM for `linkRefs`: class, tag and `[id]` selectors, one walker. */
+class FakeNode {
+  parentElement: FakeEl | null = null;
+  replacedBy: unknown = null;
+  constructor(public nodeValue: string | null = null) {}
+  replaceWith(frag: unknown) {
+    this.replacedBy = frag;
+  }
+}
+class FakeEl extends FakeNode {
+  children: FakeNode[] = [];
+  dataset: Record<string, string> = {};
+  constructor(
+    public tagName: string,
+    public classes: string[] = [],
+    public id = "",
+  ) {
+    super();
+  }
+  get textContent() {
+    return this.children.map((c) => (c instanceof FakeEl ? c.textContent : c.nodeValue)).join("");
+  }
+  set textContent(text: string) {
+    this.children = [];
+    this.add(new FakeNode(text));
+  }
+  add<T extends FakeNode>(child: T): T {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+  matches(sel: string): boolean {
+    return sel.split(",").some((part) => {
+      const p = part.trim();
+      if (p === "[id]") return !!this.id;
+      if (p.startsWith(".")) return this.classes.includes(p.slice(1));
+      return p === this.tagName;
+    });
+  }
+  closest(sel: string): FakeEl | null {
+    for (let e: FakeEl | null = this; e; e = e.parentElement) if (e.matches(sel)) return e;
+    return null;
+  }
+  contains(n: FakeNode): boolean {
+    for (let e: FakeNode | null = n; e; e = e.parentElement) if (e === this) return true;
+    return false;
+  }
+  texts(): FakeNode[] {
+    return this.children.flatMap((c) => (c instanceof FakeEl ? c.texts() : [c]));
+  }
+}
+
+describe("linkRefs: hidden text gets no link", () => {
+  test("an id inside the lanes' hidden label stays text; the same id in prose links", () => {
+    const root = new FakeEl("div", ["wiki-article"]);
+    const item = root.add(new FakeEl("div", ["dl-item"], "dl-d4"));
+    item.add(new FakeEl("span", ["dl-id"])).add(new FakeNode("D4"));
+    const prose = root.add(new FakeEl("p")).add(new FakeNode("Hold rule D4 applies."));
+    const lanes = root.add(new FakeEl("section", ["dc-view", "tl-lanes"]));
+    const hidden = lanes.add(new FakeEl("span", ["vh"])).add(new FakeNode("2026-09-01: D4"));
+    (root as unknown as { querySelectorAll: (s: string) => FakeEl[] }).querySelectorAll = (s) =>
+      s.startsWith(".dl-item") ? [item.children[0] as FakeEl] : [];
+    const g = globalThis as Record<string, unknown>;
+    const saved = { document: g.document, NodeFilter: g.NodeFilter };
+    g.NodeFilter = { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3 };
+    g.document = {
+      getElementById: () => null,
+      createDocumentFragment: () => ({ parts: [] as unknown[], append(...xs: unknown[]) { this.parts.push(...xs); } }),
+      createElement: (tag: string) => new FakeEl(tag),
+      createTreeWalker: (r: FakeEl, _what: number, filter: { acceptNode: (n: FakeNode) => number }) => {
+        const nodes = r.texts().filter((n) => filter.acceptNode(n) === 1);
+        let i = 0;
+        return { nextNode: () => nodes[i++] ?? null };
+      },
+    };
+    try {
+      expect(linkRefs(root as unknown as Element)).toBe(1);
+    } finally {
+      g.document = saved.document;
+      g.NodeFilter = saved.NodeFilter;
+    }
+    expect(prose.replacedBy).not.toBeNull();
+    expect(hidden.replacedBy).toBeNull();
   });
 });

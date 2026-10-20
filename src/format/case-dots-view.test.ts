@@ -120,6 +120,14 @@ describe("edge cases", () => {
     expect(html.match(/class="cb-dots"/g)?.length).toBe(2);
   });
 
+  test("the squares sit between the board's notes and its rows", () => {
+    const html = reader(DOTS, "- {id: LIB-1, status: ok}\n- {status: hold}\n");
+    const note = html.indexOf('class="cb-warning"');
+    expect(note).toBeGreaterThan(-1);
+    expect(note).toBeLessThan(html.indexOf('class="cb-dots"'));
+    expect(html.indexOf('class="cb-dots"')).toBeLessThan(html.indexOf('class="cb-group"'));
+  });
+
   test("inside a Fold, and a fenced fake draws nothing", () => {
     expect(reader(`<Fold title="Cases">\n\n${DOTS}\n\n</Fold>\n`)).toContain('class="cb-dots"');
     expect(reader("```\n" + DOTS + "\n```\n")).not.toContain('class="cb-dots"');
