@@ -248,3 +248,30 @@ test("an Explain excerpt is found across a marked term", () => {
   expect(excerpt).toContain("A Hold keeps a book back for one reader.");
   expect(excerpt.length).toBeLessThan(body.length);
 });
+
+describe("a glossary's shapes, as the reader and the lint read them", () => {
+  const lintGlossary = (md: string) =>
+    checkPageText({ relPath: "plans/g.mdx" }, md, []).filter((f) => f.check === "glossary").map((f) => f.message);
+  /** Each tip's text, tags dropped. */
+  const tips = (html: string) =>
+    [...html.matchAll(/<span class="gl-tip" [^>]*>([^]*?)<\/span>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ""));
+
+  test("only a paragraph sentence's lead emphasis is a term, not emphasis inside its definition", () => {
+    const g = glossary("**Hold** is a book *not* returned.");
+    expect(marked("A Hold is not lent.\n" + g)).toEqual([["hold", "Hold"]]);
+    expect(lintGlossary("A Hold lasts a week.\n" + g)).toEqual([]);
+  });
+
+  test("a list item whose emphasis has no separator after it is an item with no term", () => {
+    const g = glossary("- **Note** this list is short", "- **Hold:** a book kept back");
+    expect(marked("Note the Hold.\n" + g)).toEqual([["hold", "Hold"]]);
+    expect(lintGlossary("Note the Hold.\n" + g)).toEqual(["<Glossary> has an item with no term: «Note this list is short»"]);
+  });
+
+  test("a paragraph term's tip does not repeat the term", () => {
+    expect(tips(reader("A Hold lasts.\n" + glossary("**Hold** is a book kept back.")))).toEqual(["Hold is a book kept back."]);
+    expect(tips(reader("A Hold lasts.\n" + glossary("A **Hold** keeps a book back. It lasts a week.")))).toEqual([
+      "Hold keeps a book back. It lasts a week.",
+    ]);
+  });
+});

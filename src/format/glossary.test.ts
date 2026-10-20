@@ -25,6 +25,12 @@ describe("the list shape", () => {
     expect(r?.findings).toEqual([]);
   });
 
+  test("an item whose emphasis has no separator has no term", () => {
+    const [r] = read(block("- **Note** this list is short\n- **Hold** - a book kept back"));
+    expect(r?.entries.map((e) => e.term)).toEqual(["Hold"]);
+    expect(r?.findings).toEqual([{ level: "info", message: "has an item with no term: «Note this list is short»", at: 0 }]);
+  });
+
   test("a hyphen inside the definition is not the separator", () => {
     const [r] = read(block("- **Hold**: a well-kept book"));
     expect(r?.entries[0]?.definition).toBe("a well-kept book");
@@ -49,12 +55,17 @@ describe("the list shape", () => {
 });
 
 describe("the paragraph shape", () => {
-  test("each emphasised span is a term; its definition runs to the next term's sentence", () => {
-    const [r] = read(block("**Words on the page:** A **Hold** keeps a book back. It lasts a week. A **Renewal** adds two weeks."));
+  test("a sentence's lead span is a term; its definition runs to the next term's sentence, without the term", () => {
+    const [r] = read(block("**Words on the page:** A **Hold** keeps a book back. It lasts a week. **Renewal:** two weeks more."));
     expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([
-      ["Hold", "A Hold keeps a book back. It lasts a week."],
-      ["Renewal", "A Renewal adds two weeks."],
+      ["Hold", "keeps a book back. It lasts a week."],
+      ["Renewal", "two weeks more."],
     ]);
+  });
+
+  test("emphasis past a sentence's lead is definition text, not a term", () => {
+    const [r] = read(block("**Hold** is a book *not* returned. It is *never* lent. Then *one* reader waits."));
+    expect(r?.entries.map((e) => [e.term, e.definition])).toEqual([["Hold", "is a book not returned. It is never lent. Then one reader waits."]]);
   });
 
   test("the Norwegian label is not a term", () => {

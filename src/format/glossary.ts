@@ -8,10 +8,13 @@
  *
  * - a list item led by an emphasised term: `- **Hold:** a case kept back`,
  *   `- **Hold**: …`, `- *Hold* — …` (a trailing `:` inside or after the
- *   emphasis, or a ` — `, ` – ` or ` - ` after it, is the separator);
- * - a paragraph: every emphasised span is a term, and its definition is the
- *   sentence holding it plus the sentences after it that hold no term. A
- *   leading «Words on the page» / «Ord på siden» label is not a term.
+ *   emphasis, or a ` — `, ` – ` or ` - ` after it, is the separator; an item
+ *   without one has no term);
+ * - a paragraph: a sentence led by an emphasised span, or by an article and
+ *   one (`A **Hold** …`, `Et **Lån** …`), defines that span; emphasis further in is
+ *   definition text. The definition is the rest of the sentence plus the
+ *   sentences after it that define nothing. A leading «Words on the page» /
+ *   «Ord på siden» label is not a term.
  *
  * A term whose text is one code span (`` **`--arm`:** ``) is code-spelled: it
  * is listed but never marked, since prose that names it is code too.
@@ -55,8 +58,10 @@ export interface GlossaryBlockRead {
 const GLOSSARY_TERM_MIN = 2;
 
 const LABEL_RE = /^(?:\*\*|__)\s*(?:words on the page|ord på siden)\s*[.:]?\s*(?:\*\*|__)\s*[.:]?\s*/iu;
-const ITEM_LEAD_RE = /^(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}])\s*(?:(?::|[—–-](?=\s))\s*)?/u;
-const SPAN_RE = /(?<![\p{L}\p{N}*_\\])(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}*_])/gu;
+// Group 3 is the separator; an item needs it or a term ending in `:`.
+const ITEM_LEAD_RE = /^(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}])\s*(?:(:|[—–-](?=\s))\s*)?/u;
+// An optional article before the span (88 real glossaries: «A», «The»); the separator is optional.
+const SENTENCE_LEAD_RE = /^(?:(?:an?|the|e[nit]|de[nt]?)\s+)?(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}*_])\s*(?:(?::|[—–-](?=\s))\s*)?/iu;
 const CODE_ONLY_RE = /^`+[^`]+`+$/;
 const SENTENCE_END_RE = /(?<=[.!?])\s+(?=\S)/u;
 
@@ -83,7 +88,7 @@ function entry(rawTerm: string, rawDefinition: string, at: number): GlossaryEntr
 function readItem(text: string, out: GlossaryBlockRead): void {
   const at = out.reads.push(text) - 1;
   const lead = ITEM_LEAD_RE.exec(text);
-  const e = lead ? entry(lead[2]!, text.slice(lead[0].length), at) : null;
+  const e = lead && (lead[3] || lead[2]!.trimEnd().endsWith(":")) ? entry(lead[2]!, text.slice(lead[0].length), at) : null;
   if (e) out.entries.push(e);
   else if (visibleText(text)) out.findings.push({ level: "info", message: `has an item with no term: «${visibleText(text).slice(0, 60)}»`, at });
 }
@@ -91,16 +96,16 @@ function readItem(text: string, out: GlossaryBlockRead): void {
 function readParagraph(text: string, out: GlossaryBlockRead): void {
   const body = text.replace(LABEL_RE, "");
   const sentences = body.split(SENTENCE_END_RE);
-  // Each sentence's terms; a term-less sentence extends the definition above it.
-  const read = sentences.map((s) => [...s.matchAll(SPAN_RE)].map((m) => m[2]!));
+  // A sentence with no lead term extends the definition above it.
+  const leads = sentences.map((s) => SENTENCE_LEAD_RE.exec(s));
   for (let i = 0; i < sentences.length; i++) {
     const at = out.reads.push(sentences[i]!) - 1;
-    let definition = sentences[i]!;
-    for (let j = i + 1; j < sentences.length && read[j]!.length === 0; j++) definition += ` ${sentences[j]}`;
-    for (const term of read[i]!) {
-      const e = entry(term, definition, at);
-      if (e) out.entries.push(e);
-    }
+    const lead = leads[i];
+    if (!lead) continue;
+    let definition = sentences[i]!.slice(lead[0].length);
+    for (let j = i + 1; j < sentences.length && !leads[j]; j++) definition += ` ${sentences[j]}`;
+    const e = entry(lead[2]!, definition, at);
+    if (e) out.entries.push(e);
   }
 }
 
