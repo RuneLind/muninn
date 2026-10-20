@@ -35,6 +35,15 @@ export const RULE_TREE_CASE_ID_RE = /^[A-Z]+-\d+$/;
 /** A year a leaf names: 19xx or 20xx, not inside a longer word or number. */
 const YEAR_RE = /(?<![\p{L}\p{N}])(?:19|20)\d{2}(?![\p{L}\p{N}])/gu;
 
+/** A bare URL: no year inside it is one. */
+const BARE_URL_RE = /(?:\b[a-z][a-z\d+.-]*:\/\/|\bwww\.)[^\s<>]*/giu;
+
+/** A case id by grammar inside text, a `-` either side allowed: no year inside it is one. */
+const CASE_ID_IN_TEXT_RE = /(?<![\p{L}\p{N}])[A-Z]+-\d+(?![\p{L}\p{N}])/gu;
+
+/** A `-`-joined word, the shape a board id has. */
+const JOINED_WORD_RE = /[\p{L}\p{N}_]+(?:-[\p{L}\p{N}_]+)+/gu;
+
 /** The italic lead: `*label*` or `_label_`, an optional `:` after it. */
 const LEAD_RES = [/^\*(?![\s*→])([^*\n]+?)\*(?![*\p{L}\p{N}_])(:?)/u, /^_(?![\s_→])([^_\n]+?)_(?![_\p{L}\p{N}])(:?)/u];
 
@@ -59,8 +68,9 @@ export interface RuleLeaf {
   /** `rest` cut where the cases start: `body + dash + pieces.join(",")` is `rest`.
    *  Null when the leaf names no cases. */
   caseSplit: { body: string; dash: string; pieces: string[] } | null;
-  /** The years on the leaf's path: each ancestor item's own text, then the
-   *  leaf's edge label and text before its cases. */
+  /** The years of the deepest node on the leaf's path that names any: the
+   *  leaf's own edge label and text before its cases, else its nearest such
+   *  ancestor's own text (nested lists aside). */
   years: string[];
   /** The leaf has a ` — ` tail that reads as no case ids (a typo, a full stop
    *  after the id): lint names it, since the reader draws it as text. */
@@ -136,11 +146,39 @@ const unstruck = (s: string) => s.replace(/~~[\s\S]*?~~/g, "");
 /** `s` with code spans and link destinations masked, length kept. */
 const maskInline = (s: string) => maskCode(s).replace(LINK_DEST_RE, (_m, text: string, dest: string) => text + CODE_MASK.repeat(dest.length));
 
-/** An ASCII arrow where a leaf's `→` goes. */
-const ASCII_ARROW_RE = /^\s*(\*\*|__|\*|_)?\s*->/;
+/** The years `raw`'s visible text names, struck text, bare URLs, case ids and board ids aside. */
+function yearsIn(raw: string, opts: RuleTreeReadOptions): string[] {
+  const text = opts
+    .text(unstruck(raw))
+    .replace(BARE_URL_RE, " ")
+    .replace(CASE_ID_IN_TEXT_RE, " ")
+    .replace(JOINED_WORD_RE, (w) => (opts.boardIds?.has(w) ? " " : w));
+  return [...new Set(text.match(YEAR_RE) ?? [])];
+}
 
-/** The years `raw` names, struck text aside. */
-const yearsIn = (raw: string, opts: RuleTreeReadOptions) => [...new Set(opts.text(unstruck(raw)).match(YEAR_RE) ?? [])];
+/** The lead an item that starts like a leaf may carry: one to three `*` or `_`
+ *  around a label holding no arrow, an optional `:` after. Read on masked text. */
+const LEAD_TRY_RE = /^(\*{1,3}|_{1,3})(?![\s*_])((?:(?!->|→)[^\n])+?)\1(?![*_\p{L}\p{N}])(:?)/u;
+
+/** The arrow an item that starts like a leaf opens with, after an optional emphasis run (captured). */
+const ARROW_TRY_RE = /^\s*([*_]{1,3})?\s*(→|->)/;
+
+/** Why an item that is no leaf is not read as one, when it starts like a leaf:
+ *  its arrow opens its text, after an optional lead and emphasis run. Null for
+ *  any other item (an arrow inside prose is no leaf attempt). */
+function notLeafRemedy(n: RuleNode): string | null {
+  const masked = maskInline(n.raw);
+  const tried = n.lead ? null : LEAD_TRY_RE.exec(masked);
+  const arrow = ARROW_TRY_RE.exec(masked.slice(n.lead ? n.lead.raw.length : (tried?.[0].length ?? 0)));
+  if (!arrow) return null;
+  const remedies: string[] = [];
+  const leadRun = tried?.[1] ?? "";
+  if (leadRun.length > 1) remedies.push("write the edge label in italics (*label:*)");
+  if (arrow[2] === "->") remedies.push("write the arrow as →");
+  else if (arrow[1] && !["**", "__", "*", "_"].includes(arrow[1])) remedies.push(`the "${arrow[1]}" before → is not read (write →, *→ or **→)`);
+  if (!remedies.length) remedies.push("the text before → is not read as an edge label");
+  return remedies.join("; ");
+}
 
 function readLead(raw: string, text: (raw: string) => string): RuleNode["lead"] {
   for (const re of LEAD_RES) {
@@ -190,13 +228,16 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
   return { outcome, tone: null, cases, caseSplit, years: yearsIn(lead + (caseSplit ? caseSplit.body : rest), opts), unreadTail };
 }
 
-/** `pathYears`: the years its ancestors' own text names, outermost first. */
+/** `pathYears`: the years of the nearest ancestor whose own text names any. */
 function readNodes(list: ListBlock, opts: RuleTreeReadOptions, pathYears: readonly string[] = []): RuleNode[] {
   return list.items.map((raw, k) => {
     const lead = readLead(raw, opts.text);
     const rest = raw.slice(lead?.raw.length ?? 0);
     const leaf = readLeaf(lead?.raw ?? "", rest, opts);
-    const years = [...new Set([...pathYears, ...(leaf ? leaf.years : yearsIn(raw, opts))])];
+    // The deepest node on the path that names a year sets the years: a split
+    // below a parent that names both years reads the split's.
+    const own = leaf ? leaf.years : yearsIn(raw, opts);
+    const years = own.length ? own : [...pathYears];
     if (leaf) leaf.years = years;
     const under: RuleUnder[] = (list.nested?.[k] ?? []).map((c) =>
       c.type === "ul" || c.type === "ol" ? { kind: "list", list: c, nodes: readNodes(c, opts, years) } : { kind: "other", child: c },
@@ -285,8 +326,9 @@ export function readRuleTree(children: readonly Block[], attrs: Readonly<Record<
     });
   }
   for (const n of all) {
-    if (!n.leaf && (maskInline(n.raw).includes("→") || ASCII_ARROW_RE.test(n.rest))) {
-      findings.push({ message: `item ${quoteName(n)} has → but is not read as a leaf (write the edge label in italics: *label:*)`, level: "info", node: n });
+    const remedy = n.leaf ? null : notLeafRemedy(n);
+    if (remedy) {
+      findings.push({ message: `item ${quoteName(n)} is not read as a leaf: ${remedy}`, level: "info", node: n });
     } else if (n.leaf?.unreadTail) {
       findings.push({ message: `leaf ${quoteName(n)}: the text after the last — reads as no case ids`, level: "info", node: n });
     }

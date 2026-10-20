@@ -285,22 +285,46 @@ describe("the reader and the lint read one tree", () => {
     ["a bold italic arrow run", "***→ Renew*** — LIB-1"],
     ["a lead with * in a code span", "*`a*b`:* → Renew — LIB-1"],
     ["an ASCII arrow in a bold run", "**-> Renew** — LIB-1"],
+    ["a bold edge label and an ASCII arrow", "**Yes:** -> Renew — LIB-1"],
+    ["a bold edge label with the colon outside", "**Yes**: → Renew — LIB-1"],
+    ["an underscore bold edge label", "__Yes:__ → Renew — LIB-1"],
+    ["an arrow inside the text", "Loan → reservation → return", false],
+    ["an arrow after text that follows an edge label", "*Yes:* the loan → a return", false],
+    ["an arrow after text that follows a bold lead", "**Note:** a loan → a return", false],
     ["a full stop after the id", "→ Renew — LIB-1."],
     ["a lowercase id", "→ Renew — lib-1"],
     ["ids joined by a word", "→ Renew — LIB-7 og LIB-8"],
     ["a struck case id", "→ Renew — ~~LIB-1~~"],
     ["a dash inside code", "→ Renew `a — b`"],
     ["a dash inside link text", "→ [Renew — LIB-2](http://x)"],
-  ])("%s: what drops is named", (_name, item) => {
+  ] as [string, string, boolean?][])("%s: what drops is named", (_name, item, attempt = true) => {
+    // `attempt`: the item starts like a leaf; an arrow inside prose is no leaf and no finding.
     const md = tree(`- ${item}`, 'title="T" outcomes="Renew=good"');
     const r = renderedLeaves(md);
     const fs = lintOf(md);
     const notLeaf = fs.filter((f) => f.message.includes("is not read as a leaf"));
     const noCases = fs.filter((f) => f.message.includes("reads as no case ids"));
-    expect(notLeaf.length).toBe(r.leaves === 0 ? 1 : 0);
+    expect(notLeaf.length).toBe(r.leaves === 0 && attempt ? 1 : 0);
     const tail = item.replace(/~~[^~]*~~/g, "").replace(/`[^`]*`/g, "").replace(/\[[^\]]*\]\([^)]*\)/g, "").split(" — ")[1]?.trim();
     expect(noCases.length).toBe(r.leaves === 1 && r.cased === 0 && Boolean(tail) ? 1 : 0);
     expect([...notLeaf, ...noCases].every((f) => f.severity === "info")).toBe(true);
+  });
+
+  // Two leaves of one case on a year-shaped path: the reader draws both with
+  // their cases, and the lint warns exactly when no year keeps them apart.
+  test.each([
+    ["a year split under a parent naming both years", ["- Rule changed between 2024 and 2025", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Renew — LIB-1"], false],
+    ["a year split under a parent naming an earlier year", ["- Applied after 2023?", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Renew — LIB-1"], false],
+    ["two leaves under one year parent", ["- *2024:*", "  - *Yes:* → Renew — LIB-1", "  - *No:* → Renew — LIB-1"], true],
+    ["a leaf's own year over its parent's", ["- *2024:*", "  - *In 2025:* → Renew — LIB-1", "- *2025:*", "  - → Renew — LIB-1"], true],
+    ["a year in a link destination", ["- See [rule](loans/2024)", "  - → Renew — LIB-1", "- See [rule](loans/2025)", "  - → Renew — LIB-1"], true],
+    ["a year inside a case id", ["- See LIB-2024", "  - → Renew — LIB-1", "- See LIB-2025", "  - → Renew — LIB-1"], true],
+    ["a year inside a bare URL", ["- See http://x/2024/a", "  - → Renew — LIB-1", "- See http://x/2025/a", "  - → Renew — LIB-1"], true],
+    ["a year inside an autolink", ["- See <http://x/2024/a>", "  - → Renew — LIB-1", "- See <http://x/2025/a>", "  - → Renew — LIB-1"], true],
+  ] as [string, string[], boolean][])("years: %s", (_name, body, warns) => {
+    const md = tree(body.join("\n"), 'title="T" outcomes="Renew=good"');
+    expect(renderedLeaves(md)).toEqual({ leaves: 2, toned: 2, cased: 2 });
+    expect(lintOf(md).some((f) => / is on 2 leaves /.test(f.message))).toBe(warns);
   });
 
   test("the one stated divergence: on a board page, an id the board lacks beside a grammar id", () => {

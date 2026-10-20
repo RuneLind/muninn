@@ -7,9 +7,11 @@
  * - warning: the block holds no list (it renders as written), an `outcomes=`
  *   entry it cannot read, a leaf with no outcome after `→`, an outcome with no
  *   tone, a case on two leaves that do not each name a different year on
- *   their paths (an ancestor's year counts, the title's does not);
+ *   their paths (the deepest node naming a year sets a leaf's years; the
+ *   title does not count);
  * - info: an `outcomes=` label that names no leaf outcome, or names one twice;
- *   an item holding `→` (or `->`) that is not read as a leaf; a leaf whose
+ *   an item whose `→` (or `->`) opens its text after a lead, not read as a
+ *   leaf; a leaf whose
  *   text after the last ` — ` reads as no case ids (not on a CaseBoard page,
  *   where an unknown id may be a board id).
  *

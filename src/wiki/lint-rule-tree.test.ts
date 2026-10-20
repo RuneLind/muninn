@@ -118,13 +118,26 @@ describe("lint check 18 (rule-tree)", () => {
       "- **Yes:** → Renew — LIB-1",
       "- -> Renew",
       "- *No:* → Renew — LIB-1.",
+      "- Loan → return",
       "",
       "</RuleTree>",
     ].join("\n");
     expect(checkRuleTrees(page, text).map((f) => [f.message, f.line, f.severity])).toEqual([
-      ['<RuleTree title="T"> item «Yes: → Renew — LIB-1» has → but is not read as a leaf (write the edge label in italics: *label:*)', 3, "info"],
-      ['<RuleTree title="T"> item «-> Renew» has → but is not read as a leaf (write the edge label in italics: *label:*)', 4, "info"],
+      ['<RuleTree title="T"> item «Yes: → Renew — LIB-1» is not read as a leaf: write the edge label in italics (*label:*)', 3, "info"],
+      ['<RuleTree title="T"> item «-> Renew» is not read as a leaf: write the arrow as →', 4, "info"],
       ['<RuleTree title="T"> leaf «No: → Renew — LIB-1.»: the text after the last — reads as no case ids', 5, "info"],
+    ]);
+  });
+
+  test("a year on a shared parent does not join year-split leaves", () => {
+    const text = ['<RuleTree title="T" outcomes="Renew=good;Return=good">', "", "- Rule changed between 2024 and 2025", "  - *2024:* → Renew — LIB-1", "  - *2025:* → Return — LIB-1", "", "</RuleTree>"].join("\n");
+    expect(checkRuleTrees(page, text)).toEqual([]);
+  });
+
+  test("a year inside a case id or a URL on the path keeps no leaves apart", () => {
+    const text = ['<RuleTree title="T" outcomes="Renew=good;Return=good">', "", "- See LIB-2024", "  - → Renew — LIB-1", "- See http://x/2025/a", "  - → Return — LIB-1", "", "</RuleTree>"].join("\n");
+    expect(checkRuleTrees(page, text).map((f) => f.message)).toEqual([
+      '<RuleTree title="T"> case LIB-1 is on 2 leaves that do not each name a different year: «→ Renew — LIB-1», «→ Return — LIB-1»',
     ]);
   });
 
