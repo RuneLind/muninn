@@ -1419,7 +1419,7 @@ describe("rankActivity — session work (D5)", () => {
       sinceMs: NOW - 8 * DAY,
       asOfMs: NOW,
       pages,
-      identity: { roots: ["/w/kode"], name: "kode" },
+      identity: { roots: ["/w/kode"], names: ["kode"] },
       otherRoots: ["/w/mimir"],
     });
     const work = r.pages.get("concepts/c0.mdx")!;

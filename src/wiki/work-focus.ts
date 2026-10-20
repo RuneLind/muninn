@@ -26,7 +26,7 @@
  */
 
 import { isMetaStem } from "../dashboard/views/components/wiki-filter.ts";
-import { normalizeRelPath } from "./rel-path.ts";
+import { normalizeWorkedPath } from "./rel-path.ts";
 import { mapLedgerProvider } from "./provenance.ts";
 
 // ── Wire shapes ─────────────────────────────────────────────────────────────
@@ -221,8 +221,9 @@ export interface WorkFocusInput {
   sinceMs: number;
   asOfMs: number;
   pages: readonly WorkPageInput[];
-  /** This wiki: the spellings of its registered root, and its registry name. */
-  identity: { roots: readonly string[]; name?: string };
+  /** This wiki: the spellings of its registered root, and every registry name
+   *  on that root (an aliased root answers to each). */
+  identity: { roots: readonly string[]; names?: readonly string[] };
   /** Every other registered root that is not read-only. */
   otherRoots: readonly string[];
 }
@@ -239,11 +240,10 @@ export interface WorkFocusResult {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** The one key for ledger paths, prompt tokens and page relPaths:
- *  `normalizeWorkedPath`'s rule (kept here so this module imports nothing with
- *  IO) plus `coverageKey`'s NFC fold, since macOS hands back NFD names. */
+/** The one key for ledger paths, prompt tokens and page relPaths: the worked
+ *  ledger's `normalizeWorkedPath`, NFC fold included. */
 export function workPathKey(p: string): string {
-  return normalizeRelPath(p.replace(/\\/g, "/")).replace(/^\/+/, "").normalize("NFC");
+  return normalizeWorkedPath(p);
 }
 
 const DATE_PREFIX_RE = /^\d{4}-\d{2}-\d{2}-/;
@@ -404,7 +404,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
   }
   const idRoots = input.identity.roots.map(rootPrefix);
   const otherRoots = input.otherRoots.map(rootPrefix).filter((r) => !idRoots.includes(r));
-  const wikiName = input.identity.name?.toLowerCase();
+  const wikiNames = new Set((input.identity.names ?? []).map((n) => n.toLowerCase()));
   const pageByToken = (token: string): PageRec | undefined => {
     const k = workPathKey(token);
     return byKey.get(k) ?? aliasOwner.get(k);
@@ -425,7 +425,7 @@ export function computeWorkFocus(input: WorkFocusInput): WorkFocusResult {
       }
     }
     for (const l of s.text.links) {
-      if (!l.wiki || !wikiName || l.wiki.toLowerCase() !== wikiName) continue;
+      if (!l.wiki || !wikiNames.has(l.wiki.toLowerCase())) continue;
       const hit = pageByToken(l.relPath);
       if (hit) out.add(hit);
     }

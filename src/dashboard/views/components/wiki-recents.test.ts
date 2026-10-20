@@ -1447,6 +1447,49 @@ describe("groups — fix round 1", () => {
     expect(rowsOf(stored).find((r) => r.page.relPath === "plans/x.mdx")!.forcedOpen).toBeUndefined();
   });
 
+  // Arch review 2026-10, finding 72: the parent's force is decided AFTER the
+  // lifts. An open child lifted out of the group is on screen in another
+  // section, so the parent's chip stays the reader's own toggle.
+  test("an open child PINNED out of its group does not force the parent's chip", () => {
+    const m = rail({ openRelPath: "plans/x.html", pins: ["plans/x.html"] });
+    const pinnedRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.html")!;
+    expect(pinnedRow.section).toBe("pinned");
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.forcedOpen).toBeUndefined();
+    expect(parentRow.folded).toBe(true);
+    expect(parentRow.children!.map((c) => c.relPath)).toEqual(["plans/x-prototype.html"]);
+  });
+
+  test("an open child in an OPEN work-thread card does not force the parent's chip", () => {
+    const card: RailThreadCard = {
+      key: "plans/x.html",
+      foldKey: "thread:plans/x.html",
+      toggleKey: "thread:plans/x.html",
+      name: "X diagram",
+      open: true,
+      pinned: false,
+      pinAnchor: "plans/x.html",
+      focus: [child],
+      created: [],
+      touched: [],
+      sessions: [],
+      movesYou: 0,
+      score: 1,
+    };
+    const m = rail({ openRelPath: "plans/x.html", threads: [card] });
+    const cardRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.html")!;
+    expect(cardRow.section).toBe("threads");
+    const parentRow = rowsOf(m).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(parentRow.forcedOpen).toBeUndefined();
+    expect(parentRow.folded).toBe(true);
+    // Scope guard: the same open child that really renders under the parent
+    // keeps the force (a CLOSED card lifts nothing).
+    const closed = rail({ openRelPath: "plans/x.html", threads: [{ ...card, open: false }] });
+    const closedParent = rowsOf(closed).find((r) => r.page.relPath === "plans/x.mdx")!;
+    expect(closedParent.forcedOpen).toBe(true);
+    expect(closedParent.folded).toBe(false);
+  });
+
   test("Bookkeeping forced open by the open page says so too", () => {
     const log = page({ relPath: "log.md", title: "Log" });
     const pages = [loner, log];

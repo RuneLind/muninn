@@ -1,5 +1,7 @@
 import { test, expect, describe } from "bun:test";
+import { Hono } from "hono";
 import { setupTestDb } from "../test/setup-db.ts";
+import { registerDataRoutes } from "../dashboard/routes/data-routes.ts";
 import {
   createConnector,
   getConnector,
@@ -10,6 +12,7 @@ import {
 } from "./connectors.ts";
 import { createThread } from "./threads.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { holdUncommittedConnector } from "../test/connector-race.ts";
 
 setupTestDb();
 
@@ -112,6 +115,55 @@ describe("connectors", () => {
       expect(connectors[0]!.name).toBe("Alpha");
       expect(connectors[1]!.name).toBe("Middle");
       expect(connectors[2]!.name).toBe("Zebra");
+    });
+  });
+
+  describe("effort", () => {
+    test("is stored, returned, updated and cleared", async () => {
+      const created = await createConnector({ name: "Fast", connectorType: "claude-cli", model: "claude-sonnet-5-5", effort: "low" });
+      expect(created.effort).toBe("low");
+      expect((await getConnector(created.id))!.effort).toBe("low");
+      expect((await updateConnector(created.id, { effort: "high" }))!.effort).toBe("high");
+      // undefined keeps it, null clears it
+      expect((await updateConnector(created.id, { name: "Fast 2" }))!.effort).toBe("high");
+      expect((await updateConnector(created.id, { effort: null }))!.effort).toBeUndefined();
+    });
+
+    test("two connectors differing only in effort can both exist; a same-effort twin still collides", async () => {
+      const base = { connectorType: "claude-cli" as const, model: "claude-opus-5-5", baseUrl: "http://x.example/v1" };
+      const low = await createConnector({ ...base, name: "Opus low", effort: "low" });
+      const high = await createConnector({ ...base, name: "Opus high", effort: "high" });
+      const none = await createConnector({ ...base, name: "Opus default" });
+      expect(new Set([low.id, high.id, none.id]).size).toBe(3);
+      const dupe = await createConnector({ ...base, name: "Opus low again", effort: "low" }).catch((e: { code?: string }) => e.code);
+      expect(dupe).toBe("23505");
+      // The seed path's ON CONFLICT must still name a matching unique index.
+      expect(await seedConnectorsFromBotConfigs([makeBotConfig()])).toBeGreaterThanOrEqual(0);
+      expect(await seedConnectorsFromBotConfigs([makeBotConfig()])).toBe(0);
+    });
+
+    test("a connector without one reads back undefined", async () => {
+      expect((await createConnector({ name: "No effort", connectorType: "claude-cli" })).effort).toBeUndefined();
+    });
+
+    test("POST and PUT /api/connectors carry it, and refuse a value outside the enum", async () => {
+      const app = new Hono();
+      registerDataRoutes(app);
+      const send = (method: string, url: string, body: unknown) =>
+        app.request(url, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+      const bad = await send("POST", "/api/connectors", { name: "x", connectorType: "claude-cli", effort: "turbo" });
+      expect(bad.status).toBe(400);
+      expect(((await bad.json()) as { error: string }).error).toContain("Invalid effort");
+
+      const made = await send("POST", "/api/connectors", { name: "Fast", connectorType: "claude-cli", model: "m1", effort: "low" });
+      expect(made.status).toBe(201);
+      const { connector } = (await made.json()) as { connector: { id: string; effort?: string } };
+      expect(connector.effort).toBe("low");
+
+      expect((await send("PUT", `/api/connectors/${connector.id}`, { effort: "max!" })).status).toBe(400);
+      const cleared = await send("PUT", `/api/connectors/${connector.id}`, { effort: null });
+      expect(((await cleared.json()) as { connector: { effort?: string } }).connector.effort).toBeUndefined();
     });
   });
 
@@ -269,6 +321,45 @@ describe("connectors", () => {
       const all = await listConnectors();
       const copilot = all.find((c) => c.connectorType === "copilot-sdk");
       expect(copilot).toBeDefined();
+    });
+
+    // The unique key includes effort, so a conflict target alone re-seeded a
+    // NULL-effort twin of the row a user had set to `high`.
+    test("a boot seed after the user set effort on the seeded copilot connector creates no twin", async () => {
+      await seedConnectorsFromBotConfigs([]);
+      const [seeded] = (await listConnectors()).filter((c) => c.connectorType === "copilot-sdk");
+      await updateConnector(seeded!.id, { effort: "high" });
+      await seedConnectorsFromBotConfigs([]);
+      await seedConnectorsFromBotConfigs([]);
+      const copilot = (await listConnectors()).filter((c) => c.connectorType === "copilot-sdk");
+      expect(copilot.map((c) => `${c.model}|${c.effort ?? null}`)).toEqual(["claude-sonnet-5.5|high"]);
+      // A user can still add an effort variant by hand.
+      await createConnector({ name: "copilot low", connectorType: "copilot-sdk", model: "claude-sonnet-5.5", effort: "low" });
+      expect((await listConnectors()).filter((c) => c.connectorType === "copilot-sdk")).toHaveLength(2);
+    });
+
+    // The NOT EXISTS cannot see a row another boot has inserted and not yet
+    // committed, so every seed waits on the unique index; ON CONFLICT is what
+    // turns that wait into DO NOTHING instead of a unique violation.
+    test("eight boots seeding at once over a populated table leave one copilot row and none throws", async () => {
+      await createConnector({ name: "Existing CLI", connectorType: "claude-cli" });
+      const held = await holdUncommittedConnector("copilot-sdk", "claude-sonnet-5.5", null);
+      try {
+        const seeds = Array.from({ length: 8 }, () => seedConnectorsFromBotConfigs([]).then(() => "ok", (e: unknown) => String(e)));
+        await held.waitForBlocked(5); // the pool holds 5 connections; the rest queue for one
+        await held.commit();
+        expect(await Promise.all(seeds)).toEqual(Array(8).fill("ok"));
+      } finally {
+        await held.end();
+      }
+      expect((await listConnectors()).filter((c) => c.connectorType === "copilot-sdk")).toHaveLength(1);
+    });
+
+    test("a copilot row at another base URL does not stand in for the default one", async () => {
+      await createConnector({ name: "proxy", connectorType: "copilot-sdk", model: "claude-sonnet-5.5", baseUrl: "http://proxy:1" });
+      await seedConnectorsFromBotConfigs([]);
+      const copilot = (await listConnectors()).filter((c) => c.connectorType === "copilot-sdk");
+      expect(copilot.map((c) => c.baseUrl ?? null).sort()).toEqual(["http://proxy:1", null]);
     });
   });
 });

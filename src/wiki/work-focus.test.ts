@@ -56,7 +56,7 @@ function run(sessions: WorkSession[], pages: WorkPageInput[], over: Partial<Work
     sinceMs: SINCE,
     asOfMs: AS_OF,
     pages,
-    identity: { roots: ["/w/kode"], name: "kode" },
+    identity: { roots: ["/w/kode"], names: ["kode"] },
     otherRoots: ["/w/mimir"],
     ...over,
   });
@@ -93,9 +93,20 @@ describe("named (D18)", () => {
     expect(kinds(link("mimir"), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["touch"]);
     expect(kinds(link(null), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["touch"]);
   });
+  // Arch review 2026-10, finding 71: a root registered twice answers to both names.
+  test("a reader link names a page under ANY registry name of this root", () => {
+    const link = (wiki: string | null) =>
+      run([sess("a", [f("plans/2026-10-12-vaktsaker.mdx", 1, T(10)), f("plans/other.mdx", 10, T(10))], { links: [{ wiki, relPath: "plans/2026-10-12-vaktsaker.mdx" }] })], pages, {
+        identity: { roots: ["/w/kode"], names: ["kode", "kode-extra"] },
+      });
+    expect(kinds(link("kode-extra"), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["focus"]);
+    expect(kinds(link("KODE"), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["focus"]);
+    expect(kinds(link("mimir"), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["touch"]);
+    expect(kinds(link(null), "plans/2026-10-12-vaktsaker.mdx")).toEqual(["touch"]); // D18
+  });
   test("on a clone, an absolute path under the REGISTERED root names the page", () => {
     const r = run([sess("a", [f("plans/other.mdx", 1, T(10)), f("notes/note.mdx", 9, T(10))], { paths: ["/reg/kode/plans/other.mdx"] })], pages, {
-      identity: { roots: ["/reg/kode"], name: "kode" },
+      identity: { roots: ["/reg/kode"], names: ["kode"] },
     });
     expect(kinds(r, "plans/other.mdx")).toEqual(["focus"]);
   });
@@ -393,7 +404,7 @@ describe("events and states", () => {
     const pages = [pg("p/a.mdx"), pg("p/b.mdx")];
     const writes = () => [f("p/a.mdx", 1, T(10)), f("p/b.mdx", 10, T(10))];
     const named = (path: string, root: string) =>
-      kinds(run([sess("a", writes(), { paths: [path] })], pages, { identity: { roots: [root], name: "kode" } }), "p/a.mdx");
+      kinds(run([sess("a", writes(), { paths: [path] })], pages, { identity: { roots: [root], names: ["kode"] } }), "p/a.mdx");
     expect(named("/w/ka\u030ade/p/a.mdx", "/w/k\u00e5de")).toEqual(["focus"]);
     expect(named("/w/k\u00e5de/p/a.mdx", "/w/ka\u030ade")).toEqual(["focus"]);
     const away = run([sess("a", writes(), { paths: ["/w/mi\u0301mir/x.mdx"] })], pages, { otherRoots: ["/w/m\u00edmir"] });

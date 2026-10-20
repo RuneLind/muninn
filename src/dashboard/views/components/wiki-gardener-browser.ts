@@ -36,7 +36,7 @@ import {
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
 import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
-import { approveButtonFor, singleDriftNote } from "./wiki-gardener-drift.ts";
+import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wiki-gardener-drift.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -80,6 +80,8 @@ interface ProposalView {
     needsRedraft: boolean;
     missingBlock: boolean;
   } | null;
+  /** The marks read failed and the lock applies to this card: state unknown. */
+  factcheckUnknown?: boolean;
   /** A stale row Redraft replaced: the replacement's id. */
   replacedBy?: string | null;
   /** Why Approve would be refused: the page changed since drafting. */
@@ -286,6 +288,9 @@ function groupCardHtml(rows: ProposalView[]): string {
  *  (blocks one-click Approve) or the at-apply "no fact-check block" note
  *  (never blocks). */
 function factcheckNoteHtml(p: ProposalView): string {
+  if (p.factcheckUnknown && p.status === "draft") {
+    return `<div class="gard-fc-note" data-fc="unknown">${esc(FACTCHECK_UNKNOWN_NOTE)}</div>`;
+  }
   const fc = p.factcheck;
   if (!fc) return "";
   const date = fmtDate(fc.checkedAt);

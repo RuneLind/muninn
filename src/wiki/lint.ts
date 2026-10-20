@@ -146,7 +146,8 @@ import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts"
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { checkOwnsEntries, checkState, isStateScopePage, STATE_LINT_CHECKS, stateOwners, type OwnerPage, type StatePage } from "./lint-state.ts";
-import { checkComponents, COMPONENT_LINT_CHECKS } from "./lint-components.ts";
+import { checkComponents, COMPONENT_LINT_CHECKS, type LoadedPageFiles } from "./lint-components.ts";
+import { loadPageFiles } from "./page-files.ts";
 import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-chain.ts";
 import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
 import { checkRuleTrees, RULE_TREE_LINT_CHECKS } from "./lint-rule-tree.ts";
@@ -190,8 +191,9 @@ export const LINT_CHECKS = [
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
-/** The checks that read nothing but a page's own text, its relPath and the
- *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18 and 19). Check
+/** The checks that read a page's own text, its relPath and the reader
+ *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18 and 19),
+ *  and for check 15 the data files the page names ({@link pageTextFiles}). Check
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
  *  through {@link checkPageText}, and `scripts/wiki-check.ts` runs the same
@@ -991,7 +993,12 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
  * culled, and 11's Tldr half on an `.mdx` page that is a live report page or a
  * reference page and is not reserved or culled.
  */
-export function checkPageText(page: PageTextRef, content: string, roleKeys: readonly string[]): LintFinding[] {
+export function checkPageText(
+  page: PageTextRef,
+  content: string,
+  roleKeys: readonly string[],
+  files?: LoadedPageFiles,
+): LintFinding[] {
   const findings = [
     ...checkIndexTruncation(page, content),
     ...checkNestedAnnotation(page, content),
@@ -1002,9 +1009,23 @@ export function checkPageText(page: PageTextRef, content: string, roleKeys: read
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content));
   return findings;
+}
+
+/** Check 15 runs on an `.mdx` page that is not culled. */
+export const judgesComponents = (page: Pick<PageTextRef, "relPath" | "culled">): boolean =>
+  !page.culled && page.relPath.toLowerCase().endsWith(".mdx");
+
+/** The files a page check 15 judges reads beside itself, read the way the
+ *  reader reads them (`loadPageFiles`, under the wiki root's containment
+ *  check): every `<Query>` `csv=`/`sql=` and every `<CaseBoard>`/`<DeltaTable>`
+ *  `src=`, not only a `<CaseBoard>`'s YAML, on every lint run. A file with no
+ *  component name in it is read and not rendered. None for a page the check
+ *  skips. */
+export async function pageTextFiles(root: string, page: Pick<PageTextRef, "relPath" | "culled">, content: string): Promise<LoadedPageFiles> {
+  return judgesComponents(page) ? loadPageFiles(root, page.relPath, content) : new Map();
 }
 
 /**
@@ -1035,7 +1056,7 @@ export async function lintWiki(
     // Broken links apply to every markdown page (a dead link in index.md is
     // still a dead link); the frontmatter-shaped checks skip reserved infra.
     findings.push(...checkBrokenLinks(page, content, index));
-    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? []));
+    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? [], await pageTextFiles(index.root, page, content)));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.

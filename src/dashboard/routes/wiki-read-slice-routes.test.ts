@@ -174,4 +174,35 @@ describe("wiki read slice — routes", () => {
     await Bun.write(path.join(ro, "New.md"), "# New\n");
     expect(await relPaths(app, "/api/wiki/pages?wiki=rowiki&refresh=1")).toContain("New.md");
   });
+
+  // The page inlines the whole client bundle (~1 MB); nothing else in the
+  // serving chain compresses it, the nais pod's ingress included.
+  describe("GET /wiki is gzipped for a client that accepts it", () => {
+    for (const profile of ["default", "nais"] as const) {
+      test(`${profile}: gzip on Accept-Encoding, identity without it, same bytes either way`, async () => {
+        const app = appFor(profile);
+        const plain = await app.request("/wiki?wiki=rowiki");
+        expect(plain.headers.get("content-encoding")).toBeNull();
+        const html = await plain.text();
+        expect(html).toContain("rowiki");
+
+        const zipped = await app.request("/wiki?wiki=rowiki", { headers: { "accept-encoding": "gzip, deflate, br" } });
+        expect(zipped.status).toBe(200);
+        expect(zipped.headers.get("content-encoding")).toBe("gzip");
+        expect(zipped.headers.get("vary")).toContain("Accept-Encoding");
+        expect(zipped.headers.get("content-type")).toContain("text/html");
+        const raw = new Uint8Array(await zipped.arrayBuffer());
+        expect(raw.byteLength).toBeLessThan(html.length / 2);
+        expect(new TextDecoder().decode(Bun.gunzipSync(raw))).toBe(html);
+      });
+    }
+
+    test("a JSON route beside it is not compressed", async () => {
+      const res = await appFor("default").request("/api/wiki/pages?wiki=rowiki", {
+        headers: { "accept-encoding": "gzip" },
+      });
+      expect(res.headers.get("content-encoding")).toBeNull();
+      expect(((await res.json()) as { pages: unknown[] }).pages.length).toBe(2);
+    });
+  });
 });

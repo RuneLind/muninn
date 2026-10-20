@@ -79,11 +79,15 @@ describe("preferences", () => {
       ],
       keptApart: ["x.md", "X.md", 3, "", "a/../b.md", "y.md"],
     })!;
+    // `/etc/x.md` and `a/../b.md` are other spellings of a wiki page (the
+    // reader's one spelling, `normalizeRel`), so they read back canonical;
+    // `../x.md` climbs out of the wiki and is dropped.
     expect(p.splits).toEqual([
       { id: "ok", page: "a.md" },
+      { id: "abs", page: "etc/x.md" },
       { id: "fine", page: "d/e.md" },
     ]);
-    expect(p.keptApart).toEqual(["x.md", "y.md"]);
+    expect(p.keptApart).toEqual(["x.md", "b.md", "y.md"]);
     const many = parseWorkGroupPrefs({
       ...valid,
       splits: Array.from({ length: WORK_GROUP_SPLITS_MAX + 5 }, (_, i) => ({ id: `s${i}`, page: `p/${i}.md` })),

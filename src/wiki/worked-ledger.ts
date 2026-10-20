@@ -45,7 +45,7 @@ import {
   claudeUsageJson,
   claudeUsageWarnOnce,
 } from "../utils/claude-usage-fetch.ts";
-import { normalizeRelPath } from "./rel-path.ts";
+import { normalizeWorkedPath } from "./rel-path.ts";
 
 const log = getLog("wiki", "worked-ledger");
 
@@ -140,26 +140,9 @@ export function workedLedgerDepsFromEnv(): WorkedLedgerDeps {
   return defaultWorkedLedgerDeps(raw || CLAUDE_USAGE_DEFAULT_URL, raw !== "");
 }
 
-/**
- * A wiki-relative path in the spelling both sides compare on.
- *
- * The index's own `normalizeRelPath` does the work — posix-normalize (which
- * collapses `..` and `//`, neither of which a hand-rolled prefix strip sees) and
- * lower-case — with a LEADING-SLASH strip layered on top, because this side's
- * rows come from a tool that may have spelled the path `/plans/a.md` while the
- * index stores `plans/a.md`. One normalizer, so a key the store looks up is the
- * key the ledger stored.
- *
- * Lower-cased unlike the git date walk's raw-relPath keying, and deliberately:
- * that walk and the index read one filesystem through one tool, so a case
- * difference there IS a bug worth missing on. This map comes from a SECOND
- * process reading a case-insensitive filesystem through whatever spelling an
- * agent typed, so a case-only difference is noise — and the match rate is the
- * guard that a real mismatch still fires.
- */
-export function normalizeWorkedPath(p: string): string {
-  return normalizeRelPath(p.replace(/\\/g, "/")).replace(/^\/+/, "");
-}
+/** Moved to the IO-free `rel-path.ts` so the work facts (`work-focus.ts`)
+ *  key on the same rule; re-exported for every existing importer. */
+export { normalizeWorkedPath };
 
 /** A parsed `?summary=1` answer, or WHY it is not one. The reasons are separate
  *  because they are separate operator problems: a body with no `pages` key is an

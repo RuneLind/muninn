@@ -44,6 +44,7 @@ import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { normalizeRelPath } from "./rel-path.ts";
+import { aliasTopDirs, aliasWorkedPaths } from "./alias-ref.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { readFrontmatterLists, resolveRelatedEntries, type RelatedEntry } from "./frontmatter-lists.ts";
 import { extractNextMoves } from "./next-moves.ts";
@@ -60,7 +61,7 @@ import {
   normalizeWorkedPath,
   workedLedgerFor,
 } from "./worked-ledger.ts";
-import { kickWorkSessionsRefresh, workSessionsFor } from "./work-sessions.ts";
+import { kickWorkSessionsRefresh, workSessionsFor, workSessionsIdentityFor } from "./work-sessions.ts";
 import { computeWorkFocus, type IndexWork, type PageWork, type WorkPageInput } from "./work-focus.ts";
 import { buildWorkEvidence } from "./work-evidence.ts";
 
@@ -3079,27 +3080,9 @@ function lastAtOrBefore(times: readonly number[] | undefined, limit: number): nu
   return undefined;
 }
 
-/**
- * The worked-ledger keys an `aliases:` entry can stand for — the page's OLD
- * path, when it was moved. An alias is a PATH only when it is path-shaped for
- * THIS wiki: its first segment is a directory under the wiki root (`topDirs`,
- * lower-cased), so a title alias that happens to hold a slash
- * (`claude.ai/design`, `coleam00/Archon`, `/ultrareview`) folds nothing. Such a
- * path (`archive/old-plan`, `[[archive/old-plan]]`) tries `.md` then `.mdx`; a
- * spelled `.md`/`.mdx`/`.html` extension is used as written, and is the only
- * way a root-level move (`old-plan.md`) names itself. A bare name is a title
- * alias and answers nothing.
- */
-export function aliasWorkedPaths(alias: string, topDirs: ReadonlySet<string>): string[] {
-  let v = alias.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
-  v = v.split("|")[0]!.split("#")[0]!.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!v) return [];
-  const slash = v.indexOf("/");
-  if (slash !== -1 && !topDirs.has(v.slice(0, slash).toLowerCase())) return [];
-  if (/\.(?:mdx?|html)$/i.test(v)) return [normalizeWorkedPath(v)];
-  if (slash === -1) return [];
-  return [normalizeWorkedPath(`${v}.md`), normalizeWorkedPath(`${v}.mdx`)];
-}
+/** `aliasWorkedPaths` lives in the IO-free `alias-ref.ts`, which the
+ *  browser's boundary resolver imports too; re-exported for existing callers. */
+export { aliasWorkedPaths };
 
 /**
  * The relPath a `superseded_by:` value names, in ANY folder — what the reader's
@@ -3335,13 +3318,19 @@ export async function buildWikiIndex(
   // top-level `"include": "x"` (wrong type ⇒ degraded to none) and a list of
   // nothing but blanks all leave the scan just as unscoped, and measured, a
   // `{}` config silently re-admitted all eleven strays with no warn at all.
-  if (includePatterns.length === 0 && isReadonlyWikiRoot(root)) {
+  //
+  // Once per (root, reason): a bucket-mirror root is rebuilt on every changed
+  // poll and every TTL read, and a warn per build buried the mirror's own.
+  const unscopedReason = readerConfig ? "present but empty/invalid" : "missing or unreadable";
+  const unscopedKey = `${root}\u0000${unscopedReason}`;
+  if (includePatterns.length === 0 && isReadonlyWikiRoot(root) && !unscopedWarned.has(unscopedKey)) {
+    unscopedWarned.add(unscopedKey);
     log.warn(
       "{file} at read-only wiki root {root} names no `include` globs ({reason}) — the scan is unscoped (the read-only guard is unaffected; it lives in {env})",
       {
         file: WIKI_READER_CONFIG_FILE,
         root,
-        reason: readerConfig ? "present but empty/invalid" : "missing or unreadable",
+        reason: unscopedReason,
         env: WIKI_READONLY_ROOTS_ENV,
       },
     );
@@ -3795,15 +3784,15 @@ export async function buildWikiIndex(
   // client hides the sort option on the second, not the first.
   let workedCoverage: WikiIndex["workedCoverage"];
   let topDirsMemo: Set<string> | undefined;
-  /** First-level directories under the root, lower-cased — what makes an
+  /** First-level directories under the root (`aliasTopDirs`) — what makes an
    *  `aliases:` entry path-shaped (`aliasWorkedPaths`). Read once, on demand. */
   const topDirsOf = async (): Promise<Set<string>> => {
     if (topDirsMemo) return topDirsMemo;
     try {
-      topDirsMemo = new Set(
+      topDirsMemo = aliasTopDirs(
         (await readdir(root, { withFileTypes: true }))
           .filter((d) => d.isDirectory())
-          .map((d) => d.name.toLowerCase()),
+          .map((d) => d.name),
       );
     } catch {
       // An unreadable root folds no alias; the page's own path still matches.
@@ -4021,7 +4010,7 @@ export async function buildWikiIndex(
   // it names ONE page: `resolve` is first-registration-wins, so `reach` (filled
   // by `register` itself) is what tells a unique name from an ambiguous one.
   if (rawRelated.size) {
-    const roots = [root, ...(workSessionsFor(root)?.identity.roots ?? [])];
+    const roots = [root, ...(workSessionsIdentityFor(root)?.roots ?? [])];
     for (const meta of pages) {
       const entries = rawRelated.get(meta.relPath);
       if (!entries) continue;
@@ -4146,6 +4135,8 @@ export async function buildWikiIndex(
 
 /** Per-root TTL cache — bots point at different wikis, so caches can't be shared. */
 const caches = new Map<string, WikiIndex>();
+/** `root\0reason` keys already warned about an unscoped read-only scan. */
+const unscopedWarned = new Set<string>();
 /** Roots we've already warned about being unreadable (one warn per root). */
 const warnedRoots = new Set<string>();
 
@@ -4276,5 +4267,6 @@ export async function readWikiPage(index: WikiIndex, meta: WikiPageMeta): Promis
 export function __resetWikiCacheForTest(): void {
   caches.clear();
   warnedRoots.clear();
+  unscopedWarned.clear();
   flights.clear();
 }

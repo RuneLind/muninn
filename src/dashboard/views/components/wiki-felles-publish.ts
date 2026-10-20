@@ -33,6 +33,9 @@ export function fellesPublishCommand(opts: {
   return [
     ...(opts.bucket ? ["FELLES_WIKI_BUCKET=" + shellQuote(opts.bucket)] : []),
     "bun",
+    // Without it bun loads the `.env` of the directory the line runs in, which
+    // can override the bucket or credentials; the route spawns with it too.
+    "--no-env-file",
     shellQuote(opts.bin),
     ...(opts.dryRun ? ["--dry-run"] : []),
     ...(opts.allowIdent ? ["--tillat-ident"] : []),
@@ -42,15 +45,49 @@ export function fellesPublishCommand(opts: {
   ].join(" ");
 }
 
-export type FellesAction = "publish" | "remove";
+/** The command that removes a published page from the bucket by hand, for a
+ *  page the local wiki no longer lists (architecture review 2026-10, finding
+ *  80): the route refuses a relPath the index does not list, by design. No
+ *  `--ja`, so the script asks before it deletes. The relPath is the object
+ *  name, so it goes in NFC and with no `./`. */
+export function fellesRemoveCommand(opts: { bin: string; relPath: string; bucket?: string; alsoRemove?: readonly string[] }): string {
+  return [
+    ...(opts.bucket ? ["FELLES_WIKI_BUCKET=" + shellQuote(opts.bucket)] : []),
+    "bun",
+    // Without it bun loads the `.env` of the directory the line runs in, which
+    // can override the bucket or credentials; the route spawns with it too.
+    "--no-env-file",
+    shellQuote(opts.bin),
+    "--fjern",
+    "--",
+    ...[opts.relPath, ...(opts.alsoRemove ?? [])].map((r) => shellQuote(r.normalize("NFC"))),
+  ].join(" ");
+}
 
-/** One line for the script's exit code (`publiser-felles-wiki.ts` header). */
-export function fellesOutcomeLine(
-  exitCode: number,
+/** `remove-data` is the retry of a remove's data-file run alone
+ *  (`dataFilesOnly` on the route), for a page already gone from the bucket. */
+export type FellesAction = "publish" | "remove" | "remove-data";
+
+/** The POST body for one dialog run. Retry data files is a real remove with
+ *  `dataFilesOnly`; the route knows no `remove-data` action. */
+export function fellesRunBody(
+  page: { wiki: string; relPath: string },
+  action: FellesAction,
   dryRun: boolean,
-  action: FellesAction = "publish",
-): { text: string; ok: boolean } {
-  if (action === "remove") return fellesRemoveOutcomeLine(exitCode, dryRun);
+  allowIdent: boolean,
+): Record<string, unknown> {
+  return {
+    wiki: page.wiki,
+    relPath: page.relPath,
+    dryRun,
+    allowIdent,
+    action: action === "remove-data" ? "remove" : action,
+    ...(action === "remove-data" ? { dataFilesOnly: true } : {}),
+  };
+}
+
+/** One line for a publish run's exit code (`publiser-felles-wiki.ts` header). */
+export function fellesOutcomeLine(exitCode: number, dryRun: boolean): { text: string; ok: boolean } {
   switch (exitCode) {
     case 0:
       return dryRun
@@ -68,24 +105,202 @@ export function fellesOutcomeLine(
   }
 }
 
-/** The bucket has no soft delete, so the dry run names the object first and
- *  the confirm button deletes it. The script's dry run never asks the bucket,
- *  so its line claims the name, not that the object exists. */
-function fellesRemoveOutcomeLine(exitCode: number, dryRun: boolean): { text: string; ok: boolean } {
-  switch (exitCode) {
-    case 0:
-      return dryRun
-        ? { text: "Dry run: this is the object a remove deletes. The dry run does not check that it is in the bucket.", ok: true }
-        : { text: "Removed. The pod drops the page within about 2 minutes.", ok: true };
-    case 1:
-      return { text: "The script refused the path or failed before deleting — nothing was removed. See the output.", ok: false };
-    case 2:
-      return { text: "Usage or environment error — nothing was removed. See the output.", ok: false };
-    case 3:
-      return { text: "Delete failed — the page may not be in the bucket, or gcloud needs a login. See the output.", ok: false };
-    default:
-      return { text: `The script exited with code ${exitCode}.`, ok: false };
+/** What the route read from one `--fjern` run (`fellesFjernVerdict`). */
+export type FellesFjernVerdict = "deleted" | "missing" | "failed" | "error" | "timeout";
+
+/** The route's answer to a remove, a retry, or their refusals. */
+export interface FellesRemoveAnswer {
+  exitCode?: number;
+  error?: string;
+  output?: string;
+  removes?: string[];
+  keptShared?: string[];
+  keptRefused?: string[];
+  dataFiles?: string[];
+  pageRun?: FellesFjernVerdict;
+  dataRun?: FellesFjernVerdict;
+  dataFilesExitCode?: number | null;
+  retryDataFiles?: boolean;
+  dataFilesOnly?: boolean;
+}
+
+/** The confirm row after a run: hidden, or a text with Confirm remove, Retry
+ *  data files, or neither button. */
+export type FellesConfirmRow = { hidden: true } | { hidden: false; html: string; button: "confirm" | "retry" | "none" };
+
+const HIDDEN_ROW: FellesConfirmRow = { hidden: true };
+const NOT_IN_BUCKET = "an error muninn does not read as «not in the bucket» — gcloud may need a login, or the bucket could not be reached";
+const dataRunFailed = (v: FellesFjernVerdict | undefined) => v === "failed" || v === "timeout";
+
+/**
+ * The status line and confirm row for a remove or a retry, from the route's
+ * answer: the decision table's OUTCOMES cells (`src/wiki/CLAUDE.md`). Retry
+ * data files is offered only when the route says so AND the answer shows the
+ * page deleted (a page run `deleted`, or a retry the route admitted) AND the
+ * data-file run did not finish clean. A page run that reads «not in the
+ * bucket» runs no data delete, and its row gives the data files' command; one
+ * that leaves the page possibly published offers the terminal command instead.
+ */
+export function fellesRemoveView(
+  action: "remove" | "remove-data",
+  dryRun: boolean,
+  httpStatus: number,
+  data: FellesRemoveAnswer | null,
+  cmd: { bin: string; relPath: string; bucket?: string },
+): { text: string; ok: boolean; row: FellesConfirmRow } {
+  const dataFiles = data?.dataFiles ?? [];
+  const pageGone = action === "remove-data" ? data?.dataFilesOnly === true : data?.pageRun === "deleted";
+  const retry: FellesConfirmRow =
+    !dryRun && data?.retryDataFiles === true && dataFiles.length > 0 && pageGone && dataRunFailed(data.dataRun)
+      ? { hidden: false, button: "retry", html: fellesDataRetryHtml(dataFiles) }
+      : HIDDEN_ROW;
+  if (httpStatus !== 200 || !data || typeof data.exitCode !== "number") {
+    return { text: data?.error ?? `Request failed (HTTP ${httpStatus}).`, ok: false, row: retry };
   }
+  const code = data.exitCode;
+  // A data-file run that exited neither 0 nor 3 would fail the same way again.
+  const dataCommandRow = (): FellesConfirmRow => {
+    const [first, ...rest] = dataFiles;
+    if (first === undefined) return HIDDEN_ROW;
+    const command = fellesRemoveCommand({ bin: cmd.bin, relPath: first, bucket: cmd.bucket, alsoRemove: rest });
+    return { hidden: false, button: "none", html: `To delete the data files from a terminal with your own gcloud login: <code>${esc(command)}</code>` };
+  };
+  if (dryRun) {
+    if (code === 0) {
+      return {
+        text: "Dry run: this is the object a remove deletes. The dry run does not check that it is in the bucket.",
+        ok: true,
+        row: {
+          hidden: false,
+          button: "confirm",
+          html: fellesRemoveConfirmHtml(data.removes ?? [cmd.relPath], data.keptShared ?? [], data.keptRefused ?? []),
+        },
+      };
+    }
+    const text =
+      code === 1
+        ? "The script refused a path or failed — a dry run deletes nothing. See the output."
+        : code === 2
+          ? "Usage or environment error — a dry run deletes nothing. See the output."
+          : code === 3
+            ? "Delete failed in a dry run, which deletes nothing — see the output."
+            : `The script exited with code ${code}. See the output.`;
+    return { text, ok: false, row: HIDDEN_ROW };
+  }
+  const dataCode = data.dataFilesExitCode ?? code;
+  if (action === "remove-data") {
+    const text =
+      data.dataRun === "deleted"
+        ? "Removed the data files. The pod drops them within about 2 minutes."
+        : data.dataRun === "missing"
+          ? "The data files are gone from the bucket: the ones still there were deleted, the rest were already gone."
+          : data.dataRun === "failed"
+            ? `At least one data-file delete failed with ${NOT_IN_BUCKET}. See the output; Retry data files tries again.`
+            : data.dataRun === "timeout"
+              ? "The data-file delete timed out or could not start, so data files may still be in the bucket. Retry data files runs it again."
+              : `The data-file delete exited with code ${dataCode}, so data files may still be in the bucket. See the output.`;
+    const row = data.dataRun === "error" ? dataCommandRow() : retry;
+    return { text, ok: data.dataRun === "deleted" || data.dataRun === "missing", row };
+  }
+  if (data.pageRun === "missing") {
+    // «Not in the bucket» does not prove the data files unused: a page
+    // published under another name (this one before a rename) may show them.
+    const page = "The page was not in the bucket (never published, already removed, or published under another name).";
+    const [first, ...rest] = dataFiles;
+    if (first === undefined) return { text: `${page} Nothing was deleted.`, ok: true, row: HIDDEN_ROW };
+    const command = fellesRemoveCommand({ bin: cmd.bin, relPath: first, bucket: cmd.bucket, alsoRemove: rest });
+    return {
+      text: `${page} Its data files were left in the bucket, since a page published under another name, such as this page before a rename, may still show them.`,
+      ok: true,
+      row: {
+        hidden: false,
+        button: "none",
+        html: `Check the rail's «Felles» chip first: a page published under its old name is listed there as missing locally. If no published page shows them, delete them from a terminal with your own gcloud login: <code>${esc(command)}</code>`,
+      },
+    };
+  }
+  if (data.pageRun === "deleted") {
+    const page = "Removed the page.";
+    switch (data.dataRun) {
+      case undefined:
+        return { text: "Removed. The pod drops the page within about 2 minutes.", ok: true, row: retry };
+      case "deleted":
+        return { text: "Removed the page and its data files. The pod drops them within about 2 minutes.", ok: true, row: retry };
+      case "missing":
+        return {
+          text: `${page} Its data files are gone from the bucket too: the ones still there were deleted, the rest were not in it (never uploaded, or already deleted).`,
+          ok: true,
+          row: retry,
+        };
+      case "failed":
+        return { text: `${page} At least one data-file delete failed with ${NOT_IN_BUCKET}. See the output; Retry data files deletes what is left.`, ok: false, row: retry };
+      case "timeout":
+        return { text: `${page} The data-file delete timed out or could not start, so data files may still be in the bucket. Retry data files runs it again.`, ok: false, row: retry };
+      default:
+        return {
+          text: `${page} The data-file delete exited with code ${dataCode}, so data files may still be in the bucket. See the output.`,
+          ok: false,
+          row: dataCommandRow(),
+        };
+    }
+  }
+  // The page may still be published: no data file was touched, and no retry
+  // is offered. The operator's own terminal (own gcloud login) is the way out.
+  const text =
+    data.pageRun === "failed"
+      ? `The page delete failed with ${NOT_IN_BUCKET}. The page may still be published; nothing else was deleted. See the output.`
+      : code === 2
+        ? "Usage or environment error (exit 2) — nothing was deleted. See the output."
+        : code === 1
+          ? "The script refused the path or failed (exit 1). The page may still be published; nothing else was deleted. See the output."
+          : `The script exited with code ${code}. The page may still be published; nothing else was deleted. See the output.`;
+  const command = fellesRemoveCommand({ bin: cmd.bin, relPath: cmd.relPath, bucket: cmd.bucket, alsoRemove: dataFiles });
+  return {
+    text,
+    ok: false,
+    row: { hidden: false, button: "none", html: `To remove it from a terminal with your own gcloud login: <code>${esc(command)}</code>` },
+  };
+}
+
+/** Paint a confirm row onto the dialog's four nodes (plain objects in tests). */
+export function paintConfirmRow(
+  row: FellesConfirmRow,
+  els: { row: { hidden: boolean }; text: { innerHTML: string }; confirm: { hidden: boolean }; retry: { hidden: boolean } },
+): void {
+  els.row.hidden = row.hidden;
+  if (row.hidden) return;
+  els.text.innerHTML = row.html;
+  els.confirm.hidden = row.button !== "confirm";
+  els.retry.hidden = row.button !== "retry";
+}
+
+/** The confirm row's text when it offers Retry data files: the data files
+ *  alone, never the page. */
+export function fellesDataRetryHtml(dataFiles: readonly string[]): string {
+  const list = dataFiles.map((r) => `<code>${esc(r)}</code>`).join(", ");
+  return `Delete the data files again? ${list}. A file that is already gone counts as deleted.`;
+}
+
+const REMOVE_QUESTION = "Delete it from the bucket? The bucket keeps no copy; your local page stays.";
+
+/** The confirm row's text after a remove dry run: every object the confirm
+ *  deletes (the page and the data files only it reads), the data files kept
+ *  because another local page reads them, and the ones kept because the script
+ *  refuses their name. The lists are the route's answer. */
+export function fellesRemoveConfirmHtml(
+  removes: readonly string[],
+  keptShared: readonly string[],
+  keptRefused: readonly string[] = [],
+): string {
+  if (removes.length <= 1 && keptShared.length === 0 && keptRefused.length === 0) return REMOVE_QUESTION;
+  const list = (items: readonly string[]) => items.map((r) => `<code>${esc(r)}</code>`).join(", ");
+  let html =
+    removes.length <= 1
+      ? REMOVE_QUESTION
+      : `Delete ${removes.length} objects from the bucket? The page and the data files only it reads: ${list(removes)}. The bucket keeps no copy; your local files stay.`;
+  if (keptShared.length > 0) html += ` Kept, since another page reads it: ${list(keptShared)}.`;
+  if (keptRefused.length > 0) html += ` Kept, since the script refuses its name: ${list(keptRefused)}.`;
+  return html;
 }
 
 /** Escaped output with every `https://` address made a link (the script prints
@@ -142,8 +357,9 @@ export function fellesDialogHtml(relPath: string): string {
     `<button type="button" class="danger" data-felles="remove" title="Delete this page from the melosys-felles bucket">Remove…</button>` +
     `</div>` +
     `<div class="wiki-felles-confirm" hidden>` +
-    `<span>Delete it from the bucket? The bucket keeps no copy; your local page stays.</span>` +
+    `<span class="wiki-felles-confirm-text">${REMOVE_QUESTION}</span>` +
     `<button type="button" class="danger" data-felles="remove-confirm">Confirm remove</button>` +
+    `<button type="button" class="danger" data-felles="remove-data" hidden>Retry data files</button>` +
     `<button type="button" data-felles="remove-cancel">Cancel</button>` +
     `</div>` +
     `<div class="wiki-felles-status" role="status"></div>` +
@@ -230,6 +446,8 @@ export function fellesPublishStyles(): string {
     .wiki-felles-refresh { margin: 6px 0 0; color: var(--text-primary); padding-left: 8px; border-left: 3px solid var(--status-error); }
     .wiki-felles-refresh[hidden] { display: none; }
     .wiki-felles-masked { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .wiki-felles-cmd { display: flex; gap: 6px; align-items: flex-start; margin-top: 2px; }
+    .wiki-felles-cmd code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 11.5px; color: var(--text-secondary); }
     .wiki-felles-warn { color: var(--text-secondary); font-size: 11.5px; border-left: 3px solid var(--status-warning); padding-left: 6px; margin-top: 2px; }
   `;
 }
@@ -278,6 +496,9 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
   const status = q<HTMLElement>(".wiki-felles-status");
   const out = q<HTMLElement>(".wiki-felles-out");
   const confirmRow = q<HTMLElement>(".wiki-felles-confirm");
+  const confirmText = q<HTMLElement>(".wiki-felles-confirm-text");
+  const confirmBtn = q<HTMLButtonElement>('[data-felles="remove-confirm"]');
+  const retryBtn = q<HTMLButtonElement>('[data-felles="remove-data"]');
   // ✕ is disabled with the run buttons: closing mid-run would drop the result
   // and let a re-opened dialog start a second upload beside the first.
   const runButtons = [
@@ -285,6 +506,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     q<HTMLButtonElement>('[data-felles="publish"]'),
     q<HTMLButtonElement>('[data-felles="remove"]'),
     q<HTMLButtonElement>('[data-felles="remove-confirm"]'),
+    q<HTMLButtonElement>('[data-felles="remove-data"]'),
     q<HTMLButtonElement>('[data-felles="remove-cancel"]'),
     q<HTMLButtonElement>('[data-felles="close"]'),
   ];
@@ -298,6 +520,8 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     status.className = "wiki-felles-status" + (kind ? " " + kind : "");
   };
 
+  const showConfirmRow = (row: FellesConfirmRow) => paintConfirmRow(row, { row: confirmRow, text: confirmText, confirm: confirmBtn, retry: retryBtn });
+
   // Remove is two runs: the script's own dry run names the object, and only
   // then does the confirm row offer the real delete. Any other run hides it.
   async function run(action: FellesAction, dryRun: boolean): Promise<void> {
@@ -306,23 +530,28 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     running = true;
     runButtons.forEach((b) => (b.disabled = true));
     confirmRow.hidden = true;
-    const verb = action === "remove" ? "Removing…" : "Publishing…";
+    const verb = action === "publish" ? "Publishing…" : "Removing…";
     setStatus(dryRun ? "Running dry run…" : verb, "");
     out.hidden = true;
     try {
       const res = await fetch("/api/wiki/felles-publish", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wiki: opts.wiki, relPath: opts.relPath, dryRun, allowIdent: ident.checked, action }),
+        body: JSON.stringify(fellesRunBody(opts, action, dryRun, ident.checked)),
       });
-      const data = (await res.json().catch(() => null)) as
-        | { exitCode?: number; output?: string; error?: string }
-        | null;
+      const data = (await res.json().catch(() => null)) as (FellesRemoveAnswer & { exitCode?: number }) | null;
       httpStatus = res.status;
-      if (res.ok && data && typeof data.exitCode === "number") {
-        const line = fellesOutcomeLine(data.exitCode, dryRun, action);
+      if (action !== "publish") {
+        const view = fellesRemoveView(action, dryRun, res.status, data, opts);
+        setStatus(view.text, view.ok ? "ok" : "err");
+        showConfirmRow(view.row);
+        if (res.ok && data?.output) {
+          out.innerHTML = fellesOutputHtml(data.output);
+          out.hidden = false;
+        }
+      } else if (res.ok && data && typeof data.exitCode === "number") {
+        const line = fellesOutcomeLine(data.exitCode, dryRun);
         setStatus(line.text, line.ok ? "ok" : "err");
-        if (action === "remove" && dryRun && data.exitCode === 0) confirmRow.hidden = false;
         if (data.output) {
           out.innerHTML = fellesOutputHtml(data.output);
           out.hidden = false;
@@ -349,6 +578,7 @@ export function openFellesPublishDialog(opts: OpenFellesOptions): void {
     else if (action === "publish") void run("publish", false);
     else if (action === "remove") void run("remove", true);
     else if (action === "remove-confirm") void run("remove", false);
+    else if (action === "remove-data") void run("remove-data", false);
     else if (action === "remove-cancel") {
       confirmRow.hidden = true;
       setStatus("", "");
@@ -460,8 +690,14 @@ function changedFilesHtml(relPath: string, files: string[]): string {
 }
 
 /** The status lists in the sync dialog: changed pages with their files,
- *  refused pages with the scanner's reasons, pages missing locally, orphans. */
-export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: string) => string): string {
+ *  refused pages with the scanner's reasons, pages missing locally, orphans.
+ *  With `removeCommandFor`, each unmasked page missing locally carries the
+ *  command that removes it and a ⧉ copy for it. */
+export function fellesSyncListHtml(
+  status: FellesSyncStatus,
+  hrefFor: (relPath: string) => string,
+  removeCommandFor?: (relPath: string) => string,
+): string {
   const by = (state: FellesSyncState) => status.pages.filter((p) => p.state === state);
   const changed = by("changed");
   const refused = by("refused");
@@ -490,8 +726,18 @@ export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: 
     section(
       "missing",
       "Missing locally",
-      "In the bucket, but not in this wiki.",
-      missing.map((p) => `<li><span class="wiki-felles-masked">${esc(p.relPath)}</span>${warn(p.warnings)}</li>`),
+      removeCommandFor
+        ? "In the bucket, but not in this wiki. To remove one from the bucket, run its command in a terminal; the script asks before it deletes. A renamed page is tracked under its new name only after it is published once."
+        : "In the bucket, but not in this wiki.",
+      missing.map(
+        (p) =>
+          `<li><span class="wiki-felles-masked">${esc(p.relPath)}</span>` +
+          (removeCommandFor && !p.masked
+            ? `<div class="wiki-felles-cmd"><code>${esc(removeCommandFor(p.relPath))}</code>` +
+              `<button type="button" class="wiki-felles-copy-remove" data-felles="copy-remove" data-felles-path="${esc(p.relPath)}" aria-label="Copy the remove command">⧉ Copy</button></div>`
+            : "") +
+          `${warn(p.warnings)}</li>`,
+      ),
     ) +
     section(
       "orphans",
@@ -512,11 +758,15 @@ export function fellesSyncListHtml(status: FellesSyncStatus, hrefFor: (relPath: 
   );
 }
 
-export function fellesSyncDialogHtml(status: FellesSyncStatus, hrefFor: (relPath: string) => string): string {
+export function fellesSyncDialogHtml(
+  status: FellesSyncStatus,
+  hrefFor: (relPath: string) => string,
+  removeCommandFor?: (relPath: string) => string,
+): string {
   return (
     `<div class="wiki-felles-body"><div class="wiki-felles-head"><span>melosys-felles — sync</span>` +
     `<button type="button" class="wiki-felles-x" data-felles="close" aria-label="Close">✕</button></div>` +
-    `<div class="wiki-felles-lists">${fellesSyncListHtml(status, hrefFor)}</div>` +
+    `<div class="wiki-felles-lists">${fellesSyncListHtml(status, hrefFor, removeCommandFor)}</div>` +
     `<p class="wiki-felles-refresh" role="alert" hidden></p>` +
     `<label class="wiki-felles-check"><input type="checkbox" data-felles="ident" checked> ` +
     `Allow NAVident and e-mail (<code>--tillat-ident</code>)</label>` +
@@ -539,7 +789,7 @@ export function fellesSyncOutcomeLine(exitCode: number, dryRun: boolean): { text
     case 1:
       return dryRun
         ? { text: "Dry run: a page is refused by the scanner, or the script failed. Nothing was uploaded. See the output.", ok: false }
-        : { text: "A page is refused by the scanner, or the script failed. The other changed pages were published. See the output.", ok: false };
+        : { text: "A page is refused by the scanner, or the script failed. See the output.", ok: false };
     case 2:
       return { text: "Usage or environment error — nothing was uploaded. See the output.", ok: false };
     case 3:
@@ -555,17 +805,27 @@ export function fellesSyncOutcomeLine(exitCode: number, dryRun: boolean): { text
  *  sync read as a failure. It is not one when the status after it shows
  *  nothing left to publish (for a dry run: nothing would be left) and at least
  *  one refused page — the refusal is the 1. Anything else keeps the
- *  exit-code line, red. */
+ *  exit-code line, red. `after` must be read AFTER the run, a dry run
+ *  included: the status the dialog opened with can be minutes old, and a
+ *  refused page in it says nothing about why this run exited 1 (architecture
+ *  review 2026-10, finding 79). `before` is the view the run started from; a
+ *  failed real run says pages were published only when `changed` dropped.
+ *  A dry run reads ok only when its own `output` reports a refusal: a crash
+ *  also exits 1, and the status before and after it both hold the wiki's
+ *  permanently refused page, so no status comparison can tell the two apart. */
 export function fellesSyncRunOutcome(
   exitCode: number,
   dryRun: boolean,
   after: FellesSyncStatus | null,
+  before: FellesSyncStatus | null = null,
+  output = "",
 ): { text: string; ok: boolean } {
   if (exitCode === 1 && after) {
     const refused = after.pages.filter((p) => p.state === "refused").length;
     // A dry run uploads nothing, so the status after it still counts the
     // changed pages it would have published.
-    if (refused > 0 && (dryRun || after.changed === 0)) {
+    const explained = dryRun ? (fellesDrySummaryRefusals(output) ?? 0) > 0 : after.changed === 0;
+    if (refused > 0 && explained) {
       return dryRun
         ? {
             text: `Dry run: all changed pages would be published. ${refused} refused page(s) would not — see Refused. Nothing was uploaded.`,
@@ -573,8 +833,22 @@ export function fellesSyncRunOutcome(
           }
         : { text: `All changed pages were published. ${refused} refused page(s) were not — see Refused.`, ok: true };
     }
+    if (!dryRun && before && after.changed < before.changed) {
+      return {
+        text: `A page is refused by the scanner, or the script failed. ${before.changed - after.changed} changed page(s) were published. See the output.`,
+        ok: false,
+      };
+    }
   }
   return fellesSyncOutcomeLine(exitCode, dryRun);
+}
+
+/** The refused count in a `--synk --dry-run` summary line
+ *  (`Oppsummering: N klar(e), M avvist…`, `publiser-felles-wiki.ts`), which
+ *  the script prints last on every run that finished. Null without one. */
+export function fellesDrySummaryRefusals(output: string): number | null {
+  const m = /^Oppsummering: \d+ klar\(e\), (\d+) avvist\b/m.exec(output);
+  return m ? Number(m[1]) : null;
 }
 
 export interface FellesSyncOptions {
@@ -585,6 +859,10 @@ export interface FellesSyncOptions {
   openPage: (relPath: string) => void;
   /** Called whenever a status arrives, so the ⇪ Felles marker can repaint. */
   onStatus: () => void;
+  /** The publish script and muninn's bucket, for the remove command a page
+   *  missing locally carries (finding 80). Without `bin`, no command. */
+  bin?: string;
+  bucket?: string;
 }
 
 export interface FellesSync {
@@ -593,6 +871,11 @@ export interface FellesSync {
    *  could have changed the bucket has just ended, so this call starts its own
    *  request and no answer to an older one is applied after it. */
   load(opts?: { afterRun?: boolean }): Promise<StatusResult>;
+  /** Read the status again on the reader's own refetch triggers (focus,
+   *  visibility, heartbeat), without the chip's "checking…" flash. A no-op
+   *  while a sync dialog run is in flight: that run reloads the status itself
+   *  when it ends, in a newer generation. */
+  refresh(): void;
   /** What the last good status says about this page. Null until one arrived. */
   markFor(relPath: string): FellesMark;
 }
@@ -615,6 +898,10 @@ async function requestStatus(wiki: string, allowIdent: boolean): Promise<StatusR
 
 /** Wire the rail chip and its dialog. Call once, on a wiki that offers ⇪ Felles. */
 export function initFellesSync(opts: FellesSyncOptions): FellesSync {
+  const bin = opts.bin;
+  const removeCommandFor = bin
+    ? (relPath: string) => fellesRemoveCommand({ bin, relPath, bucket: opts.bucket })
+    : undefined;
   // The last GOOD default status: a failed reload leaves it and the markers
   // standing, and only the chip says the status failed.
   let status: FellesSyncStatus | null = null;
@@ -623,6 +910,8 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
   // returned to its caller but never painted.
   let generation = 0;
   let inflight: { gen: number; promise: Promise<StatusResult> } | null = null;
+  // True while a sync dialog run is in flight; `refresh()` stands down then.
+  let runInFlight = false;
 
   const slot = document.getElementById(FELLES_SYNC_SLOT_ID);
   // The chip is updated IN PLACE, never re-created, so keyboard focus survives
@@ -642,11 +931,12 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     slot.hidden = false;
   };
 
-  function load(o: { afterRun?: boolean } = {}): Promise<StatusResult> {
+  function load(o: { afterRun?: boolean; quiet?: boolean } = {}): Promise<StatusResult> {
     if (o.afterRun) generation++;
     if (inflight && inflight.gen === generation) return inflight.promise;
     const gen = generation;
-    paint({ kind: "loading" });
+    // A background refresh keeps the chip's last answer on screen meanwhile.
+    if (!(o.quiet && status)) paint({ kind: "loading" });
     const promise: Promise<StatusResult> = requestStatus(opts.wiki, true).then((r) => {
       if (inflight?.promise === promise) inflight = null;
       if (gen !== generation) return r;
@@ -669,15 +959,17 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     if (!btn) return;
     const state = btn.getAttribute("data-state");
     if (state === "error") void load();
-    else if (state === "ok" && status) openDialog(status);
+    else if (state === "ok" && status) openDialog(status, true);
   });
 
-  function openDialog(initial: FellesSyncStatus): void {
+  /** `fresh`: read the dialog's view again once it is open, so it never sits
+   *  on an answer older than the click (finding 67). */
+  function openDialog(initial: FellesSyncStatus, fresh = false): void {
     document.getElementById(SYNC_DIALOG_ID)?.remove();
     const dialog = document.createElement("dialog");
     dialog.id = SYNC_DIALOG_ID;
     dialog.className = "wiki-felles wiki-felles-sync-dialog";
-    dialog.innerHTML = fellesSyncDialogHtml(initial, opts.hrefFor);
+    dialog.innerHTML = fellesSyncDialogHtml(initial, opts.hrefFor, removeCommandFor);
     document.body.appendChild(dialog);
     let running = false;
     // Same hold as the page dialog: a run in flight keeps it open.
@@ -713,6 +1005,7 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     // false from the moment the flag or the bucket may have moved until a
     // status for it arrives; Publish changed stays off meanwhile.
     let view = initial;
+    let listsHtml = fellesSyncListHtml(initial, opts.hrefFor, removeCommandFor);
     let viewReady = true;
     let viewSeq = 0;
     const syncEnabled = () => {
@@ -725,7 +1018,9 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       syncEnabled();
       const allowIdent = ident.checked;
       let r: StatusResult;
-      if (afterRun && allowIdent) r = await load({ afterRun: true });
+      // With the default flag the view IS the chip's status: one request
+      // updates the chip, the page markers and the view together.
+      if (allowIdent) r = await load(afterRun ? { afterRun: true } : { quiet: true });
       else {
         // After a run the chip refreshes too, with its own default flag.
         if (afterRun) void load({ afterRun: true });
@@ -735,7 +1030,10 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       if (r.ok) {
         view = r.status;
         viewReady = true;
-        lists.innerHTML = fellesSyncListHtml(view, opts.hrefFor);
+        // An unchanged answer keeps the nodes: a swap would pull a link out
+        // from under a pointer that is on it.
+        const html = fellesSyncListHtml(view, opts.hrefFor, removeCommandFor);
+        if (html !== listsHtml) lists.innerHTML = listsHtml = html;
         syncBtn.textContent = `Publish changed (${view.changed})`;
         setRefresh("");
       } else {
@@ -750,6 +1048,8 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
     async function run(dryRun: boolean): Promise<void> {
       if (running) return;
       running = true;
+      runInFlight = true;
+      const before = viewReady ? view : null;
       // Links are inert mid-run: a click would navigate behind the modal.
       lists.inert = true;
       holdDuringRun.forEach((b) => (b.disabled = true));
@@ -758,36 +1058,50 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       out.hidden = true;
       let exitCode: number | null = null;
       let httpStatus: number | null = null;
+      let output = "";
       try {
-        const res = await fetch("/api/wiki/felles-publish", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ wiki: opts.wiki, action: "sync", dryRun, allowIdent: ident.checked }),
-        });
-        const data = (await res.json().catch(() => null)) as { exitCode?: number; output?: string; error?: string } | null;
-        httpStatus = res.status;
-        if (res.ok && data && typeof data.exitCode === "number") {
-          exitCode = data.exitCode;
-          if (data.output) {
-            out.innerHTML = fellesOutputHtml(data.output);
-            out.hidden = false;
+        try {
+          const res = await fetch("/api/wiki/felles-publish", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ wiki: opts.wiki, action: "sync", dryRun, allowIdent: ident.checked }),
+          });
+          const data = (await res.json().catch(() => null)) as { exitCode?: number; output?: string; error?: string } | null;
+          httpStatus = res.status;
+          if (res.ok && data && typeof data.exitCode === "number") {
+            exitCode = data.exitCode;
+            output = data.output ?? "";
+            if (data.output) {
+              out.innerHTML = fellesOutputHtml(data.output);
+              out.hidden = false;
+            }
+            setStatus(dryRun ? "Dry run finished." : "Checking the status after the run…", "");
+          } else {
+            setStatus(data?.error ?? `Request failed (HTTP ${res.status}).`, "err");
           }
-          setStatus(dryRun ? "Dry run finished." : "Checking the status after the run…", "");
-        } else {
-          setStatus(data?.error ?? `Request failed (HTTP ${res.status}).`, "err");
+        } catch (err) {
+          setStatus(`Request failed: ${err instanceof Error ? err.message : String(err)}`, "err");
         }
-      } catch (err) {
-        setStatus(`Request failed: ${err instanceof Error ? err.message : String(err)}`, "err");
+        // A dry run that answered is judged on a status read after it too
+        // (finding 79); with the default flag that read also refreshes the chip.
+        const after = fellesRunCouldChangeBucket(dryRun, httpStatus)
+          ? await reloadView(true)
+          : dryRun && exitCode !== null
+            ? await reloadView(false)
+            : viewReady
+              ? view
+              : null;
+        if (exitCode !== null) {
+          const line = fellesSyncRunOutcome(exitCode, dryRun, after, before, output);
+          setStatus(line.text, line.ok ? "ok" : "err");
+        }
+      } finally {
+        running = false;
+        runInFlight = false;
+        lists.inert = false;
+        holdDuringRun.forEach((b) => (b.disabled = false));
+        syncEnabled();
       }
-      const after = fellesRunCouldChangeBucket(dryRun, httpStatus) ? await reloadView(true) : viewReady ? view : null;
-      if (exitCode !== null) {
-        const line = fellesSyncRunOutcome(exitCode, dryRun, after);
-        setStatus(line.text, line.ok ? "ok" : "err");
-      }
-      running = false;
-      lists.inert = false;
-      holdDuringRun.forEach((b) => (b.disabled = false));
-      syncEnabled();
     }
 
     dialog.addEventListener("click", (e) => {
@@ -807,12 +1121,27 @@ export function initFellesSync(opts: FellesSyncOptions): FellesSync {
       if (action === "close") dialog.close();
       else if (action === "sync-dry") void run(true);
       else if (action === "sync") void run(false);
+      else if (action === "copy-remove" && removeCommandFor) {
+        const btn = target.closest("button") as HTMLButtonElement;
+        void copyText(removeCommandFor(btn.getAttribute("data-felles-path") || "")).then((ok) =>
+          flashCopyResult(btn, ok, {
+            text: "⧉ Copy",
+            ariaLabel: "Copy the remove command",
+            okText: "✓ Copied",
+            failText: "Copy failed",
+          }),
+        );
+      }
     });
     dialog.showModal();
+    if (fresh) void reloadView(false);
   }
 
   return {
     load,
+    refresh: () => {
+      if (!runInFlight) void load({ quiet: true });
+    },
     markFor: (relPath) => {
       const state = states.get(fellesStatusKey(relPath));
       return state === "changed" ? "stale" : state === "refused" ? "refused" : null;

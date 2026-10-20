@@ -2,8 +2,12 @@
  * Seed default AI connectors into the database.
  *
  * Creates standard connector entries for common AI backends.
- * Safe to run multiple times — skips entries that already exist
- * (unique on connector_type + model + base_url).
+ * Safe to run multiple times — skips an entry when a connector with the same
+ * connector_type + model + base_url exists at any effort. The table's unique
+ * key is `idx_connectors_unique_config` on (connector_type, COALESCE(model, ''),
+ * COALESCE(base_url, ''), COALESCE(effort, '')) — migration 084 — so the key
+ * alone would let a user's `high` variant gain a NULL-effort twin; pinned by
+ * src/db/seed-connectors-script.test.ts.
  *
  * Usage:
  *   bun scripts/seed-connectors.ts
@@ -38,8 +42,14 @@ async function seedConnector(c: ConnectorSeed): Promise<boolean> {
   try {
     const [row] = await sql`
       INSERT INTO connectors (name, description, connector_type, model, base_url)
-      VALUES (${c.name}, ${"Seeded by seed-connectors script"}, ${c.connectorType}, ${c.model}, ${c.baseUrl})
-      ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, '')) DO NOTHING
+      SELECT ${c.name}, ${"Seeded by seed-connectors script"}, ${c.connectorType}, ${c.model}, ${c.baseUrl}
+      WHERE NOT EXISTS (
+        SELECT 1 FROM connectors
+        WHERE connector_type = ${c.connectorType}
+          AND COALESCE(model, '') = COALESCE(${c.model}::text, '')
+          AND COALESCE(base_url, '') = COALESCE(${c.baseUrl}::text, '')
+      )
+      ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, ''), COALESCE(effort, '')) DO NOTHING
       RETURNING id
     `;
     if (row) {

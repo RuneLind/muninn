@@ -30,7 +30,7 @@ import { getSchedulerContext } from "../../scheduler/runner.ts";
 import { getAllThreadsForBot, deleteThreadById } from "../../db/threads.ts";
 import { getUserSettings } from "../../db/user-settings.ts";
 import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
-import type { ConnectorType } from "../../bots/config.ts";
+import { EFFORT_VALUES, type ConnectorType, type EffortLevel } from "../../bots/config.ts";
 import { parseIntParam, isValidUuid } from "./route-utils.ts";
 import {
   isReadonlyWikiRoot,
@@ -567,6 +567,7 @@ export function registerDataRoutes(app: Hono): void {
         model?: string;
         baseUrl?: string;
         thinkingMaxTokens?: number;
+        effort?: string | null;
         timeoutMs?: number;
       }>();
       if (!body.name || !body.connectorType) {
@@ -576,6 +577,7 @@ export function registerDataRoutes(app: Hono): void {
       if (!validTypes.includes(body.connectorType as ConnectorType)) {
         return c.json({ error: `Invalid connectorType. Must be one of: ${validTypes.join(", ")}` }, 400);
       }
+      if (!isConnectorEffort(body.effort)) return c.json({ error: CONNECTOR_EFFORT_ERROR }, 400);
       const connector = await createConnector({
         name: body.name,
         description: body.description,
@@ -583,12 +585,13 @@ export function registerDataRoutes(app: Hono): void {
         model: body.model,
         baseUrl: body.baseUrl,
         thinkingMaxTokens: body.thinkingMaxTokens,
+        effort: body.effort ?? undefined,
         timeoutMs: body.timeoutMs,
       });
       return c.json({ connector }, 201);
     } catch (err) {
       if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
-        return c.json({ error: "A connector with this type, model, and base URL already exists" }, 409);
+        return c.json({ error: "A connector with this type, model, base URL and effort already exists" }, 409);
       }
       log.error("Failed to create connector: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to create connector" }, 500);
@@ -606,6 +609,7 @@ export function registerDataRoutes(app: Hono): void {
         model?: string | null;
         baseUrl?: string | null;
         thinkingMaxTokens?: number | null;
+        effort?: string | null;
         timeoutMs?: number | null;
       }>();
       if (body.connectorType) {
@@ -614,6 +618,7 @@ export function registerDataRoutes(app: Hono): void {
           return c.json({ error: `Invalid connectorType. Must be one of: ${validTypes.join(", ")}` }, 400);
         }
       }
+      if (!isConnectorEffort(body.effort)) return c.json({ error: CONNECTOR_EFFORT_ERROR }, 400);
       const connector = await updateConnector(id, {
         name: body.name,
         description: body.description,
@@ -621,6 +626,7 @@ export function registerDataRoutes(app: Hono): void {
         model: body.model,
         baseUrl: body.baseUrl,
         thinkingMaxTokens: body.thinkingMaxTokens,
+        effort: body.effort,
         timeoutMs: body.timeoutMs,
       });
       if (!connector) {
@@ -629,7 +635,7 @@ export function registerDataRoutes(app: Hono): void {
       return c.json({ connector });
     } catch (err) {
       if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
-        return c.json({ error: "A connector with this type, model, and base URL already exists" }, 409);
+        return c.json({ error: "A connector with this type, model, base URL and effort already exists" }, 409);
       }
       log.error("Failed to update connector: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to update connector" }, 500);
@@ -654,4 +660,11 @@ export function registerDataRoutes(app: Hono): void {
       return c.json({ error: "Failed to delete connector" }, 500);
     }
   });
+}
+
+const CONNECTOR_EFFORT_ERROR = `Invalid effort. Must be one of: ${EFFORT_VALUES.join(", ")}, or null`;
+
+/** Absent and null pass (keep / clear); anything else must be an effort level. */
+function isConnectorEffort(value: unknown): value is EffortLevel | null | undefined {
+  return value == null || (EFFORT_VALUES as readonly unknown[]).includes(value);
 }

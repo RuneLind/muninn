@@ -543,6 +543,32 @@ describe(".wiki-reader.json `include` — scan scope", () => {
     }
   });
 
+  test("the unscoped warn fires once per root, not on every rebuild", async () => {
+    // A bucket-mirror root is rebuilt on every poll that changed something and
+    // on every TTL read; a warn per build buried the mirror's own warnings.
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    const unscopedWarns = () =>
+      records.filter((r) => r.level === "warning" && r.message.join("").includes("no `include` globs")).length;
+    try {
+      __setReadonlyWikiRootsForTest([root]);
+      __resetWikiCacheForTest();
+      for (let i = 0; i < 3; i++) await buildWikiIndex(root);
+      expect(unscopedWarns()).toBe(1);
+      // A test reset (or a new process) re-arms it.
+      __resetWikiCacheForTest();
+      await buildWikiIndex(root);
+      expect(unscopedWarns()).toBe(2);
+    } finally {
+      await reset();
+      __setReadonlyWikiRootsForTest();
+    }
+  });
+
   test("a read-only root with no readable config warns — the scan is unscoped", async () => {
     const records: LogRecord[] = [];
     await configure({

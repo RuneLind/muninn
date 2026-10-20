@@ -16,6 +16,13 @@ import {
   type WikiViewState,
 } from "./wiki-refresh.ts";
 import type { WikiListing } from "./wiki-filter.ts";
+import {
+  MIRROR_STATUS_AGE_ID,
+  MIRROR_STATUS_MSG_ID,
+  MIRROR_STATUS_SLOT_ID,
+  paintMirrorStatus,
+  type ListingMirrorStatus,
+} from "./wiki-mirror-status.ts";
 
 function page(name: string): WikiListing {
   return {
@@ -325,4 +332,88 @@ test("full cycle: throttled refetch → defer while reading → applied once on 
   markApplied(model, pending);
   expect(model.appliedKey).toBe("f3");
   expect(takePending(model)).toBeNull();
+});
+
+// ── The bucket-mirror line rides every listing (architecture review 2026-10, batch H fix round 1) ──
+// `receivePages` is the listing handler `wiki-browser.ts` hands every response
+// to; its `onMirror` hook is how the rail line is painted. These drive it with
+// the real painter over a fake slot, so a status that never reaches the slot
+// fails here.
+
+function withMirrorSlot(run: (slot: { readonly text: string; hidden: boolean }) => void): void {
+  const saved = globalThis.document;
+  const msg = { textContent: "" };
+  const age = { textContent: "" };
+  const slot = { hidden: true, get text() { return `${msg.textContent} ${age.textContent}`; } };
+  const byId: Record<string, unknown> = { [MIRROR_STATUS_SLOT_ID]: slot, [MIRROR_STATUS_MSG_ID]: msg, [MIRROR_STATUS_AGE_ID]: age };
+  globalThis.document = { getElementById: (id: string) => byId[id] ?? null } as unknown as Document;
+  try {
+    run(slot);
+  } finally {
+    globalThis.document = saved;
+  }
+}
+
+const MIRROR_NOW = Date.UTC(2026, 9, 20, 12, 0, 0);
+const failing = (lastSuccessAt: number): ListingMirrorStatus => ({
+  health: "failing", lastSuccessAt, consecutiveFailures: 3, failedObjects: 0,
+});
+
+function receiveWithMirror(model: PagesRefreshModel, data: WikiPagesResponse, view: WikiViewState, now: number, fingerprint = JSON.stringify(data)) {
+  const seq = startFetch(model, model.lastFetchAt + WIKI_REFETCH_MIN_INTERVAL_MS);
+  return receivePages(model, { data, view, seq, fingerprint, onMirror: (m) => paintMirrorStatus(m, now) });
+}
+
+test("F2: a listing deferred under an open page still paints the mirror line", () => {
+  withMirrorSlot((slot) => {
+    const model = createRefreshModel();
+    const boot = payload(["a"]);
+    expect(receiveWithMirror(model, boot, "start", MIRROR_NOW)).toBe("apply");
+    apply(model, boot);
+    expect(slot.hidden).toBe(true);
+    // The mirror starts failing while the reader has a page open: the page list
+    // is held back, the rail line is not.
+    expect(receiveWithMirror(model, payload(["a", "b"], { mirror: failing(MIRROR_NOW - 5 * 60_000) }), "article", MIRROR_NOW)).toBe("defer");
+    expect(slot.hidden).toBe(false);
+    expect(slot.text).toContain("the bucket does not answer; last complete update 5 min ago");
+  });
+});
+
+test("F1: an unchanged listing still repaints the mirror line, so its age advances", () => {
+  withMirrorSlot((slot) => {
+    const model = createRefreshModel();
+    const data = payload(["a"], { mirror: failing(MIRROR_NOW - 2 * 60_000) });
+    expect(receiveWithMirror(model, data, "start", MIRROR_NOW)).toBe("apply");
+    apply(model, data);
+    expect(slot.text).toContain("2 min ago");
+    // Same bytes an hour later: the page list is untouched, the age is not.
+    expect(receiveWithMirror(model, data, "start", MIRROR_NOW + 60 * 60_000)).toBe("unchanged");
+    expect(slot.text).toContain("1 h ago");
+  });
+});
+
+test("F1: an empty degraded refetch still reports the mirror", () => {
+  withMirrorSlot((slot) => {
+    const model = createRefreshModel();
+    const boot = payload(["a"]);
+    receiveWithMirror(model, boot, "start", MIRROR_NOW);
+    apply(model, boot);
+    expect(receiveWithMirror(model, payload([], { mirror: failing(MIRROR_NOW) }), "start", MIRROR_NOW)).toBe("empty");
+    expect(slot.hidden).toBe(false);
+  });
+});
+
+test("a stale response does not paint the mirror line", () => {
+  withMirrorSlot((slot) => {
+    const model = createRefreshModel();
+    const slow = startFetch(model, 0);
+    const fast = startFetch(model, WIKI_REFETCH_MIN_INTERVAL_MS);
+    const paint = (m: ListingMirrorStatus | undefined) => paintMirrorStatus(m, MIRROR_NOW);
+    receivePages(model, { data: payload(["a"]), view: "start", seq: fast, fingerprint: "f", onMirror: paint });
+    expect(slot.hidden).toBe(true);
+    expect(
+      receivePages(model, { data: payload(["a"], { mirror: failing(MIRROR_NOW) }), view: "start", seq: slow, fingerprint: "s", onMirror: paint }),
+    ).toBe("stale");
+    expect(slot.hidden).toBe(true);
+  });
 });

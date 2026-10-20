@@ -1109,6 +1109,15 @@ describe("traces", () => {
       expect(remaining.find((t) => t.id === oldId)).toBeUndefined();
       expect(remaining.find((t) => t.id === newSpan.id)).toBeTruthy();
     });
+
+    test("a window under 1 day throws and deletes nothing", async () => {
+      const span = makeRootSpan();
+      await saveSpan(span);
+      for (const days of [0, -1]) {
+        await expect(cleanupOldTraces(days)).rejects.toThrow(/at least 1 day/);
+      }
+      expect((await getRecentTraces(50)).find((t) => t.id === span.id)).toBeTruthy();
+    });
   });
 });
 

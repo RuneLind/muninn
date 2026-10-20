@@ -28,6 +28,7 @@ describe("decideOrigin — the off-mode table", () => {
     origin: undefined as string | undefined,
     secFetchSite: undefined as string | undefined,
     host: undefined as string | undefined,
+    forwardedProto: undefined as string | undefined,
     mode: "off" as const,
   };
   const allowed = (over: Partial<typeof base>) => decideOrigin({ ...base, ...over }).allowed;
@@ -97,6 +98,26 @@ describe("decideOrigin — the off-mode table", () => {
     expect(allowed({ origin: "http://192.168.1.50:3010", host: "192.168.1.50:3010", secFetchSite: "none" })).toBe(true);
     expect(allowed({ origin: "https://mini.ts.net", host: "mini.ts.net", secFetchSite: "same-origin" })).toBe(true);
     expect(allowed({ origin: EXTENSION, host: "mini.ts.net", secFetchSite: "cross-site" })).toBe(true);
+  });
+
+  test("X-Forwarded-Proto pins the Host arm's scheme: an http page cannot open the https-proxied socket", () => {
+    // The WS handshake carries no Sec-Fetch-Site, so before this the arm took
+    // the scheme from the Origin and an http page on :80 of the tailnet name
+    // passed against the socket `tailscale serve` publishes on 443.
+    const proxied = { method: "GET", path: "/chat/ws", host: "mini.ts.net", forwardedProto: "https" };
+    expect(allowed({ ...proxied, origin: "http://mini.ts.net" })).toBe(false);
+    expect(allowed({ ...proxied, origin: "https://mini.ts.net" })).toBe(true);
+    // A list (proxy chain) is read by its first hop; case and spaces fold.
+    expect(allowed({ ...proxied, forwardedProto: " HTTPS , http", origin: "http://mini.ts.net" })).toBe(false);
+    expect(allowed({ ...proxied, forwardedProto: "http", origin: "http://mini.ts.net" })).toBe(true);
+    expect(allowed({ ...proxied, forwardedProto: "http", origin: "https://mini.ts.net" })).toBe(false);
+    // No proxy, no header: plain-http LAN use is unchanged.
+    expect(allowed({ ...proxied, forwardedProto: undefined, origin: "http://mini.ts.net" })).toBe(true);
+    // A value that names neither scheme is ignored rather than trusted or refused.
+    expect(allowed({ ...proxied, forwardedProto: "wss", origin: "http://mini.ts.net" })).toBe(true);
+    // The other arms do not read it: the loopback literal and an extension still pass.
+    expect(allowed({ ...proxied, origin: `http://localhost:${PORT}` })).toBe(true);
+    expect(allowed({ ...proxied, origin: EXTENSION })).toBe(true);
   });
 
   test("an origin on the optional allowlist is allowed", () => {
@@ -242,6 +263,12 @@ describe("the dashboard with auth off, composed as src/index.ts composes it", ()
       headers: { host: "mini.ts.net", origin: "http://mini.ts.net", "sec-fetch-site": "cross-site" },
     });
     await refused(res);
+  });
+
+  test("behind an https proxy (X-Forwarded-Proto: https), an http Origin on the same name is refused", async () => {
+    const proxied = { host: "mini.ts.net", "x-forwarded-proto": "https", "content-type": "application/json" };
+    await refused(await post(offApp(), { ...proxied, origin: "http://mini.ts.net" }));
+    await reachedHandler(await post(offApp(), { ...proxied, origin: "https://mini.ts.net" }));
   });
 
   test("a foreign page's POST to that LAN host is still refused", async () => {

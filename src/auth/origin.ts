@@ -128,6 +128,27 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // request. The route also requires its own header, which a cross-origin page
   // cannot send without a preflight; this entry is the instance-wide rule.
   "/api/wiki/felles-status",
+  // Search, similarity and embedding amplifiers: each GET carries caller text
+  // or a collection to a huginn search or graph computation, or to a local
+  // embedding plus a pgvector query. Exact paths; the pages fetch them
+  // same-origin, and the cheap siblings (`/api/graph/collections`,
+  // `/api/search/health`) stay unlisted. `side-effecting-gets.test.ts` holds
+  // the criterion and classifies every other GET.
+  "/api/search/search",
+  "/api/memsearch",
+  "/api/graph/similarity",
+  "/api/graph/author",
+  "/api/research/similar",
+  "/api/summaries/same-story",
+  "/api/anthropic/similar",
+  "/api/articles/similar",
+  "/api/youtube/similar",
+  "/api/x-articles/similar",
+  "/api/tiktok/similar",
+  "/api/vimeo/similar",
+  "/api/wiki/similar",
+  // `?semantic=1` builds one huginn similarity graph per backing collection.
+  "/api/wiki/atlas",
   // On a missing or stale cache it SPAWNS every stdio MCP server in the bot's `.mcp.json` to probe
   // it — so an `<img>` on any page could start local processes. The chat page
   // calls it with a same-origin `fetch`, which passes.
@@ -146,6 +167,33 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
 ];
 
 /**
+ * GET paths whose plain read is the reader's own and stays open, but whose
+ * `?refresh=1` forces a rebuild: a full wiki index build with its git reads
+ * (`pages`, `index-coverage`), or an uncached recompute over every summary
+ * collection (`ingest-backlog`, `stats`). Exact paths. Each route reads
+ * `c.req.query("refresh") === "1"`, which is Hono's FIRST value of a repeated
+ * parameter; {@link refreshRequested} matches ANY `refresh` value equal to
+ * `"1"`, a superset of whichever one the route reads.
+ * `side-effecting-gets.test.ts` finds a new read only when it is spelled
+ * `.query("refresh")` or `.queries("refresh")` with a literal name, in a
+ * non-test `.ts` file under `src/dashboard/` or `src/chat/`, and it attributes
+ * the read to the nearest literal `.get("…")` above it in that file. A
+ * destructured `c.req.query()`, an indexed `queries()["refresh"]`, a
+ * `searchParams` read, or a read in any other directory is not seen.
+ */
+export const REFRESH_SIDE_EFFECTING_GETS: readonly string[] = [
+  "/api/wiki/pages",
+  "/api/wiki/index-coverage",
+  "/api/wiki/ingest-backlog",
+  "/api/summaries/stats",
+];
+
+/** Does the query ask for a forced rebuild, as the routes above parse it? */
+export function refreshRequested(search: URLSearchParams | undefined): boolean {
+  return !!search && search.getAll("refresh").includes("1");
+}
+
+/**
  * ⚠️ **HEAD is NOT safe, and treating it as safe is a hole rather than an
  * optimisation.** Hono dispatches `HEAD /x` to the handler registered with
  * `app.get("/x")` and RUNS ITS BODY — so exempting HEAD does not skip a
@@ -157,18 +205,21 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
  * to the GET rule; the two read-only `app.on("HEAD", …)` report/spec routes are
  * not on the list and are unaffected.
  */
-export function isSideEffectingRequest(method: string, path: string): boolean {
+export function isSideEffectingRequest(method: string, path: string, search?: URLSearchParams): boolean {
   const m = method.toUpperCase();
   // OPTIONS only: a CORS preflight has no side effect, and refusing it would
   // break the very preflight `src/auth/cors.ts` answers.
   if (m === "OPTIONS") return false;
   if (m !== "GET" && m !== "HEAD") return true;
-  return SIDE_EFFECTING_GETS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p));
+  if (SIDE_EFFECTING_GETS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p))) return true;
+  return REFRESH_SIDE_EFFECTING_GETS.includes(path) && refreshRequested(search);
 }
 
 export interface OriginDecisionInput {
   readonly method: string;
   readonly path: string;
+  /** The query string, read only for {@link REFRESH_SIDE_EFFECTING_GETS}. */
+  readonly search?: URLSearchParams;
   /** The `Origin` request header, verbatim. */
   readonly origin: string | undefined;
   /** The `Sec-Fetch-Site` request header, verbatim. */
@@ -193,6 +244,13 @@ export interface OriginDecisionInput {
    * for the rebinding reason recorded on `allowedOrigins` above.
    */
   readonly host?: string | undefined;
+  /**
+   * The `X-Forwarded-Proto` request header, verbatim — read by the `off` Host
+   * arm ONLY. When it names `http` or `https`, the `Origin`'s scheme must equal
+   * it. It can only NARROW the arm: a client that sets it on a direct request
+   * refuses its own request, never admits another.
+   */
+  readonly forwardedProto?: string | undefined;
   /** Omitted ⇒ `"authenticating"`, the stricter rule. */
   readonly mode?: OriginPolicyMode;
 }
@@ -273,6 +331,21 @@ export function originMatchesHost(origin: string, host: string | undefined): boo
   }
 }
 
+/**
+ * True unless `X-Forwarded-Proto` names a scheme (`http`/`https`, first hop of
+ * a comma list, case-folded) that differs from the `Origin`'s. An absent or
+ * unrecognised value constrains nothing: plain-http LAN use sends none.
+ */
+export function originSchemeMatchesForwarded(origin: string, forwardedProto: string | undefined): boolean {
+  const proto = forwardedProto?.split(",")[0]?.trim().toLowerCase();
+  if (proto !== "http" && proto !== "https") return true;
+  try {
+    return new URL(origin.trim()).protocol === `${proto}:`;
+  } catch {
+    return false;
+  }
+}
+
 export interface OriginDecision {
   readonly allowed: boolean;
   /** Short, log-shaped. Never echoed to the client — a refusal that explains
@@ -305,7 +378,7 @@ export function loopbackOrigins(port: number): string[] {
 }
 
 export function decideOrigin(input: OriginDecisionInput): OriginDecision {
-  if (!isSideEffectingRequest(input.method, input.path)) {
+  if (!isSideEffectingRequest(input.method, input.path, input.search)) {
     return { allowed: true, reason: "not side-effecting" };
   }
 
@@ -324,7 +397,15 @@ export function decideOrigin(input: OriginDecisionInput): OriginDecision {
       // requests that carry none (a plain-http page, a WS handshake). A
       // cross-site http page on the name an https proxy forwards as Host
       // would otherwise match it.
-      if ((!site || site === "none") && originMatchesHost(origin, input.host)) {
+      //
+      // The proxy's scheme, when it states one, is the scheme the request was
+      // served on: an http page on :80 of the name `tailscale serve` publishes
+      // on 443 sends a matching Host and no Sec-Fetch-Site on a WS handshake.
+      if (
+        (!site || site === "none") &&
+        originMatchesHost(origin, input.host) &&
+        originSchemeMatchesForwarded(origin, input.forwardedProto)
+      ) {
         return { allowed: true, reason: "origin matches host" };
       }
       if (site === "same-origin") return { allowed: true, reason: "sec-fetch-site same-origin" };
@@ -370,9 +451,11 @@ export function createOriginMiddleware(
     const decision = decideOrigin({
       method: c.req.method,
       path: c.req.path,
+      search: REFRESH_SIDE_EFFECTING_GETS.includes(c.req.path) ? new URL(c.req.url).searchParams : undefined,
       origin: c.req.header("origin"),
       secFetchSite: c.req.header("sec-fetch-site"),
       host: c.req.header("host"),
+      forwardedProto: c.req.header("x-forwarded-proto"),
       allowedOrigins: accepted,
       mode,
     });

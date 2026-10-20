@@ -46,6 +46,7 @@ CREATE TABLE connectors (
   base_url TEXT,
   thinking_max_tokens INTEGER,
   timeout_ms INTEGER,
+  effort TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -64,7 +65,7 @@ CREATE TRIGGER connectors_updated_at
   EXECUTE FUNCTION update_connectors_updated_at();
 
 CREATE UNIQUE INDEX idx_connectors_unique_config
-  ON connectors (connector_type, COALESCE(model, ''), COALESCE(base_url, ''));
+  ON connectors (connector_type, COALESCE(model, ''), COALESCE(base_url, ''), COALESCE(effort, ''));
 
 -- ============================================================================
 -- Threads: isolated conversation contexts per topic

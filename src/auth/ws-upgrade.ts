@@ -183,6 +183,7 @@ function originRefusal(
     origin: req.headers.get("origin") ?? undefined,
     secFetchSite: req.headers.get("sec-fetch-site") ?? undefined,
     host: req.headers.get("host") ?? undefined,
+    forwardedProto: req.headers.get("x-forwarded-proto") ?? undefined,
     allowedOrigins: accepted,
     mode,
   });
