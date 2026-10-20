@@ -49,7 +49,7 @@
  * `since`/`until`, pre-window `until`, summary `until`), as epoch ms. A bound
  * past the window (a later `until`, an earlier `since`) is refused at any
  * offset; one inside it by up to `FROZEN_WINDOW_SLACK_MS` is accepted with a Δ
- * line; further is refused. Capture all three with `until=<ms>`: the live
+ * line; further is refused. Capture all three with `until=<ms>`: muninn's live
  * sessions and worked-ledger fetches ask without it, and upstream then echoes
  * the time it answered on the sessions form and no `until` on the summary
  * form. A refusal prints the route to capture with. A pre-window answer inside
@@ -74,13 +74,14 @@
  *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
  * written anywhere but the temp clone, which is removed on exit and on SIGINT,
- * SIGTERM and SIGHUP (after the running git child has exited).
+ * SIGTERM, SIGHUP and SIGQUIT, after the running git child's process group is
+ * killed. SIGTSTP stops that group with the script, SIGCONT resumes it.
  */
 
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { commitAt, git, ReplayError, signalHandler, stampMtimes } from "./wiki-work-replay-git.ts";
+import { commitAt, git, ReplayError, resume, signalHandler, stampMtimes, suspend } from "./wiki-work-replay-git.ts";
 import { getWikiRegistry } from "../src/wiki/registry-memo.ts";
 import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
@@ -633,11 +634,15 @@ async function main(): Promise<void> {
   let removing: Promise<void> | undefined;
   const cleanup = () => (removing ??= rm(tmp, { recursive: true, force: true }));
   // A signal stops the git children first, so nothing writes into the clone
-  // while it is removed; see `signalHandler` for the exit code.
+  // while it is removed; see `signalHandler` for the exit code. Each git runs
+  // in its own process group, so the terminal's Ctrl-C, Ctrl-\ and Ctrl-Z
+  // reach the script alone, and the script passes each one on.
   const onSignal = signalHandler(cleanup);
-  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
+  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129], ["SIGQUIT", 131]] as const) {
     process.on(sig, () => onSignal(code));
   }
+  process.on("SIGTSTP", () => suspend());
+  process.on("SIGCONT", () => resume());
   try {
     const repo = path.join(tmp, "repo");
     await git(tmp, ["clone", "--quiet", "--shared", "--no-checkout", toplevel, repo]);

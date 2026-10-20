@@ -12,73 +12,113 @@ import type { Subprocess } from "bun";
 /** A failure the script explains in one stderr line instead of a stack. */
 export class ReplayError extends Error {}
 
-/** The git children still running, so a signal can stop them before the
- *  clone they write into is removed. */
-export const gitChildren = new Set<Subprocess>();
+/**
+ * The shell each git runs under, as the leader of its own session and process
+ * group (`detached`): it starts a watchdog in that group, then `exec`s git with
+ * stdin from /dev/null. The watchdog blocks on the script's end of the stdin
+ * pipe and SIGKILLs the whole group once it closes, which happens when the
+ * script exits for any reason, a SIGKILL included. Until then the watchdog keeps
+ * the group alive, so a group kill reaches only processes git started, including
+ * one a hook left behind with `&` (ppid 1). One that calls `setsid` leaves the
+ * group and is not reached.
+ */
+const WATCHDOG_SHELL = 'exec 3<&0 </dev/null; { read -r _ <&3; kill -s KILL 0; } >/dev/null 2>&1 & exec 3<&-; exec "$@"';
+
+interface GitChild {
+  proc: Subprocess<"pipe", "pipe", "pipe">;
+  /** Set once the group is SIGKILLed; it is never signalled after that. */
+  killed: boolean;
+}
+
+/** The git children whose group is not yet killed, so a signal can stop them
+ *  before the clone they write into is removed. */
+const gitChildren = new Set<GitChild>();
+
+/** SIGKILL `c`'s process group, once. The watchdog keeps the group alive until
+ *  this kill, so the group id cannot name another group. */
+function killGroup(c: GitChild): void {
+  if (c.killed) return;
+  c.killed = true;
+  try {
+    process.kill(-c.proc.pid, "SIGKILL");
+  } catch {
+    // The group is gone: the script's stdin end closed early and the watchdog
+    // killed it, or someone outside killed every member.
+  }
+}
+
+/** Send `sig` to every git child's group not yet killed (SIGSTOP and SIGCONT,
+ *  for job control). */
+function signalGroups(sig: "SIGSTOP" | "SIGCONT"): void {
+  for (const c of gitChildren) {
+    if (c.killed) continue;
+    try {
+      process.kill(-c.proc.pid, sig);
+    } catch {
+      // the group is gone
+    }
+  }
+}
 
 export async function git(cwd: string, args: string[]): Promise<string> {
-  // In the script's own process group, not `detached`: a group signal the
-  // script does not handle (Ctrl-\, Ctrl-Z, a supervisor's group SIGKILL)
-  // then reaches git and its hooks too, which a detached git escapes (the cost
-  // `runGit` documents in `src/wiki/commit.ts`). A handled signal kills the
-  // tree through `killGitChildren`.
-  const proc = Bun.spawn(["git", "-C", cwd, "-c", "core.quotePath=false", ...args], { stdout: "pipe", stderr: "pipe" });
-  gitChildren.add(proc);
+  const proc = Bun.spawn(["/bin/sh", "-c", WATCHDOG_SHELL, "sh", "git", "-C", cwd, "-c", "core.quotePath=false", ...args], {
+    detached: true,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const child: GitChild = { proc, killed: false };
+  gitChildren.add(child);
   try {
-    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err.trim()}`);
-    return out;
+    const out = new Response(proc.stdout).text();
+    const err = new Response(proc.stderr).text();
+    const code = await proc.exited;
+    // What a hook left running in the group dies with git, before the output is
+    // read: a child that holds git's stdout or stderr would hold the read too.
+    killGroup(child);
+    const [o, e] = await Promise.all([out, err]);
+    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${e.trim()}`);
+    return o;
   } finally {
-    gitChildren.delete(proc);
+    killGroup(child);
+    gitChildren.delete(child);
+    try {
+      proc.stdin.end();
+    } catch {
+      // already closed
+    }
   }
 }
 
-/** `roots` and every process below them, each SIGSTOPped as it is found so
- *  none can fork a child the walk misses. A stopped parent cannot reap an
- *  exited child either, so no pid in the tree is reused before the kill. */
-function stopTree(roots: number[]): number[] {
-  const tree = new Set<number>();
-  for (let found = roots; found.length > 0; ) {
-    for (const pid of found) {
-      tree.add(pid);
-      try {
-        process.kill(pid, "SIGSTOP");
-      } catch {
-        // already exited
-      }
-    }
-    found = [];
-    for (const line of Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="]).stdout.toString().split("\n")) {
-      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
-      if (pid && ppid && tree.has(ppid) && !tree.has(pid)) found.push(pid);
-    }
-  }
-  return [...tree];
-}
-
-/** SIGKILL each running git child and everything below it (a hook, an lfs
- *  smudge), so nothing writes into the clone after it is removed. A process
- *  that left the tree (`setsid` and a double fork) is not reached. Returns the
- *  git children killed. */
+/** SIGKILL each running git child's process group: git, its hooks and filters,
+ *  and what they left in the group, so nothing writes into the clone after it
+ *  is removed. Returns the git children killed. */
 export function killGitChildren(): Subprocess[] {
   const running = [...gitChildren];
-  for (const pid of stopTree(running.map((c) => c.pid))) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // already exited
-    }
-  }
-  return running;
+  for (const c of running) killGroup(c);
+  return running.map((c) => c.proc);
+}
+
+/** SIGTSTP: stop every git child's group, then the script itself. A terminal's
+ *  Ctrl-Z reaches only the script's group, and a group in another session
+ *  ignores SIGTSTP, so the groups get SIGSTOP. */
+export function suspend(): void {
+  signalGroups("SIGSTOP");
+  process.kill(process.pid, "SIGSTOP");
+}
+
+/** SIGCONT: resume the groups `suspend` stopped. */
+export function resume(): void {
+  signalGroups("SIGCONT");
 }
 
 /**
  * The script's signal handler, called with the signal's exit code (128 + n).
- * The first signal kills the git children's trees (`kill`), waits for them to
- * exit, runs `cleanup` and exits with its own code, also when `cleanup`
- * rejects. A signal that arrives while that is in flight exits at once with ITS
- * code, without waiting, so a second Ctrl-C quits a stalled removal (the clone
- * may remain).
+ * The first signal kills the git children's groups (`kill`), waits for them to
+ * exit, runs `cleanup` and exits with its own code, also when `kill` throws or
+ * `cleanup` rejects. A signal that arrives while that is in flight exits at
+ * once with ITS code, without waiting, so a second Ctrl-C quits a stalled
+ * removal (the clone may remain).
  */
 export function signalHandler(
   cleanup: () => Promise<void>,
@@ -89,7 +129,12 @@ export function signalHandler(
   return (code) => {
     if (stopping) return exit(code);
     stopping = true;
-    const running = kill();
+    let running: { exited: Promise<unknown> }[] = [];
+    try {
+      running = kill();
+    } catch {
+      // Remove the clone and exit all the same.
+    }
     void Promise.all(running.map((c) => c.exited))
       .then(cleanup)
       .then(

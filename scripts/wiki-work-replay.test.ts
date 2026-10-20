@@ -201,124 +201,276 @@ function alive(pid: number): boolean {
   }
 }
 
-describe("a signal mid-run", () => {
-  /** What a test started: the replay, killed with its process group, and the
-   *  hook's sleep. `afterEach` kills only an entry the test did not see exit,
-   *  which happens when an assertion failed first, so a pid already reaped and
-   *  perhaps reused is never signalled. */
-  const started: { pid: number; group: boolean; exited: () => boolean }[] = [];
-  /** Hook pids `goneSoon` saw exit. */
-  const seenGone = new Set<number>();
+/** `ps -o <field>=` for one pid, or "" once it is gone. */
+function psField(pid: number, field: "stat" | "pgid"): string {
+  return Bun.spawnSync(["ps", "-o", `${field}=`, "-p", String(pid)]).stdout.toString().trim();
+}
+
+/**
+ * The teardown matrix: hooks git runs × what happens to the script. Each row
+ * spawns the replay against a fixture whose post-checkout hook leaves sleeps
+ * behind, does one thing to the script, and asserts that no sleep survives.
+ * Process signals go through `process.kill`: on macOS Bun's `Subprocess.kill`
+ * maps SIGTSTP, SIGCONT and SIGSTOP by Linux numbers and sends other signals.
+ */
+describe("git teardown", () => {
+  /** Every process group a test started or saw a sleep in: the replay's own
+   *  (spawned detached) and each sleep's. `afterEach` SIGKILLs all of them,
+   *  also the ones whose leader exited, since an orphan keeps a group alive. */
+  const groups = new Set<number>();
   afterEach(() => {
-    for (const { pid, group, exited } of started.splice(0)) {
-      if (exited()) continue;
+    for (const g of groups) {
       try {
-        process.kill(group ? -pid : pid, "SIGKILL");
+        process.kill(-g, "SIGKILL");
       } catch {
-        // exited after the check
+        // the group is empty
       }
     }
-    seenGone.clear();
+    groups.clear();
   });
 
-  /** A fixture whose post-checkout hook writes its pid to the returned marker,
-   *  then holds the checkout for 20 s: the signal lands between the clone and
-   *  the build. `ignoreTerm` makes the hook and its sleep ignore SIGTERM. */
-  async function heldCheckout(ignoreTerm = false): Promise<{ f: Fixture; hooks: string; marker: string }> {
+  /**
+   * - `fg`: the hook runs `sleep` in the foreground and holds the checkout.
+   * - `orphan`: as `fg`, after starting a second `sleep` with `&` in a subshell
+   *   that exits, so that sleep runs on with ppid 1 while git still runs.
+   * - `bg-held`: the hook starts `sleep` with `&` and exits; the sleep keeps
+   *   git's stdout and stderr open after git has exited.
+   * - `bg-free`: as `bg-held`, with the sleep's output sent to /dev/null, so git
+   *   returns at once and the script runs to its end.
+   * - `bg-fail`: as `bg-free`, and the hook exits 1, so the checkout fails.
+   */
+  type Hook = "fg" | "orphan" | "bg-held" | "bg-free" | "bg-fail";
+
+  /** A fixture with a `kind` hook; each sleep's pid goes to a marker file. */
+  async function hooked(kind: Hook): Promise<{ f: Fixture; hookEnv: Record<string, string>; markers: string[] }> {
     const f = await fixture();
     await writeFile(path.join(f.repo, "a.md"), page("A"));
     await commit(f.repo, "a", AT - 2 * H, AT - 2 * H);
     const hooks = path.join(f.base, "hooks");
-    const marker = path.join(f.base, "checkout-running");
     await mkdir(hooks);
-    await writeFile(path.join(hooks, "post-checkout"), `#!/bin/sh\necho $$ > "${marker}"\n${ignoreTerm ? "trap '' TERM\nsleep 20" : "exec sleep 20"}\n`);
+    const [m1, m2] = [path.join(f.base, "sleep-1"), path.join(f.base, "sleep-2")];
+    const body = {
+      fg: `echo $$ > "${m1}"\nexec sleep 20`,
+      orphan: `( sleep 20 >/dev/null 2>&1 & echo $! > "${m2}" )\necho $$ > "${m1}"\nexec sleep 20`,
+      "bg-held": `sleep 20 &\necho $! > "${m1}"\nexit 0`,
+      "bg-free": `sleep 20 >/dev/null 2>&1 &\necho $! > "${m1}"\nexit 0`,
+      "bg-fail": `sleep 20 >/dev/null 2>&1 &\necho $! > "${m1}"\nexit 1`,
+    }[kind];
+    await writeFile(path.join(hooks, "post-checkout"), `#!/bin/sh\n${body}\n`);
     await chmod(path.join(hooks, "post-checkout"), 0o755);
-    return { f, hooks, marker };
-  }
-
-  /** Spawn the replay (its own process group, so a failed test can kill it
-   *  all) and wait for the hook; returns the process and the hook's pid. */
-  async function startHeld(f: Fixture, hooks: string, marker: string, env: Record<string, string> = {}) {
     const hookEnv = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: hooks };
-    const proc = spawnReplay(f, await writeFrozen(f), { ...hookEnv, ...env }, true);
-    started.push({ pid: proc.pid, group: true, exited: () => proc.exitCode !== null || proc.signalCode !== null });
-    const deadline = Date.now() + 20_000;
-    while (!existsSync(marker) || !(await Bun.file(marker).text()).trim()) {
-      if (Date.now() > deadline) throw new Error("the checkout hook never ran");
-      await Bun.sleep(50);
-    }
-    const sleeper = Number((await Bun.file(marker).text()).trim());
-    started.push({ pid: sleeper, group: false, exited: () => seenGone.has(sleeper) || !alive(sleeper) });
-    expect(await clonesIn(f.scriptTmp)).toHaveLength(1);
-    return { proc, sleeper };
+    return { f, hookEnv, markers: kind === "orphan" ? [m1, m2] : [m1] };
   }
 
-  /** Waits up to 2 s for `pid` to be reaped after its group is killed. */
-  async function goneSoon(pid: number): Promise<boolean> {
-    for (const until = Date.now() + 2_000; Date.now() < until; await Bun.sleep(50)) {
-      if (!alive(pid)) {
-        seenGone.add(pid);
-        return true;
+  /** The replay, in its own process group so `afterEach` can kill it all. */
+  async function start(kind: Hook, env: Record<string, string> = {}) {
+    const { f, hookEnv, markers } = await hooked(kind);
+    const proc = spawnReplay(f, await writeFrozen(f), { ...hookEnv, ...env }, true);
+    groups.add(proc.pid);
+    return { f, proc, markers };
+  }
+
+  /** Waits for the hook to write every marker; returns the sleeps' pids and
+   *  records their groups for `afterEach`. */
+  async function sleepsOf(markers: string[]): Promise<number[]> {
+    const deadline = Date.now() + 20_000;
+    const pids: number[] = [];
+    for (const m of markers) {
+      while (!existsSync(m) || !(await Bun.file(m).text()).trim()) {
+        if (Date.now() > deadline) throw new Error("the checkout hook never ran");
+        await Bun.sleep(50);
       }
+      pids.push(Number((await Bun.file(m).text()).trim()));
+    }
+    for (const pid of pids) {
+      const g = Number(psField(pid, "pgid"));
+      if (g > 1) groups.add(g);
+    }
+    return pids;
+  }
+
+  /** True once every pid has exited, polled for up to 3 s. */
+  async function allGone(pids: number[]): Promise<boolean> {
+    for (const until = Date.now() + 3_000; Date.now() < until; await Bun.sleep(50)) {
+      if (!pids.some(alive)) return true;
     }
     return false;
   }
 
-  for (const [signal, code] of [
-    ["SIGTERM", 143],
-    ["SIGHUP", 129],
-    ["SIGINT", 130],
-  ] as const) {
-    test(`${signal} removes the temp clone and stops the hook git started`, async () => {
-      const { f, hooks, marker } = await heldCheckout();
-      const { proc, sleeper } = await startHeld(f, hooks, marker);
-
-      const sent = Date.now();
-      proc.kill(signal);
-      expect(await proc.exited).toBe(code);
-      // The handler stops the git child instead of waiting out its 20 s hook.
-      expect(Date.now() - sent).toBeLessThan(10_000);
-      expect(await clonesIn(f.scriptTmp)).toEqual([]);
-      // ...and the hook with it: killing git alone leaves `sleep` reparented.
-      expect(await goneSoon(sleeper)).toBe(true);
-    }, 40_000);
+  /** True once `ps` shows every pid stopped (`want`) or running (`!want`). */
+  async function stopped(pids: number[], want: boolean): Promise<boolean> {
+    for (const until = Date.now() + 3_000; Date.now() < until; await Bun.sleep(50)) {
+      if (pids.every((p) => psField(p, "stat").startsWith("T") === want)) return true;
+    }
+    return false;
   }
 
-  // A signal the script does not handle, sent to its whole process group as a
-  // terminal (Ctrl-\) or a supervisor would: git and its hook are in that
-  // group, so they die with the script instead of running on reparented.
-  for (const signal of ["SIGQUIT", "SIGKILL"] as const) {
-    test(`a group ${signal} stops the hook git started`, async () => {
-      const { f, hooks, marker } = await heldCheckout();
-      const { proc, sleeper } = await startHeld(f, hooks, marker);
+  const exitOrHang = (proc: { exited: Promise<number> }, ms = 10_000) =>
+    Promise.race([proc.exited, Bun.sleep(ms).then(() => "hung" as const)]);
 
-      process.kill(-proc.pid, signal);
-      await proc.exited;
-      expect(await goneSoon(sleeper)).toBe(true);
-    }, 40_000);
+  describe("the script ends on its own", () => {
+    test("bg-free, normal exit: the sleep the hook left behind is killed", async () => {
+      const { proc, markers } = await start("bg-free");
+      expect(await exitOrHang(proc)).toBe(0);
+      expect(await allGone(await sleepsOf(markers))).toBe(true);
+    }, 30_000);
+
+    test("bg-held, normal exit: a sleep holding git's output open neither holds the exit nor survives it", async () => {
+      const { proc, markers } = await start("bg-held");
+      const sleeps = await sleepsOf(markers);
+      expect(await exitOrHang(proc)).toBe(0);
+      expect(await allGone(sleeps)).toBe(true);
+    }, 30_000);
+
+    test("bg-fail, git error exit: the sleep the hook left behind is killed", async () => {
+      const { proc, markers } = await start("bg-fail");
+      const code = await exitOrHang(proc);
+      expect(code).not.toBe("hung");
+      expect(code).not.toBe(0);
+      expect(await allGone(await sleepsOf(markers))).toBe(true);
+    }, 30_000);
+  });
+
+  type Send = { name: string; send: (pid: number) => void; code: number | null };
+  const sends: Send[] = [
+    { name: "SIGINT to the script", send: (p) => process.kill(p, "SIGINT"), code: 130 },
+    { name: "SIGTERM to the script", send: (p) => process.kill(p, "SIGTERM"), code: 143 },
+    { name: "SIGHUP to the script", send: (p) => process.kill(p, "SIGHUP"), code: 129 },
+    // As a terminal sends Ctrl-C and Ctrl-\ to its foreground job.
+    { name: "SIGINT to its process group", send: (p) => process.kill(-p, "SIGINT"), code: 130 },
+    { name: "SIGQUIT to its process group", send: (p) => process.kill(-p, "SIGQUIT"), code: 131 },
+    // Neither can be handled: no exit code to check, and the clone remains.
+    { name: "SIGKILL to its process group", send: (p) => process.kill(-p, "SIGKILL"), code: null },
+    { name: "SIGKILL to the script alone", send: (p) => process.kill(p, "SIGKILL"), code: null },
+  ];
+  for (const kind of ["fg", "orphan"] as const) {
+    describe(`a ${kind} hook holding the checkout`, () => {
+      for (const { name, send, code } of sends) {
+        test(`${name}: no sleep survives${code === null ? "" : `, the clone is removed and the script exits ${code}`}`, async () => {
+          const { f, proc, markers } = await start(kind);
+          const sleeps = await sleepsOf(markers);
+          expect(await clonesIn(f.scriptTmp)).toHaveLength(1);
+
+          send(proc.pid);
+          const exited = await exitOrHang(proc);
+          expect(exited).not.toBe("hung");
+          expect(await allGone(sleeps)).toBe(true);
+          if (code !== null) {
+            expect(proc.signalCode).toBeNull();
+            expect(exited).toBe(code);
+            expect(await clonesIn(f.scriptTmp)).toEqual([]);
+          }
+        }, 40_000);
+      }
+
+      test("SIGTSTP then SIGCONT to the script: the sleeps stop and resume with it", async () => {
+        const { f, proc, markers } = await start(kind);
+        const sleeps = await sleepsOf(markers);
+
+        process.kill(proc.pid, "SIGTSTP");
+        expect(await stopped(sleeps, true)).toBe(true);
+        expect(await stopped([proc.pid], true)).toBe(true);
+        process.kill(proc.pid, "SIGCONT");
+        expect(await stopped(sleeps, false)).toBe(true);
+        expect(await stopped([proc.pid], false)).toBe(true);
+
+        process.kill(proc.pid, "SIGTERM");
+        expect(await exitOrHang(proc)).toBe(143);
+        expect(await allGone(sleeps)).toBe(true);
+        expect(await clonesIn(f.scriptTmp)).toEqual([]);
+      }, 40_000);
+    });
   }
+
+  test("bg-held, SIGTERM while the sleep holds git's output: the sleep dies and the script exits", async () => {
+    const { f, proc, markers } = await start("bg-held");
+    const sleeps = await sleepsOf(markers);
+    process.kill(proc.pid, "SIGTERM");
+    // The signal may land after the script has finished (0) or during it (143).
+    expect([0, 143] as (number | "hung")[]).toContain(await exitOrHang(proc));
+    expect(await allGone(sleeps)).toBe(true);
+    expect(await clonesIn(f.scriptTmp)).toEqual([]);
+  }, 40_000);
+
+  test("without ps on PATH, SIGTERM still stops the hook and exits 143", async () => {
+    const realGit = Bun.which("git");
+    const realSleep = Bun.which("sleep");
+    if (!realGit || !realSleep) throw new Error("no git or sleep on PATH");
+    const base = await testTempDir(path.join(tmpdir(), "wiki-work-replay-bin-"));
+    await writeFile(path.join(base, "git"), `#!/bin/sh\nexec "${realGit}" "$@"\n`);
+    await chmod(path.join(base, "git"), 0o755);
+    await symlink(realSleep, path.join(base, "sleep"));
+    await symlink(process.execPath, path.join(base, "bun"));
+    const { f, proc, markers } = await start("fg", { PATH: base });
+    const sleeps = await sleepsOf(markers);
+
+    process.kill(proc.pid, "SIGTERM");
+    expect(await exitOrHang(proc)).toBe(143);
+    expect(await allGone(sleeps)).toBe(true);
+    expect(await clonesIn(f.scriptTmp)).toEqual([]);
+  }, 40_000);
 
   test("a git child and hook that ignore SIGTERM do not hold the exit", async () => {
-    const { f, hooks, marker } = await heldCheckout(true);
-    // A `git` on PATH that ignores SIGTERM and runs the real one under it.
     const realGit = Bun.which("git");
     if (!realGit) throw new Error("no git on PATH");
+    const { f, hookEnv, markers } = await hooked("fg");
+    // The hook's sleep ignores SIGTERM too.
+    await writeFile(path.join(f.base, "hooks", "post-checkout"), `#!/bin/sh\necho $$ > "${markers[0]}"\ntrap '' TERM\nsleep 20\n`);
+    // A `git` on PATH that ignores SIGTERM and runs the real one under it.
     const bin = path.join(f.base, "bin");
     await mkdir(bin);
     await writeFile(path.join(bin, "git"), `#!/bin/sh\ntrap '' TERM\n"${realGit}" "$@"\n`);
     await chmod(path.join(bin, "git"), 0o755);
-    const { proc, sleeper } = await startHeld(f, hooks, marker, { PATH: `${bin}:${process.env.PATH ?? ""}` });
+    const proc = spawnReplay(f, await writeFrozen(f), { ...hookEnv, PATH: `${bin}:${process.env.PATH ?? ""}` }, true);
+    groups.add(proc.pid);
+    const sleeps = await sleepsOf(markers);
 
     const sent = Date.now();
-    proc.kill("SIGTERM");
+    process.kill(proc.pid, "SIGTERM");
     // A second signal, as a user would send on a stuck exit.
-    const second = setTimeout(() => proc.kill("SIGINT"), 2_000);
-    const exited = await Promise.race([proc.exited, Bun.sleep(10_000).then(() => "hung" as const)]);
+    const second = setTimeout(() => process.kill(proc.pid, "SIGINT"), 2_000);
+    const exited = await exitOrHang(proc);
     clearTimeout(second);
     expect(exited).not.toBe("hung");
     expect(Date.now() - sent).toBeLessThan(10_000);
-    expect(await goneSoon(sleeper)).toBe(true);
+    expect(await allGone(sleeps)).toBe(true);
   }, 40_000);
+});
+
+describe("live ledger answers", () => {
+  test("each of the three is asked for the registered root on the full files route", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.repo, "a.md"), page("A"));
+    await commit(f.repo, "a", AT - 2 * H, AT - 2 * H);
+    const asked: string[] = [];
+    const summary = (until: number) => ({ root: f.repo, pageCount: 0, bulk: 10, limit: 5000, truncated: false, until, pages: [] });
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const url = new URL(req.url);
+        asked.push(url.pathname + url.search);
+        const q = url.searchParams;
+        if (q.get("sessions") === "1") {
+          return Response.json({ form: "sessions", root: f.repo, since: SINCE, until: AT, limit: 200, truncated: false, sessions: [] });
+        }
+        return Response.json(summary(Number(q.get("until"))));
+      },
+    });
+    try {
+      const proc = spawnReplay(f, [], { CLAUDE_USAGE_URL: `http://127.0.0.1:${server.port}` });
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(err).toBe("");
+      expect(code).toBe(0);
+      expect(out).toContain(`wiki fx at ${new Date(AT).toISOString()}`);
+      const route = `/api/files?root=${encodeURIComponent(f.repo)}&`;
+      expect(asked.sort()).toEqual(
+        [`${route}sessions=1&since=${SINCE}&until=${AT}`, `${route}summary=1&until=${AT}`, `${route}summary=1&until=${SINCE}`].sort(),
+      );
+    } finally {
+      server.stop(true);
+    }
+  }, 30_000);
 });
 
 describe("signalHandler", () => {
@@ -359,6 +511,20 @@ describe("signalHandler", () => {
     gitExit();
     await Bun.sleep(20);
     expect(order).toEqual(["cleanup", "exit 130"]);
+  });
+
+  test("a kill step that throws still runs cleanup and exits with the signal's code", async () => {
+    const order: string[] = [];
+    const onSignal = await signalHandler(
+      async () => void order.push("cleanup"),
+      (c) => void order.push(`exit ${c}`),
+      () => {
+        throw new Error("ps: not found");
+      },
+    );
+    onSignal(143);
+    await Bun.sleep(20);
+    expect(order).toEqual(["cleanup", "exit 143"]);
   });
 
   test("a second signal during a stalled cleanup exits at once with its own code", async () => {
