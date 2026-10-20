@@ -854,6 +854,11 @@ describe("an enum value that folds to the default renders as written and is no f
       for (const [v, folded] of variants) {
         const out = readerHtml(at(v));
         const found = run(at(v)).map((f) => f.message);
+        // Check 15 renders without `views`: a value that renders as the
+        // default in the reader renders as the default there too.
+        if (folded === def || out === readerHtml(at(def))) {
+          expect({ key, v, plainAsDefault: html(at(v)) === html(at(def)) }).toEqual({ key, v, plainAsDefault: true });
+        }
         if (out === readerHtml(at(folded))) {
           expect({ key, v, found }).toEqual({ key, v, found: [] });
         } else {
