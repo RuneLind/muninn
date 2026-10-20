@@ -242,8 +242,8 @@ describe("resolveServingProfile", () => {
  * there is the safe one — a typo that keeps prompts three days too long costs
  * disk, and one that empties the archive is unrecoverable.
  *
- * A value that does not parse as an integer at all is the OTHER band and still
- * throws out of `optionalEnvInt`, refusing the boot. Both are pinned below,
+ * A value that is not a whole integer (`ninety`, `1e3`, `5.9`) is the OTHER band and
+ * throws out of `positiveEnvInt`'s strict parse, refusing the boot. Both are pinned below,
  * because the docblocks describe two answers and a reader who tried `=ninety`
  * expecting a warning would find the process gone.
  */
@@ -317,10 +317,29 @@ describe("prompt-snapshot retention clamps", () => {
   });
 
   test("a NON-INTEGER refuses the boot instead of warning — the other band", () => {
-    // `positiveEnvInt` delegates to `optionalEnvInt`, which throws on a value
-    // that names no number at all. The clamp above never sees it.
+    // `positiveEnvInt`'s strict parse throws on a value that is not a whole
+    // integer. The clamp above never sees it.
     set(CAPTURE, "ninety");
     expect(() => config()).toThrow(/PROMPT_SNAPSHOTS_CAPTURE_RETENTION_DAYS/);
+  });
+
+  test("a value that is not a whole integer refuses the boot, not read as its leading digits", () => {
+    // `parseInt` read `1e3` as 1, `30s` as 30 and `5.9` as 5: a window far from
+    // the one the operator wrote, accepted in silence.
+    for (const name of [CAPTURE, CHAT, "TRACING_RETENTION_DAYS"]) {
+      for (const v of ["1e3", "30s", "5.9", "0x10", "7 days", "1_000", "99999999999999999999"]) {
+        set(name, v);
+        expect(() => config(), `${name}=${v}`).toThrow(new RegExp(name));
+      }
+      set(name, undefined);
+    }
+  });
+
+  test("surrounding whitespace and a leading + are still a whole integer", () => {
+    set(CHAT, " 14 ");
+    set(CAPTURE, "+30");
+    const c = config();
+    expect([c.promptSnapshotsRetentionDays, c.promptSnapshotsCaptureRetentionDays]).toEqual([14, 30]);
   });
 
   test("the refusal is warned about, naming the variable and the value", async () => {
@@ -330,6 +349,15 @@ describe("prompt-snapshot retention clamps", () => {
     const warning = records.find((r) => r.level === "warning" && String(r.message.join("")).includes(CAPTURE));
     expect(warning).toBeDefined();
     expect(String(warning!.message.join("") + JSON.stringify(warning!.properties))).toContain("0");
+  });
+
+  test("TRACING_RETENTION_DAYS 0 or negative falls back to 7 rather than wiping every trace", () => {
+    for (const v of ["0", "-1"]) {
+      set("TRACING_RETENTION_DAYS", v);
+      expect(config().tracingRetentionDays).toBe(7);
+    }
+    set("TRACING_RETENTION_DAYS", "3");
+    expect(config().tracingRetentionDays).toBe(3);
   });
 });
 

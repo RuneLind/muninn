@@ -23,6 +23,7 @@
 
 import type { ListingTracker, WikiListing } from "./wiki-filter.ts";
 import type { IndexWork } from "../../../wiki/work-focus.ts";
+import type { ListingMirrorStatus } from "./wiki-mirror-status.ts";
 
 /** The `/api/wiki/pages` payload (mirrors `src/dashboard/routes/wiki-routes.ts`).
  *  It lives here rather than in `wiki-browser.ts` so this module can name it
@@ -71,6 +72,9 @@ export interface WikiPagesResponse {
   work?: IndexWork;
   /** The publish script's path on a wiki that offers ⇪ Felles; absent elsewhere. */
   fellesPublish?: { bin: string; bucket?: string };
+  /** A bucket-mirrored wiki's health while it is not up to date; absent
+   *  otherwise (`src/wiki/bucket-mirror-status.ts`). */
+  mirror?: ListingMirrorStatus;
   error?: string;
 }
 
@@ -203,6 +207,11 @@ export interface ReceivedPages {
   /** The sequence number `startFetch` returned for THIS request. */
   seq: number;
   fingerprint: string;
+  /** Paints the bucket-mirror rail line from this response's `mirror`. Called
+   *  for every response that is not stale, whatever happens to its page list:
+   *  the line is rail chrome, so a deferred, unchanged or empty listing still
+   *  carries the freshest mirror health. */
+  onMirror?: (mirror: ListingMirrorStatus | undefined) => void;
 }
 
 /**
@@ -230,6 +239,7 @@ export function receivePages(model: PagesRefreshModel, input: ReceivedPages): Re
   // fingerprint, or anything else.
   if (seq <= model.lastSeenSeq) return "stale";
   model.lastSeenSeq = seq;
+  input.onMirror?.(data.mirror);
 
   // A well-formed but EMPTY set is a real state for a brand-new wiki, and boot
   // renders it — but once a listing is on screen it is far more likely a

@@ -158,10 +158,12 @@ export type FenceLineState = "opener" | "closer" | "inside" | "outside";
  * with no closer means:
  *  - `"to-eof"`: CommonMark's rule, the fence runs to the end of the document.
  *    Right for a MASK, where over-masking costs a missed report or a refused edit;
- *  - `"literal"`: {@link scanClaimLines}' retirement rule, and the reader's
- *    (`extractFences`): the opener is prose and the lines after it are read as
- *    usual. Right for a parse that then SPLICES, where one stray ``` must not hide
- *    everything after it.
+ *  - `"literal"`: {@link scanClaimLines}' retirement rule: the opener is prose
+ *    and the lines after it are read as usual. Right for a parse that then
+ *    SPLICES, where one stray ``` must not hide everything after it. The reader
+ *    (`extractFences`) treats an unclosed opener the same way, but it pairs
+ *    backtick fences only, so a `~~~` block is fenced here and prose there; a
+ *    caller that needs the reader's rule reads `readerFencedLines`.
  */
 export function fenceLineStates(
   lines: readonly string[],

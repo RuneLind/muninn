@@ -515,7 +515,7 @@ describe("the pin anchor is never a hub page (D7 × D16)", () => {
       sinceMs: asOf - 8 * DAY,
       asOfMs: asOf,
       pages: [HUB, A].map((relPath) => ({ relPath, backlinks: BACKLINKS[relPath]!, gitCreatedMs: asOf - 40 * DAY })),
-      identity: { roots: ["/w/x"], name: "x" },
+      identity: { roots: ["/w/x"], names: ["x"] },
       otherRoots: [],
     });
     const pages = [HUB, A].map((rel) => {
@@ -573,7 +573,7 @@ describe("the pin's anchor rows (D7 × D16): a hub pin never moves to a thread t
       sinceMs: asOf - 8 * DAY,
       asOfMs: asOf,
       pages: rels.map((relPath) => ({ relPath, backlinks: BACKLINKS[relPath]!, gitCreatedMs: asOf - 40 * DAY })),
-      identity: { roots: ["/w/x"], name: "x" },
+      identity: { roots: ["/w/x"], names: ["x"] },
       otherRoots: [],
     });
     const pages = rels.map((rel) => {

@@ -116,11 +116,17 @@ import { Tracer } from "../../tracing/index.ts";
 import { getLog } from "../../logging.ts";
 import { readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
 import { requireJsonRequest } from "./json-request.ts";
-import { listSummaryFactcheckMarks } from "../../db/summary-factchecks.ts";
+import {
+  getSummaryFactcheckMark,
+  isMissingTableError,
+  listSummaryFactcheckMarks,
+  type SummaryFactcheckMark,
+} from "../../db/summary-factchecks.ts";
 import {
   proposalFactcheckFlag,
   type FactcheckMark,
   type ProposalFactcheckFlag,
+  type RedraftableProposal,
 } from "../../gardener/factcheck-carry.ts";
 import {
   redraftRefusal,
@@ -257,6 +263,9 @@ interface ProposalView {
   wiring: WiringPreview | null;
   /** Saved summary fact-check flags (`proposalFactcheckFlag`); null when none apply. */
   factcheck: ProposalFactcheckFlag | null;
+  /** Present (true) only when the marks read failed and this card is one the
+   *  lock applies to: its fact-check state is unknown, so Approve stays locked. */
+  factcheckUnknown?: true;
   /** A `stale` row Redraft replaced: the replacement's id (`redraftReplacements`). */
   replacedBy: string | null;
   /** A reviewable update row Approve would refuse as `stale`: the reason
@@ -268,18 +277,45 @@ interface ProposalView {
   drifted: string | null;
 }
 
-/** The checked docs as `<collection>/<docId>` → mark. A missing table or a failed
- *  read means no flags, never a failed listing. */
-async function loadFactcheckMarks(): Promise<Map<string, FactcheckMark>> {
+/** The two fact-check reads the gate makes; a module seam so a route test can
+ *  fail them without breaking the database under every other query. */
+interface FactcheckMarkReads {
+  list: () => Promise<SummaryFactcheckMark[]>;
+  one: (collection: string, docId: string) => Promise<SummaryFactcheckMark | null>;
+}
+const DEFAULT_FACTCHECK_MARK_READS: FactcheckMarkReads = {
+  list: listSummaryFactcheckMarks,
+  one: getSummaryFactcheckMark,
+};
+let factcheckMarkReads = DEFAULT_FACTCHECK_MARK_READS;
+
+/** Test-only: override (or with `null` restore) the fact-check reads. */
+export function __setFactcheckMarkReadsForTest(over: Partial<FactcheckMarkReads> | null): void {
+  factcheckMarkReads = over ? { ...DEFAULT_FACTCHECK_MARK_READS, ...over } : DEFAULT_FACTCHECK_MARK_READS;
+}
+
+/**
+ * The checked docs as `<collection>/<docId>` → mark. Never a failed listing: a
+ * missing table (migration 079 not run) means no checks exist, so no flags; any
+ * other failure lists without flags but says so (`unavailable`), so the gate can
+ * lock the cards whose lock it cannot compute instead of showing them unlocked.
+ */
+async function loadFactcheckMarks(): Promise<{ marks: Map<string, FactcheckMark>; unavailable: boolean }> {
   try {
-    const marks = await listSummaryFactcheckMarks();
-    return new Map(marks.map((m) => [`${m.collection}/${m.docId}`, m]));
+    const marks = await factcheckMarkReads.list();
+    return { marks: new Map(marks.map((m) => [`${m.collection}/${m.docId}`, m])), unavailable: false };
   } catch (err) {
+    if (isMissingTableError(err)) return { marks: new Map(), unavailable: false };
     log.warn("Wiki-gardener: fact-check marks unavailable, listing without flags: {error}", {
       error: err instanceof Error ? err.message : String(err),
     });
-    return new Map();
+    return { marks: new Map(), unavailable: true };
   }
+}
+
+/** A card the fact-check lock can apply to: a draft `redraftRefusal` accepts. */
+function factcheckLockApplies(p: RedraftableProposal): boolean {
+  return p.kind === "source" && p.mode === "create" && redraftRefusal(p) === null;
 }
 
 async function readFileOrNull(absPath: string): Promise<string | null> {
@@ -1344,7 +1380,7 @@ export function registerWikiGardenerRoutes(
     }
     const index = await getWikiIndex({ root });
     const resolve = index ? index.resolve : () => undefined;
-    const factcheckMarks = await loadFactcheckMarks();
+    const { marks: factcheckMarks, unavailable: factcheckUnavailable } = await loadFactcheckMarks();
     const replacements = redraftReplacements(rows);
 
     const proposals: ProposalView[] = await Promise.all(
@@ -1451,10 +1487,13 @@ export function registerWikiGardenerRoutes(
           ),
           replacedBy: replacements.get(p.id) ?? null,
           drifted,
+          ...(factcheckUnavailable && factcheckLockApplies(p) ? { factcheckUnknown: true as const } : {}),
         };
       }),
     );
-    return c.json({ proposals });
+    // The two unknown fields are absent on a healthy read, so that payload is
+    // byte-identical to what it was.
+    return c.json(factcheckUnavailable ? { proposals, factcheckUnavailable: true } : { proposals });
   });
 
   // Report-only wiki lint findings, recomputed on demand from the wiki tree (no
@@ -2659,6 +2698,35 @@ export function registerWikiGardenerRoutes(
           // dropped `outcome: "forbidden"` for exactly that reason.
           return c.json({ error: stemCollisionMessage(blocking, stem), collision: true }, 409);
         }
+      }
+    }
+
+    // The fact-check lock, on the server. The gate disables Approve on a draft
+    // built without its doc's current check, but a stale tab (check saved after
+    // the listing loaded) or a direct POST never sees that button, so the route
+    // re-derives the same flag here, before the CAS, from `proposalFactcheckFlag`.
+    // A missing table means no checks exist; any other read failure refuses,
+    // since an unknown lock is not an open one.
+    if (existing.status === "draft" && factcheckLockApplies(existing)) {
+      const doc = existing.sourceDocs[0]!;
+      let mark: FactcheckMark | null;
+      try {
+        mark = await factcheckMarkReads.one(doc.collection, doc.docId);
+      } catch (err) {
+        if (!isMissingTableError(err)) {
+          log.warn("Wiki-gardener approve: fact-check read failed for proposal {id}: {error}", {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return c.json(
+            { error: "Could not read the source's fact-check — try again", factcheckUnavailable: true },
+            503,
+          );
+        }
+        mark = null;
+      }
+      if (proposalFactcheckFlag(existing, mark ?? undefined)?.needsRedraft) {
+        return c.json({ error: "Drafted without the current fact-check — redraft it first", factcheck: true }, 409);
       }
     }
 

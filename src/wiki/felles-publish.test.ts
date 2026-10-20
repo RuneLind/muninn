@@ -104,6 +104,18 @@ test("remove names the object in NFC, the spelling publish uploaded", () => {
   expect(object).toBe("plans/p\u00E5.md");
 });
 
+test("remove's data files follow the page, each in NFC", () => {
+  const args = fellesScriptArgs({
+    action: "remove",
+    dryRun: false,
+    allowIdent: false,
+    root: "/w",
+    relPath: "plans/a.mdx",
+    alsoRemove: ["plans/a.yaml", "plans/pa\u030A.csv"],
+  });
+  expect(args).toEqual(["--fjern", "--ja", "--", "plans/a.mdx", "plans/a.yaml", "plans/p\u00E5.csv"]);
+});
+
 test("sync and status run on the whole wiki: the root, no relPath", () => {
   const base = { root: "/w", relPath: "plans/a.mdx" };
   expect(fellesScriptArgs({ action: "sync", dryRun: true, allowIdent: true, ...base })).toEqual([

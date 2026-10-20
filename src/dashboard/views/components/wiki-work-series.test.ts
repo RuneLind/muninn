@@ -7,7 +7,23 @@ import { describe, expect, test } from "bun:test";
 import { checkNewSeriesKey, recheckSaveAsSeries, saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { buildWorkEvidence } from "../../../wiki/work-evidence.ts";
 import type { WikiPageMeta } from "../../../wiki/store.ts";
-import { loadSeriesBaseMap, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { loadSeriesBaseMap, openPageChanged, openPageRefusal, writeSeriesUnlessOpenChanged, type SeriesPostAnswer, type SeriesPoster, type SeriesWriteOutcome } from "./wiki-series-write.ts";
+import type { SeriesWrite } from "./wiki-series-menu.ts";
+
+/** The write loop is module-private: it runs only behind the open-page
+ *  refusal. With no page open the refusal never fires, so this is the loop. */
+async function runSeriesWrites(
+  writes: readonly SeriesWrite[],
+  bases: ReadonlyMap<string, string>,
+  post: SeriesPoster,
+  opts: { batch?: boolean } = {},
+): Promise<SeriesWriteOutcome> {
+  const r = await writeSeriesUnlessOpenChanged({ writes, bases, open: { relPath: null, loadedHash: null }, post, batch: opts.batch });
+  return r.run!;
+}
+// Namespace import for the fix-round-2 batch-2 seams, so each case reports its
+// own failure rather than the whole file failing to link.
+import * as seriesWrite from "./wiki-series-write.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupChild } from "./wiki-work-groups.ts";
 import { coinSeriesKey, isNarrativePage, seriesPageStem } from "../../../wiki/series-rules.ts";
@@ -285,3 +301,150 @@ describe("runSeriesWrites: one page per call, stop at the first failure", () => 
 });
 
 
+
+// Arch review 2026-10, finding 66: Save as series sent the hash the reader
+// LOADED as the open page's CAS base, so a page changed on disk since then
+// 409ed mid-sequence, after the pages before it were written.
+describe("openPageChanged: the open page's fresh base against the hash it loaded with", () => {
+  const bases = new Map([["plans/a.md", "a2"], ["plans/open.md", "open-now"]]);
+  test("changed since it loaded: named as the bases hold it", () => {
+    expect(openPageChanged({ relPath: "Plans/Open.md", loadedHash: "open-at-load" }, bases)).toBe("plans/open.md");
+  });
+  test("unchanged, outside the bases, or no loaded hash: nothing named", () => {
+    expect(openPageChanged({ relPath: "plans/open.md", loadedHash: "open-now" }, bases)).toBeNull();
+    expect(openPageChanged({ relPath: "plans/gone.md", loadedHash: "old" }, bases)).toBeNull();
+    expect(openPageChanged({ relPath: "plans/open.md", loadedHash: null }, bases)).toBeNull();
+    expect(openPageChanged({ relPath: null, loadedHash: "old" }, bases)).toBeNull();
+  });
+});
+
+// Fix round 2 (finding 3): the one write entry both the ⋯ menu and Save as
+// series call, so the refusal is pinned here rather than in the browser glue.
+describe("writeSeriesUnlessOpenChanged: refuse before any write, else run the loop", () => {
+  const ok: SeriesPostAnswer = { ok: true, status: 200, body: { hash: "new", written: true } };
+  const writes = [{ relPath: "plans/a.md", series: "k" }, { relPath: "plans/open.md", series: "k" }];
+  const bases = new Map([["plans/a.md", "a2"], ["plans/open.md", "open-now"]]);
+  const recorder = () => {
+    const sent: string[] = [];
+    return { sent, post: async (b: { relPath: string; baseHash: string }) => (sent.push(`${b.relPath}@${b.baseHash}`), ok) };
+  };
+  test("the open page changed since it loaded and is written: refused, nothing posted", async () => {
+    const r = recorder();
+    const out = await writeSeriesUnlessOpenChanged({ writes, bases, open: { relPath: "plans/open.md", loadedHash: "open-at-load" }, post: r.post });
+    expect(out.refusal).toBe("plans/open.md changed since you opened it — reload it; nothing written");
+    expect(out.run).toBeUndefined();
+    expect(r.sent).toEqual([]);
+  });
+  test("unchanged: every write posted with its fresh base", async () => {
+    const r = recorder();
+    const out = await writeSeriesUnlessOpenChanged({ writes, bases, open: { relPath: "plans/open.md", loadedHash: "open-now" }, post: r.post });
+    expect(out.refusal).toBeNull();
+    expect(out.run?.written).toBe(2);
+    expect(r.sent).toEqual(["plans/a.md@a2", "plans/open.md@open-now"]);
+  });
+  test("a changed open page the sequence does not write: the sequence runs", async () => {
+    const r = recorder();
+    const out = await writeSeriesUnlessOpenChanged({ writes: writes.slice(0, 1), bases, open: { relPath: "plans/open.md", loadedHash: "open-at-load" }, post: r.post });
+    expect(out.refusal).toBeNull();
+    expect(r.sent).toEqual(["plans/a.md@a2"]);
+  });
+});
+
+// Fix round 1 (finding I): the refusal `writeSeriesUnlessOpenChanged` makes
+// before any write — for Save as series and the ⋯ menu alike.
+describe("openPageRefusal: an open page changed on disk refuses the whole sequence", () => {
+  const writes = [{ relPath: "plans/a.md", series: "k" }, { relPath: "plans/open.md", series: "k" }];
+  test("changed and among the writes: refused, naming the page", () => {
+    expect(openPageRefusal("plans/open.md", writes)).toBe("plans/open.md changed since you opened it — reload it; nothing written");
+  });
+  test("changed and among the writes under another spelling: still refused", () => {
+    expect(openPageRefusal("Plans/Open.md", writes)).toContain("changed since you opened it");
+  });
+  test("changed but NOT among the writes: proceeds", () => {
+    expect(openPageRefusal("plans/elsewhere.md", writes)).toBeNull();
+  });
+  test("unchanged: proceeds", () => {
+    expect(openPageRefusal(null, writes)).toBeNull();
+  });
+});
+
+describe("runSeriesWrites batch marks (finding 75)", () => {
+  const ok: SeriesPostAnswer = { ok: true, status: 200, body: { hash: "x", written: true } };
+  const writes = [{ relPath: "a.md", series: "k" }, { relPath: "b.md", series: "k" }, { relPath: "c.md", series: "k" }];
+  const bases = new Map([["a.md", "h"], ["b.md", "h"], ["c.md", "h"]]);
+  test("a batch marks every write but the last defer, the last last", async () => {
+    const sent: (string | undefined)[] = [];
+    await runSeriesWrites(writes, bases, async (b) => (sent.push(b.batch), ok), { batch: true });
+    expect(sent).toEqual(["defer", "defer", "last"]);
+  });
+  test("one write, or no batch option, sends no mark", async () => {
+    const sent: (string | undefined)[] = [];
+    await runSeriesWrites(writes.slice(0, 1), bases, async (b) => (sent.push(b.batch), ok), { batch: true });
+    await runSeriesWrites(writes, bases, async (b) => (sent.push(b.batch), ok));
+    expect(sent).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});
+
+// Fix round 2 batch 2, finding 1: the reader's OWN write moved the open page's
+// bytes before its answer moved the load-time hash, so a menu opened in that
+// window blamed the reader for the change. A base read now waits for every
+// sequence in flight when it starts, and snapshots the open page after them.
+describe("readSeriesBasesAfterWrites: the reader's own writes settle before a base read", () => {
+  test("a read started while a write is in flight sees the hash that write's answer adopted", async () => {
+    let disk = "h0";
+    let loaded = "h0";
+    let answer!: () => void;
+    const answered = new Promise<void>((r) => (answer = r));
+    // The POST lands on disk at once; its answer, which moves the reader's
+    // load-time hash, arrives later.
+    const write = seriesWrite.trackSeriesWrite(async () => {
+      disk = "h1";
+      await answered;
+      loaded = "h1";
+    });
+    const read = seriesWrite.readSeriesBasesAfterWrites(["plans/open.md"], async () => disk, () => ({ relPath: "plans/open.md", loadedHash: loaded }));
+    answer();
+    await write;
+    const out = await read;
+    expect(out.open.loadedHash).toBe("h1");
+    expect(out.bases.get("plans/open.md")).toBe("h1");
+    expect(openPageChanged(out.open, out.bases)).toBeNull();
+  });
+
+  test("a sequence that failed still releases the read, and its caller still sees the failure", async () => {
+    const write = seriesWrite.trackSeriesWrite(async () => {
+      throw new Error("refused");
+    });
+    const read = seriesWrite.readSeriesBasesAfterWrites(["plans/a.md"], async () => "a1", () => ({ relPath: null, loadedHash: null }));
+    await expect(write).rejects.toThrow("refused");
+    expect((await read).bases.get("plans/a.md")).toBe("a1");
+  });
+
+  test("a read does not wait for a sequence that started after it, so a sequence may await its own earlier read", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const read = seriesWrite.readSeriesBasesAfterWrites(["plans/a.md"], async () => (await gate, "a1"), () => ({ relPath: null, loadedHash: null }));
+    const write = seriesWrite.trackSeriesWrite(async () => (await read).bases.get("plans/a.md"));
+    release();
+    const settled = await Promise.race([write, new Promise((r) => setTimeout(() => r("deadlock"), 500))]);
+    expect(settled).toBe("a1");
+  });
+});
+
+// Fix round 2 batch 2, finding 2: a 409 told the reader to close and reopen
+// the menu even when the page was the OPEN one — whose reopen then refused
+// with "reload it". The step now follows the page.
+describe("seriesConflictCopy: a 409 names the step that clears it", () => {
+  test("the open page: reload, since a reopened menu keeps its load-time hash and a verb writing it is refused at the click", () => {
+    const c = seriesWrite.seriesConflictCopy("plans/open.md", "Plans/Open.md");
+    expect(c.note).toBe("plans/open.md changed since this menu opened — reload it");
+    expect(c.again).toBe("Reload the page — it has changed");
+  });
+  test("any other page, or no page open: close and reopen, which reads its base fresh", () => {
+    for (const open of ["plans/elsewhere.md", null]) {
+      const c = seriesWrite.seriesConflictCopy("plans/a.md", open);
+      expect(c.note).toBe("plans/a.md changed since this menu opened — close and reopen it");
+      expect(c.again).toBe("Close and reopen this menu — the page has changed");
+    }
+  });
+});

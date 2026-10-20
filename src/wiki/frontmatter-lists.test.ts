@@ -16,7 +16,8 @@ import {
   type RelatedRead,
   type RelatedResolveContext,
 } from "./frontmatter-lists.ts";
-import { frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { stateLineRoles } from "./lint-state.ts";
+import { frontmatterBodyLine, splitFrontmatter } from "./page-text.ts";
 import { buildWikiIndex } from "./store.ts";
 import { extractWikilinks, WIKILINK_RE } from "./wikilinks.ts";
 import { toListing } from "../dashboard/routes/wiki-routes.ts";
@@ -294,8 +295,10 @@ describe("fix round 1 batch 2 — leading slash and the name census", () => {
 });
 
 describe("fix round 1 batch 3 — N: the index and the reader share one frontmatter boundary", () => {
-  // `----` ends the frontmatter for a `\n---` prefix test but not for
-  // `frontmatterEndLine`, which wants a line that trims to `---`.
+  // `----` ends the frontmatter for the store's `\n---` prefix test
+  // (`splitFrontmatter`) but not for `frontmatterEndLine`, which wants a line
+  // that trims to `---`. The readers take the store's boundary (finding 84), so
+  // `owns:` and `related:` after it are body text, as the reader renders them.
   const DASHED = "---\ntitle: N\nnote: x\n----\nowns: [ABC-7]\nrelated: [[n-target]]\n---\n\nBody.\n";
   let root = "";
   beforeAll(async () => {
@@ -305,12 +308,12 @@ describe("fix round 1 batch 3 — N: the index and the reader share one frontmat
   });
   afterAll(() => rm(root, { recursive: true, force: true }));
 
-  test("a `----` line inside the frontmatter: the index reads what lint check 14's reader reads", async () => {
-    expect(readOwns(DASHED).keys).toEqual(["ABC-7"]);
+  test("a `----` line ends the frontmatter: the index reads what lint check 14's reader reads", async () => {
+    expect(readOwns(DASHED)).toMatchObject({ present: false, keys: [] });
     const index = await buildWikiIndex(root);
     const n = index.pages.find((p) => p.relPath === "n.md")!;
-    expect(n.owns).toEqual(readOwns(DASHED).keys);
-    expect(n.related).toEqual(["n-target.md"]);
+    expect(n.owns ?? []).toEqual(readOwns(DASHED).keys);
+    expect(n.related ?? []).toEqual([]);
   });
 
   test("the gate still admits the quoted, flow and indented spellings", () => {
@@ -330,6 +333,46 @@ describe("fix round 1 batch 3 — N: the index and the reader share one frontmat
     const long = `---\n${filler}\nowns: [ABC-5]\n---\n\n${"line\n".repeat(100)}`;
     expect(readFrontmatterLists(long).owns).toEqual(readOwns(long));
     expect(readFrontmatterLists(long).owns.keys).toEqual(["ABC-5"]);
+  });
+});
+
+describe("architecture review 2026-10 finding 84 — the four readers end frontmatter where the store does", () => {
+  // The store (`splitFrontmatter`, which `parseFrontmatter` and the reader's
+  // render both use) ends the frontmatter at a column-0 `---`. An indented one,
+  // inside a block scalar, is part of the value.
+  const BLOCK = ["---", "title: P", "description: |", "  Before", "  ---", "  After", "owns: [ABC-1]", "related: [[target]]", "---", "Body.", ""];
+  const cases: [string, string][] = [
+    ["an indented --- inside a block scalar", BLOCK.join("\n")],
+    ["the same page with CRLF line ends", BLOCK.join("\r\n")],
+    ["a --- that does not start at column 0 opens nothing", [" ---", "owns: [ABC-1]", "---", "Body.", ""].join("\n")],
+  ];
+
+  for (const [name, content] of cases) {
+    test(name, () => {
+      const { frontmatter, body } = splitFrontmatter(content);
+      const lines = content.replace(/\r\n/g, "\n").split("\n");
+      const bodyStart = frontmatter === null ? 0 : lines.length - body.replace(/\r\n/g, "\n").split("\n").length;
+      const hasOwns = frontmatter !== null && /^owns:/m.test(frontmatter);
+      const hasRelated = frontmatter !== null && /^related:/m.test(frontmatter);
+
+      expect(readOwns(content).present).toBe(hasOwns);
+      expect(readRelated(content).present).toBe(hasRelated);
+      expect(readFrontmatterLists(content)).toEqual({ owns: readOwns(content), related: readRelated(content) });
+      if (hasOwns) expect(readOwns(content).keys).toEqual(["ABC-1"]);
+
+      // Lint check 14: a frontmatter line is linted only as part of a
+      // `description` unit; every body line from the boundary on is read.
+      const roles = stateLineRoles(content);
+      const units = [...roles.linted, ...roles.home].map((u) => u.lines);
+      const inFrontmatter = units.filter((u) => u[0]! < bodyStart).flat();
+      const descriptionUnit = units.find((u) => /^description:/.test(lines[u[0]!]!)) ?? [];
+      expect(inFrontmatter).toEqual(descriptionUnit);
+      expect(units.flat()).toContain(lines.indexOf("Body."));
+    });
+  }
+
+  test("the block-scalar page: the description runs to the indented --- and past it", () => {
+    expect(stateLineRoles(BLOCK.join("\n")).linted.find((u) => u.lines[0] === 2)?.lines).toEqual([2, 3, 4, 5]);
   });
 });
 
@@ -595,10 +638,10 @@ describe("class check — the related: reader against a YAML oracle", () => {
    * truth there, and the reader falls back to its own lexer.
    */
   function oracle(content: string): { links: string[]; texts: string[]; unread: number; asNode: number } | undefined {
-    // The frontmatter the index reads (`frontmatterEndLine`), and the entry: the
+    // The frontmatter the index reads (`frontmatterBodyLine`), and the entry: the
     // `related:` line and its continuation lines up to the next top-level key.
     const lines = content.split("\n");
-    const fmLines = lines.slice(1, frontmatterEndLine(lines) - 1);
+    const fmLines = lines.slice(1, frontmatterBodyLine(content) - 1);
     const fmText = fmLines.join("\n");
     const V = relatedOf(tryParse(fmText));
     if (!V) return undefined;

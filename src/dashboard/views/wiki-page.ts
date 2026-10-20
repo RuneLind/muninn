@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { compactPartsHiddenCss, componentBlockCss, decisionViewsCss, factcheckReaderCss, questionReaderCss, statusTilesCss } from "../../format/component-styles.ts";
+import { chartViewCss, ruleTreeCss, compactPartsHiddenCss, componentBlockCss, decisionViewsCss, factcheckReaderCss, questionReaderCss, statusTilesCss } from "../../format/component-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -8,6 +8,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
+import { mirrorStatusSlotHtml, mirrorStatusStyles } from "./components/wiki-mirror-status.ts";
 import {
   RAIL_CHIP_COMPACT,
   RAIL_CHIP_COMPACT_NARROW,
@@ -2389,6 +2390,10 @@ export async function renderWikiPage(opts?: {
     ${decisionViewsCss(".wiki-article")}
     /* Reader-only: StatusRows view="tiles" (statusRowsHtml, views: true). */
     ${statusTilesCss(".wiki-article")}
+    /* Reader-only: the <Chart> view (chart-view.ts, views: true). */
+    ${chartViewCss(".wiki-article")}
+    /* Reader-only: the <RuleTree> view (rule-tree-view.ts, views: true). */
+    ${ruleTreeCss(".wiki-article")}
 
     /* Blog-type article chrome (native .mdx pages with type: blog):
        explainer-style h2 underline for stronger section separation. The accent
@@ -3064,6 +3069,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${shareDialogStyles()}
     ${findPaletteStyles()}
     ${fellesPublishStyles()}
+    ${mirrorStatusStyles()}
     ${wikiReadonlyStyles()}
     ${wikiReadSliceStyles()}
   </style>
@@ -3136,6 +3142,9 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
         <!-- «Felles: N changed» — painted by the client on a wiki that offers
              ⇪ Felles, after the page has rendered (wiki-felles-publish.ts). -->
         <div class="wiki-felles-sync" id="wikiFellesSync" aria-live="polite" hidden></div>
+        <!-- A bucket-mirrored wiki whose copy is stale — painted from the
+             listing's \`mirror\` field (wiki-mirror-status.ts). -->
+        ${mirrorStatusSlotHtml()}
         <details class="wiki-filters" id="wikiFilters">
           <summary class="wiki-filters-summary">Filters</summary>
           <div class="wiki-filters-body">

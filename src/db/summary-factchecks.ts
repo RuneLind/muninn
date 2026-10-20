@@ -286,6 +286,30 @@ export async function listSummaryFactcheckMarks(): Promise<SummaryFactcheckMark[
   }));
 }
 
+/** One document's mark (see {@link listSummaryFactcheckMarks}), or null when it has no saved check. */
+export async function getSummaryFactcheckMark(collection: string, docId: string): Promise<SummaryFactcheckMark | null> {
+  const sql = getDb();
+  const rows = await sql<{ collection: string; doc_id: string; created_at: Date | string; claims: unknown; answer_sha256: string }[]>`
+    SELECT collection, doc_id, created_at, claims,
+           encode(sha256(convert_to(answer, 'UTF8')), 'hex') AS answer_sha256
+    FROM summary_factchecks WHERE collection = ${collection} AND doc_id = ${docId}
+  `;
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    collection: r.collection,
+    docId: r.doc_id,
+    checkedAt: new Date(r.created_at).getTime(),
+    ...countCorrectableClaims(r.claims),
+    answerSha256: r.answer_sha256,
+  };
+}
+
+/** True for Postgres `undefined_table` — `summary_factchecks` before migration 079. */
+export function isMissingTableError(err: unknown): boolean {
+  return !!err && typeof err === "object" && (err as { code?: unknown }).code === "42P01";
+}
+
 /** The row for a write route, with its full-precision `created_at` text. */
 export async function getSummaryFactcheckVersioned(
   collection: string,

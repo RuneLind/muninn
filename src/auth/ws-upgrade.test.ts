@@ -305,6 +305,16 @@ describe("with auth OFF", () => {
     expect((await handshake(lan)).ok).toBe(true);
   });
 
+  test("behind tailscale serve: an http page on the proxied name cannot open the https socket", async () => {
+    // The open residual from #603: no Sec-Fetch-Site on a handshake, and the
+    // Host arm took its scheme from the Origin. serve sets X-Forwarded-Proto.
+    const serve = { host: "mini.tail7b311e.ts.net", "x-forwarded-proto": "https" };
+    const hostile = await handshake({ ...serve, origin: "http://mini.tail7b311e.ts.net" });
+    expect(hostile.ok).toBe(false);
+    if (!hostile.ok) expect(hostile.response.status).toBe(403);
+    expect((await handshake({ ...serve, origin: "https://mini.tail7b311e.ts.net" })).ok).toBe(true);
+  });
+
   test("over a real socket: a cross-origin handshake answers 403, a loopback one upgrades", async () => {
     const saved = authorizeAtPort;
     authorizeAtPort = off();

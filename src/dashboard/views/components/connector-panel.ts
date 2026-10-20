@@ -189,6 +189,7 @@ export function connectorPanelStyles(): string {
       border-color: var(--accent);
     }
     .connector-form-group textarea { resize: vertical; min-height: 40px; }
+    .connector-form-hint { margin-top: 4px; font-size: 11px; color: var(--text-muted); line-height: 1.4; }
     .connector-modal-footer {
       display: flex;
       justify-content: flex-end;
@@ -270,8 +271,21 @@ export function connectorPanelHtml(): string {
             <input type="text" id="connectorBaseUrl" placeholder="e.g. http://localhost:11434/v1">
           </div>
           <div class="connector-form-group">
+            <label>Effort</label>
+            <select id="connectorEffort">
+              <option value="">(bot default)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
+            <div class="connector-form-hint">The thinking control on adaptive-thinking Claude models (Opus/Sonnet 4.6 and later, every 5.5 model), via claude-cli and claude-sdk.</div>
+          </div>
+          <div class="connector-form-group">
             <label>Thinking Max Tokens</label>
-            <input type="number" id="connectorThinking" placeholder="0 = disable">
+            <input type="number" id="connectorThinking" placeholder="0 = disable (Haiku 4.5 and older)">
+            <div class="connector-form-hint">Ignored on adaptive-thinking models: set Effort there. On openai-compat it is the request's max_tokens.</div>
           </div>
           <div class="connector-form-group">
             <label>Timeout (ms)</label>
@@ -323,6 +337,7 @@ export function connectorPanelScript(): string {
         var fields = '';
         if (c.model) fields += '<div class="connector-field-label">Model</div><div class="connector-field-value">' + esc(c.model) + '</div>';
         if (c.baseUrl) fields += '<div class="connector-field-label">URL</div><div class="connector-field-value">' + esc(c.baseUrl) + '</div>';
+        if (c.effort) fields += '<div class="connector-field-label">Effort</div><div class="connector-field-value">' + esc(c.effort) + '</div>';
         if (c.thinkingMaxTokens != null) fields += '<div class="connector-field-label">Thinking</div><div class="connector-field-value">' + c.thinkingMaxTokens + '</div>';
         if (c.timeoutMs != null) fields += '<div class="connector-field-label">Timeout</div><div class="connector-field-value">' + c.timeoutMs + 'ms</div>';
 
@@ -348,6 +363,7 @@ export function connectorPanelScript(): string {
       document.getElementById('connectorType').value = connector ? connector.connectorType : 'claude-cli';
       document.getElementById('connectorModel').value = connector ? (connector.model || '') : '';
       document.getElementById('connectorBaseUrl').value = connector ? (connector.baseUrl || '') : '';
+      document.getElementById('connectorEffort').value = connector && connector.effort ? connector.effort : '';
       document.getElementById('connectorThinking').value = connector && connector.thinkingMaxTokens != null ? connector.thinkingMaxTokens : '';
       document.getElementById('connectorTimeout').value = connector && connector.timeoutMs != null ? connector.timeoutMs : '';
       document.getElementById('connectorModalTitle').textContent = connector ? 'Edit Connector' : 'New Connector';
@@ -372,6 +388,7 @@ export function connectorPanelScript(): string {
       var connType = document.getElementById('connectorType').value;
       var model = document.getElementById('connectorModel').value.trim() || null;
       var baseUrl = document.getElementById('connectorBaseUrl').value.trim() || null;
+      var effort = document.getElementById('connectorEffort').value || null;
       var thinking = document.getElementById('connectorThinking').value;
       var timeout = document.getElementById('connectorTimeout').value;
 
@@ -384,6 +401,7 @@ export function connectorPanelScript(): string {
         model: model,
         baseUrl: baseUrl,
         thinkingMaxTokens: thinking ? parseInt(thinking) : null,
+        effort: effort,
         timeoutMs: timeout ? parseInt(timeout) : null,
       };
 

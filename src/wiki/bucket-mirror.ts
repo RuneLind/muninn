@@ -31,6 +31,7 @@ import { PAGE_FILE_KIND_EXTENSIONS, PAGE_FILE_MAX_BYTES } from "../format/query-
 import { isReadonlyWikiRoot } from "./readonly.ts";
 import { findWikiByRoot, getWikiRegistry } from "./registry-memo.ts";
 import { getWikiIndex } from "./store.ts";
+import { registerBucketMirrorStatus, type BucketMirrorStatus } from "./bucket-mirror-status.ts";
 
 const log = getLog("wiki", "bucket-mirror");
 
@@ -517,6 +518,10 @@ export class BucketMirror {
   #abort = new AbortController();
   #failures = 0;
   #lastError: string | null = null;
+  /** The last poll that resolved, and when one last brought every object in
+   *  (finding 32: a resolved poll is not the same as an up-to-date copy). */
+  #lastResult: PollResult | null = null;
+  #lastSuccessAt: number | null = null;
   #refreshOwed = false;
   #lastGuardWarn: string | null = null;
   /** Per-object warnings already emitted: name → `generation\0reason`, pruned
@@ -532,6 +537,26 @@ export class BucketMirror {
 
   get state(): "new" | "ready" | "refused" {
     return this.#state;
+  }
+
+  get root(): string {
+    return this.entry.root;
+  }
+
+  /** Read-only health for the listing payload (`bucket-mirror-status.ts`). */
+  status(): BucketMirrorStatus {
+    const last = this.#lastResult;
+    const health = this.#state === "refused" ? "refused"
+      : this.#failures > 0 ? "failing"
+      : last === null ? "starting"
+      : last.failed > 0 || last.refreshError !== undefined || last.massDeleteRefused ? "degraded"
+      : "ok";
+    return {
+      health,
+      lastSuccessAt: this.#lastSuccessAt,
+      consecutiveFailures: this.#failures,
+      failedObjects: last?.failed ?? 0,
+    };
   }
 
   #releaseLock(): void {
@@ -907,7 +932,11 @@ export class BucketMirror {
   #tick(): void {
     this.#timer = null;
     this.#current = this.pollOnce().then(
-      () => {
+      (result) => {
+        this.#lastResult = result;
+        if (result.failed === 0 && result.refreshError === undefined && !result.massDeleteRefused) {
+          this.#lastSuccessAt = (this.deps.now ?? Date.now)();
+        }
         if (this.#failures > 0) log.info("Wiki bucket mirror {source} recovered", { source: this.source });
         this.#failures = 0;
         this.#lastError = null;
@@ -1058,11 +1087,18 @@ export function startWikiBucketMirrors(
     // A bucket name is global and public: another project can create it first.
     log.warn("Wiki bucket mirrors: bucket ownership is not pinned — set WIKI_BUCKET_MIRROR_PROJECT_NUMBER so a bucket another project created under the same name is not mirrored");
   }
+  const unregister = mirrors.map((m) => registerBucketMirrorStatus(m));
   if (autostart) for (const m of mirrors) m.start();
   if (mirrors.length > 0) {
     log.info("Wiki bucket mirrors started: {count}, every {intervalMs} ms from {base}", {
       count: mirrors.length, intervalMs: config.intervalMs, base: config.gcsBase,
     });
   }
-  return { mirrors, stop: async () => { await Promise.all(mirrors.map((m) => m.stop())); } };
+  return {
+    mirrors,
+    stop: async () => {
+      for (const u of unregister) u();
+      await Promise.all(mirrors.map((m) => m.stop()));
+    },
+  };
 }

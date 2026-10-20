@@ -28,6 +28,12 @@ export const STRIP_VIEW_MIN = 4;
 /** A node's go-to link, as the caller retargets it after the anchor passes. */
 export const DC_GO_RE = /<a class="dc-go" href="#[^"]*" data-dc-ref="([^"]*)">/g;
 
+/** The go-to link {@link DC_GO_RE} matches, to the section `id` names, around
+ *  `textHtml` (already escaped). */
+export function dcGoLink(id: string, textHtml: string): string {
+  return `<a class="dc-go" href="#${anchorSlug(id)}" data-dc-ref="${escapeHtml(id)}">${textHtml}</a>`;
+}
+
 export interface PageDecisionData {
   ledgers: Ledger[];
   analysis: ChainAnalysis;
@@ -99,7 +105,7 @@ function node(id: string, kind: "q" | "d", label: string, language: QuestionLang
   return (
     `<details class="dc-node dc-${kind}${struck ? " dc-struck" : ""}" name="dc-chain"><summary>${escapeHtml(id)}</summary>` +
     `<div class="dc-pop">${struck ? `<s>${text}</s>` : text} ` +
-    `<a class="dc-go" href="#${anchorSlug(id)}" data-dc-ref="${escapeHtml(id)}">${GO_TO[language]} ${escapeHtml(id)} ↓</a></div></details>`
+    `${dcGoLink(id, `${GO_TO[language]} ${escapeHtml(id)} ↓`)}</div></details>`
   );
 }
 
@@ -177,7 +183,7 @@ export function prStripHtml(ledgers: Ledger[], language: QuestionLanguage, analy
   const phases = [...groups]
     .map(([d, rs]) => {
       const head = d && inLog.has(d)
-        ? `<a class="dc-go" href="#${anchorSlug(d)}" data-dc-ref="${escapeHtml(d)}">${escapeHtml(d)}</a>`
+        ? dcGoLink(d, escapeHtml(d))
         : escapeHtml(d || NO_DECISION[language]);
       return `<div class="dc-phase"><div class="dc-ph">${head}</div><div class="dc-prs">${rs.map((r) => square(r, language)).join("")}</div></div>`;
     })

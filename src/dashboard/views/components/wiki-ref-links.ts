@@ -323,6 +323,36 @@ function decodeHash(href: string): string | null {
   }
 }
 
+/** A `<Chart>`'s reader chrome (`CHART_CHROME_CLASSES` in chart-view.ts,
+ *  pinned equal by a test; the server module stays out of this bundle). */
+export const PEEK_CHART_CHROME = ["vc-head", "vc-plot", "vc-legend", "vc-notes"] as const;
+
+/** A peeked chart keeps its table and loses the classes that would hide it. */
+function bareChart(chart: Element): void {
+  chart.removeAttribute("class");
+  chart.removeAttribute("role");
+  chart.removeAttribute("aria-label");
+  chart.querySelector(":scope > .vc-table")?.classList.remove("vc-table");
+}
+
+/** A `<RuleTree>`'s reader chrome (`RULE_TREE_CHROME_CLASSES` in
+ *  rule-tree-view.ts, pinned equal by a test). */
+export const PEEK_RULE_TREE_CHROME = ["rt-head"] as const;
+
+/** A peeked rule tree is its list as written: no tree classes, no picker
+ *  wiring (a pick's `aria-current` included), no figure role. The live region
+ *  goes with `.rt-head`. */
+function bareRuleTree(tree: Element): void {
+  for (const x of [tree, ...Array.from(tree.querySelectorAll("[class], [data-rt-cases], [data-rt-case]"))]) {
+    if (x === tree || Array.from(x.classList).some((k) => k.startsWith("rt-"))) x.removeAttribute("class");
+    x.removeAttribute("data-rt-cases");
+    x.removeAttribute("data-rt-case");
+    x.removeAttribute("aria-current");
+  }
+  tree.removeAttribute("role");
+  tree.removeAttribute("aria-label");
+}
+
 /** What a peek copy drops: the reader's compact-list controls and parts (D6,
  *  D41, D42) and the decision views — a peek shows its target whole, as
  *  written, and never the chain or the strip. */
@@ -336,6 +366,8 @@ export const PEEK_STRIP_SELECTOR = [
   DL_WHEN_CLASS,
   CB_LINE_CLASS,
   DC_VIEW_CLASS,
+  ...PEEK_CHART_CHROME,
+  ...PEEK_RULE_TREE_CHROME,
 ]
   .map((c) => `.${c}`)
   .join(", ");
@@ -349,6 +381,8 @@ function cloneBare<T extends Node>(n: T): T {
   const c = n.cloneNode(true) as T;
   if (c instanceof Element) {
     c.querySelectorAll(PEEK_STRIP_SELECTOR).forEach((b) => b.remove());
+    for (const chart of [c, ...Array.from(c.querySelectorAll("section.vc"))]) if (chart.matches("section.vc")) bareChart(chart);
+    for (const tree of [c, ...Array.from(c.querySelectorAll("section.rt"))]) if (tree.matches("section.rt")) bareRuleTree(tree);
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;
       const items = Array.from(list.children);
@@ -388,9 +422,11 @@ function leadingContent(start: ChildNode | null): Node[] {
       if (chars > 0) break;
       continue;
     }
-    const text = (n.textContent ?? "").trim();
+    // Counted on the copy: stripped chrome is text the card does not show.
+    const copy = cloneBare(n);
+    const text = (copy.textContent ?? "").trim();
     if (!out.length && !text) continue;
-    out.push(cloneBare(n));
+    out.push(copy);
     chars += text.length;
   }
   return out;

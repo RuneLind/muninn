@@ -59,13 +59,17 @@ export const WORK_GROUP_DEFAULTS: Readonly<Pick<WorkGroupPrefs, "stop" | "eviden
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
-/** A canonical page path, or null: a relative, non-empty path with no `..`
- *  segment, trimmed and normalized the way pins are (`normalizeRel`). The
+/** A canonical page path, or null: trimmed and spelled by `normalizeRel` (the
+ *  reader's one spelling, which the boundaries and the pin compare with), then
+ *  refused when nothing is left, it climbs out of the wiki (`..`), or it ends
+ *  in `/`. A path that normalizes to a folder is not refused: `plans/.` reads
+ *  back as `plans`, `a/b/..` as `a`. A record written under the old
+ *  lower-case-only spelling reads back canonical here, so no migration. The
  *  parser and the record's list operations both match pages by it. */
 export function workGroupPagePath(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const rel = normalizeRel(v.trim());
-  if (!rel || rel.length > PAGE_PATH_MAX || rel.startsWith("/")) return null;
+  if (!rel || rel.length > PAGE_PATH_MAX) return null;
   if (rel.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return null;
   return rel;
 }

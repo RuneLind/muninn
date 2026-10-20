@@ -80,3 +80,13 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
   expect(fallback).toContain("Answered by <strong>melosys</strong>");
   expect(fallback).toContain("research-bot fallback");
 });
+
+// A size pin, so growth of the bundle every /wiki load inlines is a decision
+// rather than drift. Measured 1,089,983 bytes (272,938 gzipped) on 2026-10-20;
+// raise the bound in the PR that needs it.
+const WIKI_CLIENT_MAX_BYTES = 1_300_000;
+
+test("wikiClientScript stays under its size pin", async () => {
+  const js = await wikiClientScript();
+  expect(Buffer.byteLength(js)).toBeLessThan(WIKI_CLIENT_MAX_BYTES);
+});

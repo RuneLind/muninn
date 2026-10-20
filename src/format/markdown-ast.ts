@@ -63,9 +63,28 @@ export type Block =
   | { type: "blockquote"; lines: string[] }
   | UlBlock
   | OlBlock
-  | { type: "table"; headers: string[]; rows: string[][] }
+  | TableBlock
   | ComponentBlock
-  | { type: "text"; lines: string[] };
+  | TextBlock;
+
+/** A run of lines no other block claimed, blank lines included. The reader
+ *  prints its lines joined by `\n`, so a blank line inside it ends one visible
+ *  paragraph and starts the next. */
+export interface TextBlock {
+  type: "text";
+  lines: string[];
+}
+
+/** `line` is the 0-based line of the header row in the text `parseBlocks` was
+ *  given, as {@link ComponentBlock}'s is: a line linter skips the header row the
+ *  reader renders as column labels by asking the parser, not by re-deciding
+ *  where a table starts. */
+export interface TableBlock {
+  type: "table";
+  headers: string[];
+  rows: string[][];
+  line?: number;
+}
 
 /** `line` is the 0-based line of the opening tag in the text `parseBlocks` was
  *  given, so a caller can name the tag's line from the block it walks. */
@@ -119,6 +138,44 @@ export interface ListParagraph {
   text: string;
 }
 export type ListChild = ListBlock | CodeBlock | ListParagraph;
+
+/** Each list's item source lines: `[k]` holds the 0-based lines, in the text
+ *  `parseBlocks` was given, whose text `items[k]` joins (the item line and its
+ *  continuation lines; nested content is not the item's text). A side table,
+ *  not a field, so the AST and everything that compares it stay as they were. */
+const LIST_ITEM_LINES = new WeakMap<ListBlock, number[][]>();
+
+/** The source lines of each of `list`'s items ({@link LIST_ITEM_LINES}), or
+ *  undefined for a list `parseBlocks` did not make. */
+export function listItemLines(list: ListBlock): readonly (readonly number[])[] | undefined {
+  return LIST_ITEM_LINES.get(list);
+}
+
+/** The source lines of a text block or an item paragraph, by the same
+ *  convention as {@link LIST_ITEM_LINES}: `[k]` is the line `lines[k]` (a text
+ *  block) or the `k`th line of `text` (an item paragraph) came from. */
+const PARAGRAPH_LINES = new WeakMap<TextBlock | ListParagraph, number[]>();
+
+/** The source lines of a text block or an item paragraph `parseBlocks` made
+ *  ({@link PARAGRAPH_LINES}), or undefined for one it did not make. */
+export function paragraphLines(block: TextBlock | ListParagraph): readonly number[] | undefined {
+  return PARAGRAPH_LINES.get(block);
+}
+
+function noteParagraphLine(block: TextBlock | ListParagraph, line: number | undefined): void {
+  if (line === undefined) return;
+  const all = PARAGRAPH_LINES.get(block) ?? [];
+  PARAGRAPH_LINES.set(block, all);
+  all.push(line);
+}
+
+function noteItemLine(list: ListBlock, line: number | undefined): void {
+  if (line === undefined) return;
+  const all = LIST_ITEM_LINES.get(list) ?? [];
+  LIST_ITEM_LINES.set(list, all);
+  const k = list.items.length - 1;
+  (all[k] ??= []).push(line);
+}
 
 // ── Component blocks ────────────────────────────────────────────────────────
 // A small, whitelisted vocabulary of presentational block components shared with
@@ -1054,12 +1111,14 @@ function parseList(
   i: number,
   store: FenceStore,
   atBlockStart: boolean,
+  base: number,
 ): { block: ListBlock; next: number } | null {
   const first = matchListLine(lines[i]!);
   if (!first || first.indent > 3 || first.marker === "+") return null;
   if (first.indent > 0 && !atBlockStart) return null;
   const stack: ListLevel[] = [openLevel(first)];
   const root = stack[0]!.block;
+  noteItemLine(root, store.srcLine[base + i]);
   let afterCode = false;
   /** The item paragraph the last line went into, which a lazy line continues. */
   let para: ListParagraph | undefined;
@@ -1085,8 +1144,16 @@ function parseList(
             : step.level - 1;
       stack[at]!.block.loose = true;
     }
-    if (step.kind === "text" && para) para.text += "\n" + step.text;
-    else para = applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
+    if (step.kind === "text" && para) {
+      para.text += "\n" + step.text;
+      noteParagraphLine(para, store.srcLine[base + k]);
+    } else {
+      para = applyListStep(step, stack, afterBlank ? undefined : lastItemAt);
+      if (para) noteParagraphLine(para, store.srcLine[base + k]);
+      if (step.kind === "child" || step.kind === "item" || step.kind === "sublist" || step.kind === "text") {
+        noteItemLine(stack[stack.length - 1]!.block, store.srcLine[base + k]);
+      }
+    }
     afterCode = step.kind === "code";
     lastItemAt = step.kind === "text" || step.kind === "code" || step.kind === "para" ? undefined : stack[stack.length - 1];
     j = k + 1;
@@ -1225,6 +1292,29 @@ function applyListStep(
       return;
     }
   }
+}
+
+/**
+ * Which lines of `text` the reader shows as fenced code: `true` for a fence's
+ * opener, body and closer. Read off {@link extractFences} itself, so the rule is
+ * the reader's: backticks only, and an opener with no closer stays a prose line,
+ * as do the lines after it. `fencedLineMask` (`wiki-integrate.ts`) is the
+ * fact-check walk and takes `~~~` and an unclosed opener to the end; a line
+ * linter that judges what the reader SHOWS reads this one. CRLF is folded first.
+ */
+export function readerFencedLines(text: string): boolean[] {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, srcLine: [] };
+  const out = extractFences(normalized, store).split("\n");
+  const fenced = new Array<boolean>(lines.length).fill(true);
+  // A line the walk passed through verbatim is not code. A placeholder never
+  // equals an input line: its id is one no line of the input spells.
+  out.forEach((line, k) => {
+    const src = store.srcLine[k]!;
+    if (line === lines[src]) fenced[src] = false;
+  });
+  return fenced;
 }
 
 export function parseBlocks(text: string): Block[] {
@@ -1404,6 +1494,8 @@ function parseBlocksInner(
   const lines = protectedText.split("\n");
   const blocks: Block[] = [];
   let textBuffer: string[] = [];
+  /** `textBuffer[k]`'s source line, for {@link PARAGRAPH_LINES}. */
+  let textSrc: (number | undefined)[] = [];
   let i = 0;
 
   // Per-parse memo of scan futility: once a multi-line scan for `<Name>` runs to
@@ -1417,8 +1509,11 @@ function parseBlocksInner(
 
   function flushText() {
     if (textBuffer.length > 0) {
-      blocks.push({ type: "text", lines: textBuffer });
+      const block: TextBlock = { type: "text", lines: textBuffer };
+      for (const l of textSrc) noteParagraphLine(block, l);
+      blocks.push(block);
       textBuffer = [];
+      textSrc = [];
     }
   }
 
@@ -1489,7 +1584,7 @@ function parseBlocksInner(
     const prev = i > 0 ? lines[i - 1]! : "";
     const atBlockStart =
       i === 0 || prev.trim() === "" || CODE_PLACEHOLDER_RE.test(prev) || HEADING_RE.test(prev);
-    const list = parseList(lines, i, store, atBlockStart);
+    const list = parseList(lines, i, store, atBlockStart, base);
     if (list) {
       flushText();
       blocks.push(list.block);
@@ -1511,13 +1606,14 @@ function parseBlocksInner(
           .slice(2)
           .filter((l) => !isSeparatorRow(l))
           .map((l) => parsePipeCells(l).map((c) => c.trim()));
-        blocks.push({ type: "table", headers, rows });
+        blocks.push({ type: "table", headers, rows, line: store.srcLine[base + i] });
         i = j;
         continue;
       }
     }
 
     textBuffer.push(line);
+    textSrc.push(store.srcLine[base + i]);
     i++;
   }
   flushText();
@@ -1739,4 +1835,19 @@ function parsePipeCells(line: string): string[] {
   const inner = trimmed.startsWith("|") ? trimmed.slice(1) : trimmed;
   const withoutEnd = inner.endsWith("|") ? inner.slice(0, -1) : inner;
   return withoutEnd.split("|");
+}
+
+/** Every `name` component in `blocks` and in the component bodies under them,
+ *  in source order (a list item opens no component block). */
+export function componentBlocks(blocks: readonly Block[], name: ComponentName): ComponentBlock[] {
+  const out: ComponentBlock[] = [];
+  const walk = (bs: readonly Block[]) => {
+    for (const b of bs) {
+      if (b.type !== "component") continue;
+      if (b.name === name) out.push(b);
+      walk(b.children);
+    }
+  };
+  walk(blocks);
+  return out;
 }

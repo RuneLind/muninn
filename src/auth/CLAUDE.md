@@ -310,13 +310,16 @@ laptop or mini keeps working:
   **skipped when `Sec-Fetch-Site` is `cross-site` or `same-site`**: Fetch
   Metadata, when present, is authoritative. Without that, an http page on :80
   of the name serve publishes sends a matching `Origin` with `cross-site` and
-  passed (measured). **Open residual:** the same page's `new WebSocket` still
-  passes, because a handshake carries no `Sec-Fetch-Site` and the arm takes the
-  Host side's scheme from the `Origin` (measured: 101 and a chat snapshot). It
-  needs hostile http content on :80 of muninn's own tailnet name; the remedy
-  is to take that scheme from `X-Forwarded-Proto`, which serve sets. Browsers
-  that send no Fetch Metadata (Safari < 16.4, Firefox < 90) keep the HTTP half
-  of the same gap.
+  passed (measured). The same page's `new WebSocket` carries no
+  `Sec-Fetch-Site`, so the arm also requires **the `Origin`'s scheme to equal
+  `X-Forwarded-Proto`** when that header names `http` or `https` (first hop of
+  a list; `originSchemeMatchesForwarded`). serve sets it, so an http page on
+  :80 of the tailnet name no longer opens the https socket (it got a 101 and a
+  chat snapshot before). An absent or unrecognised value constrains nothing,
+  so plain-http LAN use keeps working; the header can only narrow the arm,
+  never admit a request. Both `createOriginMiddleware` and the WS upgrade pass
+  it. A same-host proxy that terminates https and does NOT set the header
+  leaves the gap open.
 - **`Sec-Fetch-Site: same-origin`**, a second path for an https proxy that
   rewrites `Host`, so the arm above does not match.
 
@@ -346,9 +349,30 @@ passes through the Host / same-origin arms instead — known, not fixed.
 Scoped to **side effects, not to methods**. `SIDE_EFFECTING_GETS` (`origin.ts`)
 is the enumerated exception list — the pending consume (and its `/simulator/`
 alias), the research synthesis GET, the wiki ask/digest/explain/fact-check
-model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the MCP-status
-probe and the
-two WS upgrade paths. Three examples: `GET /chat/pending/:threadId` is a one-time *consume*
+model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the
+search/similarity/embedding amplifiers (`/api/search/search`, `/api/memsearch`,
+the `*/similar` proxies, `/api/graph/{similarity,author}`, same-story, the
+atlas), the MCP-status probe and the two WS upgrade paths. A second list,
+`REFRESH_SIDE_EFFECTING_GETS`, holds the GETs whose plain read stays open but
+whose `?refresh=1` forces a rebuild — `/api/wiki/pages` and
+`/api/wiki/index-coverage` (a full index build with its git reads),
+`/api/wiki/ingest-backlog` and `/api/summaries/stats` (an uncached recompute
+over every summary collection); those count as side-effecting only when a
+`refresh` value is `"1"`, HEAD included. `/api/wiki/page` reads no `refresh`
+and is on neither list.
+**`side-effecting-gets.test.ts` is the carrier**: it walks every registered GET
+and requires each on this list or on its `READ_ONLY_GETS` allowlist with a
+reason, so a new GET starts red; it also scans for `refresh` reads, so a GET
+that grows one starts red until it is classified — but only a read spelled
+`.query("refresh")` or `.queries("refresh")` with a literal name, in a non-test
+`.ts` file under `src/dashboard/` or `src/chat/`, attributed to the nearest
+literal `.get("…")` above it in the same file. A destructured `c.req.query()`,
+an indexed `queries()["refresh"]`, a `searchParams` read, or a read in any other
+directory is not seen. The routes' `c.req.query("refresh")` takes the FIRST
+value of a repeated parameter, so the gate matches any value equal to `"1"`. The criterion is written in its header: a
+model call, a spawn, a consume, a search/similarity/embedding computation the
+caller drives, or a fan-out the data sizes is listed; a fixed set of listings
+or one bounded sibling read is not. Three examples: `GET /chat/pending/:threadId` is a one-time *consume*
 (a cross-site `<img>` destroys the victim's pending message without reading a
 response) and `GET /api/research/ask` spends a retrieval + synthesis turn;
 `GET /chat/mcp-status/:bot` spawns every stdio MCP server in the bot's

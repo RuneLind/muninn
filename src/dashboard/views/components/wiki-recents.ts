@@ -1549,8 +1549,7 @@ export function buildRail(input: RailInput): RailModel {
   if (grouped && input.openRelPath) {
     const openKey = normalizeRel(input.openRelPath);
     const openPage = byRel.get(openKey);
-    const openParent = parentOf.get(openKey);
-    if (openParent) forced.add(normalizeRel(openParent.relPath));
+    // The open CHILD's parent is forced below, after the lifts.
     if (childrenOf.has(openKey)) forced.add(openKey);
     if (openPage && isMetaPage(openPage)) forced.add(SECTION_META_FOLD_KEY);
     // NB the FAMILY or MONTH holding the open page is NOT forced here: whether
@@ -1806,6 +1805,14 @@ export function buildRail(input: RailInput): RailModel {
       sectionLifted.add(key);
       if (parentOf.has(key)) lifted.add(key);
     }
+  }
+  // The open child's parent is forced only while the child renders under it:
+  // a child an open card or a pin lifted is on screen in that section, so the
+  // parent's chip stays the reader's toggle (arch review 2026-10, finding 72).
+  if (grouped && input.openRelPath) {
+    const openKey = normalizeRel(input.openRelPath);
+    const openParent = parentOf.get(openKey);
+    if (openParent && !lifted.has(openKey)) forced.add(normalizeRel(openParent.relPath));
   }
   /** The ranked members a CLOSED series row in Activity shows under it — never
    *  one a pin lifted to `Pinned`, which is on screen there already. */
