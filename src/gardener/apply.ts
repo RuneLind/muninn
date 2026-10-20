@@ -375,11 +375,11 @@ export interface GroupApplyResult {
  * still runs OUTSIDE the section, as ONE commit over every path the group
  * touched.
  *
- * **It STOPS on the first row that is not `applied`, and says which.** A stale
- * or colliding row means the group's diffs no longer describe the wiki, and the
- * remaining rows are not attempted. Rows already written stay written: there is
- * no rollback, so the honest answer is to report the boundary and let the
- * reviewer re-propose, which the lint does deterministically on its next run.
+ * **It checks EVERY row's CAS before writing any of them** (`preflightGroupRows`,
+ * inside the same section), so a member edited since seeding stops the group
+ * with nothing written. A row that fails later (a write error) still STOPS the
+ * group and says which; rows already written by then stay written, since there
+ * is no rollback.
  *
  * The per-row work is the SAME `applyInner` a single approve runs — the
  * confinement, staleness, write, `log.md` and reindex steps are not re-spelled
@@ -403,6 +403,15 @@ export async function applyWikiProposalGroup(
   const tail: { paths: string[] } = { paths: [] };
   const result = await runWikiWriteExclusive(deps.wikiDir, async () => {
     const out: GroupApplyResult = { results: [] };
+    // Every member's CAS BEFORE the first write, so a stale member stops the
+    // group with nothing written (finding 61). The section serializes the
+    // in-process writers, so the check holds until the loop below runs.
+    const blocked = await preflightGroupRows(rows, deps);
+    if (blocked) {
+      out.results.push(blocked);
+      out.stoppedAt = blocked;
+      return out;
+    }
     const written: WikiProposal[] = [];
     for (const row of rows) {
       // `skipLog: true` — a group writes ONE log.md entry, not one per row. A
@@ -491,6 +500,50 @@ async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps
       error: errMsg(err),
     });
   }
+}
+
+/**
+ * The group's CAS, run over EVERY row before any row is written: the first row
+ * (in the given order) whose target is no longer what it was drafted against,
+ * as the outcome `applyInner` would give it, or null when every row may go.
+ * Mirrors `applyInner`'s steps 1a, 2a and 2b; a row that already IS its draft
+ * (2a, a no-op) passes. A lint draft is written verbatim, so the no-op test is
+ * exact on that kind; other kinds also accept the trailing-newline form.
+ */
+async function preflightGroupRows(
+  rows: readonly WikiProposal[],
+  deps: ApplyDeps,
+): Promise<GroupRowOutcome | null> {
+  const index = await deps.getWikiIndex();
+  for (const row of rows) {
+    const blocked = (outcome: ApplyOutcome): GroupRowOutcome => ({
+      id: row.id,
+      targetPath: row.targetPath,
+      outcome,
+    });
+    if (row.mode === "update" && !index?.pages.some((p) => p.relPath === row.targetPath)) {
+      return blocked({
+        outcome: "error",
+        reason: `update target "${row.targetPath}" is not an indexed wiki page`,
+      });
+    }
+    const current = await deps.readFile(path.join(deps.wikiDir, row.targetPath));
+    if (
+      current !== null &&
+      (current === row.draft || (row.kind !== "lint" && current === withTrailingNewline(row.draft)))
+    ) {
+      continue;
+    }
+    if (row.mode === "update") {
+      if (current === null) return blocked({ outcome: "stale", reason: "target file no longer exists" });
+      if (!row.baseHash || sha256(current) !== row.baseHash) {
+        return blocked({ outcome: "stale", reason: "target file changed since drafting" });
+      }
+    } else if (current !== null) {
+      return blocked({ outcome: "stale", reason: "target path already exists" });
+    }
+  }
+  return null;
 }
 
 /** The two read-only refusals `applyWikiProposal` makes before entering the

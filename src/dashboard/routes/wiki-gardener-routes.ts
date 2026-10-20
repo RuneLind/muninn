@@ -3006,8 +3006,8 @@ export function registerWikiGardenerRoutes(
       return c.json(
         {
           outcome: "stopped",
-          // Written pages stay written — there is no rollback, so the honest
-          // answer names the boundary rather than implying nothing happened.
+          // The preflight refuses a stale member before any write; a later
+          // failure leaves earlier pages written, so the answer names both.
           applied,
           noop,
           skipped,

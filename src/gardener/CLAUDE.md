@@ -168,9 +168,11 @@ whichever `target_path` sorts first. The commit subject counts PAGES — the
 staged paths minus the wiki-global `log.md` — never the rows the apply reached,
 which on a stopped group said "3 pages" over a commit staging one.
 
-It **stops at the first row that is not `applied`** and reports which. Rows
-already written stay written — there is no rollback, so the honest answer names
-the boundary. The route (`POST /api/wiki/proposals/group/:groupKey/approve?wiki=`)
+It **checks every row's CAS before the first write** (`preflightGroupRows`,
+inside the same section): a member that is unindexed, gone, edited since
+drafting or (create mode) already present stops the group with NO page written.
+A row that fails after that (a write error) still stops the group; rows written
+before it stay written, since there is no rollback. The route (`POST /api/wiki/proposals/group/:groupKey/approve?wiki=`)
 answers 409 `outcome: "stopped"` with `applied[]`, `noop[]` and `stoppedAt`,
 and CASes each reached row through its own terminal verb.
 
@@ -206,7 +208,7 @@ Four more rules on that route, each a measured defect:
   `draft`, so the very next Accept answered `mixed` and the reverted rows could
   never be applied at all — the card kept its buttons and they did nothing. That
   is also what the e2e stop case now asserts: a second Accept writes the
-  remaining page and the card settles on `2 applied · 1 stale`.
+  remaining pages and the card settles on `2 applied · 1 stale`.
 - **A row `applyInner` short-circuits at step 2a** — the page already WAS the
   draft — is reported in `noop[]`, not `applied[]`. It is `applied` in the DB
   (it is done), but "3 pages written" and "3 pages that already said that" are

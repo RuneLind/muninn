@@ -977,19 +977,44 @@ describe("applyWikiProposalGroup", () => {
     expect(await readFile(logPath, "utf8")).toBe(original);
   });
 
-  test("stops at a stale row; earlier rows stay written, later rows are never attempted", async () => {
+  test("a member edited after seeding stops the group with NONE of its members written (finding 61)", async () => {
+    // The 8.2 shape: B is the head carrying the label edit, and the author
+    // edited it before Accept. Stopping after A was written left A carrying the
+    // coined key and the label edit lost for good.
+    const PAGE_C = "plans/c.mdx";
+    await writeFile(path.join(wikiDir, PAGE_C), pageBody("C"));
+    const rowB = lintRow("r2", PAGE_B, pageBody("B"));
     const rows = [
       lintRow("r1", PAGE_A, pageBody("A")),
-      { ...lintRow("r2", PAGE_B, pageBody("B")), baseHash: "0".repeat(64) },
-      lintRow("r3", PAGE_B, pageBody("B")),
+      { ...rowB, draft: rowB.draft.replace("series: prov\n", "series: prov\nseries_label: Prov Work\n") },
+      lintRow("r3", PAGE_C, pageBody("C")),
     ];
+    await writeFile(path.join(wikiDir, PAGE_B), pageBody("B") + "\nEdited after seeding.\n");
     const res = await applyWikiProposalGroup(rows, deps());
 
-    expect(res.results).toHaveLength(2);
     expect(res.stoppedAt?.id).toBe("r2");
     expect(res.stoppedAt?.outcome.outcome).toBe("stale");
-    expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
-    expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).not.toContain("series: prov");
+    // Only the stale row was reached; the others are unreached (the route puts
+    // them back to draft).
+    expect(res.results.map((r) => r.id)).toEqual(["r2"]);
+    expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    expect(await readFile(path.join(wikiDir, PAGE_C), "utf8")).toBe(pageBody("C"));
+    let logExists = true;
+    try {
+      await readFile(path.join(wikiDir, "log.md"), "utf8");
+    } catch {
+      logExists = false;
+    }
+    expect(logExists).toBe(false);
+  });
+
+  test("a no-op member passes the group preflight (finding 61 scope guard)", async () => {
+    const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+    await writeFile(path.join(wikiDir, PAGE_A), rowA.draft); // already applied
+    const res = await applyWikiProposalGroup([rowA, lintRow("r2", PAGE_B, pageBody("B"))], deps());
+    expect(res.stoppedAt).toBeUndefined();
+    expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+    expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toContain("series: prov");
   });
 
   test("makes ONE commit over every path the group touched", async () => {
@@ -1098,13 +1123,19 @@ describe("applyWikiProposalGroup", () => {
 
   test("a STOPPED group commits the pages it wrote, and its subject says so", async () => {
     const commits: Array<{ paths: string[]; message: string }> = [];
-    const rows = [
-      lintRow("r1", PAGE_A, pageBody("A")),
-      { ...lintRow("r2", PAGE_B, pageBody("B")), baseHash: "0".repeat(64) },
-    ];
+    const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+    // Both pass the preflight CAS; B's WRITE then fails, which is the stop the
+    // preflight cannot see (a stale member now stops with nothing written).
     await applyWikiProposalGroup(
       rows,
-      deps({ commit: async (paths, message) => { commits.push({ paths, message }); } }),
+      deps({
+        commit: async (paths, message) => { commits.push({ paths, message }); },
+        writeFile: async (absPath, content) => {
+          if (absPath.endsWith(PAGE_B)) throw new Error("disk full");
+          await mkdir(path.dirname(absPath), { recursive: true });
+          await writeFile(absPath, content);
+        },
+      }),
     );
     expect(commits).toHaveLength(1);
     // `log.md` is not a page. Counting the rows the apply REACHED said
