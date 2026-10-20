@@ -2,8 +2,8 @@
  * Lint check 14 — volatile state outside its home (living-facts PR 1, D10).
  * Each volatile fact (a PR's state, a prod release, a Jira status) has one
  * home, on one page: the page whose frontmatter `owns:` lists the key. On a
- * page the homes are `<StatusRows>`, a paragraph that starts with a `**Status**`
- * label, a leading-pipe table directly under a `PR ledger` / `PR-oversikt` label
+ * page the homes are `<StatusRows>`, a paragraph or list item that starts with a
+ * `**Status**` label, a leading-pipe table directly under a `PR ledger` / `PR-oversikt` label
  * or heading, and `status_note`. Every other line names the key and leaves the
  * state to the chip.
  *
@@ -21,9 +21,12 @@
  * reserved or culled. Frontmatter `description` is linted; `status_note` is a
  * home. Exempt from check 1, besides the homes: `<Timeline>`, `<DecisionLog>`,
  * `<Historic>` (each exactly where `parseBlocks` makes a block of it),
- * blockquote lines (a line that opens with `>`), code fences and inline code.
- * HTML and JSX comments are linted: this reader renders them as visible text.
- * Lanes and plain tables are linted.
+ * blockquote lines (a line that opens with `>`), code fences by the reader's
+ * rule (`readerFencedLines`: backticks only, an unclosed opener stays prose),
+ * inline code, and the header row of each table `parseBlocks` makes. HTML and
+ * JSX comments are linted: this reader renders them as visible text. Lanes and
+ * plain tables are linted.
+ * The frontmatter ends where the store's does (`frontmatterBodyLine`).
  *
  * Off unless `.wiki-reader.json` declares `statePhrases`
  * (`src/format/state-phrases.ts`): the phrases and task words are the wiki's
@@ -38,17 +41,17 @@
  */
 
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, parseBlocks, type Block } from "../format/markdown-ast.ts";
+import { COMPONENT_OPEN_RE, listItemLines, paragraphLines, parseBlocks, readerFencedLines, type Block, type ListChild } from "../format/markdown-ast.ts";
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
-import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
 import { JIRA_KEY_SOURCE } from "../jira/retrieval.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
 import { ownerCensus, readOwns } from "./frontmatter-lists.ts";
+import { frontmatterBodyLine } from "./page-text.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
@@ -108,14 +111,17 @@ const PR_REF_RE = new RegExp(
 /** A date qualifier: `per 11.10`, `per 11.10.2026`, `(11.10)`. */
 const DATE_QUALIFIER_RE = /(?<![\p{L}\p{N}])per\s+\d{1,2}\.\d{1,2}(?:\.\d{4})?(?![\p{N}])|\(\d{1,2}\.\d{1,2}\)/giu;
 /**
- * A paragraph that is a home: `**Status` with an optional date and an optional
- * `:` or `.`, then `**` — `**Status:**`, `**Status.**`, `**Status 28.09:**`,
- * `**Status 12.10.2026**` — after an optional list marker. `**Statusen**` is not.
+ * The label that makes a paragraph or a list item a home: `**Status` with an
+ * optional date and an optional `:` or `.`, then `**` — `**Status:**`,
+ * `**Status.**`, `**Status 28.09:**`, `**Status 12.10.2026**`. `**Statusen**`
+ * is not. A paragraph's first line (trimmed) starts with it; a list item's
+ * first line starts with it after the item's own marker.
  */
-const STATUS_PARA_RE = /^(?:[-*+]\s+|\d+[.)]\s+)?\*\*Status(?:\s+\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\.?)?[:.]?\*\*/;
+const STATUS_LABEL = "\\*\\*Status(?:\\s+\\d{1,2}\\.\\d{1,2}(?:\\.\\d{2,4})?\\.?)?[:.]?\\*\\*";
+const STATUS_PARA_RE = new RegExp(`^${STATUS_LABEL}`);
+const STATUS_ITEM_RE = new RegExp(`^(?:[-*+]\\s+|\\d+\\.\\s+)${STATUS_LABEL}`);
 /** A blockquote line. `- > x` is a list item: the reader shows its `>`. */
 const QUOTE_RE = /^>/;
-const INLINE_TAG_RE = new RegExp(`^<(?:${INLINE_COMPONENT_NAMES.join("|")})(?=[\\s>/])`);
 
 /** One case-insensitive, word-edged alternation over `words`, longest first so
  *  `ikke opprettet` wins over `opprettet` at the same place. */
@@ -128,18 +134,44 @@ function wordsRe(words: readonly string[]): RegExp | null {
 /**
  * Task words. A word with an upper-case letter (`PR`, `PR-er`) matches as
  * written, so `e2e-pr.yml` is no PR; an all-lower-case word (`oppgave`) matches
- * any case. Neither may touch a `.`/`/` path neighbour or a letter, but a
- * hyphen is fine (`api-PR-en`) and so is a sentence-ending period.
+ * any case. A task word anchors only next to a number: one after it names a
+ * piece of work (`PR 1`, `PR 1–4`, `oppgave #3`), one before it counts pieces
+ * of work (`8 PR-er`, `7 av 8 PR-er`). A bare one (`når PR-en er merget`, a
+ * `| Service-PR |` column) is generic prose about no piece of work. A plural
+ * the wiki does not list (`3 oppgaver` for `oppgave`) is no count.
+ *
+ * The count form, `COUNT SEP WORD`:
+ *
+ * | part   | rule                                                                        |
+ * |--------|-----------------------------------------------------------------------------|
+ * | COUNT  | 1–3 ASCII digits (`3`, `10`, `999`), or a range of two such numbers joined   |
+ * |        | by `-` or `–` (`1-3`, `10–12`). Four digits are a year (`2026`), and         |
+ * |        | `2026-10` a year-month                                                      |
+ * | left   | before COUNT: the start, or none of a letter, a digit of any script, `_`,   |
+ * |        | `.`, `,`, `#`, `:`, `/`, `-`, `–`. So the end of a version, decimal, time,  |
+ * |        | date, key or word (`v2`, `1.2`, `1,5`, `14:30`, `6/10`, `DEMO-8`, `#3`) is  |
+ * |        | no count, and neither is a range that is (`1.5–3`, `14:30–16`, `1-2-3`)     |
+ * | SEP    | exactly one space, tab or no-break space (`3PRs`, `3  PRs` are no count)     |
+ * | WORD   | a listed task word, followed by none of a letter, a digit, `_`, `/`, or a   |
+ * |        | `.` with a letter or digit after it. A hyphen may follow: `3 PR-en` counts   |
+ * |        | as `3 PR`                                                                   |
  */
-function taskWordsRes(words: readonly string[]): RegExp[] {
-  const edge = (alt: string, flags: string) =>
-    new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`, flags);
+/** COUNT with its left edge, as the table above spells it. */
+const COUNT_SOURCE = "(?<![\\p{L}\\p{N}_.,#:/\\-–])(?:[0-9]{1,3}[-–])?[0-9]{1,3}";
+
+function taskWordsRes(words: readonly string[]): { re: RegExp; count: boolean }[] {
+  const named = (alt: string, flags: string) =>
+    new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?=[ \\t\\u00a0]?#?\\d)`, flags);
+  const counted = (alt: string, flags: string) =>
+    new RegExp(`(?<=${COUNT_SOURCE}[ \\t\\u00a0])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`, flags);
   const alt = (ws: string[]) => ws.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
   const cased = words.filter((w) => /\p{Lu}/u.test(w));
   const folded = words.filter((w) => !/\p{Lu}/u.test(w));
-  const out: RegExp[] = [];
-  if (cased.length > 0) out.push(edge(alt(cased), "gu"));
-  if (folded.length > 0) out.push(edge(alt(folded), "giu"));
+  const out: { re: RegExp; count: boolean }[] = [];
+  for (const [ws, flags] of [[cased, "gu"], [folded, "giu"]] as const) {
+    if (ws.length === 0) continue;
+    out.push({ re: named(alt(ws), flags), count: false }, { re: counted(alt(ws), flags), count: true });
+  }
   return out;
 }
 
@@ -223,11 +255,48 @@ function blockEnd(lines: readonly string[], fenced: readonly boolean[], start: n
 }
 
 /** Lines inside a tracked block, by `parseBlocks`: a tag the parser renders as
- *  text (a multi-line opener, a close mid-line, trailing prose) opens nothing. */
-function trackedLines(lines: readonly string[], fenced: readonly boolean[], body: number): Map<number, "home" | "history"> {
+ *  text (a multi-line opener, a close mid-line, trailing prose) opens nothing.
+ *  `headers` gets the header row of every table the parser makes: column
+ *  labels, not state. `status` gets every line of each Status home the parser
+ *  makes ({@link statusHomeLines}). */
+function trackedLines(
+  lines: readonly string[],
+  fenced: readonly boolean[],
+  body: number,
+  headers: Set<number>,
+  status: Set<number>,
+): Map<number, "home" | "history"> {
   const roles = new Map<number, "home" | "history">();
+  const homeIf = (src: readonly number[] | undefined, re: RegExp) => {
+    if (src?.length && re.test(lines[body + src[0]!]!.trim())) for (const l of src) status.add(body + l);
+  };
+  const walkList = (children: readonly ListChild[]) => {
+    for (const c of children) {
+      if (c.type === "paragraph") homeIf(paragraphLines(c), STATUS_PARA_RE);
+      if (c.type !== "ul" && c.type !== "ol") continue;
+      for (const src of listItemLines(c) ?? []) homeIf(src, STATUS_ITEM_RE);
+      for (const n of c.nested ?? []) walkList(n ?? []);
+    }
+  };
   const walk = (blocks: Block[]) => {
     for (const b of blocks) {
+      if (b.type === "table" && b.line !== undefined) headers.add(body + b.line);
+      if (b.type === "ul" || b.type === "ol") walkList([b]);
+      if (b.type === "text") {
+        // One visible paragraph per run between empty lines: the reader joins
+        // a text block's lines with `\n` and turns only `\n\n` into a break
+        // (`paragraphGaps`), so a line of spaces stays inside the paragraph.
+        const src = paragraphLines(b) ?? [];
+        let run: number[] = [];
+        for (const l of [...src, -1]) {
+          if (l >= 0 && lines[body + l] !== "") {
+            run.push(l);
+            continue;
+          }
+          homeIf(run, STATUS_PARA_RE);
+          run = [];
+        }
+      }
       if (b.type !== "component") continue;
       if (b.line !== undefined && (b.name === HOME_BLOCK || HISTORY_BLOCKS.includes(b.name))) {
         const start = body + b.line;
@@ -260,27 +329,26 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
   return out;
 }
 
-/** A line that starts a new block, ending a paragraph. An inline component
- *  (`<Pill>`) continues the paragraph. */
-function startsBlock(t: string): boolean {
-  if (/^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\||```|~~~)/.test(t)) return true;
-  return t.startsWith("<") && !INLINE_TAG_RE.test(t);
-}
-
 /**
  * Classify a page's lines. Frontmatter: `description` and `status_note`, each
  * with its indented continuation lines (a quoted, plain or block scalar, blank
  * lines inside a block scalar included), are a linted unit and a home unit;
  * the rest is neither. Body: fences, blockquote lines and the three history
  * blocks are exempt; `<StatusRows>`,
- * a `**Status**` paragraph and a PR-ledger table are homes; every other line
+ * a `**Status**` paragraph or list item and a PR-ledger table are homes; every other line
  * is linted.
  */
 export function stateLineRoles(content: string): LineRoles {
-  // Folded so a CRLF fence is a fence: `fencedLineMask` reads "```\r" as no fence.
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
-  const body = frontmatterEndLine(lines);
-  const fenced = fencedLineMask(lines);
+  // Folded once, so `lines`, the frontmatter boundary and `readerFencedLines`
+  // (which folds its own input too) all count the same lines.
+  const folded = content.replace(/\r\n/g, "\n");
+  const lines = folded.split("\n");
+  // The store's boundary: a column-0 `---` ends the frontmatter, so an indented
+  // one inside a block scalar is still frontmatter.
+  const body = frontmatterBodyLine(folded);
+  // The reader's fence rule over the body it renders: backticks only, and an
+  // opener with no closer stays prose. Frontmatter lines are never fenced.
+  const fenced = [...new Array<boolean>(body).fill(false), ...readerFencedLines(lines.slice(body).join("\n"))];
   const linted: Unit[] = [];
   const home: Unit[] = [];
 
@@ -296,41 +364,36 @@ export function stateLineRoles(content: string): LineRoles {
     }
   }
 
-  const tracked = trackedLines(lines, fenced, body);
+  const headers = new Set<number>();
+  const status = new Set<number>();
+  const tracked = trackedLines(lines, fenced, body, headers, status);
   const tables = tableRows(lines, fenced, body);
-  let statusPara = false;
   let ledger = false;
-  const reset = () => {
-    statusPara = false;
-    ledger = false;
-  };
   for (let i = body; i < lines.length; i++) {
     if (fenced[i]) {
-      reset();
+      ledger = false;
       continue;
     }
     const role = tracked.get(i);
     if (role) {
-      reset();
+      ledger = false;
       if (role === "home") home.push({ lines: [i] });
       continue;
     }
     const t = lines[i]!.trim();
     if (t === "") {
-      reset();
+      ledger = false;
+      continue;
+    }
+    // A Status paragraph or list item, exactly where the parser makes it.
+    if (status.has(i)) {
+      ledger = false;
+      home.push({ lines: [i] });
       continue;
     }
     // The reader renders the unprefixed line after a quote as its own text.
     if (QUOTE_RE.test(t)) {
-      reset();
-      continue;
-    }
-
-    // A `**Status**` paragraph runs to the next blank line or block start.
-    if (STATUS_PARA_RE.test(t)) statusPara = true;
-    else if (statusPara && startsBlock(t)) statusPara = false;
-    if (statusPara) {
-      home.push({ lines: [i] });
+      ledger = false;
       continue;
     }
 
@@ -342,6 +405,7 @@ export function stateLineRoles(content: string): LineRoles {
         while (j >= body && lines[j]!.trim() === "") j--;
         ledger = j >= body && isLedgerLabel(lines[j]!);
       }
+      if (headers.has(i)) continue;
       if (ledger) {
         home.push({ lines: [i], row: true });
         continue;
@@ -505,19 +569,23 @@ export function checkState(
     // ── Check 1: state outside its home ────────────────────────────────────
     for (const unit of roles.linted) {
       const { text, lineAt } = unitText(lines, unit);
-      const states = [...allMatches(phraseRe, text), ...allMatches(DATE_QUALIFIER_RE, text)];
+      const phrases = allMatches(phraseRe, text);
+      const states = [...phrases, ...allMatches(DATE_QUALIFIER_RE, text)];
       if (states.length === 0) continue;
+      const counts = taskRes.filter((t) => t.count).flatMap((t) => allMatches(t.re, text));
       const anchors = [
         ...keyHits(text),
         ...allMatches(namedRe, text),
         ...allMatches(PR_REF_RE, maskLinks(text)),
-        ...taskRes.flatMap((re) => allMatches(re, text)),
+        ...taskRes.filter((t) => !t.count).flatMap((t) => allMatches(t.re, text)),
       ];
-      if (anchors.length === 0) continue;
+      if (anchors.length === 0 && counts.length === 0) continue;
       const byLine = new Map<number, { states: string[]; anchor: string }>();
       for (const clause of stateClauses(text, unit.row)) {
         const cs = inClause(states, clause).sort((a, b) => a.start - b.start);
-        const ca = inClause(anchors, clause);
+        // A count (`3 PR-er`) anchors a state phrase only: beside a date alone
+        // it is a dated record (`| abc123 (11.09) | 3 PR-er | $140 |`).
+        const ca = [...inClause(anchors, clause), ...(inClause(phrases, clause).length > 0 ? inClause(counts, clause) : [])];
         if (cs.length === 0 || ca.length === 0) continue;
         for (const s of cs) {
           const line = lineAt(s.start);

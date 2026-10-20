@@ -13,7 +13,7 @@
  */
 
 import path from "node:path";
-import { frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { frontmatterBodyLine } from "./page-text.ts";
 import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { extractWikilinks, WIKILINK_RE } from "./wikilinks.ts";
@@ -51,9 +51,9 @@ class Frontmatter {
   constructor(readonly lines: readonly string[]) {}
 
   static of(content: string): Frontmatter | null {
-    const lines = content.replace(/\r\n/g, "\n").split("\n");
-    const end = frontmatterEndLine(lines);
-    return end === 0 ? null : new Frontmatter(lines.slice(1, end - 1));
+    const folded = content.replace(/\r\n/g, "\n");
+    const end = frontmatterBodyLine(folded);
+    return end === 0 ? null : new Frontmatter(folded.split("\n", end).slice(1, end - 1));
   }
 
   whole(): Record<string, unknown> | null {
@@ -431,28 +431,18 @@ function cleanLinkTarget(target: string): string {
  *  miss drops a key. */
 const LISTS_KEY_RE = /owns|related|\\/;
 
-/** Lines split before the whole page is: a frontmatter rarely runs longer. */
-const LISTS_GATE_PREFIX_LINES = 32;
-
 /** The frontmatter as {@link Frontmatter.of} would read it — the same
- *  `frontmatterEndLine` boundary — when a line of it matches
- *  {@link LISTS_KEY_RE}, else `null`. Splits a prefix first, the whole page
- *  only when the fence opens and does not close inside it. Every line before
- *  the closing fence ended in `\n`, so dropping its one trailing `\r` is what
- *  `Frontmatter.of`'s CRLF fold does to it; a quoted scalar spanning lines
- *  reads differently with the `\r` left in. */
+ *  `frontmatterBodyLine` boundary — when a line of it matches
+ *  {@link LISTS_KEY_RE}, else `null`. Splits only the frontmatter's lines.
+ *  Every line before the closing fence ended in `\n`, so dropping its one
+ *  trailing `\r` is what `Frontmatter.of`'s CRLF fold does to it; a quoted
+ *  scalar spanning lines reads differently with the `\r` left in. */
 function listsFrontmatter(content: string): Frontmatter | null {
-  for (const limit of [LISTS_GATE_PREFIX_LINES, undefined]) {
-    const lines = content.split("\n", limit);
-    if (lines[0]?.trim() !== "---") return null;
-    const end = frontmatterEndLine(lines);
-    if (end) {
-      const fm = lines.slice(1, end - 1);
-      if (!fm.some((l) => LISTS_KEY_RE.test(l))) return null;
-      return new Frontmatter(fm.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l)));
-    }
-  }
-  return null;
+  const end = frontmatterBodyLine(content);
+  if (end === 0) return null;
+  const fm = content.split("\n", end).slice(1, end - 1);
+  if (!fm.some((l) => LISTS_KEY_RE.test(l))) return null;
+  return new Frontmatter(fm.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l)));
 }
 
 /** Owns `owns:` and `related:` of one page with ONE whole-frontmatter parse —
