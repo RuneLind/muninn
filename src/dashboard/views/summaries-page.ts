@@ -202,8 +202,9 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
       padding: 12px 16px;
       /* Theme tokens only: --accent-dim and --text were never defined, so the
          banner was a fixed #2a2f3a in both themes and its light-theme link read
-         2.65:1. Measured on these tokens: link 7.37:1 dark, 5.77:1 light. */
-      background: var(--bg-surface);
+         2.65:1. --tint-purple, not --bg-surface (1.017:1 on the light page):
+         fill/page 1.23 dark, 1.11 light; link 6.92 dark, 5.30 light. */
+      background: var(--tint-purple);
       border-left: 3px solid var(--accent);
       color: var(--text-primary);
       border-radius: 4px;

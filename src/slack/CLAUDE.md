@@ -118,7 +118,7 @@ Claude outputs markdown. Slack uses mrkdwn (different!):
 - `## heading` → `*heading*` (bold line)
 - `~~strike~~` → `~strike~`
 - `[text](url)` → `<url|text>`
-- Code blocks and inline code preserved as-is
+- Code blocks preserved as-is; an inline code span keeps its backticks, but a backtick INSIDE one (a ``` ``a ` b`` ``` span) becomes U+02CB `ˋ`: mrkdwn has no escape and no double-backtick span, so a raw one closes the span early. A reader copying that span gets `ˋ`, not `` ` `` (92 of 145,823 inline spans across mimir, melosys-kode-wiki and huginn-jarvis, measured 2026-10-20)
 
 Four ordering rules in `renderInline` are load-bearing, all measured:
 

@@ -209,6 +209,16 @@ describe("banner contrast in both themes", () => {
       expect(contrast(link, fill)).toBeGreaterThanOrEqual(4.5);
       expect(contrast(text, fill)).toBeGreaterThanOrEqual(4.5);
     });
+    // The banner sits on the body, so its fill must read as a fill against the
+    // body's own ground. `--bg-surface` measured 1.017:1 on the light page (an
+    // invisible banner); 1.1 is a floor that `--bg-surface` (light) and
+    // `--bg-panel` (dark, 1.06) both miss.
+    test(`${theme}: the banner's fill is visibly different from the page`, () => {
+      const body = /(?:^|[\s}])body\s*\{([^}]*)\}/.exec(html)?.[1] ?? "";
+      const page = resolveColor(/(?:^|[;\s])background:\s*([^;]+);/.exec(body)?.[1]?.trim() ?? "", tokens);
+      const fill = resolveColor(rule(".duplicate-banner", "background"), tokens);
+      expect(contrast(fill, page)).toBeGreaterThanOrEqual(1.1);
+    });
   }
 });
 
