@@ -104,27 +104,24 @@ export async function loadSeriesBaseMap(
   return { bases, missing };
 }
 
-/** Save as series' reads before any write (D14, arch review 2026-10, finding
- *  66): every page's CAS base fetched fresh, the open page included, and the
- *  open page named in `openChanged` when its fresh base is not the hash the
- *  reader loaded. The caller then writes nothing: sending the loaded hash
- *  instead made that page 409 mid-sequence, after earlier pages were written. */
-export async function prepareSeriesSave(input: {
-  relPaths: readonly string[];
-  openRelPath: string | null;
+/** The open page as the reader loaded it: its relPath and the hash it loaded
+ *  with. Both callers snapshot it before reading the bases. */
+export interface OpenPageAtLoad {
+  relPath: string | null;
   loadedHash: string | null;
-  hashOf: (relPath: string) => Promise<string | null>;
-}): Promise<{ bases: Map<string, string>; missing: string[]; openChanged: string | null }> {
-  const { bases, missing } = await loadSeriesBaseMap(input.relPaths, input.hashOf);
-  let openChanged: string | null = null;
-  if (input.openRelPath && input.loadedHash) {
-    const open = normalizeRel(input.openRelPath);
-    for (const [rel, hash] of bases) if (normalizeRel(rel) === open && hash !== input.loadedHash) openChanged = rel;
-  }
-  return { bases, missing, openChanged };
 }
 
-/** The refusal both callers make after {@link prepareSeriesSave} and before
+/** The open page, named as `bases` holds it, when its fresh base is not the
+ *  hash the reader loaded (arch review 2026-10, finding 66); `null` when it is
+ *  the same, has no fresh base, or no hash was loaded. */
+export function openPageChanged(open: OpenPageAtLoad, bases: ReadonlyMap<string, string>): string | null {
+  if (!open.relPath || !open.loadedHash) return null;
+  const rel = normalizeRel(open.relPath);
+  for (const [k, hash] of bases) if (normalizeRel(k) === rel && hash !== open.loadedHash) return k;
+  return null;
+}
+
+/** The refusal {@link writeSeriesUnlessOpenChanged} makes before
  *  any write (arch review 2026-10, finding 66): the open page changed on disk
  *  since the reader loaded it AND the sequence writes it ⇒ write nothing and
  *  say so. `null` ⇒ proceed. An open page outside the writes is not this
@@ -137,4 +134,20 @@ export function openPageRefusal(
   const open = normalizeRel(openChanged);
   if (!writes.some((w) => normalizeRel(w.relPath) === open)) return null;
   return `${openChanged} changed since you opened it — reload it; nothing written`;
+}
+
+/** The one write entry both callers use — the `⋯` menu and Save as series:
+ *  refuse the whole sequence when the open page changed since it loaded and
+ *  is among the writes (`openPageChanged`, `openPageRefusal`), else run it.
+ *  `bases` are the ones read FRESH before the call, the open page included. */
+export async function writeSeriesUnlessOpenChanged(input: {
+  writes: readonly SeriesWrite[];
+  bases: ReadonlyMap<string, string>;
+  open: OpenPageAtLoad;
+  post: SeriesPoster;
+  batch?: boolean;
+}): Promise<{ refusal: string; run?: undefined } | { refusal: null; run: SeriesWriteOutcome }> {
+  const refusal = openPageRefusal(openPageChanged(input.open, input.bases), input.writes);
+  if (refusal) return { refusal };
+  return { refusal: null, run: await runSeriesWrites(input.writes, input.bases, input.post, { batch: input.batch }) };
 }

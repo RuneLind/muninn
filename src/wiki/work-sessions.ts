@@ -249,8 +249,10 @@ const fetchedAt = new Map<string, number>();
 export function workSessionsFor(root: string, now: number = Date.now()): WorkSessionsMemo | null {
   const memo = memos.get(root);
   if (!memo) return null;
-  const since = failingSince.get(root);
-  if (since === undefined || since < memo.asOfMs) return memo;
+  // Any failure on record is since this memo's answer: a success clears it.
+  // Comparing it with `asOfMs` instead let a wall clock stepped back between
+  // the two hold the memo for the whole outage.
+  if (!failingSince.has(root)) return memo;
   const asOf = ledgerInstant(memo.asOfMs, now);
   return asOf !== undefined && now - asOf < WORK_MEMO_HOLD_MS ? memo : null;
 }

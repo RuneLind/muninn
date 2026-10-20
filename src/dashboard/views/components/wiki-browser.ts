@@ -168,7 +168,7 @@ import {
 } from "./wiki-groups.ts";
 import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
-import { openPageRefusal, prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { loadSeriesBaseMap, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -3788,9 +3788,10 @@ interface SeriesMenuState {
   /** Resolves when every base above has been read (or failed). A click that
    *  beats the fetches waits for it instead of racing them. */
   basesReady: Promise<void>;
-  /** The open page, when its base read at open is not the hash the reader
-   *  loaded (`prepareSeriesSave`): a write to it is refused before any write. */
-  openChanged: string | null;
+  /** The open page as loaded when this menu opened: a write to it is refused
+   *  before any write when its base read at open differs
+   *  (`writeSeriesUnlessOpenChanged`). */
+  open: OpenPageAtLoad;
   /** Set when the held bases no longer describe the files on disk — a write
    *  came back 409, or one of this menu's own writes landed and the popover
    *  stayed open to report it. Either way no further write may go out under
@@ -3930,7 +3931,7 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
     openerSel: seriesOpenerSel(anchor),
     bases: new Map(),
     basesReady: Promise.resolve(),
-    openChanged: null,
+    open: openPageAtLoad(),
     staleBases: false,
   };
   state.basesReady = loadSeriesBases(state);
@@ -3944,6 +3945,12 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
   (el.querySelector<HTMLElement>("[data-thread-split], [data-work-return]") ?? el.querySelector<HTMLInputElement>("[data-series-input]"))?.focus({ preventScroll: true });
 }
 
+/** The open page as loaded, the snapshot both series writers compare its
+ *  fresh base with (`writeSeriesUnlessOpenChanged`). */
+function openPageAtLoad(): OpenPageAtLoad {
+  return { relPath: currentRelPath, loadedHash: currentPageHash };
+}
+
 /**
  * Every page this menu's verbs can write, as the CAS bases they will be sent
  * with.
@@ -3955,10 +3962,10 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
  * member of one series, issued once per popover open, and the alternative is a
  * base read after the reader has decided, which is the CAS this closes.
  *
- * The open page's base is read FRESH too, by Save as series' rule
- * (`prepareSeriesSave`, arch review 2026-10, finding 66): its load-time hash
- * made every reopen after a 409 send the same stale base. A changed open page
- * is named in `openChanged`, and `applySeriesWrites` refuses before writing.
+ * The open page's base is read FRESH too, by Save as series' rule (arch
+ * review 2026-10, finding 66): its load-time hash made every reopen after a
+ * 409 send the same stale base. `writeSeriesUnlessOpenChanged` compares it
+ * with `state.open` and refuses before writing.
  */
 function loadSeriesBases(state: SeriesMenuState): Promise<void> {
   const { model, edit } = state;
@@ -3967,14 +3974,8 @@ function loadSeriesBases(state: SeriesMenuState): Promise<void> {
     if (model.headRel) targets.add(model.headRel);
     for (const m of model.members) targets.add(m.relPath);
   }
-  return prepareSeriesSave({
-    relPaths: [...targets],
-    openRelPath: currentRelPath,
-    loadedHash: currentPageHash,
-    hashOf: seriesBaseHash,
-  }).then(({ bases, openChanged }) => {
+  return loadSeriesBaseMap([...targets], seriesBaseHash).then(({ bases }) => {
     for (const [rel, hash] of bases) state.bases.set(rel, hash);
-    state.openChanged = openChanged;
   });
 }
 
@@ -4063,14 +4064,13 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
   setSeriesMenuNote(state, "Saving…", false);
   try {
     await state.basesReady;
-    const refusal = openPageRefusal(state.openChanged, writes);
-    if (refusal) {
+    // The refusal and the loop are `wiki-series-write.ts`'s, shared with the
+    // Work threads' Save as series.
+    const { refusal, run } = await writeSeriesUnlessOpenChanged({ writes, bases: state.bases, open: state.open, post: postSeriesWrite });
+    if (refusal !== null) {
       setSeriesMenuNote(state, refusal, true);
       return;
     }
-    // The loop itself is `runSeriesWrites` (`wiki-series-write.ts`), shared
-    // with the Work threads' Save as series.
-    const run = await runSeriesWrites(writes, state.bases, postSeriesWrite);
     // The page the reader has open keeps a CURRENT hash rather than a stale
     // one: this write is the reason it moved, and the answer says where to.
     for (const [rel, hash] of run.hashes) {
@@ -5647,12 +5647,8 @@ async function runSaveAsSeries(): Promise<void> {
   try {
     const planned = plan.writes.map((w) => w.relPath);
     setWorkSeriesMsg(state, `Reading ${planned.length} ${planned.length === 1 ? "page" : "pages"}…`, false);
-    const { bases, missing, openChanged } = await prepareSeriesSave({
-      relPaths: planned,
-      openRelPath: currentRelPath,
-      loadedHash: currentPageHash,
-      hashOf: seriesBaseHash,
-    });
+    const open = openPageAtLoad();
+    const { bases, missing } = await loadSeriesBaseMap(planned, seriesBaseHash);
     const fresh = await freshListing();
     if (!fresh) {
       report = { text: "Could not re-read the wiki listing — nothing written", bad: true, retry: true };
@@ -5670,18 +5666,17 @@ async function runSaveAsSeries(): Promise<void> {
       report = { text: `Could not read ${stillMissing.join(", ")} — nothing written`, bad: true };
       return;
     }
-    // The open page changed on disk since the reader loaded it: refuse before
-    // any write rather than 409 on it mid-sequence (arch review 2026-10, 66).
-    const refusal = openPageRefusal(openChanged, writes);
-    if (refusal) {
-      report = { text: refusal, bad: true };
-      return;
-    }
     const skipped = checked.moved.length
       ? `Skipped — joined another series since this menu opened: ${checked.moved.map((m) => `${m.title} (in «${m.series}»)`).join(", ")}`
       : "";
     setWorkSeriesMsg(state, "Saving…", false);
-    const run = await runSeriesWrites(writes, bases, postSeriesWrite, { batch: true });
+    // The open page changed on disk since the reader loaded it: refused before
+    // any write rather than 409 on it mid-sequence (arch review 2026-10, 66).
+    const { refusal, run } = await writeSeriesUnlessOpenChanged({ writes, bases, open, post: postSeriesWrite, batch: true });
+    if (refusal !== null) {
+      report = { text: refusal, bad: true };
+      return;
+    }
     for (const [rel, hash] of run.hashes) if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
     const outcome = await refreshAfterSeriesWrite();
     const notes: string[] = [];

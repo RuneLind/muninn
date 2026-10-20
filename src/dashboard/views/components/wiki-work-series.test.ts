@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { checkNewSeriesKey, recheckSaveAsSeries, saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { buildWorkEvidence } from "../../../wiki/work-evidence.ts";
 import type { WikiPageMeta } from "../../../wiki/store.ts";
-import { loadSeriesBaseMap, openPageRefusal, prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { loadSeriesBaseMap, openPageChanged, openPageRefusal, runSeriesWrites, writeSeriesUnlessOpenChanged, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupChild } from "./wiki-work-groups.ts";
 import { coinSeriesKey, isNarrativePage, seriesPageStem } from "../../../wiki/series-rules.ts";
@@ -289,39 +289,53 @@ describe("runSeriesWrites: one page per call, stop at the first failure", () => 
 // Arch review 2026-10, finding 66: Save as series sent the hash the reader
 // LOADED as the open page's CAS base, so a page changed on disk since then
 // 409ed mid-sequence, after the pages before it were written.
-describe("prepareSeriesSave: every base fresh, the open page included", () => {
-  const disk = new Map([["plans/a.md", "a2"], ["plans/open.md", "open-now"], ["plans/c.md", "c1"]]);
-  const hashOf = async (rel: string) => disk.get(rel) ?? null;
-  test("the open page changed since it loaded: its fresh base is used and the change is named", async () => {
-    const asked: string[] = [];
-    const r = await prepareSeriesSave({
-      relPaths: ["plans/a.md", "plans/open.md", "plans/c.md"],
-      openRelPath: "Plans/Open.md",
-      loadedHash: "open-at-load",
-      hashOf: async (rel) => (asked.push(rel), hashOf(rel)),
-    });
-    expect(asked.sort()).toEqual(["plans/a.md", "plans/c.md", "plans/open.md"]);
-    expect(r.bases.get("plans/open.md")).toBe("open-now");
-    expect(r.openChanged).toBe("plans/open.md");
+describe("openPageChanged: the open page's fresh base against the hash it loaded with", () => {
+  const bases = new Map([["plans/a.md", "a2"], ["plans/open.md", "open-now"]]);
+  test("changed since it loaded: named as the bases hold it", () => {
+    expect(openPageChanged({ relPath: "Plans/Open.md", loadedHash: "open-at-load" }, bases)).toBe("plans/open.md");
   });
-  test("an unchanged open page saves: no change named", async () => {
-    const r = await prepareSeriesSave({ relPaths: ["plans/a.md", "plans/open.md"], openRelPath: "plans/open.md", loadedHash: "open-now", hashOf });
-    expect(r.openChanged).toBeNull();
-    expect([...r.bases.keys()].sort()).toEqual(["plans/a.md", "plans/open.md"]);
-  });
-  test("an open page outside the plan, or no loaded hash, names nothing", async () => {
-    expect((await prepareSeriesSave({ relPaths: ["plans/a.md"], openRelPath: "plans/open.md", loadedHash: "old", hashOf })).openChanged).toBeNull();
-    expect((await prepareSeriesSave({ relPaths: ["plans/open.md"], openRelPath: "plans/open.md", loadedHash: null, hashOf })).openChanged).toBeNull();
-  });
-  test("an open page that cannot be read is missing, not changed", async () => {
-    const r = await prepareSeriesSave({ relPaths: ["plans/gone.md"], openRelPath: "plans/gone.md", loadedHash: "old", hashOf });
-    expect(r.missing).toEqual(["plans/gone.md"]);
-    expect(r.openChanged).toBeNull();
+  test("unchanged, outside the bases, or no loaded hash: nothing named", () => {
+    expect(openPageChanged({ relPath: "plans/open.md", loadedHash: "open-now" }, bases)).toBeNull();
+    expect(openPageChanged({ relPath: "plans/gone.md", loadedHash: "old" }, bases)).toBeNull();
+    expect(openPageChanged({ relPath: "plans/open.md", loadedHash: null }, bases)).toBeNull();
+    expect(openPageChanged({ relPath: null, loadedHash: "old" }, bases)).toBeNull();
   });
 });
 
-// Fix round 1 (finding I): the decision both callers make after
-// `prepareSeriesSave`, before any write — Save as series and the ⋯ menu.
+// Fix round 2 (finding 3): the one write entry both the ⋯ menu and Save as
+// series call, so the refusal is pinned here rather than in the browser glue.
+describe("writeSeriesUnlessOpenChanged: refuse before any write, else run the loop", () => {
+  const ok: SeriesPostAnswer = { ok: true, status: 200, body: { hash: "new", written: true } };
+  const writes = [{ relPath: "plans/a.md", series: "k" }, { relPath: "plans/open.md", series: "k" }];
+  const bases = new Map([["plans/a.md", "a2"], ["plans/open.md", "open-now"]]);
+  const recorder = () => {
+    const sent: string[] = [];
+    return { sent, post: async (b: { relPath: string; baseHash: string }) => (sent.push(`${b.relPath}@${b.baseHash}`), ok) };
+  };
+  test("the open page changed since it loaded and is written: refused, nothing posted", async () => {
+    const r = recorder();
+    const out = await writeSeriesUnlessOpenChanged({ writes, bases, open: { relPath: "plans/open.md", loadedHash: "open-at-load" }, post: r.post });
+    expect(out.refusal).toBe("plans/open.md changed since you opened it — reload it; nothing written");
+    expect(out.run).toBeUndefined();
+    expect(r.sent).toEqual([]);
+  });
+  test("unchanged: every write posted with its fresh base", async () => {
+    const r = recorder();
+    const out = await writeSeriesUnlessOpenChanged({ writes, bases, open: { relPath: "plans/open.md", loadedHash: "open-now" }, post: r.post });
+    expect(out.refusal).toBeNull();
+    expect(out.run?.written).toBe(2);
+    expect(r.sent).toEqual(["plans/a.md@a2", "plans/open.md@open-now"]);
+  });
+  test("a changed open page the sequence does not write: the sequence runs", async () => {
+    const r = recorder();
+    const out = await writeSeriesUnlessOpenChanged({ writes: writes.slice(0, 1), bases, open: { relPath: "plans/open.md", loadedHash: "open-at-load" }, post: r.post });
+    expect(out.refusal).toBeNull();
+    expect(r.sent).toEqual(["plans/a.md@a2"]);
+  });
+});
+
+// Fix round 1 (finding I): the refusal `writeSeriesUnlessOpenChanged` makes
+// before any write — for Save as series and the ⋯ menu alike.
 describe("openPageRefusal: an open page changed on disk refuses the whole sequence", () => {
   const writes = [{ relPath: "plans/a.md", series: "k" }, { relPath: "plans/open.md", series: "k" }];
   test("changed and among the writes: refused, naming the page", () => {

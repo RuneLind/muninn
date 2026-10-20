@@ -12,6 +12,7 @@ import { applyWorkBoundaries, rowBoundaryAction } from "./wiki-work-boundaries.t
 import type { WikiListing } from "./wiki-filter.ts";
 import { WORK_EVIDENCE_VERSION, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
 import { aliasWorkedPaths } from "../../../wiki/store.ts";
+import { aliasTopDirs, classifyAliasRef } from "../../../wiki/alias-ref.ts";
 import { normalizeWorkedPath } from "../../../wiki/rel-path.ts";
 
 const NOW = Date.UTC(2026, 9, 17, 20, 0);
@@ -329,28 +330,49 @@ describe("applyWorkBoundaries: an alias is read as the server reads it", () => {
     );
   });
 
-  test("the server and the resolver agree on every alias: a stored path resolves to the alias's page iff the server folds it", () => {
+  test("the server and the resolver agree on every alias and spelling: a stored path resolves to the alias's page iff the server folds it, or the same-folder stem rule names it", () => {
+    const NFD = "cafe\u0301";
     const aliases = [
       "old-plan.md", "[[old-plan.md]]", "Old.MDX", "x.html", "plans/old", "[[plans/old|label]]", "[[plans/c#history]]",
       "Plans/Mixed", "plans/a#b", "plans/a|b", "archive/z.md", "/goal", "openai/math Repository", "ω ≤ 9/4",
       "The #1 Mistake", "claude.ai/design", "openai/x.md",
+      // Path spellings `normalizeWorkedPath` folds and a bare lower-case fold does not (fix round 2, finding 1).
+      "plans//old", "plans/./old", "plans/x/../old", "x/../plans/old", "plans/old/..", `plans/${NFD}`, "plans/café", "Plans\\Old",
+      `${NFD}s/old`, "cafés/old", NFD, "café", "owner-was", "entities/./gone",
     ];
     const f = fixture();
-    const base = [...f.pages, page("plans/live.md"), page("archive/live.md")];
-    const topDirs = new Set(["plans", "archive", "entities"]);
+    const base = [...f.pages, page("plans/live.md"), page("archive/live.md"), page(`${NFD}s/live.md`)];
+    const pages0 = [...base, page("entities/owner.md")];
+    // Derived as production derives it: the resolver's own folders, which on
+    // the server are `aliasTopDirs` over a root holding exactly these pages.
+    const topDirs = aliasTopDirs(pages0.map((p) => p.relPath).filter((r) => r.includes("/")).map((r) => r.slice(0, r.indexOf("/"))));
+    const live = new Set(pages0.map((p) => normalizeWorkedPath(p.relPath)));
+    const spellings = (v: string) => {
+      const out = [v, v.normalize("NFC"), v.normalize("NFD"), v.toUpperCase(), `/${v}`, v.replace(/\//g, "//"), v.replace(/\//, "/./"), v.replace(/\//, "/x/../")];
+      return out.filter((c) => c && !c.startsWith("[["));
+    };
+    let checked = 0;
     for (const alias of aliases) {
       const pages = [...base, page("entities/owner.md", { aliases: [alias] })];
       const folded = new Set(aliasWorkedPaths(alias, topDirs));
+      const ref = classifyAliasRef(alias, topDirs);
       const plain = alias.replace(/^\[\[|\]\]$/g, "");
       const cut = plain.split("|")[0]!.split("#")[0]!;
-      const candidates = new Set<string>();
-      for (const v of [alias, plain, cut]) for (const ext of ["", ".md", ".mdx", ".html"]) candidates.add(`${v}${ext}`.replace(/^\/+/, ""));
+      const roots = new Set<string>();
+      for (const v of [alias, plain, cut, ...folded]) for (const ext of ["", ".md", ".mdx", ".html"]) roots.add(`${v}${ext}`);
+      // Same-folder candidates: the owner's folder, where a bare stem names it.
+      if (ref.kind === "stem") for (const ext of ["", ".md", ".mdx"]) roots.add(`entities/${ref.stem}${ext}`);
+      const candidates = new Set([...roots].flatMap(spellings));
       for (const c of candidates) {
-        if (c.toLowerCase().startsWith("entities/") || !c) continue;
+        const n = normalizeWorkedPath(c);
+        if (!n || live.has(n)) continue;
+        const stemNamed = ref.kind === "stem" && n.replace(/\.mdx?$/, "") === normalizeWorkedPath(`entities/${ref.stem}`);
         const d = applyWorkBoundaries({ work: f.work, allPages: pages, splits: [{ id: "x", page: c }], keptApart: [] }).definitions[0]!;
-        expect([alias, c, d.page === "entities/owner.md"]).toEqual([alias, c, folded.has(normalizeWorkedPath(c))]);
+        expect([alias, c, d.page === "entities/owner.md"]).toEqual([alias, c, folded.has(n) || stemNamed]);
+        checked++;
       }
     }
+    expect(checked).toBeGreaterThan(1000);
   });
 });
 

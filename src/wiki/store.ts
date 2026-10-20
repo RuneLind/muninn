@@ -44,7 +44,7 @@ import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { normalizeRelPath } from "./rel-path.ts";
-import { classifyAliasRef } from "./alias-ref.ts";
+import { aliasTopDirs, aliasWorkedPaths } from "./alias-ref.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { readFrontmatterLists, resolveRelatedEntries, type RelatedEntry } from "./frontmatter-lists.ts";
 import { extractNextMoves } from "./next-moves.ts";
@@ -3080,22 +3080,9 @@ function lastAtOrBefore(times: readonly number[] | undefined, limit: number): nu
   return undefined;
 }
 
-/**
- * The worked-ledger keys an `aliases:` entry can stand for — the page's OLD
- * path, when it was moved. Read through `classifyAliasRef` (`alias-ref.ts`),
- * the reading the boundary resolver shares: a path-shaped alias (a `/` alias
- * whose first segment is a directory under the wiki root — `topDirs`,
- * lower-cased — or a name spelling `.md`/`.mdx`/`.html`, the only way a
- * root-level move names itself) is a path; anything else answers nothing. An
- * extensionless path tries `.md` then `.mdx`; a spelled extension is used as
- * written.
- */
-export function aliasWorkedPaths(alias: string, topDirs: ReadonlySet<string>): string[] {
-  const ref = classifyAliasRef(alias, topDirs);
-  if (ref.kind !== "path") return [];
-  if (ref.ext) return [normalizeWorkedPath(ref.path)];
-  return [normalizeWorkedPath(`${ref.path}.md`), normalizeWorkedPath(`${ref.path}.mdx`)];
-}
+/** `aliasWorkedPaths` lives in the IO-free `alias-ref.ts`, which the
+ *  browser's boundary resolver imports too; re-exported for existing callers. */
+export { aliasWorkedPaths };
 
 /**
  * The relPath a `superseded_by:` value names, in ANY folder — what the reader's
@@ -3791,15 +3778,15 @@ export async function buildWikiIndex(
   // client hides the sort option on the second, not the first.
   let workedCoverage: WikiIndex["workedCoverage"];
   let topDirsMemo: Set<string> | undefined;
-  /** First-level directories under the root, lower-cased — what makes an
+  /** First-level directories under the root (`aliasTopDirs`) — what makes an
    *  `aliases:` entry path-shaped (`aliasWorkedPaths`). Read once, on demand. */
   const topDirsOf = async (): Promise<Set<string>> => {
     if (topDirsMemo) return topDirsMemo;
     try {
-      topDirsMemo = new Set(
+      topDirsMemo = aliasTopDirs(
         (await readdir(root, { withFileTypes: true }))
           .filter((d) => d.isDirectory())
-          .map((d) => d.name.toLowerCase()),
+          .map((d) => d.name),
       );
     } catch {
       // An unreadable root folds no alias; the page's own path still matches.

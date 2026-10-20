@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { classifyAliasRef, unwrapAliasRef } from "./alias-ref.ts";
+import { aliasTopDirs, aliasWorkedPaths, classifyAliasRef, unwrapAliasRef } from "./alias-ref.ts";
 
 const dirs = new Set(["archive", "plans", "sources"]);
 
@@ -42,5 +42,26 @@ describe("classifyAliasRef", () => {
     expect(classifyAliasRef("Vibe coding", dirs)).toEqual({ kind: "stem", stem: "Vibe coding" });
     expect(classifyAliasRef("The #1 Mistake", dirs)).toEqual({ kind: "stem", stem: "The #1 Mistake" });
     expect(classifyAliasRef("  ", dirs)).toEqual({ kind: "none" });
+  });
+});
+
+// Fix round 2 (finding 1): one fold for the folder set and the alias's first
+// segment, and the keys in `normalizeWorkedPath`'s spelling.
+describe("aliasTopDirs and the folder an alias names, NFD or NFC", () => {
+  const NFD = "cafe\u0301s";
+  test("a folder name folds to lower case and NFC; blanks drop", () => {
+    expect([...aliasTopDirs([NFD.toUpperCase(), "Plans", ""])]).toEqual(["cafés", "plans"]);
+  });
+  test("an alias naming the folder in either form is a path", () => {
+    for (const dirsOn of [[NFD], ["cafés"]]) {
+      for (const a of [`${NFD}/old`, "cafés/old"]) expect(classifyAliasRef(a, aliasTopDirs(dirsOn)).kind).toBe("path");
+    }
+  });
+  test("its keys are normalizeWorkedPath's: //, ./, .. and NFD fold", () => {
+    const d = aliasTopDirs(["plans"]);
+    for (const a of ["plans//old", "plans/./old", "plans/x/../old", "/plans/old"]) {
+      expect(aliasWorkedPaths(a, d)).toEqual(a.startsWith("/") ? [] : ["plans/old.md", "plans/old.mdx"]);
+    }
+    expect(aliasWorkedPaths("plans/cafe\u0301.md", d)).toEqual(["plans/café.md"]);
   });
 });

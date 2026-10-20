@@ -234,6 +234,15 @@ describe("the age bound on a held memo", () => {
     expect(workSessionsFor("/w", at)).toBeNull();
     expect(workSessionsFor("/w", at + 59 * 60_000)).toBeNull();
   });
+  test("a wall clock stepped back between the answer and the failure does not hold the memo for the outage", async () => {
+    const good = await refreshWorkSessions("/w", deps({}));
+    // The clock steps back a day, then the next refresh fails: that failure
+    // is stamped before the memo's answer.
+    expect(await refreshWorkSessions("/w", deps({ sessions: new Error("down") }, { now: () => NOW - DAY }))).toBe(good);
+    expect(workSessionsFor("/w", NOW + WORK_MEMO_HOLD_MS - 1)).toBe(good);
+    expect(workSessionsFor("/w", NOW + WORK_MEMO_HOLD_MS)).toBeNull();
+    expect(workSessionsFor("/w", NOW + 7 * DAY)).toBeNull();
+  });
   test("the index build drops the work field once the hold has expired", async () => {
     const root = await testTempDir(path.join(tmpdir(), "work-sessions-held-"));
     try {
