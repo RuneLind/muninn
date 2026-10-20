@@ -2032,7 +2032,7 @@ Two info findings, page text only (they run in `checkPageText`, so `wiki-check` 
 
 ### Lint check 19 — `<Glossary>` (`lint-glossary.ts`)
 
-`glossary` on `.mdx` pages that are not culled, page text only (it runs in `checkPageText`, so `wiki-check` reports it). It reads the page through `pageGlossaries` (`render.ts`), the reading the reader marks from, and renders nothing. Warnings: a block that holds no term (nothing on the page is marked); a term defined twice on the page (the first definition is the one shown). Info: a list item with no emphasised term. It does not report a term the page never uses: measured on 88 real glossaries, 42 of 65 such findings were legend or enumeration entries no matcher can match, and the lint renders without the page's data files, so it missed uses the reader marks. The line is the item's or sentence's own source line (frontmatter and fenced lines skipped), else the tag's.
+`glossary` on `.mdx` pages that are not culled, page text only (it runs in `checkPageText`, so `wiki-check` reports it). It reads the page through `pageGlossaries` (`render.ts`), the reading the reader marks from, and renders nothing. Warnings: a block that holds no term (nothing on the page is marked); a term defined twice on the page (the first definition is the one shown). Info: a list item with no emphasised term. It does not report a term the page never uses: a legend or enumeration entry names a word the page need not use as written, and the uses the reader marks include text from the page's data files (a CaseBoard's notes), which `checkPageText` does not read. The line is the item's or sentence's own source line (frontmatter and fenced lines skipped), else the tag's.
 
 ### Decision chain route and dry run
 

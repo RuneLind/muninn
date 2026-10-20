@@ -20,13 +20,19 @@
  *   never overlap and never cross an element;
  * - sections: `<h2>`/`<h3>` (`#`/`##`) start one, `###` does not, and text
  *   before the first heading is one too;
- * - never inside: headings, links (resolved or not), code, `pre`, `kbd`,
- *   `samp`, buttons, `summary`, form controls, `svg`, a fact-check mark,
- *   reader-only text, the `<Glossary>` block itself, a callout or lead-box
- *   title, a chart's table (`section.vc`, visually hidden in chart mode), a
- *   `<Query>` result (data) and the labels and notes the renderer writes around
- *   a component's body (`Query without id`, `run …`, `lower is better`, a
- *   step count, a Historic stamp); a word inside a bare URL is not marked either;
+ * - never inside: a `SKIP_TAGS` element (headings, links, code, `pre`, `kbd`,
+ *   `samp`, buttons, `summary`, form controls, `svg`), a `role="heading"`
+ *   element, reader-only text (a NextMoves title row and its count line
+ *   among it), or an element with a `SKIP_CLASSES` class: the `<Glossary>`
+ *   block itself, a fact-check mark, an unresolved link, a callout title, a
+ *   Tldr label, a chart's table (`section.vc`, visually hidden in chart
+ *   mode), a `<Query>` result, a CaseBoard's count strip and pills, and the
+ *   labels and notes the renderer writes around a component's body (a
+ *   Query's warning, meta and unavailable lines; a Question card's label,
+ *   state, for line and duplicate note; a DeltaTable's Δ column and its
+ *   `blockNote` lines; a RunChecklist's count and row labels; an Embed's
+ *   fallback; a Historic stamp; a CaseBoard's `blockNote` lines); a word
+ *   inside a bare URL is not marked either;
  * - attributes are never read or written, and the text a mark wraps is the
  *   source's own bytes.
  */

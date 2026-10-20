@@ -65,7 +65,7 @@ function clip(text: string): string {
 /** Inline markdown read as the text it renders to. */
 const cut = (text: string) => clip(visibleText(text));
 
-/** A Query id as its card prints it: literal, each wikilink as its link text. */
+/** A Query id as written (markdown not rendered), each wikilink as its trimmed link text. */
 const literal = (text: string, shown: (text: string) => string) =>
   clip(text.replace(/\x00WIKIPAGELINK\d+\x00/g, (m) => shown(m).trim()));
 
