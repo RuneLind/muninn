@@ -1227,6 +1227,29 @@ function applyListStep(
   }
 }
 
+/**
+ * Which lines of `text` the reader shows as fenced code: `true` for a fence's
+ * opener, body and closer. Read off {@link extractFences} itself, so the rule is
+ * the reader's: backticks only, and an opener with no closer stays a prose line,
+ * as do the lines after it. `fencedLineMask` (`wiki-integrate.ts`) is the
+ * fact-check walk and takes `~~~` and an unclosed opener to the end; a line
+ * linter that judges what the reader SHOWS reads this one. CRLF is folded first.
+ */
+export function readerFencedLines(text: string): boolean[] {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0, srcLine: [] };
+  const out = extractFences(normalized, store).split("\n");
+  const fenced = new Array<boolean>(lines.length).fill(true);
+  // A line the walk passed through verbatim is not code. A placeholder never
+  // equals an input line: its id is one no line of the input spells.
+  out.forEach((line, k) => {
+    const src = store.srcLine[k]!;
+    if (line === lines[src]) fenced[src] = false;
+  });
+  return fenced;
+}
+
 export function parseBlocks(text: string): Block[] {
   const normalized = text.replace(/\r\n/g, "\n");
 

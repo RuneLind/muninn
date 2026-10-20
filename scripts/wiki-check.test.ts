@@ -393,3 +393,32 @@ describe("wiki-check", () => {
     expect(r.err).toEqual([noRootNote(path.join(tmp, "locked")), expect.stringMatching(/^wiki-check: cannot read .*i\.mdx: EACCES$/)]);
   });
 });
+
+describe("wiki-check reads a CaseBoard's data file as lintWiki does (architecture review 2026-10 finding 76)", () => {
+  const BOARD = ["---", "title: B", "---", '<CaseBoard src="c.yaml" />', ""].join("\n");
+  const YAML = ["- id: A-1", "  status: ok", '  note: Fixed <Pill tone="sucess">x</Pill> today', ""].join("\n");
+  let dir = "";
+  let root = "";
+  beforeAll(async () => {
+    dir = await testTempDir(path.join(tmpdir(), "wiki-check-data-"));
+    root = path.join(dir, "wiki");
+    await Bun.write(path.join(root, ".wiki-reader.json"), "{}");
+    await Bun.write(path.join(root, "concepts/b.mdx"), BOARD);
+    await Bun.write(path.join(root, "concepts/c.yaml"), YAML);
+    // A board whose file sits outside the wiki root reads nothing.
+    await Bun.write(path.join(root, "concepts/out.mdx"), BOARD.replace("c.yaml", "../../outside.yaml"));
+    await Bun.write(path.join(dir, "outside.yaml"), YAML);
+  });
+  afterAll(() => rm(dir, { recursive: true, force: true }));
+
+  test("a single page: the tag in the file is a finding naming the file", async () => {
+    const { findings } = await wikiCheck(path.join(root, "concepts/b.mdx"));
+    expect(findings.filter((f) => f.check.startsWith("component-")).map((f) => f.message)).toEqual(['In c.yaml: Pill tone="sucess" renders as default']);
+  });
+
+  test("a directory: the same findings as lintWiki, and nothing read from outside the root", async () => {
+    const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => PAGE_TEXT.has(f.check));
+    expect(lint.filter((f) => f.check.startsWith("component-")).map((f) => f.relPath)).toEqual(["concepts/b.mdx"]);
+    expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
+  });
+});

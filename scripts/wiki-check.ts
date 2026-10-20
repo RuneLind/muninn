@@ -34,7 +34,7 @@
 import path from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { extRank, parseFrontmatter, readCull, readPlanStatus, readWikiReaderConfig, stemKey, wikiPageRelPaths, wikiPageStem } from "../src/wiki/store.ts";
-import { checkPageText, type LintFinding } from "../src/wiki/lint.ts";
+import { checkPageText, pageTextFiles, type LintFinding } from "../src/wiki/lint.ts";
 
 const USAGE = "usage: bun --no-env-file scripts/wiki-check.ts <absolute .mdx page or directory path>";
 
@@ -109,7 +109,8 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     const rel = path.relative(root, target).split(path.sep).join("/");
     const content = await Bun.file(target).text();
     const plan_status = readPlanStatus(parseFrontmatter(content));
-    const findings = checkPageText({ relPath: rel, plan_status }, content, await roleKeysAt(root));
+    const ref = { relPath: rel, plan_status };
+    const findings = checkPageText(ref, content, await roleKeysAt(root), await pageTextFiles(root, ref, content));
     if (found) return { findings, checked: 1, selected: 1, unreadable: [] };
     return { findings: findings.filter((f) => !FOLDER_CHECKS.has(f.check)), checked: 1, selected: 1, unreadable: [], guessedRoot: base };
   }
@@ -129,7 +130,8 @@ export async function wikiCheck(target: string): Promise<WikiCheckResult> {
     }
     out.checked += 1;
     const fm = parseFrontmatter(content);
-    const findings = checkPageText({ relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) }, content, roleKeys);
+    const ref = { relPath: rel, culled: isCulled(fm), plan_status: readPlanStatus(fm) };
+    const findings = checkPageText(ref, content, roleKeys, await pageTextFiles(root, ref, content));
     out.findings.push(...(found ? findings : findings.filter((f) => !FOLDER_CHECKS.has(f.check))));
   }
   return out;

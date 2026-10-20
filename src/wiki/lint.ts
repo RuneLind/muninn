@@ -126,7 +126,8 @@ import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts"
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
 import { checkOwnsEntries, checkState, isStateScopePage, STATE_LINT_CHECKS, stateOwners, type OwnerPage, type StatePage } from "./lint-state.ts";
-import { checkComponents, COMPONENT_LINT_CHECKS } from "./lint-components.ts";
+import { checkComponents, COMPONENT_LINT_CHECKS, type LoadedPageFiles } from "./lint-components.ts";
+import { loadPageFiles } from "./page-files.ts";
 import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-chain.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
@@ -962,7 +963,12 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
  * culled, and 11's Tldr half on an `.mdx` page that is a live report page or a
  * reference page and is not reserved or culled.
  */
-export function checkPageText(page: PageTextRef, content: string, roleKeys: readonly string[]): LintFinding[] {
+export function checkPageText(
+  page: PageTextRef,
+  content: string,
+  roleKeys: readonly string[],
+  files?: LoadedPageFiles,
+): LintFinding[] {
   const findings = [
     ...checkIndexTruncation(page, content),
     ...checkNestedAnnotation(page, content),
@@ -973,9 +979,20 @@ export function checkPageText(page: PageTextRef, content: string, roleKeys: read
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (!page.culled && page.relPath.toLowerCase().endsWith(".mdx")) findings.push(...checkComponents(page.relPath, content));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content));
   return findings;
+}
+
+/** Check 15 runs on an `.mdx` page that is not culled. */
+export const judgesComponents = (page: Pick<PageTextRef, "relPath" | "culled">): boolean =>
+  !page.culled && page.relPath.toLowerCase().endsWith(".mdx");
+
+/** The files a page check 15 judges reads beside itself — a `<CaseBoard>`'s
+ *  YAML — read the way the reader reads them (`loadPageFiles`, under the wiki
+ *  root's containment check). None for a page the check skips. */
+export async function pageTextFiles(root: string, page: Pick<PageTextRef, "relPath" | "culled">, content: string): Promise<LoadedPageFiles> {
+  return judgesComponents(page) ? loadPageFiles(root, page.relPath, content) : new Map();
 }
 
 /**
@@ -1006,7 +1023,7 @@ export async function lintWiki(
     // Broken links apply to every markdown page (a dead link in index.md is
     // still a dead link); the frontmatter-shaped checks skip reserved infra.
     findings.push(...checkBrokenLinks(page, content, index));
-    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? []));
+    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? [], await pageTextFiles(index.root, page, content)));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.

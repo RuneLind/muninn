@@ -56,7 +56,7 @@ describe("lint: state-outside-home", () => {
         [
           "See PR #31 — merged on Monday.",
           "",
-          "The second task is not merged.",
+          "Task 2 is not merged.",
           "",
           "So 120 can go in prod now.",
           "",
@@ -622,7 +622,7 @@ describe("check 14 exempt text", () => {
   });
 
   test("a task word PR does not match a lowercase pr inside a file name", async () => {
-    expect(await flaggedBody(["Runs in e2e-pr.yml and is merged.", "The e2e-pr job merged.", "The api-PR-en is merged."])).toEqual([2]);
+    expect(await flaggedBody(["Runs in e2e-pr.yml and is merged.", "The e2e-pr 3 job merged.", "The api-PR 2 is merged."])).toEqual([2]);
   });
 });
 
@@ -685,7 +685,7 @@ describe("check 14 pinned edges", () => {
   });
 
   test("a task word does not touch a `.` on its left or a `.x` on its right, in either case class", async () => {
-    const body = ["The config.PR merged.", "The PR.yml merged.", "The PR merged.", "The config.task merged.", "The task.yml merged.", "The task merged.", "We merged the PR."];
+    const body = ["The config.PR 1 merged.", "The PR.yml merged.", "The PR 1 merged.", "The config.task 1 merged.", "The task.yml merged.", "The task 1 merged.", "We merged PR 1."];
     expect(await flaggedBody(body)).toEqual([2, 5, 6]);
   });
 
@@ -701,5 +701,45 @@ describe("check 14 pinned edges", () => {
     await write("plans/other.mdx", page(["## PR ledger", "", "| Key | Note |", "|---|---|", "| DEMO-1 | Fixed the bug. Then merged |"]));
     const f = await notOwner();
     expect(f.map((x) => [x.relPath, x.line])).toEqual([["plans/other.mdx", bodyLine(4)]]);
+  });
+});
+
+// ── Architecture review 2026-10, batch L (findings 77, 78) ───────────────────
+
+describe("check 14 table header rows (finding 77)", () => {
+  test("the row above a table's delimiter row is a header, not state; the body rows are linted", async () => {
+    const body = ["| Fix for DEMO-1 | Merged |", "|---|---|", "| DEMO-2 | merged |"];
+    expect(await flaggedBody(body)).toEqual([2]);
+  });
+
+  test("a header with no body row under it is text the reader shows, so it is linted", async () => {
+    // A header and a delimiter row only: the parser's table needs three rows, so it renders as text.
+    expect(await flaggedBody(["| Fix for DEMO-1 | Merged |", "|---|---|"])).toEqual([0]);
+  });
+});
+
+describe("check 14 task words anchor only with a number (finding 77)", () => {
+  test("a bare task word is generic prose; a numbered one names a piece of work", async () => {
+    const body = [
+      "The second task is not merged.",
+      "Task 2 is not merged.",
+      "Wait until the api-PR-en is merged.",
+      "PR 1 is merged.",
+      "PRs 1–4 are merged.",
+      "The PRs merged through the queue.",
+      "Task #3 is merged.",
+    ];
+    expect(await flaggedBody(body)).toEqual([1, 3, 4, 6]);
+  });
+});
+
+describe("check 14 uses the reader's fence rule (finding 78)", () => {
+  test("a tilde block is prose to the reader, so its lines are linted; a backtick fence is not", async () => {
+    const body = ["~~~", "DEMO-1 is merged.", "~~~", "", "```", "DEMO-2 is merged.", "```"];
+    expect(await flaggedBody(body)).toEqual([1]);
+  });
+
+  test("an unclosed backtick opener stays prose, and so does every line after it", async () => {
+    expect(await flaggedBody(["```", "DEMO-1 is merged.", "", "DEMO-2 is merged."])).toEqual([1, 3]);
   });
 });

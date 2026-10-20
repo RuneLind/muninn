@@ -554,6 +554,40 @@ describe("lintWiki runs the check on .mdx pages that are not culled", () => {
   });
 });
 
+describe("a CaseBoard data file's note and kort are judged (architecture review 2026-10 finding 76)", () => {
+  // The reader runs a case's `note` and `kort` through `renderInline`, so a tag
+  // there is a component on the page. The check reads the file the way the
+  // reader does: through `loadPageFiles`.
+  const BOARD = page("Cases:", "", '<CaseBoard src="c.yaml" />');
+  const YAML = ["- id: A-1", "  status: ok", '  note: Fixed <Pill tone="sucess">x</Pill> today', "- id: A-2", "  status: wait", '  kort: Waits <Pill hue="red">y</Pill>', ""].join("\n");
+  // In the order the board renders them: the `wait` group before the `ok` one.
+  const DATA_FINDINGS = [
+    { check: "component-attr", relPath: "plans/x.mdx", message: 'In c.yaml: Pill hue="red" is not a Pill attribute; the renderer drops it' },
+    { check: "component-value", relPath: "plans/x.mdx", message: 'In c.yaml: Pill tone="sucess" renders as default' },
+  ];
+  const shape = (fs: { check: string; relPath: string; message: string; line?: number }[]) =>
+    fs.map(({ check, relPath, message, line }) => ({ check, relPath, message, ...(line === undefined ? {} : { line }) }));
+
+  test("checkComponents judges the tags in the file the page reads, with the file named and no line", () => {
+    const files = new Map([["c.yaml", { ok: true as const, text: YAML }]]);
+    expect(shape(checkComponents("plans/x.mdx", BOARD, undefined, files))).toEqual(DATA_FINDINGS);
+    // Without the file the board renders nothing from it.
+    expect(checkComponents("plans/x.mdx", BOARD)).toEqual([]);
+  });
+
+  test("lintWiki reads the file beside the page", async () => {
+    const root = await testTempDir(path.join(tmpdir(), "wiki-lint-components-files-"));
+    try {
+      await Bun.write(path.join(root, "plans/x.mdx"), BOARD);
+      await Bun.write(path.join(root, "plans/c.yaml"), YAML);
+      const report = await lintWiki(await buildWikiIndex(root));
+      expect(shape(report.findings.filter((f) => f.check.startsWith("component-")))).toEqual(DATA_FINDINGS);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 /** A render seam that counts its calls and renders like the reader. */
 const counting = () => {
   const seam = Object.assign((content: string) => (seam.calls++, html(content)), { calls: 0 });

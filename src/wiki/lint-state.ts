@@ -21,9 +21,11 @@
  * reserved or culled. Frontmatter `description` is linted; `status_note` is a
  * home. Exempt from check 1, besides the homes: `<Timeline>`, `<DecisionLog>`,
  * `<Historic>` (each exactly where `parseBlocks` makes a block of it),
- * blockquote lines (a line that opens with `>`), code fences and inline code.
- * HTML and JSX comments are linted: this reader renders them as visible text.
- * Lanes and plain tables are linted.
+ * blockquote lines (a line that opens with `>`), code fences by the reader's
+ * rule (`readerFencedLines`: backticks only, an unclosed opener stays prose),
+ * inline code, and a table's header row. HTML and JSX comments are linted:
+ * this reader renders them as visible text. Lanes and plain tables are linted.
+ * The frontmatter ends where the store's does (`frontmatterBodyLine`).
  *
  * Off unless `.wiki-reader.json` declares `statePhrases`
  * (`src/format/state-phrases.ts`): the phrases and task words are the wiki's
@@ -38,17 +40,17 @@
  */
 
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, parseBlocks, type Block } from "../format/markdown-ast.ts";
+import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, isSeparatorRow, isTableRow, parseBlocks, readerFencedLines, type Block } from "../format/markdown-ast.ts";
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
-import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
 import { JIRA_KEY_SOURCE } from "../jira/retrieval.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
 import { ownerCensus, readOwns } from "./frontmatter-lists.ts";
+import { frontmatterBodyLine } from "./page-text.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
 
@@ -129,11 +131,13 @@ function wordsRe(words: readonly string[]): RegExp | null {
  * Task words. A word with an upper-case letter (`PR`, `PR-er`) matches as
  * written, so `e2e-pr.yml` is no PR; an all-lower-case word (`oppgave`) matches
  * any case. Neither may touch a `.`/`/` path neighbour or a letter, but a
- * hyphen is fine (`api-PR-en`) and so is a sentence-ending period.
+ * hyphen is fine on the left (`api-PR 2`). A task word anchors only when a
+ * number follows it (`PR 1`, `PR 1–4`, `oppgave #3`): a bare one (`når PR-en er
+ * merget`, a `| Service-PR |` column) is generic prose about no piece of work.
  */
 function taskWordsRes(words: readonly string[]): RegExp[] {
   const edge = (alt: string, flags: string) =>
-    new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`, flags);
+    new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?=[ \\t\\u00a0]?#?\\d)`, flags);
   const alt = (ws: string[]) => ws.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
   const cased = words.filter((w) => /\p{Lu}/u.test(w));
   const folded = words.filter((w) => !/\p{Lu}/u.test(w));
@@ -245,8 +249,11 @@ function trackedLines(lines: readonly string[], fenced: readonly boolean[], body
 }
 
 /** Each pipe-table row line → the first line of its table: a run of lines that
- *  start with `|`. Rows without a leading pipe render as text. */
-function tableRows(lines: readonly string[], fenced: readonly boolean[], body: number): Map<number, number> {
+ *  start with `|`. Rows without a leading pipe render as text. `headers` gets
+ *  the first row of a run the parser makes a table of (`parseBlocks`' rule: three
+ *  `isTableRow` rows or more, the second an `isSeparatorRow`): column labels,
+ *  not state. */
+function tableRows(lines: readonly string[], fenced: readonly boolean[], body: number, headers: Set<number>): Map<number, number> {
   const out = new Map<number, number>();
   for (let i = body; i < lines.length; i++) {
     if (fenced[i]) continue;
@@ -255,6 +262,9 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
     if (t.startsWith("|")) {
       while (j < lines.length && !fenced[j] && lines[j]!.trim().startsWith("|")) out.set(j++, i);
     }
+    let k = i;
+    while (k < j && isTableRow(lines[k]!)) k++;
+    if (k - i >= 3 && isSeparatorRow(lines[i + 1]!)) headers.add(i);
     if (j > i) i = j - 1;
   }
   return out;
@@ -278,9 +288,14 @@ function startsBlock(t: string): boolean {
  */
 export function stateLineRoles(content: string): LineRoles {
   // Folded so a CRLF fence is a fence: `fencedLineMask` reads "```\r" as no fence.
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
-  const body = frontmatterEndLine(lines);
-  const fenced = fencedLineMask(lines);
+  const folded = content.replace(/\r\n/g, "\n");
+  const lines = folded.split("\n");
+  // The store's boundary: a column-0 `---` ends the frontmatter, so an indented
+  // one inside a block scalar is still frontmatter.
+  const body = frontmatterBodyLine(folded);
+  // The reader's fence rule over the body it renders: backticks only, and an
+  // opener with no closer stays prose. Frontmatter lines are never fenced.
+  const fenced = [...new Array<boolean>(body).fill(false), ...readerFencedLines(lines.slice(body).join("\n"))];
   const linted: Unit[] = [];
   const home: Unit[] = [];
 
@@ -297,7 +312,8 @@ export function stateLineRoles(content: string): LineRoles {
   }
 
   const tracked = trackedLines(lines, fenced, body);
-  const tables = tableRows(lines, fenced, body);
+  const headers = new Set<number>();
+  const tables = tableRows(lines, fenced, body, headers);
   let statusPara = false;
   let ledger = false;
   const reset = () => {
@@ -342,6 +358,7 @@ export function stateLineRoles(content: string): LineRoles {
         while (j >= body && lines[j]!.trim() === "") j--;
         ledger = j >= body && isLedgerLabel(lines[j]!);
       }
+      if (headers.has(i)) continue;
       if (ledger) {
         home.push({ lines: [i], row: true });
         continue;
