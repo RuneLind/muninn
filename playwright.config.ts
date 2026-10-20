@@ -12,8 +12,9 @@ export default defineConfig({
   retries: 0,
   // Spec FILES run in parallel, and most of them boot a muninn of their own —
   // some two or three, some restart theirs mid-file (count the booting files
-  // with `grep -l '"src/index.ts"' e2e/*.spec.ts | wc -l`; a stub huginn or
-  // Texas is an IN-PROCESS `node:http` server, not a second process) — on top
+  // with `grep -l '"src/index.ts"' e2e/*.spec.ts | wc -l`; every other server
+  // a spec starts is an IN-PROCESS `node:http` stub, not a second process —
+  // list those files with `grep -l createServer e2e/*.spec.ts`) — on top
   // of this config's own shared server on 3011. Each is a Bun process that
   // bundles the client with `Bun.build` and tries to start its MCP adapters. On a developer's machine that fits; on a 4-core CI runner (`nproc`, 2026-10-13) it
   // does not, and the way it fails is not a bind error but a CLICK LANDING BEFORE
