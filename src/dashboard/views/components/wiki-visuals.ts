@@ -1,5 +1,6 @@
 /**
- * The reader's `<Chart>` toggles and `<RuleTree>` case picker. The server
+ * The reader's `<Chart>` toggles, `<RuleTree>` case picker, `<Glossary>`
+ * term definitions and `<CaseBoard view="dots">` squares. The server
  * draws every chart variant (`src/format/chart-view.ts`); this file only shows
  * one: Chart or Table, and the variant (points or % of target, the bar as
  * decided or after). A picked case marks the tree's rows on its path
@@ -91,6 +92,121 @@ function ruleTreeSays(live: HTMLElement): Record<string, string> {
   }
 }
 
+/** The client box of the nearest ancestor that clips `el` (overflow other
+ *  than visible), cut to the viewport: the reader's article pane scrolls, so
+ *  the viewport alone let a definition run under its edge or scrollbar. */
+function clipBox(el: Element): { left: number; top: number; right: number; bottom: number } {
+  const root = el.ownerDocument.documentElement;
+  const box = { left: 0, top: 0, right: root.clientWidth, bottom: root.clientHeight };
+  for (let a = el.parentElement; a && a !== root; a = a.parentElement) {
+    const s = getComputedStyle(a);
+    if (s.overflowX === "visible" && s.overflowY === "visible") continue;
+    const r = a.getBoundingClientRect();
+    const left = r.left + a.clientLeft;
+    const top = r.top + a.clientTop;
+    box.left = Math.max(box.left, left);
+    box.top = Math.max(box.top, top);
+    box.right = Math.min(box.right, left + a.clientWidth);
+    box.bottom = Math.min(box.bottom, top + a.clientHeight);
+    break;
+  }
+  return box;
+}
+
+/** Keep a glossary definition inside the box that clips it: no wider than
+ *  that box, shifted back from its right edge, and opened above the term
+ *  (`gl-above`) when there is no room below and more room above. */
+function placeGlossaryTip(mark: Element): void {
+  const tip = mark.querySelector<HTMLElement>(":scope > .gl-tip");
+  if (!tip) return;
+  tip.style.insetInlineStart = "";
+  tip.style.maxInlineSize = "";
+  mark.classList.remove("gl-above");
+  const r0 = tip.getBoundingClientRect();
+  if (r0.width === 0) return;
+  const box = clipBox(mark);
+  const pad = 8;
+  const room = box.right - box.left - 2 * pad;
+  if (r0.width > room) tip.style.maxInlineSize = `${Math.max(0, room)}px`;
+  const r = tip.getBoundingClientRect();
+  // Physical shift, + moves right; the left case is an rtl tip, opening leftwards.
+  const dx = r.right > box.right - pad ? box.right - pad - r.right : Math.max(0, box.left + pad - r.left);
+  if (dx) tip.style.insetInlineStart = `${getComputedStyle(tip).direction === "rtl" ? -dx : dx}px`;
+  const term = mark.getBoundingClientRect();
+  const below = box.bottom - term.bottom;
+  const above = term.top - box.top;
+  if (r.height > below && above > below) mark.classList.add("gl-above");
+}
+
+/** A definition shown by hover or focus: place it; Escape hides it until the
+ *  pointer or focus leaves the term. */
+function wireGlossary(doc: Document): void {
+  const markOf = (t: EventTarget | null) => (t instanceof Element ? t.closest(".gl-mark") : null);
+  doc.addEventListener("mouseover", (e) => {
+    const m = markOf(e.target);
+    if (m) placeGlossaryTip(m);
+  });
+  doc.addEventListener("focusin", (e) => {
+    const m = markOf(e.target);
+    if (m) placeGlossaryTip(m);
+  });
+  doc.addEventListener("mouseout", (e) => {
+    const m = markOf(e.target);
+    if (m && !(e.relatedTarget instanceof Node && m.contains(e.relatedTarget))) m.classList.remove("gl-dismissed");
+  });
+  doc.addEventListener("focusout", (e) => markOf(e.target)?.classList.remove("gl-dismissed"));
+  doc.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape") return;
+      const m = markOf(doc.activeElement) ?? doc.querySelector(".gl-mark:hover:not(.gl-dismissed)");
+      if (!m || m.classList.contains("gl-dismissed")) return;
+      m.classList.add("gl-dismissed");
+      // The open definition takes this Escape; the reader's own keys get the next one.
+      e.stopPropagation();
+    },
+    true,
+  );
+}
+
+/** Press one CaseBoard square: it alone is pressed, and the board's live line
+ *  says its case (`data-cb-say`). Pressing it again releases it. False when
+ *  `target` is not a square. */
+function applyCaseDot(target: Element | null): boolean {
+  const dot = target?.closest?.<HTMLElement>("button.cb-dot");
+  const dots = dot?.closest<HTMLElement>(".cb-dots");
+  if (!dot || !dots || dots.closest(".wiki-ref-peek")) return false;
+  const on = dot.getAttribute("aria-pressed") !== "true";
+  dots.querySelectorAll<HTMLElement>("button.cb-dot").forEach((b) => {
+    b.setAttribute("aria-pressed", String(on && b === dot));
+    b.setAttribute("tabindex", b === dot ? "0" : "-1");
+  });
+  const say = dots.querySelector<HTMLElement>(".cb-dots-say");
+  if (say) say.textContent = on ? (dot.dataset.cbSay ?? "") : "";
+  return true;
+}
+
+const DOT_KEYS = new Set(["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"]);
+
+/** The arrow keys, Home and End move between a board's squares; the board is
+ *  one tab stop (the square focused last keeps `tabindex="0"`). */
+function moveCaseDot(e: KeyboardEvent): void {
+  if (!DOT_KEYS.has(e.key) || !(e.target instanceof Element)) return;
+  const dot = e.target.closest<HTMLElement>("button.cb-dot");
+  const dots = dot?.closest(".cb-dots");
+  if (!dot || !dots) return;
+  // A square a lens hides (Overview's none group) is skipped.
+  const all = Array.from(dots.querySelectorAll<HTMLElement>("button.cb-dot")).filter((b) => b === dot || b.getClientRects().length > 0);
+  const i = all.indexOf(dot);
+  // Right means the previous square under rtl; Up, Down, Home and End do not flip.
+  const ahead = getComputedStyle(dot).direction === "rtl" ? "ArrowLeft" : "ArrowRight";
+  const forward = e.key === ahead || e.key === "ArrowDown";
+  const next = e.key === "Home" ? 0 : e.key === "End" ? all.length - 1 : forward ? Math.min(i + 1, all.length - 1) : Math.max(i - 1, 0);
+  e.preventDefault();
+  dots.querySelectorAll<HTMLElement>("button.cb-dot").forEach((b) => b.setAttribute("tabindex", b === all[next] ? "0" : "-1"));
+  all[next]?.focus();
+}
+
 let installed = false;
 
 /** Install the delegated listeners; later calls do nothing. */
@@ -98,11 +214,14 @@ export function initWikiVisuals(doc: Document = document): void {
   if (installed) return;
   installed = true;
   doc.addEventListener("click", (e) => {
-    applyChartToggle(e.target instanceof Element ? e.target : null);
+    const target = e.target instanceof Element ? e.target : null;
+    if (!applyChartToggle(target)) applyCaseDot(target);
   });
+  doc.addEventListener("keydown", moveCaseDot);
   doc.addEventListener("change", (e) => {
     applyRuleTreePick(e.target instanceof Element ? e.target : null);
   });
-  // The rule tree picker shows only once its listener is in place.
+  wireGlossary(doc);
+  // The rule tree picker and the CaseBoard squares show only once their listeners are in place.
   doc.documentElement.classList.add("rt-js");
 }

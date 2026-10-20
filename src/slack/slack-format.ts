@@ -181,6 +181,9 @@ const slackRenderer: BlockRenderer = {
       // The list as written: only the wiki reader draws a rule tree.
       case "RuleTree":
         return children;
+      // The list as written: only the wiki reader marks the terms.
+      case "Glossary":
+        return children;
       case "StatusRows":
         return rawChildren
           .map((b) =>

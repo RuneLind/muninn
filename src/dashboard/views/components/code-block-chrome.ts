@@ -142,6 +142,7 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   Chart: null,
   // A rule tree wraps a nested list; a fence in an item is an ordinary fence.
   RuleTree: null,
+  Glossary: null,
 };
 
 const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);

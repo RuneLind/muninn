@@ -138,7 +138,10 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     },
   },
   Query: { doc: "One prod query with its SQL, CSV result and answer.", teach: WIKI },
-  CaseBoard: { doc: "Tracked cases from a YAML file beside the page.", teach: WIKI },
+  CaseBoard: {
+    doc: 'Tracked cases from a YAML file beside the page; `view="dots"` adds one square per case, by status, above the rows on the wiki reader.',
+    teach: WIKI,
+  },
   DeltaTable: {
     doc: "Run-to-run numbers with a computed delta column.",
     teach: WIKI,
@@ -188,6 +191,10 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
         printType: '"<outcome>=good|warn|info|muted|yes|no|fix;…"',
       },
     },
+  },
+  Glossary: {
+    doc: "A «Words on the page» list of `**Term:** definition` items, or a paragraph of sentences each led by an emphasised term (`A *Hold* is …`; a term needs a separator or a following word, and after Det/Den/De a copula); the wiki reader marks each term's first use per section (the text before the first heading, then each `#` and `##` heading; a `###` does not start one) with its definition (case-free unless the term holds a capital past its first letter), every other surface prints the list.",
+    teach: WIKI,
   },
 };
 

@@ -85,12 +85,13 @@ import {
   type StatusTones,
   visibleText,
 } from "../format/report-top.ts";
-import { readChartKind, readStatusRowsView } from "../format/component-spec.ts";
+import { readCaseBoardView, readChartKind, readStatusRowsView, type CaseBoardView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
-import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
+import { ITEM_DATE_ATTR, itemDate, listChildrenText } from "../format/item-dates.ts";
+import type { TimelineLanesRenderer } from "../format/timeline-lanes.ts";
 import {
   CB_LINE_CLASS,
   DL_DECISION_CLASS,
@@ -111,6 +112,7 @@ import {
   parseCaseBoard,
   parseCaseLabels,
   type BoardCase,
+  type CaseDotsViewRenderer,
   type CaseLabels,
 } from "../format/case-board.ts";
 import {
@@ -282,6 +284,13 @@ export function formatWebHtml(
      *  `ruleTreeViewHtml`), passed in like `chartView`. Absent ⇒ a rule tree
      *  prints its list as written. */
     ruleTreeView?: RuleTreeViewRenderer;
+    /** With `views`: the `<CaseBoard view="dots">` squares (`renderWikiHtml`
+     *  passes `caseDotsViewHtml`), passed in like `chartView`. Absent ⇒ the
+     *  board's rows alone. */
+    caseDotsView?: CaseDotsViewRenderer;
+    /** With `views` and `itemDates`: the timeline lanes after the decision
+     *  views (`renderWikiHtml` passes `timelineLanesHtml`). Absent ⇒ none. */
+    timelineLanes?: TimelineLanesRenderer;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -300,7 +309,11 @@ export function formatWebHtml(
   const prevLogIds = currentLogIds;
   const prevRuleTreeView = currentRuleTreeView;
   const prevCaseKorts = currentCaseKorts;
+  const prevCaseDotsView = currentCaseDotsView;
+  const prevCaseDotsPending = currentCaseDotsPending;
+  currentCaseDotsPending = [];
   currentViews = opts?.views === true;
+  currentCaseDotsView = currentViews && text.includes("<CaseBoard") ? (opts?.caseDotsView ?? null) : null;
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
   currentCaseKorts = NO_CASE_KORTS;
   const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
@@ -352,13 +365,15 @@ export function formatWebHtml(
       const linkTexts = opts?.wikiLinkTexts;
       const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
       const data = pageDecisionData(analysed === text ? blocks : parseBlocks(analysed), { proposed: opts?.proposedPlan === true });
-      const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis);
+      const lanes = currentItemDates && opts?.timelineLanes ? opts.timelineLanes(blocks, currentItemDates, currentLanguage, shownLinkText) : "";
+      const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis) + lanes;
       rendered = view
         ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
             .filter((part) => part !== "")
             .join("\n")
         : renderBlocks(blocks, webRenderer);
     }
+    rendered = fillCaseDots(rendered, currentCaseDotsPending);
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
     const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
@@ -384,6 +399,8 @@ export function formatWebHtml(
     currentLogIds = prevLogIds;
     currentRuleTreeView = prevRuleTreeView;
     currentCaseKorts = prevCaseKorts;
+    currentCaseDotsView = prevCaseDotsView;
+    currentCaseDotsPending = prevCaseDotsPending;
   }
 }
 
@@ -408,17 +425,9 @@ export interface ItemDateDays {
 /** `opts.itemDates` for the call in progress (reader only). */
 let currentItemDates: ItemDateDays | undefined;
 
-/** The source text of what sits under a list item — nested items and
- *  paragraphs, not code — for its date. */
-function listChildrenText(children: readonly ListChild[] | undefined): string {
-  if (!children) return "";
-  return children
-    .map((c) => {
-      if (c.type === "paragraph") return c.text;
-      if (c.type === "code_block") return "";
-      return c.items.map((t, k) => `${t}\n${listChildrenText(c.nested?.[k])}`).join("\n");
-    })
-    .join("\n");
+/** `text` with each wikilink sentinel read as the text its link shows. */
+function shownLinkText(text: string): string {
+  return text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => ` ${currentLinkTexts?.[Number(i)] ?? ""} `);
 }
 
 /** ` data-item-date="YYYY-MM-DD"` for the latest date in `text` not after the
@@ -426,8 +435,7 @@ function listChildrenText(children: readonly ListChild[] | undefined): string {
  *  wikilink is read as the text it shows, so a label's date counts. */
 function itemDateAttr(text: string | null | undefined): string {
   if (!currentItemDates || !text) return "";
-  const shown = text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => ` ${currentLinkTexts?.[Number(i)] ?? ""} `);
-  const d = itemDate(shown, currentItemDates.ref, currentItemDates.today);
+  const d = itemDate(shownLinkText(text), currentItemDates.ref, currentItemDates.today);
   return d ? ` ${ITEM_DATE_ATTR}="${d}"` : "";
 }
 
@@ -446,6 +454,31 @@ let currentChartView: ChartViewRenderer | null = null;
 
 /** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
 let currentRuleTreeView: RuleTreeViewRenderer | null = null;
+
+/** `opts.caseDotsView` for the call in progress; null ⇒ a `<CaseBoard>` is its rows. */
+let currentCaseDotsView: CaseDotsViewRenderer | null = null;
+/** The dots views asked for so far, each left in the output as a
+ *  `\x00CASEDOTS<i>\x00` sentinel and drawn by {@link fillCaseDots} once the
+ *  page is rendered: a `<Lane>` or `<More>` renders its children twice and
+ *  keeps one copy, so only a board in the final output takes an ordinal. */
+let currentCaseDotsPending: Array<(nth: number) => { file: string; html: string }> = [];
+const CASE_DOTS_SENTINEL = /\x00CASEDOTS(\d+)\x00/g;
+
+/** Draw each dots view left in `html`, in page order: the second board drawn
+ *  from one src is «(2)», and a board drawing no squares takes no number. */
+function fillCaseDots(html: string, pending: typeof currentCaseDotsPending): string {
+  if (!pending.length) return html;
+  const seen = new Map<string, number>();
+  return html.replace(CASE_DOTS_SENTINEL, (_m, i: string) => {
+    const draw = pending[Number(i)];
+    if (!draw) return "";
+    const probe = draw(1);
+    if (!probe.html) return "";
+    const nth = (seen.get(probe.file) ?? 0) + 1;
+    seen.set(probe.file, nth);
+    return nth === 1 ? probe.html : draw(nth).html;
+  });
+}
 
 const NO_CASE_KORTS: ReadonlyMap<string, string> = new Map();
 /** The page's CaseBoard case ids → their `kort:`, while a rule tree page renders. */
@@ -721,7 +754,7 @@ function caseLineHtml(c: BoardCase): string {
 }
 
 /** A `<CaseBoard src labels>`: the count strip, then the rows grouped by status. */
-function caseBoardHtml(src: string, labelsAttr: string | undefined): string {
+function caseBoardHtml(src: string, labelsAttr: string | undefined, view: CaseBoardView): string {
   const section = (inner: string) => `<section class="caseboard">${inner}</section>`;
   if (!src) return section(blockNote("cb-unavailable", CASEBOARD_NO_SRC));
   const file = lookupPageFile(currentPageFiles, src, "yaml");
@@ -746,7 +779,16 @@ function caseBoardHtml(src: string, labelsAttr: string | undefined): string {
         `${g.cases.map((c) => caseRowHtml(c, labels)).join("")}</div>`,
     )
     .join("");
-  return section(`<p class="cb-strip">${strip}</p>${notes}${groups}`);
+  let dots = "";
+  if (view === "dots" && currentCaseDotsView) {
+    const view = currentCaseDotsView;
+    // The src as written, not its basename: `a/x.yaml` and `b/x.yaml` are two files.
+    const file = src;
+    const language = currentLanguage;
+    dots = `\x00CASEDOTS${currentCaseDotsPending.length}\x00`;
+    currentCaseDotsPending.push((nth) => ({ file, html: view(board.cases, labels, { language, file, nth }) }));
+  }
+  return section(`<p class="cb-strip">${strip}</p>${notes}${dots}${groups}`);
 }
 
 /** A toned delta's marker: a sign and an accessible name, so good and bad do
@@ -2249,7 +2291,7 @@ const webRenderer: BlockRenderer = {
       }
       case "CaseBoard": {
         // Self-closing in the authoring rule; a body, if written, follows the board.
-        const board = caseBoardHtml((attrs.src ?? "").trim(), attrs.labels);
+        const board = caseBoardHtml((attrs.src ?? "").trim(), attrs.labels, readCaseBoardView(attrs.view).value);
         return rawChildren.some((b) => !isBlankTextBlock(b)) ? `${board}${children}` : board;
       }
       case "DeltaTable":
@@ -2267,6 +2309,10 @@ const webRenderer: BlockRenderer = {
         return chartBlockHtml(attrs, rawChildren, children);
       case "RuleTree":
         return ruleTreeBlockHtml(attrs, rawChildren, children);
+      case "Glossary":
+        // The list as written. The reader's page render wraps it so the term
+        // marks (`glossary-view.ts`) leave the list itself alone.
+        return currentViews ? `<div class="glossary">${children}</div>` : children;
       case "StatusRows":
         // Tiles on the reader's page render only; every other surface prints rows.
         return statusRowsHtml(

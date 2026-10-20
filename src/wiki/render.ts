@@ -27,6 +27,11 @@ import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
 import { ruleTreeViewHtml } from "../format/rule-tree-view.ts";
+import { caseDotsViewHtml } from "../format/case-dots-view.ts";
+import { timelineLanesHtml } from "../format/timeline-lanes.ts";
+import { glossaryTerms, readGlossaries, type GlossaryBlockRead } from "../format/glossary.ts";
+import { markGlossaryTerms } from "../format/glossary-view.ts";
+import { parseBlocks } from "../format/markdown-ast.ts";
 import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
@@ -128,7 +133,7 @@ export function renderWikiHtml(
       wikiLinkTexts: linkTexts,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
-      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, ruleTreeView: ruleTreeViewHtml } : {}),
+      ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml } : {}),
     }),
     literal,
   );
@@ -146,7 +151,14 @@ export function renderWikiHtml(
       return rendered[i] ?? "";
     },
   );
-  return paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
+  const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(html, codeAtFromPage(markdown))));
+  return opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
+}
+
+/** The page body's `<Glossary>` blocks, wikilinks read as their text — the
+ *  one reading the reader's marks and lint check 19 share. */
+export function pageGlossaries(body: string): GlossaryBlockRead[] {
+  return readGlossaries(parseBlocks(body.replace(WIKILINK_WITH_LABEL_RE, (_w: string, target: string, label?: string) => wikiLinkText(target, label))));
 }
 
 /** D20/D49: the days an item date is read against — the page's

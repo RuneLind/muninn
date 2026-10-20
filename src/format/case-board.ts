@@ -8,6 +8,7 @@
  * chat bundle carries `web-format.ts` into a browser, where no file is ever
  * loaded and so no parse runs.
  */
+import type { QuestionLanguage } from "./question-labels.ts";
 import { anchorSlug, formatCount } from "./query-block.ts";
 import { maskSpans, SEGMENT_PROTECTED_RES, splitOutside } from "./report-top.ts";
 
@@ -280,6 +281,17 @@ export function caseKort(c: Pick<BoardCase, "kort" | "note">): string {
 }
 
 export type CaseLabels = Partial<Record<CaseStatus, string>>;
+
+/** Which board a dots view draws: the wiki's language, the board's `src` as
+ *  written, and how many boards on the page have drawn that src (1 for the first). */
+export interface CaseDotsBoard {
+  language: QuestionLanguage;
+  file: string;
+  nth: number;
+}
+
+/** The reader's dots view (`case-dots-view.ts`), passed to `formatWebHtml`. */
+export type CaseDotsViewRenderer = (cases: readonly BoardCase[], labels: CaseLabels, board: CaseDotsBoard) => string;
 
 /** `labels="hold:holdt ute,wait:venter"` read into status → label. A key that
  *  is not a case status, or an entry with no `:` or an empty side, is kept in
