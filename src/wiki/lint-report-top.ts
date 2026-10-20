@@ -8,6 +8,11 @@
  * | `decision-first-sentence` | an id-led `<DecisionLog>` item, not dimmed, whose first sentence (what the |
  * |                           | Overview lens shows, D6) is over `FIRST_SENTENCE_MAX` (160) visible chars  |
  * | `status-row-long`         | a `<StatusRows>` row over `STATUS_ROW_MAX` (160) chars as written (D11)    |
+ * | `status-tones`            | a `<StatusRows tones>` entry that names no row (a wikilinked row by its    |
+ * |                           | text), names a row twice, or is not `Label=good|warn|info|muted`; or       |
+ * |                           | `tones` on a block not in `view="tiles"`                                   |
+ * | `status-tile-long`        | in `view="tiles"`, a row whose first ` · ` part (the tile's big value) is  |
+ * |                           | over `STATUS_TILE_FIRST_MAX` (24) visible chars                            |
  * | `missing-tldr`            | an `.mdx` page in {@link isTldrScope} whose first non-blank block after the H1 is |
  * |                           | not `<Tldr>` (the In short / Kort fortalt box)                             |
  * | `tldr-no-more` (info)     | that `<Tldr>` holds no `<More>`                                            |
@@ -24,15 +29,34 @@
 
 import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { decisionLogEntries } from "../format/question.ts";
-import { FIRST_SENTENCE_MAX, STATUS_ROW_MAX, statusRowBlocks, visibleText } from "../format/report-top.ts";
+import {
+  FIRST_SENTENCE_MAX,
+  parseStatusRow,
+  parseStatusTones,
+  STATUS_ROW_MAX,
+  STATUS_TILE_FIRST_MAX,
+  statusRowBlocks,
+  statusSegments,
+  statusToneWarnings,
+  visibleText,
+} from "../format/report-top.ts";
+import { readStatusRowsView } from "../format/component-spec.ts";
 import { decisionFirstSentence } from "../web/web-format.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import { parseFrontmatter, stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const REPORT_TOP_LINT_CHECKS = ["decision-first-sentence", "status-row-long", "missing-tldr", "tldr-no-more"] as const;
+export const REPORT_TOP_LINT_CHECKS = [
+  "decision-first-sentence",
+  "status-row-long",
+  "status-tones",
+  "status-tile-long",
+  "missing-tldr",
+  "tldr-no-more",
+] as const;
 
 /** Folders whose `.mdx` pages are reference pages and open with the box
  *  (mdx-explainer «Reference page shape», 2026-10-13). */
@@ -51,6 +75,17 @@ function findLine(lines: readonly string[], fenced: readonly boolean[], from: nu
     if (!fenced[i] && test(lines[i]!)) return i + 1;
   }
   return undefined;
+}
+
+/** A `<StatusRows>` row's label as the reader matches it: each wikilink
+ *  hidden behind `renderWikiHtml`'s sentinel before the row is parsed, so a
+ *  `*` or `:**` inside a link never reaches the label pattern, then read as
+ *  its text (`[[t|l]]` → `l`, else `t`), as `peekText` reads it. */
+function statusRowLabelAsRendered(item: string): string | null {
+  const texts: string[] = [];
+  const hidden = item.replace(WIKILINK_WITH_LABEL_RE, (_w, t: string, l?: string) => `\x00WIKIPAGELINK${texts.push(wikiLinkText(t, l)) - 1}\x00`);
+  const { label } = parseStatusRow(hidden);
+  return label === null ? null : label.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => texts[Number(i)] ?? "").replace(/\x00/g, "");
 }
 
 export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
@@ -85,19 +120,41 @@ export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: 
 
   if (hasRows) {
     let from = body;
-    for (const rows of statusRowBlocks(blocks)) {
+    for (const { attrs, rows } of statusRowBlocks(blocks)) {
       const open = findLine(lines, fenced, from, (l) => l.trim().startsWith("<StatusRows"));
       if (open !== undefined) from = open;
+      const tiles = readStatusRowsView(attrs.view).value === "tiles";
+      // The reader reads tones in tile view only; a wrong entry is wrong either way.
+      if (attrs.tones !== undefined) {
+        const labels = rows.map((r) => statusRowLabelAsRendered(r.text));
+        const warnings = [
+          ...(!tiles && attrs.tones.trim() ? ["`tones` colours tiles only; this block renders as rows"] : []),
+          ...statusToneWarnings(parseStatusTones(attrs.tones), labels),
+        ];
+        for (const warning of warnings) {
+          findings.push({ check: "status-tones", relPath: page.relPath, message: `<StatusRows> ${warning}`, ...(open !== undefined ? { line: open } : {}) });
+        }
+      }
       for (const row of rows) {
         const head = row.text.split("\n")[0]!.slice(0, 40);
         const line = findLine(lines, fenced, from, (l) => l.includes(head));
         if (line !== undefined) from = line;
+        const at = line !== undefined ? { line } : {};
+        const big = tiles ? visibleText(statusSegments(row.value)[0] ?? "") : "";
+        if (big.length > STATUS_TILE_FIRST_MAX) {
+          findings.push({
+            check: "status-tile-long",
+            relPath: page.relPath,
+            message: `<StatusRows view="tiles"> row's first part is ${big.length} chars (max ${STATUS_TILE_FIRST_MAX}) and does not read as a tile; put a number or a short state first and the rest after " · " (${quote(big)})`,
+            ...at,
+          });
+        }
         if (row.text.length <= STATUS_ROW_MAX) continue;
         findings.push({
           check: "status-row-long",
           relPath: page.relPath,
           message: `<StatusRows> row of ${row.text.length} chars (max ${STATUS_ROW_MAX}) — a row reads at a glance; move the detail into the page (${quote(row.text)})`,
-          ...(line !== undefined ? { line } : {}),
+          ...at,
         });
       }
     }
