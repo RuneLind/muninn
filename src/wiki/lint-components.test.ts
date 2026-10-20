@@ -890,12 +890,14 @@ describe("an enum value that folds to the default renders as written and is no f
     "Fact.v": (v) => page(`A <Fact n="1" v="${v}">c</Fact> b`),
     "Lane.kind": (v) => page("<NextMoves>", "", `<Lane kind="${v}">`, "", "- s", "", "</Lane>", "", "</NextMoves>"),
     "StatusRows.view": (v) => page(`<StatusRows view="${v}">`, "", "- **A:** 1 · b", "", "</StatusRows>"),
+    "CaseBoard.view": (v) => page(`<CaseBoard src="c.yaml" view="${v}" />`),
     "Chart.normalize": (v) =>
       page(`<Chart kind="steps" x="Step" ref="A" normalize="${v}">`, "", "| Step | S |", "|---|---|", "| A | 10 |", "| B | 20 |", "", "</Chart>"),
   };
   const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-  // The reader's page render: `StatusRows view` draws only there.
-  const readerHtml = (content: string) => renderWikiHtml(content, () => undefined, { views: true });
+  // The reader's page render: `StatusRows view` and `CaseBoard view` draw only there.
+  const boardFile = new Map([["c.yaml", { ok: true as const, text: "- {id: LIB-1, status: ok}\n" }]]);
+  const readerHtml = (content: string) => renderWikiHtml(content, () => undefined, { views: true, files: boardFile });
   const allEnums = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
     Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number; required?: true }>)
       .filter(([, a]) => a.enum)

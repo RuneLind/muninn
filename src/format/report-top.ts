@@ -18,6 +18,7 @@
 import type { Block } from "./markdown-ast.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 import { isAbbreviation } from "./abbreviations.ts";
+import { codePointText } from "./code-point.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { labelListWarnings, normalizeLabel, parseLabelList, type LabelList } from "./delta-table.ts";
 
@@ -499,11 +500,12 @@ export function splitFirstSentence(
   return null;
 }
 
-/** The entities a page's prose may spell, decoded. */
+/** The entities a page's prose may spell, decoded; a numeric one no code
+ *  point holds is U+FFFD. */
 function decodeEntities(s: string): string {
   return s
-    .replace(/&#(\d+);/g, (_m, d: string) => String.fromCodePoint(Number(d)))
-    .replace(/&#x([0-9a-f]+);/gi, (_m, h: string) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_m, d: string) => codePointText(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_m, h: string) => codePointText(parseInt(h, 16)))
     .replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")

@@ -29,11 +29,12 @@
  *    leave one within 183 days, so in practice only a 29.02 far from a leap
  *    year reads null.
  *
- * Dependency-free (its one import, `code-spans.ts`, is too) so the browser
- * bundle and a port can share it.
+ * Dependency-free (its one import, `code-spans.ts`, is too; the AST import is
+ * a type) so the browser bundle and a port can share it.
  */
 
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import type { ListChild } from "./markdown-ast.ts";
 
 /** The attribute the reader's render stamps with an item's ISO day. */
 export const ITEM_DATE_ATTR = "data-item-date";
@@ -317,4 +318,17 @@ export function itemDate(text: string, ref: string, today: string): string | nul
   let best: string | null = null;
   for (const d of itemDates(text, ref)) if (d <= today && (best === null || d > best)) best = d;
   return best;
+}
+
+/** The source text of what sits under a list item — nested items and
+ *  paragraphs, not code — read with the item for its date. */
+export function listChildrenText(children: readonly ListChild[] | undefined): string {
+  if (!children) return "";
+  return children
+    .map((c) => {
+      if (c.type === "paragraph") return c.text;
+      if (c.type === "code_block") return "";
+      return c.items.map((t, k) => `${t}\n${listChildrenText(c.nested?.[k])}`).join("\n");
+    })
+    .join("\n");
 }

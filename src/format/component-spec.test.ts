@@ -30,7 +30,7 @@ const FROZEN_NAMES = [
   "FileTree", "Checklist", "AnnotatedCode", "CodeTabs", "Tab", "Fact", "FactCheck", "Embed",
   "Fold", "Historic", "NextMoves", "Lane", "Query", "CaseBoard", "DeltaTable", "Tldr",
   "Timeline", "DecisionLog", "RunChecklist", "Question", "More", "StatusRows", "Chart",
-  "RuleTree",
+  "RuleTree", "Glossary",
 ];
 const FROZEN_SELF_CLOSING = ["FileRef", "Verdict", "Pill", "Fact", "Embed", "Query", "CaseBoard", "DeltaTable"];
 const FROZEN_ATTRS: Record<string, string[]> = {
@@ -55,7 +55,7 @@ const FROZEN_ATTRS: Record<string, string[]> = {
   NextMoves: [],
   Lane: ["kind", "who", "role", "since"],
   Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
-  CaseBoard: ["src", "labels"],
+  CaseBoard: ["src", "labels", "view"],
   DeltaTable: ["src", "better", "decimal"],
   Tldr: ["label"],
   Timeline: [],
@@ -66,6 +66,7 @@ const FROZEN_ATTRS: Record<string, string[]> = {
   StatusRows: ["view", "tones"],
   Chart: ["kind", "caption", "value", "target", "gap", "mark", "x", "ref", "normalize", "bar", "pass", "hold"],
   RuleTree: ["title", "outcomes"],
+  Glossary: [],
 };
 const FROZEN_INLINE = ["Verdict", "Pill", "Fact"];
 const FROZEN_LANE_KINDS = ["you", "waiting", "draft", "blocked"];

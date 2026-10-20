@@ -1388,3 +1388,117 @@ export function ruleTreeCss(scope: string): string {
     }
   `;
 }
+
+/** `<Glossary>` term marks on the wiki reader (`glossary-view.ts`). The
+ *  definition shows on hover and on keyboard focus; Escape hides it
+ *  (`gl-dismissed`, `wiki-visuals.ts`). `placeGlossaryTip` in `wiki-visuals.ts`
+ *  keeps it inside the pane that clips it and opens it above the term
+ *  (`gl-above`) near the pane's foot. Theme tokens, except the tip's
+ *  `box-shadow` rgba (the theme has no shadow token). */
+export function glossaryCss(scope: string): string {
+  const s = scope;
+  return `
+    ${s} .gl-mark { position: relative; }
+    ${s} .gl-term {
+      text-decoration: underline dotted var(--text-secondary); text-decoration-thickness: 1px; text-underline-offset: 0.2em;
+      cursor: help; border-radius: 3px;
+    }
+    ${s} .gl-term:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
+    ${s} .gl-tip {
+      display: none; position: absolute; z-index: 20; inset-block-start: calc(100% + 0.25rem); inset-inline-start: 0;
+      width: max-content; max-width: min(22rem, calc(100vw - 2rem)); box-sizing: border-box; padding: 0.4rem 0.6rem;
+      border-radius: 6px; border: 1px solid var(--text-muted); background: var(--bg-surface); color: var(--text-primary);
+      font-size: 0.85rem; font-weight: 400; font-style: normal; line-height: 1.4; white-space: normal; overflow-wrap: anywhere;
+      text-align: start; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      -webkit-user-select: none; user-select: none; /* an open definition stays out of a selection and a copy */
+    }
+    /* The gap is part of the tip, so the pointer crosses it without leaving the mark (WCAG 1.4.13). */
+    ${s} .gl-tip::before { content: ""; position: absolute; inset-inline: -1px; inset-block-end: 100%; block-size: calc(0.25rem + 2px); }
+    ${s} .gl-above > .gl-tip { inset-block-start: auto; inset-block-end: calc(100% + 0.25rem); }
+    ${s} .gl-above > .gl-tip::before { inset-block-end: auto; inset-block-start: 100%; }
+    ${s} .gl-tip-term { font-weight: 600; }
+    ${s} .gl-mark:not(.gl-dismissed):hover > .gl-tip,
+    ${s} .gl-mark:not(.gl-dismissed):focus-within > .gl-tip { display: block; }
+    @media print {
+      /* !important: an open tip (hover or focus) out-specifies any print selector. */
+      ${s} .gl-tip { display: none !important; }
+      ${s} .gl-term, ${s} .gl-term:focus-visible { text-decoration: none; outline: none; }
+    }
+    @media (forced-colors: active) {
+      ${s} .gl-term { text-decoration-color: CanvasText; }
+      ${s} .gl-tip { border-color: CanvasText; }
+    }
+  `;
+}
+
+/** `<CaseBoard view="dots">` on the wiki reader (`case-dots-view.ts`): one
+ *  square per case, tinted like its status pill, with the status glyph inside,
+ *  so colour is never the only cue. Shown once `wiki-visuals.ts` has put
+ *  `rt-js` on the root, so a page without the script has no dead buttons. */
+export function caseDotsCss(scope: string): string {
+  const s = scope;
+  return `
+    ${s} .cb-dots { display: none; margin-block: 0.5rem 0.75rem; container: cb-dots / inline-size; }
+    .rt-js ${s} .cb-dots { display: block; }
+    ${s} .cb-dots-group { display: grid; grid-template-columns: minmax(5rem, 8rem) minmax(0, 1fr); align-items: start; column-gap: 0.5rem; margin-block-end: 0.35rem; }
+    ${s} .cb-dots-label { font-size: 0.8rem; color: var(--text-soft); line-height: 1.6rem; overflow-wrap: anywhere; }
+    ${s} .cb-dots-row { display: flex; flex-wrap: wrap; gap: 0.25rem; min-inline-size: 0; }
+    ${s} .cb-dot {
+      inline-size: 1.6rem; block-size: 1.6rem; padding: 0; border-radius: 4px; cursor: pointer;
+      border: 1px solid currentColor; font: inherit; font-size: 0.8rem; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    ${s} .cb-dot-hold { background: var(--tint-warning); color: var(--tone-warn); }
+    ${s} .cb-dot-wait { background: var(--tint-info); color: var(--tone-info); }
+    ${s} .cb-dot-wrong { background: var(--tint-error); color: var(--tone-err); }
+    ${s} .cb-dot-none { background: var(--tint-neutral); color: var(--text-soft); }
+    ${s} .cb-dot-ok { background: var(--tint-success); color: var(--tone-good); }
+    ${s} .cb-dot-unknown { background: var(--bg-surface); color: var(--text-secondary); border-style: dashed; }
+    ${s} .cb-dot:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 2px; }
+    ${s} .cb-dot[aria-pressed="true"] { border-width: 2px; box-shadow: 0 0 0 2px var(--text-primary); }
+    @container cb-dots (max-width: 26rem) {
+      ${s} .cb-dots-group { grid-template-columns: minmax(0, 1fr); }
+    }
+    ${s} .cb-dots-say { margin: 0.25rem 0 0; min-block-size: 1.2em; font-size: 0.85rem; color: var(--text-primary); overflow-wrap: anywhere; }
+    @media print {
+      ${s} .cb-dots, .rt-js ${s} .cb-dots { display: none; }
+    }
+    @media (forced-colors: active) {
+      ${s} .cb-dot { border-color: ButtonText; color: ButtonText; background: ButtonFace; }
+      ${s} .cb-dot[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; box-shadow: none; }
+    }
+  `;
+}
+
+/** The reader's timeline lanes (`timeline-lanes.ts`), inside the decision
+ *  views' `.dc-view` box: a label column and one track per lane over a shared
+ *  axis. Each lane's mark has its own shape as well as its colour. */
+export function timelineLanesCss(scope: string): string {
+  const s = `${scope} .tl-lanes`;
+  return `
+    ${s} { --tll-label: 8rem; }
+    ${s} .tll-lane { display: grid; grid-template-columns: var(--tll-label) minmax(0, 1fr); align-items: center; column-gap: 0.75rem; min-block-size: 1.6rem; }
+    ${s} .tll-label { font-size: 0.8rem; color: var(--text-secondary); overflow-wrap: anywhere; }
+    ${s} .tll-track { position: relative; list-style: none; margin: 0; margin-inline: 0.5rem; padding: 0; block-size: 1.4rem; border-block-end: 1px dashed var(--border-secondary); }
+    /* A zero-width box at the day, its content centred and overflowing both ways: centred in ltr and rtl alike. */
+    ${s} .tll-mark { position: absolute; inset-block-start: 50%; inline-size: 0; display: flex; justify-content: center; align-items: center; gap: 0.15rem; transform: translateY(-50%); margin: 0; }
+    ${s} .tll-dot { display: inline-block; flex: none; inline-size: 0.7rem; block-size: 0.7rem; border: 1px solid var(--bg-panel); }
+    ${s} .tll-decisions .tll-dot { border-radius: 50%; background: var(--accent-light); }
+    ${s} .tll-queries .tll-dot { border-radius: 1px; background: var(--tone-info); }
+    ${s} .tll-timeline .tll-dot { transform: rotate(45deg); background: var(--tone-warn); }
+    ${s} .tll-n { font-size: 0.7rem; color: var(--text-secondary); }
+    ${s} .tll-say { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    ${s} .tll-axis { display: flex; justify-content: space-between; margin-inline-start: calc(var(--tll-label) + 0.75rem); font-size: 0.75rem; color: var(--text-soft); margin-block-start: 0.2rem; }
+    @container dc-view (max-width: 28rem) {
+      ${s} .tll-lane { grid-template-columns: minmax(0, 1fr); }
+      ${s} .tll-axis { margin-inline-start: 0; }
+    }
+    @media print {
+      ${s} .tll-dot { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    }
+    @media (forced-colors: active) {
+      ${s} .tll-lane .tll-dot { forced-color-adjust: none; background: CanvasText; border-color: Canvas; }
+      ${s} .tll-track { border-block-end-color: CanvasText; }
+    }
+  `;
+}

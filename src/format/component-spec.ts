@@ -270,6 +270,17 @@ export function readStatusRowsView(raw: string | undefined): AttrRead<StatusRows
   return readEnum(STATUS_ROWS_VIEWS, "rows", raw);
 }
 
+// ── CaseBoard ───────────────────────────────────────────────────────────────
+
+const CASE_BOARD_VIEWS = ["rows", "dots"] as const;
+export type CaseBoardView = (typeof CASE_BOARD_VIEWS)[number];
+
+/** A `CaseBoard view=` value: `dots` adds one square per case on the wiki
+ *  reader's page render; anything else reads as `rows`. */
+export function readCaseBoardView(raw: string | undefined): AttrRead<CaseBoardView> {
+  return readEnum(CASE_BOARD_VIEWS, "rows", raw);
+}
+
 // ── Chart ───────────────────────────────────────────────────────────────────
 
 export const CHART_KINDS = ["gap", "steps", "gate", "funnel"] as const;
@@ -385,7 +396,7 @@ export const COMPONENT_SPEC = {
   },
   // Tracked cases from a YAML list beside the page; `labels` names each status
   // in the wiki's words (`hold:holdt ute,wait:venter`). See `case-board.ts`.
-  CaseBoard: { attrs: { src: text, labels: text }, selfClosing: true },
+  CaseBoard: { attrs: { src: text, labels: text, view: { parse: readCaseBoardView, enum: CASE_BOARD_VIEWS, default: "rows" } }, selfClosing: true },
   // Run-to-run numbers from a CSV beside the page or a pipe-table body, with a
   // computed delta column. See `src/format/delta-table.ts`; a bad value fails visibly.
   DeltaTable: { attrs: { src: text, better: text, decimal: text }, selfClosing: true },
@@ -435,6 +446,10 @@ export const COMPONENT_SPEC = {
       outcomes: text,
     },
   },
+  // A «Words on the page» list (`glossary.ts`); the reader marks each term's
+  // first use per section: the text before the first heading, then each `#`
+  // and `##` heading (a `###` does not start one).
+  Glossary: { attrs: {} },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;
