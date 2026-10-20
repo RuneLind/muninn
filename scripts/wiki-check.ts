@@ -26,8 +26,12 @@
  * and one stderr line says so. A `<CaseBoard>` data file whose ref climbs
  * above the guessed root (`../data/c.yaml` from a page checked alone) reads
  * nothing, so check 15 cannot judge it; a second stderr line names each such
- * ref. A ref that fails for any other reason (a typo, a wrong extension) would
- * fail under the real root too, and is not named.
+ * ref. Only a ref whose path climbs above the guessed root is named. A ref that
+ * fails for any other reason is not named: a typo or a wrong extension, which
+ * fails under the real root too, but also a ref through a symlink to a folder
+ * outside the guessed root and inside the real one. The loader refuses that
+ * ref on its realpath, so it reads nothing here and the real root may read it;
+ * check 15 does not judge it and no line says so (a known gap).
  *
  * Exit codes: 0 when the check ran, with or without findings. 2 on a usage
  * error or a path that cannot be read or listed. 3 when a directory holds
