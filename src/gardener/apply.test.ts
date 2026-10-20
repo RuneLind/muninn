@@ -1018,6 +1018,80 @@ describe("applyWikiProposalGroup", () => {
     expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toContain("series: prov");
   });
 
+  // Fix round 1 batch 2: the preflight runs applyInner's OWN pre-write checks,
+  // so a member the apply would refuse after the CAS stops the group before
+  // the first write, and a member applyInner treats as a no-op passes.
+  describe("the preflight mirrors every pre-write check (finding 61)", () => {
+    const groupHead = (): WikiProposal => lintRow("r1", PAGE_A, pageBody("A"));
+
+    test("an explainer member stops the group with nothing written", async () => {
+      const html = "<!doctype html><html><head><title>Z</title></head><body>Z</body></html>\n";
+      await writeFile(path.join(wikiDir, "plans/z.html"), html);
+      const explainer = makeProposal({
+        id: "r2",
+        kind: "lint",
+        mode: "update",
+        groupKey: "lint:series-unnamed:deadbeef1234",
+        targetPath: "plans/z.html",
+        baseHash: sha256(html),
+        draft: html.replace("Z</body>", "Z2</body>"),
+        sourceDocs: [],
+      });
+      const res = await applyWikiProposalGroup([groupHead(), explainer], deps());
+
+      expect(res.stoppedAt?.id).toBe("r2");
+      expect(res.stoppedAt?.outcome).toMatchObject({ outcome: "error", reason: expect.stringContaining("explainer page") });
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    });
+
+    test("a member that fails path confinement stops the group with nothing written", async () => {
+      const escaping = makeProposal({ id: "r2", targetPath: "../escape.md", status: "approved" });
+      const res = await applyWikiProposalGroup([groupHead(), escaping], deps());
+
+      expect(res.stoppedAt?.id).toBe("r2");
+      expect(res.stoppedAt?.outcome).toMatchObject({ outcome: "error", reason: expect.stringContaining("path confinement") });
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    });
+
+    test("a create member whose stem another page owns stops the group with nothing written", async () => {
+      // `concepts/a.md` would shadow `plans/a.mdx` (same stem, different extension).
+      const twin = makeProposal({ id: "r2", targetPath: "concepts/a.md" });
+      const res = await applyWikiProposalGroup([groupHead(), twin], deps());
+
+      expect(res.stoppedAt?.id).toBe("r2");
+      expect(res.stoppedAt?.outcome.outcome).toBe("collision");
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toBe(pageBody("A"));
+    });
+
+    test("a member whose page already IS its CONTAINED draft passes as a no-op", async () => {
+      // A concept update whose draft links a page that does not exist. Containment
+      // de-links it before step 2a, so after a crash-after-write the page on disk
+      // is the contained draft, not the raw one. applyInner calls that a no-op;
+      // a preflight comparing the raw draft called it drift and stopped the group.
+      const target = "concepts/Context Compaction.md";
+      const before = DRAFT_BODY.replace("A technique", "An older technique");
+      await mkdir(path.join(wikiDir, "concepts"), { recursive: true });
+      await writeFile(path.join(wikiDir, target), before);
+      const row = makeProposal({
+        id: "r2",
+        mode: "update",
+        baseHash: sha256(before),
+        draft: DRAFT_BODY.replace("A technique", "A technique, see [[No Such Page]],"),
+      });
+      const single = await applyWikiProposal(row, deps());
+      expect(single).toMatchObject({ outcome: "applied" });
+      expect(await readFile(path.join(wikiDir, target), "utf8")).not.toContain("[[No Such Page]]");
+
+      const res = await applyWikiProposalGroup([groupHead(), row], deps());
+      expect(res.stoppedAt).toBeUndefined();
+      expect(res.results.map((r) => r.outcome)).toEqual([
+        expect.objectContaining({ outcome: "applied" }),
+        expect.objectContaining({ outcome: "applied", noop: true }),
+      ]);
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
+    });
+  });
+
   test("makes ONE commit over every path the group touched", async () => {
     const commits: Array<{ paths: string[]; message: string }> = [];
     const rows = [
