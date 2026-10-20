@@ -36,7 +36,7 @@ const CHART_CLASS = "vc";
 /** The chrome a peek drops (`PEEK_STRIP_SELECTOR`). */
 export const CHART_CHROME_CLASSES = ["vc-head", "vc-plot", "vc-legend", "vc-notes"] as const;
 
-export interface ChartWords {
+interface ChartWords {
   chart: string;
   table: string;
   view: string;

@@ -21,7 +21,7 @@ type TableBlock = Extract<Block, { type: "table" }>;
 
 /** A `<Chart>` body split around its first pipe table, so the blocks after
  *  the table render after the chart and source order holds. */
-export interface ChartBody {
+interface ChartBody {
   before: Block[];
   table: TableBlock | null;
   after: Block[];
@@ -35,7 +35,7 @@ export function chartBody(children: readonly Block[]): ChartBody {
 
 /** A table as the chart reads it: every cell's visible text with struck
  *  (`~~…~~`) text removed, and each row's first cell raw for the PR match. */
-export interface ChartTable {
+interface ChartTable {
   headers: string[];
   rows: string[][];
   rawFirst: string[];
@@ -170,7 +170,7 @@ export function formatChartPercent(n: number, comma: boolean): string {
 
 /** The gate verdict, numeric only: both the pass and the hold value reach
  *  the bar (≥). An unmeasured hold is a miss. Used by the reader view only. */
-export type GateVerdict =
+type GateVerdict =
   | { pass: true }
   | { pass: false; reason: "below"; value: string; bar: string }
   | { pass: false; reason: "hold-not-measured" };
