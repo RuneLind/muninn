@@ -48,11 +48,12 @@
  * Each capture must be of its form, then echo this replay's window (sessions
  * `since`/`until`, pre-window `until`, summary `until`), as epoch ms. A bound
  * past the window (a later `until`, an earlier `since`) is refused at any
- * offset: it holds rows --at had not seen. A bound inside it by up to
- * `FROZEN_WINDOW_SLACK_MS` is accepted with a Δ line; further is refused. Capture
- * the summary forms with `until=<ms>`: the live worked ledger asks without it,
- * and such a capture records no window. A pre-window answer inside the slack is
- * re-stamped to this replay's start. `CLAUDE_USAGE_URL` is not read.
+ * offset; one inside it by up to `FROZEN_WINDOW_SLACK_MS` is accepted with a Δ
+ * line; further is refused. Capture all three with `until=<ms>`: the live
+ * sessions and worked-ledger fetches ask without it, and upstream then echoes
+ * the time it answered on the sessions form and no `until` on the summary
+ * form. A refusal prints the route to capture with. A pre-window answer inside
+ * the slack is re-stamped to this replay's start. `CLAUDE_USAGE_URL` is not read.
  *
  * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
  * row's derivation), the rendered Work threads section (cards, open state,
@@ -457,13 +458,13 @@ function printGroups(index: WikiIndex, listing: WikiListing[], at: number): void
 const FROZEN_WINDOW_SLACK_MS = 5 * 60_000;
 
 /** One echoed bound a frozen capture must carry. `outward` is the side on
- *  which the capture holds rows this replay's window does not: `later` for an
- *  `until` (writes after it), `earlier` for a `since` (sessions that had
- *  left the window). */
+ *  which the capture holds rows this replay's window does not (`later` for an
+ *  `until`, `earlier` for a `since`); `pastWhy` says what those rows are. */
 interface WindowBound {
   field: "since" | "until";
   want: number;
   outward: "later" | "earlier";
+  pastWhy: string;
 }
 
 /** Signed seconds or hours, for a refusal or a Δ line. */
@@ -478,12 +479,11 @@ function offBy(ms: number): string {
  * form is checked first (`formError`, from the parse the live path runs), so a body
  * of the wrong form says so instead of "records no window". Then each bound:
  *  - absent, or not a number: refused, naming what it holds;
- *  - past the window (`outward`) by any amount: refused. Upstream echoes the
- *    request's own parameter, not a clock reading, so a capture asked for
- *    this window echoes it exactly and no skew allowance applies; a later
- *    `until` holds writes --at had not seen, an earlier `since` sessions
- *    the window had dropped, and neither can be cut back exactly (the file
- *    lists are capped, a summary row keeps only its newest write);
+ *  - past the window (`outward`) by any amount: refused, with `pastWhy`.
+ *    Upstream echoes `since` and `until` as asked, so a capture asked for
+ *    this window echoes it exactly; asked without `until`, the sessions form
+ *    echoes the time it answered. Neither past side can be cut back exactly
+ *    (the file lists are capped, a summary row keeps only its newest write);
  *  - inside the window by more than the slack: refused;
  *  - inside it by up to the slack: accepted, with a Δ line on stdout.
  * Every refusal names the query to capture it again with.
@@ -491,7 +491,7 @@ function offBy(ms: number): string {
 function checkWindow(file: string, body: unknown, formError: string | null, bounds: WindowBound[], capture: string): void {
   if (formError) throw new ReplayError(formError);
   const again = `capture it again with \`${capture}\``;
-  for (const { field, want, outward } of bounds) {
+  for (const { field, want, outward, pastWhy } of bounds) {
     const got = (body as Record<string, unknown>)[field];
     if (got === undefined) {
       throw new ReplayError(`${file}: the capture records no window (no \`${field}\`); ${again}`);
@@ -506,7 +506,7 @@ function checkWindow(file: string, body: unknown, formError: string | null, boun
     const at = `${field} ${new Date(got).toISOString()}, this replay needs ${new Date(want).toISOString()}, off by ${offBy(delta)}`;
     if (past) {
       throw new ReplayError(
-        `${file}: captured for another window (${at}; a capture past this replay's window holds rows --at had not seen, so any offset is refused); ${again}`,
+        `${file}: captured for another window (${at}; ${pastWhy}, so any offset is refused); ${again}`,
       );
     }
     if (Math.abs(delta) > FROZEN_WINDOW_SLACK_MS) {
@@ -519,9 +519,17 @@ function checkWindow(file: string, body: unknown, formError: string | null, boun
   }
 }
 
+/** The ledger queries, live and as printed for a capture. */
+const sessionsQuery = (sinceMs: number, untilMs: number) => `sessions=1&since=${sinceMs}&until=${untilMs}`;
+const summaryQuery = (untilMs: number) => `summary=1&until=${untilMs}`;
+
 /** The frozen ledger answers, or null when the flags are absent. Each must
  *  be of its form and echo this replay's window (`checkWindow`). */
-async function frozenAnswers(sinceMs: number, atMs: number): Promise<{ sessions: unknown; pre: unknown; summary: unknown | null } | null> {
+async function frozenAnswers(
+  sinceMs: number,
+  atMs: number,
+  route: (query: string) => string,
+): Promise<{ sessions: unknown; pre: unknown; summary: unknown | null } | null> {
   const sessionsPath = arg("sessions-json");
   const prePath = arg("pre-json");
   const summaryPath = arg("summary-json");
@@ -538,17 +546,24 @@ async function frozenAnswers(sinceMs: number, atMs: number): Promise<{ sessions:
   // The same parses and messages `main` runs on a live answer.
   const parsed = (what: string, r: { ok: true } | { ok: false; reason: string; detail: string }) =>
     r.ok ? null : `the ledger's ${what} answer did not parse: ${r.reason}: ${r.detail}`;
-  const until = (want: number): WindowBound => ({ field: "until", want, outward: "later" });
+  const until = (want: number, pastWhy: string): WindowBound => ({ field: "until", want, outward: "later", pastWhy });
+  const afterAt = "it holds writes made after --at";
   checkWindow(
     sessionsPath,
     sessions,
     parsed("sessions", parseWorkSessions(sessions)),
-    [{ field: "since", want: sinceMs, outward: "earlier" }, until(atMs)],
-    `sessions=1&since=${sinceMs}&until=${atMs}`,
+    [{ field: "since", want: sinceMs, outward: "earlier", pastWhy: "it holds sessions that had left the window by --at" }, until(atMs, afterAt)],
+    route(sessionsQuery(sinceMs, atMs)),
   );
-  checkWindow(prePath, preRaw, parsed("summary at window start", parseWorkedPages(preRaw)), [until(sinceMs)], `summary=1&until=${sinceMs}`);
+  checkWindow(
+    prePath,
+    preRaw,
+    parsed("summary at window start", parseWorkedPages(preRaw)),
+    [until(sinceMs, "it counts writes made inside the window as before it")],
+    route(summaryQuery(sinceMs)),
+  );
   if (summaryPath) {
-    checkWindow(summaryPath, summary, parsed("summary at --at", parseWorkedPages(summary)), [until(atMs)], `summary=1&until=${atMs}`);
+    checkWindow(summaryPath, summary, parsed("summary at --at", parseWorkedPages(summary)), [until(atMs, afterAt)], route(summaryQuery(atMs)));
   }
   // A pre-window answer the slack early is re-stamped to this replay's start,
   // so `parsePreWindow`'s echo check reads it.
@@ -574,14 +589,15 @@ async function main(): Promise<void> {
       `no registered wiki named ${wikiName} (registered: ${names}). A wiki registers through WIKI_EXTRA or a bot's wikiDir under MUNINN_BOTS_DIR; set them when the checkout has no .env`,
     );
   }
-  const frozen = await frozenAnswers(sinceMs, at);
+  const registeredRoot = path.resolve(entry.root);
+  const filesRoute = (query: string) => `/api/files?root=${encodeURIComponent(registeredRoot)}&${query}`;
+  const frozen = await frozenAnswers(sinceMs, at, filesRoute);
   const baseUrl = frozen ? "frozen" : (process.env.CLAUDE_USAGE_URL ?? "").trim().replace(/\/+$/, "");
   if (!baseUrl) throw new ReplayError("CLAUDE_USAGE_URL is not set");
-  const registeredRoot = path.resolve(entry.root);
 
   // The three ledger answers, for the REGISTERED root.
   const q = async (p: string): Promise<unknown> => {
-    const route = `/api/files?root=${encodeURIComponent(registeredRoot)}&${p}`;
+    const route = filesRoute(p);
     try {
       return await claudeUsageJson(baseUrl, route, { label: baseUrl });
     } catch (err) {
@@ -593,9 +609,9 @@ async function main(): Promise<void> {
   const [summaryAt, preWindow, sessionsBody] = frozen
     ? [frozen.summary, frozen.pre, frozen.sessions]
     : await Promise.all([
-        q(`summary=1&until=${at}`),
-        q(`summary=1&until=${sinceMs}`),
-        q(`sessions=1&since=${sinceMs}&until=${at}`),
+        q(summaryQuery(at)),
+        q(summaryQuery(sinceMs)),
+        q(sessionsQuery(sinceMs, at)),
       ]);
   // Parsed here, so a bad answer names its reason: the memos' own warns go to
   // LogTape, which this script does not configure.

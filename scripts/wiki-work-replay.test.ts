@@ -380,6 +380,28 @@ describe("frozen captures", () => {
     return f;
   }
 
+  /** The full route each refusal tells the operator to capture with. */
+  const captureQuery = (f: Fixture, file: string): string => {
+    const route = `/api/files?root=${encodeURIComponent(f.repo)}&`;
+    const query = {
+      "sessions.json": `sessions=1&since=${SINCE}&until=${AT}`,
+      "pre.json": `summary=1&until=${SINCE}`,
+      "summary.json": `summary=1&until=${AT}`,
+    }[file];
+    if (query === undefined) throw new Error(`no capture query for ${file}`);
+    return route + query;
+  };
+
+  test("an exact capture of all three files prints no Δ line", async () => {
+    const f = await oneCommit();
+    const r = await runReplay(f, await writeFrozen(f, { summary: {} }));
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("ledger answers: frozen (files)");
+    expect(r.out).not.toContain("Δ");
+    expect(r.out).not.toContain("frozen capture");
+  }, 30_000);
+
   test("a capture of this window is accepted", async () => {
     const f = await oneCommit();
     const r = await runReplay(f, await writeFrozen(f));
@@ -418,6 +440,7 @@ describe("frozen captures", () => {
     expect(r.code).toBe(1);
     expect(r.err).toContain("pre.json");
     expect(r.err).toContain("records no window");
+    expect(r.err).toContain(captureQuery(f, "pre.json"));
   }, 30_000);
 
   test("a sessions capture that records no window is refused", async () => {
@@ -426,14 +449,14 @@ describe("frozen captures", () => {
     expect(r.code).toBe(1);
     expect(r.err).toContain("sessions.json");
     expect(r.err).toContain("records no window");
+    expect(r.err).toContain(captureQuery(f, "sessions.json"));
   }, 30_000);
 
   const MIN = 60_000;
   const SLACK = 5 * MIN;
 
   /** Each echoed bound against this replay's: a bound past the window (a
-   *  later `until`, an earlier `since`) holds rows --at had not seen and is
-   *  refused at any offset; one inside it misses at most the slack and is
+   *  later `until`, an earlier `since`) is refused at any offset; one inside it misses at most the slack and is
    *  accepted with a Δ line naming the file and field. */
   const windowCases: [string, Frozen, string, "refused" | { delta: string }][] = [
     ["sessions until 1 ms after --at", { sessions: { until: AT + 1 } }, "sessions.json", "refused"],
@@ -469,8 +492,28 @@ describe("frozen captures", () => {
         expect(r.code).toBe(1);
         expect(r.err).toContain(where);
         expect(r.err).toContain("another window");
+        expect(r.err).toContain(`capture it again with \`${captureQuery(f, where)}\``);
         expect(r.out).not.toContain("ledger answers: frozen");
       }
+    }, 30_000);
+  }
+
+  /** A bound past the window, per field and file: why it cannot be read. */
+  const pastCases: [string, Frozen, string, string][] = [
+    ["sessions until after --at", { sessions: { until: AT + 1 } }, "sessions.json", "it holds writes made after --at"],
+    ["sessions since before the window start", { sessions: { since: SINCE - 1 } }, "sessions.json", "it holds sessions that had left the window by --at"],
+    ["pre until after the window start", { pre: { until: SINCE + 1 } }, "pre.json", "it counts writes made inside the window as before it"],
+    ["summary until after --at", { summary: { until: AT + 1 } }, "summary.json", "it holds writes made after --at"],
+  ];
+  for (const [name, over, file, why] of pastCases) {
+    test(`${name}: the refusal names its own reason and the full capture route`, async () => {
+      const f = await oneCommit();
+      const r = await runReplay(f, await writeFrozen(f, over));
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(`${file}: captured for another window`);
+      expect(r.err).toContain(`${why}, so any offset is refused`);
+      expect(r.err).not.toContain("rows --at had not seen");
+      expect(r.err).toContain(`capture it again with \`${captureQuery(f, file)}\``);
     }, 30_000);
   }
 
@@ -499,6 +542,7 @@ describe("frozen captures", () => {
     expect(r.err).toContain("sessions.json");
     expect(r.err).toContain("records the window as string");
     expect(r.err).toContain("expected epoch ms");
+    expect(r.err).toContain(captureQuery(f, "sessions.json"));
     expect(r.err).not.toContain("records no window");
   }, 30_000);
 
@@ -508,7 +552,7 @@ describe("frozen captures", () => {
     expect(r.code).toBe(1);
     expect(r.err).toContain("summary.json");
     expect(r.err).toContain("records no window");
-    expect(r.err).toContain(`until=${AT}`);
+    expect(r.err).toContain(captureQuery(f, "summary.json"));
   }, 30_000);
 
   test("a summary capture of this window is accepted, one from another window refused", async () => {
