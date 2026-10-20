@@ -44,6 +44,7 @@ import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { normalizeRelPath } from "./rel-path.ts";
+import { unwrapAliasRef } from "./alias-ref.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { readFrontmatterLists, resolveRelatedEntries, type RelatedEntry } from "./frontmatter-lists.ts";
 import { extractNextMoves } from "./next-moves.ts";
@@ -3091,8 +3092,7 @@ function lastAtOrBefore(times: readonly number[] | undefined, limit: number): nu
  * alias and answers nothing.
  */
 export function aliasWorkedPaths(alias: string, topDirs: ReadonlySet<string>): string[] {
-  let v = alias.trim().replace(/^\[+/, "").replace(/\]+$/, "").trim();
-  v = v.split("|")[0]!.split("#")[0]!.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  const v = unwrapAliasRef(alias);
   if (!v) return [];
   const slash = v.indexOf("/");
   if (slash !== -1 && !topDirs.has(v.slice(0, slash).toLowerCase())) return [];

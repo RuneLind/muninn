@@ -234,6 +234,14 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       if (!wantedSeries.ok) return c.json({ error: wantedSeries.error }, 400);
       const wantedLabel = readScalar(body.seriesLabel, "seriesLabel");
       if (!wantedLabel.ok) return c.json({ error: wantedLabel.error }, 400);
+      // A multi-page save (Save as series) marks each write `defer` and its
+      // last `last`: the batch then refreshes the index once, after the last
+      // write, instead of before and after every page (arch review 2026-10,
+      // finding 75). The client read a fresh listing just before the batch.
+      if (body.batch !== undefined && body.batch !== "defer" && body.batch !== "last") {
+        return c.json({ error: 'batch must be "defer" or "last"' }, 400);
+      }
+      const batch = body.batch as "defer" | "last" | undefined;
 
       // The same resolution every other `/api/wiki/*` route makes, `WIKI_DIR`
       // env-override shape included (`resolveWikiRequest` returns no entry there).
@@ -252,7 +260,9 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       // the cached one is up to five minutes old — long enough for the previous
       // write of this very editor's own head move to be invisible to the next.
       // One rebuild per human click, and the write refreshes it again anyway.
-      const index = await getWikiIndex({ root, refresh: true });
+      // A batched write reads the cached index: the batch refreshes once, at
+      // its last write.
+      const index = await getWikiIndex({ root, refresh: batch === undefined });
       if (!index) return c.json({ error: "wiki directory not found" }, 503);
       const meta = index.resolveRelPath(relPath);
       if (!meta) return c.json({ error: `no wiki page for relPath "${relPath}"` }, 404);
@@ -428,6 +438,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
           return current;
         },
         ...defaultPageWriteIo(root),
+        ...(batch === "defer" ? { refreshIndex: async () => {} } : {}),
         readFile: inSectionRead,
         // Unreachable in no-log mode (`writeWikiPage` skips the fan-out), and
         // required by the type — stated rather than relied on.

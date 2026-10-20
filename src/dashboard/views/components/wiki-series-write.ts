@@ -12,6 +12,7 @@
  */
 
 import type { SeriesWrite } from "./wiki-series-menu.ts";
+import { normalizeRel } from "./wiki-nav.ts";
 
 /** What `POST /api/wiki/series` answers, as the loop reads it. */
 export interface SeriesPostAnswer {
@@ -25,7 +26,7 @@ export interface SeriesPostAnswer {
   } | null;
 }
 
-export type SeriesPoster = (body: SeriesWrite & { baseHash: string }) => Promise<SeriesPostAnswer>;
+export type SeriesPoster = (body: SeriesWrite & { baseHash: string; batch?: "defer" | "last" }) => Promise<SeriesPostAnswer>;
 
 export interface SeriesWriteOutcome {
   /** Writes that landed (an all-noop answer counts: the route accepted it). */
@@ -43,10 +44,19 @@ export interface SeriesWriteOutcome {
 }
 
 /** Run `writes` in order against `bases` (relPath as sent → CAS hash),
- *  stopping at the first write with no base or a refused answer. */
-export async function runSeriesWrites(writes: readonly SeriesWrite[], bases: ReadonlyMap<string, string>, post: SeriesPoster): Promise<SeriesWriteOutcome> {
+ *  stopping at the first write with no base or a refused answer. `batch`
+ *  marks every write but the last `defer` and the last `last`, so the route
+ *  refreshes the index once for the whole sequence (arch review 2026-10,
+ *  finding 75); a sequence that stops early leaves the refresh to the caller's
+ *  own listing refetch. */
+export async function runSeriesWrites(
+  writes: readonly SeriesWrite[],
+  bases: ReadonlyMap<string, string>,
+  post: SeriesPoster,
+  opts: { batch?: boolean } = {},
+): Promise<SeriesWriteOutcome> {
   const out: SeriesWriteOutcome = { written: 0, total: writes.length, wrote: false, cleared: null, hashes: new Map() };
-  for (const write of writes) {
+  for (const [i, write] of writes.entries()) {
     const baseHash = bases.get(write.relPath);
     if (!baseHash) {
       out.failure = { write, status: 0, error: `Could not read ${write.relPath}` };
@@ -54,7 +64,8 @@ export async function runSeriesWrites(writes: readonly SeriesWrite[], bases: Rea
     }
     let res: SeriesPostAnswer;
     try {
-      res = await post({ ...write, baseHash });
+      const batch = opts.batch && writes.length > 1 ? (i === writes.length - 1 ? "last" : "defer") : undefined;
+      res = await post({ ...write, baseHash, ...(batch ? { batch } : {}) });
     } catch (err) {
       // A rejected fetch (network down, connection reset) is a failed write.
       out.failure = { write, status: 0, error: `Network error: ${err instanceof Error ? err.message : String(err)}` };
@@ -91,4 +102,24 @@ export async function loadSeriesBaseMap(
   );
   missing.sort();
   return { bases, missing };
+}
+
+/** Save as series' reads before any write (D14, arch review 2026-10, finding
+ *  66): every page's CAS base fetched fresh, the open page included, and the
+ *  open page named in `openChanged` when its fresh base is not the hash the
+ *  reader loaded. The caller then writes nothing: sending the loaded hash
+ *  instead made that page 409 mid-sequence, after earlier pages were written. */
+export async function prepareSeriesSave(input: {
+  relPaths: readonly string[];
+  openRelPath: string | null;
+  loadedHash: string | null;
+  hashOf: (relPath: string) => Promise<string | null>;
+}): Promise<{ bases: Map<string, string>; missing: string[]; openChanged: string | null }> {
+  const { bases, missing } = await loadSeriesBaseMap(input.relPaths, input.hashOf);
+  let openChanged: string | null = null;
+  if (input.openRelPath && input.loadedHash) {
+    const open = normalizeRel(input.openRelPath);
+    for (const [rel, hash] of bases) if (normalizeRel(rel) === open && hash !== input.loadedHash) openChanged = rel;
+  }
+  return { bases, missing, openChanged };
 }

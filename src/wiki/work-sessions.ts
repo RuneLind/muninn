@@ -33,6 +33,7 @@ import { claudeUsageHttpStatus, claudeUsageJson, claudeUsageWarnOnce } from "../
 import { isReadonlyWikiRoot, sameWikiRoot } from "./readonly.ts";
 import { parseWorkedPages, workedLedgerFor } from "./worked-ledger.ts";
 import { WORK_WINDOW_MS, type WorkSession, type WorkSessionFile } from "./work-focus.ts";
+import { ledgerHeldPast } from "../dashboard/views/components/wiki-filter.ts";
 
 const log = getLog("wiki", "work-sessions");
 
@@ -47,8 +48,8 @@ export interface WorkSessionsMemo {
   /** Normalized path → newest write before the window. */
   pre: Map<string, number>;
   /** This wiki as the prompts name it: the registered root's spellings and the
-   *  registry name (absent when the root is in no registry entry). */
-  identity: { roots: string[]; name?: string };
+   *  registry names — every entry on this root (absent when there is none). */
+  identity: { roots: string[]; names?: string[] };
   /** Every other registered root that is not read-only. */
   otherRoots: string[];
   baseUrl: string;
@@ -164,7 +165,8 @@ export function parseWorkSessions(body: unknown): WorkSessionsParse {
     if (!isObj(s)) return bad(`${at} is not an object`);
     if (typeof s.id !== "string" || !s.id) return bad(`${at}.id is not a string`);
     if (typeof s.provider !== "string") return bad(`${at}.provider is not a string`);
-    if (typeof s.title !== "string") return bad(`${at}.title is not a string`);
+    // claude-usage sends `title: null` for a session with no session_meta row.
+    if (s.title != null && typeof s.title !== "string") return bad(`${at}.title is not a string`);
     if (!isInstant(s.first) || !isInstant(s.last)) return bad(`${at}.first/last is not an instant`);
     if (typeof s.bulk !== "boolean") return bad(`${at}.bulk is not a boolean`);
     const t = s.text;
@@ -189,7 +191,7 @@ export function parseWorkSessions(body: unknown): WorkSessionsParse {
     sessions.push({
       id: s.id,
       provider: s.provider,
-      title: s.title,
+      title: typeof s.title === "string" ? s.title : "",
       first: s.first,
       last: s.last,
       bulk: s.bulk,
@@ -218,14 +220,33 @@ export function parsePreWindow(
   return { ok: true, pages: parsed.pages };
 }
 
+/**
+ * How long a memo is held through failed refreshes before it reads as absent
+ * (arch review 2026-10, finding 69). A failure keeps the last good memo, so a
+ * claude-usage outage would otherwise show week-old Work threads as current.
+ * Measured from the FIRST failure after the memo's answer, so one transient
+ * failure (the next refresh is a TTL away) never hides it, and an old memo
+ * nobody asked about since (an idle reader) is not a held one. An hour, the
+ * worked ledger's own `WORKED_EMPTY_RELEASE_MS`.
+ */
+export const WORK_MEMO_HOLD_MS = 60 * 60_000;
+
 const memos = new Map<string, WorkSessionsMemo>();
 const inFlight = new Map<string, Promise<WorkSessionsMemo | null>>();
 const lastFailureAt = new Map<string, number>();
+/** The first failure since the memo's answer; cleared by a success. */
+const failingSince = new Map<string, number>();
 const fetchedAt = new Map<string, number>();
 
-/** The warm memo for a root, or null. */
-export function workSessionsFor(root: string): WorkSessionsMemo | null {
-  return memos.get(root) ?? null;
+/** The warm memo for a root, or null — null too once the memo has been held
+ *  through {@link WORK_MEMO_HOLD_MS} of failed refreshes. The memo itself is
+ *  kept: the next good answer replaces it. */
+export function workSessionsFor(root: string, now: number = Date.now()): WorkSessionsMemo | null {
+  const memo = memos.get(root);
+  if (!memo) return null;
+  const since = failingSince.get(root);
+  if (since !== undefined && since >= memo.asOfMs && ledgerHeldPast(since, now, WORK_MEMO_HOLD_MS)) return null;
+  return memo;
 }
 
 /**
@@ -251,6 +272,7 @@ async function runRefresh(root: string, deps: WorkSessionsDeps, identityRoot: st
   const now = (deps.now ?? Date.now)();
   const fail = (): WorkSessionsMemo | null => {
     lastFailureAt.set(root, now);
+    if (!failingSince.has(root)) failingSince.set(root, now);
     return prev;
   };
   const canonical = path.resolve(identityRoot);
@@ -282,13 +304,14 @@ async function runRefresh(root: string, deps: WorkSessionsDeps, identityRoot: st
   }
   const real = await realpath(canonical).catch(() => null);
   const roots = [...new Set([canonical, asked, ...(real ? [real] : [])])];
-  const self = entries.find((e) => sameWikiRoot(e.root, identityRoot));
+  // Every registry name of this root: an aliased root answers to each (finding 71).
+  const names = entries.filter((e) => sameWikiRoot(e.root, identityRoot)).map((e) => e.name);
   const memo: WorkSessionsMemo = {
     sinceMs,
     asOfMs: now,
     sessions: sessions.sessions,
     pre: pre.pages,
-    identity: { roots, ...(self ? { name: self.name } : {}) },
+    identity: { roots, ...(names.length ? { names } : {}) },
     otherRoots: entries
       .filter((e) => !sameWikiRoot(e.root, identityRoot) && !isReadonlyWikiRoot(e.root))
       .map((e) => path.resolve(e.root)),
@@ -296,6 +319,7 @@ async function runRefresh(root: string, deps: WorkSessionsDeps, identityRoot: st
     truncated: sessions.truncated,
   };
   lastFailureAt.delete(root);
+  failingSince.delete(root);
   memos.set(root, memo);
   fetchedAt.set(root, now);
   if (memo.truncated) {
@@ -354,5 +378,6 @@ export function __resetWorkSessionsForTest(): void {
   memos.clear();
   inFlight.clear();
   lastFailureAt.clear();
+  failingSince.clear();
   fetchedAt.clear();
 }

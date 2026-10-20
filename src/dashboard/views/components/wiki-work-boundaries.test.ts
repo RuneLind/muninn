@@ -220,6 +220,53 @@ describe("applyWorkBoundaries: definitions that do not apply", () => {
     expect(b.derived).toEqual([f.T, f.U]);
   });
 
+  // Arch review 2026-10, findings 74 and 85.
+  test("a wikilink-form alias resolves as the path it wraps (85)", () => {
+    const f = fixture();
+    const pages = [
+      ...f.pages,
+      page("plans/retry-plan-v2.md", { aliases: ["[[plans/retry-plan]]"] }),
+      page("plans/b-v2.md", { aliases: ["[[plans/b|The B plan]]"] }),
+      page("plans/c-v2.md", { aliases: [" [[plans/c#history]] "] }),
+    ];
+    const b = applyWorkBoundaries({
+      work: f.work,
+      allPages: pages,
+      splits: [
+        { id: "r", page: "plans/retry-plan.md" },
+        { id: "b", page: "plans/b.md" },
+        { id: "c", page: "plans/c.mdx" },
+      ],
+      keptApart: [],
+    });
+    expect(b.definitions.map((d) => [d.id, d.state, d.page])).toEqual([
+      ["r", "dormant", "plans/retry-plan-v2.md"],
+      ["b", "dormant", "plans/b-v2.md"],
+      ["c", "dormant", "plans/c-v2.md"],
+    ]);
+  });
+
+  test("a bare-stem alias matches only in the stored path's folder (74)", () => {
+    const f = fixture();
+    const elsewhere = [...f.pages, page("entities/andrej karpathy.md", { aliases: ["vibe coding"] })];
+    const gone = applyWorkBoundaries({ work: f.work, allPages: elsewhere, splits: [{ id: "v", page: "concepts/vibe coding.md" }], keptApart: ["concepts/vibe coding.md"] });
+    expect(gone.definitions.map((d) => [d.id ?? d.stored, d.state, d.page])).toEqual([
+      ["v", "missing", undefined],
+      ["concepts/vibe coding.md", "missing", undefined],
+    ]);
+    // Scope guard: an unambiguous rename in the same folder is still followed.
+    const sameFolder = [...elsewhere, page("concepts/vibe-coding.md", { aliases: ["Vibe coding"] })];
+    const renamed = applyWorkBoundaries({ work: f.work, allPages: sameFolder, splits: [{ id: "v", page: "concepts/vibe coding.md" }], keptApart: [] });
+    expect(renamed.definitions.map((d) => [d.state, d.page])).toEqual([["dormant", "concepts/vibe-coding.md"]]);
+  });
+
+  test("a path-shaped alias match wins over a stem match (85)", () => {
+    const f = fixture();
+    const pages = [...f.pages, page("plans/b.md", { aliases: ["plans/a"] }), page("plans/c.md", { aliases: ["a"] })];
+    const b = applyWorkBoundaries({ work: f.work, allPages: pages, splits: [{ id: "a", page: "plans/a.md" }], keptApart: [] });
+    expect(b.definitions.map((d) => [d.state, d.page])).toEqual([["dormant", "plans/b.md"]]);
+  });
+
   test("an alias that names a page a thread holds applies the split there", () => {
     const f = fixture();
     const pages = f.pages.map((p) => (p.relPath === "p.md" ? { ...p, aliases: ["was-p"] } : p));

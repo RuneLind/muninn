@@ -16,6 +16,7 @@ import {
   parseWorkSessions,
   refreshWorkSessions,
   workSessionsFor,
+  WORK_MEMO_HOLD_MS,
   type WorkSessionsDeps,
 } from "./work-sessions.ts";
 import { WORK_WINDOW_MS } from "./work-focus.ts";
@@ -105,6 +106,17 @@ describe("parseWorkSessions", () => {
     expect(parseWorkSessions(sessionsBody([session({ bulk: "no" })]))).toMatchObject({ ok: false });
     expect(parseWorkSessions(sessionsBody([session({ text: { from: "x", paths: [], links: [], files: [] } })]))).toMatchObject({ ok: false });
   });
+  // Arch review 2026-10, finding 70: claude-usage sends `title: null` for a
+  // session with no session_meta row, and one such row must not reject the answer.
+  test("a null or absent title reads as an empty title", () => {
+    const { title: _t, ...untitled } = session({ id: "s3" });
+    void _t;
+    const r = parseWorkSessions(sessionsBody([session(), session({ id: "s2", title: null }), untitled]));
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.sessions.map((s) => s.title)).toEqual(["Work on plans/a.mdx", "", ""]);
+    // A structurally wrong title still rejects the whole answer.
+    expect(parseWorkSessions(sessionsBody([session({ title: 7 })]))).toMatchObject({ ok: false, reason: "malformed-rows" });
+  });
 });
 
 describe("parsePreWindow", () => {
@@ -126,9 +138,20 @@ describe("refreshWorkSessions", () => {
     expect(memo!.sinceMs).toBe(SINCE);
     expect(memo!.asOfMs).toBe(NOW);
     expect(memo!.pre.get("plans/a.mdx")).toBe(SINCE - 86_400_000);
-    expect(memo!.identity.name).toBe("kode");
+    expect(memo!.identity.names).toEqual(["kode"]);
     expect(memo!.otherRoots).toEqual(["/m"]);
     expect(workSessionsFor("/w")).toBe(memo);
+  });
+  // Arch review 2026-10, finding 71: a root registered under two names keeps both.
+  test("an aliased root keeps every registry name, in registry order", async () => {
+    const registry = async () => [
+      { name: "kode", root: "/w" },
+      { name: "mimir", root: "/m" },
+      { name: "kode-extra", root: "/w/" },
+    ];
+    const memo = await refreshWorkSessions("/w", deps({}, { registry }));
+    expect(memo!.identity.names).toEqual(["kode", "kode-extra"]);
+    expect(memo!.otherRoots).toEqual(["/m"]);
   });
   test("an older claude-usage's raw form commits nothing and warns once", async () => {
     const { levels, log } = recorder();
@@ -144,7 +167,7 @@ describe("refreshWorkSessions", () => {
     void _u;
     const later = await refreshWorkSessions("/w", deps({ sessions: sessionsBody([]), pre: unbounded }));
     expect(later).toBe(good);
-    expect(workSessionsFor("/w")!.sessions).toHaveLength(1);
+    expect(workSessionsFor("/w", NOW)!.sessions).toHaveLength(1);
   });
   test("a transport failure on either leg keeps the last good pair", async () => {
     const good = await refreshWorkSessions("/w", deps({}));
@@ -172,6 +195,46 @@ describe("refreshWorkSessions", () => {
     kickWorkSessionsRefresh("/w", { maxAgeMs: 300_000, deps: d });
     await Bun.sleep(0);
     expect(d.calls.length).toBe(n);
+  });
+});
+
+// Arch review 2026-10, finding 69: a memo held through an outage stops
+// reading as current once the outage has lasted `WORK_MEMO_HOLD_MS`.
+describe("the age bound on a held memo", () => {
+  const H = 3_600_000;
+  test("held through failures for the hold limit, the memo reads as absent; a success brings it back", async () => {
+    const good = await refreshWorkSessions("/w", deps({}));
+    const failAt = NOW + 10 * 60_000;
+    expect(await refreshWorkSessions("/w", deps({ sessions: new Error("down") }, { now: () => failAt }))).toBe(good);
+    // A single failure is not the bound: the memo still stands inside the hour.
+    expect(workSessionsFor("/w", failAt + WORK_MEMO_HOLD_MS - 1)).toBe(good);
+    // Later failures do not restart the clock.
+    await refreshWorkSessions("/w", deps({ sessions: new Error("down") }, { now: () => failAt + 30 * 60_000 }));
+    expect(workSessionsFor("/w", failAt + WORK_MEMO_HOLD_MS)).toBeNull();
+    // The memo is held, not blanked: the next good answer replaces it.
+    const back = await refreshWorkSessions("/w", deps({}, { now: () => failAt + 2 * H }));
+    expect(workSessionsFor("/w", failAt + 2 * H)).toBe(back);
+  });
+  test("an old memo nobody refreshed (no failure since) still stands", async () => {
+    const good = await refreshWorkSessions("/w", deps({}));
+    expect(workSessionsFor("/w", NOW + 48 * H)).toBe(good);
+  });
+  test("the index build drops the work field once the hold has expired", async () => {
+    const root = await testTempDir(path.join(tmpdir(), "work-sessions-held-"));
+    try {
+      await mkdir(path.join(root, "plans"));
+      await writeFile(path.join(root, "plans/a.mdx"), "# A\n");
+      const registry = async () => [{ name: "t", root }];
+      await refreshWorkSessions(root, deps({}, { registry }));
+      expect((await buildWikiIndex(root)).work).toBeDefined();
+      // The outage began at NOW + 1 min; the build runs on the real clock, days later.
+      await refreshWorkSessions(root, deps({ sessions: new Error("down") }, { registry, now: () => NOW + 60_000 }));
+      const held = await buildWikiIndex(root);
+      expect(held.work).toBeUndefined();
+      expect(JSON.stringify(held.pages)).not.toContain('"work"');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

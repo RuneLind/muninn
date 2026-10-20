@@ -26,6 +26,7 @@ import {
 } from "./worked-ledger.ts";
 import { __resetWorkedMatchWarnsForTest, buildWikiIndex, workedMatchWarnDue } from "./store.ts";
 import { __resetClaudeUsageWarnsForTest } from "../utils/claude-usage-fetch.ts";
+import { workPathKey } from "./work-focus.ts";
 import type { getLog } from "../logging.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
@@ -194,6 +195,10 @@ describe("normalizeWorkedPath", () => {
     expect(normalizeWorkedPath("Plans\\A.MDX")).toBe("plans/a.mdx");
     expect(normalizeWorkedPath("./x/y.md")).toBe("x/y.md");
     expect(normalizeWorkedPath("/x/y.md")).toBe("x/y.md");
+    // Finding 83: NFC, so a macOS NFD name and an NFC ledger row are one key,
+    // and `workPathKey` (the work facts' key) is this same rule.
+    expect(normalizeWorkedPath("Plans/Cafe\u0301.md")).toBe("plans/caf\u00e9.md");
+    for (const p of ["Plans\\A.MDX", "/x/y.md", "a/Cafe\u0301.mdx", "./b/../c.md"]) expect(workPathKey(p)).toBe(normalizeWorkedPath(p));
   });
 });
 
@@ -579,6 +584,24 @@ describe("the index fold", () => {
       expect(one?.workedMs).toBe(1_700_000_000_000);
       expect(two?.workedMs).toBeUndefined();
       expect(index.workedCoverage).toEqual({ matched: 1, total: 2, returned: 2, asOfMs: expect.any(Number) });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Arch review 2026-10, finding 83: a page stored NFD on disk matches the
+  // ledger's NFC row, as its work facts already do.
+  test("an NFD page name matches the ledger's NFC row", async () => {
+    const { buildWikiIndex } = await import("./store.ts");
+    const root = await testTempDir(path.join(tmpdir(), "worked-index-nfd-"));
+    try {
+      const nfd = "plans/cafe\u0301.mdx";
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await writeFile(path.join(root, nfd), "---\ntitle: Cafe\n---\n\nbody\n");
+      await refreshWorkedLedger(root, deps({ [root]: { pages: [{ p: nfd.normalize("NFC"), w: 1_700_000_000_000 }] } }));
+      const index = await buildWikiIndex(root);
+      expect(index.pages).toHaveLength(1);
+      expect(index.pages[0]!.workedMs).toBe(1_700_000_000_000);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

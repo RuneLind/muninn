@@ -36,6 +36,7 @@
 
 import type { WikiListing } from "./wiki-filter.ts";
 import { normalizeRel } from "./wiki-nav.ts";
+import { unwrapAliasRef } from "../../../wiki/alias-ref.ts";
 import { newestFocusPage, threadHoldsPin, usableThreads } from "./wiki-thread-core.ts";
 import { WORK_GROUP_SPLITS_MAX, type WorkGroupSplit } from "./wiki-work-group-prefs.ts";
 import { readWorkEvidence, threadSessionsAvailability, type WorkGroupUnavailableReason, type WorkUnit } from "./wiki-work-groups.ts";
@@ -114,30 +115,47 @@ export interface WorkBoundariesInput {
   keptApart: readonly string[];
 }
 
-/** The page a stored path names: itself when the listing holds it, else the
- *  ONE page that carries it (or its stem) as an alias. */
+/** The page a stored path names: itself when the listing holds it; else the
+ *  ONE page carrying it as a path alias (`aliases: [plans/old]`, wikilink form
+ *  included); else the ONE page in the stored path's folder carrying its stem
+ *  as a bare alias. A stem in another folder names nothing, so a boundary on a
+ *  deleted page never moves to an unrelated page (arch review 2026-10, 74/85). */
 function resolverFor(allPages: readonly WikiListing[]): (stored: string) => { page?: string; state?: "missing" | "ambiguous" } {
   const byRel = new Set(allPages.map((p) => normalizeRel(p.relPath)));
-  let aliases: Map<string, Set<string>> | null = null;
+  /** Path-shaped alias key → pages; `folder\0stem` of a bare alias → pages. */
+  let byPath: Map<string, Set<string>> | null = null;
+  let byStem: Map<string, Set<string>> | null = null;
   const key = (v: string) => normalizeRel(v.trim()).replace(/\.mdx?$/i, "");
-  const stemOf = (v: string) => key(v).split("/").pop() ?? "";
+  const folderOf = (rel: string) => (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
+  const add = (m: Map<string, Set<string>>, k: string, rel: string) => {
+    const set = m.get(k) ?? new Set<string>();
+    set.add(rel);
+    m.set(k, set);
+  };
+  const answer = (hits: Set<string> | undefined) =>
+    hits?.size === 1 ? { page: [...hits][0]! } : hits?.size ? { state: "ambiguous" as const } : null;
   return (stored) => {
     const rel = normalizeRel(stored);
     if (byRel.has(rel)) return { page: rel };
-    if (!aliases) {
-      aliases = new Map();
-      for (const p of allPages)
+    if (!byPath || !byStem) {
+      byPath = new Map();
+      byStem = new Map();
+      for (const p of allPages) {
+        const own = normalizeRel(p.relPath);
         for (const a of p.aliases ?? []) {
-          if (typeof a !== "string" || !a.trim()) continue;
-          const k = key(a);
-          const set = aliases.get(k) ?? new Set<string>();
-          set.add(normalizeRel(p.relPath));
-          aliases.set(k, set);
+          if (typeof a !== "string") continue;
+          const v = unwrapAliasRef(a);
+          if (!v) continue;
+          if (v.includes("/")) add(byPath, key(v), own);
+          else add(byStem, `${folderOf(own)}\0${key(v)}`, own);
         }
+      }
     }
-    const hits = new Set([...(aliases.get(key(stored)) ?? []), ...(aliases.get(stemOf(stored)) ?? [])]);
-    if (hits.size === 1) return { page: [...hits][0]! };
-    return { state: hits.size ? "ambiguous" : "missing" };
+    const k = key(stored);
+    return (
+      answer(byPath.get(k)) ??
+      answer(byStem.get(`${folderOf(k)}\0${k.split("/").pop() ?? ""}`)) ?? { state: "missing" as const }
+    );
   };
 }
 

@@ -168,7 +168,7 @@ import {
 } from "./wiki-groups.ts";
 import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
-import { loadSeriesBaseMap, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -4004,7 +4004,7 @@ async function seriesBaseHash(relPath: string): Promise<string | null> {
  *  query — the Stamp route's contract, and the reason the route reads one
  *  place: a write must name its target in the payload it is validated
  *  against, never in a string the client happened to append. */
-async function postSeriesWrite(write: SeriesWrite & { baseHash: string }): Promise<SeriesPostAnswer> {
+async function postSeriesWrite(write: SeriesWrite & { baseHash: string; batch?: "defer" | "last" }): Promise<SeriesPostAnswer> {
   const res = await fetch("/api/wiki/series", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -5631,9 +5631,12 @@ async function runSaveAsSeries(): Promise<void> {
   try {
     const planned = plan.writes.map((w) => w.relPath);
     setWorkSeriesMsg(state, `Reading ${planned.length} ${planned.length === 1 ? "page" : "pages"}…`, false);
-    const { bases, missing } = await loadSeriesBaseMap(planned, (rel) =>
-      currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel) && currentPageHash ? Promise.resolve(currentPageHash) : seriesBaseHash(rel),
-    );
+    const { bases, missing, openChanged } = await prepareSeriesSave({
+      relPaths: planned,
+      openRelPath: currentRelPath,
+      loadedHash: currentPageHash,
+      hashOf: seriesBaseHash,
+    });
     const fresh = await freshListing();
     if (!fresh) {
       report = { text: "Could not re-read the wiki listing — nothing written", bad: true, retry: true };
@@ -5651,11 +5654,17 @@ async function runSaveAsSeries(): Promise<void> {
       report = { text: `Could not read ${stillMissing.join(", ")} — nothing written`, bad: true };
       return;
     }
+    // The open page changed on disk since the reader loaded it: refuse before
+    // any write rather than 409 on it mid-sequence (arch review 2026-10, 66).
+    if (openChanged && writes.some((w) => w.relPath === openChanged)) {
+      report = { text: `${openChanged} changed since you opened it — reload it; nothing written`, bad: true };
+      return;
+    }
     const skipped = checked.moved.length
       ? `Skipped — joined another series since this menu opened: ${checked.moved.map((m) => `${m.title} (in «${m.series}»)`).join(", ")}`
       : "";
     setWorkSeriesMsg(state, "Saving…", false);
-    const run = await runSeriesWrites(writes, bases, postSeriesWrite);
+    const run = await runSeriesWrites(writes, bases, postSeriesWrite, { batch: true });
     for (const [rel, hash] of run.hashes) if (currentRelPath && normalizeRel(currentRelPath) === normalizeRel(rel)) currentPageHash = hash;
     const outcome = await refreshAfterSeriesWrite();
     const notes: string[] = [];

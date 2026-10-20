@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { checkNewSeriesKey, recheckSaveAsSeries, saveAsSeriesPlan } from "./wiki-work-series.ts";
 import { buildWorkEvidence } from "../../../wiki/work-evidence.ts";
 import type { WikiPageMeta } from "../../../wiki/store.ts";
-import { loadSeriesBaseMap, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { loadSeriesBaseMap, prepareSeriesSave, runSeriesWrites, type SeriesPostAnswer } from "./wiki-series-write.ts";
 import type { WikiListing } from "./wiki-filter.ts";
 import type { WorkGroupChild } from "./wiki-work-groups.ts";
 import { coinSeriesKey, isNarrativePage, seriesPageStem } from "../../../wiki/series-rules.ts";
@@ -285,3 +285,54 @@ describe("runSeriesWrites: one page per call, stop at the first failure", () => 
 });
 
 
+
+// Arch review 2026-10, finding 66: Save as series sent the hash the reader
+// LOADED as the open page's CAS base, so a page changed on disk since then
+// 409ed mid-sequence, after the pages before it were written.
+describe("prepareSeriesSave: every base fresh, the open page included", () => {
+  const disk = new Map([["plans/a.md", "a2"], ["plans/open.md", "open-now"], ["plans/c.md", "c1"]]);
+  const hashOf = async (rel: string) => disk.get(rel) ?? null;
+  test("the open page changed since it loaded: its fresh base is used and the change is named", async () => {
+    const asked: string[] = [];
+    const r = await prepareSeriesSave({
+      relPaths: ["plans/a.md", "plans/open.md", "plans/c.md"],
+      openRelPath: "Plans/Open.md",
+      loadedHash: "open-at-load",
+      hashOf: async (rel) => (asked.push(rel), hashOf(rel)),
+    });
+    expect(asked.sort()).toEqual(["plans/a.md", "plans/c.md", "plans/open.md"]);
+    expect(r.bases.get("plans/open.md")).toBe("open-now");
+    expect(r.openChanged).toBe("plans/open.md");
+  });
+  test("an unchanged open page saves: no change named", async () => {
+    const r = await prepareSeriesSave({ relPaths: ["plans/a.md", "plans/open.md"], openRelPath: "plans/open.md", loadedHash: "open-now", hashOf });
+    expect(r.openChanged).toBeNull();
+    expect([...r.bases.keys()].sort()).toEqual(["plans/a.md", "plans/open.md"]);
+  });
+  test("an open page outside the plan, or no loaded hash, names nothing", async () => {
+    expect((await prepareSeriesSave({ relPaths: ["plans/a.md"], openRelPath: "plans/open.md", loadedHash: "old", hashOf })).openChanged).toBeNull();
+    expect((await prepareSeriesSave({ relPaths: ["plans/open.md"], openRelPath: "plans/open.md", loadedHash: null, hashOf })).openChanged).toBeNull();
+  });
+  test("an open page that cannot be read is missing, not changed", async () => {
+    const r = await prepareSeriesSave({ relPaths: ["plans/gone.md"], openRelPath: "plans/gone.md", loadedHash: "old", hashOf });
+    expect(r.missing).toEqual(["plans/gone.md"]);
+    expect(r.openChanged).toBeNull();
+  });
+});
+
+describe("runSeriesWrites batch marks (finding 75)", () => {
+  const ok: SeriesPostAnswer = { ok: true, status: 200, body: { hash: "x", written: true } };
+  const writes = [{ relPath: "a.md", series: "k" }, { relPath: "b.md", series: "k" }, { relPath: "c.md", series: "k" }];
+  const bases = new Map([["a.md", "h"], ["b.md", "h"], ["c.md", "h"]]);
+  test("a batch marks every write but the last defer, the last last", async () => {
+    const sent: (string | undefined)[] = [];
+    await runSeriesWrites(writes, bases, async (b) => (sent.push(b.batch), ok), { batch: true });
+    expect(sent).toEqual(["defer", "defer", "last"]);
+  });
+  test("one write, or no batch option, sends no mark", async () => {
+    const sent: (string | undefined)[] = [];
+    await runSeriesWrites(writes.slice(0, 1), bases, async (b) => (sent.push(b.batch), ok), { batch: true });
+    await runSeriesWrites(writes, bases, async (b) => (sent.push(b.batch), ok));
+    expect(sent).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});
