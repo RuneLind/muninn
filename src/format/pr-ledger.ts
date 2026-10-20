@@ -17,7 +17,7 @@
  * A row matching none is `unknown`. Struck text (`~~…~~`) is removed before
  * the state and the link are read; the slate and label read through it.
  * A PR ref is a markdown PR link (`linkNumber`) or a bare `PR #n`,
- * `owner/repo#n`, `repo #n` (`bareNumber`).
+ * `owner/repo#n`, `repo #n`, `repo#n` (`bareNumber`).
  *
  * The strip draws a ledger only when its header names a state column
  * (State/Status/Tilstand, a parenthetical qualifier allowed) and at least {@link LEDGER_PARSED_MIN} of its rows

@@ -607,3 +607,51 @@ describe("CS: slate identity, first-cell shapes × headers × other cells", () =
     expect(parseLedgerTable(["PR", "State"], [["~~**1**~~", `shipped [#107](${U}/107)`]]).rows[0]).toMatchObject({ slate: 1, link: 107, pr: 1 });
   });
 });
+
+// Round-3 verify pins (93dab1fd): ref shapes, rule 3's bare-ref and
+// other-link guards, and a linear scan. Expected values are literal.
+describe("round-3 pins: ref shapes and rule 3", () => {
+  /** A row whose PR column is not the slate column, so a row exists only
+   *  when the PR cell holds a ref. */
+  const prCell = (cell: string) => parseLedgerTable(["Fase", "PR", "State"], [["a", cell, "open"]]).rows[0];
+  const landed = (cell: string) => parseLedgerTable(["PR", "State", "Landed"], [["1", "", cell]]).rows[0]!;
+
+  test("a state cell of 1 MB with no `#` after the run parses in under 1 s", () => {
+    const n = 500_000;
+    for (const cell of ["merged " + "a-".repeat(n), "merged " + "a.".repeat(n)]) {
+      const t = performance.now();
+      const r = parseLedgerTable(["PR", "State"], [["1", cell]]).rows[0]!;
+      expect(performance.now() - t).toBeLessThan(1000);
+      expect(r).toMatchObject({ slate: 1, link: null, state: "merged", rule: 2 });
+    }
+  });
+
+  test("rule 3: a bare ref beside a PR link is no landed-links-only cell", () => {
+    expect(landed("[#5](https://example.test/o/r/pull/5), muninn #6")).toMatchObject({ link: 5, state: "unknown", rule: 0 });
+  });
+
+  test("rule 3: another link beside a PR link is not merged", () => {
+    expect(landed("[#5](https://example.test/o/r/pull/5) [notes](x.md)")).toMatchObject({ link: 5, state: "unknown", rule: 0 });
+  });
+
+  test("a link whose text is a ref and more, to no PR URL, is no link", () => {
+    expect(prCell("[muninn #3 notes](notes.md)")).toBeUndefined();
+  });
+
+  test("a bare ref runs to a word end: `muninn #5a` is none", () => {
+    expect(prCell("muninn #5a")).toBeUndefined();
+  });
+
+  test("a repo slug is lower case: `gitHub #5`, `Muninn #5` are none", () => {
+    expect(prCell("gitHub #5")).toBeUndefined();
+    expect(prCell("Muninn #5")).toBeUndefined();
+  });
+
+  test("a bare `#5` alone is no ref", () => {
+    expect(prCell("#5")).toBeUndefined();
+  });
+
+  test("a pull URL with a trailing path reads its number", () => {
+    expect(prCell("[x](https://example.test/o/r/pull/5/files)")).toMatchObject({ slate: null, link: 5, pr: 5, state: "open" });
+  });
+});
