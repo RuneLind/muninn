@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { getWikiIndex, __resetWikiCacheForTest } from "../wiki/store.ts";
 import {
+  appendFactcheckBlock,
   buildFactcheckRider,
   correctableClaims,
   FACTCHECK_RIDER_MAX,
   pageCarriesFactcheck,
   proposalFactcheckFlag,
   stripReproducedFactcheck,
-  withFactcheckAppendix,
 } from "./factcheck-carry.ts";
 import { sourceKindNoun } from "../summaries/source-noun.ts";
 import {
@@ -23,6 +23,11 @@ import { FACTCHECK_SENTINEL_START, findLiveSentinelBlocks } from "../wiki/factch
 import * as factchecks from "../db/summary-factchecks.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
 const countCorrectableClaims = (claims: unknown) => factchecks.countCorrectableClaims(claims);
+
+/** The source drafter's own two calls: strip what the model reproduced, then append the saved block. */
+function drafterSequence(page: string, saved: SummaryFactcheck, headings: boolean): string {
+  return appendFactcheckBlock(stripReproducedFactcheck(page, { headings }), saved);
+}
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
 import { sha256 } from "./util.ts";
 import { factcheckBodySha256 } from "../summaries/factcheck-body.ts";
@@ -463,9 +468,9 @@ describe("stripReproducedFactcheck / pageCarriesFactcheck", () => {
     expect(stripReproducedFactcheck(text)).toBe(text);
   });
 
-  test("withFactcheckAppendix on a page that already carries one keeps exactly one", () => {
-    const once = withFactcheckAppendix(page("Body."), saved());
-    const twice = withFactcheckAppendix(once, saved());
+  test.each([true, false])("the drafter's strip+append on a page that already carries one keeps exactly one (headings: %p)", (headings) => {
+    const once = drafterSequence(page("Body."), saved(), headings);
+    const twice = drafterSequence(once, saved(), headings);
     expect(twice).toBe(once);
     expect(pageCarriesFactcheck(once)).toBe(true);
     expect(pageCarriesFactcheck(page("Body.\n\n### Fact-check\n\nx"))).toBe(true);
@@ -679,7 +684,7 @@ describe("proposalFactcheckFlag (the gate flag)", () => {
   /** The same draft built with the current check: its digest and its block. */
   const carrying = {
     ...plain,
-    draft: withFactcheckAppendix(page("Body."), saved()),
+    draft: drafterSequence(page("Body."), saved(), true),
     sourceDocs: [{ ...doc, factcheckSha256: SHA }] as WikiProposal["sourceDocs"],
   };
   const mark = { checkedAt: CHECKED_AT, bad: 1, warn: 1, answerSha256: SHA };

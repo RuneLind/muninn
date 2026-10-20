@@ -165,11 +165,6 @@ function errnoOf(err: unknown): string {
  *  (or a genuinely unwritable one in production) warns once, not per write. */
 const warnedUnavailable = new Set<string>();
 
-/** Test-only: forget which roots have already warned. */
-export function __resetWikiLockWarnsForTest(): void {
-  warnedUnavailable.clear();
-}
-
 /**
  * Take `<root>/.wiki-write.lock`, or report that another process holds it.
  *
