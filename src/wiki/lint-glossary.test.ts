@@ -52,6 +52,21 @@ describe("lint check 19 — glossary", () => {
   test("a paragraph term is found on the line its sentence starts, wrapped or not", () => {
     const page = ["<Glossary>", "", "**Words on the page:** A **Renewal** is a new loan.", "It lasts a week. A **Renewal**", "is two weeks more.", "", "</Glossary>", ""].join("\n");
     expect(lint(page)).toEqual([[4, "warning", "<Glossary> defines «Renewal» twice; the first definition is shown"]]);
+    const twice = "<Glossary> defines «Hold» twice; the first definition is shown";
+    // Unwrapped: the repeat shares line 3 with the first sentence.
+    expect(lint(["<Glossary>", "", "A **Hold** keeps a book. A **Hold** is two weeks more.", "", "</Glossary>", ""].join("\n"))).toEqual([[3, "warning", twice]]);
+    // A short sentence head that ends its line: the probe reads across the break.
+    expect(lint(["<Glossary>", "", "A **Hold** keeps a book.", "It lasts a week. A **Hold**", "is two weeks more.", "", "</Glossary>", ""].join("\n"))).toEqual([[4, "warning", twice]]);
+    expect(lint(["<Glossary>", "", "A **Hold** keeps a book. A **Hold**", "is two weeks more.", "", "</Glossary>", ""].join("\n"))).toEqual([[3, "warning", twice]]);
+    expect(lint(["<Glossary>", "", "A **Hold** keeps a book.", "", "A", "**Hold** is two weeks more.", "", "</Glossary>", ""].join("\n"))).toEqual([[5, "warning", twice]]);
+    // A paragraph that ends in the head's first word is not the sentence.
+    expect(lint(["<Glossary>", "", "A **Hold** keeps a book. It is plan A", "", "A **Hold** is two weeks more.", "", "</Glossary>", ""].join("\n"))).toEqual([[5, "warning", twice]]);
+  });
+
+  test("a list item's term is found on its own line, wrapped or not", () => {
+    const twice = "<Glossary> defines «Hold» twice; the first definition is shown";
+    expect(lint(["<Glossary>", "", "- **Hold:** a book", "- **Hold:**", "  kept back", "", "</Glossary>", ""].join("\n"))).toEqual([[4, "warning", twice]]);
+    expect(lint(["<Glossary>", "", "- **Hold:** a book", "- **Hold:** kept back", "", "</Glossary>", ""].join("\n"))).toEqual([[4, "warning", twice]]);
   });
 
   test("a term the page never uses raises no finding: whether a term is used is the reader's call", () => {

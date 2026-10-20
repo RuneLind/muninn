@@ -20,16 +20,21 @@ import type { LintFinding } from "./lint.ts";
 export const GLOSSARY_LINT_CHECKS = ["glossary"] as const;
 
 /** The first unfenced place at or after (`line`, `col`), both 0-based, where
- *  `head` starts: all of it on the line, or the part before a line break (a
- *  paragraph's sentence can wrap). */
+ *  `head` starts. A read has its line breaks as spaces, so whitespace runs match
+ *  each other and the probe reads on across line breaks; only the page's end
+ *  cuts it short (a paragraph that ends in the head's first word is no match). */
 function findFrom(lines: readonly string[], fenced: readonly boolean[], line: number, col: number, head: string): { line: number; col: number } | undefined {
-  const lead = head.slice(0, 12);
+  const flat = (s: string) => s.replace(/\s+/g, " ");
+  const want = flat(head);
+  const lead = want.split(" ")[0]!;
   for (let i = line; i < lines.length; i++) {
     if (fenced[i]) continue;
     const text = lines[i]!;
     for (let at = text.indexOf(lead, i === line ? col : 0); at >= 0; at = text.indexOf(lead, at + 1)) {
-      const rest = text.slice(at).trimEnd();
-      if (rest.startsWith(head) || head.startsWith(rest)) return { line: i, col: at };
+      let rest = text.slice(at);
+      for (let j = i + 1; flat(rest).length < want.length && j < lines.length; j++) rest += "\n" + lines[j];
+      const got = flat(rest).trimEnd();
+      if (got.startsWith(want) || want.startsWith(got)) return { line: i, col: at };
     }
   }
   return undefined;
