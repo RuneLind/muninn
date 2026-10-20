@@ -568,12 +568,51 @@ describe("refusals", () => {
     try {
       const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
       expect(res.status).toBe(503);
-      expect(res.json.code).toBe("frames_unsupported");
+      expect(res.json.code).toBe("cli_too_old");
       expect(String(res.json.error)).toContain("needs Claude CLI 2.1.303 or newer");
       await settle();
       expect(rec.prompts.length).toBe(0);
     } finally {
       __setClaudeCliVersionForTest("2.1.304");
+    }
+  });
+
+  test("a text-only re-run (no kept frames) on a claude-cli older than --restricted still runs, tool-less", async () => {
+    // No frames ⇒ the run declares `"none"`, which every CLI runs: the version
+    // pre-flight applies to the slide pass only.
+    const root = tempFramesRoot();
+    const cli = { ...BOT, connector: "claude-cli" } as unknown as BotConfig;
+    const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, bot: cli });
+    __setClaudeCliVersionForTest("2.1.200");
+    try {
+      const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+      expect(res.status).toBe(200);
+      await settle();
+      expect(rec.prompts.length).toBe(1);
+      expect(rec.prompts[0]!.toolSurface).toBe("none");
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
+  });
+
+  test("kept frames on a claude-sdk bot re-run whatever the installed CLI reports: only claude-cli is version-gated", async () => {
+    const root = tempFramesRoot();
+    const dir = join(root, "youtube", VIDEO_ID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "30.jpg"), "x");
+    const sdk = { ...BOT, connector: "claude-sdk" } as unknown as BotConfig;
+    for (const version of ["2.1.200", null]) {
+      const { deps, rec } = makeDeps(youtubeDoc(), { framesRoot: root, bot: sdk });
+      __setClaudeCliVersionForTest(version);
+      try {
+        const res = await post(appFor(deps), { source: "youtube", docId: DOC_ID });
+        expect(res.status).toBe(200);
+        await settle();
+        expect(rec.prompts.length).toBe(1);
+        expect(rec.prompts[0]!.toolSurface).toEqual({ read: [dir] });
+      } finally {
+        __setClaudeCliVersionForTest("2.1.304");
+      }
     }
   });
 });

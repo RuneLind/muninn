@@ -701,6 +701,13 @@ describe("sum-submit-form: the Slides checkbox (v2 PR 4)", () => {
     expect(dead).toContain("cannot read frame files");
     // Default (no bot in hand) is the live control.
     expect(captureUrlFormHtml(PICKER)).not.toContain("disabled");
+
+    // A claude-cli too old for the slide pass is disabled too, and its reason
+    // names the upgrade rather than a connector switch the bot does not need.
+    const oldCli = captureUrlFormHtml({ ...PICKER, framesSupported: false, framesBlock: "cli_too_old" });
+    expect(oldCli).toContain('<input type="checkbox" id="captureFrames" disabled />');
+    expect(oldCli).toContain("Claude CLI is too old");
+    expect(oldCli).not.toContain("SUMMARIZER_BOT");
     // Never pre-checked by the server: the browser's memory decides.
     expect(live).not.toContain("checked");
   });

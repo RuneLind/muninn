@@ -1050,7 +1050,7 @@ export function registerSummariesRerunRoutes(
       // cannot run one (or a claude-cli older than 2.1.303) would produce a summary with no slides while the tail
       // stripped every quote it could not serve — a re-run that silently loses
       // pictures. Refused instead, the TikTok/YouTube `frames_unsupported`
-      // precedent, before a job exists.
+      // precedent (`cli_too_old` for the old CLI), before a job exists.
       if (frames.length > 0 && !connectorCapabilities(bot).supportsExtraDirs) {
         return {
           ok: false,
@@ -1065,7 +1065,7 @@ export function registerSummariesRerunRoutes(
           ok: false,
           status: 503,
           error: `Summarizer bot "${bot.name}" cannot read the kept slides: ${cliBlocked}`,
-          code: "frames_unsupported",
+          code: "cli_too_old",
         } satisfies Refusal;
       }
 

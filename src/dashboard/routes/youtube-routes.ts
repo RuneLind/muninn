@@ -6,6 +6,7 @@ import { summarizeVideo } from "../../youtube/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { restrictedCliBlocker } from "../../ai/tool-surface.ts";
+import { framesBlock } from "./frames-block.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
@@ -392,7 +393,7 @@ export function registerYouTubeRoutes(
    * — one call, `requireThinkingControl` on both, so the picker and the 400
    * cannot disagree.
    */
-  app.get("/api/youtube/options", (c) => {
+  app.get("/api/youtube/options", async (c) => {
     applyCors(c);
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
     if (!summarizerBot) {
@@ -403,7 +404,8 @@ export function registerYouTubeRoutes(
       // The id a client sends when the reader picks nothing. Named rather than
       // left as "the first entry", so the popup never has to assume an order.
       default_kind: DEFAULT_CAPTURE_KIND,
-      frames: { supported: connectorCapabilities(summarizerBot).supportsExtraDirs },
+      // Off wherever the POST would 503 Slides: no file access, or a claude-cli too old.
+      frames: { supported: (await framesBlock(summarizerBot)) === null },
       // How much of the video the summary may SHOW, offered the same way the
       // kinds are: the popup renders the control from the server rather than
       // from a catalog of its own, so an instance that does not offer this at
@@ -578,7 +580,7 @@ export function registerYouTubeRoutes(
       return c.json(
         {
           error: "Slides are not available on this summarizer bot's Claude CLI.",
-          code: "frames_unsupported",
+          code: "cli_too_old",
           detail: `Summarizer bot "${summarizerBot.name}": ${cliBlocked} Untick Slides, or upgrade the CLI.`,
         },
         503,

@@ -317,11 +317,12 @@ detection is ever built.
 
 **`frames` is a boolean on the route body, off by default, pre-flighted BEFORE
 oEmbed.** A non-boolean is 400 `bad_frames`; `true` on a summarizer whose
-connector lacks `supportsExtraDirs` is **503 `frames_unsupported`** before a job
+connector lacks `supportsExtraDirs` is **503 `frames_unsupported`**, and on a
+claude-cli older than 2.1.303 **503 `cli_too_old`**, before a job
 exists (the TikTok precedent), rendered by the card from the one sentence map —
 slides are opt-out, never a silent skip. On `/summaries` the **Slides checkbox**
-(`captureUrlFormHtml`, `framesSupported` from `GET /summaries`'s
-`connectorCapabilities(summarizerBot)`) renders DISABLED with the reason in its
+(`captureUrlFormHtml`, `framesSupported` + `framesBlock` from `GET /summaries`'s
+`framesBlock(summarizerBot)`, `src/dashboard/routes/frames-block.ts`) renders DISABLED with the reason in its
 title where the route would 503, and a disabled box posts `false` whatever
 storage remembers — a tick taken on one instance must not 503 on another. The
 tick is remembered under the same `muninn.summaries.capture.v1` key as kind and
@@ -815,6 +816,7 @@ spell the same word.
 | 200 `in_flight` | Already being captured — plus an attach to the running job |
 | 400 `bad_frames` | The Slides flag must be on or off |
 | 503 `frames_unsupported` | The summarizer bot cannot read slide frames — untick Slides, or set SUMMARIZER_BOT to a claude-cli / claude-sdk bot |
+| 503 `cli_too_old` | The summarizer bot's Claude CLI is too old to read slide frames — untick Slides, or upgrade the Claude CLI |
 | job error `no_captions` | This video has no caption track |
 | job error `whisper_unavailable` | This video has no caption track, and this machine cannot transcribe it (whisper-cli and a multilingual model are needed — see VIMEO_WHISPER_MODEL_PATH) |
 | job error `transcription_failed` | This video has no caption track, and transcribing its audio failed |

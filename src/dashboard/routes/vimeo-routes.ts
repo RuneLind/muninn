@@ -452,7 +452,8 @@ export function registerVimeoRoutes(
     // then PRE-FLIGHTED against the summarizer's connector: frames are read by
     // the model through a fenced Read (`{ read: [framesDir] }`), which only the
     // Claude connectors can express (claude-cli from 2.1.303), so a bot that
-    // cannot read files answers 503 `frames_unsupported`
+    // cannot read files answers 503 `frames_unsupported` (`cli_too_old` on an
+    // older claude-cli)
     // BEFORE a job exists (the TikTok precedent) rather than silently
     // summarizing without the slides the reader ticked.
     if (body.frames !== undefined && typeof body.frames !== "boolean") {
@@ -476,8 +477,8 @@ export function registerVimeoRoutes(
     if (cliBlocked !== null) {
       return c.json(
         {
-          error: "frames_unsupported",
-          code: "frames_unsupported",
+          error: "cli_too_old",
+          code: "cli_too_old",
           detail: `Summarizer bot "${summarizerBot.name}": ${cliBlocked} Untick Slides, or upgrade the CLI.`,
         },
         503,
