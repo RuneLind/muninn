@@ -1446,11 +1446,15 @@ group apply and why Dismiss is durable: `src/gardener/CLAUDE.md`.
 - **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
   plus per-file content reads. Each finding is `{ check, relPath, message,
   detail?, fix? }` — `fix` on check 8's findings alone. The full set of checks
-  is `LINT_CHECKS` in `src/wiki/lint.ts`. Checks 1–7 (with 6b) have their rules
-  in the list below; check 10 (`question-block`) in the answer cards' **Lint**
-  bullet in `src/web/CLAUDE.md`; checks 8, 9 and 11 onward in the «Lint check N»
-  sections of `src/wiki/CLAUDE.md` (`grep -n '^#.*Lint check'
-  src/wiki/CLAUDE.md`). The engine's first checks:
+  is `LINT_CHECKS` in `src/wiki/lint.ts`. Where each check's rules live:
+  checks 1–5 and 7 in the list below; check 6 splits, with its lint-specific
+  facts in the list below and the rule it enforces in `src/web/CLAUDE.md`;
+  check 6b has a one-line summary below and its rule in `src/web/CLAUDE.md`;
+  check 10 (`question-block`) is in the answer cards' **Lint** bullet in
+  `src/web/CLAUDE.md`; checks 8, 9 and 11 onward are in the «Lint check N»
+  sections of `src/wiki/CLAUDE.md`, which this command lists:
+  `grep -n '^#.*Lint check' src/wiki/CLAUDE.md`.
+  The engine's first checks:
   1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
      page and resolves against the index (the store's builder silently drops
      unresolved targets, so resolution is recomputed here); `../`-escapes are
