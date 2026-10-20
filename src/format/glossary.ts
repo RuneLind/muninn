@@ -34,7 +34,7 @@ export interface GlossaryEntry {
   at: number;
 }
 
-export interface GlossaryFinding {
+interface GlossaryFinding {
   level: "warning" | "info";
   message: string;
   /** Index into the block's `reads`; absent ⇒ the block's tag line. */
@@ -52,7 +52,7 @@ export interface GlossaryBlockRead {
 }
 
 /** A term shorter than this is never marked: `A` would mark every «a». */
-export const GLOSSARY_TERM_MIN = 2;
+const GLOSSARY_TERM_MIN = 2;
 
 const LABEL_RE = /^(?:\*\*|__)\s*(?:words on the page|ord på siden)\s*[.:]?\s*(?:\*\*|__)\s*[.:]?\s*/iu;
 const ITEM_LEAD_RE = /^(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}])\s*(?:(?::|[—–-](?=\s))\s*)?/u;

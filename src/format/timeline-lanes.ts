@@ -22,12 +22,12 @@ import { visibleText } from "./report-top.ts";
 
 export type LaneKind = "decisions" | "queries" | "timeline";
 
-export interface LaneItem {
+interface LaneItem {
   day: string;
   label: string;
 }
 
-export interface TimelineLane {
+interface TimelineLane {
   kind: LaneKind;
   items: LaneItem[];
 }
@@ -47,7 +47,7 @@ const WORDS: Record<QuestionLanguage, { title: string; lanes: Record<LaneKind, s
 };
 
 /** The days an item date is read with, as `formatWebHtml`'s `itemDates`. */
-export interface LaneDays {
+interface LaneDays {
   ref: string;
   today: string;
 }
