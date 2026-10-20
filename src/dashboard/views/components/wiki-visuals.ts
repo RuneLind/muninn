@@ -92,17 +92,50 @@ function ruleTreeSays(live: HTMLElement): Record<string, string> {
   }
 }
 
-/** Keep a glossary definition inside the viewport: shift it back left by
- *  what it would overflow on the right. */
+/** The client box of the nearest ancestor that clips `el` (overflow other
+ *  than visible), cut to the viewport: the reader's article pane scrolls, so
+ *  the viewport alone let a definition run under its edge or scrollbar. */
+function clipBox(el: Element): { left: number; top: number; right: number; bottom: number } {
+  const root = el.ownerDocument.documentElement;
+  const box = { left: 0, top: 0, right: root.clientWidth, bottom: root.clientHeight };
+  for (let a = el.parentElement; a && a !== root; a = a.parentElement) {
+    const s = getComputedStyle(a);
+    if (s.overflowX === "visible" && s.overflowY === "visible") continue;
+    const r = a.getBoundingClientRect();
+    const left = r.left + a.clientLeft;
+    const top = r.top + a.clientTop;
+    box.left = Math.max(box.left, left);
+    box.top = Math.max(box.top, top);
+    box.right = Math.min(box.right, left + a.clientWidth);
+    box.bottom = Math.min(box.bottom, top + a.clientHeight);
+    break;
+  }
+  return box;
+}
+
+/** Keep a glossary definition inside the box that clips it: no wider than
+ *  that box, shifted back from its right edge, and opened above the term
+ *  (`gl-above`) when there is no room below and more room above. */
 function placeGlossaryTip(mark: Element): void {
   const tip = mark.querySelector<HTMLElement>(":scope > .gl-tip");
   if (!tip) return;
   tip.style.insetInlineStart = "";
-  const view = mark.ownerDocument.documentElement.clientWidth;
+  tip.style.maxInlineSize = "";
+  mark.classList.remove("gl-above");
+  const r0 = tip.getBoundingClientRect();
+  if (r0.width === 0) return;
+  const box = clipBox(mark);
+  const pad = 8;
+  const room = box.right - box.left - 2 * pad;
+  if (r0.width > room) tip.style.maxInlineSize = `${Math.max(0, room)}px`;
   const r = tip.getBoundingClientRect();
-  if (r.width === 0) return;
-  const over = r.right - (view - 8);
-  if (over > 0) tip.style.insetInlineStart = `${-Math.min(over, Math.max(0, r.left - 8))}px`;
+  // Physical shift, + moves right; the left case is an rtl tip, opening leftwards.
+  const dx = r.right > box.right - pad ? box.right - pad - r.right : Math.max(0, box.left + pad - r.left);
+  if (dx) tip.style.insetInlineStart = `${getComputedStyle(tip).direction === "rtl" ? -dx : dx}px`;
+  const term = mark.getBoundingClientRect();
+  const below = box.bottom - term.bottom;
+  const above = term.top - box.top;
+  if (r.height > below && above > below) mark.classList.add("gl-above");
 }
 
 /** A definition shown by hover or focus: place it; Escape hides it until the

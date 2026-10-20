@@ -1391,7 +1391,8 @@ export function ruleTreeCss(scope: string): string {
 
 /** `<Glossary>` term marks on the wiki reader (`glossary-view.ts`). The
  *  definition shows on hover and on keyboard focus; Escape hides it
- *  (`gl-dismissed`, `wiki-visuals.ts`), which also keeps it inside the viewport. */
+ *  (`gl-dismissed`, `wiki-visuals.ts`), which also keeps it inside the pane
+ *  that clips it and opens it above the term (`gl-above`) near the pane's foot. */
 export function glossaryCss(scope: string): string {
   const s = scope;
   return `
@@ -1408,6 +1409,10 @@ export function glossaryCss(scope: string): string {
       font-size: 0.85rem; font-weight: 400; font-style: normal; line-height: 1.4; white-space: normal; overflow-wrap: anywhere;
       text-align: start; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
     }
+    /* The gap is part of the tip, so the pointer crosses it without leaving the mark (WCAG 1.4.13). */
+    ${s} .gl-tip::before { content: ""; position: absolute; inset-inline: -1px; inset-block-end: 100%; block-size: calc(0.25rem + 2px); }
+    ${s} .gl-above > .gl-tip { inset-block-start: auto; inset-block-end: calc(100% + 0.25rem); }
+    ${s} .gl-above > .gl-tip::before { inset-block-end: auto; inset-block-start: 100%; }
     ${s} .gl-tip-term { font-weight: 600; }
     ${s} .gl-mark:not(.gl-dismissed):hover > .gl-tip,
     ${s} .gl-mark:not(.gl-dismissed):focus-within > .gl-tip { display: block; }

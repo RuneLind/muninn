@@ -164,6 +164,23 @@ const css = (l: Locator, prop: string) => l.evaluate((e, p) => getComputedStyle(
 const overflow = (l: Locator) => l.evaluate((e) => e.scrollWidth - e.clientWidth);
 const shots = (name: string) => test.info().outputPath(`${name}.png`);
 
+/** A tip's box and the client box of the nearest ancestor that clips it
+ *  (overflow other than visible), cut to the viewport. */
+function clipBoxOf(tip: Element) {
+  const t = tip.getBoundingClientRect();
+  let c = { left: 0, top: 0, right: document.documentElement.clientWidth, bottom: document.documentElement.clientHeight };
+  for (let el = tip.parentElement; el && el !== document.documentElement; el = el.parentElement) {
+    const s = getComputedStyle(el);
+    if (s.overflowX === "visible" && s.overflowY === "visible") continue;
+    const r = el.getBoundingClientRect();
+    const left = r.left + el.clientLeft;
+    const top = r.top + el.clientTop;
+    c = { left: Math.max(c.left, left), top: Math.max(c.top, top), right: Math.min(c.right, left + el.clientWidth), bottom: Math.min(c.bottom, top + el.clientHeight) };
+    break;
+  }
+  return { t: { left: t.left, top: t.top, right: t.right, bottom: t.bottom }, c };
+}
+
 test.describe("Wiki reader: polish", () => {
   for (const scheme of ["dark", "light"] as const) {
     test(`${scheme}: squares, lanes and term marks draw in the theme's tokens`, async ({ page }) => {
@@ -332,6 +349,82 @@ test.describe("Wiki reader: polish", () => {
     // An id in a definition stays text: a link inside role=tooltip is a tab stop in a hidden tip.
     await expect(mark.locator(".gl-tip")).toContainText("(D2)");
     await expect(page.locator(".wiki-article .gl-tip a")).toHaveCount(0);
+  });
+
+  for (const width of [1280, 700, 390] as const) {
+    test(`${width} px: every definition, a right-edge one too, stays inside the box that clips it`, async ({ page }) => {
+      await open(page, width, width === 390);
+      // A copy of the first term at the end of a right-aligned line: the column's right edge.
+      await page.evaluate(() => {
+        const mark = document.querySelector(".wiki-article .gl-mark")!;
+        const line = document.createElement("div");
+        line.style.textAlign = "end";
+        line.append(mark.cloneNode(true));
+        mark.after(line);
+      });
+      const marks = await page.locator(".wiki-article .gl-mark").all();
+      expect(marks.length).toBe(5);
+      for (const [i, mark] of marks.entries()) {
+        await mark.scrollIntoViewIfNeeded();
+        await mark.locator(".gl-term").focus();
+        const tip = mark.locator(".gl-tip");
+        await expect(tip).toBeVisible();
+        const { t, c } = await tip.evaluate(clipBoxOf);
+        expect(t.left, `term ${i} left`).toBeGreaterThanOrEqual(c.left - 0.5);
+        expect(t.right, `term ${i} right`).toBeLessThanOrEqual(c.right + 0.5);
+        expect(t.top, `term ${i} top`).toBeGreaterThanOrEqual(c.top - 0.5);
+        expect(t.bottom, `term ${i} bottom`).toBeLessThanOrEqual(c.bottom + 0.5);
+        await mark.locator(".gl-term").blur();
+      }
+      const edge = marks[1]!;
+      for (const scheme of ["dark", "light"] as const) {
+        await page.emulateMedia({ colorScheme: scheme });
+        await edge.locator(".gl-term").focus();
+        await page.locator("#articleWrap").screenshot({ path: shots(`${width}-${scheme}-glossary-edge`) });
+        await edge.locator(".gl-term").blur();
+      }
+    });
+  }
+
+  test("a term near the pane's bottom opens its definition above", async ({ page }) => {
+    await open(page, 1280);
+    // The last term: far enough down the page to scroll to the pane's foot.
+    const mark = page.locator(".wiki-article .gl-mark").last();
+    // Scroll the pane until the term sits 12 px above its bottom edge.
+    await mark.evaluate((m) => {
+      const wrap = document.getElementById("articleWrap")!;
+      const w = wrap.getBoundingClientRect();
+      const r = m.getBoundingClientRect();
+      wrap.scrollTop += r.bottom - (w.top + wrap.clientTop + wrap.clientHeight - 12);
+    });
+    await mark.locator(".gl-term").evaluate((t) => (t as HTMLElement).focus({ preventScroll: true }));
+    const tip = mark.locator(".gl-tip");
+    await expect(tip).toBeVisible();
+    const { t, c } = await tip.evaluate(clipBoxOf);
+    const m = (await mark.locator(".gl-term").boundingBox())!;
+    expect(c.bottom - (m.y + m.height), "the term sits at the pane's foot").toBeLessThan(20);
+    expect(t.bottom).toBeLessThanOrEqual(m.y + 0.5);
+    expect(t.top).toBeGreaterThanOrEqual(c.top - 0.5);
+  });
+
+  test("the pointer moved from a term into its definition keeps it open", async ({ page }) => {
+    await open(page, 1280);
+    const mark = page.locator(".wiki-article .gl-mark").first();
+    await mark.scrollIntoViewIfNeeded();
+    const term = (await mark.locator(".gl-term").boundingBox())!;
+    const x = term.x + Math.min(6, term.width / 2);
+    await page.mouse.move(x, term.y + term.height / 2);
+    const tip = mark.locator(".gl-tip");
+    await expect(tip).toBeVisible();
+    const box = (await tip.boundingBox())!;
+    expect(box.y).toBeGreaterThan(term.y);
+    for (let y = Math.ceil(term.y + term.height / 2); y <= box.y + 6; y++) {
+      await page.mouse.move(x, y);
+      expect(await tip.evaluate((e) => getComputedStyle(e).display), `pointer at y=${y}`).not.toBe("none");
+    }
+    // Resting on the definition keeps it open.
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(tip).toBeVisible();
   });
 
   test("forced colours: a pressed square is Highlight, the lanes' dots are CanvasText", async ({ page }) => {
