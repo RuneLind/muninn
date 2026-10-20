@@ -28,7 +28,7 @@ const WORDS: Record<QuestionLanguage, { tree: string; caseLabel: string; all: st
 
 const RO = `${READER_ONLY_ATTR}=""`;
 
-/** The case id a chip's source names: the longest of the leaf's ids that
+/** The case id a chip's source names: the first of the leaf's ids that
  *  stands as a whole token in it, struck text and link destinations aside.
  *  The picker matches chips on this, never on their text, which the reader
  *  extends (an `idLabels` noun). */
@@ -42,7 +42,7 @@ function chipCase(core: string, ids: readonly string[]): string | undefined {
     }
     return false;
   };
-  return [...ids].sort((a, b) => b.length - a.length).find(token);
+  return ids.find(token);
 }
 
 /** One item's own text: lead and case ids wrapped when the pieces render as
