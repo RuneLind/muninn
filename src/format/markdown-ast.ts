@@ -63,9 +63,20 @@ export type Block =
   | { type: "blockquote"; lines: string[] }
   | UlBlock
   | OlBlock
-  | { type: "table"; headers: string[]; rows: string[][] }
+  | TableBlock
   | ComponentBlock
   | { type: "text"; lines: string[] };
+
+/** `line` is the 0-based line of the header row in the text `parseBlocks` was
+ *  given, as {@link ComponentBlock}'s is: a line linter skips the header row the
+ *  reader renders as column labels by asking the parser, not by re-deciding
+ *  where a table starts. */
+export interface TableBlock {
+  type: "table";
+  headers: string[];
+  rows: string[][];
+  line?: number;
+}
 
 /** `line` is the 0-based line of the opening tag in the text `parseBlocks` was
  *  given, so a caller can name the tag's line from the block it walks. */
@@ -1534,7 +1545,7 @@ function parseBlocksInner(
           .slice(2)
           .filter((l) => !isSeparatorRow(l))
           .map((l) => parsePipeCells(l).map((c) => c.trim()));
-        blocks.push({ type: "table", headers, rows });
+        blocks.push({ type: "table", headers, rows, line: store.srcLine[base + i] });
         i = j;
         continue;
       }

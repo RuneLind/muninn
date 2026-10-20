@@ -23,8 +23,9 @@
  * `<Historic>` (each exactly where `parseBlocks` makes a block of it),
  * blockquote lines (a line that opens with `>`), code fences by the reader's
  * rule (`readerFencedLines`: backticks only, an unclosed opener stays prose),
- * inline code, and a table's header row. HTML and JSX comments are linted:
- * this reader renders them as visible text. Lanes and plain tables are linted.
+ * inline code, and the header row of each table `parseBlocks` makes. HTML and
+ * JSX comments are linted: this reader renders them as visible text. Lanes and
+ * plain tables are linted.
  * The frontmatter ends where the store's does (`frontmatterBodyLine`).
  *
  * Off unless `.wiki-reader.json` declares `statePhrases`
@@ -40,7 +41,7 @@
  */
 
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, isSeparatorRow, isTableRow, parseBlocks, readerFencedLines, type Block } from "../format/markdown-ast.ts";
+import { COMPONENT_OPEN_RE, INLINE_COMPONENT_NAMES, parseBlocks, readerFencedLines, type Block } from "../format/markdown-ast.ts";
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
@@ -131,19 +132,29 @@ function wordsRe(words: readonly string[]): RegExp | null {
  * Task words. A word with an upper-case letter (`PR`, `PR-er`) matches as
  * written, so `e2e-pr.yml` is no PR; an all-lower-case word (`oppgave`) matches
  * any case. Neither may touch a `.`/`/` path neighbour or a letter, but a
- * hyphen is fine on the left (`api-PR 2`). A task word anchors only when a
- * number follows it (`PR 1`, `PR 1–4`, `oppgave #3`): a bare one (`når PR-en er
- * merget`, a `| Service-PR |` column) is generic prose about no piece of work.
+ * hyphen is fine on the left (`api-PR 2`). A task word anchors only next to a
+ * number: one after it names a piece of work (`PR 1`, `PR 1–4`, `oppgave #3`),
+ * one before it counts pieces of work (`8 PR-er`, `7 av 8 PR-er`). A bare one
+ * (`når PR-en er merget`, a `| Service-PR |` column) is generic prose about no
+ * piece of work. The count's number stands alone: not the end of a version or
+ * a date (`1.2 PR`, `06.10 PR`), a key (`DEMO-8 PR`) or a word (`v2 PR`).
  */
-function taskWordsRes(words: readonly string[]): RegExp[] {
-  const edge = (alt: string, flags: string) =>
+function taskWordsRes(words: readonly string[]): { re: RegExp; count: boolean }[] {
+  const named = (alt: string, flags: string) =>
     new RegExp(`(?<![\\p{L}\\p{N}_./])(?:${alt})(?=[ \\t\\u00a0]?#?\\d)`, flags);
+  const counted = (alt: string, flags: string) =>
+    new RegExp(
+      `(?<=(?<![\\p{L}\\p{N}_.#-])\\p{N}+[ \\t\\u00a0])(?:${alt})(?![\\p{L}\\p{N}_/]|\\.[\\p{L}\\p{N}])`,
+      flags,
+    );
   const alt = (ws: string[]) => ws.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
   const cased = words.filter((w) => /\p{Lu}/u.test(w));
   const folded = words.filter((w) => !/\p{Lu}/u.test(w));
-  const out: RegExp[] = [];
-  if (cased.length > 0) out.push(edge(alt(cased), "gu"));
-  if (folded.length > 0) out.push(edge(alt(folded), "giu"));
+  const out: { re: RegExp; count: boolean }[] = [];
+  for (const [ws, flags] of [[cased, "gu"], [folded, "giu"]] as const) {
+    if (ws.length === 0) continue;
+    out.push({ re: named(alt(ws), flags), count: false }, { re: counted(alt(ws), flags), count: true });
+  }
   return out;
 }
 
@@ -227,11 +238,19 @@ function blockEnd(lines: readonly string[], fenced: readonly boolean[], start: n
 }
 
 /** Lines inside a tracked block, by `parseBlocks`: a tag the parser renders as
- *  text (a multi-line opener, a close mid-line, trailing prose) opens nothing. */
-function trackedLines(lines: readonly string[], fenced: readonly boolean[], body: number): Map<number, "home" | "history"> {
+ *  text (a multi-line opener, a close mid-line, trailing prose) opens nothing.
+ *  `headers` gets the header row of every table the parser makes: column
+ *  labels, not state. */
+function trackedLines(
+  lines: readonly string[],
+  fenced: readonly boolean[],
+  body: number,
+  headers: Set<number>,
+): Map<number, "home" | "history"> {
   const roles = new Map<number, "home" | "history">();
   const walk = (blocks: Block[]) => {
     for (const b of blocks) {
+      if (b.type === "table" && b.line !== undefined) headers.add(body + b.line);
       if (b.type !== "component") continue;
       if (b.line !== undefined && (b.name === HOME_BLOCK || HISTORY_BLOCKS.includes(b.name))) {
         const start = body + b.line;
@@ -249,11 +268,8 @@ function trackedLines(lines: readonly string[], fenced: readonly boolean[], body
 }
 
 /** Each pipe-table row line → the first line of its table: a run of lines that
- *  start with `|`. Rows without a leading pipe render as text. `headers` gets
- *  the first row of a run the parser makes a table of (`parseBlocks`' rule: three
- *  `isTableRow` rows or more, the second an `isSeparatorRow`): column labels,
- *  not state. */
-function tableRows(lines: readonly string[], fenced: readonly boolean[], body: number, headers: Set<number>): Map<number, number> {
+ *  start with `|`. Rows without a leading pipe render as text. */
+function tableRows(lines: readonly string[], fenced: readonly boolean[], body: number): Map<number, number> {
   const out = new Map<number, number>();
   for (let i = body; i < lines.length; i++) {
     if (fenced[i]) continue;
@@ -262,18 +278,17 @@ function tableRows(lines: readonly string[], fenced: readonly boolean[], body: n
     if (t.startsWith("|")) {
       while (j < lines.length && !fenced[j] && lines[j]!.trim().startsWith("|")) out.set(j++, i);
     }
-    let k = i;
-    while (k < j && isTableRow(lines[k]!)) k++;
-    if (k - i >= 3 && isSeparatorRow(lines[i + 1]!)) headers.add(i);
     if (j > i) i = j - 1;
   }
   return out;
 }
 
 /** A line that starts a new block, ending a paragraph. An inline component
- *  (`<Pill>`) continues the paragraph. */
+ *  (`<Pill>`) continues the paragraph. A fence line is no case here: a fence the
+ *  reader pairs is `fenced` and ends the paragraph before this is asked, and a
+ *  `~~~` line or an unclosed opener is prose the reader keeps in it. */
 function startsBlock(t: string): boolean {
-  if (/^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\||```|~~~)/.test(t)) return true;
+  if (/^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\|)/.test(t)) return true;
   return t.startsWith("<") && !INLINE_TAG_RE.test(t);
 }
 
@@ -311,9 +326,9 @@ export function stateLineRoles(content: string): LineRoles {
     }
   }
 
-  const tracked = trackedLines(lines, fenced, body);
   const headers = new Set<number>();
-  const tables = tableRows(lines, fenced, body, headers);
+  const tracked = trackedLines(lines, fenced, body, headers);
+  const tables = tableRows(lines, fenced, body);
   let statusPara = false;
   let ledger = false;
   const reset = () => {
@@ -522,19 +537,23 @@ export function checkState(
     // ── Check 1: state outside its home ────────────────────────────────────
     for (const unit of roles.linted) {
       const { text, lineAt } = unitText(lines, unit);
-      const states = [...allMatches(phraseRe, text), ...allMatches(DATE_QUALIFIER_RE, text)];
+      const phrases = allMatches(phraseRe, text);
+      const states = [...phrases, ...allMatches(DATE_QUALIFIER_RE, text)];
       if (states.length === 0) continue;
+      const counts = taskRes.filter((t) => t.count).flatMap((t) => allMatches(t.re, text));
       const anchors = [
         ...keyHits(text),
         ...allMatches(namedRe, text),
         ...allMatches(PR_REF_RE, maskLinks(text)),
-        ...taskRes.flatMap((re) => allMatches(re, text)),
+        ...taskRes.filter((t) => !t.count).flatMap((t) => allMatches(t.re, text)),
       ];
-      if (anchors.length === 0) continue;
+      if (anchors.length === 0 && counts.length === 0) continue;
       const byLine = new Map<number, { states: string[]; anchor: string }>();
       for (const clause of stateClauses(text, unit.row)) {
         const cs = inClause(states, clause).sort((a, b) => a.start - b.start);
-        const ca = inClause(anchors, clause);
+        // A count (`3 PR-er`) anchors a state phrase only: beside a date alone
+        // it is a dated record (`| abc123 (11.09) | 3 PR-er | $140 |`).
+        const ca = [...inClause(anchors, clause), ...(inClause(phrases, clause).length > 0 ? inClause(counts, clause) : [])];
         if (cs.length === 0 || ca.length === 0) continue;
         for (const s of cs) {
           const line = lineAt(s.start);

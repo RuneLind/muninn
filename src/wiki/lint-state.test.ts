@@ -743,3 +743,50 @@ describe("check 14 uses the reader's fence rule (finding 78)", () => {
     expect(await flaggedBody(["```", "DEMO-1 is merged.", "", "DEMO-2 is merged."])).toEqual([1, 3]);
   });
 });
+
+// ── Batch L fix round 1: the reader's paragraph and table rules, count anchors ──
+
+describe("check 14 Status paragraph ends where the reader's does (fix round 1)", () => {
+  test("a tilde line or an unclosed backtick opener stays inside the paragraph", async () => {
+    expect(await flaggedBody(["**Status:** DEMO-1 is merged", "~~~", "DEMO-2 is merged.", "~~~"])).toEqual([]);
+    expect(await flaggedBody(["**Status:** DEMO-1 is merged", "```", "DEMO-2 is merged."])).toEqual([]);
+  });
+
+  test("a paired backtick fence ends the paragraph: the line after it is linted", async () => {
+    expect(await flaggedBody(["**Status:** DEMO-1 is merged", "```", "x", "```", "DEMO-2 is merged."])).toEqual([4]);
+  });
+});
+
+describe("check 14 table header is the parser's own header row (fix round 1)", () => {
+  test("a pipe line above the header is text; the header under it is skipped", async () => {
+    const table = ["| Fix for DEMO-1 | Merged |", "|---|---|", "| DEMO-2 | merged |"];
+    expect(await flaggedBody(["| Note on DEMO-9 merged |", ...table])).toEqual([0, 3]);
+    expect(await flaggedBody(["|junk DEMO-5 merged", ...table])).toEqual([0, 3]);
+  });
+
+  test("three or more pipe rows with no delimiter row are text, so every row is linted", async () => {
+    expect(await flaggedBody(["| Fix for DEMO-1 | Merged |", "| DEMO-3 | merged |", "| DEMO-2 | merged |"])).toEqual([0, 1, 2]);
+  });
+
+  test("the header is found at its own line after a fence and inside a component", async () => {
+    const table = ["| Fix for DEMO-1 | Merged |", "|---|---|", "| DEMO-2 | merged |"];
+    expect(await flaggedBody(["```", "x", "```", ...table])).toEqual([5]);
+    expect(await flaggedBody(["<ComparisonTable>", ...table, "</ComparisonTable>"])).toEqual([3]);
+  });
+});
+
+describe("check 14 a counted task word anchors a state phrase (fix round 1)", () => {
+  test("a number before the task word anchors a state phrase, not a date alone", async () => {
+    const body = [
+      "Per 06.10, 7 of 8 PRs are merged.",
+      "2 PRs are merged.",
+      "| fdea6907 (11.09) | 3 PRs in console | about $140 |",
+      "The PRs are merged.",
+      "Version 1.2 PRs are merged.",
+      "The v2 PR is merged.",
+    ];
+    expect(await flaggedBody(body)).toEqual([0, 1]);
+    const f = await outside();
+    expect(f[0]!.message).toContain("beside «PRs»");
+  });
+});
