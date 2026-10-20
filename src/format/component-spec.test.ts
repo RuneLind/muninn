@@ -55,7 +55,7 @@ const FROZEN_ATTRS: Record<string, string[]> = {
   NextMoves: [],
   Lane: ["kind", "who", "role", "since"],
   Query: ["id", "question", "answer", "csv", "sql", "run", "uses"],
-  CaseBoard: ["src", "labels"],
+  CaseBoard: ["src", "labels", "view"],
   DeltaTable: ["src", "better", "decimal"],
   Tldr: ["label"],
   Timeline: [],

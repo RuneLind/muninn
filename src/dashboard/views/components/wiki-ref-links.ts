@@ -386,6 +386,7 @@ export const PEEK_STRIP_SELECTOR = [
   ...PEEK_CHART_CHROME,
   ...PEEK_RULE_TREE_CHROME,
   "gl-tip",
+  "cb-dots",
 ]
   .map((c) => `.${c}`)
   .join(", ");

@@ -281,6 +281,9 @@ export function caseKort(c: Pick<BoardCase, "kort" | "note">): string {
 
 export type CaseLabels = Partial<Record<CaseStatus, string>>;
 
+/** The reader's dots view (`case-dots-view.ts`), passed to `formatWebHtml`. */
+export type CaseDotsViewRenderer = (cases: readonly BoardCase[], labels: CaseLabels) => string;
+
 /** `labels="hold:holdt ute,wait:venter"` read into status → label. A key that
  *  is not a case status, or an entry with no `:` or an empty side, is kept in
  *  `bad` (the linter names it) and ignored. Keys are case-folded; a key given

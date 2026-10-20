@@ -1,6 +1,6 @@
 /**
- * The reader's `<Chart>` toggles, `<RuleTree>` case picker and `<Glossary>`
- * term definitions. The server
+ * The reader's `<Chart>` toggles, `<RuleTree>` case picker, `<Glossary>`
+ * term definitions and `<CaseBoard view="dots">` squares. The server
  * draws every chart variant (`src/format/chart-view.ts`); this file only shows
  * one: Chart or Table, and the variant (points or % of target, the bar as
  * decided or after). A picked case marks the tree's rows on its path
@@ -136,6 +136,38 @@ function wireGlossary(doc: Document): void {
   );
 }
 
+/** Press one CaseBoard square: it alone is pressed, and the board's live line
+ *  says its case (`data-cb-say`). Pressing it again releases it. False when
+ *  `target` is not a square. */
+function applyCaseDot(target: Element | null): boolean {
+  const dot = target?.closest?.<HTMLElement>("button.cb-dot");
+  const dots = dot?.closest<HTMLElement>(".cb-dots");
+  if (!dot || !dots || dots.closest(".wiki-ref-peek")) return false;
+  const on = dot.getAttribute("aria-pressed") !== "true";
+  dots.querySelectorAll<HTMLElement>("button.cb-dot").forEach((b) => b.setAttribute("aria-pressed", String(on && b === dot)));
+  const say = dots.querySelector<HTMLElement>(".cb-dots-say");
+  if (say) say.textContent = on ? (dot.dataset.cbSay ?? "") : "";
+  return true;
+}
+
+const DOT_KEYS = new Set(["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"]);
+
+/** The arrow keys, Home and End move between a board's squares; the board is
+ *  one tab stop (the square focused last keeps `tabindex="0"`). */
+function moveCaseDot(e: KeyboardEvent): void {
+  if (!DOT_KEYS.has(e.key) || !(e.target instanceof Element)) return;
+  const dot = e.target.closest<HTMLElement>("button.cb-dot");
+  const dots = dot?.closest(".cb-dots");
+  if (!dot || !dots) return;
+  const all = Array.from(dots.querySelectorAll<HTMLElement>("button.cb-dot"));
+  const i = all.indexOf(dot);
+  const forward = e.key === "ArrowRight" || e.key === "ArrowDown";
+  const next = e.key === "Home" ? 0 : e.key === "End" ? all.length - 1 : forward ? Math.min(i + 1, all.length - 1) : Math.max(i - 1, 0);
+  e.preventDefault();
+  all.forEach((b, k) => b.setAttribute("tabindex", k === next ? "0" : "-1"));
+  all[next]?.focus();
+}
+
 let installed = false;
 
 /** Install the delegated listeners; later calls do nothing. */
@@ -143,12 +175,14 @@ export function initWikiVisuals(doc: Document = document): void {
   if (installed) return;
   installed = true;
   doc.addEventListener("click", (e) => {
-    applyChartToggle(e.target instanceof Element ? e.target : null);
+    const target = e.target instanceof Element ? e.target : null;
+    if (!applyChartToggle(target)) applyCaseDot(target);
   });
+  doc.addEventListener("keydown", moveCaseDot);
   doc.addEventListener("change", (e) => {
     applyRuleTreePick(e.target instanceof Element ? e.target : null);
   });
   wireGlossary(doc);
-  // The rule tree picker shows only once its listener is in place.
+  // The rule tree picker and the CaseBoard squares show only once their listeners are in place.
   doc.documentElement.classList.add("rt-js");
 }

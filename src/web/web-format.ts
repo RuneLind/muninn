@@ -85,7 +85,7 @@ import {
   type StatusTones,
   visibleText,
 } from "../format/report-top.ts";
-import { readChartKind, readStatusRowsView } from "../format/component-spec.ts";
+import { readCaseBoardView, readChartKind, readStatusRowsView, type CaseBoardView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
 import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
@@ -111,6 +111,7 @@ import {
   parseCaseBoard,
   parseCaseLabels,
   type BoardCase,
+  type CaseDotsViewRenderer,
   type CaseLabels,
 } from "../format/case-board.ts";
 import {
@@ -282,6 +283,10 @@ export function formatWebHtml(
      *  `ruleTreeViewHtml`), passed in like `chartView`. Absent ⇒ a rule tree
      *  prints its list as written. */
     ruleTreeView?: RuleTreeViewRenderer;
+    /** With `views`: the `<CaseBoard view="dots">` squares (`renderWikiHtml`
+     *  passes `caseDotsViewHtml`), passed in like `chartView`. Absent ⇒ the
+     *  board's rows alone. */
+    caseDotsView?: CaseDotsViewRenderer;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -300,7 +305,9 @@ export function formatWebHtml(
   const prevLogIds = currentLogIds;
   const prevRuleTreeView = currentRuleTreeView;
   const prevCaseKorts = currentCaseKorts;
+  const prevCaseDotsView = currentCaseDotsView;
   currentViews = opts?.views === true;
+  currentCaseDotsView = currentViews && text.includes("<CaseBoard") ? (opts?.caseDotsView ?? null) : null;
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
   currentCaseKorts = NO_CASE_KORTS;
   const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
@@ -384,6 +391,7 @@ export function formatWebHtml(
     currentLogIds = prevLogIds;
     currentRuleTreeView = prevRuleTreeView;
     currentCaseKorts = prevCaseKorts;
+    currentCaseDotsView = prevCaseDotsView;
   }
 }
 
@@ -446,6 +454,9 @@ let currentChartView: ChartViewRenderer | null = null;
 
 /** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
 let currentRuleTreeView: RuleTreeViewRenderer | null = null;
+
+/** `opts.caseDotsView` for the call in progress; null ⇒ a `<CaseBoard>` is its rows. */
+let currentCaseDotsView: CaseDotsViewRenderer | null = null;
 
 const NO_CASE_KORTS: ReadonlyMap<string, string> = new Map();
 /** The page's CaseBoard case ids → their `kort:`, while a rule tree page renders. */
@@ -721,7 +732,7 @@ function caseLineHtml(c: BoardCase): string {
 }
 
 /** A `<CaseBoard src labels>`: the count strip, then the rows grouped by status. */
-function caseBoardHtml(src: string, labelsAttr: string | undefined): string {
+function caseBoardHtml(src: string, labelsAttr: string | undefined, view: CaseBoardView): string {
   const section = (inner: string) => `<section class="caseboard">${inner}</section>`;
   if (!src) return section(blockNote("cb-unavailable", CASEBOARD_NO_SRC));
   const file = lookupPageFile(currentPageFiles, src, "yaml");
@@ -746,7 +757,8 @@ function caseBoardHtml(src: string, labelsAttr: string | undefined): string {
         `${g.cases.map((c) => caseRowHtml(c, labels)).join("")}</div>`,
     )
     .join("");
-  return section(`<p class="cb-strip">${strip}</p>${notes}${groups}`);
+  const dots = view === "dots" && currentCaseDotsView ? currentCaseDotsView(board.cases, labels) : "";
+  return section(`<p class="cb-strip">${strip}</p>${notes}${dots}${groups}`);
 }
 
 /** A toned delta's marker: a sign and an accessible name, so good and bad do
@@ -2249,7 +2261,7 @@ const webRenderer: BlockRenderer = {
       }
       case "CaseBoard": {
         // Self-closing in the authoring rule; a body, if written, follows the board.
-        const board = caseBoardHtml((attrs.src ?? "").trim(), attrs.labels);
+        const board = caseBoardHtml((attrs.src ?? "").trim(), attrs.labels, readCaseBoardView(attrs.view).value);
         return rawChildren.some((b) => !isBlankTextBlock(b)) ? `${board}${children}` : board;
       }
       case "DeltaTable":

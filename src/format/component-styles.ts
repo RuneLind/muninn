@@ -1421,3 +1421,39 @@ export function glossaryCss(scope: string): string {
     }
   `;
 }
+
+/** `<CaseBoard view="dots">` on the wiki reader (`case-dots-view.ts`): one
+ *  square per case, tinted like its status pill, with the status glyph inside,
+ *  so colour is never the only cue. Shown once `wiki-visuals.ts` has put
+ *  `rt-js` on the root, so a page without the script has no dead buttons. */
+export function caseDotsCss(scope: string): string {
+  const s = scope;
+  return `
+    ${s} .cb-dots { display: none; margin-block: 0.5rem 0.75rem; }
+    .rt-js ${s} .cb-dots { display: block; }
+    ${s} .cb-dots-group { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.5rem; margin-block-end: 0.35rem; }
+    ${s} .cb-dots-label { font-size: 0.8rem; color: var(--text-soft); min-inline-size: 7rem; }
+    ${s} .cb-dots-row { display: flex; flex-wrap: wrap; gap: 0.25rem; min-inline-size: 0; }
+    ${s} .cb-dot {
+      inline-size: 1.6rem; block-size: 1.6rem; padding: 0; border-radius: 4px; cursor: pointer;
+      border: 1px solid currentColor; font: inherit; font-size: 0.8rem; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    ${s} .cb-dot-hold { background: var(--tint-warning); color: var(--tone-warn); }
+    ${s} .cb-dot-wait { background: var(--tint-info); color: var(--tone-info); }
+    ${s} .cb-dot-wrong { background: var(--tint-error); color: var(--tone-err); }
+    ${s} .cb-dot-none { background: var(--tint-neutral); color: var(--text-soft); }
+    ${s} .cb-dot-ok { background: var(--tint-success); color: var(--tone-good); }
+    ${s} .cb-dot-unknown { background: var(--bg-surface); color: var(--text-secondary); border-style: dashed; }
+    ${s} .cb-dot:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 2px; }
+    ${s} .cb-dot[aria-pressed="true"] { border-width: 2px; box-shadow: 0 0 0 2px var(--text-primary); }
+    ${s} .cb-dots-say { margin: 0.25rem 0 0; min-block-size: 1.2em; font-size: 0.85rem; color: var(--text-primary); overflow-wrap: anywhere; }
+    @media print {
+      ${s} .cb-dots, .rt-js ${s} .cb-dots { display: none; }
+    }
+    @media (forced-colors: active) {
+      ${s} .cb-dot { border-color: ButtonText; color: ButtonText; background: ButtonFace; }
+      ${s} .cb-dot[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; box-shadow: none; }
+    }
+  `;
+}
