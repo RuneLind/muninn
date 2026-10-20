@@ -92,16 +92,10 @@ function ruleTreeSays(live: HTMLElement): Record<string, string> {
   }
 }
 
-type Box = { left: number; top: number; right: number; bottom: number };
-
-/** The box a definition stays inside: the viewport, cut across by every
- *  ancestor that clips `el` (the reader's pane, a table wrapper) and cut
- *  top and bottom only by one whose content overflows it that way (the
- *  pane). A wrapper that holds its content whole (a short `.tablewrap` or
- *  `.figure-body`: `overflow-x: auto` makes overflow-y compute `auto`)
- *  hides nothing above or below it, and the tip, in the top layer, is not
- *  clipped by it. */
-function viewBox(el: Element): Box {
+/** The client box of the nearest ancestor that clips `el` (overflow other
+ *  than visible), cut to the viewport: the reader's article pane scrolls, so
+ *  the viewport alone let a definition run under its edge or scrollbar. */
+function clipBox(el: Element): { left: number; top: number; right: number; bottom: number } {
   const root = el.ownerDocument.documentElement;
   const box = { left: 0, top: 0, right: root.clientWidth, bottom: root.clientHeight };
   for (let a = el.parentElement; a && a !== root; a = a.parentElement) {
@@ -111,57 +105,37 @@ function viewBox(el: Element): Box {
     const left = r.left + a.clientLeft;
     const top = r.top + a.clientTop;
     box.left = Math.max(box.left, left);
+    box.top = Math.max(box.top, top);
     box.right = Math.min(box.right, left + a.clientWidth);
-    if (a.scrollHeight > a.clientHeight) {
-      box.top = Math.max(box.top, top);
-      box.bottom = Math.min(box.bottom, top + a.clientHeight);
-    }
+    box.bottom = Math.min(box.bottom, top + a.clientHeight);
+    break;
   }
   return box;
 }
 
-/** Show a glossary definition in the top layer (a manual popover), so no
- *  wrapper between the term and the pane clips it, and place it against the
- *  term inside the pane that shows the term: no wider than that box, kept
- *  inside its edges, and opened above the term (`gl-above`) when there is no
- *  room below and more room above. */
+/** Keep a glossary definition inside the box that clips it: no wider than
+ *  that box, shifted back from its right edge, and opened above the term
+ *  (`gl-above`) when there is no room below and more room above. */
 function placeGlossaryTip(mark: Element): void {
   const tip = mark.querySelector<HTMLElement>(":scope > .gl-tip");
   if (!tip) return;
-  tip.style.cssText = "";
+  tip.style.insetInlineStart = "";
+  tip.style.maxInlineSize = "";
   mark.classList.remove("gl-above");
-  if (typeof tip.showPopover !== "function") return;
-  if (getComputedStyle(tip).display === "none") {
-    // Hidden by CSS (the pointer and focus left, or Escape): leave the top layer too.
-    if (tip.matches(":popover-open")) tip.hidePopover();
-    return;
-  }
-  if (!tip.popover) tip.popover = "manual";
-  if (!tip.matches(":popover-open")) tip.showPopover();
-  const box = viewBox(mark);
+  const r0 = tip.getBoundingClientRect();
+  if (r0.width === 0) return;
+  const box = clipBox(mark);
   const pad = 8;
   const room = box.right - box.left - 2 * pad;
-  if (tip.getBoundingClientRect().width > room) tip.style.maxInlineSize = `${Math.max(0, room)}px`;
-  const { width, height } = tip.getBoundingClientRect();
+  if (r0.width > room) tip.style.maxInlineSize = `${Math.max(0, room)}px`;
+  const r = tip.getBoundingClientRect();
+  // Physical shift, + moves right; the left case is an rtl tip, opening leftwards.
+  const dx = r.right > box.right - pad ? box.right - pad - r.right : Math.max(0, box.left + pad - r.left);
+  if (dx) tip.style.insetInlineStart = `${getComputedStyle(tip).direction === "rtl" ? -dx : dx}px`;
   const term = mark.getBoundingClientRect();
-  // An rtl tip opens leftwards from the term's right edge.
-  const start = getComputedStyle(tip).direction === "rtl" ? term.right - width : term.left;
-  const left = Math.max(box.left + pad, Math.min(start, box.right - pad - width));
-  const gap = 0.25 * parseFloat(getComputedStyle(mark.ownerDocument.documentElement).fontSize);
   const below = box.bottom - term.bottom;
   const above = term.top - box.top;
-  const up = height + gap > below && above > below;
-  mark.classList.toggle("gl-above", up);
-  tip.style.left = `${left}px`;
-  tip.style.top = `${up ? term.top - gap - height : term.bottom + gap}px`;
-}
-
-/** Place every definition on show again: it is fixed to the viewport, and the
- *  term moves under it when the pane scrolls or the window resizes. */
-function placeOpenTips(doc: Document): void {
-  doc.querySelectorAll<HTMLElement>(".gl-tip:popover-open").forEach((tip) => {
-    if (tip.parentElement) placeGlossaryTip(tip.parentElement);
-  });
+  if (r.height > below && above > below) mark.classList.add("gl-above");
 }
 
 /** A definition shown by hover or focus: place it; Escape hides it until the
@@ -181,8 +155,6 @@ function wireGlossary(doc: Document): void {
     if (m && !(e.relatedTarget instanceof Node && m.contains(e.relatedTarget))) m.classList.remove("gl-dismissed");
   });
   doc.addEventListener("focusout", (e) => markOf(e.target)?.classList.remove("gl-dismissed"));
-  doc.addEventListener("scroll", () => placeOpenTips(doc), { capture: true, passive: true });
-  doc.defaultView?.addEventListener("resize", () => placeOpenTips(doc));
   doc.addEventListener(
     "keydown",
     (e) => {

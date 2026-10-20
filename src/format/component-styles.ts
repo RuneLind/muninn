@@ -1392,11 +1392,9 @@ export function ruleTreeCss(scope: string): string {
 /** `<Glossary>` term marks on the wiki reader (`glossary-view.ts`). The
  *  definition shows on hover and on keyboard focus; Escape hides it
  *  (`gl-dismissed`, `wiki-visuals.ts`). `placeGlossaryTip` in `wiki-visuals.ts`
- *  lifts it into the top layer (a manual popover), so a sideways-scrolling
- *  wrapper cannot clip it, keeps it inside the pane that shows the term and
- *  opens it above the term (`gl-above`) near the pane's foot. Without the
- *  script it is the absolute box below the term. Theme tokens, except the
- *  tip's `box-shadow` rgba (the theme has no shadow token). */
+ *  keeps it inside the pane that clips it and opens it above the term
+ *  (`gl-above`) near the pane's foot. Theme tokens, except the tip's
+ *  `box-shadow` rgba (the theme has no shadow token). */
 export function glossaryCss(scope: string): string {
   const s = scope;
   return `
@@ -1418,13 +1416,11 @@ export function glossaryCss(scope: string): string {
     ${s} .gl-tip::before { content: ""; position: absolute; inset-inline: -1px; inset-block-end: 100%; block-size: calc(0.25rem + 2px); }
     ${s} .gl-above > .gl-tip { inset-block-start: auto; inset-block-end: calc(100% + 0.25rem); }
     ${s} .gl-above > .gl-tip::before { inset-block-end: auto; inset-block-start: 100%; }
-    /* Placed by the script against the viewport; the UA's popover inset, margin and overflow are undone. */
-    ${s} .gl-mark > .gl-tip:popover-open { position: fixed; inset: auto; margin: 0; overflow: visible; }
     ${s} .gl-tip-term { font-weight: 600; }
     ${s} .gl-mark:not(.gl-dismissed):hover > .gl-tip,
     ${s} .gl-mark:not(.gl-dismissed):focus-within > .gl-tip { display: block; }
     @media print {
-      /* !important: an open tip (hover, focus, the top-layer popover) out-specifies any print selector. */
+      /* !important: an open tip (hover or focus) out-specifies any print selector. */
       ${s} .gl-tip { display: none !important; }
       ${s} .gl-term, ${s} .gl-term:focus-visible { text-decoration: none; outline: none; }
     }
