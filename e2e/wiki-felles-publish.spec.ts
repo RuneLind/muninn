@@ -204,7 +204,7 @@ test.describe("Wiki reader: ⇪ Felles", () => {
     // the realpath only by `/private`; compare against what the page was served.
     const servedRoot = await page.evaluate(() => (globalThis as { __WIKI_ROOT__?: string }).__WIKI_ROOT__);
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
-      `bun ${stub} --tillat-ident ${servedRoot} ${REL}`,
+      `bun --no-env-file ${stub} --tillat-ident ${servedRoot} ${REL}`,
     );
   });
 

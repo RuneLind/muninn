@@ -52,12 +52,27 @@ export function mirrorStatusHtml(status: ListingMirrorStatus | undefined | null,
   return text ? `<span class="wiki-mirror-status-mark" aria-hidden="true">⚠</span> ${escHtml(text)}` : "";
 }
 
+/** How often the reader redraws the line between listings: the age text's
+ *  finest step is a minute, and a listing can be 5 min apart or held back. */
+export const MIRROR_STATUS_TICK_MS = 60_000;
+
+/** The last status a listing carried, for `repaintMirrorStatus`. */
+let lastStatus: ListingMirrorStatus | undefined | null;
+
 /** Paint the slot from a listing; hides it when the listing has no `mirror`. */
 export function paintMirrorStatus(status: ListingMirrorStatus | undefined | null, now: number): void {
+  lastStatus = status;
+  repaintMirrorStatus(now);
+}
+
+/** Redraw the last listing's status against `now`, so its age advances
+ *  between listings. Writes only when the text changed: the slot is a
+ *  `role="status"` live region. */
+export function repaintMirrorStatus(now: number): void {
   const slot = typeof document === "undefined" ? null : document.getElementById(MIRROR_STATUS_SLOT_ID);
   if (!slot) return;
-  const html = mirrorStatusHtml(status, now);
-  slot.innerHTML = html;
+  const html = mirrorStatusHtml(lastStatus, now);
+  if (slot.innerHTML !== html) slot.innerHTML = html;
   slot.hidden = html === "";
 }
 

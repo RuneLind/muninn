@@ -57,3 +57,29 @@ describe("paintMirrorStatus", () => {
     expect(slot.innerHTML).toBe("");
   });
 });
+
+describe("the age advances between listings (batch H fix round 1, F1)", () => {
+  const saved = globalThis.document;
+  afterEach(() => {
+    globalThis.document = saved;
+  });
+
+  test("repaintMirrorStatus redraws the last status against a later clock", () => {
+    const slot = { innerHTML: "", hidden: true };
+    globalThis.document = { getElementById: (id: string) => (id === view.MIRROR_STATUS_SLOT_ID ? slot : null) } as unknown as Document;
+    view.paintMirrorStatus(s({ health: "failing", lastSuccessAt: NOW - 2 * 60_000 }), NOW);
+    expect(slot.innerHTML).toContain("2 min ago");
+    view.repaintMirrorStatus(NOW + 60 * 60_000);
+    expect(slot.innerHTML).toContain("1 h ago");
+    expect(slot.hidden).toBe(false);
+    // Healthy again: the tick keeps it hidden.
+    view.paintMirrorStatus(undefined, NOW);
+    view.repaintMirrorStatus(NOW + 2 * 60 * 60_000);
+    expect(slot.hidden).toBe(true);
+    expect(slot.innerHTML).toBe("");
+  });
+
+  test("the tick interval is one minute, the finest step the age text shows", () => {
+    expect(view.MIRROR_STATUS_TICK_MS).toBe(60_000);
+  });
+});

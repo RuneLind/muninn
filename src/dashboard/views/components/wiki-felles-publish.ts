@@ -33,6 +33,9 @@ export function fellesPublishCommand(opts: {
   return [
     ...(opts.bucket ? ["FELLES_WIKI_BUCKET=" + shellQuote(opts.bucket)] : []),
     "bun",
+    // Without it bun loads the `.env` of the directory the line runs in, which
+    // can override the bucket or credentials; the route spawns with it too.
+    "--no-env-file",
     shellQuote(opts.bin),
     ...(opts.dryRun ? ["--dry-run"] : []),
     ...(opts.allowIdent ? ["--tillat-ident"] : []),
@@ -51,6 +54,9 @@ export function fellesRemoveCommand(opts: { bin: string; relPath: string; bucket
   return [
     ...(opts.bucket ? ["FELLES_WIKI_BUCKET=" + shellQuote(opts.bucket)] : []),
     "bun",
+    // Without it bun loads the `.env` of the directory the line runs in, which
+    // can override the bucket or credentials; the route spawns with it too.
+    "--no-env-file",
     shellQuote(opts.bin),
     "--fjern",
     "--",

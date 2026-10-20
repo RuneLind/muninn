@@ -245,7 +245,7 @@ describe("finding 80 — the client wires the remove command into the dialog", (
     await sync.load();
     h.slot.dispatch("click", { target: { closest: () => ({ getAttribute: (n: string) => (n === "data-state" ? "ok" : null) }) } });
     await settle();
-    expect(h.dialog()!.innerHTML).toContain("<code>FELLES_WIKI_BUCKET=felles bun /x/publiser.ts --fjern -- gone.md</code>");
+    expect(h.dialog()!.innerHTML).toContain("<code>FELLES_WIKI_BUCKET=felles bun --no-env-file /x/publiser.ts --fjern -- gone.md</code>");
   });
 });
 

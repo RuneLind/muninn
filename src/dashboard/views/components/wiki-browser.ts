@@ -81,7 +81,7 @@ import {
   setFellesBtnMark,
   type FellesSync,
 } from "./wiki-felles-publish.ts";
-import { paintMirrorStatus } from "./wiki-mirror-status.ts";
+import { MIRROR_STATUS_TICK_MS, paintMirrorStatus, repaintMirrorStatus } from "./wiki-mirror-status.ts";
 // The `Related work` block: pure string building, moved out so `bun test` can
 // load it — this file touches `document` at import time.
 import {
@@ -9098,7 +9098,6 @@ function setPagesData(data: WikiPagesResponse, boot = false): void {
   // future-date guard on every frontmatter-dated page in the wiki at once.
   scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
   applyWorkedSortOption(data.workedCoverage);
-  paintMirrorStatus(data.mirror, Date.now());
   // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
   // Absent/empty (older server / degraded) keeps the built-in constants so
   // standard types still render — the belt-and-suspenders unions in the chip/hub
@@ -9323,6 +9322,9 @@ function handlePagesResponse(
     view: force ? "start" : currentViewState(),
     seq,
     fingerprint,
+    // The mirror line paints from every fresh response, not only an adopted one:
+    // a deferred or unchanged listing still carries the current mirror health.
+    onMirror: (mirror) => paintMirrorStatus(mirror, Date.now()),
   });
   if (outcome === "apply") applyPagesResponse({ data, fingerprint });
   // Returned for the ONE caller that must know: a write's own refetch, where
@@ -9444,6 +9446,8 @@ document.addEventListener("visibilitychange", () => {
 // event. Same gate, but the PLAIN fetch — server TTL freshness is fine for idle
 // drift.
 setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
+// The mirror line's age text advances between listings.
+setInterval(() => repaintMirrorStatus(Date.now()), MIRROR_STATUS_TICK_MS);
 
 // ── Boot ──────────────────────────────────────────────────────────────
 // Two independent flags, one installer (`wikiBlockedSelectorFor`):

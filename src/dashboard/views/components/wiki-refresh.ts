@@ -207,6 +207,11 @@ export interface ReceivedPages {
   /** The sequence number `startFetch` returned for THIS request. */
   seq: number;
   fingerprint: string;
+  /** Paints the bucket-mirror rail line from this response's `mirror`. Called
+   *  for every response that is not stale, whatever happens to its page list:
+   *  the line is rail chrome, so a deferred, unchanged or empty listing still
+   *  carries the freshest mirror health. */
+  onMirror?: (mirror: ListingMirrorStatus | undefined) => void;
 }
 
 /**
@@ -234,6 +239,7 @@ export function receivePages(model: PagesRefreshModel, input: ReceivedPages): Re
   // fingerprint, or anything else.
   if (seq <= model.lastSeenSeq) return "stale";
   model.lastSeenSeq = seq;
+  input.onMirror?.(data.mirror);
 
   // A well-formed but EMPTY set is a real state for a brand-new wiki, and boot
   // renders it — but once a listing is on screen it is far more likely a

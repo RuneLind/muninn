@@ -30,13 +30,13 @@ describe("fellesPublishCommand", () => {
         allowIdent: true,
       }),
     ).toBe(
-      "bun /n/muninn-nais/scripts/publiser-felles-wiki.ts --tillat-ident /Users/rune/source/nav/melosys-kode-wiki plans/2026-09-29-vedtaksmetadata-fagavklaring.mdx",
+      "bun --no-env-file /n/muninn-nais/scripts/publiser-felles-wiki.ts --tillat-ident /Users/rune/source/nav/melosys-kode-wiki plans/2026-09-29-vedtaksmetadata-fagavklaring.mdx",
     );
   });
 
   test("quotes what a shell would split", () => {
     expect(fellesPublishCommand({ bin: "/b.ts", root: "/w w", relPath: "x/it's.md", allowIdent: false, dryRun: true })).toBe(
-      "bun /b.ts --dry-run '/w w' 'x/it'\\''s.md'",
+      "bun --no-env-file /b.ts --dry-run '/w w' 'x/it'\\''s.md'",
     );
   });
 });
@@ -116,19 +116,19 @@ test("exit 1 claims nothing the code cannot know", () => {
 
 test("the copied command carries the bucket the button would use", () => {
   expect(fellesPublishCommand({ bin: "/b.ts", root: "/w", relPath: "a.md", allowIdent: true, bucket: "b-1" })).toBe(
-    "FELLES_WIKI_BUCKET=b-1 bun /b.ts --tillat-ident /w a.md",
+    "FELLES_WIKI_BUCKET=b-1 bun --no-env-file /b.ts --tillat-ident /w a.md",
   );
 });
 
 test("the bucket prefix is shell-quoted", () => {
   expect(fellesPublishCommand({ bin: "/b.ts", root: "/w", relPath: "a.md", allowIdent: false, bucket: "x;rm -rf ~" })).toBe(
-    "FELLES_WIKI_BUCKET='x;rm -rf ~' bun /b.ts /w a.md",
+    "FELLES_WIKI_BUCKET='x;rm -rf ~' bun --no-env-file /b.ts /w a.md",
   );
 });
 
 test("a dash-led relPath is copied as a path", () => {
   expect(fellesPublishCommand({ bin: "/b.ts", root: "/w", relPath: "-x.md", allowIdent: false })).toBe(
-    "bun /b.ts /w ./-x.md",
+    "bun --no-env-file /b.ts /w ./-x.md",
   );
 });
 
@@ -336,18 +336,18 @@ describe("finding 80 — a page missing locally carries its remove command", () 
   const bin = "/n/muninn-nais/scripts/publiser-felles-wiki.ts";
 
   test("the command is --fjern -- <relPath>, NFC, quoted, with no --ja and no ./", () => {
-    expect(removeCmd({ bin, relPath: "plans/gone.mdx" })).toBe(`bun ${bin} --fjern -- plans/gone.mdx`);
+    expect(removeCmd({ bin, relPath: "plans/gone.mdx" })).toBe(`bun --no-env-file ${bin} --fjern -- plans/gone.mdx`);
     const nfd = "plans/på.mdx".normalize("NFD");
-    expect(removeCmd({ bin, relPath: nfd })).toBe(`bun ${bin} --fjern -- '${"plans/på.mdx".normalize("NFC")}'`);
-    expect(removeCmd({ bin, relPath: "it's.md" })).toBe(`bun ${bin} --fjern -- 'it'\\''s.md'`);
-    expect(removeCmd({ bin, relPath: "--x.md" })).toBe(`bun ${bin} --fjern -- --x.md`);
-    expect(removeCmd({ bin: "/a b/p.ts", relPath: "x y.md" })).toBe("bun '/a b/p.ts' --fjern -- 'x y.md'");
+    expect(removeCmd({ bin, relPath: nfd })).toBe(`bun --no-env-file ${bin} --fjern -- '${"plans/på.mdx".normalize("NFC")}'`);
+    expect(removeCmd({ bin, relPath: "it's.md" })).toBe(`bun --no-env-file ${bin} --fjern -- 'it'\\''s.md'`);
+    expect(removeCmd({ bin, relPath: "--x.md" })).toBe(`bun --no-env-file ${bin} --fjern -- --x.md`);
+    expect(removeCmd({ bin: "/a b/p.ts", relPath: "x y.md" })).toBe("bun --no-env-file '/a b/p.ts' --fjern -- 'x y.md'");
     expect(removeCmd({ bin, relPath: "a.md" })).not.toContain("--ja");
   });
 
   test("the bucket muninn targets is prefixed, as on ⧉ Copy command", () => {
     expect(removeCmd({ bin, relPath: "a.md", bucket: "melosys-felles" })).toBe(
-      `FELLES_WIKI_BUCKET=melosys-felles bun ${bin} --fjern -- a.md`,
+      `FELLES_WIKI_BUCKET=melosys-felles bun --no-env-file ${bin} --fjern -- a.md`,
     );
   });
 
@@ -366,7 +366,7 @@ describe("finding 80 — a page missing locally carries its remove command", () 
 
   test("an unmasked missing page shows its command and a copy button; a masked one shows neither", () => {
     const html = fellesSyncListHtml(status, href, cmdFor);
-    expect(html).toContain(`<code>bun ${bin} --fjern -- &#39;gone&lt;x&gt;.md&#39;</code>`);
+    expect(html).toContain(`<code>bun --no-env-file ${bin} --fjern -- &#39;gone&lt;x&gt;.md&#39;</code>`);
     expect(html).toContain('data-felles="copy-remove" data-felles-path="gone&lt;x&gt;.md"');
     expect(html.match(/data-felles="copy-remove"/g)?.length).toBe(1);
     expect(html.match(/--fjern/g)?.length).toBe(1);
@@ -385,4 +385,13 @@ describe("finding 80 — a page missing locally carries its remove command", () 
   test("the dialog passes the builder through", () => {
     expect(fellesSyncDialogHtml(status, href, cmdFor)).toContain('data-felles="copy-remove"');
   });
+});
+
+// Batch H fix round 1, P: a copied line run from a muninn checkout would load
+// that checkout's `.env`, whose variables can override the bucket or the
+// credentials the line means. The route spawns with `--no-env-file`; so do these.
+test("both copyable command lines tell bun not to load a .env", () => {
+  const pub = fellesPublishCommand({ bin: "/b.ts", root: "/w", relPath: "a.md", allowIdent: false, bucket: "b-1" });
+  const rem = felles.fellesRemoveCommand({ bin: "/b.ts", relPath: "a.md", bucket: "b-1" });
+  for (const line of [pub, rem]) expect(line.split(" ").slice(1, 3)).toEqual(["bun", "--no-env-file"]);
 });
