@@ -106,8 +106,9 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     services:
-      # `src/test/setup-db.ts` hardcodes `…@127.0.0.1:5435/muninn_test`, so the
-      # host port has to be 5435 — it is not configurable from here. pgvector,
+      # `src/test/test-db-url.ts` hardcodes the default `…@127.0.0.1:5435/muninn_test`
+      # and this job sets no `MUNINN_TEST_DATABASE_URL`, so the host port has to
+      # be 5435. pgvector,
       # not plain postgres: `db/init.sql` creates the `vector` extension for the
       # memory embeddings.
       postgres:
@@ -327,9 +328,10 @@ jobs:
       - run: bunx playwright install-deps chromium
       - run: bunx playwright install chromium
       # The schema has to exist before the first server boots — the dashboard and
-      # /chat routes query it on the very first request. `db:setup:test` reaches
-      # the server through its own hardcoded admin URL, so it needs no env of its
-      # own; it creates `muninn_test`, applies `init.sql` and baselines.
+      # /chat routes query it on the very first request. `db:setup:test` derives
+      # its admin URL from the default test URL in `src/test/test-db-url.ts`, so it
+      # needs no env of its own; it creates `muninn_test`, applies `init.sql` and
+      # baselines.
       - run: bun run db:setup:test
       # A fresh database makes `chat.spec.ts`/`inspector.spec.ts` FAIL (no user to
       # select) and makes the traces + inspector cases SKIP THEMSELVES, which is
