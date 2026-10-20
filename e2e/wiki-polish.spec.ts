@@ -93,6 +93,26 @@ const CASES = [
   ...Array.from({ length: 24 }, (_, i) => `- {id: LIB-${200 + i}, status: ok}`),
 ].join("\n");
 
+/** A page whose first board opens on its none group, and a second board. */
+const NONE_REL = "plans/none-first.mdx";
+const NONE_PAGE = [
+  "---",
+  "title: Shelf returns",
+  "---",
+  "",
+  "# Shelf returns",
+  "",
+  "[Before the boards](#returns)",
+  "",
+  "## Returns",
+  "",
+  '<CaseBoard src="none-first.yaml" view="dots" />',
+  "",
+  '<CaseBoard src="cases.yaml" view="dots" />',
+  "",
+].join("\n");
+const NONE_CASES = ["- {id: LIB-301, status: none}", "- {id: LIB-302, status: none}", "- {id: LIB-303, status: ok}", "- {id: LIB-304, status: ok}"].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -101,6 +121,8 @@ test.beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
   await writeFile(path.join(root, "plans/cases.yaml"), CASES, "utf8");
+  await writeFile(path.join(root, NONE_REL), NONE_PAGE, "utf8");
+  await writeFile(path.join(root, "plans/none-first.yaml"), NONE_CASES, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -332,6 +354,39 @@ test.describe("Wiki reader: polish", () => {
     await wrong.focus();
     await page.keyboard.press("ArrowRight");
     await expect(d.locator('button.cb-dot[tabindex="0"]')).toHaveCount(1);
+  });
+
+  test("Overview from load: a board opening on its none group keeps its tab stop on a shown square", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(NONE_REL)}&lens=overview`);
+    await expect(page.locator(".wiki-article.lens-overview")).toHaveCount(1);
+    const [first, second] = [dots(page).nth(0), dots(page).nth(1)];
+    await expect(first.locator('.cb-dots-group[data-status="none"]')).toBeHidden();
+    await expect(first.locator('button.cb-dot[tabindex="0"]')).toHaveCount(1);
+    await expect(first.getByRole("button", { name: "LIB-303: ok" })).toHaveAttribute("tabindex", "0");
+    await expect(second.getByRole("button", { name: "LIB-101: hold" })).toHaveAttribute("tabindex", "0");
+    await page.locator(".wiki-article a", { hasText: "Before the boards" }).focus();
+    await page.keyboard.press("Tab");
+    await expect(first.getByRole("button", { name: "LIB-303: ok" })).toBeFocused();
+  });
+
+  test("All then Overview: a pressed none square is released, its line emptied, the tab stop moved", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(NONE_REL)}&lens=all`);
+    await expect(page.locator(".wiki-article.lens-all")).toHaveCount(1);
+    const [first, second] = [dots(page).nth(0), dots(page).nth(1)];
+    await first.getByRole("button", { name: "LIB-302: none" }).click();
+    await expect(first.locator(".cb-dots-say")).toHaveText("LIB-302 — none");
+    await second.getByRole("button", { name: "LIB-102: hold" }).click();
+    await page.locator(".wiki-lens-switch button[data-lens='overview']").click();
+    await expect(page.locator(".wiki-article.lens-overview")).toHaveCount(1);
+    await expect(first.locator(".cb-dots-say")).toHaveText("");
+    await expect(first.locator('button.cb-dot[aria-pressed="true"]')).toHaveCount(0);
+    await expect(first.locator('button.cb-dot[tabindex="0"]')).toHaveCount(1);
+    await expect(first.getByRole("button", { name: "LIB-303: ok" })).toHaveAttribute("tabindex", "0");
+    // A pressed square the lens keeps stays pressed.
+    await expect(second.getByRole("button", { name: "LIB-102: hold" })).toHaveAttribute("aria-pressed", "true");
+    await expect(second.locator(".cb-dots-say")).toHaveText("LIB-102 — hold");
   });
 
   test("a definition shows on focus and Escape hides it", async ({ page }) => {

@@ -553,6 +553,7 @@ function applyLens(article: HTMLElement, ctx: LensContext, lens: Lens, enter = t
     article.classList.toggle(`${LENS_CLASS_PREFIX}${l}`, l === lens);
   }
   if (lens === "overview" && before !== "overview" && enter) openCompactFolds(article);
+  if (lens === "overview") settleCaseDots(article);
   // D4: the Agent lens hides the article (CSS) and shows plan-card's card.
   setAgentPane(article, lens === "agent", agentOptions.get(article) ?? null);
   markSwitch(ctx, lens);
@@ -563,6 +564,23 @@ function applyLens(article: HTMLElement, ctx: LensContext, lens: Lens, enter = t
   });
   row?.querySelectorAll<HTMLElement>(`.${ROLE_VIEW_CLASS}`).forEach((t) => {
     t.hidden = lens === "agent";
+  });
+}
+
+/** Overview hides a CaseBoard's `none` squares: a board's pressed square
+ *  that is hidden is released and its line emptied, and a hidden tab stop
+ *  moves to the board's first shown square, so Tab still reaches the board. */
+function settleCaseDots(article: HTMLElement): void {
+  article.querySelectorAll<HTMLElement>(".cb-dots").forEach((board) => {
+    const squares = Array.from(board.querySelectorAll<HTMLElement>("button.cb-dot"));
+    const shown = squares.filter((b) => !isHiddenByOverview(b));
+    if (squares.some((b) => b.getAttribute("aria-pressed") === "true" && !shown.includes(b))) {
+      squares.forEach((b) => b.setAttribute("aria-pressed", "false"));
+      const say = board.querySelector(".cb-dots-say");
+      if (say) say.textContent = "";
+    }
+    const stop = squares.find((b) => b.getAttribute("tabindex") === "0");
+    if (shown.length && (!stop || !shown.includes(stop))) squares.forEach((b) => b.setAttribute("tabindex", b === shown[0] ? "0" : "-1"));
   });
 }
 
