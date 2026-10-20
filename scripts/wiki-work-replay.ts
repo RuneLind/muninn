@@ -45,12 +45,14 @@
  * outcome; both or neither. `--summary-json` (the summary form at `until = at`)
  * is optional: without it the worked ledger is not loaded, and the Activity and
  * Worked-on sections run without worked dates (the threads do not read them).
- * Each capture's echoed window must match this replay's within
- * `FROZEN_WINDOW_SLACK_MS` (sessions `since`/`until`, pre-window `until`,
- * summary `until`); a capture from another window, or one that records none,
- * is refused. A pre-window answer a few seconds off is re-stamped to this
- * replay's start, and the script says by how much and how many of its rows
- * land inside that gap. `CLAUDE_USAGE_URL` is not read.
+ * Each capture must be of its form, then echo this replay's window (sessions
+ * `since`/`until`, pre-window `until`, summary `until`), as epoch ms. A bound
+ * past the window (a later `until`, an earlier `since`) is refused at any
+ * offset: it holds rows --at had not seen. A bound inside it by up to
+ * `FROZEN_WINDOW_SLACK_MS` is accepted with a Δ line; further is refused. Capture
+ * the summary forms with `until=<ms>`: the live worked ledger asks without it,
+ * and such a capture records no window. A pre-window answer inside the slack is
+ * re-stamped to this replay's start. `CLAUDE_USAGE_URL` is not read.
  *
  * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
  * row's derivation), the rendered Work threads section (cards, open state,
@@ -448,30 +450,77 @@ function printGroups(index: WikiIndex, listing: WikiListing[], at: number): void
   }
 }
 
-/** How far a frozen capture's echoed window may sit from this replay's before
- *  it is refused: a capture taken by hand a moment before or after the replay
- *  started, not one from another day. */
+/** How far a frozen capture's echoed bound may sit INSIDE this replay's
+ *  window (a later `since`, an earlier `until`) and still be read: a
+ *  capture taken by hand a moment before the replay, missing at most this
+ *  much, not one from another day. */
 const FROZEN_WINDOW_SLACK_MS = 5 * 60_000;
 
-/** Refuse a frozen capture whose echoed window (`field` → the instant this
- *  replay asked for) is missing or further off than the slack. */
-function checkWindow(file: string, body: unknown, expected: Record<string, number>): void {
-  for (const [field, want] of Object.entries(expected)) {
-    const got = (body as Record<string, unknown> | null)?.[field];
-    if (typeof got !== "number" || !Number.isFinite(got)) {
-      throw new ReplayError(`${file}: the capture records no window (no numeric \`${field}\`); capture it again for this --at`);
+/** One echoed bound a frozen capture must carry. `outward` is the side on
+ *  which the capture holds rows this replay's window does not: `later` for an
+ *  `until` (writes after it), `earlier` for a `since` (sessions that had
+ *  left the window). */
+interface WindowBound {
+  field: "since" | "until";
+  want: number;
+  outward: "later" | "earlier";
+}
+
+/** Signed seconds or hours, for a refusal or a Δ line. */
+function offBy(ms: number): string {
+  const sign = ms < 0 ? "-" : "+";
+  const abs = Math.abs(ms);
+  return abs < 3_600_000 ? `${sign}${(abs / 1000).toFixed(1)} s` : `${sign}${(abs / 3_600_000).toFixed(2)} h`;
+}
+
+/**
+ * Check a frozen capture's echoed window against this replay's. The body's
+ * form is checked first (`formError`, from the parse the live path runs), so a body
+ * of the wrong form says so instead of "records no window". Then each bound:
+ *  - absent, or not a number: refused, naming what it holds;
+ *  - past the window (`outward`) by any amount: refused. Upstream echoes the
+ *    request's own parameter, not a clock reading, so a capture asked for
+ *    this window echoes it exactly and no skew allowance applies; a later
+ *    `until` holds writes --at had not seen, an earlier `since` sessions
+ *    the window had dropped, and neither can be cut back exactly (the file
+ *    lists are capped, a summary row keeps only its newest write);
+ *  - inside the window by more than the slack: refused;
+ *  - inside it by up to the slack: accepted, with a Δ line on stdout.
+ * Every refusal names the query to capture it again with.
+ */
+function checkWindow(file: string, body: unknown, formError: string | null, bounds: WindowBound[], capture: string): void {
+  if (formError) throw new ReplayError(formError);
+  const again = `capture it again with \`${capture}\``;
+  for (const { field, want, outward } of bounds) {
+    const got = (body as Record<string, unknown>)[field];
+    if (got === undefined) {
+      throw new ReplayError(`${file}: the capture records no window (no \`${field}\`); ${again}`);
     }
-    if (Math.abs(got - want) > FROZEN_WINDOW_SLACK_MS) {
+    if (typeof got !== "number" || !Number.isFinite(got)) {
+      const kind = got === null ? "null" : Array.isArray(got) ? "an array" : typeof got;
+      throw new ReplayError(`${file}: the capture records the window as ${kind} (${field} ${JSON.stringify(got)}), expected epoch ms; ${again}`);
+    }
+    const delta = got - want;
+    if (delta === 0) continue;
+    const past = outward === "later" ? delta > 0 : delta < 0;
+    const at = `${field} ${new Date(got).toISOString()}, this replay needs ${new Date(want).toISOString()}, off by ${offBy(delta)}`;
+    if (past) {
       throw new ReplayError(
-        `${file}: captured for another window (${field} ${new Date(got).toISOString()}, this replay needs ${new Date(want).toISOString()}, ` +
-          `off by ${((got - want) / 3_600_000).toFixed(2)} h; more than ${FROZEN_WINDOW_SLACK_MS / 60_000} min is refused)`,
+        `${file}: captured for another window (${at}; a capture past this replay's window holds rows --at had not seen, so any offset is refused); ${again}`,
       );
     }
+    if (Math.abs(delta) > FROZEN_WINDOW_SLACK_MS) {
+      throw new ReplayError(`${file}: captured for another window (${at}; more than ${FROZEN_WINDOW_SLACK_MS / 60_000} min is refused); ${again}`);
+    }
+    console.log(
+      `frozen capture ${file}: ${field} ${new Date(got).toISOString()} sits inside this replay's ${new Date(want).toISOString()} ` +
+        `(Δ ${offBy(delta)}); what was written in that gap is missing`,
+    );
   }
 }
 
 /** The frozen ledger answers, or null when the flags are absent. Each must
- *  echo this replay's window (`checkWindow`). */
+ *  be of its form and echo this replay's window (`checkWindow`). */
 async function frozenAnswers(sinceMs: number, atMs: number): Promise<{ sessions: unknown; pre: unknown; summary: unknown | null } | null> {
   const sessionsPath = arg("sessions-json");
   const prePath = arg("pre-json");
@@ -486,18 +535,26 @@ async function frozenAnswers(sinceMs: number, atMs: number): Promise<{ sessions:
     }
   };
   const [sessions, preRaw, summary] = await Promise.all([read(sessionsPath), read(prePath), summaryPath ? read(summaryPath) : null]);
-  checkWindow(sessionsPath, sessions, { since: sinceMs, until: atMs });
-  checkWindow(prePath, preRaw, { until: sinceMs });
-  if (summaryPath) checkWindow(summaryPath, summary, { until: atMs });
-  const pre = preRaw as { until: number; pages?: { w?: number; b?: number }[] };
-  if (pre.until !== sinceMs) {
-    const late = (pre.pages ?? []).filter((r) => Math.max(r.w ?? 0, r.b ?? 0) > sinceMs).length;
-    console.log(
-      `frozen pre-window answer: until ${new Date(pre.until).toISOString()} re-stamped to ${new Date(sinceMs).toISOString()} ` +
-        `(Δ ${((pre.until - sinceMs) / 1000).toFixed(1)} s; ${late} row(s) written inside the gap)`,
-    );
+  // The same parses and messages `main` runs on a live answer.
+  const parsed = (what: string, r: { ok: true } | { ok: false; reason: string; detail: string }) =>
+    r.ok ? null : `the ledger's ${what} answer did not parse: ${r.reason}: ${r.detail}`;
+  const until = (want: number): WindowBound => ({ field: "until", want, outward: "later" });
+  checkWindow(
+    sessionsPath,
+    sessions,
+    parsed("sessions", parseWorkSessions(sessions)),
+    [{ field: "since", want: sinceMs, outward: "earlier" }, until(atMs)],
+    `sessions=1&since=${sinceMs}&until=${atMs}`,
+  );
+  checkWindow(prePath, preRaw, parsed("summary at window start", parseWorkedPages(preRaw)), [until(sinceMs)], `summary=1&until=${sinceMs}`);
+  if (summaryPath) {
+    checkWindow(summaryPath, summary, parsed("summary at --at", parseWorkedPages(summary)), [until(atMs)], `summary=1&until=${atMs}`);
   }
-  return { sessions, pre: { ...(pre as object), until: sinceMs }, summary };
+  // A pre-window answer the slack early is re-stamped to this replay's start,
+  // so `parsePreWindow`'s echo check reads it.
+  const pre = preRaw as { until: number };
+  if (pre.until !== sinceMs) console.log(`frozen capture ${prePath}: until re-stamped to ${new Date(sinceMs).toISOString()}`);
+  return { sessions, pre: { ...pre, until: sinceMs }, summary };
 }
 
 async function main(): Promise<void> {

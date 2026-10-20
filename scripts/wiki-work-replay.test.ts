@@ -71,11 +71,19 @@ interface Frozen {
   pre?: Record<string, unknown>;
   /** The summary form at `until = at`; written only when given. */
   summary?: Record<string, unknown>;
+  /** A whole body written in place of the sessions or pre capture. */
+  raw?: { sessions?: unknown; pre?: unknown };
 }
 
 async function writeFrozen(f: Fixture, over: Frozen = {}): Promise<string[]> {
-  const sessions = { form: "sessions", root: f.repo, since: SINCE, until: AT, limit: 200, truncated: false, sessions: [], ...over.sessions };
-  const pre = { root: f.repo, pageCount: 0, bulk: 10, limit: 5000, truncated: false, until: SINCE, pages: [], ...over.pre };
+  const sessions =
+    over.raw && "sessions" in over.raw
+      ? over.raw.sessions
+      : { form: "sessions", root: f.repo, since: SINCE, until: AT, limit: 200, truncated: false, sessions: [], ...over.sessions };
+  const pre =
+    over.raw && "pre" in over.raw
+      ? over.raw.pre
+      : { root: f.repo, pageCount: 0, bulk: 10, limit: 5000, truncated: false, until: SINCE, pages: [], ...over.pre };
   const sessionsPath = path.join(f.base, "sessions.json");
   const prePath = path.join(f.base, "pre.json");
   await writeFile(sessionsPath, JSON.stringify(sessions));
@@ -378,6 +386,89 @@ describe("frozen captures", () => {
     expect(r.code).toBe(1);
     expect(r.err).toContain("sessions.json");
     expect(r.err).toContain("records no window");
+  }, 30_000);
+
+  const MIN = 60_000;
+  const SLACK = 5 * MIN;
+
+  /** Each echoed bound against this replay's: a bound past the window (a
+   *  later `until`, an earlier `since`) holds rows --at had not seen and is
+   *  refused at any offset; one inside it misses at most the slack and is
+   *  accepted with a Δ line naming the file and field. */
+  const windowCases: [string, Frozen, string, "refused" | { delta: string }][] = [
+    ["sessions until 1 ms after --at", { sessions: { until: AT + 1 } }, "sessions.json", "refused"],
+    ["sessions until 4 min after --at", { sessions: { until: AT + 4 * MIN } }, "sessions.json", "refused"],
+    ["sessions until a day early, since right", { sessions: { until: AT - 24 * H } }, "sessions.json", "refused"],
+    ["sessions until exactly the slack early", { sessions: { until: AT - SLACK } }, "sessions.json: until", { delta: "Δ -300.0 s" }],
+    ["sessions until 1 ms more than the slack early", { sessions: { until: AT - SLACK - 1 } }, "sessions.json", "refused"],
+    ["sessions since 1 ms before the window start", { sessions: { since: SINCE - 1 } }, "sessions.json", "refused"],
+    ["sessions since exactly the slack late", { sessions: { since: SINCE + SLACK } }, "sessions.json: since", { delta: "Δ +300.0 s" }],
+    ["sessions since 1 ms more than the slack late", { sessions: { since: SINCE + SLACK + 1 } }, "sessions.json", "refused"],
+    ["sessions from a later window", { sessions: { since: SINCE + 24 * H, until: AT + 24 * H } }, "sessions.json", "refused"],
+    ["pre until 1 ms after the window start", { pre: { until: SINCE + 1 } }, "pre.json", "refused"],
+    ["pre until exactly the slack early", { pre: { until: SINCE - SLACK } }, "pre.json: until", { delta: "Δ -300.0 s" }],
+    ["pre until 1 ms more than the slack early", { pre: { until: SINCE - SLACK - 1 } }, "pre.json", "refused"],
+    ["pre from a later window", { pre: { until: SINCE + 24 * H } }, "pre.json", "refused"],
+    ["summary until 1 ms after --at", { summary: { until: AT + 1 } }, "summary.json", "refused"],
+    ["summary until 4 min after --at", { summary: { until: AT + 4 * MIN } }, "summary.json", "refused"],
+    ["summary until exactly the slack early", { summary: { until: AT - SLACK } }, "summary.json: until", { delta: "Δ -300.0 s" }],
+    ["summary until 1 ms more than the slack early", { summary: { until: AT - SLACK - 1 } }, "summary.json", "refused"],
+    ["summary from a later window", { summary: { until: AT + 24 * H } }, "summary.json", "refused"],
+  ];
+  for (const [name, over, where, outcome] of windowCases) {
+    test(`${name}: ${outcome === "refused" ? "refused" : "accepted"}`, async () => {
+      const f = await oneCommit();
+      const r = await runReplay(f, await writeFrozen(f, over));
+      if (outcome !== "refused") {
+        expect(r.err).toBe("");
+        expect(r.code).toBe(0);
+        // The Δ line: which file and field, and by how much.
+        expect(r.out).toContain(where);
+        expect(r.out).toContain(outcome.delta);
+      } else {
+        expect(r.code).toBe(1);
+        expect(r.err).toContain(where);
+        expect(r.err).toContain("another window");
+        expect(r.out).not.toContain("ledger answers: frozen");
+      }
+    }, 30_000);
+  }
+
+  test("a sessions body that is not the sessions form says so, before any window check", async () => {
+    for (const body of [[], null]) {
+      const f = await oneCommit();
+      const r = await runReplay(f, await writeFrozen(f, { raw: { sessions: body } }));
+      expect(r.code).toBe(1);
+      expect(r.err).toContain('does not echo form: "sessions" — upstream does not answer the sessions form yet');
+      expect(r.err).not.toContain("window");
+    }
+  }, 30_000);
+
+  test("a pre body that is not the summary form says so, before any window check", async () => {
+    const f = await oneCommit();
+    const r = await runReplay(f, await writeFrozen(f, { raw: { pre: [] } }));
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("summary at window start answer did not parse");
+    expect(r.err).not.toContain("window (");
+  }, 30_000);
+
+  test("a window recorded as an ISO string is named as such, not as missing", async () => {
+    const f = await oneCommit();
+    const r = await runReplay(f, await writeFrozen(f, { sessions: { until: new Date(AT).toISOString() } }));
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("sessions.json");
+    expect(r.err).toContain("records the window as string");
+    expect(r.err).toContain("expected epoch ms");
+    expect(r.err).not.toContain("records no window");
+  }, 30_000);
+
+  test("a summary captured without until= is refused with the until= to capture it with", async () => {
+    const f = await oneCommit();
+    const r = await runReplay(f, await writeFrozen(f, { summary: { until: undefined } }));
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("summary.json");
+    expect(r.err).toContain("records no window");
+    expect(r.err).toContain(`until=${AT}`);
   }, 30_000);
 
   test("a summary capture of this window is accepted, one from another window refused", async () => {
