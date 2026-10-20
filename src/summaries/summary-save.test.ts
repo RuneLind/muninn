@@ -16,6 +16,7 @@ import {
   SummarySaveClaims,
 } from "./summary-save.ts";
 import { postSummaryIngest, type SummaryIngest, type SummaryIngestResponse } from "./summarizer-shared.ts";
+import { youtubeVideoFields } from "../youtube/metadata.ts";
 
 function doc(front: string[], body: string): string {
   return ["---", ...front, "---", "", body].join("\n");
@@ -419,6 +420,103 @@ describe("the descriptor table", () => {
     expect(Object.keys(CAPTURE_FILES).sort()).toEqual(SUMMARY_SAVE_DESCRIPTORS.map((d) => d.id).sort());
   });
 
+  // The descriptor is the RE-SEND list: a key the capture writes and a save
+  // leaves off is erased by the save. So every key a capture's ingest body
+  // sends must be in its descriptor, or be one of the fields every save builds
+  // itself. Every ingest body in a file is read, not only the first.
+  const SAVE_BUILT_FIELDS = new Set(["title", "summary", "category", "transcript_markdown"]);
+  /** Where a file's ingest bodies open: `ingestSummary({ … body: {`, or a raw
+   *  `fetch` whose `JSON.stringify({` follows the ingest path literal. */
+  type BodyAnchor = { call: RegExp; open: string };
+  const VIA_INGEST_SUMMARY: BodyAnchor = { call: /ingestSummary\(\{/g, open: "body: {" };
+  const BODY_FILES: Array<[string, string[], BodyAnchor]> = [
+    ["src/youtube/summarizer.ts", ["youtube"], VIA_INGEST_SUMMARY],
+    ["src/video/short-video.ts", ["tiktok", "x-article"], VIA_INGEST_SUMMARY],
+    ["src/x-article/summarizer.ts", ["x-article"], VIA_INGEST_SUMMARY],
+    ["src/vimeo/summarizer.ts", ["vimeo"], VIA_INGEST_SUMMARY],
+    ["src/article/summarizer.ts", ["article"], VIA_INGEST_SUMMARY],
+    ["src/anthropic/summarizer.ts", ["anthropic"], { call: /\/api\/anthropic-summaries\/ingest/g, open: "JSON.stringify({" }],
+  ];
+  /** A spread inside a body, resolved to the keys it can carry. */
+  const SPREADS: Record<string, () => string[]> = {
+    // Every key the declared type allows, plus every key a fully-populated call
+    // emits — a field added to either reaches the body.
+    videoFields: () => [
+      ...interfaceKeys(readFileSync(join(repoRoot, "src/youtube/metadata.ts"), "utf8"), "YouTubeVideoFields"),
+      ...Object.keys(
+        youtubeVideoFields({ id: "v", title: "t", duration: 61.4, uploader: "U", uploadDate: "20260101" }, "O"),
+      ),
+    ],
+  };
+  function interfaceKeys(source: string, name: string): string[] {
+    const at = source.indexOf(`export interface ${name} {`);
+    expect(at).toBeGreaterThan(-1);
+    const body = source.slice(at, source.indexOf("\n}", at));
+    return [...body.matchAll(/^\s+([a-z_]+)\??:/gm)].map((m) => m[1]!);
+  }
+  /** The keys of every ingest body literal in `source`. */
+  function ingestBodyKeys(source: string, anchor: BodyAnchor): string[] {
+    const calls = [...source.matchAll(anchor.call)].map((m) => m.index!);
+    expect(calls.length).toBeGreaterThan(0);
+    const keys: string[] = [];
+    for (const at of calls) {
+      const open = source.indexOf(anchor.open, at);
+      expect(open).toBeGreaterThan(at);
+      let depth = 0;
+      let end = open + anchor.open.length - 1;
+      for (; end < source.length; end++) {
+        if (source[end] === "{") depth++;
+        else if (source[end] === "}" && --depth === 0) break;
+      }
+      for (const line of source.slice(open + anchor.open.length, end).split("\n")) {
+        const t = line.trim();
+        if (t === "" || t.startsWith("//")) continue;
+        const spread = /^\.\.\.([A-Za-z_]+),?$/.exec(t);
+        if (spread) {
+          const resolve = SPREADS[spread[1]!];
+          expect({ line: t, resolvable: Boolean(resolve) }).toEqual({ line: t, resolvable: true });
+          keys.push(...resolve!());
+          continue;
+        }
+        const m = /^\.\.\.\(.*\?\s*\{\s*([a-z_]+)\s*[:,}]/.exec(t) ?? /^([a-z_]+)\s*[:,]?/.exec(t);
+        expect({ line: t, parsed: Boolean(m) }).toEqual({ line: t, parsed: true });
+        keys.push(m![1]!);
+      }
+    }
+    return [...new Set(keys)];
+  }
+
+  test("every capture file's ingest bodies are scanned", () => {
+    const scanned = new Set(BODY_FILES.flatMap(([, ids]) => ids));
+    expect([...scanned].sort()).toEqual(SUMMARY_SAVE_DESCRIPTORS.map((d) => d.id).sort());
+  });
+
+  for (const [file, ids, anchor] of BODY_FILES) {
+    test(`${file}: every ingest body key is re-sent by the ${ids.join(" and ")} save`, () => {
+      const keys = ingestBodyKeys(readFileSync(join(repoRoot, file), "utf8"), anchor);
+      expect(keys).toContain("summary");
+      for (const id of ids) {
+        const resent = new Set(requireSaveDescriptor(id).frontmatterFields);
+        expect({ id, missing: keys.filter((k) => !resent.has(k) && !SAVE_BUILT_FIELDS.has(k)) }).toEqual({ id, missing: [] });
+      }
+    });
+  }
+
+  test("the body scan sees a second ingest call and a spread field", () => {
+    const one = "await ingestSummary({\n  body: {\n    title,\n    summary,\n  },\n});\n";
+    const two = one + "await ingestSummary({\n  body: {\n    summary,\n    speaker: s,\n  },\n});\n";
+    expect(ingestBodyKeys(two, VIA_INGEST_SUMMARY)).toContain("speaker");
+    const spread = "await ingestSummary({\n  body: {\n    summary,\n    ...videoFields,\n  },\n});\n";
+    expect(ingestBodyKeys(spread, VIA_INGEST_SUMMARY)).toEqual(
+      expect.arrayContaining(["summary", "author", "upload_date", "duration_sec"]),
+    );
+  });
+
+  test("anthropic re-sends no author, and no save re-sends a field huginn derives", () => {
+    expect(requireSaveDescriptor("anthropic").frontmatterFields).not.toContain("author");
+    for (const d of SUMMARY_SAVE_DESCRIPTORS) expect(d.frontmatterFields).not.toContain("vimeo_video_id");
+  });
+
   for (const d of SUMMARY_SAVE_DESCRIPTORS) {
     test(`${d.id}: the capture posts to the descriptor's ingest path and no other`, () => {
       for (const file of CAPTURE_FILES[d.id] ?? []) {
@@ -462,6 +560,161 @@ describe("a lapsed claim after a whole rival write", () => {
     expect(disk.map((d) => d.trim())).toEqual(["B's summary"]);
     expect(claims.isHeld("article", DOC_ID)).toBe(false);
     claims.clear();
+  });
+
+  test("a rival that saved and then ABANDONS still refuses the stale save: a pinned claim may have written", async () => {
+    // The re-run job lets go with `abandon` on every path; a job that reached
+    // its save must still move the generation on.
+    const claims = new SummarySaveClaims();
+    const disk: string[] = [];
+    const save = (claim: ReturnType<SummarySaveClaims["claim"]>, summary: string) =>
+      saveSummaryBody({
+        descriptor: requireSaveDescriptor("article"),
+        stored: readStoredCapture(ARTICLE),
+        docId: DOC_ID,
+        summary,
+        claim: claim!,
+        knowledgeApiUrl: "http://127.0.0.1:1",
+        ingest: async (o) => {
+          disk.push(String(o.body.summary));
+          return { ok: true, status: 200, data: { file_path: DOC_ID } };
+        },
+      });
+    const a = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const b = claims.claim("article", DOC_ID, 1_000);
+    expect((await save(b, "B's summary")).ok).toBe(true);
+    claims.abandon(b!);
+    const stale = await save(a, "A's stale summary");
+    expect(stale.ok ? "ok" : stale.code).toBe("in_flight");
+    expect(disk.map((d) => d.trim())).toEqual(["B's summary"]);
+    claims.clear();
+  });
+
+  test("a rival that abandons WITHOUT saving leaves the lapsed claim free to save", async () => {
+    const claims = new SummarySaveClaims();
+    const a = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const b = claims.claim("article", DOC_ID, 1_000)!;
+    claims.abandon(b);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A's summary",
+      claim: a!,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest: async () => ({ ok: true, status: 200, data: { file_path: DOC_ID } }),
+    });
+    expect(res.ok).toBe(true);
+    claims.clear();
+  });
+
+  test("a rival that LAPSED and then abandons without saving leaves the earlier lapsed claim free to save", async () => {
+    // Two re-runs both outlive their budget; the second one's model call then
+    // fails and its job `finally` abandons a claim that already lapsed.
+    const claims = new SummarySaveClaims();
+    const a = claims.claim("article", DOC_ID, 20);
+    await Bun.sleep(40);
+    const b = claims.claim("article", DOC_ID, 20)!;
+    await Bun.sleep(40);
+    expect(claims.isHeld("article", DOC_ID)).toBe(false);
+    claims.abandon(b);
+    const res = await saveSummaryBody({
+      descriptor: requireSaveDescriptor("article"),
+      stored: readStoredCapture(ARTICLE),
+      docId: DOC_ID,
+      summary: "A's summary",
+      claim: a!,
+      knowledgeApiUrl: "http://127.0.0.1:1",
+      ingest: async () => ({ ok: true, status: 200, data: { file_path: DOC_ID } }),
+    });
+    expect(res.ok ? "ok" : res.code).toBe("ok");
+    claims.clear();
+  });
+
+  test("abandoning a lapsed claim restores nothing once the key moved on, or once it was pinned", async () => {
+    // `pinForWrite` is the probe: "pinned" means that claim could still save.
+    const lapsedPair = async (claims: SummarySaveClaims) => {
+      const a = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      return a;
+    };
+
+    // A lapses, B claims and lapses unpinned, then A abandons: B owns the
+    // generation, so A's abandon is a no-op and B may still re-take the key.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      claims.abandon(a);
+      expect(claims.pinForWrite(b)).toBe("pinned");
+      claims.clear();
+    }
+    // A lapses, B claims and HOLDS, A abandons: B stays the holder.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 1_000)!;
+      claims.abandon(a);
+      expect(claims.holds(b)).toBe(true);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
+    // B lapses, is released, then abandoned: the release dropped the
+    // generation for good, so A stays refused.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      claims.release(b);
+      claims.abandon(b);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
+    // B lapses, is abandoned, then released: the release is a no-op, so A saves.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      await Bun.sleep(40);
+      claims.abandon(b);
+      claims.abandon(b);
+      claims.release(b);
+      expect(claims.pinForWrite(a)).toBe("pinned");
+      claims.clear();
+    }
+    // B pins for a write, lapses at the unpin, then abandons: its POST may have
+    // landed, so this is a release and A stays refused.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      expect(claims.pinForWrite(b)).toBe("pinned");
+      await Bun.sleep(40);
+      claims.unpinAfterWrite(b);
+      expect(claims.isHeld("article", DOC_ID)).toBe(false);
+      claims.abandon(b);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
+    // B writes and lapses at the unpin, then C claims and abandons: C restores
+    // B's generation, not A's, so A stays refused.
+    {
+      const claims = new SummarySaveClaims();
+      const a = await lapsedPair(claims);
+      const b = claims.claim("article", DOC_ID, 20)!;
+      expect(claims.pinForWrite(b)).toBe("pinned");
+      await Bun.sleep(40);
+      claims.unpinAfterWrite(b);
+      const c = claims.claim("article", DOC_ID, 1_000)!;
+      claims.abandon(c);
+      expect(claims.pinForWrite(a)).toBe("taken");
+      claims.clear();
+    }
   });
 
   test("a lapsed claim the caller released does not save", async () => {

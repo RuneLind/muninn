@@ -138,7 +138,10 @@ live and `frame.path` IS the destination. `copyKeptFrame`
 (`src/summaries/frames.ts`) skips the copy when the two RESOLVE to one path —
 `copyFile(p, p)` is measured harmless on macOS/Bun and is unproven on Linux,
 where the plausible failure is a truncate-then-write that destroys the only copy
-of the frame. It is its own exported function with an injectable copy BECAUSE the
+of the frame. The skip holds only for a source that EXISTS: a missing one is a
+copy failure, so a frame removed after the re-run listed it (a delete's frame
+cleanup still running after its claim was released) loses its quote instead of
+being reported kept. It is its own exported function with an injectable copy BECAUSE the
 guard is invisible from the filesystem here: without the seam, a test of the
 same-path case passes whether the guard is there or not.
 
@@ -188,16 +191,67 @@ per-`(source, docId)` claim registry answers **409 `in_flight`** to a second
 POST, or to any other write route holding the document. Two concurrent runs
 would spend two model calls and then race each other's ingest for one FILE —
 huginn rewrites the whole document from the request body, so the loser's summary
-is simply gone and which one loses is decided by the network. The claim is taken
-after every other refusal (a 409 has to mean a run is under way) and released in
-a `finally` on the job.
+is simply gone and which one loses is decided by the network. **The claim is
+taken BEFORE the document is read** — after the body-only refusals (415, 400s,
+501) and the bot lookup, before any huginn read — and every refusal after it
+(`not_found`, `no_transcript`, `bad_kind`, the preflight, `too_many_frames`,
+`frames_unsupported`) lets it go; a run lets it go in a `finally` on the job.
+Claiming after the read left a window in which a Delete removed the document
+between the read and the claim, and the run wrote it back.
+
+**Two ways to let go: `release` and `abandon`.** `release` is for a claimant
+that wrote (or deleted) the document: the key's generation is dropped, so a
+claim that lapsed before it can no longer save. `abandon` is for one that wrote
+NOTHING — every re-run refusal above, a job whose model call failed before the
+save, a Delete refused by the gardener mutex or by a huginn answer proving
+nothing moved: the generation goes back to what it was before the claim, so a re-run whose claim
+lapsed still saves and its model spend is not lost. That holds for an
+abandoning claim that itself LAPSED too, as long as no claim was taken on the
+key since (its `lapse` keeps the generation it replaced). A claim that was ever
+pinned for a write may have landed its POST, so `abandon` on it is a `release`
+— which is why the re-run job's `finally` can call `abandon` on every path.
+
+**The `/summaries` Delete is a writer too** (`backlog-doc-delete`,
+`wiki-gardener-routes.ts`): it maps the collection to its SHELF id through
+`SUMMARY_SOURCES` (`x-article` for X video, never the spec id `x-video`),
+claims for `DELETE_CLAIM_BUDGET_MS` (5 min), and answers **409 `in_flight`**
+while a re-run, fact-check save or earlier delete holds the document. On a move
+it releases before the client's reindex poll, and the moved generation means a
+re-run whose claim lapsed during the model call cannot re-take it and write the
+deleted document back (`summary-save-delete-race-db.test.ts`). It abandons
+only when nothing was moved: the gardener mutex, any huginn 4xx (huginn raises
+every one before the move), or a 500 whose `detail` is one of huginn's
+pre-move errors (the manifest read, the index-mapping read, `Could not move
+source file:`; `huginnDeleteMovedNothing`). Any other 5xx — huginn's own
+`Internal Server Error` for an exception after the move, a proxy 502/504 while
+huginn may still be working — and NO answer at all (the 20 s client timeout, a
+transport failure, a refused connection) let go of nothing: the move may have landed or may still
+land, and a re-run claimed right after would read the still-present file and
+write the deleted document back. Abandoning there restored a lapsed re-run's
+generation, and that run then wrote the deleted document back. The claim
+lapses at the 5-minute budget instead (15x the client timeout; huginn's handler
+is local file work — the collection's manifest read, a stat, the index check, the
+trash directory chain and the move, then the other collections' manifests and a
+reindex enqueue for each that shares the source), and the 502 says the delete
+may have completed. A huginn 404 re-runs the proposal cleanup only when its
+`detail` is the source-file-gone one (`Source file for document '…' not found in
+collection '…'`): the membership gate's 404 (the file exists, the index lags), an
+unknown collection and a huginn without the route all name a document that may
+still exist, so its drafts are kept and the 404 says so in `warning`. Only the
+source-gone 404 whose cleanup failed adds `warningCode: "drafts_on_gate"`, and
+the `/summaries` client shows the review-gate link on that code alone.
 
 "Settles" is the connector's promise and not this module's, though: `runRerunJob`
 awaits `deps.oneShot`, and a call that never settles pinned the document at 409
 for the life of the PROCESS, with no way back but a restart. Each claim therefore
-carries a timer sized to the budget that run actually sends —
-`rerunLatchBudgetMs` = `max(summarizeTimeoutFor(frames), bot.timeoutMs)` plus a
-2-minute slack — and the expiry warns. **An expiry frees the key for OTHER
+carries a timer, and the expiry warns. The frame count is not known before the
+read and a deadline cannot be extended, so the budget is the WORST case:
+`rerunLatchBudgetMs(FRAME_BUDGET_MAX, bot)` =
+`max(summarizeTimeoutFor(60), bot.timeoutMs)` plus a 2-minute slack — 1,440 s
+where a sized claim for up to 30 frames was 720 s, so a hung re-run blocks
+Delete about twice as long. A document that keeps more than `FRAME_BUDGET_MAX`
+frames is **422 `too_many_frames`**, not a truncated list (the frames listing
+hazard above). **An expiry frees the key for OTHER
 writers; it does not cancel the claim.** Work after the model call (the
 closing-takeaway check, frame copies) and a connector's retry loop can outlast
 the budget inside their own timeouts, so at save time `pinForWrite` re-takes a
@@ -383,7 +437,9 @@ article mode, unchanged prompts) over the summary and saves the result in
   stream and `html` on `/result`, so the client bundle (~12 KB) carries no
   markdown renderer.
 - **Badges** (`/badges`) are one query over the table; the client patches the
-  Latest rail rows and re-reads after every completed check.
+  Latest rail rows and re-reads after every completed check. A failed lookup
+  is 200 `{badges: [], error}`; the client keeps the badges it has on an
+  `error` and clears them only on an empty list without one.
 - **Transcript check** (`POST /api/summaries/factcheck/transcript`,
   `src/dashboard/routes/summaries-factcheck-transcript.ts`; pure half
   `transcript-check.ts`). Its input is the saved row's web claims (index,
@@ -533,7 +589,9 @@ preview) and `factcheck-callout.ts` (how the block reads); client half:
   `src/gardener/factcheck-carry.test.ts`. Staleness is
   `summaryFactcheckStale` (`factcheck-body.ts`, shared with `/result` and
   export): Share says the summary "still states" the claims only when the
-  check matches the source file, else "may"; Ask reads no file and always says
+  check matches the source file, else "may"; the source drafter's rider follows
+  the same rule over the same raw file (`readSourceText`, read only for a row
+  with a ❌/⚠️ claim); Ask reads no file and always says
   "may". Ask: both "Ask a follow-up" setters add
   `factcheck=<source>:<docId>` for a registered source, `/research` sends it on
   every ask until ＋ New conversation clears it, and `/api/research/ask` adds
