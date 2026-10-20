@@ -3,8 +3,9 @@ import { renderWikiHtml } from "../wiki/render.ts";
 import { checkPageText } from "../wiki/lint.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { GATE_BAR_AFTER_HEADERS, FUNNEL_OF_HEADERS } from "./chart-block.ts";
-import { CHART_WORDS, stepsAxisDecimals, stepsLabelIndexes, STEPS_X_LABELS_MAX } from "./chart-view.ts";
+import { CHART_CHROME_CLASSES, CHART_WORDS, stepsAxisDecimals, stepsLabelIndexes, STEPS_X_LABELS_MAX } from "./chart-view.ts";
 import { headerKey } from "./delta-table.ts";
+import { PEEK_CHART_CHROME } from "../dashboard/views/components/wiki-ref-links.ts";
 
 // Invented pages only.
 
@@ -48,6 +49,10 @@ describe("the chart view's words", () => {
 });
 
 describe("the section", () => {
+  test("a peek strips exactly the chart's chrome", () => {
+    expect([...PEEK_CHART_CHROME]).toEqual([...CHART_CHROME_CLASSES]);
+  });
+
   const html = reader(gate(["| a | 2 | 3 | 2 |"]));
 
   test("is a figure named by its caption, with a kind class", () => {
