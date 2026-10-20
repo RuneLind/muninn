@@ -528,8 +528,10 @@ describe("C: PR refs, the token kinds × the cells they sit in", () => {
     expect(parseLedgerTable(["PR", "State"], [["PR #5 1 — y", "open"]]).rows[0]).toMatchObject({ slate: 5, link: 5, pr: 5 });
   });
 
-  test("a 1 MB cell of near-refs finishes in under 1 s", () => {
-    const MB = (unit: string): string => unit.repeat(Math.ceil(1_000_000 / unit.length));
+  // 256 KB, not 1 MB: a CI runner took 1.4 s at 1 MB (linear); a quadratic
+  // scan takes minutes at this size, so the bound still separates them.
+  test("a 256 KB cell of near-refs finishes in under 1 s", () => {
+    const MB = (unit: string): string => unit.repeat(Math.ceil(256_000 / unit.length));
     for (const cell of [
       `merged ${MB("a")} #5`,
       `merged ${MB("a-")}#5`,
@@ -616,8 +618,8 @@ describe("round-3 pins: ref shapes and rule 3", () => {
   const prCell = (cell: string) => parseLedgerTable(["Fase", "PR", "State"], [["a", cell, "open"]]).rows[0];
   const landed = (cell: string) => parseLedgerTable(["PR", "State", "Landed"], [["1", "", cell]]).rows[0]!;
 
-  test("a state cell of 1 MB with no `#` after the run parses in under 1 s", () => {
-    const n = 500_000;
+  test("a state cell of 256 KB with no `#` after the run parses in under 1 s", () => {
+    const n = 128_000;
     for (const cell of ["merged " + "a-".repeat(n), "merged " + "a.".repeat(n)]) {
       const t = performance.now();
       const r = parseLedgerTable(["PR", "State"], [["1", cell]]).rows[0]!;
