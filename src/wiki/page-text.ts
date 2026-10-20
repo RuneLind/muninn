@@ -57,8 +57,10 @@ function closingFenceAt(content: string): number {
  * {@link splitFrontmatter} finds — or 0 for a page with no frontmatter. The
  * line-indexed form of the same boundary, for readers that walk lines: the
  * `owns:`/`related:` readers and lint check 14. `frontmatterEndLine`
- * (`wiki-integrate.ts`) is the fact-check paths' rule and also ends at an
- * indented `---`.
+ * (`wiki-integrate.ts`) is an older rule that also ends at an indented `---`;
+ * the fact-check paths and the other line-walking lint checks (9, 10, 11, 12,
+ * 16 and the index-truncation and fact-mark checks) still read it, so the
+ * linter has two frontmatter boundaries.
  */
 export function frontmatterBodyLine(content: string): number {
   const end = closingFenceAt(content);

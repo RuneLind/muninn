@@ -24,11 +24,14 @@
  *
  * **A page's data files are judged too.** The reader runs a `<CaseBoard>`
  * case's `note` and `kort` through the inline renderer, so a tag there is a
- * component on the page. The caller passes what `loadPageFiles` read; each
- * file that holds a component name is rendered with the page alone, and the
- * tags it adds over the render with no files are judged, each distinct tag
- * once per file (refs resolving to one path are one file, named by the first
- * ref). Their findings have no line and say `In <ref>: ` first.
+ * component on the page. The caller passes what `loadPageFiles` read (every
+ * `<Query>`, `<CaseBoard>` and `<DeltaTable>` file the page names). Refs that
+ * resolve to one path are one file, named by the first ref. For each file whose
+ * text holds a component name, the page is rendered with that file as its only
+ * file (every ref to it mapped to it); the tags that render reads beyond the
+ * render with no files are judged, each distinct tag once per file. A file
+ * with no component name is not rendered. Their findings have no line and say
+ * `In <ref>: ` first.
  *
  * **Where a tag is** comes from a second render of the same page with a marker
  * attribute (`muninnlintmark="N"`) inserted after every `<Name` of a component

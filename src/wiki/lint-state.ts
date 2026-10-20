@@ -302,7 +302,8 @@ function startsBlock(t: string): boolean {
  * is linted.
  */
 export function stateLineRoles(content: string): LineRoles {
-  // Folded so a CRLF fence is a fence: `fencedLineMask` reads "```\r" as no fence.
+  // Folded once, so `lines`, the frontmatter boundary and `readerFencedLines`
+  // (which folds its own input too) all count the same lines.
   const folded = content.replace(/\r\n/g, "\n");
   const lines = folded.split("\n");
   // The store's boundary: a column-0 `---` ends the frontmatter, so an indented

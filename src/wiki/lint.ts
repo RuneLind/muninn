@@ -172,8 +172,9 @@ export const LINT_CHECKS = [
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
-/** The checks that read nothing but a page's own text, its relPath and the
- *  reader config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16 and 17). Check
+/** The checks that read a page's own text, its relPath and the reader
+ *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16 and 17), and
+ *  for check 15 the data files the page names ({@link pageTextFiles}). Check
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
  *  through {@link checkPageText}, and `scripts/wiki-check.ts` runs the same
@@ -996,9 +997,12 @@ export function checkPageText(
 export const judgesComponents = (page: Pick<PageTextRef, "relPath" | "culled">): boolean =>
   !page.culled && page.relPath.toLowerCase().endsWith(".mdx");
 
-/** The files a page check 15 judges reads beside itself — a `<CaseBoard>`'s
- *  YAML — read the way the reader reads them (`loadPageFiles`, under the wiki
- *  root's containment check). None for a page the check skips. */
+/** The files a page check 15 judges reads beside itself, read the way the
+ *  reader reads them (`loadPageFiles`, under the wiki root's containment
+ *  check): every `<Query>` `csv=`/`sql=` and every `<CaseBoard>`/`<DeltaTable>`
+ *  `src=`, not only a `<CaseBoard>`'s YAML, on every lint run. A file with no
+ *  component name in it is read and not rendered. None for a page the check
+ *  skips. */
 export async function pageTextFiles(root: string, page: Pick<PageTextRef, "relPath" | "culled">, content: string): Promise<LoadedPageFiles> {
   return judgesComponents(page) ? loadPageFiles(root, page.relPath, content) : new Map();
 }

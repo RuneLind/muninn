@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * The lint checks that read only a page's own text (`checkPageText`,
+ * The lint checks that read a page's own text, and for the component checks
+ * the data files it names (`pageTextFiles`) (`checkPageText`,
  * `src/wiki/lint.ts`: index-truncation, nested-annotation, unrendered-fact-mark,
  * question-block, decision-first-sentence, status-row-long, status-tones,
  * status-tile-long, role-key,

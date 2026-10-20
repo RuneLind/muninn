@@ -685,7 +685,9 @@ describe("check 14 pinned edges", () => {
   });
 
   test("a task word does not touch a `.` on its left or a `.x` on its right, in either case class", async () => {
-    const body = ["The config.PR 1 merged.", "The PR.yml merged.", "The PR 1 merged.", "The config.task 1 merged.", "The task.yml merged.", "The task 1 merged.", "We merged PR 1."];
+    // The right-edge rows use the count form (`3 PR.yml`): the named form needs a
+    // number after the word, so without the count a `.x` row passes for any reason.
+    const body = ["The config.PR 1 merged.", "The 3 PR.yml merged.", "The PR 1 merged.", "The config.task 1 merged.", "The 3 task.yml merged.", "The task 1 merged.", "We merged PR 1."];
     expect(await flaggedBody(body)).toEqual([2, 5, 6]);
   });
 
