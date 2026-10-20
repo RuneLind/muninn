@@ -146,6 +146,13 @@ export function buildInlineMcpConfig(botDir: string, onlyKeys?: readonly string[
  *    weakens that fence re-exposes the server WITH a standing grant.
  */
 export function buildInlineSettings(botDir: string): string | null {
+  const merged = mergedBotSettings(botDir);
+  return merged ? JSON.stringify(merged) : null;
+}
+
+/** {@link buildInlineSettings}' merged document as an object, for a caller that
+ *  reads its permission lists instead of passing it on. */
+export function mergedBotSettings(botDir: string): Record<string, unknown> | null {
   const read = (name: string): Record<string, unknown> | null => {
     const path = join(botDir, ".claude", name);
     if (!existsSync(path)) return null;
@@ -178,7 +185,7 @@ export function buildInlineSettings(botDir: string): string | null {
     }
     merged.permissions = perms;
   }
-  return JSON.stringify(merged);
+  return merged;
 }
 
 /**

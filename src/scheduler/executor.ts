@@ -4,7 +4,7 @@ import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
 import { resolveAgentCwd } from "../ai/agent-cwd.ts";
 import { assertHaikuCliAvailable, type HaikuCliFallback } from "../ai/haiku-cli-unavailable.ts";
-import { buildInlineMcpConfig, buildInlineSettings, gmailServerKeys, loadRawMcpServers, unreadableBotConfigs } from "../ai/mcp-config-utils.ts";
+import { buildInlineMcpConfig, gmailServerKeys, loadRawMcpServers, mergedBotSettings, unreadableBotConfigs } from "../ai/mcp-config-utils.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -299,13 +299,14 @@ export const GMAIL_WRITE_TOOLS = [
 /**
  * The bot's Gmail servers only (`.mcp.json` keys containing "gmail", the same
  * rule the liveness predicate uses), and settings that allow only the read tools
- * the bot itself allows, plus `ToolSearch`. `null` when the bot has no Gmail
+ * the bot itself allows and does not deny, plus `ToolSearch`, and keep the bot's
+ * deny rules for those servers. `null` when the bot has no Gmail
  * server, so the caller falls back to the tool-less spawn.
  */
 function gmailReadSurface(botDir: string): { mcpConfig: string; settings: string; disallowed: string[] } | null {
   const keys = gmailServerKeys(loadRawMcpServers(botDir));
   const mcpConfig = keys.length > 0 ? buildInlineMcpConfig(botDir, keys) : null;
-  const botSettings = buildInlineSettings(botDir);
+  const botSettings = mergedBotSettings(botDir);
 
   if (!mcpConfig) {
     warnOnce(`mcp:${botDir}`,
@@ -330,23 +331,27 @@ function gmailReadSurface(botDir: string): { mcpConfig: string; settings: string
   }
   if (!mcpConfig) return null;
 
-  const botAllow = new Set<string>();
-  try {
-    const perms = botSettings ? (JSON.parse(botSettings) as { permissions?: { allow?: unknown } }).permissions : undefined;
-    if (Array.isArray(perms?.allow)) for (const a of perms.allow) if (typeof a === "string") botAllow.add(a);
-  } catch { /* buildInlineSettings emits JSON it built itself */ }
+  const perms = botSettings?.permissions as { allow?: unknown; deny?: unknown } | undefined;
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  const botAllow = new Set(list(perms?.allow));
+  const botDeny = new Set(list(perms?.deny));
+  const covers = (rules: Set<string>, key: string, name: string) =>
+    rules.has(name) || rules.has(`mcp__${key}`) || rules.has(`mcp__${key}__*`);
   const allow = ["ToolSearch"];
   for (const key of keys) {
-    const serverWide = botAllow.has(`mcp__${key}`) || botAllow.has(`mcp__${key}__*`);
     for (const tool of GMAIL_READ_TOOLS) {
       const name = `mcp__${key}__${tool}`;
-      if (serverWide || botAllow.has(name)) allow.push(name);
+      // A bot's deny beats its allow, as it did when the spawn ran in the bot dir.
+      if (covers(botAllow, key, name) && !covers(botDeny, key, name)) allow.push(name);
     }
   }
+  // Carried too, because deny wins across scopes: a user-scope allow naming the
+  // server must not re-grant a read the bot itself denies.
+  const deny = [...botDeny].filter((rule) => keys.some((key) => rule === `mcp__${key}` || rule.startsWith(`mcp__${key}__`)));
   const disallowed = keys.flatMap((key) => GMAIL_WRITE_TOOLS.map((tool) => `mcp__${key}__${tool}`));
   return {
     mcpConfig,
-    settings: JSON.stringify({ permissions: { allow, defaultMode: "dontAsk" } }),
+    settings: JSON.stringify({ permissions: { allow, ...(deny.length > 0 ? { deny } : {}), defaultMode: "dontAsk" } }),
     disallowed,
   };
 }

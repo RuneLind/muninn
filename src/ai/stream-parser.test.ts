@@ -234,6 +234,27 @@ describe("StreamParser", () => {
     expect(result.toolCalls![0]!.output).toBeUndefined();
   });
 
+  test("a drained call is flagged unterminated; a call that got its tool_result is not", () => {
+    // The email watcher's liveness reads this: a search_emails with no result
+    // must not count as a search that came back.
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_A", name: "mcp__gmail__list_email_labels", input: {} },
+      { type: "tool_use", id: "toolu_B", name: "mcp__gmail__search_emails", input: {} },
+    ])), 100);
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_A", content: "labels", is_error: false },
+    ])), 200);
+    parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), 300);
+
+    const calls = parser.getResult().toolCalls!;
+    expect(calls.map((c) => [c.name, c.unterminated])).toEqual([
+      ["mcp__gmail__list_email_labels", undefined],
+      ["mcp__gmail__search_emails", true],
+    ]);
+  });
+
   test("handles multiple sequential tool turns", () => {
     const t0 = 0;
     const parser = new StreamParser(t0);

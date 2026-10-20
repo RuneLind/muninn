@@ -273,7 +273,7 @@ export class StreamParser {
     }
   }
 
-  private pushResolved(pending: PendingToolCall, endTimestamp: number): void {
+  private pushResolved(pending: PendingToolCall, endTimestamp: number, unterminated = false): void {
     const durationMs = Math.max(0, Math.round(endTimestamp - pending.startTimestamp));
     const startOffsetMs = Math.max(0, Math.round(pending.startTimestamp - this.refTimestamp));
     const displayName = formatToolDisplayName(pending.name);
@@ -289,6 +289,7 @@ export class StreamParser {
       searchTracePointer: pending.searchTracePointer,
       searchTraceFetch: pending.searchTraceFetch,
       ...(pending.isError ? { isError: true } : {}),
+      ...(unterminated ? { unterminated: true } : {}),
     });
     this.onProgress?.({
       type: "tool_end",
@@ -299,10 +300,11 @@ export class StreamParser {
     });
   }
 
-  /** Final-flush safety net for tools that never received a matching tool_result. */
+  /** Final-flush safety net for tools that never received a matching tool_result.
+   *  Flagged `unterminated`: the call has no result, so nothing may read it as a success. */
   private drainPendingTools(endTimestamp: number): void {
     for (const pending of this.pendingTools) {
-      this.pushResolved(pending, endTimestamp);
+      this.pushResolved(pending, endTimestamp, true);
     }
     this.pendingTools = [];
   }

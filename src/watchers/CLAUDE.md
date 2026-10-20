@@ -565,8 +565,9 @@ The email spawn opts into `toolSurface: "gmail-read"` (`buildHaikuArgs`,
 `src/scheduler/executor.ts`): the Gmail server only, `ToolSearch` plus the three
 Gmail reads, `dontAsk`, the known writes disallowed. Every other watcher spawn is
 tool-less (`--tools ""`). A run counts as reached only on a `search_emails`
-call whose `tool_result` did not come back `is_error` (`ToolCall.isError`, set by
-`StreamParser`): under `dontAsk` a denied read is exactly that, and a successful
+call whose `tool_result` arrived and did not come back `is_error` (`ToolCall.isError`
+and `ToolCall.unterminated`, both set by `StreamParser`; a call the stream ended on
+before its result is `unterminated`): under `dontAsk` a denied read is `is_error`, and a successful
 `list_email_labels` beside a failed search covers no window. A bot whose
 `.mcp.json` has no key containing "gmail" fails the check before the spawn
 (`missingGmailServerMessage`) instead of answering `[]` from a tool-less spawn. Email bodies are not content-fenced; the model reads them through a

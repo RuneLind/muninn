@@ -418,6 +418,28 @@ describe("checkEmail coverage reporting", () => {
     expect(gmailLiveness([{ name: "mcp__gmail__search_emails" }], botDirWithGmail)).toEqual({ reached: true, failure: null });
   });
 
+  test("gmailLiveness: a search_emails the stream ended on before its tool_result is not reached", async () => {
+    // Through the real parser, so the flag gmailLiveness reads is the one the
+    // parser sets — not a hand-written fixture of it.
+    const { StreamParser } = await import("../ai/stream-parser.ts");
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify({ type: "system", subtype: "init", session_id: "s", tools: [] }), 0);
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "toolu_S", name: "mcp__gmail__search_emails", input: {} }], model: "m" },
+      parent_tool_use_id: null,
+    }), 100);
+    parser.parseLine(JSON.stringify({
+      type: "result", subtype: "success", session_id: "s", is_error: false, num_turns: 1, result: "[]",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }), 200);
+
+    expect(gmailLiveness(parser.getResult().toolCalls, botDirWithGmail)).toMatchObject({
+      reached: false,
+      failure: expect.stringContaining("mcp__gmail__search_emails (no result)"),
+    });
+  });
+
   test("does NOT claim coverage when the liveness predicate fails on every attempt", async () => {
     spawnScript = [
       { toolCalls: [{ name: "ToolSearch" }], result: "[]" },

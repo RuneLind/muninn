@@ -419,32 +419,33 @@ export function shouldStartEmailAttempt(attempt: number, remainingMs: number): b
  * {@link missingGmailServerMessage} fails the check before the spawn.
  */
 export function gmailLiveness(
-  toolCalls: { name: string; isError?: boolean }[] | undefined,
+  toolCalls: { name: string; isError?: boolean; unterminated?: boolean }[] | undefined,
   botDir: string | undefined,
 ): { failure: string | null; reached: boolean } {
   const prefixes = toolCalls ? gmailToolPrefixes(botDir) : null;
   // Reached means a `search_emails` call that came back without `is_error`. A
   // successful `list_email_labels` or `read_email` beside a failed search covers no
   // window: the search is the only call that reads the window the watermark claims.
-  // An errored call (a `dontAsk` denial, an API error, a rate limit) is not reached.
+  // An errored call (a `dontAsk` denial, an API error, a rate limit) is not reached,
+  // nor is an `unterminated` one: the stream ended before its result arrived.
   // The probe's `gmailError` (`scripts/probe-toolsearch-deferral.ts`) asks another
   // question: it flags a run when ANY Gmail call errored.
   const reachedGmail = toolCalls?.some(
-    (t) => typeof t.name === "string" && t.isError !== true &&
+    (t) => typeof t.name === "string" && t.isError !== true && t.unterminated !== true &&
       prefixes?.some((p) => t.name === `${p}${GMAIL_SEARCH_TOOL}`),
   );
   return { failure: livenessFailureMessage(toolCalls, prefixes, reachedGmail), reached: reachedGmail === true };
 }
 
 function livenessFailureMessage(
-  toolCalls: { name: string; isError?: boolean }[] | undefined,
+  toolCalls: { name: string; isError?: boolean; unterminated?: boolean }[] | undefined,
   prefixes: string[] | null,
   reachedGmail: boolean | undefined,
 ): string | null {
   // `prefixes === null` here means no botDir: `checkEmail` fails a bot with no
   // Gmail server before the spawn, so this is the botDir-less caller only.
   if (!toolCalls || !prefixes || reachedGmail) return null;
-  const called = [...new Set(toolCalls.map((t) => `${String(t.name)}${t.isError ? " (error)" : ""}`))].join(", ") || "none";
+  const called = [...new Set(toolCalls.map((t) => `${String(t.name)}${t.isError ? " (error)" : t.unterminated ? " (no result)" : ""}`))].join(", ") || "none";
   return (
     `Email check made no successful Gmail ${GMAIL_SEARCH_TOOL} call (${toolCalls.length} tool call(s): ${called}) — ` +
     `the empty result is not a quiet inbox`

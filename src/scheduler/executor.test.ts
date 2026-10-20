@@ -434,6 +434,50 @@ describe("buildHaikuArgs", () => {
     }
   });
 
+  test("gmail-read grants the three reads to a bot that allows mcp__<key>__*", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
+      mkdirSync(join(root, ".claude"), { recursive: true });
+      writeFileSync(join(root, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["mcp__gmail__*"] } }));
+      const settings = JSON.parse(flag(buildHaikuArgs({ ...base, botDir: root, toolSurface: "gmail-read" }), "--settings")!);
+      expect(settings.permissions.allow).toEqual([
+        "ToolSearch", "mcp__gmail__search_emails", "mcp__gmail__read_email", "mcp__gmail__list_email_labels",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gmail-read keeps the bot's deny: a denied read is not allowed, and the deny is carried", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
+      mkdirSync(join(root, ".claude"), { recursive: true });
+      writeFileSync(
+        join(root, ".claude", "settings.json"),
+        JSON.stringify({ permissions: { allow: ["mcp__gmail"], deny: ["mcp__gmail__read_email", "Bash"] } }),
+      );
+      let settings = JSON.parse(flag(buildHaikuArgs({ ...base, botDir: root, toolSurface: "gmail-read" }), "--settings")!);
+      expect(settings).toEqual({
+        permissions: {
+          allow: ["ToolSearch", "mcp__gmail__search_emails", "mcp__gmail__list_email_labels"],
+          // Only the Gmail rules travel; `Bash` names no tool on this surface.
+          deny: ["mcp__gmail__read_email"],
+          defaultMode: "dontAsk",
+        },
+      });
+
+      // A server-wide deny in the LOCAL file beats the shared file's allow.
+      writeFileSync(join(root, ".claude", "settings.local.json"), JSON.stringify({ permissions: { deny: ["mcp__gmail__*"] } }));
+      settings = JSON.parse(flag(buildHaikuArgs({ ...base, botDir: root, toolSurface: "gmail-read" }), "--settings")!);
+      expect(settings.permissions.allow).toEqual(["ToolSearch"]);
+      expect(settings.permissions.deny).toEqual(["mcp__gmail__read_email", "mcp__gmail__*"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("gmail-read on a bot with no Gmail server falls back to the tool-less spawn", () => {
     const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
@@ -599,6 +643,12 @@ describe("spawnHaiku degrade warnings", () => {
       buildHaikuArgs({ prompt: "x", model: "m" });
       buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
       expect(records).toHaveLength(0);
+
+      // Asking for Gmail with no botDir to find it in is a caller bug: one warn.
+      buildHaikuArgs({ ...gmailRead });
+      buildHaikuArgs({ ...gmailRead });
+      expect(records.filter((r) => r.includes("without a botDir"))).toHaveLength(1);
+      records.length = 0;
 
       // The case the two checks above structurally CANNOT see: a corrupt
       // settings.json next to a healthy settings.local.json. The merge returns

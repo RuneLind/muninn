@@ -358,6 +358,26 @@ interface SpawnSonnetResult {
 }
 
 /**
+ * The judge's `claude -p` argv. Tool-less: the judge reads the answers under
+ * test, which quote retrieved third-party text, so it gets no built-in tool and
+ * no MCP server (`--strict-mcp-config` with no `--mcp-config` also keeps the
+ * user-scope servers out).
+ */
+export function buildJudgeArgs(prompt: string, model: string): string[] {
+  return [
+    "claude",
+    "-p",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--model", model,
+    "--tools", "",
+    "--strict-mcp-config",
+    "--", prompt,
+  ];
+}
+
+/**
  * Spawn Claude CLI in stream-json mode and parse output line-by-line so the
  * caller can observe progress in real time via `onProgress`.
  *
@@ -377,21 +397,8 @@ async function spawnSonnetStreaming(
   // context this judge doesn't need. Was a bare `/tmp`; the shared helper adds a
   // stable per-caller project folder, so judge sessions group under their own
   // name instead of an anonymous `-tmp` pile.
-  //
-  // Tool-less: the judge reads the answers under test, which quote retrieved
-  // third-party text, so it gets no built-in tool and no MCP server.
   const proc = Bun.spawn(
-    [
-      "claude",
-      "-p",
-      "--output-format", "stream-json",
-      "--verbose",
-      "--include-partial-messages",
-      "--model", model,
-      "--tools", "",
-      "--strict-mcp-config",
-      "--", prompt,
-    ],
+    buildJudgeArgs(prompt, model),
     {
       cwd: resolveAgentCwd("benchmark-judge"),
       env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "benchmark-judge" },
