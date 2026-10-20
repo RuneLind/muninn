@@ -4,7 +4,7 @@ import path from "node:path";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
 import { parseBlocks } from "./markdown-ast.ts";
-import { CHAIN_VIEW_MIN, STATE_LOOKS, STRIP_VIEW_MIN, viewSlot } from "./decision-views.ts";
+import { CHAIN_VIEW_MIN, STATE_LOOKS, STRIP_VIEW_MIN, pageDecisionData, viewSlot } from "./decision-views.ts";
 import { decisionViewsCss } from "./component-styles.ts";
 import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
 import { PEEK_SKIP, PEEK_STRIP_SELECTOR } from "../dashboard/views/components/wiki-ref-links.ts";
@@ -356,5 +356,25 @@ describe("M1/M2: the strip's group is a decision the chain view shows the PR und
     const html = formatWebHtml(["# Plan", "", NEXT, log, ledger(["| 5 — reader | merged | D99, D3 |", ...rest])].join("\n"), { reader: true, views: true });
     expect(stripGroups(html)).toEqual(["→D3: 5=merged 7=open", "→D4: 8=planned", "No decision: 9=planned"]);
     expect(html).not.toContain('data-dc-ref="D99"');
+  });
+});
+
+// Cleanup batch: the row's own cited decision outranks the oldest chain naming its PR.
+describe("the strip prefers the row's cited decision over an older chain naming its PR", () => {
+  // A second, older ledger has PR 5 citing D1, so D1's chain names PR 5 too
+  // (a ledger row citing a decision suppresses the prose edge).
+  const log = ["<DecisionLog>", "", "- **D1** — Build the reader.", "- **D4** — Ship the reader.", "", "</DecisionLog>", ""].join("\n");
+  const ledger = (title: string, rows: string[]) => [`**${title}.**`, "", "| PR | State | Decisions |", "|---|---|---|", ...rows, ""].join("\n");
+
+  test("a row citing D4 groups under D4, not the older unreversed D1", () => {
+    const current = ledger("PR ledger", ["| 5 — reader | merged | D4 |", "| 7 — a | open | D1 |", "| 8 — b | planned | D1 |", "| 9 — c | planned | |"]);
+    const old = ledger("PR ledger (old)", ["| 5 — reader | dropped | D1 |", "| 6 — x | dropped | D1 |"]);
+    const page = ["# Plan", "", NEXT, log, current, old].join("\n");
+    // Precondition: the older D1 is unreversed and its chain names PR 5.
+    const d1 = pageDecisionData(parseBlocks(page)).analysis.chains.find((c) => c.decision === "D1");
+    expect(d1?.reversed).toBeNull();
+    expect(d1?.outputs.map((o) => o.number)).toContain(5);
+    const html = formatWebHtml(page, { reader: true, views: true });
+    expect(stripGroups(html)).toEqual(["→D4: 5=merged", "→D1: 7=open 8=planned 6=dropped", "No decision: 9=planned"]);
   });
 });

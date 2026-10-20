@@ -153,10 +153,10 @@ function square(r: LedgerRow, language: QuestionLanguage): string {
 
 /** The PR strip: one square per PR over the drawing ledgers (the first row
  *  wins), grouped by the first decision the row cites that the log has, else
- *  by the oldest unreversed decision whose chain names that PR (a later
- *  decision's «PR n» is usually a reference back), else by the row's
- *  first cited id, unlinked; groups in order of first appearance; "" under
- *  `STRIP_VIEW_MIN` squares. */
+ *  by the oldest unreversed decision whose chain names that PR, else by the
+ *  row's first cited id, unlinked; groups in order of first appearance; ""
+ *  under `STRIP_VIEW_MIN` squares. «Oldest»: «newest» moved three real pages'
+ *  PRs to decisions that only mention them; the oldest usually created it. */
 export function prStripHtml(ledgers: Ledger[], language: QuestionLanguage, analysis: ChainAnalysis): string {
   const rows = firstRowPerPr(ledgers.filter((l) => l.draws));
   if (rows.length < STRIP_VIEW_MIN) return "";
