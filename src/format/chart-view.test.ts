@@ -239,6 +239,17 @@ describe("funnel", () => {
   });
 });
 
+describe("gate legend", () => {
+  test("the pass key names the pass column and the hold key the hold column, each on its own swatch", () => {
+    const out = reader(chart('<Chart kind="gate" bar="Floor" pass="Kept" hold="Spare">', ["| S | Floor | Kept | Spare |", "|---|---|---|---|", "| a | 2 | 3 | 2 |"]));
+    const legend = out.match(/<div class="vc-legend"[^>]*>(.*?)<\/div>/)?.[1] ?? "";
+    const keys = [...legend.matchAll(/<span class="vc-sw ([a-z-]+)"[^>]*><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]}=${m[2]}`);
+    expect(keys).toEqual(["vc-k-value=Kept", "vc-k-hold=Spare", "vc-k-target=bar"]);
+    // The plot draws the hold as its own mark class, which the stylesheet outlines and dashes.
+    expect(out).toContain('<rect class="vc-hold"');
+  });
+});
+
 describe("gate pills", () => {
   test("a gate row shows its PR's ledger state with the dc-s classes", () => {
     const md = ["## PR ledger", "", "| PR | What | State |", "|---|---|---|", "| 31 | a | merged |", "| 32 | b | open |", "", gate(["| PR 31 — a | 2 | 3 | 3 |", "| 32 b | 2 | 3 | 3 |", "| 12–40 | 2 | 3 | 3 |"])].join("\n");

@@ -135,6 +135,25 @@ const PAGE = [
   "",
   "</Chart>",
   "",
+  // A section that opens on a chart: its chrome (head, two plots, legend)
+  // carries over 400 chars of text, its table under 400, so the peek's
+  // length budget reaches the line after it only when counted on the copy.
+  "## Peek lanes",
+  "",
+  '<Chart kind="gap" caption="Peek lanes" value="Now" target="Goal" gap="Gap">',
+  "",
+  "| Lane | Now | Goal | Gap |",
+  "|---|---|---|---|",
+  "| Lane north of the river | 14 | 22 | 8 |",
+  "| Lane south of the river | 9 | 16 | 7 |",
+  "| Lane east by the old mill | 21 | 24 | 3 |",
+  "| Lane west past the field | 5 | 12 | 7 |",
+  "| Lane through the orchard | 17 | 19 | 2 |",
+  "",
+  "</Chart>",
+  "",
+  "The line after the peek lanes chart.",
+  "",
   "## Decisions",
   "",
   "<DecisionLog>",
@@ -142,6 +161,8 @@ const PAGE = [
   "- **D3** — Rows ship first.",
   "",
   "</DecisionLog>",
+  "",
+  "See «Peek lanes» for a section that opens on a chart.",
   "",
 ].join("\n");
 
@@ -190,7 +211,7 @@ const visiblePlot = (c: Locator) => c.locator(":scope > .vc-plot:not([hidden])")
 async function open(page: Page, width: number, focus = false): Promise<void> {
   await page.setViewportSize({ width, height: 900 });
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
-  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(6);
+  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(7);
   if (focus) {
     await page.locator("body").press("f");
     await expect(page.locator("#wikiFocusExit")).toBeVisible();
@@ -350,6 +371,77 @@ test.describe("Wiki reader: Chart", () => {
     await expect(peek.locator("table")).toContainText("PR 31");
     await expect(peek.locator(".vc-head, .vc-plot, .vc-legend, .vc-notes, svg")).toHaveCount(0);
     await expect(peek.locator("[class*='vc'], [data-vc-mode], [data-vc-variant], [data-vc-plot]")).toHaveCount(0);
+  });
+
+  test("a peek counts its length on the stripped copy: a chart's chrome does not use up the budget", async ({ page }) => {
+    await open(page, 1280);
+    const c = chart(page, "gap", "Peek lanes");
+    // The fixture's premise: over the 400-char budget with chrome, under it without.
+    const [whole, bare] = await c.evaluate((s) => {
+      const copy = s.cloneNode(true) as Element;
+      copy.querySelectorAll(".vc-head, .vc-plot, .vc-legend, .vc-notes").forEach((e) => e.remove());
+      return [(s.textContent ?? "").trim().length, (copy.textContent ?? "").trim().length];
+    });
+    expect(whole).toBeGreaterThan(400);
+    expect(bare).toBeLessThan(400);
+    await page.locator(".wiki-article a.wiki-ref", { hasText: "Peek lanes" }).first().hover();
+    const peek = page.locator(".wiki-ref-peek");
+    await expect(peek).toBeVisible();
+    await expect(peek.locator("table")).toContainText("Lane through the orchard");
+    await expect(peek).toContainText("The line after the peek lanes chart.");
+  });
+
+  test("the gate legend names pass and hold apart, and the hold reads apart beyond hue", async ({ page }) => {
+    await open(page, 1280);
+    const c = chart(page, "gate");
+    const legend = c.locator(".vc-legend .vc-key");
+    await expect(legend).toHaveText(["Pass", "Hold", "bar"]);
+    await expect(legend.nth(0).locator(".vc-sw.vc-k-value")).toHaveCount(1);
+    await expect(legend.nth(1).locator(".vc-sw.vc-k-hold")).toHaveCount(1);
+    const css = (sel: string, props: string[]) =>
+      c.locator(sel).first().evaluate((e, ps) => ps.map((p) => getComputedStyle(e).getPropertyValue(p)), props);
+    // Legend: the pass swatch is a filled block, the hold swatch a dashed outline on no fill.
+    expect(await css(".vc-legend .vc-k-value", ["border-top-style", "background-color"])).not.toContain("dashed");
+    const [holdBorder, holdBg] = await css(".vc-legend .vc-k-hold", ["border-top-style", "background-color"]);
+    expect(holdBorder).toBe("dashed");
+    expect(holdBg).toBe("rgba(0, 0, 0, 0)");
+    // Plot: the pass bar is filled and solid, the hold mark an unfilled dashed outline.
+    const [valueFill, valueDash] = await css(".vc-plot:not([hidden]) rect.vc-value", ["fill", "stroke-dasharray"]);
+    expect(valueFill).not.toBe("none");
+    expect(valueDash).toBe("none");
+    const [holdFill, holdDash, holdStroke] = await css(".vc-plot:not([hidden]) rect.vc-hold", ["fill", "stroke-dasharray", "stroke-width"]);
+    expect(holdFill).toBe("none");
+    expect(holdDash).not.toBe("none");
+    expect(parseFloat(holdStroke!)).toBeGreaterThan(0);
+  });
+
+  test("right to left, the segmented buttons round their outer corners and drop the inner border on the start side", async ({ page }) => {
+    await open(page, 1280);
+    const c = chart(page, "gate");
+    await c.evaluate((s) => s.setAttribute("dir", "rtl"));
+    const group = c.locator(".vc-group").first();
+    const btns = group.locator(".vc-btn");
+    expect(await btns.count()).toBeGreaterThan(1);
+    const corners = (b: Locator) =>
+      b.evaluate((e) => {
+        const s = getComputedStyle(e);
+        return {
+          tl: s.borderTopLeftRadius,
+          tr: s.borderTopRightRadius,
+          bl: s.borderBottomLeftRadius,
+          br: s.borderBottomRightRadius,
+          lw: s.borderLeftWidth,
+          rw: s.borderRightWidth,
+        };
+      });
+    const first = await corners(btns.first());
+    const last = await corners(btns.last());
+    // RTL: the first button sits at the right edge, the last at the left.
+    expect([first.tr, first.br, first.tl, first.bl]).toEqual(["6px", "6px", "0px", "0px"]);
+    expect([last.tl, last.bl, last.tr, last.br]).toEqual(["6px", "6px", "0px", "0px"]);
+    // A following button drops its start (right) border, keeping its end (left) one.
+    expect(last.rw).toBe("0px");
+    expect(last.lw).not.toBe("0px");
   });
 
   test("an Explain selection across a chart locates in the page source", async ({ page }) => {
