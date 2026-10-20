@@ -168,7 +168,7 @@ import {
 } from "./wiki-groups.ts";
 import { railInputFor, threadPinAnchor, workBoundariesOf } from "./wiki-rail-input.ts";
 import { rowBoundaryAction, type WorkBoundaries } from "./wiki-work-boundaries.ts";
-import { readSeriesBasesAfterWrites, seriesConflictCopy, trackSeriesWrite, writeSeriesUnlessOpenChanged, type OpenPageAtLoad, type SeriesPostAnswer } from "./wiki-series-write.ts";
+import { readSeriesBasesAfterWrites, SERIES_REQUEST_TIMEOUT_MS, SERIES_STALLED_COPY, seriesBaseReader, seriesConflictCopy, seriesPoster, trackSeriesWrite, withinSeriesBound, writeSeriesUnlessOpenChanged, type OpenPageAtLoad } from "./wiki-series-write.ts";
 import { checkNewSeriesKey, recheckSaveAsSeries } from "./wiki-work-series.ts";
 import {
   DEFAULT_ACTIVITY_WEIGHTS,
@@ -3789,9 +3789,14 @@ interface SeriesMenuState {
    *  beats the fetches waits for it instead of racing them. */
   basesReady: Promise<void>;
   /** The open page as loaded, taken with the bases once the reader's own
-   *  writes in flight have settled: a write to it is refused before any write
-   *  when its base read at open differs (`writeSeriesUnlessOpenChanged`). */
+   *  writes in flight have settled: at the click, a verb that writes it is
+   *  refused before any write when its base read at open differs
+   *  (`writeSeriesUnlessOpenChanged`). */
   open: OpenPageAtLoad;
+  /** The base read gave up waiting for an earlier save of the reader's
+   *  (`readSeriesBasesAfterWrites`' bound): every verb is refused with
+   *  `SERIES_STALLED_COPY`, and the menu is free again. */
+  stalled: boolean;
   /** Set when the held bases no longer describe the files on disk — a write
    *  came back 409, or one of this menu's own writes landed and the popover
    *  stayed open to report it. Either way no further write may go out under
@@ -3935,6 +3940,7 @@ function openSeriesMenu(anchor: HTMLElement, relPath: string, edit: boolean): vo
     bases: new Map(),
     basesReady: Promise.resolve(),
     open: openPageAtLoad(),
+    stalled: false,
     staleBases: false,
     staleNote: "Close and reopen this menu — the page has changed",
   };
@@ -3976,10 +3982,12 @@ function adoptOwnSeriesHashes(hashes: ReadonlyMap<string, string>): void {
  *
  * The open page's base is read FRESH too, by Save as series' rule (arch
  * review 2026-10, finding 66): its load-time hash made every reopen after a
- * 409 send the same stale base. `writeSeriesUnlessOpenChanged` compares it
- * with `state.open` and refuses before writing. Both are taken after the
- * reader's own writes in flight settle (`readSeriesBasesAfterWrites`), or a
- * menu opened during one blames the reader for their own change.
+ * 409 send the same stale base. At the click, `writeSeriesUnlessOpenChanged`
+ * compares it with `state.open` and refuses a verb that writes the open page
+ * before writing. Both are taken after the reader's own writes in flight
+ * settle (`readSeriesBasesAfterWrites`), or a menu opened during one blames
+ * the reader for their own change; a wait past the bound marks the menu
+ * `stalled` instead, and every verb is refused with copy that says so.
  */
 function loadSeriesBases(state: SeriesMenuState): Promise<void> {
   const { model, edit } = state;
@@ -3988,8 +3996,9 @@ function loadSeriesBases(state: SeriesMenuState): Promise<void> {
     if (model.headRel) targets.add(model.headRel);
     for (const m of model.members) targets.add(m.relPath);
   }
-  return readSeriesBasesAfterWrites([...targets], seriesBaseHash, openPageAtLoad).then(({ bases, open }) => {
+  return readSeriesBasesAfterWrites([...targets], seriesBaseHash, openPageAtLoad).then(({ bases, open, stalled }) => {
     state.open = open;
+    state.stalled = stalled;
     for (const [rel, hash] of bases) state.bases.set(rel, hash);
   });
 }
@@ -4015,30 +4024,12 @@ function setSeriesMenuNote(state: SeriesMenuState, text: string, bad: boolean): 
   note.textContent = text;
 }
 
-/** The page's current content hash — the CAS base. `null` when the page cannot
- *  be read, which the caller reports rather than writing without one. */
-async function seriesBaseHash(relPath: string): Promise<string | null> {
-  try {
-    const res = await fetch(withWiki(`/api/wiki/page?relPath=${encodeURIComponent(relPath)}`));
-    const data = (await res.json()) as { hash?: unknown };
-    return typeof data.hash === "string" && data.hash ? data.hash : null;
-  } catch {
-    return null;
-  }
-}
-
-/** `POST /api/wiki/series` for one page. The wiki rides the BODY, not the
- *  query — the Stamp route's contract, and the reason the route reads one
- *  place: a write must name its target in the payload it is validated
- *  against, never in a string the client happened to append. */
-async function postSeriesWrite(write: SeriesWrite & { baseHash: string; batch?: "defer" | "last" }): Promise<SeriesPostAnswer> {
-  const res = await fetch("/api/wiki/series", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ wiki: WIKI, ...write }),
-  });
-  return { ok: res.ok, status: res.status, body: (await res.json().catch(() => null)) as SeriesPostAnswer["body"] };
-}
+/** The page's current content hash — the CAS base — and the series POST,
+ *  both bounded by `SERIES_REQUEST_TIMEOUT_MS` (`wiki-series-write.ts`). A
+ *  base that cannot be read is `null`, which the caller reports rather than
+ *  writing without one. */
+const seriesBaseHash = seriesBaseReader((relPath) => withWiki(`/api/wiki/page?relPath=${encodeURIComponent(relPath)}`));
+const postSeriesWrite = seriesPoster(WIKI);
 
 /**
  * Run the editor's writes, in order, stopping at the first failure.
@@ -4084,7 +4075,7 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
       await state.basesReady;
       // The refusal and the loop are `wiki-series-write.ts`'s, shared with
       // the Work threads' Save as series.
-      const out = await writeSeriesUnlessOpenChanged({ writes, bases: state.bases, open: state.open, post: postSeriesWrite });
+      const out = await writeSeriesUnlessOpenChanged({ writes, bases: state.bases, open: state.open, post: postSeriesWrite, stalled: state.stalled });
       if (out.refusal === null) adoptOwnSeriesHashes(out.run.hashes);
       return out;
     });
@@ -4097,8 +4088,9 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
         // The base this menu has held since it opened describes a file
         // somebody else has moved on from. Every base it holds is suspect
         // now, so the menu stops writing and says which page it was.
-        // The step follows the page: the open one is compared at every open
-        // with the hash it loaded with, so only a reload clears it.
+        // The step follows the page: a reopened menu still holds the open
+        // page's load-time hash, and a verb that writes that page is refused
+        // at the click, so only a reload clears it.
         const copy = seriesConflictCopy(run.failure.write.relPath, currentRelPath);
         state.staleBases = true;
         state.staleNote = copy.again;
@@ -4164,7 +4156,9 @@ async function applySeriesWrites(writes: SeriesWrite[]): Promise<void> {
  * see is false.
  */
 async function refreshAfterSeriesWrite(): Promise<ReceiveOutcome | "error"> {
-  const outcome = await requestPagesAwaited({ refresh: true, force: true });
+  // Bounded: both popovers hold their busy state across this await. A late
+  // answer still lands through the listing's own sequence discipline.
+  const outcome = await withinSeriesBound(requestPagesAwaited({ refresh: true, force: true }), "error");
   repaintSeriesHead();
   // Related work's rows carry series too, and the ⋯ on them is one of the
   // editor's openers.
@@ -5615,10 +5609,11 @@ function setWorkSeriesLocked(state: WorkPopState, locked: boolean, goToo = locke
 }
 
 /** The listing as the server has it NOW (`?refresh=1` rescans), read without
- *  applying it; `null` when it cannot be read. */
+ *  applying it; `null` when it cannot be read, or not within
+ *  `SERIES_REQUEST_TIMEOUT_MS` (Save as series holds its popover meanwhile). */
 async function freshListing(): Promise<WikiListing[] | null> {
   try {
-    const res = await fetch(withWiki("/api/wiki/pages?refresh=1"));
+    const res = await fetch(withWiki("/api/wiki/pages?refresh=1"), { signal: AbortSignal.timeout(SERIES_REQUEST_TIMEOUT_MS) });
     if (!res.ok) return null;
     const data = (await res.json()) as { pages?: unknown };
     return Array.isArray(data.pages) ? (data.pages as WikiListing[]) : null;
@@ -5667,7 +5662,12 @@ async function runSaveAsSeries(): Promise<void> {
   try {
     const planned = plan.writes.map((w) => w.relPath);
     setWorkSeriesMsg(state, `Reading ${planned.length} ${planned.length === 1 ? "page" : "pages"}…`, false);
-    const { bases, missing, open } = await readSeriesBasesAfterWrites(planned, seriesBaseHash, openPageAtLoad);
+    const { bases, missing, open, stalled } = await readSeriesBasesAfterWrites(planned, seriesBaseHash, openPageAtLoad);
+    if (stalled) {
+      // Nothing read and nothing written; Write stays on for another try.
+      report = { text: SERIES_STALLED_COPY, bad: true, retry: true };
+      return;
+    }
     const fresh = await freshListing();
     if (!fresh) {
       report = { text: "Could not re-read the wiki listing — nothing written", bad: true, retry: true };

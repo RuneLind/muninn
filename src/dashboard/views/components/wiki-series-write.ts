@@ -14,6 +14,49 @@
 import type { SeriesWrite } from "./wiki-series-menu.ts";
 import { normalizeRel } from "./wiki-nav.ts";
 
+/**
+ * The longest a series request (the base GET, the POST) or a base read's wait
+ * for the reader's own writes runs before the reader is told and the popover
+ * is free again. Bun does not cut a hung request at its `idleTimeout`
+ * (`src/wiki/CLAUDE.md`), and an unbounded wait here left every later ⋯ stuck
+ * on "Saving…". 30 s is three times the 10 s the server's own bounded fetches
+ * use (`BOUNDED_FETCH_TIMEOUT_MS`), because one POST may wait out the 2 s
+ * cross-process lock (`WIKI_LOCK_WAIT_MS`), rebuild the index and commit.
+ */
+export const SERIES_REQUEST_TIMEOUT_MS = 30_000;
+
+/** What a write says when the reader's earlier save has not answered within
+ *  {@link SERIES_REQUEST_TIMEOUT_MS}: nothing is sent under bases read while
+ *  that save may still move the page. */
+export const SERIES_STALLED_COPY =
+  "An earlier series save has not answered yet — nothing written. Close and reopen this menu in a moment, or reload the page";
+
+/** What a POST that got no answer within the bound says. The server may have
+ *  written the page, so the step is to look. */
+export function seriesTimeoutCopy(relPath: string): string {
+  return `No answer for ${relPath} after ${SERIES_REQUEST_TIMEOUT_MS / 1000} s — it may have been written; reload the page to see`;
+}
+
+/** `p`, or `fallback` when `p` has not settled within `ms`. For an await the
+ *  series writers hold a popover on that is not a request of their own (the
+ *  listing refresh after a write): `p` still runs and lands as it would. */
+export async function withinSeriesBound<T>(p: Promise<T>, fallback: T, ms = SERIES_REQUEST_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([p, new Promise<T>((r) => (timer = setTimeout(() => r(fallback), ms)))]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const isTimeout = (err: unknown): boolean => (err as { name?: unknown } | null)?.name === "TimeoutError";
+
+type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+interface RequestOpts {
+  fetch?: FetchLike;
+  timeoutMs?: number;
+}
+
 /** What `POST /api/wiki/series` answers, as the loop reads it. */
 export interface SeriesPostAnswer {
   ok: boolean;
@@ -67,8 +110,10 @@ async function runSeriesWrites(
       const batch = opts.batch && writes.length > 1 ? (i === writes.length - 1 ? "last" : "defer") : undefined;
       res = await post({ ...write, baseHash, ...(batch ? { batch } : {}) });
     } catch (err) {
-      // A rejected fetch (network down, connection reset) is a failed write.
-      out.failure = { write, status: 0, error: `Network error: ${err instanceof Error ? err.message : String(err)}` };
+      // A rejected fetch (network down, connection reset, no answer within
+      // the bound) is a failed write.
+      const error = isTimeout(err) ? seriesTimeoutCopy(write.relPath) : `Network error: ${err instanceof Error ? err.message : String(err)}`;
+      out.failure = { write, status: 0, error };
       return out;
     }
     if (!res.ok) {
@@ -137,26 +182,32 @@ export function openPageRefusal(
 }
 
 /** The one write entry both callers use — the `⋯` menu and Save as series:
- *  refuse the whole sequence when the open page changed since it loaded and
- *  is among the writes (`openPageChanged`, `openPageRefusal`), else run it.
- *  `bases` are the ones read FRESH before the call, the open page included. */
+ *  refuse the whole sequence when its base read gave up waiting for an earlier
+ *  save (`stalled`, {@link SERIES_STALLED_COPY}), or when the open page changed
+ *  since it loaded and is among the writes (`openPageChanged`,
+ *  `openPageRefusal`), else run it. `bases` are the ones read FRESH before the
+ *  call, the open page included. */
 export async function writeSeriesUnlessOpenChanged(input: {
   writes: readonly SeriesWrite[];
   bases: ReadonlyMap<string, string>;
   open: OpenPageAtLoad;
   post: SeriesPoster;
   batch?: boolean;
+  stalled?: boolean;
 }): Promise<{ refusal: string; run?: undefined } | { refusal: null; run: SeriesWriteOutcome }> {
+  if (input.stalled) return { refusal: SERIES_STALLED_COPY };
   const refusal = openPageRefusal(openPageChanged(input.open, input.bases), input.writes);
   if (refusal) return { refusal };
   return { refusal: null, run: await runSeriesWrites(input.writes, input.bases, input.post, { batch: input.batch }) };
 }
 
 /** What a 409 on `failedRel` says, and what the next click on the same menu
- *  says (`again`). The step follows the page: the OPEN page is compared at
- *  every menu open with the hash it loaded with, so reopening the menu alone
- *  refuses it again ({@link openPageRefusal}) and reloading is the step; any
- *  other page's base is read fresh at the next open, so reopening is. */
+ *  says (`again`). The step follows the page. A reopened menu reads every base
+ *  fresh, the open page's included, but keeps the open page's LOAD-time hash;
+ *  at the click, a verb that writes the open page compares the two and is
+ *  refused ({@link openPageRefusal}) — so for the OPEN page reloading is the
+ *  step. Any other page's fresh base is what the next write sends, so
+ *  reopening is. */
 export function seriesConflictCopy(failedRel: string, openRel: string | null): { note: string; again: string } {
   return openRel && normalizeRel(openRel) === normalizeRel(failedRel)
     ? { note: `${failedRel} changed since this menu opened — reload it`, again: "Reload the page — it has changed" }
@@ -166,6 +217,12 @@ export function seriesConflictCopy(failedRel: string, openRel: string | null): {
 /** The series write sequences in flight, each as a promise that settles (never
  *  rejects) once the caller's sequence has finished. */
 const writesInFlight = new Set<Promise<void>>();
+
+/** How many sequences are in flight — the set must empty once each settles,
+ *  late or not (`wiki-series-write.test.ts`). */
+export function seriesWritesInFlight(): number {
+  return writesInFlight.size;
+}
 
 /** Run `fn` — one caller's write sequence, from the click until its answers
  *  have moved the reader's load-time hash — as a sequence every base read
@@ -185,15 +242,75 @@ export function trackSeriesWrite<T>(fn: () => Promise<T>): Promise<T> {
  *  compare with, AFTER every write sequence in flight when the read starts
  *  (fix round 2, finding 1): the reader's own write moves the open page's bytes
  *  before its answer moves the load-time hash, so a snapshot taken in between
- *  blames the reader for their own change. A sequence that starts later is not
- *  waited for, so a sequence may await a read it started before. */
+ *  blames the reader for their own change. The snapshot is taken before the
+ *  base fetch, so a page that moves during it reads as changed, never the
+ *  reverse. A sequence that starts later is not waited for, so a sequence may
+ *  await a read it started before.
+ *
+ *  The wait is bounded (`waitMs`, {@link SERIES_REQUEST_TIMEOUT_MS}): past it
+ *  the read is `stalled`, reads nothing and hands back no base, so a write
+ *  from it is refused ({@link writeSeriesUnlessOpenChanged}) rather than sent
+ *  under a base the unanswered save may still move. A sequence that settles
+ *  later leaves the in-flight set as any other does. */
 export async function readSeriesBasesAfterWrites(
   relPaths: readonly string[],
   hashOf: (relPath: string) => Promise<string | null>,
   openNow: () => OpenPageAtLoad,
-): Promise<{ bases: Map<string, string>; missing: string[]; open: OpenPageAtLoad }> {
-  await Promise.all([...writesInFlight]);
+  opts: { waitMs?: number } = {},
+): Promise<{ bases: Map<string, string>; missing: string[]; open: OpenPageAtLoad; stalled: boolean }> {
+  const pending = [...writesInFlight];
+  if (pending.length) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settled = await Promise.race([
+      Promise.all(pending).then(() => true),
+      new Promise<false>((r) => (timer = setTimeout(() => r(false), opts.waitMs ?? SERIES_REQUEST_TIMEOUT_MS))),
+    ]);
+    clearTimeout(timer);
+    if (!settled) {
+      return { bases: new Map(), missing: [...new Set(relPaths)].sort(), open: { relPath: null, loadedHash: null }, stalled: true };
+    }
+  }
   const open = openNow();
   const { bases, missing } = await loadSeriesBaseMap(relPaths, hashOf);
-  return { bases, missing, open };
+  return { bases, missing, open, stalled: false };
+}
+
+/** The page's current content hash — the CAS base — read through `urlOf`
+ *  under the bound. `null` when it cannot be read: an error status or body, a
+ *  network error, or no answer in time; the caller writes nothing then. */
+export function seriesBaseReader(
+  urlOf: (relPath: string) => string,
+  opts: RequestOpts = {},
+): (relPath: string) => Promise<string | null> {
+  const f = opts.fetch ?? ((u, i) => fetch(u, i));
+  const ms = opts.timeoutMs ?? SERIES_REQUEST_TIMEOUT_MS;
+  return async (relPath) => {
+    try {
+      const res = await f(urlOf(relPath), { signal: AbortSignal.timeout(ms) });
+      const data = (await res.json()) as { hash?: unknown };
+      return typeof data.hash === "string" && data.hash ? data.hash : null;
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** `POST /api/wiki/series` for one page, under the bound. The wiki rides the
+ *  BODY, not the query — the Stamp route's contract, and the reason the route
+ *  reads one place: a write must name its target in the payload it is
+ *  validated against, never in a string the client happened to append. A
+ *  request with no answer in time rejects with a `TimeoutError`, which the
+ *  loop reports as {@link seriesTimeoutCopy}. */
+export function seriesPoster(wiki: string, opts: RequestOpts = {}): SeriesPoster {
+  const f = opts.fetch ?? ((u, i) => fetch(u, i));
+  const ms = opts.timeoutMs ?? SERIES_REQUEST_TIMEOUT_MS;
+  return async (write) => {
+    const res = await f("/api/wiki/series", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wiki, ...write }),
+      signal: AbortSignal.timeout(ms),
+    });
+    return { ok: res.ok, status: res.status, body: (await res.json().catch(() => null)) as SeriesPostAnswer["body"] };
+  };
 }

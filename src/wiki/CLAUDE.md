@@ -1239,10 +1239,11 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     long as it is on screen. Read per write instead, the compare-and-swap covers
     the network round trip and not the seconds a human spends deciding: measured,
     an edit made while the menu stood open was silently overwritten. The page the
-    reader has OPEN is read fresh too, Save as series' rule: when its fresh
-    base is not the hash the page loaded with (`openPageChanged`, against the
-    `{relPath, loadedHash}` snapshot the menu takes when it opens), a verb that
-    writes it is refused before any write with
+    reader has OPEN is read fresh too, Save as series' rule. The comparison
+    runs at the CLICK, and only for a verb that writes the open page: when its
+    fresh base is not the hash the page loaded with (`openPageChanged`, against
+    the `{relPath, loadedHash}` snapshot the menu takes with its bases), the
+    sequence is refused before any write with
     `<page> changed since you opened it — reload it; nothing written`.
     Both callers write only through `writeSeriesUnlessOpenChanged`
     (`wiki-series-write.ts`), which makes that refusal and then runs the loop;
@@ -1256,8 +1257,25 @@ type a new key), RENAME the label, MOVE the head, and REMOVE the page.
     "changed since you opened it" over the reader's own change. A 409 stops the
     menu writing, names the page and refetches the listing, and its copy names
     the step (`seriesConflictCopy`): on any other page, close and reopen, which
-    reads that page's base fresh; on the OPEN page, reload it, because a reopen
-    compares the fresh base with the hash the page loaded with and refuses.
+    reads that page's base fresh; on the OPEN page, reload it, because a
+    reopened menu keeps the hash the page loaded with, so the next verb that
+    writes the open page is refused at the click (a verb that writes only
+    other pages is not).
+  - **Every wait is bounded** by `SERIES_REQUEST_TIMEOUT_MS` (30 s,
+    `wiki-series-write.ts`): the base GET (`seriesBaseReader`; no answer ⇒ no
+    base ⇒ "Could not read <page>", nothing written), the POST (`seriesPoster`;
+    no answer ⇒ the sequence stops there with "No answer for <page> after 30 s
+    — it may have been written; reload the page to see"), Save as series'
+    listing re-read, the listing refresh after a write (`withinSeriesBound`;
+    past it the reader is told to reload, and the late answer still lands),
+    and `readSeriesBasesAfterWrites`' wait for the reader's
+    own writes (past it the read is `stalled`, reads nothing, and every verb is
+    refused with `SERIES_STALLED_COPY`). Bun does not cut a hung request at its
+    `idleTimeout`, and one hung POST used to leave every later ⋯ on "Saving…"
+    and Save as series on "Reading N pages…" until a reload. A sequence that
+    settles after a read gave up leaves the in-flight set like any other. The
+    state table is `wiki-series-write.test.ts`. Known gap: opening page P
+    while a write to P is in flight can adopt a stale loaded hash.
   - **A head move is TWO calls**, each CAS'd, and the ORDER is the contract: the
     old head's label is cleared FIRST. A failure between them leaves a series
     with no labelled member, which the fold and the reader header render under

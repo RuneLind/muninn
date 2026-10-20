@@ -435,7 +435,7 @@ describe("readSeriesBasesAfterWrites: the reader's own writes settle before a ba
 // the menu even when the page was the OPEN one — whose reopen then refused
 // with "reload it". The step now follows the page.
 describe("seriesConflictCopy: a 409 names the step that clears it", () => {
-  test("the open page: reload, since a reopen compares it with the hash it loaded with", () => {
+  test("the open page: reload, since a reopened menu keeps its load-time hash and a verb writing it is refused at the click", () => {
     const c = seriesWrite.seriesConflictCopy("plans/open.md", "Plans/Open.md");
     expect(c.note).toBe("plans/open.md changed since this menu opened — reload it");
     expect(c.again).toBe("Reload the page — it has changed");
