@@ -152,20 +152,24 @@ function square(r: LedgerRow, language: QuestionLanguage): string {
 }
 
 /** The PR strip: one square per PR over the drawing ledgers (the first row
- *  wins), grouped by the first decision the row cites, else by the oldest
- *  decision whose chain names that PR, in order of first appearance; "" under
- *  `STRIP_VIEW_MIN` squares. A group whose decision the log lacks shows its
- *  id unlinked. */
+ *  wins), grouped by the first decision the row cites that the log has, else
+ *  by the oldest unreversed decision whose chain names that PR (a later
+ *  decision's «PR n» is usually a reference back), else by the row's
+ *  first cited id, unlinked; groups in order of first appearance; "" under
+ *  `STRIP_VIEW_MIN` squares. */
 export function prStripHtml(ledgers: Ledger[], language: QuestionLanguage, analysis: ChainAnalysis): string {
   const rows = firstRowPerPr(ledgers.filter((l) => l.draws));
   if (rows.length < STRIP_VIEW_MIN) return "";
   // Chains come newest first: walking them backwards leaves the oldest.
   const chainOfPr = new Map<number, string>();
-  for (const c of [...analysis.chains].reverse()) for (const o of c.outputs) if (!chainOfPr.has(o.number)) chainOfPr.set(o.number, c.decision);
+  for (const c of [...analysis.chains].reverse()) {
+    if (c.reversed) continue;
+    for (const o of c.outputs) if (!chainOfPr.has(o.number)) chainOfPr.set(o.number, c.decision);
+  }
   const inLog = new Set(analysis.chains.map((c) => c.decision));
   const groups = new Map<string, LedgerRow[]>();
   for (const r of rows) {
-    const key = r.decisions[0] ?? chainOfPr.get(r.pr!) ?? "";
+    const key = r.decisions.find((d) => inLog.has(d)) ?? chainOfPr.get(r.pr!) ?? r.decisions[0] ?? "";
     let g = groups.get(key);
     if (!g) groups.set(key, (g = []));
     g.push(r);

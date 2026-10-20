@@ -331,3 +331,20 @@ describe("reversal grammar, enumerated", () => {
     expect(failed).toEqual([]);
   });
 });
+
+// Fix round 2, batch 3 (M3).
+describe("M3: a ledger edge states the PR's first row, as the strip does", () => {
+  test("ledger A says 1 merged (D1), ledger B says 1 dropped (D2): both edges read merged", () => {
+    const md = [
+      log("**D1** — Ship it.", "**D2** — Drop it."),
+      ledger(["PR", "State", "Decisions"], [["1 — a", "merged", "D1"]]),
+      "**PR ledger (old).**",
+      "",
+      "| PR | State | Decisions |",
+      "|---|---|---|",
+      "| 1 — a | dropped | D2 |",
+      "",
+    ].join("\n");
+    expect(lines(md)).toEqual(["D2 → PR 1 (merged)", "D1 → PR 1 (merged)"]);
+  });
+});

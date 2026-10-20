@@ -253,7 +253,7 @@ export function analyzeDecisionChains(blocks: Block[], ledgers: Ledger[], opts: 
         if (!d) continue;
         const c = chain(d);
         if (!c.outputs.some((o) => o.number === r.pr && o.noun === noun))
-          c.outputs.push({ noun, number: r.pr, state: r.state, source: "ledger" });
+          c.outputs.push({ noun, number: r.pr, state: states[noun].get(r.pr) ?? r.state, source: "ledger" });
       }
     }
   }

@@ -330,3 +330,31 @@ describe("F15: the strip legend lists each look once", () => {
     expect(sw).toBeLessThan(css.indexOf(".s .dc-s-"));
   });
 });
+
+// Fix round 2, batch 3 (M1, M2). Synthetic rows only.
+describe("M1/M2: the strip's group is a decision the chain view shows the PR under", () => {
+  // D3 and D4 both name PR 5 in prose; D2, the oldest, names it too but is reversed.
+  const log = [
+    "<DecisionLog>",
+    "",
+    "- **D2** — ~~Hold PR 5 back.~~ Reversed, superseded by D3.",
+    "- **D3** — Build the reader in PR 5.",
+    "- **D4** — Ship the reader with PR 5.",
+    "",
+    "</DecisionLog>",
+    "",
+  ].join("\n");
+  const ledger = (rows: string[]) => ["**PR ledger.**", "", "| PR | State | Decisions |", "|---|---|---|", ...rows, ""].join("\n");
+  const rest = ["| 7 — a | open | D3 |", "| 8 — b | planned | D4 |", "| 9 — c | planned | |"];
+
+  test("a row citing no decision sits under the oldest unreversed decision naming its PR", () => {
+    const html = formatWebHtml(["# Plan", "", NEXT, log, ledger(["| 5 — reader | merged | |", ...rest])].join("\n"), { reader: true, views: true });
+    expect(stripGroups(html)).toEqual(["→D3: 5=merged 7=open", "→D4: 8=planned", "No decision: 9=planned"]);
+  });
+
+  test("a row citing an absent decision first sits under the first cited decision the log has", () => {
+    const html = formatWebHtml(["# Plan", "", NEXT, log, ledger(["| 5 — reader | merged | D99, D3 |", ...rest])].join("\n"), { reader: true, views: true });
+    expect(stripGroups(html)).toEqual(["→D3: 5=merged 7=open", "→D4: 8=planned", "No decision: 9=planned"]);
+    expect(html).not.toContain('data-dc-ref="D99"');
+  });
+});
