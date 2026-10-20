@@ -1434,14 +1434,17 @@ the wiki** from this path.
 (the three SERIES checks, `src/wiki/lint-series.ts`) a finding can carry a `fix`,
 and the run SEEDS those into `wiki_proposals` as `kind: "lint"` rows for the
 human review gate — a DB write, never a wiki one, and refused outright when the
-instance is wiki-readonly or the ROOT is registered read-only. Every pass that
-the read-only checks do not refuse seeds, including one with zero fixable findings: the seeder's
+instance is wiki-readonly or the ROOT is registered read-only. A pass seeds
+when the bot has a `wikiDir`, `getWikiIndex` reads the wiki, and neither
+read-only check refuses; it seeds even with zero fixable findings. A pass with
+no `wikiDir` or an unreadable wiki returns `[]` before seeding. The seeder's
 self-heal retires every live `draft` group no current finding mints, and a wiki
 whose fixable findings are all fixed is exactly where that matters. The cost is
 one indexed read per wiki per week. Do not restore a `fixable.length` guard in
 `wiki-linter.ts`; the first cut had one, and it left fixed cards live forever.
-Seeding is best-effort: a seeding failure warns and the report still goes out. Rules and cuts: `src/wiki/CLAUDE.md`; the rows, the
-group apply and why Dismiss is durable: `src/gardener/CLAUDE.md`.
+Seeding is best-effort: a seeding failure warns and the report still goes out.
+Rules and cuts: `src/wiki/CLAUDE.md`; the rows, the group apply and why
+Dismiss is durable: `src/gardener/CLAUDE.md`.
 
 - **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
   plus per-file content reads. Each finding is `{ check, relPath, message,
