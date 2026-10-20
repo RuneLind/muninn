@@ -283,7 +283,7 @@ export function readRuleTree(children: readonly Block[], attrs: Readonly<Record<
     });
   }
   for (const n of all) {
-    if (!n.leaf && (maskInline(n.raw).includes("→") || ASCII_ARROW_RE.test(maskInline(n.rest)))) {
+    if (!n.leaf && (maskInline(n.raw).includes("→") || ASCII_ARROW_RE.test(n.rest))) {
       findings.push({ message: `item ${quoteName(n)} has → but is not read as a leaf (write the edge label in italics: *label:*)`, level: "info", node: n });
     } else if (n.leaf?.unreadTail) {
       findings.push({ message: `leaf ${quoteName(n)}: the text after the last — reads as no case ids`, level: "info", node: n });

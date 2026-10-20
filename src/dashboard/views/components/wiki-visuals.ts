@@ -73,7 +73,7 @@ function applyRuleTreePick(target: Element | null): boolean {
   });
   // A screen reader learns which leaves are on the path, and hears the result.
   for (const li of nodes) {
-    if (li.matches(".rt-leaf") && id !== "" && leafCases(li).includes(id)) li.setAttribute("aria-current", "true");
+    if (leafCases(li).includes(id)) li.setAttribute("aria-current", "true");
     else li.removeAttribute("aria-current");
   }
   const live = tree.querySelector<HTMLElement>("[data-rt-live]");
