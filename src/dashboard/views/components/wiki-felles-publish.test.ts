@@ -363,6 +363,31 @@ describe("the sync status", () => {
       expect(fellesSyncRunOutcome(1, true, after(2, 1), after(2, 1), drySummary(1)).ok).toBe(true);
     });
 
+    // Fix round 2: `--synk` prints the STATUS summary first (`skrivStatus`,
+    // `Oppsummering: N uendret, N endret, N avvist, …`), then syncs. A crash
+    // after that line carries an «N avvist» but no dry-run summary, so only the
+    // `klar(e)` shape may explain the exit 1.
+    test("a crash after the status summary is not read as the refusal", () => {
+      const crashAfterStatus = [
+        "Status for gs://felles: 3 fulgt(e) side(r)",
+        "ENDRET         plans/c0.md",
+        "    endret: plans/c0.md",
+        "ENDRET         plans/c1.md",
+        "    endret: plans/c1.md",
+        "AVVIST         plans/r.mdx",
+        "    avslag: NAVident på linje 3",
+        "",
+        "Oppsummering: 0 uendret, 2 endret, 1 avvist, 0 mangler lokalt, 0 foreldreløs(e) datafil(er).",
+        "",
+        "Synker 2 endret(e) side(r):",
+        "",
+        "error: Cannot read properties of undefined",
+        "    at publiser (publiser-felles-wiki.ts:1500:3)",
+      ].join("\n");
+      expect(felles.fellesDrySummaryRefusals(crashAfterStatus)).toBeNull();
+      expect(fellesSyncRunOutcome(1, true, after(2, 1), after(2, 1), crashAfterStatus)).toEqual(fellesSyncOutcomeLine(1, true));
+    });
+
     // Finding 79: a failed real run claims pages were published only when the
     // status after it shows fewer changed pages than the run started from.
     test("a failed real run says pages went up only when changed dropped", () => {

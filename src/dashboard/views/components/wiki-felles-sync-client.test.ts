@@ -357,3 +357,113 @@ describe("fix round 1 — a crashed dry run with a refused page reads red", () =
     expect(line.className).toContain("ok");
   });
 });
+
+describe("fix round 2 — the lists guard and the run's cleanup", () => {
+  test("lists that change A → B → A show A again", async () => {
+    const a = status({ changed: 1, pages: [changedPage(1)] });
+    const b = status({ changed: 2, pages: [changedPage(1), changedPage(2)] });
+    h.answers = [a];
+    await h.sync.load();
+    // The chip click's fresh read answers B; the ident toggle's reload answers A.
+    h.answers = [b, a];
+    clickChip();
+    await settle();
+    expect(lists().innerHTML).toContain("plans/c2.mdx");
+    h.dialog()!.querySelector('[data-felles="ident"]').dispatch("change", {});
+    await settle();
+    expect(h.statusCalls()).toBe(3);
+    expect(lists().innerHTML).not.toContain("plans/c2.mdx");
+    expect(lists().innerHTML).toContain("plans/c1.mdx");
+    expect(lists().htmlSets).toBe(2);
+  });
+
+  // `run` is fired with `void`, so a throw inside it is an unhandled
+  // rejection, which `bun test` fails the test on whatever handler is
+  // installed. The scenario therefore runs in its own `bun` process, where a
+  // `process.on("unhandledRejection")` handler is honoured; the fake DOM and
+  // the scenario go over by source.
+  test("a run whose status read throws still clears its busy state", () => {
+    const modulePath = new URL("./wiki-felles-publish.ts", import.meta.url).pathname;
+    const script = [
+      FakeEl.toString(),
+      `const mod = await import(${JSON.stringify(modulePath)});`,
+      "const rejections = [];",
+      "process.on('unhandledRejection', (e) => rejections.push(e instanceof Error ? e.message : String(e)));",
+      `const r = await (${throwingRunScenario.toString()})(mod, FakeEl);`,
+      "console.log(JSON.stringify({ ...r, rejections }));",
+    ].join("\n");
+    const p = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], { cwd: "/", stdout: "pipe", stderr: "pipe" });
+    expect(p.stderr.toString()).toBe("");
+    const r = JSON.parse(p.stdout.toString().trim().split("\n").pop()!);
+    expect(r).toEqual({
+      // The scenario really threw inside the run.
+      rejections: ["onStatus blew up"],
+      inert: false,
+      dryDisabled: false,
+      closeDisabled: false,
+      identDisabled: false,
+      // The run is over: refresh() reads the status again.
+      refreshReads: 1,
+    });
+  });
+});
+
+/** Runs in a child `bun` process (see the test above): no closure over this
+ *  file, only its arguments. */
+async function throwingRunScenario(
+  mod: typeof import("./wiki-felles-publish.ts"),
+  Fake: typeof FakeEl,
+): Promise<Record<string, unknown>> {
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+  const slot = new Fake();
+  let dialog: FakeEl | null = null;
+  let statusCalls = 0;
+  let throwOnStatus = false;
+  const s = { bucket: "b", pages: [{ relPath: "plans/c1.mdx", masked: false, state: "changed", changedFiles: [], refusals: [], warnings: [] }], orphans: [], maybeOrphans: [], changed: 1 };
+  globalThis.document = {
+    getElementById: (id: string) => (id === mod.FELLES_SYNC_SLOT_ID ? slot : null),
+    createElement: (tag: string) => {
+      const el = new Fake();
+      if (tag === "dialog") dialog = el;
+      return el;
+    },
+    body: new Fake(),
+  } as unknown as Document;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).startsWith("/api/wiki/felles-status")) {
+      statusCalls++;
+      return new Response(JSON.stringify(s), { status: 200 });
+    }
+    if (init?.method === "POST") return new Response(JSON.stringify({ exitCode: 0, output: "" }), { status: 200 });
+    throw new Error(`unexpected fetch ${url}`);
+  }) as typeof fetch;
+  const sync = mod.initFellesSync({
+    wiki: "kode",
+    hrefFor: (r) => r,
+    openPage: () => {},
+    onStatus: () => {
+      if (throwOnStatus) throw new Error("onStatus blew up");
+    },
+  });
+  await sync.load();
+  slot.dispatch("click", { target: { closest: () => ({ getAttribute: (n: string) => (n === "data-state" ? "ok" : null) }) } });
+  await settle();
+  const d = dialog as unknown as FakeEl;
+  // The dry run's status read after the run throws out of `run`.
+  throwOnStatus = true;
+  d.dispatch("click", { target: { closest: (sel: string) => (sel === "[data-felles]" ? { getAttribute: () => "sync-dry" } : null) } });
+  await settle();
+  throwOnStatus = false;
+  const before = statusCalls;
+  sync.refresh();
+  await settle();
+  return {
+    inert: d.querySelector(".wiki-felles-lists").inert,
+    dryDisabled: d.querySelector('[data-felles="sync-dry"]').disabled,
+    closeDisabled: d.querySelector('[data-felles="close"]').disabled,
+    identDisabled: d.querySelector('[data-felles="ident"]').disabled,
+    refreshReads: statusCalls - before,
+  };
+}
