@@ -309,6 +309,19 @@ describe("a FAILED listing lookup is remembered too", () => {
     expect(calls).toBe(1);
   });
 
+  // arch-review 2026-10 #34: a non-empty listing whose ids all fail to parse.
+  test("a listing that parses to no keys is a failure, and is cached as one", async () => {
+    let calls = 0;
+    const renamed = (async () => {
+      calls += 1;
+      return { documents: [{ id: "MELOSYS/MELOSYS-1_x.md" }, { id: "MELOSYS/MELOSYS-2_y.md" }] };
+    }) as unknown as typeof fetchKnowledgeApi;
+    const t0 = 3_500_000;
+    expect(await loadJiraKeyIndex("http://huginn.test", renamed, t0)).toBeNull();
+    expect(await loadJiraKeyIndex("http://huginn.test", renamed, t0 + 1_000)).toBeNull();
+    expect(calls).toBe(1);
+  });
+
   test("the negative entry is per HOST, so one down instance does not mute another", async () => {
     const { fetchApi } = down();
     const t0 = 4_000_000;

@@ -105,6 +105,25 @@ describe("loadIssueFields", () => {
   test("an EMPTY listing is a failure, not a corpus with no issues", async () => {
     expect(await loadIssueFields("http://c.test", async () => ({ documents: [] }))).toBeNull();
   });
+
+  // arch-review 2026-10 #34: a listing whose ids all fail to parse is the same failure.
+  test("a listing that parses to no keys is a failure: stale served, negatively cached", async () => {
+    const good = { documents: [{ id: "DEMO-110_x.md", status: "Ferdig" }] };
+    const renamed = { documents: [{ id: "DEMO/DEMO-110_x.md" }, { id: "DEMO/DEMO-111_y.md" }] };
+    let calls = 0;
+    let body: unknown = good;
+    const fetchApi = async () => {
+      calls++;
+      return body;
+    };
+    expect((await loadIssueFields("http://p.test", fetchApi, 0))?.get("DEMO-110")?.status).toBe("Ferdig");
+    body = renamed;
+    const tenMinutes = 10 * 60_000;
+    expect((await loadIssueFields("http://p.test", fetchApi, tenMinutes + 1))?.get("DEMO-110")?.status).toBe("Ferdig");
+    expect((await loadIssueFields("http://p.test", fetchApi, tenMinutes + 2))?.get("DEMO-110")?.status).toBe("Ferdig");
+    expect(calls).toBe(2);
+    expect(await loadIssueFields("http://q.test", async () => renamed, 0)).toBeNull();
+  });
 });
 
 describe("PR 3 fix round 1", () => {
