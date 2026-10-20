@@ -85,7 +85,7 @@ import {
 } from "../format/report-top.ts";
 import { readChartKind, readStatusRowsView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
-import { pageLedgers, prStateMap, type PrState } from "../format/pr-ledger.ts";
+import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
 import {
@@ -289,11 +289,11 @@ export function formatWebHtml(
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
   const prevChartView = currentChartView;
-  const prevPrStates = currentPrStates;
+  const prevLedgerRows = currentLedgerRows;
   currentViews = opts?.views === true;
   const charted = currentViews && opts?.chartView !== undefined && text.includes("<Chart");
   currentChartView = charted ? opts!.chartView! : null;
-  currentPrStates = null;
+  currentLedgerRows = null;
   currentPageFiles = opts?.files;
   currentLinkTexts = opts?.wikiLinkTexts;
   currentReader = opts?.reader === true;
@@ -320,7 +320,7 @@ export function formatWebHtml(
       const linkTexts = opts?.wikiLinkTexts;
       const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
       const ledgers = pageLedgers(analysed === text ? blocks : parseBlocks(analysed), opts?.proposedPlan === true);
-      currentPrStates = ledgers.length ? prStateMap(ledgers) : null;
+      currentLedgerRows = ledgers.length ? firstRowPerPr(ledgers) : null;
     }
     let rendered: string;
     if (slot < 0) {
@@ -359,7 +359,7 @@ export function formatWebHtml(
     currentItemDates = prevItemDates;
     currentViews = prevViews;
     currentChartView = prevChartView;
-    currentPrStates = prevPrStates;
+    currentLedgerRows = prevLedgerRows;
   }
 }
 
@@ -420,8 +420,8 @@ let currentViews = false;
 /** `opts.chartView` for the call in progress; null ⇒ a `<Chart>` is its table. */
 let currentChartView: ChartViewRenderer | null = null;
 
-/** The page's PR → ledger state, for a gate chart's pills; read once per call. */
-let currentPrStates: ReadonlyMap<number, PrState> | null = null;
+/** The page's ledger rows, for a gate chart's pills; read once per call. */
+let currentLedgerRows: readonly LedgerRow[] | null = null;
 
 /** The wiki's `language` for the call in progress (`<More>`, `<StatusRows>`). */
 let currentLanguage: QuestionLanguage = "en";
@@ -797,11 +797,12 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
   return currentChartView({
     read: readChart(kind, attrs, chartTable(body.table, (c) => visibleText(peekText(c)))),
     caption: attrs.caption ?? "",
+    captionText: peekText(attrs.caption ?? ""),
     tableHtml: renderBlocks([body.table], webRenderer),
     beforeHtml: renderBlocks(body.before, webRenderer),
     afterHtml: renderBlocks(body.after, webRenderer),
     language: currentLanguage,
-    prStates: currentPrStates,
+    ledgerRows: currentLedgerRows,
   });
 }
 

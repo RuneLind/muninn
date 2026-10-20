@@ -14,7 +14,7 @@ import { isEmptyCell, parseCellValue, tableDecimalComma, type NumberContext } fr
 import { readChartNormalize, type ChartKind } from "./component-spec.ts";
 import { headerKey } from "./delta-table.ts";
 import type { Block } from "./markdown-ast.ts";
-import { gateRowPr, type PrState } from "./pr-ledger.ts";
+import { gateRowPr, type GatePr, type LedgerRow } from "./pr-ledger.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 
 type TableBlock = Extract<Block, { type: "table" }>;
@@ -107,8 +107,8 @@ export interface GapRow {
 
 export interface GateRow {
   label: string;
-  /** The PR the first cell names (`gateRowPr`), the ledger join key. */
-  pr: number | null;
+  /** The slate and PR link the first cell names (`gateRowPr`), the ledger join key. */
+  pr: GatePr | null;
   bar: ChartValue;
   barAfter: ChartValue | null;
   pass: ChartValue;
@@ -346,6 +346,11 @@ class Reader {
     const refName = this.attrs.ref?.trim() ?? "";
     if (normalize && !refName) this.fatal('normalize="ref" needs ref= naming a row');
     if (xi === null) return null;
+    const cols = this.t.headers.map((_, i) => i).filter((i) => i !== xi);
+    if (!cols.length) {
+      this.fatal("has no series columns");
+      return null;
+    }
     const labels = this.t.rows.map((row) => row[xi] ?? "");
     let refRow = -1;
     if (refName) {
@@ -359,7 +364,6 @@ class Reader {
     // A ref row that opens the table is the first step (the baseline); any
     // other ref row is the reference only. Each cell is read once.
     const stepRows = this.t.rows.map((_, r) => r).filter((r) => r !== refRow || refRow === 0);
-    const cols = this.t.headers.map((_, i) => i).filter((i) => i !== xi);
     const read = new Map<string, ChartValue | null | undefined>();
     const at = (r: number, i: number) => {
       const key = `${r}:${i}`;
@@ -445,13 +449,16 @@ export interface ChartViewInput {
   /** No model: the table failed its kind, and the view shows it with the findings. */
   read: ChartRead;
   caption: string;
+  /** The caption's visible text (wikilinks as their link text), the section's
+   *  accessible name; the same text lint names. */
+  captionText: string;
   /** The table, the blocks before it and the blocks after it, rendered. */
   tableHtml: string;
   beforeHtml: string;
   afterHtml: string;
   language: QuestionLanguage;
-  /** PR number → ledger state, for a gate row's pill; null without a ledger. */
-  prStates: ReadonlyMap<number, PrState> | null;
+  /** The page's ledger rows (`firstRowPerPr`), for a gate row's pill; null without a ledger. */
+  ledgerRows: readonly LedgerRow[] | null;
 }
 
 export type ChartViewRenderer = (input: ChartViewInput) => string;

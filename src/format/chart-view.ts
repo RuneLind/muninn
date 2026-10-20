@@ -23,6 +23,7 @@ import {
 import type { ChartKind } from "./component-spec.ts";
 import { dcGoLink, prStateWord } from "./decision-views.ts";
 import { escapeHtml } from "./markdown-core.ts";
+import { gateRowState } from "./pr-ledger.ts";
 import { DECISION_ID_RE, QUESTION_ID_RE } from "./question.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
@@ -109,7 +110,7 @@ export function chartViewHtml(input: ChartViewInput): string {
     ? `<ul class="vc-notes" ${RO}>${input.read.findings.map((f) => `<li>${escapeHtml(f.message)}</li>`).join("")}</ul>`
     : "";
   if (!model) {
-    const name = input.caption.trim() || w.chart;
+    const name = input.captionText.trim() || w.chart;
     return (
       `<section class="${CHART_CLASS} vc-fallback" role="figure" aria-label="${escapeHtml(name)}">` +
       input.beforeHtml +
@@ -121,7 +122,7 @@ export function chartViewHtml(input: ChartViewInput): string {
   }
   const comma = input.language === "no" || input.read.ctx.decimalComma === true;
   const caption = input.caption.trim();
-  const name = caption || w.kinds[model.kind];
+  const name = input.captionText.trim() || w.kinds[model.kind];
   const plot = plotFor(model, input, w, comma);
   const variants =
     plot.variants.length > 1
@@ -185,7 +186,7 @@ function plotFor(
       return { toggle: "barToggle", variants, legend: legendHtml(keys) };
     }
     case "steps":
-      return { toggle: "scale", variants: [{ id: "lines", label: "", html: stepsPlot(model, comma, input.caption || w.kinds.steps) }], legend: stepsLegend(model) };
+      return { toggle: "scale", variants: [{ id: "lines", label: "", html: stepsPlot(model, comma, input.captionText.trim() || w.kinds.steps) }], legend: stepsLegend(model) };
     case "funnel":
       return { toggle: "scale", variants: [{ id: "bars", label: "", html: funnelRows(model, w, comma) }], legend: "" };
   }
@@ -293,10 +294,11 @@ function gateRows(rows: GateRow[], after: boolean, input: ChartViewInput, w: Cha
       (sc.negative ? vline("vc-zero", z) : "") +
       vline("vc-target", b) +
       `</svg>`;
-    const state = r.pr !== null ? input.prStates?.get(r.pr) : undefined;
+    const state = r.pr && input.ledgerRows ? gateRowState(r.pr, input.ledgerRows) : undefined;
     const word = state ? prStateWord(state, input.language) : "";
+    const n = r.pr?.slate ?? r.pr?.link;
     const pill = state
-      ? ` <span class="dc-pr dc-s-${state} vc-pill" role="img" title="PR ${r.pr} · ${escapeHtml(word)}" aria-label="PR ${r.pr} · ${escapeHtml(word)}">${escapeHtml(word)}</span>`
+      ? ` <span class="dc-pr dc-s-${state} vc-pill" role="img" title="PR ${n} · ${escapeHtml(word)}" aria-label="PR ${n} · ${escapeHtml(word)}">${escapeHtml(word)}</span>`
       : "";
     const nums =
       `${valueHtml(r.pass)} · ${r.hold ? valueHtml(r.hold) : "—"} · ${escapeHtml(w.bar)} ${valueHtml(bar)}` +

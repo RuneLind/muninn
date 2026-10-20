@@ -312,19 +312,33 @@ function slateBody(t: string): { body: string; link: number | null; prefixed: bo
   return { body, link, prefixed: body.length !== rest.length };
 }
 
+/** A gate row's PR identity: a slate and the first cell's PR link. */
+export interface GatePr {
+  slate: number | null;
+  link: number | null;
+}
+
 /** The PR a non-ledger table row names in its first cell, read as a ledger
- *  slate is (`7`, `PR 7`, `**7** — x`, a leading PR link), but stricter: a
- *  number followed by more text counts only after a separator or a `PR`
- *  prefix, and only when that text does not open with a digit, so `3 runs`,
- *  `12–40`, `21a` and a date name no PR. A `<Chart kind="gate">` row matches
- *  a ledger row by this. */
-export function gateRowPr(cell: string): number | null {
-  const { body, link, prefixed } = slateBody(plain(cell).replace(/^[-–—\s]+/, ""));
+ *  row's first cell is: the slate (`7`, `PR 7`, `**7** — x`) and the cell's
+ *  first PR link. The slate is stricter than a ledger's: a number followed by
+ *  more text counts only after a separator or a `PR` prefix, and only when
+ *  that text does not open with a digit, so `3 runs`, `12–40`, `21a` and a
+ *  date name no PR. Null when the cell names neither. */
+export function gateRowPr(cell: string): GatePr | null {
+  const t = plain(cell).replace(/^[-–—\s]+/, "");
+  const { body, prefixed } = slateBody(t);
   const m = SLATE_RE.exec(body);
-  if (!m) return body.trim() === "" ? link : null;
-  const label = m[3]!.trim();
-  if (label === "" || ((m[2] !== undefined || prefixed) && !/^\d/.test(label))) return Number(m[1]);
-  return null;
+  const label = m?.[3]!.trim();
+  const slate = m && (label === "" || ((m[2] !== undefined || prefixed) && !/^\d/.test(label!))) ? Number(m[1]) : null;
+  const link = prRefOf(unstruck(cell));
+  return slate === null && link === null ? null : { slate, link };
+}
+
+/** The ledger state of a gate row's PR: a slate matches the row with that
+ *  slate, a link-only cell the row whose PR link is that number; no match, none. */
+export function gateRowState(pr: GatePr, rows: readonly LedgerRow[]): PrState | undefined {
+  if (pr.slate !== null) return rows.find((r) => r.slate === pr.slate)?.state;
+  return rows.find((r) => r.link === pr.link)?.state;
 }
 
 /** The row's PR link: the first cell, the PR, state and Landed cells first,

@@ -164,7 +164,7 @@ describe("gate", () => {
 
   test("a row's PR is read as a ledger slate, strictly", () => {
     const g = model(chart(open, head, [["7 — rows", "1", "1", "1"], ["PR 9", "1", "1", "1"], ["3 runs", "1", "1", "1"]]), "gate");
-    expect(g.rows.map((r) => r.pr)).toEqual([7, 9, null]);
+    expect(g.rows.map((r) => r.pr?.slate ?? null)).toEqual([7, 9, null]);
   });
 });
 
@@ -184,11 +184,15 @@ describe("named columns", () => {
 
 describe("gateRowPr", () => {
   test.each([
-    ["7", 7],
-    ["**7** — rows", 7],
-    ["PR 7", 7],
-    ["PR #7 rows", 7],
-    ["7: rows", 7],
+    ["7", { slate: 7, link: null }],
+    ["**7** — rows", { slate: 7, link: null }],
+    ["PR 7", { slate: 7, link: null }],
+    ["PR #7 rows", { slate: 7, link: 7 }],
+    ["7: rows", { slate: 7, link: null }],
+    ["[#7](https://example.test/o/r/pull/7)", { slate: null, link: 7 }],
+    ["[#7](https://example.test/o/r/pull/7) Retry logic", { slate: null, link: 7 }],
+    ["[#7](https://example.test/o/r/pull/7) — Retry", { slate: null, link: 7 }],
+    ["2 — [#7](https://example.test/o/r/pull/7)", { slate: 2, link: 7 }],
     ["21a", null],
     ["2026-10-01", null],
     ["12–40", null],
@@ -197,7 +201,7 @@ describe("gateRowPr", () => {
     ["7 — 3 runs", null],
     ["rows", null],
   ])("%p → %p", (cell, pr) => {
-    expect(gateRowPr(cell)).toBe(pr);
+    expect(gateRowPr(cell)).toEqual(pr);
   });
 });
 
@@ -239,6 +243,12 @@ describe("steps", () => {
   test("a ref= naming no row, or two rows, is a finding", () => {
     expect(messages(chart('<Chart kind="steps" x="Step" ref="zz">', ["Step", "A"], [["one", "1"]]))).toEqual(['ref="zz" names no row in Step']);
     expect(messages(chart('<Chart kind="steps" x="Step" ref="one">', ["Step", "A"], [["one", "1"], ["One", "2"]]))).toEqual(['ref="one" names 2 rows']);
+  });
+
+  test("x= naming the only column leaves no series, a fatal finding", () => {
+    const r = chart('<Chart kind="steps" x="Step">', ["Step"], [["one"], ["two"]]);
+    expect(r.model).toBeNull();
+    expect(r.findings.map((f) => [f.message, f.fatal])).toEqual([["has no series columns", true]]);
   });
 
   test("a table with no rows says it has no step rows", () => {

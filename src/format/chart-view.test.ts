@@ -198,6 +198,26 @@ describe("gate pills", () => {
     expect([...out.matchAll(/dc-pr dc-s-([a-z-]+) vc-pill/g)].map((m) => m[1])).toEqual(["merged"]);
   });
 
+  // A ledger whose slate and GitHub numbers differ: slate 16 is merged, the
+  // row linking GitHub PR 16 is slate 3 and open.
+  const ledger = ["## PR ledger", "", "| PR | What | State |", "|---|---|---|", "| 16 | a | merged |", "| 3 — [#16](https://example.test/o/r/pull/16) | b | open |", ""];
+  const pills = (out: string) => [...out.matchAll(/<span class="dc-pr dc-s-([a-z-]+) vc-pill"[^>]*aria-label="([^"]*)"/g)].map((m) => [m[1], m[2]]);
+
+  test("a link-only first cell matches the ledger row with that link, not the slate with that number", () => {
+    const out = reader([...ledger, gate(["| [#16](https://example.test/o/r/pull/16) | 2 | 3 | 3 |"])].join("\n"));
+    expect(pills(out)).toEqual([["open", "PR 16 · open"]]);
+  });
+
+  test("a PR link followed by a label reads the link, as a ledger row does", () => {
+    const out = reader([...ledger, gate(["| [#16](https://example.test/o/r/pull/16) Retry logic | 2 | 3 | 3 |", "| [#16](https://example.test/o/r/pull/16) — Retry | 2 | 3 | 3 |"])].join("\n"));
+    expect(pills(out).map((p) => p[0])).toEqual(["open", "open"]);
+  });
+
+  test("a slate matches the ledger row with that slate; a link no ledger row carries gets no pill", () => {
+    const out = reader([...ledger, gate(["| 16 — a | 2 | 3 | 3 |", "| [#9](https://example.test/o/r/pull/9) | 2 | 3 | 3 |", "| 3 — [#16](https://example.test/o/r/pull/16) | 2 | 3 | 3 |"])].join("\n"));
+    expect(pills(out)).toEqual([["merged", "PR 16 · merged"], ["open", "PR 3 · open"]]);
+  });
+
   test("no ledger, no pill", () => {
     expect(reader(gate(["| PR 31 — a | 2 | 3 | 3 |"]))).not.toContain("vc-pill");
   });
@@ -220,9 +240,40 @@ describe("off the reader view", () => {
   });
 });
 
+describe("the accessible name", () => {
+  // The caption's visible text, the same text lint names; never the source.
+  const lintCaption = (md: string) => /caption="([^"]*)"/.exec(checkPageText({ relPath: "plans/a.mdx" }, md, []).find((f) => f.check === "chart-table")?.message ?? "")?.[1];
+  const labels = (out: string) => [...out.matchAll(/<section class="vc [^"]*" role="figure" aria-label="([^"]*)"/g)].map((m) => m[1]);
+
+  test("a drawn chart's caption with a wikilink names the link text", () => {
+    const out = reader(chart('<Chart kind="gate" caption="Cap [[Foo|bar]]" bar="Bar" pass="Pass" hold="Hold">', ["| S | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | 3 | 2 |"]));
+    expect(labels(out)).toEqual(["Cap bar"]);
+    expect(out).not.toContain("[[Foo");
+  });
+
+  test("a fallback section's caption with a wikilink names what lint names", () => {
+    const md = chart('<Chart kind="gate" caption="Cap [[Foo|bar]]" bar="Bar" pass="Pass" hold="Hold">', ["| S | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | x | 2 |"]);
+    const out = reader(md);
+    expect(out).toContain("vc-fallback");
+    expect(labels(out)).toEqual(["Cap bar"]);
+    expect(labels(out)).toEqual([lintCaption(md)]);
+  });
+
+  test("a steps plot's SVG title names the link text", () => {
+    const out = reader(chart('<Chart kind="steps" caption="Cap [[Foo|bar]]" x="Step">', ["| Step | A |", "|---|---|", "| one | 1 |", "| two | 2 |"]));
+    expect(out).toContain("<title>Cap bar");
+    expect(out).not.toContain("[[Foo");
+  });
+});
+
 describe("render and lint agree", () => {
   // Each table: does the reader draw it, and does lint raise a warning?
-  const cases: [string, string[], boolean][] = [
+  const steps: [string, string[], boolean, string][] = [
+    ["steps with series", ["| Step | A |", "|---|---|", "| one | 1 |"], true, '<Chart kind="steps" x="Step">'],
+    ["steps with no series column", ["| Step |", "|---|", "| one |", "| two |"], false, '<Chart kind="steps" x="Step">'],
+  ];
+  const cases: [string, string[], boolean, string?][] = [
+    ...steps,
     ["wikilink header", ["| Slice | [[Bar]] | Pass | Hold |", "|---|---|---|---|", "| a | 2 | 3 | 2 |"], true],
     ["aliased header", ["| Slice | [[x|Bar]] | Pass | Hold |", "|---|---|---|---|", "| a | 2 | 3 | 2 |"], true],
     ["code header", ["| Slice | `Bar` | Pass | Hold |", "|---|---|---|---|", "| a | 2 | 3 | 2 |"], true],
@@ -235,10 +286,10 @@ describe("render and lint agree", () => {
     ["struck cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | ~~9~~ 3 | 2 |"], true],
     ["text cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | soon | 2 |"], false],
   ];
-  for (const [name, rows, draws] of cases) {
+  for (const [name, rows, draws, open] of cases) {
     test(name, () => {
-      const md = chart('<Chart kind="gate" bar="Bar" pass="Pass" hold="Hold">', rows);
-      const drawn = reader(md).includes("vc-kind-gate");
+      const md = chart(open ?? '<Chart kind="gate" bar="Bar" pass="Pass" hold="Hold">', rows);
+      const drawn = reader(md).includes("vc-kind-");
       const warned = checkPageText({ relPath: "plans/a.mdx" }, md, []).some((f) => f.check === "chart-table" && f.severity !== "info");
       expect({ drawn, warned }).toEqual({ drawn: draws, warned: !draws });
     });
