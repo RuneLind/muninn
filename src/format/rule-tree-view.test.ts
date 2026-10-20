@@ -94,15 +94,22 @@ describe("the reader's tree", () => {
   });
 
   test("each chip names its case id in data-rt-case, read past a link or emphasis", () => {
-    const html = reader(tree("- → Renew — LIB-1, [LIB-9](https://example.test/LIB-10), **LIB-10**, ~~LIB-11~~ LIB-12"));
-    expect(html).toContain('data-rt-cases="[&quot;LIB-1&quot;,&quot;LIB-9&quot;,&quot;LIB-10&quot;,&quot;LIB-12&quot;]"');
-    expect([...html.matchAll(/data-rt-case="([^"]*)"/g)].map((m) => m[1])).toEqual(["LIB-1", "LIB-9", "LIB-10", "LIB-12"]);
+    // LIB-1 sits in a link destination, struck text, and the edges of LIB-10 and XLIB-1.
+    const html = reader(tree("- → Renew — LIB-1, [LIB-9](https://example.test/LIB-1), **LIB-10**, ~~LIB-1~~ LIB-12, XLIB-1"));
+    expect(html).toContain('data-rt-cases="[&quot;LIB-1&quot;,&quot;LIB-9&quot;,&quot;LIB-10&quot;,&quot;LIB-12&quot;,&quot;XLIB-1&quot;]"');
+    expect([...html.matchAll(/data-rt-case="([^"]*)"/g)].map((m) => m[1])).toEqual(["LIB-1", "LIB-9", "LIB-10", "LIB-12", "XLIB-1"]);
   });
 
   test("a chip whose source does not spell its id (a wikilink) takes it by position", () => {
-    const html = reader(tree("- → Renew — [[LIB-5]], LIB-6"));
-    expect(html).toContain('data-rt-cases="[&quot;LIB-5&quot;,&quot;LIB-6&quot;]"');
-    expect([...html.matchAll(/data-rt-case="([^"]*)"/g)].map((m) => m[1])).toEqual(["LIB-5", "LIB-6"]);
+    const html = reader(tree("- → Renew — LIB-6, [[LIB-5]]"));
+    expect(html).toContain('data-rt-cases="[&quot;LIB-6&quot;,&quot;LIB-5&quot;]"');
+    expect([...html.matchAll(/data-rt-case="([^"]*)"/g)].map((m) => m[1])).toEqual(["LIB-6", "LIB-5"]);
+  });
+
+  test("with a repeated id the position is ambiguous: that chip gets no id rather than a wrong one", () => {
+    const html = reader(tree("- → Renew — LIB-5, LIB-5, [[LIB-6]], LIB-7"));
+    expect(html).toContain('data-rt-cases="[&quot;LIB-5&quot;,&quot;LIB-6&quot;,&quot;LIB-7&quot;]"');
+    expect([...html.matchAll(/data-rt-case="([^"]*)"/g)].map((m) => m[1])).toEqual(["LIB-5", "LIB-5", "LIB-7"]);
   });
 
   test("a body with no list renders as written", () => {
