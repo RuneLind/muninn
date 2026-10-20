@@ -9,12 +9,16 @@
  * chain (`src/test/mock-isolation.test.ts`).
  */
 
-import { test, expect, mock, beforeEach, afterAll } from "bun:test";
+import { test, expect, mock, spyOn, beforeEach, afterAll } from "bun:test";
 
 type EndCall = { label: string; status: "ok" | "error" };
 const ends: EndCall[] = [];
 const started: string[] = [];
 let root: "ok" | "error" | null = null;
+const rootErrors: string[] = [];
+const replies: string[] = [];
+const activity: { type: string; text: string }[] = [];
+const logged: { level: string; message: string; props: Record<string, unknown> }[] = [];
 
 class FakeTracer {
   constructor(_name: string, _opts?: unknown) {}
@@ -30,8 +34,9 @@ class FakeTracer {
   summary() {
     return Object.fromEntries(started.map((l) => [l, 5]));
   }
-  error() {
+  error(err: unknown) {
     root = "error";
+    rootErrors.push(err instanceof Error ? err.message : String(err));
   }
   finish(status: "ok" | "error" = "ok") {
     root = status;
@@ -49,9 +54,18 @@ mock.module("../core/message-processor.ts", () => ({
 }));
 mock.module("../db/threads.ts", () => ({ getActiveThreadId: async () => null }));
 mock.module("../db/messages.ts", () => ({ setTelegramMessageId: async () => {} }));
-mock.module("../observability/activity-log.ts", () => ({ activityLog: { push: () => {} } }));
+mock.module("../observability/activity-log.ts", () => ({
+  activityLog: { push: (type: string, text: string) => activity.push({ type, text }) },
+}));
+const recorder = (level: string) => (message: string, props: Record<string, unknown> = {}) =>
+  logged.push({ level, message, props });
+mock.module("../logging.ts", () => ({
+  getLog: () => ({ debug: recorder("debug"), info: recorder("info"), warn: recorder("warn"), error: recorder("error") }),
+}));
 
 const { createVoiceHandler } = await import("./voice-handler.ts");
+const { agentStatus } = await import("../observability/agent-status.ts");
+const statusSpy = spyOn(agentStatus, "set");
 
 const realFetch = globalThis.fetch;
 let downloadOk = true;
@@ -62,6 +76,11 @@ beforeEach(() => {
   ends.length = 0;
   started.length = 0;
   root = null;
+  rootErrors.length = 0;
+  replies.length = 0;
+  activity.length = 0;
+  logged.length = 0;
+  statusSpy.mockClear();
   downloadThrows = null;
   downloadOk = true;
   sendVoiceFails = false;
@@ -81,6 +100,7 @@ beforeEach(() => {
 });
 afterAll(() => {
   globalThis.fetch = realFetch;
+  statusSpy.mockRestore();
 });
 
 function ctx() {
@@ -94,7 +114,10 @@ function ctx() {
         return { file_path: "voice.ogg" };
       },
     },
-    reply: async () => ({ message_id: 2 }),
+    reply: async (text: string) => {
+      replies.push(text);
+      return { message_id: 2 };
+    },
     replyWithChatAction: async () => {},
     replyWithVoice: async () => {
       if (sendVoiceFails) throw new Error("send failed");
@@ -107,19 +130,37 @@ const handler = createVoiceHandler({} as never, { name: "b", telegramBotToken: "
 const run = () => handler(ctx() as never);
 const statusOf = (label: string) => ends.filter((e) => e.label === label).map((e) => e.status);
 
+const lastPhase = () => statusSpy.mock.calls.at(-1)?.[0];
+const errorLogs = () => logged.filter((l) => l.level === "error");
+
 test("a failed download ends voice_download as error", async () => {
   downloadOk = false;
   await run();
   expect(statusOf("voice_download")).toEqual(["error"]);
+  expect(replies).toEqual(["Failed to download voice message."]);
+  expect(lastPhase()).toBe("idle");
+  expect(rootErrors).toEqual(["Failed to download voice message"]);
+  // Matches the code before the catch existed: a non-OK response never threw,
+  // so it reached no log or activity entry.
+  expect(errorLogs()).toEqual([]);
+  expect(activity).toEqual([]);
 });
 
 for (const step of ["getFile", "fetch", "arrayBuffer"] as const) {
   test(`a throw in ${step} ends voice_download as error and the root as error`, async () => {
     downloadThrows = step;
-    await run().catch(() => {});
+    await run();
     expect(statusOf("voice_download")).toEqual(["error"]);
     expect(started).not.toContain("stt");
     expect(root).toBe("error");
+    const message = { getFile: "getFile failed", fetch: "network down", arrayBuffer: "body read failed" }[step];
+    expect(rootErrors).toEqual([message]);
+    expect(replies).toEqual(["Failed to download voice message."]);
+    expect(lastPhase()).toBe("idle");
+    expect(errorLogs()).toHaveLength(1);
+    expect(errorLogs()[0]!.props).toMatchObject({ botName: "b", error: message });
+    expect(JSON.stringify(logged)).not.toContain("api.telegram.org");
+    expect(activity).toEqual([{ type: "error", text: `[Voice] Download failed: ${message}` }]);
   });
 }
 

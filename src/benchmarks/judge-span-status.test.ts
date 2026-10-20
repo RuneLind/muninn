@@ -96,16 +96,21 @@ test("a judge that fails both attempts ends claude-cli-call as error", async () 
   expect(ends).toEqual([{ label: "claude-cli-call", status: "error" }]);
 }, 10_000);
 
-test("cleanup removes this file's dump and leaves one another run wrote meanwhile", () => {
+test("cleanup removes this file's dump and leaves one another run wrote meanwhile", async () => {
+  // Writes its own dump, so the test passes alone (`-t cleanup`) as well.
+  const before = ownDumps().length;
+  fakeClaude("exit 1");
+  await expect(run(5_000)).rejects.toThrow(/claude exited with code 1/);
+  const own = ownDumps();
+  expect(own).toHaveLength(before + 1);
+  expect(existsSync(own.at(-1)!)).toBe(true);
   const foreign = `/tmp/benchmark-judge-debug-${Date.now()}-other-run-${process.pid}`;
   makeDir(foreign);
   try {
-    const own = ownDumps();
-    expect(own).toHaveLength(1); // the both-attempts-failed test above
     removeOwnDumps();
-    expect(existsSync(own[0]!)).toBe(false);
+    for (const d of own) expect(existsSync(d)).toBe(false);
     expect(existsSync(foreign)).toBe(true);
   } finally {
     rmSync(foreign, { recursive: true, force: true });
   }
-});
+}, 10_000);

@@ -45,7 +45,11 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       const response = await fetch(fileUrl);
       if (response.ok) oggBuffer = new Uint8Array(await response.arrayBuffer());
     } catch (error) {
+      // Logged here because the throw no longer reaches bot.catch. The message
+      // only, never fileUrl: it carries the bot token.
       downloadError = error instanceof Error ? error.message : String(error);
+      log.error("Voice download failed: {error}", { ...props, error: downloadError });
+      activityLog.push("error", `[Voice] Download failed: ${downloadError}`, { userId, username, botName: botConfig.name });
     }
     if (!oggBuffer) {
       t.end("voice_download", undefined, "error");
