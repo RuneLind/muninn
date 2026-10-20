@@ -362,7 +362,7 @@ describe("G3: a PR link is a PR URL or a PR-shaped text; a bare ref is `PR #n` o
     expect(l.rows.map((r) => r.pr)).toEqual([9]);
   });
 
-  test("a struck link gives no identity; a struck first cell gives no slate", () => {
+  test("a struck link gives no identity; a struck first cell keeps its slate", () => {
     const l = parseLedgerTable(["PR", "Repo", "State"], [
       [`~~[#3](${U}/3)~~ [#4](${U}/4)`, "", "open"],
       ["fix x", `~~[#5](${U}/5)~~ [#6](${U}/6)`, "open"],
@@ -372,7 +372,8 @@ describe("G3: a PR link is a PR URL or a PR-shaped text; a bare ref is `PR #n` o
     expect(l.rows.map((r) => [r.slate, r.link, r.pr])).toEqual([
       [null, 4, 4],
       [null, 6, 6],
-      [9, null, 9],
+      [7, null, 7],
+      [8, null, 8],
     ]);
   });
 
@@ -544,5 +545,65 @@ describe("C: PR refs, the token kinds × the cells they sit in", () => {
       parseLedgerTable(["PR", "State", "Landed"], [[cell, cell, cell]]);
       expect(performance.now() - t).toBeLessThan(1000);
     }
+  });
+});
+
+// Class check (fix round 3, batch 3): the slate, its label and the row's link
+// over first-cell shapes × first headers × other cells. Rules: the slate and
+// the label are read from the first cell with `~~` stripped like `**` (struck
+// text kept); the link and the state from the unstruck cells; a first header
+// of a phase, date or period word, alone or with a parenthetical, holds no
+// slate. Synthetic rows only.
+describe("CS: slate identity, first-cell shapes × headers × other cells", () => {
+  /** A first-cell shape: its text with markers stripped and leading dashes
+   *  gone (`plain`), and — in a slate column — the slate and the label after it. */
+  const shapes: { cell: string; plain: string; slate: number | null; label: string }[] = [
+    { cell: "3 — x", plain: "3 — x", slate: 3, label: "x" },
+    { cell: "**3 — x**", plain: "3 — x", slate: 3, label: "x" },
+    { cell: "~~3 — x~~", plain: "3 — x", slate: 3, label: "x" },
+    { cell: "~~**3 — x**~~", plain: "3 — x", slate: 3, label: "x" },
+    { cell: "**~~3~~** — x", plain: "3 — x", slate: 3, label: "x" },
+    // The leading integer of the text with `~~` stripped: 3, not 4.
+    { cell: "~~3~~ 4 — x", plain: "3 4 — x", slate: 3, label: "4 — x" },
+    // The label keeps struck text, markers stripped.
+    { cell: "3 — ~~old~~ new", plain: "3 — old new", slate: 3, label: "old new" },
+    { cell: "A1 — x", plain: "A1 — x", slate: null, label: "A1 — x" },
+    { cell: "2026-10-03 — x", plain: "2026-10-03 — x", slate: null, label: "2026-10-03 — x" },
+    { cell: "1.5 — x", plain: "1.5 — x", slate: null, label: "1.5 — x" },
+    { cell: "", plain: "", slate: null, label: "" },
+  ];
+  /** First headers and whether the column holds the slate. The anchors: a
+   *  phase/date/period word inside a longer word (`Update`, `Sprintnr`) or
+   *  followed by more than a parenthetical (`Phase PR`) is no such header. */
+  const headers: [string, boolean][] = [
+    ["PR", true], ["#", true], ["", true], ["Slate", true],
+    ["Fase", false], ["Fase (uke)", false],
+    ["Update", true], ["Workaround", true], ["Background", true],
+    ["Sprintnr", true], ["Phase PR", true], ["Versjon bump", true],
+  ];
+  const others: { name: string; cell: string; link: number | null }[] = [
+    { name: "none", cell: "", link: null },
+    { name: "live link", cell: `[#7](${U}/7)`, link: 7 },
+    { name: "struck link", cell: `~~[#7](${U}/7)~~`, link: null },
+  ];
+
+  const cells = shapes.flatMap((s) => headers.flatMap(([h, slateCol]) => others.map((o) => ({ s, h, slateCol, o }))));
+  test(`${cells.length} cells`, () => {
+    const red: string[] = [];
+    for (const { s, h, slateCol, o } of cells) {
+      const r = parseLedgerTable([h, "State", "Notes"], [[s.cell, "dropped", o.cell]]).rows[0];
+      const slate = slateCol ? s.slate : null;
+      const pr = slate ?? o.link;
+      const want = pr === null ? "no row" : { slate, link: o.link, pr, label: slateCol ? s.label : s.plain, state: "dropped" };
+      const got = r ? { slate: r.slate, link: r.link, pr: r.pr, label: r.label, state: r.state } : "no row";
+      if (JSON.stringify(got) !== JSON.stringify(want)) red.push(`${s.cell} | ${h} | ${o.name} | want ${JSON.stringify(want)} got ${JSON.stringify(got)}`);
+    }
+    console.log(`slate class-check table: ${cells.length} cells, ${red.length} red`);
+    if (red.length) console.log(red.join("\n"));
+    expect(red).toEqual([]);
+  });
+
+  test("a struck slate with a live link: the slate wins, the link stays", () => {
+    expect(parseLedgerTable(["PR", "State"], [["~~**1**~~", `shipped [#107](${U}/107)`]]).rows[0]).toMatchObject({ slate: 1, link: 107, pr: 1 });
   });
 });

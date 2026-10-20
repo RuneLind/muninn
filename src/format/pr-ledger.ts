@@ -14,7 +14,8 @@
  *  1b. else rule 1 in any other cell, so prose there never beats the state cell;
  *  3. else a merged-PR link alone in a «Landed»/«Landet» cell reads as merged:
  *     a markdown PR link, never a bare `repo #n`.
- * A row matching none is `unknown`. Struck text (`~~…~~`) is removed first.
+ * A row matching none is `unknown`. Struck text (`~~…~~`) is removed before
+ * the state and the link are read; the slate and label read through it.
  * A PR ref is a markdown PR link (`linkNumber`) or a bare `PR #n`,
  * `owner/repo#n`, `repo #n` (`bareNumber`).
  *
@@ -223,7 +224,8 @@ const LANDED_HEADER_RE = /^(?:landed|landet)$/i;
 const DECISIONS_HEADER_RE = /^(?:decisions?|beslutning(?:er)?)$/i;
 const PR_HEADER_RE = /^PR$/i;
 /** A first column that is a phase, a date or a period, not a slate; any
- *  other first column numbers the slate. A qualifier in parentheses may follow. */
+ *  other first column numbers the slate. A qualifier in parentheses may follow;
+ *  anchored, so `Update`, `Sprintnr` and `Phase PR` hold the slate. */
 const NOT_SLATE_HEADER_RE = /^(?:fase|phase|date|dato|når|when|uke|week|sprint|runde|round|versjon|version)(?:\s*\([^()]*\))?$/i;
 
 const DECISION_ID_GLOBAL = /(?<![\p{L}\p{N}])D(\d{1,4})(?![\p{L}\p{N}])/gu;
@@ -245,7 +247,7 @@ export interface LedgerRow {
   rule: 0 | 1 | 2 | 3;
   /** The D ids the row cites, in cell order, deduplicated. */
   decisions: string[];
-  /** The first cell's text without its number (`harness`). */
+  /** The first cell's text without its number (`harness`), struck text kept. */
   label: string;
   cells: string[];
 }
@@ -281,7 +283,8 @@ function prRefOf(text: string): number | null {
 }
 
 /** The slate number of a slate column's cell (`**12** — x`, `PR 12`,
- *  `[#351](…) 1 — x`); a date or a decimal is none. The cell comes unstruck. */
+ *  `[#351](…) 1 — x`); a date or a decimal is none. The cell comes raw:
+ *  `plain` strips `~~` with `**`, so struck text stays in slate and label. */
 function slateOf(cell: string, slateColumn: boolean): { slate: number | null; label: string } {
   const t = plain(cell).replace(/^[-–—\s]+/, "");
   if (!slateColumn) return { slate: null, label: t };
@@ -360,9 +363,10 @@ export function parseLedgerTable(headers: string[], rows: string[][], source: Le
   const slateColumn = !NOT_SLATE_HEADER_RE.test(plain(headers[0] ?? ""));
   const out: LedgerRow[] = [];
   for (const cells of rows) {
-    // Struck text (`~~[#3](…)~~`) gives no identity, as it gives no state.
+    // `~~` is formatting for the slate and label (`~~**3**~~` stays slate 3,
+    // a dropped row stays on the strip); a struck link or state word counts not.
     const live = cells.map(unstruck);
-    const { slate, label } = slateOf(live[0] ?? "", slateColumn);
+    const { slate, label } = slateOf(cells[0] ?? "", slateColumn);
     const link = linkOf(live, [prCol, stateColumn, landedCol]);
     const pr = slate ?? link;
     if (pr === null) continue;
