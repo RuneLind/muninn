@@ -1109,6 +1109,115 @@ export function statusTilesCss(scope: string): string {
 }
 
 /**
+ * Reader-only: `<Chart>` (`chart-view.ts`, MDX visual components PR 3). Only
+ * the reader's page render draws a chart, so no other surface ships these
+ * rules. Theme tokens only: a series takes its colour through `--vc-c`, set
+ * per class from the status tokens, so both themes work. Each chart is its own
+ * size container, so a row's label stacks over its bar when the chart is
+ * narrow (390 px, a narrowed pane), not when the viewport is.
+ *
+ * In chart mode the table is hidden, but never inside a peek: `cloneBare`
+ * strips the chrome there, and a hidden table would leave an empty box.
+ */
+export function chartCss(scope: string): string {
+  return `
+    ${scope} .vc-chart {
+      container-type: inline-size; margin: 1.2rem 0; padding: 0.7rem 0.85rem;
+      border: 1px solid var(--border-secondary); border-radius: 9px; background: var(--bg-surface);
+    }
+    ${scope} .vc-chart > .vc-table { margin: 0.5rem 0 0; }
+    ${scope} .vc-chart.vc-has-plot:not(.vc-table-on):not(.wiki-ref-peek *) > .vc-table { display: none; }
+    ${scope} .vc-chart.vc-table-on > .vc-plot, ${scope} .vc-chart.vc-table-on > .vc-legend { display: none; }
+    ${scope} .vc-plot[hidden] { display: none; }
+    ${scope} .vc-caption { font-weight: 600; color: var(--text-primary); margin-bottom: 0.4rem; }
+    ${scope} .vc-ctl { display: flex; flex-wrap: wrap; gap: 0.4rem 0.8rem; margin-bottom: 0.55rem; user-select: none; }
+    ${scope} .vc-group { display: inline-flex; flex-wrap: wrap; }
+    ${scope} .vc-btn {
+      font: inherit; font-size: 0.8em; padding: 0.15rem 0.55rem; cursor: pointer;
+      color: var(--text-soft); background: transparent; border: 1px solid var(--border-secondary);
+    }
+    ${scope} .vc-group .vc-btn + .vc-btn { margin-left: -1px; }
+    ${scope} .vc-group .vc-btn:first-child { border-radius: 6px 0 0 6px; }
+    ${scope} .vc-group .vc-btn:last-child { border-radius: 0 6px 6px 0; }
+    ${scope} .vc-btn[aria-pressed="true"] { color: var(--text-primary); background: var(--tint-info); border-color: var(--accent); }
+    ${scope} .vc-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .vc-rows { display: flex; flex-direction: column; gap: 0.45rem; }
+    ${scope} .vc-row {
+      display: grid; grid-template-columns: minmax(0, 11rem) minmax(4rem, 1fr) minmax(0, 13rem);
+      gap: 0.2rem 0.7rem; align-items: center;
+    }
+    @container (max-width: 34rem) {
+      ${scope} .vc-row { grid-template-columns: minmax(0, 1fr); }
+    }
+    ${scope} .vc-lab { min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: 0.9em; }
+    ${scope} .vc-num { min-width: 0; overflow-wrap: anywhere; color: var(--text-soft); font-size: 0.85em; font-variant-numeric: tabular-nums; }
+    ${scope} .vc-svg { display: block; width: 100%; height: 0.9rem; overflow: visible; }
+    ${scope} .vc-track { fill: var(--bg-inset); }
+    ${scope} .vc-value { fill: var(--status-info); }
+    ${scope} .vc-hold { fill: var(--status-cyan); }
+    ${scope} .vc-gapband { fill: var(--tint-warning); }
+    ${scope} .vc-target { stroke: var(--text-primary); stroke-width: 2px; }
+    ${scope} .vc-mark { stroke: var(--status-magenta); stroke-width: 2px; stroke-dasharray: 2 2; }
+    ${scope} .vc-gap { color: var(--tone-warn); white-space: nowrap; }
+    ${scope} .vc-verdict { font-weight: 600; }
+    ${scope} .vc-ok { color: var(--tone-good); }
+    ${scope} .vc-miss { color: var(--tone-err); }
+    ${scope} .vc-state {
+      display: inline-block; margin-left: 0.35rem; padding: 0 0.4rem; border-radius: 4px; font-size: 0.8em;
+      color: var(--text-primary); border: 1px solid var(--border-secondary); background: var(--tint-neutral); white-space: nowrap;
+    }
+    ${scope} .vc-st-merged { background: var(--tint-success); border-color: var(--status-success); }
+    ${scope} .vc-st-open, ${scope} .vc-st-measurement { background: var(--tint-info); border-color: var(--status-info); }
+    ${scope} .vc-st-planned, ${scope} .vc-st-not-started, ${scope} .vc-st-optional { background: transparent; border-style: dashed; }
+    ${scope} .vc-st-blocked { background: var(--tint-warning); border-color: var(--status-warning); }
+    ${scope} .vc-st-dropped, ${scope} .vc-st-closed { background: var(--tint-error); border-color: var(--status-error); text-decoration: line-through; }
+    ${scope} .vc-st-unknown { background: transparent; border-style: dotted; color: var(--text-soft); }
+    ${scope} .vc-pct { color: var(--text-soft); }
+    ${scope} .vc-d1 { padding-left: 0.8rem; } ${scope} .vc-d2 { padding-left: 1.6rem; }
+    ${scope} .vc-d3 { padding-left: 2.4rem; } ${scope} .vc-d4 { padding-left: 3.2rem; }
+    ${scope} .vc-steps { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; gap: 0.2rem 0.4rem; }
+    ${scope} .vc-yaxis {
+      display: flex; flex-direction: column; justify-content: space-between; text-align: right;
+      font-size: 0.75em; color: var(--text-soft); font-variant-numeric: tabular-nums;
+    }
+    ${scope} .vc-area { min-width: 0; }
+    ${scope} .vc-area .vc-svg { height: 9rem; }
+    ${scope} .vc-xaxis {
+      grid-column: 2; display: flex; justify-content: space-between; gap: 0.3rem;
+      font-size: 0.75em; color: var(--text-soft); overflow-wrap: anywhere;
+    }
+    ${scope} .vc-xaxis > span { min-width: 0; }
+    ${scope} .vc-s0 { --vc-c: var(--status-info); }
+    ${scope} .vc-s1 { --vc-c: var(--status-magenta); }
+    ${scope} .vc-s2 { --vc-c: var(--status-cyan); }
+    ${scope} .vc-s3 { --vc-c: var(--status-warning); }
+    ${scope} .vc-s4 { --vc-c: var(--status-success); }
+    ${scope} .vc-s5 { --vc-c: var(--status-error); }
+    ${scope} .vc-line { fill: none; stroke: var(--vc-c); stroke-width: 2px; stroke-linejoin: round; }
+    ${scope} .vc-ref { stroke: var(--vc-c); stroke-width: 1px; stroke-dasharray: 4 3; opacity: 0.75; }
+    ${scope} .vc-series.vc-off { display: none; }
+    ${scope} .vc-legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; margin-top: 0.55rem; font-size: 0.8em; color: var(--text-soft); }
+    ${scope} .vc-key { display: inline-flex; align-items: center; gap: 0.3rem; }
+    ${scope} button.vc-key { border-radius: 6px; }
+    ${scope} button.vc-key[aria-pressed="false"] { opacity: 0.55; text-decoration: line-through; }
+    ${scope} .vc-sw { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; }
+    ${scope} .vc-k-value { background: var(--status-info); }
+    ${scope} .vc-k-hold { background: var(--status-cyan); }
+    ${scope} .vc-k-target { width: 2px; background: var(--text-primary); }
+    ${scope} .vc-k-mark { width: 2px; background: var(--status-magenta); }
+    ${scope} .vc-k-line { height: 2px; background: var(--vc-c); }
+    ${scope} .vc-k-ref { height: 0; border-top: 1px dashed var(--text-soft); }
+    ${scope} .vc-finding { margin: 0 0 0.5rem; padding-left: 1.1rem; font-size: 0.85em; color: var(--tone-warn); }
+    ${scope} .vc-finding .vc-fatal { color: var(--tone-err); }
+    @media (forced-colors: active) {
+      ${scope} .vc-value, ${scope} .vc-hold { fill: CanvasText; }
+      ${scope} .vc-gapband { fill: transparent; }
+      ${scope} .vc-line, ${scope} .vc-ref, ${scope} .vc-target, ${scope} .vc-mark { stroke: CanvasText; }
+    }
+  `;
+}
+
+/**
  * Reader-only: the decision chain view and the PR strip (`decision-views.ts`).
  * Only the wiki reader renders them (`views: true`), so chat and `/research`
  * never ship these rules. Theme tokens only. Each view is its own size

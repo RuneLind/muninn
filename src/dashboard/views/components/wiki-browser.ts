@@ -234,6 +234,7 @@ import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceEmbeds } from "./wiki-embed.ts";
 import { bindLaneProgress, enhanceReportBlocks } from "./wiki-report-blocks.ts";
 import { enhanceQueryTables } from "./wiki-query-table.ts";
+import { enhanceVisuals } from "./wiki-visuals.ts";
 import { enhanceQueryExplorer } from "./wiki-query-explorer.ts";
 import { enhanceRefLinks, hideRefPeek } from "./wiki-ref-links.ts";
 import { closeFind, initFindPalette, isFindOpen, refreshFind } from "./wiki-find-palette.ts";
@@ -4525,6 +4526,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels, roles: reader?.roles });
       // `<Query>` result tables: header-click sorting. No-op without one.
       enhanceQueryTables(articleRoot);
+      // `<Chart>`: the Chart/Table, scale and series toggles. No-op without one.
+      enhanceVisuals(articleRoot);
       // Two or more adjacent `<Query>` cards: a search box and `uses` chips.
       enhanceQueryExplorer(articleRoot);
       // Fact-check layer: chip → evidence card, the summary strip, and the
