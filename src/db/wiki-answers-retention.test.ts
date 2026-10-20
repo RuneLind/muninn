@@ -32,7 +32,7 @@ const version = (answerId: string, v: number, relPath = PAGE): WikiAnswerVersion
   wiki: WIKI,
   relPath,
   questionId: "Q1",
-  author: { userId: null, oid: null, navIdent: null, name: "Test Person" },
+  author: { userId: null, oid: null, navIdent: null, name: `Test Person ${answerId}` },
   choice: "A",
   body: `version ${v} text`,
   questionHash: "h",

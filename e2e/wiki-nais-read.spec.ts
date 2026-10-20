@@ -819,11 +819,13 @@ test.describe("answers under nais — role `user`", () => {
   test("GET and POST /api/wiki/answers pass the zone; the scanner refuses its marker", async () => {
     expect((await send(BASE, "GET", ANSWERS_Q)).status).toBe(200);
     expect((await send(BASE, "HEAD", ANSWERS_Q)).status).toBe(200);
-    const saved = await send(BASE, "POST", ANSWERS, answerBody("Ja, fra en kollega."));
-    expect(saved.status).toBe(201);
+    // The refusal first: once this identity has a live answer to S1, a second
+    // new answer is 409 already_answered before the scanner runs.
     const refused = await send(BASE, "POST", ANSWERS, answerBody(`med ${SCANNER_MARKER}`));
     expect(refused.status).toBe(422);
     expect(refused.json!.reasons).toEqual(["stub marker"]);
+    const saved = await send(BASE, "POST", ANSWERS, answerBody("Ja, fra en kollega."));
+    expect(saved.status).toBe(201);
   });
 
   test("every other method on the path, and export, confirm and redact, are the zone's 403", async () => {

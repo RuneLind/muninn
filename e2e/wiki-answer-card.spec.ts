@@ -22,7 +22,7 @@
 
 import { test, expect, type Locator, type Page, type Route } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -48,6 +48,11 @@ const FIX_REL = "plans/fix.mdx";
 const OWNER = "Rune Owner";
 
 const q = (id: string, text: string, attrs = "") => [`<Question id="${id}"${attrs}>`, "", `**${text}**`, "", "</Question>", ""];
+/** The `question_hash` the route stores for a `q()` block today: sha256 of its
+ *  body and choices (`hashInput`). A seed that answers the current wording
+ *  stores it; a stale hash makes the card say "answered an earlier wording". */
+const qHash = (text: string, choices = "") =>
+  createHash("sha256").update(`**${text}**\n\nchoices: ${choices}`).digest("hex");
 
 const PAGE = [
   "---",
@@ -378,13 +383,14 @@ test.beforeAll(async ({}, info) => {
   await api({ relPath: STYLE_REL, questionId: "C4", body: "Not asked, answered anyway." });
   // C2 is closed, so the route refuses it: an answer saved before the close.
   await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, body, question_hash)
-            VALUES (${randomUUID()}, 1, ${WIKI}, ${STYLE_REL}, 'C2', ${OWNER}, 'Saved before the close.', 'seed')`;
+            VALUES (${randomUUID()}, 1, ${WIKI}, ${STYLE_REL}, 'C2', ${OWNER}, 'Saved before the close.', ${qHash("Closed with a new answer?")})`;
   await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, body, question_hash)
-            VALUES (${randomUUID()}, 1, ${WIKI}, ${SETTLED_REL}, 'N1', ${OWNER}, 'Saved before the decision.', 'seed')`;
+            VALUES (${randomUUID()}, 1, ${WIKI}, ${SETTLED_REL}, 'N1', ${OWNER}, 'Saved before the decision.', ${qHash("Decided with a new answer?")})`;
 
   // The fix page's seeded state.
   await api({ relPath: FIX_REL, questionId: "F1", choice: "A", body: "F1 version one." });
-  // F7 was answered with "A" when the page offered A|B; it now offers X|Y.
+  // F7 was answered with "A" when the page offered A|B; it now offers X|Y, so
+  // its stored hash is the old wording's (any other than today's).
   await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, choice, body, question_hash)
             VALUES (${randomUUID()}, 1, ${WIKI}, ${FIX_REL}, 'F7', ${OWNER}, 'A', 'Picked A back then.', 'seed')`;
   const f8 = await api({ relPath: FIX_REL, questionId: "F8", body: "F8 version one." });
@@ -399,11 +405,19 @@ test.beforeAll(async ({}, info) => {
   }
   await api({ relPath: SWEEP_REL, questionId: "S1", choice: "A", body: "S1 version one." });
   await api({ relPath: SWEEP_REL, questionId: "S3", body: "S3 version one." });
-  await api({ relPath: SWEEP_REL, questionId: "S5", body: "S5 first answer." });
-  await api({ relPath: SWEEP_REL, questionId: "S5", body: "S5 second answer." });
+  // S5 and S8: two live answers by one author, from before the one-live-answer
+  // rule (the route now refuses a second), so seeded in SQL.
+  for (const [id, text] of [
+    ["S5", "Swept while the viewer has another answer here?"],
+    ["S8", "A carried draft cancelled?"],
+  ] as const) {
+    for (const nth of ["first", "second"]) {
+      await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, body, question_hash, created_at)
+                VALUES (${randomUUID()}, 1, ${WIKI}, ${SWEEP_REL}, ${id}, ${OWNER}, ${`${id} ${nth} answer.`}, ${qHash(text)},
+                        now() - ${nth === "first" ? "2 minutes" : "1 minute"}::interval)`;
+    }
+  }
   await api({ relPath: SWEEP_REL, questionId: "S6", body: "S6 version one." });
-  await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 first answer." });
-  await api({ relPath: SWEEP_REL, questionId: "S8", body: "S8 second answer." });
 
   for (const id of ["T1", "T3", "T4", "T5", "T7"]) await api({ relPath: TERMINAL_REL, questionId: id, body: `${id} version one.` });
 
@@ -413,7 +427,7 @@ test.beforeAll(async ({}, info) => {
     ["Utvikler, Ola", "Z990003", "From a developer."],
   ] as const) {
     await sql`INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_name, author_nav_ident, body, question_hash)
-              VALUES (${randomUUID()}, 1, ${WIKI}, ${GROUPS_REL}, 'H1', ${name}, ${ident}, ${body}, 'seed')`;
+              VALUES (${randomUUID()}, 1, ${WIKI}, ${GROUPS_REL}, 'H1', ${name}, ${ident}, ${body}, ${qHash("For the domain experts?")})`;
   }
 });
 
@@ -749,7 +763,9 @@ test.describe("Wiki reader: the answer card under reloads, failures and focus", 
   test("a stored choice the page no longer offers is dropped from the edit, and a picked choice can be cleared", async ({ page }) => {
     const seen = await openFix(page);
     const f7 = fixCard(page, "F7");
-    await expect(f7.locator(".q-answer > .q-pick")).toHaveText("A");
+    // Read-only, the stored choice is shown and marked as no longer offered.
+    await expect(f7.locator(".q-answer > .q-pick")).toHaveText("A (no longer offered)");
+    await expect(f7.locator(".q-answer > .q-pick")).toHaveClass(/q-pick-gone/);
     await f7.locator("button.q-edit").click();
     await expect(f7.locator('input[type="radio"]:checked')).toHaveCount(0);
     await f7.locator("textarea.q-text").fill("No choice now, just text.");
@@ -1634,6 +1650,10 @@ test.describe("Wiki reader: an answer swept while it is being edited (PR 5b fix 
     const after = await rowsFor("S5", SWEEP_REL);
     expect(after.map((r) => r.body).sort()).toEqual(["S5 second answer.", "S5 typed before the sweep."]);
     expect(after.some((r) => r.answer_id === kept)).toBe(true);
+    // Let in beside the other answer on the swept answer's carry token, and
+    // stored under the swept id; never turned into an edit of the kept one.
+    expect(after.find((r) => r.body === "S5 typed before the sweep.")!.answer_id).toBe(swept);
+    expect(after.find((r) => r.answer_id === kept)!.body).toBe("S5 second answer.");
     expect(seen.errors).toEqual([]);
   });
 

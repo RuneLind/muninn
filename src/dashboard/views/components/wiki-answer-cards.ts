@@ -36,7 +36,9 @@ import {
 } from "../../../format/question-labels.ts";
 import { codePointLength, parseChoices, QUESTION_ANSWER_MAX } from "../../../format/question.ts";
 import {
+  alreadyAnsweredOf,
   answerItemHtml,
+  carryFieldsFor,
   cardDisplayState,
   composerCanSave,
   composerHtml,
@@ -45,6 +47,7 @@ import {
   mergeSavedAnswer,
   overCapText,
   redactErrorText,
+  rememberCarryTokens,
   saveErrorText,
   savedAnswerOf,
   statePillText,
@@ -98,6 +101,9 @@ interface CardUi {
    *  answer is gone: the composer stays, and no Edit is offered, until it is
    *  saved or cancelled — an Edit click would overwrite it. */
   carried: boolean;
+  /** The gone answer a carried draft came from: its carry token goes with the
+   *  save, so the draft saves as a new answer beside another one. */
+  carriedFrom: string | null;
   /** Answer ids whose log fold the reader has open. */
   openLogs: Set<string>;
   /** The viewer may redact (an admin: the page's `canExport`). */
@@ -119,6 +125,8 @@ interface CardsCtx {
   /** The newest answers request issued; only its response paints. */
   loadSeq: number;
   listeners: Set<() => void>;
+  /** Every carry token a load has listed, kept after its answer is gone. */
+  carryTokens: Map<string, string>;
 }
 
 type LoadResult = "ok" | "failed" | "off" | "stale";
@@ -158,6 +166,7 @@ export function enhanceAnswerCards(
     fetchFn: opts.fetchFn ?? fetch.bind(globalThis),
     loadSeq: 0,
     listeners: new Set(),
+    carryTokens: new Map(),
   };
   const handle: AnswerCardsHandle = {
     answers: () => ctx.answers,
@@ -192,6 +201,7 @@ export function enhanceAnswerCards(
       message: null,
       rebaseOnLoad: false,
       carried: false,
+      carriedFrom: null,
       openLogs: new Set(),
       canRedact: info.canExport === true,
       redact: null,
@@ -234,6 +244,7 @@ async function loadAnswers(ctx: CardsCtx): Promise<LoadResult> {
   // A wiki the route says takes no answers: leave the cards as they are.
   if (data.answerable === false) return "off";
   ctx.answers = Array.isArray(data.answers) ? data.answers : [];
+  rememberCarryTokens(ctx.carryTokens, ctx.answers);
   ctx.loaded = true;
   for (const ui of ctx.cards) {
     if (ui.message?.retry) ui.message = null;
@@ -347,6 +358,7 @@ function paint(ctx: CardsCtx, ui: CardUi, force = false): void {
     ui.editing = null;
     ui.rebaseOnLoad = false;
     ui.carried = true;
+    ui.carriedFrom = editingNow.answerId;
     ui.message = { text: ui.L.composer.editGone, kind: "warn" };
   }
   const key = JSON.stringify([answers, ui.editing, ui.sending, ui.message, ui.server, ui.redact]);
@@ -393,7 +405,7 @@ function renderCard(ui: CardUi, answers: AnswerWire[]): void {
           can: ui.canRedact && ui.editing?.answerId !== a.answerId,
           confirming: ui.redact?.answerId === a.answerId,
           working: ui.redact?.answerId === a.answerId && ui.redact.working,
-        }) +
+        }, ui.choices) +
         // The editor sits under the answer it edits, so a 409 shows the newer
         // version above the reader's own text.
         (a.answerId === editingId ? composerHtml(composerView(ui), L) : ""),
@@ -626,6 +638,7 @@ function wireCard(ctx: CardsCtx, ui: CardUi): void {
 function resetDraft(ui: CardUi): void {
   ui.editing = null;
   ui.carried = false;
+  ui.carriedFrom = null;
   ui.choice = null;
   ui.body = "";
   ui.rebaseOnLoad = false;
@@ -647,6 +660,7 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
     body: ui.body,
   };
   if (base) Object.assign(payload, { answerId: base.answerId, baseVersion: base.version });
+  else if (ui.carried) Object.assign(payload, carryFieldsFor(ui.carriedFrom, ctx.carryTokens));
   let status = 0;
   let data: unknown = null;
   try {
@@ -676,6 +690,31 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
     const r = await loadAnswers(ctx);
     if (r === "failed" || r === "off") {
       ui.message = { text: L.composer.savedReloadFailed, kind: "warn", retry: true };
+      paint(ctx, ui, true);
+    }
+  } else if (!base && alreadyAnsweredOf(status, data)) {
+    // The viewer already has a live answer to this question (another tab, or a
+    // carried draft beside one): the draft becomes an edit of it, text and
+    // choice kept, based on the version the server named — so saving again is
+    // a deliberate replace, and a newer version since is a version_conflict.
+    const existing = alreadyAnsweredOf(status, data)!;
+    const wasCarried = ui.carried;
+    const wasCarriedFrom = ui.carriedFrom;
+    const known = () => ctx.answers.some((a) => a.answerId === existing.answerId);
+    ui.editing = { answerId: existing.answerId, version: existing.version };
+    ui.carried = false;
+    ui.carriedFrom = null;
+    ui.rebaseOnLoad = false;
+    ui.message = { text: L.composer.alreadyAnswered, kind: "warn" };
+    // Painted only once the list holds the answer: an editor on an answer the
+    // list lacks reads as gone (paint's editGone rule).
+    if (known()) paint(ctx, ui, true);
+    const r = await loadAnswers(ctx);
+    if ((r === "failed" || r === "off") && !known()) {
+      ui.editing = null;
+      ui.carried = wasCarried;
+      ui.carriedFrom = wasCarriedFrom;
+      ui.message = { text: `${L.composer.alreadyAnswered} ${L.composer.loadFailed}`, kind: "warn", retry: true };
       paint(ctx, ui, true);
     }
   } else if (isVersionConflict(status, data)) {

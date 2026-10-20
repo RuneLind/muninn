@@ -295,7 +295,9 @@ test.describe("role user on the pod — the zone and the store", () => {
 
   test("a body the scanner flags is 422 with the scanner's reason, and nothing is stored", async () => {
     const before = (await sql!`SELECT count(*)::int AS n FROM wiki_answers WHERE wiki = ${WIKI}`)[0]!.n;
-    const res = await call(BASE, PEOPLE.other, "/api/wiki/answers", answerBody({ body: `kopiert inn: ${MARKER}` }));
+    // A colleague with no answer to S1 yet: one who has a live answer gets 409
+    // already_answered before the scanner runs.
+    const res = await call(BASE, PEOPLE.browser, "/api/wiki/answers", answerBody({ body: `kopiert inn: ${MARKER}` }));
     expect(res.status).toBe(422);
     expect(res.json).toEqual({ error: "scanner_refused", code: "scanner_refused", reasons: [STUB_REASON] });
     expect((await sql!`SELECT count(*)::int AS n FROM wiki_answers WHERE wiki = ${WIKI}`)[0]!.n).toBe(before);
@@ -402,8 +404,9 @@ test.describe("the card in the browser", () => {
   });
 
   test("an admin's card offers Redact… with an inline confirm; Cancel backs out, Redact empties the answer", async ({ page }) => {
-    // Its own answer, so this test reads no other test's rows.
-    const seeded = await call(BASE, PEOPLE.browser, "/api/wiki/answers", answerBody({ choice: null, body: "Et svar som skal fjernes." }));
+    // Its own answer, so this test reads no other test's rows; from a colleague
+    // with no answer to S1 yet (the browser case above gave PEOPLE.browser one).
+    const seeded = await call(BASE, PEOPLE.fag, "/api/wiki/answers", answerBody({ choice: null, body: "Et svar som skal fjernes." }));
     expect(seeded.status).toBe(201);
     const answerId = String(seeded.json!.answerId);
     let dialogs = 0;
