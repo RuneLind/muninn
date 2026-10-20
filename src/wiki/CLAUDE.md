@@ -3181,8 +3181,9 @@ and counts the rest in its footer as `+N issues not drawn`).
   many-key rules (`ledgerCost`: a cost rounded to cents, finite and not
   negative; costed sessions a count no larger than the sessions), so one key
   never prices "$0.00" here and "—" on the board; a row that fails reads
-  `unreachable`, and a priced key with no costed session says "no costed
-  session", never "$0.00". Every other unpriced row says why (`cap`,
+  `unreachable`, a priced key that sessions mention but none costed says "no
+  costed session", and one with no session says only "0 sessions mention
+  it", never "$0.00". Every other unpriced row says why (`cap`,
   `deadline`, `unreachable`, `not-configured`, `demoted`).
 - **Layout.** Counting keys are rows (dashed unless stamped; the strongest
   relation shown, all of them on hover). Link-only keys go on an "also linked"

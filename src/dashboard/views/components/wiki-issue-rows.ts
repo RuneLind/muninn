@@ -88,7 +88,8 @@ export function ledgerLabel(l: IssueLedgerView | undefined): string {
   if (l.state === "priced") {
     const n = l.truncated ? `${l.sessions}+` : String(l.sessions);
     const noun = l.sessions === 1 && !l.truncated ? "session mentions" : "sessions mention";
-    // No costed session is no cost, never "$0.00" — the board's dash rule.
+    // No session has no cost to name; no costed session is no cost, never "$0.00".
+    if (l.sessions === 0) return `${n} ${noun} it`;
     return `${n} ${noun} it · ` + (l.costedSessions > 0 ? `$${l.totalCost.toFixed(2)}` : "no costed session");
   }
   if (l.state === "not-tracked") return "not tracked";
