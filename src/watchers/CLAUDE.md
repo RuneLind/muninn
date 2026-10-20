@@ -1434,8 +1434,8 @@ the wiki** from this path.
 (the three SERIES checks, `src/wiki/lint-series.ts`) a finding can carry a `fix`,
 and the run SEEDS those into `wiki_proposals` as `kind: "lint"` rows for the
 human review gate — a DB write, never a wiki one, and refused outright when the
-instance is wiki-readonly or the ROOT is registered read-only. The seeding runs
-on every other pass, including one with zero fixable findings: the seeder's
+instance is wiki-readonly or the ROOT is registered read-only. Every pass that
+the read-only checks do not refuse seeds, including one with zero fixable findings: the seeder's
 self-heal retires every live `draft` group no current finding mints, and a wiki
 whose fixable findings are all fixed is exactly where that matters. The cost is
 one indexed read per wiki per week. Do not restore a `fixable.length` guard in
