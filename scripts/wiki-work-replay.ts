@@ -7,9 +7,12 @@
  *     [--sessions-json <path> --pre-json <path> [--summary-json <path>]]
  *
  * Builds the index on a `git clone --shared` of the wiki's repo checked out at
- * the newest first-parent commit authored at or before `at` — content, series,
+ * the newest first-parent commit COMMITTED at or before `at` — content, series,
  * page set and git dates as of `at`, with every file's mtime set to its last
- * commit time (`buildExplainerMeta` dates `.html` pages by mtime). The ledger
+ * commit's committer time, clamped to `at` (`buildExplainerMeta` dates `.html`
+ * pages by mtime). Committer time, not author time: a rebased commit keeps its
+ * author date but lands on top of commits authored later, so author time would
+ * check out content written after `at`. The ledger
  * answers come from `CLAUDE_USAGE_URL` (Bun loads `.env`) for the REGISTERED
  * root: the summary form at `until = at` and at `until = at − 8 d`, and the
  * sessions form over `[at − 8 d, at]`. They are injected through the memos'
@@ -42,9 +45,12 @@
  * outcome; both or neither. `--summary-json` (the summary form at `until = at`)
  * is optional: without it the worked ledger is not loaded, and the Activity and
  * Worked-on sections run without worked dates (the threads do not read them).
- * A pre-window answer captured for a slightly different window start is
- * re-stamped to this replay's start, and the script says by how much and how
- * many of its rows land inside that gap. `CLAUDE_USAGE_URL` is not read.
+ * Each capture's echoed window must match this replay's within
+ * `FROZEN_WINDOW_SLACK_MS` (sessions `since`/`until`, pre-window `until`,
+ * summary `until`); a capture from another window, or one that records none,
+ * is refused. A pre-window answer a few seconds off is re-stamped to this
+ * replay's start, and the script says by how much and how many of its rows
+ * land inside that gap. `CLAUDE_USAGE_URL` is not read.
  *
  * It prints the threads, the pre-lift Activity ranking (rows 1–10, with each
  * row's derivation), the rendered Work threads section (cards, open state,
@@ -64,12 +70,14 @@
  * split's own sessions and its remainder's key and sessions.
  *
  * Output is local only: melosys-kode-wiki titles are NAV data (D21). Nothing is
- * written anywhere but the temp clone, which is removed on exit.
+ * written anywhere but the temp clone, which is removed on exit and on SIGINT,
+ * SIGTERM and SIGHUP (after the running git child has exited).
  */
 
-import { mkdtemp, realpath, rm, utimes } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { commitAt, git, gitChildren, ReplayError, stampMtimes } from "./wiki-work-replay-git.ts";
 import { getWikiRegistry } from "../src/wiki/registry-memo.ts";
 import { buildWikiIndex, type WikiIndex } from "../src/wiki/store.ts";
 import { refreshWorkedLedger } from "../src/wiki/worked-ledger.ts";
@@ -102,51 +110,9 @@ import { railGhostNote, threadGroupTally, threadMetaLine } from "../src/dashboar
 import { groupWorkThreads, type WorkWitness } from "../src/dashboard/views/components/wiki-work-groups.ts";
 import { WORK_GROUP_STOPS, type WorkGroupEvidenceToggles, type WorkGroupStop } from "../src/dashboard/views/components/wiki-work-group-prefs.ts";
 
-/** A failure the script explains in one stderr line instead of a stack. */
-class ReplayError extends Error {}
-
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i === -1 ? undefined : process.argv[i + 1];
-}
-
-async function git(cwd: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn(["git", "-C", cwd, "-c", "core.quotePath=false", ...args], { stdout: "pipe", stderr: "pipe" });
-  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err.trim()}`);
-  return out;
-}
-
-/** The newest first-parent commit authored at or before `atSec`. */
-async function commitAt(repo: string, atSec: number): Promise<{ sha: string; at: number }> {
-  for (const line of (await git(repo, ["log", "--first-parent", "--format=%H %at", "HEAD"])).split("\n")) {
-    const [sha, t] = line.split(" ");
-    if (sha && Number(t) <= atSec) return { sha, at: Number(t) };
-  }
-  throw new Error("no commit at or before --at");
-}
-
-/** Every tracked file's mtime set to its last commit time (all ≤ `at` after
- *  the checkout). */
-async function stampMtimes(repo: string): Promise<number> {
-  const newest = new Map<string, number>();
-  let t = 0;
-  for (const line of (await git(repo, ["log", "--format=%x00%at", "--name-only", "HEAD"])).split("\n")) {
-    if (line.startsWith("\u0000")) t = Number(line.slice(1));
-    else if (line && !newest.has(line)) newest.set(line, t);
-  }
-  let n = 0;
-  for (const file of (await git(repo, ["ls-files"])).split("\n")) {
-    const at = newest.get(file);
-    if (!file || at === undefined) continue;
-    try {
-      await utimes(path.join(repo, file), at, at);
-      n++;
-    } catch {
-      // A file the checkout did not produce (a submodule path) keeps its time.
-    }
-  }
-  return n;
 }
 
 /** The viewer defaults the shipped rail opens with: no stored sort, families
@@ -482,8 +448,31 @@ function printGroups(index: WikiIndex, listing: WikiListing[], at: number): void
   }
 }
 
-/** The frozen ledger answers, or null when the flags are absent. */
-async function frozenAnswers(sinceMs: number): Promise<{ sessions: unknown; pre: unknown; summary: unknown | null } | null> {
+/** How far a frozen capture's echoed window may sit from this replay's before
+ *  it is refused: a capture taken by hand a moment before or after the replay
+ *  started, not one from another day. */
+const FROZEN_WINDOW_SLACK_MS = 5 * 60_000;
+
+/** Refuse a frozen capture whose echoed window (`field` → the instant this
+ *  replay asked for) is missing or further off than the slack. */
+function checkWindow(file: string, body: unknown, expected: Record<string, number>): void {
+  for (const [field, want] of Object.entries(expected)) {
+    const got = (body as Record<string, unknown> | null)?.[field];
+    if (typeof got !== "number" || !Number.isFinite(got)) {
+      throw new ReplayError(`${file}: the capture records no window (no numeric \`${field}\`); capture it again for this --at`);
+    }
+    if (Math.abs(got - want) > FROZEN_WINDOW_SLACK_MS) {
+      throw new ReplayError(
+        `${file}: captured for another window (${field} ${new Date(got).toISOString()}, this replay needs ${new Date(want).toISOString()}, ` +
+          `off by ${((got - want) / 3_600_000).toFixed(2)} h; more than ${FROZEN_WINDOW_SLACK_MS / 60_000} min is refused)`,
+      );
+    }
+  }
+}
+
+/** The frozen ledger answers, or null when the flags are absent. Each must
+ *  echo this replay's window (`checkWindow`). */
+async function frozenAnswers(sinceMs: number, atMs: number): Promise<{ sessions: unknown; pre: unknown; summary: unknown | null } | null> {
   const sessionsPath = arg("sessions-json");
   const prePath = arg("pre-json");
   const summaryPath = arg("summary-json");
@@ -497,8 +486,11 @@ async function frozenAnswers(sinceMs: number): Promise<{ sessions: unknown; pre:
     }
   };
   const [sessions, preRaw, summary] = await Promise.all([read(sessionsPath), read(prePath), summaryPath ? read(summaryPath) : null]);
-  const pre = preRaw as { until?: unknown; pages?: { w?: number; b?: number }[] };
-  if (typeof pre?.until === "number" && pre.until !== sinceMs) {
+  checkWindow(sessionsPath, sessions, { since: sinceMs, until: atMs });
+  checkWindow(prePath, preRaw, { until: sinceMs });
+  if (summaryPath) checkWindow(summaryPath, summary, { until: atMs });
+  const pre = preRaw as { until: number; pages?: { w?: number; b?: number }[] };
+  if (pre.until !== sinceMs) {
     const late = (pre.pages ?? []).filter((r) => Math.max(r.w ?? 0, r.b ?? 0) > sinceMs).length;
     console.log(
       `frozen pre-window answer: until ${new Date(pre.until).toISOString()} re-stamped to ${new Date(sinceMs).toISOString()} ` +
@@ -525,7 +517,7 @@ async function main(): Promise<void> {
       `no registered wiki named ${wikiName} (registered: ${names}). A wiki registers through WIKI_EXTRA or a bot's wikiDir under MUNINN_BOTS_DIR; set them when the checkout has no .env`,
     );
   }
-  const frozen = await frozenAnswers(sinceMs);
+  const frozen = await frozenAnswers(sinceMs, at);
   const baseUrl = frozen ? "frozen" : (process.env.CLAUDE_USAGE_URL ?? "").trim().replace(/\/+$/, "");
   if (!baseUrl) throw new ReplayError("CLAUDE_USAGE_URL is not set");
   const registeredRoot = path.resolve(entry.root);
@@ -561,18 +553,33 @@ async function main(): Promise<void> {
   const raw = sessionsBody as { sessions: { last: number; files?: { lastMs: number }[] }[] };
   const { sessions: kept, clipped } = clipSessionsAt(raw.sessions, at);
 
-  // The clone, at the commit authored at or before `at`.
+  // The clone, at the commit committed at or before `at`.
   const toplevel = (await git(registeredRoot, ["rev-parse", "--show-toplevel"])).trim();
   const sub = path.relative(toplevel, await realpath(registeredRoot));
   const tmp = await mkdtemp(path.join(tmpdir(), "wiki-work-replay-"));
-  const cleanup = () => rm(tmp, { recursive: true, force: true });
-  process.on("SIGINT", () => void cleanup().then(() => process.exit(130)));
+  let removing: Promise<void> | undefined;
+  const cleanup = () => (removing ??= rm(tmp, { recursive: true, force: true }));
+  // A signal stops the running git child first, so it is not writing into the
+  // clone while it is removed; `main` failing on the killed child then waits
+  // for this exit instead of reporting it (`signalled`).
+  const onSignal = async (code: number) => {
+    signalled = true;
+    const running = [...gitChildren];
+    for (const c of running) c.kill();
+    await Promise.all(running.map((c) => c.exited));
+    await cleanup();
+    process.exit(code);
+  };
+  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
+    process.on(sig, () => void onSignal(code));
+  }
   try {
     const repo = path.join(tmp, "repo");
     await git(tmp, ["clone", "--quiet", "--shared", "--no-checkout", toplevel, repo]);
-    const commit = await commitAt(repo, Math.floor(at / 1000));
+    const atSec = Math.floor(at / 1000);
+    const commit = await commitAt(repo, atSec);
     await git(repo, ["checkout", "--quiet", "--detach", commit.sha]);
-    const stamped = await stampMtimes(repo);
+    const stamped = await stampMtimes(repo, atSec);
     const cloneRoot = path.join(repo, sub);
 
     const now = () => at;
@@ -624,9 +631,14 @@ async function main(): Promise<void> {
   }
 }
 
+/** Set by a signal handler, which owns the exit from then on. */
+let signalled = false;
+
 try {
   await main();
 } catch (err) {
+  // The signal handler is removing the clone and exits with the signal's code.
+  if (signalled) await new Promise(() => {});
   if (!(err instanceof ReplayError)) throw err;
   console.error(`wiki-work-replay: ${err.message}`);
   process.exit(1);
