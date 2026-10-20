@@ -1203,7 +1203,8 @@ export function decisionViewsCss(scope: string): string {
   `;
 }
 
-/** The reader's `<Chart>` view (`src/format/chart-view.ts`): theme tokens only.
+/** The reader's `<Chart>` view (`src/format/chart-view.ts`): theme tokens, except
+ *  the pressed button's white ink (the theme has no ink token for the accent fill).
  *  In chart mode the table is visually hidden, not removed, so a screen
  *  reader and a selection still reach it; a peek card shows it plainly. */
 export function chartViewCss(scope: string): string {
@@ -1313,6 +1314,77 @@ export function chartViewCss(scope: string): string {
       ${scope} .vc-k-hold { background: Canvas; border-color: CanvasText; }
       ${scope} .vc-k-ref { background: none; border-top-color: CanvasText; }
       ${scope} .vc-btn[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+    }
+  `;
+}
+
+/** The reader's `<RuleTree>` view (`src/format/rule-tree-view.ts`): theme
+ *  tokens, except the picked chip's `#fff` on `--accent-hover` (the theme has
+ *  no ink token for the accent fill; Chart's pressed button does the same). The picker shows once `wiki-visuals.ts` has put `rt-js` on the
+ *  document root; a picked case dims every row off its path with a muted ink
+ *  and a dashed border, never with opacity alone. */
+export function ruleTreeCss(scope: string): string {
+  const s = scope;
+  return `
+    ${s} .rt {
+      margin: 0.8rem 0 1rem; padding: 0.6rem 0.8rem; border-radius: 8px; max-width: 100%; box-sizing: border-box;
+      background: var(--bg-panel); border: 1px solid var(--border-primary); container: rt / inline-size;
+    }
+    ${s} .rt-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.8rem; margin-bottom: 0.5rem; }
+    ${s} .rt-title { margin: 0; font-weight: 600; color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+    ${s} .rt-pick { display: none; align-items: center; gap: 0.4rem; font-size: 0.85em; color: var(--text-secondary); max-width: 100%; }
+    .rt-js ${s} .rt-pick { display: inline-flex; }
+    ${s} .rt-select {
+      font: inherit; min-width: 0; max-width: 100%; padding: 0.1rem 0.3rem; border-radius: 6px;
+      color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--text-muted);
+    }
+    ${s} .rt-select:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
+    /* Heard on a pick, never seen: the tree on screen already shows the path. */
+    ${s} .rt-live { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+    ${s} .rt-korts { flex-basis: 100%; margin: 0; font-size: 0.85em; color: var(--text-secondary); }
+    ${s} .rt-kort { display: block; overflow-wrap: anywhere; }
+    ${s} .rt-kort[hidden] { display: none; }
+    ${s} .rt-list { list-style: none; margin: 0; padding: 0; }
+    ${s} ol.rt-list { list-style: decimal inside; }
+    ${s} .rt-list .rt-list { margin-inline-start: 0.55rem; padding-inline-start: 0.9rem; border-inline-start: 1px solid var(--text-muted); }
+    ${s} .rt-node { position: relative; margin: 0.3rem 0; }
+    ${s} .rt-list .rt-list > .rt-node::before {
+      content: ""; position: absolute; inset-inline-start: -0.9rem; top: 0.8em; width: 0.7rem; border-top: 1px solid var(--text-muted);
+    }
+    ${s} .rt-row {
+      display: inline-block; max-width: 100%; box-sizing: border-box; padding: 0.1rem 0.45rem; border-radius: 6px;
+      border: 1px solid transparent; color: var(--text-primary); overflow-wrap: anywhere;
+    }
+    ${s} .rt-edge { color: var(--text-secondary); }
+    ${s} .rt-leaf > .rt-row { border-color: var(--text-muted); border-inline-start-width: 4px; background: var(--bg-surface); }
+    ${s} .rt-tone-good > .rt-row { border-inline-start-color: var(--tone-good); background: var(--tint-success); }
+    ${s} .rt-tone-warn > .rt-row { border-inline-start-color: var(--tone-warn); background: var(--tint-warning); }
+    ${s} .rt-tone-info > .rt-row { border-inline-start-color: var(--tone-info); background: var(--tint-info); }
+    ${s} .rt-tone-muted > .rt-row { border-inline-start-color: var(--text-soft); background: var(--tint-neutral); }
+    ${s} .rt-case { display: inline-block; max-width: 100%; padding: 0 0.3rem; border: 1px solid var(--text-muted); border-radius: 4px; font-size: 0.85em; }
+    /* The pick is screen-only: print shows the tree unpicked, as it hides the picker. */
+    @media not print {
+      ${s} .rt-picked .rt-off > .rt-row { color: var(--text-soft); border-style: dashed; background: none; }
+      ${s} .rt-picked .rt-off > .rt-row .rt-edge { color: var(--text-soft); }
+      ${s} .rt-picked .rt-on > .rt-row { font-weight: 600; border-block-color: var(--accent); border-inline-end-color: var(--accent); }
+      ${s} .rt-picked .rt-on:not(.rt-leaf) > .rt-row { border-inline-start-color: var(--accent); }
+      ${s} .rt-case.rt-hit { background: var(--accent-hover); border-color: var(--accent-hover); color: #fff; }
+      /* A case id the reader links to its board row keeps the chip's ink. */
+      ${s} .rt-case.rt-hit a { color: inherit; }
+    }
+    @container rt (max-width: 26rem) {
+      ${s} .rt-list .rt-list { margin-inline-start: 0.3rem; padding-inline-start: 0.6rem; }
+      ${s} .rt-list .rt-list > .rt-node::before { inset-inline-start: -0.6rem; width: 0.45rem; }
+    }
+    @media print {
+      ${s} .rt-pick, .rt-js ${s} .rt-pick, ${s} .rt-korts, ${s} .rt-live { display: none; }
+    }
+    @media (forced-colors: active) {
+      ${s} .rt-leaf > .rt-row, ${s} .rt-case { border-color: CanvasText; }
+      ${s} .rt-list .rt-list, ${s} .rt-list .rt-list > .rt-node::before { border-color: CanvasText; }
+      ${s} .rt-picked .rt-off > .rt-row, ${s} .rt-picked .rt-off > .rt-row .rt-edge { color: GrayText; border-color: GrayText; }
+      ${s} .rt-picked .rt-on > .rt-row, ${s} .rt-picked .rt-on:not(.rt-leaf) > .rt-row { border-color: Highlight; }
+      ${s} .rt-case.rt-hit { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
     }
   `;
 }

@@ -3,7 +3,7 @@
  * `muninn-wiki-work-thread-grouping`, D8, D14): which pages a group's ⋯ would
  * write `series:` on, under which key, and why it may not. Pure: the reader
  * shows this plan, fetches every base first and runs the writes through
- * `runSeriesWrites` (`wiki-series-write.ts`).
+ * `writeSeriesUnlessOpenChanged` (`wiki-series-write.ts`).
  *
  *  - A page is writable when it can carry `series:` at all
  *    (`canEditSeriesPage`), is narrative (`isNarrativePage`, lint 8.2's

@@ -237,6 +237,24 @@ async function openRowMenu(page: Page, rel: string): Promise<void> {
 }
 
 /**
+ * Open the row's ⋯ and wait until the menu has READ `rel`'s base.
+ *
+ * The menu paints first and reads its bases after (`loadSeriesBases`), so an
+ * out-of-band write made the moment the menu is visible can land before that
+ * read, which then takes the moved bytes as its base and the write succeeds.
+ * The listener is installed before the click; the server has hashed the file
+ * once the response arrives.
+ */
+async function openRowMenuAfterBaseRead(page: Page, rel: string): Promise<void> {
+  const baseRead = page.waitForResponse((r) => {
+    const url = new URL(r.url());
+    return url.pathname === "/api/wiki/page" && url.searchParams.get("relPath") === rel;
+  });
+  await openRowMenu(page, rel);
+  await baseRead;
+}
+
+/**
  * Open the Series fold.
  *
  * Load-bearing, not setup noise: a CLOSED fold renders none of its member rows
@@ -435,7 +453,7 @@ test.describe("read-only", () => {
 test.describe("the base the menu holds", () => {
   test("an edit made while the menu is open is refused, not overwritten", async ({ page }) => {
     await openRail(page);
-    await openRowMenu(page, JOINER);
+    await openRowMenuAfterBaseRead(page, JOINER);
     // Behind the server AND behind the reader: the menu is already painted.
     const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
     await writeFile(path.join(root, JOINER), edited, "utf8");
@@ -454,19 +472,28 @@ test.describe("the base the menu holds", () => {
     page,
   }) => {
     // The head move is clear-then-set. The target is the page the reader has
-    // open, so its base is the one the page payload carried — and moving the
-    // file under it is what proves the editor is holding that base rather than
-    // re-reading it a millisecond before the POST.
+    // open, and its base is read fresh when the menu opens — so moving the
+    // file after that read is what proves the editor is holding that base
+    // rather than re-reading it a millisecond before the POST.
     await openPage(page, SHIPPED, "Provenance chain strip");
+    // The menu reads the open page's base fresh at open (finding 66), so the
+    // out-of-band edit waits for that read: landing before it, the edit is a
+    // change since the page LOADED, which the menu refuses before any write.
+    const baseRead = page.waitForResponse((r) => {
+      const url = new URL(r.url());
+      return url.pathname === "/api/wiki/page" && url.searchParams.get("relPath") === SHIPPED;
+    });
     await page.locator("[data-series-edit]").click();
     await expect(menu(page)).toBeVisible();
+    await baseRead;
     const edited = (await read(root, SHIPPED)).replace("Body.", "Body, rewritten elsewhere.");
     await writeFile(path.join(root, SHIPPED), edited, "utf8");
 
     await page.locator(`#wikiSeriesMenu [data-series-cmd="head"][data-series-arg="${SHIPPED}"]`).click();
     const msg = page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad");
-    await expect(msg).toBeVisible();
-    await expect(msg).toContainText(SHIPPED);
+    // The 409 is on the OPEN page, so the step is a reload: a reopen would
+    // compare its fresh base with the hash it loaded with and refuse again.
+    await expect(msg).toHaveText(`${SHIPPED} changed since this menu opened — reload it`);
     // Write 1 landed: the old head's label is gone from disk.
     await expect
       .poll(async () => (await fence(root, HEAD)).some((l) => l.startsWith("series_label:")))
@@ -568,13 +595,74 @@ test.describe("the menu between clicks", () => {
     await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toHaveCount(0);
   });
 
+  // Fix round 1 of arch review 2026-10, finding 66 (B): the menu sent the open
+  // page's LOAD-time hash, so a page changed on disk since then 409ed on every
+  // reopen. It reads that base fresh now and refuses before writing.
+  test("the open page changed on disk since it loaded: refused before any write, and a reload clears it", async ({
+    page,
+  }) => {
+    let posts = 0;
+    page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().includes("/api/wiki/series")) posts++;
+    });
+    await openPage(page, JOINER, "Search recall plan");
+    const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
+    await writeFile(path.join(root, JOINER), edited, "utf8");
+
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect(page.locator("#wikiSeriesMenu .wiki-series-menu-msg.bad")).toHaveText(
+      `${JOINER} changed since you opened it — reload it; nothing written`,
+    );
+    expect(posts).toBe(0);
+    expect(await read(root, JOINER)).toBe(edited);
+
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Search recall plan");
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await expect
+      .poll(async () => (await fence(root, JOINER)).find((l) => l.startsWith("series:")))
+      .toBe(`series: ${KEY}`);
+    expect(posts).toBe(1);
+  });
+
+  // Fix round 2 batch 2, finding 1: the reader's own write moved the open
+  // page's bytes before its answer moved the hash it loaded with, so a menu
+  // opened in between blamed the reader for their own change. Its bases now
+  // wait for the write in flight.
+  test("a menu opened while the reader's own write is in flight waits for it instead of blaming the reader", async ({
+    page,
+  }) => {
+    const statuses: number[] = [];
+    await page.route("**/api/wiki/series", async (route) => {
+      await new Promise((r) => setTimeout(r, 1200));
+      const res = await route.fetch();
+      statuses.push(res.status());
+      await route.fulfill({ response: res });
+    });
+    await openPage(page, JOINER, "Search recall plan");
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    await page.keyboard.press("Escape");
+    await expect(menu(page)).toHaveCount(0);
+    // The second menu on the same, open page, before the first write answers.
+    await openRowMenu(page, JOINER);
+    await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
+    // Its join reaches the file the first one already wrote: a noop, which
+    // closes the menu. A refusal would hold it open with a `.bad` line.
+    await expect(menu(page)).toHaveCount(0, { timeout: 10_000 });
+    expect(statuses).toEqual([200, 200]);
+    expect((await fence(root, JOINER)).filter((l) => l.startsWith("series:"))).toEqual([`series: ${KEY}`]);
+  });
+
   test("after a 409 the next click sends nothing and says to reopen", async ({ page }) => {
     let posts = 0;
     page.on("request", (req) => {
       if (req.method() === "POST" && req.url().includes("/api/wiki/series")) posts++;
     });
     await openRail(page);
-    await openRowMenu(page, JOINER);
+    await openRowMenuAfterBaseRead(page, JOINER);
     const edited = (await read(root, JOINER)).replace("Body.", "Body, rewritten elsewhere.");
     await writeFile(path.join(root, JOINER), edited, "utf8");
     await page.locator(`#wikiSeriesMenu [data-series-cmd="join"][data-series-arg="${KEY}"]`).click();
@@ -869,7 +957,14 @@ for (const scheme of ["light", "dark"] as const) {
     // measured in the state it really appears in — after a write the CAS
     // refused.
     await page.keyboard.press("Escape");
+    // The out-of-band write waits for the menu's base read, or a read landing
+    // after it takes the moved bytes as its base and the join succeeds.
+    const baseRead = page.waitForResponse((r) => {
+      const url = new URL(r.url());
+      return url.pathname === "/api/wiki/page" && url.searchParams.get("relPath") === JOINER;
+    });
     await openRowMenu(page, JOINER);
+    await baseRead;
     await writeFile(
       path.join(root, JOINER),
       (await read(root, JOINER)).replace("Body.", "Moved on."),

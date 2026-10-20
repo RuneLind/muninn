@@ -13,7 +13,7 @@
 import { isEmptyCell, parseCellValue, tableDecimalComma, type NumberContext } from "./cell-number.ts";
 import { readChartNormalize, type ChartKind } from "./component-spec.ts";
 import { headerKey } from "./delta-table.ts";
-import type { Block } from "./markdown-ast.ts";
+import { componentBlocks, type Block } from "./markdown-ast.ts";
 import { gateRowPr, type GatePr, type LedgerRow } from "./pr-ledger.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 
@@ -184,16 +184,7 @@ export function chartGateVerdict(pass: ChartValue, hold: ChartValue | null, bar:
 
 /** Every `<Chart>` block at any depth, in document order. */
 export function chartBlocks(blocks: readonly Block[]): Extract<Block, { type: "component" }>[] {
-  const out: Extract<Block, { type: "component" }>[] = [];
-  const walk = (bs: readonly Block[]) => {
-    for (const b of bs) {
-      if (b.type !== "component") continue;
-      if (b.name === "Chart") out.push(b);
-      walk(b.children);
-    }
-  };
-  walk(blocks);
-  return out;
+  return componentBlocks(blocks, "Chart");
 }
 
 /** The table read for one kind. `kind` null (missing or unknown) gives no

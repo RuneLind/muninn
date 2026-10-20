@@ -23,6 +23,7 @@ import {
   runChecklistBody,
   runChecklistSteps,
   taskListRows,
+  componentBlocks,
 } from "../format/markdown-ast.ts";
 import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
 import { withoutComponentTags } from "../format/component-observer.ts";
@@ -86,6 +87,7 @@ import {
 } from "../format/report-top.ts";
 import { readChartKind, readStatusRowsView } from "../format/component-spec.ts";
 import { chartBody, chartTable, readChart, type ChartViewRenderer } from "../format/chart-block.ts";
+import { readRuleTree, type RuleTreeViewRenderer } from "../format/rule-tree.ts";
 import { firstRowPerPr, pageLedgers, type LedgerRow } from "../format/pr-ledger.ts";
 import { isAgentContextTitle } from "../format/agent-context.ts";
 import { ITEM_DATE_ATTR, itemDate } from "../format/item-dates.ts";
@@ -276,6 +278,10 @@ export function formatWebHtml(
      *  `chartViewHtml`). Passed in so the chat bundle never carries it.
      *  Absent ⇒ a chart prints its table as written. */
     chartView?: ChartViewRenderer;
+    /** With `views`: the `<RuleTree>` view (`renderWikiHtml` passes
+     *  `ruleTreeViewHtml`), passed in like `chartView`. Absent ⇒ a rule tree
+     *  prints its list as written. */
+    ruleTreeView?: RuleTreeViewRenderer;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -292,7 +298,11 @@ export function formatWebHtml(
   const prevChartView = currentChartView;
   const prevLedgerRows = currentLedgerRows;
   const prevLogIds = currentLogIds;
+  const prevRuleTreeView = currentRuleTreeView;
+  const prevCaseKorts = currentCaseKorts;
   currentViews = opts?.views === true;
+  currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
+  currentCaseKorts = NO_CASE_KORTS;
   const chartView = currentViews && text.includes("<Chart") ? opts?.chartView : undefined;
   const charted = chartView !== undefined;
   currentChartView = chartView ?? null;
@@ -319,6 +329,8 @@ export function formatWebHtml(
     // The views' whole-page pre-pass runs only on the reader's page render;
     // without it the walk is the one `renderBlocks` call, byte for byte.
     const slot = opts?.views ? viewSlot(blocks) : -1;
+    // A tree's case ids join the page's CaseBoard rows, whichever comes first.
+    if (currentRuleTreeView && text.includes("<CaseBoard")) currentCaseKorts = pageCaseKorts(blocks);
     if (charted) {
       // A gate row's pill reads the page's own ledgers, as the PR strip does;
       // a value cell's id links only when the page's DecisionLog has its item.
@@ -370,6 +382,8 @@ export function formatWebHtml(
     currentChartView = prevChartView;
     currentLedgerRows = prevLedgerRows;
     currentLogIds = prevLogIds;
+    currentRuleTreeView = prevRuleTreeView;
+    currentCaseKorts = prevCaseKorts;
   }
 }
 
@@ -429,6 +443,13 @@ let currentViews = false;
 
 /** `opts.chartView` for the call in progress; null ⇒ a `<Chart>` is its table. */
 let currentChartView: ChartViewRenderer | null = null;
+
+/** `opts.ruleTreeView` for the call in progress; null ⇒ a `<RuleTree>` is its list. */
+let currentRuleTreeView: RuleTreeViewRenderer | null = null;
+
+const NO_CASE_KORTS: ReadonlyMap<string, string> = new Map();
+/** The page's CaseBoard case ids → their `kort:`, while a rule tree page renders. */
+let currentCaseKorts: ReadonlyMap<string, string> = NO_CASE_KORTS;
 
 /** The page's ledger rows, for a gate chart's pills; read once per call. */
 let currentLedgerRows: readonly LedgerRow[] | null = null;
@@ -814,6 +835,43 @@ function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], chi
     language: currentLanguage,
     ledgerRows: currentLedgerRows,
     logIds: currentLogIds,
+  });
+}
+
+/** Every case id the page's CaseBoards hold, first board first, with its
+ *  `kort:` (`caseKort`, the row's compact line); a board whose file does not
+ *  load adds nothing. */
+function pageCaseKorts(blocks: readonly Block[]): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  for (const b of componentBlocks(blocks, "CaseBoard")) {
+    const file = lookupPageFile(currentPageFiles, (b.attrs.src ?? "").trim(), "yaml");
+    const board = file.ok ? parseCaseBoard(file.text) : null;
+    if (board?.ok) for (const c of board.cases) if (!out.has(c.id)) out.set(c.id, caseKort(c));
+  }
+  return out;
+}
+
+/** A `<RuleTree>`: on the reader's page render with a tree view, its list as a
+ *  tree; else, or with no list, the body as written. Items are read as the
+ *  lint reads them (`visibleText`), wikilink sentinels as their link text. */
+function ruleTreeBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
+  if (!currentRuleTreeView) return children;
+  const read = readRuleTree(rawChildren, attrs, {
+    text: (raw) => visibleText(peekText(raw)),
+    boardIds: new Set(currentCaseKorts.keys()),
+  });
+  if (!read.list) return children;
+  const korts = new Map([...currentCaseKorts].filter(([, k]) => k).map(([id, k]) => [id, renderInline(k)] as const));
+  return currentRuleTreeView({
+    read: { ...read, list: read.list },
+    title: attrs.title ?? "",
+    titleText: visibleText(peekText(attrs.title ?? "")),
+    inline: itemHtml,
+    same: (pieces, whole) => rendersAs(pieces, flatHtml(probeItemHtml([whole]))),
+    child: listChildHtml,
+    blocks: (bs) => renderBlocks(bs, webRenderer),
+    korts,
+    language: currentLanguage,
   });
 }
 
@@ -2207,6 +2265,8 @@ const webRenderer: BlockRenderer = {
         return children;
       case "Chart":
         return chartBlockHtml(attrs, rawChildren, children);
+      case "RuleTree":
+        return ruleTreeBlockHtml(attrs, rawChildren, children);
       case "StatusRows":
         // Tiles on the reader's page render only; every other surface prints rows.
         return statusRowsHtml(
