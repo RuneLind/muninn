@@ -827,18 +827,24 @@ describe("an enum value that folds to the default renders as written and is no f
     "Fact.v": (v) => page(`A <Fact n="1" v="${v}">c</Fact> b`),
     "Lane.kind": (v) => page("<NextMoves>", "", `<Lane kind="${v}">`, "", "- s", "", "</Lane>", "", "</NextMoves>"),
     "StatusRows.view": (v) => page(`<StatusRows view="${v}">`, "", "- **A:** 1 · b", "", "</StatusRows>"),
+    "Chart.normalize": (v) =>
+      page(`<Chart kind="steps" x="Step" ref="A" normalize="${v}">`, "", "| Step | S |", "|---|---|", "| A | 10 |", "| B | 20 |", "", "</Chart>"),
   };
   const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
   // The reader's page render: `StatusRows view` draws only there.
   const readerHtml = (content: string) => renderWikiHtml(content, () => undefined, { views: true });
-  const enumAttrs = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
-    Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number }>)
+  const allEnums = Object.entries(COMPONENT_SPEC).flatMap(([name, spec]) =>
+    Object.entries(spec.attrs as Record<string, { enum?: readonly string[]; default?: string | number; required?: true }>)
       .filter(([, a]) => a.enum)
-      .map(([attr, a]) => ({ key: `${name}.${attr}`, enum: a.enum!, def: String(a.default) })),
+      .map(([attr, a]) => ({ key: `${name}.${attr}`, enum: a.enum!, def: String(a.default), required: a.required === true })),
   );
+  // A required enum has no default to fold to: a missing or unknown value is
+  // its own fallback (Chart kind renders the table), pinned in its own tests.
+  const enumAttrs = allEnums.filter((a) => !a.required);
 
-  test("every enum attribute has a page here", () => {
+  test("every enum attribute has a page here, and only required ones are exempt", () => {
     expect(enumAttrs.map((a) => a.key).sort()).toEqual(Object.keys(pages).sort());
+    expect(allEnums.filter((a) => a.required).map((a) => a.key)).toEqual(["Chart.kind"]);
   });
 
   for (const { key, enum: values, def } of enumAttrs) {

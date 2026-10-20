@@ -350,6 +350,9 @@ const emailRenderer: BlockRenderer = {
       case "More":
         return children;
       // One plain line per row, other blocks in place.
+      // The table as written: only the wiki reader draws a chart.
+      case "Chart":
+        return children;
       case "StatusRows":
         return rawChildren
           .map((b) =>

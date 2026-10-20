@@ -24,6 +24,7 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "case-board-labels": "<CaseBoard labels=> entries that name no case status",
   "ledger-row-state": "PR ledger rows the strip cannot read a state from",
   "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",
+  "chart-table": "<Chart> tables the chart cannot draw, or draws with a note",
   "same-work-no-link": "Same work, no link between the pages",
   "series-unnamed": "Linked pages that declare no series:",
   "series-inconsistent": "Half-written series: (spelling, label, or a missing member)",

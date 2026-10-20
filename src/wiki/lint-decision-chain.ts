@@ -19,15 +19,9 @@ import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import type { WikiPageMeta } from "./store.ts";
 import type { LintFinding } from "./lint.ts";
+import { findUnfencedLine as findLine } from "./lint-lines.ts";
 
 export const DECISION_CHAIN_LINT_CHECKS = ["ledger-row-state", "chain-close-conflict"] as const;
-
-/** The 1-based line of the first unfenced line at or after `from` (0-based)
- *  that `test` accepts. */
-function findLine(lines: readonly string[], fenced: readonly boolean[], from: number, test: (line: string) => boolean): number | undefined {
-  for (let i = from; i < lines.length; i++) if (!fenced[i] && test(lines[i]!)) return i + 1;
-  return undefined;
-}
 
 /** A table row whose first cell, flattened, is `cell`. */
 function rowTest(cell: string): (line: string) => boolean {
