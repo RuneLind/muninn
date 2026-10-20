@@ -627,6 +627,58 @@ describe("the whole fan-out", () => {
     expect(p!.sessions).toHaveLength(1);
   });
 
+  // arch-review 2026-10 #19: a reader who moved on stops the fan-out.
+  test("a request that goes away aborts every leg, and never reads as timed out", async () => {
+    const req = new AbortController();
+    const seen: (AbortSignal | undefined)[] = [];
+    const untilAbort = (signal?: AbortSignal) =>
+      new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    const started = Date.now();
+    const pending = pageProvenance(
+      meta({ prs: ["acme/widget#553"] }),
+      ctx({
+        budgetMs: 5_000,
+        sessionLedger: deps({
+          fetchSessions: (_ids, signal) => (seen.push(signal), untilAbort(signal)),
+          fetchMerges: (_ids, signal) => (seen.push(signal), untilAbort(signal)),
+          fetchHandoff: (_id, signal) => (seen.push(signal), untilAbort(signal)),
+          fetchMergesForPrs: (_prs, signal) => (seen.push(signal), untilAbort(signal)),
+        }),
+      }),
+      undefined,
+      undefined,
+      req.signal,
+    );
+    setTimeout(() => req.abort(), 20);
+    const p = await pending;
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(seen).toHaveLength(4);
+    for (const signal of seen) expect(signal?.aborted).toBe(true);
+    expect(p!.links.timedOut).toBe(false);
+  });
+
+  test.each([false, true])("the deadline bounds the legs, with a live request signal or none (%p)", async (live) => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const p = await pageProvenance(
+      meta(),
+      ctx({
+        budgetMs: 25,
+        sessionLedger: deps({
+          fetchHandoff: async (_id, signal) => {
+            seen.push(signal);
+            await new Promise((r) => setTimeout(r, 60));
+            return ranBy(GHOST);
+          },
+        }),
+      }),
+      undefined,
+      undefined,
+      live ? new AbortController().signal : undefined,
+    );
+    expect(seen[0]?.aborted).toBe(true);
+    expect(p!.links.timedOut).toBe(true);
+  });
+
   test("an unconfigured host runs none of the four legs", async () => {
     const p = await pageProvenance(
       meta({ prs: ["acme/widget#553"] }),

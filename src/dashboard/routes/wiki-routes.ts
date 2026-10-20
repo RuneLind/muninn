@@ -1812,7 +1812,13 @@ export function registerWikiReadRoutes(
     const resolved = await resolvePageRequest(c);
     if (!resolved.ok) return resolved.res;
     const { entry, index, meta } = resolved;
-    const provenance = await pageProvenance(meta, provenanceCtx, resolveWikiRoot(entry?.root), index);
+    const provenance = await pageProvenance(
+      meta,
+      provenanceCtx,
+      resolveWikiRoot(entry?.root),
+      index,
+      c.req.raw.signal,
+    );
     return c.json(provenance ? { provenance } : {});
   });
 

@@ -2514,6 +2514,16 @@ function provenanceUrl(relPath: string): string {
  *  flight. */
 let provLoadSeq = 0;
 
+/** The provenance load in flight. Leaving the page aborts it, which aborts
+ *  the server's huginn and claude-usage fan-out with it (the route passes the
+ *  request signal into `pageProvenance`). */
+let provLoadAbort: AbortController | null = null;
+
+function abortProvLoad(): void {
+  provLoadAbort?.abort();
+  provLoadAbort = null;
+}
+
 /**
  * The ONE writer of the strip. Every writer — a load, the Stamp redraw, the
  * retry — replaces whatever `.wiki-prov-strip` is on the page (the
@@ -2562,10 +2572,13 @@ function writeProvStrip(html: string): void {
  */
 async function loadProvStrip(relPath: string): Promise<void> {
   const seq = ++provLoadSeq;
+  abortProvLoad();
+  const ctl = new AbortController();
+  provLoadAbort = ctl;
   let next: string | null = null;
   let prov: ProvenancePayload | undefined;
   try {
-    const res = await fetch(provenanceUrl(relPath));
+    const res = await fetch(provenanceUrl(relPath), { signal: ctl.signal });
     if (res.ok) {
       const data = (await res.json()) as WikiPageProvenance | null;
       prov = data?.provenance;
@@ -2574,6 +2587,9 @@ async function loadProvStrip(relPath: string): Promise<void> {
   } catch {
     /* falls through to the unavailable line */
   }
+  // An aborted load was retired on purpose: it never writes the failure line.
+  if (ctl.signal.aborted) return;
+  if (provLoadAbort === ctl) provLoadAbort = null;
   if (currentRelPath !== relPath || seq !== provLoadSeq) return;
   // Connections is the fetch's second consumer, under the same guard.
   if (prov) adoptIssueRows(prov);
@@ -2602,6 +2618,7 @@ function retryProvStrip(): void {
  *  the sequence is bumped to retire them. */
 function redrawProvStrip(provenance: ProvenancePayload): void {
   provLoadSeq += 1;
+  abortProvLoad();
   placeProvStrip(provStripHtml(provenance, jiraKeys));
   adoptIssueRows(provenance);
 }
@@ -2855,6 +2872,8 @@ const ledgerReadTitle = (day: string) =>
 const NO_SESSION_TITLE =
   "No agent session write is recorded for this page (bulk passes are not counted). The date is the file's own.";
 function renderBreadcrumb(m: WikiListing): void {
+  // A page render starts over: the previous page's provenance load is not wanted.
+  abortProvLoad();
   const el = document.getElementById("wikiBreadcrumb");
   // Navigating to a DIFFERENT page invalidates an open article popover: it still
   // targets the page the reader just left, and its anchor button has been
@@ -2977,6 +2996,7 @@ function renderBreadcrumb(m: WikiListing): void {
   el.style.display = "flex";
 }
 function hideBreadcrumb(): void {
+  abortProvLoad(); // no page open: its provenance load is not wanted either
   const el = document.getElementById("wikiBreadcrumb");
   if (el) el.style.display = "none";
   unmountAnswerExport(); // an Ask answer, the start view or an issue graph: no page
