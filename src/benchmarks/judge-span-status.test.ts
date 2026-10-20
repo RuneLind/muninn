@@ -9,8 +9,9 @@
  * (`src/test/mock-isolation.test.ts`).
  */
 
-import { test, expect, mock, beforeAll, afterAll } from "bun:test";
-import { chmodSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { test, expect, mock, spyOn, beforeAll, afterAll } from "bun:test";
+import * as fs from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testTempDirSync } from "../test/temp-dir.ts";
@@ -38,7 +39,13 @@ const { runJudge } = await import("./judge.ts");
 const root = testTempDirSync(join(tmpdir(), "judge-span-status-"));
 const bin = join(root, "bin");
 const saved = { PATH: process.env.PATH, MUNINN_AGENT_CWD: process.env.MUNINN_AGENT_CWD };
-const tmpBefore = new Set(readdirSync("/tmp").filter((n) => n.startsWith("benchmark-judge-debug-")));
+// The both-attempts-failed exit writes a debug dump under /tmp. The spy records
+// the dumps this file's runs create, so cleanup never removes one another run
+// wrote meanwhile. `makeDir` is the unspied original, for a dump that run makes.
+const makeDir = fs.mkdirSync;
+const mkdirSpy = spyOn(fs, "mkdirSync");
+const ownDumps = () =>
+  mkdirSpy.mock.calls.map(([p]) => String(p)).filter((p) => p.startsWith("/tmp/benchmark-judge-debug-"));
 
 beforeAll(() => {
   mkdirSync(bin, { recursive: true });
@@ -53,12 +60,14 @@ afterAll(() => {
   process.env.PATH = saved.PATH;
   if (saved.MUNINN_AGENT_CWD === undefined) delete process.env.MUNINN_AGENT_CWD;
   else process.env.MUNINN_AGENT_CWD = saved.MUNINN_AGENT_CWD;
-  // The both-attempts-failed exit writes a debug dump under /tmp; drop ours.
-  for (const n of readdirSync("/tmp")) {
-    if (n.startsWith("benchmark-judge-debug-") && !tmpBefore.has(n)) rmSync(join("/tmp", n), { recursive: true, force: true });
-  }
+  removeOwnDumps();
+  mkdirSpy.mockRestore();
   rmSync(root, { recursive: true, force: true });
 });
+
+function removeOwnDumps() {
+  for (const d of ownDumps()) rmSync(d, { recursive: true, force: true });
+}
 
 function fakeClaude(body: string) {
   writeFileSync(join(bin, "claude"), `#!/bin/sh\n${body}\n`);
@@ -86,3 +95,17 @@ test("a judge that fails both attempts ends claude-cli-call as error", async () 
   await expect(run(5_000)).rejects.toThrow(/claude exited with code 1/);
   expect(ends).toEqual([{ label: "claude-cli-call", status: "error" }]);
 }, 10_000);
+
+test("cleanup removes this file's dump and leaves one another run wrote meanwhile", () => {
+  const foreign = `/tmp/benchmark-judge-debug-${Date.now()}-other-run-${process.pid}`;
+  makeDir(foreign);
+  try {
+    const own = ownDumps();
+    expect(own).toHaveLength(1); // the both-attempts-failed test above
+    removeOwnDumps();
+    expect(existsSync(own[0]!)).toBe(false);
+    expect(existsSync(foreign)).toBe(true);
+  } finally {
+    rmSync(foreign, { recursive: true, force: true });
+  }
+});

@@ -45,9 +45,9 @@ import { ATTR_RE, observeComponentTags, type ObservedComponentTag } from "../for
 import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName, type ComponentSpec } from "../format/component-spec.ts";
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
-import { lineCodeSpanRanges } from "../format/code-spans.ts";
-import { WIKILINK_WITH_LABEL_RE, renderWikiHtml } from "./render.ts";
+import { renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import { parkLinksThenCodeSpans } from "./park-links.ts";
 import type { LintFinding } from "./lint.ts";
 
 export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr"] as const;
@@ -95,15 +95,7 @@ const sentinelShape = (value: string) => value.replace(/\u0000(WIKIPAGELINK|INLI
 /** `written` parked the way the renderer parks it: wikilinks (the whole body,
  *  first), then, with `code`, code spans (`renderInline`, over the parked text). */
 function parkedShape(written: string, code: boolean): string {
-  const linked = written.replace(new RegExp(WIKILINK_WITH_LABEL_RE.source, "g"), "\u0000WIKIPAGELINK\u0000");
-  if (!code) return linked;
-  let out = "";
-  let cursor = 0;
-  for (const r of lineCodeSpanRanges(linked)) {
-    out += `${linked.slice(cursor, r.start)}\u0000INLINE\u0000`;
-    cursor = r.end;
-  }
-  return out + linked.slice(cursor);
+  return parkLinksThenCodeSpans(written, () => "\u0000WIKIPAGELINK\u0000", code ? "\u0000INLINE\u0000" : null).text;
 }
 
 /**

@@ -37,17 +37,23 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     // --- Voice download ---
     agentStatus.set("receiving", username);
     t.start("voice_download");
-    const file = await ctx.api.getFile(voice.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken!}/${file.file_path}`;
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
+    let oggBuffer: Uint8Array | null = null;
+    let downloadError = "Failed to download voice message";
+    try {
+      const file = await ctx.api.getFile(voice.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken!}/${file.file_path}`;
+      const response = await fetch(fileUrl);
+      if (response.ok) oggBuffer = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      downloadError = error instanceof Error ? error.message : String(error);
+    }
+    if (!oggBuffer) {
       t.end("voice_download", undefined, "error");
       agentStatus.set("idle");
-      t.error("Failed to download voice message");
+      t.error(downloadError);
       await ctx.reply("Failed to download voice message.");
       return;
     }
-    const oggBuffer = new Uint8Array(await response.arrayBuffer());
     t.end("voice_download");
 
     // --- STT transcription ---

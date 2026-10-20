@@ -121,8 +121,8 @@ import {
   NESTED_MARKUP_RE,
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
-import { lineCodeSpanRanges, maskLineCodeSpans } from "../format/code-spans.ts";
-import { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
+import { maskLineCodeSpans } from "../format/code-spans.ts";
+import { parkLinksThenCodeSpans } from "./park-links.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
 import { checkDrift, driftContext, DRIFT_LINT_CHECKS } from "./lint-drift.ts";
 import { checkReportTop, checkTldr, REPORT_TOP_LINT_CHECKS } from "./lint-report-top.ts";
@@ -274,19 +274,8 @@ function stripCodeSpans(content: string): string {
 
 function stripLineCodeSpansKeepingLinks(line: string): string {
   if (!line.includes("`")) return line;
-  const parked: string[] = [];
-  const tokens = line.replace(WIKILINK_WITH_LABEL_RE, (whole: string) => {
-    parked.push(whole);
-    return `\uE000${parked.length - 1}\uE001`;
-  });
-  let out = "";
-  let cursor = 0;
-  for (const r of lineCodeSpanRanges(tokens)) {
-    out += tokens.slice(cursor, r.start);
-    cursor = r.end;
-  }
-  out += tokens.slice(cursor);
-  return out.replace(/\uE000(\d+)\uE001/g, (m: string, i: string) => parked[Number(i)] ?? m);
+  const { text, links } = parkLinksThenCodeSpans(line, (i) => `\uE000${i}\uE001`, "");
+  return text.replace(/\uE000(\d+)\uE001/g, (m: string, i: string) => links[Number(i)] ?? m);
 }
 
 /** Broken [[wikilinks]] + relative .md links on one page, resolved against the index. */

@@ -1,7 +1,9 @@
 /**
  * Span status on the Telegram voice path's failure sites (arch review 2026-10
  * finding 54): a failed step's span ends "error", so /traces renders it red
- * under a red root instead of green.
+ * instead of green. A download or STT failure also ends the root as error; a
+ * TTS or send failure is caught after the text reply went out, so the root
+ * finishes ok with one red child.
  *
  * Uses mock.module, so this file runs in its own `bun test` link in every
  * chain (`src/test/mock-isolation.test.ts`).
@@ -12,6 +14,7 @@ import { test, expect, mock, beforeEach, afterAll } from "bun:test";
 type EndCall = { label: string; status: "ok" | "error" };
 const ends: EndCall[] = [];
 const started: string[] = [];
+let root: "ok" | "error" | null = null;
 
 class FakeTracer {
   constructor(_name: string, _opts?: unknown) {}
@@ -27,8 +30,12 @@ class FakeTracer {
   summary() {
     return Object.fromEntries(started.map((l) => [l, 5]));
   }
-  error() {}
-  finish() {}
+  error() {
+    root = "error";
+  }
+  finish(status: "ok" | "error" = "ok") {
+    root = status;
+  }
 }
 
 let sttImpl: () => Promise<string> = async () => "hello";
@@ -49,16 +56,28 @@ const { createVoiceHandler } = await import("./voice-handler.ts");
 const realFetch = globalThis.fetch;
 let downloadOk = true;
 let sendVoiceFails = false;
+let downloadThrows: "getFile" | "fetch" | "arrayBuffer" | null = null;
 
 beforeEach(() => {
   ends.length = 0;
   started.length = 0;
+  root = null;
+  downloadThrows = null;
   downloadOk = true;
   sendVoiceFails = false;
   sttImpl = async () => "hello";
   ttsImpl = async () => new Uint8Array([1]);
-  globalThis.fetch = (async () =>
-    downloadOk ? new Response(new Uint8Array([1, 2])) : new Response("no", { status: 404 })) as unknown as typeof fetch;
+  globalThis.fetch = (async () => {
+    if (downloadThrows === "fetch") throw new Error("network down");
+    if (downloadThrows === "arrayBuffer") {
+      const res = new Response(new Uint8Array([1, 2]));
+      res.arrayBuffer = async () => {
+        throw new Error("body read failed");
+      };
+      return res;
+    }
+    return downloadOk ? new Response(new Uint8Array([1, 2])) : new Response("no", { status: 404 });
+  }) as unknown as typeof fetch;
 });
 afterAll(() => {
   globalThis.fetch = realFetch;
@@ -69,7 +88,12 @@ function ctx() {
     message: { voice: { file_id: "f" } },
     from: { id: 7, first_name: "A" },
     chat: { id: 1 },
-    api: { getFile: async () => ({ file_path: "voice.ogg" }) },
+    api: {
+      getFile: async () => {
+        if (downloadThrows === "getFile") throw new Error("getFile failed");
+        return { file_path: "voice.ogg" };
+      },
+    },
     reply: async () => ({ message_id: 2 }),
     replyWithChatAction: async () => {},
     replyWithVoice: async () => {
@@ -88,6 +112,16 @@ test("a failed download ends voice_download as error", async () => {
   await run();
   expect(statusOf("voice_download")).toEqual(["error"]);
 });
+
+for (const step of ["getFile", "fetch", "arrayBuffer"] as const) {
+  test(`a throw in ${step} ends voice_download as error and the root as error`, async () => {
+    downloadThrows = step;
+    await run().catch(() => {});
+    expect(statusOf("voice_download")).toEqual(["error"]);
+    expect(started).not.toContain("stt");
+    expect(root).toBe("error");
+  });
+}
 
 test("a failed transcription ends stt as error", async () => {
   sttImpl = async () => {
@@ -112,6 +146,7 @@ test("a failed voice send ends telegram_send_voice as error, tts stays ok", asyn
   await run();
   expect(statusOf("tts")).toEqual(["ok"]);
   expect(statusOf("telegram_send_voice")).toEqual(["error"]);
+  expect(root).toBe("ok");
 });
 
 test("the success path ends every span ok", async () => {
