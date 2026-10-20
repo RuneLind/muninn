@@ -284,6 +284,18 @@ describe("fix round 1: key shapes that are not keys", () => {
     expect(stemmed("demo-12x")).toEqual({});
   });
 
+  // arch-review 2026-10 #17: the stem rule takes the title rule's distance cap.
+  test("stem: a year after a same-width key is no second key, and the base stands", () => {
+    expect(stemmed("2026-09-01-demo-8045-2026-arsavregning")).toEqual({ "DEMO-8045": ["stem"] });
+    expect(stemKeys("demo-8045-2026-arsavregning", CONFIG)).toEqual(["DEMO-8045"]);
+    expect(stemKeys("demo-8045-2026", CONFIG)).toEqual(["DEMO-8045"]);
+    // Within the cap both keys still count, and a date after the key is still none.
+    expect(stemKeys("demo-7588-7969-notes", CONFIG)).toEqual(["DEMO-7588", "DEMO-7969"]);
+    expect(stemKeys("demo-8045-2026-09-25", CONFIG)).toEqual([]);
+    // The title rule is unchanged.
+    expect(titleKeys("DEMO-8045/2026", CONFIG)).toEqual(["DEMO-8045"]);
+  });
+
   test("a leading-zero number is not a key in any inferred rule", () => {
     const refs = inferJiraIssues(
       page({

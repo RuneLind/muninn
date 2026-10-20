@@ -113,7 +113,12 @@ function scanKeys(
         const next = c.index + c[0].length;
         const rest = text.slice(next);
         if (num.length !== base.length || num[0] === "0" || END_RE.test(rest)) break;
-        if (opts.maxGap !== undefined && Math.abs(Number(num) - Number(base)) > opts.maxGap) break;
+        if (opts.maxGap !== undefined && Math.abs(Number(num) - Number(base)) > opts.maxGap) {
+          // A far number (`demo-8045-2026-notes`: a year) is no key, but it is
+          // not an end either: the base stands, judged after it.
+          pos = next;
+          break;
+        }
         found.push(`${project}-${num}`);
         pos = next;
       }
@@ -139,9 +144,10 @@ export function titleKeys(title: string, config: TrackerConfig): string[] {
   return scanKeys(title, config, { caseSensitive: true, chain: TITLE_CHAIN, maxGap: TITLE_MAX_GAP });
 }
 
-/** Stem keys, case-insensitive; `demo-7588-7969-notes` yields both. */
+/** Stem keys, case-insensitive; `demo-7588-7969-notes` yields both, and
+ *  `demo-8045-2026-notes` the base alone (the title rule's distance cap). */
 export function stemKeys(stem: string, config: TrackerConfig): string[] {
-  return scanKeys(stem, config, { caseSensitive: false, chain: STEM_CHAIN });
+  return scanKeys(stem, config, { caseSensitive: false, chain: STEM_CHAIN, maxGap: TITLE_MAX_GAP });
 }
 
 /** A tag that IS a key: `demo-145`. */
