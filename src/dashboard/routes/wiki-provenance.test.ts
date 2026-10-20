@@ -319,6 +319,37 @@ describe("the listing and the page route", () => {
     expect(body.provenancePending).toBe(true);
   });
 
+  // arch-review 2026-10 #19: the route hands its request signal to the legs.
+  test("/api/wiki/page/provenance aborts its fan-out when the request goes away", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const hang = (signal?: AbortSignal) => {
+      seen.push(signal);
+      return new Promise<never>((_, reject) =>
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+      );
+    };
+    const live = new Hono();
+    registerWikiRoutes(
+      live,
+      { knowledgeApiUrl: "http://localhost:8321", claudeUsageUrl: "http://127.0.0.1:8787", claudeUsagePublicUrl: null } as Config,
+      testCtx({
+        budgetMs: 10_000,
+        sessionLedger: {
+          ...testCtx().sessionLedger,
+          fetchSessions: (_ids, signal) => hang(signal),
+          fetchMerges: (_ids, signal) => hang(signal),
+        },
+      }),
+    );
+    const req = new AbortController();
+    const pending = Promise.resolve(live.request("/api/wiki/page/provenance?wiki=mimir&relPath=plan.md", { signal: req.signal }));
+    await new Promise((r) => setTimeout(r, 30));
+    req.abort();
+    await Promise.race([pending.catch(() => null), new Promise((r) => setTimeout(r, 2_000))]);
+    expect(seen.length).toBeGreaterThan(0);
+    for (const signal of seen) expect(signal?.aborted).toBe(true);
+  });
+
   test("/api/wiki/page/provenance answers {} for an unstamped page and 404 for none", async () => {
     const plain = await pageApp.request("/api/wiki/page/provenance?wiki=mimir&relPath=plain.md");
     expect(plain.status).toBe(200);

@@ -48,6 +48,16 @@ export function readFindSelfWiki(): string {
   return typeof injected === "string" ? injected : readActiveWikiName();
 }
 
+/** The name find-everywhere labels this wiki's own rows with
+ *  (`__WIKI_FIND_ROWS__`, see `findRowsWikiName`): the first registry entry on
+ *  the served root, so it differs from `readFindSelfWiki` on aliased roots.
+ *  Only the palette's dedupe and open-in-place read it. Falls back to
+ *  `readFindSelfWiki` on an older page. */
+export function readFindRowsWiki(): string {
+  const injected = (globalThis as { __WIKI_FIND_ROWS__?: unknown }).__WIKI_FIND_ROWS__;
+  return typeof injected === "string" ? injected : readFindSelfWiki();
+}
+
 /** Append the active `wiki` param to a URL so the fetch stays on-wiki. */
 export function withWikiParam(url: string, wiki: string): string {
   if (!wiki) return url;

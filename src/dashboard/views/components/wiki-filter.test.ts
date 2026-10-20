@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   anchorNow,
+  WORKED_INGEST_SLACK_MS,
   articleUrl,
   breadcrumbLeaf,
   connectionTypeOrder,
@@ -1985,4 +1986,52 @@ test("activityRowSource: a page whose events are all future-rejected keeps the D
   const p = withWork({ relPath: "ff.md", workedMs: undefined, gitTouchedMs: wAgo(24) }, [[-10 * 24, 2, "focus"]]);
   const sig = pageDateSignal(p, "updated", W_NOW);
   expect(activityRowSource(p, W_NOW, "updated", sig, "changed", true)).toEqual({ kind: "fallback" });
+});
+
+// arch-review 2026-10 #16: a memo held through a ledger outage is not current fact.
+test("a change after the last ledger read says when the ledger was read, not 'no session write'", () => {
+  const git = { gitCreatedMs: T("2026-09-01") };
+  const readAt = T("2026-09-19");
+  // No session row; the page changed after the ledger was last read.
+  const fresh = page({ ...git, gitTouchedMs: T("2026-09-21") });
+  expect(workedSourceOf(fresh, MARK_NOW, undefined, readAt)).toEqual({ kind: "fallback", ledgerReadDay: "2026-09-19" });
+  expect(workedChip({ kind: "fallback", ledgerReadDay: "2026-09-19" }, "2026-09-21").title).toBe(
+    "2026-09-21 (updated — ledger last read 2026-09-19)",
+  );
+  expect(pageHeaderDates(fresh, MARK_NOW, { ledger: true, ledgerAsOfMs: readAt })).toEqual({
+    created: "2026-09-01",
+    updated: "2026-09-21",
+    noSession: true,
+    ledgerReadDay: "2026-09-19",
+  });
+  // A session wrote it, then it changed after the ledger was read.
+  const later = page({ ...git, workedMs: T("2026-09-16"), gitTouchedMs: T("2026-09-21") });
+  expect(workedSourceOf(later, MARK_NOW, undefined, readAt)).toEqual({
+    kind: "worked",
+    worked: "2026-09-16",
+    changedSince: "2026-09-21",
+    ledgerReadDay: "2026-09-19",
+  });
+  expect(pageHeaderDates(later, MARK_NOW, { ledger: true, ledgerAsOfMs: readAt })).toMatchObject({
+    changedSince: true,
+    ledgerReadDay: "2026-09-19",
+  });
+  expect(
+    workedChip({ kind: "worked", worked: "2026-09-16", changedSince: "2026-09-21", ledgerReadDay: "2026-09-19" }, "2026-09-16")
+      .title,
+  ).toBe("2026-09-16 (worked)\nchanged 2026-09-21, ledger last read 2026-09-19");
+  // A read after the change, beyond the ingest slack, keeps the claim.
+  expect(workedSourceOf(fresh, MARK_NOW, undefined, T("2026-09-23"))).toEqual({ kind: "fallback" });
+  expect(workedSourceOf(fresh, MARK_NOW, undefined, T("2026-09-21") + WORKED_INGEST_SLACK_MS)).toEqual({
+    kind: "fallback",
+  });
+  expect(workedSourceOf(fresh, MARK_NOW, undefined, T("2026-09-21") + WORKED_INGEST_SLACK_MS - 1)).toEqual({
+    kind: "fallback",
+    ledgerReadDay: "2026-09-21",
+  });
+  // An Activity row on an open gate takes the same reading.
+  expect(activityRowSource(fresh, MARK_NOW, "updated", null, "changed", true, readAt)).toEqual({
+    kind: "fallback",
+    ledgerReadDay: "2026-09-19",
+  });
 });

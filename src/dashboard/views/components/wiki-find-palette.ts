@@ -71,8 +71,9 @@ export interface FindPalettePort {
   hrefFor(relPath: string): string;
   /** Called as the palette opens — hides any hover peek. */
   onOpen(): void;
-  /** This wiki's REGISTRY name (`__WIKI_FIND_SELF__`) — Everywhere rows of
-   *  this wiki are deduped against the local rows and open in place. */
+  /** The name Everywhere rows carry for this ROOT (`__WIKI_FIND_ROWS__`, which
+   *  differs from the registry name `__WIKI_FIND_SELF__` on aliased roots) —
+   *  rows carrying it are deduped against the local rows and open in place. */
   selfWiki(): string;
   /** Is `GET /api/wiki/find-everywhere` served here? False on the read slice. */
   everywhere(): boolean;

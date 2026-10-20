@@ -196,6 +196,41 @@ describe("the Jira facet over stamped and inferred", () => {
   });
 });
 
+// arch-review 2026-10 #37: one key shape. Every key the index mints must be
+// one the tracker's `parseKey` takes back unchanged, or the graph's
+// `issue=jira:KEY` root and the Stamp route refuse a key the index shows.
+describe("every indexed issue key round-trips through parseKey", () => {
+  let odd: WikiIndex;
+  beforeAll(async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "tracker-oddkeys-"));
+    roots.push(root);
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(TRACKERS));
+    await writeFile(
+      path.join(root, "odd.md"),
+      "---\ntitle: DEMO-147 notes\njira: [X-1, DEMO-0145, demo-146, DEMO-123456789]\ntags: [demo-148]\n---\n\n" +
+        `Opprettet: [DEMO-149](${url("DEMO-149")}). Also DEMO-150.\n`,
+    );
+    __resetWikiCacheForTest();
+    odd = (await getWikiIndex({ root, refresh: true }))!;
+  });
+
+  test("a stamped key parseKey refuses is not an issue ref; the jira list keeps it", () => {
+    const page = pageAt(odd, "odd.md");
+    expect(Object.keys(issuesOf(odd, "odd.md")).sort()).toEqual(["DEMO-146", "DEMO-147", "DEMO-148", "DEMO-149", "DEMO-150"]);
+    expect(page.jira).toEqual(["X-1", "DEMO-0145", "DEMO-146", "DEMO-123456789"]);
+  });
+
+  test("every key in the index's key map parses back to itself", async () => {
+    const { jiraAdapter } = await import("./jira.ts");
+    const keys = [...(odd.issueKeys ?? new Map()).keys()];
+    expect(keys.length).toBeGreaterThan(0);
+    for (const id of keys) {
+      const key = id.slice(id.indexOf(":") + 1);
+      expect(jiraAdapter.parseKey(key)).toBe(key);
+    }
+  });
+});
+
 describe("a wiki with NO trackers block keeps today's behaviour", () => {
   test("no page carries issues", () => {
     expect(plain.pages.some((p) => "issues" in p)).toBe(false);

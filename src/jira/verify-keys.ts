@@ -189,7 +189,13 @@ export async function loadJiraKeyIndex(
         // believing it would mark every real key in the draft as fabricated.
         return noteJiraIndexFailure(knowledgeApiUrl, now, "listing came back empty");
       }
-      const index: KeyIndex = { byKey: indexFromListing(docs), fetchedAtMs: now };
+      const byKey = indexFromListing(docs);
+      // Ids that all fail to parse are the empty-listing failure in another
+      // form (a renamed doc-id spelling); believing it marks every key fabricated.
+      if (byKey.size === 0) {
+        return noteJiraIndexFailure(knowledgeApiUrl, now, `listing parsed to 0 keys from ${docs.length} docs`);
+      }
+      const index: KeyIndex = { byKey, fetchedAtMs: now };
       cached.set(knowledgeApiUrl, index);
       // HYGIENE, not a behaviour: the negative entry is read only when the
       // positive one is absent or stale (10 min) and its own TTL is 60 s, so a

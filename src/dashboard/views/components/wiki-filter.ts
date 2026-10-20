@@ -787,7 +787,7 @@ export function pageDateKind(p: WikiListing, now?: number): WikiDateKind {
 export function pageHeaderDates(
   p: WikiListing,
   nowMs?: number,
-  opts: { ledger?: boolean } = {},
+  opts: { ledger?: boolean; ledgerAsOfMs?: number } = {},
 ): WikiHeaderDates {
   // One clock read for all three signal reads on this page (they must agree). The
   // caller passes a server-ANCHORED instant (`anchorNow`) where it has one — this
@@ -795,7 +795,7 @@ export function pageHeaderDates(
   const now = nowMs ?? Date.now();
   const created = pageAddedLabel(p, now);
   if (opts.ledger) {
-    const src = workedSourceOf(p, now);
+    const src = workedSourceOf(p, now, undefined, opts.ledgerAsOfMs);
     if (src.kind === "worked") {
       // "created X · worked X" is the same noise the created/updated pair drops.
       const out: WikiHeaderDates = { worked: src.worked };
@@ -803,6 +803,7 @@ export function pageHeaderDates(
       if (src.changedSince) {
         out.updated = src.changedSince;
         out.changedSince = true;
+        if (src.ledgerReadDay) out.ledgerReadDay = src.ledgerReadDay;
       }
       if (src.touched) out.touched = src.touched;
       return out;
@@ -821,7 +822,11 @@ export function pageHeaderDates(
     // A bash-only touch has no ledger summary row, so it lands here: its events
     // are the record (D5), so no "no session" claim, and its mark names the touch.
     const w = pageWorkState(p);
-    if (!w || usableWorkEvents(w, now).length === 0) out.noSession = true;
+    if (!w || usableWorkEvents(w, now).length === 0) {
+      out.noSession = true;
+      const readDay = ledgerReadDayFor(p, now, opts.ledgerAsOfMs);
+      if (readDay) out.ledgerReadDay = readDay;
+    }
     const touched = workedShownSignal(p, now).touched;
     if (touched) out.touched = touched;
   }
@@ -845,6 +850,35 @@ export interface WikiHeaderDates {
   noSession?: boolean;
   /** State T/T0: the page's in-window events are touches or pass markers. */
   touched?: WorkedTouch;
+  /** With `noSession` or `changedSince`: the page changed after the ledger was
+   *  last read (this day), so "no session write recorded" is not known. */
+  ledgerReadDay?: string;
+}
+
+/**
+ * How long after an edit the ledger may still not hold it. `asOfMs` is when
+ * muninn got the answer, not how fresh the ledger's data is: a laptop edit
+ * reaches the mini's ledger through a push job that runs every minute. An
+ * update newer than `asOfMs` minus this is never set aside. It covers the
+ * steady state only: while that push stalls (one lasted 2h44m) a fresh laptop
+ * edit on a page with an older worked date is demoted until it lands.
+ */
+export const WORKED_INGEST_SLACK_MS = 10 * 60_000;
+
+/**
+ * The day the ledger was last read (`workedCoverage.asOfMs`), when the page's
+ * update is too new for that read to have seen a session write: newer than
+ * `asOfMs` minus {@link WORKED_INGEST_SLACK_MS}. Undefined otherwise. While
+ * claude-usage is down the memo is held (a failure must not blank a good
+ * axis), so this is what keeps a chip from presenting the held answer as
+ * current fact.
+ */
+export function ledgerReadDayFor(p: WikiRecencyFields, now: number, asOfMs: number | undefined): string | undefined {
+  if (asOfMs === undefined || !Number.isFinite(asOfMs) || asOfMs <= 0) return undefined;
+  const asOf = Math.min(asOfMs, now);
+  const updated = updatedSignal(p, now);
+  if (!(updated.ms > 0) || updated.ms <= asOf - WORKED_INGEST_SLACK_MS) return undefined;
+  return localDay(new Date(asOf));
 }
 
 /**
@@ -859,7 +893,8 @@ export function workedChip(
 ): { cls: string; title: string } {
   if (!source) return { cls: "", title: fullDate };
   if (source.kind === "fallback") {
-    return { cls: " fallback", title: `${fullDate} (${fallbackKind} — no session write recorded)` };
+    const why = source.ledgerReadDay ? `ledger last read ${source.ledgerReadDay}` : "no session write recorded";
+    return { cls: " fallback", title: `${fullDate} (${fallbackKind} — ${why})` };
   }
   // A T/T0 page (D15): its real date, with a dotted mark whose hover names the touch.
   const touched = source.touched
@@ -869,7 +904,10 @@ export function workedChip(
   if (source.changedSince) {
     return {
       cls: " worked changed-since" + touched.cls,
-      title: `${fullDate} (worked)\nchanged ${source.changedSince}, no session write recorded` + touched.line,
+      title:
+        `${fullDate} (worked)\nchanged ${source.changedSince}, ` +
+        (source.ledgerReadDay ? `ledger last read ${source.ledgerReadDay}` : "no session write recorded") +
+        touched.line,
     };
   }
   return { cls: " worked" + touched.cls, title: `${fullDate} (worked)` + touched.line };
@@ -897,8 +935,8 @@ export const CHANGED_SINCE_MIN_MS = 24 * 60 * 60 * 1000;
  *    term is not a worked date: the date is plain, a T/T0 touch still marked.
  */
 export type WorkedSource =
-  | { kind: "worked"; worked: string; changedSince?: string; touched?: WorkedTouch }
-  | { kind: "fallback" }
+  | { kind: "worked"; worked: string; changedSince?: string; touched?: WorkedTouch; ledgerReadDay?: string }
+  | { kind: "fallback"; ledgerReadDay?: string }
   | { kind: "events"; touched?: WorkedTouch };
 
 /**
@@ -912,13 +950,17 @@ export function workedSourceOf(
   now: number,
   // The row already holds this signal; passing it keeps one derivation per row.
   signal: WikiDateSignal = workedShownSignal(p, now),
+  // `workedCoverage.asOfMs`: a change after the ledger was last read says so.
+  ledgerAsOfMs?: number,
 ): WorkedSource {
   const touched = signal.touched ? { touched: signal.touched } : {};
   const w = pageWorkState(p);
   const events = w ? usableWorkEvents(w, now) : [];
+  const readDay = ledgerReadDayFor(p, now, ledgerAsOfMs);
+  const stale = readDay ? { ledgerReadDay: readDay } : {};
   // D5: a page with usable session events never takes the fallback's "no
   // session write recorded" claim; its T/T0 touch keeps its mark.
-  if (signal.kind !== "worked") return events.length > 0 ? { kind: "events", ...touched } : { kind: "fallback" };
+  if (signal.kind !== "worked") return events.length > 0 ? { kind: "events", ...touched } : { kind: "fallback", ...stale };
   const updated = updatedSignal(p, now);
   let newestWrite = signal.ms;
   if (isUsableWorkedMs(p.workedMs, now)) newestWrite = Math.max(newestWrite, p.workedMs);
@@ -929,7 +971,7 @@ export function workedSourceOf(
     updated.ms - newestWrite > CHANGED_SINCE_MIN_MS &&
     updated.label > localDay(new Date(newestWrite))
   ) {
-    return { kind: "worked", worked: signal.label, changedSince: updated.label, ...touched };
+    return { kind: "worked", worked: signal.label, changedSince: updated.label, ...touched, ...stale };
   }
   return { kind: "worked", worked: signal.label, ...touched };
 }
@@ -952,8 +994,9 @@ export function workedAxisSource(
   p: WikiRecencyFields,
   now: number,
   signal: WikiDateSignal | null | undefined,
+  ledgerAsOfMs?: number,
 ): WorkedSource | null {
-  return signal ? workedSourceOf(p, now, signal) : null;
+  return signal ? workedSourceOf(p, now, signal, ledgerAsOfMs) : null;
 }
 
 /**
@@ -970,8 +1013,9 @@ export function activityRowSource(
   dateSignal: WikiDateSignal | null,
   rowKind: "new" | "changed",
   gateOpen: boolean,
+  ledgerAsOfMs?: number,
 ): WorkedSource | null {
-  const base = rowSignal === "worked" && dateSignal ? workedSourceOf(p, now, dateSignal) : null;
+  const base = rowSignal === "worked" && dateSignal ? workedSourceOf(p, now, dateSignal, ledgerAsOfMs) : null;
   const w = pageWorkState(p);
   if (w && usableWorkEvents(w, now).length > 0) {
     // D5: the events are the record, so no "no session write" claim; the
@@ -981,7 +1025,9 @@ export function activityRowSource(
     return touched ? { kind: "events", touched } : null;
   }
   if (base) return base;
-  return rowKind === "changed" && gateOpen && !isUsableWorkedMs(p.workedMs, now) ? { kind: "fallback" } : null;
+  if (!(rowKind === "changed" && gateOpen && !isUsableWorkedMs(p.workedMs, now))) return null;
+  const readDay = ledgerReadDayFor(p, now, ledgerAsOfMs);
+  return readDay ? { kind: "fallback", ledgerReadDay: readDay } : { kind: "fallback" };
 }
 
 /**

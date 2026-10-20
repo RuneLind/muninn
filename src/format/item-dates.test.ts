@@ -56,6 +56,16 @@ describe("itemDates", () => {
   test("skips the reader's parked wikilinks and tags", () => {
     expect(itemDates('Se \x00WIKIPAGELINK12\x00 og <Fact n="1" v="ok">07.10</Fact>.', "2026-10-07")).toEqual(["2026-10-07"]);
   });
+  // arch-review 2026-10 #36: code spans pair as the reader pairs them.
+  test("a double-backtick span holding one tick does not swallow the prose after it", () => {
+    expect(itemDates("Kjør `` a ` b `` 03.10 og ` c", "2026-10-07")).toEqual(["2026-10-03"]);
+    expect(itemDates("Kjør `02.10` og `` x`03.10 `` så 04.10.", "2026-10-07")).toEqual(["2026-10-04"]);
+    // A span becomes a space, so a date right after one is not glued to the word before it.
+    expect(itemDates("fra`kode`03.10", "2026-10-07")).toEqual(["2026-10-03"]);
+  });
+  test("a span never crosses a line, so a stray tick on one line keeps the next line's date", () => {
+    expect(itemDates("Stray ` tick\nlukket 05.10 og `x`", "2026-10-07")).toEqual(["2026-10-05"]);
+  });
 });
 
 describe("itemDateReference", () => {

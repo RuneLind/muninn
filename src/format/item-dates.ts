@@ -29,8 +29,11 @@
  *    leave one within 183 days, so in practice only a 29.02 far from a leap
  *    year reads null.
  *
- * Dependency-free so the browser bundle and a port can share it.
+ * Dependency-free (its one import, `code-spans.ts`, is too) so the browser
+ * bundle and a port can share it.
  */
+
+import { lineCodeSpanRanges } from "./code-spans.ts";
 
 /** The attribute the reader's render stamps with an item's ISO day. */
 export const ITEM_DATE_ATTR = "data-item-date";
@@ -111,12 +114,31 @@ export function resolveYearless(day: number, month: number, ref: string): string
  *  parked-wikilink sentinels (a caller that knows the labels puts them back
  *  first). */
 function scannable(text: string): string {
-  return text
-    .replace(/`[^`]*`/g, " ")
+  return blankCodeSpans(text)
     .replace(/\]\([^)]*\)/g, "] ")
     .replace(/<[^>]*>/g, " ")
     .replace(/https?:\/\/\S+/g, " ")
     .replace(/\x00[A-Z]+\d+\x00/g, " ");
+}
+
+/** Each inline code span (the reader's pairing, `lineCodeSpanRanges`) as one
+ *  space, line by line: a `` `[^`]*` `` replace mis-pairs a double-backtick
+ *  span holding one tick and blanks the prose up to the next stray tick. */
+function blankCodeSpans(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const ranges = lineCodeSpanRanges(line);
+      if (ranges.length === 0) return line;
+      let out = "";
+      let cursor = 0;
+      for (const r of ranges) {
+        out += line.slice(cursor, r.start) + " ";
+        cursor = r.end;
+      }
+      return out + line.slice(cursor);
+    })
+    .join("\n");
 }
 
 const ISO = String.raw`\d{4}-\d{2}-\d{2}`;
