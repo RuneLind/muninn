@@ -103,8 +103,10 @@
  *                      cannot read: no list (a warning: the reader shows the
  *                      block as written), an untoned or empty outcome, an
  *                      unreadable `outcomes=` entry, a case id on two leaves
- *                      that do not each name a different year (warnings), an
- *                      `outcomes=` label that names no outcome (info). Rules:
+ *                      that do not each name a different year on its path
+ *                      (warnings), an `outcomes=` label that names no
+ *                      outcome, an item with `→` not read as a leaf, a case
+ *                      tail that reads as no ids (info). Rules:
  *                      `lint-rule-tree.ts`.
  *
  * The store's index builder silently drops unresolved link targets

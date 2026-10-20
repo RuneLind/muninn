@@ -59,8 +59,12 @@ export interface RuleLeaf {
   /** `rest` cut where the cases start: `body + dash + pieces.join(",")` is `rest`.
    *  Null when the leaf names no cases. */
   caseSplit: { body: string; dash: string; pieces: string[] } | null;
-  /** The years the leaf names before its cases. */
+  /** The years on the leaf's path: each ancestor item's own text, then the
+   *  leaf's edge label and text before its cases. */
   years: string[];
+  /** The leaf has a ` — ` tail that reads as no case ids (a typo, a full stop
+   *  after the id): lint names it, since the reader draws it as text. */
+  unreadTail: boolean;
 }
 
 export type RuleUnder = { kind: "list"; list: ListBlock; nodes: RuleNode[] } | { kind: "other"; child: ListChild };
@@ -129,6 +133,15 @@ function maskCode(s: string): string {
 
 const unstruck = (s: string) => s.replace(/~~[\s\S]*?~~/g, "");
 
+/** `s` with code spans and link destinations masked, length kept. */
+const maskInline = (s: string) => maskCode(s).replace(LINK_DEST_RE, (_m, text: string, dest: string) => text + CODE_MASK.repeat(dest.length));
+
+/** An ASCII arrow where a leaf's `→` goes. */
+const ASCII_ARROW_RE = /^\s*(\*\*|__|\*|_)?\s*->/;
+
+/** The years `raw` names, struck text aside. */
+const yearsIn = (raw: string, opts: RuleTreeReadOptions) => [...new Set(opts.text(unstruck(raw)).match(YEAR_RE) ?? [])];
+
 function readLead(raw: string, text: (raw: string) => string): RuleNode["lead"] {
   for (const re of LEAD_RES) {
     const m = re.exec(raw);
@@ -140,7 +153,7 @@ function readLead(raw: string, text: (raw: string) => string): RuleNode["lead"] 
 
 function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLeaf | null {
   // Code spans and link destinations masked, so a `(`, `,` or dash in either is no delimiter.
-  const masked = maskCode(rest).replace(LINK_DEST_RE, (_m, text: string, dest: string) => text + CODE_MASK.repeat(dest.length));
+  const masked = maskInline(rest);
   const arrow = ARROW_RE.exec(masked);
   if (!arrow) return null;
   const from = arrow[0].length;
@@ -153,6 +166,7 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
   const outcome = opts.text(unstruck(rest.slice(from, end))).replace(/[\s.,;:]+$/, "").trim();
   let caseSplit: RuleLeaf["caseSplit"] = null;
   let cases: string[] = [];
+  let unreadTail = false;
   if (dash) {
     const tail = dash.index + dash[0].length;
     const pieces: string[] = [];
@@ -168,19 +182,24 @@ function readLeaf(lead: string, rest: string, opts: RuleTreeReadOptions): RuleLe
       caseSplit = { body: rest.slice(0, dash.index), dash: rest.slice(dash.index, tail), pieces };
       cases = [...new Set(known)];
     }
+    // On a page with a board the lint did not read, an unknown id may be a board id.
+    unreadTail = ids.length > 0 && !caseSplit && opts.boardUnread !== true;
   }
-  const named = opts.text(unstruck(lead + (caseSplit ? caseSplit.body : rest)));
-  return { outcome, tone: null, cases, caseSplit, years: [...new Set(named.match(YEAR_RE) ?? [])] };
+  return { outcome, tone: null, cases, caseSplit, years: yearsIn(lead + (caseSplit ? caseSplit.body : rest), opts), unreadTail };
 }
 
-function readNodes(list: ListBlock, opts: RuleTreeReadOptions): RuleNode[] {
+/** `pathYears`: the years its ancestors' own text names, outermost first. */
+function readNodes(list: ListBlock, opts: RuleTreeReadOptions, pathYears: readonly string[] = []): RuleNode[] {
   return list.items.map((raw, k) => {
     const lead = readLead(raw, opts.text);
     const rest = raw.slice(lead?.raw.length ?? 0);
+    const leaf = readLeaf(lead?.raw ?? "", rest, opts);
+    const years = [...new Set([...pathYears, ...(leaf ? leaf.years : yearsIn(raw, opts))])];
+    if (leaf) leaf.years = years;
     const under: RuleUnder[] = (list.nested?.[k] ?? []).map((c) =>
-      c.type === "ul" || c.type === "ol" ? { kind: "list", list: c, nodes: readNodes(c, opts) } : { kind: "other", child: c },
+      c.type === "ul" || c.type === "ol" ? { kind: "list", list: c, nodes: readNodes(c, opts, years) } : { kind: "other", child: c },
     );
-    return { raw, lead, rest, leaf: readLeaf(lead?.raw ?? "", rest, opts), under, name: opts.text(raw) };
+    return { raw, lead, rest, leaf, under, name: opts.text(raw) };
   });
 }
 
@@ -262,6 +281,13 @@ export function readRuleTree(children: readonly Block[], attrs: Readonly<Record<
       level: "warning",
       node: second,
     });
+  }
+  for (const n of all) {
+    if (!n.leaf && (maskInline(n.raw).includes("→") || ASCII_ARROW_RE.test(maskInline(n.rest)))) {
+      findings.push({ message: `item ${quoteName(n)} has → but is not read as a leaf (write the edge label in italics: *label:*)`, level: "info", node: n });
+    } else if (n.leaf?.unreadTail) {
+      findings.push({ message: `leaf ${quoteName(n)}: the text after the last — reads as no case ids`, level: "info", node: n });
+    }
   }
   return { before: children.slice(0, k), list, after: children.slice(k + 1), nodes, cases: [...byCase.keys()], findings };
 }

@@ -187,6 +187,105 @@ describe("a case on two leaves", () => {
     const r = read(tree("Renew=good;Return=muted", ["- *In 2023:* → Renew — LIB-1", "- *In 2024:* → Return — LIB-1"].join("\n")));
     expect(caseFindings(r)).toEqual([]);
   });
+
+  test("a year on the leaf's path counts: a tree that splits on the year above its leaves", () => {
+    const r = read(tree("Renew=good;Return=muted", ["- *2024:*", "  - → Renew — LIB-1", "- *2025:*", "  - → Return — LIB-1"].join("\n")));
+    expect(caseFindings(r)).toEqual([]);
+    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2024"], ["2025"]]);
+  });
+
+  test("a year in an ancestor's item text before its child list counts", () => {
+    const r = read(tree("Renew=good;Return=muted", ["- Loans from 2024", "  - → Renew — LIB-1", "- Loans from 2025", "  - → Return — LIB-1"].join("\n")));
+    expect(caseFindings(r)).toEqual([]);
+  });
+
+  test("a leaf under a year parent that names another year names both", () => {
+    const r = read(tree("Renew=good;Return=muted", ["- *2024:*", "  - *In 2025:* → Renew — LIB-1", "- *2025:*", "  - → Return — LIB-1"].join("\n")));
+    expect(leaves(r.nodes).map((n) => n.leaf?.years)).toEqual([["2024", "2025"], ["2025"]]);
+    expect(caseFindings(r)).toHaveLength(1);
+  });
+
+  test("a year only in the title is not on any path", () => {
+    const r = read(tree("Renew=good;Return=muted", ["- *Yes:* → Renew — LIB-1", "- *No:* → Return — LIB-1"].join("\n"), "Renewals in 2024"));
+    expect(caseFindings(r)).toHaveLength(1);
+  });
+
+  test("two leaves under one year parent share that year", () => {
+    const r = read(tree("Renew=good;Return=muted", ["- *2024:*", "  - *Yes:* → Renew — LIB-1", "  - *No:* → Return — LIB-1"].join("\n")));
+    expect(caseFindings(r)).toHaveLength(1);
+  });
+});
+
+describe("what drops silently is named", () => {
+  const notLeaf = (r: ReturnType<typeof read>) => r.findings.filter((f) => f.message.includes("is not read as a leaf"));
+  const noCases = (r: ReturnType<typeof read>) => r.findings.filter((f) => f.message.includes("reads as no case ids"));
+
+  test.each([
+    ["an ASCII arrow", "-> Yes"],
+    ["an ASCII arrow after an edge label", "*Yes:* -> Renew"],
+    ["a bold edge label", "**yes:** → Yes"],
+    ["a bold italic edge label", "***yes:*** → Yes"],
+    ["a bold italic arrow run", "***→ Yes***"],
+    ["a lead with * in a code span", "*`a*b`:* → Yes"],
+  ])("an item with an arrow that is not a leaf: %s", (_name, item) => {
+    const r = read(tree("Yes=good;Renew=good", `- ${item}`));
+    expect(leaves(r.nodes)).toEqual([]);
+    const [f, ...more] = notLeaf(r);
+    expect(more).toEqual([]);
+    expect(f?.level).toBe("info");
+    expect(f?.node).toBe(r.nodes[0]);
+    expect(f?.message).toBe(`item «${visibleText(item)}» has → but is not read as a leaf (write the edge label in italics: *label:*)`);
+  });
+
+  test.each([
+    ["an arrow inside code", "- Is `a → b` true?"],
+    ["no arrow", "- Is the book reserved?"],
+    ["a leaf", "- *Yes:* → Renew"],
+    ["an arrow in a link destination", "- See [the rule](http://x/→)"],
+  ])("no finding for %s", (_name, item) => {
+    expect(notLeaf(read(tree("Renew=good", item)))).toEqual([]);
+  });
+
+  test.each([
+    ["a full stop after the id", "→ Renew — LIB-1."],
+    ["a lowercase id", "→ Renew — lib-1"],
+    ["ids joined by a word", "→ Renew — LIB-7 og LIB-8"],
+    ["a board id the page has no board for", "→ Renew — LIB-1, loan-7"],
+  ])("a case tail that reads as no ids: %s", (_name, item) => {
+    const r = read(tree("Renew=good", `- ${item}`));
+    expect(r.nodes[0]?.leaf?.cases).toEqual([]);
+    const [f, ...more] = noCases(r);
+    expect(more).toEqual([]);
+    expect(f?.level).toBe("info");
+    expect(f?.node).toBe(r.nodes[0]);
+    expect(f?.message).toBe(`leaf «${visibleText(item)}»: the text after the last — reads as no case ids`);
+  });
+
+  test.each([
+    ["cases", "→ Renew — LIB-1"],
+    ["no dash", "→ Renew"],
+    ["a struck tail", "→ Renew — ~~LIB-1~~"],
+    ["a dash inside code", "→ Renew `a — b`"],
+  ])("no tail finding for %s", (_name, item) => {
+    expect(noCases(read(tree("Renew=good", `- ${item}`)))).toEqual([]);
+  });
+
+  test("on a page with a board it did not read, a tail of ids outside the grammar may be board ids", () => {
+    const tailOf = (item: string) => {
+      const [block] = componentBlocks(parseBlocks(tree("Renew=good", item)), "RuleTree");
+      return readRuleTree(block?.children ?? [], block?.attrs ?? {}, { text: visibleText, boardUnread: true }).findings.filter((f) =>
+        f.message.includes("reads as no case ids"),
+      );
+    };
+    expect(tailOf("- → Renew — loan-7")).toEqual([]);
+    expect(tailOf("- → Renew — lib-1")).toEqual([]);
+  });
+
+  test("with the board read, an id the board lacks is named", () => {
+    const r = read(tree("Renew=good", "- → Renew — loan-8"), new Set(["loan-7"]));
+    expect(noCases(r)).toHaveLength(1);
+    expect(noCases(read(tree("Renew=good", "- → Renew — loan-7"), new Set(["loan-7"])))).toEqual([]);
+  });
 });
 
 describe("outcomes=", () => {

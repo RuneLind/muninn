@@ -6,8 +6,12 @@
  *
  * - warning: the block holds no list (it renders as written), an `outcomes=`
  *   entry it cannot read, a leaf with no outcome after `→`, an outcome with no
- *   tone, a case on two leaves that do not each name a different year;
- * - info: an `outcomes=` label that names no leaf outcome, or names one twice.
+ *   tone, a case on two leaves that do not each name a different year on
+ *   their paths (an ancestor's year counts, the title's does not);
+ * - info: an `outcomes=` label that names no leaf outcome, or names one twice;
+ *   an item holding `→` (or `->`) that is not read as a leaf; a leaf whose
+ *   text after the last ` — ` reads as no case ids (not on a CaseBoard page,
+ *   where an unknown id may be a board id).
  *
  * The lint reads no CaseBoard file, so a case id counts here only by its
  * grammar (`CASE_ID_RE`); the reader also takes a board id. On a page with a

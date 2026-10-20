@@ -66,10 +66,29 @@ function applyRuleTreePick(target: Element | null): boolean {
   }
   // On the server's id, never the chip's text: the reader adds an idLabels noun to it.
   tree.querySelectorAll<HTMLElement>(".rt-case").forEach((c) => c.classList.toggle("rt-hit", id !== "" && c.dataset.rtCase === id));
+  let kort = "";
   tree.querySelectorAll<HTMLElement>("[data-rt-kort]").forEach((k) => {
     k.hidden = k.dataset.rtKort !== id;
+    if (!k.hidden) kort = k.textContent ?? "";
   });
+  // A screen reader learns which leaves are on the path, and hears the result.
+  for (const li of nodes) {
+    if (li.matches(".rt-leaf") && id !== "" && leafCases(li).includes(id)) li.setAttribute("aria-current", "true");
+    else li.removeAttribute("aria-current");
+  }
+  const live = tree.querySelector<HTMLElement>("[data-rt-live]");
+  if (live) live.textContent = id ? [ruleTreeSays(live)[id] ?? id, kort].filter(Boolean).join(". ") : "";
   return true;
+}
+
+/** The server's per-case result lines (`data-rt-say`); `{}` when unreadable. */
+function ruleTreeSays(live: HTMLElement): Record<string, string> {
+  try {
+    const v: unknown = JSON.parse(live.dataset.rtSay ?? "{}");
+    return v && typeof v === "object" ? (v as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
 }
 
 let installed = false;

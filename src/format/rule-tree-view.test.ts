@@ -56,13 +56,46 @@ describe("the reader's tree", () => {
 
   test("the picker is a labelled native select over the cases in first-seen order", () => {
     const html = reader(LOANS);
-    expect(html).toContain('<label class="rt-pick"><span class="rt-pick-label">Case</span><select class="rt-select" data-rt-select>');
+    expect(html).toContain(`<label class="rt-pick" ${READER_ONLY_ATTR}=""><span class="rt-pick-label">Case</span><select class="rt-select" data-rt-select aria-label="Case — Can the book be renewed?">`);
     const options = [...html.matchAll(/<option value="([^"]*)">/g)].map((m) => m[1]);
     expect(options).toEqual(["", "LIB-101", "LIB-102", "LIB-103", "LIB-104"]);
   });
 
+  test("the picker is named by its tree, and a reader-only live region stands beside it", () => {
+    const html = reader(LOANS);
+    expect(html).toContain('<select class="rt-select" data-rt-select aria-label="Case — Can the book be renewed?">');
+    const live = /<p class="rt-live" ([^>]*)><\/p>/.exec(html);
+    expect(live?.[1]).toContain(`${READER_ONLY_ATTR}=""`);
+    expect(live?.[1]).toContain('aria-live="polite"');
+    expect(live?.[1]).toContain("data-rt-live");
+    const say = JSON.parse((/data-rt-say="([^"]*)"/.exec(live?.[1] ?? "")?.[1] ?? "{}").replace(/&quot;/g, '"'));
+    expect(say).toEqual({
+      "LIB-101": "LIB-101: 1 leaf — Return",
+      "LIB-102": "LIB-102: 1 leaf — Return",
+      "LIB-103": "LIB-103: 1 leaf — Return",
+      "LIB-104": "LIB-104: 1 leaf — Renew",
+    });
+    // The label too is the reader's, not the source's.
+    expect(html).toContain(`<label class="rt-pick" ${READER_ONLY_ATTR}="">`);
+  });
+
+  test("the live text counts a case's leaves and names their outcomes once each, in the wiki's language", () => {
+    const md = tree("- *2024:* → Renew — LIB-1\n- *2025:* → Return — LIB-1\n- *2026:* → Return — LIB-1\n- → Renew — LIB-2", 'outcomes="Renew=good;Return=muted"');
+    const say = (html: string) => JSON.parse((/data-rt-say="([^"]*)"/.exec(html)?.[1] ?? "{}").replace(/&quot;/g, '"'));
+    expect(say(reader(md))).toEqual({ "LIB-1": "LIB-1: 3 leaves — Renew, Return", "LIB-2": "LIB-2: 1 leaf — Renew" });
+    expect(say(reader(md, { language: "no" }))).toEqual({ "LIB-1": "LIB-1: 3 blader — Renew, Return", "LIB-2": "LIB-2: 1 blad — Renew" });
+    expect(reader(md, { language: "no" })).toContain('aria-label="Sak — Regeltre"');
+  });
+
+  test("a leaf with no outcome is counted and names none", () => {
+    const md = tree("- *2024:* → — LIB-1\n- *2025:* → Renew — LIB-1", 'title="T" outcomes="Renew=good"');
+    expect(reader(md)).toContain("LIB-1: 2 leaves — Renew");
+    expect(reader(tree("- → — LIB-1", 'title="T"'))).toContain("LIB-1: 1 leaf&quot;");
+  });
+
   test("a tree with no cases has no picker", () => {
     expect(reader(tree("- → Renew\n- → Return"))).not.toContain("<select");
+    expect(reader(tree("- → Renew\n- → Return"))).not.toContain("rt-live");
   });
 
   test("leaves carry their tone and cases; the decision ref stays in the leaf text", () => {
@@ -139,7 +172,7 @@ describe("CaseBoard kort", () => {
 
   test("a case the page's board holds shows its kort, hidden until picked", () => {
     const html = reader(page("- → Return — LIB-101\n- → Renew — LIB-104"), { files });
-    expect(html).toContain('<p class="rt-korts" aria-live="polite"><span class="rt-kort" data-rt-kort="LIB-101" hidden>LIB-101 · Two <strong>loans</strong> open</span></p>');
+    expect(html).toContain('<p class="rt-korts"><span class="rt-kort" data-rt-kort="LIB-101" hidden>LIB-101 · Two <strong>loans</strong> open</span></p>');
     // A board row with no kort, and no note, adds no line.
     expect(html).not.toContain('data-rt-kort="LIB-104"');
   });
@@ -232,6 +265,35 @@ describe("the reader and the lint read one tree", () => {
     expect(r.leaves).toBe(2);
     expect(r.toned === 0).toBe(fs.some((m) => m.includes("has no tone")));
     expect(r.cased > 0).toBe(fs.some((m) => / is on 2 leaves /.test(m)));
+    expect(fs.some((m) => m.includes("is not read as a leaf"))).toBe(false);
+  });
+
+  // Each item once: the lint names an item with an arrow exactly when the
+  // reader draws no leaf, and a case tail exactly when it draws a leaf with no cases.
+  test.each([
+    ["a leaf with a case", "→ Renew — LIB-1"],
+    ["a leaf with no dash", "→ Renew"],
+    ["an ASCII arrow", "-> Renew — LIB-1"],
+    ["an ASCII arrow after an edge label", "*Yes:* -> Renew — LIB-1"],
+    ["a bold edge label", "**Yes:** → Renew — LIB-1"],
+    ["a bold italic edge label", "***Yes:*** → Renew — LIB-1"],
+    ["a bold italic arrow run", "***→ Renew*** — LIB-1"],
+    ["a lead with * in a code span", "*`a*b`:* → Renew — LIB-1"],
+    ["a full stop after the id", "→ Renew — LIB-1."],
+    ["a lowercase id", "→ Renew — lib-1"],
+    ["ids joined by a word", "→ Renew — LIB-7 og LIB-8"],
+    ["a struck case id", "→ Renew — ~~LIB-1~~"],
+    ["a dash inside code", "→ Renew `a — b`"],
+  ])("%s: what drops is named", (_name, item) => {
+    const md = tree(`- ${item}`, 'title="T" outcomes="Renew=good"');
+    const r = renderedLeaves(md);
+    const fs = lintOf(md);
+    const notLeaf = fs.filter((f) => f.message.includes("is not read as a leaf"));
+    const noCases = fs.filter((f) => f.message.includes("reads as no case ids"));
+    expect(notLeaf.length).toBe(r.leaves === 0 ? 1 : 0);
+    const tail = item.replace(/~~[^~]*~~/g, "").replace(/`[^`]*`/g, "").split(" — ")[1]?.trim();
+    expect(noCases.length).toBe(r.leaves === 1 && r.cased === 0 && Boolean(tail) ? 1 : 0);
+    expect([...notLeaf, ...noCases].every((f) => f.severity === "info")).toBe(true);
   });
 
   test("the one stated divergence: on a board page, an id the board lacks beside a grammar id", () => {

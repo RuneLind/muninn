@@ -287,6 +287,35 @@ test.describe("Wiki reader: RuleTree", () => {
     await expect(t.locator('[data-rt-kort="LIB-101"]')).toBeVisible();
   });
 
+  test("a pick marks its leaves for a screen reader and says what it found", async ({ page }) => {
+    await open(page, 1280);
+    const t = loanTree(page);
+    const select = t.locator(".rt-select");
+    await expect(select).toHaveAccessibleName("Case — Can the book be renewed?");
+    const live = t.locator("[data-rt-live]");
+    await expect(live).toHaveAttribute("aria-live", "polite");
+    await expect(live).toHaveText("");
+    await expect(t.locator("[aria-current]")).toHaveCount(0);
+    await select.selectOption("LIB-101");
+    const current = t.locator('li.rt-leaf[aria-current="true"]');
+    await expect(current).toHaveCount(1);
+    await expect(current).toHaveAttribute("data-rt-cases", /LIB-101/);
+    await expect(live).toHaveText(/^LIB-101: 1 leaf — Return\. (Loan )?LIB-101 · Two loans open$/);
+    // Read by a screen reader, never seen: one pixel, clipped.
+    expect(await live.evaluate((e) => e.getBoundingClientRect().width)).toBeLessThanOrEqual(1);
+    await select.selectOption("LIB-104");
+    await expect(current).toHaveCount(1);
+    await expect(current).toHaveAttribute("data-rt-cases", /LIB-104/);
+    await expect(live).toHaveText("LIB-104: 1 leaf — Renew");
+    await select.selectOption("");
+    await expect(t.locator("[aria-current]")).toHaveCount(0);
+    await expect(live).toHaveText("");
+    await select.selectOption("LIB-103");
+    await page.emulateMedia({ media: "print" });
+    await expect(live).toBeHidden();
+    await page.emulateMedia({ media: "screen" });
+  });
+
   test("without the script's flag the picker is gone and the case chips stay", async ({ page }) => {
     await open(page, 1280);
     await page.evaluate(() => document.documentElement.classList.remove("rt-js"));
@@ -368,13 +397,16 @@ test.describe("Wiki reader: RuleTree", () => {
 
   test("a peek shows the list and none of the tree's chrome or wiring", async ({ page }) => {
     await open(page, 1280);
+    // Picked first: the peek clones the live tree, pick state included.
+    await loanTree(page).locator(".rt-select").selectOption("LIB-101");
+    await expect(loanTree(page).locator('li[aria-current="true"]')).toHaveCount(1);
     await page.locator(".wiki-article a.wiki-ref", { hasText: "Loan rule" }).first().hover();
     const peek = page.locator(".wiki-ref-peek");
     await expect(peek).toBeVisible();
     await expect(peek.locator("li").first()).toContainText("Is the book reserved by someone else?");
     // The reader's idLabels noun rides into the peek copy with the chip's link.
     await expect(peek).toContainText(/Return \(D2\) — (Loan )?LIB-101, LIB-102/);
-    await expect(peek.locator("select, .rt-head, [class*='rt-'], [data-rt-cases], [data-rt-case], [data-rt-kort], [role='figure']")).toHaveCount(0);
+    await expect(peek.locator("select, .rt-head, [class*='rt-'], [data-rt-cases], [data-rt-case], [data-rt-kort], [role='figure'], [aria-current], [aria-live], [data-rt-live], [data-rt-say]")).toHaveCount(0);
   });
 
   test("an Explain selection across a tree locates in the page source", async ({ page }) => {

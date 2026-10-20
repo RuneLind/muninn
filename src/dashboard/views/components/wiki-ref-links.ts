@@ -340,12 +340,14 @@ function bareChart(chart: Element): void {
 export const PEEK_RULE_TREE_CHROME = ["rt-head"] as const;
 
 /** A peeked rule tree is its list as written: no tree classes, no picker
- *  wiring, no figure role. */
+ *  wiring (a pick's `aria-current` included), no figure role. The live region
+ *  goes with `.rt-head`. */
 function bareRuleTree(tree: Element): void {
-  for (const x of [tree, ...Array.from(tree.querySelectorAll("[class], [data-rt-cases], [data-rt-case]"))]) {
+  for (const x of [tree, ...Array.from(tree.querySelectorAll("[class], [data-rt-cases], [data-rt-case], [aria-current]"))]) {
     if (x === tree || Array.from(x.classList).some((k) => k.startsWith("rt-"))) x.removeAttribute("class");
     x.removeAttribute("data-rt-cases");
     x.removeAttribute("data-rt-case");
+    x.removeAttribute("aria-current");
   }
   tree.removeAttribute("role");
   tree.removeAttribute("aria-label");

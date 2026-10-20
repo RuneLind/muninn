@@ -1337,6 +1337,8 @@ export function ruleTreeCss(scope: string): string {
       color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--text-muted);
     }
     ${s} .rt-select:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
+    /* Heard on a pick, never seen: the tree on screen already shows the path. */
+    ${s} .rt-live { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
     ${s} .rt-korts { flex-basis: 100%; margin: 0; font-size: 0.85em; color: var(--text-secondary); }
     ${s} .rt-kort { display: block; overflow-wrap: anywhere; }
     ${s} .rt-kort[hidden] { display: none; }
@@ -1373,7 +1375,7 @@ export function ruleTreeCss(scope: string): string {
       ${s} .rt-list .rt-list > .rt-node::before { inset-inline-start: -0.6rem; width: 0.45rem; }
     }
     @media print {
-      ${s} .rt-pick, .rt-js ${s} .rt-pick, ${s} .rt-korts { display: none; }
+      ${s} .rt-pick, .rt-js ${s} .rt-pick, ${s} .rt-korts, ${s} .rt-live { display: none; }
     }
     @media (forced-colors: active) {
       ${s} .rt-leaf > .rt-row, ${s} .rt-case { border-color: CanvasText; }

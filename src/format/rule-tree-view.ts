@@ -15,15 +15,15 @@ import { escapeHtml } from "./markdown-core.ts";
 import type { ListBlock } from "./markdown-ast.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
-import type { RuleNode, RuleTreeViewInput, RuleUnder } from "./rule-tree.ts";
+import { type RuleNode, type RuleTreeViewInput, type RuleUnder, ruleTreeNodes } from "./rule-tree.ts";
 
 /** The classes the reader adds; `wiki-ref-links.ts` strips these from a peek
  *  (`PEEK_RULE_TREE_CHROME`, pinned equal by a test). */
 export const RULE_TREE_CHROME_CLASSES = ["rt-head"] as const;
 
-const WORDS: Record<QuestionLanguage, { tree: string; caseLabel: string; all: string }> = {
-  en: { tree: "Rule tree", caseLabel: "Case", all: "All cases" },
-  no: { tree: "Regeltre", caseLabel: "Sak", all: "Alle saker" },
+const WORDS: Record<QuestionLanguage, { tree: string; caseLabel: string; all: string; leaf: string; leaves: string }> = {
+  en: { tree: "Rule tree", caseLabel: "Case", all: "All cases", leaf: "leaf", leaves: "leaves" },
+  no: { tree: "Regeltre", caseLabel: "Sak", all: "Alle saker", leaf: "blad", leaves: "blader" },
 };
 
 const RO = `${READER_ONLY_ATTR}=""`;
@@ -92,8 +92,23 @@ function listHtml(list: ListBlock, nodes: readonly RuleNode[], input: RuleTreeVi
   return `<ol class="rt-list"${list.start !== 1 ? ` start="${list.start}"` : ""}>${items}</ol>`;
 }
 
-/** The picker: one option per case, in first-seen order. */
-function pickerHtml(input: RuleTreeViewInput): string {
+/** What a screen reader hears on a pick: `LIB-1: 2 leaves — Renew, Return`,
+ *  each outcome once, in source order. */
+function caseSays(input: RuleTreeViewInput): Record<string, string> {
+  const w = WORDS[input.language];
+  const says: Record<string, string> = {};
+  const leaves = ruleTreeNodes(input.read.nodes).flatMap((n) => (n.leaf ? [n.leaf] : []));
+  for (const id of input.read.cases) {
+    const on = leaves.filter((l) => l.cases.includes(id));
+    const outcomes = [...new Set(on.map((l) => l.outcome).filter(Boolean))];
+    says[id] = `${id}: ${on.length} ${on.length === 1 ? w.leaf : w.leaves}${outcomes.length ? ` — ${outcomes.join(", ")}` : ""}`;
+  }
+  return says;
+}
+
+/** The picker, named by its tree: one option per case, in first-seen order,
+ *  and a reader-only live region the client fills on a pick. */
+function pickerHtml(input: RuleTreeViewInput, name: string): string {
   const w = WORDS[input.language];
   const { cases } = input.read;
   if (!cases.length) return "";
@@ -103,9 +118,10 @@ function pickerHtml(input: RuleTreeViewInput): string {
     .map((id) => `<span class="rt-kort" data-rt-kort="${escapeHtml(id)}" hidden>${escapeHtml(id)} · ${input.korts.get(id)}</span>`)
     .join("");
   return (
-    `<label class="rt-pick"><span class="rt-pick-label">${w.caseLabel}</span>` +
-    `<select class="rt-select" data-rt-select><option value="">${w.all}</option>${options}</select></label>` +
-    (korts ? `<p class="rt-korts" aria-live="polite">${korts}</p>` : "")
+    `<label class="rt-pick" ${RO}><span class="rt-pick-label">${w.caseLabel}</span>` +
+    `<select class="rt-select" data-rt-select aria-label="${escapeHtml(`${w.caseLabel} — ${name}`)}"><option value="">${w.all}</option>${options}</select></label>` +
+    `<p class="rt-live" ${RO} aria-live="polite" data-rt-live data-rt-say="${escapeHtml(JSON.stringify(caseSays(input)))}"></p>` +
+    (korts ? `<p class="rt-korts">${korts}</p>` : "")
   );
 }
 
@@ -115,7 +131,7 @@ export function ruleTreeViewHtml(input: RuleTreeViewInput): string {
   const w = WORDS[input.language];
   const title = input.title.trim();
   const name = input.titleText.trim() || w.tree;
-  const head = (title ? `<p class="rt-title">${input.inline(title)}</p>` : "") + pickerHtml(input);
+  const head = (title ? `<p class="rt-title">${input.inline(title)}</p>` : "") + pickerHtml(input, name);
   return (
     `<section class="rt" role="figure" aria-label="${escapeHtml(name)}">` +
     (head ? `<div class="rt-head" ${RO}>${head}</div>` : "") +

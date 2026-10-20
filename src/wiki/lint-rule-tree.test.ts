@@ -111,6 +111,28 @@ describe("lint check 18 (rule-tree)", () => {
     expect(checkRuleTrees(page, text("Return=good")).map((f) => f.message)).toContain('<RuleTree title="T"> outcome "Renew" has no tone in outcomes, first at leaf «→ Renew — LIB-1»');
   });
 
+  test("an item with an arrow that is not a leaf, and a case tail that reads as no ids, are info on their own lines", () => {
+    const text = [
+      '<RuleTree title="T" outcomes="Renew=good">',
+      "",
+      "- **Yes:** → Renew — LIB-1",
+      "- -> Renew",
+      "- *No:* → Renew — LIB-1.",
+      "",
+      "</RuleTree>",
+    ].join("\n");
+    expect(checkRuleTrees(page, text).map((f) => [f.message, f.line, f.severity])).toEqual([
+      ['<RuleTree title="T"> item «Yes: → Renew — LIB-1» has → but is not read as a leaf (write the edge label in italics: *label:*)', 3, "info"],
+      ['<RuleTree title="T"> item «-> Renew» has → but is not read as a leaf (write the edge label in italics: *label:*)', 4, "info"],
+      ['<RuleTree title="T"> leaf «No: → Renew — LIB-1.»: the text after the last — reads as no case ids', 5, "info"],
+    ]);
+  });
+
+  test("a year on the leaf's path keeps two leaves of one case apart", () => {
+    const text = ['<RuleTree title="T" outcomes="Renew=good;Return=good">', "", "- *2024:*", "  - → Renew — LIB-1", "- *2025:*", "  - → Return — LIB-1", "", "</RuleTree>"].join("\n");
+    expect(checkRuleTrees(page, text)).toEqual([]);
+  });
+
   test("checkPageText runs it on an .mdx page that is not culled", () => {
     const text = ['<RuleTree title="T">', "", "- → Return", "", "</RuleTree>"].join("\n");
     const ruleTree = (fs: { check: string }[]) => fs.filter((f) => f.check === "rule-tree");
