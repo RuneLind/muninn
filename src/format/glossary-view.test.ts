@@ -277,10 +277,16 @@ describe("where the reader marks a term on the page", () => {
 
 test("an Explain excerpt is found across a marked term", () => {
   const filler = Array.from({ length: 400 }, (_, i) => `Shelf ${i} holds books.`).join(" ");
-  const body = `${filler}\n\n## Loans\n\nA Hold keeps a book back for one reader.\n${HOLD}`;
-  // The selection is the visible text: the tooltip is hidden, so it is not in it.
-  const excerpt = locateExcerpt(body, "A Hold keeps a book back");
-  expect(excerpt).toContain("A Hold keeps a book back for one reader.");
+  const body = `${filler}\n\n## Loans\n\nAsk at the desk: a hold keeps a book back for one reader.\n${HOLD}`;
+  const html = reader(body);
+  // The paragraph the reader selects across: after the heading, before the list.
+  const para = html.slice(html.indexOf("Ask at the desk"), html.indexOf("one reader.") + "one reader.".length);
+  expect(marks(para)).toEqual([["hold", "hold"]]);
+  // A selection leaves out reader-only parts (readerSelectionText), as here.
+  const visible = new HTMLRewriter().on(`[${READER_ONLY_ATTR}]`, { element: (e) => void e.remove() }).transform(para);
+  const selection = visible.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&");
+  const excerpt = locateExcerpt(body, selection);
+  expect(excerpt).toContain("Ask at the desk: a hold keeps a book back for one reader.");
   expect(excerpt.length).toBeLessThan(body.length);
 });
 
