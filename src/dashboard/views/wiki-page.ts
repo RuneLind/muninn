@@ -120,10 +120,11 @@ export async function renderWikiPage(opts?: {
    *  would reach a dropped route, and the client skips the fetches those
    *  controls' panels make on load. Default true. */
   tools?: boolean;
-  /** The registry name of the wiki served at `wikiRoot` — what the find
-   *  palette's Everywhere rows call this wiki. Differs from `selected` under
-   *  the `WIKI_DIR` override, where `selected` is "" while the root may still
-   *  be a registered wiki. Default `selected`. */
+  /** The registry name of the wiki served at `wikiRoot` — what the answer
+   *  cards, new-since and the Agent lens send as `wiki` (`__WIKI_FIND_SELF__`).
+   *  Differs from `selected` under the `WIKI_DIR` override, where `selected`
+   *  is "" while the root may still be a registered wiki. The find palette
+   *  reads `findRows` instead. Default `selected`. */
   findSelf?: string;
   /** The name find-everywhere labels this root's rows with (`findRowsWikiName`):
    *  differs from `findSelf` on aliased roots. Only the palette reads it.

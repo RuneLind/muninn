@@ -2774,10 +2774,14 @@ and the issue ledger all hand the signal to `fetch`). The two huginn reads (the
 Jira-key corpus and the tracker issue fields) take a timeout, not a signal:
 they are RACED, so the page stops waiting, and the fetch runs on to its own
 bound. The Stamp route's inline call passes no request signal. Only the
-DEADLINE reads as `links.timedOut`, and only the deadline warns: a call that
-the request's abort rejected logs `<leg> not read: request aborted` at debug
-(`abortedByCaller` in `session-ledger.ts`; a deadline aborts with a
-`TimeoutError`, a reader leaving does not).
+DEADLINE reads as `links.timedOut`. A deadline and a real upstream failure both
+warn (`<leg> degraded: …`, once per distinct error, on all four ledger legs);
+only a call that the request's abort rejected logs `<leg> not read: request
+aborted` at debug instead (`abortedByCaller` in `session-ledger.ts`; a deadline
+aborts with a `TimeoutError`, a reader leaving does not). The same
+classification covers the graph/board route: `GET /api/wiki/graph`
+(`src/dashboard/routes/wiki-graph.ts`) hands `AbortSignal.any([req.signal,
+deadline])` to the same ledger legs through `graphLedgerPort`.
 
 The other four legs are PR 3's, and they all live in `pageProvenance` for the
 merges leg's reason:

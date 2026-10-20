@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { findRefs, headingSlug, isRefId, nounRuns } from "./wiki-ref-links.ts";
+import { findRefs, headingSlug, isRefId, nounRuns, refTargets } from "./wiki-ref-links.ts";
 import { foldSizeLabel, formatChars, readingMinutes } from "./wiki-lens.ts";
 
 /** The browser half (wrapping, the peek, the jump and Back) is driven in
@@ -81,6 +81,18 @@ describe("ref ids that are not ids (arch-review 2026-10 #13)", () => {
   test("ranges still link both ends, and a sub-step `S1.2` links its step", () => {
     expect(linked("se Q-1–Q-14.", ["Q-1", "Q-14"])).toEqual(["id:Q-1", "id:Q-14"]);
     expect(linked("Steg S1.2 og D4.", ["S1", "D4"])).toEqual(["id:S1", "id:D4"]);
+  });
+
+  test("refTargets itself keeps only the chip keys isRefId accepts", () => {
+    // A stub root, since `linked` filters with isRefId on its own: only the id
+    // chips (ID_TARGETS) answer; the sections query finds nothing.
+    const chip = (key: string) => ({ textContent: key, closest: () => ({ id: `case-${key}` }) });
+    const root = {
+      querySelectorAll: (sel: string) =>
+        sel.includes(".dl-id") ? ["A", "10", "Q-A", "q-a", "D4"].map(chip) : [],
+    } as unknown as Element;
+    // A lowercase letter counts as a letter: `q-a` is an id.
+    expect([...refTargets(root).ids.keys()]).toEqual(["Q-A", "q-a", "D4"]);
   });
 });
 
