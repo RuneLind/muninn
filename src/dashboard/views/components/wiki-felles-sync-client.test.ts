@@ -467,3 +467,56 @@ async function throwingRunScenario(
     refreshReads: statusCalls - before,
   };
 }
+
+/** Hold every status request until the test answers it; other requests go to
+ *  the harness fetch. `afterEach` restores the real fetch. */
+function holdStatus(): { pending: ((s: FellesSyncStatus) => Promise<void>)[] } {
+  const inner = globalThis.fetch;
+  const pending: ((s: FellesSyncStatus) => Promise<void>)[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (!String(url).startsWith("/api/wiki/felles-status")) return inner(url, init);
+    return new Promise<Response>((resolve) => {
+      pending.push(async (s) => {
+        resolve(new Response(JSON.stringify(s), { status: 200 }));
+        await settle();
+      });
+    });
+  }) as typeof fetch;
+  return { pending };
+}
+
+const chipText = () => h.slot.querySelector("#" + FELLES_SYNC_BTN_ID).textContent;
+
+describe("fix round 2 batch 4 — the status load's quiet and generation rules", () => {
+  // M9: a background refresh keeps the chip's last answer on screen.
+  test("a quiet refresh with a status shown does not paint «checking…»", async () => {
+    await h.sync.load();
+    expect(chipText()).toBe("Felles: 0 changed");
+    const held = holdStatus();
+    h.sync.refresh();
+    await settle();
+    expect(held.pending.length).toBe(1);
+    expect(chipText()).toBe("Felles: 0 changed");
+    await held.pending[0]!(status({ changed: 3, pages: [changedPage(1), changedPage(2), changedPage(3)] }));
+    expect(chipText()).toBe("Felles: 3 changed");
+  });
+
+  // M10: an answer from an older generation is returned but never applied.
+  test("an older generation's answer arriving last changes nothing", async () => {
+    await h.sync.load();
+    const held = holdStatus();
+    h.sync.refresh(); // generation 0
+    void h.sync.load({ afterRun: true }); // generation 1, its own request
+    await settle();
+    expect(held.pending.length).toBe(2);
+    await held.pending[1]!(status({ changed: 2, pages: [changedPage(1), changedPage(2)] }));
+    expect(chipText()).toBe("Felles: 2 changed");
+    expect(h.sync.markFor("plans/c1.mdx")).toBe("stale");
+    const onStatusAfterNew = h.onStatusCalls();
+    await held.pending[0]!(status({ changed: 5, pages: [refusedPage] }));
+    expect(chipText()).toBe("Felles: 2 changed");
+    expect(h.sync.markFor("plans/c1.mdx")).toBe("stale");
+    expect(h.sync.markFor(refusedPage.relPath)).toBeNull();
+    expect(h.onStatusCalls()).toBe(onStatusAfterNew);
+  });
+});

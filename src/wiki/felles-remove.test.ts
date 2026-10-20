@@ -165,6 +165,28 @@ describe("fellesObjectPathRefusal mirrors the script's sjekkStiform", () => {
   ])("refuses %p", (rel) => {
     expect(fellesObjectPathRefusal(rel)).not.toBeNull();
   });
+
+  // The script's KONTROLLTEGN class, one row per range edge, and the code
+  // point just outside each edge, which passes this rule.
+  const hex = (cp: number) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
+  test.each([
+    0x0000, 0x0009, 0x000a, 0x001f, // C0, tab and newline included
+    0x007f, // DEL
+    0x0080, 0x009f, // C1
+    0x061c, // Arabic letter mark
+    0x200e, 0x200f, // LRM, RLM
+    0x2028, 0x2029, // line and paragraph separator
+    0x202a, 0x202c, 0x202e, // LRE … RLO
+    0x2066, 0x2069, // LRI … PDI
+  ].map((cp) => [hex(cp), cp] as const))("refuses %s as a control or direction character", (_n, cp) => {
+    expect(fellesObjectPathRefusal(`plans/x${String.fromCharCode(cp)}y.csv`)).toBe("control or direction character");
+  });
+
+  test.each([0x0020, 0x007e, 0x00a0, 0x061b, 0x061d, 0x200d, 0x2010, 0x2027, 0x202f, 0x2065, 0x206a].map(
+    (cp) => [hex(cp), cp] as const,
+  ))("accepts %s, just outside the class", (_n, cp) => {
+    expect(fellesObjectPathRefusal(`plans/x${String.fromCharCode(cp)}y.csv`)).toBeNull();
+  });
 });
 
 // The real script's lines (the empirical pass compares this fake with the

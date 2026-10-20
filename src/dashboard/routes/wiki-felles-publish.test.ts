@@ -4,7 +4,7 @@
  * `publiser-felles-wiki.ts` is asserted without gcloud. The `.env` case runs
  * the route's real Bun interpreter, since that leak only exists there.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,6 +16,7 @@ import { registerWikiFellesPublishRoute, type FellesPublishRouteDeps } from "./w
 import { ProcTimeoutError } from "../../utils/run-proc.ts";
 import type { FellesPublishConfig } from "../../wiki/felles-publish.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import * as fellesRemove from "../../wiki/felles-remove.ts";
 import { fakeFjernRun, fakeGcloudRm, GCLOUD_LOGGED_OUT, GCLOUD_NETWORK } from "../../test/felles-fjern-fake.ts";
 
 let root = "";
@@ -179,6 +180,34 @@ describe("the spawn", () => {
     expect((await first).status).toBe(200);
     expect((await post(app, ok)).status).toBe(200);
     expect(calls).toBe(2);
+  });
+
+  // Fix round 2 batch 4 (R9): the run slot is claimed before the remove's
+  // data-file pre-read, so a request that loses the race reads no file.
+  test("a remove that loses the slot is a 409 before its data-file pre-read", async () => {
+    const preRead = spyOn(fellesRemove, "fellesRemoveDataFiles");
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const app = appWith({
+        runProc: async () => {
+          await gate;
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      const first = post(app, ok);
+      await Bun.sleep(20);
+      const second = await post(app, { ...ok, action: "remove" });
+      expect(second.status).toBe(409);
+      expect(preRead).toHaveBeenCalledTimes(0);
+      release();
+      expect((await first).status).toBe(200);
+      // Positive control: with the slot free, the same remove pre-reads once.
+      expect((await post(app, { ...ok, action: "remove" })).status).toBe(200);
+      expect(preRead).toHaveBeenCalledTimes(1);
+    } finally {
+      preRead.mockRestore();
+    }
   });
 
   test("a script that does not return is a 504, and frees the slot", async () => {
