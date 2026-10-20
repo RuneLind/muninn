@@ -83,11 +83,7 @@ const QUOTE_SRC = String.raw`«([^«»\n]{1,120})»|“([^“”\n]{1,120})”|"
  *  scanned for ids inside it. */
 export function findRefs(text: string, ids: ReadonlySet<string>, titles: ReadonlySet<string>): RefMatch[] {
   const idAlt = [...ids].sort((a, b) => b.length - a.length).map(escapeRe).join("|");
-  // A `.` between digits joins a date or version (07.10.2026, 1.10): no id
-  // starts or ends inside one. A sentence-ending `S4.` still matches.
-  const idSrc = idAlt
-    ? String.raw`(?<![\p{L}\p{N}_-]|\p{N}\.)(${idAlt})(?![\p{L}\p{N}_]|-[\p{L}\p{N}]|\.\p{N})`
-    : "";
+  const idSrc = idAlt ? String.raw`(?<![\p{L}\p{N}_-])(${idAlt})(?![\p{L}\p{N}_]|-[\p{L}\p{N}])` : "";
   const src = [titles.size ? QUOTE_SRC : "", idSrc].filter(Boolean).join("|");
   if (!src) return [];
   const re = new RegExp(src, "gu");
@@ -133,11 +129,12 @@ const SECTIONS = "details.fold, h1, h2, h3, h4, h5, h6";
 /** What a peek can show: the targets `peekParts` knows. */
 const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${SECTIONS}`;
 
-/** Whether a chip's text can name its target in prose: it holds a letter AND
- *  a digit (D4, S1, Q-14, MEL-601780). A bare `A` would link every
- *  sentence-initial A, and a digit-only `10` the parts of a date. */
+/** Whether a chip's text can name its target in prose: two or more
+ *  characters, at least one a letter (D4, S1, Q-14, Q-A, MEL-601780). A
+ *  digit-only `10` would link the parts of a date or version, and a bare `A`
+ *  every sentence-initial A. */
 export function isRefId(key: string): boolean {
-  return /\p{L}/u.test(key) && /\p{N}/u.test(key);
+  return /\p{L}/u.test(key) && [...key].length >= 2;
 }
 
 /** A key seen twice maps to null: it names no one target. */

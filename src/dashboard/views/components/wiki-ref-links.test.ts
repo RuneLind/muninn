@@ -56,18 +56,31 @@ describe("findRefs: ids", () => {
 });
 
 describe("ref ids that are not ids (arch-review 2026-10 #13)", () => {
-  test("a dot between digits is a date or version, never an id boundary", () => {
-    expect(keys("vedtak 07.10.2026 etter 10 kjøringer; versjon 1.10", ["10", "2026", "1"])).toEqual(["id:10"]);
-    expect(keys("D4.5 og S1.", ["D4", "S1"])).toEqual(["id:S1"]);
+  /** What `refTargets` links: the chip keys `isRefId` keeps. */
+  const linked = (text: string, chips: string[]) => keys(text, chips.filter(isRefId));
+
+  test("a digit-only or one-character key links nothing", () => {
+    for (const k of ["A", "1", "10", "2026", "0123", "Q"]) expect(isRefId(k)).toBe(false);
+    expect(linked("A decision on 07.10.2026 after 10 runs; step 1, version 1.10.", ["A", "1", "10", "2026"])).toEqual([]);
   });
 
-  test("only a key with a letter and a digit links", () => {
-    for (const k of ["D4", "S1", "Q-14", "MEL-601780", "H1", "MELOSYS-1234"]) expect(isRefId(k)).toBe(true);
-    for (const k of ["A", "1", "10", "2026", "0123", "Case-A"]) expect(isRefId(k)).toBe(false);
+  test("letter ids link, with or without a digit", () => {
+    for (const k of ["D4", "S1", "Q-14", "MEL-601780", "H1", "MELOSYS-1234", "Q-A", "Q-H", "Case-A"]) {
+      expect(isRefId(k)).toBe(true);
+    }
+    // kode-wiki plans/2026-09-22-vedtaksmetadata-rotaarsak.mdx: query ids Q-A … Q-H.
+    expect(linked("Q-A–Q-H kjørt; 1981 rader (Q-A). SQL-en for Q-F–Q-H.", ["Q-A", "Q-F", "Q-H"])).toEqual([
+      "id:Q-A",
+      "id:Q-H",
+      "id:Q-A",
+      "id:Q-F",
+      "id:Q-H",
+    ]);
   });
 
-  test("ranges still link both ends", () => {
-    expect(keys("se Q-1–Q-14.", ["Q-1", "Q-14"])).toEqual(["id:Q-1", "id:Q-14"]);
+  test("ranges still link both ends, and a sub-step `S1.2` links its step", () => {
+    expect(linked("se Q-1–Q-14.", ["Q-1", "Q-14"])).toEqual(["id:Q-1", "id:Q-14"]);
+    expect(linked("Steg S1.2 og D4.", ["S1", "D4"])).toEqual(["id:S1", "id:D4"]);
   });
 });
 
