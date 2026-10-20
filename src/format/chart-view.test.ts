@@ -139,6 +139,13 @@ describe("numbers", () => {
     expect(reader(pos)).not.toContain('class="vc-zero"');
   });
 
+  test("the gap band is drawn over the value bar, so a value past its target keeps the band in view", () => {
+    const md = chart('<Chart kind="gap" value="Now" target="Goal" gap="Gap">', ["| I | Now | Goal | Gap |", "|---|---|---|---|", "| below | -9 | -3 | 6 |", "| over | 28 | 18 | -10 |", "| cross | -4 | 6 | 10 |", "| under | 4 | 12 | 8 |"]);
+    const svgs = reader(md).match(/<svg[^]*?<\/svg>/g)!.filter((x) => x.includes('class="vc-band"'));
+    expect(svgs.length).toBe(4); // one per row; a negative target offers no % variant
+    for (const svg of svgs) expect(svg.indexOf('class="vc-band"')).toBeGreaterThan(svg.indexOf('class="vc-value"'));
+  });
+
   test("the y axis shows the plotted extremes with enough decimals", () => {
     expect(stepsAxisDecimals(1.2, 1.25, 2)).toBe(2);
     expect(stepsAxisDecimals(1.2, 1.25, 0)).toBe(2);

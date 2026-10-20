@@ -257,8 +257,9 @@ function gapRows(model: Extract<ChartModel, { kind: "gap" }>, pct: boolean, w: C
     const svg =
       svgOpen(title) +
       track +
-      rect("vc-band", v, t, 4, 4) +
+      // The band goes over the bar: a value past its target puts the band inside the bar.
       rect("vc-value", z, v, 2, 8) +
+      rect("vc-band", v, t, 4, 4) +
       (sc.negative ? vline("vc-zero", z) : "") +
       (r.mark ? vline("vc-mark", sc.at(val(r.mark.n, r.target.n)), 1, 11) : "") +
       vline("vc-target", t) +

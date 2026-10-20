@@ -122,6 +122,19 @@ const PAGE = [
   "",
   "</Chart>",
   "",
+  "## Signs chart",
+  "",
+  '<Chart kind="gap" caption="Signs" value="Now" target="Goal" gap="Gap">',
+  "",
+  "| Track | Now | Goal | Gap |",
+  "|---|---|---|---|",
+  "| Below [ref](https://example.com/signs) | -9 | -3 | 6 |",
+  "| Over | 28 | 18 | -10 |",
+  "| Cross | -4 | 6 | 10 |",
+  "| Under | 4 | 12 | 8 |",
+  "",
+  "</Chart>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -169,7 +182,7 @@ const visiblePlot = (c: Locator) => c.locator(":scope > .vc-plot:not([hidden])")
 async function open(page: Page, width: number, focus = false): Promise<void> {
   await page.setViewportSize({ width, height: 900 });
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
-  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(5);
+  await expect(page.locator(".wiki-article section.vc[class*='vc-kind-']")).toHaveCount(6);
   if (focus) {
     await page.locator("body").press("f");
     await expect(page.locator("#wikiFocusExit")).toBeVisible();
@@ -369,6 +382,53 @@ test.describe("Wiki reader: Chart", () => {
     expect(excerpt).toContain(GAP_CHART[4]!);
   });
 
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: a link in a chart's hidden table shows its table while it has focus`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await open(page, 1280);
+      const c = chart(page, "gap", "Signs");
+      const table = c.locator(":scope > .vc-table");
+      expect((await table.boundingBox())!.width).toBeLessThanOrEqual(1);
+      await c.locator('button[data-vc-mode="table"]').focus();
+      await page.keyboard.press("Tab");
+      const link = table.locator('a[href="https://example.com/signs"]');
+      await expect(link).toBeFocused();
+      // Focus is never on a 1 px clip: the table shows, and the link's middle is the link.
+      expect((await table.boundingBox())!.width).toBeGreaterThan(100);
+      const hit = await link.evaluate((a) => {
+        const r = a.getBoundingClientRect();
+        return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest("a") === a;
+      });
+      expect(hit).toBe(true);
+      expect(await link.evaluate((e) => getComputedStyle(e).outlineStyle)).not.toBe("none");
+      // The chart stays in chart mode, and leaving the table hides it again.
+      await expect(c.locator('button[data-vc-mode="chart"]')).toHaveAttribute("aria-pressed", "true");
+      await expect(visiblePlot(c)).toBeVisible();
+      await c.screenshot({ path: test.info().outputPath(`focus-${scheme}.png`) });
+      await page.keyboard.press("Shift+Tab");
+      expect((await table.boundingBox())!.width).toBeLessThanOrEqual(1);
+    });
+
+    test(`${scheme}: the gap band shows on every row, whichever side of the target and of zero the value is`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await open(page, 1280);
+      const c = chart(page, "gap", "Signs");
+      const svgs = c.locator(".vc-plot:not([hidden]) svg");
+      await expect(svgs).toHaveCount(4);
+      for (const svg of await svgs.all()) {
+        await svg.scrollIntoViewIfNeeded();
+        const name = await svg.locator("title").textContent();
+        // The band's middle is the band itself, not a bar painted over it.
+        const top = await svg.locator(".vc-band").evaluate((band) => {
+          const r = band.getBoundingClientRect();
+          return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.getAttribute("class");
+        });
+        expect(top, name ?? "").toBe("vc-band");
+      }
+      await c.screenshot({ path: test.info().outputPath(`signs-${scheme}.png`) });
+    });
+  }
+
   test("print shows each table and hides the plot and controls", async ({ page }) => {
     await open(page, 1280);
     await page.emulateMedia({ media: "print" });
@@ -380,14 +440,34 @@ test.describe("Wiki reader: Chart", () => {
     }
   });
 
-  test("forced colours keep the swatches and the track", async ({ page }) => {
+  test("forced colours paint the track, the marks, every series line and the swatches in system colours", async ({ page }) => {
     await page.emulateMedia({ forcedColors: "active" });
     await open(page, 1280);
-    const c = chart(page, "gap");
-    const bg = await c.locator(".vc-sw.vc-k-value").evaluate((e) => getComputedStyle(e).backgroundColor);
-    expect(bg).not.toBe("rgba(0, 0, 0, 0)");
-    const stroke = await c.locator(".vc-plot:not([hidden]) .vc-track").first().evaluate((e) => getComputedStyle(e).stroke);
-    expect(stroke).not.toBe("none");
+    const system = (name: string) =>
+      page.evaluate((n) => {
+        const probe = document.createElement("span");
+        probe.style.color = n;
+        document.body.appendChild(probe);
+        const v = getComputedStyle(probe).color;
+        probe.remove();
+        return v;
+      }, name);
+    const [text, highlight] = [await system("CanvasText"), await system("Highlight")];
+    expect(text).not.toBe(highlight);
+    const all = (c: Locator, sel: string, prop: "fill" | "stroke" | "backgroundColor") =>
+      c.locator(sel).evaluateAll((es, p) => es.map((e) => getComputedStyle(e)[p as "fill"]), prop);
+    const gap = chart(page, "gap");
+    expect(await all(gap, ".vc-plot:not([hidden]) .vc-track", "stroke")).toEqual(Array(3).fill(text));
+    expect(await all(gap, ".vc-plot:not([hidden]) .vc-value", "fill")).toEqual(Array(3).fill(highlight));
+    expect(await all(gap, ".vc-plot:not([hidden]) .vc-band", "fill")).toEqual(Array(3).fill(text));
+    expect(await all(gap, ".vc-plot:not([hidden]) .vc-mark", "stroke")).toEqual(Array(2).fill(text));
+    expect(await all(gap, ".vc-sw.vc-k-value", "backgroundColor")).toEqual([highlight]);
+    expect(await all(gap, ".vc-sw.vc-k-band", "backgroundColor")).toEqual([text]);
+    // Every steps series, plotted and in the legend, drops its hue.
+    const steps = chart(page, "steps", "Steps");
+    const lines = await all(steps, ".vc-plot:not([hidden]) .vc-line, .vc-legend .vc-line", "stroke");
+    expect(lines.length).toBe(4);
+    expect(lines).toEqual(Array(4).fill(text));
   });
 
   for (const scheme of ["dark", "light"] as const) {

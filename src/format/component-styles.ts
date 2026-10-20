@@ -1283,9 +1283,10 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc-s3 .vc-sw-line .vc-line, ${scope} .vc-s4 .vc-sw-line .vc-line { stroke-dasharray: 6 2; }
     ${scope} .vc-notes { margin: 0.5rem 0 0; padding-inline-start: 1.1rem; font-size: 0.8em; color: var(--text-soft); }
     ${scope} .vc-table table { margin: 0.4rem 0 0; }
-    /* Chart mode on screen: the table is there for a screen reader and a selection only. */
+    /* Chart mode on screen: the table is there for a screen reader and a selection,
+       and it shows while a link in it has keyboard focus. */
     @media screen {
-      ${live}:not(.vc-mode-table) > .vc-table {
+      ${live}:not(.vc-mode-table) > .vc-table:not(:focus-within) {
         position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
         clip-path: inset(50%); white-space: nowrap; border: 0;
       }
@@ -1301,10 +1302,11 @@ export function chartViewCss(scope: string): string {
       ${scope} .vc > .vc-plot, ${scope} .vc > .vc-legend, ${scope} .vc-ctl { display: none; }
     }
     @media (forced-colors: active) {
+      /* \`.vc .vc-line\` matches the \`.vc-sN .vc-line\` series rules' specificity and comes later. */
       ${scope} .vc-track, ${scope} .vc-hold { stroke: CanvasText; }
       ${scope} .vc-value { fill: Highlight; }
       ${scope} .vc-band { fill: CanvasText; }
-      ${scope} .vc-target, ${scope} .vc-mark, ${scope} .vc-ref, ${scope} .vc-zero, ${scope} .vc-line { stroke: CanvasText; }
+      ${scope} .vc-target, ${scope} .vc-mark, ${scope} .vc-ref, ${scope} .vc-zero, ${scope} .vc .vc-line { stroke: CanvasText; }
       ${scope} .vc-sw { forced-color-adjust: none; background: CanvasText; }
       ${scope} .vc-k-value { background: Highlight; }
       ${scope} .vc-k-hold { background: Canvas; border-color: CanvasText; }
