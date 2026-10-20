@@ -1740,3 +1740,18 @@ function parsePipeCells(line: string): string[] {
   const withoutEnd = inner.endsWith("|") ? inner.slice(0, -1) : inner;
   return withoutEnd.split("|");
 }
+
+/** Every `name` component in `blocks` and in the component bodies under them,
+ *  in source order (a list item opens no component block). */
+export function componentBlocks(blocks: readonly Block[], name: ComponentName): ComponentBlock[] {
+  const out: ComponentBlock[] = [];
+  const walk = (bs: readonly Block[]) => {
+    for (const b of bs) {
+      if (b.type !== "component") continue;
+      if (b.name === name) out.push(b);
+      walk(b.children);
+    }
+  };
+  walk(blocks);
+  return out;
+}

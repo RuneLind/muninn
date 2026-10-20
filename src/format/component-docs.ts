@@ -178,6 +178,17 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     },
     onMissingRequired: "it renders as its table",
   },
+  RuleTree: {
+    doc: "A rule written as a nested list; the wiki reader draws it as a tree with a case picker, every other surface prints the list.",
+    teach: WIKI,
+    attrs: {
+      title: { doc: "The tree's title, also its accessible name" },
+      outcomes: {
+        doc: "Leaf tone per outcome (the text after a leaf's →, up to its first ( or last —); tone words are lower-case",
+        printType: '"<outcome>=good|warn|info|muted|yes|no|fix;…"',
+      },
+    },
+  },
 };
 
 /**
