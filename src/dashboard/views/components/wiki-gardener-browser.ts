@@ -36,6 +36,7 @@ import {
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
 import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
+import { approveButtonHtml, singleDriftNote } from "./wiki-gardener-drift.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -174,7 +175,7 @@ function cardHtml(p: ProposalView): string {
       '<div class="gard-stale-note">Target changed since drafting — this proposal was not applied. The topic becomes eligible again on the next weekly gardener run.</div>';
   }
   if (p.drifted && p.status === "draft") {
-    html += `<div class="gard-stale-note" data-drifted>Page changed since this was drafted (${esc(p.drifted)}) — the diff below is against the page as it is now, and Approve would be refused.</div>`;
+    html += `<div class="gard-stale-note" data-drifted>${esc(singleDriftNote(p.drifted))}</div>`;
   }
   html += factcheckNoteHtml(p);
   if (p.rationale) {
@@ -209,11 +210,7 @@ function cardHtml(p: ProposalView): string {
   if (isDraft) {
     const locked = !!p.factcheck?.needsRedraft;
     html += '<div class="gard-actions">';
-    html += locked
-      ? `<button class="gard-btn gard-approve" data-action="approve" data-fc-locked disabled title="Drafted without the current fact-check — redraft it first">Approve</button>`
-      : p.drifted
-        ? `<button class="gard-btn gard-approve" data-action="approve" data-fc-locked disabled title="The page changed since this was drafted — Approve would mark it stale">Approve</button>`
-        : `<button class="gard-btn gard-approve" data-action="approve">Approve</button>`;
+    html += approveButtonHtml({ factcheckLocked: locked, drifted: !!p.drifted });
     if (locked) html += `<button class="gard-btn gard-redraft" data-action="redraft">Redraft</button>`;
     html += `<button class="gard-btn gard-reject" data-action="reject">Reject</button>`;
     html += '<span class="gard-outcome"></span>';

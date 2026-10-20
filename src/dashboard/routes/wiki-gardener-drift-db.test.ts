@@ -2,7 +2,7 @@
  * `GET /api/wiki/proposals` against the REAL test database and a temp wiki:
  * an update row whose page changed since drafting carries `drifted`, so the gate
  * says so before the reviewer clicks Approve (architecture review 2026-10,
- * finding 63). Its own `bun test` link in the `test` and `test:db` chains.
+ * finding 63), and a page that already IS its draft is not flagged. Its own `bun test` link in the `test` and `test:db` chains.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -22,6 +22,7 @@ setupTestDb();
 const WIKI = "driftwiki";
 const SAME = "concepts/same.md";
 const EDITED = "concepts/edited.md";
+const APPLIED = "concepts/applied.md";
 const page = (title: string) => `---\ntitle: ${title}\n---\n\nBody.\n`;
 
 let root: string;
@@ -43,8 +44,9 @@ describe("GET /api/wiki/proposals — base-hash drift", () => {
     // Seeded here, not in beforeAll: `setupTestDb` truncates before every test.
     await Bun.write(path.join(root, SAME), page("Same"));
     await Bun.write(path.join(root, EDITED), page("Edited"));
+    await Bun.write(path.join(root, APPLIED), page("Applied"));
     __resetWikiCacheForTest();
-    for (const [topic, rel] of [["same", SAME], ["edited", EDITED]] as const) {
+    for (const [topic, rel] of [["same", SAME], ["edited", EDITED], ["applied", APPLIED]] as const) {
       const current = await Bun.file(path.join(root, rel)).text();
       await insertWikiProposal({
         botName: "jarvis",
@@ -60,6 +62,9 @@ describe("GET /api/wiki/proposals — base-hash drift", () => {
     }
     // A hand edit lands after the draft was written.
     await Bun.write(path.join(root, EDITED), page("Edited") + "\nA reviewer's own paragraph.\n");
+    // A page that already carries its draft (a hand-apply, or a crash after the
+    // write): the apply passes it as a no-op, so the gate must not call it drift.
+    await Bun.write(path.join(root, APPLIED), page("Applied").replace("Body.", "Body, revised."));
 
     const app = new Hono();
     registerWikiGardenerRoutes(app, {} as Parameters<typeof registerWikiGardenerRoutes>[1]);
@@ -68,10 +73,11 @@ describe("GET /api/wiki/proposals — base-hash drift", () => {
     const { proposals } = (await res.json()) as {
       proposals: { targetPath: string; drifted?: string | null; diff: unknown[] | null }[];
     };
-    expect(proposals).toHaveLength(2);
+    expect(proposals).toHaveLength(3);
     const byPath = new Map(proposals.map((p) => [p.targetPath, p]));
     expect(byPath.get(SAME)?.drifted).toBeNull();
     expect(byPath.get(EDITED)?.drifted).toBe("target file changed since drafting");
+    expect(byPath.get(APPLIED)?.drifted).toBeNull();
     // The diff is still shown, against the page as it is now.
     expect(byPath.get(EDITED)?.diff?.length).toBeGreaterThan(0);
   });

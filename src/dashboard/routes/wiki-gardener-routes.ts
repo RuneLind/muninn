@@ -19,7 +19,7 @@ import { findWikiByRoot, getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
-import { applyWikiProposal, draftTitle, updateBaseDrift, type ApplyDeps } from "../../gardener/apply.ts";
+import { applyWikiProposal, draftTitle, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
@@ -260,7 +260,8 @@ interface ProposalView {
   /** A `stale` row Redraft replaced: the replacement's id (`redraftReplacements`). */
   replacedBy: string | null;
   /** A reviewable update row whose page no longer matches its base hash: the
-   *  reason Approve would be refused (`updateBaseDrift`), else null. The diff
+   *  reason Approve would be refused (`listingDrift`), else null — a page that
+   *  already IS the draft is not drift, since the apply passes it. The diff
    *  is against the page as it is now, not the page the draft was written on. */
   drifted: string | null;
 }
@@ -1359,8 +1360,9 @@ export function registerWikiGardenerRoutes(
         let drifted: string | null = null;
         if (reviewable && p.mode === "update" && root) {
           const current = await readFileOrNull(path.join(root, p.targetPath));
-          // Judged on the raw bytes, the same test the apply step refuses on.
-          drifted = updateBaseDrift(p.baseHash, current);
+          // Judged on the raw bytes, the same CAS the apply step refuses on;
+          // a page that already IS the draft passes there as a no-op.
+          drifted = listingDrift(p, current);
           // A lint diff is one frontmatter line on a page the reviewer can open
           // in the reader, and the gate ships one per touched page — so its
           // context is TRIMMED. `lineDiff`'s full context is right for a drafted

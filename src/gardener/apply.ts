@@ -149,6 +149,23 @@ export function updateBaseDrift(baseHash: string | null | undefined, current: st
   return null;
 }
 
+/**
+ * The gate listing's drift flag for an update row: `updateBaseDrift`, except a
+ * page that already IS the draft is not drift — step 2a applies it as a no-op
+ * and the group preflight passes it. The listing runs no containment pass, so
+ * "is the draft" means the raw draft, or (non-lint kinds) its one-trailing-
+ * newline form; a page equal only to the contained draft still reads as drift.
+ */
+export function listingDrift(
+  row: Pick<WikiProposal, "draft" | "kind" | "baseHash">,
+  current: string | null,
+): string | null {
+  if (current !== null && (current === row.draft || (row.kind !== "lint" && current === withTrailingNewline(row.draft)))) {
+    return null;
+  }
+  return updateBaseDrift(row.baseHash, current);
+}
+
 export function commitMessageFor(proposal: WikiProposal): string {
   if (proposal.kind === "synthesis") return `[consolidation] apply: ${proposal.targetPath}`;
   if (proposal.kind === "lint") return `[lint] fix: ${proposal.targetPath}`;

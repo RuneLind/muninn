@@ -52,11 +52,24 @@ export function groupChipTone(statuses: readonly string[]): string {
 
 /**
  * The group card's drift line, or null when no draft row drifted. Accept stays
- * enabled: the apply refuses the whole group and marks only the drifted rows
- * stale, which is the outcome the reviewer needs to see.
+ * enabled, and the line says what it does: the preflight stops on the FIRST
+ * blocked row, the route marks that one row `stale` and returns every other row
+ * to `draft` (`groupApplyActions`), so each Accept clears one drifted page and
+ * the clean pages are written only once none is left.
  */
 export function groupDriftNote(rows: readonly { status: string; drifted?: string | null }[]): string | null {
-  const n = rows.filter((r) => r.status === "draft" && r.drifted).length;
+  const drafts = rows.filter((r) => r.status === "draft");
+  const n = drafts.filter((r) => r.drifted).length;
   if (n === 0) return null;
-  return `${n} page${n === 1 ? "" : "s"} changed since drafting — Accept will apply nothing and mark ${n === 1 ? "it" : "them"} stale.`;
+  const rest = drafts.length - n;
+  if (n === 1) {
+    return rest === 0
+      ? "1 page changed since drafting — Accept writes nothing and marks it stale."
+      : `1 page changed since drafting — Accept writes nothing: it marks that page stale and returns the other ${rest} to draft, so a second Accept writes them.`;
+  }
+  return (
+    `${n} pages changed since drafting — each Accept writes nothing and marks only one of them stale, returning the rest to draft. ` +
+    `It takes ${n} Accepts to mark all ${n} stale` +
+    (rest === 0 ? "." : `, and one more to write the other ${rest}.`)
+  );
 }
