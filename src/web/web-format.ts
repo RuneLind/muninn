@@ -1805,7 +1805,8 @@ function statusRowsHtml(rawChildren: Block[], tiles: StatusTones | null): string
             })
             .join(`<span class="sr-sep">${STATUS_SEPARATOR}</span>`);
           const under = (b.nested?.[k] ?? []).map(listChildHtml).join("");
-          const tone = tiles ? statusTileTone(tiles, r.label) : undefined;
+          // A wikilinked label matches by the link's text, as lint check 11 reads it.
+          const tone = tiles ? statusTileTone(tiles, r.label === null ? null : peekText(r.label)) : undefined;
           return (
             `<div class="sr-row${tone ? ` sr-tone-${tone}` : ""}"><span class="sr-label">${r.label === null ? "" : renderInline(r.label)}</span>` +
             `<span class="sr-value">${value}${under}</span></div>`

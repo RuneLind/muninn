@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { COMPONENT_ATTRS, readStatusRowsView } from "./component-spec.ts";
 import {
-  normalizeTileLabel,
   parseStatusTones,
   STATUS_TILE_FIRST_MAX,
   statusRowBlocks,
@@ -9,6 +8,7 @@ import {
   statusToneWarnings,
 } from "./report-top.ts";
 import { parseBlocks } from "./markdown-ast.ts";
+import { normalizeLabel } from "./delta-table.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
@@ -60,9 +60,9 @@ describe("tones", () => {
     expect([...parseStatusTones("a=b=muted").rows]).toEqual([["a=b", "muted"]]);
   });
   test("labels match past emphasis, backticks, case and Unicode form", () => {
-    expect(normalizeTileLabel("**Gap**")).toBe("gap");
-    expect(normalizeTileLabel(" `P95` ")).toBe("p95");
-    expect(normalizeTileLabel("Café")).toBe(normalizeTileLabel("Café"));
+    expect(normalizeLabel("**Gap**")).toBe("gap");
+    expect(normalizeLabel(" `P95` ")).toBe("p95");
+    expect(normalizeLabel("Café")).toBe(normalizeLabel("Café"));
     const t = parseStatusTones("gap=warn");
     expect(statusTileTone(t, "Gap")).toBe("warn");
     expect(statusTileTone(t, null)).toBeUndefined();
@@ -148,7 +148,9 @@ describe("lint: status-tones and status-tile-long via checkPageText", () => {
     expect(f[0]!.line).toBe(8);
   });
   test("an unusable tone warns in rows view too", () => {
-    expect(run(block(' tones="Gap=red"'), "status-tones")).toHaveLength(1);
+    expect(run(block(' tones="Gap=red"'), "status-tones").map((f) => f.message)).toContain(
+      '<StatusRows> tones entry not read (use "Label=good|warn|info|muted"): Gap=red',
+    );
     expect(run(block(' view="tiles" tones="Gap=warn;Next=good"'), "status-tones")).toEqual([]);
   });
   test("a first part over the max warns in tile view only, at the boundary", () => {
@@ -160,5 +162,70 @@ describe("lint: status-tones and status-tile-long via checkPageText", () => {
     expect(f[0]!.message).toContain(`is ${STATUS_TILE_FIRST_MAX + 1} chars (max ${STATUS_TILE_FIRST_MAX})`);
     expect(f[0]!.line).toBe(11);
     expect(run(block("", rows), "status-tile-long")).toEqual([]);
+  });
+});
+
+describe("tone labels share DeltaTable's normalization", () => {
+  const t = parseStatusTones("gap=warn; café=good");
+  test.each(["**Gap**", "__Gap__", "*Gap*", "_Gap_", "`Gap`", " GAP ", "** `Gap` **"])("row label %p takes the tone", (label) => {
+    expect(statusTileTone(t, label)).toBe("warn");
+  });
+  test.each(["__gap__=info", "*gap*=info", "_gap_=info", "`gap`=info"])("tones label %p matches row Gap", (raw) => {
+    expect(statusTileTone(parseStatusTones(raw), "Gap")).toBe("info");
+    expect(statusToneWarnings(parseStatusTones(raw), ["Gap"])).toEqual([]);
+  });
+  test("a decomposed tones label matches a precomposed row label (NFC)", () => {
+    expect(statusTileTone(t, "Café")).toBe("good");
+    expect(statusToneWarnings(parseStatusTones("café=good"), ["Café"])).toEqual([]);
+  });
+});
+
+describe("a wikilinked row label: render and lint agree on its visible text", () => {
+  const page = (body: string) => ["---", "title: P", "type: plan", "---", "", "# P", "", body, ""].join("\n");
+  const lint = (body: string) => checkPageText({ relPath: "plans/p.mdx" }, page(body), []).filter((f) => f.check === "status-tones");
+  const render = (body: string) => renderWikiHtml(body, () => undefined, { views: true });
+  const linkRows = ["- **[[foo]]:** 3 · n", "- **[[bar-page|Bar]]:** 4 · m"];
+
+  test("tones names a wikilink row by its text, or its alias", () => {
+    const md = block(' view="tiles" tones="foo=good; Bar=warn"', linkRows);
+    const html = render(md);
+    expect(html).toContain("sr-row sr-tone-good");
+    expect(html).toContain("sr-row sr-tone-warn");
+    expect(lint(md)).toEqual([]);
+  });
+  test("the [[…]] spelling in tones colours nothing, and lint says so", () => {
+    const md = block(' view="tiles" tones="[[foo]]=good"', linkRows);
+    expect(render(md)).not.toContain("sr-tone-");
+    expect(lint(md).map((f) => f.message)).toEqual(["<StatusRows> tones names no row: [[foo]]"]);
+  });
+  test("the measured case: only foo=warn applies, and lint flags only [[foo]]", () => {
+    const md = block(' view="tiles" tones="[[foo]]=good; foo=warn"', ["- **[[foo]]:** 3 · n"]);
+    const html = render(md);
+    expect(html).toContain("sr-row sr-tone-warn");
+    expect(html).not.toContain("sr-tone-good");
+    expect(lint(md).map((f) => f.message)).toEqual(["<StatusRows> tones names no row: [[foo]]"]);
+  });
+});
+
+describe("lint: tones outside tile view", () => {
+  const page = (body: string) => ["---", "title: P", "type: plan", "---", "", "# P", "", body, ""].join("\n");
+  const lint = (body: string) => checkPageText({ relPath: "plans/p.mdx" }, page(body), []).filter((f) => f.check === "status-tones");
+  const NOT_TILES = "<StatusRows> `tones` colours tiles only; this block renders as rows";
+
+  test.each(["", ' view="rows"', ' view="grid"'])("tones with view %p warns, on the block's line", (view) => {
+    const f = lint(block(`${view} tones="Gap=warn"`));
+    expect(f.map((x) => x.message)).toEqual([NOT_TILES]);
+    expect(f[0]!.line).toBe(8);
+  });
+  test("tile view does not, and the entry findings still fire in rows view", () => {
+    expect(lint(block(' view="tiles" tones="Gap=warn"'))).toEqual([]);
+    expect(lint(block(' tones="Gap=red; Nope=good"')).map((x) => x.message)).toEqual([
+      NOT_TILES,
+      '<StatusRows> tones entry not read (use "Label=good|warn|info|muted"): Gap=red',
+      "<StatusRows> tones names no row: Nope",
+    ]);
+  });
+  test("no tones, no finding", () => {
+    expect(lint(block(""))).toEqual([]);
   });
 });

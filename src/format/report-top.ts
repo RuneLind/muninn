@@ -19,6 +19,7 @@ import type { Block } from "./markdown-ast.ts";
 import type { QuestionLanguage } from "./question-labels.ts";
 import { isAbbreviation } from "./abbreviations.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
+import { labelListWarnings, normalizeLabel, parseLabelList, type LabelList } from "./delta-table.ts";
 
 // ── <More> ───────────────────────────────────────────────────────────────────
 
@@ -96,66 +97,37 @@ export function statusRowBlocks(blocks: Block[]): StatusRowsBlock[] {
 export const STATUS_TILE_FIRST_MAX = 24;
 
 /** The tones a `tones=` entry may name: the state pills' own vocabulary. */
-export const STATUS_TILE_TONES: readonly StatusTone[] = ["good", "warn", "info", "muted"];
+export const STATUS_TILE_TONES = ["good", "warn", "info", "muted"] as const;
 
-/** A `tones=` list read: `Label=tone; Label=tone`. */
-export interface StatusTones {
-  /** Normalized row label → tone; a label given twice keeps its last tone. */
-  rows: Map<string, StatusTone>;
-  /** Each usable entry's label as written, in order, repeats included. */
-  labels: string[];
-  /** The entries this cannot use: no `=`, no label, or an unknown tone. */
-  bad: string[];
-}
+export type StatusTone = (typeof STATUS_TILE_TONES)[number];
 
-/** A row label as `tones=` matches it: trimmed, past one wrapping emphasis,
- *  backticks dropped, NFC, any case (DeltaTable's `better` rule). */
-export function normalizeTileLabel(label: string): string {
-  const t = label.trim();
-  const m = /^\*\*(.+)\*\*$/s.exec(t) ?? /^__(.+)__$/s.exec(t) ?? /^\*(.+)\*$/s.exec(t) ?? /^_(.+)_$/s.exec(t);
-  return (m ? m[1]! : t).replace(/`/g, "").trim().normalize("NFC").toLowerCase();
-}
+const readTone = (v: string): StatusTone | null => {
+  const t = v.trim().toLowerCase();
+  return (STATUS_TILE_TONES as readonly string[]).includes(t) ? (t as StatusTone) : null;
+};
 
-/** A `tones=` value. A label cannot hold `;`; it may hold `=`, since the tone
- *  is read after the last one. */
+/** A `tones=` list read: `Label=tone; Label=tone`, labels keyed as
+ *  DeltaTable's `better` keys them (`normalizeLabel`). */
+export type StatusTones = LabelList<StatusTone>;
+
+/** A `tones=` value (`parseLabelList`). */
 export function parseStatusTones(raw: string | undefined): StatusTones {
-  const out: StatusTones = { rows: new Map(), labels: [], bad: [] };
-  for (const part of (raw ?? "").split(";").map((p) => p.trim()).filter(Boolean)) {
-    const eq = part.lastIndexOf("=");
-    const tone = eq > 0 ? part.slice(eq + 1).trim().toLowerCase() : "";
-    const label = eq > 0 ? normalizeTileLabel(part.slice(0, eq)) : "";
-    if (!label || !(STATUS_TILE_TONES as readonly string[]).includes(tone)) {
-      out.bad.push(part);
-      continue;
-    }
-    out.rows.set(label, tone as StatusTone);
-    out.labels.push(part.slice(0, eq).trim());
-  }
-  return out;
+  return parseLabelList(raw ?? "", readTone);
 }
 
-/** The tone `tones` gives the row labelled `label`, if any. */
+/** The tone `tones` gives the row labelled `label`, if any. A wikilink in
+ *  the label must already read as its text (`[[t|l]]` → `l`, else `t`), as
+ *  both callers resolve it. */
 export function statusTileTone(tones: StatusTones, label: string | null): StatusTone | undefined {
-  return label === null ? undefined : tones.rows.get(normalizeTileLabel(label));
+  return label === null ? undefined : tones.rows.get(normalizeLabel(label));
 }
 
 /** The warning lines for a `tones=` list against the block's row labels: an
  *  entry this cannot use, a label given twice, a label that names no row. */
 export function statusToneWarnings(tones: StatusTones, rowLabels: readonly (string | null)[]): string[] {
-  const present = new Set(rowLabels.filter((l): l is string => l !== null).map(normalizeTileLabel));
-  const seen = new Set<string>();
-  const twice: string[] = [];
-  const missing: string[] = [];
-  for (const label of tones.labels) {
-    const key = normalizeTileLabel(label);
-    if (seen.has(key)) twice.push(label);
-    else if (!present.has(key)) missing.push(label);
-    seen.add(key);
-  }
   return [
     tones.bad.length ? `tones entry not read (use "Label=${STATUS_TILE_TONES.join("|")}"): ${tones.bad.join("; ")}` : "",
-    twice.length ? `tones names a row more than once: ${twice.join(", ")}` : "",
-    missing.length ? `tones names no row: ${missing.join(", ")}` : "",
+    ...labelListWarnings("tones", tones.labels, rowLabels.filter((l): l is string => l !== null)),
   ].filter(Boolean);
 }
 
@@ -190,8 +162,6 @@ export function splitOutside(value: string, res: readonly RegExp[]): string[] {
   out.push(value.slice(start));
   return out;
 }
-
-export type StatusTone = "good" | "warn" | "muted" | "info";
 
 /** State phrases per `language` and their tone. Matched longest first, as
  *  whole words, any case. «i prod» is the only good state: the work reached

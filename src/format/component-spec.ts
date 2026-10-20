@@ -380,7 +380,7 @@ export const COMPONENT_SPEC = {
   // «Mer om saken» part of a `Tldr`; `StatusRows` a list of `**Label:** value` rows.
   // `view="tiles"` draws a tile per row on the reader; `tones` colours tiles by
   // row label (`parseStatusTones`, `report-top.ts`; lint check 11 reports an
-  // entry it cannot use).
+  // entry it cannot use, and `tones` outside tile view).
   More: { attrs: {} },
   StatusRows: {
     attrs: {

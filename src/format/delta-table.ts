@@ -75,20 +75,56 @@ function parseBetter(attrs: Record<string, string>): Omit<DeltaAttrs, "decimal" 
   const all = direction(raw);
   if (all) return { src, better: all, rows: null, warning: "" };
   if (!raw.includes("=")) return { src, better: "", rows: null, warning: unknownBetter(raw) };
-  const rows = new Map<string, "lower" | "higher">();
-  const labels: string[] = [];
-  const bad: string[] = [];
+  const { rows, labels, bad } = parseLabelList(raw, direction);
+  return { src, better: "", rows, warning: bad.length ? unknownBetter(bad.join("; ")) : "", labels };
+}
+
+/** A `Label=value; Label=value` list, read as DeltaTable's `better` and
+ *  StatusRows' `tones` read theirs. */
+export interface LabelList<T extends string> {
+  /** {@link normalizeLabel} key → value; a label given twice keeps the last. */
+  rows: Map<string, T>;
+  /** Each usable entry's label as written, in order, repeats included. */
+  labels: string[];
+  /** The entries `read` cannot use, or with no `=` or no label. */
+  bad: string[];
+}
+
+/** Read a `Label=value;…` list. A label cannot hold `;`; it may hold `=`,
+ *  since the value is read after the last one. */
+export function parseLabelList<T extends string>(raw: string, read: (value: string) => T | null): LabelList<T> {
+  const out: LabelList<T> = { rows: new Map(), labels: [], bad: [] };
   for (const part of raw.split(";").map((p) => p.trim()).filter(Boolean)) {
     const eq = part.lastIndexOf("=");
-    const d = eq > 0 ? direction(part.slice(eq + 1)) : null;
+    const value = eq > 0 ? read(part.slice(eq + 1)) : null;
     const label = eq > 0 ? normalizeLabel(part.slice(0, eq)) : "";
-    if (!d || !label) bad.push(part);
+    if (!value || !label) out.bad.push(part);
     else {
-      rows.set(label, d);
-      labels.push(part.slice(0, eq).trim());
+      out.rows.set(label, value);
+      out.labels.push(part.slice(0, eq).trim());
     }
   }
-  return { src, better: "", rows, warning: bad.length ? unknownBetter(bad.join("; ")) : "", labels };
+  return out;
+}
+
+/** A label list's warning lines against the row labels: a label given more
+ *  than once, and a label that matches no row, each named as written. */
+export function labelListWarnings(attr: string, labels: readonly string[] | undefined, rowLabels: readonly string[]): string[] {
+  if (!labels?.length) return [];
+  const present = new Set(rowLabels.map(normalizeLabel));
+  const seen = new Set<string>();
+  const twice: string[] = [];
+  const missing: string[] = [];
+  for (const label of labels) {
+    const key = normalizeLabel(label);
+    if (seen.has(key)) twice.push(label);
+    else if (!present.has(key)) missing.push(label);
+    seen.add(key);
+  }
+  return [
+    twice.length ? `${attr} names a row more than once: ${twice.join(", ")}` : "",
+    missing.length ? `${attr} names no row: ${missing.join(", ")}` : "",
+  ].filter(Boolean);
 }
 
 function unknownBetter(v: string): string {
@@ -99,21 +135,7 @@ function unknownBetter(v: string): string {
  *  given more than once, and a label that matches no row, each named as
  *  written. */
 export function betterLabelWarnings(attrs: DeltaAttrs, rowLabels: string[]): string[] {
-  if (!attrs.labels?.length) return [];
-  const present = new Set(rowLabels.map(normalizeLabel));
-  const seen = new Set<string>();
-  const twice: string[] = [];
-  const missing: string[] = [];
-  for (const label of attrs.labels) {
-    const key = normalizeLabel(label);
-    if (seen.has(key)) twice.push(label);
-    else if (!present.has(key)) missing.push(label);
-    seen.add(key);
-  }
-  return [
-    twice.length ? `better names a row more than once: ${twice.join(", ")}` : "",
-    missing.length ? `better names no row: ${missing.join(", ")}` : "",
-  ].filter(Boolean);
+  return labelListWarnings("better", attrs.labels, rowLabels);
 }
 
 /** The direction for one row: the table-wide value, else the row's entry in a

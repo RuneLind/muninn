@@ -8,8 +8,9 @@
  * | `decision-first-sentence` | an id-led `<DecisionLog>` item, not dimmed, whose first sentence (what the |
  * |                           | Overview lens shows, D6) is over `FIRST_SENTENCE_MAX` (160) visible chars  |
  * | `status-row-long`         | a `<StatusRows>` row over `STATUS_ROW_MAX` (160) chars as written (D11)    |
- * | `status-tones`            | a `<StatusRows tones>` entry that names no row, names a row twice, or is   |
- * |                           | not `Label=good|warn|info|muted`                                           |
+ * | `status-tones`            | a `<StatusRows tones>` entry that names no row (a wikilinked row by its    |
+ * |                           | text), names a row twice, or is not `Label=good|warn|info|muted`; or       |
+ * |                           | `tones` on a block not in `view="tiles"`                                   |
  * | `status-tile-long`        | in `view="tiles"`, a row whose first ` · ` part (the tile's big value) is  |
  * |                           | over `STATUS_TILE_FIRST_MAX` (24) visible chars                            |
  * | `missing-tldr`            | an `.mdx` page in {@link isTldrScope} whose first non-blank block after the H1 is |
@@ -43,6 +44,7 @@ import { decisionFirstSentence } from "../web/web-format.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { fencedLineMask, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
 import { parseFrontmatter, stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import { WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
 import type { LintFinding } from "./lint.ts";
 
@@ -109,13 +111,19 @@ export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: 
     for (const { attrs, rows } of statusRowBlocks(blocks)) {
       const open = findLine(lines, fenced, from, (l) => l.trim().startsWith("<StatusRows"));
       if (open !== undefined) from = open;
+      const tiles = readStatusRowsView(attrs.view).value === "tiles";
       // The reader reads tones in tile view only; a wrong entry is wrong either way.
       if (attrs.tones !== undefined) {
-        for (const warning of statusToneWarnings(parseStatusTones(attrs.tones), rows.map((r) => r.label))) {
+        // A wikilinked row label matches by the link's text, as the reader matches it.
+        const labels = rows.map((r) => (r.label === null ? null : r.label.replace(WIKILINK_WITH_LABEL_RE, (_w, t: string, l?: string) => wikiLinkText(t, l))));
+        const warnings = [
+          ...(!tiles && attrs.tones.trim() ? ["`tones` colours tiles only; this block renders as rows"] : []),
+          ...statusToneWarnings(parseStatusTones(attrs.tones), labels),
+        ];
+        for (const warning of warnings) {
           findings.push({ check: "status-tones", relPath: page.relPath, message: `<StatusRows> ${warning}`, ...(open !== undefined ? { line: open } : {}) });
         }
       }
-      const tiles = readStatusRowsView(attrs.view).value === "tiles";
       for (const row of rows) {
         const head = row.text.split("\n")[0]!.slice(0, 40);
         const line = findLine(lines, fenced, from, (l) => l.includes(head));

@@ -58,8 +58,9 @@
  *                      Overview lens shows) runs over 160 chars, and a
  *                      `<StatusRows>` row over 160 chars. Warnings, report-only.
  *                      Its status-tones / status-tile-long half: a `tones`
- *                      entry naming no row, and in `view="tiles"` a row whose
- *                      first ` · ` part is over 24 chars.
+ *                      entry it cannot read, naming no row or naming a row
+ *                      twice, `tones` outside `view="tiles"`, and in tile view
+ *                      a row whose first ` · ` part is over 24 chars.
  *                      Its missing-tldr / tldr-no-more half (live report pages
  *                      and `.mdx` reference pages): no `<Tldr>` first under the
  *                      title, and (info) a `<Tldr>` with no `<More>`.

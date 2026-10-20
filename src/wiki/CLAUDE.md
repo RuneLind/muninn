@@ -1921,9 +1921,11 @@ the reader agree on where a sentence ends. Measured 2026-10-09
 `lint-report-top.test.ts`.
 
 Two more warnings on a `<StatusRows>` block (MDX visual components PR 2):
-`status-tones` (any view, on the tag line: a `tones=` entry it cannot read, a
+`status-tones` (on the tag line: in any view a `tones=` entry it cannot read, a
 row named twice, or a label that matches no row — `statusToneWarnings` in
-`src/format/report-top.ts`, matched as the renderer matches) and
+`src/format/report-top.ts`, matched as the renderer matches, a wikilinked row
+label by its text, `[[t|l]]` → `l`, else `t`; and a non-empty `tones` on a
+block not in `view="tiles"`, which colours nothing) and
 `status-tile-long` (`view="tiles"` only, on the row's line: a first ` · ` part
 over `STATUS_TILE_FIRST_MAX`, 24 visible chars, which does not read as a tile).
 Measured 2026-10-20 with `view="tiles"` forced on every block of both wikis:
