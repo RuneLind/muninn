@@ -43,7 +43,7 @@ const SKIP_CLASSES = new Set([
   // Labels and notes the renderer writes around a component's body.
   "query-warning", "query-meta", "query-unavailable", "q-label", "q-state", "q-for", "q-duplicate",
   "dt-delta", "dt-note", "dt-warning", "dt-unavailable", "rc-count", "rc-label", "embed-fallback", "historic-stamp",
-  "cb-warning", "cb-truncated", "cb-unavailable",
+  "cb-warning", "cb-truncated", "cb-unavailable", "dt-truncated",
 ]);
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);

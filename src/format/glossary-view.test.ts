@@ -141,6 +141,7 @@ describe("where a term is never marked", () => {
   const caseFiles = new Map([
     ["c.yaml", { ok: true as const, text: "- {status: hold}\n- {id: LIB-1, status: hold}\n" }],
     ["big.yaml", { ok: true as const, text: Array.from({ length: 501 }, (_, k) => `- {id: LIB-${k}, status: ok}`).join("\n") }],
+    ["big.csv", { ok: true as const, text: ["Run,a,b", ...Array.from({ length: 2001 }, (_, k) => `LIB-${k},1,2`)].join("\n") }],
   ]);
   const question = { questionsTo: [], language: "en" as const, answerable: true, owner: null };
   test.each([
@@ -158,6 +159,7 @@ describe("where a term is never marked", () => {
     ["showing", "a CaseBoard's row cap", '<CaseBoard src="big.yaml" />', "cb-truncated"],
     ["without", "a CaseBoard with no src", "<CaseBoard />", "cb-unavailable"],
     ["value", "a DeltaTable's warning", '<DeltaTable better="sideways">\n\n| Run | a | b |\n|---|---|---|\n| T | 1 | 2 |\n\n</DeltaTable>', "dt-warning"],
+    ["showing", "a DeltaTable's row cap", '<DeltaTable src="big.csv" />', "dt-truncated"],
     ["available", "a DeltaTable's file note", '<DeltaTable src="r.csv" />', "dt-unavailable"],
     ["available", "a Query's SQL file note", '<Query id="Q-1" sql="q.sql" />', "query-unavailable"],
     ["Open", "a Question card's state", '<Question id="O1">\n\nWhich desk?\n\n</Question>', "q-state"],
