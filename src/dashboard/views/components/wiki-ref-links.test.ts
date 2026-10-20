@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { findRefs, headingSlug, nounRuns } from "./wiki-ref-links.ts";
+import { findRefs, headingSlug, isRefId, nounRuns } from "./wiki-ref-links.ts";
 import { foldSizeLabel, formatChars, readingMinutes } from "./wiki-lens.ts";
 
 /** The browser half (wrapping, the peek, the jump and Back) is driven in
@@ -52,6 +52,22 @@ describe("findRefs: ids", () => {
 
   test("a case id with a hyphen", () => {
     expect(keys("saken MEL-601780, ikke MEL-60178", ids)).toEqual(["id:MEL-601780"]);
+  });
+});
+
+describe("ref ids that are not ids (arch-review 2026-10 #13)", () => {
+  test("a dot between digits is a date or version, never an id boundary", () => {
+    expect(keys("vedtak 07.10.2026 etter 10 kjøringer; versjon 1.10", ["10", "2026", "1"])).toEqual(["id:10"]);
+    expect(keys("D4.5 og S1.", ["D4", "S1"])).toEqual(["id:S1"]);
+  });
+
+  test("only a key with a letter and a digit links", () => {
+    for (const k of ["D4", "S1", "Q-14", "MEL-601780", "H1", "MELOSYS-1234"]) expect(isRefId(k)).toBe(true);
+    for (const k of ["A", "1", "10", "2026", "0123", "Case-A"]) expect(isRefId(k)).toBe(false);
+  });
+
+  test("ranges still link both ends", () => {
+    expect(keys("se Q-1–Q-14.", ["Q-1", "Q-14"])).toEqual(["id:Q-1", "id:Q-14"]);
   });
 });
 

@@ -83,7 +83,11 @@ const QUOTE_SRC = String.raw`«([^«»\n]{1,120})»|“([^“”\n]{1,120})”|"
  *  scanned for ids inside it. */
 export function findRefs(text: string, ids: ReadonlySet<string>, titles: ReadonlySet<string>): RefMatch[] {
   const idAlt = [...ids].sort((a, b) => b.length - a.length).map(escapeRe).join("|");
-  const idSrc = idAlt ? String.raw`(?<![\p{L}\p{N}_-])(${idAlt})(?![\p{L}\p{N}_]|-[\p{L}\p{N}])` : "";
+  // A `.` between digits joins a date or version (07.10.2026, 1.10): no id
+  // starts or ends inside one. A sentence-ending `S4.` still matches.
+  const idSrc = idAlt
+    ? String.raw`(?<![\p{L}\p{N}_-]|\p{N}\.)(${idAlt})(?![\p{L}\p{N}_]|-[\p{L}\p{N}]|\.\p{N})`
+    : "";
   const src = [titles.size ? QUOTE_SRC : "", idSrc].filter(Boolean).join("|");
   if (!src) return [];
   const re = new RegExp(src, "gu");
@@ -129,6 +133,13 @@ const SECTIONS = "details.fold, h1, h2, h3, h4, h5, h6";
 /** What a peek can show: the targets `peekParts` knows. */
 const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${SECTIONS}`;
 
+/** Whether a chip's text can name its target in prose: it holds a letter AND
+ *  a digit (D4, S1, Q-14, MEL-601780). A bare `A` would link every
+ *  sentence-initial A, and a digit-only `10` the parts of a date. */
+export function isRefId(key: string): boolean {
+  return /\p{L}/u.test(key) && /\p{N}/u.test(key);
+}
+
 /** A key seen twice maps to null: it names no one target. */
 function claim(map: Map<string, Element | null>, key: string, el: Element): void {
   map.set(key, map.has(key) ? null : el);
@@ -148,7 +159,7 @@ export function refTargets(root: Element): { ids: Map<string, Element>; titles: 
   root.querySelectorAll(ID_TARGETS).forEach((chip) => {
     const key = (chip.textContent ?? "").trim();
     const target = chip.closest("[id]");
-    if (key && target) claim(idDefs, key, target);
+    if (key && target && isRefId(key)) claim(idDefs, key, target);
   });
   const folds = new Map<string, Element | null>();
   const headings = new Map<string, Element | null>();
