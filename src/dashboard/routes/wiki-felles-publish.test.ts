@@ -5,7 +5,7 @@
  * the route's real Bun interpreter, since that leak only exists there.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -15,6 +15,7 @@ import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { registerWikiFellesPublishRoute, type FellesPublishRouteDeps } from "./wiki-felles-publish.ts";
 import { ProcTimeoutError } from "../../utils/run-proc.ts";
 import type { FellesPublishConfig } from "../../wiki/felles-publish.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 let root = "";
 let bin = "";
@@ -43,7 +44,7 @@ const post = (app: Hono, body: unknown, headers: Record<string, string> = {}) =>
 const ok = { wiki: "kode", relPath: "plans/a.mdx", dryRun: true, allowIdent: true };
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "muninn-felles-"));
+  root = await testTempDir(path.join(tmpdir(), "muninn-felles-"));
   bin = path.join(root, "..", `fake-publiser-${process.pid}.sh`);
   argvFile = path.join(root, "..", `fake-publiser-argv-${process.pid}.txt`);
   await Bun.write(path.join(root, "plans", "a.mdx"), "---\ntitle: A\n---\n\n# A\n");
@@ -140,7 +141,7 @@ describe("the spawn", () => {
   test("a real Bun child does not load the .env in its working directory", async () => {
     // Bun reads `.env` from the cwd it starts in, which is muninn's own repo
     // root in production; an env allowlist means nothing if that file refills it.
-    const cwd = await mkdtemp(path.join(tmpdir(), "muninn-felles-cwd-"));
+    const cwd = await testTempDir(path.join(tmpdir(), "muninn-felles-cwd-"));
     const probe = path.join(cwd, "probe.ts");
     await writeFile(path.join(cwd, ".env"), "FELLES_LEAK_PROBE=leaked\n", "utf8");
     await writeFile(probe, 'console.log("LEAK=" + (process.env.FELLES_LEAK_PROBE ?? "none"));\n', "utf8");

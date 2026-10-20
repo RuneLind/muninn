@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -31,6 +31,7 @@ import { agentStatus } from "../observability/agent-status.ts";
 // Spied (not mocked) so the REAL `Tracer` can be exercised without `mock.module`,
 // which would invalidate `db/traces.ts` for every other file in this test chunk.
 import * as traceStore from "../db/traces.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** DB-free recording tracer (mirrors summarizer-shared.test's). */
 function fakeTracer(): Tracer {
@@ -74,7 +75,7 @@ describe("buildMemberExcerpt", () => {
 describe("harvestMembers + budget", () => {
   let root: string;
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "synth-harvest-"));
+    root = await testTempDir(path.join(tmpdir(), "synth-harvest-"));
     __resetWikiCacheForTest();
   });
   afterEach(async () => {
@@ -112,7 +113,7 @@ describe("synthesisShapeGate", () => {
   let members: string[];
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "synth-gate-"));
+    root = await testTempDir(path.join(tmpdir(), "synth-gate-"));
     __resetWikiCacheForTest();
     await writePage(root, "plans/alpha.md", "Alpha Plan", "Body.");
     await writePage(root, "plans/beta.md", "Beta Plan", "Body.");
@@ -214,7 +215,7 @@ describe("draftAndPersistSynthesis", () => {
   };
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "synth-orch-"));
+    root = await testTempDir(path.join(tmpdir(), "synth-orch-"));
     __resetWikiCacheForTest();
     await writePage(root, "plans/alpha.md", "Alpha Plan", "The alpha arc.");
     await writePage(root, "plans/beta.md", "Beta Plan", "The beta arc.");

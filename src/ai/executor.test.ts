@@ -1,7 +1,8 @@
 import { test, expect, describe, mock, spyOn, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 // Mock parseClaudeOutput to avoid needing real Claude output
 mock.module("./result-parser.ts", () => ({
@@ -245,7 +246,7 @@ describe("executeClaudePrompt", () => {
   test("toolsDisabled spawns with no built-in tools and no MCP servers at all", async () => {
     // A bot dir WITH a .mcp.json: the flag must win over it, and --strict-mcp-config
     // is what also keeps the CLI's user-global servers out.
-    const dir = mkdtempSync(join(tmpdir(), "executor-fence-"));
+    const dir = testTempDirSync(join(tmpdir(), "executor-fence-"));
     writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "x" } } }));
     const spawnSpy = spyOn(Bun, "spawn");
     spawnSpy.mockReturnValueOnce({
@@ -277,7 +278,7 @@ describe("executeClaudePrompt", () => {
   test("toolsDisabled keeps the user settings: no --restricted, the bot dir as cwd, no forced effort", async () => {
     // `--restricted` ignores the user settings file (OTEL env, alwaysThinkingEnabled,
     // hooks), so a tool-less run must not take it even on a CLI that has it.
-    const dir = mkdtempSync(join(tmpdir(), "executor-none-"));
+    const dir = testTempDirSync(join(tmpdir(), "executor-none-"));
     const spawnSpy = spyOn(Bun, "spawn");
     const ok = () => ({
       pid: 123,

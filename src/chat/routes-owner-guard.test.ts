@@ -16,7 +16,7 @@
  * and carries neither of the two channels the `/api/events` denial exists for.
  */
 import { test, expect, describe, afterAll, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -30,10 +30,11 @@ import { __setAuthPolicyForTest } from "../auth/policy.ts";
 import { __setOwnerLookupForTest } from "../auth/resource-guard.ts";
 import type { Identity } from "../auth/introspect.ts";
 import type { AuthRole } from "../auth/role.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const tmpDirs: string[] = [];
 async function appWithBot() {
-  const dir = await mkdtemp(join(tmpdir(), "muninn-guard-test-"));
+  const dir = await testTempDir(join(tmpdir(), "muninn-guard-test-"));
   tmpDirs.push(dir);
   const bot = { name: "testbot", dir } as unknown as BotConfig;
   const app = createChatRoutes([bot], {} as unknown as Config);

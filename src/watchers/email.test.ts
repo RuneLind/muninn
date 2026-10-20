@@ -1,9 +1,10 @@
 import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
 import * as realExecutor from "../scheduler/executor.ts";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Watcher } from "../types.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 // buildGmailQuery takes an explicit clock now (the shared-clock invariant with
 // the coverage anchor); these cases pass no watermark, so the value is inert.
@@ -309,9 +310,9 @@ describe("checkEmail coverage reporting", () => {
   let botDirNoGmail = "";
 
   beforeEach(() => {
-    botDirWithGmail = mkdtempSync(join(tmpdir(), "muninn-email-cov-gmail-"));
+    botDirWithGmail = testTempDirSync(join(tmpdir(), "muninn-email-cov-gmail-"));
     writeFileSync(join(botDirWithGmail, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
-    botDirNoGmail = mkdtempSync(join(tmpdir(), "muninn-email-cov-nogmail-"));
+    botDirNoGmail = testTempDirSync(join(tmpdir(), "muninn-email-cov-nogmail-"));
     writeFileSync(join(botDirNoGmail, ".mcp.json"), JSON.stringify({ mcpServers: { "google-mail": { type: "stdio", command: "x" } } }));
     lastPrompt = "";
     profileByUser.clear();
@@ -382,7 +383,7 @@ describe("checkEmail coverage reporting", () => {
   });
 
   test("a bot with no readable .mcp.json fails the same way", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "muninn-email-cov-nomcp-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-email-cov-nomcp-"));
     try {
       await expect(checkEmail(baseWatcher(), dir, "capra")).rejects.toThrow(
         /bot capra: no Gmail MCP server .*servers: no readable \.mcp\.json/,
@@ -638,7 +639,7 @@ describe("checkEmail Gmail liveness predicate", () => {
     profileByUser.clear();
     spawnScript = [];
     spawnOpts = [];
-    gmailBotDir = mkdtempSync(join(tmpdir(), "muninn-email-bot-"));
+    gmailBotDir = testTempDirSync(join(tmpdir(), "muninn-email-bot-"));
     writeFileSync(join(gmailBotDir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
   });
   afterEach(() => rmSync(gmailBotDir, { recursive: true, force: true }));
@@ -708,7 +709,7 @@ describe("checkEmail Gmail liveness predicate", () => {
     // The trap this closes: bot folders other than jarvis are gitignored and synced
     // from another repo, so a `.mcp.json` rename could turn every healthy run into
     // an hourly hard failure with no code change to point at.
-    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-email-mcp-"));
     try {
       writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "gmail-mcp": { type: "stdio", command: "x" } } }));
       expect(gmailToolPrefixes(dir)).toEqual(["mcp__gmail-mcp__"]);
@@ -722,7 +723,7 @@ describe("checkEmail Gmail liveness predicate", () => {
   test("no identifiable gmail server ⇒ null prefixes, and the check fails before the spawn", async () => {
     // Since the A1 fence such a bot's spawn has no Gmail server on its surface, so
     // nothing it returns can be a read of mail.
-    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-email-mcp-"));
     try {
       writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "google-mail": { type: "stdio", command: "x" } } }));
       expect(gmailToolPrefixes(dir)).toBeNull();
@@ -734,7 +735,7 @@ describe("checkEmail Gmail liveness predicate", () => {
   });
 
   test("a malformed .mcp.json ⇒ null, never a throw", () => {
-    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-email-mcp-"));
     try {
       writeFileSync(join(dir, ".mcp.json"), "{ not json at all");
       expect(gmailToolPrefixes(dir)).toBeNull();
@@ -744,7 +745,7 @@ describe("checkEmail Gmail liveness predicate", () => {
   });
 
   test("multiple gmail-like keys ⇒ ANY of them counts", () => {
-    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    const dir = testTempDirSync(join(tmpdir(), "muninn-email-mcp-"));
     try {
       writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: {}, "gmail-backup": {} } }));
       expect(gmailToolPrefixes(dir)?.sort()).toEqual(["mcp__gmail-backup__", "mcp__gmail__"]);
@@ -781,7 +782,7 @@ describe("checkEmail bounded retry", () => {
     profileByUser.clear();
     spawnScript = [];
     spawnOpts = [];
-    gmailBotDir = mkdtempSync(join(tmpdir(), "muninn-email-retry-"));
+    gmailBotDir = testTempDirSync(join(tmpdir(), "muninn-email-retry-"));
     writeFileSync(join(gmailBotDir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
   });
   afterEach(() => rmSync(gmailBotDir, { recursive: true, force: true }));

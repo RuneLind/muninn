@@ -1,16 +1,16 @@
 import { test, expect, describe } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getWikiIndex, __resetWikiCacheForTest } from "../wiki/store.ts";
 import {
+  appendFactcheckBlock,
   buildFactcheckRider,
   correctableClaims,
   FACTCHECK_RIDER_MAX,
   pageCarriesFactcheck,
   proposalFactcheckFlag,
   stripReproducedFactcheck,
-  withFactcheckAppendix,
 } from "./factcheck-carry.ts";
 import { sourceKindNoun } from "../summaries/source-noun.ts";
 import {
@@ -26,6 +26,7 @@ const countCorrectableClaims = (claims: unknown) => factchecks.countCorrectableC
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
 import { sha256 } from "./util.ts";
 import { factcheckBodySha256 } from "../summaries/factcheck-body.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const URL = "https://www.tiktok.com/@coach/video/7550000000000000000";
 const CHECKED_AT = Date.UTC(2026, 9, 6, 10, 0, 0);
@@ -454,6 +455,22 @@ describe("draftSourcePage with a saved check (stub drafter)", () => {
     expect(draft).not.toContain("## Fact check");
     expect(draft).toContain("## See also\n- [[Habits]]");
   });
+  // Finding 38: the drafter's own strip-then-append, with both `headings`
+  // values it passes (a rider means `headings: true`). The model hands back the
+  // page this pipeline persisted, block included, and the result is that page.
+  test.each([
+    ["a rider, so headings: true", saved, true],
+    ["no rider, so headings: false", okOnly, false],
+  ] as const)("a page that already carries the block keeps exactly one (%s)", async (_label, row, rider) => {
+    expect(buildFactcheckRider(row(), "tiktok-summaries", undefined, null) !== "").toBe(rider);
+    const first: InsertWikiProposalParams[] = [];
+    await draftSourcePage(deps({ inserted: first, callDrafter: async () => page("Body."), getFactcheck: async () => row() }));
+    const once = first[0]!.draft;
+    expect(findLiveSentinelBlocks(once)).toHaveLength(1);
+    const second: InsertWikiProposalParams[] = [];
+    await draftSourcePage(deps({ inserted: second, callDrafter: async () => once, getFactcheck: async () => row() }));
+    expect(second[0]!.draft).toBe(once);
+  });
 });
 
 describe("stripReproducedFactcheck / pageCarriesFactcheck", () => {
@@ -463,11 +480,8 @@ describe("stripReproducedFactcheck / pageCarriesFactcheck", () => {
     expect(stripReproducedFactcheck(text)).toBe(text);
   });
 
-  test("withFactcheckAppendix on a page that already carries one keeps exactly one", () => {
-    const once = withFactcheckAppendix(page("Body."), saved());
-    const twice = withFactcheckAppendix(once, saved());
-    expect(twice).toBe(once);
-    expect(pageCarriesFactcheck(once)).toBe(true);
+  test("pageCarriesFactcheck reads a live block or an unfenced fact-check heading", () => {
+    expect(pageCarriesFactcheck(appendFactcheckBlock(page("Body."), saved()))).toBe(true);
     expect(pageCarriesFactcheck(page("Body.\n\n### Fact-check\n\nx"))).toBe(true);
     expect(pageCarriesFactcheck(page("Body."))).toBe(false);
   });
@@ -583,7 +597,7 @@ describe("draftSourcePage — strip order, digest, and what reads the persisted 
   // Item 5: related pages and de-linked links are read off what is persisted,
   // not off a section the strip then removes.
   test("relatedPages and containedLinks ignore a stripped Fact check section", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "fc-carry-related-"));
+    const root = await testTempDir(path.join(tmpdir(), "fc-carry-related-"));
     await mkdir(path.join(root, "concepts"), { recursive: true });
     await writeFile(path.join(root, "index.md"), "# Index\n");
     await writeFile(path.join(root, "concepts", "Habits.md"), "---\ntype: concept\ntitle: Habits\n---\n\n# Habits\n\nBody.\n");
@@ -618,7 +632,7 @@ describe("draftSourcePage — round 2", () => {
   // The fact-check block's answer is web-derived: a wikilink in it must not
   // pick a page that Approve then edits (a See-also backlink).
   test("a [[link]] inside the appended block's answer is not a related page", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "fc-carry-related2-"));
+    const root = await testTempDir(path.join(tmpdir(), "fc-carry-related2-"));
     await mkdir(path.join(root, "concepts"), { recursive: true });
     await writeFile(path.join(root, "index.md"), "# Index\n");
     await writeFile(path.join(root, "concepts", "Habits.md"), "---\ntype: concept\ntitle: Habits\n---\n\n# Habits\n\nBody.\n");
@@ -679,7 +693,7 @@ describe("proposalFactcheckFlag (the gate flag)", () => {
   /** The same draft built with the current check: its digest and its block. */
   const carrying = {
     ...plain,
-    draft: withFactcheckAppendix(page("Body."), saved()),
+    draft: appendFactcheckBlock(page("Body."), saved()),
     sourceDocs: [{ ...doc, factcheckSha256: SHA }] as WikiProposal["sourceDocs"],
   };
   const mark = { checkedAt: CHECKED_AT, bad: 1, warn: 1, answerSha256: SHA };

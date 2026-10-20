@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, chmod, stat, utimes } from "node:fs/promises";
+import { rm, mkdir, writeFile, chmod, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -15,6 +15,7 @@ import {
 } from "./commit.ts";
 import { existsSync } from "node:fs";
 import { isWikiWriteArtifact, WIKI_LOCK_BASENAME } from "./lockfile.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * A barrier over the async-push seam: `onPushSettled` resolves `done`, so a test
@@ -41,7 +42,7 @@ async function git(cwd: string, args: string[]): Promise<{ code: number; out: st
  * so HEAD + a default `main` branch exist. Returns { repo, wikiDir }.
  */
 async function makeRepo(base: string): Promise<{ repo: string; wikiDir: string }> {
-  const repo = await mkdtemp(path.join(base, "repo-"));
+  const repo = await testTempDir(path.join(base, "repo-"));
   const wikiDir = path.join(repo, "data", "wiki");
   await mkdir(path.join(wikiDir, "concepts"), { recursive: true });
   await git(repo, ["init", "-b", "main"]);
@@ -58,7 +59,7 @@ describe("commitWikiChange", () => {
 
   beforeEach(async () => {
     __resetForTest();
-    base = await mkdtemp(path.join(tmpdir(), "wiki-commit-"));
+    base = await testTempDir(path.join(tmpdir(), "wiki-commit-"));
   });
   afterEach(async () => {
     __resetForTest();
@@ -113,7 +114,7 @@ describe("commitWikiChange", () => {
   });
 
   test("wikiDir outside any git repo → skip, non-fatal", async () => {
-    const nonRepo = await mkdtemp(path.join(base, "loose-"));
+    const nonRepo = await testTempDir(path.join(base, "loose-"));
     await writeFile(path.join(nonRepo, "note.md"), "# note\n");
     // Must not throw.
     await commitWikiChange(nonRepo, ["note.md"], "[gardener] apply: note.md");
@@ -158,7 +159,7 @@ describe("commitWikiChange", () => {
   });
 
   test("wikiDir outside any git repo → { committed:false, reason:'not-a-repo' }", async () => {
-    const nonRepo = await mkdtemp(path.join(base, "loose2-"));
+    const nonRepo = await testTempDir(path.join(base, "loose2-"));
     await writeFile(path.join(nonRepo, "note.md"), "# note\n");
     const result = await commitWikiChange(nonRepo, ["note.md"], "[gardener] apply: note.md");
     expect(result).toEqual({ committed: false, reason: "not-a-repo" });
@@ -430,7 +431,7 @@ describe("parsePorcelainZWithStatus", () => {
 describe("listDirtyEntries", () => {
   let base: string;
   beforeEach(async () => {
-    base = await mkdtemp(path.join(tmpdir(), "wiki-dirty-"));
+    base = await testTempDir(path.join(tmpdir(), "wiki-dirty-"));
   });
   afterEach(async () => {
     await rm(base, { recursive: true, force: true });
@@ -484,7 +485,7 @@ describe("listDirtyEntries", () => {
   });
 
   test("a non-repo degrades to an empty list, never a throw", async () => {
-    const loose = await mkdtemp(path.join(base, "loose-"));
+    const loose = await testTempDir(path.join(base, "loose-"));
     expect(await listDirtyEntries(loose)).toEqual([]);
   });
 
@@ -517,7 +518,7 @@ describe("listDirtyEntries", () => {
 
 describe("runGit timeout", () => {
   test("kills the child and reports a synthetic failure", async () => {
-    const base = await mkdtemp(path.join(tmpdir(), "wiki-timeout-"));
+    const base = await testTempDir(path.join(tmpdir(), "wiki-timeout-"));
     try {
       const { repo } = await makeRepo(base);
       // A shell alias is the deterministic offline stand-in for a hung network
@@ -537,7 +538,7 @@ describe("runGit timeout", () => {
     // running: it inherited the pipes and the connection, so a hung push's ssh
     // survives every 15-minute tick and they accumulate. Measured before the
     // fix: the fake-ssh pid was still alive 700 ms after the kill.
-    const base = await mkdtemp(path.join(tmpdir(), "wiki-grandchild-"));
+    const base = await testTempDir(path.join(tmpdir(), "wiki-grandchild-"));
     try {
       const { repo } = await makeRepo(base);
       await git(repo, ["remote", "add", "origin", "ssh://example.invalid/x.git"]);
@@ -579,7 +580,7 @@ describe("runGit timeout", () => {
   }, 20_000);
 
   test("an untimed call is unaffected (local verbs stay untimed by design)", async () => {
-    const base = await mkdtemp(path.join(tmpdir(), "wiki-untimed-"));
+    const base = await testTempDir(path.join(tmpdir(), "wiki-untimed-"));
     try {
       const { repo } = await makeRepo(base);
       const res = await runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -598,7 +599,7 @@ describe("the wiki write lock is never swept, staged or counted", () => {
 
   beforeEach(async () => {
     __resetForTest();
-    base = await mkdtemp(path.join(tmpdir(), "wiki-artifact-"));
+    base = await testTempDir(path.join(tmpdir(), "wiki-artifact-"));
   });
   afterEach(async () => {
     await rm(base, { recursive: true, force: true });

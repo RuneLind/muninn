@@ -1,7 +1,8 @@
 import { test, expect, describe, mock } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 // Mock DB to prevent real SQL calls. `dbThrows` makes `getDb()` throw the way
 // the real one does when the pool was never opened — see the trackUsage case.
@@ -83,7 +84,7 @@ describe("parseHaikuJson", () => {
  */
 async function withScratchAgentCwd(body: () => Promise<void>): Promise<void> {
   const previous = process.env.MUNINN_AGENT_CWD;
-  const scratch = mkdtempSync(join(tmpdir(), "muninn-executor-test-"));
+  const scratch = testTempDirSync(join(tmpdir(), "muninn-executor-test-"));
   process.env.MUNINN_AGENT_CWD = scratch;
   try {
     await body();
@@ -108,7 +109,7 @@ async function withScratchAgentCwd(body: () => Promise<void>): Promise<void> {
  * it exists for. With the stub, the same real kill runs on every host.
  */
 async function withStubClaude(body: () => Promise<void>): Promise<void> {
-  const bin = mkdtempSync(join(tmpdir(), "muninn-stub-bin-"));
+  const bin = testTempDirSync(join(tmpdir(), "muninn-stub-bin-"));
   // Longer than any timeout a test here passes, so the kill is always ours.
   writeFileSync(join(bin, "claude"), "#!/bin/sh\nsleep 30\n", { mode: 0o755 });
   const previous = process.env.PATH;
@@ -360,7 +361,7 @@ describe("buildHaikuArgs", () => {
   });
 
   test("a botDir without the gmail-read opt-in is still tool-less", () => {
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
       const args = buildHaikuArgs({ ...base, botDir: jarvisLike(root) });
       expect(flag(args, "--tools")).toBe("");
@@ -377,7 +378,7 @@ describe("buildHaikuArgs", () => {
   });
 
   test("gmail-read: the Gmail server only, the three read tools, dontAsk, the writes removed", () => {
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
       const args = buildHaikuArgs({ ...base, botDir: jarvisLike(root), toolSurface: "gmail-read" });
 
@@ -414,7 +415,7 @@ describe("buildHaikuArgs", () => {
   });
 
   test("gmail-read keeps a read the bot does not allow out of the allow list", () => {
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
       const botDir = join(root, "b");
       mkdirSync(join(botDir, ".claude"), { recursive: true });
@@ -435,7 +436,7 @@ describe("buildHaikuArgs", () => {
   });
 
   test("gmail-read grants the three reads to a bot that allows mcp__<key>__*", () => {
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
       writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
       mkdirSync(join(root, ".claude"), { recursive: true });
@@ -450,7 +451,7 @@ describe("buildHaikuArgs", () => {
   });
 
   test("gmail-read keeps the bot's deny: a denied read is not allowed, and the deny is carried", () => {
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
       writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
       mkdirSync(join(root, ".claude"), { recursive: true });
@@ -480,7 +481,7 @@ describe("buildHaikuArgs", () => {
 
   test("gmail-read carries a bare server-wide deny (mcp__<key>)", () => {
     // Without the carry, a user-scope allow naming `mcp__gmail` re-grants the reads.
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
       writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
       mkdirSync(join(root, ".claude"), { recursive: true });
@@ -497,7 +498,7 @@ describe("buildHaikuArgs", () => {
   });
 
   test("gmail-read on a bot with no Gmail server falls back to the tool-less spawn", () => {
-    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-haiku-args-"));
     try {
       writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { knowledge: { command: "uv" } } }));
       const args = buildHaikuArgs({ ...base, botDir: root, toolSurface: "gmail-read" });
@@ -641,7 +642,7 @@ describe("spawnHaiku degrade warnings", () => {
     });
     _resetSpawnWarningsForTests();
 
-    const root = mkdtempSync(join(tmpdir(), "muninn-warn-"));
+    const root = testTempDirSync(join(tmpdir(), "muninn-warn-"));
     try {
       // A bot dir with neither file — the shape a typo'd path or a broken JSON
       // edit produces.

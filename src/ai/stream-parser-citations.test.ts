@@ -1,7 +1,8 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /**
  * The claude-cli half of the thread-citation capture seam.
@@ -100,7 +101,7 @@ describe("StreamParser files the hits it saw", () => {
     // re-capturing from the recovered text the thread's whole retrieval — the
     // biggest result sets, the ones a refinement discussion leans on hardest —
     // is filed as nothing at all.
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-cite-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-cite-"));
     const filePath = join(dir, "result.txt");
     writeFileSync(filePath, JSON.stringify({ result: RENDERED_HITS }), "utf8");
     try {
@@ -114,7 +115,7 @@ describe("StreamParser files the hits it saw", () => {
   });
 
   test("the trace fence is peeled off the recovered body before it is captured", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-cite-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-cite-"));
     const filePath = join(dir, "result.txt");
     const withFence =
       RENDERED_HITS + '\n\n```huginn-trace\n{"schemaVersion":1}\n```';

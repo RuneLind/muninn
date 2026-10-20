@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import {
 } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 /**
  * **Page ACTIONS must target the page the reader is looking at.**
@@ -50,7 +51,7 @@ describe("wiki routes resolve by relPath, name as fallback", () => {
     createHash("sha256").update(await Bun.file(path.join(root, rel)).text()).digest("hex");
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-relpath-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-relpath-"));
     await mkdir(path.join(root, "a"), { recursive: true });
     await mkdir(path.join(root, "b"), { recursive: true });
     await Bun.write(path.join(root, "a/dup.md"), FIRST);

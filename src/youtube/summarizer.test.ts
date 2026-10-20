@@ -16,7 +16,7 @@
  */
 import { test, expect, describe, beforeEach, beforeAll, afterAll, mock } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
@@ -25,6 +25,7 @@ import type { CaptureFrame } from "../summaries/frames.ts";
 import type { VisualDetail } from "../summaries/visual-detail.ts";
 import { summarizeTimeoutFor } from "../video/media.ts";
 import type { DownloadOptions, DownloadResult, YtDlpInfo } from "../video/media.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const VIDEO_ID = "dQw4w9WgXcQ";
 const WATCH_URL = `https://www.youtube.com/watch?v=${VIDEO_ID}`;
@@ -246,7 +247,7 @@ const bot = { name: "jarvis", dir: "/tmp/bot", model: "sonnet" } as unknown as B
 
 const tmpDirs: string[] = [];
 function tmpRoot(prefix: string): string {
-  const d = mkdtempSync(join(tmpdir(), prefix));
+  const d = testTempDirSync(join(tmpdir(), prefix));
   tmpDirs.push(d);
   return d;
 }

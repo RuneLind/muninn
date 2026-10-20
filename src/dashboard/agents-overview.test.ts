@@ -401,7 +401,7 @@ describe("assembleAgentsOverview running + degrade", () => {
         run({ kind: "research", name: "Q", startedAt: 0, completedAt: 400 }),
       ],
     }), NOW);
-    expect(o.estimates["research Q"]).toBe(300); // median 200/400
+    expect(o.estimates["research\u0000Q"]).toBe(300); // median 200/400
     expect(typeof o.processStartedAt).toBe("number");
   });
 
@@ -412,6 +412,6 @@ describe("assembleAgentsOverview running + degrade", () => {
       getWatcherDurations: async () => { throw new Error("traces down"); },
     }), NOW);
     expect(o.errors!.some((e) => e.includes("watcher_durations"))).toBe(true);
-    expect(o.estimates["watcher email"]).toBeUndefined();
+    expect(o.estimates["watcher\u0000email"]).toBeUndefined();
   });
 });

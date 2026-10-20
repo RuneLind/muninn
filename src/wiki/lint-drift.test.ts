@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { WikiPageMeta } from "./store.ts";
@@ -21,6 +21,7 @@ import {
   pageLineCount,
   type DriftContext,
 } from "./lint-drift.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const TODAY = "2026-10-01";
 const CTX: DriftContext = { today: TODAY };
@@ -431,7 +432,7 @@ describe("lintWiki — drift checks over a real git repo", () => {
     `---\ntitle: P\nplan_status: ${status}\nstatus_date: ${date}\n${extra}---\n\n${body}\n`;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-drift-git-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-drift-git-"));
     await mkdir(path.join(root, "plans"), { recursive: true });
     git(["init", "-q"]);
   });

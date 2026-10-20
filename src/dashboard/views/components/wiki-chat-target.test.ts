@@ -559,7 +559,7 @@ describe("threadNameSuggestions", () => {
     // `deriveAskThreadTitle` would answer "wiki ask" here; offering that as a
     // CHOICE would let a reader pin a thread to the generic fallback on purpose.
     expect(threadNameSuggestions({ mode: "direct", question: "   " })).toEqual([]);
-    expect(threadNameSuggestions({ mode: "article", question: "", articleTitle: " " }))
+    expect(threadNameSuggestions({ mode: "article", question: "", articleTitle: "\u0000" }))
       .toEqual([]);
   });
 

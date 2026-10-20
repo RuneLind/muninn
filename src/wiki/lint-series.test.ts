@@ -1,11 +1,12 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki, type LintFinding } from "./lint.ts";
 import { SERIES_CLUSTER_MAX, type LintPageEdit } from "./lint-series.ts";
 import { RELATED_DIGEST_PRS, RELATED_HUB_BACKLINKS } from "./related-constants.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * Check 8 over temp-dir wiki fixtures.
@@ -58,7 +59,7 @@ describe("checkSeries", () => {
   }
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-lint-series-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-lint-series-"));
   });
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });

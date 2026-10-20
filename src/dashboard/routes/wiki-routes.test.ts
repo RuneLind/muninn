@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, symlink } from "node:fs/promises";
+import { rm, mkdir, symlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -52,6 +52,7 @@ import { todayOslo } from "../../gardener/util.ts";
 import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import { __setAuthPolicyForTest } from "../../auth/policy.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 /**
  * Route-level tests for the explainer-serving seam `/api/wiki/html`. Uses the
@@ -64,7 +65,7 @@ describe("GET /api/wiki/html", () => {
   let prevWikiDir: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-html-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-html-route-"));
     await mkdir(path.join(root, "blogs"), { recursive: true });
     await mkdir(path.join(root, "concepts"), { recursive: true });
     await Bun.write(
@@ -236,7 +237,7 @@ describe("GET /api/wiki/html", () => {
   // Containment is judged on the REAL path: `path.resolve` is lexical, so a
   // symlink under the root pointing outside it passed the check and was served.
   test("the unlisted-.html fallback does not follow a symlink out of the root", async () => {
-    const outsideDir = await mkdtemp(path.join(tmpdir(), "wiki-html-outside-"));
+    const outsideDir = await testTempDir(path.join(tmpdir(), "wiki-html-outside-"));
     try {
       await Bun.write(path.join(outsideDir, "secret.html"), "<html>SECRET-OUTSIDE</html>");
       await symlink(path.join(outsideDir, "secret.html"), path.join(root, "blogs/link.html"));
@@ -652,7 +653,7 @@ describe("GET /api/wiki/ask — resolution errors", () => {
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-ask-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-ask-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
     // Standalone wiki with NO third segment ⇒ no collections.
@@ -715,7 +716,7 @@ describe("POST /api/wiki/remember — resolution branches", () => {
     });
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-remember-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-remember-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `remwiki=${root}`;
@@ -833,7 +834,7 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
   ];
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-integrate-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-integrate-route-"));
     await Bun.write(path.join(root, "Widgets.md"), "# Widgets\n\nThe device ships 4M units.\n");
     await Bun.write(path.join(root, "index.md"), "# Index\n\n- [[Widgets]]\n");
     prevExtra = process.env.WIKI_EXTRA;
@@ -1312,7 +1313,7 @@ describe("GET /api/wiki/index-coverage — resolution branches", () => {
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-idxcov-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-idxcov-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
     // Standalone wiki with NO third segment ⇒ no collections.
@@ -1360,7 +1361,7 @@ describe("wiki reindex routes — resolution branches", () => {
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-reindex-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-reindex-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
     // Standalone wiki with NO third segment ⇒ no collections.
@@ -1422,7 +1423,7 @@ describe("GET /api/wiki/similar", () => {
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-similar-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-similar-route-"));
     await mkdir(path.join(root, "sub"), { recursive: true });
     await Bun.write(path.join(root, "Current.md"), "---\ntype: concept\ntitle: Current\n---\n\nBody of current.");
     await Bun.write(path.join(root, "Cousin A.md"), "---\ntype: concept\ntitle: Cousin A\n---\n\nBody A.");
@@ -1567,7 +1568,7 @@ describe("GET /api/wiki/explain — resolution + preflight", () => {
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-explain-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-explain-route-"));
     await mkdir(path.join(root, "blogs"), { recursive: true });
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     await Bun.write(
@@ -1974,7 +1975,7 @@ describe("GET /api/wiki/digest", () => {
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-digest-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-digest-route-"));
     await Bun.write(
       path.join(root, "knowledge-graph.md"),
       "---\ntype: concept\ntitle: knowledge-graph\n---\n\nBody.",
@@ -2063,7 +2064,7 @@ describe("POST /api/wiki/atlas/draft-synthesis", () => {
     });
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-synth-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-synth-route-"));
     await mkdir(path.join(root, "plans"), { recursive: true });
     for (const [rel, title] of [
       ["plans/alpha.md", "Alpha Plan"],
@@ -2271,7 +2272,7 @@ describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
   let prevWikiDir: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-planstatus-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-planstatus-route-"));
     await mkdir(path.join(root, "plans"), { recursive: true });
     await Bun.write(
       path.join(root, "plans/Lifecycle Plan.md"),
@@ -2513,7 +2514,7 @@ describe("POST /api/wiki/ask/chat", () => {
   });
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-askchat-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-askchat-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
     // A standalone wiki (no owner) alongside the fabricated BOT wiki below — the
@@ -3548,7 +3549,7 @@ describe("GET /api/wiki/chat-target", () => {
   let preferenceCalls: string[];
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-chattarget-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-chattarget-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `lonewiki=${root}`;
@@ -3859,7 +3860,7 @@ describe("POST /api/wiki/factcheck/append — supersedes stale marks", () => {
   const read = (rel: string): Promise<string> => Bun.file(path.join(root, rel)).text();
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-append-sup-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-append-sup-"));
     await Bun.write(path.join(root, "index.md"), "# Index\n");
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `appendwiki=${root}`;
@@ -4178,7 +4179,7 @@ describe("project + projects map on /api/wiki/pages", () => {
   };
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-project-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-project-route-"));
     for (const d of ["areas/pomme-core", "units", "misc"]) {
       await mkdir(path.join(root, d), { recursive: true });
     }
@@ -4298,7 +4299,7 @@ describe("a HELD wiki write lock at the fact-check write routes", () => {
     createHash("sha256").update(await Bun.file(path.join(root, rel)).text()).digest("hex");
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-lock-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-lock-route-"));
     await Bun.write(path.join(root, "Widgets.md"), "# Widgets\n\nThe device ships 4M units.\n");
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `lockwiki=${root}`;
@@ -4376,7 +4377,7 @@ describe("GET /api/wiki/pages?refresh=1 and the worked ledger's back-off", () =>
   // Real env deps and a real socket, because the coupling lived in the ROUTE.
   test("a refreshed listing does not re-ask a failed upstream inside the TTL", async () => {
     const { __resetWorkedLedgerForTest } = await import("../../wiki/worked-ledger.ts");
-    const root = await mkdtemp(path.join(tmpdir(), "wiki-pages-nohatch-"));
+    const root = await testTempDir(path.join(tmpdir(), "wiki-pages-nohatch-"));
     await Bun.write(path.join(root, "a.md"), "---\ntitle: A\n---\n\nbody\n");
     let hits = 0;
     let sessionHits = 0;
@@ -4441,7 +4442,7 @@ describe("the culled bit — listing and page payloads", () => {
   let prevWikiDir: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-culled-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-culled-route-"));
     await mkdir(path.join(root, "archive"), { recursive: true });
     await mkdir(path.join(root, "plans"), { recursive: true });
     await Bun.write(
@@ -4516,7 +4517,7 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
   let prevExtra: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-alias-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-alias-route-"));
     await Bun.write(path.join(root, "p.md"), "# P\n\nBody.\n");
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `aliasfirst=${root},aliassecond=${root}`;

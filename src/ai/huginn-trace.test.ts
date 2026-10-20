@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import { parseHuginnTrace, extractMcpResultText, recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 describe("parseHuginnTrace — text-mode", () => {
   test("extracts trailing ```huginn-trace fence", () => {
@@ -236,7 +237,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
   });
 
   test("recovers trace and rewrites file fence-free by default", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     const trace = { query: { raw: "hello" }, schemaVersion: 1 };
     const body = "## Search results\n\nlots of content here";
@@ -259,7 +260,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
   });
 
   test("does not rewrite when stripTraceFromFile is false", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     const trace = { schemaVersion: 1 };
     const original = "body\n\n```huginn-trace\n" + JSON.stringify(trace) + "\n```";
@@ -281,7 +282,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
   });
 
   test("returns trace=null when file has no fence (and does not rewrite)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     const fileContent = JSON.stringify({ result: "no fence in here" });
     writeFileSync(filePath, fileContent, "utf8");
@@ -300,7 +301,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
     // The caller's own copy of the result is the pointer stub, so anything that
     // reads tool output for content — the thread-citation capture files the
     // hits out of it — has nowhere else to read from.
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     const body = "## Search results\n\nlots of content here";
     writeFileSync(
@@ -317,7 +318,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
   });
 
   test("text is null when the file cannot be turned back into text", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     writeFileSync(filePath, "not json at all", "utf8");
     try {
@@ -342,7 +343,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
   });
 
   test("degrades gracefully when file is not the expected JSON shape", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     writeFileSync(filePath, "not json at all", "utf8");
 
@@ -356,7 +357,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
   });
 
   test("recovers Phase 2 pointer URL from diverted file and strips it", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     const body = "## Search results\n\nrelevant content here";
     const url = "http://localhost:8321/api/trace/86251f3c5c58db3a";
@@ -379,7 +380,7 @@ describe("recoverOversizedClaudeCliToolResult", () => {
   });
 
   test("pointer recovery does not rewrite when stripTraceFromFile is false", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const dir = testTempDirSync(join(tmpdir(), "cli-divert-"));
     const filePath = join(dir, "result.txt");
     const url = "http://localhost:8321/api/trace/0123456789abcdef";
     const original = "body\n\nhuginn-trace-url: " + url + "\n";

@@ -5,7 +5,7 @@
  * configuration after each test.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
@@ -14,6 +14,7 @@ import { sha256 } from "./util.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
 import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const PAGE = "concepts/Chat.md";
 const BASE = "---\ntype: concept\ntitle: Chat\naliases: []\n---\n\n# Chat\n\nBody.\n";
@@ -73,7 +74,7 @@ const messages = () => records.map((r) => r.message.map((m) => String(m)).join("
 const count = (needle: string) => messages().filter((m) => m.includes(needle)).length;
 
 beforeEach(async () => {
-  wikiDir = await mkdtemp(path.join(tmpdir(), "gardener-drift-"));
+  wikiDir = await testTempDir(path.join(tmpdir(), "gardener-drift-"));
   __resetWikiWriteQueueForTest();
   await mkdir(path.join(wikiDir, "concepts"), { recursive: true });
   await writeFile(path.join(wikiDir, PAGE), BASE);

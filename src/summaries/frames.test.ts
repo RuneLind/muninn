@@ -4,7 +4,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   symlinkSync,
@@ -43,6 +42,7 @@ import {
   type CaptureFrame,
   type FrameSource,
 } from "./frames.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 /** Capture muninn's warns for the duration of one test. */
 async function withCapturedLogs(run: (records: LogRecord[]) => Promise<void> | void): Promise<void> {
@@ -62,7 +62,7 @@ async function withCapturedLogs(run: (records: LogRecord[]) => Promise<void> | v
   }
 }
 
-const dir = (prefix = "capture-frames-") => mkdtempSync(join(tmpdir(), prefix));
+const dir = (prefix = "capture-frames-") => testTempDirSync(join(tmpdir(), prefix));
 
 /** An id outside BOTH sources' charsets that is also a live regex pattern. */
 const META_ID = "a.b|c(d)+ef"; // 11 chars, so length alone cannot be what refuses it

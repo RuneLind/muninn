@@ -8,9 +8,10 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 const queryCalls: Array<{ prompt: string; options: Record<string, unknown> }> = [];
 
@@ -40,7 +41,7 @@ const saved = {
 };
 
 beforeAll(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "sdk-surface-")));
+  root = realpathSync(testTempDirSync(join(tmpdir(), "sdk-surface-")));
   botDir = join(root, "bot");
   framesDir = join(root, "frames");
   agentRoot = join(root, "agent-home");

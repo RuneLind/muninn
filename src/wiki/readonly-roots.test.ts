@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach, beforeEach } from "bun:test";
-import { mkdtemp, rm, mkdir, symlink } from "node:fs/promises";
+import { rm, mkdir, symlink } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import path from "node:path";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
@@ -23,6 +23,7 @@ import { writePlanQueue } from "../plans/write.ts";
 import { sha256 } from "../gardener/util.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * `WIKI_READONLY_ROOTS` — the PER-WIKI read-only mechanism, the sibling of the
@@ -89,7 +90,7 @@ describe("WIKI_READONLY_ROOTS — parse + predicate", () => {
   test("a SYMLINKED spelling of the same directory still matches", async () => {
     // The registry and this var are configured independently; one naming the
     // symlink and the other the real path must not open the guard.
-    const base = await mkdtemp(path.join(tmpdir(), "ro-symlink-"));
+    const base = await testTempDir(path.join(tmpdir(), "ro-symlink-"));
     try {
       const real = path.join(base, "real");
       const link = path.join(base, "link");
@@ -136,7 +137,7 @@ describe("WIKI_READONLY_ROOTS — parse + predicate", () => {
   });
 
   test("sameWikiRoot matches through a symlink, both directions", async () => {
-    const base = await mkdtemp(path.join(tmpdir(), "wiki-sameroot-"));
+    const base = await testTempDir(path.join(tmpdir(), "wiki-sameroot-"));
     try {
       const real = path.join(base, "real");
       const link = path.join(base, "link");
@@ -341,7 +342,7 @@ describe("WIKI_READONLY_ROOTS — registry flag + drift detection", () => {
     // strings, so on macOS (`/tmp` → `/private/tmp`) a wiki registered through
     // the symlink warned "matches no registered wiki root" while its entry
     // carried `readonly: true` — the diagnostic contradicting the guard.
-    const base = await mkdtemp(path.join(tmpdir(), "wiki-rodrift-"));
+    const base = await testTempDir(path.join(tmpdir(), "wiki-rodrift-"));
     try {
       const real = path.join(base, "real");
       const link = path.join(base, "link");
@@ -371,7 +372,7 @@ describe(".wiki-reader.json `include` — scan scope", () => {
 
   beforeEach(async () => {
     __resetWikiCacheForTest();
-    root = await mkdtemp(path.join(tmpdir(), "wiki-include-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-include-"));
     await mkdir(path.join(root, "proj-a", "memory"), { recursive: true });
     await mkdir(path.join(root, "proj-b", "memory"), { recursive: true });
     await mkdir(path.join(root, "abc-uuid", "session-memory"), { recursive: true });

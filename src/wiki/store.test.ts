@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
@@ -34,6 +34,7 @@ import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { SWEEP_THRESHOLD } from "./git-dates.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../dashboard/views/components/wiki-activity-rank.ts";
 import { DEFAULT_CULL_LABELS } from "../dashboard/views/components/wiki-cull-view.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 describe("parseFrontmatter", () => {
   test("parses scalars, quoted strings, and inline arrays", () => {
@@ -430,7 +431,7 @@ describe("buildWikiIndex", () => {
   let root: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-test-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-test-"));
     const write = (rel: string, content: string) =>
       Bun.write(path.join(root, rel), content);
     await mkdir(path.join(root, "concepts"), { recursive: true });
@@ -904,7 +905,7 @@ describe("buildWikiIndex", () => {
   test("getWikiIndex isolates caches + degraded state per explicit root", async () => {
     __resetWikiCacheForTest();
     // A second, differently-shaped wiki root alongside the beforeEach `root`.
-    const rootB = await mkdtemp(path.join(tmpdir(), "wiki-test-b-"));
+    const rootB = await testTempDir(path.join(tmpdir(), "wiki-test-b-"));
     await mkdir(path.join(rootB, "concepts"), { recursive: true });
     await Bun.write(path.join(rootB, "concepts/Only In B.md"), "---\ntype: concept\n---\n\nB-only.");
     const missing = path.join(rootB, "does-not-exist");
@@ -1723,7 +1724,7 @@ describe("attachments — the pairing pass", () => {
   let root: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-pair-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-pair-"));
     await mkdir(path.join(root, "plans"), { recursive: true });
     await mkdir(path.join(root, "blogs"), { recursive: true });
   });
@@ -2020,7 +2021,7 @@ describe("attachments — fix round 1", () => {
   let root: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-pair2-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-pair2-"));
     for (const dir of ["plans", "blogs", "archive", "zz"]) {
       await mkdir(path.join(root, dir), { recursive: true });
     }
@@ -2595,7 +2596,7 @@ describe("flattenLinks", () => {
 describe("buildWikiIndex — Atlas fields + trails", () => {
   let root: string;
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-atlas-store-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-atlas-store-"));
     await mkdir(path.join(root, "sources"), { recursive: true });
   });
   afterEach(async () => {
@@ -2663,7 +2664,7 @@ describe("buildWikiIndex — Atlas fields + trails", () => {
 describe("buildWikiIndex — plan status fields", () => {
   let root: string;
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-planstatus-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-planstatus-"));
     await mkdir(path.join(root, "plans"), { recursive: true });
   });
   afterEach(async () => {
@@ -3329,7 +3330,7 @@ const projectFieldWarns = (records: LogRecord[], key: string) =>
 describe("buildWikiIndex — project", () => {
   let root: string;
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-project-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-project-"));
     for (const d of ["areas/pomme-core", "units", "drafts", "misc"]) {
       await mkdir(path.join(root, d), { recursive: true });
     }
@@ -3755,7 +3756,7 @@ describe("buildWikiIndex + git dates", () => {
   };
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-git-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-git-"));
     await git("init", "-q");
   });
 
@@ -3821,7 +3822,7 @@ describe("buildWikiIndex + git dates", () => {
   });
 
   test("a non-git wiki builds cleanly with the fields simply absent", async () => {
-    const plain = await mkdtemp(path.join(tmpdir(), "wiki-nogit-"));
+    const plain = await testTempDir(path.join(tmpdir(), "wiki-nogit-"));
     try {
       await Bun.write(path.join(plain, "p.md"), "# P");
       const index = await buildWikiIndex(plain);
@@ -3981,7 +3982,7 @@ describe("flattenWikiLinks", () => {
 describe("buildWikiIndex — series", () => {
   let root: string;
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-series-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-series-"));
     await mkdir(path.join(root, "plans"), { recursive: true });
   });
   afterEach(async () => {
@@ -4233,7 +4234,7 @@ describe("extractPrRefs / pagePrRefs — the three body shapes", () => {
 describe("buildWikiIndex — prRefs", () => {
   let root: string;
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-prrefs-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-prrefs-"));
     await mkdir(path.join(root, "plans"), { recursive: true });
   });
   afterEach(async () => {

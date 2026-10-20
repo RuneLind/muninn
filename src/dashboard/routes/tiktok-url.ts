@@ -26,11 +26,6 @@ export function parseAllowedTikTokUrl(raw: string): URL | null {
   return parseAllowedHttpsUrl(raw, TIKTOK_HOSTS);
 }
 
-/** Boolean form of {@link parseAllowedTikTokUrl}. */
-export function isAllowedTikTokUrl(raw: string): boolean {
-  return parseAllowedTikTokUrl(raw) !== null;
-}
-
 /**
  * A short link: any path on vm./vt.tiktok.com, or `/t/<code>` on the other
  * hosts. The route resolves these itself (gated hop by hop) and never hands one

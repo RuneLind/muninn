@@ -1,16 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
 import { lintWiki } from "./lint.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 const NOW = Date.parse("2026-10-09T12:00:00Z");
 let root: string;
 const write = (rel: string, content: string) => Bun.write(path.join(root, rel), content);
 
 beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "wiki-case-board-lint-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-case-board-lint-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
 });
 afterEach(async () => {

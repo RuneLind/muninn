@@ -86,8 +86,3 @@ export function notifyCaptureIngest(
     }
   }
 }
-
-/** Test-only: how many sinks are registered for a source. */
-export function __recentIngestSinkCount(source: string): number {
-  return sinks.get(source)?.size ?? 0;
-}

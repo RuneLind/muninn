@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -8,6 +8,7 @@ import { registerWikiReadRoutes } from "./wiki-routes.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 /**
  * The wiki READ slice's own rules, at the route level:
@@ -47,8 +48,8 @@ describe("wiki read slice — routes", () => {
   }
 
   beforeEach(async () => {
-    ro = await mkdtemp(path.join(tmpdir(), "wiki-slice-ro-"));
-    rw = await mkdtemp(path.join(tmpdir(), "wiki-slice-rw-"));
+    ro = await testTempDir(path.join(tmpdir(), "wiki-slice-ro-"));
+    rw = await testTempDir(path.join(tmpdir(), "wiki-slice-rw-"));
     await Bun.write(path.join(ro, "Widgets.md"), PAGE);
     await Bun.write(path.join(rw, "Widgets.md"), PAGE);
     await Bun.write(path.join(ro, "x.html"), "<p>explainer</p>");

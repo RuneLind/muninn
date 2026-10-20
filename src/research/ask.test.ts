@@ -5,6 +5,7 @@ import type { Tracer } from "../tracing/index.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ResearchHit, ResearchKnowledgeResult } from "../ai/research-knowledge.ts";
 import type { AnswerEvent } from "./ask.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
 // Retrieval and the Claude synthesis call are mocked so the orchestration runs
@@ -372,13 +373,13 @@ describe("research trace", () => {
 // PR #653 fix round 2: the note's whole path — route → SSE helper →
 // streamResearchAnswer — with only retrieval and the model mocked (above).
 test("GET /api/research/ask?factcheck=: a declined ask streams the saved findings in its done answer", async () => {
-  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { Hono } = await import("hono");
   const { registerResearchRoutes } = await import("../dashboard/routes/research-routes.ts");
   const { streamResearchSSE } = await import("../dashboard/routes/research-sse.ts");
-  const botsDir = mkdtempSync(join(tmpdir(), "muninn-ask-bots-"));
+  const botsDir = testTempDirSync(join(tmpdir(), "muninn-ask-bots-"));
   mkdirSync(join(botsDir, "asker"));
   writeFileSync(join(botsDir, "asker", "CLAUDE.md"), "test bot");
   const before = process.env.MUNINN_BOTS_DIR;

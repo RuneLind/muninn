@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
   getWikiIndex,
   type WikiIndex,
 } from "./store.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /**
  * `getWikiIndex` single-flight: concurrent callers share one build, and a
@@ -18,7 +19,7 @@ describe("getWikiIndex single-flight", () => {
   let root: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-flight-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-flight-"));
     await Bun.write(path.join(root, "A.md"), "# A\n\nbody\n");
     __resetWikiCacheForTest();
   });

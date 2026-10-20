@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -36,6 +36,7 @@ import {
   WIKI_READONLY_INPUT_PLACEHOLDER,
   WIKI_READONLY_WIKI_MESSAGE,
 } from "../views/components/wiki-readonly-client.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 /** The gated gardener POSTs take application/json (a 415 otherwise — `json-request.ts`). */
 const JSON_POST: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
@@ -81,8 +82,8 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
     createHash("sha256").update(await Bun.file(path.join(root, rel)).text()).digest("hex");
 
   beforeEach(async () => {
-    ro = await mkdtemp(path.join(tmpdir(), "wiki-ro-root-"));
-    rw = await mkdtemp(path.join(tmpdir(), "wiki-rw-root-"));
+    ro = await testTempDir(path.join(tmpdir(), "wiki-ro-root-"));
+    rw = await testTempDir(path.join(tmpdir(), "wiki-rw-root-"));
     await Bun.write(path.join(ro, "Widgets.md"), PAGE);
     await Bun.write(path.join(rw, "Widgets.md"), PAGE);
     prevExtra = process.env.WIKI_EXTRA;
@@ -333,7 +334,7 @@ describe("WIKI_READONLY_ROOTS — the WIKI_DIR env-override shape", () => {
   let app: Hono;
 
   beforeEach(async () => {
-    ro = await mkdtemp(path.join(tmpdir(), "wiki-envoverride-"));
+    ro = await testTempDir(path.join(tmpdir(), "wiki-envoverride-"));
     await Bun.write(path.join(ro, "Widgets.md"), "# Widgets\n\nBody.\n");
     prevWikiDir = process.env.WIKI_DIR;
     prevExtra = process.env.WIKI_EXTRA;
@@ -421,7 +422,7 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
 
   beforeEach(async () => {
     approved = [];
-    ro = await mkdtemp(path.join(tmpdir(), "wiki-ro-approve-"));
+    ro = await testTempDir(path.join(tmpdir(), "wiki-ro-approve-"));
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `rowiki=${ro}`;
     __setWikiReadonlyForTest(false);
@@ -534,7 +535,7 @@ describe("WIKI_READONLY_ROOTS — the WIKI_DIR fallback is not inherited by an u
   let prevWikiDir: string | undefined;
 
   beforeEach(async () => {
-    ro = await mkdtemp(path.join(tmpdir(), "wiki-ro-envdir-"));
+    ro = await testTempDir(path.join(tmpdir(), "wiki-ro-envdir-"));
     await Bun.write(path.join(ro, "Widgets.md"), "# Widgets\n\nThe device ships 4M units.\n");
     prevExtra = process.env.WIKI_EXTRA;
     prevWikiDir = process.env.WIKI_DIR;

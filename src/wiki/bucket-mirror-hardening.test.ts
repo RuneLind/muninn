@@ -12,7 +12,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
@@ -22,6 +22,7 @@ import { __resetWikiRegistryForTest } from "./registry-memo.ts";
 import { __resetWikiCacheForTest, getWikiIndex } from "./store.ts";
 import * as mirrorModule from "./bucket-mirror.ts";
 import { BucketMirror, MIRROR_MARKER, objectRelPath, startWikiBucketMirrors, type TokenSource } from "./bucket-mirror.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 interface FakeObject { generation: number; body: string | Uint8Array; updated?: string; size?: number }
 
@@ -105,7 +106,7 @@ beforeEach(async () => {
   releaseHang = null;
   listOverride = null;
   __resetWikiCacheForTest();
-  base = await mkdtemp(path.join(tmpdir(), "bm-hard-"));
+  base = await testTempDir(path.join(tmpdir(), "bm-hard-"));
   root = path.join(base, "wikis", "felles");
   __setReadonlyWikiRootsForTest([root]);
 });

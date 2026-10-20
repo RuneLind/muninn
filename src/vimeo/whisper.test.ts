@@ -5,7 +5,7 @@
  */
 import { test, expect, describe, beforeAll } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
-import { readFileSync, mkdtempSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseVimeoManifest, VIMEO_MEDIA_HOST, type VimeoManifest } from "./media.ts";
@@ -22,6 +22,7 @@ import {
   looksSpeechless,
   SPEECH_MIN_WORDS_PER_MINUTE,
 } from "./whisper.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
 const FIXTURE_RAW = JSON.parse(readFileSync(new URL("./fixtures/manifest-placeholder.json", import.meta.url).pathname, "utf8"));
 const MANIFEST_URL = `https://${VIMEO_MEDIA_HOST}/exp=0~acl=placeholder~hmac=placeholder/00000000-0000-4000-8000-000000000000/psid=placeholder/v2/playlist/av/primary/prot/placeholder/playlist.json?omit=av1-hevc&pathsig=placeholder`;
@@ -70,7 +71,7 @@ function fakeRun(answers: { ffmpeg?: { exitCode: number; stderr?: string }; whis
 }
 
 function workDir() {
-  return mkdtempSync(join(tmpdir(), "vimeo-whisper-"));
+  return testTempDirSync(join(tmpdir(), "vimeo-whisper-"));
 }
 
 describe("the pure rules", () => {

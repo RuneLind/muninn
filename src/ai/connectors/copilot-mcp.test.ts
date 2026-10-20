@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import { parseMcpConfig } from "./copilot-mcp.ts";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { testTempDirSync } from "../../test/temp-dir.ts";
 
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) delete process.env[key];
@@ -16,7 +17,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("returns empty object when .mcp.json has no mcpServers", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ other: "stuff" }));
     try {
       const result = parseMcpConfig(dir);
@@ -27,7 +28,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("converts mcpServers to Copilot SDK format", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = {
       mcpServers: {
         gmail: {
@@ -64,7 +65,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("propagates trace-pointer env vars from process.env to spawned MCP children", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = { mcpServers: { huginn: { command: "uv", args: ["run", "x.py"] } } };
     writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
 
@@ -94,7 +95,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("bot's .mcp.json env wins over inherited process.env on key collision", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = {
       mcpServers: { svc: { command: "node", env: { TOKEN_PATH: "/bot/specific" } } },
     };
@@ -114,7 +115,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("converts http entries to remote server format", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = {
       mcpServers: {
         "serena-api": {
@@ -151,7 +152,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("skips http entry without url", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = {
       mcpServers: {
         broken: { type: "http" },
@@ -168,7 +169,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("skips stdio entry without command", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = {
       mcpServers: {
         broken: { args: ["--flag"] },
@@ -185,7 +186,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("handles mixed local and remote entries", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = {
       mcpServers: {
         gmail: { command: "npx", args: ["-y", "gmail-mcp"] },
@@ -203,7 +204,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("resolves relative cwd against bot dir", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     const mcpJson = {
       mcpServers: {
         rel: { command: "uv", args: ["run", "x.py"], cwd: "../sibling" },
@@ -223,7 +224,7 @@ describe("parseMcpConfig", () => {
   });
 
   test("returns empty object for invalid JSON", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const dir = testTempDirSync(join(tmpdir(), "mcp-test-"));
     writeFileSync(join(dir, ".mcp.json"), "not json{{{");
     try {
       const result = parseMcpConfig(dir);

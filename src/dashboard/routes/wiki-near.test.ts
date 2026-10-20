@@ -9,7 +9,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -17,6 +17,7 @@ import { registerWikiRoutes } from "./wiki-routes.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { NEAR_MAX, RELATED_HUB_BACKLINKS, RELATED_HUB_OUTLINKS } from "../../wiki/related-constants.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 function page(title: string, body: string): string {
   return ["---", `title: ${title}`, "---", "", body, ""].join("\n");
@@ -28,7 +29,7 @@ describe("GET /api/wiki/page — near", () => {
   let prevExtra: string | undefined;
 
   beforeAll(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-near-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-near-"));
     const files: Array<[string, string]> = [
       ["plans/open.md", page("Open", "Links [[Mid]] and [[hub]].")],
       ["Notes/Mid.md", page("Mid", "Links [[far]].")],

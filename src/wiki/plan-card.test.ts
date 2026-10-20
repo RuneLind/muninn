@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -13,8 +13,9 @@ import {
   planCardRootFor,
   planCardRoots,
 } from "./plan-card.ts";
+import { testTempDirSync } from "../test/temp-dir.ts";
 
-const tmp = mkdtempSync(path.join(tmpdir(), "plan-card-cfg-"));
+const tmp = testTempDirSync(path.join(tmpdir(), "plan-card-cfg-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 const mimir = path.join(tmp, "source/private/mimir");
 mkdirSync(mimir, { recursive: true });

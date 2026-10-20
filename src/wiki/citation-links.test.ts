@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -11,6 +11,7 @@ import type { Citation } from "../research/answer.ts";
 import { __resetWikiCacheForTest } from "./store.ts";
 import type { WikiRegistryEntry } from "./registry.ts";
 import type { WikiPageMeta } from "./store.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** Minimal WikiPageMeta stub — only fields the helpers read. */
 function page(name: string, extra: Partial<WikiPageMeta> = {}): WikiPageMeta {
@@ -133,7 +134,7 @@ describe("matchCitationToPage on same-stem pages", () => {
 
 describe("enrichCitationsWithPages stamps the matched page's own relPath", () => {
   test("a cite of the second same-stem page opens the second page", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "citation-links-"));
+    const root = await testTempDir(path.join(tmpdir(), "citation-links-"));
     try {
       await mkdir(path.join(root, "projects/claude-hivemind"), { recursive: true });
       await mkdir(path.join(root, "projects/yggdrasil"), { recursive: true });

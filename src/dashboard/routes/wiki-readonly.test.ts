@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { rm, mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +21,7 @@ import {
   wikiReadonlyFlag,
   WIKI_READONLY_BLOCKED_SELECTOR,
 } from "../views/components/wiki-readonly-client.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 /**
  * `MUNINN_WIKI_READONLY` — the wiki write-owner switch, tested at the three
@@ -49,7 +50,7 @@ async function git(cwd: string, args: string[]): Promise<{ code: number; out: st
 /** A fixture repo with the wiki nested at repo/data/wiki (the real jarvis
  *  layout), one initial commit so HEAD + `main` exist. Mirrors commit.test.ts. */
 async function makeRepo(base: string): Promise<{ repo: string; wikiDir: string }> {
-  const repo = await mkdtemp(path.join(base, "repo-"));
+  const repo = await testTempDir(path.join(base, "repo-"));
   const wikiDir = path.join(repo, "data", "wiki");
   await mkdir(wikiDir, { recursive: true });
   await git(repo, ["init", "-b", "main"]);
@@ -79,7 +80,7 @@ describe("MUNINN_WIKI_READONLY — routes", () => {
     createHash("sha256").update(await Bun.file(path.join(root, rel)).text()).digest("hex");
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "wiki-readonly-route-"));
+    root = await testTempDir(path.join(tmpdir(), "wiki-readonly-route-"));
     await Bun.write(path.join(root, "Widgets.md"), PAGE);
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `rowiki=${root}`;
@@ -349,7 +350,7 @@ describe("MUNINN_WIKI_READONLY — git is deliberately NOT guarded", () => {
 
   beforeEach(async () => {
     __resetCommitForTest();
-    base = await mkdtemp(path.join(tmpdir(), "wiki-readonly-commit-"));
+    base = await testTempDir(path.join(tmpdir(), "wiki-readonly-commit-"));
   });
   afterEach(async () => {
     __setWikiReadonlyForTest();

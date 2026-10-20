@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   type ListedDoc,
   type WikiRefs,
 } from "./ingest-backlog.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** Build a WikiRefs from bare url + id-token lists (tests only). */
 function refs(urls: string[] = [], idTokens: string[] = []): WikiRefs {
@@ -282,7 +283,7 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
 
 describe("collectWikiRefs — sweeps .md AND .mdx pages", () => {
   test("a native .mdx source page's url: + body URLs credit their docs", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "wikirefs-"));
+    const root = await testTempDir(path.join(tmpdir(), "wikirefs-"));
     try {
       // A .md page (existing behavior) and a .mdx source page (the new glob).
       await Bun.write(

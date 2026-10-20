@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { GCS_DEFAULT_BASE, parseWikiBucketMirrors, resolveWikiBucketMirrorConfig } from "../config.ts";
@@ -20,6 +20,7 @@ import {
   type TokenSource,
 } from "./bucket-mirror.ts";
 import { loadPageFiles } from "./page-files.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 // ── Config parse ─────────────────────────────────────────────────
 
@@ -152,7 +153,7 @@ const SRC = "gs://felles/";
 
 describe("checkMirrorRoot / prepareMirrorRoot", () => {
   let base: string;
-  beforeEach(async () => { base = await mkdtemp(path.join(tmpdir(), "bm-root-")); });
+  beforeEach(async () => { base = await testTempDir(path.join(tmpdir(), "bm-root-")); });
   afterEach(async () => { await rm(base, { recursive: true, force: true }); });
 
   test("a root inside tmpdir passes, even before it exists", () => {
@@ -170,7 +171,7 @@ describe("checkMirrorRoot / prepareMirrorRoot", () => {
   });
 
   test("refuses a root that escapes tmpdir through a symlink", async () => {
-    const outside = await mkdtemp(path.join(process.cwd(), ".bm-outside-"));
+    const outside = await testTempDir(path.join(process.cwd(), ".bm-outside-"));
     try {
       const link = path.join(base, "link");
       await symlink(outside, link);
@@ -220,7 +221,7 @@ describe("checkMirrorRoot / prepareMirrorRoot", () => {
   });
 
   test("atomicWrite refuses to write through a symlinked directory", async () => {
-    const outside = await mkdtemp(path.join(tmpdir(), "bm-elsewhere-"));
+    const outside = await testTempDir(path.join(tmpdir(), "bm-elsewhere-"));
     try {
       await symlink(outside, path.join(base, "plans"));
       await expect(atomicWrite(base, "plans/x.md", new Uint8Array([1]))).rejects.toThrow(/not a plain directory/);
@@ -287,7 +288,7 @@ describe("BucketMirror.pollOnce against a fake GCS", () => {
     listStatus = 200;
     mediaStatus = new Map();
     refreshes = [];
-    base = await mkdtemp(path.join(tmpdir(), "bm-poll-"));
+    base = await testTempDir(path.join(tmpdir(), "bm-poll-"));
     root = path.join(base, "wikis/felles");
   });
   afterEach(async () => {

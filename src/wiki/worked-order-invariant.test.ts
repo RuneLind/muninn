@@ -21,7 +21,7 @@
  */
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
@@ -32,6 +32,7 @@ import {
   seriesMembersOf,
 } from "../dashboard/views/components/wiki-groups.ts";
 import type { WikiListing } from "../dashboard/views/components/wiki-filter.ts";
+import { testTempDir } from "../test/temp-dir.ts";
 
 /** A page in one series, with a body that links and names PRs. */
 function page(
@@ -126,7 +127,7 @@ async function buildStamped(): Promise<WikiIndex> {
 }
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "worked-invariant-"));
+  root = await testTempDir(path.join(tmpdir(), "worked-invariant-"));
   await mkdir(path.join(root, "plans"), { recursive: true });
   await mkdir(path.join(root, "blogs"), { recursive: true });
   for (const [rel, body] of PAGES) await writeFile(path.join(root, rel), body, "utf8");

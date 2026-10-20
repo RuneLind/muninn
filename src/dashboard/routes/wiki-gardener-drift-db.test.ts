@@ -5,7 +5,7 @@
  * finding 63), and a page that already IS its draft is not flagged. Its own `bun test` link in the `test` and `test:db` chains.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -16,6 +16,7 @@ import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { sha256 } from "../../gardener/util.ts";
 import { registerWikiGardenerRoutes } from "./wiki-gardener-routes.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
 
 setupTestDb();
 
@@ -29,7 +30,7 @@ const page = (title: string) => `---\ntitle: ${title}\n---\n\nBody.\n`;
 let root: string;
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "wiki-drift-"));
+  root = await testTempDir(path.join(tmpdir(), "wiki-drift-"));
   __setReadonlyWikiRootsForTest();
   __setWikiRegistryForTest([{ name: WIKI, root, source: "extra", collections: ["driftwiki"] }]);
 });
