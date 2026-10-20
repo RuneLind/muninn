@@ -136,9 +136,10 @@ const dataRunFailed = (v: FellesFjernVerdict | undefined) => v === "failed" || v
  * The status line and confirm row for a remove or a retry, from the route's
  * answer: the decision table's OUTCOMES cells (`src/wiki/CLAUDE.md`). Retry
  * data files is offered only when the route says so AND the answer shows the
- * page gone (a page run `deleted` or `missing`, or a retry the route admitted)
- * AND the data-file run did not finish clean. A page run that leaves the page
- * possibly published offers the terminal command instead.
+ * page deleted (a page run `deleted`, or a retry the route admitted) AND the
+ * data-file run did not finish clean. A page run that reads «not in the
+ * bucket» runs no data delete, and its row gives the data files' command; one
+ * that leaves the page possibly published offers the terminal command instead.
  */
 export function fellesRemoveView(
   action: "remove" | "remove-data",
@@ -148,7 +149,7 @@ export function fellesRemoveView(
   cmd: { bin: string; relPath: string; bucket?: string },
 ): { text: string; ok: boolean; row: FellesConfirmRow } {
   const dataFiles = data?.dataFiles ?? [];
-  const pageGone = action === "remove-data" ? data?.dataFilesOnly === true : data?.pageRun === "deleted" || data?.pageRun === "missing";
+  const pageGone = action === "remove-data" ? data?.dataFilesOnly === true : data?.pageRun === "deleted";
   const retry: FellesConfirmRow =
     !dryRun && data?.retryDataFiles === true && dataFiles.length > 0 && pageGone && dataRunFailed(data.dataRun)
       ? { hidden: false, button: "retry", html: fellesDataRetryHtml(dataFiles) }
@@ -201,17 +202,30 @@ export function fellesRemoveView(
     const row = data.dataRun === "error" ? dataCommandRow() : retry;
     return { text, ok: data.dataRun === "deleted" || data.dataRun === "missing", row };
   }
-  if (data.pageRun === "deleted" || data.pageRun === "missing") {
-    const page = data.pageRun === "deleted" ? "Removed the page." : "The page was not in the bucket (never published, or already removed).";
+  if (data.pageRun === "missing") {
+    // «Not in the bucket» does not prove the data files unused: a page
+    // published under another name (this one before a rename) may show them.
+    const page = "The page was not in the bucket (never published, already removed, or published under another name).";
+    const [first, ...rest] = dataFiles;
+    if (first === undefined) return { text: `${page} Nothing was deleted.`, ok: true, row: HIDDEN_ROW };
+    const command = fellesRemoveCommand({ bin: cmd.bin, relPath: first, bucket: cmd.bucket, alsoRemove: rest });
+    return {
+      text: `${page} Its data files were left in the bucket, since a page published under another name, such as this page before a rename, may still show them.`,
+      ok: true,
+      row: {
+        hidden: false,
+        button: "none",
+        html: `Check the rail's «Felles» chip first: a page published under its old name is listed there as missing locally. If no published page shows them, delete them from a terminal with your own gcloud login: <code>${esc(command)}</code>`,
+      },
+    };
+  }
+  if (data.pageRun === "deleted") {
+    const page = "Removed the page.";
     switch (data.dataRun) {
       case undefined:
-        return data.pageRun === "deleted"
-          ? { text: "Removed. The pod drops the page within about 2 minutes.", ok: true, row: retry }
-          : { text: `${page} Nothing was deleted.`, ok: true, row: retry };
+        return { text: "Removed. The pod drops the page within about 2 minutes.", ok: true, row: retry };
       case "deleted":
-        return data.pageRun === "deleted"
-          ? { text: "Removed the page and its data files. The pod drops them within about 2 minutes.", ok: true, row: retry }
-          : { text: `${page} Removed its data files.`, ok: true, row: retry };
+        return { text: "Removed the page and its data files. The pod drops them within about 2 minutes.", ok: true, row: retry };
       case "missing":
         return {
           text: `${page} Its data files are gone from the bucket too: the ones still there were deleted, the rest were not in it (never uploaded, or already deleted).`,

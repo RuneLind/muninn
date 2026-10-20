@@ -173,19 +173,22 @@ A breadcrumb button on a wiki named in `FELLES_WIKI_PUBLISH_WIKIS` that runs the
   | refused by the scanner or the encoding check | yes (not mirrored) | its delete answers «not in the bucket» = success |
   | changed locally since the publish (now over the cap, renamed) | no (not mirrored) | its object stays: the status's `muligensForeldreløse` covers it |
 
-  **Outcomes**, read by `fellesFjernVerdict` from the script's lines: `deleted` (exit 0); `missing` (exit 3, and every `Feil: sletting av <url> feilet (exit N): <detail>` line has the detail equal to the URL — gcloud's `matched no objects or files` prints the URL last; the summary must add up); `failed` (exit 3 otherwise: a logged-out gcloud, a network error, a masked detail, lines that do not add up); `error` (exit 1 or 2 or any other code); `timeout` (no result). A real remove runs the page alone first; the data-file run follows only when the page run is `deleted` or `missing`.
+  A data file only the bucket's copy of another page names is not seen: when the removed page names it too, remove targets it, and that published copy shows «File not available» until it is published again. The status lists that other page as changed or missing locally; `muligensForeldreløse` does not cover it, since it holds files still in the bucket.
+
+  **Outcomes**, read by `fellesFjernVerdict` from the script's lines: `deleted` (exit 0); `missing` (exit 3, and every `Feil: sletting av <url> feilet (exit N): <detail>` line has the detail equal to the URL — gcloud's `matched no objects or files` prints the URL last; the summary must add up); `failed` (exit 3 otherwise: a logged-out gcloud, a network error, a masked detail, lines that do not add up); `error` (exit 1 or 2 or any other code); `timeout` (no result). A real remove runs the page alone first; the data-file run follows only when the page run is `deleted`. A page run that reads `missing` runs no data delete: «not in the bucket» does not prove the data files unused, since a page published under another name may still show them. Example: a page renamed locally from `old` to `new` and not yet published; Remove on `new` reads `missing`, and deleting `d.csv` would break the live `old` page on the pod.
 
   | Page run | Data-file run | Status line | Next |
   |---|---|---|---|
   | `deleted` | none (no data files) | Removed. | — |
-  | `deleted` / `missing` | `deleted` or `missing` | page removed (or «was not in the bucket»), data files gone | — |
-  | `deleted` / `missing` | `failed` | a data-file delete failed with an error muninn does not read as «not in the bucket» | **Retry data files** |
-  | `deleted` / `missing` | `timeout` | timed out or could not start | **Retry data files** |
-  | `deleted` / `missing` | `error` (exit 1, 2, other) | exited with code N | the data files' `--fjern` command |
-  | `missing` | none | «was not in the bucket», nothing deleted | — |
+  | `deleted` | `deleted` or `missing` | page removed, data files gone | — |
+  | `deleted` | `failed` | a data-file delete failed with an error muninn does not read as «not in the bucket» | **Retry data files** |
+  | `deleted` | `timeout` | timed out or could not start | **Retry data files** |
+  | `deleted` | `error` (exit 1, 2, other) | exited with code N | the data files' `--fjern` command |
+  | `missing`, no data files | none | «was not in the bucket», nothing deleted | — |
+  | `missing`, data files | not run | «was not in the bucket»; the data files were left in the bucket, since a page published under another name may still show them | check the «Felles» chip (a page published under its old name is listed as missing locally); if no published page shows them, the data files' `--fjern` command |
   | `failed` (exit 3, not only «not in the bucket») | not run | the page may still be published; nothing else deleted | the page + data files' `--fjern` command |
   | `error` (exit 1, 2, other) | not run | refused / environment / code N; page may still be published | the same command |
-  | `timeout` (504) | not run | page may or may not be deleted; data files left alone; run Remove… again | — |
+  | `timeout` (504) | not run | page may or may not be deleted; data files left alone; run Remove… again (it deletes the page if still there, else shows the data files' command) | — |
 
   | Retry data files | Status line | Next |
   |---|---|---|
@@ -193,9 +196,9 @@ A breadcrumb button on a wiki named in `FELLES_WIKI_PUBLISH_WIKIS` that runs the
   | `failed` | a delete failed with an error muninn does not read as «not in the bucket» | **Retry data files** |
   | `timeout` (504) | did not return | **Retry data files** |
   | `error` | exited with code N | the data files' `--fjern` command |
-  | 409 `page-not-gone` | no recent record the page is gone; run Remove… again | — |
+  | 409 `page-not-gone` | no recent record that this instance deleted the page; run Remove… again | — |
 
-  Retry is offered only with evidence the page object is gone, never after an unexplained exit 3, and it cannot loop on a file that is already gone (that is `missing`, success). The ROUTE enforces the same rule: a page run that reads `deleted` or `missing` records the page (wiki + NFC relPath) in an in-process map; any other page outcome, a real publish or a sync drops it, and it expires after `FELLES_GONE_TTL_MS` (15 min, a re-publish this process cannot see). `dataFilesOnly` without a fresh record is a 409, before any spawn. A reopened dialog on a page already gone needs no retry: Remove… again reads the page as `missing` and deletes the data files. The dry run never asks the bucket and stays one run naming every object; the route claims the run slot before the pre-read, so the 409 answers before any file is read. Tests: `routes/wiki-felles-publish.test.ts` (one row per cell, over `src/test/felles-fjern-fake.ts`, whose lines match the real script's), `views/components/wiki-felles-publish.test.ts` (`fellesRemoveView`, one row per cell).
+  Retry is offered only after a page run that deleted the page, never after an unexplained exit 3 or a page run that reads `missing`, and it cannot loop on a file that is already gone (a data run that reads `missing` is success). The ROUTE enforces the same rule: a page run that reads `deleted` records the page (wiki + NFC relPath) in an in-process map; any other page outcome (`missing` included), a real publish or a sync drops it, and it expires after `FELLES_GONE_TTL_MS` (15 min, a re-publish this process cannot see). `dataFilesOnly` without a fresh record is a 409, before any spawn. A reopened dialog on a page already gone deletes no data files: Remove… again reads the page as `missing`, leaves the data files, and shows their `--fjern` command for a terminal. The dry run never asks the bucket and stays one run naming every object; the route claims the run slot before the pre-read, so the 409 answers before any file is read. Tests: `routes/wiki-felles-publish.test.ts` (one row per cell, over `src/test/felles-fjern-fake.ts`, whose lines match the real script's), `views/components/wiki-felles-publish.test.ts` (`fellesRemoveView`, one row per cell).
 - **Known limit: one bucket for every allowlisted wiki.** Each wiki maps its relPath straight onto the bucket root, so with two wikis in `FELLES_WIKI_PUBLISH_WIKIS` sharing a relPath, publish overwrites and remove deletes the other wiki's object. Today the list has one wiki.
 
 - **muninn uploads nothing.** The script's scanner is the only guard against personal data on a page the whole team reads; a second uploader here would be a second, weaker guard.

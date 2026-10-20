@@ -136,7 +136,10 @@ describe("the spawn", () => {
     });
     const res = await post(app, { ...ok, action: "remove" });
     expect(res.status).toBe(504);
-    expect(((await res.json()) as { error: string }).error).toMatch(/was stopped\. The page may or may not be deleted, and its data files were left alone/);
+    const error = ((await res.json()) as { error: string }).error;
+    expect(error).toMatch(/was stopped\. The page may or may not be deleted, and its data files were left alone/);
+    expect(error).toMatch(/if it is not, it shows the command that deletes its data files/);
+    expect(error).not.toMatch(/its data files are deleted/);
   });
 
   test("a real Bun child does not load the .env in its working directory", async () => {
@@ -301,7 +304,9 @@ describe("remove outcomes: one row per cell", () => {
     ["R3 page deleted, data run logged out", [PAGE, ...DATA], dataLoggedOut, 0, null, 200, { exitCode: 0, pageRun: "deleted", dataRun: "failed", dataFilesExitCode: 3, retryDataFiles: true }, [[PAGE], DATA], DATA],
     ["R4 page deleted, data run exit 2", [PAGE, ...DATA], undefined, 0, { run: 2, code: 2 }, 200, { exitCode: 0, pageRun: "deleted", dataRun: "error", dataFilesExitCode: 2, retryDataFiles: false }, [[PAGE], DATA], DATA],
     ["R5 page deleted, data run timed out", [PAGE, ...DATA], undefined, 2, null, 200, { exitCode: 0, pageRun: "deleted", dataRun: "timeout", dataFilesExitCode: null, retryDataFiles: true }, [[PAGE], DATA], DATA],
-    ["R6 page not in the bucket (already removed), data still there", [...DATA], undefined, 0, null, 200, { exitCode: 3, pageRun: "missing", dataRun: "deleted", dataFilesExitCode: 0, retryDataFiles: false }, [[PAGE], DATA], []],
+    // «Not in the bucket» does not prove the data files unused: a page renamed
+    // locally and not yet published under the new name still shows them.
+    ["R6 page not in the bucket (renamed, or already removed): no data run, data kept", [...DATA], undefined, 0, null, 200, { exitCode: 3, pageRun: "missing", retryDataFiles: false }, [[PAGE]], DATA],
     ["R7 page run logged out: no data run, page kept", [PAGE, ...DATA], loggedOut, 0, null, 200, { exitCode: 3, pageRun: "failed", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
     ["R8 page run network error", [PAGE, ...DATA], () => GCLOUD_NETWORK, 0, null, 200, { exitCode: 3, pageRun: "failed", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
     ["R9 page run exit 1", [PAGE, ...DATA], undefined, 0, { run: 1, code: 1 }, 200, { exitCode: 1, pageRun: "error", retryDataFiles: false }, [[PAGE]], [PAGE, ...DATA]],
@@ -360,7 +365,10 @@ describe("remove outcomes: one row per cell", () => {
     state.bucket.add(PAGE);
     const res = await remove(app, { dataFilesOnly: true });
     expect(res.status).toBe(409);
-    expect(((await res.json()) as Answer).reason).toBe("page-not-gone");
+    const body = (await res.json()) as Answer & { error?: string };
+    expect(body.reason).toBe("page-not-gone");
+    expect(body.error).toMatch(/no recent record that it deleted the page/);
+    expect(body.error).not.toMatch(/its data files are deleted/);
     expect(state.runs).toEqual([]);
   });
 
@@ -423,13 +431,35 @@ describe("remove outcomes: one row per cell", () => {
     expect(await (await remove(app, { dataFilesOnly: true })).json()).toMatchObject({ exitCode: 2, dataRun: "error", dataFilesExitCode: 2, retryDataFiles: false });
   });
 
-  test("T10 a page proven gone by «not in the bucket» admits the retry too", async () => {
+  test("T10 a page run that reads «not in the bucket» is no evidence: the data files stay, and the retry is a 409", async () => {
     const { app, state } = harness();
     DATA.forEach((o) => state.bucket.add(o));
-    state.fail = dataLoggedOut;
-    expect(await (await remove(app)).json()).toMatchObject({ pageRun: "missing", dataRun: "failed", retryDataFiles: true });
-    state.fail = undefined;
-    expect(await (await remove(app, { dataFilesOnly: true })).json()).toMatchObject({ dataRun: "deleted", retryDataFiles: false });
+    const body = (await (await remove(app)).json()) as Answer;
+    expect(body).toMatchObject({ pageRun: "missing", retryDataFiles: false, dataFiles: DATA });
+    expect(body.dataRun).toBeUndefined();
+    expect(state.runs).toEqual([[PAGE]]);
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(409);
+    expect(state.runs).toEqual([[PAGE]]);
+    expect([...state.bucket].sort()).toEqual([...DATA].sort());
+  });
+
+  test("T11 a page run that reads «not in the bucket» after the evidence drops it, and runs no data delete", async () => {
+    const { app, state } = await afterR3();
+    const body = (await (await remove(app)).json()) as Answer;
+    expect(body).toMatchObject({ pageRun: "missing", retryDataFiles: false });
+    expect(body.dataRun).toBeUndefined();
+    expect(state.runs).toEqual([[PAGE]]);
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(409);
+    expect([...state.bucket].sort()).toEqual([...DATA].sort());
+  });
+
+  test("T12 a real sync drops the evidence; a dry sync does not", async () => {
+    const { app } = await afterR3();
+    expect((await post(app, { wiki: "kode", dryRun: true, allowIdent: true, action: "sync" })).status).toBe(200);
+    expect((await remove(app, { dataFilesOnly: true })).status).toBe(200);
+    const h2 = await afterR3();
+    expect((await post(h2.app, { wiki: "kode", dryRun: false, allowIdent: true, action: "sync" })).status).toBe(200);
+    expect((await remove(h2.app, { dataFilesOnly: true })).status).toBe(409);
   });
 
   test("dataFilesOnly is refused before any spawn unless it is true on a real remove of a page with data files", async () => {

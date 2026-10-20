@@ -13,12 +13,13 @@
  * `sync`, which runs `--synk` on the whole wiki and takes no relPath;
  * `allowIdent` is required for publish and sync. A real remove deletes the page
  * in one run (`pageRun`, read by `fellesFjernVerdict`) and the data files in a
- * second (`dataRun`, `dataFilesExitCode`) only when the page run proved the page
- * gone (`deleted`, or `missing`: «not in the bucket»); `retryDataFiles` says
- * whether Retry data files may follow. `dataFilesOnly: true` is that retry: the
+ * second (`dataRun`, `dataFilesExitCode`) only when the page run deleted the
+ * page (`deleted`). A page run that reads «not in the bucket» (`missing`) runs
+ * no data delete: a page published under another name, such as this one
+ * before a rename, may still show those files. `retryDataFiles` says whether
+ * Retry data files may follow. `dataFilesOnly: true` is that retry: the
  * data-file run alone, admitted only on this process's own record that a page
- * run proved the page gone within `FELLES_GONE_TTL_MS` (else 409
- * `page-not-gone`). The decision table is in `src/wiki/CLAUDE.md`. Answers 200
+ * run deleted the page within `FELLES_GONE_TTL_MS` (else 409 `page-not-gone`). The decision table is in `src/wiki/CLAUDE.md`. Answers 200
  * `{ exitCode, dryRun, output }` whenever the script ran — its exit code is the
  * verdict (0 ok, 1 a file refused, 2 usage/environment, 3 an upload or delete
  * failed) and its output is already masked by the script. Refusals before any spawn:
@@ -156,9 +157,10 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
   // when a run that could have changed the bucket ends (spawned, not a dry run),
   // so a status spawned before that is neither cached nor joined by a later
   // request: it may have seen the bucket before the run changed it.
-  // wiki + page (NFC) → when a real page run here last proved the page gone
-  // from the bucket (`fellesFjernVerdict` `deleted` or `missing`). Retry data
-  // files needs it, so the retry cannot delete a published page's data files.
+  // wiki + page (NFC) → when a real page run here last deleted the page
+  // (`fellesFjernVerdict` `deleted`; `missing` is not enough, see the data run).
+  // Retry data files needs it, so the retry cannot delete a published page's
+  // data files.
   const goneEvidence = new Map<string, number>();
   let generation = 0;
   const statusCache = new Map<string, { at: number; gen: number; answer: StatusAnswer }>();
@@ -343,7 +345,7 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
           return c.json(
             {
               error:
-                "This instance has no recent record that the page is gone from the bucket, so it will not delete its data files alone. Run Remove… again: a page that is already gone then counts as removed, and its data files are deleted.",
+                "This instance has no recent record that it deleted the page, so it will not delete its data files alone. Run Remove… again: it deletes the page if it is still in the bucket; if it is not, it shows the command that deletes its data files.",
               reason: "page-not-gone",
             },
             409,
@@ -372,10 +374,12 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
         );
       const [firstData, ...restData] = dataFiles;
       // A real remove deletes the page in a run of its own, then the data files
-      // in a second, and only when the page is gone (`fellesFjernVerdict`
-      // `deleted` or `missing`): after any other page outcome the page may
-      // still be published, and its data files must stay. The dry run never
-      // asks the bucket, so it stays one run that names every object.
+      // in a second, and only when the page run deleted the page
+      // (`fellesFjernVerdict` `deleted`). After any other outcome the data files
+      // stay: the page may still be published, or, on `missing`, a page
+      // published under another name (this one before a rename) may still show
+      // them. The dry run never asks the bucket, so it stays one run that names
+      // every object.
       const realRemove = action === "remove" && !dryRun;
       const pageRunReal = realRemove && !dataFilesOnly;
       let proc;
@@ -413,7 +417,7 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
           if (!dryRun) invalidateStatus();
           const error =
             action === "remove"
-              ? "The script did not return in time and was stopped. The page may or may not be deleted, and its data files were left alone. Run Remove… again: a page that is already gone then counts as removed, and its data files are deleted."
+              ? "The script did not return in time and was stopped. The page may or may not be deleted, and its data files were left alone. Run Remove… again: it deletes the page if it is still in the bucket; if it is not, it shows the command that deletes its data files."
               : action === "sync"
                 ? "The sync did not return in time and was stopped. Pages uploaded before that are published — refresh the status before running it again."
                 : "The publish script did not return in time and was stopped. An upload may already have finished — run a dry run to check.";
@@ -432,10 +436,10 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
         dataFilesExitCode = proc.exitCode;
       } else if (pageRunReal) {
         pageRun = fellesFjernVerdict(proc, 1);
-        const gone = pageRun === "deleted" || pageRun === "missing";
-        if (gone) goneEvidence.set(goneKey, now());
+        const deleted = pageRun === "deleted";
+        if (deleted) goneEvidence.set(goneKey, now());
         else goneEvidence.delete(goneKey);
-        if (gone && firstData !== undefined) {
+        if (deleted && firstData !== undefined) {
           try {
             const dataProc = await run(firstData, restData);
             dataFilesExitCode = dataProc.exitCode;

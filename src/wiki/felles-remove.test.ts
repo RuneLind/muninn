@@ -63,6 +63,8 @@ const TARGET_SET: [string, string, Record<string, Entry>, (s: string) => string,
   ["a name sjekkStiform refuses: never uploaded, listed as refused", refs("b[1].csv"), { "/w/p/b[1].csv": F() }, ext4, [], ["p/b[1].csv"]],
   ["collision on APFS: Data.csv and data.csv both resolve, both refused", refs("Data.csv", "data.csv"), { "/w/p/data.csv": F() }, apfs, [], []],
   ["collision on ext4: only data.csv resolves, so no collision", refs("Data.csv", "data.csv"), { "/w/p/data.csv": F() }, ext4, ["p/data.csv"], []],
+  // Publish's collision pass counts every file it names, refused ones too.
+  ["collision on ext4 with a refused spelling: Data.csv a symlink, data.csv a file, neither", refs("Data.csv", "data.csv"), { "/w/p/Data.csv": LINK, "/w/p/data.csv": F() }, ext4, [], []],
   ["case variant alone on APFS: Data.CSV finds data.csv, object Data.CSV", refs("Data.CSV"), { "/w/p/data.csv": F() }, apfs, ["p/Data.CSV"], []],
   ["case variant alone on ext4: nothing found", refs("Data.CSV"), { "/w/p/data.csv": F() }, ext4, [], []],
   ["two refs, one NFC name, APFS: one object", refs(NFC, NFD), { [`/w/p/${NFD}`]: F() }, apfs, [`p/${NFC}`], []],
@@ -188,6 +190,18 @@ const VERDICTS: [string, { exitCode: number; stdout: string; stderr: string } | 
   [
     "a masked detail is not read as «not in the bucket»",
     { ...run([PAGE], []), stderr: `Feil: sletting av gs://${FAKE_BUCKET}/${PAGE} feilet (exit 1): [feilmeldingen er skjult: inneholder e-post]\n` },
+    1,
+    "failed",
+  ],
+  [
+    "a detail that only starts with the URL (another object) is not «not in the bucket»",
+    { ...run([PAGE], []), stderr: `Feil: sletting av gs://${FAKE_BUCKET}/${PAGE} feilet (exit 1): gs://${FAKE_BUCKET}/${PAGE}.bak\n` },
+    1,
+    "failed",
+  ],
+  [
+    "a detail naming another object is not «not in the bucket»",
+    { ...run([PAGE], []), stderr: `Feil: sletting av gs://${FAKE_BUCKET}/${PAGE} feilet (exit 1): gs://${FAKE_BUCKET}/plans/other.mdx\n` },
     1,
     "failed",
   ],
