@@ -16,7 +16,13 @@ import { normalizeRel } from "./wiki-nav.ts";
 import { claimOwnedFocus, newestFocusPage, threadHoldsPin, threadPinAnchor, threadRankScore, workTermOrder } from "./wiki-thread-core.ts";
 import { applyWorkBoundaries } from "./wiki-work-boundaries.ts";
 import { parseWorkGroupPrefs, workGroupPagePath } from "./wiki-work-group-prefs.ts";
-import { openPageChanged } from "./wiki-series-write.ts";
+import { openPageChanged, openPageRefusal, seriesConflictCopy } from "./wiki-series-write.ts";
+import * as seriesWrite from "./wiki-series-write.ts";
+import { threadCardPieces } from "./wiki-rail-input.ts";
+import { groupWorkThreads, type WorkGroupChild } from "./wiki-work-groups.ts";
+import { saveAsSeriesPlan } from "./wiki-work-series.ts";
+import { isFoldOpen, isPinnedRelPath } from "./wiki-recents.ts";
+import type { WikiFilters } from "./wiki-filter.ts";
 import { aliasTopDirs, aliasWorkedPaths } from "../../../wiki/alias-ref.ts";
 import { normalizeWorkedPath } from "../../../wiki/rel-path.ts";
 import { WORK_EVIDENCE_VERSION, workSessionRef, type IndexWork, type WorkContribution, type WorkThread } from "../../../wiki/work-focus.ts";
@@ -183,4 +189,73 @@ describe("the reproduced case (round 3)", () => {
     // The anchor is already the thread's newest page, so nothing re-anchors.
     expect(b.reanchor).toEqual([]);
   });
+});
+
+// Fix round 3, follow-up pins: the sites the table above did not reach. Each
+// computes the canonical answer too, so a site that folds case only (the old
+// `normalizeRel`) fails on the NFD listing even for the canonical spelling.
+const INERT: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "", status: "", followups: "", waiting: "", project: "", jira: "" };
+
+describe.each(Object.entries(SPELLINGS))("spelling, remaining sites: %s", (_name, spelled) => {
+  test("threadCardPieces (wiki-rail-input): a thread naming the page this way draws the listed page", () => {
+    const f = fixture();
+    const focus = (threadPage: string) =>
+      threadCardPieces([{ ...f.T, pages: [threadPage, "plans/a.md"] }, f.U], f.pages, INERT, null, NOW, f.pages, NOW, 5)
+        .flat()
+        .flatMap((c) => c.focus.map((p) => p.relPath));
+    expect(focus(CANON)).toContain(NFD);
+    expect(focus(spelled)).toEqual(focus(CANON));
+  });
+
+  test("groupWorkThreads (wiki-work-groups): a series relation keyed this way joins the page's thread", () => {
+    const f = fixture();
+    const sizes = (key: string) => {
+      const w = structuredClone(f.work);
+      w.evidence!.relations.series = { [key]: "s", "plans/b.md": "s" };
+      return groupWorkThreads({ work: w, allPages: f.pages, now: NOW, stop: "related", toggles: { series: true, related: true, issue: true } }).groups.map((g) => g.children.length);
+    };
+    expect(sizes(CANON)).toEqual([2]);
+    expect(sizes(spelled)).toEqual(sizes(CANON));
+  });
+
+  test("saveAsSeriesPlan (wiki-work-series): a thread naming the page this way writes the listed page", () => {
+    const f = fixture();
+    const writes = (threadPage: string) => {
+      const child = (key: string, pages: string[]) =>
+        ({ key, name: key, unit: { key, index: 0, sub: 0, isolated: false, rank: { key, pages, touched: [], sessions: [] }, thread: { key, pages, touched: [], sessions: [] } } }) as unknown as WorkGroupChild;
+      return saveAsSeriesPlan({ children: [child("t", [threadPage]), child("u", ["plans/b.md"])] }, f.pages).writes.map((w) => w.relPath);
+    };
+    expect(writes(CANON)).toEqual([NFD, "plans/b.md"]);
+    expect(writes(spelled)).toEqual(writes(CANON));
+  });
+
+  test("openPageRefusal: the changed open page in this spelling is the page the writes name", () => {
+    const refuses = (changed: string, written: string) => openPageRefusal(changed, [{ relPath: written }]) !== null;
+    expect(refuses(CANON, NFD)).toBe(true);
+    expect(refuses(spelled, NFD)).toBe(true);
+    expect(refuses(NFD, spelled)).toBe(true);
+  });
+
+  test("seriesConflictCopy: a 409 on the open page in this spelling says reload", () => {
+    const reload = "Reload the page — it has changed";
+    expect(seriesConflictCopy(NFD, CANON).again).toBe(reload);
+    expect(seriesConflictCopy(NFD, spelled).again).toBe(reload);
+    expect(seriesConflictCopy(spelled, NFD).again).toBe(reload);
+  });
+
+  test("isPinnedRelPath, isFoldOpen (wiki-recents): a pin or fold stored in this spelling matches the listed page", () => {
+    expect(isPinnedRelPath([CANON], NFD)).toBe(true);
+    expect(isPinnedRelPath([spelled], NFD)).toBe(true);
+    expect(isFoldOpen([spelled], NFD)).toBe(true);
+  });
+});
+
+test("the write loop is not exported: both callers go through the open-page refusal", () => {
+  expect(Object.keys(seriesWrite)).not.toContain("runSeriesWrites");
+});
+
+test("workGroupPagePath refuses empty, root-escaping and trailing-slash paths, and reads a folder-shaped one back as the folder", () => {
+  for (const v of ["", " ", "..", "../x", "a/../..", "plans/", ".", "a/.."]) expect(workGroupPagePath(v)).toBeNull();
+  expect(workGroupPagePath("plans/.")).toBe("plans");
+  expect(workGroupPagePath("a/b/..")).toBe("a");
 });

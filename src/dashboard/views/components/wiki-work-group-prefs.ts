@@ -61,10 +61,11 @@ const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v =
 
 /** A canonical page path, or null: trimmed and spelled by `normalizeRel` (the
  *  reader's one spelling, which the boundaries and the pin compare with), then
- *  refused when nothing is left, it climbs out of the wiki (`..`), or it names
- *  a folder (a trailing `/`). A record written under the old lower-case-only
- *  spelling reads back canonical here, so no migration. The parser and the
- *  record's list operations both match pages by it. */
+ *  refused when nothing is left, it climbs out of the wiki (`..`), or it ends
+ *  in `/`. A path that normalizes to a folder is not refused: `plans/.` reads
+ *  back as `plans`, `a/b/..` as `a`. A record written under the old
+ *  lower-case-only spelling reads back canonical here, so no migration. The
+ *  parser and the record's list operations both match pages by it. */
 export function workGroupPagePath(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const rel = normalizeRel(v.trim());

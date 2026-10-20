@@ -38,7 +38,7 @@ export function normalizeRelPath(relPath: string): string {
  */
 export function normalizeWorkedPath(p: string): string {
   // Empty stays empty: `posix.normalize("")` is ".", which a caller testing
-  // for "no path" (`findByRelPath`, `workGroupPagePath`) would read as one.
+  // for "no path" (`findPageByRelPath`, `workGroupPagePath`) would read as one.
   if (!p) return "";
   return normalizeRelPath(p.replace(/\\/g, "/")).replace(/^\/+/, "").normalize("NFC");
 }
