@@ -303,3 +303,42 @@ describe("multi-claim compose — thinking controls", () => {
     for (const o of claimOpts) expect(o).not.toHaveProperty("effort");
   });
 });
+
+describe("multi-claim run — declared tool surfaces", () => {
+  test("each verify declares { web: true }; the compose declares no tools", async () => {
+    extractedClaims = [
+      { title: "The sky is blue", quote: "The sky is blue" },
+      { title: "Water is wet", quote: "Water is wet" },
+    ];
+    const composeSurfaces: unknown[] = [];
+    const claimSurfaces: unknown[] = [];
+    const oneShot = async (_p: string, _c: unknown, _b: unknown, o: Record<string, unknown> = {}) => {
+      if (o.timeoutMs === COMPOSE_BUDGET_MS) {
+        composeSurfaces.push(o.toolSurface);
+        return { result: "Overall: fine.", inputTokens: 1, outputTokens: 1, numTurns: 1, durationMs: 1 };
+      }
+      claimSurfaces.push(o.toolSurface);
+      throw new Error("claim verify not under test");
+    };
+    try {
+      const app = new Hono();
+      app.get("/fc", (c) =>
+        streamFactcheckSSE(c, {
+          config,
+          botConfig,
+          body: "The sky is blue. Water is wet.",
+          meta: { title: "Sky", tags: [], type: "concept" },
+          wikiName: "testwiki",
+          mode: "article",
+          baseHash: "deadbeef",
+          oneShot: oneShot as never,
+        }),
+      );
+      await (await app.request("/fc")).text();
+    } finally {
+      extractedClaims = [{ title: "The sky is blue", quote: "the sky is blue" }];
+    }
+    expect(claimSurfaces).toEqual([{ web: true }, { web: true }]);
+    expect(composeSurfaces).toEqual(["none"]);
+  });
+});

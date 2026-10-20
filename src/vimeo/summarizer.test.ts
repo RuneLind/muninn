@@ -37,7 +37,6 @@ mock.module("../ai/one-shot.ts", () => ({
     opts?: {
       systemPrompt?: string;
       thinkingMaxTokens?: number;
-      extraDirs?: string[];
       toolSurface?: unknown;
       timeoutMs?: number;
       onProgress?: (e: { type: string; text: string }) => void;
@@ -47,7 +46,6 @@ mock.module("../ai/one-shot.ts", () => ({
     lastSystemPrompt = opts?.systemPrompt;
     lastRunModel = b.model;
     lastThinking = opts?.thinkingMaxTokens;
-    lastExtraDirs = opts?.extraDirs;
     lastToolSurface = opts?.toolSurface;
     lastTimeoutMs = opts?.timeoutMs;
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
@@ -59,7 +57,6 @@ mock.module("../ai/one-shot.ts", () => ({
 /** The model the connector was handed, and the thinking cap it was (or was not) given. */
 let lastRunModel: string | undefined;
 let lastThinking: number | undefined;
-let lastExtraDirs: string[] | undefined;
 let lastToolSurface: unknown;
 let lastTimeoutMs: number | undefined;
 let sourceDraftCalls: Array<Record<string, unknown>> = [];
@@ -220,7 +217,6 @@ beforeEach(() => {
   lastPrompt = undefined;
   lastRunModel = undefined;
   lastThinking = undefined;
-  lastExtraDirs = undefined;
   lastToolSurface = undefined;
   lastTimeoutMs = undefined;
   manifestFetches = [];
@@ -1021,7 +1017,6 @@ test("frames ON: extracting_frames runs between harvest and summarize, the frame
   // The SYSTEM prompt says nothing about frames — a frames-off capture's prompt is unchanged.
   expect(lastSystemPrompt).not.toContain("Slide");
   expect(lastToolSurface).toEqual({ read: [extractCalls[0]!.workDir] });
-  expect(lastExtraDirs).toBeUndefined();
   expect(lastTimeoutMs).toBe(600_000); // 3 frames: the floor
   // The harvest is told to WAIT for the manifest: measured on the first live
   // frames capture, the captions arrive before the player asks for its
@@ -1035,7 +1030,6 @@ test("frames OFF: no manifest fetch, no extraction, no tools, prompt byte-identi
   expect(lastHarvestOpts?.awaitManifestMs).toBe(0); // frames off: close on the captions
   expect(manifestFetches).toEqual([]);
   expect(extractCalls).toEqual([]);
-  expect(lastExtraDirs).toBeUndefined();
   expect(lastToolSurface).toBe("none");
   expect(lastPrompt).not.toContain("Slide frames");
 });
@@ -1073,7 +1067,6 @@ test("frames requested but the harvest saw no manifest: transcript-only, one war
   expect(statuses).toEqual(["harvesting_captions", "summarizing", "ingesting"]);
   expect(getJob(jobId)!.status).toBe("complete");
   expect(warns.some((w) => /frames requested but the player requested no manifest/.test(String(w.message)))).toBe(true);
-  expect(lastExtraDirs).toBeUndefined();
   expect(lastToolSurface).toBe("none");
 });
 
@@ -1084,7 +1077,6 @@ test("frame extraction failing degrades to transcript-only with a warn, never an
   }));
   expect(getJob(jobId)!.status).toBe("complete");
   expect(warns.some((w) => /frame extraction failed — transcript only/.test(String(w.message)))).toBe(true);
-  expect(lastExtraDirs).toBeUndefined();
   expect(lastToolSurface).toBe("none");
   expect(lastPrompt).not.toContain("Slide frames");
 });

@@ -64,7 +64,6 @@ export interface CaptureOneShotOptions {
   attachRun: (jobId: string, meta: RunMeta) => void;
   onProgress?: StreamProgressCallback;
   timeoutMs?: number;
-  extraDirs?: string[];
   /** The tools the pass may reach — required, forwarded to `tracedOneShot`. */
   toolSurface: ToolSurface;
   /**
@@ -212,7 +211,6 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       systemPrompt: opts.systemPrompt,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-      ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
       toolSurface: opts.toolSurface,
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
       ...(effort ? { effort } : {}),

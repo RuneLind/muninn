@@ -5,7 +5,7 @@
  * It is the merge of `src/tiktok/summarizer.test.ts` and
  * `src/x-article/video.test.ts`, which were twins of the twins they tested. What
  * the two suites AGREED on is a loop over both specs below (the happy path, the
- * degrade paths, the builders, the extraDirs/timeout pass-through); what they
+ * degrade paths, the builders, the surface/timeout pass-through); what they
  * DISAGREED on stays per-vertical, because those disagreements are the whole
  * content of a spec: the duration cap, the canonical url, the ingest endpoint
  * and collection, the work-dir name.
@@ -67,7 +67,6 @@ let lastOpts:
   | {
       systemPrompt?: string;
       timeoutMs?: number;
-      extraDirs?: string[];
       toolSurface?: unknown;
       thinkingMaxTokens?: number | null;
     }
@@ -147,7 +146,6 @@ mock.module("../ai/one-shot.ts", () => ({
     opts?: {
       systemPrompt?: string;
       timeoutMs?: number;
-      extraDirs?: string[];
       toolSurface?: unknown;
       thinkingMaxTokens?: number | null;
       onProgress?: (e: { type: string; text: string }) => void;
@@ -171,7 +169,7 @@ mock.module("../ai/one-shot.ts", () => ({
 
 /**
  * The capture seam, DELEGATING — the real `runCaptureOneShot` still runs, so the
- * thinking-cap gate, the `extraDirs` pass-through and the trace root are the
+ * thinking-cap gate, the `toolSurface` pass-through and the trace root are the
  * shipped ones; the wrapper only records the options it was handed.
  *
  * It exists for ONE field: `source`, which is what stamps `capture:<id>` on the
@@ -602,7 +600,6 @@ for (const v of VERTICALS) {
       extractShouldThrow = true;
       await capture(v.title, v.canonicalUrl);
       expect(lastOpts!.toolSurface).toBe("none");
-      expect(lastOpts!.extraDirs).toBeUndefined();
     });
 
     test("declares a Read fence on the frames dir alone and raises the timeout to >=600s", async () => {
@@ -617,7 +614,6 @@ for (const v of VERTICALS) {
       expect(lastOpts!.toolSurface).toEqual({ read: [framesDir] });
       expect(extractDir).toBe(framesDir);
       for (const f of framesResult) expect(lastPrompt).toContain(join(framesDir, f.path));
-      expect(lastOpts!.extraDirs).toBeUndefined();
       expect(downloadCalls[0]!.workDir).toBe(workDir);
       expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
       // The summarize budget is computed from the REAL frame count (2 here), not

@@ -63,6 +63,19 @@ describe("buildGardenerSeams.callDraft — thinking controls", () => {
     expect(seen[0]!.effort).toBe("low");
     expect(seen[0]!.thinkingMaxTokens).toBe(8_000);
   });
+
+  test("drafts with no tools: the summaries ride in the prompt", async () => {
+    const surfaces: unknown[] = [];
+    const seams = buildGardenerSeams({
+      ...ctx(["wiki"]),
+      oneShot: (async (_p: string, _c: Config, _b: BotConfig, opts: { toolSurface: unknown }) => {
+        surfaces.push(opts.toolSurface);
+        return { result: "draft", model: "m", inputTokens: 0, outputTokens: 0, numTurns: 1 };
+      }) as never,
+    });
+    await seams.callDraft("prompt", 1_000);
+    expect(surfaces).toEqual(["none"]);
+  });
 });
 
 describe("buildGardenerSeams.fetchDoc — the weekly harvest's body", () => {

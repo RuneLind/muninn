@@ -32,7 +32,6 @@ const WATCH_URL = `https://www.youtube.com/watch?v=${VIDEO_ID}`;
 let claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point";
 let lastPrompt: string | undefined;
 let lastSystemPrompt: string | undefined;
-let lastExtraDirs: string[] | undefined;
 let lastToolSurface: unknown;
 let lastThinking: number | undefined;
 /** The bot config the model call ran with — the KIND may have swapped its model. */
@@ -49,7 +48,6 @@ mock.module("../ai/one-shot.ts", () => ({
     opts?: {
       systemPrompt?: string;
       thinkingMaxTokens?: number;
-      extraDirs?: string[];
       toolSurface?: unknown;
       timeoutMs?: number;
       onProgress?: (e: { type: string; text: string }) => void;
@@ -64,7 +62,6 @@ mock.module("../ai/one-shot.ts", () => ({
       pass: isSelection ? "select" : "summary",
       prompt,
       systemPrompt: opts?.systemPrompt,
-      extraDirs: opts?.extraDirs,
       toolSurface: opts?.toolSurface,
       timeoutMs: opts?.timeoutMs,
       thinkingMaxTokens: opts?.thinkingMaxTokens,
@@ -86,7 +83,6 @@ mock.module("../ai/one-shot.ts", () => ({
     lastPrompt = prompt;
     lastBotConfig = botConfig;
     lastSystemPrompt = opts?.systemPrompt;
-    lastExtraDirs = opts?.extraDirs;
     lastToolSurface = opts?.toolSurface;
     lastThinking = opts?.thinkingMaxTokens;
     lastTimeoutMs = opts?.timeoutMs;
@@ -116,7 +112,6 @@ let oneShotCalls: Array<{
   pass: "select" | "summary";
   prompt: string;
   systemPrompt?: string;
-  extraDirs?: string[];
   toolSurface?: unknown;
   timeoutMs?: number;
   thinkingMaxTokens?: number;
@@ -461,7 +456,6 @@ beforeEach(() => {
   claudeResult = "CATEGORY: ai/rag\n\nSUMMARY:\n### Heading\n- point";
   lastPrompt = undefined;
   lastSystemPrompt = undefined;
-  lastExtraDirs = undefined;
   lastToolSurface = undefined;
   lastThinking = undefined;
   lastBotConfig = undefined;
@@ -607,7 +601,6 @@ describe("frames off — the capture that shipped before this PR", () => {
     // absent, so the prompt pair is what it always was.
     expect(lastPrompt).toBe(transcriptBody.transcript);
     expect(lastSystemPrompt).not.toContain("### [HH:MM:SS]");
-    expect(lastExtraDirs).toBeUndefined();
     expect(lastToolSurface).toBe("none");
     expect(getJob(jobId)?.status).toBe("complete");
   });
@@ -722,7 +715,6 @@ describe("frames on", () => {
     // directory the model may Read in the first place.
     expect(existedAtModelCall).toBe(false);
     expect(lastToolSurface).toEqual({ read: [join(workDirFor(jobId), "frames")] });
-    expect(lastExtraDirs).toBeUndefined();
   });
 
   test("the frame list is on the prompt and the thinking cap is lifted", async () => {
@@ -827,7 +819,6 @@ describe("every frames failure degrades to a transcript-only capture", () => {
     const jobId = await run({ frames: true });
     expect(getJob(jobId)?.status).toBe("complete");
     expect(logged("warning", "frames failed")).toBe(true);
-    expect(lastExtraDirs).toBeUndefined();
     expect(lastToolSurface).toBe("none");
     expect(lastThinking).toBe(8000);
   });
@@ -877,7 +868,6 @@ describe("what is WINDOWED is what huginn ANSWERED, not what we asked for", () =
     // Everything else about the capture is unchanged: frames still ran.
     expect(downloadCalls).toHaveLength(1);
     expect(lastToolSurface).toEqual({ read: [join(workDirFor(jobId), "frames")] });
-    expect(lastExtraDirs).toBeUndefined();
     expect(getJob(jobId)?.status).toBe("complete");
   });
 
@@ -1229,7 +1219,6 @@ describe("the summary KIND", () => {
     expect(getJob(jobId)?.status).toBe("complete");
     expect(lastBotConfig?.model).toBe(CAPTURE_DEEP_MODEL);
     expect(lastThinking).toBeUndefined();
-    expect(lastExtraDirs).toBeUndefined();
     expect(lastToolSurface).toBe("none");
   });
 
@@ -1394,7 +1383,6 @@ describe("the dense scan path", () => {
     // second pass 10 contact sheets of a scan it is not being asked about —
     // and hands a CADENCE fallback the abandoned sheets of a dense attempt.
     expect(select.toolSurface).toEqual({ read: [join(mediaDirFor(jobId), "select")] });
-    expect(select.extraDirs).toBeUndefined();
     // No text streams during it — a JSON manifest must not reach the job card.
     expect(select.hasProgress).toBe(false);
     // Capped EVEN ON `deep`, whose full thinking budget is for the summary.

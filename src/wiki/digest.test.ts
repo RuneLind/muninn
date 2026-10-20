@@ -261,6 +261,17 @@ describe("generateWikiDigest", () => {
     expect(seenSystem.toLowerCase()).toContain("what's new");
   });
 
+  test("the digest call declares no tools: the log entries ride in the prompt", async () => {
+    let seenSurface: unknown;
+    await generateWikiDigest(root, index, config, bot, {
+      oneShot: async (_p, _c, _b, opts) => {
+        seenSurface = opts.toolSurface;
+        return { result: "- Bootstrapped" } as ClaudeExecResult;
+      },
+    });
+    expect(seenSurface).toBe("none");
+  });
+
   test("returns null when the connector yields empty text", async () => {
     const digest = await generateWikiDigest(root, index, config, bot, {
       oneShot: async () => ({ result: "   " }) as ClaudeExecResult,

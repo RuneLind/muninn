@@ -20,6 +20,9 @@
  * capture's work dir lands inside the fixture) and mocks the Haiku router for
  * the fact-check extraction phase with `mock.module`. Arms skip without their
  * binary, like the sibling harness.
+ *
+ * `FENCE_ROWS=1` prints one per-tool outcome row per arm (`FENCE-ROW | …`), the
+ * table a PR's Testing section quotes; a plain run prints nothing.
  */
 
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
@@ -216,9 +219,15 @@ interface Outcome {
   pageHits: number;
 }
 
+/** Remove every marker a run leaves on disk, so one arm's outcome cannot carry into the next. */
+function resetRunMarkers() {
+  rmSync(f.bashMarker, { force: true });
+  rmSync(f.mcpStartedPath, { force: true });
+}
+
 async function probe(plan: ScriptedToolUse[], run: () => Promise<unknown>): Promise<Outcome> {
   f.api.setPlan(plan);
-  rmSync(f.mcpStartedPath, { force: true });
+  resetRunMarkers();
   const hits = f.page.hits();
   const calls = f.mcpCalls();
   await run();
@@ -244,8 +253,9 @@ function expectHostileRefused(o: Outcome) {
   expect(o.mcpCalls).toBe(0);
 }
 
-/** One per-tool outcome row, printed for the PR's table. */
+/** One per-tool outcome row for the PR's table, printed only under `FENCE_ROWS=1`. */
 function report(caller: string, connector: string, o: Outcome) {
+  if (process.env.FENCE_ROWS !== "1") return;
   const cells = o.results.map((r, i) => `${i + 1}:${r.name}=${r.isError ? "refused" : "ran"}`);
   console.log(`FENCE-ROW | ${caller} | ${connector} | ${cells.join(" ")} | leaked=${o.leaked.length} mcpCalls=${o.mcpCalls} mcpStarted=${o.mcpStarted} pageHits=${o.pageHits}`);
 }
@@ -259,6 +269,18 @@ async function waitForJob(jobId: string): Promise<void> {
   }
   throw new Error(`job ${jobId} did not settle`);
 }
+
+describe.skipIf(!cliReady && !sdkReady)("probe: one arm's markers never reach the next", () => {
+  test("an arm whose Bash ran and whose MCP stub started leaves the next arm clean", async () => {
+    const a = await probe([], async () => {
+      writeFileSync(f.bashMarker, "ran\n");
+      writeFileSync(f.mcpStartedPath, "");
+    });
+    const b = await probe([], async () => {});
+    expect([a.bashRan, a.mcpStarted]).toEqual([true, true]);
+    expect([b.bashRan, b.mcpStarted]).toEqual([false, false]);
+  });
+});
 
 for (const connector of ["claude-cli", "claude-sdk"] as const) {
   const ready = connector === "claude-cli" ? cliReady : sdkReady;

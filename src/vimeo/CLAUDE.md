@@ -377,8 +377,9 @@ the TikTok `t=HH:MM:SS <path>` shape) plus the one rule TikTok does not need:
 the frame's file name, only where it adds something the transcript did not
 say, at most `MAX_INLINE_SLIDES` (8). The SYSTEM prompt says nothing about
 frames, so a frames-off capture's prompt is byte-identical to PR 1's.
-`extraDirs: [workDir]` only when there are frames; the summarize timeout is
-`summarizeTimeoutFor(frames.length, 600 s)`.
+The summary call declares `toolSurface: { read: [framesDir] }` (`<workDir>/frames`,
+the JPEGs and nothing else) only when there are frames, and `"none"` otherwise;
+the summarize timeout is `summarizeTimeoutFor(frames.length, 600 s)`.
 
 **Only the frames the summary QUOTES survive the job.** `keepReferencedFrames`
 parses the summary for this video's `/api/frames/vimeo/<id>/<sec>.jpg` paths —
@@ -561,8 +562,8 @@ interactively — the launchd rule for models applies), `brew install whisper-cp
 **Whisper + frames share one manifest fetch and one work dir; the audio does
 not outlive whisper.** `getManifest` in the job memoizes the fetch; the fMP4
 and the WAV are unlinked the moment `whisper-cli` exits (a 3 h talk is ~137 MB
-of Opus plus ~345 MB of WAV, and with Slides on the work dir is what the model
-is handed as `--add-dir`), and the segments go with the dir in the `finally`.
+of Opus plus ~345 MB of WAV; the model's one Read dir is `<workDir>/frames`,
+which never holds them), and the segments go with the dir in the `finally`.
 Statuses on that path: `harvesting_captions → downloading → transcribing →
 extracting_frames → summarizing → ingesting`.
 
@@ -603,10 +604,10 @@ machine too, because without it the first answer would shadow the second.
 (5) *On the success path nothing of the audio or frames pass outlives its
 step in the work dir*: the fMP4, the WAV and whisper's `.vtt` are unlinked as
 soon as they are consumed, and `extractCadenceFrames` removes its segment
-files after the last grab — the work dir is what the model is handed as
-`--add-dir`, and holds only the JPEGs. A step that FAILS (ffmpeg non-zero, a
+files after the last grab — the frames dir is the summary call's Read
+surface, and holds only the JPEGs. A step that FAILS (ffmpeg non-zero, a
 whisper killed mid-write, a frame grab throwing) leaves its files for the
-job's `rm` of the work dir, and no failed pass reaches `--add-dir`. (6) The docs' operator remedy is spelled without `~` (no
+job's `rm` of the work dir, and no failed pass reaches the model's Read surface. (6) The docs' operator remedy is spelled without `~` (no
 expansion). (7) The "larger of two allowances" test covers both orders.
 Stated residual: a track-less harvest spends the 25 s track wait AND up to
 10 s of manifest wait inside the 60 s budget, so a watch page that takes

@@ -113,7 +113,6 @@ interface Recorded {
     system: string;
     user: string;
     toolSurface: unknown;
-    extraDirs?: string[];
     url: string;
     title: string;
     source: string;
@@ -154,7 +153,6 @@ function makeDeps(
         system: o.systemPrompt as string,
         user: o.prompt as string,
         toolSurface: o.toolSurface,
-        ...(o.extraDirs ? { extraDirs: o.extraDirs as string[] } : {}),
         url: o.url as string,
         title: o.title as string,
         source: o.source as string,
@@ -823,7 +821,6 @@ describe("the frames listing", () => {
     expect(rec.prompts[0]!.user).toContain(join(dir, "60.jpg"));
     // …through a Read fenced to the kept frames dir, never the bot's surface.
     expect(rec.prompts[0]!.toolSurface).toEqual({ read: [dir] });
-    expect(rec.prompts[0]!.extraDirs).toBeUndefined();
     // …the quote of the one it used survived the tail…
     expect(String(rec.ingests[0]!.body.summary)).toContain(quote);
     // …and NOTHING was pruned: the unquoted frame is still there, and the

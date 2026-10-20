@@ -478,14 +478,7 @@ describe("claude-sdk executePrompt", () => {
     expect("effort" in opts).toBe(false);
   });
 
-  test("maps extraDirs to additionalDirectories", async () => {
-    fakeEvents = successOnly;
-    await executePrompt("hi", baseConfig, { ...baseBot(), extraDirs: ["/tmp/frames", "/tmp/more"] });
-    const opts = queryCalls[0]!.options as Record<string, unknown>;
-    expect(opts.additionalDirectories).toEqual(["/tmp/frames", "/tmp/more"]);
-  });
-
-  test("omits additionalDirectories when extraDirs is unset", async () => {
+  test("an unfenced run sends no additionalDirectories", async () => {
     fakeEvents = successOnly;
     await executePrompt("hi", baseConfig, baseBot());
     const opts = queryCalls[0]!.options as Record<string, unknown>;
