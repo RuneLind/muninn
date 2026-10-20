@@ -1481,7 +1481,7 @@ export function timelineLanesCss(scope: string): string {
     ${s} .tll-track { position: relative; list-style: none; margin: 0; margin-inline: 0.5rem; padding: 0; block-size: 1.4rem; border-block-end: 1px dashed var(--border-secondary); }
     /* A zero-width box at the day, its content centred and overflowing both ways: centred in ltr and rtl alike. */
     ${s} .tll-mark { position: absolute; inset-block-start: 50%; inline-size: 0; display: flex; justify-content: center; align-items: center; gap: 0.15rem; transform: translateY(-50%); margin: 0; }
-    ${s} .tll-dot { display: inline-block; inline-size: 0.7rem; block-size: 0.7rem; border: 1px solid var(--bg-panel); }
+    ${s} .tll-dot { display: inline-block; flex: none; inline-size: 0.7rem; block-size: 0.7rem; border: 1px solid var(--bg-panel); }
     ${s} .tll-decisions .tll-dot { border-radius: 50%; background: var(--accent-light); }
     ${s} .tll-queries .tll-dot { border-radius: 1px; background: var(--tone-info); }
     ${s} .tll-timeline .tll-dot { transform: rotate(45deg); background: var(--tone-warn); }

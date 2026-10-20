@@ -477,6 +477,28 @@ test.describe("Wiki reader: polish", () => {
     }
   });
 
+  for (const forced of [false, true]) {
+    test(`each lane's dot keeps its 0.7rem size and its own shape in ltr and rtl${forced ? ", forced colours" : ""}`, async ({ page }) => {
+      if (forced) await page.emulateMedia({ forcedColors: "active" });
+      await open(page, 1280);
+      const want = await page.evaluate(() => 0.7 * parseFloat(getComputedStyle(document.documentElement).fontSize));
+      for (const dir of ["ltr", "rtl"]) {
+        await page.evaluate((d) => (document.documentElement.dir = d), dir);
+        for (const [kind, radius, turned] of [["decisions", "50%", false], ["queries", "1px", false], ["timeline", "0px", true]] as const) {
+          const dot = lanes(page).locator(`.tll-${kind} .tll-dot`).first();
+          // The layout box, before the diamond's rotation.
+          const size = await dot.evaluate((e) => ({ w: (e as HTMLElement).offsetWidth, h: (e as HTMLElement).offsetHeight, rect: e.getBoundingClientRect().width }));
+          expect(Math.abs(size.w - want), `${dir} ${kind} width ${size.w}`).toBeLessThanOrEqual(1);
+          expect(Math.abs(size.h - want), `${dir} ${kind} height ${size.h}`).toBeLessThanOrEqual(1);
+          expect(await css(dot, "border-top-left-radius"), `${dir} ${kind} radius`).toBe(radius);
+          expect((await css(dot, "transform")) !== "none", `${dir} ${kind} rotated`).toBe(turned);
+          // A rotated square's box is √2 wider than its side; an unrotated one is its side.
+          expect(Math.abs(size.rect - want * (turned ? Math.SQRT2 : 1)), `${dir} ${kind} drawn width ${size.rect}`).toBeLessThanOrEqual(1);
+        }
+      }
+    });
+  }
+
   test("dir=rtl: ArrowLeft moves to the next square and ArrowRight to the previous; Up, Down, Home and End do not flip", async ({ page }) => {
     await open(page, 1280);
     await page.evaluate(() => (document.documentElement.dir = "rtl"));
