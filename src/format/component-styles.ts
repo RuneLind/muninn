@@ -1212,7 +1212,7 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc {
       position: relative; margin: 0.8rem 0 1rem; padding: 0.6rem 0.8rem; border-radius: 8px; max-width: 100%;
       box-sizing: border-box; background: var(--bg-panel); border: 1px solid var(--border-primary);
-      container: vc / inline-size; overflow-wrap: anywhere;
+      container: vc / inline-size;
     }
     ${scope} .vc-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.8rem; margin-bottom: 0.5rem; }
     ${scope} .vc-caption { font-weight: 600; color: var(--text-primary); }
@@ -1229,7 +1229,8 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc-btn:focus-visible { outline: 2px solid var(--accent-light); outline-offset: 1px; }
     ${scope} .vc-rows { display: grid; grid-template-columns: minmax(6rem, max-content) minmax(8rem, 1fr) minmax(0, max-content); gap: 0.35rem 0.7rem; align-items: center; }
     ${scope} .vc-row { display: contents; }
-    ${scope} .vc-lab { color: var(--text-primary); min-width: 0; }
+    ${scope} .vc-lab { color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+    ${scope} .vc-num .dc-go { margin-left: 0; }
     ${scope} .vc-bar { display: block; min-width: 0; }
     ${scope} .vc-num { font-size: 0.85em; color: var(--text-soft); font-variant-numeric: tabular-nums; min-width: 0; }
     ${scope} .vc-svg { display: block; width: 100%; height: 1.1rem; overflow: visible; }
@@ -1282,10 +1283,12 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc-s3 .vc-sw-line .vc-line, ${scope} .vc-s4 .vc-sw-line .vc-line { stroke-dasharray: 6 2; }
     ${scope} .vc-notes { margin: 0.5rem 0 0; padding-inline-start: 1.1rem; font-size: 0.8em; color: var(--text-soft); }
     ${scope} .vc-table table { margin: 0.4rem 0 0; }
-    /* Chart mode: the table is there for a screen reader and a selection only. */
-    ${live}:not(.vc-mode-table) > .vc-table {
-      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
-      clip-path: inset(50%); white-space: nowrap; border: 0;
+    /* Chart mode on screen: the table is there for a screen reader and a selection only. */
+    @media screen {
+      ${live}:not(.vc-mode-table) > .vc-table {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+        clip-path: inset(50%); white-space: nowrap; border: 0;
+      }
     }
     ${live}.vc-mode-table > .vc-plot, ${live}.vc-mode-table > .vc-legend, ${live}.vc-mode-table .vc-variants { display: none; }
     ${scope} .vc-plot[hidden] { display: none; }
@@ -1295,7 +1298,6 @@ export function chartViewCss(scope: string): string {
       ${scope} .vc-lab, ${scope} .vc-num { display: block; }
     }
     @media print {
-      ${scope} .vc > .vc-table { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; white-space: normal; }
       ${scope} .vc > .vc-plot, ${scope} .vc > .vc-legend, ${scope} .vc-ctl { display: none; }
     }
     @media (forced-colors: active) {

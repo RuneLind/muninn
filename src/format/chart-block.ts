@@ -442,7 +442,8 @@ class Reader {
  *  renderer `renderWikiHtml` passes as `chartView`, so the view's module stays
  *  out of the chat bundle. */
 export interface ChartViewInput {
-  read: ChartRead & { model: ChartModel };
+  /** No model: the table failed its kind, and the view shows it with the findings. */
+  read: ChartRead;
   caption: string;
   /** The table, the blocks before it and the blocks after it, rendered. */
   tableHtml: string;

@@ -100,10 +100,25 @@ interface Variant {
   html: string;
 }
 
-/** The whole `<Chart>` section for a table that reads as its kind. */
+/** The whole `<Chart>` section: the view, or for a table that fails its
+ *  kind, the table as written under its findings. */
 export function chartViewHtml(input: ChartViewInput): string {
   const { model } = input.read;
   const w = CHART_WORDS[input.language];
+  const notes = input.read.findings.length
+    ? `<ul class="vc-notes" ${RO}>${input.read.findings.map((f) => `<li>${escapeHtml(f.message)}</li>`).join("")}</ul>`
+    : "";
+  if (!model) {
+    const name = input.caption.trim() || w.chart;
+    return (
+      `<section class="${CHART_CLASS} vc-fallback" role="figure" aria-label="${escapeHtml(name)}">` +
+      input.beforeHtml +
+      notes +
+      `<div class="tablewrap">${input.tableHtml}</div>` +
+      input.afterHtml +
+      `</section>`
+    );
+  }
   const comma = input.language === "no" || input.read.ctx.decimalComma === true;
   const caption = input.caption.trim();
   const name = caption || w.kinds[model.kind];
@@ -120,9 +135,6 @@ export function chartViewHtml(input: ChartViewInput): string {
   const plots = plot.variants
     .map((v, i) => `<div class="vc-plot" ${RO} data-vc-plot="${v.id}"${i === 0 ? "" : " hidden"}>${v.html}</div>`)
     .join("");
-  const notes = input.read.findings.length
-    ? `<ul class="vc-notes" ${RO}>${input.read.findings.map((f) => `<li>${escapeHtml(f.message)}</li>`).join("")}</ul>`
-    : "";
   return (
     `<section class="${CHART_CLASS} vc-kind-${model.kind}" role="figure" aria-label="${escapeHtml(name)}">` +
     input.beforeHtml +
@@ -361,7 +373,9 @@ function stepsPlot(model: Extract<ChartModel, { kind: "steps" }>, comma: boolean
   const xLabels = shown
     .map((i) => {
       const edge = n > 1 && i === 0 ? " vc-xfirst" : n > 1 && i === n - 1 ? " vc-xlast" : "";
-      return `<span class="vc-xlab${edge}" style="left:${round2(xPct(i))}%;max-width:${round2(100 / shown.length)}%" title="${escapeHtml(model.steps[i]!)}">${escapeHtml(model.steps[i]!)}</span>`;
+      // An edge label grows one way only: half the width keeps it off its neighbour.
+      const width = (edge ? 50 : 100) / shown.length;
+      return `<span class="vc-xlab${edge}" style="left:${round2(xPct(i))}%;max-width:${round2(width)}%" title="${escapeHtml(model.steps[i]!)}">${escapeHtml(model.steps[i]!)}</span>`;
     })
     .join("");
   return (

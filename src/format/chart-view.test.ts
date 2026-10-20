@@ -207,10 +207,12 @@ describe("off the reader view", () => {
     expect(out).toContain("<table");
   });
 
-  test("a table that fails its kind renders as written", () => {
+  test("a table that fails its kind renders as its table under the finding", () => {
     const out = reader(gate(["| a | 2 | x | 2 |"]));
-    expect(out).not.toContain('class="vc ');
-    expect(out).toContain("<table");
+    expect(out).not.toContain("vc-kind-");
+    expect(out).not.toContain("<svg");
+    expect(out).toContain('<section class="vc vc-fallback" role="figure" aria-label="Gates">');
+    expect(out).toMatch(/<ul class="vc-notes" data-reader-only="">.*not a number.*<\/ul><div class="tablewrap"><table/);
   });
 });
 
@@ -232,7 +234,7 @@ describe("render and lint agree", () => {
   for (const [name, rows, draws] of cases) {
     test(name, () => {
       const md = chart('<Chart kind="gate" bar="Bar" pass="Pass" hold="Hold">', rows);
-      const drawn = reader(md).includes('class="vc ');
+      const drawn = reader(md).includes("vc-kind-gate");
       const warned = checkPageText({ relPath: "plans/a.mdx" }, md, []).some((f) => f.check === "chart-table" && f.severity !== "info");
       expect({ drawn, warned }).toEqual({ drawn: draws, warned: !draws });
     });

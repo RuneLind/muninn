@@ -786,18 +786,16 @@ function deltaTableHtml(
  *  that is a direct child of its body. The rest of the body renders above the
  *  table. */
 /** A `<Chart>`: on the reader's page render with a chart view, the view over
- *  its table; else, or when the table does not read as its kind, the body as
- *  written. Cells are read as the lint reads them (`visibleText`), wikilink
+ *  its table (the table under its findings when it fails its kind); else, or
+ *  with no kind or no table, the body as written. Cells are read as the lint reads them (`visibleText`), wikilink
  *  sentinels as their link text first. */
 function chartBlockHtml(attrs: Record<string, string>, rawChildren: Block[], children: string): string {
   if (!currentChartView) return children;
   const kind = readChartKind(attrs.kind).value;
   const body = chartBody(rawChildren);
   if (!kind || !body.table) return children;
-  const read = readChart(kind, attrs, chartTable(body.table, (c) => visibleText(peekText(c))));
-  if (!read.model) return children;
   return currentChartView({
-    read: { ...read, model: read.model },
+    read: readChart(kind, attrs, chartTable(body.table, (c) => visibleText(peekText(c)))),
     caption: attrs.caption ?? "",
     tableHtml: renderBlocks([body.table], webRenderer),
     beforeHtml: renderBlocks(body.before, webRenderer),
