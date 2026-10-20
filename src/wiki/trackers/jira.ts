@@ -312,7 +312,10 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
     }
   };
 
-  add(stampedKeys(page.frontmatter[jiraAdapter.frontmatterKey]), "stamped");
+  // One key shape for the index: a stamped key `parseKey` refuses (`X-1`,
+  // `DEMO-0145`) stays on the page's `jira` list and its strip, never an issue
+  // ref, since the graph and the Stamp route could not take it back.
+  add(stampedKeys(page.frontmatter[jiraAdapter.frontmatterKey]).filter((k) => parseClientKey(k) !== null), "stamped");
   for (const field of config.frontmatterKeys) {
     if (!Object.prototype.hasOwnProperty.call(page.frontmatter, field)) continue;
     add(valueStrings(page.frontmatter[field]).flatMap((v) => scanKeys(v, config, { caseSensitive: false })), "declared");
