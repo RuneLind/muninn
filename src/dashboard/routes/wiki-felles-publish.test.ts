@@ -359,6 +359,18 @@ describe("remove outcomes: one row per cell", () => {
     expect([...state.bucket].sort()).toEqual([...after].sort());
   });
 
+  test("R14 the answer's output carries the data run's stdout and stderr after the page run's", async () => {
+    const { app, state } = harness();
+    [PAGE, ...DATA].forEach((o) => state.bucket.add(o));
+    state.fail = dataLoggedOut;
+    const { output } = (await (await remove(app)).json()) as { output: string };
+    const pageLine = output.search(/slettet gs:\/\/\S+\/plans\/case\.mdx/);
+    const dataOut = output.search(/sletter gs:\/\/\S+\/plans\/case\.yaml/);
+    const dataErr = output.search(/Feil: sletting av gs:\/\/\S+\/plans\/case\.yaml/);
+    expect([pageLine, dataOut, dataErr].every((i) => i >= 0)).toBe(true);
+    expect(pageLine).toBeLessThan(dataOut);
+  });
+
   test("R13 a page with no data files that is not in the bucket counts as removed", async () => {
     const { app, state } = harness();
     const res = await post(app, { wiki: "kode", relPath: "plans/a.mdx", dryRun: false, action: "remove" });

@@ -171,10 +171,15 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
  * `?refresh=1` forces a rebuild: a full wiki index build with its git reads
  * (`pages`, `index-coverage`), or an uncached recompute over every summary
  * collection (`ingest-backlog`, `stats`). Exact paths. Each route reads
- * `c.req.query("refresh") === "1"`; {@link refreshRequested} matches ANY
- * `refresh` value equal to `"1"`, a superset of whichever one the route reads.
- * `side-effecting-gets.test.ts` scans the route sources for every `refresh`
- * read, so a new one starts red until it is classified.
+ * `c.req.query("refresh") === "1"`, which is Hono's FIRST value of a repeated
+ * parameter; {@link refreshRequested} matches ANY `refresh` value equal to
+ * `"1"`, a superset of whichever one the route reads.
+ * `side-effecting-gets.test.ts` finds a new read only when it is spelled
+ * `.query("refresh")` or `.queries("refresh")` with a literal name, in a
+ * non-test `.ts` file under `src/dashboard/` or `src/chat/`, and it attributes
+ * the read to the nearest literal `.get("…")` above it in that file. A
+ * destructured `c.req.query()`, an indexed `queries()["refresh"]`, a
+ * `searchParams` read, or a read in any other directory is not seen.
  */
 export const REFRESH_SIDE_EFFECTING_GETS: readonly string[] = [
   "/api/wiki/pages",

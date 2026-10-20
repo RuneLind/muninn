@@ -362,8 +362,14 @@ over every summary collection); those count as side-effecting only when a
 and is on neither list.
 **`side-effecting-gets.test.ts` is the carrier**: it walks every registered GET
 and requires each on this list or on its `READ_ONLY_GETS` allowlist with a
-reason, so a new GET starts red; it also scans the route sources for every
-`refresh` read, so a GET that grows one starts red until it is classified. The criterion is written in its header: a
+reason, so a new GET starts red; it also scans for `refresh` reads, so a GET
+that grows one starts red until it is classified — but only a read spelled
+`.query("refresh")` or `.queries("refresh")` with a literal name, in a non-test
+`.ts` file under `src/dashboard/` or `src/chat/`, attributed to the nearest
+literal `.get("…")` above it in the same file. A destructured `c.req.query()`,
+an indexed `queries()["refresh"]`, a `searchParams` read, or a read in any other
+directory is not seen. The routes' `c.req.query("refresh")` takes the FIRST
+value of a repeated parameter, so the gate matches any value equal to `"1"`. The criterion is written in its header: a
 model call, a spawn, a consume, a search/similarity/embedding computation the
 caller drives, or a fan-out the data sizes is listed; a fixed set of listings
 or one bounded sibling read is not. Three examples: `GET /chat/pending/:threadId` is a one-time *consume*

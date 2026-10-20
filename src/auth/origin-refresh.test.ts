@@ -34,7 +34,7 @@ for (const mode of ["off", "authenticating"] as const) {
     for (const path of REFRESH_PATHS) {
       test(`${path}: a cross-site ?refresh=1 is refused before the handler`, async () => {
         const { app, calls } = appFor(mode);
-        for (const target of [`${path}?refresh=1`, `${path}?wiki=mimir&refresh=1`, `${path}?refresh=0&refresh=1`]) {
+        for (const target of [`${path}?refresh=1`, `${path}?wiki=mimir&refresh=1`, `${path}?refresh=0&refresh=1`, `${path}?refresh=1&refresh=0`]) {
           const res = await app.request(target, { headers: CROSS });
           expect({ target, status: res.status }).toEqual({ target, status: 403 });
         }
@@ -59,6 +59,24 @@ for (const mode of ["off", "authenticating"] as const) {
         expect(calls[path]).toBe(2);
       });
     }
+
+    // The routes read `c.req.query("refresh")`, which is Hono's FIRST value, so
+    // `?refresh=1&refresh=0` is a rebuild: a gate reading the last value would let it through.
+    test("a repeated refresh: the route reads the first value, and the gate refuses either order", async () => {
+      const app = new Hono();
+      app.use("*", createOriginMiddleware(["https://muninn.example"], PORT, mode));
+      const seen: (string | undefined)[] = [];
+      app.get("/api/wiki/pages", (c) => {
+        seen.push(c.req.query("refresh"));
+        return c.json({ ok: true });
+      });
+      const same = { "sec-fetch-site": "same-origin" };
+      expect((await app.request("/api/wiki/pages?refresh=1&refresh=0", { headers: same })).status).toBe(200);
+      expect((await app.request("/api/wiki/pages?refresh=0&refresh=1", { headers: same })).status).toBe(200);
+      expect(seen).toEqual(["1", "0"]);
+      expect((await app.request("/api/wiki/pages?refresh=1&refresh=0", { headers: CROSS })).status).toBe(403);
+      expect(seen).toHaveLength(2);
+    });
 
     test("/api/wiki/page never rebuilds on ?refresh=1, so it is not refused", async () => {
       const { app, calls } = appFor(mode);

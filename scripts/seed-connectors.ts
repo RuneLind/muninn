@@ -3,9 +3,11 @@
  *
  * Creates standard connector entries for common AI backends.
  * Safe to run multiple times — skips an entry when a connector with the same
- * connector_type + model + base_url exists at any effort (the table's unique
- * key also includes effort, so a user's `high` variant must not gain a
- * NULL-effort twin; pinned by src/db/seed-connectors-script.test.ts).
+ * connector_type + model + base_url exists at any effort. The table's unique
+ * key is `idx_connectors_unique_config` on (connector_type, COALESCE(model, ''),
+ * COALESCE(base_url, ''), COALESCE(effort, '')) — migration 084 — so the key
+ * alone would let a user's `high` variant gain a NULL-effort twin; pinned by
+ * src/db/seed-connectors-script.test.ts.
  *
  * Usage:
  *   bun scripts/seed-connectors.ts

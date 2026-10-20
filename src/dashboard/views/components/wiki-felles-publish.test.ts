@@ -94,6 +94,8 @@ describe("fellesRemoveView: one row per outcome cell", () => {
   const ROWS: [string, "remove" | "remove-data", boolean, number, Record<string, unknown> | null, Want][] = [
     // Dry runs never ask the bucket.
     ["D1 dry run exit 0: the confirm row lists every object", "remove", true, 200, { exitCode: 0, removes: [PAGE, ...DATA], keptShared: [], keptRefused: [] }, { text: /does not check/, ok: true, row: "confirm", has: DATA }],
+    // The answer's kept lists reach the confirm row (the view passes both on).
+    ["D6 dry run exit 0: the confirm row names the kept data files", "remove", true, 200, { exitCode: 0, removes: [PAGE, ...DATA], keptShared: ["shared/s.csv"], keptRefused: ["plans/a[1].csv"] }, { text: /does not check/, ok: true, row: "confirm", has: ["another page reads it: <code>shared/s.csv</code>", "the script refuses its name: <code>plans/a[1].csv</code>"] }],
     ["D2 dry run exit 3", "remove", true, 200, { exitCode: 3 }, { text: /^Delete failed in a dry run/, ok: false, row: "hidden" }],
     ["D3 dry run exit 1", "remove", true, 200, { exitCode: 1 }, { text: /dry run deletes nothing/, ok: false, row: "hidden" }],
     ["D4 dry run exit 2", "remove", true, 200, { exitCode: 2 }, { text: /^Usage or environment error/, ok: false, row: "hidden" }],

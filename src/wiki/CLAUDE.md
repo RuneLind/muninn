@@ -4427,9 +4427,11 @@ with the time of the last poll that brought every object in. `/api/wiki/pages`
 carries it as `mirror` on a mirrored root only while it is not `ok`, so a
 healthy listing is unchanged; the reader shows one rail line under the felles
 chip (`views/components/wiki-mirror-status.ts`). The line paints from every
-listing response that is not stale, through `receivePages`' `onMirror` hook, so
-a listing held back under an open page or unchanged since the last one still
-updates it; a 1-minute tick redraws its age between listings. Both come from
+listing that reaches `receivePages` and is not stale, through its `onMirror`
+hook, so a listing held back under an open page or unchanged since the last one
+still updates it. A fetch that fails, or a response that does not parse,
+carries no `pages` array, or carries an `error` with no pages, stops in
+`handlePagesResponse` before `receivePages` and leaves the line as it was; a 1-minute tick redraws its age between listings. Both come from
 `installMirrorStatus` (the reader passes its clock and timer). Only the health
 message is a live region (`role="status"`, written only when it changes); the
 age sits beside it, so the minute tick does not re-announce the line. The wiring
