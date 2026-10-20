@@ -1,7 +1,9 @@
 /**
- * The reader's `<Chart>` toggles. The server draws every variant
- * (`src/format/chart-view.ts`); this file only shows one: Chart or Table,
- * and the variant (points or % of target, the bar as decided or after).
+ * The reader's `<Chart>` toggles and `<RuleTree>` case picker. The server
+ * draws every chart variant (`src/format/chart-view.ts`); this file only shows
+ * one: Chart or Table, and the variant (points or % of target, the bar as
+ * decided or after). A picked case marks the tree's rows on its path
+ * (`src/format/rule-tree-view.ts`).
  * No third-party imports; part of the /wiki bundle via `wiki-browser.ts`.
  *
  * State lives on the DOM (`aria-pressed`, `hidden`, the `vc-mode-table`
@@ -32,13 +34,55 @@ function applyChartToggle(target: Element | null): boolean {
   return true;
 }
 
+/** The case ids a rule tree row's leaf names (`data-rt-cases`, a JSON list). */
+function leafCases(li: Element): string[] {
+  try {
+    const v: unknown = JSON.parse(li.getAttribute("data-rt-cases") ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Apply one picker change; false when `target` is not a rule tree picker.
+ *  An empty value clears the pick. */
+function applyRuleTreePick(target: Element | null): boolean {
+  const select = target instanceof HTMLSelectElement && target.matches("select[data-rt-select]") ? target : null;
+  const tree = select?.closest<HTMLElement>("section.rt");
+  if (!select || !tree || tree.closest(".wiki-ref-peek")) return false;
+  const id = select.value;
+  const nodes = Array.from(tree.querySelectorAll<HTMLElement>("li.rt-node"));
+  const on = new Set<Element>();
+  if (id) {
+    for (const li of nodes) {
+      if (!leafCases(li).includes(id)) continue;
+      for (let n: Element | null = li; n && n !== tree; n = n.parentElement) if (n.matches("li.rt-node")) on.add(n);
+    }
+  }
+  tree.classList.toggle("rt-picked", id !== "");
+  for (const li of nodes) {
+    li.classList.toggle("rt-on", id !== "" && on.has(li));
+    li.classList.toggle("rt-off", id !== "" && !on.has(li));
+  }
+  tree.querySelectorAll(".rt-case").forEach((c) => c.classList.toggle("rt-hit", id !== "" && c.textContent?.trim() === id));
+  tree.querySelectorAll<HTMLElement>("[data-rt-kort]").forEach((k) => {
+    k.hidden = k.dataset.rtKort !== id;
+  });
+  return true;
+}
+
 let installed = false;
 
-/** Install the one delegated listener; later calls do nothing. */
+/** Install the delegated listeners; later calls do nothing. */
 export function initWikiVisuals(doc: Document = document): void {
   if (installed) return;
   installed = true;
   doc.addEventListener("click", (e) => {
     applyChartToggle(e.target instanceof Element ? e.target : null);
   });
+  doc.addEventListener("change", (e) => {
+    applyRuleTreePick(e.target instanceof Element ? e.target : null);
+  });
+  // The rule tree picker shows only once its listener is in place.
+  doc.documentElement.classList.add("rt-js");
 }

@@ -335,6 +335,21 @@ function bareChart(chart: Element): void {
   chart.querySelector(":scope > .vc-table")?.classList.remove("vc-table");
 }
 
+/** A `<RuleTree>`'s reader chrome (`RULE_TREE_CHROME_CLASSES` in
+ *  rule-tree-view.ts, pinned equal by a test). */
+export const PEEK_RULE_TREE_CHROME = ["rt-head"] as const;
+
+/** A peeked rule tree is its list as written: no tree classes, no picker
+ *  wiring, no figure role. */
+function bareRuleTree(tree: Element): void {
+  for (const x of [tree, ...Array.from(tree.querySelectorAll("[class], [data-rt-cases]"))]) {
+    if (x === tree || Array.from(x.classList).some((k) => k.startsWith("rt-"))) x.removeAttribute("class");
+    x.removeAttribute("data-rt-cases");
+  }
+  tree.removeAttribute("role");
+  tree.removeAttribute("aria-label");
+}
+
 /** What a peek copy drops: the reader's compact-list controls and parts (D6,
  *  D41, D42) and the decision views — a peek shows its target whole, as
  *  written, and never the chain or the strip. */
@@ -349,6 +364,7 @@ export const PEEK_STRIP_SELECTOR = [
   CB_LINE_CLASS,
   DC_VIEW_CLASS,
   ...PEEK_CHART_CHROME,
+  ...PEEK_RULE_TREE_CHROME,
 ]
   .map((c) => `.${c}`)
   .join(", ");
@@ -363,6 +379,7 @@ function cloneBare<T extends Node>(n: T): T {
   if (c instanceof Element) {
     c.querySelectorAll(PEEK_STRIP_SELECTOR).forEach((b) => b.remove());
     for (const chart of [c, ...Array.from(c.querySelectorAll("section.vc"))]) if (chart.matches("section.vc")) bareChart(chart);
+    for (const tree of [c, ...Array.from(c.querySelectorAll("section.rt"))]) if (tree.matches("section.rt")) bareRuleTree(tree);
     for (const list of [c, ...Array.from(c.querySelectorAll(".dl-list"))]) {
       if (!list.matches(".dl-list")) continue;
       const items = Array.from(list.children);
