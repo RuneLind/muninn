@@ -106,7 +106,7 @@ import {
 } from "../../wiki/page-write.ts";
 import { setFrontmatterScalar } from "../../plans/frontmatter.ts";
 import { sha256 } from "../../gardener/util.ts";
-import { normalizeSeriesKey, seriesCensusKey, seriesKeyOf } from "../views/components/wiki-groups.ts";
+import { normalizeSeriesKey, seriesCensusKey } from "../views/components/wiki-groups.ts";
 import { canEditSeriesPage, SERIES_VALUE_MAX } from "../views/components/wiki-series-menu.ts";
 import { decideStampRequest } from "./wiki-stamp.ts";
 import { readonlyRefusal } from "./route-utils.ts";
@@ -155,6 +155,9 @@ const SERIES_LABEL_KEY = "series_label";
  * ordinary `.md` page `explainer`, and the extension test is what excludes a
  * real HTML one.
  */
+/** How many pages rule 4's in-section census reads at once. */
+const CENSUS_READ_BATCH = 32;
+
 function isMarkdownPage(meta: WikiPageMeta): boolean {
   return canEditSeriesPage(meta.relPath);
 }
@@ -274,22 +277,32 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
        * series, so a member spelling the key the other way is the very member
        * this must find.
        */
-      // Judged on the members' ON-DISK frontmatter, re-read inside the write
+      // Judged on the pages' ON-DISK frontmatter, re-read inside the write
       // section (`inSectionRead` below), never on `index`: that was built before
       // the queue, so a label another writer added in between was invisible and
-      // the series ended up two-headed. Candidates are the pages the index knew
-      // in SOME series; a page joining a series off-path since then is not seen.
+      // the series ended up two-headed. EVERY indexed markdown page is read, not
+      // only the index's series members: a concurrent request of this route can
+      // move a page INTO the series with a label after the index was built.
+      // Keyed by the page's real relPath (it is reported back in the 409), and
+      // compared to this page's through `normalizeRelPath` separately.
       const freshPairs = new Map<string, { series: string | null; seriesLabel: string | null }>();
       const baseRead = deps.readFile ?? defaultPageWriteIo(root).readFile;
       const mine = normalizeRelPath(meta.relPath);
       const inSectionRead = async (absPath: string): Promise<string | null> => {
         const target = await baseRead(absPath);
         freshPairs.clear();
-        for (const p of index.pages) {
-          const rel = normalizeRelPath(p.relPath);
-          if (rel === mine || !seriesKeyOf(p)) continue;
-          const text = await baseRead(path.join(root, p.relPath));
-          if (text !== null) freshPairs.set(rel, seriesPairOf(text));
+        const others = index.pages.filter(
+          (p) => isMarkdownPage(p) && normalizeRelPath(p.relPath) !== mine,
+        );
+        // Batched, not one `Promise.all` over the wiki: a 1,500-page wiki would
+        // open every file at once, and a read that fails reads as "no label".
+        for (let i = 0; i < others.length; i += CENSUS_READ_BATCH) {
+          const batch = others.slice(i, i + CENSUS_READ_BATCH);
+          const texts = await Promise.all(batch.map((p) => baseRead(path.join(root, p.relPath))));
+          batch.forEach((p, j) => {
+            const text = texts[j];
+            if (text != null) freshPairs.set(p.relPath, seriesPairOf(text));
+          });
         }
         return target;
       };
