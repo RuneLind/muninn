@@ -168,6 +168,20 @@ describe("gate", () => {
   });
 });
 
+describe("named columns", () => {
+  test("a mark= naming no column is fatal, and like a missing column stops the read", () => {
+    const r = chart('<Chart kind="gap" value="Now" target="Goal" gap="Gap" mark="Nope">', ["I", "Now", "Goal", "Gap"], [["a", "soon", "4", "3"]]);
+    expect(r.model).toBeNull();
+    expect(messages(r)).toEqual(['mark="Nope" names no column']);
+  });
+
+  test("a Bar after column written in both languages is fatal", () => {
+    const r = chart('<Chart kind="gate" bar="Bar" pass="Pass" hold="Hold">', ["S", "Bar", "Bar after", "Krav etter", "Pass", "Hold"], [["a", "2", "3", "3", "3", "3"]]);
+    expect(r.model).toBeNull();
+    expect(messages(r)).toEqual(["has 2 «Bar after» columns"]);
+  });
+});
+
 describe("gateRowPr", () => {
   test.each([
     ["7", 7],
@@ -244,6 +258,15 @@ describe("funnel", () => {
       ["sent", 2, 50],
       ["side", 1, 50],
       ["late", 2, 25],
+    ]);
+  });
+
+  test("of two earlier rows with the Of count, the nearer one is the parent", () => {
+    const f = model(chart('<Chart kind="funnel">', ["Step", "Count", "Of"], [["root", "20", ""], ["again", "20", "20"], ["kid", "5", "20"]]), "funnel");
+    expect(f.rows.map((r) => [r.label, r.depth])).toEqual([
+      ["root", 0],
+      ["again", 1],
+      ["kid", 2],
     ]);
   });
 

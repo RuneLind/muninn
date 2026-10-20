@@ -168,6 +168,10 @@ describe("steps x labels", () => {
     const labels = [...out.matchAll(/class="vc-xlab[^"]*" style="left:([\d.]+)%[^"]*" title="([^"]*)"/g)];
     expect(labels.map((m) => m[2])).toEqual(idx.map((i) => `step number ${i} with a long name`));
     expect(labels.map((m) => Number(m[1]))).toEqual(idx.map((i) => Math.round((i / 24) * 10000) / 100));
+    // An edge label grows one way, so it gets half a middle label's width.
+    const widths = [...out.matchAll(/class="vc-xlab[^"]*" style="[^"]*max-width:([\d.]+)%/g)].map((m) => Number(m[1]));
+    expect(widths[0]).toBeCloseTo(widths[1]! / 2, 1);
+    expect(widths[widths.length - 1]).toBeCloseTo(widths[1]! / 2, 1);
   });
 
   test("a small step count labels every step", () => {
