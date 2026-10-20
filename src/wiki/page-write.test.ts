@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, realpath, symlink, chmod } from "node:fs/promises";
+import { rm, mkdir, writeFile, realpath, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeWikiPage, defaultPageWriteIo, type PageWriteOptions } from "./page-write.ts";
@@ -461,7 +461,7 @@ test("the logged path is unchanged beside it", async () => {
 
 test("an UNREADABLE log.md is skipped, never overwritten with a fresh log (finding 21)", async () => {
   __resetWikiWriteQueueForTest();
-  const root = await realpath(await mkdtemp(path.join(tmpdir(), "logwipe-")));
+  const root = await realpath(await testTempDir(path.join(tmpdir(), "logwipe-")));
   const logPath = path.join(root, "log.md");
   const pagePath = path.join(root, "analyses", "page.md");
   const original = "# Activity Log\n\n## [2026-01-01] create | Old\n- an entry that must survive\n";
@@ -492,7 +492,7 @@ test("an UNREADABLE log.md is skipped, never overwritten with a fresh log (findi
 
 test("an ABSENT log.md is still created by a page write (finding 21 scope guard)", async () => {
   __resetWikiWriteQueueForTest();
-  const root = await realpath(await mkdtemp(path.join(tmpdir(), "logcreate-")));
+  const root = await realpath(await testTempDir(path.join(tmpdir(), "logcreate-")));
   try {
     await mkdir(path.join(root, "analyses"), { recursive: true });
     await writeFile(path.join(root, "analyses", "page.md"), "# Page\n\nBody.\n");
