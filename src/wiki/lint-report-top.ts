@@ -31,6 +31,7 @@ import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { decisionLogEntries } from "../format/question.ts";
 import {
   FIRST_SENTENCE_MAX,
+  parseStatusRow,
   parseStatusTones,
   STATUS_ROW_MAX,
   STATUS_TILE_FIRST_MAX,
@@ -76,6 +77,17 @@ function findLine(lines: readonly string[], fenced: readonly boolean[], from: nu
   return undefined;
 }
 
+/** A `<StatusRows>` row's label as the reader matches it: each wikilink
+ *  hidden behind `renderWikiHtml`'s sentinel before the row is parsed, so a
+ *  `*` or `:**` inside a link never reaches the label pattern, then read as
+ *  its text (`[[t|l]]` → `l`, else `t`), as `peekText` reads it. */
+function statusRowLabelAsRendered(item: string): string | null {
+  const texts: string[] = [];
+  const hidden = item.replace(WIKILINK_WITH_LABEL_RE, (_w, t: string, l?: string) => `\x00WIKIPAGELINK${texts.push(wikiLinkText(t, l)) - 1}\x00`);
+  const { label } = parseStatusRow(hidden);
+  return label === null ? null : label.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => texts[Number(i)] ?? "").replace(/\x00/g, "");
+}
+
 export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: string): LintFinding[] {
   const hasLog = rawContent.includes("<DecisionLog");
   const hasRows = rawContent.includes("<StatusRows");
@@ -114,8 +126,7 @@ export function checkReportTop(page: Pick<WikiPageMeta, "relPath">, rawContent: 
       const tiles = readStatusRowsView(attrs.view).value === "tiles";
       // The reader reads tones in tile view only; a wrong entry is wrong either way.
       if (attrs.tones !== undefined) {
-        // A wikilinked row label matches by the link's text, as the reader matches it.
-        const labels = rows.map((r) => (r.label === null ? null : r.label.replace(WIKILINK_WITH_LABEL_RE, (_w, t: string, l?: string) => wikiLinkText(t, l))));
+        const labels = rows.map((r) => statusRowLabelAsRendered(r.text));
         const warnings = [
           ...(!tiles && attrs.tones.trim() ? ["`tones` colours tiles only; this block renders as rows"] : []),
           ...statusToneWarnings(parseStatusTones(attrs.tones), labels),

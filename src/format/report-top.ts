@@ -116,8 +116,9 @@ export function parseStatusTones(raw: string | undefined): StatusTones {
 }
 
 /** The tone `tones` gives the row labelled `label`, if any. A wikilink in
- *  the label must already read as its text (`[[t|l]]` → `l`, else `t`), as
- *  both callers resolve it. */
+ *  the label must already read as its text (`[[t|l]]` → `l`, else `t`): the
+ *  reader's render passes it so, and lint check 11 resolves its labels the
+ *  same way before it calls {@link statusToneWarnings}. */
 export function statusTileTone(tones: StatusTones, label: string | null): StatusTone | undefined {
   return label === null ? undefined : tones.rows.get(normalizeLabel(label));
 }

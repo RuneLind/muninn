@@ -8,7 +8,7 @@ import {
   statusToneWarnings,
 } from "./report-top.ts";
 import { parseBlocks } from "./markdown-ast.ts";
-import { normalizeLabel } from "./delta-table.ts";
+import { betterLabelWarnings, normalizeLabel, parseDeltaAttrs } from "./delta-table.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
@@ -204,6 +204,44 @@ describe("a wikilinked row label: render and lint agree on its visible text", ()
     expect(html).toContain("sr-row sr-tone-warn");
     expect(html).not.toContain("sr-tone-good");
     expect(lint(md).map((f) => f.message)).toEqual(["<StatusRows> tones names no row: [[foo]]"]);
+  });
+});
+
+describe("a wikilinked row label: lint parses the row as the render does", () => {
+  // The render hides each wikilink before it parses a row, so a `*` or a `:**`
+  // inside a link never reaches the label pattern; lint has to do the same.
+  const page = (body: string) => ["---", "title: P", "type: plan", "---", "", "# P", "", body, ""].join("\n");
+  const lint = (body: string) => checkPageText({ relPath: "plans/p.mdx" }, page(body), []).filter((f) => f.check === "status-tones");
+  const render = (body: string) => renderWikiHtml(body, () => undefined, { views: true });
+
+  test.each([
+    ["[[foo|a*b]]", "a*b"],
+    ["[[foo|**Foo**]]", "Foo"],
+    ["[[t#h|l]]", "l"],
+    ["[[t\\|l]]", "l"],
+    ["[[foo|a:** b]]", "a:** b"],
+    ["[[foo]]", "foo"],
+    ["See [[foo|Bar]] now", "See Bar now"],
+    ["[[a|X]] and [[b|Y]]", "X and Y"],
+    ["Gap", "Gap"],
+    ["[[foo|a\u0000b]]", "ab"],
+  ])("row **%s:** with tones %p: the render tones it and lint is silent", (label, tone) => {
+    const md = block(` view="tiles" tones="${tone}=good"`, [`- **${label}:** 3 · n`]);
+    expect(render(md)).toContain("sr-row sr-tone-good");
+    expect(lint(md)).toEqual([]);
+  });
+});
+
+describe("an entry whose label normalizes to empty is not read", () => {
+  test("tones: reported as not read, never as naming no row", () => {
+    expect(statusToneWarnings(parseStatusTones("``=good"), ["Gap"])).toEqual([
+      'tones entry not read (use "Label=good|warn|info|muted"): ``=good',
+    ]);
+  });
+  test("DeltaTable better: an unknown value, and no label to match", () => {
+    const attrs = parseDeltaAttrs({ better: "``=lower" });
+    expect(attrs.warning).toContain("Unknown better value: ``=lower");
+    expect(betterLabelWarnings(attrs, ["A"])).toEqual([]);
   });
 });
 
