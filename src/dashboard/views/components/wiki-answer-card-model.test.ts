@@ -409,3 +409,29 @@ describe("arch-10 D: answer staleness and one live answer", () => {
     expect(of(409, null)).toBeNull();
   });
 });
+
+describe("arch-10 D fix round 1", () => {
+  test("a redacted answer carries no earlier-wording marker", () => {
+    const html = answerItemHtml(answer({ redacted: true, body: "", choice: null, questionChanged: true }), en, "en", false);
+    expect(html).toContain("q-redacted");
+    expect(html).not.toContain("q-changed");
+  });
+  test("carryFieldsFor names the swept answer and its token, and nothing without a token", () => {
+    const of = (cardModel as unknown as {
+      carryFieldsFor: (from: string | null, tokens: ReadonlyMap<string, string>) => Record<string, string>;
+    }).carryFieldsFor;
+    const tokens = new Map([["a1", "t1"]]);
+    expect(of("a1", tokens)).toEqual({ carriedFrom: "a1", carryToken: "t1" });
+    expect(of("a2", tokens)).toEqual({});
+    expect(of(null, tokens)).toEqual({});
+  });
+  test("rememberCarryTokens keeps a gone answer's token and adds the new ones", () => {
+    const remember = (cardModel as unknown as {
+      rememberCarryTokens: (into: Map<string, string>, answers: readonly AnswerWire[]) => void;
+    }).rememberCarryTokens;
+    const tokens = new Map([["gone", "tg"]]);
+    remember(tokens, [answer({ answerId: "a1", carryToken: "t1" } as Partial<AnswerWire>), answer({ answerId: "a2" })]);
+    expect([...tokens.entries()].sort()).toEqual([["a1", "t1"], ["gone", "tg"]]);
+  });
+});
+

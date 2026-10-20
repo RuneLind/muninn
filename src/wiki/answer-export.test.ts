@@ -86,6 +86,11 @@ describe("staleness marks are ADDED to the heading, never reshaping it", () => {
     expect(exportHeading(a({ questionChanged: false, choiceOffered: true }))).toBe(plain);
     expect(exportHeading(a({ questionChanged: null }))).toBe(plain);
   });
+  test("a redacted answer carries no staleness mark either", () => {
+    expect(exportHeading(a({ redacted: true, questionChanged: true }))).toBe(
+      "### O3 — Synne Testdal (asked), 07.10.2026 21:32, redacted, version 2",
+    );
+  });
   test("a redacted answer carries no choice annotation", () => {
     expect(exportHeading(a({ redacted: true, choiceOffered: false }))).toBe(
       "### O3 — Synne Testdal (asked), 07.10.2026 21:32, redacted, version 2",

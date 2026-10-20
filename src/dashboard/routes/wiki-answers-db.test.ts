@@ -1213,3 +1213,143 @@ describe("arch-10 D: staleness (finding 2) and one live answer per author (findi
     expect((await post(app, answer({ questionId: "O3", choice: null, body: "on O3" }))).status).toBe(201);
   });
 });
+
+describe("arch-10 D fix round 1: a redacted answer carries no staleness mark", () => {
+  const REWORDED = "**Keep the export block in English?**";
+  test("GET gives a redacted answer to a reworded question questionChanged null, and its export heading no mark", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer({ choice: "A" }))).json();
+    // Exported, then redacted: the export's "again" block prints it as redacted.
+    const exportUrl = `/api/wiki/answers/export?wiki=answers&relPath=${encodeURIComponent(REL)}`;
+    const { rows: picked } = await (await app.request(exportUrl)).json();
+    const confirm = await app.request("/api/wiki/answers/export/confirm", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wiki: "answers", relPath: REL, rows: picked }),
+    });
+    expect(confirm.status).toBe(200);
+    await getDb()`UPDATE wiki_answers SET redacted_at = now(), body = '', choice = NULL WHERE answer_id = ${first.answerId}`;
+    await Bun.write(path.join(root, REL), PAGE.replace("**Keep the export block in Norwegian?**", REWORDED));
+    try {
+      const { answers } = await getAnswers(app);
+      const row = answers.find((a: { answerId: string }) => a.answerId === first.answerId);
+      expect(row.redacted).toBe(true);
+      expect(row.questionChanged).toBeNull();
+      const text = (await (await app.request(exportUrl)).json()).again.block as string;
+      expect(text).toMatch(/### O1 — Rune Owner[^\n]*, redacted, version 1/);
+      expect(text).not.toContain("(question changed since)");
+    } finally {
+      await Bun.write(path.join(root, REL), PAGE);
+    }
+  });
+});
+
+describe("arch-10 D fix round 1: a carried draft from a swept answer beside another live answer", () => {
+  const O1_HASH = sha256("**Keep the export block in Norwegian?**\n\nchoices: A|B");
+  /** A second live answer by the same author: one that predates the
+   *  one-live-answer rule, which the route can no longer create. */
+  async function legacyAnswer(who: Identity, body: string): Promise<string> {
+    const id = crypto.randomUUID();
+    await getDb()`
+      INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_user_id, author_oid, author_nav_ident, author_name, body, question_hash)
+      VALUES (${id}, 1, 'answers', ${REL}, 'O1', ${who.userId}, ${who.oid}, ${who.navIdent}, ${who.displayName}, ${body}, ${O1_HASH})
+    `;
+    return id;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tokenOf = async (app: Hono, answerId: string): Promise<any> =>
+    (await getAnswers(app)).answers.find((a: { answerId: string }) => a.answerId === answerId)?.carryToken;
+  const sweep = (answerId: string) => getDb()`DELETE FROM wiki_answers WHERE answer_id = ${answerId}`;
+  const distinctAnswers = async () => (await getDb()`SELECT count(DISTINCT answer_id)::int AS n FROM wiki_answers`)[0]!.n;
+
+  test("the GET gives an author a carry token on each of their own live answers, and on nobody else's", async () => {
+    const synneApp = appFor({ identity: synne, role: "user" });
+    const olaApp = appFor({ identity: ola, role: "user" });
+    const s = (await (await post(synneApp, answer())).json()).answerId;
+    const o = (await (await post(olaApp, answer({ body: "ola's view" }))).json()).answerId;
+    expect(typeof (await tokenOf(synneApp, s))).toBe("string");
+    expect(await tokenOf(synneApp, o)).toBeUndefined();
+    expect(typeof (await tokenOf(olaApp, o))).toBe("string");
+    expect(await tokenOf(olaApp, s)).toBeUndefined();
+    expect(await tokenOf(synneApp, s)).not.toBe(await tokenOf(olaApp, o));
+  });
+
+  test("swept under its editor while the author holds another live answer: the carried draft saves as a new answer, the other one untouched", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const swept = (await (await post(app, answer({ body: "first" }))).json()).answerId;
+    const kept = await legacyAnswer(synne, "second");
+    const carryToken = await tokenOf(app, swept);
+    await sweep(swept);
+    const res = await post(app, answer({ body: "carried draft", carriedFrom: swept, carryToken }));
+    expect(res.status).toBe(201);
+    const saved = await res.json();
+    // Stored under the swept id: a replay of the same token finds it live.
+    expect(saved.answerId).toBe(swept);
+    expect(saved.version).toBe(1);
+    const rows = await getDb()`SELECT answer_id, version, body FROM wiki_answers ORDER BY body`;
+    expect(rows.map((r) => [r.answer_id, r.version, r.body])).toEqual([
+      [swept, 1, "carried draft"],
+      [kept, 1, "second"],
+    ]);
+  });
+
+  test("with no other live answer the carried draft is an ordinary new answer under a fresh id", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const swept = (await (await post(app, answer())).json()).answerId;
+    const carryToken = await tokenOf(app, swept);
+    await sweep(swept);
+    const res = await post(app, answer({ body: "carried draft", carriedFrom: swept, carryToken }));
+    expect(res.status).toBe(201);
+    expect((await res.json()).answerId).not.toBe(swept);
+  });
+
+  test("the exemption is the server's token for a gone answer of this author and question: anything else is 409 already_answered", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const olaApp = appFor({ identity: ola, role: "user" });
+    const live = (await (await post(app, answer())).json()).answerId;
+    // Ola's own swept answer, and his token for it.
+    const olas = (await (await post(olaApp, answer({ body: "ola" }))).json()).answerId;
+    const olaToken = await tokenOf(olaApp, olas);
+    await sweep(olas);
+    // Synne's swept answer to ANOTHER question, and her token for it.
+    const onO3 = (await (await post(app, answer({ questionId: "O3", choice: null, body: "on O3" }))).json()).answerId;
+    const o3Token = await tokenOf(app, onO3);
+    await sweep(onO3);
+    const liveToken = await tokenOf(app, live);
+    const before = await distinctAnswers();
+    const cases: [string, Record<string, unknown>][] = [
+      ["made-up id, made-up token", { carriedFrom: crypto.randomUUID(), carryToken: "x" }],
+      ["made-up id, no token", { carriedFrom: crypto.randomUUID() }],
+      ["another author's token", { carriedFrom: olas, carryToken: olaToken }],
+      ["another question's token", { carriedFrom: onO3, carryToken: o3Token }],
+      ["an answer still live", { carriedFrom: live, carryToken: liveToken }],
+      ["a token for another id", { carriedFrom: olas, carryToken: liveToken }],
+    ];
+    for (const [label, extra] of cases) {
+      const res = await post(app, answer({ body: "minted?", ...extra }));
+      expect(`${label} → ${res.status} ${(await res.json()).code}`).toBe(`${label} → 409 already_answered`);
+    }
+    expect(await distinctAnswers()).toBe(before);
+  });
+
+  test("a replay of a used token is 409: the swept id is live again", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const swept = (await (await post(app, answer({ body: "first" }))).json()).answerId;
+    await legacyAnswer(synne, "second");
+    const carryToken = await tokenOf(app, swept);
+    await sweep(swept);
+    expect((await post(app, answer({ body: "carried", carriedFrom: swept, carryToken }))).status).toBe(201);
+    const again = await post(app, answer({ body: "carried again", carriedFrom: swept, carryToken }));
+    expect(again.status).toBe(409);
+    expect((await again.json()).code).toBe("already_answered");
+    expect(await distinctAnswers()).toBe(2);
+  });
+
+  test("carriedFrom of the wrong type, or on an edit, is a 400", async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const first = (await (await post(app, answer())).json()).answerId;
+    expect((await post(app, answer({ carriedFrom: 7 }))).status).toBe(400);
+    expect((await post(app, answer({ carriedFrom: first, carryToken: 7 }))).status).toBe(400);
+    expect((await post(app, answer({ answerId: first, baseVersion: 1, carriedFrom: first, carryToken: "x" }))).status).toBe(400);
+  });
+});

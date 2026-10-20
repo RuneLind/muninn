@@ -32,7 +32,7 @@
  */
 import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { resolveServingProfile, resolveWikiAnswerConfig, wikiTakesAnswers, type Config } from "../../config.ts";
 import { servesWikiReadSliceOnly } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage } from "./wiki-read-scope.ts";
@@ -60,6 +60,7 @@ import { sessionIdentity, sessionRole } from "../../auth/guard.ts";
 import { decideZone } from "../../auth/zones.ts";
 import type { AuthRole } from "../../auth/role.ts";
 import {
+  authorKeyOf,
   findLiveWikiAnswerByAuthor,
   getLatestWikiAnswerVersion,
   insertWikiAnswerVersion,
@@ -273,6 +274,9 @@ interface AnswerView extends AnswerVersionView {
   /** The `WIKI_ANSWER_GROUPS` groups holding the author's stored NAV ident,
    *  sorted — read from the CURRENT config, never stored, never the ident. */
   authorGroups: string[];
+  /** On the viewer's own unredacted answers only: the proof the card sends
+   *  back as `carryToken` when this answer is swept under its editor. */
+  carryToken?: string;
   /** Earlier versions, newest first — with `versions=1`, to the author and an admin only. */
   earlier?: AnswerVersionView[];
 }
@@ -315,6 +319,28 @@ const err = (c: Context, status: 400 | 403 | 404 | 409 | 422 | 503, code: string
  *  U+FFFD, the next character lost — measured on `"a\udc00b"`). */
 function hasUnstorableText(s: string): boolean {
   return s.includes("\u0000") || !s.isWellFormed();
+}
+
+/** Signs carry tokens. Per process: a token outlives no restart, and a draft
+ *  carried across one gets the ordinary one-live-answer rule. */
+const CARRY_KEY = randomBytes(32);
+
+/**
+ * The carry token for an answer: proof, issued by the GET to the answer's own
+ * author, that this id was this author's answer to this question. A draft
+ * carried from that answer after the sweep deleted it sends the token back,
+ * and is let in beside the author's other live answer (`besideLive`).
+ */
+function carryTokenFor(answerId: string, wiki: string, relPath: string, questionId: string, author: Pick<WikiAnswerAuthor, "userId" | "name">): string {
+  return createHmac("sha256", CARRY_KEY)
+    .update(JSON.stringify(["wiki-answer-carry", answerId.toLowerCase(), wiki, relPath, questionId, authorKeyOf(author)]))
+    .digest("base64url");
+}
+
+function carryTokenValid(token: string, ...args: Parameters<typeof carryTokenFor>): boolean {
+  const want = Buffer.from(carryTokenFor(...args));
+  const got = Buffer.from(token);
+  return got.length === want.length && timingSafeEqual(got, want);
 }
 
 const answerRedacted = (c: Context) => err(c, 409, "answer_redacted", "this answer was redacted");
@@ -411,7 +437,7 @@ function exportAnswerOf(a: ExportRow, current: Map<string, CurrentQuestion>, gro
     body: redacted ? "" : a.body,
     version: a.version,
     redacted,
-    questionChanged: questionChangedOf(q, a.questionHash),
+    questionChanged: redacted ? null : questionChangedOf(q, a.questionHash),
     // Judged only while the question is on the page: a gone question offers nothing to compare.
     ...(q && choice !== null ? { choiceOffered: isChoiceOffered(choice, q.choices) } : {}),
   };
@@ -463,9 +489,13 @@ export function registerWikiAnswerRoutes(
           const q = targets.get(a.questionId);
           return q ? isAskedAuthor({ name: a.author.name, navIdent: a.author.navIdent }, q.to, groups) : null;
         })(),
-        questionChanged: questionChangedOf(targets.get(a.questionId), a.questionHash),
+        // A redacted answer's text is gone: there is nothing left to be stale.
+        questionChanged: a.redactedAt !== null ? null : questionChangedOf(targets.get(a.questionId), a.questionHash),
         authorGroups: authorGroupsOf(a.author.navIdent, groups),
         ...(earlier.has(a.answerId) ? { earlier: earlier.get(a.answerId) } : {}),
+        ...(isMine(c, a) && a.redactedAt === null
+          ? { carryToken: carryTokenFor(a.answerId, a.wiki, a.relPath, a.questionId, a.author) }
+          : {}),
       }));
       return c.json({ answerable: true, answers });
     } catch (e) {
@@ -498,6 +528,11 @@ export function registerWikiAnswerRoutes(
       return err(c, 400, "bad_request", "choice must be a string");
     }
     if (b.answerId !== undefined && typeof b.answerId !== "string") return err(c, 400, "bad_request", "answerId must be a string");
+    if (b.carriedFrom !== undefined && typeof b.carriedFrom !== "string") return err(c, 400, "bad_request", "carriedFrom must be a string");
+    if (b.carryToken !== undefined && typeof b.carryToken !== "string") return err(c, 400, "bad_request", "carryToken must be a string");
+    if (b.answerId !== undefined && b.carriedFrom !== undefined) {
+      return err(c, 400, "bad_request", "carriedFrom belongs to a new answer, not an edit");
+    }
     const rawBody = (b.body as string | undefined) ?? "";
     // A body that is only white space says nothing: stored empty, so the
     // export prints no empty blockquote.
@@ -556,6 +591,7 @@ export function registerWikiAnswerRoutes(
 
     let id: string;
     let version: number;
+    let besideLive = false;
     if (answerId !== undefined) {
       const latest = isValidUuid(answerId) ? await store.getLatest(answerId) : null;
       if (
@@ -584,9 +620,26 @@ export function registerWikiAnswerRoutes(
       // card's carried draft still posts.
       const where = { wiki: page.entry.name, relPath: page.meta.relPath, questionId, author };
       const live = await (store.findLive ?? findLiveWikiAnswerByAuthor)(where);
-      if (live) return alreadyAnswered(c, live);
       id = randomUUID();
       version = 1;
+      if (live) {
+        // The one exemption: a draft carried from this author's answer to this
+        // question that the sweep deleted under its editor (the card lets an
+        // author hold several answers from before this rule). The GET's token
+        // proves the id was theirs; no rows proves it is gone. Stored under
+        // that id, so a replayed token finds it live and is refused.
+        const from = typeof b.carriedFrom === "string" ? b.carriedFrom : null;
+        const token = typeof b.carryToken === "string" ? b.carryToken : null;
+        const carried =
+          from !== null &&
+          token !== null &&
+          isValidUuid(from) &&
+          carryTokenValid(token, from, page.entry.name, page.meta.relPath, questionId, author) &&
+          (await store.getLatest(from)) === null;
+        if (!carried) return alreadyAnswered(c, live);
+        id = from.toLowerCase();
+        besideLive = true;
+      }
     }
 
     // D16: the body is scanned before it is stored — after every refusal that
@@ -627,6 +680,7 @@ export function registerWikiAnswerRoutes(
         choice,
         body,
         questionHash: sha256(question.hashInput),
+        besideLive,
       });
       return c.json({ answerId: saved.answerId, questionId, ...versionView(saved), mine: true }, version === 1 ? 201 : 200);
     } catch (e) {

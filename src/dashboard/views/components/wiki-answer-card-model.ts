@@ -43,6 +43,9 @@ export interface AnswerWire extends AnswerVersionWire {
   /** The question's wording or choices changed since this version was saved
    *  (its stored hash differs from the page's); null when the question is gone. */
   questionChanged?: boolean | null;
+  /** On the viewer's own unredacted answers: sent back as `carryToken` when a
+   *  draft is carried from this answer after it is swept. */
+  carryToken?: string;
   /** Earlier versions, newest first; only the author and an admin get them. */
   earlier?: AnswerVersionWire[];
 }
@@ -249,7 +252,7 @@ export function answerItemHtml(
     .map((g) => ` <span class="q-group"><span class="q-group-label">${esc(L.group)} </span>${esc(g)}</span>`)
     .join("");
   const edited = a.versionCount > 1 ? ` ${byPart("q-edited", L.edited(a.versionCount - 1))}` : "";
-  const changed = a.questionChanged === true ? ` ${byPart("q-changed", L.earlierWording)}` : "";
+  const changed = a.questionChanged === true && !a.redacted ? ` ${byPart("q-changed", L.earlierWording)}` : "";
   const edit = canEdit
     ? ` <button type="button" class="q-edit" data-answer-id="${esc(a.answerId)}">${esc(L.composer.edit)}</button>`
     : "";
@@ -393,6 +396,23 @@ export function alreadyAnsweredOf(status: number, payload: unknown): { answerId:
     (p.version as number) >= 1
     ? { answerId: p.answerId, version: p.version as number }
     : null;
+}
+
+/** Keep every carry token a load lists, and the ones it no longer lists: a
+ *  token is wanted exactly when its answer is gone. */
+export function rememberCarryTokens(into: Map<string, string>, answers: readonly AnswerWire[]): void {
+  for (const a of answers) if (typeof a.carryToken === "string") into.set(a.answerId, a.carryToken);
+}
+
+/** What a carried draft's POST adds: the swept answer and its token, so the
+ *  server lets it in beside the viewer's other live answer. Nothing without a
+ *  token — the ordinary one-live-answer rule then applies. */
+export function carryFieldsFor(
+  carriedFrom: string | null,
+  tokens: ReadonlyMap<string, string>,
+): { carriedFrom?: string; carryToken?: string } {
+  const token = carriedFrom === null ? undefined : tokens.get(carriedFrom);
+  return carriedFrom !== null && token !== undefined ? { carriedFrom, carryToken: token } : {};
 }
 
 /** A successful POST's body, when it has the saved answer's shape. */

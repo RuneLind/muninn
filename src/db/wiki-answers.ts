@@ -120,6 +120,11 @@ export interface WikiAnswerAuthorQuestion {
 
 /** The author as the one-live-answer rule compares authors: the session's
  *  user, else (auth off, no user) the stored name — the owner's. */
+export function authorKeyOf(author: Pick<WikiAnswerAuthor, "userId" | "name">): string {
+  return author.userId !== null ? `user:${author.userId}` : `name:${author.name}`;
+}
+
+/** {@link authorKeyOf} as a WHERE clause. */
 function authorMatch(sql: Sql, author: WikiAnswerAuthor) {
   return author.userId !== null
     ? sql`author_user_id = ${author.userId}`
@@ -155,8 +160,7 @@ export async function findLiveWikiAnswerByAuthor(
  * {@link lockAnswer} is, and always BEFORE it, so the two locks are ordered.
  */
 async function lockAuthorQuestion(tx: Sql, q: WikiAnswerAuthorQuestion): Promise<void> {
-  const who = q.author.userId !== null ? `user:${q.author.userId}` : `name:${q.author.name}`;
-  const key = JSON.stringify(["wiki-answer-author", q.wiki, q.relPath, q.questionId, who]);
+  const key = JSON.stringify(["wiki-answer-author", q.wiki, q.relPath, q.questionId, authorKeyOf(q.author)]);
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
 }
 
@@ -172,7 +176,12 @@ export interface WikiAnswerWriteHooks {
  * {@link WikiAnswerVersionConflict}, which the route answers 409.
  */
 export async function insertWikiAnswerVersion(
-  input: WikiAnswerVersionInput,
+  input: WikiAnswerVersionInput & {
+    /** A new answer the route let in beside the author's live one: a draft
+     *  carried from an answer swept under its editor, stored under that gone
+     *  id (the primary key refuses a second use). */
+    besideLive?: boolean;
+  },
   hooks: WikiAnswerWriteHooks = {},
 ): Promise<WikiAnswerVersion> {
   const sql = getDb();
@@ -182,7 +191,7 @@ export async function insertWikiAnswerVersion(
       // A new answer: one live answer per author and question, re-checked
       // under the author lock, so of two racing first POSTs one lands and the
       // other is told which answer to edit.
-      if (input.version === 1) {
+      if (input.version === 1 && !input.besideLive) {
         await lockAuthorQuestion(tx, input);
         const live = await findLiveWikiAnswerByAuthor(input, tx);
         if (live) throw new WikiAnswerAlreadyAnswered(live.answerId, live.version);

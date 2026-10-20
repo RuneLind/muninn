@@ -84,7 +84,7 @@ const commentSafe = (s: string) => oneLine(s).replaceAll("-->", "-- >");
  */
 export function exportHeading(a: ExportAnswer): string {
   const asked = (a.asked === null ? "" : a.asked ? " (asked)" : " (not asked)") +
-    (a.questionChanged === true ? " (question changed since)" : "");
+    (a.questionChanged === true && !a.redacted ? " (question changed since)" : "");
   const choice = a.redacted
     ? ", redacted"
     : a.choice !== null
