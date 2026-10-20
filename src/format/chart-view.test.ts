@@ -283,6 +283,10 @@ describe("steps x labels", () => {
       [["same name", "same name"], ["same name", "same name"], null],
       [["[[x|run]] 1", "[[x|run]] 2"], ["1", "2"], "run …"],
       [["baseline", "basement"], ["baseline", "basement"], null],
+      // Only a digit before the space starts a grouped number.
+      [["Team A 500", "Team B 500"], ["A", "B"], "Team … 500"],
+      // An empty step name has no words, so nothing is cut.
+      [["", "x y"], ["", "x y"], null],
     ];
     const got = cases.map(([names]) => {
       const out = steps(names);
